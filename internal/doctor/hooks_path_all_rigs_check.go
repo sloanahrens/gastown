@@ -126,28 +126,33 @@ func rigCloneDirs(rigPath string) []string {
 	return valid
 }
 
-// polecatCloneDirs returns the worktree of one polecat. A worktree is nested at
+// polecatCloneDirs returns the clones of one polecat. A worktree is nested at
 // polecats/<name>/<dir>/, where <dir> is the rig's directory in every town
-// layout, but any subdirectory carrying a .git is taken so that a clone nested
-// under another name is still judged. The flat polecats/<name>/ layout predates
-// that nesting, so it is the worktree only when no nested clone exists.
+// layout, but any subdirectory holding a clone is taken so that one nested under
+// another name is still judged. The flat polecats/<name>/ layout predates that
+// nesting, so it is the clone only when no nested clone exists.
 func polecatCloneDirs(polecat string) []string {
-	entries, err := os.ReadDir(polecat)
-	if err != nil {
+	if entries, err := os.ReadDir(polecat); err == nil {
+		var nested []string
+		for _, entry := range entries {
+			clonePath := filepath.Join(polecat, entry.Name())
+			if entry.IsDir() && isCloneDir(clonePath) {
+				nested = append(nested, clonePath)
+			}
+		}
+		if len(nested) > 0 {
+			return nested
+		}
+	}
+	if isCloneDir(polecat) {
 		return []string{polecat}
 	}
-	var nested []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		clonePath := filepath.Join(polecat, entry.Name())
-		if _, err := os.Stat(filepath.Join(clonePath, ".git")); err == nil {
-			nested = append(nested, clonePath)
-		}
-	}
-	if len(nested) > 0 {
-		return nested
-	}
-	return []string{polecat}
+	return nil
+}
+
+// isCloneDir reports whether dir holds a clone, a .git directory. A linked
+// worktree's .git is a file, and crewCloneDirs leaves those out as well.
+func isCloneDir(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil && info.IsDir()
 }
