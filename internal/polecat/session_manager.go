@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -81,6 +82,12 @@ type SessionManager struct {
 	// cleanup an abandoned launch runs, so a test never shells out to the
 	// sandbox CLI; nil means the linked one.
 	sandboxDeleter func(townRoot string, rec session.SandboxRecord) error
+	// sandboxExists asks a gateway whether it has a sandbox of that name when
+	// nil: a seam for the unit tier, which has no gateway.
+	sandboxExists func(gateway, name string) (bool, error)
+	// launchFn replaces launch when set: a seam so a test can see what Start
+	// has done by the time it launches.
+	launchFn func(polecat, sessionID string, opts SessionStartOptions) error
 }
 
 // SessionHooks route a SessionManager's kills through the supervisor
@@ -534,7 +541,66 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		}
 		return m.hooks.Respawn(polecat, "polecat start: replace a session whose agent exited", replace)
 	}
-	return m.launch(polecat, sessionID, opts)
+	m.dropStaleSandboxRoute(sessionID, opts)
+	launch := m.launch
+	if m.launchFn != nil {
+		launch = m.launchFn
+	}
+	return launch(polecat, sessionID, opts)
+}
+
+// dropStaleSandboxRoute removes the registry record a finished sandbox left
+// behind when a HOST session is about to take its name. The routed tmux client
+// sends every command for a recorded name into that sandbox, so with the record
+// still listed the new session's creation went to a sandbox that no longer exists
+// and failed as "session not found"; the patrol reaps such records only on its
+// own schedule.
+//
+// The record goes only when the record's own gateway affirmatively reports no
+// sandbox of that name, the patrol reaper's rule. That is also why a concurrent
+// sandbox Prepare is never wiped: Prepare creates the sandbox before it writes
+// the record, so while a record is new the gateway has the sandbox, and the
+// record stays. A gateway that cannot be asked, or a registry that cannot be
+// read, leaves the record and the start proceeds with a one-line warning: the
+// record only matters if it exists, and the launch fails by itself, naming the
+// sandbox, if it does route into a dead one. Only the record and its route are
+// dropped; a sandbox start (Prepare writes the record afresh) is left alone.
+func (m *SessionManager) dropStaleSandboxRoute(sessionID string, opts SessionStartOptions) {
+	if b := opts.Backend; b != nil && b.Name() != session.BackendTmux {
+		return
+	}
+	townRoot := filepath.Dir(m.rig.Path)
+	rec, found, err := session.ReadSandboxRecord(townRoot, sessionID)
+	if err != nil {
+		style.PrintWarning("starting %s: cannot read its sandbox record, leaving it: %v", sessionID, err)
+		return
+	}
+	if !found {
+		return
+	}
+	exists := m.sandboxExists
+	if exists == nil {
+		exists = gatewayHasSandbox
+	}
+	has, err := exists(rec.Gateway, sessionID)
+	if err != nil {
+		style.PrintWarning("starting %s: cannot ask the gateway about its sandbox record, leaving it: %v", sessionID, err)
+		return
+	}
+	if has {
+		return
+	}
+	if err := session.CleanupSandboxWith(nil, townRoot, sessionID); err != nil {
+		style.PrintWarning("starting %s: dropping its stale sandbox record failed: %v", sessionID, err)
+	}
+}
+
+// gatewayHasSandbox asks gateway ("" is the default gateway) whether it has a
+// sandbox called name.
+func gatewayHasSandbox(gateway, name string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return (&sandbox.CLI{Gateway: gateway}).Exists(ctx, name)
 }
 
 // launch creates the polecat's session and starts its agent. A launch that
