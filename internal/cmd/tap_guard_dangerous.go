@@ -1064,9 +1064,14 @@ func heredocLineEnd(command string, from int) int {
 			// "$$" is the PID, so the second "$" starts no expansion and a
 			// quote after the pair is a plain one (gt-0vbb2).
 			i++
-		case c == '$' && i+1 < len(command) && command[i+1] == '\'':
-			quote = '$'
-			i++
+		case c == '$':
+			// A backslash-newline between the "$" and its quote is deleted
+			// before the shell reads the quote, so that quote still opens a
+			// $'...' string (gt-javvg).
+			if q := skipLineContinuationBytes(command, i+1); q < len(command) && command[q] == '\'' {
+				quote = '$'
+				i = q
+			}
 		case c == '\'' || c == '"':
 			quote = c
 		case c == '#' && wordStart:
@@ -1075,6 +1080,17 @@ func heredocLineEnd(command string, from int) int {
 		wordStart = quote == 0 && !comment && strings.IndexByte(" \t;&|(", c) >= 0
 	}
 	return len(command)
+}
+
+// skipLineContinuationBytes is skipLineContinuations for command's bytes: it
+// returns the offset of the first byte at or after i that is not part of a
+// backslash-newline pair. Callers reach it just past an unescaped "$", so no
+// pair is escaped by the byte before it (gt-javvg).
+func skipLineContinuationBytes(command string, i int) int {
+	for i+1 < len(command) && command[i] == '\\' && command[i+1] == '\n' {
+		i += 2
+	}
+	return i
 }
 
 // logicalLineEndsAt reports whether the newline at nl ends a logical line. It
