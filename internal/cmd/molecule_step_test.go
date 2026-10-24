@@ -97,6 +97,10 @@ func TestExtractMoleculeIDFromStep(t *testing.T) {
 // - List() returns issues with DependsOn empty (bd list doesn't return deps)
 // - Show()/ShowMultiple() returns issues with Dependencies populated (bd show does)
 type mockBeadsForStep struct {
+	// beads.Client is embedded only so the mock satisfies the interface the
+	// readiness readers take. Methods a test does not implement panic on the nil
+	// embed, which is loud enough.
+	beads.Client
 	issues map[string]*beads.Issue
 }
 
@@ -117,13 +121,24 @@ func (m *mockBeadsForStep) Show(id string) (*beads.Issue, error) {
 	return nil, beads.ErrNotFound
 }
 
-// ShowMultiple simulates bd show with multiple IDs - returns full issue data including Dependencies
+// ShowMultiple simulates bd show: each dependency entry carries its target's
+// current status, so a Close changes what the readiness scan sees.
 func (m *mockBeadsForStep) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
 	result := make(map[string]*beads.Issue)
 	for _, id := range ids {
-		if issue, ok := m.issues[id]; ok {
-			result[id] = issue
+		issue, ok := m.issues[id]
+		if !ok {
+			continue
 		}
+		shown := *issue
+		shown.Dependencies = make([]beads.IssueDep, len(issue.Dependencies))
+		for i, dep := range issue.Dependencies {
+			if target, found := m.issues[dep.ID]; found {
+				dep.Status = target.Status
+			}
+			shown.Dependencies[i] = dep
+		}
+		result[id] = &shown
 	}
 	return result, nil
 }
@@ -262,17 +277,13 @@ func TestStepDoneScenarios(t *testing.T) {
 			// Now find next ready step using the FIXED algorithm
 			children, _ := m.List(beads.ListOptions{Parent: moleculeID, Status: "all"})
 
-			closedIDs := make(map[string]bool)
 			var openStepIDs []string
 			hasNonClosedSteps := false
 			for _, child := range children {
-				switch child.Status {
-				case "closed":
-					closedIDs[child.ID] = true
-				case "open":
+				if child.Status == "open" {
 					openStepIDs = append(openStepIDs, child.ID)
 					hasNonClosedSteps = true
-				default:
+				} else if child.Status != "closed" {
 					// in_progress or other - not closed, not available
 					hasNonClosedSteps = true
 				}
@@ -289,29 +300,15 @@ func TestStepDoneScenarios(t *testing.T) {
 				// Fetch full details for open steps (Dependencies will be populated)
 				openStepsMap, _ := m.ShowMultiple(openStepIDs)
 
-				// Find ready step using Dependencies (not DependsOn!)
-				// Only "blocks" type dependencies block progress - ignore "parent-child".
+				// Find the first ready step from bd show's dependencies (not
+				// DependsOn, which bd list leaves empty).
 				var readyStep *beads.Issue
 				for _, stepID := range openStepIDs {
 					step := openStepsMap[stepID]
 					if step == nil {
 						continue
 					}
-
-					// Use Dependencies (from bd show), NOT DependsOn (empty from bd list)
-					allDepsClosed := true
-					hasBlockingDeps := false
-					for _, dep := range step.Dependencies {
-						if !isBlockingDepType(dep.DependencyType) {
-							continue // Skip parent-child and other non-blocking relationships
-						}
-						hasBlockingDeps = true
-						if !closedIDs[dep.ID] {
-							allDepsClosed = false
-							break
-						}
-					}
-					if !hasBlockingDeps || allDepsClosed {
+					if len(beads.UnresolvedBlockerIDs(step.Dependencies)) == 0 {
 						readyStep = step
 						break
 					}
@@ -353,11 +350,11 @@ func makeStepIssueWithDepType(id, title, parent, status string, deps []beads.Iss
 	}
 }
 
-// TestDepTypeBlockingSemantics verifies that isBlockingDepType matches beads'
-// canonical AffectsReadyWork semantics: only "blocks", "conditional-blocks",
-// and "waits-for" are blocking. Unknown/custom types (including "needs", empty
-// string) are non-blocking — matching beads' default behavior. Parent-child is
-// non-blocking for step gating (it represents molecule→step hierarchy).
+// TestDepTypeBlockingSemantics verifies that a step's readiness follows beads'
+// canonical blocking types ("blocks", "conditional-blocks", "waits-for",
+// "merge-blocks"). Unknown/custom types (including "needs", empty string) are
+// non-blocking, and parent-child is non-blocking for step gating because it is
+// the molecule→step hierarchy.
 func TestDepTypeBlockingSemantics(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -365,7 +362,7 @@ func TestDepTypeBlockingSemantics(t *testing.T) {
 		depType   string
 		wantReady int // How many steps should be ready
 	}{
-		// Blocking types (beads AffectsReadyWork minus parent-child)
+		// Blocking types (beads blockingDependencyTypes minus parent-child)
 		{
 			name:      "blocks type is blocking",
 			depType:   "blocks",
@@ -379,6 +376,11 @@ func TestDepTypeBlockingSemantics(t *testing.T) {
 		{
 			name:      "waits-for type is blocking",
 			depType:   "waits-for",
+			wantReady: 1,
+		},
+		{
+			name:      "merge-blocks type is blocking",
+			depType:   "merge-blocks",
 			wantReady: 1,
 		},
 		// Non-blocking types (matching beads: unknown/custom types don't affect ready work)
@@ -417,6 +419,7 @@ func TestDepTypeBlockingSemantics(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newMockBeadsForStep()
+			m.addIssue(&beads.Issue{ID: "gt-mol", Title: "Molecule", Type: "epic", Status: "open"})
 
 			// Step 1: no deps (always ready)
 			m.addIssue(makeStepIssueWithDepType("gt-mol.1", "Ensure labels", "gt-mol", "open", nil))
@@ -431,43 +434,82 @@ func TestDepTypeBlockingSemantics(t *testing.T) {
 				{ID: "gt-mol.2", Title: "Split and file", DependencyType: tt.depType},
 			}))
 
-			children, _ := m.List(beads.ListOptions{Parent: "gt-mol", Status: "all"})
-			closedIDs := make(map[string]bool)
-			var openStepIDs []string
-			for _, child := range children {
-				if child.Status == "closed" {
-					closedIDs[child.ID] = true
-				} else if child.Status == "open" {
-					openStepIDs = append(openStepIDs, child.ID)
-				}
+			progress, err := getMoleculeProgressInfo(m, "gt-mol")
+			if err != nil {
+				t.Fatalf("getMoleculeProgressInfo: %v", err)
 			}
-			openStepsMap, _ := m.ShowMultiple(openStepIDs)
-
-			var readySteps []string
-			for _, stepID := range openStepIDs {
-				step := openStepsMap[stepID]
-				if step == nil {
-					continue
-				}
-				allDepsClosed := true
-				hasBlockingDeps := false
-				for _, dep := range step.Dependencies {
-					if !isBlockingDepType(dep.DependencyType) {
-						continue
-					}
-					hasBlockingDeps = true
-					if !closedIDs[dep.ID] {
-						allDepsClosed = false
-						break
-					}
-				}
-				if !hasBlockingDeps || allDepsClosed {
-					readySteps = append(readySteps, step.ID)
-				}
+			if got := len(progress.ReadySteps); got != tt.wantReady {
+				t.Errorf("got %d ready steps, want %d (ready=%v blocked=%v)",
+					got, tt.wantReady, progress.ReadySteps, progress.BlockedSteps)
 			}
+		})
+	}
+}
 
-			if len(readySteps) != tt.wantReady {
-				t.Errorf("got %d ready steps, want %d (readySteps=%v)", len(readySteps), tt.wantReady, readySteps)
+// TestIsBlockingDepType_MatchesBeads: the molecule scans ask the blocking-type
+// question once, through beads, so a merge-blocks edge and a capitalised type
+// gate a step exactly as they do in bd's ready query (gt-03mac).
+func TestIsBlockingDepType_MatchesBeads(t *testing.T) {
+	t.Parallel()
+
+	for _, depType := range []string{"merge-blocks", "Blocks"} {
+		if !isBlockingDepType(depType) {
+			t.Errorf("isBlockingDepType(%q) = false, want true", depType)
+		}
+	}
+
+	for _, depType := range []string{
+		"blocks", "Blocks", " blocks ", "conditional-blocks", "waits-for",
+		"merge-blocks", "Merge-Blocks", "parent-child", "tracks", "related",
+		"discovered-from", "thread", "", "needs",
+	} {
+		if got, want := isBlockingDepType(depType), beads.IsBlockingDependencyType(depType); got != want {
+			t.Errorf("isBlockingDepType(%q) = %t, beads.IsBlockingDependencyType = %t", depType, got, want)
+		}
+	}
+}
+
+// TestMoleculeStepReady covers the one readiness rule the progress, current and
+// DAG views share. An unresolved blocker is one beads has not seen close: a
+// merge-blocks edge resolves only on a "Merged in " close reason, and a
+// dependency with no status from bd show stays unresolved.
+func TestMoleculeStepReady(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		deps      []beads.IssueDep
+		wantReady bool
+	}{
+		{name: "no dependencies", deps: nil, wantReady: true},
+		{name: "parent-child is not a gate", deps: []beads.IssueDep{
+			{ID: "gt-mol", DependencyType: "parent-child", Status: "open"},
+		}, wantReady: true},
+		{name: "closed blocks edge", deps: []beads.IssueDep{
+			{ID: "gt-mol.1", DependencyType: "blocks", Status: "closed"},
+		}, wantReady: true},
+		{name: "open blocks edge", deps: []beads.IssueDep{
+			{ID: "gt-mol.1", DependencyType: "blocks", Status: "open"},
+		}, wantReady: false},
+		{name: "capitalised type still gates", deps: []beads.IssueDep{
+			{ID: "gt-mol.1", DependencyType: "Blocks", Status: "open"},
+		}, wantReady: false},
+		{name: "merge-blocks closed without merge reason", deps: []beads.IssueDep{
+			{ID: "gt-mol.1", DependencyType: "merge-blocks", Status: "closed", CloseReason: "done"},
+		}, wantReady: false},
+		{name: "merge-blocks closed as merged", deps: []beads.IssueDep{
+			{ID: "gt-mol.1", DependencyType: "merge-blocks", Status: "closed", CloseReason: "Merged in abc123"},
+		}, wantReady: true},
+		{name: "blocks edge with no status from bd show", deps: []beads.IssueDep{
+			{ID: "gt-mol.1", DependencyType: "blocks"},
+		}, wantReady: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			step := makeStepIssueWithDepType("gt-mol.2", "Split and file", "gt-mol", "open", tt.deps)
+			if got := moleculeStepReady(step); got != tt.wantReady {
+				t.Errorf("moleculeStepReady() = %t, want %t", got, tt.wantReady)
 			}
 		})
 	}
@@ -488,7 +530,6 @@ func TestReadyStepOrderReversed(t *testing.T) {
 
 	// Run the algorithm - all steps have no deps so all are "ready"
 	children, _ := m.List(beads.ListOptions{Parent: "gt-mol", Status: "all"})
-	closedIDs := make(map[string]bool)
 	var openStepIDs []string
 	for _, child := range children {
 		if child.Status == "open" {
@@ -503,19 +544,7 @@ func TestReadyStepOrderReversed(t *testing.T) {
 		if step == nil {
 			continue
 		}
-		allDepsClosed := true
-		hasBlockingDeps := false
-		for _, dep := range step.Dependencies {
-			if !isBlockingDepType(dep.DependencyType) {
-				continue
-			}
-			hasBlockingDeps = true
-			if !closedIDs[dep.ID] {
-				allDepsClosed = false
-				break
-			}
-		}
-		if !hasBlockingDeps || allDepsClosed {
+		if len(beads.UnresolvedBlockerIDs(step.Dependencies)) == 0 {
 			readySteps = append(readySteps, step)
 		}
 	}
@@ -724,14 +753,11 @@ func TestMoleculeDepTypeFilterMixed(t *testing.T) {
 		{ID: "gt-mol", Title: "intake", DependencyType: "parent-child"},
 	}))
 
-	// Run algorithm using isBlockingDepType
+	// Run the readiness scan
 	children, _ := m.List(beads.ListOptions{Parent: "gt-mol", Status: "all"})
-	closedIDs := make(map[string]bool)
 	var openStepIDs []string
 	for _, child := range children {
-		if child.Status == "closed" {
-			closedIDs[child.ID] = true
-		} else if child.Status == "open" {
+		if child.Status == "open" {
 			openStepIDs = append(openStepIDs, child.ID)
 		}
 	}
@@ -744,19 +770,7 @@ func TestMoleculeDepTypeFilterMixed(t *testing.T) {
 		if step == nil {
 			continue
 		}
-		allDepsClosed := true
-		hasBlockingDeps := false
-		for _, dep := range step.Dependencies {
-			if !isBlockingDepType(dep.DependencyType) {
-				continue
-			}
-			hasBlockingDeps = true
-			if !closedIDs[dep.ID] {
-				allDepsClosed = false
-				break
-			}
-		}
-		if !hasBlockingDeps || allDepsClosed {
+		if len(beads.UnresolvedBlockerIDs(step.Dependencies)) == 0 {
 			readySteps = append(readySteps, step.ID)
 		} else {
 			blockedSteps = append(blockedSteps, step.ID)

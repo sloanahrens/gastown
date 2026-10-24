@@ -8,17 +8,20 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// isBlockingDepType returns true for dependency types that block molecule step
-// progress. Matches beads' canonical blocking types (AffectsReadyWork) except
-// parent-child, which represents molecule→step hierarchy in this context.
-// Unknown/custom types are non-blocking, matching beads' default behavior.
+// isBlockingDepType reports whether a dependency type gates molecule step
+// progress. It is beads' definition, so gt mol and bd answer the same question
+// the same way (gt-03mac); parent-child falls out as non-blocking because it is
+// the molecule→step hierarchy, not a gate.
 func isBlockingDepType(depType string) bool {
-	switch depType {
-	case "blocks", "conditional-blocks", "waits-for":
-		return true
-	default:
-		return false
-	}
+	return beads.IsBlockingDependencyType(depType)
+}
+
+// moleculeStepReady reports whether an open molecule step has no unresolved
+// blocker. Every readiness view (progress, current, DAG) asks it, so they agree
+// with bd's ready query (gt-03mac). Dependencies must come from bd show; bd list
+// leaves them empty.
+func moleculeStepReady(step *beads.Issue) bool {
+	return len(beads.UnresolvedBlockerIDs(step.Dependencies)) == 0
 }
 
 // sortStepsBySequence sorts step issues by their sequence number suffix (.1, .2, etc.)

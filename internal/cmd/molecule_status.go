@@ -172,13 +172,10 @@ func runMoleculeProgress(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Build set of closed issue IDs and collect open step IDs for dependency checking
-	closedIDs := make(map[string]bool)
+	// Collect open step IDs for dependency checking
 	var openStepIDs []string
 	for _, child := range children {
-		if child.Status == "closed" {
-			closedIDs[child.ID] = true
-		} else if child.Status == "open" {
+		if child.Status == "open" {
 			openStepIDs = append(openStepIDs, child.ID)
 		}
 	}
@@ -204,30 +201,9 @@ func runMoleculeProgress(cmd *cobra.Command, args []string) error {
 		case "in_progress":
 			progress.InProgress++
 		case "open":
-			// Get full step info with dependencies
+			// Dependencies come from bd show (bd list leaves DependsOn empty).
 			step := openStepsMap[child.ID]
-
-			// Check if all dependencies are closed using Dependencies field
-			// (from bd show), not DependsOn (which is empty from bd list).
-			// Only "blocks" type dependencies block progress - ignore "parent-child".
-			allDepsClosed := true
-			hasBlockingDeps := false
-			var deps []beads.IssueDep
-			if step != nil {
-				deps = step.Dependencies
-			}
-			for _, dep := range deps {
-				if !isBlockingDepType(dep.DependencyType) {
-					continue // Skip parent-child and other non-blocking relationships
-				}
-				hasBlockingDeps = true
-				if !closedIDs[dep.ID] {
-					allDepsClosed = false
-					break
-				}
-			}
-
-			if !hasBlockingDeps || allDepsClosed {
+			if step == nil || moleculeStepReady(step) {
 				progress.ReadySteps = append(progress.ReadySteps, child.ID)
 			} else {
 				progress.BlockedSteps = append(progress.BlockedSteps, child.ID)
@@ -552,13 +528,10 @@ func getMoleculeProgressInfo(b beads.Client, moleculeRootID string) (*MoleculePr
 		}
 	}
 
-	// Build set of closed issue IDs and collect open step IDs for dependency checking
-	closedIDs := make(map[string]bool)
+	// Collect open step IDs for dependency checking
 	var openStepIDs []string
 	for _, child := range children {
-		if child.Status == "closed" {
-			closedIDs[child.ID] = true
-		} else if child.Status == "open" {
+		if child.Status == "open" {
 			openStepIDs = append(openStepIDs, child.ID)
 		}
 	}
@@ -585,30 +558,9 @@ func getMoleculeProgressInfo(b beads.Client, moleculeRootID string) (*MoleculePr
 		case "in_progress":
 			progress.InProgress++
 		case "open":
-			// Get full step info with dependencies
+			// Dependencies come from bd show (bd list leaves DependsOn empty).
 			step := openStepsMap[child.ID]
-
-			// Check if all dependencies are closed using Dependencies field
-			// (from bd show), not DependsOn (which is empty from bd list).
-			// Only "blocks" type dependencies block progress - ignore "parent-child".
-			allDepsClosed := true
-			hasBlockingDeps := false
-			var deps []beads.IssueDep
-			if step != nil {
-				deps = step.Dependencies
-			}
-			for _, dep := range deps {
-				if !isBlockingDepType(dep.DependencyType) {
-					continue // Skip parent-child and other non-blocking relationships
-				}
-				hasBlockingDeps = true
-				if !closedIDs[dep.ID] {
-					allDepsClosed = false
-					break
-				}
-			}
-
-			if !hasBlockingDeps || allDepsClosed {
+			if step == nil || moleculeStepReady(step) {
 				progress.ReadySteps = append(progress.ReadySteps, child.ID)
 			} else {
 				progress.BlockedSteps = append(progress.BlockedSteps, child.ID)
@@ -1019,8 +971,7 @@ func moleculeCurrentFrom(b beads.Client, handoff *beads.Issue, target string) Mo
 
 	info.StepsTotal = len(children)
 
-	// Build set of closed issue IDs and collect open step IDs for dependency checking
-	closedIDs := make(map[string]bool)
+	// Collect open step IDs for dependency checking
 	var inProgressSteps []*beads.Issue
 	var openStepIDs []string
 
@@ -1028,7 +979,6 @@ func moleculeCurrentFrom(b beads.Client, handoff *beads.Issue, target string) Mo
 		switch child.Status {
 		case "closed":
 			info.StepsComplete++
-			closedIDs[child.ID] = true
 		case "in_progress", "pinned", "hooked":
 			// A pinned or hooked step is held by an agent, as in_progress says.
 			inProgressSteps = append(inProgressSteps, child)
@@ -1064,21 +1014,7 @@ func moleculeCurrentFrom(b beads.Client, handoff *beads.Issue, target string) Mo
 			continue
 		}
 
-		// Check dependencies using Dependencies field (from bd show),
-		// not DependsOn (which is empty from bd list).
-		allDepsClosed := true
-		hasBlockingDeps := false
-		for _, dep := range step.Dependencies {
-			if !isBlockingDepType(dep.DependencyType) {
-				continue // Skip parent-child and other non-blocking relationships
-			}
-			hasBlockingDeps = true
-			if !closedIDs[dep.ID] {
-				allDepsClosed = false
-				break
-			}
-		}
-		if !hasBlockingDeps || allDepsClosed {
+		if moleculeStepReady(step) {
 			readySteps = append(readySteps, step)
 		}
 	}
