@@ -161,9 +161,7 @@ func TestDoltStrayServersCheck_Run(t *testing.T) {
 			setup: func(t *testing.T, root string) []util.DoltServerProcess {
 				writeWorkspaceMetadata(t, filepath.Join(root, ".beads"), "hq")
 				writePortFile(t, filepath.Join(root, ".beads"), 3307)
-				if err := os.MkdirAll(filepath.Join(root, ".dolt-data", "hq"), 0o755); err != nil {
-					t.Fatal(err)
-				}
+				writeStrayDatabase(t, filepath.Join(root, ".dolt-data"), "hq")
 				return []util.DoltServerProcess{townServer(root)}
 			},
 			wantStatus: StatusOK,
@@ -175,9 +173,7 @@ func TestDoltStrayServersCheck_Run(t *testing.T) {
 				beadsDir := filepath.Join(root, ".claude", ".beads")
 				writeWorkspaceMetadata(t, beadsDir, "claude")
 				writePortFile(t, beadsDir, 3307)
-				if err := os.MkdirAll(filepath.Join(root, ".dolt-data", "claude"), 0o755); err != nil {
-					t.Fatal(err)
-				}
+				writeStrayDatabase(t, filepath.Join(root, ".dolt-data"), "claude")
 				return []util.DoltServerProcess{{
 					PID: 43, Port: 3307,
 					ConfigPath: filepath.Join(beadsDir, "dolt-server-config.yaml"),
@@ -227,5 +223,45 @@ func TestDoltStrayServersCheck_Run(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// writeStrayDatabase lays out a loadable Dolt database (.dolt/noms/manifest)
+// under dataDir.
+func writeStrayDatabase(t *testing.T, dataDir, name string) {
+	t.Helper()
+	writeStrayFile(t, filepath.Join(dataDir, name, ".dolt", "noms", "manifest"), "manifest")
+}
+
+// TestDoltStrayServersCheck_PortFileServerWithPhantomDatabaseDir: a directory
+// named after the workspace database, with .dolt/ but no noms/manifest, is not a
+// database the server can load, so bd fails with "database not found" there.
+func TestDoltStrayServersCheck_PortFileServerWithPhantomDatabaseDir(t *testing.T) {
+	t.Parallel()
+	root := newStrayTown(t)
+	dataDir := filepath.Join(root, ".dolt-data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "foo", ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceMetadata(t, filepath.Join(root, ".beads"), "foo")
+	writePortFile(t, filepath.Join(root, ".beads"), 3307)
+
+	check := NewDoltStrayServersCheck()
+	check.findServers = func() ([]util.DoltServerProcess, error) {
+		return []util.DoltServerProcess{{
+			PID: 42, Port: 3307,
+			ConfigPath: filepath.Join(dataDir, "config.yaml"),
+			DataDir:    dataDir,
+		}}, nil
+	}
+	check.dial = reachable
+
+	result := check.Run(&CheckContext{TownRoot: root})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v (%s), want %v", result.Status, result.Message, StatusWarning)
+	}
+	if joined := strings.Join(result.Details, "\n"); !strings.Contains(joined, `holds no "foo" database`) {
+		t.Errorf("details missing the phantom-database report:\n%s", joined)
 	}
 }

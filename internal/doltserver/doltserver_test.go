@@ -6121,3 +6121,39 @@ func lastEnvValue(env []string, key string) (value string, found bool) {
 	}
 	return value, found
 }
+
+// TestDataDirHasDatabase pins the shared presence rule: only .dolt/noms/manifest
+// makes a directory a database, and listDatabasesLocal agrees.
+func TestDataDirHasDatabase(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	mk := func(rel string, file bool) {
+		t.Helper()
+		p := filepath.Join(dataDir, rel)
+		dir := p
+		if file {
+			dir = filepath.Dir(p)
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if file {
+			if err := os.WriteFile(p, []byte("m"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	mk("valid/.dolt/noms/manifest", true)
+	mk("phantom/.dolt", false)
+	mk("plain", false)
+
+	for name, want := range map[string]bool{"valid": true, "phantom": false, "plain": false, "missing": false} {
+		if got := DataDirHasDatabase(dataDir, name); got != want {
+			t.Errorf("DataDirHasDatabase(%q) = %v, want %v", name, got, want)
+		}
+	}
+	dbs, err := listDatabasesLocal(&Config{DataDir: dataDir})
+	if err != nil || len(dbs) != 1 || dbs[0] != "valid" {
+		t.Errorf("listDatabasesLocal = %v, %v; want [valid]", dbs, err)
+	}
+}
