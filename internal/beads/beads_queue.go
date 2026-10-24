@@ -328,7 +328,11 @@ func MatchClaimPattern(pattern, identity string) bool {
 		if len(parts) == 2 {
 			prefix := parts[0]
 			suffix := parts[1]
-			if strings.HasPrefix(identity, prefix) && strings.HasSuffix(identity, suffix) {
+			// The prefix and suffix can overlap ("gastown/*/x" against
+			// "gastown/x"), which passes both tests but leaves no middle
+			// segment to slice (gt-p252t).
+			if len(identity) >= len(prefix)+len(suffix) &&
+				strings.HasPrefix(identity, prefix) && strings.HasSuffix(identity, suffix) {
 				// Check that the middle part doesn't contain path separators
 				// unless the pattern allows it (e.g., "*/" at start)
 				middle := identity[len(prefix) : len(identity)-len(suffix)]
