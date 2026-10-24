@@ -35,6 +35,23 @@ cat >"$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 # `info` (is the daemon up) and `image inspect --format … <image>` are used
 if [ "${1:-}" = info ]; then [ ! -f "$STUB_STATE/docker-down" ]; exit; fi
+# `images --format … <repo>` lists the tags in image-tags (newest first); `rmi`
+# is recorded in rmi, and refused for the refs listed in rmi-refuse (an image a
+# running container uses); `image inspect --format {{.Id}} <ref>` answers from
+# ids ("<ref> <id>" lines), else "id-of-<ref>".
+case "${1:-}" in
+  images) cat "$STUB_STATE/image-tags" 2>/dev/null || true; exit 0 ;;
+  rmi)
+    echo "$*" >>"$STUB_STATE/rmi"
+    if grep -qx "$2" "$STUB_STATE/rmi-refuse" 2>/dev/null; then echo "conflict: image is being used by running container" >&2; exit 1; fi
+    exit 0 ;;
+esac
+if [ "${1:-}" = image ] && [ "${4:-}" = '{{.Id}}' ]; then
+  ref="${5:-}"
+  id="$(awk -v r="$ref" '$1 == r { print $2 }' "$STUB_STATE/ids" 2>/dev/null || true)"
+  echo "${id:-id-of-$ref}"
+  exit 0
+fi
 [ -f "$STUB_STATE/image" ] || { echo "Error: No such image" >&2; exit 1; }
 echo "a warning on stderr that must not read as a commit" >&2
 cat "$STUB_STATE/image"
@@ -226,6 +243,41 @@ if [ "$RC" != 0 ] && [ "$(builds)" = 0 ] && grep -q "is not in" <<<"$OUT"; then 
 new_case nogt ""
 run_it
 if [ "$RC" != 0 ] && grep -q "cannot read the installed gt" <<<"$OUT"; then pass "an unreadable installed commit is an error"; else fail "nogt: rc=$RC out=$OUT"; fi
+
+echo "--- the per-commit images every build leaves behind are untagged, not forced (gt-mexpf)"
+# tags_case <name> <installed> [label]: a case whose docker lists these tags,
+# newest first. gastown-polecat:dev names the same image as eeeeeee5.
+tags_case() {
+  new_case "$@"
+  printf '%s\n' dev aaaaaaa1 bbbbbbb2 ccccccc3 ddddddd4 eeeeeee5 latest fffffff6 >"$STUB_STATE/image-tags"
+  printf '%s\n' "gastown-polecat:dev same-image" "gastown-polecat:eeeeeee5 same-image" >"$STUB_STATE/ids"
+}
+rmis() { if [ -f "$STUB_STATE/rmi" ]; then sed 's/^rmi //' "$STUB_STATE/rmi" | tr '\n' ' '; fi; }
+tags_case prune abc1234 "$(full abc1234)"
+run_it
+if [ "$RC" = 0 ] && [ "$(rmis)" = "gastown-polecat:ddddddd4 gastown-polecat:fffffff6 " ]; then pass "newest 3 kept; older tags untagged; :dev's image, 'dev' and 'latest' left alone"; else fail "prune: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
+if ! grep -q -e ' -f' -e 'force' "$STUB_STATE/rmi"; then pass "docker rmi is never forced"; else fail "prune forced: $(cat "$STUB_STATE/rmi")"; fi
+tags_case prunekeep abc1234 "$(full abc1234)"
+POLECAT_IMAGE_KEEP=1 run_it
+if [ "$RC" = 0 ] && [ "$(rmis)" = "gastown-polecat:bbbbbbb2 gastown-polecat:ccccccc3 gastown-polecat:ddddddd4 gastown-polecat:fffffff6 " ]; then pass "POLECAT_IMAGE_KEEP=1 keeps only the newest (and :dev's image)"; else fail "prunekeep: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
+tags_case prunerefused abc1234 "$(full abc1234)"
+echo "gastown-polecat:ddddddd4" >"$STUB_STATE/rmi-refuse"
+run_it
+if [ "$RC" = 0 ] && [ "$(rmis)" = "gastown-polecat:ddddddd4 gastown-polecat:fffffff6 " ] && grep -q "kept gastown-polecat:ddddddd4 (in use)" <<<"$OUT" && grep -q "removed gastown-polecat:fffffff6" <<<"$OUT"; then pass "an image a container uses is refused, logged as kept, and the others still go"; else fail "prunerefused: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
+tags_case prunebuilt abc1234 "$(full 1111111)"
+run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && [ "$(rmis)" = "gastown-polecat:ddddddd4 gastown-polecat:fffffff6 " ]; then pass "a run that built also prunes"; else fail "prunebuilt: rc=$RC builds=$(builds) rmi=[$(rmis)] out=$OUT"; fi
+tags_case prunedown abc1234
+touch "$STUB_STATE/docker-down"
+run_it
+if [ "$RC" = 0 ] && [ -z "$(rmis)" ]; then pass "docker down: nothing removed, exit 0"; else fail "prunedown: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
+new_case prunenone abc1234 "$(full abc1234)"
+run_it
+if [ "$RC" = 0 ] && [ -z "$(rmis)" ]; then pass "no tags listed: nothing removed"; else fail "prunenone: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
+tags_case prunefail abc1234 "$(full 1111111)"
+touch "$STUB_STATE/make-fail"
+run_it
+if [ "$RC" != 0 ] && [ -z "$(rmis)" ]; then pass "a failed build prunes nothing"; else fail "prunefail: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
 
 echo
 echo "polecat-image: $PASS passed, $FAIL failed"

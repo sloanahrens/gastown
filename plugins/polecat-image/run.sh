@@ -19,6 +19,8 @@ IMAGE="${POLECAT_IMAGE_NAME:-gastown-polecat:dev}"
 LABEL="org.gastown.gt-commit"
 STALE_LOCK_MINUTES="${POLECAT_IMAGE_STALE_MINUTES:-20}"
 MAX_ROUNDS=3
+# KEEP_IMAGES is how many of the newest per-commit tags prune_old_images leaves.
+KEEP_IMAGES="${POLECAT_IMAGE_KEEP:-3}"
 
 GT="${POLECAT_IMAGE_GT:-gt}"
 DOCKER="${POLECAT_IMAGE_DOCKER:-docker}"
@@ -213,4 +215,31 @@ main() {
   die "the installed gt kept moving: $IMAGE is still not at ${installed:0:12} after $MAX_ROUNDS builds"
 }
 
+# prune_old_images untags the per-commit images (gastown-polecat:<hex sha>) every
+# build leaves behind, keeping the newest KEEP_IMAGES. Never :dev, never a tag
+# that is not a hex commit, never the image :dev names, and never forced: docker
+# refuses to remove an image a container (a running sandbox) uses, and that
+# refusal is the protection, logged as kept. A listing that fails prunes nothing
+# (gt-mexpf).
+prune_old_images() {
+  local repo="${IMAGE%%:*}" tag n=0 dev_id id
+  "$DOCKER" info >/dev/null 2>&1 || return 0
+  dev_id="$("$DOCKER" image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+  while read -r tag; do
+    case "$tag" in '' | *[!0-9a-f]*) continue ;; esac
+    [ "${#tag}" -ge 7 ] || continue
+    n=$((n + 1))
+    [ "$n" -gt "$KEEP_IMAGES" ] || continue
+    id="$("$DOCKER" image inspect --format '{{.Id}}' "$repo:$tag" 2>/dev/null || true)"
+    [ -n "$id" ] || continue
+    [ "$id" != "$dev_id" ] || continue
+    if "$DOCKER" rmi "$repo:$tag" >/dev/null 2>&1; then
+      log "removed $repo:$tag"
+    else
+      log "kept $repo:$tag (in use)"
+    fi
+  done < <("$DOCKER" images --format '{{.Tag}}' "$repo" 2>/dev/null || true)
+}
+
 main "$@"
+prune_old_images || true
