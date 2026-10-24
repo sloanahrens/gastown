@@ -286,7 +286,7 @@ func skipLauncherArgsChdir(name string, launcher prWorkflowLauncher, rest []stri
 				continue
 			}
 		}
-		if dir, ok := launcherChdirFlag(name, word); ok {
+		if dir, ok := launcherChdirFlag(name, launcher, word); ok {
 			if dir == "" {
 				if i+1 < len(rest) {
 					dir = rest[i+1]
@@ -312,8 +312,10 @@ func skipLauncherArgsChdir(name string, launcher prWorkflowLauncher, rest []stri
 // launcherChdirFlag returns the directory a launcher flag changes into — the
 // empty string when it stands in the next word — and whether word is such a
 // flag. Only env -C/--chdir and sudo -D/--chdir do this: they run the command
-// behind them in that directory (gt-l18zp).
-func launcherChdirFlag(name, word string) (dir string, ok bool) {
+// behind them in that directory (gt-l18zp). A short flag inside a cluster
+// counts only when launcherFlagWidth would hand it the directory, so "env -iC
+// dir" changes directory and "env -uC name" does not.
+func launcherChdirFlag(name string, launcher prWorkflowLauncher, word string) (dir string, ok bool) {
 	short, long := "", ""
 	switch name {
 	case "env":
@@ -328,8 +330,19 @@ func launcherChdirFlag(name, word string) (dir string, ok bool) {
 		return "", true
 	case strings.HasPrefix(word, long+"="):
 		return word[len(long)+1:], true
-	case strings.HasPrefix(word, short) && len(word) > len(short):
-		return word[len(short):], true
+	}
+	if len(word) < 2 || word[0] != '-' || word[1] == '-' {
+		return "", false
+	}
+	for j := 1; j < len(word); j++ {
+		flag := "-" + string(word[j])
+		if !launcher.valueFlags[flag] {
+			continue
+		}
+		if flag != short {
+			return "", false
+		}
+		return word[j+1:], true
 	}
 	return "", false
 }

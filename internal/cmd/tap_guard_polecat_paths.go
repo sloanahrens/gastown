@@ -331,6 +331,9 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 					return reason
 				}
 			}
+			// With no command here, the scope set above is dropped with this
+			// reading and nothing is carried on from it, so this exit needs no
+			// restore (gt-l18zp).
 			if word == "" {
 				continue
 			}

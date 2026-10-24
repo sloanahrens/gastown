@@ -490,6 +490,101 @@ func TestPolecatPathsGuard_LauncherChdirFlag(t *testing.T) {
 		{"env -C into the own worktree", "env -C . rm -rf build", false},
 		{"env --chdir= into the own worktree", "env --chdir=. rm -rf build", false},
 		{"sudo -D into the own worktree", "sudo -D . rm -rf build", false},
+		{"env cluster ending in -C into a sibling worktree", "env -iC " + up + " rm -rf internal.go", true},
+		{"env -C attached to a cluster into a sibling worktree", "env -iC" + up + " rm -rf internal.go", true},
+		{"sudo cluster ending in -D into a sibling worktree", "sudo -ED " + up + " rm -rf internal.go", true},
+		{"env cluster ending in -C into the own worktree", "env -iC . rm -rf build", false},
+		{"sudo cluster ending in -D into the own worktree", "sudo -ED . rm -rf build", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := p.run(t, "Bash", commandInput(tt.command))
+			if tt.wantBlock && err == nil {
+				t.Errorf("%q was allowed, want a block", tt.command)
+			}
+			if !tt.wantBlock && err != nil {
+				t.Errorf("%q blocked in the own worktree: %v", tt.command, err)
+			}
+		})
+	}
+}
+
+// TestPolecatPathsGuard_LauncherChdirScopeEnds pins gt-l18zp's rule that a
+// launcher's chdir scopes only the command it runs: the words after the
+// launcher, in the same line or the next segment, are judged from the
+// worktree again. The chdir target itself is judged as a cd is, so a sibling
+// target is blocked whatever runs behind it.
+func TestPolecatPathsGuard_LauncherChdirScopeEnds(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	up := filepath.Join("..", "..", p.other, p.rig)
+	for _, tt := range []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{"chdir over a command that runs nothing, then an own file", "env -C sub true; rm -rf internal.go", false},
+		{"chdir over a bare launcher, then an own file", "env -C sub; rm -rf internal.go", false},
+		{"chdir over a payload that runs nothing, then an own file", "env -C . -S 'true' && rm -rf internal.go", false},
+		{"chdir over a payload that runs nothing, then an own build", "env -C sub -S 'true'; rm -rf build", false},
+		{"chdir target in a sibling worktree", "env -C " + up + " true", true},
+		{"chdir into a sibling worktree over a payload", "env -C " + up + " -S 'true'", true},
+		{"chdir into a sibling worktree over a write, then an own build", "env -C " + up + " rm -rf internal.go; rm -rf build", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := p.run(t, "Bash", commandInput(tt.command))
+			if tt.wantBlock && err == nil {
+				t.Errorf("%q was allowed, want a block", tt.command)
+			}
+			if !tt.wantBlock && err != nil {
+				t.Errorf("%q blocked: %v", tt.command, err)
+			}
+		})
+	}
+}
+
+// TestTrimShellKeywordsKeepsNamedFdRedirection pins gt-l18zp's rule that a
+// brace that opens a named fd is a redirection, not a group opener: the trim
+// stops on it, while braces and parens that really group a command are
+// stepped over to the command word.
+func TestTrimShellKeywordsKeepsNamedFdRedirection(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		segment []string
+		want    []string
+	}{
+		{"named fd redirection stays whole", []string{"{fd}>log", "rm", "-rf", "x"}, []string{"{fd}>log", "rm", "-rf", "x"}},
+		{"named fd duplication stays whole", []string{"{fd}>&2", "rm", "-rf", "x"}, []string{"{fd}>&2", "rm", "-rf", "x"}},
+		{"brace group opener is stepped over", []string{"{rm", "-rf", "x"}, []string{"rm", "-rf", "x"}},
+		{"paren group opener is stepped over", []string{"(rm", "-rf", "x"}, []string{"rm", "-rf", "x"}},
+		{"case pattern is stepped over", []string{"case", "x", "in", "a)", "rm", "-rf", "x"}, []string{"rm", "-rf", "x"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := trimShellKeywords(tt.segment)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("trimShellKeywords(%q) = %q, want %q", tt.segment, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPolecatPathsGuard_NamedFdAheadOfCommand pins gt-l18zp's rule that a
+// redirection on a named fd ahead of a command is skipped, not trimmed as a
+// group opener: "{fd}>log" is one redirection and the command behind it is
+// the one judged.
+func TestPolecatPathsGuard_NamedFdAheadOfCommand(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	rm := "rm -rf " + filepath.Join(p.sibling, "internal.go")
+	for _, tt := range []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{"named fd redirection ahead of a write into a sibling worktree", "{fd}>log " + rm, true},
+		{"named fd redirection ahead of a write in the own worktree", "{fd}>log rm -rf build", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
