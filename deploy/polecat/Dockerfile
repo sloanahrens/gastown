@@ -113,9 +113,35 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 RUN groupadd -g 10001 polecat \
     && useradd -M -u 10001 -g 10001 -d /sandbox -s /bin/bash polecat
 
+# Seeded Go caches (gt-ieuvf). A cold sandbox otherwise compiles every dependency
+# of the rigs' modules before a presubmit can run (devops: ~900 packages, a 10 GB
+# peak at -p=4). The caches live OUTSIDE /sandbox on purpose: the sandbox's
+# workspace-init container copies this image's /sandbox into each sandbox's
+# volume, so a seed under /sandbox costs gigabytes of copy and disk per sandbox,
+# while a path outside it is one image layer every sandbox shares. New entries a
+# sandbox writes go to its own writable layer and vanish with it.
+#
+# The sources are `make polecat-image`'s pinned checkouts (deploy/polecat/seed,
+# staged from deploy/polecat/seed-pins), bind-mounted for this one RUN so no
+# source lands in the image. Each module gets the commands the rigs' presubmits
+# run, with the default flags (no -trimpath), so the cache keys match; a step
+# that fails here (gastown's go vet needs libicu headers) is logged and skipped.
+# The directories are made writable for uid 10001 in this same RUN: a chmod in a
+# later layer would copy every file again.
+ENV GOCACHE=/opt/gocache \
+    GOMODCACHE=/opt/gomod
+RUN --mount=type=bind,source=seed,target=/seed \
+    mkdir -p "$GOCACHE" "$GOMODCACHE" \
+    && for gomod in $(find /seed -name go.mod -not -path '*/testdata/*' | sort); do \
+         dir=$(dirname "$gomod"); echo "seed: $dir"; \
+         for step in "go build ./..." "go vet ./..." "go test -count=1 -run ^\$ ./..."; do \
+           (cd "$dir" && GOFLAGS="-p=4 -modcacherw" $step >/dev/null 2>&1) || echo "seed: '$step' failed in $dir, continuing"; \
+         done; \
+       done \
+    && chmod -R a+rwX "$GOCACHE" "$GOMODCACHE"
+
 ENV PATH="/usr/local/go/bin:/sandbox/go/bin:${PATH}" \
     GOPATH=/sandbox/go \
-    GOCACHE=/sandbox/.cache/go-build \
     GOFLAGS=-p=4 \
     BD_DISABLE_METRICS=1 \
     DO_NOT_TRACK=1 \

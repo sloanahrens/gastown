@@ -9,6 +9,8 @@
 /build/
 # make polecat-image cross-compiles gt and bd here (gt-n0mr7)
 /deploy/polecat/bin/
+# make polecat-image stages the pinned seed sources here (gt-ieuvf)
+/deploy/polecat/seed/
 
 # IDE
 .idea/
