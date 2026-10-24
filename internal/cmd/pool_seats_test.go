@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -475,7 +476,8 @@ func TestPoolSeatSessionsCountsADeadSandboxSeatAsDeadHooked(t *testing.T) {
 	answering := &fakeLister{sessions: map[string]map[string]string{
 		sandbox: {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
 	}}
-	recordedDead := &intent.Progress{SampledAt: time.Unix(1760000000, 0), DeadSamples: 1}
+	recordedDead := &intent.Progress{SampledAt: time.Unix(1760000000, 0), DeadSamples: 2}
+	recordedWaiting := &intent.Progress{SampledAt: time.Unix(1760000000, 0), DeadSamples: 1}
 	recordedAlive := &intent.Progress{SampledAt: time.Unix(1760000000, 0)}
 
 	cases := []struct {
@@ -488,6 +490,7 @@ func TestPoolSeatSessionsCountsADeadSandboxSeatAsDeadHooked(t *testing.T) {
 	}{
 		{"a dead sandbox seat holding work is dead-hooked", held, recordedDead, false, 1, true},
 		{"a dead sandbox seat holding nothing is free", free, recordedDead, false, 0, false},
+		{"a seat the patrol is still waiting on is working", held, recordedWaiting, false, 1, false},
 		{"a live sandbox seat is working", held, recordedAlive, false, 1, false},
 		{"a caller with no town keeps the seat", held, recordedDead, true, 1, false},
 	}
@@ -526,6 +529,81 @@ func TestPoolSeatSessionsCountsADeadSandboxSeatAsDeadHooked(t *testing.T) {
 				if s.deadHooked != (c.wantHeld && s.rig == "gastown") {
 					t.Fatalf("session %+v deadHooked = %v, want %v", s, s.deadHooked, c.wantHeld)
 				}
+			}
+		})
+	}
+}
+
+// A death the patrol has not confirmed is not a death the roster reports: below
+// the configured dead-sample count the patrol only waits, so the seat keeps its
+// live session, the session's created time (which arms the spec dispatcher's
+// spawn stagger) and the session's own GT_AGENT. The roster reads the same
+// configured count, so a town that sets dead_samples to 1 confirms on the first
+// sample in both processes (gt-4rxdi).
+func TestPoolSeatSessionsKeepsASandboxSeatShortOfTheDeadThreshold(t *testing.T) {
+	t.Parallel()
+	pool := seatPool("deepseek-flash", 3)
+	const sandbox = "gt-ember"
+	created := time.Unix(1760000000, 0)
+	held := poolSeatState{
+		Disposition: polecat.WorkstateDisposition{
+			Verdict: polecat.WorkstateVerdictNeedsRecovery, NeedsRecovery: true, CountsTowardCapacity: true,
+		},
+		HookHeld: true,
+	}
+	cases := []struct {
+		name     string
+		deadSet  int // the patrol's configured dead_samples; 0 leaves it unset
+		wantDead bool
+	}{
+		{"the default threshold keeps a seat at one dead sample", 0, false},
+		{"a configured threshold of one confirms it", 1, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
+			writeTownPolecatDir(t, town, "gastown", "ember")
+			if c.deadSet > 0 {
+				cfg := &daemon.DaemonPatrolConfig{Patrols: &daemon.PatrolsConfig{
+					PatrolScan: &daemon.PatrolScanConfig{Enabled: true, DeadSamples: c.deadSet},
+				}}
+				if err := daemon.SavePatrolConfig(town, cfg); err != nil {
+					t.Fatalf("SavePatrolConfig: %v", err)
+				}
+			}
+			writeSandboxSeat(t, town, sandbox, "gastown", "ember",
+				&intent.Progress{SampledAt: created, DeadSamples: 1})
+			answering := &fakeLister{
+				sessions: map[string]map[string]string{
+					sandbox: {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
+				},
+				created: map[string]time.Time{sandbox: created},
+			}
+
+			got, err := poolOccupiedSessions(answering, town, func(string, string) (poolSeatState, error) { return held, nil }, nil, pool, time.Now, sandboxSeatDeathsFor(town))
+			if err != nil {
+				t.Fatalf("poolOccupiedSessions: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("seat picture = %+v, want the one session", got)
+			}
+			if s := got[0]; s.deadHooked != c.wantDead {
+				t.Fatalf("session %+v deadHooked = %v, want %v", s, s.deadHooked, c.wantDead)
+			}
+			roster := specRosterFrom(got, nil)
+			if n := roster.DeadHooked["deepseek-flash"]; (n > 0) != c.wantDead {
+				t.Fatalf("roster dead-hooked = %d, want %v (%+v)", n, c.wantDead, roster)
+			}
+			if c.wantDead {
+				return
+			}
+			if s := got[0]; !s.created.Equal(created) || s.agent != "deepseek-flash" {
+				t.Fatalf("session = %+v, want created %v and the session's own GT_AGENT", s, created)
+			}
+			if roster.Newest != created {
+				t.Fatalf("roster newest = %v, want the session's created %v", roster.Newest, created)
 			}
 		})
 	}

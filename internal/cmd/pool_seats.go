@@ -13,6 +13,8 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/deadseats"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
@@ -25,6 +27,20 @@ import (
 // a seat one process calls taken is taken in the other. It lived in
 // daemon_dispatch.go until the idle-seat dispatch check was deleted
 // (gt-rwp7z.3); the picture itself outlives the patrol.
+
+// sandboxDeadSamples is the patrol's configured dead-sample threshold: the
+// number of consecutive dead samples its intent record has to reach before the
+// patrol acts on it. The roster's dead-seat read confirms at the same count, so
+// a seat the patrol is still waiting on stays live here (gt-4rxdi). An
+// unreadable block reads as the compiled default, which is the count the patrol
+// itself falls back to.
+func sandboxDeadSamples(townRoot string) int {
+	cfg, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return deadseats.DefaultSamples
+	}
+	return daemon.PatrolScanDeadSamples(cfg)
+}
 
 // poolSeatSessions lists the seats the pool counts as taken: the live polecat
 // sessions, the seats whose session is gone while their bead is still hooked

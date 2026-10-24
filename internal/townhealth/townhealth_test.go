@@ -778,6 +778,9 @@ func TestSeats(t *testing.T) {
 		{Rig: "gt", Name: "polecat/quiet", Run: true, Sampled: ago(time.Minute), Changed: ago(10 * time.Minute)},
 		{Rig: "gt", Name: "polecat/stalled", Run: true, Sampled: ago(time.Minute), Changed: ago(45 * time.Minute)},
 		{Rig: "gt", Name: "polecat/dead", Run: true, Sampled: ago(time.Minute), DeadSamples: 2},
+		// One dead sample is not a death: the patrol waits for the second
+		// (gt-4rxdi), so the seat is still judged on its quiet time.
+		{Rig: "gt", Name: "polecat/one-sample", Run: true, Sampled: ago(time.Minute), DeadSamples: 1},
 		{Rig: "gt", Name: "polecat/stale", Run: true, Sampled: ago(time.Hour), Changed: ago(time.Hour)},
 		{Rig: "gt", Name: "polecat/unsampled", Run: true},
 		{Rig: "gt", Name: "polecat/frozen", Frozen: true},
@@ -785,12 +788,13 @@ func TestSeats(t *testing.T) {
 	}
 	r := Compute(context.Background(), inputs(f))
 	for key, want := range map[string]Verdict{
-		"seat/gt:polecat/quiet":     Green,
-		"seat/gt:polecat/stalled":   Degraded,
-		"seat/gt:polecat/dead":      Degraded,
-		"seat/gt:polecat/stale":     VerdictUnknown,
-		"seat/gt:polecat/unsampled": VerdictUnknown,
-		"seat/gt:polecat/frozen":    Red,
+		"seat/gt:polecat/quiet":      Green,
+		"seat/gt:polecat/stalled":    Degraded,
+		"seat/gt:polecat/dead":       Degraded,
+		"seat/gt:polecat/one-sample": Green,
+		"seat/gt:polecat/stale":      VerdictUnknown,
+		"seat/gt:polecat/unsampled":  VerdictUnknown,
+		"seat/gt:polecat/frozen":     Red,
 	} {
 		if got := field(t, r, key); got.Verdict != want {
 			t.Errorf("%s = %+v, want %s", key, got, want)
@@ -800,6 +804,21 @@ func TestSeats(t *testing.T) {
 		if fl.Subject == "polecat/parked" {
 			t.Errorf("parked seat listed: %+v", fl)
 		}
+	}
+}
+
+// The health line reports a seat dead at the patrol's configured dead-sample
+// count, so an operator who lowers dead_samples to 1 sees the same single
+// sample confirm a death that the patrol acts on (gt-4rxdi).
+func TestSeatsFollowTheConfiguredDeadThreshold(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.seats = []Seat{{Rig: "gt", Name: "polecat/once", Run: true, Sampled: ago(time.Minute), DeadSamples: 1}}
+	in := inputs(f)
+	in.Thresholds.DeadSamples = 1
+	r := Compute(context.Background(), in)
+	if got := field(t, r, "seat/gt:polecat/once"); got.Value != "dead" {
+		t.Errorf("seat field = %+v, want dead at the configured threshold of one", got)
 	}
 }
 

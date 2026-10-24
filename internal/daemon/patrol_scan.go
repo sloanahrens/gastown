@@ -61,6 +61,17 @@ func patrolScanConfig(config *DaemonPatrolConfig) *PatrolScanConfig {
 	return config.Patrols.PatrolScan
 }
 
+// PatrolScanDeadSamples is the dead-sample count the patrol acts on for a
+// patrol config: patrols.patrol_scan.dead_samples, or the compiled default
+// when the block is absent. The roster and the health line read it so the
+// three confirm a death at the same count (gt-4rxdi).
+func PatrolScanDeadSamples(config *DaemonPatrolConfig) int {
+	if c := patrolScanConfig(config); c != nil && c.DeadSamples > 0 {
+		return c.DeadSamples
+	}
+	return patrolscan.DefaultDeadSamples
+}
+
 // patrolScanOptions builds the scanner options from config.
 func patrolScanOptions(config *DaemonPatrolConfig, now func() time.Time) patrolscan.Options {
 	o := patrolscan.Options{

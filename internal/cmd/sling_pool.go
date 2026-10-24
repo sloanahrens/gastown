@@ -16,6 +16,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/deadseats"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -605,6 +606,9 @@ func sandboxSeatDeathsFor(townRoot string) sandboxSeatDeadFunc {
 	if townRoot == "" {
 		return nil
 	}
+	// The patrol's own count, so a seat it is still waiting on is kept
+	// (gt-4rxdi).
+	threshold := sandboxDeadSamples(townRoot)
 	return func(sessionName, rigName, polecatName string) bool {
 		if _, ok, err := session.ReadSandboxRecord(townRoot, sessionName); err != nil || !ok {
 			return false
@@ -612,7 +616,7 @@ func sandboxSeatDeathsFor(townRoot string) sandboxSeatDeadFunc {
 		// Read's unreadable answer is a record carrying no progress, which is
 		// not a death, so the seat is kept.
 		rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, polecatName))
-		return rec.Progress != nil && rec.Progress.DeadSamples > 0
+		return rec.Progress != nil && deadseats.Confirmed(rec.Progress.DeadSamples, threshold)
 	}
 }
 

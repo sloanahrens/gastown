@@ -50,6 +50,9 @@ func (d *Daemon) writeTownHealth() {
 		// runs on the defaults rather than leaving the file to go stale.
 		th, stale = townhealth.DefaultThresholds(), townhealth.DefaultStaleAfter
 	}
+	// The patrol's own death threshold, so the health line calls a seat dead
+	// at the count the patrol acts on (gt-4rxdi).
+	th.DeadSamples = PatrolScanDeadSamples(d.patrolConfig)
 	src := &healthSources{d: d, evidence: th.SeatEvidence}
 	if d.townHealthSources != nil {
 		d.townHealthSources(src)
