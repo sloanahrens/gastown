@@ -685,8 +685,6 @@ func duplicateCandidatesOf(store beads.Client, beadsDir string, rows []*beads.Is
 			continue
 		}
 		detail := detailsByID[row.ID]
-		refs := extractOverlapRefs(row.Title, row.Description, row.CloseReason,
-			detail.Design, detail.Notes)
 		candidates = append(candidates, duplicateCandidate{
 			ID:        row.ID,
 			Title:     row.Title,
@@ -697,8 +695,8 @@ func duplicateCandidatesOf(store beads.Client, beadsDir string, rows []*beads.Is
 			CreatedAt: row.CreatedAt,
 			Blockers:  detail.Blockers,
 			Ready:     readinessOf(row, detail),
-			Refs:      refs,
-			HoldFiles: specHoldFiles(refs.Files, row.Description),
+			Refs: extractOverlapRefs(row.Title, row.Description, row.CloseReason,
+				detail.Design, detail.Notes),
 		})
 	}
 	return candidates, deferred, detailErr

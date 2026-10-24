@@ -50,9 +50,6 @@ type Duplicate struct {
 	// would sling a peer costs no read of its own (gt-mknmb).
 	Ready Readiness
 	Refs  ContentRefs
-	// HoldFiles is the file set the dispatcher's overlap hold reads: Refs.Files
-	// minus the reference documents the bead only reads (gt-6t44f).
-	HoldFiles []string
 	// Blockers lists the IDs this bead has a blocking dependency on, as far as
 	// the caller could read them from bd. The overlap guard walks these edges
 	// to tell a bead of the candidate's own chain from a duplicate: a chain's
