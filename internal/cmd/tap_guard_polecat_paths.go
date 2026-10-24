@@ -304,6 +304,15 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 				cmdline = trimShellKeywords(append([]string{word}, args...))
 				word, args = segmentCommandWord(cmdline)
 			}
+			// A launcher's -S payload is a command line the shell runs, as the
+			// body of sh -c is, so it is judged here. segmentCommandWord leaves
+			// it out, and with nothing after the -S word is empty (gt-j21h4).
+			_, payloads, _ := prWorkflowCommand(cmdline)
+			for _, payload := range payloads {
+				if reason := s.checkBashCommand(payload, depth+1); reason != "" {
+					return reason
+				}
+			}
 			if word == "" {
 				continue
 			}
@@ -1982,6 +1991,8 @@ func segmentCommandWord(segment []string) (string, []string) {
 		}
 		if skipsToCommand(token) {
 			if launcher, ok := prWorkflowLaunchers[token]; ok {
+				// The payload (env -S) is not the command word: checkBashCommand
+				// judges it through prWorkflowCommand.
 				rest, _ := skipLauncherArgs(token, launcher, segment[i+1:])
 				i = len(segment) - len(rest) - 1
 			}
