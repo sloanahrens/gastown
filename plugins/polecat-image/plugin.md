@@ -1,6 +1,6 @@
 +++
 name = "polecat-image"
-description = "Rebuild gastown-polecat:dev at the installed gt's commit after each gt install, so sandbox slings are not refused for image drift; then trim the image tags, build cache and per-rig cache volumes that run grows"
+description = "Rebuild gastown-polecat:dev at the installed gt's commit after each gt install, so sandbox slings are not refused for image drift; publish it to POLECAT_IMAGE_REGISTRY when set; then trim the image tags, build cache and per-rig cache volumes that run grows"
 version = 1
 
 [gate]
@@ -51,12 +51,36 @@ a minute.
    label it ended with.
 5. Reads the installed commit again; if a newer install landed during the
    build it builds again, at most 3 rounds.
+6. With `POLECAT_IMAGE_REGISTRY` set, publishes what it just built there, and
+   retries a publish that did not complete for an image that is already current
+   ("Publishing to a registry").
 
 The build's worktree is a detached one on the rig repo's shared `.repo.git`. No
 cleanup path treats it as a stray: the reaper and `heldByOtherWorktree` only
 `git worktree prune` registrations whose directory is gone (the directory exists
 for the whole build), they match worktrees by branch name (a detached HEAD has
 none), and the local-branch prune reads the list only to protect branches.
+
+## Publishing to a registry
+
+A Kubernetes seat pulls the image from a registry, not from the Mac's Docker
+daemon (`docs/design/k8s-sandboxes.md`). With `POLECAT_IMAGE_REGISTRY` set to a
+`host:port` such as `localhost:5001` the plugin publishes each image it builds,
+and does nothing of the kind when it is unset. How a publish is done, tagged and
+retried is in `run.sh` beside the publish functions.
+
+- **Name change.** `POLECAT_IMAGE_REGISTRY` once named the gateway's
+  sandbox-records directory; that is `POLECAT_IMAGE_SANDBOX_RECORDS` now. A
+  `POLECAT_IMAGE_REGISTRY` that is a path is refused with a log line naming the
+  new variable.
+- **Why `crane`.** Docker Desktop's list of insecure registries belongs to the
+  overseer, so the plugin pushes with `crane` from a `docker save` tarball and
+  tags the image locally with the registry reference, which is what the sandbox
+  backend's drift check inspects.
+- **Failure never breaks the plugin.** A missing `crane` or a failed list, tag,
+  save or push is logged with its reason and the run exits 0; nothing is removed.
+  A push that did not complete is retried by the next run even when the image is
+  already current.
 
 ## Old images
 
@@ -68,6 +92,8 @@ beyond the newest 3 (`POLECAT_IMAGE_KEEP`) with a plain `docker rmi
 not a hex commit, never passes `-f`, and never prunes anything else. A failed
 removal keeps the tag and logs docker's own reason, `kept ... (rmi failed:
 <reason>)`, so a container using the image and a real error read differently.
+With a registry set, the tag's `<registry>/…:<sha>` alias is untagged first (it
+would keep the image on disk); an alias docker refuses to untag keeps the tag.
 The build cache is not touched.
 
 ## Build cache

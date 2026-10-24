@@ -14,8 +14,14 @@ RIG_REPO="${POLECAT_IMAGE_RIG_REPO:-$TOWN_ROOT/gastown/.repo.git}"
 BUILD_ROOT="${POLECAT_IMAGE_BUILD_ROOT:-$TOWN_ROOT/gastown/.polecat-image-build}"
 BD_SRC="${POLECAT_IMAGE_BD_SRC:-$TOWN_ROOT/beads/mayor/rig}"
 LOCK_DIR="${POLECAT_IMAGE_LOCK:-$TOWN_ROOT/.runtime/polecat-image.lock}"
-REGISTRY_DIR="${POLECAT_IMAGE_REGISTRY:-$TOWN_ROOT/.runtime/sandboxes}"
+# The gateway's per-sandbox records; this seam was named POLECAT_IMAGE_REGISTRY
+# until that name went to the container registry below (gt-mm7q6).
+SANDBOX_RECORDS="${POLECAT_IMAGE_SANDBOX_RECORDS:-$TOWN_ROOT/.runtime/sandboxes}"
 IMAGE="${POLECAT_IMAGE_NAME:-gastown-polecat:dev}"
+# Empty REGISTRY publishes nothing (plugin.md, "Publishing to a registry").
+REGISTRY="${POLECAT_IMAGE_REGISTRY:-}"
+# PUBLISHED holds "<image id> <registry>" once that image is fully pushed.
+PUBLISHED="${POLECAT_IMAGE_PUBLISHED:-$TOWN_ROOT/.runtime/polecat-image.published}"
 LABEL="org.gastown.gt-commit"
 STALE_LOCK_MINUTES="${POLECAT_IMAGE_STALE_MINUTES:-20}"
 MAX_ROUNDS=3
@@ -37,6 +43,7 @@ DOCKER="${POLECAT_IMAGE_DOCKER:-docker}"
 GIT="${POLECAT_IMAGE_GIT:-git}"
 MAKE="${POLECAT_IMAGE_MAKE:-make}"
 OPENSHELL="${POLECAT_IMAGE_OPENSHELL:-openshell}"
+CRANE="${POLECAT_IMAGE_CRANE:-crane}"
 PGREP="${POLECAT_IMAGE_PGREP:-pgrep}"
 
 log() { echo "[polecat-image] $*"; }
@@ -103,7 +110,7 @@ defer_reason() {
   while read -r name _; do
     if [ "$name" = "NAME" ]; then header=1; continue; fi
     [ "$header" = 1 ] && [ -n "$name" ] || continue
-    if [ ! -f "$REGISTRY_DIR/$name.json" ]; then
+    if [ ! -f "$SANDBOX_RECORDS/$name.json" ]; then
       echo "sandbox $name has no registry record yet"
       return
     fi
@@ -143,8 +150,10 @@ take_lock() {
 }
 
 WORKTREE=""
+TAR_DIR=""
 HAVE_LOCK=0
 cleanup() {
+  [ -z "$TAR_DIR" ] || rm -rf "$TAR_DIR"
   if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
     "$GIT" -C "$RIG_REPO" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || rm -rf "$WORKTREE"
   fi
@@ -175,6 +184,111 @@ build_at() {
   same_commit "$(image_commit)" "$full" || die "after the build $IMAGE carries '$(image_commit)', not ${full:0:12}"
 }
 
+# Every tag docker holds for the image: the build's, and any registry alias.
+REPO_TAGS_FORMAT='{{range .RepoTags}}{{println .}}{{end}}'
+
+# image_id prints the id of the image, empty when it is missing.
+image_id() {
+  "$DOCKER" image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true
+}
+
+# publish_stamp is what PUBLISHED holds after a complete push of the current
+# image; another image or another registry makes it differ.
+publish_stamp() { printf '%s %s\n' "$(image_id)" "$REGISTRY"; }
+
+# publish_pending succeeds when a registry is named and the image is not yet
+# fully pushed to it, so a failed push is retried while the image stays current.
+publish_pending() {
+  [ -n "$REGISTRY" ] || return 1
+  [ "$(cat "$PUBLISHED" 2>/dev/null || true)" != "$(publish_stamp)" ]
+}
+
+# registry_problem prints why nothing can be published, empty when it can. A
+# path is an old POLECAT_IMAGE_REGISTRY, which named the sandbox-records
+# directory, left in an environment.
+registry_problem() {
+  case "$REGISTRY" in
+    /* | ./* | ../* | '~'*)
+      echo "POLECAT_IMAGE_REGISTRY=$REGISTRY is a path, not a host:port (the sandbox records directory is POLECAT_IMAGE_SANDBOX_RECORDS now)"
+      return ;;
+  esac
+  command -v "$CRANE" >/dev/null 2>&1 || echo "POLECAT_IMAGE_REGISTRY=$REGISTRY is set but $CRANE is not installed"
+}
+
+# publish_tags tags and pushes each local tag of the image through TAR_DIR. It
+# stops at the first failure and logs why; nothing is removed.
+publish_tags() {
+  local repo="${IMAGE%%:*}" ref tag reg tar out refs
+  if ! refs="$("$DOCKER" image inspect --format "$REPO_TAGS_FORMAT" "$IMAGE" 2>&1)"; then
+    log "registry: cannot read the tags of $IMAGE ($(last_line "$refs")); the image is not published"
+    return 1
+  fi
+  tar="$TAR_DIR/image.tar"
+  while read -r ref; do
+    [ -n "$ref" ] || continue
+    # Only this repo's own tags: an alias from an earlier push carries the registry prefix.
+    [ "${ref%:*}" = "$repo" ] || continue
+    tag="${ref##*:}"
+    case "$tag" in
+      dev) ;;
+      '' | *[!0-9a-f]*) continue ;;
+      *) [ "${#tag}" -ge 7 ] || continue ;;
+    esac
+    reg="$REGISTRY/$ref"
+    if ! out="$("$DOCKER" tag "$ref" "$reg" 2>&1)"; then
+      log "registry: cannot tag $reg ($(last_line "$out")); the image is not published"
+      return 1
+    fi
+    rm -f "$tar"
+    if ! out="$("$DOCKER" save -o "$tar" "$reg" 2>&1)"; then
+      log "registry: cannot save $reg to a tarball ($(last_line "$out")); the image is not published"
+      return 1
+    fi
+    if ! out="$("$CRANE" push --insecure "$tar" "$reg" 2>&1)"; then
+      log "registry: pushing $reg failed ($(last_line "$out")); the image is not published"
+      return 1
+    fi
+    rm -f "$tar"
+    log "registry: pushed $reg"
+  done <<<"$refs"
+}
+
+# push_to_registry publishes the image to POLECAT_IMAGE_REGISTRY (gt-mm7q6) and
+# records the push in PUBLISHED when every tag went. A failure is logged and the
+# run carries on.
+push_to_registry() {
+  local why
+  [ -n "$REGISTRY" ] || return 0
+  why="$(registry_problem)"
+  if [ -n "$why" ]; then
+    log "registry: $why; the image is not published"
+    return 0
+  fi
+  mkdir -p "$BUILD_ROOT"
+  if ! TAR_DIR="$(mktemp -d "$BUILD_ROOT/push.XXXXXX")"; then
+    TAR_DIR=""
+    log "registry: cannot make a directory under $BUILD_ROOT; the image is not published"
+    return 0
+  fi
+  if publish_tags; then
+    publish_stamp >"$PUBLISHED" || log "registry: cannot write $PUBLISHED; the next run pushes again"
+  fi
+  rm -rf "$TAR_DIR"
+  TAR_DIR=""
+}
+
+# republish retries a push that did not complete, for an image that needs no
+# build. A lock another run holds leaves the push to that run.
+republish() {
+  publish_pending || return 0
+  if ! take_lock; then
+    log "registry: already running (lock $LOCK_DIR); the publish waits for the next run"
+    return 0
+  fi
+  HAVE_LOCK=1
+  push_to_registry
+}
+
 main() {
   local installed image reason
   installed="$(installed_commit)"
@@ -188,6 +302,7 @@ main() {
   fi
   image="$(image_commit)"
   if same_commit "$image" "$installed"; then
+    republish
     log "current at ${installed:0:12}"
     return 0
   fi
@@ -216,6 +331,7 @@ main() {
       return 0
     fi
     build_at "$installed"
+    push_to_registry
   done
   installed="$(installed_commit)"
   if same_commit "$(image_commit)" "$installed"; then
@@ -223,6 +339,21 @@ main() {
     return 0
   fi
   die "the installed gt kept moving: $IMAGE is still not at ${installed:0:12} after $MAX_ROUNDS builds"
+}
+
+# drop_registry_alias untags the registry reference of a per-commit tag that is
+# about to go: left behind it keeps the image on disk. A reference that cannot
+# be removed is logged with docker's reason and fails, so the caller keeps the tag.
+drop_registry_alias() {
+  local ref="$REGISTRY/$1" err
+  [ -n "$REGISTRY" ] || return 0
+  "$DOCKER" image inspect --format '{{.Id}}' "$ref" >/dev/null 2>&1 || return 0
+  if err="$("$DOCKER" rmi "$ref" 2>&1)"; then
+    log "removed $ref"
+  else
+    log "kept $1 ($ref: rmi failed: $(last_line "$err"))"
+    return 1
+  fi
 }
 
 # prune_old_images untags the per-commit images (gastown-polecat:<hex sha>) every
@@ -243,6 +374,7 @@ prune_old_images() {
     id="$("$DOCKER" image inspect --format '{{.Id}}' "$repo:$tag" 2>/dev/null || true)"
     [ -n "$id" ] || continue
     [ "$id" != "$dev_id" ] || continue
+    drop_registry_alias "$repo:$tag" || continue
     if err="$("$DOCKER" rmi "$repo:$tag" 2>&1)"; then
       log "removed $repo:$tag"
     else
