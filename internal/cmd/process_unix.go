@@ -2,19 +2,17 @@
 
 package cmd
 
-import "syscall"
+import (
+	"syscall"
 
-// isProcessRunning checks if a process with the given PID exists.
+	"github.com/steveyegge/gastown/internal/procid"
+)
+
+// isProcessRunning checks if a process with the given PID exists. EPERM counts
+// as running: the process exists under another uid.
 func isProcessRunning(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-
-	err := syscall.Kill(pid, 0)
-	if err == nil {
-		return true
-	}
-
-	// EPERM means process exists but we don't have permission to signal it.
-	return err == syscall.EPERM
+	return procid.ProbeAlive(syscall.Kill(pid, 0))
 }

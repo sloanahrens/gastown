@@ -2,11 +2,8 @@
 
 package cmd
 
-import "syscall"
-
+// processAlive is the liveness check the capacity and sling paths use. It is
+// the same predicate as isProcessRunning, so the two cannot disagree.
 func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	return syscall.Kill(pid, 0) == nil
+	return isProcessRunning(pid)
 }
