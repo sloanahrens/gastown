@@ -233,6 +233,14 @@ type Manager struct {
 	// sandbox cleanup the kill path runs, so a test never shells out to the
 	// sandbox CLI; nil means the linked one.
 	sandboxDeleter func(townRoot string, rec session.SandboxRecord) error
+	// sandboxSeat stands in for the sandbox probe the reuse gate asks about a
+	// sandbox seat's git state, so a test never asks a gateway; nil means the
+	// town's own seat map and gateway (gt-qq6rg).
+	sandboxSeat SandboxSeatProbe
+	// sandboxSeatDefault is the town's own probe, built on the first question
+	// so one Manager reads the seat map once rather than per polecat.
+	sandboxSeatDefault SandboxSeatProbe
+	sandboxSeatOnce    sync.Once
 }
 
 // SetCleanup routes the session kills the manager does as housekeeping
@@ -3186,6 +3194,76 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	// CleanupStatus again, so a missing/unknown status must not permanently
 	// veto reclaiming this slot. See ResolveIgnoreCleanupStatus.
 	facts.WorktreeStructurallyMissing = IsStructuralWorktreeError(verifyWorktreeExists(m.gits, clonePath))
+	// A sandbox seat's host worktree is a stale leftover whose commits read as
+	// unpushed: its git facts are the gateway's answer, and nothing on the host
+	// clone is measured (gt-qq6rg.1).
+	sandboxLive, sandboxed := m.sandboxSeatState(fields, name)
+	var targetRefs []string
+	if sandboxed {
+		applySandboxSeatFacts(&facts, sandboxLive, fields)
+	} else {
+		targetRefs = m.measureHostWorktreeFacts(&facts, fields, clonePath)
+	}
+	// gt-7kr: missing/unknown cleanup_status must fail closed to NEEDS_RECOVERY,
+	// never be silently promoted to clean. A narrow local git check (no dirty
+	// files, no stash, no unpushed commits) is not proof of safety by itself —
+	// it says nothing about a live session or a still-hooked bead, and a false
+	// clear here authorizes destructive cleanup on real, at-risk work. Do not
+	// reintroduce a gitSafe-implies-clean shortcut for CleanupUnknown. This
+	// snapshot is consumed both by AssessActiveMR below and, identically
+	// re-derived from the same finalized facts, inside NewWorkstateInput.
+	gitSafe := facts.GitSafe()
+	sourceTerminal := sourceHint != "" && m.assignedBeadTerminal(sourceHint)
+	if activeMR != "" {
+		// The landed probe is lazy: it runs only for an active_mr that already
+		// looks gone or closed and is still blocking (gt-wprt). This is the
+		// reuse gate the directory allocator (FindIdlePolecat) decides on, so a
+		// pointer left in that state refuses every new spawn once the rig is at
+		// its directory cap.
+		assessment := AssessActiveMRWithLandedEvidence(m.agentBeads(), ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe},
+			func() LandedEvidence {
+				if sandboxed {
+					return LandedEvidence{} // the host clone says nothing about what a sandbox pushed
+				}
+				return activeMRLandedEvidence(facts, m.gits, clonePath, facts.Branch)
+			})
+		if assessment.Pending {
+			facts.ActiveMRBlocker = assessment.Reason
+		}
+		if assessment.SourceTerminal {
+			sourceTerminal = true
+		}
+	}
+	facts.ActiveMRSourceTerminal = sourceTerminal
+	workIssue := issue
+	if workIssue == "" {
+		workIssue = sourceHint
+	}
+	facts.MQCheckRequired = facts.Branch != ""
+	if !sandboxed {
+		// A sandbox seat has no host commits to count, so HasSubmittableWork
+		// stays false and no MR is demanded of it: a gone sandbox reads clean,
+		// and whether its bead lost work is the recovery verdict's question
+		// (gt-qq6rg), not this gate's.
+		facts.HasSubmittableWork = hasSubmittableWorkForWorkstate(m.gits.Open(clonePath), targetRefs)
+	}
+	facts.AssignedBeadTerminal = m.assignedBeadTerminal(workIssue)
+	facts.MQNotRequired = m.mqNotRequiredSource(workIssue)
+	if facts.MQCheckRequired && facts.HasSubmittableWork && !facts.AssignedBeadTerminal && !facts.MQNotRequired {
+		mr, err := m.beads.FindMRForBranchAny(facts.Branch)
+		if err != nil {
+			facts.MQLookupFailed = true
+		} else {
+			facts.MRSubmitted = mr != nil
+		}
+	}
+	return NewWorkstateInput(facts)
+}
+
+// measureHostWorktreeFacts overlays the reuse gate's live git facts onto facts,
+// measured on the host worktree at clonePath, and returns the MR target refs
+// the later submittable-work check needs.
+func (m *Manager) measureHostWorktreeFacts(facts *WorkstateFacts, fields *beads.AgentFields, clonePath string) []string {
 	g := m.gits.Open(clonePath)
 	// claude-41j.1 D9: this is the reuse gate's live probe, and it is the
 	// primary source for the verdict — the recorded cleanup_status is demoted
@@ -3247,50 +3325,8 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	// The reuse gate must clear a landed seat for the same reason check-recovery
 	// does, or it refuses a seat the reaper will not remove and nobody reuses
 	// (gt-jol0i).
-	ApplyWorkLanded(&facts, g, m.beads, m.rig.Path, facts.HookBead, facts.Branch)
-	// gt-7kr: missing/unknown cleanup_status must fail closed to NEEDS_RECOVERY,
-	// never be silently promoted to clean. A narrow local git check (no dirty
-	// files, no stash, no unpushed commits) is not proof of safety by itself —
-	// it says nothing about a live session or a still-hooked bead, and a false
-	// clear here authorizes destructive cleanup on real, at-risk work. Do not
-	// reintroduce a gitSafe-implies-clean shortcut for CleanupUnknown. This
-	// snapshot is consumed both by AssessActiveMR below and, identically
-	// re-derived from the same finalized facts, inside NewWorkstateInput.
-	gitSafe := facts.GitSafe()
-	sourceTerminal := sourceHint != "" && m.assignedBeadTerminal(sourceHint)
-	if activeMR != "" {
-		// The landed probe is lazy: it runs only for an active_mr that already
-		// looks gone or closed and is still blocking (gt-wprt). This is the
-		// reuse gate the directory allocator (FindIdlePolecat) decides on, so a
-		// pointer left in that state refuses every new spawn once the rig is at
-		// its directory cap.
-		assessment := AssessActiveMRWithLandedEvidence(m.agentBeads(), ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe},
-			func() LandedEvidence { return activeMRLandedEvidence(facts, m.gits, clonePath, facts.Branch) })
-		if assessment.Pending {
-			facts.ActiveMRBlocker = assessment.Reason
-		}
-		if assessment.SourceTerminal {
-			sourceTerminal = true
-		}
-	}
-	facts.ActiveMRSourceTerminal = sourceTerminal
-	workIssue := issue
-	if workIssue == "" {
-		workIssue = sourceHint
-	}
-	facts.MQCheckRequired = facts.Branch != ""
-	facts.HasSubmittableWork = hasSubmittableWorkForWorkstate(m.gits.Open(clonePath), targetRefs)
-	facts.AssignedBeadTerminal = m.assignedBeadTerminal(workIssue)
-	facts.MQNotRequired = m.mqNotRequiredSource(workIssue)
-	if facts.MQCheckRequired && facts.HasSubmittableWork && !facts.AssignedBeadTerminal && !facts.MQNotRequired {
-		mr, err := m.beads.FindMRForBranchAny(facts.Branch)
-		if err != nil {
-			facts.MQLookupFailed = true
-		} else {
-			facts.MRSubmitted = mr != nil
-		}
-	}
-	return NewWorkstateInput(facts)
+	ApplyWorkLanded(facts, g, m.beads, m.rig.Path, facts.HookBead, facts.Branch)
+	return targetRefs
 }
 
 // hookBeadSafeForWorkstate answers the reuse gate's hook question from the
