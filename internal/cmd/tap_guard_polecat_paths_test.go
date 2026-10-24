@@ -390,6 +390,39 @@ func TestPolecatPathGuardNoOpOutsidePolecatContext(t *testing.T) {
 	}
 }
 
+// TestPolecatPathsGuard_PathQualifiedLauncher pins gt-257j9: a launcher named
+// by path, or gtimeout, is stepped over like its bare name, so the rm behind it
+// is judged.
+func TestPolecatPathsGuard_PathQualifiedLauncher(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	rm := "rm -rf " + filepath.Join(p.sibling, "internal.go")
+	for _, tt := range []struct {
+		name    string
+		command string
+	}{
+		{"bare env", "env " + rm},
+		{"/usr/bin/env", "/usr/bin/env " + rm},
+		{"bare timeout", "timeout 5 " + rm},
+		{"/usr/bin/timeout", "/usr/bin/timeout 5 " + rm},
+		{"/usr/bin/nice", "/usr/bin/nice " + rm},
+		{"/usr/bin/sudo", "/usr/bin/sudo " + rm},
+		{"gtimeout", "gtimeout 5 " + rm},
+		{"/opt/homebrew/bin/gtimeout", "/opt/homebrew/bin/gtimeout 5 " + rm},
+		{"upper-case path launcher", "/USR/BIN/ENV " + rm},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := p.run(t, "Bash", commandInput(tt.command)); err == nil {
+				t.Errorf("%q was allowed, want a block", tt.command)
+			}
+		})
+	}
+	if err := p.run(t, "Bash", commandInput("/usr/bin/env rm -rf build")); err != nil {
+		t.Errorf("path-qualified launcher on an own file blocked: %v", err)
+	}
+}
+
 // TestPolecatPathGuardBash covers the Bash leg in one table: writes aimed at
 // another agent's tree are blocked, ordinary polecat work is not.
 func TestPolecatPathGuardBash(t *testing.T) {
