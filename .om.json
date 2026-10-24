@@ -53,6 +53,11 @@
       "name": "instruction-proliferation",
       "weight": 2,
       "guidance": "An added statement of a fact or instruction already stated in an agent-facing file (the list docs-and-comments names) is a finding even when the copies agree today: the offence is the second copy, and the drift it permits is otherwise charged to whichever later change touches one of them. The finding does not stand when the new copy links to the existing one as its source of truth. R2 in docs/writing-for-agents.md is the rule this enforces; cite it, the existing copy, and whether the new one points at it. In an agent-facing file this is major; the criterion moves the score and does not block alone."
+    },
+    {
+      "name": "scripts-are-debt",
+      "weight": 2,
+      "guidance": "Do not add a shell, Python or other script when the logic is testable Go. MAJOR: a new script that holds logic (branches, loops, parsing, state) beyond a thin exec wrapper, Makefile or CI glue, a bootstrap that must run before Go exists, or a file the platform dictates (launchd plist, hook entry, Dockerfile); the finding says 'port to Go with unit tests behind an Exec seam'. MINOR: a new bats or stub-harness test for such a script, or new logic added to an existing script. Never flag deleting or shrinking a script, or a Go package that execs a program through an Exec seam. The bead must state the reason for any new script; none stated is itself a finding."
     }
   ]
 }

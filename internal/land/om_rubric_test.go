@@ -121,6 +121,37 @@ func TestShippedOMRubricCarriesInstructionProliferationCriterion(t *testing.T) {
 	}
 }
 
+// scriptsAreDebtCriterion is the criterion for the town's 2026-10-24 policy
+// ("Scripts are debt" in test-engineering.md): a new script that holds
+// testable logic is a MAJOR finding.
+const scriptsAreDebtCriterion = "scripts-are-debt"
+
+// TestShippedOMRubricCarriesScriptsAreDebtCriterion pins the criterion once,
+// at weight 2, and the guidance a reviewer needs to apply it: the severity
+// split, the remedy the finding names, and the exemption for deletions.
+func TestShippedOMRubricCarriesScriptsAreDebtCriterion(t *testing.T) {
+	t.Parallel()
+	r := shippedRubric(t)
+	var found []omCriterion
+	for _, c := range r.Rubric {
+		if c.Name == scriptsAreDebtCriterion {
+			found = append(found, c)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("the shipped rubric %s carries %d %q criteria, want exactly 1: a new script holding testable logic is ungraded without it, and a duplicate double-counts the finding", shippedRubricPath(t), len(found), scriptsAreDebtCriterion)
+	}
+	c := found[0]
+	if c.Weight == nil || *c.Weight != 2 {
+		t.Errorf("%s weight = %v, want 2", scriptsAreDebtCriterion, c.Weight)
+	}
+	for _, want := range []string{"MAJOR", "MINOR", "port to Go with unit tests behind an Exec seam", "Never flag deleting or shrinking a script"} {
+		if !strings.Contains(c.Guidance, want) {
+			t.Errorf("%s guidance no longer carries %q: %q", scriptsAreDebtCriterion, want, c.Guidance)
+		}
+	}
+}
+
 // TestShippedOMThresholdIsGastownBar pins the approval bar the landing worker
 // reads from the repo-root .om.json, through the reader that reads it: an
 // OMThreshold that finds no file, no key or a non-numeric one reports 0, and no
