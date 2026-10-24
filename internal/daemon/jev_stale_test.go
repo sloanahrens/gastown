@@ -306,6 +306,28 @@ func TestJevStaleFailedPassSuppressesTheRerunWithoutARecord(t *testing.T) {
 	}
 }
 
+// The in-memory last-run outranks an older record on disk: a pass this
+// process finished but could not persist must not reopen because the record
+// still shows the run before it.
+func TestJevStaleMemoryOutranksAStaleDiskRecord(t *testing.T) {
+	t.Parallel()
+	r := newJevStaleRig(t)
+	now := r.clock.Now()
+	// The record on disk is two weeks old, so alone it reads the patrol as due.
+	if err := savePatrolLastRun(r.town, "jev_stale", now.Add(-2*jevStaleInterval)); err != nil {
+		t.Fatalf("seed stale last run: %v", err)
+	}
+	// This process finished a pass a minute ago that it could not persist.
+	r.d.jevStaleRun.record(now.Add(-time.Minute))
+
+	r.d.triggerJevStale()
+	waitJevStaleIdle(t, r.d)
+
+	if r.opened != 0 {
+		t.Errorf("pass opened %d times with a one-minute-old in-memory run, want 0", r.opened)
+	}
+}
+
 // A trigger that arrives while a pass is in flight is turned away.
 func TestJevStaleTriggerSkipsWhileAPassIsRunning(t *testing.T) {
 	t.Parallel()
