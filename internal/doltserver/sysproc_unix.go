@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+
+	"github.com/steveyegge/gastown/internal/procid"
 )
 
 // setProcessGroup puts the command in its own process group so that signals
@@ -17,9 +19,19 @@ func setProcessGroup(cmd *exec.Cmd) {
 
 // processIsAlive checks whether a process with the given PID is still running.
 func processIsAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	return process.Signal(syscall.Signal(0)) == nil
+	return processAliveAfterSignal(process.Signal(syscall.Signal(0)))
+}
+
+// processAliveAfterSignal reports whether a signal-0 probe that returned err
+// leaves the process alive. EPERM means another uid owns it, so a live server
+// is never read as dead.
+func processAliveAfterSignal(err error) bool {
+	return procid.ProbeAlive(err)
 }

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/steveyegge/gastown/internal/procid"
 )
 
 // StaleSQLServerInfoCheck detects stale sql-server.info files left by crashed
@@ -139,9 +141,19 @@ func (c *StaleSQLServerInfoCheck) isStale(path string) bool {
 
 // signalZeroAlive reports whether pid is alive using signal 0 (no-op probe).
 func signalZeroAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	return signalZeroAliveAfterError(proc.Signal(syscall.Signal(0)))
+}
+
+// signalZeroAliveAfterError reports whether a signal-0 probe that returned err
+// leaves the process alive. EPERM means another uid owns it, so a live server's
+// sql-server.info is never called stale.
+func signalZeroAliveAfterError(err error) bool {
+	return procid.ProbeAlive(err)
 }
