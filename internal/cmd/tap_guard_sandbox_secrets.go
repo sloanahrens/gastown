@@ -31,8 +31,8 @@ Blocked, in any chain, launcher, shell -c payload, eval or command substitution:
   - any read of /proc/<pid>/environ
   - reading ~/.claude.json, a .env file, ~/.netrc or ~/.git-credentials
   - git credential fill, and the git credential helper run directly
-  - a python/node/ruby/perl/awk one-liner that reads the whole environment, a
-    secret-like variable, or a credential file, or passes a shell command that
+  - a python/node/ruby/perl/awk one-liner or heredoc body that reads the whole
+    environment, a secret-like variable, or a credential file, or passes a shell command that
     prints the environment to a shell-out such as os.system or child_process;
     also when run through uv run, uv tool run, uvx, npx or pipx run
   - jq whose filter is env or $ENV
@@ -196,17 +196,52 @@ const sandboxSecretsOperatorMark = "sandboxsecretsheredocoperator"
 // own pipeline runs its body: "cat <<EOF | bash". A shell invoker after a ; or &&
 // on the same line reads no body from this heredoc, so it does not exempt it.
 func sandboxSecretsHeredocFedToShell(command string, span heredocSpan) bool {
+	for _, word := range sandboxSecretsHeredocPipeline(command, span) {
+		if shellInvokers[word] {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxSecretsHeredocInterpreter returns the script interpreter in the heredoc's
+// own pipeline that runs its body: "python3 <<EOF", or "cat <<EOF | node". It is
+// "" when no interpreter runs the body.
+func sandboxSecretsHeredocInterpreter(command string, span heredocSpan) string {
+	for _, word := range sandboxSecretsHeredocPipeline(command, span) {
+		if sandboxSecretsIsScriptRunner(word) {
+			return word
+		}
+	}
+	return ""
+}
+
+// sandboxSecretsHeredocPipeline returns the command words of the pipeline that
+// holds the heredoc's operator, lowercased, so a caller can see what runs the body.
+func sandboxSecretsHeredocPipeline(command string, span heredocSpan) []string {
 	lineEnd := len(command)
 	if i := strings.IndexByte(command[span.opEnd:], '\n'); i >= 0 {
 		lineEnd = span.opEnd + i
 	}
 	line := command[span.readerStart:span.opStart] + " " + sandboxSecretsOperatorMark + " " + command[span.opEnd:lineEnd]
-	return sandboxSecretsPipelineHasShell(shellTokenize(strings.ReplaceAll(line, "\\\n", " ")))
+	return sandboxSecretsPipelineWords(shellTokenize(strings.ReplaceAll(line, "\\\n", " ")))
 }
 
 // sandboxSecretsPipelineHasShell reports whether a shell invoker sits in the
 // pipeline that holds the operator mark: the run of segments joined by | with it.
 func sandboxSecretsPipelineHasShell(tokens []string) bool {
+	for _, word := range sandboxSecretsPipelineWords(tokens) {
+		if shellInvokers[word] {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxSecretsPipelineWords returns the lowercased command word of each segment in
+// the pipeline that holds the operator mark, the run of segments joined by | with it.
+// It is nil when the tokens hold no mark.
+func sandboxSecretsPipelineWords(tokens []string) []string {
 	var (
 		segments [][]string
 		piped    []bool // piped[i]: segments[i] reads the output of the segment before it
@@ -231,7 +266,7 @@ func sandboxSecretsPipelineHasShell(tokens []string) bool {
 	segments = append(segments, current)
 	piped = append(piped, joined)
 	if mark < 0 {
-		return false
+		return nil
 	}
 	first, last := mark, mark
 	for first > 0 && piped[first] {
@@ -240,12 +275,13 @@ func sandboxSecretsPipelineHasShell(tokens []string) bool {
 	for last+1 < len(segments) && piped[last+1] {
 		last++
 	}
+	var words []string
 	for _, segment := range segments[first : last+1] {
-		if word, _ := segmentCommandWord(segment); word != "" && shellInvokers[strings.ToLower(filepath.Base(word))] {
-			return true
+		if word, _ := segmentCommandWord(segment); word != "" {
+			words = append(words, strings.ToLower(filepath.Base(word)))
 		}
 	}
-	return false
+	return words
 }
 
 // sandboxSecretsEnvReaders are the commands that print a file's contents.
@@ -332,6 +368,18 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	}
 	if sandboxSecretsHeredocRefsSecret(command) {
 		return "an unquoted heredoc expands a secret variable", false
+	}
+	// A body an interpreter runs is code whatever its tag: the quotes only keep
+	// the shell from expanding it. So it gets the one-liner rules, as a -c string would.
+	for _, span := range scanHeredocs(command) {
+		interpreter := sandboxSecretsHeredocInterpreter(command, span)
+		if span.bodyStart < 0 || interpreter == "" {
+			continue
+		}
+		if reason := sandboxSecretsScriptReason(span.body); reason != "" {
+			return interpreter + " heredoc " + reason, false
+		}
+		payloads = append(payloads, sandboxSecretsShelledStrings(span.body)...)
 	}
 	payloads = append(payloads, shellFedHeredocBodies(command)...)
 	substitutions := prWorkflowSubstitutions(command)
@@ -617,13 +665,23 @@ func sandboxSecretsInvocation(argv []string, tainted, expanded map[string]bool) 
 	}
 	if sandboxSecretsIsScriptRunner(name) {
 		for _, a := range args {
-			if sandboxSecretsReadsEnvironment(a) {
-				return "a " + name + " one-liner reads the environment"
-			}
-			if sandboxSecretsCredentialPathRe.MatchString(a) {
-				return "a " + name + " one-liner reads a credential file"
+			if reason := sandboxSecretsScriptReason(a); reason != "" {
+				return "a " + name + " one-liner " + reason
 			}
 		}
+	}
+	return ""
+}
+
+// sandboxSecretsScriptReason names what a script an interpreter runs would read, the
+// whole environment, a secret-like variable or a credential file, or "" when it reads
+// none. A -c one-liner and a heredoc body are both scripts, so both are judged here.
+func sandboxSecretsScriptReason(script string) string {
+	if sandboxSecretsReadsEnvironment(script) {
+		return "reads the environment"
+	}
+	if sandboxSecretsCredentialPathRe.MatchString(script) {
+		return "reads a credential file"
 	}
 	return ""
 }
