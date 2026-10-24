@@ -31,10 +31,11 @@ Blocked, in any chain, launcher, shell -c payload, eval or command substitution:
   - any read of /proc/<pid>/environ
   - reading ~/.claude.json, a .env file, ~/.netrc or ~/.git-credentials
   - git credential fill, and the git credential helper run directly
-  - a python/node/ruby/perl/awk one-liner or heredoc body that reads the whole
-    environment, a secret-like variable, or a credential file, or passes a shell command that
-    prints the environment to a shell-out such as os.system or child_process;
-    also when run through uv run, uv tool run, uvx, npx or pipx run
+  - a python/node/ruby/perl/awk one-liner, or a heredoc body that one runs as
+    code, that reads the whole environment, a secret-like variable, or a
+    credential file, or passes a shell command that prints the environment to
+    a shell-out such as os.system or child_process; also when run through uv
+    run, uv tool run, uvx, npx or pipx run
   - jq whose filter is env or $ENV
 
 Exit codes:
@@ -196,8 +197,8 @@ const sandboxSecretsOperatorMark = "sandboxsecretsheredocoperator"
 // own pipeline runs its body: "cat <<EOF | bash". A shell invoker after a ; or &&
 // on the same line reads no body from this heredoc, so it does not exempt it.
 func sandboxSecretsHeredocFedToShell(command string, span heredocSpan) bool {
-	for _, word := range sandboxSecretsHeredocPipeline(command, span) {
-		if shellInvokers[word] {
+	for _, argv := range sandboxSecretsHeredocPipeline(command, span) {
+		if shellInvokers[strings.ToLower(filepath.Base(argv[0]))] {
 			return true
 		}
 	}
@@ -205,43 +206,36 @@ func sandboxSecretsHeredocFedToShell(command string, span heredocSpan) bool {
 }
 
 // sandboxSecretsHeredocInterpreter returns the script interpreter in the heredoc's
-// own pipeline that runs its body: "python3 <<EOF", or "cat <<EOF | node". It is
-// "" when no interpreter runs the body.
+// own pipeline that runs its body: "python3 <<EOF", "uv run python3 <<EOF", or
+// "cat <<EOF | node". It is "" when no interpreter runs the body, which includes an
+// interpreter that runs a script file: the body is then that file's stdin, not code.
 func sandboxSecretsHeredocInterpreter(command string, span heredocSpan) string {
-	for _, word := range sandboxSecretsHeredocPipeline(command, span) {
-		if sandboxSecretsIsScriptRunner(word) {
-			return word
+	for _, argv := range sandboxSecretsHeredocPipeline(command, span) {
+		name := strings.ToLower(filepath.Base(argv[0]))
+		if sandboxSecretsIsScriptRunner(name) && !sandboxSecretsRunsScriptFile(name, argv[1:]) {
+			return name
 		}
 	}
 	return ""
 }
 
-// sandboxSecretsHeredocPipeline returns the command words of the pipeline that
-// holds the heredoc's operator, lowercased, so a caller can see what runs the body.
-func sandboxSecretsHeredocPipeline(command string, span heredocSpan) []string {
+// sandboxSecretsHeredocPipeline returns the argv of each command in the pipeline that
+// holds the heredoc's operator, so a caller can see what runs the body and with what.
+func sandboxSecretsHeredocPipeline(command string, span heredocSpan) [][]string {
 	lineEnd := len(command)
 	if i := strings.IndexByte(command[span.opEnd:], '\n'); i >= 0 {
 		lineEnd = span.opEnd + i
 	}
 	line := command[span.readerStart:span.opStart] + " " + sandboxSecretsOperatorMark + " " + command[span.opEnd:lineEnd]
-	return sandboxSecretsPipelineWords(shellTokenize(strings.ReplaceAll(line, "\\\n", " ")))
+	return sandboxSecretsPipelineArgvs(shellTokenize(strings.ReplaceAll(line, "\\\n", " ")))
 }
 
-// sandboxSecretsPipelineHasShell reports whether a shell invoker sits in the
-// pipeline that holds the operator mark: the run of segments joined by | with it.
-func sandboxSecretsPipelineHasShell(tokens []string) bool {
-	for _, word := range sandboxSecretsPipelineWords(tokens) {
-		if shellInvokers[word] {
-			return true
-		}
-	}
-	return false
-}
-
-// sandboxSecretsPipelineWords returns the lowercased command word of each segment in
-// the pipeline that holds the operator mark, the run of segments joined by | with it.
-// It is nil when the tokens hold no mark.
-func sandboxSecretsPipelineWords(tokens []string) []string {
+// sandboxSecretsPipelineArgvs returns the argv of each command in the pipeline that
+// holds the operator mark, the run of segments joined by | with it. Each argv starts at
+// the command its segment runs, past the assignments, launchers and package runners
+// ahead of it, so "uv run python3 <<EOF" yields python3. It is nil when the tokens
+// hold no mark.
+func sandboxSecretsPipelineArgvs(tokens []string) [][]string {
 	var (
 		segments [][]string
 		piped    []bool // piped[i]: segments[i] reads the output of the segment before it
@@ -275,13 +269,13 @@ func sandboxSecretsPipelineWords(tokens []string) []string {
 	for last+1 < len(segments) && piped[last+1] {
 		last++
 	}
-	var words []string
+	var argvs [][]string
 	for _, segment := range segments[first : last+1] {
-		if word, _ := segmentCommandWord(segment); word != "" {
-			words = append(words, strings.ToLower(filepath.Base(word)))
+		if _, _, argv := sandboxSecretsSegment(segment, map[string]bool{}, map[string]bool{}); len(argv) > 0 {
+			argvs = append(argvs, argv)
 		}
 	}
-	return words
+	return argvs
 }
 
 // sandboxSecretsEnvReaders are the commands that print a file's contents.
@@ -296,6 +290,28 @@ var sandboxSecretsEnvReaders = map[string]bool{
 var sandboxSecretsScriptRunners = map[string]bool{
 	"python": true, "python3": true, "node": true, "ruby": true, "perl": true,
 	"awk": true, "gawk": true, "mawk": true,
+}
+
+// sandboxSecretsScriptExts are the source extensions of the runners that take a script
+// file, keyed by the runner's name without its version.
+var sandboxSecretsScriptExts = map[string][]string{
+	"python": {".py"}, "node": {".js", ".mjs", ".cjs"}, "perl": {".pl"}, "ruby": {".rb"},
+}
+
+// sandboxSecretsRunsScriptFile reports whether an interpreter's arguments name a script
+// file: a word with the runner's source extension. The file runs in place of the
+// heredoc, which is then its stdin. A flag or a - is not a file, so python3 -u <<EOF
+// and python3 - <<EOF still run the body as code.
+func sandboxSecretsRunsScriptFile(name string, args []string) bool {
+	exts := sandboxSecretsScriptExts[strings.TrimRight(name, "0123456789.")]
+	for _, arg := range args {
+		for _, ext := range exts {
+			if strings.HasSuffix(strings.ToLower(arg), ext) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // sandboxSecretsReason names why the command would print the environment or a
