@@ -108,6 +108,7 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 		imageGT:     func(context.Context, string) (string, error) { return openshellTestGTCommit, nil },
 		gitEmail:    func() string { return openshellTestGitEmail },
 		installedGT: func() string { return openshellTestGTCommit },
+		policyRoot:  func(townRoot string) (string, error) { return openshellTestPolicyRoot(townRoot), nil },
 	}
 	return b, pushes
 }
@@ -171,7 +172,7 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 		"openshell", "sandbox", "create",
 		"--name", openshellTestSession,
 		"--from", "gastown-polecat:dev",
-		"--policy", filepath.Join(work, "deploy/polecat/policy.yaml"),
+		"--policy", filepath.Join(openshellTestPolicyRoot(town), "deploy/polecat/policy.yaml"),
 		"--provider", "deepseek", "--provider", "forgejo-polecat",
 		"--cpu", "4", "--memory", "8Gi",
 		"--label", "polecat=sandbox-ace", "--label", "rig=gastown",
@@ -715,7 +716,38 @@ func TestOpenShellPrepareRollbackRemovesTheRecord(t *testing.T) {
 	}
 }
 
-func TestOpenShellPolicyPathStaysInTheWorktree(t *testing.T) {
+// openshellTestPolicyRoot is where the tests' town keeps the gt source checkout,
+// the repo a profile's policy path is relative to. The polecat's worktree is a
+// different rig's repo and does not hold the policy.
+func openshellTestPolicyRoot(townRoot string) string {
+	return filepath.Join(townRoot, "gastown", "mayor", "rig")
+}
+
+// The profile's policy is the town's copy in the gt source checkout, whichever
+// rig the polecat works in: a worktree without deploy/polecat/policy.yaml (every
+// rig but gastown) still gets the sandbox, and the create names the town's
+// file.
+func TestOpenShellPolicyComesFromTheTownCopyNotTheWorktree(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	if _, err := os.Stat(filepath.Join(work, "deploy", "polecat", "policy.yaml")); err == nil {
+		t.Fatalf("the test worktree %s has a policy; it must lack one to prove the town copy is used", work)
+	}
+	b, _ := openshellTestBackend(town, openshellTestProfile, &sandbox.Fake{})
+
+	cs, err := b.createSpec(openshellSpawn(town, work))
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	if want := filepath.Join(openshellTestPolicyRoot(town), "deploy", "polecat", "policy.yaml"); cs.PolicyPath != want {
+		t.Fatalf("PolicyPath = %q, want the town copy %q", cs.PolicyPath, want)
+	}
+}
+
+// A policy path that is empty, absolute or climbs out of the source checkout is
+// refused before anything is pushed or created; a town with no gt source
+// checkout is an error naming the policy, not a path into the worktree.
+func TestOpenShellPolicyPathStaysInTheSourceCheckout(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	for _, policy := range []string{"", "/etc/policy.yaml", "../../../other/policy.yaml", ".."} {
@@ -734,8 +766,20 @@ func TestOpenShellPolicyPathStaysInTheWorktree(t *testing.T) {
 			}
 		})
 	}
-	if got, err := confinedPath(work, "deploy/polecat/policy.yaml"); err != nil || got != filepath.Join(work, "deploy/polecat/policy.yaml") {
-		t.Fatalf("confinedPath = %q, %v; want the policy under the worktree", got, err)
+	root := openshellTestPolicyRoot(town)
+	if got, err := confinedPath(root, "deploy/polecat/policy.yaml"); err != nil || got != filepath.Join(root, "deploy/polecat/policy.yaml") {
+		t.Fatalf("confinedPath = %q, %v; want the policy under the source checkout", got, err)
+	}
+
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, pushes := openshellTestBackend(town, openshellTestProfile, fake)
+	b.policyRoot = func(string) (string, error) { return "", errors.New("no gt source checkout") }
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), "deploy/polecat/policy.yaml") || !strings.Contains(err.Error(), "no gt source checkout") {
+		t.Fatalf("Prepare without a source checkout = %v; want an error naming the policy and the cause", err)
+	}
+	if len(*pushes) != 0 || len(fake.Calls()) != 0 {
+		t.Fatalf("pushes = %d, openshell calls = %d; a missing source checkout must touch nothing", len(*pushes), len(fake.Calls()))
 	}
 }
 

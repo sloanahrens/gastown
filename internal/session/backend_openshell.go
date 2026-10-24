@@ -113,6 +113,11 @@ type openshellBackend struct {
 	// imageGT reads the gt commit an image was built from, and installedGT is
 	// the commit of the gt running Prepare. Tests set both.
 	imageGT func(ctx context.Context, image string) (string, error)
+	// policyRoot is the town's gt source checkout, the repo a sandbox profile's
+	// policy path is relative to. A polecat's worktree is the wrong base: only
+	// the gt repo carries deploy/polecat/policy.yaml, and a sandbox seat serves
+	// the town's other rigs too.
+	policyRoot func(townRoot string) (string, error)
 	// gitEmail reads the host's global git user.email, the address the sandbox's
 	// commits carry (host polecats commit with it too); "" when it is unset.
 	gitEmail    func() string
@@ -130,6 +135,7 @@ func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
 		imageGT:     dockerImageGT,
 		gitEmail:    hostGitEmail,
 		installedGT: version.BuildCommit,
+		policyRoot:  version.GetRepoRootForTown,
 	}, nil
 }
 
@@ -457,7 +463,11 @@ func (b *openshellBackend) rollback(ctx context.Context, name string, cause erro
 // providers and sizing, the identity labels, the env contract, and the
 // main process that keeps the tmux server alive.
 func (b *openshellBackend) createSpec(spec SpawnSpec) (sandbox.CreateSpec, error) {
-	policy, err := confinedPath(spec.HostWorkDir, b.profile.Policy)
+	root, err := b.policyRoot(spec.TownRoot)
+	if err != nil {
+		return sandbox.CreateSpec{}, fmt.Errorf("sandbox %s: locating the policy %q: %w", spec.Session, b.profile.Policy, err)
+	}
+	policy, err := confinedPath(root, b.profile.Policy)
 	if err != nil {
 		return sandbox.CreateSpec{}, err
 	}
@@ -562,7 +572,7 @@ func (b *openshellBackend) stageDir() (string, error) {
 func confinedPath(dir, rel string) (string, error) {
 	clean := filepath.Clean(rel)
 	if rel == "" || filepath.IsAbs(rel) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("policy path %q must be relative to the worktree and stay inside it", rel)
+		return "", fmt.Errorf("policy path %q must be relative to the gt source checkout and stay inside it", rel)
 	}
 	return filepath.Join(dir, clean), nil
 }
