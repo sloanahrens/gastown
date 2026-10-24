@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -499,15 +500,27 @@ func sandboxSecretsSubstitutionHeredocs(command string) []string {
 // no command behind it. It returns the verdict on the command it finds, the
 // payloads a launcher carries, and that command's argv. tainted names the
 // variables the whole command assigns a secret to.
+//
+// A redirection ahead of the command ("2>/dev/null bash <<< printenv") is not
+// the command word. The shell applies it to the command all the same, so the
+// returned argv carries it after the command, where the callers already look
+// for a here-string, and the verdict is read on the command without it.
 func sandboxSecretsSegment(segment []string, tainted, expanded map[string]bool) (reason string, payloads, argv []string) {
 	if sandboxSecretsHereStringRefsSecret(segment) {
 		return "a here-string expands a secret variable", nil, nil
 	}
 	seg := trimShellKeywords(segment)
+	var redirections []string
 	for len(seg) > 0 {
 		word := seg[0]
 		if isEnvAssignment(word) || word == "!" || word == prWorkflowSubstitutionWord {
 			seg = seg[1:]
+			continue
+		}
+		if redirected, skip, _ := shellRedirection(word); redirected {
+			n := min(1+skip, len(seg))
+			redirections = append(redirections, seg[:n]...)
+			seg = seg[n:]
 			continue
 		}
 		name := strings.ToLower(filepath.Base(word))
@@ -520,7 +533,7 @@ func sandboxSecretsSegment(segment []string, tainted, expanded map[string]bool) 
 				seg = inner
 				continue
 			}
-			return sandboxSecretsInvocation(seg, tainted, expanded), payloads, seg
+			return sandboxSecretsInvocation(seg, tainted, expanded), payloads, append(slices.Clone(seg), redirections...)
 		}
 		if name == "env" && sandboxSecretsEnvWouldPrint(seg[1:]) {
 			return "env prints the environment", nil, nil
