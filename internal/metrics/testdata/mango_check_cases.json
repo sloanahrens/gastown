@@ -1,0 +1,1147 @@
+{
+  "cases": [
+    {
+      "name": "small box does not replicate",
+      "target": "t",
+      "min_support": 2,
+      "rows": [
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        }
+      ],
+      "boxes": [
+        {
+          "ranges": [
+            {
+              "column": "rig",
+              "categories": [
+                "a"
+              ]
+            }
+          ],
+          "n": 50,
+          "purity": 0.5
+        }
+      ],
+      "want": [
+        {
+          "box": "rig in {a}",
+          "train_n": 50,
+          "train_rate": 0.5,
+          "n": 4,
+          "k": 3,
+          "rate": 0.75,
+          "baseline": 0.4,
+          "p_holm": 0.30879999999999985,
+          "replicates": false,
+          "label": ""
+        }
+      ]
+    },
+    {
+      "name": "strong box replicates",
+      "target": "t",
+      "min_support": 20,
+      "rows": [
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        }
+      ],
+      "boxes": [
+        {
+          "ranges": [
+            {
+              "column": "rig",
+              "categories": [
+                "a"
+              ]
+            }
+          ],
+          "n": 50,
+          "purity": 0.5
+        }
+      ],
+      "want": [
+        {
+          "box": "rig in {a}",
+          "train_n": 50,
+          "train_rate": 0.5,
+          "n": 20,
+          "k": 17,
+          "rate": 0.85,
+          "baseline": 0.425,
+          "p_holm": 0.0001338577093074193,
+          "replicates": true,
+          "label": ""
+        }
+      ]
+    },
+    {
+      "name": "support floor blocks replication",
+      "target": "t",
+      "min_support": 30,
+      "rows": [
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        }
+      ],
+      "boxes": [
+        {
+          "ranges": [
+            {
+              "column": "rig",
+              "categories": [
+                "a"
+              ]
+            }
+          ],
+          "n": 50,
+          "purity": 0.5
+        }
+      ],
+      "want": [
+        {
+          "box": "rig in {a}",
+          "train_n": 50,
+          "train_rate": 0.5,
+          "n": 20,
+          "k": 17,
+          "rate": 0.85,
+          "baseline": 0.425,
+          "p_holm": 0.0001338577093074193,
+          "replicates": false,
+          "label": ""
+        }
+      ]
+    },
+    {
+      "name": "a box below the baseline does not replicate and Holm covers every box",
+      "target": "t",
+      "min_support": 2,
+      "rows": [
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        }
+      ],
+      "boxes": [
+        {
+          "ranges": [
+            {
+              "column": "rig",
+              "categories": [
+                "a"
+              ]
+            }
+          ],
+          "n": 50,
+          "purity": 0.5
+        },
+        {
+          "ranges": [
+            {
+              "column": "rig",
+              "categories": [
+                "b"
+              ]
+            }
+          ],
+          "n": 50,
+          "purity": 0.5
+        }
+      ],
+      "want": [
+        {
+          "box": "rig in {a}",
+          "train_n": 50,
+          "train_rate": 0.5,
+          "n": 4,
+          "k": 3,
+          "rate": 0.75,
+          "baseline": 0.4,
+          "p_holm": 0.6175999999999997,
+          "replicates": false,
+          "label": ""
+        },
+        {
+          "box": "rig in {b}",
+          "train_n": 50,
+          "train_rate": 0.5,
+          "n": 6,
+          "k": 1,
+          "rate": 0.16666666666666666,
+          "baseline": 0.4,
+          "p_holm": 0.6175999999999997,
+          "replicates": false,
+          "label": ""
+        }
+      ]
+    },
+    {
+      "name": "a box matching no holdout rows has no evidence",
+      "target": "t",
+      "min_support": 1,
+      "rows": [
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "b",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        }
+      ],
+      "boxes": [
+        {
+          "ranges": [
+            {
+              "column": "rig",
+              "categories": [
+                "z"
+              ]
+            }
+          ],
+          "n": 50,
+          "purity": 0.5
+        }
+      ],
+      "want": [
+        {
+          "box": "rig in {z}",
+          "train_n": 50,
+          "train_rate": 0.5,
+          "n": 0,
+          "k": 0,
+          "rate": 0.0,
+          "baseline": 0.4,
+          "p_holm": 1.0,
+          "replicates": false,
+          "label": ""
+        }
+      ]
+    },
+    {
+      "name": "the label is period only on regime columns",
+      "target": "t",
+      "min_support": 1,
+      "rows": [
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "1"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        },
+        {
+          "rig": "a",
+          "om_threshold": "0.7",
+          "dominant_model": "m",
+          "t": "0"
+        }
+      ],
+      "boxes": [
+        {
+          "ranges": [
+            {
+              "column": "om_threshold",
+              "min": 0.7,
+              "max": 0.7
+            }
+          ],
+          "n": 10,
+          "purity": 0.4
+        },
+        {
+          "ranges": [
+            {
+              "column": "om_threshold",
+              "min": 0.7,
+              "max": 0.7
+            },
+            {
+              "column": "dominant_model",
+              "categories": [
+                "m"
+              ]
+            }
+          ],
+          "n": 10,
+          "purity": 0.4
+        },
+        {
+          "ranges": [
+            {
+              "column": "om_threshold",
+              "min": 0.7,
+              "max": 0.7
+            },
+            {
+              "column": "rig",
+              "categories": [
+                "a"
+              ]
+            }
+          ],
+          "n": 10,
+          "purity": 0.4
+        },
+        {
+          "ranges": [],
+          "n": 10,
+          "purity": 0.4
+        }
+      ],
+      "want": [
+        {
+          "box": "om_threshold = 0.7",
+          "train_n": 10,
+          "train_rate": 0.4,
+          "n": 10,
+          "k": 4,
+          "rate": 0.4,
+          "baseline": 0.4,
+          "p_holm": 1.0,
+          "replicates": false,
+          "label": "period"
+        },
+        {
+          "box": "om_threshold = 0.7; dominant_model in {m}",
+          "train_n": 10,
+          "train_rate": 0.4,
+          "n": 10,
+          "k": 4,
+          "rate": 0.4,
+          "baseline": 0.4,
+          "p_holm": 1.0,
+          "replicates": false,
+          "label": "period"
+        },
+        {
+          "box": "om_threshold = 0.7; rig in {a}",
+          "train_n": 10,
+          "train_rate": 0.4,
+          "n": 10,
+          "k": 4,
+          "rate": 0.4,
+          "baseline": 0.4,
+          "p_holm": 1.0,
+          "replicates": false,
+          "label": ""
+        },
+        {
+          "box": "",
+          "train_n": 10,
+          "train_rate": 0.4,
+          "n": 10,
+          "k": 4,
+          "rate": 0.4,
+          "baseline": 0.4,
+          "p_holm": 1.0,
+          "replicates": false,
+          "label": ""
+        }
+      ]
+    },
+    {
+      "name": "a box far below the baseline is evidence but not replication",
+      "target": "t",
+      "min_support": 2,
+      "rows": [
+        {
+          "rig": "low",
+          "t": "0"
+        },
+        {
+          "rig": "low",
+          "t": "0"
+        },
+        {
+          "rig": "low",
+          "t": "0"
+        },
+        {
+          "rig": "low",
+          "t": "0"
+        },
+        {
+          "rig": "low",
+          "t": "0"
+        },
+        {
+          "rig": "low",
+          "t": "0"
+        },
+        {
+          "rig": "low",
+          "t": "0"
+        },
+        {
+          "rig": "low",
+          "t": "0"
+        },
+        {
+          "rig": "low",
+          "t": "0"
+        },
+        {
+          "rig": "low",
+          "t": "0"
+        },
+        {
+          "rig": "high",
+          "t": "1"
+        },
+        {
+          "rig": "high",
+          "t": "1"
+        },
+        {
+          "rig": "high",
+          "t": "1"
+        },
+        {
+          "rig": "high",
+          "t": "1"
+        },
+        {
+          "rig": "high",
+          "t": "1"
+        },
+        {
+          "rig": "high",
+          "t": "1"
+        },
+        {
+          "rig": "high",
+          "t": "1"
+        },
+        {
+          "rig": "high",
+          "t": "1"
+        },
+        {
+          "rig": "high",
+          "t": "0"
+        },
+        {
+          "rig": "high",
+          "t": "0"
+        }
+      ],
+      "boxes": [
+        {
+          "ranges": [
+            {
+              "column": "rig",
+              "categories": [
+                "low"
+              ]
+            }
+          ],
+          "n": 50,
+          "purity": 0.5
+        }
+      ],
+      "want": [
+        {
+          "box": "rig in {low}",
+          "train_n": 50,
+          "train_rate": 0.5,
+          "n": 10,
+          "k": 0,
+          "rate": 0.0,
+          "baseline": 0.4,
+          "p_holm": 0.007724339200000003,
+          "replicates": false,
+          "label": ""
+        }
+      ]
+    }
+  ]
+}
