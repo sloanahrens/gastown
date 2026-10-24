@@ -135,7 +135,12 @@ func ResolveTintFactor(rig string) float64 {
 // A rig block decides before the global one, as it does there.
 func IsWindowTintEnabled(rig string) bool {
 	townRoot, _ := workspace.FindFromCwd()
+	return isWindowTintEnabledIn(townRoot, rig)
+}
 
+// isWindowTintEnabledIn is IsWindowTintEnabled for an explicit town root, so
+// tests can pass a fixture instead of changing the working directory.
+func isWindowTintEnabledIn(townRoot, rig string) bool {
 	// Check per-rig config.
 	if townRoot != "" && rig != "" {
 		settingsPath := filepath.Join(townRoot, rig, "settings", "config.json")

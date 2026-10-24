@@ -35,16 +35,17 @@ func writeWindowTintFile(t *testing.T, path, body string) {
 // omits enabled opts the rig in, the same as ResolveWindowTint reads it.
 // Before the fix this returned false and the rig never inherited the tint.
 func TestIsWindowTintEnabled_BlockWithoutEnabledKey(t *testing.T) {
+	t.Parallel()
 	townRoot := writeWindowTintTown(t,
 		`{"theme":{"window_tint":{"tint_factor":0.3}}}`, "")
-	t.Chdir(townRoot)
 
-	if !IsWindowTintEnabled("testrig") {
-		t.Error("IsWindowTintEnabled = false for a rig block with no enabled key, want true")
+	if !isWindowTintEnabledIn(townRoot, "testrig") {
+		t.Error("isWindowTintEnabledIn = false for a rig block with no enabled key, want true")
 	}
 }
 
 func TestIsWindowTintEnabled_EnabledKeyDecides(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		rigConfig   string
@@ -75,11 +76,11 @@ func TestIsWindowTintEnabled_EnabledKeyDecides(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			townRoot := writeWindowTintTown(t, tt.rigConfig, tt.mayorConfig)
-			t.Chdir(townRoot)
 
-			if got := IsWindowTintEnabled("testrig"); got != tt.want {
-				t.Errorf("IsWindowTintEnabled = %v, want %v", got, tt.want)
+			if got := isWindowTintEnabledIn(townRoot, "testrig"); got != tt.want {
+				t.Errorf("isWindowTintEnabledIn = %v, want %v", got, tt.want)
 			}
 		})
 	}
