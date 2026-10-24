@@ -317,9 +317,9 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 		}
 	}
 
-	// First, so its reason is the one reported: the sandbox is gone and nothing
-	// was pushed, so there is nothing to nuke and nothing to resume, only a bead
-	// to send back for rework (gt-qq6rg.3).
+	// Lost work is not a hook or git problem: the sandbox is gone and nothing
+	// survives to resume from, so the only remedy is sending the bead back for
+	// rework. It is blocked on before the others so Reason names it (gt-qq6rg.3).
 	if in.SandboxWorkLost {
 		block("sandbox-work-lost", "sandbox gone with "+in.SandboxWorkBead+" unfinished and no pushed or resume branch: the work is lost and the bead needs rework", true)
 	}
@@ -781,9 +781,10 @@ func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
 		MRSubmitted:                    f.MRSubmitted,
 		MQLookupFailed:                 f.MQLookupFailed,
 	}
-	// A gone sandbox that left a bead unfinished and nothing pushed to resume
-	// from: the work is lost. A terminal or submitted bead, or a surviving
-	// branch, is not (gt-qq6rg.3).
+	// Lost work: the sandbox is gone, the seat's bead is unfinished (workTerminal
+	// is f.WorkTerminal(): the assigned bead, the active MR's source or the hook
+	// bead is closed or superseded) and not submitted for landing, and neither
+	// origin nor a resume_branch holds the branch (gt-qq6rg.3).
 	if f.SandboxGone && f.SandboxWorkBead != "" && !workTerminal && !f.HookBeadSubmitted && !f.SandboxBranchPreserved {
 		input.SandboxWorkLost = true
 		input.SandboxWorkBead = f.SandboxWorkBead
