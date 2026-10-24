@@ -481,6 +481,9 @@ type poolSeatReads struct {
 
 	// probe measures a seat's worktree; nil means polecat.ProbeLiveGitStateLocal.
 	probe func(worktreePath string) polecat.LiveGitState
+	// sandboxSeat answers the git state of a sandbox seat from the gateway; nil
+	// leaves every seat to the worktree probe.
+	sandboxSeat sandboxSeatProbe
 	// openWorkLanded opens the repository the landed probe reads; nil means
 	// the worktree's own git. Tests set both to a modeled repository.
 	openWorkLanded workLandedOpener
@@ -648,7 +651,23 @@ func poolSeatStateOccupied(state poolSeatState, err error) bool {
 // the same, which is why it adds the capacity-counting blocker the list path's
 // active-work read adds (gt-tldj4).
 func poolPolecatSeatState(townRoot, rigName, polecatName string) (poolSeatState, error) {
-	return poolPolecatSeatStateWith(townRoot, rigName, polecatName, poolSeatReadsFor())
+	return poolPolecatSeatStateWith(townRoot, rigName, polecatName, poolSeatReadsForTown(townRoot))
+}
+
+// poolSeatReadsForTown is the town's real seat reads, with the sandbox probe a
+// sandbox seat's git state comes from (gt-a0x2w).
+func poolSeatReadsForTown(townRoot string) poolSeatReads {
+	reads := poolSeatReadsFor()
+	reads.sandboxSeat = sandboxSeatProbeFor(townRoot, nil)
+	return reads
+}
+
+// sandboxSeatState is the sandbox probe's answer, or no answer when none is set.
+func (r poolSeatReads) sandboxSeatState(agent, sessionName string) (polecat.LiveGitState, bool) {
+	if r.sandboxSeat == nil {
+		return polecat.LiveGitState{}, false
+	}
+	return r.sandboxSeat(strings.TrimSpace(agent), sessionName)
 }
 
 // poolPolecatSeatStateWith is poolPolecatSeatState with the town's beads reads
@@ -695,13 +714,23 @@ func poolPolecatSeatStateWith(townRoot, rigName, polecatName string, reads poolS
 	// counting (gt-b9ud0, the gt-2nft shape of two pictures of one pool). A
 	// worktree that cannot be resolved is left unprobed, and the recorded hint
 	// stands.
-	worktree := resolvePolecatWorktree(filepath.Join(rigPath, "polecats"), polecatName, rigName)
-	if worktree != "" {
-		probe := reads.probe
-		if probe == nil {
-			probe = polecat.ProbeLiveGitStateLocal
+	//
+	// A sandbox seat's host worktree is a stale leftover whose commits read as
+	// unpushed, so its state comes from the gateway instead (gt-a0x2w).
+	var worktree string
+	if sandboxLive, sandboxed := reads.sandboxSeatState(fields.Agent, polecatSessionNameIn(rigName, polecatName)); sandboxed {
+		// No host worktree for a sandbox seat: the landed evidence below must not
+		// read the stale one either.
+		sandboxLive.ApplyFacts(&facts)
+	} else {
+		worktree = resolvePolecatWorktree(filepath.Join(rigPath, "polecats"), polecatName, rigName)
+		if worktree != "" {
+			probe := reads.probe
+			if probe == nil {
+				probe = polecat.ProbeLiveGitStateLocal
+			}
+			probe(worktree).ApplyFacts(&facts)
 		}
-		probe(worktree).ApplyFacts(&facts)
 	}
 	// The work the seat was dispatched for, read before the hook reference: the
 	// bead the seat holds, read the way the list path reads it

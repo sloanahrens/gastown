@@ -97,6 +97,11 @@ type polecatInventoryEnv struct {
 	// probe measures WorktreePath; nil means probePolecatWorktree. Tests set
 	// it to canned states so the verdict runs without a repository.
 	probe func(worktreePath string, localOnly bool) polecat.LiveGitState
+	// SandboxSeat answers the git state of a sandbox seat from the gateway,
+	// since its host worktree is a stale leftover; nil — the zero value, and
+	// what the capacity path passes — leaves every seat to the worktree probe
+	// (gt-a0x2w).
+	SandboxSeat sandboxSeatProbe
 	// openWorkLanded opens the repository the landed probe reads; nil means
 	// the worktree's own git. Tests set it to a modeled repository.
 	openWorkLanded workLandedOpener
@@ -362,12 +367,19 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 	// re-derives from live state. The recorded cleanup_status remains the
 	// input when no probe target is available; the source label records which
 	// of the two actually fed the decision.
-	if env.WorktreePath != "" {
-		probe := env.probe
-		if probe == nil {
-			probe = probePolecatWorktree
+	sandboxLive, sandboxSeat := polecat.LiveGitState{}, false
+	if env.SandboxSeat != nil && fields != nil {
+		sandboxLive, sandboxSeat = env.SandboxSeat(strings.TrimSpace(fields.Agent), polecatSessionNameIn(rigName, polecatName))
+	}
+	if env.WorktreePath != "" || sandboxSeat {
+		live := sandboxLive
+		if !sandboxSeat {
+			probe := env.probe
+			if probe == nil {
+				probe = probePolecatWorktree
+			}
+			live = probe(env.WorktreePath, env.GitProbeLocalOnly)
 		}
-		live := probe(env.WorktreePath, env.GitProbeLocalOnly)
 		live.ApplyFacts(&facts)
 		if live.Branch != "" {
 			// A live branch supersedes the recorded one, the same way live git
@@ -496,6 +508,9 @@ func probePolecatWorktree(worktreePath string, localOnly bool) polecat.LiveGitSt
 // worth being able to assert on directly (see TestPolecatListInventoryEnvProbe).
 func polecatListInventoryEnv(rigPath, rigName, polecatName string, mrIndex polecatMRIndex, issueSource polecat.IssueReader, spawn polecatSpawnFacts) polecatInventoryEnv {
 	return polecatInventoryEnv{
+		// A sandbox seat's host worktree is a stale leftover: its git state
+		// comes from the gateway (gt-a0x2w).
+		SandboxSeat: sandboxSeatProbeFor(filepath.Dir(rigPath), nil),
 		// Status consumers poll this command, so it must not pay a network
 		// round trip per seat: the probe reads branch preservation from the
 		// rig's local refs instead of running an ls-remote per seat (gt-8q0s).
