@@ -110,6 +110,18 @@ func TestTapGuardBdCreateStore(t *testing.T) {
 		{"worktree via -C from the town root", polecatRole, b.town, `bd -C ` + b.worktree + ` create --title=x`, false},
 		{"unresolvable -C then create", polecatRole, b.worktree, `bd -C "$NOPE" create --title=x`, true},
 		{"-C with no value", polecatRole, b.worktree, `bd create --title=x -C`, true},
+		// A token that starts with -C but is another flag's value is not a
+		// directory flag; the value flag before it consumes it.
+		{"-C as a --title value", polecatRole, b.worktree, `bd create --title -C ` + b.town, false},
+		{"glued -C as a --title value", polecatRole, b.worktree, `bd create --title "-C` + b.town + `"`, false},
+		{"-C-led --description value", polecatRole, b.worktree, `bd create --title=x --description "-C ` + b.town + `"`, false},
+		{"-C as a --labels value", polecatRole, b.worktree, `bd create --title=x -l -C` + b.town, false},
+		{"-C as a --db value", polecatRole, b.worktree, `bd create --title=x --db -C` + b.town, false},
+		{"-C after a --title value", polecatRole, b.worktree, `bd create --title x -C ` + b.town, true},
+		{"-C after a -C-valued --title", polecatRole, b.worktree, `bd create --title -C -C ` + b.town, true},
+		{"--repo after a -C-valued --title", polecatRole, b.worktree, `bd create --title -C --repo ` + b.town, true},
+		{"-C after a boolean flag", polecatRole, b.worktree, `bd create --silent -C ` + b.town + ` --title=x`, true},
+		{"value flag at the end of the line", polecatRole, b.worktree, `bd create --title=x --description`, false},
 		// bd create --repo names the workspace the bead is filed into, a
 		// relative one resolved against the directory bd runs in.
 		{"town via --repo", polecatRole, b.worktree, `bd create --title=x --repo ` + b.town, true},
@@ -257,6 +269,42 @@ func TestTapGuardBdCreateStoreFailsOpenOnUnreadableContext(t *testing.T) {
 			var stderr strings.Builder
 			if err := tapGuardBdCreateStore(tt.r, &stderr, tt.proc); err != nil || stderr.Len() != 0 {
 				t.Fatalf("want allowed, got err=%v stderr=%q", err, stderr.String())
+			}
+		})
+	}
+}
+
+// TestBdDirectoryFlagParse pins what the -C/--directory reader returns for the
+// token shapes a bd create can carry, apart from the store judgement on top.
+func TestBdDirectoryFlagParse(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		segment []string
+		want    string
+		wantOK  bool
+	}{
+		{"no flag", []string{"bd", "create", "--title=x"}, "", false},
+		{"separate value", []string{"bd", "-C", "/a", "create"}, "/a", true},
+		{"glued value", []string{"bd", "create", "-C/a"}, "/a", true},
+		{"equals value", []string{"bd", "create", "-C=/a"}, "/a", true},
+		{"long equals value", []string{"bd", "create", "--directory=/a"}, "/a", true},
+		{"last wins", []string{"bd", "-C", "/a", "create", "-C", "/b"}, "/b", true},
+		{"flag with no value", []string{"bd", "create", "-C"}, "", true},
+		{"glued -C is a --title value", []string{"bd", "create", "--title", "-C/a"}, "", false},
+		{"bare -C is a --title value", []string{"bd", "create", "--title", "-C", "/a"}, "", false},
+		{"-C after a --title value", []string{"bd", "create", "--title", "-C/x", "-C", "/a"}, "/a", true},
+		{"-C is a --db value", []string{"bd", "--db", "-C/a", "create"}, "", false},
+		{"--directory value spelled like a flag", []string{"bd", "--directory", "--title", "create"}, "--title", true},
+		{"after the -- terminator", []string{"bd", "create", "--", "-C", "/a"}, "", false},
+		{"value flag as the last token", []string{"bd", "create", "--title"}, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := bdDirectoryFlag(tt.segment)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("bdDirectoryFlag(%q) = (%q, %v), want (%q, %v)", tt.segment, got, ok, tt.want, tt.wantOK)
 			}
 		})
 	}
