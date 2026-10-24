@@ -10,14 +10,18 @@ import (
 // because no label distinguishes them. Titles are the weaker signal; a bead
 // that gains a label can leave this list.
 //
+// A prefix only belongs here when the family has no label or type of its own.
+// HANDOFF and merge-slot do: handoff mail carries gt:message and the merge slot
+// carries gt:merge-slot, so the label check already catches them. A bare title
+// match on those words would hide an ordinary bug that happens to start with
+// the same word, so they are not listed.
+//
 // A prefix that only announces a summary of work is deliberately absent. A
 // "main_branch_test: <diagnosis>" bug and a "STATE_COLLAPSE <rig>" notice both
 // read like alerts and the seat patrol suppresses both, but the patrol trades a
 // missed nudge for silence and re-examines the board on its next tick, while a
 // board that hides a filed bug hides work.
 var nonDispatchableTitlePrefixes = []string{
-	"HANDOFF",
-	"merge-slot",
 	"Compaction Report ",
 }
 
