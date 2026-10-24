@@ -462,6 +462,10 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"cp into a sibling behind a redirection", "2>/dev/null cp a.go " + sib, true},
 		{"bash -c writing into a sibling behind a redirection", `2>/dev/null bash -c "cp a.go ` + sib + `"`, true},
 		{"find -exec shell behind a redirection", `2>/dev/null find . -name x -exec sh -c 'cd .. && rm -rf ../` + p.other + `' \;`, true},
+		// The wrapper is read from the command word, so an assignment and a
+		// redirection ahead of it are stepped over before it is found
+		// (gt-spmli).
+		{"find -exec shell behind an assignment and a redirection", `A=1 2>/dev/null find . -name x -exec sh -c 'cd .. && rm -rf ../` + p.other + `' \;`, true},
 		{"redirection behind a subshell paren", "(2>/dev/null rm -rf " + filepath.Join(p.sibling, "internal.go") + ")", true},
 		{"read a sibling behind a redirection", "2>/dev/null cat " + filepath.Join(p.sibling, "internal.go"), false},
 		{"build behind a redirection", "2>/dev/null make build", false},
@@ -1648,30 +1652,32 @@ func TestWrappedShell(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name      string
-		cmdline   []string
+		word      string
+		args      []string
 		wantShell string
 		wantArgs  []string
 		found     bool
 	}{
-		{"timeout", []string{"timeout", "5", "bash", "-c", "ls"}, "bash", []string{"-c", "ls"}, true},
-		{"env with an option", []string{"env", "-i", "sh", "-c", "ls"}, "sh", []string{"-c", "ls"}, true},
-		{"nice with an option", []string{"nice", "-n", "5", "zsh", "-c", "ls"}, "zsh", []string{"-c", "ls"}, true},
-		{"shell by path", []string{"sudo", "/bin/bash", "-c", "ls"}, "bash", []string{"-c", "ls"}, true},
-		{"leading assignment", []string{"A=1", "timeout", "5", "bash", "-c", "ls"}, "bash", []string{"-c", "ls"}, true},
-		{"xargs", []string{"xargs", "-I{}", "sh", "-c", "ls {}"}, "sh", []string{"-c", "ls {}"}, true},
-		{"find -exec", []string{"find", ".", "-exec", "sh", "-c", "ls", ";"}, "sh", []string{"-c", "ls", ";"}, true},
-		{"find -execdir", []string{"find", ".", "-execdir", "bash", "-c", "ls", ";"}, "bash", []string{"-c", "ls", ";"}, true},
-		{"find without -exec", []string{"find", ".", "-name", "bash"}, "", nil, false},
-		{"wrapper without a shell", []string{"timeout", "5", "make", "build"}, "", nil, false},
-		{"not a wrapper", []string{"echo", "bash", "-c", "ls"}, "", nil, false},
-		{"only assignments", []string{"A=1"}, "", nil, false},
-		{"empty", nil, "", nil, false},
+		{"timeout", "timeout", []string{"5", "bash", "-c", "ls"}, "bash", []string{"-c", "ls"}, true},
+		{"env with an option", "env", []string{"-i", "sh", "-c", "ls"}, "sh", []string{"-c", "ls"}, true},
+		{"nice with an option", "nice", []string{"-n", "5", "zsh", "-c", "ls"}, "zsh", []string{"-c", "ls"}, true},
+		{"shell by path", "sudo", []string{"/bin/bash", "-c", "ls"}, "bash", []string{"-c", "ls"}, true},
+		{"xargs", "xargs", []string{"-I{}", "sh", "-c", "ls {}"}, "sh", []string{"-c", "ls {}"}, true},
+		{"find -exec", "find", []string{".", "-exec", "sh", "-c", "ls", ";"}, "sh", []string{"-c", "ls", ";"}, true},
+		{"find -execdir", "find", []string{".", "-execdir", "bash", "-c", "ls", ";"}, "bash", []string{"-c", "ls", ";"}, true},
+		{"find without -exec", "find", []string{".", "-name", "bash"}, "", nil, false},
+		{"wrapper without a shell", "timeout", []string{"5", "make", "build"}, "", nil, false},
+		{"not a wrapper", "echo", []string{"bash", "-c", "ls"}, "", nil, false},
+		// A leading assignment is the caller's to step over; the word handed
+		// here is always the command word behind it (gt-spmli).
+		{"assignment is not a wrapper", "A=1", []string{"timeout", "5", "bash", "-c", "ls"}, "", nil, false},
+		{"empty", "", nil, "", nil, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			shell, args, found := wrappedShell(tc.cmdline)
+			shell, args, found := wrappedShell(tc.word, tc.args)
 			if shell != tc.wantShell || !slices.Equal(args, tc.wantArgs) || found != tc.found {
-				t.Errorf("wrappedShell(%q) = (%q, %q, %v), want (%q, %q, %v)", tc.cmdline, shell, args, found, tc.wantShell, tc.wantArgs, tc.found)
+				t.Errorf("wrappedShell(%q, %q) = (%q, %q, %v), want (%q, %q, %v)", tc.word, tc.args, shell, args, found, tc.wantShell, tc.wantArgs, tc.found)
 			}
 		})
 	}

@@ -380,7 +380,7 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 				// reading word and args came from, so a leading redirection
 				// cannot hide the shell a wrapper such as find -exec carries
 				// (gt-cwi1q).
-				if shell, shellArgs, ok := wrappedShell(append([]string{word}, args...)); ok {
+				if shell, shellArgs, ok := wrappedShell(word, args); ok {
 					if payload, ok := shellPayload(shell, shellArgs); ok {
 						if reason := s.checkBashArgs(shellArgs, shell, true); reason != "" {
 							return reason
@@ -619,19 +619,17 @@ var shellWrappers = map[string]bool{
 }
 
 // wrappedShell returns the shell a wrapper command runs, with the words after
-// it: `timeout 5 bash -c '...'` gives ("bash", ["-c", "..."]). The wrapper's
-// own options are not told apart from its operands: the first shell's name
-// after the wrapper starts the shell's command line.
-func wrappedShell(cmdline []string) (string, []string, bool) {
-	i := 0
-	for i < len(cmdline) && isEnvAssignment(cmdline[i]) {
-		i++
-	}
-	if i == len(cmdline) {
+// it: `timeout 5 bash -c '...'` gives ("bash", ["-c", "..."]). It reads from
+// the command word the caller already found — leading assignments, launchers
+// and redirections are stepped over there (gt-cwi1q) — so word is the wrapper
+// itself. The wrapper's own options are not told apart from its operands: the
+// first shell's name after the wrapper starts the shell's command line.
+func wrappedShell(word string, args []string) (string, []string, bool) {
+	if word == "" {
 		return "", nil, false
 	}
-	wrapper := filepath.Base(cmdline[i])
-	rest := cmdline[i+1:]
+	wrapper := filepath.Base(word)
+	rest := args
 	switch {
 	case wrapper == "find":
 		start := -1
@@ -648,8 +646,8 @@ func wrappedShell(cmdline []string) (string, []string, bool) {
 	case !shellWrappers[wrapper]:
 		return "", nil, false
 	}
-	for j, word := range rest {
-		if base := filepath.Base(word); shellCommands[base] {
+	for j, arg := range rest {
+		if base := filepath.Base(arg); shellCommands[base] {
 			return base, rest[j+1:], true
 		}
 	}
