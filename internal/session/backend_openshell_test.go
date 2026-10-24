@@ -41,7 +41,8 @@ var openshellTestProfile = Profile{
 }
 
 // openshellTown is a town whose polecat worktree carries the runtime files
-// gt writes there, plus one file that must not be sent.
+// gt writes there, plus one file that must not be sent. The town's gt source
+// checkout carries the profile's policy, as the gastown repo does.
 func openshellTown(t *testing.T) (town, work string) {
 	t.Helper()
 	town = t.TempDir()
@@ -52,6 +53,9 @@ func openshellTown(t *testing.T) (town, work string) {
 	claudeDir := filepath.Join(town, openshellTestRig, "polecats", ".claude")
 	writeOpenshellFile(t, filepath.Join(claudeDir, "settings.json"), openshellHostSettings)
 	writeOpenshellFile(t, filepath.Join(claudeDir, "system-prompt-"+openshellTestPolecat+".md"), "town at "+town+"/mayor\n")
+	source := openshellTestPolicyRoot(town)
+	writeOpenshellFile(t, filepath.Join(source, "cmd", "gt", "main.go"), "package main\n")
+	writeOpenshellFile(t, filepath.Join(source, "deploy", "polecat", "policy.yaml"), "version: 1\n")
 	return town, work
 }
 
@@ -662,7 +666,7 @@ func TestOpenShellPrepareMakesNoDockerCallWithoutACacheVolume(t *testing.T) {
 func TestOpenShellCreateMountsTheCacheVolume(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	b, _ := openshellTestBackend(town, Profile{Name: "polecat-default", Image: "img", Policy: "p.yaml", CacheVolume: "gt-cache-{rig}"}, &sandbox.Fake{})
+	b, _ := openshellTestBackend(town, Profile{Name: "polecat-default", Image: "img", Policy: openshellTestProfile.Policy, CacheVolume: "gt-cache-{rig}"}, &sandbox.Fake{})
 
 	cs, err := b.createSpec(openshellSpawn(town, work))
 	if err != nil {
@@ -871,6 +875,44 @@ func TestOpenShellPolicyComesFromTheTownCopyNotTheWorktree(t *testing.T) {
 	}
 	if want := filepath.Join(openshellTestPolicyRoot(town), "deploy", "polecat", "policy.yaml"); cs.PolicyPath != want {
 		t.Fatalf("PolicyPath = %q, want the town copy %q", cs.PolicyPath, want)
+	}
+}
+
+// The backend a town gets from newOpenShellBackend resolves the policy with the
+// production resolver, not the test seam: the gt source checkout under the town.
+func TestOpenShellProductionPolicyRootIsTheTownCheckout(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	b, err := newOpenShellBackend(town, openshellTestProfile)
+	if err != nil {
+		t.Fatalf("newOpenShellBackend: %v", err)
+	}
+	cs, err := b.(*openshellBackend).createSpec(openshellSpawn(town, work))
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	if want := filepath.Join(openshellTestPolicyRoot(town), "deploy", "polecat", "policy.yaml"); cs.PolicyPath != want {
+		t.Fatalf("PolicyPath = %q, want the town copy %q", cs.PolicyPath, want)
+	}
+}
+
+// A town whose gt source checkout lacks the policy file is refused before
+// anything is pushed or created, and the error names the checkout.
+func TestOpenShellPrepareRefusesAPolicyMissingFromTheCheckout(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	if err := os.Remove(filepath.Join(openshellTestPolicyRoot(town), "deploy", "polecat", "policy.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, pushes := openshellTestBackend(town, openshellTestProfile, fake)
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), openshellTestPolicyRoot(town)) {
+		t.Fatalf("Prepare with the policy missing = %v; want an error naming the checkout %s", err, openshellTestPolicyRoot(town))
+	}
+	if len(*pushes) != 0 || len(fake.Calls()) != 0 {
+		t.Fatalf("pushes = %d, openshell calls = %d; a missing policy must touch nothing", len(*pushes), len(fake.Calls()))
 	}
 }
 

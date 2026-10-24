@@ -527,6 +527,9 @@ func (b *openshellBackend) createSpec(spec SpawnSpec) (sandbox.CreateSpec, error
 	if err != nil {
 		return sandbox.CreateSpec{}, err
 	}
+	if _, err := os.Stat(policy); err != nil {
+		return sandbox.CreateSpec{}, fmt.Errorf("sandbox %s: the policy is missing from the gt source checkout %s: %w", spec.Session, root, err)
+	}
 	cs := sandbox.CreateSpec{
 		Name:       spec.Session,
 		Image:      b.profile.Image,
