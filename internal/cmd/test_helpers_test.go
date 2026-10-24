@@ -68,9 +68,8 @@ func sweepStaleGTBinaries() {
 			_ = os.RemoveAll(dir)
 			continue
 		}
-		// processAlive (process_alive_*.go) is the package's own probe; the
-		// directories are this user's, so its owner is never another user's.
-		if pid != os.Getpid() && !processAlive(pid) {
+		// The directories are this user's, so their owner is never another user's.
+		if pid != os.Getpid() && !isProcessRunning(pid) {
 			_ = os.RemoveAll(dir)
 		}
 	}

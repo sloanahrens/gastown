@@ -617,7 +617,7 @@ func cleanupStalePolecatAdmissionReservations(townRoot string, now time.Time) er
 			continue
 		}
 		age := now.Sub(reservation.CreatedAt)
-		if processAlive(reservation.PID) && reservationHolderCurrent(reservation, age) {
+		if isProcessRunning(reservation.PID) && reservationHolderCurrent(reservation, age) {
 			continue
 		}
 		if age < polecatAdmissionReservationTTL {

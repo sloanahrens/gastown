@@ -993,7 +993,7 @@ func poolSeatLedgerFor(townRoot string, store *poolSeatClaimStore) *poolSeatLedg
 			}
 			return func() { _ = l.Unlock() }, nil
 		},
-		alive: processAlive,
+		alive: isProcessRunning,
 		pid:   os.Getpid(),
 		now:   time.Now,
 	}
