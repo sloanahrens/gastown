@@ -140,3 +140,25 @@ func TestPolecatPolicyLetsTheCgroupTreeBeReadNotWritten(t *testing.T) {
 		t.Errorf("filesystem_policy.read_write lists %s: the cgroup tree must stay read only", cgroup)
 	}
 }
+
+// /dev/zero is readable and never writable: `head -c N /dev/zero` and
+// `dd if=/dev/zero` failed with permission denied in a sandbox (gt-8yigq).
+func TestPolecatPolicyLetsDevZeroBeReadNotWritten(t *testing.T) {
+	t.Parallel()
+	doc := polecatPolicy(t)
+	const zero = "/dev/zero"
+	has := func(list []string) bool {
+		for _, p := range list {
+			if p == zero {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(policyPaths(t, doc, "read_only")) {
+		t.Errorf("filesystem_policy.read_only = %v, want it to list %s", policyPaths(t, doc, "read_only"), zero)
+	}
+	if has(policyPaths(t, doc, "read_write")) {
+		t.Errorf("filesystem_policy.read_write lists %s: it must stay read only", zero)
+	}
+}
