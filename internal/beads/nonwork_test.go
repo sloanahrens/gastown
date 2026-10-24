@@ -1,6 +1,27 @@
 package beads
 
-import "testing"
+import (
+	"slices"
+	"strings"
+	"testing"
+)
+
+// TestReadyCliArgsExcludesEpic keeps the server-side ready query in step with
+// IsNonDispatchableBead: bd is asked to drop epics the same way the client
+// pass does, so gt ready cannot list a container the board's predicate hides
+// (gt-36lax).
+func TestReadyCliArgsExcludesEpic(t *testing.T) {
+	t.Parallel()
+
+	args := readyCliArgs()
+	i := slices.Index(args, "--exclude-type")
+	if i < 0 || i+1 >= len(args) {
+		t.Fatalf("readyCliArgs = %v, has no --exclude-type value", args)
+	}
+	if !slices.Contains(strings.Split(args[i+1], ","), "epic") {
+		t.Errorf("--exclude-type = %q, want epic among the excluded types", args[i+1])
+	}
+}
 
 func TestIsNonDispatchableBead(t *testing.T) {
 	t.Parallel()
@@ -163,11 +184,16 @@ func TestIsNonDispatchableBead(t *testing.T) {
 			want:  false,
 		},
 		{
-			// Epics and their containers are a priority judgement, not a family
-			// one: the caller decides whether a container is dispatchable.
+			// An epic is a container: the polecat takes its children, so the
+			// epic itself is not dispatchable work (gt-36lax).
 			name:  "epic",
 			issue: &Issue{ID: "gt-14", Title: "de-flake the suite", Type: "epic", Priority: 1},
-			want:  false,
+			want:  true,
+		},
+		{
+			name:  "ephemeral wisp without a type",
+			issue: &Issue{ID: "gt-16", Title: "mol-polecat-work step", Type: "task", Ephemeral: true},
+			want:  true,
 		},
 	}
 

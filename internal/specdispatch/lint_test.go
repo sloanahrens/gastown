@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 const goodDescription = `## Goal
@@ -192,15 +194,68 @@ func TestNotWorkBead(t *testing.T) {
 		t.Errorf("task is a work bead: %q", why)
 	}
 	types := NonWorkBeadTypes()
-	for _, want := range []string{EpicType, "wisp", "agent"} {
+	for _, want := range []string{"epic", "wisp", "agent"} {
 		if !slices.Contains(types, want) {
 			t.Errorf("NonWorkBeadTypes = %v, missing %q", types, want)
 		}
 	}
 	// The list is freshly built, not a shared slice a caller could mutate.
 	types[0] = "task"
-	if got := NotWorkBead(Spec{Type: EpicType}); got != "type epic" {
+	if got := NotWorkBead(Spec{Type: "epic"}); got != "type epic" {
 		t.Errorf("NonWorkBeadTypes aliases the shared list: %q", got)
+	}
+}
+
+// TestNotWorkBeadTitleFamilies pins the title-prefix verdict on its own: a
+// typeless Compaction Report is a runtime record the dispatcher must refuse,
+// and a title that only mentions one is work.
+func TestNotWorkBeadTitleFamilies(t *testing.T) {
+	t.Parallel()
+	if got := NotWorkBead(Spec{Title: "Compaction Report 2026-09-08", Type: "task"}); got != "title Compaction Report" {
+		t.Errorf("typeless Compaction Report: NotWorkBead = %q, want %q", got, "title Compaction Report")
+	}
+	if got := NotWorkBead(Spec{Title: "Handle the Compaction Report pipeline", Type: "task"}); got != "" {
+		t.Errorf("work that mentions a Compaction Report: NotWorkBead = %q, want work", got)
+	}
+}
+
+// TestNotWorkBeadAgreesWithBoard holds the spec dispatcher and the ready board
+// to one answer. Each case states the reason the dispatcher must give, written
+// out here so the test cannot pass by reading the shared predicate back. The
+// board's side is beads.IsNonDispatchableBead, the call gt ready and the
+// dispatch-check make, and it must agree with the dispatcher on work versus not.
+func TestNotWorkBeadAgreesWithBoard(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		issue beads.Issue
+		want  string
+	}{
+		{"plain task", beads.Issue{Title: "fix the flaky test", Type: "task"}, ""},
+		{"epic", beads.Issue{Title: "de-flake the suite", Type: "epic"}, "type epic"},
+		{"unlabelled task titled HANDOFF", beads.Issue{Title: "HANDOFF: x", Type: "task"}, ""},
+		{"compaction report without a type", beads.Issue{Title: "Compaction Report gt-9", Type: "task"}, "title Compaction Report"},
+		{"ephemeral wisp", beads.Issue{Title: "mol-polecat-work step", Type: "task", Ephemeral: true}, "wisp"},
+		{"agent label", beads.Issue{Title: "polecat goose", Type: "task", Labels: []string{"gt:agent"}}, "label gt:agent"},
+		{"bug filed against the harness", beads.Issue{Title: "main_branch_test: gastown killed", Type: "bug"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := Spec{
+				Title:     tc.issue.Title,
+				Type:      tc.issue.Type,
+				Labels:    tc.issue.Labels,
+				Ephemeral: tc.issue.Ephemeral,
+			}
+			if got := NotWorkBead(spec); got != tc.want {
+				t.Errorf("NotWorkBead = %q, want %q", got, tc.want)
+			}
+			issue := tc.issue
+			if got := beads.IsNonDispatchableBead(&issue); got != (tc.want != "") {
+				t.Errorf("board IsNonDispatchableBead = %v, but the dispatcher's reason is %q: the dispatcher and the board disagree", got, tc.want)
+			}
+		})
 	}
 }
 

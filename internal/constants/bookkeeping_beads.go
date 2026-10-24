@@ -16,6 +16,10 @@ package constants
 // ("gt:agent" is the label an agent bead wears; "message" is the issue_type
 // mail beads can be typed with even when the label is the only signal).
 
+// EpicBeadType is the bead type of a container of work. A polecat takes the
+// epic's children, so the epic itself is never dispatchable.
+const EpicBeadType = "epic"
+
 // NonDispatchableBeadTypes are the bead kinds that record town runtime — a
 // message, a handoff note, an agent identity, and the deacon's event records
 // (a compaction report, a reaper run).

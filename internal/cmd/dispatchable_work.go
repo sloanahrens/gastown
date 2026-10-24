@@ -82,17 +82,15 @@ var patrolSuppressedTitlePrefixes = []string{
 // bookkeeping families. rv is the rig's revert in flight, which holds that
 // rig's red-main beads.
 //
-// Epics are excluded as containers. `gt sling` accepts one, but a container's
-// children are what a polecat takes, and they appear in ready on their own — a
-// nudge naming the epic would point at the wrong row.
+// Epics are containers, excluded by beads.IsNonDispatchableBead along with the
+// runtime families: `gt sling` accepts one, but a container's children are what
+// a polecat takes, and they appear in ready on their own — a nudge naming the
+// epic would point at the wrong row.
 func isActionableReadyBead(issue *beads.Issue, maxPriority int, rv *specdispatch.Revert) bool {
 	if issue == nil {
 		return false
 	}
 	if issue.Priority < 0 || issue.Priority > maxPriority {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(issue.Type), "epic") {
 		return false
 	}
 	if beads.IsNonDispatchableBead(issue) {

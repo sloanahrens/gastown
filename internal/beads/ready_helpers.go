@@ -25,8 +25,9 @@ func ReadyDispatchable(c Client) ([]*Issue, error) {
 	return dispatchableOnly(issues), err
 }
 
-// dispatchableOnly drops the bookkeeping families (mail, escalations,
-// identity, merge queue, event records) from issues.
+// dispatchableOnly drops what is not dispatchable work from issues: the
+// bookkeeping families (mail, escalations, identity, merge queue, event
+// records), wisps, and epics, which are containers.
 func dispatchableOnly(issues []*Issue) []*Issue {
 	kept := make([]*Issue, 0, len(issues))
 	for _, issue := range issues {
