@@ -32,27 +32,94 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -r "$base" ] || { echo "render-policy: cannot read $base" >&2; exit 1; }
-case "$allowed_ip" in
-  *[!0-9.]*|"") echo "render-policy: --allowed-ip must be an IPv4 address, got '$allowed_ip'" >&2; exit 2 ;;
-esac
 
+# Both producers of rendered YAML, so neither may carry YAML syntax: a name is
+# a dotted label sequence, an address is four decimal octets (gt-ywwf2).
+valid_host() {
+  local name=$1 label
+  case "$name" in ''|*[!A-Za-z0-9.-]*) return 1 ;; esac
+  [ ${#name} -le 253 ] || return 1
+  local IFS=.
+  # shellcheck disable=SC2086 # deliberate: split the name on dots
+  set -- $name
+  for label in "$@"; do
+    case "$label" in ''|-*|*-) return 1 ;; esac
+    [ ${#label} -le 63 ] || return 1
+  done
+}
+
+valid_ipv4() {
+  local addr=$1 octet
+  case "$addr" in ''|*[!0-9.]*) return 1 ;; esac
+  local IFS=.
+  # shellcheck disable=SC2086 # deliberate: split the address on dots
+  set -- $addr
+  [ $# -eq 4 ] || return 1
+  for octet in "$@"; do
+    case "$octet" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$octet" -le 255 ] || return 1
+  done
+}
+
+valid_ipv4 "$allowed_ip" || {
+  echo "render-policy: --allowed-ip must be an IPv4 address, got '$allowed_ip'" >&2
+  exit 2
+}
+valid_host "$dolt_host" || {
+  echo "render-policy: --dolt-host must be a DNS name, got '$dolt_host'" >&2
+  exit 2
+}
+valid_host "$forgejo_host" || {
+  echo "render-policy: --forgejo-host must be a DNS name, got '$forgejo_host'" >&2
+  exit 2
+}
+
+# The endpoint's port is not required to be the line after its host, and two
+# host lines may be adjacent: buffer the block until the port decides it, and
+# flush it unchanged when the block ends first (gt-ywwf2).
 awk -v dolt="$dolt_host" -v forgejo="$forgejo_host" -v ip="$allowed_ip" \
     -v stale="Docker Desktop's host alias" -v route="in-cluster Services" '
-  /^ *- host: host\.docker\.internal *$/ { held = $0; next }
-  held != "" {
-    indent = $0; sub(/port:.*/, "", indent)
-    port = $0; sub(/^ *port: */, "", port)
-    if (port == "3000") name = forgejo
-    else if (port == "3307") name = dolt
-    else { print held; print; held = ""; next }
-    sub(/host: host\.docker\.internal/, "host: " name, held)
-    print held
-    print indent "allowed_ips: [\"" ip "/32\"]"
+  {
+    if (pending) {
+      if ($0 ~ /^ *port:/) {
+        port = $0; sub(/^ *port:[ \t]*/, "", port); sub(/[^0-9].*$/, "", port)
+        if (port == "3000") name = forgejo
+        else if (port == "3307") name = dolt
+        else name = ""
+        if (name != "") {
+          indent = $0; sub(/port:.*/, "", indent)
+          h = held; sub(/host: *host\.docker\.internal/, "host: " name, h)
+          print h
+          print indent "allowed_ips: [\"" ip "/32\"]"
+          print
+          printf "%s", buf
+        } else {
+          print held
+          printf "%s", buf
+          print
+        }
+        pending = 0; held = ""; buf = ""
+        next
+      }
+      if ($0 ~ /^ *- host: *host\.docker\.internal[ \t]*$/) {
+        print held; printf "%s", buf
+        held = $0; buf = ""
+        next
+      }
+      if ($0 ~ /^ *- /) {
+        print held; printf "%s", buf
+        pending = 0; held = ""; buf = ""
+      } else {
+        buf = buf $0 "\n"
+        next
+      }
+    }
+    if ($0 ~ /^ *- host: *host\.docker\.internal[ \t]*$/) {
+      held = $0; buf = ""; pending = 1
+      next
+    }
+    if (index($0, stale)) sub(stale, route)
     print
-    held = ""
-    next
   }
-  index($0, stale) { sub(stale, route) }
-  { print }
-  END { if (held != "") { print held } }
+  END { if (pending) { print held; printf "%s", buf } }
 ' "$base"

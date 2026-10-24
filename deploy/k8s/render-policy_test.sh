@@ -67,6 +67,31 @@ set +e
 set -e
 check "an allowed-ip that is not an address is rejected" test "$rc" -ne 0
 check "a rejected allowed-ip renders nothing" test ! -s "$TMP/o"
+for bad_ip in 1.2.3 1.2.3.4.5 256.1.1.1 1.2.3.4x; do
+  set +e
+  "$RENDER" --allowed-ip "$bad_ip" >"$TMP/o" 2>"$TMP/e"; rc=$?
+  set -e
+  check "--allowed-ip $bad_ip is rejected" test "$rc" -eq 2
+  check "--allowed-ip $bad_ip renders nothing" test ! -s "$TMP/o"
+done
+set +e
+"$RENDER" --dolt-host 'dolt example' >"$TMP/o" 2>"$TMP/e"; rc=$?
+set -e
+check "a host name with a space is rejected" test "$rc" -eq 2
+check "a rejected host name renders nothing" test ! -s "$TMP/o"
+check "the failure names the flag" contains "--dolt-host" "$(cat "$TMP/e")"
+set +e
+"$RENDER" --forgejo-host '' >"$TMP/o" 2>"$TMP/e"; rc=$?
+set -e
+check "an empty forgejo host is rejected" test "$rc" -eq 2
+set +e
+"$RENDER" --forgejo-host '-bad.example' >"$TMP/o" 2>"$TMP/e"; rc=$?
+set -e
+check "a host label starting with a hyphen is rejected" test "$rc" -eq 2
+set +e
+"$RENDER" --dolt-host 'bad..example' >"$TMP/o" 2>"$TMP/e"; rc=$?
+set -e
+check "an empty host label is rejected" test "$rc" -eq 2
 set +e
 "$RENDER" "$TMP/nope.yaml" >"$TMP/o" 2>"$TMP/e"; rc=$?
 set -e
@@ -94,6 +119,30 @@ check "a host.docker.internal endpoint on another port is unchanged" test "$(end
 check "an unrelated endpoint is unchanged" contains "host: proxy.golang.org" "$other"
 check "a trailing host line at the end of the file is kept" test "$(tail -1 <<<"$other")" = "      - host: host.docker.internal"
 check "no pin is added to an endpoint that was not rewritten" lacks "allowed_ips" "$other"
+
+echo "the rewrite does not depend on line order"
+cat >"$TMP/order.yaml" <<'YAML'
+network_policies:
+  extra:
+    endpoints:
+      - host: host.docker.internal
+      - host: host.docker.internal
+        protocol: tcp
+        port: 3307
+      - host: host.docker.internal
+        protocol: tcp
+      - host: proxy.golang.org
+        port: 443
+YAML
+ordered="$("$RENDER" "$TMP/order.yaml")"
+check "adjacent host lines keep the first one" test "$(grep -c '[-] host: host\.docker\.internal$' <<<"$ordered")" -eq 2
+check "the host line before port is rewritten" contains "host: control-plane.openshell.svc.cluster.local" "$ordered"
+ordered_dolt="$(endpoint_of 3307 "$ordered")"
+check "the port is found when another key sits between it and host" contains 'allowed_ips: ["192.168.5.2/32"]' "$ordered_dolt"
+check "the endpoint without a port is left intact" contains "- host: host.docker.internal
+        protocol: tcp
+      - host: proxy.golang.org" "$ordered"
+check "the endpoint after it is untouched" contains "host: proxy.golang.org" "$ordered"
 
 echo "checked-in files"
 check "policy/kind.yaml is exactly what the script renders (no drift)" test "$(cat "$KIND")" = "$out"
