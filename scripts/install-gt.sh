@@ -137,6 +137,35 @@ gateway_step() {
   igt_gateway_agent "$mode" "$tmpl" "$GATEWAY_HOME" | while IFS= read -r line; do log "$line"; done || true
 }
 
+# polecat_image_step RUN LOG COMMIT: after a verified install, rebuild the
+# sandbox polecat image at the installed commit by running the polecat-image
+# plugin's run.sh once. A sandbox sling is refused while the image carries
+# another gt commit (gt-pmxo9), and the plugin's own cooldown can leave that
+# window open for 10 minutes after every install. Best effort, never part of the
+# install: the build (about a minute or two) runs in the background, in its own
+# session with every inherited fd closed (the lock fd above and the pipe the
+# daemon reads this script's output through would otherwise be held until the
+# build ended), bounded by an alarm, and its outcome goes to LOG. Two runs at
+# once are harmless: run.sh takes its own lock, defers while a gt sling runs
+# and returns "current" once the label matches.
+IMAGE_RUN="${INSTALL_GT_IMAGE_RUN:-${TOWN_ROOT:+$TOWN_ROOT/plugins/polecat-image/run.sh}}"
+IMAGE_LOG="${INSTALL_GT_IMAGE_LOG:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-image-install.log}}"
+polecat_image_step() {
+  local run="$1" logfile="$2" commit="$3"
+  if [ -z "$run" ] || [ ! -f "$run" ]; then
+    log "polecat image: no plugin at '${run:-?}', not rebuilt"
+    return 0
+  fi
+  [ -n "$logfile" ] || logfile=/dev/null
+  mkdir -p "$(dirname "$logfile")" 2>/dev/null || true
+  ( perl -MPOSIX -e 'POSIX::setsid(); POSIX::close($_) for 3..255; alarm 1200; exec @ARGV' \
+      bash "$run" </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null || {
+    log "polecat image: could not start the rebuild for $commit (non-fatal)"
+    return 0
+  }
+  log "polecat image: rebuild for $commit started in the background (log $logfile)"
+}
+
 if [ "$DRY_RUN" = "1" ]; then
   gateway_step dry-run "$RIG_DIR" "$SCRIPT_DIR"
   RESULT_EMITTED=1
@@ -525,5 +554,6 @@ fi
 igt_receipt installed "$EXPECTED" "$PREV" "" "$MERGED_AT" "$START"
 "$GT" escalate clear --fingerprint install-gt:build-failed --fingerprint install-gt:smoke-failed \
   --reason "install-gt: $EXPECTED is in force" >/dev/null 2>&1 || true
+polecat_image_step "$IMAGE_RUN" "$IMAGE_LOG" "$EXPECTED" || true
 log "In force: ${PREV:-unknown} -> $EXPECTED. The daemon restarts itself when idle."
 result_line installed "$EXPECTED" "$PREV" ""

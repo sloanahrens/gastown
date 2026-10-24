@@ -135,6 +135,7 @@ run_install() {
     export T_WORLD="$t" INSTALL_GT_BIN_DIR="$t/bin" INSTALL_GT_DAEMON_DIR="$t/daemon" \
       INSTALL_GT_RIG_DIR="$t/rig" INSTALL_GT_LOCK_WAIT="${LOCK_WAIT:-5}" \
       INSTALL_GT_SIGN_DIR="$t/signing" INSTALL_GT_GATEWAY_HOME="$t/home" \
+      INSTALL_GT_IMAGE_RUN="${IMAGE_RUN:-$t/no-image-plugin/run.sh}" INSTALL_GT_IMAGE_LOG="$t/image.log" \
       PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
     bash "$INSTALLER" "$@" ) > "$t/run.out" 2>&1 || rc=$?
   echo "$rc"
@@ -950,6 +951,92 @@ rc=$(gw_lib "$T" install "$T/bad.plist.tmpl" "$T/home")
   && [ ! -e "$(gw_plist "$T")" ] && ! grep -q "^launchctl bootstrap" "$T/launchctl.log" 2>/dev/null \
   && pass "gateway lib, unrenderable template: one WARNING, no unit, no bootstrap" \
   || fail "gateway lib, unrenderable template: rc=$rc $(cat "$T/lib.out")"
+
+
+# --- Cases 33-38: the polecat image rebuild after an install. The plugin's run.sh is
+# a stub that logs its call; the default in run_install is a path that does not
+# exist, so no other case can start the real plugin. The rebuild is detached, so
+# the cases wait for the stub's log.
+image_stub() { # T [sleep seconds]: a run.sh that logs, optionally lingers
+  local t="$1" linger="${2:-0}"
+  mkdir -p "$t/plugin"
+  cat > "$t/plugin/run.sh" <<STUB
+#!/usr/bin/env bash
+echo "run.sh \$("$t/bin/gt" version | head -1)" >> "$t/image-calls.log"
+sleep $linger
+exit \${IMAGE_STUB_EXIT:-0}
+STUB
+  chmod +x "$t/plugin/run.sh"
+}
+wait_for() { local i; for i in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
+
+# Case 33: a successful install starts the plugin once, after the new binary is in place.
+T=$(make_world); image_stub "$T"
+install_stub "$T" "$(cat "$T/c1")"
+rc=$(IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
+wait_for "$T/image-calls.log" || true
+[ "$rc" = "0" ] && [ "$(wc -l < "$T/image-calls.log" 2>/dev/null | tr -d ' ')" = "1" ] \
+  && grep -q "gt version $(cat "$T/c2")" "$T/image-calls.log" \
+  && grep -q "polecat image: rebuild for .* started in the background" "$T/run.out" \
+  && pass "image: a successful install runs the plugin once, on the new binary" \
+  || fail "image: success: rc=$rc calls=$(cat "$T/image-calls.log" 2>/dev/null) out=$(tail -4 "$T/run.out")"
+
+# Case 34: a no-op install (already at the commit) does not start it.
+T=$(make_world); image_stub "$T"
+install_stub "$T" "$(cat "$T/c2")"
+rc=$(IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
+sleep 0.5
+[ "$rc" = "0" ] && [ ! -e "$T/image-calls.log" ] \
+  && pass "image: a no-op install does not run the plugin" \
+  || fail "image: noop: rc=$rc calls=$(cat "$T/image-calls.log" 2>/dev/null)"
+
+# Case 35: a failed install (build fails) does not start it.
+T=$(make_world); image_stub "$T"
+touch "$T/fail_build"
+rc=$(IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
+sleep 0.5
+[ "$rc" = "1" ] && [ ! -e "$T/image-calls.log" ] \
+  && pass "image: a failed install does not run the plugin" \
+  || fail "image: failed install: rc=$rc calls=$(cat "$T/image-calls.log" 2>/dev/null)"
+
+# Case 36: no plugin on disk -> the install succeeds and says the image was not rebuilt.
+T=$(make_world)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
+[ "$rc" = "0" ] && grep -q "polecat image: no plugin at '$T/no-image-plugin/run.sh', not rebuilt" "$T/run.out" \
+  && [ "$(tail -1 "$T/run.out" | cut -d' ' -f2-3)" = "RESULT installed" ] \
+  && pass "image: no plugin: install succeeds, one line says so" \
+  || fail "image: no plugin: rc=$rc $(tail -3 "$T/run.out")"
+
+# Case 37: the plugin fails -> the install is still a success (best effort).
+T=$(make_world); image_stub "$T"
+rc=$(IMAGE_STUB_EXIT=1 IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
+wait_for "$T/image-calls.log" || true
+[ "$rc" = "0" ] && [ "$(tail -1 "$T/run.out" | cut -d' ' -f2-3)" = "RESULT installed" ] && [ "$(last_receipt "$T" event)" = "installed" ] \
+  && pass "image: a failing plugin does not fail the install" \
+  || fail "image: plugin fails: rc=$rc $(tail -2 "$T/run.out")"
+
+# Case 38: a plugin that runs for a long time does not hold the install: the
+# script returns, with its output pipe closed and the install lock released,
+# long before the stub's sleep ends.
+T=$(make_world); image_stub "$T" 8
+START_S=$SECONDS
+rc=$(IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt | tail -1)
+ELAPSED=$((SECONDS - START_S))
+[ "$rc" = "0" ] && [ "$ELAPSED" -lt 6 ] \
+  && pass "image: a slow plugin does not delay the install (returned in ${ELAPSED}s)" \
+  || fail "image: slow plugin: rc=$rc after ${ELAPSED}s"
+# The background child holds the lock fd for the few milliseconds perl takes to
+# start and close it, so the lock is polled free within 2 s; a leaked fd would
+# hold it for the stub's whole 8 s.
+LOCK_RC=1
+for _ in $(seq 1 20); do
+  LOCK_RC=$( ( perl -e 'use Fcntl qw(:flock); open(my $f, ">>", $ARGV[0]) or exit 2; exit(flock($f, LOCK_EX|LOCK_NB) ? 0 : 1)' "$T/daemon/install-gt.lock" ) >/dev/null 2>&1; echo $? )
+  [ "$LOCK_RC" = "0" ] && break
+  sleep 0.1
+done
+[ "$LOCK_RC" = "0" ] \
+  && pass "image: the background plugin does not hold the install lock" \
+  || fail "image: the install lock is held by the background plugin (rc=$LOCK_RC)"
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
