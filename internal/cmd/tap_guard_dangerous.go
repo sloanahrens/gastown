@@ -540,7 +540,7 @@ func scanHeredocs(command string) []heredocSpan {
 		quoted := m[5] > m[4]
 		tag := command[m[6]:m[7]]
 		reader, readerStart := heredocReaderLine(command, start, end, anchor)
-		cmdText := heredocCmdText(command, &walk, start, end)
+		cmdText := heredocCmdText(command, &walk, start, end, readerStart)
 
 		// The body follows the newline that ends the logical line, so a
 		// backslash-newline continuing the operator's line is not the break.
@@ -1118,17 +1118,23 @@ func heredocReaderLine(command string, start, end, anchor int) (string, int) {
 	return strings.ReplaceAll(command[lineStart:start]+" "+command[end:lineEnd], "\\\n", " "), lineStart
 }
 
-// heredocCmdText returns the command text, from the "$(" that opens it to the
-// end of the operator's logical line, of the substitution the heredoc at
-// [start,end) sits in — an unquoted one, or one inside double quotes. The shell
-// feeds that command the body, so "x=$(bash <<EOF" runs bash on it; the reader
-// line alone, which starts at the assignment, does not show that. A
-// backslash-newline continues the line, so a pipe stage on the next line is
-// part of it (gt-2am7w, gt-lx8i8). It is "" outside such a substitution.
-func heredocCmdText(command string, walk *heredocQuoteWalk, start, end int) string {
+// heredocCmdText returns the command text, from the start of the heredoc
+// reader's own logical line to the end of the operator's line, of the
+// substitution the heredoc at [start,end) sits in — an unquoted one, or one
+// inside double quotes. The shell feeds that command the body, so "x=$(bash
+// <<EOF" runs bash on it; the reader line alone, which starts at the
+// assignment, does not show that. An earlier line of the substitution is a
+// separate command and must not turn a later "cat <<EOF" body into a script,
+// so the text starts no earlier than readerStart (gt-2am7w, gt-lx8i8,
+// gt-9q6sf). A backslash-newline continues the line, so a pipe stage on the
+// next line is part of it. It is "" outside such a substitution.
+func heredocCmdText(command string, walk *heredocQuoteWalk, start, end, readerStart int) string {
 	open, ok := walk.cmdSubstOpen()
 	if !ok {
 		return ""
+	}
+	if open < readerStart {
+		open = readerStart
 	}
 	lineEnd := heredocLineEnd(command, end)
 	return strings.ReplaceAll(command[open:start]+" "+command[end:lineEnd], "\\\n", " ")

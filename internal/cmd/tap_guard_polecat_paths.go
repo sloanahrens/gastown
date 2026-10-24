@@ -2024,23 +2024,28 @@ const maxSegmentReadings = 64
 // readings outnumber maxSegmentReadings; the caller refuses the command instead
 // of walking part of them.
 func segmentReadings(segment []string) (readings [][]string, ok bool) {
-	return segmentReadingsWithin(segment, maxSegmentReadings)
+	return segmentReadingsWithin(segment, maxSegmentReadings, 0)
 }
 
-// segmentReadingsWithin is segmentReadings with a budget: it returns at most
-// budget readings and refuses a variant that would not fit in what is left,
-// so a segment with more readings than the cap is refused as soon as it
-// overflows instead of after the recursion has built them (gt-lhn14).
-func segmentReadingsWithin(segment []string, budget int) (readings [][]string, ok bool) {
+// segmentReadingsWithin is segmentReadings with a budget and a start position:
+// it returns at most budget readings and refuses a variant that would not fit
+// in what is left, so a segment with more readings than the cap is refused as
+// soon as it overflows instead of after the recursion has built them
+// (gt-lhn14). It scans from start, so a variant resumes after the tokens its
+// caller already branched on; rescanning from 0 rebuilt readings the caller
+// had produced, and six plain assignments multiplied past the cap (gt-9q6sf).
+func segmentReadingsWithin(segment []string, budget, start int) (readings [][]string, ok bool) {
 	if budget < 1 {
 		return nil, false
 	}
 	readings = [][]string{segment}
 	budget--
-	// add appends the readings of one variant of the segment, and reports
-	// whether they still fit within the remaining budget.
-	add := func(variant []string) bool {
-		more, ok := segmentReadingsWithin(variant, budget)
+	// add appends the readings of variant, the segment with the tokens its
+	// caller chose between removed, and reports whether they still fit within
+	// the remaining budget. The scan resumes at the position they were removed
+	// from.
+	add := func(variant []string, resume int) bool {
+		more, ok := segmentReadingsWithin(variant, budget, resume)
 		if !ok {
 			return false
 		}
@@ -2048,17 +2053,17 @@ func segmentReadingsWithin(segment []string, budget int) (readings [][]string, o
 		budget -= len(more)
 		return true
 	}
-	for i := 0; i < len(segment); i++ {
+	for i := start; i < len(segment); i++ {
 		token := segment[i]
 		if isEnvAssignment(token) {
 			width, opened := envAssignmentWidth(segment[i:])
 			for _, close := range envAssignmentCloses(segment[i:]) {
-				if !add(withoutTokens(segment, i, i+close)) {
+				if !add(withoutTokens(segment, i, i+close), i) {
 					return nil, false
 				}
 			}
 			if opened != "" {
-				return readings, add(withoutTokens(segment, i, i+1))
+				return readings, add(withoutTokens(segment, i, i+1), i)
 			}
 			i += width - 1
 			continue

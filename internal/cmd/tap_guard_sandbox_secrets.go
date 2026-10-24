@@ -389,7 +389,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			// the way it runs a pipe's text: bash <<< printenv (gt-ma5e6).
 			// A -c string keeps that stdin for a shell it runs, so the text is judged
 			// even when -c is present: bash -c bash <<< printenv.
-			if _, texts := splitHereStrings(argv[1:]); len(texts) > 0 {
+			if _, texts := sandboxSecretsHereStrings(argv[1:]); len(texts) > 0 {
 				payloads = append(payloads, texts...)
 			}
 			if fed != "" {
@@ -414,7 +414,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			}
 			// A here-string reaches the same stdin, so its text is judged as a
 			// script too: source /dev/stdin <<< printenv (gt-ma5e6).
-			if _, texts := splitHereStrings(argv[1:]); len(texts) > 0 {
+			if _, texts := sandboxSecretsHereStrings(argv[1:]); len(texts) > 0 {
 				payloads = append(payloads, texts...)
 			}
 		}
@@ -1216,13 +1216,25 @@ func sandboxSecretsPipeOutput(argv []string, fed string) string {
 	return ""
 }
 
+// sandboxSecretsHereStrings is splitHereStrings with the text of each here-string
+// ANSI-C decoded. shlex drops the $'...' marker, so bash <<< $'x\nprintenv'
+// arrives as one word and the printenv it runs is invisible until the escapes
+// are read (gt-9q6sf).
+func sandboxSecretsHereStrings(args []string) (rest, texts []string) {
+	rest, texts = splitHereStrings(args)
+	for i, text := range texts {
+		texts[i] = sandboxSecretsEscapes.Replace(text)
+	}
+	return rest, texts
+}
+
 // sandboxSecretsHereStringInput returns the text a here-string in a cat or tee argv
 // feeds as the command's stdin, and false when none does. The here-string replaces
 // what a pipe feeds, so cat <<< printenv | bash runs printenv. A cat that names a file
 // reads the file instead (a lone "-" still reads stdin); tee reads stdin whatever
 // files it writes (gt-enim5).
 func sandboxSecretsHereStringInput(argv []string) (string, bool) {
-	rest, texts := splitHereStrings(argv[1:])
+	rest, texts := sandboxSecretsHereStrings(argv[1:])
 	if len(texts) == 0 {
 		return "", false
 	}

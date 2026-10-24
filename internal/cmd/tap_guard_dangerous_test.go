@@ -2122,6 +2122,24 @@ func TestHeredocBodyStaysOpaqueWithoutAShellReader(t *testing.T) {
 	}
 }
 
+// TestHeredocCommandTextStopsAtTheReaderLine: the command text of a "$(..)"
+// is read to name the heredoc's reader, not to pull an earlier line of the
+// substitution into the body's judgement. A bash line above a cat heredoc is
+// a separate command, so the body it does not read stays data, while the same
+// body on the substitution opener's line still reaches bash (gt-9q6sf).
+func TestHeredocCommandTextStopsAtTheReaderLine(t *testing.T) {
+	t.Parallel()
+	const body = "git reset --hard"
+	direct := "x=$(bash <<'EOF'\n" + body + "\nEOF\n)"
+	if reason, _ := evaluateDangerousCommand(direct, 0, noTownSession); reason == "" {
+		t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — bash reads the body", direct)
+	}
+	earlier := "x=$(bash ./gen.sh\ncat <<'EOF'\n" + body + "\nEOF\n)"
+	if reason, _ := evaluateDangerousCommand(earlier, 0, noTownSession); reason != "" {
+		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — cat writes the body as data", earlier, reason)
+	}
+}
+
 // TestHeredocOperatorLineEndHonorsEscapesAndComments pins where the operator's
 // line ends, which decides where the shell reads the body. An even run of
 // backslashes escapes itself, so the newline after "\\" ends the line. A
