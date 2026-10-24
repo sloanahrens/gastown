@@ -60,6 +60,10 @@ type Status struct {
 	Name, Phase string
 	Ready       bool // the Ready condition is True
 	ReadyKnown  bool // the status carried a Ready condition at all
+	// NotReadySince is when the Ready condition last turned False, which for
+	// a terminal phase is when the failure began. Zero when the gateway does
+	// not say (gt-j18af).
+	NotReadySince time.Time
 }
 
 func (c *CLI) bin() string {
@@ -182,6 +186,13 @@ func (c *CLI) Get(ctx context.Context, name string) (Status, error) {
 		Conditions []struct {
 			Type   string `json:"type"`
 			Status string `json:"status"`
+			// The condition time arrives camelCase in the JSON the gateway
+			// prints; the snake_case proto spelling is read too. RawMessage
+			// keeps a future shape from failing the whole decode: losing the
+			// phase answer would leave the seat unjudged for as long as the
+			// spelling differs (gt-j18af).
+			LastTransitionTime      json.RawMessage `json:"lastTransitionTime"`
+			LastTransitionTimeProto json.RawMessage `json:"last_transition_time"`
 		} `json:"conditions"`
 	}
 	if err := json.Unmarshal(stdout, &raw); err != nil {
@@ -195,9 +206,42 @@ func (c *CLI) Get(ctx context.Context, name string) (Status, error) {
 		st.ReadyKnown = true
 		if strings.EqualFold(cond.Status, "True") {
 			st.Ready = true
+			continue
 		}
+		st.NotReadySince = conditionTime(cond.LastTransitionTime, cond.LastTransitionTimeProto)
 	}
 	return st, nil
+}
+
+// conditionTime reads a condition's last transition time, as an RFC3339 string
+// or a protobuf Timestamp object. An unreadable value is zero, so the caller
+// measures from its own reading instead of the failure's start.
+func conditionTime(raws ...json.RawMessage) time.Time {
+	for _, raw := range raws {
+		if t, ok := parseConditionTime(raw); ok {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func parseConditionTime(raw json.RawMessage) (time.Time, bool) {
+	if len(raw) == 0 {
+		return time.Time{}, false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		t, err := time.Parse(time.RFC3339Nano, s)
+		return t, err == nil
+	}
+	var ts struct {
+		Seconds int64 `json:"seconds"`
+		Nanos   int32 `json:"nanos"`
+	}
+	if err := json.Unmarshal(raw, &ts); err == nil && (ts.Seconds != 0 || ts.Nanos != 0) {
+		return time.Unix(ts.Seconds, int64(ts.Nanos)).UTC(), true
+	}
+	return time.Time{}, false
 }
 
 // Exists reports whether the gateway has a sandbox of that name. Only the
