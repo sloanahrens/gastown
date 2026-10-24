@@ -4185,6 +4185,9 @@ func TestDangerousGuardFieldsFallbackKeepsSeparators(t *testing.T) {
 		{"an unclosed double quote on the last line", "echo ok\nrm -rf /\necho \"", true},
 		{"an unclosed double quote with text on the last line", "echo ok\nrm -rf /\necho \"x", true},
 		{"a harmless last line", "echo ok\nrm -rf /\necho x", true},
+		{"a semicolon glued to the earlier line", "echo ok;rm -rf /;echo \"", true},
+		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"", true},
+		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"", true},
 		{"the nuke as an argument of the line before", "echo ok\necho rm -rf /\necho \"", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
