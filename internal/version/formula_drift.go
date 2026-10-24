@@ -1,6 +1,7 @@
 package version
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -61,6 +62,22 @@ func (c checker) checkFormulaDrift(repoDir string) FormulaDrift {
 		return drift
 	}
 
+	// Only a binary behind the build ref is missing formulas. IsForward cannot
+	// be the gate: it reads a failed ancestry probe as "not an ancestor", so a
+	// broken git would pass for "binary ahead or diverged" and report no drift.
+	behind, err := c.isBehind(repoDir, info.BinaryCommit, info.RepoCommit)
+	if err != nil {
+		drift.Reason = err.Error()
+		return drift
+	}
+	if !behind {
+		// Binary is ahead of or diverged from the build ref, so it is not
+		// behind it. Diffing would list the binary's own formula changes as
+		// missing and tell the operator to rebuild for nothing.
+		drift.Checked = true
+		return drift
+	}
+
 	files, err := c.formulaSourceDiff(repoDir, info.BinaryCommit, info.RepoCommit)
 	if err != nil {
 		drift.Reason = err.Error()
@@ -69,6 +86,20 @@ func (c checker) checkFormulaDrift(repoDir string) FormulaDrift {
 	drift.Checked = true
 	drift.Files = files
 	return drift
+}
+
+// isBehind reports whether binary is an ancestor of ref, the only state in which
+// the binary can be missing anything ref holds. It asks merge-base for the best
+// common ancestor and checks that it is binary: when binary is an ancestor of
+// ref, that is binary itself. A git failure is returned as an error, so the
+// caller can fail closed. `merge-base --is-ancestor` cannot be used, because
+// its "not an ancestor" exit and its failure exit both arrive as errors.
+func (c checker) isBehind(repoDir, binary, ref string) (bool, error) {
+	out, err := c.output(repoDir, "merge-base", binary, ref)
+	if err != nil {
+		return false, fmt.Errorf("cannot establish whether binary commit %s is behind %s: %w", binary, ref, err)
+	}
+	return commitsMatch(strings.TrimSpace(string(out)), binary), nil
 }
 
 // formulaSourceDiff lists the files under the formula source dir that differ

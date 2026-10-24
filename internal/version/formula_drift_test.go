@@ -136,3 +136,79 @@ func TestCheckEmbeddedFormulaDrift_UnverifiableRefFailsClosed(t *testing.T) {
 		t.Error("Reason is empty, want why the cached ref could not be trusted")
 	}
 }
+
+// TestCheckEmbeddedFormulaDrift_BinaryNotBehindBuildRefIsNotDrift: a binary
+// ahead of or diverged from origin/main is not behind it. Diffing the two
+// would list the binary's own formula changes as missing, and tell the operator
+// to rebuild for nothing.
+func TestCheckEmbeddedFormulaDrift_BinaryNotBehindBuildRefIsNotDrift(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// build adds commits after the shared origin/main base and returns the
+		// commit the binary was built from.
+		build func(r *fakeRepo) string
+	}{
+		{
+			name: "binary ahead of origin/main",
+			build: func(r *fakeRepo) string {
+				r.checkoutNew("side")
+				binary := r.commit(formulaFile("mol-refinery-patrol.formula.toml"), "v2")
+				r.checkout("main")
+				return binary
+			},
+		},
+		{
+			name: "binary diverged from origin/main",
+			build: func(r *fakeRepo) string {
+				r.checkoutNew("side")
+				binary := r.commit(formulaFile("mol-refinery-patrol.formula.toml"), "v2")
+				r.checkout("main")
+				r.commit(formulaFile("mol-polecat-work.formula.toml"), "v3")
+				r.push("origin", "main", "main")
+				return binary
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g, r := newRepo(t)
+			g.repo("/fake/origin")
+			r.addRemote("origin", "/fake/origin")
+			r.commit(formulaFile("mol-polecat-work.formula.toml"), "v1")
+			r.push("origin", "main", "main")
+			binary := tc.build(r)
+
+			drift := g.checker(binary).checkFormulaDrift(repoDir)
+
+			if !drift.Checked {
+				t.Fatalf("Checked = false (%s), want a determined result", drift.Reason)
+			}
+			if len(drift.Files) != 0 {
+				t.Errorf("Files = %v, want none: the binary is not behind origin/main", drift.Files)
+			}
+		})
+	}
+}
+
+// TestCheckEmbeddedFormulaDrift_UnverifiableAncestryFailsClosed: when git cannot
+// say whether the binary is behind the build ref, drift is unknown. Reporting it
+// as checked with no drift would hide the missing formula, because the binary is
+// behind here.
+func TestCheckEmbeddedFormulaDrift_UnverifiableAncestryFailsClosed(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	binary := r.commit(formulaFile("mol-polecat-work.formula.toml"), "v1")
+	tip := r.commit(formulaFile("mol-refinery-patrol.formula.toml"), "v2")
+	g.fault(errExit128, "merge-base", binary, tip)
+
+	drift := g.checker(binary).checkFormulaDrift(repoDir)
+
+	if drift.Checked {
+		t.Errorf("Checked = true, want false: the binary's ancestry was never established (files=%v)", drift.Files)
+	}
+	if drift.Reason == "" {
+		t.Error("Reason is empty, want why the ancestry probe could not be trusted")
+	}
+}
