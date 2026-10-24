@@ -51,6 +51,10 @@ func runMetricsSnapshotWith(ctx context.Context, out io.Writer, env metrics.Env,
 	if rec.Placement != nil {
 		groups++
 	}
-	_, err = fmt.Fprintf(out, "snapshot %s appended to %s (%d groups, %d errors)\n", rec.TS, path, groups, len(rec.Errors))
+	note := ""
+	if rec.Placement == nil {
+		note = "; placement: none known"
+	}
+	_, err = fmt.Fprintf(out, "snapshot %s appended to %s (%d groups, %d errors)%s\n", rec.TS, path, groups, len(rec.Errors), note)
 	return err
 }
