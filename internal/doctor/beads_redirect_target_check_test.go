@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestBeadsRedirectTargetCheck_ValidTarget(t *testing.T) {
@@ -727,5 +729,47 @@ func TestBeadsRedirectTargetCheck_FixWithAbsoluteRigRedirect(t *testing.T) {
 	content := strings.TrimSpace(string(data))
 	if content != absTarget {
 		t.Errorf("Expected redirect to %q (absolute), got %q", absTarget, content)
+	}
+}
+
+func TestRecomputeRedirectMatchesComputeRedirectTarget(t *testing.T) {
+	t.Parallel()
+	// A rig .beads with only config.yaml and a database under mayor/rig/.beads:
+	// the doctor fix must write the target beads.ComputeRedirectTarget gives,
+	// or doctor and stale-redirect checks disagree on the same rig (gt-7po79).
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "myrig")
+	rigBeadsDir := filepath.Join(rigDir, ".beads")
+	mayorBeadsDir := filepath.Join(rigDir, "mayor", "rig", ".beads")
+	crewDir := filepath.Join(rigDir, "crew", "worker1")
+
+	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeadsDir, "config.yaml"), []byte("prefix: gt-\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(mayorBeadsDir, "dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recomputeRedirect(townRoot, crewDir); err != nil {
+		t.Fatalf("recomputeRedirect failed: %v", err)
+	}
+
+	want, err := beads.ComputeRedirectTarget(townRoot, crewDir)
+	if err != nil {
+		t.Fatalf("ComputeRedirectTarget failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(crewDir, ".beads", "redirect"))
+	if err != nil {
+		t.Fatalf("redirect file missing after recompute: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	if got != want {
+		t.Errorf("recomputeRedirect wrote %q, want beads.ComputeRedirectTarget's %q", got, want)
 	}
 }
