@@ -273,8 +273,20 @@ type pushGit interface {
 	IsAncestor(ancestor, descendant string) (bool, error)
 }
 
+// The production push step hands in *git.Git, so this fails the build if its
+// methods drift from pushGit.
+var _ pushGit = (*git.Git)(nil)
+
 // remoteRefreshTimeout bounds the fetch that follows a rejected push.
 const remoteRefreshTimeout = 2 * time.Minute
+
+// isNonFastForwardRejection reports whether git refused the push because the
+// remote branch holds commits the local one lacks. Git names that refusal with
+// a "[rejected]" ref line. A remote hook refusal reads "[remote rejected]", and
+// an auth or network failure has no ref line, so neither is a rejection.
+func isNonFastForwardRejection(err error) bool {
+	return strings.Contains(err.Error(), "[rejected]")
+}
 
 // pushOrAcceptRemoteAhead pushes branch to origin. A sandbox pushes its commits
 // straight to Forgejo, so a seat that is started again finds the host branch
@@ -286,6 +298,9 @@ func pushOrAcceptRemoteAhead(g pushGit, branch string) error {
 	pushErr := g.Push("origin", branch, false)
 	if pushErr == nil {
 		return nil
+	}
+	if !isNonFastForwardRejection(pushErr) {
+		return pushErr
 	}
 	if err := g.FetchBranchWithTimeout("origin", branch, remoteRefreshTimeout); err != nil {
 		return pushErr
