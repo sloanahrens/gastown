@@ -86,11 +86,14 @@ else
 VERSION := $(GIT_DESCRIBE)-dirty
 endif
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+# Empty on a detached HEAD: symbolic-ref names no branch, where rev-parse --abbrev-ref prints "HEAD".
+BRANCH := $(shell git symbolic-ref --short -q HEAD 2>/dev/null)
 BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 LDFLAGS := -s -w \
            -X github.com/steveyegge/gastown/internal/cmd.Version=$(VERSION) \
            -X github.com/steveyegge/gastown/internal/cmd.Commit=$(COMMIT) \
+           -X github.com/steveyegge/gastown/internal/cmd.Branch=$(BRANCH) \
            -X github.com/steveyegge/gastown/internal/cmd.BuildTime=$(BUILD_TIME) \
            -X github.com/steveyegge/gastown/internal/cmd.BuiltProperly=1
 
