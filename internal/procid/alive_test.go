@@ -24,8 +24,11 @@ func TestProbeAlive(t *testing.T) {
 		{"any other error reads as alive", syscall.EINVAL, true},
 	}
 	for _, tc := range cases {
-		if got := ProbeAlive(tc.err); got != tc.want {
-			t.Errorf("%s: ProbeAlive(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ProbeAlive(tc.err); got != tc.want {
+				t.Errorf("ProbeAlive(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
