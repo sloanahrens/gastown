@@ -366,6 +366,81 @@ version = 1
 	}
 }
 
+// writeTestPlugin creates plugins/<dir>/plugin.md under base with the given
+// frontmatter name and description.
+func writeTestPlugin(t *testing.T, base, dir, name, description string) {
+	t.Helper()
+	pluginDir := filepath.Join(base, "plugins", dir)
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		t.Fatalf("failed to create plugin dir: %v", err)
+	}
+	content := []byte("+++\nname = \"" + name + "\"\ndescription = \"" + description + "\"\nversion = 1\n+++\n\n# " + name + "\n")
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.md"), content, 0644); err != nil {
+		t.Fatalf("failed to write plugin.md: %v", err)
+	}
+}
+
+func TestScanner_GetPlugin_MatchesDiscoverAllPrecedence(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	// Two rigs both define a plugin named "foo"; DiscoverAll lets the last rig win.
+	writeTestPlugin(t, filepath.Join(tmpDir, "a"), "foo", "foo", "Rig a version")
+	writeTestPlugin(t, filepath.Join(tmpDir, "b"), "foo", "foo", "Rig b version")
+
+	scanner := NewScanner(tmpDir, []string{"a", "b"})
+
+	discovered, err := scanner.DiscoverAll()
+	if err != nil {
+		t.Fatalf("DiscoverAll failed: %v", err)
+	}
+	var want *Plugin
+	for _, p := range discovered {
+		if p.Name == "foo" {
+			want = p
+		}
+	}
+	if want == nil {
+		t.Fatal("DiscoverAll did not return plugin foo")
+	}
+
+	got, err := scanner.GetPlugin("foo")
+	if err != nil {
+		t.Fatalf("GetPlugin failed: %v", err)
+	}
+	if got.Name != want.Name || got.Path != want.Path || got.RigName != want.RigName || got.Description != want.Description {
+		t.Errorf("GetPlugin returned %+v, want the DiscoverAll entry %+v", got, want)
+	}
+	if got.RigName != "b" {
+		t.Errorf("expected rig b to win the collision, got rig %q", got.RigName)
+	}
+}
+
+func TestScanner_GetPlugin_MatchesFrontmatterName(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	// The directory name differs from the frontmatter name.
+	writeTestPlugin(t, filepath.Join(tmpDir, "a"), "dirx", "foo", "Renamed plugin")
+
+	scanner := NewScanner(tmpDir, []string{"a"})
+
+	got, err := scanner.GetPlugin("foo")
+	if err != nil {
+		t.Fatalf("GetPlugin(foo) failed: %v", err)
+	}
+	if got.Name != "foo" {
+		t.Errorf("expected name %q, got %q", "foo", got.Name)
+	}
+	if got.Path != filepath.Join(tmpDir, "a", "plugins", "dirx") {
+		t.Errorf("unexpected path %q", got.Path)
+	}
+
+	if _, err := scanner.GetPlugin("dirx"); err == nil {
+		t.Error("expected GetPlugin(dirx) to fail: the directory name is not the plugin name")
+	}
+}
+
 func TestParsePluginMD_WithRunScript(t *testing.T) {
 	t.Parallel()
 	// Use a temp dir with a fixture plugin.md and run.sh so the test

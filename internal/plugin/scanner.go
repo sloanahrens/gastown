@@ -201,32 +201,19 @@ func parsePluginMD(content []byte, pluginDir string, location Location, rigName 
 	return plugin, nil
 }
 
-// GetPlugin returns a specific plugin by name.
-// Searches rig-level plugins first (more specific), then town-level.
+// GetPlugin returns the plugin whose frontmatter name is name, resolved through
+// DiscoverAll so a name maps to the same plugin here as it does in the daemon.
 func (s *Scanner) GetPlugin(name string) (*Plugin, error) {
-	// Search rig-level plugins first
-	for _, rigName := range s.rigNames {
-		pluginDir := filepath.Join(s.townRoot, rigName, "plugins", name)
-		plugin, err := s.loadPlugin(pluginDir, LocationRig, rigName)
-		if err != nil {
-			continue
-		}
-		if plugin != nil {
-			return plugin, nil
-		}
-	}
-
-	// Search town-level plugins
-	pluginDir := filepath.Join(s.townRoot, "plugins", name)
-	plugin, err := s.loadPlugin(pluginDir, LocationTown, "")
+	plugins, err := s.DiscoverAll()
 	if err != nil {
 		return nil, err
 	}
-	if plugin == nil {
-		return nil, fmt.Errorf("plugin not found: %s", name)
+	for _, plugin := range plugins {
+		if plugin.Name == name {
+			return plugin, nil
+		}
 	}
-
-	return plugin, nil
+	return nil, fmt.Errorf("plugin not found: %s", name)
 }
 
 // DiscoverExecWrappers returns all exec-wrapper plugins.
