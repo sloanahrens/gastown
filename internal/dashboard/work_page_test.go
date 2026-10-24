@@ -529,8 +529,9 @@ func TestTheWorkRowsCannotOverflowTheirPanel(t *testing.T) {
 // TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover drives the panel
 // over seats whose agents carry each provider prefix and one that carries none,
 // and reads the Agent cell back against the polecat in its row. A claude- or
-// deepseek- prefix goes from the cell; any other name shows as it is; the
-// tooltip keeps the whole name every time (gt-dp6u3).
+// deepseek- prefix goes from the cell; the two sandbox seats show their short
+// names; any other name shows as it is; the tooltip keeps the whole name every
+// time (gt-dp6u3, gt-2mnrl).
 func TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover(t *testing.T) {
 	t.Parallel()
 
@@ -539,20 +540,26 @@ func TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover(t *testing.T) {
 		seat("gastown", "alpha", "working", "gt-a1", "sandboxed", "deepseek-flash-sandbox", time.Minute),
 		seat("gastown", "bravo", "working", "gt-a2", "haiku", "claude-haiku", time.Minute),
 		seat("gastown", "charlie", "working", "gt-a3", "unprefixed", "gemini-pro", time.Minute),
+		seat("gastown", "delta", "working", "gt-a4", "sandboxed k8s", "deepseek-flash-sandbox-k8s", time.Minute),
+		seat("gastown", "echo", "working", "gt-a5", "sonnet", "claude-sonnet", time.Minute),
+		seat("gastown", "foxtrot", "working", "gt-a6", "flash", "deepseek-flash", time.Minute),
 	}, workQueueReading(0, 0, 0, 0)))
 
 	names := workCells(t, dom, "wname")
 	agents := workCells(t, dom, "wagent")
-	if len(names) != 3 || len(agents) != 3 {
-		t.Fatalf("the panel drew %d polecat cells and %d agent cells, want 3 of each", len(names), len(agents))
+	if len(names) != 6 || len(agents) != 6 {
+		t.Fatalf("the panel drew %d polecat cells and %d agent cells, want 6 of each", len(names), len(agents))
 	}
 	byPolecat := map[string]drawn{}
 	for i, n := range names {
 		byPolecat[n.Text] = agents[i]
 	}
 	for _, c := range []struct{ polecat, shown, full string }{
-		{"alpha", "flash-sandbox", "deepseek-flash-sandbox"},
+		{"alpha", "docker-sbx", "deepseek-flash-sandbox"},
+		{"delta", "k8s-sbx", "deepseek-flash-sandbox-k8s"},
 		{"bravo", "haiku", "claude-haiku"},
+		{"echo", "sonnet", "claude-sonnet"},
+		{"foxtrot", "flash", "deepseek-flash"},
 		{"charlie", "gemini-pro", "gemini-pro"},
 	} {
 		got, ok := byPolecat[c.polecat]

@@ -453,8 +453,8 @@ function seatFacts(m) {
     if (sr.unknown) { out.push({text: "seats unknown", title: "the seat map could not be read · " + key}); continue; }
     if (sr.closed) continue;
     out.push({
-      text: (sr.agent || "no agent") + " " + (sr.live == null ? "–" : sr.live) + "/" + sr.cap,
-      title: key + (sr.live == null ? " · the polecats have not been read yet" : ""),
+      text: (sr.agent ? seatName(sr.agent) : "no agent") + " " + (sr.live == null ? "–" : sr.live) + "/" + sr.cap,
+      title: (sr.agent ? sr.agent + " · " : "") + key + (sr.live == null ? " · the polecats have not been read yet" : ""),
     });
   }
   return out;
@@ -615,7 +615,9 @@ function renderModelsPanel(s) {
   // A seat nothing may fill now says why: a cap of 0, or its closed window.
   const seatRows = seats.map(sr => {
     const tr = el("tr");
-    const name = el("td", "", sr.unknown ? "unknown" : sr.agent); name.title = sr.key; tr.append(name);
+    const name = el("td", "", sr.unknown ? "unknown" : seatName(sr.agent));
+    name.title = (sr.agent ? sr.agent + " · " : "") + sr.key;
+    tr.append(name);
     tr.append(el("td", sr.closed || sr.unknown ? "title" : "", sr.unknown ? "the seat map could not be read" : sr.state || ""));
     const open = !sr.closed && !sr.unknown;
     tr.append(el("td", "n", open ? (sr.live != null ? sr.live : "–") + "/" + sr.cap : ""));
@@ -641,7 +643,8 @@ function renderModelsPanel(s) {
   // table (gt-h3cwd).
   const activityRows = activity.map(aa => {
     const tr = el("tr");
-    tr.append(el("td", "", aa.agent), el("td", "n", String(aa.landed)), el("td", "n", String(aa.rejected)));
+    const agent = el("td", "", seatName(aa.agent)); agent.title = aa.agent;
+    tr.append(agent, el("td", "n", String(aa.landed)), el("td", "n", String(aa.rejected)));
     return tr;
   });
   box.append(table([["Agent"], ["Seat"], ["Live / cap", 1]], seatRows), table([["Role"], ["Model"]], roleRows));
@@ -803,10 +806,25 @@ function paintAges(r, now) {
   r.age.title = p.bead ? "on the hook" + (on == null ? "" : " for " + fmtDur(on)) + silent : "";
 }
 
-// shortAgent drops the provider prefix from an agent name, so the Agent cell
-// reads flash for deepseek-flash. Any other name shows unchanged.
+// seatShortNames is the one table of the sandbox seats' short names, read by
+// every place the page prints a seat or agent name, so a later seat is one line
+// here. The seat keys, bead labels and config keep the full name.
+const seatShortNames = new Map([
+  ["deepseek-flash-sandbox", "docker-sbx"],
+  ["deepseek-flash-sandbox-k8s", "k8s-sbx"],
+]);
+
+// seatName is an agent's name where the strip and the models table print it: a
+// sandbox seat by its short name, any other agent whole.
+function seatName(agent) {
+  return seatShortNames.get(agent) || agent;
+}
+
+// shortAgent is the Agent cell's name: a sandbox seat by its short name, else the
+// agent without its provider prefix, so the cell reads flash for deepseek-flash.
+// Any other name shows unchanged.
 function shortAgent(agent) {
-  return agent.replace(/^(claude|deepseek)-/, "");
+  return seatShortNames.get(agent) || agent.replace(/^(claude|deepseek)-/, "");
 }
 
 // workRow is one seat. Every cell clips with an ellipsis and carries its whole

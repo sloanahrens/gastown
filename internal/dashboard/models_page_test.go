@@ -155,6 +155,32 @@ func TestTheHeaderStripCountsTheSeatsThePageCounts(t *testing.T) {
 	}
 }
 
+// The models panel's seat table prints the two sandbox seats by their short
+// names and keeps each full name on hover (gt-2mnrl).
+func TestTheModelsPanelNamesTheSandboxSeatsByTheirShortNames(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	if _, err := dom.vm.RunString("modelsOpen = true"); err != nil {
+		t.Fatalf("opening the models panel: %v", err)
+	}
+	dom.call(t, "renderModelsPanel", map[string]any{
+		"models": map[string]any{"seat_rows": []any{
+			map[string]any{"agent": "deepseek-flash-sandbox", "cap": 3, "state": "open", "live": 1, "key": "gastown.deepseek-flash-sandbox"},
+			map[string]any{"agent": "deepseek-flash-sandbox-k8s", "cap": 3, "state": "open", "live": 0, "key": "gastown.deepseek-flash-sandbox-k8s"},
+		}},
+	})
+	for _, c := range []struct{ shown, full string }{
+		{"docker-sbx", "deepseek-flash-sandbox"},
+		{"k8s-sbx", "deepseek-flash-sandbox-k8s"},
+	} {
+		cell := dom.cellWithText(t, "modelspanel", c.shown)
+		if !strings.Contains(cell.Title, c.full) {
+			t.Errorf("the models panel's %q does not carry the full name %q on hover: %q", c.shown, c.full, cell.Title)
+		}
+	}
+}
+
 // A working polecat's row names the model its session runs (gt-lqa6p).
 func TestThePolecatPaneNamesEachPolecatsModel(t *testing.T) {
 	t.Parallel()
