@@ -1490,6 +1490,13 @@ func shellTokenize(command string) []string {
 func splitSpacedCommand(command, spaced string) []string {
 	tokens, err := shlex.Split(spaced)
 	if err != nil {
+		// The naive split keeps quote characters, which hid 'sudo and x="$("
+		// from the matchers (gt-h45w3). A command with a quote and a paren is
+		// split by lenientShellWords, which reads the quotes; any other
+		// malformed command splits as before.
+		if strings.ContainsAny(command, `"'`) && strings.ContainsAny(command, "()") {
+			return lenientShellWords(command)
+		}
 		return strings.Fields(command)
 	}
 	// shlex returning nothing for text that still has words in it means it
@@ -1499,6 +1506,58 @@ func splitSpacedCommand(command, spaced string) []string {
 		return strings.Fields(spaced)
 	}
 	return tokens
+}
+
+// lenientShellWords splits command into words the way shlex does, but never
+// fails: a quote left open runs to the end of the text, and a trailing
+// backslash is kept. shlex gives up on those, and this is what lets the
+// matchers see the words of `echo "$(" bash -c 'sudo x'` (gt-h45w3). A
+// backslash escapes the next rune outside quotes, and inside double quotes only
+// before ", \, $ and a backtick, as the shell reads it. A word of empty quotes
+// stays as an empty word, as shlex returns it.
+func lenientShellWords(command string) []string {
+	var words []string
+	var word strings.Builder
+	inWord := false
+	var quote rune
+	runes := []rune(command)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case quote == '\'':
+			if r == '\'' {
+				quote = 0
+			} else {
+				word.WriteRune(r)
+			}
+		case r == '\\' && i+1 < len(runes) && (quote == 0 || strings.ContainsRune("\"\\$`", runes[i+1])):
+			i++
+			word.WriteRune(runes[i])
+			inWord = true
+		case quote == '"':
+			if r == '"' {
+				quote = 0
+			} else {
+				word.WriteRune(r)
+			}
+		case r == '"' || r == '\'':
+			quote = r
+			inWord = true
+		case r == ' ' || r == '\t' || r == '\n':
+			if inWord {
+				words = append(words, word.String())
+				word.Reset()
+				inWord = false
+			}
+		default:
+			word.WriteRune(r)
+			inWord = true
+		}
+	}
+	if inWord {
+		words = append(words, word.String())
+	}
+	return words
 }
 
 // spaceOutShellOperators pads the command-chaining operators ;, &&, |, ||,
