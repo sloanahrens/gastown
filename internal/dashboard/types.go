@@ -598,6 +598,9 @@ type State struct {
 	// Cloud is the cloud patrol's latest report, read from the directory it
 	// writes. It is nil until the reader first reports.
 	Cloud *Cloud `json:"cloud,omitempty"`
+	// Mango is the town-metrics panel read from the directory the metrics
+	// writer fills. It is nil until the reader first reports.
+	Mango *Mango `json:"mango,omitempty"`
 	// Deploys is the deploy and staging workflows' runs, drawn inside the Cloud
 	// section under the patrol's findings. It is nil until the reader first
 	// reports.
@@ -684,6 +687,8 @@ type Config struct {
 	Machine func() (Machine, error)
 	// Cloud reads the cloud patrol's latest report from its reports directory.
 	Cloud func() *Cloud
+	// Mango reads the town-metrics panel from its directory.
+	Mango func() *Mango
 	// Spend returns the DeepSeek spend report as JSON, nil when unavailable.
 	Spend func() json.RawMessage
 	// JevSpend returns the Jev spend row, nil when the read failed.
@@ -749,6 +754,7 @@ type Config struct {
 	HealthEvery       time.Duration
 	MachineEvery      time.Duration
 	CloudEvery        time.Duration
+	MangoEvery        time.Duration
 	SpendEvery        time.Duration
 	JevSpendEvery     time.Duration
 	JevScorecardEvery time.Duration
@@ -788,6 +794,9 @@ func (c *Config) defaults() {
 	def(&c.HealthEvery, 5*time.Second)
 	def(&c.MachineEvery, 10*time.Second)
 	def(&c.CloudEvery, 60*time.Second)
+	// The panel is rebuilt daily, so a read every five minutes picks up a new
+	// one within minutes of the writer finishing it.
+	def(&c.MangoEvery, 5*time.Minute)
 	def(&c.SpendEvery, 5*time.Minute)
 	def(&c.JevSpendEvery, 5*time.Minute)
 	// A scorecard run reads each battery's log and, for some, its beads, so it
