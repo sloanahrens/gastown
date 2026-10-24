@@ -93,16 +93,11 @@ func TestBuildTrendCountsAUTCInstantInItsLocalHour(t *testing.T) {
 	}
 }
 
-// Only the newest stage points survive, loads average and max per hour, and an
-// hour with no sample keeps nil load fields.
-func TestBuildTrendStageLimitAndLoad(t *testing.T) {
+// Loads average and max per hour, and an hour with no sample keeps nil load
+// fields.
+func TestBuildTrendLoadPerHour(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.Local)
-	var stages []omStage
-	for i := 0; i < 200; i++ {
-		stages = append(stages, omStage{At: now.Add(-time.Duration(i) * time.Minute), Bead: "gt-x", Lint: dur(2 * time.Second), Gate: dur(40 * time.Second), OM: dur(90 * time.Second)})
-	}
-	stages = append(stages, omStage{At: now.Add(-25 * time.Hour), Bead: "gt-old", Gate: dur(5 * time.Second)})
 	hour := localHour(now)
 	loads := []dashboard.LoadPoint{
 		{At: hour.Add(-time.Hour).Add(10 * time.Minute), Load: 2},
@@ -110,19 +105,7 @@ func TestBuildTrendStageLimitAndLoad(t *testing.T) {
 		{At: hour, Load: 9},
 	}
 
-	tr := buildTrend(now, nil, stages, nil, loads)
-	if len(tr.Stages) != trendMaxStages {
-		t.Fatalf("stages = %d, want the %d newest", len(tr.Stages), trendMaxStages)
-	}
-	if want := now.Add(-149 * time.Minute); !tr.Stages[0].At.Equal(want) {
-		t.Errorf("oldest kept stage = %v, want %v (the newest %d)", tr.Stages[0].At, want, trendMaxStages)
-	}
-	if !tr.Stages[len(tr.Stages)-1].At.Equal(now) {
-		t.Errorf("newest kept stage = %v, want %v", tr.Stages[len(tr.Stages)-1].At, now)
-	}
-	if s := tr.Stages[0]; s.GateSecs != 40 || s.LintSecs != 2 || s.OMSecs == nil || *s.OMSecs != 90 {
-		t.Errorf("stage point = %+v", s)
-	}
+	tr := buildTrend(now, nil, nil, nil, loads)
 	byHour := map[int]dashboard.TrendHour{}
 	for _, h := range tr.Hours {
 		byHour[h.Hour.Hour()] = h
@@ -135,6 +118,69 @@ func TestBuildTrendStageLimitAndLoad(t *testing.T) {
 	}
 	if h := byHour[12]; h.LoadAvg != nil || h.LoadMax != nil {
 		t.Errorf("an hour with no sample must have nil load, got %+v", h)
+	}
+}
+
+// More stage points than the chart draws are thinned across the whole 24 hours,
+// not cut to the newest few hours: every bucket keeps its slowest point, and the
+// slowest point of the window survives.
+func TestBuildTrendThinsStagesAcrossTheWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.Local)
+	start := localHour(now).Add(-(trendHours - 1) * time.Hour)
+	span := trendHours * time.Hour
+	const n, slowIdx = 400, 250
+	var stages []omStage
+	for i := range n {
+		gate := 40 * time.Second
+		if i == slowIdx {
+			gate = 300 * time.Second
+		}
+		stages = append(stages, omStage{At: start.Add(time.Duration(i) * span / n), Bead: "gt-x", Gate: dur(gate), OM: dur(90 * time.Second)})
+	}
+	slowAt := start.Add(time.Duration(slowIdx) * span / n)
+
+	tr := buildTrend(now, nil, stages, nil, nil)
+	if len(tr.Stages) != trendMaxStages {
+		t.Fatalf("stages = %d, want %d (one per bucket)", len(tr.Stages), trendMaxStages)
+	}
+	bucket := span / trendMaxStages
+	if at := tr.Stages[0].At; at.Sub(start) >= bucket {
+		t.Errorf("oldest kept stage = %v, want in the first bucket from %v", at, start)
+	}
+	if at := tr.Stages[len(tr.Stages)-1].At; at.Sub(start) < span-bucket {
+		t.Errorf("newest kept stage = %v, want in the last bucket of the window", at)
+	}
+	slowKept := false
+	for i, p := range tr.Stages {
+		if i > 0 && !p.At.After(tr.Stages[i-1].At) {
+			t.Errorf("stage %d at %v is not after the one before it at %v", i, p.At, tr.Stages[i-1].At)
+		}
+		slowKept = slowKept || p.At.Equal(slowAt)
+	}
+	if !slowKept {
+		t.Errorf("the slowest stage at %v was thinned away", slowAt)
+	}
+}
+
+// Under the cap every stage point is returned as it was, oldest first.
+func TestBuildTrendKeepsEveryStageUnderTheCap(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.Local)
+	var stages []omStage
+	for i := range 100 {
+		stages = append(stages, omStage{At: now.Add(-time.Duration(i) * 10 * time.Minute), Bead: "gt-x", Gate: dur(time.Duration(i+1) * time.Second)})
+	}
+
+	tr := buildTrend(now, nil, stages, nil, nil)
+	if len(tr.Stages) != len(stages) {
+		t.Fatalf("stages = %d, want all %d", len(tr.Stages), len(stages))
+	}
+	for i, p := range tr.Stages {
+		want := now.Add(-time.Duration(99-i) * 10 * time.Minute)
+		if !p.At.Equal(want) || p.GateSecs != float64(100-i) {
+			t.Fatalf("stage %d = %v gate %v, want %v gate %d", i, p.At, p.GateSecs, want, 100-i)
+		}
 	}
 }
 
