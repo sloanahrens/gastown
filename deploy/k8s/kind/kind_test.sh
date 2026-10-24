@@ -303,6 +303,7 @@ check "the controller is pinned before its rollout is awaited" before "patch dep
 check "the pool layout is checked with an exact label query" contains "get nodes -l gt.dev/pool" "$CALLS_LOG"
 check "the control-plane Services are applied" contains "services/control-plane.yaml" "$CALLS_LOG"
 check "the control-plane Services follow the NodePort service" before "gateway-nodeport.yaml" "services/control-plane.yaml"
+check "the control-plane Services are applied before the gateway is registered" before "services/control-plane.yaml" "gateway add"
 check "the client key is converted to PKCS8" contains "pkcs8 -topk8 -nocrypt" "$CALLS_LOG"
 check "the jsonpath key escapes its dot" contains "['tls\\.key']" "$CALLS_LOG"
 check "the certificates are exported before the gateway is registered" before "get secret openshell-client-tls" "gateway add"
