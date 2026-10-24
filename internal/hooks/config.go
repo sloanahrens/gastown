@@ -951,6 +951,13 @@ func DefaultBase() *HooksConfig {
 						Type:    "command",
 						Command: gtCommand("gt tap guard bd-close-invariant"),
 					},
+					// bd-create-store refuses a polecat's bd create whose effective cwd
+					// resolves to the town (hq) store, where the rig never sees the bead
+					// (hq-mk51i). It self-filters on the polecat role.
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard bd-create-store"),
+					},
 					// sandbox-secrets self-filters on GT_SESSION_BACKEND=openshell: it
 					// refuses a command that prints the environment or a secret, which
 					// would put a credential placeholder into a sandbox agent's

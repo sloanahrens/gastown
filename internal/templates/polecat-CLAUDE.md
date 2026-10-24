@@ -73,6 +73,10 @@ Before submitting, the check that catches it is the three-dot stat:
 git diff --stat origin/main...HEAD    # must list only files YOU changed
 ```
 
+### Filing beads
+
+**File beads only from your worktree.** bd picks its store from the directory it runs in, and at the town root that is the town store (hq), where your rig never sees the bead. A create that would file there is refused.
+
 ---
 
 ## Completion Protocol (MANDATORY)
