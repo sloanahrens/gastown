@@ -1050,6 +1050,19 @@ func TestPolecatGuidanceForbidsSlotPollingLoops(t *testing.T) {
 	}
 }
 
+// TestPolecatCLAUDEStatesTheBeadFilingStoreRule pins the gt-do0im line: a
+// polecat reads its provisioned CLAUDE.md before its first bead, and a bead
+// filed at the town root lands in the town store where its rig dispatcher
+// never sees it (hq-mk51i). The bd-create-store guard refuses such a create,
+// so the rule the guard enforces is stated where the polecat reads it.
+func TestPolecatCLAUDEStatesTheBeadFilingStoreRule(t *testing.T) {
+	t.Parallel()
+	const rule = "**File beads only from your worktree.**"
+	if !strings.Contains(polecatCLAUDEmd, rule) {
+		t.Errorf("polecat-CLAUDE.md lacks the bead-filing rule %q", rule)
+	}
+}
+
 // renderPolecatForTest renders the role template the way `gt prime` does, with
 // a non-fork rig (the only branch that runs `gt done`'s landing workflow).
 func renderPolecatForTest(t *testing.T) string {

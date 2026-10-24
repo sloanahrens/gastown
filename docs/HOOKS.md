@@ -82,6 +82,8 @@ the hook payload and evaluates the same predicate, refusing exactly what
 close can carry. Only ids naming the bead the current branch was cut for are
 judged; other closes and unresolvable input pass.
 
+The `bd-create-store` guard refuses a polecat's `bd create` that would file into the town's `hq` store, judged from the effective cwd.
+
 Settings are passed to Claude Code via `--settings <path>`, which loads them as
 a separate priority tier that merges additively with project settings.
 
@@ -108,7 +110,7 @@ town's own overrides layered on top:
 
 | Hook | Event | Roles |
 |---|---|---|
-| pr-workflow, dangerous-command, container-suite, bd-close-invariant guards | PreToolUse | all |
+| pr-workflow, dangerous-command, container-suite, bd-close-invariant, bd-create-store guards | PreToolUse | all |
 | session-prime (`gt prime --hook`) | SessionStart | all |
 | pre-compact-prime (`gt prime --hook`) | PreCompact | all |
 | mail-check (`gt mail check --inject`) | UserPromptSubmit | all |

@@ -744,6 +744,25 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 	}
 }
 
+// TestComputeExpectedBdCreateStoreGuardIsTownWide pins the gt-do0im wiring:
+// bd-create-store is declared in DefaultBase, so every role receives it as an
+// ungated guard on the shell-executing matcher. It self-filters on the polecat
+// role, and losing the entry would leave a polecat free to file a rig work bug
+// into the town store where its dispatcher never sees it (hq-mk51i).
+func TestComputeExpectedBdCreateStoreGuardIsTownWide(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	home := configHome{home: tmpDir}
+
+	for _, target := range []string{"gastown/polecats", "crew", "mayor", "witness", "refinery", "deacon"} {
+		cfg, err := home.computeExpected(target)
+		if err != nil {
+			t.Fatalf("home.computeExpected(%s): %v", target, err)
+		}
+		requireUngatedGuardCommand(t, target, cfg, "tap guard bd-create-store")
+	}
+}
+
 // TestComputeExpectedSandboxSecretsGuardIsTownWide pins the gt-vwdxf wiring:
 // sandbox-secrets is declared in DefaultBase, so every role must receive it as
 // an ungated guard on the shell-executing matcher. It self-filters on the

@@ -73,6 +73,8 @@ Before submitting, the check that catches it is the three-dot stat:
 git diff --stat origin/main...HEAD    # must list only files YOU changed
 ```
 
+**File beads only from your worktree.** At the town root the store is the town's (hq), where your rig never sees the bead.
+
 ---
 
 ## Completion Protocol (MANDATORY)
