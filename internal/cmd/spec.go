@@ -1427,6 +1427,8 @@ func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads
 // guard keeps every named path either way. A Constraints section that names no
 // path (a follow-up's fixed text) counts the documents its Goal names as the
 // work instead (gt-1e5s8).
+// A missing or empty Goal leaves that work unknown too, so it keeps every path
+// as well (gt-zs8fq).
 func specHoldFiles(files []string, description string) []string {
 	sections := specdispatch.Sections(description)
 	constraints, ok := sections["constraints"]
@@ -1435,6 +1437,9 @@ func specHoldFiles(files []string, description string) []string {
 	}
 	listed := extractContentRefs(constraints).Files
 	if len(listed) == 0 {
+		if sections["goal"] == "" {
+			return files
+		}
 		listed = extractContentRefs(sections["goal"]).Files
 	}
 	return specdispatch.HoldFiles(files, listed)

@@ -872,6 +872,8 @@ func TestSpecHoldFilesKeepsDocsWhenConstraintsAreUnknown(t *testing.T) {
 // unstated, so the reference doc its Goal names is the work and stays held. A
 // Constraints section that names other paths keeps the rule that a cited doc is
 // read, not changed (gt-1e5s8).
+// A bead with no Goal, or an empty one, leaves that work unknown too, so the doc
+// stays held (gt-zs8fq).
 func TestSpecHoldFilesKeepsGoalDocsWhenConstraintsNameNoPath(t *testing.T) {
 	t.Parallel()
 	const doc = "docs/reference.md"
@@ -883,11 +885,13 @@ func TestSpecHoldFilesKeepsGoalDocsWhenConstraintsNameNoPath(t *testing.T) {
 		{"Constraints names no path", "## Goal\nRewrite " + doc + ".\n\n## Constraints\nKeep the gate green.", []string{doc}},
 		{"Goal does not name the doc", "## Goal\nA thing.\n\n## Constraints\nKeep the gate green.", []string{}},
 		{"Constraints names another path", "## Goal\nRewrite " + doc + ".\n\n## Constraints\nChange only internal/cmd/spec.go.", []string{}},
+		{"Goal section is missing", "## Constraints\nKeep the gate green.", []string{doc}},
+		{"Goal section is empty", "## Goal\n\n## Constraints\nKeep the gate green.", []string{doc}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			if got := specHoldFiles([]string{doc}, c.description); fmt.Sprint(got) != fmt.Sprint(c.want) {
+			if got := specHoldFiles([]string{doc}, c.description); !reflect.DeepEqual(got, c.want) {
 				t.Errorf("specHoldFiles = %v, want %v", got, c.want)
 			}
 		})
