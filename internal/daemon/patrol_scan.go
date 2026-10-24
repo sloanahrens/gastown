@@ -586,14 +586,30 @@ func (h *patrolScanHost) PolecatEscalations(rig string) ([]patrolscan.Escalation
 // container instead — which is not a git worktree — never answered, so a seat
 // whose escalation had been resolved could not reach the clean verdict and
 // stayed DEGRADED (gt-okk50).
+//
+// A sandbox seat's work lives in its sandbox, so the host worktree is a stale
+// leftover whose commits read as unpushed: the gateway's answer decides instead
+// (polecat.SandboxSeatGitState, gt-b4waf). The host worktree is not resolved
+// for such a seat, since a nuked seat has none.
 func (h *patrolScanHost) GitState(rig, name string) (patrolscan.GitState, error) {
-	polecatsDir := filepath.Join(h.town(), rig, "polecats")
-	path := resolvePolecatWorktree(polecatsDir, name, rig)
-	if path == "" {
-		return patrolscan.GitState{}, fmt.Errorf("no git worktree for polecat %s: tried %s",
-			name, strings.Join(polecatWorktreeCandidates(polecatsDir, name, rig), ", "))
+	seat, sandboxed, err := h.openshellSeat(rig, name)
+	if err != nil {
+		return patrolscan.GitState{}, fmt.Errorf("telling a sandbox seat from a host seat: %w", err)
 	}
-	st := h.gitProbe()(path)
+	var st polecat.LiveGitState
+	if sandboxed {
+		sessionName := h.sessionName(rig, name)
+		exists, existsErr := h.sandboxStillExists(seat.gateway, sessionName)
+		st = polecat.SandboxSeatGitState("", exists, existsErr, sessionName)
+	} else {
+		polecatsDir := filepath.Join(h.town(), rig, "polecats")
+		path := resolvePolecatWorktree(polecatsDir, name, rig)
+		if path == "" {
+			return patrolscan.GitState{}, fmt.Errorf("no git worktree for polecat %s: tried %s",
+				name, strings.Join(polecatWorktreeCandidates(polecatsDir, name, rig), ", "))
+		}
+		st = h.gitProbe()(path)
+	}
 	if st.Source != polecat.GitStateSourceLive {
 		reason := st.FailedReason
 		if reason == "" {

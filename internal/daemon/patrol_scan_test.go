@@ -183,7 +183,8 @@ func TestPatrolScanGitState(t *testing.T) {
 
 	var probed []string
 	h := &patrolScanHost{
-		d: &Daemon{config: &Config{TownRoot: town}},
+		d:           &Daemon{config: &Config{TownRoot: town}},
+		agentRecord: func(string, string) (string, error) { return "", nil }, // a host seat
 		gitState: func(path string) polecat.LiveGitState {
 			probed = append(probed, path)
 			switch path {
