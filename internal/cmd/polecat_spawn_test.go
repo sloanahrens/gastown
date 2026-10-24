@@ -172,7 +172,7 @@ func TestReuseIdlePolecatForSling_StopsOnHeldBranch(t *testing.T) {
 	}
 
 	info, err := reuseIdlePolecatForSlingWith(fake, fakeIdleReuseEnv(), "rig",
-		SlingSpawnOptions{HookBead: "gt-next", ResumeBranch: branch}, func() {})
+		SlingSpawnOptions{HookBead: "gt-next", ResumeBranch: branch}, func() int { return 0 })
 
 	if err == nil {
 		t.Fatal("reuse refusal was swallowed and the sling continued to allocation; want the error")
@@ -224,7 +224,7 @@ func TestReuseIdlePolecatForSling_FallsBackOnRecoverableReuseFailure(t *testing.
 	}
 
 	info, err := reuseIdlePolecatForSlingWith(fake, fakeIdleReuseEnv(), "rig",
-		SlingSpawnOptions{HookBead: "gt-next"}, func() {})
+		SlingSpawnOptions{HookBead: "gt-next"}, func() int { return 0 })
 
 	if err != nil {
 		t.Fatalf("recoverable reuse failure aborted the sling: %v", err)
@@ -247,7 +247,7 @@ func TestReuseIdlePolecatForSling_NoIdlePolecat(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			info, err := reuseIdlePolecatForSlingWith(tt.fake, fakeIdleReuseEnv(), "rig",
-				SlingSpawnOptions{HookBead: "gt-next"}, func() {})
+				SlingSpawnOptions{HookBead: "gt-next"}, func() int { return 0 })
 
 			if err != nil || info != nil {
 				t.Errorf("reuseIdlePolecatForSling gave (%+v, %v), want (nil, nil) so the caller allocates", info, err)
@@ -289,7 +289,7 @@ func TestReuseIdlePolecatForSling_VerifyFailureReleasesSlot(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			info, err := reuseIdlePolecatForSlingWith(tt.fake, releaseRecordingEnv(tt.fake, tt.verifyErr), "rig",
-				SlingSpawnOptions{HookBead: "gt-next"}, func() {})
+				SlingSpawnOptions{HookBead: "gt-next"}, func() int { return 0 })
 
 			if err == nil {
 				t.Fatal("sling went on with a reused polecat it could not verify; want the error")
@@ -326,7 +326,7 @@ func TestReuseIdlePolecatForSling_CarriesAgentIntoAddOptions(t *testing.T) {
 			}
 
 			info, err := reuseIdlePolecatForSlingWith(fake, fakeIdleReuseEnv(), "rig",
-				SlingSpawnOptions{HookBead: "gt-next", Agent: tt.agent}, func() {})
+				SlingSpawnOptions{HookBead: "gt-next", Agent: tt.agent}, func() int { return 0 })
 
 			if err != nil || info == nil {
 				t.Fatalf("reuseIdlePolecatForSling = (%+v, %v), want the reused polecat", info, err)

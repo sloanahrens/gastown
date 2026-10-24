@@ -39,11 +39,14 @@ func respawnCountOf(t *testing.T, townRoot, bead string) int {
 
 // recordRespawnFn is the recordRespawn prepareSlingPolecat hands the spawn
 // paths: one count on the bead.
-func recordRespawnFn(t *testing.T, townRoot, bead string) func() {
-	return func() {
-		if _, err := polecat.RecordBeadRespawn(townRoot, bead); err != nil {
+func recordRespawnFn(t *testing.T, townRoot, bead string) func() int {
+	return func() int {
+		n, err := polecat.RecordBeadRespawn(townRoot, bead)
+		if err != nil {
 			t.Errorf("RecordBeadRespawn: %v", err)
+			return 0
 		}
+		return n
 	}
 }
 

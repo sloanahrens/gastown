@@ -765,3 +765,55 @@ func TestResetBeadRespawnForRound_UnreadableStateIsReported(t *testing.T) {
 		t.Error("ResetBeadRespawnForRound on a truncated file reported a cleared count")
 	}
 }
+
+// respawnCountNow is the count a bead has on disk, zero when it has no record.
+func respawnCountNow(t *testing.T, townRoot, beadID string) int {
+	t.Helper()
+	state, err := readLiveBeadRespawnState(townRoot)
+	if err != nil {
+		t.Fatalf("readLiveBeadRespawnState: %v", err)
+	}
+	if rec, ok := state.Beads[beadID]; ok {
+		return rec.Count
+	}
+	return 0
+}
+
+// TestGiveBackBeadRespawn: the increment one sling attempt recorded comes off
+// again when that attempt started no polecat, and nothing else changes (gt-cjmt5).
+func TestGiveBackBeadRespawn(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name     string
+		recorded int // counts on the bead before the give-back
+		giveBack int // the count the attempt recorded
+		reset    bool
+		want     int
+	}{
+		{name: "the attempt's increment is removed", recorded: 2, giveBack: 2, want: 1},
+		{name: "a first increment leaves no record behind", recorded: 1, giveBack: 1, want: 0},
+		{name: "an attempt that recorded nothing gives nothing back", recorded: 1, giveBack: 0, want: 1},
+		{name: "a reset since the attempt stands", recorded: 2, giveBack: 2, reset: true, want: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			for i := 0; i < tt.recorded; i++ {
+				mustRecord(t, townRoot, "bead-back")
+			}
+			if tt.reset {
+				if err := ResetBeadRespawnCount(townRoot, "bead-back"); err != nil {
+					t.Fatalf("ResetBeadRespawnCount: %v", err)
+				}
+			}
+
+			if err := GiveBackBeadRespawn(townRoot, "bead-back", tt.giveBack); err != nil {
+				t.Fatalf("GiveBackBeadRespawn: %v", err)
+			}
+
+			if got := respawnCountNow(t, townRoot, "bead-back"); got != tt.want {
+				t.Errorf("count after the give-back = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
