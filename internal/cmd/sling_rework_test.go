@@ -90,7 +90,7 @@ func authorSeat(mutate func(*polecat.Polecat)) *reworkSlingFake {
 
 func reuseForRework(t *testing.T, fake idlePolecatReuse, opts SlingSpawnOptions, seats map[string]*reworkSeat) (*SpawnedPolecatInfo, error) {
 	t.Helper()
-	return reuseIdlePolecatForSlingWith(fake, reworkIdleReuseEnv(seats), "rig", opts, func() {})
+	return reuseIdlePolecatForSlingWith(fake, reworkIdleReuseEnv(seats), "rig", opts, func() int { return 0 })
 }
 
 // TestReworkSling_KeepsEpicIntegrationTarget: a rework resumes the rejected
@@ -108,7 +108,7 @@ func TestReworkSling_KeepsEpicIntegrationTarget(t *testing.T) {
 		return ""
 	}
 
-	info, err := reuseIdlePolecatForSlingWith(fake, env, "rig", SlingSpawnOptions{HookBead: reworkBead}, func() {})
+	info, err := reuseIdlePolecatForSlingWith(fake, env, "rig", SlingSpawnOptions{HookBead: reworkBead}, func() int { return 0 })
 	if err != nil {
 		t.Fatalf("rework reuse failed: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestReworkSling_ExplicitResumeKeepsTheDefaultTarget(t *testing.T) {
 	env.integrationBranch = func(string) string { return epicIntegrationBranch }
 
 	info, err := reuseIdlePolecatForSlingWith(fake, env, "rig",
-		SlingSpawnOptions{HookBead: reworkBead, ResumeBranch: "topic/explicit"}, func() {})
+		SlingSpawnOptions{HookBead: reworkBead, ResumeBranch: "topic/explicit"}, func() int { return 0 })
 	if err != nil {
 		t.Fatalf("explicit resume failed: %v", err)
 	}

@@ -332,6 +332,47 @@ func RecordBeadRespawn(workDir, beadID string) (int, error) {
 	return rec.Count, nil
 }
 
+// GiveBackBeadRespawn removes the increment one sling attempt recorded, when
+// that attempt started no polecat. recorded is the count RecordBeadRespawn
+// returned for the attempt; zero means it recorded nothing, which gives nothing
+// back rather than charging another attempt's death to this one.
+//
+// A current count below recorded is a reset since the attempt, which already
+// removed the increment, so the reset stands. A count above recorded holds
+// another attempt's increment as well; only the one recorded here is removed.
+// The sling gives back an image-drift refusal, which is the seat's precondition
+// rather than a death of the bead (gt-cjmt5).
+func GiveBackBeadRespawn(workDir, beadID string, recorded int) error {
+	if recorded <= 0 {
+		return nil
+	}
+
+	respawnMu.Lock()
+	defer respawnMu.Unlock()
+
+	townRoot := respawnTownRoot(workDir)
+
+	unlock, err := lockRespawnState(townRoot)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	state, err := loadBeadRespawnState(townRoot)
+	if err != nil {
+		return err
+	}
+	rec, ok := state.Beads[beadID]
+	if !ok || rec.Count < recorded {
+		return nil
+	}
+	rec.Count--
+	if rec.Count == 0 {
+		delete(state.Beads, beadID)
+	}
+	return saveBeadRespawnState(townRoot, state)
+}
+
 // ResetBeadRespawnCount resets the respawn counter for beadID to zero.
 // Used by `gt sling respawn-reset` to allow re-dispatch after investigation.
 //

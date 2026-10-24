@@ -83,6 +83,11 @@ type SpawnedPolecatInfo struct {
 	// exists, and the rollback drops it when no session ever will. Nil when
 	// the spawn did not go through the pool's seat decision (gt-t8q5).
 	seatClaim *poolSeatClaimStore
+
+	// respawnCount is the count this spawn recorded for HookBead, zero when it
+	// recorded none. A session start refused for image drift hands it back:
+	// that refusal is the seat's, not a death of the bead (gt-cjmt5).
+	respawnCount int
 }
 
 // releaseSeatClaim drops the pool seat this spawn reserved. Idempotent, and a
@@ -266,13 +271,17 @@ type idlePolecatReuse interface {
 //
 // A rig whose polecat directories cannot be read is refused rather than
 // allocated into: the cap cannot be checked, so the sling does not proceed.
+//
+// recordRespawn counts one started polecat on the bead and returns the count it
+// recorded, zero when it recorded none; the spawn keeps it to give back on an
+// image-drift refusal (gt-cjmt5).
 func reuseOrRefuseAtDirCap(
 	polecatMgr idlePolecatReuse,
 	env idleReuseEnv,
 	townRoot, rigName string,
 	dirCap int,
 	opts SlingSpawnOptions,
-	recordRespawn func(),
+	recordRespawn func() int,
 ) (*SpawnedPolecatInfo, error) {
 	reused, err := reuseIdlePolecatForSlingWith(polecatMgr, env, rigName, opts, recordRespawn)
 	if err != nil || reused != nil {
@@ -392,7 +401,7 @@ func reuseIdlePolecatForSlingWith(
 	env idleReuseEnv,
 	rigName string,
 	opts SlingSpawnOptions,
-	recordRespawn func(),
+	recordRespawn func() int,
 ) (*SpawnedPolecatInfo, error) {
 	polecatName := opts.Name
 	heldIssue := "" // work the named polecat already holds, for the refusal hint
@@ -539,7 +548,7 @@ func reuseIdlePolecatForSlingWith(
 	fmt.Printf("%s Polecat %s reused (idle → working, session start deferred)\n", style.Bold.Render("✓"), polecatName)
 	env.step("reuse")
 	env.logSpawn(rigName, polecatName)
-	recordRespawn()
+	respawnCount := recordRespawn()
 
 	return &SpawnedPolecatInfo{
 		RigName:     rigName,
@@ -559,6 +568,7 @@ func reuseIdlePolecatForSlingWith(
 		HookBead:      opts.HookBead,
 		account:       opts.Account,
 		agent:         opts.Agent,
+		respawnCount:  respawnCount,
 	}, nil
 }
 
@@ -968,12 +978,16 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	// A count that cannot be recorded is reported, not rolled back: the polecat
 	// is already attached, and ShouldBlockRespawn has already refused the sling
 	// if the state file or its lock is unreadable (gt-u3hc1).
-	recordRespawn := func() {
-		if opts.HookBead != "" && !opts.Force {
-			if _, err := polecat.RecordBeadRespawn(townRoot, opts.HookBead); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: recording respawn of %s: %v\n", opts.HookBead, err)
-			}
+	recordRespawn := func() int {
+		if opts.HookBead == "" || opts.Force {
+			return 0
 		}
+		count, err := polecat.RecordBeadRespawn(townRoot, opts.HookBead)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: recording respawn of %s: %v\n", opts.HookBead, err)
+			return 0
+		}
+		return count
 	}
 	if opts.HookBead != "" && !opts.Force {
 		// A sling that follows a round which submitted is a round of work, not a
@@ -1054,7 +1068,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 
 	// Log spawn event to activity feed
 	_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
-	recordRespawn()
+	respawnCount := recordRespawn()
 
 	effectiveBranch := resolveSpawnBaseBranch(baseBranch, r.DefaultBranch())
 
@@ -1074,6 +1088,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		HookBead:      opts.HookBead,
 		account:       opts.Account,
 		agent:         opts.Agent,
+		respawnCount:  respawnCount,
 	}, nil
 }
 
@@ -1082,9 +1097,45 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 // sees its work when gt prime runs on session start.
 // Returns the pane ID after session start.
 func (s *SpawnedPolecatInfo) StartSession() (string, error) {
-	pane, err := s.startSession()
-	s.noteStartOutcome(err)
-	return pane, err
+	return s.finishStart(s.startSession())
+}
+
+// finishStart is what the start outcome does to the bead: the failure record a
+// later sling reads, and the count an image-drift refusal did not spend.
+func (s *SpawnedPolecatInfo) finishStart(pane string, startErr error) (string, error) {
+	s.noteStartOutcome(startErr)
+	s.giveBackDriftRespawn(startErr)
+	return pane, startErr
+}
+
+// giveBackDriftRespawn hands back the count this spawn recorded when its
+// session start was refused because the sandbox image lags the installed gt.
+// That refusal is the seat's precondition, and the dispatcher defers the bead
+// and slings it again next tick: a count per tick reaches the respawn limit
+// during one image rebuild, and the sling after it is refused with the failure
+// label the deferral exists to avoid (gt-2qdzf, gt-cjmt5). Every other start
+// failure keeps its count.
+func (s *SpawnedPolecatInfo) giveBackDriftRespawn(startErr error) {
+	if s == nil || s.HookBead == "" {
+		return
+	}
+	townRoot, err := s.town()
+	if err != nil {
+		return
+	}
+	s.giveBackDriftRespawnIn(townRoot, startErr)
+}
+
+// giveBackDriftRespawnIn is giveBackDriftRespawn for the town at townRoot.
+func (s *SpawnedPolecatInfo) giveBackDriftRespawnIn(townRoot string, startErr error) {
+	if s.HookBead == "" || s.respawnCount == 0 || !errors.Is(startErr, session.ErrImageDrift) {
+		return
+	}
+	if err := polecat.GiveBackBeadRespawn(townRoot, s.HookBead, s.respawnCount); err != nil {
+		style.PrintWarning("could not give back the respawn of %s for an image-drift deferral: %v", s.HookBead, err)
+		return
+	}
+	s.respawnCount = 0
 }
 
 // noteStartOutcome records a failed session start against the bead, and
