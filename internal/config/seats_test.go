@@ -442,14 +442,14 @@ func TestSandboxesFromSettingsFile(t *testing.T) {
 		var ts TownSettings
 		err := DecodeJSONFile("settings/config.json", []byte(`{"type":"town-settings","version":1,
 			"sandboxes":{"polecat-default":{"image":"gastown-polecat:dev","policy":"deploy/polecat/policy.yaml",
-				"providers":["deepseek"],"cpu":"4","memory":"8Gi","cache_volume":"{rig}-cache"}},
+				"providers":["deepseek"],"cpu":"4","memory":"8Gi","cache_volume":"{rig}-cache","driver":"docker"}},
 			"polecat_pool":{"seats":{"deepseek-flash":{"cap":1,"backend":"openshell","sandbox":"polecat-default"}}}}`), &ts)
 		if err != nil {
 			t.Fatal(err)
 		}
 		p := ts.Sandboxes["polecat-default"]
 		if p.Image != "gastown-polecat:dev" || p.Policy != "deploy/polecat/policy.yaml" || len(p.Providers) != 1 ||
-			p.CPU != "4" || p.Memory != "8Gi" || p.CacheVolume != "{rig}-cache" {
+			p.CPU != "4" || p.Memory != "8Gi" || p.CacheVolume != "{rig}-cache" || p.Driver != "docker" {
 			t.Fatalf("profile = %+v", p)
 		}
 		seats, err := Seats(&ts, nil)
@@ -483,6 +483,12 @@ func TestSandboxProfileWithDefaults(t *testing.T) {
 	if set.Gateway != "g" || set.ControlPlaneHost != "h" {
 		t.Fatalf("set fields overwritten: %q, %q", set.Gateway, set.ControlPlaneHost)
 	}
+	if got.Driver != "docker" {
+		t.Fatalf("default driver = %q, want docker", got.Driver)
+	}
+	if k := (SandboxProfile{Driver: "kubernetes"}).WithDefaults(); k.Driver != "kubernetes" {
+		t.Fatalf("set driver overwritten: %q", k.Driver)
+	}
 }
 
 func TestSandboxProfileValidate(t *testing.T) {
@@ -514,6 +520,12 @@ func TestSandboxProfileValidate(t *testing.T) {
 		{"plain byte count memory", func(p *SandboxProfile) { p.Memory = "1048576" }, ""},
 		{"lower case binary kilo memory", func(p *SandboxProfile) { p.Memory = "512ki" }, `sandboxes.p.memory "512ki": want a k8s memory quantity such as "8Gi"`},
 		{"upper case decimal kilo memory", func(p *SandboxProfile) { p.Memory = "512K" }, `sandboxes.p.memory "512K": want a k8s memory quantity such as "8Gi"`},
+		{"driver unset", func(p *SandboxProfile) { p.Driver = "" }, ""},
+		{"docker driver with a cache volume", func(p *SandboxProfile) { p.Driver = "docker"; p.CacheVolume = "{rig}-cache" }, ""},
+		{"kubernetes driver", func(p *SandboxProfile) { p.Driver = "kubernetes" }, ""},
+		{"unknown driver", func(p *SandboxProfile) { p.Driver = "podman" }, `sandboxes.p.driver "podman": want docker or kubernetes`},
+		{"driver in the wrong case", func(p *SandboxProfile) { p.Driver = "Kubernetes" }, `sandboxes.p.driver "Kubernetes": want docker or kubernetes`},
+		{"kubernetes driver with a cache volume", func(p *SandboxProfile) { p.Driver = "kubernetes"; p.CacheVolume = "{rig}-cache" }, `sandboxes.p.cache_volume "{rig}-cache": a kubernetes driver has no docker volumes; remove it`},
 		{"unit without a number memory", func(p *SandboxProfile) { p.Memory = "Gi" }, `sandboxes.p.memory "Gi": want a k8s memory quantity such as "8Gi"`},
 	}
 	for _, c := range cases {

@@ -353,8 +353,9 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	}
 
 	// Before the push and the create, as the image check is: a missing cache
-	// volume that cannot be made leaves nothing behind (gt-td6pl).
-	if b.profile.CacheVolume != "" {
+	// volume that cannot be made leaves nothing behind (gt-td6pl). A kubernetes
+	// gateway has no docker volumes, so it does none of this.
+	if b.usesDockerVolumes() {
 		if err := ensureCacheVolume(ctx, b.docker, cacheVolumeName(b.profile.CacheVolume, spec.Rig)); err != nil {
 			return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 		}
@@ -558,7 +559,7 @@ func (b *openshellBackend) createSpec(spec SpawnSpec) (sandbox.CreateSpec, error
 		Command:    []string{"sh", "-c", sandboxMainScript, "sh", spec.Session},
 		NoKeep:     true,
 	}
-	if b.profile.CacheVolume != "" {
+	if b.usesDockerVolumes() {
 		cfg, err := cacheDriverConfig(b.profile.CacheVolume, spec.Rig)
 		if err != nil {
 			return cs, err
@@ -566,6 +567,12 @@ func (b *openshellBackend) createSpec(spec SpawnSpec) (sandbox.CreateSpec, error
 		cs.DriverConfigJSON = cfg
 	}
 	return cs, nil
+}
+
+// usesDockerVolumes reports whether this seat mounts a docker cache volume:
+// the profile names one and its gateway runs the docker driver.
+func (b *openshellBackend) usesDockerVolumes() bool {
+	return b.profile.CacheVolume != "" && b.profile.Driver != DriverKubernetes
 }
 
 // contract is the environment the sandbox carries for the gt and bd it runs:

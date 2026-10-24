@@ -51,4 +51,15 @@ func TestSessionBackendForAgentFollowsTheSeat(t *testing.T) {
 	if got.Name != "polecat-default" || got.Image != "gastown-polecat:dev" || got.Gateway != "openshell" || got.ControlPlaneHost != "host.docker.internal" || strings.Join(got.Providers, ",") != "deepseek" {
 		t.Fatalf("profile handed to the backend = %+v", got)
 	}
+	if got.Driver != config.SandboxDriverDocker {
+		t.Fatalf("Driver = %q, want the docker default", got.Driver)
+	}
+
+	ts.Sandboxes["polecat-default"] = config.SandboxProfile{Image: "i", Policy: "p.yaml", Driver: config.SandboxDriverKubernetes}
+	if _, err := sessionBackendForAgentWith(resolve, ts, town, "deepseek-flash-sandbox", host); err != nil {
+		t.Fatal(err)
+	}
+	if got.Driver != session.DriverKubernetes {
+		t.Fatalf("Driver = %q, want session.DriverKubernetes: the two constants must agree", got.Driver)
+	}
 }

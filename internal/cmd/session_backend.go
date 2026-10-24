@@ -45,6 +45,7 @@ func sessionBackendForAgentWith(resolve backendResolver, ts *config.TownSettings
 				Memory:           cp.Memory,
 				ControlPlaneHost: cp.ControlPlaneHost,
 				CacheVolume:      cp.CacheVolume,
+				Driver:           cp.Driver,
 			}
 		}
 		return resolve(seat.Agent, seat.Backend, p, townRoot, host)

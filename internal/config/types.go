@@ -1679,12 +1679,20 @@ type SandboxProfile struct {
 	Memory           string   `json:"memory,omitempty"`       // e.g. "8Gi"
 	ControlPlaneHost string   `json:"control_plane_host"`     // default "host.docker.internal"
 	CacheVolume      string   `json:"cache_volume,omitempty"` // "{rig}" expands to the rig name
+	Driver           string   `json:"driver,omitempty"`       // the gateway's compute driver: "docker" (default) or "kubernetes"
 }
 
 // Defaults for the SandboxProfile fields a profile may leave unset.
 const (
 	defaultSandboxGateway          = "openshell"
 	defaultSandboxControlPlaneHost = "host.docker.internal"
+)
+
+// The compute drivers a profile's gateway may run. A kubernetes gateway has no
+// Docker volumes, so the backend skips the cache volume work for it.
+const (
+	SandboxDriverDocker     = "docker"
+	SandboxDriverKubernetes = "kubernetes"
 )
 
 // WithDefaults returns p with the unset defaulted fields filled in.
@@ -1695,13 +1703,18 @@ func (p SandboxProfile) WithDefaults() SandboxProfile {
 	if p.ControlPlaneHost == "" {
 		p.ControlPlaneHost = defaultSandboxControlPlaneHost
 	}
+	if p.Driver == "" {
+		p.Driver = SandboxDriverDocker
+	}
 	return p
 }
 
 // Validate reports the first field of p that is unset or malformed, naming the
 // profile by its key name in TownSettings.Sandboxes. Image and Policy are
 // required; Policy must stay inside the rig repo root (relative, no ".." escape); each provider must be
-// named; CPU and Memory, when set, must be k8s quantities.
+// named; CPU and Memory, when set, must be k8s quantities; Driver, when set,
+// is docker or kubernetes, and a kubernetes profile sets no CacheVolume (a
+// Docker volume does not exist there; a k8s cache is a separate design).
 func (p SandboxProfile) Validate(name string) error {
 	if p.Image == "" {
 		return fmt.Errorf("sandboxes.%s.image: required", name)
@@ -1722,6 +1735,15 @@ func (p SandboxProfile) Validate(name string) error {
 	}
 	if p.Memory != "" && !sandboxMemoryRe.MatchString(p.Memory) {
 		return fmt.Errorf("sandboxes.%s.memory %q: want a k8s memory quantity such as \"8Gi\"", name, p.Memory)
+	}
+	switch p.Driver {
+	case "", SandboxDriverDocker:
+	case SandboxDriverKubernetes:
+		if p.CacheVolume != "" {
+			return fmt.Errorf("sandboxes.%s.cache_volume %q: a kubernetes driver has no docker volumes; remove it", name, p.CacheVolume)
+		}
+	default:
+		return fmt.Errorf("sandboxes.%s.driver %q: want docker or kubernetes", name, p.Driver)
 	}
 	return nil
 }
