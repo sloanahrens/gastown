@@ -42,7 +42,25 @@ type specSlingFlight struct {
 
 	job     json.RawMessage
 	started time.Time
+	// tickSeq is the tick that planned the sling: its outcome is counted back
+	// into that tick's record and idle run (gt-pk2q8).
+	tickSeq uint64
 }
+
+// specSlingResult is how a background sling ended, as the tick that planned it
+// counts it: the tick counts every job it hands over as dispatched until the
+// sling reports back (gt-pk2q8).
+type specSlingResult int
+
+const (
+	// specSlingStarted hooked its bead, so the tick's dispatched count stands.
+	specSlingStarted specSlingResult = iota
+	// specSlingLost ran and came back deferred or failed without hooking its
+	// bead: the tick attempted the sling and lost it.
+	specSlingLost
+	// specSlingNotStarted never ran, so the tick dispatched nothing.
+	specSlingNotStarted
+)
 
 // specSlings is the in-flight set, keyed by bead: one running sling per bead.
 type specSlings struct {
@@ -131,22 +149,36 @@ func (d *Daemon) specTickArgs() ([]string, error) {
 // startSpecSlings runs each job a tick handed back in the background. It
 // starts none while an upgrade restart is pending: the restart would cut it
 // mid-sling (gt-cbaoy), and the bead stays ready for the new daemon's first
-// tick.
-func (d *Daemon) startSpecSlings(jobs []json.RawMessage) {
+// tick. A job it does not run was counted as dispatched by the tick, so its
+// outcome is fed back as not started (gt-pk2q8).
+func (d *Daemon) startSpecSlings(jobs []json.RawMessage, tickSeq uint64) {
 	for _, raw := range jobs {
 		var f specSlingFlight
+		f.tickSeq = tickSeq
 		if err := json.Unmarshal(raw, &f); err != nil || f.Bead == "" {
 			d.logger.Printf("spec_dispatch: sling job unreadable, not run: %v", err)
+			// The job names no bead, so each reader drops one lost dispatch
+			// without naming which (gt-pk2q8).
+			reason := "the job names no bead"
+			if err != nil {
+				reason = err.Error()
+			}
+			d.feedSpecSlingOutcome(f, specSlingNotStarted, specDispatchTickEntry{
+				Line: "sling job unreadable, not run: " + reason})
 			continue
 		}
 		if d.upgradeRestartPending.Load() {
-			d.logger.Printf("spec_dispatch: %s: sling not started: an upgrade restart is pending; the bead stays ready for the next tick after it", f.Bead)
+			reason := "an upgrade restart is pending; the bead stays ready for the next tick after it"
+			d.logger.Printf("spec_dispatch: %s: sling not started: %s", f.Bead, reason)
+			d.feedSpecSlingOutcome(f, specSlingNotStarted, specSlingNotStartedEntry(f.Bead, reason))
 			continue
 		}
 		f.job = raw
 		f.started = d.clk().Now()
 		if !d.specSlings.begin(f) {
-			d.logger.Printf("spec_dispatch: %s: sling not started: one is already running for it", f.Bead)
+			reason := "one is already running for it"
+			d.logger.Printf("spec_dispatch: %s: sling not started: %s", f.Bead, reason)
+			d.feedSpecSlingOutcome(f, specSlingNotStarted, specSlingNotStartedEntry(f.Bead, reason))
 			continue
 		}
 		d.specDispatchCycles.Add(1)
@@ -158,11 +190,23 @@ func (d *Daemon) startSpecSlings(jobs []json.RawMessage) {
 	}
 }
 
-// runSpecSling runs one sling job and logs how it ended. A sling that fails
-// inside `gt spec sling` is labeled and annotated by it, as a failed foreground
-// sling is (spec.go specApplyOutcome). A sling whose process is killed at its
-// bound or exits with no report never reached those writes, so the daemon makes
-// them (failSpecSling).
+// specSlingNotStartedReason heads the entry of a planned bead the daemon did
+// not start, which the idle rule reads as work waiting on neither the
+// dispatcher nor a person (gt-pk2q8).
+const specSlingNotStartedReason = "sling not started: "
+
+// specSlingNotStartedEntry is the waiting-work entry a job that never ran
+// leaves on its tick.
+func specSlingNotStartedEntry(bead, reason string) specDispatchTickEntry {
+	return specDispatchTickEntry{Bead: bead, Line: bead + ": " + specSlingNotStartedReason + reason}
+}
+
+// runSpecSling runs one sling job, logs how it ended and feeds the outcome back
+// to the tick that planned it. A sling that fails inside `gt spec sling` is
+// labeled and annotated by it, as a failed foreground sling is (spec.go
+// specApplyOutcome). A sling whose process is killed at its bound or exits with
+// no report never reached those writes, so the daemon makes them
+// (failSpecSling).
 func (d *Daemon) runSpecSling(f specSlingFlight) {
 	ctx, cancel := context.WithTimeout(d.ctx, specSlingBound())
 	defer cancel()
@@ -176,10 +220,87 @@ func (d *Daemon) runSpecSling(f specSlingFlight) {
 		reason := fmt.Sprintf("sling process failed after %s of its %s bound: %v %s", elapsed, specSlingBound(), err, lastLine(string(stderr)))
 		d.logger.Printf("spec_dispatch: %s: %s", f.Bead, reason)
 		d.failSpecSling(f, reason)
+		d.feedSpecSlingOutcome(f, specSlingLost, specDispatchTickEntry{Bead: f.Bead, Rig: f.Rig,
+			Line: f.Bead + ": sling process failed, left unassigned: " + reason})
 		return
 	}
-	for _, line := range d.formatSpecSlingReport(out) {
+	r, perr := parseSpecDispatchReport(out)
+	for _, line := range d.formatSpecSlingReport(r, perr) {
 		d.logger.Printf("spec_dispatch: %s (sling took %s)", line, elapsed)
+	}
+	// An unreadable report cannot show the bead hooked, so the tick must not
+	// keep counting it dispatched: the sling is a loss the health records see
+	// (gt-pk2q8).
+	if perr != nil {
+		d.feedSpecSlingOutcome(f, specSlingLost, specDispatchTickEntry{Bead: f.Bead, Rig: f.Rig,
+			Line: f.Bead + ": sling output unreadable: " + perr.Error()})
+		return
+	}
+	result, entry := specSlingResultOf(r, f.Bead)
+	d.feedSpecSlingOutcome(f, result, entry)
+}
+
+// specSlingResultOf reads how one sling job ended out of its report: `gt spec
+// sling --job` makes one decision about its bead, and a report naming none of
+// them says the bead was not hooked.
+func specSlingResultOf(r specDispatchTickReport, bead string) (specSlingResult, specDispatchTickEntry) {
+	var entry specDispatchTickEntry
+	switch {
+	case len(r.Dispatched) > 0:
+		return specSlingStarted, r.Dispatched[0]
+	case len(r.Failed) > 0:
+		entry = r.Failed[0]
+	case len(r.Skipped) > 0:
+		entry = r.Skipped[0]
+	case len(r.Deferred) > 0:
+		entry = r.Deferred[0]
+	case r.Hold != "":
+		return specSlingNotStarted, specDispatchTickEntry{Bead: bead, Line: bead + ": held: sling not made: " + r.Hold}
+	default:
+		return specSlingLost, specDispatchTickEntry{Bead: bead, Line: bead + ": sling reported no decision"}
+	}
+	if entry.Bead == "" {
+		entry.Bead = bead
+	}
+	if entry.Line == "" {
+		entry.Line = bead + ": sling did not start"
+	}
+	return specSlingLost, entry
+}
+
+// feedSpecSlingOutcome records one background sling's result where the two
+// health readers keep it: the tick record townhealth judges, and the idle run
+// the attention rule judges (gt-pk2q8).
+func (d *Daemon) feedSpecSlingOutcome(f specSlingFlight, result specSlingResult, entry specDispatchTickEntry) {
+	d.correctDispatchTick(f.tickSeq, result)
+	d.dispatchIdle.resolveSling(f.tickSeq, f.Bead, entry, result)
+}
+
+// correctDispatchTick takes one sling's outcome out of the tick that planned
+// it. A sling that never started joins the tick's skipped count; one that ran
+// and was lost joins its failed count, which the dispatch field reads as a tick
+// that attempted and lost rather than one that turned a bead away on purpose
+// (gt-pk2q8).
+func (d *Daemon) correctDispatchTick(seq uint64, result specSlingResult) {
+	if result == specSlingStarted || seq == 0 {
+		return
+	}
+	d.dispatchTicksMu.Lock()
+	defer d.dispatchTicksMu.Unlock()
+	for i := len(d.dispatchTicks) - 1; i >= 0; i-- {
+		t := &d.dispatchTicks[i]
+		if t.seq != seq {
+			continue
+		}
+		if t.Dispatched > 0 {
+			t.Dispatched--
+		}
+		if result == specSlingLost {
+			t.Failed++
+		} else {
+			t.Skipped++
+		}
+		return
 	}
 }
 
@@ -207,10 +328,9 @@ func (d *Daemon) failSpecSling(f specSlingFlight, reason string) {
 
 // formatSpecSlingReport renders a sling's report as log lines: one per entry,
 // under the name the tick's line gives the same entry.
-func (d *Daemon) formatSpecSlingReport(out []byte) []string {
-	r, err := parseSpecDispatchReport(out)
-	if err != nil {
-		return []string{fmt.Sprintf("unparseable sling output (%v)", err)}
+func (d *Daemon) formatSpecSlingReport(r specDispatchTickReport, parseErr error) []string {
+	if parseErr != nil {
+		return []string{fmt.Sprintf("unparseable sling output (%v)", parseErr)}
 	}
 	if r.Hold != "" {
 		return []string{"held: sling not made: " + r.Hold}

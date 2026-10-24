@@ -489,9 +489,12 @@ type Daemon struct {
 
 	// dispatchTicks is the spec_dispatch ticker's recent tick decisions,
 	// oldest first, which townhealth's dispatch field judges to tell a
-	// dispatcher that is off from one that is stalled (gt-xiw7o).
+	// dispatcher that is off from one that is stalled (gt-xiw7o). The tick's
+	// seq is what a background sling's outcome names to correct the counts it
+	// was included in (gt-pk2q8).
 	dispatchTicksMu sync.Mutex
-	dispatchTicks   []townhealth.DispatchTick
+	dispatchTicks   []recordedDispatchTick
+	dispatchTickSeq atomic.Uint64
 
 	// dispatchIdle counts the ticks that had a free seat and a dispatchable
 	// bead and started nothing, which the dispatch.idle rule judges (gt-wil0h).

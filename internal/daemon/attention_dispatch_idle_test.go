@@ -174,6 +174,119 @@ func TestDispatchIdleStaysFreshForASlowTicker(t *testing.T) {
 	}
 }
 
+// gt-pk2q8: a tick that hands its sling to the background counts as
+// dispatched while the sling runs, and as an idle tick once the sling comes
+// back without starting: the run is of ticks that started nothing.
+func TestDispatchIdleCountsABackgroundSlingThatNeverStarts(t *testing.T) {
+	t.Parallel()
+	r := newIdleRig(t)
+	var seqs []uint64
+	for seq := uint64(1); seq <= attentionDispatchIdleTicks; seq++ {
+		r.now = r.now.Add(time.Minute)
+		rep := idleTick(overlapLine)
+		rep.seq = seq
+		rep.Dispatched = []specDispatchTickEntry{{Bead: "gt-sling", Line: "gt-sling: sling to gastown/p started in the background"}}
+		r.tr.Observe(rep, r.now)
+		seqs = append(seqs, seq)
+	}
+	if got := r.tr.Status().Streak; got != 0 {
+		t.Fatalf("Streak = %d while the slings are still in flight, want 0", got)
+	}
+	if items := r.items(t); len(items) != 0 {
+		t.Fatalf("raised while the slings are still in flight: %+v", items)
+	}
+
+	deferred := specDispatchTickEntry{Bead: "gt-sling", Line: "gt-sling: sling deferred, the sandbox image lags the installed gt: image drift"}
+	for _, seq := range seqs {
+		r.tr.resolveSling(seq, "gt-sling", deferred, specSlingLost)
+	}
+	if got := r.tr.Status().Streak; got != attentionDispatchIdleTicks {
+		t.Fatalf("Streak = %d after every sling came back deferred, want %d", got, attentionDispatchIdleTicks)
+	}
+	items := r.items(t)
+	if len(items) != 1 || !strings.Contains(items[0].Summary, "sling deferred, the sandbox image lags the installed gt") {
+		t.Fatalf("items = %+v, want one naming the deferral", items)
+	}
+}
+
+// A sling that hooked its bead leaves its tick a dispatched tick, so a run of
+// them never raises the idle rule (gt-pk2q8).
+func TestDispatchIdleLeavesATickWhoseSlingStarted(t *testing.T) {
+	t.Parallel()
+	r := newIdleRig(t)
+	for seq := uint64(1); seq <= attentionDispatchIdleTicks+1; seq++ {
+		r.now = r.now.Add(time.Minute)
+		rep := idleTick(overlapLine)
+		rep.seq = seq
+		rep.Dispatched = []specDispatchTickEntry{{Bead: "gt-sling", Line: "gt-sling: sling to gastown/p started in the background"}}
+		r.tr.Observe(rep, r.now)
+		r.tr.resolveSling(seq, "gt-sling", rep.Dispatched[0], specSlingStarted)
+	}
+	if got := r.tr.Status().Streak; got != 0 {
+		t.Fatalf("Streak = %d after every sling started, want 0", got)
+	}
+	if items := r.items(t); len(items) != 0 {
+		t.Fatalf("raised: %+v", items)
+	}
+}
+
+// gt-pk2q8: Reset ends the run where the ticker stopped ticking, and the ticks
+// before it stay for the slings still out to amend. A late outcome must not
+// bridge the reset: the ticks either side of it are not one run.
+func TestDispatchIdleResetEndsTheRunForALateSlingOutcome(t *testing.T) {
+	t.Parallel()
+	r := newIdleRig(t)
+	var rep specDispatchTickReport
+	for seq := uint64(1); seq <= attentionDispatchIdleTicks; seq++ {
+		r.now = r.now.Add(time.Minute)
+		rep = idleTick(overlapLine)
+		rep.seq = seq
+		rep.Dispatched = []specDispatchTickEntry{{Bead: "gt-sling", Line: "gt-sling: sling to gastown/p started in the background"}}
+		r.tr.Observe(rep, r.now)
+	}
+	deferred := specDispatchTickEntry{Bead: "gt-sling", Line: "gt-sling: sling deferred: image drift"}
+	for seq := uint64(1); seq <= attentionDispatchIdleTicks; seq++ {
+		r.tr.resolveSling(seq, "gt-sling", deferred, specSlingLost)
+	}
+	if got := r.tr.Status().Streak; got != attentionDispatchIdleTicks {
+		t.Fatalf("Streak = %d after every sling came back deferred, want %d", got, attentionDispatchIdleTicks)
+	}
+
+	r.tr.Reset()
+	if got := r.tr.Status().Streak; got != 0 {
+		t.Fatalf("Streak = %d after a reset, want 0", got)
+	}
+	r.tr.resolveSling(uint64(attentionDispatchIdleTicks), "gt-sling", deferred, specSlingLost)
+	if got := r.tr.Status().Streak; got != 0 {
+		t.Fatalf("Streak = %d after a late outcome, want the reset to hold", got)
+	}
+
+	// The run rebuilds from the ticks after the reset, not from the ones before.
+	r.observe(idleTick(overlapLine), 1)
+	if got := r.tr.Status().Streak; got != 1 {
+		t.Fatalf("Streak = %d after one idle tick past the reset, want 1", got)
+	}
+}
+
+// The idle run outlives the kept observations, so a long idle streak still
+// reads as long after the trim (gt-pk2q8).
+func TestDispatchIdleStreakSurvivesTheTrim(t *testing.T) {
+	t.Parallel()
+	r := newIdleRig(t)
+	want := attentionDispatchIdleKept + attentionDispatchIdleTicks
+	r.observe(idleTick(overlapLine), want)
+	if got := r.tr.Status().Streak; got != want {
+		t.Fatalf("Streak = %d after %d idle ticks, want %d", got, want, want)
+	}
+	// A dispatch after the trim still ends the run, base included.
+	dispatched := idleTick(overlapLine)
+	dispatched.Dispatched = []specDispatchTickEntry{{Bead: "gt-fffff", Line: "gt-fffff: slung"}}
+	r.observe(dispatched, 1)
+	if got := r.tr.Status().Streak; got != 0 {
+		t.Fatalf("Streak = %d after a dispatch, want 0", got)
+	}
+}
+
 func TestDispatchIdleNamesOnlyTheTopThreeReasons(t *testing.T) {
 	t.Parallel()
 	r := newIdleRig(t)
@@ -430,6 +543,7 @@ func TestDispatchableWaitingIgnoresReasonsSpecDispatchWrites(t *testing.T) {
 		"no seat":                    specdispatch.SkipNoSeat + " claude-sonnet 2/2",
 		"rig hold":                   specdispatch.SkipRigHold + " paused",
 		"per-tick limit":             specdispatch.SkipPerTickLimit + " 2 reached",
+		"not started":                specSlingNotStartedReason + "one is already running for it",
 	} {
 		if dispatchableSkip(reason) {
 			t.Errorf("%s: %q counts as dispatchable", name, reason)
