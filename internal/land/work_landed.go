@@ -230,9 +230,11 @@ func worktreeMatchesLandingRecord(g WorkLandedRepo, head, target string, issue *
 	if landedRef == "" {
 		landedRef = strings.TrimSpace(rec.LandedCommit)
 	}
-	if _, err := g.Rev(landedRef); err != nil {
+	// rev-parse echoes a full SHA whether or not the object exists, so the
+	// check peels it to a commit, which reads the object (gt-3xegd).
+	if _, err := g.Rev(landedRef + "^{commit}"); err != nil {
 		landedRef = strings.TrimSpace(rec.LandedCommit)
-		if _, err := g.Rev(landedRef); err != nil {
+		if _, err := g.Rev(landedRef + "^{commit}"); err != nil {
 			return probeFailed(fmt.Sprintf("landing record of %s names no commit this repository holds", issue.ID))
 		}
 	}
