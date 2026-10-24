@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -103,6 +104,46 @@ func TestBeadNoteAndUpdate(t *testing.T) {
 	}
 	if err := v.update(is.ID, beads.UpdateOptions{}); err == nil {
 		t.Error("an empty update succeeded")
+	}
+}
+
+// untouchableStore fails the test on any Update, and panics on any other
+// method the embedded nil Client would be asked for, so a call that reaches
+// the store before the refusal cannot pass unnoticed.
+type untouchableStore struct {
+	beads.Client
+	t *testing.T
+}
+
+func (s untouchableStore) Update(id string, _ beads.UpdateOptions) error {
+	s.t.Errorf("update of %s reached the store", id)
+	return nil
+}
+
+func TestBeadUpdateRefusesBlankAcceptance(t *testing.T) {
+	t.Parallel()
+	for _, blank := range []string{"", "   ", "\n\t"} {
+		t.Run(fmt.Sprintf("%q", blank), func(t *testing.T) {
+			t.Parallel()
+			fake := beadsfake.New()
+			is := mustCreateBead(t, fake, beads.CreateOptions{Title: "work"})
+			criteria := "- [ ] unit tests pass"
+			if err := fake.Update(is.ID, beads.UpdateOptions{Acceptance: &criteria}); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			v := &beadVerbs{client: untouchableStore{Client: fake, t: t}, actor: "me", out: &out}
+			err := v.update(is.ID, beads.UpdateOptions{Acceptance: &blank})
+			if err == nil {
+				t.Fatal("a blank acceptance succeeded")
+			}
+			if !strings.Contains(err.Error(), "not changed") {
+				t.Errorf("error %q does not say the criteria were not changed", err)
+			}
+			if got := mustShowBead(t, fake, is.ID).AcceptanceCriteria; got != criteria {
+				t.Errorf("acceptance criteria = %q, want %q kept", got, criteria)
+			}
+		})
 	}
 }
 
