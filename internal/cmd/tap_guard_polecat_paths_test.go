@@ -1178,6 +1178,14 @@ func TestSegmentCommandWord(t *testing.T) {
 		{"substitution closed by a token with two parens", []string{"y=$(echo", "a))", "bash"}, "bash"},
 		{"plain assignment before a substitution assignment", []string{"A=1", "y=$(echo", "a)", "bash"}, "bash"},
 		{"subshell paren after a substitution assignment", []string{"y=$(echo", "a)", "(", "bash"}, "bash"},
+		// A launcher's own flags are not the command word: the command is the
+		// first word after them, and a value flag takes its value (gt-48buu).
+		{"env with a flag before the command", []string{"env", "-i", "bash"}, "bash"},
+		{"nice with a value flag before the command", []string{"nice", "-n", "5", "bash"}, "bash"},
+		{"time with a flag before the command", []string{"time", "-p", "bash"}, "bash"},
+		{"sudo with a value flag before the command", []string{"sudo", "-u", "alice", "bash"}, "bash"},
+		{"launcher flags then an env assignment", []string{"env", "-i", "X=1", "bash"}, "bash"},
+		{"launcher flags with nothing after them", []string{"env", "-i"}, ""},
 		// A substitution that never closes runs the text after its "$(" first.
 		{"substitution that never closes in the segment", []string{"y=$(echo", "a", "bash"}, "echo"},
 		{"substitution that never closes around a launcher", []string{"y=$(sudo", "rm", "-rf", "/"}, "sudo"},
