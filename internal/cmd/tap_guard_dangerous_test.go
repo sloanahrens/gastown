@@ -510,6 +510,9 @@ func TestMatchesPackageInstall(t *testing.T) {
 		{"install behind a heredoc operator with a strip-tabs tag", "<<- EOF apt-get install foo", true},
 		// The word after a redirection is the target, not the manager.
 		{"redirect target spelled like a manager", "2>apt-get install foo", false},
+		// The substitution body may hold unquoted words, and the whole word is
+		// stepped over (gt-8rxxy).
+		{"install behind a process substitution with a spaced body", "<(echo hi) apt-get install foo", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -624,6 +627,9 @@ func TestSegmentCommandWordPastRedirections(t *testing.T) {
 		{"herestring with a word", []string{"<<<", "make gate", "bash"}, "bash", nil},
 		{"process substitution ahead of the command", []string{"<(cmd)", "make", "gate"}, "make", []string{"gate"}},
 		{"output process substitution ahead of the command", []string{">(tee)", "apt-get", "install"}, "apt-get", []string{"install"}},
+		{"process substitution with a spaced body", []string{"<(echo", "hi)", "apt-get", "install"}, "apt-get", []string{"install"}},
+		{"process substitution whose body holds its own pair", []string{"<(echo", "$(date)", "hi)", "make"}, "make", nil},
+		{"process substitution that never closes", []string{"<(echo", "hi", "apt-get", "install"}, "", nil},
 		{"redirection only", []string{"2>/dev/null"}, "", nil},
 		{"operator with no target", []string{"2>"}, "", nil},
 		{"assignment after a redirection", []string{"2>/dev/null", "X=1", "make"}, "make", nil},

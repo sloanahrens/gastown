@@ -1302,34 +1302,60 @@ func heredocReaderIsShellInvoker(reader string) bool {
 }
 
 // segmentCommandWordPastRedirections is segmentCommandWord with the leading
-// redirections stepped over. The shell applies a redirection and then runs the
-// command behind it, so "2>/dev/null bash <<EOF" feeds bash the body exactly as
-// "bash <<EOF" does, but the redirection's word stood at command position and
-// hid the shell (gt-pdbzu). A redirection owns its target word, so the target
-// is stepped over with the operator. A process substitution word ahead of the
-// command is stepped over too: it names a file, never the command that runs.
+// redirections stepped over, so the command the shell runs behind them is
+// judged: "2>/dev/null bash <<EOF" feeds bash the body exactly as "bash <<EOF"
+// does (gt-pdbzu). A redirection owns its target word, so the target is stepped
+// over with the operator. A process substitution word ahead of the command is
+// stepped over whole: it names a file, never the command that runs (gt-8rxxy).
 func segmentCommandWordPastRedirections(segment []string) (string, []string) {
+	word, args, _ := segmentCommandWordPastRedirectionsKeepingLead(segment)
+	return word, args
+}
+
+// segmentCommandWordPastRedirectionsKeepingLead is
+// segmentCommandWordPastRedirections that also returns the redirection tokens
+// it stepped over, in shell order. A caller that reads what a redirection
+// carries needs them: a here-string ahead of a shell is the script it reads.
+func segmentCommandWordPastRedirectionsKeepingLead(segment []string) (word string, args, lead []string) {
 	for {
-		word, args := segmentCommandWord(segment)
+		word, args = segmentCommandWord(segment)
 		if processSubstitutionWord(word) {
-			if len(args) == 0 {
-				return "", nil
+			rest, closed := skipProcessSubstitution(append([]string{word}, args...))
+			if !closed {
+				return "", nil, lead
 			}
-			segment = args
+			segment = rest
 			continue
 		}
 		width := redirectionWidth(word)
 		if width == 0 {
-			return word, args
+			return word, args, lead
 		}
+		lead = append(lead, word)
 		segment = args
 		if width == 2 && len(segment) > 0 {
+			lead = append(lead, segment[0])
 			segment = segment[1:]
 		}
 		if len(segment) == 0 {
-			return "", nil
+			return "", nil, lead
 		}
 	}
+}
+
+// skipProcessSubstitution returns the tokens behind the "<(cmd)" or ">(cmd)"
+// substitution that starts at tokens[0], and false when it never closes. The
+// body may hold unquoted words, so the substitution is consumed by its
+// parentheses rather than by one token (gt-8rxxy).
+func skipProcessSubstitution(tokens []string) ([]string, bool) {
+	depth := 0
+	for i, word := range tokens {
+		depth += strings.Count(word, "(") - strings.Count(word, ")")
+		if depth <= 0 && strings.HasSuffix(word, ")") {
+			return tokens[i+1:], true
+		}
+	}
+	return nil, false
 }
 
 // redirectionWidth reports whether a token is a redirection and how many tokens
@@ -1340,9 +1366,7 @@ func segmentCommandWordPastRedirections(segment []string) (string, []string) {
 // Everything that marks a redirection apart from the file it names belongs to
 // the operator, so it is matched whole: the fd digits ("2>"), an fd allocated
 // by name ("{fd}>"), the "&" of "&>" and of ">&2", the doubled ">>" and "<<",
-// the strip-tabs "-" of "<<-", and the clobber "|" of ">|". Read as an
-// ordinary operator, the piece left over stood at command position and the
-// word behind the redirection went unseen (gt-8rxxy).
+// the strip-tabs "-" of "<<-", and the clobber "|" of ">|" (gt-8rxxy).
 //
 // A "<(cmd)" or ">(cmd)" process substitution is a word, not a redirection,
 // and redirectionWidth reports it as 0; segmentCommandWordPastRedirections
