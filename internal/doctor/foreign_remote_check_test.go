@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -100,9 +101,9 @@ func TestForeignRemoteCheck_IgnoresRelatedRemote(t *testing.T) {
 	}
 }
 
-// With no origin/main (origin only has master, or was never fetched) the
-// merge-base fails with exit 128, which is not "no common ancestor": no
-// remote may be reported foreign and Fix must have nothing to remove.
+// With no origin/main (origin only has master, or was never fetched) there is
+// nothing to compare against: the check skips, no remote is reported foreign,
+// and Fix must have nothing to remove.
 func TestForeignRemoteCheck_NoOriginMainIsNotForeign(t *testing.T) {
 	t.Parallel()
 	f, town := foreignTown(t)
@@ -119,8 +120,8 @@ func TestForeignRemoteCheck_NoOriginMainIsNotForeign(t *testing.T) {
 	if len(check.foreignRemotes) != 0 {
 		t.Fatalf("foreign remotes = %+v, want none", check.foreignRemotes)
 	}
-	if result.Status == StatusWarning {
-		t.Errorf("expected no warning without origin/main, got %v: %s", result.Status, result.Message)
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped without origin/main, got %v: %s", result.Status, result.Message)
 	}
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix failed: %v", err)
@@ -131,6 +132,62 @@ func TestForeignRemoteCheck_NoOriginMainIsNotForeign(t *testing.T) {
 	}
 	if len(remotes) != 3 {
 		t.Errorf("remotes after Fix = %v, want origin, gastown and backup kept", remotes)
+	}
+}
+
+// mergeBaseFails is the repo seam whose merge-base fails for a reason other
+// than "no common ancestor": a bad object or a timeout, not exit 1.
+type mergeBaseFails struct{ Repo }
+
+var errMergeBaseFailed = errors.New("fatal: unable to read tree")
+
+func (mergeBaseFails) MergeBase(string, string) (string, error) { return "", errMergeBaseFailed }
+
+// refExistsFails is the repo seam an unreadable repository answers on.
+type refExistsFails struct{ Repo }
+
+var errRefsUnreadable = errors.New("fatal: not a git repository")
+
+func (refExistsFails) RefExists(string) (bool, error) { return false, errRefsUnreadable }
+
+// A merge-base that fails for any reason other than "no common ancestor"
+// leaves the remote unknown, and unknown is not a pass.
+func TestForeignRemoteCheck_MergeBaseFailureIsSkipped(t *testing.T) {
+	t.Parallel()
+	f, town := foreignTown(t)
+	ctx := withGit(&CheckContext{TownRoot: town}, f)
+	ctx.openGit = func(gitDir, workDir string) Repo {
+		return mergeBaseFails{f.OpenWithDir(gitDir, workDir).(Repo)}
+	}
+	check := NewForeignRemoteCheck()
+	result := check.Run(ctx)
+
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped when merge-base fails, got %v: %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "gastown") {
+		t.Errorf("message = %q, want the unreadable remote named", result.Message)
+	}
+	if len(check.foreignRemotes) != 0 {
+		t.Errorf("foreign remotes = %+v, want none", check.foreignRemotes)
+	}
+}
+
+// Refs that cannot be read leave origin/main's existence unknown, not absent.
+func TestForeignRemoteCheck_RefExistsFailureIsSkipped(t *testing.T) {
+	t.Parallel()
+	f, town := foreignTown(t)
+	ctx := withGit(&CheckContext{TownRoot: town}, f)
+	ctx.openGit = func(gitDir, workDir string) Repo {
+		return refExistsFails{f.OpenWithDir(gitDir, workDir).(Repo)}
+	}
+	result := NewForeignRemoteCheck().Run(ctx)
+
+	if result.Status != StatusSkipped {
+		t.Errorf("expected StatusSkipped when refs cannot be read, got %v: %s", result.Status, result.Message)
+	}
+	if len(result.Details) == 0 || !strings.Contains(result.Details[0], errRefsUnreadable.Error()) {
+		t.Errorf("details = %v, want the RefExists error", result.Details)
 	}
 }
 
