@@ -50,6 +50,14 @@ func TestUncheckedAcceptanceTextMatchesLintItems(t *testing.T) {
 		{"fenced sample is not a criterion", "- [x] a\n```\n- [ ] sample\n```", nil},
 		{"tilde fence is not a criterion", "~~~\n* [ ] sample\n~~~\n- [ ] b", []string{"- [ ] b"}},
 		{"box after a fence still counts", "```\n- [ ] sample\n```\n* [ ] b", []string{"* [ ] b"}},
+		{"unclosed fence does not hide a later box", "- [x] a\n```\n- [ ] b", []string{"- [ ] b"}},
+		{"unclosed tilde fence does not hide a later box", "~~~\n* [ ] b", []string{"* [ ] b"}},
+		{"a fence closed by a longer run", "````\n- [ ] sample\n````\n- [ ] b", []string{"- [ ] b"}},
+		{"a shorter run does not close a longer fence", "````\n- [ ] sample\n```\n- [ ] sample\n````\n- [ ] b", []string{"- [ ] b"}},
+		{"a fence with an info string", "```go\n- [ ] sample\n```\n- [ ] b", []string{"- [ ] b"}},
+		{"an indented fence", "  ```\n- [ ] sample\n  ```\n- [ ] b", []string{"- [ ] b"}},
+		{"unclosed fence after a closed one", "```\n- [ ] sample\n```\n```\n- [ ] b", []string{"- [ ] b"}},
+		{"nested unchecked item counts", "- [x] a\n  * [ ] b", []string{"* [ ] b"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

@@ -23,19 +23,23 @@ type AcceptanceItem struct {
 }
 
 // AcceptanceItems returns the list items of text, in order. A fenced code
-// block is example text, so no line inside one is an item.
+// block is example text, so no line inside one is an item. A fence that is
+// never closed opens nothing: its line is ordinary text, so the items after it
+// still count and an unfinished criterion cannot hide behind it.
 func AcceptanceItems(text string) []AcceptanceItem {
 	var items []AcceptanceItem
+	lines := strings.Split(text, "\n")
 	fence := ""
-	for _, line := range strings.Split(text, "\n") {
+	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if fence != "" {
-			if marker := FenceMarker(trimmed); marker != "" && strings.HasPrefix(marker, fence) {
+			if closesFence(trimmed, fence) {
 				fence = ""
 			}
 			continue
 		}
-		if fence = FenceMarker(trimmed); fence != "" {
+		if marker := FenceMarker(trimmed); marker != "" && fenceCloses(lines[i+1:], marker) {
+			fence = marker
 			continue
 		}
 		m := acceptanceItemRe.FindStringSubmatch(trimmed)
@@ -50,6 +54,23 @@ func AcceptanceItems(text string) []AcceptanceItem {
 		items = append(items, item)
 	}
 	return items
+}
+
+// closesFence reports whether a trimmed line closes the fence that opened with
+// marker: the same character, at least as long.
+func closesFence(trimmed, marker string) bool {
+	closer := FenceMarker(trimmed)
+	return closer != "" && strings.HasPrefix(closer, marker)
+}
+
+// fenceCloses reports whether any of rest closes a fence opened with marker.
+func fenceCloses(rest []string, marker string) bool {
+	for _, line := range rest {
+		if closesFence(strings.TrimSpace(line), marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // FenceMarker reports the code fence a line opens: three or more backticks or
