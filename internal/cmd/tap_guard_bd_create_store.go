@@ -363,26 +363,16 @@ func isBdCreateSegment(segment []string) bool {
 }
 
 // inlineBeadsDir returns the BEADS_DIR a segment's leading assignments name,
-// looking past the clause and group openers bdCloseCommandTokens steps over so
-// `then BEADS_DIR=<town> bd create` is read too.
+// or "" when none does.
 func inlineBeadsDir(segment []string) string {
-	for _, tok := range segment {
-		if bdCloseLeadWords[tok] {
-			continue
-		}
-		if value, ok := strings.CutPrefix(tok, "BEADS_DIR="); ok {
-			return value
-		}
-		if !isEnvAssignment(tok) {
-			return ""
-		}
-	}
-	return ""
+	value, _ := inlineAssignment(segment, "BEADS_DIR")
+	return value
 }
 
 // inlineAssignment returns the value the last leading assignment of name in
-// segment gives, and whether there was one, reading past the same clause and
-// group openers inlineBeadsDir does.
+// segment gives, and whether there was one. It reads past the clause and group
+// openers bdCloseCommandTokens steps over, so `then BEADS_DIR=<town> bd create`
+// is read too. Last wins, as the shell applies repeated assignments in order.
 func inlineAssignment(segment []string, name string) (value string, ok bool) {
 	for _, tok := range segment {
 		if bdCloseLeadWords[tok] {

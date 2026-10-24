@@ -192,6 +192,10 @@ func TestTapGuardBdCreateStore(t *testing.T) {
 		{"--db rig outranks BEADS_DB town", polecatRole, b.worktree, `BEADS_DB=` + filepath.Join(b.town, ".beads", "x.db") + ` bd --db ` + filepath.Join(b.rigDir, "mayor", "rig", ".beads", "x.db") + ` create --title=x`, false},
 		{"--repo rig outranks BD_DB town", polecatRole, b.worktree, `BD_DB=` + filepath.Join(b.town, ".beads", "x.db") + ` bd create --title=x --repo ` + b.rigDir, false},
 		{"BEADS_DB rig with BEADS_DIR town", polecatRole, b.worktree, `BEADS_DB=` + filepath.Join(b.rigDir, "mayor", "rig", ".beads", "x.db") + ` BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` bd create --title=x`, true},
+		// Repeated assignments apply in order, so the last BEADS_DIR is the one
+		// bd reads.
+		{"last inline BEADS_DIR town", polecatRole, b.worktree, `BEADS_DIR=` + filepath.Join(b.rigDir, "mayor", "rig", ".beads") + ` BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` bd create --title=x`, true},
+		{"last inline BEADS_DIR rig", polecatRole, b.worktree, `BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` BEADS_DIR=` + filepath.Join(b.rigDir, "mayor", "rig", ".beads") + ` bd create --title=x`, false},
 		{"--global in the worktree", polecatRole, b.worktree, `bd --global create --title=x`, false},
 		{"--repo on a bd list", polecatRole, b.worktree, `bd list --repo ` + b.town, false},
 		{"cd town then -C worktree", polecatRole, b.worktree, `cd ` + b.town + ` && bd -C ` + b.worktree + ` create --title=x`, false},
@@ -275,6 +279,10 @@ func TestTapGuardBdCreateStoreProcessEnvDB(t *testing.T) {
 		{"--db rig outranks env BEADS_DB town", map[string]string{"BEADS_DB": townDB}, `bd --db ` + rigDB + ` create --title=x`, false},
 		{"BEADS_DB town with BEADS_DIR rig", map[string]string{"BEADS_DB": townDB, "BEADS_DIR": filepath.Join(b.rigDir, "mayor", "rig", ".beads")}, `bd create --title=x`, true},
 		{"BEADS_DB rig with BEADS_DIR town", map[string]string{"BEADS_DB": rigDB, "BEADS_DIR": filepath.Join(b.town, ".beads")}, `bd create --title=x`, true},
+		{"BD_DB town with BEADS_DIR rig", map[string]string{"BD_DB": townDB, "BEADS_DIR": filepath.Join(b.rigDir, "mayor", "rig", ".beads")}, `bd create --title=x`, true},
+		{"BD_DB rig with BEADS_DIR town", map[string]string{"BD_DB": rigDB, "BEADS_DIR": filepath.Join(b.town, ".beads")}, `bd create --title=x`, true},
+		{"inline BEADS_DIR rig replaces env town", map[string]string{"BEADS_DIR": filepath.Join(b.town, ".beads")}, `BEADS_DIR=` + filepath.Join(b.rigDir, "mayor", "rig", ".beads") + ` bd create --title=x`, false},
+		{"inline BEADS_DIR town replaces env rig", map[string]string{"BEADS_DIR": filepath.Join(b.rigDir, "mayor", "rig", ".beads")}, `BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` bd create --title=x`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
