@@ -151,6 +151,15 @@ done
 case "$*" in
   "gateway list")
     if [ "$town" = 1 ]; then
+      calls=$(cat "$STATE/town-list-calls" 2>/dev/null || echo 0)
+      echo $((calls + 1)) >"$STATE/town-list-calls"
+      # STUB_TOWN_LIST_FAILS=N fails the list from the Nth town call on, as a
+      # flaky CLI would. The earlier calls still answer, so the registration
+      # probe and the active-gateway probe can be failed separately.
+      if [ -n "${STUB_TOWN_LIST_FAILS:-}" ] && [ "$((calls + 1))" -ge "$STUB_TOWN_LIST_FAILS" ]; then
+        echo "Error: cannot read $HOME/.config/openshell" >&2
+        exit 1
+      fi
       # A header row and three columns, as the real list prints: the parser
       # must find the star and the name without relying on the row's width.
       echo "NAME URL STATUS"
@@ -195,6 +204,8 @@ case "$*" in
       [ -n "${STUB_TOWN_REMOVE_CLEARS_ACTIVE:-}" ] && rm -f "$STATE/town-active" "$HOME/.config/openshell/active_gateway"
       [ "$(cat "$STATE/town-active" 2>/dev/null)" = "$3" ] && rm -f "$STATE/town-active"
       [ "$(cat "$HOME/.config/openshell/active_gateway" 2>/dev/null)" = "$3" ] && rm -f "$HOME/.config/openshell/active_gateway"
+      # STUB_TOWN_REMOVE_SELECTS names a gateway the CLI selects when it removes another.
+      [ -z "${STUB_TOWN_REMOVE_SELECTS:-}" ] || town_active "$STUB_TOWN_REMOVE_SELECTS"
     else
       rm -f "$STATE/gw"
     fi
@@ -713,7 +724,44 @@ touch "$S/state/colima-running" "$S/state/cluster"
 run "$DOWN" STUB_TOWN_REMOVE_CLEARS_ACTIVE=1 STUB_SELECT_FAIL=1 --
 check "a failed reselect fails the run" test "$RC" -ne 0
 check "the failure names the gateway to select" contains "openshell gateway select docker" "$OUT_TEXT"
-check "no teardown runs when the selection cannot be restored" lacks "kind delete cluster" "$CALLS_LOG"
+check "the half-done removal still tears the cluster down" contains "kind delete cluster" "$CALLS_LOG"
+check "the k8s entry is gone" test "$(grep -cx k8s "$S/state/town-gw-list")" -eq 0
+
+echo "down stops before removal when the active gateway cannot be probed"
+scenario down_town_probe_fails
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\nk8s\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
+run "$DOWN" STUB_TOWN_LIST_FAILS=2 --
+check "down refuses" test "$RC" -ne 0
+check "the failure names the active gateway probe" contains "cannot read the active gateway" "$OUT_TEXT"
+check "the town k8s entry is kept" test "$(grep -cx k8s "$S/state/town-gw-list")" -eq 1
+check "the cluster is kept" test -f "$S/state/cluster"
+check "no teardown runs before the refusal" lacks "kind delete cluster" "$CALLS_LOG"
+
+echo "down keeps a config that names no active gateway without selecting one"
+scenario down_town_no_active
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\nk8s\n' >"$S/state/town-gw-list"
+touch "$S/state/colima-running" "$S/state/cluster"
+run "$DOWN" --
+check "down exits 0" test "$RC" -eq 0
+town_calls="$(grep "XDG=$S/home/.config " "$S/calls.log" || true)"
+check "the k8s entry is removed" contains "gateway remove k8s" "$town_calls"
+check "no gateway is selected" lacks "gateway select" "$town_calls"
+check "the teardown runs" contains "kind delete cluster" "$CALLS_LOG"
+
+echo "down reports a selection the removal invented where none was chosen"
+scenario down_town_selected_by_remove
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\nk8s\n' >"$S/state/town-gw-list"
+touch "$S/state/colima-running" "$S/state/cluster"
+run "$DOWN" STUB_TOWN_REMOVE_SELECTS=docker --
+check "the run fails" test "$RC" -ne 0
+check "the warning names the gateway the CLI selected" contains "selected docker" "$OUT_TEXT"
+check "nothing is selected back" lacks "gateway select" "$(grep "XDG=$S/home/.config " "$S/calls.log" || true)"
+check "the teardown still runs" contains "kind delete cluster" "$CALLS_LOG"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "kind_test.sh: all $PASS cases passed"
