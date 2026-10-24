@@ -1597,6 +1597,7 @@ func TestSpecRunPendingSlingsReleasesTheSeatASlingLeftEmpty(t *testing.T) {
 		{name: "the pool refuses the sling", slingErrs: []error{&poolBackpressureError{Reason: "pool: seat full (2/2) -> no seat"}}},
 		{name: "contention outlasts every retry", slingErrs: outlastedRetries, wantLive: 1},
 		{name: "the sling fails outright", slingErrs: []error{errors.New("sling failed: bd update: boom")}, wantLive: 1},
+		{name: "the sandbox image lags the installed gt", slingErrs: []error{fmt.Errorf("starting polecat session: %w", session.ErrImageDrift)}, wantLive: 1},
 		{name: "the sling fails after it spawned a polecat", spawnThenFail: true, wantLive: 1},
 		{name: "the sling spawns a polecat", wantLive: 1},
 	}
