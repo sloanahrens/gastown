@@ -107,6 +107,11 @@ func TestTapGuardBdCreateStore(t *testing.T) {
 		{"relative cd up to town", polecatRole, b.worktree, `cd ../../../.. && bd create --title=x`, true},
 		{"cd to worktree then create from town", polecatRole, b.town, `cd ` + b.worktree + ` && bd create --title=x`, false},
 		{"cd to rig dir then create", polecatRole, b.town, `cd ` + b.rigDir + ` && bd create --title=x`, false},
+		// bd walks up from its directory to the nearest .beads, so a town
+		// subdirectory with none of its own files into the town store.
+		{"cd to town subdir without .beads then create", polecatRole, b.worktree, `cd ` + filepath.Join(b.town, "mayor") + ` && bd create --title=x`, true},
+		{"town subdir without .beads, as the cwd", polecatRole, filepath.Join(b.town, "mayor"), `bd create --title=x`, true},
+		{"worktree subdir without .beads, as the cwd", polecatRole, filepath.Join(b.worktree, "internal"), `bd create --title=x`, false},
 		// bd -C/--directory moves the directory the store is resolved from,
 		// before or after the verb, alone or glued — and a relative one is
 		// resolved against the shell's directory, as bd resolves it.
@@ -368,6 +373,103 @@ func TestTapGuardBdCreateStoreDashCOutranksEnvDB(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(stderr.String(), bdCreateStoreRefusal) {
 				t.Fatalf("want blocked, got err=%v stderr=%q", err, stderr.String())
+			}
+		})
+	}
+}
+
+// TestTapGuardBdCreateStoreEnvPrefixAndExport pins the store selectors a
+// command sets through env, through an export earlier on the same line, or
+// through a bare assignment. bd reads the exported and env-prefixed values, so
+// each names the store it files into; a bare assignment is not exported and
+// bd never sees it.
+func TestTapGuardBdCreateStoreEnvPrefixAndExport(t *testing.T) {
+	t.Parallel()
+	b := newBdStoreTown(t)
+	townDB := filepath.Join(b.town, ".beads", "x.db")
+	rigDB := filepath.Join(b.rigDir, "mayor", "rig", ".beads", "x.db")
+	townBeads := filepath.Join(b.town, ".beads")
+	rigBeads := filepath.Join(b.rigDir, "mayor", "rig", ".beads")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"env BEADS_DB town", `env BEADS_DB=` + townDB + ` bd create --title=x`, true},
+		{"env BD_DB town", `env BD_DB=` + townDB + ` bd create --title=x`, true},
+		{"env BEADS_DIR town", `env BEADS_DIR=` + townBeads + ` bd create --title=x`, true},
+		{"env -u then BEADS_DB town", `env -u HOME BEADS_DB=` + townDB + ` bd create --title=x`, true},
+		{"command-prefixed env BEADS_DB town", `command env BEADS_DB=` + townDB + ` bd create --title=x`, true},
+		{"env BEADS_DB rig", `env BEADS_DB=` + rigDB + ` bd create --title=x`, false},
+		{"env BEADS_DB town, -C rig dir", `env BEADS_DB=` + townDB + ` bd -C ` + b.rigDir + ` create --title=x`, false},
+		{"export BEADS_DB town", `export BEADS_DB=` + townDB + ` && bd create --title=x`, true},
+		{"export BD_DB town", `export BD_DB=` + townDB + `; bd create --title=x`, true},
+		{"export BEADS_DIR town", `export BEADS_DIR=` + townBeads + ` && bd create --title=x`, true},
+		{"export BEADS_DB rig", `export BEADS_DB=` + rigDB + ` && bd create --title=x`, false},
+		{"export BEADS_DB town, -C rig dir", `export BEADS_DB=` + townDB + ` && bd -C ` + b.rigDir + ` create --title=x`, false},
+		{"export BEADS_DB town, then a rig create", `export BEADS_DB=` + townDB + ` && bd -C ` + rigBeads + ` create --title=x`, false},
+		{"export BEADS_DIR rig, export BEADS_DB town", `export BEADS_DIR=` + rigBeads + ` && export BEADS_DB=` + townDB + ` && bd create --title=x`, true},
+		{"bare BEADS_DB town is not exported", `BEADS_DB=` + townDB + `; bd create --title=x`, false},
+		{"bare BEADS_DB town on the line of a later export", `BEADS_DB=` + townDB + `; export BD_DB=` + rigDB + `; bd create --title=x`, false},
+		{"inline BEADS_DB rig over export town", `export BEADS_DB=` + townDB + ` && BEADS_DB=` + rigDB + ` bd create --title=x`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload, err := json.Marshal(map[string]any{
+				"tool_name":  "Bash",
+				"cwd":        b.worktree,
+				"tool_input": map[string]string{"command": tt.command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := map[string]string{"GT_ROLE": polecatRole, "HOME": b.home}
+			var stderr strings.Builder
+			err = tapGuardBdCreateStore(strings.NewReader(string(payload)), &stderr, fakeGuardProcess(env, ""))
+			if !tt.blocked {
+				if err != nil || stderr.Len() != 0 {
+					t.Fatalf("want allowed, got err=%v stderr=%q", err, stderr.String())
+				}
+				return
+			}
+			if err == nil || !strings.Contains(stderr.String(), bdCreateStoreRefusal) {
+				t.Fatalf("want blocked, got err=%v stderr=%q", err, stderr.String())
+			}
+		})
+	}
+}
+
+// TestTapGuardBdCreateStoreDashCTownSubdir pins that bd -C resolves the store
+// the way bd does: from the -C directory up to the nearest .beads. A town
+// subdirectory with no .beads of its own files into the town store, so a
+// create there is refused; a worktree subdirectory resolves to the rig's.
+func TestTapGuardBdCreateStoreDashCTownSubdir(t *testing.T) {
+	t.Parallel()
+	b := newBdStoreTown(t)
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"-C town subdir without .beads", `bd -C ` + filepath.Join(b.town, "mayor") + ` create --title=x`, true},
+		{"--directory town subdir without .beads", `bd --directory=` + filepath.Join(b.town, "mayor") + ` create --title=x`, true},
+		{"-C town subdir, create after the verb", `bd create --title=x -C ` + filepath.Join(b.town, "mayor"), true},
+		{"-C worktree subdir without .beads", `bd -C ` + filepath.Join(b.worktree, "internal") + ` create --title=x`, false},
+		{"-C rig dir", `bd -C ` + b.rigDir + ` create --title=x`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stderr, err := b.run(t, polecatRole, b.worktree, tt.command)
+			if !tt.blocked {
+				if err != nil || stderr != "" {
+					t.Fatalf("want allowed, got err=%v stderr=%q", err, stderr)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(stderr, bdCreateStoreRefusal) {
+				t.Fatalf("want blocked, got err=%v stderr=%q", err, stderr)
 			}
 		})
 	}

@@ -114,6 +114,11 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		// bash deletes a backslash-newline between the "$" and the quote, so the
 		// string is still ANSI-C and its escapes are still decoded (gt-vviaz).
 		"bash <<< $\\\n'x\\nprintenv'",
+		// bash deletes a backslash-newline between "<<<" and the word, so the
+		// ANSI-C word behind it is still decoded and judged (gt-pe0k8).
+		"bash <<< \\\n$'x\\nprintenv'",
+		"bash <<<\\\n$'printenv'",
+		"bash <<< \\\n$'cat /proc/self/environ'",
 		"echo printenv | source /dev/stdin",
 		"printf 'printenv' | . /dev/fd/0",
 		"sh <(echo printenv)",
@@ -998,6 +1003,29 @@ func TestSandboxSecretsGuardJudgesNoCommandWithoutOne(t *testing.T) {
 	}
 }
 
+// TestSandboxSecretsHereStringLineContinuation pins that a here-string whose
+// ANSI-C word follows a backslash-newline is refused. bash deletes the
+// continuation before it reads the word, so the printenv or the secret path it
+// spells runs in the sandbox (gt-pe0k8).
+func TestSandboxSecretsHereStringLineContinuation(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"bash <<< \\\n$'printenv'",
+		"bash <<<\\\n$'printenv'",
+		"bash <<< \\\n $'x\\nprintenv'",
+		"bash <<< \\\n$'cat /proc/self/environ'",
+	} {
+		blocked, out := runSandboxSecretsGuard(t, "openshell", command)
+		if !blocked {
+			t.Errorf("not blocked in a sandbox: %q", command)
+			continue
+		}
+		if out == "" {
+			t.Errorf("blocked %q with no message naming the rule", command)
+		}
+	}
+}
+
 // TestSandboxSecretsANSICHereStringsAcrossContinuation: the probe reads a
 // here-string as ANSI-C quoted when the shell does, which includes a "$" and a
 // "'" with a backslash-newline between them, since bash deletes the pair before
@@ -1016,6 +1044,12 @@ func TestSandboxSecretsANSICHereStringsAcrossContinuation(t *testing.T) {
 		{"continuation without a space after the operator", "cat <<<$\\\n'x\\ny'", map[string]bool{`x\ny`: true}},
 		{"plain quote after a continuation is not ANSI-C", "cat <<< \\\n'x\\ny'", nil},
 		{"dollar with no quote behind its continuation", "cat <<< $\\\nx", nil},
+		// A continuation between "<<<" and the word, with or without blanks, is
+		// skipped as bash skips it (gt-pe0k8).
+		{"continuation between the operator and the dollar", "cat <<< \\\n$'x\\ny'", map[string]bool{`x\ny`: true}},
+		{"continuation with no blank after the operator", "cat <<<\\\n$'x\\ny'", map[string]bool{`x\ny`: true}},
+		{"blank, continuation, then blank before the ANSI-C word", "cat <<< \\\n $'x\\ny'", map[string]bool{`x\ny`: true}},
+		{"continuation before a plain quote is not ANSI-C", "cat <<< \\\n'x\\ny'", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
