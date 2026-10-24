@@ -163,6 +163,9 @@ polecat-image:
 	floor=$$(bash deploy/polecat/go-floor.sh rig $(POLE_RIG_GO_MODS)) || { echo "polecat-image: cannot read the rig Go floor from $(POLE_RIG_GO_MODS)" >&2; exit 2; }; \
 	docker build --platform linux/arm64 --label org.gastown.gt-commit=$(POLE_COMMIT) --build-arg GO_FLOOR="$$floor" -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
 
+# The staging is shell because it only drives git and tar; its behavior (the
+# pinned commit, a missing pin, an empty pins file) is tested against a fixture
+# town in scripts/makefile-gate_test.sh.
 # polecat-seed-stage stages each pinned rig's sources into POLE_SEED_DIR with
 # `git archive` of the pinned commit; the Dockerfile bind-mounts the directory for
 # its seed RUN and copies none of it into the image.
@@ -180,7 +183,7 @@ polecat-seed-stage:
 # polecat-seed-pins rewrites deploy/polecat/seed-pins to each seeded rig's
 # canonical checkout HEAD. Commit the result; the next polecat-image reseeds.
 polecat-seed-pins:
-	@tmp=$$(mktemp); for rig in $(POLE_SEED_RIGS); do \
+	@tmp=$$(mktemp); printf '%s\n' "# <rig> <commit>: the sources the polecat image's Go cache is seeded from." "# Each commit must exist in that rig's canonical checkout under POLE_TOWN; make polecat-seed-pins rewrites this file." > "$$tmp"; for rig in $(POLE_SEED_RIGS); do \
 		sha=$$(git -C "$(POLE_TOWN)/$$rig/mayor/rig" rev-parse HEAD) || { rm -f "$$tmp"; echo "polecat-seed-pins: cannot read $(POLE_TOWN)/$$rig/mayor/rig" >&2; exit 2; }; \
 		echo "$$rig $$sha" >> "$$tmp"; \
 	done; mv "$$tmp" $(POLE_SEED_PINS); cat $(POLE_SEED_PINS)

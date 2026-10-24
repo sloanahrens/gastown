@@ -263,7 +263,7 @@ elif grep -q -F 'missing or empty' <<<"$sout"; then
 else
   fail "polecat-seed-stage refuses an empty pins file" "$sout"
 fi
-if sout=$(seedmk polecat-seed-pins 2>&1) && [[ "$(cat "$seedtown/pins")" == "fx $newest" ]]; then
+if sout=$(seedmk polecat-seed-pins 2>&1) && grep -qx "fx $newest" "$seedtown/pins"; then
   pass "polecat-seed-pins pins each seeded rig to its checkout's HEAD"
 else
   fail "polecat-seed-pins pins each seeded rig to its checkout's HEAD" "$sout / $(cat "$seedtown/pins")"
