@@ -123,6 +123,7 @@ case "$1 $2" in
       echo "Error: no custom profile $id" >&2
       exit 1
     fi
+    printf 'resource_version: 7\n'
     cat "$state/content-$id"
     ;;
   "profile update")
@@ -132,6 +133,11 @@ case "$1 $2" in
       prev=$arg
     done
     id=${!#}
+    # The real gateway refuses an update that carries no resource_version.
+    if ! grep -qE '^resource_version: [1-9]' "$file"; then
+      echo "Error: custom provider profile update requires a non-zero resource_version; export the current profile before editing it" >&2
+      exit 1
+    fi
     cp "$file" "$state/content-$id"
     echo "updated profile $id"
     ;;
@@ -350,6 +356,8 @@ check "did not report the wrong-host profile as existing" lacks "profile forgejo
 check "said it is updating the profile to the gateway's host" contains "profile forgejo-polecat binds another host, updating it to control-plane.openshell.svc.cluster.local" "$OUT"
 check "called profile update on the gateway" [ "$(calls '^-g k8s profile update --global -f .*forgejo-polecat.yaml forgejo-polecat$')" -eq 1 ]
 check "did not import the forgejo profile again" [ "$(calls '^-g k8s profile import -f .*forgejo-polecat')" -eq 0 ]
+check "the update carries the gateway's current resource_version" grep -qxF 'resource_version: 7' "$TMP/state/content-forgejo-polecat"
+check "the version appears once" [ "$(grep -c '^resource_version:' "$TMP/state/content-forgejo-polecat")" -eq 1 ]
 check "the gateway's profile now names the k8s host" grep -qxF '  - host: control-plane.openshell.svc.cluster.local' "$TMP/state/content-forgejo-polecat"
 run -g k8s
 assert_rc 0 "exits 0 on a rerun"

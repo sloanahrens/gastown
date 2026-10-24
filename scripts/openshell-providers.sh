@@ -146,6 +146,20 @@ render_forgejo_profile() {
   fi
 }
 
+# stamp_resource_version ID FILE adds the gateway's current resource_version of
+# profile ID to FILE. The gateway refuses an update without one ("requires a
+# non-zero resource_version; export the current profile before editing it").
+stamp_resource_version() {
+  local version
+  version="$(oshell profile export --global "$1" 2>/dev/null | sed -n 's/^resource_version: *\([1-9][0-9]*\)$/\1/p' | head -n 1)"
+  if [[ -z "$version" ]]; then
+    echo "openshell-providers: profile $1 exports no resource_version, so it cannot be updated" >&2
+    exit 1
+  fi
+  sed -i.bak '/^resource_version:/d' "$2" && rm -f "$2.bak"
+  printf 'resource_version: %s\n' "$version" >>"$2"
+}
+
 # profile_binds ID reports whether the gateway's profile ID binds the endpoint
 # read above. profile export prints the profile the gateway holds, and it binds
 # the endpoint when it names the host and each allowed_ips entry. A failed export
@@ -234,6 +248,7 @@ import_profiles() {
     if [[ -n "$id" ]] && profile_exists "$id"; then
       if [[ "$id" == forgejo-polecat ]] && ! profile_binds "$id"; then
         echo "openshell-providers: profile $id binds another host, updating it to $ENDPOINT_HOST"
+        stamp_resource_version "$id" "$file"
         oshell profile lint -f "$file"
         oshell profile update --global -f "$file" "$id"
         continue
