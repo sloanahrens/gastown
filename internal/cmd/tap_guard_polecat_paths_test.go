@@ -1208,6 +1208,73 @@ func TestSegmentCommandWord(t *testing.T) {
 	}
 }
 
+func TestSubstitutionStep(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name       string
+		token      string
+		depth      int
+		ticked     bool
+		wantDepth  int
+		wantTicked bool
+	}{
+		{"opens a dollar-paren substitution", "$(echo", 0, false, 1, false},
+		{"closes a dollar-paren substitution", "a)", 1, false, 0, false},
+		{"opens a backtick substitution", "`echo", 0, false, 1, true},
+		{"closes a backtick substitution", "a`", 1, true, 0, false},
+		{"backtick opened and closed in one token", "`echo`", 0, false, 0, false},
+		{"plain token changes nothing", "apt-get", 2, false, 2, false},
+	} {
+		depth, ticked := substitutionStep(tt.token, tt.depth, tt.ticked)
+		if depth != tt.wantDepth || ticked != tt.wantTicked {
+			t.Errorf("%s: substitutionStep(%q, %d, %v) = (%d, %v), want (%d, %v)",
+				tt.name, tt.token, tt.depth, tt.ticked, depth, ticked, tt.wantDepth, tt.wantTicked)
+		}
+	}
+}
+
+func TestJoinSubstitutionSeparators(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		tokens []string
+		want   string
+	}{
+		{"separator inside a substitution is removed", []string{"y=$(echo", "a", ";", "echo", "b)", "apt-get"}, "y=$(echo a echo b) apt-get"},
+		{"separator after a substitution closes is kept", []string{"y=$(echo", "a)", ";", "rm"}, "y=$(echo a) ; rm"},
+		{"separator inside a backtick substitution is removed", []string{"y=`echo", "a;", "echo", "b`", "apt-get"}, "y=`echo a; echo b` apt-get"},
+	} {
+		if got := strings.Join(joinSubstitutionSeparators(tt.tokens), " "); got != tt.want {
+			t.Errorf("%s: joined = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestSplitShellSegmentsJudgesSharedSegmentOnce(t *testing.T) {
+	t.Parallel()
+	// No substitution holds a separator, so both readings agree and each
+	// segment appears once.
+	if got := splitShellSegments([]string{"make", "build", "&&", "make", "test"}); len(got) != 2 {
+		t.Errorf("two commands split into %d segments, want 2: %q", len(got), got)
+	}
+	// The ";" inside the substitution makes the joined reading differ. Its
+	// segment is added beside the split ones, and the shared "apt-get" segment
+	// is not repeated.
+	segments := splitShellSegments([]string{"y=$(echo", "a", ";", "echo", "b)", "apt-get", "install", "foo"})
+	if len(segments) != 3 {
+		t.Fatalf("substitution with a separator split into %d segments, want 3: %q", len(segments), segments)
+	}
+	found := false
+	for _, segment := range segments {
+		if word, _ := segmentCommandWord(segment); word == "apt-get" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no segment names apt-get as its command: %q", segments)
+	}
+}
+
 // TestQuotedDollarParenHidesNoCommand: shlex drops the quotes around a literal
 // "$(", so X='$(echo' rm arrives as X=$(echo rm, which reads as an assignment
 // whose substitution never closes. The shell runs rm there, so the guard must

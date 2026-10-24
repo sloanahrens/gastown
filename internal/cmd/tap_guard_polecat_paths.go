@@ -1802,9 +1802,19 @@ func splitShellSegments(tokens []string) [][]string {
 	// A separator inside a command substitution does not start a command: the
 	// substitution's text runs first, and the command after its close runs
 	// with it (gt-bdct5). The split reading above stays, so a ";" that does
-	// end a command is still judged; the joined reading is judged as well.
+	// end a command is still judged. Only the joined segments the split reading
+	// lacks are added, so a segment both readings share is judged once.
 	if joined := joinSubstitutionSeparators(tokens); len(joined) != len(tokens) {
-		segments = append(segments, splitAtShellSegments(joined)...)
+		seen := make(map[string]bool, len(segments))
+		for _, segment := range segments {
+			seen[strings.Join(segment, "\x00")] = true
+		}
+		for _, segment := range splitAtShellSegments(joined) {
+			if key := strings.Join(segment, "\x00"); !seen[key] {
+				seen[key] = true
+				segments = append(segments, segment)
+			}
+		}
 	}
 	return segments
 }
@@ -1937,17 +1947,17 @@ func trimShellKeywords(segment []string) []string {
 func segmentCommandWord(segment []string) (string, []string) {
 	for i := 0; i < len(segment); i++ {
 		token := segment[i]
-		if token == ")" {
-			// A bare ")" is never a command: shlex dropped the quotes around a
-			// ")" inside a substitution, so it is a stray close (gt-bdct5).
-			continue
-		}
 		if isEnvAssignment(token) {
 			width, opened := envAssignmentWidth(segment[i:])
 			if opened != "" {
 				return opened, segment[i+1:]
 			}
 			i += width - 1
+			// shlex drops the quotes around a ")" inside a substitution, so the
+			// stray ")" right after the assignment is not the command (gt-bdct5).
+			for i+1 < len(segment) && segment[i+1] == ")" {
+				i++
+			}
 			continue
 		}
 		if skipsToCommand(token) {
