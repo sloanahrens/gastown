@@ -36,6 +36,15 @@ func TestMatchesPRWorkflowCommand(t *testing.T) {
 		{"compound command, blocked shape first", "gh pr create --title foo && echo done", true},
 		{"compound command with pipe", "echo x | gh pr create --title foo", true},
 		{"compound command, no blocked segment", "cd foo && git status", false},
+
+		// A redirection ahead of the command is setup the shell performs before
+		// it runs the command, so the blocked shape behind it is judged exactly
+		// as the plain line is (gt-cwi1q).
+		{"gh pr create behind a redirection", "2>/dev/null gh pr create --title foo", true},
+		{"gh pr create behind a separate-target redirection", "2> /dev/null gh pr create --title foo", true},
+		{"branch creation behind a redirection", "2>/dev/null git checkout -b feature/x", true},
+		{"wrapped gh pr create behind a redirection", "2>/dev/null env X=1 gh pr create", true},
+		{"unrelated command behind a redirection", "2>/dev/null git status", false},
 		// git bundles short flags and glues a value to its flag, so -branch is
 		// -b with the name "ranch", the same creation as -bfeature/x.
 		{"-b glued to a name that spells branch", "git checkout -branch feature/x", true},

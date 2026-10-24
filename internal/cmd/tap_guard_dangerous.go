@@ -1327,20 +1327,35 @@ func segmentCommandWordPastRedirectionsKeepingLead(segment []string) (word strin
 			segment = rest
 			continue
 		}
-		width := redirectionWidth(word)
-		if width == 0 {
+		rest := append([]string{word}, args...)
+		skip := redirectionSkip(rest)
+		if skip == 0 {
 			return word, args, lead
 		}
-		lead = append(lead, word)
-		segment = args
-		if width == 2 && len(segment) > 0 {
-			lead = append(lead, segment[0])
-			segment = segment[1:]
-		}
+		lead = append(lead, rest[:skip]...)
+		segment = rest[skip:]
 		if len(segment) == 0 {
 			return "", nil, lead
 		}
 	}
+}
+
+// redirectionSkip returns how many tokens at the front of segment one leading
+// redirection occupies — the operator alone when it carries its target
+// ("2>/dev/null"), or the operator and the next word when the target stands on
+// its own ("2> /dev/null") — and 0 when the first token is not a redirection.
+// A bare operator with no target left skips one token, so a caller can always
+// advance by the count. Every command-word scan reads a leading redirection
+// through this, so they step over the same shapes (gt-cwi1q).
+func redirectionSkip(segment []string) int {
+	if len(segment) == 0 {
+		return 0
+	}
+	width := redirectionWidth(segment[0])
+	if width == 2 && len(segment) < 2 {
+		return 1
+	}
+	return width
 }
 
 // skipProcessSubstitution returns the tokens behind the "<(cmd)" or ">(cmd)"

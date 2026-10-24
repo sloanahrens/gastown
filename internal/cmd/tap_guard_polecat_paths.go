@@ -293,17 +293,22 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 		for _, segment := range readings {
 			s := entry
 			cmdline := trimShellKeywords(segment)
-			word, args := segmentCommandWord(cmdline)
+			// A redirection ahead of the command is setup the shell performs
+			// before it runs the command, so the command behind it is the one
+			// judged: "2>/dev/null rm -rf X" removes X as the plain line does
+			// (gt-cwi1q).
+			word, args := segmentCommandWordPastRedirections(cmdline)
 			// A launcher can carry a construct rather than a command — `time ( rm
 			// -rf X )`, `! { rm -rf X; }` — so what it carried is re-read until the
 			// word is a command again.
 			for opensConstruct(word) {
 				cmdline = trimShellKeywords(append([]string{word}, args...))
-				word, args = segmentCommandWord(cmdline)
+				word, args = segmentCommandWordPastRedirections(cmdline)
 			}
 			// A launcher's -S payload is a command line the shell runs, as the
-			// body of sh -c is, so it is judged here. segmentCommandWord leaves
-			// it out, and with nothing after the -S word is empty (gt-j21h4).
+			// body of sh -c is, so it is judged here. The command-word scan
+			// leaves it out, and with nothing after the -S word is empty
+			// (gt-j21h4).
 			_, payloads, _ := prWorkflowCommand(cmdline)
 			for _, payload := range payloads {
 				if reason := s.checkBashCommand(payload, depth+1); reason != "" {
@@ -371,7 +376,11 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 			// walked here instead. A shell that is the command word itself was
 			// handled above.
 			if !isInterpreterCommand(base) {
-				if shell, shellArgs, ok := wrappedShell(cmdline); ok {
+				// The wrapper is read from the command word on, the same
+				// reading word and args came from, so a leading redirection
+				// cannot hide the shell a wrapper such as find -exec carries
+				// (gt-cwi1q).
+				if shell, shellArgs, ok := wrappedShell(append([]string{word}, args...)); ok {
 					if payload, ok := shellPayload(shell, shellArgs); ok {
 						if reason := s.checkBashArgs(shellArgs, shell, true); reason != "" {
 							return reason

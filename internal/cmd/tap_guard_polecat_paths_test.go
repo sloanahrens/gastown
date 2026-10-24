@@ -455,6 +455,16 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"redirect into the town mayor dir", "git hook > " + mayor, true},
 		{"redirect into town deacon", "echo x > " + deacon, true},
 		{"redirect into town settings", "echo x > " + settings, true},
+		// A redirection ahead of the command is setup, not the command: the
+		// write behind it is judged as the plain line is (gt-cwi1q).
+		{"rm a sibling behind a redirection", "2>/dev/null rm -rf " + filepath.Join(p.sibling, "internal.go"), true},
+		{"rm a sibling behind a separate-target redirection", "2> /dev/null rm -rf " + filepath.Join(p.sibling, "internal.go"), true},
+		{"cp into a sibling behind a redirection", "2>/dev/null cp a.go " + sib, true},
+		{"bash -c writing into a sibling behind a redirection", `2>/dev/null bash -c "cp a.go ` + sib + `"`, true},
+		{"find -exec shell behind a redirection", `2>/dev/null find . -name x -exec sh -c 'cd .. && rm -rf ../` + p.other + `' \;`, true},
+		{"redirection behind a subshell paren", "(2>/dev/null rm -rf " + filepath.Join(p.sibling, "internal.go") + ")", true},
+		{"read a sibling behind a redirection", "2>/dev/null cat " + filepath.Join(p.sibling, "internal.go"), false},
+		{"build behind a redirection", "2>/dev/null make build", false},
 		// cd decides where later relative paths land.
 		{"cd into a sibling worktree", "cd " + p.sibling + " && ls", true},
 		{"cd to the town root", "cd " + town + " && ls", true},

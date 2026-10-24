@@ -193,15 +193,23 @@ var prWorkflowLaunchers = map[string]prWorkflowLauncher{
 
 // prWorkflowCommand returns the command a shell segment runs, from its command
 // word on. It looks through the group openers and control keywords in front
-// (trimShellKeywords), leading NAME=value assignments, a command substitution
-// standing where the command word goes, and launchers with their flags.
-// payloads holds the command line a launcher itself carries, as in
+// (trimShellKeywords), leading NAME=value assignments, leading redirections, a
+// command substitution standing where the command word goes, and launchers with
+// their flags. payloads holds the command line a launcher itself carries, as in
 // env -S 'gh pr create'. argv is empty when nothing runs. standIn is set when
 // a substitution stood in the command word's place, so argv's first word may be
 // an argument of the command the substitution expanded to.
 func prWorkflowCommand(segment []string) (argv, payloads []string, standIn bool) {
 	seg := trimShellKeywords(segment)
 	for len(seg) > 0 {
+		// A redirection ahead of the command is setup the shell performs
+		// before it runs the command, exactly as an assignment is, so it and
+		// its target are stepped over: "2>/dev/null gh pr create" creates the
+		// PR the unprefixed line does (gt-cwi1q).
+		if skip := redirectionSkip(seg); skip != 0 {
+			seg = seg[skip:]
+			continue
+		}
 		word := seg[0]
 		if isEnvAssignment(word) || word == "!" {
 			seg = seg[1:]
