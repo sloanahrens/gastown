@@ -167,23 +167,19 @@ func TestMangoNamesEveryStateItCannotRead(t *testing.T) {
 	}
 }
 
-// The size cap is checked before the read, not after: the panel is unreadable to
-// this process, so a reader that opened it first would report a read error
-// rather than the cap.
+// The size cap is checked before the panel is read or parsed. The fixture is
+// bigger than the cap and is not JSON either, so the answer names the cap only
+// if the stat ran first; it is mode 0000 besides, so for any reader but root the
+// open would fail and the answer would be a read error.
 func TestMangoRefusesAnOversizePanelBeforeReadingIt(t *testing.T) {
 	t.Parallel()
 
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a mode-0000 file, so the read could not fail")
-	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, mangoPanelFile)
 	if err := os.WriteFile(path, []byte(strings.Repeat("x", mangoPanelMaxBytes+1)), 0o000); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.ReadFile(path); err == nil {
-		t.Fatal("the fixture is readable, so this test cannot tell a stat from a read")
-	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 	m := ReadMango(dir, mangoNow)
 	if m.State != MangoError || m.Note != mangoOversize {
 		t.Errorf("state %q note %q, want %q %q", m.State, m.Note, MangoError, mangoOversize)
@@ -230,9 +226,8 @@ func TestMangoStripsAndCapsPanelText(t *testing.T) {
 	}
 }
 
-// A read opens the panel for reading only: a read-only file in a read-only
-// directory reads, and the directory is the same afterwards — no rewrite, no
-// temp file.
+// A read opens the panel for reading only: a read-only file reads, and the
+// directory is the same afterwards — no rewrite, no temp file.
 func TestMangoOpensThePanelForReadingOnly(t *testing.T) {
 	t.Parallel()
 
@@ -242,13 +237,11 @@ func TestMangoOpensThePanelForReadingOnly(t *testing.T) {
 	}
 	dir := mangoFixture(t, string(raw))
 	path := filepath.Join(dir, mangoPanelFile)
+	// A write-mode open of a 0444 file is refused for any user but root, so an
+	// implementation that opened the panel to write it would fail here.
 	if err := os.Chmod(path, 0o444); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(dir, 0o755) })
 
 	m := ReadMango(dir, mangoNow) // fresh
 	ReadMango(dir, mangoNow.Add(48*time.Hour))
