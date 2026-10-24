@@ -31,6 +31,43 @@ func TestUncheckedAcceptanceTextReadsTheAcceptanceText(t *testing.T) {
 	}
 }
 
+// TestUncheckedAcceptanceTextMatchesLintItems: a box is a criterion when the
+// spec lint counts it as one, so every list marker the lint accepts counts
+// here, and a fenced block is example text that neither counts.
+func TestUncheckedAcceptanceTextMatchesLintItems(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		text string
+		want []string
+	}{
+		{"star bullet", "* [ ] a", []string{"* [ ] a"}},
+		{"plus bullet", "+ [ ] a", []string{"+ [ ] a"}},
+		{"numbered dot", "1. [ ] a", []string{"1. [ ] a"}},
+		{"numbered paren", "1) [ ] a", []string{"1) [ ] a"}},
+		{"mixed markers all count", "* [ ] a\n1. [ ] b", []string{"* [ ] a", "1. [ ] b"}},
+		{"checked stays uncounted", "* [x] a\n1. [X] b\n- [x] c", nil},
+		{"fenced sample is not a criterion", "- [x] a\n```\n- [ ] sample\n```", nil},
+		{"tilde fence is not a criterion", "~~~\n* [ ] sample\n~~~\n- [ ] b", []string{"- [ ] b"}},
+		{"box after a fence still counts", "```\n- [ ] sample\n```\n* [ ] b", []string{"* [ ] b"}},
+		{"unclosed fence does not hide a later box", "- [x] a\n```\n- [ ] b", []string{"- [ ] b"}},
+		{"unclosed tilde fence does not hide a later box", "~~~\n* [ ] b", []string{"* [ ] b"}},
+		{"a fence closed by a longer run", "````\n- [ ] sample\n````\n- [ ] b", []string{"- [ ] b"}},
+		{"a shorter run does not close a longer fence", "````\n- [ ] sample\n```\n- [ ] sample\n````\n- [ ] b", []string{"- [ ] b"}},
+		{"a fence with an info string", "```go\n- [ ] sample\n```\n- [ ] b", []string{"- [ ] b"}},
+		{"an indented fence", "  ```\n- [ ] sample\n  ```\n- [ ] b", []string{"- [ ] b"}},
+		{"unclosed fence after a closed one", "```\n- [ ] sample\n```\n```\n- [ ] b", []string{"- [ ] b"}},
+		{"nested unchecked item counts", "- [x] a\n  * [ ] b", []string{"* [ ] b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := uncheckedBoxes(tc.text); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("uncheckedBoxes(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestUncheckedCriteriaReadsTheFieldOnly: the close gates share
 // UncheckedCriteria, and the description's section does not widen them: a bead
 // whose only boxes sit in that section keeps closing as it did before

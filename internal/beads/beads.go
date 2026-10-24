@@ -529,13 +529,14 @@ func UncheckedAcceptanceText(issue *Issue) []string {
 	return uncheckedBoxes(AcceptanceText(issue))
 }
 
-// uncheckedBoxes returns the trimmed "- [ ] ..." lines of text, in order.
+// uncheckedBoxes returns the trimmed unchecked list items of text, in order,
+// whatever their marker: "- [ ]", "* [ ]", "+ [ ]" or "1. [ ]". A fenced
+// block is example text and holds no criteria (AcceptanceItems).
 func uncheckedBoxes(text string) []string {
 	var lines []string
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "- [ ] ") {
-			lines = append(lines, trimmed)
+	for _, item := range AcceptanceItems(text) {
+		if item.Boxed && !item.Checked {
+			lines = append(lines, item.Line)
 		}
 	}
 	return lines
