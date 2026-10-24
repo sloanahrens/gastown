@@ -257,6 +257,13 @@ func PackageDirHasGo(repoRoot, dir string) bool {
 // that judges only the new content of a file cannot fail on a removal.
 var treeWideGuards = []treeWideGuard{
 	{
+		// The sandbox policy is data the openshell backend sends with every
+		// sandbox; this guard pins which hosts it may reach.
+		pkg:    "internal/session",
+		tests:  []string{"TestPolecatPolicyAllowsOnlyTheReviewedEgress", "TestPolecatPolicyLetsOnlyNodeReachTheNpmRegistryAndFonts"},
+		judges: func(rel string) bool { return rel == "deploy/polecat/policy.yaml" },
+	},
+	{
 		// TestPolicy, TestUnitTierMain, TestDockerTier and friends walk every
 		// package directory in the module, so they judge test files the
 		// branch never touches (gt-gzmfs). A deletion counts: the lists they

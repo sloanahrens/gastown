@@ -97,3 +97,33 @@ network_policies:
         enforcement: enforce
     binaries:
       - path: /usr/local/go/bin/go
+
+  # npm package installs for the Node rigs (fractals, beaver, mango's nextapp):
+  # every package in their lockfiles resolves from registry.npmjs.org. npm runs
+  # as a node script, so node is the binary that connects.
+  npm_registry:
+    endpoints:
+      - host: registry.npmjs.org
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+    binaries:
+      - path: /usr/bin/node
+
+  # next/font/google fetches its font files at build time (fractals and beaver
+  # import it in src/app/layout.tsx), so `next build` needs these two hosts.
+  google_fonts:
+    endpoints:
+      - host: fonts.googleapis.com
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+      - host: fonts.gstatic.com
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+    binaries:
+      - path: /usr/bin/node

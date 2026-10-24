@@ -206,6 +206,7 @@ var guardTriggers = []struct {
 	{"internal/testdb", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/testutil", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/land", "M\x00.om.json\x00"},
+	{"internal/session", "M\x00deploy/polecat/policy.yaml\x00"},
 }
 
 // unguarded is a changed path no guard reads: a doc outside every guard's
