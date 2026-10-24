@@ -775,9 +775,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 			hostTownRoot, sandboxRoot = townRoot, root
 			// envVars was built from host paths too (GIT_CEILING_DIRECTORIES,
 			// GT_ROOT, ...); the session environment names none of them.
-			for k, v := range envVars {
-				envVars[k] = session.RewriteTownRoot(v, hostTownRoot, sandboxRoot)
-			}
+			rewriteTownRootInPathEnv(envVars, hostTownRoot, sandboxRoot)
 		}
 		// The same overrides reach the agent two ways on purpose: in the
 		// startup command (EnvOverride, so the agent process and what it
