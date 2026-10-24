@@ -5,9 +5,10 @@ import (
 	"testing"
 )
 
-// TestUncheckedCriteriaReadsTheAcceptanceText: the unchecked-box count reads
-// AcceptanceText, the field when set and else the description's section.
-func TestUncheckedCriteriaReadsTheAcceptanceText(t *testing.T) {
+// TestUncheckedAcceptanceTextReadsTheAcceptanceText: the refusal gates count
+// boxes in the acceptance text, the field when set and else the description's
+// section.
+func TestUncheckedAcceptanceTextReadsTheAcceptanceText(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name  string
@@ -21,6 +22,31 @@ func TestUncheckedCriteriaReadsTheAcceptanceText(t *testing.T) {
 		{"no section", &Issue{Description: "## Goal\n- [ ] a"}, nil},
 	}
 	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := UncheckedAcceptanceText(tc.issue); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("UncheckedAcceptanceText = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUncheckedCriteriaReadsTheFieldOnly: the close gates share
+// UncheckedCriteria, and the description's section does not widen them: a bead
+// whose only boxes sit in that section keeps closing as it did before
+// gt-1mrji (gt-zep4x).
+func TestUncheckedCriteriaReadsTheFieldOnly(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		issue *Issue
+		want  []string
+	}{
+		{"nil issue", nil, nil},
+		{"field boxes", &Issue{AcceptanceCriteria: "- [x] a\n  - [ ] b"}, []string{"- [ ] b"}},
+		{"fill the field, ignore the section", &Issue{AcceptanceCriteria: "- [x] a", Description: "## Acceptance\n- [ ] b"}, nil},
+		{"section boxes are not criteria here", &Issue{Description: "## Acceptance\n- [ ] b"}, nil},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if got := UncheckedCriteria(tc.issue); !reflect.DeepEqual(got, tc.want) {

@@ -1654,7 +1654,7 @@ func policyRejection(issue *beads.Issue) *Rejection {
 	if reason := CloseBlockReason(issue); reason != "" {
 		return &Rejection{Kind: RejectPolicy, Rework: false, Reason: reason + " work never lands on the target; a human decides what happens to the branch"}
 	}
-	if n := beads.HasUncheckedCriteria(issue); n > 0 {
+	if n := len(beads.UncheckedAcceptanceText(issue)); n > 0 {
 		return &Rejection{Kind: RejectPolicy, Rework: true, Reason: fmt.Sprintf("%d unchecked acceptance criteria", n)}
 	}
 	return nil

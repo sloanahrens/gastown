@@ -10,12 +10,12 @@ import (
 // refuseUncheckedCriteria refuses a submission whose work bead still has
 // unchecked acceptance criteria, naming each one. The landing worker rejects
 // such a bead as policy (land.policyRejection counts them with the same
-// beads.UncheckedCriteria), but by then the session has retired; refusing
+// beads.UncheckedAcceptanceText), but by then the session has retired; refusing
 // here tells the author while the session is up. nil when every box is
 // ticked or the bead has no criteria. It does not judge whether the criteria
 // are met.
 func refuseUncheckedCriteria(issueID string, issue *beads.Issue) error {
-	unchecked := beads.UncheckedCriteria(issue)
+	unchecked := beads.UncheckedAcceptanceText(issue)
 	if len(unchecked) == 0 {
 		return nil
 	}

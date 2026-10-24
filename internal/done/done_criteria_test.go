@@ -112,12 +112,23 @@ func TestCrewSubmitWithTickedCriteriaSubmits(t *testing.T) {
 }
 
 // TestRefuseUncheckedCriteriaSharesTheLandingCounter: the refusal lists
-// exactly as many lines as the count the landing worker's policy check uses.
+// exactly the lines the landing worker's policy check counts, both from
+// beads.UncheckedAcceptanceText.
 func TestRefuseUncheckedCriteriaSharesTheLandingCounter(t *testing.T) {
 	t.Parallel()
 	issue := &beads.Issue{AcceptanceCriteria: criteriaMixed}
-	if got, want := len(beads.UncheckedCriteria(issue)), beads.HasUncheckedCriteria(issue); got != want {
-		t.Errorf("UncheckedCriteria lists %d, HasUncheckedCriteria counts %d", got, want)
+	want := beads.UncheckedAcceptanceText(issue)
+	if len(want) != 2 {
+		t.Fatalf("UncheckedAcceptanceText lists %d lines, want 2", len(want))
+	}
+	err := refuseUncheckedCriteria("bd-x", issue)
+	if err == nil {
+		t.Fatal("refuseUncheckedCriteria accepted unchecked criteria")
+	}
+	for _, line := range want {
+		if !strings.Contains(err.Error(), line) {
+			t.Errorf("refusal %q lacks %q", err, line)
+		}
 	}
 	if err := refuseUncheckedCriteria("bd-x", nil); err != nil {
 		t.Errorf("nil issue refused: %v", err)
