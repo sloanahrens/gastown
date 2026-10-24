@@ -85,3 +85,42 @@ func TestIsWindowTintEnabled_EnabledKeyDecides(t *testing.T) {
 		})
 	}
 }
+
+// TestIsWindowTintEnabled_UnreadableConfigFallsThrough: a config file that
+// fails to load is skipped, so the lookup moves on to the next level.
+func TestIsWindowTintEnabled_UnreadableConfigFallsThrough(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		rigConfig   string
+		mayorConfig string
+		want        bool
+	}{
+		{
+			name:        "malformed rig block defers to an opted-in global block",
+			rigConfig:   `{"theme":{"window_tint":`,
+			mayorConfig: `{"theme":{"window_tint":{"tint_factor":0.3}}}`,
+			want:        true,
+		},
+		{
+			name:      "malformed rig block with no global block stays off",
+			rigConfig: `{"theme":{"window_tint":`,
+			want:      false,
+		},
+		{
+			name:        "malformed global block stays off",
+			mayorConfig: `{"theme":`,
+			want:        false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := writeWindowTintTown(t, tt.rigConfig, tt.mayorConfig)
+
+			if got := isWindowTintEnabledIn(townRoot, "testrig"); got != tt.want {
+				t.Errorf("isWindowTintEnabledIn = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
