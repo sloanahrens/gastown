@@ -58,6 +58,9 @@ func applySandboxLostWorkFacts(facts *polecat.WorkstateFacts, env sandboxSeatEnv
 	if issue != nil && patrolscan.ResumeBranchFromNotes(issue.Notes) != "" {
 		preserved = true
 	} else {
+		// The shared rule trims the recorded branch, so a whitespace-only
+		// record asks origin nothing and fails closed as unknown, the same
+		// answer the manager reaches for the same bead (gt-cu66c).
 		branch, unknownReason := polecat.SandboxSeatOriginBranch(fields)
 		if unknownReason != "" {
 			unknown(unknownReason)
