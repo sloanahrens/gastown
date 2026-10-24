@@ -32,6 +32,9 @@ filesystem_policy:
     - /etc/resolv.conf
     - /etc/ssl
     - /proc
+    # DuckDB sizes its default thread count from the cgroup CPU limit and aborts
+    # ("Missing DB manager") when the read is denied; read only (gt-vhkxd).
+    - /sys/fs/cgroup
     - /dev/urandom
   read_write:
     - /tmp

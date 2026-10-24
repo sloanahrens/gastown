@@ -102,3 +102,41 @@ func TestPolecatPolicyLetsOnlyNodeReachTheNpmRegistryAndFonts(t *testing.T) {
 		}
 	}
 }
+
+// policyPaths returns the paths the policy grants under filesystem_policy.<key>.
+func policyPaths(t *testing.T, doc map[string]any, key string) []string {
+	t.Helper()
+	fs, ok := doc["filesystem_policy"].(map[string]any)
+	if !ok {
+		t.Fatal("policy has no filesystem_policy")
+	}
+	list, _ := fs[key].([]any)
+	var out []string
+	for _, p := range list {
+		out = append(out, fmt.Sprint(p))
+	}
+	return out
+}
+
+// DuckDB reads the cgroup CPU limit to pick its default thread count and aborts
+// the process when that read is denied, so the cgroup tree is readable and
+// never writable (gt-vhkxd).
+func TestPolecatPolicyLetsTheCgroupTreeBeReadNotWritten(t *testing.T) {
+	t.Parallel()
+	doc := polecatPolicy(t)
+	const cgroup = "/sys/fs/cgroup"
+	contains := func(list []string) bool {
+		for _, p := range list {
+			if p == cgroup {
+				return true
+			}
+		}
+		return false
+	}
+	if !contains(policyPaths(t, doc, "read_only")) {
+		t.Errorf("filesystem_policy.read_only = %v, want it to list %s", policyPaths(t, doc, "read_only"), cgroup)
+	}
+	if contains(policyPaths(t, doc, "read_write")) {
+		t.Errorf("filesystem_policy.read_write lists %s: the cgroup tree must stay read only", cgroup)
+	}
+}
