@@ -396,6 +396,11 @@ func (v *beadVerbs) update(id string, opts beads.UpdateOptions) error {
 	if opts.Title != nil && strings.TrimSpace(*opts.Title) == "" {
 		return fmt.Errorf("--title is empty")
 	}
+	// A blank block would replace the criteria with nothing, and gt done
+	// reads zero unchecked boxes as satisfied (gt-9smgr).
+	if opts.Acceptance != nil && strings.TrimSpace(*opts.Acceptance) == "" {
+		return fmt.Errorf("--acceptance is empty: the acceptance criteria were not changed")
+	}
 	if err := v.client.Update(id, opts); err != nil {
 		return err
 	}
