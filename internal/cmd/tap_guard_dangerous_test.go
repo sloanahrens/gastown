@@ -1795,6 +1795,9 @@ func TestShellFedHeredocBodyIsInspected(t *testing.T) {
 		// A negation is a launcher the command word skips, so the subshell
 		// paren behind it is the command word the shell sits at.
 		{"shell-fed body behind a subshell paren after a negation", "! ( bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n)"},
+		// A quoted "$(" is a literal, not a substitution: the shell still runs
+		// bash after the assignment, so the body it reads is still checked.
+		{"shell-fed body behind a literal dollar-paren assignment", "X='$(' bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

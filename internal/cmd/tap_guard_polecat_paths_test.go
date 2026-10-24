@@ -1122,7 +1122,13 @@ func TestSegmentCommandWord(t *testing.T) {
 		{"substitution closed by a token with two parens", []string{"y=$(echo", "a))", "bash"}, "bash"},
 		{"plain assignment before a substitution assignment", []string{"A=1", "y=$(echo", "a)", "bash"}, "bash"},
 		{"subshell paren after a substitution assignment", []string{"y=$(echo", "a)", "(", "bash"}, "bash"},
-		{"substitution that never closes in the segment", []string{"y=$(echo", "a", "bash"}, ""},
+		// A substitution that never closes runs the text after its "$(" first.
+		{"substitution that never closes in the segment", []string{"y=$(echo", "a", "bash"}, "echo"},
+		{"substitution that never closes around a launcher", []string{"y=$(sudo", "rm", "-rf", "/"}, "sudo"},
+		// A "$(" with nothing after it is a substitution whose command is the
+		// next word, or a literal "$(" whose command is the next word too.
+		{"unclosed substitution with nothing after its paren", []string{"X=$(", "bash", "-c"}, "bash"},
+		{"literal dollar-paren in a value, command after it", []string{"X=$(", "rm", "-rf", "/"}, "rm"},
 	} {
 		if word, _ := segmentCommandWord(tt.segment); word != tt.want {
 			t.Errorf("%s: command word = %q, want %q", tt.name, word, tt.want)
