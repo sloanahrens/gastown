@@ -40,8 +40,22 @@ func OSEnv(town string) Env {
 		Run:      OSRunner(DefaultAllowEnv),
 		Now:      time.Now,
 		ReadFile: os.ReadFile,
+		ReadDir:  listDir,
 		Tail:     tailFile,
 	}
+}
+
+// listDir lists path as the names and directory flags the sources read.
+func listDir(path string) ([]DirEntry, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DirEntry, len(entries))
+	for i, entry := range entries {
+		out[i] = DirEntry{Name: entry.Name(), IsDir: entry.IsDir()}
+	}
+	return out, nil
 }
 
 // tailFile reads at most maxBytes from the end of path.
