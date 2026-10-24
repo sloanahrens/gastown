@@ -60,7 +60,25 @@ func TestHooksPathChecks_AgreeOnCrewWorktree(t *testing.T) {
 	if got := findRigClones(ctx.RigPath()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("findRigClones = %v, want %v", got, want)
 	}
-	if got := rigCloneDirs(ctx.RigPath(), rigName); !reflect.DeepEqual(got, want) {
+	if got := rigCloneDirs(ctx.RigPath()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("rigCloneDirs = %v, want %v", got, want)
+	}
+}
+
+// A polecat worktree is found under whatever directory it is nested in, not only
+// the one named after the rig, so both checks see the same clone.
+func TestHooksPathAllRigs_PolecatCloneUnderAnyDirIsChecked(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	nested := filepath.Join("polecats", "p1", "renamed-rig")
+	ctx := hooksPathRig(t, rigName, nested)
+
+	want := []string{filepath.Join(ctx.RigPath(), nested)}
+	if got := findRigClones(ctx.RigPath()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("findRigClones = %v, want %v", got, want)
+	}
+	allRigs := NewHooksPathAllRigsCheck().Run(ctx)
+	if allRigs.Status != StatusWarning || len(allRigs.Details) != 1 {
+		t.Fatalf("all-rigs = %v %v, want Warning over the one nested clone", allRigs.Status, allRigs.Details)
 	}
 }
