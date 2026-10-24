@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // malformedStub is the head of MacOSX27.0.sdk's usr/lib/libresolv.tbd, the stub
@@ -108,6 +110,78 @@ func TestMacOSSDKCheck_WellFormedStubsAreOK(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), "SDKROOT") {
 		t.Errorf("Details = %v, want the resolution source", result.Details)
+	}
+}
+
+// brokenXcrun stands in for the xcrun fallback on a host where it fails, so a
+// resolution that reaches it surfaces as an error rather than a pass.
+func brokenXcrun() (string, error) { return "", errors.New("xcrun: broken stub") }
+
+// noProcessEnv is a process environment with no variables set.
+func noProcessEnv(string) string { return "" }
+
+// writeDaemonEnv writes settings/daemon.env under town with the given SDKROOT.
+func writeDaemonEnv(t *testing.T, town, sdkRoot string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(config.DaemonEnvPath(town)), 0o755); err != nil {
+		t.Fatalf("creating settings dir: %v", err)
+	}
+	if err := os.WriteFile(config.DaemonEnvPath(town), []byte("SDKROOT="+sdkRoot+"\n"), 0o644); err != nil {
+		t.Fatalf("writing daemon.env: %v", err)
+	}
+}
+
+// TestMacOSSDKCheck_HonorsDaemonEnvSDKROOT pins the remedy sdkFixHint names:
+// an SDKROOT set in settings/daemon.env. The check runs in the operator's
+// shell, which never loads that file, so it must read the pin itself. The
+// process environment is empty and xcrun is broken, so an OK result can only
+// have come from the pin.
+func TestMacOSSDKCheck_HonorsDaemonEnvSDKROOT(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	sdk := t.TempDir()
+	writeSDK(t, sdk, map[string]string{"libresolv.tbd": wellFormedStub})
+	writeDaemonEnv(t, town, sdk)
+	check := NewMacOSSDKCheck()
+	check.goos = "darwin"
+	check.resolve = func() (string, string, error) { return resolveSDKWith(town, noProcessEnv, brokenXcrun) }
+
+	result := check.Run(&CheckContext{TownRoot: town})
+
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %v, want StatusOK for the SDK pinned in daemon.env; message %q, details %v",
+			result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "settings/daemon.env") {
+		t.Errorf("Details = %v, want the resolution source daemon.env", result.Details)
+	}
+}
+
+// TestMacOSSDKCheck_ProcessSDKROOTWinsOverDaemonEnv pins precedence: an SDKROOT
+// in the process environment beats the one in daemon.env, as the daemon's
+// own environment does.
+func TestMacOSSDKCheck_ProcessSDKROOTWinsOverDaemonEnv(t *testing.T) {
+	t.Parallel()
+	good := t.TempDir()
+	writeSDK(t, good, map[string]string{"libresolv.tbd": wellFormedStub})
+	bad := t.TempDir()
+	writeSDK(t, bad, map[string]string{"libresolv.tbd": malformedStub})
+	town := t.TempDir()
+	writeDaemonEnv(t, town, bad)
+	processEnv := func(key string) string {
+		if key == "SDKROOT" {
+			return good
+		}
+		return ""
+	}
+	check := NewMacOSSDKCheck()
+	check.goos = "darwin"
+	check.resolve = func() (string, string, error) { return resolveSDKWith(town, processEnv, brokenXcrun) }
+
+	result := check.Run(&CheckContext{TownRoot: town})
+
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %v, want StatusOK from the process SDKROOT; message %q", result.Status, result.Message)
 	}
 }
 
