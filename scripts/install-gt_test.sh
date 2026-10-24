@@ -993,13 +993,15 @@ rc=$(gw_lib "$T" install "$T/bad.plist.tmpl" "$T/home")
 # a stub that logs its call; the default in run_install is a path that does not
 # exist, so no other case can start the real plugin. The rebuild is detached, so
 # the cases wait for the stub's log.
-image_stub() { # T [sleep seconds]: a run.sh that logs, optionally lingers
+# image_stub T [sleep seconds]: a run.sh that logs its call, and with a non-zero
+# sleep records its pid and lingers until the case kills it.
+image_stub() {
   local t="$1" linger="${2:-0}"
   mkdir -p "$t/plugin"
   cat > "$t/plugin/run.sh" <<STUB
 #!/usr/bin/env bash
 echo "run.sh \$("$t/bin/gt" version | head -1)" >> "$t/image-calls.log"
-sleep $linger
+if [ $linger -gt 0 ]; then echo \$\$ > "$t/image.pid"; exec sleep $linger; fi
 exit \${IMAGE_STUB_EXIT:-0}
 STUB
   chmod +x "$t/plugin/run.sh"
@@ -1051,28 +1053,23 @@ wait_for "$T/image-calls.log" || true
   && pass "image: a failing plugin does not fail the install" \
   || fail "image: plugin fails: rc=$rc $(tail -2 "$T/run.out")"
 
-# Case 38: a plugin that runs for a long time does not hold the install: the
-# script returns, with its output pipe closed and the install lock released,
-# long before the stub's sleep ends.
-T=$(make_world); image_stub "$T" 8
-START_S=$SECONDS
+# Case 38: a plugin that runs for a long time does not hold the install. The
+# stub records its pid and sleeps until this case kills it, so nothing is
+# timed: the install returning while that pid is alive is the assertion.
+T=$(make_world); image_stub "$T" 10
 rc=$(IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt | tail -1)
-ELAPSED=$((SECONDS - START_S))
-[ "$rc" = "0" ] && [ "$ELAPSED" -lt 6 ] \
-  && pass "image: a slow plugin does not delay the install (returned in ${ELAPSED}s)" \
-  || fail "image: slow plugin: rc=$rc after ${ELAPSED}s"
-# The background child holds the lock fd for the few milliseconds perl takes to
-# start and close it, so the lock is polled free within 2 s; a leaked fd would
-# hold it for the stub's whole 8 s.
-LOCK_RC=1
-for _ in $(seq 1 20); do
-  LOCK_RC=$( ( perl -e 'use Fcntl qw(:flock); open(my $f, ">>", $ARGV[0]) or exit 2; exit(flock($f, LOCK_EX|LOCK_NB) ? 0 : 1)' "$T/daemon/install-gt.lock" ) >/dev/null 2>&1; echo $? )
-  [ "$LOCK_RC" = "0" ] && break
-  sleep 0.1
-done
+wait_for "$T/image.pid" || true
+STUB_PID=$(cat "$T/image.pid" 2>/dev/null || true)
+[ "$rc" = "0" ] && [ -n "$STUB_PID" ] && kill -0 "$STUB_PID" 2>/dev/null \
+  && pass "image: a slow plugin does not delay the install" \
+  || fail "image: slow plugin: rc=$rc pid='${STUB_PID:-}' $(tail -2 "$T/run.out")"
+# The stub had closed every fd above 2 by the time it wrote its pid (perl closes
+# them before exec), so the lock is free now unless the stub inherited it.
+LOCK_RC=$( ( perl -e 'use Fcntl qw(:flock); open(my $f, ">>", $ARGV[0]) or exit 2; exit(flock($f, LOCK_EX|LOCK_NB) ? 0 : 1)' "$T/daemon/install-gt.lock" ) >/dev/null 2>&1; echo $? )
 [ "$LOCK_RC" = "0" ] \
   && pass "image: the background plugin does not hold the install lock" \
   || fail "image: the install lock is held by the background plugin (rc=$LOCK_RC)"
+if [ -n "$STUB_PID" ]; then kill "$STUB_PID" 2>/dev/null || true; fi
 
 # --- Case 39: INSTALL_DIR names the install dir (gt-tcigd). It is the
 # Makefile's name for it and the one the dispatcher's host-safety prompt names
@@ -1102,6 +1099,18 @@ rc=$( export INSTALL_DIR="$T/otherbin"
       run_install "$T" --sha "$(cat "$T/c2")" )
 [ "$rc" = "0" ] && grep -q "C=\"$(cat "$T/c2")\"" "$T/bin/gt" && [ ! -e "$T/otherbin/gt" ] \
   && pass "both set: INSTALL_GT_BIN_DIR wins" || fail "both set: rc=$rc, bin $(grep -o 'C="[^"]*"' "$T/bin/gt" 2>/dev/null), otherbin $(ls "$T/otherbin" 2>&1)"
+
+# --- Case 41: perl is missing, so the detached rebuild cannot start. The
+# install says so on its own line instead of reporting a start it never made,
+# and still succeeds. INSTALL_GT_PERL is the seam: it names the interpreter. ---
+T=$(make_world); image_stub "$T"
+rc=$( export INSTALL_GT_PERL="$T/no-such-perl"
+      IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
+[ "$rc" = "0" ] && grep -q "polecat image: $T/no-such-perl is not installed" "$T/run.out" \
+  && ! grep -q "started in the background" "$T/run.out" \
+  && [ ! -e "$T/image-calls.log" ] \
+  && pass "image: no perl: one line says so, install succeeds" \
+  || fail "image: no perl: rc=$rc $(tail -3 "$T/run.out")"
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"

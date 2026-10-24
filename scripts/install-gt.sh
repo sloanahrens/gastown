@@ -140,28 +140,29 @@ gateway_step() {
   igt_gateway_agent "$mode" "$tmpl" "$GATEWAY_HOME" | while IFS= read -r line; do log "$line"; done || true
 }
 
-# polecat_image_step RUN LOG COMMIT: after a verified install, rebuild the
-# sandbox polecat image at the installed commit by running the polecat-image
-# plugin's run.sh once. A sandbox sling is refused while the image carries
-# another gt commit (gt-pmxo9), and the plugin's own cooldown can leave that
-# window open for 10 minutes after every install. Best effort, never part of the
-# install: the build (about a minute or two) runs in the background, in its own
-# session with every inherited fd closed (the lock fd above and the pipe the
-# daemon reads this script's output through would otherwise be held until the
-# build ended), bounded by an alarm, and its outcome goes to LOG. Two runs at
-# once are harmless: run.sh takes its own lock, defers while a gt sling runs
-# and returns "current" once the label matches.
+# polecat_image_step RUN LOG COMMIT: rebuild the sandbox polecat image at the
+# installed commit once, detached and best effort: a sling is refused while the
+# image carries another commit, and the plugin's own cooldown can hold that
+# window for 10 minutes after an install (gt-pmxo9). A minute-long build must
+# hold neither the install nor its lock nor the daemon's output pipe, and its
+# failure never fails the install. Two runs at once are harmless: run.sh takes
+# its own lock.
 IMAGE_RUN="${INSTALL_GT_IMAGE_RUN:-${TOWN_ROOT:+$TOWN_ROOT/plugins/polecat-image/run.sh}}"
 IMAGE_LOG="${INSTALL_GT_IMAGE_LOG:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-image-install.log}}"
+IMAGE_PERL="${INSTALL_GT_PERL:-perl}"
 polecat_image_step() {
   local run="$1" logfile="$2" commit="$3"
   if [ -z "$run" ] || [ ! -f "$run" ]; then
     log "polecat image: no plugin at '${run:-?}', not rebuilt"
     return 0
   fi
+  if ! command -v "$IMAGE_PERL" >/dev/null 2>&1; then
+    log "polecat image: $IMAGE_PERL is not installed, so the rebuild was not started (non-fatal)"
+    return 0
+  fi
   [ -n "$logfile" ] || logfile=/dev/null
   mkdir -p "$(dirname "$logfile")" 2>/dev/null || true
-  ( perl -MPOSIX -e 'POSIX::setsid(); POSIX::close($_) for 3..255; alarm 1200; exec @ARGV' \
+  ( "$IMAGE_PERL" -MPOSIX -e 'POSIX::setsid(); POSIX::close($_) for 3..255; alarm 1200; exec @ARGV' \
       bash "$run" </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null || {
     log "polecat image: could not start the rebuild for $commit (non-fatal)"
     return 0
