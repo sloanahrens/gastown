@@ -166,9 +166,7 @@ func buildDAG(b *beads.Beads, root *beads.Issue, children []*beads.Issue) (*DAGI
 
 		// Compute ready status for open steps
 		if child.Status == "open" {
-			// Beads decides which dependency types gate and when an edge
-			// resolves, so the DAG agrees with bd's ready query (gt-03mac).
-			if len(beads.UnresolvedBlockerIDs(step.Dependencies)) == 0 {
+			if moleculeStepReady(step) {
 				node.Status = "ready"
 			} else {
 				node.Status = "blocked"

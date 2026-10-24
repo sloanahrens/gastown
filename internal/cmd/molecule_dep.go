@@ -16,6 +16,14 @@ func isBlockingDepType(depType string) bool {
 	return beads.IsBlockingDependencyType(depType)
 }
 
+// moleculeStepReady reports whether an open molecule step has no unresolved
+// blocker. Every readiness view (progress, current, DAG) asks it, so they agree
+// with bd's ready query (gt-03mac). Dependencies must come from bd show; bd list
+// leaves them empty.
+func moleculeStepReady(step *beads.Issue) bool {
+	return len(beads.UnresolvedBlockerIDs(step.Dependencies)) == 0
+}
+
 // sortStepsBySequence sorts step issues by their sequence number suffix (.1, .2, etc.)
 func sortStepsBySequence(steps []*beads.Issue) {
 	sort.Slice(steps, func(i, j int) bool {

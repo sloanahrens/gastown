@@ -201,11 +201,9 @@ func runMoleculeProgress(cmd *cobra.Command, args []string) error {
 		case "in_progress":
 			progress.InProgress++
 		case "open":
-			// Dependencies come from bd show (bd list leaves DependsOn empty),
-			// and beads decides which types gate plus when an edge resolves
-			// (gt-03mac).
+			// Dependencies come from bd show (bd list leaves DependsOn empty).
 			step := openStepsMap[child.ID]
-			if step == nil || len(beads.UnresolvedBlockerIDs(step.Dependencies)) == 0 {
+			if step == nil || moleculeStepReady(step) {
 				progress.ReadySteps = append(progress.ReadySteps, child.ID)
 			} else {
 				progress.BlockedSteps = append(progress.BlockedSteps, child.ID)
@@ -560,11 +558,9 @@ func getMoleculeProgressInfo(b beads.Client, moleculeRootID string) (*MoleculePr
 		case "in_progress":
 			progress.InProgress++
 		case "open":
-			// Dependencies come from bd show (bd list leaves DependsOn empty),
-			// and beads decides which types gate plus when an edge resolves
-			// (gt-03mac).
+			// Dependencies come from bd show (bd list leaves DependsOn empty).
 			step := openStepsMap[child.ID]
-			if step == nil || len(beads.UnresolvedBlockerIDs(step.Dependencies)) == 0 {
+			if step == nil || moleculeStepReady(step) {
 				progress.ReadySteps = append(progress.ReadySteps, child.ID)
 			} else {
 				progress.BlockedSteps = append(progress.BlockedSteps, child.ID)
@@ -1018,9 +1014,7 @@ func moleculeCurrentFrom(b beads.Client, handoff *beads.Issue, target string) Mo
 			continue
 		}
 
-		// Beads decides which dependency types gate progress and when an edge
-		// resolves, so gt mol agrees with bd's ready query (gt-03mac).
-		if len(beads.UnresolvedBlockerIDs(step.Dependencies)) == 0 {
+		if moleculeStepReady(step) {
 			readySteps = append(readySteps, step)
 		}
 	}

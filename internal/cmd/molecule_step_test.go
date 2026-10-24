@@ -97,6 +97,10 @@ func TestExtractMoleculeIDFromStep(t *testing.T) {
 // - List() returns issues with DependsOn empty (bd list doesn't return deps)
 // - Show()/ShowMultiple() returns issues with Dependencies populated (bd show does)
 type mockBeadsForStep struct {
+	// beads.Client is embedded only so the mock satisfies the interface the
+	// readiness readers take. Methods a test does not implement panic on the nil
+	// embed, which is loud enough.
+	beads.Client
 	issues map[string]*beads.Issue
 }
 
@@ -415,6 +419,7 @@ func TestDepTypeBlockingSemantics(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newMockBeadsForStep()
+			m.addIssue(&beads.Issue{ID: "gt-mol", Title: "Molecule", Type: "epic", Status: "open"})
 
 			// Step 1: no deps (always ready)
 			m.addIssue(makeStepIssueWithDepType("gt-mol.1", "Ensure labels", "gt-mol", "open", nil))
@@ -429,28 +434,13 @@ func TestDepTypeBlockingSemantics(t *testing.T) {
 				{ID: "gt-mol.2", Title: "Split and file", DependencyType: tt.depType},
 			}))
 
-			children, _ := m.List(beads.ListOptions{Parent: "gt-mol", Status: "all"})
-			var openStepIDs []string
-			for _, child := range children {
-				if child.Status == "open" {
-					openStepIDs = append(openStepIDs, child.ID)
-				}
+			progress, err := getMoleculeProgressInfo(m, "gt-mol")
+			if err != nil {
+				t.Fatalf("getMoleculeProgressInfo: %v", err)
 			}
-			openStepsMap, _ := m.ShowMultiple(openStepIDs)
-
-			var readySteps []string
-			for _, stepID := range openStepIDs {
-				step := openStepsMap[stepID]
-				if step == nil {
-					continue
-				}
-				if len(beads.UnresolvedBlockerIDs(step.Dependencies)) == 0 {
-					readySteps = append(readySteps, step.ID)
-				}
-			}
-
-			if len(readySteps) != tt.wantReady {
-				t.Errorf("got %d ready steps, want %d (readySteps=%v)", len(readySteps), tt.wantReady, readySteps)
+			if got := len(progress.ReadySteps); got != tt.wantReady {
+				t.Errorf("got %d ready steps, want %d (ready=%v blocked=%v)",
+					got, tt.wantReady, progress.ReadySteps, progress.BlockedSteps)
 			}
 		})
 	}
@@ -476,6 +466,52 @@ func TestIsBlockingDepType_MatchesBeads(t *testing.T) {
 		if got, want := isBlockingDepType(depType), beads.IsBlockingDependencyType(depType); got != want {
 			t.Errorf("isBlockingDepType(%q) = %t, beads.IsBlockingDependencyType = %t", depType, got, want)
 		}
+	}
+}
+
+// TestMoleculeStepReady covers the one readiness rule the progress, current and
+// DAG views share. An unresolved blocker is one beads has not seen close: a
+// merge-blocks edge resolves only on a "Merged in " close reason, and a
+// dependency with no status from bd show stays unresolved.
+func TestMoleculeStepReady(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		deps      []beads.IssueDep
+		wantReady bool
+	}{
+		{name: "no dependencies", deps: nil, wantReady: true},
+		{name: "parent-child is not a gate", deps: []beads.IssueDep{
+			{ID: "gt-mol", DependencyType: "parent-child", Status: "open"},
+		}, wantReady: true},
+		{name: "closed blocks edge", deps: []beads.IssueDep{
+			{ID: "gt-mol.1", DependencyType: "blocks", Status: "closed"},
+		}, wantReady: true},
+		{name: "open blocks edge", deps: []beads.IssueDep{
+			{ID: "gt-mol.1", DependencyType: "blocks", Status: "open"},
+		}, wantReady: false},
+		{name: "capitalised type still gates", deps: []beads.IssueDep{
+			{ID: "gt-mol.1", DependencyType: "Blocks", Status: "open"},
+		}, wantReady: false},
+		{name: "merge-blocks closed without merge reason", deps: []beads.IssueDep{
+			{ID: "gt-mol.1", DependencyType: "merge-blocks", Status: "closed", CloseReason: "done"},
+		}, wantReady: false},
+		{name: "merge-blocks closed as merged", deps: []beads.IssueDep{
+			{ID: "gt-mol.1", DependencyType: "merge-blocks", Status: "closed", CloseReason: "Merged in abc123"},
+		}, wantReady: true},
+		{name: "blocks edge with no status from bd show", deps: []beads.IssueDep{
+			{ID: "gt-mol.1", DependencyType: "blocks"},
+		}, wantReady: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			step := makeStepIssueWithDepType("gt-mol.2", "Split and file", "gt-mol", "open", tt.deps)
+			if got := moleculeStepReady(step); got != tt.wantReady {
+				t.Errorf("moleculeStepReady() = %t, want %t", got, tt.wantReady)
+			}
+		})
 	}
 }
 
