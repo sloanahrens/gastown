@@ -285,13 +285,15 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 	}
 	for _, readings := range groups {
 		// The readings are alternatives to one another, so each starts from the
-		// directory its segment starts in, and only the first reading's cd carries
-		// on to the next segment (gt-lhn14). Shadowing the scope inside the loop
-		// makes every reading start from entry: a later reading cannot inherit
-		// where an earlier one walked.
+		// directory its segment starts in (gt-lhn14). Shadowing the scope inside
+		// the loop makes every reading start from entry: a later reading cannot
+		// inherit where an earlier one walked. The guard cannot tell which reading
+		// the shell takes, so the next segment is judged from the directories of
+		// all of them: a stray ')' can make reading 0 miss the cd that reading 1
+		// finds (gt-8lv66).
 		entry := s
 		carried := s
-		for i, segment := range readings {
+		for _, segment := range readings {
 			s := entry
 			cmdline := trimShellKeywords(segment)
 			word, args := segmentCommandWord(cmdline)
@@ -374,9 +376,12 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 					}
 				}
 			}
-			if i == 0 {
-				carried = s
+			if len(s.dirs) > 0 {
+				carried.dirs = unionDirs(carried.dirs, s.dirs)
 			}
+		}
+		if len(carried.dirs) > maxWalkDirs {
+			return "too many directory changes to follow in one command — split it into commands that each stay in one directory"
 		}
 		s = carried
 	}
@@ -514,6 +519,22 @@ func (s polecatPathScope) followCd(command string, args []string) (polecatPathSc
 	}
 	s.dirs = dirs
 	return s, ""
+}
+
+// unionDirs returns base followed by the directories of extra that it lacks.
+func unionDirs(base, extra []string) []string {
+	seen := make(map[string]bool, len(base)+len(extra))
+	out := append([]string(nil), base...)
+	for _, dir := range base {
+		seen[dir] = true
+	}
+	for _, dir := range extra {
+		if !seen[dir] {
+			seen[dir] = true
+			out = append(out, dir)
+		}
+	}
+	return out
 }
 
 // cdDestinations returns the paths a cd operand may name. A bare relative

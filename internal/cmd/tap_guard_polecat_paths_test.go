@@ -810,6 +810,34 @@ func TestPolecatPathGuardReadingsStartFromEntry(t *testing.T) {
 	}
 }
 
+// TestPolecatPathGuardCdCarriedFromNonfirstReading: a stray ")" or a quoted
+// "$(" makes reading 0 of a segment miss the cd that a later reading finds,
+// and in bash that cd runs in the current shell either way. The next segment
+// is judged from the directories of every reading (gt-8lv66).
+func TestPolecatPathGuardCdCarriedFromNonfirstReading(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	for _, tc := range []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{"cd-carried-from-nonfirst-reading, stray paren", `y=$(echo ")" ) cd .. && rm -rf ../` + p.other, true},
+		{"cd-carried-from-nonfirst-reading, quoted dollar-paren", `X='$(a' cd .. && rm -rf ../` + p.other, true},
+		{"cd-carried-from-nonfirst-reading, harmless rm", `y=$(echo ")" ) cd .. && rm -rf scratch`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := p.run(t, "Bash", commandInput(tc.command))
+			if tc.wantBlock && err == nil {
+				t.Errorf("command %q: expected BLOCK, got allow", tc.command)
+			}
+			if !tc.wantBlock && err != nil {
+				t.Errorf("command %q: expected allow, got block: %v", tc.command, err)
+			}
+		})
+	}
+}
+
 // TestPolecatPathGuardRefusesTooManyReadings drives the reading cap through
 // the guard: past the cap the whole segment is refused, even when no reading
 // writes anything (gt-lhn14).
