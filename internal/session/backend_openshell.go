@@ -375,7 +375,9 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 
 	// The clone inside the sandbox fetches the branch, so it must exist on
 	// Forgejo before the sandbox is created.
-	if err := b.push(filepath.Join(spec.TownRoot, spec.Rig, ".repo.git"), spec.Branch); err != nil {
+	if err := spec.Trace.Phase("push", func() error {
+		return b.push(filepath.Join(spec.TownRoot, spec.Rig, ".repo.git"), spec.Branch)
+	}); err != nil {
 		return nil, fmt.Errorf("pushing %s to forgejo: %w", spec.Branch, err)
 	}
 
@@ -414,13 +416,13 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 		}
 	}
 
-	if err := b.cli.Create(ctx, create); err != nil {
+	if err := spec.Trace.Phase("create", func() error { return b.cli.Create(ctx, create) }); err != nil {
 		return nil, fmt.Errorf("creating sandbox %s: %w", spec.Session, err)
 	}
 
 	workDir := path.Join(sandboxTownRoot, rel)
 	if err := b.populate(ctx, spec, workDir, redirectTarget(rel), staged); err != nil {
-		return nil, b.rollback(ctx, spec.Session, err)
+		return nil, b.rollback(ctx, spec.Session, err, spec.Trace)
 	}
 
 	b.tmux = tmux.NewTmuxWithExecPrefix(SandboxTmuxSocket, SandboxExecPrefix(b.profile.Gateway, spec.Session)).Routed()
@@ -437,48 +439,60 @@ type stagedArchives struct {
 // Ready, extract the skeleton, clone, extract the runtime files, write the
 // redirect, and record the sandbox so the tmux router sends its commands here.
 func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir, redirect string, files stagedArchives) error {
-	if err := b.awaitReady(ctx, spec.Session); err != nil {
+	if err := spec.Trace.Phase("ready", func() error { return b.awaitReady(ctx, spec.Session) }); err != nil {
 		return err
 	}
 	// The sandbox's own gt is the one that will run; Prepare's label check only
 	// saw the host docker's image for the same reference (gt-zdilt).
-	if err := b.checkSandboxGT(ctx, spec.Session); err != nil {
+	if err := spec.Trace.Phase("gt check", func() error { return b.checkSandboxGT(ctx, spec.Session) }); err != nil {
 		return err
 	}
-	if err := b.cli.Upload(ctx, spec.Session, files.skeleton, sandboxHome+"/"); err != nil {
-		return fmt.Errorf("uploading town skeleton: %w", err)
-	}
-	if err := b.run(ctx, spec.Session, "tar", "xzf", path.Join(sandboxHome, skeletonArchive), "-C", sandboxHome); err != nil {
-		return fmt.Errorf("extracting town skeleton: %w", err)
-	}
-	if err := b.cli.Upload(ctx, spec.Session, files.runtime, sandboxHome+"/"); err != nil {
-		return fmt.Errorf("uploading polecat settings: %w", err)
-	}
-	if err := b.run(ctx, spec.Session, "tar", "xzf", path.Join(sandboxHome, runtimeArchiveName), "-C", sandboxHome); err != nil {
-		return fmt.Errorf("extracting polecat settings: %w", err)
-	}
-	if err := b.run(ctx, spec.Session, "sh", "-c", cloneScript, "sh", spec.Branch, spec.RepoURL, workDir); err != nil {
-		return fmt.Errorf("cloning %s: %w", spec.Branch, err)
-	}
-	if files.workspace != "" {
-		if err := b.cli.Upload(ctx, spec.Session, files.workspace, sandboxHome+"/"); err != nil {
-			return fmt.Errorf("uploading runtime files: %w", err)
+	if err := spec.Trace.Phase("skeleton and env", func() error {
+		if err := b.cli.Upload(ctx, spec.Session, files.skeleton, sandboxHome+"/"); err != nil {
+			return fmt.Errorf("uploading town skeleton: %w", err)
 		}
-		if err := b.run(ctx, spec.Session, "tar", "xzf", path.Join(sandboxHome, workspaceArchiveName), "-C", workDir); err != nil {
-			return fmt.Errorf("extracting runtime files: %w", err)
+		if err := b.run(ctx, spec.Session, "tar", "xzf", path.Join(sandboxHome, skeletonArchive), "-C", sandboxHome); err != nil {
+			return fmt.Errorf("extracting town skeleton: %w", err)
 		}
+		if err := b.cli.Upload(ctx, spec.Session, files.runtime, sandboxHome+"/"); err != nil {
+			return fmt.Errorf("uploading polecat settings: %w", err)
+		}
+		if err := b.run(ctx, spec.Session, "tar", "xzf", path.Join(sandboxHome, runtimeArchiveName), "-C", sandboxHome); err != nil {
+			return fmt.Errorf("extracting polecat settings: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
-	if err := b.run(ctx, spec.Session, "sh", "-c", redirectScript, "sh", workDir, redirect); err != nil {
-		return fmt.Errorf("writing beads redirect: %w", err)
+	if err := spec.Trace.Phase("clone", func() error {
+		if err := b.run(ctx, spec.Session, "sh", "-c", cloneScript, "sh", spec.Branch, spec.RepoURL, workDir); err != nil {
+			return fmt.Errorf("cloning %s: %w", spec.Branch, err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
-	return WriteSandboxRecord(b.townRoot, SandboxRecord{
-		Session:   spec.Session,
-		Rig:       spec.Rig,
-		Polecat:   spec.Polecat,
-		Gateway:   b.profile.Gateway,
-		Profile:   b.profile.Name,
-		Image:     b.profile.Image,
-		CreatedAt: time.Now().UTC(),
+	return spec.Trace.Phase("workspace and record", func() error {
+		if files.workspace != "" {
+			if err := b.cli.Upload(ctx, spec.Session, files.workspace, sandboxHome+"/"); err != nil {
+				return fmt.Errorf("uploading runtime files: %w", err)
+			}
+			if err := b.run(ctx, spec.Session, "tar", "xzf", path.Join(sandboxHome, workspaceArchiveName), "-C", workDir); err != nil {
+				return fmt.Errorf("extracting runtime files: %w", err)
+			}
+		}
+		if err := b.run(ctx, spec.Session, "sh", "-c", redirectScript, "sh", workDir, redirect); err != nil {
+			return fmt.Errorf("writing beads redirect: %w", err)
+		}
+		return WriteSandboxRecord(b.townRoot, SandboxRecord{
+			Session:   spec.Session,
+			Rig:       spec.Rig,
+			Polecat:   spec.Polecat,
+			Gateway:   b.profile.Gateway,
+			Profile:   b.profile.Name,
+			Image:     b.profile.Image,
+			CreatedAt: time.Now().UTC(),
+		})
 	})
 }
 
@@ -527,9 +541,11 @@ func (b *openshellBackend) checkSandboxGT(ctx context.Context, name string) erro
 // rollback deletes the sandbox after a failed populate and removes its
 // record, which populate may have written before it failed. The cleanup runs
 // without the caller's context, so a canceled spawn still cleans up.
-func (b *openshellBackend) rollback(ctx context.Context, name string, cause error) error {
+func (b *openshellBackend) rollback(ctx context.Context, name string, cause error, trace *SandboxTrace) error {
 	ctx = context.WithoutCancel(ctx)
-	err := errors.Join(b.cli.Delete(ctx, name), RemoveSandboxRecord(b.townRoot, name))
+	err := trace.Phase("teardown", func() error {
+		return errors.Join(b.cli.Delete(ctx, name), RemoveSandboxRecord(b.townRoot, name))
+	})
 	if err != nil {
 		return fmt.Errorf("%w (rolling back sandbox %s: %v)", cause, name, err)
 	}

@@ -1732,6 +1732,8 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	}
 	// The roster's seat picture, kept for the slings of this tick.
 	var snapshot atomic.Pointer[poolSeatSnapshot]
+	// The sandbox phase line of each sling that starts a sandbox session (gt-0uh64).
+	slingTraces := &specSlingTraces{}
 	if slingActor == "" {
 		slingActor = specDispatchActor
 	}
@@ -1811,7 +1813,10 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			if seats := snapshot.Load(); seats != nil {
 				occupied = snapshotOccupied(*seats, newPoolSessionLister, sandboxSeatDeathsFor(townRoot), time.Now)
 			}
-			return slingSpec(townRoot, c, resumeBranch, seat, occupied)
+			trace := session.NewSandboxTrace(time.Now)
+			name, err := slingSpec(townRoot, c, resumeBranch, seat, occupied, trace)
+			slingTraces.add(specSlingTraceLine(c.Spec.ID, seat.Agent, trace, err))
+			return name, err
 		},
 		Sleep:    time.Sleep,
 		Now:      time.Now,
@@ -1824,6 +1829,7 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		ShapeGate:   ts.PolecatPool.GetShapeGate(),
 	}
 	report := runSpecDispatchCycle(env)
+	report.Notices = append(report.Notices, slingTraces.notices()...)
 	annotations.save()
 	report.DetailsFetched, report.DetailsCached, report.DetailsUnread = details.Counts()
 	if report.Hold == "" {
@@ -1840,6 +1846,46 @@ func specTickCost(reads *specTickReads, took time.Duration, slings int, slowest 
 		line += fmt.Sprintf("; %d sling(s) in parallel, slowest %s", slings, slowest.Round(time.Millisecond))
 	}
 	return line
+}
+
+// specSlingTraceLine is the line a sling that started a sandbox session adds to
+// the tick's log: its phases with their durations, then how the sling ended. It
+// is "" for a sling that touched no sandbox, so a tmux seat adds nothing.
+func specSlingTraceLine(beadID, agent string, trace *session.SandboxTrace, err error) string {
+	summary := trace.Summary()
+	if summary == "" {
+		return ""
+	}
+	outcome := "started"
+	if err != nil {
+		outcome = "error: " + err.Error()
+	}
+	return fmt.Sprintf("sling %s seat %s: %s; outcome: %s", beadID, agent, summary, outcome)
+}
+
+// specSlingTraces collects the sling lines of one tick. The slings run in
+// parallel, so it is locked, and its lines come back sorted so the log reads the
+// same from run to run.
+type specSlingTraces struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (s *specSlingTraces) add(line string) {
+	if line == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lines = append(s.lines, line)
+}
+
+func (s *specSlingTraces) notices() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := append([]string(nil), s.lines...)
+	sort.Strings(out)
+	return out
 }
 
 // specRosterSnapshot is the seat picture poolSeatSessions draws, with its
@@ -2252,8 +2298,9 @@ func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, resume
 // The agent is explicit, so it wins over the bead's route:* labels in the
 // pool; the pool still enforces its own caps and may refuse. occupied, when
 // set, is the seat occupancy read the pool decision uses (the tick's
-// snapshot); nil reads the town.
-func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice, occupied func() ([]poolSession, error)) (string, error) {
+// snapshot); nil reads the town. trace times the sandbox phases of the start;
+// nil times nothing.
+func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice, occupied func() ([]poolSession, error), trace *session.SandboxTrace) (string, error) {
 	targetBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, c.Rig)
 	if !ok {
 		return "", fmt.Errorf("cannot resolve rig %q beads database for %s", c.Rig, c.Spec.ID)
@@ -2261,12 +2308,13 @@ func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specd
 	params := specSlingParams(townRoot, targetBeadsDir, resolveFormula("", false, townRoot, c.Rig), c, resumeBranch, seat)
 	d := realSlingDeps()
 	d.beadInfoInTown = refuseOpenBlockers(d.beadInfoInTown)
-	if occupied != nil {
-		spawn := d.spawnPolecat
-		d.spawnPolecat = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+	spawn := d.spawnPolecat
+	d.spawnPolecat = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		opts.trace = trace
+		if occupied != nil {
 			opts.occupied = occupied
-			return spawn(rigName, opts)
 		}
+		return spawn(rigName, opts)
 	}
 	result, err := d.executeSling(params)
 	if err != nil {

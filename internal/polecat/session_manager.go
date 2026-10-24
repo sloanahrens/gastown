@@ -187,6 +187,10 @@ type SessionStartOptions struct {
 	// routed tmux client.
 	Backend session.Backend
 
+	// Trace times the sandbox phases of this start for the sling's log line.
+	// Nil, or a tmux start, times nothing.
+	Trace *session.SandboxTrace
+
 	// Issue is an optional issue ID to work on.
 	Issue string
 
@@ -744,6 +748,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 			RepoURL:     repoURL,
 			HostWorkDir: workDir,
 			Env:         envVars,
+			Trace:       opts.Trace,
 		})
 		if perr != nil {
 			return fmt.Errorf("preparing %s session for %s: %w", b.Name(), polecat, perr)
