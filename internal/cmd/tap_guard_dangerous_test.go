@@ -3828,6 +3828,7 @@ func TestDangerousGuardQuotedParenShapes(t *testing.T) {
 		{"a nuke after a quoted close-paren in a substitution", `echo $(echo ")" && rm -rf /)`, true},
 		{"a sudo body after a quoted close-paren in a substitution", `x=$(echo ")" && bash -c 'sudo apt-get install foo')`, true},
 		{"a sudo body after a quoted close-paren and a semicolon", `echo $(echo ")" ; bash -c 'sudo apt-get install foo')`, true},
+		{"a nuke after a double-quoted dollar-paren in a substitution", `echo $(echo "$(" ; rm -rf /)`, true},
 		{"a sudo body behind text then a quote that ends the dollar-paren", `echo "a$(" bash -c 'sudo apt-get install foo'`, true},
 		{"a sudo body behind a single-quoted dollar-paren and text", `echo '$(' text bash -c 'sudo apt-get install foo'`, true},
 		{"a sudo body behind a dollar-paren and an escaped quote", `echo "\"$(" bash -c 'sudo apt-get install foo'`, true},

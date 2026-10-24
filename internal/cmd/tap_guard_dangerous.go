@@ -1732,6 +1732,17 @@ func spaceOutShellOperators(command string) string {
 			b.WriteRune('"')
 			scopes[len(scopes)-1].quote = '$'
 			i++
+		case r == '$' && sc.quote == '"' && i+2 < len(runes) && runes[i+1] == '(' && runes[i+2] == '"':
+			// A quoted dollar-paren — "$(" — inside a double-quoted word. The
+			// substitution body begins with a quote of its own, and reading
+			// that quote as the one ending the double-quoted word keeps the
+			// substitution around it from running to the end of the line: the
+			// ")" that closes that substitution stays in view, so the rest of
+			// the substitution's body is judged (gt-qg832).
+			// The "$", "(" and quote are then plain characters of the quoted
+			// word, emitted by the quote branch below.
+			scopes[len(scopes)-1].quotedParen = true
+			emit(r)
 		case r == '$' && sc.quote != '\'' && i+1 < len(runes) && runes[i+1] == '(':
 			b.WriteString("$(")
 			i++
@@ -1749,7 +1760,15 @@ func spaceOutShellOperators(command string) string {
 			emit(r)
 		case paren == ")":
 			scopes[len(scopes)-1].depth--
-			emit(r)
+			if scopes[len(scopes)-1].quotedParen {
+				// The last word before the ")" of a substitution holding a
+				// quoted dollar-paren is an argument of its own: glued,
+				// "rm -rf /)" ends in "/)" and the root target is no token
+				// any matcher compares (gt-qg832).
+				b.WriteString(" ) ")
+			} else {
+				emit(r)
+			}
 			if scopes[len(scopes)-1].depth == 0 {
 				closeScope()
 			}
@@ -1941,6 +1960,11 @@ type shellQuoteScope struct {
 	// token those quotes promise when shlex — which has no notion of scope
 	// nesting — splits the result (gt-n8ir).
 	escapeForShlex bool
+	// quotedParen records a quoted dollar-paren — "$(" — read inside this
+	// substitution, which ends the double-quoted word it sits in. The ")"
+	// that closes this substitution is then padded out, so a word glued to it
+	// ("/" in "rm -rf /)") is still an argument of its own (gt-qg832).
+	quotedParen bool
 }
 
 // printDangerousBlock prints the standard block banner to stderr.

@@ -943,6 +943,16 @@ func closingDoubleQuote(text string, from int, bodies []heredocSpan) int {
 		case text[i] == '$' && i+1 < len(text) && text[i+1] == '(':
 			end := closingParen(text, i+2, bodies)
 			if end < 0 {
+				// The substitution never closes, so the line is one the shell
+				// rejects. When its body starts with a double quote — the
+				// quoted dollar-paren "$(" shape — reading that quote as the
+				// one ending this double-quoted stretch keeps the ")" of the
+				// substitution around it in view, so the command after the
+				// semicolon inside it is judged instead of the whole stretch
+				// running to the end of the line (gt-qg832).
+				if i+2 < len(text) && text[i+2] == '"' {
+					return i + 2
+				}
 				return -1
 			}
 			i = end
