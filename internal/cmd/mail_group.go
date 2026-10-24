@@ -199,7 +199,7 @@ func runGroupCreate(cmd *cobra.Command, args []string) error {
 	members = append(members, groupMembers...)
 
 	if !isValidGroupName(name) {
-		return fmt.Errorf("invalid group name %q: must be alphanumeric with dashes/underscores", name)
+		return fmt.Errorf("invalid group name %q: must be lowercase alphanumeric with dashes/underscores, starting with a letter or digit, at most %d characters", name, beads.MaxGroupNameLength)
 	}
 
 	// Validate member patterns
@@ -310,19 +310,10 @@ func runGroupDelete(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// isValidGroupName checks if a group name is valid.
-// Group names must be alphanumeric with dashes and underscores.
+// isValidGroupName reports whether name is a group name the group store
+// accepts; beads.ValidateGroupName owns the rule.
 func isValidGroupName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for _, r := range name {
-		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') || r == '-' || r == '_') {
-			return false
-		}
-	}
-	return true
+	return beads.ValidateGroupName(name) == nil
 }
 
 // isValidMemberPattern checks if a member pattern is syntactically valid.

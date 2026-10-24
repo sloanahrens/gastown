@@ -274,7 +274,7 @@ func runChannelCreate(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
 	if !isValidGroupName(name) { // Reuse group name validation
-		return fmt.Errorf("invalid channel name %q: must be alphanumeric with dashes/underscores", name)
+		return fmt.Errorf("invalid channel name %q: must be lowercase alphanumeric with dashes/underscores, starting with a letter or digit, at most %d characters", name, beads.MaxGroupNameLength)
 	}
 
 	townRoot, err := workspace.FindFromCwdOrError()
