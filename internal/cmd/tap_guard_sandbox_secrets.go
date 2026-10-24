@@ -1243,11 +1243,19 @@ func sandboxSecretsANSICHereStrings(command string) map[string]bool {
 		for word < len(command) && (command[word] == ' ' || command[word] == '\t') {
 			word++
 		}
-		if word+1 >= len(command) || command[word] != '$' || command[word+1] != '\'' {
+		if word >= len(command) || command[word] != '$' {
 			i = op + len("<<<")
 			continue
 		}
-		close := closingANSIQuote(command, word+2)
+		// bash deletes a backslash-newline between the "$" and the quote before
+		// it reads the quote, so $\<newline>'x' is the same ANSI-C string as $'x'
+		// (gt-javvg, gt-vviaz).
+		quote := skipLineContinuationBytes(command, word+1)
+		if quote >= len(command) || command[quote] != '\'' {
+			i = op + len("<<<")
+			continue
+		}
+		close := closingANSIQuote(command, quote+1)
 		if close < 0 {
 			return texts
 		}
