@@ -1963,9 +1963,10 @@ func trimShellKeywords(segment []string) []string {
 }
 
 // segmentCommandWord returns a segment's command word and its arguments,
-// skipping leading VAR=value assignments and the small set of launchers that
-// carry the real command behind them (env VAR=x cmd, time cmd, sudo cmd, exec
-// cmd — gt-tt8sg: `exec rm -rf X` named exec and the rm went unseen). A leading
+// skipping leading VAR=value assignments and the launchers that carry the real
+// command behind them (env VAR=x cmd, time cmd, sudo cmd, exec cmd — gt-tt8sg:
+// `exec rm -rf X` named exec and the rm went unseen). Every launcher in
+// prWorkflowLaunchers is one of them except xargs; see skipsToCommand. A leading
 // "(" opens a subshell whose first command is the command word (gt-erfxm). A
 // launcher's own flags are stepped over too, so `env -i bash` and `nice -n 5
 // bash` name bash (gt-48buu).
@@ -1999,13 +2000,20 @@ func segmentCommandWord(segment []string) (string, []string) {
 }
 
 // skipsToCommand reports whether a token is a launcher or grouping token that
-// the command word sits behind, so the scan goes past it.
+// the command word sits behind, so the scan goes past it. Every launcher in
+// prWorkflowLaunchers counts, so timeout, doas and the rest are stepped over
+// the way env, sudo and nice are. xargs is the exception: the done-slot loop
+// guard reads it as a repeater by its command word, and the path guard already
+// judges the command it runs.
 func skipsToCommand(token string) bool {
 	switch token {
-	case "(", "!", "time", "sudo", "command", "nohup", "env", "nice", "stdbuf", "exec", "builtin":
+	case "(", "!":
 		return true
+	case "xargs":
+		return false
 	}
-	return false
+	_, ok := prWorkflowLaunchers[token]
+	return ok
 }
 
 // maxSegmentReadings bounds the readings of one segment. Each leading

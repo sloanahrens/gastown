@@ -1372,6 +1372,36 @@ func TestEvaluateDangerousCommandUnquotedHeredocSubstitution(t *testing.T) {
 	}
 }
 
+// TestEvaluateDangerousCommandHeredocFedShellBehindLauncher pins that a launcher
+// in front of the shell does not hide it from the heredoc reader check: timeout
+// runs the bash that reads the body, so the body is judged as a script. Each
+// row has a mirror without the launcher.
+func TestEvaluateDangerousCommandHeredocFedShellBehindLauncher(t *testing.T) {
+	t.Parallel()
+	const body = "git reset --hard origin/main\nEOF"
+	tests := []struct {
+		name        string
+		reader      string
+		wantBlocked bool
+	}{
+		{"bash reads the body", "bash <<'EOF'", true},
+		{"timeout 5 bash reads the body", "timeout 5 bash <<'EOF'", true},
+		{"doas -u alice bash reads the body", "doas -u alice bash <<'EOF'", true},
+		{"timeout 5 grep reads the body as data", "timeout 5 grep reset <<'EOF'", false},
+		{"grep reads the body as data", "grep reset <<'EOF'", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			command := tt.reader + "\n" + body
+			reason, _ := evaluateDangerousCommand(command, 0, noTownSession)
+			if got := reason != ""; got != tt.wantBlocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", command, got, reason, tt.wantBlocked)
+			}
+		})
+	}
+}
+
 // TestHeredocDoesNotHideRealCommand ensures stripHeredocBodies only
 // removes the body span and leaves surrounding shell text — including a
 // second, genuinely dangerous command after the terminator — intact. The

@@ -582,6 +582,36 @@ func TestShellFedScriptBehindAnOptionValueIsJudged(t *testing.T) {
 	}
 }
 
+// A launcher in front of the shell does not hide it: timeout and doas run the
+// shell they wrap, so the script fed to that shell is judged the way it is
+// with no launcher there. Each row has a mirror without the launcher.
+func TestShellFedScriptBehindALauncherIsJudged(t *testing.T) {
+	t.Parallel()
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"script piped into sh", `echo 'make test' | sh`, true},
+		{"script piped into timeout 5 sh", `echo 'make test' | timeout 5 sh`, true},
+		{"script piped into timeout -s KILL 5 bash", `echo 'make test' | timeout -s KILL 5 bash`, true},
+		{"script piped into doas -u alice bash", `echo 'make test' | doas -u alice bash`, true},
+		{"harmless script piped into timeout 5 sh", `echo 'make lint' | timeout 5 sh`, false},
+		{"here-string into timeout 5 bash", `timeout 5 bash <<< 'make test'`, true},
+		{"here-string into timeout 5 bash, harmless", `timeout 5 bash <<< 'make lint'`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc := fakeGuardProcess(nil, goRoot)
+			reason, matched := evaluateContainerSuiteCommand(proc, tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
 // A redirection word is not an operand: "bash 2>&1" still reads its script from
 // stdin, so the script fed to it is judged. A redirection that replaces stdin
 // with a file feeds the shell something the guards cannot read (gt-sveq8).

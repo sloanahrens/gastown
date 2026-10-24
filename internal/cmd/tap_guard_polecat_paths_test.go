@@ -412,6 +412,12 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"cp into a sibling that does not exist yet", "cp a.go " + filepath.Join(p.sibling, "new", "x.go"), true},
 		{"mv into sibling worktree", "mv a.go " + sib, true},
 		{"rm inside sibling worktree", "rm -rf " + filepath.Join(p.sibling, "internal.go"), true},
+		{"timeout wrapping rm of a sibling file", "timeout 5 rm -rf " + filepath.Join(p.sibling, "internal.go"), true},
+		{"doas -u wrapping rm of a sibling file", "doas -u alice rm -rf " + filepath.Join(p.sibling, "internal.go"), true},
+		{"setsid wrapping rm of a sibling file", "setsid rm -rf " + filepath.Join(p.sibling, "internal.go"), true},
+		{"ionice wrapping rm of a sibling file", "ionice -c 3 rm -rf " + filepath.Join(p.sibling, "internal.go"), true},
+		{"caffeinate wrapping rm of a sibling file", "caffeinate -t 5 rm -rf " + filepath.Join(p.sibling, "internal.go"), true},
+		{"timeout wrapping rm of an own file", "timeout 5 rm -rf build", false},
 		{"mkdir in sibling worktree", "mkdir -p " + filepath.Join(p.sibling, "new"), true},
 		{"tee into sibling worktree", "echo hi | tee " + sib, true},
 		{"touch in town mayor dir", "touch " + mayor, true},
@@ -486,6 +492,12 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"sudo -u wrapping bash -c cd up then rm a sibling", "sudo -u root bash -c 'cd .. && rm -rf ../" + p.other + "'", true},
 		{"env assignment then timeout wrapping bash -c", "A=1 timeout 5 /bin/bash -c 'cd .. && rm -rf ../" + p.other + "'", true},
 		{"xargs sh -c cd up then rm a sibling", "ls | xargs -I{} sh -c 'cd .. && rm -rf ../" + p.other + "'", true},
+		// xargs is not stepped over by segmentCommandWord (the done-slot loop
+		// guard reads it as a repeater). The path guard still refuses a sibling
+		// path it names, because isWriteCapableCommand counts xargs as a writer
+		// by its own word; these rows hold that end to end.
+		{"xargs rm a sibling file", "ls | xargs -I{} rm -rf " + filepath.Join(p.sibling, "internal.go"), true},
+		{"xargs rm an own file", "ls | xargs -I{} rm -rf build", false},
 		{"find -exec sh -c cd up then rm a sibling", `find . -name x -exec sh -c 'cd .. && rm -rf ../` + p.other + `' \;`, true},
 		{"cd with an unresolvable destination then rm", "cd $POLECAT_PATHS_UNSET && rm -rf build", true},
 		// git -C reaches another tree without naming a path anywhere else.
@@ -1261,6 +1273,13 @@ func TestSegmentCommandWord(t *testing.T) {
 		{"nice with a value flag before the command", []string{"nice", "-n", "5", "bash"}, "bash"},
 		{"time with a flag before the command", []string{"time", "-p", "bash"}, "bash"},
 		{"sudo with a value flag before the command", []string{"sudo", "-u", "alice", "bash"}, "bash"},
+		{"timeout with a duration before the command", []string{"timeout", "5", "rm", "-rf", "x"}, "rm"},
+		{"timeout with a value flag and a duration", []string{"timeout", "-s", "KILL", "5", "rm"}, "rm"},
+		// timeout reads its options only ahead of the duration, so a flag after
+		// it is the command word, as coreutils' getopt reads it.
+		{"timeout with a flag after the duration", []string{"timeout", "5", "-s", "KILL", "rm"}, "-s"},
+		{"timeout with nothing but a duration", []string{"timeout", "5"}, ""},
+		{"doas with a value flag before the command", []string{"doas", "-u", "alice", "rm", "-rf", "x"}, "rm"},
 		{"launcher flags then an env assignment", []string{"env", "-i", "X=1", "bash"}, "bash"},
 		{"launcher flags with nothing after them", []string{"env", "-i"}, ""},
 		// A substitution that never closes runs the text after its "$(" first.
@@ -1279,31 +1298,31 @@ func TestSegmentCommandWord(t *testing.T) {
 
 // TestSegmentCommandWordStepsOverLauncherTable pins gt-j21h4: every launcher in
 // prWorkflowLaunchers that segmentCommandWord reaches is stepped over with each
-// of its value flags, so a launcher's flags cannot hide the command behind them.
-// Launchers the skip list does not reach (timeout, doas, xargs and the rest)
-// are left to prWorkflowCommand and are not covered here.
+// of its value flags and positional operands, so a launcher's flags cannot hide
+// the command behind them.
 func TestSegmentCommandWordStepsOverLauncherTable(t *testing.T) {
 	t.Parallel()
-	reached := 0
 	for name, launcher := range prWorkflowLaunchers {
-		if !skipsToCommand(name) {
-			continue
+		if name == "xargs" {
+			continue // a repeater to the done-slot loop guard, not stepped over
 		}
-		reached++
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
+			if !skipsToCommand(name) {
+				t.Fatalf("launcher %q in prWorkflowLaunchers is not stepped over by skipsToCommand", name)
+			}
 			segment := []string{name}
 			for flag := range launcher.valueFlags {
 				segment = append(segment, flag, "value")
+			}
+			for range launcher.positionals {
+				segment = append(segment, "5")
 			}
 			segment = append(segment, "bash")
 			if word, _ := segmentCommandWord(segment); word != "bash" {
 				t.Errorf("segmentCommandWord(%q) = %q, want %q", segment, word, "bash")
 			}
 		})
-	}
-	if reached == 0 {
-		t.Fatal("no launcher in prWorkflowLaunchers is reached by segmentCommandWord")
 	}
 }
 
