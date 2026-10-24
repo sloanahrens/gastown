@@ -68,7 +68,7 @@ func TestCheckRecoveryOfASandboxSeat(t *testing.T) {
 				ClonePath: filepath.Join(town, "gastown", "polecats", "ember", "gastown"),
 			}
 
-			status := checkRecoveryForPolecatWith(tt.probe, db, nil, r, "gastown", "ember", p, false)
+			status := checkRecoveryForPolecatWith(sandboxSeatEnv{probe: tt.probe}, db, nil, r, "gastown", "ember", p, false)
 
 			if live := status.GitStateSource == polecat.GitStateSourceLive; live != tt.wantLive {
 				t.Errorf("git state source = %q, want live=%v (verdict %s, blockers %v)", status.GitStateSource, tt.wantLive, status.Verdict, status.Blockers)
@@ -116,5 +116,99 @@ func TestSandboxSeatGitStateHelpers(t *testing.T) {
 		if sandboxSeatGitSafe(live) {
 			t.Errorf("%s reads as git safe", name)
 		}
+	}
+}
+
+// With the sandbox gone, check-recovery tells lost work from a finished seat: a
+// bead the seat left unfinished with no branch on origin and no resume_branch
+// is lost work (NEEDS_RECOVERY, sandbox-work-lost, not safe to nuke); a branch on
+// origin, a resume_branch, a finished bead, or no bead at all is not, and an
+// origin that cannot be asked leaves the git state unknown (gt-qq6rg.3).
+func TestCheckRecoveryOfAGoneSandboxSeatTellsLostWork(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/ember/gt-a+x"
+	tests := []struct {
+		name       string
+		hook       string // the agent bead's hook_bead
+		source     string // its last_source_issue
+		workStatus string // the work bead's status
+		resume     bool   // the work bead carries a resume_branch note
+		onOrigin   bool
+		originErr  error
+		wantReason string // checked when set
+		wantLost   bool
+		wantSafe   bool
+		wantUnk    bool
+	}{
+		{name: "hooked_open_nothing_pushed", hook: "gt-work", workStatus: "open", wantReason: "sandbox-work-lost", wantLost: true},
+		{name: "source_open_hook_cleared_nothing_pushed", source: "gt-work", workStatus: "open", wantReason: "sandbox-work-lost", wantLost: true},
+		{name: "hooked_open_branch_on_origin", hook: "gt-work", workStatus: "open", onOrigin: true, wantReason: "hook-still-set"},
+		{name: "hooked_open_resume_branch", hook: "gt-work", workStatus: "open", resume: true, wantReason: "hook-still-set"},
+		{name: "source_open_branch_on_origin", source: "gt-work", workStatus: "open", onOrigin: true, wantSafe: true},
+		{name: "bead_closed", hook: "gt-work", workStatus: "closed", wantSafe: true},
+		{name: "no_bead", wantSafe: true},
+		{name: "origin_cannot_be_asked", source: "gt-work", workStatus: "open", originErr: errors.New("forgejo unreachable"), wantUnk: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+			db := mrlessBeads{beadsfake.New()}
+			agentID := polecatBeadIDForRig(r, "gastown", "ember")
+			if _, err := db.Create(beads.CreateOptions{
+				ID: agentID, Title: agentID, Labels: []string{"gt:agent"}, Priority: -1,
+				Description: beads.FormatAgentDescription(agentID, &beads.AgentFields{
+					RoleType: "polecat", Rig: "gastown", AgentState: string(beads.AgentStateIdle),
+					CleanupStatus: string(polecat.CleanupClean), Agent: sandboxSeatAgent, Branch: branch,
+					HookBead: tt.hook, LastSourceIssue: tt.source,
+				}),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tt.workStatus != "" {
+				if _, err := db.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
+					t.Fatal(err)
+				}
+				status := tt.workStatus
+				upd := beads.UpdateOptions{Status: &status}
+				if tt.resume {
+					upd.AppendNotes = "resume_branch: " + branch
+				}
+				if err := db.Update("gt-work", upd); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p := &polecat.Polecat{Name: "ember", State: polecat.StateIdle, Branch: branch, ClonePath: filepath.Join(town, "gastown", "polecats", "ember", "gastown")}
+			env := sandboxSeatEnv{
+				probe: func(string, string) (polecat.LiveGitState, bool) {
+					return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
+				},
+				remoteBranch: func(_, b string) (bool, error) {
+					if b != branch {
+						t.Errorf("origin asked about %q, want the branch the agent bead recorded", b)
+					}
+					return tt.onOrigin, tt.originErr
+				},
+			}
+
+			status := checkRecoveryForPolecatWith(env, db, nil, r, "gastown", "ember", p, false)
+
+			if lost := status.Reason == "sandbox-work-lost"; lost != tt.wantLost {
+				t.Errorf("lost work = %v, want %v (verdict %s reason %s blockers %v)", lost, tt.wantLost, status.Verdict, status.Reason, status.Blockers)
+			}
+			if tt.wantLost && (status.SafeToNuke || status.Reusable || !status.NeedsRecovery) {
+				t.Errorf("lost work is safe_to_nuke=%v reusable=%v needs_recovery=%v", status.SafeToNuke, status.Reusable, status.NeedsRecovery)
+			}
+			if tt.wantReason != "" && status.Reason != tt.wantReason {
+				t.Errorf("reason = %q, want %q (blockers %v)", status.Reason, tt.wantReason, status.Blockers)
+			}
+			if tt.wantSafe && !status.SafeToNuke {
+				t.Errorf("verdict %s reason %s blockers %v, want safe to nuke", status.Verdict, status.Reason, status.Blockers)
+			}
+			if tt.wantUnk && status.GitStateSource != polecat.GitStateSourceUnknown {
+				t.Errorf("git state source = %q, want unknown when origin cannot be asked", status.GitStateSource)
+			}
+		})
 	}
 }

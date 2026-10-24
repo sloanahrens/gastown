@@ -1686,13 +1686,13 @@ func idleRecoveryStatus(rig, name string, p *polecat.Polecat, fields *beads.Agen
 // many times they call it and whether a bulk agent-bead list arms the
 // per-polecat lookup first.
 func checkRecoveryForPolecat(bd recoveryBeads, preloadedAgentBeads map[string]*beads.Issue, r *rig.Rig, rigName, polecatName string, p *polecat.Polecat, reconcileCleanup bool) RecoveryStatus {
-	return checkRecoveryForPolecatWith(sandboxSeatProbeFor(filepath.Dir(r.Path), nil), bd, preloadedAgentBeads, r, rigName, polecatName, p, reconcileCleanup)
+	return checkRecoveryForPolecatWith(sandboxSeatEnv{probe: sandboxSeatProbeFor(filepath.Dir(r.Path), nil)}, bd, preloadedAgentBeads, r, rigName, polecatName, p, reconcileCleanup)
 }
 
 // checkRecoveryForPolecatWith is checkRecoveryForPolecat with the sandbox probe
 // passed in: a sandbox seat's host worktree is a stale leftover, so its git
 // facts come from the gateway and the host clone is never measured (gt-qq6rg.2).
-func checkRecoveryForPolecatWith(sandboxSeat sandboxSeatProbe, bd recoveryBeads, preloadedAgentBeads map[string]*beads.Issue, r *rig.Rig, rigName, polecatName string, p *polecat.Polecat, reconcileCleanup bool) RecoveryStatus {
+func checkRecoveryForPolecatWith(sandboxEnv sandboxSeatEnv, bd recoveryBeads, preloadedAgentBeads map[string]*beads.Issue, r *rig.Rig, rigName, polecatName string, p *polecat.Polecat, reconcileCleanup bool) RecoveryStatus {
 	// Get cleanup_status from agent bead
 	// We need to read it directly from beads since manager doesn't expose it
 	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
@@ -1700,8 +1700,8 @@ func checkRecoveryForPolecatWith(sandboxSeat sandboxSeatProbe, bd recoveryBeads,
 	agentIssue, fields, err := recoveryAgentBead(bd, preloadedAgentBeads, agentBeadID)
 	var sandboxLive polecat.LiveGitState
 	sandboxed := false
-	if err == nil && fields != nil && sandboxSeat != nil {
-		sandboxLive, sandboxed = sandboxSeat(strings.TrimSpace(fields.Agent), polecatSessionNameIn(rigName, polecatName))
+	if err == nil && fields != nil && sandboxEnv.probe != nil {
+		sandboxLive, sandboxed = sandboxEnv.probe(strings.TrimSpace(fields.Agent), polecatSessionNameIn(rigName, polecatName))
 	}
 
 	status := RecoveryStatus{
@@ -1858,6 +1858,8 @@ func checkRecoveryForPolecatWith(sandboxSeat sandboxSeatProbe, bd recoveryBeads,
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
 		if !sandboxed {
 			applyWorkLandedToWorkstateFacts(&facts, nil, p.ClonePath, r.Path, bd, facts.HookBead, p.Branch)
+		} else if sandboxLive.Source == polecat.GitStateSourceLive {
+			applySandboxLostWorkFacts(&facts, sandboxEnv, bd, r.Path, sandboxBranch(fields, p), hookBead, sourceHint)
 		}
 		// gt-ivvgu: this diagnostic used to call ResolveIgnoreCleanupStatus
 		// directly with hand-computed predicates (partialSpawn,
