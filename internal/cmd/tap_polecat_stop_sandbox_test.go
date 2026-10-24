@@ -64,8 +64,15 @@ func TestEndSandboxSessionIfDone(t *testing.T) {
 		{"done_clean", &clean, nil, true, ""},
 		{"no_exit_type", with(func(f *beads.AgentFields) { f.ExitType = "" }), nil, true, ""},
 		{"working", with(func(f *beads.AgentFields) { f.AgentState = "working" }), nil, false, `agent_state is "working"`},
-		{"stuck_escalated", with(func(f *beads.AgentFields) { f.AgentState = "stuck"; f.ExitType = "ESCALATED" }), nil, false, `agent_state is "stuck"`},
-		{"stuck_deferred", with(func(f *beads.AgentFields) { f.AgentState = "stuck"; f.ExitType = "DEFERRED" }), nil, false, `agent_state is "stuck"`},
+		{"stuck_escalated", with(func(f *beads.AgentFields) { f.AgentState = "stuck"; f.ExitType = "ESCALATED" }), nil, true, ""},
+		{"stuck_deferred", with(func(f *beads.AgentFields) { f.AgentState = "stuck"; f.ExitType = "DEFERRED" }), nil, true, ""},
+		{"stuck_deferred_unpushed", with(func(f *beads.AgentFields) {
+			f.AgentState = "stuck"
+			f.ExitType = "DEFERRED"
+			f.CleanupStatus = "has_unpushed"
+		}), nil, false, `cleanup_status is "has_unpushed"`},
+		{"stuck_deferred_hooked", with(func(f *beads.AgentFields) { f.AgentState = "stuck"; f.ExitType = "DEFERRED"; f.HookBead = "gt-x" }), nil, false, "hook_bead gt-x is still set"},
+		{"stuck_no_exit_type", with(func(f *beads.AgentFields) { f.AgentState = "stuck"; f.ExitType = "" }), nil, false, `agent_state is "stuck"`},
 		{"done_but_exit_escalated", with(func(f *beads.AgentFields) { f.ExitType = "ESCALATED" }), nil, false, "exit_type is ESCALATED"},
 		{"has_unpushed", with(func(f *beads.AgentFields) { f.CleanupStatus = "has_unpushed" }), nil, false, `cleanup_status is "has_unpushed"`},
 		{"has_uncommitted", with(func(f *beads.AgentFields) { f.CleanupStatus = "has_uncommitted" }), nil, false, `cleanup_status is "has_uncommitted"`},

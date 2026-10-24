@@ -78,21 +78,31 @@ func endSandboxSessionIfDone(e sandboxSessionEnd, getenv func(string) string, to
 }
 
 // sandboxPolecatNotFinished returns why a polecat is not a clean, pushed
-// completion, or "" when it is: gt done completed (agent_state done, hook
-// cleared, exit COMPLETED when recorded) and its own cleanup report says nothing
-// is uncommitted, stashed or unpushed. Escalated and deferred exits record
-// agent_state stuck, so they never read as finished.
+// finish, or "" when it is: gt done completed (agent_state done, hook cleared,
+// exit COMPLETED when recorded) or ended with a final DEFERRED or ESCALATED exit
+// (agent_state stuck, which gt done writes for every exit but COMPLETED), and its
+// own cleanup report says nothing is uncommitted, stashed or unpushed. A host
+// polecat's session is retired after every final exit; a sandbox's would idle
+// for ever on a deferred one, because its bead stays hooked and the daemon
+// deletes the sandbox only once the bead leaves hooked (gt-e0pq6). The patrol
+// restarts the seat from the pushed branch once the session is gone.
+// finalStuckExit reports whether the record is the one gt done writes for a final
+// DEFERRED or ESCALATED exit: agent_state stuck beside that exit type.
+func finalStuckExit(f *beads.AgentFields) bool {
+	return f.AgentState == string(beads.AgentStateStuck) && (f.ExitType == "DEFERRED" || f.ExitType == "ESCALATED")
+}
+
 func sandboxPolecatNotFinished(f *beads.AgentFields) string {
 	switch {
 	case f == nil:
 		return "no agent bead"
-	case f.AgentState != string(beads.AgentStateDone):
+	case f.AgentState != string(beads.AgentStateDone) && !finalStuckExit(f):
 		return fmt.Sprintf("agent_state is %q, not done", f.AgentState)
 	case f.HookBead != "":
 		return fmt.Sprintf("hook_bead %s is still set", f.HookBead)
 	case f.CleanupStatus != string(polecat.CleanupClean):
 		return fmt.Sprintf("cleanup_status is %q, not clean, and the sandbox clone may hold the only copy of the work", f.CleanupStatus)
-	case f.ExitType != "" && f.ExitType != "COMPLETED":
+	case f.AgentState == string(beads.AgentStateDone) && f.ExitType != "" && f.ExitType != "COMPLETED":
 		return fmt.Sprintf("exit_type is %s, not COMPLETED", f.ExitType)
 	}
 	return ""
