@@ -92,21 +92,21 @@ Every sandbox of a rig mounts that rig's `gt-cache-<rig>` volume at
 the plugin brings each `gt-cache-<rig>` volume back under `POLECAT_CACHE_CAP`
 (default 10GB; a K, M, G, T or P suffix, so `512M` works):
 
-1. It skips a volume `docker ps --filter volume=<name>` lists a container for,
-   logging `in use by N container(s); skipped`. It skips every volume when the
-   daemon, the volume listing, a volume's inspect, a container query or the cap
-   itself cannot be read, and logs which, so a failed probe never reads as
-   "nothing to do".
-2. It runs a short-lived container from the polecat image (`--rm`, read-only
-   apart from the volume) whose script measures the volume with `du` and, over
-   the cap, deletes the least recently accessed files under `go-build` until it
-   is back under. Only when the build cache alone cannot reach the cap does it
-   do the same under `go/pkg/mod`. It removes no volume itself and runs no
-   `docker volume prune`.
+A volume with a container attached is skipped (`in use by N container(s);
+skipped`). A probe the plugin cannot read (daemon, listing, inspect, container
+query, the cap, the helper's answer) trims nothing and logs which one, so a
+failure never reads as "nothing to do".
 
-The trim takes the plugin's lock the build cache trim uses, so two trims never
-overlap, and a helper that exits non-zero or prints a line the plugin cannot
-read trims nothing and logs the reason.
+Over the cap, a short-lived container from the polecat image deletes files
+under `go-build`, least recently used first, until the volume fits. "Used" is
+the later of a file's atime and mtime, because Go touches the mtime of a cache
+entry it reuses and a noatime mount leaves atime stale. `go/pkg/mod` goes only
+when the build cache alone cannot reach the cap. No volume is removed and no
+`docker volume prune` runs.
+
+A sandbox that starts between the in-use check and the helper can lose cache
+entries it would have read. Go reads a missing entry as a miss and rebuilds it,
+so the window is accepted rather than locked.
 
 Every failure exits non-zero with the tail of the failing command: a commit the
 rig repo does not know, a failed build, an image that still carries another

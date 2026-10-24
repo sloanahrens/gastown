@@ -335,15 +335,19 @@ size() {
   printf '%s\n' $(( ${out%%[[:space:]]*} * 1024 ))
 }
 
-# list_files prints "<atime> <size> <path>" per file. BSD and GNU stat differ in
-# both flag and format, so probe for the BSD one first: GNU's -f means
-# filesystem, which makes that probe fail there and only there.
+# list_files prints "<last use> <size> <path>" per file. Last use is the later
+# of atime and mtime: a noatime or relatime mount leaves atime stale, while Go
+# touches the mtime of a cache entry it reuses. BSD and GNU stat differ in both
+# flag and format. Probe for GNU first (the image's stat): `-c` is an illegal
+# option on BSD, whereas GNU accepts BSD's `-f` as "filesystem" and succeeds
+# with the wrong fields, so a probe for BSD would pass on Linux.
 list_files() {
-  if stat -f '%a %z' "$root" >/dev/null 2>&1; then
-    find "$1" -type f -exec stat -f '%a %z %N' {} + 2>/dev/null
+  if stat -c '%X' "$root" >/dev/null 2>&1; then
+    find "$1" -type f -exec stat -c '%X %Y %s %n' {} +
   else
-    find "$1" -type f -exec stat -c '%X %s %n' {} + 2>/dev/null
-  fi
+    find "$1" -type f -exec stat -f '%a %m %z %N' {} +
+  fi 2>/dev/null |
+    awk '{ t = ($2 + 0 > $1 + 0) ? $2 : $1; sub(/^[0-9]+ [0-9]+ /, ""); print t, $0 }'
 }
 
 # trim_tree DIR NEED deletes files oldest-accessed first until NEED bytes are
@@ -393,7 +397,8 @@ trim_cache_volume() {
     log "cache: $vol: in use by $used container(s); skipped"
     return 0
   fi
-  # The container's own filesystem is read-only; the cache volume at
+  # A sandbox can start after the check above; plugin.md says why that window
+  # is accepted (gt-3g7p2). The container's own filesystem is read-only; the cache volume at
   # CACHE_MOUNT and a temp directory for sort are the only writable places.
   if ! out="$("$DOCKER" run --rm --read-only --tmpfs /tmp:size=256m --network none \
     -v "$vol:$CACHE_MOUNT" -e "CACHE_CAP_BYTES=$cap" \

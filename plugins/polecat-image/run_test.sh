@@ -31,7 +31,8 @@ mkdir -p "$BIN"
 # names), volume-ls-fail, volume-missing (names `docker volume inspect`
 # refuses), cache-in-use (names `docker ps --filter volume=` reports a container
 # for), ps-fail, cache-run-fail (what the trim helper's run prints on stderr
-# before failing).
+# before failing), cache-run-say (what a helper that exits 0 prints instead of
+# running the trim script).
 cat >"$BIN/gt" <<'STUB'
 #!/usr/bin/env bash
 echo "gt version $(cat "$STUB_STATE/installed") (dev: master@$(cat "$STUB_STATE/installed"))"
@@ -90,6 +91,12 @@ case "${1:-}" in
     if [ -f "$STUB_STATE/cache-run-fail" ]; then
       cat "$STUB_STATE/cache-run-fail" >&2
       exit 125
+    fi
+    # A helper that exits 0 but prints what cache-run-say holds, to drive the
+    # plugin's reading of a line the real script would not print.
+    if [ -f "$STUB_STATE/cache-run-say" ]; then
+      cat "$STUB_STATE/cache-run-say"
+      exit 0
     fi
     vol="" script=""
     while [ $# -gt 0 ]; do
@@ -493,6 +500,51 @@ cache_fill gastown 10
 mkdir "$LOCK"
 POLECAT_CACHE_CAP="$(cache_cap gastown 6)" run_it
 if [ "$RC" = 0 ] && grep -q "cache: skipped, another run holds the lock" <<<"$OUT" && cache_has gastown 1 && [ -d "$LOCK" ]; then pass "another run's lock: no trim, lock untouched"; else fail "cachelock: rc=$RC out=$OUT"; fi
+
+cache_case cachesay abc1234 "$(full abc1234)"
+cache_fill gastown 10
+echo "all done" >"$STUB_STATE/cache-run-say"
+POLECAT_CACHE_CAP="$(cache_cap gastown 6)" run_it
+if [ "$RC" = 0 ] && grep -q "cache: gt-cache-gastown: not trimmed, the helper printed 'all done'" <<<"$OUT" && cache_has gastown 1; then pass "a helper line the plugin cannot read: logged, never claimed as a trim"; else fail "cachesay: rc=$RC out=$OUT"; fi
+
+cache_case cachestill abc1234 "$(full abc1234)"
+cache_fill gastown 10
+echo "trimmed 5242880 4194304" >"$STUB_STATE/cache-run-say"
+POLECAT_CACHE_CAP=1MB run_it
+if [ "$RC" = 0 ] && grep -q "cache: gt-cache-gastown: trimmed 5.0MB to 4.0MB (cap 1MB)" <<<"$OUT" && grep -q "cache: gt-cache-gastown: still over the cap with nothing left to trim" <<<"$OUT"; then pass "a trim that ends over the cap: the shortfall is logged"; else fail "cachestill: rc=$RC out=$OUT"; fi
+
+# GNU stat is the image's stat. This shim answers like it: -c takes the format,
+# -f means "filesystem" and succeeds with fields that are not file times. Real
+# stat does the work, translated when the host's is BSD.
+GNU_BIN="$TMP/gnu-bin"
+mkdir -p "$GNU_BIN"
+cat >"$GNU_BIN/stat" <<'STUB'
+#!/bin/sh
+REAL=/usr/bin/stat
+case "${1:-}" in
+  -c)
+    if "$REAL" -c '%X' / >/dev/null 2>&1; then exec "$REAL" "$@"; fi
+    fmt=$(printf '%s' "$2" | sed 's/%X/%a/g; s/%Y/%m/g; s/%s/%z/g; s/%n/%N/g')
+    shift 2
+    exec "$REAL" -f "$fmt" "$@" ;;
+  -f) echo "999 ?"; exit 0 ;;
+esac
+exit 1
+STUB
+chmod +x "$GNU_BIN/stat"
+cache_case cachegnu abc1234 "$(full abc1234)"
+cache_fill gastown 10
+CAP="$(cache_cap gastown 6)"
+PATH="$GNU_BIN:$PATH" POLECAT_CACHE_CAP="$CAP" run_it
+if [ "$RC" = 0 ] && [ "$(( $(cache_kib gastown) * 1024 ))" -le "$CAP" ] && ! cache_has gastown 1 && ! cache_has gastown 6 && cache_has gastown 7 && cache_has gastown 10; then pass "where stat reads like GNU's: the same oldest files go"; else fail "cachegnu: rc=$RC out=$OUT"; fi
+
+# A noatime mount leaves atime stale; Go touches the mtime of an entry it uses.
+# The oldest-named file was just used, so it outlasts files with a newer atime.
+cache_case cachemtime abc1234 "$(full abc1234)"
+cache_fill gastown 10
+touch -m -t 202603010000 "$(cache_dir gastown)/go-build/aa/f1"
+POLECAT_CACHE_CAP="$(cache_cap gastown 6)" run_it
+if [ "$RC" = 0 ] && cache_has gastown 1 && ! cache_has gastown 2 && ! cache_has gastown 7 && cache_has gastown 8; then pass "a file with a recent mtime outlasts older ones despite an old atime"; else fail "cachemtime: $(ls "$(cache_dir gastown)/go-build/aa" | tr '\n' ' ') out=$OUT"; fi
 
 echo
 echo "polecat-image: $PASS passed, $FAIL failed"
