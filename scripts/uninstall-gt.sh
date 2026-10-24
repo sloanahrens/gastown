@@ -16,9 +16,9 @@
 # Two properties make that unrepeatable, and they are this script's contract:
 #
 #   1. The install directory is EXPLICIT. It comes from --install-dir, or
-#      $INSTALL_GT_BIN_DIR, or the Makefile's default $HOME/.local/bin — never
-#      from command -v or which. Every run prints the directory and which of
-#      the three named it, so the target is never implicit.
+#      $INSTALL_GT_BIN_DIR, or $INSTALL_DIR, or the default $HOME/.local/bin —
+#      never from command -v or which. Every run prints the directory and which
+#      of the four named it, so the target is never implicit.
 #   2. The script REFUSES (exit 2) when the directory it was given is this
 #      town's live install — $HOME/.local/bin with a town at or above this
 #      clone — unless --force is passed. Removing the binaries a running town
@@ -88,10 +88,17 @@ refuse() {
 
 [ -n "${HOME:-}" ] || refuse "HOME is not set; name the directory with --install-dir"
 
+# INSTALL_DIR is honored too: the Makefile's name for this directory, and the
+# one the dispatcher's host-safety prompt tells a worker to set, so a test that
+# follows the prompt points at its temp dir instead of the real bin dir
+# (gt-8xqic). install-gt.sh resolves the same names the same way (gt-tcigd).
 if [ -z "$BIN_DIR" ]; then
   if [ -n "${INSTALL_GT_BIN_DIR:-}" ]; then
     BIN_DIR="$INSTALL_GT_BIN_DIR"
     BIN_DIR_SOURCE="\$INSTALL_GT_BIN_DIR"
+  elif [ -n "${INSTALL_DIR:-}" ]; then
+    BIN_DIR="$INSTALL_DIR"
+    BIN_DIR_SOURCE="\$INSTALL_DIR"
   else
     BIN_DIR="$HOME/.local/bin"
     BIN_DIR_SOURCE="the default (HOME/.local/bin)"

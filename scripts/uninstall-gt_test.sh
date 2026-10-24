@@ -93,8 +93,10 @@ run_uninstall() {
   while [[ $# -gt 0 && "$1" != "--" ]]; do envs+=("$1"); shift; done
   shift
   # ${envs[@]+...} rather than "${envs[@]}": an empty array under set -u is an
-  # error on the bash 3.2 that ships as /bin/bash on macOS.
-  env -u INSTALL_GT_BIN_DIR ${envs[@]+"${envs[@]}"} bash "$UNINSTALL" "$@" 2>&1
+  # error on the bash 3.2 that ships as /bin/bash on macOS. Both install-dir env
+  # vars are unset by default so a value inherited from the caller's shell
+  # cannot decide a test that means to exercise the default.
+  env -u INSTALL_GT_BIN_DIR -u INSTALL_DIR ${envs[@]+"${envs[@]}"} bash "$UNINSTALL" "$@" 2>&1
 }
 
 echo "=== uninstall-gt.sh tests ==="
@@ -219,6 +221,49 @@ if [[ "$out" == *"the default (HOME/.local/bin)"* ]]; then
   PASS=$((PASS + 1))
 else
   echo "  FAIL: default dir: the run names where the path came from"
+  echo "$out" | sed 's/^/    | /'
+  FAIL=$((FAIL + 1))
+fi
+unset rc
+
+# --- 6b. INSTALL_DIR, the name the Makefile and the host-safety prompt use ----
+# gt-8xqic: the dispatcher's prompt tells a worker to test with a temporary
+# INSTALL_DIR, so that name must not fall back to the default ~/.local/bin.
+setup
+out="$(run_uninstall "HOME=$HOME_DIR" "GT_TOWN_ROOT=$WORK_DIR/no-such-town" \
+  "INSTALL_DIR=$SCRATCH_BIN" --)" || rc=$?
+rc="${rc:-0}"
+assert_run "INSTALL_DIR: exit 0" 0 "$rc" "$out"
+assert_eq "INSTALL_DIR: gt removed" "gone" "$(exists "$SCRATCH_BIN/gt" && echo there || echo gone)"
+assert_eq "INSTALL_DIR: bd removed" "gone" "$(exists "$SCRATCH_BIN/bd" && echo there || echo gone)"
+assert_eq "INSTALL_DIR: the default ~/.local/bin/gt is untouched" "there" "$(exists "$HOME_DIR/.local/bin/gt" && echo there || echo gone)"
+assert_eq "INSTALL_DIR: the default ~/.local/bin/bd is untouched" "there" "$(exists "$HOME_DIR/.local/bin/bd" && echo there || echo gone)"
+if [[ "$out" == *'$INSTALL_DIR'* ]]; then
+  echo "  PASS: INSTALL_DIR: the run names the env var it came from"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: INSTALL_DIR: the run names the env var it came from"
+  echo "$out" | sed 's/^/    | /'
+  FAIL=$((FAIL + 1))
+fi
+unset rc
+
+# Both set: INSTALL_GT_BIN_DIR is the install binary's own variable and wins,
+# exactly as in install-gt.sh (gt-tcigd). INSTALL_DIR points at the live-style
+# directory here, so a run that honored it would empty ~/.local/bin.
+setup
+out="$(run_uninstall "HOME=$HOME_DIR" "GT_TOWN_ROOT=$WORK_DIR/no-such-town" \
+  "INSTALL_DIR=$HOME_DIR/.local/bin" "INSTALL_GT_BIN_DIR=$SCRATCH_BIN" --)" || rc=$?
+rc="${rc:-0}"
+assert_run "both set: exit 0" 0 "$rc" "$out"
+assert_eq "both set: INSTALL_GT_BIN_DIR's gt removed" "gone" "$(exists "$SCRATCH_BIN/gt" && echo there || echo gone)"
+assert_eq "both set: INSTALL_DIR's gt untouched" "there" "$(exists "$HOME_DIR/.local/bin/gt" && echo there || echo gone)"
+assert_eq "both set: INSTALL_DIR's bd untouched" "there" "$(exists "$HOME_DIR/.local/bin/bd" && echo there || echo gone)"
+if [[ "$out" == *'$INSTALL_GT_BIN_DIR'* ]]; then
+  echo "  PASS: both set: the run names INSTALL_GT_BIN_DIR as the source"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: both set: the run names INSTALL_GT_BIN_DIR as the source"
   echo "$out" | sed 's/^/    | /'
   FAIL=$((FAIL + 1))
 fi

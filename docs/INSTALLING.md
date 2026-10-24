@@ -503,7 +503,10 @@ make uninstall             # the directory comes from INSTALL_DIR
 ```
 
 `make uninstall` runs `scripts/uninstall-gt.sh`, which removes `<INSTALL_DIR>/gt`
-and `<INSTALL_DIR>/bd` and nothing else. The directory is named, not looked up:
+and `<INSTALL_DIR>/bd` and nothing else. Run the script directly and it takes
+`--install-dir`, or `$INSTALL_GT_BIN_DIR`, or `$INSTALL_DIR` — the names
+`install-gt.sh` accepts, with `$INSTALL_GT_BIN_DIR` winning — and prints which
+one named the directory. The directory is named, not looked up:
 `command -v` answers what runs if you type `gt`, and in a running town that is
 the live install every agent on the host runs from — which is how the recipe
 this replaces resolved to the town's own binaries and deleted them (gt-acdfp).
