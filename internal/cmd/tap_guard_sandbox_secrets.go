@@ -580,7 +580,11 @@ func sandboxSecretsInvocation(argv []string, tainted map[string]bool) string {
 		return "the git credential helper prints a password"
 	}
 	if sandboxSecretsEnvReaders[name] {
-		for _, a := range args {
+		files := args
+		if sandboxSecretsPatternReaders[name] {
+			files = sandboxSecretsSearchFiles(args)
+		}
+		for _, a := range files {
 			if sandboxSecretsIsSecretFile(a) {
 				return "it reads " + a + ", which holds credentials or account data"
 			}
@@ -693,10 +697,69 @@ func sandboxSecretsNonFlagArgs(args []string) []string {
 	return names
 }
 
+// sandboxSecretsPatternReaders are the search commands whose first operand is a
+// pattern, not a file, unless -e, --regexp, -f or --file names the patterns.
+var sandboxSecretsPatternReaders = map[string]bool{"grep": true, "egrep": true, "fgrep": true, "rg": true}
+
+// sandboxSecretsSearchValueFlags are the grep and rg options whose value is a
+// count, a glob or a type, never a file. The value is skipped, so it is not taken
+// for the pattern.
+var sandboxSecretsSearchValueFlags = map[string]bool{
+	"-A": true, "-B": true, "-C": true, "-d": true, "-D": true, "-g": true, "-m": true, "-t": true,
+	"--after-context": true, "--before-context": true,
+	"--exclude": true, "--exclude-dir": true, "--include": true, "--label": true,
+	"--glob": true, "--iglob": true, "--max-count": true, "--max-depth": true, "--type": true,
+	"--type-not": true,
+}
+
+// sandboxSecretsSearchFiles returns the words a grep or rg run may open as files. The
+// pattern is not one: the value of -e or --regexp, and the first operand when -e,
+// --regexp, -f or --file names no pattern. Flags stay in the list, so --file=.env and
+// -f.env still count. A word after -- is an operand whatever it looks like.
+func sandboxSecretsSearchFiles(args []string) []string {
+	patterned := false
+	for _, a := range args {
+		if a == "-e" || a == "-f" || a == "--regexp" || a == "--file" ||
+			strings.HasPrefix(a, "--regexp=") || strings.HasPrefix(a, "--file=") ||
+			sandboxSecretsIsShortCluster(a) && strings.ContainsAny(a, "ef") {
+			patterned = true
+		}
+	}
+	var files []string
+	dashes := false
+	operands := 0
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case !dashes && a == "--":
+			dashes = true
+		case !dashes && (a == "-e" || a == "--regexp"):
+			i++ // the pattern
+		case !dashes && strings.HasPrefix(a, "--regexp="):
+			// the pattern, glued to its option
+		case !dashes && sandboxSecretsSearchValueFlags[a]:
+			i++ // a value that is no file
+		case !dashes && strings.HasPrefix(a, "-"):
+			files = append(files, a)
+		default:
+			operands++
+			if operands == 1 && !patterned {
+				continue // the pattern
+			}
+			files = append(files, a)
+		}
+	}
+	return files
+}
+
 // sandboxSecretsIsCredentialFile reports whether the word names a file that holds secrets: a
-// dotenv file (deepseek.env, .env.local), ~/.netrc or ~/.git-credentials.
+// dotenv file (deepseek.env, .env.local), ~/.netrc or ~/.git-credentials. The committed
+// .env.example template holds no values, so it is not one.
 func sandboxSecretsIsCredentialFile(word string) bool {
 	base := strings.ToLower(filepath.Base(strings.Trim(word, `"'`)))
+	if base == ".env.example" {
+		return false
+	}
 	return base == ".env" || base == ".netrc" || base == ".git-credentials" ||
 		strings.HasSuffix(base, ".env") || strings.HasPrefix(base, ".env.")
 }
