@@ -33,6 +33,31 @@ const specTestDescription = "## Goal\nA thing.\n\n## Constraints\nGo.\n\n## Out 
 // lint's minimum is three items.
 const specTestAcceptance = "- [ ] a\n- [ ] b\n- [ ] c"
 
+// specConstraints is specTestDescription with its Constraints body replaced by
+// body, or the section dropped when body is nil, so a fixture that changes that
+// section does not depend on the wording it replaces (gt-zs8fq).
+func specConstraints(body *string) string {
+	var out []string
+	in := false
+	for _, line := range strings.Split(specTestDescription, "\n") {
+		if name, ok := strings.CutPrefix(line, "## "); ok {
+			in = strings.EqualFold(strings.TrimSpace(name), "Constraints")
+			if in && body == nil {
+				continue
+			}
+			out = append(out, line)
+			if in {
+				out = append(out, *body)
+			}
+			continue
+		}
+		if !in {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
 // cleanSpec is a plain work bead: type task, no labels. Shape is the whole
 // gate, so it must be dispatchable as it stands (gt-mmsr2).
 func cleanSpec(id string, priority int, created string) specdispatch.Spec {
@@ -815,18 +840,52 @@ func TestHeldBeadsFromSkipsEpics(t *testing.T) {
 	}
 }
 
+// specHoldFiles drops a cited reference doc only when the bead's Constraints
+// section parses and does not list it. A section that is missing, empty or
+// unparsed leaves the bead's intent unknown, so the doc stays in the hold set
+// (gt-zs8fq).
+func TestSpecHoldFilesKeepsDocsWhenConstraintsAreUnknown(t *testing.T) {
+	t.Parallel()
+	const standard = "claude/docs/standards/test-engineering.md"
+	cases := []struct {
+		name        string
+		description string
+		want        []string
+	}{
+		{"no Constraints section", "## Goal\nA thing.", []string{standard}},
+		{"empty Constraints section", "## Goal\nA thing.\n\n## Constraints\n", []string{standard}},
+		{"unparsed Constraints heading", "## Goal\nA thing.\n\n## Constraint:\nGo.", []string{standard}},
+		{"Constraints does not list the doc", "## Goal\nA thing.\n\n## Constraints\nGo.", []string{}},
+		{"Constraints lists the doc", "## Goal\nA thing.\n\n## Constraints\nUpdate " + standard + ".", []string{standard}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := specHoldFiles([]string{standard}, c.description); fmt.Sprint(got) != fmt.Sprint(c.want) {
+				t.Errorf("specHoldFiles = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // Two beads that only read the same standard do not hold each other: the
 // standard is cited, not changed (gt-6t44f). Two beads naming one source file
 // still hold, and so do two beads that list the standard under Constraints,
-// because for them it is a file to change.
+// because for them it is a file to change. A bead whose Constraints section
+// never parsed has not said either way, so it keeps citing paths and holds
+// (gt-zs8fq).
 func TestSpecHeldHoldReferenceDocsDoNotHold(t *testing.T) {
 	t.Parallel()
 	const standard = "claude/docs/standards/test-engineering.md"
 	const source = "internal/notify/cli.go"
-	reads := func(path string) string { return specTestDescription + "\nRead " + path + " before you start.\n" }
+	cite := func(desc, path string) string { return desc + "\nRead " + path + " before you start.\n" }
+	reads := func(path string) string { return cite(specTestDescription, path) }
 	changes := func(path string) string {
-		return strings.Replace(specTestDescription, "Go.", "Update "+path+".", 1)
+		body := "Update " + path + "."
+		return specConstraints(&body)
 	}
+	unparsed := strings.Replace(specTestDescription, "## Constraints", "## Constraint", 1)
+	noConstraints := specConstraints(nil)
 	cases := []struct {
 		name      string
 		held      string
@@ -836,6 +895,8 @@ func TestSpecHeldHoldReferenceDocsDoNotHold(t *testing.T) {
 		{"two beads reading the same standard do not hold", reads(standard), reads(standard), false},
 		{"two beads naming the same source file hold", reads(source), reads(source), true},
 		{"two beads listing the standard under Constraints hold", changes(standard), changes(standard), true},
+		{"beads with no Constraints section keep the standard and hold", cite(noConstraints, standard), cite(noConstraints, standard), true},
+		{"beads whose Constraints heading did not parse hold", cite(unparsed, standard), cite(unparsed, standard), true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
