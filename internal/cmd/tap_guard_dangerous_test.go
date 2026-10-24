@@ -3409,6 +3409,29 @@ func TestDangerousGuardANSICStringOnAHeredocLine(t *testing.T) {
 	}
 }
 
+// gt-48buu: a launcher's own flags (env -i, nice -n, time -p) sit between the
+// launcher and the shell, so the shell is still the command word and its
+// heredoc body is judged as a script rather than stripped as data.
+func TestHeredocFedToShellBehindLauncherFlags(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"env with a flag", "env -i bash <<EOF\ngit reset --hard\nEOF"},
+		{"nice with a value flag", "nice -n 5 bash <<EOF\ngit reset --hard\nEOF"},
+		{"time with a flag", "time -p bash <<EOF\ngit reset --hard\nEOF"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); reason != gitResetHardReason {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want %q", tt.command, reason, gitResetHardReason)
+			}
+		})
+	}
+}
+
 // endsCommandReservedWord decides whether a "((" glued to a word opens an
 // arithmetic command. A word that merely ends in a reserved word, or sits
 // inside a larger word, is not one (gt-he2fi).
