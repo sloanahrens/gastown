@@ -100,6 +100,35 @@ func TestForeignRemoteCheck_IgnoresRelatedRemote(t *testing.T) {
 	}
 }
 
+// With no origin/main (origin only has master, or was never fetched) the
+// merge-base fails with exit 128, which is not "no common ancestor": no
+// remote may be reported foreign and Fix must have nothing to remove.
+func TestForeignRemoteCheck_NoOriginMainIsNotForeign(t *testing.T) {
+	t.Parallel()
+	f, town := foreignTown(t)
+	f.DeleteRef(t, town, "refs/remotes/origin/main")
+	ctx := withGit(&CheckContext{TownRoot: town}, f)
+	check := NewForeignRemoteCheck()
+
+	result := check.Run(ctx)
+	if len(check.foreignRemotes) != 0 {
+		t.Fatalf("foreign remotes = %+v, want none", check.foreignRemotes)
+	}
+	if result.Status == StatusWarning {
+		t.Errorf("expected no warning without origin/main, got %v: %s", result.Status, result.Message)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+	remotes, err := ctx.git(town).Remotes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remotes) != 2 {
+		t.Errorf("remotes after Fix = %v, want origin and gastown kept", remotes)
+	}
+}
+
 func TestForeignRemoteCheck_FixRemovesForeignRemotes(t *testing.T) {
 	t.Parallel()
 	f, town := foreignTown(t)

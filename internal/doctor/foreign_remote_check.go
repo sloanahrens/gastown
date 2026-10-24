@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -57,6 +58,16 @@ func (c *ForeignRemoteCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	// Without origin/main there is nothing to compare against, and a failed
+	// merge-base would read as "no common ancestor" for every remote.
+	if ok, _ := g.RefExists("origin/main"); !ok {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusSkipped,
+			Message: "unknown: origin/main not found, cannot compare remote history",
+		}
+	}
+
 	// For each non-origin remote, check if it shares history with origin
 	for _, remote := range remotes {
 		if remote == "origin" {
@@ -79,8 +90,9 @@ func (c *ForeignRemoteCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 
 		// Check for shared ancestry with origin/main
-		if _, err := g.MergeBase("origin/main", refName); err != nil {
-			// No common ancestor — this is a foreign remote
+		// git merge-base exits 1 for "no common ancestor"; any other failure
+		// (bad object, timeout) says nothing about the remote's history.
+		if _, err := g.MergeBase("origin/main", refName); isNoMergeBase(err) {
 			c.foreignRemotes = append(c.foreignRemotes, foreignRemote{
 				name: remote,
 				url:  url,
@@ -117,6 +129,13 @@ func (c *ForeignRemoteCheck) Run(ctx *CheckContext) *CheckResult {
 		Details: details,
 		FixHint: "Run 'gt doctor fix foreign-remotes' to remove foreign remotes",
 	}
+}
+
+// isNoMergeBase reports whether err is git merge-base's exit 1, its answer
+// for two histories with no common ancestor.
+func isNoMergeBase(err error) bool {
+	var coded interface{ ExitCode() int }
+	return errors.As(err, &coded) && coded.ExitCode() == 1
 }
 
 // Fix removes foreign remotes from the town repo.
