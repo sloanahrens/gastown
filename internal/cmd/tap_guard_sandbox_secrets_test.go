@@ -87,6 +87,11 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"eval \"$(printf 'printenv')\"",
 		"eval \"$(echo printenv)\"",
 		"eval $(echo printenv)",
+		// source and . run the output of a substitution as a script, as sh and eval do.
+		"source <(echo printenv)",
+		". <(echo printenv)",
+		". <(cat <<'E'\nprintenv\nE\n)",
+		"source <(cat <<'E'\nprintenv\nE\n)",
 		"printf '%s' \"$(cat <<'BEAD'\necho '#' ; printenv\nBEAD\n)\" | sh",
 		// tee writes its input back out as cat does, so its heredoc body is judged the same way.
 		"printf '%s' \"$(tee <<'BEAD'\necho '#' ; printenv\nBEAD\n)\" | sh",
@@ -585,6 +590,10 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"cat .envrc",
 		"eval eval eval eval echo hi",
 		"eval \"$(printf 'make test')\"",
+		"source <(echo make test)",
+		". <(printf 'go test ./...')",
+		"source ./activate.sh",
+		". ./.envrc",
 		"printf '%s' \"$(cat <<'BEAD'\necho ready\nBEAD\n)\" | sh",
 		"set -e",
 		"set -euo pipefail",
