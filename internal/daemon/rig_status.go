@@ -153,7 +153,7 @@ func (c *rigOperationalCache) store(rigName string, verdict rigBeadVerdict, fail
 		verdict:   verdict,
 		failed:    failed,
 		expiresAt: now.Add(ttl),
-		alertOpen: alertWasOpen || result.open,
+		alertOpen: failed != "" && (alertWasOpen || result.open),
 	}
 	return result
 }

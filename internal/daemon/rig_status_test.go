@@ -525,6 +525,54 @@ func TestIsRigOperational_TimeoutFailsClosedAndEscalates(t *testing.T) {
 	}
 }
 
+// TestIsRigOperational_AlertReRaisesAfterRecovery pins the alert lifecycle
+// across a recovery: a rig that times out, recovers, and then fails again must
+// raise a second alert. A clear that leaves the open-alert state set makes the
+// second failure look already alerted, so nothing is raised, and every later
+// healthy read after the window sends another clear for an alert that is gone.
+func TestIsRigOperational_AlertReRaisesAfterRecovery(t *testing.T) {
+	t.Parallel()
+	f := newRigStatusFakeFixture(t, rigShowTimedOut)
+
+	if operational, _ := f.daemon.isRigOperational(f.rigName); operational {
+		t.Fatalf("a timed-out lookup must fail closed")
+	}
+	waitForRigStatusAlert(t, f, "the first timeout escalation", func() bool {
+		raised, _, _ := f.alerts.snapshot()
+		return len(raised) == 1
+	})
+
+	f.setShow(rigShowOperational)
+	f.expire(t, f.rigName)
+	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
+		t.Fatalf("recovered rig reported not operational: %q", reason)
+	}
+	waitForRigStatusAlert(t, f, "the escalation clear", func() bool {
+		_, _, cleared := f.alerts.snapshot()
+		return len(cleared) == 1
+	})
+
+	// The alert is already gone, so a further healthy read has nothing to clear.
+	f.expire(t, f.rigName)
+	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
+		t.Fatalf("recovered rig reported not operational on a later read: %q", reason)
+	}
+	drainRigEscalations(f.daemon, f.rigName)
+	if _, _, cleared := f.alerts.snapshot(); len(cleared) != 1 {
+		t.Errorf("clears = %d, want 1: a healthy read after the alert cleared must not clear again", len(cleared))
+	}
+
+	f.setShow(rigShowTimedOut)
+	f.expire(t, f.rigName)
+	if operational, _ := f.daemon.isRigOperational(f.rigName); operational {
+		t.Fatalf("a failing rig must fail closed again")
+	}
+	waitForRigStatusAlert(t, f, "a second escalation after the rig failed again", func() bool {
+		raised, _, _ := f.alerts.snapshot()
+		return len(raised) == 2
+	})
+}
+
 // TestIsRigOperational_MissingBeadIsDistinctFromTimeout covers the second half
 // of criterion four of gt-4nu3: a missing identity bead and a starved-host
 // timeout used to produce the same "(assuming not operational)" line, and they
