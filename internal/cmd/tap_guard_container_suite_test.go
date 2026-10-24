@@ -2590,6 +2590,10 @@ func TestSubstitutionSpansCommentAndANSIQuote(t *testing.T) {
 		{"substitution in a comment", "# don't $(git reset --hard)", []string{"git reset --hard"}},
 		{"escaped quote in an ANSI-C string", `echo $'it\'s' $(git reset --hard)`, []string{"git reset --hard"}},
 		{"ANSI-C string hiding a substitution", `echo $'$(pwd)' $(git reset --hard)`, []string{"git reset --hard"}},
+		// gt-22glo: bash deletes the backslash-newline between "$" and "'", so
+		// the quote opens an ANSI-C string whose \' does not close it, and the
+		// "$(git reset --hard)" inside is text.
+		{"ANSI-C string opened across a backslash-newline hides a substitution", "echo $\\\n'a\\' $(git reset --hard) '", nil},
 		{"unterminated ANSI-C string reads as plain quotes", `echo $'it\'s $(git reset --hard)`, []string{"git reset --hard"}},
 		{"plain single quotes", `echo 'it' $(git reset --hard)`, []string{"git reset --hard"}},
 		{"hash inside a word", `echo a#b $(git reset --hard)`, []string{"git reset --hard"}},
