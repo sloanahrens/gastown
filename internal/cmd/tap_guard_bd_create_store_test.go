@@ -15,6 +15,8 @@ import (
 // polecat worktree whose .beads/redirect points at that store.
 type bdStoreTown struct {
 	town, rigDir, worktree string
+	// storeLink is a symlink, outside the town, to the town's .beads.
+	storeLink string
 }
 
 func newBdStoreTown(t *testing.T) bdStoreTown {
@@ -46,7 +48,11 @@ func newBdStoreTown(t *testing.T) bdStoreTown {
 			t.Fatal(err)
 		}
 	}
-	return bdStoreTown{town: town, rigDir: rigDir, worktree: worktree}
+	storeLink := filepath.Join(t.TempDir(), "store")
+	if err := os.Symlink(filepath.Join(town, ".beads"), storeLink); err != nil {
+		t.Fatal(err)
+	}
+	return bdStoreTown{town: town, rigDir: rigDir, worktree: worktree, storeLink: storeLink}
 }
 
 const polecatRole = "gastown/polecats/ruby"
@@ -104,6 +110,42 @@ func TestTapGuardBdCreateStore(t *testing.T) {
 		{"worktree via -C from the town root", polecatRole, b.town, `bd -C ` + b.worktree + ` create --title=x`, false},
 		{"unresolvable -C then create", polecatRole, b.worktree, `bd -C "$NOPE" create --title=x`, true},
 		{"-C with no value", polecatRole, b.worktree, `bd create --title=x -C`, true},
+		// bd create --repo names the workspace the bead is filed into, a
+		// relative one resolved against the directory bd runs in.
+		{"town via --repo", polecatRole, b.worktree, `bd create --title=x --repo ` + b.town, true},
+		{"town via --repo=", polecatRole, b.worktree, `bd create --title=x --repo=` + b.town, true},
+		{"town via --repo home", polecatRole, b.worktree, `bd create --title=x --repo ~`, true},
+		{"relative --repo up to town", polecatRole, b.worktree, `bd create --title=x --repo ../../../..`, true},
+		{"relative --repo up from the rig dir", polecatRole, b.rigDir, `bd create --title=x --repo ..`, true},
+		{"town via --repo after -C", polecatRole, b.worktree, `bd -C ` + b.rigDir + ` create --title=x --repo ..`, true},
+		{"rig dir via --repo", polecatRole, b.worktree, `bd create --title=x --repo ` + b.rigDir, false},
+		{"worktree via --repo from the town root", polecatRole, b.town, `bd create --title=x --repo ` + b.worktree, false},
+		{"rig dir via --repo after -C from the town root", polecatRole, b.town, `bd -C ` + b.rigDir + ` create --title=x --repo .`, false},
+		{"unresolvable --repo", polecatRole, b.worktree, `bd create --title=x --repo "$NOPE"`, true},
+		{"--repo with no value", polecatRole, b.worktree, `bd create --title=x --repo`, true},
+		{"--repo rig dir outranks BEADS_DIR town", polecatRole, b.worktree, `BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` bd create --title=x --repo ` + b.rigDir, false},
+		{"--repo town outranks BEADS_DIR rig", polecatRole, b.worktree, `BEADS_DIR=` + filepath.Join(b.rigDir, "mayor", "rig", ".beads") + ` bd create --title=x --repo ` + b.town, true},
+		{"--repo rig dir outranks --db town", polecatRole, b.worktree, `bd --db ` + filepath.Join(b.town, ".beads", "x.db") + ` create --title=x --repo ` + b.rigDir, false},
+		{"--repo town inside bash -c", polecatRole, b.worktree, `bash -c "bd create --title=x --repo ` + b.town + `"`, true},
+		// bd --db maps to the nearest .beads directory at or above the
+		// path's parent, whether or not the path exists.
+		{"town via --db file in .beads", polecatRole, b.worktree, `bd --db ` + filepath.Join(b.town, ".beads", "x.db") + ` create --title=x`, true},
+		{"town via --db after the verb", polecatRole, b.worktree, `bd create --title=x --db ` + filepath.Join(b.town, ".beads", "x.db"), true},
+		{"town via --db=", polecatRole, b.worktree, `bd --db=` + filepath.Join(b.town, ".beads", "x.db") + ` create --title=x`, true},
+		{"town via --db .beads directory", polecatRole, b.worktree, `bd --db ` + filepath.Join(b.town, ".beads") + ` create --title=x`, true},
+		{"town via --db dolt directory", polecatRole, b.worktree, `bd --db ` + filepath.Join(b.town, ".beads", "dolt") + ` create --title=x`, true},
+		{"town via --db name beside the town .beads", polecatRole, b.worktree, `bd --db ` + filepath.Join(b.town, "nothing.db") + ` create --title=x`, true},
+		{"town via --db under a town subdirectory", polecatRole, b.worktree, `bd --db ` + filepath.Join(b.town, "mayor", "x.db") + ` create --title=x`, true},
+		{"town via relative --db", polecatRole, b.worktree, `bd --db ../../../../.beads/x.db create --title=x`, true},
+		{"town via --db through a symlink", polecatRole, b.worktree, `bd --db ` + filepath.Join(b.storeLink, "x.db") + ` create --title=x`, true},
+		{"town via --db after -C", polecatRole, b.worktree, `bd -C ` + b.rigDir + ` --db ../.beads/x.db create --title=x`, true},
+		{"unresolvable --db", polecatRole, b.worktree, `bd --db "$NOPE" create --title=x`, true},
+		{"--db with no value", polecatRole, b.worktree, `bd create --title=x --db`, true},
+		{"worktree via --db file in .beads", polecatRole, b.worktree, `bd --db ` + filepath.Join(b.worktree, ".beads", "x.db") + ` create --title=x`, false},
+		{"rig store via --db", polecatRole, b.town, `bd --db ` + filepath.Join(b.rigDir, "mayor", "rig", ".beads", "x.db") + ` create --title=x`, false},
+		{"--db outranks BEADS_DIR", polecatRole, b.town, `BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` bd --db ` + filepath.Join(b.rigDir, "mayor", "rig", ".beads", "x.db") + ` create --title=x`, false},
+		{"--global in the worktree", polecatRole, b.worktree, `bd --global create --title=x`, false},
+		{"--repo on a bd list", polecatRole, b.worktree, `bd list --repo ` + b.town, false},
 		{"cd town then -C worktree", polecatRole, b.worktree, `cd ` + b.town + ` && bd -C ` + b.worktree + ` create --title=x`, false},
 		{"-C town inside bash -c", polecatRole, b.worktree, `bash -c "bd -C ` + b.town + ` create --title=x"`, true},
 		{"cd town then back then create", polecatRole, b.worktree, `cd ` + b.town + `; cd ` + b.worktree + `; bd create --title=x`, false},
