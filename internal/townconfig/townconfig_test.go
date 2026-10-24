@@ -3,6 +3,7 @@ package townconfig
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -448,25 +449,44 @@ func TestScheduledRunAgentMustHaveASeat(t *testing.T) {
 	const settings = `{"type":"town-settings","version":1,
 "agents":{"claude-sonnet":{"command":"claude"},"deepseek-flash":{"command":"claude"}},
 "polecat_pool":{"seats":{"claude-sonnet":{"cap":1},"deepseek-flash":{"cap":0}}}}`
-	entry := func(extra string) string {
-		return `{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_slings":{"enabled":true,"entries":[` +
-			`{"name":"deep-review","rig":"gastown","formula":"mol-deep-review","interval":"1h","dispatch":"spec"` + extra + `}]}}}`
+	// entries is a daemon file with one spec entry per extra, named deep-review,
+	// deep-review-2, and so on.
+	entries := func(extras ...string) string {
+		var parts []string
+		for i, extra := range extras {
+			name := "deep-review"
+			if i > 0 {
+				name = fmt.Sprintf("deep-review-%d", i+1)
+			}
+			parts = append(parts, `{"name":"`+name+`","rig":"gastown","formula":"mol-deep-review","interval":"1h","dispatch":"spec"`+extra+`}`)
+		}
+		return `{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_slings":{"enabled":true,"entries":[` + strings.Join(parts, ",") + `]}}}`
 	}
+	entry := func(extra string) string { return entries(extra) }
 	tests := []struct {
-		name    string
-		daemon  string
-		wantErr string // "" for a clean load
+		name       string
+		daemon     string
+		noSettings bool   // remove settings/config.json: no seats at all
+		wantErr    string // "" for a clean load
 	}{
-		{"no run_agent loads as before", entry(""), ""},
-		{"a seated agent loads", entry(`,"run_agent":"claude-sonnet"`), ""},
-		{"an agent with a seat of cap 0 loads (the pool decides)", entry(`,"run_agent":"deepseek-flash"`), ""},
-		{"an agent with no seat fails the load", entry(`,"run_agent":"claude-opus"`), `scheduled_slings[deep-review].run_agent "claude-opus": no seat for that agent in polecat_pool.seats`},
+		{"every bad entry is named on one line", entries(`,"run_agent":"claude-opus"`, `,"run_agent":"claude-sonnet"`, `,"run_agent":"gpt-5"`), false,
+			`scheduled_slings[deep-review].run_agent "claude-opus": no seat for that agent in polecat_pool.seats; scheduled_slings[deep-review-3].run_agent "gpt-5": no seat`},
+		{"a town with no settings file has no seat for it", entry(`,"run_agent":"claude-sonnet"`), true, `scheduled_slings[deep-review].run_agent "claude-sonnet": no seat`},
+		{"no run_agent loads as before", entry(""), false, ""},
+		{"a seated agent loads", entry(`,"run_agent":"claude-sonnet"`), false, ""},
+		{"an agent with a seat of cap 0 loads (the pool decides)", entry(`,"run_agent":"deepseek-flash"`), false, ""},
+		{"an agent with no seat fails the load", entry(`,"run_agent":"claude-opus"`), false, `scheduled_slings[deep-review].run_agent "claude-opus": no seat for that agent in polecat_pool.seats`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			root := copyLiveTown(t)
 			write(t, root, FileSettings, settings)
+			if tt.noSettings {
+				if err := os.Remove(filepath.Join(root, FileSettings)); err != nil {
+					t.Fatal(err)
+				}
+			}
 			write(t, root, FileDaemon, tt.daemon)
 
 			_, err := Load(root)

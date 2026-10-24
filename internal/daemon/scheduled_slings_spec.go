@@ -28,9 +28,7 @@ type scheduledRunBead struct {
 }
 
 // scheduledSpecLabels are the labels a spec-dispatched run bead carries: its
-// identity and its formula, and the agent: pin when the entry names a run_agent
-// (so the dispatcher only gives the run that agent's seats). Without run_agent
-// there is no pin and the run takes any free seat.
+// identity and its formula, plus the agent: pin the entry's run_agent names.
 func scheduledSpecLabels(e ScheduledSlingEntry) []string {
 	labels := []string{scheduledSlingLabel(e), specdispatch.FormulaLabelPrefix + e.Formula}
 	if e.RunAgent != "" {
@@ -46,10 +44,7 @@ func scheduledSpecLabels(e ScheduledSlingEntry) []string {
 // that ran before. The agent is ignored and createSpecDispatchedRun says so.
 func scheduledSlingValidateDispatch(e ScheduledSlingEntry) error {
 	if e.RunAgent != "" && e.Dispatch != scheduledDispatchSpec {
-		return fmt.Errorf("scheduled_slings[%s]: run_agent needs dispatch %q (the entry slings its own run and names its agent with agent)", e.Name, scheduledDispatchSpec)
-	}
-	if e.RunAgent != "" && (e.RunAgent != strings.TrimSpace(e.RunAgent) || strings.ContainsAny(e.RunAgent, " \t\n,")) {
-		return fmt.Errorf("scheduled_slings[%s]: run_agent %q must be one agent name", e.Name, e.RunAgent)
+		return fmt.Errorf("scheduled_slings[%s]: run_agent is valid only with dispatch %q", e.Name, scheduledDispatchSpec)
 	}
 	switch e.Dispatch {
 	case "":
@@ -115,6 +110,29 @@ func (d *Daemon) specDispatchCeiling() int {
 	return max(ts.PolecatPool.GetMaxPriority(), 0)
 }
 
+// checkSpecRunAgent refuses to create a run bead pinned to an agent with no seat
+// in the live polecat_pool.seats: the dispatcher would leave the bead waiting
+// for ever, and the failed tick counts toward the entry's escalation (gt-tplg6).
+// The load-time check in townconfig covers the same entry; this one covers a
+// settings file edited after the daemon started.
+func (d *Daemon) checkSpecRunAgent(e ScheduledSlingEntry) error {
+	if e.RunAgent == "" {
+		return nil
+	}
+	ts, err := agentconfig.LoadOrCreateTownSettings(agentconfig.TownSettingsPath(d.config.TownRoot))
+	if err != nil {
+		return fmt.Errorf("scheduled_slings[%s]: reading polecat_pool.seats to check run_agent %q: %w", e.Name, e.RunAgent, err)
+	}
+	seats, err := agentconfig.Seats(ts, agentconfig.SeatsKnownTo(ts))
+	if err != nil {
+		return fmt.Errorf("scheduled_slings[%s]: polecat_pool.seats: %w", e.Name, err)
+	}
+	if !agentconfig.HasSeat(seats, e.RunAgent) {
+		return fmt.Errorf("scheduled_slings[%s]: run_agent %q has no seat in polecat_pool.seats", e.Name, e.RunAgent)
+	}
+	return nil
+}
+
 // scheduledSpecPriority is the run bead's priority: the entry's, held at the
 // dispatcher's ceiling. A bead numbered above the ceiling is backlog to the
 // dispatcher (specdispatch.Eligible), so the default P3 would leave the run
@@ -159,6 +177,9 @@ func reportUntakenSpecRuns(runs []scheduledBead, e ScheduledSlingEntry, now time
 func (d *Daemon) createSpecDispatchedRun(ctx context.Context, r scheduledSlingRunner, e ScheduledSlingEntry, title string) error {
 	if e.Agent != "" {
 		d.logger.Printf("scheduled_slings: %s: ignoring agent %q: a spec entry gets a seat from polecat_pool.seats; remove it from the entry", e.Name, e.Agent)
+	}
+	if err := d.checkSpecRunAgent(e); err != nil {
+		return err
 	}
 	desc, acceptance := scheduledSpecBody(e)
 	id, err := r.createBead(ctx, e.Rig, scheduledRunBead{

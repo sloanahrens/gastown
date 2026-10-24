@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -12,6 +13,11 @@ const (
 	BackendTmux      = "tmux"
 	BackendOpenShell = "openshell"
 )
+
+// HasSeat reports whether seats holds one for agent.
+func HasSeat(seats []Seat, agent string) bool {
+	return slices.ContainsFunc(seats, func(s Seat) bool { return s.Agent == agent })
+}
 
 // SeatConfig is one entry of polecat_pool.seats (gt-mukgk).
 type SeatConfig struct {

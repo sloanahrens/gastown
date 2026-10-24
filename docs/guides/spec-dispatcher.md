@@ -135,13 +135,11 @@ the entry's `vars` sorted in a `## Formula vars` section, and does not sling. Th
 entry takes no `agent`: the review is an ordinary bead and draws a seat from the
 [seat map](#seats-and-budget) like any other (gt-mukgk). The config load refuses
 an `agent` on a spec entry, and the error names the replacement. To keep a
-scheduled job off some model (deep reviews never run on DeepSeek, gt-co54d), set
-`"run_agent": "<agent>"` on the entry: the patrol writes the label
-`agent:<agent>` on each run bead it creates, and the dispatcher then uses only
-that agent's seats and waits otherwise, never falling back (gt-tplg6). The agent
-must have a seat in `polecat_pool.seats` (the config load refuses an entry whose
-`run_agent` has none), and `run_agent` is valid only with `"dispatch": "spec"`.
-The open
+scheduled job on one model (deep reviews never run on DeepSeek, gt-co54d), set
+`"run_agent": "<agent>"` on the entry: the patrol labels each run bead
+`agent:<agent>`, so only that agent's seats take it (gt-tplg6). The agent needs a
+seat in `polecat_pool.seats`; the config load refuses an entry without one, and
+the patrol fails the tick rather than create a bead no seat can take. The open
 bead is the queue: the entry's skip-open rule holds the next run, and the patrol
 never retires it as stalled however long a full pool keeps it waiting. The bead's
 priority is the entry's `priority` (3 when unset), held at
