@@ -145,10 +145,9 @@ func TestPatrolScanGHGatesFailedSaveSuppressesTheRerun(t *testing.T) {
 }
 
 func TestPatrolScanRogueBDFailedSaveSuppressesTheRerun(t *testing.T) {
-	// No t.Parallel: the check walks PATH, which this test replaces.
+	t.Parallel()
 	town := t.TempDir()
 	unwritableLastRun(t, town)
-	t.Setenv("PATH", t.TempDir())
 	clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
 	logs := &bytes.Buffer{}
 	d := &Daemon{logger: log.New(logs, "", 0), config: &Config{TownRoot: town}, clock: clk}
