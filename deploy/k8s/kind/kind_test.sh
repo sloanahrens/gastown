@@ -22,6 +22,10 @@ check() { local desc=$1; shift; if "$@"; then pass "$desc"; else fail "$desc"; f
 contains() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
 lacks() { ! contains "$1" "$2"; }
 count() { grep -c -- "$1" <<<"$2" || true; }
+# GNU stat has -f for the filesystem, BSD stat has -f for the format; the BSD
+# probe must send GNU's filesystem dump to /dev/null, not just its error, or
+# the fallback output is appended to that dump.
+mode() { if stat -f %Lp "$1" >/dev/null 2>&1; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
 
 # The scripts run from a copy of the tree: they find values/kind.yaml relative to themselves.
 mkdir -p "$TMP/root/deploy/k8s"
@@ -161,7 +165,7 @@ check "the client key is converted to PKCS8" contains "pkcs8 -topk8 -nocrypt" "$
 check "the jsonpath key escapes its dot" contains "['tls\\.key']" "$CALLS_LOG"
 check "the gateway is registered as k8s on the fixed port" contains "gateway add https://127.0.0.1:28443 --local --name k8s" "$CALLS_LOG"
 mtls="$S/home/gt/.runtime/sbx-k8s/xdg/openshell/gateways/k8s/mtls"
-check "the client key is mode 600" test "$(stat -f %Lp "$mtls/tls.key" 2>/dev/null || stat -c %a "$mtls/tls.key")" = 600
+check "the client key is mode 600" test "$(mode "$mtls/tls.key")" = 600
 check "no key material is printed" lacks "SECRETVALUE" "$OUT_TEXT"
 check "every kind call runs against the kind VM docker socket" test "$(grep '^kind ' "$S/calls.log" | grep -vc "DOCKER_HOST=unix://$S/home/.colima/gt-sbx/docker.sock")" -eq 0
 check "kind was called to list clusters" contains "kind get clusters" "$CALLS_LOG"
