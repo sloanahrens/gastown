@@ -155,6 +155,23 @@ run_install() {
   echo "$rc"
 }
 
+# run_install_at T BIN_DIR_ASSIGN ARGS... -> exit code; run_install with
+# INSTALL_GT_BIN_DIR unset, BIN_DIR_ASSIGN naming the install dir, and HOME a
+# temp dir — so a case can see which env the script honors without either env
+# pointing at a real ~/.local/bin. Output in $T/run.out.
+run_install_at() {
+  local t="$1" assign="$2" rc=0; shift 2
+  ( unset BD_ACTOR GT_ROLE INSTALL_GT_BIN_DIR INSTALL_DIR
+    export T_WORLD="$t" HOME="$t/home-default" "$assign" \
+      INSTALL_GT_DAEMON_DIR="$t/daemon" INSTALL_GT_RIG_DIR="$t/rig" \
+      INSTALL_GT_LOCK_WAIT="${LOCK_WAIT:-5}" INSTALL_GT_SIGN_DIR="$t/signing" \
+      INSTALL_GT_GATEWAY_HOME="$t/home" \
+      INSTALL_GT_IMAGE_RUN="${IMAGE_RUN:-$t/no-image-plugin/run.sh}" INSTALL_GT_IMAGE_LOG="$t/image.log" \
+      PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
+    bash "$INSTALLER" "$@" ) > "$t/run.out" 2>&1 || rc=$?
+  echo "$rc"
+}
+
 # last_receipt T FIELD -> that field of the last receipt line ("None" if null)
 last_receipt() {
   tail -1 "$1/daemon/install-receipts.jsonl" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1]))' "$2" 2>/dev/null || echo "NO-RECEIPT"
@@ -1056,6 +1073,35 @@ done
 [ "$LOCK_RC" = "0" ] \
   && pass "image: the background plugin does not hold the install lock" \
   || fail "image: the install lock is held by the background plugin (rc=$LOCK_RC)"
+
+# --- Case 39: INSTALL_DIR names the install dir (gt-tcigd). It is the
+# Makefile's name for it and the one the dispatcher's host-safety prompt names
+# to test writers; while the script ignored it, a test that followed the prompt
+# installed into $HOME/.local/bin. INSTALL_DIR is a mktemp -d here and HOME is
+# the helper's temp home, pre-created with its .local/bin so the fallback the
+# bug took lands somewhere this case can see instead of failing earlier. ---
+T=$(make_world)
+BINDIR=$(mktemp -d)
+mkdir -p "$T/home-default/.local/bin"
+rc=$(run_install_at "$T" "INSTALL_DIR=$BINDIR" --sha "$(cat "$T/c2")")
+[ "$rc" = "0" ] && [ "$(tail -1 "$T/run.out" | cut -d' ' -f2-3)" = "RESULT installed" ] \
+  && pass "INSTALL_DIR: exit 0, installed" || fail "INSTALL_DIR: rc=$rc: $(tail -3 "$T/run.out")"
+grep -q "C=\"$(cat "$T/c2")\"" "$BINDIR/gt" 2>/dev/null \
+  && pass "INSTALL_DIR: the binary landed there" || fail "INSTALL_DIR: nothing usable at $BINDIR/gt"
+[ -z "$(ls -A "$T/home-default/.local/bin" 2>/dev/null)" ] \
+  && pass "INSTALL_DIR: the default bin dir was untouched" || fail "INSTALL_DIR: wrote $(ls -A "$T/home-default/.local/bin" 2>&1)"
+grep -q "make SKIP_UPDATE_CHECK=1 INSTALL_DIR=$BINDIR install-local" "$T/make.log" \
+  && pass "INSTALL_DIR: install-local was pointed at it" || fail "INSTALL_DIR: make.log $(cat "$T/make.log" 2>/dev/null)"
+
+# --- Case 40: INSTALL_GT_BIN_DIR, this script's own name, wins when both are
+# set — a caller that pins the script's env is never redirected by an
+# INSTALL_DIR it also happens to export. ---
+T=$(make_world)
+mkdir -p "$T/otherbin"
+rc=$( export INSTALL_DIR="$T/otherbin"
+      run_install "$T" --sha "$(cat "$T/c2")" )
+[ "$rc" = "0" ] && grep -q "C=\"$(cat "$T/c2")\"" "$T/bin/gt" && [ ! -e "$T/otherbin/gt" ] \
+  && pass "both set: INSTALL_GT_BIN_DIR wins" || fail "both set: rc=$rc, bin $(grep -o 'C="[^"]*"' "$T/bin/gt" 2>/dev/null), otherbin $(ls "$T/otherbin" 2>&1)"
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
