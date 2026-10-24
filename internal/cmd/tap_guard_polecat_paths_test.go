@@ -1136,6 +1136,46 @@ func TestSegmentCommandWord(t *testing.T) {
 	}
 }
 
+// TestQuotedDollarParenHidesNoCommand: shlex drops the quotes around a literal
+// "$(", so X='$(echo' rm arrives as X=$(echo rm, which reads as an assignment
+// whose substitution never closes. The shell runs rm there, so the guard must
+// still judge rm, as well as the substitution's own text.
+func TestQuotedDollarParenHidesNoCommand(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	for _, command := range []string{
+		"X='$(echo' rm -rf " + filepath.Join(p.sibling, "internal.go"),
+		"X='$(echo' bash <<'EOF'\nrm -rf " + p.sibling + "\nEOF",
+		"A=1 X='$(echo' rm -rf " + filepath.Join(p.sibling, "internal.go"),
+	} {
+		if err := p.run(t, "Bash", commandInput(command)); err == nil {
+			t.Errorf("%q allowed: the quoted dollar-paren is a plain value, so the command after it runs", command)
+		}
+	}
+}
+
+// TestSegmentReadings: an assignment that opens a substitution it never closes
+// is read both ways, the substitution's text first and the literal reading
+// (the assignment dropped) after it. Segments without one are unchanged.
+func TestSegmentReadings(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		segment []string
+		want    [][]string
+	}{
+		{"no substitution", []string{"make", "build"}, [][]string{{"make", "build"}}},
+		{"closed substitution", []string{"y=$(echo)", "bash"}, [][]string{{"y=$(echo)", "bash"}}},
+		{"unclosed substitution", []string{"X=$(echo", "bash"}, [][]string{{"X=$(echo", "bash"}, {"bash"}}},
+		{"unclosed substitution after a plain assignment", []string{"A=1", "X=$(echo", "rm"}, [][]string{{"A=1", "X=$(echo", "rm"}, {"A=1", "rm"}}},
+	} {
+		got := segmentReadings(tt.segment)
+		if fmt.Sprint(got) != fmt.Sprint(tt.want) {
+			t.Errorf("%s: segmentReadings(%q) = %q, want %q", tt.name, tt.segment, got, tt.want)
+		}
+	}
+}
+
 func TestCdDestination(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

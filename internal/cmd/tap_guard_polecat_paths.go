@@ -275,7 +275,10 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 	// not stdin.
 	heredoc := strings.Contains(command, "\n") && heredocStartPattern.MatchString(command)
 
-	segments := splitShellSegments(shellTokenize(stripped))
+	var segments [][]string
+	for _, segment := range splitShellSegments(shellTokenize(stripped)) {
+		segments = append(segments, segmentReadings(segment)...)
+	}
 	for _, segment := range segments {
 		cmdline := trimShellKeywords(segment)
 		word, args := segmentCommandWord(cmdline)
@@ -1872,13 +1875,48 @@ func segmentCommandWord(segment []string) (string, []string) {
 			i += width - 1
 			continue
 		}
-		switch token {
-		case "(", "!", "time", "sudo", "command", "nohup", "env", "nice", "stdbuf", "exec", "builtin":
+		if skipsToCommand(token) {
 			continue
 		}
 		return token, segment[i+1:]
 	}
 	return "", nil
+}
+
+// skipsToCommand reports whether a token is a launcher or grouping token that
+// the command word sits behind, so the scan goes past it.
+func skipsToCommand(token string) bool {
+	switch token {
+	case "(", "!", "time", "sudo", "command", "nohup", "env", "nice", "stdbuf", "exec", "builtin":
+		return true
+	}
+	return false
+}
+
+// segmentReadings returns each command line a segment may run. shlex drops the
+// quotes that tell a live "$(" from a literal one, so an assignment whose
+// substitution never closes is read two ways: live, where the text after its
+// "$(" runs first (what segmentCommandWord returns), and literal, where the
+// assignment is a plain value and the words after it run next. Both are judged,
+// so a quoted "$(" cannot hide the command the shell actually runs.
+func segmentReadings(segment []string) [][]string {
+	readings := [][]string{segment}
+	for i := 0; i < len(segment); i++ {
+		token := segment[i]
+		if isEnvAssignment(token) {
+			width, opened := envAssignmentWidth(segment[i:])
+			if opened != "" {
+				literal := append(append([]string{}, segment[:i]...), segment[i+1:]...)
+				return append(readings, segmentReadings(literal)...)
+			}
+			i += width - 1
+			continue
+		}
+		if !skipsToCommand(token) {
+			break
+		}
+	}
+	return readings
 }
 
 // envAssignmentWidth returns how many leading tokens of segment make up the
