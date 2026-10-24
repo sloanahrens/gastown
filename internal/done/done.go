@@ -1639,7 +1639,10 @@ func pushBranchForLanding(r *doneRun, sourceBD beads.Client, sourceIssue *beads.
 	// An unreadable user.email leaves the seat's email empty, which turns the
 	// rework push off, so the divergence refusal stands.
 	seatEmail, _ := r.deps.repo.AuthorEmail()
-	seat := git.SeatIdentityFor(r.rigName+"/polecats/"+r.polecatName, seatEmail)
+	// The seat's address comes from role.Actor rather than a hand-built copy,
+	// so the name gt commit authors under and the name this lease compares
+	// cannot be spelled differently here (gt-y5duc).
+	seat := git.SeatIdentityFor(role.Actor(role.Polecat, r.rigName, r.polecatName), seatEmail)
 	rework := reworkPushFor(sourceIssue, seat.Name, seat.Email)
 	var lastPushErr error
 	attempt := func() error {
