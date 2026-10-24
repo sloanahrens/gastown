@@ -41,8 +41,11 @@ segments that carry to a later command on the same shell line — not one in a
 subshell, pipeline or background job — and a cd this guard cannot place before
 a bd create is refused. bd's -C/--directory, before or after the verb, moves
 the directory the store is resolved from; one the guard cannot place is
-refused the same way. BEADS_DIR, in the process env or as an inline
-assignment, names the store instead. gt escalate, gt ask and gt done create
+refused the same way. bd create's --repo names the workspace the bead is
+filed into, and bd's --db the database whose enclosing .beads directory is the
+store; each overrides the directory and BEADS_DIR, and a value the guard cannot
+place is refused. BEADS_DIR, in the process env or as an inline assignment,
+names the store instead. gt escalate, gt ask and gt done create
 town beads inside gt itself and never reach this hook.
 
 Exit codes:
@@ -181,6 +184,24 @@ func (g bdCreateStoreGuard) judgeSegment(segment []string, dir string, known boo
 		}
 		dir, known = path, true
 	}
+	// bd create --repo files into the named workspace whatever the shell's
+	// directory or BEADS_DIR say, and --db selects the store before either is
+	// consulted. --repo outranks --db: it names the target the bead is written
+	// to, after --db has opened the source store.
+	if repo, ok := bdValueFlag(segment, "--repo"); ok {
+		path, placed := g.bdCreateBase(dir, known, repo, vars)
+		if !placed {
+			return bdCreateUnplaceable
+		}
+		return g.judgeStore(path)
+	}
+	if db, ok := bdValueFlag(segment, "--db"); ok {
+		path, placed := g.bdCreateBase(dir, known, db, vars)
+		if !placed {
+			return bdCreateUnplaceable
+		}
+		return g.judgeDB(path)
+	}
 	return g.judgeCreate(dir, known, inlineBeadsDir(segment))
 }
 
@@ -236,9 +257,41 @@ func (g bdCreateStoreGuard) judgeCreate(dir string, known bool, beadsDir string)
 		}
 		path = filepath.Join(dir, path)
 	}
-	beadsDir = path
-	if sameDir(beads.ResolveBeadsDir(beadsDir), g.townStore) {
-		return "this bd create resolves to the town (hq) store"
+	return g.judgeStore(path)
+}
+
+// bdCreateTownRefusal is the verdict for a bd create whose store is the town's.
+const bdCreateTownRefusal = "this bd create resolves to the town (hq) store"
+
+// judgeStore refuses a workspace directory (the one holding .beads, or the
+// .beads directory itself) whose store, through its redirect, is the town's.
+func (g bdCreateStoreGuard) judgeStore(workspace string) string {
+	if sameDir(beads.ResolveBeadsDir(workspace), g.townStore) {
+		return bdCreateTownRefusal
+	}
+	return ""
+}
+
+// judgeDB judges bd's --db value. bd maps it to a store with
+// resolveCommandBeadsDir: the first ancestor of the path's parent, nearest
+// first, that holds a .beads directory, whether or not the path exists. So a
+// file in .beads, the dolt directory under it, and a made-up name beside the
+// town's .beads all select the town's store. The path is read as written and
+// with its parent's symlinks resolved, since bd stats and canonicalizes both.
+func (g bdCreateStoreGuard) judgeDB(dbPath string) string {
+	candidates := []string{dbPath}
+	if parent, err := filepath.EvalSymlinks(filepath.Dir(dbPath)); err == nil {
+		candidates = append(candidates, filepath.Join(parent, filepath.Base(dbPath)))
+	}
+	for _, path := range candidates {
+		for dir := filepath.Dir(path); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+			if info, err := os.Stat(filepath.Join(dir, ".beads")); err == nil && info.IsDir() {
+				if reason := g.judgeStore(dir); reason != "" {
+					return reason
+				}
+				break
+			}
+		}
 	}
 	return ""
 }
@@ -279,14 +332,19 @@ func inlineBeadsDir(segment []string) string {
 	return ""
 }
 
-// bdDirectoryFlag returns the directory a bd create's -C/--directory names,
-// wherever it sits relative to the verb, in the forms pflag accepts: a
-// separate value, --directory=value, -C=value and the glued -Cvalue. A
-// repeated flag is read last-wins, as pflag sets it. ok is false only when the
-// segment names no such flag; a flag with no value reaches the caller as the
-// empty value, which it refuses rather than reading the create from the
-// shell's directory.
+// bdDirectoryFlag returns the directory a bd create's -C/--directory names.
 func bdDirectoryFlag(segment []string) (value string, ok bool) {
+	return bdValueFlag(segment, "--directory", "-C")
+}
+
+// bdValueFlag returns the value a bd create segment gives a flag, wherever it
+// sits relative to the verb, in the forms pflag accepts: a separate value,
+// --long=value, and for a flag with a shorthand, -C=value and the glued
+// -Cvalue. A repeated flag is read last-wins, as pflag sets it. ok is false
+// only when the segment names no such flag; a flag with no value reaches the
+// caller as the empty value, which it refuses rather than reading the create
+// from the shell's directory.
+func bdValueFlag(segment []string, long string, short ...string) (value string, ok bool) {
 	tokens := bdCloseCommandTokens(segment)
 	for i := 1; i < len(tokens); i++ {
 		tok := tokens[i]
@@ -294,16 +352,16 @@ func bdDirectoryFlag(segment []string) (value string, ok bool) {
 			break
 		}
 		switch {
-		case tok == "-C" || tok == "--directory":
+		case tok == long || len(short) > 0 && tok == short[0]:
 			value, ok = "", true
 			if i+1 < len(tokens) && tokens[i+1] != "--" {
 				value = tokens[i+1]
 				i++
 			}
-		case strings.HasPrefix(tok, "--directory="):
-			value, ok = strings.TrimPrefix(tok, "--directory="), true
-		case strings.HasPrefix(tok, "-C"):
-			value, ok = strings.TrimPrefix(strings.TrimPrefix(tok, "-C"), "="), true
+		case strings.HasPrefix(tok, long+"="):
+			value, ok = strings.TrimPrefix(tok, long+"="), true
+		case len(short) > 0 && strings.HasPrefix(tok, short[0]):
+			value, ok = strings.TrimPrefix(strings.TrimPrefix(tok, short[0]), "="), true
 		}
 	}
 	return value, ok
