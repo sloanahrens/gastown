@@ -24,15 +24,17 @@ const attentionStateFixture = `{"updated":"2026-10-24T13:04:02Z","items":[` +
 	`{"key":"risk:gt-a1:6cf8b456","kind":"risk-path","severity":"low","bead":"gt-a1","summary":"<summary>","first_seen":"2026-10-24T12:45:00Z","last_seen":"2026-10-24T13:04:00Z","acked_at":"2026-10-24T12:50:00Z"},` +
 	`{"key":"future:gastown","kind":"future-kind","severity":"low","summary":"<summary>","first_seen":"2026-10-24T12:45:00Z","last_seen":"2026-10-24T13:04:00Z"}]}`
 
-// attentionAcksFixture covers each disposition, an ack outside the hour, a
-// line with no disposition, a disposition this source does not know, a line
-// that will not parse and a line with no timestamp.
+// attentionAcksFixture covers each disposition, an ack outside the hour, an
+// ack stamped after the snapshot's clock, a line with no disposition, a
+// disposition this source does not know, a line that will not parse and a line
+// with no timestamp.
 const attentionAcksFixture = `{"ts":"2026-10-24T11:00:00Z","key":"old:hq-a2","kind":"escalation","rule":"","disposition":"noise"}
 {"ts":"2026-10-24T12:45:00Z","key":"esc:hq-a1","kind":"escalation","rule":"escalation","disposition":"needed-human"}
 {"ts":"2026-10-24T12:50:00Z","key":"red-main:gastown","kind":"red-main","rule":"","disposition":"fixed-by-overseer"}
 {"ts":"2026-10-24T12:55:00Z","key":"queue-stuck:gastown","kind":"queue-stuck","rule":"","disposition":"noise"}
 {"ts":"2026-10-24T12:58:00Z","key":"legacy:gastown","kind":"queue-stuck","rule":""}
 {"ts":"2026-10-24T12:59:00Z","key":"odd:gastown","kind":"queue-stuck","rule":"","disposition":"tomorrow-thing"}
+{"ts":"2026-10-24T13:30:00Z","key":"skew:gastown","kind":"queue-stuck","rule":"","disposition":"noise"}
 not json
 {"key":"no-ts:hq-a3","kind":"escalation","rule":"","disposition":"noise"}
 `
@@ -89,6 +91,7 @@ func TestSourceAttentionOpenByKindAndAcksByDisposition(t *testing.T) {
 		"acks_noise_1h":             1,
 		"acks_unlabelled_1h":        1,
 		"acks_other_1h":             1,
+		"acks_future_dated":         1,
 		"acks_unparsed_lines":       2,
 	}
 	for name, value := range want {
@@ -206,11 +209,13 @@ func TestSourceAttentionAndConfigColumnsCarryNoItemText(t *testing.T) {
 		t.Fatalf("attention Collect: %v", err)
 	}
 	settings, rigs, _, _ := configTestPaths()
+	// The text rides in every config input a column could copy it from: the
+	// retired idle_fill as a string, an extra .om.json field, and a rig's status.
 	configCols, err := configSource{}.Collect(context.Background(), configTestEnv(t, map[string]string{
-		settings:                configSettingsFixture,
+		settings:                `{"type": "town-settings", "version": 1, "polecat_pool": {"idle_fill": "` + text + `", "max_total": 12}}`,
 		rigs:                    configRigsFixture("gastown"),
-		configOmPath("gastown"): `{"threshold": 0.75}`,
-	}, nil, configRigList(t, `[{"name": "gastown", "status": "operational"}]`)))
+		configOmPath("gastown"): `{"threshold": 0.75, "summary": "` + text + `"}`,
+	}, nil, configRigList(t, `[{"name": "gastown", "status": "`+text+`"}]`)))
 	if err != nil {
 		t.Fatalf("config Collect: %v", err)
 	}
@@ -228,6 +233,33 @@ func TestSourceAttentionAndConfigColumnsCarryNoItemText(t *testing.T) {
 				t.Errorf("%s.%s carries the item's text", group.name, column)
 			}
 		}
+	}
+}
+
+// A tail read that hits its byte bound may start mid-line. The first line is
+// then dropped and counted as unplaceable even when it is a whole, in-window
+// ack, because the read cannot tell whether its start was lost; the acks after
+// it still window, end to end through the source.
+func TestSourceAttentionCutTailCountsTheCutLineAndKeepsTheRest(t *testing.T) {
+	t.Parallel()
+	const firstAck = `{"ts":"2026-10-24T12:40:00Z","key":"esc:hq-a0","kind":"escalation","rule":"","disposition":"noise"}`
+	const ack = `{"ts":"2026-10-24T12:45:00Z","key":"esc:hq-a1","kind":"escalation","rule":"","disposition":"noise"}` + "\n"
+	// Leading spaces pad the first line out to the bound, so the read is
+	// truncated; json.Unmarshal ignores them, so the line would parse if kept.
+	pad := strings.Repeat(" ", sourceLogTailBytes-len(firstAck)-1-len(ack))
+	files := map[string]string{
+		attention.StatePath(attentionTestTown):       attentionStateFixture,
+		attention.AcksHistoryPath(attentionTestTown): pad + firstAck + "\n" + ack,
+	}
+	got, err := attentionSource{}.Collect(context.Background(), attentionTestEnv(t, files, nil))
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got["acks_unparsed_lines"] != 1 {
+		t.Errorf("acks_unparsed_lines = %v, want 1 for the cut line", got["acks_unparsed_lines"])
+	}
+	if got["acks_1h"] != 1 || got["acks_noise_1h"] != 1 {
+		t.Errorf("acks_1h = %v, acks_noise_1h = %v, want the ack after the cut line counted", got["acks_1h"], got["acks_noise_1h"])
 	}
 }
 

@@ -16,62 +16,24 @@ import (
 
 // The config group: the operator settings that decide what the town does.
 //
-// The pool and guard columns come from <town>/settings/config.json, decoded as
-// config.TownSettings, the document the config kernel reads
-// (internal/townconfig):
+// The pool, guard and gate columns come from the operator's own files, read
+// through Env: settings/config.json (config.TownSettings), the guard's daemon
+// document (the settings file's "daemon" section on the two-file layout,
+// mayor/daemon.json on the five-file one, internal/config/layout.go), and each
+// rig's mayor/rig/.om.json. pool_max_total is 0 when the town sets no total
+// cap, which is how config.PolecatPool.GetMaxTotal reads it. A nil column means
+// no reading: no pool, no guard, or no gate, not a zero.
 //
-//	pool_max_total        polecat_pool.max_total. 0 is a town with no total
-//	                      cap, which is how internal/config reads an absent or
-//	                      zero key (PolecatPool.GetMaxTotal): it is a value,
-//	                      not a missing reading. nil when settings carries no
-//	                      polecat_pool at all.
-//	pool_idle_fill        polecat_pool.idle_fill as written, and nil when it is
-//	                      absent. The key is retired (internal/config/types.go
-//	                      keeps it verbatim so a rewrite does not drop operator
-//	                      data): nothing reads it, so none of its values is
-//	                      faked here, but an old setting still describes the
-//	                      town that carried it.
-//	overrun_stop_after_s  the overrun guard's stop_after in seconds. nil when
-//	                      the guard is absent or disabled: a stop that cannot
-//	                      fire is not a threshold. An unset or unusable value
-//	                      is the guard's own default of 20m, the same fallback
-//	                      internal/daemon's overrunDuration makes.
+// settings/config.json is the group's input, so without it there is no policy
+// to report and the group is null. Any other probe that fails nils only its own
+// column and counts in config_probe_failures, so a nil is never a measured zero.
+// When the rig registry cannot be read the rig names are unknown, so no
+// om_threshold_<rig> column exists for that snapshot; the failure is counted.
 //
-// The gate and rig columns come from the rig registry and each rig's own
-// files:
-//
-//	om_threshold_<rig>    the "threshold" in <rig>/mayor/rig/.om.json, the
-//	                      bar internal/land's OMThreshold reads from the tree
-//	                      under review. The clone's copy is the one
-//	                      internal/rig's ReadRepoFile falls back to; reading
-//	                      main's copy is a git call this hourly snapshot does
-//	                      not pay for. nil when the rig ships no .om.json or
-//	                      the file carries no threshold: such a rig has no
-//	                      gate, which is not a failed reading.
-//	parked_rigs           rigs whose `gt rig list --json` status is "parked".
-//	                      Docked rigs are a global shutdown, not a park, and
-//	                      are not counted.
-//
-//	config_probe_failures columns left nil because their input could not be
-//	                      read or parsed: a rig's .om.json, the rig registry,
-//	                      or `gt rig list`. 0 when every probe answered.
-//
-// settings/config.json is the group's input, so a missing, unreadable or
-// unparseable one is an error and the group is null: without it there is no
-// operator policy to report. The daemon patrol document is the settings
-// file's "daemon" section on the two-file layout and mayor/daemon.json on the
-// five-file one (internal/config/layout.go), so the guard is read from
-// whichever layout the town is on; a two-file town with no "daemon" section
-// has no guard, and a leftover mayor/daemon.json is not read.
-//
-// Every other probe costs only its own column: a rig's .om.json that is
-// malformed or unreadable leaves that rig's threshold nil and increments
-// config_probe_failures, and `gt rig list` that fails,
-// prints nothing, prints something that is not an array, or takes longer than
-// configRigListTimeout leaves parked_rigs nil and does the same. The rest of
-// the group is untouched. `gt rig list` finds the town from the working
-// directory, which is the town root when the daemon runs the snapshot, and it
-// has no flag to name another.
+// parked_rigs counts the rows of `gt rig list --json` whose status is "parked",
+// through Env.Run. That command finds the town from the process working
+// directory and has no flag to name another, so the snapshot must run from the
+// town root.
 type configSource struct {
 	// rigListTimeout bounds the `gt rig list` probe; zero means
 	// configRigListTimeout. Tests set it short to cut a hung command at its
@@ -82,20 +44,16 @@ type configSource struct {
 // configSettingsFile is the operator settings document under the town root.
 var configSettingsFile = filepath.Join("settings", "config.json")
 
-// configDaemonFile is the five-file layout's daemon patrol document. On the
-// two-file layout the same document is settings/config.json's "daemon"
-// section (internal/config/layout.go).
+// configDaemonFile is the five-file layout's daemon patrol document.
 var configDaemonFile = filepath.Join("mayor", "daemon.json")
 
 // configRigListTimeout bounds `gt rig list`, so a wedged binary costs the
 // parked count and not the group.
 const configRigListTimeout = 5 * time.Second
 
-// configOverrunDefaultStop is the overrun guard's default stop_after,
-// internal/daemon's defaultOverrunGuardStopAfter. It is mirrored rather than
-// imported: internal/daemon is the process this snapshot runs beside, not a
-// library a snapshot pulls in, and the value is the guard's contract with its
-// operators.
+// configOverrunDefaultStop mirrors internal/daemon's defaultOverrunGuardStopAfter.
+// It is copied rather than imported: the daemon is the process this snapshot
+// runs beside, not a library it links.
 const configOverrunDefaultStop = 20 * time.Minute
 
 func (configSource) Group() string { return "config" }
@@ -112,18 +70,19 @@ func (s configSource) Collect(ctx context.Context, env Env) (map[string]any, err
 		"parked_rigs":           nil,
 		"config_probe_failures": 0,
 	}
+	failures := 0
 	if pool := settings.PolecatPool; pool != nil {
 		cols["pool_max_total"] = pool.GetMaxTotal()
 		cols["pool_idle_fill"] = configIdleFill(pool.IdleFill)
 	}
+	// An unreadable guard document costs only the guard column; the pool, gate
+	// and parked probes do not read it.
 	daemon, err := configReadDaemon(env, settings)
 	if err != nil {
-		return nil, err
-	}
-	if stop := configOverrunStop(daemon); stop != nil {
+		failures++
+	} else if stop := configOverrunStop(daemon); stop != nil {
 		cols["overrun_stop_after_s"] = *stop
 	}
-	failures := 0
 	rigs, err := queueRigs(env)
 	if err != nil {
 		// The registry names the rigs the threshold columns are for, so an
@@ -178,7 +137,7 @@ func configIdleFill(raw json.RawMessage) any {
 // configReadDaemon returns the daemon patrol document for the town's layout:
 // the settings file's "daemon" section on the two-file layout, else
 // mayor/daemon.json on the five-file one. No document means no guard, not an
-// error.
+// error; a document that cannot be read or parsed is an error.
 func configReadDaemon(env Env, settings *config.TownSettings) (*config.DaemonPatrolConfig, error) {
 	if settings.Daemon != nil {
 		return settings.Daemon, nil

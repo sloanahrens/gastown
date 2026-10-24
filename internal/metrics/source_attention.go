@@ -40,6 +40,8 @@ import (
 //	                           disposition is empty
 //	acks_other_1h              a disposition outside the four above, so a value
 //	                           a newer writer adds is counted and not lost
+//	acks_future_dated          acks stamped after the snapshot's own clock, which
+//	                           a skewed writer or clock can produce
 //	acks_unparsed_lines        lines the parser could not place: no JSON object,
 //	                           or no timestamp to window them by
 //
@@ -129,7 +131,7 @@ func attentionOpenColumn(kind attention.Kind) string {
 func attentionAddAcks(env Env, cols map[string]any) error {
 	now := env.Now()
 	cutoff := now.Add(-time.Hour)
-	var total, needed, fixed, noise, unlabelled, other, unparsed int
+	var total, needed, fixed, noise, unlabelled, other, future, unparsed int
 	for _, path := range []string{
 		attention.RotatedAcksHistoryPath(env.Town),
 		attention.AcksHistoryPath(env.Town),
@@ -155,7 +157,11 @@ func attentionAddAcks(env Env, cols map[string]any) error {
 				unparsed++
 				continue
 			}
-			if rec.TS.Before(cutoff) || rec.TS.After(now) {
+			if rec.TS.After(now) {
+				future++
+				continue
+			}
+			if rec.TS.Before(cutoff) {
 				continue
 			}
 			total++
@@ -179,6 +185,7 @@ func attentionAddAcks(env Env, cols map[string]any) error {
 	cols["acks_noise_1h"] = noise
 	cols["acks_unlabelled_1h"] = unlabelled
 	cols["acks_other_1h"] = other
+	cols["acks_future_dated"] = future
 	cols["acks_unparsed_lines"] = unparsed
 	return nil
 }

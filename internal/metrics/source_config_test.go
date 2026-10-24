@@ -231,6 +231,47 @@ func TestSourceConfigReadsTheDaemonDocumentOfTheTownsLayout(t *testing.T) {
 	}
 }
 
+// A guard document that cannot be read or parsed costs only the guard column:
+// the pool and the parked count still answer, and the failure is counted.
+func TestSourceConfigUnreadableDaemonDocumentCostsOnlyTheGuard(t *testing.T) {
+	t.Parallel()
+	settings, rigs, town, daemon := configTestPaths()
+	tests := []struct {
+		name  string
+		files map[string]string
+		errs  map[string]error
+	}{
+		{name: "malformed daemon.json", files: map[string]string{daemon: `{"patrols":`}},
+		{name: "unreadable daemon.json", errs: map[string]error{daemon: fs.ErrPermission}},
+		{name: "malformed town.json", files: map[string]string{town: `{"registry":`}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			files := map[string]string{
+				settings: `{"type": "town-settings", "version": 1, "polecat_pool": {"max_total": 12}}`,
+				rigs:     configRigsFixture("gastown"),
+			}
+			for path, data := range tc.files {
+				files[path] = data
+			}
+			got, err := configSource{}.Collect(context.Background(), configTestEnv(t, files, tc.errs, configRigList(t, `[]`)))
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			if got["overrun_stop_after_s"] != nil {
+				t.Errorf("overrun_stop_after_s = %v, want nil for an unreadable guard document", got["overrun_stop_after_s"])
+			}
+			if got["config_probe_failures"] != 1 {
+				t.Errorf("config_probe_failures = %v, want 1", got["config_probe_failures"])
+			}
+			if got["pool_max_total"] != 12 || got["parked_rigs"] != 0 {
+				t.Errorf("pool_max_total = %v, parked_rigs = %v, want 12 and 0 beside the guard gap", got["pool_max_total"], got["parked_rigs"])
+			}
+		})
+	}
+}
+
 // A rig with no .om.json, or one with no threshold, has no gate: that is a nil
 // value, not a failure. A file that will not read or parse leaves only that
 // rig's column nil and increments the failure count.
