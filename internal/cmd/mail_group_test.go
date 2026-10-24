@@ -1,6 +1,9 @@
 package cmd
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestIsValidGroupName(t *testing.T) {
 	t.Parallel()
@@ -11,7 +14,7 @@ func TestIsValidGroupName(t *testing.T) {
 		{"ops-team", true},
 		{"all_witnesses", true},
 		{"team123", true},
-		{"A", true},
+		{"a", true},
 		{"abc", true},
 		{"my-cool-group", true},
 
@@ -22,6 +25,11 @@ func TestIsValidGroupName(t *testing.T) {
 		{"@team", false},
 		{"group/name", false},
 		{"team!", false},
+		{"A", false},
+		{"Ops-Team", false},
+		{"-x", false},
+		{"_x", false},
+		{strings.Repeat("a", 65), false},
 	}
 
 	for _, tt := range tests {
@@ -63,6 +71,7 @@ func TestIsValidMemberPattern(t *testing.T) {
 		// Invalid
 		{"", false},
 		{"@", false},
+		{"Ops-Team", false},
 	}
 
 	for _, tt := range tests {
