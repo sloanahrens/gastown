@@ -435,6 +435,75 @@ func TestPolecatPathsGuard_PathQualifiedLauncher(t *testing.T) {
 	}
 }
 
+// TestPolecatPathsGuard_ClusteredLauncherFlags pins gt-l18zp: a cluster of
+// short flags is read the way getopt reads it, so a value flag in the cluster
+// owns the word after it instead of that word becoming the command. Without
+// it, "caffeinate -it 5 rm -rf <sibling file>" judged "5" as the command.
+func TestPolecatPathsGuard_ClusteredLauncherFlags(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	rm := "rm -rf " + filepath.Join(p.sibling, "internal.go")
+	for _, tt := range []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{"caffeinate cluster ending in a value flag", "caffeinate -it 5 " + rm, true},
+		{"sudo cluster ending in a value flag", "sudo -Eu alice " + rm, true},
+		{"doas cluster ending in a value flag", "doas -nu alice " + rm, true},
+		{"caffeinate cluster over an own file", "caffeinate -it 5 rm -rf build", false},
+		{"sudo cluster over an own file", "sudo -Eu alice rm -rf build", false},
+		{"doas cluster over an own file", "doas -nu alice rm -rf build", false},
+		{"caffeinate value flag with an attached value", "caffeinate -t5 " + rm, true},
+		{"caffeinate value flag with an attached value over an own file", "caffeinate -t5 rm -rf build", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := p.run(t, "Bash", commandInput(tt.command))
+			if tt.wantBlock && err == nil {
+				t.Errorf("%q was allowed, want a block", tt.command)
+			}
+			if !tt.wantBlock && err != nil {
+				t.Errorf("%q blocked on an own file: %v", tt.command, err)
+			}
+		})
+	}
+}
+
+// TestPolecatPathsGuard_LauncherChdirFlag pins gt-l18zp: env -C/--chdir and
+// sudo -D run the command behind them in another directory, so its relative
+// words are judged there — "env -C ../<sibling> rm -rf internal.go" deletes
+// the sibling's file, not the worktree's.
+func TestPolecatPathsGuard_LauncherChdirFlag(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	up := filepath.Join("..", "..", p.other, p.rig)
+	for _, tt := range []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{"env -C into a sibling worktree", "env -C " + up + " rm -rf internal.go", true},
+		{"env --chdir= into a sibling worktree", "env --chdir=" + up + " rm -rf internal.go", true},
+		{"env --chdir into a sibling worktree", "env --chdir " + up + " rm -rf internal.go", true},
+		{"sudo -D into a sibling worktree", "sudo -D " + up + " rm -rf internal.go", true},
+		{"env -C into the own worktree", "env -C . rm -rf build", false},
+		{"env --chdir= into the own worktree", "env --chdir=. rm -rf build", false},
+		{"sudo -D into the own worktree", "sudo -D . rm -rf build", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := p.run(t, "Bash", commandInput(tt.command))
+			if tt.wantBlock && err == nil {
+				t.Errorf("%q was allowed, want a block", tt.command)
+			}
+			if !tt.wantBlock && err != nil {
+				t.Errorf("%q blocked in the own worktree: %v", tt.command, err)
+			}
+		})
+	}
+}
+
 // TestPolecatPathGuardBash covers the Bash leg in one table: writes aimed at
 // another agent's tree are blocked, ordinary polecat work is not.
 func TestPolecatPathGuardBash(t *testing.T) {

@@ -310,6 +310,22 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 			// leaves it out, and with nothing after the -S word is empty
 			// (gt-j21h4).
 			_, payloads, _ := prWorkflowCommand(cmdline)
+			// A launcher that changes directory ahead of what it runs (env
+			// -C/--chdir, sudo -D/--chdir) runs it in that directory, so its
+			// relative words are judged from there too — env -C
+			// ../<sibling> rm -rf internal.go deletes the sibling's file, not
+			// the worktree's (gt-l18zp). A launcher that runs nothing changes
+			// no write's directory, so a bare one is not judged. Only this
+			// command runs there, so the scope is restored before the next
+			// segment inherits it.
+			before := s
+			launcherDirs := launcherChdirDirs(cmdline)
+			if len(launcherDirs) > 0 && (word != "" || len(payloads) > 0) {
+				var reason string
+				if s, reason = s.launcherChdirScope(launcherDirs); reason != "" {
+					return reason
+				}
+			}
 			for _, payload := range payloads {
 				if reason := s.checkBashCommand(payload, depth+1); reason != "" {
 					return reason
@@ -390,6 +406,9 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 						}
 					}
 				}
+			}
+			if len(launcherDirs) > 0 && base != "cd" && base != "pushd" {
+				s = before
 			}
 			carried.dirs = unionDirs(carried.dirs, s.dirs)
 		}
@@ -531,6 +550,36 @@ func (s polecatPathScope) followCd(command string, args []string) (polecatPathSc
 		return s, "too many directory changes to follow in one command — split it into commands that each stay in one directory"
 	}
 	s.dirs = dirs
+	return s, ""
+}
+
+// launcherChdirScope returns the scope the command behind a launcher runs in.
+// Each launcher directory is judged as a target and every resolution of it is
+// added to the directories a relative word may resolve from, as followCd does
+// for a cd: the guard cannot tell which reading the shell takes (gt-l18zp).
+func (s polecatPathScope) launcherChdirScope(dirs []string) (polecatPathScope, string) {
+	walked := append([]string(nil), s.walkDirs()...)
+	seen := make(map[string]bool, len(walked))
+	for _, dir := range walked {
+		seen[dir] = true
+	}
+	for _, from := range s.walkDirs() {
+		for _, dir := range dirs {
+			if reason := s.checkBashPathFrom(dir, from, "launcher chdir"); reason != "" {
+				return s, reason
+			}
+			target, ok := canonicalizeToolPath(s.proc, dir, from)
+			if !ok || seen[target] {
+				continue
+			}
+			seen[target] = true
+			walked = append(walked, target)
+		}
+	}
+	if len(walked) > maxWalkDirs {
+		return s, "too many directory changes to follow in one command — split it into commands that each stay in one directory"
+	}
+	s.dirs = walked
 	return s, ""
 }
 
@@ -1960,6 +2009,12 @@ func trimShellKeywords(segment []string) []string {
 		if trimmed == head {
 			break
 		}
+		// "{fd}>log" leads with a brace but allocates a file descriptor: it is
+		// a redirection, and left whole redirectionSkip steps over it to the
+		// command behind it (gt-l18zp).
+		if redirectionWidth(head) != 0 {
+			break
+		}
 		if trimmed == "" {
 			segment = segment[1:]
 			continue
@@ -2005,6 +2060,43 @@ func segmentCommandWord(segment []string) (string, []string) {
 		return token, segment[i+1:]
 	}
 	return "", nil
+}
+
+// launcherChdirDirs returns the directories the launchers ahead of a segment's
+// command word change into: env -C/--chdir and sudo -D/--chdir run the command
+// behind them in that directory, so its relative words resolve there and not
+// from the session cwd (gt-l18zp).
+func launcherChdirDirs(segment []string) []string {
+	var dirs []string
+	for i := 0; i < len(segment); i++ {
+		if next, opened, ok := envAssignmentSkip(segment, i); ok {
+			if opened != "" {
+				return dirs
+			}
+			i = next - 1
+			continue
+		}
+		// A redirection ahead of the command is stepped over as
+		// segmentCommandWordPastRedirections does, so "2>/dev/null env -C"
+		// reaches the launcher behind it.
+		if skip := redirectionSkip(segment[i:]); skip != 0 {
+			i += skip - 1
+			continue
+		}
+		token := segment[i]
+		if !skipsToCommand(token) {
+			return dirs
+		}
+		name := launcherName(token)
+		launcher, ok := prWorkflowLaunchers[name]
+		if !ok {
+			continue // "(" and "!" lead a command without flags of their own
+		}
+		rest, _, chdirs := skipLauncherArgsChdir(name, launcher, segment[i+1:])
+		dirs = append(dirs, chdirs...)
+		i = len(segment) - len(rest) - 1
+	}
+	return dirs
 }
 
 // skipsToCommand reports whether a token is a launcher or grouping token that

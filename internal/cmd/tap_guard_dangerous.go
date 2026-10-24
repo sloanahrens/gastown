@@ -1855,13 +1855,14 @@ func spaceOutShellOperators(command string) string {
 			scopes[len(scopes)-1].quote = '$'
 			// Land on the quote itself; the loop step moves past it (gt-javvg).
 			i = skipLineContinuations(runes, i+1)
-		case r == '$' && sc.quote == '"' && i+2 < len(runes) && quotedDollarParen(r, runes[i+1], runes[i+2]):
-			// A quoted dollar-paren — "$(" — inside a double-quoted word ends
-			// that word at the quote after the "(", as the shell reads it, so
-			// the ")" closing the substitution around it stays in view and the
-			// command glued inside is judged (gt-qg832). The "$", "(" and quote
-			// are plain characters of the quoted word, emitted by the quote
-			// branch below.
+		case r == '$' && sc.quote == '"' && i+2 < len(runes) && quotedDollarParen(r, runes[i+1], runes[i+2]) && !quotedSubstitutionCloses(command, runes, i):
+			// A quoted dollar-paren — "$(" — whose substitution never closes
+			// ends the double-quoted word at the quote after the "(", so the
+			// ")" around it stays in view and the command glued inside is
+			// judged (gt-qg832). A substitution that does close is a quoting
+			// scope of its own, taken by the "$(" branch below; reading this
+			// one flat turned a quoted argument's ";" into a separator
+			// (gt-l18zp).
 			scopes[len(scopes)-1].quotedParen = true
 			emit(r)
 		case r == '$' && sc.quote != '\'' && i+1 < len(runes) && runes[i+1] == '(':
@@ -1939,11 +1940,14 @@ func spaceOutShellOperators(command string) string {
 		case r == '\n':
 			b.WriteString(" ; ")
 		case r == ';', r == '&', r == '|':
-			if r == '&' && ((i > 0 && runes[i-1] == '>') || (i+1 < len(runes) && runes[i+1] == '>')) {
+			if (r == '&' && ((i > 0 && runes[i-1] == '>') || (i+1 < len(runes) && runes[i+1] == '>'))) ||
+				(r == '|' && prevIdx >= 0 && runes[prevIdx] == '>' && !prevEscaped) {
 				// A '&' touching a '>' on either side is a redirection
-				// (2>&1, &>file), not a background operator. Left glued it
-				// stays one token, so the '&' tokens that reach the matchers
-				// are all real segment boundaries (gt-wwwht).
+				// (2>&1, &>file), not a background operator. A '|' right
+				// after a '>' is the clobber redirect (">|file", "2>|file",
+				// "{fd}>file"). Left glued each stays one token, so the
+				// operator and its target reach redirectionWidth whole and a
+				// command behind them is still found (gt-wwwht, gt-l18zp).
 				emit(r)
 			} else if (r == '&' || r == '|') && i+1 < len(runes) && runes[i+1] == r {
 				b.WriteRune(' ')
@@ -1987,6 +1991,15 @@ func plainGroupScope(sc shellQuoteScope) bool {
 // the shape here so the two agree on where that word ends (gt-qg832).
 func quotedDollarParen(dollar, paren, quote rune) bool {
 	return dollar == '$' && paren == '(' && quote == '"'
+}
+
+// quotedSubstitutionCloses reports whether the substitution whose "$" stands
+// at rune i of runes closes within command. closingDoubleQuote skips a
+// substitution that closes whole; spaceOutShellOperators reads one flat only
+// when it does not, so the two agree on where the quoted word ends (gt-l18zp).
+func quotedSubstitutionCloses(command string, runes []rune, i int) bool {
+	from := len(string(runes[:i+2])) // the byte just past the "("
+	return closingParen(command, from, heredocBodiesFrom(command, from)) >= 0
 }
 
 // isANSICDollar reports whether the "$" at runes[i] opens a $'...' string: the
