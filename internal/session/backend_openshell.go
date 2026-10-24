@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,11 +48,20 @@ var sandboxDroppedEnv = []string{"CLAUDE_CONFIG_DIR", "TMPDIR", "GOTMPDIR", "ANT
 // cloneScript clones the polecat branch with the Forgejo token the provider
 // put in the sandbox's environment, then fetches main into origin/main: the
 // single-branch clone's refspec covers only the polecat branch, and gt done
-// compares the branch with origin/main. Arguments are positional, so no value
-// is spliced into the script text.
+// compares the branch with origin/main. Both fetches are shallow ($4 commits):
+// the full history of the town's largest repo took about 10 s and 88 MB to
+// clone, 1.3 s and 13 MB at depth 500, and everything gt done does with history
+// (merge-base against origin/main, rebase onto it, rev-list counts, patch-id,
+// pushing the new commits) needs only the commits since the branch forked from
+// main. Arguments are positional, so no value is spliced into the script text.
 const cloneScript = `H="http.extraHeader=Authorization: token $FORGEJO_TOKEN"; ` +
-	`git -c "$H" clone --branch "$1" --single-branch "$2" "$3" && cd "$3" && ` +
-	`git remote set-branches --add origin main && git -c "$H" fetch origin main`
+	`git -c "$H" clone --branch "$1" --single-branch --depth "$4" "$2" "$3" && cd "$3" && ` +
+	`git remote set-branches --add origin main && git -c "$H" fetch --depth "$4" origin main`
+
+// sandboxCloneDepth is the history a sandbox clone takes. It must reach back
+// past the commit the polecat branch forked from main, which is at most a few
+// hours of landings behind main's tip (about a hundred commits a day).
+const sandboxCloneDepth = 1000
 
 // redirectScript writes .beads/redirect in the clone. $1 is the worktree and
 // $2 the redirect target.
@@ -465,7 +475,7 @@ func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir
 		return err
 	}
 	if err := spec.Trace.Phase("clone", func() error {
-		if err := b.run(ctx, spec.Session, "sh", "-c", cloneScript, "sh", spec.Branch, spec.RepoURL, workDir); err != nil {
+		if err := b.run(ctx, spec.Session, "sh", "-c", cloneScript, "sh", spec.Branch, spec.RepoURL, workDir, strconv.Itoa(sandboxCloneDepth)); err != nil {
 			return fmt.Errorf("cloning %s: %w", spec.Branch, err)
 		}
 		return nil
