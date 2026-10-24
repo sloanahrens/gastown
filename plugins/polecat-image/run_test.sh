@@ -26,7 +26,8 @@ mkdir -p "$BIN"
 # absent = no image), builds (one line per make run: cwd), sandboxes (what
 # `openshell sandbox list` prints), sling-running, unknown-commit, make-fail,
 # move-after-build (the commit the installed gt becomes after the first build),
-# always-move (every build installs a newer commit).
+# always-move (every build installs a newer commit), steal-lock (the build ends
+# with another run's pid in the plugin's lock).
 cat >"$BIN/gt" <<'STUB'
 #!/usr/bin/env bash
 echo "gt version $(cat "$STUB_STATE/installed") (dev: master@$(cat "$STUB_STATE/installed"))"
@@ -320,6 +321,7 @@ new_case bcachebuilt abc1234 "$(full 1111111)"
 run_it
 if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && [ "$(builders)" = "builder prune --keep-storage 8GB -f|" ] && [ ! -d "$LOCK" ]; then pass "a run that built trims once under its own lock and releases it"; else fail "bcachebuilt: rc=$RC builds=$(builds) builder=[$(builders)] out=$OUT"; fi
 new_case bcachestolen abc1234 "$(full 1111111)"
+# A build long enough for another run to take the lock before it returns.
 touch "$STUB_STATE/steal-lock"
 run_it
 if [ "$RC" = 0 ] && [ -z "$(builders)" ] && grep -q "the lock is another run's now" <<<"$OUT"; then pass "a lock another run took during the build: no trim"; else fail "bcachestolen: rc=$RC builder=[$(builders)] out=$OUT"; fi
@@ -334,7 +336,12 @@ if [ "$RC" = 0 ] && grep -q "build cache not trimmed: Error response from daemon
 new_case bcachebuildfail abc1234 "$(full 1111111)"
 touch "$STUB_STATE/make-fail"
 run_it
-if [ "$RC" != 0 ] && [ -z "$(builders)" ]; then pass "a failed build trims nothing"; else fail "bcachebuildfail: rc=$RC builder=[$(builders)] out=$OUT"; fi
+if [ "$RC" != 0 ] && [ -z "$(builders)" ] && [ ! -d "$LOCK" ]; then pass "a failed build trims nothing and releases the lock"; else fail "bcachebuildfail: rc=$RC builder=[$(builders)] lock=$([ -d "$LOCK" ] && echo held || echo free) out=$OUT"; fi
+# The failure must not cost the next run its trim: that run takes the lock and
+# trims, which is the code the failed run never reached.
+rm -f "$STUB_STATE/make-fail"
+run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 2 ] && [ "$(builders)" = "builder prune --keep-storage 8GB -f|" ]; then pass "the run after a failed build builds and trims"; else fail "bcachebuildfail next: rc=$RC builds=$(builds) builder=[$(builders)] out=$OUT"; fi
 
 echo
 echo "polecat-image: $PASS passed, $FAIL failed"
