@@ -1175,7 +1175,15 @@ func shellInvokerIndex(tokens []string) int {
 // so an argument that merely spells "bash" ("echo bash <<EOF") does not.
 func heredocReaderIsShellInvoker(reader string) bool {
 	for _, segment := range splitShellSegments(shellTokenize(reader)) {
-		word, _ := segmentCommandWord(segment)
+		cmdline := trimShellKeywords(segment)
+		word, args := segmentCommandWord(cmdline)
+		// A launcher or an assignment can carry a construct rather than a
+		// command — `time { bash <<EOF`, `y=$(echo a) { bash <<EOF` — so what
+		// it carried is re-read until the word is a command again (gt-q2jgt).
+		for opensConstruct(word) {
+			cmdline = trimShellKeywords(append([]string{word}, args...))
+			word, args = segmentCommandWord(cmdline)
+		}
 		if word == "" {
 			continue
 		}
