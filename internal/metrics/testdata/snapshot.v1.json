@@ -1,0 +1,1 @@
+{"errors":[{"group":"money","error":"read /town/.runtime/costs/spend.json: no such file or directory"}],"host":{"cpu_idle_pct":41.5},"money":null,"placement":{"dolt":"docker-desktop","overseer":"mac-host"},"queue":{"hooked":2,"in_progress":3,"open":12},"ts":"2026-10-24T13:00:00Z","v":1}
