@@ -61,6 +61,8 @@ type SpawnSpec struct {
 	// (the GT_* identity, the Dolt endpoint, the agent preset's non-secret
 	// vars). The tmux backend ignores it: StartSession sets the same vars.
 	Env map[string]string
+	// Trace times Prepare's phases for the spawn's log line. Nil times nothing.
+	Trace *SandboxTrace
 }
 
 // Prepared is what Prepare hands back to the session start.

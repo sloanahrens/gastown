@@ -88,6 +88,10 @@ type SpawnedPolecatInfo struct {
 	// recorded none. A session start refused for image drift hands it back:
 	// that refusal is the seat's, not a death of the bead (gt-cjmt5).
 	respawnMark polecat.RespawnMark
+
+	// trace times the sandbox phases of this spawn's session start, for the
+	// spec dispatcher's log. Nil for a sling that is not the dispatcher's.
+	trace *session.SandboxTrace
 }
 
 // releaseSeatClaim drops the pool seat this spawn reserved. Idempotent, and a
@@ -147,6 +151,9 @@ type SlingSpawnOptions struct {
 	// occupied is the seat occupancy read the pool decision uses; nil is the
 	// router's full read. The spec dispatcher sets it to its roster snapshot.
 	occupied func() ([]poolSession, error)
+	// trace times the sandbox phases of the session start this spawn leads to.
+	// The spec dispatcher sets it; nil times nothing.
+	trace *session.SandboxTrace
 	// Name is the exact polecat a named sling targets (gt sling <bead>
 	// <rig>/<name>). Set, it is reused or — with Create — created by that
 	// name, or the sling is refused; the pool never substitutes another
@@ -788,6 +795,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// Record the town on the spawn: the session is started later and, on the
 	// daemon's in-process path, from a process whose cwd is not this town.
 	spawnInfo.townRoot = townRoot
+	spawnInfo.trace = opts.trace
 	return spawnInfo, nil
 }
 
@@ -1270,13 +1278,23 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	}
 
 	fmt.Printf("Starting session for %s/%s...\n", s.RigName, s.PolecatName)
+	// Only a sandboxed start has phases to time: a tmux start leaves the trace
+	// empty, so its sling gets no line in the dispatcher's log.
+	sandboxed := backend != nil && backend.Name() != session.BackendTmux
 	startOpts := polecat.SessionStartOptions{
 		RuntimeConfigDir: claudeConfigDir,
 		Agent:            s.agent,
 		Backend:          backend,
 	}
+	if sandboxed {
+		startOpts.Trace = s.trace
+	}
 	if err := polecatSessMgr.Start(s.PolecatName, startOpts); err != nil {
 		return "", fmt.Errorf("starting session: %w", err)
+	}
+	if sandboxed {
+		// The agent's launch is the time after the sandbox was filled.
+		s.trace.Mark("start")
 	}
 
 	// Wait for runtime to be fully ready before returning.
