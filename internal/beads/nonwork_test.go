@@ -1,6 +1,27 @@
 package beads
 
-import "testing"
+import (
+	"slices"
+	"strings"
+	"testing"
+)
+
+// TestReadyCliArgsExcludesEpic keeps the server-side ready query in step with
+// IsNonDispatchableBead: bd is asked to drop epics the same way the client
+// pass does, so gt ready cannot list a container the board's predicate hides
+// (gt-36lax).
+func TestReadyCliArgsExcludesEpic(t *testing.T) {
+	t.Parallel()
+
+	args := readyCliArgs()
+	i := slices.Index(args, "--exclude-type")
+	if i < 0 || i+1 >= len(args) {
+		t.Fatalf("readyCliArgs = %v, has no --exclude-type value", args)
+	}
+	if !slices.Contains(strings.Split(args[i+1], ","), "epic") {
+		t.Errorf("--exclude-type = %q, want epic among the excluded types", args[i+1])
+	}
+}
 
 func TestIsNonDispatchableBead(t *testing.T) {
 	t.Parallel()

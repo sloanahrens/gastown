@@ -2893,12 +2893,14 @@ func (b *Beads) readyDispatchable() ([]*Issue, error) {
 }
 
 // readyCliArgs is the bd invocation that carries the same exclusion:
-// "ready --json" plus the exclude flags.
+// "ready --json" plus the exclude flags. The epic is excluded server-side too,
+// as IsNonDispatchableBead excludes it client-side, so the two cannot disagree.
 func readyCliArgs() []string {
+	types := append([]string{constants.EpicBeadType}, constants.NonDispatchableBeadTypes...)
 	return []string{
 		"ready", "--json",
 		"--exclude-label", strings.Join(constants.NonDispatchableBeadLabels, ","),
-		"--exclude-type", strings.Join(constants.NonDispatchableBeadTypes, ","),
+		"--exclude-type", strings.Join(types, ","),
 	}
 }
 

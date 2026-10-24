@@ -34,9 +34,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
-// EpicType is the bead type of a container of work, never a unit of it.
-const EpicType = constants.EpicBeadType
-
 // Labels and types the lint and the dispatcher key on.
 const (
 	// SpecLabel is retired (gt-mmsr2): the shape lint checks every work bead,
@@ -73,7 +70,7 @@ const (
 // runtime half is constants.NonDispatchableBeadTypes, the same list every
 // other consumer that asks "can a polecat take this?" filters on.
 func NonWorkBeadTypes() []string {
-	return append([]string{EpicType}, constants.NonDispatchableBeadTypes...)
+	return append([]string{constants.EpicBeadType}, constants.NonDispatchableBeadTypes...)
 }
 
 // NotWorkBead names why a bead is not a work bead the lint may check. The
