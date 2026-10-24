@@ -1607,9 +1607,8 @@ func splitSpacedCommand(command, spaced string) []string {
 			return lenientShellSplit(command, true)
 		}
 		// Any other malformed command splits on whitespace over the spaced
-		// text, so the separators spaceOutShellOperators made are tokens of
-		// their own and a later line's command stays in command position
-		// (gt-w9eli).
+		// text, which keeps the separators spaceOutShellOperators made as
+		// tokens of their own (gt-w9eli).
 		return strings.Fields(spaced)
 	}
 	// shlex returning nothing for text that still has words in it means it
