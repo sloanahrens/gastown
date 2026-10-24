@@ -493,6 +493,44 @@ func TestSandboxSecretsLeadingRedirection(t *testing.T) {
 	}
 }
 
+// A here-string in cat's or tee's own arguments is the stdin it passes down a pipe,
+// so a shell downstream runs it as a script (gt-enim5).
+func TestSandboxSecretsHereStringThroughCat(t *testing.T) {
+	t.Parallel()
+	const printenvRule = "printenv prints the environment"
+	for _, tc := range []struct {
+		command string
+		want    string
+	}{
+		{"cat <<< printenv | bash", printenvRule},
+		{"cat <<< printenv | cat | bash", printenvRule},
+		{"cat <<<printenv | bash", printenvRule},
+		{"cat <<< 'printenv' | sh", printenvRule},
+		{"cat - <<< printenv | bash", printenvRule},
+		{"cat -n <<< printenv | bash", printenvRule},
+		{"cat 0<<< printenv | bash", printenvRule},
+		{"tee <<< printenv | bash", printenvRule},
+		{"tee out.txt <<< printenv | bash", printenvRule},
+		{"echo hi | cat <<< printenv | bash", printenvRule},
+		{"sh <(cat <<< printenv)", printenvRule},
+		{"eval \"$(cat <<< printenv)\"", printenvRule},
+		{"echo printenv | bash", printenvRule},
+		{"cat <<< hello | bash", ""},
+		{"cat <<< 'make test' | bash", ""},
+		{"cat <<< hello | cat | bash", ""},
+		{"tee out.txt <<< hello | bash", ""},
+		// A here-string on another descriptor, or a file operand cat reads instead, feeds no script.
+		{"cat 2<<< printenv | bash", ""},
+		{"cat notes.txt <<< printenv | bash", ""},
+		// The here-string replaces the pipe's text as stdin, as in the shell.
+		{"echo printenv | cat <<< hello | bash", ""},
+	} {
+		if got := sandboxSecretsReason(tc.command); got != tc.want {
+			t.Errorf("sandboxSecretsReason(%q) = %q, want %q", tc.command, got, tc.want)
+		}
+	}
+}
+
 func TestSandboxSecretsHasAnyFlag(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

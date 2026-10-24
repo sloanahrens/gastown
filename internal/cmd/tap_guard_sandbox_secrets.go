@@ -1201,9 +1201,32 @@ func sandboxSecretsPipeOutput(argv []string, fed string) string {
 	case "echo", "printf":
 		return sandboxSecretsPrintedText(argv)
 	case "cat", "tee":
+		if text, ok := sandboxSecretsHereStringInput(argv); ok {
+			return text
+		}
 		return fed
 	}
 	return ""
+}
+
+// sandboxSecretsHereStringInput returns the text a here-string in a cat or tee argv
+// feeds as the command's stdin, and false when none does. The here-string replaces
+// what a pipe feeds, so cat <<< printenv | bash runs printenv. A cat that names a file
+// reads the file instead (a lone "-" still reads stdin); tee reads stdin whatever
+// files it writes (gt-enim5).
+func sandboxSecretsHereStringInput(argv []string) (string, bool) {
+	rest, texts := splitHereStrings(argv[1:])
+	if len(texts) == 0 {
+		return "", false
+	}
+	if strings.ToLower(filepath.Base(argv[0])) == "cat" {
+		for _, a := range rest {
+			if a != "-" && !strings.HasPrefix(a, "-") {
+				return "", false
+			}
+		}
+	}
+	return strings.Join(texts, "\n"), true
 }
 
 // sandboxSecretsStdoutText returns the text a command's last stage writes when the
