@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -134,7 +135,20 @@ func ResolveTintFactor(rig string) float64 {
 // A window_tint block with no enabled key is enabled, matching ResolveWindowTint.
 // A rig block decides before the global one, as it does there.
 func IsWindowTintEnabled(rig string) bool {
-	townRoot, _ := workspace.FindFromCwd()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	return isWindowTintEnabledFrom(cwd, rig)
+}
+
+// isWindowTintEnabledFrom is IsWindowTintEnabled from an explicit working
+// directory: the town root is resolved by walking up from cwd, as
+// workspace.FindFromCwd does from the process cwd. The wrapper passes
+// os.Getwd(), so tests drive the same resolution from a fixture town without
+// changing the process cwd.
+func isWindowTintEnabledFrom(cwd, rig string) bool {
+	townRoot, _ := workspace.Find(cwd)
 	return isWindowTintEnabledIn(townRoot, rig)
 }
 
