@@ -1134,6 +1134,7 @@ grep -q "C=\"$(cat "$T/c2")\"" "$BINDIR/gt" 2>/dev/null \
   && pass "INSTALL_DIR: the default bin dir was untouched" || fail "INSTALL_DIR: wrote $(ls -A "$T/home-default/.local/bin" 2>&1)"
 grep -q "make SKIP_UPDATE_CHECK=1 INSTALL_DIR=$BINDIR install-local" "$T/make.log" \
   && pass "INSTALL_DIR: install-local was pointed at it" || fail "INSTALL_DIR: make.log $(cat "$T/make.log" 2>/dev/null)"
+rm -rf "$BINDIR"
 
 # --- Case 40: INSTALL_GT_BIN_DIR, this script's own name, wins when both are
 # set — a caller that pins the script's env is never redirected by an
