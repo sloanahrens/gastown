@@ -50,6 +50,8 @@ type fakeDoneRepo struct {
 	reachable map[string]map[string]bool
 	// pushErrs fail the push attempts in order; nil entries succeed.
 	pushErrs []error
+	// fetchErr fails every fetch the submit path runs before a push.
+	fetchErr error
 	// dropPushed makes origin delete a pushed branch after accepting it, as
 	// a post-receive hook could.
 	dropPushed bool
@@ -114,7 +116,7 @@ func (f *fakeDoneRepo) CleanBaseRef(remote, defaultBranch, target string) string
 	return remote + "/" + target
 }
 
-func (f *fakeDoneRepo) Fetch(string) error { return nil }
+func (f *fakeDoneRepo) Fetch(string) error { return f.fetchErr }
 
 func (f *fakeDoneRepo) Rev(ref string) (string, error) {
 	f.mu.Lock()
