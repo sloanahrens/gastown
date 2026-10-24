@@ -74,6 +74,48 @@ description = "This won't match anything"
 	assert.NotEmpty(t, result.FixHint)
 }
 
+// TestOverlayHealthCheck_InvalidMode: the loader rejects a mode outside
+// replace/append/skip, so doctor must not report that overlay healthy.
+func TestOverlayHealthCheck_InvalidMode(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	setupRigsJSON(t, tmpDir, []string{"testrig"})
+
+	overlayDir := filepath.Join(tmpDir, "formula-overlays")
+	require.NoError(t, os.MkdirAll(overlayDir, 0o755))
+
+	content := "[[step-overrides]]\nstep_id = \"load-context\"" + "\nmode = \"apend\"\ndescription = \"Typo in the mode\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "mol-polecat-work.toml"), []byte(content), 0o644))
+
+	check := overlayCheckWithSteps(polecatWorkSteps)
+	result := check.Run(&CheckContext{TownRoot: tmpDir})
+
+	assert.Equal(t, StatusError, result.Status)
+	require.NotEmpty(t, result.Details)
+	assert.Contains(t, result.Details[0], `invalid mode "apend"`)
+}
+
+// TestOverlayHealthCheck_EmptyStepID: an override with no step_id is invalid
+// for the loader, so doctor reports it instead of counting it healthy.
+func TestOverlayHealthCheck_EmptyStepID(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	setupRigsJSON(t, tmpDir, []string{"testrig"})
+
+	overlayDir := filepath.Join(tmpDir, "formula-overlays")
+	require.NoError(t, os.MkdirAll(overlayDir, 0o755))
+
+	content := "[[step-overrides]]\nmode = \"replace\"\ndescription = \"No step_id\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "mol-polecat-work.toml"), []byte(content), 0o644))
+
+	check := overlayCheckWithSteps(polecatWorkSteps)
+	result := check.Run(&CheckContext{TownRoot: tmpDir})
+
+	assert.Equal(t, StatusError, result.Status)
+	require.NotEmpty(t, result.Details)
+	assert.Contains(t, result.Details[0], "step_id is required")
+}
+
 func TestOverlayHealthCheck_MalformedTOML(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()

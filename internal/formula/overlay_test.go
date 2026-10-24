@@ -100,6 +100,61 @@ description = "No step_id"
 	assert.Contains(t, err.Error(), "step_id is required")
 }
 
+// TestFormulaOverlayValidate pins the one validator: the modes loadOverlayFile
+// accepts, and the messages it returned before Validate was exported.
+func TestFormulaOverlayValidate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		overlay FormulaOverlay
+		wantErr string
+	}{
+		{
+			name: "replace",
+			overlay: FormulaOverlay{StepOverrides: []StepOverride{
+				{StepID: "build", Mode: ModeReplace, Description: "d"},
+			}},
+		},
+		{
+			name: "append",
+			overlay: FormulaOverlay{StepOverrides: []StepOverride{
+				{StepID: "build", Mode: ModeAppend, Description: "d"},
+			}},
+		},
+		{
+			name: "skip",
+			overlay: FormulaOverlay{StepOverrides: []StepOverride{
+				{StepID: "build", Mode: ModeSkip},
+			}},
+		},
+		{
+			name: "typo in mode",
+			overlay: FormulaOverlay{StepOverrides: []StepOverride{
+				{StepID: "build", Mode: OverrideMode("apend"), Description: "d"},
+			}},
+			wantErr: `step-overrides[0] (step_id="build"): invalid mode "apend" (must be replace, append, or skip)`,
+		},
+		{
+			name: "empty step_id",
+			overlay: FormulaOverlay{StepOverrides: []StepOverride{
+				{Mode: ModeReplace, Description: "d"},
+			}},
+			wantErr: "step-overrides[0]: step_id is required",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.overlay.Validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.EqualError(t, err, tc.wantErr)
+		})
+	}
+}
+
 func TestLoadFormulaOverlay_InvalidTOML(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
