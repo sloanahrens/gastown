@@ -269,6 +269,28 @@ else
 fi
 unset rc
 
+# --- 6c. INSTALL_DIR naming the live install is refused too (gt-0mnog) --------
+# Test 3 reaches the refusal through --install-dir; the host-safety prompt and
+# the Makefile use INSTALL_DIR, so the same refusal must hold for it. The default
+# directory is the same live one here, so this pins the refusal, not the lookup;
+# 6b already shows INSTALL_DIR is honored.
+setup
+out="$(run_uninstall "HOME=$HOME_DIR" "GT_TOWN_ROOT=$TOWN_DIR" \
+  "INSTALL_DIR=$HOME_DIR/.local/bin" --)" || rc=$?
+rc="${rc:-0}"
+assert_run "live INSTALL_DIR: refuses with exit 2" 2 "$rc" "$out"
+assert_eq "live INSTALL_DIR: gt survives the refusal" "there" "$(exists "$HOME_DIR/.local/bin/gt" && echo there || echo gone)"
+assert_eq "live INSTALL_DIR: bd survives the refusal" "there" "$(exists "$HOME_DIR/.local/bin/bd" && echo there || echo gone)"
+if [[ "$out" == *"the live install of the town at $TOWN_DIR"* ]]; then
+  echo "  PASS: live INSTALL_DIR: the refusal names the town"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: live INSTALL_DIR: the refusal names the town"
+  echo "$out" | sed 's/^/    | /'
+  FAIL=$((FAIL + 1))
+fi
+unset rc
+
 # --- 7. Uninstalls a binary left OS-immutable (gt-vya0s, gt-2xqtj) ------------
 setup
 if chflags uchg "$SCRATCH_BIN/gt" 2>/dev/null && [[ -n "$(ls -lO "$SCRATCH_BIN/gt" 2>/dev/null | grep -o uchg)" ]]; then
