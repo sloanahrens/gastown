@@ -755,7 +755,12 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State, now time.Time) error {
 	}
 	if err := stampRestartAttempt(d.config.TownRoot, own); err != nil {
 		d.logger.Printf("upgrade-restart: could not stamp attempted_from, not restarting: %v", err)
+		// The pending flag goes with the request. A restart that did not stamp
+		// is not waited on, so spec dispatch and landing passes run until the
+		// next heartbeat decides again; keeping the flag would hold them for as
+		// long as the stamp keeps failing (gt-21cr0).
 		d.upgradeRestartRequested.Store(false)
+		d.upgradeRestartPending.Store(false)
 		return nil
 	}
 	// A drain that is on ends with this restart: name the time it cost before
