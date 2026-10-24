@@ -83,7 +83,7 @@ func (d *Daemon) triggerRebuildOM() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "rebuild_om", time.Time{}, now, rebuildOMInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "rebuild_om", d.rebuildOMRun.last(), now, rebuildOMInterval(d.patrolConfig))
 	if !dec.due {
 		return
 	}
@@ -100,9 +100,7 @@ func (d *Daemon) triggerRebuildOM() {
 		if !d.runRebuildOM() {
 			return
 		}
-		if err := savePatrolLastRun(d.config.TownRoot, "rebuild_om", d.clk().Now()); err != nil {
-			d.logger.Printf("rebuild_om: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordPatrolRun(&d.rebuildOMRun, "rebuild_om", d.clk().Now())
 	}()
 }
 

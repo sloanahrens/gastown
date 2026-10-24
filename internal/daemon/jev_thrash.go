@@ -27,7 +27,7 @@ func (d *Daemon) triggerJevThrash() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "jev_thrash", time.Time{}, now, jevThrashInterval)
+	dec := evaluatePatrolDue(d.config.TownRoot, "jev_thrash", d.jevThrashRun.last(), now, jevThrashInterval)
 	if !dec.due {
 		return
 	}
@@ -40,9 +40,7 @@ func (d *Daemon) triggerJevThrash() {
 	go func() {
 		defer d.jevThrashRunning.Store(false)
 		d.runJevThrash()
-		if err := savePatrolLastRun(d.config.TownRoot, "jev_thrash", d.clk().Now()); err != nil {
-			d.logger.Printf("jev_thrash: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordPatrolRun(&d.jevThrashRun, "jev_thrash", d.clk().Now())
 	}()
 }
 

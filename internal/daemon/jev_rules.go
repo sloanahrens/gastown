@@ -29,7 +29,7 @@ func (d *Daemon) triggerJevRules() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "jev_rules", time.Time{}, now, jevRulesInterval)
+	dec := evaluatePatrolDue(d.config.TownRoot, "jev_rules", d.jevRulesRun.last(), now, jevRulesInterval)
 	if !dec.due {
 		return
 	}
@@ -42,9 +42,7 @@ func (d *Daemon) triggerJevRules() {
 	go func() {
 		defer d.jevRulesRunning.Store(false)
 		d.runJevRules()
-		if err := savePatrolLastRun(d.config.TownRoot, "jev_rules", d.clk().Now()); err != nil {
-			d.logger.Printf("jev_rules: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordPatrolRun(&d.jevRulesRun, "jev_rules", d.clk().Now())
 	}()
 }
 

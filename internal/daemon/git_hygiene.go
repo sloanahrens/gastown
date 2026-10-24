@@ -67,7 +67,7 @@ func (d *Daemon) triggerGitHygiene() {
 	if !d.isPatrolActive("git_hygiene") {
 		return
 	}
-	dec := evaluatePatrolDue(d.config.TownRoot, "git_hygiene", time.Time{}, d.clk().Now(), gitHygieneInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "git_hygiene", d.gitHygieneRun.last(), d.clk().Now(), gitHygieneInterval(d.patrolConfig))
 	if !dec.due {
 		return
 	}
@@ -108,9 +108,7 @@ func (d *Daemon) runGitHygiene() {
 	cycle := d.startDogCycle("git_hygiene")
 	defer cycle.close()
 	defer func() {
-		if err := savePatrolLastRun(d.config.TownRoot, "git_hygiene", d.clk().Now()); err != nil {
-			d.logger.Printf("git_hygiene: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordPatrolRun(&d.gitHygieneRun, "git_hygiene", d.clk().Now())
 	}()
 
 	var repos []string

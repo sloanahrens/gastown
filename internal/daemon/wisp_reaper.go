@@ -142,7 +142,7 @@ func (d *Daemon) triggerWispReaper() {
 		return
 	}
 
-	dec := evaluatePatrolDue(d.config.TownRoot, "wisp_reaper", time.Time{}, time.Now(), wispReaperInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "wisp_reaper", d.wispReaperRun.last(), time.Now(), wispReaperInterval(d.patrolConfig))
 	if !dec.due {
 		d.logger.Printf("wisp_reaper: not due — %s", dec.note)
 		return
@@ -180,10 +180,7 @@ func (d *Daemon) reapWisps() {
 	// Record that a cycle was attempted, regardless of outcome below — the
 	// same "attempted" semantics as the ticker firing before gt-ima2/gt-gxpwc.
 	defer func() {
-		if err := savePatrolLastRun(d.config.TownRoot, "wisp_reaper", time.Now()); err != nil {
-			d.logger.Printf("wisp_reaper: WARNING: cannot persist last-run time (%v) — "+
-				"the next check may re-run sooner than expected", err)
-		}
+		d.recordPatrolRun(&d.wispReaperRun, "wisp_reaper", time.Now())
 	}()
 
 	config := d.patrolConfig.Patrols.WispReaper

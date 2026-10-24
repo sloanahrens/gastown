@@ -731,6 +731,32 @@ type Daemon struct {
 	jevNotesRunning atomic.Bool
 	jevNotesOpen    jevNotesOpener
 
+	// The in-memory last-run times of the patrols below, as jevDedupeRun is
+	// jev_dedupe's: each outranks the persisted record when a save failed, so
+	// an unwritable daemon directory cannot make the patrol due on every
+	// heartbeat (gt-th2am, gt-cekkh).
+	jevAttentionRun   patrolLastRunMemory
+	jevLandingRun     patrolLastRunMemory
+	jevLogtriageRun   patrolLastRunMemory
+	jevReworkRun      patrolLastRunMemory
+	jevConflictRun    patrolLastRunMemory
+	jevNotesRun       patrolLastRunMemory
+	jevRulesRun       patrolLastRunMemory
+	jevDispatchRun    patrolLastRunMemory
+	jevThrashRun      patrolLastRunMemory
+	wispReaperRun     patrolLastRunMemory
+	tierSweepRun      patrolLastRunMemory
+	rebuildOMRun      patrolLastRunMemory
+	jsonlGitBackupRun patrolLastRunMemory
+	overrunGuardRun   patrolLastRunMemory
+	eventsPruneRun    patrolLastRunMemory
+	gitHygieneRun     patrolLastRunMemory
+	checkpointDogRun  patrolLastRunMemory
+	rogueBDRun        patrolLastRunMemory
+	// ghGatesRun holds one *patrolLastRunMemory per database's gh gate check,
+	// keyed by its last-run key (patrol_scan.go).
+	ghGatesRun sync.Map
+
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
 	// predicate, so checkUpgradeRestart holds a restart for it separately, up

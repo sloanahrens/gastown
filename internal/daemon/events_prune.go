@@ -49,7 +49,7 @@ func (d *Daemon) pruneEventsLog() {
 	}
 	interval, opts := eventsPruneSettings(d.patrolConfig)
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "events_prune", time.Time{}, now, interval)
+	dec := evaluatePatrolDue(d.config.TownRoot, "events_prune", d.eventsPruneRun.last(), now, interval)
 	if !dec.due {
 		return
 	}
@@ -67,7 +67,5 @@ func (d *Daemon) pruneEventsLog() {
 	case res.Pruned():
 		d.logger.Printf("events_prune: dropped %d lines, %d -> %d bytes", res.LinesDropped, res.BytesBefore, res.BytesAfter)
 	}
-	if err := savePatrolLastRun(d.config.TownRoot, "events_prune", now); err != nil {
-		d.logger.Printf("events_prune: WARNING: cannot persist last-run time (%v)", err)
-	}
+	d.recordPatrolRun(&d.eventsPruneRun, "events_prune", now)
 }

@@ -49,7 +49,7 @@ func (d *Daemon) triggerCheckpointDog() {
 		return
 	}
 
-	dec := evaluatePatrolDue(d.config.TownRoot, "checkpoint_dog", time.Time{}, time.Now(), checkpointDogInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "checkpoint_dog", d.checkpointDogRun.last(), time.Now(), checkpointDogInterval(d.patrolConfig))
 	if !dec.due {
 		d.logger.Printf("checkpoint_dog: not due — %s", dec.note)
 		return
@@ -86,10 +86,7 @@ func (d *Daemon) runCheckpointDog() {
 	// Record that a cycle was attempted, regardless of outcome below — the
 	// same "attempted" semantics as the ticker firing before gt-ima2/gt-gxpwc.
 	defer func() {
-		if err := savePatrolLastRun(d.config.TownRoot, "checkpoint_dog", time.Now()); err != nil {
-			d.logger.Printf("checkpoint_dog: WARNING: cannot persist last-run time (%v) — "+
-				"the next check may re-run sooner than expected", err)
-		}
+		d.recordPatrolRun(&d.checkpointDogRun, "checkpoint_dog", time.Now())
 	}()
 
 	d.logger.Printf("checkpoint_dog: starting cycle")

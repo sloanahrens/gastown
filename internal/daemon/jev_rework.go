@@ -27,7 +27,7 @@ func (d *Daemon) triggerJevRework() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "jev_rework", time.Time{}, now, jevReworkInterval)
+	dec := evaluatePatrolDue(d.config.TownRoot, "jev_rework", d.jevReworkRun.last(), now, jevReworkInterval)
 	if !dec.due {
 		return
 	}
@@ -40,9 +40,7 @@ func (d *Daemon) triggerJevRework() {
 	go func() {
 		defer d.jevReworkRunning.Store(false)
 		d.runJevRework()
-		if err := savePatrolLastRun(d.config.TownRoot, "jev_rework", d.clk().Now()); err != nil {
-			d.logger.Printf("jev_rework: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordPatrolRun(&d.jevReworkRun, "jev_rework", d.clk().Now())
 	}()
 }
 

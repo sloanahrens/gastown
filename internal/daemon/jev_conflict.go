@@ -27,7 +27,7 @@ func (d *Daemon) triggerJevConflict() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "jev_conflict", time.Time{}, now, jevConflictInterval)
+	dec := evaluatePatrolDue(d.config.TownRoot, "jev_conflict", d.jevConflictRun.last(), now, jevConflictInterval)
 	if !dec.due {
 		return
 	}
@@ -40,9 +40,7 @@ func (d *Daemon) triggerJevConflict() {
 	go func() {
 		defer d.jevConflictRunning.Store(false)
 		d.runJevConflict()
-		if err := savePatrolLastRun(d.config.TownRoot, "jev_conflict", d.clk().Now()); err != nil {
-			d.logger.Printf("jev_conflict: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordPatrolRun(&d.jevConflictRun, "jev_conflict", d.clk().Now())
 	}()
 }
 

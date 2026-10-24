@@ -497,7 +497,7 @@ func (d *Daemon) triggerTierSweep() {
 		d.tierSweepStaleLogged.Store(false)
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "tier_sweep", time.Time{}, now, tierSweepInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "tier_sweep", d.tierSweepRun.last(), now, tierSweepInterval(d.patrolConfig))
 	// Inside the interval, a rig whose last cycle was red may still be due early
 	// (gt-giai1). The state files pick the candidates; the bead store and
 	// origin/main are read on the cycle's goroutine.
@@ -532,9 +532,7 @@ func (d *Daemon) triggerTierSweep() {
 			// retries.
 			return
 		}
-		if err := savePatrolLastRun(d.config.TownRoot, "tier_sweep", d.clk().Now()); err != nil {
-			d.logger.Printf("tier_sweep: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordPatrolRun(&d.tierSweepRun, "tier_sweep", d.clk().Now())
 	}()
 }
 
