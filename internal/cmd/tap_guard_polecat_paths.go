@@ -275,92 +275,110 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 	// not stdin.
 	heredoc := strings.Contains(command, "\n") && heredocStartPattern.MatchString(command)
 
-	var segments [][]string
+	var groups [][][]string
 	for _, segment := range splitShellSegments(shellTokenize(stripped)) {
-		segments = append(segments, segmentReadings(segment)...)
+		readings, ok := segmentReadings(segment)
+		if !ok {
+			return "a command's substitutions have too many readings to check — run the command in a form this guard can read"
+		}
+		groups = append(groups, readings)
 	}
-	for _, segment := range segments {
-		cmdline := trimShellKeywords(segment)
-		word, args := segmentCommandWord(cmdline)
-		// A launcher can carry a construct rather than a command — `time ( rm
-		// -rf X )`, `! { rm -rf X; }` — so what it carried is re-read until the
-		// word is a command again.
-		for opensConstruct(word) {
-			cmdline = trimShellKeywords(append([]string{word}, args...))
-			word, args = segmentCommandWord(cmdline)
-		}
-		if word == "" {
-			continue
-		}
-		base := filepath.Base(word)
-		switch {
-		case isInterpreterCommand(base):
-			if heredoc {
-				return "a script fed to " + base + " on stdin (heredoc) cannot be inspected — write the script inside your worktree and run that file instead"
+	for _, readings := range groups {
+		// The readings are alternatives to one another, so each starts from the
+		// directory its segment starts in, and only the first reading's cd carries
+		// on to the next segment (gt-lhn14). Shadowing the scope inside the loop
+		// makes every reading start from entry: a later reading cannot inherit
+		// where an earlier one walked.
+		entry := s
+		carried := s
+		for i, segment := range readings {
+			s := entry
+			cmdline := trimShellKeywords(segment)
+			word, args := segmentCommandWord(cmdline)
+			// A launcher can carry a construct rather than a command — `time ( rm
+			// -rf X )`, `! { rm -rf X; }` — so what it carried is re-read until the
+			// word is a command again.
+			for opensConstruct(word) {
+				cmdline = trimShellKeywords(append([]string{word}, args...))
+				word, args = segmentCommandWord(cmdline)
 			}
-			// A payload is code, and code writes, so its words are judged
-			// destructively like a write command's (gt-tt8sg).
-			if reason := s.checkBashArgs(args, base, true); reason != "" {
-				return reason
+			if word == "" {
+				continue
 			}
-			// A shell's -c payload is a command line of its own, and a cd inside
-			// it moves the directory its later words resolve from. The words
-			// were judged above from where this shell stands; the payload is
-			// walked again so that cd is followed (gt-g2zd6).
-			if payload, ok := shellPayload(base, args); ok {
-				if reason := s.checkBashCommand(payload, depth+1); reason != "" {
+			base := filepath.Base(word)
+			switch {
+			case isInterpreterCommand(base):
+				if heredoc {
+					return "a script fed to " + base + " on stdin (heredoc) cannot be inspected — write the script inside your worktree and run that file instead"
+				}
+				// A payload is code, and code writes, so its words are judged
+				// destructively like a write command's (gt-tt8sg).
+				if reason := s.checkBashArgs(args, base, true); reason != "" {
 					return reason
 				}
-			}
-		case isWriteCapableCommand(base, args):
-			if reason := s.checkBashArgs(args, base, true); reason != "" {
-				return reason
-			}
-			if base == "ln" {
-				if reason := s.checkSymlinkText(args); reason != "" {
-					return reason
-				}
-			}
-		case base == "cd" || base == "pushd":
-			// cd is not a write, but it decides where every later relative path
-			// lands: a polecat that walks into a sibling worktree (or a
-			// town-level tree such as mayor/) is one careless relative write
-			// away from corrupting them. The destination is judged from every
-			// directory the shell may already be in, and each later word is then
-			// judged from the directory it lands in too (gt-g2zd6).
-			if reason := s.checkBashArgs(args, base, false); reason != "" {
-				return reason
-			}
-			var reason string
-			if s, reason = s.followCd(base, args); reason != "" {
-				return reason
-			}
-		case base == "git":
-			// "git -C <dir>" runs git in another tree — the one way to reach a
-			// sibling worktree without naming a path anywhere else in the line.
-			for _, dir := range gitDashCDirs(args) {
-				if reason := s.checkBashTarget(dir, "git -C", false); reason != "" {
-					return reason
-				}
-			}
-		}
-		// A shell can also be the command a wrapper runs (`timeout 5 bash -c`,
-		// `xargs sh -c`, `find -exec sh -c`, `env -i bash -c`): the command word
-		// is then the wrapper or one of its options, and the shell's payload is
-		// walked here instead. A shell that is the command word itself was
-		// handled above.
-		if !isInterpreterCommand(base) {
-			if shell, shellArgs, ok := wrappedShell(cmdline); ok {
-				if payload, ok := shellPayload(shell, shellArgs); ok {
-					if reason := s.checkBashArgs(shellArgs, shell, true); reason != "" {
-						return reason
-					}
+				// A shell's -c payload is a command line of its own, and a cd inside
+				// it moves the directory its later words resolve from. The words
+				// were judged above from where this shell stands; the payload is
+				// walked again so that cd is followed (gt-g2zd6).
+				if payload, ok := shellPayload(base, args); ok {
 					if reason := s.checkBashCommand(payload, depth+1); reason != "" {
 						return reason
 					}
 				}
+			case isWriteCapableCommand(base, args):
+				if reason := s.checkBashArgs(args, base, true); reason != "" {
+					return reason
+				}
+				if base == "ln" {
+					if reason := s.checkSymlinkText(args); reason != "" {
+						return reason
+					}
+				}
+			case base == "cd" || base == "pushd":
+				// cd is not a write, but it decides where every later relative path
+				// lands: a polecat that walks into a sibling worktree (or a
+				// town-level tree such as mayor/) is one careless relative write
+				// away from corrupting them. The destination is judged from every
+				// directory the shell may already be in, and each later word is then
+				// judged from the directory it lands in too (gt-g2zd6).
+				if reason := s.checkBashArgs(args, base, false); reason != "" {
+					return reason
+				}
+				var reason string
+				if s, reason = s.followCd(base, args); reason != "" {
+					return reason
+				}
+			case base == "git":
+				// "git -C <dir>" runs git in another tree — the one way to reach a
+				// sibling worktree without naming a path anywhere else in the line.
+				for _, dir := range gitDashCDirs(args) {
+					if reason := s.checkBashTarget(dir, "git -C", false); reason != "" {
+						return reason
+					}
+				}
+			}
+			// A shell can also be the command a wrapper runs (`timeout 5 bash -c`,
+			// `xargs sh -c`, `find -exec sh -c`, `env -i bash -c`): the command word
+			// is then the wrapper or one of its options, and the shell's payload is
+			// walked here instead. A shell that is the command word itself was
+			// handled above.
+			if !isInterpreterCommand(base) {
+				if shell, shellArgs, ok := wrappedShell(cmdline); ok {
+					if payload, ok := shellPayload(shell, shellArgs); ok {
+						if reason := s.checkBashArgs(shellArgs, shell, true); reason != "" {
+							return reason
+						}
+						if reason := s.checkBashCommand(payload, depth+1); reason != "" {
+							return reason
+						}
+					}
+				}
+			}
+			if i == 0 {
+				carried = s
 			}
 		}
+		s = carried
 	}
 
 	// Redirections are read off the heredoc-stripped text too: a body is data,
@@ -1893,21 +1911,57 @@ func skipsToCommand(token string) bool {
 	return false
 }
 
+// maxSegmentReadings bounds the readings of one segment. Each leading
+// assignment with a substitution adds readings and they multiply, so a line
+// with many of them is refused rather than walked (gt-lhn14).
+const maxSegmentReadings = 64
+
 // segmentReadings returns each command line a segment may run. shlex drops the
 // quotes that tell a live "$(" from a literal one, so an assignment whose
 // substitution never closes is read two ways: live, where the text after its
 // "$(" runs first (what segmentCommandWord returns), and literal, where the
 // assignment is a plain value and the words after it run next. Both are judged,
-// so a quoted "$(" cannot hide the command the shell actually runs.
-func segmentReadings(segment []string) [][]string {
-	readings := [][]string{segment}
+// so a quoted "$(" cannot hide the command the shell actually runs. The same
+// loss hides a stray ")" in a quoted token, so each ")" that could be the real
+// close is read as well (see envAssignmentCloses). ok is false when the
+// readings outnumber maxSegmentReadings; the caller refuses the command instead
+// of walking part of them.
+func segmentReadings(segment []string) (readings [][]string, ok bool) {
+	return segmentReadingsWithin(segment, maxSegmentReadings)
+}
+
+// segmentReadingsWithin is segmentReadings with a budget: it returns at most
+// budget readings and refuses a variant that would not fit in what is left,
+// so a segment with more readings than the cap is refused as soon as it
+// overflows instead of after the recursion has built them (gt-lhn14).
+func segmentReadingsWithin(segment []string, budget int) (readings [][]string, ok bool) {
+	if budget < 1 {
+		return nil, false
+	}
+	readings = [][]string{segment}
+	budget--
+	// add appends the readings of one variant of the segment, and reports
+	// whether they still fit within the remaining budget.
+	add := func(variant []string) bool {
+		more, ok := segmentReadingsWithin(variant, budget)
+		if !ok {
+			return false
+		}
+		readings = append(readings, more...)
+		budget -= len(more)
+		return true
+	}
 	for i := 0; i < len(segment); i++ {
 		token := segment[i]
 		if isEnvAssignment(token) {
 			width, opened := envAssignmentWidth(segment[i:])
+			for _, close := range envAssignmentCloses(segment[i:]) {
+				if !add(withoutTokens(segment, i, i+close)) {
+					return nil, false
+				}
+			}
 			if opened != "" {
-				literal := append(append([]string{}, segment[:i]...), segment[i+1:]...)
-				return append(readings, segmentReadings(literal)...)
+				return readings, add(withoutTokens(segment, i, i+1))
 			}
 			i += width - 1
 			continue
@@ -1916,7 +1970,36 @@ func segmentReadings(segment []string) [][]string {
 			break
 		}
 	}
-	return readings
+	return readings, true
+}
+
+// withoutTokens returns a copy of segment with the tokens [from, to) removed.
+func withoutTokens(segment []string, from, to int) []string {
+	return append(append([]string{}, segment[:from]...), segment[to:]...)
+}
+
+// envAssignmentCloses returns the widths, other than the one envAssignmentWidth
+// gives, at which the assignment at the head of segment may end. shlex drops
+// the quotes around a ")" inside a token, so a quoted ")" closes the
+// substitution early and the real close is a later ")" token: each ")" after
+// the first close is a candidate (gt-lhn14). When the substitution never
+// closes, every ")" token is one. An assignment with no substitution has none.
+func envAssignmentCloses(segment []string) []int {
+	if !strings.Contains(segment[0], "$(") {
+		return nil
+	}
+	width, opened := envAssignmentWidth(segment)
+	from := 0
+	if opened == "" {
+		from = width - 1
+	}
+	var closes []int
+	for j := from; j < len(segment); j++ {
+		if strings.Contains(segment[j], ")") && j+1 != width {
+			closes = append(closes, j+1)
+		}
+	}
+	return closes
 }
 
 // envAssignmentWidth returns how many leading tokens of segment make up the

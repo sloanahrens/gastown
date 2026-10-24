@@ -761,6 +761,13 @@ func TestPolecatPathGuardBashGroupingConstructs(t *testing.T) {
 		{"case body echoing", `case x in a) echo hi ;; esac`, false},
 		{"subshell writing to /tmp", `( echo hi > $TMPDIR/x )`, false},
 		{"subshell writing to the worktree", `( cp a.go ` + filepath.Join(p.worktree, "b.go") + ` )`, false},
+		// A stray ")" in a quoted token closes the assignment's substitution
+		// early; the real ")" then reads as the command word, and the rm behind
+		// it must still be judged (gt-lhn14).
+		{"stray paren in a quoted token, rm behind it", `y=$(echo ")" ) rm -rf ` + sib, true},
+		{"stray paren in a quoted token, cp behind it", `y=$(echo ")" ) cp a.go ` + sib, true},
+		{"stray paren in a quoted token, harmless command behind it", `y=$(echo ")" ) ls ` + sib, false},
+		{"stray paren in a quoted token, echo behind it", `y=$(echo ")" ) echo hi`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -772,6 +779,55 @@ func TestPolecatPathGuardBashGroupingConstructs(t *testing.T) {
 				t.Errorf("command %q: expected allow, got block: %v", tc.command, err)
 			}
 		})
+	}
+}
+
+// TestPolecatPathGuardReadingsStartFromEntry: the readings of a segment are
+// alternatives, so a cd in one must not move where the next resolves from.
+// The ")" reading here is `cd sub`; the payload reading after it still stands
+// where the segment starts, where a `cd -` has no directory this line made,
+// so that payload is refused (gt-lhn14).
+func TestPolecatPathGuardReadingsStartFromEntry(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	for _, tc := range []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{"payload with cd - after a reading that cd'd", `X=$(echo ")" ) cd sub ) bash -c "cd -; echo hi"`, true},
+		{"payload echoing after a reading that cd'd", `X=$(echo ")" ) cd sub ) bash -c "echo hi"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := p.run(t, "Bash", commandInput(tc.command))
+			if tc.wantBlock && err == nil {
+				t.Errorf("command %q: expected BLOCK, got allow", tc.command)
+			}
+			if !tc.wantBlock && err != nil {
+				t.Errorf("command %q: expected allow, got block: %v", tc.command, err)
+			}
+		})
+	}
+}
+
+// TestPolecatPathGuardRefusesTooManyReadings drives the reading cap through
+// the guard: past the cap the whole segment is refused, even when no reading
+// writes anything (gt-lhn14).
+func TestPolecatPathGuardRefusesTooManyReadings(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	var parts []string
+	for i := 0; i < 6; i++ {
+		parts = append(parts, fmt.Sprintf("V%d=$(echo", i), `")"`, ")")
+	}
+	command := strings.Join(append(parts, "echo", "hi"), " ")
+	var stderr strings.Builder
+	payload := fmt.Sprintf(`{"tool_name":%q,"cwd":%q,"tool_input":%s}`, "Bash", p.worktree, commandInput(command))
+	if err := tapGuardPolecatPaths(strings.NewReader(payload), &stderr, p.proc()); err == nil {
+		t.Fatalf("command %q allowed: its readings outnumber the guard's cap", command)
+	}
+	if !strings.Contains(stderr.String(), "too many readings") {
+		t.Errorf("command %q: stderr %q, want the too-many-readings refusal", command, stderr.String())
 	}
 }
 
@@ -1156,7 +1212,9 @@ func TestQuotedDollarParenHidesNoCommand(t *testing.T) {
 
 // TestSegmentReadings: an assignment that opens a substitution it never closes
 // is read both ways, the substitution's text first and the literal reading
-// (the assignment dropped) after it. Segments without one are unchanged.
+// (the assignment dropped) after it. A stray ")" in a quoted token closes the
+// substitution early, so the reading that drops the assignment through the
+// real close is read too (gt-lhn14). Segments without one are unchanged.
 func TestSegmentReadings(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -1168,11 +1226,48 @@ func TestSegmentReadings(t *testing.T) {
 		{"closed substitution", []string{"y=$(echo)", "bash"}, [][]string{{"y=$(echo)", "bash"}}},
 		{"unclosed substitution", []string{"X=$(echo", "bash"}, [][]string{{"X=$(echo", "bash"}, {"bash"}}},
 		{"unclosed substitution after a plain assignment", []string{"A=1", "X=$(echo", "rm"}, [][]string{{"A=1", "X=$(echo", "rm"}, {"A=1", "rm"}}},
+		{"stray paren closes early", []string{"y=$(echo", `")"`, ")", "rm"}, [][]string{{"y=$(echo", `")"`, ")", "rm"}, {"rm"}}},
+		{"stray paren in an unclosed substitution", []string{"X=$(echo", `"$("`, ")", "rm"}, [][]string{{"X=$(echo", `"$("`, ")", "rm"}, {"rm"}, {`"$("`, ")", "rm"}}},
 	} {
-		got := segmentReadings(tt.segment)
-		if fmt.Sprint(got) != fmt.Sprint(tt.want) {
-			t.Errorf("%s: segmentReadings(%q) = %q, want %q", tt.name, tt.segment, got, tt.want)
+		got, ok := segmentReadings(tt.segment)
+		if !ok || fmt.Sprint(got) != fmt.Sprint(tt.want) {
+			t.Errorf("%s: segmentReadings(%q) = %q (ok %v), want %q", tt.name, tt.segment, got, ok, tt.want)
 		}
+	}
+}
+
+// TestEnvAssignmentCloses pins the ")" tokens an assignment's substitution may
+// close at, other than the close envAssignmentWidth reads (gt-lhn14).
+func TestEnvAssignmentCloses(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		segment []string
+		want    []int
+	}{
+		{"plain assignment", []string{"FOO=1", "printf", "a)"}, nil},
+		{"closed substitution", []string{"y=$(echo", "a)", "bash"}, nil},
+		{"stray paren closes early", []string{"y=$(echo", `")"`, ")", "rm"}, []int{3}},
+		{"never closes, paren later", []string{"y=$(echo", `"$("`, ")", "rm"}, []int{3}},
+	} {
+		if got := envAssignmentCloses(tt.segment); !slices.Equal(got, tt.want) {
+			t.Errorf("%s: envAssignmentCloses(%q) = %v, want %v", tt.name, tt.segment, got, tt.want)
+		}
+	}
+}
+
+// TestSegmentReadingsRefusesTooMany: each leading assignment with a stray
+// paren adds readings and they multiply, so a segment with enough of them is
+// refused rather than walked part way (gt-lhn14).
+func TestSegmentReadingsRefusesTooMany(t *testing.T) {
+	t.Parallel()
+	var segment []string
+	for i := 0; i < 8; i++ {
+		segment = append(segment, fmt.Sprintf("V%d=$(echo", i), `")"`, ")")
+	}
+	segment = append(segment, "rm", "-rf", "x")
+	if _, ok := segmentReadings(segment); ok {
+		t.Errorf("segmentReadings of %d stray-paren assignments: ok, want the segment refused", 8)
 	}
 }
 
