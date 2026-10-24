@@ -423,11 +423,8 @@ func followupBody(w Work, res Result, g followupGroup) string {
 }
 
 // followupRevertNote is the paragraph every generated bead carries in its
-// Constraints. A finding that asks to remove a line an earlier landing added
-// makes gt done's revert check refuse the fix, and the polecat was left to find
-// that out; five hit it. The text never names the check's override: the
-// refusal omits it on purpose because agents read it and bypass the check, and
-// no label or keyword is read from a finding (gt-j0puq).
+// Constraints. It names no override, because agents read it and bypass the
+// revert check it describes (gt-j0puq).
 const followupRevertNote = "If the fix removes or rewrites a line an earlier landing added, gt done's revert " +
 	"check will refuse it. Do not work around the refusal: say so in a comment on this bead, naming each file " +
 	"the fix deletes (or a directory of at least two path components, with a trailing slash), and ask the " +

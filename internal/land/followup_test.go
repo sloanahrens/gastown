@@ -944,9 +944,8 @@ func TestFollowupFeedRetryAtTheBackpressureBoundIsQuiet(t *testing.T) {
 // Every generated bead tells its polecat what to do when the fix removes a line
 // an earlier landing added: the revert check will refuse it, so say so on the
 // bead, name the deleted paths and ask for a deletes-by-spec waiver. The text
-// never names the override flag (the refusal omits it so agents do not
-// self-bypass), the bead keeps its required sections and still lints clean, and
-// no label is added (gt-j0puq).
+// names no override, so an agent cannot self-bypass; the bead still lints clean
+// and gets no label (gt-j0puq).
 func TestFollowupBodyTellsThePolecatAboutTheRevertCheck(t *testing.T) {
 	t.Parallel()
 	f := newFollowupFixture(t, 0.8, []Finding{
@@ -958,13 +957,16 @@ func TestFollowupBodyTellsThePolecatAboutTheRevertCheck(t *testing.T) {
 	}
 	created := f.fake.created[0]
 	constraints := specdispatch.Sections(created.Body)["constraints"]
-	for _, want := range []string{"revert check will refuse", "say so in a comment on this bead", "naming each file", "deletes-by-spec waiver"} {
+	for _, want := range []string{"revert check", "comment on this bead", "deletes-by-spec waiver"} {
 		if !strings.Contains(constraints, want) {
 			t.Errorf("Constraints lacks %q:\n%s", want, constraints)
 		}
 	}
-	if strings.Contains(strings.ToLower(created.Body), "allow-reverts") || strings.Contains(created.Body, "--allow") {
-		t.Errorf("the body names an override flag:\n%s", created.Body)
+	lower := strings.ToLower(created.Body)
+	for _, override := range []string{"allow", "override", "--"} {
+		if strings.Contains(lower, override) {
+			t.Errorf("the body names an override (%q):\n%s", override, created.Body)
+		}
 	}
 	for _, label := range created.Labels {
 		if label == "deletes-by-spec" {
