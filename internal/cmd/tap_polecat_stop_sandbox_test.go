@@ -19,6 +19,7 @@ func stopEnv(m map[string]string) func(string) string { return func(k string) st
 // recorded.
 type sandboxStopRun struct {
 	ended     bool
+	reads     int
 	scheduled []string
 	delay     time.Duration
 	logged    string
@@ -28,7 +29,7 @@ func runSandboxStop(backend string, fields *beads.AgentFields, readErr error) sa
 	var r sandboxStopRun
 	var logged bytes.Buffer
 	e := sandboxSessionEnd{
-		fields: func(_, _, _ string) (*beads.AgentFields, error) { return fields, readErr },
+		fields: func(_, _, _ string) (*beads.AgentFields, error) { r.reads++; return fields, readErr },
 		schedule: func(s string, d time.Duration) error {
 			r.scheduled = append(r.scheduled, s)
 			r.delay = d
@@ -87,6 +88,15 @@ func TestEndSandboxSessionIfDone(t *testing.T) {
 				r := runSandboxStop(backend, st.fields, st.readErr)
 				if r.ended != want {
 					t.Fatalf("endSandboxSessionIfDone = %v, want %v (log %q)", r.ended, want, r.logged)
+				}
+				// A host session is not a sandbox: it returns before the agent bead
+				// is read, which is what keeps the every-Stop call free.
+				wantReads := 0
+				if backend == session.BackendOpenShell {
+					wantReads = 1
+				}
+				if r.reads != wantReads {
+					t.Errorf("agent bead read %d time(s), want %d", r.reads, wantReads)
 				}
 				switch {
 				case want:
@@ -179,6 +189,57 @@ func TestPolecatStopFinishedEndsASandboxSessionWhateverTheHeartbeatSays(t *testi
 			got := polecatStopFinished(tc.hb, func() bool { calls++; return tc.ends })
 			if got != tc.want || calls != tc.wantEnd {
 				t.Errorf("polecatStopFinished = %v after %d end attempts, want %v after %d", got, calls, tc.want, tc.wantEnd)
+			}
+		})
+	}
+}
+
+// The Stop hook runs its sandbox end on every Stop invocation. A host session
+// reaches the heartbeat without reading the agent bead. A sandbox whose kill
+// cannot be scheduled is not reported ended, so the heartbeat decides, as it
+// does for a host session.
+func TestPolecatStopFinishedSandboxEnd(t *testing.T) {
+	t.Parallel()
+	clean := &beads.AgentFields{AgentState: "done", CleanupStatus: "clean", ExitType: "COMPLETED"}
+	working := &polecat.SessionHeartbeat{State: polecat.HeartbeatWorking}
+	exiting := &polecat.SessionHeartbeat{State: polecat.HeartbeatExiting}
+	cases := []struct {
+		name        string
+		backend     string
+		scheduleErr error
+		hb          *polecat.SessionHeartbeat
+		want        bool
+		wantReads   int
+		wantScheds  int
+	}{
+		{"host_working_heartbeat", "", nil, working, false, 0, 0},
+		{"host_exiting_heartbeat", "", nil, exiting, true, 0, 0},
+		{"sandbox_ends_whatever_the_heartbeat_says", session.BackendOpenShell, nil, working, true, 1, 1},
+		{"sandbox_schedule_failure_with_working_heartbeat", session.BackendOpenShell, errors.New("fork failed"), working, false, 1, 1},
+		{"sandbox_schedule_failure_falls_back_to_the_heartbeat", session.BackendOpenShell, errors.New("fork failed"), exiting, true, 1, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logged bytes.Buffer
+			reads, scheds := 0, 0
+			e := sandboxSessionEnd{
+				fields: func(_, _, _ string) (*beads.AgentFields, error) {
+					reads++
+					return clean, nil
+				},
+				schedule: func(string, time.Duration) error {
+					scheds++
+					return tc.scheduleErr
+				},
+				log: &logged,
+			}
+			end := polecatStopSandboxEnd(e, stopEnv(map[string]string{"GT_SESSION_BACKEND": tc.backend}), "/town", "gastown", "capable", "gt-capable")
+			if got := polecatStopFinished(tc.hb, end); got != tc.want {
+				t.Errorf("polecatStopFinished = %v, want %v (log %q)", got, tc.want, logged.String())
+			}
+			if reads != tc.wantReads || scheds != tc.wantScheds {
+				t.Errorf("agent bead reads = %d and schedule attempts = %d, want %d and %d", reads, scheds, tc.wantReads, tc.wantScheds)
 			}
 		})
 	}
