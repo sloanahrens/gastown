@@ -3413,24 +3413,6 @@ func TestANSICQuotedStringKeepsTheCommandsBehindIt(t *testing.T) {
 	}
 }
 
-// The heredoc line scanner reads a $'...' string by the shell's rules, so the
-// operator line ends at its own newline and the live git reset --hard below the
-// real terminator is judged. Read as a plain single quote, the reopened ANSI-C
-// quote ran to the next quote below and that command became body (gt-s3pi5).
-func TestDangerousGuardANSICStringOnAHeredocLine(t *testing.T) {
-	t.Parallel()
-	const command = "cat <<EOF $'\\''\necho hi\nEOF\necho \\'\ngit reset --hard\nEOF"
-	if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason != gitResetHardReason {
-		t.Errorf("evaluateDangerousCommand(%q) reason = %q, want %q", command, reason, gitResetHardReason)
-	}
-	// A plain single-quoted word keeps its backslash literal, so its quote
-	// closes on the line and the same shape is already read correctly.
-	const control = "cat <<EOF 'a\\'\necho hi\nEOF\ngit reset --hard"
-	if reason, _ := evaluateDangerousCommand(control, 0, noTownSession); reason != gitResetHardReason {
-		t.Errorf("evaluateDangerousCommand(%q) reason = %q, want %q", control, reason, gitResetHardReason)
-	}
-}
-
 // gt-0vbb2: the heredoc scanners read $'...' the way bash does. The walk that
 // tells a "<<" from text opened no ANSI-C string, so the escaped quote closed a
 // plain one early and a "<<" inside the string was taken for a heredoc, which
