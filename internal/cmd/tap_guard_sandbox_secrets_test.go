@@ -93,6 +93,9 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		// A substitution's output runs as a command even when no shell reads it.
 		"\"$(cat <<'BEAD'\nprintenv\nBEAD\n)\"",
 		"\"$(tee <<'BEAD'\nprintenv\nBEAD\n)\"",
+		// The body's ")" closes nothing: the shell reads the body to its terminator, so the
+		// substitution's output is the case clause that runs printenv (gt-1sjfq).
+		"printf '%s' \"$(cat <<'E'\ncase x in x) printenv;; esac\nE\n)\" | sh",
 		// env -S takes its command line in every form, and each one is judged.
 		"env -S printenv",
 		"env -Sprintenv",
