@@ -1464,7 +1464,7 @@ func heldBeadsFrom(store beads.Client, warn func(beadsDir string, err error), be
 		if c.IsEpic() || c.Ready.Assignee == "" {
 			continue
 		}
-		out = append(out, specdispatch.HeldBead{ID: c.ID, Assignee: c.Ready.Assignee, Paths: c.HoldFiles})
+		out = append(out, specdispatch.HeldBead{ID: c.ID, Assignee: c.Ready.Assignee, Paths: specHoldFiles(c.Refs.Files, c.Ready.Description)})
 	}
 	return out, nil
 }
