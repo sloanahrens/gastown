@@ -179,8 +179,9 @@ var envAssignmentWords = map[string]bool{
 // to anything but the polecat's own identity, as a leading NAME=value word
 // (`BD_ACTOR=x bd ...`, a bare `BD_ACTOR=x`) or behind export, declare, env and
 // the like. An empty value counts as another identity: bd then falls back to
-// the git user. Only the assignment words at the front of the segment are read,
-// so comment text that mentions BD_ACTOR=x is left alone.
+// the git user, and so does a variable the segment unsets or removes with env
+// -u, or an env -i that launches bd or gt, so those count too. Only the assignment words at the front of the segment
+// are read, so comment text that mentions BD_ACTOR=x is left alone.
 func assignsOtherActor(segment, ownIdentities []string) bool {
 	tokens := segment
 	for len(tokens) > 0 {
@@ -188,8 +189,15 @@ func assignsOtherActor(segment, ownIdentities []string) bool {
 		switch {
 		case bdCloseLeadWords[tok] || envAssignmentWords[tok]:
 			tokens = tokens[1:]
+		case tok == "unset":
+			// unset launches nothing, so no word after its names is read.
+			return unsetsActor(tokens[1:])
 		case filepath.Base(tok) == "env":
-			tokens = bdCloseSkipEnvFlags(tokens[1:])
+			rest, eff := readEnvFlags(tokens[1:])
+			if eff.unsetsActor || (eff.clearsAll && launchesWithoutActor(rest, ownIdentities)) {
+				return true
+			}
+			tokens = rest
 		case strings.HasPrefix(tok, "-") && tok != "--":
 			// declare -x, export -n: flags of the assignment word.
 			tokens = tokens[1:]
@@ -204,6 +212,110 @@ func assignsOtherActor(segment, ownIdentities []string) bool {
 		}
 	}
 	return false
+}
+
+// unsetsActor reports whether the names given to unset include an actor
+// variable. Its flags (-v, -f, -n) name no variable and are skipped.
+func unsetsActor(args []string) bool {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") && slices.Contains(bdActorEnvVars, arg) {
+			return true
+		}
+	}
+	return false
+}
+
+// envEffect is what env's own flags do to the environment of the command it
+// launches: remove all of it (-i, -, --ignore-environment) or remove an actor
+// variable by name (-u NAME). bd then runs with no actor set and falls back to
+// the git user.
+type envEffect struct{ clearsAll, unsetsActor bool }
+
+// envShortValueFlags and envLongValueFlags are env's flags that take a value:
+// bdCloseEnvValueFlags plus GNU env's -a and --argv0.
+const envShortValueFlags = "uCSPa"
+
+var envLongValueFlags = map[string]bool{
+	"--unset": true, "--chdir": true, "--split-string": true, "--argv0": true,
+}
+
+// readEnvFlags reads env's flags off the front of args, the part of the command
+// line after the word env, and returns what is left (the NAME=value words and
+// the command) with the effect of the flags. A value is read in every form env
+// takes it: -u NAME, -uNAME, --unset NAME and --unset=NAME, and in a cluster
+// such as -iu NAME. -S STRING is a command line of its own, so its words are
+// read in place, as env does.
+func readEnvFlags(args []string) ([]string, envEffect) {
+	var eff envEffect
+	for len(args) > 0 {
+		arg := args[0]
+		args = args[1:]
+		switch {
+		case arg == "--":
+			return args, eff
+		case arg == "-":
+			eff.clearsAll = true
+		case strings.HasPrefix(arg, "--"):
+			name, value, attached := strings.Cut(arg, "=")
+			if name == "--ignore-environment" {
+				eff.clearsAll = true
+			}
+			if !envLongValueFlags[name] {
+				continue
+			}
+			if !attached && len(args) > 0 {
+				value, args = args[0], args[1:]
+			}
+			args = eff.applyValue(name == "--unset", name == "--split-string", value, args)
+		case strings.HasPrefix(arg, "-"):
+			for i := 1; i < len(arg); i++ {
+				if arg[i] == 'i' {
+					eff.clearsAll = true
+				}
+				if !strings.ContainsRune(envShortValueFlags, rune(arg[i])) {
+					continue
+				}
+				value := arg[i+1:]
+				if value == "" && len(args) > 0 {
+					value, args = args[0], args[1:]
+				}
+				args = eff.applyValue(arg[i] == 'u', arg[i] == 'S', value, args)
+				break
+			}
+		default:
+			return append([]string{arg}, args...), eff
+		}
+	}
+	return args, eff
+}
+
+// applyValue records the value of a value-taking env flag: the variable an
+// unset names, or the command line a split-string carries, which is put back in
+// front of args to be read as the flags and words it is.
+func (e *envEffect) applyValue(isUnset, isSplit bool, value string, args []string) []string {
+	switch {
+	case isUnset && slices.Contains(bdActorEnvVars, value):
+		e.unsetsActor = true
+	case isSplit:
+		return append(strings.Fields(value), args...)
+	}
+	return args
+}
+
+// launchesWithoutActor reports whether an env that cleared the environment
+// launches bd or gt, which then find no actor and fall back to the git user,
+// unless a NAME=value word before the command sets the polecat's own identity.
+// rest is the words env was given after its flags.
+func launchesWithoutActor(rest, ownIdentities []string) bool {
+	for len(rest) > 0 && isEnvAssignment(rest[0]) {
+		name, value, _ := strings.Cut(rest[0], "=")
+		if slices.Contains(bdActorEnvVars, name) && isOwnIdentity(value, ownIdentities) {
+			return false
+		}
+		rest = rest[1:]
+	}
+	words := polecatCommandWords(rest)
+	return len(words) > 0 && (isBdCommandWord(words[0]) || filepath.Base(words[0]) == "gt")
 }
 
 // isOwnIdentity reports whether value is one of the polecat's own identities.
@@ -442,19 +554,83 @@ func noteFlagRule(value string) polecatRule {
 }
 
 // expansionMayOpenAcceptedRisk reports whether the text of a token, once the
-// shell has expanded its $VAR, ${VAR}, $(...) and backtick expansions, could
-// begin with the ACCEPTED-RISK: marker. The literal text before the first
-// expansion decides it: an expansion can supply anything, so only literal text
-// that cannot grow into the marker rules the token out. Quoting is gone by the
-// time a token is read, so a single-quoted $ is refused too; that is the safe
-// side of the same test.
+// shell has expanded its $VAR, ${VAR}, $(...) and backtick expansions, or its
+// brace expansions ({a,b} and {a..b}), could begin with the ACCEPTED-RISK:
+// marker. The literal text before the first expansion decides it: an expansion
+// can supply anything, so only literal text that cannot grow into the marker
+// rules the token out. Quoting is gone by the time a token is read, so a
+// single-quoted $ or brace is refused too; that is the safe side of the same
+// test. A brace group yields each of its alternatives, so the token is judged
+// by each alternative's text in turn.
 func expansionMayOpenAcceptedRisk(tok string) bool {
 	at := strings.IndexAny(tok, "$`")
-	if at < 0 {
+	if open, alts, ok := firstBraceExpansion(tok); ok && (at < 0 || open < at) {
+		for _, alt := range alts {
+			// An alternative may carry the whole marker, which is no prefix of it.
+			if lit := tok[:open] + alt; markerCompatible(lit) || opensAcceptedRisk(lit) {
+				return true
+			}
+		}
 		return false
 	}
-	lead := strings.ToLower(strings.TrimLeft(tok[:at], " \t\r\n"))
+	return at >= 0 && markerCompatible(tok[:at])
+}
+
+// markerCompatible reports whether literal text, read up to its first
+// expansion, could grow into the marker. Text that is not a prefix of the
+// marker can never open one.
+func markerCompatible(lit string) bool {
+	if i := strings.IndexAny(lit, "$`{"); i >= 0 {
+		lit = lit[:i]
+	}
+	lead := strings.ToLower(strings.TrimLeft(lit, " \t\r\n"))
 	return strings.HasPrefix(acceptedRiskMarker, lead)
+}
+
+// firstBraceExpansion finds the first brace group in tok that the shell
+// expands: a {...} with a top-level comma or a {x..y} range. It returns the
+// index of the group's opening brace and the group's alternatives, the
+// comma-separated pieces. A range has no alternatives to list, so it returns
+// the empty one, and the caller tests the text before it. Braces that enclose
+// nothing the shell expands, such as {x} or a JSON object without a range, are
+// left alone.
+func firstBraceExpansion(tok string) (int, []string, bool) {
+	for open := 0; open < len(tok); open++ {
+		if tok[open] != '{' {
+			continue
+		}
+		depth, last := 0, open+1
+		var alts []string
+		isList, isRange := false, false
+		for j := open; j < len(tok); j++ {
+			switch tok[j] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					if isList {
+						return open, append(alts, tok[last:j]), true
+					}
+					if isRange {
+						return open, []string{""}, true
+					}
+					j = len(tok)
+				}
+			case ',':
+				if depth == 1 {
+					isList = true
+					alts = append(alts, tok[last:j])
+					last = j + 1
+				}
+			case '.':
+				if depth == 1 && j+1 < len(tok) && tok[j+1] == '.' {
+					isRange = true
+				}
+			}
+		}
+	}
+	return 0, nil, false
 }
 
 // opensAcceptedRisk reports whether text begins with the ACCEPTED-RISK: marker
