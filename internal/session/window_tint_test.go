@@ -124,3 +124,35 @@ func TestIsWindowTintEnabled_UnreadableConfigFallsThrough(t *testing.T) {
 		})
 	}
 }
+
+// TestIsWindowTintEnabledFrom_ResolvesTownRootFromCwd: the seam IsWindowTintEnabled
+// fills with os.Getwd walks up from its working directory to the town root, so a
+// rig config above that directory decides the answer. This is the town-root
+// resolution the wrapper performs, driven from a nested directory with no chdir.
+func TestIsWindowTintEnabledFrom_ResolvesTownRootFromCwd(t *testing.T) {
+	t.Parallel()
+	townRoot := writeWindowTintTown(t,
+		`{"theme":{"window_tint":{"name":"ocean"}}}`, "")
+	nested := filepath.Join(townRoot, "testrig", "polecats", "goose")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", nested, err)
+	}
+
+	if !isWindowTintEnabledFrom(nested, "testrig") {
+		t.Error("isWindowTintEnabledFrom = false from inside an enabled town, want true")
+	}
+}
+
+// TestIsWindowTintEnabledFrom_ConfigWithoutTownMarkerStaysOff: the walk resolves
+// the rig config only because a town marker sits above it. Without one the
+// resolution yields no town root, so the config is not read and the seam stays off.
+func TestIsWindowTintEnabledFrom_ConfigWithoutTownMarkerStaysOff(t *testing.T) {
+	t.Parallel()
+	outside := t.TempDir()
+	writeWindowTintFile(t, filepath.Join(outside, "testrig", "settings", "config.json"),
+		`{"theme":{"window_tint":{"name":"ocean"}}}`)
+
+	if isWindowTintEnabledFrom(filepath.Join(outside, "testrig"), "testrig") {
+		t.Error("isWindowTintEnabledFrom = true with no town marker above the config, want false")
+	}
+}
