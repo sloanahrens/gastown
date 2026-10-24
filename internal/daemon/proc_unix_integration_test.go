@@ -3,8 +3,10 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"os/exec"
+	"syscall"
 	"testing"
 )
 
@@ -34,6 +36,12 @@ func TestIntegrationIsProcessAlive_OtherUIDIsAlive(t *testing.T) {
 	p, err := os.FindProcess(1)
 	if err != nil {
 		t.Fatalf("finding pid 1: %v", err)
+	}
+	// The case only proves something if the probe really hits EPERM. Any
+	// other errno means the environment differs, so fail loudly instead of
+	// passing on a branch this test never reached.
+	if err := p.Signal(syscall.Signal(0)); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("signal 0 to pid 1 = %v, want EPERM", err)
 	}
 	if !isProcessAlive(p) {
 		t.Error("isProcessAlive(pid 1 under another uid) = false, want true")
