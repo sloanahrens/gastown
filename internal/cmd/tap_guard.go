@@ -330,6 +330,9 @@ func skipLauncherArgsChdir(name string, launcher prWorkflowLauncher, rest []stri
 	for n := 0; n < launcher.positionals; n++ {
 		next()
 	}
+	// A redirection after the last operand is shell setup, not the command, so
+	// it is stepped over here. Callers then never have to skip it themselves.
+	skipRedirections()
 	return rest[i:], payload, chdirs
 }
 

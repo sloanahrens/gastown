@@ -457,9 +457,6 @@ func TestPolecatPathsGuard_LauncherRedirectionBeforeArgs(t *testing.T) {
 		{"timeout redirection between flag and operand", "timeout -s KILL 2>/dev/null 5 " + rm, true},
 		{"gtimeout redirection ahead of the operand", "gtimeout 2>/dev/null 5 " + rm, true},
 		{"env -C value behind a redirection", "env -C 2>/dev/null " + p.sibling + " rm -rf internal.go", true},
-		{"nice redirection after its flags", "nice -n 5 2>/dev/null " + rm, true},
-		{"env redirection ahead of the command", "env 2>/dev/null " + rm, true},
-		{"redirection ahead of timeout", "2>/dev/null timeout 5 " + rm, true},
 		{"own file, timeout redirection ahead of the operand", "timeout 2>/dev/null 5 " + own, false},
 		{"own file, nice redirection ahead of its flag", "nice 2>/dev/null -n 5 " + own, false},
 	} {
@@ -471,6 +468,30 @@ func TestPolecatPathsGuard_LauncherRedirectionBeforeArgs(t *testing.T) {
 			}
 			if !tt.wantBlock && err != nil {
 				t.Errorf("%q blocked on an own file: %v", tt.command, err)
+			}
+		})
+	}
+}
+
+// TestPolecatPathsGuard_RedirectionAheadOfLauncher guards the redirection walk
+// ahead of a launcher. gt-76fx6 did not change these cases, so a change to the
+// walk must still block each rm.
+func TestPolecatPathsGuard_RedirectionAheadOfLauncher(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	rm := "rm -rf " + filepath.Join(p.sibling, "internal.go")
+	for _, tt := range []struct {
+		name    string
+		command string
+	}{
+		{"nice redirection after its flags", "nice -n 5 2>/dev/null " + rm},
+		{"env redirection ahead of the command", "env 2>/dev/null " + rm},
+		{"redirection ahead of timeout", "2>/dev/null timeout 5 " + rm},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := p.run(t, "Bash", commandInput(tt.command)); err == nil {
+				t.Errorf("%q was allowed, want a block", tt.command)
 			}
 		})
 	}
@@ -1539,6 +1560,8 @@ func TestSegmentCommandWord(t *testing.T) {
 		{"sudo with a value flag before the command", []string{"sudo", "-u", "alice", "bash"}, "bash"},
 		{"timeout with a duration before the command", []string{"timeout", "5", "rm", "-rf", "x"}, "rm"},
 		{"timeout with a value flag and a duration", []string{"timeout", "-s", "KILL", "5", "rm"}, "rm"},
+		{"timeout with a redirection after the duration", []string{"timeout", "5", "2>/dev/null", "rm"}, "rm"},
+		{"timeout with a spaced redirection after the duration", []string{"timeout", "5", "2>", "/dev/null", "rm"}, "rm"},
 		// timeout reads its options only ahead of the duration, so a flag after
 		// it is the command word, as coreutils' getopt reads it.
 		{"timeout with a flag after the duration", []string{"timeout", "5", "-s", "KILL", "rm"}, "-s"},
