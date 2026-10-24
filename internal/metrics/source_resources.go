@@ -63,8 +63,8 @@ func (resourcesSource) Collect(_ context.Context, env Env) (map[string]any, erro
 	}
 	found := false
 	for _, day := range []time.Time{now.AddDate(0, 0, -1), now} {
-		data, present, err := readResourcesDay(env, dir, day.Format("2006-01-02"))
-		if !present {
+		data, err := readResourcesDay(env, dir, day.Format("2006-01-02"))
+		if errors.Is(err, errResourcesDayMissing) {
 			continue
 		}
 		found = true
@@ -80,27 +80,30 @@ func (resourcesSource) Collect(_ context.Context, env Env) (map[string]any, erro
 	return roll.columns(), nil
 }
 
+// errResourcesDayMissing is returned for a day with neither its plain file nor
+// its .gz sibling: the sampler wrote nothing that day, which is not a failure.
+var errResourcesDayMissing = errors.New("no resource sampler file for the day")
+
 // readResourcesDay returns one day's rows: the plain file, or its .gz sibling
-// when the plain file is missing. present is false when neither exists; err is
-// set when a file exists but its rows cannot be read.
-func readResourcesDay(env Env, dir, date string) (data []byte, present bool, err error) {
+// when the plain file is missing. It returns errResourcesDayMissing when neither
+// exists, and another error when a file exists but its rows cannot be read.
+func readResourcesDay(env Env, dir, date string) ([]byte, error) {
 	plain := filepath.Join(dir, date+".jsonl")
-	data, err = env.ReadFile(plain)
+	data, err := env.ReadFile(plain)
 	if err == nil {
-		return data, true, nil
+		return data, nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
-		return nil, true, err
+		return nil, err
 	}
 	data, err = env.ReadFile(plain + ".gz")
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, false, nil
+		return nil, errResourcesDayMissing
 	}
 	if err != nil {
-		return nil, true, err
+		return nil, err
 	}
-	data, err = gunzip(data)
-	return data, true, err
+	return gunzip(data)
 }
 
 // resourceStat is one measure's running mean and max. A stat with no value
