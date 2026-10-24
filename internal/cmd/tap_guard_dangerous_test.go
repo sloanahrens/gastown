@@ -1767,6 +1767,9 @@ func TestShellFedHeredocBodyIsInspected(t *testing.T) {
 		{"sh with a strip-tabs delimiter", "sh <<-'EOF'\n\tsudo rm -rf /\n\tEOF"},
 		{"shell invoked with -s", "bash -s <<EOF\ngit push --force origin main\nEOF"},
 		{"body piped into a shell", "cat <<'EOF' | bash\ngit clean -fd\nEOF"},
+		// The pipe stage is continued onto its own line, so the operator line's
+		// newline comes after it and the body starts below that.
+		{"top-level body piped through a continued line", "cat <<'EOF' \\\n| bash\nsudo rm -rf /tmp\nEOF"},
 		{"invoker split across a line continuation", "bash \\\n  <<'EOF'\ngit reset --hard\nEOF"},
 		// bash -c runs its argument, but the body is still bash's stdin: the
 		// "$(cat)" here expands to the body, which is then what runs.
@@ -1802,6 +1805,8 @@ func TestHeredocBodyStaysOpaqueWithoutAShellReader(t *testing.T) {
 		{"interpreter that is not a shell", "python3 - <<'EOF'\nsudo rm -rf /\nEOF"},
 		{"shell name as an argument", "echo bash <<'EOF'\ngit reset --hard\nEOF"},
 		{"non-shell reader inside an unquoted substitution", "x=$(cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n)"},
+		// The continued line is a redirect, not a shell, so the body stays data.
+		{"non-shell reader continued onto a second line", "cat <<'EOF' \\\n> note.txt\nsudo rm -rf /tmp\nEOF"},
 		{"heredoc after a closed substitution is not in its command text", "x=$(echo bash)\ncat <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
 		// The "$(echo a)" closes its frame at the ")" that returns to zero, so
 		// the bash on the next line is not command text of the heredoc's line.
