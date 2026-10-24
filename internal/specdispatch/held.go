@@ -83,11 +83,13 @@ func HeldOverlap(paths []string, held []HeldBead) string {
 }
 
 // HoldFiles is the set of paths the overlap hold reads from a bead's text: the
-// paths it names, minus the reference documents it only reads. A bead cites
-// the standards and research it must follow (every test bead cites the
+// paths it names, minus the documents it only reads. A bead cites the
+// standards and research it must follow (every test bead cites the
 // test-engineering standard) without changing them, so two such beads do not
-// hold each other. A reference document the bead's Constraints section lists
-// is a file the bead changes, so it stays (gt-6t44f).
+// hold each other. A reference document under docs/ that the bead's Constraints
+// section lists is a file the bead changes, so it stays; a path in the town's
+// claude/docs standards tree never stays, listed or not, because that tree
+// lives in ~/.claude and no polecat edits it (gt-6t44f, gt-kr17g).
 //
 // named is the bead's paths; listed is the paths its Constraints section names.
 func HoldFiles(named, listed []string) []string {
@@ -97,7 +99,7 @@ func HoldFiles(named, listed []string) []string {
 	}
 	out := make([]string, 0, len(named))
 	for _, p := range named {
-		if IsReferenceDoc(p) && !constrained[p] {
+		if isStandardDoc(p) || (IsReferenceDoc(p) && !constrained[p]) {
 			continue
 		}
 		out = append(out, p)
@@ -106,13 +108,19 @@ func HoldFiles(named, listed []string) []string {
 }
 
 // IsReferenceDoc reports whether a normalized path names a read-only reference
-// document: the repo's docs/ tree, or the claude/docs standards tree in any
-// spelling it arrives in ("claude/docs/...", "~/.claude/docs/...", an absolute
-// path into it). The standards tree is matched at a directory boundary, so a
-// source file that merely embeds "claude/docs/" in its name stays a hold path
-// (gt-6t44f, gt-014o6).
+// document: the repo's docs/ tree, or the town's claude/docs standards tree
+// (isStandardDoc) (gt-6t44f).
 func IsReferenceDoc(path string) bool {
-	return strings.HasPrefix(path, "docs/") ||
-		strings.HasPrefix(path, "claude/docs/") ||
+	return strings.HasPrefix(path, "docs/") || isStandardDoc(path)
+}
+
+// isStandardDoc reports whether a normalized path names a document in the
+// town's claude/docs standards tree in any spelling it arrives in
+// ("claude/docs/...", "~/.claude/docs/...", an absolute path into it). The
+// tree is matched at a directory boundary, so a source file that merely embeds
+// "claude/docs/" in its name does not match (gt-014o6, gt-kr17g).
+func isStandardDoc(path string) bool {
+	return strings.HasPrefix(path, "claude/docs/") ||
+		strings.Contains(path, "/claude/docs/") ||
 		strings.Contains(path, "/.claude/docs/")
 }
