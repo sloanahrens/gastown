@@ -2,10 +2,8 @@ package cmd
 
 import (
 	"fmt"
-	"os/exec"
 	"runtime"
 	"runtime/debug"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -46,7 +44,7 @@ and the git revision the binary was built from (if available).`,
 		}
 
 		commit := resolveCommitHash()
-		branch := resolveBranch()
+		branch := resolveBranch(Branch)
 
 		if commit != "" && branch != "" {
 			fmt.Printf("gt version %s (%s: %s@%s)\n", Version, Build, branch, version.ShortCommit(commit))
@@ -90,28 +88,28 @@ func resolveCommitHash() string {
 	return ""
 }
 
-func resolveBranch() string {
-	if Branch != "" {
-		return Branch
+func resolveBranch(stamped string) string {
+	if stamped != "" {
+		return stamped
 	}
 
 	// Try to get branch from build info (build-time VCS detection)
 	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, setting := range info.Settings {
-			if setting.Key == "vcs.branch" && setting.Value != "" {
-				return setting.Value
-			}
-		}
+		return branchFromBuildSettings(info.Settings)
 	}
 
-	// Fallback: try to get branch from git at runtime
-	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
-	cmd.Dir = "."
-	if output, err := cmd.Output(); err == nil {
-		if branch := strings.TrimSpace(string(output)); branch != "" && branch != "HEAD" {
-			return branch
+	// No cwd fallback: git run here reads the checkout the caller stands in,
+	// which need not be the one this binary was built from (gt-t2fom).
+	return ""
+}
+
+// branchFromBuildSettings returns the vcs.branch recorded in the build
+// settings, or "" when there is none.
+func branchFromBuildSettings(settings []debug.BuildSetting) string {
+	for _, setting := range settings {
+		if setting.Key == "vcs.branch" && setting.Value != "" {
+			return setting.Value
 		}
 	}
-
 	return ""
 }
