@@ -1788,6 +1788,10 @@ func TestShellFedHeredocBodyIsInspected(t *testing.T) {
 		// An assignment whose value holds a substitution runs that substitution
 		// first, and the shell that follows it still reads the body.
 		{"shell-fed body behind an assignment with a substitution", "y=$(echo a) bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
+		// A brace group puts a second opener between the launcher or assignment
+		// and the shell, so the command word lies behind both of them.
+		{"shell-fed body behind a brace group after a launcher", "time { bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n}"},
+		{"shell-fed body behind a brace group after an assignment with a substitution", "y=$(echo a) { bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n}"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1812,6 +1816,8 @@ func TestHeredocBodyStaysOpaqueWithoutAShellReader(t *testing.T) {
 		{"non-shell reader inside an unquoted substitution", "x=$(cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n)"},
 		{"non-shell reader behind a subshell paren", "(cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n)"},
 		{"non-shell reader behind an assignment with a substitution", "y=$(echo a) cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n"},
+		{"non-shell reader behind a brace group after a launcher", "time { cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n}"},
+		{"non-shell reader behind a brace group after an assignment with a substitution", "y=$(echo a) { cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n}"},
 		// The continued line is a redirect, not a shell, so the body stays data.
 		{"non-shell reader continued onto a second line", "cat <<'EOF' \\\n> note.txt\nsudo rm -rf /tmp\nEOF"},
 		{"heredoc after a closed substitution is not in its command text", "x=$(echo bash)\ncat <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
