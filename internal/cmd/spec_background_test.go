@@ -3,10 +3,12 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -213,6 +215,72 @@ func TestParseSpecInFlight(t *testing.T) {
 	}
 	if _, err := parseSpecInFlight("not json"); err == nil {
 		t.Fatal("a value that is not JSON must be an error, not an empty set")
+	}
+}
+
+func TestParseSpecSlingJob(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		wantErr string // empty: the job parses
+	}{
+		{"complete", `{"bead":"gt-a","rig":"gastown","agent":"claude-sonnet"}`, ""},
+		{"not json", `not json`, "--job is not a sling job: invalid character"},
+		{"empty", ``, "--job is not a sling job: unexpected end of JSON input"},
+		{"no bead", `{"rig":"gastown","agent":"claude-sonnet"}`, "--job is not a sling job: no bead"},
+		{"no rig or agent", `{"bead":"gt-a"}`, "--job is not a sling job: no rig, agent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			job, err := parseSpecSlingJob(tc.raw)
+			if tc.wantErr == "" {
+				if err != nil || job.Bead != "gt-a" || job.Rig != "gastown" || job.Agent != "claude-sonnet" {
+					t.Fatalf("parsed = %+v, %v, want the job", job, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want one containing %q", err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), "nil") {
+				t.Errorf("err = %q, must not print a nil error", err)
+			}
+		})
+	}
+}
+
+// The operator hold stops a sling the tick planned before the hold was set.
+func TestSpecSlingHoldStopsAPlannedSling(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if held := specSlingHold(town); held != nil {
+		t.Fatalf("hold = %+v in a town with no hold file, want none", held)
+	}
+	if err := os.WriteFile(dispatch.HoldFilePath(town), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	held := specSlingHold(town)
+	if held == nil || !strings.Contains(held.Hold, "operator dispatch hold present") {
+		t.Fatalf("hold = %+v, want the operator hold named", held)
+	}
+}
+
+// A running sling adds one to its agent's live count whether or not the roster
+// shows its session yet: the seat may be counted twice until the sling returns,
+// which holds back a sling and never adds one.
+func TestSpecLiveWithInFlight(t *testing.T) {
+	t.Parallel()
+	live := map[string]int{"claude-sonnet": 1}
+	got := specLiveWithInFlight(live, []specInFlight{{Bead: "gt-a", Agent: "claude-sonnet"}, {Bead: "gt-b", Agent: "deepseek-flash"}})
+	if got["claude-sonnet"] != 2 || got["deepseek-flash"] != 1 {
+		t.Errorf("live = %v, want claude-sonnet 2 and deepseek-flash 1", got)
+	}
+	if live["claude-sonnet"] != 1 || len(live) != 1 {
+		t.Errorf("the roster's own map = %v, want it left alone", live)
+	}
+	if got := specLiveWithInFlight(nil, nil); got != nil {
+		t.Errorf("nothing in flight = %v, want the roster's map as it is", got)
 	}
 }
 

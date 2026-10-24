@@ -9,6 +9,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // Background slings (gt-5h70s).
@@ -101,16 +103,18 @@ func specSlingBound() time.Duration { return specDispatchTimeout }
 
 // specTickArgs are the flags every tick runs with: the slings are handed back
 // rather than run, and the running ones are named so the tick leaves their
-// beads and seats alone.
-func (d *Daemon) specTickArgs() []string {
+// beads and seats alone. A set that cannot be written down is an error: a tick
+// run without it would sling a running bead again, so the caller skips the tick.
+func (d *Daemon) specTickArgs() ([]string, error) {
 	args := []string{"--background-slings"}
 	if flights := d.specSlings.list(); len(flights) > 0 {
 		raw, err := json.Marshal(flights)
-		if err == nil {
-			args = append(args, "--in-flight", string(raw))
+		if err != nil {
+			return nil, fmt.Errorf("writing the in-flight slings: %w", err)
 		}
+		args = append(args, "--in-flight", string(raw))
 	}
-	return args
+	return args, nil
 }
 
 // startSpecSlings runs each job a tick handed back in the background. It
@@ -143,9 +147,11 @@ func (d *Daemon) startSpecSlings(jobs []json.RawMessage) {
 	}
 }
 
-// runSpecSling runs one sling job and logs how it ended. A failed sling is
-// labeled and annotated by `gt spec sling` itself, as a failed foreground
-// sling is (spec.go specApplyOutcome); the daemon only reports it.
+// runSpecSling runs one sling job and logs how it ended. A sling that fails
+// inside `gt spec sling` is labeled and annotated by it, as a failed foreground
+// sling is (spec.go specApplyOutcome). A sling whose process is killed at its
+// bound or exits with no report never reached those writes, so the daemon makes
+// them (failSpecSling).
 func (d *Daemon) runSpecSling(f specSlingFlight) {
 	ctx, cancel := context.WithTimeout(d.ctx, specSlingBound())
 	defer cancel()
@@ -156,12 +162,35 @@ func (d *Daemon) runSpecSling(f specSlingFlight) {
 	out, stderr, err := d.runCmd(cmd)
 	elapsed := d.clk().Now().Sub(start).Round(time.Second)
 	if err != nil {
-		msg := lastLine(string(stderr))
-		d.logger.Printf("spec_dispatch: %s: sling failed after %s of its %s bound: %v %s (its report is lost; the next tick reads the bead as it stands)", f.Bead, elapsed, specSlingBound(), err, msg)
+		reason := fmt.Sprintf("sling process failed after %s of its %s bound: %v %s", elapsed, specSlingBound(), err, lastLine(string(stderr)))
+		d.logger.Printf("spec_dispatch: %s: %s", f.Bead, reason)
+		d.failSpecSling(f, reason)
 		return
 	}
 	for _, line := range d.formatSpecSlingReport(out) {
 		d.logger.Printf("spec_dispatch: %s (sling took %s)", line, elapsed)
+	}
+}
+
+// failSpecSling labels and annotates the bead of a sling whose process died
+// without reporting, as a failed foreground sling does: the label holds the
+// bead out of the queue until an operator clears it. A daemon that is shutting
+// down cut the sling itself, so the bead stays ready for the next daemon.
+func (d *Daemon) failSpecSling(f specSlingFlight, reason string) {
+	if d.ctx.Err() != nil {
+		return
+	}
+	note := "spec-dispatch: " + reason + "; excluded from the queue until label " + constants.LabelSpecDispatchFailed + " is cleared"
+	for _, args := range [][]string{
+		{"bead", "update", f.Bead, "--add-label", constants.LabelSpecDispatchFailed},
+		{"bead", "note", f.Bead, note},
+	} {
+		cmd := exec.CommandContext(d.ctx, d.gtPath, args...) //nolint:gosec // G204: gtPath resolved at daemon init
+		cmd.Dir = d.config.TownRoot
+		cmd.Env = daemonGTEnv(os.Environ())
+		if _, stderr, err := d.runCmd(cmd); err != nil {
+			d.logger.Printf("spec_dispatch: %s: gt %s failed: %v %s", f.Bead, args[1], err, lastLine(string(stderr)))
+		}
 	}
 }
 

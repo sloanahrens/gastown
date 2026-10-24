@@ -290,8 +290,14 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 	if !d.isPatrolActive("spec_dispatch") || d.config == nil {
 		return
 	}
+	tickArgs, err := d.specTickArgs()
+	if err != nil {
+		d.logger.Printf("spec_dispatch: tick not run: %v; a tick that does not know the running slings would sling their beads again", err)
+		d.dispatchIdle.Reset()
+		return
+	}
 	start := d.clk().Now()
-	out, err := d.runSpecDispatchCommand(bound, d.specTickArgs()...)
+	out, err := d.runSpecDispatchCommand(bound, tickArgs...)
 	if err != nil {
 		elapsed := d.clk().Now().Sub(start).Round(time.Second)
 		d.logger.Printf("spec_dispatch: tick failed after %s of its %s bound: %v", elapsed, bound, err)

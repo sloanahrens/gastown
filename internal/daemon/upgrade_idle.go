@@ -59,6 +59,10 @@ func (d *Daemon) daemonWorkIdle() bool {
 type daemonWork struct {
 	name string
 	hard bool
+	// ownBound marks soft work upgradeHold bounds in a case of its own, by its
+	// own clock. daemonWorkHold names other soft work ahead of it, so the
+	// housekeeping cap is never read off the wrong hold.
+	ownBound bool
 }
 
 // daemonWorkHold reports the piece of daemon work that holds the daemon: the
@@ -71,6 +75,14 @@ func (d *Daemon) daemonWorkHold() *daemonWork {
 	holds := d.daemonWorkHolds()
 	for _, hold := range holds {
 		if hold.hard {
+			return hold
+		}
+	}
+	// Work with its own bound is named last: while it is the hold, the
+	// housekeeping cap has nothing to read, so other soft work in flight with
+	// it must be the hold instead (gt-5h70s).
+	for _, hold := range holds {
+		if !hold.ownBound {
 			return hold
 		}
 	}
@@ -141,7 +153,7 @@ func (d *Daemon) daemonWorkHolds() []*daemonWork {
 	// cuts one leaves its seat hooked with no session, as a cut tick did
 	// (gt-cbaoy).
 	if _, slinging := d.specSlings.oldest(); slinging {
-		holds = append(holds, &daemonWork{name: specSlingHoldLabel})
+		holds = append(holds, &daemonWork{name: specSlingHoldLabel, ownBound: true})
 	}
 	if d.patrolScanRunning.Load() {
 		holds = append(holds, &daemonWork{name: "a patrol scan"})

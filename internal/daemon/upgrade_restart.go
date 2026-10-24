@@ -575,7 +575,7 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 		return &daemonWork{name: specDispatchHoldLabel}
 	case slinging && slingWaited < specSlingBound():
 		return &daemonWork{name: specSlingHoldLabel}
-	case hold != nil && hold.name != specSlingHoldLabel && waited < housekeepingRestartCap:
+	case hold != nil && !hold.ownBound && waited < housekeepingRestartCap:
 		// The slings have their own case above: past their bound the housekeeping
 		// cap does not hold them longer.
 		return hold
@@ -603,7 +603,7 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 	if slinging && slingWaited >= specSlingBound() {
 		d.logger.Printf("upgrade-restart: %s is still in flight after its %s bound; restarting anyway (the bead is read again by the new daemon's first tick)", specSlingHoldLabel, specSlingBound())
 	}
-	if hold != nil && hold.name != specDispatchHoldLabel && hold.name != specSlingHoldLabel {
+	if hold != nil && hold.name != specDispatchHoldLabel && !hold.ownBound {
 		d.logger.Printf("upgrade-restart: %s is still in flight after %s; restarting anyway (it reruns from the new daemon)", hold.name, housekeepingRestartCap)
 	}
 	d.upgradeWaitLogged = ""

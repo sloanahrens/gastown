@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"log"
 	"slices"
 	"strings"
@@ -23,13 +24,55 @@ func plannedTick(jobs ...string) string {
 	return `{"candidates": 2, "pending": [` + strings.Join(jobs, ",") + `]}`
 }
 
+// slingWait bounds every wait of these tests on a sling: a sling that never
+// starts or never returns fails the one test that waits, not the gate. Nothing
+// is timed against it; the tests move the fake clock themselves.
+const slingWait = 30 * time.Second
+
+// slingClock is the daemon's clock in these tests: a fake that a sling moves by
+// slingTook while it runs, as a real sling takes time.
+const slingTook = 90 * time.Second
+
+func newSlingClock() *clockwork.FakeClock {
+	return clockwork.NewFakeClockAt(time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC))
+}
+
+// recvSling waits, bounded, for the next sling a blockedSlings announces.
+func recvSling(t *testing.T, started <-chan string) string {
+	t.Helper()
+	select {
+	case job := <-started:
+		return job
+	case <-time.After(slingWait):
+		t.Fatalf("no sling started within %s", slingWait)
+		return ""
+	}
+}
+
+// waitSlings waits, bounded, for the daemon's slings to return.
+func waitSlings(t *testing.T, d *Daemon) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		d.specDispatchCycles.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(slingWait):
+		t.Fatalf("slings still in flight after %s: %+v", slingWait, d.specSlings.list())
+	}
+}
+
 // blockedSlings answers a daemon's gt calls: every tick with the next report in
 // ticks, every `gt spec sling` once release is closed, announcing each sling on
-// started first. A test thereby holds a sling in flight without a timer.
+// started first. A test thereby holds a sling in flight without a timer. The
+// clock moves by slingTook inside each sling.
 type blockedSlings struct {
 	ticks   []string
 	release chan struct{}
 	started chan string
+	clock   *clockwork.FakeClock
 	tick    int
 }
 
@@ -37,6 +80,7 @@ func (b *blockedSlings) answer(args []string) cliReply {
 	if len(args) >= 2 && args[0] == "spec" && args[1] == "sling" {
 		b.started <- args[len(args)-1]
 		<-b.release
+		b.clock.Advance(slingTook)
 		return cliReply{stdout: string(wireOut(`{"dispatched":[{"bead":"gt-a","line":"gt-a: slung to gastown/p on claude-sonnet"}]}`))}
 	}
 	report := b.ticks[min(b.tick, len(b.ticks)-1)]
@@ -44,20 +88,30 @@ func (b *blockedSlings) answer(args []string) cliReply {
 	return cliReply{stdout: string(wireOut(report))}
 }
 
-func TestNextTickStartsWhileAnEarlierSlingIsStillRunning(t *testing.T) {
-	t.Parallel()
+// newBlockedSlings is a blockedSlings and the daemon that runs against it, on
+// the fake clock.
+func newBlockedSlings(t *testing.T, ticks ...string) (*blockedSlings, *fakeCLI, *Daemon, func() []string) {
+	t.Helper()
 	b := &blockedSlings{
-		ticks:   []string{plannedTick(slingJob("gt-a", "claude-sonnet")), plannedTick(slingJob("gt-b", "deepseek-flash"))},
+		ticks:   ticks,
 		release: make(chan struct{}),
 		started: make(chan string, 4),
+		clock:   newSlingClock(),
 	}
 	fake := newFakeCLI(b.answer)
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
-	d.clock = clockwork.NewFakeClockAt(time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC))
+	d.clock = b.clock
+	return b, fake, d, lines
+}
+
+func TestNextTickStartsWhileAnEarlierSlingIsStillRunning(t *testing.T) {
+	t.Parallel()
+	b, fake, d, lines := newBlockedSlings(t,
+		plannedTick(slingJob("gt-a", "claude-sonnet")), plannedTick(slingJob("gt-b", "deepseek-flash")))
 
 	d.runSpecDispatch()
-	if got := <-b.started; !strings.Contains(got, `"bead":"gt-a"`) {
+	if got := recvSling(t, b.started); !strings.Contains(got, `"bead":"gt-a"`) {
 		t.Fatalf("first sling job = %s, want gt-a's job as the tick printed it", got)
 	}
 	// gt-a's sling is blocked. The tick returned without it, and the next tick
@@ -66,7 +120,7 @@ func TestNextTickStartsWhileAnEarlierSlingIsStillRunning(t *testing.T) {
 		t.Fatalf("in flight = %+v, want gt-a", running)
 	}
 	d.runSpecDispatch()
-	if got := <-b.started; !strings.Contains(got, `"bead":"gt-b"`) {
+	if got := recvSling(t, b.started); !strings.Contains(got, `"bead":"gt-b"`) {
 		t.Fatalf("second sling job = %s, want gt-b's: the next tick must sling the other candidate", got)
 	}
 
@@ -84,7 +138,7 @@ func TestNextTickStartsWhileAnEarlierSlingIsStillRunning(t *testing.T) {
 	}
 
 	close(b.release)
-	d.specDispatchCycles.Wait()
+	waitSlings(t, d)
 	if running := d.specSlings.list(); len(running) != 0 {
 		t.Fatalf("in flight after the slings returned = %+v, want none", running)
 	}
@@ -97,19 +151,12 @@ func TestNextTickStartsWhileAnEarlierSlingIsStillRunning(t *testing.T) {
 
 func TestARunningBeadIsNeverSlungTwice(t *testing.T) {
 	t.Parallel()
-	b := &blockedSlings{
-		// Both ticks hand back gt-a: the second tick's board was read before the
-		// first sling hooked it.
-		ticks:   []string{plannedTick(slingJob("gt-a", "claude-sonnet"))},
-		release: make(chan struct{}),
-		started: make(chan string, 4),
-	}
-	fake := newFakeCLI(b.answer)
-	logger, lines := lineLogger()
-	d := specDispatchFake(t, fake, logger)
+	// Both ticks hand back gt-a: the second tick's board was read before the
+	// first sling hooked it.
+	b, fake, d, lines := newBlockedSlings(t, plannedTick(slingJob("gt-a", "claude-sonnet")))
 
 	d.runSpecDispatch()
-	<-b.started
+	recvSling(t, b.started)
 	d.runSpecDispatch()
 
 	if got := fake.argvs("spec", "sling"); len(got) != 1 {
@@ -119,7 +166,7 @@ func TestARunningBeadIsNeverSlungTwice(t *testing.T) {
 		t.Errorf("duplicate lines = %d, want the refused second sling logged once: %v", n, lines())
 	}
 	close(b.release)
-	d.specDispatchCycles.Wait()
+	waitSlings(t, d)
 }
 
 func TestAFailedBackgroundSlingIsLoggedLikeAForegroundFailure(t *testing.T) {
@@ -132,15 +179,126 @@ func TestAFailedBackgroundSlingIsLoggedLikeAForegroundFailure(t *testing.T) {
 	})
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
+	d.clock = newSlingClock()
 
 	d.runSpecDispatch()
-	d.specDispatchCycles.Wait()
+	waitSlings(t, d)
 
 	if n := countContaining(lines(), "spec_dispatch: failed: gt-z", "dispatch failed, left unassigned: boom"); n != 1 {
 		t.Errorf("failed lines = %d, want one naming the bead and the reason: %v", n, lines())
 	}
 	if running := d.specSlings.list(); len(running) != 0 {
 		t.Errorf("in flight = %+v, want a finished sling out of the set", running)
+	}
+	// `gt spec sling` labeled the bead itself; the daemon writes nothing more.
+	if got := fake.argvs("bead"); len(got) != 0 {
+		t.Errorf("daemon bead writes = %v, want none for a sling that reported its failure", got)
+	}
+}
+
+// A sling whose process is killed at its bound or dies with no report never
+// reached its own label and note, so the daemon labels the bead as a failed
+// foreground sling would be.
+func TestADeadBackgroundSlingProcessLabelsItsBead(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func(args []string) cliReply {
+		if args[1] == "sling" {
+			return cliReply{stderr: "signal: killed", code: 1}
+		}
+		if args[0] == "bead" {
+			return cliReply{}
+		}
+		return cliReply{stdout: string(wireOut(plannedTick(slingJob("gt-z", "claude-sonnet"))))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	d.clock = newSlingClock()
+
+	d.runSpecDispatch()
+	waitSlings(t, d)
+
+	if got := fake.argvs("bead", "update"); len(got) != 1 || !slices.Equal(got[0], []string{"bead", "update", "gt-z", "--add-label", "spec-dispatch-failed"}) {
+		t.Errorf("label calls = %v, want gt-z labeled spec-dispatch-failed once", got)
+	}
+	notes := fake.argvs("bead", "note", "gt-z")
+	if len(notes) != 1 || !strings.Contains(notes[0][len(notes[0])-1], "sling process failed") || !strings.Contains(notes[0][len(notes[0])-1], "spec-dispatch-failed is cleared") {
+		t.Errorf("note calls = %v, want one note saying the sling process failed and how to clear the label", notes)
+	}
+	if n := countContaining(lines(), "spec_dispatch: gt-z: sling process failed"); n != 1 {
+		t.Errorf("failure lines = %d, want one: %v", n, lines())
+	}
+	if running := d.specSlings.list(); len(running) != 0 {
+		t.Errorf("in flight = %+v, want a dead sling out of the set", running)
+	}
+}
+
+// A sling cut because the daemon is shutting down failed through no fault of
+// its bead, which stays ready for the next daemon.
+func TestAShutdownCutSlingDoesNotLabelItsBead(t *testing.T) {
+	t.Parallel()
+	ctx, stop := context.WithCancel(context.Background())
+	fake := newFakeCLI(func(args []string) cliReply {
+		if args[1] == "sling" {
+			stop() // the daemon shuts down while the sling runs
+			return cliReply{stderr: "signal: killed", code: 1}
+		}
+		return cliReply{stdout: string(wireOut(plannedTick(slingJob("gt-z", "claude-sonnet"))))}
+	})
+	logger, _ := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	d.ctx = ctx
+	d.clock = newSlingClock()
+
+	d.runSpecDispatch()
+	waitSlings(t, d)
+
+	if got := fake.argvs("bead"); len(got) != 0 {
+		t.Errorf("bead writes = %v, want none for a sling the shutdown cut", got)
+	}
+}
+
+// With a failed bead-write the failure is logged and the set still empties.
+func TestAFailedFailureWriteIsLoggedNotFatal(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func(args []string) cliReply {
+		switch args[0] {
+		case "bead":
+			return cliReply{stderr: "dolt down", code: 1}
+		case "spec":
+			if args[1] == "sling" {
+				return cliReply{code: 1}
+			}
+		}
+		return cliReply{stdout: string(wireOut(plannedTick(slingJob("gt-z", "claude-sonnet"))))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	d.clock = newSlingClock()
+
+	d.runSpecDispatch()
+	waitSlings(t, d)
+
+	if n := countContaining(lines(), "spec_dispatch: gt-z: gt update failed", "dolt down"); n != 1 {
+		t.Errorf("label failure lines = %d, want one: %v", n, lines())
+	}
+	if n := countContaining(lines(), "spec_dispatch: gt-z: gt note failed"); n != 1 {
+		t.Errorf("note failure lines = %d, want one: %v", n, lines())
+	}
+}
+
+// A running sling holds the restart; so does a patrol scan in flight with it.
+// The scan's hold must not be masked by the sling's, whose own bound is the
+// sling case's, not the housekeeping cap's.
+func TestDaemonWorkHoldNamesOtherSoftWorkAheadOfARunningSling(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	d.specSlings.begin(specSlingFlight{Bead: "gt-a", started: time.Now()})
+	if hold := d.daemonWorkHold(); hold == nil || hold.name != specSlingHoldLabel || !hold.ownBound {
+		t.Fatalf("hold = %+v, want the sling hold when nothing else runs", hold)
+	}
+	d.patrolScanRunning.Store(true)
+	if hold := d.daemonWorkHold(); hold == nil || hold.name != "a patrol scan" || hold.ownBound {
+		t.Fatalf("hold = %+v, want the patrol scan named ahead of the sling", hold)
 	}
 }
 
@@ -154,7 +312,7 @@ func TestNoSlingStartsWhileAnUpgradeRestartIsPending(t *testing.T) {
 	d.upgradeRestartPending.Store(true)
 
 	d.runSpecDispatch()
-	d.specDispatchCycles.Wait()
+	waitSlings(t, d)
 
 	if got := fake.argvs("spec", "sling"); len(got) != 0 {
 		t.Fatalf("slings run = %v, want none under a pending restart", got)

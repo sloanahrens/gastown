@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -152,14 +153,42 @@ func runSpecSlingJob(env specDispatchEnv, job specSlingJob) specDispatchReport {
 	return report
 }
 
+// parseSpecSlingJob reads the --job value: the bead, rig and seat are the
+// fields a sling cannot be made without.
+func parseSpecSlingJob(raw string) (specSlingJob, error) {
+	var job specSlingJob
+	if err := json.Unmarshal([]byte(raw), &job); err != nil {
+		return job, fmt.Errorf("--job is not a sling job: %w", err)
+	}
+	var missing []string
+	for _, f := range []struct{ name, value string }{{"bead", job.Bead}, {"rig", job.Rig}, {"agent", job.Agent}} {
+		if f.value == "" {
+			missing = append(missing, f.name)
+		}
+	}
+	if len(missing) > 0 {
+		return job, fmt.Errorf("--job is not a sling job: no %s", strings.Join(missing, ", "))
+	}
+	return job, nil
+}
+
+// specSlingHold is the reason a planned sling is not made: the operator hold or
+// an ESTOP set after the tick planned it stops it as it stops the tick.
+func specSlingHold(townRoot string) *specDispatchReport {
+	if hold := dispatch.OperatorHold(townRoot); hold != "" {
+		return &specDispatchReport{Hold: hold}
+	}
+	return nil
+}
+
 func runSpecSling(cmd *cobra.Command, _ []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return err
 	}
-	var job specSlingJob
-	if err := json.Unmarshal([]byte(specSlingJobJSON), &job); err != nil || job.Bead == "" || job.Rig == "" || job.Agent == "" {
-		return fmt.Errorf("--job is not a sling job (%v)", err)
+	job, err := parseSpecSlingJob(specSlingJobJSON)
+	if err != nil {
+		return err
 	}
 	if slingActor == "" {
 		slingActor = specDispatchActor
@@ -179,11 +208,8 @@ func runSpecSling(cmd *cobra.Command, _ []string) error {
 		Sleep: time.Sleep,
 		Now:   time.Now,
 	}
-	// The operator hold and ESTOP stop a sling the tick planned before they
-	// were set, as they stop the tick.
-	if hold := dispatch.OperatorHold(townRoot); hold != "" {
-		report := specDispatchReport{Hold: hold}
-		return printSpecSlingReport(cmd, report)
+	if held := specSlingHold(townRoot); held != nil {
+		return printSpecSlingReport(cmd, *held)
 	}
 	report := runSpecSlingJob(env, job)
 	report.Notices = append(report.Notices, traces.notices()...)
