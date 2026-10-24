@@ -1707,6 +1707,11 @@ func TestContainerSuiteGuardsStripHeredocBodies(t *testing.T) {
 			wantRefused: true, wantScopeOut: true,
 		},
 		{
+			name:        "shell-fed body inside an unquoted substitution is a script",
+			command:     "x=$(bash <<'EOF'\nmake test\nEOF\n)\n",
+			wantRefused: true, wantScopeOut: true,
+		},
+		{
 			name:        "shell-fed body may itself carry a heredoc",
 			command:     "bash <<'OUTER'\nbash <<'INNER'\nmake test\nINNER\nOUTER\n",
 			wantRefused: true, wantScopeOut: true,
