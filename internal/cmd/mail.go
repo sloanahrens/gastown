@@ -60,8 +60,13 @@ var mailCmd = &cobra.Command{
 	RunE:    requireSubcommand,
 	Long: `Send and receive messages between agents.
 
-The mail system allows crew, polecats, and the Refinery to communicate.
+The mail system lets crew and polecats leave messages for each other.
 Messages are stored in beads as issues with type=message.
+
+Nothing reads another session's mail or nudge in this town: a session
+sees only the mail and nudges addressed to it. To reach the operator or
+the overseer, use gt escalate, gt ask, or a comment on the bead you are
+working on.
 
 MAIL ROUTING:
   ┌─────────────────────────────────────────────────────┐
@@ -69,16 +74,12 @@ MAIL ROUTING:
   │                                                     │
   │  ┌─────────────────────────────────────────────┐   │
   │  │           gastown/ (rig mailboxes)          │   │
-  │  │  ├── witness      ← greenplace/witness         │   │
-  │  │  ├── refinery     ← greenplace/refinery        │   │
   │  │  ├── Toast        ← greenplace/Toast           │   │
   │  │  └── crew/max     ← greenplace/crew/max        │   │
   │  └─────────────────────────────────────────────┘   │
   └─────────────────────────────────────────────────────┘
 
 ADDRESS FORMATS:
-  <rig>/witness       → Rig's Witness
-  <rig>/refinery      → Rig's Refinery
   <rig>/<polecat>     → Polecat (e.g., greenplace/Toast)
   <rig>/crew/<name>   → Crew worker (e.g., greenplace/crew/max)
   @overseer           → Special: human overseer
