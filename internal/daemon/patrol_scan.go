@@ -591,10 +591,17 @@ func (h *patrolScanHost) PolecatEscalations(rig string) ([]patrolscan.Escalation
 // leftover whose commits read as unpushed: the gateway's answer decides instead
 // (polecat.SandboxSeatGitState, gt-b4waf). The host worktree is not resolved
 // for such a seat, since a nuked seat has none.
+//
+// A host seat must not depend on that classification: when the agent bead or
+// the town settings cannot be read, the seat is probed as a host seat, as it was
+// before the sandbox branch existed. A sandbox seat misread that way reads its
+// stale worktree's commits as unpushed, which keeps its exit unclear rather than
+// clearing it on a guess.
 func (h *patrolScanHost) GitState(rig, name string) (patrolscan.GitState, error) {
 	seat, sandboxed, err := h.openshellSeat(rig, name)
 	if err != nil {
-		return patrolscan.GitState{}, fmt.Errorf("telling a sandbox seat from a host seat: %w", err)
+		h.d.logger.Printf("Patrol git state of %s/%s: telling a sandbox seat from a host seat failed, probing the host worktree: %v", rig, name, err)
+		sandboxed = false
 	}
 	var st polecat.LiveGitState
 	if sandboxed {
