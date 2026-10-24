@@ -1200,3 +1200,15 @@ func TestStaleLockRemovalSparesLockRewrittenBeforeFlock(t *testing.T) {
 		})
 	}
 }
+
+// pid 1 belongs to root. A lock naming it, written by a holder under another
+// uid, is still held: the liveness probe fails with EPERM, and the process exists.
+// Root's probe succeeds instead, which is alive too, so the assertion holds
+// under either uid.
+func TestLockInfoIsStale_ProcessOwnedByAnotherUserIsHeld(t *testing.T) {
+	t.Parallel()
+	info := LockInfo{PID: 1}
+	if info.IsStale() {
+		t.Error("IsStale() = true for a lock naming pid 1; pid 1 exists under another uid, so the lock is held")
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+
+	"github.com/steveyegge/gastown/internal/procid"
 )
 
 // setProcessGroup detaches the child into its own process group.
@@ -25,7 +27,7 @@ func processExists(pid int) bool {
 		return false
 	}
 
-	// Try to send signal 0 - this will fail if process doesn't exist.
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
+	// Signal 0 fails with ESRCH when the process is gone. EPERM means it exists
+	// under another uid, so the holder is alive.
+	return procid.ProbeAlive(process.Signal(syscall.Signal(0)))
 }

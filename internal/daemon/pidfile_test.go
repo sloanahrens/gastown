@@ -188,3 +188,26 @@ func containsLine(content, line string) bool {
 	}
 	return false
 }
+
+// pid 1 belongs to root. A daemon.pid naming it, read by an ordinary user, is a
+// process another uid owns: the probe fails with EPERM, and the pid is alive.
+// Root's probe succeeds instead, which is alive too, so the assertion holds
+// under either uid.
+func TestVerifyPIDOwnership_ForeignUIDProcessIsAlive(t *testing.T) {
+	t.Parallel()
+	pidFile := filepath.Join(t.TempDir(), "daemon.pid")
+	if _, err := writePIDFile(pidFile, 1); err != nil {
+		t.Fatalf("writePIDFile: %v", err)
+	}
+
+	pid, alive, err := verifyPIDOwnership(pidFile)
+	if err != nil {
+		t.Fatalf("verifyPIDOwnership: %v", err)
+	}
+	if pid != 1 {
+		t.Errorf("expected PID 1, got %d", pid)
+	}
+	if !alive {
+		t.Error("verifyPIDOwnership(pid 1) alive = false; pid 1 exists under another uid, want true")
+	}
+}
