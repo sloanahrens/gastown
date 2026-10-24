@@ -1,6 +1,7 @@
 package townconfig
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -40,5 +41,31 @@ func TestLoadRefusesLiteralTokenWhenSwitchedOn(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "agents.ds.env.ANTHROPIC_AUTH_TOKEN") || strings.Contains(err.Error(), "sk-fake") {
 		t.Errorf("error must name the path and not the value: %v", err)
+	}
+}
+
+// The loader, not only the classifier, must refuse what the sandbox skeleton
+// treats as a credential, and must accept a region under the same switch.
+func TestLoadRefuseLiteralsClassifiesRegionAndPasswd(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		key, value string
+		refused    bool
+	}{
+		{"AWS_REGION", "ASIA-PACIFIC-EAST-1", false},
+		{"DB_PASSWD", "synthetic-passwd-value-0123", true},
+	} {
+		root := t.TempDir()
+		write(t, root, FileTown, `{"type": "town", "version": 2, "name": "t", "created_at": "2026-01-01T00:00:00Z"}`)
+		write(t, root, FileSettings, fmt.Sprintf(
+			`{"type": "town-settings", "version": 1, "secrets": {"refuse_literals": true}, "agents": {"ds": {"command": "claude", "env": {%q: %q}}}}`,
+			tt.key, tt.value))
+		_, err := Load(root)
+		if got := err != nil; got != tt.refused {
+			t.Errorf("Load with %s set: refused = %v, want %v (err %v)", tt.key, got, tt.refused, err)
+		}
+		if err != nil && strings.Contains(err.Error(), tt.value) {
+			t.Errorf("error prints the value of %s: %v", tt.key, err)
+		}
 	}
 }

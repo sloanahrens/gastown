@@ -284,7 +284,7 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 // in sandboxSecretsNameWords must agree with config, so the guard cannot grow a word that
 // config never sees.
 var sandboxSecretsGuardOnlyWords = map[string]bool{
-	"KEY": true, "PASSWD": true, "CRED": true, "CREDS": true, "CREDENTIAL": true, "CREDENTIALS": true,
+	"KEY": true, "CRED": true, "CREDS": true, "CREDENTIAL": true, "CREDENTIALS": true,
 }
 
 // The guard blocks a variable exactly when config.LooksLikeSecret would redact a value

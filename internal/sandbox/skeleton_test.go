@@ -616,7 +616,7 @@ func TestCredentialName(t *testing.T) {
 		"ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "db.password", "passwd",
 		"clientSecret", "secret", "secrets", "private-key", "privatekey",
 		"signing_key", "promote_key_file", "credentials", "authorization",
-		"auth_token", "bearer", "oauth", "jwt", "dsn", "cookie",
+		"auth_token", "bearer", "oauth", "jwt", "dsn", "cookie", "DB_PASSWD",
 	}
 	for _, key := range secret {
 		if !credentialName(key) {
@@ -628,10 +628,23 @@ func TestCredentialName(t *testing.T) {
 		"merge_queue", "remote_url", "landing_branch", "agent", "command",
 		"forgejo", "bots", "registry", "backend", "session_backend", "host",
 		"dolt_server_host", "dolt_database", "dolt_server_port", "issue_prefix",
+		"SECRETARY_NAME", "TOKENIZER_MODE",
 	}
 	for _, key := range plain {
 		if credentialName(key) {
 			t.Errorf("credentialName(%q) = true, want false", key)
+		}
+	}
+}
+
+// TestCredentialNameAgreesWithConfigMarkers: every key config redacts by marker is
+// a credential name here too, so the skeleton never copies a value config refuses.
+func TestCredentialNameAgreesWithConfigMarkers(t *testing.T) {
+	t.Parallel()
+	for _, marker := range config.SecretKeyMarkers() {
+		key := "DB_" + marker
+		if !credentialName(key) {
+			t.Errorf("credentialName(%q) = false, but config.IsSecretKey(%q) = true", key, key)
 		}
 	}
 }
@@ -657,6 +670,7 @@ func TestLooksLikeCredential(t *testing.T) {
 		"0123456789abcdef0123456789abcdef01234567",
 		"AbC3dEf6GhI9jKl2MnO5pQr8StU1vWx4YzA7",
 		"abcdefghijklmnop12345678qrstuvwx",
+		"ASIA0123456789ABCDEF",
 	}
 	for _, value := range credential {
 		if !looksLikeCredential(value) {
@@ -673,6 +687,7 @@ func TestLooksLikeCredential(t *testing.T) {
 		"~/gt/gastown/settings/config.json",
 		"2026-10-22-openshell-sandbox-backend-plan.md",
 		"openshell-sandbox-backend-plan-for-polecats",
+		"ASIA-PACIFIC-EAST-1",
 	}
 	for _, value := range plain {
 		if looksLikeCredential(value) {

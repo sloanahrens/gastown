@@ -66,7 +66,7 @@ var (
 	userInfoURL   = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://[^/@\s]+@`)
 	userInfoPart  = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@`)
 	jwtShape      = regexp.MustCompile(`^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$`)
-	knownKeyShape = regexp.MustCompile(`^(?:sk-[A-Za-z0-9_-]{16,}|sk_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,})$`)
+	knownKeyShape = regexp.MustCompile(`^(?:sk-[A-Za-z0-9_-]{16,}|sk_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|dckr_pat_[A-Za-z0-9_-]{20,}|hvs\.[A-Za-z0-9_-]{20,})$`)
 	pemKeyShape   = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)
 	bareToken     = regexp.MustCompile(`^[A-Za-z0-9_+=-]{32,}$`)
 	hexToken      = regexp.MustCompile(`^[0-9a-f]{32,}$`)
@@ -199,6 +199,8 @@ func scrubValue(key string, v any, underSecret bool) any {
 
 // credentialName reports whether a settings key names a credential, however it
 // separates its words: api_token, APIKey, db.password, private-key, apikey.
+// Every marker config.IsSecretKey matches is a credential word here too; the
+// parity test in skeleton_test.go holds that, without substring matches.
 func credentialName(key string) bool {
 	words := keyWords(key)
 	for _, w := range words {
