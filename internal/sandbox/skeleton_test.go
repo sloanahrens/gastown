@@ -914,8 +914,15 @@ func renderRigWithout(t *testing.T, drop []string, add map[string]string) (map[s
 	for k, v := range add {
 		files[k] = v
 	}
+	return renderTown(t, writeTown(t, files))
+}
+
+// renderTown renders the skeleton for rig gastown from townRoot and returns the
+// archive's entries.
+func renderTown(t *testing.T, townRoot string) (map[string][]byte, error) {
+	t.Helper()
 	data, err := RenderSkeleton(SkeletonSpec{
-		TownRoot:         writeTown(t, files),
+		TownRoot:         townRoot,
 		Rig:              "gastown",
 		ControlPlaneHost: "host.docker.internal",
 		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
@@ -927,17 +934,21 @@ func renderRigWithout(t *testing.T, drop []string, add map[string]string) (map[s
 }
 
 // TestSkeletonRigConfigFromTheRigBeadsDir: a rig whose mayor/rig/.beads holds
-// only metadata.json (devops, fractals, beaver, agentlab) keeps its config in
-// <rig>/.beads; the skeleton carries it to the tracked workspace (gt-z7ut1).
+// only metadata.json and a redirect (devops, fractals, beaver, agentlab) keeps
+// its config in <rig>/.beads; the skeleton carries it to the tracked workspace
+// (gt-z7ut1).
 func TestSkeletonRigConfigFromTheRigBeadsDir(t *testing.T) {
 	t.Parallel()
 
 	got, err := renderRigWithout(t, []string{"gastown/mayor/rig/.beads/config.yaml"},
-		map[string]string{"gastown/.beads/config.yaml": "issue-prefix: gt\n"})
+		map[string]string{
+			"gastown/mayor/rig/.beads/redirect": "../../.beads\n",
+			"gastown/.beads/config.yaml":        "issue_prefix: gt\n",
+		})
 	if err != nil {
 		t.Fatalf("RenderSkeleton: %v", err)
 	}
-	if c := string(got["gt/gastown/mayor/rig/.beads/config.yaml"]); !strings.Contains(c, "issue-prefix: gt") {
+	if c := string(got["gt/gastown/mayor/rig/.beads/config.yaml"]); !strings.Contains(c, "issue_prefix: gt") {
 		t.Errorf("tracked workspace config = %q, want the rig .beads config", c)
 	}
 	if _, ok := got["gt/gastown/.beads/config.yaml"]; ok {
@@ -967,5 +978,30 @@ func TestSkeletonRigWithoutAnyBeadsConfig(t *testing.T) {
 	_, err := renderRigWithout(t, []string{"gastown/mayor/rig/.beads/config.yaml"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "no beads config.yaml") {
 		t.Fatalf("RenderSkeleton error = %v, want it to name the missing config.yaml", err)
+	}
+}
+
+// TestSkeletonRigConfigEscapingSymlinkFails: a rig config.yaml that is a symlink
+// out of the town fails the render. It does not fall through to the valid copy
+// in <rig>/.beads, and the outside file is not shipped.
+func TestSkeletonRigConfigEscapingSymlinkFails(t *testing.T) {
+	t.Parallel()
+
+	files := minimalTown()
+	delete(files, "gastown/mayor/rig/.beads/config.yaml")
+	files["gastown/.beads/config.yaml"] = "issue_prefix: gt\n"
+	townRoot := writeTown(t, files)
+	outside := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(outside, []byte("issue_prefix: PLANTED\n"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads", "config.yaml")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if _, err := renderTown(t, townRoot); err == nil {
+		t.Fatal("RenderSkeleton succeeded, want an error for the escaping config symlink")
+	} else if !strings.Contains(err.Error(), "gastown/mayor/rig/.beads/config.yaml") {
+		t.Errorf("error = %v, want it to name the refused config", err)
 	}
 }

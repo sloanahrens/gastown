@@ -407,18 +407,18 @@ func (r townReader) readObject(rel string) (map[string]any, error) {
 	return doc, nil
 }
 
-// rigBeadsConfig returns the town-relative path of the rig's beads config.yaml:
-// the first of the rig's beads directories that holds one.
-func rigBeadsConfig(town townReader, rig string) (string, error) {
+// rigBeadsConfig returns the town-relative path and the contents of the rig's
+// beads config.yaml: the first of the rig's beads directories that holds one.
+func rigBeadsConfig(town townReader, rig string) (string, []byte, error) {
 	for _, dir := range config.RigBeadsDirs(rig) {
 		rel := dir + "/config.yaml"
-		if _, err := town.read(rel); err == nil {
-			return rel, nil
+		if data, err := town.read(rel); err == nil {
+			return rel, data, nil
 		} else if !errors.Is(err, fs.ErrNotExist) {
-			return "", err
+			return "", nil, err
 		}
 	}
-	return "", fmt.Errorf("sandbox: rig %s has no beads config.yaml in %s", rig, strings.Join(config.RigBeadsDirs(rig), " or "))
+	return "", nil, fmt.Errorf("sandbox: rig %s has no beads config.yaml in %s", rig, strings.Join(config.RigBeadsDirs(rig), " or "))
 }
 
 func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
@@ -483,11 +483,7 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	// beaver, agentlab), in <rig>/.beads. Either way it lands at the tracked
 	// workspace, which is where the sandbox's bd looks; a rig with neither stops
 	// the render, since bd would run with no prefix (gt-z7ut1).
-	configRel, err := rigBeadsConfig(town, s.Rig)
-	if err != nil {
-		return nil, err
-	}
-	rawConfig, err := town.read(configRel)
+	configRel, rawConfig, err := rigBeadsConfig(town, s.Rig)
 	if err != nil {
 		return nil, err
 	}
