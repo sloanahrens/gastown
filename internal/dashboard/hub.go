@@ -111,6 +111,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Cloud != nil {
 		start(h.cfg.CloudEvery, h.pollCloud)
 	}
+	if h.cfg.Mango != nil {
+		start(h.cfg.MangoEvery, h.pollMango)
+	}
 	if h.cfg.Spend != nil {
 		start(h.cfg.SpendEvery, h.pollSpend)
 	}
@@ -498,6 +501,20 @@ func (h *Hub) pollCloud() {
 	// read at the page's rate even with no patrol: a stop or start must not sit
 	// stale for the slow interval.
 	h.cloudMissing = c.NoPatrol && c.Apps == nil
+	h.publishLocked()
+}
+
+// pollMango holds the town-metrics panel the reader read. The reader names every
+// state it cannot read, so the panel is replaced on each poll, missing and error
+// included.
+func (h *Hub) pollMango() {
+	m := h.cfg.Mango()
+	if m == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Mango = m
 	h.publishLocked()
 }
 

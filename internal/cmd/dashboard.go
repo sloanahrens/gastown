@@ -47,6 +47,7 @@ var (
 	dashboardForgejoRepos         []string
 	dashboardClaudePlanUSD        float64
 	dashboardClaudePlanRenewalDay int
+	dashboardMangoDir             string
 	dashboardOpen                 bool
 )
 
@@ -212,6 +213,7 @@ func init() {
 	dashboardCmd.Flags().BoolVar(&dashboardOpen, "open", false, "Open the page in the default browser")
 	dashboardCmd.Flags().Float64Var(&dashboardClaudePlanUSD, "claude-plan-usd", dashboard.ClaudePlanDefaultUSD, "Monthly price of the Claude plan the plan meter's percentages are drawn against")
 	dashboardCmd.Flags().IntVar(&dashboardClaudePlanRenewalDay, "claude-plan-renewal-day", dashboard.ClaudePlanDefaultRenewalDay, "Day of the month the Claude plan renews on; the plan meter's month rollup runs from this day to the next")
+	dashboardCmd.Flags().StringVar(&dashboardMangoDir, "mango-dir", "", "Directory the town-metrics panel.json is read from (default <town>/.runtime/metrics/latest)")
 	rootCmd.AddCommand(dashboardCmd)
 }
 
@@ -304,6 +306,16 @@ func dashboardReportsDir(townRoot string) string {
 // its status inside the town: one JSON file per run, overwritten each time.
 func dashboardCloudChecksPath(townRoot string) string {
 	return filepath.Join(townRoot, ".runtime", "cloud-check", "status.json")
+}
+
+// dashboardMangoPath is the directory the town-metrics panel is read from: the
+// --mango-dir value when it is set, else the metrics writer's latest directory
+// inside the town.
+func dashboardMangoPath(townRoot, mangoDir string) string {
+	if mangoDir != "" {
+		return mangoDir
+	}
+	return filepath.Join(townRoot, ".runtime", "metrics", "latest")
 }
 
 // newDashboardClaudePlanReader builds the Cost panel's plan meter: the town's
@@ -403,12 +415,14 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		WithRenewalDay(claudePlanRenewalDay)
 	rework := newDashReworkReader(townRoot).withStages(om.stagesSince)
 	loads := newDashLoads(townRoot, time.Now)
+	mangoDir := dashboardMangoPath(townRoot, dashboardMangoDir)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:         feed,
 		Summary:      func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
 		Health:       func() dashboard.Health { return dashboardHealth(townRoot) },
 		Machine:      dashboard.SampleMachine,
 		Cloud:        func() *dashboard.Cloud { return cloud.Read(time.Now()) },
+		Mango:        func() *dashboard.Mango { return dashboard.ReadMango(mangoDir, time.Now()) },
 		Spend:        dashboardSpend(resolveSpendCmd(spendCmd)),
 		JevSpend:     dashboardJevSpend(jevSpendArgv),
 		JevScorecard: dashboardJevScorecard(jevScorecardArgv),
