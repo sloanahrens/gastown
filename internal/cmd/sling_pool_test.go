@@ -2128,6 +2128,51 @@ func TestSnapshotOccupied(t *testing.T) {
 	if _, err := snapshotOccupied(poolSeatSnapshot{sessions: snapshot, at: now}, func() sessionLister { return lister }, nil, func() time.Time { return now })(); err == nil {
 		t.Fatal("a failed session listing must fail the read, not count the snapshot alone")
 	}
+
+	// A seat the roster read live can die before this listing: the listing drops
+	// it as dead, and the roster's live entry must still count as the
+	// dead-hooked seat its own dead read would list (gt-0axfg). A seat the
+	// roster released stays free: the roster read its bead terminal.
+	rosterAt := now
+	ember := poolSession{name: "gt-ember", agent: "deepseek-flash", rig: "gastown", polecat: "ember", created: rosterAt.Add(-time.Hour)}
+	for _, tc := range []struct {
+		name           string
+		listed         bool
+		dead           bool
+		released       bool
+		want           int
+		wantDeadHooked bool
+	}{
+		{name: "live in the listing", listed: true, want: 1},
+		{name: "died mid-tick", listed: true, dead: true, want: 1, wantDeadHooked: true},
+		{name: "gone from the listing", want: 0},
+		{name: "released by the roster", listed: true, dead: true, released: true, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deadLister := &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
+			if tc.listed {
+				deadLister.sessions["gt-ember"] = map[string]string{"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"}
+				deadLister.created["gt-ember"] = ember.created
+			}
+			snap := poolSeatSnapshot{sessions: []poolSession{ember}, at: rosterAt}
+			if tc.released {
+				snap.released = map[string]bool{"gastown/ember": true}
+			}
+			dead := func(sessionName, rigName, polecatName string) bool { return tc.dead }
+			got, err := snapshotOccupied(snap, func() sessionLister { return deadLister }, dead, func() time.Time { return rosterAt.Add(time.Minute) })()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := poolSeatCount("deepseek-flash", got); n != tc.want {
+				t.Fatalf("poolSeatCount = %d, want %d: %+v", n, tc.want, got)
+			}
+			for _, s := range got {
+				if s.deadHooked != tc.wantDeadHooked {
+					t.Fatalf("deadHooked = %v, want %v: %+v", s.deadHooked, tc.wantDeadHooked, got)
+				}
+			}
+		})
+	}
 }
 
 // A cap-1 pool whose only live session is an idle-pr-open seat: the roster
