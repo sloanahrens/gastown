@@ -1859,19 +1859,40 @@ func trimShellKeywords(segment []string) []string {
 // segmentCommandWord returns a segment's command word and its arguments,
 // skipping leading VAR=value assignments and the small set of launchers that
 // carry the real command behind them (env VAR=x cmd, time cmd, sudo cmd, exec
-// cmd — gt-tt8sg: `exec rm -rf X` named exec and the rm went unseen).
+// cmd — gt-tt8sg: `exec rm -rf X` named exec and the rm went unseen). A leading
+// "(" opens a subshell whose first command is the command word (gt-erfxm).
 func segmentCommandWord(segment []string) (string, []string) {
-	for i, token := range segment {
+	for i := 0; i < len(segment); i++ {
+		token := segment[i]
 		if isEnvAssignment(token) {
+			i += envAssignmentWidth(segment[i:]) - 1
 			continue
 		}
 		switch token {
-		case "!", "time", "sudo", "command", "nohup", "env", "nice", "stdbuf", "exec", "builtin":
+		case "(", "!", "time", "sudo", "command", "nohup", "env", "nice", "stdbuf", "exec", "builtin":
 			continue
 		}
 		return token, segment[i+1:]
 	}
 	return "", nil
+}
+
+// envAssignmentWidth returns how many leading tokens of segment make up the
+// assignment at its head. An assignment whose value opens a command
+// substitution runs that substitution's text before the command, and the
+// substitution's words spread over tokens: "y=$(echo" "a)" "bash" is the
+// assignment "y=$(echo a)" followed by bash (gt-erfxm). The width runs through
+// the token that closes the substitution; a substitution that never closes in
+// this segment leaves the width at one token, as a plain assignment has.
+func envAssignmentWidth(segment []string) int {
+	depth := 0
+	for i, token := range segment {
+		depth += strings.Count(token, "$(") - strings.Count(token, ")")
+		if depth <= 0 {
+			return i + 1
+		}
+	}
+	return 1
 }
 
 // isEnvAssignment reports whether a token is a leading NAME=value environment
