@@ -412,6 +412,11 @@ func TestTapGuardBdCreateStoreEnvPrefixAndExport(t *testing.T) {
 		{"bare BEADS_DB town is not exported", `BEADS_DB=` + townDB + `; bd create --title=x`, false},
 		{"bare BEADS_DB town on the line of a later export", `BEADS_DB=` + townDB + `; export BD_DB=` + rigDB + `; bd create --title=x`, false},
 		{"inline BEADS_DB rig over export town", `export BEADS_DB=` + townDB + ` && BEADS_DB=` + rigDB + ` bd create --title=x`, false},
+		{"export town, create, then export rig: the create still files to town", `export BEADS_DB=` + townDB + `; bd create --title=x; export BEADS_DB=` + rigDB, true},
+		{"export rig, create, then export town: the create files to the rig", `export BEADS_DB=` + rigDB + `; bd create --title=x; export BEADS_DB=` + townDB, false},
+		{"bare town, exported without a value", `BEADS_DB=` + townDB + `; export BEADS_DB; bd create --title=x`, true},
+		{"export town, unset, create", `export BEADS_DB=` + townDB + `; unset BEADS_DB; bd create --title=x`, false},
+		{"grep names BEADS_DB; it sets nothing", `grep BEADS_DB README.md; bd create --title=x`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -457,6 +462,7 @@ func TestTapGuardBdCreateStoreDashCTownSubdir(t *testing.T) {
 		{"-C town subdir, create after the verb", `bd create --title=x -C ` + filepath.Join(b.town, "mayor"), true},
 		{"-C worktree subdir without .beads", `bd -C ` + filepath.Join(b.worktree, "internal") + ` create --title=x`, false},
 		{"-C rig dir", `bd -C ` + b.rigDir + ` create --title=x`, false},
+		{"-C directory with no .beads above it", `bd -C ` + filepath.Join(t.TempDir(), "nowhere") + ` create --title=x`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -470,6 +476,63 @@ func TestTapGuardBdCreateStoreDashCTownSubdir(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(stderr, bdCreateStoreRefusal) {
 				t.Fatalf("want blocked, got err=%v stderr=%q", err, stderr)
+			}
+		})
+	}
+}
+
+// TestTapGuardBdCreateStoreShellEnvFollowsLine pins what bd reads from its
+// environment once the commands on a line have run in order, starting from the
+// process env. A store change the guard cannot follow to the bd create (a
+// subshell, a branch, set -a, read) is refused, not guessed.
+func TestTapGuardBdCreateStoreShellEnvFollowsLine(t *testing.T) {
+	t.Parallel()
+	b := newBdStoreTown(t)
+	townDB := filepath.Join(b.town, ".beads", "x.db")
+	rigDB := filepath.Join(b.rigDir, "mayor", "rig", ".beads", "x.db")
+	tests := []struct {
+		name    string
+		procDB  string // BEADS_DB in the process env; "" for none
+		command string
+		blocked bool
+	}{
+		{"process town, unset before the create", townDB, `unset BEADS_DB; bd create --title=x`, false},
+		{"process town, bare rig: the process export carries the new value", townDB, `BEADS_DB=` + rigDB + `; bd create --title=x`, false},
+		{"process town, export -n before the create", townDB, `export -n BEADS_DB; bd create --title=x`, false},
+		{"process rig, bare town exported without a value", rigDB, `BEADS_DB=` + townDB + `; export BEADS_DB; bd create --title=x`, true},
+		{"subshell export of rig is not followed", "", `(export BEADS_DB=` + rigDB + `); bd create --title=x`, true},
+		{"export after a failed && is not followed", "", `false && export BEADS_DB=` + rigDB + `; bd create --title=x`, true},
+		{"export after cd && is not followed", "", `cd ` + b.worktree + ` && export BEADS_DB=` + rigDB + ` && bd create --title=x`, true},
+		{"set -a before a bare town assignment", "", `set -a; BEADS_DB=` + townDB + `; bd create --title=x`, true},
+		{"read into BEADS_DB", "", `read BEADS_DB; bd create --title=x`, true},
+		{"set -e names no store variable", "", `set -e; bd create --title=x`, false},
+		{"process town, inline rig overrides the process value", townDB, `BEADS_DB=` + rigDB + ` bd create --title=x`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := map[string]string{"GT_ROLE": polecatRole, "HOME": b.home}
+			if tt.procDB != "" {
+				env["BEADS_DB"] = tt.procDB
+			}
+			payload, err := json.Marshal(map[string]any{
+				"tool_name":  "Bash",
+				"cwd":        b.worktree,
+				"tool_input": map[string]string{"command": tt.command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr strings.Builder
+			err = tapGuardBdCreateStore(strings.NewReader(string(payload)), &stderr, fakeGuardProcess(env, ""))
+			if !tt.blocked {
+				if err != nil || stderr.Len() != 0 {
+					t.Fatalf("want allowed, got err=%v stderr=%q", err, stderr.String())
+				}
+				return
+			}
+			if err == nil || !strings.Contains(stderr.String(), bdCreateStoreRefusal) {
+				t.Fatalf("want blocked, got err=%v stderr=%q", err, stderr.String())
 			}
 		})
 	}
