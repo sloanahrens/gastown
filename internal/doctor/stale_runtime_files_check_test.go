@@ -50,11 +50,12 @@ func writeStaleRuntimePID(t *testing.T, townRoot, sessionID string) {
 
 // TestStaleRuntimeFiles_HyphenatedRigPrefixIsKept guards gt-a4po7: a rig prefix
 // may contain a hyphen, so reading my-app-nux.pid as prefix "my" reported a live
-// PID file stale and Fix deleted it.
+// PID file stale and Fix deleted it. The rig name (myapp) differs from its
+// prefix (my-app) so only the prefix lookup can keep the file.
 func TestStaleRuntimeFiles_HyphenatedRigPrefixIsKept(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	writeStaleRuntimeRigs(t, townRoot, map[string]string{"my-app": "my-app-"})
+	writeStaleRuntimeRigs(t, townRoot, map[string]string{"myapp": "my-app-"})
 	writeStaleRuntimePID(t, townRoot, "my-app-nux")
 	writeStaleRuntimePID(t, townRoot, "my-other-nux")
 
@@ -78,11 +79,12 @@ func TestStaleRuntimeFiles_HyphenatedRigPrefixIsKept(t *testing.T) {
 func TestStaleRuntimeFiles_RegisteredRigPrefixIsKept(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	writeStaleRuntimeRigs(t, townRoot, map[string]string{"sw": "sw-", "my-app": "my-app-"})
+	writeStaleRuntimeRigs(t, townRoot, map[string]string{"sw": "sw-", "myapp": "my-app-"})
 	writeStaleRuntimePID(t, townRoot, "sw-crew-max")
 	writeStaleRuntimePID(t, townRoot, "my-app-crew-max")
 	writeStaleRuntimePID(t, townRoot, "hq-overseer")
 	writeStaleRuntimePID(t, townRoot, "gt-daemon")
+	writeStaleRuntimePID(t, townRoot, "hq-crew-overseer")
 
 	check := NewStaleRuntimeFilesCheck()
 	result := check.Run(&CheckContext{TownRoot: townRoot})
