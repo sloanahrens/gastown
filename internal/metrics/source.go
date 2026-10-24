@@ -21,10 +21,24 @@ type Env struct {
 	Now func() time.Time
 	// ReadFile reads a whole file.
 	ReadFile func(string) ([]byte, error)
+	// ReadDir lists a directory, for a source whose files are named by a writer
+	// rather than by the source.
+	ReadDir func(string) ([]DirEntry, error)
 	// Tail reads at most maxBytes from the end of path, for a log too large to
 	// read whole.
 	Tail func(path string, maxBytes int64) ([]byte, error)
 }
+
+// DirEntry is one entry of a directory listing: the name and whether it is a
+// directory, which is all a source needs to choose the files it opens.
+type DirEntry struct {
+	Name  string
+	IsDir bool
+}
+
+// sourceLogTailBytes bounds what a source reads of an append-only log through
+// Env.Tail, so a series that has run for months costs one read.
+const sourceLogTailBytes = 512 << 10
 
 // Source fills one group of the snapshot. A group is the source's identity in
 // the record, so it is never renamed.
