@@ -1421,10 +1421,16 @@ func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads
 
 // specHoldFiles is the file set the overlap hold reads for one bead: the paths
 // its text names, minus the reference documents its Constraints section does
-// not list as work (gt-6t44f). The sling-time guard keeps every named path.
+// not list as work (gt-6t44f). A bead whose Constraints section is missing,
+// empty or unparsed keeps every path: it has not said which cited documents it
+// changes, and an unknown set is not an empty one (gt-zs8fq). The sling-time
+// guard keeps every named path either way.
 func specHoldFiles(files []string, description string) []string {
-	listed := extractContentRefs(specdispatch.Sections(description)["constraints"]).Files
-	return specdispatch.HoldFiles(files, listed)
+	constraints, ok := specdispatch.Sections(description)["constraints"]
+	if !ok || constraints == "" {
+		return files
+	}
+	return specdispatch.HoldFiles(files, extractContentRefs(constraints).Files)
 }
 
 // specHeldStatuses are the statuses that mean a working seat holds the bead:
