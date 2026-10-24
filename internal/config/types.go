@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1682,6 +1683,31 @@ type SandboxProfile struct {
 	ForgejoHost      string   `json:"forgejo_host,omitempty"` // the sandbox's Forgejo host; "" = ControlPlaneHost
 	CacheVolume      string   `json:"cache_volume,omitempty"` // "{rig}" expands to the rig name
 	Driver           string   `json:"driver,omitempty"`       // the gateway's compute driver: "docker" (default) or "kubernetes"
+
+	// Kubernetes pod placement and sizing, sent as driver config only for a
+	// kubernetes driver. Validate refuses them on a docker profile.
+	NodeSelector  map[string]string   `json:"node_selector,omitempty"`  // node labels the sandbox pod requires
+	Tolerations   []SandboxToleration `json:"tolerations,omitempty"`    // taints the sandbox pod tolerates
+	PriorityClass string              `json:"priority_class,omitempty"` // orders sandbox eviction
+	RuntimeClass  string              `json:"runtime_class,omitempty"`  // e.g. "gvisor"
+	Requests      *SandboxResources   `json:"requests,omitempty"`       // agent container CPU and memory requests
+	Limits        *SandboxResources   `json:"limits,omitempty"`         // agent container CPU and memory limits
+}
+
+// SandboxToleration is one Kubernetes toleration a sandbox pod carries.
+type SandboxToleration struct {
+	Key      string `json:"key,omitempty"`
+	Operator string `json:"operator,omitempty"` // Equal or Exists
+	Value    string `json:"value,omitempty"`
+	Effect   string `json:"effect,omitempty"` // NoSchedule, PreferNoSchedule or NoExecute
+}
+
+// SandboxResources is a container's requests or limits as Kubernetes
+// quantities; both are CPU cores and memory bytes when compared against each
+// other.
+type SandboxResources struct {
+	CPU    string `json:"cpu,omitempty"`
+	Memory string `json:"memory,omitempty"`
 }
 
 // Defaults for the SandboxProfile fields a profile may leave unset.
@@ -1717,7 +1743,9 @@ func (p SandboxProfile) WithDefaults() SandboxProfile {
 // named; CPU and Memory, when set, must be k8s quantities; ForgejoHost, when
 // set, must be a bare host name; Driver, when set, is docker or kubernetes,
 // and a kubernetes profile sets no CacheVolume (a Docker volume does not exist
-// there; a k8s cache is a separate design).
+// there; a k8s cache is a separate design). The kubernetes scheduling fields
+// are refused on a docker profile and checked for the pod and resources the
+// gateway accepts.
 func (p SandboxProfile) Validate(name string) error {
 	if p.Image == "" {
 		return fmt.Errorf("sandboxes.%s.image: required", name)
@@ -1744,14 +1772,131 @@ func (p SandboxProfile) Validate(name string) error {
 	}
 	switch p.Driver {
 	case "", SandboxDriverDocker:
+		if field := p.kubernetesOnlyField(); field != "" {
+			return fmt.Errorf("sandboxes.%s.%s: only a kubernetes driver sends pod placement and resources; remove it or set driver to kubernetes", name, field)
+		}
 	case SandboxDriverKubernetes:
 		if p.CacheVolume != "" {
 			return fmt.Errorf("sandboxes.%s.cache_volume %q: a kubernetes driver has no docker volumes; remove it", name, p.CacheVolume)
+		}
+		if err := p.validateKubernetes(name); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("sandboxes.%s.driver %q: want docker or kubernetes", name, p.Driver)
 	}
 	return nil
+}
+
+// kubernetesOnlyField names the first pod placement or resources field p
+// sets, or "" when it sets none.
+func (p SandboxProfile) kubernetesOnlyField() string {
+	switch {
+	case len(p.NodeSelector) > 0:
+		return "node_selector"
+	case len(p.Tolerations) > 0:
+		return "tolerations"
+	case p.PriorityClass != "":
+		return "priority_class"
+	case p.RuntimeClass != "":
+		return "runtime_class"
+	case p.Requests != nil && *p.Requests != (SandboxResources{}):
+		return "requests"
+	case p.Limits != nil && *p.Limits != (SandboxResources{}):
+		return "limits"
+	}
+	return ""
+}
+
+// validateKubernetes checks the fields only a kubernetes profile may set:
+// non-empty selector keys and values, a toleration effect and operator the
+// gateway accepts, quantities that parse, and requests no larger than limits.
+func (p SandboxProfile) validateKubernetes(name string) error {
+	keys := make([]string, 0, len(p.NodeSelector))
+	for k := range p.NodeSelector {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if strings.TrimSpace(k) == "" {
+			return fmt.Errorf("sandboxes.%s.node_selector: empty selector key", name)
+		}
+		if strings.TrimSpace(p.NodeSelector[k]) == "" {
+			return fmt.Errorf("sandboxes.%s.node_selector[%q]: empty selector value", name, k)
+		}
+	}
+	for i, tol := range p.Tolerations {
+		switch tol.Effect {
+		case "NoSchedule", "PreferNoSchedule", "NoExecute":
+		default:
+			return fmt.Errorf("sandboxes.%s.tolerations[%d].effect %q: want NoSchedule, PreferNoSchedule or NoExecute", name, i, tol.Effect)
+		}
+		switch tol.Operator {
+		case "Equal", "Exists":
+		default:
+			return fmt.Errorf("sandboxes.%s.tolerations[%d].operator %q: want Equal or Exists", name, i, tol.Operator)
+		}
+	}
+	if p.Requests != nil {
+		if err := p.Requests.validate(name, "requests"); err != nil {
+			return err
+		}
+	}
+	if p.Limits != nil {
+		if err := p.Limits.validate(name, "limits"); err != nil {
+			return err
+		}
+	}
+	if p.Requests != nil && p.Limits != nil {
+		for _, c := range []struct{ field, req, lim string }{
+			{"cpu", p.Requests.CPU, p.Limits.CPU},
+			{"memory", p.Requests.Memory, p.Limits.Memory},
+		} {
+			if c.req == "" || c.lim == "" {
+				continue
+			}
+			if sandboxQuantityValue(c.req) > sandboxQuantityValue(c.lim) {
+				return fmt.Errorf("sandboxes.%s.requests.%s %q: want no more than limits.%s %q", name, c.field, c.req, c.field, c.lim)
+			}
+		}
+	}
+	return nil
+}
+
+// validate checks the quantities in r, naming the block (requests or limits)
+// in the error.
+func (r SandboxResources) validate(name, block string) error {
+	if r.CPU != "" && !sandboxCPURe.MatchString(r.CPU) {
+		return fmt.Errorf("sandboxes.%s.%s.cpu %q: want a k8s CPU quantity such as \"4\" or \"500m\"", name, block, r.CPU)
+	}
+	if r.Memory != "" && !sandboxMemoryRe.MatchString(r.Memory) {
+		return fmt.Errorf("sandboxes.%s.%s.memory %q: want a k8s memory quantity such as \"8Gi\"", name, block, r.Memory)
+	}
+	return nil
+}
+
+// sandboxQuantityValue converts a quantity the CPU and memory patterns accept
+// to base units: CPU cores, or memory bytes. The patterns admit only a plain
+// or decimal number with one suffix, so the parse cannot fail.
+func sandboxQuantityValue(q string) float64 {
+	mult := 1.0
+	for _, s := range []struct {
+		suffix string
+		mult   float64
+	}{
+		{"Ki", 1 << 10}, {"Mi", 1 << 20}, {"Gi", 1 << 30}, {"Ti", 1 << 40}, {"Pi", 1 << 50}, {"Ei", 1 << 60},
+		{"k", 1e3}, {"M", 1e6}, {"G", 1e9}, {"T", 1e12}, {"P", 1e15}, {"E", 1e18}, {"m", 1e-3},
+	} {
+		if trimmed, ok := strings.CutSuffix(q, s.suffix); ok {
+			q, mult = trimmed, s.mult
+			break
+		}
+	}
+	n, err := strconv.ParseFloat(q, 64)
+	if err != nil {
+		return 0
+	}
+	return n * mult
 }
 
 // The k8s quantity shapes a profile's CPU and Memory may take: a plain or

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/sandbox"
@@ -569,6 +570,13 @@ func (b *openshellBackend) createSpec(spec SpawnSpec) (sandbox.CreateSpec, error
 		}
 		cs.DriverConfigJSON = cfg
 	}
+	if b.profile.Driver == DriverKubernetes {
+		cfg, err := kubernetesDriverConfig(b.profile)
+		if err != nil {
+			return cs, err
+		}
+		cs.DriverConfigJSON = cfg
+	}
 	return cs, nil
 }
 
@@ -741,6 +749,47 @@ func ensureCacheVolume(ctx context.Context, run dockerRun, volume string) error 
 		return fmt.Errorf("%w: docker volume create %s: %v: %s", ErrCacheVolume, volume, err, strings.TrimSpace(string(stderr)))
 	}
 	return nil
+}
+
+// kubernetesDriverConfig is the driver config that places the sandbox pod and
+// sizes its agent container; the field names are the OpenShell gateway's
+// (crates/openshell-driver-kubernetes/src/driver.rs), and they nest under
+// pod and containers.agent.resources. A profile that sets none of the fields
+// returns "": the gateway's pod defaults stand, and an empty object is not
+// sent.
+func kubernetesDriverConfig(p Profile) (string, error) {
+	pod := map[string]any{}
+	if len(p.NodeSelector) > 0 {
+		pod["node_selector"] = p.NodeSelector
+	}
+	if len(p.Tolerations) > 0 {
+		pod["tolerations"] = p.Tolerations
+	}
+	if p.PriorityClass != "" {
+		pod["priority_class_name"] = p.PriorityClass
+	}
+	if p.RuntimeClass != "" {
+		pod["runtime_class_name"] = p.RuntimeClass
+	}
+	resources := map[string]any{}
+	if p.Requests != nil && *p.Requests != (config.SandboxResources{}) {
+		resources["requests"] = p.Requests
+	}
+	if p.Limits != nil && *p.Limits != (config.SandboxResources{}) {
+		resources["limits"] = p.Limits
+	}
+	k8s := map[string]any{}
+	if len(pod) > 0 {
+		k8s["pod"] = pod
+	}
+	if len(resources) > 0 {
+		k8s["containers"] = map[string]any{"agent": map[string]any{"resources": resources}}
+	}
+	if len(k8s) == 0 {
+		return "", nil
+	}
+	cfg, err := json.Marshal(map[string]any{"kubernetes": k8s})
+	return string(cfg), err
 }
 
 // cacheDriverConfig is the driver config that mounts the cache volume at

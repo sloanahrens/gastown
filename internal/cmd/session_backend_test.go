@@ -55,11 +55,27 @@ func TestSessionBackendForAgentFollowsTheSeat(t *testing.T) {
 		t.Fatalf("Driver = %q, want the docker default", got.Driver)
 	}
 
-	ts.Sandboxes["polecat-default"] = config.SandboxProfile{Image: "i", Policy: "p.yaml", Driver: config.SandboxDriverKubernetes}
+	ts.Sandboxes["polecat-default"] = config.SandboxProfile{
+		Image:         "i",
+		Policy:        "p.yaml",
+		Driver:        config.SandboxDriverKubernetes,
+		NodeSelector:  map[string]string{"gt.dev/pool": "sandbox"},
+		Tolerations:   []config.SandboxToleration{{Key: "gt.dev/sandbox", Operator: "Exists", Effect: "NoSchedule"}},
+		PriorityClass: "gt-sandbox",
+		RuntimeClass:  "gvisor",
+		Requests:      &config.SandboxResources{CPU: "1", Memory: "2Gi"},
+		Limits:        &config.SandboxResources{CPU: "2", Memory: "4Gi"},
+	}
 	if _, err := sessionBackendForAgentWith(resolve, ts, town, "deepseek-flash-sandbox", host); err != nil {
 		t.Fatal(err)
 	}
 	if got.Driver != session.DriverKubernetes {
 		t.Fatalf("Driver = %q, want session.DriverKubernetes: the two constants must agree", got.Driver)
+	}
+	if got.NodeSelector["gt.dev/pool"] != "sandbox" || len(got.Tolerations) != 1 ||
+		got.Tolerations[0].Effect != "NoSchedule" || got.PriorityClass != "gt-sandbox" || got.RuntimeClass != "gvisor" ||
+		got.Requests == nil || *got.Requests != (config.SandboxResources{CPU: "1", Memory: "2Gi"}) ||
+		got.Limits == nil || *got.Limits != (config.SandboxResources{CPU: "2", Memory: "4Gi"}) {
+		t.Fatalf("profile handed to the backend = %+v: the kubernetes fields must survive the conversion", got)
 	}
 }

@@ -40,6 +40,7 @@ A sandbox profile's `driver` field names the compute driver its gateway runs. It
 - A `kubernetes` profile creates no Docker cache volume and sends no `docker.mounts` config to the gateway.
 - A `docker` profile, or one with no `driver`, keeps the Docker cache volume when it names a `cache_volume`.
 - Any other value is refused at validation: `want docker or kubernetes`.
+- A `kubernetes` profile may also set `node_selector`, `tolerations`, `priority_class`, `runtime_class`, `requests` and `limits`. gt sends them to the gateway as the create call's driver config, so the gateway needs `allow_driver_config = true` in `[openshell.drivers.kubernetes]` as well; `deploy/k8s/values/kind.yaml` sets the chart's `server.drivers.kubernetes.allowDriverConfig` for the town cluster. A `docker` profile that sets any of the six is refused at validation, and a `kubernetes` profile that sets none sends no driver config.
 
 ## Restart
 
