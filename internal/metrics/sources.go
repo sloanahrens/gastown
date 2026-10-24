@@ -6,7 +6,7 @@ package metrics
 func Sources() []Source {
 	return []Source{
 		queueSource{},
-		hostSource{},
+		newHostSource(),
 		moneySource{},
 		reviewSource{},
 		attentionSource{},
