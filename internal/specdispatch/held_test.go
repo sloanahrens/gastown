@@ -1,6 +1,9 @@
 package specdispatch
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // The hold is the gt-t61ft/gt-wikw1 pair replayed: two beads on one defect,
 // filed minutes apart, sharing the file that carries the fix and no test name.
@@ -88,5 +91,55 @@ func TestHeldOverlapCapsTheNamedPaths(t *testing.T) {
 	want := "gt-wide (held by gastown/polecats/capable) is already hooked to a working seat and names a/one.go, b/two.go, c/three.go (+2 more); the hold lifts when that bead closes"
 	if got != want {
 		t.Errorf("HeldOverlap = %q, want %q", got, want)
+	}
+}
+
+// A bead reads the standards it cites without changing them, so those paths
+// are not held; a path the Constraints section lists is work and stays
+// (gt-6t44f).
+func TestHoldFiles(t *testing.T) {
+	t.Parallel()
+	const standard = "claude/docs/standards/test-engineering.md"
+	cases := []struct {
+		name   string
+		named  []string
+		listed []string
+		want   []string
+	}{
+		{
+			name:  "a bead that only reads a standard names no hold path",
+			named: []string{standard},
+			want:  nil,
+		},
+		{
+			name:  "a repo docs path is reference-only too",
+			named: []string{"docs/reference.md", "internal/notify/cli.go"},
+			want:  []string{"internal/notify/cli.go"},
+		},
+		{
+			name:  "a home-relative standards path is reference-only",
+			named: []string{"~/.claude/docs/agents/spec-template.md"},
+			want:  nil,
+		},
+		{
+			name:   "a reference doc the Constraints section lists stays",
+			named:  []string{standard, "internal/notify/cli.go"},
+			listed: []string{standard},
+			want:   []string{standard, "internal/notify/cli.go"},
+		},
+		{
+			name:  "a source file is never reference-only",
+			named: []string{"internal/cmd/spec.go"},
+			want:  []string{"internal/cmd/spec.go"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := HoldFiles(c.named, c.listed)
+			if fmt.Sprint(got) != fmt.Sprint(c.want) {
+				t.Errorf("HoldFiles(%v, %v) = %v, want %v", c.named, c.listed, got, c.want)
+			}
+		})
 	}
 }

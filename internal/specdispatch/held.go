@@ -81,3 +81,34 @@ func HeldOverlap(paths []string, held []HeldBead) string {
 	}
 	return reason + "; the hold lifts when that bead closes"
 }
+
+// HoldFiles is the set of paths the overlap hold reads from a bead's text: the
+// paths it names, minus the reference documents it only reads. A bead cites
+// the standards and research it must follow (every test bead cites the
+// test-engineering standard) without changing them, so two such beads do not
+// hold each other. A reference document the bead's Constraints section lists
+// is a file the bead changes, so it stays (gt-6t44f).
+//
+// named is the bead's paths; listed is the paths its Constraints section names.
+func HoldFiles(named, listed []string) []string {
+	constrained := make(map[string]bool, len(listed))
+	for _, p := range listed {
+		constrained[p] = true
+	}
+	out := make([]string, 0, len(named))
+	for _, p := range named {
+		if IsReferenceDoc(p) && !constrained[p] {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// IsReferenceDoc reports whether a normalized path names a read-only reference
+// document: the repo's docs/ tree, or the claude/docs standards tree in any
+// spelling it arrives in ("claude/docs/...", "~/.claude/docs/...", an absolute
+// path into it) (gt-6t44f).
+func IsReferenceDoc(path string) bool {
+	return strings.HasPrefix(path, "docs/") || strings.Contains(path, "claude/docs/")
+}
