@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // TestNew verifies the constructor.
@@ -1271,6 +1273,10 @@ func TestConcreteWorkIssueRejectReason(t *testing.T) {
 		{name: "internal type", issue: &Issue{ID: "gt-mr", Type: "merge-request"}, want: "internal-type:merge-request"},
 		{name: "internal label", issue: &Issue{ID: "gt-mr", Labels: []string{"gt:merge-request"}}, want: "internal-label:gt:merge-request"},
 		{name: "protected label", issue: &Issue{ID: "gt-rig", Labels: []string{"gt:rig"}}, want: "protected-label:gt:rig"},
+		{name: "event type", issue: &Issue{ID: "gt-ev", Type: "event"}, want: "internal-type:event"},
+		{name: "escalation label", issue: &Issue{ID: "gt-esc", Labels: []string{"gt:escalation"}}, want: "internal-label:gt:escalation"},
+		{name: "merge-slot label", issue: &Issue{ID: "gt-slot", Labels: []string{"gt:merge-slot"}}, want: "internal-label:gt:merge-slot"},
+		{name: "townhealth label", issue: &Issue{ID: "gt-th", Labels: []string{"gt:townhealth"}}, want: "internal-label:gt:townhealth"},
 		{name: "concrete", issue: &Issue{ID: "gt-work", Type: "task"}, want: ""},
 	}
 
@@ -1278,6 +1284,26 @@ func TestConcreteWorkIssueRejectReason(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := ConcreteWorkIssueRejectReason(tt.issue); got != tt.want {
 				t.Fatalf("ConcreteWorkIssueRejectReason() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestConcreteWorkRejectCoversNonDispatchableLists pins the one definition of
+// "not work a polecat can take": every type and label the dispatcher skips is
+// also refused by gt done and the landing policy.
+func TestConcreteWorkRejectCoversNonDispatchableLists(t *testing.T) {
+	for _, typ := range constants.NonDispatchableBeadTypes {
+		t.Run("type/"+typ, func(t *testing.T) {
+			if got := ConcreteWorkIssueRejectReason(&Issue{ID: "gt-x", Type: typ}); got == "" {
+				t.Fatalf("type %q is non-dispatchable but ConcreteWorkIssueRejectReason accepts it", typ)
+			}
+		})
+	}
+	for _, label := range constants.NonDispatchableBeadLabels {
+		t.Run("label/"+label, func(t *testing.T) {
+			if got := ConcreteWorkIssueRejectReason(&Issue{ID: "gt-x", Type: "task", Labels: []string{label}}); got == "" {
+				t.Fatalf("label %q is non-dispatchable but ConcreteWorkIssueRejectReason accepts it", label)
 			}
 		})
 	}

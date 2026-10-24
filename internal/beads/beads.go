@@ -402,19 +402,39 @@ func ConcreteWorkIssueRejectReason(issue *Issue) string {
 		if ProtectedIssueLabel(label) {
 			return "protected-label:" + strings.ToLower(strings.TrimSpace(label))
 		}
+		if nonDispatchableLabel(label) {
+			return "internal-label:" + strings.ToLower(strings.TrimSpace(label))
+		}
 	}
 	return ""
 }
 
 // InternalIssueType reports whether an issue type represents Gas Town runtime
-// state rather than user/code work.
+// state rather than user/code work. The types are constants.NonDispatchableBeadTypes,
+// the list the spec dispatcher skips, so the two cannot drift.
 func InternalIssueType(issueType string) bool {
-	switch strings.ToLower(strings.TrimSpace(issueType)) {
-	case "wisp", "message", "handoff", "merge-request", "agent", "queue", "convoy", "formula":
-		return true
-	default:
-		return false
+	issueType = strings.ToLower(strings.TrimSpace(issueType))
+	for _, t := range constants.NonDispatchableBeadTypes {
+		if issueType == t {
+			return true
+		}
 	}
+	return false
+}
+
+// nonDispatchableLabel reports whether label is in
+// constants.NonDispatchableBeadLabels. InternalIssueLabel and
+// ProtectedIssueLabel stay the narrower sets other callers rely on (the
+// reaper's stale-issue clause, IsProtectedBead); the concrete-work check adds
+// this one so it rejects every family the dispatcher skips.
+func nonDispatchableLabel(label string) bool {
+	label = strings.ToLower(strings.TrimSpace(label))
+	for _, l := range constants.NonDispatchableBeadLabels {
+		if label == l {
+			return true
+		}
+	}
+	return false
 }
 
 // InternalIssueLabel reports whether a label marks Gas Town runtime state.
