@@ -261,7 +261,46 @@ func waitFor(ctx context.Context, d time.Duration) error {
 
 // pushToForgejo pushes branch from the rig's bare repo to origin (Forgejo).
 func pushToForgejo(bareRepo, branch string) error {
-	return git.NewGitWithDir(bareRepo, "").Push("origin", branch, false)
+	return pushOrAcceptRemoteAhead(git.NewGitWithDir(bareRepo, ""), branch)
+}
+
+// pushGit is the part of *git.Git the push step uses.
+type pushGit interface {
+	Push(remote, branch string, force bool) error
+	FetchBranchWithTimeout(remote, branch string, timeout time.Duration) error
+	Rev(ref string) (string, error)
+	IsAncestor(ancestor, descendant string) (bool, error)
+}
+
+// remoteRefreshTimeout bounds the fetch that follows a rejected push.
+const remoteRefreshTimeout = 2 * time.Minute
+
+// pushOrAcceptRemoteAhead pushes branch to origin. A sandbox pushes its commits
+// straight to Forgejo, so a seat that is started again finds the host branch
+// behind its remote counterpart and the push is rejected non-fast-forward. When
+// the local tip is an ancestor of the remote one the remote is simply ahead and
+// the clone inside the sandbox will fetch it, so that counts as pushed. Every
+// other outcome returns the push's own error, and nothing is forced (gt-gii34).
+func pushOrAcceptRemoteAhead(g pushGit, branch string) error {
+	pushErr := g.Push("origin", branch, false)
+	if pushErr == nil {
+		return nil
+	}
+	if err := g.FetchBranchWithTimeout("origin", branch, remoteRefreshTimeout); err != nil {
+		return pushErr
+	}
+	local, err := g.Rev("refs/heads/" + branch)
+	if err != nil {
+		return pushErr
+	}
+	remote, err := g.Rev("refs/remotes/origin/" + branch)
+	if err != nil {
+		return pushErr
+	}
+	if ahead, err := g.IsAncestor(local, remote); err != nil || !ahead {
+		return pushErr
+	}
+	return nil
 }
 
 func (b *openshellBackend) Name() string     { return BackendOpenShell }
