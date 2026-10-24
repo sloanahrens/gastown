@@ -53,6 +53,17 @@ var (
 	mailArchiveDryRun bool
 )
 
+// reachOperatorHelp is the paragraph gt mail and gt nudge both print about
+// delivery and reaching the human. It lives here once so the two help texts
+// cannot drift apart (gt-wusjq).
+const reachOperatorHelp = `Nothing reads another session's mail or nudge in this town: a session
+sees only the mail and nudges addressed to it. To reach the operator or
+the overseer, use gt escalate, gt ask, or a comment on the bead you are
+working on.
+Mail to @overseer reaches the human directly.
+
+`
+
 var mailCmd = &cobra.Command{
 	Use:     "mail",
 	GroupID: GroupComm,
@@ -63,12 +74,7 @@ var mailCmd = &cobra.Command{
 The mail system lets crew and polecats leave messages for each other.
 Messages are stored in beads as issues with type=message.
 
-Nothing reads another session's mail or nudge in this town: a session
-sees only the mail and nudges addressed to it. To reach the operator or
-the overseer, use gt escalate, gt ask, or a comment on the bead you are
-working on.
-
-MAIL ROUTING:
+` + reachOperatorHelp + `MAIL ROUTING:
   ┌─────────────────────────────────────────────────────┐
   │                    Town (.beads/)                   │
   │                                                     │
@@ -97,7 +103,6 @@ var mailSendCmd = &cobra.Command{
 	Long: `Send a message to an agent.
 
 Addresses:
-  <rig>/refinery   - Send to a rig's Refinery
   <rig>/<polecat>  - Send to a specific polecat
   <rig>/           - Broadcast to a rig
   list:<name>      - Send to a mailing list (fans out to all members)
