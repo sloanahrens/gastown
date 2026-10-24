@@ -24,7 +24,7 @@ DeepSeek polecats run in OpenShell sandboxes on Kubernetes, first on a local kin
 
 ## Node pools (town cluster)
 
-The town cluster has three nodes: a control plane, a `core` worker (label `gt.dev/pool=core`: the gateway, the agent-sandbox controller, later Dolt and Forgejo) and a `sandbox` worker (label `gt.dev/pool=sandbox`, taint `gt.dev/pool=sandbox:NoSchedule`). A node can read only the Secrets of pods scheduled on it, so sandbox pods, which tolerate the taint, share no node with the control plane's secrets. Priority classes: `gt-control-plane` above `gt-sandbox` above `gt-ci`. Sloan decided two clusters (town, tenant) with this separation inside the town cluster; evidence is on bead gt-1bedi.
+The town cluster has a control plane and two workers, `core` and `sandbox`; the labels, the sandbox taint and which workloads each pool carries are in `deploy/k8s/kind/up.sh`, and the eviction order is in `deploy/k8s/priority-classes.yaml`. A node can read only the Secrets of pods scheduled on it, so sandbox pods, which tolerate the taint, share no node with the control plane's secrets.
 
 ## Things that cost time
 

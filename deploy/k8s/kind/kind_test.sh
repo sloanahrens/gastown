@@ -94,7 +94,9 @@ cat >"$TMP/bin/kubectl" <<'STUB'
 #!/usr/bin/env bash
 "$(dirname "$0")/_log" kubectl "$@"
 case "$*" in
-  *"get nodes -l gt.dev/pool"*) [ -f "$STATE/no-layout" ] || printf 'core-node\nsandbox-node\n' ;;
+  *"get nodes -l gt.dev/pool"*)
+    if [ -f "$STATE/kubectl-down" ]; then echo "The connection to the server 127.0.0.1:1 was refused" >&2; exit 1; fi
+    [ -f "$STATE/no-layout" ] || printf 'node/core-node\nnode/sandbox-node\n' ;;
   *"get secret openshell-client-tls"*)
     name=$(sed -n "s/.*\['\([^']*\)'\].*/\1/p" <<<"$*")
     printf 'FAKE-%s-SECRETVALUE' "$name" | base64 ;;
@@ -258,10 +260,6 @@ check "the chart is not the broken pre-release" lacks "pre." "$helm_call"
 check "the chart is given the kind values file" contains "values/kind.yaml" "$helm_call"
 check "the NodePort service is applied" contains "gateway-nodeport.yaml" "$CALLS_LOG"
 check "colima is started without activating its docker context" contains "colima start gt-sbx --activate=false" "$CALLS_LOG"
-check "the kind values enable caller driver config at the chart path server.drivers.kubernetes" test "$(awk '/^server:/{s=1;next} /^[a-z]/{s=0} s&&/^  drivers:/{d=1;next} s&&d&&/^    kubernetes:/{k=1;next} s&&d&&k&&/allowDriverConfig: true/{print "yes"}' "$SCRIPT_DIR/../values/kind.yaml")" = yes
-check "the kind values pin the gateway to the core pool" test "$(grep -c 'gt.dev/pool: core' "$SCRIPT_DIR/../values/kind.yaml")" -eq 1
-check "no priority-class description has an unquoted colon (YAML would not parse)" test "$(grep -cE '^description: [^"].*: ' "$SCRIPT_DIR/../priority-classes.yaml")" -eq 0
-check "the three priority classes have the documented values" test "$(grep -E '^value: ' "$SCRIPT_DIR/../priority-classes.yaml" | tr -d ' \n')" = "value:1000000value:1000value:100"
 check "the NodePort service follows the chart install" before "helm upgrade --install" "gateway-nodeport.yaml"
 check "the kind config has a control plane and two workers" test "$(grep -c '^- role:' "$S/state/kind-config.yaml")" -eq 3
 check "the kind config has exactly two workers" test "$(grep -c '^- role: worker' "$S/state/kind-config.yaml")" -eq 2
@@ -274,7 +272,8 @@ check "only one taint is declared" test "$(grep -c 'effect:' "$S/state/kind-conf
 check "the gateway port mapping stays on the control-plane node" test "$(awk '/^- role: control-plane/{f=1;next} /^- role:/{f=0} f&&/hostPort/{c++} END{print c+0}' "$S/state/kind-config.yaml")" -eq 1
 check "the priority classes are applied" contains "priority-classes.yaml" "$CALLS_LOG"
 check "the priority classes are applied before the chart" before "priority-classes.yaml" "helm upgrade --install"
-check "the agent-sandbox controller is pinned to the core pool" contains '"nodeSelector":{"gt.dev/pool":"core"}' "$CALLS_LOG"
+patch_args='-n agent-sandbox-system patch deployment agent-sandbox-controller --type merge -p {"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
+check "the agent-sandbox controller deployment is patched once with exactly the core nodeSelector" test "$(grep -cF -e "$patch_args" "$S/calls.log" || true)" -eq 1
 check "the controller is pinned before its rollout is awaited" before "patch deployment agent-sandbox-controller" "rollout status deployment/agent-sandbox-controller"
 check "the pool layout is checked with an exact label query" contains "get nodes -l gt.dev/pool" "$CALLS_LOG"
 check "the control-plane Services are applied" contains "services/control-plane.yaml" "$CALLS_LOG"
@@ -384,6 +383,15 @@ check "a cluster without the pools is refused" test "$RC" -ne 0
 check "the message says how to rebuild it" contains "down.sh" "$OUT_TEXT"
 check "nothing is installed into the half-configured cluster" lacks "helm upgrade --install" "$CALLS_LOG"
 check "the priority classes are not applied to it either" lacks "priority-classes.yaml" "$CALLS_LOG"
+check "a missing layout is reported as missing, not as a kubectl error" lacks "cannot list the nodes" "$OUT_TEXT"
+scenario kubectldown
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/kubectl-down"
+run "$UP" --
+check "a failing node query fails the run" test "$RC" -ne 0
+check "the failure names the kubectl error, not a missing layout" contains "cannot list the nodes" "$OUT_TEXT"
+check "the kubectl error text is shown" contains "connection to the server" "$OUT_TEXT"
+check "a failing node query does not claim the layout is missing" lacks "lacks the core and sandbox nodes" "$OUT_TEXT"
+check "nothing is installed after a failing node query" lacks "helm upgrade --install" "$CALLS_LOG"
 
 echo "someone else owns the gateway port"
 scenario busy

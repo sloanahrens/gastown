@@ -140,7 +140,10 @@ done
 
 # A cluster built before the three-node layout has no pools. Refuse it rather
 # than half-configure it: rebuild with down.sh then up.sh.
-pool_nodes="$(kubectl get nodes -l gt.dev/pool --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+# A kubectl failure is not a missing layout: the two get different messages.
+pool_list="$(kubectl get nodes -l gt.dev/pool -o name 2>&1)" ||
+  die "cannot list the nodes of cluster $CLUSTER: $(tr '\n' ' ' <<<"$pool_list" | cut -c1-160)"
+pool_nodes="$(grep -c . <<<"$pool_list" || true)"
 [ "$pool_nodes" = 2 ] ||
   die "cluster $CLUSTER lacks the core and sandbox nodes ($pool_nodes labelled, want 2); rebuild it: deploy/k8s/kind/down.sh && deploy/k8s/kind/up.sh"
 kubectl apply -f "$HERE/../priority-classes.yaml"
@@ -165,6 +168,9 @@ elif [ "$actual" != "$expected" ]; then
   die "agent-sandbox $AGENT_SANDBOX_VERSION is $actual, expected $expected; refusing to apply it"
 fi
 kubectl apply -f "$sandbox_manifest"
+# Until this patch the controller may start on the control-plane node; it can
+# never start on the sandbox node (the taint), and the patch rolls it onto core
+# before the rollout below is awaited.
 kubectl -n agent-sandbox-system patch deployment agent-sandbox-controller --type merge \
   -p '{"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
 kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=180s
