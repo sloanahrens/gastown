@@ -166,12 +166,17 @@ func ReadMango(dir string, now time.Time) *Mango {
 		m.State, m.Note = MangoError, "the panel has no generated_at timestamp"
 		return m
 	}
-	m.GeneratedAt = &gen
-	m.Items, m.SnapshotHours = p.Items, p.SnapshotHours
-	if note := m.addTargets(p.Targets); note != "" {
+	// The rows are built off to the side so a panel the reader rejects leaves
+	// the error state empty: an error that carried part of the file would hand
+	// out coverage and counts from a panel it could not use.
+	targets, counts, note := mangoTargets(p.Targets)
+	if note != "" {
 		m.State, m.Note = MangoError, note
 		return m
 	}
+	m.GeneratedAt = &gen
+	m.Items, m.SnapshotHours = p.Items, p.SnapshotHours
+	m.Targets, m.Counts = targets, counts
 	if now.Sub(gen) > mangoStale {
 		m.State, m.Note = MangoStale, "stale"
 		return m
@@ -180,12 +185,15 @@ func ReadMango(dir string, now time.Time) *Mango {
 	return m
 }
 
-// addTargets fills the page's rows and verdict counts from the panel's, each
+// mangoTargets builds the page's rows and verdict counts from the panel's, each
 // string stripped and capped by cloudText, the package's cleaner for another
-// process's text (cloud.go). It returns a note naming a verdict the reader does
-// not know, which is the panel's error state: an unknown word is not a target to
-// draw as any of the three the page knows.
-func (m *Mango) addTargets(in []mangoTarget) string {
+// process's text (cloud.go). A verdict the page does not know returns its note,
+// and the caller reads the panel as an error: an unknown word is not a target to
+// draw as any of the three the page knows, and the rows built before it must not
+// outlive the rejection.
+func mangoTargets(in []mangoTarget) ([]MangoTarget, MangoCounts, string) {
+	rows := make([]MangoTarget, 0, len(in))
+	var counts MangoCounts
 	for _, t := range in {
 		row := MangoTarget{
 			Target:      cloudText(t.Target, mangoTargetMax),
@@ -199,15 +207,15 @@ func (m *Mango) addTargets(in []mangoTarget) string {
 		}
 		switch row.Verdict {
 		case MangoEarning:
-			m.Counts.Earning++
+			counts.Earning++
 		case MangoNoSignal:
-			m.Counts.NoSignal++
+			counts.NoSignal++
 		case MangoNotYet:
-			m.Counts.NotYet++
+			counts.NotYet++
 		default:
-			return fmt.Sprintf("unknown target verdict %q", row.Verdict)
+			return nil, MangoCounts{}, fmt.Sprintf("unknown target verdict %q", row.Verdict)
 		}
-		m.Targets = append(m.Targets, row)
+		rows = append(rows, row)
 	}
-	return ""
+	return rows, counts, ""
 }
