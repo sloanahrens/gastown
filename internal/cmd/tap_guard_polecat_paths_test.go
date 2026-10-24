@@ -768,6 +768,14 @@ func TestPolecatPathGuardBashGroupingConstructs(t *testing.T) {
 		{"stray paren in a quoted token, cp behind it", `y=$(echo ")" ) cp a.go ` + sib, true},
 		{"stray paren in a quoted token, harmless command behind it", `y=$(echo ")" ) ls ` + sib, false},
 		{"stray paren in a quoted token, echo behind it", `y=$(echo ")" ) echo hi`, false},
+		// gt-j21h4: an env -S payload is a command line the shell runs, so the rm
+		// in it is judged; a flag before -S and a glued -S are read the same way.
+		{"rm in an env -S payload", `env -S 'rm -rf ` + sib + `'`, true},
+		{"rm in a glued env -S payload", `env -S'rm -rf ` + sib + `'`, true},
+		{"rm in an env -S payload behind a launcher flag", `env -i -S 'rm -rf ` + sib + `'`, true},
+		{"cp in an env -S payload", `env -S 'cp a.go ` + sib + `'`, true},
+		{"read of a sibling in an env -S payload", `env -S 'cat ` + sib + `'`, false},
+		{"rm of the own worktree in an env -S payload", `env -S 'rm -rf ` + filepath.Join(p.worktree, "x.go") + `'`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1233,6 +1241,36 @@ func TestSegmentCommandWord(t *testing.T) {
 		if word, _ := segmentCommandWord(tt.segment); word != tt.want {
 			t.Errorf("%s: command word = %q, want %q", tt.name, word, tt.want)
 		}
+	}
+}
+
+// TestSegmentCommandWordStepsOverLauncherTable pins gt-j21h4: every launcher in
+// prWorkflowLaunchers that segmentCommandWord reaches is stepped over with each
+// of its value flags, so a launcher's flags cannot hide the command behind them.
+// Launchers the skip list does not reach (timeout, doas, xargs and the rest)
+// are left to prWorkflowCommand and are not covered here.
+func TestSegmentCommandWordStepsOverLauncherTable(t *testing.T) {
+	t.Parallel()
+	reached := 0
+	for name, launcher := range prWorkflowLaunchers {
+		if !skipsToCommand(name) {
+			continue
+		}
+		reached++
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			segment := []string{name}
+			for flag := range launcher.valueFlags {
+				segment = append(segment, flag, "value")
+			}
+			segment = append(segment, "bash")
+			if word, _ := segmentCommandWord(segment); word != "bash" {
+				t.Errorf("segmentCommandWord(%q) = %q, want %q", segment, word, "bash")
+			}
+		})
+	}
+	if reached == 0 {
+		t.Fatal("no launcher in prWorkflowLaunchers is reached by segmentCommandWord")
 	}
 }
 
