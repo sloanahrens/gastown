@@ -28,7 +28,8 @@ Blocked, in any chain, launcher, shell -c payload, eval or command substitution:
   - git credential fill, and the git credential helper run directly
   - a python/node/ruby/perl/awk one-liner that reads the whole environment, a
     secret-like variable, or a credential file, or passes a shell command that
-    prints the environment to a shell-out such as os.system or child_process
+    prints the environment to a shell-out such as os.system or child_process;
+    also when run through uv run, uv tool run, uvx, npx or pipx run
   - jq whose filter is env or $ENV
 
 Exit codes:
@@ -270,6 +271,13 @@ func sandboxSecretsSegment(segment []string) (reason string, payloads, argv []st
 		name := strings.ToLower(filepath.Base(word))
 		launcher, ok := prWorkflowLaunchers[name]
 		if !ok {
+			if inner, payload, runs := sandboxSecretsPackageRunner(name, seg[1:]); runs {
+				if payload != "" {
+					payloads = append(payloads, payload)
+				}
+				seg = inner
+				continue
+			}
 			return sandboxSecretsInvocation(seg), payloads, seg
 		}
 		if name == "env" && sandboxSecretsEnvWouldPrint(seg[1:]) {
@@ -282,6 +290,136 @@ func sandboxSecretsSegment(segment []string) (reason string, payloads, argv []st
 		}
 	}
 	return "", payloads, nil
+}
+
+// sandboxSecretsRunnerPayloadFlags are the flags whose value is a command line
+// the shell runs: npx -c 'env'. Only npx reads them so
+// (sandboxSecretsSkipRunnerPayload drops them for npx alone), because uv's -c
+// is --constraints, whose value is a file.
+var sandboxSecretsRunnerPayloadFlags = map[string]bool{"-c": true, "--call": true}
+
+// sandboxSecretsPackageRunner looks through the package runners that start the
+// command behind them, uv run, uv tool run, uvx, npx and pipx run, as
+// skipLauncherArgs does for a launcher. runs is false when the word is not a
+// runner or its subcommand runs nothing (uv pip install). inner is the command
+// the runner starts, from its name on; payload is the command line npx -c
+// hands to a shell.
+func sandboxSecretsPackageRunner(name string, args []string) (inner []string, payload string, runs bool) {
+	switch name {
+	case "uv", "pipx":
+		// run is the subcommand that starts a command, and uv tool run spells
+		// it with tool in front. It is read wherever it stands, not as the
+		// first word: the value of a flag ahead of it (uv --directory sub run)
+		// looks the same as it does, and no flag table can know every flag's
+		// arity, so a first-word reading would hide the command behind any
+		// flag the table lists wrongly.
+		i := sandboxSecretsWordIndex(args, "run")
+		if i < 0 {
+			return nil, "", false
+		}
+		args = args[i+1:]
+	case "uvx":
+	case "npx":
+		args, payload = sandboxSecretsSkipRunnerPayload(args)
+	default:
+		return nil, "", false
+	}
+	return sandboxSecretsRunnerCommand(args), payload, true
+}
+
+// sandboxSecretsRunnerCommand returns the command a package runner starts, from
+// its name on. The runner's own flags and their values stand ahead of it, and
+// the arity of a flag not in any table is not knowable: its value looks exactly
+// like the command. So the command is the first word that names one this guard
+// judges (sandboxSecretsNamesCommand), wherever it stands, rather than the first
+// word after the flags. When no word names one, the command is the first word
+// that is not a flag, and judging that blocks nothing.
+//
+// The cost of reading past a value is that a command named only as somebody's
+// argument is judged as that command. The guard errs toward judging more: a
+// value that hides an interpreter is the failure this function exists to
+// prevent, while a word such as pytest's -k pattern costs the agent a block
+// message that names the rule and says to escalate.
+func sandboxSecretsRunnerCommand(args []string) []string {
+	var first []string
+	for i, a := range args {
+		if len(a) > 0 && a[0] == '-' {
+			continue
+		}
+		if first == nil {
+			first = args[i:]
+		}
+		if sandboxSecretsNamesCommand(a) {
+			return append([]string{sandboxSecretsCommandWord(a)}, args[i+1:]...)
+		}
+	}
+	return first
+}
+
+// sandboxSecretsCommandWord strips the version a package runner names after the
+// command it starts: npx node@20, pipx run black==24.1. An @ inside a path is
+// part of the path, not a version.
+func sandboxSecretsCommandWord(word string) string {
+	if i := strings.Index(word, "=="); i > 0 {
+		word = word[:i]
+	}
+	if i := strings.LastIndex(word, "@"); i > 0 && !strings.Contains(word[i+1:], "/") {
+		word = word[:i]
+	}
+	return word
+}
+
+// sandboxSecretsNamesCommand reports whether the word names a command this guard
+// judges, or one that runs the command behind it.
+func sandboxSecretsNamesCommand(word string) bool {
+	name := strings.ToLower(filepath.Base(sandboxSecretsCommandWord(word)))
+	switch name {
+	case "env", "printenv", "set", "export", "declare", "typeset", "compgen",
+		"echo", "printf", "print", "curl", "wget", "http", "https", "jq", "git",
+		".githelper", "eval", "uv", "uvx", "npx", "pipx":
+		return true
+	}
+	if sandboxSecretsEnvReaders[name] || sandboxSecretsIsScriptRunner(name) || shellInvokers[name] {
+		return true
+	}
+	_, launcher := prWorkflowLaunchers[name]
+	return launcher
+}
+
+// sandboxSecretsWordIndex returns the index of the first word in args that is
+// exactly word, or -1.
+func sandboxSecretsWordIndex(args []string, word string) int {
+	for i, a := range args {
+		if a == word {
+			return i
+		}
+	}
+	return -1
+}
+
+// sandboxSecretsSkipRunnerPayload drops npx's -c/--call flag and the command
+// line it carries, given as its own word (npx -c 'env') or attached to the flag
+// (-cenv, -c=env, --call=env), and returns the words that remain with that
+// command line.
+func sandboxSecretsSkipRunnerPayload(args []string) (rest []string, payload string) {
+	rest = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case sandboxSecretsRunnerPayloadFlags[a]:
+			if i+1 < len(args) {
+				payload = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(a, "--call="):
+			payload = strings.TrimPrefix(a, "--call=")
+		case len(a) > 2 && strings.HasPrefix(a, "-c") && a[1] != '-':
+			payload = strings.TrimPrefix(a[2:], "=")
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return rest, payload
 }
 
 func sandboxSecretsInvocation(argv []string) string {
