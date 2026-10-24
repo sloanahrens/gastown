@@ -76,6 +76,8 @@ func tapGuardSandboxSecrets(stdin io.Reader, stderr io.Writer, proc guardProcess
 var (
 	// sandboxSecretsVarRefRe finds the variable names a word expands: $NAME, ${NAME}.
 	sandboxSecretsVarRefRe = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)`)
+	// sandboxSecretsVarRefAtRe matches a variable reference at the start of the text it is given.
+	sandboxSecretsVarRefAtRe = regexp.MustCompile(`^\$\{?([A-Za-z_][A-Za-z0-9_]*)`)
 	// sandboxSecretsHereStringRe matches a here-string operator, with an optional file
 	// descriptor, and captures the operand glued to it: <<<"$X" tokenizes as <<<$X.
 	sandboxSecretsHereStringRe = regexp.MustCompile(`^[0-9]*<<<(.*)$`)
@@ -263,7 +265,7 @@ var sandboxSecretsScriptRunners = map[string]bool{
 // sandboxSecretsReason names why the command would print the environment or a
 // secret, or "" when it would not.
 func sandboxSecretsReason(command string) string {
-	if sandboxSecretsProcEnvironRe.MatchString(command) {
+	if sandboxSecretsProcEnvironRe.MatchString(sandboxSecretsReadableText(command)) {
 		return "it reads a process's environment block"
 	}
 	reason, tooDeep := sandboxSecretsWalk(command, 0, nil)
@@ -288,14 +290,18 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	if tainted == nil {
 		tainted = map[string]bool{}
 	}
+	expanded := sandboxSecretsExpandedNames(command)
 	var payloads []string
+	var previous []string // the argv of the segment before this one, which a shell here may read
 	for _, segment := range splitShellSegments(tokens) {
-		r, launched, argv := sandboxSecretsSegment(segment, tainted)
+		r, launched, argv := sandboxSecretsSegment(segment, tainted, expanded)
 		if r != "" {
 			return r, false
 		}
 		sandboxSecretsTaint(segment, tainted)
 		payloads = append(payloads, launched...)
+		fed := previous
+		previous = argv
 		if len(argv) == 0 {
 			continue
 		}
@@ -304,6 +310,9 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 		case shellInvokers[name]:
 			if idx := shellCPayloadIndex(toLowerTokens(argv[1:])); idx >= 0 {
 				payloads = append(payloads, argv[1+idx])
+			}
+			if text := sandboxSecretsPrintedText(fed); text != "" {
+				payloads = append(payloads, text)
 			}
 		case sandboxSecretsIsScriptRunner(name):
 			// A script that shells out runs the strings it passes, so each one is judged as a command.
@@ -338,7 +347,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 // no command behind it. It returns the verdict on the command it finds, the
 // payloads a launcher carries, and that command's argv. tainted names the
 // variables the whole command assigns a secret to.
-func sandboxSecretsSegment(segment []string, tainted map[string]bool) (reason string, payloads, argv []string) {
+func sandboxSecretsSegment(segment []string, tainted, expanded map[string]bool) (reason string, payloads, argv []string) {
 	if sandboxSecretsHereStringRefsSecret(segment) {
 		return "a here-string expands a secret variable", nil, nil
 	}
@@ -359,7 +368,7 @@ func sandboxSecretsSegment(segment []string, tainted map[string]bool) (reason st
 				seg = inner
 				continue
 			}
-			return sandboxSecretsInvocation(seg, tainted), payloads, seg
+			return sandboxSecretsInvocation(seg, tainted, expanded), payloads, seg
 		}
 		if name == "env" && sandboxSecretsEnvWouldPrint(seg[1:]) {
 			return "env prints the environment", nil, nil
@@ -503,7 +512,7 @@ func sandboxSecretsSkipRunnerPayload(args []string) (rest []string, payload stri
 	return rest, payload
 }
 
-func sandboxSecretsInvocation(argv []string, tainted map[string]bool) string {
+func sandboxSecretsInvocation(argv []string, tainted, expanded map[string]bool) string {
 	name := strings.ToLower(filepath.Base(argv[0]))
 	args := argv[1:]
 	switch name {
@@ -540,7 +549,7 @@ func sandboxSecretsInvocation(argv []string, tainted map[string]bool) string {
 		}
 	case "echo", "printf", "print":
 		for _, a := range args {
-			if sandboxSecretsRefsSecret(a) {
+			if sandboxSecretsExpandsSecret(a, expanded) {
 				return name + " of a secret variable"
 			}
 		}
@@ -849,7 +858,14 @@ func sandboxSecretsEnvWouldPrint(args []string) bool {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
-		case a == "-u" || a == "-C" || a == "-S" || a == "--unset" || a == "--chdir":
+		case a == "-S" || a == "--split-string":
+			// The value is the command line env runs, judged as a payload of its own.
+			return i+1 >= len(args) || strings.TrimSpace(args[i+1]) == ""
+		case strings.HasPrefix(a, "--split-string="):
+			return strings.TrimSpace(strings.TrimPrefix(a, "--split-string=")) == ""
+		case strings.HasPrefix(a, "-S"):
+			return strings.TrimSpace(a[2:]) == ""
+		case a == "-u" || a == "-C" || a == "--unset" || a == "--chdir":
 			i++ // the option's value
 		case strings.HasPrefix(a, "-"):
 		case strings.Contains(a, "="):
@@ -858,6 +874,119 @@ func sandboxSecretsEnvWouldPrint(args []string) bool {
 		}
 	}
 	return true
+}
+
+// sandboxSecretsExpandedNames returns the variables the command expands: $NAME and
+// ${NAME} outside single quotes, since bare and double-quoted text both expand. A
+// single-quoted word is literal, so echo '$TOKEN' reads no variable. A backslash
+// escapes the next character outside single quotes. It returns nil when the quoting
+// does not balance, and the caller then judges every name as expanded.
+func sandboxSecretsExpandedNames(command string) map[string]bool {
+	names := map[string]bool{}
+	inSingle, inDouble := false, false
+	for i := 0; i < len(command); i++ {
+		switch c := command[i]; {
+		case inSingle:
+			inSingle = c != '\''
+		case c == '\\':
+			i++
+		case c == '\'' && !inDouble:
+			inSingle = true
+		case c == '"':
+			inDouble = !inDouble
+		case c == '$':
+			if m := sandboxSecretsVarRefAtRe.FindStringSubmatch(command[i:]); m != nil {
+				names[m[1]] = true
+			}
+		}
+	}
+	if inSingle || inDouble {
+		return nil
+	}
+	return names
+}
+
+// sandboxSecretsExpandsSecret reports whether the word expands a secret-like variable that
+// the command expands outside single quotes (sandboxSecretsExpandedNames). A nil set means
+// the quoting did not balance, so the word is judged by its names alone.
+func sandboxSecretsExpandsSecret(word string, expanded map[string]bool) bool {
+	for _, m := range sandboxSecretsVarRefRe.FindAllStringSubmatch(word, -1) {
+		if sandboxSecretsIsSecretName(m[1]) && (expanded == nil || expanded[m[1]]) {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxSecretsReadableText returns the command one segment at a time, as the environ-path
+// check reads it: quotes are gone and each segment's words are joined, so a path split by
+// quotes or by a substitution is still one path. Left out are a git commit's -m or --message
+// values, which git writes into the commit and opens no file for. A value that runs a
+// substitution stays in, because the shell runs the substitution.
+func sandboxSecretsReadableText(command string) string {
+	var b strings.Builder
+	for _, segment := range splitShellSegments(shellTokenize(command)) {
+		skip := sandboxSecretsCommitMessages(segment)
+		for i, word := range segment {
+			if !skip[i] {
+				b.WriteString(word)
+				b.WriteByte(' ')
+			}
+		}
+		b.WriteString("; ")
+	}
+	return b.String()
+}
+
+// sandboxSecretsCommitMessages marks the words of a git commit segment that are its -m or
+// --message value: -mTEXT, --message=TEXT, and the word after -m or --message.
+func sandboxSecretsCommitMessages(segment []string) []bool {
+	skip := make([]bool, len(segment))
+	if len(segment) == 0 || strings.ToLower(filepath.Base(segment[0])) != "git" || sandboxSecretsWordIndex(segment, "commit") < 0 {
+		return skip
+	}
+	for i := 1; i < len(segment); i++ {
+		word := segment[i]
+		switch {
+		case word == "-m" || word == "--message":
+			if i+1 < len(segment) {
+				skip[i+1] = !sandboxSecretsRunsSubstitution(segment[i+1])
+			}
+			i++
+		case strings.HasPrefix(word, "--message="):
+			skip[i] = !sandboxSecretsRunsSubstitution(strings.TrimPrefix(word, "--message="))
+		case strings.HasPrefix(word, "-m") && !strings.HasPrefix(word, "--"):
+			skip[i] = !sandboxSecretsRunsSubstitution(word[2:])
+		}
+	}
+	return skip
+}
+
+// sandboxSecretsRunsSubstitution reports whether the text has a command substitution the
+// shell would run.
+func sandboxSecretsRunsSubstitution(text string) bool {
+	return strings.Contains(text, "$(") || strings.Contains(text, "`")
+}
+
+// sandboxSecretsEscapes turns the escapes that make a line break or a tab in an echo or
+// printf argument into the characters themselves.
+var sandboxSecretsEscapes = strings.NewReplacer(`\n`, "\n", `\t`, "\t")
+
+// sandboxSecretsPrintedText returns the text an echo or printf writes, given its argv, or
+// "" for any other command. A shell that reads that text runs it as a script, so echo
+// printenv | sh is judged as printenv. Leading options (echo -e) are dropped.
+func sandboxSecretsPrintedText(argv []string) string {
+	if len(argv) == 0 {
+		return ""
+	}
+	if name := strings.ToLower(filepath.Base(argv[0])); name != "echo" && name != "printf" {
+		return ""
+	}
+	args := argv[1:]
+	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		args = args[1:]
+	}
+	return sandboxSecretsEscapes.Replace(strings.Join(args, " "))
 }
 
 // sandboxSecretsHasAnyFlag reports whether args carry one of the flags. A short

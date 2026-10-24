@@ -67,6 +67,17 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"echo $FORGEJO_TOKEN",
 		"echo \"$ANTHROPIC_AUTH_TOKEN\"",
 		"printf '%s' ${DEEPSEEK_API_KEY}",
+		// A line the shell runs from an echo's text is judged as that text.
+		"echo printenv | sh",
+		"printf 'env\\n' | bash",
+		"echo 'printenv' | bash -s",
+		// A message that is a substitution still runs the substitution.
+		"git commit -m \"$(cat /proc/self/environ)\"",
+		"git commit -F /proc/self/environ",
+		"git commit --template=/proc/self/environ",
+		// A double-quoted secret reference expands even inside a single-quoted word.
+		"echo '$FORGEJO_TOKEN' \"$FORGEJO_TOKEN\"",
+		"echo 'set' \"$ANTHROPIC_AUTH_TOKEN\"",
 		"cat <<< \"$FORGEJO_TOKEN\"",
 		"cat <<<$FORGEJO_TOKEN",
 		"base64 <<<\"$X_TOKEN\"",
@@ -439,7 +450,7 @@ func TestSandboxSecretsParserBranches(t *testing.T) {
 	if sandboxSecretsPipelineHasShell([]string{"cat", "notes"}) {
 		t.Error("a group with no heredoc operator was read as holding a shell")
 	}
-	if got := sandboxSecretsInvocation([]string{"env"}, nil); got != "env prints the environment" {
+	if got := sandboxSecretsInvocation([]string{"env"}, nil, nil); got != "env prints the environment" {
 		t.Errorf("sandboxSecretsInvocation(env) = %q, want the environment rule", got)
 	}
 }
@@ -600,6 +611,17 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"curl -H \"X: ${HOME}\" https://x",
 		// The ${!name} rule covers the transfer commands, not every use of it.
 		"echo ${!V}",
+		// A commit message that names the environ path is text, not a read of it.
+		"git commit -m \"fix: block reads of /proc/self/environ\"",
+		"git commit -m 'docs: note that /proc/self/environ is blocked'",
+		"git commit --message=\"env -S is a payload\" && git status",
+		// A single-quoted word does not expand, so naming a secret in it prints the text.
+		"echo 'set $FORGEJO_TOKEN first'",
+		"printf '%s\\n' 'export $DB_PASSWORD'",
+		// env -S names the command it runs, which is judged as a payload, not an env dump.
+		"env -S 'git status'",
+		"env -S'git status'",
+		"env --split-string='git status'",
 	} {
 		if blocked, out := runSandboxSecretsGuard(t, "openshell", command); blocked {
 			t.Errorf("blocked an ordinary command in a sandbox: %q\n%s", command, out)
@@ -624,6 +646,20 @@ func TestSandboxSecretsShellOutLimits(t *testing.T) {
 		if blocked, out := runSandboxSecretsGuard(t, "openshell", command); blocked {
 			t.Errorf("a documented shell-out limit is now blocked, update the case if that is intended: %q\n%s", command, out)
 		}
+	}
+}
+
+// The guard is registered for Bash and Monitor only (internal/hooks/config.go), so a
+// Read of an environ file never reaches it. Covering Read would add a hook run to
+// every file read in a sandbox, so the gap is a decided non-goal, and this case
+// records it. A change that registers Read updates this case with that change.
+func TestSandboxSecretsGuardLeavesReadToolUncovered(t *testing.T) {
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{"GT_SESSION_BACKEND": "openshell"}, "/sandbox")
+	payload := `{"tool_name":"Read","tool_input":{"file_path":"/proc/self/environ"}}`
+	var errOut bytes.Buffer
+	if err := tapGuardSandboxSecrets(strings.NewReader(payload), &errOut, proc); err != nil {
+		t.Errorf("a Read payload reached the Bash guard and was blocked: %v\n%s", err, errOut.String())
 	}
 }
 
