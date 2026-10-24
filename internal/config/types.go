@@ -1760,19 +1760,21 @@ func (p SandboxProfile) Validate(name string) error {
 var (
 	sandboxCPURe    = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?m?$`)
 	sandboxMemoryRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?(k|[KMGTPE]i|[MGTPE]|m)?$`)
-	// sandboxForgejoHostRe is a bare host name: one or more DNS characters,
-	// starting and ending with a letter or digit. A port belongs to the rig's
-	// remote URL, and an IPv6 literal has no sandbox path to support it.
-	sandboxForgejoHostRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
+	// sandboxForgejoHostRe is a bare host name: dot-separated labels of letters,
+	// digits and hyphens, each starting and ending with a letter or digit. A
+	// port belongs to the rig's remote URL, and an IPv6 literal has no sandbox
+	// path to support it.
+	sandboxForgejoHostRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$`)
 )
 
 // ValidSandboxForgejoHost reports whether host is a bare host name a sandbox
-// profile may set in forgejo_host; SandboxProfile.Validate, polecat's
-// hostAuthority and session's SandboxRepoHost all decide "a valid Forgejo host"
-// with it, so a host that loads is one the sandbox clone URL and its git
-// credential helper both accept.
+// profile may set in forgejo_host. SandboxProfile.Validate, polecat's
+// hostAuthority and session's SandboxRepoHost each call it for the host part,
+// so a host that loads is one the sandbox clone URL and its git credential
+// helper both accept. The port the helper also takes is not part of this rule:
+// it comes from the rig's remote URL, and session checks it separately.
 func ValidSandboxForgejoHost(host string) bool {
-	return sandboxForgejoHostRe.MatchString(host)
+	return len(host) <= 253 && sandboxForgejoHostRe.MatchString(host)
 }
 
 // PolecatPool is the town's polecat seat map: which agents run polecats, how

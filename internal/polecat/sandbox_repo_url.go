@@ -3,7 +3,6 @@ package polecat
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"strings"
 
@@ -50,26 +49,19 @@ func sandboxRepoURL(rigName, remoteURL, forgejoHost string) (string, error) {
 	return u.String(), nil
 }
 
-// hostAuthority is host with port, if any, as a URL authority. An IPv6 literal
-// is bracketed, since url.URL.Host requires it and a bare "fd00::1" otherwise
-// yields "http://fd00::1/x", whose host is the empty string. Every other host
-// must pass config.ValidSandboxForgejoHost: a profile's forgejo_host arrives
-// checked, but the control-plane host it falls back to does not, so
-// "forgejo:3000" is refused rather than bracketed or joined into
+// hostAuthority is host with port, if any, as a URL authority. The host must
+// pass config.ValidSandboxForgejoHost, the rule the sandbox's git credential
+// helper also holds the clone URL to: a profile's forgejo_host arrives checked,
+// but the control-plane host it falls back to does not. An IPv6 literal is
+// refused with the rest, since the helper cannot answer for a bracketed
+// authority; "forgejo:3000" is refused rather than joined into
 // "forgejo:3000:3000".
 func hostAuthority(host, port string) (string, error) {
-	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-	switch {
-	case config.ValidSandboxForgejoHost(host):
-	case net.ParseIP(host) != nil && strings.Contains(host, ":"):
-	default:
-		return "", fmt.Errorf("sandbox clone host %q: want a bare host name or an IPv6 literal", host)
+	if !config.ValidSandboxForgejoHost(host) {
+		return "", fmt.Errorf("sandbox clone host %q: want a bare host name (letters, digits, dots and hyphens); a port comes from the rig's remote and an IPv6 literal is not supported", host)
 	}
 	if port != "" {
-		return net.JoinHostPort(host, port), nil
-	}
-	if strings.Contains(host, ":") {
-		return "[" + host + "]", nil
+		return host + ":" + port, nil
 	}
 	return host, nil
 }

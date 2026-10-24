@@ -299,7 +299,7 @@ func TestRepoHostIsTheCloneURLsHostAndPort(t *testing.T) {
 	if got, err := SandboxRepoHost("http://host.docker.internal:3000/sloan/gastown.git"); err != nil || got != "host.docker.internal:3000" {
 		t.Errorf("SandboxRepoHost = %q, %v; want host.docker.internal:3000", got, err)
 	}
-	for _, bad := range []string{"", "not a url", "http:///no-host", `http://evil"; rm -rf /;:3000/x`, "http://a b:3000/x", "http://host:3000:1/x", "http://ho$(id)st:3000/x", "http://host:99999999/x", "http://-host:3000/x"} {
+	for _, bad := range []string{"", "not a url", "http:///no-host", `http://evil"; rm -rf /;:3000/x`, "http://a b:3000/x", "http://host:3000:1/x", "http://ho$(id)st:3000/x", "http://host:99999999/x", "http://-host:3000/x", "http://a..b:3000/x", "http://[fd00::1]:3000/x"} {
 		if got, err := SandboxRepoHost(bad); err == nil {
 			t.Errorf("SandboxRepoHost(%q) = %q, nil; want an error (the host goes into the helper script)", bad, got)
 		}

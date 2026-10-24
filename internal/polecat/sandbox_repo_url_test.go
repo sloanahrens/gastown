@@ -30,12 +30,13 @@ func TestSandboxRepoURL(t *testing.T) {
 		{name: "no port stays portless", remote: "http://forgejo/sloan/gastown", want: "http://host.docker.internal/sloan/gastown"},
 		{name: "userinfo dropped", remote: "http://bot:s3cret@forgejo:3000/sloan/gastown.git", want: "http://host.docker.internal:3000/sloan/gastown.git"},
 		{name: "surrounding space trimmed", remote: "  http://forgejo:3000/sloan/gastown.git\n", want: "http://host.docker.internal:3000/sloan/gastown.git"},
-		{name: "ipv6 control-plane host bracketed with the port", remote: "http://forgejo:3000/sloan/gastown.git", host: "fd00::1", want: "http://[fd00::1]:3000/sloan/gastown.git"},
-		{name: "ipv6 control-plane host bracketed portless", remote: "https://forgejo/sloan/gastown.git", host: "fd00::1", want: "https://[fd00::1]/sloan/gastown.git"},
-		{name: "bracketed ipv6 control-plane host kept single-bracketed", remote: "http://forgejo:3000/sloan/gastown.git", host: "[fd00::1]", want: "http://[fd00::1]:3000/sloan/gastown.git"},
-		{name: "host with a port rejected", remote: "http://forgejo:3000/sloan/gastown.git", host: "forgejo:3000", wantErr: "want a bare host name or an IPv6 literal"},
-		{name: "host with an underscore rejected", remote: "http://forgejo:3000/sloan/gastown.git", host: "forgejo_1", wantErr: "want a bare host name or an IPv6 literal"},
-		{name: "host with a space rejected", remote: "http://forgejo:3000/sloan/gastown.git", host: "forgejo internal", wantErr: "want a bare host name or an IPv6 literal"},
+		{name: "ipv6 control-plane host rejected: the helper cannot answer for a bracketed authority", remote: "http://forgejo:3000/sloan/gastown.git", host: "fd00::1", wantErr: "an IPv6 literal is not supported"},
+		{name: "ipv6 control-plane host rejected portless", remote: "https://forgejo/sloan/gastown.git", host: "fd00::1", wantErr: "an IPv6 literal is not supported"},
+		{name: "bracketed ipv6 control-plane host rejected", remote: "http://forgejo:3000/sloan/gastown.git", host: "[fd00::1]", wantErr: "an IPv6 literal is not supported"},
+		{name: "host with a port rejected", remote: "http://forgejo:3000/sloan/gastown.git", host: "forgejo:3000", wantErr: "want a bare host name"},
+		{name: "host with an underscore rejected", remote: "http://forgejo:3000/sloan/gastown.git", host: "forgejo_1", wantErr: "want a bare host name"},
+		{name: "host with a space rejected", remote: "http://forgejo:3000/sloan/gastown.git", host: "forgejo internal", wantErr: "want a bare host name"},
+		{name: "host with an empty label rejected", remote: "http://forgejo:3000/sloan/gastown.git", host: "forgejo..internal", wantErr: "want a bare host name"},
 		{name: "ssh url rejected", remote: "ssh://git@forgejo:2222/sloan/gastown.git", wantErr: "not an http(s) URL"},
 		{name: "scp-style remote rejected", remote: "git@forgejo:sloan/gastown.git", wantErr: "not a URL"},
 		{name: "empty rejected", remote: "", wantErr: "not an http(s) URL"},
@@ -74,17 +75,23 @@ func TestSandboxRepoURL(t *testing.T) {
 // helper takes the host back out of that URL (gt-qhxm6).
 func TestForgejoHostAgrees(t *testing.T) {
 	t.Parallel()
+	remotes := []struct{ remote, port string }{
+		{"http://forgejo:3000/sloan/gastown.git", ":3000"},
+		{"https://forgejo.example/sloan/gastown.git", ""},
+	}
 	for _, host := range []string{"forgejo", "forgejo.internal", "Forgejo-1.example.test", "host.docker.internal", "127.0.0.1"} {
 		p := config.SandboxProfile{Image: "i", Policy: "deploy/p.yaml", ForgejoHost: host}
 		if err := p.Validate("p"); err != nil {
 			t.Fatalf("Validate(%q) = %v; want the host accepted", host, err)
 		}
-		repoURL, err := sandboxRepoURL("gastown", "http://forgejo:3000/sloan/gastown.git", host)
-		if err != nil {
-			t.Fatalf("sandboxRepoURL with forgejo host %q = %v", host, err)
-		}
-		if got, err := session.SandboxRepoHost(repoURL); err != nil || got != host+":3000" {
-			t.Errorf("a profile host %q validates but its clone URL %q gives the helper %q, %v; want %q", host, repoURL, got, err, host+":3000")
+		for _, r := range remotes {
+			repoURL, err := sandboxRepoURL("gastown", r.remote, host)
+			if err != nil {
+				t.Fatalf("sandboxRepoURL(%q) with forgejo host %q = %v", r.remote, host, err)
+			}
+			if got, err := session.SandboxRepoHost(repoURL); err != nil || got != host+r.port {
+				t.Errorf("a profile host %q validates but its clone URL %q gives the helper %q, %v; want %q", host, repoURL, got, err, host+r.port)
+			}
 		}
 	}
 }

@@ -167,7 +167,8 @@ var gitEmailRe = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9][A-Za-z0-9.-]
 // SandboxRepoHost is the host:port of a sandbox clone URL, the one host the
 // git credential helper answers for; the host goes into the helper script
 // unquoted, so it must pass config.ValidSandboxForgejoHost, the rule polecat's
-// hostAuthority writes a profile's forgejo_host under.
+// hostAuthority writes a profile's forgejo_host under. It is exported so
+// polecat's TestForgejoHostAgrees can feed it the clone URLs polecat builds.
 func SandboxRepoHost(repoURL string) (string, error) {
 	u, err := url.Parse(repoURL)
 	if err == nil {
