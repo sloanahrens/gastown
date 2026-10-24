@@ -867,6 +867,39 @@ func TestPolecatPathGuardRefusesTooManyReadings(t *testing.T) {
 	}
 }
 
+// TestPolecatPathGuardRefusesTooManyCarriedDirs: the directories of every
+// reading carry into the next segment, and that union is bounded too. Each
+// reading below stays within the cap on its own, so only the union of all of
+// them can be refused (gt-f6i8t).
+func TestPolecatPathGuardRefusesTooManyCarriedDirs(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	scope, ok := resolvePolecatPathScope(p.worktree, p.proc())
+	if !ok {
+		t.Fatalf("resolvePolecatPathScope(%q) not found, want the test town's scope", p.worktree)
+	}
+	// A cd to an absolute path adds one directory per reading, so the readings
+	// are what take the union over the cap, not any one reading.
+	for i := 0; i < maxWalkDirs-6; i++ {
+		scope.dirs = append(scope.dirs, filepath.Join(p.root, fmt.Sprintf("carried%d", i)))
+	}
+	// Each stray ")" is a reading of the segment whose cd the shell may run.
+	command := func(readings int) string {
+		parts := []string{"X=$(a"}
+		for i := 0; i < readings; i++ {
+			parts = append(parts, ") cd "+filepath.Join(p.root, fmt.Sprintf("cd%d", i)))
+		}
+		return strings.Join(parts, " ")
+	}
+	if reason := scope.checkBashCommand(command(6), 0); reason != "" {
+		t.Fatalf("six readings from %d carried dirs: refused with %q, want allowed at the cap", maxWalkDirs-6, reason)
+	}
+	reason := scope.checkBashCommand(command(7), 0)
+	if !strings.Contains(reason, "too many directory changes") {
+		t.Fatalf("seven readings from %d carried dirs: reason %q, want the too-many-directory-changes refusal", maxWalkDirs-6, reason)
+	}
+}
+
 // TestScanCommandVars pins what the assignment scanner sees, since a name it
 // misses is a name the guard resolves from a stale environment, and a name it
 // invents would refuse a legitimate literal target.

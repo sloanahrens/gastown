@@ -284,13 +284,10 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 		groups = append(groups, readings)
 	}
 	for _, readings := range groups {
-		// The readings are alternatives to one another, so each starts from the
-		// directory its segment starts in (gt-lhn14). Shadowing the scope inside
-		// the loop makes every reading start from entry: a later reading cannot
-		// inherit where an earlier one walked. The guard cannot tell which reading
-		// the shell takes, so the next segment is judged from the directories of
-		// all of them: a stray ')' can make reading 0 miss the cd that reading 1
-		// finds (gt-8lv66).
+		// A reading is an alternative the shell may take, not a step in the
+		// sequence: each starts where the segment starts, and the directories of
+		// every reading carry into the next segment because the guard cannot tell
+		// which one ran (gt-8lv66).
 		entry := s
 		carried := s
 		for _, segment := range readings {
@@ -385,9 +382,7 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 					}
 				}
 			}
-			if len(s.dirs) > 0 {
-				carried.dirs = unionDirs(carried.dirs, s.dirs)
-			}
+			carried.dirs = unionDirs(carried.dirs, s.dirs)
 		}
 		if len(carried.dirs) > maxWalkDirs {
 			return "too many directory changes to follow in one command — split it into commands that each stay in one directory"
