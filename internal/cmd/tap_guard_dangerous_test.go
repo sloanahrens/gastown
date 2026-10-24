@@ -1829,6 +1829,47 @@ func TestHeredocBodyStaysOpaqueWithoutAShellReader(t *testing.T) {
 	}
 }
 
+// TestHeredocOperatorLineEndHonorsEscapesAndComments pins where the operator's
+// line ends, which decides where the shell reads the body. An even run of
+// backslashes escapes itself, so the newline after "\\" ends the line. A
+// backslash inside a "#" comment is comment text, not a continuation, and a
+// "#" inside quotes starts no comment. A misplaced end either judges a data
+// body as command text or leaves the command after the real terminator
+// unjudged (gt-jnomk).
+func TestHeredocOperatorLineEndHonorsEscapesAndComments(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// The newline ends the line, so the terminator is directly below and
+		// the rm is a command of its own, not an unterminated body.
+		{"escaped backslash before the newline ends the operator line", "cat <<'EOF' \\\\\nEOF\nsudo rm -rf /tmp", true},
+		{"backslash ending a comment does not continue the operator line", "cat <<'EOF' # note \\\nEOF\nsudo rm -rf /tmp", true},
+		// The body is cat's input, so it is data, not a command to judge.
+		{"body under a comment ending in a backslash stays data", "cat <<'EOF' # note \\\nsudo rm -rf /tmp\nEOF", false},
+		{"body after an escaped backslash stays data", "cat <<'EOF' \\\\\nsudo rm -rf /tmp\nEOF", false},
+		// The " #" is inside quotes, so the backslash continues the line and
+		// the pipe stage on the next line reads the body.
+		{"hash inside quotes is not a comment", "cat <<'EOF' ' #' \\\n| bash\nsudo rm -rf /tmp\nEOF", true},
+		// The newline inside the open quote is part of the word, so the line
+		// runs on to the continued pipe stage that feeds the body to bash.
+		{"newline inside single quotes does not end the operator line", "cat <<'EOF' 'x\n' \\\n| bash\nsudo rm -rf /tmp\nEOF", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if tt.blocked && reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — the line ends at the newline the shell reads", tt.command)
+			}
+			if !tt.blocked && reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — the body is data", tt.command, reason)
+			}
+		})
+	}
+}
+
 // TestShellFedHeredocRecursesThroughNestedBodies pins that a shell-fed body is
 // judged by the same nested-command walk as a bash -c payload: a shell between
 // the outer body and the dangerous command does not end the inspection.

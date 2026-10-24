@@ -949,15 +949,39 @@ func (w *heredocQuoteWalk) skipTo(to int) {
 }
 
 // heredocLineEnd returns the offset of the newline that ends the logical line
-// containing offset from: the first newline a backslash does not escape, or
-// len(command) when there is none. The shell reads a heredoc body after that
-// newline, so "cat <<EOF \" continued onto a "| bash" line puts the body below
-// the continuation, not below the operator's physical line (gt-f1kny).
+// containing offset from, or len(command) when there is none. The shell reads a
+// heredoc body after that newline, and it ends a line by its own rules for
+// escapes, quotes and comments, so the body is found by the same rules (gt-f1kny,
+// gt-jnomk).
 func heredocLineEnd(command string, from int) int {
+	var quote byte // the open quote mark, or 0 outside quotes
+	comment := false
+	wordStart := false // the byte before i is an unquoted, unescaped word break
 	for i := from; i < len(command); i++ {
-		if command[i] == '\n' && command[i-1] != '\\' {
+		c := command[i]
+		switch {
+		case comment:
+			if c == '\n' {
+				return i
+			}
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			}
+		case c == '\\':
+			i++ // the byte after a backslash is literal, a newline included
+		case quote == '"':
+			if c == '"' {
+				quote = 0
+			}
+		case c == '\n':
 			return i
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '#' && wordStart:
+			comment = true
 		}
+		wordStart = quote == 0 && !comment && strings.IndexByte(" \t;&|(", c) >= 0
 	}
 	return len(command)
 }
