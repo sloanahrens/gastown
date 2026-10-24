@@ -844,7 +844,7 @@ func TestHeldBeadsFromSkipsEpics(t *testing.T) {
 // section parses, listed or not: the standards tree lives in ~/.claude and no
 // polecat edits it (gt-kr17g). A section that is missing, empty or unparsed
 // leaves the bead's paths unread, so the doc stays in the hold set (gt-zs8fq).
-func TestSpecHoldFilesKeepsDocsWhenConstraintsAreUnknown(t *testing.T) {
+func TestSpecHoldFilesDropsDocOnlyWhenConstraintsParse(t *testing.T) {
 	t.Parallel()
 	const standard = "claude/docs/standards/test-engineering.md"
 	cases := []struct {
