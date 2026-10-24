@@ -20,7 +20,8 @@ RESERVED = {"ts", "v", "errors"}
 
 
 def discover(package=sources):
-    """(group, module) for each source module in package, sorted by group. A module without GROUP or collect is an error."""
+    """(group, module) for each source module in package, sorted by group.
+    A module without GROUP or collect is an error, not skipped."""
     found = []
     for info in pkgutil.iter_modules(package.__path__):
         mod = importlib.import_module("%s.%s" % (package.__name__, info.name))

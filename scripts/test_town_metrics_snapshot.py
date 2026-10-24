@@ -1,4 +1,5 @@
-"""Tests for town_metrics.snapshot and its subcommand. Fixtures only: no bd, git, gt or network, and nothing outside a temp dir."""
+"""Tests for town_metrics.snapshot and its subcommand. Fixtures only: no bd, git, gt or network;
+files go in a temp dir."""
 import contextlib
 import datetime as dt
 import importlib
