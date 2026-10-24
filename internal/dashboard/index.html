@@ -298,6 +298,7 @@ a.hrow:hover{background:#19212b}
     <section><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
     <section id="jevsec" data-default-collapsed hidden><h2>JEV · <span class="r" id="jevnote"></span></h2><div class="body" id="jev"></div></section>
+    <section id="mangosec" data-default-collapsed hidden><h2>Mango · <span class="r" id="mangonote"></span></h2><div class="body" id="mango"></div></section>
     <section><h2>Work <span class="r" id="worknote"></span></h2><div class="body" id="work"></div></section>
     <section>
       <h2>Feed <span class="chips" id="chips"></span></h2>
@@ -3399,6 +3400,64 @@ function renderJev(s) {
   for (const b of batteries) body.append(jevRow(b));
 }
 
+// The Mango panel, under the JEV panel and folded until opened: the town-metrics
+// report on which predictors of a landing outcome replicated on the holdout. The
+// title line carries the landings and snapshot hours the analysis covered, its
+// age, and a chip per verdict. The table holds a collection row, whose cell names
+// the panel's state, and one row per target. A stale panel greys its rows. A
+// missing or unreadable panel draws no target rows: the last analysis would pass
+// as current. Every string is the reader's, already stripped and capped, and is
+// set with textContent only.
+function renderMango(s) {
+  const sec = $("mangosec"), box = $("mango"), note = $("mangonote");
+  const m = s.mango;
+  box.replaceChildren();
+  note.className = "r"; note.textContent = ""; note.title = "";
+  sec.hidden = !m;
+  if (!m) return;
+  const stale = m.state === "stale";
+  const read = m.state === "fresh" || stale;
+  if (read) {
+    const c = m.counts || {};
+    const parts = [m.items + (m.items === 1 ? " landing" : " landings"), m.snapshot_hours + " snapshot hours", m.generated_at ? "analysed " + age(m.generated_at) + " ago" : "analysis age unknown", m.note];
+    note.append(document.createTextNode(parts.join(" · ")));
+    const counts = {earning: c.earning || 0, "no-signal": c.no_signal || 0, "not-yet": c.not_yet || 0};
+    for (const v of JV_VERDICTS) note.append(document.createTextNode(" "), jevChip(v, counts[v] + " " + v, JV_MEANING[v]));
+    if (stale) note.className = "r warnc";
+  } else {
+    note.className = m.state === "error" ? "r badc" : "r";
+    note.textContent = m.note;
+  }
+
+  const table = el("table", "jvtable");
+  const head = el("tr");
+  head.append(el("th", "", "target"), el("th", "", "verdict"), el("th", "n", "positives"), el("th", "n", "holdout"), el("th", "n", "baseline"), el("th", "", "best box"));
+  const thead = document.createElement("thead"); thead.append(head); table.append(thead);
+  const body = document.createElement("tbody"); table.append(body);
+  box.append(table);
+
+  const col = el("tr", stale ? "jvstale" : "");
+  col.append(el("td", "jvname", "collection"), el("td"), el("td", "n"), el("td", "n"), el("td", "n"), el("td", m.state === "error" ? "badc" : "empty", m.note));
+  body.append(col);
+  if (read) for (const t of m.targets || []) body.append(mangoRow(t, stale));
+}
+
+// mangoRow draws one target: its verdict chip, its positives, the holdout's rate
+// over its size and the baseline it is measured against, then its best box. A
+// skipped target had too few positives to check a box, so its cells say so.
+function mangoRow(t, stale) {
+  const tr = el("tr", stale ? "jvstale" : "");
+  const verdict = el("td");
+  verdict.append(jevChip(t.verdict, t.verdict, JV_MEANING[t.verdict]));
+  tr.append(el("td", "jvname", t.target), verdict, el("td", "n", String(t.positives)));
+  if (t.skipped) {
+    tr.append(el("td", "n", "-"), el("td", "n", "-"), el("td", "empty", "too few positives to check"));
+  } else {
+    tr.append(el("td", "n", jevPct(t.holdout_rate) + " of " + t.holdout_n), el("td", "n", jevPct(t.baseline)), el("td", "", t.best_box || "-"));
+  }
+  return tr;
+}
+
 // The Cost panel: what the town is spending, in one place. DeepSeek's balance,
 // pace and credit, the Claude plan line and the Jev row under them, the usage
 // scan's estimate and slow runs, the GCP budget alert, and what each om review
@@ -3684,7 +3743,7 @@ function drawQueueList(box, s) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderOM(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
