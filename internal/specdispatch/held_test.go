@@ -122,6 +122,16 @@ func TestHoldFiles(t *testing.T) {
 			want:  nil,
 		},
 		{
+			name:  "an absolute path into the standards tree is reference-only",
+			named: []string{"Users/me/.claude/docs/standards/test-engineering.md"},
+			want:  nil,
+		},
+		{
+			name:  "a path that merely embeds claude/docs mid-segment stays",
+			named: []string{"internal/myclaude/docs/render.go"},
+			want:  []string{"internal/myclaude/docs/render.go"},
+		},
+		{
 			name:   "a reference doc the Constraints section lists stays",
 			named:  []string{standard, "internal/notify/cli.go"},
 			listed: []string{standard},

@@ -108,7 +108,11 @@ func HoldFiles(named, listed []string) []string {
 // IsReferenceDoc reports whether a normalized path names a read-only reference
 // document: the repo's docs/ tree, or the claude/docs standards tree in any
 // spelling it arrives in ("claude/docs/...", "~/.claude/docs/...", an absolute
-// path into it) (gt-6t44f).
+// path into it). The standards tree is matched at a directory boundary, so a
+// source file that merely embeds "claude/docs/" in its name stays a hold path
+// (gt-6t44f, gt-014o6).
 func IsReferenceDoc(path string) bool {
-	return strings.HasPrefix(path, "docs/") || strings.Contains(path, "claude/docs/")
+	return strings.HasPrefix(path, "docs/") ||
+		strings.HasPrefix(path, "claude/docs/") ||
+		strings.Contains(path, "/.claude/docs/")
 }
