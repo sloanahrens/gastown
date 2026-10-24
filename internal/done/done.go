@@ -1107,11 +1107,10 @@ func Run(opts Options) error {
 			return failRun(err)
 		}
 	} else {
-		fmt.Printf("%s Signaling %s\n", style.Bold.Render("→"), exitType)
-		if r.issueID != "" {
-			fmt.Printf("  Issue: %s\n", r.issueID)
+		if r.sessionBackend == backendOpenShell {
+			r.useRealSubmitDeps(opts)
 		}
-		fmt.Printf("  Branch: %s\n", r.branch)
+		signalNonCompletedExit(r, exitType)
 	}
 	return reportDone(r, exitType)
 }
@@ -2341,4 +2340,16 @@ func stripOverlayCLAUDEmd(g *git.Git, defaultBranch, baseRef string) bool {
 	fmt.Printf("%s Created cleanup commit to remove Gas Town overlay files\n",
 		style.Bold.Render("✓"))
 	return true
+}
+
+// signalNonCompletedExit announces a DEFERRED or ESCALATED exit and, for a
+// sandbox seat, first puts the branch on origin (gt-oq8lc). r.deps is set by the
+// caller when the seat is a sandbox.
+func signalNonCompletedExit(r *doneRun, exitType string) {
+	fmt.Printf("%s Signaling %s\n", style.Bold.Render("→"), exitType)
+	if r.issueID != "" {
+		fmt.Printf("  Issue: %s\n", r.issueID)
+	}
+	fmt.Printf("  Branch: %s\n", r.branch)
+	pushSandboxBranchBeforeDeferral(r)
 }
