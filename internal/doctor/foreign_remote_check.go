@@ -60,13 +60,25 @@ func (c *ForeignRemoteCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Without origin/main there is nothing to compare against, and a failed
 	// merge-base would read as "no common ancestor" for every remote.
-	if ok, _ := g.RefExists("origin/main"); !ok {
+	hasOriginMain, err := g.RefExists("origin/main")
+	if err != nil {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusSkipped,
+			Message: "unknown: could not check origin/main",
+			Details: []string{err.Error()},
+		}
+	}
+	if !hasOriginMain {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusSkipped,
 			Message: "unknown: origin/main not found, cannot compare remote history",
 		}
 	}
+
+	var unknownRemotes []string
+	var unknownDetails []string
 
 	// For each non-origin remote, check if it shares history with origin
 	for _, remote := range remotes {
@@ -91,16 +103,29 @@ func (c *ForeignRemoteCheck) Run(ctx *CheckContext) *CheckResult {
 
 		// Check for shared ancestry with origin/main
 		// git merge-base exits 1 for "no common ancestor"; any other failure
-		// (bad object, timeout) says nothing about the remote's history.
-		if _, err := g.MergeBase("origin/main", refName); isNoMergeBase(err) {
+		// (bad object, timeout) says nothing about the remote's history, so
+		// the remote is neither foreign nor known to share history.
+		switch _, err := g.MergeBase("origin/main", refName); {
+		case isNoMergeBase(err):
 			c.foreignRemotes = append(c.foreignRemotes, foreignRemote{
 				name: remote,
 				url:  url,
 			})
+		case err != nil:
+			unknownRemotes = append(unknownRemotes, remote)
+			unknownDetails = append(unknownDetails, fmt.Sprintf("%s: %v", remote, err))
 		}
 	}
 
 	if len(c.foreignRemotes) == 0 {
+		if len(unknownRemotes) > 0 {
+			return &CheckResult{
+				Name:    c.Name(),
+				Status:  StatusSkipped,
+				Message: fmt.Sprintf("unknown: could not compare history with %s", strings.Join(unknownRemotes, ", ")),
+				Details: unknownDetails,
+			}
+		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
