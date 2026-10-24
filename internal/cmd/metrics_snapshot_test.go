@@ -58,3 +58,30 @@ func TestMetricsSnapshotPrintsOneReceiptAndAppendsOneLine(t *testing.T) {
 		t.Fatalf("log line lacks the alpha group or the beta error:\n%s", data)
 	}
 }
+
+// The receipt says so when no placement is known, and counts the placement
+// group when a source supplied one.
+func TestMetricsSnapshotReceiptSaysWhetherAPlacementIsKnown(t *testing.T) {
+	t.Parallel()
+	env := func() metrics.Env {
+		return metrics.Env{Town: t.TempDir(), Now: func() time.Time { return time.Date(2026, 10, 24, 20, 0, 0, 0, time.UTC) }}
+	}
+	var none bytes.Buffer
+	if err := runMetricsSnapshotWith(context.Background(), &none, env(), []metrics.Source{fakeSource{group: "alpha", cols: map[string]any{"n": 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(none.String(), "(1 groups, 0 errors); placement: none known\n") || strings.Count(none.String(), "\n") != 1 {
+		t.Fatalf("receipt without a placement = %q", none.String())
+	}
+	var known bytes.Buffer
+	sources := []metrics.Source{
+		fakeSource{group: "alpha", cols: map[string]any{"n": 1}},
+		fakeSource{group: metrics.PlacementGroup, cols: map[string]any{"dolt": "mac-host"}},
+	}
+	if err := runMetricsSnapshotWith(context.Background(), &known, env(), sources); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(known.String(), "(2 groups, 0 errors)\n") || strings.Contains(known.String(), "none known") {
+		t.Fatalf("receipt with a placement = %q", known.String())
+	}
+}

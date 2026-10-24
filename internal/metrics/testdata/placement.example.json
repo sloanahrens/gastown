@@ -1,0 +1,4 @@
+{"v": 1, "updated": "2026-10-24",
+ "places": {"dolt": "mac-host", "daemon": "mac-host", "claude": "mac-host",
+            "forgejo": "docker-desktop", "forgejo-db": "docker-desktop", "ci-engine": "docker-desktop",
+            "ci-runner": "docker-desktop", "hm-postgres": "docker-desktop", "sandbox": "docker-desktop"}}
