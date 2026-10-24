@@ -212,6 +212,51 @@ func TestStaleDoltPortCheck_TownJSONPortWins(t *testing.T) {
 	}
 }
 
+// TestStaleDoltPortCheck_TownJSONWinsOverConfigYAML verifies a conflicting
+// .dolt-data/config.yaml does not displace the port mayor/town.json names.
+func TestStaleDoltPortCheck_TownJSONWinsOverConfigYAML(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	writeDoctorTownFile(t, tmpDir, "mayor/town.json", `{"type":"town","version":1,"name":"test","dolt":{"host":"127.0.0.1","port":3310}}`)
+	writeDoctorTownFile(t, tmpDir, ".dolt-data/config.yaml", "listener:\n  host: 127.0.0.1\n  port: 3307\n")
+	writeDoctorTownFile(t, tmpDir, ".beads/dolt-server.port", "3310")
+	writeDoctorTownFile(t, tmpDir, ".beads/metadata.json", `{"dolt_mode":"server","dolt_server_port":3310}`)
+
+	check := NewStaleDoltPortCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+
+	result := check.Run(ctx)
+	if result.Status != StatusOK {
+		t.Fatalf("expected StatusOK judged against town.json's 3310, got %v: %s %v", result.Status, result.Message, result.Details)
+	}
+}
+
+// TestStaleDoltPortCheck_PortlessTownJSONFallsThroughToConfigYAML verifies a
+// mayor/town.json "dolt" block that names no port is not an endpoint: the
+// check judges port files against .dolt-data/config.yaml's listener instead of
+// skipping.
+func TestStaleDoltPortCheck_PortlessTownJSONFallsThroughToConfigYAML(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	writeDoctorTownFile(t, tmpDir, "mayor/town.json", `{"type":"town","version":1,"name":"test","dolt":{"host":"127.0.0.1","port":0}}`)
+	writeDoctorTownFile(t, tmpDir, ".dolt-data/config.yaml", "listener:\n  host: 127.0.0.1\n  port: 3307\n")
+	writeDoctorTownFile(t, tmpDir, ".beads/dolt-server.port", "3306")
+	writeDoctorTownFile(t, tmpDir, ".beads/metadata.json", `{"dolt_mode":"server","dolt_server_port":3307}`)
+
+	check := NewStaleDoltPortCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+
+	result := check.Run(ctx)
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning for the 3306 port file judged against config.yaml's 3307, got %v: %s", result.Status, result.Message)
+	}
+	if len(check.stalePorts) != 1 || check.stalePorts[0].correctPort != 3307 {
+		t.Errorf("stalePorts = %+v, want the port file judged against 3307", check.stalePorts)
+	}
+}
+
 // TestStaleDoltPortCheck_UnknownPortSkipsAndFixDeletesNothing verifies that a
 // town naming no Dolt port is reported unknown and Fix touches no file.
 func TestStaleDoltPortCheck_UnknownPortSkipsAndFixDeletesNothing(t *testing.T) {
