@@ -1,6 +1,9 @@
 package beads
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // bdGuardNotHeldExit is bd's exit code when an --if-assignee/--if-status
 // precondition no longer holds: nothing was written.
@@ -141,4 +144,33 @@ func (b *Beads) AppendNotes(id, note string) error {
 	// (gt-1q9nl).
 	_, err := b.run("update", id, "--append-notes", note)
 	return err
+}
+
+// PinReleaser is the write ReleasePinnedSteps needs. Client satisfies it, and a
+// caller's narrower interface that carries Update does too.
+type PinReleaser interface {
+	Update(id string, opts UpdateOptions) error
+}
+
+// ReleasePinnedSteps unpins each pinned issue of steps, clearing its claim as
+// well, and reports how many it released. A pin is a close fence, as an
+// assignee other than the actor is, and bd refuses to close a pinned issue
+// whoever holds it, so a closer clears the pin before it closes the step. A
+// release that fails is joined into the error, and the rest still release; the
+// count is valid even when the error is non-nil.
+func ReleasePinnedSteps(b PinReleaser, steps []*Issue) (int, error) {
+	open, unassigned := string(StatusOpen), ""
+	var errs []error
+	released := 0
+	for _, step := range steps {
+		if IssueStatus(step.Status) != IssueStatusPinned {
+			continue
+		}
+		if err := b.Update(step.ID, UpdateOptions{Status: &open, Assignee: &unassigned}); err != nil {
+			errs = append(errs, fmt.Errorf("releasing pinned step %s: %w", step.ID, err))
+			continue
+		}
+		released++
+	}
+	return released, errors.Join(errs...)
 }
