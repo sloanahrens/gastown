@@ -41,6 +41,11 @@ if [ "${1:-}" = info ]; then [ ! -f "$STUB_STATE/docker-down" ]; exit; fi
 # `image inspect --format {{.Id}} <ref>` answers from ids ("<ref> <id>" lines),
 # else "id-of-<ref>".
 case "${1:-}" in
+  builder)
+    echo "$*" >>"$STUB_STATE/builder"
+    if [ -f "$STUB_STATE/builder-fail" ]; then echo "Error response from daemon: prune failed" >&2; exit 1; fi
+    echo "Total:	12.3GB"
+    exit 0 ;;
   images) cat "$STUB_STATE/image-tags" 2>/dev/null || true; exit 0 ;;
   rmi)
     echo "$*" >>"$STUB_STATE/rmi"
@@ -291,6 +296,45 @@ tags_case prunefail abc1234 "$(full 1111111)"
 touch "$STUB_STATE/make-fail"
 run_it
 if [ "$RC" != 0 ] && [ -z "$(rmis)" ]; then pass "a failed build prunes nothing"; else fail "prunefail: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
+
+echo "--- the build cache is trimmed LRU under the lock, nothing else (gt-atxdz)"
+builders() { if [ -f "$STUB_STATE/builder" ]; then tr '\n' '|' <"$STUB_STATE/builder"; fi; }
+new_case bcache abc1234 "$(full abc1234)"
+run_it
+if [ "$RC" = 0 ] && [ "$(builders)" = "builder prune --keep-storage 8GB -f|" ] && grep -q "build cache trimmed to the newest 8GB" <<<"$OUT"; then pass "one 'docker builder prune --keep-storage 8GB -f' per run, logged"; else fail "bcache: rc=$RC builder=[$(builders)] out=$OUT"; fi
+if [ ! -d "$LOCK" ]; then pass "the lock the trim took is released"; else fail "bcache: lock left behind"; fi
+if ! grep -q -e 'system' -e 'volume' -e 'image prune' -e '--all' "$STUB_STATE/builder"; then pass "no system, volume, image or --all prune"; else fail "bcache ran a wider prune: $(cat "$STUB_STATE/builder")"; fi
+new_case bcachekeep abc1234 "$(full abc1234)"
+POLECAT_IMAGE_BUILDER_KEEP=3GB run_it
+if [ "$RC" = 0 ] && [ "$(builders)" = "builder prune --keep-storage 3GB -f|" ]; then pass "POLECAT_IMAGE_BUILDER_KEEP sets the floor"; else fail "bcachekeep: rc=$RC builder=[$(builders)] out=$OUT"; fi
+new_case bcachelock abc1234 "$(full abc1234)"
+mkdir "$LOCK"
+run_it
+if [ "$RC" = 0 ] && [ -z "$(builders)" ] && grep -q "build cache: skipped, another run holds the lock" <<<"$OUT" && [ -d "$LOCK" ]; then pass "a fresh lock held by another run: no trim, lock untouched"; else fail "bcachelock: rc=$RC builder=[$(builders)] out=$OUT"; fi
+new_case bcachestale abc1234 "$(full abc1234)"
+mkdir "$LOCK"
+touch -t 202001010000 "$LOCK"
+run_it
+if [ "$RC" = 0 ] && [ "$(builders)" = "builder prune --keep-storage 8GB -f|" ] && [ ! -d "$LOCK" ]; then pass "a stale lock is taken over for the trim and released"; else fail "bcachestale: rc=$RC builder=[$(builders)] out=$OUT"; fi
+new_case bcachebuilt abc1234 "$(full 1111111)"
+run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && [ "$(builders)" = "builder prune --keep-storage 8GB -f|" ] && [ ! -d "$LOCK" ]; then pass "a run that built trims once under its own lock and releases it"; else fail "bcachebuilt: rc=$RC builds=$(builds) builder=[$(builders)] out=$OUT"; fi
+new_case bcachestolen abc1234 "$(full 1111111)"
+touch "$STUB_STATE/steal-lock"
+run_it
+if [ "$RC" = 0 ] && [ -z "$(builders)" ] && grep -q "the lock is another run's now" <<<"$OUT"; then pass "a lock another run took during the build: no trim"; else fail "bcachestolen: rc=$RC builder=[$(builders)] out=$OUT"; fi
+new_case bcachedown abc1234
+touch "$STUB_STATE/docker-down"
+run_it
+if [ "$RC" = 0 ] && [ -z "$(builders)" ]; then pass "docker down: no trim, exit 0"; else fail "bcachedown: rc=$RC builder=[$(builders)] out=$OUT"; fi
+new_case bcachefail abc1234 "$(full abc1234)"
+touch "$STUB_STATE/builder-fail"
+run_it
+if [ "$RC" = 0 ] && grep -q "build cache not trimmed: Error response from daemon: prune failed" <<<"$OUT" && [ ! -d "$LOCK" ]; then pass "a failing prune is logged, exit 0, lock released"; else fail "bcachefail: rc=$RC out=$OUT"; fi
+new_case bcachebuildfail abc1234 "$(full 1111111)"
+touch "$STUB_STATE/make-fail"
+run_it
+if [ "$RC" != 0 ] && [ -z "$(builders)" ]; then pass "a failed build trims nothing"; else fail "bcachebuildfail: rc=$RC builder=[$(builders)] out=$OUT"; fi
 
 echo
 echo "polecat-image: $PASS passed, $FAIL failed"
