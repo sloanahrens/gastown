@@ -641,6 +641,16 @@ func TestShellFedScriptBehindARedirectionWordIsJudged(t *testing.T) {
 		{"stdin file with 0< replaces the pipe", `echo 'make test' | bash 0<./run.sh`, false},
 		{"stdin dup replaces the pipe", `echo 'make test' | bash <&3`, false},
 		{"script file piped into bash 2>&1", `cat ./run.sh | bash 2>&1`, false},
+
+		// gt-8rxxy: a redirection ahead of the command hid the command word,
+		// so the script it reads went unjudged.
+		{"script piped into bash behind a redirection", `2>/dev/null echo "make test" | bash`, true},
+		{"here-string ahead of bash", `<<< "make test" bash`, true},
+		{"here-string behind a redirection", `2>/dev/null bash <<< "make test"`, true},
+		{"eval behind a redirection", `2>/dev/null eval "make test"`, true},
+		{"harmless script piped into bash behind a redirection", `2>/dev/null echo "make lint" | bash`, false},
+		{"harmless here-string ahead of bash", `<<< "make lint" bash`, false},
+		{"harmless eval behind a redirection", `2>/dev/null eval "echo hi"`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

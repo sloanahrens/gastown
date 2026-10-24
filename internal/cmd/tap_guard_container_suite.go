@@ -239,11 +239,20 @@ func shellCPayloads(segment []string) []string {
 // spells the word ("grep eval", "echo eval make test") runs nothing
 // (gt-t1pct).
 func evalPayloads(segment []string) []string {
-	word, rest := segmentCommandWord(trimShellKeywords(segment))
+	word, rest := segmentCommandWordPastRedirections(trimShellKeywords(segment))
 	if strings.ToLower(word) != "eval" || len(rest) == 0 {
 		return nil
 	}
 	return []string{strings.Join(rest, " ")}
+}
+
+// shellCommandWord returns a segment's command word with the redirections
+// ahead of it stepped over, so "2>/dev/null sh <<< 'make gate'" is read as the
+// sh it runs (gt-8rxxy). The stepped-over tokens stay in args: a here-string
+// ahead of a shell is the script it reads, so the payload readers must see it.
+func shellCommandWord(segment []string) (string, []string) {
+	word, args, lead := segmentCommandWordPastRedirectionsKeepingLead(trimShellKeywords(segment))
+	return word, append(lead, args...)
 }
 
 // segmentPayloads returns the command lines the segment starting at
@@ -271,7 +280,7 @@ func segmentPayloads(tokens []string, start int, segment []string) []string {
 // substitution is only an argument and the pipe is still the script
 // (gt-n2gt8).
 func stdinShellPayloads(tokens []string, start int, segment []string) []string {
-	word, args := segmentCommandWord(trimShellKeywords(segment))
+	word, args := shellCommandWord(segment)
 	if !shellInvokers[filepath.Base(strings.ToLower(word))] {
 		return nil
 	}
@@ -319,7 +328,7 @@ func stdinShellPayloads(tokens []string, start int, segment []string) []string {
 // Only echo, printf and yes print text nothing here can read past; any other
 // producer (a file, a download) yields none.
 func producerPayloads(segment []string) []string {
-	producer, printed := segmentCommandWord(trimShellKeywords(segment))
+	producer, printed := segmentCommandWordPastRedirections(trimShellKeywords(segment))
 	printed, payloads := splitHereStrings(printed)
 	switch filepath.Base(strings.ToLower(producer)) {
 	case "echo", "printf", "yes":

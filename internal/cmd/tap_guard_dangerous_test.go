@@ -502,12 +502,146 @@ func TestMatchesPackageInstall(t *testing.T) {
 		{"install behind a backtick substitution", "y=`echo a` apt-get install foo", true},
 		{"install behind a quoted paren in a substitution", `y=$(echo ")" ) apt-get install foo`, true},
 		{"install behind a semicolon in a substitution", "y=$(echo a; echo b) apt-get install foo", true},
+		// gt-8rxxy: a redirection ahead of the manager hid it from the scan.
+		{"install behind a stderr redirect", "2>/dev/null apt-get install foo", true},
+		{"install behind a redirect whose target is its own word", "2> /dev/null dnf install foo", true},
+		{"install behind two redirections", "2>/dev/null 3>&1 yum install foo", true},
+		{"install behind an fd allocated by name", "{fd}>/tmp/log apt-get install foo", true},
+		{"install behind a heredoc operator with a strip-tabs tag", "<<- EOF apt-get install foo", true},
+		// The word after a redirection is the target, not the manager.
+		{"redirect target spelled like a manager", "2>apt-get install foo", false},
+		// The substitution body may hold unquoted words, and the whole word is
+		// stepped over (gt-8rxxy).
+		{"install behind a process substitution with a spaced body", "<(echo hi) apt-get install foo", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := matchesPackageInstall(lowerTokens(tt.command)) != ""
 			if got != tt.blocked {
 				t.Errorf("matchesPackageInstall(%q) blocked=%v, want %v", tt.command, got, tt.blocked)
+			}
+		})
+	}
+}
+
+// TestPackageInstallJudgedLikeThePlainForm pins the gt-8rxxy gate at the guard
+// entry: a redirection ahead of the manager changes nothing the shell runs, so
+// the prefixed install earns the reason the plain form earns.
+func TestPackageInstallJudgedLikeThePlainForm(t *testing.T) {
+	t.Parallel()
+	want, _ := evaluateDangerousCommand("apt-get install -y curl", 0, noTownSession)
+	if want == "" {
+		t.Fatalf("the plain form was allowed; the comparison rests on it being blocked")
+	}
+	for _, prefix := range []string{
+		"2>/dev/null ",
+		"2> /dev/null ",
+		">/dev/null ",
+		"&>/dev/null ",
+		"2>&1 ",
+		"{log}>/dev/null ",
+		"2>/dev/null 3>&1 ",
+	} {
+		command := prefix + "apt-get install -y curl"
+		if got, _ := evaluateDangerousCommand(command, 0, noTownSession); got != want {
+			t.Errorf("evaluateDangerousCommand(%q) = %q, want %q like the plain form", command, got, want)
+		}
+	}
+}
+
+// TestRedirectionWidth pins which tokens are redirections and how many tokens
+// each occupies. The operator is matched whole, so a heredoc tag, an allocated
+// fd name, a strip-tabs "-" or a clobber "|" is not mistaken for the file the
+// redirection targets — the mistake that left the command word hidden behind
+// it (gt-8rxxy).
+func TestRedirectionWidth(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		token string
+		width int
+	}{
+		{"stdout redirect with an attached target", ">/dev/null", 1},
+		{"stdout redirect with a target word", ">", 2},
+		{"stderr redirect with an attached target", "2>/dev/null", 1},
+		{"stderr redirect with a target word", "2>", 2},
+		{"append redirect", ">>log", 1},
+		{"append redirect with a target word", ">>", 2},
+		{"read-write redirect", "<>file", 1},
+		{"read-write redirect with a target word", "<>", 2},
+		{"clobber redirect", ">|log", 1},
+		{"clobber redirect with a target word", ">|", 2},
+		{"redirect of both streams", "&>log", 1},
+		{"redirect of both streams with a target word", "&>", 2},
+		{"append of both streams", "&>>log", 1},
+		{"append of both streams with a target word", "&>>", 2},
+		{"fd duplication", "2>&1", 1},
+		{"fd duplication of stdout", ">&2", 1},
+		{"fd close", "2>&-", 1},
+		{"stdin close", "<&-", 1},
+		{"heredoc with an attached tag", "<<EOF", 1},
+		{"heredoc with a tag word", "<<", 2},
+		{"strip-tabs heredoc with an attached tag", "<<-EOF", 1},
+		{"strip-tabs heredoc with a tag word", "<<-", 2},
+		{"herestring with attached text", "<<<text", 1},
+		{"herestring with a word", "<<<", 2},
+		{"fd allocated by name", "{fd}>log", 1},
+		{"fd allocated by name with a target word", "{fd}>", 2},
+		{"named fd duplication", "{fd}>&2", 1},
+		{"process substitution is a word, not a redirection", "<(cmd)", 0},
+		{"output process substitution is a word", ">(cmd)", 0},
+		{"unterminated fd name", "{fd", 0},
+		{"plain word", "echo", 0},
+		{"bare number", "2", 0},
+		{"number followed by a word", "2foo", 0},
+		{"operator inside a word", "foo>bar", 0},
+		{"dash", "-", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := redirectionWidth(tt.token); got != tt.width {
+				t.Errorf("redirectionWidth(%q) = %d, want %d", tt.token, got, tt.width)
+			}
+		})
+	}
+}
+
+// TestSegmentCommandWordPastRedirections pins the command word behind a
+// leading redirection, including the operator forms whose target is not the
+// word that follows them (gt-8rxxy).
+func TestSegmentCommandWordPastRedirections(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		segment []string
+		want    string
+		args    []string
+	}{
+		{"no redirection", []string{"make", "gate"}, "make", []string{"gate"}},
+		{"redirection with an attached target", []string{"2>/dev/null", "apt-get", "install"}, "apt-get", []string{"install"}},
+		{"redirection with a target word", []string{"2>", "/dev/null", "apt-get", "install"}, "apt-get", []string{"install"}},
+		{"two redirections", []string{"2>/dev/null", "3>&1", "bash", "--norc"}, "bash", []string{"--norc"}},
+		{"fd allocated by name", []string{"{fd}>log", "bash", "-c", "x"}, "bash", []string{"-c", "x"}},
+		{"strip-tabs heredoc with a tag word", []string{"<<-", "EOF", "bash"}, "bash", nil},
+		{"heredoc with a tag word", []string{"<<", "EOF", "bash"}, "bash", nil},
+		{"herestring with a word", []string{"<<<", "make gate", "bash"}, "bash", nil},
+		{"process substitution ahead of the command", []string{"<(cmd)", "make", "gate"}, "make", []string{"gate"}},
+		{"output process substitution ahead of the command", []string{">(tee)", "apt-get", "install"}, "apt-get", []string{"install"}},
+		{"process substitution with a spaced body", []string{"<(echo", "hi)", "apt-get", "install"}, "apt-get", []string{"install"}},
+		{"process substitution whose body holds its own pair", []string{"<(echo", "$(date)", "hi)", "make"}, "make", nil},
+		{"process substitution that never closes", []string{"<(echo", "hi", "apt-get", "install"}, "", nil},
+		{"redirection only", []string{"2>/dev/null"}, "", nil},
+		{"operator with no target", []string{"2>"}, "", nil},
+		{"assignment after a redirection", []string{"2>/dev/null", "X=1", "make"}, "make", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			word, args := segmentCommandWordPastRedirections(tt.segment)
+			if word != tt.want {
+				t.Fatalf("segmentCommandWordPastRedirections(%q) word = %q, want %q", tt.segment, word, tt.want)
+			}
+			if strings.Join(args, "\x00") != strings.Join(tt.args, "\x00") {
+				t.Errorf("segmentCommandWordPastRedirections(%q) args = %q, want %q", tt.segment, args, tt.args)
 			}
 		})
 	}

@@ -1302,53 +1302,122 @@ func heredocReaderIsShellInvoker(reader string) bool {
 }
 
 // segmentCommandWordPastRedirections is segmentCommandWord with the leading
-// redirections stepped over. The shell applies a redirection and then runs the
-// command behind it, so "2>/dev/null bash <<EOF" feeds bash the body exactly as
-// "bash <<EOF" does, but the redirection's word stood at command position and
-// hid the shell (gt-pdbzu). A redirection owns its target word, so the target
-// is stepped over with the operator.
+// redirections stepped over, so the command the shell runs behind them is
+// judged: "2>/dev/null bash <<EOF" feeds bash the body exactly as "bash <<EOF"
+// does (gt-pdbzu). A redirection owns its target word, so the target is stepped
+// over with the operator. A process substitution word ahead of the command is
+// stepped over whole: it names a file, never the command that runs (gt-8rxxy).
 func segmentCommandWordPastRedirections(segment []string) (string, []string) {
+	word, args, _ := segmentCommandWordPastRedirectionsKeepingLead(segment)
+	return word, args
+}
+
+// segmentCommandWordPastRedirectionsKeepingLead is
+// segmentCommandWordPastRedirections that also returns the redirection tokens
+// it stepped over, in shell order. A caller that reads what a redirection
+// carries needs them: a here-string ahead of a shell is the script it reads.
+func segmentCommandWordPastRedirectionsKeepingLead(segment []string) (word string, args, lead []string) {
 	for {
-		word, args := segmentCommandWord(segment)
+		word, args = segmentCommandWord(segment)
+		if processSubstitutionWord(word) {
+			rest, closed := skipProcessSubstitution(append([]string{word}, args...))
+			if !closed {
+				return "", nil, lead
+			}
+			segment = rest
+			continue
+		}
 		width := redirectionWidth(word)
 		if width == 0 {
-			return word, args
+			return word, args, lead
 		}
+		lead = append(lead, word)
 		segment = args
 		if width == 2 && len(segment) > 0 {
+			lead = append(lead, segment[0])
 			segment = segment[1:]
 		}
 		if len(segment) == 0 {
-			return "", nil
+			return "", nil, lead
 		}
 	}
 }
 
+// skipProcessSubstitution returns the tokens behind the "<(cmd)" or ">(cmd)"
+// substitution that starts at tokens[0], and false when it never closes. The
+// body may hold unquoted words, so the substitution is consumed by its
+// parentheses rather than by one token (gt-8rxxy).
+func skipProcessSubstitution(tokens []string) ([]string, bool) {
+	depth := 0
+	for i, word := range tokens {
+		depth += strings.Count(word, "(") - strings.Count(word, ")")
+		if depth <= 0 && strings.HasSuffix(word, ")") {
+			return tokens[i+1:], true
+		}
+	}
+	return nil, false
+}
+
 // redirectionWidth reports whether a token is a redirection and how many tokens
 // it occupies: 1 when the operator carries its target ("2>/dev/null", "2>&1",
-// "&>log"), 2 when the target is a word of its own ("2> /dev/null"), and 0 when
-// the token is no redirection.
+// "&>log"), 2 when the target is a word of its own ("2> /dev/null", "<<- EOF"),
+// and 0 when the token is no redirection.
+//
+// Everything that marks a redirection apart from the file it names belongs to
+// the operator, so it is matched whole: the fd digits ("2>"), an fd allocated
+// by name ("{fd}>"), the "&" of "&>" and of ">&2", the doubled ">>" and "<<",
+// the strip-tabs "-" of "<<-", and the clobber "|" of ">|" (gt-8rxxy).
+//
+// A "<(cmd)" or ">(cmd)" process substitution is a word, not a redirection,
+// and redirectionWidth reports it as 0; segmentCommandWordPastRedirections
+// steps over it by name.
 func redirectionWidth(token string) int {
 	i := 0
-	for i < len(token) && token[i] >= '0' && token[i] <= '9' {
-		i++
+	if strings.HasPrefix(token, "{") {
+		// "{fd}>log" allocates the descriptor by name.
+		end := strings.IndexByte(token, '}')
+		if end < 0 {
+			return 0
+		}
+		i = end + 1
+	} else {
+		for i < len(token) && token[i] >= '0' && token[i] <= '9' {
+			i++
+		}
 	}
-	if i < len(token) && token[i] == '&' {
+	if i+1 < len(token) && token[i] == '&' && token[i+1] == '>' {
 		i++
 	}
 	if i >= len(token) || (token[i] != '<' && token[i] != '>') {
 		return 0
 	}
+	if i+1 < len(token) && token[i+1] == '(' {
+		return 0
+	}
+	opStart := i
 	for i < len(token) && (token[i] == '<' || token[i] == '>') {
 		i++
 	}
-	if i < len(token) && token[i] == '&' {
+	operator := token[opStart:i]
+	switch {
+	case operator == "<<" && i < len(token) && token[i] == '-':
+		i++
+	case operator == ">" && i < len(token) && token[i] == '|':
+		i++
+	case i < len(token) && token[i] == '&':
+		// "<&0", ">&2", ">&-": the descriptor after the "&" is the target.
 		i++
 	}
 	if i < len(token) {
 		return 1
 	}
 	return 2
+}
+
+// processSubstitutionWord reports whether word opens a "<(cmd)" or ">(cmd)"
+// process substitution, which the shell replaces with a file name.
+func processSubstitutionWord(word string) bool {
+	return strings.HasPrefix(word, "<(") || strings.HasPrefix(word, ">(")
 }
 
 // heredocTerminatorEnd scans command starting at bodyStart for a line
@@ -3036,14 +3105,16 @@ func matchesPacmanInstall(tokens, lowerTokens []string) bool {
 // matchesPackageInstall blocks system package manager install commands and,
 // more narrowly, "pip install --system" and global npm installs. Each shell
 // segment is read as one invocation (gt-24lz6): the segment's command word —
-// basename, skipping env assignments and launchers (segmentCommandWord) — is
-// the package manager, and "install" is one of that invocation's arguments,
-// in any position so an option before the subcommand ("apt-get -y install
-// curl") is still blocked (gt-qis3f). tokens must be lowercased, shell-aware
-// tokens (see shellTokenize).
+// basename, skipping env assignments, launchers and the redirections ahead of
+// it (segmentCommandWordPastRedirections) — is the package manager, and
+// "install" is one of that invocation's arguments, in any position so an
+// option before the subcommand ("apt-get -y install curl") is still blocked
+// (gt-qis3f), and "2>/dev/null apt-get install curl" is read as the install it
+// is (gt-8rxxy). tokens must be lowercased, shell-aware tokens (see
+// shellTokenize).
 func matchesPackageInstall(tokens []string) string {
 	for _, segment := range splitShellSegments(tokens) {
-		word, args := segmentCommandWord(segment)
+		word, args := segmentCommandWordPastRedirections(segment)
 		if word == "" {
 			continue
 		}
