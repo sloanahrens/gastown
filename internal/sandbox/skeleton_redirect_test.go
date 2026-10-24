@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -81,8 +80,5 @@ func TestSkeletonRedirectSetupLandsOnTheSharedBeads(t *testing.T) {
 	}
 	if want := "../../../mayor/rig/.beads"; got != want {
 		t.Errorf("redirect target = %q, want %q", got, want)
-	}
-	if strings.HasSuffix(got, "gastown/.beads") || got == "../../../.beads" {
-		t.Errorf("redirect target %q is the rig root's hollow .beads", got)
 	}
 }

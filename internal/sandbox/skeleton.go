@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // skeletonRoot is the directory the archive extracts into, relative to /sandbox.
@@ -431,8 +433,13 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	// The rig's .beads holds only a pointer at the rig's shared beads, as on the
 	// host. Without it gt prime, which re-runs the redirect setup for the
 	// polecat's worktree, points the worktree at this otherwise empty directory
-	// and bd finds no workspace.
-	add(s.Rig+"/.beads/redirect", []byte("mayor/rig/.beads\n"))
+	// and bd finds no workspace. The pointer names the rig's tracked workspace,
+	// the first of the directories gastown looks in on the host.
+	workspace, err := filepath.Rel(s.Rig, filepath.FromSlash(config.RigBeadsDirs(s.Rig)[0]))
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: rig redirect target for %s: %w", s.Rig, err)
+	}
+	add(s.Rig+"/.beads/redirect", []byte(filepath.ToSlash(workspace)+"\n"))
 
 	// gt reads these files as they are; sanitizeFile is what keeps a token or a
 	// credential-carrying URL out of them.
