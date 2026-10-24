@@ -353,7 +353,9 @@ func sandboxSecretsReason(command string) string {
 // secret in. The walk starts from them and taints more as it passes each segment,
 // so an argument is judged by the assignments before it.
 func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (reason string, tooDeep bool) {
-	tokens := shellTokenize(prWorkflowTokenText(command))
+	tokenText := prWorkflowTokenText(command)
+	tokens := shellTokenize(tokenText)
+	ansiHereStrings := sandboxSecretsANSICHereStrings(tokenText)
 	tainted := maps.Clone(inherited)
 	if tainted == nil {
 		tainted = map[string]bool{}
@@ -373,7 +375,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 		fed := stdin
 		stdin = ""
 		if i+1 < len(segments) && piped[i+1] {
-			stdin = sandboxSecretsPipeOutput(argv, fed)
+			stdin = sandboxSecretsPipeOutput(argv, fed, ansiHereStrings)
 		}
 		if len(argv) == 0 {
 			continue
@@ -389,7 +391,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			// the way it runs a pipe's text: bash <<< printenv (gt-ma5e6).
 			// A -c string keeps that stdin for a shell it runs, so the text is judged
 			// even when -c is present: bash -c bash <<< printenv.
-			if _, texts := sandboxSecretsHereStrings(argv[1:]); len(texts) > 0 {
+			if _, texts := sandboxSecretsHereStrings(argv[1:], ansiHereStrings); len(texts) > 0 {
 				payloads = append(payloads, texts...)
 			}
 			if fed != "" {
@@ -414,7 +416,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			}
 			// A here-string reaches the same stdin, so its text is judged as a
 			// script too: source /dev/stdin <<< printenv (gt-ma5e6).
-			if _, texts := sandboxSecretsHereStrings(argv[1:]); len(texts) > 0 {
+			if _, texts := sandboxSecretsHereStrings(argv[1:], ansiHereStrings); len(texts) > 0 {
 				payloads = append(payloads, texts...)
 			}
 		}
@@ -1200,7 +1202,7 @@ func sandboxSecretsPipeSegments(tokens []string) (segments [][]string, piped []b
 // text a pipe feeds it: what echo or printf prints, or the input of cat or tee, which
 // pass it on. Any other command writes nothing the guard follows, so "". A filter that
 // rewrites its text (tr, sed) and a file the text is saved to are not followed.
-func sandboxSecretsPipeOutput(argv []string, fed string) string {
+func sandboxSecretsPipeOutput(argv []string, fed string, ansiHereStrings map[string]bool) string {
 	if len(argv) == 0 {
 		return ""
 	}
@@ -1208,7 +1210,7 @@ func sandboxSecretsPipeOutput(argv []string, fed string) string {
 	case "echo", "printf":
 		return sandboxSecretsPrintedText(argv)
 	case "cat", "tee":
-		if text, ok := sandboxSecretsHereStringInput(argv); ok {
+		if text, ok := sandboxSecretsHereStringInput(argv, ansiHereStrings); ok {
 			return text
 		}
 		return fed
@@ -1216,14 +1218,60 @@ func sandboxSecretsPipeOutput(argv []string, fed string) string {
 	return ""
 }
 
-// sandboxSecretsHereStrings is splitHereStrings with the text of each here-string
-// ANSI-C decoded. shlex drops the $'...' marker, so bash <<< $'x\nprintenv'
-// arrives as one word and the printenv it runs is invisible until the escapes
-// are read (gt-9q6sf).
-func sandboxSecretsHereStrings(args []string) (rest, texts []string) {
+// sandboxSecretsANSICHereStrings returns the text of each here-string in command
+// whose word is ANSI-C quoted, keyed as splitHereStrings returns it. Only that
+// form has its escapes decoded: bash <<< $'x\nprintenv' hands the shell two lines,
+// while bash <<< 'x\nprintenv' hands it one word with a backslash in it, so
+// decoding every here-string blocks the single word the shell reports as a
+// missing command (gt-9q6sf, gt-3yhp0). shlex drops the $'...' marker, so each
+// word is matched back against the command text. command must be the text the
+// caller tokenizes, so the two spellings agree.
+func sandboxSecretsANSICHereStrings(command string) map[string]bool {
+	var texts map[string]bool
+	walk := heredocQuoteWalk{runes: []rune(command), prevIdx: -1}
+	for i := 0; ; {
+		op := strings.Index(command[i:], "<<<")
+		if op < 0 {
+			return texts
+		}
+		op += i
+		if walk.advanceTo(op) != 0 || walk.comment || walk.escaped || walk.readsData() {
+			i = op + len("<<<")
+			continue
+		}
+		word := op + len("<<<")
+		for word < len(command) && (command[word] == ' ' || command[word] == '\t') {
+			word++
+		}
+		if word+1 >= len(command) || command[word] != '$' || command[word+1] != '\'' {
+			i = op + len("<<<")
+			continue
+		}
+		close := closingANSIQuote(command, word+2)
+		if close < 0 {
+			return texts
+		}
+		if words := shellTokenize(command[word : close+1]); len(words) == 1 {
+			if texts == nil {
+				texts = map[string]bool{}
+			}
+			texts[words[0]] = true
+		}
+		i = close + 1
+	}
+}
+
+// sandboxSecretsHereStrings is splitHereStrings with the text of each ANSI-C
+// quoted here-string decoded. shlex drops the $'...' marker, so bash <<<
+// $'x\nprintenv' arrives as one word and the printenv it runs is invisible until
+// the escapes are read; a plain here-string keeps its backslashes, so its text is
+// left as the shell reads it (gt-9q6sf).
+func sandboxSecretsHereStrings(args []string, ansiHereStrings map[string]bool) (rest, texts []string) {
 	rest, texts = splitHereStrings(args)
 	for i, text := range texts {
-		texts[i] = sandboxSecretsEscapes.Replace(text)
+		if ansiHereStrings[text] {
+			texts[i] = sandboxSecretsEscapes.Replace(text)
+		}
 	}
 	return rest, texts
 }
@@ -1233,8 +1281,8 @@ func sandboxSecretsHereStrings(args []string) (rest, texts []string) {
 // what a pipe feeds, so cat <<< printenv | bash runs printenv. A cat that names a file
 // reads the file instead (a lone "-" still reads stdin); tee reads stdin whatever
 // files it writes (gt-enim5).
-func sandboxSecretsHereStringInput(argv []string) (string, bool) {
-	rest, texts := sandboxSecretsHereStrings(argv[1:])
+func sandboxSecretsHereStringInput(argv []string, ansiHereStrings map[string]bool) (string, bool) {
+	rest, texts := sandboxSecretsHereStrings(argv[1:], ansiHereStrings)
 	if len(texts) == 0 {
 		return "", false
 	}
@@ -1252,11 +1300,13 @@ func sandboxSecretsHereStringInput(argv []string) (string, bool) {
 // command runs with no input, or "" when that stage writes none the guard follows.
 func sandboxSecretsStdoutText(command string) string {
 	expanded := sandboxSecretsExpandedNames(command)
-	segments, piped := sandboxSecretsPipeSegments(shellTokenize(prWorkflowTokenText(command)))
+	tokenText := prWorkflowTokenText(command)
+	ansiHereStrings := sandboxSecretsANSICHereStrings(tokenText)
+	segments, piped := sandboxSecretsPipeSegments(shellTokenize(tokenText))
 	var stdin, out string
 	for i, segment := range segments {
 		_, _, argv := sandboxSecretsSegment(segment, nil, expanded)
-		out = sandboxSecretsPipeOutput(argv, stdin)
+		out = sandboxSecretsPipeOutput(argv, stdin, ansiHereStrings)
 		stdin = ""
 		if i+1 < len(segments) && piped[i+1] {
 			stdin = out
