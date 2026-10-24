@@ -101,6 +101,17 @@ func TestKindValuesPinGatewayToCoreAndAllowDriverConfig(t *testing.T) {
 	}
 }
 
+// The mutable gastown-polecat:dev tag is only re-pulled under Always (gt-t39cu).
+// global.image.pullPolicy would not do: the chart applies it to the runtime
+// and supervisor images, never the sandbox workload image.
+func TestKindValuesPullSandboxImageAlways(t *testing.T) {
+	t.Parallel()
+	v := decodeDocs(t, "values/kind.yaml")[0]
+	if got := at(t, v, "sandbox", "image", "pullPolicy"); got != "Always" {
+		t.Errorf("sandbox.image.pullPolicy = %v, want Always", got)
+	}
+}
+
 func TestStaticManifestsParse(t *testing.T) {
 	t.Parallel()
 	for _, rel := range []string{"kind/gateway-nodeport.yaml", "services/control-plane.yaml", "policy/kind.yaml"} {
