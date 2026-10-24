@@ -397,29 +397,41 @@ func TestPolecatPathsGuard_PathQualifiedLauncher(t *testing.T) {
 	t.Parallel()
 	p := newPolecatTestTown(t)
 	rm := "rm -rf " + filepath.Join(p.sibling, "internal.go")
+	own := "rm -rf build"
 	for _, tt := range []struct {
-		name    string
-		command string
+		name      string
+		command   string
+		wantBlock bool
 	}{
-		{"bare env", "env " + rm},
-		{"/usr/bin/env", "/usr/bin/env " + rm},
-		{"bare timeout", "timeout 5 " + rm},
-		{"/usr/bin/timeout", "/usr/bin/timeout 5 " + rm},
-		{"/usr/bin/nice", "/usr/bin/nice " + rm},
-		{"/usr/bin/sudo", "/usr/bin/sudo " + rm},
-		{"gtimeout", "gtimeout 5 " + rm},
-		{"/opt/homebrew/bin/gtimeout", "/opt/homebrew/bin/gtimeout 5 " + rm},
-		{"upper-case path launcher", "/USR/BIN/ENV " + rm},
+		{"bare env", "env " + rm, true},
+		{"/usr/bin/env", "/usr/bin/env " + rm, true},
+		{"bare timeout", "timeout 5 " + rm, true},
+		{"/usr/bin/timeout", "/usr/bin/timeout 5 " + rm, true},
+		{"/usr/bin/nice", "/usr/bin/nice " + rm, true},
+		{"/usr/bin/sudo", "/usr/bin/sudo " + rm, true},
+		{"gtimeout", "gtimeout 5 " + rm, true},
+		{"/opt/homebrew/bin/gtimeout", "/opt/homebrew/bin/gtimeout 5 " + rm, true},
+		{"upper-case path launcher", "/USR/BIN/ENV " + rm, true},
+		{"own file behind bare env", "env " + own, false},
+		{"own file behind /usr/bin/env", "/usr/bin/env " + own, false},
+		{"own file behind bare timeout", "timeout 5 " + own, false},
+		{"own file behind /usr/bin/timeout", "/usr/bin/timeout 5 " + own, false},
+		{"own file behind /usr/bin/nice", "/usr/bin/nice " + own, false},
+		{"own file behind /usr/bin/sudo", "/usr/bin/sudo " + own, false},
+		{"own file behind gtimeout", "gtimeout 5 " + own, false},
+		{"own file behind /opt/homebrew/bin/gtimeout", "/opt/homebrew/bin/gtimeout 5 " + own, false},
+		{"own file behind upper-case path launcher", "/USR/BIN/ENV " + own, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if err := p.run(t, "Bash", commandInput(tt.command)); err == nil {
+			err := p.run(t, "Bash", commandInput(tt.command))
+			if tt.wantBlock && err == nil {
 				t.Errorf("%q was allowed, want a block", tt.command)
 			}
+			if !tt.wantBlock && err != nil {
+				t.Errorf("%q blocked on an own file: %v", tt.command, err)
+			}
 		})
-	}
-	if err := p.run(t, "Bash", commandInput("/usr/bin/env rm -rf build")); err != nil {
-		t.Errorf("path-qualified launcher on an own file blocked: %v", err)
 	}
 }
 
