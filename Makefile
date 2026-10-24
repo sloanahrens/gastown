@@ -146,7 +146,7 @@ POLE_RIG_GO_MODS ?= $(wildcard $(POLE_TOWN)/*/mayor/rig/go.mod)
 # rig's current canonical checkout, weekly or when a go.sum changes.
 POLE_SEED_RIGS ?= gastown devops
 POLE_SEED_PINS ?= deploy/polecat/seed-pins
-POLE_SEED_DIR ?= deploy/polecat/seed
+POLE_SEED_DIR ?= $(CURDIR)/deploy/polecat/seed
 
 # Cross-compile gt and bd for the sandbox image, then build it. The Dockerfile
 # copies deploy/polecat/bin/, so that directory is the build context's payload.
