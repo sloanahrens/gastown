@@ -604,6 +604,50 @@ func TestEnsureCacheVolumeFailureMatchesErrCacheVolume(t *testing.T) {
 	}
 }
 
+// A failed inspect that is not docker's "no such volume" answer, a daemon that
+// is down for one, must not read as an absent volume: no create is attempted.
+func TestEnsureCacheVolumeInspectErrorIsNotAbsent(t *testing.T) {
+	t.Parallel()
+	var calls [][]string
+	run := func(_ context.Context, args ...string) ([]byte, []byte, error) {
+		calls = append(calls, args)
+		return nil, []byte("Cannot connect to the Docker daemon"), errors.New("exit status 1")
+	}
+	err := ensureCacheVolume(context.Background(), run, "gt-cache-gastown")
+	if !errors.Is(err, ErrCacheVolume) {
+		t.Fatalf("err = %v, want ErrCacheVolume", err)
+	}
+	if want := [][]string{{"volume", "inspect", "gt-cache-gastown"}}; !reflect.DeepEqual(calls, want) {
+		t.Fatalf("docker calls = %q, want %q: an unreadable volume is not created", calls, want)
+	}
+}
+
+// A rig name reaches docker's argv through {rig}: a name docker would not take,
+// or one that reads as a flag, stops before any docker call.
+func TestEnsureCacheVolumeRefusesAnInvalidName(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"", "-v", "--rm", "gt cache", "gt-cache-a/b", "gt-cache-a;b", "gt-cache-a\nb"} {
+		d := &dockerRecorder{absent: true}
+		err := ensureCacheVolume(context.Background(), d.run, name)
+		if err == nil {
+			t.Errorf("name %q: want an error", name)
+		}
+		if errors.Is(err, ErrCacheVolume) {
+			t.Errorf("name %q: err = %v; a bad name is not a defer-able precondition", name, err)
+		}
+		if len(d.calls) != 0 {
+			t.Errorf("name %q: docker calls = %q, want none", name, d.calls)
+		}
+	}
+}
+
+func TestEnsureCacheVolumeRefusesANilRunner(t *testing.T) {
+	t.Parallel()
+	if err := ensureCacheVolume(context.Background(), nil, "gt-cache-gastown"); err == nil {
+		t.Fatal("want an error, not a nil-func panic")
+	}
+}
+
 // The volume is ensured before the sandbox create: both docker calls happen
 // while the sandbox has made no calls.
 func TestOpenShellPrepareEnsuresTheCacheVolumeBeforeTheCreate(t *testing.T) {

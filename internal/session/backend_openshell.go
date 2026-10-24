@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -664,15 +665,33 @@ func cacheVolumeName(volume, rig string) string {
 	return strings.ReplaceAll(volume, "{rig}", rig)
 }
 
+// cacheVolumePattern is the names docker accepts for a volume. The first
+// character is never "-", so a name cannot read as a docker flag.
+var cacheVolumePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
 // ensureCacheVolume creates volume when docker does not have it, labeled the
 // way the gateway attaches it: the same `docker volume create` that
 // scripts/polecat-caches.sh runs, so a new rig needs no onboarding step. An
-// existing volume is left alone. A volume that cannot be made is ErrCacheVolume.
+// existing volume is left alone. Only docker's "no such volume" answer to the
+// inspect means the volume is absent; any other inspect failure, such as a
+// daemon that is down, is ErrCacheVolume with no create attempted. A name
+// docker would not accept, or a nil run, is a plain error: retrying the work
+// cannot fix either. A volume that cannot be made is ErrCacheVolume.
 func ensureCacheVolume(ctx context.Context, run dockerRun, volume string) error {
-	if _, _, err := run(ctx, "volume", "inspect", volume); err == nil {
+	if run == nil {
+		return errors.New("sandbox cache volume: no docker runner configured")
+	}
+	if !cacheVolumePattern.MatchString(volume) {
+		return fmt.Errorf("sandbox cache volume name %q is not a valid docker volume name", volume)
+	}
+	_, stderr, err := run(ctx, "volume", "inspect", volume)
+	if err == nil {
 		return nil
 	}
-	_, stderr, err := run(ctx, "volume", "create",
+	if !strings.Contains(strings.ToLower(string(stderr)), "no such volume") {
+		return fmt.Errorf("%w: docker volume inspect %s: %v: %s", ErrCacheVolume, volume, err, strings.TrimSpace(string(stderr)))
+	}
+	_, stderr, err = run(ctx, "volume", "create",
 		"--label", "openshell.ai/sandbox-attachable=true",
 		"--label", "openshell.ai/sandbox-attachable-workspace=default",
 		volume)
