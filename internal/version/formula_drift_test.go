@@ -136,3 +136,58 @@ func TestCheckEmbeddedFormulaDrift_UnverifiableRefFailsClosed(t *testing.T) {
 		t.Error("Reason is empty, want why the cached ref could not be trusted")
 	}
 }
+
+// TestCheckEmbeddedFormulaDrift_BinaryNotBehindBuildRefIsNotDrift: a binary
+// ahead of or diverged from origin/main is not behind it. Diffing the two
+// would list the binary's own formula changes as missing, and tell the operator
+// to rebuild for nothing.
+func TestCheckEmbeddedFormulaDrift_BinaryNotBehindBuildRefIsNotDrift(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// build adds commits after the shared origin/main base and returns the
+		// commit the binary was built from.
+		build func(r *fakeRepo) string
+	}{
+		{
+			name: "binary ahead of origin/main",
+			build: func(r *fakeRepo) string {
+				r.checkoutNew("side")
+				binary := r.commit(formulaFile("mol-refinery-patrol.formula.toml"), "v2")
+				r.checkout("main")
+				return binary
+			},
+		},
+		{
+			name: "binary diverged from origin/main",
+			build: func(r *fakeRepo) string {
+				r.checkoutNew("side")
+				binary := r.commit(formulaFile("mol-refinery-patrol.formula.toml"), "v2")
+				r.checkout("main")
+				r.commit(formulaFile("mol-polecat-work.formula.toml"), "v3")
+				r.push("origin", "main", "main")
+				return binary
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g, r := newRepo(t)
+			g.repo("/fake/origin")
+			r.addRemote("origin", "/fake/origin")
+			r.commit(formulaFile("mol-polecat-work.formula.toml"), "v1")
+			r.push("origin", "main", "main")
+			binary := tc.build(r)
+
+			drift := g.checker(binary).checkFormulaDrift(repoDir)
+
+			if !drift.Checked {
+				t.Fatalf("Checked = false (%s), want a determined result", drift.Reason)
+			}
+			if len(drift.Files) != 0 {
+				t.Errorf("Files = %v, want none: the binary is not behind origin/main", drift.Files)
+			}
+		})
+	}
+}

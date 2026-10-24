@@ -59,6 +59,12 @@ func (c checker) checkFormulaDrift(repoDir string) FormulaDrift {
 		// dir can be missing from it.
 		drift.Checked = true
 		return drift
+	case !info.IsForward:
+		// Binary is ahead of or diverged from the build ref, so it is not
+		// behind it. Diffing would list the binary's own formula changes as
+		// missing and tell the operator to rebuild for nothing.
+		drift.Checked = true
+		return drift
 	}
 
 	files, err := c.formulaSourceDiff(repoDir, info.BinaryCommit, info.RepoCommit)
