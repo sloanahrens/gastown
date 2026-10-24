@@ -60,9 +60,11 @@ func TestSnapshotKillsHungRunnerAtDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunSnapshot: %v", err)
 	}
+	guard, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	select {
 	case <-killed:
-	case <-time.After(10 * time.Second):
+	case <-guard.Done():
 		t.Fatal("the hung runner was not killed at its deadline")
 	}
 	if len(rec.Errors) != 1 || rec.Errors[0].Group != "host" {
