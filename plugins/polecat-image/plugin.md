@@ -76,7 +76,7 @@ Each rebuild also leaves its layers in Docker's build cache (apt, the Go
 toolchain, golangci-lint, the gt and bd compiles): a day of installs made it 20
 GB with nothing in use (gt-atxdz). After the image prune the plugin runs
 `docker builder prune --keep-storage 8GB -f` (`POLECAT_IMAGE_BUILDER_KEEP`):
-LRU, so the most recently used 8 GB stays and the next rebuild is warm. It runs
+LRU, so the most recently used layers stay and the next rebuild is warm. It runs
 that command and nothing else that deletes (never a system, image, volume or
 `--all` prune; the per-rig `gt-cache-*` volumes are never touched), and it runs
 under the plugin's lock: a run that built already owns it, any other takes it,
