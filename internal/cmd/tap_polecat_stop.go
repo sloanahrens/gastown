@@ -79,6 +79,17 @@ func polecatStopFinished(hb *polecat.SessionHeartbeat, endSandboxSession func() 
 	return polecatStopGtDoneRan(hb)
 }
 
+// polecatStopSandboxEnd is the Stop hook's sandbox end as polecatStopFinished
+// receives it. It is the seam the non-sandbox path is tested through: a host
+// session returns false at the backend check before the agent bead is read
+// (gt-uiztg), and a kill that cannot be scheduled returns false so the
+// heartbeat decides.
+func polecatStopSandboxEnd(e sandboxSessionEnd, getenv func(string) string, townRoot, rig, polecatName, sessionName string) func() bool {
+	return func() bool {
+		return endSandboxSessionIfDone(e, getenv, townRoot, rig, polecatName, sessionName)
+	}
+}
+
 func init() {
 	tapCmd.AddCommand(tapPolecatStopCmd)
 }
@@ -109,9 +120,7 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 	// In a sandbox a clean, pushed completion ends this session, so the sandbox's
 	// main process exits and the gateway deletes the sandbox; otherwise gt done
 	// already ran or the polecat is idle.
-	if polecatStopFinished(hb, func() bool {
-		return endSandboxSessionIfDone(sandboxSessionEnd{}, os.Getenv, townRoot, os.Getenv("GT_RIG"), polecatName, sessionName)
-	}) {
+	if polecatStopFinished(hb, polecatStopSandboxEnd(sandboxSessionEnd{}, os.Getenv, townRoot, os.Getenv("GT_RIG"), polecatName, sessionName)) {
 		return nil
 	}
 
