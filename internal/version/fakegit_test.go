@@ -22,11 +22,25 @@ import (
 // Every repository in one test shares a fakeGit, the way clones share commit
 // hashes; each repository sees only the objects it created or fetched.
 type fakeGit struct {
-	t     testing.TB
-	mu    sync.Mutex
-	seq   int
-	store map[string]*fakeCommit
-	repos map[string]*fakeRepo
+	t      testing.TB
+	mu     sync.Mutex
+	seq    int
+	store  map[string]*fakeCommit
+	repos  map[string]*fakeRepo
+	faults []fakeFault
+}
+
+// fakeFault makes one exact git command fail with err.
+type fakeFault struct {
+	argv []string
+	err  error
+}
+
+// fault makes the git command whose arguments are exactly argv fail with err,
+// the way git fails when one probe breaks in the middle of a check. Other
+// commands are unaffected.
+func (g *fakeGit) fault(err error, argv ...string) {
+	g.faults = append(g.faults, fakeFault{argv: argv, err: err})
 }
 
 type fakeCommit struct {
@@ -305,6 +319,11 @@ func (g *fakeGit) run(ctx context.Context, dir string, args ...string) ([]byte, 
 		return nil, errExit128
 	}
 	r.calls = append(r.calls, args)
+	for _, f := range g.faults {
+		if eq(args, f.argv...) {
+			return nil, f.err
+		}
+	}
 	out, err := r.dispatch(args)
 	if errors.Is(err, errUnsupported) {
 		g.t.Errorf("fake git: unexpected command in %s: git %s", dir, strings.Join(args, " "))
@@ -362,6 +381,27 @@ func (r *fakeRepo) dispatch(args []string) (string, error) {
 			return "", nil
 		}
 		return "", errExit
+
+	case len(args) == 3 && args[0] == "merge-base":
+		// The best common ancestor. Parents are always created before their
+		// children, so the newest common ancestor is one of the maximal common
+		// ancestors, which is what git reports for a single merge base.
+		a, okA := r.resolve(args[1])
+		b, okB := r.resolve(args[2])
+		if !okA || !okB {
+			return "", errExit128
+		}
+		inB := r.g.ancestors(b)
+		best := ""
+		for id := range r.g.ancestors(a) {
+			if inB[id] && (best == "" || r.g.store[id].seq > r.g.store[best].seq) {
+				best = id
+			}
+		}
+		if best == "" {
+			return "", errExit
+		}
+		return best + "\n", nil
 
 	case len(args) == 3 && eq(args[:2], "for-each-ref", "--format=%(refname)"):
 		prefix := args[2]

@@ -191,3 +191,24 @@ func TestCheckEmbeddedFormulaDrift_BinaryNotBehindBuildRefIsNotDrift(t *testing.
 		})
 	}
 }
+
+// TestCheckEmbeddedFormulaDrift_UnverifiableAncestryFailsClosed: when git cannot
+// say whether the binary is behind the build ref, drift is unknown. Reporting it
+// as checked with no drift would hide the missing formula, because the binary is
+// behind here.
+func TestCheckEmbeddedFormulaDrift_UnverifiableAncestryFailsClosed(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	binary := r.commit(formulaFile("mol-polecat-work.formula.toml"), "v1")
+	tip := r.commit(formulaFile("mol-refinery-patrol.formula.toml"), "v2")
+	g.fault(errExit128, "merge-base", binary, tip)
+
+	drift := g.checker(binary).checkFormulaDrift(repoDir)
+
+	if drift.Checked {
+		t.Errorf("Checked = true, want false: the binary's ancestry was never established (files=%v)", drift.Files)
+	}
+	if drift.Reason == "" {
+		t.Error("Reason is empty, want why the ancestry probe could not be trusted")
+	}
+}
