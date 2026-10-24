@@ -443,7 +443,7 @@ func ProtectedIssueLabel(label string) bool {
 // dispatcher shapes a work bead as one description carrying that section and
 // leaves the field empty, so the section is the source nearly every landing
 // has. This is the one definition of the text: land.CriteriaText hands it to
-// om and UncheckedCriteria counts boxes in it.
+// om and UncheckedAcceptanceText counts boxes in it.
 func AcceptanceText(issue *Issue) string {
 	if issue == nil {
 		return ""
@@ -481,11 +481,31 @@ func acceptanceSection(description string) string {
 }
 
 // UncheckedCriteria returns the issue's unchecked acceptance criteria, one
-// trimmed "- [ ] ..." line each, in order, read from AcceptanceText. Empty
-// means all checked or none.
+// trimmed "- [ ] ..." line each, in order. Empty means all checked or none.
+// It reads the acceptance field only: the close gates have always applied it
+// to that field, so reading the description's section here would widen every
+// gate that shares this predicate. A gate judging the bead's whole acceptance
+// text counts UncheckedAcceptanceText instead (gt-zep4x).
 func UncheckedCriteria(issue *Issue) []string {
+	if issue == nil {
+		return nil
+	}
+	return uncheckedBoxes(issue.AcceptanceCriteria)
+}
+
+// UncheckedAcceptanceText returns the unchecked boxes of AcceptanceText: the
+// acceptance field when set, else the description's "## Acceptance" section.
+// The submission refusal and the landing policy count through it, so a
+// criterion the spec dispatcher shaped into the description refuses exactly as
+// one in the field does (gt-1mrji).
+func UncheckedAcceptanceText(issue *Issue) []string {
+	return uncheckedBoxes(AcceptanceText(issue))
+}
+
+// uncheckedBoxes returns the trimmed "- [ ] ..." lines of text, in order.
+func uncheckedBoxes(text string) []string {
 	var lines []string
-	for _, line := range strings.Split(AcceptanceText(issue), "\n") {
+	for _, line := range strings.Split(text, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "- [ ] ") {
 			lines = append(lines, trimmed)
@@ -494,8 +514,8 @@ func UncheckedCriteria(issue *Issue) []string {
 	return lines
 }
 
-// HasUncheckedCriteria checks if an issue has acceptance criteria with unchecked items.
-// Returns the count of unchecked items (0 means all checked or no criteria).
+// HasUncheckedCriteria counts the unchecked items in the issue's acceptance
+// field (UncheckedCriteria). 0 means all checked or no field criteria.
 func HasUncheckedCriteria(issue *Issue) int {
 	return len(UncheckedCriteria(issue))
 }

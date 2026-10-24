@@ -458,6 +458,24 @@ func TestNonReviewOnlyReviewGateDoesNotChangeCriteriaHandling(t *testing.T) {
 	}
 }
 
+// TestSourceCloseGateKeepsTheFieldContract: the description's "## Acceptance"
+// section widens the submission refusal, not the close gate: a bead with its
+// only unchecked boxes there is refused at submission and still closes as it
+// did before gt-1mrji (gt-zep4x).
+func TestSourceCloseGateKeepsTheFieldContract(t *testing.T) {
+	t.Parallel()
+	issue := &beads.Issue{
+		ID:          "gt-shaped",
+		Description: "## Goal\nx\n\n## Acceptance\n- [ ] still open\n",
+	}
+	if reason, fatal := doneSourceCloseSkipReason("", nil, issue.ID, issue); reason != "" || fatal {
+		t.Fatalf("criteria gate = %q, %v; want the close untouched by the description section", reason, fatal)
+	}
+	if err := refuseUncheckedCriteria(issue.ID, issue); err == nil {
+		t.Fatal("refuseUncheckedCriteria accepted a description-only unchecked box")
+	}
+}
+
 func TestSourceCloseRejectsNonConcreteIssue(t *testing.T) {
 	t.Parallel()
 	issue := &beads.Issue{
