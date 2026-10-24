@@ -41,12 +41,33 @@ func writeSDK(t *testing.T, dir string, stubs map[string]string) {
 	}
 }
 
-// sdkCheckAt is a MacOSSDKCheck on a host it treats as macOS whatever the
-// test runs on, resolving the SDK to path from source (or failing with err).
-func sdkCheckAt(path, source string, err error) *MacOSSDKCheck {
+// brokenXcrun stands in for the xcrun fallback on a host where it fails, so a
+// resolution that reaches it surfaces as an error rather than a pass.
+func brokenXcrun() (string, error) { return "", errors.New("xcrun: broken stub") }
+
+// noProcessEnv is a process environment with no variables set.
+func noProcessEnv(string) string { return "" }
+
+// macOSCheck is a MacOSSDKCheck on a host it treats as macOS whatever the test
+// runs on, with a process environment that sets nothing and a broken xcrun.
+// Run resolves the SDK through its production wiring over these two inputs.
+func macOSCheck() *MacOSSDKCheck {
 	c := NewMacOSSDKCheck()
 	c.goos = "darwin"
-	c.resolve = func() (string, string, error) { return path, source, err }
+	c.getenv = noProcessEnv
+	c.xcrun = brokenXcrun
+	return c
+}
+
+// sdkCheckAt is a macOSCheck whose process environment pins SDKROOT to path.
+func sdkCheckAt(path string) *MacOSSDKCheck {
+	c := macOSCheck()
+	c.getenv = func(key string) string {
+		if key == "SDKROOT" {
+			return path
+		}
+		return ""
+	}
 	return c
 }
 
@@ -56,9 +77,13 @@ func TestMacOSSDKCheck_NotApplicableOffMacOS(t *testing.T) {
 	t.Parallel()
 	check := NewMacOSSDKCheck()
 	check.goos = "linux"
-	check.resolve = func() (string, string, error) {
-		t.Error("resolveSDK called off macOS")
-		return "", "", errors.New("unreachable")
+	check.getenv = func(string) string {
+		t.Error("environment read off macOS")
+		return ""
+	}
+	check.xcrun = func() (string, error) {
+		t.Error("xcrun called off macOS")
+		return "", errors.New("unreachable")
 	}
 
 	result := check.Run(&CheckContext{})
@@ -75,7 +100,7 @@ func TestMacOSSDKCheck_MalformedStubFails(t *testing.T) {
 		"libresolv.tbd": malformedStub,
 		"libz.tbd":      wellFormedStub, // a good stub beside a bad one must not mask it
 	})
-	check := sdkCheckAt(sdk, "SDKROOT", nil)
+	check := sdkCheckAt(sdk)
 
 	result := check.Run(&CheckContext{})
 
@@ -101,7 +126,7 @@ func TestMacOSSDKCheck_WellFormedStubsAreOK(t *testing.T) {
 	t.Parallel()
 	sdk := t.TempDir()
 	writeSDK(t, sdk, map[string]string{"libresolv.tbd": wellFormedStub, "libSystem.tbd": wellFormedStub})
-	check := sdkCheckAt(sdk, "SDKROOT", nil)
+	check := sdkCheckAt(sdk)
 
 	result := check.Run(&CheckContext{})
 
@@ -112,13 +137,6 @@ func TestMacOSSDKCheck_WellFormedStubsAreOK(t *testing.T) {
 		t.Errorf("Details = %v, want the resolution source", result.Details)
 	}
 }
-
-// brokenXcrun stands in for the xcrun fallback on a host where it fails, so a
-// resolution that reaches it surfaces as an error rather than a pass.
-func brokenXcrun() (string, error) { return "", errors.New("xcrun: broken stub") }
-
-// noProcessEnv is a process environment with no variables set.
-func noProcessEnv(string) string { return "" }
 
 // writeDaemonEnv writes settings/daemon.env under town with the given SDKROOT.
 func writeDaemonEnv(t *testing.T, town, sdkRoot string) {
@@ -142,9 +160,7 @@ func TestMacOSSDKCheck_HonorsDaemonEnvSDKROOT(t *testing.T) {
 	sdk := t.TempDir()
 	writeSDK(t, sdk, map[string]string{"libresolv.tbd": wellFormedStub})
 	writeDaemonEnv(t, town, sdk)
-	check := NewMacOSSDKCheck()
-	check.goos = "darwin"
-	check.resolve = func() (string, string, error) { return resolveSDKWith(town, noProcessEnv, brokenXcrun) }
+	check := macOSCheck()
 
 	result := check.Run(&CheckContext{TownRoot: town})
 
@@ -174,9 +190,8 @@ func TestMacOSSDKCheck_ProcessSDKROOTWinsOverDaemonEnv(t *testing.T) {
 		}
 		return ""
 	}
-	check := NewMacOSSDKCheck()
-	check.goos = "darwin"
-	check.resolve = func() (string, string, error) { return resolveSDKWith(town, processEnv, brokenXcrun) }
+	check := macOSCheck()
+	check.getenv = processEnv
 
 	result := check.Run(&CheckContext{TownRoot: town})
 
@@ -185,11 +200,66 @@ func TestMacOSSDKCheck_ProcessSDKROOTWinsOverDaemonEnv(t *testing.T) {
 	}
 }
 
+// TestMacOSSDKCheck_UnreadableDaemonEnvIsSkipped pins the LoadDaemonEnv error
+// branch of resolution: a daemon.env that cannot be loaded leaves the pinned
+// SDK unknown, so the check reports it could not measure rather than falling
+// through to xcrun and judging a different SDK than the daemon's builds use.
+func TestMacOSSDKCheck_UnreadableDaemonEnvIsSkipped(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		prepare func(t *testing.T, town string)
+		want    string
+	}{
+		{
+			name: "malformed line",
+			prepare: func(t *testing.T, town string) {
+				if err := os.MkdirAll(filepath.Dir(config.DaemonEnvPath(town)), 0o755); err != nil {
+					t.Fatalf("creating settings dir: %v", err)
+				}
+				if err := os.WriteFile(config.DaemonEnvPath(town), []byte("SDKROOT /sdk\n"), 0o644); err != nil {
+					t.Fatalf("writing daemon.env: %v", err)
+				}
+			},
+			want: "missing '='",
+		},
+		{
+			name: "path is a directory",
+			prepare: func(t *testing.T, town string) {
+				if err := os.MkdirAll(config.DaemonEnvPath(town), 0o755); err != nil {
+					t.Fatalf("creating daemon.env directory: %v", err)
+				}
+			},
+			want: "reading daemon env file",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			tc.prepare(t, town)
+			check := macOSCheck()
+
+			result := check.Run(&CheckContext{TownRoot: town})
+
+			if result.Status != StatusSkipped {
+				t.Fatalf("Status = %v, want StatusSkipped; message %q", result.Status, result.Message)
+			}
+			if !strings.HasPrefix(result.Message, "unknown:") {
+				t.Errorf("Message = %q, want it to start with %q", result.Message, "unknown:")
+			}
+			if len(result.Details) == 0 || !strings.Contains(result.Details[0], tc.want) {
+				t.Errorf("Details = %v, want the load error containing %q", result.Details, tc.want)
+			}
+		})
+	}
+}
+
 func TestMacOSSDKCheck_MissingSDKErrors(t *testing.T) {
 	t.Parallel()
 	// A stale SDKROOT outlives the SDK it names: renaming the offending SDK
 	// leaves every build pointed at a deleted path.
-	check := sdkCheckAt(filepath.Join(t.TempDir(), "MacOSX27.0.sdk"), "SDKROOT", nil)
+	check := sdkCheckAt(filepath.Join(t.TempDir(), "MacOSX27.0.sdk"))
 
 	result := check.Run(&CheckContext{})
 
@@ -206,7 +276,8 @@ func TestMacOSSDKCheck_MissingSDKErrors(t *testing.T) {
 
 func TestMacOSSDKCheck_UnresolvableIsSkipped(t *testing.T) {
 	t.Parallel()
-	check := sdkCheckAt("", "", errors.New("xcrun: command not found"))
+	check := macOSCheck()
+	check.xcrun = func() (string, error) { return "", errors.New("xcrun: command not found") }
 
 	result := check.Run(&CheckContext{})
 
@@ -224,7 +295,9 @@ func TestMacOSSDKCheck_UnresolvableIsSkipped(t *testing.T) {
 func TestMacOSSDKCheck_NoStubsIsSkipped(t *testing.T) {
 	t.Parallel()
 	// An SDK with no stub tree was not judged, so it must not pass as clean.
-	check := sdkCheckAt(t.TempDir(), "xcrun", nil)
+	sdk := t.TempDir()
+	check := macOSCheck()
+	check.xcrun = func() (string, error) { return sdk, nil }
 
 	result := check.Run(&CheckContext{})
 
@@ -244,7 +317,7 @@ func TestMacOSSDKCheck_ReportsAtMostMaxStubs(t *testing.T) {
 		stubs[name] = malformedStub
 	}
 	writeSDK(t, sdk, stubs)
-	check := sdkCheckAt(sdk, "SDKROOT", nil)
+	check := sdkCheckAt(sdk)
 
 	result := check.Run(&CheckContext{})
 

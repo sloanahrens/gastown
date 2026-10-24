@@ -24,9 +24,10 @@ type MacOSSDKCheck struct {
 	// the real runtime.GOOS, on the Linux CI runner every one of them hit
 	// the not-applicable branch and failed (gt-22hdp.39).
 	goos string
-	// resolve reports the SDK a build links against; nil is resolveSDK for the
-	// check's town.
-	resolve func() (path, source string, err error)
+	// getenv reads the process environment; nil is os.Getenv.
+	getenv func(string) string
+	// xcrun reports the SDK path xcrun selects; nil is xcrunSDKPath.
+	xcrun func() (string, error)
 }
 
 // NewMacOSSDKCheck creates a new macOS SDK check.
@@ -40,17 +41,13 @@ func NewMacOSSDKCheck() *MacOSSDKCheck {
 	}
 }
 
-// resolveSDK reports the SDK a build will link against and where it came from.
-// SDKROOT wins because the daemon passes it through to every polecat build.
-// The process environment is read first, then the SDKROOT pinned in the town's
-// settings/daemon.env (config.DaemonEnvPath), which is what the daemon exports
-// into the builds it starts; xcrun is the fallback for a shell that sets nothing.
-func resolveSDK(townRoot string) (path, source string, err error) {
-	return resolveSDKWith(townRoot, os.Getenv, xcrunSDKPath)
-}
-
-// resolveSDKWith is resolveSDK with its two host inputs passed in: the process
-// environment and the xcrun fallback. Tests supply fakes for both.
+// resolveSDKWith reports the SDK a build will link against and where it came
+// from. SDKROOT wins because the daemon passes it through to every polecat
+// build. The process environment is read first, then the SDKROOT pinned in the
+// town's settings/daemon.env (config.DaemonEnvPath), which is what the daemon
+// exports into the builds it starts; xcrun is the fallback for a shell that
+// sets nothing. The process environment and the xcrun lookup are passed in so
+// tests supply fakes for both.
 func resolveSDKWith(townRoot string, getenv func(string) string, xcrun func() (string, error)) (path, source string, err error) {
 	if root := strings.TrimSpace(getenv("SDKROOT")); root != "" {
 		return root, "SDKROOT", nil
@@ -220,16 +217,15 @@ const sdkFixHint = "Point SDKROOT at a well-formed SDK in settings/daemon.env (s
 
 // Run reports whether the SDK a cgo build links against is well-formed.
 func (c *MacOSSDKCheck) Run(ctx *CheckContext) *CheckResult {
-	goos, resolve := c.goos, c.resolve
+	goos, getenv, xcrun := c.goos, c.getenv, c.xcrun
 	if goos == "" {
 		goos = runtime.GOOS
 	}
-	if resolve == nil {
-		townRoot := ""
-		if ctx != nil {
-			townRoot = ctx.TownRoot
-		}
-		resolve = func() (string, string, error) { return resolveSDK(townRoot) }
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if xcrun == nil {
+		xcrun = xcrunSDKPath
 	}
 	if goos != "darwin" {
 		return &CheckResult{
@@ -239,7 +235,11 @@ func (c *MacOSSDKCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	sdkPath, source, err := resolve()
+	townRoot := ""
+	if ctx != nil {
+		townRoot = ctx.TownRoot
+	}
+	sdkPath, source, err := resolveSDKWith(townRoot, getenv, xcrun)
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
