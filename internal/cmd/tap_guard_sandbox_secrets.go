@@ -292,32 +292,10 @@ func sandboxSecretsSegment(segment []string) (reason string, payloads, argv []st
 	return "", payloads, nil
 }
 
-// sandboxSecretsRunnerValueFlags are the flags of uv, npx and pipx run whose value is
-// the next word, so the value is not taken for the command they run. A flag
-// missing here is read as a switch: its value then stands in for the command
-// and the guard misses the interpreter behind it, so the list errs long.
-var sandboxSecretsRunnerValueFlags = map[string]bool{
-	// uv, uv run, uv tool run and uvx
-	"--with": true, "--with-editable": true, "--with-requirements": true, "--from": true,
-	"--python": true, "-p": true, "--project": true, "--directory": true, "--env-file": true,
-	"--package": true, "--extra": true, "--group": true, "--no-group": true, "--only-group": true,
-	"--index": true, "--default-index": true, "--index-url": true, "-i": true,
-	"--extra-index-url": true, "--find-links": true, "-f": true, "--index-strategy": true,
-	"--keyring-provider": true, "--config-file": true, "--cache-dir": true, "--color": true,
-	"--python-preference": true, "--python-fetch": true, "--refresh-package": true,
-	"--reinstall-package": true, "--upgrade-package": true, "-P": true, "--exclude-newer": true,
-	"--link-mode": true, "--resolution": true, "--prerelease": true, "--fork-strategy": true,
-	"--constraints": true, "-c": true, "--overrides": true, "--build-constraints": true,
-	// npx (-p and --package share the uv spelling above)
-	"--registry": true, "--cache": true, "--userconfig": true, "--prefix": true,
-	"-w": true, "--workspace": true, "--shell": true,
-	// pipx run
-	"--spec": true, "--pip-args": true,
-}
-
 // sandboxSecretsRunnerPayloadFlags are the flags whose value is a command line
-// the shell runs: npx -c 'env'. Only npx reads them so; uv's -c is
-// --constraints, a value flag whose value is a file.
+// the shell runs: npx -c 'env'. Only npx reads them so
+// (sandboxSecretsSkipRunnerPayload drops them for npx alone), because uv's -c
+// is --constraints, whose value is a file.
 var sandboxSecretsRunnerPayloadFlags = map[string]bool{"-c": true, "--call": true}
 
 // sandboxSecretsPackageRunner looks through the package runners that start the
@@ -327,76 +305,121 @@ var sandboxSecretsRunnerPayloadFlags = map[string]bool{"-c": true, "--call": tru
 // the runner starts, from its name on; payload is the command line npx -c
 // hands to a shell.
 func sandboxSecretsPackageRunner(name string, args []string) (inner []string, payload string, runs bool) {
-	var rest []string
 	switch name {
-	case "uv":
-		rest, _ = sandboxSecretsSkipRunnerFlags(args, false)
-		if len(rest) > 0 && rest[0] == "tool" {
-			rest, _ = sandboxSecretsSkipRunnerFlags(rest[1:], false)
-		}
-		if len(rest) == 0 || rest[0] != "run" {
+	case "uv", "pipx":
+		// run is the subcommand that starts a command, and uv tool run spells
+		// it with tool in front. It is read wherever it stands, not as the
+		// first word: the value of a flag ahead of it (uv --directory sub run)
+		// looks the same as it does, and no flag table can know every flag's
+		// arity, so a first-word reading would hide the command behind any
+		// flag the table lists wrongly.
+		i := sandboxSecretsWordIndex(args, "run")
+		if i < 0 {
 			return nil, "", false
 		}
-		rest, _ = sandboxSecretsSkipRunnerFlags(rest[1:], false)
+		args = args[i+1:]
 	case "uvx":
-		rest, _ = sandboxSecretsSkipRunnerFlags(args, false)
 	case "npx":
-		rest, payload = sandboxSecretsSkipRunnerFlags(args, true)
-	case "pipx":
-		rest, _ = sandboxSecretsSkipRunnerFlags(args, false)
-		if len(rest) == 0 || rest[0] != "run" {
-			return nil, "", false
-		}
-		rest, _ = sandboxSecretsSkipRunnerFlags(rest[1:], false)
+		args, payload = sandboxSecretsSkipRunnerPayload(args)
 	default:
 		return nil, "", false
 	}
-	if len(rest) == 0 {
-		return nil, payload, true
-	}
-	// npx node@20, uvx ruff@latest and pipx run black==24.1 name a version after the command.
-	cmd := rest[0]
-	if i := strings.Index(cmd, "=="); i > 0 {
-		cmd = cmd[:i]
-	}
-	if i := strings.LastIndex(cmd, "@"); i > 0 {
-		cmd = cmd[:i]
-	}
-	return append([]string{cmd}, rest[1:]...), payload, true
+	return sandboxSecretsRunnerCommand(args), payload, true
 }
 
-// sandboxSecretsSkipRunnerFlags drops the flags a package runner takes ahead of
-// the command it starts and returns the words from that command on; "--" ends
-// the flags. With npx set, the value of -c or --call comes back as payload.
-func sandboxSecretsSkipRunnerFlags(args []string, npx bool) (rest []string, payload string) {
-	i := 0
-	for i < len(args) {
+// sandboxSecretsRunnerCommand returns the command a package runner starts, from
+// its name on. The runner's own flags and their values stand ahead of it, and
+// the arity of a flag not in any table is not knowable: its value looks exactly
+// like the command. So the command is the first word that names one this guard
+// judges (sandboxSecretsNamesCommand), wherever it stands, rather than the first
+// word after the flags. When no word names one, the command is the first word
+// that is not a flag, and judging that blocks nothing.
+//
+// The cost of reading past a value is that a command named only as somebody's
+// argument is judged as that command. The guard errs toward judging more: a
+// value that hides an interpreter is the failure this function exists to
+// prevent, while a word such as pytest's -k pattern costs the agent a block
+// message that names the rule and says to escalate.
+func sandboxSecretsRunnerCommand(args []string) []string {
+	var first []string
+	for i, a := range args {
+		if len(a) > 0 && a[0] == '-' {
+			continue
+		}
+		if first == nil {
+			first = args[i:]
+		}
+		if sandboxSecretsNamesCommand(a) {
+			return append([]string{sandboxSecretsCommandWord(a)}, args[i+1:]...)
+		}
+	}
+	return first
+}
+
+// sandboxSecretsCommandWord strips the version a package runner names after the
+// command it starts: npx node@20, pipx run black==24.1. An @ inside a path is
+// part of the path, not a version.
+func sandboxSecretsCommandWord(word string) string {
+	if i := strings.Index(word, "=="); i > 0 {
+		word = word[:i]
+	}
+	if i := strings.LastIndex(word, "@"); i > 0 && !strings.Contains(word[i+1:], "/") {
+		word = word[:i]
+	}
+	return word
+}
+
+// sandboxSecretsNamesCommand reports whether the word names a command this guard
+// judges, or one that runs the command behind it.
+func sandboxSecretsNamesCommand(word string) bool {
+	name := strings.ToLower(filepath.Base(sandboxSecretsCommandWord(word)))
+	switch name {
+	case "env", "printenv", "set", "export", "declare", "typeset", "compgen",
+		"echo", "printf", "print", "curl", "wget", "http", "https", "jq", "git",
+		".githelper", "eval", "uv", "uvx", "npx", "pipx":
+		return true
+	}
+	if sandboxSecretsEnvReaders[name] || sandboxSecretsIsScriptRunner(name) || shellInvokers[name] {
+		return true
+	}
+	_, launcher := prWorkflowLaunchers[name]
+	return launcher
+}
+
+// sandboxSecretsWordIndex returns the index of the first word in args that is
+// exactly word, or -1.
+func sandboxSecretsWordIndex(args []string, word string) int {
+	for i, a := range args {
+		if a == word {
+			return i
+		}
+	}
+	return -1
+}
+
+// sandboxSecretsSkipRunnerPayload drops npx's -c/--call flag and the command
+// line it carries, given as its own word (npx -c 'env') or attached to the flag
+// (-cenv, -c=env, --call=env), and returns the words that remain with that
+// command line.
+func sandboxSecretsSkipRunnerPayload(args []string) (rest []string, payload string) {
+	rest = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if a == "--" {
-			i++
-			break
-		}
-		if len(a) < 2 || a[0] != '-' {
-			break
-		}
-		flag, value, hasValue := strings.Cut(a, "=")
 		switch {
-		case npx && sandboxSecretsRunnerPayloadFlags[flag] && hasValue:
-			payload = value
-		case npx && sandboxSecretsRunnerPayloadFlags[a]:
+		case sandboxSecretsRunnerPayloadFlags[a]:
 			if i+1 < len(args) {
 				payload = args[i+1]
+				i++
 			}
-			i++
-		case sandboxSecretsRunnerValueFlags[a]:
-			i++
+		case strings.HasPrefix(a, "--call="):
+			payload = strings.TrimPrefix(a, "--call=")
+		case len(a) > 2 && strings.HasPrefix(a, "-c") && a[1] != '-':
+			payload = strings.TrimPrefix(a[2:], "=")
+		default:
+			rest = append(rest, a)
 		}
-		i++
 	}
-	if i > len(args) {
-		i = len(args)
-	}
-	return args[i:], payload
+	return rest, payload
 }
 
 func sandboxSecretsInvocation(argv []string) string {

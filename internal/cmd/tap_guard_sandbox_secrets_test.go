@@ -132,6 +132,17 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"pipx run python -c \"import os; print(os.environ)\"",
 		"pipx run --spec foo==1.0 python -c 'import os; print(os.environ)'",
 		"pipx --quiet run python3 -c 'import os; print(os.environ)'",
+		// A runner flag the guard has no arity for does not hide the command
+		// (gt-qr646): a switch and a flag with a value both read through to the
+		// interpreter, wherever the flag's value would otherwise stand.
+		"uv run --frozen python -c 'import os; print(os.environ)'",
+		"uv run --no-progress --allow-insecure-host example.com python -c 'import os; print(os.environ)'",
+		"uv --directory sub run python -c 'import os; print(os.environ)'",
+		"uvx --offline python -c 'import os; print(os.environ)'",
+		"npx --silent node -e 'console.log(process.env)'",
+		"npx --loglevel verbose node -e 'console.log(process.env)'",
+		"npx -cenv",
+		"npx --call=env",
 		"FOO=1 timeout 5 uv run python -c 'import os; print(os.environ)'",
 		"echo hi && uv run python -c 'import os; print(os.environ)'",
 	} {
@@ -199,6 +210,39 @@ func TestSandboxSecretsHasAnyFlag(t *testing.T) {
 			t.Parallel()
 			if got := sandboxSecretsHasAnyFlag(tc.args, tc.flag); got != tc.want {
 				t.Errorf("sandboxSecretsHasAnyFlag(%q, %q) = %v, want %v", tc.args, tc.flag, got, tc.want)
+			}
+		})
+	}
+}
+
+// sandboxSecretsRunnerCommand reads past the flags of a package runner to the
+// command it starts. A flag's arity is not knowable for the ones no table
+// lists, so the command is the first word that names one the guard judges:
+// whether the word after an unlisted flag is its value or the command, the
+// interpreter behind it is still read (gt-qr646).
+func TestSandboxSecretsRunnerCommand(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"command first", []string{"python", "-c", "x"}, []string{"python", "-c", "x"}},
+		{"unlisted switch", []string{"--frozen", "python", "-c", "x"}, []string{"python", "-c", "x"}},
+		{"unlisted value flag", []string{"--loglevel", "debug", "python", "-c", "x"}, []string{"python", "-c", "x"}},
+		{"listed value flag", []string{"--python", "3.12", "python", "-c", "x"}, []string{"python", "-c", "x"}},
+		{"after --", []string{"--", "python", "-c", "x"}, []string{"python", "-c", "x"}},
+		{"version after the command", []string{"node@20", "-e", "x"}, []string{"node", "-e", "x"}},
+		{"package version", []string{"python==3.12", "-c", "x"}, []string{"python", "-c", "x"}},
+		{"path to a command", []string{"/usr/bin/printenv"}, []string{"/usr/bin/printenv"}},
+		{"no command named", []string{"--frozen", "pytest", "-k", "x"}, []string{"pytest", "-k", "x"}},
+		{"flags only", []string{"--frozen"}, nil},
+		{"nothing", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sandboxSecretsRunnerCommand(tc.args); strings.Join(got, "\x00") != strings.Join(tc.want, "\x00") {
+				t.Errorf("sandboxSecretsRunnerCommand(%q) = %q, want %q", tc.args, got, tc.want)
 			}
 		})
 	}
@@ -285,9 +329,13 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"uv pip install requests",
 		"uv tool install ruff",
 		"uv --directory sub run pytest",
+		"uv run --frozen pytest",
+		"uv run --no-progress ruff check .",
 		"uvx ruff@latest check .",
 		"npx prettier --write .",
 		"npx -y tsc --noEmit",
+		"npx --silent prettier --write .",
+		"npx --loglevel verbose tsc --noEmit",
 		"npx node -e 'console.log(process.env.NODE_ENV)'",
 		"npx node -e 'console.log(1)'",
 		"npx -c 'npm test'",
