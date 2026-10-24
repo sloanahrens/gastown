@@ -387,6 +387,71 @@ func TestCheckPolecatSafetyOfAGoneSandboxSeat(t *testing.T) {
 	}
 }
 
+// A sandbox seat the patrol calls dead is never nuked with its work at risk.
+// While the gateway still lists the sandbox its git state cannot be measured, so
+// the gate refuses on the work the seat holds against the bead; once the gateway
+// affirms the sandbox gone, the work reads as lost and the same verdict
+// (sandbox-work-lost) refuses the nuke and sends the bead back for rework
+// (gt-tj446, gt-qq6rg.3).
+func TestCheckPolecatSafetyOfADeadSandboxSeat(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		live polecat.LiveGitState // the gateway's answer for the seat
+		want string               // substring of a refusal reason
+	}{
+		{
+			name: "listed in a terminal failure phase",
+			live: polecat.SandboxSeatGitState("", true, nil, "gt-ember"),
+			want: "gt-work",
+		},
+		{
+			name: "gone after the death",
+			live: polecat.SandboxSeatGitState("", false, nil, "gt-ember"),
+			want: "work lost: sandbox gone with gt-work unfinished",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+			fake := mrlessBeads{beadsfake.New()}
+			agentID := polecatBeadIDForRig(r, "gastown", "ember")
+			if _, err := fake.Create(beads.CreateOptions{
+				ID: agentID, Title: agentID, Labels: []string{"gt:agent"}, Priority: -1,
+				Description: beads.FormatAgentDescription(agentID, &beads.AgentFields{
+					RoleType: "polecat", Rig: "gastown", AgentState: string(beads.AgentStateIdle),
+					CleanupStatus: string(polecat.CleanupClean), Agent: sandboxSeatAgent,
+					Branch: "polecat/ember/gt-a+x", HookBead: "gt-work",
+				}),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fake.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
+				t.Fatal(err)
+			}
+			env := sandboxSeatEnv{
+				probe:        func(string, string) (polecat.LiveGitState, bool) { return tt.live, true },
+				remoteBranch: func(_, _ string) (bool, error) { return false, nil },
+			}
+			get := func(string) (*polecat.Polecat, error) {
+				return &polecat.Polecat{Name: "ember", Branch: "polecat/ember/gt-a+x"}, nil
+			}
+
+			result := checkPolecatSafetyWith("gastown", "ember", r, get, fake, env)
+
+			joined := strings.Join(result.Reasons, " | ")
+			if !result.Blocked {
+				t.Fatalf("a dead sandbox seat holding gt-work is nukable; want refused (reasons %q)", joined)
+			}
+			if !strings.Contains(joined, tt.want) {
+				t.Fatalf("reasons = %q, want one containing %q", joined, tt.want)
+			}
+		})
+	}
+}
+
 // Both lost-work checks now ask origin about the branch one shared rule names,
 // and that rule trims: a record that is only whitespace names nothing to ask
 // about, so the checks fail closed rather than query origin for " ". A parsed

@@ -125,6 +125,9 @@ type openshellBackend struct {
 	// commits carry (host polecats commit with it too); "" when it is unset.
 	gitEmail    func() string
 	installedGT func() string
+	// phaseWatch is how long this session's gateway phase has been a terminal
+	// failure. Nil is the process's watch (sandboxPhases); tests set one.
+	phaseWatch *sandboxPhaseWatch
 }
 
 func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {

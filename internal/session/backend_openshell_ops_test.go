@@ -121,7 +121,13 @@ func TestOpenShellOpsSessionExistsMatrix(t *testing.T) {
 func TestOpenShellOpsProgressSampleReadsTheTranscriptThroughExec(t *testing.T) {
 	t.Parallel()
 	const path = "/sandbox/.claude/projects/-sandbox-gt-gastown/9f2.jsonl"
-	fake := &sandbox.Fake{Reply: map[string]string{"exec": "1760000123 40960 " + path + "\n"}}
+	// The sample reads the transcript. The gateway is not asked for the phase
+	// too: this sandbox's tmux answered, which is proof enough that it runs
+	// (gt-tj446, om f9ae48011e3e).
+	fake := &sandbox.Fake{Reply: map[string]string{
+		"exec": "1760000123 40960 " + path + "\n",
+		"get":  openshellReadyReply,
+	}}
 	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
 	now := time.Unix(1760000200, 0)
 

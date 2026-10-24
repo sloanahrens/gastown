@@ -56,7 +56,7 @@ func poolSeatSessions(t sessionLister, townRoot string, pool *config.PolecatPool
 // batched work-bead read the landing seats are confirmed with. A caller with
 // no town to read (a test) passes nil for both.
 func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, error) {
-	sessions, err := poolOccupiedSessions(t, townRoot, disposition, work, pool, time.Now)
+	sessions, err := poolOccupiedSessions(t, townRoot, disposition, work, pool, time.Now, sandboxSeatDeathsFor(townRoot))
 	if err != nil {
 		return nil, err
 	}
@@ -86,11 +86,16 @@ func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatD
 //
 // A failure carries which read failed (poolOccupancyError), so a caller can
 // keep its own words for a lister it cannot talk to without parsing the error.
-func poolOccupiedSessions(t sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time) ([]poolSession, error) {
+//
+// deadSandbox is the liveness read a live session is dropped by (gt-tj446): a
+// sandbox seat the patrol has recorded as dead is not a working seat, and the
+// dead read below then counts it as held while its bead is hooked.
+func poolOccupiedSessions(t sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time, deadSandbox sandboxSeatDeadFunc) ([]poolSession, error) {
 	live, err := listPolecatSessionsWith(t, disposition, now())
 	if err != nil {
 		return nil, &poolOccupancyError{sessions: true, err: err}
 	}
+	live = withoutDeadSandboxSeats(live, deadSandbox)
 	dead, err := poolDeadHookedSessions(townRoot, pool, disposition, live, now())
 	if err != nil {
 		return nil, &poolOccupancyError{err: err}

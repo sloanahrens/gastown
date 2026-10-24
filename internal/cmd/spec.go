@@ -1809,7 +1809,7 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		Sling: func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (string, error) {
 			var occupied func() ([]poolSession, error)
 			if seats := snapshot.Load(); seats != nil {
-				occupied = snapshotOccupied(*seats, newPoolSessionLister, time.Now)
+				occupied = snapshotOccupied(*seats, newPoolSessionLister, sandboxSeatDeathsFor(townRoot), time.Now)
 			}
 			return slingSpec(townRoot, c, resumeBranch, seat, occupied)
 		},

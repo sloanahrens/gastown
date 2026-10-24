@@ -17,7 +17,9 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -578,6 +580,57 @@ func listPolecatSessionsWith(t sessionLister, disposition polecatDispositionFunc
 		out = append(out, poolSession{name: n, agent: strings.TrimSpace(agent), created: created, rig: rigName, polecat: polecatName})
 	}
 	return out, nil
+}
+
+// sandboxSeatDeadFunc reports whether a seat's own liveness record says the
+// seat is dead: the patrol's last sample of it found it dead.
+type sandboxSeatDeadFunc func(sessionName, rigName, polecatName string) bool
+
+// sandboxSeatDeathsFor is the town's real dead-seat read: the verdict the
+// patrol recorded for the seat, in its intent record (intent.Record.Progress).
+//
+// The recorded verdict is the one answer both processes can have. The phase
+// grace (SandboxDeadGrace) is measured on a clock in the patrol's memory, and
+// the roster runs in its own process — one `gt spec dispatch` tick each — so a
+// clock of its own would start over every tick and never reach the grace, while
+// a phase read on its own would call the sandbox dead at once, with no grace at
+// all. Reading what the patrol decided keeps the two on one answer, grace
+// included (gt-tj446).
+//
+// A host seat has no sandbox record, and a record that cannot be read is not
+// evidence of a death: both keep the seat, as an unanswerable gateway does
+// (fail closed). The seat is not freed either way: the caller's dead-hooked
+// read counts it as held while the bead is hooked.
+func sandboxSeatDeathsFor(townRoot string) sandboxSeatDeadFunc {
+	if townRoot == "" {
+		return nil
+	}
+	return func(sessionName, rigName, polecatName string) bool {
+		if _, ok, err := session.ReadSandboxRecord(townRoot, sessionName); err != nil || !ok {
+			return false
+		}
+		// Read's unreadable answer is a record carrying no progress, which is
+		// not a death, so the seat is kept.
+		rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, polecatName))
+		return rec.Progress != nil && rec.Progress.DeadSamples > 0
+	}
+}
+
+// withoutDeadSandboxSeats drops the live sessions the patrol has recorded as
+// dead. The seat is not freed: the caller's dead-hooked read counts it as held
+// while no working session answers for it.
+func withoutDeadSandboxSeats(live []poolSession, dead sandboxSeatDeadFunc) []poolSession {
+	if dead == nil {
+		return live
+	}
+	out := live[:0:0]
+	for _, s := range live {
+		if s.rig != "" && s.polecat != "" && dead(s.name, s.rig, s.polecat) {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // parsePolecatRole splits a session's GT_ROLE ("<rig>/polecats/<name>") into
@@ -1414,7 +1467,7 @@ func poolUncountedFallback(pool *config.PolecatPool, requested string, now time.
 // seat-decision lock, which is where the count has to be taken (gt-8o35b).
 func (r *poolRouter) occupied() func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
-		return poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.work, r.pool(), r.now)
+		return poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.work, r.pool(), r.now, sandboxSeatDeathsFor(r.townRoot))
 	}
 }
 
@@ -1475,14 +1528,18 @@ func releasedSeatRecorder(disposition polecatDispositionFunc) (polecatDispositio
 // that no session accounts for. A session new since the roster counts. The
 // snapshot's own live sessions and claims are dropped: the listing replaces the
 // former and the ledger appends the latter under the decision lock (gt-t8q5).
-func snapshotOccupied(snapshot poolSeatSnapshot, lister func() sessionLister, now func() time.Time) func() ([]poolSession, error) {
+//
+// The listing is read through the same dead-seat answer as the roster
+// (deadSandbox), so a seat the roster counted dead-hooked is not read back as
+// live here (gt-tj446).
+func snapshotOccupied(snapshot poolSeatSnapshot, lister func() sessionLister, deadSandbox sandboxSeatDeadFunc, now func() time.Time) func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
 		listed, err := listPolecatSessionsWith(lister(), nil, now())
 		if err != nil {
 			return nil, &poolOccupancyError{sessions: true, err: err}
 		}
 		live := listed[:0:0]
-		for _, s := range listed {
+		for _, s := range withoutDeadSandboxSeats(listed, deadSandbox) {
 			if !snapshot.releasedAt(s) {
 				live = append(live, s)
 			}

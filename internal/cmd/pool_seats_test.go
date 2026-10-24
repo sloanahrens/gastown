@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -348,6 +349,183 @@ func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 			}
 			if n := poolSeatCount("deepseek-flash", got); n != c.want {
 				t.Fatalf("seat count = %d, want %d (%+v)", n, c.want, got)
+			}
+		})
+	}
+}
+
+// writeSandboxSeat stages a sandboxed seat: the registry record that makes the
+// session a sandbox's (routing and the dead-seat read both look it up by
+// session name) and the seat's intent record with the patrol's last sample.
+func writeSandboxSeat(t *testing.T, town, sessionName, rigName, polecatName string, progress *intent.Progress) {
+	t.Helper()
+	if err := session.WriteSandboxRecord(town, session.SandboxRecord{
+		Session: sessionName, Rig: rigName, Polecat: polecatName, Profile: "openshell", Image: "gt",
+	}); err != nil {
+		t.Fatalf("WriteSandboxRecord: %v", err)
+	}
+	writeIntentRecord(t, intent.Seat{Rig: rigName, Role: constants.RolePolecat, Name: polecatName}, town,
+		intent.Record{Progress: progress})
+}
+
+// The roster's dead-seat answer is the verdict the patrol recorded for the
+// seat, so a sandbox the patrol has given up on is not a working seat while
+// one it has not — and a host seat, a seat with no sample, and a record that
+// cannot be read — all keep their session (gt-tj446). The roster runs in its
+// own process, so it cannot measure the patrol's phase grace itself; reading
+// the recorded verdict is what keeps the two on one answer.
+func TestSandboxSeatDeathsAreThePatrolsRecordedVerdict(t *testing.T) {
+	t.Parallel()
+	const sandbox = "gt-ember"
+	dead := &intent.Progress{SampledAt: time.Unix(1760000000, 0), DeadSamples: 2}
+	alive := &intent.Progress{SampledAt: time.Unix(1760000000, 0)}
+
+	cases := []struct {
+		name   string
+		noTown bool
+		stage  func(t *testing.T, town string)
+		want   bool
+	}{
+		{
+			name: "the patrol recorded the seat dead",
+			stage: func(t *testing.T, town string) {
+				writeSandboxSeat(t, town, sandbox, "gastown", "ember", dead)
+			},
+			want: true,
+		},
+		{
+			name: "the patrol's last sample found the seat alive",
+			stage: func(t *testing.T, town string) {
+				writeSandboxSeat(t, town, sandbox, "gastown", "ember", alive)
+			},
+		},
+		{
+			name: "the seat has never been sampled",
+			stage: func(t *testing.T, town string) {
+				writeSandboxSeat(t, town, sandbox, "gastown", "ember", nil)
+			},
+		},
+		{
+			// A host seat has no sandbox record: the sandbox rule decides
+			// nothing about it, whatever its liveness sample says.
+			name: "a host seat is not judged by the sandbox rule",
+			stage: func(t *testing.T, town string) {
+				writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ember"}, town,
+					intent.Record{Progress: dead})
+			},
+		},
+		{
+			name: "a record that cannot be read is not a death",
+			stage: func(t *testing.T, town string) {
+				writeSandboxSeat(t, town, sandbox, "gastown", "ember", dead)
+				path := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ember"}.Path(town)
+				if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:   "a caller with no town is handed no read at all",
+			noTown: true,
+			stage:  func(*testing.T, string) {},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			c.stage(t, town)
+			readTown := town
+			if c.noTown {
+				readTown = ""
+			}
+			deadSeat := sandboxSeatDeathsFor(readTown)
+			if c.noTown {
+				if deadSeat != nil {
+					t.Fatal("a caller with no town was handed a dead-seat read")
+				}
+				return
+			}
+			if deadSeat == nil {
+				t.Fatal("a town was handed no dead-seat read")
+			}
+			if got := deadSeat(sandbox, "gastown", "ember"); got != c.want {
+				t.Fatalf("dead = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// A sandbox seat the patrol has recorded dead is not a working seat even when
+// its tmux still answers for it: the roster counts it dead-hooked while its
+// bead is hooked, so a full pool says why it is full and no sling reads the
+// seat free. A seat it holds no work on is free, and a seat the patrol has not
+// judged dead is working (gt-tj446).
+func TestPoolSeatSessionsCountsADeadSandboxSeatAsDeadHooked(t *testing.T) {
+	t.Parallel()
+	pool := seatPool("deepseek-flash", 3)
+	held := poolSeatState{
+		Disposition: polecat.WorkstateDisposition{
+			Verdict: polecat.WorkstateVerdictNeedsRecovery, NeedsRecovery: true, CountsTowardCapacity: true,
+		},
+		HookHeld: true,
+	}
+	free := poolSeatState{Disposition: polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictSafeToNuke}}
+	const sandbox = "gt-ember"
+	answering := &fakeLister{sessions: map[string]map[string]string{
+		sandbox: {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
+	}}
+	recordedDead := &intent.Progress{SampledAt: time.Unix(1760000000, 0), DeadSamples: 1}
+	recordedAlive := &intent.Progress{SampledAt: time.Unix(1760000000, 0)}
+
+	cases := []struct {
+		name     string
+		state    poolSeatState
+		progress *intent.Progress
+		noTown   bool // the caller has no registry and no records to read
+		want     int
+		wantHeld bool
+	}{
+		{"a dead sandbox seat holding work is dead-hooked", held, recordedDead, false, 1, true},
+		{"a dead sandbox seat holding nothing is free", free, recordedDead, false, 0, false},
+		{"a live sandbox seat is working", held, recordedAlive, false, 1, false},
+		{"a caller with no town keeps the seat", held, recordedDead, true, 1, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
+			writeTownPolecatDir(t, town, "gastown", "ember")
+			if !c.noTown {
+				writeSandboxSeat(t, town, sandbox, "gastown", "ember", c.progress)
+			}
+			disposition := func(rigName, polecatName string) (poolSeatState, error) {
+				if rigName != "gastown" || polecatName != "ember" {
+					t.Fatalf("unexpected seat read %s/%s", rigName, polecatName)
+				}
+				return c.state, nil
+			}
+			readTown := town
+			if c.noTown {
+				readTown = ""
+			}
+
+			got, err := poolOccupiedSessions(answering, town, disposition, nil, pool, time.Now, sandboxSeatDeathsFor(readTown))
+			if err != nil {
+				t.Fatalf("poolOccupiedSessions: %v", err)
+			}
+			if n := poolSeatCount("deepseek-flash", got); n != c.want {
+				t.Fatalf("seat count = %d, want %d (%+v)", n, c.want, got)
+			}
+			roster := specRosterFrom(got, nil)
+			if deadHooked := roster.DeadHooked["deepseek-flash"]; (deadHooked > 0) != c.wantHeld {
+				t.Fatalf("roster dead-hooked = %d, want held=%v (%+v)", deadHooked, c.wantHeld, roster)
+			}
+			for _, s := range got {
+				if s.deadHooked != (c.wantHeld && s.rig == "gastown") {
+					t.Fatalf("session %+v deadHooked = %v, want %v", s, s.deadHooked, c.wantHeld)
+				}
 			}
 		})
 	}
