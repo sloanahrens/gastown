@@ -294,6 +294,12 @@ func TestGuardSelectsRemovals(t *testing.T) {
 			"internal/testpolicy",
 		},
 		{
+			// The session policy tests read the file, so its removal fails them.
+			"deleting the polecat policy selects session",
+			"D\x00deploy/polecat/policy.yaml\x00",
+			"internal/session",
+		},
+		{
 			"deleting a doc selects nothing",
 			"D\x00docs/old.md\x00",
 			"",
