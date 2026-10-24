@@ -1539,6 +1539,31 @@ func TestSpecDispatchImageDriftIsADeferralAndOtherFailuresAreNot(t *testing.T) {
 	}
 }
 
+// A rig's cache volume that cannot be created defers the bead the way a drifted
+// image does: no failed label, no note, and the next tick slings it once the
+// volume exists (gt-td6pl).
+func TestSpecDispatchCacheVolumeIsADeferralNotAFailure(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	f.slingErrs["gt-a"] = []error{fmt.Errorf("starting polecat session: %w", fmt.Errorf("creating sandbox: %w", session.ErrCacheVolume))}
+	r := runSpecDispatchCycle(f.env())
+	if len(r.Failed) != 0 || len(r.Deferred) != 1 || len(f.slung) != 0 {
+		t.Fatalf("failed %+v deferred %+v slung %v; want 0 failed and 1 deferred", r.Failed, r.Deferred, f.slung)
+	}
+	if n := len(f.labels["gt-a"]); n != 0 {
+		t.Errorf("labels = %v, want no spec-dispatch-failed label", f.labels["gt-a"])
+	}
+	if n := len(f.notes["gt-a"]); n != 0 {
+		t.Errorf("annotated %d times, want none", n)
+	}
+	if line := r.Deferred[0].Line; !strings.Contains(line, "cache volume cannot be created") {
+		t.Errorf("deferral line = %q, want it to name the volume", line)
+	}
+	if r := runSpecDispatchCycle(f.env()); len(r.Dispatched) != 1 || len(f.slung) != 1 {
+		t.Errorf("next tick: dispatched %+v, slung %v; want the bead slung", r.Dispatched, f.slung)
+	}
+}
+
 func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
 	t.Parallel()
 	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))

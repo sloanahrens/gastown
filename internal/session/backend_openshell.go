@@ -113,6 +113,8 @@ type openshellBackend struct {
 	// imageGT reads the gt commit an image was built from, and installedGT is
 	// the commit of the gt running Prepare. Tests set both.
 	imageGT func(ctx context.Context, image string) (string, error)
+	// docker runs the docker CLI for the profile's cache volume. Tests set it.
+	docker dockerRun
 	// policyRoot is the town's gt source checkout, the repo a sandbox profile's
 	// policy path is relative to. A polecat's worktree is the wrong base: only
 	// the gt repo carries deploy/polecat/policy.yaml, and a sandbox seat serves
@@ -133,6 +135,7 @@ func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
 		render:      sandbox.RenderSkeleton,
 		push:        pushToForgejo,
 		imageGT:     dockerImageGT,
+		docker:      runDocker,
 		gitEmail:    hostGitEmail,
 		installedGT: version.BuildCommit,
 		policyRoot:  version.GetRepoRootForTown,
@@ -204,6 +207,12 @@ type imageDriftError struct{ msg string }
 func (e *imageDriftError) Error() string { return e.msg }
 
 func (e *imageDriftError) Is(target error) bool { return target == ErrImageDrift }
+
+// ErrCacheVolume identifies a per-rig cache volume that is missing and could
+// not be created. Like ErrImageDrift it is a precondition of the sandbox seat,
+// not a fault of the work being started: an automatic dispatcher defers the
+// work instead of failing it.
+var ErrCacheVolume = errors.New("sandbox cache volume is missing and cannot be created")
 
 // gtLabelSource is where the host's docker read the image's commit.
 const gtLabelSource = "records no gt commit (label " + gtCommitLabel + ")"
@@ -286,6 +295,14 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	}
 	if err := checkImageGT(b.profile.Image, gtLabelSource, imageCommit, b.installedGT()); err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
+	}
+
+	// Before the push and the create, as the image check is: a missing cache
+	// volume that cannot be made leaves nothing behind (gt-td6pl).
+	if b.profile.CacheVolume != "" {
+		if err := ensureCacheVolume(ctx, b.docker, cacheVolumeName(b.profile.CacheVolume, spec.Rig)); err != nil {
+			return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
+		}
 	}
 
 	// Also before anything is pushed or created: the agent command names these
@@ -599,12 +616,36 @@ func redirectTarget(rel string) string {
 	return strings.Repeat("../", strings.Count(rel, "/")) + "mayor/rig/.beads"
 }
 
+// cacheVolumeName is the rig's cache volume. {rig} in the profile's name
+// expands to the rig.
+func cacheVolumeName(volume, rig string) string {
+	return strings.ReplaceAll(volume, "{rig}", rig)
+}
+
+// ensureCacheVolume creates volume when docker does not have it, labelled the
+// way the gateway attaches it: the same `docker volume create` that
+// scripts/polecat-caches.sh runs, so a new rig needs no onboarding step. An
+// existing volume is left alone. A volume that cannot be made is ErrCacheVolume.
+func ensureCacheVolume(ctx context.Context, run dockerRun, volume string) error {
+	if _, _, err := run(ctx, "volume", "inspect", volume); err == nil {
+		return nil
+	}
+	_, stderr, err := run(ctx, "volume", "create",
+		"--label", "openshell.ai/sandbox-attachable=true",
+		"--label", "openshell.ai/sandbox-attachable-workspace=default",
+		volume)
+	if err != nil {
+		return fmt.Errorf("%w: docker volume create %s: %v: %s", ErrCacheVolume, volume, err, strings.TrimSpace(string(stderr)))
+	}
+	return nil
+}
+
 // cacheDriverConfig is the driver config that mounts the cache volume at
 // /sandbox/.cache. {rig} in the volume name expands to the rig.
 func cacheDriverConfig(volume, rig string) (string, error) {
 	mount := map[string]any{
 		"type":      "volume",
-		"source":    strings.ReplaceAll(volume, "{rig}", rig),
+		"source":    cacheVolumeName(volume, rig),
 		"target":    sandboxCacheDir,
 		"read_only": false,
 	}
