@@ -602,6 +602,55 @@ esac
 exit 0
 STUB
 chmod +x "$TMP/bin/docker" "$TMP/bin/openshell"
+
+# The stub gt for the openshell-providers cases below, so none of them runs the
+# real gt that happens to be installed on the host: an installed gt older than
+# `gt sandbox endpoint` made ten cases fail here while CI's newer gt passed them
+# (test-engineering rule 8: the cases must not depend on the host's binaries).
+# Its contract is what the real command does for the Docker gateway, and only
+# that: it implements exactly `gt sandbox endpoint --gateway NAME [--root DIR]
+# [--render FILE [--from-export EXPORT]] [--check EXPORT]`:
+#   (no --render, no --check)  prints host=host.docker.internal, port=3000 and no
+#                              allowed_ips line
+#   --render FILE              prints FILE unchanged (the Docker gateway needs no
+#                              host swap)
+#   --check EXPORT             prints "bound"
+# Anything else exits 1 with "stub gt: unhandled ..." so a call the script gains
+# later fails loudly instead of passing. Its argv goes to $TMP/gt-calls, not to
+# $STUB_LOG, so the cases that assert on the openshell calls are not disturbed.
+cat >"$TMP/bin/gt" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${STUB_GT_CALLS:-/dev/null}"
+if [ "${1-} ${2-}" != "sandbox endpoint" ]; then
+  echo "stub gt: unhandled $*" >&2
+  exit 1
+fi
+shift 2
+render="" check=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --gateway | --root | --from-export) shift 2 ;;
+    --render) render=$2; shift 2 ;;
+    --check) check=$2; shift 2 ;;
+    *) echo "stub gt: unhandled flag $1" >&2; exit 1 ;;
+  esac
+done
+if [ -n "$render" ]; then
+  cat "$render"
+elif [ -n "$check" ]; then
+  echo "bound"
+else
+  printf 'host=host.docker.internal\nport=3000\n'
+fi
+STUB
+chmod +x "$TMP/bin/gt"
+# Every case below puts $TMP/bin first on PATH; this fails the run, once, if gt
+# would resolve to anything but the stub.
+if [[ "$(PATH="$TMP/bin:$PATH" command -v gt)" == "$TMP/bin/gt" ]]; then
+  pass "the openshell-providers cases run the stub gt, not the host's"
+else
+  fail "the openshell-providers cases run the stub gt, not the host's (gt resolves to $(PATH="$TMP/bin:$PATH" command -v gt))"
+fi
 caches="$ROOT/scripts/polecat-caches.sh"
 
 : >"$TMP/calls"
