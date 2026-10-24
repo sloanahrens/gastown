@@ -26,6 +26,8 @@ Blocked, in any chain, launcher, shell -c payload, eval or command substitution:
     the environment, or printenv of a secret-like NAME
   - echo/printf of a secret-like variable, or a secret-like variable fed to a
     here-string, an unquoted heredoc body, or an argument of curl, wget or http
+  - a shell, or a source or ., whose stdin a pipe or a here-string feeds the
+    script it runs: bash <<< printenv, source /dev/stdin <<< printenv
   - curl, wget or http sending a credential file (-d @file, -K, --post-file), or
     an argument that expands a variable assigned a secret, or a ${!name} indirection
   - any read of /proc/<pid>/environ
@@ -340,10 +342,11 @@ func sandboxSecretsReason(command string) string {
 }
 
 // sandboxSecretsWalk judges every command a line runs: each segment, and the
-// payloads a shell runs (a shell -c string, an eval, a heredoc fed to a shell, a
-// command substitution). It walks the way prWorkflowInvocations does but judges
-// each segment itself, because that function reads past a launcher, and a bare
-// `env` is a launcher with no command behind it: it prints the environment.
+// payloads a shell runs (a shell -c string, an eval, a heredoc or here-string
+// fed to a shell, a command substitution). It walks the way prWorkflowInvocations
+// does but judges each segment itself, because that function reads past a
+// launcher, and a bare `env` is a launcher with no command behind it: it prints
+// the environment.
 //
 // inherited names the variables a shell that runs this command already holds a
 // secret in. The walk starts from them and taints more as it passes each segment,
@@ -381,6 +384,11 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			if idx := shellCPayloadIndex(toLowerTokens(argv[1:])); idx >= 0 {
 				payloads = append(payloads, argv[1+idx])
 			}
+			// A here-string feeds the shell's stdin, which it runs as a script
+			// the way it runs a pipe's text: bash <<< printenv (gt-ma5e6).
+			if _, texts := splitHereStrings(argv[1:]); len(texts) > 0 {
+				payloads = append(payloads, texts...)
+			}
 			if fed != "" {
 				payloads = append(payloads, fed)
 			}
@@ -400,6 +408,11 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			if fed != "" {
 				// A pipe into source reads its script from /dev/stdin, as a pipe into a shell does.
 				payloads = append(payloads, fed)
+			}
+			// A here-string reaches the same stdin, so its text is judged as a
+			// script too: source /dev/stdin <<< printenv (gt-ma5e6).
+			if _, texts := splitHereStrings(argv[1:]); len(texts) > 0 {
+				payloads = append(payloads, texts...)
 			}
 		}
 	}

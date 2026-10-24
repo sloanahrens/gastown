@@ -81,6 +81,20 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"echo printenv | tee /dev/null | bash",
 		"echo printenv | env sh",
 		"echo printenv | cat | tee /dev/null | /bin/sh",
+		// A here-string is the script a shell, source or . runs from its stdin.
+		// The text is judged even when something else names a script file, as a
+		// pipe's text is, because the guards never miss a script they could read (gt-ma5e6).
+		"bash <<< printenv",
+		"sh <<< 'env'",
+		"bash -s <<< printenv",
+		"bash <<< 'printenv -0'",
+		"bash -c 'make test' <<< printenv",
+		"bash script.sh <<< printenv",
+		"source /dev/stdin <<< printenv",
+		". /dev/stdin <<< 'env'",
+		"source ./activate.sh <<< printenv",
+		"echo printenv | source /dev/stdin",
+		"printf 'printenv' | . /dev/fd/0",
 		"sh <(echo printenv)",
 		"sh -c \"$(echo printenv)\"",
 		// eval runs a substitution's output as a script, as a shell does.
@@ -411,6 +425,8 @@ func TestSandboxSecretsGuardNamesTheRule(t *testing.T) {
 		{"env | grep TOKEN", "env prints the environment"},
 		{"printenv FORGEJO_TOKEN", "printenv FORGEJO_TOKEN prints a secret"},
 		{"cat <<< \"$FORGEJO_TOKEN\"", "a here-string expands a secret variable"},
+		{"bash <<< printenv", "printenv prints the environment"},
+		{"source /dev/stdin <<< printenv", "printenv prints the environment"},
 		{"cat <<EOF\n$FORGEJO_TOKEN\nEOF", "an unquoted heredoc expands a secret variable"},
 		{"python3 <<EOF\nprint(os.environ['FORGEJO_TOKEN'])\nEOF", "python3 heredoc reads the environment"},
 		{"uv run python3 <<EOF\nprint(os.environ['FORGEJO_TOKEN'])\nEOF", "python3 heredoc reads the environment"},
@@ -611,6 +627,8 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"echo 'go test ./...' | . /dev/stdin",
 		"echo make test | source /dev/stdin",
 		"source /dev/stdin <<'E'\nmake test\nE\n",
+		// A here-string whose text is ordinary work is allowed, like a pipe's (gt-ma5e6).
+		"bash <<< 'make test'",
 		"printf '%s' \"$(cat <<'BEAD'\necho ready\nBEAD\n)\" | sh",
 		"set -e",
 		"set -euo pipefail",
