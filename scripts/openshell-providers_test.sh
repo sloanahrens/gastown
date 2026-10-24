@@ -6,6 +6,9 @@
 # 'deepseek-claude' already exists"), so the second run exited 1 after the two
 # providers were already there.
 #
+# The named-gateway cases (gt-ujzas) assert that every call carries the -g the
+# caller asked for, and that a rerun on that gateway is still a no-op.
+#
 # A stub openshell on PATH holds the gateway's state — the profiles and
 # providers it lists — and records every call, so the assertions are about
 # which calls happen, not about their output. GT_CONFIG_DIR points inside the
@@ -62,6 +65,12 @@ set -uo pipefail
 printf '%s\n' "$*" >>"$STUB_CALLS"
 state="$STUB_STATE"
 
+# -g NAME is a global flag the script passes before the subcommand when the
+# caller named a gateway. The whole argv is recorded above, so the assertions
+# can see the flag; the case below dispatches on the subcommand.
+if [ "${1-}" = "-g" ] && [ $# -ge 2 ]; then
+  shift 2
+fi
 case "$1 $2" in
   "profile list")
     if [ -e "$state/fail-profile-list" ]; then
@@ -111,18 +120,20 @@ esac
 STUB
 chmod +x "$TMP/bin/openshell"
 
-# run: execute the script against the stub; sets RC and OUT. The stub appends
-# every call to $TMP/calls.log, so the assertions count across the whole test.
+# run ARGS...: execute the script against the stub; sets RC and OUT. Calls are
+# recorded to $CALLS_LOG, so the gateway cases can keep their calls apart from
+# the default gateway's; the stub appends, so a count spans whole scenarios.
+CALLS_LOG="$TMP/calls.log"
 run() {
   set +e
   OUT="$(PATH="$TMP/bin:$PATH" GT_CONFIG_DIR="$TMP/config" \
-    STUB_CALLS="$TMP/calls.log" STUB_STATE="$TMP/state" \
-    bash "$PROVIDERS" 2>&1)"
+    STUB_CALLS="$CALLS_LOG" STUB_STATE="$TMP/state" \
+    bash "$PROVIDERS" "$@" 2>&1)"
   RC=$?
   set -e
 }
 
-calls() { grep -c "$1" "$TMP/calls.log" || true; }
+calls() { grep -c "$1" "$CALLS_LOG" || true; }
 assert_rc() {
   if [ "$RC" -eq "$1" ]; then
     pass "$2"
@@ -183,6 +194,40 @@ check "named the failed list" contains "profile list --global failed" "$OUT"
 check "passed on the gateway's error" contains "gateway unreachable" "$OUT"
 check "did not try to import anything" [ "$(calls '^profile import')" -eq "$imports_before" ]
 rm -f "$TMP/state/fail-profile-list"
+
+echo "named gateway: -g k8s creates the providers on it"
+check "the runs without a gateway passed no -g" [ "$(grep -c '^-g ' "$CALLS_LOG" || true)" -eq 0 ]
+: >"$TMP/state/profiles"
+: >"$TMP/state/providers" # an empty gateway of its own
+CALLS_LOG="$TMP/gw-calls.log"
+: >"$CALLS_LOG"
+run -g k8s
+assert_rc 0 "exits 0"
+check "every call named the gateway" [ "$(grep -c -v '^-g k8s ' "$CALLS_LOG" || true)" -eq 0 ]
+check "imported the profiles on the gateway" [ "$(calls '^-g k8s profile import')" -ge 2 ]
+check "created both providers on the gateway" [ "$(calls '^-g k8s provider create')" -eq 2 ]
+check "never printed the deepseek key" lacks "$DEEPSEEK_KEY" "$OUT"
+check "never printed the forgejo token" lacks "$FORGEJO_KEY" "$OUT"
+check "masked the credential the provider create echoed" contains "value=***" "$OUT"
+
+echo "rerun on the named gateway"
+imports_before="$(calls '^-g k8s profile import')"
+run -g k8s
+assert_rc 0 "exits 0 on a rerun"
+check "reported the existing providers" contains "provider deepseek exists" "$OUT"
+check "did not call profile import again" [ "$(calls '^-g k8s profile import')" -eq "$imports_before" ]
+check "did not call provider create again" [ "$(calls '^-g k8s provider create')" -eq 2 ]
+
+echo "argument checking stops before any openshell call"
+CALLS_LOG="$TMP/arg-calls.log"
+: >"$CALLS_LOG"
+run -g
+assert_rc 2 "a -g with no name exits 2"
+check "named the missing gateway name" contains "-g needs a gateway name" "$OUT"
+run --bogus
+assert_rc 2 "an unknown argument exits 2"
+check "named the unknown argument" contains "unknown argument: --bogus" "$OUT"
+check "called openshell for neither" [ ! -s "$CALLS_LOG" ]
 
 echo
 if [ "$FAIL" -ne 0 ]; then

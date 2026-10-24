@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Imports the OpenShell profiles a polecat sandbox needs and creates the two
 # providers they name, from the key files under ~/.config/gt (claude-q3f.9).
-# Run it through `make openshell-providers`.
+# Run it through `make openshell-providers` for the CLI's default gateway, or
+# `scripts/openshell-providers.sh -g NAME` for a registered one such as k8s.
 #
 # A profile or provider the gateway already lists is left alone, so a rerun of
 # the target changes nothing instead of failing on the first thing it meets.
@@ -18,10 +19,51 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILES="$ROOT/deploy/polecat/profiles"
 CONFIG_DIR="${GT_CONFIG_DIR:-$HOME/.config/gt}"
 
+# GATEWAY empty means the gateway the CLI has as its default, which is what the
+# script did before -g existed. The flag is global to openshell, so it has to
+# come before the subcommand: every call goes through oshell.
+GATEWAY=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -g | --gateway)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "openshell-providers: $1 needs a gateway name, e.g. -g k8s" >&2
+        exit 2
+      fi
+      GATEWAY=$2
+      shift 2
+      ;;
+    --gateway=*)
+      GATEWAY=${1#--gateway=}
+      if [[ -z "$GATEWAY" ]]; then
+        echo "openshell-providers: --gateway needs a gateway name, e.g. --gateway=k8s" >&2
+        exit 2
+      fi
+      shift
+      ;;
+    -h | --help)
+      echo "usage: openshell-providers.sh [-g NAME]"
+      exit 0
+      ;;
+    *)
+      echo "openshell-providers: unknown argument: $1 (usage: openshell-providers.sh [-g NAME])" >&2
+      exit 2
+      ;;
+  esac
+done
+
 if ! command -v openshell >/dev/null 2>&1; then
   echo "openshell-providers: openshell is not on PATH (brew install openshell)" >&2
   exit 1
 fi
+
+oshell() {
+  if [[ -n "$GATEWAY" ]]; then
+    openshell -g "$GATEWAY" "$@"
+  else
+    openshell "$@"
+  fi
+}
 
 # A provider that already exists is left as it is: provider list is the state,
 # the key files are only read when a create is actually needed. The list is
@@ -30,7 +72,7 @@ fi
 # deepseek-legacy does not count as deepseek.
 provider_exists() {
   local listed
-  listed="$(openshell provider list 2>/dev/null || true)"
+  listed="$(oshell provider list 2>/dev/null || true)"
   awk -v name="$1" '$1 == name { found = 1 } END { exit !found }' <<<"$listed"
 }
 
@@ -44,7 +86,7 @@ profile_exists() {
   local listed
   # --global for the same reason import passes it: these are platform-scoped
   # profiles, which a workspace-scoped list leaves out.
-  if ! listed="$(openshell profile list --global 2>&1)"; then
+  if ! listed="$(oshell profile list --global 2>&1)"; then
     echo "openshell-providers: openshell profile list --global failed, so whether profile $1 exists is unknown:" >&2
     printf '%s\n' "$listed" >&2
     exit 1
@@ -113,8 +155,8 @@ import_profiles() {
       echo "openshell-providers: profile $id exists"
       continue
     fi
-    openshell profile lint -f "$file"
-    openshell profile import -f "$file" --global
+    oshell profile lint -f "$file"
+    oshell profile import -f "$file" --global
   done
 }
 
@@ -138,7 +180,7 @@ create_provider() {
       exit 1
     fi
     export "$credential=$secret"
-    openshell provider create --name "$name" --type "$type" --credential "$credential" | masked "$secret"
+    oshell provider create --name "$name" --type "$type" --credential "$credential" | masked "$secret"
   )
 }
 
