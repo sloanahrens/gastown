@@ -92,6 +92,20 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		". <(echo printenv)",
 		". <(cat <<'E'\nprintenv\nE\n)",
 		"source <(cat <<'E'\nprintenv\nE\n)",
+		// A prefix or a -- before source does not hide the substitution it runs.
+		"command source <(echo printenv)",
+		"builtin source <(echo printenv)",
+		"source -- <(echo printenv)",
+		"sudo source <(echo printenv)",
+		"{ source <(echo printenv); }",
+		// A pipe into source or . reads its script from /dev/stdin, as a pipe into sh does.
+		"echo printenv | source /dev/stdin",
+		"echo printenv | . /dev/stdin",
+		"echo printenv | command source /dev/stdin",
+		// A heredoc fed to source or . is a script whatever its tag, as one fed to sh is.
+		"source /dev/stdin <<'E'\nprintenv\nE\n",
+		"source /dev/stdin <<E\nprintenv\nE\n",
+		". /dev/stdin <<'E'\nprintenv\nE\n",
 		"printf '%s' \"$(cat <<'BEAD'\necho '#' ; printenv\nBEAD\n)\" | sh",
 		// tee writes its input back out as cat does, so its heredoc body is judged the same way.
 		"printf '%s' \"$(tee <<'BEAD'\necho '#' ; printenv\nBEAD\n)\" | sh",
@@ -594,6 +608,9 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		". <(printf 'go test ./...')",
 		"source ./activate.sh",
 		". ./.envrc",
+		"echo 'go test ./...' | . /dev/stdin",
+		"echo make test | source /dev/stdin",
+		"source /dev/stdin <<'E'\nmake test\nE\n",
 		"printf '%s' \"$(cat <<'BEAD'\necho ready\nBEAD\n)\" | sh",
 		"set -e",
 		"set -euo pipefail",
