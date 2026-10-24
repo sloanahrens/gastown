@@ -56,3 +56,39 @@ func TestIntegrationGtCommitAuthorMatchesSeatIdentity(t *testing.T) {
 		t.Errorf("author = %q <%s>, want the seat identity %q <%s>", fields[0], fields[1], seat.Name, seat.Email)
 	}
 }
+
+// TestIntegrationGtCommitRefusesUnsetAuthorEmail pins that an agent's commit in
+// a worktree with no user.email is refused and made nowhere: gt commit used to
+// author it under the agent's fallback address, which gt done's rework lease
+// could not match (gt-tip6u). The host's global and system config are kept out
+// so no email is inherited.
+func TestIntegrationGtCommitRefusesUnsetAuthorEmail(t *testing.T) {
+	dir := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+	runGit("init", "-q")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "f.txt")
+
+	t.Chdir(dir)
+	t.Setenv("GT_ROLE", "gastown/polecats/coma")
+
+	if err := runCommit(commitCmd, []string{"-m", "test: no author email"}); err == nil {
+		t.Fatal("gt commit with no user.email: want an error, got nil")
+	}
+	if commits := strings.TrimSpace(runGit("rev-list", "--all")); commits != "" {
+		t.Errorf("gt commit made a commit with no user.email: %s", commits)
+	}
+}

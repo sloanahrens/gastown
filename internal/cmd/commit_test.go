@@ -1,77 +1,52 @@
 package cmd
 
 import (
+	"errors"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
 )
 
-func TestIdentityToEmail(t *testing.T) {
+func TestSeatForCommit(t *testing.T) {
 	t.Parallel()
+	errUnset := errors.New("exit status 1")
 	tests := []struct {
-		name     string
-		identity string
-		domain   string
-		want     string
+		name          string
+		identity      string
+		worktreeEmail string
+		emailErr      error
+		want          git.SeatIdentity
+		wantErr       bool
 	}{
 		{
-			name:     "crew member",
-			identity: "gastown/crew/jack",
-			domain:   "gastown.local",
-			want:     "gastown.crew.jack@gastown.local",
+			name:          "worktree email names the seat",
+			identity:      "gastown/polecats/coma",
+			worktreeEmail: "seat@test.com",
+			want:          git.SeatIdentity{Name: "coma", Email: "seat@test.com"},
 		},
 		{
-			name:     "polecat",
-			identity: "gastown/polecats/max",
-			domain:   "gastown.local",
-			want:     "gastown.polecats.max@gastown.local",
+			name:     "unset email is refused",
+			identity: "gastown/polecats/coma",
+			emailErr: errUnset,
+			wantErr:  true,
 		},
 		{
-			name:     "witness",
-			identity: "gastown/witness",
-			domain:   "gastown.local",
-			want:     "gastown.witness@gastown.local",
-		},
-		{
-			name:     "refinery",
-			identity: "gastown/refinery",
-			domain:   "gastown.local",
-			want:     "gastown.refinery@gastown.local",
-		},
-		{
-			name:     "mayor with trailing slash",
-			identity: "mayor/",
-			domain:   "gastown.local",
-			want:     "mayor@gastown.local",
-		},
-		{
-			name:     "deacon with trailing slash",
-			identity: "deacon/",
-			domain:   "gastown.local",
-			want:     "deacon@gastown.local",
-		},
-		{
-			name:     "custom domain",
-			identity: "myrig/crew/alice",
-			domain:   "example.com",
-			want:     "myrig.crew.alice@example.com",
-		},
-		{
-			name:     "deeply nested",
-			identity: "rig/polecats/nested/deep",
-			domain:   "test.io",
-			want:     "rig.polecats.nested.deep@test.io",
+			name:          "empty email is refused",
+			identity:      "gastown/polecats/coma",
+			worktreeEmail: "  ",
+			wantErr:       true,
 		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := identityToEmail(tt.identity, tt.domain)
+			t.Parallel()
+			got, err := seatForCommit(tt.identity, tt.worktreeEmail, tt.emailErr)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("seatForCommit error = %v, wantErr %v", err, tt.wantErr)
+			}
 			if got != tt.want {
-				t.Errorf("identityToEmail(%q, %q) = %q, want %q",
-					tt.identity, tt.domain, got, tt.want)
+				t.Errorf("seatForCommit = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
@@ -193,19 +168,27 @@ func TestCommitGitArgsCarryTheSeatIdentity(t *testing.T) {
 
 // TestWithAuthorEnvReplacesInheritedAuthor covers the bug's trigger: an
 // inherited GIT_AUTHOR_NAME outranks -c user.name, so the wrapper must replace
-// it rather than add a second entry git would read past (gt-tip6u).
+// it rather than add a second entry git would read past (gt-tip6u). The same
+// holds for the committer pair, which outranks the -c user.* commitGitArgs sets.
 func TestWithAuthorEnvReplacesInheritedAuthor(t *testing.T) {
 	t.Parallel()
-	env := []string{"PATH=/bin", "GIT_AUTHOR_NAME=stale", "GIT_AUTHOR_EMAIL=stale@test.com"}
-	got := withAuthorEnv(env, git.SeatIdentity{Name: "coma", Email: "seat@test.com"})
-	want := map[string]string{"PATH": "/bin", "GIT_AUTHOR_NAME": "coma", "GIT_AUTHOR_EMAIL": "seat@test.com"}
-	if len(got) != len(want) {
-		t.Fatalf("withAuthorEnv = %v, want %d entries", got, len(want))
+	env := []string{
+		"PATH=/bin",
+		"GIT_AUTHOR_NAME=stale",
+		"GIT_AUTHOR_EMAIL=stale@test.com",
+		"GIT_COMMITTER_NAME=stale",
+		"GIT_COMMITTER_EMAIL=stale@test.com",
 	}
-	for _, kv := range got {
-		k, v, _ := strings.Cut(kv, "=")
-		if want[k] != v {
-			t.Errorf("%s = %q, want %q", k, v, want[k])
-		}
+	got := withAuthorEnv(env, git.SeatIdentity{Name: "coma", Email: "seat@test.com"})
+	// The order is fixed, so the same seat always yields the same environment.
+	want := []string{
+		"PATH=/bin",
+		"GIT_AUTHOR_NAME=coma",
+		"GIT_AUTHOR_EMAIL=seat@test.com",
+		"GIT_COMMITTER_NAME=coma",
+		"GIT_COMMITTER_EMAIL=seat@test.com",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("withAuthorEnv = %v, want %v", got, want)
 	}
 }

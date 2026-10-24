@@ -1,14 +1,14 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // DefaultAgentEmailDomain is the default domain for agent git emails.
@@ -25,8 +25,8 @@ When run by an agent (GT_ROLE set), this command:
    its worktree resolves
 3. Runs 'git commit' with the correct identity
 
-A worktree that resolves no user.email falls back to the agent's address at
-the town's agent_email_domain (default: gastown.local).
+A worktree whose user.email is unset or unreadable is refused: the commit is not
+made, because gt done's rework lease could not match an author it did not write.
 
 Examples:
   gt commit -m "Fix bug"              # Commit as current agent
@@ -67,32 +67,28 @@ func runCommit(cmd *cobra.Command, args []string) error {
 	// The worktree's own user.email is what a plain `git commit` here authors
 	// with, so it is the half of the seat identity gt done's lease compares
 	// (gt-tip6u).
-	worktreeEmail, err := git.NewGit(cwd).AuthorEmail()
+	worktreeEmail, emailErr := git.NewGit(cwd).AuthorEmail()
+	seat, err := seatForCommit(identity, worktreeEmail, emailErr)
 	if err != nil {
-		worktreeEmail = ""
-	}
-	seat := git.SeatIdentityFor(identity, worktreeEmail)
-	if seat.Email == "" {
-		// Nothing in the worktree names an address, so keep the agent's own
-		// rather than author with none; gt done cannot read this worktree's
-		// email either, which leaves its lease off rather than mismatched.
-		seat.Email = identityToEmail(identity, agentEmailDomain())
+		return err
 	}
 	return runGitCommit(args, seat)
 }
 
-// agentEmailDomain returns the town's agent_email_domain, or the default when
-// no town settings are reachable.
-func agentEmailDomain() string {
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil || townRoot == "" {
-		return DefaultAgentEmailDomain
+// seatForCommit returns the identity an agent's commit is authored as. The
+// email is the worktree's user.email, the address gt done's rework lease reads.
+// An unset or unreadable user.email is an error and not a fallback: an author
+// written under an address the lease cannot match is refused as divergence,
+// so the commit waits until the worktree names one.
+func seatForCommit(identity, worktreeEmail string, emailErr error) (git.SeatIdentity, error) {
+	if emailErr != nil {
+		return git.SeatIdentity{}, fmt.Errorf("gt commit: the worktree's user.email cannot be read (%w); set it with git config user.email, or gt done's rework lease cannot match this seat's commits", emailErr)
 	}
-	settings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
-	if err != nil || settings.AgentEmailDomain == "" {
-		return DefaultAgentEmailDomain
+	seat := git.SeatIdentityFor(identity, worktreeEmail)
+	if seat.Email == "" {
+		return git.SeatIdentity{}, errors.New("gt commit: the worktree's user.email is empty; set it with git config user.email, or gt done's rework lease cannot match this seat's commits")
 	}
-	return settings.AgentEmailDomain
+	return seat, nil
 }
 
 // commitIdentity returns the agent identity to author a commit as, or "" when
@@ -110,19 +106,6 @@ func commitIdentity(getenv func(string) string, cwd string) string {
 		return ""
 	}
 	return identity
-}
-
-// identityToEmail converts a Gas Town identity to a git email address.
-// "gastown/crew/jack" → "gastown.crew.jack@domain"
-// "deacon/" → "deacon@domain"
-func identityToEmail(identity, domain string) string {
-	// Remove trailing slash if present
-	identity = strings.TrimSuffix(identity, "/")
-
-	// Replace slashes with dots for email local part
-	localPart := strings.ReplaceAll(identity, "/", ".")
-
-	return localPart + "@" + domain
 }
 
 // runGitCommit executes git commit authored as seat. A zero seat runs plain
@@ -162,16 +145,21 @@ func commitGitArgs(args []string, seat git.SeatIdentity) []string {
 	return append(gitArgs, args...)
 }
 
-// withAuthorEnv returns env with seat's author variables set in place of any it
-// already holds: git reads the first GIT_AUTHOR_NAME in the environment, so an
-// appended second entry would leave the inherited one in force.
+// withAuthorEnv returns env with seat's author and committer variables set in
+// place of any it already holds: git reads the first GIT_AUTHOR_NAME in the
+// environment, so an appended second entry would leave the inherited one in
+// force. The committer pair is set too, because GIT_COMMITTER_* outranks the
+// -c user.* that commitGitArgs passes, so an inherited one would otherwise
+// commit under another identity than the author.
 func withAuthorEnv(env []string, seat git.SeatIdentity) []string {
-	set := make(map[string]string, 2)
+	set := make(map[string]string, 4)
 	if seat.Name != "" {
 		set["GIT_AUTHOR_NAME"] = seat.Name
+		set["GIT_COMMITTER_NAME"] = seat.Name
 	}
 	if seat.Email != "" {
 		set["GIT_AUTHOR_EMAIL"] = seat.Email
+		set["GIT_COMMITTER_EMAIL"] = seat.Email
 	}
 	out := make([]string, 0, len(env)+len(set))
 	for _, kv := range env {
@@ -182,8 +170,11 @@ func withAuthorEnv(env []string, seat git.SeatIdentity) []string {
 		}
 		out = append(out, kv)
 	}
-	for k, v := range set {
-		out = append(out, k+"="+v)
+	// Append in a fixed order, so the same seat always yields the same env.
+	for _, k := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
+		if v, ok := set[k]; ok {
+			out = append(out, k+"="+v)
+		}
 	}
 	return out
 }
