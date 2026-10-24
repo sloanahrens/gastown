@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sort"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/session"
@@ -11,7 +12,7 @@ const (
 	// may judge its sandbox gone. A record is written when a launch's Prepare
 	// ends; the grace keeps a sandbox still coming up from being judged.
 	sandboxRecordGrace = 5 * time.Minute
-	// sandboxRecordsPerTick bounds the gateway questions one tick asks.
+	// sandboxRecordsPerTick bounds the records one tick checks.
 	sandboxRecordsPerTick = 20
 )
 
@@ -28,12 +29,14 @@ const (
 //   - the gateway the record names reports no sandbox of that name (an
 //     unreachable gateway or any other error is not "gone").
 //
-// At most the budget (sandboxRecordsPerTick) of gateway questions are asked per
-// tick, so records the gateway still has cannot starve the ones behind them:
-// the walk over the name-sorted records starts at an offset that advances by
-// the budget each minute of the daemon clock, so consecutive minutes judge
-// consecutive windows and every record is judged within ceil(n/budget) ticks.
-// A failed removal is logged and the pass goes on.
+// At most the budget (sandboxRecordsPerTick) of records is checked per tick,
+// live ones included, so a tick makes at most that many tmux probes and gateway
+// questions, and records the gateway still has cannot starve the ones behind
+// them. The walk over the name-sorted records starts after the name the last
+// tick ended on (Daemon.sandboxRecordCursor), so consecutive ticks judge
+// consecutive names and every record is judged within ceil(n/budget) ticks,
+// whatever the tick's clock phase. A failed removal is logged and the pass goes
+// on.
 func (h *patrolScanHost) patrolScanSandboxRecords() {
 	names := session.ListSandboxSessions(h.town())
 	if len(names) == 0 {
@@ -44,11 +47,13 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 		budget = sandboxRecordsPerTick
 	}
 	now := h.d.clk().Now()
-	n := int64(len(names))
-	start := (now.Unix() / 60 * int64(budget)) % n
-	asked := 0
-	for i := int64(0); i < n && asked < budget; i++ {
+	n := len(names)
+	cursor := h.d.sandboxRecordCursor
+	start := sort.Search(n, func(i int) bool { return names[i] > cursor }) % n
+	checked := 0
+	for i := 0; i < n && checked < budget; i++ {
 		name := names[(start+i)%n]
+		h.d.sandboxRecordCursor = name
 		rec, ok, err := session.ReadSandboxRecord(h.town(), name)
 		if err != nil || !ok {
 			continue
@@ -56,13 +61,13 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 		if !rec.CreatedAt.IsZero() && now.Sub(rec.CreatedAt) < sandboxRecordGrace {
 			continue
 		}
+		checked++
 		live, err := h.d.tmux.HasSession(name)
 		if err != nil {
 			h.d.logger.Printf("patrol_scan: sandbox record %s: cannot ask tmux, treating it as not live and asking the gateway: %v", name, err)
 		} else if live {
 			continue
 		}
-		asked++
 		exists, err := h.sandboxStillExists(rec.Gateway, name)
 		if err != nil {
 			h.d.logger.Printf("patrol_scan: sandbox record %s kept: cannot ask gateway %q: %v", name, rec.Gateway, err)
