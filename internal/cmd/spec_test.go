@@ -840,10 +840,10 @@ func TestHeldBeadsFromSkipsEpics(t *testing.T) {
 	}
 }
 
-// specHoldFiles drops a cited reference doc only when the bead's Constraints
-// section parses and does not list it. A section that is missing, empty or
-// unparsed leaves the bead's intent unknown, so the doc stays in the hold set
-// (gt-zs8fq).
+// specHoldFiles drops a cited claude/docs standard once the bead's Constraints
+// section parses, listed or not: the standards tree lives in ~/.claude and no
+// polecat edits it (gt-kr17g). A section that is missing, empty or unparsed
+// leaves the bead's paths unread, so the doc stays in the hold set (gt-zs8fq).
 func TestSpecHoldFilesKeepsDocsWhenConstraintsAreUnknown(t *testing.T) {
 	t.Parallel()
 	const standard = "claude/docs/standards/test-engineering.md"
@@ -856,7 +856,7 @@ func TestSpecHoldFilesKeepsDocsWhenConstraintsAreUnknown(t *testing.T) {
 		{"empty Constraints section", "## Goal\nA thing.\n\n## Constraints\n", []string{standard}},
 		{"unparsed Constraints heading", "## Goal\nA thing.\n\n## Constraint:\nGo.", []string{standard}},
 		{"Constraints does not list the doc", "## Goal\nA thing.\n\n## Constraints\nGo.", []string{}},
-		{"Constraints lists the doc", "## Goal\nA thing.\n\n## Constraints\nUpdate " + standard + ".", []string{standard}},
+		{"Constraints lists the standard", "## Goal\nA thing.\n\n## Constraints\nUpdate " + standard + ".", []string{}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -899,11 +899,10 @@ func TestSpecHoldFilesKeepsGoalDocsWhenConstraintsNameNoPath(t *testing.T) {
 }
 
 // Two beads that only read the same standard do not hold each other: the
-// standard is cited, not changed (gt-6t44f). Two beads naming one source file
-// still hold, and so do two beads that list the standard under Constraints,
-// because for them it is a file to change. A bead whose Constraints section
-// never parsed has not said either way, so it keeps citing paths and holds
-// (gt-zs8fq).
+// standard is cited, not changed (gt-6t44f). Listing it under Constraints does
+// not change that — the standards tree lives in ~/.claude, which no polecat
+// edits (gt-kr17g). Two beads naming one source file still hold. A bead whose
+// Constraints section never parsed keeps its cited paths and holds (gt-zs8fq).
 func TestSpecHeldHoldReferenceDocsDoNotHold(t *testing.T) {
 	t.Parallel()
 	const standard = "claude/docs/standards/test-engineering.md"
@@ -924,7 +923,7 @@ func TestSpecHeldHoldReferenceDocsDoNotHold(t *testing.T) {
 	}{
 		{"two beads reading the same standard do not hold", reads(standard), reads(standard), false},
 		{"two beads naming the same source file hold", reads(source), reads(source), true},
-		{"two beads listing the standard under Constraints hold", changes(standard), changes(standard), true},
+		{"two beads listing the standard under Constraints do not hold", changes(standard), changes(standard), false},
 		{"beads with no Constraints section keep the standard and hold", cite(noConstraints, standard), cite(noConstraints, standard), true},
 		{"beads whose Constraints heading did not parse hold", cite(unparsed, standard), cite(unparsed, standard), true},
 	}

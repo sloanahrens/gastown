@@ -95,8 +95,9 @@ func TestHeldOverlapCapsTheNamedPaths(t *testing.T) {
 }
 
 // A bead reads the standards it cites without changing them, so those paths
-// are not held; a path the Constraints section lists is work and stays
-// (gt-6t44f).
+// are not held; a docs/ path the Constraints section lists is work and stays,
+// while a claude/docs path never stays because no polecat edits ~/.claude
+// (gt-6t44f, gt-kr17g).
 func TestHoldFiles(t *testing.T) {
 	t.Parallel()
 	const standard = "claude/docs/standards/test-engineering.md"
@@ -132,10 +133,21 @@ func TestHoldFiles(t *testing.T) {
 			want:  []string{"internal/myclaude/docs/render.go"},
 		},
 		{
-			name:   "a reference doc the Constraints section lists stays",
+			name:   "a standard the Constraints section lists still drops",
 			named:  []string{standard, "internal/notify/cli.go"},
 			listed: []string{standard},
-			want:   []string{standard, "internal/notify/cli.go"},
+			want:   []string{"internal/notify/cli.go"},
+		},
+		{
+			name:   "a docs path the Constraints section lists stays",
+			named:  []string{"docs/design/foo.md", "internal/notify/cli.go"},
+			listed: []string{"docs/design/foo.md"},
+			want:   []string{"docs/design/foo.md", "internal/notify/cli.go"},
+		},
+		{
+			name:  "an absolute path into another claude/docs tree drops",
+			named: []string{"/home/me/claude/docs/standards/test-engineering.md"},
+			want:  nil,
 		},
 		{
 			name:  "a source file is never reference-only",
@@ -151,5 +163,32 @@ func TestHoldFiles(t *testing.T) {
 				t.Errorf("HoldFiles(%v, %v) = %v, want %v", c.named, c.listed, got, c.want)
 			}
 		})
+	}
+}
+
+// Two beads citing the test-engineering standard under Constraints both name a
+// file neither can change, so neither holds the other (gt-kr17g).
+func TestHeldOverlapStandardUnderConstraintsDoesNotHold(t *testing.T) {
+	t.Parallel()
+	const standard = "claude/docs/standards/test-engineering.md"
+	held := []HeldBead{{ID: "gt-first", Assignee: "gastown/polecats/capable",
+		Paths: HoldFiles([]string{standard}, []string{standard})}}
+	candidate := HoldFiles([]string{standard}, []string{standard})
+	if got := HeldOverlap(candidate, held); got != "" {
+		t.Errorf("HeldOverlap = %q, want no hold for a shared standard", got)
+	}
+}
+
+// A docs/ path the Constraints section lists is work, so two beads changing
+// the same repo doc still hold (gt-kr17g).
+func TestHeldOverlapConstrainedDocsPathHolds(t *testing.T) {
+	t.Parallel()
+	const doc = "docs/design/foo.md"
+	const seat = "gastown/polecats/capable"
+	held := []HeldBead{{ID: "gt-first", Assignee: seat, Paths: HoldFiles([]string{doc}, []string{doc})}}
+	got := HeldOverlap(HoldFiles([]string{doc}, []string{doc}), held)
+	want := "gt-first (held by " + seat + ") is already hooked to a working seat and names " + doc + "; the hold lifts when that bead closes"
+	if got != want {
+		t.Errorf("HeldOverlap = %q, want %q", got, want)
 	}
 }
