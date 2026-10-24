@@ -386,6 +386,8 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			}
 			// A here-string feeds the shell's stdin, which it runs as a script
 			// the way it runs a pipe's text: bash <<< printenv (gt-ma5e6).
+			// A -c string keeps that stdin for a shell it runs, so the text is judged
+			// even when -c is present: bash -c bash <<< printenv.
 			if _, texts := splitHereStrings(argv[1:]); len(texts) > 0 {
 				payloads = append(payloads, texts...)
 			}

@@ -93,6 +93,20 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"source /dev/stdin <<< printenv",
 		". /dev/stdin <<< 'env'",
 		"source ./activate.sh <<< printenv",
+		// Other shell invokers, a path to one, and . with a file reach the here-string branch.
+		"zsh <<< printenv",
+		"/bin/bash <<< printenv",
+		"dash <<< printenv",
+		". ./activate.sh <<< printenv",
+		// The here-string needs no space after its operator, and fd 0 names stdin outright.
+		"bash <<<printenv",
+		"bash 0<<< printenv",
+		// A here-string in a later segment of a chain, or behind a launcher, is judged too.
+		"make test && bash <<< printenv",
+		"sudo bash <<< printenv",
+		// A -c string keeps the here-string's stdin, so a shell it runs reads the text (gt-ma5e6).
+		"bash -c bash <<< printenv",
+		"bash -c 'bash' <<< printenv",
 		"echo printenv | source /dev/stdin",
 		"printf 'printenv' | . /dev/fd/0",
 		"sh <(echo printenv)",
@@ -629,6 +643,8 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"source /dev/stdin <<'E'\nmake test\nE\n",
 		// A here-string whose text is ordinary work is allowed, like a pipe's (gt-ma5e6).
 		"bash <<< 'make test'",
+		// A here-string on fd 2 does not reach the shell's stdin, so its text is not a script.
+		"bash 2<<< printenv",
 		"printf '%s' \"$(cat <<'BEAD'\necho ready\nBEAD\n)\" | sh",
 		"set -e",
 		"set -euo pipefail",
