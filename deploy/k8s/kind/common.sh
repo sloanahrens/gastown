@@ -68,3 +68,27 @@ restore_context() { # restore_context ORIGINAL
     docker context use "$1" >/dev/null
   fi
 }
+
+# The town's openshell config is where the daemon reads its gateways. up.sh
+# --register-town writes the k8s entry there and down.sh removes it.
+TOWN_CONFIG="$TOWN_XDG_CONFIG_HOME/openshell"
+town_openshell() { XDG_CONFIG_HOME="$TOWN_XDG_CONFIG_HOME" openshell "$@"; }
+
+town_gateway_registered() {
+  town_openshell gateway list 2>/dev/null |
+    awk -v name="$GATEWAY_NAME" '{ for (i = 1; i <= NF; i++) if ($i == name) found = 1 } END { exit !found }'
+}
+
+# town_active_gateway names the gateway the town config has selected: the
+# active_gateway file when the CLI wrote one, otherwise the list's starred row.
+# The star counts only in the row's first field, so a `*` in a URL or a status
+# is not read as a gateway name. Empty means the list names no active gateway.
+town_active_gateway() {
+  local file="$TOWN_CONFIG/active_gateway"
+  if [ -s "$file" ]; then
+    tr -d '[:space:]' <"$file"
+    return 0
+  fi
+  town_openshell gateway list 2>/dev/null |
+    awk '$1 == "*" && NF > 1 { print $2; exit }' || true
+}

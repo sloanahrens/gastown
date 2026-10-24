@@ -168,6 +168,8 @@ case "$*" in
     if [ "$town" = 1 ]; then
       grep -vx "$3" "$STATE/town-gw-list" >"$STATE/town-gw-list.tmp" 2>/dev/null || true
       mv "$STATE/town-gw-list.tmp" "$STATE/town-gw-list" 2>/dev/null || true
+      # STUB_TOWN_REMOVE_CLEARS_ACTIVE drops the selection whichever gateway was removed.
+      [ -n "${STUB_TOWN_REMOVE_CLEARS_ACTIVE:-}" ] && rm -f "$STATE/town-active" "$HOME/.config/openshell/active_gateway"
       [ "$(cat "$STATE/town-active" 2>/dev/null)" = "$3" ] && rm -f "$STATE/town-active"
       [ "$(cat "$HOME/.config/openshell/active_gateway" 2>/dev/null)" = "$3" ] && rm -f "$HOME/.config/openshell/active_gateway"
     else
@@ -504,6 +506,78 @@ touch "$S/state/colima-running" "$S/state/cluster"
 run "$DOWN" STUB_CTX_FLIP=colima-gt-sbx -- --stop-vm
 check "--stop-vm stops the colima profile" contains "colima stop -p gt-sbx" "$CALLS_LOG"
 check "--stop-vm restores a flipped context" test "$(cat "$S/state/ctx")" = desktop-linux
+
+echo "down removes the town's k8s entry and keeps the other gateway selected"
+scenario down_town
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\nk8s\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+printf 'docker\n' >"$S/home/.config/openshell/active_gateway"
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
+run "$DOWN" --
+check "down exits 0" test "$RC" -eq 0
+town_calls="$(grep "XDG=$S/home/.config " "$S/calls.log" || true)"
+check "the k8s entry is removed from the town config" contains "gateway remove k8s" "$town_calls"
+check "the town config holds no k8s entry" test "$(grep -cx k8s "$S/state/town-gw-list")" -eq 0
+check "the other town gateway is kept" test "$(grep -cx docker "$S/state/town-gw-list")" -eq 1
+check "the other gateway stays selected" test "$(cat "$S/home/.config/openshell/active_gateway")" = docker
+check "only the k8s entry is removed from the town config" test "$(count 'gateway remove' "$town_calls")" -eq 1
+check "the private registration is still removed" contains "gateway remove k8s" "$(grep "XDG=$S/home/gt/.runtime/sbx-k8s/xdg " "$S/calls.log")"
+check "the town entry is removed before the cluster" before "gateway remove k8s" "kind delete cluster"
+
+echo "down leaves a town config without a k8s entry alone"
+scenario down_town_absent
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+printf 'docker\n' >"$S/home/.config/openshell/active_gateway"
+touch "$S/state/colima-running" "$S/state/cluster"
+run "$DOWN" --
+check "down exits 0" test "$RC" -eq 0
+town_calls="$(grep "XDG=$S/home/.config " "$S/calls.log" || true)"
+check "no town gateway is removed" lacks "gateway remove" "$town_calls"
+check "no town gateway is selected" lacks "gateway select" "$town_calls"
+check "the town gateway list is unchanged" test "$(cat "$S/state/town-gw-list")" = docker
+check "the town active gateway is unchanged" test "$(cat "$S/home/.config/openshell/active_gateway")" = docker
+check "the teardown still runs" contains "kind delete cluster" "$CALLS_LOG"
+
+echo "down refuses to remove the town's active k8s entry"
+scenario down_town_active
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\nk8s\n' >"$S/state/town-gw-list"
+printf 'k8s\n' >"$S/state/town-active"
+printf 'k8s\n' >"$S/home/.config/openshell/active_gateway"
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
+run "$DOWN" --
+check "down refuses" test "$RC" -ne 0
+check "the refusal names the active gateway" contains "k8s is the active gateway" "$OUT_TEXT"
+check "the refusal names the command to select another gateway" contains "openshell gateway select" "$OUT_TEXT"
+check "the town k8s entry is kept" test "$(grep -cx k8s "$S/state/town-gw-list")" -eq 1
+check "the cluster is kept" test -f "$S/state/cluster"
+check "no teardown runs before the refusal" lacks "kind delete cluster" "$CALLS_LOG"
+
+echo "down selects the previous gateway back when the town removal drops it"
+scenario down_town_reselect
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\nk8s\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+printf 'docker\n' >"$S/home/.config/openshell/active_gateway"
+touch "$S/state/colima-running" "$S/state/cluster"
+run "$DOWN" STUB_TOWN_REMOVE_CLEARS_ACTIVE=1 --
+check "down exits 0" test "$RC" -eq 0
+check "the previous active gateway is selected again" test "$(cat "$S/home/.config/openshell/active_gateway")" = docker
+check "the reselect goes through the town config" contains "gateway select docker" "$(grep "XDG=$S/home/.config " "$S/calls.log")"
+
+scenario down_town_no_reselect
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\nk8s\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+printf 'docker\n' >"$S/home/.config/openshell/active_gateway"
+touch "$S/state/colima-running" "$S/state/cluster"
+run "$DOWN" STUB_TOWN_REMOVE_CLEARS_ACTIVE=1 STUB_SELECT_FAIL=1 --
+check "a failed reselect fails the run" test "$RC" -ne 0
+check "the failure names the gateway to select" contains "openshell gateway select docker" "$OUT_TEXT"
+check "no teardown runs when the selection cannot be restored" lacks "kind delete cluster" "$CALLS_LOG"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "kind_test.sh: all $PASS cases passed"
