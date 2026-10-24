@@ -3,9 +3,27 @@
 # a Colima VM, a kind cluster with a fixed gateway port, a local image
 # registry, the pinned agent-sandbox controller and the OpenShell chart, then
 # register the gateway as `k8s` in an isolated CLI config. Safe to rerun.
+# --register-town also registers it in the town's OpenShell config, where the
+# daemon looks, and leaves the previously active gateway selected (gt-0knzj).
 set -euo pipefail
 # shellcheck source=common.sh
 . "$(dirname "$0")/common.sh"
+
+register_town=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --register-town) register_town=1 ;;
+    -h | --help)
+      echo "usage: $0 [--register-town]"
+      exit 0
+      ;;
+    *)
+      echo "usage: $0 [--register-town]" >&2
+      die "unknown argument: $1"
+      ;;
+  esac
+  shift
+done
 
 for tool in colima kind kubectl helm docker openssl openshell curl; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is not on PATH (helm may live in $OUT/bin)"
@@ -38,11 +56,18 @@ port_in_use() { # a listener on 127.0.0.1:$1, whoever owns it
 
 original_context="$(docker context show)"
 cert_stage=""
+town_rollback_pending=0
 # colima start can fail after it has already switched docker's global context,
 # so the restore is an EXIT trap rather than a call after the start returns.
+# --register-town registers its rollback here too: a run that stops between
+# removing the town's k8s entry and re-adding it puts the previous entry and
+# the previous active gateway back (town_rollback, defined below).
 cleanup() {
   if [ -n "$cert_stage" ]; then
     rm -rf "$cert_stage"
+  fi
+  if [ "$town_rollback_pending" = 1 ] && declare -F town_rollback >/dev/null; then
+    town_rollback
   fi
   restore_context "$original_context" || true
 }
@@ -125,16 +150,16 @@ kubectl -n openshell rollout status statefulset/openshell --timeout=300s
 
 # Client certificates for the CLI. The key is never printed; the CLI wants
 # PKCS8. Each file is written under umask 077 into a mktemp-created 700
-# staging directory and only then moved into place, so no reader ever sees a
-# world-readable key or a half-written one.
+# staging directory inside the destination and only then moved into place, so
+# no reader ever sees a world-readable key or a half-written one.
 mtls="$XDG_CONFIG_HOME/openshell/gateways/$GATEWAY_NAME/mtls"
-export_certs() {
-  local old_umask key
+export_certs() { # export_certs MTLS_DIR
+  local dest=$1 old_umask key
   old_umask="$(umask)"
   umask 077
-  mkdir -p "$mtls"
-  chmod 700 "$XDG_CONFIG_HOME" "$mtls"
-  cert_stage="$(mktemp -d "$mtls/.stage.XXXXXX")"
+  mkdir -p "$dest"
+  chmod 700 "$(dirname "$dest")" "$dest"
+  cert_stage="$(mktemp -d "$dest/.stage.XXXXXX")"
   for key in ca.crt tls.crt tls.key; do
     kubectl -n openshell get secret openshell-client-tls -o "jsonpath={.data['${key//./\\.}']}" |
       base64 -d >"$cert_stage/$key"
@@ -142,7 +167,7 @@ export_certs() {
   openssl pkcs8 -topk8 -nocrypt -in "$cert_stage/tls.key" -out "$cert_stage/tls.key.pk8"
   chmod 600 "$cert_stage/ca.crt" "$cert_stage/tls.crt" "$cert_stage/tls.key.pk8"
   mv -f "$cert_stage/tls.key.pk8" "$cert_stage/tls.key"
-  mv -f "$cert_stage/ca.crt" "$cert_stage/tls.crt" "$cert_stage/tls.key" "$mtls/"
+  mv -f "$cert_stage/ca.crt" "$cert_stage/tls.crt" "$cert_stage/tls.key" "$dest/"
   rm -rf "$cert_stage"
   cert_stage=""
   umask "$old_umask"
@@ -171,7 +196,7 @@ done
 healthy=0
 attempts="${GT_K8S_CERT_TRIES:-30}"
 while [ "$attempts" -gt 0 ]; do
-  export_certs
+  export_certs "$mtls"
   gateway_registered ||
     openshell gateway add "https://127.0.0.1:$GATEWAY_PORT" --local --name "$GATEWAY_NAME"
   info="$(openshell -g "$GATEWAY_NAME" gateway info 2>&1 || true)"
@@ -181,5 +206,83 @@ while [ "$attempts" -gt 0 ]; do
   sleep "$interval"
 done
 [ "$healthy" = 1 ] || die "gateway $GATEWAY_NAME is not healthy after re-exporting its client certificates"
+
+# --register-town: the daemon runs `openshell -g k8s ...` against the town
+# config, not the private one above, so copy the certificates and the entry
+# there. A rebuild changes the client certificates, so every run replaces the
+# k8s entry. `gateway add` makes the new gateway active, so read the active
+# gateway first and select it back afterwards.
+town_config="$TOWN_XDG_CONFIG_HOME/openshell"
+town_openshell() { XDG_CONFIG_HOME="$TOWN_XDG_CONFIG_HOME" openshell "$@"; }
+
+town_gateway_registered() {
+  town_openshell gateway list 2>/dev/null |
+    awk -v name="$GATEWAY_NAME" '{ for (i = 1; i <= NF; i++) if ($i == name) found = 1 } END { exit !found }'
+}
+
+# town_active_gateway names the gateway the town config has selected: the
+# active_gateway file when the CLI wrote one, otherwise the list's starred row.
+# The star counts only in the row's first field, so a `*` in a URL or a status
+# is not read as a gateway name. Empty means the list names no active gateway.
+town_active_gateway() {
+  local file="$town_config/active_gateway"
+  if [ -s "$file" ]; then
+    tr -d '[:space:]' <"$file"
+    return 0
+  fi
+  town_openshell gateway list 2>/dev/null |
+    awk '$1 == "*" && NF > 1 { print $2; exit }' || true
+}
+
+# town_rollback runs from the EXIT trap when the run stops after removing the
+# town's k8s entry but before its replacement is in place: the entry is added
+# back (with the certificates this run exported) and the gateway that was
+# active before is selected again, so a failed or interrupted registration
+# never leaves the daemon without k8s or on a gateway nobody chose. A rollback
+# that cannot put the old state back warns loudly rather than failing twice.
+town_rollback() {
+  if [ "$town_entry_before" = 1 ] && ! town_gateway_registered; then
+    if town_openshell gateway add "https://127.0.0.1:$GATEWAY_PORT" --local --name "$GATEWAY_NAME" >/dev/null 2>&1; then
+      warn "the run stopped while re-registering $GATEWAY_NAME; its previous entry is back in $town_config"
+    else
+      warn "the run stopped while re-registering $GATEWAY_NAME and $town_config has no $GATEWAY_NAME entry; restore it with: openshell gateway add https://127.0.0.1:$GATEWAY_PORT --local --name $GATEWAY_NAME"
+    fi
+  fi
+  if [ -n "$town_active_before" ] && [ "$town_active_before" != "$GATEWAY_NAME" ] &&
+    ! town_openshell gateway select "$town_active_before" >/dev/null 2>&1; then
+    warn "the active gateway in $town_config was not restored to $town_active_before; run: openshell gateway select $town_active_before"
+  fi
+}
+
+if [ "$register_town" = 1 ]; then
+  town_active_before="$(town_active_gateway)"
+  town_entry_before=0
+  town_gateway_registered && town_entry_before=1
+  if [ -z "$town_active_before" ]; then
+    warn "no active gateway is named in $town_config; $GATEWAY_NAME becomes the active gateway (openshell gateway select <name> to change it)"
+  fi
+  # From the remove to the add the config has no k8s entry, so the EXIT trap
+  # owns putting it back; town_rollback_pending arms it and the successful add
+  # disarms it. The old entry is removed before the new certificates are
+  # written, so a stale entry never points at the new cluster's certificates.
+  town_rollback_pending=1
+  if [ "$town_entry_before" = 1 ]; then
+    town_openshell gateway remove "$GATEWAY_NAME" >/dev/null ||
+      die "cannot remove the stale $GATEWAY_NAME entry from $town_config"
+  fi
+  export_certs "$town_config/gateways/$GATEWAY_NAME/mtls"
+  town_openshell gateway add "https://127.0.0.1:$GATEWAY_PORT" --local --name "$GATEWAY_NAME" ||
+    die "cannot register $GATEWAY_NAME in $town_config"
+  if [ -n "$town_active_before" ] && [ "$town_active_before" != "$GATEWAY_NAME" ]; then
+    town_openshell gateway select "$town_active_before" ||
+      die "$GATEWAY_NAME is registered in $town_config but the active gateway could not be restored to $town_active_before; run: openshell gateway select $town_active_before"
+    active_after="$(town_active_gateway)"
+    [ "$active_after" = "$town_active_before" ] ||
+      die "$GATEWAY_NAME is registered in $town_config but the active gateway is $active_after, not $town_active_before; run: openshell gateway select $town_active_before"
+  fi
+  town_rollback_pending=0
+  say "registered $GATEWAY_NAME in $town_config (active gateway: $(town_active_gateway))"
+fi
+
 say "ready: openshell -g $GATEWAY_NAME ..."
 say "export XDG_CONFIG_HOME=$XDG_CONFIG_HOME KUBECONFIG=$KUBECONFIG"
