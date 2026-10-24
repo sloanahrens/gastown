@@ -89,6 +89,23 @@ func TestTapGuardBdCreateStore(t *testing.T) {
 		{"relative cd up to town", polecatRole, b.worktree, `cd ../../../.. && bd create --title=x`, true},
 		{"cd to worktree then create from town", polecatRole, b.town, `cd ` + b.worktree + ` && bd create --title=x`, false},
 		{"cd to rig dir then create", polecatRole, b.town, `cd ` + b.rigDir + ` && bd create --title=x`, false},
+		// bd -C/--directory moves the directory the store is resolved from,
+		// before or after the verb, alone or glued — and a relative one is
+		// resolved against the shell's directory, as bd resolves it.
+		{"town via -C before the verb", polecatRole, b.worktree, `bd -C ` + b.town + ` create --title=x`, true},
+		{"town via -C after the verb", polecatRole, b.worktree, `bd create --title=x -C ` + b.town, true},
+		{"town via glued -C", polecatRole, b.worktree, `bd -C` + b.town + ` create --title=x`, true},
+		{"town via --directory", polecatRole, b.worktree, `bd --directory ` + b.town + ` create --title=x`, true},
+		{"town via -C=", polecatRole, b.worktree, `bd -C=` + b.town + ` create --title=x`, true},
+		{"town via --directory=", polecatRole, b.worktree, `bd --directory=` + b.town + ` create --title=x`, true},
+		{"town via -C home", polecatRole, b.worktree, `bd -C ~ create --title=x`, true},
+		{"relative -C up to town", polecatRole, b.worktree, `bd -C ../../../.. create --title=x`, true},
+		{"rig dir via -C from the town root", polecatRole, b.town, `bd -C ` + b.rigDir + ` create --title=x`, false},
+		{"worktree via -C from the town root", polecatRole, b.town, `bd -C ` + b.worktree + ` create --title=x`, false},
+		{"unresolvable -C then create", polecatRole, b.worktree, `bd -C "$NOPE" create --title=x`, true},
+		{"-C with no value", polecatRole, b.worktree, `bd create --title=x -C`, true},
+		{"cd town then -C worktree", polecatRole, b.worktree, `cd ` + b.town + ` && bd -C ` + b.worktree + ` create --title=x`, false},
+		{"-C town inside bash -c", polecatRole, b.worktree, `bash -c "bd -C ` + b.town + ` create --title=x"`, true},
 		{"cd town then back then create", polecatRole, b.worktree, `cd ` + b.town + `; cd ` + b.worktree + `; bd create --title=x`, false},
 		// A cd in a subshell, pipeline or background job runs in a child
 		// process, so the create after it files from the original directory.
