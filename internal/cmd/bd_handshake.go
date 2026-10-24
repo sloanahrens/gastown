@@ -53,6 +53,7 @@ var bdHandshakeNotTownRunning = map[string]string{
 	"gt plugin run":       "runs one plugin gate; starts no agent session",
 	"gt reaper run":       "closes stale beads through bd; starts nothing",
 	"gt slot run":         "wraps a test suite in the container slot",
+	"gt spec sling":       "makes one sling a gt spec dispatch tick planned; the tick's own slings never ran behind this gate, and the daemon that runs this has passed it",
 	"gt dolt start":       "starts the Dolt server, which recovery needs when bd is broken",
 	"gt dolt restart":     "restarts the Dolt server, which recovery needs when bd is broken",
 }
