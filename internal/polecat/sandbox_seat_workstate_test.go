@@ -328,3 +328,75 @@ func TestWorkstateDispositionOfAGoneSandboxSeatTellsLostWork(t *testing.T) {
 		})
 	}
 }
+
+// showFailsBeads is a Manager beads handle whose Show fails for one bead with an
+// error that is not "not found".
+type showFailsBeads struct {
+	polecatBeads
+	id string
+}
+
+func (f showFailsBeads) Show(id string) (*beads.Issue, error) {
+	if id == f.id {
+		return nil, errors.New("dolt unreachable")
+	}
+	return f.polecatBeads.Show(id)
+}
+
+// With the sandbox gone, anything the lost-work check cannot establish leaves the
+// git state unknown instead of claiming the work lost or clean: a work bead that
+// cannot be read, an origin that cannot be asked, an agent bead that records no
+// branch. A work bead that no longer exists leaves nothing at risk (gt-qq6rg.4).
+func TestSandboxLostWorkFactsFailClosedWhenTheAnswerIsUnknown(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/toast/gt-a+x"
+	tests := []struct {
+		name      string
+		branch    string
+		workBead  bool // the work bead exists (open, no resume_branch)
+		showFails bool
+		noRepo    bool // the rig has no repo, so origin cannot be asked
+		wantUnk   string
+		wantGone  bool // SandboxGone is set (the check reached a verdict)
+	}{
+		{name: "work_bead_cannot_be_read", branch: branch, workBead: true, showFails: true, wantUnk: "could not read gt-work for a resume_branch"},
+		{name: "origin_cannot_be_asked", branch: branch, workBead: true, noRepo: true, wantUnk: "could not ask origin whether " + branch},
+		{name: "no_branch_recorded", branch: "", workBead: true, wantUnk: "records no branch"},
+		{name: "work_bead_no_longer_exists", branch: branch},
+		{name: "branch_absent_from_origin_is_lost", branch: branch, workBead: true, wantGone: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mgr, _, bd, _, _ := canonicalWithPolecats(t, true, "toast")
+			if tt.workBead {
+				if _, err := bd.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.showFails {
+				mgr.beads = showFailsBeads{mgr.beads, "gt-work"}
+			}
+			if tt.noRepo {
+				mgr.rig.Path = t.TempDir()
+			}
+			fields := &beads.AgentFields{Agent: "deepseek-flash-sandbox", Branch: tt.branch, LastSourceIssue: "gt-work"}
+			facts := WorkstateFacts{State: StateIdle, CleanupStatus: CleanupClean, HookBeadSafe: true, GitStateSource: GitStateSourceLive, AgentBeadRead: true}
+
+			mgr.applySandboxLostWorkFacts(&facts, fields, "gt-work")
+
+			if (tt.wantUnk != "") != facts.GitCheckFailed || facts.SandboxGone != tt.wantGone {
+				t.Fatalf("facts = {GitCheckFailed:%v SandboxGone:%v}, want {%v %v}", facts.GitCheckFailed, facts.SandboxGone, tt.wantUnk != "", tt.wantGone)
+			}
+			if tt.wantUnk != "" {
+				if !strings.Contains(facts.GitCheckFailedReason, tt.wantUnk) || facts.GitStateSource != GitStateSourceUnknown {
+					t.Errorf("unknown = (%q, %q), want a reason naming %q", facts.GitCheckFailedReason, facts.GitStateSource, tt.wantUnk)
+				}
+				d := DecideWorkstate(NewWorkstateInput(facts))
+				if d.Reusable || d.SafeToNuke || d.Reason == "sandbox-work-lost" {
+					t.Errorf("an unknown answer decided %+v: want neither reusable, safe to nuke, nor lost work", d)
+				}
+			}
+		})
+	}
+}

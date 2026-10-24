@@ -113,14 +113,12 @@ func applySandboxSeatFacts(facts *WorkstateFacts, live LiveGitState, fields *bea
 	}
 }
 
-// applySandboxLostWorkFacts gives the verdict what it needs to tell lost work
-// from a finished seat once the gateway says the sandbox is gone: the bead the
-// seat was working (its hook, else the source issue) and whether anything
-// survives to continue from, a resume_branch on that bead or the seat's branch
-// on origin, read from the remote and never from the stale host worktree. A bead
-// or a remote that cannot be read leaves the git state unknown instead of
-// claiming either (gt-qq6rg.4; check-recovery and the nuke gate ask the same
-// question in internal/cmd).
+// applySandboxLostWorkFacts sets the facts the lost-work verdict reads once the
+// gateway says the sandbox is gone: the bead the seat was working (hook, else
+// source issue) and whether a resume_branch on it or the seat's branch on origin
+// survives. Nothing is read from the stale host worktree. A bead, remote or
+// recorded branch that cannot be read or found leaves the git state unknown, never
+// lost or clean; a bead that no longer exists leaves nothing at risk (gt-qq6rg.4).
 func (m *Manager) applySandboxLostWorkFacts(facts *WorkstateFacts, fields *beads.AgentFields, sourceHint string) {
 	if fields == nil {
 		return
@@ -139,13 +137,21 @@ func (m *Manager) applySandboxLostWorkFacts(facts *WorkstateFacts, fields *beads
 	}
 	preserved := false
 	issue, showErr := m.beads.Show(workBead)
-	if showErr != nil && !errors.Is(showErr, beads.ErrNotFound) {
+	switch {
+	case errors.Is(showErr, beads.ErrNotFound):
+		return // the bead is gone: no unfinished work to lose
+	case showErr != nil:
 		unknown(fmt.Sprintf("could not read %s for a resume_branch: %v", workBead, showErr))
 		return
 	}
 	if issue != nil && patrolscan.ResumeBranchFromNotes(issue.Notes) != "" {
 		preserved = true
-	} else if branch := strings.TrimSpace(fields.Branch); branch != "" {
+	} else {
+		branch := strings.TrimSpace(fields.Branch)
+		if branch == "" {
+			unknown("the agent bead records no branch to look for on origin")
+			return
+		}
 		onOrigin, err := branchOnOrigin(m.gits, m.rig.Path, branch)
 		if err != nil {
 			unknown(fmt.Sprintf("could not ask origin whether %s was pushed: %v", branch, err))
