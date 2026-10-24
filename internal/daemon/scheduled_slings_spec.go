@@ -28,10 +28,15 @@ type scheduledRunBead struct {
 }
 
 // scheduledSpecLabels are the labels a spec-dispatched run bead carries: its
-// identity and its formula. It carries no agent: pin, so the dispatcher gives
-// the run any free seat.
+// identity and its formula, and the agent: pin when the entry names a run_agent
+// (so the dispatcher only gives the run that agent's seats). Without run_agent
+// there is no pin and the run takes any free seat.
 func scheduledSpecLabels(e ScheduledSlingEntry) []string {
-	return []string{scheduledSlingLabel(e), specdispatch.FormulaLabelPrefix + e.Formula}
+	labels := []string{scheduledSlingLabel(e), specdispatch.FormulaLabelPrefix + e.Formula}
+	if e.RunAgent != "" {
+		labels = append(labels, specdispatch.AgentLabelPrefix+e.RunAgent)
+	}
+	return labels
 }
 
 // scheduledSlingValidateDispatch rejects a dispatch value the patrol does not
@@ -40,6 +45,12 @@ func scheduledSpecLabels(e ScheduledSlingEntry) []string {
 // patrol skips an invalid entry, so refusing it would silently stop a config
 // that ran before. The agent is ignored and createSpecDispatchedRun says so.
 func scheduledSlingValidateDispatch(e ScheduledSlingEntry) error {
+	if e.RunAgent != "" && e.Dispatch != scheduledDispatchSpec {
+		return fmt.Errorf("scheduled_slings[%s]: run_agent needs dispatch %q (the entry slings its own run and names its agent with agent)", e.Name, scheduledDispatchSpec)
+	}
+	if e.RunAgent != "" && (e.RunAgent != strings.TrimSpace(e.RunAgent) || strings.ContainsAny(e.RunAgent, " \t\n,")) {
+		return fmt.Errorf("scheduled_slings[%s]: run_agent %q must be one agent name", e.Name, e.RunAgent)
+	}
 	switch e.Dispatch {
 	case "":
 		return nil

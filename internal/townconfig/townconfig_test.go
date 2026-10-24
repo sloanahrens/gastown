@@ -438,3 +438,47 @@ func TestRefusedSeatMapFailsClosedAtLoad(t *testing.T) {
 		t.Fatalf("Load without the seat map = %v", err)
 	}
 }
+
+// A scheduled entry's run_agent is the agent: label its run beads carry, so it
+// must name an agent that has a seat: a pin no seat can serve would leave the
+// run waiting for ever and a deep review pinned off DeepSeek would never run.
+// The load says so, naming the entry (gt-tplg6).
+func TestScheduledRunAgentMustHaveASeat(t *testing.T) {
+	t.Parallel()
+	const settings = `{"type":"town-settings","version":1,
+"agents":{"claude-sonnet":{"command":"claude"},"deepseek-flash":{"command":"claude"}},
+"polecat_pool":{"seats":{"claude-sonnet":{"cap":1},"deepseek-flash":{"cap":0}}}}`
+	entry := func(extra string) string {
+		return `{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_slings":{"enabled":true,"entries":[` +
+			`{"name":"deep-review","rig":"gastown","formula":"mol-deep-review","interval":"1h","dispatch":"spec"` + extra + `}]}}}`
+	}
+	tests := []struct {
+		name    string
+		daemon  string
+		wantErr string // "" for a clean load
+	}{
+		{"no run_agent loads as before", entry(""), ""},
+		{"a seated agent loads", entry(`,"run_agent":"claude-sonnet"`), ""},
+		{"an agent with a seat of cap 0 loads (the pool decides)", entry(`,"run_agent":"deepseek-flash"`), ""},
+		{"an agent with no seat fails the load", entry(`,"run_agent":"claude-opus"`), `scheduled_slings[deep-review].run_agent "claude-opus": no seat for that agent in polecat_pool.seats`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := copyLiveTown(t)
+			write(t, root, FileSettings, settings)
+			write(t, root, FileDaemon, tt.daemon)
+
+			_, err := Load(root)
+
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatalf("Load = %v, want a clean load", err)
+			case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+				t.Fatalf("Load = %v, want an error containing %q", err, tt.wantErr)
+			case tt.wantErr != "" && strings.Count(err.Error(), "\n") != 0:
+				t.Errorf("error %q must be one line", err)
+			}
+		})
+	}
+}

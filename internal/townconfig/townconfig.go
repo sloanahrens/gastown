@@ -114,7 +114,7 @@ func Check(root string) error {
 func load(root string) (*Town, []error) {
 	t := &Town{root: root, present: map[string]bool{}, rigs: map[string]config.RigEntry{}, daemonEnv: map[string]string{}}
 	var errs []error
-	for _, step := range []func() error{t.loadTown, t.loadRigs, t.loadRigSettings, t.loadLegacyParked, t.loadSettings, t.loadDaemon, t.loadDaemonEnv, t.loadDolt} {
+	for _, step := range []func() error{t.loadTown, t.loadRigs, t.loadRigSettings, t.loadLegacyParked, t.loadSettings, t.loadDaemon, t.checkScheduledRunAgents, t.loadDaemonEnv, t.loadDolt} {
 		if err := step(); err != nil {
 			errs = append(errs, err)
 		}
@@ -225,6 +225,35 @@ func (t *Town) loadSettings() error {
 	}
 	t.settings = &s
 	return nil
+}
+
+// checkScheduledRunAgents fails the load when a scheduled entry's run_agent
+// names an agent with no seat in polecat_pool.seats: the entry's run beads
+// would carry an agent: pin no seat can serve and wait for ever, so a deep
+// review pinned off DeepSeek would silently never run (gt-tplg6). It judges only
+// what both files loaded: a town without either has nothing to cross-check.
+func (t *Town) checkScheduledRunAgents() error {
+	if t.settings == nil || t.daemon == nil || t.daemon.Patrols == nil || t.daemon.Patrols.ScheduledSlings == nil {
+		return nil
+	}
+	seats, err := config.Seats(t.settings, config.SeatsKnownTo(t.settings))
+	if err != nil {
+		return nil // loadSettings already reported it
+	}
+	have := map[string]bool{}
+	for _, s := range seats {
+		have[s.Agent] = true
+	}
+	var errs []error
+	for _, e := range t.daemon.Patrols.ScheduledSlings.Entries {
+		if e.RunAgent != "" && !have[e.RunAgent] {
+			errs = append(errs, fmt.Errorf("scheduled_slings[%s].run_agent %q: no seat for that agent in polecat_pool.seats", e.Name, e.RunAgent))
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return oneLine(t.path(FileDaemon), errors.Join(errs...))
 }
 
 func (t *Town) loadDaemon() error {

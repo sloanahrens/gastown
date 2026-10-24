@@ -248,7 +248,8 @@ type Seat struct {
 
 // AgentLabelPrefix starts the label that pins a bead to one agent's seats:
 // agent:claude-sonnet. An operator or a bead author sets it by hand; a scheduled
-// spec entry writes none, and one that names an agent is refused.
+// spec entry writes it from its run_agent (gt-tplg6), and one that names an
+// agent with the retired agent key is refused.
 const AgentLabelPrefix = "agent:"
 
 // PinnedAgents returns the distinct agent names carried by the bead's agent:
