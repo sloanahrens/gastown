@@ -91,6 +91,13 @@ func killProcessGroup(pgid int) error {
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone
 		}
+		if errors.Is(err, syscall.EPERM) {
+			// An OpenShell sandbox refuses kill(-pgid, ...) with EPERM, even
+			// for signal 0, while it allows signaling a single pid. Left at
+			// that, cmd.Wait never returns for a command whose context was
+			// canceled: nothing was ever signaled.
+			return killGroupMembers(pgid, err, procGroupMembers, signalPid, ProcessGroupKillGrace)
+		}
 		return err
 	}
 
@@ -106,6 +113,49 @@ func killProcessGroup(pgid int) error {
 	}
 
 	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
+
+// killGroupMembers ends a process group one member at a time, for a platform
+// or sandbox that refuses to signal the group itself: SIGTERM to each live
+// member, then SIGKILL to those still there after grace. refused is the error
+// the group signal failed with, returned when the members cannot be listed.
+// Like killProcessGroup it reports os.ErrProcessDone when the group was
+// already empty. list and signal are the /proc listing and the single-pid kill,
+// injected so a test needs no processes.
+func killGroupMembers(pgid int, refused error, list func(pgid int) ([]int, error), signal func(pid int, sig syscall.Signal) error, grace time.Duration) error {
+	members, err := list(pgid)
+	if err != nil {
+		return refused
+	}
+	if len(members) == 0 {
+		return os.ErrProcessDone
+	}
+	for _, pid := range members {
+		_ = signal(pid, syscall.SIGTERM)
+	}
+	deadline := time.Now().Add(grace)
+	for {
+		members, err = list(pgid)
+		if err == nil && len(members) == 0 {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(processGroupKillPoll)
+	}
+	for _, pid := range members {
+		_ = signal(pid, syscall.SIGKILL)
+	}
+	return nil
+}
+
+// signalPid sends sig to one process; a process already gone is not an error.
+func signalPid(pid int, sig syscall.Signal) error {
+	if err := syscall.Kill(pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
 	return nil
