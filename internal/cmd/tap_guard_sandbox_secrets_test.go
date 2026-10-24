@@ -110,6 +110,7 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		// The here-string text is read through its ANSI-C escapes, so a
 		// backslash-n hides no line from the walk (gt-9q6sf).
 		`bash <<< $'x\nprintenv'`,
+		`bash <<<$'x\nprintenv'`,
 		"echo printenv | source /dev/stdin",
 		"printf 'printenv' | . /dev/fd/0",
 		"sh <(echo printenv)",
@@ -728,6 +729,10 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"source /dev/stdin <<'E'\nmake test\nE\n",
 		// A here-string whose text is ordinary work is allowed, like a pipe's (gt-ma5e6).
 		"bash <<< 'make test'",
+		// A plain here-string keeps its backslashes, so the shell runs one word;
+		// only the ANSI-C form reads them as the line breaks they spell (gt-3yhp0).
+		`bash <<< 'echo hello\nprintenv'`,
+		`cat <<< 'echo hello\nprintenv' | bash`,
 		// A here-string on fd 2 does not reach the shell's stdin, so its text is not a script.
 		"bash 2<<< printenv",
 		"printf '%s' \"$(cat <<'BEAD'\necho ready\nBEAD\n)\" | sh",

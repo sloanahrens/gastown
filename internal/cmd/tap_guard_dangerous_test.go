@@ -2304,6 +2304,67 @@ func TestHeredocCommandTextStopsAtTheReaderLine(t *testing.T) {
 	}
 }
 
+// TestHeredocCommandTextClampOnContinuedReaderLines: the command text starts at
+// the heredoc reader's own logical line, so a line above reaches it only when a
+// backslash joins that line to the reader's. A continuation makes the line above
+// one command line with the reader, and its shell invoker reads the body; a
+// continuation inside the reader line leaves the line above out, so its cat
+// reads the body as data. The reader line itself is read whole either way, so a
+// pipe stage continued onto the next physical line still reaches bash
+// (gt-3yhp0).
+func TestHeredocCommandTextClampOnContinuedReaderLines(t *testing.T) {
+	t.Parallel()
+	const body = "git reset --hard"
+	tests := []struct {
+		name     string
+		command  string
+		contains string // text the command text must reach, proving the clamp did not cut it
+		lacks    string // text the command text must not reach, proving the clamp cut it
+		blocked  bool
+	}{
+		{
+			"continuation joins the bash line above onto the reader",
+			"x=$(bash ./gen.sh \\\ncat <<'EOF'\n" + body + "\nEOF\n)",
+			"bash ./gen.sh", "", true,
+		},
+		{
+			"continuation inside the reader line keeps the line above out",
+			"x=$(bash ./gen.sh\ncat \\\n<<'EOF'\n" + body + "\nEOF\n)",
+			"", "bash ./gen.sh", false,
+		},
+		{
+			"a pipe stage continued onto the next line still reaches bash",
+			"x=$(bash ./gen.sh\ncat <<'EOF' | \\\nbash\n" + body + "\nEOF\n)",
+			"bash", "bash ./gen.sh", true,
+		},
+		{
+			"a redirection ahead of the reader command",
+			"x=$(bash ./gen.sh\n2>/dev/null cat <<'EOF'\n" + body + "\nEOF\n)",
+			"2>/dev/null cat", "bash ./gen.sh", false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			spans := scanHeredocs(tt.command)
+			if len(spans) != 1 {
+				t.Fatalf("scanHeredocs(%q) found %d heredocs, want 1", tt.command, len(spans))
+			}
+			cmdText := spans[0].cmdText
+			if tt.contains != "" && !strings.Contains(cmdText, tt.contains) {
+				t.Errorf("cmdText %q does not reach %q, want the reader's logical line read whole", cmdText, tt.contains)
+			}
+			if tt.lacks != "" && strings.Contains(cmdText, tt.lacks) {
+				t.Errorf("cmdText %q reaches %q, want it to start at the reader's line", cmdText, tt.lacks)
+			}
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if blocked := reason != ""; blocked != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked=%v (reason=%q), want blocked=%v", tt.command, blocked, reason, tt.blocked)
+			}
+		})
+	}
+}
+
 // TestHeredocOperatorLineEndHonorsEscapesAndComments pins where the operator's
 // line ends, which decides where the shell reads the body. An even run of
 // backslashes escapes itself, so the newline after "\\" ends the line. A
