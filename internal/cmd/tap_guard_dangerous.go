@@ -2021,21 +2021,48 @@ func quotedSubstitutionCloses(command string, runes []rune, i int) bool {
 	return closingParen(command, from, heredocBodiesFrom(command, from)) >= 0
 }
 
-// isANSICDollar reports whether the "$" at runes[i] opens a $'...' string: the
-// quote after it is an ANSI-C one only when the "$" is one the shell reads as a
-// "$" of its own. A backslash-escaped "$" is literal text, and the second "$" of
-// "$$" is the tail of the PID expansion, so "$$'" holds a plain quote after the
-// PID (gt-0vbb2). The quote walk and spaceOutShellOperators judge the opener
-// here, so they agree on where a $'...' string starts. heredocLineEnd reads
+// isANSICDollar reports whether the "$" at runes[i] opens a $'...' string. The
+// quote walk and spaceOutShellOperators judge the opener here, and the byte
+// scan in ansiQuoteAt reads it through the same ansiCDollarQuote, so they agree
+// on where a $'...' string starts (gt-0vbb2, gt-h4go2). heredocLineEnd reads
 // bytes forward and skips the second "$" of a "$$" in place for the same reason.
-// A backslash-newline between the "$" and the quote is deleted by the shell, so
-// the quote is still the one that follows it (gt-javvg).
 func isANSICDollar(runes []rune, i int) bool {
-	if i < 0 || i >= len(runes) || runes[i] != '$' {
-		return false
+	return ansiCDollarQuote(len(runes), runesAt(runes), i) >= 0
+}
+
+// ansiCDollarQuote returns the index of the "'" that the "$" at dollar opens a
+// $'...' string with, or -1, over the n characters at reads. The quote after a
+// "$" is an ANSI-C one only when the "$" is one the shell reads as a "$" of its
+// own. A backslash-escaped "$" is literal text, and the second "$" of "$$" is
+// the tail of the PID expansion, so "$$'" holds a plain quote after the PID
+// (gt-0vbb2). A backslash-newline between the "$" and the quote is deleted by
+// the shell, so the quote is still the one that follows it (gt-javvg).
+func ansiCDollarQuote(n int, at func(int) rune, dollar int) int {
+	if dollar < 0 || dollar >= n || at(dollar) != '$' || escapedAt(at, dollar) || pidTailAt(at, dollar) {
+		return -1
 	}
-	quote := skipLineContinuations(runes, i+1)
-	return quote < len(runes) && runes[quote] == '\'' && !escapedRune(runes, i) && !isPIDTail(runes, i)
+	// A backslash after an unescaped "$" or a deleted pair is never itself
+	// escaped, so the pairs are stepped over without that check.
+	q := dollar + 1
+	for q+1 < n && at(q) == '\\' && at(q+1) == '\n' {
+		q += 2
+	}
+	if q < n && at(q) == '\'' {
+		return q
+	}
+	return -1
+}
+
+// runesAt is the character reader ansiCDollarQuote takes, over runes.
+func runesAt(runes []rune) func(int) rune {
+	return func(i int) rune { return runes[i] }
+}
+
+// bytesAt is the character reader ansiCDollarQuote takes, over text's bytes. A
+// byte of a multi-byte character is never ASCII, so it matches none of the
+// characters the predicate looks for.
+func bytesAt(text string) func(int) rune {
+	return func(i int) rune { return rune(text[i]) }
 }
 
 // skipLineContinuations returns the index of the first rune at or after i that
@@ -2059,22 +2086,22 @@ func lineContinuationsBefore(runes []rune, i int) int {
 	return i
 }
 
-// isPIDTail reports whether the "$" at runes[i] is the second half of a "$$"
-// the shell reads as the PID: the "$" before it is unescaped and begins that
-// pair itself, so a third "$" after "$$" starts an expansion of its own.
-func isPIDTail(runes []rune, i int) bool {
-	if i < 1 || runes[i] != '$' {
+// pidTailAt reports whether the "$" at at(i) is the second half of a "$$" the
+// shell reads as the PID: the "$" before it is unescaped and begins that pair
+// itself, so a third "$" after "$$" starts an expansion of its own.
+func pidTailAt(at func(int) rune, i int) bool {
+	if i < 1 || at(i) != '$' {
 		return false
 	}
 	start := i
-	for start > 0 && runes[start-1] == '$' {
+	for start > 0 && at(start-1) == '$' {
 		start--
 	}
 	// The first "$" of the run is never a tail. The escape on it decides the
 	// second, and each "$" after that alternates with the one before it.
 	tail := false
 	for j := start + 1; j <= i; j++ {
-		tail = !tail && (j > start+1 || !escapedRune(runes, start))
+		tail = !tail && (j > start+1 || !escapedAt(at, start))
 	}
 	return tail
 }
@@ -2082,8 +2109,13 @@ func isPIDTail(runes []rune, i int) bool {
 // escapedRune reports whether the rune at runes[i] is backslash-escaped: an odd
 // run of backslashes ends right before it.
 func escapedRune(runes []rune, i int) bool {
+	return escapedAt(runesAt(runes), i)
+}
+
+// escapedAt is escapedRune over the characters at reads.
+func escapedAt(at func(int) rune, i int) bool {
 	n := 0
-	for j := i - 1; j >= 0 && runes[j] == '\\'; j-- {
+	for j := i - 1; j >= 0 && at(j) == '\\'; j-- {
 		n++
 	}
 	return n%2 == 1
