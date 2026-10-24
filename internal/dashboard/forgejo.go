@@ -27,6 +27,11 @@ const (
 	// call rather than the refresh, and the other repos' feeds still arrive
 	// (gt-p7lkd).
 	forgejoCallTimeout = 2 * time.Second
+	// forgejoMaxParallel bounds how many repos one refresh reads at once. The
+	// reads block on the network, so one goroutine per repo makes the fan-out
+	// the repo list's length; a fixed crew of workers keeps it bounded, and a
+	// repo past the crew waits its turn (gt-p7lkd).
+	forgejoMaxParallel = 8
 )
 
 // ForgejoEvent is one line of the merged Forgejo activity feed.
@@ -50,12 +55,15 @@ type ForgejoFeed struct {
 	// EverySec is the panel's poll interval in seconds, set by the hub that
 	// polls. The page marks the snapshot stale past two of them.
 	EverySec float64 `json:"every_seconds,omitempty"`
-	// Missing names the repos this refresh could not read — one the viewer's
-	// token cannot see, or one whose calls outran their bound. Naming them is
-	// what keeps a rig whose repository is invisible to the viewer, or merely
-	// slow this minute, from reading as a rig with no landings (gt-faml5,
-	// gt-p7lkd).
+	// Missing names the repos the viewer's token cannot see. Naming them is
+	// what keeps a rig whose repository is invisible from reading as a rig with
+	// no landings (gt-faml5).
 	Missing []string `json:"missing,omitempty"`
+	// Failed names the repos this refresh could not read — a call hit an error
+	// or outran its bound. It is kept apart from Missing because a permission
+	// to fix and an outage to retry are different answers for the operator
+	// (gt-p7lkd).
+	Failed []string `json:"failed,omitempty"`
 	// Actions is the section's workflow runs, read in the same refresh as the
 	// events. It is nil when no repo answered for its runs — a reader with no
 	// repos at all, or one whose every run list failed — and then carries the
@@ -109,7 +117,7 @@ func (r *ForgejoReader) Read() *ForgejoFeed {
 		}
 		// The last good read keeps its own age: a pane serving it is stale, and
 		// saying when it was read is the only way the page can show that.
-		return &ForgejoFeed{Events: r.last.Events, Error: class, At: r.last.At, Missing: r.last.Missing, Actions: r.last.Actions}
+		return &ForgejoFeed{Events: r.last.Events, Error: class, At: r.last.At, Missing: r.last.Missing, Failed: r.last.Failed, Actions: r.last.Actions}
 	}
 	if feed.Actions == nil && r.last != nil {
 		// No repo answered for its runs: the Actions section keeps the last
@@ -125,9 +133,10 @@ func (r *ForgejoReader) Read() *ForgejoFeed {
 // fetch reads every repo's feed and workflow runs under one deadline and
 // merges them. The deadline still covers the whole refresh, so the poll costs
 // the panel at most forgejoTimeout however many repos the viewer sees. The
-// repos are read in parallel, each call under its own bound: a refresh of nine
-// repos is one repo's five calls deep, not forty-five calls deep, so a call
-// slower than the whole budget allows cannot starve the rest (gt-p7lkd).
+// repos are read in parallel by a fixed crew of workers, each call under its
+// own bound: a refresh of nine repos is one repo's five calls deep, not
+// forty-five calls deep, so a call slower than the whole budget allows cannot
+// starve the rest (gt-p7lkd).
 func (r *ForgejoReader) fetch() (*ForgejoFeed, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), forgejoTimeout)
 	defer cancel()
@@ -145,14 +154,21 @@ func (r *ForgejoReader) fetch() (*ForgejoFeed, error) {
 	}
 
 	reads := make([]repoRead, len(names))
+	work := make(chan int)
 	var wg sync.WaitGroup
-	for i, name := range names {
+	for w := 0; w < min(len(names), forgejoMaxParallel); w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			reads[i] = r.readRepo(ctx, name)
+			for i := range work {
+				reads[i] = r.readRepo(ctx, names[i])
+			}
 		}()
 	}
+	for i := range names {
+		work <- i
+	}
+	close(work)
 	wg.Wait()
 	return mergeRepoReads(reads)
 }
@@ -227,15 +243,18 @@ func (r *ForgejoReader) readRepo(ctx context.Context, name string) repoRead {
 
 // mergeRepoReads merges every repo's read into the feed. A repo that could not
 // be read is named and the rest merge, so one slow or failing feed never blanks
-// the others. Only a refresh where no repo answered at all is an error, which
-// Read turns into the last good feed and its age.
+// the others. A refresh where no repo answered at all is an error, which Read
+// turns into the last good feed and its age — including a refresh where every
+// repo was invisible, which must not be stored as a good read of an empty town
+// (gt-p7lkd).
 func mergeRepoReads(reads []repoRead) (*ForgejoFeed, error) {
 	var (
 		all      []forgejo.Activity
 		missing  []string
+		failed   []string
 		runs     []repoRuns
 		answered int
-		failed   error
+		firstErr error
 	)
 	for _, rr := range reads {
 		switch {
@@ -244,10 +263,13 @@ func mergeRepoReads(reads []repoRead) (*ForgejoFeed, error) {
 			// it can: the feeds of the read repos still merge, and the rest are
 			// named (gt-faml5).
 			missing = append(missing, rr.name)
+			if firstErr == nil {
+				firstErr = rr.err
+			}
 		case rr.err != nil:
-			missing = append(missing, rr.name)
-			if failed == nil {
-				failed = rr.err
+			failed = append(failed, rr.name)
+			if firstErr == nil {
+				firstErr = rr.err
 			}
 		default:
 			answered++
@@ -255,11 +277,12 @@ func mergeRepoReads(reads []repoRead) (*ForgejoFeed, error) {
 			runs = append(runs, rr.runs)
 		}
 	}
-	if answered == 0 && failed != nil {
-		return nil, failed
+	if answered == 0 && firstErr != nil {
+		return nil, firstErr
 	}
 	feed := MergeForgejoActivities(all)
 	feed.Missing = missing
+	feed.Failed = failed
 	feed.Actions = mergeForgejoRuns(runs)
 	return feed, nil
 }

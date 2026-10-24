@@ -2190,13 +2190,16 @@ function renderForgejo(s) {
   const events = f.events || [];
   feedCount = events.length;
   foldFeed(!!f.actions);
-  // A repo this refresh could not read is named, whether the viewer's token
-  // cannot see it or it outran its call bound: silently reading a subset is how
-  // a rig's landings went missing with no error anywhere (gt-faml5, gt-p7lkd).
+  // A repo the viewer's token cannot read is named, and a repo this refresh
+  // could not read is named apart from it: a permission to fix and an outage
+  // to retry are different answers, and silently reading a subset is how a
+  // rig's landings went missing with no error anywhere (gt-faml5, gt-p7lkd).
   const missing = f.missing || [];
-  if (missing.length) box.append(el("div", "badc title", "could not read: " + missing.join(", ")));
+  if (missing.length) box.append(el("div", "badc title", "not readable by the viewer: " + missing.join(", ")));
+  const failed = f.failed || [];
+  if (failed.length) box.append(el("div", "badc title", "could not read this refresh: " + failed.join(", ")));
   if (!events.length) {
-    if (!missing.length) { box.append(el("div", f.error ? "badc" : "empty", f.error ? "unavailable: " + f.error : "no activity")); return; }
+    if (!missing.length && !failed.length) { box.append(el("div", f.error ? "badc" : "empty", f.error ? "unavailable: " + f.error : "no activity")); return; }
   } else {
     const today = new Date().toDateString();
     for (const e of events) {

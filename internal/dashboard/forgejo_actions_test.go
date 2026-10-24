@@ -567,16 +567,21 @@ func TestForgejoReaderWithoutAFreshActionsValueLeavesActionsOut(t *testing.T) {
 }
 
 // A repo the viewer's token cannot read never reaches the runs: the feed has
-// already named it missing.
+// already named it missing. The readable repo still answers, so the refresh
+// succeeds — with every repo invisible it would read nothing at all and be a
+// failed refresh (gt-p7lkd).
 func TestForgejoReaderSkipsRunsForAMissingRepo(t *testing.T) {
 	t.Parallel()
-	stub := &forgejoActionsStub{}
+	stub := &forgejoActionsStub{repos: []string{"sloan/beads"}}
 	feed := newForgejoActionsReader(t, stub, []string{"sloan/beads", "sloan/mango"}).Read()
 	require.Empty(t, feed.Error)
-	assert.Empty(t, feed.Actions, "the stub 404s both feeds, so neither is read")
+	assert.Equal(t, []string{"sloan/mango"}, feed.Missing, "the invisible repo is named")
 
 	for _, asked := range stub.askedFor() {
-		assert.NotContains(t, asked, "/actions/runs", "a repo the viewer cannot read is not asked for runs")
+		if strings.Contains(asked, "/activities/feeds") {
+			continue // the feed is what names the repo invisible in the first place
+		}
+		assert.NotContains(t, asked, "sloan/mango", "a repo the viewer cannot read is not asked for runs")
 	}
 }
 
