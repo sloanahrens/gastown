@@ -6,7 +6,9 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -59,7 +61,9 @@ func startMainScriptWith(t *testing.T, session string, waitSeconds string, lostP
 	}
 	t.Cleanup(func() {
 		cancel()
-		_ = exec.Command("tmux", "-L", SandboxTmuxSocket, "kill-server").Run()
+		kill := exec.Command("tmux", "-L", SandboxTmuxSocket, "kill-server")
+		kill.Env = r.env
+		_ = kill.Run()
 	})
 	go func() { r.done <- cmd.Wait() }()
 	return r
@@ -86,6 +90,23 @@ func (r *mainScriptRun) waitServer() {
 		time.Sleep(50 * time.Millisecond)
 	}
 	r.t.Fatal("the script never started its tmux server")
+}
+
+// serverPID is the pid of the tmux server the script started under the test's
+// TMUX_TMPDIR.
+func (r *mainScriptRun) serverPID() int {
+	r.t.Helper()
+	cmd := exec.Command("tmux", "-L", SandboxTmuxSocket, "display-message", "-p", "#{pid}")
+	cmd.Env = r.env
+	out, err := cmd.Output()
+	if err != nil {
+		r.t.Fatalf("asking the tmux server for its pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		r.t.Fatalf("tmux server pid %q: %v", out, err)
+	}
+	return pid
 }
 
 // exited reports the script's exit within timeout; ok is false when it is still
@@ -190,4 +211,36 @@ func TestIntegrationMainScriptExitsOnlyAfterTmuxStaysUnreachable(t *testing.T) {
 	if took := time.Since(killed); took < 1200*time.Millisecond {
 		t.Fatalf("the script exited %s after tmux became unreachable; unknown polls must not count as the session ending", took)
 	}
+}
+
+// The test's cleanup must kill the tmux server the script started under the
+// test's own TMUX_TMPDIR. A kill-server that reaches the process's default server
+// leaves this one running, holding a pty after RemoveAll deletes its socket dir.
+func TestIntegrationMainScriptCleanupKillsItsTmuxServer(t *testing.T) {
+	t.Parallel()
+	var pid int
+	t.Run("start", func(t *testing.T) {
+		r := startMainScript(t, "gt-agent", "30")
+		r.waitServer()
+		pid = r.serverPID()
+	})
+	if pid == 0 {
+		t.Fatal("the subtest did not start a tmux server")
+	}
+	if !waitForExit(pid, 5*time.Second) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatalf("tmux server %d outlived the test's cleanup: its kill-server did not reach the server under the test's TMUX_TMPDIR", pid)
+	}
+}
+
+// waitForExit reports whether pid is gone within timeout.
+func waitForExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(pid, 0) != nil {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
 }
