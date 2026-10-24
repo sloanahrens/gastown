@@ -61,14 +61,14 @@ none), and the local-branch prune reads the list only to protect branches.
 ## Old images
 
 Every build tags the image `gastown-polecat:<short sha>` as well as `:dev`, and
-nothing else removes the old tags: a day of installs left dozens of 1.5 GB
-images and a rising Docker disk (gt-mexpf). At the end of every run (current, deferred
-or built, never after a failure) the plugin untags the per-commit tags beyond the
-newest 3 (`POLECAT_IMAGE_KEEP`) with a plain `docker rmi <repo>:<sha>`. It never
-touches `:dev`, the image `:dev` names or a tag that is not a hex commit, never
-passes `-f`, and never prunes anything else: Docker refuses to remove an image a
-container (a running sandbox) uses, and that refusal is logged as `kept ... (in
-use)`, not an error. The build cache is not touched.
+nothing else removes the old tags (gt-mexpf). At the end of every run (current,
+deferred or built, never after a failure) the plugin untags the per-commit tags
+beyond the newest 3 (`POLECAT_IMAGE_KEEP`) with a plain `docker rmi
+<repo>:<sha>`. It never touches `:dev`, the image `:dev` names or a tag that is
+not a hex commit, never passes `-f`, and never prunes anything else. A failed
+removal keeps the tag and logs docker's own reason, `kept ... (rmi failed:
+<reason>)`, so a container using the image and a real error read differently.
+The build cache is not touched.
 
 Every failure exits non-zero with the tail of the failing command: a commit the
 rig repo does not know, a failed build, an image that still carries another
