@@ -37,6 +37,7 @@ export XDG_CONFIG_HOME="$OUT/xdg" # `up.sh --register-town` is the only path int
 export PATH="$OUT/bin:$PATH"
 
 say() { printf '==> %s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 # sha256_of FILE prints the hex digest the manifest pin file stores.

@@ -116,13 +116,28 @@ cat >"$TMP/bin/openshell" <<'STUB'
 # the script's private config is any other XDG directory, kept in $STATE.
 town=0
 [ "${XDG_CONFIG_HOME:-$HOME/.config}" = "$HOME/.config" ] && town=1
-town_add() { echo "$1" >"$HOME/.config/openshell/active_gateway"; echo "$1" >"$STATE/town-active"; }
+town_active() { echo "$1" >"$HOME/.config/openshell/active_gateway"; echo "$1" >"$STATE/town-active"; }
+# The flags are scanned, not matched in a fixed order: the test must not
+# depend on how the script spells its arguments.
+name=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--name" ] && name=$a
+  prev=$a
+done
 case "$*" in
   "gateway list")
     if [ "$town" = 1 ]; then
+      # A header row and three columns, as the real list prints: the parser
+      # must find the star and the name without relying on the row's width.
+      echo "NAME URL STATUS"
       while read -r n; do
         [ -n "$n" ] || continue
-        if [ "$n" = "$(cat "$STATE/town-active" 2>/dev/null)" ]; then echo "* $n healthy"; else echo "  $n healthy"; fi
+        if [ "$n" = "$(cat "$STATE/town-active" 2>/dev/null)" ]; then
+          echo "* $n https://127.0.0.1:28443 healthy"
+        else
+          echo "  $n https://127.0.0.1:28443 healthy"
+        fi
       done <"$STATE/town-gw-list" 2>/dev/null
     else
       [ -f "$STATE/gw-list" ] && cat "$STATE/gw-list"
@@ -131,10 +146,14 @@ case "$*" in
     exit 0 ;;
   "gateway add"*)
     if [ "$town" = 1 ]; then
-      name=$(sed -n 's/.*--name \([^ ]*\).*/\1/p' <<<"$*")
+      n=$(cat "$STATE/town-add-calls" 2>/dev/null || echo 0)
+      echo $((n + 1)) >"$STATE/town-add-calls"
+      # STUB_TOWN_ADD_FAIL_ONCE fails the first add only, so the rollback's
+      # retry can be told apart from the registration that failed.
+      [ -n "${STUB_TOWN_ADD_FAIL_ONCE:-}" ] && [ "$n" -eq 0 ] && exit 1
       mkdir -p "$HOME/.config/openshell"
       grep -qx "$name" "$STATE/town-gw-list" 2>/dev/null || echo "$name" >>"$STATE/town-gw-list"
-      town_add "$name" # add makes the new gateway active
+      town_active "$name" # add makes the new gateway active
     else
       touch "$STATE/gw"
     fi
@@ -142,7 +161,7 @@ case "$*" in
   "gateway select"*)
     if [ "$town" = 1 ]; then
       [ -n "${STUB_SELECT_FAIL:-}" ] && exit 1
-      town_add "$3"
+      town_active "$3"
     fi
     exit 0 ;;
   "gateway remove"*)
@@ -409,6 +428,34 @@ run "$UP" STUB_SELECT_FAIL=1 -- --register-town
 check "a failed restore exits non-zero" test "$RC" -ne 0
 check "the failure says the gateway could not be restored" contains "could not be restored to docker" "$OUT_TEXT"
 check "the failure names the command to run" contains "openshell gateway select docker" "$OUT_TEXT"
+check "the k8s entry stays registered when only the restore fails" test "$(grep -cx k8s "$S/state/town-gw-list")" -eq 1
+
+echo "register-town warns when no gateway is active"
+scenario town_no_active
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\n' >"$S/state/town-gw-list"
+run "$UP" -- --register-town
+check "up exits 0" test "$RC" -eq 0
+check "the run warns that no gateway was active" contains "no active gateway is named" "$OUT_TEXT"
+check "the warning says k8s becomes active" contains "k8s becomes the active gateway" "$OUT_TEXT"
+check "the warning names the command to choose another" contains "openshell gateway select" "$OUT_TEXT"
+check "k8s is the active gateway" test "$(cat "$S/home/.config/openshell/active_gateway")" = k8s
+check "the town list still holds the other gateway" test "$(grep -cx docker "$S/state/town-gw-list")" -eq 1
+
+echo "a failed town registration puts the previous entry back"
+scenario town_add_fail
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\nk8s\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+printf 'docker\n' >"$S/home/.config/openshell/active_gateway"
+run "$UP" STUB_TOWN_ADD_FAIL_ONCE=1 -- --register-town
+check "the failed registration exits non-zero" test "$RC" -ne 0
+check "the failure says the gateway could not be registered" contains "cannot register k8s" "$OUT_TEXT"
+check "the previous k8s entry is back" test "$(grep -cx k8s "$S/state/town-gw-list")" -eq 1
+check "the rollback says the entry is back" contains "its previous entry is back" "$OUT_TEXT"
+check "the rollback restores the active gateway" test "$(cat "$S/home/.config/openshell/active_gateway")" = docker
+check "the active gateway is not the new one" test "$(cat "$S/state/town-active")" = docker
+check "the other gateway was never removed" test "$(grep -cx docker "$S/state/town-gw-list")" -eq 1
 
 echo "a run without the flag leaves the town config alone"
 scenario town_untouched
@@ -432,6 +479,11 @@ run "$UP" -- --register-town
 run "$UP" -- --register-town
 check "both runs exit 0" test "$RC" -eq 0
 check "the existing k8s entry is removed before the add" contains "gateway remove k8s" "$CALLS_LOG"
+remove_line="$(grep -n 'gateway remove k8s' "$S/calls.log" | head -1 | cut -d: -f1)"
+export_line="$(grep -n 'get secret openshell-client-tls' "$S/calls.log" | tail -1 | cut -d: -f1)"
+add_line="$(grep -n 'gateway add https://127.0.0.1:28443 --local --name k8s' "$S/calls.log" | tail -1 | cut -d: -f1)"
+check "the stale entry is removed before the town certificates are written" test "$remove_line" -lt "$export_line"
+check "the town certificates are written before the new entry is added" test "$export_line" -lt "$add_line"
 check "no gateway other than k8s is removed" test "$(count 'gateway remove' "$CALLS_LOG")" -eq 1
 check "the town list holds one k8s entry" test "$(grep -cx k8s "$S/state/town-gw-list")" -eq 1
 check "the other gateway survives" test "$(grep -cx docker "$S/state/town-gw-list")" -eq 1
