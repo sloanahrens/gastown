@@ -11,7 +11,9 @@ description: "Control-plane workloads (gateway, Dolt, Forgejo, hm): never preemp
 ---
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
-metadata: {name: gt-sandbox}
+# OpenShell admits an external PriorityClass named by a sandbox create only when
+# it carries its approval label (resourceAdmission, chart 0.1.4).
+metadata: {name: gt-sandbox, labels: {openshell.ai/sandbox-attachable: "true"}}
 value: 1000
 globalDefault: false
 description: "Sandbox polecats: preempted by the control plane, preempt CI."

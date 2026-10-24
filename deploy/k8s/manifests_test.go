@@ -57,6 +57,7 @@ func TestPriorityClassesOrderControlPlaneAboveSandboxAboveCI(t *testing.T) {
 	t.Parallel()
 	docs := decodeDocs(t, "priority-classes.yaml")
 	got := map[string]int{}
+	labels := map[string]map[string]any{}
 	for _, d := range docs {
 		if d["kind"] != "PriorityClass" {
 			t.Errorf("document kind = %v, want PriorityClass", d["kind"])
@@ -67,7 +68,16 @@ func TestPriorityClassesOrderControlPlaneAboveSandboxAboveCI(t *testing.T) {
 		if desc, _ := d["description"].(string); desc == "" {
 			t.Errorf("%v has no description", at(t, d, "metadata", "name"))
 		}
-		got[at(t, d, "metadata", "name").(string)] = d["value"].(int)
+		name := at(t, d, "metadata", "name").(string)
+		got[name] = d["value"].(int)
+		if l, ok := at(t, d, "metadata").(map[string]any)["labels"].(map[string]any); ok {
+			labels[name] = l
+		}
+	}
+	// The gateway admits a PriorityClass a sandbox create names only with its
+	// approval label (resourceAdmission); gt-sandbox is the one sandboxes name.
+	if got := labels["gt-sandbox"]["openshell.ai/sandbox-attachable"]; got != "true" {
+		t.Errorf("gt-sandbox label openshell.ai/sandbox-attachable = %v, want \"true\"", got)
 	}
 	want := map[string]int{"gt-control-plane": 1000000, "gt-sandbox": 1000, "gt-ci": 100}
 	if len(got) != len(want) {
