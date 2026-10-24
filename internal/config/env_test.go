@@ -84,6 +84,44 @@ func TestAgentEnv_PolecatGOFLAGSCap(t *testing.T) {
 	}
 }
 
+// The agent env's GOFLAGS is the operator's say for the seat: it replaces the
+// spawning environment's value, and one that names -p is not capped again. A
+// session backend applies this map after the agent preset env, so a cap that
+// ignored it would silently replace the agent's own -p.
+func TestAgentEnv_PolecatGOFLAGSAgentEnv(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		process string
+		agent   string
+		want    string
+	}{
+		{"neither names -p", "", "", "-p=8"},
+		{"the process env names -p only", "-p=6", "", "-p=6"},
+		{"the agent env names -p only", "", "-p=4", "-p=4"},
+		{"both name -p: the agent env wins", "-p=6", "-p=4", "-p=4"},
+		{"agent flags without -p keep their flags and gain the cap", "", "-mod=mod", "-mod=mod -p=8"},
+		{"agent flags without -p replace the process flags", "-count=1", "-mod=mod", "-mod=mod -p=8"},
+		{"a blank agent value falls back to the process env", "-p=6", "  ", "-p=6"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			process := tt.process
+			env := AgentEnv(AgentEnvConfig{
+				Role:         "polecat",
+				Rig:          "myrig",
+				AgentName:    "Toast",
+				TownRoot:     "/town",
+				AgentGOFLAGS: tt.agent,
+				Getenv:       func(string) string { return process },
+			})
+			assertEnv(t, env, "GOFLAGS", tt.want)
+		})
+	}
+}
+
 // The cap is the seat's alone: the landing worker's merged-tree gate runs
 // `make gate` from the daemon's own environment (land.Gate), which AgentEnv
 // never builds, so no other role may pick up a GOFLAGS the cap would add —

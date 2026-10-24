@@ -427,6 +427,26 @@ func TestPolecatCommandFormat(t *testing.T) {
 // when the polecat's cwd is deleted, gt done uses these to determine
 // the branch and path without a working directory.
 // Regression test for PR #1402.
+func TestPolecatAgentEnvConfigCarriesTheAgentGOFLAGS(t *testing.T) {
+	t.Parallel()
+
+	rc := &config.RuntimeConfig{Env: map[string]string{"GOFLAGS": "-p=4", "OTHER": "x"}}
+	cfg := polecatAgentEnvConfig("myrig", "Toast", "/town", "gt-Toast", SessionStartOptions{Agent: "a"}, rc)
+	if cfg.AgentGOFLAGS != "-p=4" {
+		t.Errorf("AgentGOFLAGS = %q, want -p=4 from the agent env", cfg.AgentGOFLAGS)
+	}
+	if cfg.Role != "polecat" || cfg.Rig != "myrig" || cfg.AgentName != "Toast" || cfg.SessionName != "gt-Toast" || cfg.Agent != "a" {
+		t.Errorf("config lost its identity fields: %+v", cfg)
+	}
+	env := config.AgentEnv(cfg)
+	if got := env["GOFLAGS"]; got != "-p=4" {
+		t.Errorf("session GOFLAGS = %q, want -p=4 (the agent env's cap, not the default 8)", got)
+	}
+	if got := polecatAgentEnvConfig("r", "p", "/t", "s", SessionStartOptions{}, nil).AgentGOFLAGS; got != "" {
+		t.Errorf("a nil runtime config gave AgentGOFLAGS %q, want empty", got)
+	}
+}
+
 func TestPolecatStartInjectsFallbackEnvVars(t *testing.T) {
 	t.Parallel()
 	rigName := "gastown"

@@ -120,6 +120,14 @@ type AgentEnvConfig struct {
 	// Set as the GT_SESSION env var.
 	SessionName string
 
+	// AgentGOFLAGS is the GOFLAGS the resolved agent's own env block sets
+	// (settings/config.json agents.<name>.env), empty when it sets none. A
+	// value here is the operator's say for this seat and replaces the spawning
+	// environment's GOFLAGS: the startup command applies the agent's env, but a
+	// session backend's EnvOverride is applied after it, so a cap computed
+	// without this value would silently replace the agent's own -p.
+	AgentGOFLAGS string
+
 	// Getenv reads the environment the agent's variables are resolved from
 	// (Dolt endpoint, cost tier, passthrough credentials). Nil
 	// reads the process environment.
@@ -156,9 +164,14 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		// contention leading to Dolt read-only mode (gt-5cc2p).
 		env["BD_DOLT_AUTO_COMMIT"] = "off"
 		// Give this seat's go commands a share of the host (gt-5lyns). The
-		// value comes from the spawning environment, so an operator's GOFLAGS
-		// survives and one that already caps -p is left alone.
-		env["GOFLAGS"] = seatEnvGOFLAGS(getenv("GOFLAGS"))
+		// operator's GOFLAGS survives and one that already caps -p is left
+		// alone: the agent env's value when it sets one, else the spawning
+		// environment's.
+		operatorGOFLAGS := getenv("GOFLAGS")
+		if strings.TrimSpace(cfg.AgentGOFLAGS) != "" {
+			operatorGOFLAGS = cfg.AgentGOFLAGS
+		}
+		env["GOFLAGS"] = seatEnvGOFLAGS(operatorGOFLAGS)
 
 	case constants.RoleCrew:
 		env["GT_ROLE"] = fmt.Sprintf("%s/crew/%s", cfg.Rig, cfg.AgentName)

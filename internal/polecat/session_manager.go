@@ -156,6 +156,26 @@ func NewSessionManager(t *tmux.Tmux, r *rig.Rig, prefixes *session.PrefixRegistr
 	return m
 }
 
+// polecatAgentEnvConfig is the AgentEnv input for a polecat's session. The
+// resolved agent's own GOFLAGS rides along so the seat's -p cap follows what
+// the agent env says instead of replacing it (a session backend applies this
+// map after the agent preset env).
+func polecatAgentEnvConfig(rig, polecat, townRoot, sessionID string, opts SessionStartOptions, rc *config.RuntimeConfig) config.AgentEnvConfig {
+	cfg := config.AgentEnvConfig{
+		Role:             "polecat",
+		Rig:              rig,
+		AgentName:        polecat,
+		TownRoot:         townRoot,
+		RuntimeConfigDir: opts.RuntimeConfigDir,
+		Agent:            opts.Agent,
+		SessionName:      sessionID,
+	}
+	if rc != nil {
+		cfg.AgentGOFLAGS = rc.Env["GOFLAGS"]
+	}
+	return cfg
+}
+
 // SessionStartOptions configures polecat session startup.
 type SessionStartOptions struct {
 	// WorkDir overrides the default working directory (polecat clone dir).
@@ -666,15 +686,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		}
 		polecatGitBranch = branch
 	}
-	envVars := config.AgentEnv(config.AgentEnvConfig{
-		Role:             "polecat",
-		Rig:              m.rig.Name,
-		AgentName:        polecat,
-		TownRoot:         townRoot,
-		RuntimeConfigDir: opts.RuntimeConfigDir,
-		Agent:            opts.Agent,
-		SessionName:      sessionID,
-	})
+	envVars := config.AgentEnv(polecatAgentEnvConfig(m.rig.Name, polecat, townRoot, sessionID, opts, runtimeConfig))
 	// AgentEnv already sets GT_ROLE, GT_RIG, GT_POLECAT, BD_ACTOR,
 	// BD_DOLT_AUTO_COMMIT, etc. Layer in polecat-session-specific vars.
 	envVars["GT_POLECAT_PATH"] = workDir
