@@ -89,13 +89,18 @@ town_gateway_registered() {
 # town_active_gateway names the gateway the town config has selected: the
 # active_gateway file when the CLI wrote one, otherwise the list's starred row.
 # The star counts only in the row's first field, so a `*` in a URL or a status
-# is not read as a gateway name. Empty means the list names no active gateway.
+# is not read as a gateway name. Status 0 with no output means the config names
+# no active gateway; a probe that cannot read the config returns 1, so a caller
+# never reads a broken config as "none" (gt-24122).
 town_active_gateway() {
-  local file="$TOWN_CONFIG/active_gateway"
+  local file="$TOWN_CONFIG/active_gateway" list
   if [ -s "$file" ]; then
-    tr -d '[:space:]' <"$file"
+    tr -d '[:space:]' <"$file" || return 1
     return 0
   fi
-  town_openshell gateway list 2>/dev/null |
-    awk '$1 == "*" && NF > 1 { print $2; exit }' || true
+  list="$(town_openshell gateway list)" || {
+    warn "cannot read the gateway list in $TOWN_CONFIG"
+    return 1
+  }
+  awk '$1 == "*" && NF > 1 { print $2; exit }' <<<"$list"
 }
