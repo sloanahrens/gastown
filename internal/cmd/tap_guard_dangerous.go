@@ -954,7 +954,9 @@ func (w *heredocQuoteWalk) skipTo(to int) {
 // escapes, quotes and comments, so the body is found by the same rules (gt-f1kny,
 // gt-jnomk).
 func heredocLineEnd(command string, from int) int {
-	var quote byte // the open quote mark, or 0 outside quotes
+	// The open quote mark, or 0 outside quotes. '$' is a $'...' (ANSI-C)
+	// string, in which a backslash escapes the quote (gt-s3pi5).
+	var quote byte
 	comment := false
 	wordStart := false // the byte before i is an unquoted, unescaped word break
 	for i := from; i < len(command); i++ {
@@ -970,12 +972,19 @@ func heredocLineEnd(command string, from int) int {
 			}
 		case c == '\\':
 			i++ // the byte after a backslash is literal, a newline included
+		case quote == '$':
+			if c == '\'' {
+				quote = 0
+			}
 		case quote == '"':
 			if c == '"' {
 				quote = 0
 			}
 		case c == '\n':
 			return i
+		case c == '$' && i+1 < len(command) && command[i+1] == '\'':
+			quote = '$'
+			i++
 		case c == '\'' || c == '"':
 			quote = c
 		case c == '#' && wordStart:
