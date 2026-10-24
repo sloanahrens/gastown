@@ -1239,10 +1239,7 @@ func sandboxSecretsANSICHereStrings(command string) map[string]bool {
 			i = op + len("<<<")
 			continue
 		}
-		word := op + len("<<<")
-		for word < len(command) && (command[word] == ' ' || command[word] == '\t') {
-			word++
-		}
+		word := skipHereStringGap(command, op+len("<<<"))
 		if word >= len(command) || command[word] != '$' {
 			i = op + len("<<<")
 			continue
@@ -1266,6 +1263,22 @@ func sandboxSecretsANSICHereStrings(command string) map[string]bool {
 			texts[words[0]] = true
 		}
 		i = close + 1
+	}
+}
+
+// skipHereStringGap returns the index of the here-string word after the "<<<"
+// that ends at i. bash deletes a backslash-newline wherever it sits in that gap,
+// as it does between the blanks, so both are stepped over, in any mix.
+func skipHereStringGap(command string, i int) int {
+	for {
+		next := skipLineContinuationBytes(command, i)
+		for next < len(command) && (command[next] == ' ' || command[next] == '\t') {
+			next++
+		}
+		if next == i {
+			return i
+		}
+		i = next
 	}
 }
 
