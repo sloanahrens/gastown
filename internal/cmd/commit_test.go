@@ -1,76 +1,52 @@
 package cmd
 
 import (
+	"errors"
 	"slices"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
 )
 
-func TestIdentityToEmail(t *testing.T) {
+func TestSeatForCommit(t *testing.T) {
 	t.Parallel()
+	errUnset := errors.New("exit status 1")
 	tests := []struct {
-		name     string
-		identity string
-		domain   string
-		want     string
+		name          string
+		identity      string
+		worktreeEmail string
+		emailErr      error
+		want          git.SeatIdentity
+		wantErr       bool
 	}{
 		{
-			name:     "crew member",
-			identity: "gastown/crew/jack",
-			domain:   "gastown.local",
-			want:     "gastown.crew.jack@gastown.local",
+			name:          "worktree email names the seat",
+			identity:      "gastown/polecats/coma",
+			worktreeEmail: "seat@test.com",
+			want:          git.SeatIdentity{Name: "coma", Email: "seat@test.com"},
 		},
 		{
-			name:     "polecat",
-			identity: "gastown/polecats/max",
-			domain:   "gastown.local",
-			want:     "gastown.polecats.max@gastown.local",
+			name:     "unset email is refused",
+			identity: "gastown/polecats/coma",
+			emailErr: errUnset,
+			wantErr:  true,
 		},
 		{
-			name:     "witness",
-			identity: "gastown/witness",
-			domain:   "gastown.local",
-			want:     "gastown.witness@gastown.local",
-		},
-		{
-			name:     "refinery",
-			identity: "gastown/refinery",
-			domain:   "gastown.local",
-			want:     "gastown.refinery@gastown.local",
-		},
-		{
-			name:     "mayor with trailing slash",
-			identity: "mayor/",
-			domain:   "gastown.local",
-			want:     "mayor@gastown.local",
-		},
-		{
-			name:     "deacon with trailing slash",
-			identity: "deacon/",
-			domain:   "gastown.local",
-			want:     "deacon@gastown.local",
-		},
-		{
-			name:     "custom domain",
-			identity: "myrig/crew/alice",
-			domain:   "example.com",
-			want:     "myrig.crew.alice@example.com",
-		},
-		{
-			name:     "deeply nested",
-			identity: "rig/polecats/nested/deep",
-			domain:   "test.io",
-			want:     "rig.polecats.nested.deep@test.io",
+			name:          "empty email is refused",
+			identity:      "gastown/polecats/coma",
+			worktreeEmail: "  ",
+			wantErr:       true,
 		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := identityToEmail(tt.identity, tt.domain)
+			t.Parallel()
+			got, err := seatForCommit(tt.identity, tt.worktreeEmail, tt.emailErr)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("seatForCommit error = %v, wantErr %v", err, tt.wantErr)
+			}
 			if got != tt.want {
-				t.Errorf("identityToEmail(%q, %q) = %q, want %q",
-					tt.identity, tt.domain, got, tt.want)
+				t.Errorf("seatForCommit = %+v, want %+v", got, tt.want)
 			}
 		})
 	}

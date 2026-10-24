@@ -2,15 +2,13 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
-	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // DefaultAgentEmailDomain is the default domain for agent git emails.
@@ -27,8 +25,8 @@ When run by an agent (GT_ROLE set), this command:
    its worktree resolves
 3. Runs 'git commit' with the correct identity
 
-A worktree that resolves no user.email falls back to the agent's address at
-the town's agent_email_domain (default: gastown.local).
+A worktree whose user.email is unset or unreadable is refused: the commit is not
+made, because gt done's rework lease could not match an author it did not write.
 
 Examples:
   gt commit -m "Fix bug"              # Commit as current agent
@@ -69,47 +67,28 @@ func runCommit(cmd *cobra.Command, args []string) error {
 	// The worktree's own user.email is what a plain `git commit` here authors
 	// with, so it is the half of the seat identity gt done's lease compares
 	// (gt-tip6u).
-	worktreeEmail, err := git.NewGit(cwd).AuthorEmail()
+	worktreeEmail, emailErr := git.NewGit(cwd).AuthorEmail()
+	seat, err := seatForCommit(identity, worktreeEmail, emailErr)
 	if err != nil {
-		worktreeEmail = ""
-		if !authorEmailUnset(err) {
-			// Unset is the fallback below; any other failure means the worktree
-			// could not be read, so say so instead of quietly authoring as the
-			// fallback.
-			style.PrintWarning("could not read the worktree's user.email (%v); authoring with the fallback address", err)
-		}
-	}
-	seat := git.SeatIdentityFor(identity, worktreeEmail)
-	if seat.Email == "" {
-		// Nothing in the worktree names an address, so keep the agent's own
-		// rather than author with none. gt done reads the same worktree email
-		// for its rework lease and gets none, so the lease stays off and this
-		// author is not matched against it.
-		seat.Email = identityToEmail(identity, agentEmailDomain())
-		style.PrintWarning("worktree has no user.email; authoring as %s, which gt done's rework lease cannot match", seat.Email)
+		return err
 	}
 	return runGitCommit(args, seat)
 }
 
-// authorEmailUnset reports whether err is git config saying user.email is not
-// set (exit status 1), as opposed to the worktree failing to be read.
-func authorEmailUnset(err error) bool {
-	var exitErr *exec.ExitError
-	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
-}
-
-// agentEmailDomain returns the town's agent_email_domain, or the default when
-// no town settings are reachable.
-func agentEmailDomain() string {
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil || townRoot == "" {
-		return DefaultAgentEmailDomain
+// seatForCommit returns the identity an agent's commit is authored as. The
+// email is the worktree's user.email, the address gt done's rework lease reads.
+// An unset or unreadable user.email is an error and not a fallback: an author
+// written under an address the lease cannot match is refused as divergence,
+// so the commit waits until the worktree names one.
+func seatForCommit(identity, worktreeEmail string, emailErr error) (git.SeatIdentity, error) {
+	if emailErr != nil {
+		return git.SeatIdentity{}, fmt.Errorf("gt commit: the worktree's user.email cannot be read (%w); set it with git config user.email, or gt done's rework lease cannot match this seat's commits", emailErr)
 	}
-	settings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
-	if err != nil || settings.AgentEmailDomain == "" {
-		return DefaultAgentEmailDomain
+	seat := git.SeatIdentityFor(identity, worktreeEmail)
+	if seat.Email == "" {
+		return git.SeatIdentity{}, errors.New("gt commit: the worktree's user.email is empty; set it with git config user.email, or gt done's rework lease cannot match this seat's commits")
 	}
-	return settings.AgentEmailDomain
+	return seat, nil
 }
 
 // commitIdentity returns the agent identity to author a commit as, or "" when
@@ -127,19 +106,6 @@ func commitIdentity(getenv func(string) string, cwd string) string {
 		return ""
 	}
 	return identity
-}
-
-// identityToEmail converts a Gas Town identity to a git email address.
-// "gastown/crew/jack" → "gastown.crew.jack@domain"
-// "deacon/" → "deacon@domain"
-func identityToEmail(identity, domain string) string {
-	// Remove trailing slash if present
-	identity = strings.TrimSuffix(identity, "/")
-
-	// Replace slashes with dots for email local part
-	localPart := strings.ReplaceAll(identity, "/", ".")
-
-	return localPart + "@" + domain
 }
 
 // runGitCommit executes git commit authored as seat. A zero seat runs plain

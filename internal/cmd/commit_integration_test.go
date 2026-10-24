@@ -57,37 +57,38 @@ func TestIntegrationGtCommitAuthorMatchesSeatIdentity(t *testing.T) {
 	}
 }
 
-// TestIntegrationAuthorEmailUnsetIsNotAnError pins which AuthorEmail failures
-// gt commit treats as "no email set" (the fallback path) and which it reports:
-// git config exits 1 when user.email is unset and 128 when the config cannot
-// be read, and only the first is the fallback.
-func TestIntegrationAuthorEmailUnsetIsNotAnError(t *testing.T) {
+// TestIntegrationGtCommitRefusesUnsetAuthorEmail pins that an agent's commit in
+// a worktree with no user.email is refused and made nowhere: gt commit used to
+// author it under the agent's fallback address, which gt done's rework lease
+// could not match (gt-tip6u). The host's global and system config are kept out
+// so no email is inherited.
+func TestIntegrationGtCommitRefusesUnsetAuthorEmail(t *testing.T) {
 	dir := t.TempDir()
-	runGit := func(args ...string) {
+	runGit := func(args ...string) string {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
+		out, err := cmd.CombinedOutput()
+		if err != nil {
 			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
+		return string(out)
 	}
 	runGit("init", "-q")
-	// Keep the host's global and system config out of the answer.
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	global := filepath.Join(t.TempDir(), "gitconfig")
-	t.Setenv("GIT_CONFIG_GLOBAL", global)
-
-	if err := os.WriteFile(global, nil, 0o644); err != nil {
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := git.NewGit(dir).AuthorEmail(); !authorEmailUnset(err) {
-		t.Errorf("unset user.email: authorEmailUnset(%v) = false, want true", err)
-	}
+	runGit("add", "f.txt")
 
-	if err := os.WriteFile(global, []byte("[user\n"), 0o644); err != nil {
-		t.Fatal(err)
+	t.Chdir(dir)
+	t.Setenv("GT_ROLE", "gastown/polecats/coma")
+
+	if err := runCommit(commitCmd, []string{"-m", "test: no author email"}); err == nil {
+		t.Fatal("gt commit with no user.email: want an error, got nil")
 	}
-	if _, err := git.NewGit(dir).AuthorEmail(); err == nil || authorEmailUnset(err) {
-		t.Errorf("unreadable config: authorEmailUnset(%v) = true, want false", err)
+	if commits := strings.TrimSpace(runGit("rev-list", "--all")); commits != "" {
+		t.Errorf("gt commit made a commit with no user.email: %s", commits)
 	}
 }
