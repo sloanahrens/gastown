@@ -106,6 +106,11 @@ func TestForeignRemoteCheck_IgnoresRelatedRemote(t *testing.T) {
 func TestForeignRemoteCheck_NoOriginMainIsNotForeign(t *testing.T) {
 	t.Parallel()
 	f, town := foreignTown(t)
+	backup := filepath.Join(filepath.Dir(town), "backup.git")
+	f.InitBare(t, backup)
+	f.SetRef(t, backup, "refs/heads/main", f.Ref(filepath.Join(filepath.Dir(town), "town-origin.git"), "refs/heads/main"))
+	f.Commit(t, backup, "main", "more", map[string]string{"b.txt": "b\n"})
+	fetchRemote(t, f, town, "backup", backup)
 	f.DeleteRef(t, town, "refs/remotes/origin/main")
 	ctx := withGit(&CheckContext{TownRoot: town}, f)
 	check := NewForeignRemoteCheck()
@@ -124,8 +129,8 @@ func TestForeignRemoteCheck_NoOriginMainIsNotForeign(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(remotes) != 2 {
-		t.Errorf("remotes after Fix = %v, want origin and gastown kept", remotes)
+	if len(remotes) != 3 {
+		t.Errorf("remotes after Fix = %v, want origin, gastown and backup kept", remotes)
 	}
 }
 
