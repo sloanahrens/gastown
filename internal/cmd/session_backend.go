@@ -47,6 +47,12 @@ func sessionBackendForAgentWith(resolve backendResolver, ts *config.TownSettings
 				ForgejoHost:      cp.ForgejoHost,
 				CacheVolume:      cp.CacheVolume,
 				Driver:           cp.Driver,
+				NodeSelector:     cp.NodeSelector,
+				Tolerations:      cp.Tolerations,
+				PriorityClass:    cp.PriorityClass,
+				RuntimeClass:     cp.RuntimeClass,
+				Requests:         cp.Requests,
+				Limits:           cp.Limits,
 			}
 		}
 		return resolve(seat.Agent, seat.Backend, p, townRoot, host)

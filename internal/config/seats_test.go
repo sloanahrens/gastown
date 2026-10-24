@@ -462,6 +462,31 @@ func TestSandboxesFromSettingsFile(t *testing.T) {
 		}
 	})
 
+	t.Run("with the kubernetes fields", func(t *testing.T) {
+		t.Parallel()
+		var ts TownSettings
+		err := DecodeJSONFile("settings/config.json", []byte(`{"type":"town-settings","version":1,
+			"sandboxes":{"polecat-default":{"image":"gastown-polecat:dev","policy":"deploy/polecat/policy.yaml",
+				"driver":"kubernetes","node_selector":{"gt.dev/pool":"sandbox"},
+				"tolerations":[{"key":"gt.dev/sandbox","operator":"Equal","value":"true","effect":"NoSchedule"}],
+				"priority_class":"gt-sandbox","runtime_class":"gvisor",
+				"requests":{"cpu":"1","memory":"2Gi"},"limits":{"cpu":"2","memory":"4Gi"}}}}`), &ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := ts.Sandboxes["polecat-default"]
+		if p.NodeSelector["gt.dev/pool"] != "sandbox" || len(p.Tolerations) != 1 ||
+			p.Tolerations[0].Key != "gt.dev/sandbox" || p.Tolerations[0].Effect != "NoSchedule" ||
+			p.PriorityClass != "gt-sandbox" || p.RuntimeClass != "gvisor" ||
+			p.Requests == nil || *p.Requests != (SandboxResources{CPU: "1", Memory: "2Gi"}) ||
+			p.Limits == nil || *p.Limits != (SandboxResources{CPU: "2", Memory: "4Gi"}) {
+			t.Fatalf("profile = %+v", p)
+		}
+		if err := p.Validate("polecat-default"); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	})
+
 	t.Run("unknown profile key", func(t *testing.T) {
 		t.Parallel()
 		var ts TownSettings
@@ -547,6 +572,79 @@ func TestSandboxProfileValidate(t *testing.T) {
 		{"driver in the wrong case", func(p *SandboxProfile) { p.Driver = "Kubernetes" }, `sandboxes.p.driver "Kubernetes": want docker or kubernetes`},
 		{"kubernetes driver with a cache volume", func(p *SandboxProfile) { p.Driver = "kubernetes"; p.CacheVolume = "{rig}-cache" }, `sandboxes.p.cache_volume "{rig}-cache": a kubernetes driver has no docker volumes; remove it`},
 		{"unit without a number memory", func(p *SandboxProfile) { p.Memory = "Gi" }, `sandboxes.p.memory "Gi": want a k8s memory quantity such as "8Gi"`},
+
+		{"kubernetes placement and resources", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.NodeSelector = map[string]string{"gt.dev/pool": "sandbox"}
+			p.Tolerations = []SandboxToleration{{Key: "gt.dev/sandbox", Operator: "Equal", Value: "true", Effect: "NoSchedule"}}
+			p.PriorityClass = "gt-sandbox"
+			p.RuntimeClass = "gvisor"
+			p.Requests = &SandboxResources{CPU: "1", Memory: "2Gi"}
+			p.Limits = &SandboxResources{CPU: "2", Memory: "4Gi"}
+		}, ""},
+		{"requests equal limits", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Requests = &SandboxResources{CPU: "500m", Memory: "2Gi"}
+			p.Limits = &SandboxResources{CPU: "0.5", Memory: "2Gi"}
+		}, ""},
+		{"requests without limits", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Requests = &SandboxResources{CPU: "1"}
+		}, ""},
+		{"limits without requests", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Limits = &SandboxResources{Memory: "4Gi"}
+		}, ""},
+		{"toleration defaults accepted", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Tolerations = []SandboxToleration{{Operator: "Exists", Effect: "NoExecute"}}
+		}, ""},
+		{"docker profile with a node selector", func(p *SandboxProfile) { p.NodeSelector = map[string]string{"gt.dev/pool": "sandbox"} }, `sandboxes.p.node_selector: only a kubernetes driver sends pod placement and resources; remove it or set driver to kubernetes`},
+		{"docker profile with tolerations", func(p *SandboxProfile) {
+			p.Tolerations = []SandboxToleration{{Key: "gt.dev/sandbox", Operator: "Exists", Effect: "NoSchedule"}}
+		}, `sandboxes.p.tolerations: only a kubernetes driver sends pod placement and resources; remove it or set driver to kubernetes`},
+		{"docker profile with a priority class", func(p *SandboxProfile) { p.PriorityClass = "gt-sandbox" }, `sandboxes.p.priority_class: only a kubernetes driver sends pod placement and resources; remove it or set driver to kubernetes`},
+		{"docker profile with a runtime class", func(p *SandboxProfile) { p.RuntimeClass = "gvisor" }, `sandboxes.p.runtime_class: only a kubernetes driver sends pod placement and resources; remove it or set driver to kubernetes`},
+		{"docker profile with requests", func(p *SandboxProfile) { p.Requests = &SandboxResources{CPU: "1"} }, `sandboxes.p.requests: only a kubernetes driver sends pod placement and resources; remove it or set driver to kubernetes`},
+		{"docker profile with limits", func(p *SandboxProfile) { p.Limits = &SandboxResources{Memory: "2Gi"} }, `sandboxes.p.limits: only a kubernetes driver sends pod placement and resources; remove it or set driver to kubernetes`},
+		{"empty selector key", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.NodeSelector = map[string]string{"": "sandbox"}
+		}, `sandboxes.p.node_selector: empty selector key`},
+		{"empty selector value", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.NodeSelector = map[string]string{"gt.dev/pool": " "}
+		}, `sandboxes.p.node_selector["gt.dev/pool"]: empty selector value`},
+		{"toleration effect outside the three", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Tolerations = []SandboxToleration{{Key: "k", Operator: "Exists", Effect: "NoSchedule!"}}
+		}, `sandboxes.p.tolerations[0].effect "NoSchedule!": want NoSchedule, PreferNoSchedule or NoExecute`},
+		{"toleration operator outside the two", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Tolerations = []SandboxToleration{{Key: "k", Operator: "In", Value: "v", Effect: "NoSchedule"}}
+		}, `sandboxes.p.tolerations[0].operator "In": want Equal or Exists`},
+		{"bad requests cpu", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Requests = &SandboxResources{CPU: "lots"}
+		}, `sandboxes.p.requests.cpu "lots": want a k8s CPU quantity such as "4" or "500m"`},
+		{"bad requests memory", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Requests = &SandboxResources{Memory: "8 GB"}
+		}, `sandboxes.p.requests.memory "8 GB": want a k8s memory quantity such as "8Gi"`},
+		{"bad limits cpu", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Limits = &SandboxResources{CPU: "m"}
+		}, `sandboxes.p.limits.cpu "m": want a k8s CPU quantity such as "4" or "500m"`},
+		{"requests cpu above limits", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Requests = &SandboxResources{CPU: "2"}
+			p.Limits = &SandboxResources{CPU: "1500m"}
+		}, `sandboxes.p.requests.cpu "2": want no more than limits.cpu "1500m"`},
+		{"requests memory above limits", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Requests = &SandboxResources{Memory: "4Gi"}
+			p.Limits = &SandboxResources{Memory: "2Gi"}
+		}, `sandboxes.p.requests.memory "4Gi": want no more than limits.memory "2Gi"`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

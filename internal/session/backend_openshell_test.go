@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/sandbox"
 )
 
@@ -784,6 +785,81 @@ func TestOpenShellKubernetesProfileDoesNoDockerVolumeWork(t *testing.T) {
 	}
 	if cs.DriverConfigJSON != "" {
 		t.Fatalf("DriverConfigJSON = %s, want none for a kubernetes profile", cs.DriverConfigJSON)
+	}
+}
+
+// A kubernetes profile's placement and resources reach the create call as
+// driver config, nested as the gateway's KubernetesPodDriverConfig reads it:
+// node selector, tolerations, priority and runtime class under pod, requests
+// and limits under containers.agent.resources.
+func TestOpenShellKubernetesDriverConfig(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	p := Profile{
+		Name:          "polecat-default",
+		Image:         "img",
+		Policy:        openshellTestProfile.Policy,
+		Driver:        DriverKubernetes,
+		NodeSelector:  map[string]string{"gt.dev/pool": "sandbox"},
+		Tolerations:   []config.SandboxToleration{{Key: "gt.dev/sandbox", Operator: "Equal", Value: "true", Effect: "NoSchedule"}},
+		PriorityClass: "gt-sandbox",
+		RuntimeClass:  "gvisor",
+		Requests:      &config.SandboxResources{CPU: "1", Memory: "2Gi"},
+		Limits:        &config.SandboxResources{CPU: "2", Memory: "4Gi"},
+	}
+	b, _ := openshellTestBackend(town, p, &sandbox.Fake{})
+
+	cs, err := b.createSpec(openshellSpawn(town, work))
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	want := `{"kubernetes":{"containers":{"agent":{"resources":{"limits":{"cpu":"2","memory":"4Gi"},"requests":{"cpu":"1","memory":"2Gi"}}}},"pod":{"node_selector":{"gt.dev/pool":"sandbox"},"priority_class_name":"gt-sandbox","runtime_class_name":"gvisor","tolerations":[{"key":"gt.dev/sandbox","operator":"Equal","value":"true","effect":"NoSchedule"}]}}}`
+	if cs.DriverConfigJSON != want {
+		t.Fatalf("DriverConfigJSON = %s, want %s", cs.DriverConfigJSON, want)
+	}
+}
+
+// A kubernetes profile sends only the sections it sets: a node selector alone
+// is the one-key pod the gateway's CLI help shows, and resources alone carry
+// no empty pod object.
+func TestOpenShellKubernetesDriverConfigSendsOnlyWhatIsSet(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name   string
+		mutate func(*Profile)
+		want   string
+	}{
+		{
+			name:   "node selector alone",
+			mutate: func(p *Profile) { p.NodeSelector = map[string]string{"gt.dev/pool": "sandbox"} },
+			want:   `{"kubernetes":{"pod":{"node_selector":{"gt.dev/pool":"sandbox"}}}}`,
+		},
+		{
+			name:   "limits alone",
+			mutate: func(p *Profile) { p.Limits = &config.SandboxResources{Memory: "4Gi"} },
+			want:   `{"kubernetes":{"containers":{"agent":{"resources":{"limits":{"memory":"4Gi"}}}}}}`,
+		},
+		{
+			name:   "empty resources are not sent",
+			mutate: func(p *Profile) { p.Requests = &config.SandboxResources{} },
+			want:   "",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town, work := openshellTown(t)
+			p := Profile{Name: "polecat-default", Image: "img", Policy: openshellTestProfile.Policy, Driver: DriverKubernetes}
+			c.mutate(&p)
+			b, _ := openshellTestBackend(town, p, &sandbox.Fake{})
+
+			cs, err := b.createSpec(openshellSpawn(town, work))
+			if err != nil {
+				t.Fatalf("createSpec: %v", err)
+			}
+			if cs.DriverConfigJSON != c.want {
+				t.Fatalf("DriverConfigJSON = %s, want %q", cs.DriverConfigJSON, c.want)
+			}
+		})
 	}
 }
 
