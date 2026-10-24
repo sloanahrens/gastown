@@ -81,6 +81,12 @@ RUN bash /usr/local/lib/gastown/go-floor.sh check "$GO_FLOOR"
 
 # GNU Make 4.4.1 ahead of /usr/bin/make on PATH (see the make-build stage).
 COPY --from=make-build /usr/local/bin/make /usr/local/bin/make
+# The same binary as /usr/bin/make too: a process with a restricted PATH (the
+# devops host-rehearsal fixture builds with PATH=/usr/bin:/bin:/usr/sbin:/sbin)
+# otherwise finds Ubuntu's 4.3, which fails in a sandbox (gt-r1rd5).
+RUN ln -sf /usr/local/bin/make /usr/bin/make \
+    && /usr/bin/make --version | head -1 | grep -q 'GNU Make 4.4.1' \
+    && /bin/make --version | head -1 | grep -q 'GNU Make 4.4.1'
 
 # golangci-lint at the version the gastown Makefile pins (GOLANGCI_LINT_VERSION);
 # make lint refuses to run without it, and gt done runs make presubmit. The Go
