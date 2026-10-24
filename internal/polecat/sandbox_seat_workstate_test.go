@@ -192,3 +192,69 @@ func TestNewSandboxSeatProbeReadsSettingsOnce(t *testing.T) {
 		t.Error("the second question reread the settings instead of the first read")
 	}
 }
+
+// A gone sandbox reads clean on git alone, so the work the seat still holds is
+// caught by the checks that never needed the host clone: a bead still hooked on
+// the seat blocks reuse and nuke whatever the gateway says, and only a hook
+// that names finished work lets the seat go (gt-qq6rg.1; whether a closed
+// bead's work reached origin is the recovery verdict's question).
+func TestGoneSandboxSeatIsHeldByItsHookBead(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name       string
+		status     string
+		wantReuse  bool
+		wantBlocks string
+	}{
+		{"hooked_bead_blocks", string(beads.IssueStatusHooked), false, "gt-work"},
+		{"closed_bead_releases", string(beads.StatusClosed), true, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mgr, _, bd, added, _ := canonicalWithPolecats(t, true, "toast")
+			p := added["toast"]
+			if _, err := bd.Fake.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
+				t.Fatal(err)
+			}
+			if err := bd.Fake.Update("gt-work", beads.UpdateOptions{Status: &tt.status}); err != nil {
+				t.Fatal(err)
+			}
+			bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) {
+				f.Agent = "deepseek-flash-sandbox"
+				f.Branch = p.Branch
+				f.HookBead = "gt-work"
+			})
+			mgr.sandboxSeat = func(string, string) (LiveGitState, bool) {
+				return SandboxSeatGitState("", false, nil, "sb"), true
+			}
+
+			d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
+
+			if d.Reusable != tt.wantReuse || d.SafeToNuke != tt.wantReuse {
+				t.Errorf("reusable=%v safe=%v, want %v (reason=%s blockers=%v)", d.Reusable, d.SafeToNuke, tt.wantReuse, d.Reason, d.Blockers)
+			}
+			if !strings.Contains(strings.Join(d.Blockers, "\n"), tt.wantBlocks) {
+				t.Errorf("blockers = %v, want one naming %q", d.Blockers, tt.wantBlocks)
+			}
+		})
+	}
+}
+
+// With no probe injected the Manager builds the production probe from its town
+// root: settings that cannot be read leave a recorded agent unknown, never a
+// host seat, so the default path is closed as well as the injected one.
+func TestManagerDefaultSandboxSeatProbeFailsClosed(t *testing.T) {
+	t.Parallel()
+	mgr, _, bd, _, _ := canonicalWithPolecats(t, true, "toast")
+	mgr.townRoot = writeTownSettings(t, `{not json`)
+	bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) { f.Agent = "deepseek-flash-sandbox" })
+
+	d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
+
+	if d.GitStateSource != GitStateSourceUnknown || !strings.Contains(d.GitStateReason, "deepseek-flash-sandbox") {
+		t.Errorf("git state = %q %q, want unknown naming the agent", d.GitStateSource, d.GitStateReason)
+	}
+	if d.Reusable || d.SafeToNuke {
+		t.Errorf("reusable=%v safe=%v with seat settings unreadable", d.Reusable, d.SafeToNuke)
+	}
+}

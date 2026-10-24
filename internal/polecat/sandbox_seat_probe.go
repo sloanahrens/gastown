@@ -29,8 +29,10 @@ type SandboxSeatProbe func(agent, sessionName string) (state LiveGitState, ok bo
 // seat's measured worktree, which for a sandbox seat is the stale leftover this
 // probe exists to avoid. The daemon's GitState fails closed the same way.
 //
-// The sandbox is named for the seat's session, as the daemon's GitState and the
-// reaper name it.
+// A seat is found by agent name alone because polecat_pool.seats is keyed by
+// agent (config.Seats yields one seat per agent), so the recorded agent names
+// exactly one seat. The sandbox is named for the seat's session, as the
+// daemon's GitState and the reaper name it.
 func NewSandboxSeatProbe(townRoot string, exists func(gateway, name string) (bool, error)) SandboxSeatProbe {
 	if exists == nil {
 		exists = func(gateway, name string) (bool, error) {
