@@ -311,46 +311,7 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 
 	c.unconfiguredClones = nil
 
-	// Check all clone locations
-	clonePaths := []string{
-		filepath.Join(rigPath, "mayor", "rig"),
-	}
-
-	// Add crew clones
-	crewDir := filepath.Join(rigPath, "crew")
-	if entries, err := os.ReadDir(crewDir); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				clonePaths = append(clonePaths, filepath.Join(crewDir, entry.Name()))
-			}
-		}
-	}
-
-	// Add polecat clones. A polecat worktree is nested at
-	// polecats/<name>/<rigname>/; the flat polecats/<name>/ layout predates
-	// that nesting. Only a nested .git proves the worktree, so a failed stat
-	// for any reason falls back to the flat path, which the .git check below
-	// judges.
-	polecatDir := filepath.Join(rigPath, "polecats")
-	if entries, err := os.ReadDir(polecatDir); err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			clonePath := filepath.Join(polecatDir, entry.Name(), ctx.RigName)
-			if _, err := os.Stat(filepath.Join(clonePath, ".git")); err != nil {
-				clonePath = filepath.Join(polecatDir, entry.Name())
-			}
-			clonePaths = append(clonePaths, clonePath)
-		}
-	}
-
-	for _, clonePath := range clonePaths {
-		// Skip if not a git repo
-		if _, err := os.Stat(filepath.Join(clonePath, ".git")); os.IsNotExist(err) {
-			continue
-		}
-
+	for _, clonePath := range rigCloneDirs(rigPath, ctx.RigName) {
 		// Skip if no .githooks directory exists
 		if _, err := os.Stat(filepath.Join(clonePath, ".githooks")); os.IsNotExist(err) {
 			continue
