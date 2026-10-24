@@ -622,7 +622,7 @@ func cacheVolumeName(volume, rig string) string {
 	return strings.ReplaceAll(volume, "{rig}", rig)
 }
 
-// ensureCacheVolume creates volume when docker does not have it, labelled the
+// ensureCacheVolume creates volume when docker does not have it, labeled the
 // way the gateway attaches it: the same `docker volume create` that
 // scripts/polecat-caches.sh runs, so a new rig needs no onboarding step. An
 // existing volume is left alone. A volume that cannot be made is ErrCacheVolume.
