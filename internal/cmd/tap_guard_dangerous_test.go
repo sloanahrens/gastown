@@ -496,6 +496,12 @@ func TestMatchesPackageInstall(t *testing.T) {
 		// text-only mention are not an install invocation.
 		{"cross-segment apt/install", "grep -n apt README.md; grep -n install Makefile", false},
 		{"echo apt install", "echo apt install foo", false},
+		// gt-bdct5: an assignment's substitution must not hide the package
+		// manager behind it, whether the value is a backtick substitution, a
+		// quoted ")" or a ";" inside the substitution.
+		{"install behind a backtick substitution", "y=`echo a` apt-get install foo", true},
+		{"install behind a quoted paren in a substitution", `y=$(echo ")" ) apt-get install foo`, true},
+		{"install behind a semicolon in a substitution", "y=$(echo a; echo b) apt-get install foo", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1871,6 +1877,8 @@ func TestShellFedHeredocBodyIsInspected(t *testing.T) {
 		// An assignment whose value holds a substitution runs that substitution
 		// first, and the shell that follows it still reads the body.
 		{"shell-fed body behind an assignment with a substitution", "y=$(echo a) bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
+		// The same holds when the substitution is a backtick one (gt-bdct5).
+		{"shell-fed body behind an assignment with a backtick substitution", "y=`echo a` bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
 		// A brace group puts a second opener between the launcher or assignment
 		// and the shell, so the command word lies behind both of them.
 		{"shell-fed body behind a brace group after a launcher", "time { bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n}"},
