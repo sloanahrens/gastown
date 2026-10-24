@@ -157,6 +157,12 @@ func IsSecretKey(key string) bool {
 	return false
 }
 
+// SecretKeyMarkers returns the markers IsSecretKey matches, in order. A caller that must
+// agree with IsSecretKey reads them here instead of keeping its own copy.
+func SecretKeyMarkers() []string {
+	return append([]string(nil), secretKeyMarkers...)
+}
+
 // SpawnEnv is an agent's env block resolved for a startup command.
 type SpawnEnv struct {
 	// Inline holds the values that go into the command as KEY=value.
