@@ -143,6 +143,11 @@ func LooksLikeSecret(key, value string) bool {
 			return true
 		}
 	}
+	return IsSecretKey(key)
+}
+
+// IsSecretKey reports whether an env key names a credential by containing one of secretKeyMarkers.
+func IsSecretKey(key string) bool {
 	k := strings.ToUpper(key)
 	for _, m := range secretKeyMarkers {
 		if strings.Contains(k, m) {

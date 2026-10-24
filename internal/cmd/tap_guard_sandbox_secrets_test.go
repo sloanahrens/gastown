@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // sandboxSecretsBrokenReader is a hook payload that cannot be read.
@@ -77,6 +79,9 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"echo $DB_PASSWORD",
 		"echo $MY_SECRET",
 		"echo $FORGEJO_CREDENTIALS",
+		"echo $GPG_PASSPHRASE",
+		"echo $GITHUBTOKEN",
+		"echo $CACHE_KEY",
 		"cat ~/.claude.json",
 		"cat /sandbox/.claude.json",
 		"jq . /sandbox/.claude.json",
@@ -209,6 +214,26 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		}
 		if !strings.Contains(out, "placeholders") {
 			t.Errorf("block message for %q does not explain the placeholder: %q", command, out)
+		}
+	}
+}
+
+// The guard blocks a variable exactly when config.LooksLikeSecret would redact a value
+// set for it, so a credential that config redacts is never readable through the guard.
+// CACHE_KEY is blocked by the guard alone (TestSandboxSecretsGuardBlocks), so it is not
+// in this table.
+func TestSandboxSecretsNameAgreesWithConfig(t *testing.T) {
+	t.Parallel()
+	// Long, prefix-free and no reference: config judges the name alone.
+	const value = "abcdefghijklmnopqrstuvwxyz"
+	for _, name := range []string{
+		"GPG_PASSPHRASE", "GITHUBTOKEN", "FORGEJO_TOKEN", "DB_PASSWORD", "API_KEY",
+		"PRIVATE_KEY", "ACCESS_KEY", "GIT_AUTHOR_NAME", "MONKEY", "GT_ROLE", "HOME",
+	} {
+		want := config.LooksLikeSecret(name, value)
+		blocked, _ := runSandboxSecretsGuard(t, "openshell", "echo $"+name)
+		if blocked != want {
+			t.Errorf("guard blocks $%s = %v, config.LooksLikeSecret = %v", name, blocked, want)
 		}
 	}
 }
