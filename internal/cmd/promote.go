@@ -159,7 +159,7 @@ func promoteRigSHA(deps promoteDeps, rigName, sha string) error {
 	store := deps.State(deps.TownRoot, rigName)
 	st, err := store.Load()
 	if err != nil {
-		return fmt.Errorf("reading rig %s's red-main state: %w", rigName, err)
+		return promoteFailed("reading rig %s's red-main state: %v", rigName, err)
 	}
 	escalate := func(message string) {
 		if deps.Escalate != nil {
@@ -183,11 +183,11 @@ func promoteRigSHA(deps promoteDeps, rigName, sha string) error {
 	// the promotion State, keeping every field a verdict written meanwhile set
 	// (gt-1ohu4).
 	if st, err = store.Load(); err != nil {
-		return fmt.Errorf("re-reading rig %s's red-main state: %w", rigName, err)
+		return promoteFailed("re-reading rig %s's red-main state after the push, which may have landed: %v", rigName, err)
 	}
 	st.State = promoted
 	if err := store.Save(st); err != nil {
-		return fmt.Errorf("recording rig %s's promotion: %w", rigName, err)
+		return promoteFailed("recording rig %s's promotion after the push, which may have landed: %v", rigName, err)
 	}
 
 	switch {
