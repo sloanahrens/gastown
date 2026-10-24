@@ -1115,6 +1115,14 @@ func TestSegmentCommandWord(t *testing.T) {
 		{"subshell paren", []string{"(", "bash", "<<EOF"}, "bash"},
 		{"assignment with a substitution", []string{"y=$(echo", "a)", "bash", "-s"}, "bash"},
 		{"assignment with a nested substitution", []string{"y=$(echo", "$(date))", "bash"}, "bash"},
+		{"subshell paren with an env launcher", []string{"(", "env", "X=1", "bash"}, "bash"},
+		{"lone subshell paren", []string{"("}, ""},
+		{"substitution closed in its own token", []string{"y=$(echo)", "bash"}, "bash"},
+		{"substitution spread over three tokens", []string{"y=$(echo", "$(date)", "a)", "bash"}, "bash"},
+		{"substitution closed by a token with two parens", []string{"y=$(echo", "a))", "bash"}, "bash"},
+		{"plain assignment before a substitution assignment", []string{"A=1", "y=$(echo", "a)", "bash"}, "bash"},
+		{"subshell paren after a substitution assignment", []string{"y=$(echo", "a)", "(", "bash"}, "bash"},
+		{"substitution that never closes in the segment", []string{"y=$(echo", "a", "bash"}, ""},
 	} {
 		if word, _ := segmentCommandWord(tt.segment); word != tt.want {
 			t.Errorf("%s: command word = %q, want %q", tt.name, word, tt.want)

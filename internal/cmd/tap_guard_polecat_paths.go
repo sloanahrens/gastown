@@ -1883,7 +1883,8 @@ func segmentCommandWord(segment []string) (string, []string) {
 // substitution's words spread over tokens: "y=$(echo" "a)" "bash" is the
 // assignment "y=$(echo a)" followed by bash (gt-erfxm). The width runs through
 // the token that closes the substitution; a substitution that never closes in
-// this segment leaves the width at one token, as a plain assignment has.
+// this segment takes the rest of it, since its words are the substitution's
+// text and no command word of the segment's own follows them.
 func envAssignmentWidth(segment []string) int {
 	depth := 0
 	for i, token := range segment {
@@ -1892,7 +1893,7 @@ func envAssignmentWidth(segment []string) int {
 			return i + 1
 		}
 	}
-	return 1
+	return len(segment)
 }
 
 // isEnvAssignment reports whether a token is a leading NAME=value environment
