@@ -274,6 +274,58 @@ func TestOpenShellPrepareHandsBackTheSandboxEnv(t *testing.T) {
 	}
 }
 
+// A profile that names a separate forgejo_host moves only the clone host: the
+// sandbox still reaches Dolt at the control-plane host (gt-k42fg).
+func TestOpenShellForgejoHostFallsBackToTheControlPlaneHost(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		p    Profile
+		want string
+	}{
+		{"profile names a forgejo host", Profile{ControlPlaneHost: "dolt.internal", ForgejoHost: "forgejo.internal"}, "forgejo.internal"},
+		{"profile names no forgejo host", Profile{ControlPlaneHost: "dolt.internal"}, "dolt.internal"},
+		{"profile names neither", Profile{}, defaultControlPlaneHost},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			b := &openshellBackend{profile: tt.p}
+			if got := b.ForgejoHost(); got != tt.want {
+				t.Fatalf("ForgejoHost() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// Prepare gives the skeleton and the agent's env the control-plane host even
+// when the profile names another Forgejo host: only the clone URL the session
+// start derives moves (gt-k42fg).
+func TestOpenShellPrepareKeepsDoltAtTheControlPlaneHost(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	p := openshellTestProfile
+	p.ControlPlaneHost = "dolt.internal"
+	p.ForgejoHost = "forgejo.internal"
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, _ := openshellTestBackend(town, p, fake)
+	var skeleton sandbox.SkeletonSpec
+	b.render = func(s sandbox.SkeletonSpec) ([]byte, error) {
+		skeleton = s
+		return []byte("skeleton"), nil
+	}
+
+	prep, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if skeleton.ControlPlaneHost != "dolt.internal" {
+		t.Errorf("skeleton ControlPlaneHost = %q, want the control-plane host dolt.internal", skeleton.ControlPlaneHost)
+	}
+	if got := prep.Env["BEADS_DOLT_SERVER_HOST"]; got != "dolt.internal" {
+		t.Errorf("Env[BEADS_DOLT_SERVER_HOST] = %q, want the control-plane host dolt.internal", got)
+	}
+}
+
 func TestOpenShellPrepareWaitsForReadyBetweenPolls(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)

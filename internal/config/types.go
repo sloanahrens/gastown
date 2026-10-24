@@ -1668,8 +1668,9 @@ func NewEscalationConfig() *EscalationConfig {
 }
 
 // SandboxProfile is one entry of TownSettings.Sandboxes: how an openshell seat's
-// sandbox is created. Gateway and ControlPlaneHost take their defaults from
-// WithDefaults; Validate checks the rest.
+// sandbox is created. WithDefaults fills Gateway and ControlPlaneHost, and
+// leaves ForgejoHost empty so the backend falls back to ControlPlaneHost;
+// Validate checks the rest.
 type SandboxProfile struct {
 	Gateway          string   `json:"gateway"` // openshell gateway name, default "openshell"
 	Image            string   `json:"image"`   // OCI reference, required
@@ -1678,6 +1679,7 @@ type SandboxProfile struct {
 	CPU              string   `json:"cpu,omitempty"`          // k8s quantity, e.g. "4"
 	Memory           string   `json:"memory,omitempty"`       // e.g. "8Gi"
 	ControlPlaneHost string   `json:"control_plane_host"`     // default "host.docker.internal"
+	ForgejoHost      string   `json:"forgejo_host,omitempty"` // the sandbox's Forgejo host; "" = ControlPlaneHost
 	CacheVolume      string   `json:"cache_volume,omitempty"` // "{rig}" expands to the rig name
 	Driver           string   `json:"driver,omitempty"`       // the gateway's compute driver: "docker" (default) or "kubernetes"
 }
@@ -1712,9 +1714,10 @@ func (p SandboxProfile) WithDefaults() SandboxProfile {
 // Validate reports the first field of p that is unset or malformed, naming the
 // profile by its key name in TownSettings.Sandboxes. Image and Policy are
 // required; Policy must stay inside the rig repo root (relative, no ".." escape); each provider must be
-// named; CPU and Memory, when set, must be k8s quantities; Driver, when set,
-// is docker or kubernetes, and a kubernetes profile sets no CacheVolume (a
-// Docker volume does not exist there; a k8s cache is a separate design).
+// named; CPU and Memory, when set, must be k8s quantities; ForgejoHost, when
+// set, must be a bare host name; Driver, when set, is docker or kubernetes,
+// and a kubernetes profile sets no CacheVolume (a Docker volume does not exist
+// there; a k8s cache is a separate design).
 func (p SandboxProfile) Validate(name string) error {
 	if p.Image == "" {
 		return fmt.Errorf("sandboxes.%s.image: required", name)
@@ -1735,6 +1738,9 @@ func (p SandboxProfile) Validate(name string) error {
 	}
 	if p.Memory != "" && !sandboxMemoryRe.MatchString(p.Memory) {
 		return fmt.Errorf("sandboxes.%s.memory %q: want a k8s memory quantity such as \"8Gi\"", name, p.Memory)
+	}
+	if p.ForgejoHost != "" && strings.ContainsAny(p.ForgejoHost, " \t\r\n/\\") {
+		return fmt.Errorf("sandboxes.%s.forgejo_host %q: want a bare host name with no spaces, slashes or backslashes", name, p.ForgejoHost)
 	}
 	switch p.Driver {
 	case "", SandboxDriverDocker:

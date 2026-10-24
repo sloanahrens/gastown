@@ -24,7 +24,8 @@ type Profile struct {
 	Policy           string   // policy file path, relative to the rig repo root
 	Providers        []string // provider instance names attached at create
 	CPU, Memory      string   // k8s quantities, "" = driver default
-	ControlPlaneHost string   // how the sandbox reaches Dolt and Forgejo; "" = host.docker.internal
+	ControlPlaneHost string   // how the sandbox reaches Dolt, and Forgejo unless ForgejoHost is set; "" = host.docker.internal
+	ForgejoHost      string   // how the sandbox reaches Forgejo when it differs from Dolt; "" = ControlPlaneHost
 	CacheVolume      string   // named volume for /sandbox/.cache; "{rig}" expands; "" = none
 	Driver           string   // the gateway's compute driver: DriverKubernetes skips docker volume work; anything else is docker
 }
@@ -40,7 +41,7 @@ type SpawnSpec struct {
 	Polecat     string
 	Session     string // the tmux session name, gt-<rig>-<polecat>
 	Branch      string // the polecat branch, created on the host before Prepare
-	RepoURL     string // the sandbox-side clone URL (Forgejo through the control-plane host)
+	RepoURL     string // the sandbox-side clone URL (Forgejo through the profile's Forgejo host)
 	HostWorkDir string // the host worktree; the tmux backend's WorkDir
 	Profile     Profile
 	// Env is the startup environment the backend must set on the sandbox

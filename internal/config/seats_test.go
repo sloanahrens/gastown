@@ -442,14 +442,15 @@ func TestSandboxesFromSettingsFile(t *testing.T) {
 		var ts TownSettings
 		err := DecodeJSONFile("settings/config.json", []byte(`{"type":"town-settings","version":1,
 			"sandboxes":{"polecat-default":{"image":"gastown-polecat:dev","policy":"deploy/polecat/policy.yaml",
-				"providers":["deepseek"],"cpu":"4","memory":"8Gi","cache_volume":"{rig}-cache","driver":"docker"}},
+				"providers":["deepseek"],"cpu":"4","memory":"8Gi","forgejo_host":"forgejo.internal",
+				"cache_volume":"{rig}-cache","driver":"docker"}},
 			"polecat_pool":{"seats":{"deepseek-flash":{"cap":1,"backend":"openshell","sandbox":"polecat-default"}}}}`), &ts)
 		if err != nil {
 			t.Fatal(err)
 		}
 		p := ts.Sandboxes["polecat-default"]
 		if p.Image != "gastown-polecat:dev" || p.Policy != "deploy/polecat/policy.yaml" || len(p.Providers) != 1 ||
-			p.CPU != "4" || p.Memory != "8Gi" || p.CacheVolume != "{rig}-cache" || p.Driver != "docker" {
+			p.CPU != "4" || p.Memory != "8Gi" || p.ForgejoHost != "forgejo.internal" || p.CacheVolume != "{rig}-cache" || p.Driver != "docker" {
 			t.Fatalf("profile = %+v", p)
 		}
 		seats, err := Seats(&ts, nil)
@@ -479,9 +480,12 @@ func TestSandboxProfileWithDefaults(t *testing.T) {
 	if got.Gateway != "openshell" || got.ControlPlaneHost != "host.docker.internal" {
 		t.Fatalf("defaults = %q, %q", got.Gateway, got.ControlPlaneHost)
 	}
-	set := SandboxProfile{Gateway: "g", ControlPlaneHost: "h"}.WithDefaults()
-	if set.Gateway != "g" || set.ControlPlaneHost != "h" {
-		t.Fatalf("set fields overwritten: %q, %q", set.Gateway, set.ControlPlaneHost)
+	if got.ForgejoHost != "" {
+		t.Fatalf("default forgejo_host = %q, want empty so the backend falls back to control_plane_host", got.ForgejoHost)
+	}
+	set := SandboxProfile{Gateway: "g", ControlPlaneHost: "h", ForgejoHost: "f"}.WithDefaults()
+	if set.Gateway != "g" || set.ControlPlaneHost != "h" || set.ForgejoHost != "f" {
+		t.Fatalf("set fields overwritten: %q, %q, %q", set.Gateway, set.ControlPlaneHost, set.ForgejoHost)
 	}
 	if got.Driver != "docker" {
 		t.Fatalf("default driver = %q, want docker", got.Driver)
@@ -514,6 +518,10 @@ func TestSandboxProfileValidate(t *testing.T) {
 		{"bad cpu", func(p *SandboxProfile) { p.CPU = "four" }, `sandboxes.p.cpu "four": want a k8s CPU quantity such as "4" or "500m"`},
 		{"millicpu without a number", func(p *SandboxProfile) { p.CPU = "m" }, `sandboxes.p.cpu "m": want a k8s CPU quantity such as "4" or "500m"`},
 		{"bad memory", func(p *SandboxProfile) { p.Memory = "8 GB" }, `sandboxes.p.memory "8 GB": want a k8s memory quantity such as "8Gi"`},
+		{"forgejo host", func(p *SandboxProfile) { p.ForgejoHost = "forgejo.internal" }, ""},
+		{"forgejo host with a space", func(p *SandboxProfile) { p.ForgejoHost = "forgejo internal" }, `sandboxes.p.forgejo_host "forgejo internal": want a bare host name with no spaces, slashes or backslashes`},
+		{"forgejo host with a slash", func(p *SandboxProfile) { p.ForgejoHost = "forgejo/internal" }, `sandboxes.p.forgejo_host "forgejo/internal": want a bare host name with no spaces, slashes or backslashes`},
+		{"forgejo host with a backslash", func(p *SandboxProfile) { p.ForgejoHost = `forgejo\internal` }, `sandboxes.p.forgejo_host "forgejo\\internal": want a bare host name with no spaces, slashes or backslashes`},
 		{"binary kilo memory", func(p *SandboxProfile) { p.Memory = "512Ki" }, ""},
 		{"decimal kilo memory", func(p *SandboxProfile) { p.Memory = "512k" }, ""},
 		{"fractional binary memory", func(p *SandboxProfile) { p.Memory = "1.5Gi" }, ""},
