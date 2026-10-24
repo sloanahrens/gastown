@@ -86,6 +86,8 @@ func (a *progressAdapter) Parse(raw []byte) (Item, error) {
 	if l.Rig == "" || l.Bead == "" || strings.ContainsAny(l.Bead, `/\`) || l.TS.IsZero() || l.NudgeAt.IsZero() {
 		return Item{}, errors.New("progress line needs a rig, a bead, a ts and a nudge_at")
 	}
+	// A score's meaning comes from its level order, so a line from another
+	// question set would be swept with its direction reversed.
 	if l.QuestionVersion != progress.Version {
 		return Item{}, fmt.Errorf("progress line asked question set %d, the scorecard reads %d", l.QuestionVersion, progress.Version)
 	}

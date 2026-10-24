@@ -69,6 +69,9 @@ type progressCase struct {
 	// logged is when the line was written; zero means a minute after the
 	// nudge, so the line is old enough to label at progressNow.
 	logged time.Time
+	// notInStore keeps the bead out of the fake notes reader, so it reads as
+	// beads.ErrNotFound.
+	notInStore bool
 	// want is the labels the adapter must set, nil when it must leave the item
 	// unlabeled; wantRule names the rule that sets them.
 	want     map[QuestionID]bool
@@ -110,13 +113,13 @@ func progressAnswers(making, looping, blocked, drifted, remaining float64) map[s
 // writeProgressTown writes the cases' landing notes, overrun records and log
 // lines into a town, and returns the notes reader that serves the landings.
 // Every case's bead exists in the reader with empty notes when it has no
-// landing, so a bead the store does not hold is its own case.
+// landing, unless the case marks it not in the store.
 func writeProgressTown(t *testing.T, town string, cases []progressCase) fakeProgressNotes {
 	t.Helper()
 	notes := fakeProgressNotes{notes: map[string]string{}}
 	var logLines []byte
 	for _, c := range cases {
-		if _, ok := notes.notes[c.bead]; !ok {
+		if _, ok := notes.notes[c.bead]; !ok && !c.notInStore {
 			notes.notes[c.bead] = ""
 		}
 		if !c.landed.IsZero() {
@@ -328,15 +331,75 @@ func TestProgressBothRemainingLabelsEarnAVerdict(t *testing.T) {
 	}
 }
 
+// A version-1 line answered done with a score of 0, the reverse of version 2.
+// The scorecard reads one question set, so those lines are skipped at Parse
+// and never reach the sweep: a bare 0 would otherwise read as barely started.
+func TestProgressVersion1LinesAreNotScored(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	notes := fakeProgressNotes{notes: map[string]string{}}
+	var logLines []byte
+	write := func(l progress.Line) {
+		raw, err := json.Marshal(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		logLines = append(append(logLines, raw...), '\n')
+	}
+	for i := 0; i < 40; i++ {
+		bead := fmt.Sprintf("gt-v2%02d", i)
+		c := progressCase{bead: bead, nudge: progressBase.Add(time.Duration(i) * time.Minute)}
+		line := progressLine(c)
+		remaining := 0.0
+		if i < 20 {
+			notes.notes[bead] = land.LandingRecord{LandedCommit: "abc123", LandedAt: c.nudge.Add(10 * time.Minute)}.NoteBlock()
+			remaining = 3
+		} else {
+			notes.notes[bead] = ""
+		}
+		line.Answers[progress.QRemaining] = progress.Answer{Score: &remaining}
+		write(line)
+	}
+	for i := 0; i < 20; i++ {
+		bead := fmt.Sprintf("gt-v1%02d", i)
+		c := progressCase{bead: bead, nudge: progressBase.Add(time.Duration(i) * time.Minute)}
+		line := progressLine(c)
+		line.QuestionVersion = 1
+		done := 0.0
+		line.Answers[progress.QRemaining] = progress.Answer{Score: &done}
+		notes.notes[bead] = land.LandingRecord{LandedCommit: "abc123", LandedAt: c.nudge.Add(10 * time.Minute)}.NoteBlock()
+		write(line)
+	}
+	path := progress.LogPath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, logLines, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Build(context.Background(), newProgressTestAdapter(town, notes, progressNow), time.Time{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if rep.Items != 40 || rep.LinesSkipped != 20 {
+		t.Errorf("items %d, skipped %d; want 40 and 20", rep.Items, rep.LinesSkipped)
+	}
+	q := question(t, rep, string(progress.QRemaining))
+	if q.Logged != 40 || q.Labeled != 40 || q.Positives != 20 || q.Negatives != 20 {
+		t.Errorf("remaining logged %d, labeled %d, positives %d, negatives %d; want 40, 40, 20 and 20",
+			q.Logged, q.Labeled, q.Positives, q.Negatives)
+	}
+}
+
 // A bead the store no longer has is unlabeled, not an error.
 func TestProgressBeadNotFoundIsUnlabeled(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	c := progressCase{bead: "gt-gone", nudge: progressBase}
-	notes := writeProgressTown(t, town, []progressCase{c})
 	// The bead is not in the store, so its notes read as not found: there is
 	// no state to label remaining from.
-	notes.notes = map[string]string{}
+	c := progressCase{bead: "gt-gone", nudge: progressBase, notInStore: true}
+	notes := writeProgressTown(t, town, []progressCase{c})
 	a := newProgressTestAdapter(town, notes, progressNow)
 	item, err := a.Parse(mustMarshal(t, progressLine(c)))
 	if err != nil {

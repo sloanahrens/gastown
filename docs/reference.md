@@ -1859,7 +1859,9 @@ call: `making_progress`, `looping`, `blocked_on_environment` and
 levels run from `barely started` up to `done`, so a finished bead scores at the
 top. It appends one line to
 `.runtime/jev/progress.jsonl`: `{ts, rig, polecat, bead, session, nudge_at,
-model, answers, question_version}`.
+model, answers, question_version}`. A level's position is its score, so the
+scorecard reads one question set only: a line logged under another one is
+skipped rather than swept with its direction reversed.
 
 A nudge that cannot be asked logs null `answers` and a `reason` instead. The
 reasons are `no_transcript`, `transcript_unreadable` (missing or unreadable),
@@ -1908,9 +1910,10 @@ The labels come from the bead's `LANDING RECORD` note and the overrun guard's
   bead's landing record falls within 20 minutes after the nudge
   (`progress:landed-in-window`).
 - `remaining` false when no landing falls in that window: the bead was not shown
-  done or nearly done at the nudge (`progress:not-landed-in-window`). A bead the
-  store no longer holds takes no remaining label, since its state cannot be
-  read.
+  done or nearly done at the nudge (`progress:not-landed-in-window`). The label
+  reads the nudge's window, not the bead's end state, so a bead that lands later
+  is still false for the earlier nudge. A bead the store no longer holds takes
+  no remaining label, since its state cannot be read.
 - `making_progress` false when the overrun guard stopped the seat at or after
   the nudge (`progress:stopped-by-overrun`). A landing in the window wins over a
   stop.

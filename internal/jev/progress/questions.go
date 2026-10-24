@@ -4,7 +4,8 @@ import "github.com/steveyegge/gastown/internal/jev"
 
 // Version identifies the question set. Bump it whenever a question id, its
 // wording or a level changes: every log line carries it, so the scorecard
-// reads answers from different wordings apart.
+// reads answers from different wordings apart. Version 2 put done at the top
+// of the remaining scale; a version-1 score runs the other way.
 const Version = 2
 
 // Question ids. They are the keys of a log line's answers.
