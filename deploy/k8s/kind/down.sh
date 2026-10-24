@@ -8,12 +8,14 @@ set -euo pipefail
 stop_vm=0
 [ "${1:-}" = "--stop-vm" ] && stop_vm=1
 original_context="$(docker context show)"
+# colima stop flips docker's global context before it can fail, so the restore
+# is an EXIT trap, not the line after the stop.
+trap 'restore_context "$original_context" || true' EXIT
 
 vmkind delete cluster --name "$CLUSTER"
 vmdocker rm -f "$REGISTRY_NAME" >/dev/null 2>&1 || true
 openshell gateway remove "$GATEWAY_NAME" >/dev/null 2>&1 || true
 if [ "$stop_vm" = 1 ]; then
   colima stop -p "$PROFILE"
-  restore_context "$original_context"
 fi
 say "removed cluster $CLUSTER"

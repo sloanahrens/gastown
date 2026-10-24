@@ -20,17 +20,12 @@ DeepSeek polecats run in OpenShell sandboxes on Kubernetes, first on a local kin
 
 ## Running it
 
-```bash
-deploy/k8s/kind/up.sh              # VM, kind cluster, registry, agent-sandbox, OpenShell chart, gateway registration
-deploy/k8s/kind/down.sh            # remove the cluster and registry (add --stop-vm to stop the VM)
-deploy/k8s/kind/kind_test.sh       # stub-tool tests, no VM
-```
-
-After `up.sh`: `export XDG_CONFIG_HOME=~/gt/.runtime/sbx-k8s/xdg KUBECONFIG=~/gt/.runtime/sbx-k8s/kubeconfig`, then `openshell -g k8s sandbox list`. Settings are environment variables (`GT_K8S_GATEWAY_PORT`, `GT_K8S_REGISTRY_PORT`, `GT_K8S_COLIMA_PROFILE`, `GT_K8S_DIR`).
+`deploy/k8s/kind/up.sh` builds the environment and prints the `export` line for the next shell; `down.sh` removes it (`--stop-vm` also stops the VM). `kind_test.sh` runs the stub-tool tests without a VM. Before changing a port, the profile or the directory, read the `GT_K8S_*` defaults in `deploy/k8s/kind/common.sh`.
 
 ## Things that cost time
 
 - **Chart pin.** Use OpenShell chart 0.1.4. The 0.1.5-pre.4 chart publishes a server certificate that its CA did not sign (`BadSignature`). There is no 0.1.5 chart tag.
+- **Manifest pin.** The first fetch records the agent-sandbox manifest's digest beside it, and a changed manifest fails the run; set `GT_K8S_AGENT_SANDBOX_SHA256` to pin it from the first fetch.
 - **The first certificate read can be stale.** After install the chart's certificate job can leave the gateway serving a different CA than the one first read from the secret. `up.sh` re-exports the client certificates until `gateway info` is healthy (bounded).
 - **Client key format.** The CLI needs a PKCS8 key; escape the dot in jsonpath keys (`tls\.key`) or the file is silently empty.
 - **Docker context.** `colima start` switches Docker's global context and sends the town's plain `docker` calls to the wrong VM. Every kind and registry call here uses the VM's socket through `DOCKER_HOST`; if colima flips the context anyway, `up.sh` restores the original.
