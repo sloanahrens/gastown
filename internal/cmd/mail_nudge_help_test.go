@@ -44,3 +44,16 @@ func TestMailAndNudgeHelpSayNothingReadsOtherSessions(t *testing.T) {
 		})
 	}
 }
+
+// TestMailSendHelpNamesNoRetiredRole: gt mail send's address list must name no
+// retired role, so the help cannot advertise an address the town no longer
+// has (gt-wusjq).
+func TestMailSendHelpNamesNoRetiredRole(t *testing.T) {
+	t.Parallel()
+	lower := strings.ToLower(mailSendCmd.Long)
+	for _, role := range []string{"refinery", "witness", "mayor", "deacon"} {
+		if strings.Contains(lower, role) {
+			t.Errorf("gt mail send help names retired role %q:\n%s", role, mailSendCmd.Long)
+		}
+	}
+}
