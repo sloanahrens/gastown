@@ -60,7 +60,106 @@ func TestHooksPathChecks_AgreeOnCrewWorktree(t *testing.T) {
 	if got := findRigClones(ctx.RigPath()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("findRigClones = %v, want %v", got, want)
 	}
-	if got := rigCloneDirs(ctx.RigPath(), rigName); !reflect.DeepEqual(got, want) {
+	if got := rigCloneDirs(ctx.RigPath()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("rigCloneDirs = %v, want %v", got, want)
+	}
+}
+
+// A polecat worktree is found under whatever directory it is nested in, not only
+// the one named after the rig, so both checks see the same clone.
+func TestHooksPathAllRigs_PolecatCloneUnderAnyDirIsChecked(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	nested := filepath.Join("polecats", "p1", "renamed-rig")
+	ctx := hooksPathRig(t, rigName, nested)
+
+	want := []string{filepath.Join(ctx.RigPath(), nested)}
+	if got := findRigClones(ctx.RigPath()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("findRigClones = %v, want %v", got, want)
+	}
+	allRigs := NewHooksPathAllRigsCheck().Run(ctx)
+	if allRigs.Status != StatusWarning || len(allRigs.Details) != 1 {
+		t.Fatalf("all-rigs = %v %v, want Warning over the one nested clone", allRigs.Status, allRigs.Details)
+	}
+}
+
+// A polecat can hold several nested clones. Each is judged, and a subdirectory
+// with no .git is not, so neither the parent nor the stray directory is added.
+func TestHooksPathAllRigs_PolecatWithSeveralNestedClones(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	alpha := filepath.Join("polecats", "p1", "alpha")
+	beta := filepath.Join("polecats", "p1", "beta")
+	ctx := hooksPathRig(t, rigName, alpha, beta)
+	if err := os.MkdirAll(filepath.Join(ctx.RigPath(), "polecats", "p1", "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		filepath.Join(ctx.RigPath(), alpha),
+		filepath.Join(ctx.RigPath(), beta),
+	}
+	if got := findRigClones(ctx.RigPath()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("findRigClones = %v, want %v", got, want)
+	}
+	assertHooksPathChecksWarn(t, ctx, alpha, beta)
+}
+
+// A linked worktree is not a clone: its .git is a file, as for a crew worktree.
+// A nested one under a polecat is left out, and so is a flat one.
+func TestHooksPathAllRigs_LinkedWorktreeIsNotAClone(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	nested := filepath.Join("polecats", "p1", "wt")
+	flat := filepath.Join("polecats", "p2")
+	ctx := hooksPathRig(t, rigName, nested, flat)
+	markLinkedWorktree(t, filepath.Join(ctx.RigPath(), nested))
+	markLinkedWorktree(t, filepath.Join(ctx.RigPath(), flat))
+
+	if got := findRigClones(ctx.RigPath()); len(got) != 0 {
+		t.Fatalf("findRigClones = %v, want none", got)
+	}
+	assertHooksPathChecksOK(t, ctx)
+}
+
+// markLinkedWorktree turns the clone at dir into a linked worktree: its .git
+// becomes a file that points elsewhere, as git writes it.
+func markLinkedWorktree(t *testing.T, dir string) {
+	t.Helper()
+	gitPath := filepath.Join(dir, ".git")
+	if err := os.RemoveAll(gitPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gitPath, []byte("gitdir: elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// assertHooksPathChecksWarn requires both hooks-path checks to warn over exactly
+// the clones at rels, given relative to the rig. The per-rig check names them
+// relative to the rig, the all-rigs check relative to the town.
+func assertHooksPathChecksWarn(t *testing.T, ctx *CheckContext, rels ...string) {
+	t.Helper()
+	var allRigs []string
+	for _, rel := range rels {
+		allRigs = append(allRigs, filepath.Join(ctx.RigName, rel))
+	}
+	if got := NewHooksPathConfiguredCheck().Run(ctx); got.Status != StatusWarning || !reflect.DeepEqual(got.Details, rels) {
+		t.Fatalf("per-rig = %v %v, want Warning over %v", got.Status, got.Details, rels)
+	}
+	if got := NewHooksPathAllRigsCheck().Run(ctx); got.Status != StatusWarning || !reflect.DeepEqual(got.Details, allRigs) {
+		t.Fatalf("all-rigs = %v %v, want Warning over %v", got.Status, got.Details, allRigs)
+	}
+}
+
+// assertHooksPathChecksOK requires both hooks-path checks to pass: no clone is
+// judged, so none is reported.
+func assertHooksPathChecksOK(t *testing.T, ctx *CheckContext) {
+	t.Helper()
+	if got := NewHooksPathConfiguredCheck().Run(ctx); got.Status != StatusOK {
+		t.Fatalf("per-rig = %v %v, want OK", got.Status, got.Details)
+	}
+	if got := NewHooksPathAllRigsCheck().Run(ctx); got.Status != StatusOK {
+		t.Fatalf("all-rigs = %v %v, want OK", got.Status, got.Details)
 	}
 }

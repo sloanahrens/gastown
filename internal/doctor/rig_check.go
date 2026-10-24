@@ -311,7 +311,7 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 
 	c.unconfiguredClones = nil
 
-	for _, clonePath := range rigCloneDirs(rigPath, ctx.RigName) {
+	for _, clonePath := range rigCloneDirs(rigPath) {
 		// Skip if no .githooks directory exists
 		if _, err := os.Stat(filepath.Join(clonePath, ".githooks")); os.IsNotExist(err) {
 			continue

@@ -94,35 +94,25 @@ func (c *HooksPathAllRigsCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 
-// findRigClones returns all git clone paths within a rig. The rig is named by
-// its directory, as in every town layout.
+// findRigClones returns all git clone paths within a rig.
 func findRigClones(rigPath string) []string {
-	return rigCloneDirs(rigPath, filepath.Base(rigPath))
+	return rigCloneDirs(rigPath)
 }
 
-// rigCloneDirs returns the git clones of a rig that carry core.hooksPath: the
-// mayor clone, the crew clones and the polecat clones. HooksPathConfiguredCheck
-// and HooksPathAllRigsCheck both enumerate through it so they judge the same
-// set. A crew member is a clone, not a linked worktree (see crewCloneDirs). A
-// polecat worktree is nested at polecats/<name>/<rigName>/; the flat
-// polecats/<name>/ layout predates that nesting. Only a nested .git proves the
-// worktree, so a failed stat for any reason falls back to the flat path, which
-// the .git filter below judges.
-func rigCloneDirs(rigPath, rigName string) []string {
+// rigCloneDirs returns the git clones of a rig: the mayor clone, the crew clones
+// and the polecat clones. HooksPathConfiguredCheck and HooksPathAllRigsCheck
+// both enumerate through it so they judge the same set. Linked crew worktrees
+// are left out (see crewCloneDirs). Only paths with a .git are returned.
+func rigCloneDirs(rigPath string) []string {
 	clones := []string{filepath.Join(rigPath, "mayor", "rig")}
 	clones = append(clones, crewCloneDirs(filepath.Join(rigPath, "crew"))...)
 
 	polecatDir := filepath.Join(rigPath, "polecats")
 	if entries, err := os.ReadDir(polecatDir); err == nil {
 		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
+			if entry.IsDir() {
+				clones = append(clones, polecatCloneDirs(filepath.Join(polecatDir, entry.Name()))...)
 			}
-			clonePath := filepath.Join(polecatDir, entry.Name(), rigName)
-			if _, err := os.Stat(filepath.Join(clonePath, ".git")); err != nil {
-				clonePath = filepath.Join(polecatDir, entry.Name())
-			}
-			clones = append(clones, clonePath)
 		}
 	}
 
@@ -134,4 +124,35 @@ func rigCloneDirs(rigPath, rigName string) []string {
 		}
 	}
 	return valid
+}
+
+// polecatCloneDirs returns the clones of one polecat. A worktree is nested at
+// polecats/<name>/<dir>/, where <dir> is the rig's directory in every town
+// layout, but any subdirectory holding a clone is taken so that one nested under
+// another name is still judged. The flat polecats/<name>/ layout predates that
+// nesting, so it is the clone only when no nested clone exists.
+func polecatCloneDirs(polecat string) []string {
+	if entries, err := os.ReadDir(polecat); err == nil {
+		var nested []string
+		for _, entry := range entries {
+			clonePath := filepath.Join(polecat, entry.Name())
+			if entry.IsDir() && isCloneDir(clonePath) {
+				nested = append(nested, clonePath)
+			}
+		}
+		if len(nested) > 0 {
+			return nested
+		}
+	}
+	if isCloneDir(polecat) {
+		return []string{polecat}
+	}
+	return nil
+}
+
+// isCloneDir reports whether dir holds a clone, a .git directory. A linked
+// worktree's .git is a file, and crewCloneDirs leaves those out as well.
+func isCloneDir(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil && info.IsDir()
 }
