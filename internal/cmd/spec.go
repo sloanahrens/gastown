@@ -1424,13 +1424,20 @@ func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads
 // not list as work (gt-6t44f). A bead whose Constraints section is missing,
 // empty or unparsed keeps every path: it has not said which cited documents it
 // changes, and an unknown set is not an empty one (gt-zs8fq). The sling-time
-// guard keeps every named path either way.
+// guard keeps every named path either way. A Constraints section that names no
+// path (a follow-up's fixed text) counts the documents its Goal names as the
+// work instead (gt-1e5s8).
 func specHoldFiles(files []string, description string) []string {
-	constraints, ok := specdispatch.Sections(description)["constraints"]
+	sections := specdispatch.Sections(description)
+	constraints, ok := sections["constraints"]
 	if !ok || constraints == "" {
 		return files
 	}
-	return specdispatch.HoldFiles(files, extractContentRefs(constraints).Files)
+	listed := extractContentRefs(constraints).Files
+	if len(listed) == 0 {
+		listed = extractContentRefs(sections["goal"]).Files
+	}
+	return specdispatch.HoldFiles(files, listed)
 }
 
 // specHeldStatuses are the statuses that mean a working seat holds the bead:
