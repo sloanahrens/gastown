@@ -106,6 +106,13 @@ RUN userdel -r ubuntu 2>/dev/null || true \
     && mkdir -p /sandbox /sandbox/.cache/go-build /sandbox/go \
     && chown -R sandbox:sandbox /sandbox
 
+# The OpenShell Kubernetes driver runs the workload as uid/gid 10001, not as the
+# image USER, so that uid needs a name too: without it `id -un`, `ls -l`, chown
+# and git or ssh lookups of the current user fail ("unknown userid 10001").
+# Home is the shared /sandbox, which already exists and is world-writable.
+RUN groupadd -g 10001 polecat \
+    && useradd -M -u 10001 -g 10001 -d /sandbox -s /bin/bash polecat
+
 ENV PATH="/usr/local/go/bin:/sandbox/go/bin:${PATH}" \
     GOPATH=/sandbox/go \
     GOCACHE=/sandbox/.cache/go-build \
