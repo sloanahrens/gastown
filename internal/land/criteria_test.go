@@ -15,65 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// TestCriteriaTextPrefersTheBeadField: the field is the bead's own acceptance
-// text, so a description carrying a section too does not override it.
-func TestCriteriaTextPrefersTheBeadField(t *testing.T) {
-	t.Parallel()
-	issue := &beads.Issue{
-		AcceptanceCriteria: "- [ ] from the field",
-		Description:        "## Acceptance\n\n- [ ] from the description\n",
-	}
-	if got := CriteriaText(issue); got != "- [ ] from the field" {
-		t.Errorf("CriteriaText = %q, want the field's text", got)
-	}
-}
-
-// TestCriteriaTextExtractsTheDescriptionSection: a bead the spec dispatcher
-// shaped carries its criteria as a description section, and the section body is
-// the text om gets — every item, checked and unchecked alike.
-func TestCriteriaTextExtractsTheDescriptionSection(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name string
-		desc string
-		want string
-	}{
-		{
-			name: "a middle section stops at the next heading",
-			desc: "## Goal\n\nadd b\n\n## Acceptance\n\n- [x] one\n- [ ] two\n\n## Out of scope\n\nnothing\n",
-			want: "- [x] one\n- [ ] two",
-		},
-		{
-			name: "a last section runs to the end",
-			desc: "## Goal\n\nadd b\n\n## Acceptance\n\n- [ ] only one\n",
-			want: "- [ ] only one",
-		},
-		{
-			name: "a deeper heading is body text",
-			desc: "## Acceptance\n\n### the seam\n\n- [ ] one\n",
-			want: "### the seam\n\n- [ ] one",
-		},
-		{name: "no section at all", desc: "## Goal\n\nadd b\n", want: ""},
-		{name: "an empty section", desc: "## Goal\n\nadd b\n\n## Acceptance\n\n## Out of scope\n\nx\n", want: ""},
-		{name: "a similarly named heading is not the section", desc: "## Accepted trade-offs\n\n- [ ] x\n", want: ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := CriteriaText(&beads.Issue{Description: tc.desc}); got != tc.want {
-				t.Errorf("CriteriaText = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestCriteriaTextHandlesNoBead: nothing to read, nothing to pass.
-func TestCriteriaTextHandlesNoBead(t *testing.T) {
-	t.Parallel()
-	if got := CriteriaText(nil); got != "" {
-		t.Errorf("CriteriaText(nil) = %q, want empty", got)
-	}
-}
-
 // omHelpWithCriteria is the help text of an om that knows both flags.
 const omHelpWithCriteria = `Usage:
   om review [flags]
@@ -448,13 +389,13 @@ func TestOMReviewerRunsWithoutCriteriaWhenTheWriteFails(t *testing.T) {
 
 // TestLandGivesTheReviewerTheAcceptanceText: the landing hands the reviewer the
 // text of the bead it is landing, from the description section the dispatcher
-// writes when the bead's own field is empty (gt-yl7n4).
+// writes when the bead's own field is empty (gt-yl7n4). The section shapes the
+// reader must handle are covered where the reader lives, in internal/beads.
 func TestLandGivesTheReviewerTheAcceptanceText(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	// Both ticked: an unchecked box in the section is a policy rejection now
-	// (gt-1mrji), and TestCriteriaTextExtractsTheDescriptionSection covers
-	// the mixed text.
+	// Both ticked: an unchecked box in the section becomes a policy rejection
+	// (gt-1mrji), covered by TestPolicyRejectionCountsDescriptionAcceptance.
 	const criteria = "- [x] one\n- [x] two"
 	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "hooked", Type: "task",
 		Description: "## Goal\n\nadd b\n\n## Acceptance\n\n" + criteria + "\n\n## Out of scope\n\nnothing\n",
