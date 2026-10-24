@@ -3760,3 +3760,33 @@ func TestDangerousGuardParenInCommentDoesNotEndSubstitution(t *testing.T) {
 		})
 	}
 }
+
+// gt-h45w3: a quoted "$(" makes shlex fail, so the naive split reads the
+// command, and the quote characters it keeps hid a sudo body and an
+// assignment's "$(". A quoted ")" inside an unquoted substitution must not
+// end it early.
+func TestDangerousGuardQuotedParenShapes(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"a sudo body behind a double-quoted dollar-paren", `echo "$(" bash -c 'sudo apt-get install foo'`, true},
+		{"a sudo body behind a double-quoted dollar-paren and text", `echo "$(" text bash -c 'sudo apt-get install foo'`, true},
+		{"a sudo body behind a dollar-paren with text in its quotes", `"$(x" text bash -c "sudo apt-get install foo"`, true},
+		{"a sudo body behind an assignment of a double-quoted dollar-paren", `x="$(" bash -c 'sudo apt-get install foo'`, true},
+		{"a nuke behind an assignment of a double-quoted dollar-paren", `x="$(" bash -c "rm -rf /"`, true},
+		{"a nuke after a quoted close-paren in a substitution", `echo $(echo ")" && rm -rf /)`, true},
+		{"a sudo body after a quoted close-paren in a substitution", `x=$(echo ")" && bash -c 'sudo apt-get install foo')`, true},
+		{"a sudo body after a quoted close-paren and a semicolon", `echo $(echo ")" ; bash -c 'sudo apt-get install foo')`, true},
+		{"a double-quoted dollar-paren with no reader after it", `echo "$(" ; echo ok`, false},
+		{"a single-quoted dollar-paren with no reader after it", `echo '$(' bash -c 'echo hi'`, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); (reason != "") != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, reason != "", reason, tt.blocked)
+			}
+		})
+	}
+}

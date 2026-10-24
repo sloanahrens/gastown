@@ -1486,11 +1486,25 @@ func shellTokenize(command string) []string {
 	return splitSpacedCommand(command, spaceOutShellOperators(command))
 }
 
+// quotedParenShape matches a quote character touching a "$(" or a ")", the
+// shape whose naive split drops quotes (see splitSpacedCommand).
+var quotedParenShape = regexp.MustCompile(`["']\$\(|["']\)|\)["']`)
+
+// shellQuoteChars removes the quote characters from a word of the naive split.
+var shellQuoteChars = strings.NewReplacer(`"`, "", "'", "")
+
 // splitSpacedCommand runs shlex over the operator-spaced form of command.
 func splitSpacedCommand(command, spaced string) []string {
 	tokens, err := shlex.Split(spaced)
 	if err != nil {
-		return strings.Fields(command)
+		// The naive split keeps quote characters, which hide 'sudo and x="$("
+		// from the matchers (gt-h45w3). Only a quote touching a paren strips
+		// them; other malformed commands split as before.
+		words := strings.Fields(command)
+		if !quotedParenShape.MatchString(command) {
+			return words
+		}
+		return unquoteWords(words)
 	}
 	// shlex returning nothing for text that still has words in it means it
 	// swallowed them (a comment it saw but this pass did not, gt-vonb1). Fail
@@ -1499,6 +1513,18 @@ func splitSpacedCommand(command, spaced string) []string {
 		return strings.Fields(spaced)
 	}
 	return tokens
+}
+
+// unquoteWords returns the words with their quote characters removed, dropping
+// a word that was only quotes ("") as shlex does.
+func unquoteWords(words []string) []string {
+	unquoted := make([]string, 0, len(words))
+	for _, word := range words {
+		if word = shellQuoteChars.Replace(word); word != "" {
+			unquoted = append(unquoted, word)
+		}
+	}
+	return unquoted
 }
 
 // spaceOutShellOperators pads the command-chaining operators ;, &&, |, ||,
