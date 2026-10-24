@@ -1181,14 +1181,15 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 
 // resetMailRole returns the role whose mail a reset clears: the --role value
 // when given, else the role detected from cwd. A bare --role name is addressed
-// under the rig the reset runs in, so it takes that rig.
+// under the rig the reset runs in, so it takes that rig; a full address already
+// names its rig and is kept as given.
 func resetMailRole(roleFlag string, detected RoleInfo) RoleInfo {
 	if roleFlag == "" {
 		return detected
 	}
 	parsed, rig, name := parseRoleString(roleFlag)
 	info := RoleInfo{Role: parsed, Rig: rig, Polecat: name}
-	if info.Rig == "" {
+	if info.Rig == "" && !strings.Contains(roleFlag, "/") {
 		info.Rig = detected.Rig
 	}
 	return info
