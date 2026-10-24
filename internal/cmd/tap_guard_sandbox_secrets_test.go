@@ -305,14 +305,20 @@ func TestSandboxSecretsNameAgreesWithConfig(t *testing.T) {
 			t.Errorf("guard blocks $%s = %v, config.LooksLikeSecret = %v", name, blocked, want)
 		}
 	}
-	// Each marker config redacts by name is probed as DB_<marker>, so a marker added to
-	// config is checked against the guard without a change to this test.
-	for _, marker := range config.SecretKeyMarkers() {
-		name := "DB_" + marker
-		want := config.LooksLikeSecret(name, value)
-		blocked, _ := runSandboxSecretsGuard(t, "openshell", "echo $"+name)
-		if blocked != want {
-			t.Errorf("guard blocks $%s = %v, config.LooksLikeSecret = %v", name, blocked, want)
+	// Each marker config redacts by name is probed at the end, the start and the middle of
+	// a name, so a marker added to config is checked in every position without a change to
+	// this test. An empty list would make these probes pass without checking anything.
+	markers := config.SecretKeyMarkers()
+	if len(markers) == 0 {
+		t.Fatal("config.SecretKeyMarkers() is empty, so the marker probes check nothing")
+	}
+	for _, marker := range markers {
+		for _, name := range []string{"DB_" + marker, marker + "_DB", "DB_" + marker + "_X"} {
+			want := config.LooksLikeSecret(name, value)
+			blocked, _ := runSandboxSecretsGuard(t, "openshell", "echo $"+name)
+			if blocked != want {
+				t.Errorf("guard blocks $%s = %v, config.LooksLikeSecret = %v", name, blocked, want)
+			}
 		}
 	}
 	for word := range sandboxSecretsNameWords {
