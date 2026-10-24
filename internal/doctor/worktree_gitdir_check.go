@@ -319,7 +319,17 @@ func (c *WorktreeGitdirCheck) fixOneWorktree(ctx *CheckContext, bw brokenWorktre
 	// Directory already exists with content (common for dog worktrees after rsync).
 	// Manually register the worktree: create the entry in .repo.git/worktrees/
 	// and write a new .git file pointing to it.
-	return c.manualWorktreeRegister(bw.worktreePath, repoPath, branch)
+	if err := c.manualWorktreeRegister(bw.worktreePath, repoPath, branch); err != nil {
+		return err
+	}
+
+	// The manual registration writes no index, and git reads a missing index
+	// as empty: every tracked file would show as a staged deletion. Populate
+	// it from HEAD, which leaves the files on disk untouched.
+	if err := ctx.git(bw.worktreePath).ReadTreeHead(); err != nil {
+		return fmt.Errorf("%s: cannot populate index from HEAD: %w", bw.worktreePath, err)
+	}
+	return nil
 }
 
 // manualWorktreeRegister creates a worktree registration manually when

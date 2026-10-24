@@ -47,6 +47,7 @@ type Repo interface {
 
 	Checkout(ref string) error
 	CheckoutDetach(ref string) error
+	ReadTreeHead() error
 	PullRebase() error
 
 	IsTracked(path string) (bool, error)
