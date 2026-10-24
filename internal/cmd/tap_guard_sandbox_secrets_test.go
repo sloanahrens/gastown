@@ -486,6 +486,19 @@ func TestSandboxSecretsLeadingRedirection(t *testing.T) {
 		{"2>/dev/null bash <<< 'make test'", ""},
 		{"2>/dev/null bash 2<<< printenv", ""},
 		{"2>/dev/null printenv GIT_AUTHOR_NAME", ""},
+		// A heredoc ahead of the command is the shell's script all the same.
+		{"2>/dev/null bash <<EOF\nprintenv\nEOF", printenvRule},
+		{"<<EOF bash\nprintenv\nEOF", printenvRule},
+		{"2>/dev/null bash <<EOF\nmake test\nEOF", ""},
+		{"2>/dev/null nohup bash <<EOF\nprintenv\nEOF", printenvRule},
+		// So is a redirection on either side of a launcher.
+		{"2>/dev/null nohup bash <<< printenv", printenvRule},
+		{"nohup 2>/dev/null bash <<< printenv", printenvRule},
+		{"2>/dev/null env FOO=1 bash <<< printenv", printenvRule},
+		{"2>/dev/null timeout 5 bash <<< printenv", printenvRule},
+		{"2>/dev/null nohup bash <<< 'make test'", ""},
+		{"2>/dev/null nohup printenv", printenvRule},
+		{"2>/dev/null nohup echo hello", ""},
 	} {
 		if got := sandboxSecretsReason(tc.command); got != tc.want {
 			t.Errorf("sandboxSecretsReason(%q) = %q, want %q", tc.command, got, tc.want)

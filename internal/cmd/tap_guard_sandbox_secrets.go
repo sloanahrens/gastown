@@ -429,6 +429,13 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			// source /dev/stdin <<EOF runs the body as a script, so it is judged as shell text.
 			payloads = append(payloads, span.body)
 		}
+		if span.bodyStart >= 0 && strings.TrimSpace(span.body) != "" &&
+			!heredocReaderIsShellInvoker(span.reader) && !heredocReaderIsShellInvoker(span.cmdText) &&
+			sandboxSecretsHeredocFedToShell(command, span) {
+			// A redirection ahead of the shell hides it from shellFedHeredocBodies:
+			// 2>/dev/null bash <<EOF still runs the body as a script.
+			payloads = append(payloads, span.body)
+		}
 		interpreter := sandboxSecretsHeredocInterpreter(command, span)
 		if span.bodyStart < 0 || interpreter == "" {
 			continue
