@@ -84,11 +84,12 @@ func doneSlotLoopSkipLead(segment []string) []string {
 var doneSlotLoopModifiers = map[string]bool{"noglob": true, "nocorrect": true}
 
 // doneSlotLoopCommandWord returns a segment's command word and arguments after
-// the clause openers, the launchers segmentCommandWord skips, and the modifiers
-// above, in any order (`time noglob gt done`).
+// the clause openers, the launchers segmentCommandWord skips, the redirections
+// ahead of the command, and the modifiers above, in any order (`time
+// 2>/dev/null noglob gt done`).
 func doneSlotLoopCommandWord(segment []string) (string, []string) {
 	for {
-		word, args := segmentCommandWord(doneSlotLoopSkipLead(segment))
+		word, args := segmentCommandWordPastRedirections(doneSlotLoopSkipLead(segment))
 		if !doneSlotLoopModifiers[strings.ToLower(word)] {
 			return word, args
 		}
@@ -578,9 +579,11 @@ func doneSlotLoopWritesFile(reader string) bool {
 // doneSlotLoopSegmentWritesFile reports whether one pipeline stage of a heredoc
 // reader line is a `tee FILE` or a `dd of=FILE`. Each stage is judged on its
 // own command word, so `cat <<EOF | tee FILE` counts: the `cat` passes the body
-// through to the `tee` that writes it.
+// through to the `tee` that writes it. A redirection ahead of the stage is
+// stepped over, so `2>/dev/null tee FILE` writes the body just as `tee FILE`
+// does (gt-cwi1q).
 func doneSlotLoopSegmentWritesFile(segment []string) bool {
-	word, args := segmentCommandWord(segment)
+	word, args := segmentCommandWordPastRedirections(segment)
 	switch strings.ToLower(word) {
 	case "tee":
 		for _, arg := range args {
@@ -626,10 +629,10 @@ func doneSlotLoopRedirectsStdout(reader string) bool {
 }
 
 // doneSlotLoopSegmentCommandWords returns the token index that begins each
-// shell segment's command, skipping leading VAR=value assignments and the
-// launchers that carry the real command behind them (env VAR=x cmd, time cmd,
-// ...). Mirrors segmentCommandWord, which returns the word rather than its
-// index.
+// shell segment's command, skipping leading VAR=value assignments, redirections
+// and the launchers that carry the real command behind them (env VAR=x cmd,
+// time cmd, ...). Mirrors segmentCommandWordPastRedirections, which returns the
+// word rather than its index.
 //
 // A case-arm pattern is skipped the same way: `a) for ...` is a pattern and
 // then a command, so a loop behind it is policed like one that starts the line.
@@ -675,6 +678,15 @@ func doneSlotLoopSkipToCommandWord(tokens []string, j int) int {
 				return j
 			}
 			j = next
+			continue
+		}
+		// A redirection ahead of the command is setup, not the command, so the
+		// loop keyword behind it is still the command word: `2>/dev/null for i
+		// in 1 2; do gt done; done` loops like the unprefixed line (gt-cwi1q).
+		// The same reading answers prWorkflowCommand and
+		// segmentCommandWordPastRedirections.
+		if skip := redirectionSkip(tokens[j:end]); skip != 0 {
+			j += skip
 			continue
 		}
 		if doneSlotLoopLeadWords[strings.ToLower(tokens[j])] {

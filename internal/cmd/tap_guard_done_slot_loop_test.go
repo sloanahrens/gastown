@@ -119,6 +119,15 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"watch a shell payload", "watch -n 5 bash -c 'gt done'", true},
 		{"xargs a shell payload", "seq 1 300 | xargs -I{} sh -c 'gt done'", true},
 
+		// A redirection ahead of the command is setup, not the command, so the
+		// loop or repeater behind it is judged exactly as the plain line is
+		// (gt-cwi1q).
+		{"loop behind a redirection", "2>/dev/null for i in 1 2; do gt done; done", true},
+		{"loop behind a separate-target redirection", "2> /dev/null while true; do gt done; sleep 5; done", true},
+		{"xargs behind a redirection", "seq 1 5 | 2>/dev/null xargs gt done", true},
+		{"zsh repeat behind a redirection", "2>/dev/null repeat 20 gt done", true},
+		{"tee-written script behind a redirection", "2>/dev/null tee /tmp/retry.sh <<'EOF'\nwhile true; do gt done; done\nEOF", true},
+
 		// A heredoc written to a file: how the incident's script was authored.
 		{"heredoc-written retry script", "cat > /tmp/retry.sh <<'EOF'\nfor i in $(seq 1 300); do gt done; done\nEOF", true},
 		{"heredoc-written script, redirect on the right", "cat <<'EOF' > /tmp/retry.sh\nwhile true; do gt done; sleep 5; done\nEOF", true},
@@ -129,6 +138,8 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		// Allowed: `gt done` is the sanctioned path and must never trip this.
 		{"gt done alone", "gt done", false},
 		{"gt done with a target", "gt done --target main", false},
+		{"gt done behind a redirection", "2>/dev/null gt done", false},
+		{"loop that never runs the gate behind a redirection", "2>/dev/null for f in a b; do echo $f; done", false},
 		{"gt slot status alone", "gt slot status", false},
 		{"gt slot run wrapped suite", "gt slot run --role gastown/granite -- env GT_TEST_DOCKER=1 go test ./internal/beads/ -run TestOne", false},
 		{"gt done after a closed loop, semicolon", `for f in a b; do gofmt -w "$f"; done; gt done`, false},
@@ -206,8 +217,8 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 72 {
-		t.Errorf("blocked %d of %d cases, want exactly 72", blocked, len(tests))
+	if blocked != 77 {
+		t.Errorf("blocked %d of %d cases, want exactly 77", blocked, len(tests))
 	}
 }
 
