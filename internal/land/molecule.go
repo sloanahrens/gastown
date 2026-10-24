@@ -9,8 +9,10 @@ import (
 )
 
 // moleculeBeads is the slice of Beads closing an attached molecule needs.
+// Update is the unpin write for a hand-off step bd would refuse to close.
 type moleculeBeads interface {
 	Show(id string) (*beads.Issue, error)
+	Update(id string, opts beads.UpdateOptions) error
 	Children(parentID string) ([]*beads.Issue, error)
 	CloseWithReason(reason string, ids ...string) error
 }
@@ -51,15 +53,24 @@ func (l *Lander) closeAttachedMolecule(beadID string) {
 }
 
 // closeMolecule closes rootID's open descendants and then rootID, unforced,
-// and reports how many beads it closed. Root last, because bd refuses a
-// parent with open children; the work bead the molecule is bonded to is
-// closed before this runs, so the root's own bond is no longer a fence.
+// and reports how many beads it closed. Pinned steps are unpinned first, as
+// gt mol close does, because bd refuses to close a pinned issue (gt-o6kks).
+// Root last, because bd refuses a parent with open children; the work bead
+// the molecule is bonded to is closed before this runs, so the root's own
+// bond is no longer a fence.
 func closeMolecule(b moleculeBeads, rootID string) (int, error) {
 	steps, err := openDescendants(b, rootID)
 	if err != nil {
 		return 0, err
 	}
-	closed, err := closeUnforced(b, steps)
+	if _, err := beads.ReleasePinnedSteps(b, steps); err != nil {
+		return 0, fmt.Errorf("unpinning steps of molecule %s: %w", rootID, err)
+	}
+	ids := make([]string, 0, len(steps))
+	for _, step := range steps {
+		ids = append(ids, step.ID)
+	}
+	closed, err := closeUnforced(b, ids)
 	if err != nil {
 		return closed, err
 	}
@@ -78,12 +89,12 @@ func closeMolecule(b moleculeBeads, rootID string) (int, error) {
 
 // openDescendants lists parentID's descendants that are not closed, deepest
 // first, which is the order bd lets them close in.
-func openDescendants(b moleculeBeads, parentID string) ([]string, error) {
+func openDescendants(b moleculeBeads, parentID string) ([]*beads.Issue, error) {
 	children, err := b.Children(parentID)
 	if err != nil {
 		return nil, fmt.Errorf("listing children of %s: %w", parentID, err)
 	}
-	var out []string
+	var out []*beads.Issue
 	for _, child := range children {
 		deeper, err := openDescendants(b, child.ID)
 		if err != nil {
@@ -91,7 +102,7 @@ func openDescendants(b moleculeBeads, parentID string) ([]string, error) {
 		}
 		out = append(out, deeper...)
 		if !beads.IssueStatus(strings.TrimSpace(child.Status)).IsTerminal() {
-			out = append(out, child.ID)
+			out = append(out, child)
 		}
 	}
 	return out, nil

@@ -173,6 +173,28 @@ func TestLandCloseLeavesARefusedStepOpenWithoutForce(t *testing.T) {
 	}
 }
 
+// TestCloseMolecule_ReleasesPinnedStep: a step left under the hand-off pin is
+// not unfinished work, but bd refuses to close a pinned issue. The landing
+// releases the pin before the close, so the step and the root above it close
+// instead of the molecule staying open after landing (gt-o6kks).
+func TestCloseMolecule_ReleasesPinnedStep(t *testing.T) {
+	t.Parallel()
+	f := newMoleculeFixture(t)
+	f.chain(1, 2, 3)
+	if err := f.bd.Update(stepID(2), beads.UpdateOptions{Status: ptrTo("pinned")}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := closeMolecule(f.bd, fixtureMolecule); err != nil {
+		t.Fatalf("closeMolecule: %v", err)
+	}
+
+	for i := 1; i <= fixtureSteps; i++ {
+		f.wantStatus(stepID(i), "closed")
+	}
+	f.wantStatus(fixtureMolecule, "closed")
+}
+
 // TestLandClosesTheMoleculeThroughTheLanding: the wiring, not just the
 // helper — recordBead closes the molecule of the bead it lands.
 func TestLandClosesTheMoleculeThroughTheLanding(t *testing.T) {
