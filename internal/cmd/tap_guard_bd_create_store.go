@@ -337,13 +337,37 @@ func bdDirectoryFlag(segment []string) (value string, ok bool) {
 	return bdValueFlag(segment, "--directory", "-C")
 }
 
+// bdCreateValueFlags are the flags of bd create, and the global flags bd
+// accepts beside it, that take their value as the next token (--flag value or
+// -x value). bdValueFlag steps over that value, so one that starts with -C or
+// spells another flag, as in `--title -Cfix`, is not read as a flag of its
+// own. Each name is in `bd create --help`; a boolean flag stays out, since
+// stepping over the token after it would hide a real -C.
+var bdCreateValueFlags = map[string]bool{
+	"--acceptance": true, "--append-notes": true, "-a": true, "--assignee": true,
+	"--body-file": true, "--context": true, "--defer": true, "--deps": true,
+	"-d": true, "--description": true, "--design": true, "--design-file": true,
+	"--due": true, "-e": true, "--estimate": true, "--event-actor": true,
+	"--event-category": true, "--event-payload": true, "--event-target": true,
+	"--external-ref": true, "-f": true, "--file": true, "--graph": true,
+	"--id": true, "-l": true, "--labels": true, "--metadata": true,
+	"--mol-type": true, "--notes": true, "--parent": true, "-p": true,
+	"--priority": true, "--repo": true, "--skills": true, "--spec-id": true,
+	"-s": true, "--status": true, "--storage-class": true, "--title": true,
+	"-t": true, "--type": true, "--waits-for": true, "--waits-for-gate": true,
+	"--wisp-type": true, "--actor": true, "--database": true, "--db": true,
+	"--directory": true, "-C": true, "--dolt-auto-commit": true,
+	"--mem-profile": true,
+}
+
 // bdValueFlag returns the value a bd create segment gives a flag, wherever it
 // sits relative to the verb, in the forms pflag accepts: a separate value,
 // --long=value, and for a flag with a shorthand, -C=value and the glued
-// -Cvalue. A repeated flag is read last-wins, as pflag sets it. ok is false
-// only when the segment names no such flag; a flag with no value reaches the
-// caller as the empty value, which it refuses rather than reading the create
-// from the shell's directory.
+// -Cvalue. The value of any other flag in bdCreateValueFlags is stepped over,
+// as pflag consumes it, so it is never read as a flag. A repeated flag is read
+// last-wins, as pflag sets it. ok is false only when the segment names no such
+// flag; a flag with no value reaches the caller as the empty value, which it
+// refuses rather than reading the create from the shell's directory.
 func bdValueFlag(segment []string, long string, short ...string) (value string, ok bool) {
 	tokens := bdCloseCommandTokens(segment)
 	for i := 1; i < len(tokens); i++ {
@@ -362,6 +386,8 @@ func bdValueFlag(segment []string, long string, short ...string) (value string, 
 			value, ok = strings.TrimPrefix(tok, long+"="), true
 		case len(short) > 0 && strings.HasPrefix(tok, short[0]):
 			value, ok = strings.TrimPrefix(strings.TrimPrefix(tok, short[0]), "="), true
+		case bdCreateValueFlags[tok]:
+			i++ // the flag's value, not a flag of its own
 		}
 	}
 	return value, ok
