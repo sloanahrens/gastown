@@ -63,6 +63,7 @@ func queueTestRigs(names ...string) map[string]string {
 type queueBdFake struct {
 	rows map[string]int
 	fail map[string]bool
+	raw  map[string]string // an answer printed as it is, keyed like rows
 
 	mu              sync.Mutex
 	calls           []string
@@ -84,6 +85,9 @@ func (f *queueBdFake) run(ctx context.Context, argv []string) ([]byte, error) {
 	key := filepath.Base(argv[2]) + "/" + queueBdKind(argv)
 	if f.fail[key] {
 		return nil, fmt.Errorf("bd %s: no Dolt server", key)
+	}
+	if answer, ok := f.raw[key]; ok {
+		return []byte(answer), nil
 	}
 	rows := make([]string, f.rows[key])
 	for i := range rows {
@@ -234,6 +238,42 @@ func TestSourceQueueParsesDaemonLogColumns(t *testing.T) {
 			absent: []string{"seat_*"},
 		},
 		{
+			name: "ticks older than an hour report their age and no duration or seats",
+			log: "2026/10/24 10:00:00 spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 1/3, 2 dispatched, 0 refused, 0 planning, 0 skipped, 0 failed, 0 held by the failed label\n" +
+				"2026/10/24 10:00:05 spec_dispatch: tick took 3.0s (roster 1ms, sling 2s)\n",
+			want: map[string]any{
+				"dispatch_ticks_1h": 0, "dispatched_1h": 0, "last_tick_secs": nil,
+				"dispatch_newest_tick_age_s": 10800.0, "dispatch_unparsed_lines": 0,
+			},
+			absent: []string{"seat_*"},
+		},
+		{
+			name: "a tick exactly an hour old still counts, the second before it does not",
+			log: "2026/10/24 11:59:59 spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 0/3, 5 dispatched, 0 refused, 0 planning, 0 skipped, 0 failed, 0 held by the failed label\n" +
+				"2026/10/24 12:00:00 spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 1/3, 2 dispatched, 0 refused, 0 planning, 0 skipped, 0 failed, 0 held by the failed label\n",
+			want: map[string]any{
+				"dispatch_ticks_1h": 1, "dispatched_1h": 2, "dispatch_newest_tick_age_s": 3600.0,
+				"seat_live_deepseek-flash": 1, "seat_cap_deepseek-flash": 3,
+			},
+		},
+		{
+			name: "a duration line from before the window is ignored and the newest in-window one wins",
+			log: "2026/10/24 11:00:00 spec_dispatch: tick took 9.0s (roster 1ms)\n" +
+				"2026/10/24 12:10:00 spec_dispatch: tick took 2.0s (roster 1ms)\n" +
+				"2026/10/24 12:20:00 spec_dispatch: tick took 6.5s (roster 1ms)\n",
+			want: map[string]any{"last_tick_secs": 6.5, "dispatch_ticks_1h": 0},
+		},
+		{
+			name: "tick lines with no earlier timestamp are counted apart, not summed",
+			log: "spec_dispatch: tick: 3 candidate(s), roster deepseek-flash 9/9, 8 dispatched, 0 refused, 0 planning, 0 skipped, 0 failed, 0 held by the failed label\n" +
+				"spec_dispatch: tick took 1.0s (roster 1ms)\n" +
+				"2026/10/24 12:30:00 spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 1/3, 2 dispatched, 0 refused, 0 planning, 0 skipped, 0 failed, 0 held by the failed label\n",
+			want: map[string]any{
+				"dispatch_ticks_1h": 1, "dispatched_1h": 2, "dispatch_unparsed_lines": 2,
+				"seat_live_deepseek-flash": 1, "seat_cap_deepseek-flash": 3, "last_tick_secs": nil,
+			},
+		},
+		{
 			name: "an empty log is zero ticks, not a failed read",
 			log:  "",
 			want: map[string]any{"dispatch_ticks_1h": 0, "dispatched_1h": 0, "last_tick_secs": nil},
@@ -314,5 +354,64 @@ func TestSourceQueueUnreadableRegistryIsAnError(t *testing.T) {
 	}
 	if len(fake.calls) != 0 {
 		t.Errorf("bd was run %d times with no rigs; want none", len(fake.calls))
+	}
+}
+
+func TestSourceQueueDropsAFirstLineCutByTheByteBound(t *testing.T) {
+	t.Parallel()
+	tail := "\n2026/10/24 12:30:00 spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 1/3, 2 dispatched, 0 refused, 0 planning, 0 skipped, 0 failed, 0 held by the failed label\n"
+	cut := "spec_dispatch: tick: 9 candidate(s), roster deepseek-flash 9/9, 9 dispatched, 0 refused, 0 planning, "
+	cut += strings.Repeat("x", queueLogTailBytes-len(cut)-len(tail))
+	data := []byte(cut + tail)
+	if len(data) != queueLogTailBytes {
+		t.Fatalf("test data is %d bytes, want the bound %d", len(data), queueLogTailBytes)
+	}
+	fake := &queueBdFake{rows: map[string]int{}}
+	env := queueTestEnv(t, queueTestRigs("alpha"), fake.run, &queueTestLog{data: data})
+	cols, err := queueSource{}.Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	queueWantColumns(t, cols, map[string]any{
+		"dispatch_ticks_1h": 1, "dispatched_1h": 2, "dispatch_unparsed_lines": 0,
+		"seat_live_deepseek-flash": 1,
+	})
+}
+
+func TestSourceQueueUnreadableBdAnswersNilOnlyTheirColumn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "a truncated page", raw: `{"issues":[{"id":"a"}],"pagination":{"truncated":true}}`},
+		{name: "an envelope that is not JSON", raw: `{"issues":`},
+		{name: "an answer that is not JSON at all", raw: `bd: connection refused`},
+		{name: "an array cut short", raw: `[{"id":"a"},`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &queueBdFake{rows: map[string]int{"alpha/blocked": 2}, raw: map[string]string{"alpha/ready": tc.raw}}
+			env := queueTestEnv(t, queueTestRigs("alpha"), fake.run, nil)
+			cols, err := queueSource{}.Collect(context.Background(), env)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			queueWantColumns(t, cols, map[string]any{"ready": nil, "blocked": 2})
+		})
+	}
+}
+
+func TestSourceQueueMalformedRigRegistryIsAnError(t *testing.T) {
+	t.Parallel()
+	files := map[string]string{filepath.Join(queueTestTown, "mayor", "rigs.json"): `{"rigs":`}
+	fake := &queueBdFake{rows: map[string]int{}}
+	env := queueTestEnv(t, files, fake.run, nil)
+	if _, err := (queueSource{}).Collect(context.Background(), env); err == nil {
+		t.Fatal("Collect succeeded with a malformed rig registry; want an error")
+	}
+	if len(fake.calls) != 0 {
+		t.Errorf("bd was run %d times with no readable rigs; want none", len(fake.calls))
 	}
 }

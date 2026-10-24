@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -45,9 +46,17 @@ import (
 //
 //	dispatch_ticks_1h  "spec_dispatch: tick: ..." lines stamped in the last hour
 //	dispatched_1h      those lines' "N dispatched", summed
-//	last_tick_secs     the newest "spec_dispatch: tick took <d>" line, in seconds
+//	last_tick_secs     the newest "spec_dispatch: tick took <d>" line stamped in
+//	                   the last hour, in seconds (nil when there is none)
 //	seat_live_<agent>  live sessions on that agent's seat, from the roster of the
-//	seat_cap_<agent>   newest tick line carrying one (specdispatch's Budget.Picture)
+//	seat_cap_<agent>   newest tick line stamped in the last hour (specdispatch's
+//	                   Budget.Picture); left out when no tick is that recent
+//	dispatch_newest_tick_age_s  the age of the newest tick line in the tail
+//	                   whatever its age, so a dispatcher that went quiet reads
+//	                   as a number and not as current values
+//	dispatch_unparsed_lines  tick lines the tail holds with no timestamp the
+//	                   parser could place (no stamped line before them): they
+//	                   are not counted in any column above, and counted here
 //
 // A read that failed leaves its columns nil rather than zero: a queue that
 // could not be read is not an empty queue, and one rig failing nil only the
@@ -57,10 +66,16 @@ import (
 // everyone but the towns that do.
 type queueSource struct{}
 
-// queueBdTimeout is one bd read's deadline. A column reads its rigs one after
-// another, so a town costs at most one deadline per rig for that column, and a
-// bd hung on a dead Dolt server costs its column rather than the whole group.
+// queueBdTimeout is one bd read's deadline. A column reads its rigs
+// queueRigParallel at a time, so nine rigs cost at most three deadlines (15 s)
+// for a column, and the group's own deadline (SourceTimeout) caps the whole
+// group regardless. A bd hung on a dead Dolt server costs its column rather
+// than the whole group.
 const queueBdTimeout = 5 * time.Second
+
+// queueRigParallel is how many rigs one column reads at once. The four columns
+// run side by side, so at most four times this many bd processes are alive.
+const queueRigParallel = 3
 
 // queueLogMaxLines is how many of the log's last lines the parse keeps.
 const queueLogMaxLines = 2000
@@ -188,17 +203,33 @@ func queueRigNames(rc *config.RigsConfig) []string {
 	return names
 }
 
-// queueSumBeads runs one column's read in every rig and sums the rows. Any rig
-// that fails leaves the column nil: a partial sum would read as a queue that
-// shrank.
+// queueSumBeads runs one column's read in every rig, queueRigParallel at a
+// time, and sums the rows. Any rig that fails leaves the column nil: a partial
+// sum would read as a queue that shrank.
 func queueSumBeads(ctx context.Context, env Env, rigs []string, args []string) any {
+	type result struct {
+		n   int
+		err error
+	}
+	results := make([]result, len(rigs))
+	sem := make(chan struct{}, queueRigParallel)
+	var wg sync.WaitGroup
+	for i, rig := range rigs {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int, rig string) {
+			defer func() { <-sem; wg.Done() }()
+			n, err := queueCount(ctx, env, filepath.Join(env.Town, rig), args)
+			results[i] = result{n: n, err: err}
+		}(i, rig)
+	}
+	wg.Wait()
 	sum := 0
-	for _, rig := range rigs {
-		n, err := queueCount(ctx, env, filepath.Join(env.Town, rig), args)
-		if err != nil {
+	for _, r := range results {
+		if r.err != nil {
 			return nil
 		}
-		sum += n
+		sum += r.n
 	}
 	return sum
 }
@@ -257,6 +288,8 @@ func queueAddLogColumns(env Env, cols map[string]any) {
 	cols["dispatch_ticks_1h"] = nil
 	cols["dispatched_1h"] = nil
 	cols["last_tick_secs"] = nil
+	cols["dispatch_newest_tick_age_s"] = nil
+	cols["dispatch_unparsed_lines"] = nil
 	data, err := env.Tail(filepath.Join(env.Town, "daemon", daemonlog.FileName), queueLogTailBytes)
 	if err != nil {
 		return
@@ -264,30 +297,49 @@ func queueAddLogColumns(env Env, cols map[string]any) {
 	now := env.Now()
 	p := &daemonlog.Parser{Loc: now.Location()}
 	cutoff := now.Add(-time.Hour)
-	ticks, dispatched := 0, 0
-	var lastTickSecs *float64
+	ticks, dispatched, unparsed := 0, 0, 0
+	var newestTick, tookAt, rosterAt time.Time
+	var lastTookSecs *float64
 	roster, haveRoster := "", false
-	for _, raw := range queueTailLines(data, queueLogMaxLines) {
+	for _, raw := range queueTailLines(data, queueLogMaxLines, int64(len(data)) >= queueLogTailBytes) {
 		at, text := p.Parse(raw)
 		text = strings.TrimPrefix(text, "spec_dispatch: ")
 		if secs, ok := queueTookSecs(text); ok {
-			lastTickSecs = &secs
+			if at.IsZero() {
+				unparsed++
+			} else if !at.Before(cutoff) && !at.Before(tookAt) {
+				lastTookSecs, tookAt = &secs, at
+			}
 			continue
 		}
 		n, r, ok := queueTickLine(text)
 		if !ok {
 			continue
 		}
-		roster, haveRoster = r, true
-		if !at.IsZero() && !at.Before(cutoff) {
-			ticks++
-			dispatched += n
+		if at.IsZero() {
+			unparsed++
+			continue
+		}
+		if at.After(newestTick) {
+			newestTick = at
+		}
+		if at.Before(cutoff) {
+			continue
+		}
+		ticks++
+		dispatched += n
+		if !at.Before(rosterAt) {
+			roster, rosterAt, haveRoster = r, at, true
 		}
 	}
 	cols["dispatch_ticks_1h"] = ticks
 	cols["dispatched_1h"] = dispatched
-	if lastTickSecs != nil {
-		cols["last_tick_secs"] = *lastTickSecs
+	cols["dispatch_unparsed_lines"] = unparsed
+	if lastTookSecs != nil {
+		cols["last_tick_secs"] = *lastTookSecs
+	}
+	if !newestTick.IsZero() {
+		cols["dispatch_newest_tick_age_s"] = now.Sub(newestTick).Seconds()
 	}
 	if haveRoster {
 		for name, value := range queueSeatColumns(roster) {
@@ -296,11 +348,14 @@ func queueAddLogColumns(env Env, cols map[string]any) {
 	}
 }
 
-// queueTailLines splits the tail into lines and keeps the last max. The first
-// kept line may be cut by the byte bound; no parser below matches a cut line,
-// so it is dropped where it is.
-func queueTailLines(data []byte, max int) []string {
+// queueTailLines splits the tail into lines and keeps the last max. When the
+// read hit its byte bound (truncated) the first line may be cut in the middle,
+// and a cut line can still look like a tick, so it is dropped.
+func queueTailLines(data []byte, max int, truncated bool) []string {
 	lines := strings.Split(string(data), "\n")
+	if truncated && len(lines) > 0 {
+		lines = lines[1:]
+	}
 	if len(lines) > max {
 		lines = lines[len(lines)-max:]
 	}
