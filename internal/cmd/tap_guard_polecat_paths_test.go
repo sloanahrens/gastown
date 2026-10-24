@@ -1418,6 +1418,31 @@ func TestSegmentReadings(t *testing.T) {
 	}
 }
 
+// TestSegmentReadingsClosedAssignmentsStayWithinTheCap: an assignment whose
+// substitution is already closed is one reading, and a later assignment's ")"
+// is not an alternative close for it. Six of them yield 32 readings, under the
+// cap, so the command behind them runs (gt-9q6sf).
+func TestSegmentReadingsClosedAssignmentsStayWithinTheCap(t *testing.T) {
+	t.Parallel()
+	var segment []string
+	for i := 0; i < 6; i++ {
+		segment = append(segment, fmt.Sprintf("A%d=$(c%d)", i, i))
+	}
+	segment = append(segment, "make")
+	readings, ok := segmentReadings(segment)
+	if !ok {
+		t.Fatalf("segmentReadings(%q) refused, want the readings within the cap", segment)
+	}
+	if len(readings) >= maxSegmentReadings {
+		t.Errorf("segmentReadings(%q) = %d readings, want fewer than %d", segment, len(readings), maxSegmentReadings)
+	}
+	p := newPolecatTestTown(t)
+	command := strings.Join(segment, " ")
+	if err := p.run(t, "Bash", commandInput(command)); err != nil {
+		t.Errorf("%q blocked: %v", command, err)
+	}
+}
+
 // TestEnvAssignmentCloses pins the ")" tokens an assignment's substitution may
 // close at, other than the close envAssignmentWidth reads (gt-lhn14).
 func TestEnvAssignmentCloses(t *testing.T) {

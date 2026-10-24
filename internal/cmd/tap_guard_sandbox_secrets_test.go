@@ -107,6 +107,9 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		// A -c string keeps the here-string's stdin, so a shell it runs reads the text (gt-ma5e6).
 		"bash -c bash <<< printenv",
 		"bash -c 'bash' <<< printenv",
+		// The here-string text is read through its ANSI-C escapes, so a
+		// backslash-n hides no line from the walk (gt-9q6sf).
+		`bash <<< $'x\nprintenv'`,
 		"echo printenv | source /dev/stdin",
 		"printf 'printenv' | . /dev/fd/0",
 		"sh <(echo printenv)",
@@ -440,6 +443,7 @@ func TestSandboxSecretsGuardNamesTheRule(t *testing.T) {
 		{"printenv FORGEJO_TOKEN", "printenv FORGEJO_TOKEN prints a secret"},
 		{"cat <<< \"$FORGEJO_TOKEN\"", "a here-string expands a secret variable"},
 		{"bash <<< printenv", "printenv prints the environment"},
+		{`bash <<< $'x\nprintenv'`, "printenv prints the environment"},
 		{"source /dev/stdin <<< printenv", "printenv prints the environment"},
 		{"cat <<EOF\n$FORGEJO_TOKEN\nEOF", "an unquoted heredoc expands a secret variable"},
 		{"python3 <<EOF\nprint(os.environ['FORGEJO_TOKEN'])\nEOF", "python3 heredoc reads the environment"},
@@ -519,6 +523,7 @@ func TestSandboxSecretsHereStringThroughCat(t *testing.T) {
 		{"cat <<< printenv | cat | bash", printenvRule},
 		{"cat <<<printenv | bash", printenvRule},
 		{"cat <<< 'printenv' | sh", printenvRule},
+		{`cat <<< $'x\nprintenv' | bash`, printenvRule},
 		{"cat - <<< printenv | bash", printenvRule},
 		{"cat -n <<< printenv | bash", printenvRule},
 		{"cat 0<<< printenv | bash", printenvRule},
