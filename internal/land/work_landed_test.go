@@ -206,6 +206,37 @@ func TestWorkLandedOnTargetFallsBackWhenTheHeadIsNotInTheClone(t *testing.T) {
 	}
 }
 
+// A record whose head and landed commit are both absent from the clone is a
+// failed probe, not unpushed: the record is broken, and reading it as unlanded
+// would hide that. The two missing commits differ, and one path has no head, so
+// each route to the alarm runs (gt-rrt9z).
+func TestWorkLandedOnTargetAlarmsWhenNeitherRecordedCommitIsInTheClone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		head string
+	}{
+		{name: "head and landed commit both missing", head: strings.Repeat("e", 40)},
+		{name: "no head and landed commit missing", head: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w := newLandedWorld(t)
+			record := LandingRecord{BeadID: "gt-abc", Head: tt.head, LandedCommit: strings.Repeat("f", 40), Target: "main"}
+			issue := &beads.Issue{ID: "gt-abc", Status: "closed", Notes: record.NoteBlock()}
+
+			v := WorkLandedOnTarget(w.worktree(), WorkLandedQuery{Head: w.earlier, BeadID: "gt-abc", Issue: issue})
+			if v.Landed || v.Reason != WorkProbeFailed {
+				t.Fatalf("WorkLandedOnTarget(neither recorded commit in clone) = %+v; want not landed, %s", v, WorkProbeFailed)
+			}
+			if !strings.Contains(v.Detail, "gt-abc") || !strings.Contains(v.Detail, "names no commit") {
+				t.Fatalf("detail = %q; want it to name gt-abc and say the record names no commit", v.Detail)
+			}
+		})
+	}
+}
+
 // Every way the proof can be missing returns not-landed with a Reason, never a
 // landed answer: a missing record, an unreadable ref, an unreadable object, a
 // failed comparison, and a worktree with no files to compare.
