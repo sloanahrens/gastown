@@ -1115,9 +1115,63 @@ func TestSegmentCommandWord(t *testing.T) {
 		{"subshell paren", []string{"(", "bash", "<<EOF"}, "bash"},
 		{"assignment with a substitution", []string{"y=$(echo", "a)", "bash", "-s"}, "bash"},
 		{"assignment with a nested substitution", []string{"y=$(echo", "$(date))", "bash"}, "bash"},
+		{"subshell paren with an env launcher", []string{"(", "env", "X=1", "bash"}, "bash"},
+		{"lone subshell paren", []string{"("}, ""},
+		{"substitution closed in its own token", []string{"y=$(echo)", "bash"}, "bash"},
+		{"substitution spread over three tokens", []string{"y=$(echo", "$(date)", "a)", "bash"}, "bash"},
+		{"substitution closed by a token with two parens", []string{"y=$(echo", "a))", "bash"}, "bash"},
+		{"plain assignment before a substitution assignment", []string{"A=1", "y=$(echo", "a)", "bash"}, "bash"},
+		{"subshell paren after a substitution assignment", []string{"y=$(echo", "a)", "(", "bash"}, "bash"},
+		// A substitution that never closes runs the text after its "$(" first.
+		{"substitution that never closes in the segment", []string{"y=$(echo", "a", "bash"}, "echo"},
+		{"substitution that never closes around a launcher", []string{"y=$(sudo", "rm", "-rf", "/"}, "sudo"},
+		// A "$(" with nothing after it is a substitution whose command is the
+		// next word, or a literal "$(" whose command is the next word too.
+		{"unclosed substitution with nothing after its paren", []string{"X=$(", "bash", "-c"}, "bash"},
+		{"literal dollar-paren in a value, command after it", []string{"X=$(", "rm", "-rf", "/"}, "rm"},
 	} {
 		if word, _ := segmentCommandWord(tt.segment); word != tt.want {
 			t.Errorf("%s: command word = %q, want %q", tt.name, word, tt.want)
+		}
+	}
+}
+
+// TestQuotedDollarParenHidesNoCommand: shlex drops the quotes around a literal
+// "$(", so X='$(echo' rm arrives as X=$(echo rm, which reads as an assignment
+// whose substitution never closes. The shell runs rm there, so the guard must
+// still judge rm, as well as the substitution's own text.
+func TestQuotedDollarParenHidesNoCommand(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	for _, command := range []string{
+		"X='$(echo' rm -rf " + filepath.Join(p.sibling, "internal.go"),
+		"X='$(echo' bash <<'EOF'\nrm -rf " + p.sibling + "\nEOF",
+		"A=1 X='$(echo' rm -rf " + filepath.Join(p.sibling, "internal.go"),
+	} {
+		if err := p.run(t, "Bash", commandInput(command)); err == nil {
+			t.Errorf("%q allowed: the quoted dollar-paren is a plain value, so the command after it runs", command)
+		}
+	}
+}
+
+// TestSegmentReadings: an assignment that opens a substitution it never closes
+// is read both ways, the substitution's text first and the literal reading
+// (the assignment dropped) after it. Segments without one are unchanged.
+func TestSegmentReadings(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		segment []string
+		want    [][]string
+	}{
+		{"no substitution", []string{"make", "build"}, [][]string{{"make", "build"}}},
+		{"closed substitution", []string{"y=$(echo)", "bash"}, [][]string{{"y=$(echo)", "bash"}}},
+		{"unclosed substitution", []string{"X=$(echo", "bash"}, [][]string{{"X=$(echo", "bash"}, {"bash"}}},
+		{"unclosed substitution after a plain assignment", []string{"A=1", "X=$(echo", "rm"}, [][]string{{"A=1", "X=$(echo", "rm"}, {"A=1", "rm"}}},
+	} {
+		got := segmentReadings(tt.segment)
+		if fmt.Sprint(got) != fmt.Sprint(tt.want) {
+			t.Errorf("%s: segmentReadings(%q) = %q, want %q", tt.name, tt.segment, got, tt.want)
 		}
 	}
 }

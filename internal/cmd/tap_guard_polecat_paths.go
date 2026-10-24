@@ -275,7 +275,10 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 	// not stdin.
 	heredoc := strings.Contains(command, "\n") && heredocStartPattern.MatchString(command)
 
-	segments := splitShellSegments(shellTokenize(stripped))
+	var segments [][]string
+	for _, segment := range splitShellSegments(shellTokenize(stripped)) {
+		segments = append(segments, segmentReadings(segment)...)
+	}
 	for _, segment := range segments {
 		cmdline := trimShellKeywords(segment)
 		word, args := segmentCommandWord(cmdline)
@@ -1865,11 +1868,14 @@ func segmentCommandWord(segment []string) (string, []string) {
 	for i := 0; i < len(segment); i++ {
 		token := segment[i]
 		if isEnvAssignment(token) {
-			i += envAssignmentWidth(segment[i:]) - 1
+			width, opened := envAssignmentWidth(segment[i:])
+			if opened != "" {
+				return opened, segment[i+1:]
+			}
+			i += width - 1
 			continue
 		}
-		switch token {
-		case "(", "!", "time", "sudo", "command", "nohup", "env", "nice", "stdbuf", "exec", "builtin":
+		if skipsToCommand(token) {
 			continue
 		}
 		return token, segment[i+1:]
@@ -1877,22 +1883,67 @@ func segmentCommandWord(segment []string) (string, []string) {
 	return "", nil
 }
 
+// skipsToCommand reports whether a token is a launcher or grouping token that
+// the command word sits behind, so the scan goes past it.
+func skipsToCommand(token string) bool {
+	switch token {
+	case "(", "!", "time", "sudo", "command", "nohup", "env", "nice", "stdbuf", "exec", "builtin":
+		return true
+	}
+	return false
+}
+
+// segmentReadings returns each command line a segment may run. shlex drops the
+// quotes that tell a live "$(" from a literal one, so an assignment whose
+// substitution never closes is read two ways: live, where the text after its
+// "$(" runs first (what segmentCommandWord returns), and literal, where the
+// assignment is a plain value and the words after it run next. Both are judged,
+// so a quoted "$(" cannot hide the command the shell actually runs.
+func segmentReadings(segment []string) [][]string {
+	readings := [][]string{segment}
+	for i := 0; i < len(segment); i++ {
+		token := segment[i]
+		if isEnvAssignment(token) {
+			width, opened := envAssignmentWidth(segment[i:])
+			if opened != "" {
+				literal := append(append([]string{}, segment[:i]...), segment[i+1:]...)
+				return append(readings, segmentReadings(literal)...)
+			}
+			i += width - 1
+			continue
+		}
+		if !skipsToCommand(token) {
+			break
+		}
+	}
+	return readings
+}
+
 // envAssignmentWidth returns how many leading tokens of segment make up the
 // assignment at its head. An assignment whose value opens a command
 // substitution runs that substitution's text before the command, and the
 // substitution's words spread over tokens: "y=$(echo" "a)" "bash" is the
 // assignment "y=$(echo a)" followed by bash (gt-erfxm). The width runs through
-// the token that closes the substitution; a substitution that never closes in
-// this segment leaves the width at one token, as a plain assignment has.
-func envAssignmentWidth(segment []string) int {
+// the token that closes the substitution.
+//
+// A substitution that never closes in this segment runs the text after its
+// "$(" first, so that text's first word is the command: it is returned as
+// opened, and the width is one token. With nothing after the "$(" the command
+// is the next token, as it is for a literal "$(" in a plain value: shlex has
+// already dropped the quotes that tell the two apart.
+func envAssignmentWidth(segment []string) (width int, opened string) {
 	depth := 0
 	for i, token := range segment {
 		depth += strings.Count(token, "$(") - strings.Count(token, ")")
 		if depth <= 0 {
-			return i + 1
+			return i + 1, ""
 		}
 	}
-	return 1
+	_, text, _ := strings.Cut(segment[0], "$(")
+	if nested := strings.Index(text, "$("); nested >= 0 {
+		text = text[:nested]
+	}
+	return 1, text
 }
 
 // isEnvAssignment reports whether a token is a leading NAME=value environment
