@@ -111,6 +111,9 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		// backslash-n hides no line from the walk (gt-9q6sf).
 		`bash <<< $'x\nprintenv'`,
 		`bash <<<$'x\nprintenv'`,
+		// bash deletes a backslash-newline between the "$" and the quote, so the
+		// string is still ANSI-C and its escapes are still decoded (gt-vviaz).
+		"bash <<< $\\\n'x\\nprintenv'",
 		"echo printenv | source /dev/stdin",
 		"printf 'printenv' | . /dev/fd/0",
 		"sh <(echo printenv)",
@@ -992,5 +995,40 @@ func TestSandboxSecretsGuardJudgesNoCommandWithoutOne(t *testing.T) {
 		if err := tapGuardSandboxSecrets(strings.NewReader(payload), &bytes.Buffer{}, proc); err != nil {
 			t.Errorf("payload %q blocked although it names no command: %v", payload, err)
 		}
+	}
+}
+
+// TestSandboxSecretsANSICHereStringsAcrossContinuation: the probe reads a
+// here-string as ANSI-C quoted when the shell does, which includes a "$" and a
+// "'" with a backslash-newline between them, since bash deletes the pair before
+// it reads the quote (gt-vviaz). A plain quote with the same continuation before
+// it stays undecoded.
+func TestSandboxSecretsANSICHereStringsAcrossContinuation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    map[string]bool
+	}{
+		{"no continuation", "cat <<< $'x\\ny'", map[string]bool{`x\ny`: true}},
+		{"continuation between the dollar and the quote", "cat <<< $\\\n'x\\ny'", map[string]bool{`x\ny`: true}},
+		{"two continuations", "cat <<< $\\\n\\\n'x\\ny'", map[string]bool{`x\ny`: true}},
+		{"continuation without a space after the operator", "cat <<<$\\\n'x\\ny'", map[string]bool{`x\ny`: true}},
+		{"plain quote after a continuation is not ANSI-C", "cat <<< \\\n'x\\ny'", nil},
+		{"dollar with no quote behind its continuation", "cat <<< $\\\nx", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := sandboxSecretsANSICHereStrings(tt.command)
+			if len(got) != len(tt.want) {
+				t.Fatalf("sandboxSecretsANSICHereStrings(%q) = %v, want %v", tt.command, got, tt.want)
+			}
+			for k := range tt.want {
+				if !got[k] {
+					t.Errorf("sandboxSecretsANSICHereStrings(%q) = %v, want %v", tt.command, got, tt.want)
+				}
+			}
+		})
 	}
 }
