@@ -1178,6 +1178,14 @@ func TestSegmentCommandWord(t *testing.T) {
 		{"substitution closed by a token with two parens", []string{"y=$(echo", "a))", "bash"}, "bash"},
 		{"plain assignment before a substitution assignment", []string{"A=1", "y=$(echo", "a)", "bash"}, "bash"},
 		{"subshell paren after a substitution assignment", []string{"y=$(echo", "a)", "(", "bash"}, "bash"},
+		// A backtick substitution closes on a later token, as "$(" does, so the
+		// command after it is the word that follows (gt-bdct5).
+		{"backtick substitution closed in a later token", []string{"y=`echo", "a`", "apt-get"}, "apt-get"},
+		{"backtick substitution closed in its own token", []string{"y=`echo`", "bash"}, "bash"},
+		{"backtick substitution that never closes", []string{"y=`echo", "a", "bash"}, "echo"},
+		// shlex drops the quotes around a ")" inside a substitution, so the
+		// stray ")" tokens are not the command (gt-bdct5).
+		{"quoted paren closes the substitution early", []string{"y=$(echo", ")", ")", "apt-get"}, "apt-get"},
 		// A launcher's own flags are not the command word: the command is the
 		// first word after them, and a value flag takes its value (gt-48buu).
 		{"env with a flag before the command", []string{"env", "-i", "bash"}, "bash"},

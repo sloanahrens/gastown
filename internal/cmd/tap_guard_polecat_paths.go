@@ -1798,6 +1798,19 @@ func gitDashCDirs(args []string) []string {
 // at cd. A background & belongs here with the others: it runs the following
 // command just as ; does (gt-wwwht).
 func splitShellSegments(tokens []string) [][]string {
+	segments := splitAtShellSegments(tokens)
+	// A separator inside a command substitution does not start a command: the
+	// substitution's text runs first, and the command after its close runs
+	// with it (gt-bdct5). The split reading above stays, so a ";" that does
+	// end a command is still judged; the joined reading is judged as well.
+	if joined := joinSubstitutionSeparators(tokens); len(joined) != len(tokens) {
+		segments = append(segments, splitAtShellSegments(joined)...)
+	}
+	return segments
+}
+
+// splitAtShellSegments splits tokens on every shell command separator.
+func splitAtShellSegments(tokens []string) [][]string {
 	var (
 		segments [][]string
 		current  []string
@@ -1816,6 +1829,43 @@ func splitShellSegments(tokens []string) [][]string {
 		segments = append(segments, current)
 	}
 	return segments
+}
+
+// joinSubstitutionSeparators returns tokens with each separator that sits
+// inside a command substitution removed, so "y=$(echo a; echo b) apt-get"
+// reads as one segment whose assignment closes before apt-get.
+func joinSubstitutionSeparators(tokens []string) []string {
+	joined := make([]string, 0, len(tokens))
+	depth, ticked := 0, false
+	for _, token := range tokens {
+		if depth > 0 && shellCommandSeparators[token] {
+			continue
+		}
+		joined = append(joined, token)
+		depth, ticked = substitutionStep(token, depth, ticked)
+		if depth < 0 {
+			depth = 0
+		}
+	}
+	return joined
+}
+
+// substitutionStep returns the depth of open command substitutions after a
+// token, given the depth and backtick state before it. Each "$(" adds a level
+// and each ")" takes one away. A backtick opens a substitution when none is
+// open and closes the one that is, so a token that carries one toggles the
+// state (gt-bdct5).
+func substitutionStep(token string, depth int, ticked bool) (int, bool) {
+	depth += strings.Count(token, "$(") - strings.Count(token, ")")
+	if strings.Count(token, "`")%2 == 1 {
+		if ticked {
+			depth--
+		} else {
+			depth++
+		}
+		ticked = !ticked
+	}
+	return depth, ticked
 }
 
 // shellCommandKeywords introduce a command, or open a construct that contains
@@ -1887,6 +1937,11 @@ func trimShellKeywords(segment []string) []string {
 func segmentCommandWord(segment []string) (string, []string) {
 	for i := 0; i < len(segment); i++ {
 		token := segment[i]
+		if token == ")" {
+			// A bare ")" is never a command: shlex dropped the quotes around a
+			// ")" inside a substitution, so it is a stray close (gt-bdct5).
+			continue
+		}
 		if isEnvAssignment(token) {
 			width, opened := envAssignmentWidth(segment[i:])
 			if opened != "" {
@@ -2013,7 +2068,8 @@ func envAssignmentCloses(segment []string) []int {
 // substitution runs that substitution's text before the command, and the
 // substitution's words spread over tokens: "y=$(echo" "a)" "bash" is the
 // assignment "y=$(echo a)" followed by bash (gt-erfxm). The width runs through
-// the token that closes the substitution.
+// the token that closes the substitution. A backtick substitution closes the
+// same way, on its next backtick (gt-bdct5).
 //
 // A substitution that never closes in this segment runs the text after its
 // "$(" first, so that text's first word is the command: it is returned as
@@ -2021,14 +2077,18 @@ func envAssignmentCloses(segment []string) []int {
 // is the next token, as it is for a literal "$(" in a plain value: shlex has
 // already dropped the quotes that tell the two apart.
 func envAssignmentWidth(segment []string) (width int, opened string) {
-	depth := 0
+	depth, ticked := 0, false
 	for i, token := range segment {
-		depth += strings.Count(token, "$(") - strings.Count(token, ")")
+		depth, ticked = substitutionStep(token, depth, ticked)
 		if depth <= 0 {
 			return i + 1, ""
 		}
 	}
-	_, text, _ := strings.Cut(segment[0], "$(")
+	opener := "$("
+	if !strings.Contains(segment[0], opener) {
+		opener = "`"
+	}
+	_, text, _ := strings.Cut(segment[0], opener)
 	if nested := strings.Index(text, "$("); nested >= 0 {
 		text = text[:nested]
 	}
