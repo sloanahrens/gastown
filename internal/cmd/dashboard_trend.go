@@ -41,7 +41,7 @@ func trendWindowStart(now time.Time) time.Time {
 // buildTrend folds the landings, the landing worker's stage lines and
 // rejections, and the host's load samples into the last 24 hours. It is pure:
 // a record outside the window is not counted, an empty hour is present with
-// zeros, and only the newest trendMaxStages stage points are kept.
+// zeros, and the stage points are thinned to trendMaxStages across the window.
 func buildTrend(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, loads []dashboard.LoadPoint) *dashboard.Trend {
 	base := localHour(now)
 	hours := make([]dashboard.TrendHour, trendHours)
@@ -102,8 +102,33 @@ func buildTrend(now time.Time, recs []omRecord, stages []omStage, rejs []omRejec
 		})
 	}
 	sort.SliceStable(tr.Stages, func(i, j int) bool { return tr.Stages[i].At.Before(tr.Stages[j].At) })
-	if n := len(tr.Stages); n > trendMaxStages {
-		tr.Stages = append([]dashboard.TrendPoint(nil), tr.Stages[n-trendMaxStages:]...)
+	// Too many points for the chart: cut the window into trendMaxStages equal
+	// buckets and keep each bucket's slowest point. Keeping the newest points
+	// instead would leave a busy day's axis empty before the last few hours.
+	if len(tr.Stages) > trendMaxStages {
+		start := hours[0].Hour
+		span := hours[trendHours-1].Hour.Add(time.Hour).Sub(start)
+		slow := func(p dashboard.TrendPoint) float64 {
+			s := p.LintSecs + p.GateSecs
+			if p.OMSecs != nil {
+				s += *p.OMSecs
+			}
+			return s
+		}
+		slowest := make(map[int]dashboard.TrendPoint, trendMaxStages)
+		for _, p := range tr.Stages {
+			b := min(int(int64(p.At.Sub(start))*trendMaxStages/int64(span)), trendMaxStages-1)
+			if cur, ok := slowest[b]; !ok || slow(p) > slow(cur) {
+				slowest[b] = p
+			}
+		}
+		kept := make([]dashboard.TrendPoint, 0, len(slowest))
+		for b := range trendMaxStages {
+			if p, ok := slowest[b]; ok {
+				kept = append(kept, p)
+			}
+		}
+		tr.Stages = kept
 	}
 	return tr
 }
