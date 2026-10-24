@@ -30,9 +30,10 @@ const progressSettle = 30 * time.Minute
 
 // The rules that label a progress line, by the name --json reports.
 const (
-	ruleProgressLanded   = "progress:landed-in-window"
-	ruleProgressStopped  = "progress:stopped-by-overrun"
-	ruleProgressGateWait = "progress:gate-wait"
+	ruleProgressLanded    = "progress:landed-in-window"
+	ruleProgressNotLanded = "progress:not-landed-in-window"
+	ruleProgressStopped   = "progress:stopped-by-overrun"
+	ruleProgressGateWait  = "progress:gate-wait"
 )
 
 // The question ids the progress battery logs, named by the progress package.
@@ -109,11 +110,14 @@ func (a *progressAdapter) Parse(raw []byte) (Item, error) {
 //
 //  1. a landing record that names a landing within the window after the nudge
 //     sets making_progress true and remaining true (done or nearly done);
-//  2. else an overrun stop at or after the nudge sets making_progress false;
-//  3. an overrun record whose gate time was charged at or after the nudge sets
+//  2. no landing in the window sets remaining false: the bead was not shown
+//     done or nearly done at the nudge. A bead the store no longer holds takes
+//     no remaining label, since its state cannot be read;
+//  3. else an overrun stop at or after the nudge sets making_progress false;
+//  4. an overrun record whose gate time was charged at or after the nudge sets
 //     blocked_on_environment true.
 //
-// Rules 1 and 2 are exclusive: a landing in the window is progress, so a stop
+// Rules 1 and 3 are exclusive: a landing in the window is progress, so a stop
 // cannot also be the answer for the same nudge. The rule that set each label is
 // joined into the rule name with "+".
 func (a *progressAdapter) Label(_ context.Context, item Item) (Labeling, error) {
@@ -125,7 +129,8 @@ func (a *progressAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 		return Labeling{}, nil
 	}
 	notes, err := a.notes.Notes(line.Rig, line.Bead)
-	if errors.Is(err, beads.ErrNotFound) {
+	missing := errors.Is(err, beads.ErrNotFound)
+	if missing {
 		notes, err = "", nil
 	}
 	if err != nil {
@@ -143,9 +148,15 @@ func (a *progressAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 		labels[qMakingProgress] = true
 		labels[qRemaining] = true
 		rules = append(rules, ruleProgressLanded)
-	} else if !stop.StoppedAt.IsZero() && !stop.StoppedAt.Before(nudged) {
-		labels[qMakingProgress] = false
-		rules = append(rules, ruleProgressStopped)
+	} else {
+		if !missing {
+			labels[qRemaining] = false
+			rules = append(rules, ruleProgressNotLanded)
+		}
+		if !stop.StoppedAt.IsZero() && !stop.StoppedAt.Before(nudged) {
+			labels[qMakingProgress] = false
+			rules = append(rules, ruleProgressStopped)
+		}
 	}
 	if stop.GateSpent > 0 && !stop.GateSeenAt.Before(nudged) {
 		labels[qBlockedOnEnvironment] = true

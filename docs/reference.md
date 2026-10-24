@@ -1855,8 +1855,9 @@ queued. The progress pass runs on the next heartbeat that finds a nudge queued,
 so the answer lands while the seat is still inside its clock. The pass reads the
 seat's transcript for the window before the nudge and asks five questions in one
 call: `making_progress`, `looping`, `blocked_on_environment` and
-`drifted_from_bead`, each a `noul` probability, and `remaining`, a `score` over
-`done`, `nearly done`, `halfway` and `barely started`. It appends one line to
+`drifted_from_bead`, each a `noul` probability, and `remaining`, a `score` whose
+levels run from `barely started` up to `done`, so a finished bead scores at the
+top. It appends one line to
 `.runtime/jev/progress.jsonl`: `{ts, rig, polecat, bead, session, nudge_at,
 model, answers, question_version}`.
 
@@ -1906,6 +1907,10 @@ The labels come from the bead's `LANDING RECORD` note and the overrun guard's
 - `making_progress` true, and `remaining` true (done or nearly done), when the
   bead's landing record falls within 20 minutes after the nudge
   (`progress:landed-in-window`).
+- `remaining` false when no landing falls in that window: the bead was not shown
+  done or nearly done at the nudge (`progress:not-landed-in-window`). A bead the
+  store no longer holds takes no remaining label, since its state cannot be
+  read.
 - `making_progress` false when the overrun guard stopped the seat at or after
   the nudge (`progress:stopped-by-overrun`). A landing in the window wins over a
   stop.
@@ -1913,9 +1918,9 @@ The labels come from the bead's `LANDING RECORD` note and the overrun guard's
   at or after the nudge (`progress:gate-wait`). Network waits are not recorded,
   so no rule labels them.
 
-`looping`, `drifted_from_bead` and `remaining` set to barely started are not
-labeled: no record names a restart or a repeated command, and the guard's stop
-keeps no reason text. The rules are in `internal/jev/scorecard/progress.go`.
+`looping` and `drifted_from_bead` are not labeled: no record names a restart or
+a repeated command, and the guard's stop keeps no reason text. The rules are in
+`internal/jev/scorecard/progress.go`.
 
 ### Stale-bead battery (`jev_stale`)
 

@@ -562,8 +562,8 @@ func TestJevProgressQuestionSet(t *testing.T) {
 			t.Errorf("question %s = %+v, want type %s", id, q, typ)
 		}
 	}
-	if got := qs[QRemaining].Levels; len(got) != 4 || got[0] != "done" {
-		t.Errorf("remaining levels = %v", got)
+	if got := qs[QRemaining].Levels; len(got) != 4 || got[0] != "barely started" || got[3] != "done" {
+		t.Errorf("remaining levels = %v, want barely started to done", got)
 	}
 }
 
