@@ -120,6 +120,7 @@ say "installing OpenShell chart $CHART_VERSION"
 helm upgrade --install openshell oci://ghcr.io/nvidia/openshell/helm-chart --version "$CHART_VERSION" \
   --namespace openshell --create-namespace -f "$VALUES" --wait --timeout 7m
 kubectl apply -f "$HERE/gateway-nodeport.yaml"
+kubectl apply -f "$HERE/../services/control-plane.yaml"
 kubectl -n openshell rollout status statefulset/openshell --timeout=300s
 
 # Client certificates for the CLI. The key is never printed; the CLI wants
