@@ -664,8 +664,18 @@ func doneSlotLoopSegmentCommandWords(tokens []string) map[int]bool {
 // doneSlotLoopSkipToCommandWord returns the index of the command word at or
 // behind tokens[j], or the index of the segment's end when it holds none.
 func doneSlotLoopSkipToCommandWord(tokens []string, j int) int {
-	for j < len(tokens) && !shellCommandSeparators[tokens[j]] {
-		if isEnvAssignment(tokens[j]) || doneSlotLoopLeadWords[strings.ToLower(tokens[j])] {
+	end := j
+	for end < len(tokens) && !shellCommandSeparators[tokens[end]] {
+		end++
+	}
+	for j < end {
+		// One reading of a leading assignment, shared with segmentCommandWord,
+		// so a substitution's tokens are stepped over whole here too (gt-pnly6).
+		if next, _, ok := envAssignmentSkip(tokens[:end], j); ok {
+			j = next
+			continue
+		}
+		if doneSlotLoopLeadWords[strings.ToLower(tokens[j])] {
 			j++
 			continue
 		}

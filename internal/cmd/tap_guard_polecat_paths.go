@@ -1968,12 +1968,11 @@ func trimShellKeywords(segment []string) []string {
 func segmentCommandWord(segment []string) (string, []string) {
 	for i := 0; i < len(segment); i++ {
 		token := segment[i]
-		if isEnvAssignment(token) {
-			width, opened := envAssignmentWidth(segment[i:])
+		if next, opened, ok := envAssignmentSkip(segment, i); ok {
 			if opened != "" {
 				return opened, segment[i+1:]
 			}
-			i += width - 1
+			i = next - 1
 			// shlex drops the quotes around a ")" inside a substitution, so the
 			// stray ")" right after the assignment is not the command (gt-bdct5).
 			for i+1 < len(segment) && segment[i+1] == ")" {
@@ -2124,6 +2123,23 @@ func envAssignmentWidth(segment []string) (width int, opened string) {
 		text = text[:nested]
 	}
 	return 1, text
+}
+
+// envAssignmentSkip is the single reading of a leading NAME=value assignment
+// that every command-word walk shares: ok reports that segment[i] starts one,
+// and next is the index just past it — the whole substitution when the value
+// holds one, only its own token otherwise. A walk that steps one token per
+// assignment instead reads the substitution's first word as the command, so
+// `y=$(echo a b) repeat 3 gt done` never judges the repeat (gt-pnly6). The
+// slice must end where the segment does: a substitution that never closes
+// inside it is then read as opened rather than swallowing the command behind
+// it.
+func envAssignmentSkip(segment []string, i int) (next int, opened string, ok bool) {
+	if !isEnvAssignment(segment[i]) {
+		return i, "", false
+	}
+	width, opened := envAssignmentWidth(segment[i:])
+	return i + width, opened, true
 }
 
 // isEnvAssignment reports whether a token is a leading NAME=value environment

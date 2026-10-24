@@ -38,6 +38,14 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"zsh foreach gt done", "foreach f (a b c); gt done; end", true},
 		{"zsh foreach slot poll", "foreach r (gastown beads) gt slot status; end", true},
 
+		// The loop word sits behind a leading assignment, which the shell
+		// evaluates and discards before it runs the command. A substitution
+		// assignment spans every token of its substitution, so skipping one
+		// token per assignment reads the substitution's text as the command
+		// and the repeat goes unjudged (gt-pnly6).
+		{"zsh repeat behind a plain assignment", "y=1 repeat 3 gt done", true},
+		{"zsh repeat behind a substitution assignment", "y=$(echo a b) repeat 3 gt done", true},
+
 		// The other shapes zsh accepts, and the modifiers that prefix them
 		// (gt-ezhf4). Each was verified to loop in zsh.
 		{"zsh repeat of an && list", "repeat 20 make lint && gt done", true},
@@ -186,8 +194,32 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 65 {
-		t.Errorf("blocked %d of %d cases, want exactly 65", blocked, len(tests))
+	if blocked != 67 {
+		t.Errorf("blocked %d of %d cases, want exactly 67", blocked, len(tests))
+	}
+}
+
+// A loop behind a leading assignment is refused however many tokens the
+// value spans: a substitution assignment covers its whole substitution, and a
+// walk that stepped over one token read the substitution's text as the
+// command (gt-pnly6).
+func TestDoneSlotLoopAssignmentBeforeRepeat(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"plain assignment", "y=1 repeat 3 gt done"},
+		{"substitution assignment", "y=$(echo a b) repeat 3 gt done"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if reason != doneSlotLoopReason {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want %q", tt.command, reason, doneSlotLoopReason)
+			}
+		})
 	}
 }
 
