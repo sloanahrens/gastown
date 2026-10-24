@@ -1195,3 +1195,111 @@ func TestEnsureRuntimeWorkspace_SeedsTrustForNeverTrustedWorktree(t *testing.T) 
 		t.Errorf("expected trust entry for %s, got %s", workDir, data)
 	}
 }
+
+// staleSandboxStart is a SessionManager over a temp town with a polecat dir, a
+// fake tmux with no running session, and a launch that records whether the
+// sandbox record still existed at the moment Start launched.
+type staleSandboxStart struct {
+	m              *SessionManager
+	town, sess     string
+	recordAtLaunch *bool
+	asked          *[]string
+}
+
+func newStaleSandboxStart(t *testing.T, record bool, exists func(gateway, name string) (bool, error)) staleSandboxStart {
+	t.Helper()
+	town := t.TempDir()
+	rg := &rig.Rig{Name: "test-rig", Path: filepath.Join(town, "test-rig"), Polecats: []string{"Toast"}}
+	if err := os.MkdirAll(filepath.Join(rg.Path, "polecats", "Toast"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := &SessionManager{tmux: newFakeSessionTmux(), rig: rg, gits: newWorld().opener()}
+	sess := m.SessionName("Toast")
+	if record {
+		if err := session.WriteSandboxRecord(town, session.SandboxRecord{Session: sess, Rig: "test-rig", Polecat: "Toast", Gateway: "gw1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var asked []string
+	m.sandboxExists = func(gateway, name string) (bool, error) {
+		asked = append(asked, gateway+"|"+name)
+		return exists(gateway, name)
+	}
+	var at bool
+	m.launchFn = func(string, string, SessionStartOptions) error {
+		_, at, _ = session.ReadSandboxRecord(town, sess)
+		return nil
+	}
+	return staleSandboxStart{m: m, town: town, sess: sess, recordAtLaunch: &at, asked: &asked}
+}
+
+// Start on a HOST name that a finished sandbox seat left a record for drops that
+// record BEFORE it launches (the routed tmux client would otherwise send the new
+// session into the dead sandbox), but only when the record's gateway affirms the
+// sandbox is gone. A sandbox start, a live sandbox, a gateway that cannot be
+// asked and an unreadable registry all leave the record, and Start still
+// launches.
+func TestStartDropsAStaleSandboxRecordBeforeLaunching(t *testing.T) {
+	t.Parallel()
+	gone := func(string, string) (bool, error) { return false, nil }
+	live := func(string, string) (bool, error) { return true, nil }
+	unreachable := func(string, string) (bool, error) { return false, errors.New("gateway unreachable") }
+	tests := []struct {
+		name        string
+		record      bool
+		exists      func(string, string) (bool, error)
+		opts        SessionStartOptions
+		wantAtLaunc bool // the record still exists when launch runs
+		wantAsked   int
+	}{
+		{"host_start_gateway_says_gone_drops_it", true, gone, SessionStartOptions{}, false, 1},
+		{"tmux_backend_start_drops_it_too", true, gone, SessionStartOptions{Backend: session.NewTmuxBackend(nil)}, false, 1},
+		{"live_sandbox_keeps_its_record", true, live, SessionStartOptions{}, true, 1},
+		{"unreachable_gateway_keeps_it_and_start_proceeds", true, unreachable, SessionStartOptions{}, true, 1},
+		{"sandbox_start_keeps_its_record_and_asks_nothing", true, gone, SessionStartOptions{Backend: sandboxNamedBackend{}}, true, 0},
+		{"no_record_asks_nothing", false, gone, SessionStartOptions{}, false, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newStaleSandboxStart(t, tt.record, tt.exists)
+			if err := s.m.Start("Toast", tt.opts); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if *s.recordAtLaunch != tt.wantAtLaunc {
+				t.Errorf("record present when launch ran = %v, want %v", *s.recordAtLaunch, tt.wantAtLaunc)
+			}
+			if len(*s.asked) != tt.wantAsked {
+				t.Errorf("gateway questions = %v, want %d", *s.asked, tt.wantAsked)
+			}
+			if tt.wantAsked == 1 && (*s.asked)[0] != "gw1|"+s.sess {
+				t.Errorf("gateway question = %q, want the record's gateway and the session", (*s.asked)[0])
+			}
+		})
+	}
+}
+
+// A registry that cannot be read does not abort a host Start: the record only
+// matters if it exists.
+func TestStartProceedsWhenTheSandboxRegistryCannotBeRead(t *testing.T) {
+	t.Parallel()
+	s := newStaleSandboxStart(t, false, func(string, string) (bool, error) { return false, nil })
+	dir := session.SandboxRegistryDir(s.town)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, s.sess+".json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launched := false
+	s.m.launchFn = func(string, string, SessionStartOptions) error { launched = true; return nil }
+	if err := s.m.Start("Toast", SessionStartOptions{}); err != nil || !launched {
+		t.Fatalf("Start = %v, launched = %v; want it to proceed past an unreadable record", err, launched)
+	}
+}
+
+// sandboxNamedBackend is a session.Backend that reports the openshell backend's
+// name; dropStaleSandboxRoute only reads Name.
+type sandboxNamedBackend struct{ session.Backend }
+
+func (sandboxNamedBackend) Name() string { return session.BackendOpenShell }
