@@ -56,3 +56,38 @@ func TestIntegrationGtCommitAuthorMatchesSeatIdentity(t *testing.T) {
 		t.Errorf("author = %q <%s>, want the seat identity %q <%s>", fields[0], fields[1], seat.Name, seat.Email)
 	}
 }
+
+// TestIntegrationAuthorEmailUnsetIsNotAnError pins which AuthorEmail failures
+// gt commit treats as "no email set" (the fallback path) and which it reports:
+// git config exits 1 when user.email is unset and 128 when the config cannot
+// be read, and only the first is the fallback.
+func TestIntegrationAuthorEmailUnsetIsNotAnError(t *testing.T) {
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	runGit("init", "-q")
+	// Keep the host's global and system config out of the answer.
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+
+	if err := os.WriteFile(global, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.NewGit(dir).AuthorEmail(); !authorEmailUnset(err) {
+		t.Errorf("unset user.email: authorEmailUnset(%v) = false, want true", err)
+	}
+
+	if err := os.WriteFile(global, []byte("[user\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.NewGit(dir).AuthorEmail(); err == nil || authorEmailUnset(err) {
+		t.Errorf("unreadable config: authorEmailUnset(%v) = true, want false", err)
+	}
+}

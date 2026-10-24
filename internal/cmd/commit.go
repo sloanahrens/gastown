@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -70,15 +72,30 @@ func runCommit(cmd *cobra.Command, args []string) error {
 	worktreeEmail, err := git.NewGit(cwd).AuthorEmail()
 	if err != nil {
 		worktreeEmail = ""
+		if !authorEmailUnset(err) {
+			// Unset is the fallback below; any other failure means the worktree
+			// could not be read, so say so instead of quietly authoring as the
+			// fallback.
+			style.PrintWarning("could not read the worktree's user.email (%v); authoring with the fallback address", err)
+		}
 	}
 	seat := git.SeatIdentityFor(identity, worktreeEmail)
 	if seat.Email == "" {
 		// Nothing in the worktree names an address, so keep the agent's own
-		// rather than author with none; gt done cannot read this worktree's
-		// email either, which leaves its lease off rather than mismatched.
+		// rather than author with none. gt done reads the same worktree email
+		// for its rework lease and gets none, so the lease stays off and this
+		// author is not matched against it.
 		seat.Email = identityToEmail(identity, agentEmailDomain())
+		style.PrintWarning("worktree has no user.email; authoring as %s, which gt done's rework lease cannot match", seat.Email)
 	}
 	return runGitCommit(args, seat)
+}
+
+// authorEmailUnset reports whether err is git config saying user.email is not
+// set (exit status 1), as opposed to the worktree failing to be read.
+func authorEmailUnset(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
 // agentEmailDomain returns the town's agent_email_domain, or the default when
@@ -162,16 +179,21 @@ func commitGitArgs(args []string, seat git.SeatIdentity) []string {
 	return append(gitArgs, args...)
 }
 
-// withAuthorEnv returns env with seat's author variables set in place of any it
-// already holds: git reads the first GIT_AUTHOR_NAME in the environment, so an
-// appended second entry would leave the inherited one in force.
+// withAuthorEnv returns env with seat's author and committer variables set in
+// place of any it already holds: git reads the first GIT_AUTHOR_NAME in the
+// environment, so an appended second entry would leave the inherited one in
+// force. The committer pair is set too, because GIT_COMMITTER_* outranks the
+// -c user.* that commitGitArgs passes, so an inherited one would otherwise
+// commit under another identity than the author.
 func withAuthorEnv(env []string, seat git.SeatIdentity) []string {
-	set := make(map[string]string, 2)
+	set := make(map[string]string, 4)
 	if seat.Name != "" {
 		set["GIT_AUTHOR_NAME"] = seat.Name
+		set["GIT_COMMITTER_NAME"] = seat.Name
 	}
 	if seat.Email != "" {
 		set["GIT_AUTHOR_EMAIL"] = seat.Email
+		set["GIT_COMMITTER_EMAIL"] = seat.Email
 	}
 	out := make([]string, 0, len(env)+len(set))
 	for _, kv := range env {
@@ -182,8 +204,11 @@ func withAuthorEnv(env []string, seat git.SeatIdentity) []string {
 		}
 		out = append(out, kv)
 	}
-	for k, v := range set {
-		out = append(out, k+"="+v)
+	// Append in a fixed order, so the same seat always yields the same env.
+	for _, k := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
+		if v, ok := set[k]; ok {
+			out = append(out, k+"="+v)
+		}
 	}
 	return out
 }

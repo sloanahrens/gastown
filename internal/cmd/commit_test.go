@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
@@ -193,19 +192,27 @@ func TestCommitGitArgsCarryTheSeatIdentity(t *testing.T) {
 
 // TestWithAuthorEnvReplacesInheritedAuthor covers the bug's trigger: an
 // inherited GIT_AUTHOR_NAME outranks -c user.name, so the wrapper must replace
-// it rather than add a second entry git would read past (gt-tip6u).
+// it rather than add a second entry git would read past (gt-tip6u). The same
+// holds for the committer pair, which outranks the -c user.* commitGitArgs sets.
 func TestWithAuthorEnvReplacesInheritedAuthor(t *testing.T) {
 	t.Parallel()
-	env := []string{"PATH=/bin", "GIT_AUTHOR_NAME=stale", "GIT_AUTHOR_EMAIL=stale@test.com"}
-	got := withAuthorEnv(env, git.SeatIdentity{Name: "coma", Email: "seat@test.com"})
-	want := map[string]string{"PATH": "/bin", "GIT_AUTHOR_NAME": "coma", "GIT_AUTHOR_EMAIL": "seat@test.com"}
-	if len(got) != len(want) {
-		t.Fatalf("withAuthorEnv = %v, want %d entries", got, len(want))
+	env := []string{
+		"PATH=/bin",
+		"GIT_AUTHOR_NAME=stale",
+		"GIT_AUTHOR_EMAIL=stale@test.com",
+		"GIT_COMMITTER_NAME=stale",
+		"GIT_COMMITTER_EMAIL=stale@test.com",
 	}
-	for _, kv := range got {
-		k, v, _ := strings.Cut(kv, "=")
-		if want[k] != v {
-			t.Errorf("%s = %q, want %q", k, v, want[k])
-		}
+	got := withAuthorEnv(env, git.SeatIdentity{Name: "coma", Email: "seat@test.com"})
+	// The order is fixed, so the same seat always yields the same environment.
+	want := []string{
+		"PATH=/bin",
+		"GIT_AUTHOR_NAME=coma",
+		"GIT_AUTHOR_EMAIL=seat@test.com",
+		"GIT_COMMITTER_NAME=coma",
+		"GIT_COMMITTER_EMAIL=seat@test.com",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("withAuthorEnv = %v, want %v", got, want)
 	}
 }
