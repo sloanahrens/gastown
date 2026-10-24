@@ -50,18 +50,19 @@ const hostBDFixture = `Found 1 issue:
 ○ gt-xxxxxxx P2 <title>
 `
 
-// hostFake answers the probes with canned output and steps through a fixed
-// clock, so no test starts a process or reads the wall clock.
+// hostFake answers the probes with canned output. Its clock moves only when a
+// command runs, by that command's took duration, so a latency reading is the
+// difference the probe takes between the two Now calls around its Run.
 type hostFake struct {
 	output map[string]string
 	fail   map[string]error
-	times  []time.Time
-	now    int
+	took   map[string]time.Duration
+	now    time.Time
 }
 
-// hostFixtureEnv answers every probe with its captured output. The clock
-// starts at startAt and every reading moves it forward by step.
-func hostFixtureEnv(startAt time.Time, step time.Duration) *hostFake {
+// hostFixtureEnv answers every probe with its captured output. bd takes 37 ms
+// on the fake clock; the others take none.
+func hostFixtureEnv(startAt time.Time) *hostFake {
 	return &hostFake{
 		output: map[string]string{
 			"/usr/bin/top": hostTopFixture,
@@ -69,8 +70,9 @@ func hostFixtureEnv(startAt time.Time, step time.Duration) *hostFake {
 			"lsof":         hostLsofFixture,
 			"docker":       hostDFFixture,
 		},
-		fail:  map[string]error{},
-		times: []time.Time{startAt, startAt.Add(step)},
+		fail: map[string]error{},
+		took: map[string]time.Duration{"bd": 37 * time.Millisecond},
+		now:  startAt,
 	}
 }
 
@@ -78,29 +80,21 @@ func (f *hostFake) env() Env {
 	return Env{
 		Town: "/town",
 		Run: func(_ context.Context, argv []string) ([]byte, error) {
+			f.now = f.now.Add(f.took[argv[0]])
 			if err := f.fail[argv[0]]; err != nil {
 				return nil, err
 			}
 			return []byte(f.output[argv[0]]), nil
 		},
-		Now: func() time.Time {
-			if f.now >= len(f.times) {
-				f.now++
-				return f.times[len(f.times)-1]
-			}
-			at := f.times[f.now]
-			f.now++
-			return at
-		},
+		Now: func() time.Time { return f.now },
 	}
 }
 
 func TestSourceHostCollectsTheFourColumns(t *testing.T) {
 	t.Parallel()
-	start := time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)
-	fake := hostFixtureEnv(start, 37*time.Millisecond)
+	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
 
-	got, err := (hostSource{}).Collect(context.Background(), fake.env())
+	got, err := newHostSource().Collect(context.Background(), fake.env())
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
@@ -129,6 +123,8 @@ func TestSourceHostParsers(t *testing.T) {
 		{"top CPU line without idle", parseCPUIdlePct, "CPU usage: 10.42% user, 5.29% sys\n", nil, true},
 		{"lsof counts each connection once", parseDoltConns, hostLsofFixture, 2, false},
 		{"lsof with no connections", parseDoltConns, hostLsofHeader, 0, false},
+		{"lsof printing nothing", parseDoltConns, "", nil, true},
+		{"lsof line that is not an established connection", parseDoltConns, hostLsofHeader + "dolt 41022 sloan 45u IPv4 0x8a TCP 127.0.0.1:3307 (LISTEN)\n", nil, true},
 		{"df reads the root capacity", parseDockerDiskPct, hostDFFixture, 59.0, false},
 		{"df without a root line", parseDockerDiskPct, "Filesystem 1024-blocks Used Available Capacity Mounted on\n", nil, true},
 	}
@@ -152,24 +148,39 @@ func TestSourceHostParsers(t *testing.T) {
 	}
 }
 
+// An empty bd answer is no reading: the call returned, but nothing answered.
+func TestSourceHostEmptyLatencyAnswerLeavesItsColumnNil(t *testing.T) {
+	t.Parallel()
+	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
+	fake.output["bd"] = ""
+
+	got, err := newHostSource().Collect(context.Background(), fake.env())
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got["bd_latency_ms"] != nil {
+		t.Errorf("bd_latency_ms = %v, want nil when bd printed nothing", got["bd_latency_ms"])
+	}
+}
+
 // Each probe is failed in turn: the columns of the commands that answered stay
 // filled, so one broken command costs one reading.
 func TestSourceHostFailedCommandLeavesOnlyThatColumnNil(t *testing.T) {
 	t.Parallel()
-	for _, probe := range hostProbes() {
+	for _, probe := range newHostSource().probes() {
 		t.Run(probe.column, func(t *testing.T) {
 			t.Parallel()
-			fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC), time.Millisecond)
+			fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
 			fake.fail[probe.argv[0]] = errors.New("command failed")
 
-			got, err := (hostSource{}).Collect(context.Background(), fake.env())
+			got, err := newHostSource().Collect(context.Background(), fake.env())
 			if err != nil {
 				t.Fatalf("Collect: %v", err)
 			}
 			if got[probe.column] != nil {
 				t.Errorf("%s = %v, want nil when its command fails", probe.column, got[probe.column])
 			}
-			for _, other := range hostProbes() {
+			for _, other := range newHostSource().probes() {
 				if other.column != probe.column && got[other.column] == nil {
 					t.Errorf("%s = nil, want it filled while only %s failed", other.column, probe.column)
 				}
@@ -178,26 +189,33 @@ func TestSourceHostFailedCommandLeavesOnlyThatColumnNil(t *testing.T) {
 	}
 }
 
-// A command that runs past its deadline is abandoned and its column is nil,
-// the same as one that fails outright.
-func TestSourceHostTimedOutCommandLeavesOnlyThatColumnNil(t *testing.T) {
+// Every probe runs under its own hostCommandTimeout, counted from when it
+// starts, so a wedged command costs its column and no more. The check reads the
+// deadline the probe passed to Run; no test waits out the five seconds.
+func TestSourceHostEachProbeRunsUnderItsOwnDeadline(t *testing.T) {
 	t.Parallel()
-	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC), time.Millisecond)
+	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
 	env := fake.env()
 	answer := env.Run
+	before := time.Now()
 	env.Run = func(ctx context.Context, argv []string) ([]byte, error) {
-		if argv[0] != "lsof" {
-			return answer(ctx, argv)
+		deadline, ok := ctx.Deadline()
+		switch {
+		case !ok:
+			t.Errorf("%s ran with no deadline", argv[0])
+		case deadline.Before(before.Add(hostCommandTimeout)):
+			t.Errorf("%s deadline %v is sooner than hostCommandTimeout after the snapshot began", argv[0], deadline)
+		case deadline.After(time.Now().Add(hostCommandTimeout)):
+			t.Errorf("%s deadline %v is later than hostCommandTimeout from now", argv[0], deadline)
 		}
-		<-ctx.Done()
-		return nil, ctx.Err()
+		if argv[0] == "lsof" {
+			// The command that missed its deadline: the probe must read it as nil.
+			return nil, context.DeadlineExceeded
+		}
+		return answer(ctx, argv)
 	}
-	// The snapshot's own context is already over, so lsof's wait ends at once:
-	// the test proves the deadline path without spending hostCommandTimeout.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 
-	got, err := (hostSource{}).Collect(ctx, env)
+	got, err := newHostSource().Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
@@ -213,10 +231,10 @@ func TestSourceHostTimedOutCommandLeavesOnlyThatColumnNil(t *testing.T) {
 // changed is missing from the record rather than recorded as a wrong reading.
 func TestSourceHostUnreadableOutputNullsTheGroup(t *testing.T) {
 	t.Parallel()
-	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC), time.Millisecond)
+	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
 	fake.output["/usr/bin/top"] = "Processes: 641 total\n"
 
-	got, err := (hostSource{}).Collect(context.Background(), fake.env())
+	got, err := newHostSource().Collect(context.Background(), fake.env())
 	if err == nil {
 		t.Fatal("Collect accepted top output with no CPU line")
 	}
@@ -230,7 +248,7 @@ func TestSourceHostUnreadableOutputNullsTheGroup(t *testing.T) {
 func TestSourceHostDockerArgvNamesTheContext(t *testing.T) {
 	t.Parallel()
 	checked := 0
-	for _, probe := range hostProbes() {
+	for _, probe := range newHostSource().probes() {
 		if probe.argv[0] != "docker" {
 			continue
 		}
@@ -241,5 +259,22 @@ func TestSourceHostDockerArgvNamesTheContext(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no docker probe to check")
+	}
+}
+
+// The Dolt port and the container are the source's fields, so the commands
+// read the ones the source was built with.
+func TestSourceHostProbesUseTheConfiguredPortAndContainer(t *testing.T) {
+	t.Parallel()
+	host := hostSource{doltPort: "4321", dockerContainer: "runner-test"}
+	argv := map[string][]string{}
+	for _, probe := range host.probes() {
+		argv[probe.argv[0]] = probe.argv
+	}
+	if got := strings.Join(argv["lsof"], " "); !strings.Contains(got, "-iTCP:4321") {
+		t.Errorf("lsof argv = %q, want it to watch port 4321", got)
+	}
+	if got := strings.Join(argv["docker"], " "); !strings.Contains(got, "exec runner-test df") {
+		t.Errorf("docker argv = %q, want it to exec in runner-test", got)
 	}
 }

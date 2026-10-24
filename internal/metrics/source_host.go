@@ -6,36 +6,46 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // hostCommandTimeout bounds each host probe separately, so a wedged top, bd,
 // lsof or docker costs its own column and leaves the other three filled.
 const hostCommandTimeout = 5 * time.Second
 
-// hostDoltPort is the port the town's Dolt server listens on. Counting the
-// connections to it with lsof answers without a database round trip, so a
-// server too busy to answer still reports its connection count.
-const hostDoltPort = "3307"
-
-// hostDockerContainer is the Forgejo runner, part of the stack a town keeps
-// running. A container's filesystem is the Docker VM's disk, so df inside this
-// one reads the usage Docker Desktop fills (gt-mexpf).
-const hostDockerContainer = "forgejo-runner-daemon-1"
-
 // hostSource is the host group: the machine the snapshot runs on, read with
 // the macOS commands the operator uses by hand. A host without one of them,
 // or one whose command fails or misses hostCommandTimeout, leaves that column
 // nil rather than inventing a number.
-type hostSource struct{}
+type hostSource struct {
+	// doltPort is the port the Dolt server listens on. lsof counts the
+	// connections to it, which answers without a database round trip, so a
+	// server too busy to answer still reports its connection count.
+	doltPort string
+	// dockerContainer is a container whose filesystem is the Docker VM's disk,
+	// so df inside it reads the usage Docker Desktop fills (gt-mexpf).
+	dockerContainer string
+}
+
+// newHostSource is the host group as the registry runs it: the default Dolt
+// port and the Forgejo runner, which is part of the stack a town keeps up.
+func newHostSource() hostSource {
+	return hostSource{
+		doltPort:        strconv.Itoa(doltserver.DefaultPort),
+		dockerContainer: "forgejo-runner-daemon-1",
+	}
+}
 
 func (hostSource) Group() string { return "host" }
 
 // Collect fills the host group. Output a parser cannot read is an error, which
 // nulls the group: a fixture that no longer matches the command must show up
 // as missing rather than as a wrong reading.
-func (hostSource) Collect(ctx context.Context, env Env) (map[string]any, error) {
-	cols := make(map[string]any, len(hostProbes()))
-	for _, probe := range hostProbes() {
+func (s hostSource) Collect(ctx context.Context, env Env) (map[string]any, error) {
+	probes := s.probes()
+	cols := make(map[string]any, len(probes))
+	for _, probe := range probes {
 		value, err := probe.read(ctx, env)
 		if err != nil {
 			return nil, fmt.Errorf("host %s: %w", probe.column, err)
@@ -55,9 +65,9 @@ type hostProbe struct {
 	parse   func(string) (any, error)
 }
 
-// hostProbes are the group's columns, in the order they run. They run one
-// after another, so Collect costs at most four timeouts.
-func hostProbes() []hostProbe {
+// probes are the group's columns, in the order they run. They run one after
+// another, so Collect costs at most four timeouts.
+func (s hostSource) probes() []hostProbe {
 	return []hostProbe{
 		{
 			column: "cpu_idle_pct",
@@ -71,14 +81,14 @@ func hostProbes() []hostProbe {
 		},
 		{
 			column: "dolt_conns",
-			argv:   []string{"lsof", "-nP", "-iTCP:" + hostDoltPort, "-sTCP:ESTABLISHED"},
+			argv:   []string{"lsof", "-nP", "-iTCP:" + s.doltPort, "-sTCP:ESTABLISHED"},
 			parse:  parseDoltConns,
 		},
 		{
 			column: "docker_disk_pct",
 			argv: []string{
 				"docker", "--context", "desktop-linux", "exec",
-				hostDockerContainer, "df", "-Pk", "/",
+				s.dockerContainer, "df", "-Pk", "/",
 			},
 			parse: parseDockerDiskPct,
 		},
@@ -93,8 +103,12 @@ func (p hostProbe) read(ctx context.Context, env Env) (any, error) {
 	ctx, cancel := context.WithTimeout(ctx, hostCommandTimeout)
 	defer cancel()
 	if p.latency {
+		// The start is read before the command runs, so the difference is the
+		// command's own time. An empty answer is nil: a bd that printed nothing
+		// did not answer, and its fast return is not a latency.
 		start := env.Now()
-		if _, err := env.Run(ctx, p.argv); err != nil {
+		out, err := env.Run(ctx, p.argv)
+		if err != nil || strings.TrimSpace(string(out)) == "" {
 			return nil, nil
 		}
 		return float64(env.Now().Sub(start)) / float64(time.Millisecond), nil
@@ -133,13 +147,21 @@ func parseCPUIdlePct(out string) (any, error) {
 	return nil, fmt.Errorf("top's CPU line names no idle share")
 }
 
-// parseDoltConns counts the established connections to the Dolt port in lsof's
-// output. lsof prints one line per endpoint, so a connection appears twice,
-// once for each process holding it; the endpoints are ordered into one key so
-// the pair counts once.
+// parseDoltConns counts the established connections in lsof's output. lsof
+// prints one line per endpoint, so a connection appears twice, once for each
+// process holding it; the endpoints are ordered into one key so the pair
+// counts once. Any line that is not a connection is an error, so a format
+// change reads as missing rather than as zero connections.
 func parseDoltConns(out string) (any, error) {
+	text := strings.TrimSpace(out)
+	if text == "" {
+		return nil, fmt.Errorf("lsof printed nothing, not even its header")
+	}
 	conns := map[string]bool{}
-	for _, line := range strings.Split(out, "\n") {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "COMMAND") {
+			continue
+		}
 		name := ""
 		for _, field := range strings.Fields(line) {
 			if strings.Contains(field, "->") {
@@ -148,8 +170,8 @@ func parseDoltConns(out string) (any, error) {
 			}
 		}
 		ends := strings.Split(name, "->")
-		if len(ends) != 2 {
-			continue
+		if len(ends) != 2 || !strings.Contains(line, "(ESTABLISHED)") {
+			return nil, fmt.Errorf("lsof line names no established connection: %q", line)
 		}
 		if ends[0] > ends[1] {
 			ends[0], ends[1] = ends[1], ends[0]
