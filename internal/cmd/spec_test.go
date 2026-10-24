@@ -868,6 +868,32 @@ func TestSpecHoldFilesKeepsDocsWhenConstraintsAreUnknown(t *testing.T) {
 	}
 }
 
+// A Constraints section that names no path leaves the files a follow-up changes
+// unstated, so the reference doc its Goal names is the work and stays held. A
+// Constraints section that names other paths keeps the rule that a cited doc is
+// read, not changed (gt-1e5s8).
+func TestSpecHoldFilesKeepsGoalDocsWhenConstraintsNameNoPath(t *testing.T) {
+	t.Parallel()
+	const doc = "docs/reference.md"
+	cases := []struct {
+		name        string
+		description string
+		want        []string
+	}{
+		{"Constraints names no path", "## Goal\nRewrite " + doc + ".\n\n## Constraints\nKeep the gate green.", []string{doc}},
+		{"Goal does not name the doc", "## Goal\nA thing.\n\n## Constraints\nKeep the gate green.", []string{}},
+		{"Constraints names another path", "## Goal\nRewrite " + doc + ".\n\n## Constraints\nChange only internal/cmd/spec.go.", []string{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := specHoldFiles([]string{doc}, c.description); fmt.Sprint(got) != fmt.Sprint(c.want) {
+				t.Errorf("specHoldFiles = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // Two beads that only read the same standard do not hold each other: the
 // standard is cited, not changed (gt-6t44f). Two beads naming one source file
 // still hold, and so do two beads that list the standard under Constraints,
