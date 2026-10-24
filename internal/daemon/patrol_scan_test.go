@@ -786,6 +786,8 @@ func (e *passEnv) GitState(string, string) (patrolscan.GitState, error) {
 func (e *passEnv) Heartbeat(string, string) *patrolscan.Heartbeat      { return nil }
 func (e *passEnv) Restart(string, string, string) error                { return nil }
 func (e *passEnv) Kill(string, string, string) error                   { return nil }
+func (e *passEnv) StalledReleaseOwed(string, string) (bool, error)     { return false, nil }
+func (e *passEnv) FinishStalledRelease(string, string) error           { return nil }
 func (e *passEnv) MarkIdle(string, string) (bool, error)               { return false, nil }
 func (e *passEnv) ClearStuckExit(string, string, string) (bool, error) { return false, nil }
 func (e *passEnv) MarkSubmitted(string, string, string) error          { return nil }
@@ -1240,6 +1242,156 @@ func TestPatrolScanKillRemovesTheSandboxAfterTheKill(t *testing.T) {
 		err := h.Kill("myr", "mycat", "stalled seat")
 		if !errors.Is(err, boom) || !strings.Contains(err.Error(), "killed the session, but removing the sandbox") {
 			t.Errorf("Kill = %v, want the cleanup error to say the kill succeeded and the sandbox removal failed", err)
+		}
+	})
+}
+
+// A stalled seat whose kill stopped the session but whose sandbox removal failed
+// owes that removal and its retire to stop. The dead-seat check finishes both,
+// and the owed mark clears only once they have gone through: a failed retry
+// leaves the release owed for the next tick (see TestDeadSeatFinishesAStalledReleaseOwedItsSandboxRemoval
+// for the scan side).
+func TestPatrolScanStalledReleaseOwesItsSandboxRemoval(t *testing.T) {
+	t.Parallel()
+	newHost := func(t *testing.T, cleanup func(townRoot, sessionName string) error) (*patrolScanHost, string) {
+		t.Helper()
+		town := t.TempDir()
+		tm := newFakeTmux(newFixedClock())
+		tm.addSession("myr-mycat", "claude", time.Now())
+		d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0), tmux: tm, prefixRegistryFn: myrPrefixes}
+		return &patrolScanHost{d: d, cleanupSandbox: cleanup}, town
+	}
+
+	t.Run("the kill owes the removal and the retry finishes it", func(t *testing.T) {
+		t.Parallel()
+		removals := 0
+		h, town := newHost(t, func(string, string) error {
+			removals++
+			if removals == 1 {
+				return errors.New("gateway unreachable")
+			}
+			return nil
+		})
+		if err := h.Kill("myr", "mycat", "stalled seat"); err == nil {
+			t.Fatal("Kill = nil, want the failed sandbox removal reported")
+		}
+		if owed, err := h.StalledReleaseOwed("myr", "mycat"); err != nil || !owed {
+			t.Fatalf("StalledReleaseOwed = %v, %v; want the failed removal to owe the release", owed, err)
+		}
+		if err := h.FinishStalledRelease("myr", "mycat"); err != nil {
+			t.Fatalf("FinishStalledRelease = %v; want the owed release finished", err)
+		}
+		if removals != 2 {
+			t.Errorf("sandbox removals = %d, want the retry to be the second", removals)
+		}
+		if owed, _ := h.StalledReleaseOwed("myr", "mycat"); owed {
+			t.Error("the release is still owed after it finished")
+		}
+		rec, err := intent.Read(town, supervisor.IntentSeat(h.seat("myr", "mycat")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.EffectiveDesired() != intent.DesiredStop {
+			t.Errorf("seat desired = %q after the finished release, want %q", rec.EffectiveDesired(), intent.DesiredStop)
+		}
+		if owed, _ := h.StalledReleaseOwed("myr", "mycat"); owed {
+			t.Error("the release is owed again after it finished")
+		}
+	})
+
+	t.Run("a failed retry keeps the release owed", func(t *testing.T) {
+		t.Parallel()
+		h, _ := newHost(t, func(string, string) error { return errors.New("gateway unreachable") })
+		if err := h.Kill("myr", "mycat", "stalled seat"); err == nil {
+			t.Fatal("Kill = nil, want the failed sandbox removal reported")
+		}
+
+		if err := h.FinishStalledRelease("myr", "mycat"); err == nil {
+			t.Fatal("FinishStalledRelease = nil, want the failed retry reported")
+		}
+		if owed, _ := h.StalledReleaseOwed("myr", "mycat"); !owed {
+			t.Error("the release lost its owed mark on a failed retry")
+		}
+	})
+
+	t.Run("a failed retire after the removal keeps the release owed", func(t *testing.T) {
+		t.Parallel()
+		removals := 0
+		h, town := newHost(t, func(string, string) error {
+			removals++
+			if removals == 1 {
+				return errors.New("gateway unreachable")
+			}
+			return nil
+		})
+		if err := h.Kill("myr", "mycat", "stalled seat"); err == nil {
+			t.Fatal("Kill = nil, want the failed sandbox removal reported")
+		}
+
+		// The removal goes through, then the retire cannot read the seat record.
+		seatPath := supervisor.IntentSeat(h.seat("myr", "mycat")).Path(town)
+		good, err := os.ReadFile(seatPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(seatPath, []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.FinishStalledRelease("myr", "mycat"); err == nil {
+			t.Fatal("FinishStalledRelease = nil, want the failed retire reported")
+		}
+		if err := os.WriteFile(seatPath, good, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if owed, err := h.StalledReleaseOwed("myr", "mycat"); err != nil || !owed {
+			t.Fatalf("StalledReleaseOwed = %v, %v; want the failed retire to keep the release owed", owed, err)
+		}
+	})
+
+	t.Run("the owed mark survives a daemon restart", func(t *testing.T) {
+		t.Parallel()
+		h, town := newHost(t, func(string, string) error { return errors.New("gateway unreachable") })
+		if err := h.Kill("myr", "mycat", "stalled seat"); err == nil {
+			t.Fatal("Kill = nil, want the failed sandbox removal reported")
+		}
+
+		// A restarted daemon has none of the first one's memory: only the seat
+		// record on disk under the same town carries the debt.
+		restarted := &patrolScanHost{
+			d: &Daemon{config: &Config{TownRoot: town}, logger: h.d.logger, tmux: h.d.tmux, prefixRegistryFn: myrPrefixes},
+		}
+		if owed, err := restarted.StalledReleaseOwed("myr", "mycat"); err != nil || !owed {
+			t.Fatalf("after restart StalledReleaseOwed = %v, %v; want the debt kept", owed, err)
+		}
+	})
+
+	t.Run("a re-sling clears the owed mark", func(t *testing.T) {
+		t.Parallel()
+		h, town := newHost(t, func(string, string) error { return errors.New("gateway unreachable") })
+		if err := h.Kill("myr", "mycat", "stalled seat"); err == nil {
+			t.Fatal("Kill = nil, want the failed sandbox removal reported")
+		}
+
+		// The new session is the seat's next life: the old removal debt must not
+		// retire it to stop on the dead-seat check.
+		if err := intent.MarkSlung(town, supervisor.IntentSeat(h.seat("myr", "mycat")), "claude", "test", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if owed, err := h.StalledReleaseOwed("myr", "mycat"); err != nil || owed {
+			t.Fatalf("after re-sling StalledReleaseOwed = %v, %v; want the debt cleared", owed, err)
+		}
+	})
+
+	t.Run("a seat with no owed release costs nothing", func(t *testing.T) {
+		t.Parallel()
+		removals := 0
+		h, _ := newHost(t, func(string, string) error { removals++; return nil })
+
+		if owed, _ := h.StalledReleaseOwed("myr", "mycat"); owed {
+			t.Fatal("a seat with no stalled release reads as owing one")
+		}
+		if removals != 0 {
+			t.Errorf("sandbox removals = %d, want none for a seat with no owed release", removals)
 		}
 	})
 }

@@ -901,7 +901,11 @@ func (d *Daemon) tierSweepJudgedByADeferredCycle(state tierSweepState) bool {
 	if d.clk().Now().Sub(state.LastRun) >= tierSweepStaleAfter(d.patrolConfig) {
 		return false
 	}
-	lastRun, found, err := loadPatrolLastRun(d.config.TownRoot, "tier_sweep")
+	// The clock is read the way the trigger reads it, with the completion this
+	// process recorded: after a failed clock save the disk alone is older than
+	// the cycle that judged the tip, and reading it would call that cycle's
+	// verdict a deferral's (gt-zq1pb).
+	lastRun, found, _, err := latestPatrolLastRun(d.config.TownRoot, "tier_sweep", d.tierSweepRun.last())
 	if err != nil {
 		// An unreadable clock says nothing about a deferral, so the tip keeps
 		// the re-run every other cadence run gets.

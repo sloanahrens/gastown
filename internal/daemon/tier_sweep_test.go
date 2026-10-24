@@ -767,6 +767,38 @@ func TestRunTierSweepReSweepsATipACompletedCycleJudged(t *testing.T) {
 	}
 }
 
+// A cycle that judged the red tip and then failed to save its patrol clock is
+// not a deferral: the trigger reads that completion from memory, and the judged
+// check must read it the same way, so the cadence run re-sweeps the tip rather
+// than skipping it for another interval (gt-zq1pb).
+func TestRunTierSweepReSweepsATipWhenTheClockSaveFailed(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-40 * time.Minute), LastSHA: "redsha", LastGreenSHA: "green0",
+		Tiers: map[string]tierSweepTierResult{
+			"shell": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"TestRed"}, SHA: "redsha"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The disk clock is the last save that landed; the completion after it did
+	// not, so only this process remembers it.
+	if err := savePatrolLastRun(d.config.TownRoot, "tier_sweep", now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	d.tierSweepRun.record(now.Add(-30 * time.Minute))
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "redsha", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+
+	d.runTierSweep()
+
+	if len(rec.stages) == 0 {
+		t.Error("no stage ran, want a re-sweep: the judged cycle completed, so its verdict is not a deferral's")
+	}
+}
+
 // gt-1911b: an early re-run writes its record outside the town-wide cycle, so
 // the cadence run that reads it re-derives the tip. Read as a deferred cycle's
 // record, an unchanged red would be skipped for another interval.

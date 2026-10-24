@@ -153,6 +153,13 @@ type Record struct {
 	// the thing a reader counts a sessionless seat by (gt-2q283).
 	Agent string `json:"agent,omitempty"`
 
+	// SandboxOwed is set when a kill of a stalled seat stopped its session but
+	// the sandbox removal failed: the release still owes that removal and its
+	// retire to stop (patrolscan's FinishStalledRelease). It lives here, not in
+	// the daemon's memory, so a daemon restart keeps the debt, and MarkSlung
+	// clears it, so a new session on the seat never inherits it.
+	SandboxOwed bool `json:"sandbox_owed,omitempty"`
+
 	// The pause marker fields, unchanged in name and meaning. Paused is
 	// always serialized and always equals Held().
 	Paused          bool      `json:"paused"`
@@ -254,7 +261,25 @@ func MarkSlung(townRoot string, s Seat, agent, actor string, now time.Time) erro
 		r.Agent = strings.TrimSpace(agent)
 		// A sling starts a new session, so the stall evidence is the previous
 		// session's and is dropped, as a kill, MarkIdle and MarkSubmitted do.
+		// The sandbox debt of a stalled release is the previous session's too.
 		r.Progress = nil
+		r.SandboxOwed = false
+		r.Actor, r.UpdatedAt = actor, now.UTC()
+		return nil
+	})
+	return err
+}
+
+// MarkSandboxOwed records whether a stalled release of the seat still owes its
+// sandbox removal (see SandboxOwed). It writes only when the value changes, so
+// a seat with no debt costs no write.
+func MarkSandboxOwed(townRoot string, s Seat, owed bool, actor string, now time.Time) error {
+	rec, err := Read(townRoot, s)
+	if err != nil || rec.SandboxOwed == owed {
+		return err
+	}
+	_, err = Update(townRoot, s, func(r *Record) error {
+		r.SandboxOwed = owed
 		r.Actor, r.UpdatedAt = actor, now.UTC()
 		return nil
 	})

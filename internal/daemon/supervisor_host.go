@@ -135,13 +135,33 @@ func (d *Daemon) assessSeat(seat supervisor.Seat, in liveness.Input) liveness.Re
 	if res.Verdict == liveness.Unknown {
 		return res
 	}
+	d.recordSeatSample(iseat, rec, res.Sample)
+	return res
+}
+
+// recordSeatSample writes sample as the seat's progress, but only while the
+// record is still the one the assessment read. The read and the write are
+// separate lock holds, and a sling or kill that lands between them (MarkSlung
+// clears Progress for the session it starts) would otherwise have its clean
+// record overwritten with the previous session's sample, which the new
+// session's first real dead verdict then counts against. Every mutator sets
+// UpdatedAt, so a moved UpdatedAt says the record changed.
+func (d *Daemon) recordSeatSample(iseat intent.Seat, read intent.Record, sample *intent.Progress) {
+	recorded := false
 	if _, err := intent.Update(d.config.TownRoot, iseat, func(r *intent.Record) error {
-		r.Progress = res.Sample
+		if !r.UpdatedAt.Equal(read.UpdatedAt) {
+			return nil
+		}
+		r.Progress = sample
+		recorded = true
 		return nil
 	}); err != nil {
 		d.logger.Printf("Warning: recording liveness sample for %s: %v", iseat, err)
+		return
 	}
-	return res
+	if !recorded {
+		d.logger.Printf("liveness sample for %s not recorded: the seat record changed after it was read", iseat)
+	}
 }
 
 // seatWorkDir returns the directory a seat's agent session runs in, the path

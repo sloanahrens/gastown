@@ -80,9 +80,13 @@ type patrolLastRunMemory struct {
 	lastRun time.Time
 }
 
+// record keeps at without its monotonic clock reading. The persisted record has
+// none, and a due-ness check subtracts one time from the other: with a reading
+// on the in-memory side, the interval counts awake time only, so after a failed
+// save and a host sleep the patrol would not come due when its interval ran out.
 func (m *patrolLastRunMemory) record(at time.Time) {
 	m.mu.Lock()
-	m.lastRun = at
+	m.lastRun = at.Round(0)
 	m.mu.Unlock()
 }
 
@@ -117,7 +121,19 @@ type patrolDueDecision struct {
 // readable file behind at all); pass the zero time.Time when the caller keeps
 // no in-memory record of its own.
 func evaluatePatrolDue(townRoot, patrol string, inMemory, now time.Time, interval time.Duration) patrolDueDecision {
-	lastRun, found, err := loadPatrolLastRun(townRoot, patrol)
+	lastRun, found, corruptWarn, err := latestPatrolLastRun(townRoot, patrol, inMemory)
+	return patrolDueFromLastRun(lastRun, found, err, corruptWarn, now, interval)
+}
+
+// latestPatrolLastRun is the patrol's last completion as the due-ness checks see
+// it: the persisted record, unless this process completed a cycle it could not
+// persist, or whose write left no record at all. Every check that asks "did the
+// patrol last run, and when" reads it here, so a check cannot disagree with the
+// trigger about a completion the write failed to record (gt-4nqej, gt-zq1pb).
+// corruptWarn is set when a corrupt record was overridden by the in-memory
+// time, so the warning rides with the decision.
+func latestPatrolLastRun(townRoot, patrol string, inMemory time.Time) (lastRun time.Time, found bool, corruptWarn string, err error) {
+	lastRun, found, err = loadPatrolLastRun(townRoot, patrol)
 
 	// A cycle this process ran outranks the file: it can be newer than the
 	// record when the write failed, and — the load above having left lastRun
@@ -132,15 +148,13 @@ func evaluatePatrolDue(townRoot, patrol string, inMemory, now time.Time, interva
 	// right, and every caller that passes an in-memory time would otherwise
 	// lose the warning. The in-memory time still decides whether the patrol is
 	// due; the warning rides with the decision.
-	var corruptWarn string
 	if !inMemory.IsZero() && inMemory.After(lastRun) {
 		if errors.Is(err, errPatrolLastRunCorrupt) {
 			corruptWarn = fmt.Sprintf("last-run state unreadable (%v)", err)
 		}
 		lastRun, found, err = inMemory, true, nil
 	}
-
-	return patrolDueFromLastRun(lastRun, found, err, corruptWarn, now, interval)
+	return lastRun, found, corruptWarn, err
 }
 
 // patrolDueFromLastRun is evaluatePatrolDue's decision over a record the

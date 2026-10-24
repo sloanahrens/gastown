@@ -45,6 +45,11 @@ type fakeEnv struct {
 	// idleStopped names seats whose record already says stop, so MarkIdle
 	// reports no change.
 	idleStopped map[string]bool
+	// owedRelease names the stalled seats whose release still owes its sandbox
+	// removal; finishErr makes FinishStalledRelease fail for a seat.
+	owedRelease map[string]bool
+	owedErr     map[string]error
+	finishErr   map[string]error
 
 	active     []Work
 	activeErr  error
@@ -138,7 +143,8 @@ func newFake() *fakeEnv {
 		agents: map[string]AgentRecord{}, stateErr: map[string]error{}, heartbeats: map[string]*Heartbeat{},
 		restartErr: map[string]error{}, killErr: map[string]error{}, idleErr: map[string]error{}, submitErr: map[string]error{},
 		idleStopped: map[string]bool{},
-		dirs:        map[string]bool{}, dirErr: map[string]error{},
+		owedRelease: map[string]bool{}, owedErr: map[string]error{}, finishErr: map[string]error{},
+		dirs: map[string]bool{}, dirErr: map[string]error{},
 		sessions: map[string]bool{}, sessionErr: map[string]error{}, molStatus: map[string]string{},
 		molErr: map[string]error{}, wispStatus: map[string]string{}, wispStatusErr: map[string]error{}, branches: map[string]string{}, branchErr: map[string]error{},
 		notesErr: map[string]error{}, reopenErr: map[string]error{}, heldBeads: map[string]bool{},
@@ -233,6 +239,25 @@ func (f *fakeEnv) MarkIdle(_, p string) (bool, error) {
 	}
 	f.idleStopped[p] = true
 	return true, nil
+}
+
+// StalledReleaseOwed and FinishStalledRelease answer from owedRelease, as the
+// daemon does: a stalled release that owes its sandbox removal is finished
+// here, and finishErr makes the retry fail. owedErr makes the read fail.
+func (f *fakeEnv) StalledReleaseOwed(_, p string) (bool, error) {
+	if err := f.owedErr[p]; err != nil {
+		return false, err
+	}
+	return f.owedRelease[p], nil
+}
+
+func (f *fakeEnv) FinishStalledRelease(_, p string) error {
+	if err := f.finishErr[p]; err != nil {
+		return err
+	}
+	f.owedRelease[p] = false
+	f.events = append(f.events, "finish:"+p)
+	return nil
 }
 
 func (f *fakeEnv) MarkSubmitted(_, p, bead string) error {
@@ -1445,6 +1470,72 @@ func TestStalledReleaseStopsTheSessionBeforeRetiringTheRecord(t *testing.T) {
 	if line := r.Lines()[0]; !strings.Contains(line, "1 released") {
 		t.Fatalf("summary = %q, want the release counted", line)
 	}
+}
+
+// A stalled seat whose kill stopped the session but whose sandbox removal failed
+// still holds its record. Its release is finished on the dead-seat check and the
+// seat is not restarted: the kill was the release, and restarting it would put
+// back a session the release had stopped. A failed retry is reported and left
+// owed for the next tick.
+func TestDeadSeatFinishesAStalledReleaseOwedItsSandboxRemoval(t *testing.T) {
+	t.Parallel()
+	t.Run("finished", func(t *testing.T) {
+		t.Parallel()
+		env := newFake()
+		deadWithWork(env, "ruby")
+		env.owedRelease["ruby"] = true
+
+		r := scanner(env, nil).Tick("gastown")
+
+		if got := seatFinding(t, r, "ruby").Outcome; got != OutcomeReleased {
+			t.Fatalf("outcome = %q, want %q. report: %v", got, OutcomeReleased, r.Lines())
+		}
+		if len(env.restarts) != 0 {
+			t.Fatalf("restarts = %v, want none: the stalled release owes a removal, not a restart", env.restarts)
+		}
+		if got, want := strings.Join(env.events, ","), "finish:ruby"; got != want {
+			t.Fatalf("events = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("retry fails", func(t *testing.T) {
+		t.Parallel()
+		env := newFake()
+		deadWithWork(env, "ruby")
+		env.owedRelease["ruby"] = true
+		env.finishErr["ruby"] = errors.New("gateway unreachable")
+
+		r := scanner(env, nil).Tick("gastown")
+
+		if got := seatFinding(t, r, "ruby").Outcome; got != OutcomeFailed {
+			t.Fatalf("outcome = %q, want %q. report: %v", got, OutcomeFailed, r.Lines())
+		}
+		if len(env.restarts) != 0 {
+			t.Fatalf("restarts = %v, want none while the release is still owed", env.restarts)
+		}
+		if !env.owedRelease["ruby"] {
+			t.Fatal("the release is no longer owed after a failed retry")
+		}
+	})
+
+	t.Run("unreadable record is unknown, not assumed clear", func(t *testing.T) {
+		t.Parallel()
+		env := newFake()
+		deadWithWork(env, "ruby")
+		env.owedErr["ruby"] = errors.New("seat record unreadable")
+
+		r := scanner(env, nil).Tick("gastown")
+
+		if got := seatFinding(t, r, "ruby").Outcome; got != OutcomeUnknown {
+			t.Fatalf("outcome = %q, want %q. report: %v", got, OutcomeUnknown, r.Lines())
+		}
+		if len(env.restarts) != 0 {
+			t.Fatalf("restarts = %v, want none: the owed debt could not be read", env.restarts)
+		}
+		if got := strings.Join(env.events, ","); got != "" {
+			t.Fatalf("events = %q, want none: nothing is finished on an unreadable record", got)
+		}
+	})
 }
 
 // gt-xs1ni: gt done submits, the landing worker (or an overseer) pulls the

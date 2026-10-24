@@ -1058,6 +1058,40 @@ func TestUpgradeWaitsForASpecDispatchTickToItsBound(t *testing.T) {
 	}
 }
 
+// A max_per_tick cut while a tick runs, or a patrol block that stops reading,
+// must not shorten the wait for that tick: the restart waits on the bound the
+// tick was started under, not on a fresh read of the config (gt-cbaoy).
+func TestUpgradeWaitsForTheSpecDispatchBoundTheTickStartedWith(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	d.logger = log.New(io.Discard, "", 0)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+	if err := SavePatrolConfig(d.config.TownRoot, &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{MaxPerTick: 5}}}); err != nil {
+		t.Fatal(err)
+	}
+	started := specDispatchBound(specDispatchTimeout, 5)
+
+	now := time.Now()
+	d.specDispatchRunning.Store(true)
+	d.specDispatchTick.Store(&specDispatchTickRun{started: now, bound: started})
+	if err := SavePatrolConfig(d.config.TownRoot, &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{MaxPerTick: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if d.checkUpgradeRestart(now) {
+		t.Fatal("restarted under a spec dispatch tick inside its bound")
+	}
+	if d.checkUpgradeRestart(now.Add(started - time.Minute)) {
+		t.Fatal("a max_per_tick cut mid-tick shortened the wait for the running tick")
+	}
+	if !d.checkUpgradeRestart(now.Add(started)) {
+		t.Fatal("the restart must go once the tick is past the bound it started under")
+	}
+}
+
 // gt-32j1y: a tick with no recorded start falls back to the marker's wait clock
 // under the config's bound, so a tick whose start went missing still holds the
 // restart for its bound rather than for the housekeeping cap.
