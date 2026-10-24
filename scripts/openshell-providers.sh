@@ -7,6 +7,11 @@
 # A profile or provider the gateway already lists is left alone, so a rerun of
 # the target changes nothing instead of failing on the first thing it meets.
 #
+# The forgejo-polecat profile binds the Forgejo endpoint of the gateway it is
+# imported to. `gt sandbox endpoint` reads that endpoint from the town's sandbox
+# profile and its policy file, and the script keeps no copy of the values. A
+# gateway that already lists the profile on another host has it updated.
+#
 # Nothing secret reaches the terminal: xtrace is off for the whole run, a key
 # file is read as data (never sourced), the credential travels back to provider
 # create by name (so it never enters argv or the output of a command), and
@@ -18,6 +23,10 @@ set +x
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILES="$ROOT/deploy/polecat/profiles"
 CONFIG_DIR="${GT_CONFIG_DIR:-$HOME/.config/gt}"
+
+# The rendered forgejo-polecat profile lives in this run's temp dir only.
+RENDER_DIR="$(mktemp -d)"
+trap 'rm -rf "$RENDER_DIR"' EXIT
 
 # GATEWAY empty means the gateway the CLI has as its default, which is what the
 # script did before -g existed. The flag is global to openshell, so it has to
@@ -94,6 +103,71 @@ profile_exists() {
   awk -v name="$1" '$1 == name { found = 1 } END { exit !found }' <<<"$listed"
 }
 
+# gt_endpoint ARGS... runs `gt sandbox endpoint` for the gateway this run
+# targets. The default gateway is named openshell, the name a sandbox profile
+# without a gateway runs on. gt reads the endpoint from the town's sandbox
+# profile and its policy; a refusal (no profile names the gateway, or the policy
+# has no Forgejo rule) is gt's to explain, and its message reaches the terminal.
+gt_endpoint() {
+  gt sandbox endpoint --gateway "${GATEWAY:-openshell}" --root "$ROOT" "$@"
+}
+
+# read_endpoint reads the Forgejo endpoint this gateway's forgejo-polecat profile
+# binds: the host the sandboxes reach Forgejo at, its port and its allowed_ips.
+# A refusal stops the run before any profile or provider is touched.
+read_endpoint() {
+  local out key value
+  if ! out="$(gt_endpoint)"; then
+    echo "openshell-providers: gt sandbox endpoint --gateway ${GATEWAY:-openshell} failed, so the forgejo-polecat profile cannot be rendered" >&2
+    exit 1
+  fi
+  ENDPOINT_HOST="" ENDPOINT_PORT="" ENDPOINT_IPS=""
+  while IFS='=' read -r key value; do
+    case "$key" in
+      host) ENDPOINT_HOST=$value ;;
+      port) ENDPOINT_PORT=$value ;;
+      allowed_ips) ENDPOINT_IPS=$value ;;
+    esac
+  done <<<"$out"
+  if [[ -z "$ENDPOINT_HOST" || -z "$ENDPOINT_PORT" ]]; then
+    echo "openshell-providers: gt sandbox endpoint --gateway ${GATEWAY:-openshell} printed no host and port:" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+}
+
+# render_forgejo_profile FILE OUT writes the forgejo-polecat profile FILE with the
+# endpoint gt reads in place of the Docker host alias it names. gt renders it, so
+# the Docker endpoint comes out byte for byte the same as FILE.
+render_forgejo_profile() {
+  if ! gt_endpoint --render "$1" >"$2"; then
+    echo "openshell-providers: gt sandbox endpoint --render $1 failed, so the forgejo-polecat profile cannot be rendered" >&2
+    exit 1
+  fi
+}
+
+# profile_binds ID reports whether the gateway's profile ID binds the endpoint
+# read above. profile export prints the profile the gateway holds, and it binds
+# the endpoint when it names the host and each allowed_ips entry. A failed export
+# stops the run, as a failed list does: guessing would either leave a wrong-host
+# profile in place or update one that is already right.
+profile_binds() {
+  local exported ip
+  local ips=()
+  if ! exported="$(oshell profile export --global "$1" 2>&1)"; then
+    echo "openshell-providers: openshell profile export --global $1 failed, so whether it binds $ENDPOINT_HOST is unknown:" >&2
+    printf '%s\n' "$exported" >&2
+    exit 1
+  fi
+  grep -qF -- "$ENDPOINT_HOST" <<<"$exported" || return 1
+  if [[ -n "$ENDPOINT_IPS" ]]; then
+    IFS=, read -ra ips <<<"$ENDPOINT_IPS"
+    for ip in "${ips[@]}"; do
+      grep -qF -- "$ip" <<<"$exported" || return 1
+    done
+  fi
+}
+
 # profile_id FILE prints the id: a profile yaml declares, the name import keys
 # on and the name the gateway reports a clash under. A line starting with
 # "id:" only, so a nested "- id:" inside credentials is not mistaken for it.
@@ -149,9 +223,21 @@ import_profiles() {
   fi
   for file in "${profiles[@]}"; do
     id="$(profile_id "$file")"
+    # The file names the Docker host alias; the gateway it goes to may reach
+    # Forgejo elsewhere, so the forgejo-polecat profile goes in as rendered.
+    if [[ "$id" == forgejo-polecat ]]; then
+      render_forgejo_profile "$file" "$RENDER_DIR/$id.yaml"
+      file="$RENDER_DIR/$id.yaml"
+    fi
     # A profile with no id: cannot be one the gateway already lists, so it
     # goes to lint and import as it always did and lint names what is wrong.
     if [[ -n "$id" ]] && profile_exists "$id"; then
+      if [[ "$id" == forgejo-polecat ]] && ! profile_binds "$id"; then
+        echo "openshell-providers: profile $id binds another host, updating it to $ENDPOINT_HOST"
+        oshell profile lint -f "$file"
+        oshell profile update --global -f "$file" "$id"
+        continue
+      fi
       echo "openshell-providers: profile $id exists"
       continue
     fi
@@ -184,6 +270,7 @@ create_provider() {
   )
 }
 
+read_endpoint
 import_profiles
 create_provider deepseek deepseek-claude "$CONFIG_DIR/deepseek.env" DEEPSEEK_API_KEY ANTHROPIC_AUTH_TOKEN
 create_provider forgejo-polecat forgejo-polecat "$CONFIG_DIR/forgejo-polecat.env" FORGEJO_TOKEN FORGEJO_TOKEN

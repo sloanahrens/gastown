@@ -52,6 +52,29 @@ printf 'FORGEJO_TOKEN=%s\n' "$FORGEJO_KEY" >"$TMP/config/forgejo-polecat.env"
 : >"$TMP/state/providers"
 : >"$TMP/calls.log"
 
+# What the stub gt answers for a gateway: $TMP/endpoints/GATEWAY holds the three
+# lines `gt sandbox endpoint` prints, and $TMP/endpoints/render-GATEWAY holds the
+# forgejo-polecat profile `--render` prints for that endpoint. The rewrite itself
+# is gt's and is unit tested in Go; these cases check that the script imports
+# what gt prints and renders. set_endpoint writes both for a gateway.
+# set_endpoint GATEWAY HOST PORT [CIDR...]
+set_endpoint() {
+  local gateway=$1 host=$2 port=$3 ips="" cidr
+  shift 3
+  for cidr in "$@"; do ips="${ips:+$ips,}$cidr"; done
+  printf 'host=%s\nport=%s\nallowed_ips=%s\n' "$host" "$port" "$ips" >"$TMP/endpoints/$gateway"
+  {
+    printf 'id: forgejo-polecat\nendpoints:\n  - host: %s\n    port: %s\n' "$host" "$port"
+    if [ $# -gt 0 ]; then printf '    allowed_ips: ["%s"]\n' "${ips//,/\",\"}"; fi
+  } >"$TMP/endpoints/render-$gateway"
+}
+mkdir -p "$TMP/endpoints"
+set_endpoint openshell host.docker.internal 3000
+cp "$REPO_ROOT/deploy/polecat/profiles/forgejo-polecat.yaml" "$TMP/endpoints/render-openshell"
+set_endpoint k8s control-plane.openshell.svc.cluster.local 3000 192.168.5.2/32
+GT_CALLS="$TMP/gt-calls.log"
+: >"$GT_CALLS"
+
 # The stub answers the four subcommands the script uses. profile import fails
 # the way the real gateway does when the id is already listed, which is what
 # makes the rerun assertion meaningful; provider create prints the credential
@@ -90,7 +113,27 @@ case "$1 $2" in
       exit 1
     fi
     printf '%s\n' "$id" >>"$state/profiles"
+    cp "$file" "$state/content-$id"
     echo "imported profile $id"
+    ;;
+  "profile export")
+    # The profile as the gateway holds it: the last copy imported or updated.
+    id=${!#}
+    if [ ! -e "$state/content-$id" ]; then
+      echo "Error: no custom profile $id" >&2
+      exit 1
+    fi
+    cat "$state/content-$id"
+    ;;
+  "profile update")
+    file="" prev=""
+    for arg in "$@"; do
+      [ "$prev" = "-f" ] && file=$arg
+      prev=$arg
+    done
+    id=${!#}
+    cp "$file" "$state/content-$id"
+    echo "updated profile $id"
     ;;
   "provider list")
     printf 'NAME  TYPE  SOURCE  SCOPE\n'
@@ -120,6 +163,38 @@ esac
 STUB
 chmod +x "$TMP/bin/openshell"
 
+# The stub gt answers `gt sandbox endpoint --gateway NAME --root DIR` with the
+# file $STUB_ENDPOINTS/NAME, and refuses every gateway while $STUB_ENDPOINTS/fail
+# exists, as the real command does for a gateway no sandbox profile names. Its
+# argv is logged to $STUB_GT_CALLS, so the cases can see which gateway was asked.
+cat >"$TMP/bin/gt" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$STUB_GT_CALLS"
+if [ "${1-} ${2-}" != "sandbox endpoint" ]; then
+  echo "stub gt: unhandled $*" >&2
+  exit 1
+fi
+shift 2
+gateway="" render=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --gateway) gateway=$2 ;;
+    --render) render=$2 ;;
+  esac
+  shift 2
+done
+if [ -e "$STUB_ENDPOINTS/fail" ]; then
+  echo "Error: sandbox endpoint: no sandbox profile names gateway \"$gateway\"" >&2
+  exit 1
+fi
+if [ -n "$render" ]; then
+  cat "$STUB_ENDPOINTS/render-$gateway"
+else
+  cat "$STUB_ENDPOINTS/$gateway"
+fi
+STUB
+chmod +x "$TMP/bin/gt"
+
 # run ARGS...: execute the script against the stub; sets RC and OUT. Calls are
 # recorded to $CALLS_LOG, so the gateway cases can keep their calls apart from
 # the default gateway's; the stub appends, so a count spans whole scenarios.
@@ -128,6 +203,7 @@ run() {
   set +e
   OUT="$(PATH="$TMP/bin:$PATH" GT_CONFIG_DIR="$TMP/config" \
     STUB_CALLS="$CALLS_LOG" STUB_STATE="$TMP/state" \
+    STUB_GT_CALLS="$GT_CALLS" STUB_ENDPOINTS="$TMP/endpoints" \
     bash "$PROVIDERS" "$@" 2>&1)"
   RC=$?
   set -e
@@ -151,6 +227,9 @@ check "led the user to the imported profiles" contains "imported profile deepsee
 check "never printed the deepseek key" lacks "$DEEPSEEK_KEY" "$OUT"
 check "never printed the forgejo token" lacks "$FORGEJO_KEY" "$OUT"
 check "masked the credential the provider create echoed" contains "value=***" "$OUT"
+check "asked gt for the default gateway's endpoint" [ "$(grep -c '^sandbox endpoint --gateway openshell --root ' "$GT_CALLS")" -ge 1 ]
+check "asked gt to render the forgejo profile" [ "$(grep -c '^sandbox endpoint --gateway openshell --root .* --render .*forgejo-polecat.yaml$' "$GT_CALLS")" -eq 1 ]
+check "imported the Docker forgejo profile byte for byte" cmp -s "$TMP/state/content-forgejo-polecat" "$REPO_ROOT/deploy/polecat/profiles/forgejo-polecat.yaml"
 
 echo "rerun: both profiles and both providers already present"
 run
@@ -210,6 +289,12 @@ check "created both providers on the gateway" [ "$(calls '^-g k8s provider creat
 check "never printed the deepseek key" lacks "$DEEPSEEK_KEY" "$OUT"
 check "never printed the forgejo token" lacks "$FORGEJO_KEY" "$OUT"
 check "masked the credential the provider create echoed" contains "value=***" "$OUT"
+check "asked gt for the k8s gateway's endpoint" [ "$(grep -c '^sandbox endpoint --gateway k8s ' "$GT_CALLS")" -ge 1 ]
+forgejo="$TMP/state/content-forgejo-polecat"
+check "the k8s forgejo profile names the Service host" grep -qxF '  - host: control-plane.openshell.svc.cluster.local' "$forgejo"
+check "the k8s forgejo profile names port 3000" grep -qxF '    port: 3000' "$forgejo"
+check "the k8s forgejo profile allows the control plane address" grep -qxF '    allowed_ips: ["192.168.5.2/32"]' "$forgejo"
+check "the k8s forgejo profile no longer names the Docker alias as its host" [ "$(grep -cxF '  - host: host.docker.internal' "$forgejo")" -eq 0 ]
 
 echo "rerun on the named gateway"
 imports_before="$(calls '^-g k8s profile import')"
@@ -238,6 +323,51 @@ for form in "--gateway=k8s" "--gateway k8s"; do
   check "$form: reported the existing providers" contains "provider deepseek exists" "$OUT"
   check "$form: did not call provider create again" [ "$(calls '^-g k8s provider create')" -eq 2 ]
 done
+
+echo "the endpoint is what gt prints: a different answer changes the profile"
+set_endpoint k8s gt-chosen.example.test 4000 10.9.8.7/32 10.9.8.8/32
+: >"$TMP/state/profiles"
+: >"$TMP/state/providers"
+CALLS_LOG="$TMP/chosen-calls.log"
+: >"$CALLS_LOG"
+run -g k8s
+assert_rc 0 "exits 0"
+forgejo="$TMP/state/content-forgejo-polecat"
+check "the profile names the host gt printed" grep -qxF '  - host: gt-chosen.example.test' "$forgejo"
+check "the profile names the port gt printed" grep -qxF '    port: 4000' "$forgejo"
+check "the profile names each allowed address gt printed" grep -qxF '    allowed_ips: ["10.9.8.7/32","10.9.8.8/32"]' "$forgejo"
+set_endpoint k8s control-plane.openshell.svc.cluster.local 3000 192.168.5.2/32
+
+echo "rerun: the gateway's forgejo profile binds the Docker host, so it is updated"
+printf 'forgejo-polecat\ndeepseek-claude\n' >"$TMP/state/profiles"
+cp "$REPO_ROOT/deploy/polecat/profiles/forgejo-polecat.yaml" "$TMP/state/content-forgejo-polecat"
+: >"$TMP/state/providers"
+CALLS_LOG="$TMP/update-calls.log"
+: >"$CALLS_LOG"
+run -g k8s
+assert_rc 0 "exits 0"
+check "did not report the wrong-host profile as existing" lacks "profile forgejo-polecat exists" "$OUT"
+check "said it is updating the profile to the gateway's host" contains "profile forgejo-polecat binds another host, updating it to control-plane.openshell.svc.cluster.local" "$OUT"
+check "called profile update on the gateway" [ "$(calls '^-g k8s profile update --global -f .*forgejo-polecat.yaml forgejo-polecat$')" -eq 1 ]
+check "did not import the forgejo profile again" [ "$(calls '^-g k8s profile import -f .*forgejo-polecat')" -eq 0 ]
+check "the gateway's profile now names the k8s host" grep -qxF '  - host: control-plane.openshell.svc.cluster.local' "$TMP/state/content-forgejo-polecat"
+run -g k8s
+assert_rc 0 "exits 0 on a rerun"
+check "the rerun reports the updated profile as existing" contains "profile forgejo-polecat exists" "$OUT"
+check "the rerun does not update it again" [ "$(calls '^-g k8s profile update')" -eq 1 ]
+
+echo "gt refuses the gateway: nothing is imported, updated or created"
+touch "$TMP/endpoints/fail"
+: >"$TMP/state/profiles"
+: >"$TMP/state/providers"
+CALLS_LOG="$TMP/refused-calls.log"
+: >"$CALLS_LOG"
+run -g nope
+assert_rc 1 "exits 1"
+check "named the gateway gt refused" contains "gt sandbox endpoint --gateway nope failed" "$OUT"
+check "passed on gt's reason" contains 'no sandbox profile names gateway "nope"' "$OUT"
+check "called openshell for nothing" [ ! -s "$CALLS_LOG" ]
+rm -f "$TMP/endpoints/fail"
 
 echo "argument checking stops before any openshell call"
 CALLS_LOG="$TMP/arg-calls.log"
