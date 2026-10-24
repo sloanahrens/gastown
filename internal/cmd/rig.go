@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/hooks"
+	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -288,7 +289,7 @@ func init() {
 	rigAddCmd.Flags().StringSliceVar(&rigAddSparseCheckout, "sparse-checkout", nil, "Sparse checkout paths (cone mode); comma-separated or repeated")
 
 	rigResetCmd.Flags().BoolVar(&rigResetHandoff, "handoff", false, "Clear handoff content")
-	rigResetCmd.Flags().BoolVar(&rigResetMail, "mail", false, "Clear stale mail messages")
+	rigResetCmd.Flags().BoolVar(&rigResetMail, "mail", false, "Clear stale mail addressed to the role being reset")
 	rigResetCmd.Flags().BoolVar(&rigResetStale, "stale", false, "Reset orphaned in_progress issues (no active session)")
 	rigResetCmd.Flags().BoolVar(&rigResetDryRun, "dry-run", false, "Show what would be reset without making changes")
 	rigResetCmd.Flags().StringVar(&rigResetRole, "role", "", "Role to reset (default: auto-detect from cwd)")
@@ -1178,6 +1179,39 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 	return nil
 }
 
+// resetMailRole returns the role whose mail a reset clears: the --role value
+// when given, else the role detected from cwd. A bare --role name is addressed
+// under the rig the reset runs in, so it takes that rig; a full address already
+// names its rig and is kept as given.
+func resetMailRole(roleFlag string, detected RoleInfo) RoleInfo {
+	if roleFlag == "" {
+		return detected
+	}
+	parsed, rig, name := parseRoleString(roleFlag)
+	info := RoleInfo{Role: parsed, Rig: rig, Polecat: name}
+	if info.Rig == "" && !strings.Contains(roleFlag, "/") {
+		info.Rig = detected.Rig
+	}
+	return info
+}
+
+// resetMailIdentity returns the beads identity that mail addressed to the role
+// is assigned to: <rig>/<name> for a polecat or crew member, <rig>/<role> for a
+// rig-scoped role such as witness, and the bare role for a town-level one.
+func resetMailIdentity(info RoleInfo) (string, error) {
+	switch info.Role {
+	case RolePolecat, RoleCrew:
+		if info.Rig == "" || info.Polecat == "" {
+			return "", fmt.Errorf("%s needs a rig and a name to address its mail", info.Role)
+		}
+		return mail.AddressToIdentity(info.ActorString()), nil
+	}
+	if info.Rig == "" {
+		return string(info.Role), nil
+	}
+	return info.Rig + "/" + string(info.Role), nil
+}
+
 func runRigReset(cmd *cobra.Command, args []string) error {
 	// Find workspace
 	townRoot, err := workspace.FindFromCwdOrError()
@@ -1192,16 +1226,16 @@ func runRigReset(cmd *cobra.Command, args []string) error {
 
 	// Determine role to reset
 	roleKey := rigResetRole
+	detected, detectErr := GetRoleWithContext(cwd, townRoot)
 	if roleKey == "" {
 		// Auto-detect using env-aware role detection
-		roleInfo, err := GetRoleWithContext(cwd, townRoot)
-		if err != nil {
-			return fmt.Errorf("detecting role: %w", err)
+		if detectErr != nil {
+			return fmt.Errorf("detecting role: %w", detectErr)
 		}
-		if roleInfo.Role == RoleUnknown {
+		if detected.Role == RoleUnknown {
 			return fmt.Errorf("could not detect role; use --role to specify")
 		}
-		roleKey = string(roleInfo.Role)
+		roleKey = string(detected.Role)
 	}
 
 	// If no specific flags, reset all; otherwise only reset what's specified
@@ -1220,9 +1254,15 @@ func runRigReset(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s Cleared handoff content for %s\n", style.Success.Render("✓"), roleKey)
 	}
 
-	// Clear stale mail messages
+	// Clear stale mail messages addressed to the role being reset; the town
+	// store holds every role's mail, so the sweep is scoped to that role's
+	// identity.
 	if resetAll || rigResetMail {
-		result, err := beads.ClearMail(townBd, "Cleared during reset")
+		identity, err := resetMailIdentity(resetMailRole(rigResetRole, detected))
+		if err != nil {
+			return fmt.Errorf("clearing mail: %w", err)
+		}
+		result, err := beads.ClearMail(townBd, identity, "Cleared during reset")
 		if err != nil {
 			return fmt.Errorf("clearing mail: %w", err)
 		}

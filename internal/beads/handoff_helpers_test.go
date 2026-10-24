@@ -88,9 +88,9 @@ func TestHandoffBeadsOverClient(t *testing.T) {
 // closes, and the beads that are not messages at all.
 func TestClearMailOverClient(t *testing.T) {
 	t.Parallel()
-	c := beadsfake.New()
+	c := beadsfake.New(beadsfake.WithActor("gastown/a"))
 
-	message, err := c.Create(beads.CreateOptions{ID: "gt-msg-1", Title: "mail", Labels: []string{"gt:message"}, Priority: -1})
+	message, err := c.Create(beads.CreateOptions{ID: "gt-msg-1", Title: "mail", Labels: []string{"gt:message"}, Assignee: "gastown/a", Priority: -1})
 	if err != nil {
 		t.Fatalf("creating message: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestClearMailOverClient(t *testing.T) {
 		t.Fatalf("creating work bead: %v", err)
 	}
 
-	result, err := beads.ClearMail(c, "cleared during reset")
+	result, err := beads.ClearMail(c, "gastown/a", "cleared during reset")
 	if err != nil {
 		t.Fatalf("ClearMail: %v", err)
 	}
@@ -118,6 +118,67 @@ func TestClearMailOverClient(t *testing.T) {
 	}
 	if work.Status == string(beads.StatusClosed) {
 		t.Error("ClearMail closed a bead that is not a gt:message")
+	}
+}
+
+// TestClearMail_OnlyCallersMail: a reset clears the open mail assigned to the
+// role that ran it and leaves every other role's mail open. The fake acts as
+// gastown/a, the role resetting its own mail, since bd refuses to close a
+// bead assigned to another actor.
+func TestClearMail_OnlyCallersMail(t *testing.T) {
+	t.Parallel()
+	c := beadsfake.New(beadsfake.WithActor("gastown/a"))
+
+	for _, msg := range []struct{ id, assignee string }{
+		{"gt-msg-a", "gastown/a"},
+		{"gt-msg-b", "gastown/b"},
+	} {
+		if _, err := c.Create(beads.CreateOptions{ID: msg.id, Title: msg.id, Labels: []string{"gt:message"}, Assignee: msg.assignee, Priority: -1}); err != nil {
+			t.Fatalf("creating %s: %v", msg.id, err)
+		}
+	}
+
+	result, err := beads.ClearMail(c, "gastown/a", "cleared during reset")
+	if err != nil {
+		t.Fatalf("ClearMail: %v", err)
+	}
+	if result.Closed != 1 {
+		t.Errorf("ClearMail closed %d messages for gastown/a, want 1", result.Closed)
+	}
+
+	for id, want := range map[string]string{
+		"gt-msg-a": string(beads.StatusClosed),
+		"gt-msg-b": "open",
+	} {
+		issue, err := c.Show(id)
+		if err != nil {
+			t.Fatalf("Show(%s): %v", id, err)
+		}
+		if issue.Status != want {
+			t.Errorf("%s status = %q after ClearMail for gastown/a, want %q", id, issue.Status, want)
+		}
+	}
+}
+
+// TestClearMail_RefusesEmptyAssignee: an empty assignee would match every
+// role's mail, so the sweep refuses it and closes nothing.
+func TestClearMail_RefusesEmptyAssignee(t *testing.T) {
+	t.Parallel()
+	c := beadsfake.New(beadsfake.WithActor("gastown/a"))
+
+	if _, err := c.Create(beads.CreateOptions{ID: "gt-msg-a", Title: "gt-msg-a", Labels: []string{"gt:message"}, Assignee: "gastown/a", Priority: -1}); err != nil {
+		t.Fatalf("creating gt-msg-a: %v", err)
+	}
+
+	if _, err := beads.ClearMail(c, "", "cleared during reset"); err == nil {
+		t.Fatal("ClearMail with an empty assignee: want an error, got nil")
+	}
+	issue, err := c.Show("gt-msg-a")
+	if err != nil {
+		t.Fatalf("Show(gt-msg-a): %v", err)
+	}
+	if issue.Status != "open" {
+		t.Errorf("gt-msg-a status = %q after refused ClearMail, want open", issue.Status)
 	}
 }
 
