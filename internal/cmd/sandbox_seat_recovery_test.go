@@ -214,9 +214,10 @@ func TestCheckRecoveryOfAGoneSandboxSeatTellsLostWork(t *testing.T) {
 }
 
 // An agent bead that recorded no branch names nothing to look for on origin, so
-// this package reaches the manager's answer for the same seat — git state
-// unknown — instead of borrowing the host polecat's branch and clearing a seat
-// the manager holds (gt-cu66c).
+// check-recovery asks origin nothing, then reaches the manager's answer for the
+// same seat — the "records no branch" failure, which the status reports as an
+// unknown git state that clears nothing — instead of borrowing the host
+// polecat's branch and clearing a seat the manager holds (gt-cu66c).
 func TestSandboxLostWorkFactsAgreeWithManagerWhenAgentBeadRecordsNoBranch(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -383,5 +384,28 @@ func TestCheckPolecatSafetyOfAGoneSandboxSeat(t *testing.T) {
 				t.Errorf("reasons = %q, want one containing %q", joined, tt.want)
 			}
 		})
+	}
+}
+
+// Both lost-work checks now ask origin about the branch one shared rule names,
+// and that rule trims: a record that is only whitespace names nothing to ask
+// about, so the checks fail closed rather than query origin for " ". A parsed
+// agent bead cannot carry the case — ParseAgentFields trims the value — so the
+// rule is pinned directly where the checks delegate to it (gt-cu66c).
+func TestSandboxSeatOriginBranchTrimsWhitespace(t *testing.T) {
+	t.Parallel()
+	for name, fields := range map[string]*beads.AgentFields{
+		"no_fields":    nil,
+		"empty_fields": {},
+		"empty_branch": {Branch: ""},
+		"space_branch": {Branch: " \t"},
+	} {
+		branch, reason := polecat.SandboxSeatOriginBranch(fields)
+		if branch != "" || !strings.Contains(reason, "records no branch") {
+			t.Errorf("%s: SandboxSeatOriginBranch = (%q, %q), want no branch and a records-no-branch reason", name, branch, reason)
+		}
+	}
+	if branch, reason := polecat.SandboxSeatOriginBranch(&beads.AgentFields{Branch: "  polecat/ember/gt-a+x\t"}); branch != "polecat/ember/gt-a+x" || reason != "" {
+		t.Errorf("branch surrounded by space = (%q, %q), want the trimmed branch and no reason", branch, reason)
 	}
 }
