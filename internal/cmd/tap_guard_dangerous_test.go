@@ -1870,6 +1870,40 @@ func TestHeredocOperatorLineEndHonorsEscapesAndComments(t *testing.T) {
 	}
 }
 
+// TestHeredocReaderWalkBackHonorsBackslashParity pins gt-fke2f: the walk-back
+// joins the line above the heredoc operator only when that line ends in an odd
+// run of backslashes. In an even run each backslash escapes the next, so the
+// shell ends the line at the newline and its words are not on the reader line
+// — the body is data, not a script the shell above runs.
+func TestHeredocReaderWalkBackHonorsBackslashParity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// "bash \\" is bash with one literal backslash argument, and the
+		// newline ends that command; cat is the reader of the body below it.
+		{"an escaped backslash above the operator line ends it", "bash \\\\\ncat <<'EOF'\nsudo rm -rf /tmp\nEOF", false},
+		// Trailing spaces after the even run do not make it a continuation.
+		{"an escaped backslash followed by spaces ends the line", "bash \\\\  \ncat <<'EOF'\nsudo rm -rf /tmp\nEOF", false},
+		// An odd run still continues the line, so the invoker above joins the
+		// operator line and the body is its script.
+		{"an odd backslash run above the operator line continues it", "bash \\\\\\\n  <<'EOF'\ngit reset --hard\nEOF", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if tt.blocked && reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — the continued line keeps the invoker on the reader line", tt.command)
+			}
+			if !tt.blocked && reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — the shell ends the line at the newline, so the body is data", tt.command, reason)
+			}
+		})
+	}
+}
+
 // TestShellFedHeredocRecursesThroughNestedBodies pins that a shell-fed body is
 // judged by the same nested-command walk as a bash -c payload: a shell between
 // the outer body and the dangerous command does not end the inspection.
