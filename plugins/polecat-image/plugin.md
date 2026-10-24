@@ -1,6 +1,6 @@
 +++
 name = "polecat-image"
-description = "Rebuild gastown-polecat:dev at the installed gt's commit after each gt install, so sandbox slings are not refused for image drift"
+description = "Rebuild gastown-polecat:dev at the installed gt's commit after each gt install, so sandbox slings are not refused for image drift; then trim the image tags, build cache and per-rig cache volumes that run grows"
 version = 1
 
 [gate]
@@ -77,12 +77,36 @@ toolchain, golangci-lint, the gt and bd compiles): a day of installs made it 20
 GB with nothing in use (gt-atxdz). After the image prune the plugin runs
 `docker builder prune --keep-storage 8GB -f` (`POLECAT_IMAGE_BUILDER_KEEP`):
 LRU, so the most recently used layers stay and the next rebuild is warm. It runs
-that command and nothing else that deletes (never a system, image, volume or
-`--all` prune; the per-rig `gt-cache-*` volumes are never touched), and it runs
-under the plugin's lock: a run that built already owns it, any other takes it,
-and a run that finds another's lock, or whose lock was taken during the build,
-skips with a logged line, so a trim never overlaps a build. A down docker, a
-failed build or a failing prune trims nothing and does not fail the run.
+that command and no wider prune (never a system, image, volume or `--all`
+prune), and it runs under the plugin's lock: a run that built already owns it,
+any other takes it, and a run that finds another's lock, or whose lock was taken
+during the build, skips with a logged line, so a trim never overlaps a build. A
+down docker, a failed build or a failing prune trims nothing and does not fail
+the run.
+
+## Per-rig cache volumes
+
+Every sandbox of a rig mounts that rig's `gt-cache-<rig>` volume at
+`/sandbox/.cache`, and nothing trimmed it: `gt-cache-gastown` reached 27.7 GB on
+2026-10-24, growing about 3 GB an hour (gt-3g7p2). After the build cache trim
+the plugin brings each `gt-cache-<rig>` volume back under `POLECAT_CACHE_CAP`
+(default 10GB; a K, M, G, T or P suffix, so `512M` works):
+
+A volume with a container attached is skipped (`in use by N container(s);
+skipped`). A probe the plugin cannot read (daemon, listing, inspect, container
+query, the cap, the helper's answer) trims nothing and logs which one, so a
+failure never reads as "nothing to do".
+
+Over the cap, a short-lived container from the polecat image deletes files
+under `go-build`, least recently used first, until the volume fits. "Used" is
+the later of a file's atime and mtime, because Go touches the mtime of a cache
+entry it reuses and a noatime mount leaves atime stale. `go/pkg/mod` goes only
+when the build cache alone cannot reach the cap. No volume is removed and no
+`docker volume prune` runs.
+
+A sandbox that starts between the in-use check and the helper can lose cache
+entries it would have read. Go reads a missing entry as a miss and rebuilds it,
+so the window is accepted rather than locked.
 
 Every failure exits non-zero with the tail of the failing command: a commit the
 rig repo does not know, a failed build, an image that still carries another

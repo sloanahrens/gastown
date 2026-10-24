@@ -24,6 +24,13 @@ KEEP_IMAGES="${POLECAT_IMAGE_KEEP:-3}"
 # BUILDER_KEEP is how much of the build cache prune_build_cache leaves (most
 # recently used first), as docker's --keep-storage value.
 BUILDER_KEEP="${POLECAT_IMAGE_BUILDER_KEEP:-8GB}"
+# CACHE_CAP bounds each per-rig cache volume (gt-cache-<rig>, mounted at
+# /sandbox/.cache in every sandbox of the rig): nothing trimmed them and
+# gt-cache-gastown reached 27.7 GB, growing about 3 GB an hour (gt-3g7p2). The
+# helper mounts it at CACHE_MOUNT, which its script measures.
+CACHE_CAP="${POLECAT_CACHE_CAP:-10GB}"
+CACHE_MOUNT=/cache
+CACHE_VOLUME_PREFIX="gt-cache-"
 
 GT="${POLECAT_IMAGE_GT:-gt}"
 DOCKER="${POLECAT_IMAGE_DOCKER:-docker}"
@@ -245,23 +252,31 @@ prune_old_images() {
   done < <("$DOCKER" images --format '{{.Tag}}' "$repo" 2>/dev/null || true)
 }
 
-# prune_build_cache keeps Docker's build cache to the newest BUILDER_KEEP. It
-# holds the plugin's lock so a trim never overlaps a build: a run that built
-# already owns it, any other takes it, and one that cannot skips. A failed
-# command prunes nothing and is logged (gt-atxdz).
-prune_build_cache() {
-  "$DOCKER" info >/dev/null 2>&1 || return 0
+# own_lock makes this run the plugin lock's owner for a trim, so a trim never
+# overlaps a build: a run that built already owns it, any other takes it, and
+# one that cannot sets LOCK_WHY and leaves the lock alone. It reports through a
+# variable, not stdout: a `$(own_lock)` would run in a subshell, and the
+# HAVE_LOCK it set there would be gone by the time cleanup looked at it.
+LOCK_WHY=""
+own_lock() {
+  LOCK_WHY=""
   if [ "$HAVE_LOCK" != 1 ]; then
-    if ! take_lock; then
-      log "build cache: skipped, another run holds the lock"
-      return 0
-    fi
+    take_lock || { LOCK_WHY="another run holds the lock"; return 1; }
     HAVE_LOCK=1
-  elif [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" != "$$" ]; then
-    log "build cache: skipped, the lock is another run's now"
     return 0
   fi
+  [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ] || { LOCK_WHY="the lock is another run's now"; return 1; }
+}
+
+# prune_build_cache keeps Docker's build cache to the newest BUILDER_KEEP. A
+# failed command prunes nothing and is logged (gt-atxdz).
+prune_build_cache() {
+  "$DOCKER" info >/dev/null 2>&1 || return 0
   local out
+  if ! own_lock; then
+    log "build cache: skipped, $LOCK_WHY"
+    return 0
+  fi
   if out="$("$DOCKER" builder prune --keep-storage "$BUILDER_KEEP" -f 2>&1)"; then
     log "build cache trimmed to the newest $BUILDER_KEEP: $(printf '%s\n' "$out" | tail -n 1)"
   else
@@ -269,6 +284,164 @@ prune_build_cache() {
   fi
 }
 
+# cap_bytes prints a size such as 10GB, 512M or 1024 as bytes. Anything
+# unreadable fails, so a typo trims nothing rather than reading as a cap near
+# zero.
+cap_bytes() {
+  local v=$1 mult=1
+  case "$v" in '' | *[!0-9kKmMgGtTpPbB]*) return 1 ;; esac
+  v=${v%[Bb]}
+  case "$v" in
+    *[kK]) mult=$((1024)); v=${v%?} ;;
+    *[mM]) mult=$((1024 * 1024)); v=${v%?} ;;
+    *[gG]) mult=$((1024 * 1024 * 1024)); v=${v%?} ;;
+    *[tT]) mult=$((1024 * 1024 * 1024 * 1024)); v=${v%?} ;;
+    *[pP]) mult=$((1024 * 1024 * 1024 * 1024 * 1024)); v=${v%?} ;;
+  esac
+  case "$v" in '' | *[!0-9]*) return 1 ;; esac
+  echo "$((v * mult))"
+}
+
+# human renders a byte count for a log line: 9.8GB, 512.0KB.
+human() {
+  awk -v b="$1" 'BEGIN { split("B KB MB GB TB PB", u, " "); n = 1; while (b >= 1024 && n < 6) { b /= 1024; n++ } printf "%.1f%s", b, u[n] }'
+}
+
+# last_line prints the last non-blank line of a command's output: the reason a
+# docker call failed is its last line, and everything before is noise.
+last_line() {
+  printf '%s\n' "$1" | sed '/^[[:space:]]*$/d' | tail -n 1
+}
+
+# CACHE_TRIM_SCRIPT runs inside the helper container. A docker volume has no
+# host path, and the polecat image already carries find, du and stat. Each file
+# is deleted least recently accessed first: go-build's until the volume is back
+# under the cap, then go/pkg/mod's only if the build cache alone could not
+# reach it. A size it cannot read exits non-zero, so the caller logs the reason
+# rather than a trim it cannot vouch for. Every tool it uses is portable,
+# because run_test.sh runs it on the host (macOS, where `du -b` and
+# `find -printf` do not exist).
+CACHE_TRIM_SCRIPT=$(cat <<'SCRIPT'
+set -eu
+root=${CACHE_ROOT:-/cache}
+cap=${CACHE_CAP_BYTES:?CACHE_CAP_BYTES is unset}
+
+[ -d "$root" ] || { echo "no $root to measure" >&2; exit 3; }
+
+# size prints the tree's disk usage in bytes, from du's portable KiB figure.
+size() {
+  local out
+  out=$(du -sk "$root" 2>/dev/null) || return 1
+  printf '%s\n' $(( ${out%%[[:space:]]*} * 1024 ))
+}
+
+# list_files prints "<last use> <size> <path>" per file. Last use is the later
+# of atime and mtime: a noatime or relatime mount leaves atime stale, while Go
+# touches the mtime of a cache entry it reuses. BSD and GNU stat differ in both
+# flag and format. Probe for GNU first (the image's stat): `-c` is an illegal
+# option on BSD, whereas GNU accepts BSD's `-f` as "filesystem" and succeeds
+# with the wrong fields, so a probe for BSD would pass on Linux.
+list_files() {
+  if stat -c '%X' "$root" >/dev/null 2>&1; then
+    find "$1" -type f -exec stat -c '%X %Y %s %n' {} +
+  else
+    find "$1" -type f -exec stat -f '%a %m %z %N' {} +
+  fi 2>/dev/null |
+    awk '{ t = ($2 + 0 > $1 + 0) ? $2 : $1; sub(/^[0-9]+ [0-9]+ /, ""); print t, $0 }'
+}
+
+# trim_tree DIR NEED deletes files oldest-accessed first until NEED bytes are
+# freed. The caller measures again rather than trusting this arithmetic.
+trim_tree() {
+  local need=$2
+  [ -d "$1" ] || return 0
+  list_files "$1" | LC_ALL=C sort -n -k1,1 |
+    while read -r _atime fsize path; do
+      [ "$need" -gt 0 ] || break
+      rm -f -- "$path" || continue
+      need=$((need - fsize))
+    done
+  find "$1" -mindepth 1 -type d -empty -exec rmdir {} + 2>/dev/null || true
+}
+
+before=$(size) || { echo "cannot measure the size of $root" >&2; exit 3; }
+if [ "$before" -le "$cap" ]; then
+  echo "under $before"
+  exit 0
+fi
+trim_tree "$root/go-build" "$((before - cap))"
+after=$(size) || { echo "cannot measure the size of $root after trimming" >&2; exit 3; }
+if [ "$after" -gt "$cap" ]; then
+  trim_tree "$root/go/pkg/mod" "$((after - cap))"
+  after=$(size) || { echo "cannot measure the size of $root after trimming" >&2; exit 3; }
+fi
+echo "trimmed $before $after"
+SCRIPT
+)
+
+# trim_cache_volume trims one volume back under cap, or logs why it did not:
+# a container still using it, a probe that cannot answer, or a helper that
+# failed. The volume itself is never removed and nothing is pruned.
+trim_cache_volume() {
+  local vol=$1 cap=$2 out used last
+  if ! out="$("$DOCKER" volume inspect "$vol" 2>&1)"; then
+    log "cache: $vol: cannot inspect the volume ($(last_line "$out")); nothing trimmed"
+    return 0
+  fi
+  if ! out="$("$DOCKER" ps --filter "volume=$vol" --format '{{.ID}}' 2>&1)"; then
+    log "cache: $vol: cannot list the containers using it ($(last_line "$out")); nothing trimmed"
+    return 0
+  fi
+  used="$(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+  if [ "$used" -gt 0 ]; then
+    log "cache: $vol: in use by $used container(s); skipped"
+    return 0
+  fi
+  # A sandbox can start after the check above; plugin.md says why that window
+  # is accepted (gt-3g7p2). The container's own filesystem is read-only; the cache volume at
+  # CACHE_MOUNT and a temp directory for sort are the only writable places.
+  if ! out="$("$DOCKER" run --rm --read-only --tmpfs /tmp:size=256m --network none \
+    -v "$vol:$CACHE_MOUNT" -e "CACHE_CAP_BYTES=$cap" \
+    "$IMAGE" sh -c "$CACHE_TRIM_SCRIPT" 2>&1)"; then
+    log "cache: $vol: not trimmed ($(last_line "$out"))"
+    return 0
+  fi
+  last="$(last_line "$out")"
+  if [[ "$last" =~ ^under\ ([0-9]+)$ ]]; then
+    log "cache: $vol: $(human "${BASH_REMATCH[1]}") of $CACHE_CAP, under the cap"
+  elif [[ "$last" =~ ^trimmed\ ([0-9]+)\ ([0-9]+)$ ]]; then
+    log "cache: $vol: trimmed $(human "${BASH_REMATCH[1]}") to $(human "${BASH_REMATCH[2]}") (cap $CACHE_CAP)"
+    [ "${BASH_REMATCH[2]}" -le "$cap" ] || log "cache: $vol: still over the cap with nothing left to trim"
+  else
+    log "cache: $vol: not trimmed, the helper printed '$last'"
+  fi
+}
+
+# trim_cache_volumes bounds each gt-cache-<rig> volume at CACHE_CAP. It skips
+# every volume when the listing or the cap cannot be read, and one volume when
+# a sandbox still has it attached (gt-3g7p2).
+trim_cache_volumes() {
+  "$DOCKER" info >/dev/null 2>&1 || return 0
+  local cap out vol
+  if ! cap="$(cap_bytes "$CACHE_CAP")"; then
+    log "cache: POLECAT_CACHE_CAP=$CACHE_CAP is not a size such as 10GB; nothing trimmed"
+    return 0
+  fi
+  if ! own_lock; then
+    log "cache: skipped, $LOCK_WHY"
+    return 0
+  fi
+  if ! out="$("$DOCKER" volume ls --format '{{.Name}}' --filter "name=^$CACHE_VOLUME_PREFIX" 2>&1)"; then
+    log "cache: cannot list the volumes ($(last_line "$out")); nothing trimmed"
+    return 0
+  fi
+  while read -r vol; do
+    case "$vol" in "$CACHE_VOLUME_PREFIX"?*) ;; *) continue ;; esac
+    trim_cache_volume "$vol" "$cap"
+  done <<<"$out"
+}
+
 main "$@"
 prune_old_images || true
 prune_build_cache || true
+trim_cache_volumes || true
