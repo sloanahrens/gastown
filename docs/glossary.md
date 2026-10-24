@@ -41,7 +41,7 @@ How a polecat's process is hosted. `tmux` runs it in a tmux session on the host 
 An OpenShell workload holding one polecat's clone and tmux server, fenced by a policy, named `gt-<rig>-<polecat>` like the tmux session.
 
 ### Sandbox profile
-A named entry in the town's `sandboxes` block: image, policy file, provider names, cpu, memory, gateway. A seat points at one.
+A named entry in the town's `sandboxes` block: image, policy file, provider names, cpu, memory, gateway, compute driver. A seat points at one. The `driver` field is described in [OpenShell gateway](openshell-gateway.md#sandbox-profile-driver).
 
 ### Town skeleton
 The secret-free copy of town metadata a sandbox needs for `gt` and `bd`. Before changing what a sandbox receives, read `RenderSkeleton` in `internal/sandbox/skeleton.go`, which defines the archive contents.
