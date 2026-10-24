@@ -134,6 +134,11 @@ POLE_COMMIT := $(shell git rev-parse HEAD 2>/dev/null)
 # bd is built from a beads fork checkout, not this repo. That checkout is host
 # state, so there is no default: the operator names it, BD_SRC=<checkout>.
 BD_SRC ?=
+# The image's Go floor is the highest `go` line of the rigs' go.mod files, read
+# from each rig's canonical checkout under POLE_TOWN (deploy/polecat/go-floor.sh).
+# POLE_RIG_GO_MODS names the files; override it to read other checkouts.
+POLE_TOWN ?= $(HOME)/gt
+POLE_RIG_GO_MODS ?= $(wildcard $(POLE_TOWN)/*/mayor/rig/go.mod)
 
 # Cross-compile gt and bd for the sandbox image, then build it. The Dockerfile
 # copies deploy/polecat/bin/, so that directory is the build context's payload.
@@ -142,10 +147,12 @@ BD_SRC ?=
 polecat-image:
 	@test -n "$(BD_SRC)" || { echo "polecat-image: BD_SRC is unset; run make polecat-image BD_SRC=<beads checkout>" >&2; exit 2; }
 	@test -z "$$(git status --porcelain -- . ':(exclude).beads')" || { echo "polecat-image: the tree has uncommitted or untracked changes, so its gt is not the commit the label names ($(POLE_COMMIT)); commit or remove them first" >&2; exit 2; }
+	@test -n "$(POLE_RIG_GO_MODS)" || { echo "polecat-image: no rig go.mod under $(POLE_TOWN)/*/mayor/rig; set POLE_TOWN=<town root>" >&2; exit 2; }
 	@mkdir -p deploy/polecat/bin
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/gt ./cmd/gt
 	cd $(BD_SRC) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o $(CURDIR)/deploy/polecat/bin/bd ./cmd/bd
-	docker build --platform linux/arm64 --label org.gastown.gt-commit=$(POLE_COMMIT) -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
+	floor=$$(bash deploy/polecat/go-floor.sh rig $(POLE_RIG_GO_MODS)) || { echo "polecat-image: cannot read the rig Go floor from $(POLE_RIG_GO_MODS)" >&2; exit 2; }; \
+	docker build --platform linux/arm64 --label org.gastown.gt-commit=$(POLE_COMMIT) --build-arg GO_FLOOR="$$floor" -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
 
 # RIGS is the space-separated rig names whose cache volume a sandbox mounts:
 # make polecat-caches RIGS="gastown om". A second run changes nothing.

@@ -31,11 +31,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 FROM ubuntu:24.04
 
 ARG GO_VERSION=1.27.1
-# sha256 from https://go.dev/dl/?mode=json for go1.27.1.linux-arm64.tar.gz and
-# go1.27.1.linux-amd64.tar.gz. The image's Go must be at least the highest `go`
-# line of any rig's go.mod (om, agentlab, hm, devops, mango say 1.27): a newer
-# line makes go download a toolchain, and that downloaded go binary is not one
-# the sandbox policy lets reach the module hosts.
+# GO_FLOOR is the highest `go` line of the rigs' go.mod files. make polecat-image
+# reads it from those files (deploy/polecat/go-floor.sh rig) and passes it in.
+# There is no default: an image built without it fails the check below.
+ARG GO_FLOOR
+# sha256 of go1.27.1.linux-arm64.tar.gz and go1.27.1.linux-amd64.tar.gz, as listed
+# by https://go.dev/dl/?mode=json&include=all and matching the tarballs' own bytes,
+# checked on 2026-10-23. Update a digest only together with GO_VERSION.
 ARG GO_SHA256_ARM64=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec
 ARG GO_SHA256_AMD64=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
 ARG NODE_MAJOR=22
@@ -72,6 +74,10 @@ RUN ARCH=$(dpkg --print-architecture) \
     && curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" \
     && echo "${SHA}  /tmp/go.tgz" | sha256sum -c - \
     && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
+
+# Refuse the image when its Go is below GO_FLOOR (see go-floor.sh for the rule).
+COPY go-floor.sh /usr/local/lib/gastown/go-floor.sh
+RUN bash /usr/local/lib/gastown/go-floor.sh check "$GO_FLOOR"
 
 # GNU Make 4.4.1 ahead of /usr/bin/make on PATH (see the make-build stage).
 COPY --from=make-build /usr/local/bin/make /usr/local/bin/make
