@@ -26,7 +26,12 @@ type Profile struct {
 	CPU, Memory      string   // k8s quantities, "" = driver default
 	ControlPlaneHost string   // how the sandbox reaches Dolt and Forgejo; "" = host.docker.internal
 	CacheVolume      string   // named volume for /sandbox/.cache; "{rig}" expands; "" = none
+	Driver           string   // the gateway's compute driver: DriverKubernetes skips docker volume work; anything else is docker
 }
+
+// DriverKubernetes is Profile.Driver for a gateway that runs sandboxes on
+// Kubernetes (config.SandboxDriverKubernetes).
+const DriverKubernetes = "kubernetes"
 
 // SpawnSpec is what a backend needs to host one polecat's session.
 type SpawnSpec struct {

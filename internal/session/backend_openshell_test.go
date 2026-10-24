@@ -707,6 +707,65 @@ func TestOpenShellPrepareMakesNoDockerCallWithoutACacheVolume(t *testing.T) {
 	}
 }
 
+// A kubernetes profile has no docker volumes: Prepare makes no docker call and
+// the create carries no docker.mounts config, even if the profile names a
+// volume (Validate refuses that, but the backend does not rely on it).
+func TestOpenShellKubernetesProfileDoesNoDockerVolumeWork(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	p := openshellCachedProfile()
+	p.Driver = DriverKubernetes
+	b, _ := openshellTestBackend(town, p, fake)
+	d := &dockerRecorder{absent: true}
+	b.docker = d.run
+
+	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(d.calls) != 0 {
+		t.Fatalf("docker calls = %q, want none for a kubernetes profile", d.calls)
+	}
+	cs, err := b.createSpec(openshellSpawn(town, work))
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	if cs.DriverConfigJSON != "" {
+		t.Fatalf("DriverConfigJSON = %s, want none for a kubernetes profile", cs.DriverConfigJSON)
+	}
+}
+
+// A docker profile, named or defaulted, keeps the volume ensure and the mount.
+func TestOpenShellDockerDriverKeepsTheCacheVolumeWork(t *testing.T) {
+	t.Parallel()
+	for _, driver := range []string{"", "docker"} {
+		t.Run("driver="+driver, func(t *testing.T) {
+			t.Parallel()
+			town, work := openshellTown(t)
+			fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+			p := openshellCachedProfile()
+			p.Driver = driver
+			b, _ := openshellTestBackend(town, p, fake)
+			d := &dockerRecorder{absent: true}
+			b.docker = d.run
+
+			if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			if want := [][]string{{"volume", "inspect", "gt-cache-gastown"}, openshellTestCacheCreate}; !reflect.DeepEqual(d.calls, want) {
+				t.Fatalf("docker calls = %q, want %q", d.calls, want)
+			}
+			cs, err := b.createSpec(openshellSpawn(town, work))
+			if err != nil {
+				t.Fatalf("createSpec: %v", err)
+			}
+			if !strings.Contains(cs.DriverConfigJSON, `"source":"gt-cache-gastown"`) {
+				t.Fatalf("DriverConfigJSON = %s, want the cache mount", cs.DriverConfigJSON)
+			}
+		})
+	}
+}
+
 func TestOpenShellCreateMountsTheCacheVolume(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
