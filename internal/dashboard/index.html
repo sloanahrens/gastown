@@ -2190,10 +2190,11 @@ function renderForgejo(s) {
   const events = f.events || [];
   feedCount = events.length;
   foldFeed(!!f.actions);
-  // A repo the viewer's token cannot read is named: silently reading a subset is
-  // how a rig's landings went missing with no error anywhere (gt-faml5).
+  // A repo this refresh could not read is named, whether the viewer's token
+  // cannot see it or it outran its call bound: silently reading a subset is how
+  // a rig's landings went missing with no error anywhere (gt-faml5, gt-p7lkd).
   const missing = f.missing || [];
-  if (missing.length) box.append(el("div", "badc title", "not readable by the viewer: " + missing.join(", ")));
+  if (missing.length) box.append(el("div", "badc title", "could not read: " + missing.join(", ")));
   if (!events.length) {
     if (!missing.length) { box.append(el("div", f.error ? "badc" : "empty", f.error ? "unavailable: " + f.error : "no activity")); return; }
   } else {

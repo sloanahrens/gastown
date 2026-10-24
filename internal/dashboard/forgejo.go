@@ -22,6 +22,11 @@ const (
 	// forgejoTimeout bounds one whole refresh — the repo list and every feed
 	// call share it — so a slow Forgejo cannot hold the panel's neighbors.
 	forgejoTimeout = 5 * time.Second
+	// forgejoCallTimeout bounds one API call. The repos are read in parallel
+	// and each call carries its own bound, so one slow endpoint costs that
+	// call rather than the refresh, and the other repos' feeds still arrive
+	// (gt-p7lkd).
+	forgejoCallTimeout = 2 * time.Second
 )
 
 // ForgejoEvent is one line of the merged Forgejo activity feed.
@@ -45,9 +50,11 @@ type ForgejoFeed struct {
 	// EverySec is the panel's poll interval in seconds, set by the hub that
 	// polls. The page marks the snapshot stale past two of them.
 	EverySec float64 `json:"every_seconds,omitempty"`
-	// Missing names the repos the viewer could not read. Naming them is what
-	// keeps a rig whose repository is invisible to the viewer from reading as a
-	// rig with no landings (gt-faml5).
+	// Missing names the repos this refresh could not read — one the viewer's
+	// token cannot see, or one whose calls outran their bound. Naming them is
+	// what keeps a rig whose repository is invisible to the viewer, or merely
+	// slow this minute, from reading as a rig with no landings (gt-faml5,
+	// gt-p7lkd).
 	Missing []string `json:"missing,omitempty"`
 	// Actions is the section's workflow runs, read in the same refresh as the
 	// events. It is nil when no repo answered for its runs — a reader with no
@@ -74,6 +81,9 @@ type ForgejoReader struct {
 	api   forgejoFeeds
 	repos []string // owner/name overrides; empty reads the viewer's whole list
 	now   func() time.Time
+	// callTimeout bounds one API call; zero uses forgejoCallTimeout. It is a
+	// field so a test can shorten the bound rather than wait on the default.
+	callTimeout time.Duration
 
 	mu   sync.Mutex
 	last *ForgejoFeed
@@ -82,7 +92,7 @@ type ForgejoReader struct {
 // NewForgejoReader builds a reader over api. A non-empty repos is the exact
 // owner/name list to read instead of every repo the viewer can see.
 func NewForgejoReader(api forgejoFeeds, repos []string) *ForgejoReader {
-	return &ForgejoReader{api: api, repos: append([]string(nil), repos...), now: time.Now}
+	return &ForgejoReader{api: api, repos: append([]string(nil), repos...), now: time.Now, callTimeout: forgejoCallTimeout}
 }
 
 // Read refreshes the feed. A refresh that fails returns the last good feed
@@ -113,50 +123,140 @@ func (r *ForgejoReader) Read() *ForgejoFeed {
 }
 
 // fetch reads every repo's feed and workflow runs under one deadline and
-// merges them. The deadline covers the whole refresh rather than each call, so
-// the poll costs the panel at most forgejoTimeout however many repos the viewer
-// sees.
+// merges them. The deadline still covers the whole refresh, so the poll costs
+// the panel at most forgejoTimeout however many repos the viewer sees. The
+// repos are read in parallel, each call under its own bound: a refresh of nine
+// repos is one repo's five calls deep, not forty-five calls deep, so a call
+// slower than the whole budget allows cannot starve the rest (gt-p7lkd).
 func (r *ForgejoReader) fetch() (*ForgejoFeed, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), forgejoTimeout)
 	defer cancel()
 
-	var names []string
-	if len(r.repos) > 0 {
-		names = append(names, r.repos...)
-	} else {
-		repos, err := r.api.ListUserRepos(ctx)
-		if err != nil {
-			return nil, err
-		}
-		for _, repo := range repos {
-			names = append(names, repo.FullName)
+	names, err := r.repoNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// A name that is not owner/name is the operator's mistake, not an outage,
+	// so it is named before any read rather than as one repo among the results.
+	for _, name := range names {
+		if owner, repo, ok := strings.Cut(name, "/"); !ok || owner == "" || repo == "" {
+			return nil, fmt.Errorf("%w: %s", errRepoName, strconv.Quote(name))
 		}
 	}
 
-	var all []forgejo.Activity
-	var missing []string
-	var runs []repoRuns
-	for _, name := range names {
-		owner, repo, ok := strings.Cut(name, "/")
-		if !ok || owner == "" || repo == "" {
-			return nil, fmt.Errorf("%w: %s", errRepoName, strconv.Quote(name))
-		}
-		acts, err := r.api.ListRepoActivities(ctx, owner, repo, forgejoKept)
-		if err != nil {
+	reads := make([]repoRead, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reads[i] = r.readRepo(ctx, name)
+		}()
+	}
+	wg.Wait()
+	return mergeRepoReads(reads)
+}
+
+// repoNames is the repos one refresh reads: the reader's own owner/name list,
+// or every repository the viewer can see.
+func (r *ForgejoReader) repoNames(ctx context.Context) ([]string, error) {
+	if len(r.repos) > 0 {
+		return append([]string(nil), r.repos...), nil
+	}
+	callCtx, cancel := r.callCtx(ctx)
+	defer cancel()
+	repos, err := r.api.ListUserRepos(callCtx)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		names = append(names, repo.FullName)
+	}
+	return names, nil
+}
+
+// callCtx bounds one API call under the refresh's deadline. Every call gets
+// its own bound, so a hung endpoint spends one call's worth of the refresh and
+// is then reported, rather than holding the rest of the refresh (gt-p7lkd).
+func (r *ForgejoReader) callCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	t := r.callTimeout
+	if t <= 0 {
+		t = forgejoCallTimeout
+	}
+	return context.WithTimeout(parent, t)
+}
+
+// listActivities reads one repo's activity feed under its own bound.
+func (r *ForgejoReader) listActivities(ctx context.Context, owner, repo string) ([]forgejo.Activity, error) {
+	callCtx, cancel := r.callCtx(ctx)
+	defer cancel()
+	return r.api.ListRepoActivities(callCtx, owner, repo, forgejoKept)
+}
+
+// repoRead is one repo's part of a refresh: its feed and runs, or why it was
+// left out.
+type repoRead struct {
+	name string
+	acts []forgejo.Activity
+	runs repoRuns
+	// err is a read that failed; invisible marks the failure Forgejo answers
+	// for a repository the viewer may not see, which names a permission rather
+	// than an outage.
+	err       error
+	invisible bool
+}
+
+// readRepo reads one repo's activities and, when they arrived, its runs.
+func (r *ForgejoReader) readRepo(ctx context.Context, name string) repoRead {
+	out := repoRead{name: name}
+	owner, repo, _ := strings.Cut(name, "/") // the caller validated the name
+	acts, err := r.listActivities(ctx, owner, repo)
+	if err != nil {
+		out.err = err
+		out.invisible = invisibleToViewer(err)
+		return out
+	}
+	out.acts = acts
+	// The Actions section rides the same refresh: a repo the viewer cannot read
+	// has already been skipped above, so a runs failure here is a real one and
+	// the repo is named in the section's errors.
+	out.runs = r.readRepoRuns(ctx, name, owner, repo)
+	return out
+}
+
+// mergeRepoReads merges every repo's read into the feed. A repo that could not
+// be read is named and the rest merge, so one slow or failing feed never blanks
+// the others. Only a refresh where no repo answered at all is an error, which
+// Read turns into the last good feed and its age.
+func mergeRepoReads(reads []repoRead) (*ForgejoFeed, error) {
+	var (
+		all      []forgejo.Activity
+		missing  []string
+		runs     []repoRuns
+		answered int
+		failed   error
+	)
+	for _, rr := range reads {
+		switch {
+		case rr.invisible:
 			// One repo the viewer cannot read must not cost the panel the repos
 			// it can: the feeds of the read repos still merge, and the rest are
 			// named (gt-faml5).
-			if invisibleToViewer(err) {
-				missing = append(missing, name)
-				continue
+			missing = append(missing, rr.name)
+		case rr.err != nil:
+			missing = append(missing, rr.name)
+			if failed == nil {
+				failed = rr.err
 			}
-			return nil, err
+		default:
+			answered++
+			all = append(all, rr.acts...)
+			runs = append(runs, rr.runs)
 		}
-		all = append(all, acts...)
-		// The Actions section rides the same refresh: a repo the viewer cannot
-		// read has already been skipped above, so a runs failure here is a real
-		// one and the repo is named in the section's errors.
-		runs = append(runs, r.readRepoRuns(ctx, name, owner, repo))
+	}
+	if answered == 0 && failed != nil {
+		return nil, failed
 	}
 	feed := MergeForgejoActivities(all)
 	feed.Missing = missing

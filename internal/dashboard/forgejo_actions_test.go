@@ -473,18 +473,29 @@ func TestForgejoReaderReadsActionsWithTheFeed(t *testing.T) {
 	assert.Equal(t, 27.0, a.Recent[0].DurationSecs, "27s arrives as 27000000000 nanoseconds")
 	assert.Equal(t, "gt-abc", a.Recent[0].Bead, "the bead id is parsed out of the title")
 
-	assert.Equal(t, []string{
-		"/api/v1/repos/sloan/beads/activities/feeds?limit=30",
-		"/api/v1/repos/sloan/beads/actions/runs?limit=20&status=waiting",
-		"/api/v1/repos/sloan/beads/actions/runs?limit=20&status=blocked",
-		"/api/v1/repos/sloan/beads/actions/runs?limit=20&status=running",
-		"/api/v1/repos/sloan/beads/actions/runs?limit=20&status=success&status=failure&status=cancelled&status=skipped",
-		"/api/v1/repos/sloan/mango/activities/feeds?limit=30",
-		"/api/v1/repos/sloan/mango/actions/runs?limit=20&status=waiting",
-		"/api/v1/repos/sloan/mango/actions/runs?limit=20&status=blocked",
-		"/api/v1/repos/sloan/mango/actions/runs?limit=20&status=running",
-		"/api/v1/repos/sloan/mango/actions/runs?limit=20&status=success&status=failure&status=cancelled&status=skipped",
-	}, stub.askedFor(), "current is one bounded query per status, completed one for every finished status")
+	// The repos are read in parallel, so only each repo's own order is fixed:
+	// its feed first, then one bounded query per current status and one for
+	// every finished status (gt-p7lkd).
+	for _, repo := range []string{"sloan/beads", "sloan/mango"} {
+		assert.Equal(t, []string{
+			"/api/v1/repos/" + repo + "/activities/feeds?limit=30",
+			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=waiting",
+			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=blocked",
+			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=running",
+			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=success&status=failure&status=cancelled&status=skipped",
+		}, askedForRepo(stub.askedFor(), repo), "current is one bounded query per status, completed one for every finished status")
+	}
+}
+
+// askedForRepo is the stub's requests for one repo, in the order it saw them.
+func askedForRepo(asked []string, repo string) []string {
+	var out []string
+	for _, q := range asked {
+		if strings.HasPrefix(q, "/api/v1/repos/"+repo+"/") {
+			out = append(out, q)
+		}
+	}
+	return out
 }
 
 // The reader keeps the last good Actions when every repo's runs fail, the same
