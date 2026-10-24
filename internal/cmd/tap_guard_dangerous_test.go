@@ -2024,10 +2024,15 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		{"git push --force after a quoted <<EOF", "git commit -m \"explain <<EOF handling\"\ngit push --force origin x", true},
 		{"git reset --hard after a <<< here-string", "cat <<< hello\ngit reset --hard origin/main", true},
 		{"sudo after a quoted <<EOF", "git commit -m \"say <<EOF here\"\nsudo rm -rf /etc", true},
+		// A backslash that ends a # comment does not join the operator line to
+		// the comment above it, so bash is the reader of the body (gt-3vky2).
+		{"a comment ending in a backslash does not join the operator line", "echo hi # note \\\nbash <<EOF\ngit reset --hard\nEOF", true},
+		{"a bash continuation above the operator line still joins it", "bash \\\n<<EOF\ngit reset --hard\nEOF", true},
 
 		// Allowed — the same shape with a terminator still reads as data
 		{"terminated heredoc body stays data", "cat <<EOF\ndrop table users\nEOF", false},
 		{"terminated quoted-tag heredoc body stays data", "git commit -m \"explain <<EOF\"\ncat <<EOF\ndrop table users\nEOF", false},
+		{"a comment ending in a backslash above a data reader is allowed", "echo hi # note \\\ncat <<'EOF'\ngit reset --hard\nEOF", false},
 
 		// Allowed
 		{"rm -rf ./build/", "rm -rf ./build/", false},

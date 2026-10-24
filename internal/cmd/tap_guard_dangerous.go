@@ -999,7 +999,10 @@ func heredocReaderLine(command string, start, end int) (string, int) {
 	// over line continuations to keep the invoker on the reader line. Only an
 	// odd run of trailing backslashes continues the line: in an even run each
 	// backslash escapes the next, so the shell ends the line at the newline
-	// and the line above is not part of the reader (gt-fke2f).
+	// and the line above is not part of the reader (gt-fke2f). A backslash
+	// inside a "#" comment continues nothing either: the comment runs to the
+	// newline, so heredocLineEnd, which tracks comments, ends the line there
+	// (gt-3vky2).
 	for lineStart > 0 {
 		prevEnd := lineStart - 1
 		prevStart := strings.LastIndexByte(command[:prevEnd], '\n') + 1
@@ -1008,7 +1011,7 @@ func heredocReaderLine(command string, start, end int) (string, int) {
 		for n < len(prev) && prev[len(prev)-1-n] == '\\' {
 			n++
 		}
-		if n%2 == 0 {
+		if n%2 == 0 || heredocLineEnd(command, prevStart) == prevEnd {
 			break
 		}
 		lineStart = prevStart
