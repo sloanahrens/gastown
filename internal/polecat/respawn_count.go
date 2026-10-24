@@ -22,10 +22,21 @@ import (
 var respawnMu sync.Mutex
 
 // beadRespawnRecord tracks how many times a single bead has been reset for re-dispatch.
+//
+// Since is when the current run of counts began. A reset deletes the record, so
+// a later increment starts a new run and GiveBackBeadRespawn can tell them apart.
 type beadRespawnRecord struct {
 	BeadID      string    `json:"bead_id"`
 	Count       int       `json:"count"`
 	LastRespawn time.Time `json:"last_respawn"`
+	Since       time.Time `json:"since"`
+}
+
+// RespawnMark names one increment from RecordBeadRespawnMark; the zero mark
+// names none.
+type RespawnMark struct {
+	Count int
+	Since time.Time
 }
 
 // beadRespawnState holds respawn counts for all tracked beads.
@@ -304,6 +315,13 @@ func ShouldBlockRespawn(workDir, beadID string) bool {
 // respawn would otherwise proceed uncounted, which is the spawn storm this
 // counter exists to stop (gt-u3hc1).
 func RecordBeadRespawn(workDir, beadID string) (int, error) {
+	mark, err := RecordBeadRespawnMark(workDir, beadID)
+	return mark.Count, err
+}
+
+// RecordBeadRespawnMark is RecordBeadRespawn for a caller that may give the
+// increment back: it returns a mark that names this increment.
+func RecordBeadRespawnMark(workDir, beadID string) (RespawnMark, error) {
 	respawnMu.Lock()
 	defer respawnMu.Unlock()
 
@@ -311,39 +329,40 @@ func RecordBeadRespawn(workDir, beadID string) (int, error) {
 
 	unlock, err := lockRespawnState(townRoot)
 	if err != nil {
-		return 0, err
+		return RespawnMark{}, err
 	}
 	defer unlock()
 
 	state, err := loadBeadRespawnState(townRoot)
 	if err != nil {
-		return 0, err
+		return RespawnMark{}, err
 	}
+	now := time.Now().UTC()
 	rec, ok := state.Beads[beadID]
 	if !ok {
-		rec = &beadRespawnRecord{BeadID: beadID}
+		rec = &beadRespawnRecord{BeadID: beadID, Since: now}
 		state.Beads[beadID] = rec
 	}
 	rec.Count++
-	rec.LastRespawn = time.Now().UTC()
+	rec.LastRespawn = now
 	if err := saveBeadRespawnState(townRoot, state); err != nil {
-		return 0, err
+		return RespawnMark{}, err
 	}
-	return rec.Count, nil
+	return RespawnMark{Count: rec.Count, Since: rec.Since}, nil
 }
 
 // GiveBackBeadRespawn removes the increment one sling attempt recorded, when
-// that attempt started no polecat. recorded is the count RecordBeadRespawn
-// returned for the attempt; zero means it recorded nothing, which gives nothing
-// back rather than charging another attempt's death to this one.
+// that attempt started no polecat. mark is what RecordBeadRespawnMark returned
+// for the attempt; the zero mark records nothing, which gives nothing back
+// rather than charging another attempt's death to this one.
 //
-// A current count below recorded is a reset since the attempt, which already
-// removed the increment, so the reset stands. A count above recorded holds
-// another attempt's increment as well; only the one recorded here is removed.
-// The sling gives back an image-drift refusal, which is the seat's precondition
+// A record that is gone, or began after the mark, was reset since the attempt
+// and already lost the increment, so nothing else comes off. Otherwise one
+// increment comes off and the other attempts' increments in the run stay. The
+// sling gives back an image-drift refusal, which is the seat's precondition
 // rather than a death of the bead (gt-cjmt5).
-func GiveBackBeadRespawn(workDir, beadID string, recorded int) error {
-	if recorded <= 0 {
+func GiveBackBeadRespawn(workDir, beadID string, mark RespawnMark) error {
+	if mark.Count <= 0 {
 		return nil
 	}
 
@@ -363,11 +382,11 @@ func GiveBackBeadRespawn(workDir, beadID string, recorded int) error {
 		return err
 	}
 	rec, ok := state.Beads[beadID]
-	if !ok || rec.Count < recorded {
+	if !ok || !rec.Since.Equal(mark.Since) {
 		return nil
 	}
 	rec.Count--
-	if rec.Count == 0 {
+	if rec.Count <= 0 {
 		delete(state.Beads, beadID)
 	}
 	return saveBeadRespawnState(townRoot, state)

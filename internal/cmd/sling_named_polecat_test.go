@@ -93,7 +93,7 @@ func fakeIdleReuseEnv() idleReuseEnv {
 
 func reuseForNamedSling(t *testing.T, fake idlePolecatReuse, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 	t.Helper()
-	return reuseIdlePolecatForSlingWith(fake, fakeIdleReuseEnv(), "rig", opts, func() int { return 0 })
+	return reuseIdlePolecatForSlingWith(fake, fakeIdleReuseEnv(), "rig", opts, func() polecat.RespawnMark { return polecat.RespawnMark{} })
 }
 
 func assertOnlyNamedTouched(t *testing.T, fake *namedSlingFake, name string) {

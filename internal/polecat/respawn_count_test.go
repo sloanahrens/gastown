@@ -779,40 +779,91 @@ func respawnCountNow(t *testing.T, townRoot, beadID string) int {
 	return 0
 }
 
+// markRecord is RecordBeadRespawnMark for the fixtures that expect it to land.
+func markRecord(t *testing.T, townRoot, beadID string) RespawnMark {
+	t.Helper()
+	mark, err := RecordBeadRespawnMark(townRoot, beadID)
+	if err != nil {
+		t.Fatalf("RecordBeadRespawnMark(%s): %v", beadID, err)
+	}
+	return mark
+}
+
 // TestGiveBackBeadRespawn: the increment one sling attempt recorded comes off
-// again when that attempt started no polecat, and nothing else changes (gt-cjmt5).
+// again when that attempt started no polecat, and nothing else changes. A reset
+// since the attempt stands, including when a later increment brings the count
+// back to the attempt's own (gt-cjmt5).
 func TestGiveBackBeadRespawn(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
-		name     string
-		recorded int // counts on the bead before the give-back
-		giveBack int // the count the attempt recorded
-		reset    bool
-		want     int
+		name       string
+		prior      int  // increments recorded before the attempt
+		noRecord   bool // the attempt recorded nothing, so its mark is zero
+		resetAfter bool // the bead is reset after the attempt recorded
+		later      int  // increments recorded after the attempt, after any reset
+		want       int
 	}{
-		{name: "the attempt's increment is removed", recorded: 2, giveBack: 2, want: 1},
-		{name: "a first increment leaves no record behind", recorded: 1, giveBack: 1, want: 0},
-		{name: "an attempt that recorded nothing gives nothing back", recorded: 1, giveBack: 0, want: 1},
-		{name: "a reset since the attempt stands", recorded: 2, giveBack: 2, reset: true, want: 0},
+		{name: "the attempt's increment is removed", prior: 1, want: 1},
+		{name: "a first increment leaves no record behind", prior: 0, want: 0},
+		{name: "an attempt that recorded nothing gives nothing back", prior: 1, noRecord: true, want: 1},
+		{name: "a reset since the attempt stands", prior: 1, resetAfter: true, want: 0},
+		{name: "an increment recorded after a reset is not taken", resetAfter: true, later: 1, want: 1},
+		{name: "increments recorded after the attempt stay", prior: 1, later: 2, want: 3},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
-			for i := 0; i < tt.recorded; i++ {
+			for i := 0; i < tt.prior; i++ {
 				mustRecord(t, townRoot, "bead-back")
 			}
-			if tt.reset {
+			var mark RespawnMark
+			if !tt.noRecord {
+				mark = markRecord(t, townRoot, "bead-back")
+			}
+			if tt.resetAfter {
 				if err := ResetBeadRespawnCount(townRoot, "bead-back"); err != nil {
 					t.Fatalf("ResetBeadRespawnCount: %v", err)
 				}
 			}
+			for i := 0; i < tt.later; i++ {
+				mustRecord(t, townRoot, "bead-back")
+			}
 
-			if err := GiveBackBeadRespawn(townRoot, "bead-back", tt.giveBack); err != nil {
+			if err := GiveBackBeadRespawn(townRoot, "bead-back", mark); err != nil {
 				t.Fatalf("GiveBackBeadRespawn: %v", err)
 			}
 
 			if got := respawnCountNow(t, townRoot, "bead-back"); got != tt.want {
 				t.Errorf("count after the give-back = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGiveBackBeadRespawn_ConcurrentAttemptsEitherOrder: two attempts that both
+// recorded in one run each take off only their own increment, whichever gives
+// back first, so neither strands the other's increment in the count.
+func TestGiveBackBeadRespawn_ConcurrentAttemptsEitherOrder(t *testing.T) {
+	t.Parallel()
+	for _, order := range []string{"first attempt gives back first", "second attempt gives back first"} {
+		t.Run(order, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			first := markRecord(t, townRoot, "bead-pair")
+			second := markRecord(t, townRoot, "bead-pair")
+
+			marks := []RespawnMark{first, second}
+			if order == "second attempt gives back first" {
+				marks = []RespawnMark{second, first}
+			}
+			for _, mark := range marks {
+				if err := GiveBackBeadRespawn(townRoot, "bead-pair", mark); err != nil {
+					t.Fatalf("GiveBackBeadRespawn: %v", err)
+				}
+			}
+
+			if got := respawnCountNow(t, townRoot, "bead-pair"); got != 0 {
+				t.Errorf("count after both give-backs = %d, want 0", got)
 			}
 		})
 	}

@@ -48,26 +48,26 @@ func TestImageDriftStartGivesBackTheRespawn(t *testing.T) {
 			}
 			// The seam prepareSlingPolecat hands its spawn: one count on the
 			// bead, or none where the sling must not count.
-			recorded := 0
-			record := func() int {
+			recorded := polecat.RespawnMark{}
+			record := func() polecat.RespawnMark {
 				if !tt.record {
-					return 0
+					return polecat.RespawnMark{}
 				}
-				n, err := polecat.RecordBeadRespawn(townRoot, bead)
+				mark, err := polecat.RecordBeadRespawnMark(townRoot, bead)
 				if err != nil {
-					t.Fatalf("RecordBeadRespawn: %v", err)
+					t.Fatalf("RecordBeadRespawnMark: %v", err)
 				}
-				recorded = n
-				return n
+				recorded = mark
+				return mark
 			}
 
 			s := freshSpawnInfo("rig",
 				&polecat.Polecat{Name: "alpha", Branch: "polecat/alpha/" + bead},
 				"alpha-session", "main", "main",
 				SlingSpawnOptions{HookBead: bead}, record)
-			if s.respawnCount != recorded {
-				t.Fatalf("spawn carries respawn count %d, want the %d its recordRespawn returned",
-					s.respawnCount, recorded)
+			if s.respawnMark != recorded {
+				t.Fatalf("spawn carries respawn mark %+v, want the %+v its recordRespawn returned",
+					s.respawnMark, recorded)
 			}
 			// What slingSeatSpawn.spawn sets on the info it hands on.
 			s.townRoot = townRoot
