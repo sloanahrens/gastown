@@ -246,16 +246,68 @@ func TestPolecatPolicyLetsOnlyNodeReachTheNpmRegistryAndFonts(t *testing.T) {
 // policyPaths returns the paths the policy grants under filesystem_policy.<key>.
 func policyPaths(t *testing.T, doc map[string]any, key string) []string {
 	t.Helper()
-	fs, ok := doc["filesystem_policy"].(map[string]any)
-	if !ok {
-		t.Fatal("policy has no filesystem_policy")
-	}
-	list, _ := fs[key].([]any)
-	var out []string
-	for _, p := range list {
-		out = append(out, fmt.Sprint(p))
+	out, err := parsePolicyPaths(doc, key)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return out
+}
+
+// parsePolicyPaths reads filesystem_policy.<key> as a list of path strings. An
+// absent or empty key grants nothing; any other shape is an error naming the
+// field, so a malformed list cannot pass as an empty one (gt-tmi6n).
+func parsePolicyPaths(doc map[string]any, key string) ([]string, error) {
+	fs, ok := doc["filesystem_policy"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("policy has no filesystem_policy")
+	}
+	v := fs[key]
+	if v == nil {
+		return nil, nil
+	}
+	list, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("filesystem_policy.%s: want a list, got %T", key, v)
+	}
+	out := make([]string, 0, len(list))
+	for i, p := range list {
+		s, ok := p.(string)
+		if !ok {
+			return nil, fmt.Errorf("filesystem_policy.%s[%d]: want a string, got %T", key, i, p)
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// policyGrants reports whether list grants dir itself or one of its ancestors.
+// Landlock grants whole paths, so a grant of a subdirectory does not reach dir.
+func policyGrants(list []string, dir string) bool {
+	for _, p := range list {
+		if pathWithin(dir, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// policyTouches reports whether list names dir, an ancestor of dir, or anything
+// beneath it: each of these lets a sandbox write somewhere in dir.
+func policyTouches(list []string, dir string) bool {
+	for _, p := range list {
+		if pathWithin(dir, p) || pathWithin(p, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathWithin reports whether path is dir or lies beneath it. Both are cleaned
+// first, so a trailing slash changes nothing, and a sibling that shares a
+// prefix ("/sys/fs/cgroupfoo") is not beneath "/sys/fs/cgroup".
+func pathWithin(path, dir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // DuckDB reads the cgroup CPU limit to pick its default thread count and aborts
@@ -265,19 +317,11 @@ func TestPolecatPolicyLetsTheCgroupTreeBeReadNotWritten(t *testing.T) {
 	t.Parallel()
 	doc := polecatPolicy(t)
 	const cgroup = "/sys/fs/cgroup"
-	contains := func(list []string) bool {
-		for _, p := range list {
-			if p == cgroup {
-				return true
-			}
-		}
-		return false
+	if readOnly := policyPaths(t, doc, "read_only"); !policyGrants(readOnly, cgroup) {
+		t.Errorf("filesystem_policy.read_only = %v, want it to grant %s", readOnly, cgroup)
 	}
-	if !contains(policyPaths(t, doc, "read_only")) {
-		t.Errorf("filesystem_policy.read_only = %v, want it to list %s", policyPaths(t, doc, "read_only"), cgroup)
-	}
-	if contains(policyPaths(t, doc, "read_write")) {
-		t.Errorf("filesystem_policy.read_write lists %s: the cgroup tree must stay read only", cgroup)
+	if readWrite := policyPaths(t, doc, "read_write"); policyTouches(readWrite, cgroup) {
+		t.Errorf("filesystem_policy.read_write = %v overlaps %s: the cgroup tree must stay read only", readWrite, cgroup)
 	}
 }
 
@@ -300,5 +344,53 @@ func TestPolecatPolicyLetsDevZeroBeReadNotWritten(t *testing.T) {
 	}
 	if has(policyPaths(t, doc, "read_write")) {
 		t.Errorf("filesystem_policy.read_write lists %s: it must stay read only", zero)
+	}
+}
+
+// A filesystem list of the wrong shape must name its field, not read as an empty
+// grant that fails the path checks for the wrong reason (gt-tmi6n).
+func TestParsePolicyPathsReportsMalformedList(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		fs   map[string]any
+		want string // field the error must name
+	}{
+		{"read_only is not a list", map[string]any{"read_only": "/usr"}, "filesystem_policy.read_only"},
+		{"entry is not a string", map[string]any{"read_only": []any{1}}, "filesystem_policy.read_only[0]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := parsePolicyPaths(map[string]any{"filesystem_policy": tc.fs}, "read_only")
+			if err == nil {
+				t.Fatalf("parsePolicyPaths accepted a list whose %s is malformed", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The cgroup checks depend on these edges: a trailing slash is the same path, and
+// a sibling that shares a prefix is not beneath it (gt-tmi6n).
+func TestPathWithin(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		path, dir string
+		want      bool
+	}{
+		{"/sys/fs/cgroup", "/sys/fs/cgroup", true},
+		{"/sys/fs/cgroup/", "/sys/fs/cgroup", true},
+		{"/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup", true},
+		{"/sys/fs/cgroupfoo", "/sys/fs/cgroup", false},
+		{"/sys/fs", "/sys/fs/cgroup", false},
+		{"/anything", "/", true},
+	}
+	for _, tc := range cases {
+		if got := pathWithin(tc.path, tc.dir); got != tc.want {
+			t.Errorf("pathWithin(%q, %q) = %v, want %v", tc.path, tc.dir, got, tc.want)
+		}
 	}
 }
