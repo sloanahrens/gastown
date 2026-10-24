@@ -1583,9 +1583,12 @@ func splitSpacedCommand(command, spaced string) []string {
 		// The naive split keeps quote characters, which hid 'sudo and x="$("
 		// from the matchers (gt-h45w3). A command with a quote and a paren is
 		// split by lenientShellWords, which reads the quotes; any other
-		// malformed command splits as before.
+		// malformed command splits as before. It cuts the separators the words
+		// would otherwise fold in: a newline, ;, && or | left inside the
+		// enclosing word made a later line's "rm -rf /" read as an argument of
+		// the line before it (gt-w3j7z).
 		if strings.ContainsAny(command, `"'`) && strings.ContainsAny(command, "()") {
-			return lenientShellWords(command)
+			return lenientShellSplit(command, true)
 		}
 		return strings.Fields(command)
 	}
@@ -1606,6 +1609,19 @@ func splitSpacedCommand(command, spaced string) []string {
 // before ", \, $ and a backtick, as the shell reads it. A word of empty quotes
 // stays as an empty word, as shlex returns it.
 func lenientShellWords(command string) []string {
+	return lenientShellSplit(command, false)
+}
+
+// lenientShellSplit is the walk behind lenientShellWords. With separators
+// set, it also cuts at an unquoted ";", "&", "|" or newline and emits the
+// operator as a token of its own — a newline as ";" and a doubled "&&" or
+// "||" as one token, an "&" touching a ">" staying in its redirection — the
+// tokens spaceOutShellOperators gets shlex to produce. That is the only
+// separator reading a malformed command has: the spaced text shlex failed on
+// escapes its substitutions' quoting for shlex, which reads back as one long
+// quoted word, so a later line's command would ride into the line before it
+// (gt-w3j7z).
+func lenientShellSplit(command string, separators bool) []string {
 	var words []string
 	var word strings.Builder
 	inWord := false
@@ -1633,6 +1649,28 @@ func lenientShellWords(command string) []string {
 		case r == '"' || r == '\'':
 			quote = r
 			inWord = true
+		case separators && (r == ';' || r == '&' || r == '|' || r == '\n'):
+			if r == '&' && ((i > 0 && runes[i-1] == '>') || (i+1 < len(runes) && runes[i+1] == '>')) {
+				// A '&' touching a '>' is a redirection (2>&1, &>file),
+				// not a background operator (gt-wwwht).
+				word.WriteRune(r)
+				inWord = true
+				continue
+			}
+			if inWord {
+				words = append(words, word.String())
+				word.Reset()
+				inWord = false
+			}
+			switch {
+			case r == '\n':
+				words = append(words, ";")
+			case (r == '&' || r == '|') && i+1 < len(runes) && runes[i+1] == r:
+				words = append(words, string([]rune{r, r}))
+				i++
+			default:
+				words = append(words, string(r))
+			}
 		case r == ' ' || r == '\t' || r == '\n':
 			if inWord {
 				words = append(words, word.String())
