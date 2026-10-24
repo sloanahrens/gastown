@@ -1460,6 +1460,46 @@ func TestHandoffMarkerWrittenInPlanWorkDir(t *testing.T) {
 	}
 }
 
+// A respawn exports the same git author first spawn does: the seat's bare
+// name. GT_ROLE and BD_ACTOR stay compound. The compound author is what gt
+// done's rework lease (git.SeatIdentityFor) reads as another seat's
+// divergence, so a handoff used to break the successor's next commit
+// (gt-7a955).
+//
+// A session name is the rig's beads prefix plus the worker name
+// (session.PolecatSessionName), so gt-furiosa is the polecat furiosa whose
+// compound address is gastown/polecats/furiosa.
+func TestRestartPlanExportsBareGitAuthorName(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	tests := []struct {
+		session  string
+		want     string
+		compound string
+	}{
+		{"gt-furiosa", "GIT_AUTHOR_NAME=furiosa", "GIT_AUTHOR_NAME=gastown/polecats/furiosa"},
+		{"gt-crew-max", "GIT_AUTHOR_NAME=max", "GIT_AUTHOR_NAME=gastown/crew/max"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.session, func(t *testing.T) {
+			t.Parallel()
+			plan, err := buildRestartPlan(tt.session, restartOpts(townRoot, map[string]string{}))
+			if err != nil {
+				t.Fatalf("buildRestartPlan(%q): %v", tt.session, err)
+			}
+			if !strings.Contains(plan.Command, tt.want) {
+				t.Errorf("command does not carry %s:\n%s", tt.want, plan.Command)
+			}
+			if strings.Contains(plan.Command, tt.compound) {
+				t.Errorf("command carries the compound git author %s:\n%s", tt.compound, plan.Command)
+			}
+			if role := "GT_ROLE=" + strings.TrimPrefix(tt.compound, "GIT_AUTHOR_NAME="); !strings.Contains(plan.Command, role) {
+				t.Errorf("command lost the compound GT_ROLE %s:\n%s", role, plan.Command)
+			}
+		})
+	}
+}
+
 // The plan's workDir wins; without one the state stays in cwd, and with
 // neither there is no directory to write under.
 func TestHandoffStateDir(t *testing.T) {
