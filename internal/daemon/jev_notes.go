@@ -32,7 +32,7 @@ func (d *Daemon) triggerJevNotes() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "jev_notes", time.Time{}, now, jevNotesInterval)
+	dec := evaluatePatrolDue(d.config.TownRoot, "jev_notes", d.jevNotesRun.last(), now, jevNotesInterval)
 	if !dec.due {
 		return
 	}
@@ -47,9 +47,7 @@ func (d *Daemon) triggerJevNotes() {
 		if !d.runJevNotes() {
 			return
 		}
-		if err := savePatrolLastRun(d.config.TownRoot, "jev_notes", d.clk().Now()); err != nil {
-			d.logger.Printf("jev_notes: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordPatrolRun(&d.jevNotesRun, "jev_notes", d.clk().Now())
 	}()
 }
 

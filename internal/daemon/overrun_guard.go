@@ -268,7 +268,7 @@ func (d *Daemon) triggerOverrunGuard() {
 		return
 	}
 
-	dec := evaluatePatrolDue(d.config.TownRoot, "overrun_guard", time.Time{}, time.Now(), overrunGuardInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "overrun_guard", d.overrunGuardRun.last(), time.Now(), overrunGuardInterval(d.patrolConfig))
 	if !dec.due {
 		return
 	}
@@ -285,9 +285,7 @@ func (d *Daemon) triggerOverrunGuard() {
 	go func() {
 		defer d.overrunGuardRunning.Store(false)
 		defer func() {
-			if err := savePatrolLastRun(d.config.TownRoot, "overrun_guard", time.Now()); err != nil {
-				d.logger.Printf("overrun_guard: WARNING: cannot persist last-run time (%v)", err)
-			}
+			d.recordPatrolRun(&d.overrunGuardRun, "overrun_guard", time.Now())
 		}()
 		d.runOverrunGuard(d.overrunProdSeams())
 	}()

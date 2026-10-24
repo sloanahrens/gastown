@@ -28,7 +28,7 @@ func (d *Daemon) triggerJevLogtriage() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "jev_logtriage", time.Time{}, now, jevLogtriageInterval)
+	dec := evaluatePatrolDue(d.config.TownRoot, "jev_logtriage", d.jevLogtriageRun.last(), now, jevLogtriageInterval)
 	if !dec.due {
 		return
 	}
@@ -41,9 +41,7 @@ func (d *Daemon) triggerJevLogtriage() {
 	go func() {
 		defer d.jevLogtriageRunning.Store(false)
 		d.runJevLogtriage()
-		if err := savePatrolLastRun(d.config.TownRoot, "jev_logtriage", d.clk().Now()); err != nil {
-			d.logger.Printf("jev_logtriage: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordPatrolRun(&d.jevLogtriageRun, "jev_logtriage", d.clk().Now())
 	}()
 }
 

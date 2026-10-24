@@ -153,7 +153,7 @@ func (d *Daemon) triggerJsonlGitBackup() {
 		return
 	}
 
-	dec := evaluatePatrolDue(d.config.TownRoot, "jsonl_git_backup", time.Time{}, time.Now(), jsonlGitBackupInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "jsonl_git_backup", d.jsonlGitBackupRun.last(), time.Now(), jsonlGitBackupInterval(d.patrolConfig))
 	if !dec.due {
 		d.logger.Printf("jsonl_git_backup: not due — %s", dec.note)
 		return
@@ -194,10 +194,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// An unwritable daemon directory only means the next restart or tick
 	// re-checks; it does not fail the cycle itself.
 	defer func() {
-		if err := savePatrolLastRun(d.config.TownRoot, "jsonl_git_backup", time.Now()); err != nil {
-			d.logger.Printf("jsonl_git_backup: WARNING: cannot persist last-run time (%v) — "+
-				"the next check may re-run sooner than expected", err)
-		}
+		d.recordPatrolRun(&d.jsonlGitBackupRun, "jsonl_git_backup", time.Now())
 	}()
 
 	cycle := d.startDogCycle("jsonl_git_backup")

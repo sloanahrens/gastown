@@ -195,17 +195,23 @@ func (d *Daemon) patrolScanGHGates(h *patrolScanHost, rigs []string) {
 	now := d.clk().Now()
 	for _, rigName := range append([]string{""}, rigs...) {
 		patrol := ghGatesPatrol(rigName)
-		if due := evaluatePatrolDue(d.config.TownRoot, patrol, time.Time{}, now, ghGateInterval); !due.due {
+		mem := d.ghGatesRunMemory(patrol)
+		if due := evaluatePatrolDue(d.config.TownRoot, patrol, mem.last(), now, ghGateInterval); !due.due {
 			continue
 		}
 		if !d.patrolScanGateCheckDB(h, rigName, "gh") {
 			d.logger.Printf("patrol_scan: %s: gh gates: the gate check failed; not recording the run", gateCheckWhere(rigName))
 			continue
 		}
-		if err := savePatrolLastRun(d.config.TownRoot, patrol, now); err != nil {
-			d.logger.Printf("patrol_scan: %s: gh gates: recording last run: %v", gateCheckWhere(rigName), err)
-		}
+		d.recordPatrolRun(mem, patrol, now)
 	}
+}
+
+// ghGatesRunMemory returns the in-memory last-run time of one database's gh
+// gate check, keyed as its persisted record is.
+func (d *Daemon) ghGatesRunMemory(patrol string) *patrolLastRunMemory {
+	mem, _ := d.ghGatesRun.LoadOrStore(patrol, &patrolLastRunMemory{})
+	return mem.(*patrolLastRunMemory)
 }
 
 // ghGatesPatrol is the last-run key for one database's gh gate check ("" is the
@@ -263,16 +269,14 @@ const rogueBDInterval = time.Hour
 // operator; an inconclusive walk is escalated too, never logged as clean.
 func (d *Daemon) patrolScanRogueBD() {
 	now := d.clk().Now()
-	if due := evaluatePatrolDue(d.config.TownRoot, "patrol_scan_rogue_bd", time.Time{}, now, rogueBDInterval); !due.due {
+	if due := evaluatePatrolDue(d.config.TownRoot, "patrol_scan_rogue_bd", d.rogueBDRun.last(), now, rogueBDInterval); !due.due {
 		return
 	}
 	r := patrolscan.CheckRogueBD(patrolscan.RogueBDAggregates(d.config.TownRoot), patrolscan.RogueBDOptions{
 		PathDirs:      filepath.SplitList(os.Getenv("PATH")),
 		IsBuildOutput: gitIgnoredBDBuildOutput,
 	})
-	if err := savePatrolLastRun(d.config.TownRoot, "patrol_scan_rogue_bd", now); err != nil {
-		d.logger.Printf("patrol_scan: rogue bd: recording last run: %v", err)
-	}
+	d.recordPatrolRun(&d.rogueBDRun, "patrol_scan_rogue_bd", now)
 	if r.Clean() {
 		d.logger.Printf("patrol_scan: rogue bd check: clean (%d candidate(s), all build output)", len(r.Candidates))
 		return

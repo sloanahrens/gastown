@@ -28,7 +28,7 @@ func (d *Daemon) triggerJevDispatch() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "jev_dispatch", time.Time{}, now, jevDispatchInterval)
+	dec := evaluatePatrolDue(d.config.TownRoot, "jev_dispatch", d.jevDispatchRun.last(), now, jevDispatchInterval)
 	if !dec.due {
 		return
 	}
@@ -41,9 +41,7 @@ func (d *Daemon) triggerJevDispatch() {
 	go func() {
 		defer d.jevDispatchRunning.Store(false)
 		d.runJevDispatch()
-		if err := savePatrolLastRun(d.config.TownRoot, "jev_dispatch", d.clk().Now()); err != nil {
-			d.logger.Printf("jev_dispatch: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordPatrolRun(&d.jevDispatchRun, "jev_dispatch", d.clk().Now())
 	}()
 }
 
