@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -120,8 +121,7 @@ func writeOldRecords(t *testing.T, town string, clk interface{ Now() time.Time }
 // after the name the last one ended on, so records the gateway still has cannot
 // starve the ones behind them: every record is asked within ceil(n/budget)
 // ticks, and the ones the gateway has are the only ones left. The two-minute
-// case is the default cadence: there the old minute-based offset landed on the
-// same records every tick and never reached the back half.
+// case runs at the default cadence.
 func TestPatrolScanSandboxRecordsRotateSoKeptRecordsDoNotStarveTheRest(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -180,6 +180,84 @@ func TestPatrolScanSandboxRecordsRotateSoKeptRecordsDoNotStarveTheRest(t *testin
 			}
 		})
 	}
+}
+
+// churnHost is a record pass over town whose gateway has every sandbox, so the
+// pass removes nothing and asked holds the names it judged, in order.
+func churnHost(town string, clk *clockwork.FakeClock, budget int, asked *[]string) *patrolScanHost {
+	return &patrolScanHost{
+		d: &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0), tmux: newFakeTmux(clk), clock: clk},
+		sandboxExists: func(_, name string) (bool, error) {
+			*asked = append(*asked, name)
+			return true, nil
+		},
+		sandboxRecordBudget: budget,
+	}
+}
+
+// The walk keeps its place when records come and go between ticks: a record
+// removed under the cursor does not restart the walk, a record still inside the
+// grace uses none of the budget, and a record added behind the cursor is judged
+// once the walk wraps.
+func TestPatrolScanSandboxRecordsCursorSurvivesChurn(t *testing.T) {
+	t.Parallel()
+	t.Run("removed_cursor_record_does_not_restart_the_walk", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		clk := newFixedClock()
+		writeOldRecords(t, town, clk, []string{"gt-p00", "gt-p01", "gt-p02", "gt-p03"})
+		var asked []string
+		h := churnHost(town, clk, 2, &asked)
+		h.patrolScanSandboxRecords()
+		if want := []string{"gt-p00", "gt-p01"}; !reflect.DeepEqual(asked, want) {
+			t.Fatalf("first tick asked %v, want %v", asked, want)
+		}
+		if err := session.RemoveSandboxRecord(town, "gt-p01"); err != nil {
+			t.Fatal(err)
+		}
+
+		asked = nil
+		h.patrolScanSandboxRecords()
+		if want := []string{"gt-p02", "gt-p03"}; !reflect.DeepEqual(asked, want) {
+			t.Errorf("second tick asked %v, want %v: the walk resumes after the removed cursor name", asked, want)
+		}
+	})
+	t.Run("young_records_use_no_budget", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		clk := newFixedClock()
+		for _, n := range []string{"gt-a", "gt-b"} {
+			if err := session.WriteSandboxRecord(town, session.SandboxRecord{Session: n, CreatedAt: clk.Now().Add(-time.Minute)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writeOldRecords(t, town, clk, []string{"gt-c", "gt-d", "gt-e"})
+		var asked []string
+		h := churnHost(town, clk, 2, &asked)
+		h.patrolScanSandboxRecords()
+		if want := []string{"gt-c", "gt-d"}; !reflect.DeepEqual(asked, want) {
+			t.Errorf("tick asked %v, want %v: the young records are skipped without costing the budget", asked, want)
+		}
+	})
+	t.Run("record_added_behind_the_cursor_is_judged_after_the_wrap", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		clk := newFixedClock()
+		writeOldRecords(t, town, clk, []string{"gt-p02", "gt-p03", "gt-p04"})
+		var asked []string
+		h := churnHost(town, clk, 2, &asked)
+		h.patrolScanSandboxRecords()
+		if want := []string{"gt-p02", "gt-p03"}; !reflect.DeepEqual(asked, want) {
+			t.Fatalf("first tick asked %v, want %v", asked, want)
+		}
+		writeOldRecords(t, town, clk, []string{"gt-p00"})
+
+		asked = nil
+		h.patrolScanSandboxRecords()
+		if want := []string{"gt-p04", "gt-p00"}; !reflect.DeepEqual(asked, want) {
+			t.Errorf("second tick asked %v, want %v: the new record sorts behind the cursor and is reached on the wrap", asked, want)
+		}
+	})
 }
 
 // probeCounter counts the tmux probes a record pass makes.
