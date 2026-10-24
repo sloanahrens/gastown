@@ -85,6 +85,11 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"eval \"$(echo printenv)\"",
 		"eval $(echo printenv)",
 		"printf '%s' \"$(cat <<'BEAD'\necho '#' ; printenv\nBEAD\n)\" | sh",
+		// tee writes its input back out as cat does, so its heredoc body is judged the same way.
+		"printf '%s' \"$(tee <<'BEAD'\necho '#' ; printenv\nBEAD\n)\" | sh",
+		// A substitution's output runs as a command even when no shell reads it.
+		"\"$(cat <<'BEAD'\nprintenv\nBEAD\n)\"",
+		"\"$(tee <<'BEAD'\nprintenv\nBEAD\n)\"",
 		// env -S takes its command line in every form, and each one is judged.
 		"env -S printenv",
 		"env -Sprintenv",
@@ -508,6 +513,28 @@ func TestSandboxSecretsSearchTakesValue(t *testing.T) {
 	}
 }
 
+// The substitution heredocs the walk judges. A heredoc whose tag never closes inside
+// the substitution is a shell syntax error, so nothing runs and nothing is judged. A
+// "<<" inside an accepted body is that body's data, so the outer body is the only one.
+func TestSandboxSecretsSubstitutionHeredocBodies(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{"cat reader", "x=\"$(cat <<'BEAD'\nprintenv\nBEAD\n)\"", []string{"printenv\nBEAD\n"}},
+		{"tee reader", "x=\"$(tee <<'BEAD'\nprintenv\nBEAD\n)\"", []string{"printenv\nBEAD\n"}},
+		{"unterminated tag", "x=\"$(cat <<'BEAD'\nprintenv\n)\"", nil},
+		{"nested operator is data", "x=\"$(cat <<'A'\ncat <<'B'\nprintenv\nB\nA\n)\"", []string{"cat <<'B'\nprintenv\nB\nA\n"}},
+	} {
+		got := sandboxSecretsSubstitutionHeredocs(tc.command)
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: sandboxSecretsSubstitutionHeredocs(%q) = %q, want %q", tc.name, tc.command, got, tc.want)
+		}
+	}
+}
+
 // Branches a command line cannot reach, because the walk handles them earlier or
 // builds the words itself: the parser's own contract for a group with no operator,
 // and for an env that no launcher loop consumed (gt-80akp).
@@ -703,6 +730,8 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		// A pipe carries printed text only to the command it feeds, and a separator carries none.
 		"echo printenv && bash -c 'date'",
 		"echo printenv; sh -c 'date'",
+		// A substitution's heredoc body is judged as a command, and a harmless one stays allowed.
+		"echo \"$(cat <<'EOF'\nhello\nEOF\n)\"",
 	} {
 		if blocked, out := runSandboxSecretsGuard(t, "openshell", command); blocked {
 			t.Errorf("blocked an ordinary command in a sandbox: %q\n%s", command, out)
