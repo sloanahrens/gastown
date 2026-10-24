@@ -1616,6 +1616,78 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 	}
 }
 
+// TestHeredocInsideQuotedSubstitutionStaysOpaque is the double-quoted half of
+// the reading above. A heredoc a double-quoted command substitution holds is
+// still a heredoc: its body is data, so an apostrophe in it opens no quote and
+// a dangerous phrase in it is not a command. The ")" that closes the
+// substitution ends the double quote the "$(" interrupted, so text after it is
+// judged as it would be with no heredoc at all, and a substitution nested
+// inside closes at its own paren rather than swallowing the one that follows
+// (gt-lx8i8).
+func TestHeredocInsideQuotedSubstitutionStaysOpaque(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{
+			name:      "dangerous phrase in a body with an apostrophe is data",
+			command:   "x=\"$(cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n)\"",
+			wantBlock: false,
+		},
+		{
+			name:      "real command after the substitution is still judged",
+			command:   "x=\"$(cat <<'EOF'\nit's a note\nEOF\n)\"; sudo rm -rf /tmp",
+			wantBlock: true,
+		},
+		{
+			name:      "shell-fed body inside a double-quoted substitution is still a script",
+			command:   "x=\"$(bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n)\"",
+			wantBlock: true,
+		},
+		{
+			name:      "nested substitution inside the body's substitution closes at its own paren",
+			command:   "x=\"$(echo $(date); cat <<'EOF'\nit's a note\nEOF\n)\"; sudo rm -rf /tmp",
+			wantBlock: true,
+		},
+		{
+			name:      "second heredoc after the substitution is data",
+			command:   "x=\"$(cat <<'EOF'\nit's a note\nEOF\n)\"; cat > note.md <<'Z'\nsudo rm -rf /tmp\nZ\n",
+			wantBlock: false,
+		},
+		{
+			name:      "heredoc after a nested substitution is not inside it",
+			command:   "x=\"$(echo $(date))\"; cat > note.md <<'Z'\nsudo rm -rf /tmp\nZ\n",
+			wantBlock: false,
+		},
+		{
+			name:      "command after a nested substitution is still judged",
+			command:   "x=\"$(echo $(date))\"; sudo rm -rf /tmp",
+			wantBlock: true,
+		},
+		{
+			name:      "arithmetic inside the substitution does not close it",
+			command:   "x=\"$(echo $((1+2)); cat <<'EOF'\nit's a note\nEOF\n)\"; sudo rm -rf /tmp",
+			wantBlock: true,
+		},
+		{
+			name:      "shell-fed body inside a nested substitution is still a script",
+			command:   "x=\"$(echo $(bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n))\"",
+			wantBlock: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if got := reason != ""; got != tt.wantBlock {
+				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.wantBlock)
+			}
+		})
+	}
+}
+
 // A "}" inside the backtick text of a "${..}" word is that command's own text,
 // as it is inside "$(..)" (gt-nwd3k): the expansion ends at the last "}", so the
 // "<<x" before it is text in the word and the "sudo" line is a live command

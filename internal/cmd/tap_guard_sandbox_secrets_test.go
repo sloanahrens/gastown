@@ -69,6 +69,9 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"echo $FORGEJO_TOKEN",
 		"echo \"$ANTHROPIC_AUTH_TOKEN\"",
 		"printf '%s' ${DEEPSEEK_API_KEY}",
+		// A heredoc body in a double-quoted substitution ends at its terminator,
+		// so the secret read after it is still judged (gt-lx8i8).
+		"x=\"$(cat <<'EOF'\nit's a note\nEOF\n)\"; echo $FORGEJO_TOKEN",
 		// A line the shell runs from an echo's text is judged as that text.
 		"echo printenv | sh",
 		"printf 'env\\n' | bash",
@@ -657,6 +660,9 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"pipx run black==24.1.0 .",
 		"pipx install ruff",
 		"pipx run python -c 'print(1+1)'",
+		// A body with a quote mark in a double-quoted substitution is data, and a
+		// quoted sentence after it is text, not a command (gt-lx8i8).
+		"x=\"$(cat <<'EOF'\nit's a note\nEOF\n)\"; echo \"use rg to search\"",
 		// A quoted heredoc keeps its body literal, and a shell invoker in the
 		// same pipeline runs the body, judged as code (gt-294yz).
 		"cat <<'EOF'\n$FORGEJO_TOKEN\nEOF; bash -c 'true'",

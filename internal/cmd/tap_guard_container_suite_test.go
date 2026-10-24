@@ -1721,6 +1721,23 @@ func TestContainerSuiteGuardsStripHeredocBodies(t *testing.T) {
 			command:     "bash <<'EOF'\nGT_TEST_DOCKER=1 go test ./internal/beads/...\nEOF\n",
 			wantRefused: true, wantScopeOut: false,
 		},
+		// The body is data even inside a double-quoted substitution, where its
+		// apostrophe used to open a quote that ran past the ")" (gt-lx8i8).
+		{
+			name:        "container run in a body inside a double-quoted substitution is data",
+			command:     "x=\"$(cat <<'EOF'\nit's GT_TEST_DOCKER=1 go test ./internal/beads/...\nEOF\n)\"",
+			wantRefused: false, wantScopeOut: false,
+		},
+		{
+			name:        "shell-fed container run inside a double-quoted substitution is refused",
+			command:     "x=\"$(bash <<'EOF'\nGT_TEST_DOCKER=1 go test ./internal/beads/...\nEOF\n)\"",
+			wantRefused: true, wantScopeOut: false,
+		},
+		{
+			name:        "live container run after a body inside a double-quoted substitution is refused",
+			command:     "x=\"$(cat <<'EOF'\nit's a note\nEOF\n)\"\nGT_TEST_DOCKER=1 go test ./internal/beads/...",
+			wantRefused: true, wantScopeOut: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2481,6 +2498,11 @@ func TestCommandSubstitutionSpans(t *testing.T) {
 		{"single-quoted process substitution", `echo '<(go test .)'`, nil},
 		{"double-quoted process substitution", `echo "<(go test .)"`, nil},
 		{"process substitution in a comment", `echo hi # <(go test .)`, nil},
+		// A heredoc body the substitution holds is data, so its quote mark
+		// opens nothing and its ")" closes nothing (gt-lx8i8).
+		{"heredoc body with a quote mark in a double-quoted substitution", "x=\"$(cat <<'EOF'\nit's a note\nEOF\n)\"; pwd", []string{"cat <<'EOF'\nit's a note\nEOF\n"}},
+		{"heredoc body with a quote mark in a substitution", "x=$(cat <<EOF\nit's a note\nEOF\n)", []string{"cat <<EOF\nit's a note\nEOF\n"}},
+		{"heredoc body holding a closing paren", "x=$(cat <<'EOF'\nfoo)\nEOF\n)", []string{"cat <<'EOF'\nfoo)\nEOF\n"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

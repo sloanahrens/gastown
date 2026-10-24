@@ -495,14 +495,15 @@ type heredocSpan struct {
 	bodyEnd      int
 	quoted       bool
 	unterminated bool
-	cmdText      string // the command text of an unquoted "$(" the heredoc sits in, or ""
+	cmdText      string // the command text of the "$(" the heredoc sits in, or ""
 }
 
 // scanHeredocs returns every heredoc in command, in source order. A "<<" that
 // appears inside another heredoc's body is that body's data, not a second
 // heredoc, so it is dropped (gt-mkrj). One written inside quotes is a literal
-// the shell never reads as a redirection, and one preceded by "<" is the tail
-// of a "<<<" here-string: both are skipped, because a body inferred from
+// the shell never reads as a redirection, unless a "$(...)" inside double quotes
+// reopens command text, where it is a heredoc (gt-lx8i8). One preceded by "<" is
+// the tail of a "<<<" here-string: both are skipped, because a body inferred from
 // either runs to the end of the text and hides the lines after it (gt-79opc).
 // So are the other spellings that look like a heredoc operator but are not
 // (gt-yza8u, gt-dherr, gt-adt8r): a "<" behind a backslash ("\<<EOF" reads as
@@ -612,18 +613,22 @@ type heredocQuoteWalk struct {
 	braces  int             // "${" expansions open here, the level a brace frame belongs to
 	substs  []substFrame    // "$(..)" open inside a "${..}" word, where "#" comments again, innermost last
 	ticks   []tickFrame     // backtick command text open, outermost first
-	subs    []cmdSubstFrame // unquoted "$(" command text open, innermost last
+	subs    []cmdSubstFrame // "$(" command text open, innermost last
 	prevIdx int             // the rune the shell read last, for startsShellWord
 	prevEsc bool            // that rune was backslash-escaped
 }
 
-// cmdSubstFrame is one unquoted "$(" the walk is reading. The shell reads its
-// text as a command line, so a heredoc in it is fed to that command: the
-// reader line alone starts at the assignment ("x=$(bash <<EOF") and does not
-// show it (gt-2am7w). depth counts the "(" open in the command text, the opener
-// included, so the ")" that returns it to zero closes the frame. open is the
-// offset just past the opening "(".
+// cmdSubstFrame is one "$(" the walk is reading as command text: an unquoted
+// one, or one written inside double quotes. The shell reads its text as a
+// command line, so a heredoc in it is fed to that command: the reader line
+// alone starts at the assignment ("x=$(bash <<EOF") and does not show it
+// (gt-2am7w). outer is the double quote the substitution interrupts, which the
+// ")" that closes the frame resumes, or 0 when it sits in command text that no
+// quote holds (gt-lx8i8). depth counts the "(" open in the command text, the
+// opener included, so the ")" that returns it to zero closes the frame. open is
+// the offset just past the opening "(".
 type cmdSubstFrame struct {
+	outer rune
 	depth int
 	open  int
 }
@@ -677,9 +682,10 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 		escaped := w.escaped
 		w.escaped = false
 		if w.quote == 0 && !w.comment && !escaped && w.inCmdSubstText() &&
-			(r == ')' || r == '(' && w.runeAt(w.runeIdx+1) != '(') {
+			(r == ')' || r == '(' && w.runeAt(w.runeIdx+1) != '(' && !w.followsUnescapedDollar()) {
 			// Counted before the switch, which may open a frame on this rune;
-			// a "((" is arithmetic and its parentheses are not counted.
+			// a "((" is arithmetic and its parentheses are not counted, and a
+			// "$(" opens a frame whose own depth stands for its parenthesis.
 			w.countCmdParen(r)
 		}
 		switch {
@@ -712,6 +718,14 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			}
 		case w.quote == 0 && (r == '\'' || r == '"'):
 			w.quote = r
+		case w.quote == '"' && w.braces == 0 && r == '(' && w.followsUnescapedDollar() && w.runeAt(w.runeIdx+1) != '(':
+			// A "$(" inside double quotes is command text, where the shell
+			// starts quoting afresh, so the frame remembers the quote its ")"
+			// resumes (countCmdParen). "$((" is arithmetic, which double
+			// quotes already hide from this walk, and a "$(" in the word of a
+			// "${..}" expansion keeps that expansion's own reading.
+			w.subs = append(w.subs, cmdSubstFrame{outer: w.quote, depth: 1, open: w.byteIdx + 1})
+			w.quote = 0
 		case w.quote != 0 && r == w.quote:
 			w.quote = 0
 		case r == '#' && w.readsComment() && startsShellWord(w.runes, w.prevIdx, w.prevEsc):
@@ -851,14 +865,25 @@ func (w *heredocQuoteWalk) inSubstText() bool {
 }
 
 // inCmdSubstText reports whether the walk sits in the command text of the
-// innermost unquoted "$(..)", with no arithmetic or "${..}" context open since
-// it opened, so the parentheses here are its own (gt-2am7w).
+// innermost "$(..)", with no arithmetic or "${..}" context open since it
+// opened, so the parentheses here are its own (gt-2am7w, gt-lx8i8).
 func (w *heredocQuoteWalk) inCmdSubstText() bool {
 	return len(w.subs) > 0 && !w.readsData()
 }
 
+// cmdSubstOpen returns where the command text of the "$(" the walk is in
+// begins, and whether the walk is in one (see inCmdSubstText).
+func (w *heredocQuoteWalk) cmdSubstOpen() (int, bool) {
+	if !w.inCmdSubstText() {
+		return 0, false
+	}
+	return w.subs[len(w.subs)-1].open, true
+}
+
 // countCmdParen counts a "(" or ")" in the command text of the innermost
-// unquoted "$(..)" and closes the frame at the ")" that ends it (gt-2am7w).
+// "$(..)" and closes the frame at the ")" that ends it, resuming the double
+// quote the substitution interrupted when it opened inside one (gt-2am7w,
+// gt-lx8i8).
 func (w *heredocQuoteWalk) countCmdParen(r rune) {
 	top := &w.subs[len(w.subs)-1]
 	if r == '(' {
@@ -867,6 +892,7 @@ func (w *heredocQuoteWalk) countCmdParen(r rune) {
 	}
 	top.depth--
 	if top.depth == 0 {
+		w.quote = top.outer
 		w.subs = w.subs[:len(w.subs)-1]
 	}
 }
@@ -909,7 +935,8 @@ func (w *heredocQuoteWalk) closeArithBraces() {
 
 // skipTo reads past byte offset to with no quote tracking: the text crossed is
 // a heredoc body, which the shell reads verbatim, so a quote left open in it
-// must not reach the command text after the terminator.
+// must not reach the command text after the terminator. A "$(" the heredoc sits
+// in stays open, since its ")" comes after the body (gt-lx8i8).
 func (w *heredocQuoteWalk) skipTo(to int) {
 	for w.byteIdx < to && w.runeIdx < len(w.runes) {
 		w.byteIdx += utf8.RuneLen(w.runes[w.runeIdx])
@@ -948,18 +975,18 @@ func heredocReaderLine(command string, start, end int) (string, int) {
 	return strings.ReplaceAll(command[lineStart:start]+" "+command[end:lineEnd], "\\\n", " "), lineStart
 }
 
-// heredocCmdText returns the command text, from the unquoted "$(" that opens it
-// to the end of the operator's logical line, of the substitution the heredoc at
-// [start,end) sits in. The shell feeds that command the body, so
-// "x=$(bash <<EOF" runs bash on it; the reader line alone, which starts at the
-// assignment, does not show that. A backslash-newline continues the line, so
-// a pipe stage on the next line is part of it (gt-2am7w). It is "" outside such
-// a substitution.
+// heredocCmdText returns the command text, from the "$(" that opens it to the
+// end of the operator's logical line, of the substitution the heredoc at
+// [start,end) sits in — an unquoted one, or one inside double quotes. The shell
+// feeds that command the body, so "x=$(bash <<EOF" runs bash on it; the reader
+// line alone, which starts at the assignment, does not show that. A
+// backslash-newline continues the line, so a pipe stage on the next line is
+// part of it (gt-2am7w, gt-lx8i8). It is "" outside such a substitution.
 func heredocCmdText(command string, walk *heredocQuoteWalk, start, end int) string {
-	if !walk.inCmdSubstText() {
+	open, ok := walk.cmdSubstOpen()
+	if !ok {
 		return ""
 	}
-	open := walk.subs[len(walk.subs)-1].open
 	lineEnd := len(command)
 	for i := end; i < len(command); i++ {
 		if command[i] == '\n' && command[i-1] != '\\' {
