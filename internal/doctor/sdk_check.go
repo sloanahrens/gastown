@@ -46,7 +46,13 @@ func NewMacOSSDKCheck() *MacOSSDKCheck {
 // settings/daemon.env (config.DaemonEnvPath), which is what the daemon exports
 // into the builds it starts; xcrun is the fallback for a shell that sets nothing.
 func resolveSDK(townRoot string) (path, source string, err error) {
-	if root := strings.TrimSpace(os.Getenv("SDKROOT")); root != "" {
+	return resolveSDKWith(townRoot, os.Getenv, xcrunSDKPath)
+}
+
+// resolveSDKWith is resolveSDK with its two host inputs passed in: the process
+// environment and the xcrun fallback. Tests supply fakes for both.
+func resolveSDKWith(townRoot string, getenv func(string) string, xcrun func() (string, error)) (path, source string, err error) {
+	if root := strings.TrimSpace(getenv("SDKROOT")); root != "" {
 		return root, "SDKROOT", nil
 	}
 	if townRoot != "" {
@@ -58,15 +64,23 @@ func resolveSDK(townRoot string) (path, source string, err error) {
 			return root, "settings/daemon.env", nil
 		}
 	}
-	out, err := exec.Command("xcrun", "--show-sdk-path").Output() //nolint:gosec // G204: fixed args, no user input
+	path, err = xcrun()
 	if err != nil {
 		return "", "", err
 	}
-	path = strings.TrimSpace(string(out))
 	if path == "" {
 		return "", "", fmt.Errorf("xcrun --show-sdk-path reported no SDK")
 	}
 	return path, "xcrun", nil
+}
+
+// xcrunSDKPath asks xcrun for the SDK path, the last resort in resolveSDKWith.
+func xcrunSDKPath() (string, error) {
+	out, err := exec.Command("xcrun", "--show-sdk-path").Output() //nolint:gosec // G204: fixed args, no user input
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // stubScanRoots are the SDK directories a cgo link resolves stubs from. usr/lib
