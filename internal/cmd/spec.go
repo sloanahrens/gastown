@@ -1325,6 +1325,13 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 			entry.Line = fmt.Sprintf("%s: sling deferred, the sandbox image lags the installed gt (it is rebuilt after an install): %s", id, firstErrLine(err))
 			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
 		}
+		// A rig's cache volume that cannot be created is the seat's precondition
+		// too, not the bead's. It is deferred for the same reason as the drift
+		// above (gt-td6pl).
+		if errors.Is(err, session.ErrCacheVolume) {
+			entry.Line = fmt.Sprintf("%s: sling deferred, the sandbox cache volume cannot be created: %s", id, firstErrLine(err))
+			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
+		}
 		if isSpecSlingRefusal(err) {
 			entry.Line = fmt.Sprintf("%s: sling deferred: %s", id, firstErrLine(err))
 			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry, refused: true})

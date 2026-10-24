@@ -105,7 +105,11 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 			*pushes = append(*pushes, pushCall{bare: bare, branch: branch, sandboxCalls: len(fake.Calls())})
 			return nil
 		},
-		imageGT:     func(context.Context, string) (string, error) { return openshellTestGTCommit, nil },
+		imageGT: func(context.Context, string) (string, error) { return openshellTestGTCommit, nil },
+		// No docker in these tests. A profile with a cache volume sets its own runner.
+		docker: func(context.Context, ...string) ([]byte, []byte, error) {
+			return nil, []byte("docker is not configured for this test"), errors.New("no docker")
+		},
 		gitEmail:    func() string { return openshellTestGitEmail },
 		installedGT: func() string { return openshellTestGTCommit },
 		policyRoot:  func(townRoot string) (string, error) { return openshellTestPolicyRoot(townRoot), nil },
@@ -526,6 +530,132 @@ func TestOpenShellPrepareRefusesAWorktreeOutsideTheTown(t *testing.T) {
 	}
 	if len(*pushes) != 0 || len(fake.Calls()) != 0 {
 		t.Fatalf("pushes = %d, openshell calls = %d; a bad spec must touch nothing", len(*pushes), len(fake.Calls()))
+	}
+}
+
+// dockerRecorder is a dockerRun that records its argv and runs no docker. The
+// volume is present unless absent is set; create fails with createErr.
+type dockerRecorder struct {
+	absent    bool
+	createErr error
+	calls     [][]string
+}
+
+func (d *dockerRecorder) run(_ context.Context, args ...string) ([]byte, []byte, error) {
+	d.calls = append(d.calls, args)
+	switch args[1] {
+	case "inspect":
+		if d.absent {
+			return nil, []byte("Error: No such volume: gt-cache-gastown"), errors.New("exit status 1")
+		}
+	case "create":
+		if d.createErr != nil {
+			return nil, []byte("Cannot connect to the Docker daemon"), d.createErr
+		}
+	}
+	return nil, nil, nil
+}
+
+var openshellTestCacheCreate = []string{"volume", "create", "--label", "openshell.ai/sandbox-attachable=true", "--label", "openshell.ai/sandbox-attachable-workspace=default", "gt-cache-gastown"}
+
+func openshellCachedProfile() Profile {
+	p := openshellTestProfile
+	p.CacheVolume = "gt-cache-{rig}"
+	return p
+}
+
+func TestEnsureCacheVolumeCreatesAMissingVolume(t *testing.T) {
+	t.Parallel()
+	d := &dockerRecorder{absent: true}
+	if err := ensureCacheVolume(context.Background(), d.run, "gt-cache-gastown"); err != nil {
+		t.Fatalf("ensureCacheVolume: %v", err)
+	}
+	want := [][]string{{"volume", "inspect", "gt-cache-gastown"}, openshellTestCacheCreate}
+	if !reflect.DeepEqual(d.calls, want) {
+		t.Fatalf("docker calls = %q, want %q", d.calls, want)
+	}
+}
+
+func TestEnsureCacheVolumeLeavesAPresentVolumeAlone(t *testing.T) {
+	t.Parallel()
+	d := &dockerRecorder{}
+	if err := ensureCacheVolume(context.Background(), d.run, "gt-cache-gastown"); err != nil {
+		t.Fatalf("ensureCacheVolume: %v", err)
+	}
+	want := [][]string{{"volume", "inspect", "gt-cache-gastown"}}
+	if !reflect.DeepEqual(d.calls, want) {
+		t.Fatalf("docker calls = %q, want %q: a present volume is not recreated", d.calls, want)
+	}
+}
+
+func TestEnsureCacheVolumeFailureMatchesErrCacheVolume(t *testing.T) {
+	t.Parallel()
+	d := &dockerRecorder{absent: true, createErr: errors.New("exit status 1")}
+	err := ensureCacheVolume(context.Background(), d.run, "gt-cache-gastown")
+	if !errors.Is(err, ErrCacheVolume) {
+		t.Fatalf("err = %v, want ErrCacheVolume", err)
+	}
+	if !strings.Contains(err.Error(), "Cannot connect to the Docker daemon") {
+		t.Errorf("err = %v, want docker's stderr in it", err)
+	}
+}
+
+// The volume is ensured before the sandbox create: both docker calls happen
+// while the sandbox has made no calls.
+func TestOpenShellPrepareEnsuresTheCacheVolumeBeforeTheCreate(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, _ := openshellTestBackend(town, openshellCachedProfile(), fake)
+	d := &dockerRecorder{absent: true}
+	var sandboxCalls []int
+	b.docker = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+		sandboxCalls = append(sandboxCalls, len(fake.Calls()))
+		return d.run(ctx, args...)
+	}
+
+	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if want := [][]string{{"volume", "inspect", "gt-cache-gastown"}, openshellTestCacheCreate}; !reflect.DeepEqual(d.calls, want) {
+		t.Fatalf("docker calls = %q, want %q", d.calls, want)
+	}
+	if want := []int{0, 0}; !reflect.DeepEqual(sandboxCalls, want) {
+		t.Fatalf("sandbox calls before each docker call = %v, want %v: the volume exists before the create", sandboxCalls, want)
+	}
+}
+
+// A volume that cannot be made stops Prepare before the push and the sandbox,
+// and the error keeps ErrCacheVolume for the dispatcher.
+func TestOpenShellPrepareStopsWhenTheCacheVolumeCannotBeMade(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := &sandbox.Fake{}
+	b, pushes := openshellTestBackend(town, openshellCachedProfile(), fake)
+	b.docker = (&dockerRecorder{absent: true, createErr: errors.New("exit status 1")}).run
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if !errors.Is(err, ErrCacheVolume) {
+		t.Fatalf("err = %v, want ErrCacheVolume", err)
+	}
+	if len(*pushes) != 0 || len(fake.Calls()) != 0 {
+		t.Fatalf("pushes = %d, sandbox calls = %d; a missing volume must touch nothing", len(*pushes), len(fake.Calls()))
+	}
+}
+
+func TestOpenShellPrepareMakesNoDockerCallWithoutACacheVolume(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	d := &dockerRecorder{absent: true}
+	b.docker = d.run
+
+	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(d.calls) != 0 {
+		t.Fatalf("docker calls = %q, want none for a profile with no cache volume", d.calls)
 	}
 }
 
