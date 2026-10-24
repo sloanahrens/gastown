@@ -464,6 +464,35 @@ func TestSandboxSecretsGuardNamesTheRule(t *testing.T) {
 	}
 }
 
+// A redirection ahead of the command is not the command word: the shell applies
+// it to the command that follows, so both orderings are judged alike (gt-4jbqc).
+func TestSandboxSecretsLeadingRedirection(t *testing.T) {
+	t.Parallel()
+	const printenvRule = "printenv prints the environment"
+	for _, tc := range []struct {
+		command string
+		want    string
+	}{
+		{"2>/dev/null bash <<< printenv", printenvRule},
+		{"<<< printenv bash", printenvRule},
+		{">/dev/null bash <<< printenv", printenvRule},
+		{"2> /dev/null bash <<< printenv", printenvRule},
+		{"2>/dev/null sh <<< 'env'", "env prints the environment"},
+		{"2>/dev/null source /dev/stdin <<< printenv", printenvRule},
+		{"2>/dev/null printenv", printenvRule},
+		{"2>&1 >/dev/null bash <<< printenv", printenvRule},
+		{"2>/dev/null echo hello", ""},
+		{"2> /dev/null echo hello", ""},
+		{"2>/dev/null bash <<< 'make test'", ""},
+		{"2>/dev/null bash 2<<< printenv", ""},
+		{"2>/dev/null printenv GIT_AUTHOR_NAME", ""},
+	} {
+		if got := sandboxSecretsReason(tc.command); got != tc.want {
+			t.Errorf("sandboxSecretsReason(%q) = %q, want %q", tc.command, got, tc.want)
+		}
+	}
+}
+
 func TestSandboxSecretsHasAnyFlag(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
