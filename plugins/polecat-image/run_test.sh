@@ -36,14 +36,18 @@ cat >"$BIN/docker" <<'STUB'
 # `info` (is the daemon up) and `image inspect --format … <image>` are used
 if [ "${1:-}" = info ]; then [ ! -f "$STUB_STATE/docker-down" ]; exit; fi
 # `images --format … <repo>` lists the tags in image-tags (newest first); `rmi`
-# is recorded in rmi, and refused for the refs listed in rmi-refuse (an image a
-# running container uses); `image inspect --format {{.Id}} <ref>` answers from
-# ids ("<ref> <id>" lines), else "id-of-<ref>".
+# is recorded in rmi, and refused for the refs listed in rmi-refuse, with the
+# reason in rmi-refuse-message (default: an image a running container uses);
+# `image inspect --format {{.Id}} <ref>` answers from ids ("<ref> <id>" lines),
+# else "id-of-<ref>".
 case "${1:-}" in
   images) cat "$STUB_STATE/image-tags" 2>/dev/null || true; exit 0 ;;
   rmi)
     echo "$*" >>"$STUB_STATE/rmi"
-    if grep -qx "$2" "$STUB_STATE/rmi-refuse" 2>/dev/null; then echo "conflict: image is being used by running container" >&2; exit 1; fi
+    if grep -qx "$2" "$STUB_STATE/rmi-refuse" 2>/dev/null; then
+      cat "$STUB_STATE/rmi-refuse-message" 2>/dev/null || echo "conflict: image is being used by running container"
+      exit 1
+    fi
     exit 0 ;;
 esac
 if [ "${1:-}" = image ] && [ "${4:-}" = '{{.Id}}' ]; then
@@ -256,17 +260,26 @@ rmis() { if [ -f "$STUB_STATE/rmi" ]; then sed 's/^rmi //' "$STUB_STATE/rmi" | t
 tags_case prune abc1234 "$(full abc1234)"
 run_it
 if [ "$RC" = 0 ] && [ "$(rmis)" = "gastown-polecat:ddddddd4 gastown-polecat:fffffff6 " ]; then pass "newest 3 kept; older tags untagged; :dev's image, 'dev' and 'latest' left alone"; else fail "prune: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
-if ! grep -q -e ' -f' -e 'force' "$STUB_STATE/rmi"; then pass "docker rmi is never forced"; else fail "prune forced: $(cat "$STUB_STATE/rmi")"; fi
+if [ -s "$STUB_STATE/rmi" ] && ! grep -q -e ' -f' -e 'force' "$STUB_STATE/rmi"; then pass "docker rmi is called, and never forced"; else fail "no-force: rmi log missing or forced: [$(rmis)]"; fi
 tags_case prunekeep abc1234 "$(full abc1234)"
 POLECAT_IMAGE_KEEP=1 run_it
 if [ "$RC" = 0 ] && [ "$(rmis)" = "gastown-polecat:bbbbbbb2 gastown-polecat:ccccccc3 gastown-polecat:ddddddd4 gastown-polecat:fffffff6 " ]; then pass "POLECAT_IMAGE_KEEP=1 keeps only the newest (and :dev's image)"; else fail "prunekeep: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
 tags_case prunerefused abc1234 "$(full abc1234)"
 echo "gastown-polecat:ddddddd4" >"$STUB_STATE/rmi-refuse"
 run_it
-if [ "$RC" = 0 ] && [ "$(rmis)" = "gastown-polecat:ddddddd4 gastown-polecat:fffffff6 " ] && grep -q "kept gastown-polecat:ddddddd4 (in use)" <<<"$OUT" && grep -q "removed gastown-polecat:fffffff6" <<<"$OUT"; then pass "an image a container uses is refused, logged as kept, and the others still go"; else fail "prunerefused: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
+if [ "$RC" = 0 ] && [ "$(rmis)" = "gastown-polecat:ddddddd4 gastown-polecat:fffffff6 " ] && grep -qF "kept gastown-polecat:ddddddd4 (rmi failed: conflict: image is being used by running container)" <<<"$OUT" && grep -q "removed gastown-polecat:fffffff6" <<<"$OUT"; then pass "an image a container uses is kept with docker's refusal, and the others still go"; else fail "prunerefused: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
+tags_case prunermierror abc1234 "$(full abc1234)"
+echo "gastown-polecat:ddddddd4" >"$STUB_STATE/rmi-refuse"
+echo "permission denied while connecting to the Docker daemon" >"$STUB_STATE/rmi-refuse-message"
+run_it
+if [ "$RC" = 0 ] && grep -qF "kept gastown-polecat:ddddddd4 (rmi failed: permission denied while connecting to the Docker daemon)" <<<"$OUT" && ! grep -q "in use" <<<"$OUT"; then pass "a failed rmi logs docker's own reason, not 'in use'"; else fail "prunermierror: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
 tags_case prunebuilt abc1234 "$(full 1111111)"
 run_it
 if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && [ "$(rmis)" = "gastown-polecat:ddddddd4 gastown-polecat:fffffff6 " ]; then pass "a run that built also prunes"; else fail "prunebuilt: rc=$RC builds=$(builds) rmi=[$(rmis)] out=$OUT"; fi
+tags_case prunedeferred abc1234 "$(full 1111111)"
+touch "$STUB_STATE/sling-running"
+run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 0 ] && grep -q "deferred: sandbox sling in progress" <<<"$OUT" && [ "$(rmis)" = "gastown-polecat:ddddddd4 gastown-polecat:fffffff6 " ]; then pass "a deferred run still prunes"; else fail "prunedeferred: rc=$RC builds=$(builds) rmi=[$(rmis)] out=$OUT"; fi
 tags_case prunedown abc1234
 touch "$STUB_STATE/docker-down"
 run_it

@@ -217,12 +217,12 @@ main() {
 
 # prune_old_images untags the per-commit images (gastown-polecat:<hex sha>) every
 # build leaves behind, keeping the newest KEEP_IMAGES. Never :dev, never a tag
-# that is not a hex commit, never the image :dev names, and never forced: docker
-# refuses to remove an image a container (a running sandbox) uses, and that
-# refusal is the protection, logged as kept. A listing that fails prunes nothing
-# (gt-mexpf).
+# that is not a hex commit, never the image :dev names, and never forced: a
+# refusal (a running sandbox's container, an unreachable daemon) keeps the tag
+# and logs docker's own reason, so a refusal never reads as some other failure.
+# A listing that fails prunes nothing (gt-mexpf).
 prune_old_images() {
-  local repo="${IMAGE%%:*}" tag n=0 dev_id id
+  local repo="${IMAGE%%:*}" tag n=0 dev_id id err
   "$DOCKER" info >/dev/null 2>&1 || return 0
   dev_id="$("$DOCKER" image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
   while read -r tag; do
@@ -233,10 +233,11 @@ prune_old_images() {
     id="$("$DOCKER" image inspect --format '{{.Id}}' "$repo:$tag" 2>/dev/null || true)"
     [ -n "$id" ] || continue
     [ "$id" != "$dev_id" ] || continue
-    if "$DOCKER" rmi "$repo:$tag" >/dev/null 2>&1; then
+    if err="$("$DOCKER" rmi "$repo:$tag" 2>&1)"; then
       log "removed $repo:$tag"
     else
-      log "kept $repo:$tag (in use)"
+      err="$(printf '%s\n' "$err" | tail -n 1)"
+      log "kept $repo:$tag (rmi failed: ${err:-no output})"
     fi
   done < <("$DOCKER" images --format '{{.Tag}}' "$repo" 2>/dev/null || true)
 }
