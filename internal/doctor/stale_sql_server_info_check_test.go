@@ -1,8 +1,10 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -150,5 +152,41 @@ func TestStaleSQLServerInfoCheck_EmptyFile(t *testing.T) {
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
 		t.Errorf("expected Warning for empty sql-server.info, got %s: %s", result.Status, result.Message)
+	}
+}
+
+// TestSignalZeroAliveEPERM injects the signal error so a live server owned by
+// another uid is testable without root.
+func TestSignalZeroAliveEPERM(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"probe succeeded", nil, true},
+		{"no such process", syscall.ESRCH, false},
+		{"no such process, wrapped", fmt.Errorf("probe: %w", syscall.ESRCH), false},
+		{"os.Process reports ESRCH as done", os.ErrProcessDone, false},
+		{"reaped child", &os.SyscallError{Syscall: "kill", Err: syscall.ESRCH}, false},
+		{"exists under another uid", syscall.EPERM, true},
+		{"exists under another uid, via os.Process", &os.SyscallError{Syscall: "kill", Err: syscall.EPERM}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := signalZeroAliveAfterError(tc.err); got != tc.want {
+				t.Errorf("signalZeroAliveAfterError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSignalZeroAliveNonPositivePID(t *testing.T) {
+	t.Parallel()
+	for _, pid := range []int{0, -1} {
+		if signalZeroAlive(pid) {
+			t.Errorf("signalZeroAlive(%d) = true, want false", pid)
+		}
 	}
 }
