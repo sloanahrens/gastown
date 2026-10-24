@@ -52,7 +52,7 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"substitution opened by a while loop", "y=$(while true; do gt done; done)", true},
 		{"substitution opened by a zsh repeat", "y=$(repeat 3 gt done; true)", true},
 		{"substitution opened by a command with no loop", "y=$(echo hi; gt done)", false},
-		{"subshell loop whose paren glues to done", "(while true; do gt done; done)", true},
+		{"substitution opened by a backticked for loop", "y=`for i in 1 2; do gt done; done; true`", true},
 
 		// The other shapes zsh accepts, and the modifiers that prefix them
 		// (gt-ezhf4). Each was verified to loop in zsh.
@@ -244,6 +244,31 @@ func TestDoneSlotLoopHeredocPipedIntoNonWriter(t *testing.T) {
 	}
 }
 
+// A `done)` closes a loop inside a group, but behind `in` or a `;;` the same
+// text is a case-arm pattern and stays what it was written as (gt-9ujo2).
+func TestDoneSlotLoopLowerReadsDoneParen(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		index   int
+		want    string
+	}{
+		{"closing a group", "x; done) y", 2, "done"},
+		{"the first case arm", "case a in done) gt done;; esac", 3, "done)"},
+		{"a later case arm", "case a in b) true;; done) gt done;; esac", 7, "done)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tokens := shellTokenize(tt.command)
+			if got := doneSlotLoopLower(tokens)[tt.index]; got != tt.want {
+				t.Errorf("doneSlotLoopLower(%q)[%d] = %q, want %q (tokens %q)", tt.command, tt.index, got, tt.want, tokens)
+			}
+		})
+	}
+}
+
 func TestDoneSlotLoopReachesGuard(t *testing.T) {
 	t.Parallel()
 	const incident = `for i in $(seq 1 300); do if gt slot status | grep -q free; then gt done; fi; done`
@@ -265,6 +290,10 @@ func TestDoneSlotLoopReachesGuard(t *testing.T) {
 		`bash -c "while true; do gt done; done"`,
 		`bash -c "for i in $(seq 1 5); do gt done; done"`,
 		"echo $(for i in 1 2; do gt slot status; done)",
+		// An assignment's substitution that opens a loop, backticked or nested
+		// in another substitution, whose close the matcher cannot see (gt-9ujo2).
+		"y=`for i in 1 2; do gt done; done`",
+		"y=$(echo $(for i in 1 2; do gt done; done))",
 		`seq 1 300 | xargs -I{} bash -c 'gt done'`,
 		"repeat 20 gt done",
 		"repeat 20 { gt done; sleep 60 }",

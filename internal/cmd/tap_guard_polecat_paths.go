@@ -2100,9 +2100,10 @@ func envAssignmentCloses(segment []string) []int {
 }
 
 // envAssignmentWidth returns how many leading tokens of segment make up the
-// assignment at its head: through the token that closes its command
-// substitution, since the substitution's words spread over tokens (gt-erfxm).
-// A backtick substitution closes on its next backtick (gt-bdct5).
+// assignment at its head. A substitution's words spread over tokens
+// ("y=$(echo" "a)" "bash" is the assignment "y=$(echo a)" and then bash), so
+// the width runs through the token that closes it (gt-erfxm). A backtick
+// substitution closes on its next backtick (gt-bdct5).
 //
 // A substitution that does not close in this segment, because a `;` split it
 // off, runs its first word as the command: that word is returned as opened and
