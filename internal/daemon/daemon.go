@@ -471,6 +471,10 @@ type Daemon struct {
 	specDispatchTick        atomic.Pointer[specDispatchTickRun]
 	specDispatchDeferLogged atomic.Bool
 
+	// specSlings is the slings the ticks planned and the daemon still has
+	// running in the background (spec_slings.go, gt-5h70s).
+	specSlings specSlings
+
 	// specSeats is the seat settings the ticker read last, and specSeatHold
 	// remembers the read error it last saw, so a seat file that does not parse
 	// parks the ticker with one line per distinct error (spec_seats.go,

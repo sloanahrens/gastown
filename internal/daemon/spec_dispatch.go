@@ -149,6 +149,9 @@ type specDispatchTickReport struct {
 	Deferred []specDispatchTickEntry `json:"deferred,omitempty"`
 	Notices  []string                `json:"notices,omitempty"`
 	Errors   []string                `json:"errors,omitempty"`
+	// Pending is the slings the tick planned and handed back to run in the
+	// background, each the tick's own job object (spec_slings.go, gt-5h70s).
+	Pending []json.RawMessage `json:"pending,omitempty"`
 	// The tick's phase times, for the 'tick took' line (gt-bqch0).
 	RosterNs     time.Duration `json:"roster_ns,omitempty"`
 	BoardNs      time.Duration `json:"board_ns,omitempty"`
@@ -287,8 +290,14 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 	if !d.isPatrolActive("spec_dispatch") || d.config == nil {
 		return
 	}
+	tickArgs, err := d.specTickArgs()
+	if err != nil {
+		d.logger.Printf("spec_dispatch: tick not run: %v; a tick that does not know the running slings would sling their beads again", err)
+		d.dispatchIdle.Reset()
+		return
+	}
 	start := d.clk().Now()
-	out, err := d.runSpecDispatchCommand(bound)
+	out, err := d.runSpecDispatchCommand(bound, tickArgs...)
 	if err != nil {
 		elapsed := d.clk().Now().Sub(start).Round(time.Second)
 		d.logger.Printf("spec_dispatch: tick failed after %s of its %s bound: %v", elapsed, bound, err)
@@ -317,6 +326,9 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 			d.dispatchIdle.Observe(r, now)
 			d.recordDispatchTick(r, now)
 			took = specDispatchTookLine(r, now.Sub(start))
+			// The tick has returned; its slings run on from here, and the next
+			// tick does not wait for them (gt-5h70s).
+			d.startSpecSlings(r.Pending)
 		}
 	} else {
 		// A report nothing can read says nothing about the town: the run of

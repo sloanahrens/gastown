@@ -559,6 +559,13 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 		specBound = d.specDispatchRunBound()
 	}
 
+	// The slings a tick handed back to run in the background hold the restart
+	// the same way, each up to the sling's own bound from the oldest one's
+	// start: the restart waits for the in-flight set to empty, not forever
+	// (gt-5h70s).
+	slingSince, slinging := d.specSlings.oldest()
+	slingWaited := max(now.Sub(slingSince), 0)
+
 	switch {
 	case postLand && waited < postLandRestartCap:
 		return &daemonWork{name: "the post-land run"}
@@ -566,7 +573,11 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 		return &daemonWork{name: tierSweepHoldLabel}
 	case spec && specWaited < specBound:
 		return &daemonWork{name: specDispatchHoldLabel}
-	case hold != nil && waited < housekeepingRestartCap:
+	case slinging && slingWaited < specSlingBound():
+		return &daemonWork{name: specSlingHoldLabel}
+	case hold != nil && !hold.ownBound && waited < housekeepingRestartCap:
+		// The slings have their own case above: past their bound the housekeeping
+		// cap does not hold them longer.
 		return hold
 	}
 
@@ -589,7 +600,10 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 	if spec && specWaited >= specBound {
 		d.logger.Printf("upgrade-restart: %s is still in flight after its %s bound; restarting anyway (it reruns from the new daemon)", specDispatchHoldLabel, specBound)
 	}
-	if hold != nil && hold.name != specDispatchHoldLabel {
+	if slinging && slingWaited >= specSlingBound() {
+		d.logger.Printf("upgrade-restart: %s is still in flight after its %s bound; restarting anyway (the bead is read again by the new daemon's first tick)", specSlingHoldLabel, specSlingBound())
+	}
+	if hold != nil && hold.name != specDispatchHoldLabel && !hold.ownBound {
 		d.logger.Printf("upgrade-restart: %s is still in flight after %s; restarting anyway (it reruns from the new daemon)", hold.name, housekeepingRestartCap)
 	}
 	d.upgradeWaitLogged = ""
