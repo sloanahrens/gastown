@@ -101,6 +101,13 @@ func (s *specSlings) oldest() (time.Time, bool) {
 // the tick used to give a sling.
 func specSlingBound() time.Duration { return specDispatchTimeout }
 
+// specTickFlight is a running sling as the tick reads it: the set's fields, and
+// the start the stagger measures from (gt-vames).
+type specTickFlight struct {
+	specSlingFlight
+	Started time.Time `json:"started,omitempty"`
+}
+
 // specTickArgs are the flags every tick runs with: the slings are handed back
 // rather than run, and the running ones are named so the tick leaves their
 // beads and seats alone. A set that cannot be written down is an error: a tick
@@ -108,7 +115,11 @@ func specSlingBound() time.Duration { return specDispatchTimeout }
 func (d *Daemon) specTickArgs() ([]string, error) {
 	args := []string{"--background-slings"}
 	if flights := d.specSlings.list(); len(flights) > 0 {
-		raw, err := json.Marshal(flights)
+		payload := make([]specTickFlight, 0, len(flights))
+		for _, f := range flights {
+			payload = append(payload, specTickFlight{specSlingFlight: f, Started: f.started})
+		}
+		raw, err := json.Marshal(payload)
 		if err != nil {
 			return nil, fmt.Errorf("writing the in-flight slings: %w", err)
 		}

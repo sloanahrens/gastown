@@ -44,12 +44,16 @@ type specSlingJob struct {
 }
 
 // specInFlight is a running sling as the daemon hands it to the tick: the
-// bead and the seat it occupies, and the files it holds.
+// bead and the seat it occupies, the files it holds, and when it started. A
+// sling has no session until it is well under way, so its start is the only
+// spawn the roster cannot show (gt-vames). A zero Started is a sling with no
+// start time: it still takes its seat.
 type specInFlight struct {
-	Bead  string   `json:"bead"`
-	Rig   string   `json:"rig"`
-	Agent string   `json:"agent"`
-	Paths []string `json:"paths,omitempty"`
+	Bead    string    `json:"bead"`
+	Rig     string    `json:"rig"`
+	Agent   string    `json:"agent"`
+	Paths   []string  `json:"paths,omitempty"`
+	Started time.Time `json:"started,omitempty"`
 }
 
 var (
@@ -108,6 +112,20 @@ func specLiveWithInFlight(live map[string]int, inFlight []specInFlight) map[stri
 		out[f.Agent]++
 	}
 	return out
+}
+
+// specNewestSpawn is the spawn the min_spawn_gap stagger measures from: the
+// newer of the newest polecat the roster shows and the newest running sling's
+// start. The roster lacks a sling that has not spawned yet, so without the start
+// a tick would plan another sling a moment after the last one (gt-vames).
+func specNewestSpawn(rosterNewest time.Time, inFlight []specInFlight) time.Time {
+	newest := rosterNewest
+	for _, f := range inFlight {
+		if f.Started.After(newest) {
+			newest = f.Started
+		}
+	}
+	return newest
 }
 
 // specHandOffPendingSlings puts the tick's planned slings in the report as

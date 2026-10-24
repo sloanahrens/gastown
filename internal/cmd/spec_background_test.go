@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -102,6 +103,50 @@ func TestBackgroundTickRosterCountsTheRunningSling(t *testing.T) {
 	r := runSpecDispatchCycle(env)
 	if !strings.Contains(r.Roster, "deepseek-flash 1/2") {
 		t.Fatalf("roster = %q, want the running sling counted on its seat", r.Roster)
+	}
+}
+
+// A sling in its first minute has no session, so the roster shows no spawn. The
+// stagger must still hold the next sling until the running one's start is a gap
+// old (gt-vames).
+func TestSpecDispatchInFlightHonorsMinSpawnGap(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		started time.Duration // the running sling's age at the tick
+		want    int           // slings handed back
+	}{
+		{"started inside the gap", -60 * time.Second, 0},
+		{"started before the gap", -91 * time.Second, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeSpecTown(
+				cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"),
+				cleanSpec("gt-b", 2, "2026-09-29T10:01:00Z"),
+			)
+			env := backgroundEnv(f)
+			env.Budget.MinSpawnGap = 90 * time.Second
+			env.InFlight = []specInFlight{{Bead: "gt-x", Rig: "gastown", Agent: "deepseek-flash", Started: specTestNow.Add(tc.started)}}
+			r := runSpecDispatchCycle(env)
+
+			if len(r.Pending) != tc.want {
+				t.Fatalf("handed back %+v, want %d (skipped %+v)", r.Pending, tc.want, r.Skipped)
+			}
+			if len(f.slung) != 0 {
+				t.Fatalf("the tick slung %v itself", f.slung)
+			}
+		})
+	}
+}
+
+// An in-flight entry written without a start still parses and takes its seat:
+// the field is new, and a daemon payload from before it carries none.
+func TestSpecInFlightWithoutAStartStillParses(t *testing.T) {
+	t.Parallel()
+	got, err := parseSpecInFlight(`[{"bead":"gt-x","rig":"gastown","agent":"deepseek-flash"}]`)
+	if err != nil || len(got) != 1 || !got[0].Started.IsZero() || got[0].Agent != "deepseek-flash" {
+		t.Fatalf("parseSpecInFlight = %+v, %v; want gt-x on deepseek-flash with no start", got, err)
 	}
 }
 
