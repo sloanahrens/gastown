@@ -15,16 +15,26 @@ import (
 const hostCommandTimeout = 5 * time.Second
 
 // hostSource is the host group: the machine the snapshot runs on, read with
-// the macOS commands the operator uses by hand. A host without one of them,
-// or one whose command fails or misses hostCommandTimeout, leaves that column
-// nil rather than inventing a number.
+// the macOS commands the operator uses by hand. A probe that cannot give a
+// reading leaves its column nil rather than inventing a number, and the
+// failure is counted in host_probe_failures so a column that is nil because
+// its command failed, hung, printed nothing or printed something the parser
+// could not read is a number in the record and not a silent absence. The
+// other columns are untouched: one broken command costs one reading, never the
+// group.
 type hostSource struct {
+	// timeout bounds each probe; zero means hostCommandTimeout. Tests set it
+	// short to exercise the deadline itself.
+	timeout time.Duration
 	// doltPort is the port the Dolt server listens on. lsof counts the
 	// connections to it, which answers without a database round trip, so a
 	// server too busy to answer still reports its connection count.
 	doltPort string
 	// dockerContainer is a container whose filesystem is the Docker VM's disk,
-	// so df inside it reads the usage Docker Desktop fills (gt-mexpf).
+	// so df inside it reads the usage Docker Desktop fills (gt-mexpf). It is
+	// the runner service of the town's compose stack, whose name comes from the
+	// compose file; if that name changes, docker_disk_pct goes nil and
+	// host_probe_failures says so until this default follows it.
 	dockerContainer string
 }
 
@@ -39,20 +49,29 @@ func newHostSource() hostSource {
 
 func (hostSource) Group() string { return "host" }
 
-// Collect fills the host group. Output a parser cannot read is an error, which
-// nulls the group: a fixture that no longer matches the command must show up
-// as missing rather than as a wrong reading.
+// Collect fills the host group. It returns no error: every probe that cannot
+// give a reading is a nil column counted in host_probe_failures.
 func (s hostSource) Collect(ctx context.Context, env Env) (map[string]any, error) {
 	probes := s.probes()
-	cols := make(map[string]any, len(probes))
+	cols := make(map[string]any, len(probes)+1)
+	failures := 0
 	for _, probe := range probes {
-		value, err := probe.read(ctx, env)
-		if err != nil {
-			return nil, fmt.Errorf("host %s: %w", probe.column, err)
-		}
+		value, ok := probe.read(ctx, env, s.probeTimeout())
 		cols[probe.column] = value
+		if !ok {
+			failures++
+		}
 	}
+	cols["host_probe_failures"] = failures
 	return cols, nil
+}
+
+// probeTimeout is the deadline each probe gets.
+func (s hostSource) probeTimeout() time.Duration {
+	if s.timeout > 0 {
+		return s.timeout
+	}
+	return hostCommandTimeout
 }
 
 // hostProbe is one host column: the command that reads it and the parser that
@@ -66,7 +85,8 @@ type hostProbe struct {
 }
 
 // probes are the group's columns, in the order they run. They run one after
-// another, so Collect costs at most four timeouts.
+// another, so Collect costs at most four timeouts (20 s), under the group's own
+// deadline (SourceTimeout).
 func (s hostSource) probes() []hostProbe {
 	return []hostProbe{
 		{
@@ -95,29 +115,34 @@ func (s hostSource) probes() []hostProbe {
 	}
 }
 
-// read runs the probe's command and returns its column's value. A command
-// that fails or misses its deadline is a nil value and no error, the gap a
-// host that cannot answer leaves in the record; a parser error is returned,
-// because that is a bug in the source rather than a reading the host refused.
-func (p hostProbe) read(ctx context.Context, env Env) (any, error) {
-	ctx, cancel := context.WithTimeout(ctx, hostCommandTimeout)
+// read runs the probe's command under timeout and returns its column's value
+// and whether it is a reading. A command that fails, misses its deadline, or
+// prints nothing where an answer is the point, and output the parser cannot
+// read, are all (nil, false): the host could not answer, or its format changed,
+// and either way the column is a gap that Collect counts.
+func (p hostProbe) read(ctx context.Context, env Env, timeout time.Duration) (any, bool) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if p.latency {
 		// The start is read before the command runs, so the difference is the
-		// command's own time. An empty answer is nil: a bd that printed nothing
+		// command's own time. An empty answer is a gap: a bd that printed nothing
 		// did not answer, and its fast return is not a latency.
 		start := env.Now()
 		out, err := env.Run(ctx, p.argv)
 		if err != nil || strings.TrimSpace(string(out)) == "" {
-			return nil, nil
+			return nil, false
 		}
-		return float64(env.Now().Sub(start)) / float64(time.Millisecond), nil
+		return float64(env.Now().Sub(start)) / float64(time.Millisecond), true
 	}
 	out, err := env.Run(ctx, p.argv)
 	if err != nil {
-		return nil, nil
+		return nil, false
 	}
-	return p.parse(string(out))
+	value, err := p.parse(string(out))
+	if err != nil {
+		return nil, false
+	}
+	return value, true
 }
 
 // parseCPUIdlePct reads the idle share off top's last CPU line. A two-sample

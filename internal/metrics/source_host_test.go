@@ -99,10 +99,11 @@ func TestSourceHostCollectsTheFourColumns(t *testing.T) {
 		t.Fatalf("Collect: %v", err)
 	}
 	want := map[string]any{
-		"cpu_idle_pct":    86.99,
-		"bd_latency_ms":   float64(37),
-		"dolt_conns":      2,
-		"docker_disk_pct": 59.0,
+		"cpu_idle_pct":        86.99,
+		"bd_latency_ms":       float64(37),
+		"dolt_conns":          2,
+		"docker_disk_pct":     59.0,
+		"host_probe_failures": 0,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Collect = %v, want %v", got, want)
@@ -161,6 +162,9 @@ func TestSourceHostEmptyLatencyAnswerLeavesItsColumnNil(t *testing.T) {
 	if got["bd_latency_ms"] != nil {
 		t.Errorf("bd_latency_ms = %v, want nil when bd printed nothing", got["bd_latency_ms"])
 	}
+	if got["host_probe_failures"] != 1 {
+		t.Errorf("host_probe_failures = %v, want 1 for the empty answer", got["host_probe_failures"])
+	}
 }
 
 // Each probe is failed in turn: the columns of the commands that answered stay
@@ -179,6 +183,9 @@ func TestSourceHostFailedCommandLeavesOnlyThatColumnNil(t *testing.T) {
 			}
 			if got[probe.column] != nil {
 				t.Errorf("%s = %v, want nil when its command fails", probe.column, got[probe.column])
+			}
+			if got["host_probe_failures"] != 1 {
+				t.Errorf("host_probe_failures = %v, want 1", got["host_probe_failures"])
 			}
 			for _, other := range newHostSource().probes() {
 				if other.column != probe.column && got[other.column] == nil {
@@ -219,27 +226,87 @@ func TestSourceHostEachProbeRunsUnderItsOwnDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
-	if got["dolt_conns"] != nil {
-		t.Errorf("dolt_conns = %v, want nil for a command that missed its deadline", got["dolt_conns"])
+	if got["dolt_conns"] != nil || got["host_probe_failures"] != 1 {
+		t.Errorf("dolt_conns = %v, host_probe_failures = %v, want nil and 1 for a command that missed its deadline", got["dolt_conns"], got["host_probe_failures"])
 	}
 	if got["cpu_idle_pct"] == nil || got["bd_latency_ms"] == nil || got["docker_disk_pct"] == nil {
 		t.Errorf("Collect nulled a column whose command answered: %v", got)
 	}
 }
 
-// Output the parser cannot read nulls the group, so a command whose format
-// changed is missing from the record rather than recorded as a wrong reading.
-func TestSourceHostUnreadableOutputNullsTheGroup(t *testing.T) {
+// Output a parser cannot read is one nil column and one counted failure, never
+// a null group and never a wrong reading: a command whose format changed shows
+// as a gap in its own column while the other three stay filled.
+func TestSourceHostUnreadableOutputNilsOnlyItsColumnAndCountsIt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, command, output, column string
+	}{
+		{name: "top with no CPU line", command: "/usr/bin/top", output: "Processes: 641 total\n", column: "cpu_idle_pct"},
+		{name: "lsof with a line that is no connection", command: "lsof", output: hostLsofHeader + "dolt 41022 sloan 45u IPv4 0x1 0t0 TCP *:3307 (LISTEN)\n", column: "dolt_conns"},
+		{name: "lsof that printed nothing at all", command: "lsof", output: "", column: "dolt_conns"},
+		{name: "df with no root line", command: "docker", output: "Filesystem 1024-blocks Used Available Capacity Mounted on\n", column: "docker_disk_pct"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
+			fake.output[tc.command] = tc.output
+
+			got, err := newHostSource().Collect(context.Background(), fake.env())
+			if err != nil {
+				t.Fatalf("Collect returned %v; an unreadable probe must not null the group", err)
+			}
+			if got[tc.column] != nil || got["host_probe_failures"] != 1 {
+				t.Errorf("%s = %v, host_probe_failures = %v, want nil and 1", tc.column, got[tc.column], got["host_probe_failures"])
+			}
+			for _, probe := range newHostSource().probes() {
+				if probe.column != tc.column && got[probe.column] == nil {
+					t.Errorf("%s = nil, want it filled while only %s was unreadable", probe.column, tc.column)
+				}
+			}
+		})
+	}
+}
+
+// A command that never returns is cut at the probe's own deadline. The fake
+// blocks until its context ends; the caller's context stays alive, so the
+// deadline that freed it can only be the probe's own timeout. Nothing sleeps:
+// the wait is the 20 ms deadline.
+func TestSourceHostAHungCommandIsCutAtItsOwnDeadline(t *testing.T) {
 	t.Parallel()
 	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
-	fake.output["/usr/bin/top"] = "Processes: 641 total\n"
-
-	got, err := newHostSource().Collect(context.Background(), fake.env())
-	if err == nil {
-		t.Fatal("Collect accepted top output with no CPU line")
+	env := fake.env()
+	answer := env.Run
+	hung := 0
+	env.Run = func(ctx context.Context, argv []string) ([]byte, error) {
+		if argv[0] == "lsof" {
+			hung++
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return answer(ctx, argv)
 	}
-	if got != nil {
-		t.Errorf("Collect = %v beside an error, want a null group", got)
+	caller, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	src := newHostSource()
+	src.timeout = 20 * time.Millisecond
+	got, err := src.Collect(caller, env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if hung != 1 {
+		t.Fatalf("the hung command ran %d times, want once", hung)
+	}
+	if caller.Err() != nil {
+		t.Fatalf("the caller's context ended (%v): the probe's own deadline did not free the command", caller.Err())
+	}
+	if got["dolt_conns"] != nil || got["host_probe_failures"] != 1 {
+		t.Errorf("dolt_conns = %v, host_probe_failures = %v, want nil and 1", got["dolt_conns"], got["host_probe_failures"])
+	}
+	if got["cpu_idle_pct"] == nil || got["bd_latency_ms"] == nil || got["docker_disk_pct"] == nil {
+		t.Errorf("the hung command cost more than its own column: %v", got)
 	}
 }
 
