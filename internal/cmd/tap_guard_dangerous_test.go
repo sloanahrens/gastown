@@ -1762,6 +1762,154 @@ func TestShellFedHeredocInBacktickOrProcessSubstitution(t *testing.T) {
 			command:   "x=`echo hi`; cat > note.md <<'Z'\ngit reset --hard\nZ\n",
 			wantBlock: false,
 		},
+		{
+			name:      "a close paren in backtick text is that command's own, so the heredoc after it stays data",
+			command:   "x=`echo )`; cat <<EOF\ngit reset --hard\nEOF",
+			wantBlock: false,
+		},
+		{
+			name:      "a substitution in backtick text closes at its own paren",
+			command:   "x=`echo $(date)`; cat <<EOF\ngit reset --hard\nEOF",
+			wantBlock: false,
+		},
+		{
+			name:       "shell-fed heredoc inside a substitution in backtick text is a script",
+			command:    "x=`echo $(bash <<EOF\ngit reset --hard\nEOF\n)`",
+			wantBlock:  true,
+			wantReason: "Hard reset",
+		},
+		{
+			name:       "shell-fed heredoc inside a process substitution in backtick text is a script",
+			command:    "x=`cat <(bash <<EOF\ngit reset --hard\nEOF\n)`",
+			wantBlock:  true,
+			wantReason: "Hard reset",
+		},
+		{
+			name:      "heredoc fed to cat inside double-quoted backticks stays data",
+			command:   "echo \"`cat <<EOF\ngit reset --hard\nEOF\n`\"",
+			wantBlock: false,
+		},
+		{
+			name:      "heredoc inside backticks then a heredoc after them stays data",
+			command:   "x=`cat <<EOF\ngit reset --hard\nEOF\n`; cat <<Z\ngit reset --hard\nZ",
+			wantBlock: false,
+		},
+		{
+			name:      "heredoc fed to cat in backticks closed inside a substitution stays data, and so does the one after",
+			command:   "x=$(echo `cat <<EOF\ngit reset --hard\nEOF\n`); cat <<Z\ngit reset --hard\nZ",
+			wantBlock: false,
+		},
+		{
+			name:       "a substitution still open when the backtick closes does not hide the command after it",
+			command:    "x=`echo $(echo`; git reset --hard",
+			wantBlock:  true,
+			wantReason: "Hard reset",
+		},
+		{
+			name:       "a process substitution still open when the backtick closes does not hide the command after it",
+			command:    "x=`cat <(echo`; git reset --hard",
+			wantBlock:  true,
+			wantReason: "Hard reset",
+		},
+		{
+			name:      "a close paren in a process substitution's own text ends only that text",
+			command:   "cat <(echo ); cat <<EOF\ngit reset --hard\nEOF",
+			wantBlock: false,
+		},
+		{
+			name:      "a quoted close paren in a process substitution is text",
+			command:   "cat <(echo \")\"); cat <<EOF\ngit reset --hard\nEOF",
+			wantBlock: false,
+		},
+		{
+			name:       "a process substitution nested in another is command text",
+			command:    "cat <(cat <(bash <<EOF\ngit reset --hard\nEOF\n))",
+			wantBlock:  true,
+			wantReason: "Hard reset",
+		},
+		{
+			name:      "a process substitution fed from a file is command text",
+			command:   "cat < <(bash <<EOF\ngit reset --hard\nEOF\n)",
+			wantBlock: true,
+		},
+		{
+			name:       "shell-fed heredoc in a process substitution inside an expansion is a script",
+			command:    "echo ${v:-<(bash <<EOF\ngit reset --hard\nEOF\n)}",
+			wantBlock:  true,
+			wantReason: "Hard reset",
+		},
+		{
+			name:      "a process substitution inside an expansion leaves the heredoc after it data",
+			command:   "echo ${v:-<(echo x)}; cat <<EOF\ngit reset --hard\nEOF",
+			wantBlock: false,
+		},
+		{
+			name:      "a close paren in a heredoc body inside a process substitution is body text",
+			command:   "cat <(cat <<EOF\n)\ngit reset --hard\nEOF\n)",
+			wantBlock: false,
+		},
+		{
+			name:       "shell-fed heredoc with an indented terminator is a script",
+			command:    "cat <(bash <<-EOF\n\tgit reset --hard\n\tEOF\n)",
+			wantBlock:  true,
+			wantReason: "Hard reset",
+		},
+		{
+			name:      "heredoc fed to cat with an indented terminator stays data",
+			command:   "cat <(cat <<-EOF\n\tgit reset --hard\n\tEOF\n)",
+			wantBlock: false,
+		},
+		{
+			name:       "a quoted paren in a shell-fed body does not end the process substitution early",
+			command:    "cat <(bash <<EOF\necho \")\" ; git reset --hard\nEOF\n)",
+			wantBlock:  true,
+			wantReason: "Hard reset",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if got := reason != ""; got != tt.wantBlock {
+				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.wantBlock)
+			}
+			if tt.wantReason != "" && !strings.Contains(reason, tt.wantReason) {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want it to name %q", tt.command, reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+// An escaped backtick inside backtick text opens a command of its own, and the
+// shell re-parses the outer text before it runs that command: the reader of a
+// heredoc there is the word after the escaped backtick, not the assignment the
+// outer text starts with. Reading the outer text's start as the reader line hid
+// the shell, so the body went unchecked (gt-tzh06).
+func TestShellFedHeredocInNestedBacktickText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		command    string
+		wantBlock  bool
+		wantReason string // the reason the judged body is refused, when it is
+	}{
+		{
+			name:       "shell-fed heredoc in escaped backticks is a script",
+			command:    "x=`echo \\`bash <<EOF\ngit reset --hard\nEOF\n\\``",
+			wantBlock:  true,
+			wantReason: "Hard reset",
+		},
+		{
+			name:      "heredoc fed to cat in escaped backticks stays data",
+			command:   "x=`echo \\`cat <<EOF\ngit reset --hard\nEOF\n\\``; cat <<Z\ngit reset --hard\nZ",
+			wantBlock: false,
+		},
+		{
+			name:       "a data heredoc after the escaped texts does not hide the script",
+			command:    "x=`echo \\`bash <<EOF\ngit reset --hard\nEOF\n\\``; cat <<Z\ngit reset --hard\nZ",
+			wantBlock:  true,
+			wantReason: "Hard reset",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

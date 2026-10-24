@@ -635,7 +635,8 @@ type heredocQuoteWalk struct {
 // The same frame reads a backtick pair and a "<(" or ">(" process substitution
 // (gt-1f28p): "x=`bash <<EOF" and "cat <(bash <<EOF" feed bash the body too. A
 // tick frame has no opener to count, so tick marks it, and the closing backtick
-// (not a ")") ends it. Its outer quote is the one the backticks interrupted.
+// (not a ")") ends it: the quote it resumes and where its text starts live on
+// the tickFrame, which owns them (gt-tzh06).
 type cmdSubstFrame struct {
 	outer rune
 	depth int
@@ -670,10 +671,15 @@ type arithFrame struct {
 // "${" has opened inside it. nested marks the text an escaped backtick opened
 // inside another: the shell unescapes the outer text before it parses it, so
 // the escaped backtick in "`echo \`echo }\“" opens a command of its own, and
-// its "}" is that command's.
+// its "}" is that command's. open is the offset just past the opening backtick,
+// and outer the double quote that backtick interrupted, which the closing one
+// resumes: the frame carries both, so ending the text reads nothing from the
+// "$(" stack and does not depend on the two staying in step (gt-tzh06).
 type tickFrame struct {
 	at     int
 	nested bool
+	open   int
+	outer  rune
 }
 
 // substFrame is one "$(..)" the walk is reading inside a "${..}" word. brace is
@@ -709,7 +715,7 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			if top := w.ticks[len(w.ticks)-1]; top.nested {
 				w.ticks = w.ticks[:len(w.ticks)-1]
 			} else {
-				w.ticks = append(w.ticks, tickFrame{at: w.braces, nested: true})
+				w.ticks = append(w.ticks, tickFrame{at: w.braces, nested: true, open: w.byteIdx + 1, outer: w.quote})
 			}
 		case escaped:
 			// Literal text behind a backslash opens nothing.
@@ -722,14 +728,13 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			// the first backtick no backslash escapes, however many nested
 			// texts are open in it.
 			if len(w.ticks) > 0 {
-				w.ticks = nil
 				w.closeTickSubst()
 			} else {
-				w.ticks = append(w.ticks, tickFrame{at: w.braces})
 				// The backticks are command text the shell starts quoting
 				// afresh, as "$(" is, so the frame remembers the double quote
 				// they interrupt and the closing backtick resumes it (gt-1f28p).
-				w.subs = append(w.subs, cmdSubstFrame{outer: w.quote, open: w.byteIdx + 1, tick: true})
+				w.ticks = append(w.ticks, tickFrame{at: w.braces, open: w.byteIdx + 1, outer: w.quote})
+				w.subs = append(w.subs, cmdSubstFrame{open: w.byteIdx + 1, tick: true})
 				w.quote = 0
 			}
 		case w.quote == 0 && r == '\'' && isANSICDollar(w.runes, w.runeIdx-1):
@@ -898,13 +903,23 @@ func (w *heredocQuoteWalk) inCmdSubstText() bool {
 	return len(w.subs) > 0 && !w.readsData()
 }
 
-// cmdSubstOpen returns where the command text of the "$(" the walk is in
-// begins, and whether the walk is in one (see inCmdSubstText).
+// cmdSubstOpen returns where the command text the walk is in begins — the text
+// of a "$(" or a "<(", or of a backtick pair — and whether the walk is in one
+// (see inCmdSubstText). The two stacks can both be open, so the innermost text
+// is the one that starts furthest right: a backtick pair an escaped backtick
+// opened inside another command's text is the command the heredoc in it is fed
+// to, and where its reader line starts (gt-tzh06).
 func (w *heredocQuoteWalk) cmdSubstOpen() (int, bool) {
 	if !w.inCmdSubstText() {
 		return 0, false
 	}
-	return w.subs[len(w.subs)-1].open, true
+	open := w.subs[len(w.subs)-1].open
+	if len(w.ticks) > 0 {
+		if tick := w.ticks[len(w.ticks)-1].open; tick > open {
+			open = tick
+		}
+	}
+	return open, true
 }
 
 // countCmdParen counts a "(" or ")" in the command text of the innermost
@@ -933,13 +948,18 @@ func (w *heredocQuoteWalk) countCmdParen(r rune) {
 // frame that holds it and anything still open inside it: the shell ends the
 // text at the first backtick no backslash escapes. It resumes the double quote
 // the backticks interrupted (gt-1f28p).
+//
+// The text's own frame carries the quote to resume and where the text starts,
+// so ending it reads nothing from the "$(" stack and needs no tick frame to
+// find there: the frames it drops are the ones that start inside the text,
+// picked by position, so a "$(" or "<(" still open when the backtick closes
+// goes with it and the frames below the backtick stay (gt-tzh06).
 func (w *heredocQuoteWalk) closeTickSubst() {
-	for i := len(w.subs) - 1; i >= 0; i-- {
-		if w.subs[i].tick {
-			w.quote = w.subs[i].outer
-			w.subs = w.subs[:i]
-			return
-		}
+	top := w.ticks[0] // the unescaped backtick that opened the text; escaped ones stack above it
+	w.ticks = nil
+	w.quote = top.outer
+	for len(w.subs) > 0 && w.subs[len(w.subs)-1].open >= top.open {
+		w.subs = w.subs[:len(w.subs)-1]
 	}
 }
 
