@@ -140,13 +140,20 @@ type ClearMailResult struct {
 	Cleared int // Number of pinned messages cleared (content removed)
 }
 
-// ClearMail closes the open non-pinned messages and empties the pinned ones,
-// which stay open.
-func ClearMail(c Client, reason string) (*ClearMailResult, error) {
-	// List all open messages
+// ClearMail closes the open non-pinned messages assigned to assignee and
+// empties the pinned ones, which stay open. assignee is an identity such as
+// gastown/goose.
+func ClearMail(c Client, assignee, reason string) (*ClearMailResult, error) {
+	// An empty assignee would match every role's mail, so refuse it.
+	if assignee == "" {
+		return nil, errors.New("clearing mail: no assignee given")
+	}
+
+	// List the open messages assigned to this role
 	issues, err := c.List(ListOptions{
 		Status:   "open",
 		Label:    "gt:message",
+		Assignee: assignee,
 		Priority: -1,
 	})
 	if err != nil {
