@@ -79,7 +79,7 @@ type overlayFile struct {
 	Path        string
 	FormulaName string
 	Overlay     *formula.FormulaOverlay
-	ParseErr    error    // non-nil if TOML parsing failed
+	ParseErr    error    // non-nil if TOML parsing or overlay validation failed
 	CookErr     error    // non-nil if bd could not cook the formula: step IDs unverified
 	StaleIDs    []string // step IDs that don't match any formula step
 }
@@ -123,7 +123,7 @@ func (c *OverlayHealthCheck) runOverlayDir(townRoot string) *CheckResult {
 	for _, f := range files {
 		if f.ParseErr != nil {
 			malformed++
-			details = append(details, fmt.Sprintf("%s: malformed TOML: %v", f.Path, f.ParseErr))
+			details = append(details, fmt.Sprintf("%s: %v", f.Path, f.ParseErr))
 			continue
 		}
 		if f.CookErr != nil {
@@ -280,6 +280,13 @@ func (c *OverlayHealthCheck) scanOverlayDir(townRoot, dir string) []overlayFile 
 		var overlay formula.FormulaOverlay
 		if _, err := toml.Decode(string(data), &overlay); err != nil {
 			of.ParseErr = fmt.Errorf("parsing TOML: %w", err)
+			results = append(results, of)
+			continue
+		}
+		// Validate before the formula and cook lookups: a mode the loader
+		// rejects is an error whatever the step IDs are.
+		if err := overlay.Validate(); err != nil {
+			of.ParseErr = fmt.Errorf("invalid overlay: %w", err)
 			results = append(results, of)
 			continue
 		}

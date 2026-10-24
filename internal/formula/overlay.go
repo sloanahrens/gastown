@@ -32,6 +32,24 @@ type FormulaOverlay struct {
 	StepOverrides []StepOverride `toml:"step-overrides"`
 }
 
+// Validate checks that every step override names a step and uses a known mode.
+// It is the one validator the overlay loader and gt doctor call, so the two
+// cannot disagree about what a valid overlay is.
+func (o *FormulaOverlay) Validate() error {
+	for i, so := range o.StepOverrides {
+		if so.StepID == "" {
+			return fmt.Errorf("step-overrides[%d]: step_id is required", i)
+		}
+		switch so.Mode {
+		case ModeReplace, ModeAppend, ModeSkip:
+			// valid
+		default:
+			return fmt.Errorf("step-overrides[%d] (step_id=%q): invalid mode %q (must be replace, append, or skip)", i, so.StepID, so.Mode)
+		}
+	}
+	return nil
+}
+
 // OverlayDirName is the one overlay directory, directly under the town root
 // (gt-fd2cu.3). A rig-level <rig>/formula-overlays directory is not read.
 const OverlayDirName = "formula-overlays"
@@ -73,17 +91,8 @@ func loadOverlayFile(path string) (*FormulaOverlay, error) {
 		return nil, fmt.Errorf("parsing overlay TOML: %w", err)
 	}
 
-	// Validate overrides.
-	for i, so := range overlay.StepOverrides {
-		if so.StepID == "" {
-			return nil, fmt.Errorf("step-overrides[%d]: step_id is required", i)
-		}
-		switch so.Mode {
-		case ModeReplace, ModeAppend, ModeSkip:
-			// valid
-		default:
-			return nil, fmt.Errorf("step-overrides[%d] (step_id=%q): invalid mode %q (must be replace, append, or skip)", i, so.StepID, so.Mode)
-		}
+	if err := overlay.Validate(); err != nil {
+		return nil, err
 	}
 
 	return &overlay, nil
