@@ -1,12 +1,15 @@
 package doctor
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // mockSocketLister implements socketSessionLister for testing.
@@ -259,27 +262,48 @@ func TestSocketSplitBrainCheck_Fix_KillsStale(t *testing.T) {
 	}
 }
 
-// The legacy cleanup and gt doctor's split-brain check must kill the same
-// default-socket sessions. Every row runs through both: the legacy cleanup's
-// own selection and the check's Fix. It fails if either side starts deciding
-// for itself (gt-2n5go).
+// TestSocketSplitBrainCheck_AgreesWithLegacyCleanup runs one table of
+// default-socket names through both kill paths: gt doctor's split-brain check
+// (Run, then Fix, over fake listers) and the legacy default-socket cleanup
+// (session.CleanupDefaultSocketForTest, over a scripted tmux). Each must kill
+// exactly the table's stale rows, so neither can start deciding for itself
+// (gt-2n5go).
 func TestSocketSplitBrainCheck_AgreesWithLegacyCleanup(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		sessions []string
+		name      string
+		onDefault []string // sessions on the "default" socket
+		onTown    []string // sessions on the town socket, making the same names duplicates
+		want      []string // what both paths must kill
 	}{
 		{
-			name:     "town roles, live overseer, unregistered and foreign names",
-			sessions: []string{"ga-witness", "hq-mayor", "hq-deacon", "hq-boot", "hq-dog-alpha", "hq-overseer", "gt-unregistered", "bd-thing", "gthq-thing", "personal-stuff"},
+			name: "town roles, the live overseer, rig sessions and names that are not town sessions",
+			onDefault: []string{
+				"hq-mayor", "hq-deacon", "hq-boot", "hq-dog-alpha", "hq-overseer",
+				"ga-witness", "ga-crew-max",
+				"gt-unregistered", "bd-thing", "gthq-thing", "personal-stuff", "dotfiles-main",
+			},
+			onTown: []string{"hq-overseer", "ga-witness", "ga-crew-max"},
+			want:   []string{"ga-crew-max", "ga-witness", "hq-boot", "hq-deacon", "hq-dog-alpha", "hq-mayor"},
 		},
 		{
-			name:     "nothing stale",
-			sessions: []string{"hq-overseer", "personal-stuff"},
+			name:      "the live overseer, duplicated on the town socket",
+			onDefault: []string{"hq-overseer"},
+			onTown:    []string{"hq-overseer"},
 		},
 		{
-			name:     "rig sessions only",
-			sessions: []string{"ga-nux", "ga-crew-max"},
+			name:      "the overseer with no live copy",
+			onDefault: []string{"hq-overseer"},
+		},
+		{
+			name:      "rig sessions only",
+			onDefault: []string{"ga-nux", "ga-crew-max"},
+			onTown:    []string{"ga-nux"},
+			want:      []string{"ga-crew-max", "ga-nux"},
+		},
+		{
+			name:      "names that are not town sessions",
+			onDefault: []string{"gt-unregistered", "bd-thing", "gthq-thing", "personal-stuff", "dotfiles-main"},
 		},
 	}
 	for _, tt := range tests {
@@ -289,28 +313,72 @@ func TestSocketSplitBrainCheck_AgreesWithLegacyCleanup(t *testing.T) {
 			reg := session.NewPrefixRegistry()
 			reg.Register("ga", "gastown")
 
-			check := NewSocketSplitBrainCheck()
-			check.useSocketForTest = true
-			check.socketForTest = "gt-abc123"
-			check.townListerForTest = &mockSocketLister{}
-			mock := &mockSocketLister{sessions: tt.sessions}
-			check.defaultListerForTest = mock
-
-			ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: reg}
-			check.Run(ctx)
-			if err := check.Fix(ctx); err != nil {
-				t.Fatalf("Fix() returned error: %v", err)
-			}
-
-			want := session.StaleDefaultSocketSessions(reg, tt.sessions)
+			want := slices.Clone(tt.want)
 			slices.Sort(want)
-			got := slices.Clone(mock.killed)
-			slices.Sort(got)
-			if !slices.Equal(got, want) {
-				t.Errorf("gt doctor killed %v, legacy cleanup selects %v", got, want)
+
+			if got := socketSplitBrainKills(t, reg, tt.onTown, tt.onDefault); !slices.Equal(got, want) {
+				t.Errorf("gt doctor killed %v, want %v", got, want)
+			}
+			if got := legacyCleanupKills(t, reg, tt.onDefault); !slices.Equal(got, want) {
+				t.Errorf("legacy cleanup killed %v, want %v", got, want)
 			}
 		})
 	}
+}
+
+// socketSplitBrainKills returns, sorted, what the split-brain check's Fix kills
+// when onDefault sits on the "default" socket and onTown on the town socket.
+func socketSplitBrainKills(t *testing.T, reg *session.PrefixRegistry, onTown, onDefault []string) []string {
+	t.Helper()
+	check := NewSocketSplitBrainCheck()
+	check.useSocketForTest = true
+	check.socketForTest = "gt-town"
+	check.townListerForTest = &mockSocketLister{sessions: onTown}
+	defaultLister := &mockSocketLister{sessions: onDefault}
+	check.defaultListerForTest = defaultLister
+
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: reg}
+	if result := check.Run(ctx); result.Status != StatusOK && result.Status != StatusError {
+		t.Fatalf("Run() = %v: %s %v", result.Status, result.Message, result.Details)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+	kills := slices.Clone(defaultLister.killed)
+	slices.Sort(kills)
+	return kills
+}
+
+// legacyCleanupKills returns, sorted, what the legacy cleanup's own kill loop
+// kills when onDefault sits on the "default" socket: the real
+// CleanupLegacyDefaultSocket path, with tmux answering through its exec seam.
+func legacyCleanupKills(t *testing.T, reg *session.PrefixRegistry, onDefault []string) []string {
+	t.Helper()
+	remaining := slices.Clone(onDefault)
+	var killed []string
+	execFn := func(_ context.Context, _ string, args ...string) ([]byte, []byte, error) {
+		switch {
+		case slices.Contains(args, "list-sessions"):
+			return []byte(strings.Join(remaining, "\n")), nil, nil
+		case slices.Contains(args, "kill-session"):
+			name := strings.TrimPrefix(args[len(args)-1], "=")
+			killed = append(killed, name)
+			remaining = slices.DeleteFunc(remaining, func(s string) bool { return s == name })
+			return nil, nil, nil
+		}
+		// display-message, set-option and set-hook: the session has no pane to
+		// read, so KillSessionWithProcesses falls back to kill-session.
+		return nil, []byte("can't find pane"), errors.New("exit status 1")
+	}
+
+	cleaned := session.CleanupDefaultSocketForTest(reg, "gt-town", func(socket string) *tmux.Tmux {
+		return tmux.NewTmuxWithExec(socket, execFn)
+	})
+	if cleaned != len(killed) {
+		t.Fatalf("cleanup reported %d cleaned, killed %v", cleaned, killed)
+	}
+	slices.Sort(killed)
+	return killed
 }
 
 // gt doctor's split-brain check used to kill every IsKnownSession match on the

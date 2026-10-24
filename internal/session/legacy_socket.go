@@ -45,6 +45,16 @@ func CleanupLegacyDefaultSocket(prefixes *PrefixRegistry) int {
 	return newLegacySockets(prefixes).cleanupDefault()
 }
 
+// CleanupDefaultSocketForTest runs the default-socket cleanup as if this
+// process were on currentSocket, over clients built by build, so a test in
+// another package can drive this kill path beside gt doctor's split-brain
+// check (gt-2n5go).
+func CleanupDefaultSocketForTest(prefixes *PrefixRegistry, currentSocket string, build func(socket string) *tmux.Tmux) int {
+	l := newLegacySocketsWith(prefixes, build)
+	l.current = currentSocket
+	return l.cleanupDefault()
+}
+
 // CountLegacyDefaultSocketSessions counts Gas Town sessions on the "default"
 // tmux socket for dry-run output.
 func CountLegacyDefaultSocketSessions(prefixes *PrefixRegistry) int {
