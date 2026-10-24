@@ -264,3 +264,25 @@ func TestSandboxSeatProbeDoesNotWriteTheTownSettings(t *testing.T) {
 		t.Errorf("the probe left %v (err %v) in a town with no settings", entries, err)
 	}
 }
+
+// Settings that cannot be read leave every recorded agent unclassifiable, so the
+// seat answers unknown instead of falling back to its stale host worktree.
+func TestSandboxSeatProbeFailsClosedOnUnreadableSettings(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "settings", "config.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := sandboxSeatProbeFor(town, func(string, string) (bool, error) {
+		t.Error("the gateway was asked although the seat map could not be read")
+		return false, nil
+	})(sandboxSeatAgent, "gt-ember")
+
+	if !ok || got.Source != polecat.GitStateSourceUnknown {
+		t.Fatalf("probe = %+v, %v; want a seat whose git state is unknown", got, ok)
+	}
+}

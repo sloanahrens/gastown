@@ -102,16 +102,23 @@ type SafetyCheckResult struct {
 // checkPolecatSafety performs safety checks before destructive operations.
 // Returns nil if the polecat is safe to operate on, or a SafetyCheckResult with reasons if blocked.
 func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
+	return checkPolecatSafetyWith(target.rigName, target.polecatName, target.r, target.mgr.Get, beads.New(target.r.Path),
+		sandboxSeatEnv{probe: sandboxSeatProbeFor(filepath.Dir(target.r.Path), nil)})
+}
+
+// checkPolecatSafetyWith is checkPolecatSafety with its reads passed in: the
+// polecat lookup, the rig's beads and the sandbox probe, so a test drives the
+// whole check with no manager, database or gateway.
+func checkPolecatSafetyWith(rigName, polecatName string, r *rig.Rig, getPolecat func(string) (*polecat.Polecat, error), bd recoveryBeads, sandboxEnv sandboxSeatEnv) *SafetyCheckResult {
 	result := &SafetyCheckResult{
-		Polecat: fmt.Sprintf("%s/%s", target.rigName, target.polecatName),
+		Polecat: fmt.Sprintf("%s/%s", rigName, polecatName),
 	}
 
 	// Get polecat info for branch name
-	polecatInfo, infoErr := target.mgr.Get(target.polecatName)
+	polecatInfo, infoErr := getPolecat(polecatName)
 
 	// Check 1: Unpushed commits via cleanup_status or git state
-	bd := beads.New(target.r.Path)
-	agentBeadID := polecatBeadIDForRig(target.r, target.rigName, target.polecatName)
+	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
 	agentIssue, fields, err := beads.GetAgentBead(bd, agentBeadID)
 
 	if err != nil || fields == nil {
@@ -138,13 +145,20 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 		}
 		sourceHint := agentSourceIssueHint(currentIssue, fields)
 		hookBead := agentHookBead(agentIssue, fields)
+		// A sandbox seat's host worktree is a stale leftover: its git state is the
+		// gateway's answer, and the host clone is never measured (gt-qq6rg.2).
+		sandboxLive, sandboxed := sandboxEnv.probe(strings.TrimSpace(fields.Agent), polecatSessionNameIn(rigName, polecatName))
 		var gitState *GitState
 		gitStateLoaded := false
 		loadGitState := func() {
 			if gitStateLoaded || infoErr != nil || polecatInfo == nil {
 				return
 			}
-			gitState, _ = getGitState(polecatInfo.ClonePath)
+			if sandboxed {
+				gitState, _ = sandboxSeatGitState(sandboxLive)
+			} else {
+				gitState, _ = getGitState(polecatInfo.ClonePath)
+			}
 			result.GitState = gitState
 			gitStateLoaded = true
 		}
@@ -152,7 +166,9 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 		if fields.ActiveMR != "" {
 			loadGitState()
 			gitSafe := false
-			if polecatInfo != nil {
+			if sandboxed {
+				gitSafe = sandboxSeatGitSafe(sandboxLive)
+			} else if polecatInfo != nil {
 				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath)
 			}
 			activeMRAssessment = polecat.AssessActiveMR(bd, polecat.ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
@@ -160,6 +176,23 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 		beadTerminal := isAssignedBeadTerminal(bd, sourceHint)
 		if activeMRAssessment.SourceTerminal {
 			beadTerminal = true
+		}
+
+		// A sandbox the gateway says is gone reads clean, which is not the same as
+		// finished: unfinished work with no branch on origin and no resume_branch
+		// is lost, and nuking the seat would bury it (gt-qq6rg.3).
+		if sandboxed && sandboxLive.Source == polecat.GitStateSourceLive {
+			branch := fields.Branch
+			if branch == "" && polecatInfo != nil {
+				branch = polecatInfo.Branch
+			}
+			lost, lostErr := sandboxLostWork(sandboxEnv, bd, r.Path, branch, hookBead, sourceHint, hookBeadSafeForCleanup(bd, hookBead), beadTerminal)
+			switch {
+			case lostErr != nil:
+				result.Reasons = append(result.Reasons, "cannot check whether the sandbox's work survived: "+lostErr.Error())
+			case lost != "":
+				result.Reasons = append(result.Reasons, fmt.Sprintf("work lost: sandbox gone with %s unfinished and no pushed or resume branch", lost))
+			}
 		}
 
 		// Check cleanup_status from agent bead
@@ -172,7 +205,9 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 				loadGitState()
 			}
 			gitSafe := false
-			if polecatInfo != nil {
+			if sandboxed {
+				gitSafe = sandboxSeatGitSafe(sandboxLive)
+			} else if polecatInfo != nil {
 				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath)
 			}
 			facts := polecat.WorkstateFacts{
