@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for plugins/polecat-image/run.sh (gt-t4k72): stubs stand in for gt,
-# docker, git, make, openshell and pgrep and record every call, so the compare,
+# docker, git, make, openshell, crane and pgrep and record every call, so the compare,
 # the build, the debounce, the lock and the deferral are exercised without a
 # docker daemon, a gateway or a rig repo. Everything lives under one temp
 # directory; nothing sleeps. Run directly or via the shell tier:
@@ -62,6 +62,19 @@ case "${1:-}" in
     echo "Total:	12.3GB"
     exit 0 ;;
   images) cat "$STUB_STATE/image-tags" 2>/dev/null || true; exit 0 ;;
+  # `tag <src> <dst>` is recorded in tags; `save -o <file> <ref>` writes the
+  # tarball the crane stub then reads, so a push of an empty file is caught.
+  # tag-fail and save-fail hold the message of a call that fails.
+  tag)
+    echo "$*" >>"$STUB_STATE/tags"
+    if [ -f "$STUB_STATE/tag-fail" ]; then cat "$STUB_STATE/tag-fail" >&2; exit 1; fi
+    exit 0 ;;
+  save)
+    if [ -f "$STUB_STATE/save-fail" ]; then cat "$STUB_STATE/save-fail" >&2; exit 1; fi
+    out=""
+    while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2 ;; *) shift ;; esac; done
+    [ -n "$out" ] && printf 'tarball\n' >"$out"
+    exit 0 ;;
   rmi)
     echo "$*" >>"$STUB_STATE/rmi"
     if grep -qx "$2" "$STUB_STATE/rmi-refuse" 2>/dev/null; then
@@ -114,8 +127,15 @@ case "${1:-}" in
     mkdir -p "$CACHE_ROOT"
     exec sh -c "$script" ;;
 esac
+if [ "${1:-}" = image ] && [ "${4:-}" = '{{range .RepoTags}}{{println .}}{{end}}' ]; then
+  if [ -f "$STUB_STATE/repo-tags-fail" ]; then cat "$STUB_STATE/repo-tags-fail" >&2; exit 1; fi
+  cat "$STUB_STATE/repo-tags" 2>/dev/null || true
+  exit 0
+fi
 if [ "${1:-}" = image ] && [ "${4:-}" = '{{.Id}}' ]; then
   ref="${5:-}"
+  # missing-refs: refs docker has no image for.
+  if grep -qxF "$ref" "$STUB_STATE/missing-refs" 2>/dev/null; then echo "Error: No such image: $ref" >&2; exit 1; fi
   id="$(awk -v r="$ref" '$1 == r { print $2 }' "$STUB_STATE/ids" 2>/dev/null || true)"
   echo "${id:-id-of-$ref}"
   exit 0
@@ -149,7 +169,13 @@ if [ -f "$STUB_STATE/make-fail" ]; then
   echo "go: build failed" >&2
   exit 2
 fi
-basename "$(pwd)" >"$STUB_STATE/image"
+base="$(basename "$(pwd)")"
+echo "$base" >"$STUB_STATE/image"
+# The tags a real build makes (`:dev` and the short commit), plus the registry
+# alias a previous push left on the same image, which `image inspect` reports
+# in RepoTags and the plugin must not prefix a second time.
+printf 'gastown-polecat:dev\ngastown-polecat:%s\n' "${base:0:7}" >"$STUB_STATE/repo-tags"
+[ -z "${POLECAT_IMAGE_REGISTRY:-}" ] || echo "$POLECAT_IMAGE_REGISTRY/gastown-polecat:dev" >>"$STUB_STATE/repo-tags"
 [ ! -f "$STUB_STATE/sling-after-build" ] || touch "$STUB_STATE/sling-running"
 # another run owns the lock by the time this build ends
 [ ! -f "$STUB_STATE/steal-lock" ] || echo 99999 >"$POLECAT_IMAGE_TOWN_ROOT/.runtime/polecat-image.lock/pid"
@@ -170,6 +196,21 @@ if [ -f "$STUB_STATE/sandboxes" ]; then
 else
   echo "No sandboxes found."
 fi
+STUB
+cat >"$BIN/crane" <<'STUB'
+#!/usr/bin/env bash
+# `crane push --insecure <tarball> <ref>`: each call is recorded in crane, with
+# a missing-tarball line first when the docker save stub wrote nothing (or the
+# plugin removed it too early). crane-fail holds the message of a push that
+# fails.
+[ "${1:-}" = push ] || { echo "unexpected crane call: $*" >&2; exit 2; }
+[ -s "${3:-}" ] || echo "missing-tarball ${4:-}" >>"$STUB_STATE/crane"
+echo "$*" >>"$STUB_STATE/crane"
+if [ -f "$STUB_STATE/crane-fail" ]; then
+  cat "$STUB_STATE/crane-fail" >&2
+  exit 1
+fi
+exit 0
 STUB
 cat >"$BIN/pgrep" <<'STUB'
 #!/usr/bin/env bash
@@ -193,6 +234,8 @@ new_case() {
   export POLECAT_IMAGE_STALE_MINUTES=20
   export POLECAT_IMAGE_GT="$BIN/gt" POLECAT_IMAGE_DOCKER="$BIN/docker" POLECAT_IMAGE_GIT="$BIN/git"
   export POLECAT_IMAGE_MAKE="$BIN/make" POLECAT_IMAGE_OPENSHELL="$BIN/openshell" POLECAT_IMAGE_PGREP="$BIN/pgrep"
+  unset POLECAT_IMAGE_REGISTRY
+  export POLECAT_IMAGE_CRANE="$BIN/crane"
   mkdir -p "$POLECAT_IMAGE_TOWN_ROOT/.runtime"
   LOCK="$POLECAT_IMAGE_TOWN_ROOT/.runtime/polecat-image.lock"
   BUILD_ROOT="$POLECAT_IMAGE_TOWN_ROOT/gastown/.polecat-image-build"
@@ -545,6 +588,110 @@ cache_fill gastown 10
 touch -m -t 202603010000 "$(cache_dir gastown)/go-build/aa/f1"
 POLECAT_CACHE_CAP="$(cache_cap gastown 6)" run_it
 if [ "$RC" = 0 ] && cache_has gastown 1 && ! cache_has gastown 2 && ! cache_has gastown 7 && cache_has gastown 8; then pass "a file with a recent mtime outlasts older ones despite an old atime"; else fail "cachemtime: $(ls "$(cache_dir gastown)/go-build/aa" | tr '\n' ' ') out=$OUT"; fi
+
+echo "--- POLECAT_IMAGE_REGISTRY publishes the image it builds (gt-mm7q6)"
+# tags_made lists `docker tag <src> <dst>` calls, pushes the refs crane was
+# given; the tarball path varies, so only the destination is compared.
+tags_made() { if [ -f "$STUB_STATE/tags" ]; then sed 's/^tag //' "$STUB_STATE/tags" | tr '\n' ' '; fi; }
+pushes() { if [ -f "$STUB_STATE/crane" ]; then grep '^push ' "$STUB_STATE/crane" | sed 's/^push --insecure [^ ]* //' | tr '\n' ' '; fi; }
+
+new_case regunset abc1234 "$(full 1111111)"
+run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && [ ! -f "$STUB_STATE/tags" ] && [ ! -f "$STUB_STATE/crane" ] && ! grep -q "registry:" <<<"$OUT"; then pass "unset: the build as before, nothing tagged or pushed"; else fail "regunset: rc=$RC builds=$(builds) tags=[$(tags_made)] out=$OUT"; fi
+
+new_case regpush abc1234 "$(full 1111111)"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && [ "$(tags_made)" = "gastown-polecat:dev localhost:5001/gastown-polecat:dev gastown-polecat:abc1234 localhost:5001/gastown-polecat:abc1234 " ]; then pass ":dev and the commit tag each get the registry reference locally"; else fail "regpush tags: rc=$RC tags=[$(tags_made)] out=$OUT"; fi
+if [ "$(pushes)" = "localhost:5001/gastown-polecat:dev localhost:5001/gastown-polecat:abc1234 " ] && grep -q "registry: pushed localhost:5001/gastown-polecat:dev" <<<"$OUT"; then pass "both references are pushed, and the pushes are logged"; else fail "regpush pushes=[$(pushes)] out=$OUT"; fi
+if [ -f "$STUB_STATE/crane" ] && ! grep -q missing-tarball "$STUB_STATE/crane"; then pass "crane is handed a tarball docker save wrote"; else fail "regpush tarball: $(cat "$STUB_STATE/crane" 2>/dev/null)"; fi
+if ! grep -q "localhost:5001/localhost:5001" <<<"$(tags_made)$(pushes)"; then pass "the alias a previous push left is not prefixed a second time"; else fail "regpush double prefix: tags=[$(tags_made)] pushes=[$(pushes)]"; fi
+
+new_case regcurrent abc1234 "$(full abc1234)"
+printf 'gastown-polecat:dev\ngastown-polecat:abc1234\n' >"$STUB_STATE/repo-tags"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 0 ] && [ "$(pushes)" = "localhost:5001/gastown-polecat:dev localhost:5001/gastown-polecat:abc1234 " ] && grep -q "current at" <<<"$OUT"; then pass "a current image never published is pushed without a build"; else fail "regcurrent: rc=$RC builds=$(builds) pushes=[$(pushes)] out=$OUT"; fi
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && [ "$(grep -c '^push ' "$STUB_STATE/crane")" = 2 ] && [ ! -d "$LOCK" ]; then pass "once pushed, a current image is not pushed again, and the lock is released"; else fail "regstamp: rc=$RC pushes=[$(pushes)] out=$OUT"; fi
+POLECAT_IMAGE_REGISTRY=localhost:6000 run_it
+if [ "$RC" = 0 ] && [ "$(pushes)" = "localhost:5001/gastown-polecat:dev localhost:5001/gastown-polecat:abc1234 localhost:6000/gastown-polecat:dev localhost:6000/gastown-polecat:abc1234 " ]; then pass "a different registry is pushed to even though the image is current"; else fail "regother: rc=$RC pushes=[$(pushes)] out=$OUT"; fi
+
+new_case regretry abc1234 "$(full 1111111)"
+echo "UNAUTHORIZED: authentication required" >"$STUB_STATE/crane-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+rm "$STUB_STATE/crane-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && [ "$(pushes)" = "localhost:5001/gastown-polecat:dev localhost:5001/gastown-polecat:dev localhost:5001/gastown-polecat:abc1234 " ]; then pass "a failed push is retried by the next run while the image stays current"; else fail "regretry: rc=$RC builds=$(builds) pushes=[$(pushes)] out=$OUT"; fi
+
+new_case reglocked abc1234 "$(full abc1234)"
+mkdir "$LOCK"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && [ ! -f "$STUB_STATE/crane" ] && [ -d "$LOCK" ] && grep -q "registry: already running" <<<"$OUT"; then pass "a current image with a held lock: the publish waits, lock untouched"; else fail "reglocked: rc=$RC out=$OUT"; fi
+
+new_case regpath abc1234 "$(full 1111111)"
+POLECAT_IMAGE_REGISTRY=/Users/x/gt/.runtime/sandboxes run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && [ ! -f "$STUB_STATE/tags" ] && [ ! -f "$STUB_STATE/crane" ] && grep -q "is a path, not a host:port (the sandbox records directory is POLECAT_IMAGE_SANDBOX_RECORDS now)" <<<"$OUT"; then pass "an old sandbox-records path in POLECAT_IMAGE_REGISTRY is refused with the new name"; else fail "regpath: rc=$RC tags=[$(tags_made)] out=$OUT"; fi
+
+new_case recordsdir abc1234 "$(full 1111111)"
+echo "gt-corpus 2026-10-23 Ready" >"$STUB_STATE/sandboxes"
+mkdir -p "$CASE/records"
+echo '{}' >"$CASE/records/gt-corpus.json"
+POLECAT_IMAGE_SANDBOX_RECORDS="$CASE/records" run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ]; then pass "POLECAT_IMAGE_SANDBOX_RECORDS names the sandbox records directory"; else fail "recordsdir: rc=$RC builds=$(builds) out=$OUT"; fi
+
+new_case regnocrane abc1234 "$(full 1111111)"
+POLECAT_IMAGE_REGISTRY=localhost:5001 POLECAT_IMAGE_CRANE="$CASE/no-crane" run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && grep -qF "registry: POLECAT_IMAGE_REGISTRY=localhost:5001 is set but $CASE/no-crane is not installed; the image is not published" <<<"$OUT" && [ ! -f "$STUB_STATE/tags" ]; then pass "a missing crane: logged, exit 0, nothing tagged"; else fail "regnocrane: rc=$RC builds=$(builds) tags=[$(tags_made)] out=$OUT"; fi
+
+new_case regfail abc1234 "$(full 1111111)"
+echo "UNAUTHORIZED: authentication required" >"$STUB_STATE/crane-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && grep -qF "registry: pushing localhost:5001/gastown-polecat:dev failed (UNAUTHORIZED: authentication required); the image is not published" <<<"$OUT" && [ "$(grep -c '^push ' "$STUB_STATE/crane")" = 1 ]; then pass "a failed push: crane's reason logged, exit 0, one attempt"; else fail "regfail: rc=$RC crane=[$(cat "$STUB_STATE/crane" 2>/dev/null)] out=$OUT"; fi
+if [ -z "$(rmis)" ] && grep -qF "tag gastown-polecat:dev localhost:5001/gastown-polecat:dev" "$STUB_STATE/tags"; then pass "a failed push removes nothing and keeps the local registry tag"; else fail "regfail removal: rmi=[$(rmis)] tags=[$(tags_made)]"; fi
+
+# Each failing step stops the publish: the later steps never run, the run exits
+# 0, nothing is removed, and the next run tries again (no stamp is written).
+new_case regtagfail abc1234 "$(full 1111111)"
+echo "Error response from daemon: no such image" >"$STUB_STATE/tag-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && grep -qF "registry: cannot tag localhost:5001/gastown-polecat:dev (Error response from daemon: no such image); the image is not published" <<<"$OUT" && [ ! -f "$STUB_STATE/crane" ] && ! grep -q '^save' "$STUB_STATE/docker-calls" && [ -z "$(rmis)" ] && [ ! -f "$POLECAT_IMAGE_TOWN_ROOT/.runtime/polecat-image.published" ]; then pass "a failed docker tag: logged, exit 0, no save or push, nothing removed"; else fail "regtagfail: rc=$RC out=$OUT"; fi
+
+new_case regsavefail abc1234 "$(full 1111111)"
+echo "write /tmp/image.tar: no space left on device" >"$STUB_STATE/save-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && grep -qF "registry: cannot save localhost:5001/gastown-polecat:dev to a tarball (write /tmp/image.tar: no space left on device); the image is not published" <<<"$OUT" && [ ! -f "$STUB_STATE/crane" ] && [ -z "$(rmis)" ] && [ ! -f "$POLECAT_IMAGE_TOWN_ROOT/.runtime/polecat-image.published" ]; then pass "a failed docker save: logged, exit 0, no push, nothing removed"; else fail "regsavefail: rc=$RC out=$OUT"; fi
+
+new_case reginspectfail abc1234 "$(full 1111111)"
+echo "Error: No such image: gastown-polecat:dev" >"$STUB_STATE/repo-tags-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && grep -qF "registry: cannot read the tags of gastown-polecat:dev (Error: No such image: gastown-polecat:dev); the image is not published" <<<"$OUT" && [ ! -f "$STUB_STATE/tags" ] && [ ! -f "$STUB_STATE/crane" ]; then pass "a failed tag listing: logged, exit 0, nothing tagged or pushed"; else fail "reginspectfail: rc=$RC out=$OUT"; fi
+
+# The tarball directory is made under the build root and removed after every
+# publish, whatever its outcome and however many rounds ran.
+pushdirs() { find "$BUILD_ROOT" -maxdepth 1 -name 'push.*' 2>/dev/null | wc -l | tr -d ' '; }
+new_case regrounds abc1234 "$(full 1111111)"
+echo def5678 >"$STUB_STATE/move-after-build"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 2 ] && [ "$(grep -c '^push ' "$STUB_STATE/crane")" = 4 ] && [ "$(pushdirs)" = 0 ]; then pass "two build rounds publish twice and leave no tarball directory"; else fail "regrounds: rc=$RC builds=$(builds) dirs=$(pushdirs) out=$OUT"; fi
+new_case regleak abc1234 "$(full 1111111)"
+echo "UNAUTHORIZED: authentication required" >"$STUB_STATE/crane-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && [ "$(pushdirs)" = 0 ]; then pass "a failed push leaves no tarball directory"; else fail "regleak: rc=$RC dirs=$(pushdirs) out=$OUT"; fi
+
+# The registry alias of a per-commit tag goes with the tag: the image stays on
+# disk while any tag names it.
+tags_case regprune abc1234 "$(full abc1234)"
+echo "localhost:5001/gastown-polecat:fffffff6" >"$STUB_STATE/missing-refs"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && [ "$(rmis)" = "localhost:5001/gastown-polecat:ddddddd4 gastown-polecat:ddddddd4 gastown-polecat:fffffff6 " ]; then pass "an old tag's registry alias is untagged first; a tag with no alias is untagged alone; :dev's alias stays"; else fail "regprune: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
+tags_case regprunekeep abc1234 "$(full abc1234)"
+echo "localhost:5001/gastown-polecat:ddddddd4" >"$STUB_STATE/rmi-refuse"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && [ "$(rmis)" = "localhost:5001/gastown-polecat:ddddddd4 localhost:5001/gastown-polecat:fffffff6 gastown-polecat:fffffff6 " ] && grep -qF "kept gastown-polecat:ddddddd4 (localhost:5001/gastown-polecat:ddddddd4: rmi failed: conflict: image is being used by running container)" <<<"$OUT"; then pass "an alias docker refuses to untag keeps its tag, and the others still go"; else fail "regprunekeep: rc=$RC rmi=[$(rmis)] out=$OUT"; fi
+
+new_case regbuildfail abc1234 "$(full 1111111)"
+touch "$STUB_STATE/make-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" != 0 ] && [ ! -f "$STUB_STATE/tags" ] && [ ! -f "$STUB_STATE/crane" ]; then pass "a failed build publishes nothing"; else fail "regbuildfail: rc=$RC tags=[$(tags_made)] crane=[$(cat "$STUB_STATE/crane" 2>/dev/null)]"; fi
 
 echo
 echo "polecat-image: $PASS passed, $FAIL failed"
