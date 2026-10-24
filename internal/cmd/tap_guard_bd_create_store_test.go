@@ -314,6 +314,65 @@ func TestTapGuardBdCreateStoreProcessEnvDB(t *testing.T) {
 	}
 }
 
+// TestTapGuardBdCreateStoreDashCOutranksEnvDB pins that bd -C decides the
+// store: bd sets BEADS_DIR from -C and reads it before BEADS_DB/BD_DB, so a
+// rig-valued database variable, inline or in the process env, cannot make a
+// -C town create look like a rig one.
+func TestTapGuardBdCreateStoreDashCOutranksEnvDB(t *testing.T) {
+	t.Parallel()
+	b := newBdStoreTown(t)
+	townDB := filepath.Join(b.town, ".beads", "x.db")
+	rigDB := filepath.Join(b.rigDir, "mayor", "rig", ".beads", "x.db")
+	rigBeads := filepath.Join(b.rigDir, "mayor", "rig", ".beads")
+	tests := []struct {
+		name    string
+		env     map[string]string
+		command string
+		blocked bool
+	}{
+		{"inline BEADS_DB rig, -C town", nil, `BEADS_DB=` + rigDB + ` bd -C ` + b.town + ` create --title=x`, true},
+		{"inline BD_DB rig, -C town", nil, `BD_DB=` + rigDB + ` bd -C ` + b.town + ` create --title=x`, true},
+		{"inline BEADS_DB rig, --directory town", nil, `BEADS_DB=` + rigDB + ` bd --directory ` + b.town + ` create --title=x`, true},
+		{"inline BEADS_DB rig, -C town after the verb", nil, `BEADS_DB=` + rigDB + ` bd create --title=x -C ` + b.town, true},
+		{"process BEADS_DB rig, -C town", map[string]string{"BEADS_DB": rigDB}, `bd -C ` + b.town + ` create --title=x`, true},
+		{"process BD_DB rig, -C town", map[string]string{"BD_DB": rigDB}, `bd -C ` + b.town + ` create --title=x`, true},
+		{"inline BEADS_DIR rig, -C town", nil, `BEADS_DIR=` + rigBeads + ` bd -C ` + b.town + ` create --title=x`, true},
+		{"process BEADS_DIR rig, -C town", map[string]string{"BEADS_DIR": rigBeads}, `bd -C ` + b.town + ` create --title=x`, true},
+		{"inline BEADS_DB town, -C rig dir", nil, `BEADS_DB=` + townDB + ` bd -C ` + b.rigDir + ` create --title=x`, false},
+		{"process BEADS_DB town, -C rig dir", map[string]string{"BEADS_DB": townDB}, `bd -C ` + b.rigDir + ` create --title=x`, false},
+		{"inline BEADS_DIR town, -C rig dir", nil, `BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` bd -C ` + b.rigDir + ` create --title=x`, false},
+		{"inline BEADS_DB rig, no -C", nil, `BEADS_DB=` + rigDB + ` bd create --title=x`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload, err := json.Marshal(map[string]any{
+				"tool_name":  "Bash",
+				"cwd":        b.worktree,
+				"tool_input": map[string]string{"command": tt.command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := map[string]string{"GT_ROLE": polecatRole, "HOME": b.home}
+			for k, v := range tt.env {
+				env[k] = v
+			}
+			var stderr strings.Builder
+			err = tapGuardBdCreateStore(strings.NewReader(string(payload)), &stderr, fakeGuardProcess(env, ""))
+			if !tt.blocked {
+				if err != nil || stderr.Len() != 0 {
+					t.Fatalf("want allowed, got err=%v stderr=%q", err, stderr.String())
+				}
+				return
+			}
+			if err == nil || !strings.Contains(stderr.String(), bdCreateStoreRefusal) {
+				t.Fatalf("want blocked, got err=%v stderr=%q", err, stderr.String())
+			}
+		})
+	}
+}
+
 // failingReader is a hook payload the guard cannot read, as a closed stdin is.
 type failingReader struct{}
 

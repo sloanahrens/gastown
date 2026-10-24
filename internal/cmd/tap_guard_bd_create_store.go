@@ -177,7 +177,8 @@ func (g bdCreateStoreGuard) judgeSegment(segment []string, dir string, known boo
 	if !isBdCreateSegment(segment) {
 		return ""
 	}
-	if bdDir, ok := bdDirectoryFlag(segment); ok {
+	bdDir, changesDir := bdDirectoryFlag(segment)
+	if changesDir {
 		// bd changes to the -C directory before resolving its store, so the
 		// store is read from there, not from the shell's directory.
 		path, placed := g.bdCreateBase(dir, known, bdDir, vars)
@@ -215,6 +216,12 @@ func (g bdCreateStoreGuard) judgeSegment(segment []string, dir string, known boo
 			return bdCreateUnplaceable
 		}
 		return g.judgeDB(path)
+	}
+	if changesDir {
+		// -C sets BEADS_DIR to the new directory, and bd looks at BEADS_DIR
+		// before BEADS_DB, so neither an inline or process BEADS_DIR nor a
+		// BEADS_DB/BD_DB can move the store off the -C directory.
+		return g.judgeStore(dir)
 	}
 	// BEADS_DB, then BD_DB, name a database the way --db does, ahead of the
 	// directory. bd reads BEADS_DIR before BEADS_DB in one lookup and after it
