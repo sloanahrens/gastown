@@ -752,13 +752,11 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State, now time.Time) error {
 		d.endUpgradeDrain(now)
 		return nil
 	}
-	// The idle read behind the request raced the landing worker's own
-	// registration: the worker reads the drain at the top of its loop and
-	// only then counts the pass, so a pass can begin after the read saw none
-	// — one merged after the queue was last seen drained as easily as any
-	// other. Shutting down here would kill a gate the restart never waited
-	// for, so drop the request and let the next heartbeat see the pass. The
-	// drain is still on, so this pass is the last one (gt-3cbee).
+	// The idle read can miss a landing pass that is starting: the worker
+	// reads the drain, then counts itself. Shutting down now would kill a
+	// gate the restart never waited for, so drop the request and let the
+	// next heartbeat see the pass. The drain stays on, so that pass is the
+	// last one (gt-3cbee).
 	if d.landingPasses.Load() > 0 {
 		d.upgradeRestartRequested.Store(false)
 		d.logUpgradeWait(landingHoldName(d.landingPassBead()), now)
