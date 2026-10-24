@@ -83,17 +83,16 @@ func (c *StaleRuntimeFilesCheck) Run(ctx *CheckContext) *CheckResult {
 			}
 			name := file.Name()
 			// PID files are named like: sw-crew-max.pid, pir-nux.pid, hq-overseer.pid
-			// Extract the rig prefix (first part before the hyphen or underscore)
-			rigPrefix := extractRigPrefix(name)
-			if rigPrefix == "" || rigPrefix == "hq" || rigPrefix == "gt" {
-				// Town-level agents (hq, gt) are always valid
+			// Match the file name against the known prefixes: rig prefixes may
+			// themselves contain hyphens, so cutting at the first separator would
+			// read my-app-nux.pid as prefix "my" and delete a live file. (gt-a4po7)
+			rigPrefix, known := matchKnownPrefix(name, knownPrefixes)
+			if known || rigPrefix == "" || rigPrefix == "hq" || rigPrefix == "gt" {
+				// Registered rigs and town-level agents (hq, gt) are always valid
 				continue
 			}
-			// Check if this rig is registered (by name or prefix)
-			if !knownPrefixes[rigPrefix] {
-				c.stalePIDFiles = append(c.stalePIDFiles, filepath.Join(pidsDir, name))
-				details = append(details, fmt.Sprintf("Stale PID file for unregistered rig: %s", name))
-			}
+			c.stalePIDFiles = append(c.stalePIDFiles, filepath.Join(pidsDir, name))
+			details = append(details, fmt.Sprintf("Stale PID file for unregistered rig: %s", name))
 		}
 	}
 
@@ -159,6 +158,33 @@ func (c *StaleRuntimeFilesCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 	return nil
+}
+
+// matchKnownPrefix reports the known rig prefix that owns a PID filename.
+// A PID file is named <session-id>.pid, and the session id starts with the rig
+// prefix followed by a hyphen. Prefixes may contain hyphens themselves, so the
+// longest known prefix that matches is the owner — never the text before the
+// first separator. (gt-a4po7)
+//
+// When no known prefix matches, known is false and prefix falls back to
+// extractRigPrefix, which is what the caller reports as stale.
+func matchKnownPrefix(filename string, knownPrefixes map[string]bool) (prefix string, known bool) {
+	name := strings.TrimSuffix(filename, ".pid")
+	for candidate := range knownPrefixes {
+		if candidate == "" {
+			continue
+		}
+		if name != candidate && !strings.HasPrefix(name, candidate+"-") {
+			continue
+		}
+		if len(candidate) > len(prefix) {
+			prefix = candidate
+		}
+	}
+	if prefix != "" {
+		return prefix, true
+	}
+	return extractRigPrefix(filename), false
 }
 
 // extractRigPrefix extracts the rig prefix from a PID filename.
