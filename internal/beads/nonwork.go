@@ -6,15 +6,18 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
-// nonDispatchableTitlePrefixes are the unlabelled families, matched on title
-// because no label distinguishes them. Titles are the weaker signal; a bead
-// that gains a label can leave this list.
+// nonDispatchableTitlePrefixes are the families matched on title because a
+// record can lose the type or label that would otherwise name it. Titles are
+// the weaker signal: a family leaves this list once a type or label names it
+// reliably.
 //
-// A prefix only belongs here when the family has no label or type of its own.
-// HANDOFF and merge-slot do: handoff mail carries gt:message and the merge slot
-// carries gt:merge-slot, so the label check already catches them. A bare title
-// match on those words would hide an ordinary bug that happens to start with
-// the same word, so they are not listed.
+// A prefix only belongs here when the family has no type or label that
+// survives the record. HANDOFF and merge-slot have one: handoff mail carries
+// gt:message and the merge slot carries gt:merge-slot, so the label check
+// already catches them. A bare title match on those words would hide an
+// ordinary bug that happens to start with the same word, so they are not
+// listed. A compaction report is typed event, and stays because an event
+// record that lost its type has only the title.
 //
 // A prefix that only announces a summary of work is deliberately absent. A
 // "main_branch_test: <diagnosis>" bug and a "STATE_COLLAPSE <rig>" notice both
