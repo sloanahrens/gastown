@@ -37,12 +37,11 @@ func TestFilterNonDispatchableBeads_ExcludesMailAndReports(t *testing.T) {
 	}
 }
 
-// TestFilterNonDispatchableBeads_KeepsAContainer guards the other direction: a
-// family-level filter must not quietly become a priority or container filter.
-// Epics and unstarted low-priority work are still rows someone can read, and
-// dropping them here would change the shape of the board rather than what it
-// counts as work.
-func TestFilterNonDispatchableBeads_KeepsAContainer(t *testing.T) {
+// TestFilterNonDispatchableBeads_KeepsLowPriorityWork guards the other
+// direction: the family filter must not quietly become a priority filter.
+// Unstarted low-priority work is still a row someone can take. An epic is not
+// (gt-36lax): it is a container, and the shared predicate names it as such.
+func TestFilterNonDispatchableBeads_KeepsLowPriorityWork(t *testing.T) {
 	t.Parallel()
 
 	issues := []*beads.Issue{
@@ -52,7 +51,7 @@ func TestFilterNonDispatchableBeads_KeepsAContainer(t *testing.T) {
 
 	filtered := filterNonDispatchableBeads(issues)
 
-	if got, want := issueIDs(filtered), []string{"gt-epic", "gt-low"}; !reflect.DeepEqual(got, want) {
+	if got, want := issueIDs(filtered), []string{"gt-low"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("filtered IDs = %v, want %v", got, want)
 	}
 }

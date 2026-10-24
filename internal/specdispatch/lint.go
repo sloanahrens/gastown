@@ -30,11 +30,12 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // EpicType is the bead type of a container of work, never a unit of it.
-const EpicType = "epic"
+const EpicType = constants.EpicBeadType
 
 // Labels and types the lint and the dispatcher key on.
 const (
@@ -75,30 +76,16 @@ func NonWorkBeadTypes() []string {
 	return append([]string{EpicType}, constants.NonDispatchableBeadTypes...)
 }
 
-// NotWorkBead names why a bead is not a work bead the lint may check: its type
-// is an epic or a runtime family, it wears a runtime family label (gt:agent,
-// gt:wisp, ...), or it is ephemeral, which is what a wisp is. Empty means the
-// bead is a work bead. The reason names what the bead is ("type epic",
-// "label gt:agent", "wisp").
+// NotWorkBead names why a bead is not a work bead the lint may check. The
+// verdict is beads.NonDispatchableReason's, so the spec dispatcher and the
+// ready board share one answer. Empty means the bead is a work bead.
 func NotWorkBead(s Spec) string {
-	t := strings.ToLower(strings.TrimSpace(s.Type))
-	if t == EpicType {
-		return "type " + EpicType
-	}
-	for _, nt := range constants.NonDispatchableBeadTypes {
-		if t == nt {
-			return "type " + nt
-		}
-	}
-	for _, l := range constants.NonDispatchableBeadLabels {
-		if s.HasLabel(l) {
-			return "label " + l
-		}
-	}
-	if s.Ephemeral {
-		return "wisp"
-	}
-	return ""
+	return beads.NonDispatchableReason(&beads.Issue{
+		Type:      s.Type,
+		Title:     s.Title,
+		Labels:    s.Labels,
+		Ephemeral: s.Ephemeral,
+	})
 }
 
 // DefaultSections are the template's required sections, used when the

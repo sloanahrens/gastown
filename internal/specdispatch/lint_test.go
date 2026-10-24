@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 const goodDescription = `## Goal
@@ -201,6 +203,41 @@ func TestNotWorkBead(t *testing.T) {
 	types[0] = "task"
 	if got := NotWorkBead(Spec{Type: EpicType}); got != "type epic" {
 		t.Errorf("NonWorkBeadTypes aliases the shared list: %q", got)
+	}
+}
+
+// TestNotWorkBeadAgreesWithBoard holds the spec dispatcher and the ready board
+// to one answer: the same bead, read once as a beads.Issue and once as a Spec,
+// gets the same verdict and the same reason.
+func TestNotWorkBeadAgreesWithBoard(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		issue beads.Issue
+	}{
+		{"plain task", beads.Issue{Title: "fix the flaky test", Type: "task"}},
+		{"epic", beads.Issue{Title: "de-flake the suite", Type: "epic"}},
+		{"unlabelled task titled HANDOFF", beads.Issue{Title: "HANDOFF: x", Type: "task"}},
+		{"compaction report without a type", beads.Issue{Title: "Compaction Report gt-9", Type: "task"}},
+		{"ephemeral wisp", beads.Issue{Title: "mol-polecat-work step", Type: "task", Ephemeral: true}},
+		{"agent label", beads.Issue{Title: "polecat goose", Type: "task", Labels: []string{"gt:agent"}}},
+		{"bug filed against the harness", beads.Issue{Title: "main_branch_test: gastown killed", Type: "bug"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := Spec{
+				Title:     tc.issue.Title,
+				Type:      tc.issue.Type,
+				Labels:    tc.issue.Labels,
+				Ephemeral: tc.issue.Ephemeral,
+			}
+			issue := tc.issue
+			board := beads.NonDispatchableReason(&issue)
+			if got := NotWorkBead(spec); got != board {
+				t.Errorf("NotWorkBead = %q, board reason = %q: the dispatcher and the board disagree", got, board)
+			}
+		})
 	}
 }
 

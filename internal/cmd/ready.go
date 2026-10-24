@@ -628,7 +628,8 @@ func readyIssueRoutesToSource(townRoot, source, issueID string) bool {
 
 // filterNonDispatchableBeads removes the bead families that record town
 // runtime rather than work: mail, escalations, identity, merge requests and
-// slots, queues, and the deacon's event records (gt-b9wq).
+// slots, queues, and the deacon's event records (gt-b9wq), and epics, which
+// are containers whose children are the work (gt-36lax).
 //
 // A ready row is a dispatch candidate, not a status: every ID this list emits
 // is one a caller may sling, so a row that no polecat can take is a row that

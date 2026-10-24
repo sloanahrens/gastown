@@ -25,36 +25,50 @@ var nonDispatchableTitlePrefixes = []string{
 	"Compaction Report ",
 }
 
-// IsNonDispatchableBead reports whether issue belongs to a family that records
-// town runtime rather than work someone can take.
-//
-// It judges family alone: priority is the caller's call, and so is any
-// container the caller wants to keep. A convoy is named as a family and an epic
-// is not, so an epic survives this predicate and the caller excludes it if the
-// container itself is not what an agent works.
+// IsNonDispatchableBead reports whether issue is work a polecat cannot take.
+// It is NonDispatchableReason with the reason dropped.
 func IsNonDispatchableBead(issue *Issue) bool {
+	return NonDispatchableReason(issue) != ""
+}
+
+// NonDispatchableReason names why issue is not work a polecat can take, in the
+// words a log or a board row shows ("type epic", "label gt:agent", "wisp",
+// "title Compaction Report"). It returns "" for work. The spec dispatcher's
+// NotWorkBead delegates here, so the board and the dispatcher cannot disagree
+// about what work is.
+//
+// An epic is a container, so it is not work a polecat takes; its children are.
+// A runtime family is named by type, by label, or, for a wisp, by ephemerality.
+func NonDispatchableReason(issue *Issue) string {
 	if issue == nil {
-		return false
+		return ""
 	}
 
+	t := strings.ToLower(strings.TrimSpace(issue.Type))
+	if t == constants.EpicBeadType {
+		return "type " + constants.EpicBeadType
+	}
 	for _, skip := range constants.NonDispatchableBeadTypes {
-		if strings.EqualFold(strings.TrimSpace(issue.Type), skip) {
-			return true
+		if t == skip {
+			return "type " + skip
 		}
 	}
 	for _, label := range issue.Labels {
 		for _, skip := range constants.NonDispatchableBeadLabels {
 			if strings.EqualFold(strings.TrimSpace(label), skip) {
-				return true
+				return "label " + skip
 			}
 		}
+	}
+	if issue.Ephemeral {
+		return "wisp"
 	}
 
 	title := strings.TrimSpace(issue.Title)
 	for _, prefix := range nonDispatchableTitlePrefixes {
 		if strings.HasPrefix(title, prefix) {
-			return true
+			return "title " + strings.TrimSpace(prefix)
 		}
 	}
-	return false
+	return ""
 }

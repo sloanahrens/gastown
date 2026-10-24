@@ -163,11 +163,16 @@ func TestIsNonDispatchableBead(t *testing.T) {
 			want:  false,
 		},
 		{
-			// Epics and their containers are a priority judgement, not a family
-			// one: the caller decides whether a container is dispatchable.
+			// An epic is a container: the polecat takes its children, so the
+			// epic itself is not dispatchable work (gt-36lax).
 			name:  "epic",
 			issue: &Issue{ID: "gt-14", Title: "de-flake the suite", Type: "epic", Priority: 1},
-			want:  false,
+			want:  true,
+		},
+		{
+			name:  "ephemeral wisp without a type",
+			issue: &Issue{ID: "gt-16", Title: "mol-polecat-work step", Type: "task", Ephemeral: true},
+			want:  true,
 		},
 	}
 
