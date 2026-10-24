@@ -187,11 +187,11 @@ func normalizeReplySubject(subject string) string {
 	return strings.ToLower(s)
 }
 
-// normalizeAddress lowercases an address and trims a trailing slash so that
-// "Gastown/Toast/" and "gastown/toast" compare equal. Matches identityVariants
-// behavior in mail.Mailbox without depending on its internals.
+// normalizeAddress lowercases an address and reduces it to the mail package's
+// canonical identity, so "Gastown/Toast/" and "gastown/toast" compare equal and
+// "gastown/crew/max" matches the "gastown/max" that Message.From is stored as.
 func normalizeAddress(addr string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(addr)), "/")
+	return mail.AddressToIdentity(strings.ToLower(strings.TrimSpace(addr)))
 }
 
 // inferReplyTo searches the sender's mailbox for a single unambiguous message
