@@ -1,0 +1,14 @@
+#!/bin/sh
+# Stand-in for the mango CLI in town_metrics tests: records argv, writes canned outputs. Never touches anything else.
+echo "$@" >> "$FAKE_MANGO_LOG"
+prev=""; out=""
+for a in "$@"; do
+  if [ "$prev" = "--out" ]; then out="$a"; fi
+  prev="$a"
+done
+case "$1" in
+  ingest) : > "$out" ;;
+  explore) cp "$FAKE_MANGO_RESULT" "$out"; echo "wrote 0 hypercubes to $out" >&2 ;;
+  report) echo "# fake report" ;;
+  profile) echo "profile of $2" ;;
+esac
