@@ -641,9 +641,9 @@ func readyIssueRoutesToSource(townRoot, source, issueID string) bool {
 // fetch through Beads.ReadyDispatchable(), which asks bd to exclude the same
 // label/type families server-side before it ever builds the response, so
 // this loop does not depend on labels surviving into what the caller
-// received. It still matters on its own — the title-prefix families
-// (Compaction Report, HANDOFF, the merge-slot title) have no label at all,
-// so bd's --exclude-label/--exclude-type cannot catch them.
+// received. It still matters on its own: the Compaction Report title family
+// has no label of its own, and an event record can lose its event type, so
+// bd's --exclude-label/--exclude-type cannot catch it.
 func filterNonDispatchableBeads(issues []*beads.Issue) []*beads.Issue {
 	filtered := make([]*beads.Issue, 0, len(issues))
 	for _, issue := range issues {
