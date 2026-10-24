@@ -1105,6 +1105,21 @@ func TestSegmentCommandWord(t *testing.T) {
 	if word, _ := segmentCommandWord([]string{"FOO=bar"}); word != "" {
 		t.Errorf("an assignment-only segment should have no command word, got %q", word)
 	}
+	// A leading subshell paren and an assignment whose value holds a
+	// substitution (split across tokens by shlex) both lead to the real command.
+	for _, tt := range []struct {
+		name    string
+		segment []string
+		want    string
+	}{
+		{"subshell paren", []string{"(", "bash", "<<EOF"}, "bash"},
+		{"assignment with a substitution", []string{"y=$(echo", "a)", "bash", "-s"}, "bash"},
+		{"assignment with a nested substitution", []string{"y=$(echo", "$(date))", "bash"}, "bash"},
+	} {
+		if word, _ := segmentCommandWord(tt.segment); word != tt.want {
+			t.Errorf("%s: command word = %q, want %q", tt.name, word, tt.want)
+		}
+	}
 }
 
 func TestCdDestination(t *testing.T) {

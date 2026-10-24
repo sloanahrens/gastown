@@ -1783,6 +1783,11 @@ func TestShellFedHeredocBodyIsInspected(t *testing.T) {
 		{"shell-fed body after a nested substitution in the command text", "x=$(echo $(echo a); bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n)"},
 		{"shell-fed body after a quoted parenthesis in the command text", "x=$(echo \")\"; bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n)"},
 		{"shell-fed body after a subshell inside an unquoted substitution", "x=$( (true); bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n)"},
+		// A leading subshell paren puts the shell at the start of the command.
+		{"shell-fed body behind a subshell paren", "(bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n)"},
+		// An assignment whose value holds a substitution runs that substitution
+		// first, and the shell that follows it still reads the body.
+		{"shell-fed body behind an assignment with a substitution", "y=$(echo a) bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1805,6 +1810,8 @@ func TestHeredocBodyStaysOpaqueWithoutAShellReader(t *testing.T) {
 		{"interpreter that is not a shell", "python3 - <<'EOF'\nsudo rm -rf /\nEOF"},
 		{"shell name as an argument", "echo bash <<'EOF'\ngit reset --hard\nEOF"},
 		{"non-shell reader inside an unquoted substitution", "x=$(cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n)"},
+		{"non-shell reader behind a subshell paren", "(cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n)"},
+		{"non-shell reader behind an assignment with a substitution", "y=$(echo a) cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n"},
 		// The continued line is a redirect, not a shell, so the body stays data.
 		{"non-shell reader continued onto a second line", "cat <<'EOF' \\\n> note.txt\nsudo rm -rf /tmp\nEOF"},
 		{"heredoc after a closed substitution is not in its command text", "x=$(echo bash)\ncat <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
