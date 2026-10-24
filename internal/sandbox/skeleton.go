@@ -199,10 +199,9 @@ func scrubValue(key string, v any, underSecret bool) any {
 
 // credentialName reports whether a settings key names a credential, however it
 // separates its words: api_token, APIKey, db.password, private-key, apikey.
+// Every marker config.IsSecretKey matches is a credential word here too; the
+// parity test in skeleton_test.go holds that, without substring matches.
 func credentialName(key string) bool {
-	if config.IsSecretKey(key) {
-		return true
-	}
 	words := keyWords(key)
 	for _, w := range words {
 		if credentialKeyWords[w] {

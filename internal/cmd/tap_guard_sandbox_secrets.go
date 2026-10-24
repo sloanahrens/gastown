@@ -108,7 +108,7 @@ var (
 )
 
 // sandboxSecretsNameWords are the words, between underscores, that make a variable name
-// secret-like beyond config.IsSecretKey: CACHE_KEY, DB_PASSWD, GH_CREDENTIALS. Whole words
+// secret-like beyond config.IsSecretKey: CACHE_KEY, GH_CREDENTIALS. Whole words
 // only, so GIT_AUTHOR_NAME and MONKEY are not secrets.
 var sandboxSecretsNameWords = map[string]bool{
 	"KEY": true, "PASSWD": true, "CRED": true, "CREDS": true, "CREDENTIAL": true, "CREDENTIALS": true,

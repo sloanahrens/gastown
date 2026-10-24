@@ -114,9 +114,9 @@ var secretValuePrefixes = []string{
 	"xoxb-", "xoxp-", "xapp-", "AKIA", "AIza", "ya29.",
 }
 
-// temporaryKeyIDShape is an AWS temporary access key ID. The bare ASIA prefix is
-// not enough: it also starts region names such as ASIA-PACIFIC-EAST-1.
-var temporaryKeyIDShape = regexp.MustCompile(`^ASIA[0-9A-Z]{16}$`)
+// temporaryKeyIDShape is an AWS temporary access key ID: ASIA and then only upper-case
+// letters and digits. The dashes in region names such as ASIA-PACIFIC-EAST-1 keep them out.
+var temporaryKeyIDShape = regexp.MustCompile(`^ASIA[0-9A-Z]+$`)
 
 // secretKeyMarkers mark an env key whose value is a credential.
 var secretKeyMarkers = []string{
@@ -155,7 +155,8 @@ func LooksLikeSecret(key, value string) bool {
 }
 
 // IsSecretKey reports whether an env key names a credential by containing one of secretKeyMarkers.
-// The sandbox skeleton checks this first, so a key config redacts is redacted there as well.
+// The sandbox skeleton's credentialName must flag every key this matches; the parity test in
+// sandbox/skeleton_test.go checks each marker.
 func IsSecretKey(key string) bool {
 	k := strings.ToUpper(key)
 	for _, m := range secretKeyMarkers {

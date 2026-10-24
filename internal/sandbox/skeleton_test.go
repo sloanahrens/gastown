@@ -628,6 +628,7 @@ func TestCredentialName(t *testing.T) {
 		"merge_queue", "remote_url", "landing_branch", "agent", "command",
 		"forgejo", "bots", "registry", "backend", "session_backend", "host",
 		"dolt_server_host", "dolt_database", "dolt_server_port", "issue_prefix",
+		"SECRETARY_NAME", "TOKENIZER_MODE",
 	}
 	for _, key := range plain {
 		if credentialName(key) {
