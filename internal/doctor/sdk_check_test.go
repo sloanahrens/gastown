@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // malformedStub is the head of MacOSX27.0.sdk's usr/lib/libresolv.tbd, the stub
@@ -108,6 +110,69 @@ func TestMacOSSDKCheck_WellFormedStubsAreOK(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), "SDKROOT") {
 		t.Errorf("Details = %v, want the resolution source", result.Details)
+	}
+}
+
+// TestMacOSSDKCheck_HonorsDaemonEnvSDKROOT pins the remedy sdkFixHint names:
+// an SDKROOT set in settings/daemon.env. The check runs in the operator's
+// shell, which never loads that file, so it must read the pin itself. A broken
+// xcrun on PATH proves the answer did not come from the fallback. Not parallel:
+// t.Setenv replaces the process environment.
+func TestMacOSSDKCheck_HonorsDaemonEnvSDKROOT(t *testing.T) {
+	t.Setenv("SDKROOT", "")
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "xcrun"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("writing broken xcrun: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	town := t.TempDir()
+	sdk := t.TempDir()
+	writeSDK(t, sdk, map[string]string{"libresolv.tbd": wellFormedStub})
+	if err := os.MkdirAll(filepath.Dir(config.DaemonEnvPath(town)), 0o755); err != nil {
+		t.Fatalf("creating settings dir: %v", err)
+	}
+	if err := os.WriteFile(config.DaemonEnvPath(town), []byte("SDKROOT="+sdk+"\n"), 0o644); err != nil {
+		t.Fatalf("writing daemon.env: %v", err)
+	}
+	check := NewMacOSSDKCheck()
+	check.goos = "darwin"
+
+	result := check.Run(&CheckContext{TownRoot: town})
+
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %v, want StatusOK for the SDK pinned in daemon.env; message %q, details %v",
+			result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "settings/daemon.env") {
+		t.Errorf("Details = %v, want the resolution source daemon.env", result.Details)
+	}
+}
+
+// TestMacOSSDKCheck_ProcessSDKROOTWinsOverDaemonEnv pins precedence: an SDKROOT
+// in the process environment beats the one in daemon.env, as the daemon's
+// own environment does.
+func TestMacOSSDKCheck_ProcessSDKROOTWinsOverDaemonEnv(t *testing.T) {
+	good := t.TempDir()
+	writeSDK(t, good, map[string]string{"libresolv.tbd": wellFormedStub})
+	bad := t.TempDir()
+	writeSDK(t, bad, map[string]string{"libresolv.tbd": malformedStub})
+	t.Setenv("SDKROOT", good)
+
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(config.DaemonEnvPath(town)), 0o755); err != nil {
+		t.Fatalf("creating settings dir: %v", err)
+	}
+	if err := os.WriteFile(config.DaemonEnvPath(town), []byte("SDKROOT="+bad+"\n"), 0o644); err != nil {
+		t.Fatalf("writing daemon.env: %v", err)
+	}
+	check := NewMacOSSDKCheck()
+	check.goos = "darwin"
+
+	result := check.Run(&CheckContext{TownRoot: town})
+
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %v, want StatusOK from the process SDKROOT; message %q", result.Status, result.Message)
 	}
 }
 

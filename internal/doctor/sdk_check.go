@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // MacOSSDKCheck verifies that the SDK a cgo build links against declares only
@@ -22,7 +24,8 @@ type MacOSSDKCheck struct {
 	// the real runtime.GOOS, on the Linux CI runner every one of them hit
 	// the not-applicable branch and failed (gt-22hdp.39).
 	goos string
-	// resolve reports the SDK a build links against; nil is resolveSDK.
+	// resolve reports the SDK a build links against; nil is resolveSDK for the
+	// check's town.
 	resolve func() (path, source string, err error)
 }
 
@@ -38,12 +41,22 @@ func NewMacOSSDKCheck() *MacOSSDKCheck {
 }
 
 // resolveSDK reports the SDK a build will link against and where it came from.
-// SDKROOT wins because the daemon passes it through to every polecat
-// build (config.DaemonEnvPath); xcrun is the fallback for a shell that
-// sets nothing.
-func resolveSDK() (path, source string, err error) {
+// SDKROOT wins because the daemon passes it through to every polecat build.
+// The process environment is read first, then the SDKROOT pinned in the town's
+// settings/daemon.env (config.DaemonEnvPath), which is what the daemon exports
+// into the builds it starts; xcrun is the fallback for a shell that sets nothing.
+func resolveSDK(townRoot string) (path, source string, err error) {
 	if root := strings.TrimSpace(os.Getenv("SDKROOT")); root != "" {
 		return root, "SDKROOT", nil
+	}
+	if townRoot != "" {
+		daemonEnv, loadErr := config.LoadDaemonEnv(townRoot)
+		if loadErr != nil {
+			return "", "", loadErr
+		}
+		if root := strings.TrimSpace(daemonEnv["SDKROOT"]); root != "" {
+			return root, "settings/daemon.env", nil
+		}
 	}
 	out, err := exec.Command("xcrun", "--show-sdk-path").Output() //nolint:gosec // G204: fixed args, no user input
 	if err != nil {
@@ -192,13 +205,17 @@ const maxReportedStubs = 5
 const sdkFixHint = "Point SDKROOT at a well-formed SDK in settings/daemon.env (see Reference, Daemon Environment), or reinstall Command Line Tools"
 
 // Run reports whether the SDK a cgo build links against is well-formed.
-func (c *MacOSSDKCheck) Run(_ *CheckContext) *CheckResult {
+func (c *MacOSSDKCheck) Run(ctx *CheckContext) *CheckResult {
 	goos, resolve := c.goos, c.resolve
 	if goos == "" {
 		goos = runtime.GOOS
 	}
 	if resolve == nil {
-		resolve = resolveSDK
+		townRoot := ""
+		if ctx != nil {
+			townRoot = ctx.TownRoot
+		}
+		resolve = func() (string, string, error) { return resolveSDK(townRoot) }
 	}
 	if goos != "darwin" {
 		return &CheckResult{
