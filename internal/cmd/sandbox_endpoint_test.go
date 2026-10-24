@@ -67,6 +67,7 @@ func writePolicyRoot(t *testing.T, policies map[string]string) string {
 }
 
 func TestForgejoEndpointForGateway(t *testing.T) {
+	t.Parallel()
 	dockerProfile := config.SandboxProfile{Image: "gastown-polecat:dev", Policy: "docker.yaml"}
 	k8sProfile := config.SandboxProfile{
 		Image:            "gastown-polecat:dev",
@@ -181,6 +182,7 @@ func TestForgejoEndpointForGateway(t *testing.T) {
 // this reads them: a change to either file that moves the Forgejo endpoint
 // shows up here, not as a 403 on the next sandbox clone.
 func TestForgejoEndpointFromShippedPolicies(t *testing.T) {
+	t.Parallel()
 	ts := &config.TownSettings{Sandboxes: map[string]config.SandboxProfile{
 		"polecat-default": {Image: "i", Policy: "deploy/polecat/policy.yaml"},
 		"polecat-k8s": {
@@ -215,6 +217,7 @@ func TestForgejoEndpointFromShippedPolicies(t *testing.T) {
 }
 
 func TestPrintSandboxEndpoint(t *testing.T) {
+	t.Parallel()
 	ep := sandboxEndpoint{
 		Host:       "control-plane.openshell.svc.cluster.local",
 		Port:       3000,
@@ -252,6 +255,7 @@ func TestPrintSandboxEndpoint(t *testing.T) {
 const shippedForgejoProfile = "../../deploy/polecat/profiles/forgejo-polecat.yaml"
 
 func TestRenderForgejoProfile(t *testing.T) {
+	t.Parallel()
 	src, err := os.ReadFile(shippedForgejoProfile)
 	if err != nil {
 		t.Fatalf("reading the shipped profile: %v", err)
