@@ -39,6 +39,10 @@ bash -n scripts/openshell-providers.sh
 bash scripts/openshell-providers_test.sh
 bash -n deploy/gke-probe/probe.sh
 bash deploy/gke-probe/probe_test.sh
+bash -n deploy/k8s/kind/common.sh
+bash -n deploy/k8s/kind/up.sh
+bash -n deploy/k8s/kind/down.sh
+bash deploy/k8s/kind/kind_test.sh
 bash -n scripts/repo-guards.sh
 bash scripts/repo-guards_test.sh
 bash -n scripts/test-makefile.sh

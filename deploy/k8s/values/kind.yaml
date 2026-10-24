@@ -1,0 +1,6 @@
+# OpenShell Helm values for the local kind environment (chart 0.1.4).
+# Local trusted development only: the gateway accepts unauthenticated users
+# behind mTLS on a loopback port. GKE gets its own values file with real auth.
+server:
+  auth:
+    allowUnauthenticatedUsers: true

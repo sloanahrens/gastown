@@ -1,0 +1,17 @@
+# The chart's Service cannot pin a NodePort, so this one does. kind maps
+# hostPort GATEWAY_PORT on the Mac to nodePort 30443 on the node (see up.sh).
+apiVersion: v1
+kind: Service
+metadata:
+  name: openshell-nodeport
+  namespace: openshell
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: openshell
+    app.kubernetes.io/instance: openshell
+  ports:
+  - name: grpc
+    port: 8080
+    targetPort: 8080
+    nodePort: 30443
