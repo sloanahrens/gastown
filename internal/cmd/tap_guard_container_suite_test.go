@@ -35,6 +35,16 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"switch via env(1)", "env GT_TEST_DOCKER=1 go test ./internal/beads/...", true},
 		{"switch quoted", `GT_TEST_DOCKER="1" go test ./internal/beads/...`, true},
 
+		// A redirection ahead of the command is setup the shell performs
+		// before it runs the command, so the test run behind it is judged as
+		// the plain line is (gt-spmli).
+		{"go test behind a leading redirection", "GT_TEST_DOCKER=1 2>/dev/null go test ./internal/beads/...", true},
+		{"go test with a redirection ahead of the opt-in", "2>/dev/null GT_TEST_DOCKER=1 go test ./internal/beads/...", true},
+		{"make test behind a leading redirection", "2>/dev/null make test", true},
+		{"go test non-container package behind a leading redirection", "2>/dev/null go test ./internal/style/...", false},
+		{"go test container package behind a leading redirection, switch off", "2>/dev/null go test ./internal/beads/...", false},
+		{"go test wrapped in gt slot run behind a leading redirection", "GT_TEST_DOCKER=1 2>/dev/null gt slot run --role gastown/refinery -- go test ./internal/beads/...", false},
+
 		// Blocked: go's global -C dir flag may sit between the binary and the
 		// subcommand, in either spelling, and the invocation must be read
 		// through it — the same walk gt-t7p80/gt-soohm added for go clean
