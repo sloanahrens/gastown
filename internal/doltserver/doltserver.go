@@ -2679,10 +2679,11 @@ func databaseDirState(dataDir, name string) (dbDirKind, error) {
 // named name: the rule listDatabasesLocal applies to every entry, so a phantom
 // directory named after the database does not count. A directory it cannot
 // stat counts as holding the database, because an unreadable path is not
-// evidence of absence.
+// evidence of absence; the warning keeps that verdict from being silent.
 func DataDirHasDatabase(dataDir, name string) bool {
 	kind, err := databaseDirState(dataDir, name)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot read database %q in %s: %v\n", name, dataDir, err)
 		return true
 	}
 	return kind == dbDirValid
@@ -2705,7 +2706,11 @@ func listDatabasesLocal(config *Config) ([]string, error) {
 		}
 		kind, err := databaseDirState(config.DataDir, entry.Name())
 		if err != nil {
-			return nil, err
+			// Unreadable is not absent: keep the entry so one bad directory
+			// does not fail the scan or hide the databases beside it.
+			fmt.Fprintf(os.Stderr, "Warning: cannot read database %q: %v\n", entry.Name(), err)
+			databases = append(databases, entry.Name())
+			continue
 		}
 		switch kind {
 		case dbDirAbsent:

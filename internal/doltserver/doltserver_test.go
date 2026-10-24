@@ -6184,9 +6184,44 @@ func TestDatabaseDirStateSurfacesStatErrors(t *testing.T) {
 			t.Errorf("DataDirHasDatabase(%q) = false, want true for an unreadable path", name)
 		}
 	}
+}
 
-	// One unreadable entry fails the listing instead of being dropped silently.
-	if _, err := listDatabasesLocal(&Config{DataDir: dataDir}); err == nil {
-		t.Error("listDatabasesLocal error = nil, want the unreadable entry reported")
+// TestListDatabasesLocalKeepsUnreadableEntries pins that an entry which cannot
+// be stat'ed neither fails the scan nor drops the databases beside it, and is
+// kept rather than filed as absent. A .dolt symlink to itself makes stat fail
+// with ELOOP, which holds for root too, so no permission bits are touched.
+func TestListDatabasesLocalKeepsUnreadableEntries(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	manifestDir := filepath.Join(dataDir, "good", ".dolt", "noms")
+	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestDir, "manifest"), []byte("m"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// stat(loopy/.dolt) follows the link back to itself and fails with ELOOP.
+	loopy := filepath.Join(dataDir, "loopy")
+	if err := os.MkdirAll(loopy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(".dolt", filepath.Join(loopy, ".dolt")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := databaseDirState(dataDir, "loopy"); err == nil {
+		t.Fatal("databaseDirState(loopy) error = nil, want ELOOP surfaced")
+	}
+	if !DataDirHasDatabase(dataDir, "loopy") {
+		t.Error("DataDirHasDatabase(loopy) = false, want true for an unreadable path")
+	}
+
+	got, err := listDatabasesLocal(&Config{DataDir: dataDir})
+	if err != nil {
+		t.Fatalf("listDatabasesLocal error = %v, want the scan to succeed", err)
+	}
+	// os.ReadDir returns entries in filename order.
+	if want := []string{"good", "loopy"}; !slices.Equal(got, want) {
+		t.Errorf("listDatabasesLocal = %v, want %v", got, want)
 	}
 }
