@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,66 +10,96 @@ import (
 	"github.com/steveyegge/gastown/internal/hooks"
 )
 
-// TestStripInterimHook pins the removal rule: only a Hook whose Command
+// TestStripInterimHook pins the removal rule: only a hook whose command
 // references interimHookMarker is dropped; every other hook on the same
 // matcher, and every matcher that never carried the interim hook, is left
 // untouched.
 func TestStripInterimHook(t *testing.T) {
 	t.Parallel()
 
-	interim := hooks.Hook{Type: "command", Command: "/Users/sloan/.claude/hooks/no-root-scan.sh"}
-	dangerous := hooks.Hook{Type: "command", Command: "/Users/sloan/.local/bin/gt tap guard dangerous-command"}
-	prWorkflow := hooks.Hook{Type: "command", Command: "/Users/sloan/.local/bin/gt tap guard pr-workflow", If: "Bash(gh pr create*)"}
+	const (
+		interim    = `{"type": "command", "command": "/Users/sloan/.claude/hooks/no-root-scan.sh"}`
+		dangerous  = `{"type": "command", "command": "/Users/sloan/.local/bin/gt tap guard dangerous-command"}`
+		prWorkflow = `{"type": "command", "command": "/Users/sloan/.local/bin/gt tap guard pr-workflow", "if": "Bash(gh pr create*)"}`
+	)
+	entry := func(matcher string, hookJSON ...string) json.RawMessage {
+		return json.RawMessage(`{"matcher": "` + matcher + `", "hooks": [` + strings.Join(hookJSON, ",") + `]}`)
+	}
+	commands := func(t *testing.T, e json.RawMessage) []string {
+		t.Helper()
+		var parsed struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		}
+		if err := json.Unmarshal(e, &parsed); err != nil {
+			t.Fatalf("unmarshal entry %s: %v", e, err)
+		}
+		var cmds []string
+		for _, h := range parsed.Hooks {
+			cmds = append(cmds, h.Command)
+		}
+		return cmds
+	}
 
 	t.Run("removes the interim hook alongside others on the same matcher", func(t *testing.T) {
-		entries := []hooks.HookEntry{
-			{Matcher: "Bash", Hooks: []hooks.Hook{prWorkflow, interim, dangerous}},
-		}
-		result, removed := stripInterimHook(entries)
+		result, removed := stripInterimHook([]json.RawMessage{entry("Bash", prWorkflow, interim, dangerous)})
 		if !removed {
 			t.Fatalf("stripInterimHook() removed=false, want true")
 		}
-		if len(result) != 1 || len(result[0].Hooks) != 2 {
-			t.Fatalf("stripInterimHook() = %+v, want one entry with 2 hooks", result)
+		if len(result) != 1 {
+			t.Fatalf("stripInterimHook() = %s, want one entry", result)
 		}
-		for _, h := range result[0].Hooks {
-			if h.Command == interim.Command {
-				t.Fatalf("interim hook still present: %+v", result)
+		cmds := commands(t, result[0])
+		if len(cmds) != 2 {
+			t.Fatalf("surviving commands = %v, want 2", cmds)
+		}
+		for _, c := range cmds {
+			if strings.Contains(c, interimHookMarker) {
+				t.Fatalf("interim hook still present: %v", cmds)
 			}
+		}
+		if !strings.Contains(string(result[0]), `"if":"Bash(gh pr create*)"`) {
+			t.Errorf("surviving hook lost its if key: %s", result[0])
 		}
 	})
 
 	t.Run("drops the whole entry when the interim hook was its only hook", func(t *testing.T) {
-		entries := []hooks.HookEntry{
-			{Matcher: "Bash", Hooks: []hooks.Hook{interim}},
-			{Matcher: "Edit|Write", Hooks: []hooks.Hook{dangerous}},
-		}
-		result, removed := stripInterimHook(entries)
+		result, removed := stripInterimHook([]json.RawMessage{
+			entry("Bash", interim),
+			entry("Edit|Write", dangerous),
+		})
 		if !removed {
 			t.Fatalf("stripInterimHook() removed=false, want true")
 		}
-		if len(result) != 1 || result[0].Matcher != "Edit|Write" {
-			t.Fatalf("stripInterimHook() = %+v, want only the Edit|Write entry left", result)
+		if len(result) != 1 || !strings.Contains(string(result[0]), "Edit|Write") {
+			t.Fatalf("stripInterimHook() = %s, want only the Edit|Write entry left", result)
 		}
 	})
 
 	t.Run("no-op when nothing references the interim hook", func(t *testing.T) {
-		entries := []hooks.HookEntry{
-			{Matcher: "Bash", Hooks: []hooks.Hook{prWorkflow, dangerous}},
-		}
-		result, removed := stripInterimHook(entries)
+		in := []json.RawMessage{entry("Bash", prWorkflow, dangerous)}
+		result, removed := stripInterimHook(in)
 		if removed {
 			t.Fatalf("stripInterimHook() removed=true, want false")
 		}
-		if len(result) != 1 || len(result[0].Hooks) != 2 {
-			t.Fatalf("stripInterimHook() = %+v, want the entry unchanged", result)
+		if len(result) != 1 || string(result[0]) != string(in[0]) {
+			t.Fatalf("stripInterimHook() = %s, want the entry byte-identical", result)
+		}
+	})
+
+	t.Run("keeps an entry with no hooks array untouched", func(t *testing.T) {
+		bare := json.RawMessage(`{"matcher": "Bash"}`)
+		result, removed := stripInterimHook([]json.RawMessage{bare})
+		if removed || len(result) != 1 || string(result[0]) != string(bare) {
+			t.Fatalf("stripInterimHook(bare) = (%s, %v), want the entry untouched", result, removed)
 		}
 	})
 
 	t.Run("no-op on empty input", func(t *testing.T) {
 		result, removed := stripInterimHook(nil)
 		if removed || len(result) != 0 {
-			t.Fatalf("stripInterimHook(nil) = (%+v, %v), want (nil, false)", result, removed)
+			t.Fatalf("stripInterimHook(nil) = (%s, %v), want (nil, false)", result, removed)
 		}
 	})
 }
@@ -143,6 +174,66 @@ func TestReconcileTarget(t *testing.T) {
 		}
 	})
 
+	// The typed hooks.HooksConfig has no Notification field and hooks.Hook has
+	// no timeout, so a typed round-trip dropped both whenever reconcile removed
+	// the interim hook from a file that carried them (gt-wqvxe).
+	t.Run("keeps hook events and hook keys the typed config lacks", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		const rich = `{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {"type": "command", "command": "/Users/sloan/.local/bin/gt tap guard dangerous-command", "timeout": 30},
+          {"type": "command", "command": "/Users/sloan/.claude/hooks/no-root-scan.sh"}
+        ]
+      }
+    ],
+    "Notification": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "/Users/sloan/.local/bin/notify"}]}
+    ]
+  }
+}`
+		path := writeSettings(t, dir, rich)
+		target := hooks.Target{Path: path, Key: "test/target"}
+
+		changed, err := reconcileTarget(target, false)
+		if err != nil {
+			t.Fatalf("reconcileTarget: %v", err)
+		}
+		if !changed {
+			t.Fatalf("reconcileTarget() changed=false, want true")
+		}
+
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		var got struct {
+			Hooks map[string][]struct {
+				Hooks []map[string]any `json:"hooks"`
+			} `json:"hooks"`
+		}
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("unmarshal rewritten settings: %v\n%s", err, raw)
+		}
+		if _, ok := got.Hooks["Notification"]; !ok {
+			t.Errorf("Notification event lost from settings.json: %s", raw)
+		}
+		pre := got.Hooks["PreToolUse"]
+		if len(pre) != 1 || len(pre[0].Hooks) != 1 {
+			t.Fatalf("PreToolUse after reconcile = %+v, want one entry with one hook", pre)
+		}
+		if timeout, _ := pre[0].Hooks[0]["timeout"].(float64); timeout != 30 {
+			t.Errorf("timeout key lost from the surviving hook: %s", raw)
+		}
+		if strings.Contains(string(raw), "no-root-scan.sh") {
+			t.Errorf("interim hook still present: %s", raw)
+		}
+	})
+
 	t.Run("dry run reports change without writing", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
@@ -203,6 +294,18 @@ func TestReconcileTarget(t *testing.T) {
 		}
 		if changed {
 			t.Fatalf("reconcileTarget() changed=true, want false for a missing file")
+		}
+	})
+
+	t.Run("malformed settings is an integrity error", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := writeSettings(t, dir, `{"hooks": [`)
+		target := hooks.Target{Path: path, Key: "test/target"}
+
+		_, err := reconcileTarget(target, false)
+		if !hooks.IsSettingsIntegrityError(err) {
+			t.Fatalf("reconcileTarget() err = %v, want a settings integrity error", err)
 		}
 	})
 
