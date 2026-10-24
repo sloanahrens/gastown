@@ -231,10 +231,18 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 	}
 }
 
+// sandboxSecretsGuardOnlyWords are the name words the guard reads as secret where config
+// does not. A word listed here must stay one config does not redact, and every other word
+// in sandboxSecretsNameWords must agree with config, so the guard cannot grow a word that
+// config never sees.
+var sandboxSecretsGuardOnlyWords = map[string]bool{
+	"KEY": true, "PASSWD": true, "CRED": true, "CREDS": true, "CREDENTIAL": true, "CREDENTIALS": true,
+}
+
 // The guard blocks a variable exactly when config.LooksLikeSecret would redact a value
 // set for it, so a credential that config redacts is never readable through the guard.
-// CACHE_KEY is blocked by the guard alone (TestSandboxSecretsGuardBlocks), so it is not
-// in this table.
+// The guard's own name words are checked in both directions: the guard may be stricter
+// than config only for the words in sandboxSecretsGuardOnlyWords.
 func TestSandboxSecretsNameAgreesWithConfig(t *testing.T) {
 	t.Parallel()
 	// Long, prefix-free and no reference: config judges the name alone.
@@ -247,6 +255,28 @@ func TestSandboxSecretsNameAgreesWithConfig(t *testing.T) {
 		blocked, _ := runSandboxSecretsGuard(t, "openshell", "echo $"+name)
 		if blocked != want {
 			t.Errorf("guard blocks $%s = %v, config.LooksLikeSecret = %v", name, blocked, want)
+		}
+	}
+	for word := range sandboxSecretsNameWords {
+		name := "DB_" + word
+		want := config.LooksLikeSecret(name, value)
+		blocked, _ := runSandboxSecretsGuard(t, "openshell", "echo $"+name)
+		if sandboxSecretsGuardOnlyWords[word] {
+			if want {
+				t.Errorf("$%s is listed as guard-only, but config.LooksLikeSecret redacts it", name)
+			}
+			if !blocked {
+				t.Errorf("guard does not block $%s, a guard-only word", name)
+			}
+			continue
+		}
+		if blocked != want {
+			t.Errorf("guard blocks $%s = %v, config.LooksLikeSecret = %v", name, blocked, want)
+		}
+	}
+	for word := range sandboxSecretsGuardOnlyWords {
+		if _, ok := sandboxSecretsNameWords[word]; !ok {
+			t.Errorf("guard-only word %s is not in sandboxSecretsNameWords", word)
 		}
 	}
 }
