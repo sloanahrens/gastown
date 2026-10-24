@@ -458,3 +458,75 @@ func TestPromoteKeepsAVerdictWrittenDuringThePush(t *testing.T) {
 		t.Errorf("saved last_promoted = %q, want the promoted commit %s", got, fx.sha)
 	}
 }
+
+// failingStore is a red-main store whose Load fails on the loadFailsAt-th call
+// (0 never) and whose Save fails when saveErr is set.
+type failingStore struct {
+	loads       int
+	loadFailsAt int
+	saveErr     error
+}
+
+func (s *failingStore) Load() (landworker.MainState, error) {
+	s.loads++
+	if s.loads == s.loadFailsAt {
+		return landworker.MainState{}, errors.New("state store unreadable")
+	}
+	return landworker.MainState{}, nil
+}
+
+func (s *failingStore) Save(landworker.MainState) error { return s.saveErr }
+
+// A red-main state failure is a promotion failure, exit 2: exit 1 reads as
+// "not promotable" to plugins/app-promote/run.sh, which logs it and skips
+// without paging, so a push that landed with last_promoted unrecorded went
+// unseen (gt-0x25g).
+func TestPromoteReportsAStateSaveFailureAsFailed(t *testing.T) {
+	t.Parallel()
+	fx := newPromoteFixture(t)
+	store := &failingStore{saveErr: errors.New("disk full")}
+	deps := fx.deps()
+	deps.State = func(string, string) landworker.MainStateStore { return store }
+
+	err := promoteRigSHA(deps, promoteTestRig, fx.sha)
+	if code := exitCodeForError(err); code != promoteExitFailed {
+		t.Fatalf("exit code = %d (%v), want %d", code, err, promoteExitFailed)
+	}
+	for _, want := range []string{"disk full", "may have landed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+func TestPromoteReportsAStateLoadFailureAsFailed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		loadFailsAt int
+		wantPushed  bool
+	}{
+		{"first load, before the push", 1, false},
+		{"re-read after the push", 2, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newPromoteFixture(t)
+			store := &failingStore{loadFailsAt: tt.loadFailsAt}
+			deps := fx.deps()
+			deps.State = func(string, string) landworker.MainStateStore { return store }
+
+			err := promoteRigSHA(deps, promoteTestRig, fx.sha)
+			if code := exitCodeForError(err); code != promoteExitFailed {
+				t.Fatalf("exit code = %d (%v), want %d", code, err, promoteExitFailed)
+			}
+			if !strings.Contains(err.Error(), "state store unreadable") {
+				t.Errorf("error %q lost the cause", err)
+			}
+			if got := strings.Contains(err.Error(), "may have landed"); got != tt.wantPushed {
+				t.Errorf("error %q: says the push may have landed = %v, want %v", err, got, tt.wantPushed)
+			}
+		})
+	}
+}
