@@ -70,6 +70,20 @@ removal keeps the tag and logs docker's own reason, `kept ... (rmi failed:
 <reason>)`, so a container using the image and a real error read differently.
 The build cache is not touched.
 
+## Build cache
+
+Each rebuild also leaves its layers in Docker's build cache (apt, the Go
+toolchain, golangci-lint, the gt and bd compiles): a day of installs made it 20
+GB with nothing in use (gt-atxdz). After the image prune the plugin runs
+`docker builder prune --keep-storage 8GB -f` (`POLECAT_IMAGE_BUILDER_KEEP`):
+LRU, so the most recently used 8 GB stays and the next rebuild is warm. It runs
+that command and nothing else that deletes (never a system, image, volume or
+`--all` prune; the per-rig `gt-cache-*` volumes are never touched), and it runs
+under the plugin's lock: a run that built already owns it, any other takes it,
+and a run that finds another's lock, or whose lock was taken during the build,
+skips with a logged line, so a trim never overlaps a build. A down docker, a
+failed build or a failing prune trims nothing and does not fail the run.
+
 Every failure exits non-zero with the tail of the failing command: a commit the
 rig repo does not know, a failed build, an image that still carries another
 commit afterwards, an installed gt whose commit cannot be read. A deferral is not a

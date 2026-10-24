@@ -21,6 +21,9 @@ STALE_LOCK_MINUTES="${POLECAT_IMAGE_STALE_MINUTES:-20}"
 MAX_ROUNDS=3
 # KEEP_IMAGES is how many of the newest per-commit tags prune_old_images leaves.
 KEEP_IMAGES="${POLECAT_IMAGE_KEEP:-3}"
+# BUILDER_KEEP is how much of the build cache prune_build_cache leaves (most
+# recently used first), as docker's --keep-storage value.
+BUILDER_KEEP="${POLECAT_IMAGE_BUILDER_KEEP:-8GB}"
 
 GT="${POLECAT_IMAGE_GT:-gt}"
 DOCKER="${POLECAT_IMAGE_DOCKER:-docker}"
@@ -242,5 +245,34 @@ prune_old_images() {
   done < <("$DOCKER" images --format '{{.Tag}}' "$repo" 2>/dev/null || true)
 }
 
+# prune_build_cache keeps Docker's build cache to the most recently used
+# BUILDER_KEEP: each rebuild leaves its layers behind (a day of installs made it
+# 20 GB), and nothing else removes them. LRU with a floor, so the next rebuild
+# stays warm. It runs `docker builder prune --keep-storage` and nothing else that
+# deletes: no system, image, volume or --all prune. It holds the plugin's lock,
+# so a trim never overlaps a build: a run that built already owns it, any other
+# takes it, and one that cannot skips. A failed command prunes nothing and is
+# logged (gt-atxdz).
+prune_build_cache() {
+  "$DOCKER" info >/dev/null 2>&1 || return 0
+  if [ "$HAVE_LOCK" != 1 ]; then
+    if ! take_lock; then
+      log "build cache: skipped, another run holds the lock"
+      return 0
+    fi
+    HAVE_LOCK=1
+  elif [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" != "$$" ]; then
+    log "build cache: skipped, the lock is another run's now"
+    return 0
+  fi
+  local out
+  if out="$("$DOCKER" builder prune --keep-storage "$BUILDER_KEEP" -f 2>&1)"; then
+    log "build cache trimmed to the newest $BUILDER_KEEP: $(printf '%s\n' "$out" | tail -n 1)"
+  else
+    log "build cache not trimmed: $(printf '%s\n' "$out" | tail -n 1)"
+  fi
+}
+
 main "$@"
 prune_old_images || true
+prune_build_cache || true
