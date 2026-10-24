@@ -258,10 +258,12 @@ func PackageDirHasGo(repoRoot, dir string) bool {
 var treeWideGuards = []treeWideGuard{
 	{
 		// The sandbox policy is data the openshell backend sends with every
-		// sandbox; this guard pins which hosts it may reach.
-		pkg:    "internal/session",
-		tests:  []string{"TestPolecatPolicyAllowsOnlyTheReviewedEgress", "TestPolecatPolicyLetsOnlyNodeReachTheNpmRegistryAndFonts"},
-		judges: func(rel string) bool { return rel == "deploy/polecat/policy.yaml" },
+		// sandbox; this guard pins which hosts it may reach. The tests read
+		// the file, so deleting it fails them too.
+		pkg:     "internal/session",
+		tests:   []string{"TestPolecatPolicyAllowsOnlyTheReviewedEgress", "TestPolecatPolicyLetsOnlyNodeReachTheNpmRegistryAndFonts"},
+		judges:  func(rel string) bool { return rel == "deploy/polecat/policy.yaml" },
+		removal: true,
 	},
 	{
 		// TestPolicy, TestUnitTierMain, TestDockerTier and friends walk every
