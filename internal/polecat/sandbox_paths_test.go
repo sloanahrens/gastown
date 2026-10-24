@@ -40,14 +40,16 @@ func TestSandboxTownRootAcceptsAWorktreeNamedLikeDotDotFoo(t *testing.T) {
 	}
 }
 
-// Only path-valued entries move: free text and flag values that mention the
-// town root are not paths the sandbox needs rewritten.
+// Only path-valued entries move, and a path list moves whether or not its
+// first element is a path: free text and flag values that mention the town
+// root are not paths the sandbox needs rewritten.
 func TestRewriteTownRootInPathEnvLeavesNonPathValuesAlone(t *testing.T) {
 	t.Parallel()
 	env := map[string]string{
 		"GT_TOWN_ROOT":            "/h/gt",
 		"GIT_CEILING_DIRECTORIES": "/h/gt",
 		"GT_POLECAT_PATH":         "/h/gt/r/polecats/p/r",
+		"PATH":                    "bin:/h/gt/bin",
 		"GT_NOTE":                 "see /h/gt for the town",
 		"GOFLAGS":                 "-modfile=/h/gt/go.mod",
 	}
@@ -56,6 +58,7 @@ func TestRewriteTownRootInPathEnvLeavesNonPathValuesAlone(t *testing.T) {
 		"GT_TOWN_ROOT":            "/sandbox/gt",
 		"GIT_CEILING_DIRECTORIES": "/sandbox/gt",
 		"GT_POLECAT_PATH":         "/sandbox/gt/r/polecats/p/r",
+		"PATH":                    "bin:/sandbox/gt/bin",
 		"GT_NOTE":                 "see /h/gt for the town",
 		"GOFLAGS":                 "-modfile=/h/gt/go.mod",
 	}

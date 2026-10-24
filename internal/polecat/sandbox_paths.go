@@ -28,12 +28,24 @@ func sandboxTownRoot(hostTownRoot, hostWorkDir, sandboxWorkDir string) (string, 
 }
 
 // rewriteTownRootInPathEnv moves the host town root to the sandbox's in the
-// env values that are paths (they start with '/'). A value that is free text,
-// a name or a flag list is left as it is, even when it mentions the root.
+// env values that are paths or path lists. A value that is free text, a name
+// or a flag is left as it is, even when it mentions the root.
 func rewriteTownRootInPathEnv(env map[string]string, hostTownRoot, sandboxTownRoot string) {
 	for k, v := range env {
-		if strings.HasPrefix(v, "/") {
+		if isPathValue(v) {
 			env[k] = session.RewriteTownRoot(v, hostTownRoot, sandboxTownRoot)
 		}
 	}
+}
+
+// isPathValue reports whether some element of a list separated by
+// filepath.ListSeparator is an absolute path, so a path list such as
+// "bin:/h/gt/bin" counts even though its first element is not one.
+func isPathValue(v string) bool {
+	for _, elem := range strings.Split(v, string(filepath.ListSeparator)) {
+		if strings.HasPrefix(elem, "/") {
+			return true
+		}
+	}
+	return false
 }
