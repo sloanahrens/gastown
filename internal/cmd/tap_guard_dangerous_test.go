@@ -1904,6 +1904,33 @@ func TestHeredocReaderWalkBackHonorsBackslashParity(t *testing.T) {
 	}
 }
 
+// TestHeredocReaderWalkBackAllowedCasesInspectTheBody pins gt-c6kva: an allowed
+// row is allowed because its body is data to cat, and the walk still reached
+// that body. The control keeps the same operator line and body under a shell
+// reader, which must block; without it, a guard that never read the body would
+// pass the allowed rows too.
+func TestHeredocReaderWalkBackAllowedCasesInspectTheBody(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		control string
+	}{
+		{"an escaped backslash above the operator line ends it", "bash \\\\\ncat <<'EOF'\nsudo rm -rf /tmp\nEOF", "bash \\\\\nbash <<'EOF'\nsudo rm -rf /tmp\nEOF"},
+		{"an escaped backslash followed by spaces ends the line", "bash \\\\  \ncat <<'EOF'\nsudo rm -rf /tmp\nEOF", "bash \\\\  \nbash <<'EOF'\nsudo rm -rf /tmp\nEOF"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — the body is data to cat", tt.command, reason)
+			}
+			if reason, _ := evaluateDangerousCommand(tt.control, 0, noTownSession); reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — the same body under a shell reader is a script, so the walk must reach it", tt.control)
+			}
+		})
+	}
+}
+
 // TestShellFedHeredocRecursesThroughNestedBodies pins that a shell-fed body is
 // judged by the same nested-command walk as a bash -c payload: a shell between
 // the outer body and the dangerous command does not end the inspection.
