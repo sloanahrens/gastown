@@ -226,15 +226,15 @@ func workspaceDatabase(beadsDir string) string {
 	return cfg.Database
 }
 
-// dataDirHasDatabase reports whether a Dolt server's data directory holds db —
-// Dolt lays each database out as a directory of the same name. A server with
-// no discoverable data directory is never accused of missing one.
+// dataDirHasDatabase reports whether a Dolt server's data directory holds db,
+// by the rule doltserver lists databases with: a directory of the same name
+// holding .dolt/noms/manifest, so a phantom directory does not count. A server
+// with no discoverable data directory is never accused of missing one.
 func dataDirHasDatabase(dataDir, db string) bool {
 	if dataDir == "" || db == "" {
 		return true
 	}
-	info, err := os.Stat(filepath.Join(dataDir, db))
-	return err == nil && info.IsDir()
+	return doltserver.DataDirHasDatabase(dataDir, db)
 }
 
 // displayPort keeps a 0 port (the town names no endpoint) readable in a detail

@@ -2644,6 +2644,36 @@ func ListDatabases(townRoot string) ([]string, error) {
 	return std.ListDatabases(townRoot)
 }
 
+// dbDirKind is how databaseDirState classifies one directory of a Dolt data dir.
+type dbDirKind int
+
+const (
+	dbDirAbsent  dbDirKind = iota // no .dolt/ directory: not a database
+	dbDirPhantom                  // .dolt/ without noms/manifest: loading it crashes the server
+	dbDirValid                    // .dolt/noms/manifest present
+)
+
+// databaseDirState classifies <dataDir>/<name>. A phantom/corrupted .dolt/ dir
+// (e.g., from DROP + catalog re-materialization) has .dolt/ but no
+// noms/manifest.
+func databaseDirState(dataDir, name string) dbDirKind {
+	doltDir := filepath.Join(dataDir, name, ".dolt")
+	if _, err := os.Stat(doltDir); err != nil {
+		return dbDirAbsent
+	}
+	if _, err := os.Stat(filepath.Join(doltDir, "noms", "manifest")); err != nil {
+		return dbDirPhantom
+	}
+	return dbDirValid
+}
+
+// DataDirHasDatabase reports whether dataDir holds a loadable Dolt database
+// named name: the rule listDatabasesLocal applies to every entry, so a phantom
+// directory named after the database does not count.
+func DataDirHasDatabase(dataDir, name string) bool {
+	return databaseDirState(dataDir, name) == dbDirValid
+}
+
 // listDatabasesLocal scans the filesystem for valid Dolt database directories.
 func listDatabasesLocal(config *Config) ([]string, error) {
 	entries, err := os.ReadDir(config.DataDir)
@@ -2659,15 +2689,10 @@ func listDatabasesLocal(config *Config) ([]string, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		// Check if this directory is a valid Dolt database.
-		// A phantom/corrupted .dolt/ dir (e.g., from DROP + catalog re-materialization)
-		// will have .dolt/ but no noms/manifest. Loading such a dir crashes the server.
-		doltDir := filepath.Join(config.DataDir, entry.Name(), ".dolt")
-		if _, err := os.Stat(doltDir); err != nil {
+		switch databaseDirState(config.DataDir, entry.Name()) {
+		case dbDirAbsent:
 			continue
-		}
-		manifest := filepath.Join(doltDir, "noms", "manifest")
-		if _, err := os.Stat(manifest); err != nil {
+		case dbDirPhantom:
 			// .dolt/ exists but no noms/manifest — corrupted/phantom database
 			fmt.Fprintf(os.Stderr, "Warning: skipping corrupted database %q (missing noms/manifest)\n", entry.Name())
 			continue
