@@ -259,7 +259,34 @@ func skipLauncherArgs(name string, launcher prWorkflowLauncher, rest []string) (
 // shell order.
 func skipLauncherArgsChdir(name string, launcher prWorkflowLauncher, rest []string) (seg []string, payload string, chdirs []string) {
 	i := 0
-	for i < len(rest) {
+	// skipRedirections steps over the redirections at rest[i:]. The shell
+	// removes them before the launcher sees its arguments, so one standing
+	// among the flags, or ahead of a flag's value or an operand, is not that
+	// word: "timeout 2>/dev/null 5 rm" runs rm under a 5 second limit.
+	skipRedirections := func() {
+		for i < len(rest) {
+			n := redirectionSkip(rest[i:])
+			if n == 0 {
+				return
+			}
+			i += n
+		}
+	}
+	// next returns the word after any redirections and steps past it.
+	next := func() string {
+		skipRedirections()
+		if i >= len(rest) {
+			return ""
+		}
+		word := rest[i]
+		i++
+		return word
+	}
+	for {
+		skipRedirections()
+		if i >= len(rest) {
+			break
+		}
 		word := rest[i]
 		if word == "--" {
 			i++
@@ -271,10 +298,8 @@ func skipLauncherArgsChdir(name string, launcher prWorkflowLauncher, rest []stri
 		if name == "env" {
 			switch {
 			case word == "-S" || word == "--split-string":
-				if i+1 < len(rest) {
-					payload = rest[i+1]
-				}
-				i += 2
+				i++
+				payload = next()
 				continue
 			case strings.HasPrefix(word, "--split-string="):
 				payload = strings.TrimPrefix(word, "--split-string=")
@@ -287,24 +312,23 @@ func skipLauncherArgsChdir(name string, launcher prWorkflowLauncher, rest []stri
 			}
 		}
 		if dir, ok := launcherChdirFlag(name, launcher, word); ok {
+			i++
 			if dir == "" {
-				if i+1 < len(rest) {
-					dir = rest[i+1]
-				}
-				i += 2
-			} else {
-				i++
+				dir = next()
 			}
 			if dir != "" {
 				chdirs = append(chdirs, dir)
 			}
 			continue
 		}
-		i += launcherFlagWidth(launcher, word)
+		width := launcherFlagWidth(launcher, word)
+		i++
+		if width == 2 {
+			next()
+		}
 	}
-	i += launcher.positionals
-	if i > len(rest) {
-		i = len(rest)
+	for n := 0; n < launcher.positionals; n++ {
+		next()
 	}
 	return rest[i:], payload, chdirs
 }
