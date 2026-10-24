@@ -24,8 +24,8 @@ import (
 // The patrols that decide due-ness with a persisted last-run time keep an
 // in-memory one as well, so a save that fails cannot make the patrol due on
 // every heartbeat (gt-th2am, gt-cekkh). Each test makes the record unwritable
-// (the town's daemon directory is a regular file) and triggers the patrol twice
-// inside its interval. The jev patrols' tests are in jev_failed_save_test.go.
+// and triggers the patrol twice inside its interval, then once after it. The
+// jev patrols' tests are in jev_failed_save_test.go.
 
 // unwritableLastRun makes the town's last-run record unwritable: a directory
 // stands where the file belongs, so the rest of the daemon directory (the
@@ -47,6 +47,15 @@ func waitFlagClear(t *testing.T, running *atomic.Bool) {
 		}
 		runtime.Gosched()
 	}
+}
+
+// ageLastRun dates a wall-clock patrol's last run back by two intervals, so its
+// rerun falls due. wisp_reaper, checkpoint_dog, jsonl_git_backup and
+// overrun_guard read time.Now and round the elapsed time to the minute, so the
+// tests date the record back instead of waiting one out.
+func ageLastRun(t *testing.T, mem *patrolLastRunMemory, interval time.Duration) {
+	t.Helper()
+	mem.record(time.Now().Add(-2 * interval))
 }
 
 func noFeed(string, map[string]interface{}) error { return nil }
@@ -192,6 +201,13 @@ func TestWispReaperFailedSaveSuppressesTheRerun(t *testing.T) {
 	if !strings.Contains(logs.String(), "cannot persist last-run time") {
 		t.Errorf("log = %q, want the failed save named", logs)
 	}
+
+	ageLastRun(t, &d.wispReaperRun, wispReaperInterval(d.patrolConfig))
+	d.triggerWispReaper()
+	waitFlagClear(t, &d.wispReaperRunning)
+	if n := strings.Count(logs.String(), "dog_cycle: wisp_reaper outcome="); n != 2 {
+		t.Errorf("wisp_reaper ran %d cycles after the interval, want 2:\n%s", n, logs)
+	}
 }
 
 func TestJsonlGitBackupFailedSaveSuppressesTheRerun(t *testing.T) {
@@ -229,6 +245,13 @@ func TestJsonlGitBackupFailedSaveSuppressesTheRerun(t *testing.T) {
 	if !strings.Contains(logs.String(), "cannot persist last-run time") {
 		t.Errorf("log = %q, want the failed save named", logs)
 	}
+
+	ageLastRun(t, &d.jsonlGitBackupRun, jsonlGitBackupInterval(d.patrolConfig))
+	d.triggerJsonlGitBackup()
+	waitFlagClear(t, &d.jsonlGitBackupRunning)
+	if exports != 2 {
+		t.Errorf("jsonl_git_backup exported %d times after the interval, want 2", exports)
+	}
 }
 
 func TestCheckpointDogFailedSaveSuppressesTheRerun(t *testing.T) {
@@ -253,6 +276,13 @@ func TestCheckpointDogFailedSaveSuppressesTheRerun(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "cannot persist last-run time") {
 		t.Errorf("log = %q, want the failed save named", logs)
+	}
+
+	ageLastRun(t, &d.checkpointDogRun, checkpointDogInterval(d.patrolConfig))
+	d.triggerCheckpointDog()
+	waitFlagClear(t, &d.checkpointDogRunning)
+	if n := strings.Count(logs.String(), "checkpoint_dog: starting cycle"); n != 2 {
+		t.Errorf("checkpoint_dog ran %d cycles after the interval, want 2:\n%s", n, logs)
 	}
 }
 
@@ -300,28 +330,29 @@ func TestOverrunGuardFailedSaveSuppressesTheRerun(t *testing.T) {
 		logger:       log.New(logs, "", 0),
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{OverrunGuard: &OverrunGuardConfig{Enabled: true}}},
 	}
-	// A run reads the rig registry, which the daemon caches until invalidated:
-	// a valid cache after a trigger is the mark that a run happened.
-	ran := func() bool {
-		d.knownRigsMu.Lock()
-		defer d.knownRigsMu.Unlock()
-		valid := d.knownRigsCacheValid
-		d.knownRigsCacheValid = false
-		return valid
-	}
-
+	// A cycle records its completion time, saved or not, so a moved time is the
+	// mark that a cycle ran.
 	d.triggerOverrunGuard()
 	waitFlagClear(t, &d.overrunGuardRunning)
-	if !ran() {
-		t.Fatal("the first trigger ran no cycle")
+	first := d.overrunGuardRun.last()
+	if first.IsZero() {
+		t.Fatalf("the first trigger ran no cycle:\n%s", logs)
 	}
 	d.triggerOverrunGuard()
 	waitFlagClear(t, &d.overrunGuardRunning)
-	if ran() {
-		t.Error("overrun_guard ran again inside its interval after a failed save")
+	if got := d.overrunGuardRun.last(); !got.Equal(first) {
+		t.Errorf("overrun_guard ran again inside its interval after a failed save (last run %s -> %s)", first, got)
 	}
 	if !strings.Contains(logs.String(), "cannot persist last-run time") {
 		t.Errorf("log = %q, want the failed save named", logs)
+	}
+
+	ageLastRun(t, &d.overrunGuardRun, overrunGuardInterval(d.patrolConfig))
+	aged := d.overrunGuardRun.last()
+	d.triggerOverrunGuard()
+	waitFlagClear(t, &d.overrunGuardRunning)
+	if !d.overrunGuardRun.last().After(aged) {
+		t.Error("overrun_guard did not run once the interval had passed")
 	}
 }
 
