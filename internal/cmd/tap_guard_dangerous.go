@@ -1732,15 +1732,13 @@ func spaceOutShellOperators(command string) string {
 			b.WriteRune('"')
 			scopes[len(scopes)-1].quote = '$'
 			i++
-		case r == '$' && sc.quote == '"' && i+2 < len(runes) && runes[i+1] == '(' && runes[i+2] == '"':
-			// A quoted dollar-paren — "$(" — inside a double-quoted word. The
-			// substitution body begins with a quote of its own, and reading
-			// that quote as the one ending the double-quoted word keeps the
-			// substitution around it from running to the end of the line: the
-			// ")" that closes that substitution stays in view, so the rest of
-			// the substitution's body is judged (gt-qg832).
-			// The "$", "(" and quote are then plain characters of the quoted
-			// word, emitted by the quote branch below.
+		case r == '$' && sc.quote == '"' && i+2 < len(runes) && quotedDollarParen(r, runes[i+1], runes[i+2]):
+			// A quoted dollar-paren — "$(" — inside a double-quoted word ends
+			// that word at the quote after the "(", as the shell reads it, so
+			// the ")" closing the substitution around it stays in view and the
+			// command glued inside is judged (gt-qg832). The "$", "(" and quote
+			// are plain characters of the quoted word, emitted by the quote
+			// branch below.
 			scopes[len(scopes)-1].quotedParen = true
 			emit(r)
 		case r == '$' && sc.quote != '\'' && i+1 < len(runes) && runes[i+1] == '(':
@@ -1760,16 +1758,19 @@ func spaceOutShellOperators(command string) string {
 			emit(r)
 		case paren == ")":
 			scopes[len(scopes)-1].depth--
-			if scopes[len(scopes)-1].quotedParen {
-				// The last word before the ")" of a substitution holding a
-				// quoted dollar-paren is an argument of its own: glued,
+			closing := scopes[len(scopes)-1].depth == 0
+			if closing && scopes[len(scopes)-1].quotedParen {
+				// The word before the ")" that closes the substitution holding
+				// a quoted dollar-paren is an argument of its own: glued,
 				// "rm -rf /)" ends in "/)" and the root target is no token
-				// any matcher compares (gt-qg832).
+				// any matcher compares (gt-qg832). Only the substitution's OWN
+				// ")" is padded — one nested inside it closes a group, and is
+				// emitted as in any other substitution body.
 				b.WriteString(" ) ")
 			} else {
 				emit(r)
 			}
-			if scopes[len(scopes)-1].depth == 0 {
+			if closing {
 				closeScope()
 			}
 		case r == '(' && plainGroupScope(sc) && startsShellWord(runes, prevIdx, prevEscaped):
@@ -1854,6 +1855,15 @@ func spaceOutShellOperators(command string) string {
 // are literal text (see spaceOutShellOperators, gt-n8ir, gt-5eniu).
 func plainGroupScope(sc shellQuoteScope) bool {
 	return sc.quote == 0 && !sc.subst && !sc.tick && !sc.escapeForShlex
+}
+
+// quotedDollarParen reports whether the three characters spell the quoted
+// dollar-paren shape "$(" — a substitution opener whose body begins with the
+// double quote the shell ends the surrounding double-quoted word at. The quote
+// walk in spaceOutShellOperators and the span scan in closingDoubleQuote judge
+// the shape here so the two agree on where that word ends (gt-qg832).
+func quotedDollarParen(dollar, paren, quote rune) bool {
+	return dollar == '$' && paren == '(' && quote == '"'
 }
 
 // isANSICDollar reports whether the "$" at runes[i] opens a $'...' string: the
@@ -1962,8 +1972,9 @@ type shellQuoteScope struct {
 	escapeForShlex bool
 	// quotedParen records a quoted dollar-paren — "$(" — read inside this
 	// substitution, which ends the double-quoted word it sits in. The ")"
-	// that closes this substitution is then padded out, so a word glued to it
-	// ("/" in "rm -rf /)") is still an argument of its own (gt-qg832).
+	// that closes this substitution — and only it, not a ")" nested inside —
+	// is then padded out, so a word glued to it ("/" in "rm -rf /)") is still
+	// an argument of its own (gt-qg832).
 	quotedParen bool
 }
 
