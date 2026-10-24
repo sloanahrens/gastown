@@ -82,7 +82,7 @@ RUN bash /usr/local/lib/gastown/go-floor.sh check "$GO_FLOOR"
 # GNU Make 4.4.1 ahead of /usr/bin/make on PATH (see the make-build stage).
 COPY --from=make-build /usr/local/bin/make /usr/local/bin/make
 # The same binary as /usr/bin/make too, so a restricted PATH never finds Ubuntu's
-# 4.3. Why: TestPolecatImageReplacesTheDistroMake.
+# 4.3. Why: TestIntegrationPolecatImageReplacesTheDistroMake.
 RUN ln -sf /usr/local/bin/make /usr/bin/make \
     && /usr/bin/make --version | head -1 | grep -q 'GNU Make 4.4.1' \
     && /bin/make --version | head -1 | grep -q 'GNU Make 4.4.1'
