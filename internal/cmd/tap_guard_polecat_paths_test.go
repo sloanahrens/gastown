@@ -492,6 +492,12 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"sudo -u wrapping bash -c cd up then rm a sibling", "sudo -u root bash -c 'cd .. && rm -rf ../" + p.other + "'", true},
 		{"env assignment then timeout wrapping bash -c", "A=1 timeout 5 /bin/bash -c 'cd .. && rm -rf ../" + p.other + "'", true},
 		{"xargs sh -c cd up then rm a sibling", "ls | xargs -I{} sh -c 'cd .. && rm -rf ../" + p.other + "'", true},
+		// xargs is not stepped over by segmentCommandWord (the done-slot loop
+		// guard reads it as a repeater). The path guard still refuses a sibling
+		// path it names, because isWriteCapableCommand counts xargs as a writer
+		// by its own word; these rows hold that end to end.
+		{"xargs rm a sibling file", "ls | xargs -I{} rm -rf " + filepath.Join(p.sibling, "internal.go"), true},
+		{"xargs rm an own file", "ls | xargs -I{} rm -rf build", false},
 		{"find -exec sh -c cd up then rm a sibling", `find . -name x -exec sh -c 'cd .. && rm -rf ../` + p.other + `' \;`, true},
 		{"cd with an unresolvable destination then rm", "cd $POLECAT_PATHS_UNSET && rm -rf build", true},
 		// git -C reaches another tree without naming a path anywhere else.
@@ -1269,6 +1275,10 @@ func TestSegmentCommandWord(t *testing.T) {
 		{"sudo with a value flag before the command", []string{"sudo", "-u", "alice", "bash"}, "bash"},
 		{"timeout with a duration before the command", []string{"timeout", "5", "rm", "-rf", "x"}, "rm"},
 		{"timeout with a value flag and a duration", []string{"timeout", "-s", "KILL", "5", "rm"}, "rm"},
+		// timeout reads its options only ahead of the duration, so a flag after
+		// it is the command word, as coreutils' getopt reads it.
+		{"timeout with a flag after the duration", []string{"timeout", "5", "-s", "KILL", "rm"}, "-s"},
+		{"timeout with nothing but a duration", []string{"timeout", "5"}, ""},
 		{"doas with a value flag before the command", []string{"doas", "-u", "alice", "rm", "-rf", "x"}, "rm"},
 		{"launcher flags then an env assignment", []string{"env", "-i", "X=1", "bash"}, "bash"},
 		{"launcher flags with nothing after them", []string{"env", "-i"}, ""},

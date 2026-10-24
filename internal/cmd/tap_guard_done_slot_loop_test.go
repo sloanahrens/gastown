@@ -93,6 +93,9 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"loop in a background subshell", "(while true; do gt slot status; sleep 5; done) &", true},
 		{"loop in a brace group", "{ until gt done; do sleep 5; done; }", true},
 		{"xargs behind then", "if true; then xargs -I{} gt done; fi", true},
+		// segmentCommandWord now steps over timeout, so the gt done behind it
+		// is the command the repeater runs.
+		{"xargs running a timeout-wrapped gt done", "seq 1 300 | xargs -I{} timeout 5 gt done", true},
 		{"watch in a subshell", "(watch gt slot status)", true},
 		{"loop behind else", "if false; then :; else while true; do gt done; done; fi", true},
 
@@ -155,6 +158,7 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"noglob repeat that never runs the gate", "noglob repeat 3 gofmt -l", false},
 		{"seq with no gate command", "seq 1 5", false},
 		{"xargs with no gate command", "seq 1 5 | xargs -I{} echo {}", false},
+		{"timeout around a single gt done is not a loop", "timeout 300 gt done", false},
 
 		// A case arm that holds no gate loop is not flagged, and a gate after
 		// the case is the sanctioned one (gt-vjrpj).
@@ -202,8 +206,8 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 71 {
-		t.Errorf("blocked %d of %d cases, want exactly 71", blocked, len(tests))
+	if blocked != 72 {
+		t.Errorf("blocked %d of %d cases, want exactly 72", blocked, len(tests))
 	}
 }
 
@@ -226,8 +230,10 @@ func TestDoneSlotLoopHeredocPipedIntoNonWriter(t *testing.T) {
 	}{
 		{"tee FILE writes the body", "cat <<'EOF' | tee /tmp/retry.sh", true},
 		{"tee with a flag and a FILE writes the body", "cat <<'EOF' | tee -a /tmp/retry.sh", true},
+		{"timeout around tee FILE writes the body", "cat <<'EOF' | timeout 5 tee /tmp/retry.sh", true},
 		{"dd of= writes the body", "cat <<'EOF' | dd of=/tmp/retry.sh", true},
 		{"grep reads the body as data", "cat <<'EOF' | grep gate", false},
+		{"timeout around grep reads the body as data", "cat <<'EOF' | timeout 5 grep gate", false},
 		{"tee with no file writes nothing", "cat <<'EOF' | tee", false},
 		{"tee with only flags writes nothing", "cat <<'EOF' | tee -a", false},
 		{"dd with no of= writes nothing", "cat <<'EOF' | dd bs=1k", false},

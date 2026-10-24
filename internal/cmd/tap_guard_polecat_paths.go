@@ -1963,11 +1963,10 @@ func trimShellKeywords(segment []string) []string {
 }
 
 // segmentCommandWord returns a segment's command word and its arguments,
-// skipping leading VAR=value assignments and the small set of launchers that
-// carry the real command behind them (env VAR=x cmd, time cmd, sudo cmd, exec
-// cmd — gt-tt8sg: `exec rm -rf X` named exec and the rm went unseen), and the
-// rest of prWorkflowLaunchers but xargs (timeout, doas, setsid, ionice,
-// caffeinate). A leading
+// skipping leading VAR=value assignments and the launchers that carry the real
+// command behind them (env VAR=x cmd, time cmd, sudo cmd, exec cmd — gt-tt8sg:
+// `exec rm -rf X` named exec and the rm went unseen). Every launcher in
+// prWorkflowLaunchers is one of them except xargs; see skipsToCommand. A leading
 // "(" opens a subshell whose first command is the command word (gt-erfxm). A
 // launcher's own flags are stepped over too, so `env -i bash` and `nice -n 5
 // bash` name bash (gt-48buu).
