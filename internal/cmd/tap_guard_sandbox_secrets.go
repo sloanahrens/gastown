@@ -292,30 +292,37 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	}
 	expanded := sandboxSecretsExpandedNames(command)
 	var payloads []string
-	var previous []string // the argv of the segment before this one, which a shell here may read
-	for _, segment := range splitShellSegments(tokens) {
+	segments, piped := sandboxSecretsPipeSegments(tokens)
+	var stdin string // the text a pipe hands the segment being judged
+	shells := false  // whether the line runs a shell, which reads a substitution's output as a script
+	for i, segment := range segments {
 		r, launched, argv := sandboxSecretsSegment(segment, tainted, expanded)
 		if r != "" {
 			return r, false
 		}
 		sandboxSecretsTaint(segment, tainted)
 		payloads = append(payloads, launched...)
-		fed := previous
-		previous = argv
+		fed := stdin
+		stdin = ""
+		if i+1 < len(segments) && piped[i+1] {
+			stdin = sandboxSecretsPipeOutput(argv, fed)
+		}
 		if len(argv) == 0 {
 			continue
 		}
 		name := strings.ToLower(filepath.Base(argv[0]))
 		switch {
 		case shellInvokers[name]:
+			shells = true
 			if idx := shellCPayloadIndex(toLowerTokens(argv[1:])); idx >= 0 {
 				payloads = append(payloads, argv[1+idx])
 			}
-			if text := sandboxSecretsPrintedText(fed); text != "" {
-				payloads = append(payloads, text)
+			if fed != "" {
+				payloads = append(payloads, fed)
 			}
 		case sandboxSecretsIsScriptRunner(name):
 			// A script that shells out runs the strings it passes, so each one is judged as a command.
+			shells = true
 			for _, a := range argv[1:] {
 				payloads = append(payloads, sandboxSecretsShelledStrings(a)...)
 			}
@@ -327,7 +334,16 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 		return "an unquoted heredoc expands a secret variable", false
 	}
 	payloads = append(payloads, shellFedHeredocBodies(command)...)
-	payloads = append(payloads, prWorkflowSubstitutions(command)...)
+	substitutions := prWorkflowSubstitutions(command)
+	payloads = append(payloads, substitutions...)
+	if shells {
+		// A shell reads a substitution's output as a script too: sh <(echo printenv).
+		for _, body := range substitutions {
+			if text := sandboxSecretsStdoutText(body); text != "" {
+				payloads = append(payloads, text)
+			}
+		}
+	}
 	for _, payload := range payloads {
 		if depth >= maxPRWorkflowNestDepth {
 			tooDeep = true
@@ -939,13 +955,19 @@ func sandboxSecretsReadableText(command string) string {
 }
 
 // sandboxSecretsCommitMessages marks the words of a git commit segment that are its -m or
-// --message value: -mTEXT, --message=TEXT, and the word after -m or --message.
+// --message value: -mTEXT, --message=TEXT, and the word after -m or --message. Only the
+// commit subcommand's words are read this way, past git's global options; another
+// subcommand's -m is judged like any other word.
 func sandboxSecretsCommitMessages(segment []string) []bool {
 	skip := make([]bool, len(segment))
-	if len(segment) == 0 || strings.ToLower(filepath.Base(segment[0])) != "git" || sandboxSecretsWordIndex(segment, "commit") < 0 {
+	if len(segment) == 0 || strings.ToLower(filepath.Base(segment[0])) != "git" {
 		return skip
 	}
-	for i := 1; i < len(segment); i++ {
+	sub := gitSubcommandIndex(segment[1:]) + 1
+	if sub < 1 || segment[sub] != "commit" {
+		return skip
+	}
+	for i := sub + 1; i < len(segment); i++ {
 		word := segment[i]
 		switch {
 		case word == "-m" || word == "--message":
@@ -972,21 +994,73 @@ func sandboxSecretsRunsSubstitution(text string) bool {
 // printf argument into the characters themselves.
 var sandboxSecretsEscapes = strings.NewReplacer(`\n`, "\n", `\t`, "\t")
 
-// sandboxSecretsPrintedText returns the text an echo or printf writes, given its argv, or
-// "" for any other command. A shell that reads that text runs it as a script, so echo
-// printenv | sh is judged as printenv. Leading options (echo -e) are dropped.
+// sandboxSecretsPrintedText returns the text an echo or printf writes, given its argv. A
+// shell that reads that text runs it as a script, so echo printenv | sh is judged as
+// printenv. Leading options (echo -e) are dropped.
 func sandboxSecretsPrintedText(argv []string) string {
-	if len(argv) == 0 {
-		return ""
-	}
-	if name := strings.ToLower(filepath.Base(argv[0])); name != "echo" && name != "printf" {
-		return ""
-	}
 	args := argv[1:]
 	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
 		args = args[1:]
 	}
 	return sandboxSecretsEscapes.Replace(strings.Join(args, " "))
+}
+
+// sandboxSecretsPipeSegments splits tokens as splitShellSegments does, and reports for
+// each segment whether a pipe feeds it. A ;, && or || separator feeds nothing.
+func sandboxSecretsPipeSegments(tokens []string) (segments [][]string, piped []bool) {
+	var current []string
+	pipe := false // whether the separator before current is a pipe
+	for _, token := range tokens {
+		if shellCommandSeparators[token] {
+			if len(current) > 0 {
+				segments = append(segments, current)
+				piped = append(piped, pipe)
+			}
+			current = nil
+			pipe = token == "|"
+			continue
+		}
+		current = append(current, token)
+	}
+	if len(current) > 0 {
+		segments = append(segments, current)
+		piped = append(piped, pipe)
+	}
+	return segments, piped
+}
+
+// sandboxSecretsPipeOutput returns the text a command writes to its output, given the
+// text a pipe feeds it: what echo or printf prints, or the input of cat or tee, which
+// pass it on. Any other command writes nothing the guard follows, so "". A filter that
+// rewrites its text (tr, sed) and a file the text is saved to are not followed.
+func sandboxSecretsPipeOutput(argv []string, fed string) string {
+	if len(argv) == 0 {
+		return ""
+	}
+	switch strings.ToLower(filepath.Base(argv[0])) {
+	case "echo", "printf":
+		return sandboxSecretsPrintedText(argv)
+	case "cat", "tee":
+		return fed
+	}
+	return ""
+}
+
+// sandboxSecretsStdoutText returns the text a command's last stage writes when the
+// command runs with no input, or "" when that stage writes none the guard follows.
+func sandboxSecretsStdoutText(command string) string {
+	expanded := sandboxSecretsExpandedNames(command)
+	segments, piped := sandboxSecretsPipeSegments(shellTokenize(prWorkflowTokenText(command)))
+	var stdin, out string
+	for i, segment := range segments {
+		_, _, argv := sandboxSecretsSegment(segment, nil, expanded)
+		out = sandboxSecretsPipeOutput(argv, stdin)
+		stdin = ""
+		if i+1 < len(segments) && piped[i+1] {
+			stdin = out
+		}
+	}
+	return out
 }
 
 // sandboxSecretsHasAnyFlag reports whether args carry one of the flags. A short

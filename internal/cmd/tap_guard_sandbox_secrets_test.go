@@ -3,10 +3,12 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/hooks"
 )
 
 // sandboxSecretsBrokenReader is a hook payload that cannot be read.
@@ -71,12 +73,30 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"echo printenv | sh",
 		"printf 'env\\n' | bash",
 		"echo 'printenv' | bash -s",
+		// The text survives the filters a pipe runs before the shell reads it.
+		"echo printenv | cat | sh",
+		"echo printenv | tee /dev/null | bash",
+		"echo printenv | env sh",
+		"echo printenv | cat | tee /dev/null | /bin/sh",
+		"sh <(echo printenv)",
+		"sh -c \"$(echo printenv)\"",
+		// env -S takes its command line in every form, and each one is judged.
+		"env -S printenv",
+		"env -Sprintenv",
+		"env --split-string=printenv",
+		"env --split-string printenv",
+		"env -S'env'",
 		// A message that is a substitution still runs the substitution.
 		"git commit -m \"$(cat /proc/self/environ)\"",
 		"git commit -F /proc/self/environ",
 		"git commit --template=/proc/self/environ",
+		// Only a git commit's -m is text: a -m of another subcommand that names commit is judged.
+		"git tag commit -m 'see /proc/self/environ'",
 		// A double-quoted secret reference expands even inside a single-quoted word.
 		"echo '$FORGEJO_TOKEN' \"$FORGEJO_TOKEN\"",
+		// The expanded names are read per line, so a name a line expands anywhere blocks its
+		// single-quoted echo too. That over-blocks, and it is the price of never missing one.
+		"echo 'set $FORGEJO_TOKEN first' && true $FORGEJO_TOKEN",
 		"echo 'set' \"$ANTHROPIC_AUTH_TOKEN\"",
 		"cat <<< \"$FORGEJO_TOKEN\"",
 		"cat <<<$FORGEJO_TOKEN",
@@ -622,6 +642,9 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"env -S 'git status'",
 		"env -S'git status'",
 		"env --split-string='git status'",
+		// A pipe carries printed text only to the command it feeds, and a separator carries none.
+		"echo printenv && bash -c 'date'",
+		"echo printenv; sh -c 'date'",
 	} {
 		if blocked, out := runSandboxSecretsGuard(t, "openshell", command); blocked {
 			t.Errorf("blocked an ordinary command in a sandbox: %q\n%s", command, out)
@@ -649,12 +672,28 @@ func TestSandboxSecretsShellOutLimits(t *testing.T) {
 	}
 }
 
-// The guard is registered for Bash and Monitor only (internal/hooks/config.go), so a
-// Read of an environ file never reaches it. Covering Read would add a hook run to
-// every file read in a sandbox, so the gap is a decided non-goal, and this case
-// records it. A change that registers Read updates this case with that change.
+// The guard is registered for Bash and Monitor only (hooks.DefaultBase), so a Read of
+// an environ file never reaches it. Covering Read would add a hook run to every file
+// read in a sandbox, so the gap is a decided non-goal. This case reads the registered
+// matcher and fails if a change registers the guard for Read, so that change must
+// update this case with it.
 func TestSandboxSecretsGuardLeavesReadToolUncovered(t *testing.T) {
 	t.Parallel()
+	registered := 0
+	for _, entry := range hooks.DefaultBase().PreToolUse {
+		for _, h := range entry.Hooks {
+			if !strings.Contains(h.Command, "tap guard sandbox-secrets") {
+				continue
+			}
+			registered++
+			if slices.Contains(strings.Split(entry.Matcher, "|"), "Read") {
+				t.Errorf("the sandbox secrets guard is registered for Read (matcher %q); record the Read coverage in this case", entry.Matcher)
+			}
+		}
+	}
+	if registered == 0 {
+		t.Fatal("the sandbox secrets guard is not registered in hooks.DefaultBase")
+	}
 	proc := fakeGuardProcess(map[string]string{"GT_SESSION_BACKEND": "openshell"}, "/sandbox")
 	payload := `{"tool_name":"Read","tool_input":{"file_path":"/proc/self/environ"}}`
 	var errOut bytes.Buffer
