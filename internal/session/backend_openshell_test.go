@@ -959,10 +959,8 @@ func TestOpenShellMainScriptHolderIsNotThePolecatSession(t *testing.T) {
 	}
 }
 
-// An image whose gt commit differs from the installed gt's is ErrImageDrift to
-// errors.Is, with the same rebuild instruction as its message; the other checkImageGT
-// refusals (no commit recorded) are not, since rebuilding gt or the image's label
-// is not the drift the dispatcher waits out.
+// A commit mismatch is ErrImageDrift, which the dispatcher defers on. A missing
+// commit is a plain refusal, not drift, so the dispatcher labels the bead instead.
 func TestCheckImageGTClassifiesDrift(t *testing.T) {
 	t.Parallel()
 	err := checkImageGT("gastown-polecat:dev", gtLabelSource, "aaaaaaa1111", "bbbbbbb2222")
