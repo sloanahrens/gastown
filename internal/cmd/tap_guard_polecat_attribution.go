@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/cmdtree"
 )
 
 // The accepted-risk gate (internal/land/criteria.go) trusts a comment's
@@ -243,9 +245,16 @@ func polecatBdViolation(rest []string) polecatRule {
 				return polecatRuleCommentInput
 			}
 		}
-		// The bead id, the flags and the text are all checked here: the text
-		// may sit anywhere among them and a quoted one is a single token.
-		if rule := acceptedRiskRule(args); rule != polecatRuleOK {
+		// The text may sit anywhere among the flags and a quoted one is a
+		// single token, so a literal opener is looked for in every token; only
+		// the bead id and a global flag's value are exempt from the expansion
+		// test.
+		commentArgs := args
+		if verb == "comments" {
+			// bdWritesComment found the add action, so it is there to drop.
+			commentArgs = args[bdSubcommandIndex(args)+1:]
+		}
+		if rule := commentRule(commentArgs, true); rule != polecatRuleOK {
 			return rule
 		}
 	}
@@ -257,11 +266,11 @@ func polecatBdViolation(rest []string) polecatRule {
 		for _, flag := range bdNoteFlags {
 			switch {
 			case tok == flag && i+1 < len(flags):
-				if rule := acceptedRiskRule(flags[i+1 : i+2]); rule != polecatRuleOK {
+				if rule := noteFlagRule(flags[i+1]); rule != polecatRuleOK {
 					return rule
 				}
 			case strings.HasPrefix(tok, flag+"="):
-				if rule := acceptedRiskRule([]string{strings.TrimPrefix(tok, flag+"=")}); rule != polecatRuleOK {
+				if rule := noteFlagRule(strings.TrimPrefix(tok, flag+"=")); rule != polecatRuleOK {
 					return rule
 				}
 			}
@@ -277,7 +286,7 @@ func polecatGtViolation(rest []string) polecatRule {
 	if len(rest) < 3 || rest[0] != "bead" || (rest[1] != "comment" && rest[1] != "note") {
 		return polecatRuleOK
 	}
-	return acceptedRiskRule(rest[2:])
+	return commentRule(rest[2:], false)
 }
 
 // bdWritesComment reports whether a bd invocation adds a comment or note to a
@@ -371,22 +380,63 @@ func bdFlagTokens(tokens []string) []string {
 	return tokens
 }
 
-// acceptedRiskRule judges the arguments of a comment or note write. Comment text
-// is the arguments that follow the bead id, quoted as one token or split into
-// words, and a flag's value may sit among them, so each token is checked rather
-// than guessing which one is the text. A literal ACCEPTED-RISK: opener is refused
-// as such. A token whose expansion could still build the opener is refused as
-// unresolved, since the shell fills it in before bd sees the text.
-func acceptedRiskRule(tokens []string) polecatRule {
-	for _, tok := range tokens {
+// commentRule judges the arguments of a comment or note write, args being the
+// tokens after the verb: the bead id, the flags and the text, in any order. A
+// literal ACCEPTED-RISK: opener in any token is refused as such, since the text
+// may be split into words and sit anywhere among the flags. A token whose
+// expansion could build the opener is refused as unresolved, since the shell
+// fills it in before bd sees the text; but only a token that can be the text is
+// tested, because `bd comments add $ID "note"` is an ordinary comment. withFlags
+// is whether the tokens can carry bd flags; gt bead comment and gt bead note
+// take none.
+func commentRule(args []string, withFlags bool) polecatRule {
+	for _, tok := range args {
 		if opensAcceptedRisk(tok) {
 			return polecatRuleAcceptedRisk
 		}
 	}
-	for _, tok := range tokens {
+	for _, tok := range commentTextTokens(args, withFlags) {
 		if expansionMayOpenAcceptedRisk(tok) {
 			return polecatRuleUnresolvedText
 		}
+	}
+	return polecatRuleOK
+}
+
+// commentTextTokens returns the tokens of a comment's arguments that can be its
+// text: everything but the flags, the value of a global flag that takes one
+// (`--db $DB`) and the first positional, which is the bead id. Every token after
+// a `--` is positional. A flag bd does not list as taking a value leaves the
+// token behind it in, since that token may be the text.
+func commentTextTokens(args []string, withFlags bool) []string {
+	var text []string
+	sawID, positional := false, false
+	for i := 0; i < len(args); i++ {
+		tok := args[i]
+		switch {
+		case !positional && tok == "--":
+			positional = true
+		case withFlags && !positional && strings.HasPrefix(tok, "-"):
+			if cmdtree.IsBdGlobalValueFlag(tok) {
+				i++
+			}
+		case !sawID:
+			sawID = true
+		default:
+			text = append(text, tok)
+		}
+	}
+	return text
+}
+
+// noteFlagRule judges the value of a --notes or --append-notes flag, all of
+// which is text.
+func noteFlagRule(value string) polecatRule {
+	switch {
+	case opensAcceptedRisk(value):
+		return polecatRuleAcceptedRisk
+	case expansionMayOpenAcceptedRisk(value):
+		return polecatRuleUnresolvedText
 	}
 	return polecatRuleOK
 }

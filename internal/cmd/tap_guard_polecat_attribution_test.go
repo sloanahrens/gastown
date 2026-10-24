@@ -78,6 +78,11 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 		{"accepted-risk built by a substitution in a note", `bd note gt-x "$(printf 'ACCEPTED-RISK: ok')"`, polecatUnresolvedTextReason},
 		{"accepted-risk built by a variable in gt bead note", `gt bead note gt-x "$T"`, polecatUnresolvedTextReason},
 		{"accepted-risk built by a substitution in gt bead comment", `gt bead comment gt-x "$(echo 'ACCEPTED-RISK: ok')"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a variable after a variable id", `T='ACCEPTED-RISK: x'; bd comments add $ID "$T"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a variable after a global flag value", `bd --db $DB comments add gt-x "$T"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a variable after a double dash", `bd comments add gt-x -- "$T"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a variable after an unlisted flag", `bd comments add gt-x --other "$T"`, polecatUnresolvedTextReason},
+		{"literal accepted-risk after a variable id", `bd comments add $ID "ACCEPTED-RISK: fine"`, polecatAcceptedRiskReason},
 		{"accepted-risk built by a variable in append-notes", `bd update gt-x --append-notes "$(echo 'ACCEPTED-RISK: ok')"`, polecatUnresolvedTextReason},
 		{"accepted-risk built by a variable in append-notes equals", `bd update gt-x --append-notes="$T"`, polecatUnresolvedTextReason},
 		{"accepted-risk built by a variable in notes", `bd update gt-x --notes "$T"`, polecatUnresolvedTextReason},
@@ -130,6 +135,16 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 		{"variable after a marker-free word", `bd note gt-x "rig $RIG is set"`, ""},
 		{"substitution in prose note append", `bd update gt-x --append-notes "rebuilt with $(go env GOROOT)"`, ""},
 		{"variable named in prose about the marker", `bd comments add gt-x "the marker is $T, see the guard"`, ""},
+		{"variable as the bead id", `bd comments add $ID "found the cause"`, ""},
+		{"braced variable as the bead id", `bd comment ${BEAD} "found the cause"`, ""},
+		{"substitution as the bead id", `bd note $(gt hook-bead) "found the cause"`, ""},
+		{"variable as the bead id after a double dash", `bd comments add -- $ID "found the cause"`, ""},
+		{"variable as a global flag value", `bd --db $DB comments add gt-x "found the cause"`, ""},
+		{"variable as a global flag value after the verb", `bd comments add --format $F gt-x "found the cause"`, ""},
+		{"variable glued to a flag", `bd comments add gt-x --format=$F "found the cause"`, ""},
+		{"variable as the id of gt bead comment", `gt bead comment $ID "found the cause"`, ""},
+		{"variable as the id of gt bead note", `gt bead note $ID "found the cause"`, ""},
+		{"variable id with a variable in the prose", `bd comments add $ID "rig $RIG is set"`, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
