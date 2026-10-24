@@ -9,7 +9,7 @@ import dataclasses
 import json
 import os
 
-from . import backtest, common, loaders, mango_run, metrics, render, tables
+from . import backtest, common, loaders, mango_run, metrics, render, snapshot, tables
 
 BEAD_COLUMNS = ["id", "rig", "created_at", "closed_at", "type", "labels", "dependency_count", "comment_count",
                 "handoff_bytes", "sessions"]
@@ -310,13 +310,25 @@ def write_mango_section(env):
     return text
 
 
+def run_snapshot(town=None):
+    """Append one snapshot line to ~/gt/.runtime/metrics/snapshots.jsonl and return the log's path."""
+    import datetime as dt
+    town = _town(town)
+    path = os.path.join(town, ".runtime", "metrics", "snapshots.jsonl")
+    snapshot.append(path, snapshot.take(town, _run, dt.datetime.now(dt.timezone.utc)))
+    return path
+
+
 def main(argv):
     import datetime as dt
-    cmds = {"extract", "mango", "backtest", "report", "all"}
+    cmds = {"snapshot", "extract", "mango", "backtest", "report", "all"}
     if len(argv) != 1 or argv[0] not in cmds:
-        print("usage: town-metrics extract|mango|backtest|report|all   (run under `nice`, on demand only)")
+        print("usage: town-metrics snapshot|extract|mango|backtest|report|all   (run under `nice`, on demand only)")
         return 2
     cmd = argv[0]
+    if cmd == "snapshot":
+        print("snapshot: appended to %s" % run_snapshot())
+        return 0
     env = real_env(dt.date.today().isoformat())
     if cmd in ("extract", "all"):
         result = extract(env)
