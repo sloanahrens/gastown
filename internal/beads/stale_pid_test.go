@@ -4,7 +4,6 @@ package beads
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -43,21 +42,40 @@ func TestCleanStaleDoltServerPID_KeepsPidFileOnEPERM(t *testing.T) {
 	}
 }
 
-// TestCleanStaleDoltServerPID_RemovesPidFileOfExitedProcess covers the other
-// side: a child that has exited and been reaped answers ESRCH, so its pid file
-// is stale and must go.
-func TestCleanStaleDoltServerPID_RemovesPidFileOfExitedProcess(t *testing.T) {
+// noSuchPID is above the largest pid any kernel hands out (pid_max is at most
+// 4194304 on Linux and 99999 on macOS), so no process can hold it and the probe
+// answers ESRCH. A reaped child's pid is not used, because the kernel may reuse
+// it before the probe runs.
+const noSuchPID = 1<<31 - 1
+
+// TestCleanStaleDoltServerPID_RemovesPidFileOfAbsentProcess covers the other
+// side: a pid with no process behind it answers ESRCH, so its pid file is stale
+// and must go.
+func TestCleanStaleDoltServerPID_RemovesPidFileOfAbsentProcess(t *testing.T) {
 	t.Parallel()
-	child := exec.Command("sh", "-c", "exit 0")
-	if err := child.Run(); err != nil {
-		t.Fatalf("run child: %v", err)
-	}
 	beadsDir := t.TempDir()
-	path := writeDoltPidFile(t, beadsDir, child.Process.Pid)
+	path := writeDoltPidFile(t, beadsDir, noSuchPID)
 
 	CleanStaleDoltServerPID(beadsDir)
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("pid file of an exited process still exists (stat error: %v)", err)
+		t.Errorf("pid file of an absent process still exists (stat error: %v)", err)
+	}
+}
+
+// TestCleanStaleDoltServerPID_RemovesPidFileOfNonPositivePID: pid 0 and -1 are
+// not processes. Signal 0 to either addresses a group or every process, so the
+// file must go without a probe ever reporting it alive.
+func TestCleanStaleDoltServerPID_RemovesPidFileOfNonPositivePID(t *testing.T) {
+	t.Parallel()
+	for _, pid := range []int{0, -1} {
+		beadsDir := t.TempDir()
+		path := writeDoltPidFile(t, beadsDir, pid)
+
+		CleanStaleDoltServerPID(beadsDir)
+
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("pid file holding %d still exists (stat error: %v)", pid, err)
+		}
 	}
 }
