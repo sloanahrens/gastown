@@ -152,6 +152,9 @@ func (c *StaleDoltPortCheck) Fix(ctx *CheckContext) error {
 
 // getCorrectPort returns the town's Dolt port from the config resolver
 // (mayor/town.json, then .dolt-data/config.yaml), or 0 when it names none.
+// A town.json dolt block that names no port is not an endpoint: LoadTownConfig
+// rejects a dolt.port outside 1..65535, so ResolveDoltEndpoint falls through to
+// config.yaml exactly as it does for an absent block (gt-co6me).
 func (c *StaleDoltPortCheck) getCorrectPort(ctx *CheckContext) int {
 	ep, ok := config.ResolveDoltEndpoint(ctx.TownRoot)
 	if !ok || ep.Port <= 0 {
