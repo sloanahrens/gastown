@@ -31,11 +31,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 FROM ubuntu:24.04
 
 ARG GO_VERSION=1.27.1
-# sha256 from https://go.dev/dl/?mode=json for go1.27.1.linux-arm64.tar.gz and
-# go1.27.1.linux-amd64.tar.gz. The image's Go must be at least the highest `go`
-# line of any rig's go.mod (om, agentlab, hm, devops, mango say 1.27): a newer
-# line makes go download a toolchain, and that downloaded go binary is not one
-# the sandbox policy lets reach the module hosts.
+# The image's Go must be at least the highest `go` line of any rig's go.mod (om,
+# agentlab, hm, devops, mango say 1.27): a newer line makes go download a
+# toolchain, and that downloaded go binary is not one the sandbox policy lets
+# reach the module hosts. GO_FLOOR is that line, and the build fails when
+# GO_VERSION is below it. Raise GO_FLOOR when a rig's go.mod names a newer line.
+ARG GO_FLOOR=1.27
+# sha256 of go1.27.1.linux-arm64.tar.gz and go1.27.1.linux-amd64.tar.gz, as listed
+# by https://go.dev/dl/?mode=json&include=all and matching the tarballs' own bytes,
+# checked on 2026-10-23. Update a digest only together with GO_VERSION.
 ARG GO_SHA256_ARM64=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec
 ARG GO_SHA256_AMD64=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
 ARG NODE_MAJOR=22
@@ -72,6 +76,11 @@ RUN ARCH=$(dpkg --print-architecture) \
     && curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" \
     && echo "${SHA}  /tmp/go.tgz" | sha256sum -c - \
     && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
+
+# The floor sorts first (or ties) only when the installed Go is at least GO_FLOOR.
+RUN GO_NOW=$(GOTOOLCHAIN=local /usr/local/go/bin/go env GOVERSION | sed 's/^go//') \
+    && [ "$(printf '%s\n%s\n' "$GO_FLOOR" "$GO_NOW" | sort -V | head -n 1)" = "$GO_FLOOR" ] \
+    || { echo "image Go ${GO_NOW} is below GO_FLOOR ${GO_FLOOR}" >&2; exit 1; }
 
 # GNU Make 4.4.1 ahead of /usr/bin/make on PATH (see the make-build stage).
 COPY --from=make-build /usr/local/bin/make /usr/local/bin/make
