@@ -188,6 +188,24 @@ func TestWorkLandedOnTargetSeesTheCommitOnTheTarget(t *testing.T) {
 	}
 }
 
+// The record's head was gc'd out of this clone, so the LANDING RECORD arm reads
+// its LandedCommit instead. The landed commit adds a file the worktree's commit
+// does not, so its patch is not on the target and the content arm decides.
+func TestWorkLandedOnTargetFallsBackWhenTheHeadIsNotInTheClone(t *testing.T) {
+	t.Parallel()
+	w := newLandedWorld(t)
+	missing := strings.Repeat("e", 40)
+	landed := w.git.Commit(t, w.origin, "main", "land: gt-abc", map[string]string{"b.txt": "work\n", "d.txt": "squashed\n"})
+	w.git.SetRef(t, w.repo, "refs/remotes/origin/main", landed)
+	record := LandingRecord{BeadID: "gt-abc", Head: missing, LandedCommit: landed, Target: "main"}
+	issue := &beads.Issue{ID: "gt-abc", Status: "closed", Notes: record.NoteBlock()}
+
+	v := WorkLandedOnTarget(w.worktree(), WorkLandedQuery{Head: w.earlier, BeadID: "gt-abc", Issue: issue})
+	if !v.Landed || v.Reason != WorkLandedByRecord {
+		t.Fatalf("WorkLandedOnTarget(record head missing from clone) = %+v; want landed %s", v, WorkLandedByRecord)
+	}
+}
+
 // Every way the proof can be missing returns not-landed with a Reason, never a
 // landed answer: a missing record, an unreadable ref, an unreadable object, a
 // failed comparison, and a worktree with no files to compare.
