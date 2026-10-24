@@ -407,6 +407,20 @@ func (r townReader) readObject(rel string) (map[string]any, error) {
 	return doc, nil
 }
 
+// rigBeadsConfig returns the town-relative path of the rig's beads config.yaml:
+// the first of the rig's beads directories that holds one.
+func rigBeadsConfig(town townReader, rig string) (string, error) {
+	for _, dir := range config.RigBeadsDirs(rig) {
+		rel := dir + "/config.yaml"
+		if _, err := town.read(rel); err == nil {
+			return rel, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("sandbox: rig %s has no beads config.yaml in %s", rig, strings.Join(config.RigBeadsDirs(rig), " or "))
+}
+
 func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	if err := s.validate(); err != nil {
 		return nil, err
@@ -449,7 +463,6 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 		"mayor/town.json",
 		".beads/routes.jsonl",
 		rigMetadata,
-		s.Rig + "/mayor/rig/.beads/config.yaml",
 	} {
 		raw, err := town.read(rel)
 		if errors.Is(err, fs.ErrNotExist) && rel == rigMetadata {
@@ -464,6 +477,25 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 		}
 		add(rel, data)
 	}
+
+	// The rig's beads config sits in the tracked workspace or, for a rig whose
+	// mayor/rig/.beads holds only metadata.json and a redirect (devops, fractals,
+	// beaver, agentlab), in <rig>/.beads. Either way it lands at the tracked
+	// workspace, which is where the sandbox's bd looks; a rig with neither stops
+	// the render, since bd would run with no prefix (gt-z7ut1).
+	configRel, err := rigBeadsConfig(town, s.Rig)
+	if err != nil {
+		return nil, err
+	}
+	rawConfig, err := town.read(configRel)
+	if err != nil {
+		return nil, err
+	}
+	beadsConfig, err := sanitizeFile(configRel, rawConfig)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: %s: %w", configRel, err)
+	}
+	add(s.Rig+"/mayor/rig/.beads/config.yaml", beadsConfig)
 
 	// Both beads metadata files point at the control plane's Dolt server.
 	for _, rel := range []string{".beads/metadata.json", s.Rig + "/mayor/rig/.beads/metadata.json"} {
