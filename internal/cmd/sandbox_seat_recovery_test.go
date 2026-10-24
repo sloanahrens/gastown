@@ -212,3 +212,108 @@ func TestCheckRecoveryOfAGoneSandboxSeatTellsLostWork(t *testing.T) {
 		})
 	}
 }
+
+// workShowFailsBeads is a beads fake whose Show fails for one bead.
+type workShowFailsBeads struct {
+	mrlessBeads
+	id string
+}
+
+func (f workShowFailsBeads) Show(id string) (*beads.Issue, error) {
+	if id == f.id {
+		return nil, errors.New("dolt unreachable")
+	}
+	return f.mrlessBeads.Show(id)
+}
+
+// The nuke safety check is the gate that deletes a seat, so it asks the same
+// lost-work question check-recovery does: a sandbox the gateway says is gone
+// reads clean, which is not finished. Unfinished work with no branch on origin
+// and no resume_branch refuses the nuke; a branch on origin, a resume_branch, a
+// finished bead or a host seat does not; an origin or a bead that cannot be read
+// refuses it and says so (gt-qq6rg.3).
+func TestCheckPolecatSafetyOfAGoneSandboxSeat(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/ember/gt-a+x"
+	tests := []struct {
+		name       string
+		host       bool // the seat is a host seat, not a sandbox seat
+		source     string
+		workStatus string
+		resume     bool
+		onOrigin   bool
+		originErr  error
+		showFails  bool
+		want       string // substring of a refusal reason; "" for a safe nuke
+	}{
+		{name: "unfinished_nothing_pushed", source: "gt-work", workStatus: "open", want: "work lost: sandbox gone with gt-work unfinished"},
+		{name: "branch_on_origin", source: "gt-work", workStatus: "open", onOrigin: true},
+		{name: "resume_branch", source: "gt-work", workStatus: "open", resume: true},
+		{name: "bead_finished", source: "gt-work", workStatus: "closed"},
+		{name: "no_bead"},
+		{name: "host_seat_is_not_checked", host: true, source: "gt-work", workStatus: "open"},
+		{name: "origin_cannot_be_asked", source: "gt-work", workStatus: "open", originErr: errors.New("forgejo unreachable"), want: "cannot check whether the sandbox's work survived"},
+		{name: "work_bead_cannot_be_read", source: "gt-work", workStatus: "open", showFails: true, want: "could not read gt-work for a resume_branch"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+			fake := mrlessBeads{beadsfake.New()}
+			var db recoveryBeads = fake
+			if tt.showFails {
+				db = workShowFailsBeads{fake, "gt-work"}
+			}
+			agent := sandboxSeatAgent
+			if tt.host {
+				agent = "deepseek-flash"
+			}
+			agentID := polecatBeadIDForRig(r, "gastown", "ember")
+			if _, err := fake.Create(beads.CreateOptions{
+				ID: agentID, Title: agentID, Labels: []string{"gt:agent"}, Priority: -1,
+				Description: beads.FormatAgentDescription(agentID, &beads.AgentFields{
+					RoleType: "polecat", Rig: "gastown", AgentState: string(beads.AgentStateIdle),
+					CleanupStatus: string(polecat.CleanupClean), Agent: agent, Branch: branch, LastSourceIssue: tt.source,
+				}),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tt.workStatus != "" {
+				if _, err := fake.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
+					t.Fatal(err)
+				}
+				status := tt.workStatus
+				upd := beads.UpdateOptions{Status: &status}
+				if tt.resume {
+					upd.AppendNotes = "resume_branch: " + branch
+				}
+				if err := fake.Update("gt-work", upd); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env := sandboxSeatEnv{
+				probe: func(string, string) (polecat.LiveGitState, bool) {
+					if tt.host {
+						return polecat.LiveGitState{}, false
+					}
+					return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
+				},
+				remoteBranch: func(string, string) (bool, error) { return tt.onOrigin, tt.originErr },
+			}
+			get := func(string) (*polecat.Polecat, error) {
+				return &polecat.Polecat{Name: "ember", Branch: branch, ClonePath: filepath.Join(town, "gastown", "polecats", "ember", "gastown")}, nil
+			}
+
+			result := checkPolecatSafetyWith("gastown", "ember", r, get, db, env)
+
+			joined := strings.Join(result.Reasons, " | ")
+			if tt.want == "" && len(result.Reasons) != 0 {
+				t.Errorf("nuke refused: %s", joined)
+			}
+			if tt.want != "" && !strings.Contains(joined, tt.want) {
+				t.Errorf("reasons = %q, want one containing %q", joined, tt.want)
+			}
+		})
+	}
+}

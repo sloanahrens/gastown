@@ -1812,7 +1812,12 @@ func checkRecoveryForPolecatWith(sandboxEnv sandboxSeatEnv, bd recoveryBeads, pr
 		}
 		activeMRAssessment := polecat.ActiveMRAssessment{}
 		if fields.ActiveMR != "" {
-			gitSafe := sandboxed && sandboxSeatGitSafe(sandboxLive) || !sandboxed && activeMRGitSafeForWorktree(p.ClonePath)
+			var gitSafe bool
+			if sandboxed {
+				gitSafe = sandboxSeatGitSafe(sandboxLive)
+			} else {
+				gitSafe = activeMRGitSafeForWorktree(p.ClonePath)
+			}
 			// hq-kr3hm: a dangling active_mr used to report PENDING_MR forever,
 			// telling an agent to PRESERVE a polecat whose work already landed.
 			// The landed probe is what separates "gone and finished" from

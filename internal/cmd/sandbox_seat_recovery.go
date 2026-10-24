@@ -42,7 +42,15 @@ func applySandboxLostWorkFacts(facts *polecat.WorkstateFacts, env sandboxSeatEnv
 		return
 	}
 	preserved := false
-	if issue, err := bd.Show(workBead); err == nil && issue != nil && patrolscan.ResumeBranchFromNotes(issue.Notes) != "" {
+	issue, showErr := bd.Show(workBead)
+	if showErr != nil && !errors.Is(showErr, beads.ErrNotFound) {
+		// A bead that cannot be read may carry the resume_branch: not lost, not safe.
+		facts.GitCheckFailed = true
+		facts.GitCheckFailedReason = fmt.Sprintf("git_state=unknown: could not read %s for a resume_branch: %v", workBead, showErr)
+		facts.GitStateSource = polecat.GitStateSourceUnknown
+		return
+	}
+	if issue != nil && patrolscan.ResumeBranchFromNotes(issue.Notes) != "" {
 		preserved = true
 	} else if branch != "" {
 		onOrigin, err := env.branchOnOrigin(rigPath, branch)
@@ -90,4 +98,22 @@ func sandboxBranch(fields *beads.AgentFields, p *polecat.Polecat) string {
 		return fields.Branch
 	}
 	return p.Branch
+}
+
+// sandboxLostWork asks the lost-work question the nuke gate needs, with the
+// same facts and rule check-recovery uses: it returns the bead whose work is
+// lost, or "" when nothing is, and an error when the answer is unknown (origin
+// or the work bead could not be read), which the caller fails closed on
+// (gt-qq6rg.3).
+func sandboxLostWork(env sandboxSeatEnv, bd issueShower, rigPath, branch, hookBead, sourceHint string, hook polecat.HookBeadDisposition, workTerminal bool) (string, error) {
+	facts := polecat.WorkstateFacts{HookBeadSafe: true, AssignedBeadTerminal: workTerminal}
+	applyHookDispositionToWorkstateFacts(&facts, hookBead, hook)
+	applySandboxLostWorkFacts(&facts, env, bd, rigPath, branch, hookBead, sourceHint)
+	if facts.GitCheckFailed {
+		return "", errors.New(facts.GitCheckFailedReason)
+	}
+	if in := polecat.NewWorkstateInput(facts); in.SandboxWorkLost {
+		return in.SandboxWorkBead, nil
+	}
+	return "", nil
 }
