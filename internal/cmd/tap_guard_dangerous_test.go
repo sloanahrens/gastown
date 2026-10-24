@@ -4152,10 +4152,13 @@ func TestDangerousGuardLenientFallbackKeepsSeparators(t *testing.T) {
 	}{
 		{"a double-quoted paren on the last line", "echo ok\nrm -rf /\necho \"(", true},
 		{"a single-quoted paren on the last line", "echo ok\nrm -rf /\necho '(", true},
-		{"a harmless last line", "echo ok\nrm -rf /\necho x", true},
+		{"a harmless last line behind an unclosed quote and a paren", "echo ok\nrm -rf /\necho \"(x", true},
 		{"a semicolon glued to the earlier line", "echo ok; rm -rf /; echo \"(", true},
 		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"(", true},
 		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"(", true},
+		{"a single ampersand glued on both sides", "echo ok&rm -rf /&echo \"(", true},
+		{"a doubled pipe glued on both sides", "echo ok||rm -rf /||echo \"(", true},
+		{"an ampersand redirection keeps the nuke an argument", "echo ok >&rm -rf / \"(", false},
 		{"the nuke as an argument of the line before", "echo ok\necho rm -rf /\necho \"(", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -4184,7 +4187,7 @@ func TestDangerousGuardFieldsFallbackKeepsSeparators(t *testing.T) {
 	}{
 		{"an unclosed double quote on the last line", "echo ok\nrm -rf /\necho \"", true},
 		{"an unclosed double quote with text on the last line", "echo ok\nrm -rf /\necho \"x", true},
-		{"a harmless last line", "echo ok\nrm -rf /\necho x", true},
+		{"a harmless last line behind a closed quote and an unclosed one", "echo ok\nrm -rf /\necho \"x\" \"y", true},
 		{"a semicolon glued to the earlier line", "echo ok;rm -rf /;echo \"", true},
 		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"", true},
 		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"", true},
