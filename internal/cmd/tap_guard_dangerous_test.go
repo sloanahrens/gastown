@@ -3828,6 +3828,9 @@ func TestDangerousGuardQuotedParenShapes(t *testing.T) {
 		{"a nuke after a quoted close-paren in a substitution", `echo $(echo ")" && rm -rf /)`, true},
 		{"a sudo body after a quoted close-paren in a substitution", `x=$(echo ")" && bash -c 'sudo apt-get install foo')`, true},
 		{"a sudo body after a quoted close-paren and a semicolon", `echo $(echo ")" ; bash -c 'sudo apt-get install foo')`, true},
+		{"a nuke after a double-quoted dollar-paren in a substitution", `echo $(echo "$(" ; rm -rf /)`, true},
+		{"a nuke after a double-quoted dollar-paren and a nested group", `echo $(echo "$(" ; (echo ok) ; rm -rf /)`, true},
+		{"a quoted dollar-paren and a nested group with harmless commands", `echo $(echo "$(" ; (echo ok) ; echo hi)`, false},
 		{"a sudo body behind text then a quote that ends the dollar-paren", `echo "a$(" bash -c 'sudo apt-get install foo'`, true},
 		{"a sudo body behind a single-quoted dollar-paren and text", `echo '$(' text bash -c 'sudo apt-get install foo'`, true},
 		{"a sudo body behind a dollar-paren and an escaped quote", `echo "\"$(" bash -c 'sudo apt-get install foo'`, true},
@@ -3842,6 +3845,42 @@ func TestDangerousGuardQuotedParenShapes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); (reason != "") != tt.blocked {
 				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, reason != "", reason, tt.blocked)
+			}
+		})
+	}
+}
+
+// TestQuotedDollarParenPadsOnlyItsSubstitutionsCloser pins the reach of the
+// ")" padding: a substitution whose word was ended by a quoted dollar-paren
+// has its OWN ")" spaced out, so the word glued before it ("/" in
+// "rm -rf /)") is a token of its own; a ")" nested inside that substitution
+// closes a group and is emitted exactly as in any other substitution body,
+// staying glued to the word before it ("ok)" below). Without the second half
+// the padding would rewrite every ")" in the scope, not just the one the
+// gt-qg832 shape hid (gt-qg832).
+func TestQuotedDollarParenPadsOnlyItsSubstitutionsCloser(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{
+			name:    "the closer is padded so the glued word stands alone",
+			command: `echo $(echo "$(" ; rm -rf /)`,
+			want:    []string{"echo", "$(echo", "$(", ";", "rm", "-rf", "/", ")"},
+		},
+		{
+			name:    "a nested group's closer stays glued to its word",
+			command: `echo $(echo "$(" ; (echo ok); rm -rf /)`,
+			want:    []string{"echo", "$(echo", "$(", ";", "(echo", "ok)", ";", "rm", "-rf", "/", ")"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellTokenize(tt.command)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("shellTokenize(%q) = %q, want %q", tt.command, got, tt.want)
 			}
 		})
 	}

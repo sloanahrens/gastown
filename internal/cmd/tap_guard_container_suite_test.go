@@ -2520,6 +2520,10 @@ func TestCommandSubstitutionSpans(t *testing.T) {
 		{"unterminated", `x=$(go test .`, []string{"go test ."}},
 		{"unterminated backtick", "x=`go test .", []string{"go test ."}},
 		{"unterminated quote in the body", `echo $(a "b) $(c)`, []string{`a "b) $(c)`}},
+		// gt-qg832: the quote after a quoted dollar-paren's "(" is the one that
+		// ends the double-quoted word, so the ")" that closes the substitution
+		// around it is found instead of the body running past it.
+		{"quoted dollar-paren in a substitution", `echo $(echo "$(" ; rm -rf /)`, []string{`echo "$(" ; rm -rf /`}},
 		{"unterminated after a closed one", `a=$(one) b=$(two`, []string{"one", "two"}},
 		{"process substitution", `cat <(go test .)`, []string{"go test ."}},
 		{"output process substitution", `cat > >(tee out)`, []string{"tee out"}},
