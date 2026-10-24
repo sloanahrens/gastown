@@ -30,6 +30,8 @@ AGENT_SANDBOX_VERSION="v1.0.7"
 # Empty records the first fetch's digest next to the manifest; a release tag
 # can be re-pointed, so set this to pin the bytes before the first fetch.
 AGENT_SANDBOX_SHA256="${GT_K8S_AGENT_SANDBOX_SHA256:-}"
+METRICS_SERVER_VERSION="v0.9.0" # the release proven against kind (gt-avlfd)
+METRICS_SERVER_SHA256="${GT_K8S_METRICS_SERVER_SHA256:-}" # pinned like AGENT_SANDBOX_SHA256
 CHART_VERSION="0.1.4" # 0.1.5-pre.4 publishes a server leaf not signed by its CA
 GATEWAY_NAME="k8s"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

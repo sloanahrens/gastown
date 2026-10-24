@@ -23,6 +23,7 @@ check() { local desc=$1; shift; if "$@"; then pass "$desc"; else fail "$desc"; f
 contains() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
 lacks() { ! contains "$1" "$2"; }
 count() { grep -c -- "$1" <<<"$2" || true; }
+occurrences() { { grep -o -- "$1" <<<"$2" || true; } | wc -l | tr -d ' '; }
 # GNU stat has -f for the filesystem, BSD stat has -f for the format; the BSD
 # probe must send GNU's filesystem dump to /dev/null, not just its error, or
 # the fallback output is appended to that dump.
@@ -93,6 +94,7 @@ STUB
 cat >"$TMP/bin/kubectl" <<'STUB'
 #!/usr/bin/env bash
 "$(dirname "$0")/_log" kubectl "$@"
+METRICS_DEFAULT_ARGS='--cert-dir=/tmp --secure-port=10250 --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname --kubelet-use-node-status-port --metric-resolution=15s'
 case "$*" in
   *"get nodes -l gt.dev/pool"*)
     if [ -f "$STATE/kubectl-down" ]; then echo "The connection to the server 127.0.0.1:1 was refused" >&2; exit 1; fi
@@ -115,6 +117,16 @@ case "$*" in
     for a in "$@"; do case "$a" in --from-literal=helm=*) echo "${a#--from-literal=}" ;; esac; done ;;
   *"apply -f -"*)
     while read -r line; do case "$line" in helm=*) printf '%s' "${line#helm=}" >"$STATE/marker" ;; esac; done ;;
+  # The args the pinned components.yaml gives the metrics-server container. The
+  # stub keeps them across applies, so a rerun exercises the script's
+  # already-flagged guard rather than the merge kubectl apply would do.
+  *"get deployment metrics-server"*)
+    cat "$STATE/metrics-args" 2>/dev/null || printf '%s' "$METRICS_DEFAULT_ARGS" ;;
+  *"patch deployment metrics-server"*)
+    case "$*" in
+      *'"value":"--kubelet-insecure-tls"'*)
+        printf '%s --kubelet-insecure-tls' "$(cat "$STATE/metrics-args" 2>/dev/null || printf '%s' "$METRICS_DEFAULT_ARGS")" >"$STATE/metrics-args" ;;
+    esac ;;
 esac
 exit 0
 STUB
@@ -308,6 +320,15 @@ check "only one taint is declared" test "$(grep -c 'effect:' "$S/state/kind-conf
 check "the gateway port mapping stays on the control-plane node" test "$(awk '/^- role: control-plane/{f=1;next} /^- role:/{f=0} f&&/hostPort/{c++} END{print c+0}' "$S/state/kind-config.yaml")" -eq 1
 check "the priority classes are applied" contains "priority-classes.yaml" "$CALLS_LOG"
 check "the priority classes are applied before the chart" before "priority-classes.yaml" "helm upgrade --install"
+check "the metrics-server manifest is downloaded from the pinned release" contains "metrics-server/releases/download/v0.9.0/components.yaml" "$(grep '^curl ' "$S/calls.log")"
+metrics_manifest="$S/home/gt/.runtime/sbx-k8s/metrics-server-v0.9.0.yaml"
+check "the metrics-server manifest is applied from the local verified copy" contains "kubectl apply -f $metrics_manifest" "$CALLS_LOG"
+check "the first fetch records the metrics-server digest" test "$(cat "$metrics_manifest.sha256")" = "$(digest "$metrics_manifest")"
+check "metrics-server is installed after the cluster exists" before "kind create cluster" "kubectl apply -f $metrics_manifest"
+check "the insecure kubelet flag is patched in once" test "$(count 'patch deployment metrics-server' "$CALLS_LOG")" -eq 1
+check "the flag patch appends to the container args as a json op" contains '"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"' "$CALLS_LOG"
+check "the flag is patched after the manifest is applied" before "apply -f $metrics_manifest" "patch deployment metrics-server"
+check "the metrics-server rollout follows the flag patch" before "patch deployment metrics-server" "rollout status deployment/metrics-server"
 patch_args='-n agent-sandbox-system patch deployment agent-sandbox-controller --type merge -p {"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
 check "the agent-sandbox controller deployment is patched once with exactly the core nodeSelector" test "$(grep -cF -e "$patch_args" "$S/calls.log" || true)" -eq 1
 check "the controller is pinned before its rollout is awaited" before "patch deployment agent-sandbox-controller" "rollout status deployment/agent-sandbox-controller"
@@ -534,6 +555,29 @@ run "$UP" --
 check "a changed agent-sandbox manifest stops the run" test "$RC" -ne 0
 check "the failure names both digests" contains "refusing to apply it" "$OUT_TEXT"
 check "the unverified manifest is not applied" lacks "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/agent-sandbox-v1.0.7.yaml" "$CALLS_LOG"
+
+echo "the metrics-server manifest does not match its pin"
+scenario metrics_digest
+mkdir -p "$S/home/gt/.runtime/sbx-k8s"
+echo "0000000000000000000000000000000000000000000000000000000000000000" >"$S/home/gt/.runtime/sbx-k8s/metrics-server-v0.9.0.yaml.sha256"
+run "$UP" --
+check "a changed metrics-server manifest stops the run" test "$RC" -ne 0
+check "the failure names metrics-server and the version" contains "metrics-server v0.9.0 is" "$OUT_TEXT"
+check "the failure refuses to apply it and names both digests" contains "refusing to apply it" "$OUT_TEXT"
+check "the unverified metrics-server manifest is not applied" lacks "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/metrics-server-v0.9.0.yaml" "$CALLS_LOG"
+check "no flag is patched onto an unverified deployment" lacks "patch deployment metrics-server" "$CALLS_LOG"
+
+echo "the insecure kubelet flag survives a rerun exactly once"
+scenario metrics_rerun
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
+run "$UP" --
+check "the first run patches the flag in" test "$(occurrences '--kubelet-insecure-tls' "$(cat "$S/state/metrics-args")")" -eq 1
+run "$UP" --
+check "the rerun exits 0" test "$RC" -eq 0
+# calls.log accumulates both runs; the guard means the two runs patch once.
+check "the flag is not patched again when the deployment already has it" test "$(count 'patch deployment metrics-server' "$(cat "$S/calls.log")")" -eq 1
+check "the deployment still carries the flag exactly once" test "$(occurrences '--kubelet-insecure-tls' "$(cat "$S/state/metrics-args")")" -eq 1
+check "the manifest's own container args survive the patch" contains "--metric-resolution=15s" "$(cat "$S/state/metrics-args")"
 
 echo "register the gateway in the town config"
 scenario town

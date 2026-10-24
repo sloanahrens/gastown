@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Stand up the local Kubernetes sandbox environment (see docs/design/k8s-sandboxes.md):
 # a Colima VM, a kind cluster with a fixed gateway port, a local image
-# registry, the pinned agent-sandbox controller and the OpenShell chart, then
-# register the gateway as `k8s` in an isolated CLI config. Safe to rerun.
+# registry, the pinned metrics-server and agent-sandbox releases and the
+# OpenShell chart, then register the gateway as `k8s` in an isolated CLI config.
+# Safe to rerun.
 # --register-town also registers it in the town's OpenShell config, where the
 # daemon looks, and leaves the previously active gateway selected (gt-0knzj).
 set -euo pipefail
@@ -149,25 +150,51 @@ pool_nodes="$(grep -c . <<<"$pool_list" || true)"
   die "cluster $CLUSTER lacks the core and sandbox nodes ($pool_nodes labelled, want 2); rebuild it: deploy/k8s/kind/down.sh && deploy/k8s/kind/up.sh"
 kubectl apply -f "$HERE/../priority-classes.yaml"
 
-# The release tag can be re-pointed at different bytes; the digest is what
-# pins them. The first fetch records its digest beside the manifest and later
-# runs refuse a changed asset; GT_K8S_AGENT_SANDBOX_SHA256 pins it from the
-# first run.
+# fetch_pinned NAME VERSION URL DEST PIN downloads URL to DEST and refuses a
+# manifest whose sha256 differs from PIN or from the digest the first fetch
+# recorded beside DEST. A release tag can be re-pointed at different bytes; the
+# digest is what pins them.
+fetch_pinned() { # fetch_pinned NAME VERSION URL DEST PIN
+  local name=$1 version=$2 url=$3 dest=$4 expected=${5:-} actual
+  curl -fsSL -o "$dest" "$url"
+  actual="$(sha256_of "$dest")"
+  if [ -z "$expected" ] && [ -f "$dest.sha256" ]; then
+    expected="$(cat "$dest.sha256")"
+  fi
+  if [ -z "$expected" ]; then
+    printf '%s\n' "$actual" >"$dest.sha256"
+    say "recorded the $name manifest digest ($actual) in $dest.sha256"
+  elif [ "$actual" != "$expected" ]; then
+    die "$name $version is $actual, expected $expected; refusing to apply it"
+  fi
+}
+
+# metrics-server feeds `kubectl top` and the resource sampler. kind's kubelet
+# serves a certificate metrics-server cannot verify, so the metrics API answers
+# only once its deployment allows insecure TLS; the flag is appended here and
+# never in a values file a cloud environment reuses.
+say "installing metrics-server $METRICS_SERVER_VERSION"
+metrics_manifest="$OUT/metrics-server-$METRICS_SERVER_VERSION.yaml"
+fetch_pinned metrics-server "$METRICS_SERVER_VERSION" \
+  "https://github.com/kubernetes-sigs/metrics-server/releases/download/$METRICS_SERVER_VERSION/components.yaml" \
+  "$metrics_manifest" "$METRICS_SERVER_SHA256"
+kubectl apply -f "$metrics_manifest"
+metrics_args="$(kubectl -n kube-system get deployment metrics-server -o jsonpath='{.spec.template.spec.containers[0].args[*]}' 2>&1)" ||
+  die "cannot read the metrics-server deployment's args: $(tr '\n' ' ' <<<"$metrics_args" | cut -c1-160)"
+case " $metrics_args " in
+  *" --kubelet-insecure-tls "*) ;;
+  *)
+    kubectl -n kube-system patch deployment metrics-server --type json \
+      -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+    ;;
+esac
+kubectl -n kube-system rollout status deployment/metrics-server --timeout=180s
+
 say "installing agent-sandbox $AGENT_SANDBOX_VERSION"
 sandbox_manifest="$OUT/agent-sandbox-$AGENT_SANDBOX_VERSION.yaml"
-curl -fsSL -o "$sandbox_manifest" \
-  "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/$AGENT_SANDBOX_VERSION/sandbox.yaml"
-actual="$(sha256_of "$sandbox_manifest")"
-expected="$AGENT_SANDBOX_SHA256"
-if [ -z "$expected" ] && [ -f "$sandbox_manifest.sha256" ]; then
-  expected="$(cat "$sandbox_manifest.sha256")"
-fi
-if [ -z "$expected" ]; then
-  printf '%s\n' "$actual" >"$sandbox_manifest.sha256"
-  say "recorded the agent-sandbox manifest digest ($actual) in $sandbox_manifest.sha256"
-elif [ "$actual" != "$expected" ]; then
-  die "agent-sandbox $AGENT_SANDBOX_VERSION is $actual, expected $expected; refusing to apply it"
-fi
+fetch_pinned agent-sandbox "$AGENT_SANDBOX_VERSION" \
+  "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/$AGENT_SANDBOX_VERSION/sandbox.yaml" \
+  "$sandbox_manifest" "$AGENT_SANDBOX_SHA256"
 kubectl apply -f "$sandbox_manifest"
 # Until this patch the controller may start on the control-plane node; it can
 # never start on the sandbox node (the taint), and the patch rolls it onto core
