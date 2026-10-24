@@ -1,0 +1,68 @@
+package metrics
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+// killGrace is how long a child gets after its context ends before its pipes
+// are closed and Wait returns: a child that forks keeps the pipes open, and
+// without a grace Wait would outlive the deadline.
+const killGrace = 2 * time.Second
+
+// DefaultAllowEnv is the environment a source's child commands inherit: enough
+// to find binaries and the user's config, and nothing else.
+var DefaultAllowEnv = []string{"PATH", "HOME", "TMPDIR", "LANG"}
+
+// OSRunner returns a Runner that runs argv as a child process under the
+// caller's context. The child's environment holds only the variables named in
+// allowEnv that are set, so a secret in the snapshotting process's environment
+// never reaches a command a source runs. A non-zero exit is an error carrying
+// the tail of stderr.
+func OSRunner(allowEnv []string) Runner {
+	return func(ctx context.Context, argv []string) ([]byte, error) {
+		if len(argv) == 0 {
+			return nil, errors.New("run: empty command")
+		}
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd.Env = childEnv(allowEnv, os.LookupEnv)
+		cmd.WaitDelay = killGrace
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("%s: %w", argv[0], ctxErr)
+			}
+			return nil, fmt.Errorf("%s: %w: %s", argv[0], err, tailString(stderr.String(), 400))
+		}
+		return stdout.Bytes(), nil
+	}
+}
+
+// childEnv builds the child's environment from the allowlisted names that
+// lookup reports set, in allowEnv order.
+func childEnv(allowEnv []string, lookup func(string) (string, bool)) []string {
+	env := make([]string, 0, len(allowEnv))
+	for _, name := range allowEnv {
+		if v, ok := lookup(name); ok {
+			env = append(env, name+"="+v)
+		}
+	}
+	return env
+}
+
+// tailString returns the last max bytes of s, trimmed.
+func tailString(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > max {
+		s = s[len(s)-max:]
+	}
+	return s
+}
