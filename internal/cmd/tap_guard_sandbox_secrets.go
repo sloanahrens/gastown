@@ -346,7 +346,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	var payloads []string
 	segments, piped := sandboxSecretsPipeSegments(tokens)
 	var stdin string // the text a pipe hands the segment being judged
-	shells := false  // whether the line runs a shell, which reads a substitution's output as a script
+	shells := false  // whether the line runs a shell or eval, which reads a substitution's output as a script
 	for i, segment := range segments {
 		r, launched, argv := sandboxSecretsSegment(segment, tainted, expanded)
 		if r != "" {
@@ -379,6 +379,8 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 				payloads = append(payloads, sandboxSecretsShelledStrings(a)...)
 			}
 		case name == "eval" && len(argv) > 1:
+			// eval runs its argument as a script, and reads a substitution's output the way a shell does.
+			shells = true
 			payloads = append(payloads, strings.Join(argv[1:], " "))
 		}
 	}
@@ -407,6 +409,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 				payloads = append(payloads, text)
 			}
 		}
+		payloads = append(payloads, sandboxSecretsSubstitutionHeredocs(command)...)
 	}
 	for _, payload := range payloads {
 		if depth >= maxPRWorkflowNestDepth {
@@ -420,6 +423,30 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 		tooDeep = tooDeep || deep
 	}
 	return "", tooDeep
+}
+
+// sandboxSecretsSubstitutionHeredocs returns the bodies of heredocs that a command
+// substitution reads through cat, which writes them back out. The substitution's
+// output is what a shell runs: printf '%s' "$(cat <<'BEAD' ...)" | sh. The heredoc
+// is found in the substitution's own body, because scanHeredocs does not see an
+// operator written inside double quotes (gt-ynkew).
+func sandboxSecretsSubstitutionHeredocs(command string) []string {
+	var bodies []string
+	for _, sub := range substitutionSpansIn(command, true) {
+		text := substitutionBody(command, sub)
+		for _, span := range scanHeredocs(text) {
+			if span.bodyStart < 0 || span.unterminated {
+				continue
+			}
+			for _, argv := range sandboxSecretsHeredocPipeline(text, span) {
+				if strings.ToLower(filepath.Base(argv[0])) == "cat" {
+					bodies = append(bodies, span.body)
+					break
+				}
+			}
+		}
+	}
+	return bodies
 }
 
 // sandboxSecretsSegment looks through the assignments and launchers ahead of a
