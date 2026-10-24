@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -175,5 +176,67 @@ listener:
 	result = check.Run(ctx)
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK after fix, got %v: %s", result.Status, result.Message)
+	}
+}
+
+// TestStaleDoltPortCheck_TownJSONPortWins verifies the port named in
+// mayor/town.json is the correct one when .dolt-data/config.yaml is absent.
+func TestStaleDoltPortCheck_TownJSONPortWins(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	writeDoctorTownFile(t, tmpDir, "mayor/town.json", `{"type":"town","version":1,"name":"test","dolt":{"host":"127.0.0.1","port":3310}}`)
+	portFile := writeDoctorTownFile(t, tmpDir, ".beads/dolt-server.port", "3310")
+	metaFile := writeDoctorTownFile(t, tmpDir, ".beads/metadata.json", `{"dolt_mode":"server","dolt_server_port":3310}`)
+
+	check := NewStaleDoltPortCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+
+	result := check.Run(ctx)
+	if result.Status != StatusOK {
+		t.Fatalf("expected StatusOK, got %v: %s %v", result.Status, result.Message, result.Details)
+	}
+	if len(check.stalePorts) != 0 {
+		t.Errorf("expected no stale ports, got %+v", check.stalePorts)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() failed: %v", err)
+	}
+	if _, err := os.Stat(portFile); err != nil {
+		t.Errorf("port file must survive Fix: %v", err)
+	}
+	data, err := os.ReadFile(metaFile)
+	if err != nil || !strings.Contains(string(data), "3310") {
+		t.Errorf("metadata.json must keep 3310, got %q (err %v)", data, err)
+	}
+}
+
+// TestStaleDoltPortCheck_UnknownPortSkipsAndFixDeletesNothing verifies that a
+// town naming no Dolt port is reported unknown and Fix touches no file.
+func TestStaleDoltPortCheck_UnknownPortSkipsAndFixDeletesNothing(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	portFile := writeDoctorTownFile(t, tmpDir, ".beads/dolt-server.port", "3310")
+	metaFile := writeDoctorTownFile(t, tmpDir, ".beads/metadata.json", `{"dolt_mode":"server","dolt_server_port":3310}`)
+
+	check := NewStaleDoltPortCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+
+	result := check.Run(ctx)
+	if result.Status != StatusSkipped {
+		t.Fatalf("expected StatusSkipped, got %v: %s", result.Status, result.Message)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() failed: %v", err)
+	}
+	if _, err := os.Stat(portFile); err != nil {
+		t.Errorf("port file must survive Fix when the port is unknown: %v", err)
+	}
+	data, err := os.ReadFile(metaFile)
+	if err != nil || !strings.Contains(string(data), "3310") {
+		t.Errorf("metadata.json must keep 3310, got %q (err %v)", data, err)
 	}
 }

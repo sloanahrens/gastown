@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // StaleDoltPortCheck detects stale Dolt port files that point to wrong ports.
@@ -49,10 +51,17 @@ func (c *StaleDoltPortCheck) Run(ctx *CheckContext) *CheckResult {
 	c.stalePorts = nil
 	c.staleMetadata = nil
 
-	// Get the correct port from the main Dolt config
+	// Get the correct port from the town's Dolt endpoint. A town that names
+	// none has no port to compare against: skip rather than assume one, since
+	// Fix deletes port files and rewrites metadata.json to the correct port.
 	correctPort := c.getCorrectPort(ctx)
-	if correctPort == 0 {
-		correctPort = 3307 // default
+	if correctPort <= 0 {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusSkipped,
+			Message: "Dolt port unknown; no port in mayor/town.json or .dolt-data/config.yaml to compare against",
+			FixHint: "Run 'gt config set dolt.port <port>' to name the Dolt server's port",
+		}
 	}
 
 	// Find all dolt-server.port files
@@ -141,35 +150,14 @@ func (c *StaleDoltPortCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 
-// getCorrectPort returns the port from the main Dolt server config.
+// getCorrectPort returns the town's Dolt port from the config resolver
+// (mayor/town.json, then .dolt-data/config.yaml), or 0 when it names none.
 func (c *StaleDoltPortCheck) getCorrectPort(ctx *CheckContext) int {
-	// Check the main Dolt server config
-	configPath := filepath.Join(ctx.TownRoot, ".dolt-data", "config.yaml")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
+	ep, ok := config.ResolveDoltEndpoint(ctx.TownRoot)
+	if !ok || ep.Port <= 0 {
 		return 0
 	}
-
-	// Parse port from config.yaml
-	lines := strings.Split(string(data), "\n")
-	for i, line := range lines {
-		if strings.TrimSpace(line) == "port:" && i+1 < len(lines) {
-			portStr := strings.TrimSpace(strings.TrimPrefix(lines[i+1], "port:"))
-			port, err := strconv.Atoi(portStr)
-			if err == nil {
-				return port
-			}
-		}
-		if strings.HasPrefix(line, "  port:") {
-			portStr := strings.TrimSpace(strings.TrimPrefix(line, "  port:"))
-			port, err := strconv.Atoi(portStr)
-			if err == nil {
-				return port
-			}
-		}
-	}
-
-	return 0
+	return ep.Port
 }
 
 // findPortFiles finds all dolt-server.port files in known locations.
