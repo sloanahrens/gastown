@@ -95,6 +95,9 @@ cat >"$TMP/bin/kubectl" <<'STUB'
 #!/usr/bin/env bash
 "$(dirname "$0")/_log" kubectl "$@"
 METRICS_DEFAULT_ARGS='--cert-dir=/tmp --secure-port=10250 --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname --kubelet-use-node-status-port --metric-resolution=15s'
+# The args the deployment carries: the manifest's, plus each patch applied since.
+# They persist across applies, so a rerun exercises the script's flag guard.
+metrics_args() { cat "$STATE/metrics-args" 2>/dev/null || printf '%s' "$METRICS_DEFAULT_ARGS"; }
 case "$*" in
   *"get nodes -l gt.dev/pool"*)
     if [ -f "$STATE/kubectl-down" ]; then echo "The connection to the server 127.0.0.1:1 was refused" >&2; exit 1; fi
@@ -117,15 +120,16 @@ case "$*" in
     for a in "$@"; do case "$a" in --from-literal=helm=*) echo "${a#--from-literal=}" ;; esac; done ;;
   *"apply -f -"*)
     while read -r line; do case "$line" in helm=*) printf '%s' "${line#helm=}" >"$STATE/marker" ;; esac; done ;;
-  # The args the pinned components.yaml gives the metrics-server container. The
-  # stub keeps them across applies, so a rerun exercises the script's
-  # already-flagged guard rather than the merge kubectl apply would do.
   *"get deployment metrics-server"*)
-    cat "$STATE/metrics-args" 2>/dev/null || printf '%s' "$METRICS_DEFAULT_ARGS" ;;
+    # STUB_METRICS_WARNING: a successful read that still warns on stderr, as
+    # kubectl does; the warning follows the value so a read that merges the
+    # streams no longer ends with the flag, and the check must see stdout only.
+    metrics_args
+    [ -n "${STUB_METRICS_WARNING:-}" ] && echo "Warning: unused parameter" >&2 ;;
   *"patch deployment metrics-server"*)
     case "$*" in
       *'"value":"--kubelet-insecure-tls"'*)
-        printf '%s --kubelet-insecure-tls' "$(cat "$STATE/metrics-args" 2>/dev/null || printf '%s' "$METRICS_DEFAULT_ARGS")" >"$STATE/metrics-args" ;;
+        printf '%s --kubelet-insecure-tls' "$(metrics_args)" >"$STATE/metrics-args" ;;
     esac ;;
 esac
 exit 0
@@ -566,6 +570,35 @@ check "the failure names metrics-server and the version" contains "metrics-serve
 check "the failure refuses to apply it and names both digests" contains "refusing to apply it" "$OUT_TEXT"
 check "the unverified metrics-server manifest is not applied" lacks "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/metrics-server-v0.9.0.yaml" "$CALLS_LOG"
 check "no flag is patched onto an unverified deployment" lacks "patch deployment metrics-server" "$CALLS_LOG"
+
+echo "a configured pin is used in place of the recorded digest"
+scenario metrics_pin
+# The curl stub writes this text for every download, so its digest is the pin.
+mkdir -p "$S/home/gt/.runtime/sbx-k8s"
+printf 'kind: List\n' >"$S/home/gt/.runtime/sbx-k8s/pin-probe"
+stub_digest="$(digest "$S/home/gt/.runtime/sbx-k8s/pin-probe")"
+run "$UP" GT_K8S_METRICS_SERVER_SHA256="$stub_digest" --
+check "a matching configured pin lets the run proceed" test "$RC" -eq 0
+check "a configured pin records no digest file" test ! -e "$S/home/gt/.runtime/sbx-k8s/metrics-server-v0.9.0.yaml.sha256"
+check "the verified manifest is applied from the runtime copy" contains "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/metrics-server-v0.9.0.yaml" "$CALLS_LOG"
+scenario metrics_pin_wins
+mkdir -p "$S/home/gt/.runtime/sbx-k8s"
+printf '%s\n' "$stub_digest" >"$S/home/gt/.runtime/sbx-k8s/metrics-server-v0.9.0.yaml.sha256"
+printf 'the copy verified before this run\n' >"$S/home/gt/.runtime/sbx-k8s/metrics-server-v0.9.0.yaml"
+run "$UP" GT_K8S_METRICS_SERVER_SHA256=1111111111111111111111111111111111111111111111111111111111111111 --
+check "a configured pin wins over a matching recorded digest" test "$RC" -ne 0
+check "the failure names the configured digest" contains "expected 1111111111111111111111111111111111111111111111111111111111111111" "$OUT_TEXT"
+check "the unverified manifest is not applied" lacks "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/metrics-server-v0.9.0.yaml" "$CALLS_LOG"
+check "a rejected download leaves the verified copy in place" contains "the copy verified before this run" "$(cat "$S/home/gt/.runtime/sbx-k8s/metrics-server-v0.9.0.yaml")"
+
+echo "a warning on stderr does not hide the flag (kubectl merges stderr if the read captures it)"
+scenario metrics_warning
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
+run "$UP" STUB_METRICS_WARNING=1 --
+run "$UP" STUB_METRICS_WARNING=1 --
+check "the warned reads still exit 0" test "$RC" -eq 0
+check "the flag is patched once across both runs" test "$(count 'patch deployment metrics-server' "$(cat "$S/calls.log")")" -eq 1
+check "the deployment carries the flag exactly once" test "$(occurrences '--kubelet-insecure-tls' "$(cat "$S/state/metrics-args")")" -eq 1
 
 echo "the insecure kubelet flag survives a rerun exactly once"
 scenario metrics_rerun

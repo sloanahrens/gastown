@@ -150,14 +150,15 @@ pool_nodes="$(grep -c . <<<"$pool_list" || true)"
   die "cluster $CLUSTER lacks the core and sandbox nodes ($pool_nodes labelled, want 2); rebuild it: deploy/k8s/kind/down.sh && deploy/k8s/kind/up.sh"
 kubectl apply -f "$HERE/../priority-classes.yaml"
 
-# fetch_pinned NAME VERSION URL DEST PIN downloads URL to DEST and refuses a
-# manifest whose sha256 differs from PIN or from the digest the first fetch
-# recorded beside DEST. A release tag can be re-pointed at different bytes; the
-# digest is what pins them.
+# fetch_pinned NAME VERSION URL DEST PIN downloads URL and moves it to DEST only
+# once its sha256 matches PIN or the digest the first fetch recorded beside DEST,
+# so a rejected manifest never replaces the verified copy a later run applies.
+# A release tag can be re-pointed at different bytes; the digest is what pins
+# them.
 fetch_pinned() { # fetch_pinned NAME VERSION URL DEST PIN
   local name=$1 version=$2 url=$3 dest=$4 expected=${5:-} actual
-  curl -fsSL -o "$dest" "$url"
-  actual="$(sha256_of "$dest")"
+  curl -fsSL -o "$dest.tmp" "$url"
+  actual="$(sha256_of "$dest.tmp")"
   if [ -z "$expected" ] && [ -f "$dest.sha256" ]; then
     expected="$(cat "$dest.sha256")"
   fi
@@ -165,8 +166,10 @@ fetch_pinned() { # fetch_pinned NAME VERSION URL DEST PIN
     printf '%s\n' "$actual" >"$dest.sha256"
     say "recorded the $name manifest digest ($actual) in $dest.sha256"
   elif [ "$actual" != "$expected" ]; then
+    rm -f "$dest.tmp"
     die "$name $version is $actual, expected $expected; refusing to apply it"
   fi
+  mv -f "$dest.tmp" "$dest"
 }
 
 # metrics-server feeds `kubectl top` and the resource sampler. kind's kubelet
@@ -179,8 +182,10 @@ fetch_pinned metrics-server "$METRICS_SERVER_VERSION" \
   "https://github.com/kubernetes-sigs/metrics-server/releases/download/$METRICS_SERVER_VERSION/components.yaml" \
   "$metrics_manifest" "$METRICS_SERVER_SHA256"
 kubectl apply -f "$metrics_manifest"
-metrics_args="$(kubectl -n kube-system get deployment metrics-server -o jsonpath='{.spec.template.spec.containers[0].args[*]}' 2>&1)" ||
-  die "cannot read the metrics-server deployment's args: $(tr '\n' ' ' <<<"$metrics_args" | cut -c1-160)"
+# stdout only: kubectl can warn on stderr during a successful read, and text
+# appended to the args would hide the flag from the check below.
+metrics_args="$(kubectl -n kube-system get deployment metrics-server -o jsonpath='{.spec.template.spec.containers[0].args[*]}' 2>/dev/null)" ||
+  die "cannot read the metrics-server deployment's args in cluster $CLUSTER"
 case " $metrics_args " in
   *" --kubelet-insecure-tls "*) ;;
   *)
