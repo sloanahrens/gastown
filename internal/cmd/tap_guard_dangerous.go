@@ -1260,7 +1260,7 @@ func shellInvokerIndex(tokens []string) int {
 		if i < len(tokens) && !shellCommandSeparators[tokens[i]] {
 			continue
 		}
-		if word, _ := segmentCommandWord(tokens[start:i]); word != "" && shellInvokers[strings.ToLower(filepath.Base(word))] {
+		if word, _ := segmentCommandWordPastRedirections(tokens[start:i]); word != "" && shellInvokers[strings.ToLower(filepath.Base(word))] {
 			return start
 		}
 		start = i + 1
@@ -1277,13 +1277,13 @@ func heredocReaderIsShellInvoker(reader string) bool {
 		// The trim drops a case pattern such as `a)`, which opens no construct
 		// for the re-read below to follow (gt-4j5q6).
 		cmdline := trimShellKeywords(segment)
-		word, args := segmentCommandWord(cmdline)
+		word, args := segmentCommandWordPastRedirections(cmdline)
 		// A launcher or an assignment can carry a construct rather than a
 		// command — `time { bash <<EOF`, `y=$(echo a) { bash <<EOF` — so what
 		// it carried is re-read until the word is a command again (gt-q2jgt).
 		for opensConstruct(word) {
 			cmdline = trimShellKeywords(append([]string{word}, args...))
-			word, args = segmentCommandWord(cmdline)
+			word, args = segmentCommandWordPastRedirections(cmdline)
 		}
 		if word == "" {
 			continue
@@ -1293,6 +1293,56 @@ func heredocReaderIsShellInvoker(reader string) bool {
 		}
 	}
 	return false
+}
+
+// segmentCommandWordPastRedirections is segmentCommandWord with the leading
+// redirections stepped over. The shell applies a redirection and then runs the
+// command behind it, so "2>/dev/null bash <<EOF" feeds bash the body exactly as
+// "bash <<EOF" does, but the redirection's word stood at command position and
+// hid the shell (gt-pdbzu). A redirection owns its target word, so the target
+// is stepped over with the operator.
+func segmentCommandWordPastRedirections(segment []string) (string, []string) {
+	for {
+		word, args := segmentCommandWord(segment)
+		width := redirectionWidth(word)
+		if width == 0 {
+			return word, args
+		}
+		segment = args
+		if width == 2 && len(segment) > 0 {
+			segment = segment[1:]
+		}
+		if len(segment) == 0 {
+			return "", nil
+		}
+	}
+}
+
+// redirectionWidth reports whether a token is a redirection and how many tokens
+// it occupies: 1 when the operator carries its target ("2>/dev/null", "2>&1",
+// "&>log"), 2 when the target is a word of its own ("2> /dev/null"), and 0 when
+// the token is no redirection.
+func redirectionWidth(token string) int {
+	i := 0
+	for i < len(token) && token[i] >= '0' && token[i] <= '9' {
+		i++
+	}
+	if i < len(token) && token[i] == '&' {
+		i++
+	}
+	if i >= len(token) || (token[i] != '<' && token[i] != '>') {
+		return 0
+	}
+	for i < len(token) && (token[i] == '<' || token[i] == '>') {
+		i++
+	}
+	if i < len(token) && token[i] == '&' {
+		i++
+	}
+	if i < len(token) {
+		return 1
+	}
+	return 2
 }
 
 // heredocTerminatorEnd scans command starting at bodyStart for a line
