@@ -411,6 +411,7 @@ func followupBody(w Work, res Result, g followupGroup) string {
 		fmt.Fprintf(&b, "- %s\n", c.Detail)
 	}
 	b.WriteString("\n## Constraints\nOnly the files the findings name. Keep the rig's gate green. Do not widen the change.\n")
+	b.WriteString(followupRevertNote)
 	b.WriteString("\n## Out of scope\nAnything the findings do not name.\n")
 	b.WriteString("\n## Gate\ngt done presubmit; the landing runs make gate\n")
 	b.WriteString("\n## Size\none worker, one landing\n")
@@ -420,6 +421,17 @@ func followupBody(w Work, res Result, g followupGroup) string {
 	}
 	return b.String()
 }
+
+// followupRevertNote is the paragraph every generated bead carries in its
+// Constraints. A finding that asks to remove a line an earlier landing added
+// makes gt done's revert check refuse the fix, and the polecat was left to find
+// that out; five hit it. The text never names the check's override: the
+// refusal omits it on purpose because agents read it and bypass the check, and
+// no label or keyword is read from a finding (gt-j0puq).
+const followupRevertNote = "If the fix removes or rewrites a line an earlier landing added, gt done's revert " +
+	"check will refuse it. Do not work around the refusal: say so in a comment on this bead, naming each file " +
+	"the fix deletes (or a directory of at least two path components, with a trailing slash), and ask the " +
+	"operator for a deletes-by-spec waiver.\n"
 
 // findingResolved opens every acceptance item. A finding's title may state a
 // defect or ask for a change, so a box that restates it asks the worker to
