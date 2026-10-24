@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1212,6 +1213,42 @@ func TestUpgradeNewerMarkerIdleRequestsRestartAndStampsAttempt(t *testing.T) {
 	if err := json.Unmarshal(data, &raw); err != nil || raw["future_field"] != float64(42) {
 		t.Fatalf("unknown field lost on rewrite: %s", data)
 	}
+}
+
+// gt-21cr0: a restart whose stamp fails must not leave the pending flag set.
+// The flag holds spec dispatch and the landing passes, so a flag left behind by
+// a failed stamp holds them until a later stamp succeeds.
+func TestFailedRestartStampReleasesThePendingFlag(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+	// A directory where the stamp writes its temp file makes the stamp fail.
+	if err := os.Mkdir(restartMarkerPath(d.config.TownRoot)+".tmp", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+
+	if !d.checkUpgradeRestart(now) {
+		t.Fatal("idle daemon with newer marker must request restart")
+	}
+	state := &State{Running: true}
+	if err := d.exitForUpgradeIfRequested(state, now); err != nil || !state.Running {
+		t.Fatalf("failed stamp: err = %v, shut down = %v; want no error and no shutdown", err, !state.Running)
+	}
+	if d.upgradeRestartPending.Load() {
+		t.Fatal("pending flag still set after the stamp failed")
+	}
+	// The tick runs against a fake CLI, as the spec dispatch tests do.
+	d.ctx = context.Background()
+	d.execCmd = newFakeCLI(func([]string) cliReply { return cliReply{} }).run
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(true)}}}
+	if !d.triggerSpecDispatch() {
+		t.Fatal("spec dispatch held after the stamp failed")
+	}
+	d.specDispatchCycles.Wait()
 }
 
 // TestStampRestartAttemptDoesNotOverwriteANewerMarker pins gt-oyrav (D9):
