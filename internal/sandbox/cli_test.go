@@ -115,6 +115,16 @@ func TestGetArgvAndDecode(t *testing.T) {
 			Status{Name: "x", Phase: "Provisioning"}},
 		{"no conditions", `{"name":"x","phase":"Stopped"}`,
 			Status{Name: "x", Phase: "Stopped"}},
+		{"ready condition with a transition time", `{"name":"x","phase":"Error","conditions":[{"type":"Ready","status":"False","lastTransitionTime":"2026-10-24T14:07:29Z"}]}`,
+			Status{Name: "x", Phase: "Error", ReadyKnown: true, NotReadySince: time.Date(2026, 10, 24, 14, 7, 29, 0, time.UTC)}},
+		{"snake_case transition time", `{"name":"x","phase":"Error","conditions":[{"type":"Ready","status":"False","last_transition_time":"2026-10-24T14:07:29Z"}]}`,
+			Status{Name: "x", Phase: "Error", ReadyKnown: true, NotReadySince: time.Date(2026, 10, 24, 14, 7, 29, 0, time.UTC)}},
+		{"protobuf timestamp", `{"name":"x","phase":"Error","conditions":[{"type":"Ready","status":"False","lastTransitionTime":{"seconds":1792850849}}]}`,
+			Status{Name: "x", Phase: "Error", ReadyKnown: true, NotReadySince: time.Date(2026, 10, 24, 14, 7, 29, 0, time.UTC)}},
+		{"unreadable transition time", `{"name":"x","phase":"Error","conditions":[{"type":"Ready","status":"False","lastTransitionTime":"yesterday"}]}`,
+			Status{Name: "x", Phase: "Error", ReadyKnown: true}},
+		{"a ready condition keeps no failure clock", `{"name":"x","phase":"Ready","conditions":[{"type":"Ready","status":"True","lastTransitionTime":"2026-10-24T14:07:29Z"}]}`,
+			Status{Name: "x", Phase: "Ready", Ready: true, ReadyKnown: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

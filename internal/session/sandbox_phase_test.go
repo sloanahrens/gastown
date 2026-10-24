@@ -57,6 +57,82 @@ func TestSandboxLivenessDeadAfterThePhaseGrace(t *testing.T) {
 	}
 }
 
+// The grace runs from the phase's own transition, so a patrol that first looks
+// minutes into the failure declares the seat dead at once instead of holding it
+// for the sample lag plus the grace (gt-j18af).
+func TestSandboxLivenessDeadFromTheGatewayTransitionTime(t *testing.T) {
+	t.Parallel()
+	const session = "gt-gastown-sandbox-late-sample"
+	t0 := time.Unix(1760000000, 0)
+	b, _ := sandboxPhaseBackend(t, session, phaseErrorSince(session, t0))
+
+	// The first sample is minutes after the failure: the grace is already
+	// spent, so one sample is all the seat needs.
+	res := b.ProgressSample(session, liveness.Input{Now: t0.Add(6 * time.Minute)})
+	if res.Verdict != liveness.Dead {
+		t.Fatalf("verdict six minutes after the failure = %v (%s), want dead", res.Verdict, res.Reason)
+	}
+	if !strings.Contains(res.Reason, "phase Error") || !strings.Contains(res.Reason, "6m0s") {
+		t.Errorf("reason %q does not measure the failure from the gateway's transition time", res.Reason)
+	}
+	if res.Sample == nil || res.Sample.DeadSamples != 1 {
+		t.Errorf("sample = %+v, want one dead sample", res.Sample)
+	}
+}
+
+// A sample taken before the grace is spent still waits, even when it is the
+// first: the clock is the transition time, not the reading.
+func TestSandboxLivenessTransitionTimeKeepsTheGrace(t *testing.T) {
+	t.Parallel()
+	const session = "gt-gastown-sandbox-grace-kept"
+	t0 := time.Unix(1760000000, 0)
+	b, _ := sandboxPhaseBackend(t, session, phaseErrorSince(session, t0))
+
+	if res := b.ProgressSample(session, liveness.Input{Now: t0.Add(SandboxDeadGrace - time.Second)}); res.Verdict == liveness.Dead {
+		t.Fatalf("dead one second short of the grace: %s", res.Reason)
+	}
+	if res := b.ProgressSample(session, liveness.Input{Now: t0.Add(SandboxDeadGrace)}); res.Verdict != liveness.Dead {
+		t.Fatalf("verdict at the grace = %v (%s), want dead", res.Verdict, res.Reason)
+	}
+}
+
+// A gateway clock ahead of the host's is not a failure duration: the seat
+// waits for readings to show the grace, and the future time is not kept.
+func TestSandboxLivenessFutureTransitionTimeWaits(t *testing.T) {
+	t.Parallel()
+	const session = "gt-gastown-sandbox-skew"
+	t0 := time.Unix(1760000000, 0)
+	b, _ := sandboxPhaseBackend(t, session, phaseErrorSince(session, t0.Add(10*time.Minute)))
+
+	if res := b.ProgressSample(session, liveness.Input{Now: t0}); res.Verdict == liveness.Dead {
+		t.Fatalf("dead on a transition time ahead of the host clock: %s", res.Reason)
+	}
+	if res := b.ProgressSample(session, liveness.Input{Now: t0.Add(time.Minute)}); res.Verdict == liveness.Dead {
+		t.Fatalf("dead a minute in, from a future transition time: %s", res.Reason)
+	}
+	if res := b.ProgressSample(session, liveness.Input{Now: t0.Add(SandboxDeadGrace)}); res.Verdict != liveness.Dead {
+		t.Fatalf("verdict at the grace = %v (%s), want dead", res.Verdict, res.Reason)
+	}
+}
+
+// A transition time the gateway spells in a way this client cannot read costs
+// only the head start: the failure is then measured from the first reading, as
+// before.
+func TestSandboxLivenessUnreadableTransitionTimeMeasuredFromTheReading(t *testing.T) {
+	t.Parallel()
+	const session = "gt-gastown-sandbox-bad-time"
+	t0 := time.Unix(1760000000, 0)
+	reply := `{"name":"` + session + `","phase":"Error","conditions":[{"type":"Ready","status":"False","lastTransitionTime":"yesterday"}]}`
+	b, _ := sandboxPhaseBackend(t, session, reply)
+
+	if res := b.ProgressSample(session, liveness.Input{Now: t0}); res.Verdict != liveness.Unknown {
+		t.Fatalf("first reading = %v (%s), want unknown while the clock starts", res.Verdict, res.Reason)
+	}
+	if res := b.ProgressSample(session, liveness.Input{Now: t0.Add(SandboxDeadGrace)}); res.Verdict != liveness.Dead {
+		t.Fatalf("verdict at the grace = %v (%s), want dead", res.Verdict, res.Reason)
+	}
+}
+
 // A tmux that answers is proof the sandbox runs, so the gateway is not asked
 // for its phase: a healthy seat costs no gateway call per sample, and the
 // failure clock it may carry is dropped (om f9ae48011e3e).
@@ -288,18 +364,18 @@ func TestSandboxPhaseClockIgnoresABackwardsReading(t *testing.T) {
 	w := newSandboxPhaseWatch()
 	t0 := time.Unix(1760000000, 0)
 
-	if got := w.failing("gt-a", t0); got != 0 {
+	if got := w.failing("gt-a", time.Time{}, t0); got != 0 {
 		t.Fatalf("first reading = %s, want 0", got)
 	}
-	if got := w.failing("gt-a", t0.Add(-time.Hour)); got != 0 {
+	if got := w.failing("gt-a", time.Time{}, t0.Add(-time.Hour)); got != 0 {
 		t.Fatalf("backwards reading = %s, want 0", got)
 	}
-	if got := w.failing("gt-a", t0.Add(time.Minute)); got != time.Minute {
+	if got := w.failing("gt-a", time.Time{}, t0.Add(time.Minute)); got != time.Minute {
 		t.Fatalf("a minute later = %s, want the failure measured from the first reading", got)
 	}
 	// A sandbox that answers is forgotten, so its next failure starts afresh.
 	w.forget("gt-a")
-	if got := w.failing("gt-a", t0.Add(2*time.Minute)); got != 0 {
+	if got := w.failing("gt-a", time.Time{}, t0.Add(2*time.Minute)); got != 0 {
 		t.Fatalf("reading after forget = %s, want a new clock", got)
 	}
 }
@@ -346,6 +422,12 @@ func gatewayQuestions(fake *sandbox.Fake) int {
 
 func phaseErrorReply(session string) string {
 	return `{"name":"` + session + `","phase":"Error","conditions":[{"type":"Ready","status":"False"}]}`
+}
+
+// phaseErrorSince is the gateway's answer for a sandbox that stopped being
+// ready at since and has stayed Error.
+func phaseErrorSince(session string, since time.Time) string {
+	return `{"name":"` + session + `","phase":"Error","conditions":[{"type":"Ready","status":"False","lastTransitionTime":"` + since.UTC().Format(time.RFC3339) + `"}]}`
 }
 
 // unansweredProbe is an in-sandbox tmux that refuses every question, which is

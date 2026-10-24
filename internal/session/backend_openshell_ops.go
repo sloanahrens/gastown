@@ -102,9 +102,12 @@ func (b *openshellBackend) ProgressSample(session string, in liveness.Input) liv
 // phaseVerdict is the gateway's half of a sandbox seat's liveness answer: a
 // sandbox whose phase has been Error or Failed for SandboxDeadGrace is dead,
 // whatever its tmux said, which is what a sandbox whose supervisor died looks
-// like (gt-tj446). Any other phase, and a Ready one in particular, starts the
-// clock over and leaves the tmux answer standing. A gateway that cannot answer
-// leaves it standing too: an outage is not a dead sandbox.
+// like (gt-tj446). The grace runs from when the gateway says the sandbox
+// stopped being Ready, so a patrol that first looks minutes into the failure
+// does not add that lag to the seat's hold (gt-j18af). Any other phase, and a
+// Ready one in particular, starts the clock over and leaves the tmux answer
+// standing. A gateway that cannot answer leaves it standing too: an outage is
+// not a dead sandbox.
 //
 // The gateway is asked only when the tmux sample is not Alive. A tmux that
 // answers is proof the sandbox runs, so a healthy seat costs no gateway call
@@ -119,7 +122,7 @@ func (b *openshellBackend) phaseVerdict(session string, in liveness.Input, res l
 	if now.IsZero() {
 		now = time.Now()
 	}
-	phase, err := b.sandboxPhase(session)
+	st, err := b.sandboxPhase(session)
 	if err != nil {
 		if isSandboxNotFound(err) {
 			// The name is free again: a sandbox created under it later must
@@ -131,31 +134,27 @@ func (b *openshellBackend) phaseVerdict(session string, in liveness.Input, res l
 		}
 		return res
 	}
-	if !sandboxPhaseTerminal(phase) {
+	if !sandboxPhaseTerminal(st.Phase) {
 		b.phases().forget(session)
 		return res
 	}
-	failing := b.phases().failing(session, now)
+	failing := b.phases().failing(session, st.NotReadySince, now)
 	if failing < SandboxDeadGrace {
 		if res.Verdict == liveness.Unknown {
-			res.Reason = fmt.Sprintf("%s; sandbox phase %s for %s of %s", res.Reason, phase, failing.Round(time.Second), SandboxDeadGrace)
+			res.Reason = fmt.Sprintf("%s; sandbox phase %s for %s of %s", res.Reason, st.Phase, failing.Round(time.Second), SandboxDeadGrace)
 		}
 		return res
 	}
-	return liveness.DeadResult(in.Prev, now, fmt.Sprintf("sandbox phase %s for %s", phase, failing.Round(time.Second)))
+	return liveness.DeadResult(in.Prev, now, fmt.Sprintf("sandbox phase %s for %s", st.Phase, failing.Round(time.Second)))
 }
 
-// sandboxPhase asks the gateway for the sandbox's phase, bounded well under
-// the two minutes an openshell call may otherwise take, so a hung gateway
-// cannot hold a patrol tick.
-func (b *openshellBackend) sandboxPhase(session string) (string, error) {
+// sandboxPhase asks the gateway for the sandbox, bounded well under the two
+// minutes an openshell call may otherwise take, so a hung gateway cannot hold
+// a patrol tick.
+func (b *openshellBackend) sandboxPhase(session string) (sandbox.Status, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxPhaseTimeout)
 	defer cancel()
-	st, err := b.cli.Get(ctx, session)
-	if err != nil {
-		return "", err
-	}
-	return st.Phase, nil
+	return b.cli.Get(ctx, session)
 }
 
 // phases is the clock this backend's sandbox phase readings are measured from.

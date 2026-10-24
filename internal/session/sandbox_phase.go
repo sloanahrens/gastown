@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	// SandboxDeadGrace is how long a sandbox's gateway phase may read as a
-	// terminal failure before its seat counts as dead (gt-tj446).
+	// SandboxDeadGrace is how long after a sandbox's gateway phase turns a
+	// terminal failure its seat counts as dead, however late a patrol first
+	// reads that phase (gt-tj446, gt-j18af).
 	SandboxDeadGrace = 5 * time.Minute
 	// sandboxPhaseTimeout bounds one gateway phase question.
 	sandboxPhaseTimeout = 15 * time.Second
@@ -26,10 +27,11 @@ func sandboxPhaseTerminal(phase string) bool {
 	return false
 }
 
-// sandboxPhaseWatch remembers when each sandbox's gateway phase first read as a
-// terminal failure, so the seat is dead only once the failure has lasted
-// SandboxDeadGrace. It is memory, not state on disk: a daemon restart starts
-// every clock again.
+// sandboxPhaseWatch remembers when each sandbox's terminal failure began, so
+// the seat is dead only once the failure has lasted SandboxDeadGrace. The
+// gateway's own transition time seeds it when it is readable; otherwise the
+// first reading that saw the failure does. It is memory, not state on disk: a
+// daemon restart starts every clock again.
 type sandboxPhaseWatch struct {
 	mu    sync.Mutex
 	since map[string]time.Time
@@ -41,18 +43,29 @@ func newSandboxPhaseWatch() *sandboxPhaseWatch {
 
 // failing records that name's phase read as a terminal failure at now and
 // returns how long it has read that way, this reading included.
-func (w *sandboxPhaseWatch) failing(name string, now time.Time) time.Duration {
+//
+// since is when the gateway says the sandbox stopped being Ready. It puts the
+// clock at the failure rather than at the first reading to notice it, which
+// can trail by minutes (gt-j18af); the earlier of the two wins. A zero, or a
+// since ahead of this host's clock, falls back to the start already recorded,
+// or to now.
+func (w *sandboxPhaseWatch) failing(name string, since, now time.Time) time.Duration {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	first, ok := w.since[name]
+	start, ok := w.since[name]
+	if !since.IsZero() && !since.After(now) && (!ok || since.Before(start)) {
+		start, ok = since, true
+	}
 	if !ok {
-		w.since[name] = now
+		start = now
+	}
+	if start.After(now) {
+		// A clock that reads backwards is never a failure duration, and the
+		// start the watch recorded stays where it was.
 		return 0
 	}
-	if failing := now.Sub(first); failing > 0 {
-		return failing
-	}
-	return 0
+	w.since[name] = start
+	return now.Sub(start)
 }
 
 // forget drops name's clock: the sandbox answered, or its phase is no longer a
