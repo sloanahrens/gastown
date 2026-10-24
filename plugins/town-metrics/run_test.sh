@@ -24,14 +24,18 @@ mkdir -p "$STATE"
 # --- Stubs and fixtures -------------------------------------------------------
 
 # gt appends the argv it got to the calls file, then answers with STUB_OUT and
-# STUB_ERR on the exit code STUB_RC. STUB_SLEEP holds the run open long enough
-# for the overlap case to see its lock.
+# STUB_ERR on the exit code STUB_RC. With STUB_HOLD set it holds the run open
+# until the test releases it: it opens the release FIFO read-write (so no open
+# blocks), tells the test it started through the started FIFO, and waits, with a
+# bound, for one line on the release FIFO. Nothing here polls.
 mkdir -p "$TMP/bin" "$TMP/empty"
 cat >"$TMP/bin/gt" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$STUB_STATE/calls"
-if [ -n "${STUB_SLEEP:-}" ]; then
-  sleep "$STUB_SLEEP"
+if [ -n "${STUB_HOLD:-}" ]; then
+  exec 4<>"$STUB_STATE/release"
+  printf 'started\n' >"$STUB_STATE/started"
+  read -r -t 30 -u 4 _ || true
 fi
 printf '%s' "${STUB_OUT:-}"
 printf '%s' "${STUB_ERR:-}" >&2
@@ -119,30 +123,35 @@ fi
 
 echo "town-metrics: a run that overlaps another skips instead of snapshotting twice"
 : >"$STATE/calls"
-PATH="$TMP/bin:$PATH" GT_TOWN_ROOT="$TOWN" STUB_STATE="$STATE" STUB_SLEEP=1 \
+# The test holds the started FIFO read-write, so the stub's write never blocks
+# and a read with -t is bounded; the stub does the same on the release FIFO.
+mkfifo "$STATE/started" "$STATE/release"
+exec 3<>"$STATE/started"
+PATH="$TMP/bin:$PATH" GT_TOWN_ROOT="$TOWN" STUB_STATE="$STATE" STUB_HOLD=1 \
   "$BASH_BIN" "$RUN" >"$TMP/first" 2>&1 &
 first_pid=$!
-for _ in $(seq 1 200); do
-  [ -e "$LOCK" ] && break
-  sleep 0.02
-done
-if [ -e "$LOCK" ]; then
+if read -r -t 20 -u 3 _; then
   second_rc=0
   PATH="$TMP/bin:$PATH" GT_TOWN_ROOT="$TOWN" STUB_STATE="$STATE" \
     "$BASH_BIN" "$RUN" >"$TMP/second" 2>&1 || second_rc=$?
+  printf 'go\n' >"$STATE/release"
   first_rc=0
   wait "$first_pid" || first_rc=$?
+  n_calls=$(wc -l <"$STATE/calls" | tr -d ' ')
   if [ "$first_rc" == 0 ] && [ "$second_rc" == 0 ] \
     && grep -qF "[plugin-result skipped]" "$TMP/second" \
-    && [ "$(wc -l <"$STATE/calls")" == 1 ]; then
+    && [ "$n_calls" == 1 ]; then
     pass "the second run skips while the first holds the lock, and only one snapshot runs"
   else
     fail "the second run skips while the first holds the lock (first=$first_rc, second=$second_rc, calls=$(calls | tr '\n' '|'), $(cat "$TMP/second"))"
   fi
 else
+  kill "$first_pid" 2>/dev/null || true
   wait "$first_pid" 2>/dev/null || true
-  fail "the first run never wrote its lock"
+  fail "the first run never reached gt within 20 s"
 fi
+exec 3>&-
+rm -f "$STATE/started" "$STATE/release"
 
 echo "town-metrics: a run with no gt on PATH fails closed"
 run_wrapper "$TMP/out" 0 "" "" "$TOWN" "$TMP/empty"
