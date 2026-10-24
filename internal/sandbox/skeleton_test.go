@@ -903,3 +903,69 @@ func TestScrubSettingsKeepsTheTokenPriceNumber(t *testing.T) {
 		t.Errorf("number under api_token = %#v, want REDACTED", v)
 	}
 }
+
+// renderRigWithout renders the minimal town after dropping and adding files.
+func renderRigWithout(t *testing.T, drop []string, add map[string]string) (map[string][]byte, error) {
+	t.Helper()
+	files := minimalTown()
+	for _, f := range drop {
+		delete(files, f)
+	}
+	for k, v := range add {
+		files[k] = v
+	}
+	data, err := RenderSkeleton(SkeletonSpec{
+		TownRoot:         writeTown(t, files),
+		Rig:              "gastown",
+		ControlPlaneHost: "host.docker.internal",
+		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+	})
+	if err != nil {
+		return nil, err
+	}
+	return untar(t, data), nil
+}
+
+// TestSkeletonRigConfigFromTheRigBeadsDir: a rig whose mayor/rig/.beads holds
+// only metadata.json (devops, fractals, beaver, agentlab) keeps its config in
+// <rig>/.beads; the skeleton carries it to the tracked workspace (gt-z7ut1).
+func TestSkeletonRigConfigFromTheRigBeadsDir(t *testing.T) {
+	t.Parallel()
+
+	got, err := renderRigWithout(t, []string{"gastown/mayor/rig/.beads/config.yaml"},
+		map[string]string{"gastown/.beads/config.yaml": "issue-prefix: gt\n"})
+	if err != nil {
+		t.Fatalf("RenderSkeleton: %v", err)
+	}
+	if c := string(got["gt/gastown/mayor/rig/.beads/config.yaml"]); !strings.Contains(c, "issue-prefix: gt") {
+		t.Errorf("tracked workspace config = %q, want the rig .beads config", c)
+	}
+	if _, ok := got["gt/gastown/.beads/config.yaml"]; ok {
+		t.Error("the config was also written under the rig .beads, where the redirect already points away")
+	}
+}
+
+// TestSkeletonRigConfigPrefersTheTrackedWorkspace: when both exist, the tracked
+// workspace's config is the one carried.
+func TestSkeletonRigConfigPrefersTheTrackedWorkspace(t *testing.T) {
+	t.Parallel()
+
+	got, err := renderRigWithout(t, nil, map[string]string{"gastown/.beads/config.yaml": "issue-prefix: other\n"})
+	if err != nil {
+		t.Fatalf("RenderSkeleton: %v", err)
+	}
+	if c := string(got["gt/gastown/mayor/rig/.beads/config.yaml"]); !strings.Contains(c, "issue_prefix: gt") {
+		t.Errorf("config = %q, want the tracked workspace's", c)
+	}
+}
+
+// TestSkeletonRigWithoutAnyBeadsConfig: a rig with no config.yaml in either
+// beads directory stops the render rather than ship a workspace with no prefix.
+func TestSkeletonRigWithoutAnyBeadsConfig(t *testing.T) {
+	t.Parallel()
+
+	_, err := renderRigWithout(t, []string{"gastown/mayor/rig/.beads/config.yaml"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "no beads config.yaml") {
+		t.Fatalf("RenderSkeleton error = %v, want it to name the missing config.yaml", err)
+	}
+}
