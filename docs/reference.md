@@ -330,7 +330,8 @@ The two-seat keys the map replaced no longer load (gt-mukgk): `polecat_pool.agen
 entry in `scheduled_slings`. A file that holds one fails to load with a message
 that names the key and what replaced it; `gt pool migrate` converts the file
 (`--dry-run` prints the changes and writes nothing). Pin a bead to a model with
-an `agent:<name>` label.
+an `agent:<name>` label; a scheduled spec entry pins its run beads with
+`run_agent` (see [the spec dispatcher guide](guides/spec-dispatcher.md)).
 `gt config get --help` lists the keys with their defaults; `gt config get
 polecat_pool.<key>` prints the effective value. Edit the file by hand, or `gt
 config set polecat_pool.<key> <value>`.

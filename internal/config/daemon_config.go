@@ -1004,9 +1004,14 @@ type ScheduledSlingEntry struct {
 	// a "## Formula vars" section, and the spec dispatcher picks the seat, the
 	// queue position and the moment: a full pool is a wait, not a failed sling.
 	// The dispatcher chooses the seat and the moment, so a "spec" entry runs
-	// on any agent with a free seat and cannot carry an Agent: the file does
-	// not load with one (retired_keys.go, gt-mukgk).
+	// on any agent with a free seat (or RunAgent's), and cannot carry an Agent:
+	// the file does not load with one (retired_keys.go, gt-mukgk).
 	Dispatch string `json:"dispatch,omitempty"`
+
+	// RunAgent is the agent a "spec" entry's run beads must run on: the
+	// scheduler labels each bead agent:<name>, and the dispatcher then uses only
+	// that agent's seats. It names an agent in polecat_pool.seats (gt-tplg6).
+	RunAgent string `json:"run_agent,omitempty"`
 
 	// GateCommand is a shell command that decides whether a due run happens.
 	// The patrol runs it through `sh -c` in <town>/<rig>/mayor/rig, with

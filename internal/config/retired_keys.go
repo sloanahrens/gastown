@@ -30,7 +30,7 @@ var retiredSeatKeys = map[string]string{
 
 // retiredScheduledAgentReplacement is what replaced the agent on a scheduled
 // entry the spec dispatcher runs. The entry's index stays in the reported path.
-const retiredScheduledAgentReplacement = "an agent:<name> label on the bead, or a seat in polecat_pool.seats"
+const retiredScheduledAgentReplacement = "an agent:<name> label on the bead, run_agent on the entry (the label its run beads carry), or a seat in polecat_pool.seats"
 
 // retiredKeyReplacement returns what replaced the key at path, and whether the
 // key is retired. A path from a patrol document read on its own is matched as

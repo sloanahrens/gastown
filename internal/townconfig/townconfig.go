@@ -73,6 +73,7 @@ type Town struct {
 	identity  config.TownConfig
 	rigs      map[string]config.RigEntry
 	settings  *config.TownSettings
+	seats     []config.Seat // settings' polecat_pool.seats, set with settings
 	daemon    *config.DaemonPatrolConfig
 	daemonEnv map[string]string
 	dolt      DoltEndpoint
@@ -114,7 +115,7 @@ func Check(root string) error {
 func load(root string) (*Town, []error) {
 	t := &Town{root: root, present: map[string]bool{}, rigs: map[string]config.RigEntry{}, daemonEnv: map[string]string{}}
 	var errs []error
-	for _, step := range []func() error{t.loadTown, t.loadRigs, t.loadRigSettings, t.loadLegacyParked, t.loadSettings, t.loadDaemon, t.loadDaemonEnv, t.loadDolt} {
+	for _, step := range []func() error{t.loadTown, t.loadRigs, t.loadRigSettings, t.loadLegacyParked, t.loadSettings, t.loadDaemon, t.checkScheduledRunAgents, t.loadDaemonEnv, t.loadDolt} {
 		if err := step(); err != nil {
 			errs = append(errs, err)
 		}
@@ -217,14 +218,41 @@ func (t *Town) loadSettings() error {
 	if err := s.PolecatPool.Validate(); err != nil {
 		return oneLine(t.path(FileSettings), err)
 	}
-	if _, err := config.Seats(&s, config.SeatsKnownTo(&s)); err != nil {
+	seats, err := config.Seats(&s, config.SeatsKnownTo(&s))
+	if err != nil {
 		return oneLine(t.path(FileSettings), err)
 	}
 	if err := t.checkLiteralSecrets(&s); err != nil {
 		return err
 	}
 	t.settings = &s
+	t.seats = seats
 	return nil
+}
+
+// checkScheduledRunAgents fails the load when a scheduled entry's run_agent
+// names an agent with no seat in polecat_pool.seats: the entry's run beads
+// would carry an agent: pin no seat can serve and wait for ever, so a deep
+// review pinned off DeepSeek would silently never run (gt-tplg6). A settings
+// file that is absent has no seats, so it fails the same way; one that is
+// present but did not load already reported its own error.
+func (t *Town) checkScheduledRunAgents() error {
+	if t.daemon == nil || t.daemon.Patrols == nil || t.daemon.Patrols.ScheduledSlings == nil {
+		return nil
+	}
+	if t.settings == nil && t.present[FileSettings] {
+		return nil
+	}
+	var bad []string
+	for _, e := range t.daemon.Patrols.ScheduledSlings.Entries {
+		if e.RunAgent != "" && !config.HasSeat(t.seats, e.RunAgent) {
+			bad = append(bad, fmt.Sprintf("scheduled_slings[%s].run_agent %q: no seat for that agent in polecat_pool.seats", e.Name, e.RunAgent))
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return oneLine(t.path(FileDaemon), errors.New(strings.Join(bad, "; ")))
 }
 
 func (t *Town) loadDaemon() error {

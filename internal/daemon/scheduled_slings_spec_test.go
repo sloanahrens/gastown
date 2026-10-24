@@ -425,3 +425,66 @@ func TestRunScheduledSlingEntry_SpecDispatchIgnoresAStaleAgent(t *testing.T) {
 		t.Errorf("log does not say the agent is ignored:\n%s", logs.String())
 	}
 }
+
+// run_agent is the agent: label the scheduler puts on each run bead it creates,
+// which is how a scheduled spec entry keeps its runs off a model (deep reviews
+// never on DeepSeek, gt-tplg6). An entry without it makes the bead it always
+// did.
+func TestScheduledSpecRunAgentLabelsTheRunBead(t *testing.T) {
+	t.Parallel()
+	pinned := specAuditEntry
+	pinned.RunAgent = "claude-sonnet"
+	f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{pinned}, f)
+	writeSpecSeatTown(t, d.config.TownRoot, `"agents": {"claude-sonnet": {"command": "claude"}}`, specSeatPool("claude-sonnet", 1))
+	if err := d.runScheduledSlingEntry(context.Background(), pinned, time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.runs) != 1 {
+		t.Fatalf("created = %+v", f.runs)
+	}
+	if want := []string{"scheduled:deep-review", "formula:mol-deep-review", "agent:claude-sonnet"}; !slices.Equal(f.runs[0].Labels, want) {
+		t.Errorf("labels = %v, want %v", f.runs[0].Labels, want)
+	}
+	if got := scheduledSpecLabels(specAuditEntry); slices.Contains(got, "agent:claude-sonnet") || len(got) != 2 {
+		t.Errorf("an entry without run_agent got labels %v", got)
+	}
+	// The dispatcher reads that label back as a pin to the agent's seats.
+	run := specdispatch.Spec{Labels: f.runs[0].Labels}
+	if got := run.PinnedAgents(); !slices.Equal(got, []string{"claude-sonnet"}) {
+		t.Errorf("the dispatcher reads pins %v from the run bead, want [claude-sonnet]", got)
+	}
+
+}
+
+// A run_agent the live seat map has no seat for fails the tick without creating
+// a bead the dispatcher could never place.
+func TestScheduledSpecRunAgentWithoutASeatCreatesNoBead(t *testing.T) {
+	t.Parallel()
+	pinned := specAuditEntry
+	pinned.RunAgent = "claude-opus"
+	f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{pinned}, f)
+	writeSpecSeatTown(t, d.config.TownRoot, `"agents": {"claude-sonnet": {"command": "claude"}}`, specSeatPool("claude-sonnet", 1))
+
+	err := d.runScheduledSlingEntry(context.Background(), pinned, time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+
+	if err == nil || !strings.Contains(err.Error(), `run_agent "claude-opus" has no seat`) {
+		t.Fatalf("err = %v, want a no-seat error naming claude-opus", err)
+	}
+	if len(f.runs) != 0 {
+		t.Errorf("created %+v, want no bead", f.runs)
+	}
+}
+
+// run_agent is valid only on a spec entry: any other dispatch slings its own
+// run and names its agent with agent.
+func TestScheduledSlingEntry_RunAgentNeedsSpecDispatch(t *testing.T) {
+	t.Parallel()
+	bad := specAuditEntry
+	bad.RunAgent = "claude-sonnet"
+	bad.Dispatch = ""
+	if err := scheduledSlingValidate(bad); err == nil || !strings.Contains(err.Error(), `run_agent is valid only with dispatch "spec"`) {
+		t.Errorf("run_agent without dispatch spec validated: %v", err)
+	}
+}
