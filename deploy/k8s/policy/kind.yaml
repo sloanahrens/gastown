@@ -1,7 +1,7 @@
 # Gas Town polecat sandbox policy.
 #
 # Deny by default. The control plane stays on the Mac: Dolt on :3307 and
-# Forgejo on :3000 are reached through Docker Desktop's host alias. The model
+# Forgejo on :3000 are reached through in-cluster Services. The model
 # endpoint comes from the attached provider profile (deepseek), not from here.
 # Every inspected endpoint enforces; the remaining width (any repository on
 # Forgejo, any Dolt database the bd user may open) is the subject of the

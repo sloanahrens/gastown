@@ -40,7 +40,9 @@ base_sum_before="$(shasum "$BASE")"
 
 echo "default render"
 check "no host.docker.internal is left" lacks "host.docker.internal" "$out"
-check "the render differs from the Docker policy in exactly 6 lines" test "$(diff "$BASE" <(printf '%s\n' "$out") | grep -c '^[<>]')" -eq 6
+check "the header names the in-cluster route" contains "Forgejo on :3000 are reached through in-cluster Services." "$out"
+check "the header does not claim a Docker host alias" lacks "Docker Desktop" "$out"
+check "the render differs from the Docker policy in exactly 8 lines" test "$(diff "$BASE" <(printf '%s\n' "$out") | grep -c '^[<>]')" -eq 8
 check "the Docker policy file is only read" test "$(shasum "$BASE")" = "$base_sum_before"
 dolt="$(endpoint_of 3307 "$out")"
 forgejo="$(endpoint_of 3000 "$out")"
