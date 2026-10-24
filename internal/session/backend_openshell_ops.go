@@ -105,7 +105,16 @@ func (b *openshellBackend) ProgressSample(session string, in liveness.Input) liv
 // like (gt-tj446). Any other phase, and a Ready one in particular, starts the
 // clock over and leaves the tmux answer standing. A gateway that cannot answer
 // leaves it standing too: an outage is not a dead sandbox.
+//
+// The gateway is asked only when the tmux sample is not Alive. A tmux that
+// answers is proof the sandbox runs, so a healthy seat costs no gateway call
+// per sample (om f9ae48011e3e), and any failure clock it carries is stale: a
+// sandbox that answers starts the clock over.
 func (b *openshellBackend) phaseVerdict(session string, in liveness.Input, res liveness.Result) liveness.Result {
+	if res.Verdict == liveness.Alive {
+		b.phases().forget(session)
+		return res
+	}
 	now := in.Now
 	if now.IsZero() {
 		now = time.Now()
@@ -136,8 +145,9 @@ func (b *openshellBackend) phaseVerdict(session string, in liveness.Input, res l
 	return liveness.DeadResult(in.Prev, now, fmt.Sprintf("sandbox phase %s for %s", phase, failing.Round(time.Second)))
 }
 
-// sandboxPhase asks the gateway for the sandbox's phase, bounded like the
-// roster's question so a hung gateway cannot hold a patrol tick.
+// sandboxPhase asks the gateway for the sandbox's phase, bounded well under
+// the two minutes an openshell call may otherwise take, so a hung gateway
+// cannot hold a patrol tick.
 func (b *openshellBackend) sandboxPhase(session string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxPhaseTimeout)
 	defer cancel()

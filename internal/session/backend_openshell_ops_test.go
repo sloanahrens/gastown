@@ -121,8 +121,9 @@ func TestOpenShellOpsSessionExistsMatrix(t *testing.T) {
 func TestOpenShellOpsProgressSampleReadsTheTranscriptThroughExec(t *testing.T) {
 	t.Parallel()
 	const path = "/sandbox/.claude/projects/-sandbox-gt-gastown/9f2.jsonl"
-	// The sample reads the transcript and then asks the gateway for the phase,
-	// the second half of a sandbox seat's liveness answer (gt-tj446).
+	// The sample reads the transcript. The gateway is not asked for the phase
+	// too: this sandbox's tmux answered, which is proof enough that it runs
+	// (gt-tj446, om f9ae48011e3e).
 	fake := &sandbox.Fake{Reply: map[string]string{
 		"exec": "1760000123 40960 " + path + "\n",
 		"get":  openshellReadyReply,
@@ -142,10 +143,7 @@ func TestOpenShellOpsProgressSampleReadsTheTranscriptThroughExec(t *testing.T) {
 	if s.TranscriptPath != path || s.TranscriptBytes != 40960 || !s.TranscriptMtime.Equal(time.Unix(1760000123, 0)) {
 		t.Fatalf("transcript sample = %q %d %v, want %q 40960 %v", s.TranscriptPath, s.TranscriptBytes, s.TranscriptMtime, path, time.Unix(1760000123, 0))
 	}
-	want := [][]string{
-		sandboxExec("sh", "-c", transcriptScript),
-		{"openshell", "sandbox", "get", openshellTestSession, "--output", "json"},
-	}
+	want := [][]string{sandboxExec("sh", "-c", transcriptScript)}
 	if !reflect.DeepEqual(fake.Calls(), want) {
 		t.Fatalf("openshell calls = %v, want %v", fake.Calls(), want)
 	}

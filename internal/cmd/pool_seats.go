@@ -87,9 +87,9 @@ func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatD
 // A failure carries which read failed (poolOccupancyError), so a caller can
 // keep its own words for a lister it cannot talk to without parsing the error.
 //
-// deadSandbox is the phase read a live session is dropped by (gt-tj446): a
-// sandbox the gateway reports in a terminal failure phase is not a working seat,
-// and the dead read below then counts it as held while its bead is hooked.
+// deadSandbox is the liveness read a live session is dropped by (gt-tj446): a
+// sandbox seat the patrol has recorded as dead is not a working seat, and the
+// dead read below then counts it as held while its bead is hooked.
 func poolOccupiedSessions(t sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time, deadSandbox sandboxSeatDeadFunc) ([]poolSession, error) {
 	live, err := listPolecatSessionsWith(t, disposition, now())
 	if err != nil {

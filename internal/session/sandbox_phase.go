@@ -1,13 +1,9 @@
 package session
 
 import (
-	"context"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/sandbox"
 )
 
 const (
@@ -69,39 +65,7 @@ func (w *sandboxPhaseWatch) forget(name string) {
 
 // sandboxPhases is the process's watch. A backend built from a registry record
 // (recordBackend) carries none of its own, so the daemon's patrol judges one
-// sandbox across ticks (gt-tj446).
+// sandbox across ticks (gt-tj446). Anything outside that process — the pool
+// roster runs in its own — reads the verdict the patrol recorded for the seat,
+// not the clock, so the two can never disagree about one sandbox.
 var sandboxPhases = newSandboxPhaseWatch()
-
-// SandboxPhaseTerminal reports whether the gateway reports session's sandbox in
-// a terminal failure phase: Error or Failed. A session with no registry record
-// is a host session, and a gateway that cannot answer is an error rather than a
-// "no", so a caller keeps the seat on one.
-func SandboxPhaseTerminal(townRoot, session string) (bool, error) {
-	rec, ok, err := ReadSandboxRecord(townRoot, session)
-	if err != nil || !ok {
-		return false, err
-	}
-	return sandboxPhaseTerminalWith(rec.Gateway, session, askSandboxPhase)
-}
-
-// sandboxPhaseTerminalWith is SandboxPhaseTerminal over the gateway question.
-func sandboxPhaseTerminalWith(gateway, session string, phaseOf func(gateway, session string) (string, error)) (bool, error) {
-	phase, err := phaseOf(gateway, session)
-	if err != nil {
-		return false, fmt.Errorf("asking the gateway for the phase of sandbox %s: %w", session, err)
-	}
-	return sandboxPhaseTerminal(phase), nil
-}
-
-// askSandboxPhase is the gateway question the roster asks, bounded well under
-// the two minutes an openshell call may otherwise take, so an unreachable
-// gateway cannot hold a pool read for the whole of it.
-func askSandboxPhase(gateway, session string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), sandboxPhaseTimeout)
-	defer cancel()
-	st, err := (&sandbox.CLI{Gateway: gateway}).Get(ctx, session)
-	if err != nil {
-		return "", err
-	}
-	return st.Phase, nil
-}
