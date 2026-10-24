@@ -162,14 +162,21 @@ polecat_image_step() {
     log "polecat image: $IMAGE_PERL is not installed, so the rebuild was not started (non-fatal)"
     return 0
   fi
+  # An alarm of 0 or a non-number would leave the build with no bound at all.
+  local alarm="$IMAGE_ALARM"
+  if ! [[ "$alarm" =~ ^[1-9][0-9]*$ ]]; then
+    log "polecat image: INSTALL_GT_IMAGE_ALARM='$alarm' is not a whole number of seconds above zero, so the build gets 1200"
+    alarm=1200
+  fi
   [ -n "$logfile" ] || logfile=/dev/null
   mkdir -p "$(dirname "$logfile")" 2>/dev/null || true
   # The perl that stays up is the supervisor: run.sh runs in its own process
   # group, so on the alarm the whole build (run.sh and the docker it started)
   # is stopped, and only then is the lock run.sh took removed. Removing it while
   # a docker child still runs would let the next install build beside it.
-  # run.sh gets this install's town root, gt and lock, not whatever HOME and
-  # PATH resolve to, so the image is built for the install that asked for it.
+  # run.sh gets this install's town root, gt and lock (POLECAT_IMAGE_TOWN_ROOT,
+  # POLECAT_IMAGE_GT, POLECAT_IMAGE_LOCK; case 43 pins them), not whatever HOME
+  # and PATH resolve to, so the image is built for the install that asked for it.
   ( POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$GT" POLECAT_IMAGE_LOCK="$IMAGE_LOCK" \
       "$IMAGE_PERL" -MPOSIX -MFile::Path=remove_tree -e '
         my ($secs, $lock, @cmd) = @ARGV;
@@ -187,12 +194,13 @@ polecat_image_step() {
             chomp $pid;
             remove_tree($lock) if $pid == $child;
           }
+          print STDERR "polecat image: alarm after $secs s stopped the build\n";
           exit 124;
         };
         alarm $secs;
         waitpid($child, 0);
         exit($? >> 8);
-      ' "$IMAGE_ALARM" "$IMAGE_LOCK" bash "$run" </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null || {
+      ' "$alarm" "$IMAGE_LOCK" bash "$run" </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null || {
     log "polecat image: could not start the rebuild for $commit (non-fatal)"
     return 0
   }
