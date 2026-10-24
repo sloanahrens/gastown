@@ -10,6 +10,9 @@
 # raw TCP and Forgejo's git smart-HTTP paths pass; the web UI, API and LFS are
 # denied by the layer-7 rules.
 #
+# The source header names Docker Desktop's host alias; the rendered header names
+# the in-cluster Services, so a kind policy does not describe the Docker route.
+#
 # usage: render-policy.sh [--dolt-host H] [--forgejo-host H] [--allowed-ip IP] [BASE]
 set -euo pipefail
 
@@ -33,7 +36,8 @@ case "$allowed_ip" in
   *[!0-9.]*|"") echo "render-policy: --allowed-ip must be an IPv4 address, got '$allowed_ip'" >&2; exit 2 ;;
 esac
 
-awk -v dolt="$dolt_host" -v forgejo="$forgejo_host" -v ip="$allowed_ip" '
+awk -v dolt="$dolt_host" -v forgejo="$forgejo_host" -v ip="$allowed_ip" \
+    -v stale="Docker Desktop's host alias" -v route="in-cluster Services" '
   /^ *- host: host\.docker\.internal *$/ { held = $0; next }
   held != "" {
     indent = $0; sub(/port:.*/, "", indent)
@@ -48,6 +52,7 @@ awk -v dolt="$dolt_host" -v forgejo="$forgejo_host" -v ip="$allowed_ip" '
     held = ""
     next
   }
+  index($0, stale) { sub(stale, route) }
   { print }
   END { if (held != "") { print held } }
 ' "$base"
