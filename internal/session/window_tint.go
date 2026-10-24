@@ -130,17 +130,23 @@ func ResolveTintFactor(rig string) float64 {
 	return DefaultTintFactor
 }
 
-// IsWindowTintEnabled checks if window tinting is enabled at any config level.
-// Returns true if enabled explicitly; false if disabled or not configured.
+// IsWindowTintEnabled reports whether window tinting is enabled at any config level.
+// A window_tint block with no enabled key is enabled, matching ResolveWindowTint.
+// A rig block decides before the global one, as it does there.
 func IsWindowTintEnabled(rig string) bool {
 	townRoot, _ := workspace.FindFromCwd()
+	return isWindowTintEnabledIn(townRoot, rig)
+}
 
+// isWindowTintEnabledIn is IsWindowTintEnabled for an explicit town root, so
+// tests can pass a fixture instead of changing the working directory.
+func isWindowTintEnabledIn(townRoot, rig string) bool {
 	// Check per-rig config.
 	if townRoot != "" && rig != "" {
 		settingsPath := filepath.Join(townRoot, rig, "settings", "config.json")
 		if settings, err := config.LoadRigSettings(settingsPath); err == nil {
-			if settings.Theme != nil && settings.Theme.WindowTint != nil && settings.Theme.WindowTint.Enabled != nil {
-				return *settings.Theme.WindowTint.Enabled
+			if settings.Theme != nil && settings.Theme.WindowTint != nil {
+				return settings.Theme.WindowTint.Enabled == nil || *settings.Theme.WindowTint.Enabled
 			}
 		}
 	}
@@ -149,8 +155,8 @@ func IsWindowTintEnabled(rig string) bool {
 	if townRoot != "" {
 		mayorConfigPath := filepath.Join(townRoot, "mayor", "config.json")
 		if mayorCfg, err := config.LoadMayorConfig(mayorConfigPath); err == nil {
-			if mayorCfg.Theme != nil && mayorCfg.Theme.WindowTint != nil && mayorCfg.Theme.WindowTint.Enabled != nil {
-				return *mayorCfg.Theme.WindowTint.Enabled
+			if mayorCfg.Theme != nil && mayorCfg.Theme.WindowTint != nil {
+				return mayorCfg.Theme.WindowTint.Enabled == nil || *mayorCfg.Theme.WindowTint.Enabled
 			}
 		}
 	}
