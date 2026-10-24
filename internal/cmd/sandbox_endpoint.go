@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -54,7 +53,13 @@ Default output is three lines, shell-safe without quoting:
   allowed_ips=192.168.5.2/32
 
 allowed_ips is empty when the policy names none, as the Docker policy does.
---json prints {host, port, allowed_ips} instead.`,
+--json prints {host, port, allowed_ips} instead.
+
+--render FILE prints the forgejo-polecat profile FILE with its Forgejo endpoint
+bound to this one (the Docker endpoint comes back byte for byte); --from-export
+EXPORT adds the resource_version of a profile export, which profile update
+needs. --check EXPORT prints "bound" when the exported profile names this
+host, port and allowed_ips, and "stale: <why>" when it does not.`,
 	Args: cobra.NoArgs,
 	RunE: runSandboxEndpoint,
 }
@@ -64,13 +69,18 @@ var (
 	sandboxEndpointRoot    string
 	sandboxEndpointJSON    bool
 	sandboxEndpointRender  string
+
+	sandboxEndpointFromExport string
+	sandboxEndpointCheck      string
 )
 
 func init() {
 	sandboxEndpointCmd.Flags().StringVar(&sandboxEndpointGateway, "gateway", "", "openshell gateway name, e.g. k8s (required)")
 	sandboxEndpointCmd.Flags().StringVar(&sandboxEndpointRoot, "root", "", "gt source checkout the policy paths are relative to (default: the town's gt source)")
 	sandboxEndpointCmd.Flags().BoolVar(&sandboxEndpointJSON, "json", false, "Print {host, port, allowed_ips} as JSON")
-	sandboxEndpointCmd.Flags().StringVar(&sandboxEndpointRender, "render", "", "Print the forgejo-polecat profile FILE with this endpoint in place of its Docker host alias, instead of the endpoint")
+	sandboxEndpointCmd.Flags().StringVar(&sandboxEndpointRender, "render", "", "Print the forgejo-polecat profile FILE bound to this endpoint, instead of the endpoint")
+	sandboxEndpointCmd.Flags().StringVar(&sandboxEndpointFromExport, "from-export", "", "With --render: add the resource_version of the exported profile FILE, as profile update requires")
+	sandboxEndpointCmd.Flags().StringVar(&sandboxEndpointCheck, "check", "", "Print \"bound\" or \"stale: <why>\" for the exported profile FILE against this endpoint, instead of the endpoint")
 	_ = sandboxEndpointCmd.MarkFlagRequired("gateway")
 	sandboxCmd.AddCommand(sandboxEndpointCmd)
 	rootCmd.AddCommand(sandboxCmd)
@@ -83,7 +93,41 @@ type sandboxEndpoint struct {
 	AllowedIPs []string `json:"allowed_ips"`
 }
 
+// sandboxEndpointOptions are the flags of one `gt sandbox endpoint` run.
+type sandboxEndpointOptions struct {
+	Gateway string
+	JSON    bool
+	// Render is a forgejo-polecat profile file to print bound to the endpoint;
+	// FromExport adds the resource_version of an exported copy to it.
+	Render     string
+	FromExport string
+	// Check is an exported profile to compare with the endpoint.
+	Check string
+}
+
+func (o sandboxEndpointOptions) validate() error {
+	switch {
+	case o.Render != "" && o.Check != "":
+		return fmt.Errorf("--render and --check are separate questions; pass one")
+	case o.FromExport != "" && o.Render == "":
+		return fmt.Errorf("--from-export stamps a rendered profile; pass --render too")
+	case o.JSON && (o.Render != "" || o.Check != ""):
+		return fmt.Errorf("--json prints the endpoint; it does not combine with --render or --check")
+	}
+	return nil
+}
+
 func runSandboxEndpoint(cmd *cobra.Command, _ []string) error {
+	opts := sandboxEndpointOptions{
+		Gateway:    sandboxEndpointGateway,
+		JSON:       sandboxEndpointJSON,
+		Render:     sandboxEndpointRender,
+		FromExport: sandboxEndpointFromExport,
+		Check:      sandboxEndpointCheck,
+	}
+	if err := opts.validate(); err != nil {
+		return fmt.Errorf("sandbox endpoint: %w", err)
+	}
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("sandbox endpoint: %w", err)
@@ -98,19 +142,32 @@ func runSandboxEndpoint(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("sandbox endpoint: %w", err)
 		}
 	}
-	ep, err := forgejoEndpointForGateway(ts, sandboxEndpointGateway, root)
+	return executeSandboxEndpoint(cmd.OutOrStdout(), opts, ts, root)
+}
+
+// executeSandboxEndpoint resolves the gateway's endpoint from ts and the policy
+// files under root, then answers the way opts asks: the endpoint, the profile
+// file rendered for it, or whether an exported profile binds it.
+func executeSandboxEndpoint(w io.Writer, opts sandboxEndpointOptions, ts *config.TownSettings, root string) error {
+	if err := opts.validate(); err != nil {
+		return fmt.Errorf("sandbox endpoint: %w", err)
+	}
+	ep, err := forgejoEndpointForGateway(ts, opts.Gateway, root)
 	if err != nil {
 		return fmt.Errorf("sandbox endpoint: %w", err)
 	}
-	if sandboxEndpointRender != "" {
-		return renderSandboxProfile(cmd.OutOrStdout(), sandboxEndpointRender, ep)
+	switch {
+	case opts.Render != "":
+		return renderSandboxProfile(w, opts.Render, opts.FromExport, ep)
+	case opts.Check != "":
+		return checkSandboxProfile(w, opts.Check, ep)
 	}
-	return printSandboxEndpoint(cmd.OutOrStdout(), ep, sandboxEndpointJSON)
+	return printSandboxEndpoint(w, ep, opts.JSON)
 }
 
-// renderSandboxProfile writes the profile file at path with ep in place of the
-// Docker host alias it names.
-func renderSandboxProfile(w io.Writer, path string, ep sandboxEndpoint) error {
+// renderSandboxProfile writes the profile file at path bound to ep, carrying the
+// resource_version of the exported profile at exportPath when one is named.
+func renderSandboxProfile(w io.Writer, path, exportPath string, ep sandboxEndpoint) error {
 	src, err := os.ReadFile(path) //nolint:gosec // G304: the operator names the profile file to render
 	if err != nil {
 		return fmt.Errorf("sandbox endpoint: %w", err)
@@ -119,44 +176,37 @@ func renderSandboxProfile(w io.Writer, path string, ep sandboxEndpoint) error {
 	if err != nil {
 		return fmt.Errorf("sandbox endpoint: %s: %w", path, err)
 	}
+	if exportPath != "" {
+		exported, err := os.ReadFile(exportPath) //nolint:gosec // G304: the operator names the exported profile
+		if err != nil {
+			return fmt.Errorf("sandbox endpoint: %w", err)
+		}
+		if out, err = stampResourceVersion(out, exported); err != nil {
+			return fmt.Errorf("sandbox endpoint: %s: %w", exportPath, err)
+		}
+	}
 	_, err = w.Write(out)
 	return err
 }
 
-// renderForgejoProfile returns the forgejo-polecat provider profile src with ep
-// in place of the Docker host alias it names: the host line, and the port line
-// followed by an allowed_ips line when ep has any. A Docker endpoint (no
-// allowed_ips) comes back byte for byte, so the Docker gateway imports the
-// profile it always did. src must name host.docker.internal on port 3000, the
-// one shape this rewrites.
-func renderForgejoProfile(src []byte, ep sandboxEndpoint) ([]byte, error) {
-	const (
-		dockerHostLine = "  - host: host.docker.internal"
-		dockerPortLine = "    port: 3000"
-	)
-	var out strings.Builder
-	hosted, ported := false, false
-	for _, line := range strings.SplitAfter(string(src), "\n") {
-		text := strings.TrimSuffix(line, "\n")
-		eol := line[len(text):]
-		switch text {
-		case dockerHostLine:
-			hosted = true
-			line = "  - host: " + ep.Host + eol
-		case dockerPortLine:
-			ported = true
-			out.WriteString("    port: " + strconv.Itoa(ep.Port) + eol)
-			if len(ep.AllowedIPs) > 0 {
-				out.WriteString(`    allowed_ips: ["` + strings.Join(ep.AllowedIPs, `","`) + `"]` + "\n")
-			}
-			continue
-		}
-		out.WriteString(line)
+// checkSandboxProfile prints "bound" when the exported profile at path binds ep,
+// and "stale: <what differs>" when it does not. Either is a successful answer;
+// only a file it cannot read or parse is an error.
+func checkSandboxProfile(w io.Writer, path string, ep sandboxEndpoint) error {
+	exported, err := os.ReadFile(path) //nolint:gosec // G304: the operator names the exported profile
+	if err != nil {
+		return fmt.Errorf("sandbox endpoint: %w", err)
 	}
-	if !hosted || !ported {
-		return nil, fmt.Errorf("the profile names no host.docker.internal endpoint on port 3000 to rewrite")
+	diff, err := profileEndpointDiff(exported, ep)
+	if err != nil {
+		return fmt.Errorf("sandbox endpoint: %s: %w", path, err)
 	}
-	return []byte(out.String()), nil
+	if diff == "" {
+		_, err = fmt.Fprintln(w, "bound")
+	} else {
+		_, err = fmt.Fprintf(w, "stale: %s\n", diff)
+	}
+	return err
 }
 
 // printSandboxEndpoint writes ep as the three shell-safe lines, or as JSON.
