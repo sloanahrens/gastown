@@ -1,6 +1,7 @@
 package polecat
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -65,7 +66,7 @@ func TestIsSandboxSeatAgentSeatTableErrorIsReturned(t *testing.T) {
 
 func TestSandboxSeatGitStateRunningSandboxIsUnknown(t *testing.T) {
 	t.Parallel()
-	st := SandboxSeatGitState("polecat/x/gt-1", true, "ma-papaya")
+	st := SandboxSeatGitState("polecat/x/gt-1", true, nil, "ma-papaya")
 	if st.Source != GitStateSourceUnknown {
 		t.Fatalf("Source = %q, want unknown: the work lives in the running sandbox", st.Source)
 	}
@@ -76,9 +77,24 @@ func TestSandboxSeatGitStateRunningSandboxIsUnknown(t *testing.T) {
 
 func TestSandboxSeatGitStateGoneSandboxIsCleanAndLive(t *testing.T) {
 	t.Parallel()
-	st := SandboxSeatGitState("polecat/x/gt-1", false, "ma-papaya")
+	st := SandboxSeatGitState("polecat/x/gt-1", false, nil, "ma-papaya")
 	want := LiveGitState{Branch: "polecat/x/gt-1", Source: GitStateSourceLive}
 	if st != want {
 		t.Errorf("SandboxSeatGitState = %+v, want %+v: no unpushed, dirty or stash facts from a host worktree", st, want)
+	}
+}
+
+// A gateway that errors (down, timed out) is not an answer: a live sandbox must
+// not read as gone, so the state stays unknown whatever exists says.
+func TestSandboxSeatGitStateGatewayErrorIsUnknown(t *testing.T) {
+	t.Parallel()
+	for _, exists := range []bool{false, true} {
+		st := SandboxSeatGitState("polecat/x/gt-1", exists, errors.New("gateway unreachable"), "ma-papaya")
+		if st.Source != GitStateSourceUnknown {
+			t.Errorf("exists=%v with a gateway error: Source = %v, want unknown", exists, st.Source)
+		}
+		if !strings.Contains(st.FailedReason, "gateway unreachable") {
+			t.Errorf("exists=%v: FailedReason = %q, want the gateway error in it", exists, st.FailedReason)
+		}
 	}
 }
