@@ -20,7 +20,7 @@ DeepSeek polecats run in OpenShell sandboxes on Kubernetes, first on a local kin
 
 ## Running it
 
-`deploy/k8s/kind/up.sh` builds the environment and prints the `export` line for the next shell; `--register-town` also copies the `k8s` entry and its client certificates into `~/.config/openshell`, where the daemon's `openshell -g k8s` looks. `down.sh` removes it (`--stop-vm` also stops the VM). `kind_test.sh` runs the stub-tool tests without a VM. Before changing a port, the profile or the directory, read the `GT_K8S_*` defaults in `deploy/k8s/kind/common.sh`.
+`deploy/k8s/kind/up.sh` builds the environment and prints the `export` line for the next shell; `--register-town` also copies the `k8s` entry and its client certificates into `~/.config/openshell`, where the daemon's `openshell -g k8s` looks. `down.sh` removes that town entry before it tears anything down, and refuses while `k8s` is the active gateway, since removing it would leave none selected (`--stop-vm` also stops the VM). `kind_test.sh` runs the stub-tool tests without a VM. Before changing a port, the profile or the directory, read the `GT_K8S_*` defaults in `deploy/k8s/kind/common.sh`.
 
 ## Things that cost time
 

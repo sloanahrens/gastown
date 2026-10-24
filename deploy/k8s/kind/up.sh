@@ -211,28 +211,7 @@ done
 # config, not the private one above, so copy the certificates and the entry
 # there. A rebuild changes the client certificates, so every run replaces the
 # k8s entry. `gateway add` makes the new gateway active, so read the active
-# gateway first and select it back afterwards.
-town_config="$TOWN_XDG_CONFIG_HOME/openshell"
-town_openshell() { XDG_CONFIG_HOME="$TOWN_XDG_CONFIG_HOME" openshell "$@"; }
-
-town_gateway_registered() {
-  town_openshell gateway list 2>/dev/null |
-    awk -v name="$GATEWAY_NAME" '{ for (i = 1; i <= NF; i++) if ($i == name) found = 1 } END { exit !found }'
-}
-
-# town_active_gateway names the gateway the town config has selected: the
-# active_gateway file when the CLI wrote one, otherwise the list's starred row.
-# The star counts only in the row's first field, so a `*` in a URL or a status
-# is not read as a gateway name. Empty means the list names no active gateway.
-town_active_gateway() {
-  local file="$town_config/active_gateway"
-  if [ -s "$file" ]; then
-    tr -d '[:space:]' <"$file"
-    return 0
-  fi
-  town_openshell gateway list 2>/dev/null |
-    awk '$1 == "*" && NF > 1 { print $2; exit }' || true
-}
+# gateway first and select it back afterwards. The town helpers live in common.sh.
 
 # town_rollback runs from the EXIT trap when the run stops after removing the
 # town's k8s entry but before its replacement is in place: the entry is added
@@ -243,14 +222,14 @@ town_active_gateway() {
 town_rollback() {
   if [ "$town_entry_before" = 1 ] && ! town_gateway_registered; then
     if town_openshell gateway add "https://127.0.0.1:$GATEWAY_PORT" --local --name "$GATEWAY_NAME" >/dev/null 2>&1; then
-      warn "the run stopped while re-registering $GATEWAY_NAME; its previous entry is back in $town_config"
+      warn "the run stopped while re-registering $GATEWAY_NAME; its previous entry is back in $TOWN_CONFIG"
     else
-      warn "the run stopped while re-registering $GATEWAY_NAME and $town_config has no $GATEWAY_NAME entry; restore it with: openshell gateway add https://127.0.0.1:$GATEWAY_PORT --local --name $GATEWAY_NAME"
+      warn "the run stopped while re-registering $GATEWAY_NAME and $TOWN_CONFIG has no $GATEWAY_NAME entry; restore it with: openshell gateway add https://127.0.0.1:$GATEWAY_PORT --local --name $GATEWAY_NAME"
     fi
   fi
   if [ -n "$town_active_before" ] && [ "$town_active_before" != "$GATEWAY_NAME" ] &&
     ! town_openshell gateway select "$town_active_before" >/dev/null 2>&1; then
-    warn "the active gateway in $town_config was not restored to $town_active_before; run: openshell gateway select $town_active_before"
+    warn "the active gateway in $TOWN_CONFIG was not restored to $town_active_before; run: openshell gateway select $town_active_before"
   fi
 }
 
@@ -259,7 +238,7 @@ if [ "$register_town" = 1 ]; then
   town_entry_before=0
   town_gateway_registered && town_entry_before=1
   if [ -z "$town_active_before" ]; then
-    warn "no active gateway is named in $town_config; $GATEWAY_NAME becomes the active gateway (openshell gateway select <name> to change it)"
+    warn "no active gateway is named in $TOWN_CONFIG; $GATEWAY_NAME becomes the active gateway (openshell gateway select <name> to change it)"
   fi
   # From the remove to the add the config has no k8s entry, so the EXIT trap
   # owns putting it back; town_rollback_pending arms it and the successful add
@@ -268,20 +247,20 @@ if [ "$register_town" = 1 ]; then
   town_rollback_pending=1
   if [ "$town_entry_before" = 1 ]; then
     town_openshell gateway remove "$GATEWAY_NAME" >/dev/null ||
-      die "cannot remove the stale $GATEWAY_NAME entry from $town_config"
+      die "cannot remove the stale $GATEWAY_NAME entry from $TOWN_CONFIG"
   fi
-  export_certs "$town_config/gateways/$GATEWAY_NAME/mtls"
+  export_certs "$TOWN_CONFIG/gateways/$GATEWAY_NAME/mtls"
   town_openshell gateway add "https://127.0.0.1:$GATEWAY_PORT" --local --name "$GATEWAY_NAME" ||
-    die "cannot register $GATEWAY_NAME in $town_config"
+    die "cannot register $GATEWAY_NAME in $TOWN_CONFIG"
   if [ -n "$town_active_before" ] && [ "$town_active_before" != "$GATEWAY_NAME" ]; then
     town_openshell gateway select "$town_active_before" ||
-      die "$GATEWAY_NAME is registered in $town_config but the active gateway could not be restored to $town_active_before; run: openshell gateway select $town_active_before"
+      die "$GATEWAY_NAME is registered in $TOWN_CONFIG but the active gateway could not be restored to $town_active_before; run: openshell gateway select $town_active_before"
     active_after="$(town_active_gateway)"
     [ "$active_after" = "$town_active_before" ] ||
-      die "$GATEWAY_NAME is registered in $town_config but the active gateway is $active_after, not $town_active_before; run: openshell gateway select $town_active_before"
+      die "$GATEWAY_NAME is registered in $TOWN_CONFIG but the active gateway is $active_after, not $town_active_before; run: openshell gateway select $town_active_before"
   fi
   town_rollback_pending=0
-  say "registered $GATEWAY_NAME in $town_config (active gateway: $(town_active_gateway))"
+  say "registered $GATEWAY_NAME in $TOWN_CONFIG (active gateway: $(town_active_gateway))"
 fi
 
 say "ready: openshell -g $GATEWAY_NAME ..."
