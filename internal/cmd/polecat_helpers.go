@@ -138,13 +138,20 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 		}
 		sourceHint := agentSourceIssueHint(currentIssue, fields)
 		hookBead := agentHookBead(agentIssue, fields)
+		// A sandbox seat's host worktree is a stale leftover: its git state is the
+		// gateway's answer, and the host clone is never measured (gt-qq6rg.2).
+		sandboxLive, sandboxed := sandboxSeatProbeFor(filepath.Dir(target.r.Path), nil)(strings.TrimSpace(fields.Agent), polecatSessionNameIn(target.rigName, target.polecatName))
 		var gitState *GitState
 		gitStateLoaded := false
 		loadGitState := func() {
 			if gitStateLoaded || infoErr != nil || polecatInfo == nil {
 				return
 			}
-			gitState, _ = getGitState(polecatInfo.ClonePath)
+			if sandboxed {
+				gitState, _ = sandboxSeatGitState(sandboxLive)
+			} else {
+				gitState, _ = getGitState(polecatInfo.ClonePath)
+			}
 			result.GitState = gitState
 			gitStateLoaded = true
 		}
@@ -152,7 +159,9 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 		if fields.ActiveMR != "" {
 			loadGitState()
 			gitSafe := false
-			if polecatInfo != nil {
+			if sandboxed {
+				gitSafe = sandboxSeatGitSafe(sandboxLive)
+			} else if polecatInfo != nil {
 				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath)
 			}
 			activeMRAssessment = polecat.AssessActiveMR(bd, polecat.ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
@@ -172,7 +181,9 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 				loadGitState()
 			}
 			gitSafe := false
-			if polecatInfo != nil {
+			if sandboxed {
+				gitSafe = sandboxSeatGitSafe(sandboxLive)
+			} else if polecatInfo != nil {
 				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath)
 			}
 			facts := polecat.WorkstateFacts{
