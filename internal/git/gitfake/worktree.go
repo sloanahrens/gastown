@@ -16,6 +16,7 @@ type WorkTree interface {
 	Status() (*git.GitStatus, error)
 	Add(pathspecs ...string) error
 	ResetFiles(pathspecs ...string) error
+	ReadTreeHead() error
 	StagedChanges() ([]git.StagedChange, error)
 	RuntimeArtifactPathspecs(paths []string) []string
 	WriteTree() (string, error)
