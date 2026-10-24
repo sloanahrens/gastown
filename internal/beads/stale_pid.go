@@ -6,7 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
+
+	"github.com/steveyegge/gastown/internal/tmuxsweep"
 )
 
 // CleanStaleDoltServerPID removes the dolt-server.pid file inside a beads
@@ -31,16 +32,12 @@ func CleanStaleDoltServerPID(beadsDir string) {
 		return
 	}
 
-	// Check if the process is alive using signal 0 (no-op probe)
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		_ = os.Remove(pidPath)
+	// A Dolt server running under another uid answers EPERM to signal 0. It is
+	// alive, and its pid file must stay, so only a process that is gone counts.
+	if tmuxsweep.PIDAlive(pid) {
 		return
 	}
 
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		// Process is dead — remove stale PID file
-		_ = os.Remove(pidPath)
-		fmt.Fprintf(os.Stderr, "Cleaned stale dolt-server.pid (PID %d) from %s\n", pid, beadsDir)
-	}
+	_ = os.Remove(pidPath)
+	fmt.Fprintf(os.Stderr, "Cleaned stale dolt-server.pid (PID %d) from %s\n", pid, beadsDir)
 }
