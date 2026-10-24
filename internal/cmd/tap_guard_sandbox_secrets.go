@@ -23,6 +23,8 @@ Blocked, in any chain, launcher, shell -c payload, eval or command substitution:
     the environment, or printenv of a secret-like NAME
   - echo/printf of a secret-like variable, or a secret-like variable fed to a
     here-string, an unquoted heredoc body, or an argument of curl, wget or http
+  - curl, wget or http sending a credential file (-d @file, -K, --post-file), or
+    an argument that expands a variable assigned a secret, or a ${!name} indirection
   - any read of /proc/<pid>/environ
   - reading ~/.claude.json, a .env file, ~/.netrc or ~/.git-credentials
   - git credential fill, and the git credential helper run directly
@@ -165,10 +167,77 @@ func sandboxSecretsHereStringRefsSecret(segment []string) bool {
 // body literal, and a body fed to a shell is judged as code by the walk.
 func sandboxSecretsHeredocRefsSecret(command string) bool {
 	for _, span := range scanHeredocs(command) {
-		if span.bodyStart < 0 || span.quoted || heredocReaderIsShellInvoker(span.reader) {
+		if span.bodyStart < 0 || span.quoted || sandboxSecretsHeredocFedToShell(command, span) {
 			continue
 		}
 		if sandboxSecretsBodyRefsSecret(span.body) {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxSecretsOperatorMark stands in for a heredoc's operator while the line
+// it sits on is tokenized, so the segment that the body is fed to can be found.
+const sandboxSecretsOperatorMark = "sandboxsecretsheredocoperator"
+
+// sandboxSecretsHeredocFedToShell reports whether a shell invoker in the heredoc's
+// own pipeline runs its body: "cat <<EOF | bash". A shell invoker after a ; or &&
+// on the same line reads no body from this heredoc, so it does not exempt it.
+func sandboxSecretsHeredocFedToShell(command string, span heredocSpan) bool {
+	for _, m := range heredocStartPattern.FindAllStringSubmatchIndex(command, -1) {
+		reader, readerStart := heredocReaderLine(command, m[0], m[1])
+		if readerStart != span.readerStart || reader != span.reader {
+			continue
+		}
+		lineEnd := len(command)
+		if i := strings.IndexByte(command[m[0]:], '\n'); i >= 0 {
+			lineEnd = m[0] + i
+		}
+		line := command[span.readerStart:m[0]] + " " + sandboxSecretsOperatorMark + " " + command[m[1]:lineEnd]
+		return sandboxSecretsPipelineHasShell(shellTokenize(strings.ReplaceAll(line, "\\\n", " ")))
+	}
+	return false
+}
+
+// sandboxSecretsPipelineHasShell reports whether a shell invoker sits in the
+// pipeline that holds the operator mark: the run of segments joined by | with it.
+func sandboxSecretsPipelineHasShell(tokens []string) bool {
+	var (
+		segments [][]string
+		piped    []bool // piped[i]: segments[i] reads the output of the segment before it
+		current  []string
+		joined   bool
+		mark     = -1
+	)
+	for _, tok := range tokens {
+		if shellCommandSeparators[tok] {
+			segments = append(segments, current)
+			piped = append(piped, joined)
+			current = nil
+			joined = tok == "|"
+			continue
+		}
+		if tok == sandboxSecretsOperatorMark {
+			mark = len(segments)
+			continue
+		}
+		current = append(current, tok)
+	}
+	segments = append(segments, current)
+	piped = append(piped, joined)
+	if mark < 0 {
+		return false
+	}
+	first, last := mark, mark
+	for first > 0 && piped[first] {
+		first--
+	}
+	for last+1 < len(segments) && piped[last+1] {
+		last++
+	}
+	for _, segment := range segments[first : last+1] {
+		if word, _ := segmentCommandWord(segment); word != "" && shellInvokers[strings.ToLower(filepath.Base(word))] {
 			return true
 		}
 	}
@@ -209,9 +278,10 @@ func sandboxSecretsReason(command string) string {
 // `env` is a launcher with no command behind it: it prints the environment.
 func sandboxSecretsWalk(command string, depth int) (reason string, tooDeep bool) {
 	tokens := shellTokenize(prWorkflowTokenText(command))
+	tainted := sandboxSecretsTaintedNames(tokens)
 	var payloads []string
 	for _, segment := range splitShellSegments(tokens) {
-		r, launched, argv := sandboxSecretsSegment(segment)
+		r, launched, argv := sandboxSecretsSegment(segment, tainted)
 		if r != "" {
 			return r, false
 		}
@@ -256,8 +326,9 @@ func sandboxSecretsWalk(command string, depth int) (reason string, tooDeep bool)
 // sandboxSecretsSegment looks through the assignments and launchers ahead of a
 // segment's command, as prWorkflowCommand does, but stops at an `env` that has
 // no command behind it. It returns the verdict on the command it finds, the
-// payloads a launcher carries, and that command's argv.
-func sandboxSecretsSegment(segment []string) (reason string, payloads, argv []string) {
+// payloads a launcher carries, and that command's argv. tainted names the
+// variables the whole command assigns a secret to.
+func sandboxSecretsSegment(segment []string, tainted map[string]bool) (reason string, payloads, argv []string) {
 	if sandboxSecretsHereStringRefsSecret(segment) {
 		return "a here-string expands a secret variable", nil, nil
 	}
@@ -278,7 +349,7 @@ func sandboxSecretsSegment(segment []string) (reason string, payloads, argv []st
 				seg = inner
 				continue
 			}
-			return sandboxSecretsInvocation(seg), payloads, seg
+			return sandboxSecretsInvocation(seg, tainted), payloads, seg
 		}
 		if name == "env" && sandboxSecretsEnvWouldPrint(seg[1:]) {
 			return "env prints the environment", nil, nil
@@ -422,7 +493,7 @@ func sandboxSecretsSkipRunnerPayload(args []string) (rest []string, payload stri
 	return rest, payload
 }
 
-func sandboxSecretsInvocation(argv []string) string {
+func sandboxSecretsInvocation(argv []string, tainted map[string]bool) string {
 	name := strings.ToLower(filepath.Base(argv[0]))
 	args := argv[1:]
 	switch name {
@@ -465,11 +536,18 @@ func sandboxSecretsInvocation(argv []string) string {
 		}
 	case "curl", "wget", "http", "https":
 		// A verbose flag or an echoing server puts a header or body in the output,
-		// so any argument that expands a secret counts, not only -H and -d.
+		// so any argument that expands a secret counts, not only -H and -d. So does
+		// one that expands a variable assigned a secret, or names it indirectly.
 		for _, a := range args {
-			if sandboxSecretsRefsSecret(a) {
+			if sandboxSecretsRefsSecret(a) || sandboxSecretsRefsTainted(a, tainted) {
 				return name + " sends a secret variable"
 			}
+			if strings.Contains(a, "${!") {
+				return name + " expands a variable named by another, which the guard cannot read"
+			}
+		}
+		if file := sandboxSecretsSentFile(args); file != "" {
+			return name + " sends " + file + ", which holds credentials or account data"
 		}
 	case "jq":
 		// The first word that is not a flag is the filter; `jq -n env` prints the environment.
@@ -485,7 +563,7 @@ func sandboxSecretsInvocation(argv []string) string {
 	}
 	if sandboxSecretsEnvReaders[name] {
 		for _, a := range args {
-			if sandboxSecretsIsClaudeJSONPath(a) || sandboxSecretsIsCredentialFile(a) {
+			if sandboxSecretsIsSecretFile(a) {
 				return "it reads " + a + ", which holds credentials or account data"
 			}
 		}
@@ -635,8 +713,93 @@ func sandboxSecretsHasAssignment(args []string) bool {
 	return false
 }
 
+// sandboxSecretsIsSecretFile reports whether the word names a file that holds
+// credentials or account data: ~/.claude.json, a dotenv file, ~/.netrc or
+// ~/.git-credentials.
+func sandboxSecretsIsSecretFile(word string) bool {
+	return sandboxSecretsIsClaudeJSONPath(word) || sandboxSecretsIsCredentialFile(word)
+}
+
 func sandboxSecretsIsClaudeJSONPath(word string) bool {
 	return filepath.Base(strings.Trim(word, `"'`)) == ".claude.json"
+}
+
+// sandboxSecretsFileFlags are the flags whose value is a file a transfer command
+// reads and sends: a config file that may hold headers (curl -K), a netrc
+// (curl --netrc-file), an upload (curl -T) and a request body (wget --post-file).
+var sandboxSecretsFileFlags = map[string]bool{
+	"-K": true, "--config": true, "--netrc-file": true,
+	"-T": true, "--upload-file": true, "--post-file": true, "--body-file": true,
+}
+
+// sandboxSecretsSentFile returns the first credential file a transfer command
+// reads and sends, given as the value of a file flag or as the @file of a data,
+// form or header argument, or "" when none is. The argument forms are curl's -d
+// @f and -F name=@f, and httpie's field=@f and Header:@f.
+func sandboxSecretsSentFile(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if flag, value, found := strings.Cut(a, "="); found && sandboxSecretsFileFlags[flag] {
+			if sandboxSecretsIsSecretFile(value) {
+				return value
+			}
+			continue
+		}
+		if sandboxSecretsFileFlags[a] && i+1 < len(args) {
+			i++
+			if sandboxSecretsIsSecretFile(args[i]) {
+				return args[i]
+			}
+			continue
+		}
+		if path, ok := sandboxSecretsAtOperand(a); ok && sandboxSecretsIsSecretFile(path) {
+			return path
+		}
+	}
+	return ""
+}
+
+// sandboxSecretsAtOperand returns the file a data, form or header argument reads
+// with an @: the rest of @file, -d@file, name=@file or Header:@file. A @ inside a
+// word, as in a URL's user@host, names no file.
+func sandboxSecretsAtOperand(word string) (string, bool) {
+	if rest, ok := strings.CutPrefix(word, "-d@"); ok {
+		return rest, true
+	}
+	i := strings.IndexByte(word, '@')
+	if i < 0 || (i > 0 && word[i-1] != '=' && word[i-1] != ':') {
+		return "", false
+	}
+	return word[i+1:], true
+}
+
+// sandboxSecretsTaintedNames returns the variables the command assigns a value
+// that expands a secret-like variable: T=$FORGEJO_TOKEN, or export T=${DB_PASSWORD}.
+// A name that is not secret-like still holds the secret, so an argument that
+// expands it is judged as one that expands the secret (curl -H "X: $T").
+func sandboxSecretsTaintedNames(tokens []string) map[string]bool {
+	tainted := map[string]bool{}
+	for _, tok := range tokens {
+		if !isEnvAssignment(tok) {
+			continue
+		}
+		name, value, _ := strings.Cut(tok, "=")
+		if sandboxSecretsRefsSecret(value) {
+			tainted[name] = true
+		}
+	}
+	return tainted
+}
+
+// sandboxSecretsRefsTainted reports whether the word expands a variable that
+// holds a secret, as named by sandboxSecretsTaintedNames.
+func sandboxSecretsRefsTainted(word string, tainted map[string]bool) bool {
+	for _, m := range sandboxSecretsVarRefRe.FindAllStringSubmatch(word, -1) {
+		if tainted[m[1]] {
+			return true
+		}
+	}
+	return false
 }
 
 func printSandboxSecretsBlock(w io.Writer, reason string) {
