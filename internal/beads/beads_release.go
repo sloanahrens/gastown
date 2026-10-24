@@ -146,14 +146,19 @@ func (b *Beads) AppendNotes(id, note string) error {
 	return err
 }
 
+// PinReleaser is the write ReleasePinnedSteps needs. Client satisfies it, and a
+// caller's narrower interface that carries Update does too.
+type PinReleaser interface {
+	Update(id string, opts UpdateOptions) error
+}
+
 // ReleasePinnedSteps unpins each pinned issue of steps, clearing its claim as
 // well, and reports how many it released. A pin is a close fence, as an
 // assignee other than the actor is, and bd refuses to close a pinned issue
 // whoever holds it, so a closer clears the pin before it closes the step. A
-// release that fails is joined into the error, and the rest still release.
-func ReleasePinnedSteps(b interface {
-	Update(id string, opts UpdateOptions) error
-}, steps []*Issue) (int, error) {
+// release that fails is joined into the error, and the rest still release; the
+// count is valid even when the error is non-nil.
+func ReleasePinnedSteps(b PinReleaser, steps []*Issue) (int, error) {
 	open, unassigned := string(StatusOpen), ""
 	var errs []error
 	released := 0

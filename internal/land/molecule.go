@@ -55,36 +55,36 @@ func (l *Lander) closeAttachedMolecule(beadID string) {
 // closeMolecule closes rootID's open descendants and then rootID, unforced,
 // and reports how many beads it closed. Pinned steps are unpinned first, as
 // gt mol close does, because bd refuses to close a pinned issue (gt-o6kks).
-// Root last, because bd refuses a parent with open children; the work bead
-// the molecule is bonded to is closed before this runs, so the root's own
-// bond is no longer a fence.
+// A failed unpin does not stop the close: the step stays pinned, so bd refuses
+// it, and the molecule stays open with the unpin error in the result. Root
+// last, because bd refuses a parent with open children; the work bead the
+// molecule is bonded to is closed before this runs, so the root's own bond is
+// no longer a fence.
 func closeMolecule(b moleculeBeads, rootID string) (int, error) {
 	steps, err := openDescendants(b, rootID)
 	if err != nil {
 		return 0, err
 	}
-	if _, err := beads.ReleasePinnedSteps(b, steps); err != nil {
-		return 0, fmt.Errorf("unpinning steps of molecule %s: %w", rootID, err)
-	}
+	_, unpinErr := beads.ReleasePinnedSteps(b, steps)
 	ids := make([]string, 0, len(steps))
 	for _, step := range steps {
 		ids = append(ids, step.ID)
 	}
 	closed, err := closeUnforced(b, ids)
 	if err != nil {
-		return closed, err
+		return closed, errors.Join(unpinErr, err)
 	}
 	root, err := b.Show(rootID)
 	switch {
 	case errors.Is(err, beads.ErrNotFound):
-		return closed, nil
+		return closed, unpinErr
 	case err != nil:
-		return closed, fmt.Errorf("reading molecule %s: %w", rootID, err)
+		return closed, errors.Join(unpinErr, fmt.Errorf("reading molecule %s: %w", rootID, err))
 	case beads.IssueStatus(strings.TrimSpace(root.Status)).IsTerminal():
-		return closed, nil
+		return closed, unpinErr
 	}
 	n, err := closeUnforced(b, []string{rootID})
-	return closed + n, err
+	return closed + n, errors.Join(unpinErr, err)
 }
 
 // openDescendants lists parentID's descendants that are not closed, deepest

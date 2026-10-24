@@ -3,6 +3,7 @@ package land
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -193,6 +194,48 @@ func TestCloseMolecule_ReleasesPinnedStep(t *testing.T) {
 		f.wantStatus(stepID(i), "closed")
 	}
 	f.wantStatus(fixtureMolecule, "closed")
+}
+
+// unpinRefusingBeads is a moleculeBeads whose unpin write fails for one step,
+// as a bd refusal of that write would.
+type unpinRefusingBeads struct {
+	moleculeBeads
+	refused string
+}
+
+func (u unpinRefusingBeads) Update(id string, opts beads.UpdateOptions) error {
+	if id == u.refused {
+		return errors.New("bd update refused")
+	}
+	return u.moleculeBeads.Update(id, opts)
+}
+
+// TestCloseMolecule_OneFailedUnpinDoesNotStopTheOthers: a step whose unpin
+// fails stays pinned, so bd refuses it and the molecule stays open, but the
+// other pinned step is still released and closed, and the error names the
+// refused step rather than aborting the whole close.
+func TestCloseMolecule_OneFailedUnpinDoesNotStopTheOthers(t *testing.T) {
+	t.Parallel()
+	f := newMoleculeFixture(t)
+	f.chain(1, 2, 3)
+	for _, id := range []string{"gt-wisp-refused", "gt-wisp-released"} {
+		f.bd.Seed(beads.Issue{ID: id, Title: id, Status: "pinned", Type: "task"})
+		if err := f.bd.AddTypedDependency(id, fixtureMolecule, "parent-child"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err := closeMolecule(unpinRefusingBeads{moleculeBeads: f.bd, refused: "gt-wisp-refused"}, fixtureMolecule)
+
+	if err == nil || !strings.Contains(err.Error(), "gt-wisp-refused") {
+		t.Fatalf("closeMolecule err = %v, want the refused unpin named", err)
+	}
+	f.wantStatus("gt-wisp-released", "closed")
+	f.wantStatus("gt-wisp-refused", "pinned")
+	for i := 1; i <= fixtureSteps; i++ {
+		f.wantStatus(stepID(i), "closed")
+	}
+	f.wantStatus(fixtureMolecule, "open")
 }
 
 // TestLandClosesTheMoleculeThroughTheLanding: the wiring, not just the
