@@ -1,0 +1,1110 @@
+{
+ "binom": [
+  {
+   "k": 0,
+   "n": 0,
+   "p": 0.5,
+   "want": 1.0
+  },
+  {
+   "k": 0,
+   "n": 5,
+   "p": 0.0,
+   "want": 1.0
+  },
+  {
+   "k": 1,
+   "n": 5,
+   "p": 0.0,
+   "want": 0.0
+  },
+  {
+   "k": 5,
+   "n": 5,
+   "p": 1.0,
+   "want": 1.0
+  },
+  {
+   "k": 3,
+   "n": 5,
+   "p": 1.0,
+   "want": 0.0
+  },
+  {
+   "k": 0,
+   "n": 10,
+   "p": 0.3,
+   "want": 0.03883960329999998
+  },
+  {
+   "k": 3,
+   "n": 10,
+   "p": 0.3,
+   "want": 0.999999999999999
+  },
+  {
+   "k": 10,
+   "n": 10,
+   "p": 0.3,
+   "want": 5.904899999999995e-06
+  },
+  {
+   "k": 7,
+   "n": 20,
+   "p": 0.5,
+   "want": 0.2631759643554691
+  },
+  {
+   "k": 30,
+   "n": 100,
+   "p": 0.19,
+   "want": 0.007232605312296939
+  },
+  {
+   "k": 35,
+   "n": 98,
+   "p": 0.192,
+   "want": 0.0001485649144218409
+  },
+  {
+   "k": 164,
+   "n": 855,
+   "p": 0.192,
+   "want": 1.0
+  },
+  {
+   "k": 0,
+   "n": 30,
+   "p": 0.1,
+   "want": 0.06821794693712625
+  },
+  {
+   "k": 5,
+   "n": 5,
+   "p": 0.5,
+   "want": 0.0625
+  },
+  {
+   "k": 1,
+   "n": 1,
+   "p": 0.5,
+   "want": 1.0
+  },
+  {
+   "k": 0,
+   "n": 1,
+   "p": 0.5,
+   "want": 1.0
+  },
+  {
+   "k": 12,
+   "n": 40,
+   "p": 0.25,
+   "want": 0.46680976110246064
+  },
+  {
+   "k": 2,
+   "n": 200,
+   "p": 0.001,
+   "want": 0.01745751096608141
+  },
+  {
+   "k": 60,
+   "n": 200,
+   "p": 0.3,
+   "want": 0.999999999999938
+  },
+  {
+   "k": 100,
+   "n": 200,
+   "p": 0.5,
+   "want": 0.9999999999999527
+  }
+ ],
+ "describe": [
+  {
+   "cube": {
+    "ranges": [
+     {
+      "categories": [
+       "devops",
+       "gastown"
+      ],
+      "column": "rig"
+     },
+     {
+      "column": "priority",
+      "max": 3,
+      "min": 2
+     }
+    ]
+   },
+   "want": "rig in {devops, gastown}; priority in [2, 3]"
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "lines_total",
+      "max": 120.5,
+      "min": 0
+     }
+    ]
+   },
+   "want": "lines_total in [0, 120.5]"
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "shaped",
+      "max": 1,
+      "min": 1
+     },
+     {
+      "categories": [
+       "daemon"
+      ],
+      "column": "route"
+     }
+    ]
+   },
+   "want": "shaped = 1; route in {daemon}"
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "om_threshold",
+      "max": 0.75,
+      "min": 0.75
+     }
+    ]
+   },
+   "want": "om_threshold = 0.75"
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "x",
+      "max": 1234567,
+      "min": 1000000
+     }
+    ]
+   },
+   "want": "x in [1e+06, 1.23457e+06]"
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "categories": [
+       "task"
+      ],
+      "column": "type"
+     }
+    ]
+   },
+   "want": "type in {task}"
+  },
+  {
+   "cube": {
+    "ranges": []
+   },
+   "want": ""
+  }
+ ],
+ "holm": [
+  {
+   "p": [
+    0.01,
+    0.04,
+    0.03,
+    0.005
+   ],
+   "want": [
+    0.03,
+    0.06,
+    0.06,
+    0.02
+   ]
+  },
+  {
+   "p": [
+    0.02,
+    0.02,
+    0.02
+   ],
+   "want": [
+    0.06,
+    0.06,
+    0.06
+   ]
+  },
+  {
+   "p": [],
+   "want": []
+  },
+  {
+   "p": [
+    0.5
+   ],
+   "want": [
+    0.5
+   ]
+  },
+  {
+   "p": [
+    0.001,
+    0.9,
+    1.0
+   ],
+   "want": [
+    0.003,
+    1.0,
+    1.0
+   ]
+  },
+  {
+   "p": [
+    0.3,
+    0.01,
+    0.2,
+    0.04,
+    0.5
+   ],
+   "want": [
+    0.6000000000000001,
+    0.05,
+    0.6000000000000001,
+    0.16,
+    0.6000000000000001
+   ]
+  },
+  {
+   "p": [
+    0.04,
+    0.04,
+    0.01
+   ],
+   "want": [
+    0.08,
+    0.08,
+    0.03
+   ]
+  }
+ ],
+ "matches": [
+  {
+   "cube": {
+    "ranges": [
+     {
+      "categories": [
+       "devops",
+       "gastown"
+      ],
+      "column": "rig"
+     },
+     {
+      "column": "priority",
+      "max": 3,
+      "min": 2
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "50",
+    "om_threshold": "0.75",
+    "priority": "2",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1100000"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "categories": [
+       "devops",
+       "gastown"
+      ],
+      "column": "rig"
+     },
+     {
+      "column": "priority",
+      "max": 3,
+      "min": 2
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "130",
+    "om_threshold": "0.6",
+    "priority": "2",
+    "rig": "om",
+    "route": "daemon",
+    "shaped": "0",
+    "type": "bug",
+    "x": "5"
+   },
+   "want": false
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "categories": [
+       "devops",
+       "gastown"
+      ],
+      "column": "rig"
+     },
+     {
+      "column": "priority",
+      "max": 3,
+      "min": 2
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "",
+    "om_threshold": "0.75",
+    "priority": "4",
+    "rig": "devops",
+    "route": "overseer-manual",
+    "shaped": "1",
+    "type": "task",
+    "x": "abc"
+   },
+   "want": false
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "categories": [
+       "devops",
+       "gastown"
+      ],
+      "column": "rig"
+     },
+     {
+      "column": "priority",
+      "max": 3,
+      "min": 2
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "120.5",
+    "om_threshold": " 0.75 ",
+    "priority": "3",
+    "rig": "devops",
+    "route": "daemon",
+    "shaped": "1.0",
+    "type": "feature",
+    "x": "1234567"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "categories": [
+       "devops",
+       "gastown"
+      ],
+      "column": "rig"
+     },
+     {
+      "column": "priority",
+      "max": 3,
+      "min": 2
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "-3",
+    "om_threshold": "0.75",
+    "priority": "nan",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1000000"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "lines_total",
+      "max": 120.5,
+      "min": 0
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "50",
+    "om_threshold": "0.75",
+    "priority": "2",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1100000"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "lines_total",
+      "max": 120.5,
+      "min": 0
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "130",
+    "om_threshold": "0.6",
+    "priority": "2",
+    "rig": "om",
+    "route": "daemon",
+    "shaped": "0",
+    "type": "bug",
+    "x": "5"
+   },
+   "want": false
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "lines_total",
+      "max": 120.5,
+      "min": 0
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "",
+    "om_threshold": "0.75",
+    "priority": "4",
+    "rig": "devops",
+    "route": "overseer-manual",
+    "shaped": "1",
+    "type": "task",
+    "x": "abc"
+   },
+   "want": false
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "lines_total",
+      "max": 120.5,
+      "min": 0
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "120.5",
+    "om_threshold": " 0.75 ",
+    "priority": "3",
+    "rig": "devops",
+    "route": "daemon",
+    "shaped": "1.0",
+    "type": "feature",
+    "x": "1234567"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "lines_total",
+      "max": 120.5,
+      "min": 0
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "-3",
+    "om_threshold": "0.75",
+    "priority": "nan",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1000000"
+   },
+   "want": false
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "shaped",
+      "max": 1,
+      "min": 1
+     },
+     {
+      "categories": [
+       "daemon"
+      ],
+      "column": "route"
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "50",
+    "om_threshold": "0.75",
+    "priority": "2",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1100000"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "shaped",
+      "max": 1,
+      "min": 1
+     },
+     {
+      "categories": [
+       "daemon"
+      ],
+      "column": "route"
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "130",
+    "om_threshold": "0.6",
+    "priority": "2",
+    "rig": "om",
+    "route": "daemon",
+    "shaped": "0",
+    "type": "bug",
+    "x": "5"
+   },
+   "want": false
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "shaped",
+      "max": 1,
+      "min": 1
+     },
+     {
+      "categories": [
+       "daemon"
+      ],
+      "column": "route"
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "",
+    "om_threshold": "0.75",
+    "priority": "4",
+    "rig": "devops",
+    "route": "overseer-manual",
+    "shaped": "1",
+    "type": "task",
+    "x": "abc"
+   },
+   "want": false
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "shaped",
+      "max": 1,
+      "min": 1
+     },
+     {
+      "categories": [
+       "daemon"
+      ],
+      "column": "route"
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "120.5",
+    "om_threshold": " 0.75 ",
+    "priority": "3",
+    "rig": "devops",
+    "route": "daemon",
+    "shaped": "1.0",
+    "type": "feature",
+    "x": "1234567"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "shaped",
+      "max": 1,
+      "min": 1
+     },
+     {
+      "categories": [
+       "daemon"
+      ],
+      "column": "route"
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "-3",
+    "om_threshold": "0.75",
+    "priority": "nan",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1000000"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "om_threshold",
+      "max": 0.75,
+      "min": 0.75
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "50",
+    "om_threshold": "0.75",
+    "priority": "2",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1100000"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "om_threshold",
+      "max": 0.75,
+      "min": 0.75
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "130",
+    "om_threshold": "0.6",
+    "priority": "2",
+    "rig": "om",
+    "route": "daemon",
+    "shaped": "0",
+    "type": "bug",
+    "x": "5"
+   },
+   "want": false
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "om_threshold",
+      "max": 0.75,
+      "min": 0.75
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "",
+    "om_threshold": "0.75",
+    "priority": "4",
+    "rig": "devops",
+    "route": "overseer-manual",
+    "shaped": "1",
+    "type": "task",
+    "x": "abc"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "om_threshold",
+      "max": 0.75,
+      "min": 0.75
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "120.5",
+    "om_threshold": " 0.75 ",
+    "priority": "3",
+    "rig": "devops",
+    "route": "daemon",
+    "shaped": "1.0",
+    "type": "feature",
+    "x": "1234567"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "om_threshold",
+      "max": 0.75,
+      "min": 0.75
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "-3",
+    "om_threshold": "0.75",
+    "priority": "nan",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1000000"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "x",
+      "max": 1234567,
+      "min": 1000000
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "50",
+    "om_threshold": "0.75",
+    "priority": "2",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1100000"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "x",
+      "max": 1234567,
+      "min": 1000000
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "130",
+    "om_threshold": "0.6",
+    "priority": "2",
+    "rig": "om",
+    "route": "daemon",
+    "shaped": "0",
+    "type": "bug",
+    "x": "5"
+   },
+   "want": false
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "x",
+      "max": 1234567,
+      "min": 1000000
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "",
+    "om_threshold": "0.75",
+    "priority": "4",
+    "rig": "devops",
+    "route": "overseer-manual",
+    "shaped": "1",
+    "type": "task",
+    "x": "abc"
+   },
+   "want": false
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "x",
+      "max": 1234567,
+      "min": 1000000
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "120.5",
+    "om_threshold": " 0.75 ",
+    "priority": "3",
+    "rig": "devops",
+    "route": "daemon",
+    "shaped": "1.0",
+    "type": "feature",
+    "x": "1234567"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "column": "x",
+      "max": 1234567,
+      "min": 1000000
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "-3",
+    "om_threshold": "0.75",
+    "priority": "nan",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1000000"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "categories": [
+       "task"
+      ],
+      "column": "type"
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "50",
+    "om_threshold": "0.75",
+    "priority": "2",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1100000"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "categories": [
+       "task"
+      ],
+      "column": "type"
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "130",
+    "om_threshold": "0.6",
+    "priority": "2",
+    "rig": "om",
+    "route": "daemon",
+    "shaped": "0",
+    "type": "bug",
+    "x": "5"
+   },
+   "want": false
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "categories": [
+       "task"
+      ],
+      "column": "type"
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "",
+    "om_threshold": "0.75",
+    "priority": "4",
+    "rig": "devops",
+    "route": "overseer-manual",
+    "shaped": "1",
+    "type": "task",
+    "x": "abc"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "categories": [
+       "task"
+      ],
+      "column": "type"
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "120.5",
+    "om_threshold": " 0.75 ",
+    "priority": "3",
+    "rig": "devops",
+    "route": "daemon",
+    "shaped": "1.0",
+    "type": "feature",
+    "x": "1234567"
+   },
+   "want": false
+  },
+  {
+   "cube": {
+    "ranges": [
+     {
+      "categories": [
+       "task"
+      ],
+      "column": "type"
+     }
+    ]
+   },
+   "row": {
+    "lines_total": "-3",
+    "om_threshold": "0.75",
+    "priority": "nan",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1000000"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": []
+   },
+   "row": {
+    "lines_total": "50",
+    "om_threshold": "0.75",
+    "priority": "2",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1100000"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": []
+   },
+   "row": {
+    "lines_total": "130",
+    "om_threshold": "0.6",
+    "priority": "2",
+    "rig": "om",
+    "route": "daemon",
+    "shaped": "0",
+    "type": "bug",
+    "x": "5"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": []
+   },
+   "row": {
+    "lines_total": "",
+    "om_threshold": "0.75",
+    "priority": "4",
+    "rig": "devops",
+    "route": "overseer-manual",
+    "shaped": "1",
+    "type": "task",
+    "x": "abc"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": []
+   },
+   "row": {
+    "lines_total": "120.5",
+    "om_threshold": " 0.75 ",
+    "priority": "3",
+    "rig": "devops",
+    "route": "daemon",
+    "shaped": "1.0",
+    "type": "feature",
+    "x": "1234567"
+   },
+   "want": true
+  },
+  {
+   "cube": {
+    "ranges": []
+   },
+   "row": {
+    "lines_total": "-3",
+    "om_threshold": "0.75",
+    "priority": "nan",
+    "rig": "gastown",
+    "route": "daemon",
+    "shaped": "1",
+    "type": "task",
+    "x": "1000000"
+   },
+   "want": true
+  }
+ ]
+}
