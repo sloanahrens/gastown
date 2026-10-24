@@ -80,6 +80,11 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"echo printenv | cat | tee /dev/null | /bin/sh",
 		"sh <(echo printenv)",
 		"sh -c \"$(echo printenv)\"",
+		// eval runs a substitution's output as a script, as a shell does.
+		"eval \"$(printf 'printenv')\"",
+		"eval \"$(echo printenv)\"",
+		"eval $(echo printenv)",
+		"printf '%s' \"$(cat <<'BEAD'\necho '#' ; printenv\nBEAD\n)\" | sh",
 		// env -S takes its command line in every form, and each one is judged.
 		"env -S printenv",
 		"env -Sprintenv",
@@ -546,6 +551,8 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"python3 -c 'print(open(\"/var/environ-notes\").read())'",
 		"cat .envrc",
 		"eval eval eval eval echo hi",
+		"eval \"$(printf 'make test')\"",
+		"printf '%s' \"$(cat <<'BEAD'\necho ready\nBEAD\n)\" | sh",
 		"set -e",
 		"set -euo pipefail",
 		"export FOO=bar",
