@@ -1,0 +1,4 @@
+bead,rig,landed_at,week,route,om_verdict,gate_result,lines_added,lines_deleted,lines_total,files_touched,file_entropy,package_entropy,attempts,rejected_before_landing,manual_rescue,reached_overrun_stop,unreadable,type,priority,shaped,label_count,model,om_threshold,dominant_model
+gt-r2d2a,gastown,2026-10-24T13:05:00Z,2026-10-19,daemon,approve,pass,120,8,128,4,1.98,0.81,1,0,0,0,0,task,P1,1,3,opus,0.80,opus
+gt-c3po9,gastown,2026-10-24T13:44:00Z,2026-10-19,manual,minor,pass,,,,,,,2,1,1,0,1,bug,P2,0,1,sonnet,0.80,sonnet
+gt-bb8e1,beads,2026-10-24T12:10:00Z,2026-10-19,daemon,approve,pass,31,2,33,2,1.0,0.0,1,0,0,0,0,task,P3,1,0,opus,0.80,opus

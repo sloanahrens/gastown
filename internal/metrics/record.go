@@ -1,5 +1,7 @@
 // Package metrics holds the town's hourly snapshot in Go: the record every
-// reader of snapshots.jsonl parses, the sources that fill it, and Collect.
+// reader of snapshots.jsonl parses, the sources that fill it, and Collect; and
+// the join that puts the snapshot in force beside every landing in
+// landings.csv.
 //
 // A record is one JSON line: the fixed keys v, ts, placement and errors, then
 // one top-level key per source group. Keys and columns are additive within
