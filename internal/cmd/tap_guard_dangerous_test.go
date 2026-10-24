@@ -2040,6 +2040,14 @@ func TestShellFedHeredocBodyIsInspected(t *testing.T) {
 		// A quoted "$(" is a literal, not a substitution: the shell still runs
 		// bash after the assignment, so the body it reads is still checked.
 		{"shell-fed body behind a literal dollar-paren assignment", "X='$(' bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
+		// A redirection ahead of the shell hides it from a command-word scan
+		// unless the redirection is stepped over (gt-pdbzu).
+		{"shell-fed body behind a leading stderr redirect", "2>/dev/null bash <<'EOF'\ngit reset --hard\nEOF"},
+		{"shell-fed body behind a redirect whose target is its own word", "2> /dev/null bash <<'EOF'\ngit reset --hard\nEOF"},
+		{"shell-fed body behind a leading stdout redirect", ">/dev/null bash <<'EOF'\ngit reset --hard\nEOF"},
+		{"shell-fed body behind two leading redirections", "2>/dev/null 3>&1 bash <<'EOF'\ngit reset --hard\nEOF"},
+		{"shell-fed body behind a redirect after a launcher", "env 2>/dev/null bash <<'EOF'\ngit reset --hard\nEOF"},
+		{"shell-fed body behind a redirect after an assignment", "X=1 2>/dev/null bash <<'EOF'\ngit reset --hard\nEOF"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2047,6 +2055,33 @@ func TestShellFedHeredocBodyIsInspected(t *testing.T) {
 				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — a shell invoker runs the heredoc body", tt.command)
 			}
 		})
+	}
+}
+
+// TestShellFedHeredocJudgedLikeThePlainForm pins the gt-pdbzu gate: a
+// redirection ahead of the shell changes nothing the shell does with the body,
+// so every prefixed form is judged with the reason the plain form earns.
+func TestShellFedHeredocJudgedLikeThePlainForm(t *testing.T) {
+	t.Parallel()
+	const body = "\ngit reset --hard\nEOF"
+	want, _ := evaluateDangerousCommand("bash <<'EOF'"+body, 0, noTownSession)
+	if want == "" {
+		t.Fatalf("the plain form was allowed; the comparison rests on it being blocked")
+	}
+	for _, prefix := range []string{
+		"2>/dev/null ",
+		"2> /dev/null ",
+		">/dev/null ",
+		"&>/dev/null ",
+		"2>&1 ",
+		"2>/dev/null 3>&1 ",
+		"env 2>/dev/null ",
+		"X=1 2>/dev/null ",
+	} {
+		command := prefix + "bash <<'EOF'" + body
+		if got, _ := evaluateDangerousCommand(command, 0, noTownSession); got != want {
+			t.Errorf("evaluateDangerousCommand(%q) = %q, want %q like the plain form", command, got, want)
+		}
 	}
 }
 
@@ -2073,6 +2108,10 @@ func TestHeredocBodyStaysOpaqueWithoutAShellReader(t *testing.T) {
 		// the bash on the next line is not command text of the heredoc's line.
 		{"heredoc after a closed substitution does not inherit the next line", "x=$(echo a)\nbash\ncat <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
 		{"heredoc after a nested substitution closes back to the outer frame", "x=$(echo $(echo a) b)\ncat <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
+		// Stepping over the redirection must not turn its target into a command:
+		// the body is written to the file "bash", no shell reads it.
+		{"shell name as a redirection target", "2>bash <<'EOF'\ngit reset --hard\nEOF"},
+		{"non-shell reader behind a leading stderr redirect", "2>/dev/null python3 - <<'EOF'\nsudo rm -rf /\nEOF"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
