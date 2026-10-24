@@ -31,6 +31,21 @@ func TestUncheckedAcceptanceTextReadsTheAcceptanceText(t *testing.T) {
 	}
 }
 
+// TestUncheckedAcceptanceText_PrefixedAcceptanceHeading: the lint reads a
+// "## Acceptance criteria" section and dispatches the bead, so gt done and the
+// landing policy count the same section — a longer heading must not hide
+// unticked boxes from the refusal (gt-a4ay1).
+func TestUncheckedAcceptanceText_PrefixedAcceptanceHeading(t *testing.T) {
+	t.Parallel()
+	issue := &Issue{Description: "## Goal\nx\n## Acceptance criteria\n- [ ] a\n- [x] b\n"}
+	if got, want := UncheckedAcceptanceText(issue), []string{"- [ ] a"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("UncheckedAcceptanceText = %q, want %q", got, want)
+	}
+	if got, want := AcceptanceText(issue), "- [ ] a\n- [x] b"; got != want {
+		t.Errorf("AcceptanceText = %q, want %q", got, want)
+	}
+}
+
 // TestUncheckedAcceptanceTextMatchesLintItems: a box is a criterion when the
 // spec lint counts it as one, so every list marker the lint accepts counts
 // here, and a fenced block is example text that neither counts.
@@ -129,6 +144,21 @@ func TestAcceptanceTextReadsTheFieldThenTheDescriptionSection(t *testing.T) {
 		},
 		{name: "no section at all", issue: &Issue{Description: "## Goal\n\nadd b\n"}, want: ""},
 		{name: "an empty section", issue: &Issue{Description: "## Goal\n\nadd b\n\n## Acceptance\n\n## Out of scope\n\nx\n"}, want: ""},
+		{
+			name:  "a longer acceptance heading is read",
+			issue: &Issue{Description: "## Acceptance criteria\n\n- [ ] one\n"},
+			want:  "- [ ] one",
+		},
+		{
+			name:  "the exact heading wins over a longer one",
+			issue: &Issue{Description: "## Acceptance notes\n\n- [ ] notes\n\n## Acceptance\n\n- [ ] exact\n"},
+			want:  "- [ ] exact",
+		},
+		{
+			name:  "two longer headings resolve by name, not position",
+			issue: &Issue{Description: "## Acceptance notes\n\n- [ ] notes\n\n## Acceptance criteria\n\n- [ ] criteria\n"},
+			want:  "- [ ] criteria",
+		},
 		{name: "a similarly named heading is not the section", issue: &Issue{Description: "## Accepted trade-offs\n\n- [ ] x\n"}, want: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

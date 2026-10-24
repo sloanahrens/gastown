@@ -151,3 +151,19 @@ func TestRefuseUncheckedCriteriaReadsDescriptionSection(t *testing.T) {
 		t.Errorf("ticked section refused: %v", err)
 	}
 }
+
+// TestRefuseUncheckedCriteriaReadsAPrefixedAcceptanceHeading: the spec lint
+// accepts "## Acceptance criteria" and dispatches the bead, so the refusal
+// reads that heading too; otherwise unticked boxes submit and land (gt-a4ay1).
+func TestRefuseUncheckedCriteriaReadsAPrefixedAcceptanceHeading(t *testing.T) {
+	t.Parallel()
+	issue := &beads.Issue{Description: "## Goal\nx\n## Acceptance criteria\n- [ ] a\n- [x] b\n"}
+	err := refuseUncheckedCriteria("gt-x", issue)
+	if err == nil || !strings.Contains(err.Error(), "- [ ] a") {
+		t.Fatalf("refuseUncheckedCriteria = %v, want a refusal naming the unchecked line", err)
+	}
+	issue.Description = "## Acceptance criteria\n- [x] a\n"
+	if err := refuseUncheckedCriteria("gt-x", issue); err != nil {
+		t.Errorf("ticked section refused: %v", err)
+	}
+}

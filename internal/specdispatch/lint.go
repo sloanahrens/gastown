@@ -197,14 +197,9 @@ func (t Template) Skeleton(beadID string) string {
 }
 
 // hasAcceptanceSection reports whether the template already requires an
-// acceptance section, under any name acceptanceText reads.
+// acceptance section, under any name AcceptanceSectionKey reads.
 func (t Template) hasAcceptanceSection() bool {
-	for _, name := range t.Sections {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), "acceptance") {
-			return true
-		}
-	}
-	return false
+	return beads.AcceptanceSectionKey(t.Sections) != ""
 }
 
 func sectionHint(name string) string {
@@ -446,25 +441,19 @@ func CountAcceptance(text string) int {
 	return n
 }
 
-// acceptanceText is the bead's acceptance field, else an "## Acceptance..."
-// section of the description. The exact "acceptance" heading wins over a
-// longer one like "## Acceptance notes", and a tie between two prefix matches
-// resolves by name so the answer never depends on map iteration order
-// (gt-2czgm).
+// acceptanceText is the bead's acceptance field, else the description's
+// acceptance section. Beads.AcceptanceSectionKey chooses the heading the same
+// way for the submission refusal and the landing policy, so a heading the lint
+// counts is a heading gt done counts (gt-2czgm, gt-a4ay1).
 func acceptanceText(s Spec, sections map[string]string) string {
 	if strings.TrimSpace(s.Acceptance) != "" {
 		return s.Acceptance
 	}
-	if body, ok := sections["acceptance"]; ok {
-		return body
-	}
-	bestKey := ""
+	keys := make([]string, 0, len(sections))
 	for key := range sections {
-		if strings.HasPrefix(key, "acceptance") && (bestKey == "" || key < bestKey) {
-			bestKey = key
-		}
+		keys = append(keys, key)
 	}
-	return sections[bestKey]
+	return sections[beads.AcceptanceSectionKey(keys)]
 }
 
 // Lint validates the shape of a work bead against the template. Every failure

@@ -466,11 +466,12 @@ func ProtectedIssueLabel(label string) bool {
 }
 
 // AcceptanceText is the bead's acceptance text: its acceptance field when set,
-// else the body of the description's "## Acceptance" section. The spec
-// dispatcher shapes a work bead as one description carrying that section and
-// leaves the field empty, so the section is the source nearly every landing
-// has. This is the one definition of the text: land.CriteriaText hands it to
-// om and UncheckedAcceptanceText counts boxes in it.
+// else the body of the description's acceptance section, chosen by
+// AcceptanceSectionKey. The spec dispatcher shapes a work bead as one
+// description carrying that section and leaves the field empty, so the section
+// is the source nearly every landing has. This is the one definition of the
+// text: land.CriteriaText hands it to om, UncheckedAcceptanceText counts boxes
+// in it, and the spec lint counts its items through the same heading rule.
 func AcceptanceText(issue *Issue) string {
 	if issue == nil {
 		return ""
@@ -481,30 +482,65 @@ func AcceptanceText(issue *Issue) string {
 	return acceptanceSection(issue.Description)
 }
 
-// acceptanceSection is the body under the description's "## Acceptance"
-// heading, up to the next "## " heading or the end of the description. The
-// heading itself is not part of the text; the heading must be the section's
-// whole title, so "## Acceptance" matches and "## Accepted trade-offs" does
-// not.
+// AcceptanceSectionKey returns the key among headings that names the
+// acceptance section, or "" when none does. The exact "acceptance" heading wins
+// over a longer one; with no exact heading the lowest-sorting key with the
+// "acceptance" prefix wins, so the section's position and map iteration order
+// never decide. "accepted" is not an acceptance heading: the prefix is the
+// whole word. Keys are section headings, matched case-insensitively.
+//
+// This is the one definition of the rule: the submission refusal, the landing
+// policy and the spec lint all choose the acceptance section through it, so a
+// heading the lint accepts is a heading gt done counts (gt-a4ay1).
+func AcceptanceSectionKey(headings []string) string {
+	best := ""
+	for _, heading := range headings {
+		key := strings.ToLower(strings.TrimSpace(heading))
+		if key == "acceptance" {
+			return key
+		}
+		if strings.HasPrefix(key, "acceptance") && (best == "" || key < best) {
+			best = key
+		}
+	}
+	return best
+}
+
+// acceptanceSection is the body under the description's acceptance heading, as
+// AcceptanceSectionKey chooses it, up to the next "## " heading or the end of
+// the description. The heading itself is not part of the text. The first
+// section with a repeated heading wins, as it does for the spec lint's
+// Sections.
 func acceptanceSection(description string) string {
+	var headings []string
+	bodies := map[string]string{}
+	var current string
 	var body []string
-	inside := false
+	flush := func() {
+		if current == "" {
+			return
+		}
+		if _, dup := bodies[current]; !dup {
+			headings = append(headings, current)
+			bodies[current] = strings.TrimSpace(strings.Join(body, "\n"))
+		}
+		body = nil
+	}
 	for _, line := range strings.Split(description, "\n") {
 		trimmed := strings.TrimSpace(line)
 		// A deeper heading ("### a criterion") is body text: only a "## "
 		// line opens or closes a section.
 		if strings.HasPrefix(trimmed, "## ") {
-			if inside {
-				break
-			}
-			inside = strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(trimmed, "## ")), "acceptance")
+			flush()
+			current = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, "## ")))
 			continue
 		}
-		if inside {
+		if current != "" {
 			body = append(body, line)
 		}
 	}
-	return strings.TrimSpace(strings.Join(body, "\n"))
+	flush()
+	return bodies[AcceptanceSectionKey(headings)]
 }
 
 // UncheckedCriteria returns the issue's unchecked acceptance criteria, one
