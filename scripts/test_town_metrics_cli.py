@@ -1,4 +1,6 @@
 """Tests for cli.extract / cli.report over in-memory fake sources (no ~/gt, no bd, no git)."""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -8,8 +10,6 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from town_metrics import cli, common, loaders  # noqa: E402
-
-BASE = os.path.expanduser("~/gt/claude/crew")
 
 
 def ledger_line(bead, rig="gastown", route="daemon", at="2026-10-14T00:00:00Z"):
@@ -44,7 +44,7 @@ def fake_bd(cwd, args):
 
 class CliCase(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="tm-cli-", dir=BASE)
+        self.tmp = tempfile.mkdtemp(prefix="tm-cli-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
     def env(self, **over):
@@ -208,3 +208,21 @@ class TestReport(CliCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMain(unittest.TestCase):
+    def usage(self, argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.main(argv)
+        return rc, out.getvalue()
+
+    def test_no_arguments_prints_usage_and_returns_2(self):
+        rc, text = self.usage([])
+        self.assertEqual(rc, 2)
+        self.assertIn("usage: town-metrics", text)
+
+    def test_an_unknown_command_prints_usage_and_returns_2(self):
+        rc, text = self.usage(["frobnicate"])
+        self.assertEqual(rc, 2)
+        self.assertIn("usage: town-metrics", text)

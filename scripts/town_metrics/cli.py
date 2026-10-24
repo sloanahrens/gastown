@@ -1,7 +1,10 @@
 """extract and report: wire loaders -> tables -> metrics -> CSVs and the Markdown report.
 
 `extract` and `report` take an Env of injected sources, so unit tests never touch ~/gt, bd or git.
-The real Env is built in `real_env` (impure wiring only, kept thin)."""
+The real Env is built in `real_env` (impure wiring only, kept thin).
+
+This tool is this town's by design: the rig list and the bead prefixes (RIGS, PREFIX_TO_RIG) are constants below, and
+the town root and docs directory come from TOWN_METRICS_TOWN and TOWN_METRICS_DOCS."""
 import dataclasses
 import json
 import os

@@ -1,4 +1,4 @@
-"""Tests for town_metrics.diffstats. The git case builds one tiny repo under ~/gt/claude/crew (never /tmp)."""
+"""Tests for town_metrics.diffstats. The git case builds one tiny repo in a temporary directory and removes it."""
 import os
 import shutil
 import subprocess
@@ -43,8 +43,7 @@ class TestParse(unittest.TestCase):
 class TestGitSource(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        base = os.path.expanduser("~/gt/claude/crew")
-        cls.tmp = tempfile.mkdtemp(prefix="tm-git-", dir=base)
+        cls.tmp = tempfile.mkdtemp(prefix="tm-git-")
 
         def g(*a):
             return subprocess.run(["git", "-C", cls.tmp, "-c", "user.name=t", "-c", "user.email=t@t", *a],
@@ -88,3 +87,18 @@ class TestGitSource(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCommitValueIsValidated(unittest.TestCase):
+    def test_a_ledger_value_that_is_not_a_hash_never_reaches_git(self):
+        calls = []
+        src = ds.GitDiffSource(lambda rig: "/bare/" + rig, lambda args: calls.append(args), {})
+        for bad in ("", None, "--output=/x", "HEAD~3", "main..other", "abc", "g" * 40, "a" * 65):
+            self.assertIsNone(src.stats("gastown", bad), repr(bad))
+        self.assertEqual(calls, [])
+
+    def test_a_hash_is_passed_before_a_path_separator(self):
+        calls = []
+        src = ds.GitDiffSource(lambda rig: "/bare/" + rig, lambda args: calls.append(args) or "", {})
+        src.stats("gastown", "0123abc")
+        self.assertEqual(calls[0][-2:], ["0123abc", "--"])

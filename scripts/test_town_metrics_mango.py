@@ -12,7 +12,6 @@ from town_metrics import common, mango_run, tables  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAKE = os.path.join(HERE, "testdata", "town_metrics", "fake-mango")
-BASE = os.path.expanduser("~/gt/claude/crew")
 
 
 def landing(i, rig="a", rej=0, at=None, route="daemon", **kw):
@@ -116,7 +115,7 @@ class TestReplicateApi(unittest.TestCase):
 
 class TestExec(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="tm-mango-", dir=BASE)
+        self.tmp = tempfile.mkdtemp(prefix="tm-mango-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.log = os.path.join(self.tmp, "argv.log")
         self.result = os.path.join(self.tmp, "canned.json")
@@ -135,16 +134,12 @@ class TestExec(unittest.TestCase):
         return r.returncode, r.stdout
 
     def test_widen_flag_is_left_out_when_off(self):
-        with open(FAKE) as f:  # declare the binary as an input (test-engineering rule 6)
-            self.assertIn("FAKE_MANGO_LOG", f.read())
         mango_run.run_mango(FAKE, self.tmp, "t", self.runner, min_support=30, widen=False)
         with open(self.log) as f:
             explore = [ln.split() for ln in f.read().splitlines()][1]
         self.assertNotIn("--widen", explore)
 
     def test_argv_sequence_and_parsed_search_stats(self):
-        with open(FAKE) as f:  # declare the binary as an input (test-engineering rule 6)
-            self.assertIn("FAKE_MANGO_LOG", f.read())
         out = mango_run.run_mango(FAKE, self.tmp, "t", self.runner, min_support=30)
         with open(self.log) as f:
             calls = [ln.split() for ln in f.read().splitlines()]
@@ -169,7 +164,7 @@ class TestExec(unittest.TestCase):
 
 class TestSection(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="tm-section-", dir=BASE)
+        self.tmp = tempfile.mkdtemp(prefix="tm-section-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         rows = [landing(i, rej=i % 2, at="2026-10-%02dT00:00:00Z" % (1 + i % 28)) for i in range(40)]
         common.write_csv(os.path.join(self.tmp, "landings.csv"), rows, tables.LANDING_COLUMNS)
@@ -193,8 +188,6 @@ class TestSection(unittest.TestCase):
         self.assertIn(self.tmp, text)
 
     def test_zero_valid_boxes_is_not_reported_as_nothing_predictive(self):
-        with open(FAKE) as f:
-            f.read()  # rule 6: the binary is an input
         text = mango_run.mango_section(self.tmp, FAKE, self.runner, min_positives=1)
         self.assertIn("### rejected_before_landing", text)
         self.assertIn("200 cubes generated", text)

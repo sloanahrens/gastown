@@ -62,7 +62,7 @@ class TestLandings(unittest.TestCase):
     def test_sidecar_lists_explain_only(self):
         import json
         import tempfile
-        with tempfile.TemporaryDirectory(dir=os.path.expanduser("~/gt/claude/crew")) as d:
+        with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "s.json")
             tables.write_landing_sidecar(p)
             with open(p) as f:

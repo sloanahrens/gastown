@@ -42,6 +42,9 @@ def diff_stats(entries):
     }
 
 
+_COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}$")
+
+
 class GitDiffSource:
     """bare_repo_for(rig) -> path; run(args) -> stdout or None on failure; cache maps (rig, commit) -> stats."""
 
@@ -52,7 +55,9 @@ class GitDiffSource:
         key = (rig, commit)
         if key in self.cache:
             return self.cache[key]
-        out = self._run(["--git-dir", self._repo(rig), "show", "--numstat", "-M", "--format=", commit])
+        if not _COMMIT_RE.match(commit or ""):  # a ledger value must be a hash: never an option or a revision expression
+            return None
+        out = self._run(["--git-dir", self._repo(rig), "show", "--numstat", "-M", "--format=", commit, "--"])
         if out is None:
             return None
         s = diff_stats(parse_numstat(out))
