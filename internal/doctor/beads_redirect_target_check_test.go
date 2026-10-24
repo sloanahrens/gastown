@@ -760,16 +760,41 @@ func TestRecomputeRedirectMatchesComputeRedirectTarget(t *testing.T) {
 		t.Fatalf("recomputeRedirect failed: %v", err)
 	}
 
-	want, err := beads.ComputeRedirectTarget(townRoot, crewDir)
-	if err != nil {
-		t.Fatalf("ComputeRedirectTarget failed: %v", err)
-	}
 	data, err := os.ReadFile(filepath.Join(crewDir, ".beads", "redirect"))
 	if err != nil {
 		t.Fatalf("redirect file missing after recompute: %v", err)
 	}
 	got := strings.TrimSpace(string(data))
+
+	// The literal target: crew/worker1 is two levels below the rig, and the
+	// database lives under mayor/rig/.beads. Comparing against the shared
+	// function alone would pass if both sides drifted together.
+	const literal = "../../mayor/rig/.beads"
+	if got != literal {
+		t.Errorf("recomputeRedirect wrote %q, want %q", got, literal)
+	}
+
+	want, err := beads.ComputeRedirectTarget(townRoot, crewDir)
+	if err != nil {
+		t.Fatalf("ComputeRedirectTarget failed: %v", err)
+	}
 	if got != want {
 		t.Errorf("recomputeRedirect wrote %q, want beads.ComputeRedirectTarget's %q", got, want)
+	}
+}
+
+func TestRecomputeRedirectReturnsComputeError(t *testing.T) {
+	t.Parallel()
+	// No beads anywhere under the town: ComputeRedirectTarget errors, so
+	// recomputeRedirect must return that error and write nothing.
+	townRoot := t.TempDir()
+	crewDir := filepath.Join(townRoot, "myrig", "crew", "worker1")
+
+	if err := recomputeRedirect(townRoot, crewDir); err == nil {
+		t.Fatal("expected recomputeRedirect to fail when no beads exist")
+	}
+	beadsDir := filepath.Join(crewDir, ".beads")
+	if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
+		t.Errorf("recomputeRedirect left %s behind after failing (stat err: %v)", beadsDir, err)
 	}
 }
