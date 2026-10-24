@@ -110,9 +110,31 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"python3 -c \"import subprocess; subprocess.run('printenv', shell=True)\"",
 		"ruby -e 'puts `env`'",
 		"node -e \"require('child_process').execSync('env', {stdio: 'inherit'})\"",
+		"node -e \"require('child_process').spawnSync('env')\"",
+		"node -e \"require('child_process').execFileSync('printenv')\"",
+		"python3 -c \"import subprocess; subprocess.check_output('env')\"",
+		"python3 -c \"import os; os.popen('printenv').read()\"",
+		"python3 -c \"import subprocess; subprocess.getoutput('env')\"",
+		"ruby -e \"system('env')\"",
+		"perl -e 'system(\"env\")'",
+		"perl -e 'use IPC::Open3; open3(undef, my $out, undef, \"env\")'",
 		"jq -n env",
 		"jq -n '$ENV'",
 		"jq -n '$ENV.FORGEJO_TOKEN'",
+		"jq -n env | grep TOKEN",
+		"jq -n '[env]'",
+		"jq -n '{a: env}'",
+		"jq -n '$ENV | .HOME'",
+		// jq's options that take a value do not hide the filter after them (gt-zi9a1).
+		"jq --arg x y env",
+		"jq --argjson k 1 env",
+		"jq --slurpfile k f.json env",
+		"jq --rawfile k f.json '$ENV'",
+		"jq --indent 2 env",
+		"jq -L lib env",
+		"jq -n --arg name value env",
+		"jq --arg a 1 --arg b 2 -n env",
+		"jq . .env",
 		// Package runners start the interpreter (gt-qr646).
 		"uv run python -c \"import os; print(dict(os.environ))\"",
 		"uv run --with requests --python 3.12 python3 -c 'import os; print(os.environ)'",
@@ -354,6 +376,16 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"jq . file.json",
 		"jq -r '.name' file.json",
 		"jq -n '{env: 1}'",
+		"jq -n '[.env, .HOME]'",
+		"jq -n '$ENVIRONMENT'",
+		"jq -n '\"env\"'",
+		"jq --arg env prod .name",
+		"jq --arg env prod '.env'",
+		"jq -L env .name",
+		"jq --indent 2 .name file.json",
+		"jq -n --argjson env '{}' '$env'",
+		"jq --args -n '$ARGS' env",
+		"jq '.env' config.json",
 		"ls -la /sandbox",
 		"uv run pytest",
 		"uv run pytest -k environ tests/",
@@ -411,6 +443,26 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 	} {
 		if blocked, out := runSandboxSecretsGuard(t, "openshell", command); blocked {
 			t.Errorf("blocked an ordinary command in a sandbox: %q\n%s", command, out)
+		}
+	}
+}
+
+// The shell-out check is a keyword heuristic: a script that names a shell-out call
+// has its quoted strings judged as commands. These are the spellings it does not
+// judge, so they stay allowed here on purpose. A change that closes one fails its
+// case, and the case is updated with that change (gt-zi9a1).
+func TestSandboxSecretsShellOutLimits(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		// The command is split across two strings, and each one judged alone is harmless.
+		"python3 -c \"import os; os.system('e'+'nv')\"",
+		// The command comes from input, not from a literal in the script.
+		"python3 -c \"import os; os.system(input())\"",
+		// The script is a file, and the guard reads only the one-liner.
+		"python3 printenv.py",
+	} {
+		if blocked, out := runSandboxSecretsGuard(t, "openshell", command); blocked {
+			t.Errorf("a documented shell-out limit is now blocked, update the case if that is intended: %q\n%s", command, out)
 		}
 	}
 }
