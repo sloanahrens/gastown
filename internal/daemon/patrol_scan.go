@@ -592,16 +592,15 @@ func (h *patrolScanHost) PolecatEscalations(rig string) ([]patrolscan.Escalation
 // (polecat.SandboxSeatGitState, gt-b4waf). The host worktree is not resolved
 // for such a seat, since a nuked seat has none.
 //
-// A host seat must not depend on that classification: when the agent bead or
-// the town settings cannot be read, the seat is probed as a host seat, as it was
-// before the sandbox branch existed. A sandbox seat misread that way reads its
-// stale worktree's commits as unpushed, which keeps its exit unclear rather than
-// clearing it on a guess.
+// When that classification cannot be made (the agent bead or the town settings
+// cannot be read), the seat is unknown rather than probed: a sandbox seat misread
+// as a host seat can read clean from its stale worktree, and clearing it on that
+// guess is the fail-open case. The error keeps the exit unclear until a later
+// patrol can classify the seat.
 func (h *patrolScanHost) GitState(rig, name string) (patrolscan.GitState, error) {
 	seat, sandboxed, err := h.openshellSeat(rig, name)
 	if err != nil {
-		h.d.logger.Printf("Patrol git state of %s/%s: telling a sandbox seat from a host seat failed, probing the host worktree: %v", rig, name, err)
-		sandboxed = false
+		return patrolscan.GitState{}, fmt.Errorf("telling a sandbox seat from a host seat: %w", err)
 	}
 	var st polecat.LiveGitState
 	if sandboxed {

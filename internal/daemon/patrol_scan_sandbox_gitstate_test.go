@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"errors"
-	"io"
-	"log"
 	"strings"
 	"testing"
 
@@ -14,24 +12,45 @@ import (
 // it comes from the gateway, never from the host probe (gt-b4waf): a sandbox
 // the gateway says is gone reads clean (what was pushed is what survived), a
 // running one and a gateway that cannot be asked are unknown, and none of them
-// reaches the host worktree. A host seat still goes through the probe, also when
-// the lookup that tells the two apart fails.
+// reaches the host worktree. A host seat still goes through the probe. A seat
+// whose classification cannot be read is unknown too, and never probed.
 func TestPatrolScanGitStateOfASandboxSeat(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
 		agent     string
-		agentErr  error // the agent bead cannot be read
+		agentErr  error
 		exists    bool
 		existsErr error
 		wantErr   string // substring of the error; "" for an answer
 		wantProbe bool
 	}{
-		{"sandbox_gone_reads_clean", "deepseek-flash-sandbox", nil, false, nil, "", false},
-		{"sandbox_running_is_unknown", "deepseek-flash-sandbox", nil, true, nil, "running sandbox", false},
-		{"gateway_error_is_unknown", "deepseek-flash-sandbox", nil, false, errors.New("connection refused"), "connection refused", false},
-		{"host_seat_is_probed", "deepseek-flash", nil, false, nil, "", true},
-		{"unreadable_agent_bead_probes_the_host_worktree", "", errors.New("bd down"), false, nil, "", true},
+		{
+			name:  "sandbox_gone_reads_clean",
+			agent: "deepseek-flash-sandbox",
+		},
+		{
+			name:    "sandbox_running_is_unknown",
+			agent:   "deepseek-flash-sandbox",
+			exists:  true,
+			wantErr: "running sandbox",
+		},
+		{
+			name:      "gateway_error_is_unknown",
+			agent:     "deepseek-flash-sandbox",
+			existsErr: errors.New("connection refused"),
+			wantErr:   "connection refused",
+		},
+		{
+			name:      "host_seat_is_probed",
+			agent:     "deepseek-flash",
+			wantProbe: true,
+		},
+		{
+			name:     "unreadable_agent_bead_is_unknown_and_never_probed",
+			agentErr: errors.New("bd down"),
+			wantErr:  "bd down",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -41,7 +60,7 @@ func TestPatrolScanGitStateOfASandboxSeat(t *testing.T) {
 			probed := false
 			var asked []string
 			h := &patrolScanHost{
-				d:           &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)},
+				d:           &Daemon{config: &Config{TownRoot: town}},
 				agentRecord: func(string, string) (string, error) { return tt.agent, tt.agentErr },
 				gitState: func(string) polecat.LiveGitState {
 					probed = true
