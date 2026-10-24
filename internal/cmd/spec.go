@@ -1390,7 +1390,7 @@ type heldRead struct {
 // in the same tick are held on the same overlap the seats' hooked beads
 // cause. A rig whose held read failed stays failed.
 func specNotePendingHeld(reads map[string]heldRead, rig, id, agent string, full specdispatch.Spec) {
-	paths := extractOverlapRefs(full.Title, full.Description, full.Design, full.Notes).Files
+	paths := specHoldFiles(extractOverlapRefs(full.Title, full.Description, full.Design, full.Notes).Files, full.Description)
 	if len(paths) == 0 {
 		return
 	}
@@ -1403,7 +1403,7 @@ func specNotePendingHeld(reads map[string]heldRead, rig, id, agent string, full 
 }
 
 func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads map[string]heldRead) (string, error) {
-	paths := extractOverlapRefs(full.Title, full.Description, full.Design, full.Notes).Files
+	paths := specHoldFiles(extractOverlapRefs(full.Title, full.Description, full.Design, full.Notes).Files, full.Description)
 	if len(paths) == 0 {
 		return "", nil
 	}
@@ -1417,6 +1417,14 @@ func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads
 		return "", fmt.Errorf("%s: cannot read the beads the seats hold: %v", full.ID, read.err)
 	}
 	return specdispatch.HeldOverlap(paths, read.beads), nil
+}
+
+// specHoldFiles is the file set the overlap hold reads for one bead: the paths
+// its text names, minus the reference documents its Constraints section does
+// not list as work (gt-6t44f). The sling-time guard keeps every named path.
+func specHoldFiles(files []string, description string) []string {
+	listed := extractContentRefs(specdispatch.Sections(description)["constraints"]).Files
+	return specdispatch.HoldFiles(files, listed)
 }
 
 // specHeldStatuses are the statuses that mean a working seat holds the bead:
@@ -1450,7 +1458,7 @@ func heldBeadsFrom(store beads.Client, warn func(beadsDir string, err error), be
 		if c.IsEpic() || c.Ready.Assignee == "" {
 			continue
 		}
-		out = append(out, specdispatch.HeldBead{ID: c.ID, Assignee: c.Ready.Assignee, Paths: c.Refs.Files})
+		out = append(out, specdispatch.HeldBead{ID: c.ID, Assignee: c.Ready.Assignee, Paths: c.HoldFiles})
 	}
 	return out, nil
 }

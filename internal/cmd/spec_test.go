@@ -815,6 +815,51 @@ func TestHeldBeadsFromSkipsEpics(t *testing.T) {
 	}
 }
 
+// Two beads that only read the same standard do not hold each other: the
+// standard is cited, not changed (gt-6t44f). Two beads naming one source file
+// still hold, and so do two beads that list the standard under Constraints,
+// because for them it is a file to change.
+func TestSpecHeldHoldReferenceDocsDoNotHold(t *testing.T) {
+	t.Parallel()
+	const standard = "claude/docs/standards/test-engineering.md"
+	const source = "internal/notify/cli.go"
+	reads := func(path string) string { return specTestDescription + "\nRead " + path + " before you start.\n" }
+	changes := func(path string) string {
+		return strings.Replace(specTestDescription, "Go.", "Update "+path+".", 1)
+	}
+	cases := []struct {
+		name      string
+		held      string
+		candidate string
+		wantHold  bool
+	}{
+		{"two beads reading the same standard do not hold", reads(standard), reads(standard), false},
+		{"two beads naming the same source file hold", reads(source), reads(source), true},
+		{"two beads listing the standard under Constraints hold", changes(standard), changes(standard), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			db := beadsfake.New()
+			db.Seed(beads.Issue{ID: "gt-seat", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable",
+				Description: c.held})
+			env := specDispatchEnv{Held: func(string) ([]specdispatch.HeldBead, error) {
+				return heldBeadsFrom(db, func(string, error) {}, dir)
+			}}
+			candidate := cleanSpec("gt-second", 2, "2026-10-19T10:00:00Z")
+			candidate.Description = c.candidate
+			why, err := specHeldHold(env, "gastown", candidate, map[string]heldRead{})
+			if err != nil {
+				t.Fatalf("specHeldHold: %v", err)
+			}
+			if got := why != ""; got != c.wantHold {
+				t.Errorf("specHeldHold = %q, want a hold: %v", why, c.wantHold)
+			}
+		})
+	}
+}
+
 // --dry-run holds an unshaped bead too: it reports the unshaped reason and
 // writes nothing (gt-f8ppx acceptance 1).
 func TestSpecDispatchDryRunHoldsUnshaped(t *testing.T) {
