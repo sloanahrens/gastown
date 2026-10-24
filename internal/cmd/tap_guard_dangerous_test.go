@@ -1699,6 +1699,15 @@ func TestShellFedHeredocBodyIsInspected(t *testing.T) {
 		// bash -c runs its argument, but the body is still bash's stdin: the
 		// "$(cat)" here expands to the body, which is then what runs.
 		{"body read back through the -c substitution", "bash -c \"$(cat)\" <<'EOF'\nsudo rm -rf /\nEOF"},
+		// An unquoted "$(" runs its command text in the shell, so the reader
+		// line the heredoc sits on begins at the assignment, not at bash.
+		{"shell-fed body inside an unquoted substitution", "x=$(bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n)"},
+		{"shell-fed body inside an unquoted substitution opened on an earlier line", "x=$(\nbash <<'EOF'\nsudo rm -rf /tmp\nEOF\n)"},
+		// The pipe stage sits on the continuation line, after the operator line's newline.
+		{"shell-fed body piped through a continued line inside an unquoted substitution", "x=$(cat <<'EOF' | \\\nbash\nsudo rm -rf /tmp\nEOF\n)"},
+		{"shell-fed body after a nested substitution in the command text", "x=$(echo $(echo a); bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n)"},
+		{"shell-fed body after a quoted parenthesis in the command text", "x=$(echo \")\"; bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n)"},
+		{"shell-fed body after a subshell inside an unquoted substitution", "x=$( (true); bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1720,6 +1729,12 @@ func TestHeredocBodyStaysOpaqueWithoutAShellReader(t *testing.T) {
 	}{
 		{"interpreter that is not a shell", "python3 - <<'EOF'\nsudo rm -rf /\nEOF"},
 		{"shell name as an argument", "echo bash <<'EOF'\ngit reset --hard\nEOF"},
+		{"non-shell reader inside an unquoted substitution", "x=$(cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n)"},
+		{"heredoc after a closed substitution is not in its command text", "x=$(echo bash)\ncat <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
+		// The "$(echo a)" closes its frame at the ")" that returns to zero, so
+		// the bash on the next line is not command text of the heredoc's line.
+		{"heredoc after a closed substitution does not inherit the next line", "x=$(echo a)\nbash\ncat <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
+		{"heredoc after a nested substitution closes back to the outer frame", "x=$(echo $(echo a) b)\ncat <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
