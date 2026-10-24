@@ -149,6 +149,8 @@ gateway_step() {
 # its own lock.
 IMAGE_RUN="${INSTALL_GT_IMAGE_RUN:-${TOWN_ROOT:+$TOWN_ROOT/plugins/polecat-image/run.sh}}"
 IMAGE_LOG="${INSTALL_GT_IMAGE_LOG:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-image-install.log}}"
+IMAGE_LOCK="${INSTALL_GT_IMAGE_LOCK:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-image.lock}}"
+IMAGE_ALARM="${INSTALL_GT_IMAGE_ALARM:-1200}"
 IMAGE_PERL="${INSTALL_GT_PERL:-perl}"
 polecat_image_step() {
   local run="$1" logfile="$2" commit="$3"
@@ -162,8 +164,35 @@ polecat_image_step() {
   fi
   [ -n "$logfile" ] || logfile=/dev/null
   mkdir -p "$(dirname "$logfile")" 2>/dev/null || true
-  ( "$IMAGE_PERL" -MPOSIX -e 'POSIX::setsid(); POSIX::close($_) for 3..255; alarm 1200; exec @ARGV' \
-      bash "$run" </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null || {
+  # The perl that stays up is the supervisor: run.sh runs in its own process
+  # group, so on the alarm the whole build (run.sh and the docker it started)
+  # is stopped, and only then is the lock run.sh took removed. Removing it while
+  # a docker child still runs would let the next install build beside it.
+  # run.sh gets this install's town root, gt and lock, not whatever HOME and
+  # PATH resolve to, so the image is built for the install that asked for it.
+  ( POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$GT" POLECAT_IMAGE_LOCK="$IMAGE_LOCK" \
+      "$IMAGE_PERL" -MPOSIX -MFile::Path=remove_tree -e '
+        my ($secs, $lock, @cmd) = @ARGV;
+        POSIX::setsid(); POSIX::close($_) for 3..255;
+        my $child = fork();
+        die "fork: $!" unless defined $child;
+        if ($child == 0) { POSIX::setpgid(0, 0); exec @cmd or die "exec: $!"; }
+        $SIG{ALRM} = sub {
+          kill "TERM", -$child;
+          sleep 1;
+          kill "KILL", -$child;
+          if (length $lock && open(my $fh, "<", "$lock/pid")) {
+            my $pid = <$fh>;
+            close $fh;
+            chomp $pid;
+            remove_tree($lock) if $pid == $child;
+          }
+          exit 124;
+        };
+        alarm $secs;
+        waitpid($child, 0);
+        exit($? >> 8);
+      ' "$IMAGE_ALARM" "$IMAGE_LOCK" bash "$run" </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null || {
     log "polecat image: could not start the rebuild for $commit (non-fatal)"
     return 0
   }
@@ -172,7 +201,7 @@ polecat_image_step() {
 
 if [ "$DRY_RUN" = "1" ]; then
   gateway_step dry-run "$RIG_DIR" "$SCRIPT_DIR"
-  RESULT_EMITTED=1
+  result_line dry-run "$SHA" "" ""
   exit 0
 fi
 
