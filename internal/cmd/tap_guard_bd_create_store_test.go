@@ -481,6 +481,30 @@ func TestTapGuardBdCreateStoreDashCTownSubdir(t *testing.T) {
 	}
 }
 
+// TestTapGuardBdCreateStoreUnreadableDirRefused pins that a directory the
+// walk cannot stat is refused, not skipped: the .beads bd finds there might be
+// the town's. The fixture is a path through a regular file, whose stat fails
+// with ENOTDIR rather than not-exist. A missing .beads is not an error and the
+// walk goes on.
+func TestTapGuardBdCreateStoreUnreadableDirRefused(t *testing.T) {
+	t.Parallel()
+	b := newBdStoreTown(t)
+	file := filepath.Join(b.worktree, "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stderr, err := b.run(t, polecatRole, b.worktree, `bd -C `+file+` create --title=x`)
+	if err == nil || !strings.Contains(stderr, bdCreateStoreRefusal) || !strings.Contains(stderr, bdCreateStoreUnreadable) {
+		t.Fatalf("want the unreadable-directory refusal, got err=%v stderr=%q", err, stderr)
+	}
+
+	stderr, err = b.run(t, polecatRole, b.worktree, `bd -C `+filepath.Join(b.worktree, "internal")+` create --title=x`)
+	if err != nil || stderr != "" {
+		t.Fatalf("want a worktree subdirectory without .beads allowed, got err=%v stderr=%q", err, stderr)
+	}
+}
+
 // TestTapGuardBdCreateStoreShellEnvFollowsLine pins what bd reads from its
 // environment once the commands on a line have run in order, starting from the
 // process env. A store change the guard cannot follow to the bd create (a
@@ -507,6 +531,16 @@ func TestTapGuardBdCreateStoreShellEnvFollowsLine(t *testing.T) {
 		{"read into BEADS_DB", "", `read BEADS_DB; bd create --title=x`, true},
 		{"set -e names no store variable", "", `set -e; bd create --title=x`, false},
 		{"process town, inline rig overrides the process value", townDB, `BEADS_DB=` + rigDB + ` bd create --title=x`, false},
+		{"export town reaches a bash -c payload", "", `export BEADS_DB=` + townDB + `; bash -c 'bd create --title=x'`, true},
+		{"export town reaches a command substitution", "", `export BEADS_DB=` + townDB + `; echo $(bd create --title=x)`, true},
+		{"inline town reaches the bash -c it prefixes", "", `BEADS_DB=` + townDB + ` bash -c 'bd create --title=x'`, true},
+		{"process town reaches a bash -c payload", townDB, `bash -c 'bd create --title=x'`, true},
+		{"export rig reaches a bash -c payload", "", `export BEADS_DB=` + rigDB + `; bash -c 'bd create --title=x'`, false},
+		{"bare town is not exported to a bash -c payload", "", `BEADS_DB=` + townDB + `; bash -c 'bd create --title=x'`, false},
+		{"unset inside the payload clears the exported town", "", `export BEADS_DB=` + townDB + `; bash -c 'unset BEADS_DB; bd create --title=x'`, false},
+		{"export town inside the payload", "", `bash -c 'export BEADS_DB=` + townDB + `; bd create --title=x'`, true},
+		{"unfollowed store change reaches a bash -c payload", "", `read BEADS_DB; bash -c 'bd create --title=x'`, true},
+		{"unfollowed store change inside a bash -c payload", "", `bash -c 'read BEADS_DB; bd create --title=x'`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

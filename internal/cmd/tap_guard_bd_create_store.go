@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,7 +92,7 @@ func tapGuardBdCreateStore(stdin io.Reader, stderr io.Writer, proc guardProcess)
 		return nil
 	}
 	g := bdCreateStoreGuard{proc: proc, townStore: filepath.Join(townRoot, ".beads")}
-	reason := g.evaluate(command, cwd, true, 0)
+	reason := g.evaluate(command, cwd, true, 0, nil)
 	if reason == "" {
 		return nil
 	}
@@ -112,11 +114,19 @@ type bdCreateStoreGuard struct {
 // pipeline or background job is not carried to the commands after it, and an
 // "&&" list whose cd fails does not name a directory its remainder never
 // reaches.
-func (g bdCreateStoreGuard) evaluate(command, cwd string, cwdKnown bool, depth int) string {
+//
+// inherited is the store-variable state the command starts with: nil for the
+// hook's own line (the process env), else what the enclosing line leaves a
+// nested payload or substitution, so a variable exported earlier on the outer
+// line reaches a bd create inside "bash -c" or "$(...)".
+func (g bdCreateStoreGuard) evaluate(command, cwd string, cwdKnown bool, depth int, inherited *bdEnvState) string {
 	stripped := strings.TrimSpace(stripHeredocBodies(command))
 	tokens := shellTokenize(stripped)
 	vars := shellVarAssignments(tokens)
-	env := g.newBdEnvState()
+	env := inherited
+	if env == nil {
+		env = g.newBdEnvState()
+	}
 	judge := func(segment []string, start int) string {
 		segment = commandSegment(segment)
 		dir, known := segmentWalkRoot(g.proc, tokens, start, cwd, vars)
@@ -134,8 +144,9 @@ func (g bdCreateStoreGuard) evaluate(command, cwd string, cwdKnown bool, depth i
 		if !known {
 			dir = cwd
 		}
+		child := env.forPayload(segment)
 		for _, payload := range payloads {
-			if reason := g.evaluate(payload, dir, known, depth+1); reason != "" {
+			if reason := g.evaluate(payload, dir, known, depth+1, child); reason != "" {
 				return reason
 			}
 		}
@@ -171,8 +182,11 @@ func (g bdCreateStoreGuard) evaluate(command, cwd string, cwdKnown bool, depth i
 		}
 		return ""
 	}
+	// A substitution runs in a subshell that holds every variable the line has
+	// set; the state at the line's end stands for it, as the scripts carry no
+	// position.
 	for _, script := range scripts {
-		if reason := g.evaluate(script.body, script.dir, script.known, depth+1); reason != "" {
+		if reason := g.evaluate(script.body, script.dir, script.known, depth+1, env.forSubshell()); reason != "" {
 			return reason
 		}
 	}
@@ -292,6 +306,10 @@ const bdCreateEnvUnplaced = "a store variable (BEADS_DIR, BEADS_DB, BD_DB) chang
 // bdCreateNoStore refuses a bd create whose directory has no .beads above it:
 // bd finds no store there, so the guard cannot name the one it would file into.
 const bdCreateNoStore = "no beads store is above this bd create's directory, so the guard cannot tell which store it would file into; run it from your worktree"
+
+// bdCreateStoreUnreadable refuses a bd create whose directory walk hit a
+// directory the guard cannot stat: it cannot tell whether a .beads is there.
+const bdCreateStoreUnreadable = "a directory above this bd create cannot be read, so the guard cannot tell which store it would file into; run it from your worktree"
 
 // bdCreateBase resolves the directory bd is told to run in (a -C value). A
 // relative one is resolved against dir, as bd resolves it from the shell's
@@ -480,6 +498,35 @@ func (env *bdEnvState) exportedValue(name string) string {
 	return ""
 }
 
+// forSubshell is the state a command substitution starts with: a copy of env,
+// as a subshell holds every variable of the shell that forked it.
+func (env *bdEnvState) forSubshell() *bdEnvState {
+	child := &bdEnvState{vars: make(map[string]shellVar, len(env.vars)), unplaced: env.unplaced}
+	for name, v := range env.vars {
+		child.vars[name] = v
+	}
+	return child
+}
+
+// forPayload is the state a nested shell started by segment ("bash -c ...")
+// starts with: the exported variables, with the segment's own inline
+// assignments over them, since the new process inherits only its environment.
+// An empty value is no variable, as bd reads it. A store change the guard could
+// not follow stays unplaced in the nested shell too.
+func (env *bdEnvState) forPayload(segment []string) *bdEnvState {
+	child := &bdEnvState{vars: make(map[string]shellVar), unplaced: env.unplaced}
+	for _, name := range bdStoreEnvNames {
+		value, inline := inlineAssignment(segment, name)
+		if !inline {
+			value = env.exportedValue(name)
+		}
+		if value != "" {
+			child.vars[name] = shellVar{value: value, exported: true}
+		}
+	}
+	return child
+}
+
 // apply moves env past segment, the simple command that follows the separator
 // sep ("" at the line's start). Only a store variable's export, unset or bare
 // assignment changes what bd reads. The guard follows one the shell surely runs;
@@ -617,7 +664,12 @@ func bdNamesStoreVar(args []string) bool {
 // own resolves to the town's store.
 func (g bdCreateStoreGuard) judgeWorkdirStore(dir string) string {
 	for d := dir; ; d = filepath.Dir(d) {
-		if info, err := os.Stat(filepath.Join(d, ".beads")); err == nil && info.IsDir() {
+		info, err := os.Stat(filepath.Join(d, ".beads"))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			// A directory the guard cannot read may hold the store bd finds there.
+			return bdCreateStoreUnreadable
+		}
+		if err == nil && info.IsDir() {
 			return g.judgeStore(d)
 		}
 		if filepath.Dir(d) == d {
