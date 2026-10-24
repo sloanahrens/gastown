@@ -737,7 +737,7 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 				w.subs = append(w.subs, cmdSubstFrame{open: w.byteIdx + 1, tick: true})
 				w.quote = 0
 			}
-		case w.quote == 0 && r == '\'' && isANSICDollar(w.runes, w.runeIdx-1):
+		case w.quote == 0 && r == '\'' && isANSICDollar(w.runes, lineContinuationsBefore(w.runes, w.runeIdx)-1):
 			// A "$'" opens an ANSI-C string, where a backslash escapes the
 			// quote, so \' does not end it (gt-0vbb2).
 			w.quote = '$'
@@ -1815,7 +1815,8 @@ func spaceOutShellOperators(command string) string {
 		case sc.quote == 0 && !sc.escapeForShlex && isANSICDollar(runes, i):
 			b.WriteRune('"')
 			scopes[len(scopes)-1].quote = '$'
-			i++
+			// Land on the quote itself; the loop step moves past it (gt-javvg).
+			i = skipLineContinuations(runes, i+1)
 		case r == '$' && sc.quote == '"' && i+2 < len(runes) && quotedDollarParen(r, runes[i+1], runes[i+2]):
 			// A quoted dollar-paren — "$(" — inside a double-quoted word ends
 			// that word at the quote after the "(", as the shell reads it, so
@@ -1957,9 +1958,35 @@ func quotedDollarParen(dollar, paren, quote rune) bool {
 // PID (gt-0vbb2). The quote walk and spaceOutShellOperators judge the opener
 // here, so they agree on where a $'...' string starts. heredocLineEnd reads
 // bytes forward and skips the second "$" of a "$$" in place for the same reason.
+// A backslash-newline between the "$" and the quote is deleted by the shell, so
+// the quote is still the one that follows it (gt-javvg).
 func isANSICDollar(runes []rune, i int) bool {
-	return i >= 0 && i+1 < len(runes) && runes[i] == '$' && runes[i+1] == '\'' &&
-		!escapedRune(runes, i) && !isPIDTail(runes, i)
+	if i < 0 || i >= len(runes) || runes[i] != '$' {
+		return false
+	}
+	quote := skipLineContinuations(runes, i+1)
+	return quote < len(runes) && runes[quote] == '\'' && !escapedRune(runes, i) && !isPIDTail(runes, i)
+}
+
+// skipLineContinuations returns the index of the first rune at or after i that
+// is not part of a backslash-newline pair, which the shell deletes before it
+// reads the words around it (gt-javvg).
+func skipLineContinuations(runes []rune, i int) int {
+	for i+1 < len(runes) && runes[i] == '\\' && runes[i+1] == '\n' && !escapedRune(runes, i) {
+		i += 2
+	}
+	return i
+}
+
+// lineContinuationsBefore is the backward form of skipLineContinuations: it
+// returns the index just past the last rune before i that is not part of a
+// backslash-newline pair, so runes[result-1] is the rune the shell reads before
+// runes[i] (gt-javvg).
+func lineContinuationsBefore(runes []rune, i int) int {
+	for i >= 2 && runes[i-1] == '\n' && runes[i-2] == '\\' && !escapedRune(runes, i-2) {
+		i -= 2
+	}
+	return i
 }
 
 // isPIDTail reports whether the "$" at runes[i] is the second half of a "$$"

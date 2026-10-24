@@ -3843,6 +3843,26 @@ func TestANSICQuotedStringKeepsTheCommandsBehindIt(t *testing.T) {
 	}
 }
 
+// gt-javvg: bash deletes a backslash-newline before it reads the quote, so a
+// "$" and its "'" with a continuation between them still open an ANSI-C string,
+// where the \' does not end it. Read as a plain quote, the rm behind it was
+// hidden inside what the guard took for quoted text.
+func TestDangerousGuardANSICLineContinuation(t *testing.T) {
+	t.Parallel()
+	joined := "echo $\\\n'a\\'' ; rm -rf / ; echo \\'"
+	if reason, _ := evaluateDangerousCommand(joined, 0, noTownSession); !strings.Contains(reason, "filesystem destruction") {
+		t.Errorf("evaluateDangerousCommand(%q) reason = %q, want filesystem destruction", joined, reason)
+	}
+	plain := "echo $'a\\'' ; rm -rf / ; echo \\'"
+	if reason, _ := evaluateDangerousCommand(plain, 0, noTownSession); !strings.Contains(reason, "filesystem destruction") {
+		t.Errorf("evaluateDangerousCommand(%q) reason = %q, want filesystem destruction", plain, reason)
+	}
+	text := "echo $\\\n'rm -rf /'"
+	if reason, _ := evaluateDangerousCommand(text, 0, noTownSession); reason != "" {
+		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — the rm is text inside the string", text, reason)
+	}
+}
+
 // gt-0vbb2: the heredoc scanners open and close $'...' strings where bash does,
 // and read "$$" as the PID, so a "<<" inside an ANSI-C string is text and not a
 // heredoc, and the operator line ends at its own newline.
@@ -3855,6 +3875,8 @@ func TestHeredocANSICQuotesFollowBash(t *testing.T) {
 	}{
 		// The "<<" is text inside the string, so the rm is a live command.
 		{"a << inside an ANSI-C string is not a heredoc", "echo $'a\\'\n<<EOF\n'\nrm -rf /\nEOF", true},
+		// gt-javvg: the continuation between $ and ' does not hide the string.
+		{"a << inside an ANSI-C string opened across a continuation is not a heredoc", "echo $\\\n'a\\'\n<<EOF\n'\nrm -rf /\nEOF", true},
 		// "$$" is the PID, so 'a\' is a plain quote and <<EOF is a redirection
 		// whose body is data.
 		{"the quote after $$ is plain, so the walk reads the heredoc", "cat $$'a\\' <<EOF\nrm -rf /\nEOF", false},
@@ -3900,6 +3922,10 @@ func TestIsANSICDollar(t *testing.T) {
 		{"a third dollar after PID is live", "$$$'", 2, true},
 		{"the fourth dollar is the tail of a second PID", "$$$$'", 3, false},
 		{"an escaped first dollar leaves the second live", `\$$'`, 2, true},
+		{"a continuation between the dollar and the quote opens a string", "$\\\n'a'", 0, true},
+		{"a continuation then a plain letter opens nothing", "$\\\na", 0, false},
+		{"an escaped backslash before a newline is not a continuation", "$\\\\\n'a'", 0, false},
+		{"a PID tail across a continuation is still a tail", "$$\\\n'a'", 1, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isANSICDollar([]rune(tt.text), tt.i); got != tt.want {
