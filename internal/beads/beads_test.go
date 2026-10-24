@@ -1277,6 +1277,12 @@ func TestConcreteWorkIssueRejectReason(t *testing.T) {
 		{name: "escalation label", issue: &Issue{ID: "gt-esc", Labels: []string{"gt:escalation"}}, want: "internal-label:gt:escalation"},
 		{name: "merge-slot label", issue: &Issue{ID: "gt-slot", Labels: []string{"gt:merge-slot"}}, want: "internal-label:gt:merge-slot"},
 		{name: "townhealth label", issue: &Issue{ID: "gt-th", Labels: []string{"gt:townhealth"}}, want: "internal-label:gt:townhealth"},
+		{name: "protected label after non-dispatchable label", issue: &Issue{ID: "gt-x", Labels: []string{"gt:escalation", "gt:keep"}}, want: "protected-label:gt:keep"},
+		{name: "protected label before non-dispatchable label", issue: &Issue{ID: "gt-x", Labels: []string{"gt:keep", "gt:escalation"}}, want: "protected-label:gt:keep"},
+		{name: "internal label after protected label", issue: &Issue{ID: "gt-x", Labels: []string{"gt:keep", "gt:wisp"}}, want: "internal-label:gt:wisp"},
+		{name: "internal label after non-dispatchable label", issue: &Issue{ID: "gt-x", Labels: []string{"gt:merge-slot", "gt:wisp"}}, want: "internal-label:gt:wisp"},
+		{name: "uppercase padded label", issue: &Issue{ID: "gt-x", Labels: []string{"  GT:Escalation "}}, want: "internal-label:gt:escalation"},
+		{name: "uppercase padded type", issue: &Issue{ID: "gt-x", Type: " Merge-Request "}, want: "internal-type:merge-request"},
 		{name: "concrete", issue: &Issue{ID: "gt-work", Type: "task"}, want: ""},
 	}
 
@@ -1293,19 +1299,25 @@ func TestConcreteWorkIssueRejectReason(t *testing.T) {
 // "not work a polecat can take": every type and label the dispatcher skips is
 // also refused by gt done and the landing policy.
 func TestConcreteWorkRejectCoversNonDispatchableLists(t *testing.T) {
+	// Each entry is also checked in uppercase and padded form: the dispatcher
+	// matches case-insensitively, so the reject check must too.
 	for _, typ := range constants.NonDispatchableBeadTypes {
-		t.Run("type/"+typ, func(t *testing.T) {
-			if got := ConcreteWorkIssueRejectReason(&Issue{ID: "gt-x", Type: typ}); got == "" {
-				t.Fatalf("type %q is non-dispatchable but ConcreteWorkIssueRejectReason accepts it", typ)
-			}
-		})
+		for _, variant := range []string{typ, strings.ToUpper(typ), " " + typ + "\t"} {
+			t.Run("type/"+variant, func(t *testing.T) {
+				if got := ConcreteWorkIssueRejectReason(&Issue{ID: "gt-x", Type: variant}); got == "" {
+					t.Fatalf("type %q is non-dispatchable but ConcreteWorkIssueRejectReason accepts it", variant)
+				}
+			})
+		}
 	}
 	for _, label := range constants.NonDispatchableBeadLabels {
-		t.Run("label/"+label, func(t *testing.T) {
-			if got := ConcreteWorkIssueRejectReason(&Issue{ID: "gt-x", Type: "task", Labels: []string{label}}); got == "" {
-				t.Fatalf("label %q is non-dispatchable but ConcreteWorkIssueRejectReason accepts it", label)
-			}
-		})
+		for _, variant := range []string{label, strings.ToUpper(label), " " + label + "\t"} {
+			t.Run("label/"+variant, func(t *testing.T) {
+				if got := ConcreteWorkIssueRejectReason(&Issue{ID: "gt-x", Type: "task", Labels: []string{variant}}); got == "" {
+					t.Fatalf("label %q is non-dispatchable but ConcreteWorkIssueRejectReason accepts it", variant)
+				}
+			})
+		}
 	}
 }
 
