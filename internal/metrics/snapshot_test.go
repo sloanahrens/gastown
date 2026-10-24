@@ -43,7 +43,8 @@ func TestSnapshotAppendsExactlyOneParseableLine(t *testing.T) {
 func TestSnapshotKillsHungRunnerAtDeadline(t *testing.T) {
 	t.Parallel()
 	// The fake waits on its context, so it returns only when RunSnapshot's
-	// deadline kills it; there is no sleep and the test ends when it does.
+	// deadline for the hung source kills it; there is no sleep and the test
+	// ends when it does.
 	killed := make(chan struct{})
 	env := envAt(fixedNow())
 	env.Town = t.TempDir()
@@ -52,11 +53,16 @@ func TestSnapshotKillsHungRunnerAtDeadline(t *testing.T) {
 		close(killed)
 		return nil, ctx.Err()
 	}
+	// The hung source is alone here: one that answered instantly would share
+	// the same 1ms deadline and, on a loaded host, miss it too, adding a
+	// second errors entry for a reason this test is not about (gt-m5mxp).
+	// That other groups still fill beside a failed one is Collect's contract,
+	// covered by its own tests under a budget no loaded host misses.
 	hung := sourceFunc{group: "host", fn: func(ctx context.Context, env Env) (map[string]any, error) {
 		_, err := env.Run(ctx, []string{"vm_stat"})
 		return nil, err
 	}}
-	rec, _, err := RunSnapshot(context.Background(), env, []Source{hung, healthy("queue")}, time.Millisecond)
+	rec, _, err := RunSnapshot(context.Background(), env, []Source{hung}, time.Millisecond)
 	if err != nil {
 		t.Fatalf("RunSnapshot: %v", err)
 	}
@@ -70,8 +76,8 @@ func TestSnapshotKillsHungRunnerAtDeadline(t *testing.T) {
 	if len(rec.Errors) != 1 || rec.Errors[0].Group != "host" {
 		t.Fatalf("errors = %+v, want one entry for host", rec.Errors)
 	}
-	if rec.Groups["host"] != nil || rec.Groups["queue"] == nil {
-		t.Fatalf("groups = %+v, want host null and queue filled", rec.Groups)
+	if rec.Groups["host"] != nil {
+		t.Fatalf("Groups[host] = %v, want null", rec.Groups["host"])
 	}
 }
 
