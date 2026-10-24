@@ -311,7 +311,9 @@ def write_mango_section(env):
 
 
 def run_snapshot(town=None):
-    """Append one snapshot line to ~/gt/.runtime/metrics/snapshots.jsonl and return the log's path."""
+    """Append one snapshot line under _town(town)'s .runtime/metrics and return the log's path.
+
+    The town root follows _town (argument, TOWN_METRICS_TOWN, ~/gt) and the sources' commands run through _run."""
     import datetime as dt
     town = _town(town)
     path = os.path.join(town, ".runtime", "metrics", "snapshots.jsonl")

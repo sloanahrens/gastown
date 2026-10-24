@@ -57,8 +57,9 @@ BROKEN_SOURCE = ('GROUP = "broken"\n\n\ndef collect(town, run, now):\n'
 
 class TestStubSources(unittest.TestCase):
     def test_six_stub_groups_are_discovered_and_report_no_columns(self):
-        found = snapshot.discover()
+        found, errors = snapshot.discover()
         self.assertEqual([g for g, _ in found], GROUPS)
+        self.assertEqual(errors, [])
         for group, mod in found:
             self.assertEqual(mod.collect("/town", no_run, NOW), {}, group)
 
@@ -75,18 +76,43 @@ class TestTake(TempCase):
         snapshot.append(self.log, rec)
         self.assertEqual(json.loads(self.read_lines()[0]), rec)
 
+    def test_a_discovery_error_lands_in_the_record_without_losing_the_other_groups(self):
+        pkg = self.fake_package({"bad": 'GROUP = "errors"\n\n\ndef collect(town, run, now):\n    return {}\n',
+                                 "ok": OK_SOURCE})
+        rec = snapshot.take("/town", no_run, NOW, package=pkg)
+        self.assertEqual(rec["ok"], {"n": 1})
+        self.assertEqual([e["group"] for e in rec["errors"]], ["bad"])
+
     def test_a_module_added_to_the_package_is_picked_up_with_no_other_change(self):
         pkg = self.fake_package({"ok": OK_SOURCE})
-        self.assertEqual([g for g, _ in snapshot.discover(pkg)], ["ok"])
+        self.assertEqual([g for g, _ in snapshot.discover(pkg)[0]], ["ok"])
         with open(os.path.join(os.path.dirname(pkg.__file__), "extra.py"), "w") as f:
             f.write('GROUP = "extra"\n\n\ndef collect(town, run, now):\n    return {}\n')
         importlib.invalidate_caches()  # the import finder caches directory listings by mtime
-        self.assertEqual([g for g, _ in snapshot.discover(pkg)], ["extra", "ok"])
+        self.assertEqual([g for g, _ in snapshot.discover(pkg)[0]], ["extra", "ok"])
 
-    def test_a_source_named_after_a_reserved_key_is_refused(self):
-        pkg = self.fake_package({"bad": 'GROUP = "errors"\n\n\ndef collect(town, run, now):\n    return {}\n'})
-        with self.assertRaises(ValueError):
-            snapshot.discover(pkg)
+    def test_a_source_named_after_a_reserved_key_is_an_error_and_the_rest_still_discover(self):
+        pkg = self.fake_package({"bad": 'GROUP = "errors"\n\n\ndef collect(town, run, now):\n    return {}\n',
+                                 "ok": OK_SOURCE})
+        found, errors = snapshot.discover(pkg)
+        self.assertEqual([g for g, _ in found], ["ok"])
+        self.assertEqual(errors, [{"group": "bad", "error": "ValueError: %s.bad: group 'errors' is reserved or "
+                                                          "already taken" % pkg.__name__}])
+
+    def test_a_module_that_fails_to_import_is_an_error_and_the_rest_still_discover(self):
+        pkg = self.fake_package({"broken": "raise RuntimeError('no module named bd_helper')\n", "ok": OK_SOURCE})
+        found, errors = snapshot.discover(pkg)
+        self.assertEqual([g for g, _ in found], ["ok"])
+        self.assertEqual(errors, [{"group": "broken",
+                                   "error": "RuntimeError: no module named bd_helper"}])
+
+    def test_a_module_without_group_or_collect_is_an_error_and_the_rest_still_discover(self):
+        pkg = self.fake_package({"nogroup": "VALUE = 1\n",
+                                 "ok": OK_SOURCE})
+        found, errors = snapshot.discover(pkg)
+        self.assertEqual([g for g, _ in found], ["ok"])
+        self.assertEqual(errors, [{"group": "nogroup", "error": "ValueError: %s.nogroup needs GROUP and collect()"
+                                                               % pkg.__name__}])
 
 
 class TestAppend(TempCase):
@@ -95,6 +121,20 @@ class TestAppend(TempCase):
         snapshot.append(self.log, {"a": 2})
         self.assertEqual([json.loads(line) for line in self.read_lines()], [{"a": 1}, {"a": 2}])
         self.assertEqual(stat.S_IMODE(os.stat(self.log).st_mode), 0o600)
+
+    def test_a_log_left_at_0644_is_tightened_to_0600(self):
+        os.makedirs(os.path.dirname(self.log))
+        with open(self.log, "w"):
+            pass
+        os.chmod(self.log, 0o644)
+        snapshot.append(self.log, {"a": 1})
+        self.assertEqual(stat.S_IMODE(os.stat(self.log).st_mode), 0o600)
+
+    def test_a_log_directory_left_at_0755_is_tightened_to_0700(self):
+        os.makedirs(os.path.dirname(self.log))
+        os.chmod(os.path.dirname(self.log), 0o755)
+        snapshot.append(self.log, {"a": 1})
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(self.log)).st_mode), 0o700)
 
     def test_a_half_written_last_line_does_not_corrupt_the_next_record(self):
         snapshot.append(self.log, {"a": 1})
@@ -106,6 +146,21 @@ class TestAppend(TempCase):
         self.assertEqual(json.loads(lines[0]), {"a": 1})
         self.assertEqual(lines[1], '{"a": 2, "b": ')
         self.assertEqual(json.loads(lines[2]), {"a": 3})
+
+
+class TestCliHelpers(unittest.TestCase):
+    def test_town_root_is_the_argument_then_the_env_override_then_home(self):
+        with mock.patch.dict(os.environ, {"TOWN_METRICS_TOWN": "/from/env"}):
+            self.assertEqual(cli._town("/explicit"), "/explicit")
+            self.assertEqual(cli._town(), "/from/env")
+        env = {k: v for k, v in os.environ.items() if k != "TOWN_METRICS_TOWN"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(cli._town(), os.path.expanduser("~/gt"))
+
+    def test_run_returns_stdout_and_none_on_a_failing_command(self):
+        self.assertEqual(cli._run(["sh", "-c", "echo out"]), "out\n")
+        self.assertIsNone(cli._run(["sh", "-c", "echo err >&2; exit 3"]))
+        self.assertIsNone(cli._run(["town-metrics-no-such-command"]))
 
 
 class TestSnapshotCommand(TempCase):
@@ -120,6 +175,11 @@ class TestSnapshotCommand(TempCase):
         rec = json.loads(lines[0])
         self.assertEqual(sorted(k for k in rec if k not in ("ts", "v", "errors")), GROUPS)
         self.assertEqual(rec["errors"], [])
+
+    def test_run_snapshot_writes_under_the_env_override(self):
+        with mock.patch.dict(os.environ, {"TOWN_METRICS_TOWN": self.tmp}):
+            self.assertEqual(cli.run_snapshot(), self.log)
+        self.assertEqual(len(self.read_lines()), 1)
 
 
 if __name__ == "__main__":
