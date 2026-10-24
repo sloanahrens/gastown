@@ -395,13 +395,20 @@ func ConcreteWorkIssueRejectReason(issue *Issue) string {
 	if InternalIssueType(issue.Type) {
 		return "internal-type:" + strings.ToLower(strings.TrimSpace(issue.Type))
 	}
+	// Each label family gets a full pass over the labels, in precedence
+	// order, so the reason does not depend on which label the issue lists
+	// first: ["gt:escalation", "gt:keep"] reports the protected label.
 	for _, label := range issue.Labels {
 		if InternalIssueLabel(label) {
 			return "internal-label:" + strings.ToLower(strings.TrimSpace(label))
 		}
+	}
+	for _, label := range issue.Labels {
 		if ProtectedIssueLabel(label) {
 			return "protected-label:" + strings.ToLower(strings.TrimSpace(label))
 		}
+	}
+	for _, label := range issue.Labels {
 		if nonDispatchableLabel(label) {
 			return "internal-label:" + strings.ToLower(strings.TrimSpace(label))
 		}
