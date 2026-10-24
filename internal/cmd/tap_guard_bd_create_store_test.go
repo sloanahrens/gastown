@@ -314,10 +314,11 @@ func TestTapGuardBdCreateStoreProcessEnvDB(t *testing.T) {
 	}
 }
 
-// TestTapGuardBdCreateStoreDashCOutranksEnvDB pins that bd -C decides the
-// store: bd sets BEADS_DIR from -C and reads it before BEADS_DB/BD_DB, so a
-// rig-valued database variable, inline or in the process env, cannot make a
-// -C town create look like a rig one.
+// TestTapGuardBdCreateStoreDashCOutranksEnvDB pins which selector decides the
+// store when bd -C meets a database one: -C sets BEADS_DIR and bd reads it
+// before BEADS_DB/BD_DB, so a rig-valued database variable, inline or in the
+// process env, cannot make a -C town create look like a rig one; an explicit
+// --db or --repo outranks -C, so it alone decides where the bead lands.
 func TestTapGuardBdCreateStoreDashCOutranksEnvDB(t *testing.T) {
 	t.Parallel()
 	b := newBdStoreTown(t)
@@ -341,6 +342,12 @@ func TestTapGuardBdCreateStoreDashCOutranksEnvDB(t *testing.T) {
 		{"inline BEADS_DB town, -C rig dir", nil, `BEADS_DB=` + townDB + ` bd -C ` + b.rigDir + ` create --title=x`, false},
 		{"process BEADS_DB town, -C rig dir", map[string]string{"BEADS_DB": townDB}, `bd -C ` + b.rigDir + ` create --title=x`, false},
 		{"inline BEADS_DIR town, -C rig dir", nil, `BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` bd -C ` + b.rigDir + ` create --title=x`, false},
+		// An explicit --db or --repo outranks -C: bd acts on the flag, so the
+		// directory -C changed to no longer decides the store.
+		{"-C town with --db rig", nil, `bd -C ` + b.town + ` --db ` + rigDB + ` create --title=x`, false},
+		{"-C rig dir with --db town", nil, `bd -C ` + b.rigDir + ` --db ` + townDB + ` create --title=x`, true},
+		{"-C town with --repo rig", nil, `bd -C ` + b.town + ` create --title=x --repo ` + b.rigDir, false},
+		{"-C rig dir with --repo town", nil, `bd -C ` + b.rigDir + ` create --title=x --repo ` + b.town, true},
 		{"inline BEADS_DB rig, no -C", nil, `BEADS_DB=` + rigDB + ` bd create --title=x`, false},
 	}
 	for _, tt := range tests {
