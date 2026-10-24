@@ -53,6 +53,10 @@ const (
 // mangoNoPanel is the sentence the panel carries before its first collection.
 const mangoNoPanel = "not collected yet"
 
+// mangoNoPanelRead is the sentence for a reader that hands the hub no panel at
+// all, which is a state the reader did not name itself.
+const mangoNoPanelRead = "the panel reader returned no panel"
+
 // mangoOversize names the size cap the way the page shows it. The number is
 // read out of the cap itself, so the sentence and the reader that enforces it
 // cannot come apart.
@@ -177,12 +181,18 @@ func ReadMango(dir string, now time.Time) *Mango {
 	m.GeneratedAt = &gen
 	m.Items, m.SnapshotHours = p.Items, p.SnapshotHours
 	m.Targets, m.Counts = targets, counts
-	if now.Sub(gen) > mangoStale {
-		m.State, m.Note = MangoStale, "stale"
-		return m
-	}
-	m.State, m.Note = MangoFresh, "fresh"
+	m.State, m.Note = mangoFreshness(gen, now)
 	return m
+}
+
+// mangoFreshness names a panel the reader could use by its generation time: fresh
+// until it is mangoStale old, stale after. The hub stamps its snapshots by this
+// same rule, so the badge a page draws cannot disagree with the age beside it.
+func mangoFreshness(gen, now time.Time) (state, note string) {
+	if now.Sub(gen) > mangoStale {
+		return MangoStale, "stale"
+	}
+	return MangoFresh, "fresh"
 }
 
 // mangoTargets builds the page's rows and verdict counts from the panel's, each

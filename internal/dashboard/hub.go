@@ -312,6 +312,7 @@ func (h *Hub) stateLocked() State {
 	st.Viewers = len(h.subs)
 	st.Polecats = h.polecatsLocked(st.Now)
 	st.Reads = h.readsLocked(st.Now)
+	st.Mango = mangoAt(st.Mango, st.Now)
 	st.Strip = stripAlarms(&st)
 	return st
 }
@@ -506,16 +507,32 @@ func (h *Hub) pollCloud() {
 
 // pollMango holds the town-metrics panel the reader read. The reader names every
 // state it cannot read, so the panel is replaced on each poll, missing and error
-// included.
+// included. A reader that hands back nothing named no state at all, so the hub
+// names it here: keeping the previous panel would pass an old analysis off as
+// the one just read (gt-1wz1k).
 func (h *Hub) pollMango() {
 	m := h.cfg.Mango()
 	if m == nil {
-		return
+		m = &Mango{At: h.cfg.Now(), State: MangoError, Note: mangoNoPanelRead, Targets: []MangoTarget{}}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Mango = m
 	h.publishLocked()
+}
+
+// mangoAt stamps the panel with the freshness its generation time earns at now.
+// Freshness is a fact about the clock rather than the poll, so a page open across
+// the stale mark sees the panel turn old without waiting for the next read. A
+// panel the reader could not use keeps the state its read named: there is no
+// generation time to judge (gt-1wz1k).
+func mangoAt(m *Mango, now time.Time) *Mango {
+	if m == nil || m.GeneratedAt == nil || (m.State != MangoFresh && m.State != MangoStale) {
+		return m
+	}
+	out := *m
+	out.State, out.Note = mangoFreshness(*m.GeneratedAt, now)
+	return &out
 }
 
 func (h *Hub) pollOM() {
