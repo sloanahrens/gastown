@@ -44,6 +44,7 @@ func sessionBackendForAgentWith(resolve backendResolver, ts *config.TownSettings
 				CPU:              cp.CPU,
 				Memory:           cp.Memory,
 				ControlPlaneHost: cp.ControlPlaneHost,
+				ForgejoHost:      cp.ForgejoHost,
 				CacheVolume:      cp.CacheVolume,
 				Driver:           cp.Driver,
 			}

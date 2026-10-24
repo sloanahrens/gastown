@@ -713,13 +713,13 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		SessionName: sessionID,
 	}
 	if b := opts.Backend; b != nil && b.Name() != session.BackendTmux {
-		cp, ok := b.(controlPlaneHoster)
+		fh, ok := b.(forgejoHoster)
 		if !ok {
-			return fmt.Errorf("preparing %s session for %s: the backend names no control-plane host to clone from", b.Name(), polecat)
+			return fmt.Errorf("preparing %s session for %s: the backend names no forgejo host to clone from", b.Name(), polecat)
 		}
 		// A separate error: the deferred cleanup below reads the named
 		// result, which this block must not shadow.
-		repoURL, repoErr := m.sandboxRepoURL(cp, townRoot, polecat, polecatGitBranch)
+		repoURL, repoErr := m.sandboxRepoURL(fh, townRoot, polecat, polecatGitBranch)
 		if repoErr != nil {
 			return fmt.Errorf("preparing %s session for %s: %w", b.Name(), polecat, repoErr)
 		}

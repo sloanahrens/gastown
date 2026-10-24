@@ -17,7 +17,7 @@ func TestSessionBackendForAgentFollowsTheSeat(t *testing.T) {
 		"claude-haiku":           {Cap: 1},
 		"deepseek-flash-sandbox": {Cap: 1, Backend: config.BackendOpenShell, Sandbox: "polecat-default"},
 	}}
-	ts.Sandboxes = map[string]config.SandboxProfile{"polecat-default": {Image: "gastown-polecat:dev", Policy: "deploy/polecat/policy.yaml", Providers: []string{"deepseek"}}}
+	ts.Sandboxes = map[string]config.SandboxProfile{"polecat-default": {Image: "gastown-polecat:dev", Policy: "deploy/polecat/policy.yaml", Providers: []string{"deepseek"}, ForgejoHost: "forgejo.internal"}}
 	town := t.TempDir()
 
 	b, err := sessionBackendForAgent(ts, town, "claude-haiku", host)
@@ -48,7 +48,7 @@ func TestSessionBackendForAgentFollowsTheSeat(t *testing.T) {
 	if _, err := sessionBackendForAgentWith(resolve, ts, town, "deepseek-flash-sandbox", host); err != nil {
 		t.Fatal(err)
 	}
-	if got.Name != "polecat-default" || got.Image != "gastown-polecat:dev" || got.Gateway != "openshell" || got.ControlPlaneHost != "host.docker.internal" || strings.Join(got.Providers, ",") != "deepseek" {
+	if got.Name != "polecat-default" || got.Image != "gastown-polecat:dev" || got.Gateway != "openshell" || got.ControlPlaneHost != "host.docker.internal" || got.ForgejoHost != "forgejo.internal" || strings.Join(got.Providers, ",") != "deepseek" {
 		t.Fatalf("profile handed to the backend = %+v", got)
 	}
 	if got.Driver != config.SandboxDriverDocker {

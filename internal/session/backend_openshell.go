@@ -618,9 +618,16 @@ func (b *openshellBackend) agentEnv(spec SpawnSpec, workDir string) map[string]s
 	return env
 }
 
-// ControlPlaneHost is the host a sandbox reaches Dolt and Forgejo at; the
-// session start derives the sandbox clone URL from it.
-func (b *openshellBackend) ControlPlaneHost() string { return b.controlPlaneHost() }
+// ForgejoHost is the host a sandbox reaches Forgejo at; the session start
+// derives the sandbox clone URL from it. A profile that names no forgejo_host
+// falls back to the control-plane host, so existing configs clone from where
+// they always did.
+func (b *openshellBackend) ForgejoHost() string {
+	if b.profile.ForgejoHost != "" {
+		return b.profile.ForgejoHost
+	}
+	return b.controlPlaneHost()
+}
 
 func (b *openshellBackend) controlPlaneHost() string {
 	if b.profile.ControlPlaneHost != "" {

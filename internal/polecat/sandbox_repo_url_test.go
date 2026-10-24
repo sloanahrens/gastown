@@ -98,16 +98,16 @@ func TestSandboxRepoURLRejectsUserinfoInTheParseError(t *testing.T) {
 // recordingSandboxBackend is a non-tmux backend that records the SpawnSpec
 // Prepare receives and then fails, so a session start stops there.
 type recordingSandboxBackend struct {
-	host    string
+	forgejo string
 	got     *session.SpawnSpec
 	stopErr error
 }
 
 var _ session.Backend = (*recordingSandboxBackend)(nil)
 
-func (b *recordingSandboxBackend) Name() string             { return session.BackendOpenShell }
-func (b *recordingSandboxBackend) Tmux() *tmux.Tmux         { return nil }
-func (b *recordingSandboxBackend) ControlPlaneHost() string { return b.host }
+func (b *recordingSandboxBackend) Name() string        { return session.BackendOpenShell }
+func (b *recordingSandboxBackend) Tmux() *tmux.Tmux    { return nil }
+func (b *recordingSandboxBackend) ForgejoHost() string { return b.forgejo }
 func (b *recordingSandboxBackend) Prepare(_ context.Context, spec session.SpawnSpec) (*session.Prepared, error) {
 	b.got = &spec
 	return nil, b.stopErr
@@ -121,8 +121,14 @@ func (b *recordingSandboxBackend) Delete(string) error { return nil }
 
 // launchOnSandbox starts Toast on a recording sandbox backend in a town whose
 // gastown rig has the given Forgejo remote, and returns the backend and the
-// launch error.
+// launch error. The backend answers host.docker.internal for Forgejo.
 func launchOnSandbox(t *testing.T, remote string) (*recordingSandboxBackend, error) {
+	t.Helper()
+	return launchOnSandboxAt(t, remote, "host.docker.internal")
+}
+
+// launchOnSandboxAt is launchOnSandbox with the backend's Forgejo host named.
+func launchOnSandboxAt(t *testing.T, remote, forgejoHost string) (*recordingSandboxBackend, error) {
 	t.Helper()
 	town := t.TempDir()
 	rigPath := filepath.Join(town, "gastown")
@@ -136,7 +142,7 @@ func launchOnSandbox(t *testing.T, remote string) (*recordingSandboxBackend, err
 	}
 	workDir, _, w := setupSessionBranchTestRepo(t)
 	m := &SessionManager{tmux: newFakeSessionTmux(), rig: &rig.Rig{Name: "gastown", Path: rigPath}, gits: w.opener()}
-	b := &recordingSandboxBackend{host: "host.docker.internal", stopErr: errors.New("stop after prepare")}
+	b := &recordingSandboxBackend{forgejo: forgejoHost, stopErr: errors.New("stop after prepare")}
 	err := m.launch("Toast", m.SessionName("Toast"), SessionStartOptions{
 		WorkDir:          workDir,
 		Backend:          b,
@@ -161,6 +167,22 @@ func TestLaunchGivesSandboxPrepareTheRigsCloneURL(t *testing.T) {
 	}
 	if !strings.Contains(b.got.Branch, "polecat/") {
 		t.Errorf("SpawnSpec.Branch = %q, want the session branch", b.got.Branch)
+	}
+}
+
+// The clone URL follows the backend's Forgejo host, so a profile that names a
+// separate forgejo_host clones from it (gt-k42fg).
+func TestLaunchClonesFromTheBackendsForgejoHost(t *testing.T) {
+	t.Parallel()
+	b, err := launchOnSandboxAt(t, "http://forgejo:3000/sloan/gastown.git", "forgejo.internal")
+	if err == nil || !strings.Contains(err.Error(), "stop after prepare") {
+		t.Fatalf("launch = %v, want the backend's stop error", err)
+	}
+	if b.got == nil {
+		t.Fatal("Prepare was never called")
+	}
+	if want := "http://forgejo.internal:3000/sloan/gastown.git"; b.got.RepoURL != want {
+		t.Errorf("SpawnSpec.RepoURL = %q, want %q", b.got.RepoURL, want)
 	}
 }
 

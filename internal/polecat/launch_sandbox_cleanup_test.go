@@ -28,7 +28,7 @@ var _ session.Backend = (*preparingBackend)(nil)
 func (b *preparingBackend) Name() string                       { return session.BackendOpenShell }
 func (b *preparingBackend) Tmux() *tmux.Tmux                   { return nil }
 func (b *preparingBackend) SessionExists(string) (bool, error) { return false, nil }
-func (b *preparingBackend) ControlPlaneHost() string           { return "host.docker.internal" }
+func (b *preparingBackend) ForgejoHost() string                { return "host.docker.internal" }
 func (b *preparingBackend) ProgressSample(string, liveness.Input) liveness.Result {
 	return liveness.Result{}
 }
