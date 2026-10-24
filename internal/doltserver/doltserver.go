@@ -2655,23 +2655,37 @@ const (
 
 // databaseDirState classifies <dataDir>/<name>. A phantom/corrupted .dolt/ dir
 // (e.g., from DROP + catalog re-materialization) has .dolt/ but no
-// noms/manifest.
-func databaseDirState(dataDir, name string) dbDirKind {
+// noms/manifest. Only a missing path reads as absent or phantom; any other stat
+// error is returned instead of being filed under either verdict.
+func databaseDirState(dataDir, name string) (dbDirKind, error) {
 	doltDir := filepath.Join(dataDir, name, ".dolt")
 	if _, err := os.Stat(doltDir); err != nil {
-		return dbDirAbsent
+		if os.IsNotExist(err) {
+			return dbDirAbsent, nil
+		}
+		return dbDirAbsent, fmt.Errorf("stat %s: %w", doltDir, err)
 	}
-	if _, err := os.Stat(filepath.Join(doltDir, "noms", "manifest")); err != nil {
-		return dbDirPhantom
+	manifest := filepath.Join(doltDir, "noms", "manifest")
+	if _, err := os.Stat(manifest); err != nil {
+		if os.IsNotExist(err) {
+			return dbDirPhantom, nil
+		}
+		return dbDirPhantom, fmt.Errorf("stat %s: %w", manifest, err)
 	}
-	return dbDirValid
+	return dbDirValid, nil
 }
 
 // DataDirHasDatabase reports whether dataDir holds a loadable Dolt database
 // named name: the rule listDatabasesLocal applies to every entry, so a phantom
-// directory named after the database does not count.
+// directory named after the database does not count. A directory it cannot
+// stat counts as holding the database, because an unreadable path is not
+// evidence of absence.
 func DataDirHasDatabase(dataDir, name string) bool {
-	return databaseDirState(dataDir, name) == dbDirValid
+	kind, err := databaseDirState(dataDir, name)
+	if err != nil {
+		return true
+	}
+	return kind == dbDirValid
 }
 
 // listDatabasesLocal scans the filesystem for valid Dolt database directories.
@@ -2689,7 +2703,11 @@ func listDatabasesLocal(config *Config) ([]string, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		switch databaseDirState(config.DataDir, entry.Name()) {
+		kind, err := databaseDirState(config.DataDir, entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		switch kind {
 		case dbDirAbsent:
 			continue
 		case dbDirPhantom:

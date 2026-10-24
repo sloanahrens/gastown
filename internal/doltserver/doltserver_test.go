@@ -6157,3 +6157,36 @@ func TestDataDirHasDatabase(t *testing.T) {
 		t.Errorf("listDatabasesLocal = %v, %v; want [valid]", dbs, err)
 	}
 }
+
+// TestDatabaseDirStateSurfacesStatErrors pins that a stat failure which is not
+// "not exist" (a path component that is a file yields ENOTDIR) comes back as an
+// error rather than as an absent or phantom database.
+func TestDatabaseDirStateSurfacesStatErrors(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	// stat(<file>/.dolt) fails with ENOTDIR, not ENOENT.
+	if err := os.WriteFile(filepath.Join(dataDir, "notadir"), []byte("m"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// stat(.dolt/noms/manifest) fails with ENOTDIR when noms is a file.
+	if err := os.MkdirAll(filepath.Join(dataDir, "borked", ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "borked", ".dolt", "noms"), []byte("m"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"notadir", "borked"} {
+		if _, err := databaseDirState(dataDir, name); err == nil {
+			t.Errorf("databaseDirState(%q) error = nil, want the stat error surfaced", name)
+		}
+		if !DataDirHasDatabase(dataDir, name) {
+			t.Errorf("DataDirHasDatabase(%q) = false, want true for an unreadable path", name)
+		}
+	}
+
+	// One unreadable entry fails the listing instead of being dropped silently.
+	if _, err := listDatabasesLocal(&Config{DataDir: dataDir}); err == nil {
+		t.Error("listDatabasesLocal error = nil, want the unreadable entry reported")
+	}
+}
