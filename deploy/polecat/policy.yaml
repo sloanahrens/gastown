@@ -36,6 +36,8 @@ filesystem_policy:
     # ("Missing DB manager") when the read is denied; read only (gt-vhkxd).
     - /sys/fs/cgroup
     - /dev/urandom
+    # head -c N /dev/zero and dd if=/dev/zero fail with permission denied without it (gt-8yigq).
+    - /dev/zero
   read_write:
     - /tmp
     - /dev/null
