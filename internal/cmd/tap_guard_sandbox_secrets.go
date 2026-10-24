@@ -205,6 +205,18 @@ func sandboxSecretsHeredocFedToShell(command string, span heredocSpan) bool {
 	return false
 }
 
+// sandboxSecretsHeredocFedToSource reports whether source or . in the heredoc's own
+// pipeline runs its body: "source /dev/stdin <<EOF". A shell reads the body as a script
+// there, so the guard judges it as one.
+func sandboxSecretsHeredocFedToSource(command string, span heredocSpan) bool {
+	for _, argv := range sandboxSecretsHeredocPipeline(command, span) {
+		if name := strings.ToLower(filepath.Base(argv[0])); name == "source" || name == "." {
+			return true
+		}
+	}
+	return false
+}
+
 // sandboxSecretsHeredocInterpreter returns the script interpreter in the heredoc's
 // own pipeline that runs its body: "python3 <<EOF", "uv run python3 <<EOF", or
 // "cat <<EOF | node". It is "" when no interpreter runs the body, which includes an
@@ -385,6 +397,10 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 		case name == "source" || name == ".":
 			// source and . run the file they name as a script, so a substitution's output is one, as sh <(...) is.
 			shells = true
+			if fed != "" {
+				// A pipe into source reads its script from /dev/stdin, as a pipe into a shell does.
+				payloads = append(payloads, fed)
+			}
 		}
 	}
 	if sandboxSecretsHeredocRefsSecret(command) {
@@ -393,6 +409,10 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	// A body an interpreter runs is code whatever its tag: the quotes only keep
 	// the shell from expanding it. So it gets the one-liner rules, as a -c string would.
 	for _, span := range scanHeredocs(command) {
+		if span.bodyStart >= 0 && sandboxSecretsHeredocFedToSource(command, span) {
+			// source /dev/stdin <<EOF runs the body as a script, so it is judged as shell text.
+			payloads = append(payloads, span.body)
+		}
 		interpreter := sandboxSecretsHeredocInterpreter(command, span)
 		if span.bodyStart < 0 || interpreter == "" {
 			continue
