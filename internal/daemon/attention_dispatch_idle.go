@@ -34,6 +34,10 @@ const (
 	attentionDispatchIdleGapIntervals = 5
 	// attentionDispatchIdleReasons is how many skip reasons the summary names.
 	attentionDispatchIdleReasons = 3
+	// attentionDispatchIdleKept bounds the tick observations the tracker keeps:
+	// a background sling amends the tick that planned it, which can be several
+	// ticks back (gt-pk2q8).
+	attentionDispatchIdleKept = 64
 )
 
 // dispatchIdleKey is the one item the rule raises.
@@ -65,15 +69,54 @@ type dispatchIdleReason struct {
 	Beads  int
 }
 
-// dispatchIdleTracker counts idle ticks. The ticker goroutine feeds it and
-// the heartbeat reads it.
+// dispatchIdleObservation is one tick as the rule judged it, kept so that the
+// outcome of a sling the tick handed to the background can amend the verdict
+// (gt-pk2q8).
+type dispatchIdleObservation struct {
+	at      time.Time
+	report  specDispatchTickReport
+	idle    bool
+	roster  string
+	waiting int
+	reasons []dispatchIdleReason
+}
+
+// judge reads the observation's verdict out of its report, which is the input
+// an amendment re-reads.
+func (o *dispatchIdleObservation) judge() {
+	o.idle, o.roster, o.waiting, o.reasons = false, "", 0, nil
+	if o.report.Hold != "" || len(o.report.Dispatched) > 0 || !rosterHasFreeSeat(o.report.Roster) {
+		return
+	}
+	waiting, reasons := dispatchableWaiting(o.report)
+	if waiting == 0 {
+		return
+	}
+	o.idle, o.roster, o.waiting, o.reasons = true, o.report.Roster, waiting, reasons
+}
+
+// dispatchIdleTracker counts idle ticks. The ticker goroutine feeds it, a
+// finished background sling amends the tick it was planned by, and the
+// heartbeat reads it.
 type dispatchIdleTracker struct {
 	mu sync.Mutex
 	// interval is the ticker's cadence, set where the ticker starts. The
 	// consecutive-tick gap scales with it, so a ticker slower than the default
 	// still has consecutive ticks (gt-icmdq).
 	interval time.Duration
-	st       dispatchIdleStatus
+	// observations are the newest ticks, oldest first. base is the idle run
+	// ending at the newest observation the trim dropped, and droppedAt is when
+	// that one ticked, so a streak outlives the kept window and the gap rule
+	// still sees across its edge (gt-pk2q8).
+	observations []dispatchIdleObservation
+	base         int
+	droppedAt    time.Time
+	// lastAt is when the newest tick was observed. Reset keeps it: the
+	// freshness check reads when the ticker last ran, not the idle run.
+	lastAt time.Time
+	// st is the run ending at the newest observation, recomputed when a tick,
+	// a sling outcome or a reset changes the observations (gt-pk2q8).
+	st dispatchIdleStatus
 }
 
 // setInterval records the cadence the ticker runs at, before its first tick.
@@ -81,6 +124,7 @@ func (t *dispatchIdleTracker) setInterval(d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.interval = d
+	t.recompute()
 }
 
 // gap is how long the ticker may be quiet between two ticks and still have them
@@ -107,40 +151,131 @@ func (t *dispatchIdleTracker) fresh() time.Duration {
 	return attentionDispatchIdleFresh
 }
 
-// Observe folds one tick report into the streak. A tick is idle when the
-// roster shows a free seat, a dispatchable bead waited and nothing was
-// dispatched. Any other tick ends the streak: a held tick decided nothing on
-// purpose, and a roster that cannot be read could be hiding a full town. A tick
-// arriving more than gap after the last one ends it too: the ticker was parked,
-// failing or behind in between, and the idle ticks either side of that gap are
-// not consecutive (gt-icmdq).
+// Observe records one tick. A tick is idle when the roster shows a free seat, a
+// dispatchable bead waited and nothing was dispatched. A held tick decided
+// nothing on purpose, and a roster that cannot be read could be hiding a full
+// town, so neither counts. A tick arriving more than gap after the last one
+// does not extend that run: the ticker was parked, failing or behind in between
+// (gt-icmdq). A tick that handed its slings to the background judges as
+// dispatched until each sling returns and resolveSling amends it (gt-pk2q8).
 func (t *dispatchIdleTracker) Observe(r specDispatchTickReport, at time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if !t.st.At.IsZero() && at.Sub(t.st.At) > t.gap() {
-		t.st.Streak = 0
+	o := dispatchIdleObservation{at: at, report: r}
+	o.judge()
+	t.observations = append(t.observations, o)
+	t.lastAt = at
+	t.trim()
+	t.recompute()
+}
+
+// trim keeps the newest attentionDispatchIdleKept observations, carrying the
+// idle run past the dropped edge in base. The caller holds t.mu.
+func (t *dispatchIdleTracker) trim() {
+	for len(t.observations) > attentionDispatchIdleKept {
+		t.base = t.runEndingAt(0)
+		t.droppedAt = t.observations[0].at
+		t.observations = t.observations[1:]
 	}
-	t.st.At = at
-	if r.Hold != "" || len(r.Dispatched) > 0 || !rosterHasFreeSeat(r.Roster) {
-		t.st.Streak = 0
+}
+
+// recompute reads the run ending at the newest observation into st. The caller
+// holds t.mu.
+func (t *dispatchIdleTracker) recompute() {
+	st := dispatchIdleStatus{At: t.lastAt}
+	if n := len(t.observations); n > 0 {
+		st.Streak = t.runEndingAt(n - 1)
+		if st.Streak > 0 {
+			newest := t.observations[n-1]
+			st.Roster, st.Waiting = newest.roster, newest.waiting
+			st.Reasons = append([]dispatchIdleReason(nil), newest.reasons...)
+		}
+	}
+	t.st = st
+}
+
+// resolveSling folds a background sling's outcome into the tick that planned
+// it: the bead the tick counted as dispatched leaves that count, and a sling
+// that deferred, failed or never started joins the tick's waiting work. A tick
+// whose every sling came back without starting is the idle tick the rule
+// watches for (gt-pk2q8). A stale observation, already amended or trimmed,
+// changes nothing.
+func (t *dispatchIdleTracker) resolveSling(seq uint64, bead string, entry specDispatchTickEntry, result specSlingResult) {
+	if result == specSlingStarted || seq == 0 {
 		return
 	}
-	waiting, reasons := dispatchableWaiting(r)
-	if waiting == 0 {
-		t.st.Streak = 0
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := len(t.observations) - 1; i >= 0; i-- {
+		o := &t.observations[i]
+		if o.report.seq != seq {
+			continue
+		}
+		if !removeDispatchedBead(&o.report, bead) {
+			return
+		}
+		if result == specSlingLost {
+			o.report.Failed = append(o.report.Failed, entry)
+		} else {
+			o.report.Skipped = append(o.report.Skipped, entry)
+		}
+		o.judge()
+		t.recompute()
 		return
 	}
-	t.st.Streak++
-	t.st.Roster, t.st.Waiting, t.st.Reasons = r.Roster, waiting, reasons
+}
+
+// removeDispatchedBead takes one bead out of a report's dispatched list and
+// reports whether it was there: the named bead, or one of them when the job
+// named no bead (gt-pk2q8).
+func removeDispatchedBead(r *specDispatchTickReport, bead string) bool {
+	for i, e := range r.Dispatched {
+		if bead != "" && e.Bead != bead {
+			continue
+		}
+		r.Dispatched = append(r.Dispatched[:i], r.Dispatched[i+1:]...)
+		return true
+	}
+	return false
+}
+
+// runEndingAt is the idle run ending at observation i: the idle observations
+// back to the last one that was not, extended by base when the run reaches the
+// oldest kept. A tick more than gap after the one before it starts a new run
+// rather than extending the old (gt-icmdq). The caller holds t.mu.
+func (t *dispatchIdleTracker) runEndingAt(i int) int {
+	run := 0
+	for ; i >= 0; i-- {
+		o := t.observations[i]
+		if !o.idle {
+			return run
+		}
+		run++
+		prev := t.droppedAt
+		if i > 0 {
+			prev = t.observations[i-1].at
+		}
+		if !prev.IsZero() && o.at.Sub(prev) > t.gap() {
+			return run
+		}
+		if i == 0 {
+			return run + t.base
+		}
+	}
+	return run
 }
 
 // Reset ends the streak: the ticker did not tick, so the run of idle ticks
-// ending at the last observation is over (gt-icmdq). The recorded tick keeps
-// its time, which is what the freshness check reads.
+// ending at the last observation is over (gt-icmdq). A barrier observation
+// ends the run without dropping the ticks before it, which a sling still out
+// may yet amend (gt-pk2q8). The newest tick's time stays, which is what the
+// freshness check reads.
 func (t *dispatchIdleTracker) Reset() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.st.Streak = 0
+	t.observations = append(t.observations, dispatchIdleObservation{at: t.lastAt})
+	t.trim()
+	t.recompute()
 }
 
 // Status returns the tracker's current reading, with the freshness bound its
@@ -206,6 +341,10 @@ func dispatchableWaiting(r specDispatchTickReport) (int, []dispatchIdleReason) {
 // session start ends by itself, so the bead waits on the dispatcher and the
 // rule should name the failure rather than stay quiet.
 var notDispatchableReasons = []string{
+	// specSlingNotStartedReason is the daemon's own: a planned bead it did not
+	// start because a sling for it already runs or an upgrade restart is
+	// pending waits on neither the dispatcher nor a person (gt-pk2q8).
+	specSlingNotStartedReason,
 	specdispatch.SkipUnshaped,
 	specdispatch.SkipNotEligible,
 	specdispatch.SkipUnknownFormula,

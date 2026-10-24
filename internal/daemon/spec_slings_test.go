@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
 // Background slings (gt-5h70s): a tick plans and returns, its slings run on in
@@ -20,9 +21,20 @@ func slingJob(bead, agent string) string {
 	return `{"bead":"` + bead + `","rig":"gastown","agent":"` + agent + `","paths":["internal/x.go"],"run":{"Formula":"","Vars":null,"Actor":""}}`
 }
 
-// plannedTick is the report of a tick that planned the jobs.
+// plannedTick is the report of a tick that planned the jobs: each is in the
+// tick's dispatched list, as the hand-off writes it, and in the pending jobs
+// the daemon runs.
 func plannedTick(jobs ...string) string {
-	return `{"candidates": 2, "pending": [` + strings.Join(jobs, ",") + `]}`
+	var dispatched []string
+	for _, job := range jobs {
+		var f specSlingFlight
+		if err := json.Unmarshal([]byte(job), &f); err != nil {
+			continue
+		}
+		e, _ := json.Marshal(specDispatchTickEntry{Bead: f.Bead, Rig: f.Rig, Line: f.Bead + ": sling started in the background"})
+		dispatched = append(dispatched, string(e))
+	}
+	return `{"candidates": 2, "dispatched": [` + strings.Join(dispatched, ",") + `], "pending": [` + strings.Join(jobs, ",") + `]}`
 }
 
 // slingWait bounds every wait of these tests on a sling: a sling that never
@@ -172,6 +184,19 @@ func TestARunningBeadIsNeverSlungTwice(t *testing.T) {
 	}
 	close(b.release)
 	waitSlings(t, d)
+
+	// The second tick handed over a bead it never dispatched, so its record
+	// must count the duplicate skipped (gt-pk2q8).
+	recs := d.dispatchTickRecords()
+	if len(recs) != 2 {
+		t.Fatalf("tick records = %+v, want two", recs)
+	}
+	if recs[0].Dispatched != 1 {
+		t.Errorf("first tick = %+v, want its started sling counted dispatched", recs[0])
+	}
+	if recs[1].Dispatched != 0 || recs[1].Skipped != 1 {
+		t.Errorf("second tick = %+v, want the duplicate counted skipped", recs[1])
+	}
 }
 
 // The tick is told when each running sling started, so the min_spawn_gap
@@ -319,6 +344,153 @@ func TestAFailedFailureWriteIsLoggedNotFatal(t *testing.T) {
 	}
 }
 
+// backgroundTick is the report of a tick that planned one background sling for
+// gt-a: the bead is both in its dispatched list, as the tick hands off, and in
+// the pending jobs the daemon runs.
+func backgroundTick() string {
+	return `{"roster":"claude-sonnet 0/2","candidates":1,
+		"dispatched":[{"bead":"gt-a","rig":"gastown","line":"gt-a: sling to gastown/p started in the background"}],
+		"pending":[` + slingJob("gt-a", "claude-sonnet") + `]}`
+}
+
+// staticDispatch answers townhealth with a record as the daemon holds it.
+type staticDispatch struct{ rec townhealth.DispatchRecord }
+
+func (s staticDispatch) Dispatch() (townhealth.DispatchRecord, error) { return s.rec, nil }
+
+// dispatchVerdict is townhealth's dispatch field for rec.
+func dispatchVerdict(t *testing.T, now time.Time, rec townhealth.DispatchRecord) townhealth.Field {
+	t.Helper()
+	rep := townhealth.Compute(context.Background(), townhealth.Inputs{Now: now, Dispatch: staticDispatch{rec: rec}})
+	for _, f := range rep.Fields {
+		if f.Name == townhealth.FieldDispatch {
+			return f
+		}
+	}
+	t.Fatalf("the report carries no %s field: %+v", townhealth.FieldDispatch, rep.Fields)
+	return townhealth.Field{}
+}
+
+// gt-pk2q8: a background sling that comes back deferred or failed started
+// nothing, so the tick that planned it must not keep counting it as a
+// dispatch. Every tick then reads as a tick that started nothing: the idle run
+// counts toward its alarm and the dispatch field stops reading ok, where the
+// hand-off alone left both green.
+func TestRunSpecSlingDeferralFeedsHealth(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		sling string
+	}{
+		{"deferred", `{"deferred":[{"bead":"gt-a","line":"gt-a: sling deferred, the sandbox image lags the installed gt: image drift"}]}`},
+		{"failed", `{"failed":[{"bead":"gt-a","line":"gt-a: dispatch failed, left unassigned: boom; excluded from the queue until label spec-dispatch-failed is cleared"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clock := newSlingClock()
+			fake := newFakeCLI(func(args []string) cliReply {
+				if len(args) > 1 && args[1] == "sling" {
+					return cliReply{stdout: string(wireOut(tc.sling))}
+				}
+				return cliReply{stdout: string(wireOut(backgroundTick()))}
+			})
+			logger, lines := lineLogger()
+			d := specDispatchFake(t, fake, logger)
+			d.clock = clock
+
+			for i := 0; i < attentionDispatchIdleTicks; i++ {
+				d.runSpecDispatch()
+				waitSlings(t, d)
+				clock.Advance(time.Minute)
+			}
+
+			if got := d.dispatchIdle.Status().Streak; got != attentionDispatchIdleTicks {
+				t.Errorf("idle streak = %d after %d ticks whose slings never started, want %d: %v",
+					got, attentionDispatchIdleTicks, attentionDispatchIdleTicks, lines())
+			}
+			for i, rec := range d.dispatchTickRecords() {
+				if rec.Dispatched != 0 || rec.Failed != 1 {
+					t.Errorf("tick %d = %+v, want the lost sling counted failed rather than dispatched", i, rec)
+				}
+			}
+			f := dispatchVerdict(t, clock.Now(), townhealth.DispatchRecord{Active: true, Ticks: d.dispatchTickRecords()})
+			if f.Verdict != townhealth.Red || f.Value != "stalled" {
+				t.Errorf("dispatch field = %+v, want the stalled reading after %d ticks that started nothing", f, attentionDispatchIdleTicks)
+			}
+		})
+	}
+}
+
+// gt-pk2q8: a sling that exits without a readable report or without naming a
+// decision cannot show its bead hooked, so the tick that planned it counts the
+// sling lost rather than dispatched. Counting it dispatched is the fail-open
+// reading that lets every other sling in the same state hide behind it.
+func TestRunSpecSlingWithoutAReadableOutcomeFeedsHealth(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		sling cliReply
+	}{
+		{"unreadable output", cliReply{stdout: "not a report\n"}},
+		{"no decision named", cliReply{stdout: string(wireOut(`{}`))}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clock := newSlingClock()
+			fake := newFakeCLI(func(args []string) cliReply {
+				if len(args) > 1 && args[1] == "sling" {
+					return tc.sling
+				}
+				return cliReply{stdout: string(wireOut(backgroundTick()))}
+			})
+			logger, lines := lineLogger()
+			d := specDispatchFake(t, fake, logger)
+			d.clock = clock
+
+			d.runSpecDispatch()
+			waitSlings(t, d)
+
+			tick := d.dispatchTickRecords()
+			if len(tick) != 1 {
+				t.Fatalf("tick records = %+v, want one", tick)
+			}
+			if tick[0].Dispatched != 0 || tick[0].Failed != 1 {
+				t.Errorf("tick = %+v, want the sling counted failed rather than dispatched: %v", tick[0], lines())
+			}
+			if got := d.dispatchIdle.Status().Streak; got != 1 {
+				t.Errorf("idle streak = %d, want the tick counted idle: %v", got, lines())
+			}
+		})
+	}
+}
+
+// gt-pk2q8: a pending job the daemon cannot read names no bead, so it starts
+// nothing; the tick that counted it dispatched must not keep it.
+func TestAnUnreadableSlingJobIsCountedNotStarted(t *testing.T) {
+	t.Parallel()
+	clock := newSlingClock()
+	const tick = `{"roster":"claude-sonnet 0/2","candidates":1,
+		"dispatched":[{"bead":"gt-a","rig":"gastown","line":"gt-a: sling to gastown/p started in the background"}],
+		"pending":[{"rig":"gastown"}]}`
+	fake := newFakeCLI(func([]string) cliReply { return cliReply{stdout: string(wireOut(tick))} })
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	d.clock = clock
+
+	d.runSpecDispatch()
+
+	rec := d.dispatchTickRecords()
+	if len(rec) != 1 {
+		t.Fatalf("tick records = %+v, want one", rec)
+	}
+	if rec[0].Dispatched != 0 || rec[0].Skipped != 1 {
+		t.Errorf("tick = %+v, want the unreadable job counted skipped rather than dispatched: %v", rec[0], lines())
+	}
+	if got := d.dispatchIdle.Status().Streak; got != 1 {
+		t.Errorf("idle streak = %d, want the tick counted idle: %v", got, lines())
+	}
+}
+
 // A running sling holds the restart; so does a patrol scan in flight with it.
 // The scan's hold must not be masked by the sling's, whose own bound is the
 // sling case's, not the housekeeping cap's.
@@ -337,8 +509,11 @@ func TestDaemonWorkHoldNamesOtherSoftWorkAheadOfARunningSling(t *testing.T) {
 
 func TestNoSlingStartsWhileAnUpgradeRestartIsPending(t *testing.T) {
 	t.Parallel()
+	const tick = `{"roster":"claude-sonnet 0/2","candidates":1,
+		"dispatched":[{"bead":"gt-a","rig":"gastown","line":"gt-a: sling to gastown/p started in the background"}],
+		"pending":[` + `{"bead":"gt-a","rig":"gastown","agent":"claude-sonnet","paths":["internal/x.go"]}` + `]}`
 	fake := newFakeCLI(func([]string) cliReply {
-		return cliReply{stdout: string(wireOut(plannedTick(slingJob("gt-a", "claude-sonnet"))))}
+		return cliReply{stdout: string(wireOut(tick))}
 	})
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
@@ -352,6 +527,18 @@ func TestNoSlingStartsWhileAnUpgradeRestartIsPending(t *testing.T) {
 	}
 	if n := countContaining(lines(), "gt-a: sling not started: an upgrade restart is pending"); n != 1 {
 		t.Errorf("lines = %v, want the held sling named", lines())
+	}
+	// The tick counted the job dispatched when it handed it over; a job that
+	// never ran is the tick's skipped work, not its dispatch (gt-pk2q8).
+	for i, rec := range d.dispatchTickRecords() {
+		if rec.Dispatched != 0 || rec.Skipped != 1 {
+			t.Errorf("tick %d = %+v, want the unstarted job counted skipped", i, rec)
+		}
+	}
+	// The bead waits for the restart, not on the dispatcher, so the tick is
+	// not an idle tick that the attention rule should count (gt-pk2q8).
+	if got := d.dispatchIdle.Status().Streak; got != 0 {
+		t.Errorf("idle streak = %d for a tick held by an upgrade restart, want 0: %v", got, lines())
 	}
 }
 

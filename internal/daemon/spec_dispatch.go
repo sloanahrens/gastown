@@ -157,6 +157,10 @@ type specDispatchTickReport struct {
 	BoardNs      time.Duration `json:"board_ns,omitempty"`
 	CandidatesNs time.Duration `json:"candidates_ns,omitempty"`
 	SlingNs      time.Duration `json:"sling_ns,omitempty"`
+	// seq is the daemon's own id for the tick, set after decoding: a
+	// background sling's outcome names the tick that planned it, which the
+	// tick's own report cannot (gt-pk2q8).
+	seq uint64
 }
 
 // specDispatchTickRun is when the running tick started. It is published before
@@ -323,12 +327,14 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 		if r.Hold != "" {
 			d.dispatchIdle.Reset()
 		} else {
+			r.seq = d.dispatchTickSeq.Add(1)
 			d.dispatchIdle.Observe(r, now)
 			d.recordDispatchTick(r, now)
 			took = specDispatchTookLine(r, now.Sub(start))
 			// The tick has returned; its slings run on from here, and the next
-			// tick does not wait for them (gt-5h70s).
-			d.startSpecSlings(r.Pending)
+			// tick does not wait for them (gt-5h70s). Each sling's outcome
+			// returns to this tick's counts (gt-pk2q8).
+			d.startSpecSlings(r.Pending, r.seq)
 		}
 	} else {
 		// A report nothing can read says nothing about the town: the run of
@@ -352,6 +358,14 @@ func specDispatchTookLine(r specDispatchTickReport, took time.Duration) string {
 		r.Candidates, r.CandidatesNs.Round(time.Millisecond), r.SlingNs.Round(time.Millisecond))
 }
 
+// recordedDispatchTick is one tick as townhealth reads it, tagged with the
+// daemon's id for the tick so the outcome of a sling that tick planned in the
+// background finds the counts it was included in (gt-pk2q8).
+type recordedDispatchTick struct {
+	townhealth.DispatchTick
+	seq uint64
+}
+
 // recordDispatchTick appends one tick's decision to the history townhealth's
 // dispatch field judges, keeping the newest dispatchTickHistory records
 // (gt-xiw7o). The history is in memory: a restart drops it, and the field
@@ -373,9 +387,9 @@ func (d *Daemon) recordDispatchTick(r specDispatchTickReport, at time.Time) {
 	}
 	d.dispatchTicksMu.Lock()
 	defer d.dispatchTicksMu.Unlock()
-	d.dispatchTicks = append(d.dispatchTicks, t)
+	d.dispatchTicks = append(d.dispatchTicks, recordedDispatchTick{DispatchTick: t, seq: r.seq})
 	if n := len(d.dispatchTicks); n > dispatchTickHistory {
-		d.dispatchTicks = append([]townhealth.DispatchTick(nil), d.dispatchTicks[n-dispatchTickHistory:]...)
+		d.dispatchTicks = append([]recordedDispatchTick(nil), d.dispatchTicks[n-dispatchTickHistory:]...)
 	}
 }
 
@@ -383,7 +397,11 @@ func (d *Daemon) recordDispatchTick(r specDispatchTickReport, at time.Time) {
 func (d *Daemon) dispatchTickRecords() []townhealth.DispatchTick {
 	d.dispatchTicksMu.Lock()
 	defer d.dispatchTicksMu.Unlock()
-	return append([]townhealth.DispatchTick(nil), d.dispatchTicks...)
+	out := make([]townhealth.DispatchTick, len(d.dispatchTicks))
+	for i, t := range d.dispatchTicks {
+		out[i] = t.DispatchTick
+	}
+	return out
 }
 
 // dispatchRosterSeats reads the seats out of a tick's roster, which
