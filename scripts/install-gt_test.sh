@@ -151,6 +151,7 @@ run_install() {
       INSTALL_GT_RIG_DIR="$t/rig" INSTALL_GT_LOCK_WAIT="${LOCK_WAIT:-5}" \
       INSTALL_GT_SIGN_DIR="$t/signing" INSTALL_GT_GATEWAY_HOME="$t/home" \
       INSTALL_GT_IMAGE_RUN="${IMAGE_RUN:-$t/no-image-plugin/run.sh}" INSTALL_GT_IMAGE_LOG="$t/image.log" \
+      INSTALL_GT_IMAGE_LOCK="$t/image.lock" \
       PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
     bash "$INSTALLER" "$@" ) > "$t/run.out" 2>&1 || rc=$?
   echo "$rc"
@@ -1155,6 +1156,54 @@ rc=$( export INSTALL_GT_PERL="$T/no-such-perl"
   && [ ! -e "$T/image-calls.log" ] \
   && pass "image: no perl: one line says so, install succeeds" \
   || fail "image: no perl: rc=$rc $(tail -3 "$T/run.out")"
+
+# --- Case 42: --dry-run ends with the RESULT line the header contract promises
+# (gt-87hlc). It changes nothing, so the commit it names is the one it was
+# asked for, unresolved, and the event says so. ---
+T=$(make_world)
+rc=$(run_install "$T" --dry-run)
+[ "$rc" = "0" ] && [ "$(tail -1 "$T/run.out")" = "install-gt: RESULT dry-run origin/main - -" ] \
+  && pass "dry-run: exit 0, RESULT line last" || fail "dry-run: rc=$rc last=$(tail -1 "$T/run.out")"
+
+# --- Case 43: run.sh is handed this install's town root and gt binary, not the
+# ones HOME and PATH would resolve to (gt-87hlc). ---
+T=$(make_world); mkdir -p "$T/plugin"
+cat > "$T/plugin/run.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "$POLECAT_IMAGE_TOWN_ROOT $POLECAT_IMAGE_GT" > "$T_WORLD/image-env.txt"
+STUB
+chmod +x "$T/plugin/run.sh"
+install_stub "$T" "$(cat "$T/c1")"
+rc=$( export GT_TOWN_ROOT="$T"
+      IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
+wait_for "$T/image-env.txt" || true
+[ "$rc" = "0" ] && [ "$(cat "$T/image-env.txt" 2>/dev/null)" = "$T $T/bin/gt" ] \
+  && pass "image: run.sh gets the install's town root and gt binary" \
+  || fail "image: run.sh env: rc=$rc got='$(cat "$T/image-env.txt" 2>/dev/null)' want='$T $T/bin/gt'"
+
+# --- Case 44: the alarm stops the whole image build and then removes the lock
+# run.sh took. The stub takes that lock and starts a child standing in for the
+# docker work, then waits on it. INSTALL_GT_IMAGE_ALARM is one second, so the
+# alarm is what ends the stub; both waits below are bounded. ---
+T=$(make_world); mkdir -p "$T/plugin"
+cat > "$T/plugin/run.sh" <<'STUB'
+#!/usr/bin/env bash
+mkdir "$T_WORLD/image.lock" && echo "$$" > "$T_WORLD/image.lock/pid"
+sleep 30 &
+echo "$!" > "$T_WORLD/image-child.pid"
+wait
+STUB
+chmod +x "$T/plugin/run.sh"
+install_stub "$T" "$(cat "$T/c1")"
+rc=$( export INSTALL_GT_IMAGE_ALARM=1
+      IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
+wait_for "$T/image-child.pid" || true
+CHILD=$(cat "$T/image-child.pid" 2>/dev/null || true)
+for _ in $(seq 1 100); do [ -e "$T/image.lock" ] || break; sleep 0.1; done
+for _ in $(seq 1 50); do [ -n "$CHILD" ] && kill -0 "$CHILD" 2>/dev/null || break; sleep 0.1; done
+[ "$rc" = "0" ] && [ -n "$CHILD" ] && [ ! -e "$T/image.lock" ] && ! kill -0 "$CHILD" 2>/dev/null \
+  && pass "image: the alarm stops the build and removes the lock run.sh took" \
+  || fail "image: alarm: rc=$rc child=${CHILD:-none} lock=$([ -e "$T/image.lock" ] && echo held || echo free) out=$(tail -2 "$T/image.log" 2>/dev/null)"
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
