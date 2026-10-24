@@ -620,17 +620,32 @@ func sandboxSeatDeathsFor(townRoot string) sandboxSeatDeadFunc {
 // dead. The seat is not freed: the caller's dead-hooked read counts it as held
 // while no working session answers for it.
 func withoutDeadSandboxSeats(live []poolSession, dead sandboxSeatDeadFunc) []poolSession {
+	kept, _ := partitionDeadSandboxSeats(live, dead)
+	return kept
+}
+
+// partitionDeadSandboxSeats splits live into the sessions the patrol has not
+// recorded dead and the "rig/polecat" names of the seats it dropped. A caller
+// that carries the roster's own entries into its result needs the names too: an
+// entry the roster read live whose session has since died is the dead-hooked
+// seat the roster's dead read would list on a fresh read (gt-0axfg).
+func partitionDeadSandboxSeats(live []poolSession, dead sandboxSeatDeadFunc) ([]poolSession, map[string]bool) {
 	if dead == nil {
-		return live
+		return live, nil
 	}
-	out := live[:0:0]
+	kept := live[:0:0]
+	var deadSeats map[string]bool
 	for _, s := range live {
 		if s.rig != "" && s.polecat != "" && dead(s.name, s.rig, s.polecat) {
+			if deadSeats == nil {
+				deadSeats = make(map[string]bool)
+			}
+			deadSeats[s.rig+"/"+s.polecat] = true
 			continue
 		}
-		out = append(out, s)
+		kept = append(kept, s)
 	}
-	return out
+	return kept, deadSeats
 }
 
 // parsePolecatRole splits a session's GT_ROLE ("<rig>/polecats/<name>") into
@@ -1531,15 +1546,20 @@ func releasedSeatRecorder(disposition polecatDispositionFunc) (polecatDispositio
 //
 // The listing is read through the same dead-seat answer as the roster
 // (deadSandbox), so a seat the roster counted dead-hooked is not read back as
-// live here (gt-tj446).
+// live here (gt-tj446). A seat the roster read live whose session the answer
+// now drops as dead is carried as dead-hooked: the roster's own dead read would
+// list it on a fresh read, and dropping it would count the seat nowhere while
+// its bead is still hooked (gt-0axfg). A seat the roster released is not
+// carried: the roster read its bead terminal and counts it free.
 func snapshotOccupied(snapshot poolSeatSnapshot, lister func() sessionLister, deadSandbox sandboxSeatDeadFunc, now func() time.Time) func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
 		listed, err := listPolecatSessionsWith(lister(), nil, now())
 		if err != nil {
 			return nil, &poolOccupancyError{sessions: true, err: err}
 		}
-		live := listed[:0:0]
-		for _, s := range withoutDeadSandboxSeats(listed, deadSandbox) {
+		kept, deadSeats := partitionDeadSandboxSeats(listed, deadSandbox)
+		live := kept[:0:0]
+		for _, s := range kept {
 			if !snapshot.releasedAt(s) {
 				live = append(live, s)
 			}
@@ -1548,7 +1568,10 @@ func snapshotOccupied(snapshot poolSeatSnapshot, lister func() sessionLister, de
 		out := live
 		for _, s := range snapshot.sessions {
 			if !s.deadHooked && !s.landing {
-				continue
+				if s.rig == "" || s.polecat == "" || !deadSeats[s.rig+"/"+s.polecat] || snapshot.releasedAt(s) {
+					continue
+				}
+				s.deadHooked = true
 			}
 			if s.rig != "" && s.polecat != "" && seats[s.rig+"/"+s.polecat] {
 				continue
