@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-24T12:00:00Z",
+  "items": 412,
+  "snapshot_hours": 168,
+  "targets": [
+    {
+      "target": "rejected_before_landing",
+      "positives": 48,
+      "skipped": false,
+      "best_box": "model = opus and attempts in q4",
+      "holdout_n": 96,
+      "holdout_rate": 0.42,
+      "baseline": 0.25,
+      "verdict": "earning"
+    },
+    {
+      "target": "manual_rescue",
+      "positives": 37,
+      "skipped": false,
+      "best_box": "attempts in q3..q4 and files_touched = none",
+      "holdout_n": 54,
+      "holdout_rate": 0.11,
+      "baseline": 0.09,
+      "verdict": "no-signal"
+    },
+    {
+      "target": "reached_overrun_stop",
+      "positives": 12,
+      "skipped": true,
+      "best_box": "",
+      "holdout_n": 0,
+      "holdout_rate": 0,
+      "baseline": 0.03,
+      "verdict": "not-yet"
+    }
+  ]
+}
