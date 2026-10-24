@@ -348,6 +348,38 @@ func (p *pageDOM) element(t *testing.T, id string) drawn {
 	return d
 }
 
+// cellWithText reads back the first leaf under the element id whose text holds
+// text: the cell a render drew, with the title it carries. A render that drew
+// no such cell fails here rather than reading as an empty string.
+func (p *pageDOM) cellWithText(t *testing.T, id, text string) drawn {
+	t.Helper()
+
+	v, err := p.vm.RunString(`JSON.stringify((() => {
+		let out = null;
+		(function walk(n) {
+			for (const c of (n.children || [])) {
+				if (!out && c.children && c.children.length === 0 && String(c.textContent).indexOf(` + quoteJS(text) + `) >= 0) {
+					out = {text: c.textContent, class: c.className, title: c.title};
+				}
+				walk(c);
+			}
+		})(__byId[` + quoteJS(id) + `]);
+		return out;
+	})())`)
+	if err != nil {
+		t.Fatalf("reading #%s for %q: %v", id, text, err)
+	}
+	js := v.String()
+	if js == "null" {
+		t.Fatalf("#%s draws no cell holding %q", id, text)
+	}
+	var d drawn
+	if err := json.Unmarshal([]byte(js), &d); err != nil {
+		t.Fatalf("reading #%s for %q: %v", id, text, err)
+	}
+	return d
+}
+
 // descend reads back one element of the page by walking child indices from an
 // id — the row a pane drew under its container, where element reads only the
 // container. A path the pane did not draw fails here rather than returning a

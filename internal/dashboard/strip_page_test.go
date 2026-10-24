@@ -296,6 +296,32 @@ func TestTheStripNamesTheOpenSeatsAndTheRetiredSeatIsGone(t *testing.T) {
 	}
 }
 
+// The header strip prints the two DeepSeek sandbox seats by their short names
+// and keeps each full name on hover; any other seat prints as it always has
+// (gt-2mnrl).
+func TestTheStripNamesTheSandboxSeatsByTheirShortNames(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderStrip", map[string]any{
+		"models": map[string]any{"seat_rows": []any{
+			map[string]any{"agent": "deepseek-flash-sandbox", "cap": 3, "state": "open", "live": 1, "key": "gastown.deepseek-flash-sandbox"},
+			map[string]any{"agent": "deepseek-flash-sandbox-k8s", "cap": 3, "state": "open", "live": 0, "key": "gastown.deepseek-flash-sandbox-k8s"},
+			map[string]any{"agent": "claude-haiku", "cap": 2, "state": "open", "live": 1, "key": "gastown.claude-haiku"},
+		}},
+	})
+	for _, c := range []struct{ shown, full string }{
+		{"docker-sbx 1/3", "deepseek-flash-sandbox"},
+		{"k8s-sbx 0/3", "deepseek-flash-sandbox-k8s"},
+		{"claude-haiku 1/2", "claude-haiku"},
+	} {
+		cell := dom.cellWithText(t, "strip", c.shown)
+		if !strings.Contains(cell.Title, c.full) {
+			t.Errorf("the strip's %q does not carry the full name %q on hover: %q", c.shown, c.full, cell.Title)
+		}
+	}
+}
+
 // contains reports whether a state is one of the ones the table means.
 func contains(all []string, one string) bool {
 	for _, s := range all {
