@@ -25,7 +25,7 @@ const askResponse = `{
       "type": "score",
       "score": 2,
       "confidence": 0.8,
-      "legend": {"0": "done", "1": "nearly done", "2": "halfway", "3": "barely started"},
+      "legend": {"0": "barely started", "1": "halfway", "2": "nearly done", "3": "done"},
       "probabilities": {"0": 0.05, "1": 0.15, "2": 0.7, "3": 0.1}
     }
   },

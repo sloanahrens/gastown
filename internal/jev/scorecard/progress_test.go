@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -68,6 +69,9 @@ type progressCase struct {
 	// logged is when the line was written; zero means a minute after the
 	// nudge, so the line is old enough to label at progressNow.
 	logged time.Time
+	// notInStore keeps the bead out of the fake notes reader, so it reads as
+	// beads.ErrNotFound.
+	notInStore bool
 	// want is the labels the adapter must set, nil when it must leave the item
 	// unlabeled; wantRule names the rule that sets them.
 	want     map[QuestionID]bool
@@ -108,11 +112,16 @@ func progressAnswers(making, looping, blocked, drifted, remaining float64) map[s
 
 // writeProgressTown writes the cases' landing notes, overrun records and log
 // lines into a town, and returns the notes reader that serves the landings.
+// Every case's bead exists in the reader with empty notes when it has no
+// landing, unless the case marks it not in the store.
 func writeProgressTown(t *testing.T, town string, cases []progressCase) fakeProgressNotes {
 	t.Helper()
 	notes := fakeProgressNotes{notes: map[string]string{}}
 	var logLines []byte
 	for _, c := range cases {
+		if _, ok := notes.notes[c.bead]; !ok && !c.notInStore {
+			notes.notes[c.bead] = ""
+		}
 		if !c.landed.IsZero() {
 			notes.notes[c.bead] = land.LandingRecord{LandedCommit: "abc123", LandedAt: c.landed}.NoteBlock()
 		}
@@ -172,44 +181,52 @@ func TestProgressLabelRules(t *testing.T) {
 			wantRule: ruleProgressLanded,
 		},
 		{
-			name:   "a landing after the window does not count as progress",
-			bead:   "gt-p03",
-			nudge:  progressBase,
-			landed: at(21 * time.Minute),
+			name:     "a landing after the window does not count, so remaining is false",
+			bead:     "gt-p03",
+			nudge:    progressBase,
+			landed:   at(21 * time.Minute),
+			want:     map[QuestionID]bool{qRemaining: false},
+			wantRule: ruleProgressNotLanded,
 		},
 		{
-			name:   "a landing before the nudge is an earlier sling",
-			bead:   "gt-p04",
-			nudge:  progressBase,
-			landed: at(-5 * time.Minute),
+			name:     "a landing before the nudge is an earlier sling, so remaining is false",
+			bead:     "gt-p04",
+			nudge:    progressBase,
+			landed:   at(-5 * time.Minute),
+			want:     map[QuestionID]bool{qRemaining: false},
+			wantRule: ruleProgressNotLanded,
 		},
 		{
-			name:     "a stop at or after the nudge is no progress",
+			name:     "a stop at or after the nudge is no progress and not done",
 			bead:     "gt-p05",
 			nudge:    progressBase,
 			stop:     progressStop{StoppedAt: at(20 * time.Minute)},
-			want:     map[QuestionID]bool{qMakingProgress: false},
-			wantRule: ruleProgressStopped,
+			want:     map[QuestionID]bool{qMakingProgress: false, qRemaining: false},
+			wantRule: ruleProgressNotLanded + "+" + ruleProgressStopped,
 		},
 		{
-			name:  "a stop from an earlier sling does not label this nudge",
-			bead:  "gt-p06",
-			nudge: progressBase,
-			stop:  progressStop{StoppedAt: at(-time.Hour)},
+			name:     "a stop from an earlier sling does not label progress, but remaining is false",
+			bead:     "gt-p06",
+			nudge:    progressBase,
+			stop:     progressStop{StoppedAt: at(-time.Hour)},
+			want:     map[QuestionID]bool{qRemaining: false},
+			wantRule: ruleProgressNotLanded,
 		},
 		{
 			name:     "gate time charged since the nudge is blocked on the environment",
 			bead:     "gt-p07",
 			nudge:    progressBase,
 			stop:     progressStop{GateSpent: 4 * time.Minute, GateSeenAt: at(5 * time.Minute)},
-			want:     map[QuestionID]bool{qBlockedOnEnvironment: true},
-			wantRule: ruleProgressGateWait,
+			want:     map[QuestionID]bool{qRemaining: false, qBlockedOnEnvironment: true},
+			wantRule: ruleProgressNotLanded + "+" + ruleProgressGateWait,
 		},
 		{
-			name:  "gate time seen only before the nudge does not label",
-			bead:  "gt-p08",
-			nudge: progressBase,
-			stop:  progressStop{GateSpent: 4 * time.Minute, GateSeenAt: at(-time.Minute)},
+			name:     "gate time seen only before the nudge does not label the wait, but remaining is false",
+			bead:     "gt-p08",
+			nudge:    progressBase,
+			stop:     progressStop{GateSpent: 4 * time.Minute, GateSeenAt: at(-time.Minute)},
+			want:     map[QuestionID]bool{qRemaining: false},
+			wantRule: ruleProgressNotLanded,
 		},
 		{
 			name:     "a landing and a gate wait both label, joined in order",
@@ -221,9 +238,11 @@ func TestProgressLabelRules(t *testing.T) {
 			wantRule: ruleProgressLanded + "+" + ruleProgressGateWait,
 		},
 		{
-			name:  "a bead with no landing and no record is unlabeled",
-			bead:  "gt-p10",
-			nudge: progressBase,
+			name:     "a bead that has not landed has remaining false",
+			bead:     "gt-p10",
+			nudge:    progressBase,
+			want:     map[QuestionID]bool{qRemaining: false},
+			wantRule: ruleProgressNotLanded,
 		},
 		{
 			name:  "a line younger than 30 minutes stays unlabeled",
@@ -262,11 +281,124 @@ func TestProgressLabelRules(t *testing.T) {
 	}
 }
 
+// Both labels present and separable: half the beads landed and answered done,
+// half did not land and answered barely started. The cut then beats the base
+// rate, so the question earns a verdict instead of reading no-signal. Before
+// the not-landed label and the score's done-high ordering, every label was
+// true, the best F1 could not beat a base rate of 1, and the verdict was
+// no-signal.
+func TestProgressBothRemainingLabelsEarnAVerdict(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	notes := fakeProgressNotes{notes: map[string]string{}}
+	var logLines []byte
+	for i := 0; i < 64; i++ {
+		bead := fmt.Sprintf("gt-e%02d", i)
+		c := progressCase{bead: bead, nudge: progressBase.Add(time.Duration(i) * time.Minute)}
+		line := progressLine(c)
+		remaining := 0.0
+		if i < 32 {
+			notes.notes[bead] = land.LandingRecord{LandedCommit: "abc123", LandedAt: c.nudge.Add(10 * time.Minute)}.NoteBlock()
+			remaining = 3
+		} else {
+			notes.notes[bead] = ""
+		}
+		line.Answers[progress.QRemaining] = progress.Answer{Score: &remaining}
+		raw, err := json.Marshal(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		logLines = append(append(logLines, raw...), '\n')
+	}
+	path := progress.LogPath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, logLines, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Build(context.Background(), newProgressTestAdapter(town, notes, progressNow), time.Time{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	q := question(t, rep, string(progress.QRemaining))
+	if q.Labeled != 64 || q.Positives != 32 || q.Negatives != 32 {
+		t.Fatalf("remaining labeled %d, positives %d, negatives %d, want 64, 32 and 32", q.Labeled, q.Positives, q.Negatives)
+	}
+	if q.Verdict != VerdictEarning {
+		t.Errorf("remaining verdict = %s, want %s", q.Verdict, VerdictEarning)
+	}
+}
+
+// A version-1 line answered done with a score of 0, the reverse of version 2.
+// The scorecard reads one question set, so those lines are skipped at Parse
+// and never reach the sweep: a bare 0 would otherwise read as barely started.
+func TestProgressVersion1LinesAreNotScored(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	notes := fakeProgressNotes{notes: map[string]string{}}
+	var logLines []byte
+	write := func(l progress.Line) {
+		raw, err := json.Marshal(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		logLines = append(append(logLines, raw...), '\n')
+	}
+	for i := 0; i < 40; i++ {
+		bead := fmt.Sprintf("gt-v2%02d", i)
+		c := progressCase{bead: bead, nudge: progressBase.Add(time.Duration(i) * time.Minute)}
+		line := progressLine(c)
+		remaining := 0.0
+		if i < 20 {
+			notes.notes[bead] = land.LandingRecord{LandedCommit: "abc123", LandedAt: c.nudge.Add(10 * time.Minute)}.NoteBlock()
+			remaining = 3
+		} else {
+			notes.notes[bead] = ""
+		}
+		line.Answers[progress.QRemaining] = progress.Answer{Score: &remaining}
+		write(line)
+	}
+	for i := 0; i < 20; i++ {
+		bead := fmt.Sprintf("gt-v1%02d", i)
+		c := progressCase{bead: bead, nudge: progressBase.Add(time.Duration(i) * time.Minute)}
+		line := progressLine(c)
+		line.QuestionVersion = 1
+		done := 0.0
+		line.Answers[progress.QRemaining] = progress.Answer{Score: &done}
+		notes.notes[bead] = land.LandingRecord{LandedCommit: "abc123", LandedAt: c.nudge.Add(10 * time.Minute)}.NoteBlock()
+		write(line)
+	}
+	path := progress.LogPath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, logLines, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Build(context.Background(), newProgressTestAdapter(town, notes, progressNow), time.Time{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if rep.Items != 40 || rep.LinesSkipped != 20 {
+		t.Errorf("items %d, skipped %d; want 40 and 20", rep.Items, rep.LinesSkipped)
+	}
+	q := question(t, rep, string(progress.QRemaining))
+	if q.Logged != 40 || q.Labeled != 40 || q.Positives != 20 || q.Negatives != 20 {
+		t.Errorf("remaining logged %d, labeled %d, positives %d, negatives %d; want 40, 40, 20 and 20",
+			q.Logged, q.Labeled, q.Positives, q.Negatives)
+	}
+}
+
 // A bead the store no longer has is unlabeled, not an error.
 func TestProgressBeadNotFoundIsUnlabeled(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	c := progressCase{bead: "gt-gone", nudge: progressBase}
+	// The bead is not in the store, so its notes read as not found: there is
+	// no state to label remaining from.
+	c := progressCase{bead: "gt-gone", nudge: progressBase, notInStore: true}
 	notes := writeProgressTown(t, town, []progressCase{c})
 	a := newProgressTestAdapter(town, notes, progressNow)
 	item, err := a.Parse(mustMarshal(t, progressLine(c)))

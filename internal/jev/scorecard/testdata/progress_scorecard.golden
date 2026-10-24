@@ -50,7 +50,7 @@ making_progress (noul)
   verdict: not-yet
 
 remaining (score)
-  logged 6, labeled 1, positives 1, negatives 0, base rate 100.0%
-  mean score: positives 0.500, negatives n/a
-  best F1 1.000 at threshold 0.500
+  logged 6, labeled 5, positives 1, negatives 4, base rate 20.0%
+  mean score: positives 0.500, negatives 0.500
+  best F1 0.333 at threshold 0.500
   verdict: not-yet
