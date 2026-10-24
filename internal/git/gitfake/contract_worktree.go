@@ -319,6 +319,25 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 	})
 
+	t.Run("ReadTreeHead makes the index HEAD's tree and leaves the files on disk", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		g := fx.env.Open(fx.clone).(WorkTree)
+		writeFiles(t, fx.clone, map[string]string{"a.txt": "staged\n", "c.txt": "c\n"})
+		if err := g.Add("-A"); err != nil {
+			t.Fatal(err)
+		}
+		wantStaged(t, g, git.StagedChange{Status: 'M', Path: "a.txt"}, git.StagedChange{Status: 'A', Path: "c.txt"})
+		if err := g.ReadTreeHead(); err != nil {
+			t.Fatalf("ReadTreeHead: %v", err)
+		}
+		wantStaged(t, g)
+		if got := readFile(t, filepath.Join(fx.clone, "a.txt")); got != "staged\n" {
+			t.Errorf("a.txt after ReadTreeHead = %q, want it left on disk", got)
+		}
+		wantStatus(t, g, false, map[string][]string{"modified": {"a.txt"}, "untracked": {"c.txt"}})
+	})
+
 	t.Run("TreeFileBlobs and BlobContent read git's blob ids", func(t *testing.T) {
 		t.Parallel()
 		fx := newFixture(t, newEnv(t))
