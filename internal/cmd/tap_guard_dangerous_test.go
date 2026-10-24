@@ -1792,6 +1792,9 @@ func TestShellFedHeredocBodyIsInspected(t *testing.T) {
 		// and the shell, so the command word lies behind both of them.
 		{"shell-fed body behind a brace group after a launcher", "time { bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n}"},
 		{"shell-fed body behind a brace group after an assignment with a substitution", "y=$(echo a) { bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n}"},
+		// A case pattern opens no construct, so only the trim before the reader
+		// reaches the shell that follows it.
+		{"shell-fed body behind a case pattern whose case is on an earlier line", "case $x in\na) bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n;;\nesac\n"},
 		// A negation is a launcher the command word skips, so the subshell
 		// paren behind it is the command word the shell sits at.
 		{"shell-fed body behind a subshell paren after a negation", "! ( bash <<'EOF'\nsudo rm -rf /tmp\nEOF\n)"},

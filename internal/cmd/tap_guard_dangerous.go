@@ -1175,6 +1175,8 @@ func shellInvokerIndex(tokens []string) int {
 // so an argument that merely spells "bash" ("echo bash <<EOF") does not.
 func heredocReaderIsShellInvoker(reader string) bool {
 	for _, segment := range splitShellSegments(shellTokenize(reader)) {
+		// The trim drops a case pattern such as `a)`, which opens no construct
+		// for the re-read below to follow (gt-4j5q6).
 		cmdline := trimShellKeywords(segment)
 		word, args := segmentCommandWord(cmdline)
 		// A launcher or an assignment can carry a construct rather than a
