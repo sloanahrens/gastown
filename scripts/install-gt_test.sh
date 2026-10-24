@@ -51,7 +51,21 @@ install_stub() {
 
 # make_world -> dir with: origin.git, rig (main at C2, C1 its parent), bin/gt
 # reporting C1 (short), a stub make on PATH, and C1/C2 recorded in files.
+#
+# Every case gets a copy of WORLD_TEMPLATE (built once, below) rather than a
+# fresh world: forty cases each want one of their own, and the twenty-odd
+# processes a fresh world costs (mostly git) are a sixth of this script's wall
+# time on a loaded host. A case mutates only its own copy; the copy's rig gets
+# its origin remote rewritten, since git clone recorded the template's path and
+# a case may push to it.
 make_world() {
+  local t; t=$(mktemp -d)
+  cp -Rp "$WORLD_TEMPLATE/." "$t/"
+  git -C "$t/rig" remote set-url origin "$t/origin.git"
+  echo "$t"
+}
+
+build_world() {
   local t; t=$(mktemp -d)
   git init -q --bare -b main "$t/origin.git"
   git clone -q "$t/origin.git" "$t/rig" 2>/dev/null
@@ -156,6 +170,11 @@ escalations() { grep "^escalate " "$1/gt.log" 2>/dev/null | grep -v -- "escalate
 
 # reported T -> the commit the installed gt stub reports
 reported() { "$1/bin/gt" stale --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["binary_commit"])'; }
+
+# The world make_world copies. Built here, in the script's own shell: every
+# case calls make_world inside a command substitution, and an assignment made
+# in one of those dies with the subshell.
+WORLD_TEMPLATE=$(build_world)
 
 echo "=== install-gt.sh tests ==="
 
