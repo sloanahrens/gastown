@@ -2028,8 +2028,14 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		// the comment above it, so bash is the reader of the body (gt-3vky2).
 		{"a comment ending in a backslash does not join the operator line", "echo hi # note \\\nbash <<EOF\ngit reset --hard\nEOF", true},
 		{"a bash continuation above the operator line still joins it", "bash \\\n<<EOF\ngit reset --hard\nEOF", true},
+		// In $'...' a backslash escapes the quote, so $'\'' ends the word and
+		// the operator line ends at its own newline: the git reset --hard
+		// below the real terminator stays live (gt-s3pi5).
+		{"git reset --hard after an ANSI-C string on the operator line", "cat <<EOF $'\\''\necho hi\nEOF\necho \\'\ngit reset --hard\nEOF", true},
+		{"a plain single-quoted word keeps its backslash literal", "cat <<EOF 'a\\'\necho hi\nEOF\ngit reset --hard", true},
 
 		// Allowed — the same shape with a terminator still reads as data
+		{"an ANSI-C string on the operator line above a data reader", "cat <<EOF $'\\''\ndrop table users\nEOF", false},
 		{"terminated heredoc body stays data", "cat <<EOF\ndrop table users\nEOF", false},
 		{"terminated quoted-tag heredoc body stays data", "git commit -m \"explain <<EOF\"\ncat <<EOF\ndrop table users\nEOF", false},
 		{"a comment ending in a backslash above a data reader is allowed", "echo hi # note \\\ncat <<'EOF'\ngit reset --hard\nEOF", false},
@@ -3299,6 +3305,24 @@ func TestANSICQuotedStringKeepsTheCommandsBehindIt(t *testing.T) {
 	}
 	if reason, _ := evaluateDangerousCommand(`echo $'rm -rf /'`, 0, noTownSession); reason != "" {
 		t.Errorf("rm -rf / inside an ANSI-C string is only text, but was blocked (%q)", reason)
+	}
+}
+
+// The heredoc line scanner reads a $'...' string by the shell's rules, so the
+// operator line ends at its own newline and the live git reset --hard below the
+// real terminator is judged. Read as a plain single quote, the reopened ANSI-C
+// quote ran to the next quote below and that command became body (gt-s3pi5).
+func TestDangerousGuardANSICStringOnAHeredocLine(t *testing.T) {
+	t.Parallel()
+	const command = "cat <<EOF $'\\''\necho hi\nEOF\necho \\'\ngit reset --hard\nEOF"
+	if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason != gitResetHardReason {
+		t.Errorf("evaluateDangerousCommand(%q) reason = %q, want %q", command, reason, gitResetHardReason)
+	}
+	// A plain single-quoted word keeps its backslash literal, so its quote
+	// closes on the line and the same shape is already read correctly.
+	const control = "cat <<EOF 'a\\'\necho hi\nEOF\ngit reset --hard"
+	if reason, _ := evaluateDangerousCommand(control, 0, noTownSession); reason != gitResetHardReason {
+		t.Errorf("evaluateDangerousCommand(%q) reason = %q, want %q", control, reason, gitResetHardReason)
 	}
 }
 
