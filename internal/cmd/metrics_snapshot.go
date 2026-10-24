@@ -31,9 +31,17 @@ only a failed append fails the command.`,
 	},
 }
 
-// runMetricsSnapshot takes one snapshot of town and prints the receipt.
+// runMetricsSnapshot takes one snapshot of town with the real sources and the
+// real environment and prints the receipt. It is the only place the command
+// wires the real registry and OSEnv; tests call runMetricsSnapshotWith.
 func runMetricsSnapshot(ctx context.Context, out io.Writer, town string) error {
-	rec, path, err := metrics.RunSnapshot(ctx, metrics.OSEnv(town), metrics.Sources(), metrics.SourceTimeout)
+	return runMetricsSnapshotWith(ctx, out, metrics.OSEnv(town), metrics.Sources())
+}
+
+// runMetricsSnapshotWith collects one snapshot over the given sources in env,
+// appends it to env.Town's snapshot log and prints the receipt.
+func runMetricsSnapshotWith(ctx context.Context, out io.Writer, env metrics.Env, sources []metrics.Source) error {
+	rec, path, err := metrics.RunSnapshot(ctx, env, sources, metrics.SourceTimeout)
 	if err != nil {
 		return err
 	}
