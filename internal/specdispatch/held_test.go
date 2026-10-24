@@ -145,9 +145,19 @@ func TestHoldFiles(t *testing.T) {
 			want:   []string{"docs/design/foo.md", "internal/notify/cli.go"},
 		},
 		{
-			name:  "an absolute path into another claude/docs tree drops",
-			named: []string{"/home/me/claude/docs/standards/test-engineering.md"},
+			name:  "an absolute path into the standards tree is reference-only",
+			named: []string{"/home/me/.claude/docs/standards/test-engineering.md"},
 			want:  nil,
+		},
+		{
+			name:  "an absolute path under another claude/docs tree stays",
+			named: []string{"/home/me/claude/docs/standards/test-engineering.md"},
+			want:  []string{"/home/me/claude/docs/standards/test-engineering.md"},
+		},
+		{
+			name:  "a repo path with a claude/docs directory inside it stays",
+			named: []string{"internal/x/claude/docs/render.go"},
+			want:  []string{"internal/x/claude/docs/render.go"},
 		},
 		{
 			name:  "a source file is never reference-only",

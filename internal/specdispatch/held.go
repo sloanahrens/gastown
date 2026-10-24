@@ -116,11 +116,11 @@ func IsReferenceDoc(path string) bool {
 
 // isStandardDoc reports whether a normalized path names a document in the
 // town's claude/docs standards tree in any spelling it arrives in
-// ("claude/docs/...", "~/.claude/docs/...", an absolute path into it). The
-// tree is matched at a directory boundary, so a source file that merely embeds
-// "claude/docs/" in its name does not match (gt-014o6, gt-kr17g).
+// ("claude/docs/...", "~/.claude/docs/...", an absolute path into it). Only
+// the bare "claude/docs/" prefix and a ".claude/docs/" directory match, so a
+// repo path that merely embeds a claude/docs directory, such as
+// "internal/x/claude/docs/render.go", stays a hold path (gt-014o6, gt-rrr4x).
 func isStandardDoc(path string) bool {
 	return strings.HasPrefix(path, "claude/docs/") ||
-		strings.Contains(path, "/claude/docs/") ||
 		strings.Contains(path, "/.claude/docs/")
 }
