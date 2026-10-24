@@ -541,8 +541,10 @@ func scanHeredocs(command string) []heredocSpan {
 		reader, readerStart := heredocReaderLine(command, start, end)
 		cmdText := heredocCmdText(command, &walk, start, end)
 
-		nl := strings.IndexByte(command[end:], '\n')
-		if nl < 0 {
+		// The body follows the newline that ends the logical line, so a
+		// backslash-newline continuing the operator's line is not the break.
+		lineEnd := heredocLineEnd(command, end)
+		if lineEnd == len(command) {
 			// No body follows on a later line (e.g. the heredoc marker is
 			// the last thing on the line with nothing after it).
 			spans = append(spans, heredocSpan{reader: reader, readerStart: readerStart, opStart: start, opEnd: end, bodyStart: -1, bodyEnd: end, quoted: quoted, cmdText: cmdText})
@@ -550,7 +552,7 @@ func scanHeredocs(command string) []heredocSpan {
 			walk.skipTo(end)
 			continue
 		}
-		bodyStart := end + nl + 1
+		bodyStart := lineEnd + 1
 		bodyEnd := heredocTerminatorEnd(command, bodyStart, tag, allowIndent)
 		if bodyEnd < 0 {
 			// No line equals the tag, so the shell would read the rest of
@@ -946,12 +948,27 @@ func (w *heredocQuoteWalk) skipTo(to int) {
 	w.arith, w.braces, w.substs, w.ticks = nil, 0, nil, nil
 }
 
+// heredocLineEnd returns the offset of the newline that ends the logical line
+// containing offset from: the first newline a backslash does not escape, or
+// len(command) when there is none. The shell reads a heredoc body after that
+// newline, so "cat <<EOF \" continued onto a "| bash" line puts the body below
+// the continuation, not below the operator's physical line (gt-f1kny).
+func heredocLineEnd(command string, from int) int {
+	for i := from; i < len(command); i++ {
+		if command[i] == '\n' && command[i-1] != '\\' {
+			return i
+		}
+	}
+	return len(command)
+}
+
 // heredocReaderLine returns the text of the line the heredoc operator at
 // [start,end) sits on, with the operator itself removed, and the offset that
 // line starts at. The text after the operator stays: in "cat <<EOF | bash"
 // the pipeline's command words, not the words before the operator, decide who
 // consumes the body. The offset is the start of the whole logical line, so a
-// caller can read the command text preceding it (gt-v02wh).
+// caller can read the command text preceding it (gt-v02wh). A continued line
+// is part of the logical line, so its pipe stage is in the reader (gt-f1kny).
 func heredocReaderLine(command string, start, end int) (string, int) {
 	lineStart := strings.LastIndexByte(command[:start], '\n') + 1
 	// "bash \" + newline + "<<EOF" still hands the body to bash, so walk back
@@ -964,12 +981,7 @@ func heredocReaderLine(command string, start, end int) (string, int) {
 		}
 		lineStart = prevStart
 	}
-	lineEnd := strings.IndexByte(command[start:], '\n')
-	if lineEnd < 0 {
-		lineEnd = len(command)
-	} else {
-		lineEnd += start
-	}
+	lineEnd := heredocLineEnd(command, end)
 	// Drop the continuations themselves: left in place they glue onto the
 	// preceding word and hide it from the token matchers below.
 	return strings.ReplaceAll(command[lineStart:start]+" "+command[end:lineEnd], "\\\n", " "), lineStart
@@ -987,13 +999,7 @@ func heredocCmdText(command string, walk *heredocQuoteWalk, start, end int) stri
 	if !ok {
 		return ""
 	}
-	lineEnd := len(command)
-	for i := end; i < len(command); i++ {
-		if command[i] == '\n' && command[i-1] != '\\' {
-			lineEnd = i
-			break
-		}
-	}
+	lineEnd := heredocLineEnd(command, end)
 	return strings.ReplaceAll(command[open:start]+" "+command[end:lineEnd], "\\\n", " ")
 }
 
