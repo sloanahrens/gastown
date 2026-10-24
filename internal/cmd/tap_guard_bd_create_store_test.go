@@ -15,6 +15,11 @@ import (
 // polecat worktree whose .beads/redirect points at that store.
 type bdStoreTown struct {
 	town, rigDir, worktree string
+	// home is the fake hook process's HOME, a directory outside the town whose
+	// .beads is a symlink to the town's. A ~ row then tests expansion from a
+	// named HOME rather than from the town root, so its verdict does not ride
+	// on the fixture happening to set HOME to the town (gt-utked).
+	home string
 	// storeLink is a symlink, outside the town, to the town's .beads.
 	storeLink string
 }
@@ -52,7 +57,14 @@ func newBdStoreTown(t *testing.T) bdStoreTown {
 	if err := os.Symlink(filepath.Join(town, ".beads"), storeLink); err != nil {
 		t.Fatal(err)
 	}
-	return bdStoreTown{town: town, rigDir: rigDir, worktree: worktree, storeLink: storeLink}
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(town, ".beads"), filepath.Join(home, ".beads")); err != nil {
+		t.Fatal(err)
+	}
+	return bdStoreTown{town: town, rigDir: rigDir, worktree: worktree, home: home, storeLink: storeLink}
 }
 
 const polecatRole = "gastown/polecats/ruby"
@@ -67,7 +79,7 @@ func (b bdStoreTown) run(t *testing.T, role, cwd, command string) (string, error
 	if err != nil {
 		t.Fatal(err)
 	}
-	proc := fakeGuardProcess(map[string]string{"GT_ROLE": role, "HOME": b.town}, "")
+	proc := fakeGuardProcess(map[string]string{"GT_ROLE": role, "HOME": b.home}, "")
 	var stderr strings.Builder
 	err = tapGuardBdCreateStore(strings.NewReader(string(payload)), &stderr, proc)
 	return stderr.String(), err
@@ -126,6 +138,9 @@ func TestTapGuardBdCreateStore(t *testing.T) {
 		// relative one resolved against the directory bd runs in.
 		{"town via --repo", polecatRole, b.worktree, `bd create --title=x --repo ` + b.town, true},
 		{"town via --repo=", polecatRole, b.worktree, `bd create --title=x --repo=` + b.town, true},
+		// ~ is expanded from the hook process's HOME, which the fixture names:
+		// a directory outside the town whose .beads is the town's store. A guard
+		// that read "~" as a literal path name would allow the create.
 		{"town via --repo home", polecatRole, b.worktree, `bd create --title=x --repo ~`, true},
 		{"relative --repo up to town", polecatRole, b.worktree, `bd create --title=x --repo ../../../..`, true},
 		{"relative --repo up from the rig dir", polecatRole, b.rigDir, `bd create --title=x --repo ..`, true},
@@ -137,7 +152,12 @@ func TestTapGuardBdCreateStore(t *testing.T) {
 		{"--repo with no value", polecatRole, b.worktree, `bd create --title=x --repo`, true},
 		{"--repo rig dir outranks BEADS_DIR town", polecatRole, b.worktree, `BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` bd create --title=x --repo ` + b.rigDir, false},
 		{"--repo town outranks BEADS_DIR rig", polecatRole, b.worktree, `BEADS_DIR=` + filepath.Join(b.rigDir, "mayor", "rig", ".beads") + ` bd create --title=x --repo ` + b.town, true},
-		{"--repo rig dir outranks --db town", polecatRole, b.worktree, `bd --db ` + filepath.Join(b.town, ".beads", "x.db") + ` create --title=x --repo ` + b.rigDir, false},
+		// bd --db names the store bd opens, and it opens it even when --repo is
+		// given, so --db is judged beside --repo rather than yielding to it.
+		{"--repo rig dir with --db rig store", polecatRole, b.worktree, `bd --db ` + filepath.Join(b.rigDir, "mayor", "rig", ".beads", "x.db") + ` create --title=x --repo ` + b.rigDir, false},
+		{"--repo rig dir with --db town", polecatRole, b.worktree, `bd --db ` + filepath.Join(b.town, ".beads", "x.db") + ` create --title=x --repo ` + b.rigDir, true},
+		{"--repo rig dir with unplaceable --db", polecatRole, b.worktree, `bd create --title=x --repo ` + b.rigDir + ` --db "$NOPE"`, true},
+		{"--repo town with --db rig store", polecatRole, b.worktree, `bd --db ` + filepath.Join(b.rigDir, "mayor", "rig", ".beads", "x.db") + ` create --title=x --repo ` + b.town, true},
 		{"--repo town inside bash -c", polecatRole, b.worktree, `bash -c "bd create --title=x --repo ` + b.town + `"`, true},
 		// bd --db maps to the nearest .beads directory at or above the
 		// path's parent, whether or not the path exists.

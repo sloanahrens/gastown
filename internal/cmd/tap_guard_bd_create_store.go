@@ -43,11 +43,12 @@ a bd create is refused. bd's -C/--directory, before or after the verb, moves
 the directory the store is resolved from; one the guard cannot place is
 refused the same way. bd create's --repo names the workspace the bead is
 filed into, and bd's --db the database whose enclosing .beads directory is the
-store; each overrides the directory and BEADS_DIR, and a value the guard cannot
-place is refused. BEADS_DIR, in the process env or as an inline assignment,
-names the store instead, and so do BEADS_DB and BD_DB, database paths read as
---db is and yielding to --db and --repo. gt escalate, gt ask and gt done create
-town beads inside gt itself and never reach this hook.
+store; each overrides the directory and BEADS_DIR, both are judged when both are
+given, and a value the guard cannot place is refused. BEADS_DIR, in the process
+env or as an inline assignment, names the store instead, and so do BEADS_DB and
+BD_DB, database paths read as --db is and yielding to --db and --repo. gt
+escalate, gt ask and gt done create town beads inside gt itself and never reach
+this hook.
 
 Exit codes:
   0 - Allowed (not a polecat, not a bd create, or the store is the rig's)
@@ -185,16 +186,28 @@ func (g bdCreateStoreGuard) judgeSegment(segment []string, dir string, known boo
 		}
 		dir, known = path, true
 	}
-	// bd create --repo files into the named workspace whatever the shell's
-	// directory or BEADS_DIR say, and --db selects the store before either is
-	// consulted. --repo outranks --db: it names the target the bead is written
-	// to, after --db has opened the source store.
+	// bd create --repo names the workspace the bead is filed into, and bd --db
+	// the database whose enclosing .beads directory is the store. --repo
+	// outranks BEADS_DIR and the BEADS_DB/BD_DB environment, but not an explicit
+	// --db: bd opens that store even when --repo is given, so a --repo that
+	// files into the rig does not make a --db naming the town safe. Both are
+	// judged, and a value the guard cannot place is refused.
 	if repo, ok := bdValueFlag(segment, "--repo"); ok {
 		path, placed := g.bdCreateBase(dir, known, repo, vars)
 		if !placed {
 			return bdCreateUnplaceable
 		}
-		return g.judgeStore(path)
+		if reason := g.judgeStore(path); reason != "" {
+			return reason
+		}
+		if db, ok := bdValueFlag(segment, "--db"); ok {
+			path, placed := g.bdCreateBase(dir, known, db, vars)
+			if !placed {
+				return bdCreateUnplaceable
+			}
+			return g.judgeDB(path)
+		}
+		return ""
 	}
 	if db, ok := bdValueFlag(segment, "--db"); ok {
 		path, placed := g.bdCreateBase(dir, known, db, vars)
