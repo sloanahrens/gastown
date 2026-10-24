@@ -4130,6 +4130,40 @@ func TestDangerousGuardQuotedParenShapes(t *testing.T) {
 	}
 }
 
+// gt-w3j7z: shlex fails on the operator-spaced text of a command that holds a
+// quote and a paren, so splitSpacedCommand falls back to lenientShellWords.
+// Reading the RAW command, that fallback kept a newline (or a glued ;, &&, |)
+// inside the enclosing word instead of as the separator spaceOutShellOperators
+// made it, so the rm on a later line sat mid-segment as an argument of the
+// previous line's command. bash runs those lines before it reports the syntax
+// error on the last one.
+func TestDangerousGuardLenientFallbackKeepsSeparators(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"a double-quoted paren on the last line", "echo ok\nrm -rf /\necho \"(", true},
+		{"a single-quoted paren on the last line", "echo ok\nrm -rf /\necho '(", true},
+		{"a harmless last line", "echo ok\nrm -rf /\necho x", true},
+		{"a semicolon glued to the earlier line", "echo ok; rm -rf /; echo \"(", true},
+		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"(", true},
+		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"(", true},
+		{"the nuke as an argument of the line before", "echo ok\necho rm -rf /\necho \"(", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if (reason != "") != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, reason != "", reason, tt.blocked)
+			}
+			if tt.blocked && !strings.Contains(reason, "filesystem destruction") {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want filesystem destruction", tt.command, reason)
+			}
+		})
+	}
+}
+
 // TestQuotedDollarParenPadsOnlyItsSubstitutionsCloser pins the reach of the
 // ")" padding: a substitution whose word was ended by a quoted dollar-paren
 // has its OWN ")" spaced out, so the word glued before it ("/" in
