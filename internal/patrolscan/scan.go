@@ -506,6 +506,13 @@ type Env interface {
 	// It is the automatic-path kill, so a stall can never outrun an operator's
 	// park or e-stop (gt-9p99w).
 	Kill(rig, polecat, reason string) error
+	// StalledReleaseOwed reports whether a stalled seat's release, whose kill
+	// stopped the session, still owes its sandbox removal. An unreadable seat
+	// record is an error: the debt is never assumed absent.
+	StalledReleaseOwed(rig, polecat string) (bool, error)
+	// FinishStalledRelease completes such a release: it retries the removal and
+	// retires the seat to stop. Called only for a seat StalledReleaseOwed reports.
+	FinishStalledRelease(rig, polecat string) error
 	// MarkIdle retires the seat's intent record to stop: its session is gone
 	// and it holds no work, so nothing needs it running. It reports whether
 	// the record changed.
@@ -830,6 +837,22 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	samples := 0
 	if res.Sample != nil {
 		samples = res.Sample.DeadSamples
+	}
+
+	// A stalled seat whose kill stopped the session but whose sandbox removal
+	// failed still holds its record, and nothing else reaches that sandbox. The
+	// release is finished here, as the stall path would have finished it.
+	owed, err := s.env.StalledReleaseOwed(rig, name)
+	if err != nil {
+		return unknown("stalled release unreadable", err)
+	}
+	if owed {
+		if err := s.env.FinishStalledRelease(rig, name); err != nil {
+			f.Outcome, f.Detail = OutcomeFailed, err.Error()
+			return f, true
+		}
+		f.Outcome, f.Detail = OutcomeReleased, "sandbox removal finished after a stalled kill; session stopped and seat retired to stop"
+		return f, true
 	}
 
 	work, err := s.env.AssignedWork(rig, name)

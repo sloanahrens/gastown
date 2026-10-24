@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/agentlog"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -93,6 +95,46 @@ func TestAssessSeat_NoTranscriptIsNotDead(t *testing.T) {
 	}
 	if res.Sample == nil || res.Sample.TranscriptPath != "" {
 		t.Fatalf("transcript = %+v, want none", res.Sample)
+	}
+}
+
+// A liveness sample is written only while the record is the one the assessment
+// read. A sling that lands after the read starts a new session with a clean
+// record, and the old session's sample must not be written over it.
+func TestRecordSeatSampleDoesNotWriteOverASlingSinceTheRead(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	d, seat := liveSeatDaemon(t, townRoot, "ace")
+	iseat := supervisor.IntentSeat(seat)
+	first := time.Now()
+	if err := intent.MarkSlung(townRoot, iseat, "claude", "test", first); err != nil {
+		t.Fatal(err)
+	}
+	read, err := intent.Read(townRoot, iseat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := intent.MarkSlung(townRoot, iseat, "claude", "test", first.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	d.logger = log.New(&logs, "", 0)
+	d.recordSeatSample(iseat, read, &intent.Progress{DeadSamples: 1})
+	if got, err := intent.Read(townRoot, iseat); err != nil || got.Progress != nil {
+		t.Fatalf("progress after a sling since the read = %+v (%v), want the cleared record kept", got.Progress, err)
+	}
+	if !strings.Contains(logs.String(), "not recorded") {
+		t.Errorf("log = %q, want the skipped sample reported", logs.String())
+	}
+
+	current, err := intent.Read(townRoot, iseat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.recordSeatSample(iseat, current, &intent.Progress{DeadSamples: 1})
+	if got, err := intent.Read(townRoot, iseat); err != nil || got.Progress == nil || got.Progress.DeadSamples != 1 {
+		t.Fatalf("progress for a current read = %+v (%v), want the sample written", got.Progress, err)
 	}
 }
 

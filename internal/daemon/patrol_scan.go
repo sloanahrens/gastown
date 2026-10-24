@@ -690,16 +690,60 @@ func (h *patrolScanHost) Kill(rig, name, reason string) error {
 	if err := h.d.sup().Kill(h.seat(rig, name), reason, patrolscan.Actor); err != nil {
 		return err
 	}
-	cleanup := h.cleanupSandbox
-	if cleanup == nil {
-		cleanup = func(townRoot, sessionName string) error {
-			return session.CleanupSandboxWith(session.SandboxDeleter, townRoot, sessionName)
+	if err := h.sandboxCleanupFunc()(h.town(), h.sessionName(rig, name)); err != nil {
+		// The session is stopped, so the release now owes its sandbox removal
+		// and its retire to stop. The dead-seat check finishes both, because
+		// the next tick never reaches the sandbox otherwise (FinishStalledRelease).
+		// The debt is written to the seat's record, so a daemon restart keeps it.
+		err = fmt.Errorf("killed the session, but removing the sandbox of %s/%s failed: %w", rig, name, err)
+		if mErr := intent.MarkSandboxOwed(h.town(), supervisor.IntentSeat(h.seat(rig, name)), true, patrolscan.Actor, h.d.clk().Now()); mErr != nil {
+			return errors.Join(err, fmt.Errorf("recording the owed sandbox removal of %s/%s: %w", rig, name, mErr))
 		}
-	}
-	if err := cleanup(h.town(), h.sessionName(rig, name)); err != nil {
-		return fmt.Errorf("killed the session, but removing the sandbox of %s/%s failed: %w", rig, name, err)
+		return err
 	}
 	return nil
+}
+
+// StalledReleaseOwed reports whether a stalled release of the seat still owes
+// its sandbox removal. A record that cannot be read is an error, never a "no":
+// the dead-seat check reads that as unknown rather than skipping the debt.
+func (h *patrolScanHost) StalledReleaseOwed(rig, name string) (bool, error) {
+	rec, err := intent.Read(h.town(), supervisor.IntentSeat(h.seat(rig, name)))
+	if err != nil {
+		return false, err
+	}
+	return rec.SandboxOwed, nil
+}
+
+// FinishStalledRelease completes a stalled seat's release that stopped the
+// session but failed to remove its sandbox: it retries the removal and then
+// retires the seat to stop, the two steps a release that went through runs in
+// order. Call it only for a seat StalledReleaseOwed reports. The owed mark
+// clears only once the retire has gone through, so a failure on either step is
+// retried on the next dead-seat check; the removal and the retire are both
+// idempotent for a seat that already has neither.
+func (h *patrolScanHost) FinishStalledRelease(rig, name string) error {
+	if err := h.sandboxCleanupFunc()(h.town(), h.sessionName(rig, name)); err != nil {
+		return fmt.Errorf("retrying the sandbox removal of %s/%s: %w", rig, name, err)
+	}
+	if _, err := h.MarkIdle(rig, name); err != nil {
+		return fmt.Errorf("retiring %s/%s to stop after its sandbox removal: %w", rig, name, err)
+	}
+	if err := intent.MarkSandboxOwed(h.town(), supervisor.IntentSeat(h.seat(rig, name)), false, patrolscan.Actor, h.d.clk().Now()); err != nil {
+		return fmt.Errorf("clearing the owed sandbox removal of %s/%s: %w", rig, name, err)
+	}
+	return nil
+}
+
+// sandboxCleanupFunc is the sandbox removal a kill runs: session.CleanupSandboxWith
+// over the real deleter unless a test substituted one.
+func (h *patrolScanHost) sandboxCleanupFunc() func(townRoot, sessionName string) error {
+	if h.cleanupSandbox != nil {
+		return h.cleanupSandbox
+	}
+	return func(townRoot, sessionName string) error {
+		return session.CleanupSandboxWith(session.SandboxDeleter, townRoot, sessionName)
+	}
 }
 
 // MarkIdle retires a polecat seat's record to stop once its session is gone

@@ -162,6 +162,11 @@ type specDispatchTickReport struct {
 // (gt-32j1y).
 type specDispatchTickRun struct {
 	started time.Time
+	// bound is the bound the tick runs under, read once when it is triggered.
+	// An upgrade restart waits on this value, not on a fresh read of the
+	// config, so a max_per_tick edit or an unreadable config mid-tick cannot
+	// shorten the wait below the time the tick is given.
+	bound time.Duration
 }
 
 // triggerSpecDispatch starts one tick on its own goroutine unless one is
@@ -211,7 +216,7 @@ func (d *Daemon) triggerSpecDispatch() bool {
 	// The start is published before the flag: a restart that reads the flag set
 	// must not be handed the previous tick's start, which would read as a tick
 	// already past its bound and let the restart cut this one (gt-32j1y).
-	run := &specDispatchTickRun{started: d.clk().Now()}
+	run := &specDispatchTickRun{started: d.clk().Now(), bound: d.specDispatchTickBound()}
 	prev := d.specDispatchTick.Swap(run)
 	if !d.specDispatchRunning.CompareAndSwap(false, true) {
 		d.specDispatchTick.CompareAndSwap(run, prev)
@@ -228,7 +233,7 @@ func (d *Daemon) triggerSpecDispatch() bool {
 			d.specDispatchRunning.Store(false)
 			d.specDispatchTick.CompareAndSwap(run, nil)
 		}()
-		d.runSpecDispatch()
+		d.runSpecDispatchUnder(run.bound)
 	}()
 	return true
 }
@@ -266,16 +271,23 @@ func (d *Daemon) specDispatchTownHold() string {
 	return dispatch.OperatorHold(d.config.TownRoot)
 }
 
-// runSpecDispatch runs one tick and logs its outcome, one line per decision.
+// runSpecDispatch runs one tick under the bound the config gives now.
 func (d *Daemon) runSpecDispatch() {
 	if !d.isPatrolActive("spec_dispatch") || d.config == nil {
 		return
 	}
+	d.runSpecDispatchUnder(d.specDispatchTickBound())
+}
+
+// runSpecDispatchUnder runs one tick under bound and logs its outcome, one line
+// per decision. The bound is the one the tick was triggered with, so the
+// failure line names the bound the tick ran under, which a second read could
+// change if the config was edited meanwhile (gt-zeqqg).
+func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
+	if !d.isPatrolActive("spec_dispatch") || d.config == nil {
+		return
+	}
 	start := d.clk().Now()
-	// The bound is read once: the failure line names the bound the tick ran
-	// under, which a second read could change if the config was edited
-	// meanwhile (gt-zeqqg).
-	bound := d.specDispatchTickBound()
 	out, err := d.runSpecDispatchCommand(bound)
 	if err != nil {
 		elapsed := d.clk().Now().Sub(start).Round(time.Second)

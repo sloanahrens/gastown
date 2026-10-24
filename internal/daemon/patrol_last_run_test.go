@@ -229,6 +229,23 @@ func TestEvaluatePatrolDueWarnsOfCorruptRecordBesideInMemoryTime(t *testing.T) {
 	}
 }
 
+// The in-memory completion is kept without its monotonic reading. The persisted
+// record has none, and a due-ness check that subtracts one from the other counts
+// wall time only when both lack it; with a reading kept, a host sleep after a
+// failed save would not age the interval (gt-cekkh). Checked by value, so no
+// sleep is needed to see it.
+func TestPatrolLastRunMemoryKeepsNoMonotonicReading(t *testing.T) {
+	t.Parallel()
+	var m patrolLastRunMemory
+	at := time.Now()
+
+	m.record(at)
+
+	if got := m.last(); got != at.Round(0) {
+		t.Errorf("last() = %v, want the wall-clock time %v with no monotonic reading", got, at.Round(0))
+	}
+}
+
 // TestEvaluatePatrolDueUsesInMemoryWhenTheRecordIsMissing covers the write that
 // leaves no record at all: the file cannot be created, so the next check sees a
 // missing record rather than a stale one. A completion this process remembers

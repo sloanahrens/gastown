@@ -556,7 +556,7 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 	specWaited := d.specDispatchRestartWait(now, waited)
 	var specBound time.Duration
 	if spec {
-		specBound = d.specDispatchTickBound()
+		specBound = d.specDispatchRunBound()
 	}
 
 	switch {
@@ -607,6 +607,17 @@ func (d *Daemon) specDispatchRestartWait(now time.Time, waited time.Duration) ti
 		return waited
 	}
 	return max(now.Sub(run.started), 0)
+}
+
+// specDispatchRunBound is the bound the running tick was triggered under, so
+// the restart's wait and the tick's own cut agree even when the config changed
+// or stopped reading mid-tick (gt-cbaoy). A tick that recorded no bound (a test
+// that sets the flag and start directly) reads the config's, as before.
+func (d *Daemon) specDispatchRunBound() time.Duration {
+	if run := d.specDispatchTick.Load(); run != nil && run.bound > 0 {
+		return run.bound
+	}
+	return d.specDispatchTickBound()
 }
 
 // noteStuckWait escalates once when a pending restart has waited past
