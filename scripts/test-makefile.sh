@@ -47,6 +47,8 @@ bash -n deploy/k8s/render-policy.sh
 bash deploy/k8s/render-policy_test.sh
 bash -n scripts/repo-guards.sh
 bash scripts/repo-guards_test.sh
+bash -n scripts/resource-sampler_test.sh
+bash scripts/resource-sampler_test.sh
 bash -n scripts/test-makefile.sh
 bash -n scripts/lint-lock-wait.sh
 bash -n scripts/makefile-gate_test.sh
