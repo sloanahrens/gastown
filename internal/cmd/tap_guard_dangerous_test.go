@@ -3877,6 +3877,12 @@ func TestHeredocANSICQuotesFollowBash(t *testing.T) {
 		{"a << inside an ANSI-C string is not a heredoc", "echo $'a\\'\n<<EOF\n'\nrm -rf /\nEOF", true},
 		// gt-javvg: the continuation between $ and ' does not hide the string.
 		{"a << inside an ANSI-C string opened across a continuation is not a heredoc", "echo $\\\n'a\\'\n<<EOF\n'\nrm -rf /\nEOF", true},
+		// gt-9xutc: the operator line's own ANSI-C string opens across a
+		// continuation and closes before the newline, so the line ends there
+		// and the rm is body text, read as data. Read as a plain quote, the
+		// string ran on past the newline and hid the body's end.
+		{"an ANSI-C string on the operator line opened across a continuation ends the line", "cat <<EOF $\\\n'a\\''\nrm -rf /\nEOF", false},
+		{"the same string without the continuation ends the line", "cat <<EOF $'a\\''\nrm -rf /\nEOF", false},
 		// "$$" is the PID, so 'a\' is a plain quote and <<EOF is a redirection
 		// whose body is data.
 		{"the quote after $$ is plain, so the walk reads the heredoc", "cat $$'a\\' <<EOF\nrm -rf /\nEOF", false},
