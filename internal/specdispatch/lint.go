@@ -442,7 +442,7 @@ func CountAcceptance(text string) int {
 }
 
 // acceptanceText is the bead's acceptance field, else the description's
-// acceptance section. Beads.AcceptanceSectionKey chooses the heading the same
+// acceptance section. beads.AcceptanceSectionKey chooses the heading the same
 // way for the submission refusal and the landing policy, so a heading the lint
 // counts is a heading gt done counts (gt-2czgm, gt-a4ay1).
 func acceptanceText(s Spec, sections map[string]string) string {

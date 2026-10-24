@@ -414,6 +414,33 @@ func TestAcceptanceTextPrefersTheExactSection(t *testing.T) {
 	}
 }
 
+// hasAcceptanceSection reads an acceptance heading the way beads.AcceptanceSectionKey
+// does, so the skeleton does not add a second one. "accepted" is not an
+// acceptance heading: the prefix is the whole word (gt-a4ay1).
+func TestTemplateAcceptanceSectionFollowsTheSharedRule(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		sections []string
+		want     bool
+	}{
+		{"exact heading", []string{"Goal", "Acceptance"}, true},
+		{"prefix heading", []string{"Goal", "Acceptance criteria"}, true},
+		{"mixed case and padding", []string{"  ACCEPTANCE notes "}, true},
+		{"whole word only", []string{"Goal", "Accepted"}, false},
+		{"no acceptance heading", []string{"Goal", "Constraints"}, false},
+		{"empty template", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := (Template{Sections: c.sections}).hasAcceptanceSection(); got != c.want {
+				t.Errorf("hasAcceptanceSection(%q) = %v, want %v", c.sections, got, c.want)
+			}
+		})
+	}
+}
+
 // The real template's headings must parse to the built-in list, so a town with
 // the template file lints the same shape as one without it.
 func TestParseTemplateSectionsMatchesTemplateShape(t *testing.T) {
