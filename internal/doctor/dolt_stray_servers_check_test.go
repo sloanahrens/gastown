@@ -156,6 +156,23 @@ func TestDoltStrayServersCheck_Run(t *testing.T) {
 			},
 		},
 		{
+			name: "port file pointing at a server whose database directory is a plain directory",
+			dial: reachable,
+			setup: func(t *testing.T, root string) []util.DoltServerProcess {
+				writeWorkspaceMetadata(t, filepath.Join(root, ".beads"), "hq")
+				writePortFile(t, filepath.Join(root, ".beads"), 3307)
+				if err := os.MkdirAll(filepath.Join(root, ".dolt-data", "hq"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return []util.DoltServerProcess{townServer(root)}
+			},
+			wantStatus: StatusWarning,
+			wantDetails: []string{
+				"served by PID 42",
+				`holds no "hq" database`,
+			},
+		},
+		{
 			name: "healthy: the town's server holds the workspace database",
 			dial: reachable,
 			setup: func(t *testing.T, root string) []util.DoltServerProcess {
