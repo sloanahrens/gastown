@@ -32,6 +32,15 @@ allow_driver_config = true
 
 With the key absent every `sandbox create` is refused, so a seat never starts: gt reports `creating sandbox <name>: openshell sandbox create:` and the gateway's message after it. The gateway reads `gateway.toml` at start, so restart it after editing; the [Restart](#restart) section has the command.
 
+### Sandbox profile driver
+
+A sandbox profile's `driver` field names the compute driver its gateway runs. It takes `docker` or `kubernetes`, and `docker` is the default when the field is unset.
+
+- A `kubernetes` profile must not set `cache_volume`. Validation refuses the pair, because a kubernetes gateway has no Docker volumes.
+- A `kubernetes` profile creates no Docker cache volume and sends no `docker.mounts` config to the gateway.
+- A `docker` profile, or one with no `driver`, keeps the Docker cache volume when it names a `cache_volume`.
+- Any other value is refused at validation: `want docker or kubernetes`.
+
 ## Restart
 
 An install never restarts a running gateway, and neither does a changed template: a restart drops the live sessions of every sandbox the gateway serves. When the install rewrites the unit of a loaded agent it logs the command to apply it. Restart by kickstart, at a moment no polecat is mid-task:
