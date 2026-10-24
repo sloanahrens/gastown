@@ -138,14 +138,6 @@ func buildDAG(b *beads.Beads, root *beads.Issue, children []*beads.Issue) (*DAGI
 		return nil, fmt.Errorf("fetching step details: %w", err)
 	}
 
-	// Build closed set for status checking
-	closedIDs := make(map[string]bool)
-	for _, child := range children {
-		if child.Status == "closed" {
-			closedIDs[child.ID] = true
-		}
-	}
-
 	// Create nodes
 	for _, child := range children {
 		step := stepsMap[child.ID]
@@ -174,14 +166,9 @@ func buildDAG(b *beads.Beads, root *beads.Issue, children []*beads.Issue) (*DAGI
 
 		// Compute ready status for open steps
 		if child.Status == "open" {
-			allDepsClosed := true
-			for _, depID := range node.Dependencies {
-				if !closedIDs[depID] {
-					allDepsClosed = false
-					break
-				}
-			}
-			if allDepsClosed {
+			// Beads decides which dependency types gate and when an edge
+			// resolves, so the DAG agrees with bd's ready query (gt-03mac).
+			if len(beads.UnresolvedBlockerIDs(step.Dependencies)) == 0 {
 				node.Status = "ready"
 			} else {
 				node.Status = "blocked"

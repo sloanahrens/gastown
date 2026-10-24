@@ -294,10 +294,8 @@ func findAllReadySteps(b beads.Client, moleculeID string) ([]*beads.Issue, bool,
 		return nil, true, nil
 	}
 
-	// Delegate readiness to beads' canonical ready-work semantics.
-	// This replaces manual dependency walking with isBlockingDepType,
-	// using beads' blocked_issues_cache which handles all blocking types,
-	// transitive propagation, and conditional-blocks resolution.
+	// Beads' blocked_issues_cache is the ready-work authority here: all
+	// blocking types, transitive propagation, conditional-blocks resolution.
 	readySteps, err := beads.ReadyForMol(b, moleculeID)
 	if err != nil {
 		return nil, false, fmt.Errorf("finding ready steps: %w", err)
