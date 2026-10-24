@@ -160,7 +160,7 @@ func writeMangoCSV(path string, header []string, rows []Row, open func(string) (
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	fail := func(err error) error {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	cw := csv.NewWriter(f)
