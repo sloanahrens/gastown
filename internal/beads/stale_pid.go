@@ -1,13 +1,13 @@
 package beads
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/tmuxsweep"
+	"syscall"
 )
 
 // CleanStaleDoltServerPID removes the dolt-server.pid file inside a beads
@@ -34,10 +34,26 @@ func CleanStaleDoltServerPID(beadsDir string) {
 
 	// A Dolt server running under another uid answers EPERM to signal 0. It is
 	// alive, and its pid file must stay, so only a process that is gone counts.
-	if tmuxsweep.PIDAlive(pid) {
+	if pidAlive(pid) {
 		return
 	}
 
 	_ = os.Remove(pidPath)
 	fmt.Fprintf(os.Stderr, "Cleaned stale dolt-server.pid (PID %d) from %s\n", pid, beadsDir)
+}
+
+// pidAlive reports whether pid names a live process. A pid this process may not
+// signal still exists, so EPERM counts as alive. A non-positive pid is never a
+// process: signal 0 to pid 0 or -1 addresses a process group or every process,
+// so it is refused before any probe.
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	sigErr := p.Signal(syscall.Signal(0))
+	return sigErr == nil || errors.Is(sigErr, syscall.EPERM)
 }
