@@ -409,8 +409,10 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 				payloads = append(payloads, text)
 			}
 		}
-		payloads = append(payloads, sandboxSecretsSubstitutionHeredocs(command)...)
 	}
+	// A substitution's heredoc output runs as a command whether or not a shell reads it
+	// here: "$(cat <<'B' ... B)" runs the body it prints.
+	payloads = append(payloads, sandboxSecretsSubstitutionHeredocs(command)...)
 	for _, payload := range payloads {
 		if depth >= maxPRWorkflowNestDepth {
 			tooDeep = true
@@ -425,11 +427,16 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	return "", tooDeep
 }
 
+// sandboxSecretsBodyPassers are the readers that write a heredoc body back to their
+// output, so a substitution's output carries the body it read.
+var sandboxSecretsBodyPassers = map[string]bool{"cat": true, "tee": true}
+
 // sandboxSecretsSubstitutionHeredocs returns the bodies of heredocs that a command
-// substitution reads through cat, which writes them back out. The substitution's
-// output is what a shell runs: printf '%s' "$(cat <<'BEAD' ...)" | sh. The heredoc
-// is found in the substitution's own body, because scanHeredocs does not see an
-// operator written inside double quotes (gt-ynkew).
+// substitution reads through a body passer such as cat or tee, which writes them back
+// out. The substitution's output is what a shell or a command word runs:
+// printf '%s' "$(cat <<'BEAD' ...)" | sh. The heredoc is found in the substitution's
+// own body, because scanHeredocs does not see an operator written inside double
+// quotes (gt-ynkew).
 func sandboxSecretsSubstitutionHeredocs(command string) []string {
 	var bodies []string
 	for _, sub := range substitutionSpansIn(command, true) {
@@ -439,7 +446,7 @@ func sandboxSecretsSubstitutionHeredocs(command string) []string {
 				continue
 			}
 			for _, argv := range sandboxSecretsHeredocPipeline(text, span) {
-				if strings.ToLower(filepath.Base(argv[0])) == "cat" {
+				if sandboxSecretsBodyPassers[strings.ToLower(filepath.Base(argv[0]))] {
 					bodies = append(bodies, span.body)
 					break
 				}
