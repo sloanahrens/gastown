@@ -435,6 +435,47 @@ func TestPolecatPathsGuard_PathQualifiedLauncher(t *testing.T) {
 	}
 }
 
+// TestPolecatPathsGuard_LauncherRedirectionBeforeArgs pins gt-76fx6: a
+// redirection standing among a launcher's flags, or ahead of its operand,
+// is shell setup and not one of those arguments. "timeout 2>/dev/null 5 rm"
+// read the redirection as DURATION, so "5" became the command and the rm was
+// never judged.
+func TestPolecatPathsGuard_LauncherRedirectionBeforeArgs(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	rm := "rm -rf " + filepath.Join(p.sibling, "internal.go")
+	own := "rm -rf build"
+	for _, tt := range []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{"timeout redirection ahead of the operand", "timeout 2>/dev/null 5 " + rm, true},
+		{"timeout spaced redirection ahead of the operand", "timeout 2> /dev/null 5 " + rm, true},
+		{"nice redirection ahead of its flag", "nice 2>/dev/null -n 5 " + rm, true},
+		{"timeout redirection ahead of a flag value", "timeout -s 2>/dev/null KILL 5 " + rm, true},
+		{"timeout redirection between flag and operand", "timeout -s KILL 2>/dev/null 5 " + rm, true},
+		{"gtimeout redirection ahead of the operand", "gtimeout 2>/dev/null 5 " + rm, true},
+		{"env -C value behind a redirection", "env -C 2>/dev/null " + p.sibling + " rm -rf internal.go", true},
+		{"nice redirection after its flags", "nice -n 5 2>/dev/null " + rm, true},
+		{"env redirection ahead of the command", "env 2>/dev/null " + rm, true},
+		{"redirection ahead of timeout", "2>/dev/null timeout 5 " + rm, true},
+		{"own file, timeout redirection ahead of the operand", "timeout 2>/dev/null 5 " + own, false},
+		{"own file, nice redirection ahead of its flag", "nice 2>/dev/null -n 5 " + own, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := p.run(t, "Bash", commandInput(tt.command))
+			if tt.wantBlock && err == nil {
+				t.Errorf("%q was allowed, want a block", tt.command)
+			}
+			if !tt.wantBlock && err != nil {
+				t.Errorf("%q blocked on an own file: %v", tt.command, err)
+			}
+		})
+	}
+}
+
 // TestPolecatPathsGuard_ClusteredLauncherFlags pins gt-l18zp: a cluster of
 // short flags is read the way getopt reads it, so a value flag in the cluster
 // owns the word after it instead of that word becoming the command. Without
