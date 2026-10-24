@@ -3780,12 +3780,51 @@ func TestDangerousGuardQuotedParenShapes(t *testing.T) {
 		{"a nuke after a quoted close-paren in a substitution", `echo $(echo ")" && rm -rf /)`, true},
 		{"a sudo body after a quoted close-paren in a substitution", `x=$(echo ")" && bash -c 'sudo apt-get install foo')`, true},
 		{"a sudo body after a quoted close-paren and a semicolon", `echo $(echo ")" ; bash -c 'sudo apt-get install foo')`, true},
+		{"a sudo body behind text then a quote that ends the dollar-paren", `echo "a$(" bash -c 'sudo apt-get install foo'`, true},
+		{"a sudo body behind a single-quoted dollar-paren and text", `echo '$(' text bash -c 'sudo apt-get install foo'`, true},
+		{"a sudo body behind a dollar-paren and an escaped quote", `echo "\"$(" bash -c 'sudo apt-get install foo'`, true},
+		{"a sudo body behind a quoted close-paren with an apostrophe inside", `echo "it's)" "$(" bash -c 'sudo apt-get install foo'`, true},
 		{"a double-quoted dollar-paren with no reader after it", `echo "$(" ; echo ok`, false},
 		{"a single-quoted dollar-paren with no reader after it", `echo '$(' bash -c 'echo hi'`, false},
+		{"a double-quoted dollar-paren with a harmless shell body", `echo "$(" text bash -c "echo hi"`, false},
+		{"a harmless body behind an assignment of a double-quoted dollar-paren", `x="$(" bash -c 'echo hi'`, false},
+		{"a quoted close-paren in a substitution with harmless commands", `echo $(echo ")" && echo ok)`, false},
+		{"a quoted close-paren in a substitution with a harmless shell body", `x=$(echo ")" ; bash -c 'echo hi')`, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); (reason != "") != tt.blocked {
 				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, reason != "", reason, tt.blocked)
+			}
+		})
+	}
+}
+
+// gt-h45w3: lenientShellWords reads quotes the way shlex does and, unlike it,
+// never fails on a quote left open.
+func TestLenientShellWords(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{"plain words", `a  b	c`, []string{"a", "b", "c"}},
+		{"double quotes group a word", `echo "a b" c`, []string{"echo", "a b", "c"}},
+		{"single quotes keep a backslash", `echo 'a\b' c`, []string{"echo", `a\b`, "c"}},
+		{"an escaped double quote stays in a double-quoted word", `echo "a\"b" c`, []string{"echo", `a"b`, "c"}},
+		{"a backslash before an ordinary rune stays in double quotes", `echo "a\nb"`, []string{"echo", `a\nb`}},
+		{"an apostrophe in double quotes is text", `echo "it's" x`, []string{"echo", "it's", "x"}},
+		{"an escaped space joins a word", `echo a\ b`, []string{"echo", "a b"}},
+		{"empty quotes are an empty word", `a "" b`, []string{"a", "", "b"}},
+		{"adjacent quoted parts are one word", `x="$("y`, []string{"x=$(y"}},
+		{"an open double quote runs to the end", `echo "$( bash -c`, []string{"echo", "$( bash -c"}},
+		{"an open single quote runs to the end", `echo 'a b`, []string{"echo", "a b"}},
+		{"a trailing backslash is kept", `echo a\`, []string{"echo", `a\`}},
+		{"empty command", ``, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := lenientShellWords(tt.command); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("lenientShellWords(%q) = %q, want %q", tt.command, got, tt.want)
 			}
 		})
 	}
