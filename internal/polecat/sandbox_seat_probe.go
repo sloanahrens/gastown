@@ -113,6 +113,20 @@ func applySandboxSeatFacts(facts *WorkstateFacts, live LiveGitState, fields *bea
 	}
 }
 
+// SandboxSeatOriginBranch is the branch the lost-work checks ask origin about
+// for a gone sandbox seat — the one its agent bead recorded — and, for a bead
+// that recorded none, the reason the answer is unknown, which is never the host
+// polecat's branch because that names a worktree the sandbox never wrote to
+// (gt-cu66c).
+func SandboxSeatOriginBranch(fields *beads.AgentFields) (branch, unknownReason string) {
+	if fields != nil {
+		if branch = strings.TrimSpace(fields.Branch); branch != "" {
+			return branch, ""
+		}
+	}
+	return "", "the agent bead records no branch to look for on origin"
+}
+
 // applySandboxLostWorkFacts sets the facts the lost-work verdict reads once the
 // gateway says the sandbox is gone: the bead the seat was working (hook, else
 // source issue) and whether a resume_branch on it or the seat's branch on origin
@@ -147,9 +161,9 @@ func (m *Manager) applySandboxLostWorkFacts(facts *WorkstateFacts, fields *beads
 	if issue != nil && patrolscan.ResumeBranchFromNotes(issue.Notes) != "" {
 		preserved = true
 	} else {
-		branch := strings.TrimSpace(fields.Branch)
-		if branch == "" {
-			unknown("the agent bead records no branch to look for on origin")
+		branch, unknownReason := SandboxSeatOriginBranch(fields)
+		if unknownReason != "" {
+			unknown(unknownReason)
 			return
 		}
 		onOrigin, err := branchOnOrigin(m.gits, m.rig.Path, branch)

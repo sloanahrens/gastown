@@ -182,11 +182,7 @@ func checkPolecatSafetyWith(rigName, polecatName string, r *rig.Rig, getPolecat 
 		// finished: unfinished work with no branch on origin and no resume_branch
 		// is lost, and nuking the seat would bury it (gt-qq6rg.3).
 		if sandboxed && sandboxLive.Source == polecat.GitStateSourceLive {
-			branch := fields.Branch
-			if branch == "" && polecatInfo != nil {
-				branch = polecatInfo.Branch
-			}
-			lost, lostErr := sandboxLostWork(sandboxEnv, bd, r.Path, branch, hookBead, sourceHint, hookBeadSafeForCleanup(bd, hookBead), beadTerminal)
+			lost, lostErr := sandboxLostWork(sandboxEnv, bd, r.Path, fields, hookBead, sourceHint, hookBeadSafeForCleanup(bd, hookBead), beadTerminal)
 			switch {
 			case lostErr != nil:
 				result.Reasons = append(result.Reasons, "cannot check whether the sandbox's work survived: "+lostErr.Error())
