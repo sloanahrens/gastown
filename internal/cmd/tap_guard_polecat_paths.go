@@ -1993,10 +1993,11 @@ func segmentCommandWord(segment []string) (string, []string) {
 			continue
 		}
 		if skipsToCommand(token) {
-			if launcher, ok := prWorkflowLaunchers[token]; ok {
+			name := launcherName(token)
+			if launcher, ok := prWorkflowLaunchers[name]; ok {
 				// The payload (env -S) is not the command word: checkBashCommand
 				// judges it through prWorkflowCommand.
-				rest, _ := skipLauncherArgs(token, launcher, segment[i+1:])
+				rest, _ := skipLauncherArgs(name, launcher, segment[i+1:])
 				i = len(segment) - len(rest) - 1
 			}
 			continue
@@ -2009,18 +2010,27 @@ func segmentCommandWord(segment []string) (string, []string) {
 // skipsToCommand reports whether a token is a launcher or grouping token that
 // the command word sits behind, so the scan goes past it. Every launcher in
 // prWorkflowLaunchers counts, so timeout, doas and the rest are stepped over
-// the way env, sudo and nice are. xargs is the exception: the done-slot loop
-// guard reads it as a repeater by its command word, and the path guard already
-// judges the command it runs.
+// the way env, sudo and nice are, by base name, so /usr/bin/env is stepped over
+// like env (gt-257j9). xargs is the exception: the done-slot loop guard reads it
+// as a repeater by its command word, and the path guard already judges the
+// command it runs.
 func skipsToCommand(token string) bool {
 	switch token {
 	case "(", "!":
 		return true
-	case "xargs":
+	}
+	name := launcherName(token)
+	if name == "xargs" {
 		return false
 	}
-	_, ok := prWorkflowLaunchers[token]
+	_, ok := prWorkflowLaunchers[name]
 	return ok
+}
+
+// launcherName is the key a command word looks up in prWorkflowLaunchers: the
+// lowercased base name, the same reading prWorkflowCommand gives it.
+func launcherName(token string) string {
+	return strings.ToLower(filepath.Base(token))
 }
 
 // maxSegmentReadings bounds the readings of one segment. Each leading

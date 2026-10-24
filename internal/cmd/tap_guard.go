@@ -189,6 +189,8 @@ var prWorkflowLaunchers = map[string]prWorkflowLauncher{
 		"-I": true, "-n": true, "-P": true, "-L": true, "-s": true, "-d": true, "-E": true, "-a": true,
 	}},
 	"timeout": {valueFlags: map[string]bool{"-s": true, "--signal": true, "-k": true, "--kill-after": true}, positionals: 1},
+	// Homebrew coreutils installs timeout as gtimeout.
+	"gtimeout": {valueFlags: map[string]bool{"-s": true, "--signal": true, "-k": true, "--kill-after": true}, positionals: 1},
 }
 
 // prWorkflowCommand returns the command a shell segment runs, from its command
