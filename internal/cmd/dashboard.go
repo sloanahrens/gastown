@@ -239,7 +239,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, jevScorecardArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay)
+	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, jevScorecardArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay, dashboardMangoDir)
 	if err != nil {
 		return err
 	}
@@ -340,7 +340,7 @@ func dashboardClaudePlanPath(townRoot string) string {
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
 // when the server stops.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv, jevScorecardArgv []string, claudePlanUSD float64, claudePlanRenewalDay int) (*dashboard.Hub, func(), error) {
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv, jevScorecardArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string) (*dashboard.Hub, func(), error) {
 	beadReads := openTailBeads(townRoot)
 	rigOfBead := landingRig(townRoot)
 	// The deploy block reads the same repos through the same viewer client as
@@ -415,14 +415,14 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		WithRenewalDay(claudePlanRenewalDay)
 	rework := newDashReworkReader(townRoot).withStages(om.stagesSince)
 	loads := newDashLoads(townRoot, time.Now)
-	mangoDir := dashboardMangoPath(townRoot, dashboardMangoDir)
+	mango := dashboardMangoPath(townRoot, mangoDir)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:         feed,
 		Summary:      func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
 		Health:       func() dashboard.Health { return dashboardHealth(townRoot) },
 		Machine:      dashboard.SampleMachine,
 		Cloud:        func() *dashboard.Cloud { return cloud.Read(time.Now()) },
-		Mango:        func() *dashboard.Mango { return dashboard.ReadMango(mangoDir, time.Now()) },
+		Mango:        func() *dashboard.Mango { return dashboard.ReadMango(mango, time.Now()) },
 		Spend:        dashboardSpend(resolveSpendCmd(spendCmd)),
 		JevSpend:     dashboardJevSpend(jevSpendArgv),
 		JevScorecard: dashboardJevScorecard(jevScorecardArgv),
