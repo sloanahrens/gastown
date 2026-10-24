@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -55,21 +54,11 @@ func failedSaveDaemon(t *testing.T, cfg *PatrolsConfig) (*Daemon, *clockwork.Fak
 // interval and once after it, and checks the pass opened once, then twice.
 func assertFailedSaveSuppressesTheRerun(t *testing.T, trigger func(), running *atomic.Bool, opens *int, clk *clockwork.FakeClock, logs *bytes.Buffer, interval time.Duration) {
 	t.Helper()
-	wait := func() {
-		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
-		for running.Load() {
-			if time.Now().After(deadline) {
-				t.Fatal("the pass did not finish")
-			}
-			runtime.Gosched()
-		}
-	}
 
 	trigger()
-	wait()
+	waitFlagClear(t, running)
 	trigger()
-	wait()
+	waitFlagClear(t, running)
 
 	if *opens != 1 {
 		t.Errorf("pass opened %d times inside one interval after a failed save, want 1", *opens)
@@ -80,7 +69,7 @@ func assertFailedSaveSuppressesTheRerun(t *testing.T, trigger func(), running *a
 
 	clk.Advance(interval)
 	trigger()
-	wait()
+	waitFlagClear(t, running)
 	if *opens != 2 {
 		t.Errorf("pass opened %d times after the interval, want 2", *opens)
 	}
