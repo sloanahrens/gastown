@@ -57,7 +57,6 @@ func TestPriorityClassesOrderControlPlaneAboveSandboxAboveCI(t *testing.T) {
 	t.Parallel()
 	docs := decodeDocs(t, "priority-classes.yaml")
 	got := map[string]int{}
-	labels := map[string]map[string]any{}
 	for _, d := range docs {
 		if d["kind"] != "PriorityClass" {
 			t.Errorf("document kind = %v, want PriorityClass", d["kind"])
@@ -68,16 +67,16 @@ func TestPriorityClassesOrderControlPlaneAboveSandboxAboveCI(t *testing.T) {
 		if desc, _ := d["description"].(string); desc == "" {
 			t.Errorf("%v has no description", at(t, d, "metadata", "name"))
 		}
-		name := at(t, d, "metadata", "name").(string)
-		got[name] = d["value"].(int)
-		if l, ok := at(t, d, "metadata").(map[string]any)["labels"].(map[string]any); ok {
-			labels[name] = l
+		nameAny := at(t, d, "metadata", "name")
+		name, ok := nameAny.(string)
+		if !ok {
+			t.Fatalf("metadata.name = %v (%T), want a string", nameAny, nameAny)
 		}
-	}
-	// The gateway admits a PriorityClass a sandbox create names only with its
-	// approval label (resourceAdmission); gt-sandbox is the one sandboxes name.
-	if got := labels["gt-sandbox"]["openshell.ai/sandbox-attachable"]; got != "true" {
-		t.Errorf("gt-sandbox label openshell.ai/sandbox-attachable = %v, want \"true\"", got)
+		value, ok := d["value"].(int)
+		if !ok {
+			t.Fatalf("%s value = %v (%T), want an int", name, d["value"], d["value"])
+		}
+		got[name] = value
 	}
 	want := map[string]int{"gt-control-plane": 1000000, "gt-sandbox": 1000, "gt-ci": 100}
 	if len(got) != len(want) {
@@ -90,6 +89,39 @@ func TestPriorityClassesOrderControlPlaneAboveSandboxAboveCI(t *testing.T) {
 	}
 	if !(got["gt-control-plane"] > got["gt-sandbox"] && got["gt-sandbox"] > got["gt-ci"]) {
 		t.Errorf("eviction order broken: %v", got)
+	}
+}
+
+// The gateway admits a PriorityClass a sandbox create names only with its
+// approval label (resourceAdmission); gt-sandbox is the one sandboxes name.
+func TestSandboxPriorityClassCarriesAttachableLabel(t *testing.T) {
+	t.Parallel()
+	var found bool
+	for _, d := range decodeDocs(t, "priority-classes.yaml") {
+		nameAny := at(t, d, "metadata", "name")
+		name, ok := nameAny.(string)
+		if !ok {
+			t.Fatalf("metadata.name = %v (%T), want a string", nameAny, nameAny)
+		}
+		if name != "gt-sandbox" {
+			continue
+		}
+		found = true
+		metaAny := at(t, d, "metadata")
+		meta, ok := metaAny.(map[string]any)
+		if !ok {
+			t.Fatalf("gt-sandbox metadata = %v (%T), want a map", metaAny, metaAny)
+		}
+		labels, ok := meta["labels"].(map[string]any)
+		if !ok {
+			t.Fatalf("gt-sandbox metadata.labels = %v (%T), want a map", meta["labels"], meta["labels"])
+		}
+		if got := labels["openshell.ai/sandbox-attachable"]; got != "true" {
+			t.Errorf("gt-sandbox label openshell.ai/sandbox-attachable = %v, want \"true\"", got)
+		}
+	}
+	if !found {
+		t.Fatal("priority-classes.yaml has no gt-sandbox PriorityClass")
 	}
 }
 
