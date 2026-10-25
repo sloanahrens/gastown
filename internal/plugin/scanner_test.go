@@ -3,6 +3,7 @@ package plugin
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -380,11 +381,14 @@ func writeTestPlugin(t *testing.T, base, dir, name, description string) {
 	}
 }
 
-func TestScanner_GetPlugin_MatchesDiscoverAllPrecedence(t *testing.T) {
+// TestScanner_GetPlugin_AgreesWithDiscoverAll pins the contract callers depend
+// on: whatever plugin DiscoverAll resolves a name to, GetPlugin returns.
+func TestScanner_GetPlugin_AgreesWithDiscoverAll(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	// Two rigs both define a plugin named "foo"; DiscoverAll lets the last rig win.
+	// Two rigs both define "foo"; which one wins is DiscoverAll's business, not
+	// this test's.
 	writeTestPlugin(t, filepath.Join(tmpDir, "a"), "foo", "foo", "Rig a version")
 	writeTestPlugin(t, filepath.Join(tmpDir, "b"), "foo", "foo", "Rig b version")
 
@@ -394,15 +398,16 @@ func TestScanner_GetPlugin_MatchesDiscoverAllPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoverAll failed: %v", err)
 	}
-	var want *Plugin
+	var matches []*Plugin
 	for _, p := range discovered {
 		if p.Name == "foo" {
-			want = p
+			matches = append(matches, p)
 		}
 	}
-	if want == nil {
-		t.Fatal("DiscoverAll did not return plugin foo")
+	if len(matches) != 1 {
+		t.Fatalf("DiscoverAll returned %d plugins named foo, want exactly 1", len(matches))
 	}
+	want := matches[0]
 
 	got, err := scanner.GetPlugin("foo")
 	if err != nil {
@@ -411,8 +416,71 @@ func TestScanner_GetPlugin_MatchesDiscoverAllPrecedence(t *testing.T) {
 	if got.Name != want.Name || got.Path != want.Path || got.RigName != want.RigName || got.Description != want.Description {
 		t.Errorf("GetPlugin returned %+v, want the DiscoverAll entry %+v", got, want)
 	}
-	if got.RigName != "b" {
-		t.Errorf("expected rig b to win the collision, got rig %q", got.RigName)
+}
+
+// TestScanner_GetPlugin_SurfacesScanError pins that a discovery failure reaches
+// the caller instead of being reported as a missing plugin.
+func TestScanner_GetPlugin_SurfacesScanError(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	// A self-referential symlink makes the town plugins directory unreadable.
+	if err := os.Symlink("plugins", filepath.Join(tmpDir, "plugins")); err != nil {
+		t.Fatalf("failed to create self-referential symlink: %v", err)
+	}
+
+	scanner := NewScanner(tmpDir, nil)
+
+	_, err := scanner.GetPlugin("foo")
+	if err == nil {
+		t.Fatal("expected GetPlugin to fail when discovery fails")
+	}
+	if !strings.Contains(err.Error(), "scanning town plugins") {
+		t.Errorf("expected the scan error, got %v", err)
+	}
+}
+
+// TestScanner_GetPlugin_SkipsUnparseablePlugins pins that one broken plugin.md
+// neither hides a good plugin nor turns into a scan failure.
+func TestScanner_GetPlugin_SkipsUnparseablePlugins(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	writeTestPlugin(t, tmpDir, "good", "good", "Good plugin")
+	brokenDir := filepath.Join(tmpDir, "plugins", "broken")
+	if err := os.MkdirAll(brokenDir, 0755); err != nil {
+		t.Fatalf("failed to create plugin dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(brokenDir, "plugin.md"), []byte("+++\nname = \"unterminated\n+++\n"), 0644); err != nil {
+		t.Fatalf("failed to write broken plugin.md: %v", err)
+	}
+
+	scanner := NewScanner(tmpDir, nil)
+
+	got, err := scanner.GetPlugin("good")
+	if err != nil {
+		t.Fatalf("GetPlugin(good) failed: %v", err)
+	}
+	if got.Name != "good" {
+		t.Errorf("expected good, got %q", got.Name)
+	}
+	if _, err := scanner.GetPlugin("broken"); err == nil || !strings.Contains(err.Error(), "plugin not found") {
+		t.Errorf("expected broken to be absent, got %v", err)
+	}
+}
+
+// TestScanner_GetPlugin_ScansOnlyConfiguredRigs pins the scan's scope, which
+// bounds its cost: a rig the scanner was not built with is not searched.
+func TestScanner_GetPlugin_ScansOnlyConfiguredRigs(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	writeTestPlugin(t, filepath.Join(tmpDir, "other"), "foo", "foo", "Other rig version")
+
+	scanner := NewScanner(tmpDir, []string{"configured"})
+
+	if _, err := scanner.GetPlugin("foo"); err == nil {
+		t.Error("expected GetPlugin not to find a plugin under an unconfigured rig")
 	}
 }
 

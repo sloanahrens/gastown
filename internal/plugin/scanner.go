@@ -201,9 +201,13 @@ func parsePluginMD(content []byte, pluginDir string, location Location, rigName 
 	return plugin, nil
 }
 
-// GetPlugin returns the plugin whose frontmatter name is name, resolved through
-// DiscoverAll so a name maps to the same plugin here as it does in the daemon.
+// GetPlugin returns the plugin whose frontmatter name is name, deduplicated the
+// way DiscoverAll dedupes it, and reports the scan's error rather than "plugin
+// not found" when discovery itself fails.
 func (s *Scanner) GetPlugin(name string) (*Plugin, error) {
+	// A plugin is identified by frontmatter name, not directory name (gt-v19m3),
+	// so finding one costs a full scan; each caller is a one-shot CLI command, so
+	// that scan is the command's cost (gt-ontk4).
 	plugins, err := s.DiscoverAll()
 	if err != nil {
 		return nil, err
