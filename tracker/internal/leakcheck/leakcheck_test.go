@@ -93,3 +93,18 @@ func TestReportNamesTheCreator(t *testing.T) {
 		t.Errorf("exit code = %d, want the tests' own code 3 preserved", got)
 	}
 }
+
+func TestStrayIgnoresRuntimeLifetimeGoroutines(t *testing.T) {
+	t.Parallel()
+	dump := `goroutine 1 [running]:
+main.main()
+
+goroutine 9 [syscall]:
+os/signal.signal_recv()
+	/go/src/os/signal/sig.go:1 +0x1
+created by os/signal.Notify.func1 in goroutine 1
+`
+	if got := stray(parseGoroutines(dump), map[int]bool{}); len(got) != 0 {
+		t.Errorf("stray = %v, want the signal loop ignored: it lives for the process once started", got)
+	}
+}

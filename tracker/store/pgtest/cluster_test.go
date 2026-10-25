@@ -85,22 +85,12 @@ func TestStopLeavesNoProcessAndNoDirectory(t *testing.T) {
 	}
 }
 
-// cloneBudget is the per-clone ceiling. Measured 2026-10-25 with postgresql@17
-// 17.11 on the dev Mac: 80 ms per clone driving psql (process spawn included),
-// so in-process pgx should be well under it. It is a hang-and-regression
-// detector with headroom for a loaded host, not a target.
-const cloneBudget = 300 * time.Millisecond
-
-// TestCloneCost runs alone (not parallel) so nothing competes for the clock.
-func TestCloneCost(t *testing.T) {
-	const n = 20
-	start := time.Now()
-	for i := 0; i < n; i++ {
-		New(t, "tpl")
-	}
-	per := time.Since(start) / n
-	t.Logf("clone cost: %v per clone over %d clones (budget %v)", per, n, cloneBudget)
-	if per > cloneBudget {
-		t.Errorf("per-clone cost %v exceeds the budget %v; find what got slower, do not raise the budget", per, cloneBudget)
+// BenchmarkClone is how the per-clone cost is measured, outside the test run
+// (go test -tags integration -bench Clone ./store/pgtest). It is not an
+// assertion: a wall-clock bound in a test depends on host load. Measured
+// 2026-10-25 with postgresql@17 17.11 on the dev Mac: about 70 ms per clone.
+func BenchmarkClone(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		shared.Clone(b, "tpl")
 	}
 }

@@ -42,12 +42,16 @@ const maxSocketDir = 104 - len("/.s.PGSQL.5432") - 1
 
 // Cluster is one private PostgreSQL server on a unix socket.
 type Cluster struct {
-	dir   string
-	cmd   *exec.Cmd
-	log   *lineWatcher
-	exit  chan error
-	admin *pgxpool.Pool
-	seq   atomic.Int64
+	dir     string
+	cmd     *exec.Cmd
+	log     *lineWatcher
+	done    chan struct{} // closed when postgres has exited
+	waitErr error         // cmd.Wait's result; valid once done is closed
+	admin   *pgxpool.Pool
+	seq     atomic.Int64
+
+	stopOnce sync.Once
+	stopErr  error
 }
 
 // lineWatcher is the postmaster's stderr: it keeps the output for error
@@ -103,7 +107,7 @@ func Start(ctx context.Context) (*Cluster, error) {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("pgtest: temp dir %q is too long for a unix socket; set TMPDIR to a shorter path", dir)
 	}
-	c := &Cluster{dir: dir, exit: make(chan error, 1), log: &lineWatcher{ready: make(chan struct{})}}
+	c := &Cluster{dir: dir, done: make(chan struct{}), log: &lineWatcher{ready: make(chan struct{})}}
 	if err := c.start(ctx, bin); err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, err
@@ -123,26 +127,31 @@ func (c *Cluster) start(ctx context.Context, bin string) error {
 	c.cmd = exec.Command(filepath.Join(bin, "postgres"), "-D", data,
 		"-c", "listen_addresses=", "-c", "unix_socket_directories="+c.dir,
 		"-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off",
-		"-c", "shared_buffers=64MB", "-c", "max_connections=100")
+		"-c", "shared_buffers=64MB", "-c", "max_connections=100",
+		// The ready line is matched as English text at LOG level.
+		"-c", "lc_messages=C", "-c", "log_min_messages=warning")
 	c.cmd.Stderr = c.log
 	if err := c.cmd.Start(); err != nil {
 		return fmt.Errorf("pgtest: start postgres: %w", err)
 	}
-	go func() { c.exit <- c.cmd.Wait() }()
+	go func() {
+		c.waitErr = c.cmd.Wait()
+		close(c.done)
+	}()
 
 	timer := time.NewTimer(readyTimeout)
 	defer timer.Stop()
 	select {
 	case <-c.log.ready:
-	case err := <-c.exit:
-		return fmt.Errorf("pgtest: postgres exited before it was ready: %v\n%s", err, c.log.tail())
+	case <-c.done:
+		return fmt.Errorf("pgtest: postgres exited before it was ready: %v\n%s", c.waitErr, c.log.tail())
 	case <-timer.C:
 		_ = c.cmd.Process.Kill()
-		<-c.exit
+		<-c.done
 		return fmt.Errorf("pgtest: postgres not ready after %v\n%s", readyTimeout, c.log.tail())
 	case <-ctx.Done():
 		_ = c.cmd.Process.Kill()
-		<-c.exit
+		<-c.done
 		return ctx.Err()
 	}
 	admin, err := pgxpool.New(ctx, c.DSN("postgres"))
@@ -165,8 +174,14 @@ func (c *Cluster) DSN(db string) string {
 }
 
 // Stop shuts the server down (a fast shutdown, then a kill after stopTimeout),
-// waits for it to exit, and removes its directory.
+// waits for it to exit, and removes its directory. It is safe to call more
+// than once; later calls return the first call's result.
 func (c *Cluster) Stop() error {
+	c.stopOnce.Do(func() { c.stopErr = c.stop() })
+	return c.stopErr
+}
+
+func (c *Cluster) stop() error {
 	if c.admin != nil {
 		c.admin.Close()
 		c.admin = nil
@@ -176,8 +191,8 @@ func (c *Cluster) Stop() error {
 	timer := time.NewTimer(stopTimeout)
 	defer timer.Stop()
 	select {
-	case err := <-c.exit:
-		if err != nil {
+	case <-c.done:
+		if err := c.waitErr; err != nil {
 			var ee *exec.ExitError
 			if !errors.As(err, &ee) || ee.ExitCode() != 0 {
 				stopErr = fmt.Errorf("pgtest: postgres exited uncleanly: %v\n%s", err, c.log.tail())
@@ -185,7 +200,7 @@ func (c *Cluster) Stop() error {
 		}
 	case <-timer.C:
 		_ = c.cmd.Process.Kill()
-		<-c.exit
+		<-c.done
 		stopErr = fmt.Errorf("pgtest: postgres did not stop within %v and was killed\n%s", stopTimeout, c.log.tail())
 	}
 	if err := os.RemoveAll(c.dir); err != nil && stopErr == nil {

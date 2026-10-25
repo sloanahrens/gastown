@@ -119,12 +119,20 @@ func snapshot() map[int]bool {
 	return ids
 }
 
+// lifetimeGoroutines are the tops of goroutines the runtime or the standard
+// library may start lazily during the tests and that nothing can stop.
+var lifetimeGoroutines = map[string]bool{
+	"os/signal.signal_recv": true,
+	"os/signal.loop":        true,
+	"runtime.ensureSigM":    true,
+}
+
 // stray returns the goroutines in gs, other than the first (the caller), that
-// were not running before the tests (before).
+// were not running before the tests (before) and are not lifetimeGoroutines.
 func stray(gs []goroutine, before map[int]bool) []goroutine {
 	var out []goroutine
 	for i, g := range gs {
-		if i == 0 || before[g.id] {
+		if i == 0 || before[g.id] || lifetimeGoroutines[g.top()] {
 			continue
 		}
 		out = append(out, g)
