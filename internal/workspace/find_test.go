@@ -382,6 +382,11 @@ func TestFindFromCwdWithFallback(t *testing.T) {
 	if _, _, err := envWith(nil).findFromCwdWithFallback(); err == nil || !strings.Contains(err.Error(), "getting current directory") {
 		t.Errorf("no cwd, no env: err = %v, want the getwd error", err)
 	}
+	// ...and never to the town the hermetic harness forbids.
+	forbidden := envWith(map[string]string{"GT_TOWN_ROOT": town, EnvForbiddenTownRoot: town})
+	if root, cwd, err := forbidden.findFromCwdWithFallback(); err == nil || !strings.Contains(err.Error(), "getting current directory") {
+		t.Errorf("no cwd, GT_TOWN_ROOT = forbidden town: got (%q, %q, %v), want the getwd error", root, cwd, err)
+	}
 }
 
 func TestGetTownName(t *testing.T) {
