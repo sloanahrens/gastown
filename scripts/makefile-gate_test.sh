@@ -365,6 +365,13 @@ if [[ -z "$missing" ]]; then
 else
   fail "test-integration runs every package in internal/testpolicy/docker.txt; missing:$missing" "$iout"
 fi
+# The tracker module's integration tier (a real postgres) runs in the same
+# target, after the root packages, and its failure fails the target.
+if grep -q -F 'for m in tracker; do' <<<"$iout" && grep -q -F 'go vet -tags integration ./... && go test -tags integration -timeout 20m ./...' <<<"$iout"; then
+  pass "test-integration also vets and tests the tracker module with the integration tag"
+else
+  fail "test-integration also vets and tests the tracker module with the integration tag" "$iout"
+fi
 if [[ -n "$town_slots" && "$(init_pool_lines "$iout")" == 2 ]]; then
   pass "test-integration sets the test-Dolt init pool to the town slot count ($town_slots) on both commands"
 else
@@ -607,6 +614,13 @@ if [[ "$rc" == 0 ]] && ! grep -q -x 'go test in tracker' "$TMP/calls"; then
   pass "presubmit: an unchanged tracker module is not tested"
 else
   fail "presubmit: an unchanged tracker module is not tested (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+rc=$(TARGET=test-integration run_gate -o lint -- STUB_GO_FAIL=test STUB_GO_FAIL_DIR=tracker)
+if [[ "$rc" != 0 ]] && grep -q -F 'test-integration: FAILED in tracker' "$TMP/err" && grep -q -x 'go test in tracker' "$TMP/calls"; then
+  pass "test-integration: a failing tracker integration test fails the target and names the module"
+else
+  fail "test-integration: a failing tracker integration test fails the target and names the module (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
 rc=$(run_gate -o lint -- STUB_GO_INTERRUPT=1)
