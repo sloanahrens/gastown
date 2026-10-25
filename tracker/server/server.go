@@ -54,7 +54,8 @@ type Server struct {
 	cfg Config
 	mux *http.ServeMux
 	// routes is the /v1 mux, behind the schema gate and authentication.
-	routes *http.ServeMux
+	routes  *http.ServeMux
+	metrics *metrics
 }
 
 // readyTimeout bounds the readiness probe so a stalled database reads as not
@@ -66,12 +67,15 @@ func New(cfg Config) *Server {
 	if cfg.Log == nil {
 		cfg.Log = discardLog{}
 	}
-	s := &Server{cfg: cfg, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, mux: http.NewServeMux(), metrics: newMetrics(cfg.Log)}
 	// Probes carry no token: the daemon and launchd call them.
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	// The scrape is unauthenticated like the probes, on the same loopback-only
+	// listener, and is not itself instrumented.
+	s.mux.HandleFunc("GET /metrics", s.metrics.serve)
 	s.mux.HandleFunc("GET /readyz", s.readyz)
 	s.mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"service": "trackerd", "schema_level": cfg.SchemaLevel})
@@ -88,7 +92,10 @@ func New(cfg Config) *Server {
 	s.registerBoardRoutes(v1)
 	s.registerEventRoutes(v1)
 	s.registerAdminRoutes(v1)
-	s.mux.Handle("/v1/", s.authenticated(s.schemaGate(v1)))
+	// Instrumentation sits inside authentication because it reads the actor
+	// from the resolved identity, and outside the schema gate so a refused
+	// request is still counted under the route it asked for.
+	s.mux.Handle("/v1/", s.authenticated(s.metrics.instrument(v1, s.schemaGate(v1))))
 	return s
 }
 
