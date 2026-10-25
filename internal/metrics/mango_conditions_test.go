@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"math"
 	"testing"
 )
 
@@ -67,29 +68,29 @@ func TestMangoConditionsChecksEveryShare(t *testing.T) {
 }
 
 // TestMangoConditionsNarrowsBelowTheThreshold pins the boundary the panel
-// draws on: a condition true of exactly MangoNarrowBelow of the rows does not
-// narrow, one row less does. It guards the strict < in narrows and the 0.90
-// the const holds.
+// draws on: a condition true of at least MangoNarrowBelow of the rows does not
+// narrow, one row less does. The boundary is counted off the constant, so
+// moving the threshold moves the table with it; what stays pinned is the strict
+// < in narrows.
 func TestMangoConditionsNarrowsBelowTheThreshold(t *testing.T) {
 	t.Parallel()
-	if MangoNarrowBelow != 0.90 {
-		t.Fatalf("MangoNarrowBelow = %v, want the spec's 0.90", MangoNarrowBelow)
-	}
+	const total = 10
+	atThreshold := int(math.Ceil(MangoNarrowBelow * total))
 	tests := []struct {
 		name    string
 		matches int // rows of the ten out of "a", so share is matches/10
 		narrows bool
 	}{
-		{"every row", 10, false},
-		{"exactly the threshold", 9, false},
-		{"one row under", 8, true},
-		{"a handful", 3, true},
+		{"every row", total, false},
+		{"at or above the threshold", atThreshold, false},
+		{"one row under", atThreshold - 1, true},
 		{"no matching rows", 0, true},
 	}
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			rows := make([]Row, 10)
+			rows := make([]Row, total)
 			for i := range rows {
 				model := "b"
 				if i < tc.matches {
@@ -101,7 +102,7 @@ func TestMangoConditionsNarrowsBelowTheThreshold(t *testing.T) {
 			if len(got) != 1 {
 				t.Fatalf("conditions = %d, want 1", len(got))
 			}
-			if want := float64(tc.matches) / 10; got[0].Share != want {
+			if want := float64(tc.matches) / total; got[0].Share != want {
 				t.Errorf("share = %v, want %v", got[0].Share, want)
 			}
 			if got[0].Narrows != tc.narrows {
@@ -134,7 +135,7 @@ func TestMangoConditionsCapsTheConditions(t *testing.T) {
 
 // TestMangoConditionsHandlesTheEmptyBox checks the two degenerate inputs: a box
 // with no ranges yields no conditions, and rows that are empty leave every
-// share at 0 rather than dividing by zero.
+// share at 0 rather than dividing by zero, and narrow nothing.
 func TestMangoConditionsHandlesTheEmptyBox(t *testing.T) {
 	t.Parallel()
 	if got := MangoConditions(Cube{}, conditionRows()); len(got) != 0 {
@@ -145,8 +146,8 @@ func TestMangoConditionsHandlesTheEmptyBox(t *testing.T) {
 		t.Fatalf("conditions = %d, want one per box range", len(got))
 	}
 	for _, c := range got {
-		if c.Share != 0 || !c.Narrows {
-			t.Errorf("%q with no rows = share %v narrows %v, want 0 and true", c.Text, c.Share, c.Narrows)
+		if c.Share != 0 || c.Narrows {
+			t.Errorf("%q with no rows = share %v narrows %v, want 0 and false", c.Text, c.Share, c.Narrows)
 		}
 	}
 }

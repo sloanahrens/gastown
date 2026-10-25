@@ -12,7 +12,8 @@ const MangoMaxConditions = 16
 
 // MangoCondition is one range of a best box read alone, as the panel writes it:
 // the range on its own, as Describe renders it, the share of the prepared rows
-// that satisfy it by itself, and whether that share is below MangoNarrowBelow.
+// that satisfy it by itself, and whether that share is below MangoNarrowBelow
+// and there are rows for it to single out.
 type MangoCondition struct {
 	Text    string  `json:"text"`
 	Share   float64 `json:"share"`
@@ -27,7 +28,8 @@ type MangoCondition struct {
 //
 // A cube with more than MangoMaxConditions ranges contributes its first
 // MangoMaxConditions only, and one with no rows gives every condition a share
-// of 0, as fraction does.
+// of 0, as fraction does, and narrows none of them: there is nothing for a
+// condition to single out.
 func MangoConditions(cube Cube, rows []Row) []MangoCondition {
 	conditions := make([]MangoCondition, 0, len(cube.Ranges))
 	for i, r := range cube.Ranges {
@@ -45,7 +47,7 @@ func MangoConditions(cube Cube, rows []Row) []MangoCondition {
 		conditions = append(conditions, MangoCondition{
 			Text:    Describe(one),
 			Share:   share,
-			Narrows: share < MangoNarrowBelow,
+			Narrows: len(rows) > 0 && share < MangoNarrowBelow,
 		})
 	}
 	return conditions
