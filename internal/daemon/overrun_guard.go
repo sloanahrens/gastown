@@ -202,6 +202,12 @@ type overrunSeams struct {
 	// stopped, when the stop's own session may still be running and only a
 	// missing pause marker means the seat was taken back.
 	stopLapsed func(seat overrunSeat, sessionStopped bool) (string, error)
+
+	// spanEnd closes the attempt the stop ended on the seat's bead at at: the
+	// 20-minute stop is what ended the run, so the reason is overrun. It runs
+	// once the bead is handed back, in the give-up branch as well, and its
+	// failure is logged and never fails the stop. nil records nothing.
+	spanEnd func(seat overrunSeat, at time.Time) error
 }
 
 // overrunGuardConfig returns the patrol's config, or nil when absent.

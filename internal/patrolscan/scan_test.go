@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
@@ -84,8 +85,12 @@ type fakeEnv struct {
 
 	restarts []string
 	kills    []string // polecats whose live session was stopped
-	killErr  map[string]error
-	idles    []string // polecats whose seat was retired to stop
+	// spans records each confirmed-dead seat's span close, "<bead> <seat> <at>";
+	// spanErr makes the write fail.
+	spans   []string
+	spanErr error
+	killErr map[string]error
+	idles   []string // polecats whose seat was retired to stop
 	// events orders the stop and the record write, so a test can prove the
 	// session is stopped before the record is retired.
 	events      []string
@@ -165,6 +170,16 @@ func (f *fakeEnv) Assess(_, p string) liveness.Result {
 		return r
 	}
 	return liveness.Result{Verdict: liveness.Alive}
+}
+
+// CloseDeadSpan records each dead seat's span close as
+// "<bead> <seat> <reason> <at>"; spanErr makes the write fail.
+func (f *fakeEnv) CloseDeadSpan(bead, seat string, reason spans.Reason, lastSeen time.Time) error {
+	if f.spanErr != nil {
+		return f.spanErr
+	}
+	f.spans = append(f.spans, bead+" "+seat+" "+string(reason)+" "+lastSeen.Format(time.RFC3339))
+	return nil
 }
 func (f *fakeEnv) AssignedWork(_, p string) (*Work, error) {
 	f.workReads = append(f.workReads, p)
@@ -423,6 +438,122 @@ func TestDeadSeatWithHookedWorkIsRestarted(t *testing.T) {
 	}
 	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeRestarted {
 		t.Fatalf("outcome = %v, want restarted", f)
+	}
+}
+
+// TestConfirmedDeadSeatClosesItsSpanAtTheLastTimeItWasSeen: a seat that died
+// without an end cannot close its own attempt, so the tick that confirms the
+// death closes it — at the last time the seat was seen, not at the
+// confirmation, which would count the dead ticks as work (gt-dz78b). The
+// record's own last write dates the seat when no liveness sample does.
+func TestConfirmedDeadSeatClosesItsSpanAtTheLastTimeItWasSeen(t *testing.T) {
+	t.Parallel()
+	seen := now.Add(-4 * time.Minute)
+	for _, tc := range []struct {
+		name string
+		rec  intent.Record
+		want time.Time
+	}{
+		{
+			name: "last sample",
+			rec:  intent.Record{Progress: &intent.Progress{SampledAt: seen, ChangedAt: seen.Add(-6 * time.Minute)}},
+			want: seen,
+		},
+		{
+			name: "record write",
+			rec:  intent.Record{UpdatedAt: seen},
+			want: seen,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			deadWithWork(env, "ruby")
+			env.intents["ruby"] = tc.rec
+
+			scanner(env, nil).Tick("gastown")
+
+			want := "gt-ruby gastown/ruby dead " + tc.want.Format(time.RFC3339)
+			if len(env.spans) != 1 || env.spans[0] != want {
+				t.Errorf("span closes = %v, want %q", env.spans, want)
+			}
+		})
+	}
+}
+
+// TestDeferredSeatThatRanDoneClosesItsSpanAsDone: a DEFERRED seat whose own
+// last event is a done for its bead ended its turn itself, so the attempt it
+// left open (a gt done whose span write failed) closes as done, not as a death
+// the seat did not have (gt-dz78b).
+func TestDeferredSeatThatRanDoneClosesItsSpanAsDone(t *testing.T) {
+	t.Parallel()
+	seen := now.Add(-4 * time.Minute)
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitDeferred, CleanupStatus: "clean"}
+	env.intents["ruby"] = intent.Record{Progress: &intent.Progress{SampledAt: seen}}
+	s := New(env, memLedger{}, Options{
+		Now:     func() time.Time { return now },
+		SeatCap: env.seatCapFor,
+		DoneAge: func(_, _, _ string, _ time.Time) (time.Duration, bool) { return time.Minute, true },
+	})
+
+	s.Tick("gastown")
+
+	// The done event dates the turn's end, so the close lands there rather
+	// than at the older liveness sample.
+	want := "gt-ruby gastown/ruby done " + now.Add(-time.Minute).Format(time.RFC3339)
+	if len(env.spans) != 1 || env.spans[0] != want {
+		t.Errorf("span closes = %v, want %q", env.spans, want)
+	}
+}
+
+// TestSeatNotYetConfirmedDeadKeepsItsSpanOpen: below the confirmation the seat
+// may still come back, so the attempt stays open for its own end.
+func TestSeatNotYetConfirmedDeadKeepsItsSpanOpen(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.verdicts["ruby"] = dead(1)
+	env.intents["ruby"] = intent.Record{Progress: &intent.Progress{SampledAt: now.Add(-2 * time.Minute), DeadSamples: 1}}
+
+	if r := scanner(env, nil).Tick("gastown"); len(env.spans) != 0 {
+		t.Errorf("closed spans %v for a seat one sample short of confirmation; report %v", env.spans, r.Lines())
+	}
+}
+
+// TestDeadSeatWithNoDatedEvidenceWritesNoSpan: an end the tick cannot date
+// would land before the attempt's start and read as an unpaired line, so
+// nothing is written.
+func TestDeadSeatWithNoDatedEvidenceWritesNoSpan(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+
+	scanner(env, nil).Tick("gastown")
+
+	if len(env.spans) != 0 {
+		t.Errorf("closed spans %v for a seat with no dated evidence", env.spans)
+	}
+}
+
+// TestFailedSpanCloseDoesNotStopTheRecovery: the span is a measurement, not a
+// gate — the restart goes ahead and the failure is reported beside it.
+func TestFailedSpanCloseDoesNotStopTheRecovery(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.intents["ruby"] = intent.Record{Progress: &intent.Progress{SampledAt: now.Add(-4 * time.Minute)}}
+	env.spanErr = errors.New("read-only file system")
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if got := strings.Join(env.restarts, ","); got != "ruby" {
+		t.Fatalf("restarts = %q, want ruby; report %v", got, r.Lines())
+	}
+	f := seatFinding(t, r, "ruby")
+	if f.Outcome != OutcomeRestarted || !strings.Contains(f.Detail, "dead span not closed") {
+		t.Errorf("outcome = %v (%q), want restarted naming the failed span close", f.Outcome, f.Detail)
 	}
 }
 

@@ -109,6 +109,45 @@ func TestCompletedDoneClosesTheSpanItsSlingStarted(t *testing.T) {
 	}
 }
 
+// TestEscalatedDoneClosesTheSpanItsSlingStarted: an ESCALATED exit ends the
+// attempt like any other turn — the seat stopped on a blocker — so a bead that
+// is resumed and escalated again reads as two attempts, not one that never
+// ended (gt-dz78b).
+func TestEscalatedDoneClosesTheSpanItsSlingStarted(t *testing.T) {
+	t.Parallel()
+	townRoot := escalatedTown(t)
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	seedEscalatedBead(db)
+	store := spans.New(spans.DefaultDir(townRoot), nil)
+	if err := store.Start("gt-blocked", "gastown/nux"); err != nil {
+		t.Fatalf("start span: %v", err)
+	}
+
+	runEscalatedDone(t, db, filepath.Join(townRoot, "gastown"), townRoot)
+
+	events := readSpanLog(t, townRoot, "gt-blocked")
+	if len(events) != 2 {
+		t.Fatalf("span log = %+v, want the start and one end", events)
+	}
+	if end := events[1]; end.Event != spans.EventEnd || end.Reason != string(spans.ReasonEscalated) || end.Seat != "gastown/nux" {
+		t.Errorf("end event = %+v, want gastown/nux closing with reason %q", end, spans.ReasonEscalated)
+	}
+	sum, err := store.Summarize("gt-blocked")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if len(sum.Attempts) != 1 || sum.Attempts[0].Open || sum.LowerBound {
+		t.Errorf("summary = %+v, want one closed attempt", sum)
+	}
+
+	// The bead stays open for the operator, so gt done can run again: the
+	// attempt it would find is already ended, and a second end is not written.
+	runEscalatedDone(t, db, filepath.Join(townRoot, "gastown"), townRoot)
+	if again := readSpanLog(t, townRoot, "gt-blocked"); len(again) != 2 {
+		t.Errorf("span log = %+v after a repeated escalated exit, want it unchanged", again)
+	}
+}
+
 // TestCompletedDoneWritesNoSecondEnd: a repeated gt done on the same submitted
 // bead finds the attempt already closed, so it leaves the log alone instead of
 // appending an end pair every run.
