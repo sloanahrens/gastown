@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/land"
@@ -107,12 +108,17 @@ func TestBeadNoteAndUpdate(t *testing.T) {
 	}
 }
 
-// untouchableStore fails the test on any Update, and panics on any other
-// method the embedded nil Client would be asked for, so a call that reaches
-// the store before the refusal cannot pass unnoticed.
+// untouchableStore fails the test on any Create or Update, and panics on any
+// other method the embedded nil Client would be asked for, so a call that
+// reaches the store before the refusal cannot pass unnoticed.
 type untouchableStore struct {
 	beads.Client
 	t *testing.T
+}
+
+func (s untouchableStore) Create(beads.CreateOptions) (*beads.Issue, error) {
+	s.t.Errorf("create reached the store")
+	return &beads.Issue{ID: "gt-unexpected"}, nil
 }
 
 func (s untouchableStore) Update(id string, _ beads.UpdateOptions) error {
@@ -123,6 +129,7 @@ func (s untouchableStore) Update(id string, _ beads.UpdateOptions) error {
 func TestBeadUpdateRefusesBlankAcceptance(t *testing.T) {
 	t.Parallel()
 	for _, blank := range []string{"", "   ", "\n\t"} {
+		blank := blank
 		t.Run(fmt.Sprintf("%q", blank), func(t *testing.T) {
 			t.Parallel()
 			fake := beadsfake.New()
@@ -137,6 +144,9 @@ func TestBeadUpdateRefusesBlankAcceptance(t *testing.T) {
 			if err == nil {
 				t.Fatal("a blank acceptance succeeded")
 			}
+			if !strings.Contains(err.Error(), "--acceptance") {
+				t.Errorf("error %q does not name --acceptance", err)
+			}
 			if !strings.Contains(err.Error(), "not changed") {
 				t.Errorf("error %q does not say the criteria were not changed", err)
 			}
@@ -145,6 +155,120 @@ func TestBeadUpdateRefusesBlankAcceptance(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBeadCreateRefusesBlankAcceptance(t *testing.T) {
+	t.Parallel()
+	for _, blank := range []string{"", "   ", "\n\t"} {
+		blank := blank
+		t.Run(fmt.Sprintf("%q", blank), func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			v := &beadVerbs{client: untouchableStore{t: t}, out: &out}
+			err := v.create(beadCreateRequest{title: "work", acceptance: blank, acceptanceSet: true})
+			if err == nil {
+				t.Fatal("a blank acceptance created a bead")
+			}
+			if !strings.Contains(err.Error(), "--acceptance") {
+				t.Errorf("error %q does not name --acceptance", err)
+			}
+		})
+	}
+
+	// A create that omits the flag is not a request for a blank block.
+	t.Run("omitted", func(t *testing.T) {
+		t.Parallel()
+		v, fake, out := testBeadVerbs("me")
+		if err := v.create(beadCreateRequest{title: "work", quiet: true}); err != nil {
+			t.Fatal(err)
+		}
+		id := strings.TrimSpace(out.String())
+		if got := mustShowBead(t, fake, id).AcceptanceCriteria; got != "" {
+			t.Errorf("acceptance criteria = %q, want none", got)
+		}
+	})
+}
+
+// TestBeadFlagMapping covers the mapping each write verb does before it
+// reaches a store. An omitted --acceptance must stay nil so update leaves the
+// criteria alone, and an explicit blank one must arrive non-nil so the verb
+// refuses it (gt-aht2p). The flags come from the same registration the
+// commands use, so the test cannot drift from them.
+func TestBeadFlagMapping(t *testing.T) {
+	t.Parallel()
+	newUpdateFlags := func() *pflag.FlagSet {
+		f := pflag.NewFlagSet("update", pflag.ContinueOnError)
+		beadUpdateFlags(f)
+		return f
+	}
+	t.Run("update omits acceptance", func(t *testing.T) {
+		if got := beadUpdateOptions(newUpdateFlags()).Acceptance; got != nil {
+			t.Errorf("omitted --acceptance mapped to %q, want nil", *got)
+		}
+	})
+	t.Run("update keeps a blank acceptance for the verb to refuse", func(t *testing.T) {
+		f := newUpdateFlags()
+		if err := f.Set("acceptance", ""); err != nil {
+			t.Fatal(err)
+		}
+		got := beadUpdateOptions(f).Acceptance
+		if got == nil || *got != "" {
+			t.Fatalf("--acceptance= mapped to %v, want a pointer to the blank value", got)
+		}
+	})
+	t.Run("update maps given values", func(t *testing.T) {
+		f := newUpdateFlags()
+		given := map[string]string{
+			"title": "DISPROVEN: x", "priority": "1", "acceptance": "- [ ] x",
+			"add-label": "l1", "remove-label": "l2",
+		}
+		for flag, value := range given {
+			if err := f.Set(flag, value); err != nil {
+				t.Fatal(err)
+			}
+		}
+		opts := beadUpdateOptions(f)
+		if opts.Title == nil || *opts.Title != given["title"] {
+			t.Errorf("title = %v, want %q", opts.Title, given["title"])
+		}
+		if opts.Priority == nil || *opts.Priority != 1 {
+			t.Errorf("priority = %v, want 1", opts.Priority)
+		}
+		if opts.Acceptance == nil || *opts.Acceptance != given["acceptance"] {
+			t.Errorf("acceptance = %v, want %q", opts.Acceptance, given["acceptance"])
+		}
+		if !reflect.DeepEqual(opts.AddLabels, []string{"l1"}) || !reflect.DeepEqual(opts.RemoveLabels, []string{"l2"}) {
+			t.Errorf("labels to add %v, remove %v", opts.AddLabels, opts.RemoveLabels)
+		}
+	})
+
+	newCreateFlags := func() *pflag.FlagSet {
+		f := pflag.NewFlagSet("create", pflag.ContinueOnError)
+		beadCreateFlags(f)
+		return f
+	}
+	t.Run("create omits acceptance", func(t *testing.T) {
+		r, err := beadCreateRequestFrom(newCreateFlags(), []string{"work"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.acceptanceSet {
+			t.Error("omitted --acceptance mapped as set")
+		}
+	})
+	t.Run("create marks an explicit blank acceptance", func(t *testing.T) {
+		f := newCreateFlags()
+		if err := f.Set("acceptance", ""); err != nil {
+			t.Fatal(err)
+		}
+		r, err := beadCreateRequestFrom(f, []string{"work"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !r.acceptanceSet {
+			t.Error("--acceptance= mapped as unset, so the store would drop it")
+		}
+	})
 }
 
 func TestBeadClaim(t *testing.T) {
