@@ -771,6 +771,14 @@ type Daemon struct {
 	// keyed by its last-run key (patrol_scan.go).
 	ghGatesRun sync.Map
 
+	// samplerPatrol is the resource_sampler patrol's sampler and pacing,
+	// built on its first tick. newResourceSampler builds it: nil means the
+	// host's own ps, and a test sets it to hand the patrol a fake
+	// (resource_sampler.go).
+	samplerPatrol      *resourceSamplerPatrol
+	resourceSamplerMu  sync.Mutex
+	newResourceSampler newResourceSamplerFn
+
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
 	// predicate, so checkUpgradeRestart holds a restart for it separately, up
@@ -1476,6 +1484,19 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Patrol scan ticker started (interval %v)", interval)
 	}
 
+	// Start the resource sampler ticker if enabled (default on, gt-qqwey). Its
+	// own ticker, not the heartbeat: the heartbeat is minutes apart and a row's
+	// cpu_pct is the delta over the interval since the previous row.
+	var resourceSamplerTicker *time.Ticker
+	var resourceSamplerChan <-chan time.Time
+	if d.isPatrolActive("resource_sampler") {
+		interval := resourceSamplerInterval(d.patrolConfig)
+		resourceSamplerTicker = time.NewTicker(interval)
+		resourceSamplerChan = resourceSamplerTicker.C
+		defer resourceSamplerTicker.Stop()
+		d.logger.Printf("Resource sampler ticker started (interval %v)", interval)
+	}
+
 	// No tmux pane-died respawn hooks: a dead session is restarted by the
 	// heartbeat through the supervisor, within its budget (gt-4k3fj.3).
 
@@ -1595,6 +1616,13 @@ func (d *Daemon) Run() (err error) {
 			// its own goroutine (gt-a6fg7).
 			if !d.isShutdownInProgress() {
 				d.triggerOverseerReport()
+			}
+
+		case <-resourceSamplerChan:
+			// Resource sampler — appends the host's CPU and memory rows for
+			// the metrics snapshot (gt-qqwey).
+			if !d.isShutdownInProgress() {
+				d.triggerResourceSampler()
 			}
 
 		case <-patrolScanChan:

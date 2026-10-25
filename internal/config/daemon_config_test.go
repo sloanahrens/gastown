@@ -368,6 +368,28 @@ func TestDaemonPatrolConfigDecodesEventsPrune(t *testing.T) {
 	}
 }
 
+// resource_sampler (gt-qqwey) decodes with the patrol schema's fields, and a
+// daemon.json without it still decodes (the daemon then runs it on defaults).
+func TestDaemonPatrolConfigDecodesResourceSampler(t *testing.T) {
+	t.Parallel()
+	body := `{"patrols":{"resource_sampler":{"enabled":true,"interval":"10s"}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := cfg.Patrols.ResourceSampler; got == nil || !got.Enabled || got.Interval != "10s" {
+		t.Errorf("resource_sampler = %+v, want enabled with interval 10s", got)
+	}
+
+	var absent DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"handler":{"enabled":true}}}`), &absent); err != nil {
+		t.Fatalf("decode without resource_sampler: %v", err)
+	}
+	if absent.Patrols.ResourceSampler != nil {
+		t.Errorf("absent key decoded as %+v", absent.Patrols.ResourceSampler)
+	}
+}
+
 // overseer_report (gt-a6fg7) decodes strictly with its own fields, and a
 // config without it leaves the patrol unset, which the daemon reads as off.
 func TestDaemonPatrolConfigDecodesOverseerReport(t *testing.T) {
