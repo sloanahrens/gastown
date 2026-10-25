@@ -13,16 +13,17 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// liveTown is the scrubbed copy of the operator town's files that
+// fixtureTown is the scrubbed copy of the operator town's files that
 // internal/config's strict-decoding tests also use.
-const liveTown = "../config/testdata/livetown"
+const fixtureTown = "../config/testdata/livetown"
 
-// copyLiveTown copies the live town's town-level files into a temp town.
-func copyLiveTown(t *testing.T) string {
+// copyFixtureTown copies the fixture's town-level files into a temp town, so a
+// test that writes a record leaves the shared fixture alone.
+func copyFixtureTown(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	for _, f := range []string{FileTown, FileRigs, FileSettings, FileDaemon, FileDaemonEnv, FileDolt} {
-		data, err := os.ReadFile(filepath.Join(liveTown, f))
+		data, err := os.ReadFile(filepath.Join(fixtureTown, f))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -42,9 +43,9 @@ func write(t *testing.T, root, rel, body string) {
 	}
 }
 
-func TestLoadAcceptsTheLiveTown(t *testing.T) {
+func TestLoadAcceptsTheFixtureTown(t *testing.T) {
 	t.Parallel()
-	town, err := Load(liveTown)
+	town, err := Load(fixtureTown)
 	if err != nil {
 		t.Fatalf("Load(live town) = %v", err)
 	}
@@ -83,7 +84,7 @@ func TestLoadAcceptsTheLiveTown(t *testing.T) {
 
 func TestUnknownRigIsAnErrorNeverGt(t *testing.T) {
 	t.Parallel()
-	town, err := Load(liveTown)
+	town, err := Load(fixtureTown)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +99,7 @@ func TestUnknownRigIsAnErrorNeverGt(t *testing.T) {
 
 func TestRigWithoutPrefixIsAnError(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	write(t, root, FileRigs, `{"version":1,"rigs":{"bare":{"git_url":"x","added_at":"2026-01-01T00:00:00Z"}}}`)
 	town, err := Load(root)
 	if err != nil {
@@ -111,7 +112,7 @@ func TestRigWithoutPrefixIsAnError(t *testing.T) {
 
 func TestDuplicateRigPrefixFailsLoad(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	write(t, root, FileRigs, `{"version":1,"rigs":{
 		"a":{"git_url":"x","added_at":"2026-01-01T00:00:00Z","beads":{"repo":"local","prefix":"dup-"}},
 		"b":{"git_url":"y","added_at":"2026-01-01T00:00:00Z","beads":{"repo":"local","prefix":"dup"}}}}`)
@@ -184,7 +185,7 @@ func TestEachBrokenFileFailsClosedWithOneLine(t *testing.T) {
 		FileDolt:      "listener:\n  port: 3307\n  prot: 1\n",
 	}
 	for file, body := range broken {
-		root := copyLiveTown(t)
+		root := copyFixtureTown(t)
 		write(t, root, file, body)
 		_, err := Load(root)
 		if !errors.Is(err, config.ErrUnparseable) {
@@ -203,7 +204,7 @@ func TestEachBrokenFileFailsClosedWithOneLine(t *testing.T) {
 
 func TestTwoBrokenFilesGiveTwoLines(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	write(t, root, FileSettings, "{,}")
 	write(t, root, FileDaemon, "{,}")
 	_, err := Load(root)
@@ -222,7 +223,7 @@ func TestTwoBrokenFilesGiveTwoLines(t *testing.T) {
 // dispatching on a value the plugin would ignore (gt-y3pgh.12).
 func TestRefusedPoolPolicyFailsClosedAtLoad(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	write(t, root, FileSettings, `{"type":"town-settings","version":1,"polecat_pool":{"seats":{"claude":{"cap":2}},"max_priority":-1}}`)
 	_, err := Load(root)
 	if err == nil {
@@ -246,7 +247,7 @@ func TestRefusedPoolPolicyFailsClosedAtLoad(t *testing.T) {
 
 func TestAccessorsReturnCopies(t *testing.T) {
 	t.Parallel()
-	town, err := Load(liveTown)
+	town, err := Load(fixtureTown)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +277,7 @@ func TestAccessorsReturnCopies(t *testing.T) {
 func TestCheckRefusesAnUnreadableFile(t *testing.T) {
 	t.Parallel()
 	for _, file := range []string{FileTown, FileRigs, FileSettings, FileDaemonEnv, FileDolt, FileDaemon} {
-		root := copyLiveTown(t)
+		root := copyFixtureTown(t)
 		path := filepath.Join(root, file)
 		if err := os.Remove(path); err != nil {
 			t.Fatal(err)
@@ -295,7 +296,7 @@ func TestCheckRefusesAnUnreadableFile(t *testing.T) {
 // only for a town.json without one (gt-y3pgh.3).
 func TestDoltEndpointTownJSONWins(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	write(t, root, FileTown, `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","dolt":{"host":"127.0.0.2","port":5507}}`)
 	town, err := Load(root)
 	if err != nil {
@@ -323,7 +324,7 @@ func TestTownJSONRejectsNonPortDolt(t *testing.T) {
 // the same town from mayor/town.json and settings/config.json alone.
 func TestLoadReadsTheTwoFileLayout(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	before, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
@@ -373,7 +374,7 @@ func TestLoadReadsTheTwoFileLayout(t *testing.T) {
 // through the same loader, so this covers both layouts.
 func TestLoadDecodesWorktreeCleanupBlock(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	path := filepath.Join(root, FileDaemon)
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -415,7 +416,7 @@ func TestLoadDecodesWorktreeCleanupBlock(t *testing.T) {
 // (gt-mukgk); the same pool with a valid map, or none, loads.
 func TestRefusedSeatMapFailsClosedAtLoad(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	write(t, root, FileSettings, `{"type":"town-settings","version":1,"polecat_pool":{"seats":{"no-such-agent":{"cap":1}}}}`)
 	_, err := Load(root)
 	if err == nil {
@@ -480,7 +481,7 @@ func TestScheduledRunAgentMustHaveASeat(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			root := copyLiveTown(t)
+			root := copyFixtureTown(t)
 			write(t, root, FileSettings, settings)
 			if tt.noSettings {
 				if err := os.Remove(filepath.Join(root, FileSettings)); err != nil {

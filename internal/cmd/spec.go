@@ -1002,6 +1002,14 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s (%s)", id, specdispatch.SkipNotEligible, why)})
 			continue
 		}
+		// A held rig is skipped before any read or write of its beads, and
+		// before the per-tick limit below: the hold, not the tick's seat count,
+		// is what stops these beads, so their skip line names the hold rather
+		// than a limit that would hide it (gt-vty1v).
+		if hold := env.RigHold(c.Rig); hold != "" {
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %s", id, specdispatch.SkipRigHold, hold)})
+			continue
+		}
 		// A bead may declare the formula that runs it. A declaration the tick
 		// cannot read, or a formula the rig does not have, is a skip with its
 		// reason: the bead stays ready and is never slung with the wrong
@@ -1137,10 +1145,6 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 				limit = specdispatch.SkipNoSeat + " no free seat this tick"
 			}
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, limit)})
-			continue
-		}
-		if hold := env.RigHold(c.Rig); hold != "" {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %s", id, specdispatch.SkipRigHold, hold)})
 			continue
 		}
 		// A bead whose last sling failed at session start rests out its backoff

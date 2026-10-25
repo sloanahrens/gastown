@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 const specTestDescription = "## Goal\nA thing.\n\n## Constraints\nGo.\n\n## Out of scope\nNone.\n\n## Gate\nmake gate\n\n## Size\none worker, one MR"
@@ -77,7 +78,10 @@ type fakeSpecTown struct {
 	rosterErr error
 	hold      string
 	rigHold   map[string]string
-	revert    map[string]*specdispatch.Revert
+	// rigOf is each bead's rig; a bead absent here is in gastown, the rig most
+	// fixtures use.
+	rigOf  map[string]string
+	revert map[string]*specdispatch.Revert
 	// children is each bead's direct child set, and childErrs a per-bead
 	// children read failure, for the container rule.
 	children map[string][]specdispatch.Child
@@ -149,6 +153,14 @@ type specSlingRecord struct {
 	run    specdispatch.FormulaRun
 }
 
+// rigOfBead is id's rig, gastown unless the test says otherwise.
+func (f *fakeSpecTown) rigOfBead(id string) string {
+	if rig := f.rigOf[id]; rig != "" {
+		return rig
+	}
+	return "gastown"
+}
+
 func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	f := &fakeSpecTown{specs: map[string]specdispatch.Spec{}, rigHold: map[string]string{}, revert: map[string]*specdispatch.Revert{},
 		slingErrs: map[string][]error{}, originBranches: map[string]bool{}, notes: map[string][]string{}, labels: map[string][]string{},
@@ -186,14 +198,14 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 				} else if specdispatch.BoardCarried(s) {
 					// specCandidates reports a board-carried refusal rather
 					// than dropping it unseen (gt-k1g3e).
-					skipped = append(skipped, specDispatchEntry{Bead: s.ID, Rig: "gastown", Line: fmt.Sprintf("%s: not eligible (%s)", s.ID, why)})
+					skipped = append(skipped, specDispatchEntry{Bead: s.ID, Rig: f.rigOfBead(s.ID), Line: fmt.Sprintf("%s: not eligible (%s)", s.ID, why)})
 				}
 			}
 			specdispatch.Order(list)
 			sort.Slice(skipped, func(i, j int) bool { return skipped[i].Bead < skipped[j].Bead })
 			out := make([]specCandidate, 0, len(list))
 			for _, s := range list {
-				out = append(out, specCandidate{Spec: s, Rig: "gastown"})
+				out = append(out, specCandidate{Spec: s, Rig: f.rigOfBead(s.ID)})
 			}
 			return specBoardRead{Candidates: out, LabeledFailed: labeled, Skipped: skipped}
 		},
@@ -1603,6 +1615,50 @@ func TestSpecDispatchHoldsAndExclusions(t *testing.T) {
 	f = newFakeSpecTown(retired)
 	if r := runSpecDispatchCycle(f.env()); len(f.slung) != 1 {
 		t.Fatalf("the retired label still held a bead: slung %v report %+v", f.slung, r)
+	}
+}
+
+// A rig held out of new dispatches has its candidate skipped while another
+// rig's bead in the same tick is dispatched: the tick reads the hold record
+// off the registry (dispatch.RigHold), so the hold stops gastown and leaves
+// devops alone (gt-vty1v acceptance 3).
+func TestSpecDispatchHeldRigSkipsOnlyItsCandidates(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	data, err := json.Marshal(&config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{"gastown": {}, "devops": {}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "rigs.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := townconfig.Hold(townRoot, "gastown", config.RigDispatchHold{
+		Since: specTestNow, By: "sloan", Reason: "drain the landing backlog",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	f := newFakeSpecTown(
+		cleanSpec("gt-held", 1, "2026-09-29T10:00:00Z"),
+		cleanSpec("dv-open", 1, "2026-09-29T11:00:00Z"),
+	)
+	f.rigOf = map[string]string{"gt-held": "gastown", "dv-open": "devops"}
+	env := f.env()
+	env.RigHold = func(rig string) string { return dispatch.RigHold(townRoot, rig) }
+	env.PerTick = 2
+
+	report := runSpecDispatchCycle(env)
+
+	if len(f.slung) != 1 || f.slung[0] != "dv-open" {
+		t.Errorf("slung = %v, want the devops candidate alone", f.slung)
+	}
+	if len(report.Skipped) != 1 || report.Skipped[0].Bead != "gt-held" || report.Skipped[0].Rig != "gastown" {
+		t.Fatalf("skipped = %+v, want the held gastown candidate alone", report.Skipped)
+	}
+	line := report.Skipped[0].Line
+	if !strings.Contains(line, specdispatch.SkipRigHold) || !strings.Contains(line, "drain the landing backlog") ||
+		!strings.Contains(line, "gt rig release gastown") {
+		t.Errorf("skip line = %q, want a rig hold naming the reason and the release command", line)
 	}
 }
 

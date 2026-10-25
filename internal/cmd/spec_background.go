@@ -193,10 +193,11 @@ func parseSpecSlingJob(raw string) (specSlingJob, error) {
 	return job, nil
 }
 
-// specSlingHold is the reason a planned sling is not made: the operator hold or
-// an ESTOP set after the tick planned it stops it as it stops the tick.
-func specSlingHold(townRoot string) *specDispatchReport {
-	if hold := dispatch.OperatorHold(townRoot); hold != "" {
+// specSlingHold is the reason a planned sling is not made: a hold set after the
+// tick planned it — the town-wide one, the rig's ESTOP, or the rig's dispatch
+// hold (dispatch.RigHold) — stops it as it stops the tick.
+func specSlingHold(townRoot, rig string) *specDispatchReport {
+	if hold := dispatch.RigHold(townRoot, rig); hold != "" {
 		return &specDispatchReport{Hold: hold}
 	}
 	return nil
@@ -229,7 +230,7 @@ func runSpecSling(cmd *cobra.Command, _ []string) error {
 		Sleep: time.Sleep,
 		Now:   time.Now,
 	}
-	if held := specSlingHold(townRoot); held != nil {
+	if held := specSlingHold(townRoot, job.Rig); held != nil {
 		return printSpecSlingReport(cmd, *held)
 	}
 	report := runSpecSlingJob(env, job)

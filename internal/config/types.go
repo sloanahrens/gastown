@@ -585,6 +585,10 @@ type RigEntry struct {
 	// nothing for it. gt rig park and gt rig unpark are its only writers
 	// (gt-y3pgh.4, D5 Q5); everything else reads it through townconfig.
 	Parked *RigParked `json:"parked,omitempty"`
+	// DispatchHold is set while new automatic dispatches skip the rig. gt rig
+	// hold and gt rig release are its only writers (gt-vty1v); automatic
+	// dispatchers read it through dispatch.RigHold. It never changes Parked.
+	DispatchHold *RigDispatchHold `json:"dispatch_hold,omitempty"`
 	// DoltDatabase is the rig's database on the town Dolt server, absorbed
 	// from the dolt_database of its bd .beads/metadata.json (gt-y3pgh.11, D5
 	// Q3). gt rig add, gt config migrate and gt doctor fix rig-database write it;
@@ -595,6 +599,15 @@ type RigEntry struct {
 
 // RigParked records who parked a rig, when, and why.
 type RigParked struct {
+	Since  time.Time `json:"since"`
+	By     string    `json:"by"`
+	Reason string    `json:"reason"`
+}
+
+// RigDispatchHold records who held a rig out of new automatic dispatches,
+// when, and why (gt-vty1v). It is a record of its own, separate from
+// RigParked.
+type RigDispatchHold struct {
 	Since  time.Time `json:"since"`
 	By     string    `json:"by"`
 	Reason string    `json:"reason"`

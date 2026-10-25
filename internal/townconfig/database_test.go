@@ -51,7 +51,7 @@ func registryDatabases(t *testing.T, root string) map[string]string {
 // registry entry and metadata.json is left for bd.
 func TestMigrateThenAbsorbRecordsLiveRigDatabases(t *testing.T) {
 	t.Parallel()
-	root := withBDMetadata(t, copyLiveTown(t))
+	root := withBDMetadata(t, copyFixtureTown(t))
 	if got := registryDatabases(t, root); len(got) != 0 {
 		t.Fatalf("live registry already names databases: %v", got)
 	}
@@ -100,7 +100,7 @@ func TestMigrateThenAbsorbRecordsLiveRigDatabases(t *testing.T) {
 // own metadata.json.
 func TestDatabaseForBeadsDirReadsTheRegistry(t *testing.T) {
 	t.Parallel()
-	root := withBDMetadata(t, copyLiveTown(t))
+	root := withBDMetadata(t, copyFixtureTown(t))
 	if _, err := AbsorbRigDatabases(root, false); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestDatabaseForBeadsDirReadsTheRegistry(t *testing.T) {
 // move too, through the rigs.json writer.
 func TestAbsorbOnAFiveFileTownWritesRigsJSON(t *testing.T) {
 	t.Parallel()
-	root := withBDMetadata(t, copyLiveTown(t))
+	root := withBDMetadata(t, copyFixtureTown(t))
 	if _, err := AbsorbRigDatabases(root, false); err != nil {
 		t.Fatal(err)
 	}

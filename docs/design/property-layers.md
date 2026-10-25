@@ -108,7 +108,7 @@ labels:
 
 These beads sync via git, so all clones of the rig see the same state.
 
-## Two-Level Rig Control
+## Rig Control
 
 ### Level 1: Park (Town-Local)
 
@@ -128,6 +128,27 @@ gt rig unpark gastown                          # allow dispatch and auto-start
 - Older gt versions stored park as `"status": "parked"` in
   `.beads-wisp/config/<rig>.json`. Such a rig still reads as parked;
   `gt rig park --migrate` moves the record into `mayor/rigs.json`.
+
+### Level 1b: Dispatch Hold (Town-Local, Dispatch Only)
+
+```bash
+gt rig hold gastown --reason "drain the landing backlog"   # new automatic dispatches skip the rig
+gt rig release gastown                                     # automatic dispatch resumes
+```
+
+- Stored as a `dispatch_hold` record `{since, by, reason}` on the rig's entry
+  in `mayor/rigs.json` (gt-vty1v). `gt rig hold` / `gt rig release` are its only
+  writers.
+- Stops the automatic dispatchers only — the spec dispatcher, its background
+  slings and the daemon's scheduled slings read it through `dispatch.RigHold`.
+  Running polecats, the daemon's auto-start and a `gt sling` an operator types
+  are untouched, which is the difference from park.
+- Read off the registry (`townconfig.DispatchHeldReason`), failing closed: a
+  registry that is present and does not load holds the rig. The town-wide
+  operator hold file wins over every rig's record.
+- The hold and the park record are separate: each command owns one and neither
+  changes the other.
+- Use: let a landing backlog drain while running work finishes
 
 ### Level 2: Dock (Global, Persistent)
 
