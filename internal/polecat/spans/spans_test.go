@@ -8,8 +8,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/gofrs/flock"
 )
 
 var testEpoch = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
@@ -486,8 +484,8 @@ func TestAppend_SerializesOnThePerBeadLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	held := flock.New(filepath.Join(dir, "gt-abc.jsonl.lock"))
-	if err := held.Lock(); err != nil {
+	held, err := lockLog(filepath.Join(dir, "gt-abc.jsonl.lock"))
+	if err != nil {
 		t.Fatalf("locking the span log: %v", err)
 	}
 
@@ -495,14 +493,12 @@ func TestAppend_SerializesOnThePerBeadLock(t *testing.T) {
 	go func() { done <- st.End("gt-abc", "organic", ReasonDone, testEpoch.Add(time.Second)) }()
 	select {
 	case err := <-done:
-		_ = held.Unlock()
+		held.unlock()
 		t.Fatalf("End completed while another holder had the log's lock: %v", err)
 	//testpolicy:allow no-sleep — a lock the writer must wait on has no event to select on
 	case <-time.After(50 * time.Millisecond):
 	}
-	if err := held.Unlock(); err != nil {
-		t.Fatalf("unlocking the span log: %v", err)
-	}
+	held.unlock()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -679,9 +675,12 @@ func TestSummarize_MissingLogIsZeroAttempts(t *testing.T) {
 	}
 }
 
-// TestStartEnd_RejectASeatThatIsNotOneToken: the seat keys the start/end
-// pairing and is shown to operators, so whitespace and control characters are
-// refused as a bead id that is not a path component is.
+// TestStartEnd_RejectASeatThatIsNotOneToken: a new attempt names its seat as one
+// token, since the seat keys the start/end pairing and is shown to operators, so
+// whitespace and control characters are refused as a bead id that is not a path
+// component is. A close refuses only an empty seat: a log written before this
+// rule can hold an attempt under a seat with a space in it, and that attempt
+// must still be closable (gt-rm0ab).
 func TestStartEnd_RejectASeatThatIsNotOneToken(t *testing.T) {
 	t.Parallel()
 	st := New(t.TempDir(), fixedClock{at: testEpoch})
@@ -691,12 +690,12 @@ func TestStartEnd_RejectASeatThatIsNotOneToken(t *testing.T) {
 		if err := st.Start("gt-abc", seat); err == nil {
 			t.Errorf("Start(%q) = nil, want an error", seat)
 		}
-		if err := st.End("gt-abc", seat, ReasonDone, testEpoch); err == nil {
-			t.Errorf("End(%q) = nil, want an error", seat)
-		}
-		if _, err := st.EndOpen("gt-abc", seat, ReasonDead, testEpoch); err == nil {
-			t.Errorf("EndOpen(%q) = nil error, want an error", seat)
-		}
+	}
+	if err := st.End("gt-abc", "", ReasonDone, testEpoch); err == nil {
+		t.Errorf("End(\"\") = nil, want an error")
+	}
+	if _, err := st.EndOpen("gt-abc", "", ReasonDead, testEpoch); err == nil {
+		t.Errorf("EndOpen(\"\") = nil error, want an error")
 	}
 	if err := st.Start("gt-abc", "gastown/polecats/organic"); err != nil {
 		t.Errorf("Start rejected the rig/name seat: %v", err)
@@ -750,5 +749,33 @@ func TestSummarize_ReadsALegacySeatWithAWhitespaceAsItDid(t *testing.T) {
 	}
 	if sum.Secs != 30 || len(sum.Attempts) != 1 {
 		t.Errorf("summary = %+v, want the one 30s attempt", sum)
+	}
+}
+
+// An attempt a log holds under a seat with a space in it can still be closed:
+// the close refuses only an empty seat, so the attempt does not stay open
+// forever behind the whitespace rule (gt-rm0ab).
+func TestEndOpen_ClosesALegacySeatWithAWhitespace(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	bead := "gt-abc"
+	writeLog(t, dir, bead, logLines(t,
+		event{Bead: bead, Seat: "old seat", Event: EventStart, At: formatTime(testEpoch)},
+	))
+	st := New(dir, fixedClock{at: testEpoch.Add(time.Minute)})
+
+	closed, err := st.EndOpen(bead, "old seat", ReasonDone, testEpoch.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("EndOpen on a legacy seat: %v", err)
+	}
+	if !closed {
+		t.Fatal("EndOpen found no open attempt under the legacy seat")
+	}
+	sum, err := st.Summarize(bead)
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Secs != 30 || len(sum.Attempts) != 1 || sum.Attempts[0].Open {
+		t.Errorf("summary = %+v, want the legacy attempt closed at 30s", sum)
 	}
 }

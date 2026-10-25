@@ -19,7 +19,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -96,7 +95,7 @@ func (s *Store) End(bead, seat string, reason Reason, at time.Time) error {
 	if err := validateBead(bead); err != nil {
 		return err
 	}
-	if err := validateSeat(seat, bead); err != nil {
+	if err := requireSeat(seat, bead); err != nil {
 		return err
 	}
 	if !validReason(reason) {
@@ -118,7 +117,7 @@ func (s *Store) End(bead, seat string, reason Reason, at time.Time) error {
 // dated before its start would be skipped on read instead of closing the
 // attempt.
 func (s *Store) EndOpen(bead, seat string, reason Reason, at time.Time) (bool, error) {
-	if err := validateSeat(seat, bead); err != nil {
+	if err := requireSeat(seat, bead); err != nil {
 		return false, err
 	}
 	sum, err := s.Summarize(bead)
@@ -308,11 +307,11 @@ func (s *Store) append(bead string, ev event) error {
 		return fmt.Errorf("creating polecat spans directory %s: %w", s.dir, err)
 	}
 	path := s.path(bead)
-	fl := flock.New(path + ".lock")
-	if err := fl.Lock(); err != nil {
+	lk, err := lockLog(path + ".lock")
+	if err != nil {
 		return fmt.Errorf("locking polecat span log for %q: %w", bead, err)
 	}
-	defer fl.Unlock() //nolint:errcheck // best-effort unlock
+	defer lk.unlock()
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("opening polecat span log for %q: %w", bead, err)
@@ -345,6 +344,17 @@ func validateSeat(seat, bead string) error {
 		return unicode.IsSpace(r) || unicode.IsControl(r)
 	}) >= 0 {
 		return fmt.Errorf("polecat spans: seat %q for bead %q contains whitespace or a control character", seat, bead)
+	}
+	return nil
+}
+
+// requireSeat is the check a close applies: the seat is non-empty. A close names
+// an attempt the log already holds, and a log written before the whitespace
+// rule (validateSeat, applied to new starts only) can hold a seat with a space in
+// it; refusing the close would leave that attempt open forever.
+func requireSeat(seat, bead string) error {
+	if seat == "" {
+		return fmt.Errorf("polecat spans: empty seat for bead %q", bead)
 	}
 	return nil
 }
