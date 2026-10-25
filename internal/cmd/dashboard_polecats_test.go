@@ -391,6 +391,35 @@ func TestBuildDashPolecatsDatesAQueuedRowByItsSubmit(t *testing.T) {
 	}
 }
 
+// A queued row whose last write does not parse has no submit clock the page can
+// read, so it dates the wait from the hook. The row says so: the fallback must
+// not pass for the submit time (gt-uqmdg).
+func TestBuildDashPolecatsSaysWhenAQueuedRowsLastWriteDoesNotParse(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 25, 18, 0, 0, 0, time.UTC)
+	got := buildDashPolecats(dashPolecatInputs{
+		Now: now, SessionsKnown: true, Ready: map[string]bool{"gt-1": true},
+		Seats: []dashSeat{{
+			Rig: "gastown", Name: "queued", HookedAt: now.Add(-15 * time.Minute),
+			Item:  dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}),
+			Issue: &beads.Issue{ID: "gt-1", Title: "one", UpdatedAt: "yesterday evening"},
+		}},
+	})
+	if len(got) != 1 {
+		t.Fatalf("got %d polecats, want 1", len(got))
+	}
+	p := got[0]
+	if p.State != dashboard.StateQueued {
+		t.Errorf("state = %q, want queued", p.State)
+	}
+	if p.StateSince != nil {
+		t.Errorf("StateSince = %v, want nil: the last write does not parse", p.StateSince)
+	}
+	if !strings.Contains(p.Reason, "last write could not be read") {
+		t.Errorf("reason = %q, want it to say the last write could not be read", p.Reason)
+	}
+}
+
 func TestBuildDashPolecatsCarriesTheRigParkedFlag(t *testing.T) {
 	t.Parallel()
 	got := buildDashPolecats(dashPolecatInputs{
