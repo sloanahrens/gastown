@@ -35,7 +35,7 @@ func TestIntegrationCloneScriptLeavesOriginMainForGTDone(t *testing.T) {
 			t.Parallel()
 			remote := cloneReplayRemote(t, tc.branches)
 			dest := filepath.Join(t.TempDir(), "clone")
-			cmd := exec.Command("sh", "-c", cloneScript, "sh", tc.branch, remote, dest, "1000")
+			cmd := exec.Command("sh", "-c", cloneScript, "sh", tc.branch, remote, dest, strconv.Itoa(sandboxCloneDepth))
 			cmd.Env = cloneReplayEnv()
 			out, err := cmd.CombinedOutput()
 			if (err == nil) != tc.wantOK {
@@ -57,8 +57,9 @@ func TestIntegrationCloneScriptLeavesOriginMainForGTDone(t *testing.T) {
 // commit the polecat branch forked from, and runs what gt done does with
 // history: merge-base against origin/main, an ancestry check, the commit count,
 // a rebase onto origin/main, patch-id, and pushing the new commits. A depth
-// shorter than the fork distance loses the merge-base, which is why the depth
-// is generous.
+// shorter than the fork distance puts the fork point outside the shallow
+// history, and the script then refetches in full rather than hand gt done a
+// clone without a merge-base.
 func TestIntegrationShallowCloneKeepsWhatGTDoneNeeds(t *testing.T) {
 	t.Parallel()
 	const (
@@ -85,16 +86,19 @@ func TestIntegrationShallowCloneKeepsWhatGTDoneNeeds(t *testing.T) {
 		if err != nil {
 			t.Fatalf("clone script: %v", err)
 		}
-		if got := cloneReplayGit(t, dest, "rev-parse", "--is-shallow-repository"); got != "true" {
-			t.Fatalf("is-shallow-repository = %s, want true: the history is %d commits deep", got, mainCommits)
+		// The shallow file names where each history was cut. --is-shallow-repository
+		// is already true on main's shallow fetch alone, so the branch's own
+		// boundary is what catches a clone that dropped --depth.
+		boundary := cloneReplayGit(t, strings.TrimPrefix(remote, "file://"), "rev-parse",
+			fmt.Sprintf("%s~%d", openshellTestBranch, sandboxCloneDepth-1))
+		shallow, err := os.ReadFile(filepath.Join(dest, ".git", "shallow"))
+		if err != nil || !strings.Contains(string(shallow), boundary) {
+			t.Fatalf("shallow file = %q (err %v), want the branch's depth boundary %s", shallow, err, boundary)
 		}
-		// Both fetches are shallow: neither the branch nor origin/main may carry
-		// the whole history, or the clone is no cheaper than a full one.
-		for _, ref := range []string{"HEAD", "origin/main"} {
-			n, err := strconv.Atoi(cloneReplayGit(t, dest, "rev-list", "--count", ref))
-			if err != nil || n > sandboxCloneDepth+polecatWork {
-				t.Errorf("%s holds %d commits (err %v), want at most %d", ref, n, err, sandboxCloneDepth+polecatWork)
-			}
+		// origin/main's window starts exactly at the depth: a dropped --depth on
+		// the fetch fails this count, not a size bound.
+		if got := cloneReplayGit(t, dest, "rev-list", "--count", "origin/main"); got != strconv.Itoa(sandboxCloneDepth) {
+			t.Errorf("origin/main holds %s commits, want exactly the depth %d", got, sandboxCloneDepth)
 		}
 		// The first fetch is shallow too: a full clone followed by a shallow
 		// fetch of main still holds every object, which is the cost to avoid.
@@ -141,17 +145,14 @@ func TestIntegrationShallowCloneKeepsWhatGTDoneNeeds(t *testing.T) {
 		}
 	})
 
-	t.Run("a depth shorter than the fork distance loses the merge-base", func(t *testing.T) {
+	t.Run("a depth shorter than the fork distance still yields the merge-base", func(t *testing.T) {
 		t.Parallel()
 		dest, err := clone(t, forkDistance/2)
 		if err != nil {
 			t.Fatalf("clone script: %v", err)
 		}
-		cmd := exec.Command("git", "merge-base", "HEAD", "origin/main")
-		cmd.Dir = dest
-		cmd.Env = cloneReplayEnv()
-		if out, err := cmd.CombinedOutput(); err == nil {
-			t.Fatalf("merge-base succeeded at depth %d with a fork %d commits back: %s", forkDistance/2, forkDistance, out)
+		if got := cloneReplayGit(t, dest, "merge-base", "HEAD", "origin/main"); got != forkSHA {
+			t.Errorf("merge-base = %s, want the fork point %s: a depth that stops short of the fork point must refetch in full", got, forkSHA)
 		}
 	})
 }
