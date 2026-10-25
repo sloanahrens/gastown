@@ -422,3 +422,18 @@ func TestAMemoryAlreadyPresentWithTheSameValueIsReportedNotSilent(t *testing.T) 
 		t.Errorf("Skipped = %v, want the shared memory counted once", rep.Skipped)
 	}
 }
+
+func TestAnImportWithZeroTimestampsIsRefusedAndWritesNothing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool, ds := newPool(t), sample()
+	ds.Issues[0].CreatedAt = time.Time{} // what a connection that did not parse datetimes produces
+	_, err := Import(ctx, pool, ds, Options{})
+	if !errors.Is(err, api.ErrInvalid) {
+		t.Fatalf("Import = %v, want api.ErrInvalid", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, "SELECT (SELECT count(*) FROM tracker.issues) + (SELECT count(*) FROM tracker.rigs)").Scan(&n); err != nil || n != 0 {
+		t.Errorf("rows after the refused import = %d, %v; want 0", n, err)
+	}
+}

@@ -9,8 +9,9 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
-	_ "github.com/go-sql-driver/mysql" // the Dolt (MySQL protocol) driver
+	"github.com/go-sql-driver/mysql" // the Dolt (MySQL protocol) driver
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/steveyegge/gastown/tracker/migrate"
@@ -36,12 +37,31 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	return runWith(ctx, args, getenv, stdout, stderr, readDolt)
 }
 
-// readDolt opens the Dolt database named by dsn and reads it.
-func readDolt(ctx context.Context, dsn string) (*migrate.Dataset, error) {
-	db, err := sql.Open("mysql", dsn)
+// doltConfig parses dsn and forces what the importer needs of the connection:
+// datetimes parsed into times, in UTC. Without parseTime the driver returns
+// them as text and every timestamp would be lost. A parse error says the DSN
+// is unusable and never quotes it (it holds a password).
+func doltConfig(dsn string) (*mysql.Config, error) {
+	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
 		return nil, errors.New("cannot use DOLT_DSN as a connection string")
 	}
+	cfg.ParseTime = true
+	cfg.Loc = time.UTC
+	return cfg, nil
+}
+
+// readDolt opens the Dolt database named by dsn and reads it.
+func readDolt(ctx context.Context, dsn string) (*migrate.Dataset, error) {
+	cfg, err := doltConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	connector, err := mysql.NewConnector(cfg)
+	if err != nil {
+		return nil, errors.New("cannot use DOLT_DSN as a connection string")
+	}
+	db := sql.OpenDB(connector)
 	defer db.Close()
 	return migrate.Read(ctx, db)
 }

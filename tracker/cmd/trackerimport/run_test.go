@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/tracker/internal/leakcheck"
 	"github.com/steveyegge/gastown/tracker/migrate"
@@ -81,5 +82,31 @@ func TestAnUnreachableTrackerFailsWithoutLeakingItsDSN(t *testing.T) {
 	}
 	if all := err.Error() + out.String() + errb.String(); strings.Contains(all, "hunter2") || strings.Contains(all, "pgpass") {
 		t.Errorf("output leaks a password: %q", all)
+	}
+}
+
+func TestDoltConfigForcesDatetimeParsingInUTCAndKeepsTheRest(t *testing.T) {
+	t.Parallel()
+	cfg, err := doltConfig("root:pw@tcp(127.0.0.1:3307)/gt?parseTime=false&loc=America%2FChicago&timeout=5s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ParseTime || cfg.Loc != time.UTC {
+		t.Errorf("ParseTime = %v, Loc = %v; want true and UTC whatever the DSN said", cfg.ParseTime, cfg.Loc)
+	}
+	if cfg.User != "root" || cfg.Addr != "127.0.0.1:3307" || cfg.DBName != "gt" || cfg.Timeout != 5*time.Second {
+		t.Errorf("config = %+v lost something the DSN named", cfg)
+	}
+	bare, err := doltConfig("root:@tcp(127.0.0.1:1)/gt")
+	if err != nil || !bare.ParseTime {
+		t.Errorf("a DSN with no options = %+v, %v; want parseTime on", bare, err)
+	}
+}
+
+func TestDoltConfigErrorNeverQuotesTheDSN(t *testing.T) {
+	t.Parallel()
+	_, err := doltConfig("root:hunter2@tcp(127.0.0.1:3307/gt")
+	if err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("doltConfig(bad) = %v, want an error without the password", err)
 	}
 }

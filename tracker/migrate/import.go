@@ -44,6 +44,9 @@ func newReport() Report { return Report{Written: map[string]int{}, Skipped: map[
 // cannot double the data; to redo an import, start from an empty database.
 func Import(ctx context.Context, pool *pgxpool.Pool, ds *Dataset, opt Options) (Report, error) {
 	rep := newReport()
+	if err := Validate(ds); err != nil {
+		return rep, err
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return rep, fmt.Errorf("migrate: begin: %w", err)
@@ -320,4 +323,44 @@ func clampInt16(v int) int16 {
 		return math.MinInt16
 	}
 	return int16(v)
+}
+
+// Validate refuses a dataset that cannot be what a Dolt database holds: rows
+// without the timestamps every row has. This is the check that notices a Dolt
+// connection which did not parse datetimes (every time came back zero), which
+// Verify cannot: it compares the tracker with the same zeros it was given.
+func Validate(ds *Dataset) error {
+	var bad []string
+	count := func(what string, n int) {
+		if n > 0 {
+			bad = append(bad, fmt.Sprintf("%d %s", n, what))
+		}
+	}
+	zeroIssues, zeroComments, zeroEvents := 0, 0, 0
+	first := ""
+	for _, is := range ds.Issues {
+		if is.CreatedAt.IsZero() || is.UpdatedAt.IsZero() {
+			if zeroIssues == 0 {
+				first = is.ID
+			}
+			zeroIssues++
+		}
+	}
+	for _, c := range ds.Comments {
+		if c.CreatedAt.IsZero() {
+			zeroComments++
+		}
+	}
+	for _, e := range ds.Events {
+		if e.CreatedAt.IsZero() {
+			zeroEvents++
+		}
+	}
+	count("issues without created_at or updated_at", zeroIssues)
+	count("comments without created_at", zeroComments)
+	count("events without created_at", zeroEvents)
+	if len(bad) == 0 {
+		return nil
+	}
+	return api.Invalid("the Dolt data has %s (first issue: %q); the connection probably did not parse datetimes, so nothing was imported", strings.Join(bad, ", "), first)
 }

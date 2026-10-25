@@ -44,6 +44,11 @@ type listCursor struct {
 }
 
 func (c listCursor) encode() string {
+	// UTC, always: the database hands a time back in its session zone, and for
+	// an early date that zone's offset has seconds (-05:50:36 for year 1), which
+	// the RFC 3339 text in the cursor cannot carry. A cursor that decodes to a
+	// different instant makes a page repeat forever.
+	c.CreatedAt = c.CreatedAt.UTC()
 	b, _ := json.Marshal(c) // three plain fields; Marshal cannot fail
 	return base64.RawURLEncoding.EncodeToString(b)
 }
