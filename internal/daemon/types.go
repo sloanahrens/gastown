@@ -458,6 +458,13 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		if config.Patrols.RebuildGT != nil {
 			return config.Patrols.RebuildGT.Enabled
 		}
+	// resource_sampler defaults ON: the snapshot reads a silent sampler as an
+	// error, and a sampler that must be switched on cannot fill the metrics a
+	// new town needs (gt-qqwey).
+	case "resource_sampler":
+		if config.Patrols.ResourceSampler != nil {
+			return config.Patrols.ResourceSampler.Enabled
+		}
 	}
 	return true // Default: enabled
 }

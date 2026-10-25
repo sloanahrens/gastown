@@ -69,6 +69,13 @@ type PatrolsConfig struct {
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
 
+	// ResourceSampler appends the host's CPU and memory rows every interval,
+	// which the metrics snapshot's resources group reads
+	// (internal/daemon/resource_sampler.go, gt-qqwey). On when absent: the
+	// snapshot reports a silent sampler as an error, so a sampler that must be
+	// switched on would leave every new town with that error.
+	ResourceSampler *PatrolConfig `json:"resource_sampler,omitempty"`
+
 	// JevDedupe asks Jev which existing bead each new finding duplicates and
 	// logs every answer (internal/jev/dedupe). Opt-in: each pass pays for Jev
 	// calls, so only an explicit enabled:true turns it on.
