@@ -31,9 +31,9 @@ import (
 // om_threshold_<rig> column exists for that snapshot; the failure is counted.
 //
 // parked_rigs counts the rows of `gt rig list --json` whose status is "parked",
-// through Env.Run. That command finds the town from the process working
-// directory and has no flag to name another, so the snapshot must run from the
-// town root.
+// through Env.RunDir. That command finds the town from its working directory
+// and has no flag to name another, so the probe starts it in env.Town: the
+// snapshot process's own directory names the town it was started in, or none.
 type configSource struct {
 	// rigListTimeout bounds the `gt rig list` probe; zero means
 	// configRigListTimeout. Tests set it short to cut a hung command at its
@@ -228,17 +228,21 @@ func configOmThreshold(env Env, rig string) (value any, ok bool) {
 	return *doc.Threshold, true
 }
 
-// configParkedRigs counts the parked rigs in `gt rig list --json`. ok is
-// false when the command failed, missed its deadline, printed nothing, or
-// printed something that is not the array the command writes.
+// configParkedRigs counts the parked rigs in `gt rig list --json`, run in
+// env.Town so the command answers for the snapshot's town. ok is false when
+// the command failed, missed its deadline, printed nothing, or printed
+// something that is not the array the command writes.
 func (s configSource) configParkedRigs(ctx context.Context, env Env) (value any, ok bool) {
+	if env.RunDir == nil {
+		return nil, false
+	}
 	timeout := s.rigListTimeout
 	if timeout <= 0 {
 		timeout = configRigListTimeout
 	}
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	out, err := env.Run(callCtx, []string{"gt", "rig", "list", "--json"})
+	out, err := env.RunDir(callCtx, env.Town, []string{"gt", "rig", "list", "--json"})
 	if err != nil {
 		return nil, false
 	}

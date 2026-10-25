@@ -80,6 +80,12 @@ func configTestEnv(t *testing.T, files map[string]string, errs map[string]error,
 	}
 	if run != nil {
 		env.Run = run
+		env.RunDir = func(ctx context.Context, dir string, argv []string) ([]byte, error) {
+			if dir != configTestTown {
+				t.Errorf("ran %q in %q, want the snapshot's town %q", strings.Join(argv, " "), dir, configTestTown)
+			}
+			return run(ctx, argv)
+		}
 	}
 	return env
 }
@@ -303,6 +309,41 @@ func TestSourceConfigOmThresholds(t *testing.T) {
 		if !reflect.DeepEqual(got[name], value) {
 			t.Errorf("%s = %#v, want %#v", name, got[name], value)
 		}
+	}
+}
+
+// The parked count answers for the town the snapshot was given, not the
+// directory its process happens to run in: a snapshot of /town started
+// elsewhere still starts `gt rig list` in /town (gt-kj6sx).
+func TestSourceConfigParkedRigsRunsInTheSnapshotsTown(t *testing.T) {
+	settings, rigs, _, _ := configTestPaths()
+	files := map[string]string{
+		settings:              configSettingsFixture,
+		rigs:                  configRigsFixture("beads"),
+		configOmPath("beads"): `{"threshold": 0.75}`,
+	}
+	env := configTestEnv(t, files, nil, nil)
+	var ranIn []string
+	env.RunDir = func(_ context.Context, dir string, _ []string) ([]byte, error) {
+		ranIn = append(ranIn, dir)
+		return []byte(`[{"name": "beads", "status": "parked"}]`), nil
+	}
+	// The process runs somewhere that is not a town at all: only the town
+	// passed to the probe can answer.
+	t.Chdir(t.TempDir())
+
+	got, err := configSource{}.Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(ranIn) != 1 || ranIn[0] != env.Town {
+		t.Fatalf("`gt rig list` ran in %v, want once in the snapshot's town %q", ranIn, env.Town)
+	}
+	if got["parked_rigs"] != 1 {
+		t.Errorf("parked_rigs = %v, want 1", got["parked_rigs"])
+	}
+	if got["config_probe_failures"] != 0 {
+		t.Errorf("config_probe_failures = %v, want 0", got["config_probe_failures"])
 	}
 }
 

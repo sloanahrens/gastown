@@ -14,6 +14,11 @@ type Runner func(ctx context.Context, argv []string) ([]byte, error)
 // than read it back afterwards.
 type RunnerEnv func(ctx context.Context, argv, extraEnv []string) ([]byte, error)
 
+// RunnerDir runs argv in dir and returns its stdout, for a command that finds
+// what it needs from the working directory it starts in rather than from an
+// argument.
+type RunnerDir func(ctx context.Context, dir string, argv []string) ([]byte, error)
+
 // Env is everything a source reaches outside its own process. Every read of
 // the town, the clock or a file goes through these seams, so a source has no
 // os or time call of its own and its test needs no host.
@@ -26,6 +31,10 @@ type Env struct {
 	// takes it for the extract, which keeps itself inside the town by the
 	// environment it is given.
 	RunEnv RunnerEnv
+	// RunDir runs a command in the directory named. A command that resolves the
+	// town from its working directory takes it, so the snapshot's own working
+	// directory never decides which town is read.
+	RunDir RunnerDir
 	// Now is the time the snapshot is taken; Collect writes it as the record's ts.
 	Now func() time.Time
 	// ReadFile reads a whole file.
