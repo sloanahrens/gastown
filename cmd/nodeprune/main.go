@@ -96,7 +96,7 @@ func crictl(context, node string, args ...string) ([]byte, error) {
 }
 
 func docker(context string, args ...string) ([]byte, error) {
-	cmd := exec.Command("docker", append([]string{"--context", context}, args...)...)
+	cmd := exec.Command("docker", append([]string{"--context", context}, args...)...) //nolint:gosec // G204: the verbs are fixed here and node names come from docker ps; no shell runs
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
