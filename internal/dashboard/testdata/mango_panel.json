@@ -6,33 +6,45 @@
   "targets": [
     {
       "target": "rejected_before_landing",
+      "label": "Landings rejected before they land",
       "positives": 48,
       "skipped": false,
       "best_box": "model = opus and attempts in q4",
-      "holdout_n": 96,
+      "holdout_positives": 21,
+      "holdout_n": 50,
       "holdout_rate": 0.42,
+      "ci_low": 0.2937479723456693,
+      "ci_high": 0.5576680331222217,
+      "thin": false,
       "baseline": 0.25,
       "verdict": "earning"
     },
     {
       "target": "manual_rescue",
+      "label": "Landings that needed a manual rescue",
       "positives": 37,
       "skipped": false,
       "best_box": "attempts in q3..q4 and files_touched = none",
-      "holdout_n": 54,
-      "holdout_rate": 0.11,
+      "holdout_positives": 5,
+      "holdout_n": 49,
+      "holdout_rate": 0.10204081632653061,
+      "ci_low": 0.044378892487039884,
+      "ci_high": 0.21756624164970087,
+      "thin": true,
       "baseline": 0.09,
       "verdict": "no-signal"
     },
     {
       "target": "reached_overrun_stop",
+      "label": "Beads stopped by the overrun guard",
       "positives": 12,
       "skipped": true,
       "best_box": "",
       "holdout_n": 0,
       "holdout_rate": 0,
       "baseline": 0.03,
-      "verdict": "not-yet"
+      "verdict": "not-yet",
+      "reason": "few_positives"
     }
   ]
 }

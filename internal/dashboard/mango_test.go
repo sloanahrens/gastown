@@ -80,7 +80,7 @@ func TestMangoReadsTheCollectedPanel(t *testing.T) {
 	}
 	if got := m.Targets[0]; got.Target != "rejected_before_landing" || got.Verdict != MangoEarning ||
 		got.Positives != 48 || got.BestBox != "model = opus and attempts in q4" ||
-		got.HoldoutN != 96 || got.HoldoutRate != 0.42 || got.Baseline != 0.25 {
+		got.HoldoutN != 50 || got.HoldoutRate != 0.42 || got.Baseline != 0.25 {
 		t.Errorf("an earning target reads %+v", got)
 	}
 	if got := m.Targets[2]; !got.Skipped || got.Verdict != MangoNotYet || got.BestBox != "" {
