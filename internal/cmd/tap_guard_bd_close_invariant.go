@@ -626,7 +626,7 @@ var (
 // the table can only ever reveal more closes (gt-gzz4j's review flagged the
 // residual this closes).
 var bdCloseLauncherValueFlags = map[string]map[string]bool{
-	"sudo":    {"-u": true, "-g": true, "-h": true, "-p": true, "-C": true, "-D": true, "-R": true, "-T": true, "-U": true},
+	"sudo":    {"-u": true, "-g": true, "-h": true, "-p": true, "-C": true, "-D": true, "-R": true, "-T": true, "-U": true, "--chdir": true},
 	"stdbuf":  {"-i": true, "-o": true, "-e": true},
 	"timeout": {"-s": true, "-k": true},
 	"nice":    {"-n": true},
