@@ -165,6 +165,7 @@ polecat-image:
 	@$(MAKE) --no-print-directory polecat-seed-stage
 	floor=$$(bash deploy/polecat/go-floor.sh rig $(POLE_RIG_GO_MODS)) || { echo "polecat-image: cannot read the rig Go floor from $(POLE_RIG_GO_MODS)" >&2; exit 2; }; \
 	docker build --platform linux/arm64 --label org.gastown.gt-commit=$(POLE_COMMIT) --build-arg GO_FLOOR="$$floor" -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
+	@go run ./cmd/nodeprune -keep "$${POLECAT_IMAGE_KEEP:-3}" || echo "polecat-image: node prune failed; the old images stay on the sandbox nodes" >&2
 
 # polecat-seed-stage writes POLE_SEED_DIR: each pinned rig at its pin, and
 # POLE_SEED_BUILD_RIG at POLE_COMMIT. The Dockerfile bind-mounts the directory for

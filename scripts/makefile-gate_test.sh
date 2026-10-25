@@ -344,6 +344,18 @@ else
   fail "a stale committed pin stops the seed stage before anything is staged" "$bout"
 fi
 
+# The node prune (gt-e14j6) runs after the image build, and a failure there does not
+# fail the image: it is one run of the same plugin, reclaiming the nodes' old images.
+if pn=$(dry polecat-image BD_SRC=/somewhere/else) \
+  && bline=$(grep -n 'docker build' <<<"$pn" | head -1 | cut -d: -f1) \
+  && nline=$(grep -n 'cmd/nodeprune' <<<"$pn" | head -1 | cut -d: -f1) \
+  && [[ -n "$bline" && -n "$nline" && "$nline" -gt "$bline" ]] \
+  && grep -q -F 'node prune failed' <<<"$pn"; then
+  pass "polecat-image prunes the sandbox nodes after the build, and a prune failure does not fail the image"
+else
+  fail "polecat-image prunes the sandbox nodes after the build, and a prune failure does not fail the image" "$pn"
+fi
+
 for t in polecat-image polecat-seed-stage polecat-seed-pins polecat-caches openshell-providers; do
   grep -q -E "^$t:" "$ROOT/Makefile" && grep -q -E "^\.PHONY:.* $t( |\$)" <<<"$phony" || missing="$missing $t"
 done
