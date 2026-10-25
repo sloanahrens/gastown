@@ -8,6 +8,6 @@ import (
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, "trackerd: not implemented yet (see docs/plans/2026-10-25-town-tracker-plan.md, tasks C3-C5)")
+	fmt.Fprintln(os.Stderr, "trackerd: not implemented yet")
 	os.Exit(1)
 }
