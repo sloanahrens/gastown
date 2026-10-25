@@ -58,6 +58,7 @@ import (
 	"github.com/steveyegge/gastown/internal/deadseats"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 )
 
 // ReadyToLandLabel marks work gt done submitted to the landing worker. It is
@@ -576,6 +577,18 @@ type Env interface {
 	Comment(beadID, text string) error
 }
 
+// SpanEnv is the optional Env extension that closes the attempt a confirmed
+// dead seat left open. gt sling opens an attempt and gt done ends one, so a
+// seat that dies without either leaves its bead looking unfinished; a host
+// that does not implement this records nothing.
+type SpanEnv interface {
+	// CloseDeadSpan ends seat's open attempt on bead at at, with reason saying
+	// how the turn ended (dead for a seat that never reported one). A seat
+	// with no open attempt writes nothing, and a failed write is the host's
+	// to report.
+	CloseDeadSpan(bead, seat string, reason spans.Reason, at time.Time) error
+}
+
 // Ledger remembers when a bead was last reported, so a report is written
 // once per window across ticks and daemon restarts.
 type Ledger interface {
@@ -628,6 +641,7 @@ type Scanner struct {
 	ledger  Ledger
 	o       Options
 	reapEnv ReapEnv
+	spanEnv SpanEnv
 }
 
 // New returns a Scanner with defaults filled in.
@@ -651,6 +665,7 @@ func New(env Env, ledger Ledger, o Options) *Scanner {
 		o.IsRefusal = func(error) bool { return false }
 	}
 	s := &Scanner{env: env, ledger: ledger, o: o}
+	s.spanEnv, _ = env.(SpanEnv)
 	if o.Reap != nil {
 		r := *o.Reap
 		if r.Grace <= 0 {
@@ -778,12 +793,16 @@ func (s *Scanner) Tick(rig string) Report {
 // to say beyond "alive" or "nothing to do".
 func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	f := Finding{Kind: "seat", Subject: name}
+	// spanNote is appended to whatever this seat reports once its dead
+	// attempt's span cannot be closed, so a measurement that failed is not
+	// silent while the recovery it accompanies goes on.
+	spanNote := ""
 	skip := func(why string) (Finding, bool) {
-		f.Outcome, f.Detail = OutcomeSkipped, why
+		f.Outcome, f.Detail = OutcomeSkipped, why+spanNote
 		return f, true
 	}
 	unknown := func(why string, err error) (Finding, bool) {
-		f.Outcome, f.Detail = OutcomeUnknown, why+": "+err.Error()
+		f.Outcome, f.Detail = OutcomeUnknown, why+": "+err.Error()+spanNote
 		return f, true
 	}
 
@@ -1018,21 +1037,41 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		return f, true
 	}
 
-	// A DEFERRED seat whose own last event is a done for this bead has ended
-	// its turn, and the bead's close trails that event: a report-only run that
-	// skipped the close leaves the bead hooked over a dead session, and a
-	// restart here starts its agent again for nothing (gt-iwgbd). The event log
-	// is read only here, for a dead session over open work already confirmed
-	// across ticks, never for every seat. The wait is bounded: a done whose
-	// bead never closes, and a DEFERRED exit with unpushed commits that the
-	// town needs resumed (gt-ks62m), end in the same restart once the grace
-	// passes. The dead samples are kept, so that restart goes ahead on the
-	// first tick after it.
-	if recovery == ExitDeferred && s.o.DoneAge != nil && s.o.DoneCloseGrace > 0 {
-		if age, ok := s.o.DoneAge(rig, name, work.ID, now); ok && age < s.o.DoneCloseGrace {
-			return skip(fmt.Sprintf("%s: the seat ran gt done for it %s ago and the bead has not closed yet",
-				work.ID, age.Round(time.Second)))
+	// A DEFERRED seat whose own last event is a done for this bead ended its
+	// turn itself, so an attempt it left open (a gt done whose span write
+	// failed) is closed as done, not as a death it did not have. Every other
+	// confirmed death closes as dead. The event log is read once here, for a
+	// dead session over open work already confirmed across ticks, never for
+	// every seat.
+	spanReason, spanAt := spans.ReasonDead, lastSeenAt(rec)
+	doneAge, doneTurn := time.Duration(0), false
+	if recovery == ExitDeferred && s.o.DoneAge != nil {
+		if doneAge, doneTurn = s.o.DoneAge(rig, name, work.ID, now); doneTurn {
+			// The seat's own done dates the end of its turn, so the attempt
+			// closes there rather than at the older liveness sample.
+			spanReason, spanAt = spans.ReasonDone, now.Add(-doneAge)
 		}
+	}
+
+	// The death is confirmed, so the attempt is over: the seat cannot end it
+	// itself. It is closed at the last time the seat was seen, not now — the
+	// ticks since then are not work — which is why a dead close is a lower
+	// bound. A seat the patrol resumes later starts a fresh attempt through
+	// the sling path, so the two never overlap (gt-dz78b).
+	if err := s.closeDeadSpan(rig, name, work.ID, spanAt, spanReason); err != nil {
+		spanNote = "; dead span not closed: " + err.Error()
+	}
+
+	// A DEFERRED seat's done may trail the bead's close: a report-only run
+	// that skipped the close leaves the bead hooked over a dead session, and a
+	// restart here starts its agent again for nothing (gt-iwgbd). The wait is
+	// bounded: a done whose bead never closes, and a DEFERRED exit with
+	// unpushed commits that the town needs resumed (gt-ks62m), end in the same
+	// restart once the grace passes. The dead samples are kept, so that restart
+	// goes ahead on the first tick after it.
+	if doneTurn && s.o.DoneCloseGrace > 0 && doneAge < s.o.DoneCloseGrace {
+		return skip(fmt.Sprintf("%s: the seat ran gt done for it %s ago and the bead has not closed yet",
+			work.ID, doneAge.Round(time.Second)))
 	}
 
 	// The restart below raises a live session, so it spends a seat as a sling
@@ -1079,14 +1118,47 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	}
 	if err := s.env.Restart(rig, name, reason); err != nil {
 		if s.o.IsRefusal(err) {
-			f.Outcome, f.Detail = OutcomeRefused, err.Error()
+			f.Outcome, f.Detail = OutcomeRefused, err.Error()+spanNote
 			return f, true
 		}
-		f.Outcome, f.Detail = OutcomeFailed, err.Error()
+		f.Outcome, f.Detail = OutcomeFailed, err.Error()+spanNote
 		return f, true
 	}
-	f.Outcome, f.Detail = OutcomeRestarted, reason
+	f.Outcome, f.Detail = OutcomeRestarted, reason+spanNote
 	return f, true
+}
+
+// closeDeadSpan ends the attempt a confirmed-dead seat cannot end itself, at
+// the time the seat was last seen to be working, with reason saying how its
+// turn ended. An undated seat writes nothing: an end with no time would land
+// before the attempt's start and be read as an unpaired line. Best effort: the
+// error is reported beside the recovery and never stops it.
+func (s *Scanner) closeDeadSpan(rig, name, bead string, at time.Time, reason spans.Reason) error {
+	if s.spanEnv == nil || at.IsZero() {
+		return nil
+	}
+	return s.spanEnv.CloseDeadSpan(bead, rig+"/"+name, reason, at)
+}
+
+// lastSeenAt is the newest moment the seat's persisted liveness evidence
+// dates: the last sample taken, or the last sample at which its evidence
+// changed, whichever is later, falling back to the record's own last write. It
+// is read before this tick's assessment, so it never answers now. Zero means
+// the seat was never dated.
+func lastSeenAt(rec intent.Record) time.Time {
+	var at time.Time
+	if p := rec.Progress; p != nil {
+		if p.SampledAt.After(at) {
+			at = p.SampledAt
+		}
+		if p.ChangedAt.After(at) {
+			at = p.ChangedAt
+		}
+	}
+	if at.IsZero() {
+		at = rec.UpdatedAt
+	}
+	return at
 }
 
 // releaseStalled frees a LIVE but stalled seat that has no work left to make

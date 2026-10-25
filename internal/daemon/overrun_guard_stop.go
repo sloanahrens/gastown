@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -320,6 +321,20 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		d.logger.Printf("overrun_guard: stop %s on %s: hand-back failed: %v", who, st.Bead, err)
 		return
 	}
+	// The run ended when the session was stopped, so the attempt is closed at
+	// that time: the stop is what ended it, and the bead is handed back above.
+	// An attempt left open would read as unfinished work in the bead's time
+	// (gt-dz78b). It is a measurement, not a step: a failed write is logged and
+	// the rest of the stop goes on.
+	if s.spanEnd != nil {
+		at := st.SessionStoppedAt
+		if at.IsZero() {
+			at = now
+		}
+		if err := s.spanEnd(handed, at); err != nil {
+			d.logger.Printf("overrun_guard: WARNING: %s: span not closed for %s: %v", who, st.Bead, err)
+		}
+	}
 	if st.CheckpointGaveUp || st.PushGaveUp {
 		// 6 is skipped: the park is what keeps the name, and the worktree
 		// under it, from taking new work while it holds state origin lacks.
@@ -471,6 +486,13 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 	s.resetWorktree = d.overrunResetWorktree
 	s.retire = func(seat overrunSeat) error {
 		return agentpause.Retire(d.config.TownRoot, seat.Rig, constants.RolePolecat, seat.Polecat, overrunActor)
+	}
+	s.spanEnd = func(seat overrunSeat, at time.Time) error {
+		// A seat with no open attempt (its sling never reached the store, or
+		// gt done ended it) has nothing to close.
+		_, err := spans.New(spans.DefaultDir(d.config.TownRoot), nil).
+			EndOpen(seat.Bead, seat.Rig+"/"+seat.Polecat, spans.ReasonOverrun, at)
+		return err
 	}
 	s.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)

@@ -275,6 +275,12 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 		default:
 			done.NotifyDoneEscalated(hookBd, hookedBeadID)
 		}
+		// The attempt ends with the turn: the seat stopped on a blocker and
+		// holds nothing more. A resume after the escalation closes starts a
+		// fresh attempt through the sling path (gt-dz78b).
+		if roleInfo.Role == RolePolecat && roleInfo.Polecat != "" {
+			recordSpanEnd(e.spanStoreAt(townRoot), hookedBeadID, roleInfo.Rig+"/"+roleInfo.Polecat, spans.ReasonEscalated)
+		}
 	}
 
 	// A DEFERRED exit keeps the bead for the next session — but only a bead
@@ -428,7 +434,7 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 					fmt.Fprintf(os.Stderr, "Warning: couldn't record the submission on %s: %v\n", hookedBeadID, err)
 				}
 				if roleInfo.Role == RolePolecat && roleInfo.Polecat != "" {
-					recordSubmittedSpan(e.spanStoreAt(townRoot), hookedBeadID, roleInfo.Rig+"/"+roleInfo.Polecat)
+					recordSpanEnd(e.spanStoreAt(townRoot), hookedBeadID, roleInfo.Rig+"/"+roleInfo.Polecat, spans.ReasonDone)
 				}
 			} else if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
@@ -508,11 +514,11 @@ doneStateUpdate:
 	return consumed, nil
 }
 
-// recordSubmittedSpan ends seat's open attempt on bead when its work is
-// submitted for landing. A failure is logged and the submission stands, and a
-// seat with no open attempt writes nothing: a repeated gt done on the same
-// submission must not append a second end (gt-liseq).
-func recordSubmittedSpan(store spanStore, bead, seat string) {
+// recordSpanEnd ends seat's open attempt on bead with reason, the way its turn
+// ended. A failure is logged and the exit stands, and a seat with no open
+// attempt writes nothing: a repeated gt done on the same ending must not append
+// a second end (gt-liseq).
+func recordSpanEnd(store spanStore, bead, seat string, reason spans.Reason) {
 	sum, err := store.Summarize(bead)
 	if err != nil {
 		style.PrintWarning("could not read the polecat span log for %s: %v", bead, err)
@@ -522,7 +528,7 @@ func recordSubmittedSpan(store spanStore, bead, seat string) {
 		fmt.Fprintf(os.Stderr, "Note: no open polecat span for %s on %s — nothing to close\n", seat, bead)
 		return
 	}
-	if err := store.End(bead, seat, spans.ReasonDone, time.Now()); err != nil {
+	if err := store.End(bead, seat, reason, time.Now()); err != nil {
 		style.PrintWarning("could not record the polecat span end for %s: %v", bead, err)
 	}
 }

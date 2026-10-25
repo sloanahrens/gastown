@@ -98,6 +98,10 @@ type overrunFake struct {
 	agentBeadsReset []string
 	// handBackNotes lists the note each handBack call carried, in the same order.
 	handBackNotes []string
+	// spanEnd, when set, is the stop's span close; spanEnds records the
+	// "<bead> <at>" each successful close was given, in call order.
+	spanEnd  func(seat overrunSeat, at time.Time) error
+	spanEnds []string
 	// comments lists "<bead>: <text>" for each comment a scheduled stop added;
 	// closed lists "<bead>: <reason>" for each run bead it closed.
 	comments []string
@@ -132,6 +136,16 @@ func (f *overrunFake) seams() overrunSeams {
 		s.resetWorktree = func(seat overrunSeat) error {
 			f.calls = append(f.calls, "reset-worktree "+seat.Rig+"/"+seat.Polecat)
 			return f.resetWorktree(seat)
+		}
+	}
+	if f.spanEnd != nil {
+		s.spanEnd = func(seat overrunSeat, at time.Time) error {
+			f.calls = append(f.calls, "span-end "+seat.Rig+"/"+seat.Polecat)
+			if err := f.spanEnd(seat, at); err != nil {
+				return err
+			}
+			f.spanEnds = append(f.spanEnds, seat.Bead+" "+at.Format(time.RFC3339))
+			return nil
 		}
 	}
 	return s

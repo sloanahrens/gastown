@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/util"
@@ -414,6 +415,22 @@ func (h *patrolScanHost) Intent(rig, name string) (intent.Record, error) {
 func (h *patrolScanHost) Assess(rig, name string) liveness.Result {
 	return h.d.assessSeat(h.seat(rig, name), liveness.Input{})
 }
+
+// CloseDeadSpan ends the attempt a confirmed-dead seat left open on bead at at
+// (patrolscan.SpanEnv). The span log is the town's JSONL under .runtime, so the
+// write costs no bd call, and a seat with no open attempt writes nothing.
+//
+// bead and seat reach a log filename only inside spans, whose validateBead
+// keeps a bead id a single path component and whose End rejects an empty seat.
+func (h *patrolScanHost) CloseDeadSpan(bead, seat string, reason spans.Reason, at time.Time) error {
+	_, err := spans.New(spans.DefaultDir(h.town()), nil).EndOpen(bead, seat, reason, at)
+	return err
+}
+
+// The patrol closes a dead seat's span through SpanEnv, an optional extension
+// of Env: a host that stops implementing it would otherwise fail the cast and
+// silently leave every dead attempt open.
+var _ patrolscan.SpanEnv = (*patrolScanHost)(nil)
 
 // readBeads is the read-only client for rig's database (pinned), or routed
 // from the town root for rig "" or a rig with no directory.

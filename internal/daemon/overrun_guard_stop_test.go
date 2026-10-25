@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -59,6 +60,111 @@ func TestStop_OrderIsPauseStopCheckpointHandBack(t *testing.T) {
 	}
 	if st.StoppedAt.IsZero() {
 		t.Error("StoppedAt not persisted after the hand-back")
+	}
+}
+
+// TestStop_ClosesTheAttemptItEnded: the 20-minute stop is what ended the run,
+// so the attempt the sling opened is closed once the bead is handed back — at
+// the moment the session was stopped, after which the seat did no work — with
+// reason overrun (gt-dz78b).
+func TestStop_ClosesTheAttemptItEnded(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.spanEnd = func(overrunSeat, time.Time) error { return nil }
+
+	d.runOverrunGuard(f.seams())
+
+	want := stopSeat.Bead + " " + f.now.Format(time.RFC3339)
+	if len(f.spanEnds) != 1 || f.spanEnds[0] != want {
+		t.Fatalf("span ends = %v, want %q", f.spanEnds, want)
+	}
+	handBack, spanEnd := -1, -1
+	for i, c := range f.calls {
+		switch {
+		case strings.HasPrefix(c, "hand-back "):
+			handBack = i
+		case strings.HasPrefix(c, "span-end "):
+			spanEnd = i
+		}
+	}
+	if spanEnd < 0 || handBack < 0 || spanEnd < handBack {
+		t.Errorf("calls = %q, want the span closed after the hand-back", f.calls)
+	}
+}
+
+// TestSpanEndSeamWritesTheOverrunReason: the stop's own spanEnd closure is
+// what writes the log, so it is checked against an attempt a sling opened: the
+// end is at the stop, reason overrun, and the attempt counts as real time
+// rather than a lower bound (gt-dz78b).
+func TestSpanEndSeamWritesTheOverrunReason(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	began := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	store := spans.New(spans.DefaultDir(d.config.TownRoot), spanClock{at: began})
+	if err := store.Start(stopSeat.Bead, stopSeat.Rig+"/"+stopSeat.Polecat); err != nil {
+		t.Fatalf("start span: %v", err)
+	}
+	stopped := began.Add(20 * time.Minute)
+
+	seams := d.overrunStopSeams(overrunSeams{})
+	if seams.spanEnd == nil {
+		t.Fatal("overrunStopSeams left spanEnd nil: nothing would close the attempt")
+	}
+	if err := seams.spanEnd(stopSeat, stopped); err != nil {
+		t.Fatalf("spanEnd: %v", err)
+	}
+
+	sum, err := store.Summarize(stopSeat.Bead)
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if len(sum.Attempts) != 1 || sum.Attempts[0].Open || sum.Attempts[0].LowerBound {
+		t.Fatalf("summary = %+v, want one closed, measured attempt", sum)
+	}
+	if got, want := sum.Attempts[0].Secs, (20 * time.Minute).Seconds(); got != want {
+		t.Errorf("attempt secs = %v, want %v", got, want)
+	}
+}
+
+// A stop that gave up on the push still hands the bead back, so it still ends
+// the attempt: the seat is stopped either way, and leaving the span open would
+// read as work in progress on a bead nobody holds.
+func TestStop_GivenUpPushStillClosesTheAttempt(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.failOn = map[string]error{"push": &overrunPushDivergedError{
+		Branch: stopSeat.Branch, OriginSHA: "9f8e7d6", Err: errors.New("rejected (non-fast-forward)"),
+	}}
+	f.spanEnd = func(overrunSeat, time.Time) error { return nil }
+
+	d.runOverrunGuard(f.seams())
+
+	if len(f.spanEnds) != 1 {
+		t.Errorf("span ends = %v, want the attempt closed after a given-up push", f.spanEnds)
+	}
+}
+
+// TestStop_SurvivesAFailedSpanClose: the span is a measurement, not a step — a
+// log that cannot be written is logged and the stop runs to its end.
+func TestStop_SurvivesAFailedSpanClose(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.spanEnd = func(overrunSeat, time.Time) error { return errors.New("read-only file system") }
+
+	d.runOverrunGuard(f.seams())
+
+	st, err := readOverrunState(d.config.TownRoot, "gt-aaa11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.StoppedAt.IsZero() {
+		t.Error("stop not marked finished after a failed span write")
+	}
+	if !strings.Contains(buf.String(), "span not closed") {
+		t.Errorf("log lacks the failed span write:\n%s", buf.String())
 	}
 }
 

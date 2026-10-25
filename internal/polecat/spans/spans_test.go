@@ -166,8 +166,8 @@ func TestSummarize_TwoAttemptsSummed(t *testing.T) {
 		t.Errorf("Secs = %v, want the 60s and 30s attempts summed to 90", sum.Secs)
 	}
 	want := []Attempt{
-		{Seat: "organic", Secs: 60},
-		{Seat: "dipper", Secs: 30},
+		{Seat: "organic", StartedAt: testEpoch, Secs: 60},
+		{Seat: "dipper", StartedAt: testEpoch.Add(60 * time.Second), Secs: 30},
 	}
 	if len(sum.Attempts) != len(want) {
 		t.Fatalf("Attempts = %+v, want %+v", sum.Attempts, want)
@@ -206,6 +206,119 @@ func TestSummarize_OpenAttemptIsLowerBound(t *testing.T) {
 	}
 	if !sum.LowerBound {
 		t.Error("LowerBound = false, want true while an attempt is open")
+	}
+}
+
+// TestEndOpen_ClosesTheSeatsOpenAttempt: the paths that end an attempt for a
+// seat that cannot end it itself (an overrun stop, a confirmed death) write
+// the end through EndOpen, which reports the attempt it found.
+func TestEndOpen_ClosesTheSeatsOpenAttempt(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := New(dir, fixedClock{at: testEpoch})
+	if err := st.Start("gt-abc", "organic"); err != nil {
+		t.Fatal(err)
+	}
+
+	closed, err := st.EndOpen("gt-abc", "organic", ReasonOverrun, testEpoch.Add(90*time.Second))
+	if err != nil {
+		t.Fatalf("EndOpen: %v", err)
+	}
+	if !closed {
+		t.Fatal("EndOpen = false, want the open attempt found and closed")
+	}
+
+	sum, err := st.Summarize("gt-abc")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Secs != 90 || sum.Skipped != 0 || sum.LowerBound {
+		t.Errorf("Secs/Skipped/LowerBound = %v/%d/%v, want 90/0/false", sum.Secs, sum.Skipped, sum.LowerBound)
+	}
+	if len(sum.Attempts) != 1 || sum.Attempts[0].Open {
+		t.Errorf("Attempts = %+v, want the one attempt closed", sum.Attempts)
+	}
+}
+
+// TestEndOpen_NoOpenAttemptWritesNothing: an attempt a seat already ended (a
+// repeated stop, a gt done that got there first) is not closed twice, and a
+// bead with no attempt at all gains no log.
+func TestEndOpen_NoOpenAttemptWritesNothing(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := New(dir, fixedClock{at: testEpoch})
+	if err := st.Start("gt-abc", "organic"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.End("gt-abc", "organic", ReasonDone, testEpoch.Add(30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, bead := range []string{"gt-abc", "gt-never-started"} {
+		closed, err := st.EndOpen(bead, "organic", ReasonDead, testEpoch.Add(time.Hour))
+		if err != nil {
+			t.Fatalf("EndOpen(%q): %v", bead, err)
+		}
+		if closed {
+			t.Errorf("EndOpen(%q) = true, want no open attempt to close", bead)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "gt-never-started.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("a bead with no attempt gained a log: %v", err)
+	}
+	sum, err := st.Summarize("gt-abc")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Secs != 30 || sum.Skipped != 0 {
+		t.Errorf("Secs/Skipped = %v/%d, want the single 30s attempt and no skipped end", sum.Secs, sum.Skipped)
+	}
+}
+
+// TestEndOpen_DatesAnOldEndAtTheAttemptStart: the time EndOpen is given can be
+// second-hand evidence from before the attempt began (a stale liveness record
+// from an earlier attempt). An end dated there would be skipped on read, so it
+// is moved to the start and the attempt still closes as a lower bound.
+func TestEndOpen_DatesAnOldEndAtTheAttemptStart(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := New(dir, fixedClock{at: testEpoch})
+	if err := st.Start("gt-abc", "organic"); err != nil {
+		t.Fatal(err)
+	}
+
+	closed, err := st.EndOpen("gt-abc", "organic", ReasonDead, testEpoch.Add(-5*time.Minute))
+	if err != nil {
+		t.Fatalf("EndOpen: %v", err)
+	}
+	if !closed {
+		t.Fatal("EndOpen = false, want the open attempt closed")
+	}
+
+	sum, err := st.Summarize("gt-abc")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Secs != 0 || sum.Skipped != 0 || !sum.LowerBound {
+		t.Errorf("Secs/Skipped/LowerBound = %v/%d/%v, want 0/0/true", sum.Secs, sum.Skipped, sum.LowerBound)
+	}
+	if len(sum.Attempts) != 1 || sum.Attempts[0].Open {
+		t.Errorf("Attempts = %+v, want the attempt closed rather than the end skipped", sum.Attempts)
+	}
+}
+
+// TestEndOpen_RefusesABeadThatIsNotAPathComponent: the bead id reaches a
+// filename only here, so the end path validates it as the start path does.
+func TestEndOpen_RefusesABeadThatIsNotAPathComponent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := New(dir, fixedClock{at: testEpoch})
+
+	if _, err := st.EndOpen("../escape", "organic", ReasonDead, testEpoch); err == nil {
+		t.Fatal("EndOpen accepted a bead id that is not a path component")
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Errorf("EndOpen wrote under %s: entries %v, err %v", dir, entries, err)
 	}
 }
 
@@ -315,8 +428,8 @@ func TestSummarize_SkipsAndCountsUnpairedEvents(t *testing.T) {
 		t.Errorf("Secs = %v, want a's 20s", sum.Secs)
 	}
 	want := []Attempt{
-		{Seat: "a", Secs: 20},
-		{Seat: "b", Open: true, LowerBound: true},
+		{Seat: "a", StartedAt: testEpoch, Secs: 20},
+		{Seat: "b", StartedAt: testEpoch, Open: true, LowerBound: true},
 	}
 	if len(sum.Attempts) != len(want) {
 		t.Fatalf("Attempts = %+v, want %+v", sum.Attempts, want)

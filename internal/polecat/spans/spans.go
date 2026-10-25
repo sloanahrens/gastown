@@ -109,6 +109,28 @@ func (s *Store) End(bead, seat string, reason Reason, at time.Time) error {
 	})
 }
 
+// EndOpen ends seat's open attempt on bead at at and reports whether it had
+// one. An at earlier than the attempt's start is moved to the start: the time
+// can be second-hand evidence (a dead seat's last-seen sample, say), and an end
+// dated before its start would be skipped on read instead of closing the
+// attempt.
+func (s *Store) EndOpen(bead, seat string, reason Reason, at time.Time) (bool, error) {
+	sum, err := s.Summarize(bead)
+	if err != nil {
+		return false, err
+	}
+	for _, a := range sum.Attempts {
+		if a.Seat != seat || !a.Open {
+			continue
+		}
+		if at.Before(a.StartedAt) {
+			at = a.StartedAt
+		}
+		return true, s.End(bead, seat, reason, at)
+	}
+	return false, nil
+}
+
 // Summary is the time a bead's seats spent hooked on it across every attempt.
 type Summary struct {
 	// Secs is the sum of the closed attempts' durations.
@@ -129,7 +151,9 @@ type Summary struct {
 // Attempt is one seat's start..end pair.
 type Attempt struct {
 	Seat string
-	Secs float64
+	// StartedAt is the time of the attempt's start event.
+	StartedAt time.Time
+	Secs      float64
 	// Open marks an attempt its seat has not ended, so a later event can close
 	// it.
 	Open bool
@@ -223,7 +247,7 @@ func (sum *Summary) readLine(line, bead string, open map[string]openAttempt) {
 			sum.Skipped++
 			return
 		}
-		sum.Attempts = append(sum.Attempts, Attempt{Seat: ev.Seat, Open: true})
+		sum.Attempts = append(sum.Attempts, Attempt{Seat: ev.Seat, StartedAt: at, Open: true})
 		open[ev.Seat] = openAttempt{index: len(sum.Attempts) - 1, at: at}
 	case EventEnd:
 		o, ok := open[ev.Seat]
