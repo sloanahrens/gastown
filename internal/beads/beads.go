@@ -952,6 +952,9 @@ type Beads struct {
 
 	// plainTimeout bounds each bd call of a plain wrapper; zero means none.
 	plainTimeout time.Duration
+	// plainGroup runs each bd call of a plain wrapper in its own process group, so
+	// a timeout kills bd and anything it started; see WithProcessGroup.
+	plainGroup bool
 	// accessMode marks a wrapper built by NewPinned: each call is forced
 	// read-only or into an auto-committed mutation by its argv, through
 	// forceBDReadOnly or forceBDMutation, overriding whatever
@@ -1092,7 +1095,7 @@ func (b *Beads) ActingAs(actor string) *Beads {
 		actor:      actor,
 		budget:     b.budget,
 	})
-	c.plain, c.plainEnv, c.plainTimeout = b.plain, b.plainEnv, b.plainTimeout
+	c.plain, c.plainEnv, c.plainTimeout, c.plainGroup = b.plain, b.plainEnv, b.plainTimeout, b.plainGroup
 	c.accessMode = b.accessMode
 	return c
 }
@@ -1866,6 +1869,66 @@ func (b *Beads) Run(args ...string) ([]byte, error) {
 func (b *Beads) PurgeClosedEphemeral(olderThan string) (string, error) {
 	out, err := b.run("purge", "--force", "--quiet", "--older-than", olderThan)
 	return strings.TrimSpace(string(out)), err
+}
+
+// GateCheck evaluates the open gates of each of types and returns the line
+// bd last reported, for the caller's log; empty when the check resolved
+// nothing.
+//
+// In machine mode bd keeps stdout for its JSON envelope and writes the
+// notices an operator reads to stderr, so a plain wrapper reads the report
+// there; a wrapper that does not keep bd's stderr falls back to the
+// envelope's payload. Either answer is normalized once, here: bd's leading
+// JSON null — printed before its no-gates notice, which reads "nullNo open
+// gates of type 'timer' found." — is dropped, and the notice answers empty
+// because it reports only that nothing was resolved.
+func (b *Beads) GateCheck(types ...string) (string, error) {
+	args := []string{"gate", "check"}
+	for _, t := range types {
+		args = append(args, "--type="+t)
+	}
+	stdout, stderr, err := b.gateCheckStreams(args)
+	if err != nil {
+		return "", err
+	}
+	// The report is on stdout for a plain call that resolved something, and
+	// on stderr for a machine-mode notice; a stderr warning (bd's permissions
+	// notice, say) must not hide a report on stdout, so stdout is read first.
+	if line := gateCheckLine(string(LegacyPayload(args, stdout))); line != "" {
+		return line, nil
+	}
+	return gateCheckLine(string(stderr)), nil
+}
+
+// gateCheckLine is the last line of one stream of gate check output, with the
+// stray JSON null bd prints before a notice stripped; the no-gates notice is
+// nothing to report.
+func gateCheckLine(text string) string {
+	line := strings.TrimPrefix(lastLineOfText(text), "null")
+	if strings.HasPrefix(line, "No open gates") {
+		return ""
+	}
+	return line
+}
+
+// gateCheckStreams runs the gate check for either kind of wrapper: a plain
+// wrapper keeps both of bd's streams, while the routed path answers stdout
+// only, its stderr dropped inside run.
+func (b *Beads) gateCheckStreams(args []string) (stdout, stderr []byte, err error) {
+	if b.plain {
+		return b.runPlainOut(nil, args)
+	}
+	out, err := b.run(args...)
+	return out, nil, err
+}
+
+// lastLineOfText is the last line of s, without surrounding whitespace.
+func lastLineOfText(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[i+1:])
+	}
+	return s
 }
 
 // wrapError wraps bd errors with context.

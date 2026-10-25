@@ -21,7 +21,6 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // Patrol scan tick (gt-4k3fj.6, ADR 0005).
@@ -258,15 +257,12 @@ func (d *Daemon) patrolScanGateCheck(h *patrolScanHost, rigs []string, gateType 
 // whose call failed has had none of its gates evaluated.
 func (d *Daemon) patrolScanGateCheckDB(h *patrolScanHost, rigName, gateType string) bool {
 	where := gateCheckWhere(rigName)
-	out, err := h.bdMutating(rigName, "gate", "check", "--type="+gateType)
+	line, err := h.gateCheckReport(rigName, gateType)
 	if err != nil {
 		d.logger.Printf("patrol_scan: %s: %s gate check failed: %v", where, gateType, err)
 		return false
 	}
-	// bd prints a JSON null before its no-gates notice ("nullNo open gates of
-	// type 'timer' found."); a tick that resolved nothing is not worth a line.
-	line := strings.TrimPrefix(lastLine(string(out)), "null")
-	if line != "" && !strings.HasPrefix(line, "No open gates") {
+	if line != "" {
 		d.logger.Printf("patrol_scan: %s: %s gates: %s", where, gateType, line)
 	}
 	return true
@@ -357,9 +353,9 @@ type patrolScanHost struct {
 	// gitState is polecat.ProbeLiveGitState when nil: a seam for the unit
 	// tier, which cannot start git.
 	gitState func(worktreePath string) polecat.LiveGitState
-	// bdGateCheck is the raw `bd gate check` call when nil: a seam for the
-	// unit tier, which cannot start bd.
-	bdGateCheck func(rig string, args ...string) ([]byte, error)
+	// gateCheck is one database's `bd gate check --type=<gateType>` when nil:
+	// a seam for the unit tier, which cannot start bd.
+	gateCheck func(rig, gateType string) (string, error)
 	// reapBatches caches each rig's check-recovery-batch for the life of this
 	// host, which is one tick: the reap pass asks for a verdict on every
 	// session-less seat, and one bulk sweep must answer them all.
@@ -442,31 +438,34 @@ func (h *patrolScanHost) readBeads(rig string) workBeadReader {
 	return h.d.workBeads(env, patrolScanBdTimeout)
 }
 
-// bdMutating runs a bd command that may write, pinned to the rig's database
-// (or routed from the town root for rig ""), and returns its output.
-func (h *patrolScanHost) bdMutating(rig string, args ...string) ([]byte, error) {
-	if h.bdGateCheck != nil {
-		return h.bdGateCheck(rig, args...)
+// gateCheckReport runs one database's gate check for gateType through the
+// beads seam, or through the unit tier's substituted check.
+func (h *patrolScanHost) gateCheckReport(rig, gateType string) (string, error) {
+	if h.gateCheck != nil {
+		return h.gateCheck(rig, gateType)
 	}
-	ctx, cancel := context.WithTimeout(h.d.ctxOrBackground(), patrolScanBdTimeout)
-	defer cancel()
-	env := bdMutationRoutingEnv(h.town())
+	return h.gateCheckBeads(rig).GateCheck(gateType)
+}
+
+// gateCheckBeads is the mutating bd client for one database's gate check:
+// pinned to rig's database, or routed from the town root for rig "" or a rig
+// with no directory.
+func (h *patrolScanHost) gateCheckBeads(rig string) beads.Client {
+	return beads.NewPlain(h.town(), gateCheckEnv(h.town(), rig), beads.WithBin(h.d.bdPathOrDefault())).WithTimeout(patrolScanBdTimeout).WithProcessGroup()
+}
+
+// gateCheckEnv is the environment of one database's gate check: pinned to the
+// rig's own database when rig names one under townRoot, and routed from the
+// town root otherwise (rig "" or a rig with no directory).
+func gateCheckEnv(townRoot, rig string) []string {
+	env := bdMutationRoutingEnv(townRoot)
 	if rig != "" {
-		if rigDir := beads.GetRigDirForName(h.town(), rig); rigDir != "" {
-			base := agentconfig.NormalizeConfiguredDoltEnv(os.Environ(), h.town())
+		if rigDir := beads.GetRigDirForName(townRoot, rig); rigDir != "" {
+			base := agentconfig.NormalizeConfiguredDoltEnv(os.Environ(), townRoot)
 			env = beads.BuildMutationPinnedBDEnv(base, beads.ResolveBeadsDir(rigDir))
 		}
 	}
-	// Kept raw (gt-7iwy0.4.1): its one caller is bd gate check, which has no
-	// machine output to type and nothing a fake database could model; the
-	// patrol logs its last prose line.
-	cmd := beads.CommandContextWithPath(ctx, h.d.bdPathOrDefault(), h.town(), env, args...)
-	util.SetProcessGroup(cmd.Cmd)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("bd %s: %w: %s", strings.Join(args, " "), err, lastLine(string(out)))
-	}
-	return out, nil
+	return env
 }
 
 // issueWork is the slice of a work bead the tick reads.

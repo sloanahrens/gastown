@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // bdCall is one bd subprocess: the argv after "bd", the working directory,
@@ -22,6 +24,8 @@ type bdCall struct {
 	// plain marks a call built the way CommandWithEnv builds one: the
 	// caller's environment as given, bd in the caller's process group.
 	plain bool
+	// group runs the call in its own process group (plain calls only).
+	group bool
 }
 
 // bdRunFunc runs one bd call and returns its stdout and stderr. Every bd
@@ -68,6 +72,9 @@ func newPlainBDCmd(ctx context.Context, c bdCall, stdout, stderr *bytes.Buffer) 
 	cmd.Stderr = stderr
 	if c.stdin != nil {
 		cmd.Stdin = bytes.NewReader(c.stdin)
+	}
+	if c.group {
+		util.SetProcessGroup(cmd)
 	}
 	return cmd
 }
@@ -124,6 +131,21 @@ func (b *Beads) WithTimeout(d time.Duration) *Beads {
 	c := NewPlain(b.workDir, b.plainEnv, WithBin(b.bin))
 	c.exec = b.exec
 	c.plainTimeout = d
+	c.plainGroup = b.plainGroup
+	return c
+}
+
+// WithProcessGroup returns a copy of a plain wrapper whose bd calls run in
+// their own process group, so a timeout kills bd and every process it started,
+// not only bd. It panics on a wrapper not built by NewPlain.
+func (b *Beads) WithProcessGroup() *Beads {
+	if !b.plain {
+		panic("beads: WithProcessGroup on a wrapper not built by NewPlain")
+	}
+	c := NewPlain(b.workDir, b.plainEnv, WithBin(b.bin))
+	c.exec = b.exec
+	c.plainTimeout = b.plainTimeout
+	c.plainGroup = true
 	return c
 }
 
@@ -162,6 +184,14 @@ func (e *CLIError) Unwrap() []error {
 
 // runPlain runs one bd call for a plain wrapper.
 func (b *Beads) runPlain(stdin []byte, args []string) ([]byte, error) {
+	stdout, _, err := b.runPlainOut(stdin, args)
+	return stdout, err
+}
+
+// runPlainOut is runPlain that keeps bd's stderr on success too, for a call
+// whose answer bd writes there: machine mode keeps stdout for the JSON
+// envelope.
+func (b *Beads) runPlainOut(stdin []byte, args []string) (stdout, stderr []byte, err error) {
 	ctx := context.Background()
 	if b.plainTimeout > 0 {
 		var cancel context.CancelFunc
@@ -172,9 +202,9 @@ func (b *Beads) runPlain(stdin []byte, args []string) ([]byte, error) {
 	// gt install initializes the town database through a plain wrapper, so the
 	// new-database opt-in rides this path too (be-d4v).
 	env = applyNewDatabaseOptIn(env, args)
-	stdout, stderr, err := b.runner()(ctx, bdCall{bin: b.bin, dir: b.workDir, env: env, args: args, stdin: stdin, plain: true})
+	stdout, stderr, err = b.runner()(ctx, bdCall{bin: b.bin, dir: b.workDir, env: env, args: args, stdin: stdin, plain: true, group: b.plainGroup})
 	if err != nil {
-		return stdout, &CLIError{Args: args, Stdout: stdout, Stderr: stderr, Err: SubprocessFailureError(ctx, b.plainTimeout, err)}
+		return stdout, stderr, &CLIError{Args: args, Stdout: stdout, Stderr: stderr, Err: SubprocessFailureError(ctx, b.plainTimeout, err)}
 	}
-	return stdout, nil
+	return stdout, stderr, nil
 }

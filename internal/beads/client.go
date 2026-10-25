@@ -110,6 +110,9 @@ type Client interface {
 	// AppendNotes appends note to the issue's notes, on a new line when
 	// there are notes already.
 	AppendNotes(id, note string) error
+	// GateCheck evaluates the open gates of each of types and returns bd's
+	// report line: empty when the check resolved nothing.
+	GateCheck(types ...string) (string, error)
 
 	// ReleaseIfAssignee returns the issue to open with no assignee, but only
 	// while expected still holds it. released=false with a nil error means

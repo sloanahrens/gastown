@@ -130,9 +130,9 @@ func TestPatrolScanGHGatesFailedSaveSuppressesTheRerun(t *testing.T) {
 	logs := &bytes.Buffer{}
 	d := &Daemon{logger: log.New(logs, "", 0), config: &Config{TownRoot: town}, clock: clk}
 	checks := 0
-	h := &patrolScanHost{d: d, bdGateCheck: func(string, ...string) ([]byte, error) {
+	h := &patrolScanHost{d: d, gateCheck: func(string, string) (string, error) {
 		checks++
-		return []byte("No open gates of type 'gh' found.\n"), nil
+		return "", nil
 	}}
 
 	d.patrolScanGHGates(h, []string{"myr"})
