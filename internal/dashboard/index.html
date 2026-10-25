@@ -3472,14 +3472,9 @@ function renderJev(s) {
   for (const b of batteries) body.append(jevRow(b));
 }
 
-// The Mango panel, under the JEV panel and folded until opened: the town-metrics
-// report on which predictors of a landing outcome replicated on the holdout. The
-// title line carries the landings and snapshot hours the analysis covered, its
-// age, and a chip per verdict. The table holds a collection row, whose cell names
-// the panel's state, and one row per target. A stale panel greys its rows. A
-// missing or unreadable panel draws no target rows: the last analysis would pass
-// as current. Every string is the reader's, already stripped and capped, and is
-// set with textContent only.
+// renderMango draws the Mango panel. A missing or unreadable panel draws no
+// target rows: the last analysis would pass as current. Every string is the
+// reader's, already stripped and capped, and is set with textContent only.
 function renderMango(s) {
   const sec = $("mangosec"), box = $("mango"), note = $("mangonote");
   const m = s.mango;
@@ -3520,12 +3515,18 @@ function renderMango(s) {
 function mangoRow(t, stale) {
   const tr = el("tr", stale ? "jvstale" : "");
   const verdict = el("td");
-  verdict.append(jevChip(t.verdict, t.verdict, JV_MEANING[t.verdict]));
+  // A verdict this page does not know keeps the panel's word and stays dim, so
+  // it never wears a counted verdict's colour.
+  verdict.append(jevChip(t.verdict, t.verdict, JV_MEANING[t.verdict] || "a verdict this page does not know"));
   tr.append(el("td", "jvname", t.target), verdict, el("td", "n", String(t.positives)));
   if (t.skipped) {
     tr.append(el("td", "n", "-"), el("td", "n", "-"), el("td", "empty", "too few positives to check"));
   } else {
-    tr.append(el("td", "n", jevPct(t.holdout_rate) + " of " + t.holdout_n), el("td", "n", jevPct(t.baseline)), el("td", "", t.best_box || "-"));
+    // A rate the panel did not report is a dash: as a number, jevPct would draw
+    // it as 0.0%, a figure the analysis never gave.
+    const pct = v => v == null ? "-" : jevPct(v);
+    const holdout = t.holdout_rate == null ? "-" : jevPct(t.holdout_rate) + " of " + t.holdout_n;
+    tr.append(el("td", "n", holdout), el("td", "n", pct(t.baseline)), el("td", "", t.best_box || "-"));
   }
   return tr;
 }
