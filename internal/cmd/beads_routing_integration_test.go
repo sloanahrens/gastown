@@ -134,6 +134,7 @@ func setupRoutingTestTownWithPrefixes(t *testing.T, hqPrefix, gtPrefix, trPrefix
 
 func initBeadsDBWithPrefix(t *testing.T, dir, prefix string) {
 	t.Helper()
+	refuseSharedDoltInit(t)
 
 	args := []string{"init", "--quiet", "--prefix", prefix}
 	// Forward GT_DOLT_PORT so bd connects to the ephemeral test server
