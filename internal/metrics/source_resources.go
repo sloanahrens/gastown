@@ -54,13 +54,19 @@ const resourcesSchemaVersion = 1
 // resourcesWindow is how far back the rollup reads.
 const resourcesWindow = time.Hour
 
+// resourcesStaleAfter is how long the newest sampler file may go unwritten before
+// the writer counts as stopped. The sampler appends about every thirty seconds, so
+// fifteen minutes of silence is a stopped writer, and a live one never crosses it
+// at an hour or midnight boundary.
+const resourcesStaleAfter = 15 * time.Minute
+
 func (resourcesSource) Group() string { return "resources" }
 
 // Collect returns an error, leaving the group null, when neither day has a
-// sampler file, when the newest file was last written before the snapshot's
-// hour, and when a file exists but its write time cannot be read: a snapshot
-// that cannot tell whether the writer stopped must not report it healthy. A
-// file that exists and cannot be read is counted instead.
+// sampler file, when the newest file has been silent for longer than
+// resourcesStaleAfter, and when a file exists but its write time cannot be
+// read: a snapshot that cannot tell whether the writer stopped must not report
+// it healthy. A file that exists and cannot be read is counted instead.
 func (resourcesSource) Collect(_ context.Context, env Env) (map[string]any, error) {
 	now := env.Now().UTC()
 	dir := filepath.Join(env.Town, ".runtime", "metrics", "resources")
@@ -97,9 +103,9 @@ func (resourcesSource) Collect(_ context.Context, env Env) (map[string]any, erro
 	if unknown != nil {
 		return nil, unknown
 	}
-	if hour := now.Truncate(time.Hour); newest != "" && newestAt.Before(hour) {
-		return nil, fmt.Errorf("resource sampler file %s is stale: last written %s, before the snapshot's hour starting %s",
-			newest, newestAt.UTC().Format(time.RFC3339), hour.Format(time.RFC3339))
+	if newest != "" && now.Sub(newestAt) > resourcesStaleAfter {
+		return nil, fmt.Errorf("resource sampler file %s is stale: last written %s, more than %s before the snapshot at %s",
+			newest, newestAt.UTC().Format(time.RFC3339), resourcesStaleAfter, now.UTC().Format(time.RFC3339))
 	}
 	return roll.columns(), nil
 }

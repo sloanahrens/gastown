@@ -274,7 +274,7 @@ func TestSourceResourcesCollect(t *testing.T) {
 				),
 			},
 			mods: map[string]time.Time{
-				resourcesTestPath("2026-10-24.jsonl"): time.Date(2026, 10, 24, 17, 20, 0, 0, time.UTC),
+				resourcesTestPath("2026-10-24.jsonl"): time.Date(2026, 10, 24, 17, 40, 0, 0, time.UTC),
 			},
 			want: map[string]any{
 				"res_rows_1h":                     2,
@@ -351,5 +351,57 @@ func TestSourceResourcesCollectRefusesAFileWhoseWriteTimeIsUnknown(t *testing.T)
 	}
 	if cols != nil {
 		t.Errorf("columns = %v, want none for a file whose write time is unknown", cols)
+	}
+}
+
+// The staleness rule is silence, not the clock hour: a live sampler writes about
+// every thirty seconds, so a snapshot just past an hour or midnight boundary
+// still reads its newest file as fresh, and only a writer silent for longer than
+// resourcesStaleAfter is an error (gt-vfsi6).
+func TestSourceResourcesCollectJudgesSilenceNotTheHour(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		now     time.Time
+		file    string
+		row     string
+		written time.Time
+		stale   bool
+	}{
+		{
+			name:    "a live sampler just past the hour is fresh",
+			now:     time.Date(2026, 10, 25, 16, 0, 10, 0, time.UTC),
+			file:    "2026-10-25.jsonl",
+			row:     resourcesRow("2026-10-25T15:45:00Z", "sandbox", "supervisor", "5", "10"),
+			written: time.Date(2026, 10, 25, 15, 59, 40, 0, time.UTC),
+		},
+		{
+			name:    "a live sampler just past midnight is fresh",
+			now:     time.Date(2026, 10, 25, 0, 5, 0, 0, time.UTC),
+			file:    "2026-10-24.jsonl",
+			row:     resourcesRow("2026-10-24T23:50:00Z", "sandbox", "supervisor", "5", "10"),
+			written: time.Date(2026, 10, 24, 23, 58, 0, 0, time.UTC),
+		},
+		{
+			name:    "a sampler silent for twenty minutes is stale",
+			now:     time.Date(2026, 10, 25, 16, 30, 0, 0, time.UTC),
+			file:    "2026-10-25.jsonl",
+			row:     resourcesRow("2026-10-25T16:05:00Z", "sandbox", "supervisor", "5", "10"),
+			written: time.Date(2026, 10, 25, 16, 10, 0, 0, time.UTC),
+			stale:   true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := resourcesTestPath(tc.file)
+			files := map[string][]byte{path: resourcesLines(tc.row)}
+			mods := map[string]time.Time{path: tc.written}
+			env := resourcesTestEnv(tc.now, files, nil, mods)
+			_, err := resourcesSource{}.Collect(context.Background(), env)
+			if tc.stale != (err != nil) {
+				t.Errorf("Collect error = %v, want stale %v", err, tc.stale)
+			}
+		})
 	}
 }
