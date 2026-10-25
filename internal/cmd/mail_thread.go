@@ -134,14 +134,7 @@ func runMailReply(cmd *cobra.Command, args []string) error {
 	// Build the reply. The body is exactly the caller's text: the original is
 	// consulted for threading metadata (sender, subject, thread) only, never
 	// for content.
-	subject := mailReplySubject
-	if subject == "" {
-		if strings.HasPrefix(original.Subject, "Re: ") {
-			subject = original.Subject
-		} else {
-			subject = "Re: " + original.Subject
-		}
-	}
+	subject := replySubject(original.Subject, mailReplySubject)
 
 	reply := newReplyMessage(from, original, subject, messageBody)
 
