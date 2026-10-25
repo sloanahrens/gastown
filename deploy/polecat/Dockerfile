@@ -113,9 +113,39 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 RUN groupadd -g 10001 polecat \
     && useradd -M -u 10001 -g 10001 -d /sandbox -s /bin/bash polecat
 
+# Seeded Go caches (gt-ieuvf): a cold sandbox otherwise compiles every dependency
+# of the rigs' modules before a presubmit can run. They live OUTSIDE /sandbox: the
+# sandbox's workspace-init container copies this image's /sandbox into each
+# sandbox's volume, while a path outside it is one image layer every sandbox
+# shares (new entries go to the sandbox's own writable layer).
+#
+# The sources are the pinned checkouts `make polecat-image` stages from
+# deploy/polecat/seed-pins into deploy/polecat/seed, bind-mounted for this one
+# RUN so none lands in the image. Each module gets the commands the rigs'
+# presubmits run, with their default flags (no -trimpath, default CGO) so the
+# cache keys match. A failing `go build` fails the image: a broken seed must not
+# publish. A failing vet or test compile is logged and skipped (a module may need
+# system headers the image lacks). The chmod for uid 10001 is in this same RUN,
+# as one in a later layer would copy every file again.
+ENV GOCACHE=/opt/gocache \
+    GOMODCACHE=/opt/gomod
+RUN --mount=type=bind,source=seed,target=/seed \
+    export PATH="/usr/local/go/bin:$PATH" GOFLAGS="-p=4 -modcacherw" \
+    && mkdir -p "$GOCACHE" "$GOMODCACHE" \
+    && for gomod in $(find /seed -name go.mod -not -path '*/testdata/*' | sort); do \
+         dir=$(dirname "$gomod"); echo "seed: $dir"; \
+         for step in "go build ./..." "go vet ./..." "go test -count=1 -run ^\$ ./..."; do \
+           if ! (cd "$dir" && $step >/tmp/seed.log 2>&1); then \
+             echo "seed: '$step' failed in $dir:"; tail -n 5 /tmp/seed.log; \
+             if [ "$step" = "go build ./..." ]; then exit 1; fi; \
+           fi; \
+         done; \
+       done \
+    && rm -f /tmp/seed.log \
+    && chmod -R a+rwX "$GOCACHE" "$GOMODCACHE"
+
 ENV PATH="/usr/local/go/bin:/sandbox/go/bin:${PATH}" \
     GOPATH=/sandbox/go \
-    GOCACHE=/sandbox/.cache/go-build \
     GOFLAGS=-p=4 \
     BD_DISABLE_METRICS=1 \
     DO_NOT_TRACK=1 \

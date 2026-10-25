@@ -225,15 +225,59 @@ if oout=$(dry openshell-providers) && grep -q -F 'scripts/openshell-providers.sh
 else
   fail "make -n openshell-providers runs the providers script" "$oout"
 fi
+# The seed stage and the pins (gt-ieuvf), run for real against a fixture town:
+# the image's Go caches are built from the commits seed-pins names, not from a
+# rig's moving HEAD, and a pin that cannot be staged stops the image build.
+SEEDTMP="$(mktemp -d)"
+seedtown="$SEEDTMP/seedtown"
+mkdir -p "$seedtown/fx/mayor/rig"
+git -C "$seedtown/fx/mayor/rig" init -q -b main
+echo one >"$seedtown/fx/mayor/rig/a.txt"
+git -C "$seedtown/fx/mayor/rig" add a.txt
+git -C "$seedtown/fx/mayor/rig" -c user.name=t -c user.email=t@example.invalid commit -q -m first
+pinned=$(git -C "$seedtown/fx/mayor/rig" rev-parse HEAD)
+echo two >"$seedtown/fx/mayor/rig/b.txt"
+git -C "$seedtown/fx/mayor/rig" add b.txt
+git -C "$seedtown/fx/mayor/rig" -c user.name=t -c user.email=t@example.invalid commit -q -m second
+newest=$(git -C "$seedtown/fx/mayor/rig" rev-parse HEAD)
+printf '# comment\nfx %s\n' "$pinned" >"$seedtown/pins"
+seedmk() { make -C "$ROOT" --no-print-directory "$@" POLE_TOWN="$seedtown" POLE_SEED_PINS="$seedtown/pins" POLE_SEED_DIR="$seedtown/out" POLE_SEED_RIGS=fx; }
+if sout=$(seedmk polecat-seed-stage 2>&1) && [[ -f "$seedtown/out/fx/a.txt" && ! -e "$seedtown/out/fx/b.txt" ]]; then
+  pass "polecat-seed-stage stages the pinned commit of each rig, not its newer HEAD"
+else
+  fail "polecat-seed-stage stages the pinned commit of each rig, not its newer HEAD" "$sout"
+fi
+printf 'fx %s\n' "0000000000000000000000000000000000000000" >"$seedtown/pins"
+if sout=$(seedmk polecat-seed-stage 2>&1); then
+  fail "polecat-seed-stage stops on a pin the checkout does not hold" "exited 0: $sout"
+elif grep -q -F 'cannot stage rig fx at 0000000000000000000000000000000000000000' <<<"$sout"; then
+  pass "polecat-seed-stage stops on a pin the checkout does not hold, naming the rig and sha"
+else
+  fail "polecat-seed-stage stops on a pin the checkout does not hold, naming the rig and sha" "$sout"
+fi
+: >"$seedtown/pins"
+if sout=$(seedmk polecat-seed-stage 2>&1); then
+  fail "polecat-seed-stage refuses an empty pins file" "exited 0: $sout"
+elif grep -q -F 'missing or empty' <<<"$sout"; then
+  pass "polecat-seed-stage refuses an empty pins file"
+else
+  fail "polecat-seed-stage refuses an empty pins file" "$sout"
+fi
+if sout=$(seedmk polecat-seed-pins 2>&1) && grep -qx "fx $newest" "$seedtown/pins"; then
+  pass "polecat-seed-pins pins each seeded rig to its checkout's HEAD"
+else
+  fail "polecat-seed-pins pins each seeded rig to its checkout's HEAD" "$sout / $(cat "$seedtown/pins")"
+fi
+rm -rf "$SEEDTMP"
 phony="$(sed -n '1p' "$ROOT/Makefile")"
 missing=""
-for t in polecat-image polecat-caches openshell-providers; do
+for t in polecat-image polecat-seed-stage polecat-seed-pins polecat-caches openshell-providers; do
   grep -q -E "^$t:" "$ROOT/Makefile" && grep -q -E "^\.PHONY:.* $t( |\$)" <<<"$phony" || missing="$missing $t"
 done
 if [[ -z "$missing" ]]; then
-  pass "the three polecat sandbox targets are declared and phony"
+  pass "the polecat sandbox targets are declared and phony"
 else
-  fail "the three polecat sandbox targets are declared and phony" "missing:$missing"
+  fail "the polecat sandbox targets are declared and phony" "missing:$missing"
 fi
 
 # make polecat-image without BD_SRC stops at its guard, before go or docker runs:
