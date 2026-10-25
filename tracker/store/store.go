@@ -56,6 +56,11 @@ type Store interface {
 	// ChildrenOf returns the direct children of each of parents, wisps
 	// included, keyed by parent; a parent with no children is absent.
 	ChildrenOf(ctx context.Context, parents []string) (map[string][]api.Issue, error)
+	// CreateGraph creates every node of req and every link between them in one
+	// transaction, or nothing: a cycle, a missing target or a bad node leaves no
+	// issue behind. Ephemeral nodes get wisp ids. The result maps node keys to
+	// the ids created.
+	CreateGraph(ctx context.Context, req api.GraphRequest) (api.GraphResult, error)
 	// DispatchBoard returns the dispatch tick's reads in one consistent
 	// snapshot: per rig the ready issues (no page limit), the held issues and
 	// the children of the ready issues, and the status of the probed ids.

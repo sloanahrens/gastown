@@ -236,3 +236,62 @@ func TestEmptyIDListsReachTheStoreAndAnswer204(t *testing.T) {
 		t.Errorf("store calls = close %d, delete %d, want 1 each: the handler does not decide what an empty list means", closeCalls, delCalls)
 	}
 }
+
+// graphStub answers CreateGraph; any other method panics on the nil embedded interface.
+type graphStub struct {
+	store.Store
+	create func(ctx context.Context, req api.GraphRequest) (api.GraphResult, error)
+}
+
+func (s graphStub) CreateGraph(ctx context.Context, req api.GraphRequest) (api.GraphResult, error) {
+	return s.create(ctx, req)
+}
+
+func TestCreateGraphPassesTheRequestAnswers201AndNeverNullIDs(t *testing.T) {
+	t.Parallel()
+	var got api.GraphRequest
+	var ctxActor string
+	ts := writeServer(t, graphStub{create: func(ctx context.Context, req api.GraphRequest) (api.GraphResult, error) {
+		got, ctxActor = req, api.ActorFrom(ctx)
+		return api.GraphResult{}, nil // a nil map from the store
+	}})
+	code, body := writeCall(t, "POST", ts.URL+"/v1/graphs",
+		`{"rig":"gt","nodes":[{"key":"a","title":"A","ephemeral":true,"labels":["x"]},{"key":"b","title":"B","priority":1}],"edges":[{"from":"b","to":"a","type":"blocks"}]}`)
+	if code != 201 || !strings.Contains(body, `"ids":{}`) {
+		t.Fatalf("create graph = %d %q, want 201 and an empty ids object, not null", code, body)
+	}
+	if got.Rig != "gt" || len(got.Nodes) != 2 || got.Nodes[0].Key != "a" || !got.Nodes[0].Ephemeral || got.Nodes[1].Priority != 1 ||
+		len(got.Edges) != 1 || got.Edges[0].From != "b" || got.Edges[0].Type != "blocks" {
+		t.Errorf("the store got %+v, want the request passed through", got)
+	}
+	if ctxActor != tokenActor {
+		t.Errorf("actor on the context = %q, want the token's %q", ctxActor, tokenActor)
+	}
+}
+
+func TestCreateGraphMapsStoreErrorsAndRefusesBadBodies(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		err    error
+		status int
+		kind   api.Kind
+	}{
+		"invalid":  {api.Invalid("a graph needs a rig"), 400, api.KindInvalid},
+		"conflict": {api.Conflict("cycle"), 409, api.KindConflict},
+		"missing":  {api.NotFound("gt-x"), 404, api.KindNotFound},
+		"internal": {context.DeadlineExceeded, 503, api.KindUnavailable},
+	} {
+		ts := writeServer(t, graphStub{create: func(context.Context, api.GraphRequest) (api.GraphResult, error) { return api.GraphResult{}, tc.err }})
+		code, body := writeCall(t, "POST", ts.URL+"/v1/graphs", `{"rig":"gt","nodes":[{"key":"a","title":"A"}]}`)
+		if e := decodeErr(t, body); code != tc.status || e.Kind != tc.kind {
+			t.Errorf("%s: %d %q, want %d %s", name, code, body, tc.status, tc.kind)
+		}
+	}
+	ts := writeServer(t, graphStub{})
+	for name, body := range map[string]string{"empty": "", "unknown field": `{"rig":"gt","surprise":1}`, "not json": `{`, "trailing data": `{}{}`,
+		"unknown node field": `{"rig":"gt","nodes":[{"key":"a","title":"A","nope":1}]}`} {
+		if code, resp := writeCall(t, "POST", ts.URL+"/v1/graphs", body); code != 400 {
+			t.Errorf("%s = %d %q, want 400", name, code, resp)
+		}
+	}
+}

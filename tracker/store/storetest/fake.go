@@ -134,6 +134,9 @@ func (*Fake) Blocked(context.Context, api.ReadyFilter) (api.IssuePage, error) {
 func (*Fake) ChildrenOf(context.Context, []string) (map[string][]api.Issue, error) {
 	return nil, unimplemented("ChildrenOf")
 }
+func (*Fake) CreateGraph(context.Context, api.GraphRequest) (api.GraphResult, error) {
+	return api.GraphResult{}, unimplemented("CreateGraph")
+}
 func (*Fake) DispatchBoard(context.Context, api.DispatchBoardRequest) (api.DispatchBoardResponse, error) {
 	return api.DispatchBoardResponse{}, unimplemented("DispatchBoard")
 }

@@ -133,3 +133,42 @@ type ConfigValue struct {
 type ConfigSetRequest struct {
 	Value string `json:"value"`
 }
+
+// Limits on one graph.
+const (
+	MaxGraphNodes = 500
+	MaxGraphEdges = 2000
+)
+
+// GraphNode is one issue of a graph. Key is the caller's own name for it,
+// unique within the request; edges refer to it by that name. The embedded
+// CreateParams is the issue; its ID, Parent, Rig and Actor must be empty (the
+// server mints the id, edges set parents, the request names the rig and the
+// token names the actor).
+type GraphNode struct {
+	Key string `json:"key"`
+	CreateParams
+}
+
+// GraphEdge links two issues of a graph, or an issue of the graph to one that
+// already exists. From depends on To, with the relation Type ("blocks",
+// "parent-child" with From the child, ...). From and To are node keys; one
+// that is not a key names an existing issue (or external:<rig>:<id>).
+type GraphEdge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Type string `json:"type"`
+}
+
+// GraphRequest creates a set of issues and the links between them, all or
+// none: a molecule with its steps, or any batch of related work.
+type GraphRequest struct {
+	Rig   string      `json:"rig"`
+	Nodes []GraphNode `json:"nodes"`
+	Edges []GraphEdge `json:"edges,omitempty"`
+}
+
+// GraphResult maps each node key to the id of the issue created for it.
+type GraphResult struct {
+	IDs map[string]string `json:"ids"`
+}

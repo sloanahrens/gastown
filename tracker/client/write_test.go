@@ -126,3 +126,48 @@ func TestAWriteThatGets503IsAttemptedExactlyOnce(t *testing.T) {
 		t.Errorf("client waited %v between attempts; a write has no retries to wait for", fs.waits)
 	}
 }
+
+func TestCreateGraphPostsTheRequestReturnsIDsAndIsNeverRetried(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var path, body string
+	attempts := 0
+	fail := false
+	c, fs := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		path, body = r.URL.Path, string(b)
+		attempts++
+		f := fail
+		mu.Unlock()
+		if f {
+			writeErr(w, 503, api.Unavailable("database does not answer"))
+			return
+		}
+		w.WriteHeader(201)
+		_, _ = w.Write([]byte(`{"ids":null}`))
+	}), func(cfg *Config) { cfg.MaxRetries = 4 })
+	res, err := c.CreateGraph(t.Context(), api.GraphRequest{Rig: "gt", Nodes: []api.GraphNode{{Key: "a", CreateParams: api.CreateParams{Title: "A"}}}})
+	if err != nil || res.IDs == nil {
+		t.Fatalf("CreateGraph = %+v, %v; want a non-nil ids map even when the server sent null", res, err)
+	}
+	var sent map[string]any
+	if json.Unmarshal([]byte(body), &sent) != nil || path != "/v1/graphs" || sent["rig"] != "gt" {
+		t.Errorf("sent %s %q", path, body)
+	}
+	nodes, _ := sent["nodes"].([]any)
+	if len(nodes) != 1 || nodes[0].(map[string]any)["key"] != "a" || nodes[0].(map[string]any)["title"] != "A" {
+		t.Errorf("nodes on the wire = %v, want the key and the embedded issue fields side by side", nodes)
+	}
+	mu.Lock()
+	fail, attempts = true, 0
+	mu.Unlock()
+	if _, err := c.CreateGraph(t.Context(), api.GraphRequest{Rig: "gt"}); !errors.Is(err, api.ErrUnavailable) {
+		t.Errorf("CreateGraph on 503 = %v, want api.ErrUnavailable", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 1 || len(fs.waits) != 0 {
+		t.Errorf("a graph write was attempted %d times (waits %v), want exactly once", attempts, fs.waits)
+	}
+}
