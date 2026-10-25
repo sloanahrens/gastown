@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,6 +49,35 @@ func TestSplitByDateMatchesThePythonSplit(t *testing.T) {
 			if tc.want > 0 && train[tc.want-1]["bead"] != rows[tc.want-1]["bead"] {
 				t.Errorf("train ends at %q, want the earliest %d rows ending at %q",
 					train[tc.want-1]["bead"], tc.want, rows[tc.want-1]["bead"])
+			}
+		})
+	}
+}
+
+func TestSplitByDateClampsOutOfRangeFractions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		fraction  float64
+		wantTrain int
+	}{
+		{-0.5, 0},
+		{1.5, 10},
+		{2.0, 10},
+		{math.NaN(), 0},
+		{math.Inf(1), 10},
+		{math.Inf(-1), 0},
+		{1e300, 10},
+		{-1e-300, 0},
+	}
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("fraction %v", tc.fraction), func(t *testing.T) {
+			t.Parallel()
+			train, holdout := SplitByDate(splitRows(10), tc.fraction)
+			if len(train) != tc.wantTrain {
+				t.Errorf("train = %d rows, want the cut clamped to %d", len(train), tc.wantTrain)
+			}
+			if len(holdout) != 10-tc.wantTrain {
+				t.Errorf("holdout = %d rows, want %d", len(holdout), 10-tc.wantTrain)
 			}
 		})
 	}
@@ -185,6 +215,30 @@ func TestPrepareCountsPositivesFromTheTargetCell(t *testing.T) {
 	}
 }
 
+func TestPrepareCountsAPositiveWrittenAnotherWay(t *testing.T) {
+	t.Parallel()
+	rows := splitRows(10)
+	for _, r := range rows {
+		r["rejected_before_landing"] = "0"
+	}
+	rows[0]["rejected_before_landing"] = "1.0"
+	rows[1]["rejected_before_landing"] = "TRUE"
+	rows[3]["rejected_before_landing"] = "0.0"
+	rows[4]["rejected_before_landing"] = "false"
+	rows[8]["rejected_before_landing"] = "1.0"
+
+	p := Prepare(landingColumns, rows, nil, "rejected_before_landing")
+	if p.TrainPositives != 2 {
+		t.Errorf("train positives = %d, want 2 (rows 0 and 1)", p.TrainPositives)
+	}
+	if p.HoldoutPositives != 1 {
+		t.Errorf("holdout positives = %d, want 1 (row 8)", p.HoldoutPositives)
+	}
+	if got := p.LastPositiveAt; got != rows[8]["landed_at"] {
+		t.Errorf("last positive = %q, want row 8's %q", got, rows[8]["landed_at"])
+	}
+}
+
 func TestPrepareWithoutPositivesLeavesTheDateEmpty(t *testing.T) {
 	t.Parallel()
 	rows := splitRows(10)
@@ -287,5 +341,74 @@ func TestWriteSplitReportsTheFailingFile(t *testing.T) {
 	})
 	if !errors.Is(err, boom) || !strings.Contains(err.Error(), filepath.Join("run", "train.csv")) {
 		t.Errorf("error = %v, want it to wrap %v and name train.csv", err, boom)
+	}
+}
+
+// failFile is a split file a test makes fail, at its writes or at its close.
+// It records that Close ran, which every path that opened the file owes the OS.
+type failFile struct {
+	writeErr, closeErr error
+	closed             bool
+}
+
+func (f *failFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return len(p), nil
+}
+
+func (f *failFile) Close() error {
+	f.closed = true
+	return f.closeErr
+}
+
+func TestWriteSplitReportsTheSecondFilesOpenFailure(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("permission denied")
+	train := &failFile{}
+	err := WriteSplit(Prepared{Columns: []string{"rig"}}, "run", func(path string) (io.WriteCloser, error) {
+		if filepath.Base(path) == "test.csv" {
+			return nil, boom
+		}
+		return train, nil
+	})
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), filepath.Join("run", "test.csv")) {
+		t.Errorf("error = %v, want it to wrap %v and name test.csv", err, boom)
+	}
+	if !train.closed {
+		t.Error("train.csv was left open")
+	}
+}
+
+func TestWriteSplitReportsAWriteFailureAndClosesTheFile(t *testing.T) {
+	t.Parallel()
+	writeErr, closeErr := errors.New("broken pipe"), errors.New("close failed")
+	f := &failFile{writeErr: writeErr, closeErr: closeErr}
+	err := WriteSplit(Prepared{Columns: []string{"rig"}, Train: []Row{{"rig": "gastown"}}}, "run",
+		func(string) (io.WriteCloser, error) { return f, nil })
+	if !errors.Is(err, writeErr) || !strings.Contains(err.Error(), filepath.Join("run", "train.csv")) {
+		t.Errorf("error = %v, want it to wrap %v and name train.csv", err, writeErr)
+	}
+	if errors.Is(err, closeErr) {
+		t.Errorf("error = %v, want the write failure rather than the close that followed it", err)
+	}
+	if !f.closed {
+		t.Error("the failing file was left open")
+	}
+}
+
+func TestWriteSplitReportsACloseFailure(t *testing.T) {
+	t.Parallel()
+	closeErr := errors.New("flush failed")
+	err := WriteSplit(Prepared{Columns: []string{"rig"}}, "run", func(path string) (io.WriteCloser, error) {
+		f := &failFile{}
+		if filepath.Base(path) == "test.csv" {
+			f.closeErr = closeErr
+		}
+		return f, nil
+	})
+	if !errors.Is(err, closeErr) || !strings.Contains(err.Error(), filepath.Join("run", "test.csv")) {
+		t.Errorf("error = %v, want it to wrap %v and name test.csv", err, closeErr)
 	}
 }
