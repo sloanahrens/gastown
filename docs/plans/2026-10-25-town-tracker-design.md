@@ -1,4 +1,6 @@
-> Status: approved 2026-10-25 (Sloan, claude-477). Implementation plan: 2026-10-25-town-tracker-plan.md; epic gt-p85pw.
+> Status: historical (2026-10). Merged in: gt-p85pw. Not maintained.
+
+Approved by Sloan 2026-10-25 (claude-477). The live work is the beads under epic gt-p85pw; the plan is 2026-10-25-town-tracker-plan.md.
 
 # Town tracker: replace beads and Dolt with a town-owned issue service
 
@@ -9,7 +11,9 @@ Decisions below were grilled with Sloan on 2026-10-25 (Q1-Q16, all accepted) and
 
 Dolt costs more than the town gets from it, and beads is the reason the town pays.
 
-- Dolt (pid 1368) holds 3.9 GB resident and 172% CPU after 15 hours; the gt database is 1.2 GB, of which 933 MB is old-generation history that `dolt gc` does not reclaim. An offline `gc --full` on 2026-09-29 reclaimed almost nothing (claude-1ey.3).
+The figures below were measured on 2026-10-25 and are the baseline for the exit criteria, not a live status; the raw numbers and how they were taken are on claude-477.
+
+- Dolt's resident memory, CPU and on-disk size keep growing; most of the size is old-generation history that `dolt gc` does not reclaim, and an offline `gc --full` on 2026-09-29 reclaimed almost nothing (claude-1ey.3).
 - `bd` makes one Dolt commit per write. The 09-29 policy (ADR 0002) landed on the gastown side (gt-8z769.1-.5 closed: gc actor, pause marker, commit meter, nightly backup) but the beads side stayed deferred (be-c94.1, .2, .3, .5), so commits still accumulate.
 - The slowness is mostly call volume, not database size. A 90-second process sample saw at least 529 `bd` processes (about 6 per second), 58% from `gt daemon run`, 10% from `gt dashboard`; each opens its own Dolt connection. A spec-dispatch tick costs about 108 reads and 25 s. Single-query latency is 1 ms.
 - The town has been fixing fan-out piecemeal (gt-c9rl, gt-kvp82, gt-bqj8q, gt-9bjd3). A long-lived service with a pool and server-side batch endpoints removes the class.

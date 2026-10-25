@@ -1,4 +1,6 @@
-> Status: approved 2026-10-25 (Sloan, claude-477). Design: 2026-10-25-town-tracker-design.md. Epic gt-p85pw; crew foundation handoff claude-pwu; beads are filed from this plan.
+> Status: historical (2026-10). Merged in: gt-p85pw. Not maintained.
+
+Approved by Sloan 2026-10-25 (claude-477). The beads under epic gt-p85pw are the live work; crew foundation handoff is claude-pwu. Design: 2026-10-25-town-tracker-design.md.
 
 # Town tracker implementation plan (slices S0-S2, milestones S3-S4)
 
@@ -10,18 +12,11 @@
 
 **Tech stack:** Go 1.26, `net/http`, `pgx/v5` (pool), Postgres 17 (native, launchd), server-sent events over `LISTEN/NOTIFY`. No Postgres extensions.
 
-**Spec:** `docs/plans/2026-10-25-town-tracker-design.md` (commit 9c6886e12). Handoff bead: claude-477 (in `~/.claude`).
+**Spec:** `docs/plans/2026-10-25-town-tracker-design.md`. Handoff bead: claude-477 (in `~/.claude`).
 
-## Global constraints (copied from the spec)
+## Global constraints
 
-- Postgres 17, plain connection string, no extensions; `trackerd` binds 127.0.0.1; every request carries a bearer token, hashed at rest, never printed or logged.
-- One database, one schema `tracker`, one `issues` table with a rig column; IDs verbatim (`<prefix>-<5 base36>`, children `<parent>.<n>`, wisps `<prefix>-wisp-<6>`); wisps share the table (`ephemeral` flag).
-- No stored `is_blocked`: `ready` and `blocked` compute blocking over `blocks` and `conditional-blocks` dependencies.
-- `events` is one append-only table with identity `seq`, no delete cascade; retention prunes payloads only.
-- Every write is one transaction that also appends its events; errors are typed (`not_found`, `guard_failed`, `conflict`, `invalid`, `unavailable`); lists return `next_cursor`, never a silent cap; the client sends its schema level and the server refuses on skew.
-- Only `trackerd` talks to Postgres. `tracker/` imports nothing from gt internals.
-- No dual-write. No history or time travel. Formula TOML is never parsed by the service.
-- Tests follow `~/.claude/docs/standards/test-engineering.md`: every test has a tier and a cost; bounded waits; no sleeps; hermetic; no script holds logic (Go with unit tests).
+Every task inherits the design spec: its decisions (section 2), schema (4), API (5), operations and security (10, 11) and out-of-scope list (15). Tests follow `~/.claude/docs/standards/test-engineering.md`.
 
 ## 1. File map
 
@@ -148,7 +143,8 @@ Goal of the track: every `bd` call goes through the seam, so one adapter can swi
 - **B6** formula verbs (`FormulaShow`, `FormulaList`) used by `cmd/formula.go:277`.
 - **B7** `ConfigGet` use in `cmd/tail.go:477` and `tail_sources.go:308`.
 - **B8** version and schema handshake in `internal/deps/bd_handshake.go` and `deps/beads.go` moved behind an `Admin.Version()` method.
-- **B9** `metrics/source_host.go:99` and `source_queue.go:252` through the seam; `report/hour.go:82` through the seam.
+- **B9** `metrics/source_host.go:99` and `source_queue.go:252` through the seam.
+- **B9b** `report/hour.go:82` (the generic `Run` escape hatch) through `List`.
 - **B10** `internal/mail/bd.go` runner (`runBdCommand`, used by `mailbox.go`, `router.go`, `delivery.go`) replaced by seam calls. Largest of the track: split into B10a (list and show paths), B10b (label add and remove, close, reopen), B10c (create, message thread, `mol wisp list`). Each is one landing.
 - **B11** a policy test that fails when any non-test file outside `internal/beads` execs `bd` directly (allow-list shrinks only). Depends on B1 to B10.
 
@@ -175,7 +171,7 @@ Each bead delivers the endpoint end to end: Postgres store method, handler, clie
 - **V13** `GET /board/dispatch` (payload from R3). Integration.
 - **V14** `query` and `search` forms gt uses (`ephemeral=true AND status=...`, text search). Scope fixed by R4 and the transcript survey; unsupported forms return `invalid`. Integration.
 - **V15** admin: count, stats, config get and set, kv (also `remember` keyspaces), custom types and statuses. Integration.
-- **V16** `trackerclient`: implements `beads.Client` and `beads.Admin` over `tracker/client`; `RunClientContract` and `RunAdminContract` run against it with `trackerd` in-process (integration tier, shared database per run). Chain after V2 to V15 land; split into V16a (read methods), V16b (write methods), V16c (admin).
+- **V16** `trackerclient`: implements `beads.Client` and `beads.Admin` over `tracker/client`; `RunClientContract` and `RunAdminContract` run against it with `trackerd` in-process (integration tier, shared database per run). Split into V16a (read methods; after V2, V3, V9, V10, V12, V13 and V14), V16b (write methods; after V4 to V8 and V18) and V16c (admin and events; after V11 and V15).
 - **V17** metrics: `/metrics` with request count, latency histogram, rows, per-actor counters, pool saturation, slow-query log over 100 ms, `X-Request-Tag` counted per tag. Unit tier.
 - **V18** `POST /batch` (ordered operations in one transaction). Integration.
 - **V19** `GET /snapshot/town` (R4). Integration.
@@ -241,7 +237,7 @@ C1 -> C2 -> C3 -> C4 -> C5 -> C6              (CREW, sequential)
 R5 -> E1
 {C1..C6, E1} -> V1 -> V2 -> {V3, V4, V5, V6, V7, V8, V15, V17}
 V3,V8 -> V9 -> V10 -> V12 ; R3 -> V13 ; R4 -> V12, V19 ; V2 -> V11, V14, V18
-{V2..V15} -> V16a -> V16b -> V16c
+{V2, V3, V9, V10, V12, V13, V14} -> V16a ; {V4..V8, V18} -> V16b ; {V11, V15} -> V16c ; V16a -> V16b -> V16c
 V16c -> X3..X7 ; X1 and X2 after C1 ; V16c -> Mo1..Mo3
 R1 -> Mo4, Mo5 ; R2 -> M2
 {V16c, M1..M3} -> import rehearsal M6 -> agentlab flip (crew) -> soak
@@ -249,11 +245,9 @@ O1..O6 after C5 (O2, O3 after C3); A1, A2 anytime
 D1..D6 independent of everything above
 ```
 
-## 16. Slice exits (restated from the spec)
+## 16. Slice exits
 
-- **S0 exit:** C1 and C2 done: `make gate` runs the module; a Postgres case fits the unit-test budget (measured and written on the bead).
-- **S1 exit:** V1 to V16c, V17 done; `RunClientContract` and `RunAdminContract` green on the service and on `bd`; the dispatch-board read measured on a copy of gt data (target at most 5 HTTP calls and 2 s; today about 108 reads and 25 s), owed by the overseer in V13's Gate; M2 and M3 round-trip counts on a copy.
-- **S2 exit:** X1 to X7, M1 to M6, Mo1 to Mo5, O1 to O6 done; goldens green; agentlab running on the service through a soak.
+The exit criteria are in the design spec, section 13. This plan only maps them to tasks: S0 is C1 and C2; S1 is V1 to V16c and V17 plus the M2 and M3 round-trip; S2 is X1 to X7, M1 to M6, Mo1 to Mo5 and O1 to O6. The overseer owes the dispatch-board measurement in V13's Gate.
 
 ## 17. Milestones only (re-plan after S2)
 
