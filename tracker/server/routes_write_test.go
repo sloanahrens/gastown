@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/tracker/api"
 	"github.com/steveyegge/gastown/tracker/store"
@@ -52,7 +53,7 @@ func writeCall(t *testing.T, method, url, body string) (int, string) {
 	}
 	req.Header.Set("Authorization", "Bearer good-token")
 	req.Header.Set(api.SchemaHeader, "3")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := writeHTTP.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +61,9 @@ func writeCall(t *testing.T, method, url, body string) (int, string) {
 	b, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(b)
 }
+
+// writeHTTP bounds every request: a handler that hangs fails the test fast.
+var writeHTTP = &http.Client{Timeout: 5 * time.Second}
 
 const tokenActor = "town/crew/dipper"
 
@@ -191,17 +195,44 @@ func TestWriteRoutesRefuseEmptyAndUnknownFieldBodies(t *testing.T) {
 	}
 }
 
-func TestWriteRoutesNeedAToken(t *testing.T) {
+func TestEveryWriteRouteNeedsAToken(t *testing.T) {
 	t.Parallel()
 	ts := writeServer(t, okStub())
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/issues", strings.NewReader(`{"title":"t"}`))
-	req.Header.Set(api.SchemaHeader, "3")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	for _, r := range []struct{ method, path, body string }{
+		{"POST", "/v1/issues", `{"title":"t"}`}, {"PATCH", "/v1/issues/gt-a", `{"patch":{},"guard":{}}`},
+		{"POST", "/v1/issues:close", `{"ids":["gt-a"]}`}, {"POST", "/v1/issues:delete", `{"ids":["gt-a"]}`},
+	} {
+		req, _ := http.NewRequest(r.method, ts.URL+r.path, strings.NewReader(r.body))
+		req.Header.Set(api.SchemaHeader, "3")
+		resp, err := writeHTTP.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 401 {
+			t.Errorf("%s %s without a token = %d, want 401", r.method, r.path, resp.StatusCode)
+		}
 	}
-	resp.Body.Close()
-	if resp.StatusCode != 401 {
-		t.Errorf("POST /v1/issues without a token = %d, want 401", resp.StatusCode)
+}
+
+// A close or delete of no ids is a no-op the store answers (the Store
+// contract: nothing to do is not an error); the handler passes it through.
+func TestEmptyIDListsReachTheStoreAndAnswer204(t *testing.T) {
+	t.Parallel()
+	var closeCalls, delCalls int
+	st := okStub()
+	st.close = func(_ context.Context, ids []string, _ string, _ bool) error {
+		closeCalls += 1 + len(ids)*0
+		return nil
+	}
+	st.del = func(_ context.Context, ids []string) error { delCalls += 1 + len(ids)*0; return nil }
+	ts := writeServer(t, st)
+	for _, path := range []string{"/v1/issues:close", "/v1/issues:delete"} {
+		if code, body := writeCall(t, "POST", ts.URL+path, `{"ids":[]}`); code != 204 || body != "" {
+			t.Errorf("POST %s with no ids = %d %q, want 204", path, code, body)
+		}
+	}
+	if closeCalls != 1 || delCalls != 1 {
+		t.Errorf("store calls = close %d, delete %d, want 1 each: the handler does not decide what an empty list means", closeCalls, delCalls)
 	}
 }

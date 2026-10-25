@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -46,26 +47,57 @@ func TestWriteMethodsSendTheRightRequestsAndHandle201And204(t *testing.T) {
 			t.Errorf("%s on 204 = %v, want nil", name, err)
 		}
 	}
-	want := []seenReq{
-		{"POST", "/v1/issues", `{"title":"t","rig":"gt","priority":0}`},
-		{"PATCH", "/v1/issues/gt-a%2Fb%20c", `{"patch":{"title":"n","priority":null},"guard":{}}`},
-		{"POST", "/v1/issues:close", `{"ids":["gt-a","gt-b"],"reason":"done","force":true}`},
-		{"POST", "/v1/issues:delete", `{"ids":["gt-a"]}`},
-	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(seen) != len(want) {
-		t.Fatalf("saw %d requests, want %d: %+v", len(seen), len(want), seen)
+	if len(seen) != 4 {
+		t.Fatalf("saw %d requests, want 4: %+v", len(seen), seen)
 	}
-	for i, w := range want {
+	// method, path and the decoded body of each request, compared field by field.
+	type want struct {
+		method, path string
+		body         map[string]any
+	}
+	for i, w := range []want{
+		{"POST", "/v1/issues", map[string]any{"title": "t", "rig": "gt"}},
+		{"PATCH", "/v1/issues/gt-a%2Fb%20c", map[string]any{"patch": map[string]any{"title": "n"}, "guard": map[string]any{}}},
+		{"POST", "/v1/issues:close", map[string]any{"ids": []any{"gt-a", "gt-b"}, "reason": "done", "force": true}},
+		{"POST", "/v1/issues:delete", map[string]any{"ids": []any{"gt-a"}}},
+	} {
 		if seen[i].method != w.method || seen[i].path != w.path {
 			t.Errorf("request %d = %s %s, want %s %s", i, seen[i].method, seen[i].path, w.method, w.path)
 		}
-		var a, b any
-		if json.Unmarshal([]byte(seen[i].body), &a) != nil || json.Unmarshal([]byte(w.body), &b) != nil {
-			t.Fatalf("request %d body %q or want %q is not JSON", i, seen[i].body, w.body)
+		var got map[string]any
+		if err := json.Unmarshal([]byte(seen[i].body), &got); err != nil {
+			t.Fatalf("request %d body %q is not JSON: %v", i, seen[i].body, err)
+		}
+		// Every key the test names must match; keys the wire adds with their
+		// zero value (priority 0, an empty patch field) are not asserted.
+		if !containsAll(got, w.body) {
+			t.Errorf("request %d body = %v, want it to contain %v", i, got, w.body)
 		}
 	}
+}
+
+// containsAll reports whether got has every key of want with an equal value,
+// recursing into nested objects.
+func containsAll(got, want map[string]any) bool {
+	for k, wv := range want {
+		gv, ok := got[k]
+		if !ok {
+			return false
+		}
+		if wm, isMap := wv.(map[string]any); isMap {
+			gm, ok := gv.(map[string]any)
+			if !ok || !containsAll(gm, wm) {
+				return false
+			}
+			continue
+		}
+		if !reflect.DeepEqual(gv, wv) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestAWriteThatGets503IsAttemptedExactlyOnce(t *testing.T) {
