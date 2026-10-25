@@ -34,20 +34,22 @@ const defaultTrainFraction = 0.7
 
 // SplitByDate returns rows ordered by landed_at, cut so that train holds the
 // earliest int(len(rows)*trainFraction + 1e-9) of them and holdout the rest.
-// A fraction outside [0, 1] cuts at the nearer end of rows.
+// A fraction outside [0, 1] cuts at the nearer end of rows, and it is clamped
+// before the conversion to an int: converting an out-of-range or non-finite
+// float is implementation-defined. NaN has no nearer end, so it cuts at the
+// start, which is an empty train.
 func SplitByDate(rows []Row, trainFraction float64) (train, holdout []Row) {
 	ordered := make([]Row, len(rows))
 	copy(ordered, rows)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i]["landed_at"] < ordered[j]["landed_at"] })
-	k := int(float64(len(ordered))*trainFraction + 1e-9)
-	// An out-of-range fraction, or a NaN, puts the cut past a slice bound; the
-	// caller gets an end-of-rows split instead of a panic.
-	if k < 0 {
-		k = 0
+	f := trainFraction
+	switch {
+	case math.IsNaN(f) || f < 0:
+		f = 0
+	case f > 1:
+		f = 1
 	}
-	if k > len(ordered) {
-		k = len(ordered)
-	}
+	k := int(float64(len(ordered))*f + 1e-9)
 	return ordered[:k], ordered[k:]
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -62,6 +63,11 @@ func TestSplitByDateClampsOutOfRangeFractions(t *testing.T) {
 		{-0.5, 0},
 		{1.5, 10},
 		{2.0, 10},
+		{math.NaN(), 0},
+		{math.Inf(1), 10},
+		{math.Inf(-1), 0},
+		{1e300, 10},
+		{-1e-300, 0},
 	}
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf("fraction %v", tc.fraction), func(t *testing.T) {
