@@ -62,14 +62,31 @@ func clampInt(v int64) int {
 	return int(v)
 }
 
-func timeVal(row map[string]any, col string) time.Time {
-	t, _ := row[col].(time.Time)
-	return t
+// datetime reads a datetime column. The driver returns a time.Time when the
+// connection parses times and the text of the value ("2006-01-02 15:04:05",
+// with optional fractional seconds) when it does not; both are read, as UTC.
+// A NULL, an empty value or text that is not a datetime is the zero time.
+func datetime(v any) time.Time {
+	switch x := v.(type) {
+	case time.Time:
+		return x
+	case []byte:
+		return datetime(string(x))
+	case string:
+		for _, layout := range []string{"2006-01-02 15:04:05.999999999", time.RFC3339Nano} {
+			if t, err := time.ParseInLocation(layout, x, time.UTC); err == nil {
+				return t
+			}
+		}
+	}
+	return time.Time{}
 }
 
+func timeVal(row map[string]any, col string) time.Time { return datetime(row[col]) }
+
 func timePtr(row map[string]any, col string) *time.Time {
-	t, ok := row[col].(time.Time)
-	if !ok || t.IsZero() {
+	t := datetime(row[col])
+	if t.IsZero() {
 		return nil
 	}
 	return &t

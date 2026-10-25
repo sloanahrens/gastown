@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -168,5 +169,56 @@ func TestOnlyKnownTablesAreRead(t *testing.T) {
 		if _, err := readTable(context.Background(), nil, tbl); err == nil {
 			t.Errorf("readTable(%q) was not refused before touching the database", tbl)
 		}
+	}
+}
+
+func TestDatetimeReadsTimesTextBytesAndNothing(t *testing.T) {
+	t.Parallel()
+	want := time.Date(2026, 10, 19, 18, 2, 35, 0, time.UTC)
+	frac := time.Date(2026, 10, 19, 18, 2, 35, 123456000, time.UTC)
+	for name, tc := range map[string]struct {
+		in   any
+		want time.Time
+	}{
+		"a parsed time":      {want, want},
+		"datetime bytes":     {[]byte("2026-10-19 18:02:35"), want},
+		"datetime string":    {"2026-10-19 18:02:35", want},
+		"fractional seconds": {[]byte("2026-10-19 18:02:35.123456"), frac},
+		"rfc3339":            {"2026-10-19T18:02:35Z", want},
+		"null":               {nil, time.Time{}},
+		"empty":              {[]byte(""), time.Time{}},
+		"not a time":         {[]byte("yesterday"), time.Time{}},
+		"an integer":         {int64(5), time.Time{}},
+	} {
+		if got := datetime(tc.in); !got.Equal(tc.want) {
+			t.Errorf("%s: datetime(%v) = %v, want %v", name, tc.in, got, tc.want)
+		}
+	}
+	row := map[string]any{"created_at": []byte("2026-10-19 18:02:35"), "closed_at": nil}
+	if !timeVal(row, "created_at").Equal(want) || timePtr(row, "closed_at") != nil || timePtr(row, "created_at") == nil {
+		t.Error("timeVal and timePtr must read text datetimes and give nil for a NULL")
+	}
+}
+
+func TestValidateRefusesTheZeroTimesOfAConnectionThatDidNotParseDatetimes(t *testing.T) {
+	t.Parallel()
+	ok := time.Date(2026, 10, 19, 18, 2, 35, 0, time.UTC)
+	good := &Dataset{Issues: []IssueRow{{ID: "gt-a", CreatedAt: ok, UpdatedAt: ok}}, Comments: []CommentRow{{CreatedAt: ok}}, Events: []EventRow{{CreatedAt: ok}}}
+	if err := Validate(good); err != nil {
+		t.Errorf("Validate(good) = %v, want nil", err)
+	}
+	for name, ds := range map[string]*Dataset{
+		"issue with no created_at": {Issues: []IssueRow{{ID: "gt-z", UpdatedAt: ok}}},
+		"issue with no updated_at": {Issues: []IssueRow{{ID: "gt-z", CreatedAt: ok}}},
+		"comment without a time":   {Comments: []CommentRow{{IssueID: "gt-a"}}},
+		"event without a time":     {Events: []EventRow{{IssueID: "gt-a"}}},
+	} {
+		err := Validate(ds)
+		if err == nil || !strings.Contains(err.Error(), "parse datetimes") {
+			t.Errorf("%s: Validate = %v, want an error that names the likely cause", name, err)
+		}
+	}
+	if err := Validate(&Dataset{Issues: []IssueRow{{ID: "gt-first"}, {ID: "gt-second"}}}); err == nil || !strings.Contains(err.Error(), "gt-first") || !strings.Contains(err.Error(), "2 issues") {
+		t.Errorf("Validate = %v, want the count and the first issue", err)
 	}
 }

@@ -60,3 +60,18 @@ func TestInfraTypesAreTheOnesBDHides(t *testing.T) {
 		}
 	}
 }
+
+func TestListCursorSurvivesATimeInAZoneWithSecondsInItsOffset(t *testing.T) {
+	t.Parallel()
+	// Postgres returns year 1 in the session zone with its local-mean-time
+	// offset, -05:50:36 for Chicago. RFC 3339 text cannot carry the seconds, so
+	// a cursor encoded in that zone used to decode to another instant.
+	lmt := time.FixedZone("LMT", -(5*3600 + 50*60 + 36))
+	at := time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC).In(lmt)
+	for name, in := range map[string]time.Time{"year one in LMT": at, "recent in UTC-5": time.Date(2026, 10, 25, 11, 30, 0, 5000, time.FixedZone("CDT", -5*3600))} {
+		got, err := decodeListCursor(listCursor{Priority: 1, CreatedAt: in, ID: "gt-a"}.encode())
+		if err != nil || !got.CreatedAt.Equal(in) {
+			t.Errorf("%s: cursor decoded to %v (%v), want the same instant as %v", name, got, err, in)
+		}
+	}
+}
