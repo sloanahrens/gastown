@@ -20,7 +20,7 @@ import (
 // in-process on a fresh migrated database and returns a beads.Client over it
 // acting as actor. Integration tier: one clone of a template database, about
 // 70 ms, plus a loopback server.
-func newTracker(t *testing.T, actor string) beads.Client {
+func newTracker(t *testing.T, actor string) *trackerclient.Client {
 	t.Helper()
 	pool := pgtest.New(t, "migrated")
 	ctx := context.Background()
@@ -56,4 +56,10 @@ func TestIntegrationTrackerClientSatisfiesTheClientContract(t *testing.T) {
 
 func TestIntegrationTrackerClientSatisfiesTheActorContract(t *testing.T) {
 	beadsfake.RunActorContract(t, func(t *testing.T, actor string) beads.Client { return newTracker(t, actor) })
+}
+
+// The maintenance surface: config, counts, stats, tables, wisps, the events
+// journal and export, on one database for the whole run as the contract wants.
+func TestIntegrationTrackerClientSatisfiesTheAdminContract(t *testing.T) {
+	beadsfake.RunAdminContract(t, func(t *testing.T) beadsfake.AdminClient { return newTracker(t, "town/crew/dipper") })
 }
