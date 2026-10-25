@@ -299,13 +299,13 @@ func TestParseSpecSlingJob(t *testing.T) {
 func TestSpecSlingHoldStopsAPlannedSling(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	if held := specSlingHold(town); held != nil {
+	if held := specSlingHold(town, ""); held != nil {
 		t.Fatalf("hold = %+v in a town with no hold file, want none", held)
 	}
 	if err := os.WriteFile(dispatch.HoldFilePath(town), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	held := specSlingHold(town)
+	held := specSlingHold(town, "")
 	if held == nil || !strings.Contains(held.Hold, "operator dispatch hold present") {
 		t.Fatalf("hold = %+v, want the operator hold named", held)
 	}

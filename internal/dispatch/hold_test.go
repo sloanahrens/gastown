@@ -148,3 +148,75 @@ func TestHoldLatch_ReportsOnlyTransitions(t *testing.T) {
 		}
 	}
 }
+
+// writeRigs writes a registry with each named rig, the held ones carrying
+// the dispatch-hold record an operator writes with gt rig hold (gt-vty1v).
+func writeRigs(t *testing.T, townRoot string, held, unheld []string) {
+	t.Helper()
+	entry := func(name string, hold bool) string {
+		if !hold {
+			return `"` + name + `": {}`
+		}
+		return `"` + name + `": {"dispatch_hold": {"since": "2026-10-25T12:00:00Z", "by": "sloan", "reason": "drain the landing backlog"}}`
+	}
+	var entries []string
+	for _, name := range held {
+		entries = append(entries, entry(name, true))
+	}
+	for _, name := range unheld {
+		entries = append(entries, entry(name, false))
+	}
+	body := `{"version": 1, "rigs": {` + strings.Join(entries, ", ") + `}}`
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "rigs.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A rig held out of new dispatches is held with a reason naming the release
+// command, while an unheld rig beside it dispatches (gt-vty1v).
+func TestRigHold_DispatchHoldHoldsOnlyThatRig(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRigs(t, townRoot, []string{"gastown"}, []string{"om"})
+
+	reason := RigHold(townRoot, "gastown")
+	if !strings.Contains(reason, "drain the landing backlog") || !strings.Contains(reason, "gt rig release gastown") {
+		t.Errorf("RigHold(gastown) = %q, want the hold's reason and release command", reason)
+	}
+	if reason := RigHold(townRoot, "om"); reason != "" {
+		t.Errorf("RigHold(om) = %q; another rig's dispatch hold must not hold it", reason)
+	}
+}
+
+// The town-wide hold file wins over a rig's dispatch hold: it stops every rig,
+// so its reason is the one the dispatcher reports (gt-vty1v).
+func TestRigHold_TownHoldWinsOverDispatchHold(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRigs(t, townRoot, []string{"gastown"}, nil)
+	if err := os.WriteFile(filepath.Join(townRoot, HoldFileName), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if reason := RigHold(townRoot, "gastown"); !strings.Contains(reason, "operator dispatch hold present") {
+		t.Errorf("RigHold(gastown) = %q, want the town-wide hold named first", reason)
+	}
+}
+
+// A registry that does not load cannot rule a rig's dispatch hold out, so the
+// rig reads as held, as a park does when the town config is unreadable.
+func TestRigHold_UnreadableRegistryHolds(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "rigs.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if reason := RigHold(townRoot, "gastown"); !strings.Contains(reason, "treating as held") {
+		t.Errorf("RigHold on a broken registry = %q, want a fail-closed hold", reason)
+	}
+}

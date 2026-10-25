@@ -108,6 +108,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gt rig hold` / `gt rig release`** (gt-vty1v) — an operator can stop new
+  automatic dispatches for one rig without parking it. The hold is a
+  `dispatch_hold` record `{since, by, reason}` on the rig's entry in
+  `mayor/rigs.json`; the spec dispatcher, its background slings and the daemon's
+  scheduled slings skip the held rig, while its running polecats, daemon
+  auto-start and park record are untouched, and a `gt sling` the operator types
+  still runs. The town-wide operator hold file still wins over every rig's
+  record. `gt rig release` lifts one rig's hold and leaves the others
+  dispatching.
+
 - **`overseer_report` patrol** (gt-a6fg7) — every 15 minutes the daemon writes
   the status the overseer used to write by hand to
   `.runtime/overseer/reports/<UTC timestamp>.md`, where the dashboard's Report

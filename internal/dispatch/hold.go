@@ -1,7 +1,6 @@
 // Package dispatch holds the contracts every automatic dispatcher in the town
-// shares — the spec dispatcher and the daemon's scheduled slings. It is a leaf
-// package so that the callers, which cannot import each other freely, can all
-// reach it.
+// shares — the spec dispatcher and the daemon's scheduled slings. The callers
+// cannot import each other freely, so the shared rules live here.
 package dispatch
 
 import (
@@ -11,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/steveyegge/gastown/internal/estop"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // HoldFileName is the operator's town-wide dispatch hold: a file at the town
@@ -69,9 +69,11 @@ func estopHold(townRoot, rig string) string {
 	}
 }
 
-// RigHold is OperatorHold plus the per-rig ESTOP (<town>/ESTOP.<rig>), for a
-// dispatcher that knows which rig it is about to sling into. An empty rig
-// answers for the town.
+// RigHold is OperatorHold plus the holds that cover one rig, for a dispatcher
+// that knows which rig it is about to sling into: the rig's ESTOP
+// (<town>/ESTOP.<rig>) and the operator's dispatch hold on its registry entry
+// (townconfig.DispatchHeldReason). An empty rig answers for the town, and the
+// town-wide holds win because they are checked first.
 func RigHold(townRoot, rig string) string {
 	if reason := OperatorHold(townRoot); reason != "" {
 		return reason
@@ -79,7 +81,10 @@ func RigHold(townRoot, rig string) string {
 	if townRoot == "" || rig == "" {
 		return ""
 	}
-	return estopHold(townRoot, rig)
+	if reason := estopHold(townRoot, rig); reason != "" {
+		return reason
+	}
+	return townconfig.DispatchHeldReason(townRoot, rig)
 }
 
 // HoldLatch remembers the last hold reason a polling dispatcher saw, so it can
