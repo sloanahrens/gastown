@@ -29,11 +29,17 @@ var (
 	attributionGeneratedRE = regexp.MustCompile(`(?i)^\s*(?:🤖\s*)?generated\s+(?:with|by)\b.*\b(?:claude|anthropic)\b`)
 )
 
+// IsAttribution reports whether a commit-message line is AI attribution, the
+// form the landing gate refuses and gt done strips (gt-g5fkf).
+func IsAttribution(line string) bool {
+	return attributionTrailerRE.MatchString(line) || attributionGeneratedRE.MatchString(line) || strings.Contains(line, "🤖")
+}
+
 // AttributionLine returns the first line of msg that is AI attribution, or
 // "" when there is none.
 func AttributionLine(msg string) string {
 	for _, line := range strings.Split(msg, "\n") {
-		if attributionTrailerRE.MatchString(line) || attributionGeneratedRE.MatchString(line) || strings.Contains(line, "🤖") {
+		if IsAttribution(line) {
 			return strings.TrimSpace(line)
 		}
 	}
