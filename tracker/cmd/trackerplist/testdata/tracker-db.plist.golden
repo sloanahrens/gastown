@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+	<dict>
+		<key>Label</key>
+		<string>com.gastown.tracker-db</string>
+		<key>ProgramArguments</key>
+		<array>
+			<string>/opt/homebrew/opt/postgresql@17/bin/postgres</string>
+			<string>-D</string>
+			<string>/Users/fixture/gt/.pg-data</string>
+			<string>-c</string>
+			<string>listen_addresses=127.0.0.1</string>
+			<string>-c</string>
+			<string>port=5433</string>
+			<string>-c</string>
+			<string>unix_socket_directories=/Users/fixture/gt/.pg-data</string>
+		</array>
+		<key>RunAtLoad</key>
+		<true/>
+		<key>KeepAlive</key>
+		<true/>
+		<key>EnvironmentVariables</key>
+		<dict>
+			<key>LC_ALL</key>
+			<string>C</string>
+			<key>LANG</key>
+			<string>C</string>
+		</dict>
+		<key>StandardOutPath</key>
+		<string>/Users/fixture/gt/daemon/tracker-db.log</string>
+		<key>StandardErrorPath</key>
+		<string>/Users/fixture/gt/daemon/tracker-db.err.log</string>
+	</dict>
+</plist>
