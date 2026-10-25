@@ -90,6 +90,8 @@ const (
 	// SchemaHeader carries the caller's schema level on every /v1 request; the
 	// server refuses a mismatch and a missing header.
 	SchemaHeader = "X-Tracker-Schema"
+	// RequestTagHeader optionally names the caller's unit of work (a tick id).
+	RequestTagHeader = "X-Tracker-Tag"
 )
 
 // ErrUnknownToken is what token lookup returns for a token that is not known,

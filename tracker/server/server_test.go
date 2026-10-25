@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/tracker/api"
+	"github.com/steveyegge/gastown/tracker/client"
 )
 
 type fakeAuth map[string]string // token -> actor
@@ -253,5 +254,33 @@ func TestSchemaSkewIsNotDisclosedWithoutAToken(t *testing.T) {
 	code, body := get(t, ts.URL+"/v1/whoami", map[string]string{api.SchemaHeader: "99"})
 	if code != 401 || strings.Contains(body, "skew") {
 		t.Errorf("unauthenticated skewed request = %d %q, want a plain 401 that says nothing of the schema level", code, body)
+	}
+}
+
+// The real client against the real server handler: the headers, the schema
+// level, the token and the error body all line up. A compatibility check, not
+// a second test of either side.
+func TestClientAndServerAgree(t *testing.T) {
+	t.Parallel()
+	s := New(Config{Auth: fakeAuth{"trk_good": "town/crew/dipper"}, Health: fakeHealth{}, SchemaLevel: api.SchemaLevel})
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	good, err := client.New(client.Config{BaseURL: ts.URL, Token: "trk_good"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actor, err := good.Whoami(context.Background()); err != nil || actor != "town/crew/dipper" {
+		t.Errorf("Whoami = %q, %v", actor, err)
+	}
+
+	bad, _ := client.New(client.Config{BaseURL: ts.URL, Token: "trk_bad", MaxRetries: -1})
+	if _, err := bad.Whoami(context.Background()); !errors.Is(err, api.ErrInvalid) {
+		t.Errorf("a wrong token = %v, want the server's typed invalid error", err)
+	}
+
+	skewed, _ := client.New(client.Config{BaseURL: ts.URL, Token: "trk_good", SchemaLevel: api.SchemaLevel + 1, MaxRetries: -1})
+	if _, err := skewed.Whoami(context.Background()); !errors.Is(err, api.ErrConflict) {
+		t.Errorf("a skewed client = %v, want the server's conflict error", err)
 	}
 }
