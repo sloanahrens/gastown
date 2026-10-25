@@ -50,7 +50,11 @@ func runMetricsHour(ctx context.Context, out io.Writer, town string) error {
 	if err != nil {
 		return err
 	}
-	defer lock.Release()
+	defer func() {
+		if err := lock.Release(); err != nil {
+			fmt.Fprintf(out, "[town-metrics] releasing %s: %v\n", lockPath, err)
+		}
+	}()
 
 	snapshotErr := runMetricsSnapshot(ctx, out, town)
 	analyseErr := runMetricsAnalyse(ctx, out, town)
