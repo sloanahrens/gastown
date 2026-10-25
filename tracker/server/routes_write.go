@@ -7,7 +7,8 @@ import (
 )
 
 // registerWriteRoutes registers the write routes: POST /v1/issues,
-// PATCH /v1/issues/{id}, POST /v1/issues:close and POST /v1/issues:delete.
+// PATCH /v1/issues/{id}, POST /v1/issues:close, POST /v1/issues:delete and
+// POST /v1/graphs (a set of issues and their links, all or none).
 // Every write is attributed to the actor of the request's token; an actor
 // named in a body is ignored.
 func (s *Server) registerWriteRoutes(mux *http.ServeMux) {
@@ -15,6 +16,24 @@ func (s *Server) registerWriteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/issues/{id}", s.updateIssue)
 	mux.HandleFunc("POST /v1/issues:close", s.closeIssues)
 	mux.HandleFunc("POST /v1/issues:delete", s.deleteIssues)
+	mux.HandleFunc("POST /v1/graphs", s.createGraph)
+}
+
+func (s *Server) createGraph(w http.ResponseWriter, r *http.Request) {
+	var req api.GraphRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	res, err := s.cfg.Store.CreateGraph(r.Context(), req)
+	if err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if res.IDs == nil {
+		res.IDs = map[string]string{}
+	}
+	writeJSON(w, http.StatusCreated, res)
 }
 
 func (s *Server) createIssue(w http.ResponseWriter, r *http.Request) {

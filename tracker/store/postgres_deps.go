@@ -33,6 +33,8 @@ func isCycleChecked(t string) bool { return slices.Contains(cycleCheckedTypes, t
 var cycleCheckedTypes = append(slices.Clone(blockingTypes), "parent-child")
 
 // parseExternalRef splits external:<rig>:<id>; id may itself contain colons.
+//
+//nolint:unparam // rig and id are what deps_test pins; callers today only need ok
 func parseExternalRef(ref string) (rig, id string, ok bool) {
 	rest, found := strings.CutPrefix(ref, "external:")
 	if !found {
@@ -64,72 +66,78 @@ func (p *Postgres) AddDependency(ctx context.Context, issue, dependsOn, depType 
 	if strings.HasPrefix(dependsOn, "external:") && !external {
 		return api.Invalid("external reference %q must be external:<rig>:<id>", dependsOn)
 	}
-	actor := api.ActorFrom(ctx)
 	return p.inTx(ctx, func(tx pgx.Tx) error {
-		// One link is added at a time. A cycle check reads links other
-		// transactions may be adding right now, so without this the two
-		// halves of a cycle could each pass the check and both commit. It
-		// comes first so the row locks below are taken in one order.
-		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", depLockKey); err != nil {
-			return fmt.Errorf("store: lock dependencies: %w", err)
+		return addDependencyInTx(ctx, tx, issue, dependsOn, depType, api.ActorFrom(ctx))
+	})
+}
+
+// addDependencyInTx is AddDependency's work inside a transaction the caller
+// owns and has validated the arguments of (type, self-link, external form).
+func addDependencyInTx(ctx context.Context, tx pgx.Tx, issue, dependsOn, depType, actor string) error {
+	_, _, external := parseExternalRef(dependsOn)
+	// One link is added at a time. A cycle check reads links other
+	// transactions may be adding right now, so without this the two
+	// halves of a cycle could each pass the check and both commit. It
+	// comes first so the row locks below are taken in one order.
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", depLockKey); err != nil {
+		return fmt.Errorf("store: lock dependencies: %w", err)
+	}
+	if _, err := lockIssue(ctx, tx, issue); err != nil {
+		return err
+	}
+	if !external {
+		// FOR SHARE keeps the target from being deleted before the link commits.
+		var one int
+		err := tx.QueryRow(ctx, "SELECT 1 FROM tracker.issues WHERE id = $1 FOR SHARE", dependsOn).Scan(&one)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return api.NotFound(dependsOn)
 		}
-		if _, err := lockIssue(ctx, tx, issue); err != nil {
-			return err
+		if err != nil {
+			return fmt.Errorf("store: check dependency target: %w", err)
 		}
-		if !external {
-			// FOR SHARE keeps the target from being deleted before the link commits.
-			var one int
-			err := tx.QueryRow(ctx, "SELECT 1 FROM tracker.issues WHERE id = $1 FOR SHARE", dependsOn).Scan(&one)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return api.NotFound(dependsOn)
-			}
-			if err != nil {
-				return fmt.Errorf("store: check dependency target: %w", err)
-			}
-		}
-		var have string
-		err := tx.QueryRow(ctx, "SELECT type FROM tracker.dependencies WHERE issue_id = $1 AND depends_on = $2", issue, dependsOn).Scan(&have)
-		switch {
-		case err == nil && have == depType:
-			return nil
-		case err == nil:
-			return api.Conflict("%s already depends on %s as %q", issue, dependsOn, have)
-		case !errors.Is(err, pgx.ErrNoRows):
-			return fmt.Errorf("store: check dependency: %w", err)
-		}
-		if isCycleChecked(depType) && !external {
-			var cycle bool
-			if err := tx.QueryRow(ctx, `WITH RECURSIVE walk(id) AS (
+	}
+	var have string
+	err := tx.QueryRow(ctx, "SELECT type FROM tracker.dependencies WHERE issue_id = $1 AND depends_on = $2", issue, dependsOn).Scan(&have)
+	switch {
+	case err == nil && have == depType:
+		return nil
+	case err == nil:
+		return api.Conflict("%s already depends on %s as %q", issue, dependsOn, have)
+	case !errors.Is(err, pgx.ErrNoRows):
+		return fmt.Errorf("store: check dependency: %w", err)
+	}
+	if isCycleChecked(depType) && !external {
+		var cycle bool
+		if err := tx.QueryRow(ctx, `WITH RECURSIVE walk(id) AS (
   SELECT $2::text
   UNION
   SELECT d.depends_on FROM tracker.dependencies d JOIN walk w ON d.issue_id = w.id WHERE d.type IN `+sqlList(cycleCheckedTypes)+`
 ) SELECT EXISTS (SELECT 1 FROM walk WHERE id = $1)`, issue, dependsOn).Scan(&cycle); err != nil {
-				return fmt.Errorf("store: check cycle: %w", err)
-			}
-			if cycle {
-				return api.Conflict("%s -> %s would make a cycle of blocking links", issue, dependsOn)
-			}
+			return fmt.Errorf("store: check cycle: %w", err)
 		}
-		if depType == "parent-child" {
-			var parent string
-			if err := tx.QueryRow(ctx, "SELECT coalesce(parent_id, '') FROM tracker.issues WHERE id = $1", issue).Scan(&parent); err != nil {
-				return fmt.Errorf("store: read parent: %w", err)
-			}
-			if parent != "" && parent != dependsOn {
-				return api.Conflict("%s already has parent %s", issue, parent)
-			}
-			if _, err := tx.Exec(ctx, "UPDATE tracker.issues SET parent_id = $2 WHERE id = $1", issue, dependsOn); err != nil {
-				return fmt.Errorf("store: set parent: %w", err)
-			}
+		if cycle {
+			return api.Conflict("%s -> %s would make a cycle of blocking links", issue, dependsOn)
 		}
-		if _, err := tx.Exec(ctx, "INSERT INTO tracker.dependencies (issue_id, depends_on, type, created_by) VALUES ($1, $2, $3, $4)", issue, dependsOn, depType, actor); err != nil {
-			return fmt.Errorf("store: add dependency: %w", err)
+	}
+	if depType == "parent-child" {
+		var parent string
+		if err := tx.QueryRow(ctx, "SELECT coalesce(parent_id, '') FROM tracker.issues WHERE id = $1", issue).Scan(&parent); err != nil {
+			return fmt.Errorf("store: read parent: %w", err)
 		}
-		if _, err := tx.Exec(ctx, "UPDATE tracker.issues SET updated_at = now() WHERE id = $1", issue); err != nil {
-			return fmt.Errorf("store: touch %s: %w", issue, err)
+		if parent != "" && parent != dependsOn {
+			return api.Conflict("%s already has parent %s", issue, parent)
 		}
-		return appendEvent(ctx, tx, "dependency_added", issue, actor, nil, &dependsOn, &depType)
-	})
+		if _, err := tx.Exec(ctx, "UPDATE tracker.issues SET parent_id = $2 WHERE id = $1", issue, dependsOn); err != nil {
+			return fmt.Errorf("store: set parent: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, "INSERT INTO tracker.dependencies (issue_id, depends_on, type, created_by) VALUES ($1, $2, $3, $4)", issue, dependsOn, depType, actor); err != nil {
+		return fmt.Errorf("store: add dependency: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "UPDATE tracker.issues SET updated_at = now() WHERE id = $1", issue); err != nil {
+		return fmt.Errorf("store: touch %s: %w", issue, err)
+	}
+	return appendEvent(ctx, tx, "dependency_added", issue, actor, nil, &dependsOn, &depType)
 }
 
 // RemoveDependency removes the link from issue to dependsOn, whatever its

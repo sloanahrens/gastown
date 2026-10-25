@@ -35,3 +35,17 @@ func (c *Client) Close(ctx context.Context, ids []string, reason string, force b
 func (c *Client) Delete(ctx context.Context, ids []string) error {
 	return c.do(ctx, http.MethodPost, "/v1/issues:delete", api.DeleteRequest{IDs: ids}, nil, false)
 }
+
+// CreateGraph creates the nodes and links of req in one transaction, or
+// nothing, and returns the id created for each node key. Like every write it
+// gets one attempt.
+func (c *Client) CreateGraph(ctx context.Context, req api.GraphRequest) (api.GraphResult, error) {
+	var out api.GraphResult
+	if err := c.do(ctx, http.MethodPost, "/v1/graphs", req, &out, false); err != nil {
+		return api.GraphResult{}, err
+	}
+	if out.IDs == nil {
+		out.IDs = map[string]string{}
+	}
+	return out, nil
+}
