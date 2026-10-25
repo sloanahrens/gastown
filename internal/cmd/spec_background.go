@@ -55,7 +55,7 @@ type specInFlight struct {
 	Agent   string    `json:"agent"`
 	Paths   []string  `json:"paths,omitempty"`
 	Tests   []string  `json:"tests,omitempty"`
-	Started time.Time `json:"started,omitempty"`
+	Started time.Time `json:"started,omitzero"`
 }
 
 var (
