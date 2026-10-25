@@ -161,16 +161,18 @@ func dashPolecatState(item polecatInventoryItem, hasWork, ready bool, labels []s
 // state the hook time does not date: a bead submitted for landing entered
 // queued at its last write, the label write gt done makes, which is the wait
 // the Landings panel ages from the same field. Every other state answers nil,
-// and the page reads the hub's hook time (gt-iv7jf).
-func dashPolecatStateSince(state string, issue *beads.Issue) *time.Time {
+// and the page reads the hub's hook time (gt-iv7jf). A last write that does not
+// parse answers an error, so the caller reports the hook fallback instead of
+// letting it happen silently (gt-uqmdg).
+func dashPolecatStateSince(state string, issue *beads.Issue) (*time.Time, error) {
 	if state != dashboard.StateQueued || issue == nil {
-		return nil
+		return nil, nil
 	}
 	at, err := time.Parse(time.RFC3339, issue.UpdatedAt)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return &at
+	return &at, nil
 }
 
 // buildDashPolecats joins the seats with their session, bead and record.
@@ -240,7 +242,13 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 			}
 		}
 		p.State, p.Reason = dashPolecatState(s.Item, hasWork, hasWork && in.Ready[p.Bead], labels)
-		if at := dashPolecatStateSince(p.State, s.Issue); at != nil {
+		at, err := dashPolecatStateSince(p.State, s.Issue)
+		if err != nil {
+			// The bead's last write could not be read, so the queued wait has no
+			// clock of its own and the page dates it from the hook: say so rather
+			// than let the fallback pass as the submit time (gt-uqmdg).
+			p.Reason = "the bead's last write could not be read, so the queued wait is dated from the hook"
+		} else if at != nil {
 			p.StateSince = at
 		}
 		if !in.SessionsKnown && p.State == dashboard.StateStalled {
