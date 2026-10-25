@@ -117,6 +117,9 @@ type AnalysisResult struct {
 	Dir      string
 	Landings int
 	Panel    Panel
+	// SnapshotsSkipped is how many snapshots had a ts that does not parse, so
+	// the join could not place them.
+	SnapshotsSkipped int
 }
 
 // RunAnalysis runs the daily analysis when its stamp is older than Every, and
@@ -175,7 +178,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	if err != nil {
 		return res, err
 	}
-	rows, explainOnly, err := readExtract(env, dayDir)
+	columns, rows, explainOnly, err := readExtract(env, dayDir)
 	if err != nil {
 		return res, err
 	}
@@ -188,7 +191,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 		return res, err
 	}
 
-	joinHeader, joined, _ := Join(rows, snaps, o.MaxAge)
+	joinHeader, joined, cov := Join(columns, rows, snaps, o.MaxAge)
 	joinHeader, joined = JoinPeaks(joinHeader, joined, peaks)
 	targets, err := analyseTargets(ctx, env, o, joinHeader, joined, explainOnly)
 	if err != nil {
@@ -218,7 +221,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	if err := PublishAtomic(dir, stampName, []byte(now.Format(time.RFC3339)+"\n")); err != nil {
 		return res, err
 	}
-	res.Ran, res.Landings, res.Panel = true, len(joined), panel
+	res.Ran, res.Landings, res.Panel, res.SnapshotsSkipped = true, len(joined), panel, cov.Skipped
 	return res, nil
 }
 
@@ -288,33 +291,30 @@ func extractDir(out []byte) (string, error) {
 }
 
 // readExtract reads the landings and the explain-only columns the extract wrote
-// into dir. A missing sidecar names no explain-only column: it is additive to
-// the CSV, so its absence is not an analysis without landings.
-//
-// The CSV header is not returned: Join derives the joined table's columns from
-// the rows and the record's own contract, so an unknown column is carried
-// without this reading it.
-func readExtract(env Env, dir string) (rows []Row, explainOnly []string, err error) {
+// into dir, with the CSV header Join keeps as the joined table's own. A missing
+// sidecar names no explain-only column: it is additive to the CSV, so its
+// absence is not an analysis without landings.
+func readExtract(env Env, dir string) (columns []string, rows []Row, explainOnly []string, err error) {
 	data, err := env.ReadFile(filepath.Join(dir, landingsName))
 	if err != nil {
-		return nil, nil, fmt.Errorf("%s: %w", landingsName, err)
+		return nil, nil, nil, fmt.Errorf("%s: %w", landingsName, err)
 	}
-	_, rows, err = ReadLandings(bytes.NewReader(data))
+	columns, rows, err = ReadLandings(bytes.NewReader(data))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	side, err := env.ReadFile(filepath.Join(dir, sidecarName))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return rows, nil, nil
+		return columns, rows, nil, nil
 	case err != nil:
-		return nil, nil, fmt.Errorf("%s: %w", sidecarName, err)
+		return nil, nil, nil, fmt.Errorf("%s: %w", sidecarName, err)
 	}
 	explainOnly, err = ReadSidecar(bytes.NewReader(side))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return rows, explainOnly, nil
+	return columns, rows, explainOnly, nil
 }
 
 // readSnapshots reads the town's snapshot log. No log at all is no snapshots:

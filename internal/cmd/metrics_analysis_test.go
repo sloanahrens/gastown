@@ -72,6 +72,35 @@ func TestMetricsAnalysePrintsTheReceiptOfWhatItDid(t *testing.T) {
 			t.Fatalf("receipt = %q, want %q", got, want)
 		}
 	})
+	t.Run("a snapshot with an unparseable ts is named", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		day := filepath.Join(town, ".runtime", "metrics", "2026-10-01")
+		if err := os.MkdirAll(day, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(day, "landings.csv"), []byte("bead,rig,landed_at\r\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metrics.SnapshotPath(town), []byte(`{"ts":"not a time"}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		env := metrics.Env{
+			Town:     town,
+			Now:      func() time.Time { return analyseNow },
+			ReadFile: os.ReadFile,
+			Run:      func(context.Context, []string) ([]byte, error) { return nil, errors.New("mango must not run") },
+			RunEnv:   analyseRunEnv(t, day),
+		}
+		var out bytes.Buffer
+		if err := runMetricsAnalyseWith(context.Background(), &out, env, analysisPaths(town)); err != nil {
+			t.Fatalf("runMetricsAnalyseWith: %v", err)
+		}
+		const skipped = "analyse: 1 snapshot(s) skipped, their ts does not parse\n"
+		if got := out.String(); !strings.HasSuffix(got, skipped) {
+			t.Fatalf("receipt = %q, want it to end with %q", got, skipped)
+		}
+	})
 	t.Run("failed", func(t *testing.T) {
 		t.Parallel()
 		town := t.TempDir()

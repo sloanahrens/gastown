@@ -3,6 +3,9 @@ package metrics
 import (
 	"bytes"
 	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -41,6 +44,36 @@ func TestReadLandingsReadsTheExtractHeader(t *testing.T) {
 	}
 }
 
+// pythonLandingColumns reads LANDING_COLUMNS out of the Python extract, the
+// other half of the contract landingColumns mirrors.
+func pythonLandingColumns(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "scripts", "town_metrics", "tables.py"))
+	if err != nil {
+		t.Fatalf("read the Python extract's tables.py: %v", err)
+	}
+	list := regexp.MustCompile(`(?s)LANDING_COLUMNS\s*=\s*\[(.*?)\]`).FindSubmatch(data)
+	if list == nil {
+		t.Fatal("tables.py has no LANDING_COLUMNS = [...] literal")
+	}
+	var columns []string
+	for _, quoted := range regexp.MustCompile(`"([^"]*)"`).FindAllSubmatch(list[1], -1) {
+		columns = append(columns, string(quoted[1]))
+	}
+	return columns
+}
+
+func TestLandingColumnsMatchThePythonExtract(t *testing.T) {
+	t.Parallel()
+	want := pythonLandingColumns(t)
+	if len(want) == 0 {
+		t.Fatal("read no columns out of tables.py")
+	}
+	if !slices.Equal(landingColumns, want) {
+		t.Errorf("landingColumns = %v, want the extract's %v", landingColumns, want)
+	}
+}
+
 func TestReadLandingsRejectsInputItCannotAttribute(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -76,6 +109,46 @@ func TestWriteLandingsWritesTheExtractFormat(t *testing.T) {
 	want := "a,b\r\n1,\r\n\"x,y\",2\r\n"
 	if got := buf.String(); got != want {
 		t.Errorf("bytes\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestWriteLandingsKeepsLineEndingsInACell(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, cell, want string }{
+		{"a bare carriage return", "a\rb", "x\r\n\"a\rb\"\r\n"},
+		{"a bare line feed", "a\nb", "x\r\n\"a\nb\"\r\n"},
+		{"a CRLF pair", "a\r\nb", "x\r\n\"a\r\nb\"\r\n"},
+		{"a quote beside a comma", `a",b`, "x\r\n\"a\"\",b\"\r\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			if err := WriteLandings(&buf, []string{"x"}, []Row{{"x": tc.cell}}); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if got := buf.String(); got != tc.want {
+				t.Errorf("bytes\n got: %q\nwant: %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReadLandingsKeepsACarriageReturnAndFoldsACRLFPair(t *testing.T) {
+	t.Parallel()
+	input := "x\r\n\"a\rb\"\r\n\"a\nb\"\r\n\"a\r\nb\"\r\n"
+	_, rows, err := ReadLandings(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := []string{"a\rb", "a\nb", "a\nb"}
+	if len(rows) != len(want) {
+		t.Fatalf("rows = %d, want %d", len(rows), len(want))
+	}
+	for i, want := range want {
+		if got := rows[i]["x"]; got != want {
+			t.Errorf("rows[%d][x] = %q, want %q", i, got, want)
+		}
 	}
 }
 
