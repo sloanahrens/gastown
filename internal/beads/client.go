@@ -2,6 +2,21 @@ package beads
 
 import "time"
 
+// ReadyOptions is the filter ReadyFiltered sends, so a caller's exclusions run
+// against the store's own board instead of a page filtered in Go afterwards.
+// ReadyArgs describes the bd flags these fields become.
+type ReadyOptions struct {
+	// Unassigned keeps only issues with no assignee.
+	Unassigned bool
+	// ExcludeLabels drops issues carrying any of these labels.
+	ExcludeLabels []string
+	// ExcludeTypes drops issues of any of these issue types.
+	ExcludeTypes []string
+	// Limit caps the answer. Zero asks for the whole board: bd's default
+	// page of 100 does not apply.
+	Limit int
+}
+
 // Client is the issue-store surface that code outside this package uses
 // most: reading, listing, creating, updating and closing issues, their
 // comments and dependencies, the ready queue, and claim release. *Beads
@@ -44,6 +59,10 @@ type Client interface {
 	// ReadyAll returns every issue Ready would, without bd's default page
 	// cap; a page bd reports as cut is an error.
 	ReadyAll() ([]*Issue, error)
+	// ReadyFiltered returns the ready issues matching opts' filters, which
+	// run server-side; a page returned with *ErrReadyTruncated is shorter
+	// than the answer asked for.
+	ReadyFiltered(opts ReadyOptions) ([]*Issue, error)
 	// Children returns the direct children of parentID.
 	Children(parentID string) ([]*Issue, error)
 	// ChildrenOf returns the direct children of each of parentIDs in one

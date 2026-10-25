@@ -2244,81 +2244,57 @@ func specBoardDesigns(reads *specTickReads, storeFor func(rig string) beads.Clie
 	return read
 }
 
-// specReadyArgs is the ready query: unassigned work beads, with the
-// dispatcher's exclusions and the town's non-dispatchable families filtered
-// server-side, unlimited. The retired label spec and type feature are not
-// queried on (gt-mmsr2); the non-work types (an epic, the runtime families)
-// are excluded instead, so the board holds work beads only.
+// specReadyOptions is the dispatcher's board query: unassigned work beads,
+// with the dispatcher's exclusions and the town's non-dispatchable families
+// filtered server-side, unlimited. The retired label spec and type feature are
+// not queried on (gt-mmsr2); the non-work types (an epic, the runtime
+// families) are excluded instead, so the board holds work beads only.
 //
 // A board-carried label is deliberately not among the server-side exclusions:
 // the board must carry the beads it holds so the tick can count them and name
 // them in its skip line, and the health line can show the count (gt-q6zoo,
 // gt-k1g3e). Eligible still keeps them out of the candidate set.
 //
-// The count is read from this board, not a second query, because `bd ready
-// --json` hydrates each issue's labels array. That is the CLI's own answer for
-// the bd on PATH (RunBdJSONAllowStale runs it as a subprocess); the notes in
-// internal/cmd/ready.go and internal/beads about `bd ready --json` carrying no
-// labels describe the store-backed readers, which build their issue list from
-// the store and never see this JSON. A live board captured 2026-10-02 with
-// these exact args carried labels on 61 of 72 issues (every issue that has
-// any), and TestCapturedSpecBoardCarriesLabels pins the shape against a
-// captured board whose labeled bead is the one the dispatcher itself labeled.
-func specReadyArgs() []string {
+// The count is read from this board, not a second query, because bd ready
+// --json hydrates each issue's labels array. The notes in internal/cmd/ready.go
+// and internal/beads about `bd ready --json` carrying no labels describe the
+// store-backed readers, which build their issue list from the store and never
+// see this JSON. A live board captured 2026-10-02 with these exact filters
+// carried labels on 61 of 72 issues (every issue that has any), and
+// TestCapturedSpecBoardCarriesLabels pins the shape against a captured board
+// whose labeled bead is the one the dispatcher itself labeled.
+func specReadyOptions() beads.ReadyOptions {
 	exclude := append([]string(nil), constants.NonDispatchableBeadLabels...)
 	exclude = append(exclude, specdispatch.ReadyQueryLabels()...)
-	return []string{
-		"ready", "--json",
-		"--unassigned",
-		"--exclude-label", strings.Join(exclude, ","),
-		"--exclude-type", strings.Join(specdispatch.NonWorkBeadTypes(), ","),
-		"--limit", "0",
+	return beads.ReadyOptions{
+		Unassigned:    true,
+		ExcludeLabels: exclude,
+		ExcludeTypes:  specdispatch.NonWorkBeadTypes(),
+		Limit:         0,
 	}
 }
 
-// specReadyBoard runs the ready query in one rig.
-//
-// keep-raw (gt-7iwy0.4.10): the ready query stays on the argv path. It is the
-// one dispatcher query whose filters (--unassigned, --exclude-label,
-// --exclude-type, --limit 0) must run server-side against the rig's own
-// database, and Client.ReadyAll answers a different, bookkeeping-only
-// exclusion set; expressing this one typed would push the dispatcher's
-// exclusions into a Go filter that no longer matches what bd ready selects,
-// changing which beads gt spec dispatch picks. RunBdJSONAllowStale pins the
-// rig database and asks bd's stale-read bypass, which no Client method does.
+// specReadyBoard runs the ready query in one rig, against the rig's own
+// database. beads.NewPinned pins BEADS_DIR to the database resolved from that
+// rig whatever database the tick's environment names, forces the read
+// read-only, asks bd's stale-read bypass when the installed bd takes it, and
+// carries bd's stderr into a failure.
+// TestReadyFilteredCarriesThePinnedReadOnlyPolicy pins that policy on the
+// ReadyFiltered query the dispatcher sends.
 func specReadyBoard(rigPath string) ([]*beads.Issue, error) {
-	out, err := beads.RunBdJSONAllowStale(rigPath, specReadyArgs()...)
-	if err != nil {
-		return nil, err
-	}
-	return parseSpecReady(out)
+	return specReadyBoardFrom(beads.NewPinned(beads.ResolveBeadsDir(rigPath)))
 }
 
-// parseSpecReady accepts a bare JSON array or an envelope with an "issues"
-// array; empty output is an empty board.
-func parseSpecReady(out []byte) ([]*beads.Issue, error) {
-	trimmed := strings.TrimSpace(string(out))
-	if trimmed == "" || trimmed == "null" {
-		return nil, nil
-	}
-	var issues []*beads.Issue
-	if strings.HasPrefix(trimmed, "[") {
-		if err := json.Unmarshal([]byte(trimmed), &issues); err != nil {
-			return nil, fmt.Errorf("parsing bd ready: %w", err)
-		}
+// specReadyBoardFrom is specReadyBoard's answer for a given store. A board bd
+// reports as cut is read as a partial board: the tick acts on what it got, and
+// the sentinel says only that there may be more rows.
+func specReadyBoardFrom(store beads.Client) ([]*beads.Issue, error) {
+	issues, err := store.ReadyFiltered(specReadyOptions())
+	var truncated *beads.ErrReadyTruncated
+	if errors.As(err, &truncated) {
 		return issues, nil
 	}
-	var env struct {
-		Issues []*beads.Issue `json:"issues"`
-		Data   []*beads.Issue `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
-		return nil, fmt.Errorf("parsing bd ready: %w", err)
-	}
-	if env.Issues != nil {
-		return env.Issues, nil
-	}
-	return env.Data, nil
+	return issues, err
 }
 
 // annotateSpecOnce adds text as a comment unless the bead already carries a

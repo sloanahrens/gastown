@@ -23,6 +23,13 @@ func TestFakeClientContractSharedDatabase(t *testing.T) {
 	RunCreatorOptionContract(t, func(t *testing.T) beads.Client { return shared })
 }
 
+// TestReadyFiltered runs the ReadyFiltered contract case on its own, so the
+// case is runnable alone: go test ./internal/beads/beadsfake -run ReadyFiltered.
+func TestReadyFiltered(t *testing.T) {
+	t.Parallel()
+	contractReadyFiltered(t, newScope(t, New()))
+}
+
 func TestFakeActorContract(t *testing.T) {
 	t.Parallel()
 	RunActorContract(t, func(t *testing.T, actor string) beads.Client { return New(WithActor(actor)) })

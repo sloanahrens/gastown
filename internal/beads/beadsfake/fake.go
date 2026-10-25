@@ -378,6 +378,49 @@ func (f *Fake) Ready() ([]*beads.Issue, error) {
 // ReadyAll is Ready: the fake has no page cap to lift.
 func (f *Fake) ReadyAll() ([]*beads.Issue, error) { return f.Ready() }
 
+// ReadyFiltered returns the ready issues matching opts: open, unblocked and
+// non-ephemeral, then opts' own exclusions and cap. It applies none of Ready's
+// bookkeeping exclusions, because the caller names every filter it wants.
+// A positive Limit that cuts the answer returns the page AND *ErrReadyTruncated,
+// as bd's capped page does.
+func (f *Fake) ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*beads.Issue
+	for _, r := range f.ordered() {
+		is := f.snapshot(r)
+		if is.Ephemeral || is.Status != string(beads.StatusOpen) || f.blocked(r) {
+			continue
+		}
+		if opts.Unassigned && is.Assignee != "" {
+			continue
+		}
+		if excludedBead(is, opts) {
+			continue
+		}
+		out = append(out, is)
+	}
+	if opts.Limit > 0 && len(out) > opts.Limit {
+		total := len(out)
+		return out[:opts.Limit], &beads.ErrReadyTruncated{Found: opts.Limit, Cap: opts.Limit, TrueCount: total}
+	}
+	return out, nil
+}
+
+// excludedBead reports whether opts names the issue's type or one of its
+// labels.
+func excludedBead(is *beads.Issue, opts beads.ReadyOptions) bool {
+	if slices.Contains(opts.ExcludeTypes, is.Type) {
+		return true
+	}
+	for _, l := range opts.ExcludeLabels {
+		if hasLabel(is, l) {
+			return true
+		}
+	}
+	return false
+}
+
 // Children returns the issues and wisps whose parent is parentID.
 func (f *Fake) Children(parentID string) ([]*beads.Issue, error) {
 	f.mu.Lock()

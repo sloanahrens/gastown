@@ -126,7 +126,7 @@ func (s reportNoWriteStore) TransferIfAssignee(string, string, string, string) (
 var reportReadOnlyClientMethods = map[string]bool{
 	"Show": true, "ShowMultiple": true, "List": true, "ListByAssignee": true,
 	"GetAssignedIssue": true, "ListIssueStatuses": true,
-	"ListAssignedIssueStatuses": true, "Ready": true, "ReadyAll": true,
+	"ListAssignedIssueStatuses": true, "Ready": true, "ReadyAll": true, "ReadyFiltered": true,
 	"Children": true, "ChildrenOf": true, "Comments": true, "DepList": true,
 }
 

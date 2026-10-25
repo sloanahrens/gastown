@@ -136,11 +136,11 @@ func TestContextConstructorsAreContextBound(t *testing.T) {
 	}
 }
 
-// TestRunBdJSONAllowStale_FailureCarriesBdsStderr pins the contract gt spec
-// relies on when its ready query fails: the error names the verb and carries
-// bd's own stderr, not a bare "exit status 1". It came over from the deleted
-// bdjson.go with the one RunBdJSON variant that still has a caller.
-func TestRunBdJSONAllowStale_FailureCarriesBdsStderr(t *testing.T) {
+// TestReadyFilteredFailureCarriesBdsStderr pins the contract the spec
+// dispatcher's board query relies on when bd fails: the error carries bd's own
+// stderr, not a bare "exit status 1", so the tick's error line names what went
+// wrong.
+func TestReadyFilteredFailureCarriesBdsStderr(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell stub")
 	}
@@ -148,11 +148,16 @@ func TestRunBdJSONAllowStale_FailureCarriesBdsStderr(t *testing.T) {
 	writeBDStub(t, binDir, "#!/bin/sh\necho 'database locked' >&2\nexit 1\n", "")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	_, err := RunBdJSONAllowStale(t.TempDir(), "show", "gt-x", "--json")
-	if err == nil {
-		t.Fatal("RunBdJSONAllowStale succeeded, want bd's failure")
+	rigPath := t.TempDir()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
 	}
-	if !strings.Contains(err.Error(), "bd show: database locked") {
+	_, err := NewPinned(beadsDir).ReadyFiltered(ReadyOptions{Limit: 0})
+	if err == nil {
+		t.Fatal("ReadyFiltered succeeded, want bd's failure")
+	}
+	if !strings.Contains(err.Error(), "database locked") {
 		t.Errorf("err = %q, want it to carry bd's stderr", err)
 	}
 }

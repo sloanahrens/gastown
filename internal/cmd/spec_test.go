@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/patrolscan"
@@ -573,9 +575,9 @@ func TestSpecDispatchOpenChildrenHoldTheContainer(t *testing.T) {
 		rows := fmt.Sprintf(`[{"id":"gt-container","issue_type":"task","status":"open","priority":1,`+
 			`"created_at":"2026-09-29T10:00:00Z","description":%s,"acceptance_criteria":%s,"dependent_count":%d}]`,
 			desc, accept, dependentCount)
-		issues, err := parseSpecReady([]byte(rows))
+		issues, _, err := beads.DecodeReadyBoard([]byte(rows))
 		if err != nil || len(issues) != 1 {
-			t.Fatalf("parseSpecReady: %d issues, %v", len(issues), err)
+			t.Fatalf("decode board: %d issues, %v", len(issues), err)
 		}
 		return specFromIssue(issues[0])
 	}
@@ -2653,20 +2655,26 @@ func TestSpecDispatchReportsCrewOnlySkip(t *testing.T) {
 
 // capturedSpecBoard is the board the dispatcher reads, as the dispatcher reads
 // it: the bytes of testdata/spec_ready_labels.json — a `bd ready --json`
-// response captured from the live gastown rig on 2026-10-02 with the exact
-// args specReadyArgs builds — through the production decoder parseSpecReady.
+// response captured from the live gastown rig on 2026-10-02 with the query
+// specReadyOptions names — through beads.DecodeReadyBoard, the reader
+// ReadyFiltered uses.
 //
-// The fakes elsewhere in this file hand the decoder a slice of beads.Issue
+// The fakes elsewhere in this file hand the board a slice of beads.Issue
 // values with Labels filled in, so they cannot catch a read path that never
-// carries labels at all. This one starts from bd's own JSON, which is where
-// om's critical finding lived (gt-q6zoo attempt 1).
+// carries labels at all. This one starts from bd's own JSON through the
+// production decoder, which is where om's critical finding lived (gt-q6zoo
+// attempt 1); keeping the decoder in the path is what makes the next shape
+// change in it visible here (gt-p85pw.7).
 func capturedSpecBoard(t *testing.T) specBoard {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", "spec_ready_labels.json"))
 	if err != nil {
 		t.Fatalf("captured board fixture: %v", err)
 	}
-	return func(string) ([]*beads.Issue, error) { return parseSpecReady(data) }
+	return func(string) ([]*beads.Issue, error) {
+		issues, _, err := beads.DecodeReadyBoard(data)
+		return issues, err
+	}
 }
 
 // The count of beads the spec-dispatch-failed label holds comes from the ready
@@ -2751,7 +2759,8 @@ func TestSpecCandidatesSkipsCrewOnlyFromBdJSON(t *testing.T) {
 	crewed := `{"id":"gt-crew","title":"crew one","status":"open","priority":2,"issue_type":"bug","labels":["crew-only"]}`
 	twin := `{"id":"gt-open","title":"twin","status":"open","priority":2,"issue_type":"bug"}`
 	board := func(string) ([]*beads.Issue, error) {
-		return parseSpecReady([]byte(`{"issues":[` + crewed + `,` + twin + `]}`))
+		issues, _, err := beads.DecodeReadyBoard([]byte(`{"issues":[` + crewed + `,` + twin + `]}`))
+		return issues, err
 	}
 
 	got := specCandidates(townRoot, 2, board)
@@ -2818,12 +2827,22 @@ func TestAnnotateSpecOnce_DispatchFailedDifferentReasonRecorded(t *testing.T) {
 	}
 }
 
-func TestSpecReadyQueryAndParse(t *testing.T) {
+// TestSpecReadyQuery pins the filters the dispatcher's board query carries;
+// the argv they become is pinned in internal/beads (TestReadyFiltered).
+func TestSpecReadyQuery(t *testing.T) {
 	t.Parallel()
-	args := strings.Join(specReadyArgs(), " ")
-	for _, want := range []string{"ready --json", "--unassigned", "--limit 0", "needs-human", "gt:ready-to-land", "--exclude-type", "epic,wisp", "gt:agent"} {
-		if !strings.Contains(args, want) {
-			t.Errorf("ready args %q missing %q", args, want)
+	opts := specReadyOptions()
+	if !opts.Unassigned || opts.Limit != 0 {
+		t.Errorf("ready options = %+v, want unassigned and the whole board (limit 0)", opts)
+	}
+	for _, want := range []string{"needs-human", "gt:ready-to-land", "gt:agent"} {
+		if !slices.Contains(opts.ExcludeLabels, want) {
+			t.Errorf("ready options exclude labels %q missing %q", opts.ExcludeLabels, want)
+		}
+	}
+	for _, want := range []string{constants.EpicBeadType, "wisp"} {
+		if !slices.Contains(opts.ExcludeTypes, want) {
+			t.Errorf("ready options exclude types %q missing %q", opts.ExcludeTypes, want)
 		}
 	}
 	// spec-dispatch-failed and crew-only are not excluded server-side: the
@@ -2831,24 +2850,72 @@ func TestSpecReadyQueryAndParse(t *testing.T) {
 	// name them in its skip line, and Eligible keeps them out of the candidate
 	// set (gt-q6zoo, gt-k1g3e).
 	for _, carried := range []string{specdispatch.DispatchFailedLabel, specdispatch.CrewOnlyLabel} {
-		if strings.Contains(args, carried) {
-			t.Errorf("ready args %q still exclude %s; the tick cannot report what it never reads", args, carried)
+		if slices.Contains(opts.ExcludeLabels, carried) {
+			t.Errorf("ready options exclude %s; the tick cannot report what it never reads", carried)
 		}
 	}
 	// The retired label spec and type feature must not gate the board.
-	for _, unwanted := range []string{"--label spec", "--type feature"} {
-		if strings.Contains(args, unwanted) {
-			t.Errorf("ready args %q still carry the retired %q", args, unwanted)
-		}
+	if slices.Contains(opts.ExcludeLabels, "spec") || slices.Contains(opts.ExcludeTypes, "feature") {
+		t.Errorf("ready options still carry the retired spec label or feature type: %+v", opts)
 	}
-	for _, in := range []string{`[{"id":"gt-a","issue_type":"feature","status":"open"}]`, `{"issues":[{"id":"gt-a","issue_type":"feature","status":"open"}]}`} {
-		got, err := parseSpecReady([]byte(in))
-		if err != nil || len(got) != 1 || got[0].ID != "gt-a" {
-			t.Errorf("parseSpecReady(%s) = %v, %v", in, got, err)
-		}
+	// The argv is fixed: the flags in this order, each exclusion list
+	// comma-joined once, the whole board.
+	want := []string{
+		"ready", "--json", "--unassigned",
+		"--exclude-label", strings.Join(opts.ExcludeLabels, ","),
+		"--exclude-type", strings.Join(opts.ExcludeTypes, ","),
+		"--limit", "0",
 	}
-	if got, err := parseSpecReady([]byte("")); err != nil || got != nil {
-		t.Errorf("empty = %v %v", got, err)
+	if got := beads.ReadyArgs(opts); !slices.Equal(got, want) {
+		t.Errorf("ready argv = %q, want %q", got, want)
+	}
+}
+
+// specReadyStub answers ReadyFiltered with a canned board and records the
+// query it was asked. Only that method runs, so the rest of beads.Client stays
+// unsatisfied.
+type specReadyStub struct {
+	beads.Client
+	options beads.ReadyOptions
+	issues  []*beads.Issue
+	err     error
+}
+
+func (s *specReadyStub) ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error) {
+	s.options = opts
+	return s.issues, s.err
+}
+
+// TestSpecReadyBoardReadsACutBoardAsPartial: a board bd reports as cut is the
+// tick's board, not a failed tick. The sentinel says other rows may exist; the
+// rows that did arrive are dispatched on.
+func TestSpecReadyBoardReadsACutBoardAsPartial(t *testing.T) {
+	t.Parallel()
+	stub := &specReadyStub{
+		issues: []*beads.Issue{{ID: "gt-a"}},
+		err:    &beads.ErrReadyTruncated{Found: 100, Cap: 100, TrueCount: 373},
+	}
+
+	issues, err := specReadyBoardFrom(stub)
+	if err != nil {
+		t.Fatalf("specReadyBoardFrom on a cut board = %v, want the partial board and no error", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "gt-a" {
+		t.Errorf("specReadyBoardFrom = %v, want the rows the cut page carried", issues)
+	}
+	if !stub.options.Unassigned || stub.options.Limit != 0 {
+		t.Errorf("board query = %+v, want the dispatcher's unassigned whole board", stub.options)
+	}
+}
+
+// TestSpecReadyBoardReportsAFailedQuery: every other failure is the tick's, so
+// the rig's error line names why the board could not be read.
+func TestSpecReadyBoardReportsAFailedQuery(t *testing.T) {
+	t.Parallel()
+	stub := &specReadyStub{err: errors.New("bd ready: database locked")}
+
+	if _, err := specReadyBoardFrom(stub); err == nil || !strings.Contains(err.Error(), "database locked") {
+		t.Fatalf("specReadyBoardFrom err = %v, want bd's failure", err)
 	}
 }
 

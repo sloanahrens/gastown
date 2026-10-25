@@ -25,8 +25,9 @@ import (
 // Each bead column is one bd read per registered rig, summed. The rigs come
 // from mayor/rigs.json, or from the registry section of mayor/town.json on the
 // two-file layout (internal/config/layout.go); the flags are the ones
-// internal/cmd/spec.go's specReadyArgs and internal/beads' listIssues send,
-// checked against `bd ready --help` and `bd list --help`:
+// internal/cmd/spec.go's specReadyOptions (through
+// beads.Client.ReadyFiltered) and internal/beads' listIssues send, checked
+// against `bd ready --help` and `bd list --help`:
 //
 //	ready            bd -C <town>/<rig> ready --json --limit 0
 //	dispatchable     bd -C <town>/<rig> ready --json --unassigned
