@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -189,7 +190,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	if err != nil {
 		return res, err
 	}
-	peaks, peaksSkipped, err := ReadPeaks(env)
+	peaks, peaksSkipped, err := readPeaks(env, log.Printf)
 	if err != nil {
 		return res, err
 	}
