@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,21 +11,16 @@ import (
 )
 
 // A run that finds the lock held by another run records the hour as skipped and
-// writes nothing: no snapshot is taken and no analysis runs. The lock is held
-// here by a second open file description in this process, which is what a
-// second run is to flock.
+// writes nothing: no snapshot is taken and no analysis runs. The lock's own
+// contention across processes is pinned in internal/metrics; here the acquire is
+// one that reports the lock held.
 func TestMetricsRunSkipsAnHourWhenAnotherRunHoldsTheLock(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	lockPath := filepath.Join(town, ".runtime", "town-metrics.lock")
-	held, err := metrics.AcquireTownLock(lockPath)
-	if err != nil {
-		t.Fatalf("hold the lock: %v", err)
-	}
-	defer held.Release()
+	held := func(string) (*metrics.TownLock, error) { return nil, metrics.ErrLockHeld }
 
 	var out bytes.Buffer
-	if err := runMetricsHour(context.Background(), &out, town); err != nil {
+	if err := runMetricsHour(context.Background(), &out, town, held); err != nil {
 		t.Fatalf("runMetricsHour with the lock held: %v", err)
 	}
 	got := out.String()

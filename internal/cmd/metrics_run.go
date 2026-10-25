@@ -32,16 +32,21 @@ This is the one entry point the daemon's town-metrics plugin calls.`,
 		if err != nil {
 			return err
 		}
-		return runMetricsHour(cmd.Context(), cmd.OutOrStdout(), town)
+		return runMetricsHour(cmd.Context(), cmd.OutOrStdout(), town, metrics.AcquireTownLock)
 	},
 }
+
+// lockAcquirer takes the town-metrics lock at path or reports it held. The
+// command passes metrics.AcquireTownLock; a test passes one that reports the
+// lock held, so the skip path needs no second process.
+type lockAcquirer func(path string) (*metrics.TownLock, error)
 
 // runMetricsHour is one hour of the plugin: the lock, then the two steps in
 // order. The snapshot's failure is the one reported when both fail, because the
 // hour's record is the snapshot.
-func runMetricsHour(ctx context.Context, out io.Writer, town string) error {
+func runMetricsHour(ctx context.Context, out io.Writer, town string, acquire lockAcquirer) error {
 	lockPath := filepath.Join(town, ".runtime", "town-metrics.lock")
-	lock, err := metrics.AcquireTownLock(lockPath)
+	lock, err := acquire(lockPath)
 	if errors.Is(err, metrics.ErrLockHeld) {
 		fmt.Fprintf(out, "[town-metrics] another run holds %s; the next cooldown retries\n", lockPath)
 		fmt.Fprintln(out, "[plugin-result skipped]")
