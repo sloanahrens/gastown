@@ -86,27 +86,27 @@ func buildReadyQuery(f api.ReadyFilter, cur *listCursor, limit int, blocked bool
 // Ready returns the open, unblocked work matching f, ordered by priority,
 // creation time and id, one page at a time.
 func (p *Postgres) Ready(ctx context.Context, f api.ReadyFilter) (api.IssuePage, error) {
-	return p.readyPage(ctx, f, false)
+	return readyPage(ctx, p.pool, f, false)
 }
 
 // Blocked returns the not-closed issues held by an open blocker (or by a
 // blocked parent) matching f, each with its direct open blockers in BlockedBy.
 func (p *Postgres) Blocked(ctx context.Context, f api.ReadyFilter) (api.IssuePage, error) {
-	page, err := p.readyPage(ctx, f, true)
+	page, err := readyPage(ctx, p.pool, f, true)
 	if err != nil {
 		return api.IssuePage{}, err
 	}
 	return page, p.fillBlockedBy(ctx, page.Issues)
 }
 
-func (p *Postgres) readyPage(ctx context.Context, f api.ReadyFilter, blocked bool) (api.IssuePage, error) {
+func readyPage(ctx context.Context, q querier, f api.ReadyFilter, blocked bool) (api.IssuePage, error) {
 	cur, err := decodeListCursor(f.Cursor)
 	if err != nil {
 		return api.IssuePage{}, err
 	}
 	size := pageSize(f.Limit)
-	q, args := buildReadyQuery(f, cur, size, blocked)
-	rows, err := p.pool.Query(ctx, q, args...)
+	sql, args := buildReadyQuery(f, cur, size, blocked)
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return api.IssuePage{}, fmt.Errorf("store: ready: %w", err)
 	}
@@ -128,7 +128,7 @@ func (p *Postgres) readyPage(ctx context.Context, f api.ReadyFilter, blocked boo
 		last := page.Issues[size-1]
 		page.NextCursor = listCursor{Priority: last.Priority, CreatedAt: last.CreatedAt, ID: last.ID}.encode()
 	}
-	return page, p.fillPage(ctx, page.Issues)
+	return page, fillPage(ctx, q, page.Issues)
 }
 
 // fillBlockedBy sets each issue's BlockedBy to its direct open blockers.

@@ -43,3 +43,35 @@ func (c *Client) ChildrenOf(ctx context.Context, parents []string) (map[string][
 	}
 	return out.Children, nil
 }
+
+// DispatchBoard returns the dispatch tick's reads in one snapshot: per rig the
+// ready issues, the held issues and the children of the ready ones, plus the
+// probed statuses. Its maps and slices are never nil.
+func (c *Client) DispatchBoard(ctx context.Context, req api.DispatchBoardRequest) (api.DispatchBoardResponse, error) {
+	var out api.DispatchBoardResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/board/dispatch", req, &out, true); err != nil {
+		return api.DispatchBoardResponse{}, err
+	}
+	if out.Rigs == nil {
+		out.Rigs = map[string]api.RigBoard{}
+	}
+	if out.Probes == nil {
+		out.Probes = map[string]api.Probe{}
+	}
+	if out.Errors == nil {
+		out.Errors = map[string]string{}
+	}
+	for rig, b := range out.Rigs {
+		if b.Ready == nil {
+			b.Ready = []api.Issue{}
+		}
+		if b.Held == nil {
+			b.Held = []api.HeldBead{}
+		}
+		if b.Children == nil {
+			b.Children = map[string][]api.ChildStatus{}
+		}
+		out.Rigs[rig] = b
+	}
+	return out, nil
+}

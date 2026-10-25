@@ -56,6 +56,10 @@ type Store interface {
 	// ChildrenOf returns the direct children of each of parents, wisps
 	// included, keyed by parent; a parent with no children is absent.
 	ChildrenOf(ctx context.Context, parents []string) (map[string][]api.Issue, error)
+	// DispatchBoard returns the dispatch tick's reads in one consistent
+	// snapshot: per rig the ready issues (no page limit), the held issues and
+	// the children of the ready issues, and the status of the probed ids.
+	DispatchBoard(ctx context.Context, req api.DispatchBoardRequest) (api.DispatchBoardResponse, error)
 	// EventsAfter returns up to limit events with seq greater than after
 	// (limit 0 means the server's page size), oldest first.
 	EventsAfter(ctx context.Context, after int64, limit int) (api.EventsPage, error)
