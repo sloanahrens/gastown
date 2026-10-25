@@ -256,7 +256,10 @@ func (sum *Summary) readLine(line, bead string, open map[string]openAttempt) {
 		return
 	}
 	at, err := time.Parse(time.RFC3339, ev.At)
-	if err != nil || ev.Bead != bead || validateSeat(ev.Seat, bead) != nil {
+	// The read keeps the rule logs were written under: an empty seat is corrupt.
+	// The whitespace rule is for writes (validateSeat in append), so a log written
+	// before it still reads as it did.
+	if err != nil || ev.Bead != bead || ev.Seat == "" {
 		sum.Corrupt++
 		return
 	}

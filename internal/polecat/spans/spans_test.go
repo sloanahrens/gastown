@@ -728,3 +728,27 @@ func TestDefaultDir(t *testing.T) {
 		t.Errorf("DefaultDir = %q, want %q", got, want)
 	}
 }
+
+// A log written before the whitespace rule still reads as it did: a seat with a
+// space in it is an attempt, not a corrupt line, so a tightened rule does not
+// change the totals of spans already recorded (gt-rm0ab).
+func TestSummarize_ReadsALegacySeatWithAWhitespaceAsItDid(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	bead := "gt-abc"
+	writeLog(t, dir, bead, logLines(t,
+		event{Bead: bead, Seat: "old seat", Event: EventStart, At: formatTime(testEpoch)},
+		event{Bead: bead, Seat: "old seat", Event: EventEnd, At: formatTime(testEpoch.Add(30 * time.Second))},
+	))
+
+	sum, err := New(dir, fixedClock{at: testEpoch}).Summarize(bead)
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Corrupt != 0 {
+		t.Errorf("Corrupt = %d, want the legacy seat read, not counted corrupt", sum.Corrupt)
+	}
+	if sum.Secs != 30 || len(sum.Attempts) != 1 {
+		t.Errorf("summary = %+v, want the one 30s attempt", sum)
+	}
+}
