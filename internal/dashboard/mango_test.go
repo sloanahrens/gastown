@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +86,260 @@ func TestMangoReadsTheCollectedPanel(t *testing.T) {
 	}
 	if got := m.Targets[2]; !got.Skipped || got.Verdict != MangoNotYet || got.BestBox != "" {
 		t.Errorf("a skipped target reads %+v", got)
+	}
+}
+
+// The writer's newer per-target keys — label, holdout positives, Wilson
+// interval, thin flag and reason — reach the page from the golden panel as the
+// writer wrote them, and the target that carries no box carries none of them.
+func TestMangoReadsTheNewTargetKeys(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile(filepath.Join("testdata", "mango_panel.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := ReadMango(mangoFixture(t, string(raw)), mangoNow)
+	if m.State != MangoFresh {
+		t.Fatalf("state %q note %q", m.State, m.Note)
+	}
+	if len(m.Targets) != 3 {
+		t.Fatalf("%d targets, want 3", len(m.Targets))
+	}
+
+	earning, replicated := m.Targets[0], m.Targets[1]
+	if earning.Label != "Landings rejected before they land" {
+		t.Errorf("the earning target's label reads %q", earning.Label)
+	}
+	if earning.HoldoutPositives == nil || *earning.HoldoutPositives != 21 {
+		t.Errorf("the earning target's holdout positives read %v", earning.HoldoutPositives)
+	}
+	if earning.CILow == nil || *earning.CILow != 0.2937479723456693 ||
+		earning.CIHigh == nil || *earning.CIHigh != 0.5576680331222217 {
+		t.Errorf("the earning target's interval reads %v..%v", earning.CILow, earning.CIHigh)
+	}
+	if earning.Thin == nil || *earning.Thin {
+		t.Errorf("the earning target's thin flag reads %v, want false", earning.Thin)
+	}
+	if earning.Reason != "" {
+		t.Errorf("a run target carries the reason %q", earning.Reason)
+	}
+
+	if replicated.Label != "Landings that needed a manual rescue" {
+		t.Errorf("the no-signal target's label reads %q", replicated.Label)
+	}
+	if replicated.HoldoutPositives == nil || *replicated.HoldoutPositives != 5 {
+		t.Errorf("the no-signal target's holdout positives read %v", replicated.HoldoutPositives)
+	}
+	if replicated.Thin == nil || !*replicated.Thin {
+		t.Errorf("the no-signal target's thin flag reads %v, want true", replicated.Thin)
+	}
+
+	skipped := m.Targets[2]
+	if skipped.Label != "Beads stopped by the overrun guard" {
+		t.Errorf("the skipped target's label reads %q", skipped.Label)
+	}
+	if skipped.Reason != mangoReasonFewPositives {
+		t.Errorf("the skipped target's reason reads %q", skipped.Reason)
+	}
+	if skipped.HoldoutPositives != nil || skipped.CILow != nil || skipped.CIHigh != nil || skipped.Thin != nil {
+		t.Errorf("a target with no box reads a box: %+v", skipped)
+	}
+}
+
+// A panel from the writer before these keys existed reads exactly as it did:
+// every row is the keys it always had, and the new keys are absent from the
+// page's payload rather than present as zeroes the page would draw.
+func TestMangoReadsAPanelWithoutTheNewKeys(t *testing.T) {
+	t.Parallel()
+
+	m := ReadMango(mangoFixture(t, mangoPanelJSON(t, mangoNow.Format(time.RFC3339),
+		mangoTargetMap("manual_rescue", 37, MangoNoSignal, "attempts in q3"))), mangoNow)
+	if m.State != MangoFresh {
+		t.Fatalf("state %q note %q", m.State, m.Note)
+	}
+	if len(m.Targets) != 1 {
+		t.Fatalf("%d targets, want 1", len(m.Targets))
+	}
+	got := m.Targets[0]
+	want := MangoTarget{
+		Target: "manual_rescue", Positives: 37, BestBox: "attempts in q3",
+		HoldoutN: 96, HoldoutRate: 0.42, Baseline: 0.25, Verdict: MangoNoSignal,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("a panel without the new keys reads %+v, want %+v", got, want)
+	}
+	if m.Counts != (MangoCounts{NoSignal: 1}) {
+		t.Errorf("counts %+v", m.Counts)
+	}
+
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(b, &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"label", "holdout_positives", "ci_low", "ci_high", "thin", "reason"} {
+		if _, ok := payload[key]; ok {
+			t.Errorf("an absent %q reached the page's payload: %s", key, b)
+		}
+	}
+}
+
+// The optional keys the reader cannot place are dropped one at a time, never as
+// an error state for the panel: the row keeps every other field and the panel
+// still reads fresh.
+func TestMangoDropsOptionalKeysItCannotPlace(t *testing.T) {
+	t.Parallel()
+
+	// The row every case starts from: a no-signal box with 5 positives in 49,
+	// an interval inside 0..1, and the thin flag.
+	base := func() map[string]any {
+		row := mangoTargetMap("manual_rescue", 37, MangoNoSignal, "attempts in q3..q4")
+		row["holdout_n"] = 49
+		row["holdout_positives"] = 5
+		row["ci_low"], row["ci_high"] = 0.04, 0.22
+		row["thin"] = true
+		return row
+	}
+
+	for _, tc := range []struct {
+		name string
+		set  map[string]any
+		want func(t *testing.T, got MangoTarget)
+	}{
+		{
+			name: "holdout positives above the holdout",
+			set:  map[string]any{"holdout_positives": 50},
+			want: func(t *testing.T, got MangoTarget) {
+				if got.HoldoutPositives != nil {
+					t.Errorf("a count above the holdout reads %d", *got.HoldoutPositives)
+				}
+			},
+		},
+		{
+			name: "negative holdout positives",
+			set:  map[string]any{"holdout_positives": -1},
+			want: func(t *testing.T, got MangoTarget) {
+				if got.HoldoutPositives != nil {
+					t.Errorf("a negative count reads %d", *got.HoldoutPositives)
+				}
+			},
+		},
+		{
+			name: "interval below zero",
+			set:  map[string]any{"ci_low": -0.01},
+			want: func(t *testing.T, got MangoTarget) {
+				if got.CILow != nil || got.CIHigh != nil {
+					t.Errorf("a negative bound leaves the interval %v..%v", got.CILow, got.CIHigh)
+				}
+			},
+		},
+		{
+			name: "interval above one",
+			set:  map[string]any{"ci_high": 1.01},
+			want: func(t *testing.T, got MangoTarget) {
+				if got.CILow != nil || got.CIHigh != nil {
+					t.Errorf("a bound over one leaves the interval %v..%v", got.CILow, got.CIHigh)
+				}
+			},
+		},
+		{
+			name: "interval reversed",
+			set:  map[string]any{"ci_low": 0.6},
+			want: func(t *testing.T, got MangoTarget) {
+				if got.CILow != nil || got.CIHigh != nil {
+					t.Errorf("an interval whose low is above its high reads %v..%v", got.CILow, got.CIHigh)
+				}
+			},
+		},
+		{
+			name: "unknown reason",
+			set:  map[string]any{"reason": "too_old"},
+			want: func(t *testing.T, got MangoTarget) {
+				if got.Reason != "" {
+					t.Errorf("an unknown reason reads %q", got.Reason)
+				}
+			},
+		},
+		{
+			name: "count and interval the writer could have measured",
+			set:  map[string]any{"holdout_positives": 49, "ci_low": 0, "ci_high": 1},
+			want: func(t *testing.T, got MangoTarget) {
+				if got.HoldoutPositives == nil || *got.HoldoutPositives != 49 {
+					t.Errorf("a count at the holdout reads %v", got.HoldoutPositives)
+				}
+				if got.CILow == nil || *got.CILow != 0 || got.CIHigh == nil || *got.CIHigh != 1 {
+					t.Errorf("an interval at the bounds reads %v..%v", got.CILow, got.CIHigh)
+				}
+			},
+		},
+		{
+			name: "reason the page has a sentence for",
+			set:  map[string]any{"reason": mangoReasonNoHoldoutPositives},
+			want: func(t *testing.T, got MangoTarget) {
+				if got.Reason != mangoReasonNoHoldoutPositives {
+					t.Errorf("the writer's reason reads %q", got.Reason)
+				}
+			},
+		},
+		{
+			name: "thin flag false stays present",
+			set:  map[string]any{"thin": false},
+			want: func(t *testing.T, got MangoTarget) {
+				if got.Thin == nil || *got.Thin {
+					t.Errorf("a false thin flag reads %v, want a present false", got.Thin)
+				}
+			},
+		},
+	} {
+		row := base()
+		for k, v := range tc.set {
+			row[k] = v
+		}
+		m := ReadMango(mangoFixture(t, mangoPanelJSON(t, mangoNow.Format(time.RFC3339), row)), mangoNow)
+		if m.State != MangoFresh {
+			t.Errorf("%s: state %q note %q, want %q", tc.name, m.State, m.Note, MangoFresh)
+			continue
+		}
+		got := m.Targets[0]
+		if got.Target != "manual_rescue" || got.Positives != 37 || got.BestBox != "attempts in q3..q4" ||
+			got.HoldoutN != 49 || got.HoldoutRate != 0.42 || got.Verdict != MangoNoSignal {
+			t.Errorf("%s: the drop took the rest of the row: %+v", tc.name, got)
+		}
+		if m.Counts != (MangoCounts{NoSignal: 1}) {
+			t.Errorf("%s: counts %+v", tc.name, m.Counts)
+		}
+		tc.want(t, got)
+	}
+}
+
+// The label is another process's text like every other string in the panel: the
+// invisible runes are stripped, an over-long title is marked at the cap, and the
+// page escapes the markup that is left.
+func TestMangoStripsAndCapsTheTargetLabel(t *testing.T) {
+	t.Parallel()
+
+	hostile := "bell:\x07 esc:\x1b[31m rlo:‮ invisible:​ <b>bold</b> " + strings.Repeat("é", 80)
+	row := mangoTargetMap("manual_rescue", 37, MangoNoSignal, "attempts in q3")
+	row["label"] = hostile
+	m := ReadMango(mangoFixture(t, mangoPanelJSON(t, mangoNow.Format(time.RFC3339), row)), mangoNow)
+	if m.State != MangoFresh {
+		t.Fatalf("state %q note %q", m.State, m.Note)
+	}
+	got := m.Targets[0].Label
+	for _, r := range got {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			t.Errorf("the label kept the invisible rune %U: %q", r, got)
+		}
+	}
+	if !strings.HasPrefix(got, "bell: esc:[31m rlo: invisible: <b>bold</b> ") {
+		t.Errorf("the label lost text it should have kept: %q", got)
+	}
+	if n := len([]rune(got)); n != mangoLabelMax+1 || !strings.HasSuffix(got, "…") {
+		t.Errorf("the label is %d runes and does not end at the %d-rune cap: %q", n, mangoLabelMax, got)
 	}
 }
 
