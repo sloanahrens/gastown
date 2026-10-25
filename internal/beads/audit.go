@@ -35,6 +35,13 @@ type detachAuditLogger interface {
 	logDetachAudit(entry DetachAuditEntry) error
 }
 
+// The store half of the sink is found by a type assertion, so nothing else
+// fails if the method is renamed: the assertion would simply stop matching and
+// every detach would go unlogged. This line makes the rename a compile error
+// instead, and TestDetachMoleculeWithAuditWritesTheAuditLogThroughBeads pins
+// the dispatch that reaches it.
+var _ detachAuditLogger = (*Beads)(nil)
+
 // DetachMoleculeWithAudit removes molecule attachment from a pinned bead,
 // logging the operation when the Client keeps an audit log. On a *Beads the
 // read-modify-write runs under the bead's flock.
