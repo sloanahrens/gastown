@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"slices"
@@ -63,11 +64,12 @@ func beadLanding(bead string) Row {
 }
 
 // peaksJoin reads the peaks env names and joins them onto one landing of bead.
+// A skip report goes to the test log, where -v shows it.
 func peaksJoin(t *testing.T, env Env, bead string) (Row, []string) {
 	t.Helper()
-	peaks, err := ReadPeaks(env)
+	peaks, err := readPeaks(env, t.Logf)
 	if err != nil {
-		t.Fatalf("ReadPeaks: %v", err)
+		t.Fatalf("readPeaks: %v", err)
 	}
 	header, joined := JoinPeaks(landingColumns, []Row{beadLanding(bead)}, peaks)
 	return joined[0], header
@@ -226,14 +228,14 @@ func TestReadPeaksFailsOnAFileItCannotRead(t *testing.T) {
 		want string
 	}{
 		{
-			"a read that is not a missing file",
-			Env{Town: "/town", ReadFile: func(string) ([]byte, error) { return nil, errors.New("permission denied") }},
-			"bead-peaks.jsonl.gz: permission denied",
-		},
-		{
-			"a gzip sibling that is not gzip",
-			peaksEnv(map[string][]byte{peaksPath + ".gz": []byte("not gzip")}),
-			"bead-peaks.jsonl.gz:",
+			"a plain file whose read is not a missing file",
+			Env{Town: "/town", ReadFile: func(path string) ([]byte, error) {
+				if path == peaksPath+".gz" {
+					return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+				}
+				return nil, errors.New("permission denied")
+			}},
+			"bead-peaks.jsonl: permission denied",
 		},
 	}
 	for _, tc := range tests {
@@ -242,6 +244,122 @@ func TestReadPeaksFailsOnAFileItCannotRead(t *testing.T) {
 			_, err := ReadPeaks(tc.env)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("ReadPeaks error = %v, want one containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestReadPeaksReportsTheGzipSiblingItSkips(t *testing.T) {
+	t.Parallel()
+	const row = `{"v":1,"bead":"gt-q1","ended_at":"2026-10-24T18:00:00Z","peak_mem_bytes":42}`
+	tests := []struct {
+		name string
+		env  Env
+		want string
+	}{
+		{
+			"a gzip sibling whose read is not a missing file",
+			Env{Town: "/town", ReadFile: func(path string) ([]byte, error) {
+				if path == peaksPath+".gz" {
+					return nil, errors.New("permission denied")
+				}
+				return []byte(row), nil
+			}},
+			peaksFile + ".gz: permission denied",
+		},
+		{
+			"a gzip sibling that is not gzip",
+			peaksEnv(map[string][]byte{peaksPath + ".gz": []byte("not gzip, just text"), peaksPath: []byte(row)}),
+			peaksFile + ".gz: gzip: invalid header",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var reported []string
+			peaks, err := readPeaks(tc.env, func(format string, args ...any) {
+				reported = append(reported, fmt.Sprintf(format, args...))
+			})
+			if err != nil {
+				t.Fatalf("readPeaks: %v", err)
+			}
+			if len(reported) != 1 || !strings.Contains(reported[0], tc.want) {
+				t.Fatalf("reported %q, want one line containing %q", reported, tc.want)
+			}
+			_, joined := JoinPeaks(landingColumns, []Row{beadLanding("gt-q1")}, peaks)
+			if got := joined[0]["sandbox_peak_mem_bytes"]; got != "42" {
+				t.Errorf("sandbox_peak_mem_bytes = %q, want the plain row's 42", got)
+			}
+		})
+	}
+}
+
+func TestReadPeaksUnreadableGzipSiblingOfNoPlainFileIsReportedNotFatal(t *testing.T) {
+	t.Parallel()
+	var reported []string
+	peaks, err := readPeaks(peaksEnv(map[string][]byte{peaksPath + ".gz": []byte("not gzip")}), func(format string, args ...any) {
+		reported = append(reported, fmt.Sprintf(format, args...))
+	})
+	if err != nil {
+		t.Fatalf("readPeaks: %v, want the corrupt legacy sibling skipped", err)
+	}
+	if len(peaks) != 0 {
+		t.Errorf("peaks = %v, want none", peaks)
+	}
+	if len(reported) != 1 {
+		t.Errorf("reported %q, want one line for the skipped sibling", reported)
+	}
+}
+
+func TestReadPeaksKeepsARowItCannotOrder(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		rows []string
+		want string
+	}{
+		{
+			"a bead whose only row has no ended_at keeps its cells",
+			[]string{`{"v":1,"bead":"gt-q1","peak_mem_bytes":999}`},
+			"999",
+		},
+		{
+			"a bead whose only row has an unparseable ended_at keeps its cells",
+			[]string{`{"v":1,"bead":"gt-q1","ended_at":"yesterday","peak_mem_bytes":999}`},
+			"999",
+		},
+		{
+			"a row with an end time beats one without when it is read after",
+			[]string{
+				`{"v":1,"bead":"gt-q1","ended_at":"yesterday","peak_mem_bytes":999}`,
+				`{"v":1,"bead":"gt-q1","ended_at":"2026-10-24T17:00:00Z","peak_mem_bytes":111}`,
+			},
+			"111",
+		},
+		{
+			"a row with an end time beats one without when it is read first",
+			[]string{
+				`{"v":1,"bead":"gt-q1","ended_at":"2026-10-24T17:00:00Z","peak_mem_bytes":111}`,
+				`{"v":1,"bead":"gt-q1","ended_at":"yesterday","peak_mem_bytes":999}`,
+			},
+			"111",
+		},
+		{
+			"between two rows it cannot order, the later read wins",
+			[]string{
+				`{"v":1,"bead":"gt-q1","peak_mem_bytes":5}`,
+				`{"v":1,"bead":"gt-q1","peak_mem_bytes":6}`,
+			},
+			"6",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := peaksEnv(map[string][]byte{peaksPath: []byte(strings.Join(tc.rows, "\n") + "\n")})
+			got, _ := peaksJoin(t, env, "gt-q1")
+			if got["sandbox_peak_mem_bytes"] != tc.want {
+				t.Errorf("sandbox_peak_mem_bytes = %q, want %q", got["sandbox_peak_mem_bytes"], tc.want)
 			}
 		})
 	}
