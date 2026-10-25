@@ -94,3 +94,19 @@ func BenchmarkClone(b *testing.B) {
 		shared.Clone(b, "tpl")
 	}
 }
+
+// A daemon under launchd has no locale. The harness must give postgres and
+// initdb one itself, or the cluster dies at startup on macOS.
+func TestAClusterStartsWithNoLocaleInTheCallersEnvironment(t *testing.T) {
+	// Not parallel: it changes the process environment for the duration.
+	for _, name := range []string{"LC_ALL", "LC_CTYPE", "LC_MESSAGES", "LANG", "LANGUAGE"} {
+		t.Setenv(name, "")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	c, err := Start(ctx)
+	if err != nil {
+		t.Fatalf("a cluster did not start with an empty locale environment: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Stop() })
+}

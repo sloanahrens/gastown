@@ -92,7 +92,9 @@ func Start(ctx context.Context) (*Cluster, error) {
 	if err != nil {
 		return nil, err
 	}
-	ver, err := exec.CommandContext(ctx, filepath.Join(bin, "postgres"), "--version").Output() //nolint:gosec // G204: bin is $TRACKER_PG_BIN, PATH or a fixed install directory, chosen by whoever runs the tests
+	versionCmd := exec.CommandContext(ctx, filepath.Join(bin, "postgres"), "--version") //nolint:gosec // G204: bin is $TRACKER_PG_BIN, PATH or a fixed install directory, chosen by whoever runs the tests
+	versionCmd.Env = childEnv(os.Environ())
+	ver, err := versionCmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("pgtest: postgres --version: %w", err)
 	}
@@ -120,7 +122,9 @@ func (c *Cluster) start(ctx context.Context, bin string) error {
 	initCtx, cancel := context.WithTimeout(ctx, initdbTimeout)
 	defer cancel()
 	//nolint:gosec // G204: bin is $TRACKER_PG_BIN, PATH or a fixed install directory, chosen by whoever runs the tests
-	if out, err := exec.CommandContext(initCtx, filepath.Join(bin, "initdb"), "-D", data, "-U", "postgres", "-A", "trust", "--no-sync", "-E", "UTF8", "--locale=C").CombinedOutput(); err != nil {
+	initdb := exec.CommandContext(initCtx, filepath.Join(bin, "initdb"), "-D", data, "-U", "postgres", "-A", "trust", "--no-sync", "-E", "UTF8", "--locale=C")
+	initdb.Env = childEnv(os.Environ())
+	if out, err := initdb.CombinedOutput(); err != nil {
 		return fmt.Errorf("pgtest: initdb: %w\n%s", err, out)
 	}
 	//nolint:gosec // G204: bin is $TRACKER_PG_BIN, PATH or a fixed install directory, chosen by whoever runs the tests
@@ -130,6 +134,7 @@ func (c *Cluster) start(ctx context.Context, bin string) error {
 		"-c", "shared_buffers=64MB", "-c", "max_connections=100",
 		// The ready line is matched as English text at LOG level.
 		"-c", "lc_messages=C", "-c", "log_min_messages=warning")
+	c.cmd.Env = childEnv(os.Environ())
 	c.cmd.Stderr = c.log
 	if err := c.cmd.Start(); err != nil {
 		return fmt.Errorf("pgtest: start postgres: %w", err)

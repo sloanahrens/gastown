@@ -56,3 +56,21 @@ func requireMajor17(out string) error {
 	}
 	return nil
 }
+
+// childEnv is the environment postgres and initdb run with: parent's, with
+// every locale variable replaced by the C locale. A daemon under launchd has
+// no locale, and postgres on macOS then dies at startup ("postmaster became
+// multithreaded during startup ... Set the LC_ALL environment variable to a
+// valid locale"); a shell has one, which hides it. The cluster is created with
+// --locale=C, so C is also what it must run under.
+func childEnv(parent []string) []string {
+	out := make([]string, 0, len(parent)+2)
+	for _, kv := range parent {
+		name, _, _ := strings.Cut(kv, "=")
+		if name == "LANG" || name == "LANGUAGE" || name == "LC_ALL" || strings.HasPrefix(name, "LC_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "LC_ALL=C", "LANG=C")
+}
