@@ -226,14 +226,14 @@ func TestReadPeaksFailsOnAFileItCannotRead(t *testing.T) {
 		want string
 	}{
 		{
-			"a read that is not a missing file",
-			Env{Town: "/town", ReadFile: func(string) ([]byte, error) { return nil, errors.New("permission denied") }},
-			"bead-peaks.jsonl.gz: permission denied",
-		},
-		{
-			"a gzip sibling that is not gzip",
-			peaksEnv(map[string][]byte{peaksPath + ".gz": []byte("not gzip")}),
-			"bead-peaks.jsonl.gz:",
+			"a plain file whose read is not a missing file",
+			Env{Town: "/town", ReadFile: func(path string) ([]byte, error) {
+				if path == peaksPath+".gz" {
+					return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+				}
+				return nil, errors.New("permission denied")
+			}},
+			"bead-peaks.jsonl: permission denied",
 		},
 	}
 	for _, tc := range tests {
@@ -242,6 +242,76 @@ func TestReadPeaksFailsOnAFileItCannotRead(t *testing.T) {
 			_, err := ReadPeaks(tc.env)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("ReadPeaks error = %v, want one containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestReadPeaksKeepsThePlainRowsPastAGzipSiblingItCannotRead(t *testing.T) {
+	t.Parallel()
+	const row = `{"v":1,"bead":"gt-q1","ended_at":"2026-10-24T18:00:00Z","peak_mem_bytes":42}`
+	tests := []struct {
+		name string
+		env  Env
+	}{
+		{
+			"a gzip sibling whose read is not a missing file",
+			Env{Town: "/town", ReadFile: func(path string) ([]byte, error) {
+				if path == peaksPath+".gz" {
+					return nil, errors.New("permission denied")
+				}
+				return []byte(row), nil
+			}},
+		},
+		{
+			"a gzip sibling that is not gzip",
+			peaksEnv(map[string][]byte{peaksPath + ".gz": []byte("not gzip"), peaksPath: []byte(row)}),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, _ := peaksJoin(t, tc.env, "gt-q1")
+			if got["sandbox_peak_mem_bytes"] != "42" {
+				t.Errorf("sandbox_peak_mem_bytes = %q, want the plain row's 42", got["sandbox_peak_mem_bytes"])
+			}
+		})
+	}
+}
+
+func TestReadPeaksSkipsARowItCannotOrder(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		rows []string
+		want string
+	}{
+		{
+			"a bead whose only row has no ended_at keeps empty cells",
+			[]string{`{"v":1,"bead":"gt-q1","peak_mem_bytes":999}`},
+			"",
+		},
+		{
+			"a bead whose only row has an unparseable ended_at keeps empty cells",
+			[]string{`{"v":1,"bead":"gt-q1","ended_at":"yesterday","peak_mem_bytes":999}`},
+			"",
+		},
+		{
+			"a row it can order still joins beside one it cannot",
+			[]string{
+				`{"v":1,"bead":"gt-q1","ended_at":"yesterday","peak_mem_bytes":999}`,
+				`{"v":1,"bead":"gt-q1","ended_at":"2026-10-24T17:00:00Z","peak_mem_bytes":111}`,
+			},
+			"111",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := peaksEnv(map[string][]byte{peaksPath: []byte(strings.Join(tc.rows, "\n") + "\n")})
+			got, _ := peaksJoin(t, env, "gt-q1")
+			if got["sandbox_peak_mem_bytes"] != tc.want {
+				t.Errorf("sandbox_peak_mem_bytes = %q, want %q", got["sandbox_peak_mem_bytes"], tc.want)
 			}
 		})
 	}

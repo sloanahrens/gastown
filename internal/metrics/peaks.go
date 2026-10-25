@@ -41,23 +41,33 @@ type Peak struct {
 // the .gz sibling first, then the plain file, each row in file order. No file
 // at all is no peaks, not an error.
 //
-// A line that is not a JSON object is skipped, as is a row with no bead: the
-// sampler appends while this reads, so the last line may be partial, and a row
-// with no bead names no landing. Unknown keys are ignored.
+// The .gz sibling is legacy, so one that cannot be read or decompressed is
+// skipped and the plain file's rows still join; a read error on the plain file
+// is returned.
+//
+// A line that is not a JSON object is skipped, as is a row with no bead or an
+// ended_at that is absent or not RFC 3339: the sampler appends while this
+// reads, so the last line may be partial, a row with no bead names no landing,
+// and a row with no end time cannot be ordered against its bead's other rows.
+// Unknown keys are ignored.
 func ReadPeaks(env Env) ([]Peak, error) {
 	dir := filepath.Join(env.Town, ".runtime", "metrics", "resources")
 	var peaks []Peak
 	for _, name := range []string{peaksFile + ".gz", peaksFile} {
+		compressed := filepath.Ext(name) == ".gz"
 		data, err := env.ReadFile(filepath.Join(dir, name))
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
+			if compressed {
+				continue
+			}
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
-		if filepath.Ext(name) == ".gz" {
+		if compressed {
 			if data, err = gunzip(data); err != nil {
-				return nil, fmt.Errorf("%s: %w", name, err)
+				continue
 			}
 		}
 		peaks = append(peaks, parsePeaks(data)...)
@@ -95,7 +105,10 @@ func parsePeaks(data []byte) []Peak {
 			continue
 		}
 		ended, _ := fields["ended_at"].(string)
-		endedAt, _ := time.Parse(time.RFC3339, ended)
+		endedAt, err := time.Parse(time.RFC3339, ended)
+		if err != nil {
+			continue
+		}
 		cells := make(map[string]string, len(peakFields))
 		for _, f := range peakFields {
 			cells[f.column] = cell(fields[f.key])
