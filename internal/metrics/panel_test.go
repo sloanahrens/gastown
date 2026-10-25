@@ -120,7 +120,6 @@ func TestPanelLabel(t *testing.T) {
 	}{
 		{"rejected_before_landing", "Landings rejected before they land"},
 		{"reached_overrun_stop", "Beads stopped by the overrun guard"},
-		{"manual_rescue", "Landings that needed a manual rescue"},
 		{"a_future_target", "a_future_target"},
 	}
 	for _, tc := range tests {

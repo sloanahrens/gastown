@@ -166,12 +166,16 @@ func TestPrepareBuildsPredictorsFromTheExtractHeader(t *testing.T) {
 	explainOnly := []string{"lines_added", "lines_deleted", "lines_total", "files_touched", "file_entropy",
 		"package_entropy", "attempts", "gate_result", "om_verdict", "unreadable"}
 	header := append(append([]string{}, landingColumns...), "unknown_metric")
+	// Every target drops the whole target list and none defines a column of its
+	// own, so the rows share one header; a per-target drop rule fails the row it
+	// applies to.
+	const predictors = "rig,route,manual_rescue,type,priority,shaped,label_count,om_threshold,dominant_model,unknown_metric"
 	tests := []struct {
 		target string
 		want   string
 	}{
-		{"rejected_before_landing",
-			"rig,route,manual_rescue,type,priority,shaped,label_count,om_threshold,dominant_model,unknown_metric"},
+		{"rejected_before_landing", predictors},
+		{"reached_overrun_stop", predictors},
 	}
 	for _, tc := range tests {
 		t.Run(tc.target, func(t *testing.T) {

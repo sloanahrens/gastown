@@ -12,8 +12,9 @@ import (
 	"strings"
 )
 
-// mangoTargets are the landing outcomes mango explores, in the order the
-// Python run reports them.
+// mangoTargets are the landing outcomes mango explores, in the order the panel
+// and the mango section report them. manual_rescue stays a column and a
+// predictor of the other targets, not a target (gt-jkaxr).
 var mangoTargets = []string{"rejected_before_landing", "reached_overrun_stop"}
 
 // mangoIdentity are dropped from the predictors because each is unique or
