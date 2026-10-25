@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"reflect"
@@ -125,6 +126,8 @@ func TestGetArgvAndDecode(t *testing.T) {
 			Status{Name: "x", Phase: "Error", ReadyKnown: true}},
 		{"a ready condition keeps no failure clock", `{"name":"x","phase":"Ready","conditions":[{"type":"Ready","status":"True","lastTransitionTime":"2026-10-24T14:07:29Z"}]}`,
 			Status{Name: "x", Phase: "Ready", Ready: true, ReadyKnown: true}},
+		{"an unreadable camelCase time falls back to the proto spelling", `{"name":"x","phase":"Error","conditions":[{"type":"Ready","status":"False","lastTransitionTime":"yesterday","last_transition_time":"2026-10-24T14:07:29Z"}]}`,
+			Status{Name: "x", Phase: "Error", ReadyKnown: true, NotReadySince: time.Date(2026, 10, 24, 14, 7, 29, 0, time.UTC)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -139,6 +142,48 @@ func TestGetArgvAndDecode(t *testing.T) {
 				t.Errorf("status = %+v, want %+v", got, tt.want)
 			}
 			wantCall(t, f, "openshell", "-g", "openshell", "sandbox", "get", "x", "--output", "json")
+		})
+	}
+}
+
+func TestConditionTime(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 24, 14, 7, 29, 0, time.UTC)
+	tests := []struct {
+		name string
+		raws []string
+		want time.Time
+	}{
+		{"no spelling present", nil, time.Time{}},
+		{"empty value", []string{``}, time.Time{}},
+		{"RFC3339 string", []string{`"2026-10-24T14:07:29Z"`}, at},
+		{"RFC3339Nano keeps the fraction",
+			[]string{`"2026-10-24T14:07:29.123456789Z"`},
+			time.Date(2026, 10, 24, 14, 7, 29, 123456789, time.UTC)},
+		{"unparseable string", []string{`"yesterday"`}, time.Time{}},
+		{"protobuf seconds", []string{`{"seconds":1792850849}`}, at},
+		{"protobuf nanos without seconds", []string{`{"nanos":500000000}`},
+			time.Unix(0, 500000000).UTC()},
+		{"protobuf all-zero object", []string{`{}`}, time.Time{}},
+		{"neither a string nor an object", []string{`12345`}, time.Time{}},
+		{"camelCase answers before the proto spelling",
+			[]string{`"2026-10-24T14:07:29Z"`, `{"seconds":1}`}, at},
+		{"the proto spelling answers when camelCase does not parse",
+			[]string{`"yesterday"`, `{"seconds":1792850849}`}, at},
+		{"the first readable spelling answers",
+			[]string{`{"seconds":1792850849}`, `"2026-10-24T14:07:29Z"`}, at},
+		{"every spelling unreadable", []string{`"yesterday"`, `{}`}, time.Time{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			raws := make([]json.RawMessage, len(tt.raws))
+			for i, raw := range tt.raws {
+				raws[i] = json.RawMessage(raw)
+			}
+			if got := conditionTime(raws...); !got.Equal(tt.want) {
+				t.Errorf("conditionTime(%q) = %v, want %v", tt.raws, got, tt.want)
+			}
 		})
 	}
 }
