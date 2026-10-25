@@ -1461,40 +1461,74 @@ func TestHandoffMarkerWrittenInPlanWorkDir(t *testing.T) {
 }
 
 // A respawn exports the same git author first spawn does: the seat's bare
-// name. GT_ROLE and BD_ACTOR stay compound. The compound author is what gt
-// done's rework lease (git.SeatIdentityFor) reads as another seat's
-// divergence, so a handoff used to break the successor's next commit
-// (gt-7a955).
+// name, never the compound address gt done's rework lease reads as another
+// seat's divergence, so a handoff cannot break the successor's next commit
+// (gt-7a955). GT_ROLE and BD_ACTOR stay compound.
 //
-// A session name is the rig's beads prefix plus the worker name
-// (session.PolecatSessionName), so gt-furiosa is the polecat furiosa whose
-// compound address is gastown/polecats/furiosa.
+// The fixture builds each session name from the registry's prefix and checks
+// the expected author against config.AgentEnv, so it tests the stated
+// criterion instead of a copied string, and no case can pass through
+// DefaultPrefix.
+//
+// Witness, refinery, deacon and mayor are retired roles, but their session
+// names still parse through this path, so the bare name must hold there too.
 func TestRestartPlanExportsBareGitAuthorName(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
+
+	// Prefixes other than the default "gt": a fallback to DefaultPrefix
+	// leaves a session name this registry cannot parse, failing the case.
+	reg := session.NewPrefixRegistry()
+	reg.Register("be", "beads")
+	reg.Register("hq", "hq") // town prefix; with no rig behind it, it is its own rig
+
 	tests := []struct {
-		session  string
-		want     string
-		compound string
+		name    string
+		role    string // config.AgentEnv's role, empty when it has no case for it
+		rig     string
+		seat    string
+		session func(prefix, seat string) string
 	}{
-		{"gt-furiosa", "GIT_AUTHOR_NAME=furiosa", "GIT_AUTHOR_NAME=gastown/polecats/furiosa"},
-		{"gt-crew-max", "GIT_AUTHOR_NAME=max", "GIT_AUTHOR_NAME=gastown/crew/max"},
+		{"polecat", constants.RolePolecat, "beads", "furiosa", session.PolecatSessionName},
+		{"crew", constants.RoleCrew, "beads", "max", session.CrewSessionName},
+		{"witness", "", "beads", "witness", session.PolecatSessionName},
+		{"refinery", "", "beads", "refinery", session.PolecatSessionName},
+		{"deacon", "", "hq", "deacon", session.PolecatSessionName},
+		{"mayor", "", "hq", "mayor", session.PolecatSessionName},
 	}
 	for _, tt := range tests {
-		t.Run(tt.session, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			plan, err := buildRestartPlan(tt.session, restartOpts(townRoot, map[string]string{}))
+
+			// First spawn's export is the criterion the respawn must meet.
+			if tt.role != "" {
+				env := config.AgentEnv(config.AgentEnvConfig{Role: tt.role, Rig: tt.rig, AgentName: tt.seat})
+				if got := env["GIT_AUTHOR_NAME"]; got != tt.seat {
+					t.Fatalf("config.AgentEnv exports GIT_AUTHOR_NAME=%q for a %s, want %q",
+						got, tt.role, tt.seat)
+				}
+			}
+
+			opts := restartOpts(townRoot, map[string]string{})
+			opts.Registry = reg
+			sessionName := tt.session(reg.PrefixForRig(tt.rig), tt.seat)
+			plan, err := buildRestartPlan(sessionName, opts)
 			if err != nil {
-				t.Fatalf("buildRestartPlan(%q): %v", tt.session, err)
+				t.Fatalf("buildRestartPlan(%q): %v", sessionName, err)
 			}
-			if !strings.Contains(plan.Command, tt.want) {
-				t.Errorf("command does not carry %s:\n%s", tt.want, plan.Command)
+
+			compound := tt.rig + "/polecats/" + tt.seat
+			if tt.role == constants.RoleCrew {
+				compound = tt.rig + "/crew/" + tt.seat
 			}
-			if strings.Contains(plan.Command, tt.compound) {
-				t.Errorf("command carries the compound git author %s:\n%s", tt.compound, plan.Command)
+			if want := "GIT_AUTHOR_NAME=" + tt.seat; !strings.Contains(plan.Command, want) {
+				t.Errorf("command does not carry %s:\n%s", want, plan.Command)
 			}
-			if role := "GT_ROLE=" + strings.TrimPrefix(tt.compound, "GIT_AUTHOR_NAME="); !strings.Contains(plan.Command, role) {
-				t.Errorf("command lost the compound GT_ROLE %s:\n%s", role, plan.Command)
+			if bad := "GIT_AUTHOR_NAME=" + compound; strings.Contains(plan.Command, bad) {
+				t.Errorf("command carries the compound git author %s:\n%s", bad, plan.Command)
+			}
+			if want := "GT_ROLE=" + compound; !strings.Contains(plan.Command, want) {
+				t.Errorf("command lost the compound %s:\n%s", want, plan.Command)
 			}
 		})
 	}
