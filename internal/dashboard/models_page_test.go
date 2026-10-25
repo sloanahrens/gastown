@@ -170,13 +170,48 @@ func TestTheModelsPanelNamesTheSandboxSeatsByTheirShortNames(t *testing.T) {
 			map[string]any{"agent": "deepseek-flash-sandbox-k8s", "cap": 3, "state": "open", "live": 0, "key": "gastown.deepseek-flash-sandbox-k8s"},
 		}},
 	})
-	for _, c := range []struct{ shown, full string }{
-		{"docker-sbx", "deepseek-flash-sandbox"},
-		{"k8s-sbx", "deepseek-flash-sandbox-k8s"},
+	for _, c := range []struct{ shown, full, key string }{
+		{"docker-sbx", "deepseek-flash-sandbox", "gastown.deepseek-flash-sandbox"},
+		{"k8s-sbx", "deepseek-flash-sandbox-k8s", "gastown.deepseek-flash-sandbox-k8s"},
 	} {
 		cell := dom.cellWithText(t, "modelspanel", c.shown)
-		if !strings.Contains(cell.Title, c.full) {
-			t.Errorf("the models panel's %q does not carry the full name %q on hover: %q", c.shown, c.full, cell.Title)
+		if want := c.full + " · " + c.key; cell.Title != want {
+			t.Errorf("the models panel's %q carries %q on hover, want %q", c.shown, cell.Title, want)
+		}
+	}
+}
+
+// The models panel's activity table names each agent by the short name the seat
+// table above it prints and keeps the whole name on hover, so a row's counts are
+// on the seat they name (gt-14gjd).
+func TestTheModelsPanelActivityTableNamesAgentsByTheirShortNames(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	if _, err := dom.vm.RunString("modelsOpen = true"); err != nil {
+		t.Fatalf("opening the models panel: %v", err)
+	}
+	dom.call(t, "renderModelsPanel", map[string]any{
+		"models": map[string]any{"activity": []any{
+			map[string]any{"agent": "deepseek-flash-sandbox", "landed": 2, "rejected": 1},
+			map[string]any{"agent": "deepseek-flash-sandbox-k8s", "landed": 0, "rejected": 3},
+		}},
+	})
+	for i, c := range []struct{ shown, full, landed, rejected string }{
+		{"docker-sbx", "deepseek-flash-sandbox", "2", "1"},
+		{"k8s-sbx", "deepseek-flash-sandbox-k8s", "0", "3"},
+	} {
+		cell := dom.cellWithText(t, "modelspanel", c.shown)
+		if cell.Title != c.full {
+			t.Errorf("the activity table's %q carries title %q, want the full name %q", c.shown, cell.Title, c.full)
+		}
+		// The counts stay with the row, so a short name never stands over
+		// another agent's numbers. The activity table is the panel's third:
+		// the seat and role tables are drawn above it even when empty.
+		for j, want := range []string{c.shown, c.landed, c.rejected} {
+			if got := dom.descend(t, "modelspanel", 2, i+1, j).Text; got != want {
+				t.Errorf("the activity row %d, cell %d = %q, want %q", i, j, got, want)
+			}
 		}
 	}
 }
