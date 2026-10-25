@@ -41,7 +41,7 @@ func TestValidateDepType(t *testing.T) {
 
 func TestIsCycleChecked(t *testing.T) {
 	t.Parallel()
-	for typ, want := range map[string]bool{"blocks": true, "parent-child": true, "tracks": false, "relates-to": false, "discovered-from": false} {
+	for typ, want := range map[string]bool{"blocks": true, "conditional-blocks": true, "parent-child": true, "tracks": false, "relates-to": false, "discovered-from": false} {
 		if got := isCycleChecked(typ); got != want {
 			t.Errorf("isCycleChecked(%q) = %v, want %v", typ, got, want)
 		}

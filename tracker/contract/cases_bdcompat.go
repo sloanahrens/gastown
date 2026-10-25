@@ -3,6 +3,7 @@ package contract
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/gastown/tracker/api"
@@ -16,7 +17,7 @@ func init() {
 	register(Case{Name: "a pinned issue is refused by close, passes update to closed, and force or release clears the pin", Run: bdPinnedFence})
 	register(Case{Name: "close refuses an issue assigned to another actor but update to closed and force do not", Run: bdAssigneeCloseFence})
 	register(Case{Name: "a close with no actor is refused on an assigned issue: the fence never fails open", Run: bdNoActorFence})
-	register(Case{Name: "a pinned issue is not ready, is listed by default and still blocks what depends on it", Run: bdPinnedElsewhere})
+	register(Case{Name: "a pinned issue is not ready, is listed by default and does not block what depends on it", Run: bdPinnedElsewhere})
 	register(Case{Name: "a batch close that includes a refused issue closes nothing", Run: bdBatchFenceAtomic})
 	register(Case{Name: "a read of one issue carries its dependencies with relation, title and status, and its open blockers", Run: bdReadCarriesDependencies})
 }
@@ -135,12 +136,15 @@ func bdNoActorFence(t *testing.T, s store.Store) {
 func bdPinnedElsewhere(t *testing.T, s store.Store) {
 	pinned := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "pinned"})
 	mustUpdate(t, s, pinned.ID, api.UpdatePatch{Status: str("pinned")}, api.Guard{})
-	waiter := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "waits on the pinned one"})
+	waiter := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "depends on the pinned one"})
 	mustDep(t, s, waiter.ID, pinned.ID, "blocks")
-	for _, is := range mustReady(t, s, api.ReadyFilter{}).Issues {
-		if is.ID == pinned.ID || is.ID == waiter.ID {
-			t.Errorf("ready holds %s: a pinned issue is not ready and what it blocks is not either", is.ID)
-		}
+	ready := ids(mustReady(t, s, api.ReadyFilter{}))
+	if slices.Contains(ready, pinned.ID) {
+		t.Errorf("ready holds the pinned issue %s: it is not open", pinned.ID)
+	}
+	// bd's predicate: a blocker that is closed or pinned no longer blocks.
+	if !slices.Contains(ready, waiter.ID) {
+		t.Errorf("ready = %v lacks %s: a pinned blocker does not block", ready, waiter.ID)
 	}
 	listed := false
 	for _, is := range mustList(t, s, api.ListFilter{}).Issues {
@@ -149,8 +153,12 @@ func bdPinnedElsewhere(t *testing.T, s store.Store) {
 	if !listed {
 		t.Error("the default list leaves out a pinned issue; only closed issues are left out")
 	}
-	if got := mustGet(t, s, waiter.ID); len(got.BlockedBy) != 1 || got.BlockedBy[0] != pinned.ID {
-		t.Errorf("BlockedBy = %v, want the pinned issue: it is not closed, so it blocks", got.BlockedBy)
+	if got := mustGet(t, s, waiter.ID); len(got.BlockedBy) != 0 {
+		t.Errorf("BlockedBy = %v, want none: the only blocker is pinned", got.BlockedBy)
+	}
+	// The close fence reads the same predicate: a pinned blocker does not stop a close.
+	if err := s.CloseIssues(ctx(), []string{waiter.ID}, "r", false); err != nil {
+		t.Errorf("closing an issue whose only blocker is pinned = %v, want nil", err)
 	}
 }
 

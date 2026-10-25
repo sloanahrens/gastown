@@ -242,7 +242,7 @@ WHERE d.issue_id = ANY($1) ORDER BY d.issue_id, d.created_at, t.id`, ids)
 			continue // the owner went away between the two reads
 		}
 		is.Dependencies = append(is.Dependencies, dep)
-		if dep.DependencyType == "blocks" && dep.Status != "closed" {
+		if (dep.DependencyType == "blocks" || dep.DependencyType == "conditional-blocks") && dep.Status != "closed" && dep.Status != "pinned" {
 			is.BlockedBy = append(is.BlockedBy, dep.ID)
 		}
 		out[owner] = is

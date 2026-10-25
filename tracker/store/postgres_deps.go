@@ -25,7 +25,9 @@ func validateDepType(t string) error {
 
 // isCycleChecked reports whether links of this type must stay acyclic: a
 // cycle among blocking links would leave every member permanently blocked.
-func isCycleChecked(t string) bool { return t == "blocks" || t == "parent-child" }
+func isCycleChecked(t string) bool {
+	return t == "blocks" || t == "conditional-blocks" || t == "parent-child"
+}
 
 // parseExternalRef splits external:<rig>:<id>; id may itself contain colons.
 func parseExternalRef(ref string) (rig, id string, ok bool) {
@@ -97,7 +99,7 @@ func (p *Postgres) AddDependency(ctx context.Context, issue, dependsOn, depType 
 			if err := tx.QueryRow(ctx, `WITH RECURSIVE walk(id) AS (
   SELECT $2::text
   UNION
-  SELECT d.depends_on FROM tracker.dependencies d JOIN walk w ON d.issue_id = w.id WHERE d.type IN ('blocks', 'parent-child')
+  SELECT d.depends_on FROM tracker.dependencies d JOIN walk w ON d.issue_id = w.id WHERE d.type IN ('blocks', 'conditional-blocks', 'parent-child')
 ) SELECT EXISTS (SELECT 1 FROM walk WHERE id = $1)`, issue, dependsOn).Scan(&cycle); err != nil {
 				return fmt.Errorf("store: check cycle: %w", err)
 			}

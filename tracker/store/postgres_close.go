@@ -26,7 +26,7 @@ func openChildren(ctx context.Context, q querier, id string, closing []string) (
 func openBlockers(ctx context.Context, q querier, id string, closing []string) ([]string, error) {
 	return stringsFrom(ctx, q, `SELECT d.depends_on FROM tracker.dependencies d
 JOIN tracker.issues t ON t.id = d.depends_on
-WHERE d.issue_id = $1 AND d.type = 'blocks' AND t.status <> 'closed' AND t.id <> ALL($2) ORDER BY d.depends_on LIMIT `+fmt.Sprint(fenceLimit), id, closing)
+WHERE d.issue_id = $1 AND d.type IN `+blocking+` AND `+unresolved+` AND t.id <> ALL($2) ORDER BY d.depends_on LIMIT `+fmt.Sprint(fenceLimit), id, closing)
 }
 
 func stringsFrom(ctx context.Context, q querier, sql string, args ...any) ([]string, error) {
