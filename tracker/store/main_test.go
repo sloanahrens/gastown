@@ -1,0 +1,12 @@
+//go:build !integration
+
+package store
+
+import (
+	"os"
+	"testing"
+
+	"github.com/steveyegge/gastown/tracker/internal/leakcheck"
+)
+
+func TestMain(m *testing.M) { os.Exit(leakcheck.Main(m)) }
