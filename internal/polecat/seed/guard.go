@@ -35,7 +35,11 @@ func Guard(pins []Source, buildRig, town string, git Git) error {
 		if err != nil {
 			return fmt.Errorf("pin-drift guard: rig %s pin %s is not readable in its canonical checkout, so it cannot be compared with main %s (%v): fetch or fix that checkout, then rerun", src.Rig, short(src.Commit), short(main), err)
 		}
-		msg := fmt.Sprintf("pin-drift guard: rig %s pin %s is behind its main %s; run make polecat-seed-pins on the canonical checkout at main, then commit the pin", src.Rig, short(src.Commit), short(main))
+		state := "behind its main"
+		if _, err := git(dir, "merge-base", "--is-ancestor", src.Commit, main); err != nil {
+			state = "not an ancestor of its main (ahead or diverged from)"
+		}
+		msg := fmt.Sprintf("pin-drift guard: rig %s pin %s is %s %s; run make polecat-seed-pins on the canonical checkout at main, then commit the pin", src.Rig, short(src.Commit), state, short(main))
 		if len(missing) > 0 {
 			msg += "; the pin lacks: " + strings.Join(missing, ", ")
 		}
