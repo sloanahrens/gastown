@@ -7,8 +7,15 @@ import (
 )
 
 // goCacheGrants maps each Go cache the image sets to the filesystem_policy list
-// that must grant it: a sandbox writes both, the build cache as it compiles
-// (gt-ieuvf) and the module cache to fetch a module the seed lacks (gt-pvudz).
+// that must grant it. Both caches are writable: the build cache as the sandbox
+// compiles (gt-ieuvf), and the module cache so a sandbox can fetch a module the
+// image seed lacks (gt-pvudz).
+//
+// Integrity trade-off: a writable module cache lets a sandbox change extracted
+// module files that later builds in the same cache compile from. Go checks a
+// module against go.sum when it downloads it, not on every build, so such a
+// change is not caught by the build. The read-only module cache this replaced
+// kept the seeded files unchanged; the trade-off is Sloan's to accept.
 var goCacheGrants = []struct{ env, grant string }{
 	{"GOMODCACHE", "read_write"},
 	{"GOCACHE", "read_write"},
