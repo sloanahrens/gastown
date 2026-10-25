@@ -777,45 +777,76 @@ func ensureCacheVolume(ctx context.Context, run dockerRun, volume string) error 
 	return nil
 }
 
+// kubernetesDriverConfigJSON is the create call's driver config document: the
+// kubernetes driver's config under its driver name. These types are the shape's
+// one definition, so a field the gateway reads is renamed here or not at all;
+// the gateway's names match crates/openshell-driver-kubernetes/src/driver.rs.
+type kubernetesDriverConfigJSON struct {
+	Kubernetes kubernetesPodDriverConfig `json:"kubernetes"`
+}
+
+// kubernetesPodDriverConfig is placement under pod and the agent container's
+// sizing under containers.agent.resources.
+type kubernetesPodDriverConfig struct {
+	// Containers precedes Pod so the marshaled keys stay alphabetical, the
+	// order the golden tests pin.
+	Containers *kubernetesContainers `json:"containers,omitempty"`
+	Pod        *kubernetesPod        `json:"pod,omitempty"`
+}
+
+// kubernetesContainers sizes the agent container by name; agent is the only
+// container gt configures.
+type kubernetesContainers struct {
+	Agent kubernetesContainer `json:"agent"`
+}
+
+type kubernetesContainer struct {
+	Resources kubernetesResources `json:"resources"`
+}
+
+// kubernetesResources carries the container's limits and requests, limits first
+// for the same alphabetical order.
+type kubernetesResources struct {
+	Limits   *config.SandboxResources `json:"limits,omitempty"`
+	Requests *config.SandboxResources `json:"requests,omitempty"`
+}
+
+// kubernetesPod places the sandbox pod.
+type kubernetesPod struct {
+	NodeSelector      map[string]string          `json:"node_selector,omitempty"`
+	PriorityClassName string                     `json:"priority_class_name,omitempty"`
+	RuntimeClassName  string                     `json:"runtime_class_name,omitempty"`
+	Tolerations       []config.SandboxToleration `json:"tolerations,omitempty"`
+}
+
 // kubernetesDriverConfig is the driver config that places the sandbox pod and
-// sizes its agent container; the field names are the OpenShell gateway's
-// (crates/openshell-driver-kubernetes/src/driver.rs), and they nest under
-// pod and containers.agent.resources. A profile that sets none of the fields
-// returns "": the gateway's pod defaults stand, and an empty object is not
-// sent.
+// sizes its agent container. A profile that sets none of the fields returns "":
+// the gateway's pod defaults stand, and an empty object is not sent.
 func kubernetesDriverConfig(p Profile) (string, error) {
-	pod := map[string]any{}
-	if len(p.NodeSelector) > 0 {
-		pod["node_selector"] = p.NodeSelector
+	var cfg kubernetesDriverConfigJSON
+	if len(p.NodeSelector) > 0 || len(p.Tolerations) > 0 || p.PriorityClass != "" || p.RuntimeClass != "" {
+		cfg.Kubernetes.Pod = &kubernetesPod{
+			NodeSelector:      p.NodeSelector,
+			PriorityClassName: p.PriorityClass,
+			RuntimeClassName:  p.RuntimeClass,
+			Tolerations:       p.Tolerations,
+		}
 	}
-	if len(p.Tolerations) > 0 {
-		pod["tolerations"] = p.Tolerations
-	}
-	if p.PriorityClass != "" {
-		pod["priority_class_name"] = p.PriorityClass
-	}
-	if p.RuntimeClass != "" {
-		pod["runtime_class_name"] = p.RuntimeClass
-	}
-	resources := map[string]any{}
+	var resources kubernetesResources
 	if p.Requests != nil && *p.Requests != (config.SandboxResources{}) {
-		resources["requests"] = p.Requests
+		resources.Requests = p.Requests
 	}
 	if p.Limits != nil && *p.Limits != (config.SandboxResources{}) {
-		resources["limits"] = p.Limits
+		resources.Limits = p.Limits
 	}
-	k8s := map[string]any{}
-	if len(pod) > 0 {
-		k8s["pod"] = pod
+	if resources != (kubernetesResources{}) {
+		cfg.Kubernetes.Containers = &kubernetesContainers{Agent: kubernetesContainer{Resources: resources}}
 	}
-	if len(resources) > 0 {
-		k8s["containers"] = map[string]any{"agent": map[string]any{"resources": resources}}
-	}
-	if len(k8s) == 0 {
+	if cfg.Kubernetes.Pod == nil && cfg.Kubernetes.Containers == nil {
 		return "", nil
 	}
-	cfg, err := json.Marshal(map[string]any{"kubernetes": k8s})
-	return string(cfg), err
+	cfgJSON, err := json.Marshal(cfg)
+	return string(cfgJSON), err
 }
 
 // cacheDriverConfig is the driver config that mounts the cache volume at
