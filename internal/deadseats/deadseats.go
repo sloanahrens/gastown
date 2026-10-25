@@ -6,20 +6,19 @@
 // acts on it, the seat roster that counts the seat, and the health line that
 // reports it. liveness makes the samples but cannot hold the rule: it imports
 // agentlog and tmux, which import internal/config, and config imports
-// internal/townhealth, one of the readers.
+// internal/townhealth, one of the readers (gt-4rxdi).
 package deadseats
 
 // DefaultSamples is how many consecutive dead samples confirm a seat's death:
 // the compiled default of the patrol's dead_samples, and the count a reader
 // with no configuration uses, so one death is confirmed at one count wherever
-// it is read (gt-4rxdi).
+// it is read.
 const DefaultSamples = 2
 
 // Confirmed reports whether deadSamples consecutive dead samples reach
 // threshold, the count the patrol acts on; below it the patrol only waits
 // ("dead sample 1 of 2"), so a reader that confirmed sooner would call a seat
-// dead the patrol still holds (gt-4rxdi). A threshold of zero or less is
-// DefaultSamples.
+// dead the patrol still holds. A threshold of zero or less is DefaultSamples.
 func Confirmed(deadSamples, threshold int) bool {
 	if threshold <= 0 {
 		threshold = DefaultSamples
