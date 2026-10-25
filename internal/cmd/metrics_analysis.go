@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/metrics"
@@ -66,9 +67,13 @@ func runMetricsAnalyseWith(ctx context.Context, out io.Writer, env metrics.Env, 
 	}
 	_, err = fmt.Fprintf(out, "analyse %s: %d landings, %d targets -> %s\n",
 		res.Panel.GeneratedAt, res.Landings, len(res.Panel.Targets), filepath.Join(res.Dir, "panel.json"))
-	if err != nil || res.SnapshotsSkipped == 0 {
+	if err == nil && res.SnapshotsSkipped > 0 {
+		_, err = fmt.Fprintf(out, "analyse: %d snapshot(s) skipped, their ts does not parse\n", res.SnapshotsSkipped)
+	}
+	if err != nil || len(res.PeaksSkipped) == 0 {
 		return err
 	}
-	_, err = fmt.Fprintf(out, "analyse: %d snapshot(s) skipped, their ts does not parse\n", res.SnapshotsSkipped)
+	_, err = fmt.Fprintf(out, "analyse: %d peak file(s) skipped, their rows are not joined: %s\n",
+		len(res.PeaksSkipped), strings.Join(res.PeaksSkipped, ", "))
 	return err
 }

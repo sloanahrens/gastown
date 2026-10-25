@@ -67,7 +67,7 @@ func beadLanding(bead string) Row {
 // A skip report goes to the test log, where -v shows it.
 func peaksJoin(t *testing.T, env Env, bead string) (Row, []string) {
 	t.Helper()
-	peaks, err := readPeaks(env, t.Logf)
+	peaks, _, err := readPeaks(env, t.Logf)
 	if err != nil {
 		t.Fatalf("readPeaks: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestJoinPeaksWithNoPeaksFileLeavesTheJoinOutputByteForByte(t *testing.T) {
 		t.Fatalf("write the join's output: %v", err)
 	}
 
-	peaks, err := ReadPeaks(peaksEnv(nil))
+	peaks, _, err := ReadPeaks(peaksEnv(nil))
 	if err != nil {
 		t.Fatalf("ReadPeaks with no file: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestReadPeaksFailsOnAFileItCannotRead(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := ReadPeaks(tc.env)
+			_, _, err := ReadPeaks(tc.env)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("ReadPeaks error = %v, want one containing %q", err, tc.want)
 			}
@@ -277,7 +277,7 @@ func TestReadPeaksReportsTheGzipSiblingItSkips(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var reported []string
-			peaks, err := readPeaks(tc.env, func(format string, args ...any) {
+			peaks, skipped, err := readPeaks(tc.env, func(format string, args ...any) {
 				reported = append(reported, fmt.Sprintf(format, args...))
 			})
 			if err != nil {
@@ -285,6 +285,9 @@ func TestReadPeaksReportsTheGzipSiblingItSkips(t *testing.T) {
 			}
 			if len(reported) != 1 || !strings.Contains(reported[0], tc.want) {
 				t.Fatalf("reported %q, want one line containing %q", reported, tc.want)
+			}
+			if want := []string{peaksFile + ".gz"}; !slices.Equal(skipped, want) {
+				t.Fatalf("skipped = %q, want the skipped file named %q", skipped, want)
 			}
 			_, joined := JoinPeaks(landingColumns, []Row{beadLanding("gt-q1")}, peaks)
 			if got := joined[0]["sandbox_peak_mem_bytes"]; got != "42" {
@@ -297,7 +300,7 @@ func TestReadPeaksReportsTheGzipSiblingItSkips(t *testing.T) {
 func TestReadPeaksUnreadableGzipSiblingOfNoPlainFileIsReportedNotFatal(t *testing.T) {
 	t.Parallel()
 	var reported []string
-	peaks, err := readPeaks(peaksEnv(map[string][]byte{peaksPath + ".gz": []byte("not gzip")}), func(format string, args ...any) {
+	peaks, skipped, err := readPeaks(peaksEnv(map[string][]byte{peaksPath + ".gz": []byte("not gzip")}), func(format string, args ...any) {
 		reported = append(reported, fmt.Sprintf(format, args...))
 	})
 	if err != nil {
@@ -308,6 +311,9 @@ func TestReadPeaksUnreadableGzipSiblingOfNoPlainFileIsReportedNotFatal(t *testin
 	}
 	if len(reported) != 1 {
 		t.Errorf("reported %q, want one line for the skipped sibling", reported)
+	}
+	if want := []string{peaksFile + ".gz"}; !slices.Equal(skipped, want) {
+		t.Errorf("skipped = %q, want the skipped file named %q", skipped, want)
 	}
 }
 
