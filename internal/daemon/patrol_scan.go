@@ -451,14 +451,21 @@ func (h *patrolScanHost) gateCheckReport(rig, gateType string) (string, error) {
 // pinned to rig's database, or routed from the town root for rig "" or a rig
 // with no directory.
 func (h *patrolScanHost) gateCheckBeads(rig string) beads.Client {
-	env := bdMutationRoutingEnv(h.town())
+	return beads.NewPlain(h.town(), gateCheckEnv(h.town(), rig), beads.WithBin(h.d.bdPathOrDefault())).WithTimeout(patrolScanBdTimeout).WithProcessGroup()
+}
+
+// gateCheckEnv is the environment of one database's gate check: pinned to the
+// rig's own database when rig names one under townRoot, and routed from the
+// town root otherwise (rig "" or a rig with no directory).
+func gateCheckEnv(townRoot, rig string) []string {
+	env := bdMutationRoutingEnv(townRoot)
 	if rig != "" {
-		if rigDir := beads.GetRigDirForName(h.town(), rig); rigDir != "" {
-			base := agentconfig.NormalizeConfiguredDoltEnv(os.Environ(), h.town())
+		if rigDir := beads.GetRigDirForName(townRoot, rig); rigDir != "" {
+			base := agentconfig.NormalizeConfiguredDoltEnv(os.Environ(), townRoot)
 			env = beads.BuildMutationPinnedBDEnv(base, beads.ResolveBeadsDir(rigDir))
 		}
 	}
-	return beads.NewPlain(h.town(), env, beads.WithBin(h.d.bdPathOrDefault())).WithTimeout(patrolScanBdTimeout).WithProcessGroup()
+	return env
 }
 
 // issueWork is the slice of a work bead the tick reads.

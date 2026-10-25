@@ -43,6 +43,7 @@ func TestGateCheckReportsTheLine(t *testing.T) {
 		{"no-gates notice", "", "No open gates of type 'timer' found.\n", ""},
 		{"last of several notices", "", "Resolved gate gt-1 (timer)\nResolved gate gt-2 (timer)\n", "Resolved gate gt-2 (timer)"},
 		{"report on stdout", "Resolved gate gt-2 (timer)\n", "", "Resolved gate gt-2 (timer)"},
+		{"stderr warning does not hide the stdout report", "Resolved gate gt-3 (timer)\n", "Warning: .beads has permissions 0755\n", "Resolved gate gt-3 (timer)"},
 		{"bare envelope", `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":null}`, "", ""},
 	}
 	for _, tc := range cases {

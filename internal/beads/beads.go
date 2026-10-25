@@ -1891,15 +1891,24 @@ func (b *Beads) GateCheck(types ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	report := strings.TrimSpace(string(stderr))
-	if report == "" {
-		report = strings.TrimSpace(string(LegacyPayload(args, stdout)))
+	// The report is on stdout for a plain call that resolved something, and
+	// on stderr for a machine-mode notice; a stderr warning (bd's permissions
+	// notice, say) must not hide a report on stdout, so stdout is read first.
+	if line := gateCheckLine(string(LegacyPayload(args, stdout))); line != "" {
+		return line, nil
 	}
-	line := strings.TrimPrefix(lastLineOfText(report), "null")
+	return gateCheckLine(string(stderr)), nil
+}
+
+// gateCheckLine is the last line of one stream of gate check output, with the
+// stray JSON null bd prints before a notice stripped; the no-gates notice is
+// nothing to report.
+func gateCheckLine(text string) string {
+	line := strings.TrimPrefix(lastLineOfText(text), "null")
 	if strings.HasPrefix(line, "No open gates") {
-		return "", nil
+		return ""
 	}
-	return line, nil
+	return line
 }
 
 // gateCheckStreams runs the gate check for either kind of wrapper: a plain
