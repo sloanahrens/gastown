@@ -90,6 +90,13 @@ func TestIntegrationRealDataReadsTheSameThroughTheTrackerAsThroughBd(t *testing.
 		}
 	}
 	compareReadyBoards(t, beadsDir, tc, rig)
+	// Plain bd ready: no exclusions of ours, so bd's own defaults (it leaves out
+	// merge requests, gates, molecule roots, rig beads and the infra types) are
+	// compared with the tracker's.
+	compareBdListWithTracker(t, "bd ready (defaults)", []string{"ready", "--json", "--limit", "0"}, beadsDir, false, func() ([]string, error) {
+		all, err := tc.ReadyAll(context.Background(), api.ReadyFilter{Rig: rig})
+		return idsOfAPI(all), err
+	})
 	// bd blocked lists blocked wisps too, which the tracker's Blocked leaves out as
 	// its Ready does (the dashboard's queue panel counts work, not molecule steps).
 	// The comparison is of the durable issues; the wisps are counted in the log.
