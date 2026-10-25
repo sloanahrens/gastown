@@ -59,8 +59,8 @@ func (g *fakeGit) DiffNameOnly(base, _ string) ([]string, error) {
 
 // rec is a record from a run this morning at 04:00, after the daily window
 // opened, so only a change or a later window makes it due again.
-func rec(commit string) Record {
-	return Record{Commit: commit, At: at(2026, 10, 25, 4, 0, 0)}
+func rec(tb testing.TB, commit string) Record {
+	return Record{Commit: commit, At: at(tb, 2026, 10, 25, 4, 0, 0)}
 }
 
 func TestStoreLoad(t *testing.T) {
@@ -160,7 +160,7 @@ func TestStoreSave(t *testing.T) {
 func TestStateChanged(t *testing.T) {
 	t.Parallel()
 	st := State{}
-	st.Ran("internal/beads", "c1", at(2026, 10, 25, 4, 0, 0))
+	st.Ran("internal/beads", "c1", at(t, 2026, 10, 25, 4, 0, 0))
 	g := &fakeGit{changes: map[string][]string{"c1": {"internal/beads/schema.go"}}}
 	got, err := st.Changed(g, "internal/beads")
 	if err != nil {
@@ -189,7 +189,7 @@ func TestDue(t *testing.T) {
 	}
 	beads := Package{Name: "internal/beads", Triggers: []string{"internal/beads"}}
 	testutil := Package{Name: "internal/testutil", Triggers: []string{"internal/testutil", "go.mod"}}
-	yesterday := Record{Commit: "c0", At: at(2026, 10, 24, 4, 0, 0)}
+	yesterday := Record{Commit: "c0", At: at(t, 2026, 10, 24, 4, 0, 0)}
 
 	tests := []struct {
 		name      string
@@ -216,7 +216,7 @@ func TestDue(t *testing.T) {
 		},
 		{
 			name:      "a change on a trigger path since the recorded commit runs it",
-			state:     State{"internal/beads": rec("c1")},
+			state:     State{"internal/beads": rec(t, "c1")},
 			pkgs:      []Package{beads},
 			git:       &fakeGit{changes: map[string][]string{"c1": {"internal/beads/store/schema.go"}}},
 			want:      []string{"internal/beads"},
@@ -224,7 +224,7 @@ func TestDue(t *testing.T) {
 		},
 		{
 			name:      "a change elsewhere since the recorded commit does not run it",
-			state:     State{"internal/beads": rec("c1")},
+			state:     State{"internal/beads": rec(t, "c1")},
 			pkgs:      []Package{beads},
 			git:       &fakeGit{changes: map[string][]string{"c1": {"internal/cmd/root.go"}}},
 			want:      nil,
@@ -232,7 +232,7 @@ func TestDue(t *testing.T) {
 		},
 		{
 			name:      "a change with nothing since the recorded commit does not run it",
-			state:     State{"internal/beads": rec("c1")},
+			state:     State{"internal/beads": rec(t, "c1")},
 			pkgs:      []Package{beads},
 			git:       &fakeGit{changes: map[string][]string{"c1": nil}},
 			want:      nil,
@@ -247,7 +247,7 @@ func TestDue(t *testing.T) {
 		},
 		{
 			name:      "a run after the daily window does not run it again that day",
-			state:     State{"internal/beads": rec("c1")},
+			state:     State{"internal/beads": rec(t, "c1")},
 			pkgs:      []Package{beads},
 			git:       &fakeGit{changes: map[string][]string{"c1": nil}},
 			want:      nil,
@@ -256,8 +256,8 @@ func TestDue(t *testing.T) {
 		{
 			name: "each package reads the change since its own recorded commit",
 			state: State{
-				"internal/beads":    rec("c1"),
-				"internal/testutil": rec("c2"),
+				"internal/beads":    rec(t, "c1"),
+				"internal/testutil": rec(t, "c2"),
 			},
 			pkgs: []Package{beads, testutil},
 			git: &fakeGit{changes: map[string][]string{
@@ -269,7 +269,7 @@ func TestDue(t *testing.T) {
 		},
 		{
 			name:      "a git read that fails is an error",
-			state:     State{"internal/beads": rec("c1")},
+			state:     State{"internal/beads": rec(t, "c1")},
 			pkgs:      []Package{beads},
 			git:       &fakeGit{err: errors.New("bad object c1")},
 			wantAsked: []string{"c1"},
@@ -279,7 +279,7 @@ func TestDue(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := Due(tc.state, tc.pkgs, tc.git, at(2026, 10, 25, 5, 0, 0), loc)
+			got, err := Due(tc.state, tc.pkgs, tc.git, at(t, 2026, 10, 25, 5, 0, 0), loc)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("Due() = %q, nil; want an error", got)

@@ -8,11 +8,13 @@ import (
 )
 
 // at is a time on the daily window's clock: the town zone, whatever the host's
-// zoneinfo says.
-func at(y int, mo time.Month, d, h, m, s int) time.Time {
+// zoneinfo says. It takes the test because a zone that will not load is that
+// test's failure, not a crash of the whole binary.
+func at(tb testing.TB, y int, mo time.Month, d, h, m, s int) time.Time {
+	tb.Helper()
 	loc, err := DailyZoneLocation()
 	if err != nil {
-		panic("tiertrigger: " + err.Error())
+		tb.Fatalf("tiertrigger: %v", err)
 	}
 	return time.Date(y, mo, d, h, m, s, 0, loc)
 }
@@ -31,18 +33,18 @@ func TestDailyRunDue(t *testing.T) {
 		now     time.Time
 		want    bool
 	}{
-		{"no recorded run is due once the window opens", time.Time{}, at(2026, 10, 25, 3, 30, 0), true},
-		{"not due before the window opens even with no recorded run", time.Time{}, at(2026, 10, 25, 3, 29, 59), false},
-		{"due at 03:30 the day after the last run", at(2026, 10, 24, 3, 30, 0), at(2026, 10, 25, 3, 30, 0), true},
-		{"not due a second before 03:30", at(2026, 10, 24, 3, 30, 0), at(2026, 10, 25, 3, 29, 59), false},
-		{"not due twice in one day", at(2026, 10, 25, 3, 30, 0), at(2026, 10, 25, 23, 59, 0), false},
-		{"a run exactly at 03:30 consumes that day's window", at(2026, 10, 25, 3, 30, 0), at(2026, 10, 25, 3, 30, 0), false},
-		{"due after a missed day", at(2026, 10, 23, 3, 31, 0), at(2026, 10, 25, 3, 30, 0), true},
-		{"a run before the window does not count for that day", at(2026, 10, 25, 3, 0, 0), at(2026, 10, 25, 4, 0, 0), true},
-		{"a clock set back is due", at(2026, 10, 25, 5, 0, 0), at(2026, 10, 25, 3, 0, 0), true},
+		{"no recorded run is due once the window opens", time.Time{}, at(t, 2026, 10, 25, 3, 30, 0), true},
+		{"not due before the window opens even with no recorded run", time.Time{}, at(t, 2026, 10, 25, 3, 29, 59), false},
+		{"due at 03:30 the day after the last run", at(t, 2026, 10, 24, 3, 30, 0), at(t, 2026, 10, 25, 3, 30, 0), true},
+		{"not due a second before 03:30", at(t, 2026, 10, 24, 3, 30, 0), at(t, 2026, 10, 25, 3, 29, 59), false},
+		{"not due twice in one day", at(t, 2026, 10, 25, 3, 30, 0), at(t, 2026, 10, 25, 23, 59, 0), false},
+		{"a run exactly at 03:30 consumes that day's window", at(t, 2026, 10, 25, 3, 30, 0), at(t, 2026, 10, 25, 3, 30, 0), false},
+		{"due after a missed day", at(t, 2026, 10, 23, 3, 31, 0), at(t, 2026, 10, 25, 3, 30, 0), true},
+		{"a run before the window does not count for that day", at(t, 2026, 10, 25, 3, 0, 0), at(t, 2026, 10, 25, 4, 0, 0), true},
+		{"a clock set back is due", at(t, 2026, 10, 25, 5, 0, 0), at(t, 2026, 10, 25, 3, 0, 0), true},
 		{"the window is 03:30 in the town zone, not UTC", utc(2026, 10, 25, 8, 0, 0), utc(2026, 10, 25, 9, 0, 0), true},
-		{"due at 03:30 CDT on the day daylight saving starts", at(2026, 3, 7, 3, 31, 0), at(2026, 3, 8, 3, 30, 0), true},
-		{"due at 03:30 CST on the day daylight saving ends", at(2026, 10, 31, 3, 31, 0), at(2026, 11, 1, 3, 30, 0), true},
+		{"due at 03:30 CDT on the day daylight saving starts", at(t, 2026, 3, 7, 3, 31, 0), at(t, 2026, 3, 8, 3, 30, 0), true},
+		{"due at 03:30 CST on the day daylight saving ends", at(t, 2026, 10, 31, 3, 31, 0), at(t, 2026, 11, 1, 3, 30, 0), true},
 	}
 	loc, err := DailyZoneLocation()
 	if err != nil {
