@@ -10,6 +10,39 @@ import (
 	"testing"
 )
 
+// TestShellHookEnabledRule checks the enabled check the emitted hook ships
+// with applies the rule state.IsEnabled applies: GASTOWN_DISABLED=1 wins, then
+// GASTOWN_ENABLED=1, then the state file at the XDG path (gt-1tjks). The unit
+// tier refuses to start a shell (internal/testutil/unittier), so the rule is
+// checked in the emitted source rather than by running it.
+func TestShellHookEnabledRule(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(shellHookScript, shellHookEnabledFunc) {
+		t.Fatal("shellHookScript no longer embeds shellHookEnabledFunc")
+	}
+
+	tests := []struct {
+		name string
+		rule string
+		want bool
+	}{
+		{"disabled is 1, not any non-empty value", `[[ "${GASTOWN_DISABLED:-}" == "1" ]] && return 1`, true},
+		{"enabled is 1, not any non-empty value", `[[ "${GASTOWN_ENABLED:-}" == "1" ]] && return 0`, true},
+		{"state file follows XDG_STATE_HOME with the old default", `"${XDG_STATE_HOME:-$HOME/.local/state}/gastown/state.json"`, true},
+		{"non-emptiness of GASTOWN_DISABLED decides nothing", `-n "$GASTOWN_DISABLED"`, false},
+		{"non-emptiness of GASTOWN_ENABLED decides nothing", `-n "$GASTOWN_ENABLED"`, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := strings.Contains(shellHookScript, tt.rule); got != tt.want {
+				t.Errorf("shellHookScript contains %q = %v, want %v", tt.rule, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDetectShell(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

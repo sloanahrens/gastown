@@ -155,18 +155,23 @@ func updateRCFile(path, content string) error {
 	return os.WriteFile(path, []byte(newContent), 0644)
 }
 
+// shellHookEnabledFunc holds the enabled check the hook runs. It applies the
+// same rule as state.IsEnabled: GASTOWN_DISABLED=1 wins, then
+// GASTOWN_ENABLED=1, then the state file at the XDG path (gt-1tjks).
+const shellHookEnabledFunc = `_gastown_enabled() {
+    [[ "${GASTOWN_DISABLED:-}" == "1" ]] && return 1
+    [[ "${GASTOWN_ENABLED:-}" == "1" ]] && return 0
+    local state_file="${XDG_STATE_HOME:-$HOME/.local/state}/gastown/state.json"
+    [[ -f "$state_file" ]] && grep -q '"enabled"[[:space:]]*:[[:space:]]*true' "$state_file" 2>/dev/null
+}
+`
+
 var shellHookScript = `#!/bin/zsh
 # Gas Town Shell Integration
 # Installed by: gt install --shell
 # Location: ~/.config/gastown/shell-hook.sh
 
-_gastown_enabled() {
-    [[ -n "$GASTOWN_DISABLED" ]] && return 1
-    [[ -n "$GASTOWN_ENABLED" ]] && return 0
-    local state_file="$HOME/.local/state/gastown/state.json"
-    [[ -f "$state_file" ]] && grep -q '"enabled":\s*true' "$state_file" 2>/dev/null
-}
-
+` + shellHookEnabledFunc + `
 _gastown_ignored() {
     local dir="$PWD"
     while [[ "$dir" != "/" ]]; do
