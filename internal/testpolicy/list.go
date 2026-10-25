@@ -27,7 +27,9 @@ func ReadList(path string) (map[string]bool, error) {
 	return m, sc.Err()
 }
 
-// PackageDirs returns every directory under root that holds .go files.
+// PackageDirs returns every directory under root that holds .go files and
+// belongs to the root module: a directory with its own go.mod, and everything
+// under it, is a nested module that carries its own rules.
 func PackageDirs(root string) ([]string, error) {
 	var dirs []string
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -40,6 +42,11 @@ func PackageDirs(root string) ([]string, error) {
 		name := d.Name()
 		if p != root && (name == "testdata" || name == "vendor" || name == "node_modules" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
 			return filepath.SkipDir
+		}
+		if p != root {
+			if _, err := os.Stat(filepath.Join(p, "go.mod")); err == nil {
+				return filepath.SkipDir
+			}
 		}
 		matches, err := filepath.Glob(filepath.Join(p, "*.go"))
 		if err != nil {
