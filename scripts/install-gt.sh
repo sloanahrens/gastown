@@ -222,8 +222,10 @@ image_daemon_env() {
   IMAGE_ENV_VALUE="$value"
 }
 
-# image_build SECS LOCK BINARY RUN — run.sh under the alarm supervisor. Call it
-# in a subshell: it exports the registry and crane it was given and points
+# image_build SECS LOCK BINARY RUN [FINGERPRINT] — run.sh under the alarm
+# supervisor. With a FINGERPRINT, a build that does not finish escalates it
+# (gt-vhn89): a detached build has no caller left to report it, so the
+# supervisor does. Call it in a subshell: it exports the registry and crane it was given and points
 # run.sh at this install's town root, the binary whose commit the image is
 # built at, and its lock (POLECAT_IMAGE_TOWN_ROOT, POLECAT_IMAGE_GT,
 # POLECAT_IMAGE_LOCK; case 43 pins them), not whatever HOME and PATH resolve
@@ -237,13 +239,22 @@ image_daemon_env() {
 # a detached build never holds the install lock past the install — which is why
 # the exec matters: a forked bash waiting on perl would keep that fd open.
 image_build() {
-  local secs="$1" lock="$2" bin="$3" run="$4"
+  local secs="$1" lock="$2" bin="$3" run="$4" fingerprint="${5:-}"
   export POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$bin" POLECAT_IMAGE_LOCK="$lock"
   if [ -n "$image_registry" ]; then export POLECAT_IMAGE_REGISTRY="$image_registry"; fi
   if [ -n "$image_crane" ]; then export POLECAT_IMAGE_CRANE="$image_crane"; fi
   exec "$IMAGE_PERL" -MPOSIX -MFile::Path=remove_tree -e '
-      my ($secs, $lock, @cmd) = @ARGV;
+      my ($secs, $lock, $gt, $fp, @cmd) = @ARGV;
       POSIX::setsid(); POSIX::close($_) for 3..255;
+      # Escalate a failed build from here: the supervisor is the one process
+      # still running when it ends, and it has closed the install lock fd.
+      sub finish {
+        my $code = shift;
+        if ($code && length $fp && length $gt) {
+          system($gt, "escalate", "install-gt: the detached image build did not finish (exit $code); the binary stands, and stale-image slings are refused until it is rebuilt", "-s", "medium", "--source", "script:install-gt", "--fingerprint", $fp);
+        }
+        exit $code;
+      }
       my $child = fork();
       die "fork: $!" unless defined $child;
       if ($child == 0) { POSIX::setpgid(0, 0); exec @cmd or die "exec: $!"; }
@@ -258,14 +269,14 @@ image_build() {
           remove_tree($lock) if $pid == $child;
         }
         print STDERR "polecat image: alarm after $secs s stopped the build\n";
-        exit 124;
+        finish(124);
       };
       alarm $secs;
       waitpid($child, 0);
       # A build killed by a signal is a failure; $? >> 8 alone reads it as 0.
       my $st = $?;
-      exit($st & 127 ? 128 + ($st & 127) : $st >> 8);
-    ' "$secs" "$lock" bash "$run"
+      finish($st & 127 ? 128 + ($st & 127) : $st >> 8);
+    ' "$secs" "$lock" "$GT" "$fingerprint" bash "$run"
 }
 
 polecat_image_step() {
@@ -311,7 +322,7 @@ polecat_image_step() {
     # Detached, as before gt-xzo8a: the subshell exits at once, so the install
     # never waits on the build, and image_build's fd closes keep the install
     # lock out of it.
-    ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null || {
+    ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" install-gt:image-build-failed </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null || {
       log "polecat image: could not start the rebuild for $commit (non-fatal)"
       return 0
     }

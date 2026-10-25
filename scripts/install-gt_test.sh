@@ -1072,6 +1072,8 @@ STUB
 }
 wait_for() { local i; for i in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 wait_for_alarm() { local i; for i in $(seq 1 100); do grep -q 'alarm after' "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+# wait_for_text FILE TEXT: wait until FILE holds TEXT, checked every 0.1 s for 5 s.
+wait_for_text() { local i; for i in $(seq 1 50); do grep -q -- "$2" "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
 # group_signal_ok: this host lets one process signal another's process group,
 # which is what the alarm's kill(-pgid) needs to stop a build. A
 # seccomp-filtered sandbox refuses it with EPERM, and the two alarm cases below
@@ -1315,11 +1317,9 @@ STUB
   rc=$( export INSTALL_GT_IMAGE_ALARM=1
         IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
   wait_for_alarm "$T/image.log" || true
-  [ "$rc" = "1" ] && [ "$(reported "$T")" = "$(cat "$T/c1")" ] \
-    && [ ! -e "$T/daemon/restart-pending.json" ] && ! grep -q install-local "$T/make.log" \
-    && grep -q 'polecat image: alarm after 1 s stopped the build' "$T/image.log" \
-    && pass "image: the alarm bound ends the build and the install fails closed before the swap (this host cannot signal a process group, so the stop itself is untested)" \
-    || fail "image: alarm bound: rc=$rc reported=$(reported "$T") want=$(cat "$T/c1") make=[$(sed 's/ .*//' "$T/make.log" | tr '\n' ' ')] out=$(tail -2 "$T/image.log" 2>/dev/null)"
+  # Passing here would claim a stop nobody saw: the bound is observed, the
+  # kill is not, so the case fails by name until a host that can signal runs it.
+  fail "image: alarm bound: this host refuses process-group signals (EPERM), so the alarm's stop of the build cannot be verified; rc=$rc reported=$(reported "$T") want=$(cat "$T/c1") make=[$(sed 's/ .*//' "$T/make.log" | tr '\n' ' ')] out=$(tail -2 "$T/image.log" 2>/dev/null)"
 fi
 
 # --- Case 46: an INSTALL_GT_IMAGE_ALARM that is not a whole number above zero
@@ -1380,13 +1380,21 @@ echo "4242 (sh) S 1 4242 4242 0 -1 4194304" > "$T/fakeproc/4242/stat"
   && pass "proc_state: reads the state from a /proc stat line" \
   || fail "proc_state: /proc branch read '$(PROC_ROOT="$T/fakeproc" proc_state 4242)', want S"
 
-# Case 49: with no /proc stat line, proc_state asks ps. This test shell is alive,
-# so ps has a state for it, and the first letter of that state is the answer.
-want=$(ps -o stat= -p $$ | cut -c1)
-got=$(PROC_ROOT="$T/no-proc" proc_state $$)
-[ -n "$want" ] && [ "$got" = "$want" ] \
+# Case 49: with no /proc stat line, proc_state asks ps. A child stopped with
+# SIGSTOP reads T on macOS and on Linux, so the answer is known in advance. The
+# test shell's own state is not used: it changes while the test runs, and two
+# samples of it raced (the case failed as S against R).
+sleep 60 &
+stopped=$!
+kill -STOP "$stopped"
+for _ in $(seq 1 50); do [ "$(PROC_ROOT="$T/no-proc" proc_state "$stopped")" = T ] && break; sleep 0.1; done
+got=$(PROC_ROOT="$T/no-proc" proc_state "$stopped")
+kill -CONT "$stopped" 2>/dev/null || true
+kill "$stopped" 2>/dev/null || true
+wait "$stopped" 2>/dev/null || true
+[ "$got" = T ] \
   && pass "proc_state: falls back to ps when /proc has no stat line" \
-  || fail "proc_state: ps branch read '$got', want '$want'"
+  || fail "proc_state: ps branch read '$got', want T (a stopped child)"
 
 # --- Case 50: --no-image-first keeps the old order for an urgent daemon fix:
 # the binary is swapped and the restart marker written without waiting for the
@@ -1421,13 +1429,15 @@ T=$(make_world); image_stub "$T"
 install_stub "$T" "$(cat "$T/c1")"
 rc=$( IMAGE_STUB_REASON="docker is down" IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --no-image-first )
 wait_for "$T/image-calls.log" || true
-for _ in $(seq 1 50); do grep -q "ERROR: docker is down" "$T/image.log" 2>/dev/null && break; sleep 0.1; done
+wait_for_text "$T/image.log" "ERROR: docker is down" || true
+wait_for_text "$T/gt.log" "--fingerprint install-gt:image-build-failed" || true
 [ "$rc" = "0" ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] \
   && [ -e "$T/daemon/restart-pending.json" ] \
   && [ "$(last_receipt "$T" event)" = "installed" ] \
   && grep -q "ERROR: docker is down" "$T/image.log" \
   && ! grep -q "ERROR: docker is down" "$T/run.out" \
-  && pass "no-image-first: a failed background build leaves the install standing" \
+  && grep -q "escalate .*did not finish.*--fingerprint install-gt:image-build-failed" "$T/gt.log" \
+  && pass "no-image-first: a failed background build leaves the install standing and escalates" \
   || fail "no-image-first failing build: rc=$rc reported=$(reported "$T") want=$(cat "$T/c2") receipt=$(last_receipt "$T" event) log=$(tail -2 "$T/image.log" 2>/dev/null)"
 
 # --- Case 52: with --no-image-first a missing plugin is named, and the install
