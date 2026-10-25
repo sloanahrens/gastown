@@ -2,7 +2,9 @@ package metrics
 
 import (
 	"context"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -68,5 +70,83 @@ func TestRunnerOSRunnerRejectsEmptyArgv(t *testing.T) {
 	t.Parallel()
 	if _, err := OSRunner(DefaultAllowEnv)(context.Background(), nil); err == nil {
 		t.Fatal("OSRunner ran an empty argv without an error")
+	}
+}
+
+// TestRunnerOSRunnerRunsTheCommand covers the exec the analysis actually
+// depends on: every other runner test stops short of starting a child.
+func TestRunnerOSRunnerRunsTheCommand(t *testing.T) {
+	t.Parallel()
+	out, err := OSRunner(DefaultAllowEnv)(context.Background(), []string{"/bin/sh", "-c", "printf 'collected'"})
+	if err != nil {
+		t.Fatalf("OSRunner: %v", err)
+	}
+	if got := string(out); got != "collected" {
+		t.Fatalf("stdout = %q, want %q", got, "collected")
+	}
+}
+
+// TestRunnerOSRunnerFailureCarriesTheStderrTail pins the error text a source
+// surfaces when its command fails: without the tail, the user sees an exit
+// code and no cause.
+func TestRunnerOSRunnerFailureCarriesTheStderrTail(t *testing.T) {
+	t.Parallel()
+	_, err := OSRunner(DefaultAllowEnv)(context.Background(), []string{"/bin/sh", "-c", "printf 'disk full\\n' >&2; exit 3"})
+	if err == nil {
+		t.Fatal("OSRunner returned no error for a non-zero exit")
+	}
+	if !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("error %q does not carry the child's stderr", err)
+	}
+}
+
+// TestRunnerOSRunnerExecsWithTheAllowlistedEnvironment checks the allowlist at
+// the exec, not just in childEnv: childEnv's ruling only protects a child if
+// the runner hands it to os/exec. childEnv's own tests pin which names the
+// ruling admits, so this one only proves the child receives it.
+func TestRunnerOSRunnerExecsWithTheAllowlistedEnvironment(t *testing.T) {
+	t.Parallel()
+	out, err := OSRunner(DefaultAllowEnv)(context.Background(), []string{"/bin/sh", "-c", `printf %s "$HOME"`})
+	if err != nil {
+		t.Fatalf("OSRunner: %v", err)
+	}
+	if got, want := string(out), os.Getenv("HOME"); got != want {
+		t.Fatalf("the child's HOME = %q, want the allowlisted %q", got, want)
+	}
+}
+
+func TestRunnerOSRunnerEnvDeliversExtraEnvironment(t *testing.T) {
+	t.Parallel()
+	out, err := OSRunnerEnv(DefaultAllowEnv)(context.Background(), []string{"/bin/sh", "-c", `printf %s "$TOWN_METRICS_TOWN"`}, []string{"TOWN_METRICS_TOWN=/town"})
+	if err != nil {
+		t.Fatalf("OSRunnerEnv: %v", err)
+	}
+	if got := string(out); got != "/town" {
+		t.Fatalf("stdout = %q, want %q", got, "/town")
+	}
+}
+
+func TestTailStringKeepsWholeRunes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		in       string
+		maxBytes int
+		want     string
+	}{
+		{"shorter than the limit is returned whole", "abc", 10, "abc"},
+		{"the tail is the last bytes, trimmed", "boom\nstack\n", 5, "stack"},
+		{"a cut on a boundary keeps the whole tail", "aé€", 5, "é€"},
+		{"a cut mid-rune starts at the next one", "aé€", 4, "€"},
+		{"a tail shorter than one rune is dropped", "€", 1, ""},
+		{"a zero limit returns nothing", "abc", 0, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tailString(tc.in, tc.maxBytes); got != tc.want {
+				t.Errorf("tailString(%q, %d) = %q, want %q", tc.in, tc.maxBytes, got, tc.want)
+			}
+		})
 	}
 }
