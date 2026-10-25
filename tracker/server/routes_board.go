@@ -8,12 +8,49 @@ import (
 )
 
 // registerBoardRoutes registers POST /v1/ready, POST /v1/blocked and
-// POST /v1/issues:children-of. They are POST so the filter travels in a body;
+// POST /v1/issues:children-of, plus POST /v1/board/dispatch. They are POST so the filter travels in a body;
 // none of them writes.
 func (s *Server) registerBoardRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/ready", func(w http.ResponseWriter, r *http.Request) { s.boardPage(w, r, s.cfg.Store.Ready) })
 	mux.HandleFunc("POST /v1/blocked", func(w http.ResponseWriter, r *http.Request) { s.boardPage(w, r, s.cfg.Store.Blocked) })
 	mux.HandleFunc("POST /v1/issues:children-of", s.childrenOf)
+	mux.HandleFunc("POST /v1/board/dispatch", s.dispatchBoard)
+}
+
+// dispatchBoard answers the whole spec dispatch tick read in one snapshot.
+func (s *Server) dispatchBoard(w http.ResponseWriter, r *http.Request) {
+	var req api.DispatchBoardRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	resp, err := s.cfg.Store.DispatchBoard(r.Context(), req)
+	if err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if resp.Rigs == nil {
+		resp.Rigs = map[string]api.RigBoard{}
+	}
+	if resp.Probes == nil {
+		resp.Probes = map[string]api.Probe{}
+	}
+	if resp.Errors == nil {
+		resp.Errors = map[string]string{}
+	}
+	for rig, b := range resp.Rigs {
+		if b.Ready == nil {
+			b.Ready = []api.Issue{}
+		}
+		if b.Held == nil {
+			b.Held = []api.HeldBead{}
+		}
+		if b.Children == nil {
+			b.Children = map[string][]api.ChildStatus{}
+		}
+		resp.Rigs[rig] = b
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // boardPage reads a ReadyFilter, runs query and answers with the page.

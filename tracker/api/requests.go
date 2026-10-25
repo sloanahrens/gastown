@@ -63,3 +63,55 @@ type ChildrenOfRequest struct {
 type ChildrenOfResponse struct {
 	Children map[string][]Issue `json:"children"`
 }
+
+// DispatchBoardRequest asks for everything one dispatch tick reads about the
+// work board: per rig the ready issues, the issues a seat holds and the
+// children of the ready issues, plus the status of a few named issues.
+type DispatchBoardRequest struct {
+	// Rigs are the rig prefixes to read. A prefix the tracker does not know
+	// is reported in Errors, not failed.
+	Rigs []string `json:"rigs"`
+	// ExcludeLabels and ExcludeTypes narrow the ready issues, as in ReadyFilter.
+	ExcludeLabels []string `json:"exclude_labels,omitempty"`
+	ExcludeTypes  []string `json:"exclude_types,omitempty"`
+	// HeldStatuses are the statuses that mean a seat holds an issue.
+	HeldStatuses []string `json:"held_statuses,omitempty"`
+	// ProbeIDs are issues whose status is wanted (revert beads).
+	ProbeIDs []string `json:"probe_ids,omitempty"`
+}
+
+// HeldBead is an assigned issue in one of the held statuses.
+type HeldBead struct {
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	Assignee    string `json:"assignee"`
+	Description string `json:"description"`
+}
+
+// ChildStatus is a direct child of a ready issue.
+type ChildStatus struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+// RigBoard is one rig's part of the dispatch board. Ready, Held and Children
+// are never null.
+type RigBoard struct {
+	Ready    []Issue                  `json:"ready"`
+	Held     []HeldBead               `json:"held"`
+	Children map[string][]ChildStatus `json:"children"`
+}
+
+// Probe is the status of one probed issue; Found is false when it does not exist.
+type Probe struct {
+	Found  bool   `json:"found"`
+	Status string `json:"status,omitempty"`
+}
+
+// DispatchBoardResponse is one consistent snapshot of the board. Rigs holds
+// the rigs that were read; Errors says why each other requested rig was not.
+type DispatchBoardResponse struct {
+	Rigs   map[string]RigBoard `json:"rigs"`
+	Probes map[string]Probe    `json:"probes"`
+	Errors map[string]string   `json:"errors"`
+}

@@ -160,14 +160,14 @@ func (p *Postgres) ListIssues(ctx context.Context, f api.ListFilter) (api.IssueP
 		last := page.Issues[size-1]
 		page.NextCursor = listCursor{Priority: last.Priority, CreatedAt: last.CreatedAt, ID: last.ID}.encode()
 	}
-	if err := p.fillPage(ctx, page.Issues); err != nil {
+	if err := fillPage(ctx, p.pool, page.Issues); err != nil {
 		return api.IssuePage{}, err
 	}
 	return page, nil
 }
 
 // fillPage adds labels and the three counts to the issues of a page.
-func (p *Postgres) fillPage(ctx context.Context, issues []api.Issue) error {
+func fillPage(ctx context.Context, q querier, issues []api.Issue) error {
 	if len(issues) == 0 {
 		return nil
 	}
@@ -175,7 +175,7 @@ func (p *Postgres) fillPage(ctx context.Context, issues []api.Issue) error {
 	for i, is := range issues {
 		ids[i] = is.ID
 	}
-	labels, err := loadLabels(ctx, p.pool, ids)
+	labels, err := loadLabels(ctx, q, ids)
 	if err != nil {
 		return err
 	}
@@ -188,7 +188,7 @@ func (p *Postgres) fillPage(ctx context.Context, issues []api.Issue) error {
 		{1, "SELECT issue_id, count(*) FROM tracker.dependencies WHERE issue_id = ANY($1) GROUP BY 1"},
 		{2, "SELECT depends_on, count(*) FROM tracker.dependencies WHERE depends_on = ANY($1) GROUP BY 1"},
 	} {
-		rows, err := p.pool.Query(ctx, c.sql, ids)
+		rows, err := q.Query(ctx, c.sql, ids)
 		if err != nil {
 			return fmt.Errorf("store: list counts: %w", err)
 		}
