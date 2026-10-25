@@ -458,14 +458,14 @@ function seatCount(sr, m) {
   return {text: "–", why: "the dispatcher's roster has not been read yet"};
 }
 
-// seatFacts is the strip's seats: what each open seat runs and how full it
-// is, off the seat rows the reader fills from the dispatcher's roster, so the
-// strip counts the seats a sling is refused against rather than every polecat
-// the inventory lists (gt-ly90n). A closed seat — nothing may fill it — is
-// left to the models line, and a seat whose config nobody could read says
-// unknown rather than passing as a seat nobody runs. No rows at all is a
-// settings read that has not come back, not a town with no seats: the reader
-// always sends the seats it read.
+// seatFacts is the strip's seats: what each open seat runs and how full it is,
+// off the seat rows the reader fills from the dispatcher's roster, so the strip
+// counts the seats a sling is refused against rather than every polecat the
+// inventory lists (gt-ly90n). A closed seat, which nothing may fill, is left to
+// the models line; a seat whose config nobody could read says unknown rather
+// than passing as a seat nobody runs. No rows at all is a settings read that has
+// not come back, not a town with no seats: the reader always sends the seats it
+// read.
 function seatFacts(m) {
   if (!m || !(m.seat_rows || []).length) return null;
   const out = [];
