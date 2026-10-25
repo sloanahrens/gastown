@@ -233,7 +233,10 @@ func configOmThreshold(env Env, rig string) (value any, ok bool) {
 // the command failed, missed its deadline, printed nothing, or printed
 // something that is not the array the command writes.
 func (s configSource) configParkedRigs(ctx context.Context, env Env) (value any, ok bool) {
-	if env.RunDir == nil {
+	// An empty town is no town: a command run in "" runs in the process's own
+	// working directory, which would count the rigs of whatever town the
+	// process was started in. That is a failed probe, not a count.
+	if env.RunDir == nil || env.Town == "" {
 		return nil, false
 	}
 	timeout := s.rigListTimeout

@@ -475,3 +475,39 @@ func TestSourceConfigMissingOrMalformedSettingsIsANilGroup(t *testing.T) {
 		})
 	}
 }
+
+// A probe with no town must not count the rigs of the process's own working
+// directory: no command runs and the count is no value. A missing runner is the
+// same failure, not a panic.
+func TestConfigParkedRigsIsAFailedProbeWithoutATownOrARunner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		town   string
+		runDir bool
+	}{
+		{"an empty town", "", true},
+		{"no runner for the town", configTestTown, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := envAt(fixedNow())
+			env.Town = tc.town
+			ran := 0
+			if tc.runDir {
+				env.RunDir = func(_ context.Context, _ string, _ []string) ([]byte, error) {
+					ran++
+					return []byte(`[{"name": "beads", "status": "parked"}]`), nil
+				}
+			}
+			value, ok := configSource{}.configParkedRigs(context.Background(), env)
+			if ok || value != nil {
+				t.Errorf("configParkedRigs = (%v, %v), want (nil, false)", value, ok)
+			}
+			if ran != 0 {
+				t.Errorf("`gt rig list` ran %d times, want none", ran)
+			}
+		})
+	}
+}
