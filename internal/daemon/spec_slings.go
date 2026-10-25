@@ -39,6 +39,7 @@ type specSlingFlight struct {
 	Rig   string   `json:"rig"`
 	Agent string   `json:"agent"`
 	Paths []string `json:"paths,omitempty"`
+	Tests []string `json:"tests,omitempty"`
 
 	job     json.RawMessage
 	started time.Time
