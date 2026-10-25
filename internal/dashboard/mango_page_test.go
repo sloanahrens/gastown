@@ -13,8 +13,9 @@ import (
 func TestMangoPanelStartsFolded(t *testing.T) {
 	t.Parallel()
 
-	if !strings.Contains(string(indexHTML), `<section id="mangosec" data-default-collapsed hidden>`) {
-		t.Error("the Mango section does not start folded on first load")
+	tag := mangoSectionTag(t)
+	if !strings.Contains(tag, " data-default-collapsed") || !strings.Contains(tag, " hidden") {
+		t.Errorf("the Mango section %q does not start folded on first load", tag)
 	}
 	if !strings.Contains(pageFunc(t, "setupCollapse"), `sec.hasAttribute("data-default-collapsed")`) {
 		t.Error("setupCollapse no longer folds a pane that opts in with data-default-collapsed")
@@ -171,6 +172,84 @@ func TestMangoErrorPanelNamesTheErrorAndDrawsNoRows(t *testing.T) {
 	}
 }
 
+// A state the page does not know is drawn as the panel's own note in the plain
+// title colour, with no target rows: the page does not make a reading out of a
+// state it cannot name.
+func TestMangoUnknownStateShowsItsNotePlainly(t *testing.T) {
+	t.Parallel()
+
+	const note = "the panel state is not one this page knows"
+	dom := newPageDOM(t)
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState("indeterminate", note,
+		mangoPageTarget("manual_rescue", 37, false, "attempts in q3", 54, 0.11, 0.09, MangoNoSignal))})
+
+	if got := dom.element(t, "mangonote"); got.Text != note || got.Class != "r" {
+		t.Errorf("an unknown state's title is %q (%q), want the note in the plain title class", got.Text, got.Class)
+	}
+	if n := dom.descend(t, "mango", 0, 1).Kids; n != 1 {
+		t.Errorf("an unknown state draws %d rows, want the collection row alone", n)
+	}
+	if got := mangoCell(t, dom, 0, 5); got.Text != note || got.Class != "empty" {
+		t.Errorf("the collection row says %q (%q), want the note in the empty class", got.Text, got.Class)
+	}
+}
+
+// A panel that carries no generation time dates its reading as unknown rather
+// than leaving the age out: an undated analysis would read as a current one.
+func TestMangoFreshPanelWithoutAGenerationTimeSaysTheAgeIsUnknown(t *testing.T) {
+	t.Parallel()
+
+	m := mangoPageState(MangoFresh, "fresh")
+	delete(m, "generated_at")
+	dom := newPageDOM(t)
+	dom.call(t, "renderMango", map[string]any{"mango": m})
+
+	note := dom.element(t, "mangonote")
+	if !strings.Contains(note.Text, "analysis age unknown") {
+		t.Errorf("the title line %q does not say the analysis age is unknown", note.Text)
+	}
+	if strings.Contains(note.Text, "analysed") {
+		t.Errorf("the title line %q dates an analysis that carries no generation time", note.Text)
+	}
+}
+
+// A verdict the page does not know and a rate the panel did not report are drawn
+// as the panel's word, dim, and as a dash: an unknown verdict never wears a
+// counted verdict's colour, and a missing rate never reads as zero.
+func TestMangoUnknownVerdictAndMissingRateAreNotReadings(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	unmeasured := mangoPageTarget("manual_rescue", 37, false, "attempts in q3", 54, 0.11, 0.09, "unmeasured")
+	unrated := map[string]any{
+		"target":       "reached_overrun_stop",
+		"positives":    12,
+		"skipped":      false,
+		"best_box":     "model = opus",
+		"holdout_n":    96,
+		"holdout_rate": nil,
+		"baseline":     nil,
+		"verdict":      MangoNoSignal,
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", unmeasured, unrated)})
+
+	chip := dom.descend(t, "mango", 0, 1, 1, 1, 0)
+	if chip.Text != "unmeasured" {
+		t.Errorf("the chip says %q, want the verdict word the panel gave", chip.Text)
+	}
+	if chip.Class != "jvchip jv-notyet" {
+		t.Errorf("an unknown verdict is drawn as %q, want the dim chip", chip.Class)
+	}
+	if !strings.Contains(chip.Title, "does not know") {
+		t.Errorf("an unknown verdict's tooltip is %q, want it to say the page does not know the verdict", chip.Title)
+	}
+	for _, col := range []int{3, 4} {
+		if got := mangoCell(t, dom, 2, col).Text; got != "-" {
+			t.Errorf("a missing rate in column %d reads %q, want a dash", col, got)
+		}
+	}
+}
+
 // The best box and the target name are text the panel writes into the page: a
 // box holding markup is drawn as those characters, as one text run with no
 // element inside it, so nothing it says can run or restyle the page.
@@ -225,6 +304,27 @@ func mangoPageTarget(target string, positives int, skipped bool, box string, hol
 		"baseline":     baseline,
 		"verdict":      verdict,
 	}
+}
+
+// mangoSectionTag returns the opening tag of the markup's #mangosec section, so a
+// test can read the attributes it opts in with without pinning their order.
+func mangoSectionTag(t *testing.T) string {
+	t.Helper()
+
+	page := string(indexHTML)
+	at := strings.Index(page, `id="mangosec"`)
+	if at < 0 {
+		t.Fatal("index.html has no #mangosec section")
+	}
+	start := strings.LastIndex(page[:at], "<section")
+	if start < 0 {
+		t.Fatal("index.html has no <section> holding #mangosec")
+	}
+	end := strings.Index(page[at:], ">")
+	if end < 0 {
+		t.Fatal("index.html's #mangosec section has no opening tag")
+	}
+	return page[start : at+end+1]
 }
 
 // mangoCell reads one cell of the Mango table: the row at index row of its body,
