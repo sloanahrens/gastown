@@ -8,7 +8,7 @@ Edit `<town>/settings/placement.json`. The operator installs this file at runtim
 
 - Set the component's value in `places` to the new place. Places are free text in the town's own names, such as `mac-host`, `docker-desktop`, `town-cluster` or `tenant-cluster`. A new place needs no code.
 - Set `updated` to the date of the move.
-- Keep `"v": 1`. The decode is strict: an unknown field, another version, an empty name, or data after the object is an error.
+- Keep `"v": 1`. Before changing the schema, read the placement source comment in `internal/metrics/source_placement.go`; it states the schema and what the decode rejects.
 
 Done when the next snapshot row shows the new place and has no `errors` entry named `placement`. A bad file leaves the row's placement null and adds that entry. A missing file is not an error; the receipt then says `placement: none known`.
 
@@ -17,7 +17,7 @@ Done when the next snapshot row shows the new place and has no `errors` entry na
 Append one entry to the JSON array in `regime-events.json`. Its default location is `~/.claude/docs/metrics/`; `TOWN_METRICS_DOCS` overrides the directory. The operator writes this file at runtime, outside the repo.
 
 ```json
-{"date": "2026-10-24", "what": "<component> moved from <old place> to <new place>", "source": "<where the move is recorded>", "confirmed": false}
+{"date": "<YYYY-MM-DD>", "what": "<component> moved from <old place> to <new place>", "source": "<where the move is recorded>", "confirmed": false}
 ```
 
 - `date` is the day the move took effect, as `YYYY-MM-DD`.
