@@ -442,3 +442,32 @@ func (p unansweredProbe) PaneDead(string) (bool, error)            { return fals
 func (p unansweredProbe) GetSessionCreatedTime(string) (time.Time, error) {
 	return time.Time{}, p.err
 }
+
+// A transition time that arrives after the watch started the clock cannot move
+// the start earlier, so a stale Ready condition cannot skip the grace this
+// watch is measuring (gt-h4yci).
+func TestSandboxPhaseStaleTransitionTimeKeepsTheWatchStart(t *testing.T) {
+	t.Parallel()
+	w := newSandboxPhaseWatch()
+	t0 := time.Unix(1760000000, 0)
+
+	if got := w.failing("gt-a", time.Time{}, t0); got != 0 {
+		t.Fatalf("first reading = %s, want 0", got)
+	}
+	if got := w.failing("gt-a", t0.Add(-time.Hour), t0.Add(time.Minute)); got != time.Minute {
+		t.Fatalf("reading with a stale transition time = %s, want the minute since the first reading", got)
+	}
+}
+
+// On the first reading a transition time older than the reading is the start
+// of the failure, so it spends the grace at once. This is the gt-j18af
+// contract, pinned here so the doc comment on failing states it (gt-h4yci).
+func TestSandboxPhaseStaleTransitionTimeOnTheFirstReadingSpendsTheGrace(t *testing.T) {
+	t.Parallel()
+	w := newSandboxPhaseWatch()
+	t0 := time.Unix(1760000000, 0)
+
+	if got := w.failing("gt-b", t0.Add(-time.Hour), t0); got != time.Hour {
+		t.Fatalf("first reading with a transition time an hour old = %s, want 1h0m0s", got)
+	}
+}
