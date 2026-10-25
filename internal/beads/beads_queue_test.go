@@ -134,6 +134,53 @@ func TestMatchClaimPattern_OverlappingPrefixSuffix(t *testing.T) {
 	}
 }
 
+// The overlap guard's boundary: prefix and suffix meet exactly, so the wildcard
+// middle is empty. A glob star consumes nothing there; the zero-length slice
+// must not panic (gt-p252t).
+func TestMatchClaimPattern_EmptyMiddle(t *testing.T) {
+	tests := []struct {
+		name     string
+		pattern  string
+		identity string
+		want     bool
+	}{
+		{
+			name:     "star between two parts consumes nothing",
+			pattern:  "a*b",
+			identity: "ab",
+			want:     true,
+		},
+		{
+			name:     "trailing star consumes nothing",
+			pattern:  "ab*",
+			identity: "ab",
+			want:     true,
+		},
+		{
+			name:     "leading star consumes nothing",
+			pattern:  "*ab",
+			identity: "ab",
+			want:     true,
+		},
+		{
+			name:     "wildcard after separator with no segment",
+			pattern:  "gastown/*",
+			identity: "gastown/",
+			want:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MatchClaimPattern(tt.pattern, tt.identity)
+			if got != tt.want {
+				t.Errorf("MatchClaimPattern(%q, %q) = %v, want %v",
+					tt.pattern, tt.identity, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatQueueDescription(t *testing.T) {
 	tests := []struct {
 		name   string
