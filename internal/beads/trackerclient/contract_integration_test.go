@@ -42,10 +42,18 @@ func newTracker(t *testing.T, actor string) beads.Client {
 }
 
 // The adapter must behave like bd on every case the fake and bd are held to.
-func TestTrackerClientSatisfiesTheClientContract(t *testing.T) {
+// The one suite it does not run is RunCreatorOptionContract: the tracker
+// records the creator as the token's actor and ignores one named in a request
+// (see Client.Create), and RunActorContract below pins who it records.
+//
+// This is integration tier because it needs a real Postgres; the integration
+// sweep runs it on every landing, and the tracker's own store contract runs on
+// Postgres in the same sweep. The unit tier covers the mapping and the batch
+// close rules (unit_test.go).
+func TestIntegrationTrackerClientSatisfiesTheClientContract(t *testing.T) {
 	beadsfake.RunClientContract(t, func(t *testing.T) beads.Client { return newTracker(t, "town/crew/dipper") })
 }
 
-func TestTrackerClientSatisfiesTheActorContract(t *testing.T) {
+func TestIntegrationTrackerClientSatisfiesTheActorContract(t *testing.T) {
 	beadsfake.RunActorContract(t, func(t *testing.T, actor string) beads.Client { return newTracker(t, actor) })
 }

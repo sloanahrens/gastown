@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests for scripts/repo-guards.sh: a clean repo passes; a replace directive,
+# Tests for scripts/repo-guards.sh: a clean repo passes; the tracker module's
+# replace passes; any other replace directive,
 # a replace block, a tracked .beads/issues.jsonl, or a tracked .go file gofmt -s
 # would rewrite fails; an untracked issues.jsonl (a local bd export), an
 # untracked .go file and a testdata fixture pass.
@@ -31,6 +32,10 @@ fresh() {
 fresh; check "clean repo" pass
 fresh; printf 'replace example.com/y => ../y\n' >>"$TMP/repo/go.mod"; check "replace directive" fail
 fresh; printf 'replace (\n\texample.com/y => ../y\n)\n' >>"$TMP/repo/go.mod"; check "replace block" fail
+fresh; printf 'replace github.com/steveyegge/gastown/tracker => ./tracker\n' >>"$TMP/repo/go.mod"; check "the tracker module replace" pass
+fresh; printf 'replace github.com/steveyegge/gastown/tracker => ../tracker\n' >>"$TMP/repo/go.mod"; check "the tracker module replaced by another path" fail
+fresh; printf 'replace github.com/steveyegge/gastown/tracker => ./tracker\nreplace example.com/y => ../y\n' >>"$TMP/repo/go.mod"; check "the tracker replace beside another" fail
+fresh; printf 'replace (\n\tgithub.com/steveyegge/gastown/tracker => ./tracker\n)\n' >>"$TMP/repo/go.mod"; check "the tracker replace in a block" fail
 fresh; echo '{}' >"$TMP/repo/.beads/issues.jsonl"; check "untracked issues.jsonl" pass
 fresh; echo '{}' >"$TMP/repo/.beads/issues.jsonl"; git -C "$TMP/repo" add .beads/issues.jsonl; check "tracked issues.jsonl" fail
 

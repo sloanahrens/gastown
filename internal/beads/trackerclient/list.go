@@ -8,12 +8,11 @@ import (
 	"github.com/steveyegge/gastown/tracker/api"
 )
 
-// listFilter maps beads.ListOptions to the tracker's filter. ListOptions.Rig is
-// not mapped: in bd it narrows merge requests by the rig named in their
+// listFilter maps beads.ListOptions to the tracker's filter. The tracker shares
+// bd's status rule: no status means every issue that is not closed, "all"
+// means every issue, and a comma list names statuses. ListOptions.Rig is not
+// mapped: in bd it narrows merge requests by the rig named in their
 // description (beads.ListMergeRequests does that), not by the database.
-// The tracker
-// shares bd's status rule: no status means every issue that is not closed,
-// "all" means every issue, and a comma list names statuses.
 func listFilter(o beads.ListOptions) api.ListFilter {
 	f := api.ListFilter{
 		Labels: o.Labels, Parent: o.Parent, Assignee: o.Assignee, NoAssignee: o.NoAssignee,

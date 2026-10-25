@@ -33,11 +33,6 @@ var _ beads.Client = (*Client)(nil)
 // CreateOptions names neither a rig, an ID nor a parent.
 func New(tc *client.Client, defaultRig string) *Client { return &Client{tc: tc, rig: defaultRig} }
 
-// AttributesToCredential says that every write is recorded as the actor of the
-// client's token: CreateOptions.Actor is ignored, because a request must not
-// name who it is. beadsfake.RunClientContract reads this.
-func (*Client) AttributesToCredential() bool { return true }
-
 func ctx() context.Context { return context.Background() }
 
 // Show returns one issue, or an error wrapping beads.ErrNotFound.
@@ -70,8 +65,19 @@ func (c *Client) Comments(id string) ([]beads.Comment, error) {
 	return comments(cs), nil
 }
 
-// Create creates an issue and returns it.
+// ErrActorOption is Create refusing CreateOptions.Actor. The tracker records
+// the creator as the actor of the client's token and does not take one named in
+// a request (a request must not say who it is), so an option that names one
+// is refused rather than ignored. Leave Actor empty: the creator is the
+// token's actor, which beadsfake.RunActorContract pins.
+var ErrActorOption = errors.New("trackerclient: CreateOptions.Actor is not supported: the tracker records the creator as the token's actor")
+
+// Create creates an issue and returns it. Every CreateOptions field is carried
+// except Actor, which is refused with ErrActorOption.
 func (c *Client) Create(opts beads.CreateOptions) (*beads.Issue, error) {
+	if opts.Actor != "" {
+		return nil, ErrActorOption
+	}
 	if strings.HasPrefix(opts.Title, "-") {
 		return nil, fmt.Errorf("refusing to create a bead: %w (got %q)", beads.ErrFlagTitle, opts.Title)
 	}
@@ -152,7 +158,7 @@ func (c *Client) closeIDs(reason string, force bool, ids []string) error {
 			closed = append(closed, id)
 		case errors.Is(err, api.ErrNotFound):
 			missing = append(missing, id)
-		case errors.Is(err, api.ErrConflict) || errors.Is(err, api.ErrGuardFailed):
+		case errors.Is(err, api.ErrConflict): // the close fences: children, blockers, a pin, another actor's claim
 			notClosed = append(notClosed, id)
 			if firstRefusal == nil {
 				firstRefusal = err

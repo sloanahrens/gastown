@@ -92,12 +92,21 @@ func TestListFilterMapsStatusLabelsPriorityAndLeavesRigAlone(t *testing.T) {
 	}
 }
 
+// roundTrip serves requests from handler in process: no listener, no network.
+type roundTrip http.HandlerFunc
+
+func (h roundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	http.HandlerFunc(h).ServeHTTP(rec, r)
+	return rec.Result(), nil
+}
+
 // closeServer answers POST /v1/issues:close from a table of id -> status.
 func closeServer(t *testing.T, verdict map[string]int) (*Client, func() []string) {
 	t.Helper()
 	var mu sync.Mutex
 	var asked []string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		var req api.CloseRequest
 		_ = json.Unmarshal(b, &req)
@@ -118,9 +127,8 @@ func closeServer(t *testing.T, verdict map[string]int) (*Client, func() []string
 		default:
 			w.WriteHeader(204)
 		}
-	}))
-	t.Cleanup(ts.Close)
-	tc, err := client.New(client.Config{BaseURL: ts.URL, Token: "t", SchemaLevel: api.SchemaLevel, MaxRetries: 0})
+	})
+	tc, err := client.New(client.Config{BaseURL: "http://127.0.0.1:1", Token: "t", SchemaLevel: api.SchemaLevel, MaxRetries: -1, HTTP: &http.Client{Transport: roundTrip(handler)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,5 +177,16 @@ func TestCreateRefusesAFlagLikeTitleBeforeAnyRequest(t *testing.T) {
 	}
 	if len(asked()) != 0 {
 		t.Errorf("a flag-like title reached the service: %v", asked())
+	}
+}
+
+func TestCreateRefusesAnActorOptionLoudlyInsteadOfIgnoringIt(t *testing.T) {
+	t.Parallel()
+	c, asked := closeServer(t, nil)
+	if _, err := c.Create(beads.CreateOptions{Title: "t", Actor: "someone-else"}); !errors.Is(err, ErrActorOption) {
+		t.Errorf("Create with Actor = %v, want ErrActorOption", err)
+	}
+	if len(asked()) != 0 {
+		t.Errorf("a refused option still reached the service: %v", asked())
 	}
 }

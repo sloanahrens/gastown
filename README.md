@@ -139,10 +139,14 @@ make install-local
 
 #### Install gt on Linux
 
+> **This fork installs from a checkout.** `gt` requires the in-repo `tracker/` module through a `replace`
+> directive (ADR 0006), which `go install .../cmd/gt@latest` cannot resolve.
+> Clone the repository and run `make install` instead.
+
 Install Dolt by following the [Dolt installation guide](https://github.com/dolthub/dolt#installation), then install `gt` and `bd` with `go install`.
 
 ```bash
-go install github.com/steveyegge/gastown/cmd/gt@latest
+git clone https://github.com/steveyegge/gastown && make -C gastown install
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
@@ -158,7 +162,7 @@ source ~/.bashrc
 Install Dolt first by following the [Dolt installation guide](https://github.com/dolthub/dolt#installation). Unlike the macOS Homebrew path, `go install` does not install Dolt. Then install `gt` and `bd` with `go install`.
 
 ```powershell
-go install github.com/steveyegge/gastown/cmd/gt@latest
+git clone https://github.com/steveyegge/gastown && make -C gastown install
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 

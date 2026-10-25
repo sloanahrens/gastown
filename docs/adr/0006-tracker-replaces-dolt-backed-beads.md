@@ -36,5 +36,10 @@ Dolt: no remote sync, no routine history rewrite, owned garbage collection.
 - **A separate repository.** Rejected for now: the tracker is a nested module with its own `go.mod`
   and a test that it imports nothing from `gt`, so extraction later is a move, not a rewrite.
 
+Consequence: `gt` requires the nested `tracker/` module through a `replace` directive in `go.mod`, which
+`scripts/repo-guards.sh` allows for that one module only. `go install .../cmd/gt@latest` no longer works for
+this fork; it installs from a checkout (`make install`), which is what the town already does. `flake.nix`'s
+`vendorHash` must be recomputed at the next release (`scripts/update-nix-flake.sh`).
+
 Design: `docs/plans/2026-10-25-town-tracker-design.md`. Plan: `docs/plans/2026-10-25-town-tracker-plan.md`.
 Program: epic gt-p85pw; handoff bead claude-pwu; decision record claude-477.
