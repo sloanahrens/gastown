@@ -797,7 +797,7 @@ function workHead() {
   const tr = el("div", "workrow whead");
   [["Polecat", "the polecat, with its rig and last-24-hour landings on hover"], ["Agent", "the agent the seat's session was started with"],
    ["Bead", "the bead on the seat's hook, with its title"], ["State", "the state the town's inventory reads the seat into"],
-   ["Age", "how long the row has been in the state it shows; the hover has the time the bead has been on the hook"]].forEach(([h, tip]) => { const c = el("span", "", h); c.title = tip; tr.append(c); });
+   ["Age", "how long the bead has waited: a queued bead since its submit, any other since it went on the hook; the hover repeats the hook time and adds how long its session has been silent"]].forEach(([h, tip]) => { const c = el("span", "", h); c.title = tip; tr.append(c); });
   return tr;
 }
 
