@@ -952,6 +952,9 @@ type Beads struct {
 
 	// plainTimeout bounds each bd call of a plain wrapper; zero means none.
 	plainTimeout time.Duration
+	// plainGroup runs each bd call of a plain wrapper in its own process group, so
+	// a timeout kills bd and anything it started; see WithProcessGroup.
+	plainGroup bool
 	// accessMode marks a wrapper built by NewPinned: each call is forced
 	// read-only or into an auto-committed mutation by its argv, through
 	// forceBDReadOnly or forceBDMutation, overriding whatever
@@ -1092,7 +1095,7 @@ func (b *Beads) ActingAs(actor string) *Beads {
 		actor:      actor,
 		budget:     b.budget,
 	})
-	c.plain, c.plainEnv, c.plainTimeout = b.plain, b.plainEnv, b.plainTimeout
+	c.plain, c.plainEnv, c.plainTimeout, c.plainGroup = b.plain, b.plainEnv, b.plainTimeout, b.plainGroup
 	c.accessMode = b.accessMode
 	return c
 }

@@ -458,7 +458,7 @@ func (h *patrolScanHost) gateCheckBeads(rig string) beads.Client {
 			env = beads.BuildMutationPinnedBDEnv(base, beads.ResolveBeadsDir(rigDir))
 		}
 	}
-	return beads.NewPlain(h.town(), env, beads.WithBin(h.d.bdPathOrDefault())).WithTimeout(patrolScanBdTimeout)
+	return beads.NewPlain(h.town(), env, beads.WithBin(h.d.bdPathOrDefault())).WithTimeout(patrolScanBdTimeout).WithProcessGroup()
 }
 
 // issueWork is the slice of a work bead the tick reads.
