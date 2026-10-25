@@ -81,6 +81,13 @@ func (s reportNoWriteStore) ForceCloseWithReason(string, ...string) error {
 
 func (s reportNoWriteStore) DeleteIssues(...string) error { s.fail("DeleteIssues"); return nil }
 
+// GateCheck resolves open gates, which is a write: bd gate check closes the gates
+// whose condition holds, so the guard fails the test if the report reaches it.
+func (s reportNoWriteStore) GateCheck(...string) (string, error) {
+	s.fail("GateCheck")
+	return "", nil
+}
+
 func (s reportNoWriteStore) Release(string) error { s.fail("Release"); return nil }
 
 func (s reportNoWriteStore) AddComment(string, string) error { s.fail("AddComment"); return nil }
