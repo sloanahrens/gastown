@@ -19,6 +19,17 @@ const (
 // version, because the dashboard refuses a schema it does not know.
 const panelSchema = 1
 
+// MangoThinHoldout is the holdout count under which a box's rate is too narrow
+// to read, so the dashboard marks the row thin.
+const MangoThinHoldout = 50
+
+// The reason a target is not-yet: too few positives in the training split to
+// search at all, or none in the holdout to test a box on.
+const (
+	ReasonFewPositives       = "few_positives"
+	ReasonNoHoldoutPositives = "no_holdout_positives"
+)
+
 // PanelMeta is the panel's context outside its targets: how many landings the
 // analysis read and how many hours of snapshots it joined.
 type PanelMeta struct {
@@ -39,16 +50,24 @@ type Panel struct {
 }
 
 // PanelTarget is one target's line in the panel. A skipped target carries its
-// name and positives with no box, because it was never run.
+// name and positives with no box, because it was never run. The box's keys are
+// pointers so a target without a box, or an interval with no rows behind it,
+// stays absent rather than reading as a zero the dashboard would draw.
 type PanelTarget struct {
-	Target      string  `json:"target"`
-	Positives   int     `json:"positives"`
-	Skipped     bool    `json:"skipped"`
-	BestBox     string  `json:"best_box"`
-	HoldoutN    int     `json:"holdout_n"`
-	HoldoutRate float64 `json:"holdout_rate"`
-	Baseline    float64 `json:"baseline"`
-	Verdict     string  `json:"verdict"`
+	Target           string   `json:"target"`
+	Label            string   `json:"label"`
+	Positives        int      `json:"positives"`
+	Skipped          bool     `json:"skipped"`
+	BestBox          string   `json:"best_box"`
+	HoldoutPositives *int     `json:"holdout_positives,omitempty"`
+	HoldoutN         int      `json:"holdout_n"`
+	HoldoutRate      float64  `json:"holdout_rate"`
+	CILow            *float64 `json:"ci_low,omitempty"`
+	CIHigh           *float64 `json:"ci_high,omitempty"`
+	Thin             *bool    `json:"thin,omitempty"`
+	Baseline         float64  `json:"baseline"`
+	Verdict          string   `json:"verdict"`
+	Reason           string   `json:"reason,omitempty"`
 }
 
 // Verdict returns the panel's verdict for a target: not-yet while the training
@@ -83,21 +102,55 @@ func BuildPanel(results []TargetResult, meta PanelMeta, now time.Time) Panel {
 
 // panelTarget is one result as the panel writes it: the best box's holdout
 // counts when the target was run, and the target's own holdout rate as the
-// baseline the box was measured against.
+// baseline the box was measured against. A not-yet target names its reason, and
+// a box carries its interval and whether its count is thin.
 func panelTarget(t TargetResult) PanelTarget {
 	out := PanelTarget{
 		Target:    t.Target,
+		Label:     panelLabel(t.Target),
 		Positives: t.TrainPositives,
 		Skipped:   t.TrainPositives < MangoMinSupport,
 		Baseline:  fraction(t.HoldoutPositives, t.HoldoutN),
 		Verdict:   Verdict(t, MangoMinSupport),
 	}
+	if out.Verdict == VerdictNotYet {
+		out.Reason = notYetReason(t)
+	}
 	if t.Best != nil && !out.Skipped {
 		out.BestBox = t.Best.Box
 		out.HoldoutN = t.Best.N
 		out.HoldoutRate = t.Best.Rate
+		k, thin := t.Best.K, t.Best.N < MangoThinHoldout
+		out.HoldoutPositives = &k
+		out.Thin = &thin
+		if low, high, ok := wilsonInterval(t.Best.K, t.Best.N); ok {
+			out.CILow, out.CIHigh = &low, &high
+		}
 	}
 	return out
+}
+
+// notYetReason names why a target is not-yet, as the writer derived it: the
+// verdict is only not-yet when one of these two holds.
+func notYetReason(t TargetResult) string {
+	if t.TrainPositives < MangoMinSupport {
+		return ReasonFewPositives
+	}
+	return ReasonNoHoldoutPositives
+}
+
+// panelLabel is the target's plain-words title. A target with no title shows
+// its id, so a target added to mangoTargets still draws a row.
+func panelLabel(target string) string {
+	switch target {
+	case "rejected_before_landing":
+		return "Landings rejected before they land"
+	case "reached_overrun_stop":
+		return "Beads stopped by the overrun guard"
+	case "manual_rescue":
+		return "Landings that needed a manual rescue"
+	}
+	return target
 }
 
 // fraction is k/n, and 0 when n is zero.
