@@ -1278,23 +1278,14 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	}
 
 	fmt.Printf("Starting session for %s/%s...\n", s.RigName, s.PolecatName)
-	// Only a sandboxed start has phases to time: a tmux start leaves the trace
-	// empty, so its sling gets no line in the dispatcher's log.
-	sandboxed := backend != nil && backend.Name() != session.BackendTmux
-	startOpts := polecat.SessionStartOptions{
+	if err := startSessionWithTrace(polecat.SessionStartOptions{
 		RuntimeConfigDir: claudeConfigDir,
 		Agent:            s.agent,
 		Backend:          backend,
-	}
-	if sandboxed {
-		startOpts.Trace = s.trace
-	}
-	if err := polecatSessMgr.Start(s.PolecatName, startOpts); err != nil {
+	}, backend, s.trace, func(opts polecat.SessionStartOptions) error {
+		return polecatSessMgr.Start(s.PolecatName, opts)
+	}); err != nil {
 		return "", fmt.Errorf("starting session: %w", err)
-	}
-	if sandboxed {
-		// The agent's launch is the time after the sandbox was filled.
-		s.trace.Mark("start")
 	}
 
 	// Wait for runtime to be fully ready before returning.
@@ -1345,6 +1336,24 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 
 	s.Pane = pane
 	return pane, nil
+}
+
+// startSessionWithTrace starts the session the spawn asks for and times the
+// agent's launch on trace when the backend is a sandbox, the only backend with
+// phases to time; a tmux start leaves the trace empty and its sling gets no
+// line in the dispatcher's log (gt-0uh64). The launch is marked whether start
+// returned or failed: a launch that failed still took that time, and the trace
+// is the only record of it (gt-csltr).
+func startSessionWithTrace(opts polecat.SessionStartOptions, backend session.Backend, trace *session.SandboxTrace, start func(polecat.SessionStartOptions) error) error {
+	sandboxed := backend != nil && backend.Name() != session.BackendTmux
+	if sandboxed {
+		opts.Trace = trace
+	}
+	err := start(opts)
+	if sandboxed {
+		trace.Mark("start")
+	}
+	return err
 }
 
 // paneAfterStart returns the session's pane. When the pane cannot be found the
