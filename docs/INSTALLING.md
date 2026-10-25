@@ -85,12 +85,16 @@ sudo dnf install -y tmux
 
 ### Windows
 
+> **This fork installs from a checkout.** `gt` requires the in-repo `tracker/` module through a `replace`
+> directive (ADR 0006), so `go install .../cmd/gt@latest` cannot resolve it.
+> Wherever a step below says to `go install` gt, clone the repository and run `make install` instead.
+
 Install Go and Dolt first, then install `gt` and `bd` with Go. The binaries land in `%USERPROFILE%\go\bin`; put that directory before older `gt` or `bd` install locations on `PATH`, then open a new shell. For Docker setup, install Docker Desktop with Compose support.
 
 Native Windows source builds that compile the ICU-backed query layer need an MSYS2 UCRT64 or MinGW64 shell with matching `icu`, `toolchain`, and `pkg-config` packages. The repository's Windows CI uses `pacboy -S icu:p toolchain:p pkg-config:p` before running Go commands; plain PowerShell/MSVC is not enough for that CGO build.
 
 ```powershell
-go install github.com/steveyegge/gastown/cmd/gt@latest
+git clone https://github.com/steveyegge/gastown && make -C gastown install
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
@@ -118,10 +122,10 @@ bd version
 dolt version
 ```
 
-On Linux and Windows, install `gt` and `bd` with Go after installing Dolt separately:
+On Linux and Windows, after installing Dolt separately, build `gt` from a checkout and install `bd` with Go:
 
 ```bash
-go install github.com/steveyegge/gastown/cmd/gt@latest
+git clone https://github.com/steveyegge/gastown && make -C gastown install
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 

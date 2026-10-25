@@ -81,6 +81,10 @@ func TestIntegrationClientContract(t *testing.T) {
 			return l.db
 		})
 	})
+	t.Run("creator option", func(t *testing.T) {
+		t.Parallel()
+		beadsfake.RunCreatorOptionContract(t, func(t *testing.T) beads.Client { return newDB(t, t.TempDir()) })
+	})
 	t.Run("actor", func(t *testing.T) {
 		t.Parallel()
 		// The isolated client strips the inherited BD_ACTOR, so the actor

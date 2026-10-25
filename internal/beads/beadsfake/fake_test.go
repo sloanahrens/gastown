@@ -10,6 +10,7 @@ import (
 func TestFakeClientContract(t *testing.T) {
 	t.Parallel()
 	RunClientContract(t, func(t *testing.T) beads.Client { return New() })
+	RunCreatorOptionContract(t, func(t *testing.T) beads.Client { return New() })
 }
 
 // TestFakeClientContractSharedDatabase runs the contract the way the
@@ -19,6 +20,7 @@ func TestFakeClientContractSharedDatabase(t *testing.T) {
 	t.Parallel()
 	shared := New()
 	RunClientContract(t, func(t *testing.T) beads.Client { return shared })
+	RunCreatorOptionContract(t, func(t *testing.T) beads.Client { return shared })
 }
 
 func TestFakeActorContract(t *testing.T) {

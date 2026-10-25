@@ -33,6 +33,25 @@ func RunClientContract(t *testing.T, newClient func(t *testing.T) beads.Client) 
 	}
 }
 
+// RunCreatorOptionContract checks that CreateOptions.Actor names the creator
+// recorded on the new issue (bd's --actor on create). It is separate from
+// RunClientContract because a store that records every write as the caller's
+// credential cannot honor a creator named in the request, by design (the
+// tracker does not trust an actor in a body); such a store runs
+// RunActorContract, which pins who a write is recorded as, and does not run
+// this suite. A new store runs it unless it can say why not.
+func RunCreatorOptionContract(t *testing.T, newClient func(t *testing.T) beads.Client) {
+	t.Helper()
+	t.Run("creator option", func(t *testing.T) {
+		t.Parallel()
+		s := newScope(t, newClient(t))
+		is := s.mustCreate(t, beads.CreateOptions{Title: "by someone", Priority: -1, Actor: "contract-actor"})
+		if by := s.mustShow(t, is.ID).CreatedBy; by != "contract-actor" {
+			t.Errorf("CreatedBy = %q, want contract-actor", by)
+		}
+	})
+}
+
 // RunActorContract checks that a client made to act as an actor (the fake's
 // WithActor, *beads.Beads' ActingAs) records that actor as the creator of
 // issues and the author of comments, whatever the process environment says
@@ -223,10 +242,6 @@ func contractCreateShow(t *testing.T, s *scope) {
 	dflt := s.mustCreate(t, beads.CreateOptions{Title: "default priority", Priority: -1})
 	if p := s.mustShow(t, dflt.ID).Priority; p != 2 {
 		t.Errorf("priority -1 created priority %d, want bd's default 2", p)
-	}
-	actor := s.mustCreate(t, beads.CreateOptions{Title: "by someone", Priority: -1, Actor: "contract-actor"})
-	if by := s.mustShow(t, actor.ID).CreatedBy; by != "contract-actor" {
-		t.Errorf("CreatedBy = %q, want contract-actor", by)
 	}
 	assigned := s.mustCreate(t, beads.CreateOptions{Title: "assigned", Priority: -1, Assignee: s.who("holder")})
 	if who := s.mustShow(t, assigned.ID).Assignee; who != s.who("holder") {

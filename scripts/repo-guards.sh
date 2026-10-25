@@ -3,6 +3,8 @@
 # (default: this repo).
 #   1. go.mod has no replace directives: they break
 #      `go install github.com/steveyegge/gastown/cmd/gt@latest` (upstream #2230).
+#      The one exception is the in-repo tracker module (ADR 0006), which
+#      cannot be fetched by version: this fork installs from a checkout.
 #   2. .beads/issues.jsonl is not tracked: the Dolt server is the only beads
 #      backend. Only tracked files count; bd may export the file locally.
 #   3. every tracked .go file is gofmt -s clean, test files included (gt-kc9ck).
@@ -12,7 +14,11 @@ set -euo pipefail
 root="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
 rc=0
 
-if grep -nE '^replace([[:space:]]|\()' "$root/go.mod"; then
+# The allowed replace is exactly the tracker module to its own directory.
+tracker_replace='replace github.com/steveyegge/gastown/tracker => ./tracker'
+other_replaces="$(grep -E '^replace([[:space:]]|\()' "$root/go.mod" | grep -vxF "$tracker_replace" || true)"
+if [[ -n "$other_replaces" ]]; then
+	echo "$other_replaces"
 	echo "repo-guards: go.mod contains replace directives; they break go install ...@latest (upstream #2230)" >&2
 	rc=1
 fi
