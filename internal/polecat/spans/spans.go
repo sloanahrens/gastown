@@ -187,7 +187,9 @@ func (s *Store) Summarize(bead string) (Summary, error) {
 		return sum, err
 	}
 	path := s.path(bead)
-	info, err := os.Stat(path)
+	// Open first, then stat the descriptor: a stat before the open could describe
+	// a different file than the one read if the path changes between the two.
+	f, err := os.Open(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		// A dangling symlink is present in the store but resolves to nothing;
@@ -199,14 +201,14 @@ func (s *Store) Summarize(bead string) (Summary, error) {
 	case err != nil:
 		return sum, fmt.Errorf("reading polecat spans for %q: %w", bead, err)
 	}
-	if !info.Mode().IsRegular() {
-		return sum, fmt.Errorf("reading polecat spans for %q: %s is not a regular file", bead, path)
-	}
-	f, err := os.Open(path)
+	defer f.Close()
+	info, err := f.Stat()
 	if err != nil {
 		return sum, fmt.Errorf("reading polecat spans for %q: %w", bead, err)
 	}
-	defer f.Close()
+	if !info.Mode().IsRegular() {
+		return sum, fmt.Errorf("reading polecat spans for %q: %s is not a regular file", bead, path)
+	}
 
 	open := map[string]openAttempt{}
 	r := bufio.NewReader(f)

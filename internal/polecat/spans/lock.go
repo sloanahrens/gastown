@@ -1,3 +1,5 @@
+//go:build unix
+
 package spans
 
 import (
@@ -7,16 +9,27 @@ import (
 	"syscall"
 )
 
-// logMutexes holds one mutex per lock file, so goroutines of one process
-// serialize on the mutex. A POSIX record lock belongs to the process, so it
-// cannot serialize two goroutines of the same process: the mutex does that, and
-// the record lock serializes processes.
-var logMutexes sync.Map // map[string]*sync.Mutex
+// logMutex is the in-process mutex of one span log's lock file, with the number
+// of goroutines that hold it or wait on it. The entry is removed when the last
+// one leaves, so the map holds only the logs in use.
+type logMutex struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// logMutexes maps a lock file path to its logMutex. A POSIX record lock belongs
+// to the process, so it cannot serialize two goroutines of one process: the
+// mutex does that, and the record lock serializes processes.
+var (
+	logMutexesMu sync.Mutex
+	logMutexes   = map[string]*logMutex{}
+)
 
 // logLock is the append lock of one bead's span log.
 type logLock struct {
-	mu *sync.Mutex
-	f  *os.File
+	key string
+	m   *logMutex
+	f   *os.File
 }
 
 // lockLog takes the append lock at path: the in-process mutex, then an
@@ -24,26 +37,47 @@ type logLock struct {
 // another process to release it. A record lock is not inherited across fork, so
 // a child process cannot hold the lock after the release.
 func lockLog(path string) (*logLock, error) {
-	m, _ := logMutexes.LoadOrStore(path, &sync.Mutex{})
-	mu := m.(*sync.Mutex)
-	mu.Lock()
+	logMutexesMu.Lock()
+	m := logMutexes[path]
+	if m == nil {
+		m = &logMutex{}
+		logMutexes[path] = m
+	}
+	m.refs++
+	logMutexesMu.Unlock()
+
+	m.mu.Lock()
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
-		mu.Unlock()
+		m.mu.Unlock()
+		releaseLogMutex(path, m)
 		return nil, fmt.Errorf("opening span lock %s: %w", path, err)
 	}
 	lk := syscall.Flock_t{Type: syscall.F_WRLCK}
 	if err := syscall.FcntlFlock(f.Fd(), syscall.F_SETLKW, &lk); err != nil {
 		f.Close()
-		mu.Unlock()
+		m.mu.Unlock()
+		releaseLogMutex(path, m)
 		return nil, fmt.Errorf("locking span log %s: %w", path, err)
 	}
-	return &logLock{mu: mu, f: f}, nil
+	return &logLock{key: path, m: m, f: f}, nil
 }
 
-// unlock releases the record lock and the mutex. Closing the descriptor drops
-// the record lock.
+// unlock releases the record lock and the mutex, and forgets the mutex once no
+// goroutine uses it. Closing the descriptor drops the record lock.
 func (l *logLock) unlock() {
 	_ = l.f.Close()
-	l.mu.Unlock()
+	l.m.mu.Unlock()
+	releaseLogMutex(l.key, l.m)
+}
+
+// releaseLogMutex drops one reference to m, and removes the path's entry when
+// none is left.
+func releaseLogMutex(path string, m *logMutex) {
+	logMutexesMu.Lock()
+	defer logMutexesMu.Unlock()
+	m.refs--
+	if m.refs == 0 {
+		delete(logMutexes, path)
+	}
 }
