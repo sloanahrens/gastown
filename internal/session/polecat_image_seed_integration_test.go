@@ -15,7 +15,7 @@ import (
 // seeds the caches and leaves them writable for another uid, a module that does
 // not compile fails the image build, and a module only vet objects to is
 // seeded anyway. That checks what the instruction does, not how it is spelled
-// (TestPolecatDockerfileSeedsGoCachesOutsideTheWorkspace covers its wording).
+// (TestPolecatImageSeedSetsCachesOutsideTheWorkspace covers its wording).
 
 // seedInstruction returns the shell command of the Dockerfile's seed RUN.
 func seedInstruction(t *testing.T) string {
