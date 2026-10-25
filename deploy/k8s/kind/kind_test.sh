@@ -104,17 +104,19 @@ case "$*" in
     [ -f "$STATE/no-layout" ] || printf 'node/core-node\nnode/sandbox-node\n' ;;
   *"get secret openshell-client-tls"*)
     name=$(sed -n "s/.*\['\([^']*\)'\].*/\1/p" <<<"$*")
-    gen=""
-    name=${name//\\/}
-    # STUB_SECRET_ROTATES: every read of ca.crt sees a newer certificate, as when the
-    # chart's certificate job rewrites the secret between two exports.
-    if [ -n "${STUB_SECRET_ROTATES:-}" ] && [ "$name" = ca.crt ]; then
+    # STUB_SECRET_ROTATES: every read of the CA sees a newer certificate, as
+    # when the chart's certificate job rewrites the secret between two exports.
+    # Every other read keeps the fixed value the other scenarios pin.
+    bare=${name//\\/}
+    if [ -n "${STUB_SECRET_ROTATES:-}" ] && [ "$bare" = ca.crt ]; then
       n=$(cat "$STATE/secret-gen" 2>/dev/null || echo 0)
-      echo $((n + 1)) >"$STATE/secret-gen"
-      gen="-gen$((n + 1))"
-      printf '%s' "FAKE-ca.crt-SECRETVALUE$gen" >"$STATE/last-ca"
+      n=$((n + 1))
+      echo "$n" >"$STATE/secret-gen"
+      printf '%s' "FAKE-ca.crt-SECRETVALUE-gen$n" >"$STATE/last-ca"
+      printf '%s' "FAKE-ca.crt-SECRETVALUE-gen$n" | base64
+      exit 0
     fi
-    printf 'FAKE-%s-SECRETVALUE%s' "$name" "$gen" | base64 ;;
+    printf 'FAKE-%s-SECRETVALUE' "$name" | base64 ;;
   *"get configmap gt-bootstrap"*) [ -f "$STATE/marker" ] && cat "$STATE/marker" ;;
   *"create configmap gt-bootstrap"*)
     for a in "$@"; do case "$a" in --from-literal=helm=*) echo "${a#--from-literal=}" ;; esac; done ;;
@@ -139,7 +141,9 @@ cat >"$TMP/bin/helm" <<'STUB'
 "$(dirname "$0")/_log" helm "$@"
 case "$1" in
   upgrade) touch "$STATE/helm-release" ;;
-  status) [ -f "$STATE/helm-release" ] ;;
+  # STUB_HELM_FAILED: a release that exists but is not deployed (a failed or
+  # pending upgrade); `helm list --deployed` omits it, as the CLI does.
+  list) [ -f "$STATE/helm-release" ] && [ -z "${STUB_HELM_FAILED:-}" ] && echo openshell ;;
 esac
 STUB
 cat >"$TMP/bin/openssl" <<'STUB'
@@ -235,7 +239,13 @@ case "$*" in
     fi
     n=$(cat "$STATE/info-calls" 2>/dev/null || echo 0)
     echo $((n + 1)) >"$STATE/info-calls"
-    if [ -n "${STUB_INFO_UNHEALTHY:-}" ]; then echo "Status: unhealthy"; exit 0; fi
+    # STUB_INFO_DECOY: a line that says healthy while the status does not, as a
+    # CLI message about one check can; only the status may decide.
+    if [ -n "${STUB_INFO_UNHEALTHY:-}" ]; then
+      echo "Status: unhealthy"
+      [ -n "${STUB_INFO_DECOY:-}" ] && echo "Last check: the client certificate is healthy"
+      exit 0
+    fi
     [ "$n" -ge "${STUB_INFO_FAILS:-0}" ] && echo "Status: healthy"
     exit 0 ;;
 esac
@@ -306,7 +316,7 @@ check "the agent-sandbox manifest is downloaded from the pinned release" contain
 check "the agent-sandbox manifest is applied from the local verified copy" contains "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/agent-sandbox-v1.0.7.yaml" "$CALLS_LOG"
 manifest="$S/home/gt/.runtime/sbx-k8s/agent-sandbox-v1.0.7.yaml"
 check "the first fetch records the manifest digest" test "$(cat "$manifest.sha256")" = "$(digest "$manifest")"
-helm_call="$(grep '^helm ' "$S/calls.log")"
+helm_call="$(grep '^helm upgrade' "$S/calls.log")"
 check "the OpenShell chart is pinned to 0.1.4" contains "--version 0.1.4" "$helm_call"
 check "the chart is not the broken pre-release" lacks "pre." "$helm_call"
 check "the chart is given the kind values file" contains "values/kind.yaml" "$helm_call"
@@ -425,6 +435,7 @@ scenario certs
 run "$UP" STUB_INFO_FAILS=2 --
 check "up succeeds after re-exporting" test "$RC" -eq 0
 check "the client certificates were exported again for each failed handshake" test "$(count 'get secret openshell-client-tls' "$CALLS_LOG")" -eq 9
+check "the CA was read through the escaped jsonpath key" test "$(cat "$S/home/gt/.runtime/sbx-k8s/xdg/openshell/gateways/k8s/mtls/ca.crt")" = 'FAKE-ca\.crt-SECRETVALUE'
 scenario badcerts
 run "$UP" STUB_INFO_FAILS=999 GT_K8S_CERT_TRIES=3 --
 check "a gateway that never turns healthy fails the run" test "$RC" -ne 0
@@ -436,6 +447,10 @@ scenario unhealthy
 run "$UP" STUB_INFO_UNHEALTHY=1 GT_K8S_CERT_TRIES=3 --
 check "a gateway reporting unhealthy fails the run" test "$RC" -ne 0
 check "the run still says the gateway is not healthy" contains "not healthy" "$OUT_TEXT"
+scenario decoyhealthy
+run "$UP" STUB_INFO_UNHEALTHY=1 STUB_INFO_DECOY=1 GT_K8S_CERT_TRIES=2 --
+check "a healthy word in a message line does not make the gateway healthy" test "$RC" -ne 0
+check "the decoy gateway is retried only up to the try limit" test "$(count 'gateway info' "$CALLS_LOG")" -eq 2
 
 echo "an existing cluster without the three-node layout"
 scenario oldlayout
@@ -494,6 +509,11 @@ touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/s
 printf '%s' "0.1.4:$VALUES_SHA" >"$S/state/marker"
 run "$UP" --
 check "a marker without a deployed release runs helm" test "$(helm_calls)" -eq 1
+scenario helmfailed
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+printf '%s' "0.1.4:$VALUES_SHA" >"$S/state/marker"
+run "$UP" STUB_HELM_FAILED=1 --
+check "a release that exists but is not deployed runs helm" test "$(helm_calls)" -eq 1
 scenario helmtown
 touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
 printf '%s' "0.1.4:$VALUES_SHA" >"$S/state/marker"
