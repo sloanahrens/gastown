@@ -100,11 +100,7 @@ func primaryRig(ds *Dataset) string {
 	if p := ds.Config["issue_prefix"]; p != "" {
 		return p
 	}
-	ids := make([]string, len(ds.Issues))
-	for i, is := range ds.Issues {
-		ids[i] = is.ID
-	}
-	if rigs := rigsOf(ids); len(rigs) == 1 {
+	if rigs := rigsOf(idsOf(ds)); len(rigs) == 1 {
 		return rigs[0]
 	}
 	return ""
@@ -128,12 +124,26 @@ func idsOf(ds *Dataset) []string {
 	return ids
 }
 
+// rigOfID is the rig prefix of an id, the part before its first dash; the
+// importer sets issues.rig from it, and Verify scopes events and counters by
+// it in SQL as split_part(id, '-', 1), so all three agree by construction.
+func rigOfID(id string) (string, bool) {
+	rig, _, ok := strings.Cut(id, "-")
+	return rig, ok && rig != ""
+}
+
+// inRigs reports whether id's rig prefix is one of rigs.
+func inRigs(id string, rigs []string) bool {
+	rig, ok := rigOfID(id)
+	return ok && slices.Contains(rigs, rig)
+}
+
 // eventsInRigs counts the events whose issue id belongs to one of rigs: the
 // scope Verify can check in a tracker that holds other rigs too.
 func eventsInRigs(events []EventRow, rigs []string) int {
 	n := 0
 	for _, e := range events {
-		if rig, _, ok := strings.Cut(e.IssueID, "-"); ok && slices.Contains(rigs, rig) {
+		if inRigs(e.IssueID, rigs) {
 			n++
 		}
 	}
