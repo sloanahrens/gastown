@@ -152,8 +152,60 @@ IMAGE_LOG="${INSTALL_GT_IMAGE_LOG:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-imag
 IMAGE_LOCK="${INSTALL_GT_IMAGE_LOCK:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-image.lock}}"
 IMAGE_ALARM="${INSTALL_GT_IMAGE_ALARM:-1200}"
 IMAGE_PERL="${INSTALL_GT_PERL:-perl}"
+# image_daemon_env KEY: sets IMAGE_ENV_VALUE to daemon.env.KEY in
+# settings/config.json (the one source the daemon gives its plugin runs, gt-jmd9n)
+# and IMAGE_ENV_REASON to why it is empty. Each failure has its own reason, so the
+# log says why a build is local-only: no town root, no config file, no jq, an
+# unreadable or malformed config, no daemon.env object, or no such key. Nothing here
+# is fatal; the build then runs without the registry, as it always has.
+image_daemon_env() {
+  IMAGE_ENV_VALUE=""
+  IMAGE_ENV_REASON=""
+  if [ -z "${TOWN_ROOT:-}" ]; then
+    IMAGE_ENV_REASON="no town root"
+    return 0
+  fi
+  local cfg="$TOWN_ROOT/settings/config.json"
+  if [ ! -f "$cfg" ]; then
+    IMAGE_ENV_REASON="$cfg is missing"
+    return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    IMAGE_ENV_REASON="jq is not installed, so $cfg cannot be read"
+    return 0
+  fi
+  local kind
+  if ! kind=$(jq -r '.daemon.env | type' "$cfg" 2>/dev/null); then
+    IMAGE_ENV_REASON="$cfg is not readable JSON"
+    return 0
+  fi
+  case "$kind" in
+    object) ;;
+    null) IMAGE_ENV_REASON="$cfg has no daemon.env"; return 0 ;;
+    *) IMAGE_ENV_REASON="daemon.env in $cfg is a $kind, not an object"; return 0 ;;
+  esac
+  local value
+  if ! value=$(jq -r --arg k "$1" '.daemon.env[$k] // empty' "$cfg" 2>/dev/null); then
+    IMAGE_ENV_REASON="$cfg is not readable JSON"
+    return 0
+  fi
+  if [ -z "$value" ]; then
+    IMAGE_ENV_REASON="no $1 in daemon.env of $cfg"
+    return 0
+  fi
+  IMAGE_ENV_VALUE="$value"
+}
+
 polecat_image_step() {
   local run="$1" logfile="$2" commit="$3"
+  local image_registry image_crane
+  image_daemon_env POLECAT_IMAGE_REGISTRY
+  image_registry="$IMAGE_ENV_VALUE"
+  if [ -z "$image_registry" ]; then
+    log "polecat image: build is local only and not published: $IMAGE_ENV_REASON"
+  fi
+  image_daemon_env POLECAT_IMAGE_CRANE
+  image_crane="$IMAGE_ENV_VALUE"
   if [ -z "$run" ] || [ ! -f "$run" ]; then
     log "polecat image: no plugin at '${run:-?}', not rebuilt"
     return 0
@@ -177,7 +229,9 @@ polecat_image_step() {
   # run.sh gets this install's town root, gt and lock (POLECAT_IMAGE_TOWN_ROOT,
   # POLECAT_IMAGE_GT, POLECAT_IMAGE_LOCK; case 43 pins them), not whatever HOME
   # and PATH resolve to, so the image is built for the install that asked for it.
-  ( POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$GT" POLECAT_IMAGE_LOCK="$IMAGE_LOCK" \
+  ( if [ -n "$image_registry" ]; then export POLECAT_IMAGE_REGISTRY="$image_registry"; fi
+    if [ -n "$image_crane" ]; then export POLECAT_IMAGE_CRANE="$image_crane"; fi
+    POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$GT" POLECAT_IMAGE_LOCK="$IMAGE_LOCK" \
       "$IMAGE_PERL" -MPOSIX -MFile::Path=remove_tree -e '
         my ($secs, $lock, @cmd) = @ARGV;
         POSIX::setsid(); POSIX::close($_) for 3..255;

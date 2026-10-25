@@ -1308,5 +1308,42 @@ got=$(PROC_ROOT="$T/no-proc" proc_state $$)
   && pass "proc_state: falls back to ps when /proc has no stat line" \
   || fail "proc_state: ps branch read '$got', want '$want'"
 
+# --- Cases 54-58: the build's registry settings come from settings/config.json
+# daemon.env (gt-jmd9n). Each way the read can fail is its own case: the build runs
+# local-only and the log says why. Every case uses its own temp town root; the
+# world template may carry a settings/config.json, so each case removes or writes
+# its own. ---
+registry_case() {
+  # registry_case NAME CONFIG_BODY_OR_EMPTY(missing) EXPECT_ENV EXPECT_LOG
+  local name="$1" body="$2" want_env="$3" want_log="$4" T
+  T=$(make_world); mkdir -p "$T/plugin"; rm -rf "$T/settings"
+  cat > "$T/plugin/run.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "${POLECAT_IMAGE_REGISTRY:-unset} ${POLECAT_IMAGE_CRANE:-unset}" > "$T_WORLD/image-env.txt"
+STUB
+  chmod +x "$T/plugin/run.sh"
+  if [ -n "$body" ]; then mkdir -p "$T/settings"; printf '%s' "$body" > "$T/settings/config.json"; fi
+  install_stub "$T" "$(cat "$T/c1")"
+  rc=$( export GT_TOWN_ROOT="$T"
+        IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
+  wait_for "$T/image-env.txt" || true
+  if [ "$rc" = "0" ] && [ "$(cat "$T/image-env.txt" 2>/dev/null)" = "$want_env" ] && grep -q -F "$want_log" "$T/run.out"; then
+    pass "image: $name"
+  else
+    fail "image: $name: rc=$rc env='$(cat "$T/image-env.txt" 2>/dev/null)' want env='$want_env' log='$want_log'"
+  fi
+}
+registry_case "registry and crane come from config.json daemon.env" \
+  '{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":"localhost:5001","POLECAT_IMAGE_CRANE":"/crane/bin/crane"}}}' \
+  "localhost:5001 /crane/bin/crane" "" 
+registry_case "a missing config.json runs the build local-only and says so" \
+  "" "unset unset" "is missing"
+registry_case "a malformed config.json runs local-only and says it is not readable JSON" \
+  '{"daemon":' "unset unset" "is not readable JSON"
+registry_case "a daemon.env that is not an object runs local-only and says so" \
+  '{"daemon":{"env":"oops"}}' "unset unset" "daemon.env in"
+registry_case "a missing key runs local-only and names the key" \
+  '{"daemon":{"env":{"POLECAT_IMAGE_CRANE":"/crane/bin/crane"}}}' "unset /crane/bin/crane" "no POLECAT_IMAGE_REGISTRY in daemon.env"
+
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
