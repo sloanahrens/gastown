@@ -16,6 +16,7 @@ import (
 // parallel tests only after the sequential top-level tests finish, so none of
 // these runs beside a fork.
 
+//testpolicy:allow parallel — a fork in another test holds the flock past Close, so a release and re-acquire is deterministic only with no other test running
 func TestTownLockIsHeldUntilReleased(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "town-metrics.lock")
 	first, err := AcquireTownLock(path)
@@ -40,6 +41,7 @@ func TestTownLockIsHeldUntilReleased(t *testing.T) {
 	}
 }
 
+//testpolicy:allow parallel — a fork in another test holds the flock past Close, so a release and re-acquire is deterministic only with no other test running
 func TestTownLockRecordsTheHolderPid(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "town-metrics.lock")
 	lock, err := AcquireTownLock(path)
@@ -56,6 +58,7 @@ func TestTownLockRecordsTheHolderPid(t *testing.T) {
 	}
 }
 
+//testpolicy:allow parallel — a fork in another test holds the flock past Close, so a release and re-acquire is deterministic only with no other test running
 func TestTownLockIsNotBlockedByAPidLeftByADeadRun(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "town-metrics.lock")
 	// A run the daemon killed leaves its pid in the file and no lock on it.
