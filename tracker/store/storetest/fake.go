@@ -137,6 +137,13 @@ func (*Fake) ChildrenOf(context.Context, []string) (map[string][]api.Issue, erro
 func (*Fake) DispatchBoard(context.Context, api.DispatchBoardRequest) (api.DispatchBoardResponse, error) {
 	return api.DispatchBoardResponse{}, unimplemented("DispatchBoard")
 }
+func (*Fake) Stats(context.Context, string) (api.Stats, error) {
+	return api.Stats{}, unimplemented("Stats")
+}
+func (*Fake) ConfigGet(context.Context, string) (string, bool, error) {
+	return "", false, unimplemented("ConfigGet")
+}
+func (*Fake) ConfigSet(context.Context, string, string) error { return unimplemented("ConfigSet") }
 func (*Fake) EventsAfter(context.Context, int64, int) (api.EventsPage, error) {
 	return api.EventsPage{}, unimplemented("EventsAfter")
 }

@@ -87,6 +87,7 @@ func New(cfg Config) *Server {
 	s.registerLinkRoutes(v1)
 	s.registerBoardRoutes(v1)
 	s.registerEventRoutes(v1)
+	s.registerAdminRoutes(v1)
 	s.mux.Handle("/v1/", s.authenticated(s.schemaGate(v1)))
 	return s
 }
