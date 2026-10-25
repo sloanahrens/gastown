@@ -1316,6 +1316,9 @@ got=$(PROC_ROOT="$T/no-proc" proc_state $$)
 registry_case() {
   # registry_case NAME CONFIG_BODY_OR_EMPTY(missing) EXPECT_ENV EXPECT_LOG
   local name="$1" body="$2" want_env="$3" want_log="$4" T
+  # The daemon exports these to its own runs; the cases must see only the config
+  # they write, so they are cleared here (gt-g3l7s).
+  unset POLECAT_IMAGE_REGISTRY POLECAT_IMAGE_CRANE
   T=$(make_world); mkdir -p "$T/plugin"; rm -rf "$T/settings"
   cat > "$T/plugin/run.sh" <<'STUB'
 #!/usr/bin/env bash
