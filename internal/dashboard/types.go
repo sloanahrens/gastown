@@ -541,22 +541,44 @@ type TierSweepRun struct {
 }
 
 // TierSweepRow is one completed sweep, off its "swept" log line. Secs is nil
-// for a line that predates the duration the daemon logs since gt-iqzr0.
+// for a line that predates the duration the daemon logs since gt-iqzr0. Walls
+// is the wall time each tier took, keyed by tier name, off the stage lines that
+// precede the swept line; a tier whose stage line the log lost is absent.
 type TierSweepRow struct {
-	At     time.Time        `json:"at"`
-	Rig    string           `json:"rig"`
-	SHA    string           `json:"sha"`
-	Stages []TierSweepStage `json:"stages"`
-	Secs   *float64         `json:"secs,omitempty"`
+	At     time.Time          `json:"at"`
+	Rig    string             `json:"rig"`
+	SHA    string             `json:"sha"`
+	Stages []TierSweepStage   `json:"stages"`
+	Secs   *float64           `json:"secs,omitempty"`
+	Walls  map[string]float64 `json:"walls,omitempty"`
 }
 
-// TierSweep is the daemon's tier sweeps: whether one is running now, and the
-// last few that finished. Unavailable says the daemon log could not be read,
-// which is not the same as a log that holds no sweeps.
+// TierSweepTrendPoint is one sweep in a rig's wall trend: the sha, each tier's
+// wall time in seconds, and the cycle's total. TotalSecs is nil for a swept
+// line that carries no duration.
+type TierSweepTrendPoint struct {
+	At        time.Time          `json:"at"`
+	SHA       string             `json:"sha"`
+	Walls     map[string]float64 `json:"walls,omitempty"`
+	TotalSecs *float64           `json:"total_secs,omitempty"`
+}
+
+// TierSweepTrendRig is one rig's recent sweeps, oldest first so the page draws
+// them left to right; Sweeps is empty for a rig that has not swept yet.
+type TierSweepTrendRig struct {
+	Rig    string                `json:"rig"`
+	Sweeps []TierSweepTrendPoint `json:"sweeps"`
+}
+
+// TierSweep is the daemon's tier sweeps: whether one is running now, the last
+// few that finished, and one wall trend per rig over the last 30 sweeps.
+// Unavailable says the daemon log could not be read, which is not the same as a
+// log that holds no sweeps.
 type TierSweep struct {
-	Running     *TierSweepRun  `json:"running,omitempty"`
-	Sweeps      []TierSweepRow `json:"sweeps"`
-	Unavailable bool           `json:"unavailable,omitempty"`
+	Running     *TierSweepRun       `json:"running,omitempty"`
+	Sweeps      []TierSweepRow      `json:"sweeps"`
+	Trends      []TierSweepTrendRig `json:"trends,omitempty"`
+	Unavailable bool                `json:"unavailable,omitempty"`
 }
 
 // EscalationRow is one open escalation as the pane draws it. At is when it was

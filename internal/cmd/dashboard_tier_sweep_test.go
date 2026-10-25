@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
 // tierSweepTestReader is a reader over fixture daemon-log lines, with no clock
@@ -350,5 +352,87 @@ func TestTierSweepReaderAbortedLineForAnotherShaKeepsTheOpenCycle(t *testing.T) 
 	}
 	if open := r.start["gastown"]; open.sha != "b7c1d2e3" {
 		t.Errorf("open start sha = %q, want b7c1d2e3", open.sha)
+	}
+}
+
+// The wall trend is one series per rig, oldest first, and each point names the
+// sweep's sha, the time every tier took, and the cycle's total: the verdicts
+// the table shows say nothing about whether devops test speed moved. A tier's
+// wall comes off its stage line, because the swept line that closes a cycle
+// carries only the total. A known rig with no sweeps keeps an empty series so
+// the page can say so rather than leaving the rig out.
+func TestTierSweepTrendPerRigCarriesTierWalls(t *testing.T) {
+	t.Parallel()
+	r, _ := tierSweepTestReader(t,
+		"2026/10/03 20:00:00 tier_sweep: gastown: sweep started a9be03e4 (shell, integration, race)",
+		"2026/10/03 20:01:05 tier_sweep: gastown: shell finished (exit 0) in 1m5s; last lines:",
+		"2026/10/03 20:04:05 tier_sweep: gastown: integration finished (exit 0) in 3m0s; last lines:",
+		"2026/10/03 20:05:35 tier_sweep: gastown: race finished (exit 0) in 1m30s; last lines:",
+		"2026/10/03 20:09:36 tier_sweep: gastown: swept a9be03e4 (shell GREEN, integration GREEN, race GREEN) in 9m36s",
+		"2026/10/03 21:00:00 tier_sweep: beads: sweep started b4c5d6e7 (shell, integration)",
+		"2026/10/03 21:02:00 tier_sweep: beads: shell finished (exit 0) in 2m0s; last lines:",
+		"2026/10/03 21:06:00 tier_sweep: beads: integration finished (exit 0) in 4m0s; last lines:",
+		"2026/10/03 21:08:00 tier_sweep: beads: swept b4c5d6e7 (shell GREEN, integration GREEN) in 8m0s",
+		"2026/10/03 22:00:00 tier_sweep: longeye: sweep started c7d8e9f0 (shell)",
+		"2026/10/03 22:01:30 tier_sweep: longeye: shell finished (exit 0) in 1m30s; last lines:",
+		"2026/10/03 22:02:00 tier_sweep: longeye: swept c7d8e9f0 (shell GREEN) in 2m0s",
+	)
+	r.rigs = func() ([]string, error) { return []string{"gastown", "beads", "longeye", "quiet"}, nil }
+	ts := r.read(time.Date(2026, 10, 3, 23, 0, 0, 0, time.Local))
+
+	byRig := map[string]dashboard.TierSweepTrendRig{}
+	for _, tr := range ts.Trends {
+		byRig[tr.Rig] = tr
+	}
+	if len(ts.Trends) != 4 {
+		t.Fatalf("trends = %+v, want one per known rig", ts.Trends)
+	}
+	if got := []string{ts.Trends[0].Rig, ts.Trends[1].Rig, ts.Trends[2].Rig, ts.Trends[3].Rig}; got[0] != "beads" || got[3] != "quiet" {
+		t.Errorf("trend order = %v, want the rigs sorted", got)
+	}
+
+	g := byRig["gastown"]
+	if len(g.Sweeps) != 1 {
+		t.Fatalf("gastown sweeps = %+v", g.Sweeps)
+	}
+	p := g.Sweeps[0]
+	if p.SHA != "a9be03e4" || p.TotalSecs == nil || *p.TotalSecs != 576 {
+		t.Fatalf("gastown point = %+v, want a9be03e4 at 9m36s", p)
+	}
+	for tier, secs := range map[string]float64{"shell": 65, "integration": 180, "race": 90} {
+		if p.Walls[tier] != secs {
+			t.Errorf("gastown %s wall = %v, want %v", tier, p.Walls[tier], secs)
+		}
+	}
+	if len(byRig["longeye"].Sweeps) != 1 || byRig["longeye"].Sweeps[0].Walls["shell"] != 90 {
+		t.Errorf("longeye = %+v, want its one shell wall", byRig["longeye"])
+	}
+	if q, ok := byRig["quiet"]; !ok || len(q.Sweeps) != 0 {
+		t.Errorf("quiet = %+v, want an empty trend for a rig with no sweeps", q)
+	}
+}
+
+// A rig's trend keeps the newest 30 sweeps, not the first: the pane exists to
+// show devops speed moving now, and an older window would freeze a month ago.
+func TestTierSweepTrendKeepsTheNewest30(t *testing.T) {
+	t.Parallel()
+	var lines []string
+	for i := 0; i < 35; i++ {
+		lines = append(lines, fmt.Sprintf("2026/10/03 10:%02d:00 tier_sweep: gastown: swept %08x (shell GREEN) in 1m", i, i+1))
+	}
+	r, _ := tierSweepTestReader(t, lines...)
+	ts := r.read(time.Date(2026, 10, 3, 11, 0, 0, 0, time.Local))
+	if len(ts.Trends) != 1 {
+		t.Fatalf("trends = %+v, want one rig", ts.Trends)
+	}
+	got := ts.Trends[0].Sweeps
+	if len(got) != tierSweepTrendPerRig {
+		t.Fatalf("kept %d sweeps, want %d", len(got), tierSweepTrendPerRig)
+	}
+	if got[0].SHA != "00000006" || got[len(got)-1].SHA != "00000023" {
+		t.Errorf("kept %s..%s, want the newest 30 (00000006..00000023)", got[0].SHA, got[len(got)-1].SHA)
+	}
+	if !got[0].At.Before(got[len(got)-1].At) {
+		t.Error("the trend is not oldest first")
 	}
 }

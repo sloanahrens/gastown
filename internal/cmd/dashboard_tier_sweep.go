@@ -28,6 +28,9 @@ const (
 	// tierSweepRowsKept is the backlog the incremental scan holds, deep enough
 	// that the panel's window never falls off the end.
 	tierSweepRowsKept = 40
+	// tierSweepTrendPerRig is how many sweeps each rig's wall trend keeps: a
+	// month of hourly sweeps is enough to see devops test speed move.
+	tierSweepTrendPerRig = 30
 	// tierSweepStaleAfter is when a stage-finished line stops meaning a sweep is
 	// in flight. A cycle's longest stage is the integration one, bounded by the
 	// daemon's 90m budget: a rig whose last line is older ran through a daemon
@@ -37,8 +40,10 @@ const (
 
 var (
 	// tierSweepStageRe matches the daemon's line for a stage that finished:
-	// "tier_sweep: gastown: shell finished (exit 0) in 1m5s; last lines:".
-	tierSweepStageRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) tier_sweep: (\S+): (\S+) finished \(exit -?\d+\) in \S+; last lines:$`)
+	// "tier_sweep: gastown: shell finished (exit 0) in 1m5s; last lines:". The
+	// duration is captured because the wall trend charts each tier's own time,
+	// which the swept line that closes the cycle does not carry.
+	tierSweepStageRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) tier_sweep: (\S+): (\S+) finished \(exit -?\d+\) in (\S+); last lines:$`)
 	// tierSweepSweptRe matches the line closing a cycle, whose trailing " in
 	// <dur>" is absent on a cycle that ran before gt-iqzr0:
 	// "tier_sweep: gastown: swept a9be03e4 (shell GREEN, integration GREEN) in 9m36s".
@@ -87,7 +92,14 @@ type tierSweepReader struct {
 	// start holds the cycle each rig opened and has not closed. A rig absent
 	// from it is read the old way, off its shell stage's finished line.
 	start map[string]tierSweepStarted
+	// walls holds the tier wall times the stage lines have reported for a rig's
+	// cycle in flight, until its swept line closes it.
+	walls map[string]map[string]float64
 	rows  []dashboard.TierSweepRow
+	// byRig holds each rig's newest sweeps, oldest first, for the wall trend:
+	// the panel's own rows are a town-wide window too shallow for one rig's
+	// series.
+	byRig map[string][]dashboard.TierSweepRow
 }
 
 func newTierSweepReader(townRoot string) *tierSweepReader {
@@ -125,7 +137,7 @@ func (r *tierSweepReader) read(now time.Time) *dashboard.TierSweep {
 	if err := r.scanLog(); err != nil && !r.readOK {
 		return &dashboard.TierSweep{Unavailable: true}
 	}
-	ts := &dashboard.TierSweep{Sweeps: r.recent()}
+	ts := &dashboard.TierSweep{Sweeps: r.recent(), Trends: r.trends()}
 	if run := r.running(now); run != nil {
 		ts.Running = run
 	}
@@ -178,6 +190,9 @@ func (r *tierSweepReader) parseLogLine(line string) {
 			return
 		}
 		r.start[m[2]] = tierSweepStarted{at: at, sha: m[3], tiers: splitTierSweepTiers(m[4])}
+		// A new cycle starts its walls from nothing: stage lines the previous
+		// cycle left behind (an abort the log lost) must not be charted here.
+		delete(r.walls, m[2])
 		return
 	}
 	if m := tierSweepAbortedRe.FindStringSubmatch(line); m != nil {
@@ -187,6 +202,7 @@ func (r *tierSweepReader) parseLogLine(line string) {
 		// replaced, and must not end the one that is running.
 		if open, ok := r.start[m[2]]; ok && open.sha == m[3] {
 			delete(r.start, m[2])
+			delete(r.walls, m[2])
 		}
 		return
 	}
@@ -195,19 +211,17 @@ func (r *tierSweepReader) parseLogLine(line string) {
 		if err != nil {
 			return
 		}
-		row := dashboard.TierSweepRow{At: at, Rig: m[2], SHA: m[3], Stages: parseTierSweepVerdicts(m[4])}
+		row := dashboard.TierSweepRow{At: at, Rig: m[2], SHA: m[3], Stages: parseTierSweepVerdicts(m[4]), Walls: r.walls[m[2]]}
 		if m[5] != "" {
 			if d, err := time.ParseDuration(m[5]); err == nil {
 				s := d.Seconds()
 				row.Secs = &s
 			}
 		}
-		r.rows = append(r.rows, row)
-		if len(r.rows) > tierSweepRowsKept {
-			r.rows = append([]dashboard.TierSweepRow(nil), r.rows[len(r.rows)-tierSweepRowsKept:]...)
-		}
+		r.keep(row)
 		r.last[m[2]] = tierSweepEvent{at: at, swept: true}
 		delete(r.start, m[2])
+		delete(r.walls, m[2])
 		return
 	}
 	if m := tierSweepStageRe.FindStringSubmatch(line); m != nil {
@@ -216,7 +230,87 @@ func (r *tierSweepReader) parseLogLine(line string) {
 			return
 		}
 		r.last[m[2]] = tierSweepEvent{at: at, stage: m[3]}
+		if d, err := time.ParseDuration(m[4]); err == nil {
+			if r.walls == nil {
+				r.walls = map[string]map[string]float64{}
+			}
+			w := r.walls[m[2]]
+			if w == nil {
+				w = map[string]float64{}
+				r.walls[m[2]] = w
+			}
+			w[m[3]] = d.Seconds()
+		}
 	}
+}
+
+// keep files a finished sweep in the panel's town-wide window and in its rig's
+// own, each capped to what it draws. The struct's maps are made here so a
+// reader built as a bare literal — a test's — reads a fresh log without setup.
+func (r *tierSweepReader) keep(row dashboard.TierSweepRow) {
+	r.rows = append(r.rows, row)
+	if len(r.rows) > tierSweepRowsKept {
+		r.rows = append([]dashboard.TierSweepRow(nil), r.rows[len(r.rows)-tierSweepRowsKept:]...)
+	}
+	if r.byRig == nil {
+		r.byRig = map[string][]dashboard.TierSweepRow{}
+	}
+	rig := r.byRig[row.Rig]
+	rig = append(rig, row)
+	if len(rig) > tierSweepTrendPerRig {
+		rig = append([]dashboard.TierSweepRow(nil), rig[len(rig)-tierSweepTrendPerRig:]...)
+	}
+	r.byRig[row.Rig] = rig
+}
+
+// tierSweepTrendRead is the seam a rig's wall trend reads: the sweeps kept for
+// one rig, oldest first.
+type tierSweepTrendRead func(rig string) []dashboard.TierSweepRow
+
+// buildTierSweepTrends folds the kept sweeps into one series per rig, oldest
+// first and at most perRig points each. A rig in names with no sweeps keeps an
+// empty series so the page can say so, and a name listed twice is read once.
+func buildTierSweepTrends(names []string, read tierSweepTrendRead, perRig int) []dashboard.TierSweepTrendRig {
+	if perRig <= 0 || read == nil {
+		return nil
+	}
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	seen := make(map[string]bool, len(sorted))
+	var out []dashboard.TierSweepTrendRig
+	for _, rig := range sorted {
+		if rig == "" || seen[rig] {
+			continue
+		}
+		seen[rig] = true
+		rows := read(rig)
+		if len(rows) > perRig {
+			rows = rows[len(rows)-perRig:]
+		}
+		tr := dashboard.TierSweepTrendRig{Rig: rig, Sweeps: make([]dashboard.TierSweepTrendPoint, 0, len(rows))}
+		for _, row := range rows {
+			tr.Sweeps = append(tr.Sweeps, dashboard.TierSweepTrendPoint{At: row.At, SHA: row.SHA, Walls: row.Walls, TotalSecs: row.Secs})
+		}
+		out = append(out, tr)
+	}
+	return out
+}
+
+// trends is one wall trend per rig over the sweeps the scan has kept. The town's
+// registry names the rigs, so one that has not swept yet still gets an empty
+// trend; a rig the log named is kept even if the registry lost it, because its
+// sweeps were what the log recorded.
+func (r *tierSweepReader) trends() []dashboard.TierSweepTrendRig {
+	var names []string
+	if r.rigs != nil {
+		if got, err := r.rigs(); err == nil {
+			names = append(names, got...)
+		}
+	}
+	for rig := range r.byRig {
+		names = append(names, rig)
+	}
+	return buildTierSweepTrends(names, func(rig string) []dashboard.TierSweepRow { return r.byRig[rig] }, tierSweepTrendPerRig)
 }
 
 // splitTierSweepTiers reads the "(shell, integration, race)" part of a "sweep

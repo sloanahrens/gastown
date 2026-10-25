@@ -2066,7 +2066,45 @@ function renderTierSweep(s) {
   (newest.stages || []).filter(x => x.verdict === "RED" && (x.failed || []).length).forEach(x => {
     box.append(el("div", "badc title", newest.rig + " " + x.tier + " RED: " + x.failed.join(", ")));
   });
+  renderTierSweepTrends(box, ts.trends);
   $("tiersweepnote").textContent = rows.length + " sweeps · last " + fmtDur((Date.now() - new Date(newest.at).getTime()) / 1000) + " ago";
+}
+
+// One wall-time trend per rig, oldest sweep at the left: a line per tier the
+// rig ran plus the cycle's total, drawn with the landings trend's own chart so
+// devops test speed reads the way gate time does. The reader keeps 30 sweeps
+// per rig (tierSweepTrendPerRig); a rig with none says so rather than drawing
+// an empty chart, and an empty trend never stops the pane.
+const TIERSWEEP_TREND_COLORS = ["#58a6ff", "#d29922", "#39c5bb", "#d2a8ff"];
+function tierSweepTrendSeries(trend) {
+  const sweeps = trend.sweeps || [];
+  const pts = sweeps.map(r => ({t: new Date(r.at).getTime(), walls: r.walls || {}, total: r.total_secs}));
+  const tiers = TIERSWEEP_TIERS.filter(tier => pts.some(p => p.walls[tier] != null));
+  const series = [], key = [];
+  tiers.forEach((tier, i) => {
+    const color = TIERSWEEP_TREND_COLORS[i % TIERSWEEP_TREND_COLORS.length];
+    series.push({color, pts: pts.map(p => ({t: p.t, v: p.walls[tier]}))});
+    key.push([color, tier]);
+  });
+  if (pts.some(p => p.total != null)) {
+    series.push({color: "#8b949e", pts: pts.map(p => ({t: p.t, v: p.total}))});
+    key.push(["#8b949e", "total"]);
+  }
+  return {series, key};
+}
+function renderTierSweepTrends(box, trends) {
+  for (const trend of trends || []) {
+    const sweeps = trend.sweeps || [];
+    const head = el("div", "k");
+    head.append(el("b", "", trend.rig), el("span", "", sweeps.length ? " " + sweeps.length + " sweeps · wall time each" : ""));
+    box.append(head);
+    if (!sweeps.length) { box.append(el("div", "empty", "no sweeps yet")); continue; }
+    const st = tierSweepTrendSeries(trend);
+    const t0 = Math.min(...sweeps.map(r => new Date(r.at).getTime()));
+    const t1 = Math.max(...sweeps.map(r => new Date(r.at).getTime()));
+    const peak = Math.max(...st.series.flatMap(x => x.pts.map(p => p.v == null ? 0 : p.v)));
+    box.append(el("div", "k title", "wall time per sweep · " + sweeps.length + " sweeps · peak " + fmtDur(peak)), chartSVG(st.series, t0, Math.max(t1, t0 + 1), 600, 48, 3 * 3600e3), legend(st.key));
+  }
 }
 
 // The Actions section's status colours, reusing the page's own tokens: success
