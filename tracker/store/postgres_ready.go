@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -73,6 +74,12 @@ func scopeCTE(rootArg string) string {
 )`
 }
 
+// readyExcludedTypes are the types the whole-database ready board leaves out,
+// as bd's does: the infrastructure types, and the kinds of bead that are not
+// work to pick up (merge requests, gates, molecule roots, rig identity beads).
+// Inside one molecule only the infrastructure types are left out.
+var readyExcludedTypes = append(slices.Clone(infraTypes), "merge-request", "gate", "molecule", "rig")
+
 // buildReadyQuery builds the ready query (blocked=false) or the blocked one.
 // Ready is open (or deferred and woken), unblocked, not ephemeral (unless scoped to a
 // molecule) and not an infrastructure type; blocked is not-closed and blocked.
@@ -101,7 +108,11 @@ func buildReadyQuery(f api.ReadyFilter, cur *listCursor, limit int, blocked bool
 		where = append(where, "issues.id NOT IN (SELECT id FROM blocked)",
 			"((issues.status = 'open' AND (issues.defer_until IS NULL OR issues.defer_until <= now())) OR (issues.status = 'deferred' AND issues.defer_until IS NOT NULL AND issues.defer_until <= now()))")
 	}
-	where = append(where, "issues.issue_type <> ALL("+arg(infraTypes)+")")
+	if f.Molecule == "" {
+		where = append(where, "issues.issue_type <> ALL("+arg(readyExcludedTypes)+")")
+	} else {
+		where = append(where, "issues.issue_type <> ALL("+arg(infraTypes)+")")
+	}
 	if f.Rig != "" {
 		where = append(where, "issues.rig = "+arg(f.Rig))
 	}
