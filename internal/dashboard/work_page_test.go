@@ -308,30 +308,107 @@ func TestTheWorkPanelLeadsWithTheLiveSeatsAndFoldsTheOnesThatNeedALook(t *testin
 	}
 }
 
-// TestTheWorkHeaderAndItsRowsShareOneColumnTemplate holds the Work table to one
-// column template: the table declares the five columns once and the header,
-// the seat rows and a fold's rows all take their tracks from it, so a heading
-// and the cells under it cannot start their columns at different places
-// (gt-n7yb8).
+// TestTheWorkPanelKeepsTheNeedsALookFoldAcrossPolls opens the fold over the
+// seats that want an operator and redraws the panel with a changed reading,
+// then closes it and redraws again. The fold follows the operator, not the
+// poll: its open state lives outside the rows each render rebuilds, so a redraw
+// must read it back rather than draw the fold closed again (gt-n7yb8).
+func TestTheWorkPanelKeepsTheNeedsALookFoldAcrossPolls(t *testing.T) {
+	t.Parallel()
+
+	working := func() any {
+		return seat("gastown", "dementus", "working", "gt-n7yb8", "one table", "deepseek-flash", time.Minute)
+	}
+	first := workState([]any{
+		working(),
+		seat("gastown", "stall", "stalled", "gt-stall", "nothing is doing it", "deepseek-flash", time.Minute),
+	}, workQueueReading(1, 0, 0, 0))
+	// A changed seat list, so the next poll rebuilds the table rather than
+	// returning early on an unchanged key.
+	next := workState([]any{
+		working(),
+		seat("gastown", "stall", "stalled", "gt-stall", "nothing is doing it", "deepseek-flash", time.Minute),
+		seat("gastown", "human", "needs-human", "gt-human", "waiting on a person", "deepseek-flash", time.Minute),
+	}, workQueueReading(2, 0, 0, 0))
+
+	type foldState struct {
+		Open   bool `json:"open"`
+		Hidden bool `json:"hidden"`
+		Rows   int  `json:"rows"`
+	}
+	read := func(dom *pageDOM) foldState {
+		t.Helper()
+		v, err := dom.vm.RunString(`JSON.stringify((() => {
+			const t = __byId["work"].children.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
+			if (!t) return null;
+			const d = t.children.find(c => c.tagName === "DETAILS" && c.textContent.indexOf("needs a look") === 0);
+			const w = t.children.find(c => String(c.className).split(" ").indexOf("wfoldrows") >= 0);
+			return d && w ? {open: !!d.open, hidden: !!w.hidden, rows: w.children.length} : null;
+		})())`)
+		if err != nil {
+			t.Fatalf("reading the needs-a-look fold: %v", err)
+		}
+		if v.String() == "null" {
+			t.Fatal("the panel drew no needs-a-look fold")
+		}
+		var f foldState
+		if err := json.Unmarshal([]byte(v.String()), &f); err != nil {
+			t.Fatalf("reading the needs-a-look fold: %v", err)
+		}
+		return f
+	}
+	click := func(dom *pageDOM) {
+		t.Helper()
+		if _, err := dom.vm.RunString(`(() => {
+			const t = __byId["work"].children.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
+			__clickSummary(t.children.find(c => c.tagName === "DETAILS" && c.textContent.indexOf("needs a look") === 0));
+		})()`); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderWork", first)
+	if got := read(dom); got.Open || !got.Hidden || got.Rows != 1 {
+		t.Fatalf("the fold reads open=%v hidden=%v over %d rows before an operator touches it, want it closed over its one seat", got.Open, got.Hidden, got.Rows)
+	}
+
+	click(dom)
+	if got := read(dom); !got.Open || got.Hidden {
+		t.Fatalf("a click on the summary left the fold open=%v hidden=%v, want it open", got.Open, got.Hidden)
+	}
+
+	dom.call(t, "renderWork", next)
+	if text := workText(t, dom); !strings.Contains(text, "needs a look (2)") {
+		t.Fatalf("the second poll did not redraw the fold, so the test says nothing about the next poll: %q", text)
+	}
+	if got := read(dom); !got.Open || got.Hidden || got.Rows != 2 {
+		t.Errorf("after a redraw the fold reads open=%v hidden=%v over %d rows, want it open over both seats", got.Open, got.Hidden, got.Rows)
+	}
+
+	click(dom)
+	if got := read(dom); got.Open || !got.Hidden {
+		t.Fatalf("a click on the open fold left it open=%v hidden=%v, want it closed", got.Open, got.Hidden)
+	}
+	dom.call(t, "renderWork", first)
+	if got := read(dom); got.Open || !got.Hidden {
+		t.Errorf("the fold reads open=%v hidden=%v after the operator closed it and a poll redrew the table, want it closed", got.Open, got.Hidden)
+	}
+}
+
+// TestTheWorkHeaderAndItsRowsShareOneColumnTemplate checks the table's layout
+// where a test without a browser can check it: the table is one grid container,
+// and the header, the live rows and a fold's rows are its own items — directly,
+// or through a fold wrapper that is itself a direct child — so the tracks each
+// row takes really are the table's. Each row draws one cell per track the table
+// declares, and the count is read from the rule rather than repeated here, so a
+// row or a track that gains a column without the other breaks the one template
+// the header and the cells share. A row nested anywhere else would resolve its
+// subgrid against a parent with no tracks, which the declaration strings alone
+// would not catch (gt-n7yb8).
 func TestTheWorkHeaderAndItsRowsShareOneColumnTemplate(t *testing.T) {
 	t.Parallel()
 
-	want := "[polecat] minmax(0,max-content) [agent] minmax(0,max-content) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch)"
-	if table := cssRule(t, ".wtable"); !strings.Contains(table, "grid-template-columns:"+want) {
-		t.Errorf("the seat table lays out %q, want the five named columns %q", table, want)
-	}
-	for _, sel := range []string{".workrow", ".wfoldrows"} {
-		rule := cssRule(t, sel)
-		if !strings.Contains(rule, "grid-template-columns:subgrid") {
-			t.Errorf("%s lays out its own columns instead of the table's: %s", sel, rule)
-		}
-		if !strings.Contains(rule, "grid-column:1 / -1") {
-			t.Errorf("%s does not span the table's columns: %s", sel, rule)
-		}
-	}
-
-	// The header, the live rows and the folded rows are all items of that one
-	// table, so the template above is the one each of them is laid out by.
 	dom := newPageDOM(t)
 	dom.call(t, "renderWork", workState([]any{
 		seat("gastown", "dementus", "working", "gt-n7yb8", "one table", "deepseek-flash", time.Minute),
@@ -340,37 +417,97 @@ func TestTheWorkHeaderAndItsRowsShareOneColumnTemplate(t *testing.T) {
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
 		const t = __byId["work"].children.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
 		if (!t) return null;
-		const heads = [], rows = [];
-		(function walk(n) {
+		const cls = n => String(n.className).split(" ");
+		const kind = c => c.tagName === "DETAILS" ? "fold"
+			: cls(c).indexOf("wfoldrows") >= 0 ? "wfoldrows"
+			: cls(c).indexOf("whead") >= 0 ? "whead"
+			: cls(c).indexOf("workrow") >= 0 ? "row" : cls(c).join(" ");
+		const rows = [];
+		(function walk(n, where) {
 			for (const c of (n.children || [])) {
-				const cls = String(c.className).split(" ");
-				if (cls.indexOf("workrow") >= 0) {
-					(cls.indexOf("whead") >= 0 ? heads : rows).push(c.children.filter(x => x.tagName === "SPAN").length);
+				const here = cls(c).indexOf("wfoldrows") >= 0 ? "wfoldrows" : where;
+				if (cls(c).indexOf("workrow") >= 0) {
+					rows.push({where: where, head: cls(c).indexOf("whead") >= 0, cells: c.children.filter(x => x.tagName === "SPAN").length});
 				}
-				walk(c);
+				walk(c, here);
 			}
-		})(t);
-		return {heads: heads, rows: rows};
+		})(t, "table");
+		return {
+			direct: t.children.map(kind),
+			rows: rows,
+			foldRows: t.children.filter(c => cls(c).indexOf("wfoldrows") >= 0)
+				.map(c => c.children.filter(x => cls(x).indexOf("workrow") >= 0).length)
+		};
 	})())`)
 	if err != nil {
 		t.Fatalf("reading the seat table: %v", err)
 	}
+	if v.String() == "null" {
+		t.Fatal("the panel drew no seat table")
+	}
 	var table struct {
-		Heads []int `json:"heads"`
-		Rows  []int `json:"rows"`
+		Direct []string `json:"direct"`
+		Rows   []struct {
+			Where string `json:"where"`
+			Head  bool   `json:"head"`
+			Cells int    `json:"cells"`
+		} `json:"rows"`
+		FoldRows []int `json:"foldRows"`
 	}
 	if err := json.Unmarshal([]byte(v.String()), &table); err != nil {
 		t.Fatalf("reading the seat table: %v", err)
 	}
-	if len(table.Heads) != 1 || table.Heads[0] != 5 {
-		t.Errorf("the table drew header rows %v, want one of five cells", table.Heads)
+	// The table's own children: the header, the live seat, and the fold's
+	// summary with its wrapper beside it. The stalled seat rides the wrapper.
+	if got, want := strings.Join(table.Direct, " "), "whead row fold wfoldrows"; got != want {
+		t.Errorf("the seat table's own children read %q, want %q", got, want)
 	}
-	if len(table.Rows) != 2 {
-		t.Fatalf("the table holds %d seat rows, want the live and the folded one", len(table.Rows))
+	if len(table.Rows) != 3 {
+		t.Fatalf("the table draws %d rows, want the header, the live seat and the folded one: %+v", len(table.Rows), table.Rows)
 	}
-	for _, n := range table.Rows {
-		if n != 5 {
-			t.Errorf("a seat row draws %d cells, want the header's five", n)
+	for _, r := range table.Rows {
+		if r.Where != "table" && r.Where != "wfoldrows" {
+			t.Errorf("a seat row sits in %q, not in the table or a fold's wrapper, so its subgrid resolves against no tracks", r.Where)
+		}
+	}
+	if !table.Rows[0].Head || table.Rows[1].Head || table.Rows[2].Head {
+		t.Errorf("the table's rows read as heads %v %v %v, want only the first", table.Rows[0].Head, table.Rows[1].Head, table.Rows[2].Head)
+	}
+	if len(table.FoldRows) != 1 || table.FoldRows[0] != 1 {
+		t.Errorf("the fold's wrapper holds %v rows, want the one folded seat", table.FoldRows)
+	}
+
+	tracks := 0
+	for _, decl := range strings.Split(cssRule(t, ".wtable"), ";") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(decl), "grid-template-columns:"); ok {
+			tracks = 0
+			for _, tok := range strings.Fields(v) {
+				if !strings.HasPrefix(tok, "[") {
+					tracks++
+				}
+			}
+		}
+	}
+	if tracks == 0 {
+		t.Fatal("the Work panel's seat table lays out no columns")
+	}
+	for _, r := range table.Rows {
+		if r.Cells != tracks {
+			t.Errorf("a seat row draws %d cells, want the template's %d tracks", r.Cells, tracks)
+		}
+	}
+
+	// How a row takes the table's tracks: it is a grid item spanning the table
+	// and declares subgrid. The unit tier has no browser to measure a column's
+	// position, so these declarations plus where the rows sit above are the
+	// claim; the template's own value is not copied into this test.
+	for _, sel := range []string{".workrow", ".wfoldrows"} {
+		rule := cssRule(t, sel)
+		if !strings.Contains(rule, "grid-template-columns:subgrid") {
+			t.Errorf("%s lays out its own columns instead of the table's: %s", sel, rule)
+		}
+		if !strings.Contains(rule, "grid-column:1 / -1") {
+			t.Errorf("%s does not span the table's columns: %s", sel, rule)
 		}
 	}
 }
