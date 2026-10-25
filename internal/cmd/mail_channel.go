@@ -270,11 +270,22 @@ func runChannelShow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// channelNameError returns the error channel create reports for a name the
+// channel store rejects, and nil when it accepts the name. Channels take the
+// group store's name rule; keeping the message here lets a unit test pin the
+// channel-level consequence of that sharing (gt-0w11c).
+func channelNameError(name string) error {
+	if !isValidGroupName(name) { // Reuse group name validation
+		return fmt.Errorf("invalid channel name %q: must be lowercase alphanumeric with dashes/underscores, starting with a letter or digit, at most %d characters", name, beads.MaxGroupNameLength)
+	}
+	return nil
+}
+
 func runChannelCreate(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
-	if !isValidGroupName(name) { // Reuse group name validation
-		return fmt.Errorf("invalid channel name %q: must be lowercase alphanumeric with dashes/underscores, starting with a letter or digit, at most %d characters", name, beads.MaxGroupNameLength)
+	if err := channelNameError(name); err != nil {
+		return err
 	}
 
 	townRoot, err := workspace.FindFromCwdOrError()

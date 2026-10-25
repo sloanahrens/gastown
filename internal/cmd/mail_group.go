@@ -205,7 +205,7 @@ func runGroupCreate(cmd *cobra.Command, args []string) error {
 	// Validate member patterns
 	for _, m := range members {
 		if !isValidMemberPattern(m) {
-			return fmt.Errorf("invalid member pattern: %s", m)
+			return fmt.Errorf("invalid member pattern %q: %w", m, memberPatternError(m))
 		}
 	}
 
@@ -248,7 +248,7 @@ func runGroupAdd(cmd *cobra.Command, args []string) error {
 	member := args[1]
 
 	if !isValidMemberPattern(member) {
-		return fmt.Errorf("invalid member pattern: %s", member)
+		return fmt.Errorf("invalid member pattern %q: %w", member, memberPatternError(member))
 	}
 
 	townRoot, err := workspace.FindFromCwdOrError()
@@ -321,29 +321,44 @@ func isValidGroupName(name string) bool {
 // - Direct addresses: gastown/crew/max, deacon/
 // - Wildcards: */witness, gastown/*, gastown/crew/*
 // - Special patterns: @town, @crew, @witnesses
-// - Group names: ops-team
+// - Group, queue, and channel names: ops-team
 func isValidMemberPattern(pattern string) bool {
+	return memberPatternError(pattern) == nil
+}
+
+// memberPatternError says why pattern cannot be a group member, so a rejected
+// pattern names the rule it broke instead of only repeating the token.
+func memberPatternError(pattern string) error {
 	if pattern == "" {
-		return false
+		return errors.New("must not be empty")
 	}
 
 	// @ patterns are valid
 	if strings.HasPrefix(pattern, "@") {
-		return len(pattern) > 1
+		if len(pattern) == 1 {
+			return errors.New("a special pattern needs a name after @")
+		}
+		return nil
 	}
 
 	// Path patterns with wildcards
 	if strings.Contains(pattern, "/") {
-		// Must have valid path segments
+		// Every segment must be non-empty, except a trailing slash on a prefix.
 		parts := strings.Split(pattern, "/")
 		for _, p := range parts {
 			if p == "" && pattern[len(pattern)-1] != '/' {
-				return false // Empty segment (except trailing /)
+				return errors.New("path has an empty segment")
 			}
 		}
-		return true
+		return nil
 	}
 
-	// Simple name (group reference) - use same validation as group names
-	return isValidGroupName(pattern)
+	// A bare name is a group, queue, or channel reference, never an agent
+	// address. Groups and channels share the group rule, so a name outside it
+	// can only be a queue; the group commands refuse it rather than store a
+	// member the resolver may skip (gt-s4sen).
+	if err := beads.ValidateGroupName(pattern); err != nil {
+		return fmt.Errorf("a bare name must be a group, queue, or channel name: %w", err)
+	}
+	return nil
 }

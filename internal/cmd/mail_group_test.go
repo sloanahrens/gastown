@@ -82,3 +82,42 @@ func TestIsValidMemberPattern(t *testing.T) {
 		})
 	}
 }
+
+// TestMemberPatternError: a rejected bare name says it is a group, queue, or
+// channel name and quotes the rule it broke, so the uppercase rejection is
+// explained rather than repeated as the token (gt-0w11c).
+func TestMemberPatternError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		pattern string
+		want    []string // nil means the pattern is valid
+	}{
+		{"ops-team", nil},
+		{"gastown/crew/max", nil},
+		{"@town", nil},
+		{"", []string{"must not be empty"}},
+		{"@", []string{"name after @"}},
+		{"gastown//max", []string{"empty segment"}},
+		{"Ops-Team", []string{"group, queue, or channel", "lowercase alphanumeric"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern, func(t *testing.T) {
+			err := memberPatternError(tt.pattern)
+			if tt.want == nil {
+				if err != nil {
+					t.Fatalf("memberPatternError(%q) = %v, want nil", tt.pattern, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("memberPatternError(%q) = nil, want an error", tt.pattern)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("memberPatternError(%q) = %q, want it to contain %q", tt.pattern, err, want)
+				}
+			}
+		})
+	}
+}
