@@ -51,11 +51,12 @@ BEADS_DIR, both are judged when both are given, and a value the guard cannot
 place is refused. BEADS_DIR names the store instead when bd sees it: an inline
 assignment (env or command may prefix it), or the value the shell leaves
 exported, from the process env or an earlier export on the line that no later
-unset has cleared. BEADS_DB and BD_DB name a database the way --db does, and
-yield to --db and --repo. A store variable the guard cannot follow to this bd
-create (changed after &&, ||, a pipe, a group, a subshell or a compound
-command, or by eval, source, set -a or read) refuses it, as does a
-directory with no .beads above it. gt
+unset has cleared; a nested shell the line starts (bash -c, or a shell a
+here-string feeds) runs with those exported values. BEADS_DB and BD_DB name a
+database the way --db does, and yield to --db and --repo. A store variable the
+guard cannot follow to this bd create (changed after &&, ||, a pipe, a group,
+a subshell or a compound command, or by eval, source, set -a or read) refuses
+it, as does a directory with no .beads above it. gt
 escalate, gt ask and gt done create town beads inside gt itself and never reach
 this hook.
 
