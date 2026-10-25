@@ -1,4 +1,4 @@
-> Status: historical (2026-10). Merged in: gt-p85pw.3. Not maintained.
+> Status: historical (2026-10). Merged in: gt-p85pw.3 (R3). Not maintained.
 
 # R3: the dispatch board, one response for the spec dispatch tick
 
@@ -30,39 +30,15 @@ Everything else the tick does with these (eligibility, ordering, shape lint, pat
 container rule, budget, seats) is Go in `internal/specdispatch` and stays in `gt`. The tracker
 returns raw material and never decides what to dispatch.
 
-## The response
+## Decision: one POST, not a GET
 
-`POST /v1/board/dispatch`, an idempotent read (client passes `idempotent=true`).
+The bead's acceptance wording named `GET /board/dispatch?rigs=...`. This report decides **`POST /v1/board/dispatch`**
+instead, and V13 builds that. The request carries three lists (exclude labels, exclude types, probe ids) that can
+be long, and the plan's other batch reads (`/v1/ready`, `/v1/issues:show-many`) are POST for the same reason.
+It only reads, so the client passes `idempotent=true` and retries it like any read. Plan task V13 is updated to
+say POST.
 
-## Fields
-
-Why POST and not `GET /board/dispatch?rigs=...`: the request carries three lists (exclude labels,
-exclude types, probe ids) that can be long, and the plan's other batch reads (`/v1/ready`,
-`/v1/issues:show-many`) are POST for the same reason. It is a read, so the client passes
-`idempotent=true` and retries it.
-
-Request body `api.DispatchBoardRequest`:
-
-| field | type | meaning | replaces |
-|-------|------|---------|----------|
-| `rigs` | string[] | rig prefixes to read; unknown prefix goes to `errors`, not a failure | the per-rig loop of read 1 |
-| `exclude_labels` | string[] | labels a ready bead must not carry (`specReadyArgs`) | `--exclude-label` |
-| `exclude_types` | string[] | issue types to leave out (`specdispatch.NonWorkBeadTypes`) | `--exclude-type` |
-| `held_statuses` | string[] | statuses that mean a seat holds the bead (`specHeldStatuses`) | the status filter of read 3 |
-| `probe_ids` | string[] | bead ids whose status is wanted (revert beads) | read 4 |
-
-Response `api.DispatchBoardResponse`:
-
-| field | type | meaning | replaces |
-|-------|------|---------|----------|
-| `rigs` | map[string]RigBoard | one entry per requested rig that was read | reads 1, 2, 3, 5 |
-| `rigs[r].ready` | Issue[] | ready, unassigned, unexcluded issues of rig r, full rows (never null) | read 1 and read 2 |
-| `rigs[r].held` | HeldBead[] | `{id string, type string, assignee string, description string}` for issues in `held_statuses` with an assignee (never null) | read 3 |
-| `rigs[r].children` | map[string]ChildStatus[] | for each ready issue with children: `{id string, status string}` of its direct children, wisps included; absent when none | read 5 |
-| `probes` | map[string]Probe | `{found bool, status string}` per requested id | read 4 |
-| `errors` | map[string]string | rig prefix -> reason a rig could not be read | the per-rig error list of `specBoardRead` |
-
-Request:
+## Request
 
 ```json
 {
@@ -74,46 +50,55 @@ Request:
 }
 ```
 
-`rigs` is the operational rig list `gt` already computes (it decides parked and docked); the
-tracker does not know rig status. The exclude lists are `specReadyArgs()`'s, passed through so the
-dispatcher's exclusions stay in one place (`gt`). `held_statuses` is `specHeldStatuses`. `probe_ids`
-are the revert beads named by the state files `gt` reads from disk.
+`rigs` is the operational rig list `gt` already computes (it decides parked and docked); the tracker does not
+know rig status. The exclude lists are `specReadyArgs()`'s, passed through so the dispatcher's exclusions stay in
+one place (`gt`). `held_statuses` is `specHeldStatuses`. `probe_ids` are the revert beads named by the state files
+`gt` reads from disk.
 
-Response:
+| field | type | meaning | replaces |
+|-------|------|---------|----------|
+| `rigs` | string[] | rig prefixes to read; an unknown prefix goes to `errors`, not a failure; empty is invalid | the per-rig loop of read 1 |
+| `exclude_labels` | string[] | labels a ready issue must not carry | `--exclude-label` |
+| `exclude_types` | string[] | issue types to leave out | `--exclude-type` |
+| `held_statuses` | string[] | statuses that mean a seat holds an issue; empty means no held list | the status filter of read 3 |
+| `probe_ids` | string[] | issue ids whose status is wanted | read 4 |
+
+## Response
 
 ```json
 {
   "rigs": {
     "gastown": {
       "ready": [ { "...full Issue..." } ],
-      "held": [ { "id": "gt-x", "assignee": "...", "description": "..." } ],
+      "held": [ { "id": "gt-x", "type": "task", "assignee": "...", "description": "..." } ],
       "children": { "gt-parent": [ { "id": "gt-c1", "status": "open" } ] }
     }
   },
   "probes": { "gt-revert1": { "found": true, "status": "open" } },
-  "errors": { "om": "..." }
+  "errors": { "om": "unknown rig" }
 }
 ```
 
-- `ready`: the same set as the store's `Ready` with `Unassigned`, the exclude lists and no limit,
-  but as full issues: description, design, notes, acceptance, labels, comment count, ephemeral,
-  created_at (everything `specFromIssue` reads). That removes read 2 entirely. Ordering is not the
-  tracker's job (`specdispatch.Order`).
-- `held`: issues of the rig in `held_statuses` that have an assignee, with the description, so
-  `gt` can compute `specHoldFiles` itself. Epics are filtered by `gt` (`c.IsEpic()`); the tracker
-  returns the type too. This replaces read 3, which is now always cheap, so `gt` can drop its lazy
-  per-rig loading.
-- `children`: for every `ready` issue that has children, its direct children with their status
-  (id and status only, as `childSpecs` reduces them). Wisps count as children. A ready issue with
-  no children is absent. This replaces read 5.
-- `probes`: status of each requested id, `found:false` when it does not exist (the caller treats
-  missing as not open, as `revertBeadOpen` does). This replaces read 4.
-- `errors`: a rig that could not be read is named here and the rest are still returned, like
-  `specCandidates` reporting and skipping a rig.
+| field | type | meaning | replaces |
+|-------|------|---------|----------|
+| `rigs` | map[string]RigBoard | one entry per requested rig that was read | reads 1, 2, 3, 5 |
+| `rigs[r].ready` | Issue[] | ready, unassigned, unexcluded issues of rig r, ordered by priority, created_at, id; never null | read 1 and read 2 |
+| `rigs[r].ready[]` | Issue | the full row, every field `specFromIssue` reads: id, title, issue_type, status, assignee, priority, created_at, labels, description, design, notes, acceptance_criteria, comment_count, ephemeral | read 2 (design) |
+| `rigs[r].held` | HeldBead[] | assigned issues of rig r in `held_statuses`; never null | read 3 |
+| `rigs[r].held[].id` / `.type` / `.assignee` / `.description` | string | `gt` computes `specHoldFiles` from the description and drops epics by `type` | read 3 |
+| `rigs[r].children` | map[string]ChildStatus[] | for each ready issue that has children: its direct children, wisps included; absent when none; never null | read 5 |
+| `rigs[r].children[p][].id` / `.status` | string | all `childSpecs` reads | read 5 |
+| `probes` | map[string]Probe | one entry per requested id; never null | read 4 |
+| `probes[id].found` | bool | false when the id does not exist (the caller treats that as not open, as `revertBeadOpen` does) | read 4 |
+| `probes[id].status` | string | the status when found | read 4 |
+| `errors` | map[string]string | rig prefix -> reason that rig was not read; never null | the per-rig error list of `specBoardRead` |
 
-Size: today's gt board is ~100 ready issues; with full text roughly 100-300 KB of JSON. The
-response is one HTTP call, so that is acceptable; if it grows, `ready` can drop `notes` for rows the
-caller already holds (the tick ledger), but do not add that until measured.
+Ordering stays the tracker's `priority, created_at, id`, which equals `specdispatch.Order`'s primary key; `gt`
+still applies `Eligible` and `Order` (cross-rig) itself. The tracker returns raw material and never decides what
+to dispatch.
+
+Size: today's gt board is ~100 ready issues; with full text roughly 100-300 KB of JSON. One HTTP call, so that is
+acceptable; do not trim fields until measured.
 
 ## Reads that must stay separate
 
@@ -127,16 +112,19 @@ caller already holds (the tick ledger), but do not add that until measured.
 
 ## Calls before and after
 
-Per tick, rigs R=8, candidates C (those reaching the container check), probes P (0-1 per rig):
+Before, measured: the tick's own cost line on 2026-10-25 counted about 108 bd read calls and ~25 s. They are the
+sum of the reads above: read 1 once per rig (R=8), read 2 up to once per rig, read 3 up to once per rig, read 4 once per rig
+with a red-main state file, read 5 once per candidate that reaches the container check (C), read 6 once per
+slung candidate, read 7 once. C is the term that grew the count to ~108.
 
-- before: R (ready) + up to R (designs) + up to R (held) + P + C (children) = 3R+P+C reads, each
-  a subprocess; ~108 measured.
-- after: **1** board call per tick, plus read 6 (`s` calls, `s <= max_per_tick`, usually 0-3), plus
-  read 7 (1, until R4). A tick with 8 rigs, 100 candidates and 3 slings goes from ~110 calls to 5.
+After: **1** board call replaces reads 1-5 entirely, so the count no longer depends on R or C. What remains is
+read 6 (`s` calls, `s <= max_per_tick`, usually 0-3) and read 7 (1, until R4 replaces it): `1 + s + 1`, which is
+at most 5 for `max_per_tick = 3`. A tick that slings three beads goes from ~108 measured reads to 5.
 
-Measured on 2026-10-25 against the real gt+hq data in Postgres: ready board for gt 13.5 ms, show-many
-of 100 ids 2.7 ms, children of 100 parents 1.2 ms (see `claude-477`). The board is those queries
-for 8 rigs, so well under 200 ms on the same data.
+Latency, measured 2026-10-25 on the real gt+hq data in Postgres (`claude-477`): ready board for gt 13.5 ms,
+show-many of 100 ids 2.7 ms, children of 100 parents 1.2 ms. The board is those queries for 8 rigs in one
+transaction, so a few tens of milliseconds server-side; the exit measurement (S1) replays the real call mix and
+replaces this estimate.
 
 ## Not in the board
 
@@ -148,14 +136,18 @@ for 8 rigs, so well under 200 ms on the same data.
 
 ## Implementation notes for V13
 
-- Build it from the existing store methods in one pass per rig: `Ready` (with `Unassigned`,
-  excludes, no limit), `ListIssues` on `held_statuses` for the rig, and `ChildrenOf` for the
-  ready ids. Add a `Store.DispatchBoard(ctx, DispatchBoardRequest)` that runs them in one read
-  transaction (snapshot-consistent: the board must not show a bead as ready that the held list
-  shows as hooked).
-- The ready query must stay unlimited (`--limit 0` today); the store's page size must not truncate
-  it silently, so the method pages internally and the response carries no cursor.
-- Contract cases: a ready bead and a held bead in different rigs; a parent with an open and a closed
-  child (wisp included); a probe for a missing id; one unreadable rig (an unknown rig name) that
-  must not fail the rest; exclude lists applied; description and design present on the rows.
-- Agreement test: the real client against the real route with a stub store.
+- `Store.DispatchBoard(ctx, DispatchBoardRequest) (DispatchBoardResponse, error)`, built from the same queries
+  as `Ready` (with `Unassigned`, the excludes, no limit), a held query (`rig`, `status = ANY(held_statuses)`,
+  `assignee <> ''`) and a children query for the ready ids.
+- **One snapshot.** All of it runs in one `REPEATABLE READ`, read-only transaction. The failure mode this
+  prevents: an issue that a polecat claims between the ready query and the held query would otherwise appear
+  as ready in one list and held in another, and the dispatcher could sling it again. This is an implementation
+  requirement checked in review; no test can interleave a writer inside the call without a hook, so the contract
+  does not claim to test it.
+- The ready list must not stop at a page: the method pages internally (1000 per page) until the cursor is empty,
+  and the response carries no cursor. A contract case creates 1003 ready issues and expects all of them.
+- Contract cases: ready, held and children across two rigs in one call (children include a closed child and a
+  wisp); exclude lists applied and rows carry description and labels; an unknown rig is reported in `errors`
+  and the rest answered; probes found, closed and missing; an empty `rigs` is invalid; more than one page of
+  ready issues.
+- Route `POST /v1/board/dispatch`, client `DispatchBoard(ctx, req)`, agreement test with a stub store.
