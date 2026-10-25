@@ -214,6 +214,9 @@ func (p *Postgres) GetIssues(ctx context.Context, ids []string) (map[string]api.
 	if err := fillDependencies(ctx, p.pool, found, out); err != nil {
 		return nil, err
 	}
+	if err := fillDependents(ctx, p.pool, found, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -248,6 +251,35 @@ WHERE d.issue_id = ANY($1) ORDER BY d.issue_id, d.created_at, t.id`, ids)
 			is.BlockedBy = append(is.BlockedBy, dep.ID)
 		}
 		out[owner] = is
+	}
+	return rows.Err()
+}
+
+// fillDependents sets Dependents on the issues in out named by ids: the issues
+// that depend on each, with the relation. Links from other rigs' external
+// references are not issues here and do not appear.
+func fillDependents(ctx context.Context, q querier, ids []string, out map[string]api.Issue) error {
+	rows, err := q.Query(ctx, `SELECT d.depends_on, i.id, i.title, i.status, i.priority, i.issue_type, d.type, i.close_reason
+FROM tracker.dependencies d JOIN tracker.issues i ON i.id = d.issue_id
+WHERE d.depends_on = ANY($1) ORDER BY d.depends_on, d.created_at, i.id`, ids)
+	if err != nil {
+		return fmt.Errorf("store: get dependents: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var target string
+		var dep api.IssueDep
+		var priority int16
+		if err := rows.Scan(&target, &dep.ID, &dep.Title, &dep.Status, &priority, &dep.Type, &dep.DependencyType, &dep.CloseReason); err != nil {
+			return fmt.Errorf("store: get dependents: %w", err)
+		}
+		dep.Priority = int(priority)
+		is, ok := out[target]
+		if !ok {
+			continue
+		}
+		is.Dependents = append(is.Dependents, dep)
+		out[target] = is
 	}
 	return rows.Err()
 }

@@ -50,6 +50,10 @@ type Issue struct {
 	// (GetIssues) fills them, and BlockedBy there: the open targets of its
 	// `blocks` links. A list leaves both empty, and Blocked fills BlockedBy.
 	Dependencies []IssueDep `json:"dependencies,omitempty"`
+	// Dependents are the issues that depend on this one, with their relation:
+	// the other end of each link. Filled with Dependencies, by a read of named
+	// issues only.
+	Dependents []IssueDep `json:"dependents,omitempty"`
 
 	// Counts the list endpoints fill in without loading the rows.
 	CommentCount    int `json:"comment_count,omitempty"`

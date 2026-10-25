@@ -47,12 +47,16 @@ func TestIssueConversionCarriesFieldsTimesAndDependencies(t *testing.T) {
 		ID: "gt-a", Title: "t", Status: "closed", Priority: 1, Type: "task", CreatedAt: created, UpdatedAt: created, ClosedAt: &closed,
 		BlockedBy: []string{"gt-b", "gt-c"}, Payload: `{"n": 3, "a": 1}`,
 		Dependencies: []api.IssueDep{{ID: "gt-b", Title: "b", Status: "open", DependencyType: "blocks"}},
+		Dependents:   []api.IssueDep{{ID: "gt-w", Title: "w", Status: "open", DependencyType: "tracks"}},
 	})
 	if got.CreatedAt != "2026-10-01T09:00:00Z" || got.ClosedAt != "2026-10-01T10:00:00Z" {
 		t.Errorf("times = %q / %q, want RFC3339 in UTC", got.CreatedAt, got.ClosedAt)
 	}
 	if got.BlockedByCount != 2 || len(got.Dependencies) != 1 || got.Dependencies[0].DependencyType != "blocks" || got.Dependencies[0].Title != "b" {
 		t.Errorf("BlockedByCount = %d, Dependencies = %+v", got.BlockedByCount, got.Dependencies)
+	}
+	if len(got.Dependents) != 1 || got.Dependents[0].ID != "gt-w" || got.Dependents[0].DependencyType != "tracks" {
+		t.Errorf("Dependents = %+v, want the issue that depends on this one, with its relation", got.Dependents)
 	}
 	if got.Payload != `{"a":1,"n":3}` {
 		t.Errorf("Payload = %q, want it compact with sorted keys, as bd returns it", got.Payload)

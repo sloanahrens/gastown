@@ -25,7 +25,7 @@ func tsPtr(t *time.Time) string {
 // issue converts the wire issue to a beads.Issue.
 func issue(a api.Issue) *beads.Issue {
 	return &beads.Issue{
-		Dependencies: deps(a.Dependencies), BlockedByCount: len(a.BlockedBy),
+		Dependencies: deps(a.Dependencies), Dependents: deps(a.Dependents), BlockedByCount: len(a.BlockedBy),
 		ID: a.ID, Title: a.Title, Description: a.Description, Design: a.Design, Notes: a.Notes,
 		Status: a.Status, Priority: a.Priority, Type: a.Type,
 		CreatedAt: ts(a.CreatedAt), CreatedBy: a.CreatedBy, UpdatedAt: ts(a.UpdatedAt), ClosedAt: tsPtr(a.ClosedAt),

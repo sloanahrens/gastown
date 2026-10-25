@@ -119,6 +119,16 @@ func bdReadCarriesDependencies(t *testing.T, s store.Store) {
 	if bare := mustGet(t, s, tracked.ID); len(bare.Dependencies) != 0 || len(bare.BlockedBy) != 0 {
 		t.Errorf("an issue with no outgoing links carries %+v / %v, want none", bare.Dependencies, bare.BlockedBy)
 	}
+	// The other end of the links: what depends on an issue, with the relation.
+	if tr := mustGet(t, s, tracked.ID); len(tr.Dependents) != 1 || tr.Dependents[0].ID != work.ID || tr.Dependents[0].DependencyType != "tracks" || tr.Dependents[0].Title != "work" {
+		t.Errorf("tracked.Dependents = %+v, want work, relation tracks, with its title", tr.Dependents)
+	}
+	if ob := mustGet(t, s, open.ID); len(ob.Dependents) != 1 || ob.Dependents[0].ID != work.ID || ob.Dependents[0].DependencyType != "blocks" {
+		t.Errorf("open blocker Dependents = %+v, want work, relation blocks", ob.Dependents)
+	}
+	if w := mustGet(t, s, work.ID); len(w.Dependents) != 0 {
+		t.Errorf("work.Dependents = %+v, want none: nothing depends on it", w.Dependents)
+	}
 }
 
 func bdNoActorFence(t *testing.T, s store.Store) {
