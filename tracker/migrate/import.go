@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -242,13 +243,26 @@ func copyEvents(ctx context.Context, tx pgx.Tx, ds *Dataset, rep *Report) error 
 
 func writeSettings(ctx context.Context, tx pgx.Tx, ds *Dataset, rep *Report) error {
 	cfg, kv := splitConfig(ds.Config)
+	rig := primaryRig(ds)
 	for k, v := range cfg {
-		if _, err := tx.Exec(ctx, "INSERT INTO tracker.config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", k, v); err != nil {
+		if _, err := tx.Exec(ctx, "INSERT INTO tracker.config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", configKey(rig, k), v); err != nil {
 			return fmt.Errorf("migrate: config %s: %w", k, err)
 		}
 	}
+	// Memories are town-wide. A key two rigs both hold with different values
+	// is a conflict a person must settle; never overwritten silently.
 	for k, v := range kv {
-		if _, err := tx.Exec(ctx, "INSERT INTO tracker.kv (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", k, v); err != nil {
+		var have string
+		err := tx.QueryRow(ctx, "SELECT value FROM tracker.kv WHERE key = $1", k).Scan(&have)
+		switch {
+		case err == nil && have != v:
+			return api.Conflict("memory %q already holds a different value in the tracker; settle which rig's value is right before importing", k)
+		case err == nil:
+			continue
+		case !errors.Is(err, pgx.ErrNoRows):
+			return fmt.Errorf("migrate: kv %s: %w", k, err)
+		}
+		if _, err := tx.Exec(ctx, "INSERT INTO tracker.kv (key, value) VALUES ($1, $2)", k, v); err != nil {
 			return fmt.Errorf("migrate: kv %s: %w", k, err)
 		}
 	}

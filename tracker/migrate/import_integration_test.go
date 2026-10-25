@@ -283,3 +283,69 @@ func TestImportRefusesAndRollsBackWhenItsCopyDoesNotMatch(t *testing.T) {
 		t.Errorf("issues after a mismatching import = %d, %v; want 0, nothing committed", n, err)
 	}
 }
+
+// otherRig is a second Dolt database: its own prefix, config and memories.
+func otherRig() *Dataset {
+	return &Dataset{
+		Issues:        []IssueRow{{ID: "om-a", Title: "other rig", Status: "open", Type: "task", CreatedAt: at(0), UpdatedAt: at(0)}},
+		Events:        []EventRow{{ID: "q1", IssueID: "om-a", Op: "created", CreatedAt: at(0)}},
+		Config:        map[string]string{"issue_prefix": "om", "kv.memory.x": "remember this", "kv.memory.om-only": "mine"},
+		CustomTypes:   []string{"agent", "other"},
+		ChildCounters: map[string]int{"om-a": 1},
+	}
+}
+
+func TestSeveralRigsShareOneTrackerAndEachVerifies(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool, first, second := newPool(t), sample(), otherRig()
+	for _, ds := range []*Dataset{first, second} {
+		if _, err := Import(ctx, pool, ds, Options{}); err != nil {
+			t.Fatalf("Import: %v", err)
+		}
+	}
+	// Each dataset still verifies with the other rig's rows in the tracker.
+	for name, ds := range map[string]*Dataset{"first": first, "second": second} {
+		if diff, err := Verify(ctx, pool, ds); err != nil || !diff.Equal() {
+			t.Errorf("Verify(%s) = %v, %v; want equal with the other rig present", name, diff.Problems, err)
+		}
+	}
+	var gt, om string
+	if err := pool.QueryRow(ctx, "SELECT value FROM tracker.config WHERE key = 'rig.gt.issue_prefix'").Scan(&gt); err != nil || gt != "gt" {
+		t.Errorf("rig.gt.issue_prefix = %q, %v", gt, err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT value FROM tracker.config WHERE key = 'rig.om.issue_prefix'").Scan(&om); err != nil || om != "om" {
+		t.Errorf("rig.om.issue_prefix = %q, %v; one rig's config must not overwrite another's", om, err)
+	}
+	// Tampering with the second rig is caught even though the first is intact.
+	if _, err := pool.Exec(ctx, "UPDATE tracker.issues SET title = 'x' WHERE id = 'om-a'"); err != nil {
+		t.Fatal(err)
+	}
+	if diff, _ := Verify(ctx, pool, second); diff.Equal() {
+		t.Error("Verify missed a change to the second rig")
+	}
+	if diff, _ := Verify(ctx, pool, first); !diff.Equal() {
+		t.Errorf("a change to the second rig showed up in the first's verify: %v", diff.Problems)
+	}
+}
+
+func TestAMemoryTwoRigsHoldDifferentlyIsAConflictNotAnOverwrite(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool, first, second := newPool(t), sample(), otherRig()
+	second.Config["kv.memory.x"] = "a different value"
+	if _, err := Import(ctx, pool, first, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Import(ctx, pool, second, Options{}); !errors.Is(err, api.ErrConflict) {
+		t.Fatalf("Import with a conflicting memory = %v, want api.ErrConflict", err)
+	}
+	var v string
+	if err := pool.QueryRow(ctx, "SELECT value FROM tracker.kv WHERE key = 'kv.memory.x'").Scan(&v); err != nil || v != "remember this" {
+		t.Errorf("memory = %q, %v; the first rig's value must survive", v, err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM tracker.issues WHERE rig = 'om'").Scan(&n); err != nil || n != 0 {
+		t.Errorf("the refused import left %d issues behind, %v", n, err)
+	}
+}

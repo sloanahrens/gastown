@@ -93,3 +93,49 @@ func legacyMetadata(cols map[string]any) []byte {
 	b, _ := json.Marshal(map[string]any{"legacy": kept}) // plain maps; cannot fail
 	return b
 }
+
+// primaryRig is the rig a Dolt database belongs to: its issue_prefix setting,
+// else the only rig its ids use, else "".
+func primaryRig(ds *Dataset) string {
+	if p := ds.Config["issue_prefix"]; p != "" {
+		return p
+	}
+	ids := make([]string, len(ds.Issues))
+	for i, is := range ds.Issues {
+		ids[i] = is.ID
+	}
+	if rigs := rigsOf(ids); len(rigs) == 1 {
+		return rigs[0]
+	}
+	return ""
+}
+
+// configKey namespaces a rig's configuration so several rigs can share the
+// tracker's one config table: "rig.gt.issue_prefix". With no rig it is as is.
+func configKey(rig, key string) string {
+	if rig == "" {
+		return key
+	}
+	return "rig." + rig + "." + key
+}
+
+// idsOf returns the ids of the dataset's issues.
+func idsOf(ds *Dataset) []string {
+	ids := make([]string, len(ds.Issues))
+	for i, is := range ds.Issues {
+		ids[i] = is.ID
+	}
+	return ids
+}
+
+// eventsInRigs counts the events whose issue id belongs to one of rigs: the
+// scope Verify can check in a tracker that holds other rigs too.
+func eventsInRigs(events []EventRow, rigs []string) int {
+	n := 0
+	for _, e := range events {
+		if rig, _, ok := strings.Cut(e.IssueID, "-"); ok && slices.Contains(rigs, rig) {
+			n++
+		}
+	}
+	return n
+}
