@@ -1,7 +1,6 @@
 package store
 
 import (
-	"context"
 	"errors"
 	"reflect"
 	"slices"
@@ -27,15 +26,16 @@ func TestStoreMethodSetIsPinned(t *testing.T) {
 	}
 }
 
-// An unfinished store must say so by name; an empty answer would read as "no
-// issues".
-func TestPostgresStubFailsLoudly(t *testing.T) {
+// An unfinished store method must say so by name; an empty answer would read
+// as "no issues". The helper builds that error for every stubbed method, so
+// it is tested directly: no particular method stays a stub.
+func TestUnimplementedNamesTheMethod(t *testing.T) {
 	t.Parallel()
-	_, err := NewPostgres(nil).GetIssues(context.Background(), []string{"gt-1"})
+	err := unimplemented("SomeMethod")
 	if !errors.Is(err, ErrUnimplemented) {
-		t.Fatalf("GetIssues error = %v, want ErrUnimplemented", err)
+		t.Fatalf("unimplemented() = %v, want ErrUnimplemented", err)
 	}
-	if got := err.Error(); !strings.Contains(got, "Postgres.GetIssues") {
+	if got := err.Error(); !strings.Contains(got, "Postgres.SomeMethod") {
 		t.Errorf("error %q does not name the method", got)
 	}
 }
