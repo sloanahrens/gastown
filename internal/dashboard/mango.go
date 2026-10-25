@@ -38,6 +38,17 @@ const (
 	// best box is one line of column constraints.
 	mangoTargetMax = 40
 	mangoBoxMax    = 240
+
+	// mangoLabelMax caps a target's plain-words title, which the page draws in
+	// the column a target id used to fill.
+	mangoLabelMax = 60
+)
+
+// The reasons the writer gives a not-yet target. The page has a sentence for
+// each; any other word is dropped rather than drawn.
+const (
+	mangoReasonFewPositives       = "few_positives"
+	mangoReasonNoHoldoutPositives = "no_holdout_positives"
 )
 
 // Mango states. Fresh and stale are a panel generated within mangoStale of the
@@ -86,30 +97,45 @@ type mangoPanel struct {
 
 // mangoTarget is one target as the file writes it. A target skipped for too few
 // positives carries its name and its positives with no box, and the writer's
-// not-yet verdict.
+// not-yet verdict. The box's counts, interval, thin flag and the target's label
+// and reason are the writer's newer optional keys: a panel from before they
+// existed leaves them absent.
 type mangoTarget struct {
-	Target      string  `json:"target"`
-	Positives   int     `json:"positives"`
-	Skipped     bool    `json:"skipped"`
-	BestBox     string  `json:"best_box"`
-	HoldoutN    int     `json:"holdout_n"`
-	HoldoutRate float64 `json:"holdout_rate"`
-	Baseline    float64 `json:"baseline"`
-	Verdict     string  `json:"verdict"`
+	Target           string   `json:"target"`
+	Label            string   `json:"label"`
+	Positives        int      `json:"positives"`
+	Skipped          bool     `json:"skipped"`
+	BestBox          string   `json:"best_box"`
+	HoldoutPositives *int     `json:"holdout_positives"`
+	HoldoutN         int      `json:"holdout_n"`
+	HoldoutRate      float64  `json:"holdout_rate"`
+	CILow            *float64 `json:"ci_low"`
+	CIHigh           *float64 `json:"ci_high"`
+	Thin             *bool    `json:"thin"`
+	Baseline         float64  `json:"baseline"`
+	Verdict          string   `json:"verdict"`
+	Reason           string   `json:"reason"`
 }
 
 // MangoTarget is one target as the page draws it, every string stripped and
-// capped. HoldoutRate and Baseline are fractions of the holdout and of the whole
-// set the box was measured against.
+// capped, with its optional keys absent when the panel carried none rather than
+// zeroed for the page to draw. HoldoutRate and Baseline are fractions of the
+// holdout and of the whole set the box was measured against.
 type MangoTarget struct {
-	Target      string  `json:"target"`
-	Positives   int     `json:"positives"`
-	Skipped     bool    `json:"skipped,omitempty"`
-	BestBox     string  `json:"best_box,omitempty"`
-	HoldoutN    int     `json:"holdout_n"`
-	HoldoutRate float64 `json:"holdout_rate"`
-	Baseline    float64 `json:"baseline"`
-	Verdict     string  `json:"verdict"` // earning, no-signal or not-yet
+	Target           string   `json:"target"`
+	Label            string   `json:"label,omitempty"`
+	Positives        int      `json:"positives"`
+	Skipped          bool     `json:"skipped,omitempty"`
+	BestBox          string   `json:"best_box,omitempty"`
+	HoldoutPositives *int     `json:"holdout_positives,omitempty"`
+	HoldoutN         int      `json:"holdout_n"`
+	HoldoutRate      float64  `json:"holdout_rate"`
+	CILow            *float64 `json:"ci_low,omitempty"`
+	CIHigh           *float64 `json:"ci_high,omitempty"`
+	Thin             *bool    `json:"thin,omitempty"`
+	Baseline         float64  `json:"baseline"`
+	Verdict          string   `json:"verdict"` // earning, no-signal or not-yet
+	Reason           string   `json:"reason,omitempty"`
 }
 
 // MangoCounts is how many targets carry each verdict, which is the panel's
@@ -200,13 +226,15 @@ func mangoFreshness(gen, now time.Time) (state, note string) {
 // process's text (cloud.go). A verdict the page does not know returns its note,
 // and the caller reads the panel as an error: an unknown word is not a target to
 // draw as any of the three the page knows, and the rows built before it must not
-// outlive the rejection.
+// outlive the rejection. An optional key the reader cannot place is dropped
+// instead: it costs the row that one field and leaves the panel readable.
 func mangoTargets(in []mangoTarget) ([]MangoTarget, MangoCounts, string) {
 	rows := make([]MangoTarget, 0, len(in))
 	var counts MangoCounts
 	for _, t := range in {
 		row := MangoTarget{
 			Target:      cloudText(t.Target, mangoTargetMax),
+			Label:       cloudText(t.Label, mangoLabelMax),
 			Positives:   t.Positives,
 			Skipped:     t.Skipped,
 			BestBox:     cloudText(t.BestBox, mangoBoxMax),
@@ -214,7 +242,11 @@ func mangoTargets(in []mangoTarget) ([]MangoTarget, MangoCounts, string) {
 			HoldoutRate: t.HoldoutRate,
 			Baseline:    t.Baseline,
 			Verdict:     strings.ToLower(cloudText(t.Verdict, mangoTargetMax)),
+			Reason:      mangoReason(t.Reason),
 		}
+		row.HoldoutPositives = mangoHoldoutPositives(t)
+		row.CILow, row.CIHigh = mangoInterval(t)
+		row.Thin = t.Thin
 		switch row.Verdict {
 		case MangoEarning:
 			counts.Earning++
@@ -228,4 +260,46 @@ func mangoTargets(in []mangoTarget) ([]MangoTarget, MangoCounts, string) {
 		rows = append(rows, row)
 	}
 	return rows, counts, ""
+}
+
+// mangoHoldoutPositives is the box's holdout positives when they are a count the
+// row could hold: not negative, and no more than the holdout the same row
+// reports. A count outside that is not a number this box produced, so the page
+// draws no count rather than a contradiction.
+func mangoHoldoutPositives(t mangoTarget) *int {
+	if t.HoldoutPositives == nil || *t.HoldoutPositives < 0 || *t.HoldoutPositives > t.HoldoutN {
+		return nil
+	}
+	k := *t.HoldoutPositives
+	return &k
+}
+
+// mangoInterval is the box's Wilson interval when both ends are a fraction and
+// the pair is ordered. Both are dropped together: a lone bound is not a range,
+// and a reader that kept one would draw an interval the writer never measured.
+func mangoInterval(t mangoTarget) (low, high *float64) {
+	if t.CILow == nil || t.CIHigh == nil {
+		return nil, nil
+	}
+	lo, hi := *t.CILow, *t.CIHigh
+	if !mangoFraction(lo) || !mangoFraction(hi) || lo > hi {
+		return nil, nil
+	}
+	return &lo, &hi
+}
+
+// mangoFraction reports whether v is a proportion. NaN fails both comparisons,
+// so a value JSON cannot have carried but Go can is dropped too.
+func mangoFraction(v float64) bool {
+	return v >= 0 && v <= 1
+}
+
+// mangoReason is the writer's word for why a target is not-yet, or empty when
+// the word is not one the page has a sentence for.
+func mangoReason(s string) string {
+	switch r := cloudText(s, mangoTargetMax); r {
+	case mangoReasonFewPositives, mangoReasonNoHoldoutPositives:
+		return r
+	}
+	return ""
 }
