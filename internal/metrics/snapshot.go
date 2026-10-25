@@ -41,9 +41,19 @@ func OSEnv(town string) Env {
 		RunEnv:   OSRunnerEnv(DefaultAllowEnv),
 		Now:      time.Now,
 		ReadFile: os.ReadFile,
+		ModTime:  modTime,
 		ReadDir:  listDir,
 		Tail:     tailFile,
 	}
+}
+
+// modTime reports a file's last write time.
+func modTime(path string) (time.Time, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return fi.ModTime(), nil
 }
 
 // listDir lists path as the names and directory flags the sources read.

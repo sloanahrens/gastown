@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -22,9 +23,10 @@ func resourcesTestPath(name string) string {
 	return filepath.Join(resourcesTestTown, ".runtime", "metrics", "resources", name)
 }
 
-// resourcesTestEnv serves the files and read errors a case names. A path with
-// no entry is a file the town does not have.
-func resourcesTestEnv(now time.Time, files map[string][]byte, errs map[string]error) Env {
+// resourcesTestEnv serves the files, read errors and write times a case names.
+// A path with no entry is a file the town does not have; a served file with no
+// write time was written at the snapshot's own instant, which is fresh.
+func resourcesTestEnv(now time.Time, files map[string][]byte, errs map[string]error, mods map[string]time.Time) Env {
 	return Env{
 		Town: resourcesTestTown,
 		Now:  func() time.Time { return now },
@@ -36,6 +38,15 @@ func resourcesTestEnv(now time.Time, files map[string][]byte, errs map[string]er
 				return data, nil
 			}
 			return nil, fs.ErrNotExist
+		},
+		ModTime: func(path string) (time.Time, error) {
+			if at, ok := mods[path]; ok {
+				return at, nil
+			}
+			if _, ok := files[path]; ok {
+				return now, nil
+			}
+			return time.Time{}, fs.ErrNotExist
 		},
 	}
 }
@@ -80,12 +91,15 @@ func TestSourceResourcesCollect(t *testing.T) {
 	afterMidnight := time.Date(2026, 10, 24, 0, 20, 0, 0, time.UTC)
 
 	tests := []struct {
-		name    string
-		now     time.Time
-		files   map[string][]byte
-		errs    map[string]error
-		want    map[string]any
-		wantErr bool
+		name  string
+		now   time.Time
+		files map[string][]byte
+		errs  map[string]error
+		mods  map[string]time.Time
+		want  map[string]any
+		// wantErrHas names substrings the error Collect returns must contain.
+		wantErrHas []string
+		wantErr    bool
 	}{
 		{
 			name: "rolls up the hour across midnight from a plain file and a gzipped one",
@@ -247,6 +261,43 @@ func TestSourceResourcesCollect(t *testing.T) {
 			},
 		},
 		{
+			name: "a sampler file written within the snapshot's hour is fresh",
+			now:  midday,
+			files: map[string][]byte{
+				resourcesTestPath("2026-10-24.jsonl"): resourcesLines(
+					resourcesRow("2026-10-24T17:10:00Z", "sandbox", "supervisor", "5", "10"),
+					resourcesRow("2026-10-24T17:20:00Z", "sandbox", "supervisor", "7", "20"),
+				),
+			},
+			mods: map[string]time.Time{
+				resourcesTestPath("2026-10-24.jsonl"): time.Date(2026, 10, 24, 17, 20, 0, 0, time.UTC),
+			},
+			want: map[string]any{
+				"res_rows_1h":                     2,
+				"res_skipped_rows":                0,
+				"res_unmeasured_values":           0,
+				"res_unreadable_files":            0,
+				"res_sandbox_supervisor_cpu_mean": 6.0,
+				"res_sandbox_supervisor_cpu_max":  7.0,
+				"res_sandbox_supervisor_mem_mean": 15.0,
+				"res_sandbox_supervisor_mem_max":  20.0,
+			},
+		},
+		{
+			name: "a file last written before the snapshot's hour is an error naming it, not zero rows",
+			now:  midday,
+			files: map[string][]byte{
+				resourcesTestPath("2026-10-24.jsonl"): resourcesLines(
+					resourcesRow("2026-10-24T16:50:00Z", "sandbox", "supervisor", "5", "10"),
+				),
+			},
+			mods: map[string]time.Time{
+				resourcesTestPath("2026-10-24.jsonl"): time.Date(2026, 10, 24, 16, 45, 0, 0, time.UTC),
+			},
+			wantErr:    true,
+			wantErrHas: []string{resourcesTestPath("2026-10-24.jsonl"), "2026-10-24T16:45:00Z"},
+		},
+		{
 			name:    "no sampler file for either day is an error, not an empty group",
 			now:     midday,
 			wantErr: true,
@@ -255,10 +306,15 @@ func TestSourceResourcesCollect(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			env := resourcesTestEnv(tt.now, tt.files, tt.errs)
+			env := resourcesTestEnv(tt.now, tt.files, tt.errs, tt.mods)
 			got, err := resourcesSource{}.Collect(context.Background(), env)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Collect error = %v, want error %v", err, tt.wantErr)
+			}
+			for _, want := range tt.wantErrHas {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("Collect error = %v, want it to contain %q", err, want)
+				}
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("Collect =\n%v\nwant\n%v", got, tt.want)

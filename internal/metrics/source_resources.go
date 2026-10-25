@@ -40,6 +40,11 @@ import (
 //
 // The sampler appends while this reads, so the last segment of a file, which
 // has no newline yet, is a row still being written and is not counted.
+//
+// When the newest sampler file was last written before the hour the snapshot
+// sits in, the sampler has stopped: the group is null and an errors entry names
+// the file and its last write time. An hour with no rows would otherwise read
+// as an idle town instead of a dead sampler (gt-vfsi6).
 type resourcesSource struct{}
 
 // resourcesSchemaVersion is the row version this source reads; another v is
@@ -51,8 +56,9 @@ const resourcesWindow = time.Hour
 
 func (resourcesSource) Group() string { return "resources" }
 
-// Collect returns an error only when neither day has a sampler file, so the
-// group is null. A file that exists and cannot be read is counted instead.
+// Collect returns an error, leaving the group null, when neither day has a
+// sampler file and when the newest file was last written before the snapshot's
+// hour. A file that exists and cannot be read is counted instead.
 func (resourcesSource) Collect(_ context.Context, env Env) (map[string]any, error) {
 	now := env.Now().UTC()
 	dir := filepath.Join(env.Town, ".runtime", "metrics", "resources")
@@ -62,12 +68,16 @@ func (resourcesSource) Collect(_ context.Context, env Env) (map[string]any, erro
 		groups: map[string]*resourceComponent{},
 	}
 	found := false
+	newest, newestAt := "", time.Time{}
 	for _, day := range []time.Time{now.AddDate(0, 0, -1), now} {
-		data, err := readResourcesDay(env, dir, day.Format("2006-01-02"))
+		data, path, err := readResourcesDay(env, dir, day.Format("2006-01-02"))
 		if errors.Is(err, errResourcesDayMissing) {
 			continue
 		}
 		found = true
+		if at, statErr := env.ModTime(path); statErr == nil && (newest == "" || at.After(newestAt)) {
+			newest, newestAt = path, at
+		}
 		if err != nil {
 			roll.unreadable++
 			continue
@@ -77,6 +87,10 @@ func (resourcesSource) Collect(_ context.Context, env Env) (map[string]any, erro
 	if !found {
 		return nil, fmt.Errorf("no resource sampler file for today or yesterday under %s", dir)
 	}
+	if hour := now.Truncate(time.Hour); newest != "" && newestAt.Before(hour) {
+		return nil, fmt.Errorf("resource sampler file %s is stale: last written %s, before the snapshot's hour starting %s",
+			newest, newestAt.UTC().Format(time.RFC3339), hour.Format(time.RFC3339))
+	}
 	return roll.columns(), nil
 }
 
@@ -84,26 +98,29 @@ func (resourcesSource) Collect(_ context.Context, env Env) (map[string]any, erro
 // its .gz sibling: the sampler wrote nothing that day, which is not a failure.
 var errResourcesDayMissing = errors.New("no resource sampler file for the day")
 
-// readResourcesDay returns one day's rows: the plain file, or its .gz sibling
-// when the plain file is missing. It returns errResourcesDayMissing when neither
-// exists, and another error when a file exists but its rows cannot be read.
-func readResourcesDay(env Env, dir, date string) ([]byte, error) {
+// readResourcesDay returns one day's rows and the file they came from: the
+// plain file, or its .gz sibling when the plain file is missing. It returns
+// errResourcesDayMissing when neither exists, and another error when a file
+// exists but its rows cannot be read. path names the file in both cases.
+func readResourcesDay(env Env, dir, date string) (data []byte, path string, err error) {
 	plain := filepath.Join(dir, date+".jsonl")
-	data, err := env.ReadFile(plain)
+	data, err = env.ReadFile(plain)
 	if err == nil {
-		return data, nil
+		return data, plain, nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
+		return nil, plain, err
 	}
-	data, err = env.ReadFile(plain + ".gz")
+	path = plain + ".gz"
+	data, err = env.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, errResourcesDayMissing
+		return nil, "", errResourcesDayMissing
 	}
 	if err != nil {
-		return nil, err
+		return nil, path, err
 	}
-	return gunzip(data)
+	data, err = gunzip(data)
+	return data, path, err
 }
 
 // resourceStat is one measure's running mean and max. A stat with no value

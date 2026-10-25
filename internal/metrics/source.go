@@ -30,6 +30,9 @@ type Env struct {
 	Now func() time.Time
 	// ReadFile reads a whole file.
 	ReadFile func(string) ([]byte, error)
+	// ModTime returns a file's last write time, for a source that must tell a
+	// writer that stopped from an hour nothing happened in.
+	ModTime func(string) (time.Time, error)
 	// ReadDir lists a directory, for a source whose files are named by a writer
 	// rather than by the source.
 	ReadDir func(string) ([]DirEntry, error)

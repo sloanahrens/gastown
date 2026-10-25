@@ -57,6 +57,7 @@ func emptyTownEnv(t *testing.T) Env {
 		RunEnv:   func(context.Context, []string, []string) ([]byte, error) { return nil, noCommand },
 		Now:      func() time.Time { return time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC) },
 		ReadFile: miss,
+		ModTime:  func(string) (time.Time, error) { return time.Time{}, fs.ErrNotExist },
 		ReadDir:  func(string) ([]DirEntry, error) { return nil, fs.ErrNotExist },
 		Tail:     func(string, int64) ([]byte, error) { return nil, fs.ErrNotExist },
 	}
