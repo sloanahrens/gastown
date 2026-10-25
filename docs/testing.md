@@ -16,7 +16,7 @@ Three Makefile targets are the test tiers, and `make test` runs all three in ord
 
 Writing a guard test that reads files its own package does not own, such as one that walks `internal/` for a banned symbol? Add it to the table in `internal/land/changed.go` with the paths it reads, so `make presubmit` runs it on the branch that changes one of them; `internal/land/changed_test.go` fails until it is sampled there.
 
-A nested module is invisible to `go test ./...` and `golangci-lint` at the root. The Makefile's `NESTED_MODULES` (plugins and `tracker/`) are built by the gate and presubmit; `TESTED_MODULES` (today `tracker/`, the town tracker) are also vetted and tested after the root suite in `make gate`, tested by `make presubmit` when the branch changes them, and linted by `make lint`. Add a module to `TESTED_MODULES` only with its own cases in `scripts/makefile-gate_test.sh`.
+A nested module is invisible to `go test ./...` and `golangci-lint` at the root. The Makefile's `NESTED_MODULES` (plugins and `tracker/`) are built by the gate and presubmit; `TESTED_MODULES` (today `tracker/`, the town tracker) are also vetted and tested after the root suite in `make gate`, tested by `make presubmit` when the branch changes them, and linted by `make lint`. Add a module to `TESTED_MODULES` only with its own cases in `scripts/makefile-gate_test.sh`. `tracker/` tests that need a real PostgreSQL 17 (`tracker/store/pgtest`) carry the `integration` tag and run in `make test-integration`, not in the gate; set `TRACKER_PG_BIN` when `postgres` is not on `PATH` or in the Homebrew keg.
 
 Exit codes, for every target:
 - 0 means green.

@@ -208,7 +208,7 @@ lint: docs-lint
 	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
 	@echo "lint: golangci-lint run --timeout=5m (a contended lint is retried for up to $(LINT_LOCK_WAIT)s while another run holds the module lock)"
 	bash scripts/lint-lock-wait.sh $(LINT_LOCK_WAIT) golangci-lint run --timeout=5m $(LINT_RUNNER_FLAGS) || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
-	@for m in $(TESTED_MODULES); do echo "lint: golangci-lint run in $$m"; (cd "$$m" && bash ../scripts/lint-lock-wait.sh $(LINT_LOCK_WAIT) golangci-lint run --timeout=5m --config ../.golangci.yml $(LINT_RUNNER_FLAGS)) || { echo "lint failed in $$m"; exit 1; }; done
+	@for m in $(TESTED_MODULES); do echo "lint: golangci-lint run in $$m"; (cd "$$m" && bash ../scripts/lint-lock-wait.sh $(LINT_LOCK_WAIT) golangci-lint run --timeout=5m --config ../.golangci.yml --build-tags integration $(LINT_RUNNER_FLAGS)) || { echo "lint failed in $$m"; exit 1; }; done
 	bash scripts/repo-guards.sh
 	@echo "lint: guardlint (fail-open guard check, gt-udrrw)"
 	go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
@@ -502,6 +502,7 @@ test-integration:
 	@test -n "$(strip $(DOCKER_PKGS))" || { echo "test-integration: internal/testpolicy/docker.txt lists no package; refusing to run go test over nothing" >&2; exit 1; }
 	GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 $(INTEGRATION_GO_TEST) -tags integration -timeout 20m ./...
 	GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 $(INTEGRATION_GO_TEST) -timeout 20m $(DOCKER_PKGS)
+	@for m in $(TESTED_MODULES); do echo "test-integration: vet and integration tier in $$m" >&2; (cd "$$m" && go vet -tags integration ./... && go test -tags integration -timeout 20m ./...) || { echo "test-integration: FAILED in $$m" >&2; exit 1; }; done
 
 # test-integration-wall is test-integration with the tier's wall measured
 # (gt-ik4a1.4.5): the same two commands, each -json, both through one
