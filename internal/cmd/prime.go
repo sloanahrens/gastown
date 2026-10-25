@@ -707,6 +707,9 @@ type primeTools struct {
 	// skipDupes turns off the pre-work duplicate check: set in continuation
 	// and dry-run primes.
 	skipDupes bool
+	// kv reads the rig key-value store when set: the unit tier's stand-in
+	// for the beads client, which would start a real bd.
+	kv func(workDir string) (map[string]string, error)
 }
 
 func (p primeTools) runner() primeRunFunc {
@@ -872,13 +875,12 @@ func (p primeTools) memoryIndex(workDir string) {
 	_, _ = fmt.Fprint(p.w(), renderMemoryIndex(collectMemories(kvs), memoryInjectMaxChars))
 }
 
+// kvList reads the rig's key-value store, where its memories live.
 func (p primeTools) kvList(workDir string) (map[string]string, error) {
-	stdout, _, err := p.command(workDir, "bd", "kv", "list", "--json")
-	if err != nil {
-		return nil, err
+	if p.kv != nil {
+		return p.kv(workDir)
 	}
-
-	return parseBdKvListJSON(stdout.Bytes())
+	return beads.New(workDir).KVList()
 }
 
 // mailCheck runs `gt mail check --inject` and outputs the result.

@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -261,35 +259,4 @@ func truncateWords(runes []rune, max int) string { //nolint:unparam // max is pa
 // typed for scoring too and its slug excludes the type segment (gt-fg4rh).
 func parseMemoryKey(kvKey string) (memType, shortKey string) {
 	return memrecall.ParseKey(kvKey)
-}
-
-// parseBdKvListJSON parses bd kv list --json output into displayable string values.
-func parseBdKvListJSON(data []byte) (map[string]string, error) {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parsing kv list: %w", err)
-	}
-
-	kvs := make(map[string]string, len(raw))
-	for k, v := range raw {
-		var s *string
-		if err := json.Unmarshal(v, &s); err == nil {
-			if s != nil {
-				kvs[k] = *s
-			}
-			continue
-		}
-
-		if !isMemoryKey(k) {
-			continue
-		}
-
-		// Keep non-string memory values visible without promoting bd metadata.
-		var compact bytes.Buffer
-		if err := json.Compact(&compact, v); err != nil {
-			continue
-		}
-		kvs[k] = compact.String()
-	}
-	return kvs, nil
 }

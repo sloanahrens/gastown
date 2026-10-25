@@ -640,60 +640,6 @@ func TestParseMemoryKey(t *testing.T) {
 	}
 }
 
-func TestParseBdKvListJSON(t *testing.T) {
-	t.Parallel()
-	got, err := parseBdKvListJSON([]byte(`{
-		"gt.project.note":"keep me",
-		"gt.project.empty":"",
-		"gt.project.count":12,
-		"gt.project.enabled":true,
-		"gt.project.tags":["one"],
-		"gt.project.config":{"nested":"value"},
-		"schema_version":1,
-		"other":"keep string kvs",
-		"enabled":true,
-		"tags":["one"],
-		"config":{"nested":"value"},
-		"gt.project.null":null
-	}`))
-	if err != nil {
-		t.Fatalf("parseBdKvListJSON() error = %v", err)
-	}
-
-	want := map[string]string{
-		"gt.project.note":    "keep me",
-		"gt.project.empty":   "",
-		"gt.project.count":   "12",
-		"gt.project.enabled": "true",
-		"gt.project.tags":    `["one"]`,
-		"gt.project.config":  `{"nested":"value"}`,
-		"other":              "keep string kvs",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("parseBdKvListJSON() returned %d entries, want %d: %#v", len(got), len(want), got)
-	}
-	for k, wantValue := range want {
-		if got[k] != wantValue {
-			t.Errorf("parseBdKvListJSON()[%q] = %q, want %q", k, got[k], wantValue)
-		}
-	}
-	if _, ok := got["gt.project.null"]; ok {
-		t.Error("parseBdKvListJSON() kept null memory value")
-	}
-	for _, k := range []string{"schema_version", "enabled", "tags", "config"} {
-		if _, ok := got[k]; ok {
-			t.Errorf("parseBdKvListJSON() kept non-memory non-string value for %q", k)
-		}
-	}
-}
-
-func TestParseBdKvListJSONMalformed(t *testing.T) {
-	t.Parallel()
-	if _, err := parseBdKvListJSON([]byte(`{"gt.project.note":`)); err == nil {
-		t.Fatal("parseBdKvListJSON() error = nil, want malformed JSON error")
-	}
-}
-
 // TestRenderMemoryIndex_KeysAreBdKvGetArguments pins the retrieval path the
 // index advertises. Every rendered entry must be a kv key exactly as stored,
 // in both namespaces, so `bd kv get <key>` takes it verbatim; and `bd kv get`

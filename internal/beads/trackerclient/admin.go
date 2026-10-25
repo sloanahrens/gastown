@@ -2,6 +2,7 @@ package trackerclient
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -28,6 +29,17 @@ func (c *Client) ConfigGet(key string) (string, error) {
 // ConfigSet sets a configuration key.
 func (c *Client) ConfigSet(key, value string) error {
 	return mapErr(c.tc.ConfigSet(ctx(), c.configKey(key), value))
+}
+
+// KVList returns no entries: the tracker keeps no key-value store, so a rig on
+// it carries no memories yet. Read task B4 of
+// docs/plans/2026-10-25-town-tracker-plan.md before adding a store here.
+func (c *Client) KVList() (map[string]string, error) { return map[string]string{}, nil }
+
+// KVGet finds nothing for the reason KVList is empty, so every key is
+// ErrNotFound.
+func (c *Client) KVGet(key string) (string, error) {
+	return "", fmt.Errorf("tracker: kv %s: %w", key, beads.ErrNotFound)
 }
 
 // CountIssues counts the rig's durable issues, closed ones included and wisps

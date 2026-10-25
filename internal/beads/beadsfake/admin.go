@@ -45,6 +45,41 @@ func (f *Fake) ConfigSet(key, value string) error {
 	return nil
 }
 
+func (f *Fake) kvMap() map[string]string {
+	if f.kv == nil {
+		f.kv = map[string]string{}
+	}
+	return f.kv
+}
+
+// KVList returns the fake's key-value store.
+func (f *Fake) KVList() (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failure("kv list"); err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(f.kvMap()))
+	for k, v := range f.kvMap() {
+		out[k] = v
+	}
+	return out, nil
+}
+
+// KVGet returns key's value, or an error wrapping beads.ErrNotFound.
+func (f *Fake) KVGet(key string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failure("kv get " + key); err != nil {
+		return "", err
+	}
+	v, ok := f.kvMap()[key]
+	if !ok {
+		return "", fmt.Errorf("kv get %s: %w", key, beads.ErrNotFound)
+	}
+	return v, nil
+}
+
 // CountIssues counts the issues, closed ones included and wisps not.
 func (f *Fake) CountIssues() (int, error) {
 	f.mu.Lock()
@@ -219,9 +254,10 @@ func (f *Fake) SQLCSV(query beadsql.Query) ([][]string, error) { return f.runSQL
 
 // FailWith makes the maintenance command named by op fail with err until
 // cleared with a nil err. op is the bd subcommand as the fake names it:
-// "config get <key>", "config set <key>", "stats", "mol wisp list",
-// "mol wisp gc" (the dry run), "export", "init" or "show" (every Show call,
-// for a store whose answer is unknown rather than not-found).
+// "config get <key>", "config set <key>", "kv list", "kv get <key>", "stats",
+// "mol wisp list", "mol wisp gc" (the dry run), "export", "init" or "show"
+// (every Show call, for a store whose answer is unknown rather than
+// not-found).
 func (f *Fake) FailWith(op string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

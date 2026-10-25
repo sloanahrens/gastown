@@ -126,13 +126,18 @@ type Client interface {
 
 var _ Client = (*Beads)(nil)
 
-// Admin is the maintenance surface beadsfake models: config keys, counts,
-// stats, the wisp list, gc's dry-run candidates and the events journal.
-// beadsfake.RunAdminContract pins the fake to *Beads on it. (SQLCSV and
-// InitDatabase are on *Beads too, but a fake can only script or record them.)
+// Admin is the maintenance surface beadsfake models: config keys, the
+// key-value store, counts, stats, the wisp list, gc's dry-run candidates and
+// the events journal. beadsfake.RunAdminContract pins the fake to *Beads on
+// it. (SQLCSV and InitDatabase are on *Beads too, but a fake can only script
+// or record them.)
 type Admin interface {
 	ConfigGet(key string) (string, error)
 	ConfigSet(key, value string) error
+	// KVList returns the key-value store, values rendered as text.
+	KVList() (map[string]string, error)
+	// KVGet returns key's value, or an error wrapping ErrNotFound.
+	KVGet(key string) (string, error)
 	CountIssues() (int, error)
 	StatsJSON() ([]byte, error)
 	MolWispList() ([]*Issue, error)
