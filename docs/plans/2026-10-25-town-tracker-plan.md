@@ -168,7 +168,7 @@ Each bead delivers the endpoint end to end: Postgres store method, handler, clie
 - **V10** `ChildrenOf` including wisp children. Integration.
 - **V11** events: `GET /events?after=` with the `truncated` error and first seq; `GET /events/stream` over `LISTEN/NOTIFY` with a bounded test (context deadline, no sleep). Integration.
 - **V12** `POST /assigned` (assignees by statuses, one call; R4). Integration.
-- **V13** `GET /board/dispatch` (payload from R3). Integration.
+- **V13** `POST /v1/board/dispatch` (payload from R3, which chose POST over the GET first named). Integration.
 - **V14** `query` and `search` forms gt uses (`ephemeral=true AND status=...`, text search). Scope fixed by R4 and the transcript survey; unsupported forms return `invalid`. Integration.
 - **V15** admin: count, stats, config get and set, kv (also `remember` keyspaces), custom types and statuses. Integration.
 - **V16** `trackerclient`: implements `beads.Client` and `beads.Admin` over `tracker/client`; `RunClientContract` and `RunAdminContract` run against it with `trackerd` in-process (integration tier, shared database per run). Split into V16a (read methods; after V2, V3, V9, V10, V12, V13 and V14), V16b (write methods; after V4 to V8 and V18) and V16c (admin and events; after V11 and V15).
