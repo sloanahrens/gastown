@@ -427,26 +427,6 @@ func TestPolecatCommandFormat(t *testing.T) {
 // when the polecat's cwd is deleted, gt done uses these to determine
 // the branch and path without a working directory.
 // Regression test for PR #1402.
-func TestPolecatAgentEnvConfigCarriesTheAgentGOFLAGS(t *testing.T) {
-	t.Parallel()
-
-	rc := &config.RuntimeConfig{Env: map[string]string{"GOFLAGS": "-p=4", "OTHER": "x"}}
-	cfg := polecatAgentEnvConfig("myrig", "Toast", "/town", "gt-Toast", SessionStartOptions{Agent: "a"}, rc)
-	if cfg.AgentGOFLAGS != "-p=4" {
-		t.Errorf("AgentGOFLAGS = %q, want -p=4 from the agent env", cfg.AgentGOFLAGS)
-	}
-	if cfg.Role != "polecat" || cfg.Rig != "myrig" || cfg.AgentName != "Toast" || cfg.SessionName != "gt-Toast" || cfg.Agent != "a" {
-		t.Errorf("config lost its identity fields: %+v", cfg)
-	}
-	env := config.AgentEnv(cfg)
-	if got := env["GOFLAGS"]; got != "-p=4" {
-		t.Errorf("session GOFLAGS = %q, want -p=4 (the agent env's cap, not the default 8)", got)
-	}
-	if got := polecatAgentEnvConfig("r", "p", "/t", "s", SessionStartOptions{}, nil).AgentGOFLAGS; got != "" {
-		t.Errorf("a nil runtime config gave AgentGOFLAGS %q, want empty", got)
-	}
-}
-
 func TestPolecatStartInjectsFallbackEnvVars(t *testing.T) {
 	t.Parallel()
 	rigName := "gastown"
@@ -493,6 +473,63 @@ func TestPolecatStartInjectsFallbackEnvVars(t *testing.T) {
 	// Verify GT_BRANCH matches expected branch
 	if envVars["GT_BRANCH"] != branchName {
 		t.Errorf("GT_BRANCH = %q, want %q", envVars["GT_BRANCH"], branchName)
+	}
+}
+
+func TestPolecatAgentEnvConfigCarriesTheAgentGOFLAGS(t *testing.T) {
+	t.Parallel()
+
+	rc := &config.RuntimeConfig{Env: map[string]string{"GOFLAGS": "-p=4", "OTHER": "x"}}
+	cfg := polecatAgentEnvConfig("myrig", "Toast", "/town", "gt-Toast", SessionStartOptions{Agent: "a"}, rc)
+	if cfg.AgentGOFLAGS != "-p=4" {
+		t.Errorf("AgentGOFLAGS = %q, want -p=4 from the agent env", cfg.AgentGOFLAGS)
+	}
+	if cfg.Role != "polecat" || cfg.Rig != "myrig" || cfg.AgentName != "Toast" || cfg.SessionName != "gt-Toast" || cfg.Agent != "a" {
+		t.Errorf("config lost its identity fields: %+v", cfg)
+	}
+	env := config.AgentEnv(cfg)
+	if got := env["GOFLAGS"]; got != "-p=4" {
+		t.Errorf("session GOFLAGS = %q, want -p=4 (the agent env's cap, not the default 8)", got)
+	}
+	if got := polecatAgentEnvConfig("r", "p", "/t", "s", SessionStartOptions{}, nil).AgentGOFLAGS; got != "" {
+		t.Errorf("a nil runtime config gave AgentGOFLAGS %q, want empty", got)
+	}
+}
+
+// The helper's test cannot show that launch() fills it from the resolved
+// agent config; this drives launch itself, so a launch call that drops
+// runtimeConfig leaves the seat at the cap and fails here (gt-y2mad).
+//
+//testpolicy:allow parallel — sets the spawning environment through t.Setenv, which a parallel test must not do, and points the process-wide sandbox routing at a temp town
+func TestLaunchGivesTheSessionTheAgentConfigGOFLAGS(t *testing.T) {
+	// No -p in the spawning environment, so the session's can only come from
+	// the agent config: the cap would otherwise append -p=8 to this value.
+	//testpolicy:allow no-env — the spawning GOFLAGS is the input under test: AgentEnv reads it from the process environment, and the session's -p must come from the agent config instead
+	t.Setenv("GOFLAGS", "-mod=mod")
+	town, rigPath, workDir, w := sandboxLaunchTown(t)
+	ts := config.NewTownSettings()
+	ts.Agents = map[string]*config.RuntimeConfig{
+		"seat-p4": {Command: "claude", Args: []string{"--dangerously-skip-permissions"}, Env: map[string]string{"GOFLAGS": "-p=4"}},
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(town), ts); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]string
+	m := &SessionManager{
+		tmux: envCapturingTmux{newFakeSessionTmux(), &got},
+		rig:  &rig.Rig{Name: "gastown", Path: rigPath},
+		gits: w.opener(),
+	}
+
+	err := m.launch("box", m.SessionName("box"), SessionStartOptions{
+		WorkDir: workDir,
+		Agent:   "seat-p4",
+	})
+	if err == nil || !strings.Contains(err.Error(), "captured") {
+		t.Fatalf("launch error = %v, want the capturing tmux's refusal", err)
+	}
+	if got["GOFLAGS"] != "-p=4" {
+		t.Errorf("session GOFLAGS = %q, want -p=4 from the agent config", got["GOFLAGS"])
 	}
 }
 
