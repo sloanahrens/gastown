@@ -78,7 +78,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	if want := store.SchemaLevel(); level != want {
 		return fmt.Errorf("database is at schema level %d, this binary needs %d; run trackerd -migrate", level, want)
 	}
-	srv := server.New(server.Config{Auth: pg, Health: pg, SchemaLevel: store.SchemaLevel(), Log: log.New(stderr, "trackerd: ", log.LstdFlags)})
+	srv := server.New(server.Config{Store: pg, Auth: pg, Health: pg, SchemaLevel: store.SchemaLevel(), Log: log.New(stderr, "trackerd: ", log.LstdFlags)})
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
