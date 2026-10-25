@@ -72,12 +72,12 @@ func TestGuardPassesWhenThePinIsMain(t *testing.T) {
 		mainSHA: {"go.mod": goMod("example/devops", "github.com/x/a")},
 	})
 	pins := []Source{{Rig: "devops", Commit: mainSHA}}
-	if err := Guard(pins, "gastown", town, f.run); err != nil {
+	if _, err := Guard(pins, "gastown", town, f.run); err != nil {
 		t.Fatalf("Guard on a pin equal to main = %v, want nil", err)
 	}
 }
 
-func TestGuardFailsNamingTheRigPinAndMainWhenThePinIsBehind(t *testing.T) {
+func TestGuardPassesABehindPinWithTheSameModulesWithANote(t *testing.T) {
 	t.Parallel()
 	f := &guardGit{answer: map[string]string{}}
 	seedRig(f, "devops", mainSHA, map[string]map[string]string{
@@ -85,12 +85,29 @@ func TestGuardFailsNamingTheRigPinAndMainWhenThePinIsBehind(t *testing.T) {
 		mainSHA: {"go.mod": goMod("example/devops", "github.com/x/a")},
 	})
 	f.answer[rigDir("devops")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
-	pins := []Source{{Rig: "devops", Commit: pinSHA}}
-	err := Guard(pins, "gastown", town, f.run)
-	if err == nil {
-		t.Fatal("Guard on a pin behind main = nil, want an error")
+	f.answer[rigDir("devops")+" rev-list --count "+pinSHA+".."+mainSHA] = "14\n"
+	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	if err != nil {
+		t.Fatalf("Guard on a behind pin with the same modules = %v, want nil", err)
 	}
-	for _, want := range []string{"devops", short(pinSHA), short(mainSHA), "behind its main", "make polecat-seed-pins"} {
+	if len(notes) != 1 || !strings.Contains(notes[0], "no module coverage gap") || !strings.Contains(notes[0], "14 commits behind") {
+		t.Errorf("notes = %v, want one note naming the rig, the pin, the commits behind and no coverage gap", notes)
+	}
+}
+
+func TestGuardFailsWhenABehindPinLacksAModuleMainRequires(t *testing.T) {
+	t.Parallel()
+	f := &guardGit{answer: map[string]string{}}
+	seedRig(f, "devops", mainSHA, map[string]map[string]string{
+		pinSHA:  {"go.mod": goMod("example/devops", "github.com/x/a")},
+		mainSHA: {"go.mod": goMod("example/devops", "github.com/x/a", "github.com/x/new")},
+	})
+	f.answer[rigDir("devops")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
+	_, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	if err == nil {
+		t.Fatal("Guard on a pin lacking a module main requires = nil, want an error")
+	}
+	for _, want := range []string{"devops", short(pinSHA), short(mainSHA), "github.com/x/new (in .)"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name %q", err, want)
 		}
@@ -112,7 +129,7 @@ func TestGuardNamesANestedModuleThePinLacks(t *testing.T) {
 	})
 	f.answer[rigDir("gastown")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
 	pins := []Source{{Rig: "gastown", Commit: pinSHA}}
-	err := Guard(pins, "devops", town, f.run)
+	_, err := Guard(pins, "devops", town, f.run)
 	if err == nil {
 		t.Fatal("Guard on a pin that lacks a nested module = nil, want an error")
 	}
@@ -126,7 +143,7 @@ func TestGuardSkipsTheBuildRig(t *testing.T) {
 	t.Parallel()
 	f := &guardGit{answer: map[string]string{}}
 	pins := []Source{{Rig: "gastown", Commit: pinSHA}}
-	if err := Guard(pins, "gastown", town, f.run); err != nil {
+	if _, err := Guard(pins, "gastown", town, f.run); err != nil {
 		t.Fatalf("Guard on the build rig = %v, want nil", err)
 	}
 	if len(f.calls) != 0 {
@@ -138,7 +155,7 @@ func TestGuardFailsWhenMainCannotBeRead(t *testing.T) {
 	t.Parallel()
 	f := &guardGit{answer: map[string]string{}}
 	pins := []Source{{Rig: "devops", Commit: pinSHA}}
-	err := Guard(pins, "gastown", town, f.run)
+	_, err := Guard(pins, "gastown", town, f.run)
 	if err == nil {
 		t.Fatal("Guard with no origin/main = nil, want an error naming the rig")
 	}
@@ -147,7 +164,7 @@ func TestGuardFailsWhenMainCannotBeRead(t *testing.T) {
 	}
 }
 
-func TestGuardSaysAPinThatIsNotAnAncestorOfMainIsAheadOrDiverged(t *testing.T) {
+func TestGuardPassesAnAheadOrDivergedPinWithEqualModulesWithANote(t *testing.T) {
 	t.Parallel()
 	f := &guardGit{answer: map[string]string{}}
 	seedRig(f, "devops", mainSHA, map[string]map[string]string{
@@ -155,12 +172,12 @@ func TestGuardSaysAPinThatIsNotAnAncestorOfMainIsAheadOrDiverged(t *testing.T) {
 		mainSHA: {"go.mod": goMod("example/devops")},
 	})
 	// no merge-base answer: the pin is not an ancestor of main
-	err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
-	if err == nil {
-		t.Fatal("Guard on an ahead or diverged pin = nil, want an error")
+	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	if err != nil {
+		t.Fatalf("Guard on an ahead or diverged pin with equal modules = %v, want nil", err)
 	}
-	if !strings.Contains(err.Error(), "ahead or diverged") || strings.Contains(err.Error(), "behind its main") {
-		t.Errorf("error %q should say ahead or diverged, not behind", err)
+	if len(notes) != 1 || !strings.Contains(notes[0], "ahead or diverged") {
+		t.Errorf("notes = %v, want one note saying ahead or diverged", notes)
 	}
 }
 
@@ -170,7 +187,7 @@ func TestGuardNamesAPinThatIsNotInItsCheckout(t *testing.T) {
 	dir := rigDir("devops")
 	f.answer[dir+" rev-parse --verify origin/main^{commit}"] = mainSHA + "\n"
 	// no ls-tree answer for the pin: the commit is not in this checkout
-	err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	_, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
 	if err == nil {
 		t.Fatal("Guard on a pin the checkout lacks = nil, want an error")
 	}
@@ -187,7 +204,7 @@ func TestGuardReadsOnlyGitQueries(t *testing.T) {
 	seedRig(f, "devops", mainSHA, map[string]map[string]string{
 		mainSHA: {"go.mod": goMod("example/devops")},
 	})
-	_ = Guard([]Source{{Rig: "devops", Commit: mainSHA}}, "gastown", town, f.run)
+	_, _ = Guard([]Source{{Rig: "devops", Commit: mainSHA}}, "gastown", town, f.run)
 	allowed := map[string]bool{"rev-parse": true, "ls-tree": true, "show": true, "merge-base": true}
 	for _, c := range f.calls {
 		args := strings.Fields(c)

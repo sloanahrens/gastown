@@ -9,15 +9,19 @@ import (
 	"golang.org/x/mod/modfile"
 )
 
-// Guard is the pin-drift check (gt-n3ewt): a committed pin for a rig other
-// than the build rig must be that rig's main, so the image seeds the modules
-// main's code needs. A pin that is behind main fails, naming the rig, the pin,
-// the main sha and any nested go.mod module the pin lacks. The build rig takes
-// the build commit and has no committed pin, so it is skipped.
+// Guard is the pin-drift check (gt-n3ewt): a committed pin for a rig other than
+// the build rig must carry every module that rig's main requires, so the image
+// can build the code main runs. A pin that is behind main but has the same module
+// set passes, with a note: a live rig's main moves every few minutes, and a
+// behind pin with no coverage gap does not break a build. A pin whose modules
+// are missing a module main requires fails, naming the rig, the pin, the main
+// sha and the missing modules. The build rig takes the build commit and has no
+// committed pin, so it is skipped.
 //
 // The main sha is read from the rig's canonical checkout (origin/main as it
-// stands there); the guard never fetches.
-func Guard(pins []Source, buildRig, town string, git Git) error {
+// stands there); the guard never fetches. It returns one note per rig that is
+// behind main but has no coverage gap.
+func Guard(pins []Source, buildRig, town string, git Git) (notes []string, err error) {
 	for _, src := range pins {
 		if src.Rig == buildRig {
 			continue
@@ -25,7 +29,7 @@ func Guard(pins []Source, buildRig, town string, git Git) error {
 		dir := path.Join(town, src.Rig, "mayor", "rig")
 		out, err := git(dir, "rev-parse", "--verify", "origin/main^{commit}")
 		if err != nil {
-			return fmt.Errorf("pin-drift guard: cannot read origin/main of rig %s in %s (%v): fetch that checkout through the town's path, then rerun", src.Rig, dir, err)
+			return nil, fmt.Errorf("pin-drift guard: cannot read origin/main of rig %s in %s (%v): fetch that checkout through the town's path, then rerun", src.Rig, dir, err)
 		}
 		main := strings.TrimSpace(string(out))
 		if src.Commit == main {
@@ -33,19 +37,27 @@ func Guard(pins []Source, buildRig, town string, git Git) error {
 		}
 		missing, err := missingModules(git, dir, src.Commit, main)
 		if err != nil {
-			return fmt.Errorf("pin-drift guard: rig %s pin %s is not readable in its canonical checkout, so it cannot be compared with main %s (%v): fetch or fix that checkout, then rerun", src.Rig, short(src.Commit), short(main), err)
+			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is not readable in its canonical checkout, so it cannot be compared with main %s (%v): fetch or fix that checkout, then rerun", src.Rig, short(src.Commit), short(main), err)
 		}
-		state := "behind its main"
-		if _, err := git(dir, "merge-base", "--is-ancestor", src.Commit, main); err != nil {
-			state = "not an ancestor of its main (ahead or diverged from)"
-		}
-		msg := fmt.Sprintf("pin-drift guard: rig %s pin %s is %s %s; run make polecat-seed-pins on the canonical checkout at main, then commit the pin", src.Rig, short(src.Commit), state, short(main))
 		if len(missing) > 0 {
-			msg += "; the pin lacks: " + strings.Join(missing, ", ")
+			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s lacks modules its main %s requires: %s; run make polecat-seed-pins on the canonical checkout at main, then commit the pin", src.Rig, short(src.Commit), short(main), strings.Join(missing, ", "))
 		}
-		return fmt.Errorf("%s", msg)
+		notes = append(notes, fmt.Sprintf("pin-drift guard: rig %s pin %s is %s, main %s: no module coverage gap", src.Rig, short(src.Commit), behind(git, dir, src.Commit, main), short(main)))
 	}
-	return nil
+	return notes, nil
+}
+
+// behind describes where the pin stands against main: how many commits behind
+// when the pin is an ancestor of main, and "ahead or diverged" otherwise.
+func behind(git Git, dir, pin, main string) string {
+	if _, err := git(dir, "merge-base", "--is-ancestor", pin, main); err != nil {
+		return "not an ancestor of its main (ahead or diverged)"
+	}
+	out, err := git(dir, "rev-list", "--count", pin+".."+main)
+	if err != nil {
+		return "behind its main"
+	}
+	return fmt.Sprintf("%s commits behind its main", strings.TrimSpace(string(out)))
 }
 
 // missingModules lists the modules main's go.mod files require that the pin's

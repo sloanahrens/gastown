@@ -47,9 +47,13 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "polecat-seed: %v\n", err)
 		return 1
 	}
-	if err := seed.Guard(pinned, *buildRig, *town, seed.ExecGit); err != nil {
+	notes, err := seed.Guard(pinned, *buildRig, *town, seed.ExecGit)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "polecat-seed: %v\n", err)
 		return 1
+	}
+	for _, n := range notes {
+		fmt.Printf("polecat-seed: %s\n", n)
 	}
 	for _, s := range sources {
 		how := "pinned"

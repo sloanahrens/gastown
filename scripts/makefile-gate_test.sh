@@ -321,12 +321,15 @@ fi
 gtown2="$SEEDTMP/behindtown"
 mkdir -p "$gtown2/fx/mayor/rig"
 git -C "$gtown2/fx/mayor/rig" init -q -b main
+printf 'module example.invalid/fx\n\ngo 1.21\n' >"$gtown2/fx/mayor/rig/go.mod"
 echo one >"$gtown2/fx/mayor/rig/a.txt"
-git -C "$gtown2/fx/mayor/rig" add a.txt
+git -C "$gtown2/fx/mayor/rig" add go.mod a.txt
 git -C "$gtown2/fx/mayor/rig" -c user.name=t -c user.email=t@example.invalid commit -q -m first
 bpin=$(git -C "$gtown2/fx/mayor/rig" rev-parse HEAD)
+# main requires a module the pin lacks: the guard must fail on that gap, not on the lag
+printf 'module example.invalid/fx\n\ngo 1.21\n\nrequire github.com/x/missing v1.0.0\n' >"$gtown2/fx/mayor/rig/go.mod"
 echo two >"$gtown2/fx/mayor/rig/b.txt"
-git -C "$gtown2/fx/mayor/rig" add b.txt
+git -C "$gtown2/fx/mayor/rig" add go.mod b.txt
 git -C "$gtown2/fx/mayor/rig" -c user.name=t -c user.email=t@example.invalid commit -q -m second
 git -C "$gtown2/fx/mayor/rig" update-ref refs/remotes/origin/main "$(git -C "$gtown2/fx/mayor/rig" rev-parse HEAD)"
 mkdir -p "$gtown2/gastown/mayor/rig"
@@ -338,7 +341,7 @@ gbuild2=$(git -C "$gtown2/gastown/mayor/rig" rev-parse HEAD)
 printf 'fx %s\n' "$bpin" >"$gtown2/pins"
 if bout=$(make -C "$ROOT" --no-print-directory polecat-seed-stage POLE_TOWN="$gtown2" POLE_SEED_PINS="$gtown2/pins" POLE_SEED_DIR="$gtown2/out" POLE_SEED_RIGS=fx POLE_COMMIT="$gbuild2" 2>&1); then
   fail "a stale committed pin stops the seed stage before anything is staged" "exited 0: $bout"
-elif grep -q -F 'pin-drift guard: rig fx pin' <<<"$bout" && grep -q -F 'behind its main' <<<"$bout" && [[ ! -e "$gtown2/out/fx" ]]; then
+elif grep -q -F 'pin-drift guard: rig fx pin' <<<"$bout" && grep -q -F 'lacks modules its main' <<<"$bout" && grep -q -F 'github.com/x/missing' <<<"$bout" && [[ ! -e "$gtown2/out/fx" ]]; then
   pass "a stale committed pin stops the seed stage before anything is staged"
 else
   fail "a stale committed pin stops the seed stage before anything is staged" "$bout"
