@@ -26,23 +26,26 @@ without it the log holds only the rows someone collected by hand and the join
 of snapshots to landings has nothing to read, and the dashboard's panel ages
 past its 36h stale mark.
 
-`run.sh` is a script because the daemon dispatches script plugins; both steps
-are Go (`internal/metrics`, `internal/cmd/metrics_snapshot.go`,
-`internal/cmd/metrics_analysis.go`). The wrapper does three things and nothing
-more:
+`run.sh` is a script only because the daemon dispatches script plugins: it
+changes to the town root and execs `gt metrics run`. Everything the hour does is
+Go: `internal/cmd/metrics_run.go` (the hour), `internal/metrics/townlock.go` (the
+lock), and the two steps in `internal/cmd/metrics_snapshot.go` and
+`internal/cmd/metrics_analysis.go`. `gt metrics run` does three things and
+nothing more:
 
-1. Takes the single-flight lock `<town>/.runtime/town-metrics.lock`. The file
-   holds the pid of the run that owns it, so a lock whose pid is gone is a crash
-   leftover: the next run renames it aside and takes over. A lock a live run
-   holds prints a skipped line and exits 0, which records the run as skipped
-   rather than as an overlap failure.
-2. Runs `gt metrics snapshot`, then `gt metrics analyse`, and passes both
-   outputs through unchanged. The snapshot's receipt line —
+1. Takes the single-flight lock `<town>/.runtime/town-metrics.lock` with a
+   non-blocking `flock(2)`. The file holds the pid of the run that owns it. The
+   kernel drops the flock when the holder exits, however it exits, so a run the
+   daemon killed leaves nothing to take over and there is no stale-lock path. A
+   lock a live run holds prints a skipped line and exits 0, which records the
+   run as skipped rather than as an overlap failure.
+2. Runs the snapshot, then the analysis, and passes both outputs through
+   unchanged. The snapshot's receipt line —
    `snapshot <ts> appended to <path> (<n> groups, <m> errors)` — is the hour's
    record; the analysis prints either
    `analyse <ts>: <n> landings, <t> targets -> <panel>` or a not-due line, which
    is what an hour that is not a day's boundary looks like.
-3. Exits with the first failing step's code, so both steps always run. A source
+3. Exits with the first failing step's error, so both steps always run. A source
    that fails inside the snapshot is an `errors` entry in the record, not a
    failure here; only a failed append exits non-zero, and the daemon escalates
    that once under `plugin:town-metrics:failed`, which the next good run closes.
@@ -58,5 +61,7 @@ Run it directly:
 bash ~/gt/plugins/town-metrics/run.sh
 ```
 
-Its tests are `run_test.sh` beside it: a fake `gt` on a temporary PATH against a
-temporary town root, so no real snapshot is appended.
+Its tests are Go: `internal/metrics/townlock_test.go` (the lock is held until
+released, records the holder's pid, and is not blocked by a dead run's leftover)
+and `internal/cmd/metrics_run_test.go` (a held lock skips the hour and appends
+nothing).
