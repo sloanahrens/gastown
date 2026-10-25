@@ -9,17 +9,58 @@ import (
 	"github.com/steveyegge/gastown/tracker/api"
 )
 
-// blockedCTE defines `blocked`: issues with an open `blocks` blocker, plus,
-// transitively, the children of any blocked issue (a blocked parent blocks its
-// children). Links of other types, and external targets, never block.
-const blockedCTE = `direct AS (
+// A link blocks when its type is in blockingTypes and its target is neither
+// closed nor pinned (resolvedStatuses); blocked issues pass that down to their
+// children. Every query that asks "what blocks" builds its SQL from these two
+// lists, so ready, blocked, BlockedBy and the close fence cannot disagree.
+var (
+	blockingTypes    = []string{"blocks", "conditional-blocks"}
+	resolvedStatuses = []string{"closed", "pinned"}
+)
+
+// sqlList renders a list of constants as a SQL list literal: ('a', 'b').
+func sqlList(vals []string) string {
+	quoted := make([]string, len(vals))
+	for i, v := range vals {
+		quoted[i] = "'" + v + "'"
+	}
+	return "(" + strings.Join(quoted, ", ") + ")"
+}
+
+var (
+	// blocking is the SQL list of types that block.
+	blocking = sqlList(blockingTypes)
+	// unresolved is the condition, on an alias t, that a target still blocks.
+	unresolved = "t.status NOT IN " + sqlList(resolvedStatuses)
+)
+
+// blockedCTE defines `blocked` for the whole database: issues with an
+// unresolved blocker, plus, transitively, the children of any blocked issue (a
+// blocked parent blocks its children). Links of other types, and external
+// targets, never block.
+var blockedCTE = `direct AS (
   SELECT DISTINCT d.issue_id AS id FROM tracker.dependencies d
   JOIN tracker.issues t ON t.id = d.depends_on
-  WHERE d.type = 'blocks' AND t.status <> 'closed'
+  WHERE d.type IN ` + blocking + ` AND ` + unresolved + `
 ), blocked AS (
   SELECT id FROM direct
   UNION
   SELECT c.id FROM tracker.issues c JOIN blocked b ON c.parent_id = b.id
+)`
+
+// moleculeBlockedCTE defines `blocked` inside a molecule: only the links
+// between its own steps count, and what blocks the root or lies outside does
+// not reach in. A molecule's root waits on its work bead while its steps are
+// still done in order, and gt's step walker depends on that.
+var moleculeBlockedCTE = `direct AS (
+  SELECT DISTINCT d.issue_id AS id FROM tracker.dependencies d
+  JOIN tracker.issues t ON t.id = d.depends_on
+  WHERE d.type IN ` + blocking + ` AND ` + unresolved + `
+    AND d.issue_id IN (SELECT id FROM scope) AND d.depends_on IN (SELECT id FROM scope)
+), blocked AS (
+  SELECT id FROM direct
+  UNION
+  SELECT c.id FROM tracker.issues c JOIN blocked b ON c.parent_id = b.id WHERE c.id IN (SELECT id FROM scope)
 )`
 
 // scopeCTE defines `scope`: every descendant of the molecule root $n, wisps
@@ -42,12 +83,13 @@ func buildReadyQuery(f api.ReadyFilter, cur *listCursor, limit int, blocked bool
 		args = append(args, v)
 		return "$" + strconv.Itoa(len(args))
 	}
-	ctes := "WITH RECURSIVE " + blockedCTE
+	var ctes string
 	var where []string
 	if f.Molecule != "" {
-		ctes += ", " + scopeCTE(arg(f.Molecule))
+		ctes = "WITH RECURSIVE " + scopeCTE(arg(f.Molecule)) + ", " + moleculeBlockedCTE
 		where = append(where, "issues.id IN (SELECT id FROM scope)")
 	} else {
+		ctes = "WITH RECURSIVE " + blockedCTE
 		where = append(where, "issues.ephemeral = false")
 	}
 	if blocked {
@@ -143,7 +185,7 @@ func (p *Postgres) fillBlockedBy(ctx context.Context, issues []api.Issue) error 
 	}
 	rows, err := p.pool.Query(ctx, `SELECT d.issue_id, d.depends_on FROM tracker.dependencies d
 JOIN tracker.issues t ON t.id = d.depends_on
-WHERE d.issue_id = ANY($1) AND d.type = 'blocks' AND t.status <> 'closed' ORDER BY d.issue_id, d.depends_on`, ids)
+WHERE d.issue_id = ANY($1) AND d.type IN `+blocking+` AND `+unresolved+` ORDER BY d.issue_id, d.depends_on`, ids)
 	if err != nil {
 		return fmt.Errorf("store: blocked by: %w", err)
 	}

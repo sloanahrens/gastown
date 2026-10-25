@@ -17,6 +17,8 @@ func init() {
 	register(Case{Name: "links of other types and external targets never block", Run: readyNonBlocking})
 	register(Case{Name: "ready filters: rig, parent, unassigned, excluded labels and types", Run: readyFilters})
 	register(Case{Name: "a molecule scope reaches its wisp steps in dependency order and not the root", Run: readyMolecule})
+	register(Case{Name: "a conditional-blocks link blocks like blocks does", Run: readyConditionalBlocks})
+	register(Case{Name: "inside a molecule only links among its own steps hold a step back", Run: readyMoleculeLocal})
 	register(Case{Name: "ready pages in priority order without gaps", Run: readyPaging})
 	register(Case{Name: "blocked lists what is held and by whom", Run: blockedList})
 	register(Case{Name: "children of many parents, any status, wisps included", Run: childrenOfMany})
@@ -226,4 +228,35 @@ func readyDeferral(t *testing.T, s store.Store) {
 	if got := mustGet(t, s, cleared.ID); got.DeferUntil != nil {
 		t.Errorf("DeferUntil = %v after being cleared, want none", got.DeferUntil)
 	}
+}
+
+func readyConditionalBlocks(t *testing.T, s store.Store) {
+	gate := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "gate"})
+	held := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "held by a conditional link"})
+	mustDep(t, s, held.ID, gate.ID, "conditional-blocks")
+	sameSet(t, "ready while the conditional blocker is open", ids(mustReady(t, s, api.ReadyFilter{})), gate.ID)
+	if err := s.CloseIssues(ctx(), []string{gate.ID}, "r", false); err != nil {
+		t.Fatal(err)
+	}
+	sameSet(t, "ready after it closed", ids(mustReady(t, s, api.ReadyFilter{})), held.ID)
+}
+
+// bd ready --mol answers from the molecule's own steps: a root that waits on
+// its work bead, or a step that waits on something outside, does not hold the
+// steps back, which is what gt's step walker needs to do the work in order.
+func readyMoleculeLocal(t *testing.T, s store.Store) {
+	work := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "the work bead, still open"})
+	root := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "mol", Type: "molecule", Ephemeral: true})
+	one := mustCreate(t, s, api.CreateParams{Parent: root.ID, Title: "step one", Ephemeral: true})
+	two := mustCreate(t, s, api.CreateParams{Parent: root.ID, Title: "step two", Ephemeral: true})
+	mustDep(t, s, root.ID, work.ID, "blocks") // the root waits on an open bead outside
+	mustDep(t, s, two.ID, one.ID, "blocks")   // a chain inside
+	mustDep(t, s, one.ID, work.ID, "blocks")  // and step one also names the outside bead
+	sub := mustCreate(t, s, api.CreateParams{Parent: two.ID, Title: "sub-step of step two", Ephemeral: true})
+	// Step two is held by step one, and a blocked step holds back its own children.
+	sameSet(t, "steps ready while the work bead is open", ids(mustReady(t, s, api.ReadyFilter{Molecule: root.ID})), one.ID)
+	if err := s.CloseIssues(ctx(), []string{one.ID}, "r", true); err != nil {
+		t.Fatal(err)
+	}
+	sameSet(t, "steps ready after step one closed", ids(mustReady(t, s, api.ReadyFilter{Molecule: root.ID})), two.ID, sub.ID)
 }
