@@ -19,6 +19,7 @@ func init() {
 	register(Case{Name: "a molecule scope reaches its wisp steps in dependency order and not the root", Run: readyMolecule})
 	register(Case{Name: "a conditional-blocks link blocks like blocks does", Run: readyConditionalBlocks})
 	register(Case{Name: "inside a molecule only links among its own steps hold a step back", Run: readyMoleculeLocal})
+	register(Case{Name: "the ready board leaves out merge requests, gates, molecule roots and rig beads", Run: readyExcludedKinds})
 	register(Case{Name: "ready pages in priority order without gaps", Run: readyPaging})
 	register(Case{Name: "blocked lists what is held and by whom", Run: blockedList})
 	register(Case{Name: "children of many parents, any status, wisps included", Run: childrenOfMany})
@@ -259,4 +260,18 @@ func readyMoleculeLocal(t *testing.T, s store.Store) {
 		t.Fatal(err)
 	}
 	sameSet(t, "steps ready after step one closed", ids(mustReady(t, s, api.ReadyFilter{Molecule: root.ID})), two.ID, sub.ID)
+}
+
+func readyExcludedKinds(t *testing.T, s store.Store) {
+	work := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "work"})
+	epic := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "an epic", Type: "epic"})
+	feature := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "a feature", Type: "feature"})
+	for _, typ := range []string{"merge-request", "gate", "molecule", "rig", "agent", "role", "message"} {
+		mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "a " + typ, Type: typ})
+	}
+	sameSet(t, "ready", ids(mustReady(t, s, api.ReadyFilter{})), work.ID, epic.ID, feature.ID)
+	// A molecule's own steps are still its steps, whatever their type.
+	root := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "mol", Type: "molecule", Ephemeral: true})
+	step := mustCreate(t, s, api.CreateParams{Parent: root.ID, Title: "a step that is a gate", Type: "gate", Ephemeral: true})
+	sameSet(t, "steps of a molecule", ids(mustReady(t, s, api.ReadyFilter{Molecule: root.ID})), step.ID)
 }
