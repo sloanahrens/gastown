@@ -9,30 +9,18 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
-	"sort"
 )
 
 // The placement group: where each component of the town runs, read from
 // <town>/settings/placement.json. The file is configuration that an operator,
 // the overseer or a crew session edits when a component moves; the metrics
-// tool only reads it. Schema version 1:
-//
-//	{"v": 1, "updated": "2026-10-24",
-//	 "places": {"dolt": "mac-host", "forgejo": "docker-desktop", "sandbox": "town-cluster"}}
-//
-// The place values are free text in the town's own names (mac-host,
-// docker-desktop, town-cluster, tenant-cluster), so a new place needs no code;
-// the component keys are the resource sampler's role names and the loadprof
-// names. The decode is strict: an unknown field, a version other than 1, a
-// place that is empty or not a string, and anything after the object are
-// errors, and an error leaves the record's placement null with an errors entry
-// named "placement".
+// tool only reads it. Place values are free text in the town's own names, so a
+// new place needs no code; the component keys are the resource sampler's role
+// names and the loadprof names. The decode is strict, so a file that does not
+// match the schema is an errors entry for the group.
 //
 // A MISSING file is not an error: no placement is known, the record's
 // placement stays null, and gt metrics snapshot says so in its receipt.
-//
-// Nothing else reads settings/*.json by directory scan, so the file does not
-// disturb any loader; this source opens exactly this one path.
 
 // PlacementFile is the file's path under the town root.
 var PlacementFile = filepath.Join("settings", "placement.json")
@@ -87,13 +75,8 @@ func parsePlacement(data []byte) (map[string]string, error) {
 	if doc.Places == nil {
 		return nil, errors.New(`no "places" object`)
 	}
-	components := make([]string, 0, len(doc.Places))
-	for component := range doc.Places {
-		components = append(components, component)
-	}
-	sort.Strings(components)
-	for _, component := range components {
-		if component == "" || doc.Places[component] == "" {
+	for component, place := range doc.Places {
+		if component == "" || place == "" {
 			return nil, fmt.Errorf("component %q has an empty name or place", component)
 		}
 	}

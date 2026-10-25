@@ -2,10 +2,12 @@ package metrics
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -36,8 +38,20 @@ func TestSourcePlacementReadsTheExampleFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
-	if cols["dolt"] != "mac-host" || cols["forgejo"] != "docker-desktop" || len(cols) != 9 {
-		t.Fatalf("placement = %v, want the nine components of the example", cols)
+	// The example supplies the expected places, so adding a component to it
+	// needs no test edit.
+	var example struct {
+		Places map[string]string `json:"places"`
+	}
+	if err := json.Unmarshal(data, &example); err != nil {
+		t.Fatalf("the example is not the schema: %v", err)
+	}
+	want := make(map[string]any, len(example.Places))
+	for component, place := range example.Places {
+		want[component] = place
+	}
+	if !reflect.DeepEqual(cols, want) {
+		t.Fatalf("placement = %#v, want the example's places %#v", cols, want)
 	}
 }
 
