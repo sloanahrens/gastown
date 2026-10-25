@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"slices"
 	"strings"
@@ -123,9 +124,9 @@ func TestJoinPeaksWithNoPeaksFileLeavesTheJoinOutputByteForByte(t *testing.T) {
 		t.Fatalf("write the join's output: %v", err)
 	}
 
-	peaks, _, err := ReadPeaks(peaksEnv(nil))
+	peaks, _, err := readPeaks(peaksEnv(nil), log.Printf)
 	if err != nil {
-		t.Fatalf("ReadPeaks with no file: %v", err)
+		t.Fatalf("readPeaks with no file: %v", err)
 	}
 	gotHeader, gotRows := JoinPeaks(header, joined, peaks)
 	var got bytes.Buffer
@@ -241,9 +242,9 @@ func TestReadPeaksFailsOnAFileItCannotRead(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, _, err := ReadPeaks(tc.env)
+			_, _, err := readPeaks(tc.env, log.Printf)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("ReadPeaks error = %v, want one containing %q", err, tc.want)
+				t.Errorf("readPeaks error = %v, want one containing %q", err, tc.want)
 			}
 		})
 	}

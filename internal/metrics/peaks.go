@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"path/filepath"
 	"slices"
 	"time"
@@ -41,27 +40,22 @@ type Peak struct {
 	cells   map[string]string
 }
 
-// ReadPeaks reads the sampler's peak rows from the town's resources directory:
+// readPeaks reads the sampler's peak rows from the town's resources directory:
 // the .gz sibling first, then the plain file, each row in file order. No file
-// at all is no peaks, not an error.
+// at all is no peaks, not an error. reportf takes the skip note, so a test sees
+// it without the process log.
 //
 // A .gz sibling holds the sampler's rotated older rows, so one that cannot be
 // read or decompressed costs those rows only and the join still runs. The skip
-// is reported on the process log with the file and its error, so a damaged
-// sibling is not mistaken for beads with no rows, and every skipped file is
-// returned by name so the analysis receipt can name the loss on its own output.
-// A read error on the plain file is returned: that is the file the sampler
-// writes, so its loss is not one the join can carry past.
+// is reported with the file and its error, so a damaged sibling is not mistaken
+// for beads with no rows, and every skipped file is returned by name so the
+// analysis receipt can name the loss on its own output. A read error on the
+// plain file is returned: that is the file the sampler writes, so its loss is
+// not one the join can carry past.
 //
 // A line that is not a JSON object is skipped, as is a row with no bead: the
 // sampler appends while this reads, so the last line may be partial, and a row
 // with no bead names no landing. Unknown keys are ignored.
-func ReadPeaks(env Env) ([]Peak, []string, error) {
-	return readPeaks(env, log.Printf)
-}
-
-// readPeaks is ReadPeaks taking the report's sink, so a test sees a skip without
-// the process log.
 func readPeaks(env Env, reportf func(format string, args ...any)) ([]Peak, []string, error) {
 	dir := filepath.Join(env.Town, ".runtime", "metrics", "resources")
 	var peaks []Peak
