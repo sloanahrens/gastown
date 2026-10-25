@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -98,6 +99,15 @@ type doneStateEnv struct {
 	// worktree it is not standing in, and evidence must be validated against
 	// that worktree's head (gt-u0zq0).
 	reviewHead func(dir string) (string, error)
+	// spanLog opens the polecat span log a submission's end is appended to;
+	// nil is the store under townRoot.
+	spanLog func(townRoot string) spanStore
+}
+
+// spanStore is the part of the polecat span log gt done reads and appends.
+type spanStore interface {
+	Summarize(bead string) (spans.Summary, error)
+	End(bead, seat string, reason spans.Reason, at time.Time) error
 }
 
 func (e doneStateEnv) routedAt(dir string) beads.Client {
@@ -105,6 +115,13 @@ func (e doneStateEnv) routedAt(dir string) beads.Client {
 		return beads.NewWithBeadsDir(dir, "")
 	}
 	return e.routed(dir)
+}
+
+func (e doneStateEnv) spanStoreAt(townRoot string) spanStore {
+	if e.spanLog == nil {
+		return spans.New(spans.DefaultDir(townRoot), nil)
+	}
+	return e.spanLog(townRoot)
 }
 
 func (e doneStateEnv) sourceOpener() done.SourceStoreOpener {
@@ -410,6 +427,9 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 				if err := hookBd.AddComment(hookedBeadID, note); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: couldn't record the submission on %s: %v\n", hookedBeadID, err)
 				}
+				if roleInfo.Role == RolePolecat && roleInfo.Polecat != "" {
+					recordSubmittedSpan(e.spanStoreAt(townRoot), hookedBeadID, roleInfo.Rig+"/"+roleInfo.Polecat)
+				}
 			} else if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open; see the warning above.\n")
@@ -486,6 +506,25 @@ doneStateUpdate:
 	// Clear legacy checkpoints on clean exit — gt done completed successfully.
 	clearDoneCheckpoints(agentBd, agentBeadID)
 	return consumed, nil
+}
+
+// recordSubmittedSpan ends seat's open attempt on bead when its work is
+// submitted for landing. A failure is logged and the submission stands, and a
+// seat with no open attempt writes nothing: a repeated gt done on the same
+// submission must not append a second end (gt-liseq).
+func recordSubmittedSpan(store spanStore, bead, seat string) {
+	sum, err := store.Summarize(bead)
+	if err != nil {
+		style.PrintWarning("could not read the polecat span log for %s: %v", bead, err)
+		return
+	}
+	if !sum.HasOpen(seat) {
+		fmt.Fprintf(os.Stderr, "Note: no open polecat span for %s on %s — nothing to close\n", seat, bead)
+		return
+	}
+	if err := store.End(bead, seat, spans.ReasonDone, time.Now()); err != nil {
+		style.PrintWarning("could not record the polecat span end for %s: %v", bead, err)
+	}
 }
 
 // defaultClosedWispDeleteAge is the grace period before a closed ephemeral

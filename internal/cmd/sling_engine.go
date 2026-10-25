@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/sling"
 )
 
@@ -36,6 +37,7 @@ func (d *slingDeps) engineDeps() *sling.Deps {
 
 		SpawnPolecat: d.engineSpawnPolecat,
 		StartSession: d.engineStartSession,
+		SpanStart:    d.engineSpanStart,
 
 		ClearReassigned:    d.clearReassigned,
 		RecordReassignment: d.recordReassignment,
@@ -153,6 +155,11 @@ func cmdSpawn(s *sling.Spawn) *SpawnedPolecatInfo {
 
 func (d *slingDeps) engineStartSession(spawn *sling.Spawn) (string, error) {
 	return d.startSession(cmdSpawn(spawn))
+}
+
+// engineSpanStart appends the attempt's start to the town's polecat span log.
+func (d *slingDeps) engineSpanStart(townRoot, bead, seat string) error {
+	return spans.New(spans.DefaultDir(townRoot), nil).Start(bead, seat)
 }
 
 func (d *slingDeps) engineRollbackArtifacts(spawn *sling.Spawn, townRoot, beadID, hookWorkDir string) {

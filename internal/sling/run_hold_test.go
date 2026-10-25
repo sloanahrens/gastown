@@ -44,6 +44,11 @@ type fakeSlingDeps struct {
 	started   int
 	startErr  error // what StartSession fails with, nil to start
 	noted     int   // dispatches filed back into the tick's duplicate pool
+
+	// Span recording, in call order with the session start.
+	order      []string
+	spanStarts []string
+	spanErr    error
 }
 
 func (f *fakeSlingDeps) deps() *Deps {
@@ -79,7 +84,16 @@ func (f *fakeSlingDeps) deps() *Deps {
 		UpdateAgentHook:    func(string, string, string, string) {},
 		UpdateAgentMode:    func(string, string, string, string) {},
 		StoreFields:        func(string, string, FieldUpdates) error { return nil },
-		StartSession:       func(*Spawn) (string, error) { f.started++; return "%1", f.startErr },
+		StartSession: func(*Spawn) (string, error) {
+			f.started++
+			f.order = append(f.order, "session")
+			return "%1", f.startErr
+		},
+		SpanStart: func(townRoot, bead, seat string) error {
+			f.order = append(f.order, "span")
+			f.spanStarts = append(f.spanStarts, townRoot+" "+bead+" "+seat)
+			return f.spanErr
+		},
 		RollbackArtifacts: func(*Spawn, string, string, string) {
 			f.rollback++
 		},

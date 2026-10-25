@@ -130,9 +130,23 @@ type Summary struct {
 type Attempt struct {
 	Seat string
 	Secs float64
+	// Open marks an attempt its seat has not ended, so a later event can close
+	// it.
+	Open bool
 	// LowerBound marks an attempt whose duration is a floor: it is still open,
 	// or a dead seat closed it.
 	LowerBound bool
+}
+
+// HasOpen reports whether seat has an attempt on this summary's bead that it
+// has not ended.
+func (sum Summary) HasOpen(seat string) bool {
+	for _, a := range sum.Attempts {
+		if a.Seat == seat && a.Open {
+			return true
+		}
+	}
+	return false
 }
 
 // Summarize reads bead's log and pairs its start and end events. A bead with
@@ -209,7 +223,7 @@ func (sum *Summary) readLine(line, bead string, open map[string]openAttempt) {
 			sum.Skipped++
 			return
 		}
-		sum.Attempts = append(sum.Attempts, Attempt{Seat: ev.Seat})
+		sum.Attempts = append(sum.Attempts, Attempt{Seat: ev.Seat, Open: true})
 		open[ev.Seat] = openAttempt{index: len(sum.Attempts) - 1, at: at}
 	case EventEnd:
 		o, ok := open[ev.Seat]
@@ -219,6 +233,7 @@ func (sum *Summary) readLine(line, bead string, open map[string]openAttempt) {
 		}
 		a := &sum.Attempts[o.index]
 		a.Secs = at.Sub(o.at).Seconds()
+		a.Open = false
 		a.LowerBound = ev.LowerBound
 		sum.LowerBound = sum.LowerBound || ev.LowerBound
 		delete(open, ev.Seat)
