@@ -1794,6 +1794,9 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) ([]b
 	run := func(argv []string) error {
 		stdout.Reset()
 		stderr.Reset()
+		// Every routed call passes here, so counting here counts each started
+		// subprocess once and a --flat retry as the second one it is (gt-y3bzk).
+		censusRecord(argv)
 		out, errOut, err := b.runner()(ctx, bdCall{bin: b.bin, dir: b.workDir, env: b.withActor(runEnv), stdin: stdinData, args: argv})
 		stdout.Write(out)
 		stderr.Write(errOut)
