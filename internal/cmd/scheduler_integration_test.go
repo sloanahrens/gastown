@@ -16,6 +16,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -60,16 +61,10 @@ func holdSchedulerTownSlot(t *testing.T) {
 // metadata.json so subsequent bd commands reach the test server.
 func initBeadsDBForServer(t *testing.T, dir, prefix, homeDir string) {
 	t.Helper()
+	refuseSharedDoltInit(t)
 	initSchedulerGitRepo(t, dir, homeDir)
 
-	args := []string{"init", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents", "--prefix", prefix}
-	// Forward GT_DOLT_PORT so bd connects to the ephemeral test server
-	// instead of defaulting to port 3307.
-	// bd v1.0.0+ defaults to embedded mode; --server is required to use an
-	// external server (v0.57.0 defaulted to server mode and ignored --server).
-	if p := schedulerDoltPort(); p != "" {
-		args = append(args, "--server", "--external", "--server-port", p)
-	}
+	args := schedulerInitArgs(prefix, schedulerDoltPort())
 	out, err := beads.RunTestContainerInit(t.Context(), dir, args, schedulerBDInitEnv(homeDir, filepath.Join(dir, ".beads")))
 	t.Logf("bd init --prefix %s in %s: exit=%v\n%s", prefix, dir, err, out)
 	if err != nil {
@@ -127,6 +122,37 @@ func schedulerDoltPort() string {
 		}
 	}
 	return ""
+}
+
+// schedulerInitArgs is the argv of the bd init the scheduler tests run. A
+// port routes it to the ephemeral test server; bd v1.0.0+ defaults to embedded
+// mode, so --server is required to use an external server (v0.57.0 defaulted
+// to server mode and ignored --server).
+func schedulerInitArgs(prefix, port string) []string {
+	args := []string{"init", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents", "--prefix", prefix}
+	if port != "" {
+		args = append(args, "--server", "--external", "--server-port", port)
+	}
+	return args
+}
+
+// doltInitPortError reports why a bd init must not run: no test Dolt port is
+// set, so bd would auto-detect the town's shared server on 127.0.0.1:3307 and
+// write schema and commits to it (gt-x0dmc, gt-ykzbu).
+func doltInitPortError() error {
+	if schedulerDoltPort() == "" {
+		return errors.New("refusing bd init: none of GT_DOLT_PORT, BEADS_DOLT_SERVER_PORT or BEADS_DOLT_PORT is set, so bd would reach the shared Dolt on 127.0.0.1:3307")
+	}
+	return nil
+}
+
+// refuseSharedDoltInit fails the test before any bd process starts; each init
+// helper calls it first, ahead of any git or bd work.
+func refuseSharedDoltInit(t *testing.T) {
+	t.Helper()
+	if err := doltInitPortError(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // cleanupSchedulerBeadsDatabases used to DROP each test's databases (and
