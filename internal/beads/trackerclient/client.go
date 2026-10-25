@@ -229,6 +229,11 @@ func (c *Client) AppendNotes(id, note string) error {
 	return mapErr(c.tc.Update(ctx(), id, api.UpdatePatch{AppendNotes: note}, api.Guard{}))
 }
 
+// GateCheck reports nothing: the tracker keeps no gates to evaluate, so no
+// gate of any type can be resolved. Read task Mo5 of
+// docs/plans/2026-10-25-town-tracker-plan.md before adding gate polling here.
+func (c *Client) GateCheck(types ...string) (string, error) { return "", nil }
+
 // ReleaseIfAssignee returns the issue to open with no assignee, but only while
 // expected still holds it. released=false with a nil error means the guard no
 // longer held and nothing was written.

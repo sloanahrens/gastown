@@ -1868,6 +1868,57 @@ func (b *Beads) PurgeClosedEphemeral(olderThan string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// GateCheck evaluates the open gates of each of types and returns the line
+// bd last reported, for the caller's log; empty when the check resolved
+// nothing.
+//
+// In machine mode bd keeps stdout for its JSON envelope and writes the
+// notices an operator reads to stderr, so a plain wrapper reads the report
+// there; a wrapper that does not keep bd's stderr falls back to the
+// envelope's payload. Either answer is normalized once, here: bd's leading
+// JSON null — printed before its no-gates notice, which reads "nullNo open
+// gates of type 'timer' found." — is dropped, and the notice answers empty
+// because it reports only that nothing was resolved.
+func (b *Beads) GateCheck(types ...string) (string, error) {
+	args := []string{"gate", "check"}
+	for _, t := range types {
+		args = append(args, "--type="+t)
+	}
+	stdout, stderr, err := b.gateCheckStreams(args)
+	if err != nil {
+		return "", err
+	}
+	report := strings.TrimSpace(string(stderr))
+	if report == "" {
+		report = strings.TrimSpace(string(LegacyPayload(args, stdout)))
+	}
+	line := strings.TrimPrefix(lastLineOfText(report), "null")
+	if strings.HasPrefix(line, "No open gates") {
+		return "", nil
+	}
+	return line, nil
+}
+
+// gateCheckStreams runs the gate check for either kind of wrapper: a plain
+// wrapper keeps both of bd's streams, while the routed path answers stdout
+// only, its stderr dropped inside run.
+func (b *Beads) gateCheckStreams(args []string) (stdout, stderr []byte, err error) {
+	if b.plain {
+		return b.runPlainOut(nil, args)
+	}
+	out, err := b.run(args...)
+	return out, nil, err
+}
+
+// lastLineOfText is the last line of s, without surrounding whitespace.
+func lastLineOfText(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[i+1:])
+	}
+	return s
+}
+
 // wrapError wraps bd errors with context.
 // ZFC: Avoid parsing stderr to make decisions. Transport errors to agents instead.
 // Exceptions: ErrNotInstalled (exec.ErrNotFound), ErrGuardNotHeld (bd's

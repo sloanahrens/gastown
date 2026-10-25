@@ -162,6 +162,14 @@ func (e *CLIError) Unwrap() []error {
 
 // runPlain runs one bd call for a plain wrapper.
 func (b *Beads) runPlain(stdin []byte, args []string) ([]byte, error) {
+	stdout, _, err := b.runPlainOut(stdin, args)
+	return stdout, err
+}
+
+// runPlainOut is runPlain that keeps bd's stderr on success too, for a call
+// whose answer bd writes there: machine mode keeps stdout for the JSON
+// envelope.
+func (b *Beads) runPlainOut(stdin []byte, args []string) (stdout, stderr []byte, err error) {
 	ctx := context.Background()
 	if b.plainTimeout > 0 {
 		var cancel context.CancelFunc
@@ -172,9 +180,9 @@ func (b *Beads) runPlain(stdin []byte, args []string) ([]byte, error) {
 	// gt install initializes the town database through a plain wrapper, so the
 	// new-database opt-in rides this path too (be-d4v).
 	env = applyNewDatabaseOptIn(env, args)
-	stdout, stderr, err := b.runner()(ctx, bdCall{bin: b.bin, dir: b.workDir, env: env, args: args, stdin: stdin, plain: true})
+	stdout, stderr, err = b.runner()(ctx, bdCall{bin: b.bin, dir: b.workDir, env: env, args: args, stdin: stdin, plain: true})
 	if err != nil {
-		return stdout, &CLIError{Args: args, Stdout: stdout, Stderr: stderr, Err: SubprocessFailureError(ctx, b.plainTimeout, err)}
+		return stdout, stderr, &CLIError{Args: args, Stdout: stdout, Stderr: stderr, Err: SubprocessFailureError(ctx, b.plainTimeout, err)}
 	}
-	return stdout, nil
+	return stdout, stderr, nil
 }

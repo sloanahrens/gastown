@@ -98,6 +98,7 @@ var contractCases = []contractCase{
 	{"typed dependencies", contractTypedDependencies},
 	{"ready filter", contractReadyFilter},
 	{"ReadyFiltered", contractReadyFiltered},
+	{"GateCheck", contractGateCheck},
 	{"children", contractChildren},
 	{"delete issues", contractDeleteIssues},
 	{"release", contractRelease},
@@ -886,6 +887,22 @@ func contractReadyFiltered(t *testing.T, s *scope) {
 	}
 	if capped.Found != 1 || capped.TrueCount <= capped.Found {
 		t.Errorf("ReadyFiltered(limit 1) sentinel = %+v, want one row found and more behind it", *capped)
+	}
+}
+
+// contractGateCheck pins the answer for a store with no open gate of the
+// types asked about: nothing to report, no error. The unit tier pins the
+// argv and the null-stripping against bd's exact output.
+func contractGateCheck(t *testing.T, s *scope) {
+	got, err := s.GateCheck("timer")
+	if err != nil {
+		t.Fatalf("GateCheck(timer) err = %v", err)
+	}
+	if got != "" {
+		t.Errorf("GateCheck(timer) = %q, want nothing to report with no open gate", got)
+	}
+	if got, err := s.GateCheck("gh:run", "gh:pr"); err != nil || got != "" {
+		t.Errorf("GateCheck(gh:run, gh:pr) = %q, %v; want empty, nil", got, err)
 	}
 }
 

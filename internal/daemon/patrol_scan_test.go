@@ -527,8 +527,8 @@ func TestPatrolScanGHGatesDoesNotRecordAFailedCheck(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
-	h := &patrolScanHost{d: d, bdGateCheck: func(string, ...string) ([]byte, error) {
-		return nil, errors.New("bd gate check: connection refused")
+	h := &patrolScanHost{d: d, gateCheck: func(string, string) (string, error) {
+		return "", errors.New("bd gate check: connection refused")
 	}}
 
 	d.patrolScanGHGates(h, []string{"myr"})
@@ -545,8 +545,8 @@ func TestPatrolScanGHGatesRecordsARunThatAnswered(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
-	h := &patrolScanHost{d: d, bdGateCheck: func(string, ...string) ([]byte, error) {
-		return []byte("No open gates of type 'gh' found.\n"), nil
+	h := &patrolScanHost{d: d, gateCheck: func(string, string) (string, error) {
+		return "", nil
 	}}
 
 	d.patrolScanGHGates(h, []string{"myr"})
@@ -555,6 +555,40 @@ func TestPatrolScanGHGatesRecordsARunThatAnswered(t *testing.T) {
 		if evaluatePatrolDue(townRoot, key, time.Time{}, time.Now(), ghGateInterval).due {
 			t.Fatalf("a tick whose every check answered did not record %s", key)
 		}
+	}
+}
+
+// The patrol logs the line the seam reported and nothing when the seam
+// reported nothing: bd's null and its no-gates notice are normalized inside
+// the seam, so a check that resolved nothing leaves no line (gt-p85pw.8).
+func TestPatrolScanGateCheckLogsTheReportedLine(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, report, want string
+	}{
+		{"resolved", "Resolved gate gt-1 (timer)", "patrol_scan: town: timer gates: Resolved gate gt-1 (timer)\n"},
+		{"nothing resolved", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs strings.Builder
+			d := &Daemon{logger: log.New(&logs, "", 0), config: &Config{TownRoot: t.TempDir()}}
+			var asked string
+			h := &patrolScanHost{d: d, gateCheck: func(_, gateType string) (string, error) {
+				asked = gateType
+				return tc.report, nil
+			}}
+
+			d.patrolScanGateCheck(h, nil, "timer")
+
+			if asked != "timer" {
+				t.Errorf("the seam was asked for %q gates, want timer", asked)
+			}
+			if got := logs.String(); got != tc.want {
+				t.Errorf("log = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -574,11 +608,11 @@ func TestPatrolScanGHGates_PartialFailure(t *testing.T) {
 			townRoot := t.TempDir()
 			var logs strings.Builder
 			d := &Daemon{logger: log.New(&logs, "", 0), config: &Config{TownRoot: townRoot}}
-			h := &patrolScanHost{d: d, bdGateCheck: func(rig string, _ ...string) ([]byte, error) {
+			h := &patrolScanHost{d: d, gateCheck: func(rig, _ string) (string, error) {
 				if rig == tc.failing {
-					return nil, errors.New("bd gate check: connection refused")
+					return "", errors.New("bd gate check: connection refused")
 				}
-				return []byte("No open gates of type 'gh' found.\n"), nil
+				return "", nil
 			}}
 
 			d.patrolScanGHGates(h, []string{"myr"})
@@ -610,12 +644,12 @@ func TestPatrolScanGHGates_PersistentFailureRetriesOnlyTheFailedDatabase(t *test
 	townRoot := t.TempDir()
 	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
 	calls := map[string]int{}
-	h := &patrolScanHost{d: d, bdGateCheck: func(rig string, _ ...string) ([]byte, error) {
+	h := &patrolScanHost{d: d, gateCheck: func(rig, _ string) (string, error) {
 		calls[rig]++
 		if rig == "myr" {
-			return nil, errors.New("bd gate check: connection refused")
+			return "", errors.New("bd gate check: connection refused")
 		}
-		return []byte("No open gates of type 'gh' found.\n"), nil
+		return "", nil
 	}}
 
 	for tick := 0; tick < 3; tick++ {

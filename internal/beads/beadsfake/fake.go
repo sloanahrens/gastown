@@ -1028,6 +1028,17 @@ func (f *Fake) RemoveDependency(issue, dependsOn string) error {
 	return nil
 }
 
+// GateCheck reports nothing: the fake models no gates, so no type has one to
+// resolve.
+func (f *Fake) GateCheck(types ...string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failure("GateCheck"); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
 // Seed stores issues exactly as given, IDs included, replacing any issue
 // with the same ID. It sets up a test's starting state (an issue with a
 // fixed ID, such as a rig identity bead) and is not a bd operation: labels,

@@ -203,6 +203,7 @@ func (noBeadsDB) AddTypedDependency(string, string, string) error  { return errN
 func (noBeadsDB) DepList(string, string) ([]beads.IssueDep, error) { return nil, errNoDatabase }
 func (noBeadsDB) RemoveDependency(string, string) error            { return errNoDatabase }
 func (noBeadsDB) AppendNotes(string, string) error                 { return errNoDatabase }
+func (noBeadsDB) GateCheck(...string) (string, error)              { return "", errNoDatabase }
 func (noBeadsDB) ReleaseIfAssignee(string, string) (bool, error)   { return false, errNoDatabase }
 func (noBeadsDB) TransferIfAssignee(string, string, string, string) (bool, error) {
 	return false, errNoDatabase
