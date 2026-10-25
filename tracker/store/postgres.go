@@ -27,9 +27,6 @@ func unimplemented(method string) error {
 	return fmt.Errorf("%w: Postgres.%s", ErrUnimplemented, method)
 }
 
-func (*Postgres) ListIssues(context.Context, api.ListFilter) (api.IssuePage, error) {
-	return api.IssuePage{}, unimplemented("ListIssues")
-}
 func (*Postgres) UpdateIssue(context.Context, string, api.UpdatePatch, api.Guard) error {
 	return unimplemented("UpdateIssue")
 }
