@@ -657,6 +657,11 @@ func TestShellFedScriptBehindARedirectionWordIsJudged(t *testing.T) {
 		{"script piped into bash behind a redirection", `2>/dev/null echo "make test" | bash`, true},
 		{"here-string ahead of bash", `<<< "make test" bash`, true},
 		{"here-string behind a redirection", `2>/dev/null bash <<< "make test"`, true},
+		// gt-norvx: an unquoted body is word-split, so the words behind the
+		// operator are the script, not only the first.
+		{"word-split here-string body into bash", `bash <<< make test`, true},
+		{"word-split here-string body behind a redirection", `2>/dev/null bash <<< make test`, true},
+		{"harmless word-split here-string body", `bash <<< make lint`, false},
 		{"eval behind a redirection", `2>/dev/null eval "make test"`, true},
 		{"harmless script piped into bash behind a redirection", `2>/dev/null echo "make lint" | bash`, false},
 		{"harmless here-string ahead of bash", `<<< "make lint" bash`, false},
@@ -2975,6 +2980,36 @@ func TestStdinShellPayloadsDashSWithProcessSubstitution(t *testing.T) {
 			reason, matched := evaluateContainerSuiteCommand(proc, tt.command, "")
 			if got := reason != ""; got != tt.blocked {
 				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
+// A bare here-string body is word-split by the shell, so the run of words
+// behind the operator is its text: the first word stays a text of its own and
+// the joined run is one too, up to the next redirection, which is the shell's
+// (gt-norvx).
+func TestSplitHereStringsWordSplitBody(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		args  []string
+		rest  []string
+		texts []string
+	}{
+		{"quoted body", []string{"<<<", "bd create --title=x"}, nil, []string{"bd create --title=x"}},
+		{"single bare word", []string{"<<<", "printenv"}, nil, []string{"printenv"}},
+		{"word-split body", []string{"<<<", "bd", "create", "--title=x"}, nil, []string{"bd", "bd create --title=x"}},
+		{"redirection ends the body", []string{"<<<", "printenv", "2>/dev/null"}, []string{"2>/dev/null"}, []string{"printenv"}},
+		{"redirection right behind the operator", []string{"<<<", "2>/dev/null"}, []string{"2>/dev/null"}, []string{""}},
+		{"other descriptor keeps no text", []string{"3<<<", "make", "test"}, nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rest, texts := splitHereStrings(tt.args)
+			if !reflect.DeepEqual(rest, tt.rest) || !reflect.DeepEqual(texts, tt.texts) {
+				t.Errorf("splitHereStrings(%q) = rest %q, texts %q; want rest %q, texts %q", tt.args, rest, texts, tt.rest, tt.texts)
 			}
 		})
 	}

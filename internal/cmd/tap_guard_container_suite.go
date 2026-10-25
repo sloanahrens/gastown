@@ -348,6 +348,12 @@ func producerPayloads(segment []string) []string {
 // and the text each one feeds its command's stdin. A here-string on another
 // descriptor ("3<<<text", "{fd}<<<text") feeds that descriptor, not the
 // script, so it is dropped without its text (gt-hizij).
+//
+// A bare "<<<" takes the words after it as its text: the shell word-splits an
+// unquoted body, so the run of words up to the next redirection is the script.
+// Reading only its first word left "bash <<< bd create --title=x" unjudged
+// (gt-norvx); that word is still read on its own, so a body of several words
+// adds a reading rather than replacing the one a single word drew.
 func splitHereStrings(args []string) (rest, texts []string) {
 	for i := 0; i < len(args); i++ {
 		fd, tail, ok := redirectionFD(args[i])
@@ -356,12 +362,26 @@ func splitHereStrings(args []string) (rest, texts []string) {
 			continue
 		}
 		text := strings.TrimPrefix(tail, "<<<")
+		var words []string
 		if text == "" && i+1 < len(args) {
-			text = args[i+1]
-			i++
+			end := i + 1
+			for end < len(args) {
+				if redirected, _, _ := shellRedirection(args[end]); redirected {
+					break
+				}
+				end++
+			}
+			// A redirection right behind the operator leaves the body empty; it
+			// stays a word of its own for the shell, read by the next pass.
+			if words = args[i+1 : end]; len(words) > 0 {
+				text, i = words[0], end-1
+			}
 		}
 		if fd == "" || fd == "0" {
 			texts = append(texts, text)
+			if len(words) > 1 {
+				texts = append(texts, strings.Join(words, " "))
+			}
 		}
 	}
 	return rest, texts
