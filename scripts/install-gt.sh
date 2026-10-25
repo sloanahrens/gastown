@@ -225,11 +225,11 @@ image_daemon_env() {
 # image_build SECS LOCK BINARY RUN [FINGERPRINT] — run.sh under the alarm
 # supervisor. With a FINGERPRINT, a build that does not finish escalates it
 # (gt-vhn89): a detached build has no caller left to report it, so the
-# supervisor does. Call it in a subshell: it exports the registry and crane it was given and points
-# run.sh at this install's town root, the binary whose commit the image is
-# built at, and its lock (POLECAT_IMAGE_TOWN_ROOT, POLECAT_IMAGE_GT,
-# POLECAT_IMAGE_LOCK; case 43 pins them), not whatever HOME and PATH resolve
-# to, so the image is built for the install that asked for it.
+# supervisor does. Call it in a subshell: it exports the registry and crane it
+# was given and points run.sh at this install's town root, the binary whose
+# commit the image is built at, and its lock (POLECAT_IMAGE_TOWN_ROOT,
+# POLECAT_IMAGE_GT, POLECAT_IMAGE_LOCK; case 43 pins them), not whatever HOME
+# and PATH resolve to, so the image is built for the install that asked for it.
 #
 # The perl that stays up is the supervisor: run.sh runs in its own process
 # group, so on the alarm the whole build (run.sh and the docker it started)
@@ -251,7 +251,10 @@ image_build() {
       sub finish {
         my $code = shift;
         if ($code && length $fp && length $gt) {
-          system($gt, "escalate", "install-gt: the detached image build did not finish (exit $code); the binary stands, and stale-image slings are refused until it is rebuilt", "-s", "medium", "--source", "script:install-gt", "--fingerprint", $fp);
+          # The result of the escalation itself goes to the build log, the one
+          # place a detached build result is still read from.
+          my $esc = system($gt, "escalate", "install-gt: the detached image build did not finish (exit $code); the binary stands, and stale-image slings are refused until it is rebuilt", "-s", "medium", "--source", "script:install-gt", "--fingerprint", $fp);
+          print STDERR "polecat image: the escalation for this failed build did not reach the town (exit ", $esc >> 8, ")\n" if $esc != 0;
         }
         exit $code;
       }
@@ -322,10 +325,7 @@ polecat_image_step() {
     # Detached, as before gt-xzo8a: the subshell exits at once, so the install
     # never waits on the build, and image_build's fd closes keep the install
     # lock out of it.
-    ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" install-gt:image-build-failed </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null || {
-      log "polecat image: could not start the rebuild for $commit (non-fatal)"
-      return 0
-    }
+    ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" install-gt:image-build-failed </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null
     log "polecat image: rebuild for $commit started in the background (log $logfile)"
     return 0
   fi

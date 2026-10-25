@@ -1301,6 +1301,26 @@ wait_for_alarm "$T/image.log" || true
 [ "$rc" = "1" ] && [ -n "$CHILD" ] && [ -e "$T/image.lock/pid" ] && ! is_live "$CHILD" \
   && pass "image: the alarm leaves a lock that names another process" \
   || fail "image: foreign lock: rc=$rc child=${CHILD:-none} lock=$([ -e "$T/image.lock" ] && echo held || echo free) out=$(tail -2 "$T/image.log" 2>/dev/null)"
+  # gt-vhn89: a detached build that the alarm stops escalates its own failure,
+  # and the install stands, since the binary was swapped before the build.
+  T=$(make_world); mkdir -p "$T/plugin"
+  cat > "$T/plugin/run.sh" <<'STUB'
+#!/usr/bin/env bash
+echo $$ > "$T_WORLD/image-child.pid"
+sleep 30
+STUB
+  chmod +x "$T/plugin/run.sh"
+  install_stub "$T" "$(cat "$T/c1")"
+  rc=$( export INSTALL_GT_IMAGE_ALARM=1
+        IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --no-image-first --source rebuild-gt )
+  wait_for_alarm "$T/image.log" || true
+  wait_for_text "$T/gt.log" "--fingerprint install-gt:image-build-failed" || true
+  [ "$rc" = "0" ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] && [ -e "$T/daemon/restart-pending.json" ] \
+    && grep -q 'polecat image: alarm after 1 s stopped the build' "$T/image.log" \
+    && grep -q "escalate .*did not finish.*--fingerprint install-gt:image-build-failed" "$T/gt.log" \
+    && pass "image: a detached build the alarm stops escalates, and the install stands" \
+    || fail "image: detached alarm: rc=$rc reported=$(reported "$T") want=$(cat "$T/c2") gt.log=$(tail -2 "$T/gt.log" 2>/dev/null)"
+
 else
   # This host refuses a signal to another process group (EPERM), so the kill
   # cannot stop the build and the child and lock assertions above cannot hold.
