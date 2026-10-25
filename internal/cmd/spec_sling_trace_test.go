@@ -45,6 +45,12 @@ func TestSpecSlingTraceLine(t *testing.T) {
 			want:  "sling gt-0uh64 seat deepseek-flash-sandbox-k8s: push 2s, create 18s, total 20s; outcome: error: sandbox gt-x: image drift",
 		},
 		{
+			name:  "a multi-line error is cut to its first line",
+			trace: slingTraceAt(phases, "push", "create"),
+			err:   errors.New("sandbox gt-x: image drift\n  see: gt sandbox logs gt-x\n  exit status 1"),
+			want:  "sling gt-0uh64 seat deepseek-flash-sandbox-k8s: push 2s, create 18s, total 20s; outcome: error: sandbox gt-x: image drift",
+		},
+		{
 			name:  "a sling that touched no sandbox logs nothing",
 			trace: slingTraceAt(nil),
 			want:  "",
@@ -84,5 +90,54 @@ func TestSpecSlingTracesWithNoSandboxSlingAddsNoNotice(t *testing.T) {
 
 	if got := traces.notices(); got != nil {
 		t.Fatalf("notices() = %q, want nil so the tick report carries no empty notice", got)
+	}
+}
+
+// The sling's spawn must carry the tick's trace, or the sandbox phases it
+// times never reach the tick's log (gt-0uh64).
+func TestSpecSlingSpawnRidesTheTicksTraceAndSeatSnapshot(t *testing.T) {
+	t.Parallel()
+	trace := session.NewSandboxTrace(func() time.Time { return time.Unix(1_000_000, 0) })
+	occupied := func() ([]poolSession, error) { return []poolSession{{name: "box"}}, nil }
+	var got SlingSpawnOptions
+	spawn := func(rig string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		if rig != "gastown" {
+			t.Errorf("spawn rig = %q, want the rig the sling named", rig)
+		}
+		got = opts
+		return &SpawnedPolecatInfo{}, nil
+	}
+
+	if _, err := specSlingSpawn(spawn, occupied, trace)("gastown", SlingSpawnOptions{Agent: "box"}); err != nil {
+		t.Fatalf("spawn error = %v", err)
+	}
+	if got.trace != trace {
+		t.Error("the spawn's options carry another trace: the session start would time nothing the tick logs")
+	}
+	if got.Agent != "box" {
+		t.Errorf("Agent = %q, want the caller's option kept", got.Agent)
+	}
+	if got.occupied == nil {
+		t.Fatal("occupied = nil, want the tick's snapshot")
+	}
+	if sessions, err := got.occupied(); err != nil || len(sessions) != 1 || sessions[0].name != "box" {
+		t.Errorf("occupied() = %v, %v, want the tick's snapshot", sessions, err)
+	}
+}
+
+// A tick with no roster snapshot yet leaves the seat decision reading the town.
+func TestSpecSlingSpawnWithoutASnapshotLeavesTheReadToTheTown(t *testing.T) {
+	t.Parallel()
+	var got SlingSpawnOptions
+	spawn := func(_ string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		got = opts
+		return &SpawnedPolecatInfo{}, nil
+	}
+
+	if _, err := specSlingSpawn(spawn, nil, nil)("gastown", SlingSpawnOptions{}); err != nil {
+		t.Fatalf("spawn error = %v", err)
+	}
+	if got.occupied != nil {
+		t.Error("occupied set with no snapshot: the pool would read an empty town instead of the real one")
 	}
 }

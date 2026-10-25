@@ -1940,7 +1940,9 @@ func specTickCost(reads *specTickReads, took time.Duration, slings int, slowest 
 
 // specSlingTraceLine is the line a sling that started a sandbox session adds to
 // the tick's log: its phases with their durations, then how the sling ended. It
-// is "" for a sling that touched no sandbox, so a tmux seat adds nothing.
+// is "" for a sling that touched no sandbox, so a tmux seat adds nothing. A
+// multi-line error is cut to its first line so the notice stays one log line
+// (gt-csltr).
 func specSlingTraceLine(beadID, agent string, trace *session.SandboxTrace, err error) string {
 	summary := trace.Summary()
 	if summary == "" {
@@ -1948,7 +1950,7 @@ func specSlingTraceLine(beadID, agent string, trace *session.SandboxTrace, err e
 	}
 	outcome := "started"
 	if err != nil {
-		outcome = "error: " + err.Error()
+		outcome = "error: " + firstErrLine(err)
 	}
 	return fmt.Sprintf("sling %s seat %s: %s; outcome: %s", beadID, agent, summary, outcome)
 }
@@ -2374,14 +2376,7 @@ func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specd
 	params := specSlingParams(townRoot, targetBeadsDir, resolveFormula("", false, townRoot, c.Rig), c, resumeBranch, seat)
 	d := realSlingDeps()
 	d.beadInfoInTown = refuseOpenBlockers(d.beadInfoInTown)
-	spawn := d.spawnPolecat
-	d.spawnPolecat = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
-		opts.trace = trace
-		if occupied != nil {
-			opts.occupied = occupied
-		}
-		return spawn(rigName, opts)
-	}
+	d.spawnPolecat = specSlingSpawn(d.spawnPolecat, occupied, trace)
 	result, err := d.executeSling(params)
 	if err != nil {
 		return "", err
@@ -2390,6 +2385,20 @@ func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specd
 		return "", errors.New("sling returned no result")
 	}
 	return result.PolecatName, nil
+}
+
+// specSlingSpawn is the spawn a spec sling asks for: the tick's trace rides it
+// so the session start times the sandbox phases for the tick's log (gt-0uh64),
+// and the tick's seat snapshot, when it has one, is the occupancy read the pool
+// decision uses instead of listing every polecat again (gt-thy6r).
+func specSlingSpawn(spawn func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error), occupied func() ([]poolSession, error), trace *session.SandboxTrace) func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+	return func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		opts.trace = trace
+		if occupied != nil {
+			opts.occupied = occupied
+		}
+		return spawn(rigName, opts)
+	}
 }
 
 // refuseOpenBlockers wraps the bead read a dispatch starts from so the spec
