@@ -3,6 +3,9 @@ status: accepted
 date: 2026-09-29
 ---
 
+> Update 2026-10-25: the SQLite trigger below is superseded by ADR 0006 (a town-owned tracker on
+> Postgres). The rest of this record stands while any rig still runs on Dolt.
+
 # Dolt stays for now, with no remote sync and no routine history rewrite
 
 Measured on 2026-09-29 with the town stopped: an offline `dolt gc --full` reclaimed almost nothing
