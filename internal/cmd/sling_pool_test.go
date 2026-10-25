@@ -2173,6 +2173,30 @@ func TestSnapshotOccupied(t *testing.T) {
 			}
 		})
 	}
+
+	// A snapshot entry that names no seat (a claim the dispatcher appends) is
+	// never read as a dead seat: the dead answer names seats by "rig/polecat"
+	// and the entry names none. The roster read stage drops such an entry, and
+	// an entry the roster already counted dead-hooked is carried as it stands.
+	claim := poolSession{name: "pool-claim/abc", agent: "deepseek-flash", created: rosterAt.Add(-time.Hour)}
+	deadLister := &fakeLister{sessions: map[string]map[string]string{
+		"gt-ember": {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
+	}, created: map[string]time.Time{"gt-ember": ember.created}}
+	dead := func(string, string, string) bool { return true }
+	read := func() []poolSession {
+		got, err := snapshotOccupied(poolSeatSnapshot{sessions: []poolSession{claim}, at: rosterAt}, func() sessionLister { return deadLister }, dead, func() time.Time { return rosterAt.Add(time.Minute) })()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := read(); poolSeatCount("deepseek-flash", got) != 0 {
+		t.Fatalf("a seatless live entry must not count as a dead seat: %+v", got)
+	}
+	claim.deadHooked = true
+	if got := read(); poolSeatCount("deepseek-flash", got) != 1 {
+		t.Fatalf("a seatless dead-hooked entry must be carried: %+v", got)
+	}
 }
 
 // A cap-1 pool whose only live session is an idle-pr-open seat: the roster
