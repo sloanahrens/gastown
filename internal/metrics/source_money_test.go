@@ -6,16 +6,17 @@ import (
 	"io/fs"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
 
-// moneyTestTown is the town the money tests read, rooted at moneyTestRoot so
-// every path is the one the source joins.
+// moneyTestRoot is the town the money tests read, so every path is the one the
+// source joins.
 const moneyTestRoot = "/town"
 
 // moneyTestEnv serves the files, directories and errors a money test names.
-// An input with no entry is a file the town does not have.
+// A path the files, dirs or errs map leaves out is one the town does not have.
 func moneyTestEnv(t *testing.T, files map[string]string, dirs map[string][]DirEntry, errs map[string]error) Env {
 	t.Helper()
 	env := envAt(fixedNow())
@@ -112,9 +113,10 @@ func TestSourceMoneyReadsTheCostPanelsFiles(t *testing.T) {
 			{Name: "notes.txt"},
 		},
 	}
-	// The inside record's tokens count; the one outside the hour, the
-	// incomplete one and the unreadable one's neighbours in the directory do
-	// not.
+	// The inside record's tokens count. The record outside the hour and the
+	// incomplete one name their models' columns, but with no value: neither is
+	// a measurement of this hour. The malformed record is counted as an
+	// input the group could not use.
 	files[filepath.Join(usage, "gt-a1.work.json")] = usageRecord(now.Add(-10*time.Minute), true, map[string][3]int64{
 		"claude-opus-4-6":    {100, 50, 10},
 		"deepseek-flash":     {7, 3, 0},
@@ -143,6 +145,10 @@ func TestSourceMoneyReadsTheCostPanelsFiles(t *testing.T) {
 		"tokens_claude-opus-4-6_1h":          int64(160),
 		"tokens_deepseek-flash_1h":           int64(10),
 		"tokens_anthropic_claude-x_1h":       int64(5),
+		"tokens_claude-sonnet-5-5_1h":        nil,
+		"tokens_claude-haiku-5-5_1h":         nil,
+		"money_unreadable_records":           0,
+		"money_unparsed_inputs":              3,
 	}
 	if !reflect.DeepEqual(cols, want) {
 		t.Fatalf("money = %#v, want %#v", cols, want)
@@ -163,9 +169,11 @@ func TestSourceMoneyMissingInputsLeaveNilColumns(t *testing.T) {
 		"deepseek_per_hour":                  nil,
 		"deepseek_balance":                   nil,
 		"deepseek_spend_age_s":               nil,
+		"money_unreadable_records":           0,
+		"money_unparsed_inputs":              0,
 	}
 	if !reflect.DeepEqual(cols, want) {
-		t.Fatalf("money = %#v, want every column nil (no reading, not a zero)", cols)
+		t.Fatalf("money = %#v, want every reading nil (no reading, not a zero) and no input that failed", cols)
 	}
 }
 
@@ -188,8 +196,14 @@ func TestSourceMoneySkipsWhatItCannotPlace(t *testing.T) {
 	if cols["deepseek_per_hour"] != nil || cols["deepseek_balance"] != nil {
 		t.Errorf("DeepSeek columns = %v, %v; want nil (a document with no timestamp)", cols["deepseek_per_hour"], cols["deepseek_balance"])
 	}
-	if len(cols) != 7 {
-		t.Errorf("money = %v; want the seven fixed columns and no token column", cols)
+	if cols["money_unparsed_inputs"] != 4 {
+		t.Errorf("money_unparsed_inputs = %v, want 4: two plan lines, the spend document and the record", cols["money_unparsed_inputs"])
+	}
+	if cols["money_unreadable_records"] != 0 {
+		t.Errorf("money_unreadable_records = %v; want 0 for records that were listed and read", cols["money_unreadable_records"])
+	}
+	if len(cols) != 9 {
+		t.Errorf("money = %v; want the seven readings, the two counts and no token column", cols)
 	}
 }
 
@@ -236,6 +250,119 @@ func TestSourceMoneyAnUnreadableInputLeavesTheGroupNull(t *testing.T) {
 				t.Errorf("record money = %v, errors = %v; want null and one money error", rec.Groups["money"], rec.Errors)
 			}
 		})
+	}
+}
+
+func TestSourceMoneyCountsAMalformedSpendDocument(t *testing.T) {
+	t.Parallel()
+	_, spend, _ := moneyTestPaths()
+	files := map[string]string{spend: `{"ts":`}
+	cols, err := moneySource{}.Collect(context.Background(), moneyTestEnv(t, files, nil, nil))
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	// The document is not an absent one: every DeepSeek column is nil and the
+	// count says why, where a town without the file counts no failed input.
+	if cols["deepseek_per_hour"] != nil || cols["deepseek_balance"] != nil || cols["deepseek_spend_age_s"] != nil {
+		t.Errorf("DeepSeek columns = %v, %v, %v; want nil from a document that will not decode",
+			cols["deepseek_per_hour"], cols["deepseek_balance"], cols["deepseek_spend_age_s"])
+	}
+	if cols["money_unparsed_inputs"] != 1 || cols["money_unreadable_records"] != 0 {
+		t.Errorf("money_unparsed_inputs, money_unreadable_records = %v, %v; want 1, 0",
+			cols["money_unparsed_inputs"], cols["money_unreadable_records"])
+	}
+}
+
+func TestSourceMoneyCountsUnreadableUsageRecords(t *testing.T) {
+	t.Parallel()
+	_, _, usage := moneyTestPaths()
+	now := fixedNow()
+	dirs := map[string][]DirEntry{usage: {
+		{Name: "gt-good.work.json"},
+		{Name: "gt-locked.work.json"},
+		{Name: "gt-gone.work.json"},
+	}}
+	files := map[string]string{
+		filepath.Join(usage, "gt-good.work.json"): usageRecord(now.Add(-10*time.Minute), true, map[string][3]int64{
+			"claude-opus-4-6": {100, 50, 10},
+		}),
+	}
+	// gt-locked is listed and cannot be read; gt-gone went away between the
+	// listing and the read, so there is no data left to count for it.
+	errs := map[string]error{
+		filepath.Join(usage, "gt-locked.work.json"): fs.ErrPermission,
+	}
+	cols, err := moneySource{}.Collect(context.Background(), moneyTestEnv(t, files, dirs, errs))
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if cols["tokens_claude-opus-4-6_1h"] != int64(160) {
+		t.Errorf("tokens_claude-opus-4-6_1h = %v, want 160 from the record that could be read", cols["tokens_claude-opus-4-6_1h"])
+	}
+	if cols["money_unreadable_records"] != 1 {
+		t.Errorf("money_unreadable_records = %v, want 1 for the record that could not be read", cols["money_unreadable_records"])
+	}
+	if cols["money_unparsed_inputs"] != 0 {
+		t.Errorf("money_unparsed_inputs = %v; want 0, since both other files were readable or gone", cols["money_unparsed_inputs"])
+	}
+}
+
+func TestSourceMoneyTokenColumnsFollowTheDirectoryNotTheHour(t *testing.T) {
+	t.Parallel()
+	_, _, usage := moneyTestPaths()
+	now := fixedNow()
+	dirs := map[string][]DirEntry{usage: {
+		{Name: "gt-now.work.json"},
+		{Name: "gt-earlier.work.json"},
+		{Name: "gt-open.work.json"},
+	}}
+	files := map[string]string{
+		filepath.Join(usage, "gt-now.work.json"): usageRecord(now.Add(-10*time.Minute), true, map[string][3]int64{
+			"claude-opus-4-6": {10, 5, 1},
+		}),
+		filepath.Join(usage, "gt-earlier.work.json"): usageRecord(now.Add(-3*time.Hour), true, map[string][3]int64{
+			"claude-sonnet-5-5": {999, 999, 999},
+		}),
+		filepath.Join(usage, "gt-open.work.json"): usageRecord(now.Add(-5*time.Minute), false, map[string][3]int64{
+			"claude-haiku-5-5": {777, 0, 0},
+		}),
+	}
+	cols, err := moneySource{}.Collect(context.Background(), moneyTestEnv(t, files, dirs, nil))
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if cols["tokens_claude-opus-4-6_1h"] != int64(16) {
+		t.Errorf("tokens_claude-opus-4-6_1h = %v, want 16", cols["tokens_claude-opus-4-6_1h"])
+	}
+	// A model the directory holds keeps its column while it has no reading
+	// for the hour, so the column set does not change with the hour's data.
+	for _, column := range []string{"tokens_claude-sonnet-5-5_1h", "tokens_claude-haiku-5-5_1h"} {
+		value, ok := cols[column]
+		if !ok || value != nil {
+			t.Errorf("%s = %v, present = %t; want a nil column", column, value, ok)
+		}
+	}
+	if cols["money_unparsed_inputs"] != 0 || cols["money_unreadable_records"] != 0 {
+		t.Errorf("gap counts = %v, %v; want 0, 0 from records that all decoded",
+			cols["money_unparsed_inputs"], cols["money_unreadable_records"])
+	}
+}
+
+func TestSourceMoneyWithNoReadDirLeavesTheTokenColumnsOut(t *testing.T) {
+	t.Parallel()
+	env := moneyTestEnv(t, nil, nil, nil)
+	env.ReadDir = nil
+	cols, err := moneySource{}.Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(cols) != 9 {
+		t.Errorf("money = %v; want the seven readings and the two counts, with no token column", cols)
+	}
+	for key := range cols {
+		if strings.HasPrefix(key, "tokens_") {
+			t.Errorf("money = %v; want no token column from an Env that cannot list the directory", cols)
+		}
 	}
 }
 
