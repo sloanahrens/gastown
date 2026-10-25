@@ -12,8 +12,10 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/deadseats"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -606,6 +608,33 @@ func TestPoolSeatSessionsKeepsASandboxSeatShortOfTheDeadThreshold(t *testing.T) 
 				t.Fatalf("roster newest = %v, want the session's created %v", roster.Newest, created)
 			}
 		})
+	}
+}
+
+// A patrol config that does not parse leaves the roster on the compiled
+// default, and the patrol itself falls back to the same count when its loader
+// hands it no config: the two processes have to confirm a death at one count,
+// or the roster calls a seat dead the patrol still holds (gt-4rxdi).
+func TestSandboxDeadSamplesReadsTheCompiledDefaultWhenTheConfigIsUnreadable(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, constants.DirMayor), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	broken := filepath.Join(town, constants.DirMayor, "daemon.json")
+	if err := os.WriteFile(broken, []byte(`{"type":`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := daemon.ReadPatrolConfig(town); err == nil {
+		t.Fatal("ReadPatrolConfig accepted the broken config; the test does not reach the unreadable branch")
+	}
+
+	got := sandboxDeadSamples(town)
+	if got != deadseats.DefaultSamples {
+		t.Fatalf("sandboxDeadSamples over an unreadable config = %d, want the compiled default %d", got, deadseats.DefaultSamples)
+	}
+	if patrolscan.DefaultDeadSamples != got {
+		t.Fatalf("the patrol scans with a dead-sample default of %d and the roster reads %d; the two would confirm a death at different counts", patrolscan.DefaultDeadSamples, got)
 	}
 }
 
