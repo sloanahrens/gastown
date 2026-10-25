@@ -21,7 +21,7 @@
     },
     {
       "target": "manual_rescue",
-      "label": "Landings that needed a manual rescue",
+      "label": "manual_rescue",
       "positives": 37,
       "skipped": false,
       "best_box": "attempts in q3..q4 and files_touched = none",

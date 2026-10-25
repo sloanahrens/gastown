@@ -147,8 +147,6 @@ func panelLabel(target string) string {
 		return "Landings rejected before they land"
 	case "reached_overrun_stop":
 		return "Beads stopped by the overrun guard"
-	case "manual_rescue":
-		return "Landings that needed a manual rescue"
 	}
 	return target
 }

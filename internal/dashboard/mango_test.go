@@ -125,8 +125,8 @@ func TestMangoReadsTheNewTargetKeys(t *testing.T) {
 		t.Errorf("a run target carries the reason %q", earning.Reason)
 	}
 
-	if replicated.Label != "Landings that needed a manual rescue" {
-		t.Errorf("the no-signal target's label reads %q", replicated.Label)
+	if replicated.Label != "manual_rescue" {
+		t.Errorf("the no-signal target's label reads %q, want the id the writer has no title for", replicated.Label)
 	}
 	if replicated.HoldoutPositives == nil || *replicated.HoldoutPositives != 5 {
 		t.Errorf("the no-signal target's holdout positives read %v", replicated.HoldoutPositives)
