@@ -381,6 +381,8 @@ func (f *Fake) ReadyAll() ([]*beads.Issue, error) { return f.Ready() }
 // ReadyFiltered returns the ready issues matching opts: open, unblocked and
 // non-ephemeral, then opts' own exclusions and cap. It applies none of Ready's
 // bookkeeping exclusions, because the caller names every filter it wants.
+// A positive Limit that cuts the answer returns the page AND *ErrReadyTruncated,
+// as bd's capped page does.
 func (f *Fake) ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -399,7 +401,8 @@ func (f *Fake) ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error) {
 		out = append(out, is)
 	}
 	if opts.Limit > 0 && len(out) > opts.Limit {
-		out = out[:opts.Limit]
+		total := len(out)
+		return out[:opts.Limit], &beads.ErrReadyTruncated{Found: opts.Limit, Cap: opts.Limit, TrueCount: total}
 	}
 	return out, nil
 }

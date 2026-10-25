@@ -18,9 +18,9 @@ func TestSpecFromBoardRowCarriesTheSpec(t *testing.T) {
 	row := `[{"id":"gt-r1","title":"row title","issue_type":"task","status":"open","priority":1,` +
 		`"created_at":"2026-10-20T10:00:00Z","description":"the description","notes":"a note",` +
 		`"acceptance_criteria":"- [ ] it works","design":"the design","labels":["area:x"]}]`
-	issues, err := parseSpecReady([]byte(row))
+	issues, _, err := beads.DecodeReadyBoard([]byte(row))
 	if err != nil {
-		t.Fatalf("parseSpecReady: %v", err)
+		t.Fatalf("decode board: %v", err)
 	}
 	if len(issues) != 1 {
 		t.Fatalf("parsed %d rows, want 1", len(issues))
@@ -166,18 +166,18 @@ func TestSpecTickCandidateLoopReadsNothing(t *testing.T) {
 	}
 }
 
-// parseSpecReady reads a bare array and an envelope alike. A zero
+// The production board reader takes a bare array and an envelope alike. A zero
 // dependent_count on a row no longer says anything about the bead's children
 // (gt-603wu).
 func TestSpecFromBoardRowReadsBothShapes(t *testing.T) {
 	t.Parallel()
 	rows := `[{"id":"gt-zero","issue_type":"task","status":"open","dependent_count":0}]`
-	issues, err := parseSpecReady([]byte(rows))
+	issues, _, err := beads.DecodeReadyBoard([]byte(rows))
 	if err != nil || len(issues) != 1 || issues[0].ID != "gt-zero" {
 		t.Fatalf("bare array = %v, %v; want the zero-count row", issues, err)
 	}
 	env := `{"issues":[{"id":"gt-env","issue_type":"task","status":"open"}]}`
-	issues, err = parseSpecReady([]byte(env))
+	issues, _, err = beads.DecodeReadyBoard([]byte(env))
 	if err != nil || len(issues) != 1 || issues[0].ID != "gt-env" {
 		t.Fatalf("envelope = %v, %v; want one row", issues, err)
 	}

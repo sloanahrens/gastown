@@ -2810,10 +2810,13 @@ func (b *Beads) GetAssignedIssue(assignee string) (*Issue, error) {
 // "data" array; "pagination" carries the truncation verdict bd ready's
 // own one-shot count computed, present only when the page came back capped.
 // bd builds old enough to predate the envelope emit a bare array, which the
-// plain-array branch of parseReadyOutput covers (gt-m7pq).
+// plain-array branch of decodeReadyBoard covers, and the spec dispatcher's
+// board reader has also accepted an "issues" key, so that alias is read when
+// "data" is absent (gt-m7pq, gt-p85pw.7).
 type readyEnvelope struct {
 	SchemaVersion int             `json:"schema_version"`
 	Data          json.RawMessage `json:"data"`
+	Issues        json.RawMessage `json:"issues"`
 	Pagination    struct {
 		Returned  int  `json:"returned"`
 		Total     int  `json:"total"`
@@ -2836,33 +2839,75 @@ const bdReadyDefaultLimit = 100
 // ErrReadyTruncated when the envelope says the page was capped. bd <1.2.2
 // (or any build that ignores BD_JSON_ENVELOPE) answers with a bare array
 // and no pagination block; that degrades to a plain result with no sentinel,
-// the status quo this method exists to improve on but not to break.
+// the status quo this method exists to improve on but not to break. Empty
+// output stays an error here, not decodeReadyBoard's empty board: Ready
+// reports a board, and a bd that printed nothing did not answer.
 func parseReadyOutput(out []byte) ([]*Issue, error) {
+	if len(bytes.TrimSpace(out)) == 0 {
+		return nil, errors.New("parsing bd ready output: empty answer")
+	}
+	return parseReadyBoard(out, bdReadyDefaultLimit)
+}
+
+// DecodeReadyBoard reads one buffered bd ready --json answer into its issues
+// and, when bd reported the page cut, the *ErrReadyTruncated that says so. It
+// is the reader behind Ready and ReadyFiltered, exported so a captured board
+// fixture runs through the same reader a live tick uses (gt-p85pw.7). Empty
+// output is an empty board: a tick with no ready work is a quiet board, not a
+// failure.
+func DecodeReadyBoard(out []byte) ([]*Issue, *ErrReadyTruncated, error) {
+	return decodeReadyBoardPage(out, bdReadyDefaultLimit)
+}
+
+// parseReadyBoard is decodeReadyBoardPage in the error-returning shape Ready
+// and ReadyFiltered use: the issues found, plus the sentinel when the page was
+// cut.
+func parseReadyBoard(out []byte, cap int) ([]*Issue, error) {
+	issues, capped, err := decodeReadyBoardPage(out, cap)
+	if err != nil || capped == nil {
+		return issues, err
+	}
+	return issues, capped
+}
+
+// decodeReadyBoardPage reads one buffered bd ready --json answer: the
+// BD_JSON_ENVELOPE=1 envelope runReadyCLI asks for, or the bare array a bd
+// that predates it prints. cap is the limit that bounded the query — the
+// envelope carries what came back, never the cap — and rides on the sentinel
+// when bd reports the page cut.
+func decodeReadyBoardPage(out []byte, cap int) ([]*Issue, *ErrReadyTruncated, error) {
 	trimmed := bytes.TrimSpace(out)
-	if len(trimmed) == 0 || trimmed[0] != '{' {
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil, nil, nil
+	}
+	if trimmed[0] != '{' {
 		var issues []*Issue
-		if err := json.Unmarshal(out, &issues); err != nil {
-			return nil, fmt.Errorf("parsing bd ready output: %w", err)
+		if err := json.Unmarshal(trimmed, &issues); err != nil {
+			return nil, nil, fmt.Errorf("parsing bd ready output: %w", err)
 		}
-		return issues, nil
+		return issues, nil, nil
 	}
 
 	var env readyEnvelope
-	if err := json.Unmarshal(out, &env); err != nil {
-		return nil, fmt.Errorf("parsing bd ready envelope: %w", err)
+	if err := json.Unmarshal(trimmed, &env); err != nil {
+		return nil, nil, fmt.Errorf("parsing bd ready envelope: %w", err)
+	}
+	data := env.Data
+	if len(data) == 0 {
+		data = env.Issues
 	}
 	var issues []*Issue
-	if err := json.Unmarshal(env.Data, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd ready envelope data: %w", err)
+	if err := json.Unmarshal(data, &issues); err != nil {
+		return nil, nil, fmt.Errorf("parsing bd ready envelope data: %w", err)
 	}
 	if !env.Pagination.Truncated {
-		return issues, nil
+		return issues, nil, nil
 	}
 	return issues, &ErrReadyTruncated{
 		Found:     env.Pagination.Returned,
-		Cap:       bdReadyDefaultLimit,
+		Cap:       cap,
 		TrueCount: env.Pagination.Total,
-	}
+	}, nil
 }
 
 // Ready returns issues that are ready to work (not blocked). Bookkeeping
@@ -2911,46 +2956,39 @@ func (b *Beads) ReadyAll() ([]*Issue, error) {
 	return issues, nil
 }
 
-// ReadyFiltered runs one ready query with opts' filters server-side
-// (gt-p85pw.7). Zero Limit asks for the whole board and a page bd cuts short
-// anyway is an error, as ReadyAll's is; a positive Limit is a page request, so
-// a cut page comes back with *ErrReadyTruncated instead.
+// ReadyFiltered runs one ready query with opts' filters applied server-side
+// (gt-p85pw.7), on the same BD_JSON_ENVELOPE=1 path Ready uses: the pagination
+// verdict that makes a cut page a loud answer only arrives with the envelope,
+// and machine mode wraps the payload in a different shape (runMachine).
 //
-// The flags go out in one fixed order, the one the spec dispatcher's board
-// query has always used (internal/cmd/spec.go): --unassigned, one
-// comma-joined --exclude-label, one comma-joined --exclude-type, --limit.
+// A page bd reports as cut comes back as the issues it did return AND an
+// *ErrReadyTruncated sentinel, Ready's contract. Limit 0 asks for the whole
+// board, so a caller that needs every row must not drop the sentinel; a
+// positive Limit is one page, and the sentinel says more rows remain.
 func (b *Beads) ReadyFiltered(opts ReadyOptions) ([]*Issue, error) {
-	out, err := b.runMachine(readyFilteredArgs(opts)...)
+	out, err := b.runReadyCLI(ReadyArgs(opts)...)
 	if err != nil {
 		return nil, err
 	}
-	env, isEnvelope, err := decodeMachineEnvelope(out, "bd ready")
-	if err != nil {
-		return nil, err
-	}
-	data := bytes.TrimSpace(out)
-	if isEnvelope {
-		data = env.Data
-	}
-	var issues []*Issue
-	if err := json.Unmarshal(data, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd ready output: %w", err)
-	}
-	if !isEnvelope || env.Pagination == nil || !env.Pagination.Truncated {
-		return issues, nil
-	}
-	if opts.Limit == 0 {
-		return nil, fmt.Errorf("bd ready --limit 0 returned a truncated page (%d issues); refusing to read it as the whole board", env.Pagination.Returned)
-	}
-	trueCount := 0
-	if env.Pagination.Total != nil {
-		trueCount = *env.Pagination.Total
-	}
-	return issues, &ErrReadyTruncated{Found: env.Pagination.Returned, Cap: opts.Limit, TrueCount: trueCount}
+	return parseReadyBoard(out, readyQueryCap(opts.Limit))
 }
 
-// readyFilteredArgs is ReadyFiltered's argv.
-func readyFilteredArgs(o ReadyOptions) []string {
+// readyQueryCap is the limit that bounded a ReadyFiltered query: a positive
+// Limit is that page; zero is bd's whole-board request, which bd bounds at its
+// default page if it cuts the answer anyway.
+func readyQueryCap(limit int) int {
+	if limit > 0 {
+		return limit
+	}
+	return bdReadyDefaultLimit
+}
+
+// ReadyArgs is the bd argv ReadyFiltered runs for opts: the flags in one fixed
+// order, the one the spec dispatcher's board query has always used
+// (internal/cmd/spec.go) — --unassigned, one comma-joined --exclude-label, one
+// comma-joined --exclude-type, --limit. Exported so that dispatcher's test can
+// pin the query it sends against the argv the seam builds from it.
+func ReadyArgs(o ReadyOptions) []string {
 	args := []string{"ready", "--json"}
 	if o.Unassigned {
 		args = append(args, "--unassigned")

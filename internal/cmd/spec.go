@@ -2278,8 +2278,17 @@ func specReadyOptions() beads.ReadyOptions {
 // database. The filters stay server-side, and the seam's runner adds bd's
 // stale-read bypass on its own, which is what kept this query on the argv path
 // until one adapter had to serve it (gt-7iwy0.4.10, gt-p85pw.7).
+//
+// A board bd reports as cut is still read as a partial board, the way this
+// query has always read it: the tick acts on what it got, and the sentinel
+// says only that there may be more.
 func specReadyBoard(rigPath string) ([]*beads.Issue, error) {
-	return beads.NewPinned(beads.ResolveBeadsDir(rigPath)).ReadyFiltered(specReadyOptions())
+	issues, err := beads.NewPinned(beads.ResolveBeadsDir(rigPath)).ReadyFiltered(specReadyOptions())
+	var truncated *beads.ErrReadyTruncated
+	if errors.As(err, &truncated) {
+		return issues, nil
+	}
+	return issues, err
 }
 
 // annotateSpecOnce adds text as a comment unless the bead already carries a

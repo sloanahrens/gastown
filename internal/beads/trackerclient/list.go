@@ -143,7 +143,10 @@ func (c *Client) ReadyAll() ([]*beads.Issue, error) {
 
 // ReadyFiltered returns the ready issues matching opts. A zero Limit asks for
 // the whole board, so it pages the tracker's ready query to the end; a
-// positive one is that one page.
+// positive one is that one page, and a page whose NextCursor is set has more
+// rows behind it, so it comes back with *ErrReadyTruncated as the Client
+// contract says. The tracker reports a cursor, not a board size, so the
+// sentinel's TrueCount is the proven lower bound: one more than the page.
 func (c *Client) ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error) {
 	f := api.ReadyFilter{
 		Unassigned:    opts.Unassigned,
@@ -162,7 +165,11 @@ func (c *Client) ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error) 
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	return issues(page.Issues), nil
+	out := issues(page.Issues)
+	if page.NextCursor != "" {
+		return out, &beads.ErrReadyTruncated{Found: len(out), Cap: opts.Limit, TrueCount: len(out) + 1}
+	}
+	return out, nil
 }
 
 // Children returns the direct children of parentID.

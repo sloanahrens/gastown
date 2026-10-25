@@ -877,11 +877,15 @@ func contractReadyFiltered(t *testing.T, s *scope) {
 	s.want(t, "ReadyFiltered(unassigned, excludes)", filtered, err, work.ID, blocker.ID)
 
 	first, err := s.ReadyFiltered(beads.ReadyOptions{Limit: 1})
-	if err != nil {
-		t.Fatalf("ReadyFiltered(limit 1): %v", err)
+	var capped *beads.ErrReadyTruncated
+	if !errors.As(err, &capped) {
+		t.Fatalf("ReadyFiltered(limit 1) err = %v, want *ErrReadyTruncated for a cut page", err)
 	}
 	if len(first) != 1 {
-		t.Errorf("ReadyFiltered(limit 1) = %v, want exactly one issue", ids(first))
+		t.Errorf("ReadyFiltered(limit 1) = %v, want the one-row page with its sentinel", ids(first))
+	}
+	if capped.Found != 1 || capped.TrueCount <= capped.Found {
+		t.Errorf("ReadyFiltered(limit 1) sentinel = %+v, want one row found and more behind it", *capped)
 	}
 }
 

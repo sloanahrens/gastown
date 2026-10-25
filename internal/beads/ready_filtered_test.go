@@ -2,92 +2,133 @@ package beads
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
-// specDispatchReadyOptions is the query the spec dispatcher's board read makes
-// (internal/cmd/spec.go's specReadyOptions): unassigned work beads, the town's
-// bookkeeping families and the dispatcher's own exclusions filtered
-// server-side, the whole board. The label list is
-// constants.NonDispatchableBeadLabels followed by specdispatch.ReadyQueryLabels
-// (which is gt:ready-to-land and needs-human today); the type list is
-// specdispatch.NonWorkBeadTypes.
-func specDispatchReadyOptions() ReadyOptions {
-	labels := append([]string(nil), constants.NonDispatchableBeadLabels...)
-	labels = append(labels, "gt:ready-to-land", "needs-human")
+// filteredBoardEnvelope is the shape bd prints under BD_JSON_ENVELOPE=1 for a
+// ready page: a data array and the pagination verdict. It is deliberately the
+// envelope runReadyCLI asks for, not machine mode's (which carries
+// contract_version): ReadyFiltered reads this shape (gt-p85pw.7).
+func filteredBoardEnvelope(returned, total int, truncated bool) string {
+	var items []string
+	for i := 0; i < returned; i++ {
+		items = append(items, fmt.Sprintf(`{"id":"gt-page-%d","title":"t","status":"open","priority":2,"issue_type":"task"}`, i))
+	}
+	return fmt.Sprintf(`{"schema_version":1,"data":[%s],"pagination":{"returned":%d,"total":%d,"truncated":%t}}`,
+		strings.Join(items, ","), returned, total, truncated)
+}
+
+// filteredReadyOptions is a representative filtered query: an unassigned
+// board with the caller's own label and type exclusions, uncapped. It is not
+// a named caller's query — the spec dispatcher's options are its own, pinned
+// in internal/cmd (gt-p85pw.7).
+func filteredReadyOptions() ReadyOptions {
 	return ReadyOptions{
 		Unassigned:    true,
-		ExcludeLabels: labels,
-		ExcludeTypes:  append([]string{constants.EpicBeadType}, constants.NonDispatchableBeadTypes...),
+		ExcludeLabels: []string{"gt:skipped", "needs-human"},
+		ExcludeTypes:  []string{"epic", "wisp"},
 		Limit:         0,
 	}
 }
 
-// TestReadyFiltered_SendsTheSpecDispatchArgv pins the argv the seam runs for
-// the dispatcher's board: the same one internal/cmd/spec.go built by hand
-// before the query moved behind beads.Client (gt-p85pw.7), in the same order,
-// with each exclusion list joined once.
-func TestReadyFiltered_SendsTheSpecDispatchArgv(t *testing.T) {
+// TestReadyFiltered_SendsReadyArgs pins the argv and the envelope opt-in
+// ReadyFiltered sends: ReadyArgs(opts) exactly, through the BD_JSON_ENVELOPE=1
+// path, so the pagination verdict Ready's parser reads is present.
+func TestReadyFiltered_SendsReadyArgs(t *testing.T) {
 	t.Parallel()
-	rec := newRecorder(func([]string) reply { return reply{stdout: readyBoardEnvelope(2, false)} })
-	opts := specDispatchReadyOptions()
+	rec := newRecorder(func([]string) reply { return reply{stdout: filteredBoardEnvelope(2, 2, false)} })
+	opts := filteredReadyOptions()
 	issues, err := newRecordedBeads(t.TempDir(), rec).ReadyFiltered(opts)
 	if err != nil {
 		t.Fatalf("ReadyFiltered: %v", err)
 	}
-	if len(issues) != 2 {
-		t.Fatalf("ReadyFiltered = %d issues, want 2", len(issues))
+	if len(issues) != 2 || issues[0].ID != "gt-page-0" {
+		t.Fatalf("ReadyFiltered = %v, want the two-page rows", issues)
 	}
 	calls := rec.calls()
 	if len(calls) != 1 {
 		t.Fatalf("calls = %q, want one bd ready", rec.argvs())
 	}
-	want := []string{
-		"ready", "--json",
-		"--unassigned",
-		"--exclude-label", strings.Join(opts.ExcludeLabels, ","),
-		"--exclude-type", strings.Join(opts.ExcludeTypes, ","),
-		"--limit", "0",
-	}
-	if !slices.Equal(calls[0].args, want) {
+	if want := ReadyArgs(opts); !slices.Equal(calls[0].args, want) {
 		t.Errorf("argv = %q, want %q", calls[0].args, want)
 	}
+	if want := []string{"ready", "--json", "--unassigned", "--exclude-label", "gt:skipped,needs-human", "--exclude-type", "epic,wisp", "--limit", "0"}; !slices.Equal(calls[0].args, want) {
+		t.Errorf("argv = %q, want the dispatcher's fixed flag order %q", calls[0].args, want)
+	}
+	if v, ok := lastEnvValue(calls[0].env, "BD_JSON_ENVELOPE"); !ok || v != "1" {
+		t.Errorf("BD_JSON_ENVELOPE = %q (set %t), want 1 so bd answers with the pagination envelope", v, ok)
+	}
 }
 
-// TestReadyFiltered_RefusesACutWholeBoard: --limit 0 asks for every ready
-// issue, so a page bd reports as cut is a failure, not a smaller board
-// (gt-59o9's rule for ReadyAll).
-func TestReadyFiltered_RefusesACutWholeBoard(t *testing.T) {
+// TestReadyFiltered_CutWholeBoardStillReturnsTheBoard: --limit 0 asks for
+// every row, so a page bd cuts anyway is a partial board with the sentinel
+// saying so, not a refusal. The spec dispatcher reads the page and lets the
+// tick proceed on what it got (gt-p85pw.7).
+func TestReadyFiltered_CutWholeBoardStillReturnsTheBoard(t *testing.T) {
 	t.Parallel()
-	rec := newRecorder(func([]string) reply { return reply{stdout: readyBoardEnvelope(100, true)} })
-	issues, err := newRecordedBeads(t.TempDir(), rec).ReadyFiltered(specDispatchReadyOptions())
-	if err == nil {
-		t.Fatalf("ReadyFiltered accepted a cut board as %d issues", len(issues))
-	}
+	rec := newRecorder(func([]string) reply { return reply{stdout: filteredBoardEnvelope(100, 373, true)} })
+	issues, err := newRecordedBeads(t.TempDir(), rec).ReadyFiltered(filteredReadyOptions())
 	var truncated *ErrReadyTruncated
-	if errors.As(err, &truncated) {
-		t.Errorf("err = %v, want a plain failure for a --limit 0 board", err)
+	if !errors.As(err, &truncated) {
+		t.Fatalf("ReadyFiltered(limit 0) err = %v, want *ErrReadyTruncated", err)
+	}
+	if len(issues) != 100 {
+		t.Errorf("ReadyFiltered(limit 0) = %d issues, want the 100-row partial board with its sentinel", len(issues))
+	}
+	if truncated.Cap != bdReadyDefaultLimit || truncated.TrueCount != 373 {
+		t.Errorf("sentinel = %+v, want bd's default page cap and the 373-row board", *truncated)
 	}
 }
 
-// TestReadyFiltered_APageRequestCarriesTheTruncation: a positive limit is a
-// page request, so the cut page comes back with the sentinel Ready uses.
+// TestReadyFiltered_APageRequestCarriesTheTruncation: a positive Limit is a
+// page request, so the cut page comes back with the sentinel Ready uses and
+// the caller's own limit as its cap.
 func TestReadyFiltered_APageRequestCarriesTheTruncation(t *testing.T) {
 	t.Parallel()
-	rec := newRecorder(func([]string) reply { return reply{stdout: readyBoardEnvelope(5, true)} })
+	rec := newRecorder(func([]string) reply { return reply{stdout: filteredBoardEnvelope(5, 9, true)} })
 	issues, err := newRecordedBeads(t.TempDir(), rec).ReadyFiltered(ReadyOptions{Limit: 5})
 	var truncated *ErrReadyTruncated
 	if !errors.As(err, &truncated) {
 		t.Fatalf("ReadyFiltered(limit 5) err = %v, want *ErrReadyTruncated", err)
 	}
-	if truncated.Cap != 5 || truncated.Found != 5 {
-		t.Errorf("truncation = %+v, want cap 5 and 5 found", *truncated)
+	if truncated.Cap != 5 || truncated.Found != 5 || truncated.TrueCount != 9 {
+		t.Errorf("sentinel = %+v, want cap 5, 5 found and 9 total", *truncated)
 	}
 	if len(issues) != 5 {
 		t.Errorf("ReadyFiltered(limit 5) = %d issues, want the 5-row page", len(issues))
+	}
+}
+
+// TestReadyFiltered_ReadsTheAnswersBdCanGive pins the decode branches: an
+// uncapped envelope, the bare array an older bd prints (which carries no
+// pagination verdict), and empty output — a quiet board, the rule the spec
+// dispatcher's reader has always had.
+func TestReadyFiltered_ReadsTheAnswersBdCanGive(t *testing.T) {
+	t.Parallel()
+	row := `{"id":"gt-a","title":"t","status":"open","priority":2,"issue_type":"task"}`
+	tests := []struct {
+		name string
+		out  string
+		want int
+	}{
+		{"uncapped envelope", `{"schema_version":1,"data":[` + row + `]}`, 1},
+		{"legacy bare array", `[` + row + `]`, 1},
+		{"empty output", "", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rec := newRecorder(func([]string) reply { return reply{stdout: tt.out} })
+			issues, err := newRecordedBeads(t.TempDir(), rec).ReadyFiltered(filteredReadyOptions())
+			if err != nil {
+				t.Fatalf("ReadyFiltered: %v", err)
+			}
+			if len(issues) != tt.want {
+				t.Errorf("ReadyFiltered = %d issues, want %d", len(issues), tt.want)
+			}
+		})
 	}
 }

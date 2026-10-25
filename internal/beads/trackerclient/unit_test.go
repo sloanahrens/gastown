@@ -299,3 +299,41 @@ func TestStatsJSONAndCount(t *testing.T) {
 		t.Errorf("CountIssues = %d, %v; want 6", n, err)
 	}
 }
+
+// TestReadyFilteredCarriesTheFilterAndSignalsACutPage pins the adapter's side
+// of the Client contract (gt-p85pw.7): the caller's filters cross the wire, and
+// a positive limit whose page has a next cursor comes back with
+// beads.ErrReadyTruncated — the tracker's way of saying more rows remain.
+func TestReadyFilteredCarriesTheFilterAndSignalsACutPage(t *testing.T) {
+	t.Parallel()
+	var filters []api.ReadyFilter
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		var f api.ReadyFilter
+		_ = json.NewDecoder(r.Body).Decode(&f)
+		filters = append(filters, f)
+		_ = json.NewEncoder(w).Encode(api.IssuePage{
+			Issues:     []api.Issue{{ID: "gt-a"}, {ID: "gt-b"}},
+			NextCursor: "next",
+		})
+	})
+	got, err := c.ReadyFiltered(beads.ReadyOptions{
+		Unassigned:    true,
+		ExcludeLabels: []string{"gt:skipped"},
+		ExcludeTypes:  []string{"epic"},
+		Limit:         2,
+	})
+	var capped *beads.ErrReadyTruncated
+	if !errors.As(err, &capped) {
+		t.Fatalf("ReadyFiltered(limit 2) err = %v, want beads.ErrReadyTruncated for a page with a next cursor", err)
+	}
+	if len(got) != 2 || capped.Cap != 2 || capped.TrueCount <= capped.Found {
+		t.Errorf("ReadyFiltered = %d issues, sentinel %+v; want the two-row page and more behind it", len(got), *capped)
+	}
+	if len(filters) != 1 {
+		t.Fatalf("requests = %d, want one ready page", len(filters))
+	}
+	f := filters[0]
+	if !f.Unassigned || f.Limit != 2 || strings.Join(f.ExcludeLabels, ",") != "gt:skipped" || strings.Join(f.ExcludeTypes, ",") != "epic" {
+		t.Errorf("filter = %+v, want the caller's filters carried across", f)
+	}
+}

@@ -575,9 +575,9 @@ func TestSpecDispatchOpenChildrenHoldTheContainer(t *testing.T) {
 		rows := fmt.Sprintf(`[{"id":"gt-container","issue_type":"task","status":"open","priority":1,`+
 			`"created_at":"2026-09-29T10:00:00Z","description":%s,"acceptance_criteria":%s,"dependent_count":%d}]`,
 			desc, accept, dependentCount)
-		issues, err := parseSpecReady([]byte(rows))
+		issues, _, err := beads.DecodeReadyBoard([]byte(rows))
 		if err != nil || len(issues) != 1 {
-			t.Fatalf("parseSpecReady: %d issues, %v", len(issues), err)
+			t.Fatalf("decode board: %d issues, %v", len(issues), err)
 		}
 		return specFromIssue(issues[0])
 	}
@@ -2653,54 +2653,28 @@ func TestSpecDispatchReportsCrewOnlySkip(t *testing.T) {
 	}
 }
 
-// parseSpecReady decodes a ready-board fixture: bd's bare --json array, or the
-// row-per-object envelope an older capture uses. It is a test helper — the
-// live path reads bd's answer through beads.Client.ReadyFiltered.
-func parseSpecReady(out []byte) ([]*beads.Issue, error) {
-	trimmed := strings.TrimSpace(string(out))
-	if trimmed == "" || trimmed == "null" {
-		return nil, nil
-	}
-	var issues []*beads.Issue
-	if strings.HasPrefix(trimmed, "[") {
-		if err := json.Unmarshal([]byte(trimmed), &issues); err != nil {
-			return nil, fmt.Errorf("parsing bd ready: %w", err)
-		}
-		return issues, nil
-	}
-	var env struct {
-		Issues []*beads.Issue `json:"issues"`
-		Data   []*beads.Issue `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
-		return nil, fmt.Errorf("parsing bd ready: %w", err)
-	}
-	if env.Issues != nil {
-		return env.Issues, nil
-	}
-	return env.Data, nil
-}
-
 // capturedSpecBoard is the board the dispatcher reads, as the dispatcher reads
 // it: the bytes of testdata/spec_ready_labels.json — a `bd ready --json`
 // response captured from the live gastown rig on 2026-10-02 with the query
-// specReadyOptions names — decoded into the issues the board walk reads.
+// specReadyOptions names — through beads.DecodeReadyBoard, the reader
+// ReadyFiltered uses.
 //
 // The fakes elsewhere in this file hand the board a slice of beads.Issue
 // values with Labels filled in, so they cannot catch a read path that never
-// carries labels at all. This one starts from bd's own JSON, which is where
-// om's critical finding lived (gt-q6zoo attempt 1).
+// carries labels at all. This one starts from bd's own JSON through the
+// production decoder, which is where om's critical finding lived (gt-q6zoo
+// attempt 1); keeping the decoder in the path is what makes the next shape
+// change in it visible here (gt-p85pw.7).
 func capturedSpecBoard(t *testing.T) specBoard {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", "spec_ready_labels.json"))
 	if err != nil {
 		t.Fatalf("captured board fixture: %v", err)
 	}
-	var issues []*beads.Issue
-	if err := json.Unmarshal(data, &issues); err != nil {
-		t.Fatalf("captured board fixture: %v", err)
+	return func(string) ([]*beads.Issue, error) {
+		issues, _, err := beads.DecodeReadyBoard(data)
+		return issues, err
 	}
-	return func(string) ([]*beads.Issue, error) { return issues, nil }
 }
 
 // The count of beads the spec-dispatch-failed label holds comes from the ready
@@ -2785,7 +2759,8 @@ func TestSpecCandidatesSkipsCrewOnlyFromBdJSON(t *testing.T) {
 	crewed := `{"id":"gt-crew","title":"crew one","status":"open","priority":2,"issue_type":"bug","labels":["crew-only"]}`
 	twin := `{"id":"gt-open","title":"twin","status":"open","priority":2,"issue_type":"bug"}`
 	board := func(string) ([]*beads.Issue, error) {
-		return parseSpecReady([]byte(`{"issues":[` + crewed + `,` + twin + `]}`))
+		issues, _, err := beads.DecodeReadyBoard([]byte(`{"issues":[` + crewed + `,` + twin + `]}`))
+		return issues, err
 	}
 
 	got := specCandidates(townRoot, 2, board)
@@ -2882,6 +2857,18 @@ func TestSpecReadyQuery(t *testing.T) {
 	// The retired label spec and type feature must not gate the board.
 	if slices.Contains(opts.ExcludeLabels, "spec") || slices.Contains(opts.ExcludeTypes, "feature") {
 		t.Errorf("ready options still carry the retired spec label or feature type: %+v", opts)
+	}
+	// The argv is the one spec.go built by hand before the query moved behind
+	// beads.Client (gt-p85pw.7): the flags in this order, each exclusion list
+	// comma-joined once, the whole board.
+	want := []string{
+		"ready", "--json", "--unassigned",
+		"--exclude-label", strings.Join(opts.ExcludeLabels, ","),
+		"--exclude-type", strings.Join(opts.ExcludeTypes, ","),
+		"--limit", "0",
+	}
+	if got := beads.ReadyArgs(opts); !slices.Equal(got, want) {
+		t.Errorf("ready argv = %q, want %q", got, want)
 	}
 }
 
