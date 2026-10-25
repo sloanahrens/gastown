@@ -237,7 +237,10 @@ WHERE d.issue_id = ANY($1) ORDER BY d.issue_id, d.created_at, t.id`, ids)
 			return fmt.Errorf("store: get dependencies: %w", err)
 		}
 		dep.Priority = int(priority)
-		is := out[owner]
+		is, ok := out[owner]
+		if !ok {
+			continue // the owner went away between the two reads
+		}
 		is.Dependencies = append(is.Dependencies, dep)
 		if dep.DependencyType == "blocks" && dep.Status != "closed" {
 			is.BlockedBy = append(is.BlockedBy, dep.ID)
