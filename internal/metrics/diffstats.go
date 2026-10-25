@@ -96,7 +96,7 @@ type DiffStat struct {
 	PackageEntropy float64
 }
 
-// DiffStats summarises numstat entries. A file's weight is its lines changed,
+// DiffStats summarizes numstat entries. A file's weight is its lines changed,
 // at least one, so a pure rename still counts; a package is the file's
 // directory, "." at the root.
 func DiffStats(entries []NumstatEntry) DiffStat {
