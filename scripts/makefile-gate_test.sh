@@ -871,23 +871,34 @@ chmod +x "$TMP/bin/docker" "$TMP/bin/openshell"
 # Anything else exits 1 with "stub gt: unhandled ..." so a call the script gains
 # later fails loudly instead of passing. Its argv goes to $TMP/gt-calls, not to
 # $STUB_LOG, so the cases that assert on the openshell calls are not disturbed.
+# It holds the real command's usage, not only its output (--gateway is required;
+# --render and --check exclude each other; --from-export needs a --render), so a
+# call the script misuses fails with a message instead of passing. A value-taking
+# flag with nothing after it fails too: `shift 2` with one argument left shifts
+# nothing, so a loop that shifted blindly never advanced past it (gt-p7m67).
 cat >"$TMP/bin/gt" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${STUB_GT_CALLS:-/dev/null}"
+die() { echo "stub gt: $*" >&2; exit 1; }
 if [ "${1-} ${2-}" != "sandbox endpoint" ]; then
-  echo "stub gt: unhandled $*" >&2
-  exit 1
+  die "unhandled $*"
 fi
 shift 2
-render="" check=""
+gateway="" render="" check="" from_export=""
+need_value() { [ -n "$1" ] || die "$2 needs a value"; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --gateway | --root | --from-export) shift 2 ;;
-    --render) render=$2; shift 2 ;;
-    --check) check=$2; shift 2 ;;
-    *) echo "stub gt: unhandled flag $1" >&2; exit 1 ;;
+    --gateway) need_value "${2-}" --gateway; gateway=$2; shift 2 ;;
+    --root) need_value "${2-}" --root; [ -d "$2" ] || die "--root $2 is not a directory"; shift 2 ;;
+    --from-export) need_value "${2-}" --from-export; [ -r "$2" ] || die "--from-export $2 is unreadable"; from_export=$2; shift 2 ;;
+    --render) need_value "${2-}" --render; [ -r "$2" ] || die "--render $2 is unreadable"; render=$2; shift 2 ;;
+    --check) need_value "${2-}" --check; [ -r "$2" ] || die "--check $2 is unreadable"; check=$2; shift 2 ;;
+    *) die "unhandled flag $1" ;;
   esac
 done
+[ -n "$gateway" ] || die "--gateway is required"
+[ -n "$render" ] && [ -n "$check" ] && die "--render and --check are separate questions; pass one"
+[ -n "$from_export" ] && [ -z "$render" ] && die "--from-export stamps a rendered profile; pass --render too"
 if [ -n "$render" ]; then
   cat "$render"
 elif [ -n "$check" ]; then
@@ -897,12 +908,25 @@ else
 fi
 STUB
 chmod +x "$TMP/bin/gt"
-# Every case below puts $TMP/bin first on PATH; this fails the run, once, if gt
-# would resolve to anything but the stub.
-if [[ "$(PATH="$TMP/bin:$PATH" command -v gt)" == "$TMP/bin/gt" ]]; then
+# The PATH every openshell-providers case below runs with: the check resolves gt
+# through this value in a child shell, as the cases do, so it covers the PATH
+# they actually use rather than one the check builds for itself (gt-p7m67).
+providers_path="$TMP/bin:$PATH"
+stub_gt="$(env PATH="$providers_path" bash -c 'command -v gt' || true)"
+if [[ "$stub_gt" == "$TMP/bin/gt" ]]; then
   pass "the openshell-providers cases run the stub gt, not the host's"
 else
-  fail "the openshell-providers cases run the stub gt, not the host's (gt resolves to $(PATH="$TMP/bin:$PATH" command -v gt))"
+  fail "the openshell-providers cases run the stub gt, not the host's (gt resolves to ${stub_gt:-nothing} on PATH=$providers_path)"
+fi
+# The stub's own contract, driven directly: a flag with no value and a
+# --from-export with no --render both fail (gt-p7m67).
+truncated=0 missing_render=0
+env PATH="$providers_path" gt sandbox endpoint --gateway >"$TMP/stub-out" 2>>"$TMP/stub-err" || truncated=$?
+env PATH="$providers_path" gt sandbox endpoint --gateway openshell --from-export "$TMP/preflight.sh" >"$TMP/stub-out" 2>>"$TMP/stub-err" || missing_render=$?
+if [[ "$truncated" != 0 && "$missing_render" != 0 ]] && [[ "$(grep -c -F 'stub gt: ' "$TMP/stub-err" || true)" == 2 ]]; then
+  pass "the stub gt refuses a flag with no value and --from-export without --render"
+else
+  fail "the stub gt refuses a flag with no value and --from-export without --render (truncated=$truncated missing_render=$missing_render)" "$(cat "$TMP/stub-err")"
 fi
 caches="$ROOT/scripts/polecat-caches.sh"
 
@@ -943,7 +967,7 @@ printf 'FORGEJO_URL=http://host.docker.internal:3000\nFORGEJO_TOKEN=%s\n' "$secr
 
 : >"$TMP/calls"
 rc=0
-env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
+env PATH="$providers_path" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
 if [[ "$rc" == 0 ]] && grep -q -F 'provider create --name deepseek --type deepseek-claude --credential ANTHROPIC_AUTH_TOKEN' "$TMP/calls" && grep -q -F 'provider create --name forgejo-polecat --type forgejo-polecat --credential FORGEJO_TOKEN' "$TMP/calls"; then
   pass "openshell-providers creates both providers the profiles name"
 else
@@ -962,7 +986,7 @@ mkdir -p "$tree/scripts"
 cp "$providers" "$tree/scripts/"
 : >"$TMP/calls"
 rc=0
-env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" STUB_EXISTING=$'deepseek\nforgejo-polecat' bash "$tree/scripts/openshell-providers.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
+env PATH="$providers_path" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" STUB_EXISTING=$'deepseek\nforgejo-polecat' bash "$tree/scripts/openshell-providers.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
 if [[ "$rc" == 0 ]] && grep -q -F 'no profiles under deploy/polecat/profiles' "$TMP/out" && ! grep -q -F 'profile' "$TMP/calls"; then
   pass "openshell-providers names the missing profile directory and imports nothing"
 else
@@ -972,7 +996,7 @@ fi
 mkdir -p "$TMP/empty-keys"
 : >"$TMP/calls"
 rc=0
-env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$TMP/empty-keys" STUB_EXISTING=$'deepseek\nforgejo-polecat' bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
+env PATH="$providers_path" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$TMP/empty-keys" STUB_EXISTING=$'deepseek\nforgejo-polecat' bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
 if [[ "$rc" == 0 ]] && ! grep -q -F 'provider create' "$TMP/calls"; then
   pass "openshell-providers skips an existing provider without reading its key file"
 else
@@ -981,7 +1005,7 @@ fi
 
 : >"$TMP/calls"
 rc=0
-env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$TMP/empty-keys" bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
+env PATH="$providers_path" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$TMP/empty-keys" bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
 if [[ "$rc" != 0 ]] && grep -q -F 'deepseek.env is unreadable' "$TMP/err"; then
   pass "openshell-providers fails, naming the file, when a key file is missing"
 else
@@ -994,7 +1018,7 @@ cp "$providers" "$tree/scripts/"
 printf 'name: sandbox\n' >"$tree/deploy/polecat/profiles/sandbox.yaml"
 : >"$TMP/calls"
 rc=0
-env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" STUB_EXISTING=$'deepseek\nforgejo-polecat' bash "$tree/scripts/openshell-providers.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
+env PATH="$providers_path" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" STUB_EXISTING=$'deepseek\nforgejo-polecat' bash "$tree/scripts/openshell-providers.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
 lint_at=$(grep -n -F 'openshell profile lint -f' "$TMP/calls" | cut -d: -f1 || true)
 import_at=$(grep -n -F 'openshell profile import -f' "$TMP/calls" | cut -d: -f1 || true)
 if [[ "$rc" == 0 && -n "$lint_at" && -n "$import_at" && "$lint_at" -lt "$import_at" ]] && grep -q -F -- '--global' "$TMP/calls"; then
@@ -1007,7 +1031,7 @@ fi
 # read, so no secret reaches stderr.
 : >"$TMP/calls"
 rc=0
-env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" bash -x "$providers" >"$TMP/out" 2>"$TMP/trace" || rc=$?
+env PATH="$providers_path" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" bash -x "$providers" >"$TMP/out" 2>"$TMP/trace" || rc=$?
 if [[ "$rc" == 0 ]] && grep -q -F 'set +x' "$TMP/trace" && ! grep -q -F "$secret_api" "$TMP/trace" && ! grep -q -F "$secret_token" "$TMP/trace"; then
   pass "openshell-providers keeps both keys out of an xtrace of the run"
 else
@@ -1021,7 +1045,7 @@ mkdir -p "$TMP/short-keys"
 printf 'DEEPSEEK_API_KEY=%s\n' "$short" >"$TMP/short-keys/deepseek.env"
 : >"$TMP/calls"
 rc=0
-env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$TMP/short-keys" STUB_EXISTING=forgejo-polecat bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
+env PATH="$providers_path" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$TMP/short-keys" STUB_EXISTING=forgejo-polecat bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
 if [[ "$rc" == 0 ]] && grep -q -F 'placeholder ***' "$TMP/out" && ! grep -q -F "$short" "$TMP/out" "$TMP/err"; then
   pass "openshell-providers masks a short credential by its value"
 else
@@ -1035,7 +1059,7 @@ printf 'DEEPSEEK_API_KEY=%s\n' "$secret_api" >"$TMP/sourced-keys/deepseek.env"
 printf 'touch "%s/sourced-marker"\n' "$TMP" >>"$TMP/sourced-keys/deepseek.env"
 : >"$TMP/calls"
 rc=0
-env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$TMP/sourced-keys" STUB_EXISTING=forgejo-polecat bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
+env PATH="$providers_path" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$TMP/sourced-keys" STUB_EXISTING=forgejo-polecat bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
 if [[ "$rc" == 0 && ! -e "$TMP/sourced-marker" ]] && grep -q -F 'provider create --name deepseek' "$TMP/calls" && ! grep -q -F "$secret_api" "$TMP/out"; then
   pass "openshell-providers reads a key file as data and never runs it"
 else
@@ -1046,7 +1070,7 @@ fi
 # provider: deepseek-legacy does not stand for deepseek.
 : >"$TMP/calls"
 rc=0
-env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" STUB_EXISTING=$'deepseek-legacy\nforgejo-polecat-old' bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
+env PATH="$providers_path" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" STUB_EXISTING=$'deepseek-legacy\nforgejo-polecat-old' bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
 if [[ "$rc" == 0 ]] && grep -q -F 'provider create --name deepseek --type' "$TMP/calls" && grep -q -F 'provider create --name forgejo-polecat --type' "$TMP/calls"; then
   pass "openshell-providers matches a provider by its whole name"
 else
