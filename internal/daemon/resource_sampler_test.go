@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"path/filepath"
@@ -88,7 +89,7 @@ func TestTriggerResourceSamplerTicksOncePerInterval(t *testing.T) {
 
 	d.triggerResourceSampler() // first tick: samples
 	d.triggerResourceSampler() // no time has passed
-	clock.Advance(29 * time.Second)
+	clock.Advance(26 * time.Second)
 	d.triggerResourceSampler()
 	if fake.ticks != 1 {
 		t.Fatalf("ticks inside the first interval = %d, want 1", fake.ticks)
@@ -96,7 +97,7 @@ func TestTriggerResourceSamplerTicksOncePerInterval(t *testing.T) {
 	clock.Advance(time.Second)
 	d.triggerResourceSampler()
 	if fake.ticks != 2 {
-		t.Errorf("ticks after one interval = %d, want 2", fake.ticks)
+		t.Errorf("ticks at 27s = %d, want 2: due is an interval less a tenth", fake.ticks)
 	}
 	if want := filepath.Join(town, ".runtime", "metrics"); spec.dir != want {
 		t.Errorf("sampler metrics dir = %q, want %q", spec.dir, want)
@@ -142,5 +143,48 @@ func TestTriggerResourceSamplerLogsAFailedTickOnce(t *testing.T) {
 	}
 	if got := logs.String(); !strings.Contains(got, "resource_sampler: ") {
 		t.Errorf("log = %q, want the sampler error", got)
+	}
+}
+
+// A ticker that delivers late still gets its sample: a strict interval would
+// skip every other one when each delivery lands just short of the interval.
+func TestTriggerResourceSamplerSamplesOnALateTicker(t *testing.T) {
+	t.Parallel()
+	clock := clockwork.NewFakeClockAt(time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC))
+	config := &DaemonPatrolConfig{Patrols: &PatrolsConfig{ResourceSampler: &PatrolConfig{Enabled: true, Interval: "30s"}}}
+	d, fake, _ := newSamplerDaemon(t, t.TempDir(), clock, config)
+
+	d.triggerResourceSampler()
+	clock.Advance(29*time.Second + 500*time.Millisecond)
+	d.triggerResourceSampler()
+	if fake.ticks != 2 {
+		t.Errorf("ticks after a late 29.5s delivery = %d, want 2", fake.ticks)
+	}
+}
+
+// A failed sample is reported and the next interval still samples.
+func TestTriggerResourceSamplerRetriesAfterAFailedTick(t *testing.T) {
+	t.Parallel()
+	clock := clockwork.NewFakeClockAt(time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC))
+	config := &DaemonPatrolConfig{Patrols: &PatrolsConfig{ResourceSampler: &PatrolConfig{Enabled: true, Interval: "30s"}}}
+	d, fake, _ := newSamplerDaemon(t, t.TempDir(), clock, config)
+	fake.err = errors.New("ps failed")
+
+	d.triggerResourceSampler()
+	fake.err = nil
+	clock.Advance(30 * time.Second)
+	d.triggerResourceSampler()
+	if fake.ticks != 2 {
+		t.Errorf("ticks after a failed sample and one interval = %d, want 2", fake.ticks)
+	}
+}
+
+// The configured interval is clamped up to the minimum, so a tiny value cannot
+// load the host with ps.
+func TestResourceSamplerIntervalHasAFloor(t *testing.T) {
+	t.Parallel()
+	cfg := &DaemonPatrolConfig{Patrols: &PatrolsConfig{ResourceSampler: &PatrolConfig{Enabled: true, Interval: "1s"}}}
+	if got := resourceSamplerInterval(cfg); got != minResourceSamplerInterval {
+		t.Errorf("interval 1s = %v, want the %v floor", got, minResourceSamplerInterval)
 	}
 }

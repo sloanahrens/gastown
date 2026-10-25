@@ -14,13 +14,21 @@ import (
 // this patrol only decides when the next tick runs.
 const defaultResourceSamplerInterval = resourcesampler.DefaultInterval
 
+// minResourceSamplerInterval bounds how often a configured interval can sample:
+// a shorter one only loads the host with ps.
+const minResourceSamplerInterval = 5 * time.Second
+
+// resourceSamplerTimeout bounds one sample, so a stuck ps cannot hold the
+// daemon's select loop past it.
+const resourceSamplerTimeout = 10 * time.Second
+
 // resourceSamplerInterval is the period between two samples: the configured
-// patrols.resource_sampler.interval, or the sampler's default when the key is
-// absent or does not parse.
+// patrols.resource_sampler.interval, clamped up to minResourceSamplerInterval,
+// or the sampler's default when the key is absent or does not parse.
 func resourceSamplerInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.ResourceSampler != nil {
 		if d, err := time.ParseDuration(config.Patrols.ResourceSampler.Interval); err == nil && d > 0 {
-			return d
+			return max(d, minResourceSamplerInterval)
 		}
 	}
 	return defaultResourceSamplerInterval
@@ -47,10 +55,11 @@ type resourceSamplerPatrol struct {
 	last     time.Time
 }
 
-// tick samples the host once when now is an interval or more past the last
-// sample, and reports whether it did.
+// tick samples the host once when the last sample is due, and reports whether
+// it did. Due is an interval less a tenth of it: the daemon's ticker delivers
+// late by a little, and a strict interval would then skip every other sample.
 func (p *resourceSamplerPatrol) tick(ctx context.Context, now time.Time) (bool, error) {
-	if !p.last.IsZero() && now.Sub(p.last) < p.interval {
+	if !p.last.IsZero() && now.Sub(p.last) < p.interval-p.interval/10 {
 		return false, nil
 	}
 	p.last = now
@@ -69,6 +78,8 @@ func (d *Daemon) triggerResourceSampler() {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx, cancel := context.WithTimeout(ctx, resourceSamplerTimeout)
+	defer cancel()
 	if _, err := d.resourceSampler().tick(ctx, d.clk().Now()); err != nil {
 		d.logger.Printf("resource_sampler: %v", err)
 	}
