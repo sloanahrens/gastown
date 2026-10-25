@@ -10,11 +10,10 @@ server:
       # a priority class and resources as driver config. Off by default.
       allowDriverConfig: true
 # Sandboxes run gastown-polecat:dev, a mutable tag that each install pushes
-# anew. The chart's default leaves the Kubernetes default, which pulls only
-# when the node lacks the image, so a node kept the first build and ran it
-# after every later push (gt-t39cu). This renders the gateway's
-# image_pull_policy = "always". The key is sandbox.image.pullPolicy, not
-# global.image.pullPolicy, which sets the runtime and supervisor images only.
+# anew, so pull it on every sandbox start (gt-t39cu). This renders the
+# gateway's image_pull_policy = "always". The key is sandbox.image.pullPolicy,
+# not global.image.pullPolicy, which sets the runtime and supervisor images
+# only.
 sandbox:
   image:
     pullPolicy: Always
