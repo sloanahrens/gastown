@@ -51,9 +51,22 @@ func runMetricsSnapshotWith(ctx context.Context, out io.Writer, env metrics.Env,
 	if rec.Placement != nil {
 		groups++
 	}
+	// An all-stub or all-null collection leaves a record whose groups all
+	// carry no columns; the receipt says so rather than let the append, which
+	// succeeded, read as a snapshot of data (gt-pmovc).
+	collected := len(rec.Placement) > 0
+	for _, cols := range rec.Groups {
+		if len(cols) > 0 {
+			collected = true
+			break
+		}
+	}
 	note := ""
+	if !collected {
+		note = "; no data collected"
+	}
 	if rec.Placement == nil {
-		note = "; placement: none known"
+		note += "; placement: none known"
 	}
 	_, err = fmt.Fprintf(out, "snapshot %s appended to %s (%d groups, %d errors)%s\n", rec.TS, path, groups, len(rec.Errors), note)
 	return err

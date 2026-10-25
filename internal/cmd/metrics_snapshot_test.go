@@ -47,6 +47,9 @@ func TestMetricsSnapshotPrintsOneReceiptAndAppendsOneLine(t *testing.T) {
 	if !strings.Contains(out.String(), log) || !strings.Contains(out.String(), "(2 groups, 1 errors)") {
 		t.Fatalf("receipt = %q, want the log path and 2 groups, 1 errors", out.String())
 	}
+	if strings.Contains(out.String(), "no data collected") {
+		t.Fatalf("receipt of a snapshot with a filled group says no data was collected: %q", out.String())
+	}
 	data, err := os.ReadFile(log)
 	if err != nil {
 		t.Fatal(err)
@@ -83,5 +86,55 @@ func TestMetricsSnapshotReceiptSaysWhetherAPlacementIsKnown(t *testing.T) {
 	}
 	if !strings.Contains(known.String(), "(2 groups, 0 errors)\n") || strings.Contains(known.String(), "none known") {
 		t.Fatalf("receipt with a placement = %q", known.String())
+	}
+}
+
+// A collection that carries no columns — every source a stub's empty map, a
+// source's nil, or an empty placement — must not print an unqualified success
+// receipt (gt-pmovc).
+func TestMetricsSnapshotReceiptSaysWhenNothingWasCollected(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		sources []metrics.Source
+		want    string
+	}{
+		{
+			name: "stubs returning empty maps",
+			sources: []metrics.Source{
+				fakeSource{group: "alpha", cols: map[string]any{}},
+				fakeSource{group: "beta", cols: map[string]any{}},
+			},
+			want: "(2 groups, 0 errors); no data collected; placement: none known\n",
+		},
+		{
+			name: "sources returning nil",
+			sources: []metrics.Source{
+				fakeSource{group: "alpha"},
+				fakeSource{group: "beta"},
+			},
+			want: "(2 groups, 0 errors); no data collected; placement: none known\n",
+		},
+		{
+			name: "an empty placement carries nothing either",
+			sources: []metrics.Source{
+				fakeSource{group: "alpha", cols: map[string]any{}},
+				fakeSource{group: metrics.PlacementGroup, cols: map[string]any{}},
+			},
+			want: "(2 groups, 0 errors); no data collected\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := metrics.Env{Town: t.TempDir(), Now: func() time.Time { return time.Date(2026, 10, 24, 20, 0, 0, 0, time.UTC) }}
+			var out bytes.Buffer
+			if err := runMetricsSnapshotWith(context.Background(), &out, env, tc.sources); err != nil {
+				t.Fatalf("runMetricsSnapshotWith: %v", err)
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("receipt = %q, want it to contain %q", out.String(), tc.want)
+			}
+		})
 	}
 }
