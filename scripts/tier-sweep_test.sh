@@ -2,7 +2,9 @@
 # Tests for scripts/tier-sweep.sh's summary line: each tier's line ends with
 # the elapsed time of that tier, in the daemon log's rounded style (gt-iqzr0).
 # Each case builds a throwaway repo holding the script under test and one stub
-# shell test, so no real tier runs.
+# shell test, so no real tier runs. The integration cases add a nested module
+# and stub go and gt binaries, so which packages run where, and how a failure
+# is named, are the stubs' to report (gt-558i2).
 set -uo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)/tier-sweep.sh"
@@ -82,6 +84,157 @@ if [ "$rc" = 2 ] && ! grep -qE '^tier-sweep: bogus ' <<<"$out" && grep -q 'unkno
   pass "unknown tier: no summary line, exit 2"
 else
   fail "unknown tier: rc=$rc out=$out"
+fi
+rm -rf "$R"
+
+# new_integration_repo NESTED_PKGS [MODULE_ROOT_TAGGED] prints a throwaway repo
+# holding the real sweep, a root module with one integration-tagged package
+# (./internal/root) and a nested module tracker/ whose NESTED_PKGS
+# (space-separated, module relative such as store/pgtest) are integration
+# tagged — with MODULE_ROOT_TAGGED set, a tagged file at tracker/ itself too.
+# Its stub/ holds the go and gt the sweep calls:
+#
+#   go   appends "cwd|pkg" to $STUB_LOG, refuses a package inside a nested
+#        module when run from the root (the real toolchain's "main module ...
+#        does not contain package"), and fails each package $STUB_FAIL names.
+#   gt   runs the argv after `slot run --`.
+new_integration_repo() {
+  local pkgs=${1:-} root_tagged=${2:-} pkg r
+  r=$(mktemp -d "${TMPDIR:-/tmp}/tier-sweep.XXXXXX")
+  [ -d "$r" ] || { echo "new_integration_repo: mktemp failed" >&2; exit 1; }
+  git -C "$r" init -q -b main
+  git -C "$r" config user.email t@example.com
+  git -C "$r" config user.name t
+  mkdir -p "$r/scripts" "$r/stub" "$r/internal/root" "$r/internal/testpolicy" "$r/tracker"
+  cp "$SRC" "$r/scripts/tier-sweep.sh"
+  printf 'module example.com/root\n\ngo 1.21\n' >"$r/go.mod"
+  printf '//go:build integration\n\npackage root\n' >"$r/internal/root/integration_test.go"
+  printf '# no docker-backed package\n' >"$r/internal/testpolicy/docker.txt"
+  printf 'module example.com/root/tracker\n\ngo 1.21\n' >"$r/tracker/go.mod"
+  [ -n "$root_tagged" ] && printf '//go:build integration\n\npackage fixture\n' >"$r/tracker/integration_test.go"
+  for pkg in $pkgs; do
+    mkdir -p "$r/tracker/$pkg"
+    printf '//go:build integration\n\npackage fixture\n' >"$r/tracker/$pkg/integration_test.go"
+  done
+  cat >"$r/stub/go" <<'STUB'
+#!/usr/bin/env bash
+pkg=""
+for a in "$@"; do pkg=$a; done
+echo "$PWD|$pkg" >>"$STUB_LOG"
+mod=$PWD/${pkg#./}
+mod=${mod%/}
+while [ ! -f "$mod/go.mod" ] && [ "$mod" != / ]; do mod=$(dirname "$mod"); done
+if [ "$mod" != "$PWD" ]; then
+  echo "main module example.com/root does not contain package $pkg" >&2
+  echo "FAIL $pkg [setup failed]" >&2
+  exit 1
+fi
+case " ${STUB_FAIL:-} " in
+*" $pkg "*) echo "--- FAIL: TestFixture" >&2; exit 1 ;;
+esac
+exit 0
+STUB
+  cat >"$r/stub/gt" <<'STUB'
+#!/usr/bin/env bash
+while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
+[ $# -gt 0 ] && shift
+exec "$@"
+STUB
+  chmod +x "$r/stub/go" "$r/stub/gt"
+  git -C "$r" add -A
+  git -C "$r" commit -q -m base
+  echo "$r"
+}
+
+# --- A nested module's package runs in that module, not from the root ---
+#
+# The sweep built its integration list from the root module's git ls-files, so
+# ./tracker/store reached `go test` at the repo root, where the toolchain
+# refuses it: "main module ... does not contain package", the integration RED
+# of the first sweep after tracker/ grew its tests (gt-558i2). The stub go
+# reports exactly that from the root only, so the old script is RED here.
+R=$(new_integration_repo store)
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" = 0 ] \
+  && grep -Eq '^tier-sweep: integration GREEN passed=2 failed=0 skipped=0 \(logs [^)]*\) in ' <<<"$line" \
+  && grep -Eq '/tracker\|\./store$' "$R/stub.log" \
+  && ! grep -Eq '\|\./tracker/' "$R/stub.log"; then
+  pass "nested module: tracker/store runs inside tracker, the root list omits it ($line)"
+else
+  fail "nested module: rc=$rc line=$line ran=$(tr '\n' ';' <"$R/stub.log") out=$out"
+fi
+rm -rf "$R"
+
+# --- A nested package's failure names its module and module-relative path ---
+#
+# One tracker package fails, one passes: the failure lands in failed: as
+# ./tracker/store/pgtest, the module then the path inside it, and the passing
+# one still counts, whichever module it ran in.
+R=$(new_integration_repo "store store/pgtest")
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" STUB_FAIL="./store/pgtest" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" != 0 ] \
+  && grep -Eq '^tier-sweep: integration RED passed=2 failed=1 skipped=0 failed: \./tracker/store/pgtest \(logs [^)]*\) in ' <<<"$line"; then
+  pass "nested module: a failing ./tracker/store/pgtest is named in failed: ($line)"
+else
+  fail "nested module failure: rc=$rc line=$line out=$out"
+fi
+rm -rf "$R"
+
+# --- A nested package takes the same skip entry the root list's do ---
+#
+# The skip list spells a package ./path, so a nested one has to read
+# ./tracker/store and not tracker/store: an entry that never matches is a
+# quarantine that silently does nothing, and the tier stays RED.
+R=$(new_integration_repo store)
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" STUB_FAIL="./store" TIER_SWEEP_SKIP=integration:./tracker/store bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" = 0 ] \
+  && grep -Eq '^tier-sweep: integration GREEN passed=1 failed=0 skipped=1 \(logs [^)]*\) in ' <<<"$line" \
+  && ! grep -Eq '\|\./store$' "$R/stub.log"; then
+  pass "nested module: integration:./tracker/store skips the package ($line)"
+else
+  fail "nested module skip: rc=$rc line=$line ran=$(tr '\n' ';' <"$R/stub.log") out=$out"
+fi
+rm -rf "$R"
+
+# --- A module with no tagged package runs nothing and says nothing ---
+#
+# The list is empty for tracker/, and an empty list must not reach dirname: it
+# would print "dirname: missing operand" into the log of every sweep.
+R=$(new_integration_repo "")
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" = 0 ] \
+  && grep -Eq '^tier-sweep: integration GREEN passed=1 failed=0 skipped=0 \(logs [^)]*\) in ' <<<"$line" \
+  && ! grep -q 'missing operand' <<<"$out"; then
+  pass "nested module: no tagged package there runs nothing and logs no dirname error"
+else
+  fail "nested module empty: rc=$rc line=$line out=$out"
+fi
+rm -rf "$R"
+
+# --- A tagged file at the module root runs in that module, not from the root ---
+#
+# The root list must drop ./tracker itself, not only what lies below it, or the
+# module's own package fails to build from the root and the nested pass names
+# it a second time.
+R=$(new_integration_repo "" 1)
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" = 0 ] \
+  && grep -Eq '^tier-sweep: integration GREEN passed=2 failed=0 skipped=0 \(logs [^)]*\) in ' <<<"$line" \
+  && grep -Eq '/tracker\|\./$' "$R/stub.log" \
+  && ! grep -Eq '\|\./tracker$' "$R/stub.log"; then
+  pass "nested module: a module-root package runs inside tracker ($line)"
+else
+  fail "nested module root: rc=$rc line=$line ran=$(tr '\n' ';' <"$R/stub.log") out=$out"
 fi
 rm -rf "$R"
 

@@ -7,7 +7,10 @@
 #                the *_test.sh scripts it does not call, GT_TEST_DOCKER=0
 #   integration  each package with a //go:build integration file, with
 #                -tags integration, then the docker.txt packages untagged, as
-#                make test-integration does; all under `gt slot run`
+#                make test-integration does; all under `gt slot run`. A nested
+#                module's packages run in that module's directory, and the
+#                root list leaves them out: the root toolchain cannot build
+#                them (gt-558i2)
 #   race         internal/cmd's command-tree race guard under -race in the
 #                integration build, under `gt slot run`: the integration
 #                TestMain must presort the cobra tree like the unit one does
@@ -17,7 +20,8 @@
 #
 # TIER_SWEEP_SKIP is the known-red list: whitespace-separated entries of
 #   <tier>:<pkg>             skip the package in that tier, e.g.
-#                            integration:./internal/cmd
+#                            integration:./internal/cmd, and a nested module's
+#                            package as integration:./tracker/store
 #   <tier>:<pkg>:<regexp>    run it with go test -skip <regexp>
 # It defaults to empty: every tier is green (gt-6ox58).
 # TIER_SWEEP_TIMEOUT is the per-package go test timeout (default 10m).
@@ -73,33 +77,68 @@ summary() {
 	local total=$(( $2 + $3 + $4 ))
 	local verdict=GREEN note=""
 	if [ "$3" -gt 0 ]; then
-		verdict=RED; red=1; note="${5:+ failed:$5}"
+		verdict=RED; red=1; note="${5:+ failed: $5}"
 	elif [ "$total" -eq 0 ]; then
 		verdict=RED; red=1
 	fi
 	echo "tier-sweep: $1 $verdict passed=$2 failed=$3 skipped=$4$note (logs $TIER_SWEEP_LOGDIR) in $(fmt_duration "$6")"
 }
 
-# go_tier TIER PREFIX_CMD... :: GO_TEST_ARGS... :: PKGS... (the prefix may hold
-# a "--", so "::" separates the lists)
+# nested_modules prints this repo's nested module directories: every go.mod
+# below the root, as the Makefile's NESTED_MODULES finds them.
+nested_modules() {
+	git ls-files '*go.mod' | grep -v -e '^testdata/' -e '/testdata/' -e '^vendor/' -e '/vendor/' | awk -v OFS=/ -F/ 'NF > 1 { NF--; print }' | LC_ALL=C sort -u
+}
+
+# tagged_dirs prints ./path for each directory of THIS module (the cwd's) that
+# holds a //go:build integration test file, ./ for one at the module root. The
+# awk takes dirname's place because xargs runs it on an empty list too, and
+# dirname with no operand prints an error a module with no tagged package would
+# put in every sweep's log.
+tagged_dirs() {
+	git ls-files '*_test.go' | grep -v /testdata/ | xargs grep -lE '^//go:build.*(^|[^!])integration' | awk -v OFS=/ -F/ 'NF > 1 { NF--; print "./" $0; next } { print "./" }' | LC_ALL=C sort -u
+}
+
+# inside_module DIR MODULE... is true when DIR is one of the modules or below
+# it. Both sides are ./repo-relative, as tagged_dirs and the module list print
+# them.
+inside_module() {
+	local dir=$1 m
+	shift
+	for m in ${1+"$@"}; do
+		case "$dir" in "$m"|"$m"/*) return 0 ;; esac
+	done
+	return 1
+}
+
+# go_tier TIER DIR PREFIX_CMD... :: GO_TEST_ARGS... :: PKGS... (the prefix may
+# hold a "--", so "::" separates the lists). go test runs in DIR, the module
+# PKGS belong to; PKGS are DIR-relative and a package outside the root reports
+# as ./DIR/PKG, so a failure in tracker/store/pgtest reads
+# failed: ./tracker/store/pgtest — the name the skip list and the log use too.
 go_tier() {
-	local tier=$1; shift
+	local tier=$1 dir=$2; shift 2
 	local prefix=() args=() pkgs=()
 	while [ "$1" != :: ]; do prefix+=("$1"); shift; done; shift
 	while [ "$1" != :: ]; do args+=("$1"); shift; done; shift
 	pkgs=("$@")
-	local pass=0 fail=0 skipped=0 failed="" pkg skip log extra
-	for pkg in "${pkgs[@]}"; do
-		skip=$(skip_for "$tier" "$pkg")
-		if [ "$skip" = pkg ]; then skipped=$((skipped + 1)); echo "tier-sweep: $tier $pkg SKIPPED (TIER_SWEEP_SKIP)" >&2; continue; fi
+	local pass=0 fail=0 skipped=0 failed="" pkg name skip log extra
+	for pkg in ${pkgs[@]+"${pkgs[@]}"}; do
+		name=$pkg
+		if [ "$dir" != . ]; then
+			name="./$dir"
+			[ "$pkg" = "./" ] || name="$name/${pkg#./}"
+		fi
+		skip=$(skip_for "$tier" "$name")
+		if [ "$skip" = pkg ]; then skipped=$((skipped + 1)); echo "tier-sweep: $tier $name SKIPPED (TIER_SWEEP_SKIP)" >&2; continue; fi
 		extra=()
 		[ -n "$skip" ] && extra=(-skip "$skip")
-		log="$TIER_SWEEP_LOGDIR/$tier-$(echo "${pkg#./}" | tr / _).log"
-		echo "tier-sweep: $tier $pkg ..." >&2
-		if "${prefix[@]}" go test -count=1 -timeout "$TIER_SWEEP_TIMEOUT" ${args[@]+"${args[@]}"} ${extra[@]+"${extra[@]}"} "$pkg" >"$log" 2>&1; then
+		log="$TIER_SWEEP_LOGDIR/$tier-$(echo "${name#./}" | tr / _).log"
+		echo "tier-sweep: $tier $name ..." >&2
+		if ( cd "$dir" && ${prefix[@]+"${prefix[@]}"} go test -count=1 -timeout "$TIER_SWEEP_TIMEOUT" ${args[@]+"${args[@]}"} ${extra[@]+"${extra[@]}"} "$pkg" ) >"$log" 2>&1; then
 			pass=$((pass + 1))
 		else
-			fail=$((fail + 1)); failed="$failed $pkg"
+			fail=$((fail + 1)); failed="${failed:+$failed }$name"
 			grep -a -E '^(--- FAIL|panic:|FAIL)' "$log" | head -5 | sed 's/^/    /' >&2
 		fi
 	done
@@ -121,19 +160,48 @@ for tier in "${tiers[@]}"; do
 		for t in "${scripts[@]}"; do
 			log="$TIER_SWEEP_LOGDIR/shell-$(echo "$t" | tr / _).log"
 			echo "tier-sweep: shell $t ..." >&2
-			if GT_TEST_DOCKER=0 bash "$t" >"$log" 2>&1; then p=$((p + 1)); else f=$((f + 1)); names="$names $t"; tail -5 "$log" | sed 's/^/    /' >&2; fi
+			if GT_TEST_DOCKER=0 bash "$t" >"$log" 2>&1; then p=$((p + 1)); else f=$((f + 1)); names="${names:+$names }$t"; tail -5 "$log" | sed 's/^/    /' >&2; fi
 		done
 		summary shell "$p" "$f" 0 "$names" "$((SECONDS - tier_start))"
 		;;
 	integration)
-		tagged=($(git ls-files '*_test.go' | grep -v /testdata/ | xargs grep -lE '^//go:build.*(^|[^!])integration' | xargs -n1 dirname | sort -u | sed 's|^|./|'))
+		# A module's list leaves out every directory inside one of its nested
+		# modules: git ls-files sees those files, but the toolchain reports
+		# "main module ... does not contain package" for them. Each nested
+		# module runs its own tagged packages in its own directory instead.
+		modules=($(nested_modules))
+		mods=()
+		for m in ${modules[@]+"${modules[@]}"}; do mods+=("./$m"); done
+		tagged=()
+		while read -r pkg; do
+			[ -n "$pkg" ] || continue
+			inside_module "$pkg" ${mods[@]+"${mods[@]}"} || tagged+=("$pkg")
+		done < <(tagged_dirs)
 		docker=($(sed -e 's/#.*//' internal/testpolicy/docker.txt | awk 'NF{print "./" $1}'))
-		read -r p1 f1 s1 n1 < <(go_tier integration gt slot run -- env GT_TEST_DOCKER=1 :: -tags integration :: "${tagged[@]}")
-		read -r p2 f2 s2 n2 < <(go_tier integration-docker gt slot run -- env GT_TEST_DOCKER=1 :: :: "${docker[@]}")
-		summary integration "$((p1 + p2))" "$((f1 + f2))" "$((s1 + s2))" "$n1${n2:+ untagged:$n2}" "$((SECONDS - tier_start))"
+		read -r p1 f1 s1 n1 < <(go_tier integration . gt slot run -- env GT_TEST_DOCKER=1 :: -tags integration :: ${tagged[@]+"${tagged[@]}"})
+		read -r p2 f2 s2 n2 < <(go_tier integration-docker . gt slot run -- env GT_TEST_DOCKER=1 :: :: ${docker[@]+"${docker[@]}"})
+		p=$((p1 + p2)) f=$((f1 + f2)) s=$((s1 + s2))
+		names="$n1"
+		[ -n "$n2" ] && names="${names:+$names }untagged:$n2"
+		for m in ${modules[@]+"${modules[@]}"}; do
+			deeper=()
+			for o in ${mods[@]+"${mods[@]}"}; do case "$o" in "./$m/"*) deeper+=("$o") ;; esac; done
+			pkgs=()
+			while read -r mp; do
+				[ -n "$mp" ] || continue
+				repo="./$m"
+				[ "$mp" = "./" ] || repo="$repo/${mp#./}"
+				inside_module "$repo" ${deeper[@]+"${deeper[@]}"} || pkgs+=("$mp")
+			done < <(cd "$m" && tagged_dirs)
+			[ ${#pkgs[@]} -eq 0 ] && continue
+			read -r pm fm sm nm < <(go_tier integration "$m" gt slot run -- env GT_TEST_DOCKER=1 :: -tags integration :: "${pkgs[@]}")
+			p=$((p + pm)) f=$((f + fm)) s=$((s + sm))
+			names="${nm:+${names:+$names }$nm}"
+		done
+		summary integration "$p" "$f" "$s" "$names" "$((SECONDS - tier_start))"
 		;;
 	race)
-		read -r p f s names < <(go_tier race gt slot run -- env GT_TEST_DOCKER=1 :: -race -tags integration -run '^TestCommandTreeWalkIsReadOnlyUnderParallelTests$' :: ./internal/cmd)
+		read -r p f s names < <(go_tier race . gt slot run -- env GT_TEST_DOCKER=1 :: -race -tags integration -run '^TestCommandTreeWalkIsReadOnlyUnderParallelTests$' :: ./internal/cmd)
 		summary race "$p" "$f" "$s" "$names" "$((SECONDS - tier_start))"
 		;;
 	*)
