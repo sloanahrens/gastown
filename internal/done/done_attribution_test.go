@@ -27,6 +27,30 @@ func TestStripAttributionLines(t *testing.T) {
 			wantRemoved: 2,
 		},
 		{
+			name:        "signed-off-by naming claude",
+			message:     "fix: thing\n\nSigned-off-by: Claude <noreply@anthropic.com>",
+			want:        "fix: thing",
+			wantRemoved: 1,
+		},
+		{
+			name:        "signed-off-by naming anthropic",
+			message:     "fix: thing\n\nsigned-off-by: Anthropic Bot <bot@anthropic.com>",
+			want:        "fix: thing",
+			wantRemoved: 1,
+		},
+		{
+			name:        "robot-emoji footer the landing gate refuses",
+			message:     "fix: thing\n\n🤖 Generated with Claude Code",
+			want:        "fix: thing",
+			wantRemoved: 1,
+		},
+		{
+			name:        "bare robot-emoji line",
+			message:     "fix: thing\n\n🤖",
+			want:        "fix: thing",
+			wantRemoved: 1,
+		},
+		{
 			name:        "trailer case and spacing vary",
 			message:     "fix: thing\n\nco-authored-by : Someone <a@b.c>",
 			want:        "fix: thing",

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -21,20 +22,21 @@ import (
 // A trailer line is stripped by rewriting the branch's messages. A subject line
 // that is itself the attribution cannot be stripped without inventing a new
 // subject, so that refuses and leaves the rewrite to the author.
+//
+// The predicate is land.IsAttribution, the one the landing gate refuses, so the
+// two cannot drift (gt-g5fkf).
 
 var (
 	// A Co-Authored-By trailer of any identity. A polecat has no human
 	// co-author to credit, so the trailer is machine-added whoever it names.
-	attributionTrailerRE = regexp.MustCompile(`(?i)^\s*co-authored-by\s*:`)
-	// The "Generated with Claude Code" footer, with or without its robot emoji
-	// and markdown link.
-	attributionGeneratedRE = regexp.MustCompile(`(?i)^\s*(?:🤖\s*)?generated\s+(?:with|by)\b.*\b(?:claude|anthropic)\b`)
+	coAuthorTrailerRE = regexp.MustCompile(`(?i)^\s*co-authored-by\s*:`)
 )
 
-// isAttributionLine reports whether line is a Co-Authored-By trailer or a
-// "Generated with Claude" footer.
+// isAttributionLine reports whether line must not reach landing: what the
+// landing gate refuses (land.IsAttribution), plus a Co-Authored-By trailer of
+// any identity.
 func isAttributionLine(line string) bool {
-	return attributionTrailerRE.MatchString(line) || attributionGeneratedRE.MatchString(line)
+	return land.IsAttribution(line) || coAuthorTrailerRE.MatchString(line)
 }
 
 // stripAttributionLines removes attribution lines from a commit message and
