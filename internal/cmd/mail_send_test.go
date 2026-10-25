@@ -60,6 +60,35 @@ func TestHasReplyPrefix(t *testing.T) {
 	}
 }
 
+// TestReplySubject pins the reply builder shared with `gt mail reply`: an
+// explicit -s override passes through untouched, an existing reply prefix in
+// any case is preserved rather than doubled, and only a plain subject gains
+// "Re: ".
+func TestReplySubject(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		original string
+		override string
+		want     string
+	}{
+		{"existing prefix unchanged", "Re: x", "", "Re: x"},
+		{"uppercase prefix unchanged", "RE: x", "", "RE: x"},
+		{"lowercase no-space prefix unchanged", "re:x", "", "re:x"},
+		{"leading whitespace prefix unchanged", "  Re: x", "", "  Re: x"},
+		{"plain subject gains prefix", "x", "", "Re: x"},
+		{"explicit subject unchanged", "x", "FWD: x", "FWD: x"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := replySubject(c.original, c.override); got != c.want {
+				t.Errorf("replySubject(%q, %q) = %q, want %q", c.original, c.override, got, c.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeReplySubject(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

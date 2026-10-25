@@ -176,6 +176,21 @@ func hasReplyPrefix(subject string) bool {
 	return strings.EqualFold(s[:3], "re:")
 }
 
+// replySubject returns the subject for a reply to originalSubject. An explicit
+// override is used verbatim. Otherwise an existing reply prefix, in any case
+// and with hasReplyPrefix's whitespace tolerance, is preserved as-is, so
+// replying to "RE: x" yields "RE: x" rather than "Re: RE: x"; a subject with
+// no prefix gets one "Re: " prepended.
+func replySubject(originalSubject, override string) string {
+	if override != "" {
+		return override
+	}
+	if hasReplyPrefix(originalSubject) {
+		return originalSubject
+	}
+	return "Re: " + originalSubject
+}
+
 // normalizeReplySubject strips leading "Re: " prefixes (case-insensitive,
 // possibly nested) and surrounding whitespace, so that two subjects with
 // different reply nesting compare equal.
