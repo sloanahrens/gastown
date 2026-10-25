@@ -329,32 +329,33 @@ type polecatHookBatchReader interface {
 	ShowMultiple(ids []string) (map[string]*beads.Issue, error)
 }
 
-// polecatHookIssues serves the hook beads of one rig from a single batched
-// read (gt-9bjd3). The seats used to Show each polecat's hook one id at a
-// time, one bd process per polecat. An id the batch was asked for and did not
-// return is not found, as Show reports it; any other id goes to source. If the
-// batch read fails, every id goes to source as before.
+// polecatHookIssues serves a rig's bead lookups from one batched read
+// (gt-9bjd3). The seats used to Show each polecat's hook, active MR and source
+// issue one id at a time, one bd process per polecat. An id the batch returned
+// is answered from memory. Any other id goes to source: a batch can skip an id
+// it did answer for, so absence from the batch is never read as not found. A
+// missing id costs one read; a found id costs none. A failed batch sends every
+// id to source, as before.
 type polecatHookIssues struct {
-	source    polecat.IssueReader
-	requested map[string]bool
-	issues    map[string]*beads.Issue
+	source polecat.IssueReader
+	issues map[string]*beads.Issue
 }
 
 // newPolecatHookIssues reads hookIDs in one ShowMultiple call. Duplicates and
 // empty ids cost nothing: the batch is over distinct non-empty ids only.
 func newPolecatHookIssues(batch polecatHookBatchReader, hookIDs []string) polecatHookIssues {
 	h := polecatHookIssues{source: batch}
-	requested := make(map[string]bool, len(hookIDs))
+	distinct := make(map[string]bool, len(hookIDs))
 	for _, id := range hookIDs {
 		if id != "" {
-			requested[id] = true
+			distinct[id] = true
 		}
 	}
-	if len(requested) == 0 {
+	if len(distinct) == 0 {
 		return h
 	}
-	ids := make([]string, 0, len(requested))
-	for id := range requested {
+	ids := make([]string, 0, len(distinct))
+	for id := range distinct {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
@@ -362,7 +363,6 @@ func newPolecatHookIssues(batch polecatHookBatchReader, hookIDs []string) poleca
 	if err != nil {
 		return h
 	}
-	h.requested = requested
 	h.issues = issues
 	return h
 }
@@ -370,9 +370,6 @@ func newPolecatHookIssues(batch polecatHookBatchReader, hookIDs []string) poleca
 func (h polecatHookIssues) Show(id string) (*beads.Issue, error) {
 	if issue, ok := h.issues[id]; ok {
 		return issue, nil
-	}
-	if h.requested[id] {
-		return nil, beads.ErrNotFound
 	}
 	return h.source.Show(id)
 }

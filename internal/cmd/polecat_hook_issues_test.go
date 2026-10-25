@@ -17,6 +17,7 @@ type hookCountingBeads struct {
 	shows        int
 	showMultiple int
 	multiErr     error
+	omit         map[string]bool // ids the batch silently skips
 }
 
 func (c *hookCountingBeads) Show(id string) (*beads.Issue, error) {
@@ -34,7 +35,7 @@ func (c *hookCountingBeads) ShowMultiple(ids []string) (map[string]*beads.Issue,
 	}
 	out := make(map[string]*beads.Issue, len(ids))
 	for _, id := range ids {
-		if issue, ok := c.issues[id]; ok {
+		if issue, ok := c.issues[id]; ok && !c.omit[id] {
 			out[id] = issue
 		}
 	}
@@ -71,8 +72,10 @@ func TestHookIssuesReadsARigInOneBatch(t *testing.T) {
 			for _, id := range hookIDs {
 				hookBeadDispositionForInventory(reader, id)
 			}
-			if src.showMultiple != 1 || src.shows != 0 {
-				t.Fatalf("reads = %d ShowMultiple, %d Show; want 1 and 0", src.showMultiple, src.shows)
+			// The one id the rig does not have is the only Show: a missing id
+			// costs one read, however many polecats the rig has.
+			if src.showMultiple != 1 || src.shows != 1 {
+				t.Fatalf("reads = %d ShowMultiple, %d Show; want 1 and 1", src.showMultiple, src.shows)
 			}
 		})
 	}
@@ -97,8 +100,8 @@ func TestHookIssuesClassifyAsShowWould(t *testing.T) {
 	if empty := hookBeadDispositionForInventory(reader, ""); !empty.Safe {
 		t.Errorf("empty hook = %+v, want safe", empty)
 	}
-	if src.shows != 0 {
-		t.Errorf("Show calls = %d, want 0 for ids the batch answered", src.shows)
+	if src.shows != 1 {
+		t.Errorf("Show calls = %d, want 1 (only the missing id)", src.shows)
 	}
 }
 
@@ -114,10 +117,10 @@ func TestActiveMRIsReadInTheBatch(t *testing.T) {
 		t.Fatalf("Show(be-mr1) = %v, %v; want the batched issue", issue, err)
 	}
 	if _, err := reader.Show("be-absent"); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("Show(be-absent) err = %v; want the batch's not-found", err)
+		t.Fatalf("Show(be-absent) err = %v; want not found from the source", err)
 	}
-	if src.shows != 0 {
-		t.Errorf("Show calls = %d, want 0 for ids the batch read", src.shows)
+	if src.shows != 1 {
+		t.Errorf("Show calls = %d, want 1 (only be-absent)", src.shows)
 	}
 }
 
@@ -146,5 +149,24 @@ func TestEmptyHookSkipsTheRead(t *testing.T) {
 	}
 	if src.shows != 0 {
 		t.Errorf("Show calls = %d, want 0 for an empty hook", src.shows)
+	}
+}
+
+// TestBatchOmissionIsNotNotFound: a batch that skips an id it should have
+// answered for does not make that id not found. The source answers it, so a
+// bead that exists is never reported as missing.
+func TestBatchOmissionIsNotNotFound(t *testing.T) {
+	t.Parallel()
+	src := &hookCountingBeads{
+		issues: map[string]*beads.Issue{"gt-skip": {ID: "gt-skip", Status: "hooked"}},
+		omit:   map[string]bool{"gt-skip": true},
+	}
+	reader := newPolecatHookIssues(src, []string{"gt-skip"})
+	issue, err := reader.Show("gt-skip")
+	if err != nil || issue == nil || issue.ID != "gt-skip" {
+		t.Fatalf("Show(gt-skip) = %v, %v; want the source's issue, not not-found", issue, err)
+	}
+	if src.shows != 1 {
+		t.Errorf("Show calls = %d, want 1 for the id the batch skipped", src.shows)
 	}
 }
