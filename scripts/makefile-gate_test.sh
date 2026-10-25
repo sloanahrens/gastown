@@ -225,27 +225,43 @@ if oout=$(dry openshell-providers) && grep -q -F 'scripts/openshell-providers.sh
 else
   fail "make -n openshell-providers runs the providers script" "$oout"
 fi
-# The seed stage and the pins (gt-ieuvf), run for real against a fixture town:
-# the image's Go caches are built from the commits seed-pins names, not from a
-# rig's moving HEAD, and a pin that cannot be staged stops the image build.
+# The seed stage and the pins (gt-ieuvf, gt-1rz2r), run for real against a
+# fixture town: the rig being built is seeded from the build commit, every
+# pinned rig from its pin and never from a rig's moving HEAD, and a commit the
+# checkout does not hold stops the image build.
 SEEDTMP="$(mktemp -d)"
 seedtown="$SEEDTMP/seedtown"
-mkdir -p "$seedtown/fx/mayor/rig"
-git -C "$seedtown/fx/mayor/rig" init -q -b main
-echo one >"$seedtown/fx/mayor/rig/a.txt"
-git -C "$seedtown/fx/mayor/rig" add a.txt
-git -C "$seedtown/fx/mayor/rig" -c user.name=t -c user.email=t@example.invalid commit -q -m first
-pinned=$(git -C "$seedtown/fx/mayor/rig" rev-parse HEAD)
-echo two >"$seedtown/fx/mayor/rig/b.txt"
-git -C "$seedtown/fx/mayor/rig" add b.txt
-git -C "$seedtown/fx/mayor/rig" -c user.name=t -c user.email=t@example.invalid commit -q -m second
-newest=$(git -C "$seedtown/fx/mayor/rig" rev-parse HEAD)
+# mkrig <name> makes a checkout with two commits and prints "<first> <second>".
+mkrig() {
+  local dir="$seedtown/$1/mayor/rig"
+  mkdir -p "$dir"
+  git -C "$dir" init -q -b main
+  echo one >"$dir/first.txt"
+  git -C "$dir" add first.txt
+  git -C "$dir" -c user.name=t -c user.email=t@example.invalid commit -q -m first
+  local first
+  first=$(git -C "$dir" rev-parse HEAD)
+  echo two >"$dir/second.txt"
+  git -C "$dir" add second.txt
+  git -C "$dir" -c user.name=t -c user.email=t@example.invalid commit -q -m second
+  echo "$first $(git -C "$dir" rev-parse HEAD)"
+}
+read -r gastown_first _ < <(mkrig gastown)
+read -r pinned newest < <(mkrig fx)
 printf '# comment\nfx %s\n' "$pinned" >"$seedtown/pins"
-seedmk() { make -C "$ROOT" --no-print-directory "$@" POLE_TOWN="$seedtown" POLE_SEED_PINS="$seedtown/pins" POLE_SEED_DIR="$seedtown/out" POLE_SEED_RIGS=fx; }
-if sout=$(seedmk polecat-seed-stage 2>&1) && [[ -f "$seedtown/out/fx/a.txt" && ! -e "$seedtown/out/fx/b.txt" ]]; then
-  pass "polecat-seed-stage stages the pinned commit of each rig, not its newer HEAD"
+build=$gastown_first
+seedmk() { make -C "$ROOT" --no-print-directory POLE_TOWN="$seedtown" POLE_SEED_PINS="$seedtown/pins" POLE_SEED_DIR="$seedtown/out" POLE_SEED_RIGS=fx POLE_COMMIT="$build" "$@"; }
+if sout=$(seedmk polecat-seed-stage 2>&1) \
+  && [[ -f "$seedtown/out/gastown/first.txt" && ! -e "$seedtown/out/gastown/second.txt" ]] \
+  && grep -q -F "gastown at ${gastown_first:0:12} (the build commit)" <<<"$sout"; then
+  pass "polecat-seed-stage stages the build rig at the build commit, not the checkout's HEAD"
 else
-  fail "polecat-seed-stage stages the pinned commit of each rig, not its newer HEAD" "$sout"
+  fail "polecat-seed-stage stages the build rig at the build commit, not the checkout's HEAD" "$sout"
+fi
+if [[ -f "$seedtown/out/fx/first.txt" && ! -e "$seedtown/out/fx/second.txt" ]]; then
+  pass "polecat-seed-stage stages every other rig at its pin, not its newer HEAD"
+else
+  fail "polecat-seed-stage stages every other rig at its pin, not its newer HEAD" "$sout"
 fi
 printf 'fx %s\n' "0000000000000000000000000000000000000000" >"$seedtown/pins"
 if sout=$(seedmk polecat-seed-stage 2>&1); then
@@ -255,6 +271,24 @@ elif grep -q -F 'cannot stage rig fx at 0000000000000000000000000000000000000000
 else
   fail "polecat-seed-stage stops on a pin the checkout does not hold, naming the rig and sha" "$sout"
 fi
+printf 'fx %s\n' "$pinned" >"$seedtown/pins"
+build="0000000000000000000000000000000000000000"
+if sout=$(seedmk polecat-seed-stage 2>&1); then
+  fail "polecat-seed-stage stops on a build commit the checkout does not hold" "exited 0: $sout"
+elif grep -q -F 'cannot stage rig gastown at 0000000000000000000000000000000000000000' <<<"$sout"; then
+  pass "polecat-seed-stage stops on a build commit the checkout does not hold, naming the rig and sha"
+else
+  fail "polecat-seed-stage stops on a build commit the checkout does not hold, naming the rig and sha" "$sout"
+fi
+build=""
+if sout=$(seedmk polecat-seed-stage 2>&1); then
+  fail "polecat-seed-stage refuses a build commit it cannot read" "exited 0: $sout"
+elif grep -q -F 'cannot read the build commit' <<<"$sout"; then
+  pass "polecat-seed-stage refuses a build commit it cannot read, naming the reason"
+else
+  fail "polecat-seed-stage refuses a build commit it cannot read, naming the reason" "$sout"
+fi
+build=$gastown_first
 : >"$seedtown/pins"
 if sout=$(seedmk polecat-seed-stage 2>&1); then
   fail "polecat-seed-stage refuses an empty pins file" "exited 0: $sout"

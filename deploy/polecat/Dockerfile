@@ -146,14 +146,15 @@ RUN groupadd -g 10001 polecat \
 # is read-only in a sandbox, so a module the seed lacks cannot be fetched there:
 # a build that needs one points GOMODCACHE elsewhere.
 #
-# The sources are the pinned checkouts `make polecat-image` stages from
-# deploy/polecat/seed-pins into deploy/polecat/seed, bind-mounted for this one
-# RUN so none lands in the image. Each module gets the commands the rigs'
-# presubmits run, with their default flags (no -trimpath, default CGO) so the
-# cache keys match. `go mod download` runs first because a linux build fetches
-# only the modules linux imports, while a rig's test can build for another
-# platform: devops' TestCloudqueryBinPinsAreARebuildOfTheCommit builds for
-# darwin/arm64 and needs the pulumi sdk's darwin-only purego (gt-mukre). The
+# The sources are the checkouts `make polecat-seed-stage` writes into
+# deploy/polecat/seed: gastown at the commit the image is built at, every other
+# rig at its deploy/polecat/seed-pins commit. The directory is bind-mounted for
+# this one RUN so none of it lands in the image. Each module gets the commands
+# the rigs' presubmits run, with their default flags (no -trimpath, default CGO)
+# so the cache keys match. `go mod download` runs first because a linux build
+# fetches only the modules linux imports, while a rig's test can build for
+# another platform: devops' TestCloudqueryBinPinsAreARebuildOfTheCommit builds
+# for darwin/arm64 and needs the pulumi sdk's darwin-only purego (gt-mukre). The
 # darwin build then compiles those modules into the build cache too.
 #
 # A failing linux `go build` or `go mod download` fails the image: the seed
