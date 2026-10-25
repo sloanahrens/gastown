@@ -177,6 +177,204 @@ func TestTheWorkPanelDrawsARowPerSeat(t *testing.T) {
 	}
 }
 
+// workSeatRow is one seat row the panel drew, reading its polecat and state
+// cells, whether a collapsed fold hides it, and the commands it carries.
+type workSeatRow struct {
+	Name   string   `json:"name"`
+	State  string   `json:"state"`
+	Head   bool     `json:"head"`
+	Hidden bool     `json:"hidden"`
+	Cmds   []string `json:"cmds"`
+}
+
+// workSeatRowsDrawn reads every seat row in the panel, folded or not, carrying
+// down the hidden attribute the page sets on the wrapper of the fold a row
+// sits in: the page hides the fold, not each row inside it.
+func workSeatRowsDrawn(t *testing.T, dom *pageDOM) []workSeatRow {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const out = [];
+		(function walk(n, hidden) {
+			for (const c of (n.children || [])) {
+				const cls = String(c.className).split(" ");
+				const h = hidden || !!c.hidden;
+				if (cls.indexOf("workrow") >= 0) {
+					const spans = c.children.filter(x => x.tagName === "SPAN").map(x => x.textContent);
+					const cmds = [];
+					c.children.filter(x => String(x.className).split(" ").indexOf("whints") >= 0)
+						.forEach(x => x.children.forEach(b => cmds.push(b.textContent)));
+					out.push({name: spans[0] || "", state: spans[3] || "", head: cls.indexOf("whead") >= 0, hidden: h, cmds: cmds});
+				}
+				walk(c, h);
+			}
+		})(__byId["work"], false);
+		return out;
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the panel's seat rows: %v", err)
+	}
+	var out []workSeatRow
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the panel's seat rows: %v", err)
+	}
+	return out
+}
+
+// workSeatOfEveryState is one seat in every state the inventory can read, in an
+// order the panel must not keep.
+func workSeatOfEveryState() []any {
+	recovery := seat("gastown", "recov", "recovery", "", "", "", 0)
+	recovery["hints"] = []any{"gt polecat recover gastown/recov"}
+	return []any{
+		seat("gastown", "stall", "stalled", "gt-stall", "nothing is doing it", "deepseek-flash", time.Minute),
+		seat("gastown", "work", "working", "gt-work", "on the job", "deepseek-flash", time.Minute),
+		recovery,
+		seat("gastown", "queue", "queued", "gt-queue", "submitted", "deepseek-flash", time.Minute),
+		seat("gastown", "human", "needs-human", "gt-human", "waiting on a person", "deepseek-flash", time.Minute),
+		seat("gastown", "spawn", "spawning", "gt-spawn", "up in a moment", "deepseek-flash", time.Minute),
+		seat("gastown", "gate", "gating", "gt-gate", "being gated", "deepseek-flash", time.Minute),
+		seat("gastown", "unread", "unknown", "", "", "", 0),
+		seat("gastown", "quiet", "quiet", "gt-quiet", "silent ten minutes", "deepseek-flash", time.Minute),
+		seat("gastown", "review", "review-needed", "", "", "", 0),
+	}
+}
+
+// statesOf reads the state cells of the rows hidden or shown, in the order the
+// panel drew them.
+func statesOf(rows []workSeatRow, hidden bool) []string {
+	var out []string
+	for _, r := range rows {
+		if !r.Head && r.Hidden == hidden {
+			out = append(out, r.State)
+		}
+	}
+	return out
+}
+
+// TestTheWorkPanelLeadsWithTheLiveSeatsAndFoldsTheOnesThatNeedALook drives the
+// panel over a seat in every state and reads the table back: the seats the
+// town is using draw first, ordered working, spawning, queued, gating, quiet;
+// the states that want an operator sit together in one collapsed "needs a
+// look (N)" fold below them, holding their commands until it is opened
+// (gt-n7yb8).
+func TestTheWorkPanelLeadsWithTheLiveSeatsAndFoldsTheOnesThatNeedALook(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderWork", workState(workSeatOfEveryState(), workQueueReading(1, 0, 0, 0)))
+
+	rows := workSeatRowsDrawn(t, dom)
+	if len(rows) != 11 || !rows[0].Head {
+		t.Fatalf("the panel drew %d rows with head=%v, want a header and ten seats", len(rows), len(rows) > 0 && rows[0].Head)
+	}
+	if got, want := strings.Join(statesOf(rows[1:], false), " "), "working spawning queued gating quiet"; got != want {
+		t.Errorf("the live seats read %q, want %q", got, want)
+	}
+	if got, want := strings.Join(statesOf(rows[1:], true), " "), "needs-human stalled unknown recovery review-needed"; got != want {
+		t.Errorf("the folded seats read %q, want %q", got, want)
+	}
+	if !strings.Contains(workText(t, dom), "needs a look (5)") {
+		t.Errorf("the folded seats are not under one needs-a-look summary: %q", workText(t, dom))
+	}
+	// A folded seat keeps its commands: they are drawn, and the collapse is
+	// what keeps them out of sight until the operator opens it.
+	var recov *workSeatRow
+	for i := range rows {
+		if rows[i].Name == "recov" {
+			recov = &rows[i]
+		}
+	}
+	if recov == nil || !recov.Hidden || len(recov.Cmds) != 1 || recov.Cmds[0] != "gt polecat recover gastown/recov" {
+		t.Fatalf("the recovery seat draws %+v, want it hidden with its command", recov)
+	}
+
+	// Opening the fold shows the seats and their commands, in the same rows.
+	if _, err := dom.vm.RunString(`(() => {
+		const t = __byId["work"].children.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
+		const d = t.children.find(c => c.tagName === "DETAILS" && c.textContent.indexOf("needs a look") === 0);
+		__clickSummary(d);
+	})()`); err != nil {
+		t.Fatal(err)
+	}
+	opened := workSeatRowsDrawn(t, dom)
+	if got := statesOf(opened[1:], true); len(got) != 0 {
+		t.Errorf("after opening the fold %q are still hidden", got)
+	}
+	for _, r := range opened {
+		if r.Name == "recov" && (len(r.Cmds) != 1 || r.Cmds[0] != "gt polecat recover gastown/recov") {
+			t.Errorf("the opened recovery row carries %v, want its command", r.Cmds)
+		}
+	}
+}
+
+// TestTheWorkHeaderAndItsRowsShareOneColumnTemplate holds the Work table to one
+// column template: the table declares the five columns once and the header,
+// the seat rows and a fold's rows all take their tracks from it, so a heading
+// and the cells under it cannot start their columns at different places
+// (gt-n7yb8).
+func TestTheWorkHeaderAndItsRowsShareOneColumnTemplate(t *testing.T) {
+	t.Parallel()
+
+	want := "[polecat] minmax(0,max-content) [agent] minmax(0,max-content) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch)"
+	if table := cssRule(t, ".wtable"); !strings.Contains(table, "grid-template-columns:"+want) {
+		t.Errorf("the seat table lays out %q, want the five named columns %q", table, want)
+	}
+	for _, sel := range []string{".workrow", ".wfoldrows"} {
+		rule := cssRule(t, sel)
+		if !strings.Contains(rule, "grid-template-columns:subgrid") {
+			t.Errorf("%s lays out its own columns instead of the table's: %s", sel, rule)
+		}
+		if !strings.Contains(rule, "grid-column:1 / -1") {
+			t.Errorf("%s does not span the table's columns: %s", sel, rule)
+		}
+	}
+
+	// The header, the live rows and the folded rows are all items of that one
+	// table, so the template above is the one each of them is laid out by.
+	dom := newPageDOM(t)
+	dom.call(t, "renderWork", workState([]any{
+		seat("gastown", "dementus", "working", "gt-n7yb8", "one table", "deepseek-flash", time.Minute),
+		seat("gastown", "stall", "stalled", "gt-stall", "nothing is doing it", "deepseek-flash", time.Minute),
+	}, workQueueReading(1, 0, 0, 0)))
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const t = __byId["work"].children.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
+		if (!t) return null;
+		const heads = [], rows = [];
+		(function walk(n) {
+			for (const c of (n.children || [])) {
+				const cls = String(c.className).split(" ");
+				if (cls.indexOf("workrow") >= 0) {
+					(cls.indexOf("whead") >= 0 ? heads : rows).push(c.children.filter(x => x.tagName === "SPAN").length);
+				}
+				walk(c);
+			}
+		})(t);
+		return {heads: heads, rows: rows};
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the seat table: %v", err)
+	}
+	var table struct {
+		Heads []int `json:"heads"`
+		Rows  []int `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &table); err != nil {
+		t.Fatalf("reading the seat table: %v", err)
+	}
+	if len(table.Heads) != 1 || table.Heads[0] != 5 {
+		t.Errorf("the table drew header rows %v, want one of five cells", table.Heads)
+	}
+	if len(table.Rows) != 2 {
+		t.Fatalf("the table holds %d seat rows, want the live and the folded one", len(table.Rows))
+	}
+	for _, n := range table.Rows {
+		if n != 5 {
+			t.Errorf("a seat row draws %d cells, want the header's five", n)
+		}
+	}
+}
+
 // TestTheWorkPanelGivesASeatHoldingNoBeadItsRig drives the panel over the
 // seats an idle pool holds — one whose agent bead still records the model of
 // the last job it ran, one with nothing recorded, and a seat in a parked rig
@@ -471,14 +669,20 @@ func TestTheWorkRowsCannotOverflowTheirPanel(t *testing.T) {
 	t.Parallel()
 
 	row := cssRule(t, ".workrow")
+	// The columns live on the table, not on a row: every row takes them from
+	// that one template, so the header and the cells under it cannot start
+	// their columns at different places (gt-n7yb8).
+	if !strings.Contains(row, "grid-template-columns:subgrid") {
+		t.Errorf("a seat's row lays out its own columns instead of the table's: %s", row)
+	}
 	cols := ""
-	for _, decl := range strings.Split(row, ";") {
+	for _, decl := range strings.Split(cssRule(t, ".wtable"), ";") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(decl), "grid-template-columns:"); ok {
 			cols = v
 		}
 	}
 	if cols == "" {
-		t.Fatal("the Work panel's rows lay out no columns")
+		t.Fatal("the Work panel's seat table lays out no columns")
 	}
 	// Every track is named for the cell it holds, so the template states the
 	// column order workHead and workRow draw instead of describing an order
@@ -492,10 +696,10 @@ func TestTheWorkRowsCannotOverflowTheirPanel(t *testing.T) {
 		tracks = append(tracks, tok)
 	}
 	if got, want := strings.Join(names, " "), "polecat agent bead state age"; got != want {
-		t.Errorf("a seat's row names its columns %q, want %q in the order the header draws them", got, want)
+		t.Errorf("the seat table names its columns %q, want %q in the order the header draws them", got, want)
 	}
 	if len(tracks) != 5 {
-		t.Errorf("a seat's row lays out %d columns (%q), want five: polecat, agent, bead, state, age", len(tracks), cols)
+		t.Errorf("the seat table lays out %d columns (%q), want five: polecat, agent, bead, state, age", len(tracks), cols)
 	}
 	flex := 0
 	for _, track := range tracks {
@@ -723,7 +927,8 @@ func TestTheWorkPanelMovesItsAgesBetweenPolls(t *testing.T) {
 	dom := newPageDOM(t)
 	workClock(t, dom, base)
 	dom.call(t, "renderWork", st)
-	if _, err := dom.vm.RunString(`globalThis.__seatRow = __byId["work"].children[1]`); err != nil {
+	// The seat's row, the one after the header in the table.
+	if _, err := dom.vm.RunString(`globalThis.__seatRow = __byId["work"].children[0].children[1]`); err != nil {
 		t.Fatal(err)
 	}
 	if got := workCells(t, dom, "wnum"); len(got) != 1 || got[0].Text != "12m" || strings.Contains(got[0].Class, "warnc") {
@@ -739,7 +944,7 @@ func TestTheWorkPanelMovesItsAgesBetweenPolls(t *testing.T) {
 	if !strings.Contains(got[0].Class, "warnc") || !strings.Contains(got[0].Title, "last printed 11m ago") {
 		t.Errorf("the age cell reads %+v: want the warning and the silence in its title", got[0])
 	}
-	same, err := dom.vm.RunString(`String(__byId["work"].children[1] === globalThis.__seatRow)`)
+	same, err := dom.vm.RunString(`String(__byId["work"].children[0].children[1] === globalThis.__seatRow)`)
 	if err != nil {
 		t.Fatal(err)
 	}
