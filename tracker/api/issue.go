@@ -25,6 +25,7 @@ type Issue struct {
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 	ClosedAt           *time.Time `json:"closed_at,omitempty"`
+	DeferUntil         *time.Time `json:"defer_until,omitempty"`
 	CloseReason        string     `json:"close_reason,omitempty"`
 	Parent             string     `json:"parent,omitempty"`
 	Children           []string   `json:"children,omitempty"`

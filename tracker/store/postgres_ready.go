@@ -1,0 +1,199 @@
+package store
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/steveyegge/gastown/tracker/api"
+)
+
+// blockedCTE defines `blocked`: issues with an open `blocks` blocker, plus,
+// transitively, the children of any blocked issue (a blocked parent blocks its
+// children). Links of other types, and external targets, never block.
+const blockedCTE = `direct AS (
+  SELECT DISTINCT d.issue_id AS id FROM tracker.dependencies d
+  JOIN tracker.issues t ON t.id = d.depends_on
+  WHERE d.type = 'blocks' AND t.status <> 'closed'
+), blocked AS (
+  SELECT id FROM direct
+  UNION
+  SELECT c.id FROM tracker.issues c JOIN blocked b ON c.parent_id = b.id
+)`
+
+// scopeCTE defines `scope`: every descendant of the molecule root $n, wisps
+// included, not the root itself.
+func scopeCTE(rootArg string) string {
+	return `scope AS (
+  SELECT id FROM tracker.issues WHERE parent_id = ` + rootArg + `
+  UNION
+  SELECT c.id FROM tracker.issues c JOIN scope s ON c.parent_id = s.id
+)`
+}
+
+// buildReadyQuery builds the ready query (blocked=false) or the blocked one.
+// Ready is open (or deferred and woken), unblocked, not ephemeral (unless scoped to a
+// molecule) and not an infrastructure type; blocked is not-closed and blocked.
+// ReadyFilter.Gated has no effect: no gate rows exist.
+func buildReadyQuery(f api.ReadyFilter, cur *listCursor, limit int, blocked bool) (string, []any) {
+	var args []any
+	arg := func(v any) string {
+		args = append(args, v)
+		return "$" + strconv.Itoa(len(args))
+	}
+	ctes := "WITH RECURSIVE " + blockedCTE
+	var where []string
+	if f.Molecule != "" {
+		ctes += ", " + scopeCTE(arg(f.Molecule))
+		where = append(where, "issues.id IN (SELECT id FROM scope)")
+	} else {
+		where = append(where, "issues.ephemeral = false")
+	}
+	if blocked {
+		where = append(where, "issues.status <> 'closed'", "issues.id IN (SELECT id FROM blocked)")
+	} else {
+		// An open issue is ready unless it is deferred into the future; a
+		// deferred issue wakes by itself once its time has passed, with no
+		// sweep writing to the table.
+		where = append(where, "issues.id NOT IN (SELECT id FROM blocked)",
+			"((issues.status = 'open' AND (issues.defer_until IS NULL OR issues.defer_until <= now())) OR (issues.status = 'deferred' AND issues.defer_until IS NOT NULL AND issues.defer_until <= now()))")
+	}
+	where = append(where, "issues.issue_type <> ALL("+arg(infraTypes)+")")
+	if f.Rig != "" {
+		where = append(where, "issues.rig = "+arg(f.Rig))
+	}
+	if f.Parent != "" {
+		where = append(where, "issues.parent_id = "+arg(f.Parent))
+	}
+	if f.Unassigned {
+		where = append(where, "issues.assignee = ''")
+	}
+	if len(f.ExcludeLabels) > 0 {
+		where = append(where, "NOT EXISTS (SELECT 1 FROM tracker.labels l WHERE l.issue_id = issues.id AND l.label = ANY("+arg(f.ExcludeLabels)+"))")
+	}
+	if len(f.ExcludeTypes) > 0 {
+		where = append(where, "issues.issue_type <> ALL("+arg(f.ExcludeTypes)+")")
+	}
+	if cur != nil {
+		where = append(where, fmt.Sprintf("(issues.priority, issues.created_at, issues.id) > (%s, %s, %s)", arg(cur.Priority), arg(cur.CreatedAt), arg(cur.ID)))
+	}
+	q := ctes + " SELECT " + issueColumns + " FROM tracker.issues WHERE " + strings.Join(where, " AND ") +
+		" ORDER BY priority, created_at, id LIMIT " + strconv.Itoa(limit+1)
+	return q, args
+}
+
+// Ready returns the open, unblocked work matching f, ordered by priority,
+// creation time and id, one page at a time.
+func (p *Postgres) Ready(ctx context.Context, f api.ReadyFilter) (api.IssuePage, error) {
+	return p.readyPage(ctx, f, false)
+}
+
+// Blocked returns the not-closed issues held by an open blocker (or by a
+// blocked parent) matching f, each with its direct open blockers in BlockedBy.
+func (p *Postgres) Blocked(ctx context.Context, f api.ReadyFilter) (api.IssuePage, error) {
+	page, err := p.readyPage(ctx, f, true)
+	if err != nil {
+		return api.IssuePage{}, err
+	}
+	return page, p.fillBlockedBy(ctx, page.Issues)
+}
+
+func (p *Postgres) readyPage(ctx context.Context, f api.ReadyFilter, blocked bool) (api.IssuePage, error) {
+	cur, err := decodeListCursor(f.Cursor)
+	if err != nil {
+		return api.IssuePage{}, err
+	}
+	size := pageSize(f.Limit)
+	q, args := buildReadyQuery(f, cur, size, blocked)
+	rows, err := p.pool.Query(ctx, q, args...)
+	if err != nil {
+		return api.IssuePage{}, fmt.Errorf("store: ready: %w", err)
+	}
+	defer rows.Close()
+	var issues []api.Issue
+	for rows.Next() {
+		is, err := scanIssue(rows)
+		if err != nil {
+			return api.IssuePage{}, fmt.Errorf("store: ready: %w", err)
+		}
+		issues = append(issues, is)
+	}
+	if err := rows.Err(); err != nil {
+		return api.IssuePage{}, fmt.Errorf("store: ready: %w", err)
+	}
+	page := api.IssuePage{Issues: issues}
+	if len(issues) > size {
+		page.Issues = issues[:size]
+		last := page.Issues[size-1]
+		page.NextCursor = listCursor{Priority: last.Priority, CreatedAt: last.CreatedAt, ID: last.ID}.encode()
+	}
+	return page, p.fillPage(ctx, page.Issues)
+}
+
+// fillBlockedBy sets each issue's BlockedBy to its direct open blockers.
+func (p *Postgres) fillBlockedBy(ctx context.Context, issues []api.Issue) error {
+	if len(issues) == 0 {
+		return nil
+	}
+	ids := make([]string, len(issues))
+	at := map[string]int{}
+	for i, is := range issues {
+		ids[i], at[is.ID] = is.ID, i
+	}
+	rows, err := p.pool.Query(ctx, `SELECT d.issue_id, d.depends_on FROM tracker.dependencies d
+JOIN tracker.issues t ON t.id = d.depends_on
+WHERE d.issue_id = ANY($1) AND d.type = 'blocks' AND t.status <> 'closed' ORDER BY d.issue_id, d.depends_on`, ids)
+	if err != nil {
+		return fmt.Errorf("store: blocked by: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, by string
+		if err := rows.Scan(&id, &by); err != nil {
+			return fmt.Errorf("store: blocked by: %w", err)
+		}
+		issues[at[id]].BlockedBy = append(issues[at[id]].BlockedBy, by)
+	}
+	return rows.Err()
+}
+
+// ChildrenOf returns the direct children of each of parents, any status and
+// wisps included, ordered by creation, keyed by parent. A parent with no
+// children, or that does not exist, is absent.
+func (p *Postgres) ChildrenOf(ctx context.Context, parents []string) (map[string][]api.Issue, error) {
+	out := map[string][]api.Issue{}
+	parents = uniqueStrings(parents)
+	if len(parents) == 0 {
+		return out, nil
+	}
+	rows, err := p.pool.Query(ctx, "SELECT "+issueColumns+" FROM tracker.issues WHERE parent_id = ANY($1) ORDER BY created_at, id", parents)
+	if err != nil {
+		return nil, fmt.Errorf("store: children: %w", err)
+	}
+	defer rows.Close()
+	var all []api.Issue
+	for rows.Next() {
+		is, err := scanIssue(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: children: %w", err)
+		}
+		all = append(all, is)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: children: %w", err)
+	}
+	ids := make([]string, len(all))
+	for i, is := range all {
+		ids[i] = is.ID
+	}
+	labels, err := loadLabels(ctx, p.pool, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, is := range all {
+		is.Labels = labels[is.ID]
+		out[is.Parent] = append(out[is.Parent], is)
+	}
+	return out, nil
+}

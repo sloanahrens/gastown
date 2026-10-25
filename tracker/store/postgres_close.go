@@ -13,18 +13,20 @@ import (
 // fenceLimit is how many offending ids a refusal names.
 const fenceLimit = 5
 
-// openChildren returns up to fenceLimit children of id that are not closed.
-func openChildren(ctx context.Context, q querier, id string) ([]string, error) {
-	return stringsFrom(ctx, q, "SELECT id FROM tracker.issues WHERE parent_id = $1 AND status <> 'closed' ORDER BY id LIMIT "+fmt.Sprint(fenceLimit), id)
+// openChildren returns up to fenceLimit children of id that are not closed
+// and not in closing, the set being closed together with id.
+func openChildren(ctx context.Context, q querier, id string, closing []string) ([]string, error) {
+	return stringsFrom(ctx, q, "SELECT id FROM tracker.issues WHERE parent_id = $1 AND status <> 'closed' AND id <> ALL($2) ORDER BY id LIMIT "+fmt.Sprint(fenceLimit), id, closing)
 }
 
 // openBlockers returns up to fenceLimit issues id depends on through a
-// blocking link that are not closed. Only `blocks` links count here; the
-// parent-child rule belongs to ready/blocked, not to closing.
-func openBlockers(ctx context.Context, q querier, id string) ([]string, error) {
+// blocking link that are not closed and not in closing, the set being closed
+// together with id. Only `blocks` links count here; the parent-child rule
+// belongs to ready/blocked, not to closing.
+func openBlockers(ctx context.Context, q querier, id string, closing []string) ([]string, error) {
 	return stringsFrom(ctx, q, `SELECT d.depends_on FROM tracker.dependencies d
 JOIN tracker.issues t ON t.id = d.depends_on
-WHERE d.issue_id = $1 AND d.type = 'blocks' AND t.status <> 'closed' ORDER BY d.depends_on LIMIT `+fmt.Sprint(fenceLimit), id)
+WHERE d.issue_id = $1 AND d.type = 'blocks' AND t.status <> 'closed' AND t.id <> ALL($2) ORDER BY d.depends_on LIMIT `+fmt.Sprint(fenceLimit), id, closing)
 }
 
 func stringsFrom(ctx context.Context, q querier, sql string, args ...any) ([]string, error) {
@@ -45,15 +47,16 @@ func stringsFrom(ctx context.Context, q querier, sql string, args ...any) ([]str
 }
 
 // closeRow closes one locked, not-yet-closed issue in tx. Unless force, it
-// refuses while the issue has open children or an open blocker, and says which.
-func closeRow(ctx context.Context, tx pgx.Tx, id, reason string, force bool, actor string) error {
+// refuses while the issue has open children or an open blocker, and says
+// which; members of closing (the set closed in the same call) do not count.
+func closeRow(ctx context.Context, tx pgx.Tx, id, reason string, force bool, actor string, closing []string) error {
 	if !force {
-		if kids, err := openChildren(ctx, tx, id); err != nil {
+		if kids, err := openChildren(ctx, tx, id, closing); err != nil {
 			return err
 		} else if len(kids) > 0 {
 			return api.Conflict("%s has open children: %s (close them first, or force)", id, strings.Join(kids, ", "))
 		}
-		if blockers, err := openBlockers(ctx, tx, id); err != nil {
+		if blockers, err := openBlockers(ctx, tx, id, closing); err != nil {
 			return err
 		} else if len(blockers) > 0 {
 			return api.Conflict("%s is blocked by open issues: %s (close them first, or force)", id, strings.Join(blockers, ", "))
@@ -84,7 +87,7 @@ func (p *Postgres) CloseIssues(ctx context.Context, ids []string, reason string,
 			if status[id] == "closed" {
 				continue
 			}
-			if err := closeRow(ctx, tx, id, reason, force, actor); err != nil {
+			if err := closeRow(ctx, tx, id, reason, force, actor, ids); err != nil {
 				return err
 			}
 		}

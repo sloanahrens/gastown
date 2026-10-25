@@ -20,7 +20,7 @@ const (
 
 // issueColumns is the SELECT list scanIssue reads, in order.
 const issueColumns = `id, title, description, design, notes, acceptance_criteria, status, priority,
-issue_type, assignee, owner, created_by, created_at, updated_at, closed_at, close_reason, coalesce(parent_id, ''),
+issue_type, assignee, owner, created_by, created_at, updated_at, closed_at, defer_until, close_reason, coalesce(parent_id, ''),
 ephemeral, wisp_type, event_kind, coalesce(payload::text, ''), hook_bead, agent_state, last_activity`
 
 // scanIssue reads one row of issueColumns. Labels are loaded separately.
@@ -28,7 +28,7 @@ func scanIssue(row pgx.Row) (api.Issue, error) {
 	var is api.Issue
 	var eventKind string
 	err := row.Scan(&is.ID, &is.Title, &is.Description, &is.Design, &is.Notes, &is.AcceptanceCriteria, &is.Status, &is.Priority,
-		&is.Type, &is.Assignee, &is.Owner, &is.CreatedBy, &is.CreatedAt, &is.UpdatedAt, &is.ClosedAt, &is.CloseReason, &is.Parent,
+		&is.Type, &is.Assignee, &is.Owner, &is.CreatedBy, &is.CreatedAt, &is.UpdatedAt, &is.ClosedAt, &is.DeferUntil, &is.CloseReason, &is.Parent,
 		&is.Ephemeral, &is.WispType, &eventKind, &is.Payload, &is.HookBead, &is.AgentState, &is.LastActivity)
 	is.EventKind = eventKind
 	return is, err
