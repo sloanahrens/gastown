@@ -1034,25 +1034,49 @@ rc=$(gw_lib "$T" install "$T/bad.plist.tmpl" "$T/home")
   || fail "gateway lib, unrenderable template: rc=$rc $(cat "$T/lib.out")"
 
 
-# --- Cases 33-38: the polecat image rebuild after an install. The plugin's run.sh is
-# a stub that logs its call; the default in run_install is a path that does not
-# exist, so no other case can start the real plugin. The rebuild is detached, so
-# the cases wait for the stub's log.
-# image_stub T [sleep seconds]: a run.sh that logs its call, and with a non-zero
-# sleep records its pid and lingers until the case kills it.
+# --- Cases 33-38: the sandbox image step, which runs before the binary swap and
+# fails the install when the plugin's build does not finish (gt-xzo8a). The
+# plugin's run.sh is a stub; the default in run_install is a path that does not
+# exist, so no other case reaches a real plugin.
+# image_stub T: a run.sh that logs the version of the binary it was handed
+# (POLECAT_IMAGE_GT) and of the one installed at $GT when it ran, brackets its
+# work with its own lines in make.log, and waits IMAGE_STUB_SLEEP seconds.
+# IMAGE_STUB_REASON makes it print that reason and exit 1.
 image_stub() {
-  local t="$1" linger="${2:-0}"
+  local t="$1"
   mkdir -p "$t/plugin"
   cat > "$t/plugin/run.sh" <<STUB
 #!/usr/bin/env bash
-echo "run.sh \$("$t/bin/gt" version | head -1)" >> "$t/image-calls.log"
-if [ $linger -gt 0 ]; then echo \$\$ > "$t/image.pid"; exec sleep $linger; fi
-exit \${IMAGE_STUB_EXIT:-0}
+printf '%s | %s\n' "\$("\$POLECAT_IMAGE_GT" version | head -1)" "\$("$t/bin/gt" version | head -1)" >> "$t/image-calls.log"
+echo "run.sh" >> "\$T_WORLD/make.log"
+sleep \${IMAGE_STUB_SLEEP:-0}
+if [ -n "\${IMAGE_STUB_REASON:-}" ]; then echo "ERROR: \$IMAGE_STUB_REASON" >&2; exit 1; fi
+echo "run.sh-done" >> "\$T_WORLD/make.log"
+exit 0
 STUB
   chmod +x "$t/plugin/run.sh"
 }
 wait_for() { local i; for i in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 wait_for_alarm() { local i; for i in $(seq 1 100); do grep -q 'alarm after' "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+# group_signal_ok: this host lets one process signal another's process group,
+# which is what the alarm's kill(-pgid) needs to stop a build. A
+# seccomp-filtered sandbox refuses it with EPERM, and the two alarm cases below
+# then cannot observe the stop they exist to test.
+group_signal_ok() {
+  perl -MPOSIX -e '
+    my $c = fork();
+    exit 2 unless defined $c;
+    if ($c == 0) { POSIX::setpgid(0, 0); exec "sleep", "5"; exit 1 }
+    my $ok = 0;
+    for (1 .. 20) {
+      if (kill(0, -$c)) { $ok = 1; last }
+      select(undef, undef, undef, 0.05);
+    }
+    kill "KILL", $c;
+    waitpid($c, 0);
+    exit($ok ? 0 : 1);
+  '
+}
 # proc_state PID: the one-letter state of PID (R, S, Z ...); empty once it is gone.
 # PROC_ROOT stands in for /proc, so both readers can be checked on either host.
 proc_state() {
@@ -1065,36 +1089,36 @@ proc_state() {
 # yet reaped), and an orphan whose PID 1 never reaps becomes one, so that is not live.
 is_live() { kill -0 "$1" 2>/dev/null && [ "$(proc_state "$1")" != Z ]; }
 
-# Case 33: a successful install starts the plugin once, after the new binary is in place.
+# Case 33: a successful install builds the image after `make build` and before
+# `make install-local`, on the build output (the target commit, not the installed
+# one), and swaps the binary and writes the restart marker only once it returned.
 T=$(make_world); image_stub "$T"
 install_stub "$T" "$(cat "$T/c1")"
-rc=$(IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
-wait_for "$T/image-calls.log" || true
-[ "$rc" = "0" ] && [ "$(wc -l < "$T/image-calls.log" 2>/dev/null | tr -d ' ')" = "1" ] \
-  && grep -q "gt version $(cat "$T/c2")" "$T/image-calls.log" \
-  && grep -q "polecat image: rebuild for .* started in the background" "$T/run.out" \
-  && pass "image: a successful install runs the plugin once, on the new binary" \
-  || fail "image: success: rc=$rc calls=$(cat "$T/image-calls.log" 2>/dev/null) out=$(tail -4 "$T/run.out")"
+rc=$(IMAGE_STUB_SLEEP=0.3 IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
+[ "$rc" = "0" ] && [ "$(sed 's/ .*//' "$T/make.log" | tr '\n' ' ')" = "make run.sh run.sh-done make " ] \
+  && head -1 "$T/image-calls.log" | grep -q "^gt version $(cat "$T/c2")" \
+  && head -1 "$T/image-calls.log" | grep -q "| gt version $(cat "$T/c1")" \
+  && [ "$(reported "$T")" = "$(cat "$T/c2")" ] && [ -e "$T/daemon/restart-pending.json" ] \
+  && pass "image: the image is built at the target commit before the swap, and the swap waits for it" \
+  || fail "image: success: rc=$rc reported=$(reported "$T") want=$(cat "$T/c2") marker=$([ -e "$T/daemon/restart-pending.json" ] && echo yes || echo no) make=[$(sed 's/ .*//' "$T/make.log" | tr '\n' ' ')] calls=$(cat "$T/image-calls.log" 2>/dev/null) out=$(tail -4 "$T/run.out")"
 
 # Case 34: a no-op install (already at the commit) does not start it.
 T=$(make_world); image_stub "$T"
 install_stub "$T" "$(cat "$T/c2")"
 rc=$(IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
-sleep 0.5
 [ "$rc" = "0" ] && [ ! -e "$T/image-calls.log" ] \
   && pass "image: a no-op install does not run the plugin" \
   || fail "image: noop: rc=$rc calls=$(cat "$T/image-calls.log" 2>/dev/null)"
 
-# Case 35: a failed install (build fails) does not start it.
+# Case 35: a failed install (the binary build fails) does not start it.
 T=$(make_world); image_stub "$T"
 touch "$T/fail_build"
 rc=$(IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
-sleep 0.5
 [ "$rc" = "1" ] && [ ! -e "$T/image-calls.log" ] \
-  && pass "image: a failed install does not run the plugin" \
+  && pass "image: a failed binary build does not run the plugin" \
   || fail "image: failed install: rc=$rc calls=$(cat "$T/image-calls.log" 2>/dev/null)"
 
-# Case 36: no plugin on disk -> the install succeeds and says the image was not rebuilt.
+# Case 36: no plugin on disk -> the install succeeds and says the image was not built.
 T=$(make_world)
 rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
 [ "$rc" = "0" ] && grep -q "polecat image: no plugin at '$T/no-image-plugin/run.sh', not rebuilt" "$T/run.out" \
@@ -1102,31 +1126,49 @@ rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
   && pass "image: no plugin: install succeeds, one line says so" \
   || fail "image: no plugin: rc=$rc $(tail -3 "$T/run.out")"
 
-# Case 37: the plugin fails -> the install is still a success (best effort).
+# Case 37: the plugin's build fails -> the install fails closed: the old binary
+# stays at $GT, no restart marker is written, install-local never runs, and the
+# install prints the plugin's own reason.
 T=$(make_world); image_stub "$T"
-rc=$(IMAGE_STUB_EXIT=1 IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
-wait_for "$T/image-calls.log" || true
-[ "$rc" = "0" ] && [ "$(tail -1 "$T/run.out" | cut -d' ' -f2-3)" = "RESULT installed" ] && [ "$(last_receipt "$T" event)" = "installed" ] \
-  && pass "image: a failing plugin does not fail the install" \
-  || fail "image: plugin fails: rc=$rc $(tail -2 "$T/run.out")"
+install_stub "$T" "$(cat "$T/c1")"
+rc=$(IMAGE_STUB_REASON="make polecat-image failed at $(cat "$T/c2")" \
+     IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
+[ "$rc" = "1" ] && [ -e "$T/image-calls.log" ] \
+  && [ "$(reported "$T")" = "$(cat "$T/c1")" ] && [ ! -e "$T/daemon/restart-pending.json" ] \
+  && ! grep -q "install-local" "$T/make.log" \
+  && grep -q "polecat image: the build for .* did not finish (exit 1); the binary was not swapped" "$T/run.out" \
+  && grep -q "ERROR: make polecat-image failed at $(cat "$T/c2")" "$T/run.out" \
+  && grep -q "RESULT failed .* build-failed" "$T/run.out" \
+  && pass "image: a failed build keeps the old binary, writes no restart marker and names the reason" \
+  || fail "image: failing plugin: rc=$rc reported=$(reported "$T") marker=$([ -e "$T/daemon/restart-pending.json" ] && echo yes || echo no) make=[$(sed 's/ .*//' "$T/make.log" | tr '\n' ' ')] out=$(tail -4 "$T/run.out")"
 
-# Case 38: a plugin that runs for a long time does not hold the install. The
-# stub records its pid and sleeps until this case kills it, so nothing is
-# timed: the install returning while that pid is alive is the assertion.
-T=$(make_world); image_stub "$T" 10
-rc=$(IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt | tail -1)
-wait_for "$T/image.pid" || true
-STUB_PID=$(cat "$T/image.pid" 2>/dev/null || true)
-[ "$rc" = "0" ] && [ -n "$STUB_PID" ] && kill -0 "$STUB_PID" 2>/dev/null \
-  && pass "image: a slow plugin does not delay the install" \
-  || fail "image: slow plugin: rc=$rc pid='${STUB_PID:-}' $(tail -2 "$T/run.out")"
-# The stub had closed every fd above 2 by the time it wrote its pid (perl closes
-# them before exec), so the lock is free now unless the stub inherited it.
-LOCK_RC=$( ( perl -e 'use Fcntl qw(:flock); open(my $f, ">>", $ARGV[0]) or exit 2; exit(flock($f, LOCK_EX|LOCK_NB) ? 0 : 1)' "$T/daemon/install-gt.lock" ) >/dev/null 2>&1; echo $? )
-[ "$LOCK_RC" = "0" ] \
-  && pass "image: the background plugin does not hold the install lock" \
-  || fail "image: the install lock is held by the background plugin (rc=$LOCK_RC)"
-if [ -n "$STUB_PID" ]; then kill "$STUB_PID" 2>/dev/null || true; fi
+# Case 38: a plugin killed by a signal is a failure, not an exit 0 the supervisor
+# reads off $? >> 8: the install fails closed and reports the 128+signal code.
+T=$(make_world); mkdir -p "$T/plugin"
+cat > "$T/plugin/run.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "run.sh" >> "$T_WORLD/make.log"
+kill -TERM $$
+STUB
+chmod +x "$T/plugin/run.sh"
+install_stub "$T" "$(cat "$T/c1")"
+rc=$(IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
+[ "$rc" = "1" ] && [ "$(reported "$T")" = "$(cat "$T/c1")" ] \
+  && [ ! -e "$T/daemon/restart-pending.json" ] && ! grep -q "install-local" "$T/make.log" \
+  && grep -q "polecat image: the build for .* did not finish (exit 143); the binary was not swapped" "$T/run.out" \
+  && pass "image: a signal-killed build fails the install closed, with 128+signal" \
+  || fail "image: signal-killed plugin: rc=$rc $(grep -c . "$T/run.out") lines: $(tail -3 "$T/run.out")"
+
+# Case 38b: no build output to name the commit with. run.sh would read the old
+# commit from the installed binary, so the image step fails closed instead.
+T=$(make_world); image_stub "$T"
+install_stub "$T" "$(cat "$T/c1")"
+rc=$( export INSTALL_GT_IMAGE_BINARY="$T/no-such-gt"
+      IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
+[ "$rc" = "1" ] && grep -q "polecat image: no build output at $T/no-such-gt, so the image was not built" "$T/run.out" \
+  && [ "$(reported "$T")" = "$(cat "$T/c1")" ] && [ ! -e "$T/daemon/restart-pending.json" ] \
+  && pass "image: no build output fails the install closed, before the swap" \
+  || fail "image: no build output: rc=$rc reported=$(reported "$T") out=$(tail -3 "$T/run.out")"
 
 # --- Case 39: INSTALL_DIR names the install dir (gt-tcigd). It is the
 # Makefile's name for it and the one the dispatcher's host-safety prompt names
@@ -1158,15 +1200,14 @@ rc=$( export INSTALL_DIR="$T/otherbin"
 [ "$rc" = "0" ] && grep -q "C=\"$(cat "$T/c2")\"" "$T/bin/gt" && [ ! -e "$T/otherbin/gt" ] \
   && pass "both set: INSTALL_GT_BIN_DIR wins" || fail "both set: rc=$rc, bin $(grep -o 'C="[^"]*"' "$T/bin/gt" 2>/dev/null), otherbin $(ls "$T/otherbin" 2>&1)"
 
-# --- Case 41: perl is missing, so the detached rebuild cannot start. The
-# install says so on its own line instead of reporting a start it never made,
-# and still succeeds. INSTALL_GT_PERL is the seam: it names the interpreter. ---
+# --- Case 41: perl is missing, so the rebuild cannot start at all: nothing was
+# attempted, so nothing failed. The install says so on its own line and
+# proceeds. INSTALL_GT_PERL is the seam: it names the interpreter. ---
 T=$(make_world); image_stub "$T"
 rc=$( export INSTALL_GT_PERL="$T/no-such-perl"
       IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
 [ "$rc" = "0" ] && grep -q "polecat image: $T/no-such-perl is not installed" "$T/run.out" \
-  && ! grep -q "started in the background" "$T/run.out" \
-  && [ ! -e "$T/image-calls.log" ] \
+  && ! grep -q "^run.sh" "$T/make.log" && [ "$(reported "$T")" = "$(cat "$T/c2")" ] \
   && pass "image: no perl: one line says so, install succeeds" \
   || fail "image: no perl: rc=$rc $(tail -3 "$T/run.out")"
 
@@ -1178,9 +1219,11 @@ rc=$(run_install "$T" --dry-run)
 [ "$rc" = "0" ] && [ "$(tail -1 "$T/run.out")" = "install-gt: RESULT dry-run origin/main - -" ] \
   && pass "dry-run: exit 0, RESULT line last" || fail "dry-run: rc=$rc last=$(tail -1 "$T/run.out")"
 
-# --- Case 43: run.sh is handed this install's town root, gt binary and lock,
-# not the ones HOME and PATH would resolve to (gt-87hlc). These three names are
-# the contract install-gt.sh documents at polecat_image_step. ---
+# --- Case 43: run.sh is handed this install's town root, the just-built binary
+# and the lock, not the ones HOME and PATH would resolve to (gt-87hlc). These
+# three names are the contract install-gt.sh documents at polecat_image_step;
+# POLECAT_IMAGE_GT is the build output so run.sh builds the target commit, not
+# the installed one (gt-xzo8a). ---
 T=$(make_world); mkdir -p "$T/plugin"
 cat > "$T/plugin/run.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -1190,16 +1233,16 @@ chmod +x "$T/plugin/run.sh"
 install_stub "$T" "$(cat "$T/c1")"
 rc=$( export GT_TOWN_ROOT="$T"
       IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
-wait_for "$T/image-env.txt" || true
-[ "$rc" = "0" ] && [ "$(cat "$T/image-env.txt" 2>/dev/null)" = "$T $T/bin/gt $T/image.lock" ] \
-  && pass "image: run.sh gets the install's town root, gt binary and lock" \
-  || fail "image: run.sh env: rc=$rc got='$(cat "$T/image-env.txt" 2>/dev/null)' want='$T $T/bin/gt $T/image.lock'"
+[ "$rc" = "0" ] && [ "$(cat "$T/image-env.txt" 2>/dev/null)" = "$T $T/rig/gt $T/image.lock" ] \
+  && pass "image: run.sh gets the install's town root, built binary and lock" \
+  || fail "image: run.sh env: rc=$rc got='$(cat "$T/image-env.txt" 2>/dev/null)' want='$T $T/rig/gt $T/image.lock'"
 
 # --- Case 44: the alarm stops the whole image build and then removes the lock
 # run.sh took. The stub takes that lock and starts a child standing in for the
 # docker work, then waits on it. INSTALL_GT_IMAGE_ALARM is one second, so the
 # alarm is what ends the stub. The supervisor logs its alarm line last, after
 # the kill and the lock removal, so that line is the wait: both waits are bounded. ---
+if group_signal_ok; then
 T=$(make_world); mkdir -p "$T/plugin"
 cat > "$T/plugin/run.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -1215,10 +1258,11 @@ rc=$( export INSTALL_GT_IMAGE_ALARM=1
 wait_for "$T/image-child.pid" || true
 CHILD=$(cat "$T/image-child.pid" 2>/dev/null || true)
 wait_for_alarm "$T/image.log" || true
-[ "$rc" = "0" ] && [ -n "$CHILD" ] && [ ! -e "$T/image.lock" ] && ! is_live "$CHILD" \
+[ "$rc" = "1" ] && [ -n "$CHILD" ] && [ ! -e "$T/image.lock" ] && ! is_live "$CHILD" \
+  && [ "$(reported "$T")" = "$(cat "$T/c1")" ] && [ ! -e "$T/daemon/restart-pending.json" ] \
   && grep -q 'polecat image: alarm after 1 s stopped the build' "$T/image.log" \
-  && pass "image: the alarm stops the build, removes the lock run.sh took, and says so" \
-  || fail "image: alarm: rc=$rc child=${CHILD:-none} lock=$([ -e "$T/image.lock" ] && echo held || echo free) out=$(tail -2 "$T/image.log" 2>/dev/null)"
+  && pass "image: the alarm stops the build, removes the lock run.sh took, and the install fails closed" \
+  || fail "image: alarm: rc=$rc child=${CHILD:-none} live=$(is_live "${CHILD:-0}" && echo yes || echo no) lock=$([ -e "$T/image.lock" ] && echo held || echo free) reported=$(reported "$T") want=$(cat "$T/c1") marker=$([ -e "$T/daemon/restart-pending.json" ] && echo yes || echo no) out=$(tail -2 "$T/image.log" 2>/dev/null)"
 
 # --- Case 45: the alarm removes only a lock that names the build it stopped.
 # This stub's lock names its parent (the supervisor), not its own pid, so the
@@ -1238,9 +1282,12 @@ rc=$( export INSTALL_GT_IMAGE_ALARM=1
 wait_for "$T/image-child.pid" || true
 CHILD=$(cat "$T/image-child.pid" 2>/dev/null || true)
 wait_for_alarm "$T/image.log" || true
-[ "$rc" = "0" ] && [ -n "$CHILD" ] && [ -e "$T/image.lock/pid" ] && ! is_live "$CHILD" \
+[ "$rc" = "1" ] && [ -n "$CHILD" ] && [ -e "$T/image.lock/pid" ] && ! is_live "$CHILD" \
   && pass "image: the alarm leaves a lock that names another process" \
   || fail "image: foreign lock: rc=$rc child=${CHILD:-none} lock=$([ -e "$T/image.lock" ] && echo held || echo free) out=$(tail -2 "$T/image.log" 2>/dev/null)"
+else
+  echo "  SKIP: this host refuses a signal to a process group (EPERM) — the alarm's stop of the image build was not tested"
+fi
 
 # --- Case 46: an INSTALL_GT_IMAGE_ALARM that is not a whole number above zero
 # is named in the log, and the build still starts under the default bound. Zero
