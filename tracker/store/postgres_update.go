@@ -186,6 +186,8 @@ func updateInTx(ctx context.Context, tx pgx.Tx, id string, patch api.UpdatePatch
 			return err
 		}
 	}
+	// Closing is checked last but shares this transaction: a refused close
+	// (open children or blockers) rolls back every change made above.
 	if closing {
 		return closeRow(ctx, tx, id, "", patch.Force, patch.Actor)
 	}

@@ -2,7 +2,9 @@ package contract
 
 import (
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/tracker/api"
@@ -14,6 +16,7 @@ func init() {
 	register(Case{Name: "dependencies refuse self links, missing ends, bad types and bad external refs", Run: depsRefusals})
 	register(Case{Name: "adding a link twice is a no-op and a different type is a conflict", Run: depsIdempotent})
 	register(Case{Name: "a cycle of blocking links is refused and other types may cycle", Run: depsCycles})
+	register(Case{Name: "opposite blocking links added at the same instant never both succeed", Run: depsCycleRace})
 	register(Case{Name: "an external target needs no row and is left out of the list", Run: depsExternal})
 	register(Case{Name: "a parent-child link sets and clears the parent", Run: depsParentChild})
 	register(Case{Name: "an open blocker stops close unless forced", Run: depsBlockerFence})
@@ -194,5 +197,42 @@ func depsDeleteAndCounts(t *testing.T, s store.Store) {
 	}
 	if err := s.CloseIssues(ctx(), []string{a.ID}, "r", false); err != nil {
 		t.Errorf("a deleted blocker must not block close: %v", err)
+	}
+}
+
+func depsCycleRace(t *testing.T, s store.Store) {
+	// Many rounds, both directions released together: a cycle check made
+	// outside any shared lock shows up as a round where both links land.
+	const rounds = 25
+	for round := 0; round < rounds; round++ {
+		a := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: fmt.Sprintf("a%d", round)})
+		b := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: fmt.Sprintf("b%d", round)})
+		pairs := [][2]string{{a.ID, b.ID}, {b.ID, a.ID}}
+		errs := make([]error, len(pairs))
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i, pr := range pairs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				errs[i] = s.AddDependency(ctx(), pr[0], pr[1], "blocks")
+			}()
+		}
+		close(start)
+		wg.Wait()
+		wins := 0
+		for _, err := range errs {
+			switch {
+			case err == nil:
+				wins++
+			case errors.Is(err, api.ErrConflict):
+			default:
+				t.Fatalf("round %d: unexpected error %v", round, err)
+			}
+		}
+		if wins != 1 {
+			t.Fatalf("round %d: %d of the two opposite links were added, want exactly 1 (a cycle otherwise)", round, wins)
+		}
 	}
 }

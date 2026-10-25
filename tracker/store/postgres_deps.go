@@ -40,6 +40,9 @@ func parseExternalRef(ref string) (rig, id string, ok bool) {
 	return rig, id, true
 }
 
+// depLockKey is the advisory lock that serializes AddDependency.
+const depLockKey = 7261001
+
 // AddDependency records that issue depends on dependsOn with relation
 // depType. Both must exist unless dependsOn is external:<rig>:<id>. Adding the
 // same link again is a no-op; the same pair with another type is a conflict;
@@ -58,16 +61,25 @@ func (p *Postgres) AddDependency(ctx context.Context, issue, dependsOn, depType 
 	}
 	actor := api.ActorFrom(ctx)
 	return p.inTx(ctx, func(tx pgx.Tx) error {
+		// One link is added at a time. A cycle check reads links other
+		// transactions may be adding right now, so without this the two
+		// halves of a cycle could each pass the check and both commit. It
+		// comes first so the row locks below are taken in one order.
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", depLockKey); err != nil {
+			return fmt.Errorf("store: lock dependencies: %w", err)
+		}
 		if _, err := lockIssue(ctx, tx, issue); err != nil {
 			return err
 		}
 		if !external {
-			var exists bool
-			if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM tracker.issues WHERE id = $1)", dependsOn).Scan(&exists); err != nil {
-				return fmt.Errorf("store: check dependency target: %w", err)
-			}
-			if !exists {
+			// FOR SHARE keeps the target from being deleted before the link commits.
+			var one int
+			err := tx.QueryRow(ctx, "SELECT 1 FROM tracker.issues WHERE id = $1 FOR SHARE", dependsOn).Scan(&one)
+			if errors.Is(err, pgx.ErrNoRows) {
 				return api.NotFound(dependsOn)
+			}
+			if err != nil {
+				return fmt.Errorf("store: check dependency target: %w", err)
 			}
 		}
 		var have string

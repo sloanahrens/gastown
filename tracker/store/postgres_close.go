@@ -120,9 +120,10 @@ func lockStatuses(ctx context.Context, tx pgx.Tx, ids []string) (map[string]stri
 	return status, nil
 }
 
-// DeleteIssues deletes every issue in ids, or none. Their labels and
-// comments go with them, links from or to them are removed, children are
-// left without a parent, and their events remain.
+// DeleteIssues deletes every issue in ids, or none. Their labels, comments and
+// outgoing links go with them (the schema's ON DELETE CASCADE on issue_id),
+// links pointing at them are removed here, children are left without a parent
+// but are not deleted, and their events remain.
 func (p *Postgres) DeleteIssues(ctx context.Context, ids []string) error {
 	ids = uniqueStrings(ids)
 	if len(ids) == 0 {
