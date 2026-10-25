@@ -209,6 +209,41 @@ func TestSummarize_OpenAttemptIsLowerBound(t *testing.T) {
 	}
 }
 
+// TestHasOpen_TracksTheSeatUntilItsEnd: a submission closes the attempt its
+// own seat opened, and only that one.
+func TestHasOpen_TracksTheSeatUntilItsEnd(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	clock := &stepClock{at: testEpoch}
+	st := New(dir, clock)
+
+	if err := st.Start("gt-abc", "gastown/onyx"); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := st.Summarize("gt-abc")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if !sum.HasOpen("gastown/onyx") {
+		t.Error("HasOpen = false for a seat that started and has not ended")
+	}
+	if sum.HasOpen("gastown/other") {
+		t.Error("HasOpen = true for a seat with no attempt on the bead")
+	}
+
+	clock.at = testEpoch.Add(time.Minute)
+	if err := st.End("gt-abc", "gastown/onyx", ReasonDone, clock.at); err != nil {
+		t.Fatal(err)
+	}
+	sum, err = st.Summarize("gt-abc")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.HasOpen("gastown/onyx") {
+		t.Error("HasOpen = true after the seat's end")
+	}
+}
+
 func TestSummarize_DeadSeatCloseIsLowerBound(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -281,7 +316,7 @@ func TestSummarize_SkipsAndCountsUnpairedEvents(t *testing.T) {
 	}
 	want := []Attempt{
 		{Seat: "a", Secs: 20},
-		{Seat: "b", LowerBound: true},
+		{Seat: "b", Open: true, LowerBound: true},
 	}
 	if len(sum.Attempts) != len(want) {
 		t.Fatalf("Attempts = %+v, want %+v", sum.Attempts, want)

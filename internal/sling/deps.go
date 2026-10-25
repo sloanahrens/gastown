@@ -54,6 +54,11 @@ type Deps struct {
 	SpawnPolecat func(rigName string, opts SpawnOptions) (*Spawn, error)
 	StartSession func(spawn *Spawn) (string, error)
 
+	// SpanStart records that seat's attempt on bead began. It is called once
+	// the session is up, so the spawn time is not counted as work. Best
+	// effort: the dispatch logs a failure and carries on. Nil records nothing.
+	SpanStart func(townRoot, bead, seat string) error
+
 	// Reassignment away from a previous holder.
 	//
 	// ClearReassigned clears the outgoing polecat's agent-bead state (its

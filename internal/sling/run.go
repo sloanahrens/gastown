@@ -541,6 +541,14 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	}
 	fmt.Fprintf(d.out(), "  %s Session started for %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName)
 	_ = pane
+	// The attempt starts now, not at the sling call: the work is the session's
+	// time on the bead, and the spawn before it is dispatch overhead (gt-liseq).
+	if d.SpanStart != nil {
+		seat := spawnInfo.RigName + "/" + spawnInfo.PolecatName
+		if err := d.SpanStart(townRoot, beadToHook, seat); err != nil {
+			fmt.Fprintf(d.out(), "  %s Could not record the polecat span start: %v\n", style.Dim.Render("Warning:"), err)
+		}
+	}
 
 	// The dispatch is committed once the session that runs the hook is up: no
 	// path below unwinds it. Only now is the pool note written, so later
