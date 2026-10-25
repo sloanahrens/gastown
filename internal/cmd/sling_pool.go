@@ -1571,19 +1571,43 @@ func snapshotOccupied(snapshot poolSeatSnapshot, lister func() sessionLister, de
 		seats := liveSeatKeys(live)
 		out := live
 		for _, s := range snapshot.sessions {
-			if !s.deadHooked && !s.landing {
-				if s.rig == "" || s.polecat == "" || !deadSeats[s.rig+"/"+s.polecat] || snapshot.releasedAt(s) {
-					continue
-				}
-				s.deadHooked = true
+			if carried, ok := snapshot.carryForward(s, deadSeats, seats); ok {
+				out = append(out, carried)
 			}
-			if s.rig != "" && s.polecat != "" && seats[s.rig+"/"+s.polecat] {
-				continue
-			}
-			out = append(out, s)
 		}
 		return out, nil
 	}
+}
+
+// carryForward reports whether one of the roster's seats joins the result of
+// snapshotOccupied, and returns it as it should count.
+//
+// A seat the roster read live joins only as the dead-hooked seat a fresh dead
+// read would list: the listing must now answer it dead and the roster must not
+// have released it (gt-0axfg). Otherwise the listing already holds it or the
+// roster counted it free. A seat the roster already counted dead-hooked or
+// mid-landing joins unless a live session has taken it since.
+func (p poolSeatSnapshot) carryForward(s poolSession, deadSeats, liveSeats map[string]bool) (poolSession, bool) {
+	seat := s.seatKey()
+	if !s.deadHooked && !s.landing {
+		if !deadSeats[seat] || p.releasedAt(s) {
+			return poolSession{}, false
+		}
+		s.deadHooked = true
+	}
+	if liveSeats[seat] {
+		return poolSession{}, false
+	}
+	return s, true
+}
+
+// seatKey names the pool seat a session holds, "rig/polecat", or "" when the
+// session names none.
+func (s poolSession) seatKey() string {
+	if s.rig == "" || s.polecat == "" {
+		return ""
+	}
+	return s.rig + "/" + s.polecat
 }
 
 // route decides the route. live distinguishes a sling that will spawn from a
