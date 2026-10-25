@@ -358,7 +358,7 @@ func TestDue(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := Due(tc.state, tc.pkgs, tc.git, at(t, 2026, 10, 25, 5, 0, 0), loc)
+			got, _ := Due(tc.state, tc.pkgs, tc.git, at(t, 2026, 10, 25, 5, 0, 0), loc)
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Errorf("Due() = %q; want %q", got, tc.want)
 			}
@@ -366,5 +366,25 @@ func TestDue(t *testing.T) {
 				t.Errorf("asked git for %q; want %q", tc.git.asked, tc.wantAsked)
 			}
 		})
+	}
+}
+
+// gt-42nss: a record whose diff fails runs its package and is reported with the
+// error, so a broken repository is visible instead of a silent full run.
+func TestDueReportsEachUnreadableRecord(t *testing.T) {
+	t.Parallel()
+	loc, err := DailyZoneLocation()
+	if err != nil {
+		t.Fatalf("DailyZoneLocation: %v", err)
+	}
+	beads := Package{Name: "internal/beads", Triggers: []string{"internal/beads"}}
+	state := State{"internal/beads": Record{Commit: "gone", At: at(t, 2026, 10, 25, 4, 0, 0)}}
+	git := &fakeGit{errs: map[string]error{"gone": errors.New("unknown revision")}}
+	due, unreadable := Due(state, []Package{beads}, git, at(t, 2026, 10, 25, 5, 0, 0), loc)
+	if strings.Join(due, ",") != "internal/beads" {
+		t.Errorf("Due() = %q; want the unreadable package to run", due)
+	}
+	if _, ok := unreadable["internal/beads"]; !ok {
+		t.Errorf("unreadable = %v; want internal/beads named with its diff error", unreadable)
 	}
 }
