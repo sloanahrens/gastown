@@ -132,7 +132,7 @@ func TestReadRoutesRefuseBadBodiesAsInvalid(t *testing.T) {
 	t.Parallel()
 	ts := stubServer(t, issueStub{})
 	for _, path := range []string{"/v1/issues:list", "/v1/issues:show-many"} {
-		for name, body := range map[string]string{"empty": "", "unknown field": `{"surprise":1}`, "not json": `{`} {
+		for name, body := range map[string]string{"empty": "", "unknown field": `{"surprise":1}`, "not json": `{`, "trailing data": `{}{}`} {
 			code, resp := call(t, "POST", ts.URL+path, body)
 			if e := decodeErr(t, resp); code != 400 || e.Kind != api.KindInvalid {
 				t.Errorf("%s %s = %d %q, want 400 invalid", path, name, code, resp)

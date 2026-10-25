@@ -187,6 +187,8 @@ func (c *Client) Whoami(ctx context.Context) (string, error) {
 
 // do runs one logical call. idempotent calls are retried on an unavailable
 // answer; others get exactly one attempt.
+//
+//nolint:unparam // idempotent is false for the write routes, which arrive with their own bead
 func (c *Client) do(ctx context.Context, method, path string, in, out any, idempotent bool) error {
 	var body []byte
 	if in != nil {
