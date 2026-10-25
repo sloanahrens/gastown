@@ -1246,6 +1246,12 @@ func (d *Daemon) Run() (err error) {
 
 	d.logger.Printf("Daemon running, recovery heartbeat interval %v", d.recoveryHeartbeatInterval())
 
+	// bd call census (gt-7h3vm): this process is most of the town's bd calls,
+	// so it names them once a minute where call-volume cuts are chosen.
+	censusTicker := time.NewTicker(time.Minute)
+	defer censusTicker.Stop()
+	go beads.StartCensusLog(d.ctx, censusTicker.C, d.logger.Printf)
+
 	// Clean sessions left behind on legacy tmux sockets after daemon startup has
 	// passed fatal preflight checks but before any patrol agents can be spawned.
 	d.cleanupLegacySocketSessions()
