@@ -344,16 +344,52 @@ else
   fail "a stale committed pin stops the seed stage before anything is staged" "$bout"
 fi
 
-# The node prune (gt-e14j6) runs after the image build, and a failure there does not
-# fail the image: it is one run of the same plugin, reclaiming the nodes' old images.
+# The node prune (gt-e14j6) is its own target, called by polecat-image after the
+# build. The gate runs it against a fake docker: the old image is removed, and a
+# node that cannot list its images keeps everything and the failure is named.
 if pn=$(dry polecat-image BD_SRC=/somewhere/else) \
   && bline=$(grep -n 'docker build' <<<"$pn" | head -1 | cut -d: -f1) \
-  && nline=$(grep -n 'cmd/nodeprune' <<<"$pn" | head -1 | cut -d: -f1) \
-  && [[ -n "$bline" && -n "$nline" && "$nline" -gt "$bline" ]] \
-  && grep -q -F 'node prune failed' <<<"$pn"; then
-  pass "polecat-image prunes the sandbox nodes after the build, and a prune failure does not fail the image"
+  && nline=$(grep -n 'polecat-node-prune' <<<"$pn" | head -1 | cut -d: -f1) \
+  && [[ -n "$bline" && -n "$nline" && "$nline" -gt "$bline" ]]; then
+  pass "polecat-image calls polecat-node-prune after docker build"
 else
-  fail "polecat-image prunes the sandbox nodes after the build, and a prune failure does not fail the image" "$pn"
+  fail "polecat-image calls polecat-node-prune after docker build" "$pn"
+fi
+prunebin="$SEEDTMP/prunebin"
+mkdir -p "$prunebin"
+cat >"$prunebin/docker" <<'FAKE'
+#!/bin/sh
+# A fake docker for the node-prune test: docker --context X <command> ...
+shift 2
+case "$1" in
+  ps) echo gt-sbx-worker ;;
+  exec)
+    shift 2
+    shift
+    case "$1" in
+      images) [ -n "$PRUNE_FAIL_IMAGES" ] && exit 1
+        echo '{"images":[{"id":"sha256:old","repoTags":[],"repoDigests":["localhost:5001/gastown-polecat@sha256:f627"]}]}' ;;
+      inspecti) echo '{"info":{"imageSpec":{"created":"2026-10-25T16:00:00Z"}}}' ;;
+      ps) echo '{"containers":[]}' ;;
+      rmi) echo "$2" >>"$PRUNE_RMI_LOG" ;;
+    esac ;;
+esac
+FAKE
+chmod +x "$prunebin/docker"
+rm -f "$SEEDTMP/rmi.log"
+if pout=$(PATH="$prunebin:$PATH" PRUNE_RMI_LOG="$SEEDTMP/rmi.log" POLECAT_IMAGE_KEEP=0 make -C "$ROOT" --no-print-directory polecat-node-prune 2>&1) \
+  && grep -q -F 'sha256:old' "$SEEDTMP/rmi.log"; then
+  pass "polecat-node-prune removes the old polecat image from a node with keep 0"
+else
+  fail "polecat-node-prune removes the old polecat image from a node with keep 0" "$pout"
+fi
+rm -f "$SEEDTMP/rmi.log"
+if pout=$(PATH="$prunebin:$PATH" PRUNE_FAIL_IMAGES=1 PRUNE_RMI_LOG="$SEEDTMP/rmi.log" POLECAT_IMAGE_KEEP=0 make -C "$ROOT" --no-print-directory polecat-node-prune 2>&1) \
+  && [[ ! -e "$SEEDTMP/rmi.log" ]] \
+  && grep -q -F 'node prune failed' <<<"$pout"; then
+  pass "polecat-node-prune leaves a node it cannot list alone and names the failure"
+else
+  fail "polecat-node-prune leaves a node it cannot list alone and names the failure" "$pout"
 fi
 
 for t in polecat-image polecat-seed-stage polecat-seed-pins polecat-caches openshell-providers; do

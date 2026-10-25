@@ -165,7 +165,7 @@ polecat-image:
 	@$(MAKE) --no-print-directory polecat-seed-stage
 	floor=$$(bash deploy/polecat/go-floor.sh rig $(POLE_RIG_GO_MODS)) || { echo "polecat-image: cannot read the rig Go floor from $(POLE_RIG_GO_MODS)" >&2; exit 2; }; \
 	docker build --platform linux/arm64 --label org.gastown.gt-commit=$(POLE_COMMIT) --build-arg GO_FLOOR="$$floor" -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
-	@go run ./cmd/nodeprune -keep "$${POLECAT_IMAGE_KEEP:-3}" || echo "polecat-image: node prune failed; the old images stay on the sandbox nodes" >&2
+	@$(MAKE) --no-print-directory polecat-node-prune
 
 # polecat-seed-stage writes POLE_SEED_DIR: each pinned rig at its pin, and
 # POLE_SEED_BUILD_RIG at POLE_COMMIT. The Dockerfile bind-mounts the directory for
@@ -180,6 +180,12 @@ polecat-seed-stage:
 		-dest "$(POLE_SEED_DIR)" \
 		-build-rig "$(POLE_SEED_BUILD_RIG)" \
 		-build-commit "$(POLE_COMMIT)"
+
+# polecat-node-prune removes old polecat images from the sandbox nodes after a
+# build (gt-e14j6). Not fatal to the image: a node that cannot be read keeps its
+# images, and the failure is named here.
+polecat-node-prune:
+	@go run ./cmd/nodeprune -keep "$${POLECAT_IMAGE_KEEP:-3}" || echo "polecat-image: node prune failed; the old images stay on the sandbox nodes" >&2
 
 # polecat-seed-pins rewrites deploy/polecat/seed-pins to each seeded rig's
 # canonical checkout HEAD. Commit the result; the next polecat-image reseeds.

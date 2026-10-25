@@ -26,11 +26,14 @@ type Image struct {
 	Unknown bool
 }
 
-// Plan returns the images to remove from one node. An image is kept when a
-// container on the node uses it (inUse holds image ids), when it carries the
-// "dev" tag, or when it is among the newest keep images by creation time. Only
-// images whose tags are all in Repo are candidates; a node's other images are
-// never touched.
+// Plan returns the images to remove from one node, in the order they were
+// ranked (newest first). A candidate is an image whose every tag and digest is a
+// gastown-polecat reference, whose creation time is known, and that has at least
+// one reference. An image that names another repository, or has no reference, is
+// never touched. Of the candidates, an image is kept when a container on the node
+// uses it (inUse holds image ids and digests) or it carries the dev tag; those do
+// not count toward keep. The newest keep other candidates are kept. keep 0 keeps
+// only the images in use and the dev tag.
 func Plan(images []Image, inUse map[string]bool, keep int) []Image {
 	var candidates []Image
 	for _, im := range images {

@@ -21,8 +21,15 @@ func TestParseImagesReadsIDsTagsAndDigests(t *testing.T) {
 		{ID: "sha256:59c3", Tags: []string{}, Digests: []string{"localhost:5001/gastown-polecat@sha256:f627"}},
 		{ID: "sha256:aa11", Tags: []string{"localhost:5001/gastown-polecat:dev"}, Digests: []string{"localhost:5001/gastown-polecat@sha256:beef"}},
 	}
-	if len(got) != 2 || got[0].ID != want[0].ID || got[1].ID != want[1].ID || !reflect.DeepEqual(got[1].Tags, want[1].Tags) || !reflect.DeepEqual(got[0].Digests, want[0].Digests) {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ParseImages = %+v, want %+v", got, want)
+	}
+}
+
+func TestParseImagesRejectsMalformedJSON(t *testing.T) {
+	t.Parallel()
+	if _, err := ParseImages([]byte(`{"images":`)); err == nil {
+		t.Error("ParseImages on truncated JSON = nil error, want one")
 	}
 }
 
