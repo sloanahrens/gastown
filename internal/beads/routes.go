@@ -17,6 +17,24 @@ import (
 type Route struct {
 	Prefix string `json:"prefix"` // Issue ID prefix (e.g., "gt-")
 	Path   string `json:"path"`   // Relative path to .beads directory from town root
+	// Backend names the store that holds this rig's beads: BackendDolt (also
+	// when empty) or BackendTracker. bd ignores the field; gt reads it when it
+	// opens a rig (internal/beads/backend).
+	Backend string `json:"backend,omitempty"`
+}
+
+// The stores a route can name.
+const (
+	BackendDolt    = "dolt"
+	BackendTracker = "tracker"
+)
+
+// BackendName is the route's backend, with the default made explicit.
+func (r Route) BackendName() string {
+	if r.Backend == "" {
+		return BackendDolt
+	}
+	return r.Backend
 }
 
 // RoutesFileName is the name of the routes configuration file.
