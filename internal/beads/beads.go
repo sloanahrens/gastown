@@ -1871,17 +1871,9 @@ func (b *Beads) PurgeClosedEphemeral(olderThan string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// GateCheck evaluates the open gates of each of types and returns the line
-// bd last reported, for the caller's log; empty when the check resolved
-// nothing.
-//
-// In machine mode bd keeps stdout for its JSON envelope and writes the
-// notices an operator reads to stderr, so a plain wrapper reads the report
-// there; a wrapper that does not keep bd's stderr falls back to the
-// envelope's payload. Either answer is normalized once, here: bd's leading
-// JSON null — printed before its no-gates notice, which reads "nullNo open
-// gates of type 'timer' found." — is dropped, and the notice answers empty
-// because it reports only that nothing was resolved.
+// GateCheck evaluates the open gates of each of types and returns the line bd
+// reported for the caller's log, empty when nothing was resolved. A plain
+// wrapper reads stdout first, then stderr; a machine-mode notice is on stderr.
 func (b *Beads) GateCheck(types ...string) (string, error) {
 	args := []string{"gate", "check"}
 	for _, t := range types {
