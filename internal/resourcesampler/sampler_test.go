@@ -703,3 +703,46 @@ func TestParsePSTime(t *testing.T) {
 		}
 	}
 }
+
+// A component whose process list has a process with no CPU delta reports
+// cpu_pct as null, not the sum over the processes that have one (gt-bojte).
+func TestCPUNullWhenAComponentHasAnUnmeasuredProcess(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	clock := &fakeClock{now: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
+	lister := &fakeLister{processes: []Process{
+		process(100, 1000, 10, 3600, "/usr/local/bin/dolt"),
+	}}
+	sampler := New(dir, lister, clock, 30*time.Second)
+	tick(t, sampler, clock.now)
+
+	clock.advance(30 * time.Second)
+	lister.processes = []Process{
+		process(100, 1000, 25, 3630, "/usr/local/bin/dolt"),
+		process(102, 500, 3, 40, "/usr/local/bin/dolt-sql"),
+	}
+	rows := decodeRows(t, tick(t, sampler, clock.now))
+	dolt := componentRow(t, rows[1:], "dolt")
+	if got := dolt["cpu_pct"]; got != nil {
+		t.Errorf("dolt cpu_pct = %v, want null: pid 102 has no delta, so the sum would read low", got)
+	}
+	if got := number(t, dolt, "mem_bytes"); got != (1000+500)*1024 {
+		t.Errorf("dolt mem_bytes = %v, want both processes summed", got)
+	}
+}
+
+// ps output with no process the sampler can read is an error, so a tick that
+// read garbage writes nothing; noise lines beside real processes are skipped
+// (gt-bojte).
+func TestParseProcessListRejectsOutputWithNoProcess(t *testing.T) {
+	t.Parallel()
+	for _, out := range []string{"", "\n", "not a process line\n  x  1000 00:00:10 01:00:00 bad-pid\n"} {
+		if got, err := parseProcessList(out); err == nil {
+			t.Errorf("parseProcessList(%q) = %d processes, want an error", out, len(got))
+		}
+	}
+	got, err := parseProcessList("not a process line\n  100  1000 00:00:10 01:00:00 /usr/local/bin/dolt\n")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("parseProcessList with one real process = %d processes, %v; want one and no error", len(got), err)
+	}
+}

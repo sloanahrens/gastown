@@ -162,18 +162,21 @@ type baseline struct {
 
 // aggregate is one component's row while a tick is being summed.
 type aggregate struct {
-	cpu      float64
-	measured bool
-	mem      int64
-	name     string
-	bestCPU  float64
-	bestMem  int64
-	named    bool
+	cpu        float64
+	measured   bool
+	unmeasured int
+	mem        int64
+	name       string
+	bestCPU    float64
+	bestMem    int64
+	named      bool
 }
 
 // add folds one process in. The row's name is the process with the highest CPU
 // share, and on a tick with no share the one with the most memory; a tie on CPU
-// keeps the larger memory, as the Python sampler's tuple comparison does.
+// keeps the larger memory, as the Python sampler's tuple comparison does. A
+// process with no CPU delta is counted, so the component's cpu_pct can be null
+// instead of a sum that leaves it out.
 func (a *aggregate) add(p Process, name string, cpuPct float64, measured bool) {
 	a.mem += p.RSSBytes
 	marker := -1.0
@@ -181,6 +184,8 @@ func (a *aggregate) add(p Process, name string, cpuPct float64, measured bool) {
 		a.cpu += cpuPct
 		a.measured = true
 		marker = cpuPct
+	} else {
+		a.unmeasured++
 	}
 	if !a.named || marker > a.bestCPU || (marker == a.bestCPU && p.RSSBytes > a.bestMem) {
 		a.name, a.bestCPU, a.bestMem, a.named = name, marker, p.RSSBytes, true
@@ -227,7 +232,9 @@ func (s *Sampler) rows(processes []Process, now time.Time, interval time.Duratio
 			Name:      agg.name,
 			MemBytes:  agg.mem,
 		}
-		if agg.measured {
+		// cpu_pct is null unless every process in the component has a delta: a
+		// sum over some of them would read low and say nothing about the rest.
+		if agg.measured && agg.unmeasured == 0 {
 			cpu := math.Round(agg.cpu*100) / 100
 			row.CPUPct = &cpu
 		}
@@ -376,7 +383,18 @@ func (PSLister) ListProcesses(ctx context.Context) ([]Process, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ps: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	return parsePS(string(out)), nil
+	return parseProcessList(string(out))
+}
+
+// parseProcessList is ListProcesses's reading of ps output. Noise lines are
+// skipped, but output that yields no process at all is an error: a tick that
+// read garbage must not write an empty sample as if the machine were idle.
+func parseProcessList(out string) ([]Process, error) {
+	processes := parsePS(out)
+	if len(processes) == 0 {
+		return nil, fmt.Errorf("ps printed no process the sampler could read (%d bytes)", len(out))
+	}
+	return processes, nil
 }
 
 // parsePS parses the output psArgs asks for, skipping a line whose fields do
