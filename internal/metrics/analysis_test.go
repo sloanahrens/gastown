@@ -184,7 +184,10 @@ func analysisEnv(t *testing.T, town, dayDir string, answer func(recordedCall) ([
 // commands writing the canned result where explore asked.
 func analysisAnswer(t *testing.T, dayDir string) func(recordedCall) ([]byte, error) {
 	t.Helper()
-	archive := tarOf(t, map[string]string{"go.mod": "module mango\n", "main.go": "package main\n"})
+	archive := tarOf(t, map[string]string{
+		"go-api/go.mod":            "module github.com/sloan/mango/go-api\n",
+		"go-api/cmd/mango/main.go": "package main\n",
+	})
 	return func(c recordedCall) ([]byte, error) {
 		switch c.argv[0] {
 		case "git":
@@ -491,6 +494,52 @@ func TestAnalyseRebuildsMangoOnlyWhenItsHeadMoved(t *testing.T) {
 			}
 			if got := strings.TrimSpace(string(sha)); got != analysisHead {
 				t.Errorf("mango.sha = %q, want the head %s the analysis ran against", got, analysisHead)
+			}
+		})
+	}
+}
+
+// TestAnalyseBuildsMangoInItsModuleDirectory pins the build's working directory
+// and package: mango's go.mod and CLI live under go-api/, so a build at the
+// archive root finds no module (gt-m2im9).
+func TestAnalyseBuildsMangoInItsModuleDirectory(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		tweak  func(*AnalysisOptions)
+		dir    string
+		target string
+	}{
+		{"the defaults", nil, "go-api", "./cmd/mango"},
+		{"a set module directory", func(o *AnalysisOptions) { o.BuildModuleDir = "src" }, "src", "./cmd/mango"},
+		{"a set target", func(o *AnalysisOptions) { o.BuildTarget = "./cmd/other" }, "go-api", "./cmd/other"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town, dayDir := analysisTown(t)
+			opts := analysisOptions(town)
+			if tc.tweak != nil {
+				tc.tweak(&opts)
+			}
+			env, calls := analysisEnv(t, town, dayDir, nil)
+
+			if _, err := RunAnalysis(context.Background(), env, opts); err != nil {
+				t.Fatalf("RunAnalysis: %v", err)
+			}
+			build := callWith(*calls, "go")
+			if build == nil {
+				t.Fatalf("the analysis never built mango: %v", *calls)
+			}
+			got := build.argv
+			if len(got) != 7 || got[1] != "build" || got[2] != "-C" || got[4] != "-o" {
+				t.Fatalf("mango build argv = %v, want go build -C <dir> -o <bin> <target>", got)
+			}
+			if dir := filepath.Base(got[3]); dir != tc.dir {
+				t.Errorf("go build ran in %q, want the %q module directory below the archive", got[3], tc.dir)
+			}
+			if got[6] != tc.target {
+				t.Errorf("go build target = %q, want %q", got[6], tc.target)
 			}
 		})
 	}

@@ -30,9 +30,12 @@ const (
 	JoinMaxAge = 90 * time.Minute
 )
 
-// mangoBuildTarget is the package the mango build compiles: the CLI is the
-// module's main package at the archive root.
-const mangoBuildTarget = "."
+// mangoModuleDir is the archive directory holding mango's go.mod: the module
+// sits in go-api/, not at the archive root.
+const mangoModuleDir = "go-api"
+
+// mangoBuildTarget is the CLI's package, relative to the module directory.
+const mangoBuildTarget = "./cmd/mango"
 
 // The analysis's own files, under <town>/.runtime/metrics.
 const (
@@ -78,7 +81,11 @@ type AnalysisOptions struct {
 	// MangoBin is the binary the mango stage runs; <MangoBin>.sha records the
 	// head it was built from.
 	MangoBin string
-	// BuildTarget is the package go build compiles; empty is mangoBuildTarget.
+	// BuildModuleDir is the archive directory holding mango's go.mod; empty is
+	// mangoModuleDir.
+	BuildModuleDir string
+	// BuildTarget is the package go build compiles inside BuildModuleDir; empty
+	// is mangoBuildTarget.
 	BuildTarget string
 	// Every is the stamp's interval; zero is DailyEvery.
 	Every time.Duration
@@ -88,6 +95,9 @@ type AnalysisOptions struct {
 
 // withDefaults fills the zero fields with the daily run's values.
 func (o AnalysisOptions) withDefaults() AnalysisOptions {
+	if o.BuildModuleDir == "" {
+		o.BuildModuleDir = mangoModuleDir
+	}
 	if o.BuildTarget == "" {
 		o.BuildTarget = mangoBuildTarget
 	}
@@ -383,7 +393,8 @@ func ensureMango(ctx context.Context, env Env, o AnalysisOptions) error {
 	if err := os.MkdirAll(filepath.Dir(o.MangoBin), 0o755); err != nil {
 		return fmt.Errorf("mango build: %w", err)
 	}
-	if _, err := runEnv(ctx, env, []string{"go", "build", "-C", src, "-o", o.MangoBin, o.BuildTarget}, nil); err != nil {
+	moduleDir := filepath.Join(src, o.BuildModuleDir)
+	if _, err := runEnv(ctx, env, []string{"go", "build", "-C", moduleDir, "-o", o.MangoBin, o.BuildTarget}, nil); err != nil {
 		return fmt.Errorf("mango build: %w", err)
 	}
 	return PublishAtomic(filepath.Dir(o.MangoBin), mangoShaName, []byte(head+"\n"))
