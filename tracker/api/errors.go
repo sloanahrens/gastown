@@ -1,6 +1,9 @@
 package api
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Kind is the class of an API failure. The five kinds are the wire contract:
 // clients map them to behavior (retry, give up, treat as a lost race), so
@@ -81,3 +84,14 @@ func Invalid(format string, args ...any) *Error {
 func Unavailable(format string, args ...any) *Error {
 	return &Error{Kind: KindUnavailable, Message: fmt.Sprintf(format, args...)}
 }
+
+// Headers the protocol uses.
+const (
+	// SchemaHeader carries the caller's schema level on every /v1 request; the
+	// server refuses a mismatch and a missing header.
+	SchemaHeader = "X-Tracker-Schema"
+)
+
+// ErrUnknownToken is what token lookup returns for a token that is not known,
+// was revoked, or has expired. The server answers 401 for it.
+var ErrUnknownToken = errors.New("api: unknown or expired token")
