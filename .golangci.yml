@@ -44,6 +44,10 @@ linters:
         - fmt.Fprintln
     misspell:
       locale: US
+      # "'gt metrics analyse' is the command's name, so the word is the spec's
+      # spelling rather than a misspelling (gt-xfx1k).
+      ignore-rules:
+        - analyse
 
   exclusions:
     rules:

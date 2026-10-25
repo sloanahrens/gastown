@@ -61,9 +61,17 @@ if ! take_lock; then
 fi
 trap release_lock EXIT
 
-# The command's own exit code is the run's, and its receipt line is the run's
-# record: a source that failed is an errors entry inside the snapshot, not a
-# failure here.
+# Both steps run whichever one fails, and the run reports the first failure: an
+# analysis that fails must not cost the hour its row, and a snapshot that fails
+# still leaves the analysis the hours already in the log. A source that failed
+# inside the snapshot is an errors entry, not a failure here; only a failed
+# append is.
 rc=0
 gt metrics snapshot || rc=$?
+snapshot_rc=$rc
+rc=0
+gt metrics analyse || rc=$?
+if [ "$rc" -eq 0 ]; then
+  rc=$snapshot_rc
+fi
 exit "$rc"

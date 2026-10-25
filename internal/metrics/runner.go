@@ -20,18 +20,27 @@ const killGrace = 2 * time.Second
 // to find binaries and the user's config, and nothing else.
 var DefaultAllowEnv = []string{"PATH", "HOME", "TMPDIR", "LANG"}
 
-// OSRunner returns a Runner that runs argv as a child process under the
-// caller's context. The child's environment holds only the variables named in
-// allowEnv that are set, so a secret in the snapshotting process's environment
-// never reaches a command a source runs. A non-zero exit is an error carrying
-// the tail of stderr.
+// OSRunner returns a Runner that runs argv as a child process with no
+// environment beyond the allowlist.
 func OSRunner(allowEnv []string) Runner {
+	run := OSRunnerEnv(allowEnv)
 	return func(ctx context.Context, argv []string) ([]byte, error) {
+		return run(ctx, argv, nil)
+	}
+}
+
+// OSRunnerEnv returns a RunnerEnv that runs argv as a child process under the
+// caller's context. The child's environment holds the variables named in
+// allowEnv that are set, then extraEnv, so a secret in the snapshotting
+// process's environment never reaches a command a source runs. A non-zero exit
+// is an error carrying the tail of stderr.
+func OSRunnerEnv(allowEnv []string) RunnerEnv {
+	return func(ctx context.Context, argv, extraEnv []string) ([]byte, error) {
 		if len(argv) == 0 {
 			return nil, errors.New("run: empty command")
 		}
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-		cmd.Env = childEnv(allowEnv, os.LookupEnv)
+		cmd.Env = childEnv(allowEnv, extraEnv, os.LookupEnv)
 		cmd.WaitDelay = killGrace
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -47,15 +56,25 @@ func OSRunner(allowEnv []string) Runner {
 }
 
 // childEnv builds the child's environment from the allowlisted names that
-// lookup reports set, in allowEnv order.
-func childEnv(allowEnv []string, lookup func(string) (string, bool)) []string {
-	env := make([]string, 0, len(allowEnv))
+// lookup reports set, in allowEnv order, then extraEnv. An extra variable
+// replaces the allowlisted one of the same name rather than repeating it, so a
+// caller's value wins once.
+func childEnv(allowEnv, extraEnv []string, lookup func(string) (string, bool)) []string {
+	extra := make(map[string]bool, len(extraEnv))
+	for _, kv := range extraEnv {
+		name, _, _ := strings.Cut(kv, "=")
+		extra[name] = true
+	}
+	env := make([]string, 0, len(allowEnv)+len(extraEnv))
 	for _, name := range allowEnv {
+		if extra[name] {
+			continue
+		}
 		if v, ok := lookup(name); ok {
 			env = append(env, name+"="+v)
 		}
 	}
-	return env
+	return append(env, extraEnv...)
 }
 
 // tailString returns the last max bytes of s, trimmed.
