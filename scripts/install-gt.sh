@@ -101,7 +101,6 @@ TOWN_ROOT="${GT_TOWN_ROOT:-$(igt_town_root_above "$SCRIPT_DIR")}"
 BIN_DIR="${INSTALL_GT_BIN_DIR:-${INSTALL_DIR:-$HOME/.local/bin}}"
 DAEMON_DIR="${INSTALL_GT_DAEMON_DIR:-${TOWN_ROOT:?install-gt: no town found (set GT_TOWN_ROOT); on a machine with no town yet use make install-local}/daemon}"
 RIG_DIR="${INSTALL_GT_RIG_DIR:-${TOWN_ROOT:?install-gt: no town found (set GT_TOWN_ROOT); on a machine with no town yet use make install-local}/gastown/mayor/rig}"
-LOCK_WAIT="${INSTALL_GT_LOCK_WAIT:-300}"
 GT="$BIN_DIR/gt"
 # The town's signing material: a keychain and, beside it, the 0600 file holding
 # its password. A Developer Tools grant is keyed on the *designated requirement*
@@ -164,6 +163,12 @@ IMAGE_BIN="${INSTALL_GT_IMAGE_BINARY:-$RIG_DIR/gt}"
 IMAGE_LOG="${INSTALL_GT_IMAGE_LOG:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-image-install.log}}"
 IMAGE_LOCK="${INSTALL_GT_IMAGE_LOCK:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-image.lock}}"
 IMAGE_ALARM="${INSTALL_GT_IMAGE_ALARM:-1200}"
+# The image build holds the install lock for up to the alarm bound (gt-xzo8a,
+# hq-ltx66), so a queued install waits for the whole build: the default wait is
+# the bound plus a minute. INSTALL_GT_LOCK_WAIT, when set, is used as given.
+lock_floor=1200
+if [[ "$IMAGE_ALARM" =~ ^[1-9][0-9]*$ ]]; then lock_floor=$IMAGE_ALARM; fi
+LOCK_WAIT="${INSTALL_GT_LOCK_WAIT:-$((lock_floor + 60))}"
 IMAGE_PERL="${INSTALL_GT_PERL:-perl}"
 # image_daemon_env KEY: sets IMAGE_ENV_VALUE to daemon.env.KEY in
 # settings/config.json (the one source the daemon gives its plugin runs, gt-jmd9n)
