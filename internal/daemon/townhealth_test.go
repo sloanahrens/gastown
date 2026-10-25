@@ -243,6 +243,60 @@ func TestWriteTownHealth_WritesTheReportFromTheTownsRecords(t *testing.T) {
 	}
 }
 
+// The heartbeat judges by the operator's health block, not the compiled
+// defaults: this block's 5ms exec-tax red puts the stub's 9ms reading over the
+// line, where the default 50ms is green (gt-yi9o0).
+func TestWriteTownHealth_JudgesByTheConfiguredHealthBlock(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	writeJSONFile(t, filepath.Join(d.config.TownRoot, "settings", "config.json"), map[string]any{
+		"type": "town-settings", "version": 1,
+		"operational": map[string]any{"health": map[string]any{"exec_tax_red": "5ms"}},
+	})
+
+	d.writeTownHealth()
+
+	r, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := healthField(t, r, "exec-tax"); got.Verdict != townhealth.Red || got.Value != "9ms/exec" {
+		t.Errorf("exec-tax = %+v, want RED at the configured 5ms red for the stub's 9ms reading", got)
+	}
+}
+
+// A health block that does not resolve must not leave the health file stale:
+// the computation still writes, on the compiled defaults rather than zero
+// thresholds, and the config field names the broken block (gt-yi9o0).
+func TestWriteTownHealth_BrokenHealthBlockFallsBackToDefaults(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	writeJSONFile(t, filepath.Join(d.config.TownRoot, "settings", "config.json"), map[string]any{
+		"type": "town-settings", "version": 1,
+		"operational": map[string]any{"health": map[string]any{"exec_tax_red": "soon"}},
+	})
+
+	d.writeTownHealth()
+
+	r, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("reading the health file after a broken block: %v", err)
+	}
+	if got := healthField(t, r, "exec-tax"); got.Verdict != townhealth.Green {
+		t.Errorf("exec-tax = %+v, want GREEN at the default 50ms for the stub's 9ms reading", got)
+	}
+	// The 90m escalation crossing the default 1h degraded line: zero
+	// thresholds would judge it green, so this pins the defaults.
+	if got := healthField(t, r, "escalation"); got.Verdict != townhealth.Degraded {
+		t.Errorf("escalation = %+v, want DEGRADED at the default 1h for a 90m escalation", got)
+	}
+	if got := healthField(t, r, "config"); got.Verdict != townhealth.Red || got.Value != "invalid" {
+		t.Errorf("config = %+v, want RED invalid naming the broken block", got)
+	}
+}
+
 // A rig with no post_land_command never runs a post-landing check, so its
 // lack of a verdict is n/a rather than UNKNOWN; configuring the command makes
 // the missing verdict an open question again. Both read the rig's own
