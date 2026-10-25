@@ -709,6 +709,22 @@ func buildRigSeatsFor(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.D
 		knownNames[name] = true
 	}
 
+	// Every bead a seat looks up by id, read in one batch before the seats
+	// resolve (gt-9bjd3): the hook, the active MR (another rig's MR is outside
+	// this rig's index), the source issue (the assigned work, or the last one)
+	// and the work the listing found. Each seat is then served from memory
+	// rather than one bd show per polecat. The ids are the seats' own values.
+	hookIDs := make([]string, 0, 4*len(polecatNames))
+	for _, name := range polecatNames {
+		if w := activeWork[name]; w != nil {
+			hookIDs = append(hookIDs, w.ID)
+		}
+		if fields := parsePolecatAgentFields(agents[polecatBeadIDForRig(r, r.Name, name)]); fields != nil {
+			hookIDs = append(hookIDs, strings.TrimSpace(fields.HookBead), strings.TrimSpace(fields.ActiveMR), strings.TrimSpace(fields.LastSourceIssue))
+		}
+	}
+	hookIssues := newPolecatHookIssues(bd, hookIDs)
+
 	var seats []polecatSeat
 	for _, name := range polecatNames {
 		agentBeadID := polecatBeadIDForRig(r, r.Name, name)
@@ -718,7 +734,7 @@ func buildRigSeatsFor(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.D
 		// still says spawning and was touched inside the window is a
 		// dispatch in flight, not a stall.
 		env := polecatListInventoryEnv(r.Path, r.Name, name, mrIndex,
-			polecatActiveMRReader{index: mrIndex, bd: bd},
+			polecatActiveMRReader{index: mrIndex, bd: hookIssues},
 			polecatSpawnFacts{
 				UpdatedAt: polecat.AgentBeadUpdatedAt(agentBead),
 				Grace:     spawnWindow,

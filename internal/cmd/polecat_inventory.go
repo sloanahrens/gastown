@@ -313,8 +313,65 @@ func hookBeadDispositionForInventory(source polecat.IssueReader, hookBead string
 	if source == nil {
 		return polecat.HookBeadDisposition{Blocker: "hook_bead=" + hookBead + " status=unverified"}
 	}
+	// An empty hook is safe whatever the source holds, so it is classified
+	// without a bd show of the empty id (gt-9bjd3: one per idle polecat).
+	if hookBead == "" {
+		return polecat.ClassifyHookBead("", nil, nil)
+	}
 	issue, err := source.Show(hookBead)
 	return polecat.ClassifyHookBead(hookBead, issue, err)
+}
+
+// polecatHookBatchReader is the bead client the list path reads hook beads
+// through: one Show for a single id, and ShowMultiple for a rig's ids at once.
+type polecatHookBatchReader interface {
+	polecat.IssueReader
+	ShowMultiple(ids []string) (map[string]*beads.Issue, error)
+}
+
+// polecatHookIssues serves a rig's bead lookups from one batched read
+// (gt-9bjd3). The seats used to Show each polecat's hook, active MR and source
+// issue one id at a time, one bd process per polecat. An id the batch returned
+// is answered from memory. Any other id goes to source: a batch can skip an id
+// it did answer for, so absence from the batch is never read as not found. A
+// missing id costs one read; a found id costs none. A failed batch sends every
+// id to source, as before.
+type polecatHookIssues struct {
+	source polecat.IssueReader
+	issues map[string]*beads.Issue
+}
+
+// newPolecatHookIssues reads hookIDs in one ShowMultiple call. Duplicates and
+// empty ids cost nothing: the batch is over distinct non-empty ids only.
+func newPolecatHookIssues(batch polecatHookBatchReader, hookIDs []string) polecatHookIssues {
+	h := polecatHookIssues{source: batch}
+	distinct := make(map[string]bool, len(hookIDs))
+	for _, id := range hookIDs {
+		if id != "" {
+			distinct[id] = true
+		}
+	}
+	if len(distinct) == 0 {
+		return h
+	}
+	ids := make([]string, 0, len(distinct))
+	for id := range distinct {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	issues, err := batch.ShowMultiple(ids)
+	if err != nil {
+		return h
+	}
+	h.issues = issues
+	return h
+}
+
+func (h polecatHookIssues) Show(id string) (*beads.Issue, error) {
+	if issue, ok := h.issues[id]; ok {
+		return issue, nil
+	}
+	return h.source.Show(id)
 }
 
 func buildPolecatInventoryItem(rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet, env polecatInventoryEnv) polecatInventoryItem {
