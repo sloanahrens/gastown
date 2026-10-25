@@ -115,3 +115,21 @@ type DispatchBoardResponse struct {
 	Probes map[string]Probe    `json:"probes"`
 	Errors map[string]string   `json:"errors"`
 }
+
+// Stats counts a rig's durable issues (wisps are not counted) by status.
+type Stats struct {
+	Total    int            `json:"total"`
+	ByStatus map[string]int `json:"by_status"`
+}
+
+// ConfigValue is a configuration key's value; Set is false for a key that has
+// none, whose Value is then empty.
+type ConfigValue struct {
+	Value string `json:"value"`
+	Set   bool   `json:"set"`
+}
+
+// ConfigSetRequest sets a configuration key.
+type ConfigSetRequest struct {
+	Value string `json:"value"`
+}

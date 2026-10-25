@@ -18,7 +18,7 @@ func TestStoreMethodSetIsPinned(t *testing.T) {
 	for i := 0; i < typ.NumMethod(); i++ {
 		got = append(got, typ.Method(i).Name)
 	}
-	want := []string{"AddComment", "AddDependency", "Blocked", "ChildrenOf", "CloseIssues", "Comments", "CreateIssue", "DeleteIssues", "Dependencies", "DispatchBoard", "EventsAfter", "GetIssues", "ListIssues", "Ready", "RemoveDependency", "UpdateIssue"}
+	want := []string{"AddComment", "AddDependency", "Blocked", "ChildrenOf", "CloseIssues", "Comments", "ConfigGet", "ConfigSet", "CreateIssue", "DeleteIssues", "Dependencies", "DispatchBoard", "EventsAfter", "GetIssues", "ListIssues", "Ready", "RemoveDependency", "Stats", "UpdateIssue"}
 	if !slices.Equal(got, want) {
 		t.Errorf("Store methods = %v\nwant           %v\nchange this list deliberately, with the server, fake and contract", got, want)
 	}
