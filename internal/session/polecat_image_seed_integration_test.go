@@ -47,7 +47,9 @@ func runSeed(t *testing.T, files map[string]string) (out string, err error, cach
 	// /seed is the bind mount; /tmp/seed.log is the RUN's own log file.
 	script := strings.ReplaceAll(seedInstruction(t), "find /seed ", "find "+seed+" ")
 	cmd := exec.Command("sh", "-c", script)
-	cmd.Env = append(os.Environ(), "GOCACHE="+cache, "GOMODCACHE="+mod, "GOFLAGS=", "GOTOOLCHAIN=local")
+	// The image is linux/arm64, so its linux steps build for that target whatever
+	// host runs this test; the darwin step sets its own GOOS.
+	cmd.Env = append(os.Environ(), "GOCACHE="+cache, "GOMODCACHE="+mod, "GOFLAGS=", "GOTOOLCHAIN=local", "GOOS=linux", "GOARCH=arm64")
 	b, err := cmd.CombinedOutput()
 	return string(b), err, cache, mod
 }
@@ -131,6 +133,24 @@ func TestIntegrationSeedRunToleratesADarwinOnlyFailure(t *testing.T) {
 	}
 	if !strings.Contains(out, "'GOOS=darwin GOARCH=arm64 go build ./...' failed") {
 		t.Errorf("the darwin build failure is not reported in the build log:\n%s", out)
+	}
+}
+
+// The image is linux: a linux-only compile error must fail it, whatever host runs
+// the test. This is the converse of the darwin case above, and it pins the target
+// the seed's linux steps build for.
+func TestIntegrationSeedRunBuildsForTheImageTarget(t *testing.T) {
+	t.Parallel()
+	out, err, _, _ := runSeed(t, map[string]string{
+		"go.mod":          seedGoMod,
+		"main.go":         "package main\n\nfunc main() { println(\"hi\") }\n",
+		"broken_linux.go": "//go:build linux\n\npackage main\n\nvar _ = undefinedCall\n",
+	})
+	if err == nil {
+		t.Fatalf("seed RUN passed a linux-only compile error: the linux steps are not building for linux\n%s", out)
+	}
+	if !strings.Contains(out, "'go build ./...' failed") {
+		t.Errorf("the linux build failure is not reported at the build step:\n%s", out)
 	}
 }
 
