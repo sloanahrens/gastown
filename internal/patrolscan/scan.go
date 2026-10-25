@@ -585,6 +585,8 @@ type Ledger interface {
 
 // Options tunes a Scanner.
 type Options struct {
+	// DeadSamples overrides DefaultDeadSamples: the consecutive dead samples
+	// that confirm a death. Zero or less means the default, which New fills in.
 	DeadSamples int
 	// SpawnGrace overrides DefaultSpawnGrace.
 	SpawnGrace     time.Duration
@@ -866,7 +868,9 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		// Idle or finished: a dead session is not a crash. The record still
 		// saying run would keep townhealth reporting the seat dead forever
 		// (gt-613vw), so the seat is retired to stop once the death is
-		// confirmed across ticks, exactly as a restart is.
+		// confirmed across ticks, exactly as a restart is. New fills a zero
+		// DeadSamples, so this confirms at the default count and never on the
+		// first sample (gt-76dmy).
 		if !deadseats.Confirmed(samples, s.o.DeadSamples) {
 			return Finding{}, false
 		}

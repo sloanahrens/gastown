@@ -1206,6 +1206,29 @@ func TestIdleSeatIsRetiredToStop(t *testing.T) {
 	}
 }
 
+// A zero Options.DeadSamples is the default New fills, not "confirm on the
+// first dead sample": the idle seat waits one sample short of the default and
+// is retired at it (gt-76dmy).
+func TestZeroDeadSamplesConfirmsAtTheDefault(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.polecats = []string{"ruby"}
+	env.verdicts["ruby"] = dead(DefaultDeadSamples - 1)
+	sc := New(env, memLedger{}, Options{Now: func() time.Time { return now }})
+	if got := sc.o.DeadSamples; got != DefaultDeadSamples {
+		t.Fatalf("New filled DeadSamples = %d, want DefaultDeadSamples %d", got, DefaultDeadSamples)
+	}
+	if r := sc.Tick("gastown"); len(env.idles) != 0 {
+		t.Fatalf("idles = %v at %d of %d dead samples; a zero option reads as the default, not an immediate confirm; report %v",
+			env.idles, DefaultDeadSamples-1, DefaultDeadSamples, r.Lines())
+	}
+	env.verdicts["ruby"] = dead(DefaultDeadSamples)
+	r := sc.Tick("gastown")
+	if got := strings.Join(env.idles, ","); got != "ruby" {
+		t.Fatalf("idles = %q at %d dead samples, want ruby; report %v", got, DefaultDeadSamples, r.Lines())
+	}
+}
+
 // A seat whose gt done wrote gt:ready-to-land but lost its intent-record write
 // is mid-landing, not dead. The tick brings the record up to the label, or the
 // record says run for the whole of the landing and townhealth reports the seat
