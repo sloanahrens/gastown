@@ -365,6 +365,42 @@ func TestPackageDirHasGo(t *testing.T) {
 	}
 }
 
+// A directory inside a nested module (its own go.mod below the repo root) is
+// not a package of the root module: `go test ./tracker/store` from the root
+// cannot build it, so presubmit must not select it. The gate and presubmit
+// test those modules in their own directory (Makefile TESTED_MODULES).
+func TestPackageDirHasGoSkipsNestedModules(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module example.com/root\n")
+	writeFile(t, root, "pkg/a.go", "package pkg\n")
+	writeFile(t, root, "tracker/go.mod", "module example.com/root/tracker\n")
+	writeFile(t, root, "tracker/doc.go", "package tracker\n")
+	writeFile(t, root, "tracker/store/s.go", "package store\n")
+	writeFile(t, root, "plugins/x/go.mod", "module example.com/x\n")
+	writeFile(t, root, "plugins/x/y/c.go", "package y\n")
+
+	for dir, want := range map[string]bool{
+		"pkg":           true,
+		"tracker":       false, // the nested module's own root
+		"tracker/store": false,
+		"plugins/x/y":   false,
+	} {
+		if got := PackageDirHasGo(root, dir); got != want {
+			t.Errorf("PackageDirHasGo(%q) = %v, want %v", dir, got, want)
+		}
+	}
+
+	hasGo := func(dir string) bool { return PackageDirHasGo(root, dir) }
+	got, err := ChangedPackages("M\x00tracker/store/s.go\x00M\x00pkg/a.go\x00M\x00tracker/go.mod\x00", hasGo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "pkg" {
+		t.Errorf("ChangedPackages = %v, want only [pkg]: files in a nested module are not root packages", got)
+	}
+}
+
 func contains(hay []string, needle string) bool {
 	for _, s := range hay {
 		if s == needle {

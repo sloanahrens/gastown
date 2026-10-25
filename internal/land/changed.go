@@ -229,14 +229,31 @@ func isFixtureDir(dir string) bool {
 	return false
 }
 
-// PackageDirHasGo reports whether repoRoot/dir holds a .go file directly.
+// PackageDirHasGo reports whether repoRoot/dir holds a .go file directly and
+// belongs to the root module. A directory inside a nested module (a go.mod in
+// it or above it, below repoRoot) is not one: `go test` from the root cannot
+// build it, and the Makefile tests those modules in their own directory.
 func PackageDirHasGo(repoRoot, dir string) bool {
+	if inNestedModule(repoRoot, dir) {
+		return false
+	}
 	entries, err := os.ReadDir(filepath.Join(repoRoot, filepath.FromSlash(dir)))
 	if err != nil {
 		return false
 	}
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") {
+			return true
+		}
+	}
+	return false
+}
+
+// inNestedModule reports whether dir, or an ancestor of it below repoRoot,
+// holds a go.mod: the directory then belongs to that module, not the root's.
+func inNestedModule(repoRoot, dir string) bool {
+	for d := path.Clean(filepath.ToSlash(dir)); d != "." && d != "/"; d = path.Dir(d) {
+		if _, err := os.Stat(filepath.Join(repoRoot, filepath.FromSlash(d), "go.mod")); err == nil {
 			return true
 		}
 	}
