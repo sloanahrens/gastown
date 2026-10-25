@@ -182,8 +182,8 @@ func (noBeadsDB) ListIssueStatuses(...beads.IssueStatus) ([]*beads.Issue, error)
 func (noBeadsDB) ListAssignedIssueStatuses(string, ...beads.IssueStatus) ([]*beads.Issue, error) {
 	return nil, errNoDatabase
 }
-func (noBeadsDB) Ready() ([]*beads.Issue, error)                   { return nil, errNoDatabase }
-func (noBeadsDB) ReadyAll() ([]*beads.Issue, error)                { return nil, errNoDatabase }
+func (noBeadsDB) Ready() ([]*beads.Issue, error)    { return nil, errNoDatabase }
+func (noBeadsDB) ReadyAll() ([]*beads.Issue, error) { return nil, errNoDatabase }
 func (noBeadsDB) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) {
 	return nil, errNoDatabase
 }
