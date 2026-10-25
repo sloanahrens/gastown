@@ -63,12 +63,25 @@ const recencyBonus = 0.5
 // types are the memory kinds the format defines, each with its score weight:
 // guidance the agent is meant to act on outranks a pointer, and an unknown or
 // absent type weighs as general.
+//
+// This map is the one type registry: the prime index parses keys through the
+// same resolver (ParseKey), so a type added here is typed in both places and,
+// paired with a memoryTypeOrder entry in internal/cmd, injected under it
+// (gt-fg4rh).
 var types = map[string]float64{
 	"feedback":  1.3,
+	"user":      1.1,
 	"project":   1.0,
 	"reference": 0.8,
 	"general":   0.6,
 }
+
+// Key namespaces: gt.<type>.<slug> is what the retired gt remember wrote,
+// memory.<slug> is what bd remember writes. Both corpora are live (gt-o51s).
+const (
+	keyPrefix       = "gt."
+	legacyKeyPrefix = "memory."
+)
 
 // headerNames are the fields a memory value's header block defines. A value
 // whose first line opens with any other name is legacy: the whole value is the
@@ -96,7 +109,7 @@ var stopwords = map[string]struct{}{
 type Memory struct {
 	// Key is the kv key as stored, the form `bd kv get` takes.
 	Key string
-	// Type is feedback, project, reference or general.
+	// Type is feedback, user, project, reference or general.
 	Type string
 	// Body is the value with its header block removed.
 	Body string
@@ -193,7 +206,7 @@ func Parse(key, value string) Memory {
 	if !modern {
 		return Memory{
 			Key:      key,
-			Type:     keyType(key),
+			Type:     KeyType(key),
 			Body:     value,
 			Scope:    "rig",
 			Verified: markerDate(value),
@@ -228,7 +241,7 @@ func Parse(key, value string) Memory {
 // Keywords is a memory's search terms: its key slug plus the first non-empty
 // body line. It is the shared-case rule the Python tooling reads.
 func Keywords(key, body string) map[string]struct{} {
-	out := tokens(keySlug(key))
+	out := tokens(KeySlug(key))
 	for _, line := range strings.Split(body, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -278,7 +291,7 @@ type Corpus struct {
 func NewCorpus(mems []Memory) Corpus {
 	c := Corpus{N: len(mems), df: make(map[string]int, len(mems))}
 	for _, m := range mems {
-		terms := tokens(keySlug(m.Key))
+		terms := tokens(KeySlug(m.Key))
 		union(terms, tokens(m.Body))
 		for w := range terms {
 			c.df[w]++
@@ -323,7 +336,7 @@ type assessment struct {
 
 // assess scores m against q in the pool c and reports the hits that earned it.
 func (c Corpus) assess(q map[string]struct{}, beadPaths []string, m Memory, now time.Time) assessment {
-	keyTerms, bodyTerms := tokens(keySlug(m.Key)), tokens(m.Body)
+	keyTerms, bodyTerms := tokens(KeySlug(m.Key)), tokens(m.Body)
 
 	a := assessment{}
 	for _, w := range sortedWords(q) {
@@ -597,33 +610,37 @@ func markerDate(value string) time.Time {
 	return dateField(strings.TrimRight(fields[0], ".,;"))
 }
 
-// keySlug is a memory key's own words: the kv namespace, and the type segment
-// of a gt.<type>.<slug> key, are not among them.
-func keySlug(key string) string {
-	if rest, ok := strings.CutPrefix(key, "memory."); ok {
-		return rest
+// ParseKey splits a stored memory key into its type and slug. A gt.<type>.<slug>
+// or memory.<type>.<slug> key names its type; anything else is a legacy untyped
+// key: general, with the kv namespace stripped from its slug.
+//
+// It is the one resolver: the prime index (internal/cmd parseMemoryKey) parses
+// through it, so a key the index shows under a type is typed for scoring too,
+// and the type segment never doubles as one of the key's own words (gt-fg4rh).
+func ParseKey(key string) (memType, slug string) {
+	switch {
+	case strings.HasPrefix(key, keyPrefix):
+		key = strings.TrimPrefix(key, keyPrefix)
+	case strings.HasPrefix(key, legacyKeyPrefix):
+		key = strings.TrimPrefix(key, legacyKeyPrefix)
 	}
-	rest, ok := strings.CutPrefix(key, "gt.")
-	if !ok {
-		return key
+	if t, rest, found := strings.Cut(key, "."); found && isType(t) {
+		return t, rest
 	}
-	if t, slug, found := strings.Cut(rest, "."); found && isType(t) {
-		return slug
-	}
-	return rest
+	return "general", key
 }
 
-// keyType reads a legacy memory's type from its key: gt.<type>.<slug> and
-// memory.<type>.<slug> name their type, anything else is general.
-func keyType(key string) string {
-	rest := strings.TrimPrefix(key, "gt.")
-	if rest == key {
-		rest = strings.TrimPrefix(key, "memory.")
-	}
-	if t, _, found := strings.Cut(rest, "."); found && isType(t) {
-		return t
-	}
-	return "general"
+// KeyType is the memory type ParseKey reads from a key.
+func KeyType(key string) string {
+	t, _ := ParseKey(key)
+	return t
+}
+
+// KeySlug is a memory key's own words: the kv namespace, and the type segment
+// of a typed key, are not among them.
+func KeySlug(key string) string {
+	_, slug := ParseKey(key)
+	return slug
 }
 
 // weight is a type's score weight; an unrecognized type weighs as general.

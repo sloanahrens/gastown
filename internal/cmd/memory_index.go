@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/memrecall"
 )
 
 // Memory index rendering for `gt prime`.
@@ -34,19 +36,10 @@ func isMemoryKey(key string) bool {
 	return strings.HasPrefix(key, memoryKeyPrefix) || strings.HasPrefix(key, memoryLegacyKeyPrefix)
 }
 
-// validMemoryTypes are the recognized memory type categories.
-// Typed memories are stored as gt.<type>.<key> in the kv store.
-// Legacy untyped memories (gt.<key>) are treated as "general".
-var validMemoryTypes = map[string]string{
-	"feedback":  "Guidance or corrections from users — behavioral rules for future work",
-	"project":   "Ongoing work context, goals, deadlines, decisions",
-	"user":      "Info about the user's role, preferences, expertise",
-	"reference": "Pointers to external resources (URLs, tools, dashboards)",
-	"general":   "Uncategorized memories (default)",
-}
-
 // memoryTypeOrder defines the injection priority during gt prime.
 // Feedback first (behavioral corrections), then user context, then the rest.
+// The types themselves, and which keys name them, live in memrecall (ParseKey),
+// so the index and recall scoring cannot disagree (gt-fg4rh).
 var memoryTypeOrder = []string{"feedback", "user", "project", "reference", "general"}
 
 const (
@@ -263,30 +256,11 @@ func truncateWords(runes []rune, max int) string { //nolint:unparam // max is pa
 	return string(cut)
 }
 
-// parseMemoryKey extracts the type and short key from a full kv key.
-// Handles both typed keys (gt.<type>.<key> or memory.<type>.<key>) and legacy
-// untyped keys (gt.<key> or memory.<key>).
+// parseMemoryKey extracts the type and short key from a full kv key, through
+// the resolver recall scoring uses, so a key the index shows under a type is
+// typed for scoring too and its slug excludes the type segment (gt-fg4rh).
 func parseMemoryKey(kvKey string) (memType, shortKey string) {
-	prefix := memoryLegacyKeyPrefix
-	if strings.HasPrefix(kvKey, memoryKeyPrefix) {
-		prefix = memoryKeyPrefix
-	}
-
-	rest := strings.TrimPrefix(kvKey, prefix)
-	if rest == "" {
-		return "general", ""
-	}
-
-	// Check if first segment is a known type
-	if dotIdx := strings.Index(rest, "."); dotIdx > 0 {
-		candidate := rest[:dotIdx]
-		if _, ok := validMemoryTypes[candidate]; ok {
-			return candidate, rest[dotIdx+1:]
-		}
-	}
-
-	// Legacy untyped memory
-	return "general", rest
+	return memrecall.ParseKey(kvKey)
 }
 
 // parseBdKvListJSON parses bd kv list --json output into displayable string values.
