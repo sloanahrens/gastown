@@ -121,18 +121,26 @@ RUN groupadd -g 10001 polecat \
 # Both live outside /sandbox, which the workspace-init container copies into every
 # sandbox's volume: outside it, one image layer is shared and writes fall to the
 # sandbox's own layer. /tmp gets no mount of its own (a live sandbox's
-# /proc/mounts), so the seeded build cache is there at runtime. The read-only
-# module cache cannot take a module the seed lacks: point GOMODCACHE elsewhere
-# for that build.
+# /proc/mounts), so the seeded build cache is there at runtime. The module cache
+# is read-only in a sandbox, so a module the seed lacks cannot be fetched there:
+# a build that needs one points GOMODCACHE elsewhere.
 #
 # The sources are the pinned checkouts `make polecat-image` stages from
 # deploy/polecat/seed-pins into deploy/polecat/seed, bind-mounted for this one
 # RUN so none lands in the image. Each module gets the commands the rigs'
 # presubmits run, with their default flags (no -trimpath, default CGO) so the
-# cache keys match. A failing `go build` fails the image: a broken seed must not
-# publish. A failing vet or test compile is logged and skipped (a module may need
-# system headers the image lacks). The chmod for uid 10001 is in this same RUN,
-# as one in a later layer would copy every file again.
+# cache keys match. `go mod download` runs first because a linux build fetches
+# only the modules linux imports, while a rig's test can build for another
+# platform: devops' TestCloudqueryBinPinsAreARebuildOfTheCommit builds for
+# darwin/arm64 and needs the pulumi sdk's darwin-only purego (gt-mukre). The
+# darwin build then compiles those modules into the build cache too.
+#
+# A failing linux `go build` or `go mod download` fails the image: the seed
+# would otherwise publish a hole that the read-only cache cannot fill at
+# runtime. A failing vet, test compile or darwin build is logged and skipped: a
+# module may need system headers the image lacks, or a dependency with no darwin
+# build. The chmod for uid 10001 is in this same RUN, as one in a later layer
+# would copy every file again.
 ENV GOCACHE=/tmp/gocache \
     GOMODCACHE=/usr/local/share/gomodcache
 RUN --mount=type=bind,source=seed,target=/seed \
@@ -140,10 +148,12 @@ RUN --mount=type=bind,source=seed,target=/seed \
     && mkdir -p "$GOCACHE" "$GOMODCACHE" \
     && for gomod in $(find /seed -name go.mod -not -path '*/testdata/*' | sort); do \
          dir=$(dirname "$gomod"); echo "seed: $dir"; \
-         for step in "go build ./..." "go vet ./..." "go test -count=1 -run ^\$ ./..."; do \
+         for step in "go mod download" "go build ./..." "go vet ./..." \
+                     "go test -count=1 -run ^\$ ./..." \
+                     "GOOS=darwin GOARCH=arm64 go build ./..."; do \
            if ! (cd "$dir" && $step >/tmp/seed.log 2>&1); then \
              echo "seed: '$step' failed in $dir:"; tail -n 5 /tmp/seed.log; \
-             if [ "$step" = "go build ./..." ]; then exit 1; fi; \
+             case "$step" in "go build ./..."|"go mod download") exit 1 ;; esac; \
            fi; \
          done; \
        done \

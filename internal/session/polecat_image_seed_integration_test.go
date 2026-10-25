@@ -115,3 +115,38 @@ func TestIntegrationSeedRunToleratesAVetOnlyFailure(t *testing.T) {
 		t.Errorf("no GOCACHE after a vet-only failure: %v", err)
 	}
 }
+
+// A darwin-only compile failure must not fail the image: a rig's tree, or one of
+// its dependencies, may hold a package that only builds for another platform
+// (gt-mukre). The failure stays in the build log.
+func TestIntegrationSeedRunToleratesADarwinOnlyFailure(t *testing.T) {
+	t.Parallel()
+	out, err, _, _ := runSeed(t, map[string]string{
+		"go.mod":           seedGoMod,
+		"main.go":          "package main\n\nfunc main() { println(\"hi\") }\n",
+		"broken_darwin.go": "//go:build darwin\n\npackage main\n\nvar _ = undefinedCall\n",
+	})
+	if err != nil {
+		t.Fatalf("seed RUN failed on a module that builds for linux but not darwin: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "'GOOS=darwin GOARCH=arm64 go build ./...' failed") {
+		t.Errorf("the darwin build failure is not reported in the build log:\n%s", out)
+	}
+}
+
+// A module cache the runtime cannot complete must not publish: a go.mod the seed
+// cannot resolve fails the image at the download, before any build it might have
+// passed (gt-mukre). The version below is deliberately malformed.
+func TestIntegrationSeedRunFailsTheImageWhenAModuleCannotBeResolved(t *testing.T) {
+	t.Parallel()
+	out, err, _, _ := runSeed(t, map[string]string{
+		"go.mod":  "module example.invalid/seedfx\n\ngo 1.21\n\nrequire example.invalid/dep v1\n",
+		"main.go": "package main\n\nfunc main() { println(\"hi\") }\n",
+	})
+	if err == nil {
+		t.Fatalf("seed RUN exited 0 on a go.mod it could not resolve\n%s", out)
+	}
+	if !strings.Contains(out, "'go mod download' failed") {
+		t.Errorf("the failure is not reported at the download step:\n%s", out)
+	}
+}
