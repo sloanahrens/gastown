@@ -313,9 +313,11 @@ func TestSourceConfigOmThresholds(t *testing.T) {
 }
 
 // The parked count answers for the town the snapshot was given, not the
-// directory its process happens to run in: a snapshot of /town started
-// elsewhere still starts `gt rig list` in /town (gt-kj6sx).
+// directory the snapshot process runs in: the probe starts `gt rig list` in
+// env.Town, so a town the test process does not run in still answers
+// (gt-kj6sx).
 func TestSourceConfigParkedRigsRunsInTheSnapshotsTown(t *testing.T) {
+	t.Parallel()
 	settings, rigs, _, _ := configTestPaths()
 	files := map[string]string{
 		settings:              configSettingsFixture,
@@ -328,9 +330,6 @@ func TestSourceConfigParkedRigsRunsInTheSnapshotsTown(t *testing.T) {
 		ranIn = append(ranIn, dir)
 		return []byte(`[{"name": "beads", "status": "parked"}]`), nil
 	}
-	// The process runs somewhere that is not a town at all: only the town
-	// passed to the probe can answer.
-	t.Chdir(t.TempDir())
 
 	got, err := configSource{}.Collect(context.Background(), env)
 	if err != nil {
