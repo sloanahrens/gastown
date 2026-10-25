@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/tracker/api"
+	"github.com/steveyegge/gastown/tracker/store"
 )
 
 // Authenticator resolves a bearer token to the actor it was issued to, or
@@ -40,6 +41,8 @@ type Logger interface {
 // Config is what New needs. SchemaLevel is the level this binary was built
 // for and the database was migrated to; clients must match it.
 type Config struct {
+	// Store is what the /v1 routes read and write.
+	Store       store.Store
 	Auth        Authenticator
 	Health      Health
 	SchemaLevel int
@@ -50,6 +53,8 @@ type Config struct {
 type Server struct {
 	cfg Config
 	mux *http.ServeMux
+	// routes is the /v1 mux, behind the schema gate and authentication.
+	routes *http.ServeMux
 }
 
 // readyTimeout bounds the readiness probe so a stalled database reads as not
@@ -73,9 +78,15 @@ func New(cfg Config) *Server {
 	})
 
 	v1 := http.NewServeMux()
+	s.routes = v1
 	v1.HandleFunc("GET /v1/whoami", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"actor": ActorFrom(r.Context())})
 	})
+	s.registerIssueRoutes(v1)
+	s.registerWriteRoutes(v1)
+	s.registerLinkRoutes(v1)
+	s.registerBoardRoutes(v1)
+	s.registerEventRoutes(v1)
 	s.mux.Handle("/v1/", s.authenticated(s.schemaGate(v1)))
 	return s
 }
@@ -124,14 +135,10 @@ func (s *Server) schemaGate(next http.Handler) http.Handler {
 	})
 }
 
-type actorKey struct{}
-
 // ActorFrom is the actor the request's token was issued to, or "" outside an
-// authenticated route.
-func ActorFrom(ctx context.Context) string {
-	a, _ := ctx.Value(actorKey{}).(string)
-	return a
-}
+// authenticated route. Store writes read it with api.ActorFrom on the same
+// context.
+func ActorFrom(ctx context.Context) string { return api.ActorFrom(ctx) }
 
 // authenticated resolves the bearer token to an actor and puts it on the
 // request context. A missing, malformed or unknown token is a 401.
@@ -151,7 +158,7 @@ func (s *Server) authenticated(next http.Handler) http.Handler {
 			writeError(w, err, s.cfg.Log)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), actorKey{}, actor)))
+		next.ServeHTTP(w, r.WithContext(api.WithActor(r.Context(), actor)))
 	})
 }
 
