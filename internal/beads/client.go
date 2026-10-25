@@ -2,20 +2,18 @@ package beads
 
 import "time"
 
-// ReadyOptions is the filter ReadyFiltered sends: the flags bd's ready verb
-// takes, so a caller's exclusions run against the store's own board instead of
-// a page filtered in Go afterwards.
+// ReadyOptions is the filter ReadyFiltered sends, so a caller's exclusions run
+// against the store's own board instead of a page filtered in Go afterwards.
+// ReadyArgs describes the bd flags these fields become.
 type ReadyOptions struct {
-	// Unassigned keeps only issues with no assignee (bd ready --unassigned).
+	// Unassigned keeps only issues with no assignee.
 	Unassigned bool
-	// ExcludeLabels drops issues carrying any of these labels
-	// (bd ready --exclude-label), sent as one comma-joined list.
+	// ExcludeLabels drops issues carrying any of these labels.
 	ExcludeLabels []string
-	// ExcludeTypes drops issues of any of these issue types
-	// (bd ready --exclude-type), sent as one comma-joined list.
+	// ExcludeTypes drops issues of any of these issue types.
 	ExcludeTypes []string
-	// Limit caps the answer (bd ready --limit). Zero asks for the whole
-	// board: bd's default page of 100 does not apply.
+	// Limit caps the answer. Zero asks for the whole board: bd's default
+	// page of 100 does not apply.
 	Limit int
 }
 

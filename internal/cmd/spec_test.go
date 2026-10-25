@@ -2858,8 +2858,7 @@ func TestSpecReadyQuery(t *testing.T) {
 	if slices.Contains(opts.ExcludeLabels, "spec") || slices.Contains(opts.ExcludeTypes, "feature") {
 		t.Errorf("ready options still carry the retired spec label or feature type: %+v", opts)
 	}
-	// The argv is the one spec.go built by hand before the query moved behind
-	// beads.Client (gt-p85pw.7): the flags in this order, each exclusion list
+	// The argv is fixed: the flags in this order, each exclusion list
 	// comma-joined once, the whole board.
 	want := []string{
 		"ready", "--json", "--unassigned",
@@ -2869,6 +2868,54 @@ func TestSpecReadyQuery(t *testing.T) {
 	}
 	if got := beads.ReadyArgs(opts); !slices.Equal(got, want) {
 		t.Errorf("ready argv = %q, want %q", got, want)
+	}
+}
+
+// specReadyStub answers ReadyFiltered with a canned board and records the
+// query it was asked. Only that method runs, so the rest of beads.Client stays
+// unsatisfied.
+type specReadyStub struct {
+	beads.Client
+	options beads.ReadyOptions
+	issues  []*beads.Issue
+	err     error
+}
+
+func (s *specReadyStub) ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error) {
+	s.options = opts
+	return s.issues, s.err
+}
+
+// TestSpecReadyBoardReadsACutBoardAsPartial: a board bd reports as cut is the
+// tick's board, not a failed tick. The sentinel says other rows may exist; the
+// rows that did arrive are dispatched on.
+func TestSpecReadyBoardReadsACutBoardAsPartial(t *testing.T) {
+	t.Parallel()
+	stub := &specReadyStub{
+		issues: []*beads.Issue{{ID: "gt-a"}},
+		err:    &beads.ErrReadyTruncated{Found: 100, Cap: 100, TrueCount: 373},
+	}
+
+	issues, err := specReadyBoardFrom(stub)
+	if err != nil {
+		t.Fatalf("specReadyBoardFrom on a cut board = %v, want the partial board and no error", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "gt-a" {
+		t.Errorf("specReadyBoardFrom = %v, want the rows the cut page carried", issues)
+	}
+	if !stub.options.Unassigned || stub.options.Limit != 0 {
+		t.Errorf("board query = %+v, want the dispatcher's unassigned whole board", stub.options)
+	}
+}
+
+// TestSpecReadyBoardReportsAFailedQuery: every other failure is the tick's, so
+// the rig's error line names why the board could not be read.
+func TestSpecReadyBoardReportsAFailedQuery(t *testing.T) {
+	t.Parallel()
+	stub := &specReadyStub{err: errors.New("bd ready: database locked")}
+
+	if _, err := specReadyBoardFrom(stub); err == nil || !strings.Contains(err.Error(), "database locked") {
+		t.Fatalf("specReadyBoardFrom err = %v, want bd's failure", err)
 	}
 }
 

@@ -1766,6 +1766,10 @@ func (b *Beads) runReadyCLI(args ...string) ([]byte, error) {
 	args = InjectFlatForListJSON(args)
 	beadsDir := b.getResolvedBeadsDir()
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir, "BD_JSON_ENVELOPE=1")
+	// A pinned wrapper's ready read is read-only: force BD_READONLY so it
+	// cannot ride another process's auto-commit mode, the way every other
+	// pinned call does (applyAccessMode).
+	runEnv = b.applyAccessMode(runEnv, args)
 	return b.runBdWithRetry(nil, runEnv, args)
 }
 
@@ -2850,11 +2854,11 @@ func parseReadyOutput(out []byte) ([]*Issue, error) {
 }
 
 // DecodeReadyBoard reads one buffered bd ready --json answer into its issues
-// and, when bd reported the page cut, the *ErrReadyTruncated that says so. It
-// is the reader behind Ready and ReadyFiltered, exported so a captured board
-// fixture runs through the same reader a live tick uses (gt-p85pw.7). Empty
-// output is an empty board: a tick with no ready work is a quiet board, not a
-// failure.
+// and, when bd reported the page cut, the *ErrReadyTruncated that says so.
+// Empty output is an empty board: a tick with no ready work is a quiet board,
+// not a failure. It is the reader behind Ready and ReadyFiltered, exported so
+// a captured board fixture in another package runs through the same reader a
+// live tick uses.
 func DecodeReadyBoard(out []byte) ([]*Issue, *ErrReadyTruncated, error) {
 	return decodeReadyBoardPage(out, bdReadyDefaultLimit)
 }
@@ -2893,7 +2897,7 @@ func decodeReadyBoardPage(out []byte, cap int) ([]*Issue, *ErrReadyTruncated, er
 		return nil, nil, fmt.Errorf("parsing bd ready envelope: %w", err)
 	}
 	data := env.Data
-	if len(data) == 0 {
+	if !hasReadyRows(data) {
 		data = env.Issues
 	}
 	var issues []*Issue
@@ -2908,6 +2912,14 @@ func decodeReadyBoardPage(out []byte, cap int) ([]*Issue, *ErrReadyTruncated, er
 		Cap:       cap,
 		TrueCount: env.Pagination.Total,
 	}, nil
+}
+
+// hasReadyRows reports whether a raw envelope key holds rows: present, and not
+// the JSON literal null. A null data key answers nothing, so a populated
+// issues key beside it still answers instead of the null hiding it.
+func hasReadyRows(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && string(trimmed) != "null"
 }
 
 // Ready returns issues that are ready to work (not blocked). Bookkeeping
@@ -2965,6 +2977,11 @@ func (b *Beads) ReadyAll() ([]*Issue, error) {
 // *ErrReadyTruncated sentinel, Ready's contract. Limit 0 asks for the whole
 // board, so a caller that needs every row must not drop the sentinel; a
 // positive Limit is one page, and the sentinel says more rows remain.
+//
+// On a *Beads built by NewPinned the query runs the pinned read-only policy
+// every other pinned call does: BEADS_DIR resolves from the wrapper instead of
+// an inherited one, and --allow-stale rides along when the installed bd takes
+// it. TestReadyFilteredCarriesThePinnedReadOnlyPolicy pins both.
 func (b *Beads) ReadyFiltered(opts ReadyOptions) ([]*Issue, error) {
 	out, err := b.runReadyCLI(ReadyArgs(opts)...)
 	if err != nil {
@@ -2984,10 +3001,12 @@ func readyQueryCap(limit int) int {
 }
 
 // ReadyArgs is the bd argv ReadyFiltered runs for opts: the flags in one fixed
-// order, the one the spec dispatcher's board query has always used
-// (internal/cmd/spec.go) — --unassigned, one comma-joined --exclude-label, one
-// comma-joined --exclude-type, --limit. Exported so that dispatcher's test can
-// pin the query it sends against the argv the seam builds from it.
+// order — --unassigned, one comma-joined --exclude-label, one comma-joined
+// --exclude-type, --limit. That order is the spec dispatcher's board query
+// (internal/cmd/spec.go), and exporting it lets that dispatcher's test pin the
+// filters it asks for against the argv the seam builds. bd's flags take a
+// single comma-joined list, so a label or type containing a comma cannot be
+// expressed by any caller of this method.
 func ReadyArgs(o ReadyOptions) []string {
 	args := []string{"ready", "--json"}
 	if o.Unassigned {

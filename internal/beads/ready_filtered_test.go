@@ -3,6 +3,8 @@ package beads
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -63,6 +65,74 @@ func TestReadyFiltered_SendsReadyArgs(t *testing.T) {
 	}
 }
 
+// TestReadyFilteredCarriesThePinnedReadOnlyPolicy pins what a pinned
+// ReadyFiltered query sends bd, the policy the spec dispatcher's board query
+// relies on: the wrapper's own database with an inherited BEADS_DIR stripped,
+// the ready envelope opt-in, read-only mode, and bd's stale-read bypass only
+// when the installed bd takes it.
+func TestReadyFilteredCarriesThePinnedReadOnlyPolicy(t *testing.T) {
+	rigPath := t.TempDir()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	t.Setenv("BEADS_DIR", filepath.Join(t.TempDir(), "elsewhere", ".beads"))
+
+	tests := []struct {
+		name        string
+		allowStale  bool
+		wantAllowed bool
+	}{
+		{"bd takes --allow-stale", true, true},
+		{"bd rejects --allow-stale", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := newRecorder(func([]string) reply { return reply{stdout: filteredBoardEnvelope(0, 0, false)} })
+			rec.allowStale = tt.allowStale
+			b := NewPinned(beadsDir)
+			b.exec = rec.exec
+			if _, err := b.ReadyFiltered(filteredReadyOptions()); err != nil {
+				t.Fatalf("ReadyFiltered: %v", err)
+			}
+			calls := rec.calls()
+			if len(calls) != 1 {
+				t.Fatalf("calls = %q, want one bd ready", rec.argvs())
+			}
+			call := calls[0]
+
+			if got := envValues(call.env, "BEADS_DIR"); !slices.Equal(got, []string{ResolveBeadsDir(beadsDir)}) {
+				t.Errorf("BEADS_DIR = %q, want exactly the rig's resolved database %q", got, ResolveBeadsDir(beadsDir))
+			}
+			if v, ok := lastEnvValue(call.env, "BD_JSON_ENVELOPE"); !ok || v != "1" {
+				t.Errorf("BD_JSON_ENVELOPE = %q (set %t), want 1", v, ok)
+			}
+			if v, ok := lastEnvValue(call.env, "BD_READONLY"); !ok || v != "true" {
+				t.Errorf("BD_READONLY = %q (set %t), want a pinned ready read to be read-only", v, ok)
+			}
+			want := ReadyArgs(filteredReadyOptions())
+			if tt.wantAllowed {
+				want = append([]string{"--allow-stale"}, want...)
+			}
+			if !slices.Equal(call.args, want) {
+				t.Errorf("argv = %q, want %q", call.args, want)
+			}
+		})
+	}
+}
+
+// envValues returns every value of key in env, in order, so a test can tell an
+// inherited entry from the one the wrapper appended.
+func envValues(env []string, key string) []string {
+	var out []string
+	for _, kv := range env {
+		if k, v, found := strings.Cut(kv, "="); found && k == key {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // TestReadyFiltered_CutWholeBoardStillReturnsTheBoard: --limit 0 asks for
 // every row, so a page bd cuts anyway is a partial board with the sentinel
 // saying so, not a refusal. The spec dispatcher reads the page and lets the
@@ -104,8 +174,8 @@ func TestReadyFiltered_APageRequestCarriesTheTruncation(t *testing.T) {
 
 // TestReadyFiltered_ReadsTheAnswersBdCanGive pins the decode branches: an
 // uncapped envelope, the bare array an older bd prints (which carries no
-// pagination verdict), and empty output — a quiet board, the rule the spec
-// dispatcher's reader has always had.
+// pagination verdict), empty output — a quiet board, not a failure — and a
+// null data key beside a populated issues key, which is the older key's rows.
 func TestReadyFiltered_ReadsTheAnswersBdCanGive(t *testing.T) {
 	t.Parallel()
 	row := `{"id":"gt-a","title":"t","status":"open","priority":2,"issue_type":"task"}`
@@ -117,6 +187,7 @@ func TestReadyFiltered_ReadsTheAnswersBdCanGive(t *testing.T) {
 		{"uncapped envelope", `{"schema_version":1,"data":[` + row + `]}`, 1},
 		{"legacy bare array", `[` + row + `]`, 1},
 		{"empty output", "", 0},
+		{"null data beside issues", `{"data":null,"issues":[` + row + `]}`, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

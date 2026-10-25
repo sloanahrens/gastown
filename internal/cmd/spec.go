@@ -2274,16 +2274,22 @@ func specReadyOptions() beads.ReadyOptions {
 	}
 }
 
-// specReadyBoard runs the ready query in one rig, pinned to the rig's own
-// database. The filters stay server-side, and the seam's runner adds bd's
-// stale-read bypass on its own, which is what kept this query on the argv path
-// until one adapter had to serve it (gt-7iwy0.4.10, gt-p85pw.7).
-//
-// A board bd reports as cut is still read as a partial board, the way this
-// query has always read it: the tick acts on what it got, and the sentinel
-// says only that there may be more.
+// specReadyBoard runs the ready query in one rig, against the rig's own
+// database. beads.NewPinned pins BEADS_DIR to the database resolved from that
+// rig whatever database the tick's environment names, forces the read
+// read-only, asks bd's stale-read bypass when the installed bd takes it, and
+// carries bd's stderr into a failure.
+// TestReadyFilteredCarriesThePinnedReadOnlyPolicy pins that policy on the
+// ReadyFiltered query the dispatcher sends.
 func specReadyBoard(rigPath string) ([]*beads.Issue, error) {
-	issues, err := beads.NewPinned(beads.ResolveBeadsDir(rigPath)).ReadyFiltered(specReadyOptions())
+	return specReadyBoardFrom(beads.NewPinned(beads.ResolveBeadsDir(rigPath)))
+}
+
+// specReadyBoardFrom is specReadyBoard's answer for a given store. A board bd
+// reports as cut is read as a partial board: the tick acts on what it got, and
+// the sentinel says only that there may be more rows.
+func specReadyBoardFrom(store beads.Client) ([]*beads.Issue, error) {
+	issues, err := store.ReadyFiltered(specReadyOptions())
 	var truncated *beads.ErrReadyTruncated
 	if errors.As(err, &truncated) {
 		return issues, nil

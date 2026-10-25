@@ -4,6 +4,9 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -131,4 +134,49 @@ func TestContextConstructorsAreContextBound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReadyFilteredFailureCarriesBdsStderr pins the contract the spec
+// dispatcher's board query relies on when bd fails: the error carries bd's own
+// stderr, not a bare "exit status 1", so the tick's error line names what went
+// wrong.
+func TestReadyFilteredFailureCarriesBdsStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub")
+	}
+	binDir := t.TempDir()
+	writeBDStub(t, binDir, "#!/bin/sh\necho 'database locked' >&2\nexit 1\n", "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	rigPath := t.TempDir()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	_, err := NewPinned(beadsDir).ReadyFiltered(ReadyOptions{Limit: 0})
+	if err == nil {
+		t.Fatal("ReadyFiltered succeeded, want bd's failure")
+	}
+	if !strings.Contains(err.Error(), "database locked") {
+		t.Errorf("err = %q, want it to carry bd's stderr", err)
+	}
+}
+
+// writeBDStub writes a fake bd into binDir and returns its path.
+func writeBDStub(t *testing.T, binDir string, unixScript string, windowsScript string) string {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(binDir, "bd.cmd")
+		if err := os.WriteFile(path, []byte(windowsScript), 0644); err != nil {
+			t.Fatalf("write bd stub: %v", err)
+		}
+		return path
+	}
+
+	path := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(path, []byte(unixScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	return path
 }
