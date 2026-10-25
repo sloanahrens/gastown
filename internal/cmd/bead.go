@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/style"
@@ -52,23 +53,6 @@ Read across every rig with 'gt bead search':
 }
 
 var (
-	beadCreateType       string
-	beadCreatePriority   int
-	beadCreateLabels     []string
-	beadCreateDesc       string
-	beadCreateAcceptance string
-	beadCreateParent     string
-	beadCreateRig        string
-	beadCreateTitle      string
-	beadCreateQuiet      bool
-	beadCreateJSON       bool
-
-	beadUpdateTitle       string
-	beadUpdatePriority    int
-	beadUpdateAddLabels   []string
-	beadUpdateRemoveLabel []string
-	beadUpdateAcceptance  string
-
 	beadResetReason string
 	beadCloseReason string
 )
@@ -96,21 +80,41 @@ Examples:
   gt bead create "Fix-merge PR #1234" -l pr-review -q   # print only the ID`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		title := beadCreateTitle
-		if len(args) == 1 {
-			if title != "" {
-				return fmt.Errorf("give the title once: as an argument or --title")
-			}
-			title = args[0]
+		r, err := beadCreateRequestFrom(cmd.Flags(), args)
+		if err != nil {
+			return err
 		}
-		return newBeadVerbs(cmd).create(beadCreateRequest{
-			title: title, kind: beadCreateType, priority: beadCreatePriority,
-			labels: beadCreateLabels, description: beadCreateDesc,
-			acceptance: beadCreateAcceptance,
-			parent:     beadCreateParent, rig: beadCreateRig,
-			quiet: beadCreateQuiet, json: beadCreateJSON,
-		})
+		return newBeadVerbs(cmd).create(r)
 	},
+}
+
+// beadCreateRequestFrom maps the create verb's flags and title argument to
+// the request it acts on. acceptanceSet records an explicitly given
+// --acceptance, so create can refuse a blank one the store would drop.
+func beadCreateRequestFrom(f *pflag.FlagSet, args []string) (beadCreateRequest, error) {
+	title, _ := f.GetString("title")
+	if len(args) == 1 {
+		if title != "" {
+			return beadCreateRequest{}, fmt.Errorf("give the title once: as an argument or --title")
+		}
+		title = args[0]
+	}
+	kind, _ := f.GetString("type")
+	priority, _ := f.GetInt("priority")
+	labels, _ := f.GetStringArray("label")
+	description, _ := f.GetString("description")
+	acceptance, _ := f.GetString("acceptance")
+	parent, _ := f.GetString("parent")
+	rig, _ := f.GetString("rig")
+	quiet, _ := f.GetBool("quiet")
+	asJSON, _ := f.GetBool("json")
+	return beadCreateRequest{
+		title: title, kind: kind, priority: priority,
+		labels: labels, description: description,
+		acceptance: acceptance, acceptanceSet: f.Changed("acceptance"),
+		parent: parent, rig: rig,
+		quiet: quiet, json: asJSON,
+	}, nil
 }
 
 var beadNoteCmd = &cobra.Command{
@@ -146,20 +150,30 @@ Examples:
   gt bead update gt-abc --acceptance="- [x] the refusal names the verb"`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var opts beads.UpdateOptions
-		if cmd.Flags().Changed("title") {
-			opts.Title = &beadUpdateTitle
-		}
-		if cmd.Flags().Changed("priority") {
-			opts.Priority = &beadUpdatePriority
-		}
-		if cmd.Flags().Changed("acceptance") {
-			opts.Acceptance = &beadUpdateAcceptance
-		}
-		opts.AddLabels = beadUpdateAddLabels
-		opts.RemoveLabels = beadUpdateRemoveLabel
-		return newBeadVerbs(cmd).update(args[0], opts)
+		return newBeadVerbs(cmd).update(args[0], beadUpdateOptions(cmd.Flags()))
 	},
+}
+
+// beadUpdateOptions maps the update verb's flags to the store options. A flag
+// that was not given stays nil, so an omitted --acceptance leaves the
+// criteria alone while an explicitly blank one is refused (gt-9smgr).
+func beadUpdateOptions(f *pflag.FlagSet) beads.UpdateOptions {
+	var opts beads.UpdateOptions
+	if f.Changed("title") {
+		title, _ := f.GetString("title")
+		opts.Title = &title
+	}
+	if f.Changed("priority") {
+		priority, _ := f.GetInt("priority")
+		opts.Priority = &priority
+	}
+	if f.Changed("acceptance") {
+		acceptance, _ := f.GetString("acceptance")
+		opts.Acceptance = &acceptance
+	}
+	opts.AddLabels, _ = f.GetStringArray("add-label")
+	opts.RemoveLabels, _ = f.GetStringArray("remove-label")
+	return opts
 }
 
 var beadClaimCmd = &cobra.Command{
@@ -255,25 +269,35 @@ var beadReopenCmd = &cobra.Command{
 	},
 }
 
-func init() {
-	f := beadCreateCmd.Flags()
-	f.StringVar(&beadCreateTitle, "title", "", "Title (or give it as the argument)")
-	f.StringVarP(&beadCreateType, "type", "t", "", "Kind: task, bug, feature, epic (recorded as a gt:<type> label)")
-	f.IntVarP(&beadCreatePriority, "priority", "p", -1, "Priority 0-4 (default: bd's, 2)")
-	f.StringArrayVarP(&beadCreateLabels, "label", "l", nil, "Label to add (repeatable)")
-	f.StringVarP(&beadCreateDesc, "description", "d", "", "Description")
-	f.StringVar(&beadCreateAcceptance, "acceptance", "", "Acceptance criteria block for the new bead")
-	f.StringVar(&beadCreateParent, "parent", "", "Parent bead: the new bead becomes its child")
-	f.StringVar(&beadCreateRig, "rig", "", "File in this rig's database (hq for town beads)")
-	f.BoolVarP(&beadCreateQuiet, "quiet", "q", false, "Print only the new bead's ID")
-	f.BoolVar(&beadCreateJSON, "json", false, "Print the new bead as JSON")
+// beadCreateFlags registers the create verb's flags. The test that checks the
+// flag-to-request mapping registers them through this function too, so the
+// two cannot drift.
+func beadCreateFlags(f *pflag.FlagSet) {
+	f.String("title", "", "Title (or give it as the argument)")
+	f.StringP("type", "t", "", "Kind: task, bug, feature, epic (recorded as a gt:<type> label)")
+	f.IntP("priority", "p", -1, "Priority 0-4 (default: bd's, 2)")
+	f.StringArrayP("label", "l", nil, "Label to add (repeatable)")
+	f.StringP("description", "d", "", "Description")
+	f.String("acceptance", "", "Acceptance criteria block for the new bead")
+	f.String("parent", "", "Parent bead: the new bead becomes its child")
+	f.String("rig", "", "File in this rig's database (hq for town beads)")
+	f.BoolP("quiet", "q", false, "Print only the new bead's ID")
+	f.Bool("json", false, "Print the new bead as JSON")
+}
 
-	f = beadUpdateCmd.Flags()
-	f.StringVar(&beadUpdateTitle, "title", "", "New title")
-	f.IntVarP(&beadUpdatePriority, "priority", "p", 0, "New priority 0-4")
-	f.StringArrayVar(&beadUpdateAddLabels, "add-label", nil, "Label to add (repeatable)")
-	f.StringArrayVar(&beadUpdateRemoveLabel, "remove-label", nil, "Label to remove (repeatable)")
-	f.StringVar(&beadUpdateAcceptance, "acceptance", "", "New acceptance criteria, the whole block")
+// beadUpdateFlags registers the update verb's flags; the mapping test uses it
+// for the same reason beadCreateFlags exists.
+func beadUpdateFlags(f *pflag.FlagSet) {
+	f.String("title", "", "New title")
+	f.IntP("priority", "p", 0, "New priority 0-4")
+	f.StringArray("add-label", nil, "Label to add (repeatable)")
+	f.StringArray("remove-label", nil, "Label to remove (repeatable)")
+	f.String("acceptance", "", "New acceptance criteria, the whole block")
+}
+
+func init() {
+	beadCreateFlags(beadCreateCmd.Flags())
+	beadUpdateFlags(beadUpdateCmd.Flags())
 
 	beadResetCmd.Flags().StringVar(&beadResetReason, "reason", "", "Why: appended to the bead's notes")
 	beadCloseCmd.Flags().StringVarP(&beadCloseReason, "reason", "r", "", "Close reason")
@@ -346,11 +370,21 @@ type beadCreateRequest struct {
 	priority                                          int
 	labels                                            []string
 	quiet, json                                       bool
+	// acceptanceSet records an explicitly given --acceptance, which create
+	// refuses when blank rather than letting the store drop it.
+	acceptanceSet bool
 }
 
 func (v *beadVerbs) create(r beadCreateRequest) error {
 	if strings.TrimSpace(r.title) == "" {
 		return fmt.Errorf("a title is required")
+	}
+	// The other gt verb that writes acceptance is update, which refuses a
+	// blank block the same way. Here a blank block would leave the store
+	// field empty, so the criteria would look absent rather than deliberately
+	// unset (gt-aht2p).
+	if r.acceptanceSet && strings.TrimSpace(r.acceptance) == "" {
+		return fmt.Errorf("--acceptance is empty: the new bead would carry no acceptance criteria")
 	}
 	labels := append([]string(nil), r.labels...)
 	if r.kind != "" {
