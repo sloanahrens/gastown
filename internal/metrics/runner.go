@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // killGrace is how long a child gets after its context ends before its pipes
@@ -77,11 +78,20 @@ func childEnv(allowEnv, extraEnv []string, lookup func(string) (string, bool)) [
 	return append(env, extraEnv...)
 }
 
-// tailString returns the last max bytes of s, trimmed.
-func tailString(s string, max int) string {
+// tailString returns the last at most maxBytes bytes of s, trimmed, starting
+// at a rune boundary: a child's stderr can be any UTF-8, and a byte cut that
+// lands mid-sequence would put a replacement character in a user-facing error.
+func tailString(s string, maxBytes int) string {
 	s = strings.TrimSpace(s)
-	if len(s) > max {
-		s = s[len(s)-max:]
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	s = s[len(s)-maxBytes:]
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
 	}
 	return s
 }
