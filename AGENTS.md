@@ -23,7 +23,7 @@ A bare `go build` or `go test` fails on the ICU headers on macOS; the make targe
 
 ## Architecture in five lines
 
-Before changing how sessions are supervised or how work is landed, read [Understanding Gas Town](docs/overview.md). Before changing where beads are stored, read [Dolt Storage Architecture](docs/design/dolt-storage.md). The lines below are orientation only.
+Before changing how sessions are supervised or how work is landed, read [Understanding Gas Town](docs/overview.md). Before changing where beads are stored, read [Dolt Storage Architecture](docs/design/dolt-storage.md). Before moving a component to another host or cluster, read [Moving a component: metrics checklist](docs/metrics.md). The lines below are orientation only.
 
 - The daemon is one Go process: it supervises agent sessions and is the only thing that restarts one.
 - Its landing worker gates and merges branches that `gt done` marked ready, and is the only non-human route to `main`.
