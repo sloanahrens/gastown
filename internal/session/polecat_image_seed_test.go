@@ -58,15 +58,15 @@ func dockerfileEnv(t *testing.T) map[string]string {
 // sandbox's volume, so a seed under it would cost gigabytes of copy and disk per
 // sandbox, while a path outside is one shared image layer.
 //
-// Each path is also one the sandbox policy grants (deploy/polecat/policy.yaml,
-// hq-gi754): GOMODCACHE under /usr, GOCACHE in /tmp, neither under the denied
-// /opt.
+// Each path is also one the sandbox policy grants read_write (deploy/polecat/
+// policy.yaml, hq-gi754): both in /tmp, neither under the denied /opt. A writable
+// path is what lets a sandbox fetch a module the seed lacks (gt-pvudz).
 func TestPolecatImageSeedSetsCachesOutsideTheWorkspace(t *testing.T) {
 	t.Parallel()
 	ins := dockerfileInstructions(t)
 	env := dockerfileEnv(t)
 	for _, want := range []struct{ key, path string }{
-		{"GOMODCACHE", "/usr/local/share/gomodcache"},
+		{"GOMODCACHE", "/tmp/gomodcache"},
 		{"GOCACHE", "/tmp/gocache"},
 	} {
 		got := env[want.key]

@@ -6,11 +6,18 @@ import (
 	"testing"
 )
 
-// goCacheGrants maps each Go cache the image sets to the filesystem_policy
-// list that must grant it: a sandbox mounts the module cache read-only and the
-// build cache read-write (gt-ieuvf).
+// goCacheGrants maps each Go cache the image sets to the filesystem_policy list
+// that must grant it. Both caches are writable: the build cache as the sandbox
+// compiles (gt-ieuvf), and the module cache so a sandbox can fetch a module the
+// image seed lacks (gt-pvudz).
+//
+// Integrity trade-off: a writable module cache lets a sandbox change extracted
+// module files that later builds in the same cache compile from. Go checks a
+// module against go.sum when it downloads it, not on every build, so such a
+// change is not caught by the build. The read-only module cache this replaced
+// kept the seeded files unchanged; the trade-off is Sloan's to accept.
 var goCacheGrants = []struct{ env, grant string }{
-	{"GOMODCACHE", "read_only"},
+	{"GOMODCACHE", "read_write"},
 	{"GOCACHE", "read_write"},
 }
 
@@ -58,8 +65,8 @@ func TestPolecatImageGoCachesAreGrantedByThePolicy(t *testing.T) {
 }
 
 // The check must catch the moves that break a sandbox: a cache back under /opt,
-// a module cache the policy grants writable only, a build cache under a
-// read-only path, or a cache the Dockerfile stops setting (hq-gi754).
+// a cache the policy grants read-only only, or a cache the Dockerfile stops
+// setting (hq-gi754).
 func TestGoCacheProblemsRejectsCachesThePolicyDoesNotGrant(t *testing.T) {
 	t.Parallel()
 	policy := func(readOnly, readWrite []string) map[string]any {
@@ -84,12 +91,12 @@ func TestGoCacheProblemsRejectsCachesThePolicyDoesNotGrant(t *testing.T) {
 		env    map[string]string
 		want   string // env var the problem must name; "" wants no problem
 	}{
-		{"granted", policy([]string{"/usr"}, []string{"/tmp"}), env("/usr/local/share/gomodcache", "/tmp/gocache"), ""},
+		{"granted", policy([]string{"/usr"}, []string{"/tmp"}), env("/tmp/gomodcache", "/tmp/gocache"), ""},
 		{"module cache under /opt", policy([]string{"/opt"}, []string{"/tmp"}), env("/opt/gomod", "/tmp/gocache"), "GOMODCACHE"},
-		{"build cache under /opt", policy([]string{"/usr"}, []string{"/opt"}), env("/usr/local/share/gomodcache", "/opt/gocache"), "GOCACHE"},
-		{"module cache under read_write", policy([]string{"/usr"}, []string{"/tmp"}), env("/tmp/gomodcache", "/tmp/gocache"), "GOMODCACHE"},
-		{"build cache under read_only", policy([]string{"/usr"}, []string{"/tmp"}), env("/usr/local/share/gomodcache", "/usr/gocache"), "GOCACHE"},
-		{"no GOCACHE", policy([]string{"/usr"}, []string{"/tmp"}), env("/usr/local/share/gomodcache", ""), "GOCACHE"},
+		{"build cache under /opt", policy([]string{"/usr"}, []string{"/opt"}), env("/tmp/gomodcache", "/opt/gocache"), "GOCACHE"},
+		{"module cache under read_only", policy([]string{"/usr"}, []string{"/tmp"}), env("/usr/gomodcache", "/tmp/gocache"), "GOMODCACHE"},
+		{"build cache under read_only", policy([]string{"/usr"}, []string{"/tmp"}), env("/tmp/gomodcache", "/usr/gocache"), "GOCACHE"},
+		{"no GOCACHE", policy([]string{"/usr"}, []string{"/tmp"}), env("/tmp/gomodcache", ""), "GOCACHE"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
