@@ -84,28 +84,10 @@ func (b *Beads) CountIssues() (int, error) {
 	return n, nil
 }
 
-// TableExists reports whether the database has a table named name: a query
-// on it succeeds.
-func (b *Beads) TableExists(name string) bool {
-	args, err := beadsql.TableProbe(name).BdArgs()
-	if err != nil {
-		return false
-	}
-	_, err = b.run(args...)
-	return err == nil
-}
-
 // StatsJSON returns bd stats --json. A caller that only needs to know bd
 // can open the database checks the error.
 func (b *Beads) StatsJSON() ([]byte, error) {
 	return b.run("stats", "--json")
-}
-
-// Export writes every issue in the database to path as JSONL (bd export
-// -o), the file bd's fallback import reads.
-func (b *Beads) Export(path string) error {
-	_, err := b.run("export", "-o", path)
-	return err
 }
 
 // InitOptions describe a bd init of a server-mode database.

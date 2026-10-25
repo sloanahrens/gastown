@@ -446,7 +446,7 @@ func startSharedDoltContainer() {
 	os.Setenv("GT_TEST_EXTERNAL_DOLT", "1") //nolint:tenv // integration tests reuse this container
 	// This container is always ephemeral and test-only (never production), so
 	// declare it a dedicated test server. Without this, bd refuses to connect
-	// the testdb_* databases minted by isolated Init() calls (gt-uq28):
+	// the testdb_* databases minted by isolated InitForTest calls (gt-uq28):
 	// "set BEADS_TEST_SERVER=1 on a dedicated test server". Process-wide
 	// because callers reaching this port through a non-isolated beads client
 	// (e.g. refinery's Manager, which inherits os.Environ() directly) need it

@@ -2,8 +2,6 @@ package beadsfake
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -44,36 +42,9 @@ var adminCases = []struct {
 }{
 	{"config", adminConfig},
 	{"counts and stats", adminCounts},
-	{"tables", adminTables},
 	{"wisp list", adminWispList},
 	{"wisp gc candidates", adminWispGCCandidates},
 	{"events journal", adminEventsJournal},
-	{"export", adminExport},
-}
-
-// adminExport pins Export: a JSONL file holding each issue as one object a
-// line, the bd fallback import's format.
-func adminExport(t *testing.T, s *adminScope) {
-	is := s.mustCreate(t, beads.CreateOptions{Title: "exported " + s.tag, Priority: -1})
-	path := filepath.Join(t.TempDir(), "issues.jsonl")
-	mustDo(t, "Export", s.Export(path))
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading export: %v", err)
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		var got beads.Issue
-		if err := json.Unmarshal([]byte(line), &got); err != nil {
-			t.Fatalf("export line %q is not an issue object: %v", line, err)
-		}
-		if got.ID == is.ID {
-			if got.Title != is.Title || got.Status != "open" {
-				t.Errorf("exported %s = %+v, want title %q, open", is.ID, got, is.Title)
-			}
-			return
-		}
-	}
-	t.Errorf("export has no line for %s:\n%s", is.ID, data)
 }
 
 // adminEventsJournal pins EventsTail over the mutations an events-journal
@@ -177,17 +148,6 @@ func adminCounts(t *testing.T, s *adminScope) {
 	st := stats(t, s)
 	if d := (statsSummary{st.Total - st0.Total, st.Open - st0.Open, st.Closed - st0.Closed}); d != (statsSummary{2, 1, 1}) {
 		t.Errorf("stats summary grew by %+v, want total 2 open 1 closed 1", d)
-	}
-}
-
-func adminTables(t *testing.T, s *adminScope) {
-	for _, name := range []string{"issues", "wisps", "labels", "dependencies", "wisp_dependencies"} {
-		if !s.TableExists(name) {
-			t.Errorf("TableExists(%s) = false", name)
-		}
-	}
-	if s.TableExists("no_such_table") {
-		t.Error("TableExists(no_such_table) = true")
 	}
 }
 

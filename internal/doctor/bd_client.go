@@ -19,7 +19,6 @@ type bdCLI interface {
 	ConfigSet(key, value string) error
 	SQLCSV(query beadsql.Query) ([][]string, error)
 	CountIssues() (int, error)
-	TableExists(name string) bool
 	StatsJSON() ([]byte, error)
 	InitDatabase(opts beads.InitOptions) error
 	WispGCCandidates(age time.Duration) ([]string, error)

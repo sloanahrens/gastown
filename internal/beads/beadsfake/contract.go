@@ -896,12 +896,12 @@ func contractChildren(t *testing.T, s *scope) {
 // contractRelease pins that Release does not force. A claim another actor
 // still holds survives it, with an error, because bd refuses to reassign
 // their live in_progress claim without --force (gt-v8ujv); the store's own
-// claim is released, reason and all.
+// claim is released.
 func contractRelease(t *testing.T, s *scope) {
 	held := s.mustCreate(t, beads.CreateOptions{Title: "held", Priority: -1})
 	holder := s.who("dead")
 	mustDo(t, "claim", s.Update(held.ID, beads.UpdateOptions{Status: ptr("in_progress"), Assignee: ptr(holder)}))
-	refused(t, "releasing another actor's live claim", s.ReleaseWithReason(held.ID, "worker died"))
+	refused(t, "releasing another actor's live claim", s.Release(held.ID))
 	if got := s.mustShow(t, held.ID); got.Status != "in_progress" || got.Assignee != holder {
 		t.Errorf("a refused release changed the claim to %q held by %q, want in_progress by %s", got.Status, got.Assignee, holder)
 	}
@@ -915,13 +915,10 @@ func contractRelease(t *testing.T, s *scope) {
 		t.Fatal("the store recorded no creator, so its own claim cannot be made")
 	}
 	mustDo(t, "claim as the store's actor", s.Update(is.ID, beads.UpdateOptions{Status: ptr("in_progress"), Assignee: ptr(self)}))
-	mustDo(t, "ReleaseWithReason", s.ReleaseWithReason(is.ID, "worker died"))
+	mustDo(t, "Release", s.Release(is.ID))
 	got := s.mustShow(t, is.ID)
 	if got.Status != "open" || got.Assignee != "" {
 		t.Errorf("after release: status %q assignee %q, want open and none", got.Status, got.Assignee)
-	}
-	if !strings.Contains(got.Notes, "worker died") {
-		t.Errorf("notes = %q, want the release reason", got.Notes)
 	}
 	other := s.mustCreate(t, beads.CreateOptions{Title: "stuck 2", Priority: -1})
 	mustDo(t, "claim 2", s.Update(other.ID, beads.UpdateOptions{Status: ptr("in_progress"), Assignee: ptr(self)}))

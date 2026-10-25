@@ -48,7 +48,7 @@ func TestIntegrationClientContract(t *testing.T) {
 	t.Setenv("GIT_CONFIG_VALUE_0", "maintainer")
 	newDB := func(t *testing.T, dir string) *beads.Beads {
 		b := beads.NewIsolatedWithPort(dir, port)
-		if err := b.Init("gt"); err != nil {
+		if err := beads.InitForTest(b, "gt"); err != nil {
 			t.Fatalf("bd init on the test container: %v", err)
 		}
 		// Every store gastown makes turns the events journal on in its

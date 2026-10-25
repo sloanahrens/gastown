@@ -104,7 +104,7 @@ var bdCatalogRaceMarkers = []string{
 //	refusing to auto-apply 11 pending schema migrations to a server-mode
 //	database (v55 -> v66)
 //
-// On a name Init minted microseconds earlier (testDatabaseName) a legacy
+// On a name InitForTest minted microseconds earlier (testDatabaseName) a legacy
 // refusal has two sources. One is the catalog race one check past
 // bdCatalogRaceMarkers: the open resolved a root and the era read off it
 // belonged to another database, so an attempt that resolves again can land on
@@ -127,7 +127,7 @@ var bdInitSchemaRaceMarkers = []string{
 }
 
 // bdInitOnTestDatabase reports whether args are the one command shape the
-// schema-era class may retry: bd init against a database name Init minted for
+// schema-era class may retry: bd init against a database name InitForTest minted for
 // the shared test Dolt container (testDatabaseName).
 //
 // The gate is the name, because the name is what proves the era foreign. An
@@ -412,7 +412,7 @@ func (r *bdInitRetryReset) next(args []string) []string {
 	return remintTestDatabase(args, filepath.Dir(r.dir))
 }
 
-// remintTestDatabase returns args with Init's testdb_ name replaced by a fresh
+// remintTestDatabase returns args with InitForTest's testdb_ name replaced by a fresh
 // one — from the pre-created pool when one serves the init's --server-port
 // (testDatabaseFor) — and args of any other shape unchanged: only
 // bdInitOnTestDatabase reaches the rewrite, and the check is repeated here so

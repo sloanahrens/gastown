@@ -1,11 +1,7 @@
 package trackerclient
 
 import (
-	"bufio"
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -43,18 +39,6 @@ func (c *Client) CountIssues() (int, error) {
 	}
 	return st.Total, nil
 }
-
-// tables are the tables a bd database has, which callers probe for. The
-// tracker has no such tables, but holds all of what they hold, so each is true:
-// wisps and their links live in the one issues and dependencies tables.
-var tables = map[string]bool{
-	"issues": true, "wisps": true, "labels": true, "wisp_labels": true, "dependencies": true, "wisp_dependencies": true,
-	"comments": true, "wisp_comments": true, "events": true, "wisp_events": true, "config": true,
-	"custom_types": true, "custom_statuses": true, "child_counters": true,
-}
-
-// TableExists reports whether a table of bd's database has a counterpart here.
-func (c *Client) TableExists(name string) bool { return tables[name] }
 
 // StatsJSON returns bd stats --json's summary for the rig.
 func (c *Client) StatsJSON() ([]byte, error) {
@@ -158,58 +142,4 @@ func eventStatus(e api.Event) string {
 		return ""
 	}
 	return p.Status
-}
-
-// exportBatch is how many issues one read of full rows asks for.
-const exportBatch = 200
-
-// Export writes every issue of the rig to path as JSONL, one issue object a
-// line, wisps included, with the dependencies a read of a single issue carries.
-// The file appears whole or not at all.
-func (c *Client) Export(path string) error {
-	var ids []string
-	for _, wisps := range []bool{false, true} {
-		all, err := c.tc.ListAll(ctx(), api.ListFilter{Rig: c.rig, Statuses: []string{"all"}, Ephemeral: wisps, IncludeInfra: true})
-		if err != nil {
-			return mapErr(err)
-		}
-		for _, is := range all {
-			ids = append(ids, is.ID)
-		}
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".export-*")
-	if err != nil {
-		return fmt.Errorf("export: %w", err)
-	}
-	defer os.Remove(tmp.Name()) //nolint:errcheck // gone after the rename; a leftover temp file is the only residue otherwise
-	w := bufio.NewWriter(tmp)
-	for start := 0; start < len(ids); start += exportBatch {
-		end := min(start+exportBatch, len(ids))
-		full, err := c.tc.ShowMany(ctx(), ids[start:end])
-		if err != nil {
-			_ = tmp.Close()
-			return mapErr(err)
-		}
-		for _, id := range ids[start:end] {
-			a, ok := full[id]
-			if !ok {
-				continue // deleted since the list
-			}
-			line, err := json.Marshal(issue(a))
-			if err != nil {
-				_ = tmp.Close()
-				return fmt.Errorf("export: %w", err)
-			}
-			line = append(line, '\n')
-			w.Write(line) //nolint:errcheck // bufio.Writer keeps the first error; Flush returns it
-		}
-	}
-	if err := w.Flush(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("export: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("export: %w", err)
-	}
-	return os.Rename(tmp.Name(), path)
 }

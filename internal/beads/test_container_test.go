@@ -422,7 +422,7 @@ func TestInitWaitsForATestContainerInitSlot(t *testing.T) {
 		t.Fatalf("take the only slot: %v", err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- b.Init("gt") }()
+	go func() { done <- InitForTest(b, "gt") }()
 
 	// Init is queued on the slot, not merely slow to start (gt-h1vod).
 	<-blocked
@@ -455,7 +455,7 @@ func TestInitSlotWaitIsBounded(t *testing.T) {
 	}
 	defer release()
 
-	err = NewIsolatedWithPort(t.TempDir(), 45678).Init("gt")
+	err = InitForTest(NewIsolatedWithPort(t.TempDir(), 45678), "gt")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Init with no free slot = %v, want a deadline error", err)
 	}
@@ -482,7 +482,7 @@ func TestInitOutsideTheContainerTakesNoSlot(t *testing.T) {
 	}
 	defer release()
 
-	if err := NewIsolated(t.TempDir()).Init("gt"); err != nil {
+	if err := InitForTest(NewIsolated(t.TempDir()), "gt"); err != nil {
 		t.Fatalf("port-less Init: %v", err)
 	}
 	if n := stub.calls(t); n != 1 {
@@ -506,7 +506,7 @@ func TestInitRetriesInsideOneSlot(t *testing.T) {
 	// A retry loop that re-acquired the slot it already holds would block
 	// here forever; the test binary's own timeout reports that, with every
 	// goroutine's stack, rather than a guessed wall-clock limit (gt-h1vod).
-	if err := NewIsolatedWithPort(t.TempDir(), 45678).Init("gt"); err != nil {
+	if err := InitForTest(NewIsolatedWithPort(t.TempDir(), 45678), "gt"); err != nil {
 		t.Fatalf("Init with two retried failures: %v", err)
 	}
 	if n := stub.calls(t); n != 3 {

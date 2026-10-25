@@ -52,7 +52,7 @@ func TestIntegrationValidateRecipient(t *testing.T) {
 	}
 	prefix := "vr" + hex.EncodeToString(buf[:])
 	b := beads.NewIsolatedWithPort(townRoot, doltPort)
-	if err := b.Init(prefix); err != nil {
+	if err := beads.InitForTest(b, prefix); err != nil {
 		t.Fatalf("bd init: %v", err)
 	}
 

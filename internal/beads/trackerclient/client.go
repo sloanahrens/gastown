@@ -187,12 +187,9 @@ func (c *Client) DeleteIssues(ids ...string) error {
 }
 
 // Release returns a claimed issue to open and clears its assignee.
-func (c *Client) Release(id string) error { return c.ReleaseWithReason(id, "") }
-
-// ReleaseWithReason is Release, recording reason in the notes.
-func (c *Client) ReleaseWithReason(id, reason string) error {
+func (c *Client) Release(id string) error {
 	open, none := "open", ""
-	return mapErr(c.tc.Update(ctx(), id, api.UpdatePatch{Status: &open, Assignee: &none, AppendNotes: reason}, api.Guard{}))
+	return mapErr(c.tc.Update(ctx(), id, api.UpdatePatch{Status: &open, Assignee: &none}, api.Guard{}))
 }
 
 // AddComment appends a comment as the client's actor.

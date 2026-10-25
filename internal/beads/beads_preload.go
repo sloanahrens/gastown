@@ -14,9 +14,9 @@ import "github.com/steveyegge/gastown/internal/beadsql"
 // label-filtered query cannot see them (gt-92zx). Labels and statuses scope the
 // issues side.
 //
-// The caches never refresh — the same caveat as PreloadAgentBeads and
-// PreloadMergeRequests: don't hold this instance across writes that could
-// create or change those rows mid-run.
+// The caches never refresh — the same caveat as PreloadMergeRequests: don't
+// hold this instance across writes that could create or change those rows
+// mid-run.
 func (b *Beads) PreloadBeads(labels []string, statuses []IssueStatus) error {
 	statuses = uniqueStatuses(statuses)
 	statusNames := make([]string, len(statuses))

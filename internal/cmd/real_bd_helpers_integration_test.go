@@ -36,7 +36,7 @@ func setupPatrolTestDB(t *testing.T) (string, *beads.Beads) {
 		t.Fatalf("rand: %v", err)
 	}
 	prefix := "pt" + hex.EncodeToString(buf[:])
-	if err := b.Init(prefix); err != nil {
+	if err := beads.InitForTest(b, prefix); err != nil {
 		testutil.FailContainerInit(t, b, err)
 	}
 

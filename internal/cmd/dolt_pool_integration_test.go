@@ -51,7 +51,7 @@ func TestIntegrationDoltPool_IsolatedInitsCreateNoDatabases(t *testing.T) {
 			var p int
 			_, _ = fmt.Sscan(port, &p)
 			b := beads.NewIsolatedWithPort(dirs[i], p)
-			if err := b.Init("dp" + hex.EncodeToString(buf[:])); err != nil {
+			if err := beads.InitForTest(b, "dp"+hex.EncodeToString(buf[:])); err != nil {
 				errs[i] = fmt.Errorf("init: %w", err)
 				return
 			}

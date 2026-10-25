@@ -71,8 +71,6 @@ type Client interface {
 	// another actor still holds in_progress, so recovering a dead worker's
 	// claim is ReleaseIfAssignee/TransferIfAssignee.
 	Release(id string) error
-	// ReleaseWithReason is Release, recording reason in the notes.
-	ReleaseWithReason(id, reason string) error
 	// AddComment appends a comment.
 	AddComment(id, comment string) error
 	// AddCommentAs appends a comment recorded as written by author (bd's
@@ -106,24 +104,20 @@ type Client interface {
 
 var _ Client = (*Beads)(nil)
 
-// Admin is the maintenance surface beadsfake models: config keys, table
-// probes, counts, stats, the wisp list, gc's dry-run candidates, the
-// events journal and the JSONL export.
+// Admin is the maintenance surface beadsfake models: config keys, counts,
+// stats, the wisp list, gc's dry-run candidates and the events journal.
 // beadsfake.RunAdminContract pins the fake to *Beads on it. (SQLCSV and
 // InitDatabase are on *Beads too, but a fake can only script or record them.)
 type Admin interface {
 	ConfigGet(key string) (string, error)
 	ConfigSet(key, value string) error
 	CountIssues() (int, error)
-	TableExists(name string) bool
 	StatsJSON() ([]byte, error)
 	MolWispList() ([]*Issue, error)
 	WispGCCandidates(age time.Duration) ([]string, error)
 	// EventsTail reads the events journal after since, at most limit
 	// records (0 = all); a pruned-past since is *EventsTruncatedError.
 	EventsTail(since int64, limit int) (*EventsPage, error)
-	// Export writes every issue to path as JSONL, one issue object a line.
-	Export(path string) error
 }
 
 var _ Admin = (*Beads)(nil)

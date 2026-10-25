@@ -61,8 +61,8 @@ func TestIntegrationTrackerClientSatisfiesTheActorContract(t *testing.T) {
 }
 
 // The maintenance surface runs with an admin token (configuration writes need
-// one; a seat token gets api.ErrForbidden): config, counts, stats, tables, wisps, the events
-// journal and export, on one database for the whole run as the contract wants.
+// one; a seat token gets api.ErrForbidden): config, counts, stats, wisps and
+// the events journal, on one database for the whole run as the contract wants.
 func TestIntegrationTrackerClientSatisfiesTheAdminContract(t *testing.T) {
 	beadsfake.RunAdminContract(t, func(t *testing.T) beadsfake.AdminClient { return newTracker(t, "town/daemon", api.ScopeAdmin) })
 }

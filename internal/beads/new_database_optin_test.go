@@ -78,7 +78,7 @@ func TestInitAndInitDatabaseCarryTheNewDatabaseOptIn(t *testing.T) {
 	r := newRecorder(nil)
 	b := newRecordedBeads(t.TempDir(), r)
 
-	if err := b.Init("gt"); err != nil {
+	if err := InitForTest(b, "gt"); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	if err := b.InitDatabase(InitOptions{Prefix: "gt", Database: "zzrig", ServerPort: 3307}); err != nil {

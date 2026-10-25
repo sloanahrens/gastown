@@ -28,10 +28,11 @@ type DetachOptions struct {
 
 // detachAuditLogger is the store that keeps a detach audit log: the file
 // lives in the store's own .beads directory, which a Client in general has no
-// way to name. A Client that implements it (a *Beads) records the entry; one
-// that does not (beadsfake in unit tests) detaches without one.
+// way to name. Only a *Beads implements it — the method is unexported, so the
+// log stays off the store's public surface — and a Client that does not
+// (beadsfake in unit tests) detaches without one.
 type detachAuditLogger interface {
-	LogDetachAudit(entry DetachAuditEntry) error
+	logDetachAudit(entry DetachAuditEntry) error
 }
 
 // DetachMoleculeWithAudit removes molecule attachment from a pinned bead,
@@ -72,7 +73,7 @@ func DetachMoleculeWithAudit(c Client, pinnedBeadID string, opts DetachOptions) 
 		PreviousState:    issue.Status,
 	}
 	if logger, ok := c.(detachAuditLogger); ok {
-		if err := logger.LogDetachAudit(entry); err != nil {
+		if err := logger.logDetachAudit(entry); err != nil {
 			// Log error but don't fail the detach operation
 			fmt.Fprintf(os.Stderr, "Warning: failed to write audit log: %v\n", err)
 		}
@@ -90,10 +91,10 @@ func DetachMoleculeWithAudit(c Client, pinnedBeadID string, opts DetachOptions) 
 	return c.Show(pinnedBeadID)
 }
 
-// LogDetachAudit appends an audit entry to the audit log file.
+// logDetachAudit appends an audit entry to the audit log file.
 // The audit log is stored in the resolved .beads directory as audit.log in JSONL format.
 // This follows any beads redirect so audit entries go to the correct location.
-func (b *Beads) LogDetachAudit(entry DetachAuditEntry) (retErr error) {
+func (b *Beads) logDetachAudit(entry DetachAuditEntry) (retErr error) {
 	auditPath := filepath.Join(b.getResolvedBeadsDir(), "audit.log")
 
 	// Marshal entry to JSON
