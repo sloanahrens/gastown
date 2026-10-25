@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
@@ -88,6 +90,25 @@ type dashSeat struct {
 	// pane's On it falls back to it for a bead the feed has no dispatch line
 	// for; zero when the agent bead is missing or undated (gt-jwmxo).
 	HookedAt time.Time
+	// Sandbox is the seat's liveness where the host tmux cannot see it: a
+	// sandboxed seat's session lives inside its sandbox (gt-43k7c).
+	Sandbox dashSandboxSeat
+}
+
+// dashSandboxSeat is a sandboxed seat's liveness as the town answers it. The
+// host tmux never lists the seat's session, so absence from the host listing
+// says nothing about the seat.
+type dashSandboxSeat struct {
+	// Seat is true when the agent's seat runs in a sandbox, from the town's seat
+	// settings.
+	Seat bool
+	// Sampled is true once the patrol has recorded a liveness sample for the
+	// seat. Before that the town has no answer for it, and a session the host
+	// cannot see is a question rather than a death.
+	Sampled bool
+	// Unknown is true when the town's seat settings could not be read, so
+	// nothing says whether the seat is a sandbox seat at all.
+	Unknown bool
 }
 
 // dashPolecatInputs is everything the polecat table is built from, so the
@@ -179,6 +200,11 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 			p.HasSession = true
 			at := at
 			p.LastActive = &at
+		} else if s.Item.SessionRunning {
+			// The session is up where the host tmux neither lists nor clocks it
+			// (inside a sandbox), so the row says it has one and leaves its
+			// silence unknown rather than zero (gt-43k7c).
+			p.HasSession = true
 		}
 		var labels []string
 		hasWork := s.Issue != nil
@@ -200,6 +226,16 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 		p.State, p.Reason = dashPolecatState(s.Item, hasWork, hasWork && in.Ready[p.Bead], labels)
 		if !in.SessionsKnown && p.State == dashboard.StateStalled {
 			p.State, p.Reason = dashboard.StateUnknown, "tmux could not be read, so stalled cannot be told from working"
+		}
+		if s.Sandbox.Seat && hasWork && !s.Sandbox.Sampled && p.State == dashboard.StateStalled {
+			// A sandbox seat the patrol has not sampled yet: no session the host
+			// can see says nothing about it, so the seat is starting (gt-43k7c).
+			p.State, p.Reason = dashboard.StateSpawning, "sandbox seat starting: no liveness sample yet"
+		}
+		if s.Sandbox.Unknown && hasWork && p.State == dashboard.StateStalled {
+			// The seat settings could not be read: a seat the host tmux cannot see
+			// may be a sandbox seat that is alive, so stalled cannot be told apart.
+			p.State, p.Reason = dashboard.StateUnknown, "seat settings could not be read, so stalled cannot be told from a sandbox seat starting"
 		}
 		p.Hints = dashPolecatHints(s.Rig, s.Name, p.Bead, p.State)
 		out = append(out, p)
@@ -329,7 +365,8 @@ func (c *dashSeatCache) put(id, key string, item polecatInventoryItem) {
 // a polecat is doing. (The capacity accounting's counts-only environment
 // reports a parked or finished polecat as stalled, which is right for counting
 // seats and wrong for describing them.) Sessions are the tmux names read once
-// by the caller. A rig whose beads cannot be read is an error, not a rig of
+// by the caller, plus the sandbox registry's, which the host tmux cannot see
+// (gt-43k7c). A rig whose beads cannot be read is an error, not a rig of
 // idle polecats: a store that is down must not read as a quiet town.
 func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache *dashSeatCache, lister sessionLister) ([]dashSeat, error) {
 	rigs, err := knownRigNames(townRoot)
@@ -339,7 +376,9 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 	reg := townRegistry()
 	// The lister reads each live session's recorded GT_AGENT, which the pane
 	// names as the polecat's model.
-	sessions := newPolecatSessionSetFromNames(reg, lister, sessionNames)
+	host := newPolecatSessionSetFromNames(reg, lister, sessionNames)
+	sessions := dashSeatSessions(host, reg, session.ListSandboxSessions(townRoot), sandboxSeatDeathsFor(townRoot))
+	sandboxAgents, sandboxErr := dashSandboxSeatAgents(townRoot)
 	spawnWindow := polecatSpawnGraceWindow(townRoot)
 	now := time.Now()
 	var seats []dashSeat
@@ -404,8 +443,9 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 			// session (the seat ran gt done and waits for its bead to land)
 			// the agent the sling recorded on the seat's agent bead stands in;
 			// that bead is already in hand, so it costs no read.
-			item.Agent = dashSeatAgent(sessions, rig, name, agentBead)
-			seats = append(seats, dashSeat{Rig: rig, Name: name, Session: session.PolecatSessionName(reg.PrefixForRig(rig), name), RigParked: rigParked, Item: item, Issue: active[name], HookedAt: hookedAt})
+			item.Agent = dashSeatAgent(host, rig, name, agentBead)
+			sandbox := dashSandboxStatus(sandboxAgents, sandboxErr, item.Agent, func() bool { return dashSandboxSampled(townRoot, rig, name) })
+			seats = append(seats, dashSeat{Rig: rig, Name: name, Session: session.PolecatSessionName(reg.PrefixForRig(rig), name), RigParked: rigParked, Item: item, Issue: active[name], HookedAt: hookedAt, Sandbox: sandbox})
 		}
 	}
 	return seats, nil
@@ -422,6 +462,85 @@ func dashSeatAgent(sessions polecatSessionSet, rig, name string, agentBead *bead
 		return fields.Agent
 	}
 	return ""
+}
+
+// dashSeatSessions is the live-session set the polecat table classifies seats
+// with: the host tmux's sessions plus the sandbox registry's, minus the seats
+// the patrol has recorded dead. gt polecat list counts the registry's
+// sessions, and the host listing cannot see a session inside a sandbox, so a
+// set built from the host names alone reads every live sandbox seat as
+// sessionless (gt-43k7c).
+//
+// The registry's entries carry liveness alone — no agent, no creation time — so
+// a poll costs no exec into a sandbox. The seat's agent is read from host
+// sessions only (see dashSeatAgent), so a sandboxed seat keeps the agent its
+// sling recorded.
+func dashSeatSessions(host polecatSessionSet, reg *session.PrefixRegistry, sandboxNames []string, dead sandboxSeatDeadFunc) polecatSessionSet {
+	sessions := make(polecatSessionSet, len(host)+len(sandboxNames))
+	for key, entry := range host {
+		sessions[key] = entry
+	}
+	for key, entry := range newPolecatSessionSet(reg, sandboxNames) {
+		if _, ok := sessions[key]; !ok {
+			sessions[key] = entry
+		}
+	}
+	if dead == nil {
+		return sessions
+	}
+	for key, entry := range sessions {
+		rigName, polecatName, ok := strings.Cut(key, polecatSessionKeySep)
+		if ok && dead(entry.Name, rigName, polecatName) {
+			delete(sessions, key)
+		}
+	}
+	return sessions
+}
+
+// dashSandboxSeatAgents names the agents whose seats run in a sandbox, from the
+// town's seat settings — the read the inventory's sandbox git probe makes. When
+// the settings cannot be read it returns the error, and the caller marks every
+// seat's sandbox status unknown rather than deriving a state from a failed read.
+func dashSandboxSeatAgents(townRoot string) (map[string]bool, error) {
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return nil, err
+	}
+	seats, err := config.Seats(ts, nil)
+	if err != nil {
+		return nil, err
+	}
+	agents := map[string]bool{}
+	for _, seat := range seats {
+		if seat.Backend == config.BackendOpenShell {
+			agents[seat.Agent] = true
+		}
+	}
+	return agents, nil
+}
+
+// dashSandboxStatus is a seat's sandbox standing from the town's seat settings:
+// unknown when they could not be read, a sandbox seat (sampled or not) when its
+// agent is one, otherwise a host seat. sampled is asked only for a sandbox seat.
+func dashSandboxStatus(agents map[string]bool, agentsErr error, agent string, sampled func() bool) dashSandboxSeat {
+	st := dashSandboxSeat{Unknown: agentsErr != nil}
+	if agents[agent] {
+		st.Seat, st.Sampled = true, sampled()
+	}
+	return st
+}
+
+// dashSandboxSampled reports whether the patrol has recorded a liveness sample
+// for a sandbox seat. A missing record is "no sample yet" (the intent reader
+// returns an empty record for it), and until a sample exists a session the host
+// cannot see is not yet a stall. A record that exists but cannot be read counts
+// as sampled: the seat must not read as starting forever on a bad file.
+func dashSandboxSampled(townRoot, rigName, polecatName string) bool {
+	rec, err := intent.Read(townRoot, polecatIntentSeat(rigName, polecatName))
+	if err != nil {
+		return true
+	}
+	return rec.Progress != nil
 }
 
 // dashSessions is the tmux sessions' last activity, and whether the read

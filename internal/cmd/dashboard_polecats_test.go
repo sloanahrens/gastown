@@ -9,6 +9,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 func dashItem(state polecat.State, d polecat.WorkstateDisposition) polecatInventoryItem {
@@ -241,6 +242,87 @@ func TestDashSeatKeyChangesWhenTheSpawnGraceEnds(t *testing.T) {
 	}
 	if dashSeatKey(updated, updated.Add(time.Minute), grace, "gt-1", true) == inside {
 		t.Error("a session coming up must change the key")
+	}
+}
+
+// A sandboxed seat's session lives inside its sandbox, so the host tmux never
+// lists it. The table classifies seats from the registry's names too — the
+// answer gt polecat list reads — or every live sandbox seat reads sessionless
+// and shows stalled (gt-43k7c). A seat the patrol has recorded dead leaves
+// that answer.
+func TestDashSeatSessionsCountsTheSandboxRegistry(t *testing.T) {
+	t.Parallel()
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	host := newPolecatSessionSet(reg, []string{"gt-agate"})
+	dead := func(_ string, _ string, polecatName string) bool { return polecatName == "zombie" }
+	got := dashSeatSessions(host, reg, []string{"gt-ember", "gt-zombie"}, dead)
+	if _, ok := got.session("gastown", "agate"); !ok {
+		t.Error("the host's own session left the set")
+	}
+	if entry, ok := got.session("gastown", "ember"); !ok || entry.Name != "gt-ember" {
+		t.Errorf("a registry-listed sandbox seat = %+v %v, want it live", entry, ok)
+	}
+	if _, ok := got.session("gastown", "zombie"); ok {
+		t.Error("a seat the patrol recorded dead must not read as running")
+	}
+	if entry, _ := got.session("gastown", "ember"); entry.Agent != "" {
+		t.Errorf("a registry entry carries agent %q; the seat's agent comes from its agent bead", entry.Agent)
+	}
+}
+
+// A sandbox seat is never shown stalled on the host tmux's silence: a live one
+// is working at any age, one the patrol has not sampled yet is starting, and
+// only the town's own answer of "not running" reads stalled (gt-43k7c).
+func TestBuildDashPolecatsSandboxSeatLiveness(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 25, 8, 37, 0, 0, time.UTC)
+	cap1 := polecat.WorkstateDisposition{CountsTowardCapacity: true}
+	tests := []struct {
+		name       string
+		state      polecat.State
+		live       bool // the town's session list has the seat
+		sandbox    dashSandboxSeat
+		noWork     bool
+		want       string
+		wantReason string
+	}{
+		{"live sandbox seat slung 8m ago", polecat.StateWorking, true, dashSandboxSeat{Seat: true}, false,
+			dashboard.StateWorking, ""},
+		{"no liveness sample yet", polecat.StateStalled, false, dashSandboxSeat{Seat: true}, false,
+			dashboard.StateSpawning, "sandbox seat starting: no liveness sample yet"},
+		{"sampled, not running", polecat.StateStalled, false, dashSandboxSeat{Seat: true, Sampled: true}, false,
+			dashboard.StateStalled, "assigned work and no live session"},
+		{"sandbox seat with no work", polecat.StateIdle, false, dashSandboxSeat{Seat: true}, true,
+			dashboard.StateIdle, ""},
+		{"host seat unchanged", polecat.StateStalled, false, dashSandboxSeat{}, false,
+			dashboard.StateStalled, "assigned work and no live session"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			item := dashItem(tt.state, cap1)
+			item.SessionRunning = tt.live
+			s := dashSeat{Rig: "gastown", Name: "ember", Session: "gt-ember", Item: item,
+				Issue: &beads.Issue{ID: "gt-1", Title: "one"}, Sandbox: tt.sandbox,
+				HookedAt: now.Add(-8 * time.Minute)}
+			if tt.noWork {
+				s.Issue = nil
+			}
+			got := buildDashPolecats(dashPolecatInputs{Now: now, SessionsKnown: true, Seats: []dashSeat{s}})
+			if len(got) != 1 {
+				t.Fatalf("rows = %d, want 1", len(got))
+			}
+			if got[0].State != tt.want || got[0].Reason != tt.wantReason {
+				t.Errorf("state = %q (%q), want %q (%q)", got[0].State, got[0].Reason, tt.want, tt.wantReason)
+			}
+			if wantSession := tt.live && !tt.noWork; wantSession != got[0].HasSession {
+				t.Errorf("HasSession = %v, want %v", got[0].HasSession, wantSession)
+			}
+			if tt.live && got[0].LastActive != nil {
+				t.Error("a session the host tmux cannot clock must carry no last-active time")
+			}
+		})
 	}
 }
 
