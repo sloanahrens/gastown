@@ -87,7 +87,7 @@ func TestWrittenFailNamesAFileItCannotPutBack(t *testing.T) {
 	written := Written{{Path: path, Backup: filepath.Join(dir, "missing.bak")}}
 
 	err := written.Fail(errors.New("the write failed"))
-	if err == nil || !strings.Contains(err.Error(), "could not be put back") || !strings.Contains(err.Error(), path) {
+	if err == nil || !strings.Contains(err.Error(), "not put back") || !strings.Contains(err.Error(), path) {
 		t.Errorf("Fail = %v, want an error naming %s as not put back", err, path)
 	}
 }
@@ -133,5 +133,57 @@ func TestApplyRollsBackWhenASecondWriteReallyFails(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(settings); !bytes.Equal(before, after) {
 		t.Errorf("the rollback did not put the first file back:\n%s", after)
+	}
+}
+
+// A rollback that cannot put one file back still puts back the rest, and names
+// every file it could not restore (gt-mgixx).
+func TestWrittenFailRestoresTheRestAndNamesEveryStuckFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ok := filepath.Join(dir, "ok.json")
+	if err := os.WriteFile(ok, []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	okBackup := filepath.Join(dir, "ok.bak")
+	if err := os.WriteFile(okBackup, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stuckA := filepath.Join(dir, "a.json")
+	stuckB := filepath.Join(dir, "b.json")
+	written := Written{
+		{Path: stuckA, Backup: filepath.Join(dir, "a-missing.bak")},
+		{Path: ok, Backup: okBackup},
+		{Path: stuckB, Backup: filepath.Join(dir, "b-missing.bak")},
+	}
+
+	err := written.Fail(errors.New("the write failed"))
+	for _, want := range []string{stuckA, stuckB} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("Fail = %v, want it to name %s", err, want)
+		}
+	}
+	if data, _ := os.ReadFile(ok); string(data) != "original" {
+		t.Errorf("the restorable file = %q, want it put back to original", data)
+	}
+}
+
+// The stamp becomes part of the backup's name, so one that is not a file name
+// element is refused before anything is written (gt-mgixx).
+func TestApplyRolesRefusesAStampThatIsNotOneFileNameElement(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	settings := filepath.Join(dir, "settings", "config.json")
+	writeModelFile(t, settings, applySettingsFixture)
+	before, _ := os.ReadFile(settings)
+	table := applyTable(t, `{"roles":{"crew":"haiku"}}`)
+
+	for _, stamp := range []string{"", ".", "..", "a/b", `a\b`} {
+		if _, err := ApplyRoles(settings, stamp, table); err == nil {
+			t.Errorf("ApplyRoles with stamp %q = nil error, want a refusal", stamp)
+		}
+	}
+	if after, _ := os.ReadFile(settings); !bytes.Equal(before, after) {
+		t.Error("a refused stamp changed the settings")
 	}
 }

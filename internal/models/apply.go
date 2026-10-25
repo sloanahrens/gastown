@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
@@ -48,10 +49,16 @@ type Written []WrittenFile
 // cannot be put back is named in the error, so a rollback is never reported as
 // clean when it was not.
 func (ws Written) Fail(cause error) error {
+	// Every file is tried, last written first, even after one cannot be put back:
+	// a file that can be restored is restored, and each one that cannot is named.
+	var stuck []string
 	for i := len(ws) - 1; i >= 0; i-- {
 		if err := ws[i].Restore(); err != nil {
-			return fmt.Errorf("%w; %s was written and could not be put back: %v", cause, ws[i].Path, err)
+			stuck = append(stuck, fmt.Sprintf("%s (%v)", ws[i].Path, err))
 		}
+	}
+	if len(stuck) > 0 {
+		return fmt.Errorf("%w; written and not put back: %s", cause, strings.Join(stuck, "; "))
 	}
 	if len(ws) == 0 {
 		return cause
@@ -60,6 +67,8 @@ func (ws Written) Fail(cause error) error {
 }
 
 // backupFile copies path to path.<stamp>.bak when path exists, and returns the
+// The backup is kept after a successful apply on purpose: it is the operator's copy
+// of the settings as they were before the switch, and the rollback reads it.
 // backup's path, or "" when there was no file to back up.
 func backupFile(path, stamp string) (string, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: the settings file this command writes
@@ -85,6 +94,10 @@ func backupFile(path, stamp string) (string, error) {
 // It returns the settings file it wrote, so a caller that writes more can put
 // that file back with Written.Fail. stamp names the backup.
 func ApplyRoles(path, stamp string, t *Table) (Written, error) {
+	// The stamp becomes part of the backup's name, so it is one path element.
+	if stamp == "" || stamp == "." || stamp == ".." || strings.ContainsAny(stamp, `/\`) {
+		return nil, fmt.Errorf("apply: stamp %q is not a file name element", stamp)
+	}
 	if err := t.Validate(); err != nil {
 		return nil, err
 	}
