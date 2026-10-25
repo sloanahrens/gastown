@@ -223,8 +223,8 @@ func backoff(n int) time.Duration {
 	return d
 }
 
-func (c *Client) once(ctx context.Context, method, path string, body []byte, out any) error {
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+func (c *Client) once(parent context.Context, method, path string, body []byte, out any) error {
+	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()
 	var rd io.Reader
 	if body != nil {
@@ -244,8 +244,14 @@ func (c *Client) once(ctx context.Context, method, path string, body []byte, out
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		// A transport failure (refused, reset, timed out) is "unavailable":
-		// the call may be repeated if it was a read.
+		// The caller gave up (canceled, or its own deadline passed): that is
+		// theirs, not a failure of the service, and never worth a retry.
+		if perr := parent.Err(); perr != nil {
+			return perr
+		}
+		// A transport failure (refused, reset, this attempt timed out) is
+		// "unavailable": a read may be repeated; a write may or may not have
+		// been applied, so it is never retried here.
 		return api.Unavailable("tracker request failed: %v", urlErrorOnly(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -258,11 +264,13 @@ func (c *Client) once(ctx context.Context, method, path string, body []byte, out
 			return nil
 		}
 		if err := json.Unmarshal(data, out); err != nil {
-			return api.Unavailable("tracker answered %d with a body that is not the expected JSON", resp.StatusCode)
+			// The server answered success, so the call may have been applied:
+			// this is a protocol error, never a retryable "unavailable".
+			return fmt.Errorf("client: tracker answered %d with a body that is not the expected JSON", resp.StatusCode)
 		}
 		return nil
 	}
-	return decodeError(resp.StatusCode, data)
+	return c.decodeError(resp.StatusCode, data)
 }
 
 // urlErrorOnly drops the request URL wrapper's detail down to its cause.
@@ -274,18 +282,39 @@ func urlErrorOnly(err error) error {
 	return err
 }
 
+// maxServerMessage bounds how much of a server's error text is kept.
+const maxServerMessage = 500
+
 // decodeError turns a non-2xx answer into an *api.Error. A body that is the
-// API's error JSON is returned as is; any other body is never echoed, since a
-// misbehaving server could include what it was sent.
-func decodeError(status int, data []byte) error {
+// API's error JSON keeps its kind and a cleaned message; any other body is
+// never echoed, since a misbehaving server could include what it was sent.
+func (c *Client) decodeError(status int, data []byte) error {
 	var e api.Error
 	if json.Unmarshal(data, &e) == nil && e.Message != "" && knownKind(e.Kind) {
+		e.Message = c.cleanMessage(e.Message)
 		return &e
 	}
 	if status >= 500 {
 		return api.Unavailable("tracker answered %d", status)
 	}
 	return api.Invalid("tracker answered %d", status)
+}
+
+// cleanMessage makes server text safe to put in an error or a log: control
+// characters become spaces, the token (should a server echo it) is redacted,
+// and the length is bounded.
+func (c *Client) cleanMessage(m string) string {
+	m = strings.ReplaceAll(m, c.token, "[redacted]")
+	m = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, m)
+	if len(m) > maxServerMessage {
+		m = m[:maxServerMessage] + "..."
+	}
+	return m
 }
 
 func knownKind(k api.Kind) bool {

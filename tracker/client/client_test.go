@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -144,28 +145,89 @@ func TestWritesAreNeverRetried(t *testing.T) {
 	}
 }
 
-func TestEachAttemptHasABoundedTimeout(t *testing.T) {
+// rtFunc is an http.RoundTripper for tests: no sockets, no clock.
+type rtFunc func(*http.Request) (*http.Response, error)
+
+func (f rtFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func respond(status int, body string) *http.Response {
+	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}
+}
+
+func TestEachAttemptCarriesAnAbsoluteDeadlineOfTheConfiguredTimeout(t *testing.T) {
 	t.Parallel()
-	observed := make(chan struct{})
-	c, _ := newClient(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		// The server side is bounded too, so a client with no timeout fails
-		// this test in seconds instead of hanging it.
-		select {
-		case <-r.Context().Done():
-			close(observed)
-		case <-time.After(3 * time.Second):
-		}
-	}), func(cfg *Config) { cfg.Timeout = 50 * time.Millisecond; cfg.MaxRetries = -1 })
-	_, err := c.Whoami(context.Background())
-	if !errors.Is(err, api.ErrUnavailable) {
-		t.Errorf("a call that outlives Timeout = %v, want unavailable", err)
+	var deadline time.Time
+	var ok bool
+	c, err := New(Config{BaseURL: "http://127.0.0.1:1", Token: "trk_t", Timeout: 37 * time.Second, MaxRetries: -1,
+		HTTP: &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
+			deadline, ok = r.Context().Deadline()
+			return respond(200, `{"actor":"a"}`), nil
+		})}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The handler notices the abandoned request on its own goroutine, so wait
-	// for its signal (bounded) instead of reading a flag the moment we return.
-	select {
-	case <-observed:
-	case <-time.After(5 * time.Second):
-		t.Error("the server never saw the client give up: the per-attempt timeout is not applied")
+	start := time.Now()
+	if _, err := c.Whoami(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !ok || deadline.Before(start.Add(36*time.Second)) || deadline.After(time.Now().Add(38*time.Second)) {
+		t.Errorf("attempt deadline = %v (set %v), want about 37 s after the call began: the per-attempt timeout is not applied", deadline, ok)
+	}
+}
+
+func TestAnAttemptThatTimesOutIsUnavailableButACanceledCallerIsNot(t *testing.T) {
+	t.Parallel()
+	timesOut := rtFunc(func(r *http.Request) (*http.Response, error) { return nil, context.DeadlineExceeded })
+	c, _ := New(Config{BaseURL: "http://127.0.0.1:1", Token: "trk_t", MaxRetries: -1, HTTP: &http.Client{Transport: timesOut}})
+	if _, err := c.Whoami(context.Background()); !errors.Is(err, api.ErrUnavailable) {
+		t.Errorf("an attempt that timed out = %v, want unavailable", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var calls atomic.Int32
+	counted := rtFunc(func(r *http.Request) (*http.Response, error) { calls.Add(1); return nil, r.Context().Err() })
+	c, _ = New(Config{BaseURL: "http://127.0.0.1:1", Token: "trk_t", HTTP: &http.Client{Transport: counted}})
+	_, err := c.Whoami(ctx)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, api.ErrUnavailable) {
+		t.Errorf("a canceled caller = %v, want context.Canceled and not unavailable", err)
+	}
+	if calls.Load() > 1 {
+		t.Errorf("a canceled caller was retried (%d attempts)", calls.Load())
+	}
+}
+
+// A 2xx whose body cannot be read may mean the call was applied: it must not
+// look retryable.
+func TestAMalformedSuccessBodyIsNotRetryable(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	c, _ := New(Config{BaseURL: "http://127.0.0.1:1", Token: "trk_t", Sleep: func(context.Context, time.Duration) error { return nil },
+		HTTP: &http.Client{Transport: rtFunc(func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return respond(200, "<html>proxy page"), nil
+		})}})
+	_, err := c.Whoami(context.Background())
+	if err == nil || errors.Is(err, api.ErrUnavailable) {
+		t.Errorf("malformed 2xx = %v, want a non-retryable error", err)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("calls = %d, want 1: a success must not be repeated", calls.Load())
+	}
+}
+
+func TestServerErrorTextIsCleanedBeforeItIsReturned(t *testing.T) {
+	t.Parallel()
+	const tok = "trk_secret-token-value"
+	body := `{"kind":"invalid","message":"bad\nline ` + tok + ` ` + strings.Repeat("x", 800) + `"}`
+	c, _ := New(Config{BaseURL: "http://127.0.0.1:1", Token: tok, MaxRetries: -1,
+		HTTP: &http.Client{Transport: rtFunc(func(*http.Request) (*http.Response, error) { return respond(400, body), nil })}})
+	_, err := c.Whoami(context.Background())
+	var ae *api.Error
+	if !errors.As(err, &ae) || ae.Kind != api.KindInvalid {
+		t.Fatalf("error = %v, want the typed invalid error", err)
+	}
+	if strings.Contains(ae.Message, tok) || strings.ContainsAny(ae.Message, "\n\r") || len(ae.Message) > 510 {
+		t.Errorf("message %q must have no token, no control characters and a bounded length", ae.Message)
 	}
 }
 

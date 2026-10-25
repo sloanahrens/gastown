@@ -23,18 +23,24 @@ type Case struct {
 	Run func(t *testing.T, s store.Store)
 }
 
-var registry []Case
+// caseSet is an ordered set of cases with unique names.
+type caseSet struct{ cases []Case }
 
-// register adds c; it is called from init() in a cases_*.go file. A duplicate
-// name is a programming error and panics at startup.
-func register(c Case) {
-	for _, have := range registry {
+// add appends c. A duplicate name is a programming error and panics.
+func (s *caseSet) add(c Case) {
+	for _, have := range s.cases {
 		if have.Name == c.Name {
 			panic(fmt.Sprintf("contract: case %q registered twice", c.Name))
 		}
 	}
-	registry = append(registry, c)
+	s.cases = append(s.cases, c)
 }
+
+var registry caseSet
+
+// register adds c to the package registry; it is called from init() in a
+// cases_*.go file.
+func register(c Case) { registry.add(c) }
 
 // RunStoreContract runs every case against stores from newStore (Postgres).
 // newStore returns a fresh, empty store in which the rigs gt and hq exist.
@@ -52,7 +58,7 @@ func RunFakeContract(t *testing.T, newStore func(t *testing.T) store.Store) {
 
 func run(t *testing.T, newStore func(t *testing.T) store.Store, want func(Case) bool) {
 	t.Helper()
-	for _, c := range registry {
+	for _, c := range registry.cases {
 		if !want(c) {
 			continue
 		}
@@ -65,8 +71,8 @@ func run(t *testing.T, newStore func(t *testing.T) store.Store, want func(Case) 
 
 // Names returns the registered case names, for tests that pin the set.
 func Names() []string {
-	out := make([]string, len(registry))
-	for i, c := range registry {
+	out := make([]string, len(registry.cases))
+	for i, c := range registry.cases {
 		out[i] = c.Name
 	}
 	return out
