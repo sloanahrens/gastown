@@ -143,6 +143,19 @@ LCTL
 
 # run_install T ARGS... -> exit code; output in $T/run.out. The run carries
 # no identity unless CALLER_ACTOR names one as BD_ACTOR.
+# image_plugin T: the image plugin a run gets. IMAGE_RUN names one; NO_IMAGE_PLUGIN=1
+# gives none (the missing-plugin case); otherwise a plugin that builds and publishes
+# and exits 0, so an install that is not testing the image still gets one.
+image_plugin() {
+  local t="$1"
+  if [ -n "${IMAGE_RUN:-}" ]; then printf '%s' "$IMAGE_RUN"; return; fi
+  if [ -n "${NO_IMAGE_PLUGIN:-}" ]; then printf '%s' "$t/no-image-plugin/run.sh"; return; fi
+  mkdir -p "$t/image-ok"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$t/image-ok/run.sh"
+  chmod +x "$t/image-ok/run.sh"
+  printf '%s' "$t/image-ok/run.sh"
+}
+
 run_install() {
   local t="$1" rc=0; shift
   ( unset BD_ACTOR GT_ROLE
@@ -150,7 +163,7 @@ run_install() {
     export T_WORLD="$t" INSTALL_GT_BIN_DIR="$t/bin" INSTALL_GT_DAEMON_DIR="$t/daemon" \
       INSTALL_GT_RIG_DIR="$t/rig" INSTALL_GT_LOCK_WAIT="${LOCK_WAIT:-5}" \
       INSTALL_GT_SIGN_DIR="$t/signing" INSTALL_GT_GATEWAY_HOME="$t/home" \
-      INSTALL_GT_IMAGE_RUN="${IMAGE_RUN:-$t/no-image-plugin/run.sh}" INSTALL_GT_IMAGE_LOG="$t/image.log" \
+      INSTALL_GT_IMAGE_RUN="$(image_plugin "$t")" INSTALL_GT_IMAGE_LOG="$t/image.log" \
       INSTALL_GT_IMAGE_LOCK="$t/image.lock" \
       PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
     bash "$INSTALLER" "$@" ) > "$t/run.out" 2>&1 || rc=$?
@@ -168,7 +181,7 @@ run_install_at() {
       INSTALL_GT_DAEMON_DIR="$t/daemon" INSTALL_GT_RIG_DIR="$t/rig" \
       INSTALL_GT_LOCK_WAIT="${LOCK_WAIT:-5}" INSTALL_GT_SIGN_DIR="$t/signing" \
       INSTALL_GT_GATEWAY_HOME="$t/home" \
-      INSTALL_GT_IMAGE_RUN="${IMAGE_RUN:-$t/no-image-plugin/run.sh}" INSTALL_GT_IMAGE_LOG="$t/image.log" \
+      INSTALL_GT_IMAGE_RUN="$(image_plugin "$t")" INSTALL_GT_IMAGE_LOG="$t/image.log" \
       PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
     bash "$INSTALLER" "$@" ) > "$t/run.out" 2>&1 || rc=$?
   echo "$rc"
@@ -525,6 +538,7 @@ run_located() {
   cp "$SCRIPT_DIR/lib/install-gt-lib.sh" "$dir/lib/"
   ( unset GT_TOWN_ROOT INSTALL_GT_DAEMON_DIR INSTALL_GT_RIG_DIR
     export T_WORLD="$t" INSTALL_GT_BIN_DIR="$t/bin" INSTALL_GT_LOCK_WAIT=5 \
+      INSTALL_GT_IMAGE_RUN="$(image_plugin "$t")" \
       INSTALL_GT_SIGN_DIR="$t/signing" INSTALL_GT_GATEWAY_HOME="$t/home" \
       PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
     bash "$dir/install-gt.sh" "$@" ) > "$t/run.out" 2>&1 || rc=$?
@@ -1120,10 +1134,10 @@ rc=$(IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --sour
 
 # Case 36: no plugin on disk -> the install succeeds and says the image was not built.
 T=$(make_world)
-rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
-[ "$rc" = "0" ] && grep -q "polecat image: no plugin at '$T/no-image-plugin/run.sh', not rebuilt" "$T/run.out" \
-  && [ "$(tail -1 "$T/run.out" | cut -d' ' -f2-3)" = "RESULT installed" ] \
-  && pass "image: no plugin: install succeeds, one line says so" \
+rc=$(NO_IMAGE_PLUGIN=1 run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
+[ "$rc" != "0" ] && grep -q "polecat image: no plugin at '$T/no-image-plugin/run.sh'.*the binary was not swapped" "$T/run.out" \
+  && [ "$(reported "$T")" != "$(cat "$T/c2")" ] \
+  && pass "image: no plugin: the install fails closed, the binary is not swapped, and the log says why" \
   || fail "image: no plugin: rc=$rc $(tail -3 "$T/run.out")"
 
 # Case 37: the plugin's build fails -> the install fails closed: the old binary
@@ -1206,9 +1220,9 @@ rc=$( export INSTALL_DIR="$T/otherbin"
 T=$(make_world); image_stub "$T"
 rc=$( export INSTALL_GT_PERL="$T/no-such-perl"
       IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
-[ "$rc" = "0" ] && grep -q "polecat image: $T/no-such-perl is not installed" "$T/run.out" \
-  && ! grep -q "^run.sh" "$T/make.log" && [ "$(reported "$T")" = "$(cat "$T/c2")" ] \
-  && pass "image: no perl: one line says so, install succeeds" \
+[ "$rc" != "0" ] && grep -q "polecat image: $T/no-such-perl is not installed.*the binary was not swapped" "$T/run.out" \
+  && ! grep -q "^run.sh" "$T/make.log" && [ "$(reported "$T")" != "$(cat "$T/c2")" ] \
+  && pass "image: no perl: the install fails closed, the binary is not swapped, and the log says why" \
   || fail "image: no perl: rc=$rc $(tail -3 "$T/run.out")"
 
 # --- Case 42: --dry-run ends with the RESULT line the header contract promises
@@ -1286,7 +1300,7 @@ wait_for_alarm "$T/image.log" || true
   && pass "image: the alarm leaves a lock that names another process" \
   || fail "image: foreign lock: rc=$rc child=${CHILD:-none} lock=$([ -e "$T/image.lock" ] && echo held || echo free) out=$(tail -2 "$T/image.log" 2>/dev/null)"
 else
-  echo "  SKIP: this host refuses a signal to a process group (EPERM) — the alarm's stop of the image build was not tested"
+  fail "this host refuses a signal to a process group (EPERM), so the alarm's stop of the image build cannot be tested here"
 fi
 
 # --- Case 46: an INSTALL_GT_IMAGE_ALARM that is not a whole number above zero

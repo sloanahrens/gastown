@@ -220,8 +220,8 @@ polecat_image_step() {
   image_daemon_env POLECAT_IMAGE_CRANE
   image_crane="$IMAGE_ENV_VALUE"
   if [ -z "$run" ] || [ ! -f "$run" ]; then
-    log "polecat image: no plugin at '${run:-?}', not rebuilt"
-    return 0
+    log "polecat image: no plugin at '${run:-?}', so the image cannot be built before the swap; the binary was not swapped"
+    return 1
   fi
   # Without the build output run.sh would read the old commit from $GT and build
   # an image for the binary this install is about to replace.
@@ -230,8 +230,8 @@ polecat_image_step() {
     return 1
   fi
   if ! command -v "$IMAGE_PERL" >/dev/null 2>&1; then
-    log "polecat image: $IMAGE_PERL is not installed, so the rebuild was not started (non-fatal)"
-    return 0
+    log "polecat image: $IMAGE_PERL is not installed, so the image cannot be built before the swap; the binary was not swapped"
+    return 1
   fi
   # An alarm of 0 or a non-number would leave the build with no bound at all.
   local alarm="$IMAGE_ALARM"
