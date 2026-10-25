@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -308,6 +310,33 @@ func TestSpecSlingHoldStopsAPlannedSling(t *testing.T) {
 	held := specSlingHold(town, "")
 	if held == nil || !strings.Contains(held.Hold, "operator dispatch hold present") {
 		t.Fatalf("hold = %+v, want the operator hold named", held)
+	}
+}
+
+// A rig's dispatch hold stops a sling the tick planned before the hold was
+// set, and only for the held rig: the sling reads the same record the tick
+// does, so the hold covers the window between the plan and the sling
+// (gt-vty1v).
+func TestSpecSlingHoldStopsAPlannedSlingIntoaHeldRig(t *testing.T) {
+	t.Parallel()
+	town := parkTown(t)
+	if held := specSlingHold(town, "testrig"); held != nil {
+		t.Fatalf("hold = %+v for a rig with no hold record, want none", held)
+	}
+	var out bytes.Buffer
+	if err := holdRigs(&out, town, []string{"testrig"}, config.RigDispatchHold{
+		Since: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC), By: "sloan", Reason: "drain the landing backlog",
+	}); err != nil {
+		t.Fatalf("holdRigs = %v\n%s", err, out.String())
+	}
+
+	held := specSlingHold(town, "testrig")
+	if held == nil || !strings.Contains(held.Hold, "drain the landing backlog") ||
+		!strings.Contains(held.Hold, "gt rig release testrig") {
+		t.Fatalf("hold = %+v, want the rig's hold named with its reason and release command", held)
+	}
+	if held := specSlingHold(town, "otherrig"); held != nil {
+		t.Fatalf("hold = %+v for an unheld rig beside the held one, want none", held)
 	}
 }
 

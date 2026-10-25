@@ -15,7 +15,7 @@ import (
 // A second hold keeps the first record, the way a park does (gt-vty1v).
 func TestDispatchHoldRegistryField(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	since := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 
 	kept, err := Hold(root, "gastown", config.RigDispatchHold{Since: since, By: "sloan", Reason: "drain the landing backlog"})
@@ -69,7 +69,7 @@ func TestDispatchHoldRegistryField(t *testing.T) {
 // parked, and holding an unparked rig does not park it (gt-vty1v).
 func TestDispatchHoldLeavesParkStateAlone(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	parked, err := ParkState(root, "mango")
 	if err != nil || parked == nil {
 		t.Fatalf("ParkState(mango) = %+v, %v; the fixture rig must be parked", parked, err)
@@ -117,7 +117,7 @@ func TestDispatchHoldState_RegistryReadFailsClosed(t *testing.T) {
 		t.Errorf("DispatchHeldReason with no registry = %q, want no hold", reason)
 	}
 
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	if err := os.WriteFile(filepath.Join(root, FileRigs), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestDispatchHoldState_RegistryReadFailsClosed(t *testing.T) {
 // instead of writing a record nothing reads.
 func TestHold_UnknownRig(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	if _, err := Hold(root, "nosuchrig", config.RigDispatchHold{Since: time.Now().UTC()}); err == nil {
 		t.Fatal("Hold(nosuchrig) wrote a record for an unregistered rig")
 	}

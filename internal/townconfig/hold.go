@@ -8,11 +8,8 @@ package townconfig
 // through dispatch.RigHold, along with the operator hold file and the rig's
 // ESTOP.
 //
-// The record is deliberately not a park: parking also stops the rig's agents
-// and the daemon's auto-start, while a hold leaves both alone, so a rig can let
-// a landing backlog drain while the work already running finishes. The two
-// records are independent — holding a parked rig changes neither record, and
-// releasing a hold on a parked rig leaves it parked.
+// The record is not a park: the two are independent, so holding a parked rig
+// changes neither record. What the hold is for is the command's help text.
 
 import (
 	"fmt"

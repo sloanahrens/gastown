@@ -20,20 +20,18 @@ var rigHoldCmd = &cobra.Command{
 	Long: `Hold rigs out of new automatic dispatches.
 
 Holding a rig writes a "dispatch_hold" record {since, by, reason} into the
-rig's entry in mayor/town.json (registry). The spec dispatcher and the
-daemon's scheduled slings skip the rig until 'gt rig release', while its
-running polecats keep working, the daemon keeps restarting them, and the
-rig's park record is not touched. A 'gt sling' the operator types still
-runs: like the town-wide hold file, this hold stops the automatic
-dispatchers and leaves the operator's own decision alone.
+rig's entry in mayor/rigs.json. The spec dispatcher, its background slings
+and the daemon's scheduled slings skip the rig until 'gt rig release', while
+its running polecats keep working and its park record is not touched. A
+'gt sling' the operator types still runs, as it does under the town-wide
+hold file.
 
-Use the hold where parking is too broad: parking also stops the rig's agents
-and the daemon's auto-start, so a rig that only needs its new dispatches
-stopped — while a landing backlog drains and running work finishes — is held.
+Parking is the broader hand brake: it also stops the rig's agents and the
+daemon's auto-start. Hold a rig to let a landing backlog drain while the work
+already running finishes.
 
-A rig that is already held keeps its original record.
-
-gt rig hold and gt rig release are the only writers of that record.
+A rig that is already held keeps its original record; only gt rig hold and
+gt rig release write it.
 
 Examples:
   gt rig hold gastown --reason "drain the landing backlog"
@@ -48,10 +46,9 @@ var rigReleaseCmd = &cobra.Command{
 	Short: "Release rigs from the dispatch hold (automatic dispatch resumes)",
 	Long: `Release rigs from the dispatch hold.
 
-Releasing a rig removes its "dispatch_hold" record from mayor/town.json
-(registry), which lets the automatic dispatchers see it again. It starts no
-agents and changes no other rig: 'gt rig unpark' is the command for a parked
-rig.
+Releasing a rig removes its "dispatch_hold" record from mayor/rigs.json,
+which lets the automatic dispatchers see it again. It starts no agents and
+changes no other rig: 'gt rig unpark' is the command for a parked rig.
 
 Examples:
   gt rig release gastown
@@ -61,7 +58,7 @@ Examples:
 }
 
 func init() {
-	rigHoldCmd.Flags().StringVar(&rigHoldReason, "reason", "", "Why the rigs are held, recorded in mayor/town.json (registry)")
+	rigHoldCmd.Flags().StringVar(&rigHoldReason, "reason", "", "Why the rigs are held, recorded in mayor/rigs.json")
 	rigCmd.AddCommand(rigHoldCmd)
 	rigCmd.AddCommand(rigReleaseCmd)
 }

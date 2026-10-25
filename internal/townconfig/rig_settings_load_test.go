@@ -27,7 +27,7 @@ func repoRoot(t *testing.T) string {
 // for it with the town's default agent instead of the rig's (gt-ptysu).
 func TestLoadRejectsRigSettingsThatDoNotParse(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	path := filepath.Join(root, "gastown", "settings", "config.json")
 	write(t, root, "gastown/settings/config.json", `{"type":"rig-settings","version":1,"zz_unknown":1}`)
 
@@ -44,7 +44,7 @@ func TestLoadRejectsRigSettingsThatDoNotParse(t *testing.T) {
 // TestLoadAcceptsARigSettingsFile: the new check rejects only a broken file.
 func TestLoadAcceptsARigSettingsFile(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	write(t, root, "gastown/settings/config.json", `{"type":"rig-settings","version":1,"agent":"claude"}`)
 
 	if _, err := Load(root); err != nil {
@@ -56,7 +56,7 @@ func TestLoadAcceptsARigSettingsFile(t *testing.T) {
 // file is the default, not an error.
 func TestLoadAcceptsAnAbsentRigSettingsFile(t *testing.T) {
 	t.Parallel()
-	if _, err := Load(copyLiveTown(t)); err != nil {
+	if _, err := Load(copyFixtureTown(t)); err != nil {
 		t.Fatalf("Load = %v, want nil", err)
 	}
 }
@@ -67,7 +67,7 @@ func TestLoadAcceptsAnAbsentRigSettingsFile(t *testing.T) {
 func TestLoadAcceptsTheShippedExamples(t *testing.T) {
 	t.Parallel()
 	examples := filepath.Join(repoRoot(t), "docs", "examples")
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	for _, f := range []struct{ src, dst string }{
 		{"town-settings.example.json", FileSettings},
 		{"rig-settings.example.json", "gastown/settings/config.json"},
@@ -110,7 +110,7 @@ func withLocalRepo(t *testing.T, root, localRepo string) {
 // load even when local_repo names a directory with a valid file (gt-4b0i1).
 func TestLoadValidatesRigSettingsInTheRigDirNotLocalRepo(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	reference := filepath.Join(t.TempDir(), "reference")
 	withLocalRepo(t, root, reference)
 	write(t, reference, "settings/config.json", `{"type":"rig-settings","version":1,"agent":"claude"}`)
@@ -128,7 +128,7 @@ func TestLoadValidatesRigSettingsInTheRigDirNotLocalRepo(t *testing.T) {
 // rig with local_repo, even when the reference clone holds a broken file.
 func TestLoadAcceptsALocalRepoRigWithNoSettingsFile(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	reference := filepath.Join(t.TempDir(), "reference")
 	withLocalRepo(t, root, reference)
 	write(t, reference, "settings/config.json", `{"type":"rig-settings","version":1,"zz_unknown":1}`)

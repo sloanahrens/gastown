@@ -111,10 +111,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`gt rig hold` / `gt rig release`** (gt-vty1v) — an operator can stop new
   automatic dispatches for one rig without parking it. The hold is a
   `dispatch_hold` record `{since, by, reason}` on the rig's entry in
-  `mayor/rigs.json`; the spec dispatcher, its background slings and the daemon's
-  scheduled slings skip the held rig, while its running polecats, daemon
-  auto-start and park record are untouched, and a `gt sling` the operator types
-  still runs. The town-wide operator hold file still wins over every rig's
+  `mayor/rigs.json`; the spec dispatcher and its background slings skip the held
+  rig, and so do the daemon's scheduled slings, which share the same
+  `dispatch.RigHold` check the record is read through. Its running polecats,
+  daemon auto-start and park record are untouched, and a `gt sling` the operator
+  types still runs. The town-wide operator hold file still wins over every rig's
   record. `gt rig release` lifts one rig's hold and leaves the others
   dispatching.
 

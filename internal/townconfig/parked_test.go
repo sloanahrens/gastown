@@ -17,7 +17,7 @@ import (
 // with another value beside the park, and gastown with no park at all.
 func legacyTown(t *testing.T) string {
 	t.Helper()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	write(t, root, LegacyParkedDir+"/beads.json", `{"rig":"beads","values":{"status":"parked"},"blocked":[]}`)
 	write(t, root, LegacyParkedDir+"/gastown.json", `{"rig":"gastown","values":{"max_polecats":12},"blocked":[]}`)
 	write(t, root, LegacyParkedDir+"/hm.json", `{"rig":"hm","values":{"max_polecats":2,"status":"parked"},"blocked":[]}`)
@@ -39,7 +39,7 @@ func parkedRigs(t *testing.T, root string) []string {
 
 func TestParkedRegistryField(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	since := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	rec, err := Park(root, "om", config.RigParked{Since: since, By: "sloan", Reason: "rubric work"})
 	if err != nil {
@@ -87,7 +87,7 @@ func TestParkedRegistryField(t *testing.T) {
 
 func TestParkUnknownRigIsAnError(t *testing.T) {
 	t.Parallel()
-	root := copyLiveTown(t)
+	root := copyFixtureTown(t)
 	if _, err := Park(root, "nope", config.RigParked{}); !errors.Is(err, ErrUnknownRig) {
 		t.Errorf("Park(unknown) = %v, want ErrUnknownRig", err)
 	}
@@ -115,7 +115,7 @@ func TestParkedFailsClosed(t *testing.T) {
 	for name, breakIt := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			root := copyLiveTown(t)
+			root := copyFixtureTown(t)
 			breakIt(t, root)
 			parked, why := IsParked(root, "om")
 			if !parked || !strings.Contains(why, "treated as parked") {
@@ -125,7 +125,7 @@ func TestParkedFailsClosed(t *testing.T) {
 	}
 	t.Run("unregistered rig", func(t *testing.T) {
 		t.Parallel()
-		if parked, _ := IsParked(copyLiveTown(t), "nope"); !parked {
+		if parked, _ := IsParked(copyFixtureTown(t), "nope"); !parked {
 			t.Error("an unregistered rig read as unparked")
 		}
 	})
