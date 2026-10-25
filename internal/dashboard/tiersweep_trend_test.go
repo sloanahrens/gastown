@@ -94,15 +94,48 @@ func TestTierSweepPaneDrawsATrendPerRig(t *testing.T) {
 	if strings.Contains(box.Text, "unavailable") {
 		t.Error("a rig with no sweeps must not read as an unavailable log")
 	}
-	// The chart is the one element with children and no text of its own: the
-	// svg chartSVG builds, between the caption and the legend.
-	var charts int
-	for i := 0; i < box.Kids; i++ {
-		if d := dom.descend(t, "tiersweep", i); d.Text == "" && d.Kids > 0 {
-			charts++
-		}
+	// A chart is captioned "wall time per sweep": one for gastown, none for quiet.
+	if n := strings.Count(box.Text, "wall time per sweep"); n != 1 {
+		t.Errorf("the pane drew %d charts, want one for gastown and none for quiet", n)
 	}
-	if charts != 1 {
-		t.Errorf("the pane drew %d charts, want one for gastown and none for quiet", charts)
+}
+
+// A trend whose sweeps carry no wall times at all has no line to draw: the pane
+// says so, and draws no chart.
+func TestTierSweepPaneSaysSoForAnAllNullTrend(t *testing.T) {
+	t.Parallel()
+	dom := newPageDOM(t)
+	dom.call(t, "renderTierSweep", map[string]any{
+		"tiersweep": map[string]any{
+			"sweeps": []any{},
+			"trends": []any{map[string]any{"rig": "gastown", "sweeps": []any{
+				map[string]any{"at": "2026-10-03T22:09:36Z", "sha": "a9be03e4"},
+			}}},
+		},
+	})
+	box := dom.element(t, "tiersweep")
+	if !strings.Contains(box.Text, "no wall times recorded") {
+		t.Errorf("an all-null trend must say so: %s", box.Text)
+	}
+	if strings.Contains(box.Text, "wall time per sweep") {
+		t.Errorf("an all-null trend drew a chart: %s", box.Text)
+	}
+}
+
+// A registry that could not be read is said on the pane: the trends show only
+// the rigs the log names.
+func TestTierSweepPaneSaysSoWhenTheRegistryFailed(t *testing.T) {
+	t.Parallel()
+	dom := newPageDOM(t)
+	dom.call(t, "renderTierSweep", map[string]any{
+		"tiersweep": map[string]any{
+			"sweeps":             []any{},
+			"trends":             []any{},
+			"trends_unavailable": true,
+		},
+	})
+	box := dom.element(t, "tiersweep")
+	if !strings.Contains(box.Text, "rig list unavailable") {
+		t.Errorf("a failed registry must be said on the pane: %s", box.Text)
 	}
 }

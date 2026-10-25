@@ -579,6 +579,10 @@ type TierSweep struct {
 	Sweeps      []TierSweepRow      `json:"sweeps"`
 	Trends      []TierSweepTrendRig `json:"trends,omitempty"`
 	Unavailable bool                `json:"unavailable,omitempty"`
+	// TrendsUnavailable says the town's rig list could not be read, so Trends
+	// shows only the rigs the log names: a rig missing from it may be a rig the
+	// registry lost, not one that has not swept.
+	TrendsUnavailable bool `json:"trends_unavailable,omitempty"`
 }
 
 // EscalationRow is one open escalation as the pane draws it. At is when it was

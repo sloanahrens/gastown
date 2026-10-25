@@ -137,7 +137,8 @@ func (r *tierSweepReader) read(now time.Time) *dashboard.TierSweep {
 	if err := r.scanLog(); err != nil && !r.readOK {
 		return &dashboard.TierSweep{Unavailable: true}
 	}
-	ts := &dashboard.TierSweep{Sweeps: r.recent(), Trends: r.trends()}
+	trends, trendsErr := r.trends()
+	ts := &dashboard.TierSweep{Sweeps: r.recent(), Trends: trends, TrendsUnavailable: trendsErr != nil}
 	if run := r.running(now); run != nil {
 		ts.Running = run
 	}
@@ -211,7 +212,7 @@ func (r *tierSweepReader) parseLogLine(line string) {
 		if err != nil {
 			return
 		}
-		row := dashboard.TierSweepRow{At: at, Rig: m[2], SHA: m[3], Stages: parseTierSweepVerdicts(m[4]), Walls: r.walls[m[2]]}
+		row := dashboard.TierSweepRow{At: at, Rig: m[2], SHA: m[3], Stages: parseTierSweepVerdicts(m[4]), Walls: copyWalls(r.walls[m[2]])}
 		if m[5] != "" {
 			if d, err := time.ParseDuration(m[5]); err == nil {
 				s := d.Seconds()
@@ -299,18 +300,35 @@ func buildTierSweepTrends(names []string, read tierSweepTrendRead, perRig int) [
 // trends is one wall trend per rig over the sweeps the scan has kept. The town's
 // registry names the rigs, so one that has not swept yet still gets an empty
 // trend; a rig the log named is kept even if the registry lost it, because its
-// sweeps were what the log recorded.
-func (r *tierSweepReader) trends() []dashboard.TierSweepTrendRig {
+// sweeps were what the log recorded. A registry that cannot be read is returned
+// as an error, not as a shorter list: the caller must say the list is partial.
+func (r *tierSweepReader) trends() ([]dashboard.TierSweepTrendRig, error) {
 	var names []string
+	var regErr error
 	if r.rigs != nil {
-		if got, err := r.rigs(); err == nil {
-			names = append(names, got...)
+		got, err := r.rigs()
+		if err != nil {
+			regErr = err
 		}
+		names = append(names, got...)
 	}
 	for rig := range r.byRig {
 		names = append(names, rig)
 	}
-	return buildTierSweepTrends(names, func(rig string) []dashboard.TierSweepRow { return r.byRig[rig] }, tierSweepTrendPerRig)
+	return buildTierSweepTrends(names, func(rig string) []dashboard.TierSweepRow { return r.byRig[rig] }, tierSweepTrendPerRig), regErr
+}
+
+// copyWalls returns a copy of one sweep's tier walls. The row keeps its own map,
+// so no later write to the scan's map can change a sweep already kept.
+func copyWalls(w map[string]float64) map[string]float64 {
+	if w == nil {
+		return nil
+	}
+	out := make(map[string]float64, len(w))
+	for k, v := range w {
+		out[k] = v
+	}
+	return out
 }
 
 // splitTierSweepTiers reads the "(shell, integration, race)" part of a "sweep

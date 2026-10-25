@@ -2037,7 +2037,12 @@ function renderTierSweep(s) {
   kv.append(st);
   box.append(kv);
   const rows = ts.sweeps || [];
-  if (!rows.length) { box.append(el("div", "empty", "no sweeps in the daemon log")); $("tiersweepnote").textContent = ""; return; }
+  if (!rows.length) {
+    box.append(el("div", "empty", "no sweeps in the daemon log"));
+    renderTierSweepRegistry(box, ts);
+    $("tiersweepnote").textContent = "";
+    return;
+  }
   const t = el("table");
   const hr = el("tr");
   [["When"], ["Rig"], ["Sha"], ...TIERSWEEP_TIERS.map(x => [x]), ["Total", "the whole cycle, every stage the sweep ran", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
@@ -2066,7 +2071,7 @@ function renderTierSweep(s) {
   (newest.stages || []).filter(x => x.verdict === "RED" && (x.failed || []).length).forEach(x => {
     box.append(el("div", "badc title", newest.rig + " " + x.tier + " RED: " + x.failed.join(", ")));
   });
-  renderTierSweepTrends(box, ts.trends);
+  renderTierSweepRegistry(box, ts);
   $("tiersweepnote").textContent = rows.length + " sweeps · last " + fmtDur((Date.now() - new Date(newest.at).getTime()) / 1000) + " ago";
 }
 
@@ -2092,6 +2097,13 @@ function tierSweepTrendSeries(trend) {
   }
   return {series, key};
 }
+// renderTierSweepRegistry draws the trends, and says so when the town's rig list
+// could not be read: the trends then show only the rigs the log names. It runs
+// whether or not the log holds sweeps, since a rig can have a trend without one.
+function renderTierSweepRegistry(box, ts) {
+  if (ts.trends_unavailable) box.append(el("div", "badc", "rig list unavailable: the town's registry could not be read, so the trends show only rigs the log names"));
+  renderTierSweepTrends(box, ts.trends);
+}
 function renderTierSweepTrends(box, trends) {
   for (const trend of trends || []) {
     const sweeps = trend.sweeps || [];
@@ -2100,9 +2112,13 @@ function renderTierSweepTrends(box, trends) {
     box.append(head);
     if (!sweeps.length) { box.append(el("div", "empty", "no sweeps yet")); continue; }
     const st = tierSweepTrendSeries(trend);
+    // A series with no value at all (every tier and total absent) has no line to
+    // draw and no peak to name: say so rather than draw an empty chart.
+    const vals = st.series.flatMap(x => x.pts.map(p => p.v)).filter(v => v != null);
+    if (!vals.length) { box.append(el("div", "empty", "no wall times recorded")); continue; }
     const t0 = Math.min(...sweeps.map(r => new Date(r.at).getTime()));
     const t1 = Math.max(...sweeps.map(r => new Date(r.at).getTime()));
-    const peak = Math.max(...st.series.flatMap(x => x.pts.map(p => p.v == null ? 0 : p.v)));
+    const peak = Math.max(...vals);
     box.append(el("div", "k title", "wall time per sweep · " + sweeps.length + " sweeps · peak " + fmtDur(peak)), chartSVG(st.series, t0, Math.max(t1, t0 + 1), 600, 48, 3 * 3600e3), legend(st.key));
   }
 }
