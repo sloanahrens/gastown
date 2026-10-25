@@ -362,8 +362,14 @@ func (d *Daemon) specSlingBeadHooked(f specSlingFlight) (hooked, known bool) {
 	switch beads.IssueStatus(strings.TrimSpace(issue.Status)) {
 	case beads.IssueStatusHooked, beads.StatusInProgress:
 		return true, true
+	case beads.StatusOpen, beads.StatusClosed, beads.StatusBlocked, beads.StatusDeferred,
+		beads.IssueStatusPinned, beads.StatusTombstone:
+		return false, true
 	}
-	return false, true
+	// An empty or unrecognized status is no answer: the label is the one write
+	// nothing clears, so only a status that says the bead is not held lets it be
+	// written (gt-nosod).
+	return false, false
 }
 
 // formatSpecSlingReport renders a sling's report as log lines: one per entry,

@@ -487,6 +487,7 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 		// starts after this, so the set only shrinks and its youngest member
 		// gets the bound it had when the drain began (gt-nosod).
 		d.upgradeSlingSince, _ = d.specSlings.newest()
+		d.upgradeSlingFrozen = true
 	}
 	d.upgradeRestartPending.Store(true)
 
@@ -572,8 +573,13 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 	// own left (gt-nosod). It does not run from a sling that started after the
 	// drain, which would let new slings extend it for ever (gt-5h70s).
 	slingSince, slinging := d.specSlings.newest()
-	if slinging && !d.upgradeSlingSince.IsZero() {
+	if d.upgradeSlingFrozen {
+		// The drain froze the slings in flight: those hold the restart from their
+		// youngest start, and a sling that started after the drain holds nothing,
+		// so new slings cannot extend the wait (gt-nosod). A drain that froze none
+		// holds on none.
 		slingSince = d.upgradeSlingSince
+		slinging = slinging && !d.upgradeSlingSince.IsZero()
 	}
 	slingWaited := max(now.Sub(slingSince), 0)
 
@@ -711,6 +717,7 @@ func (d *Daemon) endUpgradeDrain(now time.Time) {
 func (d *Daemon) resumeDispatchAfterDrain() {
 	d.upgradeRestartPending.Store(false)
 	d.upgradeSlingSince = time.Time{}
+	d.upgradeSlingFrozen = false
 }
 
 // reportDrainHeld writes the one line a drain leaves behind when it ends: how

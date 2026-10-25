@@ -1949,3 +1949,32 @@ func TestPostLandRestartCapStaysShort(t *testing.T) {
 		t.Fatalf("postLandRestartCap = %s; a pending upgrade restart holds the landing queue that long (gt-8p8h7)", postLandRestartCap)
 	}
 }
+
+// gt-nosod: a drain that began while no sling was in flight froze the sling wait
+// on nothing, so a sling that starts afterwards does not hold the restart. Only
+// the slings a drain froze can hold it.
+func TestUpgradeSlingHoldIgnoresSlingsStartedAfterAnEmptyDrain(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	d.logger = log.New(io.Discard, "", 0)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+	now := time.Now()
+	// A dispatch tick holds the drain open with no sling in flight.
+	d.specDispatchRunning.Store(true)
+	d.specDispatchTick.Store(&specDispatchTickRun{started: now})
+	if d.checkUpgradeRestart(now) {
+		t.Fatal("restarted under a spec dispatch tick inside its bound")
+	}
+	d.specDispatchRunning.Store(false)
+	d.specDispatchTick.Store(nil)
+
+	// A sling begun after the drain froze nothing, and must not hold the restart.
+	d.specSlings.begin(specSlingFlight{Bead: "gt-late", Rig: "gastown", started: now.Add(time.Minute)})
+	if !d.checkUpgradeRestart(now.Add(time.Minute)) {
+		t.Fatal("a sling begun after an empty drain held the restart; want it to go")
+	}
+}

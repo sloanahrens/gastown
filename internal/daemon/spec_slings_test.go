@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/steveyegge/gastown/internal/beads"
+	"io"
 	"log"
 	"slices"
 	"strings"
@@ -663,5 +665,43 @@ func TestUpgradeRestartGoesWhenTheRunningSlingsReturn(t *testing.T) {
 	d.specSlings.end("gt-b")
 	if !d.checkUpgradeRestart(now.Add(2 * time.Minute)) {
 		t.Fatal("the restart must go as soon as the in-flight set is empty")
+	}
+}
+
+// statusBeads answers Show with one status, for the failure-label decision.
+type statusBeads struct{ status string }
+
+func (s statusBeads) Show(id string) (*beads.Issue, error) {
+	return &beads.Issue{ID: id, Status: s.status}, nil
+}
+
+func (s statusBeads) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, nil }
+
+// gt-nosod: only a status that says whether the bead is held answers the
+// failure-label question. An empty or unrecognized status is no answer, so the
+// label is withheld rather than written.
+func TestSpecSlingBeadHookedAnswersOnlyKnownStatuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		status           string
+		wantHooked, know bool
+	}{
+		{"hooked", true, true},
+		{"in_progress", true, true},
+		{"closed", false, true},
+		{"open", false, true},
+		{"", false, false},
+		{"something-new", false, false},
+	}
+	for _, c := range cases {
+		d := &Daemon{
+			config:        &Config{TownRoot: t.TempDir()},
+			logger:        log.New(io.Discard, "", 0),
+			openWorkBeads: func([]string, time.Duration) workBeadReader { return statusBeads{status: c.status} },
+		}
+		hooked, known := d.specSlingBeadHooked(specSlingFlight{Bead: "gt-x", Rig: "gastown"})
+		if hooked != c.wantHooked || known != c.know {
+			t.Errorf("status %q: hooked=%v known=%v, want hooked=%v known=%v", c.status, hooked, known, c.wantHooked, c.know)
+		}
 	}
 }
