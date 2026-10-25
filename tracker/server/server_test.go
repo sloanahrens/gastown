@@ -18,11 +18,17 @@ import (
 
 type fakeAuth map[string]string // token -> actor
 
-func (f fakeAuth) ActorForToken(_ context.Context, token string) (string, error) {
-	if a, ok := f[token]; ok {
-		return a, nil
+// Identify gives every token the seat scope except "admin-token".
+func (f fakeAuth) Identify(_ context.Context, token string) (api.Identity, error) {
+	a, ok := f[token]
+	if !ok {
+		return api.Identity{}, api.ErrUnknownToken
 	}
-	return "", api.ErrUnknownToken
+	scope := api.ScopeSeat
+	if token == "admin-token" {
+		scope = api.ScopeAdmin
+	}
+	return api.Identity{Actor: a, Scope: scope}, nil
 }
 
 type fakeHealth struct{ ping, write error }

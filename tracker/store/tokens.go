@@ -36,37 +36,55 @@ func generateToken(r io.Reader) (string, error) {
 	return "trk_" + hex.EncodeToString(b), nil
 }
 
-// IssueToken creates a token for actor, valid until expires (never when nil),
-// stores its hash, and returns the token. This is the only time the token
-// exists in the clear: callers hand it to its owner and never log it.
+// IssueToken creates a seat token for actor, valid until expires (never when
+// nil). See IssueTokenScoped.
 func (p *Postgres) IssueToken(ctx context.Context, actor string, expires *time.Time) (string, error) {
+	return p.IssueTokenScoped(ctx, actor, api.ScopeSeat, expires)
+}
+
+// IssueTokenScoped creates a token for actor with the given scope, valid until
+// expires (never when nil), stores its hash, and returns the token. This is
+// the only time the token exists in the clear: callers hand it to its owner and
+// never log it.
+func (p *Postgres) IssueTokenScoped(ctx context.Context, actor string, scope api.Scope, expires *time.Time) (string, error) {
 	if actor == "" {
 		return "", api.Invalid("a token needs an actor")
+	}
+	if !scope.Valid() {
+		return "", api.Invalid("scope %q is not seat or admin", scope)
 	}
 	token, err := generateToken(rand.Reader)
 	if err != nil {
 		return "", err
 	}
-	if _, err := p.pool.Exec(ctx, "INSERT INTO tracker.tokens (actor, token_hash, expires_at) VALUES ($1, $2, $3)", actor, HashToken(token), expires); err != nil {
+	if _, err := p.pool.Exec(ctx, "INSERT INTO tracker.tokens (actor, scope, token_hash, expires_at) VALUES ($1, $2, $3, $4)", actor, string(scope), HashToken(token), expires); err != nil {
 		return "", fmt.Errorf("store: issue token: %w", err)
 	}
 	return token, nil
 }
 
-// ActorForToken returns the actor token was issued to, or api.ErrUnknownToken
+// Identify returns who token belongs to and its scope, or api.ErrUnknownToken
 // when it is not known, was revoked, or has expired.
-func (p *Postgres) ActorForToken(ctx context.Context, token string) (string, error) {
-	var actor string
+func (p *Postgres) Identify(ctx context.Context, token string) (api.Identity, error) {
+	var id api.Identity
+	var scope string
 	err := p.pool.QueryRow(ctx,
-		"SELECT actor FROM tracker.tokens WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())",
-		HashToken(token)).Scan(&actor)
+		"SELECT actor, scope FROM tracker.tokens WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())",
+		HashToken(token)).Scan(&id.Actor, &scope)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", api.ErrUnknownToken
+		return api.Identity{}, api.ErrUnknownToken
 	}
 	if err != nil {
-		return "", fmt.Errorf("store: look up token: %w", err)
+		return api.Identity{}, fmt.Errorf("store: look up token: %w", err)
 	}
-	return actor, nil
+	id.Scope = api.Scope(scope)
+	return id, nil
+}
+
+// ActorForToken returns the actor token was issued to; see Identify.
+func (p *Postgres) ActorForToken(ctx context.Context, token string) (string, error) {
+	id, err := p.Identify(ctx, token)
+	return id.Actor, err
 }
 
 // RevokeToken revokes token; it reports whether a live token was revoked.

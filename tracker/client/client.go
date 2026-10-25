@@ -321,7 +321,7 @@ func (c *Client) cleanMessage(m string) string {
 
 func knownKind(k api.Kind) bool {
 	switch k {
-	case api.KindNotFound, api.KindGuardFailed, api.KindConflict, api.KindInvalid, api.KindUnavailable:
+	case api.KindNotFound, api.KindGuardFailed, api.KindConflict, api.KindInvalid, api.KindForbidden, api.KindUnavailable:
 		return true
 	}
 	return false

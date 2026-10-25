@@ -22,6 +22,7 @@ func TestRunRefusesBadInvocations(t *testing.T) {
 		"localhost by name":    {[]string{"-listen", "localhost:7433"}, map[string]string{"TRACKER_DSN": "x"}, "loopback"},
 		"unknown flag":         {[]string{"-nope"}, map[string]string{"TRACKER_DSN": "x"}, "nope"},
 		"token without a file": {[]string{"-issue-token", "me"}, map[string]string{"TRACKER_DSN": "x"}, "-token-file"},
+		"unknown scope":        {[]string{"-issue-token", "me", "-token-file", "/x", "-scope", "root"}, map[string]string{"TRACKER_DSN": "x"}, "seat or admin"},
 		"file without a token": {[]string{"-token-file", "/x"}, map[string]string{"TRACKER_DSN": "x"}, "-issue-token"},
 	} {
 		t.Run(name, func(t *testing.T) {

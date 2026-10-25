@@ -120,3 +120,37 @@ func TestWriteProbeFailsOnAReadOnlyDatabase(t *testing.T) {
 		t.Error("WriteProbe succeeded on a read-only database; /readyz would report ready")
 	}
 }
+
+func TestIntegrationATokenHasAScopeAndTheDefaultIsSeat(t *testing.T) {
+	t.Parallel()
+	pool := pgtest.New(t, "migrated")
+	pg := NewPostgres(pool)
+	ctx := context.Background()
+	seat, err := pg.IssueToken(ctx, "town/polecats/a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := pg.IssueTokenScoped(ctx, "town/daemon", api.ScopeAdmin, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, err := pg.Identify(ctx, seat); err != nil || id.Actor != "town/polecats/a" || id.Scope != api.ScopeSeat {
+		t.Errorf("Identify(seat) = %+v, %v; want the actor and scope seat", id, err)
+	}
+	if id, err := pg.Identify(ctx, admin); err != nil || id.Actor != "town/daemon" || id.Scope != api.ScopeAdmin {
+		t.Errorf("Identify(admin) = %+v, %v; want the actor and scope admin", id, err)
+	}
+	if _, err := pg.IssueTokenScoped(ctx, "x", "root", nil); !errors.Is(err, api.ErrInvalid) {
+		t.Errorf("IssueTokenScoped with scope root = %v, want api.ErrInvalid", err)
+	}
+	if _, err := pg.Identify(ctx, "trk_nope"); !errors.Is(err, api.ErrUnknownToken) {
+		t.Errorf("Identify(unknown) = %v, want api.ErrUnknownToken", err)
+	}
+	// A revoked admin token is no admin token.
+	if ok, err := pg.RevokeToken(ctx, admin); err != nil || !ok {
+		t.Fatalf("RevokeToken = %v, %v", ok, err)
+	}
+	if _, err := pg.Identify(ctx, admin); !errors.Is(err, api.ErrUnknownToken) {
+		t.Errorf("Identify(revoked admin) = %v, want api.ErrUnknownToken", err)
+	}
+}

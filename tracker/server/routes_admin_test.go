@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -35,7 +36,7 @@ var adminHTTP = &http.Client{Timeout: 5 * time.Second}
 
 func adminServer(t *testing.T, st store.Store) *httptest.Server {
 	t.Helper()
-	s := New(Config{Auth: fakeAuth{"good-token": "town/crew/dipper"}, Health: fakeHealth{}, SchemaLevel: 3, Store: st})
+	s := New(Config{Auth: fakeAuth{"good-token": "town/crew/dipper", "admin-token": "town/daemon"}, Health: fakeHealth{}, SchemaLevel: 3, Store: st})
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -43,12 +44,22 @@ func adminServer(t *testing.T, st store.Store) *httptest.Server {
 
 func adminCall(t *testing.T, method, url, body string, token bool) (int, string) {
 	t.Helper()
+	tok := ""
+	if token {
+		tok = "admin-token"
+	}
+	return adminCallAs(t, method, url, body, tok)
+}
+
+// adminCallAs sends a request with the bearer token tok ("" for none).
+func adminCallAs(t *testing.T, method, url, body, tok string) (int, string) {
+	t.Helper()
 	req, err := http.NewRequest(method, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if token {
-		req.Header.Set("Authorization", "Bearer good-token")
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	req.Header.Set(api.SchemaHeader, "3")
 	resp, err := adminHTTP.Do(req)
@@ -188,11 +199,18 @@ func TestClientAdminAgreesWithTheRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	admin, err := client.New(client.Config{BaseURL: ts.URL, Token: "admin-token", SchemaLevel: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	if got, err := c.Stats(ctx, "gt"); err != nil || got.Total != 3 || got.ByStatus["closed"] != 1 {
 		t.Errorf("Stats = %+v, %v", got, err)
 	}
-	if err := c.ConfigSet(ctx, "types.custom", "agent,rig"); err != nil {
+	if err := c.ConfigSet(ctx, "types.custom", "x"); !errors.Is(err, api.ErrForbidden) {
+		t.Errorf("a seat client setting config = %v, want api.ErrForbidden through the client", err)
+	}
+	if err := admin.ConfigSet(ctx, "types.custom", "agent,rig"); err != nil {
 		t.Fatal(err)
 	}
 	if v, ok, err := c.ConfigGet(ctx, "types.custom"); err != nil || !ok || v != "agent,rig" {
@@ -200,5 +218,58 @@ func TestClientAdminAgreesWithTheRoutes(t *testing.T) {
 	}
 	if v, ok, err := c.ConfigGet(ctx, "missing"); err != nil || ok || v != "" {
 		t.Errorf("ConfigGet(missing) = %q, %v, %v; want empty and unset", v, ok, err)
+	}
+}
+
+func TestOnlyAnAdminTokenMayWriteConfigurationAndASeatMayStillReadIt(t *testing.T) {
+	t.Parallel()
+	var set []string
+	st := okAdmin()
+	st.set = func(_ context.Context, k, v string) error { set = append(set, k+"="+v); return nil }
+	ts := adminServer(t, st)
+	code, body := adminCallAs(t, "PUT", ts.URL+"/v1/config/k", `{"value":"v"}`, "good-token")
+	if e := decodeErr(t, body); code != 403 || e.Kind != api.KindForbidden {
+		t.Errorf("a seat token writing config = %d %q, want 403 forbidden", code, body)
+	}
+	if len(set) != 0 {
+		t.Errorf("the store was written by a seat token: %v", set)
+	}
+	if code, _ := adminCallAs(t, "PUT", ts.URL+"/v1/config/k", `{"value":"v"}`, "admin-token"); code != 204 || len(set) != 1 || set[0] != "k=v" {
+		t.Errorf("an admin token writing config = %d (store %v), want 204 and the write", code, set)
+	}
+	for _, path := range []string{"/v1/config/k", "/v1/stats"} {
+		if code, _ := adminCallAs(t, "GET", ts.URL+path, "", "good-token"); code != 200 {
+			t.Errorf("a seat token reading %s = %d, want 200", path, code)
+		}
+	}
+}
+
+func TestAnUnknownTokenIsStill401NotForbidden(t *testing.T) {
+	t.Parallel()
+	ts := adminServer(t, okAdmin())
+	if code, _ := adminCallAs(t, "PUT", ts.URL+"/v1/config/k", `{"value":"v"}`, "nope"); code != 401 {
+		t.Errorf("an unknown token on an admin route = %d, want 401", code)
+	}
+}
+
+func TestRequireAdminRefusesAContextWithNoIdentityAndAnySeat(t *testing.T) {
+	t.Parallel() // unit tier: the middleware alone, no server
+	called := false
+	h := requireAdmin(func(http.ResponseWriter, *http.Request) { called = true })
+	for name, ctx := range map[string]context.Context{
+		"no identity": context.Background(),
+		"seat":        api.WithIdentity(context.Background(), api.Identity{Actor: "a", Scope: api.ScopeSeat}),
+		"junk scope":  api.WithIdentity(context.Background(), api.Identity{Actor: "a", Scope: "root"}),
+	} {
+		rec := httptest.NewRecorder()
+		h(rec, httptest.NewRequest("PUT", "/v1/config/k", nil).WithContext(ctx))
+		if rec.Code != 403 || called {
+			t.Errorf("%s: status %d, handler called %v; want 403 and the handler not called", name, rec.Code, called)
+		}
+	}
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest("PUT", "/v1/config/k", nil).WithContext(api.WithIdentity(context.Background(), api.Identity{Actor: "d", Scope: api.ScopeAdmin})))
+	if !called {
+		t.Error("an admin identity did not reach the handler")
 	}
 }
