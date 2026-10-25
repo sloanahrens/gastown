@@ -1,6 +1,3 @@
-// Package contract holds every store.Store implementation to the same
-// behavior: the in-memory fake (unit tier) and Postgres (integration tier)
-// run the same cases.
 package contract
 
 import (
@@ -14,32 +11,12 @@ import (
 	"github.com/steveyegge/gastown/tracker/store"
 )
 
-// RunStoreContract runs the contract against stores from newStore. newStore
-// returns a fresh, empty store in which the rigs gt and hq exist; cases run
-// in parallel, each on its own store.
-func RunStoreContract(t *testing.T, newStore func(t *testing.T) store.Store) {
-	t.Helper()
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			c.run(t, newStore(t))
-		})
-	}
-}
-
-type contractCase struct {
-	name string
-	run  func(t *testing.T, s store.Store)
-}
-
-// cases grows with the store: each bead that implements a Store method adds
-// the cases that pin its behavior here, for the fake and Postgres alike.
-var cases = []contractCase{
-	{"create then get returns the issue created", createThenGet},
-	{"an explicit id is kept and a duplicate is a conflict", explicitIDAndDuplicate},
-	{"create refuses a missing title, a missing rig and a mismatched id", createRefusals},
-	{"get returns only the ids that exist", getSkipsMissing},
-	{"generated ids are distinct and carry the rig prefix", generatedIDs},
+func init() {
+	register(Case{Name: "create then get returns the issue created", Fake: true, Run: createThenGet})
+	register(Case{Name: "an explicit id is kept and a duplicate is a conflict", Fake: true, Run: explicitIDAndDuplicate})
+	register(Case{Name: "create refuses a missing title, a missing rig and a mismatched id", Fake: true, Run: createRefusals})
+	register(Case{Name: "get returns only the ids that exist", Fake: true, Run: getSkipsMissing})
+	register(Case{Name: "generated ids are distinct and carry the rig prefix", Fake: true, Run: generatedIDs})
 }
 
 func ctx() context.Context { return context.Background() }
