@@ -488,6 +488,58 @@ func TestTapGuardBdCreateStoreDashCTownSubdir(t *testing.T) {
 	}
 }
 
+// TestTapGuardBdCreateStoreLauncherChdir pins gt-m5bb4: env -C and sudo -D run
+// the command behind them in that directory, so bd create resolves its store
+// from there the way bd -C does. A relative value resolves against the shell's
+// directory, bd -C still overrides the launcher, and a value the guard cannot
+// place is refused.
+func TestTapGuardBdCreateStoreLauncherChdir(t *testing.T) {
+	t.Parallel()
+	b := newBdStoreTown(t)
+	upToTown := filepath.Join("..", "..", "..", "..")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"env -C town", `env -C ` + b.town + ` bd create --title=x`, true},
+		{"env -C town, glued", `env -C` + b.town + ` bd create --title=x`, true},
+		{"env --chdir town", `env --chdir ` + b.town + ` bd create --title=x`, true},
+		{"env --chdir= town", `env --chdir=` + b.town + ` bd create --title=x`, true},
+		{"env -i -C town", `env -i -C ` + b.town + ` bd create --title=x`, true},
+		{"env -C town subdir without .beads", `env -C ` + filepath.Join(b.town, "mayor") + ` bd create --title=x`, true},
+		{"env -C relative up to town", `env -C ` + upToTown + ` bd create --title=x`, true},
+		{"env -C rig dir", `env -C ` + b.rigDir + ` bd create --title=x`, false},
+		{"env -C worktree", `env -C ` + b.worktree + ` bd create --title=x`, false},
+		{"env -C town, bd -C back to the rig", `env -C ` + b.town + ` bd -C ` + b.rigDir + ` create --title=x`, false},
+		{"env -C town over an inline rig BEADS_DIR", `env -C ` + b.town + ` BEADS_DIR=` + filepath.Join(b.rigDir, "mayor", "rig", ".beads") + ` bd create --title=x`, false},
+		{"env -C rig with inline town BEADS_DIR", `env -C ` + b.rigDir + ` BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` bd create --title=x`, true},
+		{"env -C unexpanded variable", `env -C $TOWN_DIR bd create --title=x`, true},
+		{"env -C value from an assignment on the line", `TOWN_DIR=` + b.town + ` env -C $TOWN_DIR bd create --title=x`, true},
+		{"env -C nowhere", `env -C ` + filepath.Join(t.TempDir(), "nowhere") + ` bd create --title=x`, true},
+		{"cd town then env -C .", `cd ` + b.town + ` && env -C . bd create --title=x`, true},
+		{"sudo -D town", `sudo -D ` + b.town + ` bd create --title=x`, true},
+		{"sudo -D rig", `sudo -D ` + b.rigDir + ` bd create --title=x`, false},
+		{"env -C town, nested shell", `env -C ` + b.town + ` bash -c 'bd create --title=x'`, true},
+		{"env -C rig, nested shell", `env -C ` + b.rigDir + ` bash -c 'bd create --title=x'`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stderr, err := b.run(t, polecatRole, b.worktree, tt.command)
+			if !tt.blocked {
+				if err != nil || stderr != "" {
+					t.Fatalf("want allowed, got err=%v stderr=%q", err, stderr)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(stderr, bdCreateStoreRefusal) {
+				t.Fatalf("want blocked, got err=%v stderr=%q", err, stderr)
+			}
+		})
+	}
+}
+
 // TestTapGuardBdCreateStoreUnreadableDirRefused pins that a directory the
 // walk cannot stat is refused, not skipped: the .beads bd finds there might be
 // the town's. The fixture is a path through a regular file, whose stat fails

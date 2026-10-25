@@ -42,17 +42,19 @@ dispatcher. The effective directory is the hook payload's cwd moved by the cd
 segments that carry to a later command on the same shell line — not one in a
 subshell, pipeline or background job — and a cd this guard cannot place before
 a bd create is refused. bd's -C/--directory, before or after the verb, moves
-the directory the store is resolved from; one the guard cannot place is
-refused the same way. bd create's --repo names the workspace the bead is
-filed into, and bd's --db the database whose enclosing .beads directory is the
-store; each overrides the directory and BEADS_DIR, both are judged when both are
-given, and a value the guard cannot place is refused. BEADS_DIR names the store
-instead when bd sees it: an inline assignment (env or command may prefix it), or
-the value the shell leaves exported, from the process env or an earlier export on
-the line that no later unset has cleared. BEADS_DB and BD_DB name a database the
-way --db does, and yield to --db and --repo. A store variable the guard cannot
-follow to this bd create (changed after &&, ||, a pipe, a group, a subshell or a
-compound command, or by eval, source, set -a or read) refuses it, as does a
+the directory the store is resolved from; so does a launcher's own -C (env -C,
+sudo -D) ahead of the command, whether it runs the bd create or a nested shell.
+One the guard cannot place is refused the same way. bd create's --repo names
+the workspace the bead is filed into, and bd's --db the database whose
+enclosing .beads directory is the store; each overrides the directory and
+BEADS_DIR, both are judged when both are given, and a value the guard cannot
+place is refused. BEADS_DIR names the store instead when bd sees it: an inline
+assignment (env or command may prefix it), or the value the shell leaves
+exported, from the process env or an earlier export on the line that no later
+unset has cleared. BEADS_DB and BD_DB name a database the way --db does, and
+yield to --db and --repo. A store variable the guard cannot follow to this bd
+create (changed after &&, ||, a pipe, a group, a subshell or a compound
+command, or by eval, source, set -a or read) refuses it, as does a
 directory with no .beads above it. gt
 escalate, gt ask and gt done create town beads inside gt itself and never reach
 this hook.
@@ -131,7 +133,11 @@ func (g bdCreateStoreGuard) evaluate(command, cwd string, cwdKnown bool, depth i
 		segment = commandSegment(segment)
 		dir, known := segmentWalkRoot(g.proc, tokens, start, cwd, vars)
 		known = known && cwdKnown
-		if reason := g.judgeSegment(segment, dir, known, vars, env); reason != "" {
+		// A launcher's own -C (env -C, sudo -D) runs the bd create, or the
+		// nested shell behind it, in that directory, so the store is read from
+		// there.
+		dir, known, placed := g.launcherRunDir(segment, dir, known, vars)
+		if reason := g.judgeSegment(segment, dir, known, placed, vars, env); reason != "" {
 			return reason
 		}
 		payloads := segmentPayloads(tokens, start, segment)
@@ -194,14 +200,18 @@ func (g bdCreateStoreGuard) evaluate(command, cwd string, cwdKnown bool, depth i
 }
 
 // judgeSegment judges one simple command, filed in dir (known false when the
-// walk could not place it).
-func (g bdCreateStoreGuard) judgeSegment(segment []string, dir string, known bool, vars map[string]string, env *bdEnvState) string {
+// walk could not place it). placed is false when a launcher names a directory
+// this guard cannot resolve.
+func (g bdCreateStoreGuard) judgeSegment(segment []string, dir string, known bool, placed bool, vars map[string]string, env *bdEnvState) string {
 	segment = commandSegment(segment)
 	if !isBdCreateSegment(segment) {
 		return ""
 	}
 	if env.unplaced {
 		return bdCreateEnvUnplaced
+	}
+	if !placed {
+		return bdCreateLauncherDirUnplaceable
 	}
 	bdDir, changesDir := bdDirectoryFlag(segment)
 	if changesDir {
@@ -302,6 +312,26 @@ const bdCreateUnplaceable = "a cd before this bd create has a target this guard 
 // bdCreateEnvUnplaced refuses a bd create that runs after a store variable
 // changed in a form the guard cannot follow to it.
 const bdCreateEnvUnplaced = "a store variable (BEADS_DIR, BEADS_DB, BD_DB) changed earlier on this line in a form this guard cannot follow to this bd create; run the bd create in its own Bash call"
+
+// bdCreateLauncherDirUnplaceable refuses a bd create whose launcher (env -C,
+// sudo -D) names a directory this guard cannot resolve: bd would file into a
+// store the guard cannot name.
+const bdCreateLauncherDirUnplaceable = "the directory a launcher runs this bd create in (env -C, sudo -D) cannot be resolved; use a literal path, or run the bd create in its own Bash call"
+
+// launcherRunDir returns dir moved by the directories the segment's launchers
+// run its command in (env -C, sudo -D), in shell order, so a relative value
+// resolves against the shell's directory as the launcher resolves it. placed
+// is false when a value names a directory the guard cannot resolve.
+func (g bdCreateStoreGuard) launcherRunDir(segment []string, dir string, known bool, vars map[string]string) (string, bool, bool) {
+	for _, chdir := range launcherChdirDirs(segment) {
+		path, placed := g.bdCreateBase(dir, known, chdir, vars)
+		if !placed {
+			return "", false, false
+		}
+		dir, known = path, true
+	}
+	return dir, known, true
+}
 
 // bdCreateNoStore refuses a bd create whose directory has no .beads above it:
 // bd finds no store there, so the guard cannot name the one it would file into.
