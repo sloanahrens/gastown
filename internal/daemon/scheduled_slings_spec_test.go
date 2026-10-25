@@ -477,6 +477,28 @@ func TestScheduledSpecRunAgentWithoutASeatCreatesNoBead(t *testing.T) {
 	}
 }
 
+// run_agent without dispatch "spec" is refused when the town config loads, as
+// the patrol refuses it when it runs the entry: the alternative is a config
+// that loads and is then skipped on every tick with only a log line (gt-nosod).
+func TestScheduledSlingLoadRejectsRunAgentWithoutSpec(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeSpecSeatTown(t, root, `"agents": {"claude-sonnet": {"command": "claude"}}`, specSeatPool("claude-sonnet", 1))
+	const daemon = `{"type": "daemon-patrol-config", "version": 1, "patrols": {"scheduled_slings": {"enabled": true, "entries": [
+		{"name": "deep-review", "rig": "gastown", "formula": "mol-deep-review", "interval": "1h", "run_agent": "claude-sonnet"}]}}}`
+	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "mayor", "daemon.json"), []byte(daemon), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := CheckTownConfig(root)
+	if err == nil || !strings.Contains(err.Error(), "scheduled_slings[deep-review].run_agent") || !strings.Contains(err.Error(), `dispatch "spec"`) {
+		t.Fatalf("CheckTownConfig = %v, want a refusal naming the entry and the dispatch it lacks", err)
+	}
+}
+
 // run_agent is valid only on a spec entry: any other dispatch slings its own
 // run and names its agent with agent.
 func TestScheduledSlingEntry_RunAgentNeedsSpecDispatch(t *testing.T) {

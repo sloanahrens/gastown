@@ -560,10 +560,11 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 	}
 
 	// The slings a tick handed back to run in the background hold the restart
-	// the same way, each up to the sling's own bound from the oldest one's
+	// the same way, each up to the sling's own bound from the youngest one's
 	// start: the restart waits for the in-flight set to empty, not forever
-	// (gt-5h70s).
-	slingSince, slinging := d.specSlings.oldest()
+	// (gt-5h70s), and the youngest's bound is the first moment every sling in
+	// the set has been cut (gt-nosod).
+	slingSince, slinging := d.specSlings.newest()
 	slingWaited := max(now.Sub(slingSince), 0)
 
 	switch {

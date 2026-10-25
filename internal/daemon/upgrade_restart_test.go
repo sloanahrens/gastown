@@ -1123,6 +1123,30 @@ func TestUpgradeSpecDispatchWaitFallsBackToTheMarkerClock(t *testing.T) {
 	}
 }
 
+// gt-nosod: a restart waits from the youngest running sling's start. Measured
+// from the oldest's, it went as soon as that sling was cut at its bound, while
+// a younger sling still had most of its own left.
+func TestUpgradeHoldWaitsForYoungestSlingBound(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	d.logger = log.New(io.Discard, "", 0)
+
+	t0 := time.Now()
+	bound := specSlingBound()
+	d.specSlings.begin(specSlingFlight{Bead: "gt-old", Rig: "gastown", started: t0})
+	d.specSlings.begin(specSlingFlight{Bead: "gt-young", Rig: "gastown", started: t0.Add(4 * time.Minute)})
+
+	// The older sling is at its bound and about to leave the set; the younger
+	// one has most of its own bound left.
+	hold := d.upgradeHold(t0.Add(bound), nil)
+	if hold == nil || hold.name != specSlingHoldLabel {
+		t.Fatalf("upgradeHold = %+v with a younger sling inside its bound, want the sling hold", hold)
+	}
+	if hold := d.upgradeHold(t0.Add(4*time.Minute+bound), nil); hold != nil && hold.name == specSlingHoldLabel {
+		t.Fatalf("upgradeHold = %+v with every sling past its bound, want the restart to go", hold)
+	}
+}
+
 // gt-cbaoy: a tick that ends inside its bound releases the restart at once; the
 // restart does not wait out the rest of the bound.
 func TestUpgradeRestartGoesWhenTheSpecDispatchTickEnds(t *testing.T) {

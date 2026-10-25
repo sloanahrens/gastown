@@ -271,6 +271,9 @@ func TestADeadBackgroundSlingProcessLabelsItsBead(t *testing.T) {
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
 	d.clock = newSlingClock()
+	bd := newWorkBD(t)
+	bd.seed("gt-z", "open", time.Now())
+	d.openWorkBeads = bd.open
 
 	d.runSpecDispatch()
 	waitSlings(t, d)
@@ -287,6 +290,35 @@ func TestADeadBackgroundSlingProcessLabelsItsBead(t *testing.T) {
 	}
 	if running := d.specSlings.list(); len(running) != 0 {
 		t.Errorf("in flight = %+v, want a dead sling out of the set", running)
+	}
+}
+
+// A sling killed at its bound after it hooked the bead spawned a polecat that
+// owns the work now. The failure label would hold the bead out of the queue for
+// good, since nothing clears it if that polecat later dies (gt-nosod).
+func TestFailSpecSlingSkipsLabelWhenBeadHooked(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func(args []string) cliReply {
+		if args[1] == "sling" {
+			return cliReply{stderr: "signal: killed", code: 1}
+		}
+		return cliReply{stdout: string(wireOut(plannedTick(slingJob("gt-z", "claude-sonnet"))))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	d.clock = newSlingClock()
+	bd := newWorkBD(t)
+	bd.seed("gt-z", "hooked", time.Now())
+	d.openWorkBeads = bd.open
+
+	d.runSpecDispatch()
+	waitSlings(t, d)
+
+	if got := fake.argvs("bead"); len(got) != 0 {
+		t.Errorf("bead writes = %v, want none for a bead the sling hooked", got)
+	}
+	if n := countContaining(lines(), "spec_dispatch: gt-z: sling died after hooking it"); n != 1 {
+		t.Errorf("hook line = %d, want one saying the bead was left to its polecat: %v", n, lines())
 	}
 }
 
@@ -332,6 +364,9 @@ func TestAFailedFailureWriteIsLoggedNotFatal(t *testing.T) {
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
 	d.clock = newSlingClock()
+	bd := newWorkBD(t)
+	bd.seed("gt-z", "open", time.Now())
+	d.openWorkBeads = bd.open
 
 	d.runSpecDispatch()
 	waitSlings(t, d)

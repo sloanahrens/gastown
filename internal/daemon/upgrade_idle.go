@@ -152,7 +152,7 @@ func (d *Daemon) daemonWorkHolds() []*daemonWork {
 	// The slings a tick handed back run on after it (gt-5h70s); a restart that
 	// cuts one leaves its seat hooked with no session, as a cut tick did
 	// (gt-cbaoy).
-	if _, slinging := d.specSlings.oldest(); slinging {
+	if _, slinging := d.specSlings.newest(); slinging {
 		holds = append(holds, &daemonWork{name: specSlingHoldLabel, ownBound: true})
 	}
 	if d.patrolScanRunning.Load() {
