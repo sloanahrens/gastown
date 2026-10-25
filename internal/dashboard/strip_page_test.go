@@ -310,14 +310,16 @@ func TestTheStripNamesTheSandboxSeatsByTheirShortNames(t *testing.T) {
 			map[string]any{"agent": "claude-haiku", "cap": 2, "state": "open", "live": 1, "key": "gastown.claude-haiku"},
 		}},
 	})
-	for _, c := range []struct{ shown, full string }{
+	// Each fact after the first is drawn with the strip's " · " separator in
+	// its own cell, and cellWithText reads a cell by its whole text.
+	for _, c := range []struct{ cell, full string }{
 		{"docker-sbx 1/3", "deepseek-flash-sandbox"},
-		{"k8s-sbx 0/3", "deepseek-flash-sandbox-k8s"},
-		{"claude-haiku 1/2", "claude-haiku"},
+		{" · k8s-sbx 0/3", "deepseek-flash-sandbox-k8s"},
+		{" · claude-haiku 1/2", "claude-haiku"},
 	} {
-		cell := dom.cellWithText(t, "strip", c.shown)
+		cell := dom.cellWithText(t, "strip", c.cell)
 		if !strings.Contains(cell.Title, c.full) {
-			t.Errorf("the strip's %q does not carry the full name %q on hover: %q", c.shown, c.full, cell.Title)
+			t.Errorf("the strip's %q does not carry the full name %q on hover: %q", c.cell, c.full, cell.Title)
 		}
 	}
 }
