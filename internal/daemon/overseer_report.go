@@ -352,9 +352,15 @@ func (d *Daemon) overseerReportSeats() ([]townreport.SeatWork, error) {
 }
 
 // overseerReportLeft asks the spec dispatcher what it would do now, without
-// slinging, labeling or commenting.
+// slinging, labeling or commenting. It runs the dry run with the flags the
+// next real tick runs with, so a bead with a sling in flight is neither next in
+// the queue nor counted as a free seat (gt-nosod).
 func (d *Daemon) overseerReportLeft() (townreport.DispatchLeft, error) {
-	out, err := d.runSpecDispatchCommand(d.specDispatchTickBound(), "--dry-run")
+	args, err := d.specTickArgs()
+	if err != nil {
+		return townreport.DispatchLeft{}, err
+	}
+	out, err := d.runSpecDispatchCommand(d.specDispatchTickBound(), append(args, "--dry-run")...)
 	if err != nil {
 		return townreport.DispatchLeft{}, err
 	}

@@ -616,6 +616,62 @@ func TestOverseerReportStaysUnderSixtyLines(t *testing.T) {
 	}
 }
 
+// A bead with a sling in flight is that sling's, not the next tick's: the LEFT
+// dry run runs with the same in-flight set the real tick does, so the bead is
+// not listed as next and its seat is not counted free (gt-nosod).
+func TestOverseerReportLeftPassesInFlight(t *testing.T) {
+	t.Parallel()
+	var args []string
+	fake := newFakeCLI(func(a []string) cliReply {
+		args = a
+		// The dispatcher leaves an in-flight bead off its next list and counts
+		// the seat as taken; without the flag it would offer both.
+		if slices.Contains(a, "--in-flight") {
+			return cliReply{stdout: string(wireOut(`{"roster": "claude-sonnet 1/2", "candidates": 0}`))}
+		}
+		return cliReply{stdout: string(wireOut(`{"roster": "claude-sonnet 0/2", "candidates": 1,
+			"dispatched": [{"bead": "gt-a", "rig": "gastown", "line": "gt-a: would sling to gastown on claude-sonnet"}]}`))}
+	})
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, ctx: t.Context(), logger: discardLogger, gtPath: "gt", execCmd: fake.run}
+	d.specSlings.begin(specSlingFlight{Bead: "gt-a", Rig: "gastown", started: time.Now()})
+
+	left, err := d.overseerReportLeft()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Contains(args, "--dry-run") || !slices.Contains(args, "--in-flight") {
+		t.Fatalf("dry run args = %v, want the tick's --in-flight and --dry-run", args)
+	}
+	if i := slices.Index(args, "--in-flight"); i+1 >= len(args) || !strings.Contains(args[i+1], `"gt-a"`) {
+		t.Errorf("--in-flight = %v, want it to name gt-a", args)
+	}
+	if slices.ContainsFunc(left.Next, func(r townreport.DispatchRow) bool { return r.Bead == "gt-a" }) {
+		t.Errorf("LEFT Next = %+v, want the in-flight bead left out", left.Next)
+	}
+}
+
+// A set of running slings that cannot be written down fails the LEFT read; a
+// dry run without --in-flight would list the running bead as next and count
+// its seat free, the reading the flag exists to prevent (gt-nosod).
+func TestOverseerReportLeftFailsWhenTheInFlightSetCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func([]string) cliReply {
+		return cliReply{stdout: string(wireOut(`{"roster": "claude-sonnet 0/2"}`))}
+	})
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, ctx: t.Context(), logger: discardLogger, gtPath: "gt", execCmd: fake.run}
+	// A year time.Time cannot marshal is the one way the in-flight payload
+	// fails to write.
+	d.specSlings.begin(specSlingFlight{Bead: "gt-a", Rig: "gastown", started: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)})
+
+	if _, err := d.overseerReportLeft(); err == nil {
+		t.Fatal("overseerReportLeft returned no error for an in-flight set that cannot be written")
+	}
+	if got := fake.argvs("spec", "dispatch"); len(got) != 0 {
+		t.Errorf("dry runs = %v, want none without the flag", got)
+	}
+}
+
 func TestOverseerReportLeftSortsTheDryRun(t *testing.T) {
 	t.Parallel()
 	left, err := overseerReportLeftFrom(specDispatchTickReport{

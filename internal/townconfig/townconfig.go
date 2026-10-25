@@ -233,9 +233,12 @@ func (t *Town) loadSettings() error {
 // checkScheduledRunAgents fails the load when a scheduled entry's run_agent
 // names an agent with no seat in polecat_pool.seats: the entry's run beads
 // would carry an agent: pin no seat can serve and wait for ever, so a deep
-// review pinned off DeepSeek would silently never run (gt-tplg6). A settings
-// file that is absent has no seats, so it fails the same way; one that is
-// present but did not load already reported its own error.
+// review pinned off DeepSeek would silently never run (gt-tplg6). It also
+// fails run_agent without dispatch "spec": the patrol only rejects that as it
+// runs the entry, so the load would take a config that every later tick skips
+// with a log line (gt-nosod). A settings file that is absent has no seats, so
+// it fails the seat check the same way; one that is present but did not load
+// already reported its own error.
 func (t *Town) checkScheduledRunAgents() error {
 	if t.daemon == nil || t.daemon.Patrols == nil || t.daemon.Patrols.ScheduledSlings == nil {
 		return nil
@@ -245,7 +248,14 @@ func (t *Town) checkScheduledRunAgents() error {
 	}
 	var bad []string
 	for _, e := range t.daemon.Patrols.ScheduledSlings.Entries {
-		if e.RunAgent != "" && !config.HasSeat(t.seats, e.RunAgent) {
+		if e.RunAgent == "" {
+			continue
+		}
+		if e.Dispatch != "spec" {
+			bad = append(bad, fmt.Sprintf(`scheduled_slings[%s].run_agent: valid only with dispatch "spec"`, e.Name))
+			continue
+		}
+		if !config.HasSeat(t.seats, e.RunAgent) {
 			bad = append(bad, fmt.Sprintf("scheduled_slings[%s].run_agent %q: no seat for that agent in polecat_pool.seats", e.Name, e.RunAgent))
 		}
 	}

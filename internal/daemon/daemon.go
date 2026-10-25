@@ -407,6 +407,8 @@ type Daemon struct {
 	// no-effect alarms. Run-loop goroutine only (startup and heartbeat).
 	upgradeWaitCommit    string
 	upgradeWaitSince     time.Time
+	upgradeSlingFrozen   bool      // the drain froze the sling wait (gt-nosod): only the slings in flight then hold the restart
+	upgradeSlingSince    time.Time // the youngest in-flight sling's start when the drain began, which the restart's sling wait runs from (zero = no drain)
 	upgradeGCHoldSince   time.Time // when the drain's clock for the maintenance gc call in flight started: the call's start, moved forward over hard-hold time (zero = none)
 	upgradeGCCallStart   int64     // UnixNano start of the gc call upgradeGCHoldSince times (0 = none)
 	upgradeGCBeat        time.Time // the last heartbeat that read the gc hold

@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -103,13 +105,16 @@ func (s *specSlings) list() []specSlingFlight {
 	return out
 }
 
-// oldest is when the longest-running sling started; false when none runs.
-func (s *specSlings) oldest() (time.Time, bool) {
+// newest is when the youngest running sling started; false when none runs. The
+// upgrade restart freezes this start as its wait's origin rather than taking
+// the oldest's: a sling outlives its own bound only until the kill reaches it,
+// and the younger ones behind it may still have most of theirs left (gt-nosod).
+func (s *specSlings) newest() (time.Time, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var at time.Time
 	for _, f := range s.flights {
-		if at.IsZero() || f.started.Before(at) {
+		if at.IsZero() || f.started.After(at) {
 			at = f.started
 		}
 	}
@@ -307,10 +312,26 @@ func (d *Daemon) correctDispatchTick(seq uint64, result specSlingResult) {
 
 // failSpecSling labels and annotates the bead of a sling whose process died
 // without reporting, as a failed foreground sling does: the label holds the
-// bead out of the queue until an operator clears it. A daemon that is shutting
-// down cut the sling itself, so the bead stays ready for the next daemon.
+// bead out of the queue until an operator clears it. A sling killed at its
+// bound may have hooked its bead and spawned the polecat first; that polecat
+// owns the work now, and nothing clears the label if it later dies, so the bead
+// is left unlabeled (gt-nosod). A daemon that is shutting down cut the sling
+// itself, so the bead stays ready for the next daemon.
 func (d *Daemon) failSpecSling(f specSlingFlight, reason string) {
 	if d.ctx.Err() != nil {
+		return
+	}
+	hooked, known := d.specSlingBeadHooked(f)
+	if !known {
+		// The label is the one write nothing clears without an operator, so a
+		// read that failed withholds it: no read is no evidence the polecat
+		// does not own the bead (gt-nosod).
+		d.logger.Printf("spec_dispatch: %s: the bead could not be read before the failure label; leaving it unlabeled", f.Bead)
+		return
+	}
+	if hooked {
+		d.logger.Printf("spec_dispatch: %s: sling died after hooking it; leaving the bead to its polecat and writing no %s label",
+			f.Bead, constants.LabelSpecDispatchFailed)
 		return
 	}
 	note := "spec-dispatch: " + reason + "; excluded from the queue until label " + constants.LabelSpecDispatchFailed + " is cleared"
@@ -325,6 +346,30 @@ func (d *Daemon) failSpecSling(f specSlingFlight, reason string) {
 			d.logger.Printf("spec_dispatch: %s: gt %s failed: %v %s", f.Bead, args[1], err, lastLine(string(stderr)))
 		}
 	}
+}
+
+// specSlingBeadHooked reports whether the bead a dead sling was running is
+// hooked or in progress, so the failure label does not hold out work a polecat
+// owns, and whether that could be answered at all. A read that failed is not an
+// answer: known is false, which the caller must read as "leave the bead alone",
+// as a failed read is in workBeadStillSubmitted (gt-nosod).
+func (d *Daemon) specSlingBeadHooked(f specSlingFlight) (hooked, known bool) {
+	issue, err := d.workBeads(d.workBeadsEnv(f.Rig), workBeadReadTimeout).Show(f.Bead)
+	if err != nil {
+		d.logger.Printf("spec_dispatch: %s: reading the bead before the failure label: %v", f.Bead, err)
+		return false, false
+	}
+	switch beads.IssueStatus(strings.TrimSpace(issue.Status)) {
+	case beads.IssueStatusHooked, beads.StatusInProgress:
+		return true, true
+	case beads.StatusOpen, beads.StatusClosed, beads.StatusBlocked, beads.StatusDeferred,
+		beads.IssueStatusPinned, beads.StatusTombstone:
+		return false, true
+	}
+	// An empty or unrecognized status is no answer: the label is the one write
+	// nothing clears, so only a status that says the bead is not held lets it be
+	// written (gt-nosod).
+	return false, false
 }
 
 // formatSpecSlingReport renders a sling's report as log lines: one per entry,

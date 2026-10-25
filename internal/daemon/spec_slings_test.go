@@ -3,6 +3,9 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"github.com/steveyegge/gastown/internal/beads"
+	"io"
 	"log"
 	"slices"
 	"strings"
@@ -271,6 +274,10 @@ func TestADeadBackgroundSlingProcessLabelsItsBead(t *testing.T) {
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
 	d.clock = newSlingClock()
+	// The bead is unowned, so the failure label applies (gt-nosod).
+	bd := newWorkBD(t)
+	bd.seed("gt-z", "open", time.Now())
+	d.openWorkBeads = bd.open
 
 	d.runSpecDispatch()
 	waitSlings(t, d)
@@ -287,6 +294,64 @@ func TestADeadBackgroundSlingProcessLabelsItsBead(t *testing.T) {
 	}
 	if running := d.specSlings.list(); len(running) != 0 {
 		t.Errorf("in flight = %+v, want a dead sling out of the set", running)
+	}
+}
+
+// A sling killed at its bound after it hooked the bead spawned a polecat that
+// owns the work now. The failure label would hold the bead out of the queue for
+// good, since nothing clears it if that polecat later dies (gt-nosod).
+func TestFailSpecSlingSkipsLabelWhenBeadHooked(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func(args []string) cliReply {
+		if args[1] == "sling" {
+			return cliReply{stderr: "signal: killed", code: 1}
+		}
+		return cliReply{stdout: string(wireOut(plannedTick(slingJob("gt-z", "claude-sonnet"))))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	d.clock = newSlingClock()
+	bd := newWorkBD(t)
+	bd.seed("gt-z", "hooked", time.Now())
+	d.openWorkBeads = bd.open
+
+	d.runSpecDispatch()
+	waitSlings(t, d)
+
+	if got := fake.argvs("bead"); len(got) != 0 {
+		t.Errorf("bead writes = %v, want none for a bead the sling hooked", got)
+	}
+	if n := countContaining(lines(), "spec_dispatch: gt-z: sling died after hooking it"); n != 1 {
+		t.Errorf("hook line = %d, want one saying the bead was left to its polecat: %v", n, lines())
+	}
+}
+
+// A read that failed says nothing about whether the sling hooked the bead, and
+// the label is the one write nothing clears without an operator, so the bead is
+// left unlabeled (gt-nosod).
+func TestFailSpecSlingSkipsLabelWhenTheBeadCannotBeRead(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func(args []string) cliReply {
+		if args[1] == "sling" {
+			return cliReply{stderr: "signal: killed", code: 1}
+		}
+		return cliReply{stdout: string(wireOut(plannedTick(slingJob("gt-z", "claude-sonnet"))))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	d.clock = newSlingClock()
+	bd := newWorkBD(t)
+	bd.showErr = errors.New("dolt: connection refused")
+	d.openWorkBeads = bd.open
+
+	d.runSpecDispatch()
+	waitSlings(t, d)
+
+	if got := fake.argvs("bead"); len(got) != 0 {
+		t.Errorf("bead writes = %v, want none when the bead could not be read", got)
+	}
+	if n := countContaining(lines(), "spec_dispatch: gt-z: the bead could not be read before the failure label"); n != 1 {
+		t.Errorf("unreadable line = %d, want one saying the bead was left unlabeled: %v", n, lines())
 	}
 }
 
@@ -332,6 +397,10 @@ func TestAFailedFailureWriteIsLoggedNotFatal(t *testing.T) {
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
 	d.clock = newSlingClock()
+	// The bead is unowned, so the failure label is attempted (gt-nosod).
+	bd := newWorkBD(t)
+	bd.seed("gt-z", "open", time.Now())
+	d.openWorkBeads = bd.open
 
 	d.runSpecDispatch()
 	waitSlings(t, d)
@@ -596,5 +665,43 @@ func TestUpgradeRestartGoesWhenTheRunningSlingsReturn(t *testing.T) {
 	d.specSlings.end("gt-b")
 	if !d.checkUpgradeRestart(now.Add(2 * time.Minute)) {
 		t.Fatal("the restart must go as soon as the in-flight set is empty")
+	}
+}
+
+// statusBeads answers Show with one status, for the failure-label decision.
+type statusBeads struct{ status string }
+
+func (s statusBeads) Show(id string) (*beads.Issue, error) {
+	return &beads.Issue{ID: id, Status: s.status}, nil
+}
+
+func (s statusBeads) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, nil }
+
+// gt-nosod: only a status that says whether the bead is held answers the
+// failure-label question. An empty or unrecognized status is no answer, so the
+// label is withheld rather than written.
+func TestSpecSlingBeadHookedAnswersOnlyKnownStatuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		status           string
+		wantHooked, know bool
+	}{
+		{"hooked", true, true},
+		{"in_progress", true, true},
+		{"closed", false, true},
+		{"open", false, true},
+		{"", false, false},
+		{"something-new", false, false},
+	}
+	for _, c := range cases {
+		d := &Daemon{
+			config:        &Config{TownRoot: t.TempDir()},
+			logger:        log.New(io.Discard, "", 0),
+			openWorkBeads: func([]string, time.Duration) workBeadReader { return statusBeads{status: c.status} },
+		}
+		hooked, known := d.specSlingBeadHooked(specSlingFlight{Bead: "gt-x", Rig: "gastown"})
+		if hooked != c.wantHooked || known != c.know {
+			t.Errorf("status %q: hooked=%v known=%v, want hooked=%v known=%v", c.status, hooked, known, c.wantHooked, c.know)
+		}
 	}
 }
