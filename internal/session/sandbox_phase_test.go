@@ -443,9 +443,8 @@ func (p unansweredProbe) GetSessionCreatedTime(string) (time.Time, error) {
 	return time.Time{}, p.err
 }
 
-// A first reading with no transition time starts the clock at the reading; a
-// later transition time that predates it moves the clock back to the failure,
-// as gt-j18af requires (gt-h4yci).
+// With no transition time on the first reading, the clock starts at that
+// reading; a later transition time that predates it moves the clock back.
 func TestSandboxPhaseLaterEarlierTransitionTimeMovesTheClock(t *testing.T) {
 	t.Parallel()
 	w := newSandboxPhaseWatch()
@@ -459,8 +458,7 @@ func TestSandboxPhaseLaterEarlierTransitionTimeMovesTheClock(t *testing.T) {
 	}
 }
 
-// A transition time after the clock has started does not move it: the start
-// stays at the earliest failure time the watch has been given (gt-h4yci).
+// A transition time later than the clock start does not move the clock.
 func TestSandboxPhaseLaterTransitionTimeDoesNotMoveTheClock(t *testing.T) {
 	t.Parallel()
 	w := newSandboxPhaseWatch()
@@ -474,9 +472,8 @@ func TestSandboxPhaseLaterTransitionTimeDoesNotMoveTheClock(t *testing.T) {
 	}
 }
 
-// On the first reading a transition time older than the reading is the start
-// of the failure, so it spends the grace at once. This is the gt-j18af
-// contract, pinned here so the doc comment on failing states it (gt-h4yci).
+// A transition time older than the first reading is the start of the failure,
+// so on that reading it spends the grace at once.
 func TestSandboxPhaseStaleTransitionTimeOnTheFirstReadingSpendsTheGrace(t *testing.T) {
 	t.Parallel()
 	w := newSandboxPhaseWatch()
