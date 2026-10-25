@@ -1,5 +1,4 @@
--- Core tracker schema (design: docs/plans/2026-10-25-town-tracker-design.md,
--- section 4). One schema, one issues table for issues and wisps, one
+-- Core tracker schema (the tracker design, section 4). One schema, one issues table for issues and wisps, one
 -- dependencies table, one append-only events table. The mail and receipt
 -- tables are a later migration.
 

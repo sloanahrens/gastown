@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,6 +23,9 @@ var schemaFS embed.FS
 // migrationLockKey is the advisory-lock key Migrate takes so two processes
 // opening the same database do not apply a migration twice.
 const migrationLockKey int64 = 0x7472_6b72_6d69_6772 // "trkrmigr"
+
+// undefinedTable is the SQLSTATE for a missing relation.
+const undefinedTable = "42P01"
 
 // ErrSchemaTooNew means the database was migrated by a newer binary than this
 // one. The binary refuses to run against it rather than guess.
@@ -90,12 +95,41 @@ func embeddedMigrations() ([]migration, error) {
 
 // SchemaLevel is the newest schema version this binary knows. The server
 // reports it, and clients refuse a server whose level differs from theirs.
+//
+// It panics when the embedded migrations are invalid. They are fixed at build
+// time and TestEmbeddedMigrationsLoad checks them, so a failure here is a
+// broken binary; reporting level 0 instead would read as "no schema".
 func SchemaLevel() int {
 	ms, err := embeddedMigrations()
+	return levelOf(ms, err)
+}
+
+// levelOf is len(ms), or a panic when the migrations failed to load.
+func levelOf(ms []migration, err error) int {
 	if err != nil {
-		return 0
+		panic(fmt.Sprintf("store: embedded migrations are invalid: %v", err))
 	}
 	return len(ms)
+}
+
+// checkHistory validates the versions a database has applied against this
+// binary's migrations: none newer than the binary knows, none missing below
+// the newest applied, and every name the same. A violation is an error so a
+// migration is never applied out of order or onto a rewritten history.
+func checkHistory(ms []migration, applied map[int]string, maxApplied int) error {
+	if maxApplied > len(ms) {
+		return fmt.Errorf("%w: database is at version %d, this binary knows %d", ErrSchemaTooNew, maxApplied, len(ms))
+	}
+	for v := 1; v <= maxApplied; v++ {
+		n, ok := applied[v]
+		if !ok {
+			return fmt.Errorf("store: migrate: database history has a gap: version %d is missing below version %d", v, maxApplied)
+		}
+		if ms[v-1].name != n {
+			return fmt.Errorf("store: migrate: database has version %d as %q, this binary has %q", v, n, ms[v-1].name)
+		}
+	}
+	return nil
 }
 
 // Migrate brings the database to SchemaLevel. It serializes with other
@@ -126,7 +160,7 @@ CREATE TABLE IF NOT EXISTS tracker.schema_migrations (
     version    integer PRIMARY KEY,
     name       text NOT NULL,
     applied_at timestamptz NOT NULL DEFAULT now()
-)`); err != nil {
+)`, pgx.QueryExecModeSimpleProtocol); err != nil {
 		return fmt.Errorf("store: migrate: bootstrap: %w", err)
 	}
 
@@ -150,13 +184,8 @@ CREATE TABLE IF NOT EXISTS tracker.schema_migrations (
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("store: migrate: read applied: %w", err)
 	}
-	if maxApplied > len(ms) {
-		return fmt.Errorf("%w: database is at version %d, this binary knows %d", ErrSchemaTooNew, maxApplied, len(ms))
-	}
-	for v, n := range applied {
-		if ms[v-1].name != n {
-			return fmt.Errorf("store: migrate: database has version %d as %q, this binary has %q", v, n, ms[v-1].name)
-		}
+	if err := checkHistory(ms, applied, maxApplied); err != nil {
+		return err
 	}
 
 	for _, m := range ms {
@@ -167,7 +196,7 @@ CREATE TABLE IF NOT EXISTS tracker.schema_migrations (
 		if err != nil {
 			return fmt.Errorf("store: migrate %04d_%s: %w", m.version, m.name, err)
 		}
-		if _, err := tx.Exec(ctx, m.sql); err != nil {
+		if _, err := tx.Exec(ctx, m.sql, pgx.QueryExecModeSimpleProtocol); err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("store: migrate %04d_%s: %w", m.version, m.name, err)
 		}
@@ -182,13 +211,14 @@ CREATE TABLE IF NOT EXISTS tracker.schema_migrations (
 	return nil
 }
 
-// CurrentLevel is the newest version applied to the database, 0 when none.
+// CurrentLevel is the newest version applied to the database: 0 when the
+// migrations table does not exist yet. Any other failure is an error.
 func CurrentLevel(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	var level int
 	err := pool.QueryRow(ctx, "SELECT coalesce(max(version), 0) FROM tracker.schema_migrations").Scan(&level)
 	if err != nil {
-		var exists bool
-		if e2 := pool.QueryRow(ctx, "SELECT to_regclass('tracker.schema_migrations') IS NOT NULL").Scan(&exists); e2 == nil && !exists {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == undefinedTable {
 			return 0, nil
 		}
 		return 0, fmt.Errorf("store: schema level: %w", err)

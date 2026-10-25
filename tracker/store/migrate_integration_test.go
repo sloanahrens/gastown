@@ -92,10 +92,10 @@ func TestConcurrentMigratorsApplyEachMigrationOnce(t *testing.T) {
 	errs := make([]error, 4)
 	for i := range errs {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
 			errs[i] = Migrate(context.Background(), p)
-		}()
+		}(i)
 	}
 	wg.Wait()
 	for i, err := range errs {
@@ -192,4 +192,15 @@ func TestSchemaShape(t *testing.T) {
 			prev = s
 		}
 	})
+}
+
+// A failed query is not "no schema yet": only a missing table means level 0.
+func TestCurrentLevelDoesNotMistakeAFailureForNoSchema(t *testing.T) {
+	t.Parallel()
+	p := pgtest.New(t, "migrated")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // every query on this context fails
+	if lvl, err := CurrentLevel(ctx, p); err == nil {
+		t.Errorf("CurrentLevel with a cancelled context = %d, nil; want an error, not level 0", lvl)
+	}
 }

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -67,4 +68,48 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 	if len(ms) == 0 || SchemaLevel() != len(ms) {
 		t.Errorf("SchemaLevel() = %d with %d migrations, want them equal and at least 1", SchemaLevel(), len(ms))
 	}
+}
+
+var twoMigrations = []migration{{version: 1, name: "core"}, {version: 2, name: "labels"}}
+
+func TestCheckHistory(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		applied map[int]string
+		max     int
+		want    string // "" means no error
+	}{
+		"fresh database":       {map[int]string{}, 0, ""},
+		"partly migrated":      {map[int]string{1: "core"}, 1, ""},
+		"fully migrated":       {map[int]string{1: "core", 2: "labels"}, 2, ""},
+		"newer than binary":    {map[int]string{1: "core", 2: "labels", 3: "future"}, 3, "newer"},
+		"gap below the newest": {map[int]string{2: "labels"}, 2, "gap"},
+		"renamed version":      {map[int]string{1: "other"}, 1, "version 1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err := checkHistory(twoMigrations, tc.applied, tc.max)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Errorf("checkHistory = %v, want nil", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Errorf("checkHistory = %v, want an error mentioning %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A binary whose embedded migrations do not load must not report a schema
+// level of 0, which reads as "no schema yet".
+func TestLevelOfPanicsOnABrokenSet(t *testing.T) {
+	t.Parallel()
+	if got := levelOf(twoMigrations, nil); got != 2 {
+		t.Errorf("levelOf = %d, want 2", got)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("levelOf with a load error did not panic")
+		}
+	}()
+	levelOf(nil, errors.New("boom"))
 }
