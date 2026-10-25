@@ -2,7 +2,9 @@ package contract
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/tracker/api"
@@ -136,5 +138,49 @@ func eventsActor(t *testing.T, s store.Store) {
 	es := eventsFor(t, s, a.ID)
 	if last := es[len(es)-1]; last.Op != "deleted" || last.Actor != "town/crew/x" {
 		t.Errorf("last event = %+v, want deleted by the context's actor", last)
+	}
+}
+
+func init() {
+	register(Case{Name: "an event carries the issue's status after the change, and none after a delete", Run: eventsCarryStatus})
+}
+
+func eventStatus(t *testing.T, e api.Event) string {
+	t.Helper()
+	if len(e.Payload) == 0 {
+		return ""
+	}
+	var p struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		t.Fatalf("event %d payload %s is not JSON: %v", e.Seq, e.Payload, err)
+	}
+	return p.Status
+}
+
+func eventsCarryStatus(t *testing.T, s store.Store) {
+	is := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "journaled"})
+	if err := s.CloseIssues(ctx(), []string{is.ID}, "r", false); err != nil {
+		t.Fatal(err)
+	}
+	mustUpdate(t, s, is.ID, api.UpdatePatch{Status: str("open")}, api.Guard{})
+	mustUpdate(t, s, is.ID, api.UpdatePatch{Title: str("renamed")}, api.Guard{})
+	if err := s.DeleteIssues(ctx(), []string{is.ID}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.EventsAfter(ctx(), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range page.Events {
+		if e.IssueID == is.ID {
+			got = append(got, e.Op+":"+eventStatus(t, e))
+		}
+	}
+	want := []string{"created:open", "closed:closed", "reopened:open", "updated:open", "deleted:"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("events for %s = %v, want %v (status after each change; a delete has none)", is.ID, got, want)
 	}
 }

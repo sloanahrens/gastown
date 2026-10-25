@@ -61,9 +61,12 @@ func loadLabels(ctx context.Context, q querier, ids []string) (map[string][]stri
 }
 
 // appendEvent adds one row to the append-only events feed inside tx. Writers
-// call it in the same transaction as the change it records.
+// call it in the same transaction as the change it records, after making it, so
+// the row's payload carries {"status": <the issue's status after the change>};
+// an issue that no longer exists (a delete) has no status and no payload.
 func appendEvent(ctx context.Context, tx pgx.Tx, op, issueID, actor string, oldValue, newValue, comment *string) error {
-	_, err := tx.Exec(ctx, "INSERT INTO tracker.events (op, issue_id, actor, old_value, new_value, comment) VALUES ($1, $2, $3, $4, $5, $6)",
+	_, err := tx.Exec(ctx, `INSERT INTO tracker.events (op, issue_id, actor, old_value, new_value, comment, payload)
+VALUES ($1, $2, $3, $4, $5, $6, (SELECT jsonb_build_object('status', status) FROM tracker.issues WHERE id = $2))`,
 		op, issueID, actor, oldValue, newValue, comment)
 	if err != nil {
 		return fmt.Errorf("store: append %s event for %s: %w", op, issueID, err)
