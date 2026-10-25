@@ -30,6 +30,27 @@ func dockerfileInstructions(t *testing.T) []string {
 	return out
 }
 
+// dockerfileEnv returns the image environment as the Dockerfile's last
+// assignment of each key.
+func dockerfileEnv(t *testing.T) map[string]string {
+	t.Helper()
+	env := map[string]string{}
+	for _, in := range dockerfileInstructions(t) {
+		rest, ok := strings.CutPrefix(in, "ENV ")
+		if !ok {
+			continue
+		}
+		for _, kv := range strings.Fields(rest) {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok {
+				continue
+			}
+			env[k] = strings.Trim(v, `"`)
+		}
+	}
+	return env
+}
+
 // The image carries seeded Go caches (gt-ieuvf) so a cold sandbox's presubmit
 // does not recompile its dependencies (devops: 967 compiles and a 4.8-10 GB peak
 // cold, 66 compiles and 1.2 GB seeded). The caches sit OUTSIDE /sandbox: the
@@ -43,17 +64,7 @@ func dockerfileInstructions(t *testing.T) []string {
 func TestPolecatImageSeedSetsCachesOutsideTheWorkspace(t *testing.T) {
 	t.Parallel()
 	ins := dockerfileInstructions(t)
-
-	env := map[string]string{}
-	for _, in := range ins {
-		if rest, ok := strings.CutPrefix(in, "ENV "); ok {
-			for _, kv := range strings.Fields(rest) {
-				if k, v, ok := strings.Cut(kv, "="); ok {
-					env[k] = v
-				}
-			}
-		}
-	}
+	env := dockerfileEnv(t)
 	for _, want := range []struct{ key, path string }{
 		{"GOMODCACHE", "/usr/local/share/gomodcache"},
 		{"GOCACHE", "/tmp/gocache"},
