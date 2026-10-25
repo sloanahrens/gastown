@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -169,29 +170,34 @@ type GitDiffSource struct {
 	Cache DiffCache
 }
 
-// Stats returns the diff stats of commit in rig. The bool is false, and nothing
-// is cached, when commit is not a hash (it would otherwise be an option or a
-// revision expression) or git fails; the error is for output ParseNumstat
-// rejects.
-func (g *GitDiffSource) Stats(ctx context.Context, rig, commit string) (DiffStat, bool, error) {
+// ErrDiffUnavailable is the error Stats wraps when it has no stats for a
+// commit: the Python returned None. The commit value is not a hash, or git
+// could not read it.
+var ErrDiffUnavailable = errors.New("diff stats unavailable")
+
+// Stats returns the diff stats of commit in rig. A commit that is not a hash
+// (it would otherwise be an option or a revision expression) or that git fails
+// on is an error wrapping ErrDiffUnavailable, and nothing is cached; output
+// ParseNumstat rejects is an error that does not.
+func (g *GitDiffSource) Stats(ctx context.Context, rig, commit string) (DiffStat, error) {
 	key := DiffKey{Rig: rig, Commit: commit}
 	if s, ok := g.Cache[key]; ok {
-		return s, true, nil
+		return s, nil
 	}
 	if !commitHash.MatchString(commit) {
-		return DiffStat{}, false, nil
+		return DiffStat{}, fmt.Errorf("%w: %q is not a commit hash", ErrDiffUnavailable, commit)
 	}
 	out, err := g.Run(ctx, []string{"git", "--git-dir", g.BareRepoFor(rig), "show", "--numstat", "-M", "--format=", commit, "--"})
 	if err != nil {
-		return DiffStat{}, false, nil
+		return DiffStat{}, fmt.Errorf("%w: %w", ErrDiffUnavailable, err)
 	}
 	entries, err := ParseNumstat(string(out))
 	if err != nil {
-		return DiffStat{}, false, err
+		return DiffStat{}, err
 	}
 	s := DiffStats(entries)
 	if g.Cache != nil {
 		g.Cache[key] = s
 	}
-	return s, true, nil
+	return s, nil
 }

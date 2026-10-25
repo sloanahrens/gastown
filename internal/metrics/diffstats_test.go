@@ -104,9 +104,9 @@ func TestGitSourceStatsForACommit(t *testing.T) {
 	t.Parallel()
 	run, calls := gitStub("1\t0\tp/a.txt\n", nil)
 	src := &GitDiffSource{BareRepoFor: bareRepo, Run: run, Cache: DiffCache{}}
-	s, ok, err := src.Stats(context.Background(), "r", "0123abc")
-	if err != nil || !ok {
-		t.Fatalf("Stats = %v, %v, %v; want stats", s, ok, err)
+	s, err := src.Stats(context.Background(), "r", "0123abc")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
 	}
 	if s.LinesAdded != 1 || s.LinesDeleted != 0 || s.FilesTouched != 1 {
 		t.Errorf("counts = %d/%d/%d, want 1/0/1", s.LinesAdded, s.LinesDeleted, s.FilesTouched)
@@ -117,13 +117,14 @@ func TestGitSourceStatsForACommit(t *testing.T) {
 	}
 }
 
-func TestGitSourceUnreadableCommitIsNotOKAndNotCached(t *testing.T) {
+func TestGitSourceUnreadableCommitIsUnavailableAndNotCached(t *testing.T) {
 	t.Parallel()
 	run, _ := gitStub("", errors.New("git: bad object"))
 	cache := DiffCache{}
 	src := &GitDiffSource{BareRepoFor: bareRepo, Run: run, Cache: cache}
-	if s, ok, err := src.Stats(context.Background(), "r", "deadbeef"); ok || err != nil {
-		t.Errorf("Stats = %v, %v, %v; want not ok and no error", s, ok, err)
+	_, err := src.Stats(context.Background(), "r", "deadbeef")
+	if !errors.Is(err, ErrDiffUnavailable) || !strings.Contains(err.Error(), "bad object") {
+		t.Errorf("Stats err = %v, want ErrDiffUnavailable carrying git's error", err)
 	}
 	if len(cache) != 0 {
 		t.Errorf("cache = %v, want empty", cache)
@@ -136,8 +137,8 @@ func TestGitSourceSuccessIsCachedAndReadOnce(t *testing.T) {
 	cache := DiffCache{}
 	src := &GitDiffSource{BareRepoFor: bareRepo, Run: run, Cache: cache}
 	for range 2 {
-		if _, ok, err := src.Stats(context.Background(), "r", "0123abc"); !ok || err != nil {
-			t.Fatalf("Stats ok = %v, err = %v", ok, err)
+		if _, err := src.Stats(context.Background(), "r", "0123abc"); err != nil {
+			t.Fatalf("Stats: %v", err)
 		}
 	}
 	if _, ok := cache[DiffKey{Rig: "r", Commit: "0123abc"}]; !ok {
@@ -148,12 +149,13 @@ func TestGitSourceSuccessIsCachedAndReadOnce(t *testing.T) {
 	}
 }
 
-func TestGitSourceOutputItCannotParseIsAnError(t *testing.T) {
+func TestGitSourceOutputItCannotParseIsAnErrorNotUnavailable(t *testing.T) {
 	t.Parallel()
 	run, _ := gitStub("x\t1\tp/a.go\n", nil)
 	src := &GitDiffSource{BareRepoFor: bareRepo, Run: run, Cache: DiffCache{}}
-	if _, ok, err := src.Stats(context.Background(), "r", "0123abc"); ok || err == nil {
-		t.Errorf("Stats ok = %v, err = %v; want an error", ok, err)
+	_, err := src.Stats(context.Background(), "r", "0123abc")
+	if err == nil || errors.Is(err, ErrDiffUnavailable) {
+		t.Errorf("Stats err = %v, want a parse error that is not ErrDiffUnavailable", err)
 	}
 }
 
@@ -163,8 +165,8 @@ func TestGitSourceCommitValueIsValidated(t *testing.T) {
 	for _, bad := range []string{"", "--output=/x", "HEAD~3", "main..other", "abc", strings.Repeat("g", 40), strings.Repeat("a", 65)} {
 		run, calls := gitStub("", nil)
 		src := &GitDiffSource{BareRepoFor: bareRepo, Run: run, Cache: DiffCache{}}
-		if s, ok, err := src.Stats(context.Background(), "gastown", bad); ok || err != nil {
-			t.Errorf("Stats(%q) = %v, %v, %v; want not ok", bad, s, ok, err)
+		if s, err := src.Stats(context.Background(), "gastown", bad); !errors.Is(err, ErrDiffUnavailable) {
+			t.Errorf("Stats(%q) = %v, %v; want ErrDiffUnavailable", bad, s, err)
 		}
 		if len(*calls) != 0 {
 			t.Errorf("Stats(%q) reached git with %v; a ledger value that is not a hash must not", bad, *calls)
@@ -176,8 +178,8 @@ func TestGitSourceHashIsPassedBeforeAPathSeparator(t *testing.T) {
 	t.Parallel()
 	run, calls := gitStub("", nil)
 	src := &GitDiffSource{BareRepoFor: bareRepo, Run: run, Cache: DiffCache{}}
-	if _, ok, err := src.Stats(context.Background(), "gastown", "0123abc"); !ok || err != nil {
-		t.Fatalf("Stats ok = %v, err = %v", ok, err)
+	if _, err := src.Stats(context.Background(), "gastown", "0123abc"); err != nil {
+		t.Fatalf("Stats: %v", err)
 	}
 	argv := (*calls)[0]
 	if got := argv[len(argv)-2:]; !reflect.DeepEqual(got, []string{"0123abc", "--"}) {
@@ -189,8 +191,8 @@ func TestGitSourceHashWithATrailingNewlineIsAccepted(t *testing.T) {
 	t.Parallel()
 	run, calls := gitStub("", nil)
 	src := &GitDiffSource{BareRepoFor: bareRepo, Run: run}
-	if _, ok, err := src.Stats(context.Background(), "gastown", "0123abc\n"); !ok || err != nil {
-		t.Errorf("Stats ok = %v, err = %v; the Python's $ admits one trailing newline", ok, err)
+	if _, err := src.Stats(context.Background(), "gastown", "0123abc\n"); err != nil {
+		t.Errorf("Stats: %v; the Python's $ admits one trailing newline", err)
 	}
 	if len(*calls) != 1 {
 		t.Errorf("git ran %d times, want 1", len(*calls))
