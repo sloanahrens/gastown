@@ -1,0 +1,204 @@
+// Package server serves the /v1 HTTP API of trackerd: probes, bearer-token
+// auth, schema-level checks and typed errors, over a store.Store. Routes for
+// the Store's operations land with their beads; this package owns the
+// cross-cutting rules every route inherits.
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/steveyegge/gastown/tracker/api"
+)
+
+// ErrUnknownToken is what an Authenticator returns for a token it does not
+// know, has revoked, or has expired. The server answers 401 for it.
+var ErrUnknownToken = api.ErrUnknownToken
+
+// Authenticator resolves a bearer token to the actor it was issued to.
+type Authenticator interface {
+	ActorForToken(ctx context.Context, token string) (actor string, err error)
+}
+
+// Health reports whether the database is usable: Ping that it answers,
+// WriteProbe that it accepts writes (a read-only replica answers Ping).
+type Health interface {
+	Ping(ctx context.Context) error
+	WriteProbe(ctx context.Context) error
+}
+
+// Logger is the one method the server needs from a logger.
+type Logger interface {
+	Printf(format string, args ...any)
+}
+
+// Config is what New needs. SchemaLevel is the level this binary was built
+// for and the database was migrated to; clients must match it.
+type Config struct {
+	Auth        Authenticator
+	Health      Health
+	SchemaLevel int
+	Log         Logger
+}
+
+// Server is trackerd's HTTP handler.
+type Server struct {
+	cfg Config
+	mux *http.ServeMux
+}
+
+// readyTimeout bounds the readiness probe so a stalled database reads as not
+// ready instead of hanging the prober.
+const readyTimeout = 2 * time.Second
+
+// New returns a Server. Auth and Health are required.
+func New(cfg Config) *Server {
+	if cfg.Log == nil {
+		cfg.Log = discardLog{}
+	}
+	s := &Server{cfg: cfg, mux: http.NewServeMux()}
+	// Probes carry no token: the daemon and launchd call them.
+	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	s.mux.HandleFunc("GET /readyz", s.readyz)
+	s.mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"service": "trackerd", "schema_level": cfg.SchemaLevel})
+	})
+
+	v1 := http.NewServeMux()
+	v1.HandleFunc("GET /v1/whoami", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"actor": ActorFrom(r.Context())})
+	})
+	s.mux.Handle("/v1/", s.schemaGate(s.authenticated(v1)))
+	return s
+}
+
+// Handler is the server's http.Handler.
+func (s *Server) Handler() http.Handler { return s.mux }
+
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), readyTimeout)
+	defer cancel()
+	if err := s.cfg.Health.Ping(ctx); err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, api.Unavailable("database does not answer: %v", err))
+		return
+	}
+	if err := s.cfg.Health.WriteProbe(ctx); err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, api.Unavailable("database does not accept writes: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "schema_level": s.cfg.SchemaLevel})
+}
+
+// schemaGate refuses a /v1 request whose schema level is missing, malformed
+// or different from the server's, before anything else looks at it.
+func (s *Server) schemaGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw := r.Header.Get(api.SchemaHeader)
+		if raw == "" {
+			writeAPIError(w, http.StatusBadRequest, api.Invalid("the %s header is required", api.SchemaHeader))
+			return
+		}
+		got, err := strconv.Atoi(raw)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, api.Invalid("the %s header must be an integer, got %q", api.SchemaHeader, raw))
+			return
+		}
+		if got != s.cfg.SchemaLevel {
+			writeAPIError(w, http.StatusConflict, api.Conflict("schema level skew: client %d, server %d", got, s.cfg.SchemaLevel))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type actorKey struct{}
+
+// ActorFrom is the actor the request's token was issued to, or "" outside an
+// authenticated route.
+func ActorFrom(ctx context.Context) string {
+	a, _ := ctx.Value(actorKey{}).(string)
+	return a
+}
+
+// authenticated resolves the bearer token to an actor and puts it on the
+// request context. A missing, malformed or unknown token is a 401.
+func (s *Server) authenticated(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, ok := bearerToken(r.Header.Get("Authorization"))
+		if !ok {
+			writeAPIError(w, http.StatusUnauthorized, api.Invalid("a bearer token is required"))
+			return
+		}
+		actor, err := s.cfg.Auth.ActorForToken(r.Context(), token)
+		if errors.Is(err, ErrUnknownToken) {
+			writeAPIError(w, http.StatusUnauthorized, api.Invalid("unknown or expired bearer token"))
+			return
+		}
+		if err != nil {
+			writeError(w, err, s.cfg.Log)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), actorKey{}, actor)))
+	})
+}
+
+// bearerToken extracts the token from an Authorization header; the scheme is
+// case-insensitive and the token must be non-empty.
+func bearerToken(h string) (string, bool) {
+	scheme, token, found := strings.Cut(h, " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	token = strings.TrimSpace(token)
+	return token, token != ""
+}
+
+// RequireLoopback checks that addr is host:port with a literal loopback IP.
+// trackerd binds nowhere else: a name like "localhost" can resolve to
+// anything, and an empty host means every interface.
+func RequireLoopback(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("server: listen address %q: %w", addr, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("server: listen address %q is not a loopback IP; trackerd binds 127.0.0.1 or [::1] only", addr)
+	}
+	return nil
+}
+
+type discardLog struct{}
+
+func (discardLog) Printf(string, ...any) {}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeAPIError(w http.ResponseWriter, status int, e *api.Error) { writeJSON(w, status, e) }
+
+// writeError answers err. An api.Error keeps its kind and status; anything
+// else is an internal failure: the cause goes to the log and the client gets
+// a generic unavailable, so no connection string or SQL detail leaks.
+func writeError(w http.ResponseWriter, err error, log Logger) {
+	var ae *api.Error
+	if errors.As(err, &ae) {
+		writeAPIError(w, ae.HTTPStatus(), ae)
+		return
+	}
+	log.Printf("internal error: %v", err)
+	writeAPIError(w, http.StatusServiceUnavailable, api.Unavailable("internal error; see the server log"))
+}
