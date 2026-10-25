@@ -80,3 +80,26 @@ func TestRequireMajor17(t *testing.T) {
 		}
 	}
 }
+
+func TestChildEnvForcesTheCLocaleAndKeepsTheRest(t *testing.T) {
+	t.Parallel() // unit tier: pure
+	got := childEnv([]string{"PATH=/bin", "LC_ALL=", "LANG=en_US.UTF-8", "LC_CTYPE=de_DE", "LANGUAGE=de", "TMPDIR=/t", "LCX=keep"})
+	want := map[string]string{"PATH": "/bin", "TMPDIR": "/t", "LCX": "keep", "LC_ALL": "C", "LANG": "C"}
+	if len(got) != len(want) {
+		t.Fatalf("childEnv = %v, want exactly %v", got, want)
+	}
+	for _, kv := range got {
+		name, val, _ := strings.Cut(kv, "=")
+		if w, ok := want[name]; !ok || w != val {
+			t.Errorf("childEnv has %q, want %v", kv, want)
+		}
+	}
+}
+
+func TestChildEnvOfNothingStillSetsTheLocale(t *testing.T) {
+	t.Parallel()
+	got := childEnv(nil)
+	if len(got) != 2 || got[0] != "LC_ALL=C" || got[1] != "LANG=C" {
+		t.Errorf("childEnv(nil) = %v, want LC_ALL=C and LANG=C", got)
+	}
+}
