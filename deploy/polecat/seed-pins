@@ -1,4 +1,4 @@
 # <rig> <commit>: the sources the polecat image's Go cache is seeded from.
 # Each commit must exist in that rig's canonical checkout under POLE_TOWN; make polecat-seed-pins rewrites this file.
-gastown 4d5177a5f1161ebc9f77091f1309aef7a91d4761
+gastown 914de8c65d8cbc6302cd55ef2c06735a47166627
 devops 92b9e510ac2f9ff8c80b0291f312ac482bf96c38
