@@ -9,8 +9,14 @@ import (
 	"testing"
 )
 
+// The three lock tests run sequentially, without t.Parallel. flock(2) is held by
+// the open file description, and a child process another goroutine forks holds
+// that description until it execs or exits, so a release followed by a re-acquire
+// in this process can fail while another test spawns a process. Go starts
+// parallel tests only after the sequential top-level tests finish, so none of
+// these runs beside a fork.
+
 func TestTownLockIsHeldUntilReleased(t *testing.T) {
-	t.Parallel()
 	path := filepath.Join(t.TempDir(), "town-metrics.lock")
 	first, err := AcquireTownLock(path)
 	if err != nil {
@@ -35,7 +41,6 @@ func TestTownLockIsHeldUntilReleased(t *testing.T) {
 }
 
 func TestTownLockRecordsTheHolderPid(t *testing.T) {
-	t.Parallel()
 	path := filepath.Join(t.TempDir(), "town-metrics.lock")
 	lock, err := AcquireTownLock(path)
 	if err != nil {
@@ -52,7 +57,6 @@ func TestTownLockRecordsTheHolderPid(t *testing.T) {
 }
 
 func TestTownLockIsNotBlockedByAPidLeftByADeadRun(t *testing.T) {
-	t.Parallel()
 	path := filepath.Join(t.TempDir(), "town-metrics.lock")
 	// A run the daemon killed leaves its pid in the file and no lock on it.
 	if err := os.WriteFile(path, []byte("999999\n"), 0o644); err != nil {
