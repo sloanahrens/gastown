@@ -111,7 +111,9 @@ func runHooksReconcile(cmd *cobra.Command, args []string) error {
 // reconcileTarget removes any PreToolUse hook referencing interimHookMarker
 // from target's settings.json. Returns whether the file has (or, in a dry
 // run, would have) changed. A target with no settings.json yet, or one that
-// never carried the interim hook, reports unchanged rather than an error.
+// never carried the interim hook, reports unchanged rather than an error; a
+// PreToolUse entry this cannot inspect is a SettingsIntegrityError, because
+// the interim hook may be inside it (gt-hbjly).
 //
 // The file is edited as raw JSON, not through hooks.HooksConfig: that typed
 // struct has no field for events such as Notification or SubagentStop and
@@ -152,7 +154,10 @@ func reconcileTarget(target hooks.Target, dryRun bool) (changed bool, err error)
 		return false, &hooks.SettingsIntegrityError{Path: target.Path, Err: fmt.Errorf("unmarshaling hooks.PreToolUse: %w", err)}
 	}
 
-	newEntries, removedAny := stripInterimHook(entries)
+	newEntries, removedAny, err := stripInterimHook(entries)
+	if err != nil {
+		return false, &hooks.SettingsIntegrityError{Path: target.Path, Err: fmt.Errorf("inspecting hooks.PreToolUse: %w", err)}
+	}
 	if !removedAny {
 		return false, nil
 	}
@@ -182,12 +187,19 @@ func reconcileTarget(target hooks.Target, dryRun bool) (changed bool, err error)
 // stripInterimHook removes every hook whose command references
 // interimHookMarker from the raw PreToolUse entries, dropping an entry
 // entirely if doing so leaves it with no hooks. An entry the removal did not
-// touch (one with no interim hook, no hooks at all, or one that does not
-// parse) passes through byte-for-byte; a touched entry keeps every key it
-// had, only its "hooks" array shrinking.
-func stripInterimHook(entries []json.RawMessage) (result []json.RawMessage, removedAny bool) {
+// touch (one with no interim hook, or no hooks key) passes through
+// byte-for-byte; a touched entry keeps every key it had, only its "hooks"
+// array shrinking. An entry that cannot be inspected is an error, not a
+// silent pass: the interim hook may be inside it, and reporting the target
+// unchanged would claim a removal that never happened (gt-hbjly).
+func stripInterimHook(entries []json.RawMessage) ([]json.RawMessage, bool, error) {
+	var result []json.RawMessage
+	var removedAny bool
 	for _, entry := range entries {
-		kept, removed := stripInterimFromEntry(entry)
+		kept, removed, err := stripInterimFromEntry(entry)
+		if err != nil {
+			return nil, false, err
+		}
 		if !removed {
 			result = append(result, entry)
 			continue
@@ -197,47 +209,58 @@ func stripInterimHook(entries []json.RawMessage) (result []json.RawMessage, remo
 			result = append(result, kept)
 		}
 	}
-	return result, removedAny
+	return result, removedAny, nil
 }
 
 // stripInterimFromEntry returns entry without its interim hooks. removed
 // reports whether any hook was dropped; kept is nil when that left the
-// entry with no hooks, so the caller drops it.
-func stripInterimFromEntry(entry json.RawMessage) (kept json.RawMessage, removed bool) {
+// entry with no hooks, so the caller drops it. An entry or hook shaped in a
+// way this cannot read is an error, so a caller never mistakes "could not
+// inspect" for "nothing to remove" (gt-hbjly).
+func stripInterimFromEntry(entry json.RawMessage) (json.RawMessage, bool, error) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(entry, &fields) != nil {
-		return entry, false
+	if err := json.Unmarshal(entry, &fields); err != nil {
+		return nil, false, fmt.Errorf("PreToolUse entry is not a JSON object: %w", err)
+	}
+	rawHooks, ok := fields["hooks"]
+	if !ok {
+		return entry, false, nil
 	}
 	var hookList []json.RawMessage
-	if json.Unmarshal(fields["hooks"], &hookList) != nil {
-		return entry, false
+	if err := json.Unmarshal(rawHooks, &hookList); err != nil {
+		return nil, false, fmt.Errorf("PreToolUse entry \"hooks\" is not an array: %w", err)
 	}
 
 	var keptHooks []json.RawMessage
+	var removed bool
 	for _, h := range hookList {
 		var cmd struct {
 			Command string `json:"command"`
 		}
-		if json.Unmarshal(h, &cmd) == nil && strings.Contains(cmd.Command, interimHookMarker) {
+		if err := json.Unmarshal(h, &cmd); err != nil {
+			return nil, false, fmt.Errorf("PreToolUse hook is not an object with a string command: %w", err)
+		}
+		if strings.Contains(cmd.Command, interimHookMarker) {
 			removed = true
 			continue
 		}
 		keptHooks = append(keptHooks, h)
 	}
 	if !removed {
-		return entry, false
+		return entry, false, nil
 	}
 	if len(keptHooks) == 0 {
-		return nil, true // every hook on this entry was the interim one
+		return nil, true, nil // every hook on this entry was the interim one
 	}
 
-	var err error
-	if fields["hooks"], err = json.Marshal(keptHooks); err != nil {
-		return entry, false
+	encoded, err := json.Marshal(keptHooks)
+	if err != nil {
+		return nil, false, fmt.Errorf("rewriting PreToolUse entry hooks: %w", err)
 	}
+	fields["hooks"] = encoded
 	out, err := json.Marshal(fields)
 	if err != nil {
-		return entry, false
+		return nil, false, fmt.Errorf("rewriting PreToolUse entry: %w", err)
 	}
-	return out, true
+	return out, true, nil
 }

@@ -43,7 +43,10 @@ func TestStripInterimHook(t *testing.T) {
 	}
 
 	t.Run("removes the interim hook alongside others on the same matcher", func(t *testing.T) {
-		result, removed := stripInterimHook([]json.RawMessage{entry("Bash", prWorkflow, interim, dangerous)})
+		result, removed, err := stripInterimHook([]json.RawMessage{entry("Bash", prWorkflow, interim, dangerous)})
+		if err != nil {
+			t.Fatalf("stripInterimHook: %v", err)
+		}
 		if !removed {
 			t.Fatalf("stripInterimHook() removed=false, want true")
 		}
@@ -65,10 +68,13 @@ func TestStripInterimHook(t *testing.T) {
 	})
 
 	t.Run("drops the whole entry when the interim hook was its only hook", func(t *testing.T) {
-		result, removed := stripInterimHook([]json.RawMessage{
+		result, removed, err := stripInterimHook([]json.RawMessage{
 			entry("Bash", interim),
 			entry("Edit|Write", dangerous),
 		})
+		if err != nil {
+			t.Fatalf("stripInterimHook: %v", err)
+		}
 		if !removed {
 			t.Fatalf("stripInterimHook() removed=false, want true")
 		}
@@ -79,7 +85,10 @@ func TestStripInterimHook(t *testing.T) {
 
 	t.Run("no-op when nothing references the interim hook", func(t *testing.T) {
 		in := []json.RawMessage{entry("Bash", prWorkflow, dangerous)}
-		result, removed := stripInterimHook(in)
+		result, removed, err := stripInterimHook(in)
+		if err != nil {
+			t.Fatalf("stripInterimHook: %v", err)
+		}
 		if removed {
 			t.Fatalf("stripInterimHook() removed=true, want false")
 		}
@@ -90,16 +99,43 @@ func TestStripInterimHook(t *testing.T) {
 
 	t.Run("keeps an entry with no hooks array untouched", func(t *testing.T) {
 		bare := json.RawMessage(`{"matcher": "Bash"}`)
-		result, removed := stripInterimHook([]json.RawMessage{bare})
+		result, removed, err := stripInterimHook([]json.RawMessage{bare})
+		if err != nil {
+			t.Fatalf("stripInterimHook: %v", err)
+		}
 		if removed || len(result) != 1 || string(result[0]) != string(bare) {
 			t.Fatalf("stripInterimHook(bare) = (%s, %v), want the entry untouched", result, removed)
 		}
 	})
 
 	t.Run("no-op on empty input", func(t *testing.T) {
-		result, removed := stripInterimHook(nil)
+		result, removed, err := stripInterimHook(nil)
+		if err != nil {
+			t.Fatalf("stripInterimHook: %v", err)
+		}
 		if removed || len(result) != 0 {
 			t.Fatalf("stripInterimHook(nil) = (%s, %v), want (nil, false)", result, removed)
+		}
+	})
+
+	// An entry stripInterimHook cannot read might carry the interim hook, so
+	// passing it through would report the target unchanged after a removal
+	// that never happened (gt-hbjly).
+	t.Run("errors on an entry that cannot be inspected", func(t *testing.T) {
+		bad := []json.RawMessage{
+			json.RawMessage(`"not an object"`),
+			json.RawMessage(`{"matcher": "Bash", "hooks": "not an array"}`),
+			json.RawMessage(`{"matcher": "Bash", "hooks": [{"type": "command", "command": 42}]}`),
+		}
+		for _, e := range bad {
+			result, removed, err := stripInterimHook([]json.RawMessage{e})
+			if err == nil {
+				t.Errorf("stripInterimHook(%s) err = nil, want an error", e)
+				continue
+			}
+			if removed || result != nil {
+				t.Errorf("stripInterimHook(%s) = (%s, %v) beside the error, want no result", e, result, removed)
+			}
 		}
 	})
 }
@@ -288,12 +324,73 @@ func TestReconcileTarget(t *testing.T) {
 		dir := t.TempDir()
 		target := hooks.Target{Path: filepath.Join(dir, ".claude", "settings.json"), Key: "test/target"}
 
+		// The dry run goes through the same os.IsNotExist narrowing, and the
+		// absence still has to read as "nothing to do", not an error (gt-hbjly).
+		for _, dryRun := range []bool{false, true} {
+			changed, err := reconcileTarget(target, dryRun)
+			if err != nil {
+				t.Fatalf("reconcileTarget(dryRun=%v): %v", dryRun, err)
+			}
+			if changed {
+				t.Fatalf("reconcileTarget(dryRun=%v) changed=true, want false for a missing file", dryRun)
+			}
+		}
+	})
+
+	// The two other early returns: a settings.json with no "hooks" key, and
+	// one whose hooks carry no PreToolUse event (gt-hbjly).
+	t.Run("unchanged when settings carries nothing to reconcile", func(t *testing.T) {
+		t.Parallel()
+		bodies := map[string]string{
+			"no hooks key":  `{"theme": "dark"}`,
+			"no PreToolUse": `{"hooks": {"Notification": [{"matcher": "", "hooks": [{"type": "command", "command": "/Users/sloan/.local/bin/notify"}]}]}}`,
+		}
+		for name, body := range bodies {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				dir := t.TempDir()
+				path := writeSettings(t, dir, body)
+				target := hooks.Target{Path: path, Key: "test/target"}
+
+				changed, err := reconcileTarget(target, false)
+				if err != nil {
+					t.Fatalf("reconcileTarget: %v", err)
+				}
+				if changed {
+					t.Fatalf("reconcileTarget() changed=true, want false")
+				}
+			})
+		}
+	})
+
+	// A PreToolUse entry this cannot read is a fail-closed integrity error,
+	// never a silent "unchanged" (gt-hbjly).
+	t.Run("uninspectable PreToolUse entry is an integrity error", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		const weird = `{
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": 42}]}
+    ]
+  }
+}`
+		path := writeSettings(t, dir, weird)
+		target := hooks.Target{Path: path, Key: "test/target"}
+
 		changed, err := reconcileTarget(target, false)
-		if err != nil {
-			t.Fatalf("reconcileTarget: %v", err)
+		if !hooks.IsSettingsIntegrityError(err) {
+			t.Fatalf("reconcileTarget() err = %v, want a settings integrity error", err)
 		}
 		if changed {
-			t.Fatalf("reconcileTarget() changed=true, want false for a missing file")
+			t.Fatalf("reconcileTarget() changed=true, want false beside the error")
+		}
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("ReadFile: %v", readErr)
+		}
+		if string(raw) != weird {
+			t.Errorf("settings.json was rewritten despite the error: %s", raw)
 		}
 	})
 
