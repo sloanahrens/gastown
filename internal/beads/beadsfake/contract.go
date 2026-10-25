@@ -225,8 +225,14 @@ func contractCreateShow(t *testing.T, s *scope) {
 		t.Errorf("priority -1 created priority %d, want bd's default 2", p)
 	}
 	actor := s.mustCreate(t, beads.CreateOptions{Title: "by someone", Priority: -1, Actor: "contract-actor"})
-	if by := s.mustShow(t, actor.ID).CreatedBy; by != "contract-actor" {
-		t.Errorf("CreatedBy = %q, want contract-actor", by)
+	// A store that attributes every write to the caller's credential (the
+	// tracker: the token's actor) cannot honor a creator named in the request;
+	// it says so by implementing AttributesToCredential, and the actor contract
+	// (RunActorContract) is what pins who a write is recorded as.
+	if af, ok := s.Client.(interface{ AttributesToCredential() bool }); !ok || !af.AttributesToCredential() {
+		if by := s.mustShow(t, actor.ID).CreatedBy; by != "contract-actor" {
+			t.Errorf("CreatedBy = %q, want contract-actor", by)
+		}
 	}
 	assigned := s.mustCreate(t, beads.CreateOptions{Title: "assigned", Priority: -1, Assignee: s.who("holder")})
 	if who := s.mustShow(t, assigned.ID).Assignee; who != s.who("holder") {
