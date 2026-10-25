@@ -442,3 +442,44 @@ func (p unansweredProbe) PaneDead(string) (bool, error)            { return fals
 func (p unansweredProbe) GetSessionCreatedTime(string) (time.Time, error) {
 	return time.Time{}, p.err
 }
+
+// With no transition time on the first reading, the clock starts at that
+// reading; a later transition time that predates it moves the clock back.
+func TestSandboxPhaseLaterEarlierTransitionTimeMovesTheClock(t *testing.T) {
+	t.Parallel()
+	w := newSandboxPhaseWatch()
+	t0 := time.Unix(1760000000, 0)
+
+	if got := w.failing("gt-a", time.Time{}, t0); got != 0 {
+		t.Fatalf("first reading = %s, want 0", got)
+	}
+	if got := w.failing("gt-a", t0.Add(-time.Hour), t0.Add(time.Minute)); got != time.Hour+time.Minute {
+		t.Fatalf("reading with an earlier transition time = %s, want 1h1m0s from the transition", got)
+	}
+}
+
+// A transition time later than the clock start does not move the clock.
+func TestSandboxPhaseLaterTransitionTimeDoesNotMoveTheClock(t *testing.T) {
+	t.Parallel()
+	w := newSandboxPhaseWatch()
+	t0 := time.Unix(1760000000, 0)
+
+	if got := w.failing("gt-a", t0, t0); got != 0 {
+		t.Fatalf("first reading = %s, want 0", got)
+	}
+	if got := w.failing("gt-a", t0.Add(30*time.Second), t0.Add(time.Minute)); got != time.Minute {
+		t.Fatalf("reading with a later transition time = %s, want the minute from the first transition", got)
+	}
+}
+
+// A transition time older than the first reading is the start of the failure,
+// so on that reading it spends the grace at once.
+func TestSandboxPhaseStaleTransitionTimeOnTheFirstReadingSpendsTheGrace(t *testing.T) {
+	t.Parallel()
+	w := newSandboxPhaseWatch()
+	t0 := time.Unix(1760000000, 0)
+
+	if got := w.failing("gt-b", t0.Add(-time.Hour), t0); got != time.Hour {
+		t.Fatalf("first reading with a transition time an hour old = %s, want 1h0m0s", got)
+	}
+}

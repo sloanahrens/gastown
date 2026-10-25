@@ -44,11 +44,13 @@ func newSandboxPhaseWatch() *sandboxPhaseWatch {
 // failing records that name's phase read as a terminal failure at now and
 // returns how long it has read that way, this reading included.
 //
-// since is when the gateway says the sandbox stopped being Ready. It puts the
-// clock at the failure rather than at the first reading to notice it, which
-// can trail by minutes (gt-j18af); the earlier of the two wins. A zero, or a
-// since ahead of this host's clock, falls back to the start already recorded,
-// or to now.
+// since is when the gateway says the sandbox stopped being Ready, and the
+// gateway's word is taken as the start of the failure. The earlier of since
+// and the start already recorded wins, on any reading, so a clock that began
+// at a late first reading moves back to the gateway's time (gt-j18af). A
+// stale since is therefore trusted too: on the first reading it can already
+// have spent the grace, and the seat is dead at once. A zero or future since
+// is ignored; with no start recorded the clock starts at now.
 func (w *sandboxPhaseWatch) failing(name string, since, now time.Time) time.Duration {
 	w.mu.Lock()
 	defer w.mu.Unlock()
