@@ -24,6 +24,9 @@ import (
 // what the town runs on would not be a read of it. The models panel under the
 // strip reads the same files and two more — the daemon's patrol config and the
 // town model table — to list the seats and the model per role.
+// The seat counts take one pool read per poll (poolLiveFor, which lists the
+// sessions and reads the beads); the models themselves come from config files
+// and run no commands.
 
 // modelsReader reads the strip's models.
 type modelsReader struct {

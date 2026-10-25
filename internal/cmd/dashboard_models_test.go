@@ -525,3 +525,21 @@ func TestDashboardModelsWithNoLandingsSaysNothing(t *testing.T) {
 		t.Errorf("activity = %+v, want none for a town with no landings", got)
 	}
 }
+
+// A roster read that failed is not a roster of zero: the strip must be told the
+// read did not answer, so it says so instead of showing an empty seat. A read
+// that succeeded passes its counts through (gt-ly90n).
+func TestDashboardSeatRosterFailedReadIsNotARoster(t *testing.T) {
+	t.Parallel()
+	failed := dashboardSeatRoster(poolShowLive{})
+	if failed.Read {
+		t.Errorf("a failed roster read reports Read = true, want the read not answered")
+	}
+	if len(failed.Live) != 0 || failed.Total != 0 {
+		t.Errorf("a failed roster read counted seats: %+v", failed)
+	}
+	answered := dashboardSeatRoster(poolShowLive{ok: true, live: map[string]int{"seat": 2}, total: 2})
+	if !answered.Read || answered.Total != 2 || answered.Live["seat"] != 2 {
+		t.Errorf("an answered roster read = %+v, want its counts passed through", answered)
+	}
+}
