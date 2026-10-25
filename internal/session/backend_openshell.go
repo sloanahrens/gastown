@@ -53,14 +53,21 @@ var sandboxDroppedEnv = []string{"CLAUDE_CONFIG_DIR", "TMPDIR", "GOTMPDIR", "ANT
 // clone, 1.3 s and 13 MB at depth 500, and everything gt done does with history
 // (merge-base against origin/main, rebase onto it, rev-list counts, patch-id,
 // pushing the new commits) needs only the commits since the branch forked from
-// main. Arguments are positional, so no value is spliced into the script text.
+// main. When main has moved further than the depth since the fork, the fork
+// point falls outside origin/main's shallow history and merge-base fails; the
+// script then refetches both refs in full, so the depth is a cost bound and not
+// a cap on how far behind a branch may fall. Arguments are positional, so no
+// value is spliced into the script text.
 const cloneScript = `H="http.extraHeader=Authorization: token $FORGEJO_TOKEN"; ` +
 	`git -c "$H" clone --branch "$1" --single-branch --depth "$4" "$2" "$3" && cd "$3" && ` +
-	`git remote set-branches --add origin main && git -c "$H" fetch --depth "$4" origin main`
+	`git remote set-branches --add origin main && git -c "$H" fetch --depth "$4" origin main && ` +
+	`(git merge-base HEAD origin/main >/dev/null 2>&1 || ` +
+	`(git -c "$H" fetch --unshallow origin && git merge-base HEAD origin/main >/dev/null 2>&1))`
 
-// sandboxCloneDepth is the history a sandbox clone takes. It must reach back
-// past the commit the polecat branch forked from main, which is at most a few
-// hours of landings behind main's tip (about a hundred commits a day).
+// sandboxCloneDepth is the history a sandbox clone takes. A polecat branch
+// forks a few hours behind main's tip at most (about a hundred landings a day),
+// so this covers the fork point with room to spare; cloneScript refetches in
+// full when it does not.
 const sandboxCloneDepth = 1000
 
 // redirectScript writes .beads/redirect in the clone. $1 is the worktree and
