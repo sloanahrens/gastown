@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/tracker/api"
 )
 
 // The Store method set is the contract between the server, the fake, the
@@ -35,5 +37,14 @@ func TestPostgresStubFailsLoudly(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "Postgres.GetIssues") {
 		t.Errorf("error %q does not name the method", got)
+	}
+}
+
+// api.SchemaLevel is what clients send and store.SchemaLevel is what the
+// database was migrated to; they are the same number or every request skews.
+func TestAPISchemaLevelEqualsTheStoresMigrationCount(t *testing.T) {
+	t.Parallel()
+	if api.SchemaLevel != SchemaLevel() {
+		t.Errorf("api.SchemaLevel = %d, store.SchemaLevel() = %d; bump api.SchemaLevel with the migration", api.SchemaLevel, SchemaLevel())
 	}
 }
