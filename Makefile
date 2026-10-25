@@ -208,6 +208,7 @@ lint: docs-lint
 	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
 	@echo "lint: golangci-lint run --timeout=5m (a contended lint is retried for up to $(LINT_LOCK_WAIT)s while another run holds the module lock)"
 	bash scripts/lint-lock-wait.sh $(LINT_LOCK_WAIT) golangci-lint run --timeout=5m $(LINT_RUNNER_FLAGS) || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
+	@for m in $(TESTED_MODULES); do echo "lint: golangci-lint run in $$m"; (cd "$$m" && bash ../scripts/lint-lock-wait.sh $(LINT_LOCK_WAIT) golangci-lint run --timeout=5m --config ../.golangci.yml $(LINT_RUNNER_FLAGS)) || { echo "lint failed in $$m"; exit 1; }; done
 	bash scripts/repo-guards.sh
 	@echo "lint: guardlint (fail-open guard check, gt-udrrw)"
 	go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
@@ -348,7 +349,12 @@ clean:
 # Modules nested in this repository (plugins/*/go.mod). The root module's
 # `go build ./...` does not reach them, so the gate builds each in its own
 # directory.
-NESTED_MODULES := $(patsubst %/go.mod,%,$(shell find plugins -name go.mod -not -path '*/testdata/*' 2>/dev/null | LC_ALL=C sort))
+NESTED_MODULES := $(patsubst %/go.mod,%,$(shell find plugins tracker -name go.mod -not -path '*/testdata/*' 2>/dev/null | LC_ALL=C sort))
+
+# Nested modules whose vet and tests the gate and presubmit run, and whose lint
+# `make lint` runs: the root module's `go test ./...` and golangci-lint do not
+# reach them. tracker/ is the town tracker (docs/plans/2026-10-25-town-tracker-design.md).
+TESTED_MODULES := $(patsubst %/go.mod,%,$(wildcard tracker/go.mod))
 
 # The shell tests, run by test-slow after the gate. A make variable only so
 # scripts/makefile-gate_test.sh can drive the failure paths with a stub.
@@ -402,6 +408,7 @@ gate-test:
 	@trap 'for p in $$(pgrep -P $$$$); do k=$$(pgrep -P $$p); kill $$p 2>/dev/null; [ -n "$$k" ] && kill $$k 2>/dev/null; done; exit 130' INT TERM; \
 	GT_TEST_DOCKER=0 go test -timeout 20m ./... & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
+	for m in $(TESTED_MODULES); do [ $$go_rc -eq 0 ] || break; echo "gate: vet and unit tier in $$m" >&2; (cd "$$m" && go vet ./... && GT_TEST_DOCKER=0 go test ./...) || go_rc=$$?; done; \
 	wall=$$(( $$(date +%s) - $(GATE_START) )); \
 	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc) after $${wall}s wall" >&2; exit 1; fi; \
 	echo "gate: PASSED in $${wall}s wall" >&2
@@ -441,6 +448,7 @@ presubmit: lint
 	@echo "presubmit: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
 	@go build ./... || { echo "presubmit: FAILED at build" >&2; exit 1; }
 	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "presubmit: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
+	@for m in $(TESTED_MODULES); do if ! git diff --quiet $(PRESUBMIT_BASE)...HEAD -- "$$m"; then echo "presubmit: vet and tests in $$m" >&2; (cd "$$m" && go vet ./... && GT_TEST_DOCKER=0 go test -timeout 10m ./...) || { echo "presubmit: FAILED at tests ($$m)" >&2; exit 1; }; fi; done
 	@pkgs=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE)) || { echo "presubmit: FAILED computing the changed packages against $(PRESUBMIT_BASE)" >&2; exit 1; }; \
 	guards=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE) -guards) || { echo "presubmit: FAILED computing the tree-wide guard tests against $(PRESUBMIT_BASE)" >&2; exit 1; }; \
 	if [ -z "$$pkgs" ] && [ -z "$$guards" ]; then echo "presubmit: neither a Go package nor a tree-wide guard input changed against $(PRESUBMIT_BASE); no tests to run" >&2; \

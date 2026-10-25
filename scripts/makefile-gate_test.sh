@@ -448,13 +448,24 @@ mkdir -p "$TMP/bin"
 cat >"$TMP/bin/go" <<'STUB'
 #!/usr/bin/env bash
 echo "go $1 GT_TEST_DOCKER=${GT_TEST_DOCKER:-unset}" >>"$STUB_LOG"
+[[ "${PWD##*/}" == tracker ]] && echo "go $1 in tracker" >>"$STUB_LOG"
 if [[ "$1" == test && -n "${STUB_GO_INTERRUPT:-}" ]]; then
   # Signal the recipe shell (the parent), then wait to be killed.
   kill -TERM "$PPID"
   sleep 20
   echo "go test survived the interrupt" >>"$STUB_LOG"
 fi
-[[ "$1" == "${STUB_GO_FAIL:-}" ]] && exit 1
+# STUB_GO_FAIL_DIR limits the failure to a run inside that directory name, or
+# (with a leading !) to a run anywhere else.
+dir_ok=1
+if [[ -n "${STUB_GO_FAIL_DIR:-}" ]]; then
+  if [[ "$STUB_GO_FAIL_DIR" == '!'* ]]; then
+    [[ "${PWD##*/}" != "${STUB_GO_FAIL_DIR#!}" ]] || dir_ok=0
+  else
+    [[ "${PWD##*/}" == "$STUB_GO_FAIL_DIR" ]] || dir_ok=0
+  fi
+fi
+[[ "$1" == "${STUB_GO_FAIL:-}" && $dir_ok == 1 ]] && exit 1
 exit 0
 STUB
 cat >"$TMP/bin/golangci-lint" <<'STUB'
@@ -538,6 +549,30 @@ fi
 # An interrupted gate stops the Go suite and exits red. The stub go run
 # signals the recipe shell (its parent) and then waits to be killed; a trap
 # that did not fire would let it finish and the gate would pass.
+# The tracker module is vetted and tested after the root suite, and its failure
+# is the Go half's failure: the same wording, a non-zero exit, no PASSED line.
+rc=$(run_gate -o lint)
+if [[ "$rc" == 0 ]] && grep -q -x 'go vet in tracker' "$TMP/calls" && grep -q -x 'go test in tracker' "$TMP/calls"; then
+  pass "green stubs: the tracker module is vetted and tested after the root suite"
+else
+  fail "green stubs: the tracker module is vetted and tested after the root suite (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+rc=$(run_gate -o lint -- STUB_GO_FAIL=test STUB_GO_FAIL_DIR=tracker)
+if [[ "$rc" != 0 ]] && grep -q -F 'gate: FAILED at unit tier (Go suite' "$TMP/err" && ! grep -q -F 'gate: PASSED' "$TMP/err" && grep -q -x 'go test in tracker' "$TMP/calls"; then
+  pass "tracker tests fail: non-zero, names the Go half, no PASSED line"
+else
+  fail "tracker tests fail: non-zero, names the Go half, no PASSED line (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+# A failing root suite stops the gate before the tracker module runs.
+rc=$(run_gate -o lint -- STUB_GO_FAIL=test STUB_GO_FAIL_DIR='!tracker')
+if [[ "$rc" != 0 ]] && ! grep -q -x 'go vet in tracker' "$TMP/calls"; then
+  pass "root suite fails: the tracker module does not run"
+else
+  fail "root suite fails: the tracker module does not run (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
 rc=$(run_gate -o lint -- STUB_GO_INTERRUPT=1)
 sleep 1
 if [[ "$rc" != 0 ]] && ! grep -q -F 'gate: PASSED' "$TMP/err" && ! grep -q -F 'survived' "$TMP/calls"; then
