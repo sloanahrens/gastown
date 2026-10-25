@@ -160,6 +160,17 @@ func TestConfigSetRefusesBadBodiesAndEveryAdminRouteNeedsAToken(t *testing.T) {
 		if code, _ := adminCall(t, r.method, ts.URL+r.path, r.body, false); code != 401 {
 			t.Errorf("%s %s without a token = %d, want 401", r.method, r.path, code)
 		}
+		req, _ := http.NewRequest(r.method, ts.URL+r.path, strings.NewReader(r.body))
+		req.Header.Set("Authorization", "Bearer wrong-token")
+		req.Header.Set(api.SchemaHeader, "3")
+		resp, err := adminHTTP.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 401 {
+			t.Errorf("%s %s with an unknown token = %d, want 401", r.method, r.path, resp.StatusCode)
+		}
 	}
 }
 

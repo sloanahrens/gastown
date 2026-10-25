@@ -31,6 +31,9 @@ func (p *Postgres) Stats(ctx context.Context, rig string) (api.Stats, error) {
 	return out, rows.Err()
 }
 
+// The configuration lives in tracker.config, created by schema/0001_core.sql; the
+// config contract case runs against a freshly migrated database and so proves it.
+
 // ConfigGet returns the value of a configuration key; ok is false when unset.
 func (p *Postgres) ConfigGet(ctx context.Context, key string) (string, bool, error) {
 	if key == "" {

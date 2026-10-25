@@ -6,6 +6,11 @@ import (
 	"github.com/steveyegge/gastown/tracker/api"
 )
 
+// Authorization: every authenticated seat may read and write configuration, as
+// every process with access to Dolt may with bd today. The tracker has one
+// trust domain (identity per token, no roles); scoping tokens is the
+// token-issuance decision (wayfinder WF6, plan task O5), not this route's.
+//
 // registerAdminRoutes registers the maintenance reads and the configuration
 // routes: GET /v1/stats?rig=, GET /v1/config/{key} and PUT /v1/config/{key}.
 func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
