@@ -170,6 +170,13 @@ func applyChanges(orig, base, next any) any {
 	return out
 }
 
+// ReplaceFile writes data to path atomically and durably, for a file whose whole
+// content the caller owns. A caller that has to keep the file's own keys edits
+// them itself and hands the result here (gt-jaagc).
+func ReplaceFile(path string, data []byte, mode os.FileMode) error {
+	return replaceFile(path, data, mode)
+}
+
 // replaceFile writes data to path atomically and durably.
 func replaceFile(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
