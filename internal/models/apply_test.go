@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // applySettingsFixture is a settings file with keys the apply must keep.
@@ -78,7 +80,22 @@ func TestApplyRolesRefusesAnUnvalidatedTableWritingNothing(t *testing.T) {
 	}
 }
 
-func TestWrittenFailPutsBackTheFirstFile(t *testing.T) {
+func TestWrittenFailNamesAFileItCannotPutBack(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "models.json")
+	written := Written{{Path: path, Backup: filepath.Join(dir, "missing.bak")}}
+
+	err := written.Fail(errors.New("the write failed"))
+	if err == nil || !strings.Contains(err.Error(), "could not be put back") || !strings.Contains(err.Error(), path) {
+		t.Errorf("Fail = %v, want an error naming %s as not put back", err, path)
+	}
+}
+
+// A second write in the same switch really fails: its file sits in a read-only
+// directory, so config.ReplaceFile errors, and the rollback puts the first file
+// back as it was (gt-jaagc).
+func TestApplyRollsBackWhenASecondWriteReallyFails(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	settings := filepath.Join(dir, "settings", "config.json")
@@ -90,24 +107,31 @@ func TestWrittenFailPutsBackTheFirstFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyRoles: %v", err)
 	}
-	// A later write in the same switch fails: the settings written so far go back.
-	failure := written.Fail(errors.New("the reviewer write failed"))
-	if !strings.Contains(failure.Error(), "the reviewer write failed") {
-		t.Errorf("Fail = %v, want the cause in it", failure)
+	if after, _ := os.ReadFile(settings); bytes.Equal(before, after) {
+		t.Fatal("the first write did not change the settings, so there is nothing to roll back")
+	}
+
+	readOnly := filepath.Join(dir, "readonly")
+	if err := os.Mkdir(readOnly, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit cleared to refuse the write
+	if err := os.Chmod(readOnly, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	//testpolicy:allow no-exec-files — the target is the fixture directory: cleanup must restore its search bit
+	t.Cleanup(func() { _ = os.Chmod(readOnly, 0o700) })
+	second := filepath.Join(readOnly, "reviewer.json")
+	secondErr := config.ReplaceFile(second, []byte("{}\n"), 0o600)
+	if secondErr == nil {
+		t.Fatal("the second write succeeded in a read-only directory, so it did not fail")
+	}
+
+	failure := written.Fail(secondErr)
+	if !strings.Contains(failure.Error(), "nothing was changed") {
+		t.Errorf("Fail = %v, want the rollback reported", failure)
 	}
 	if after, _ := os.ReadFile(settings); !bytes.Equal(before, after) {
-		t.Errorf("Fail did not put the settings back:\n%s", after)
-	}
-}
-
-func TestWrittenFailNamesAFileItCannotPutBack(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "models.json")
-	written := Written{{Path: path, Backup: filepath.Join(dir, "missing.bak")}}
-
-	err := written.Fail(errors.New("the write failed"))
-	if err == nil || !strings.Contains(err.Error(), "could not be put back") || !strings.Contains(err.Error(), path) {
-		t.Errorf("Fail = %v, want an error naming %s as not put back", err, path)
+		t.Errorf("the rollback did not put the first file back:\n%s", after)
 	}
 }
