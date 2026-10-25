@@ -14,6 +14,7 @@ func TestHeldOverlap(t *testing.T) {
 	cases := []struct {
 		name  string
 		paths []string
+		tests []string
 		held  []HeldBead
 		want  string
 	}{
@@ -71,24 +72,81 @@ func TestHeldOverlap(t *testing.T) {
 			held:  []HeldBead{{ID: "gt-t61ft", Assignee: seat, Paths: []string{guard, "internal/nudge/deliver/deliver.go"}}},
 			want:  "",
 		},
+		// A shared test is the signal the sling-time guard refuses live work
+		// on, so the pre-dispatch hold reads it too: the dv-nnjl/dv-613z/
+		// dv-fec7.10 cluster named tests/host-rehearsal and nothing else
+		// distinct enough to hold on files (gt-mqa3r).
+		{
+			name:  "a shared test holds",
+			tests: []string{"TestHostRehearsal"},
+			held:  []HeldBead{{ID: "gt-t61ft", Assignee: seat, Tests: []string{"TestHostRehearsal"}}},
+			want:  "gt-t61ft (held by " + seat + ") is already hooked to a working seat and runs TestHostRehearsal; the hold lifts when that bead closes",
+		},
+		{
+			name:  "a test family holds",
+			tests: []string{"TestHostRehearsal_StaleSandbox"},
+			held:  []HeldBead{{ID: "gt-t61ft", Assignee: seat, Tests: []string{"TestHostRehearsal"}}},
+			want:  "gt-t61ft (held by " + seat + ") is already hooked to a working seat and runs TestHostRehearsal_StaleSandbox; the hold lifts when that bead closes",
+		},
+		{
+			name:  "distinct tests do not hold",
+			tests: []string{"TestNotifyCLI"},
+			held:  []HeldBead{{ID: "gt-t61ft", Assignee: seat, Tests: []string{"TestHostRehearsal"}}},
+			want:  "",
+		},
+		{
+			name:  "a held bead with no assignee holds nothing by test either",
+			tests: []string{"TestHostRehearsal"},
+			held:  []HeldBead{{ID: "gt-t61ft", Tests: []string{"TestHostRehearsal"}}},
+			want:  "",
+		},
+		{
+			name:  "paths and tests are named together",
+			paths: []string{guard},
+			tests: []string{"TestHostRehearsal"},
+			held:  []HeldBead{{ID: "gt-t61ft", Assignee: seat, Paths: []string{guard}, Tests: []string{"TestHostRehearsal"}}},
+			want:  "gt-t61ft (held by " + seat + ") is already hooked to a working seat and names " + guard + " and runs TestHostRehearsal; the hold lifts when that bead closes",
+		},
+		{
+			name:  "the lowest id wins across a path match and a test match",
+			paths: []string{guard},
+			tests: []string{"TestHostRehearsal"},
+			held: []HeldBead{
+				{ID: "gt-z9", Assignee: seat, Tests: []string{"TestHostRehearsal"}},
+				{ID: "gt-a1", Assignee: "gastown/polecats/other", Paths: []string{guard}},
+			},
+			want: "gt-a1 (held by gastown/polecats/other) is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			if got := HeldOverlap(c.paths, c.held); got != c.want {
-				t.Errorf("HeldOverlap(%v, %+v) = %q, want %q", c.paths, c.held, got, c.want)
+			if got := HeldOverlap(c.paths, c.tests, c.held); got != c.want {
+				t.Errorf("HeldOverlap(%v, %v, %+v) = %q, want %q", c.paths, c.tests, c.held, got, c.want)
 			}
 		})
 	}
 }
 
 // A bead describing an area rather than a defect shares many paths; the line
-// names at most maxNamedHeldPaths of them (gt-z80p9).
+// names at most maxNamedHeldSignals of them (gt-z80p9).
 func TestHeldOverlapCapsTheNamedPaths(t *testing.T) {
 	t.Parallel()
 	paths := []string{"a/one.go", "b/two.go", "c/three.go", "d/four.go", "e/five.go"}
-	got := HeldOverlap(paths, []HeldBead{{ID: "gt-wide", Assignee: "gastown/polecats/capable", Paths: paths}})
+	got := HeldOverlap(paths, nil, []HeldBead{{ID: "gt-wide", Assignee: "gastown/polecats/capable", Paths: paths}})
 	want := "gt-wide (held by gastown/polecats/capable) is already hooked to a working seat and names a/one.go, b/two.go, c/three.go (+2 more); the hold lifts when that bead closes"
+	if got != want {
+		t.Errorf("HeldOverlap = %q, want %q", got, want)
+	}
+}
+
+// The tests a hold line names are capped apart from the paths, so a bead that
+// names one file and a whole failing suite still reads as one line.
+func TestHeldOverlapCapsTheNamedTests(t *testing.T) {
+	t.Parallel()
+	tests := []string{"TestA", "TestB", "TestC", "TestD"}
+	got := HeldOverlap(nil, tests, []HeldBead{{ID: "gt-wide", Assignee: "gastown/polecats/capable", Tests: tests}})
+	want := "gt-wide (held by gastown/polecats/capable) is already hooked to a working seat and runs TestA, TestB, TestC (+1 more); the hold lifts when that bead closes"
 	if got != want {
 		t.Errorf("HeldOverlap = %q, want %q", got, want)
 	}
@@ -184,7 +242,7 @@ func TestHeldOverlapStandardUnderConstraintsDoesNotHold(t *testing.T) {
 	held := []HeldBead{{ID: "gt-first", Assignee: "gastown/polecats/capable",
 		Paths: HoldFiles([]string{standard}, []string{standard})}}
 	candidate := HoldFiles([]string{standard}, []string{standard})
-	if got := HeldOverlap(candidate, held); got != "" {
+	if got := HeldOverlap(candidate, nil, held); got != "" {
 		t.Errorf("HeldOverlap = %q, want no hold for a shared standard", got)
 	}
 }
@@ -196,7 +254,7 @@ func TestHeldOverlapConstrainedDocsPathHolds(t *testing.T) {
 	const doc = "docs/design/foo.md"
 	const seat = "gastown/polecats/capable"
 	held := []HeldBead{{ID: "gt-first", Assignee: seat, Paths: HoldFiles([]string{doc}, []string{doc})}}
-	got := HeldOverlap(HoldFiles([]string{doc}, []string{doc}), held)
+	got := HeldOverlap(HoldFiles([]string{doc}, []string{doc}), nil, held)
 	want := "gt-first (held by " + seat + ") is already hooked to a working seat and names " + doc + "; the hold lifts when that bead closes"
 	if got != want {
 		t.Errorf("HeldOverlap = %q, want %q", got, want)

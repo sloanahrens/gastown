@@ -680,6 +680,89 @@ func TestSpecDispatchHoldsASecondFilingOfHeldWork(t *testing.T) {
 	})
 }
 
+// An overlapping cluster — the dv-nnjl/dv-613z/dv-fec7.10 shapes seen on
+// devops 2026-10-25 — dispatches exactly the bead that precedes the others:
+// the dispatcher holds the rest on the shared test before a seat is charged or
+// a sling attempted, instead of spending one slot and 7-8 seconds per bead on a
+// guard refusal (gt-mqa3r).
+func TestSpecDispatchSelectsTheLeadingBeadOfAnOverlappingCluster(t *testing.T) {
+	t.Parallel()
+	// The three beads share one failing test and no file path, so only the
+	// test signal can hold them apart.
+	cluster := func(id string, priority int, created string) specdispatch.Spec {
+		s := cleanSpec(id, priority, created)
+		s.Title = "host rehearsal: the red tier sweep fails (TestHostRehearsal)"
+		return s
+	}
+	f := newFakeSpecTown(
+		cluster("dv-nnjl", 1, "2026-10-25T18:40:00Z"),
+		cluster("dv-613z", 2, "2026-10-25T18:41:00Z"),
+		cluster("dv-fec7.10", 2, "2026-10-25T18:42:00Z"),
+	)
+	env := f.env()
+	env.PerTick = 3
+	var mu sync.Mutex
+	calls := 0
+	sling := env.Sling
+	env.Sling = func(c specCandidate, resume string, seat specdispatch.SeatChoice) (string, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return sling(c, resume, seat)
+	}
+
+	r := runSpecDispatchCycle(env)
+
+	if got := strings.Join(f.slung, " "); got != "dv-nnjl" {
+		t.Fatalf("slung %q, want exactly the bead that precedes its overlapping peers", got)
+	}
+	if calls != 1 {
+		t.Errorf("sling attempts = %d, want one: a bead the guard would refuse takes no attempt", calls)
+	}
+	if len(r.Deferred) != 0 {
+		t.Errorf("deferred = %+v, want none: the overlap is answered before the sling", r.Deferred)
+	}
+	wantSkip := "dv-613z: held: dv-nnjl (held by this tick's sling on "
+	for _, e := range r.Skipped {
+		if strings.HasPrefix(e.Line, wantSkip) && strings.Contains(e.Line, "runs TestHostRehearsal") {
+			return
+		}
+	}
+	t.Errorf("skipped = %+v, want dv-613z held on dv-nnjl's TestHostRehearsal", r.Skipped)
+}
+
+// A bead the sling-time guard would refuse because work in flight names its
+// test is skipped before the seat choice: it costs the tick neither a seat
+// slot nor a sling attempt (gt-mqa3r).
+func TestSpecDispatchHoldsWorkInFlightOnASharedTest(t *testing.T) {
+	t.Parallel()
+	const seat = "gastown/polecats/capable"
+	candidate := cleanSpec("gt-second", 2, "2026-10-25T18:42:00Z")
+	candidate.Title = "host rehearsal: the sweep again (TestHostRehearsal)"
+	f := newFakeSpecTown(candidate)
+	f.held["gastown"] = []specdispatch.HeldBead{{ID: "gt-first", Assignee: seat, Tests: []string{"TestHostRehearsal"}}}
+	env := f.env()
+	var mu sync.Mutex
+	calls := 0
+	sling := env.Sling
+	env.Sling = func(c specCandidate, resume string, seat specdispatch.SeatChoice) (string, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return sling(c, resume, seat)
+	}
+
+	r := runSpecDispatchCycle(env)
+
+	if calls != 0 || len(f.slung) != 0 {
+		t.Fatalf("sling attempts = %d (slung %v), want none for a bead the guard would refuse", calls, f.slung)
+	}
+	want := "gt-second: held: gt-first (held by " + seat + ") is already hooked to a working seat and runs TestHostRehearsal; the hold lifts when that bead closes"
+	if len(r.Skipped) != 1 || r.Skipped[0].Line != want {
+		t.Fatalf("skipped = %+v, want %q", r.Skipped, want)
+	}
+}
+
 // A plan document is context every child of an epic cites, not work any one of
 // them does, so a held child's plan must not serialize its siblings (gt-4wb27,
 // the gt-mukgk force-sling). The code file it names still holds a second filing

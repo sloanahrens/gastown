@@ -38,9 +38,10 @@ type specSlingJob struct {
 	Gone      string                  `json:"gone,omitempty"`
 	ShapeNote string                  `json:"shape_note,omitempty"`
 	Run       specdispatch.FormulaRun `json:"run"`
-	// Paths are the files the bead's text names, for the overlap hold on the
-	// candidates of later ticks while the sling runs.
+	// Paths and Tests are the files and test names the bead's text cites, for
+	// the overlap hold on the candidates of later ticks while the sling runs.
 	Paths []string `json:"paths,omitempty"`
+	Tests []string `json:"tests,omitempty"`
 }
 
 // specInFlight is a running sling as the daemon hands it to the tick: the
@@ -53,6 +54,7 @@ type specInFlight struct {
 	Rig     string    `json:"rig"`
 	Agent   string    `json:"agent"`
 	Paths   []string  `json:"paths,omitempty"`
+	Tests   []string  `json:"tests,omitempty"`
 	Started time.Time `json:"started,omitempty"`
 }
 
@@ -139,7 +141,7 @@ func specHandOffPendingSlings(pending []specPendingSling, report *specDispatchRe
 		report.Dispatched = append(report.Dispatched, entry)
 		report.Pending = append(report.Pending, specSlingJob{
 			Bead: p.id, Rig: p.c.Rig, Agent: p.seat.Agent, Reason: p.seat.Reason,
-			Resume: p.resume, Gone: p.gone, ShapeNote: p.shapeNote, Run: p.c.Run, Paths: p.paths,
+			Resume: p.resume, Gone: p.gone, ShapeNote: p.shapeNote, Run: p.c.Run, Paths: p.paths, Tests: p.tests,
 		})
 	}
 }
@@ -156,6 +158,7 @@ func (j specSlingJob) pending() specPendingSling {
 		shapeNote: j.ShapeNote,
 		entry:     specDispatchEntry{Bead: j.Bead, Rig: j.Rig, Agent: j.Agent},
 		paths:     j.Paths,
+		tests:     j.Tests,
 	}
 }
 

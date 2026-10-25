@@ -7,8 +7,9 @@ import (
 )
 
 // HeldBead is one bead a working seat already holds, reduced to what the
-// overlap rule reads: its id, the seat holding it, and the paths its own text
-// names. The caller reads the set and fills the fields; nothing here queries.
+// overlap rule reads: its id, the seat holding it, and the paths and tests its
+// own text names. The caller reads the set and fills the fields; nothing here
+// queries.
 //
 // Assignee lets the hold line say whose seat to patrol or which stray bead to
 // close; a bead no assignee names was never slung and is not held at all, so
@@ -17,29 +18,37 @@ type HeldBead struct {
 	ID       string
 	Assignee string
 	Paths    []string
+	// Tests are the test identifiers its text cites. A bead already in flight
+	// on a test a candidate names is that candidate's defect however the two
+	// spell the files they touch, and the sling-time guard refuses on the same
+	// signal (gt-mqa3r).
+	Tests []string
 }
 
-// maxNamedHeldPaths bounds the shared paths the hold line names, so a pair of
-// beads describing an area rather than a defect does not turn a skip line into
-// a wall (maxNamedChildren's rule, gt-z80p9).
-const maxNamedHeldPaths = 3
+// maxNamedHeldSignals bounds the shared paths, and separately the shared
+// tests, that the hold line names, so a pair of beads describing an area
+// rather than a defect does not turn a skip line into a wall
+// (maxNamedChildren's rule, gt-z80p9).
+const maxNamedHeldSignals = 3
 
 // HeldOverlap reports why a candidate is the same defect a working seat is
-// already on: a bead in held names a path the candidate's own text names too,
-// and the reason names that bead, the seat holding it, and the paths the two
-// share (gt-z80p9, gt-xrog0).
+// already on: a bead in held names a path or a test the candidate's own text
+// names too, and the reason names that bead, the seat holding it, and what the
+// two share (gt-z80p9, gt-xrog0, gt-mqa3r).
 //
-// Paths alone decide it, and only against work a seat already has in hand. Two
-// beads describing one defect from different vantage points share no vocabulary
-// but always share files — the signal the sling-time guard reads too — and
-// against a held bead that signal stands alone, where against the whole open
-// pool it does not: a shared file there is as often two genuinely distinct
-// beads in one package (gt-mcq). Naming the lowest overlapping id keeps the
-// line a candidate held twice reports identical. An entry with no assignee
-// never holds: the hold fails open rather than blocking a candidate on a bead
-// no seat is working.
-func HeldOverlap(paths []string, held []HeldBead) string {
-	if len(paths) == 0 || len(held) == 0 {
+// Paths and tests decide it, and only against work a seat already has in hand.
+// Two beads describing one defect from different vantage points share no
+// vocabulary but always share files — the signal the sling-time guard reads too
+// — and against a held bead that signal stands alone, where against the whole
+// open pool it does not: a shared file there is as often two genuinely distinct
+// beads in one package (gt-mcq). A shared test name is the stronger signal the
+// guard refuses live work on, and matching here on it too is what lets a
+// candidate the guard would refuse be skipped before it is charged a seat
+// (gt-mqa3r). Naming the lowest overlapping id keeps the line a candidate held
+// twice reports identical. An entry with no assignee never holds: the hold
+// fails open rather than blocking a candidate on a bead no seat is working.
+func HeldOverlap(paths, tests []string, held []HeldBead) string {
+	if len(paths) == 0 && len(tests) == 0 || len(held) == 0 {
 		return ""
 	}
 	mine := make(map[string]bool, len(paths))
@@ -49,37 +58,103 @@ func HeldOverlap(paths []string, held []HeldBead) string {
 		}
 	}
 	var match, assignee string
-	var shared []string
+	var sharedPaths, sharedTests []string
 	for _, h := range held {
 		if h.ID == "" || h.Assignee == "" || (match != "" && h.ID >= match) {
 			continue
 		}
-		both := make([]string, 0, len(h.Paths))
+		bothPaths := make([]string, 0, len(h.Paths))
 		for _, p := range h.Paths {
 			if mine[p] {
-				both = append(both, p)
+				bothPaths = append(bothPaths, p)
 			}
 		}
-		if len(both) == 0 {
+		bothTests := sharedTestNames(tests, h.Tests)
+		if len(bothPaths) == 0 && len(bothTests) == 0 {
 			continue
 		}
-		sort.Strings(both)
-		match, assignee, shared = h.ID, h.Assignee, both
+		sort.Strings(bothPaths)
+		match, assignee, sharedPaths, sharedTests = h.ID, h.Assignee, bothPaths, bothTests
 	}
 	if match == "" {
 		return ""
 	}
-	named := shared
-	more := 0
-	if len(named) > maxNamedHeldPaths {
-		more = len(named) - maxNamedHeldPaths
-		named = named[:maxNamedHeldPaths]
-	}
-	reason := fmt.Sprintf("%s (held by %s) is already hooked to a working seat and names %s", match, assignee, strings.Join(named, ", "))
+	work, more := heldWork(sharedPaths, sharedTests)
+	reason := fmt.Sprintf("%s (held by %s) is already hooked to a working seat and %s", match, assignee, work)
 	if more > 0 {
 		reason += fmt.Sprintf(" (+%d more)", more)
 	}
 	return reason + "; the hold lifts when that bead closes"
+}
+
+// sharedTestNames returns the candidate's test identifiers that name the same
+// test or test family as one of the held bead's, sorted and deduplicated.
+func sharedTestNames(mine, held []string) []string {
+	found := map[string]bool{}
+	for _, a := range mine {
+		for _, b := range held {
+			if TestNamesOverlap(a, b) {
+				found[a] = true
+				break
+			}
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(found))
+	for name := range found {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// heldWork renders what a candidate shares with the held bead that made the
+// match — "names a, b and runs TestX" — capping each list and reporting how
+// many signals the cap left unnamed.
+func heldWork(paths, tests []string) (string, int) {
+	more := 0
+	if len(paths) > maxNamedHeldSignals {
+		more += len(paths) - maxNamedHeldSignals
+		paths = paths[:maxNamedHeldSignals]
+	}
+	if len(tests) > maxNamedHeldSignals {
+		more += len(tests) - maxNamedHeldSignals
+		tests = tests[:maxNamedHeldSignals]
+	}
+	var parts []string
+	if len(paths) > 0 {
+		parts = append(parts, "names "+strings.Join(paths, ", "))
+	}
+	if len(tests) > 0 {
+		parts = append(parts, "runs "+strings.Join(tests, ", "))
+	}
+	return strings.Join(parts, " and "), more
+}
+
+// TestNamesOverlap reports whether two extracted identifiers name the same test
+// or the same test family. Beads often cite a prefix rather than each member
+// ("TestRunPrimeExternalTools_*" against
+// "TestRunPrimeExternalTools_BoundsSlowMailCheck"), so a prefix that ends on an
+// identifier boundary counts as the same family; a prefix that ends mid-word
+// does not. It is the rule both the sling-time guard and the pre-dispatch hold
+// read, so the two cannot disagree about what a shared test is.
+func TestNamesOverlap(a, b string) bool {
+	a = strings.TrimRight(a, "_")
+	b = strings.TrimRight(b, "_")
+	if a == b {
+		return true
+	}
+	shorter, longer := a, b
+	if len(shorter) > len(longer) {
+		shorter, longer = longer, shorter
+	}
+	if shorter == "" || !strings.HasPrefix(longer, shorter) {
+		return false
+	}
+	rest := longer[len(shorter):]
+	return strings.HasPrefix(rest, "_")
 }
 
 // HoldFiles is the set of paths the overlap hold reads from a bead's text: the

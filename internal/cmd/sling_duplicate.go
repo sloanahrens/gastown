@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/sling"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -82,7 +83,7 @@ var (
 	// testNameRe matches a Go test identifier as it appears in bead prose.
 	// The trailing character class includes "_" so the wildcard spelling used
 	// in this repo ("TestRunPrimeExternalTools_*") is captured whole; trimming
-	// happens in testNamesOverlap.
+	// happens in specdispatch.TestNamesOverlap.
 	testNameRe = regexp.MustCompile(`\bTest[A-Z][A-Za-z0-9_]*`)
 
 	// pathTokenRe matches one non-space token, which is the largest unit that
@@ -227,29 +228,6 @@ func normalizeFileToken(raw string) (string, bool) {
 		return "", false
 	}
 	return strings.Join(segments, "/"), true
-}
-
-// testNamesOverlap reports whether two extracted identifiers name the same test
-// or the same test family. Beads often cite a prefix rather than each member
-// ("TestRunPrimeExternalTools_* (3)" against
-// "TestRunPrimeExternalTools_BoundsSlowMailCheck"), so a prefix that ends on an
-// identifier boundary counts as the same family; a prefix that ends mid-word
-// does not.
-func testNamesOverlap(a, b string) bool {
-	a = strings.TrimRight(a, "_")
-	b = strings.TrimRight(b, "_")
-	if a == b {
-		return true
-	}
-	shorter, longer := a, b
-	if len(shorter) > len(longer) {
-		shorter, longer = longer, shorter
-	}
-	if shorter == "" || !strings.HasPrefix(longer, shorter) {
-		return false
-	}
-	rest := longer[len(shorter):]
-	return strings.HasPrefix(rest, "_")
 }
 
 // findDuplicateMatches compares one candidate against the pool, returning every
@@ -795,7 +773,7 @@ func intersectTests(a, b []string) []string {
 	found := map[string]bool{}
 	for _, x := range a {
 		for _, y := range b {
-			if testNamesOverlap(x, y) {
+			if specdispatch.TestNamesOverlap(x, y) {
 				found[x] = true
 			}
 		}

@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -238,8 +239,8 @@ func TestTestNamesOverlap(t *testing.T) {
 		{"TestFoo", "TestBar", false},
 	}
 	for _, tt := range tests {
-		if got := testNamesOverlap(tt.a, tt.b); got != tt.want {
-			t.Errorf("testNamesOverlap(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+		if got := specdispatch.TestNamesOverlap(tt.a, tt.b); got != tt.want {
+			t.Errorf("TestNamesOverlap(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
 		}
 	}
 }
@@ -1501,6 +1502,16 @@ func TestSpecPeerHeldFrom(t *testing.T) {
 	}
 	off := knobs
 	off.ShapeGate = specdispatch.ShapeGateOff
+	// resting is the town's answer for a peer whose last sling failed at
+	// session start: a throttle the bead's own fields do not carry, so the
+	// guard has to be told it (gt-mqa3r).
+	resting := off
+	resting.Backoff = func(beadID string) string {
+		if beadID == "gt-peer" {
+			return "startup backoff: last sling failed at session start 2m ago"
+		}
+		return ""
+	}
 	unshape := func(p *duplicateCandidate) {
 		p.Ready.Description = strings.Replace(p.Ready.Description, "## Gate\nmake gate", "", 1)
 	}
@@ -1564,6 +1575,8 @@ func TestSpecPeerHeldFrom(t *testing.T) {
 		{"a peer with many open blockers names the first few", beadsfake.New(),
 			peer(func(p *duplicateCandidate) { p.Ready.OpenBlockers = []string{"gt-a", "gt-b", "gt-c", "gt-d"} }), knobs,
 			"blocked by gt-a, gt-b, gt-c (+1 more)"},
+		{"a bead resting after a failed start is not the dispatcher's next move", beadsfake.New(),
+			peer(nil), resting, "startup backoff: last sling failed at session start 2m ago"},
 		{"a container waits for its open child", childDB(beads.Issue{ID: "gt-child", Status: "open"}), peer(nil), knobs,
 			"container: open child gt-child"},
 		{"a container whose children closed is a candidate again",
@@ -1577,6 +1590,65 @@ func TestSpecPeerHeldFrom(t *testing.T) {
 				t.Errorf("specPeerHeldFrom = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// A peer resting after a failed session start is a bead the dispatcher will not
+// sling for up to an hour (dispatch.StartupBackoff). Read as the cluster's next
+// move, it refused every bead sharing its test for the length of its rest: on
+// devops 2026-10-25 that was 180 deferred slings in twenty minutes, each with a
+// charged seat and a 7-8 second attempt, and no bead of the cluster dispatched
+// (gt-mqa3r). The peer-hold question answers the rest, so the guard lets the
+// cluster's next bead through.
+func TestOverlapGuardLetsTheClusterPastAPeerInStartupBackoff(t *testing.T) {
+	t.Parallel()
+	peer := duplicateCandidate{
+		ID: "gt-head", Title: "host rehearsal: the red tier sweep fails", Status: "open",
+		IssueType: "task", Priority: 1, CreatedAt: "2026-10-25T18:40:00Z",
+		Ready: sling.Readiness{Description: specTestDescription, Acceptance: specTestAcceptance},
+		Refs:  extractOverlapRefs("TestHostRehearsal fails"),
+	}
+	candidate := duplicateCandidate{
+		ID: "gt-tail", Title: "rework: the sweep again", Status: "open",
+		IssueType: "task", Priority: 2, CreatedAt: "2026-10-25T19:00:00Z",
+		Refs: extractOverlapRefs("TestHostRehearsal fails"),
+	}
+	townRoot := duplicateTown(t)
+	heldReason := func() string {
+		knobs, ok := specHoldKnobsFrom(townRoot, io.Discard)
+		if !ok {
+			t.Fatal("the town's settings would not load")
+		}
+		matches := findDuplicateMatches(candidate, []duplicateCandidate{peer})
+		if len(matches) != 1 {
+			t.Fatalf("matches = %+v, want the peer's shared test", matches)
+		}
+		return specPeerHeldFrom(beadsfake.New(), knobs, matches[0].Bead)
+	}
+
+	// With no failure record the head is the dispatcher's next move, so the
+	// guard refuses the tail and the cluster waits for it.
+	if held := heldReason(); held != "" {
+		t.Fatalf("held = %q before any failed start, want the peer dispatchable", held)
+	}
+	matches := findDuplicateMatches(candidate, []duplicateCandidate{peer})
+	if !decideSlingDuplicates(candidate, matches).Blocked {
+		t.Fatal("the guard let the tail past a head the dispatcher would sling")
+	}
+
+	// A failed start parks the head. The guard has to see the rest, or it
+	// keeps refusing the tail with nothing slingable in the cluster.
+	if err := dispatch.RecordStartupFailure(townRoot, peer.ID, "session start failed: the sandbox image lags the installed gt"); err != nil {
+		t.Fatalf("recording the startup failure: %v", err)
+	}
+	held := heldReason()
+	if held == "" {
+		t.Fatal("the peer's startup backoff is not answered: the guard reads a resting head as next")
+	}
+	matches = findDuplicateMatches(candidate, []duplicateCandidate{peer})
+	matches[0].Bead.Held = held
+	if decideSlingDuplicates(candidate, matches).Blocked {
+		t.Fatalf("the guard refused the cluster's next bead while the head rested (%s)", held)
 	}
 }
 
