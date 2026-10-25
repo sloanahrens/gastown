@@ -1,6 +1,3 @@
-// Package tiertrigger decides which container-backed test packages a tier
-// sweep runs, from the paths a change touched and the daily schedule
-// (gt-e69b2).
 package tiertrigger
 
 import "time"
