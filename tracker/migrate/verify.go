@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,6 +96,8 @@ func Verify(ctx context.Context, q Querier, ds *Dataset) (Diff, error) {
 			labelsBy[l.IssueID] = append(labelsBy[l.IssueID], l.Label)
 		}
 	}
+	// The tracker holds other rigs too: compare only the rigs in this dataset.
+	rigs := rigsOf(idsOf(ds))
 	want := make(map[string]string, len(ds.Issues))
 	for _, is := range ds.Issues {
 		want[is.ID] = datasetFingerprint(is, parents[is.ID], labelsBy[is.ID])
@@ -104,7 +107,7 @@ func Verify(ctx context.Context, q Querier, ds *Dataset) (Diff, error) {
 i.priority, i.assignee, i.owner, i.created_by, i.created_at, i.updated_at, i.started_at, i.closed_at, i.defer_until,
 i.close_reason, i.ephemeral, i.wisp_type, i.event_kind, i.hook_bead, i.agent_state, i.last_activity, coalesce(i.parent_id, ''),
 coalesce((SELECT array_agg(l.label) FROM tracker.labels l WHERE l.issue_id = i.id), '{}')
-FROM tracker.issues i`)
+FROM tracker.issues i WHERE i.rig = ANY($1)`, rigs)
 	if err != nil {
 		return Diff{}, fmt.Errorf("migrate: verify issues: %w", err)
 	}
@@ -155,7 +158,7 @@ FROM tracker.issues i`)
 		}
 	}
 	gotDeps := map[string]bool{}
-	drows, err := q.Query(ctx, "SELECT issue_id, depends_on, type FROM tracker.dependencies")
+	drows, err := q.Query(ctx, "SELECT d.issue_id, d.depends_on, d.type FROM tracker.dependencies d JOIN tracker.issues i ON i.id = d.issue_id WHERE i.rig = ANY($1)", rigs)
 	if err != nil {
 		return Diff{}, fmt.Errorf("migrate: verify dependencies: %w", err)
 	}
@@ -173,32 +176,125 @@ FROM tracker.issues i`)
 	}
 	diffSets(&p, "dependencies", wantDeps, gotDeps)
 
-	// Counts of the rest. A failed count query aborts: a zero that came from
-	// an error could coincide with an expected zero and read as verified.
+	// Comments and events, scoped to this dataset's rigs. A failed query
+	// aborts: a zero that came from an error could coincide with an expected
+	// zero and read as verified.
 	commentsWant := 0
 	for _, c := range ds.Comments {
 		if _, ok := want[c.IssueID]; ok {
 			commentsWant++
 		}
 	}
-	cfg, kv := splitConfig(ds.Config)
 	for _, c := range []struct {
-		name, table string
-		want        int
+		name, sql string
+		want      int
 	}{
-		{"comments", "comments", commentsWant}, {"events", "events", len(ds.Events)}, {"config", "config", len(cfg)}, {"kv", "kv", len(kv)},
-		{"custom_types", "custom_types", len(ds.CustomTypes)}, {"custom_statuses", "custom_statuses", len(ds.CustomStatuses)},
-		{"child_counters", "child_counters", len(ds.ChildCounters)},
+		{"comments", "SELECT count(*) FROM tracker.comments c JOIN tracker.issues i ON i.id = c.issue_id WHERE i.rig = ANY($1)", commentsWant},
+		{"events", "SELECT count(*) FROM tracker.events WHERE split_part(issue_id, '-', 1) = ANY($1)", eventsInRigs(ds.Events, rigs)},
 	} {
 		var n int
-		if err := q.QueryRow(ctx, "SELECT count(*) FROM tracker."+c.table).Scan(&n); err != nil { //nolint:gosec // G202: c.table is from the literal list above
+		if err := q.QueryRow(ctx, c.sql, rigs).Scan(&n); err != nil {
 			return Diff{}, fmt.Errorf("migrate: verify %s: %w", c.name, err)
 		}
 		if n != c.want {
 			p.add("count "+c.name, "%s: %d in the tracker, %d expected", c.name, n, c.want)
 		}
 	}
+
+	// Rig configuration is exact: the rig's namespaced keys, nothing missing
+	// and nothing extra. Memories, types and statuses are town-wide and shared
+	// by rigs, so each of this dataset's entries must be present with its value.
+	cfg, kv := splitConfig(ds.Config)
+	rig := primaryRig(ds)
+	wantCfg := map[string]string{}
+	for k, v := range cfg {
+		wantCfg[configKey(rig, k)] = v
+	}
+	cfgSQL := "SELECT key, value FROM tracker.config"
+	var cfgArgs []any
+	if rig != "" {
+		cfgSQL += " WHERE starts_with(key, $1)"
+		cfgArgs = []any{configKey(rig, "")}
+	}
+	haveCfg, err := readPairs(ctx, q, cfgSQL, cfgArgs...)
+	if err != nil {
+		return Diff{}, fmt.Errorf("migrate: verify config: %w", err)
+	}
+	for k, v := range wantCfg {
+		if hv, ok := haveCfg[k]; !ok || hv != v {
+			p.add("config", "config %q is %q in the tracker, want %q", k, hv, v)
+		}
+	}
+	for k := range haveCfg {
+		if _, ok := wantCfg[k]; !ok {
+			p.add("config extra", "config %q is in the tracker but not in the dataset", k)
+		}
+	}
+	haveKV, err := readPairs(ctx, q, "SELECT key, value FROM tracker.kv")
+	if err != nil {
+		return Diff{}, fmt.Errorf("migrate: verify kv: %w", err)
+	}
+	for k, v := range kv {
+		if hv, ok := haveKV[k]; !ok || hv != v {
+			p.add("kv", "memory %q is %q in the tracker, want %q", k, hv, v)
+		}
+	}
+	types, err := readPairs(ctx, q, "SELECT name, name FROM tracker.custom_types")
+	if err != nil {
+		return Diff{}, fmt.Errorf("migrate: verify custom types: %w", err)
+	}
+	for _, t := range ds.CustomTypes {
+		if _, ok := types[t]; !ok {
+			p.add("custom_types", "custom type %q is missing from the tracker", t)
+		}
+	}
+	statuses, err := readPairs(ctx, q, "SELECT name, name FROM tracker.custom_statuses")
+	if err != nil {
+		return Diff{}, fmt.Errorf("migrate: verify custom statuses: %w", err)
+	}
+	for _, st := range ds.CustomStatuses {
+		if _, ok := statuses[st.Name]; !ok {
+			p.add("custom_statuses", "custom status %q is missing from the tracker", st.Name)
+		}
+	}
+	// Child counters are keyed by parent id, so they are scoped by rig like
+	// events: exact for this dataset's rigs.
+	haveCtr, err := readPairs(ctx, q, "SELECT parent_id, last_child::text FROM tracker.child_counters WHERE split_part(parent_id, '-', 1) = ANY($1)", rigs)
+	if err != nil {
+		return Diff{}, fmt.Errorf("migrate: verify child counters: %w", err)
+	}
+	wantCtr := 0
+	for parent, last := range ds.ChildCounters {
+		if !inRigs(parent, rigs) {
+			continue
+		}
+		wantCtr++
+		if got, _ := strconv.Atoi(haveCtr[parent]); got < last {
+			p.add("child_counters", "child counter of %s is %q in the tracker, want at least %d", parent, haveCtr[parent], last)
+		}
+	}
+	if len(haveCtr) != wantCtr {
+		p.add("child_counters count", "child counters of these rigs: %d in the tracker, %d expected", len(haveCtr), wantCtr)
+	}
 	return p.diff(), nil
+}
+
+// readPairs runs a two-column text query into a map.
+func readPairs(ctx context.Context, q Querier, sql string, args ...any) (map[string]string, error) {
+	rows, err := q.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
 }
 
 func diffSets(p *problems, what string, want, got map[string]bool) {

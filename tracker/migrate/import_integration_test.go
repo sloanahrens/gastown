@@ -186,16 +186,27 @@ func TestVerifyNamesWhatChangedAfterTheImport(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	for name, tc := range map[string]struct{ sql, want string }{
-		"a title":         {"UPDATE tracker.issues SET title = 'tampered' WHERE id = 'gt-a'", "gt-a"},
-		"a status":        {"UPDATE tracker.issues SET status = 'closed' WHERE id = 'gt-a'", "gt-a"},
-		"a timestamp":     {"UPDATE tracker.issues SET updated_at = updated_at + interval '1 microsecond' WHERE id = 'gt-b'", "gt-b"},
-		"a label":         {"DELETE FROM tracker.labels WHERE issue_id = 'gt-a' AND label = 'y'", "gt-a"},
-		"a parent":        {"UPDATE tracker.issues SET parent_id = NULL WHERE id = 'gt-p.1'", "gt-p.1"},
-		"a missing issue": {"DELETE FROM tracker.issues WHERE id = 'hq-c'", "hq-c"},
-		"a link":          {"DELETE FROM tracker.dependencies WHERE depends_on = 'be-9yi'", "dependencies"},
-		"an event":        {"DELETE FROM tracker.events WHERE op = 'deleted'", "events"},
-		"a comment":       {"DELETE FROM tracker.comments", "comments"},
-		"a memory":        {"DELETE FROM tracker.kv", "kv"},
+		"a title":          {"UPDATE tracker.issues SET title = 'tampered' WHERE id = 'gt-a'", "gt-a"},
+		"a status":         {"UPDATE tracker.issues SET status = 'closed' WHERE id = 'gt-a'", "gt-a"},
+		"a timestamp":      {"UPDATE tracker.issues SET updated_at = updated_at + interval '1 microsecond' WHERE id = 'gt-b'", "gt-b"},
+		"a label":          {"DELETE FROM tracker.labels WHERE issue_id = 'gt-a' AND label = 'y'", "gt-a"},
+		"a parent":         {"UPDATE tracker.issues SET parent_id = NULL WHERE id = 'gt-p.1'", "gt-p.1"},
+		"a missing issue":  {"DELETE FROM tracker.issues WHERE id = 'hq-c'", "hq-c"},
+		"a link":           {"DELETE FROM tracker.dependencies WHERE depends_on = 'be-9yi'", "dependencies"},
+		"an event":         {"DELETE FROM tracker.events WHERE op = 'deleted'", "events"},
+		"a comment":        {"DELETE FROM tracker.comments", "comments"},
+		"a memory":         {"DELETE FROM tracker.kv", "kv"},
+		"a description":    {"UPDATE tracker.issues SET description = 'x' WHERE id = 'gt-a'", "gt-a"},
+		"an assignee":      {"UPDATE tracker.issues SET assignee = 'other' WHERE id = 'gt-b'", "gt-b"},
+		"a close reason":   {"UPDATE tracker.issues SET close_reason = 'x' WHERE id = 'gt-b'", "gt-b"},
+		"a defer time":     {"UPDATE tracker.issues SET defer_until = NULL WHERE id = 'gt-wisp-s'", "gt-wisp-s"},
+		"a hook bead":      {"UPDATE tracker.issues SET hook_bead = 'x' WHERE id = 'gt-p'", "gt-p"},
+		"a rig setting":    {"UPDATE tracker.config SET value = 'x' WHERE key = 'rig.gt.issue_prefix'", "rig.gt.issue_prefix"},
+		"an extra setting": {"INSERT INTO tracker.config (key, value) VALUES ('rig.gt.stray', 'x')", "stray"},
+		"a child counter":  {"UPDATE tracker.child_counters SET last_child = 0 WHERE parent_id = 'gt-p'", "gt-p"},
+		"an extra counter": {"INSERT INTO tracker.child_counters (parent_id, last_child) VALUES ('gt-zz', 1)", "child counters"},
+		"a custom type":    {"DELETE FROM tracker.custom_types WHERE name = 'molecule'", "molecule"},
+		"a custom status":  {"DELETE FROM tracker.custom_statuses", "staged_ready"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -281,5 +292,133 @@ func TestImportRefusesAndRollsBackWhenItsCopyDoesNotMatch(t *testing.T) {
 	var n int
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM tracker.issues").Scan(&n); err != nil || n != 0 {
 		t.Errorf("issues after a mismatching import = %d, %v; want 0, nothing committed", n, err)
+	}
+}
+
+// otherRig is a second Dolt database: its own prefix, config and memories.
+func otherRig() *Dataset {
+	return &Dataset{
+		Issues:        []IssueRow{{ID: "om-a", Title: "other rig", Status: "open", Type: "task", CreatedAt: at(0), UpdatedAt: at(0)}},
+		Events:        []EventRow{{ID: "q1", IssueID: "om-a", Op: "created", CreatedAt: at(0)}},
+		Config:        map[string]string{"issue_prefix": "om", "kv.memory.x": "remember this", "kv.memory.om-only": "mine"},
+		CustomTypes:   []string{"agent", "other"},
+		ChildCounters: map[string]int{"om-a": 1},
+	}
+}
+
+func TestSeveralRigsShareOneTrackerAndEachVerifies(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool, first, second := newPool(t), sample(), otherRig()
+	for _, ds := range []*Dataset{first, second} {
+		if _, err := Import(ctx, pool, ds, Options{}); err != nil {
+			t.Fatalf("Import: %v", err)
+		}
+	}
+	// Each dataset still verifies with the other rig's rows in the tracker.
+	for name, ds := range map[string]*Dataset{"first": first, "second": second} {
+		if diff, err := Verify(ctx, pool, ds); err != nil || !diff.Equal() {
+			t.Errorf("Verify(%s) = %v, %v; want equal with the other rig present", name, diff.Problems, err)
+		}
+	}
+	var gt, om string
+	if err := pool.QueryRow(ctx, "SELECT value FROM tracker.config WHERE key = 'rig.gt.issue_prefix'").Scan(&gt); err != nil || gt != "gt" {
+		t.Errorf("rig.gt.issue_prefix = %q, %v", gt, err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT value FROM tracker.config WHERE key = 'rig.om.issue_prefix'").Scan(&om); err != nil || om != "om" {
+		t.Errorf("rig.om.issue_prefix = %q, %v; one rig's config must not overwrite another's", om, err)
+	}
+	// Tampering with the second rig is caught even though the first is intact.
+	if _, err := pool.Exec(ctx, "UPDATE tracker.issues SET title = 'x' WHERE id = 'om-a'"); err != nil {
+		t.Fatal(err)
+	}
+	if diff, _ := Verify(ctx, pool, second); diff.Equal() {
+		t.Error("Verify missed a change to the second rig")
+	}
+	if diff, _ := Verify(ctx, pool, first); !diff.Equal() {
+		t.Errorf("a change to the second rig showed up in the first's verify: %v", diff.Problems)
+	}
+}
+
+func TestAMemoryTwoRigsHoldDifferentlyIsAConflictNotAnOverwrite(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool, first, second := newPool(t), sample(), otherRig()
+	second.Config["kv.memory.x"] = "a different value"
+	if _, err := Import(ctx, pool, first, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Import(ctx, pool, second, Options{}); !errors.Is(err, api.ErrConflict) {
+		t.Fatalf("Import with a conflicting memory = %v, want api.ErrConflict", err)
+	}
+	var v string
+	if err := pool.QueryRow(ctx, "SELECT value FROM tracker.kv WHERE key = 'kv.memory.x'").Scan(&v); err != nil || v != "remember this" {
+		t.Errorf("memory = %q, %v; the first rig's value must survive", v, err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM tracker.issues WHERE rig = 'om'").Scan(&n); err != nil || n != 0 {
+		t.Errorf("the refused import left %d issues behind, %v", n, err)
+	}
+}
+
+func TestADatabaseWhoseRigCannotBeToldIsRefusedBeforeAnythingIsWritten(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool := newPool(t)
+	ds := sample() // issues of two rigs (gt and hq)...
+	delete(ds.Config, "issue_prefix")
+	ds.Config["compact_batch_size"] = "50" // ...with settings but no issue_prefix to say which is its own
+	_, err := Import(ctx, pool, ds, Options{})
+	if !errors.Is(err, api.ErrInvalid) {
+		t.Fatalf("Import = %v, want api.ErrInvalid", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, "SELECT (SELECT count(*) FROM tracker.issues) + (SELECT count(*) FROM tracker.config)").Scan(&n); err != nil || n != 0 {
+		t.Errorf("rows after the refused import = %d, %v; want 0", n, err)
+	}
+}
+
+func TestEventsOfOtherRigsAndOddIDsDoNotSkewAnotherRigsVerify(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool, first, second := newPool(t), sample(), otherRig()
+	// The second database carries events about a foreign rig's issue and about
+	// ids with no rig prefix: reported as skipped, never written.
+	second.Events = append(second.Events,
+		EventRow{ID: "q2", IssueID: "gt-a", Op: "noted", CreatedAt: at(1)},
+		EventRow{ID: "q3", IssueID: "", Op: "noted", CreatedAt: at(1)},
+		EventRow{ID: "q4", IssueID: "nodash", Op: "noted", CreatedAt: at(1)})
+	if _, err := Import(ctx, pool, first, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := Import(ctx, pool, second, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rep.Skipped["events: not about an issue of this database's rigs"]; got != 3 {
+		t.Errorf("skipped foreign events = %d, want 3 (another rig's issue, no id, no prefix); Skipped = %v", got, rep.Skipped)
+	}
+	// Both verify: the stray events were never written, so neither rig's
+	// count is skewed by them.
+	for name, ds := range map[string]*Dataset{"first": first, "second": second} {
+		if diff, err := Verify(ctx, pool, ds); err != nil || !diff.Equal() {
+			t.Errorf("Verify(%s) = %v, %v", name, diff.Problems, err)
+		}
+	}
+}
+
+func TestAMemoryAlreadyPresentWithTheSameValueIsReportedNotSilent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool := newPool(t)
+	if _, err := Import(ctx, pool, sample(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := Import(ctx, pool, otherRig(), Options{}) // shares kv.memory.x with the same value
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Skipped["kv: same value already present"] != 1 {
+		t.Errorf("Skipped = %v, want the shared memory counted once", rep.Skipped)
 	}
 }

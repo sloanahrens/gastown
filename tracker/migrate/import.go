@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -67,11 +68,16 @@ func Import(ctx context.Context, pool *pgxpool.Pool, ds *Dataset, opt Options) (
 }
 
 func importAll(ctx context.Context, tx pgx.Tx, ds *Dataset, opt Options, rep *Report) error {
-	ids := make([]string, len(ds.Issues))
+	ids := idsOf(ds)
 	have := make(map[string]bool, len(ds.Issues))
-	for i, is := range ds.Issues {
-		ids[i] = is.ID
-		have[is.ID] = true
+	for _, id := range ids {
+		have[id] = true
+	}
+	// Rig configuration is stored under the rig's name. A database whose rig
+	// cannot be told would write its settings un-namespaced and collide with
+	// the next rig's, so it is refused before anything is written.
+	if cfg, _ := splitConfig(ds.Config); len(cfg) > 0 && primaryRig(ds) == "" {
+		return api.Invalid("cannot tell which rig this database belongs to: it has no issue_prefix setting and its issues use %d rig prefixes", len(rigsOf(ids)))
 	}
 	// Writers of tracker.issues wait here until this transaction ends, so the
 	// existence check below cannot be overtaken by a concurrent import.
@@ -221,7 +227,19 @@ func copyComments(ctx context.Context, tx pgx.Tx, ds *Dataset, have map[string]b
 // the way the history did. Events of issues no longer present are kept: they
 // outlive their issue by design.
 func copyEvents(ctx context.Context, tx pgx.Tx, ds *Dataset, rep *Report) error {
-	evs := slices.Clone(ds.Events)
+	// An event is kept only when its issue id belongs to one of the dataset's
+	// own rigs. One about another rig's issue or about no issue could not be
+	// told apart from that rig's own events afterwards, so it is counted as
+	// skipped rather than written.
+	rigs := rigsOf(idsOf(ds))
+	evs := make([]EventRow, 0, len(ds.Events))
+	for _, e := range ds.Events {
+		if inRigs(e.IssueID, rigs) {
+			evs = append(evs, e)
+		} else {
+			rep.Skipped["events: not about an issue of this database's rigs"]++
+		}
+	}
 	slices.SortStableFunc(evs, func(a, b EventRow) int {
 		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
 			return c
@@ -242,13 +260,29 @@ func copyEvents(ctx context.Context, tx pgx.Tx, ds *Dataset, rep *Report) error 
 
 func writeSettings(ctx context.Context, tx pgx.Tx, ds *Dataset, rep *Report) error {
 	cfg, kv := splitConfig(ds.Config)
+	rig := primaryRig(ds)
 	for k, v := range cfg {
-		if _, err := tx.Exec(ctx, "INSERT INTO tracker.config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", k, v); err != nil {
+		if _, err := tx.Exec(ctx, "INSERT INTO tracker.config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", configKey(rig, k), v); err != nil {
 			return fmt.Errorf("migrate: config %s: %w", k, err)
 		}
 	}
+	// Memories are town-wide. A key two rigs both hold with different values
+	// is a conflict a person must settle; never overwritten silently. The
+	// check-then-insert is safe because importAll holds a table lock on
+	// tracker.issues that every other import also takes first.
 	for k, v := range kv {
-		if _, err := tx.Exec(ctx, "INSERT INTO tracker.kv (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", k, v); err != nil {
+		var have string
+		err := tx.QueryRow(ctx, "SELECT value FROM tracker.kv WHERE key = $1", k).Scan(&have)
+		switch {
+		case err == nil && have != v:
+			return api.Conflict("memory %q already holds a different value in the tracker; settle which rig's value is right before importing", k)
+		case err == nil:
+			rep.Skipped["kv: same value already present"]++
+			continue
+		case !errors.Is(err, pgx.ErrNoRows):
+			return fmt.Errorf("migrate: kv %s: %w", k, err)
+		}
+		if _, err := tx.Exec(ctx, "INSERT INTO tracker.kv (key, value) VALUES ($1, $2)", k, v); err != nil {
 			return fmt.Errorf("migrate: kv %s: %w", k, err)
 		}
 	}
