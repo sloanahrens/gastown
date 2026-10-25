@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -281,7 +279,7 @@ func TestConfigIsNamespacedByRigAndIssuePrefixIsTheRig(t *testing.T) {
 	}
 }
 
-func TestStatsJSONAndCountAndTables(t *testing.T) {
+func TestStatsJSONAndCount(t *testing.T) {
 	t.Parallel()
 	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("rig") != "gt" {
@@ -299,58 +297,5 @@ func TestStatsJSONAndCountAndTables(t *testing.T) {
 	}
 	if n, err := c.CountIssues(); err != nil || n != 6 {
 		t.Errorf("CountIssues = %d, %v; want 6", n, err)
-	}
-	if !c.TableExists("wisps") || !c.TableExists("issues") || c.TableExists("no_such_table") {
-		t.Error("TableExists: wisps and issues have counterparts, no_such_table does not")
-	}
-}
-
-func TestExportWritesDurableIssuesAndWispsOneJSONObjectPerLine(t *testing.T) {
-	t.Parallel()
-	var lists []bool // the Ephemeral flag of each list request
-	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		switch r.URL.Path {
-		case "/v1/issues:list":
-			var f api.ListFilter
-			_ = json.Unmarshal(b, &f)
-			lists = append(lists, f.Ephemeral)
-			id := "gt-durable"
-			if f.Ephemeral {
-				id = "gt-wisp-1"
-			}
-			_ = json.NewEncoder(w).Encode(api.IssuePage{Issues: []api.Issue{{ID: id}}})
-		case "/v1/issues:show-many":
-			var req api.ShowManyRequest
-			_ = json.Unmarshal(b, &req)
-			out := map[string]api.Issue{}
-			for _, id := range req.IDs {
-				out[id] = api.Issue{ID: id, Title: "t " + id, Dependencies: []api.IssueDep{{ID: "gt-x", DependencyType: "blocks"}}}
-			}
-			_ = json.NewEncoder(w).Encode(api.ShowManyResponse{Issues: out})
-		}
-	})
-	path := t.TempDir() + "/issues.jsonl"
-	if err := c.Export(path); err != nil {
-		t.Fatal(err)
-	}
-	if len(lists) != 2 || lists[0] || !lists[1] {
-		t.Errorf("list requests asked ephemeral = %v, want durable issues then wisps", lists)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("export has %d lines, want 2:\n%s", len(lines), data)
-	}
-	var is beads.Issue
-	if err := json.Unmarshal([]byte(lines[1]), &is); err != nil || is.ID != "gt-wisp-1" || len(is.Dependencies) != 1 {
-		t.Errorf("second line = %q (%v), want the wisp with its dependencies", lines[1], err)
-	}
-	entries, _ := os.ReadDir(filepath.Dir(path))
-	if len(entries) != 1 {
-		t.Errorf("directory holds %d files after export, want only the export (no temp file left)", len(entries))
 	}
 }

@@ -190,7 +190,7 @@ func TestInitDeadlineIsReportedAsTimeout(t *testing.T) {
 	}
 	b := newBeads(beadsFields{workDir: t.TempDir(), isolated: true, exec: blocked, budget: 10 * time.Millisecond})
 
-	err := b.Init("gt")
+	err := InitForTest(b, "gt")
 	if err == nil {
 		t.Fatal("Init should fail when bd blocks past its deadline")
 	}

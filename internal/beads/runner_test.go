@@ -339,15 +339,11 @@ func TestReleaseDoesNotForceTheHoldersClaim(t *testing.T) {
 	t.Parallel()
 	r := newRecorder(nil)
 	b := newRecordedBeads(t.TempDir(), r)
-	if err := b.ReleaseWithReason("gt-1", "worker died"); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Release("gt-2"); err != nil {
+	if err := b.Release("gt-1"); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
-		"update gt-1 --status=open --assignee= --notes=Released: worker died",
-		"update gt-2 --status=open --assignee=",
+		"update gt-1 --status=open --assignee=",
 	}
 	if got := r.argvs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("calls = %q\nwant    %q", got, want)

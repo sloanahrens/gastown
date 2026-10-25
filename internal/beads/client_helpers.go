@@ -23,8 +23,8 @@ import (
 // Client keeps one, so UpdateAgentDescriptionFields and the one-field setters
 // built on it run the same read-modify-write under the same lock whatever
 // the Client is. The reads differ only in what a Client can answer from
-// memory: ListAgentBeads and GetAgentBead consult a *Beads' preload snapshot
-// and fall through to a query for everyone else.
+// memory: ListAgentBeads consults a *Beads' preload snapshot and falls through
+// to a query for everyone else.
 //
 // The creates are the one write family that keeps its *Beads branch: creating
 // an agent bead also chooses its canonical database and configures that

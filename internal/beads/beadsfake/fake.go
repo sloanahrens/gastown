@@ -62,7 +62,6 @@ type Fake struct {
 
 	// The maintenance surface (admin.go).
 	config   map[string]string
-	dropped  map[string]bool
 	sql      func(query string) ([][]string, error)
 	sqlLog   []string
 	inits    []beads.InitOptions
@@ -798,13 +797,10 @@ func (f *Fake) DeleteIssues(ids ...string) error {
 	return nil
 }
 
-// Release returns an issue to open and clears its assignee.
-func (f *Fake) Release(id string) error { return f.ReleaseWithReason(id, "") }
-
-// ReleaseWithReason is Release, recording "Released: <reason>" in the notes.
-// Like bd it does not force: an in_progress issue another assignee holds is
-// refused, and only the Fake's own claim is released.
-func (f *Fake) ReleaseWithReason(id, reason string) error {
+// Release returns an issue to open and clears its assignee. Like bd it does
+// not force: an in_progress issue another assignee holds is refused, and only
+// the Fake's own claim is released.
+func (f *Fake) Release(id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r, ok := f.issues[id]
@@ -817,9 +813,6 @@ func (f *Fake) ReleaseWithReason(id, reason string) error {
 	}
 	f.setStatus(r, string(beads.StatusOpen), "")
 	r.issue.Assignee = ""
-	if reason != "" {
-		r.issue.Notes = "Released: " + reason
-	}
 	r.issue.UpdatedAt = f.now()
 	f.journalWrite("update", id)
 	return nil

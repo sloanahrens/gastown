@@ -88,7 +88,7 @@ func TestBdInitRetriesTheCatalogRace(t *testing.T) {
 	zeroRetryBackoff(t)
 
 	b := NewIsolatedWithPort(t.TempDir(), 55069)
-	if err := b.Init("pt13dd3b6a"); err != nil {
+	if err := InitForTest(b, "pt13dd3b6a"); err != nil {
 		t.Fatalf("Init after a transient catalog race: %v", err)
 	}
 	if got := stub.calls(t); got != 3 {
@@ -112,7 +112,7 @@ func TestBdInitRetriesTheSchemaEraRace(t *testing.T) {
 	zeroRetryBackoff(t)
 
 	b := NewIsolatedWithPort(t.TempDir(), 55352)
-	if err := b.Init("pt42ed0697"); err != nil {
+	if err := InitForTest(b, "pt42ed0697"); err != nil {
 		t.Fatalf("Init after a transient schema-era refusal: %v", err)
 	}
 	if got := stub.calls(t); got != 3 {
@@ -131,7 +131,7 @@ func TestBdInitRetriesTheAutoApplyRefusal(t *testing.T) {
 	zeroRetryBackoff(t)
 
 	b := NewIsolatedWithPort(t.TempDir(), 55352)
-	if err := b.Init("pkcf3e21b8"); err != nil {
+	if err := InitForTest(b, "pkcf3e21b8"); err != nil {
 		t.Fatalf("Init after a transient auto-apply refusal: %v", err)
 	}
 	if got := stub.calls(t); got != 3 {
@@ -152,7 +152,7 @@ func TestBdInitRetryClearsTheWorkspaceTheFailedAttemptLeft(t *testing.T) {
 	zeroRetryBackoff(t)
 
 	b := NewIsolatedWithPort(t.TempDir(), 55069)
-	if err := b.Init("pt13dd3b6a"); err != nil {
+	if err := InitForTest(b, "pt13dd3b6a"); err != nil {
 		t.Fatalf("Init after a failed attempt left a half-written .beads: %v", err)
 	}
 	if got := stub.calls(t); got != 2 {
@@ -185,7 +185,7 @@ func TestBdInitRetryClearsACallerMadeEmptyWorkspace(t *testing.T) {
 	}
 
 	b := NewIsolatedWithPort(workDir, 55069)
-	if err := b.Init("pt13dd3b6a"); err != nil {
+	if err := InitForTest(b, "pt13dd3b6a"); err != nil {
 		t.Fatalf("Init after a failed attempt half-wrote into a caller-made .beads: %v", err)
 	}
 	if got := stub.calls(t); got != 2 {
@@ -214,7 +214,7 @@ func TestBdInitRetryLeavesAPreexistingWorkspaceAlone(t *testing.T) {
 	}
 
 	b := NewIsolatedWithPort(workDir, 55352)
-	if err := b.Init("pt13dd3b6a"); err == nil {
+	if err := InitForTest(b, "pt13dd3b6a"); err == nil {
 		t.Fatal("Init should fail: the stub refuses every attempt")
 	}
 	if _, err := os.Stat(marker); err != nil {

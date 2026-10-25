@@ -250,7 +250,7 @@ func realAddBeads(t *testing.T, mayorRig, _ string) *polecatDB {
 	t.Helper()
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	if err := beads.NewIsolatedWithPort(mayorRig, port).Init("gt"); err != nil {
+	if err := beads.InitForTest(beads.NewIsolatedWithPort(mayorRig, port), "gt"); err != nil {
 		t.Fatalf("bd init: %v", err)
 	}
 	return nil

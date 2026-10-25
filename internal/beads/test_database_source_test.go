@@ -93,7 +93,7 @@ func TestInitLeasesItsDatabaseToItsWorkDir(t *testing.T) {
 	stub := installSucceedingBdStub(t)
 	owners := recordTestDatabaseSource(t, 45678, "testdb_leased")
 	dir := t.TempDir()
-	if err := NewIsolatedWithPort(dir, 45678).Init("gt"); err != nil {
+	if err := InitForTest(NewIsolatedWithPort(dir, 45678), "gt"); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	if got := owners(); len(got) != 1 || got[0] != dir {

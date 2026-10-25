@@ -17,7 +17,7 @@ import (
 // Test Dolt container init capacity (gt-elvf4).
 //
 // Each container-backed test package runs one shared Dolt container per test
-// process (internal/testutil/doltserver.go), and every isolated Init against
+// process (internal/testutil/doltserver.go), and every isolated InitForTest against
 // it is a CREATE DATABASE plus a full migration pass, one DOLT_COMMIT per
 // step. internal/refinery runs about eighteen of those at once against its one
 // server. Under gate load that burst produced both failure faces of gt-elvf4:
@@ -148,13 +148,13 @@ const bdContainerSubprocessTimeout = 3 * time.Minute
 var testContainerInitSlotWait = bdInitSubprocessTimeout
 
 // RunTestContainerInit runs `bd <args>` — which must be a bd init — in dir
-// the way Init runs one against testutil's Dolt container, for test helpers
+// the way InitForTest runs one against testutil's Dolt container, for test helpers
 // that exec bd init themselves: it takes one of this process's init slots
 // (waiting at most testContainerInitSlotWait, and never past ctx), adds
 // testContainerEnv to env (nil means os.Environ()), and bounds the subprocess
 // by the init budget. It returns bd's combined stdout and stderr. A killed
 // subprocess reports its timeout (SubprocessFailureError). It does not retry;
-// callers that want the gt-o8i9f retry use Init.
+// callers that want the gt-o8i9f retry use InitForTest.
 func RunTestContainerInit(ctx context.Context, dir string, args []string, env []string) ([]byte, error) {
 	if len(args) == 0 || args[0] != "init" {
 		return nil, fmt.Errorf("RunTestContainerInit: want a bd init argv, got %q", args)

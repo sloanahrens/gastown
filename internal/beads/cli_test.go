@@ -29,8 +29,6 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 			return reply{stdout: "cnt\n7\n", stderr: "warning: noise on stderr\n"}
 		case "mol wisp gc --dry-run --json --age 1h30m0s":
 			return reply{stdout: `{"cleaned_ids":[],"cleaned_count":0,"dry_run":true}`}
-		case "sql SELECT 1 FROM `nosuch` LIMIT 1":
-			return reply{stderr: "Error: table not found: nosuch", err: exitError{1}}
 		}
 		return reply{}
 	})
@@ -46,9 +44,6 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 	}
 	if n, err := b.CountIssues(); err != nil || n != 7 {
 		t.Errorf("CountIssues = %d, %v", n, err)
-	}
-	if !b.TableExists("issues") || b.TableExists("nosuch") {
-		t.Error("TableExists wrong")
 	}
 	if _, err := b.StatsJSON(); err != nil {
 		t.Fatal(err)
@@ -73,8 +68,6 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 		"config get routing.mode",
 		"config set types.infra agent",
 		"sql --csv SELECT COUNT(*) as cnt FROM issues",
-		"sql SELECT 1 FROM `issues` LIMIT 1",
-		"sql SELECT 1 FROM `nosuch` LIMIT 1",
 		"stats --json",
 		"init --prefix gt --database gastown --server --server-port 3307 --force --destroy-token=DESTROY-gt",
 		"init --database hq --server",

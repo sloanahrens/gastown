@@ -977,16 +977,7 @@ type Beads struct {
 	// rig-prefixed IDs (gt-a6g completed the gt-8we migration).
 	agentScope bool
 
-	// agentBeadCache is an opt-in, never-refreshed snapshot of ListAgentBeads(),
-	// warmed by PreloadAgentBeads() for fleet-wide callers (e.g.
-	// check-recovery-batch, gt-b839) that would otherwise pay one bd show
-	// subprocess per polecat for data a single bulk query already answers.
-	// nil means "not warmed" — GetAgentBead falls back to its normal Show()
-	// path unchanged. Not safe to enable on a *Beads held across writes that
-	// could create/close agent beads mid-run; it never invalidates.
-	agentBeadCache map[string]*Issue
-
-	// mrCache is the same opt-in snapshot for merge-request beads, warmed by
+	// mrCache is the opt-in snapshot for merge-request beads, warmed by
 	// PreloadMergeRequests() (see mrCacheState in beads_mr.go). nil means "not
 	// warmed" — findMRForBranch falls back to its normal per-call
 	// ListMergeRequests scan unchanged.
@@ -998,7 +989,7 @@ type Beads struct {
 	// (gt polecat list, gt-92zx) pays one bd sql subprocess for it instead of
 	// one more. nil, or a label missing from the map, means "not warmed for
 	// this label" — the reader falls back to its own bd subprocess unchanged.
-	// Same caveat as agentBeadCache/mrCache: never refreshes, so don't warm it
+	// Same caveat as mrCache: never refreshes, so don't warm it
 	// on a *Beads held across writes that could create/close wisps mid-run.
 	wispCache map[string][]*Issue
 
@@ -1157,9 +1148,9 @@ func NewIsolated(workDir string) *Beads {
 }
 
 // NewIsolatedWithPort creates a Beads wrapper for test isolation that targets
-// a specific Dolt server port. Init() passes --server-port to bd init, and all
-// commands get GT_DOLT_PORT in their environment. This prevents tests from
-// creating databases on the production Dolt server (port 3307).
+// a specific Dolt server port. InitForTest passes --server-port to bd init,
+// and all commands get GT_DOLT_PORT in their environment. This prevents tests
+// from creating databases on the production Dolt server (port 3307).
 func NewIsolatedWithPort(workDir string, serverPort int) *Beads {
 	return newBeads(beadsFields{workDir: workDir, isolated: true, serverPort: serverPort})
 }
@@ -1432,7 +1423,12 @@ func (b *Beads) forIssueID(id string) *Beads {
 	})
 }
 
-// Init initializes a new beads database in the working directory.
+// InitForTest initializes a new beads database in b's working directory for a
+// test harness. It is a free function rather than a *Beads method because no
+// production code initializes a database this way: the town's own init paths go
+// through InitDatabase, and the *Beads method set is the seam plus its engine
+// verbs (beadsfake.TestBeadsMethodSetIsClientAdminAndEngine).
+//
 // This uses the same environment isolation as other commands.
 // If ServerPort is set (via NewIsolatedWithPort), passes --server-port to bd init
 // so the database is created on the test Dolt server.
@@ -1444,7 +1440,7 @@ func (b *Beads) forIssueID(id string) *Beads {
 // (gt-uq28). Without an explicit --database, bd derives the database name from
 // --prefix, so every "gt"-prefixed test collided on the same database and only
 // the first init on the shared container ever succeeded. Routing each isolated
-// Init to its own randomly named database sidesteps the guard entirely: every
+// init to its own randomly named database sidesteps the guard entirely: every
 // test gets a fresh database with no prior identity to conflict with, while
 // still reusing the one shared container (see the testdb_/doctest_ naming
 // convention orphan-cleanup already recognizes in jsonl_git_backup.go).
@@ -1456,7 +1452,7 @@ func (b *Beads) forIssueID(id string) *Beads {
 // Against the test container an init first takes one of this process's init
 // slots (AcquireTestContainerInitSlot), so a package's parallel tests cannot
 // all migrate a fresh database on the one shared server at once (gt-elvf4).
-func (b *Beads) Init(prefix string) error {
+func InitForTest(b *Beads, prefix string) error {
 	args := []string{"init"}
 	if prefix != "" {
 		args = append(args, "--prefix", prefix)
@@ -1472,7 +1468,7 @@ func (b *Beads) Init(prefix string) error {
 	if b.targetsTestDoltContainer() {
 		// One slot for the whole init, retries included: b.run reaches
 		// runBdWithRetry, whose gt-o8i9f loop re-mints and re-runs inside
-		// this one acquisition (gt-elvf4). Init has no context, so the wait
+		// this one acquisition (gt-elvf4). InitForTest has no context, so the wait
 		// is bounded by testContainerInitSlotWait.
 		ctx, cancel := context.WithTimeout(context.Background(), testContainerInitSlotWait)
 		release, err := AcquireTestContainerInitSlot(ctx)
@@ -1486,21 +1482,20 @@ func (b *Beads) Init(prefix string) error {
 	return err
 }
 
-// testDatabasePrefix is the prefix on the throwaway database names isolated
-// test Init() mints on the shared test Dolt container. Orphan cleanup already
-// recognizes it as test-database cruft (internal/daemon/jsonl_git_backup.go,
-// gt dolt cleanup), and the container retry reads it back off argv to scope the
-// schema-era class to databases whose name cannot pre-exist (bdInitOnTestDatabase,
-// gt-w4sxk).
+// testDatabasePrefix is the prefix on the throwaway database names an isolated
+// test init (InitForTest) mints on the shared test Dolt container. Orphan
+// cleanup already recognizes it as test-database cruft
+// (internal/daemon/jsonl_git_backup.go, gt dolt cleanup), and the container
+// retry reads it back off argv to scope the schema-era class to databases whose
+// name cannot pre-exist (bdInitOnTestDatabase, gt-w4sxk).
 const testDatabasePrefix = testdb.MintPrefix
 
-// testDatabaseName generates a unique database name for isolated test Init()
-// calls.
+// testDatabaseName generates a unique database name for an isolated test init.
 func testDatabaseName() string {
 	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		// crypto/rand failure is effectively unreachable; fall back to a
-		// timestamp so Init() still gets a database name.
+		// timestamp so the init still gets a database name.
 		return fmt.Sprintf("%s%x", testDatabasePrefix, time.Now().UnixNano())
 	}
 	return testDatabasePrefix + hex.EncodeToString(buf[:])
@@ -1941,7 +1936,7 @@ func (b *Beads) buildRunEnv() []string {
 			env = append(env, fmt.Sprintf("BEADS_DOLT_PORT=%d", b.serverPort))
 			env = append(env, "BEADS_DOLT_AUTO_START=0")
 			// Declare a dedicated test server only for a container testutil
-			// registered: bd then connects the testdb_* databases Init()
+			// registered: bd then connects the testdb_* databases InitForTest
 			// mints (gt-uq28). Any other port, 3307 above all, keeps bd's
 			// test-database firewall on (gt-fcxe9.9, deep review B2-03).
 			// Resume, don't refuse, a testdb_ an interrupted init left
@@ -1978,7 +1973,7 @@ func (b *Beads) buildRoutingEnv() []string {
 			env = append(env, fmt.Sprintf("BEADS_DOLT_PORT=%d", b.serverPort))
 			env = append(env, "BEADS_DOLT_AUTO_START=0")
 			// Declare a dedicated test server only for a container testutil
-			// registered: bd then connects the testdb_* databases Init()
+			// registered: bd then connects the testdb_* databases InitForTest
 			// mints (gt-uq28). Any other port, 3307 above all, keeps bd's
 			// test-database firewall on (gt-fcxe9.9, deep review B2-03).
 			// Resume, don't refuse, a testdb_ an interrupted init left
@@ -3840,23 +3835,12 @@ func (b *Beads) verifyBatchClosed(ids []string) error {
 	return pe
 }
 
-// Release is ReleaseWithReason with no reason to record.
-func (b *Beads) Release(id string) error {
-	return b.ReleaseWithReason(id, "")
-}
-
-// ReleaseWithReason moves an in_progress issue back to open status and records
-// reason in its notes (gt-v8ujv): recovering a dead worker's claim is
+// Release moves an in_progress issue back to open status and clears its
+// assignee. It does not force: bd refuses a release of an issue another actor
+// still holds in_progress (gt-v8ujv), so recovering a dead worker's claim is
 // ReleaseIfAssignee or TransferIfAssignee, not this.
-func (b *Beads) ReleaseWithReason(id, reason string) error {
-	args := []string{"update", id, "--status=open", "--assignee="}
-
-	// Add reason as a note if provided
-	if reason != "" {
-		args = append(args, "--notes=Released: "+reason)
-	}
-
-	_, err := b.run(args...)
+func (b *Beads) Release(id string) error {
+	_, err := b.run("update", id, "--status=open", "--assignee=")
 	return err
 }
 

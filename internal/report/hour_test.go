@@ -83,11 +83,6 @@ func (s reportNoWriteStore) DeleteIssues(...string) error { s.fail("DeleteIssues
 
 func (s reportNoWriteStore) Release(string) error { s.fail("Release"); return nil }
 
-func (s reportNoWriteStore) ReleaseWithReason(string, string) error {
-	s.fail("ReleaseWithReason")
-	return nil
-}
-
 func (s reportNoWriteStore) AddComment(string, string) error { s.fail("AddComment"); return nil }
 
 func (s reportNoWriteStore) AddCommentAs(string, string, string) error {

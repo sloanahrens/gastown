@@ -4491,7 +4491,7 @@ func TestResetAgentBeadForReuse_NukeRespawnCycle(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	bd := NewIsolated(tmpDir)
-	if err := bd.Init("test"); err != nil {
+	if err := InitForTest(bd, "test"); err != nil {
 		t.Fatalf("bd init: %v", err)
 	}
 
@@ -4859,7 +4859,7 @@ exit 0
 
 	workDir := t.TempDir()
 	b := NewIsolatedWithPort(workDir, 19999)
-	if err := b.Init("covertest"); err != nil {
+	if err := InitForTest(b, "covertest"); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 
@@ -4920,11 +4920,11 @@ exit 0
 	t.Setenv("MOCK_BD_LOG", logPath)
 
 	b1 := NewIsolatedWithPort(t.TempDir(), 19999)
-	if err := b1.Init("gt"); err != nil {
+	if err := InitForTest(b1, "gt"); err != nil {
 		t.Fatalf("Init 1: %v", err)
 	}
 	b2 := NewIsolatedWithPort(t.TempDir(), 19999)
-	if err := b2.Init("gt"); err != nil {
+	if err := InitForTest(b2, "gt"); err != nil {
 		t.Fatalf("Init 2: %v", err)
 	}
 
@@ -5286,7 +5286,7 @@ func TestBdWireLevelBannerOnlyStderrIsSuccess(t *testing.T) {
 			b := NewIsolated(t.TempDir())
 			// Init -> run -> runWithStdin(nil, ...): the real path gt-iksp's
 			// bug report (gt-iksp) was filed against.
-			err := b.Init("")
+			err := InitForTest(b, "")
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("Init() error = %v, wantErr %v", err, tc.wantErr)
 			}

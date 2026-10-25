@@ -1,12 +1,9 @@
 package beadsfake
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"sort"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -14,9 +11,6 @@ import (
 )
 
 var _ beads.Admin = (*Fake)(nil)
-
-// bdTables are the tables a fresh bd database has that callers probe for.
-var bdTables = []string{"issues", "wisps", "labels", "wisp_labels", "dependencies", "wisp_dependencies", "comments", "events", "config"}
 
 // ErrNotScripted is returned by SQLCSV when the test did not script an
 // answer (OnSQL). SQL is not modeled.
@@ -62,33 +56,6 @@ func (f *Fake) CountIssues() (int, error) {
 		}
 	}
 	return n, nil
-}
-
-// TableExists reports whether the table exists: bd's standard tables do,
-// less any DropTable removed.
-func (f *Fake) TableExists(name string) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.dropped[name] {
-		return false
-	}
-	for _, t := range bdTables {
-		if t == name {
-			return true
-		}
-	}
-	return false
-}
-
-// DropTable makes TableExists report name missing, for tests of databases
-// that predate a table.
-func (f *Fake) DropTable(name string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.dropped == nil {
-		f.dropped = map[string]bool{}
-	}
-	f.dropped[name] = true
 }
 
 // StatsJSON returns {"summary":{"total_issues":N,...}} over the issues (not
@@ -305,29 +272,4 @@ func (f *Fake) EventsTail(since int64, limit int) (*beads.EventsPage, error) {
 		page.NextSince = r.Seq
 	}
 	return page, nil
-}
-
-// Export writes every issue, wisps left out, to path as JSONL in creation
-// order: one issue object a line, as Show returns it.
-func (f *Fake) Export(path string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.failure("export"); err != nil {
-		return err
-	}
-	var records []*record
-	for _, r := range f.issues {
-		if !r.issue.Ephemeral {
-			records = append(records, r)
-		}
-	}
-	sort.Slice(records, func(i, j int) bool { return records[i].seq < records[j].seq })
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	for _, r := range records {
-		if err := enc.Encode(f.snapshot(r)); err != nil {
-			return err
-		}
-	}
-	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
