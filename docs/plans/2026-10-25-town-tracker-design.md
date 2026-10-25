@@ -1,6 +1,8 @@
+> Status: approved 2026-10-25 (Sloan, claude-477). Implementation plan: 2026-10-25-town-tracker-plan.md; epic gt-p85pw.
+
 # Town tracker: replace beads and Dolt with a town-owned issue service
 
-Status: draft for review, 2026-10-25. Handoff bead: claude-477 (in `~/.claude`). Author: dipper.
+Handoff bead: claude-477 (in `~/.claude`). Author: dipper.
 Decisions below were grilled with Sloan on 2026-10-25 (Q1-Q16, all accepted) and the design sections were approved one by one.
 
 ## 1. Why

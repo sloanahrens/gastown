@@ -1,3 +1,5 @@
+> Status: approved 2026-10-25 (Sloan, claude-477). Design: 2026-10-25-town-tracker-design.md. Epic gt-p85pw; crew foundation handoff claude-pwu; beads are filed from this plan.
+
 # Town tracker implementation plan (slices S0-S2, milestones S3-S4)
 
 > **For agentic workers:** every task below becomes ONE Gas Town bead (polecat tasks) or is built in a crew session (crew tasks, marked `CREW`). File polecat beads from `~/gt/gastown/mayor/rig` with the filing template in section 2. Do not run tasks out of dependency order. Steps inside a bead are the polecat's to choose; the acceptance boxes are the contract.
