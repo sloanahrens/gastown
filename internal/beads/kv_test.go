@@ -110,3 +110,45 @@ func TestParseKVListJSONMalformed(t *testing.T) {
 		t.Fatal("ParseKVListJSON() error = nil, want malformed JSON error")
 	}
 }
+
+// An envelope with no data is an empty store, not the envelope read as a map
+// of entries (gt-p85pw.9).
+func TestParseKVListJSONEnvelopeWithNoDataIsEmpty(t *testing.T) {
+	t.Parallel()
+	got, err := ParseKVListJSON([]byte(`{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":null}`))
+	if err != nil {
+		t.Fatalf("ParseKVListJSON: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("entries = %v, want none", got)
+	}
+}
+
+// A non-string value under a memory key is kept as its JSON text; the same
+// value under bd's own metadata key is dropped (gt-p85pw.9).
+func TestParseKVListJSONKeepsNonStringValuesOnlyUnderMemoryKeys(t *testing.T) {
+	t.Parallel()
+	got, err := ParseKVListJSON([]byte(`{"gt.memory.a":{"n":1},"bd.meta":{"n":2},"gt.note":"text","nul":null}`))
+	if err != nil {
+		t.Fatalf("ParseKVListJSON: %v", err)
+	}
+	if got["gt.memory.a"] != `{"n":1}` || got["gt.note"] != "text" {
+		t.Errorf("memory and string entries = %v", got)
+	}
+	if _, ok := got["bd.meta"]; ok {
+		t.Errorf("metadata key bd.meta kept: %v", got)
+	}
+	if _, ok := got["nul"]; ok {
+		t.Errorf("null entry kept: %v", got)
+	}
+}
+
+// A key bd would read as a flag never reaches argv (gt-p85pw.9).
+func TestKVGetRefusesAFlagLikeKey(t *testing.T) {
+	t.Parallel()
+	for _, key := range []string{"", "--force", "-x"} {
+		if _, err := (&Beads{}).KVGet(key); err == nil {
+			t.Errorf("KVGet(%q) returned no error", key)
+		}
+	}
+}

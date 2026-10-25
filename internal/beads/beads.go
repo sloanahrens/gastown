@@ -1941,8 +1941,12 @@ func (b *Beads) KVList() (map[string]string, error) {
 }
 
 // KVGet returns the value stored at key, or an error wrapping ErrNotFound when
-// the store has no such key.
+// the store has no such key. A key bd would read as a flag is refused before
+// it reaches argv.
 func (b *Beads) KVGet(key string) (string, error) {
+	if key == "" || strings.HasPrefix(key, "-") {
+		return "", fmt.Errorf("kv get: invalid key %q", key)
+	}
 	out, err := b.run("kv", "get", key, "--json")
 	if err != nil {
 		return "", err
@@ -1950,9 +1954,23 @@ func (b *Beads) KVGet(key string) (string, error) {
 	return ParseKVGetJSON(out)
 }
 
+// The key prefixes that name a memory: gt.* and the legacy memory.*. The
+// memory index (internal/cmd) reads the same prefixes.
+const (
+	kvMemoryKeyPrefix       = "gt."
+	kvMemoryLegacyKeyPrefix = "memory."
+)
+
+// IsMemoryKey reports whether a kv key holds a memory.
+func IsMemoryKey(key string) bool {
+	return strings.HasPrefix(key, kvMemoryKeyPrefix) || strings.HasPrefix(key, kvMemoryLegacyKeyPrefix)
+}
+
 // ParseKVListJSON reads bd kv list's payload, machine envelope or the bare
-// --json object an older bd prints, rendering a string value as itself, any
-// other non-null value as its compact JSON text, and null as no entry.
+// --json object an older bd prints. A string value is kept as itself. A
+// non-string value is kept as its compact JSON text only under a memory key,
+// so bd's metadata keys do not leak into the store's view, and null is no
+// entry. An envelope with no data is an empty store.
 func ParseKVListJSON(out []byte) (map[string]string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(kvPayload(out), &raw); err != nil {
@@ -1960,8 +1978,18 @@ func ParseKVListJSON(out []byte) (map[string]string, error) {
 	}
 	kvs := make(map[string]string, len(raw))
 	for k, v := range raw {
-		if s, ok := kvValueText(v); ok {
-			kvs[k] = s
+		var s *string
+		if err := json.Unmarshal(v, &s); err == nil {
+			if s != nil {
+				kvs[k] = *s
+			}
+			continue
+		}
+		if !IsMemoryKey(k) {
+			continue
+		}
+		if text, ok := kvValueText(v); ok {
+			kvs[k] = text
 		}
 	}
 	return kvs, nil
@@ -1987,11 +2015,16 @@ func ParseKVGetJSON(out []byte) (string, error) {
 
 // kvPayload is the data of bd's machine envelope, or out when out is the bare
 // payload bd printed before machine mode. run unwraps the envelope already;
-// the parsers repeat it so a caller may hand them either form.
+// the parsers repeat it so a caller may hand them either form. An envelope
+// with no data is null, never the envelope itself: parsed as a map, its own
+// fields would read as entries.
 func kvPayload(out []byte) []byte {
 	env, ok, err := decodeMachineEnvelope(out, "bd")
-	if err != nil || !ok || len(env.Data) == 0 {
+	if err != nil || !ok {
 		return out
+	}
+	if len(env.Data) == 0 {
+		return []byte("null")
 	}
 	return env.Data
 }
