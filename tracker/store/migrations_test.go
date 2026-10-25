@@ -1,0 +1,115 @@
+package store
+
+import (
+	"errors"
+	"strings"
+	"testing"
+	"testing/fstest"
+)
+
+func fsOf(files map[string]string) fstest.MapFS {
+	m := fstest.MapFS{}
+	for name, body := range files {
+		m[name] = &fstest.MapFile{Data: []byte(body)}
+	}
+	return m
+}
+
+func TestLoadMigrationsOrdersAndNames(t *testing.T) {
+	t.Parallel() // unit tier: pure parsing over an in-memory filesystem
+	got, err := loadMigrations(fsOf(map[string]string{
+		"schema/0002_labels.sql": "-- two",
+		"schema/0001_core.sql":   "-- one",
+	}), "schema")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].version != 1 || got[0].name != "core" || got[1].version != 2 || got[1].name != "labels" {
+		t.Fatalf("loadMigrations = %+v, want versions 1 core, 2 labels in order", got)
+	}
+	if got[0].sql != "-- one" {
+		t.Errorf("migration 1 sql = %q, want its file's text", got[0].sql)
+	}
+}
+
+func TestLoadMigrationsRejectsBadSets(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		files map[string]string
+		want  string
+	}{
+		"gap":          {map[string]string{"schema/0001_a.sql": "x", "schema/0003_c.sql": "x"}, "0002"},
+		"starts at 2":  {map[string]string{"schema/0002_a.sql": "x"}, "0001"},
+		"bad name":     {map[string]string{"schema/0001_a.sql": "x", "schema/core.sql": "x"}, "core.sql"},
+		"upper case":   {map[string]string{"schema/0001_Core.sql": "x"}, "0001_Core.sql"},
+		"duplicate":    {map[string]string{"schema/0001_a.sql": "x", "schema/0001_b.sql": "x"}, "0001"},
+		"none":         {map[string]string{"schema/readme.txt": "x"}, "no migrations"},
+		"empty sql":    {map[string]string{"schema/0001_a.sql": "  \n"}, "empty"},
+		"non-sql file": {map[string]string{"schema/0001_a.sql": "x", "schema/0002_b.txt": "x"}, "0002_b.txt"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := loadMigrations(fsOf(tc.files), "schema")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("loadMigrations error = %v, want one naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The binary's own migrations must load: a bad file name or a gap is caught
+// here, in the unit tier, not when a database is first opened.
+func TestEmbeddedMigrationsLoad(t *testing.T) {
+	t.Parallel()
+	ms, err := embeddedMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) == 0 || SchemaLevel() != len(ms) {
+		t.Errorf("SchemaLevel() = %d with %d migrations, want them equal and at least 1", SchemaLevel(), len(ms))
+	}
+}
+
+var twoMigrations = []migration{{version: 1, name: "core"}, {version: 2, name: "labels"}}
+
+func TestCheckHistory(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		applied map[int]string
+		max     int
+		want    string // "" means no error
+	}{
+		"fresh database":       {map[int]string{}, 0, ""},
+		"partly migrated":      {map[int]string{1: "core"}, 1, ""},
+		"fully migrated":       {map[int]string{1: "core", 2: "labels"}, 2, ""},
+		"newer than binary":    {map[int]string{1: "core", 2: "labels", 3: "future"}, 3, "newer"},
+		"gap below the newest": {map[int]string{2: "labels"}, 2, "gap"},
+		"renamed version":      {map[int]string{1: "other"}, 1, "version 1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err := checkHistory(twoMigrations, tc.applied, tc.max)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Errorf("checkHistory = %v, want nil", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Errorf("checkHistory = %v, want an error mentioning %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A binary whose embedded migrations do not load must not report a schema
+// level of 0, which reads as "no schema yet".
+func TestLevelOfPanicsOnABrokenSet(t *testing.T) {
+	t.Parallel()
+	if got := levelOf(twoMigrations, nil); got != 2 {
+		t.Errorf("levelOf = %d, want 2", got)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("levelOf with a load error did not panic")
+		}
+	}()
+	levelOf(nil, errors.New("boom"))
+}
