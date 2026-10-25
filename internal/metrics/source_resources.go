@@ -57,8 +57,10 @@ const resourcesWindow = time.Hour
 func (resourcesSource) Group() string { return "resources" }
 
 // Collect returns an error, leaving the group null, when neither day has a
-// sampler file and when the newest file was last written before the snapshot's
-// hour. A file that exists and cannot be read is counted instead.
+// sampler file, when the newest file was last written before the snapshot's
+// hour, and when a file exists but its write time cannot be read: a snapshot
+// that cannot tell whether the writer stopped must not report it healthy. A
+// file that exists and cannot be read is counted instead.
 func (resourcesSource) Collect(_ context.Context, env Env) (map[string]any, error) {
 	now := env.Now().UTC()
 	dir := filepath.Join(env.Town, ".runtime", "metrics", "resources")
@@ -68,6 +70,7 @@ func (resourcesSource) Collect(_ context.Context, env Env) (map[string]any, erro
 		groups: map[string]*resourceComponent{},
 	}
 	found := false
+	var unknown error
 	newest, newestAt := "", time.Time{}
 	for _, day := range []time.Time{now.AddDate(0, 0, -1), now} {
 		data, path, err := readResourcesDay(env, dir, day.Format("2006-01-02"))
@@ -75,7 +78,11 @@ func (resourcesSource) Collect(_ context.Context, env Env) (map[string]any, erro
 			continue
 		}
 		found = true
-		if at, statErr := env.ModTime(path); statErr == nil && (newest == "" || at.After(newestAt)) {
+		at, statErr := env.ModTime(path)
+		if statErr != nil && unknown == nil {
+			unknown = fmt.Errorf("resource sampler file %s: last write time unknown: %w", path, statErr)
+		}
+		if statErr == nil && (newest == "" || at.After(newestAt)) {
 			newest, newestAt = path, at
 		}
 		if err != nil {
@@ -86,6 +93,9 @@ func (resourcesSource) Collect(_ context.Context, env Env) (map[string]any, erro
 	}
 	if !found {
 		return nil, fmt.Errorf("no resource sampler file for today or yesterday under %s", dir)
+	}
+	if unknown != nil {
+		return nil, unknown
 	}
 	if hour := now.Truncate(time.Hour); newest != "" && newestAt.Before(hour) {
 		return nil, fmt.Errorf("resource sampler file %s is stale: last written %s, before the snapshot's hour starting %s",

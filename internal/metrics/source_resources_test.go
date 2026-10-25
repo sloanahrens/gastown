@@ -46,6 +46,10 @@ func resourcesTestEnv(now time.Time, files map[string][]byte, errs map[string]er
 			if _, ok := files[path]; ok {
 				return now, nil
 			}
+			if err := errs[path]; err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return now, nil
+			}
+
 			return time.Time{}, fs.ErrNotExist
 		},
 	}
@@ -320,5 +324,32 @@ func TestSourceResourcesCollect(t *testing.T) {
 				t.Fatalf("Collect =\n%v\nwant\n%v", got, tt.want)
 			}
 		})
+	}
+}
+
+// A sampler file that exists but whose write time cannot be read is not judged
+// healthy: the snapshot cannot tell whether the writer stopped, so the group is
+// an error and no columns are reported.
+func TestSourceResourcesCollectRefusesAFileWhoseWriteTimeIsUnknown(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 25, 16, 30, 0, 0, time.UTC)
+	path := resourcesTestPath("2026-10-25.jsonl")
+	files := map[string][]byte{path: []byte(resourcesLines(
+		resourcesRow("2026-10-25T16:20:00Z", "app", "web", "10", "1000"),
+	))}
+	env := resourcesTestEnv(now, files, nil, nil)
+	modTime := env.ModTime
+	env.ModTime = func(p string) (time.Time, error) {
+		if p == path {
+			return time.Time{}, errors.New("stat: permission denied")
+		}
+		return modTime(p)
+	}
+	cols, err := resourcesSource{}.Collect(context.Background(), env)
+	if err == nil || !strings.Contains(err.Error(), "last write time unknown") {
+		t.Fatalf("Collect = (%v, %v), want an error naming the unknown write time", cols, err)
+	}
+	if cols != nil {
+		t.Errorf("columns = %v, want none for a file whose write time is unknown", cols)
 	}
 }
