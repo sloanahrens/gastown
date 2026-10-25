@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"path/filepath"
 	"slices"
 	"time"
@@ -30,10 +31,13 @@ const peaksFile = "bead-peaks.jsonl"
 
 // Peak is one sandbox row of the sampler: the cells it contributes to the
 // landing of its bead, and when its sandbox ended, which picks the bead's
-// latest row.
+// latest row. ended is false for a row whose ended_at is absent or unparseable;
+// such a row still contributes its cells, and is only passed over for a row
+// that can be placed.
 type Peak struct {
 	bead    string
 	endedAt time.Time
+	ended   bool
 	cells   map[string]string
 }
 
@@ -41,16 +45,23 @@ type Peak struct {
 // the .gz sibling first, then the plain file, each row in file order. No file
 // at all is no peaks, not an error.
 //
-// The .gz sibling is legacy, so one that cannot be read or decompressed is
-// skipped and the plain file's rows still join; a read error on the plain file
-// is returned.
+// A .gz sibling holds the sampler's rotated older rows, so one that cannot be
+// read or decompressed costs those rows only and the join still runs. The skip
+// is reported on the process log with the file and its error, so a damaged
+// sibling is not mistaken for beads with no rows. A read error on the plain file
+// is returned: that is the file the sampler writes, so its loss is not one the
+// join can carry past.
 //
-// A line that is not a JSON object is skipped, as is a row with no bead or an
-// ended_at that is absent or not RFC 3339: the sampler appends while this
-// reads, so the last line may be partial, a row with no bead names no landing,
-// and a row with no end time cannot be ordered against its bead's other rows.
-// Unknown keys are ignored.
+// A line that is not a JSON object is skipped, as is a row with no bead: the
+// sampler appends while this reads, so the last line may be partial, and a row
+// with no bead names no landing. Unknown keys are ignored.
 func ReadPeaks(env Env) ([]Peak, error) {
+	return readPeaks(env, log.Printf)
+}
+
+// readPeaks is ReadPeaks taking the report's sink, so a test sees a skip without
+// the process log.
+func readPeaks(env Env, reportf func(format string, args ...any)) ([]Peak, error) {
 	dir := filepath.Join(env.Town, ".runtime", "metrics", "resources")
 	var peaks []Peak
 	for _, name := range []string{peaksFile + ".gz", peaksFile} {
@@ -59,16 +70,15 @@ func ReadPeaks(env Env) ([]Peak, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		if err != nil {
-			if compressed {
-				continue
-			}
-			return nil, fmt.Errorf("%s: %w", name, err)
+		if err == nil && compressed {
+			data, err = gunzip(data)
 		}
-		if compressed {
-			if data, err = gunzip(data); err != nil {
-				continue
+		if err != nil {
+			if !compressed {
+				return nil, fmt.Errorf("%s: %w", name, err)
 			}
+			reportf("metrics: %s: %v; its rows are skipped, not the join", name, err)
+			continue
 		}
 		peaks = append(peaks, parsePeaks(data)...)
 	}
@@ -106,14 +116,11 @@ func parsePeaks(data []byte) []Peak {
 		}
 		ended, _ := fields["ended_at"].(string)
 		endedAt, err := time.Parse(time.RFC3339, ended)
-		if err != nil {
-			continue
-		}
 		cells := make(map[string]string, len(peakFields))
 		for _, f := range peakFields {
 			cells[f.column] = cell(fields[f.key])
 		}
-		peaks = append(peaks, Peak{bead: bead, endedAt: endedAt, cells: cells})
+		peaks = append(peaks, Peak{bead: bead, endedAt: endedAt, ended: err == nil, cells: cells})
 	}
 	return peaks
 }
@@ -121,7 +128,8 @@ func parsePeaks(data []byte) []Peak {
 // JoinPeaks adds the sandbox peak columns to every landing: the peak of the
 // bead's latest sandbox row, matched on the bead id exactly as the extract
 // wrote it, never on a branch name. A landing whose bead has no row keeps
-// every peak cell empty.
+// every peak cell empty. The daily analysis calls it over the rows Join
+// produced, so the columns reach the published landings.
 //
 // With no peak rows there is nothing to join, and the header and rows come back
 // unchanged, so the output is the join's own. Otherwise the peak columns are
@@ -156,15 +164,25 @@ func JoinPeaks(header []string, rows []Row, peaks []Peak) ([]string, []Row) {
 	return header, joined
 }
 
-// latestPeaks keeps each bead's row whose sandbox ended last. A tie goes to the
-// row read later, which is the one the sampler appended later.
+// latestPeaks keeps each bead's row whose sandbox ended last, and a row with no
+// end time only when the bead has no row that has one. A tie goes to the row
+// read later, which is the one the sampler appended later.
 func latestPeaks(peaks []Peak) map[string]Peak {
 	latest := make(map[string]Peak, len(peaks))
 	for _, p := range peaks {
-		if prev, ok := latest[p.bead]; ok && p.endedAt.Before(prev.endedAt) {
+		if prev, ok := latest[p.bead]; ok && !p.supersedes(prev) {
 			continue
 		}
 		latest[p.bead] = p
 	}
 	return latest
+}
+
+// supersedes reports whether p is the row the join keeps over prev: a row with
+// an end time beats one without, and otherwise the row read later wins.
+func (p Peak) supersedes(prev Peak) bool {
+	if p.ended != prev.ended {
+		return p.ended
+	}
+	return !p.ended || !p.endedAt.Before(prev.endedAt)
 }
