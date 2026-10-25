@@ -205,7 +205,10 @@ func TestGuardReadsOnlyGitQueries(t *testing.T) {
 		mainSHA: {"go.mod": goMod("example/devops")},
 	})
 	_, _ = Guard([]Source{{Rig: "devops", Commit: mainSHA}}, "gastown", town, f.run)
-	allowed := map[string]bool{"rev-parse": true, "ls-tree": true, "show": true, "merge-base": true}
+	allowed := map[string]bool{}
+	for _, v := range ReadOnlyGitVerbs {
+		allowed[v] = true
+	}
 	for _, c := range f.calls {
 		args := strings.Fields(c)
 		// c is "<dir> <verb> ..."; the verb is the second field
@@ -215,5 +218,25 @@ func TestGuardReadsOnlyGitQueries(t *testing.T) {
 	}
 	if len(f.calls) == 0 {
 		t.Error("Guard made no git calls; the check did not run")
+	}
+}
+
+// When the commit count cannot be read, the note still says the pin is behind
+// its main, without the count.
+func TestGuardNotesABehindPinWithoutACountWhenTheCountCannotBeRead(t *testing.T) {
+	t.Parallel()
+	f := &guardGit{answer: map[string]string{}}
+	seedRig(f, "devops", mainSHA, map[string]map[string]string{
+		pinSHA:  {"go.mod": goMod("example/devops", "github.com/x/a")},
+		mainSHA: {"go.mod": goMod("example/devops", "github.com/x/a")},
+	})
+	f.answer[rigDir("devops")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
+	// no rev-list answer: the count cannot be read
+	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	if err != nil {
+		t.Fatalf("Guard = %v, want nil", err)
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "behind its main") || strings.Contains(notes[0], "commits behind") {
+		t.Errorf("notes = %v, want one note saying behind its main with no count", notes)
 	}
 }

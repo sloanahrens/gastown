@@ -9,6 +9,11 @@ import (
 	"golang.org/x/mod/modfile"
 )
 
+// ReadOnlyGitVerbs is every git verb the guard runs. The guard reads only: it
+// never fetches or writes, and its no-fetch test checks each call against this
+// list.
+var ReadOnlyGitVerbs = []string{"rev-parse", "ls-tree", "show", "merge-base", "rev-list"}
+
 // Guard is the pin-drift check (gt-n3ewt): a committed pin for a rig other than
 // the build rig must carry every module that rig's main requires, so the image
 // can build the code main runs. A pin that is behind main but has the same module
@@ -21,6 +26,11 @@ import (
 // The main sha is read from the rig's canonical checkout (origin/main as it
 // stands there); the guard never fetches. It returns one note per rig that is
 // behind main but has no coverage gap.
+//
+// Signature change: Guard now returns the notes as well as the error (it was
+// error only, when it failed on any pin behind main). The only caller in the
+// repository is the stage command (internal/polecat/seed/cmd/stage), which prints
+// the notes; no other package imports internal/polecat/seed's Guard.
 func Guard(pins []Source, buildRig, town string, git Git) (notes []string, err error) {
 	for _, src := range pins {
 		if src.Rig == buildRig {
