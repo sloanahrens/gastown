@@ -245,8 +245,10 @@ func FindFromCwdWithFallback() (townRoot string, cwd string, err error) {
 func (e procEnv) findFromCwdWithFallback() (townRoot string, cwd string, err error) {
 	cwd, err = e.getwd()
 	if err != nil {
-		// Fallback: the town root the session was spawned with.
-		if townRoot = TownRootFromEnv(e.getenv); townRoot != "" {
+		// Fallback: the town root the session was spawned with. A forbidden
+		// root fails closed like a missing marker: a hermetic harness must not
+		// reach the live town just because the cwd is gone.
+		if townRoot = TownRootFromEnv(e.getenv); townRoot != "" && !e.isForbiddenRoot(townRoot) {
 			// Verify it's actually a workspace
 			if _, statErr := os.Stat(filepath.Join(townRoot, PrimaryMarker)); statErr == nil {
 				return townRoot, "", nil // cwd is gone but townRoot is valid
