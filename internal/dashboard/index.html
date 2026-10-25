@@ -785,25 +785,37 @@ function workHead() {
   const tr = el("div", "workrow whead");
   [["Polecat", "the polecat, with its rig and last-24-hour landings on hover"], ["Agent", "the agent the seat's session was started with"],
    ["Bead", "the bead on the seat's hook, with its title"], ["State", "the state the town's inventory reads the seat into"],
-   ["Age", "how long the bead has been on the seat"]].forEach(([h, tip]) => { const c = el("span", "", h); c.title = tip; tr.append(c); });
+   ["Age", "how long the row has been in the state it shows; the hover has the time the bead has been on the hook"]].forEach(([h, tip]) => { const c = el("span", "", h); c.title = tip; tr.append(c); });
   return tr;
 }
 
 // The rows on screen, so the ages can move between redraws.
 let workSeatRows = [];
 
+// SPAWN_LONG is how long a spawning row may read before its age is warned: a
+// sling this old that has not put its session up is not starting, it is stuck
+// (gt-iv7jf).
+const SPAWN_LONG = 5 * 60;
+
 // paintAges writes the two readings a seat's clock moves: the state badge's
 // tooltip carries how long its session has been silent, the age cell how long
-// the bead has been on the hook.
+// the row has been in the state it shows — a queued bead since its submit (the
+// clock the Landings panel ages the same bead by), any other since the hook.
+// The hook time stays in the cell's tooltip, so the row still says how long
+// the seat has held the bead (gt-iv7jf).
 function paintAges(r, now) {
   const p = r.p;
-  const on = p.slung ? (now - new Date(p.slung).getTime()) / 1000 : null;
+  const hook = p.slung ? (now - new Date(p.slung).getTime()) / 1000 : null;
+  const since = p.state_since ? (now - new Date(p.state_since).getTime()) / 1000 : hook;
   const quiet = p.has_session && p.last_active ? (now - new Date(p.last_active).getTime()) / 1000 : null;
   const silent = quiet != null ? " · its session last printed " + fmtDur(quiet) + " ago" : "";
+  const stuck = p.state === "spawning" && since > SPAWN_LONG ? "still spawning after " + fmtDur(since) : "";
+  const hooked = hook == null ? "" : " · on the hook for " + fmtDur(hook);
+  const stateTip = "in " + p.state + (since == null ? "" : " for " + fmtDur(since));
   r.badge.title = (STATE_HELP[p.state] || "") + (p.reason && p.bead ? " — " + p.reason : "") + silent;
-  r.age.className = "wnum" + (p.bead && (on > 5400 || (quiet != null && quiet >= 600)) ? " warnc" : "");
-  r.age.textContent = p.bead ? (on == null ? "–" : fmtDur(on)) : "";
-  r.age.title = p.bead ? "on the hook" + (on == null ? "" : " for " + fmtDur(on)) + silent : "";
+  r.age.className = "wnum" + (p.bead && (stuck || since > 5400 || (quiet != null && quiet >= 600)) ? " warnc" : "");
+  r.age.textContent = p.bead ? (since == null ? "–" : fmtDur(since)) : "";
+  r.age.title = p.bead ? (stuck || stateTip) + hooked + silent : "";
 }
 
 // seatShortNames is the one table of the sandbox seats' short names, read by
@@ -972,7 +984,7 @@ function workQueue(box, s, q, r) {
 // a comma inside a title or description cannot make two seats read as one key.
 function workKey(s) {
   const q = s.queue;
-  const seats = (s.polecats || []).map(p => JSON.stringify([p.rig, p.name, p.state, p.rig_parked, p.agent, p.bead, p.title, p.description, p.reason, p.slung || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h])).join(";");
+  const seats = (s.polecats || []).map(p => JSON.stringify([p.rig, p.name, p.state, p.rig_parked, p.agent, p.bead, p.title, p.description, p.reason, p.slung || "", p.state_since || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h])).join(";");
   // The dispatcher's skips share a poll with the queue neither of them rides:
   // its own reader ticks six times as often, and it is what tags a row unshaped.
   const named = ((s.dispatch && s.dispatch.named) || []).map(n => n.bead + ":" + (n.reason || "")).join(",");

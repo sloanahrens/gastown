@@ -748,6 +748,82 @@ func TestTheWorkPanelMovesItsAgesBetweenPolls(t *testing.T) {
 	}
 }
 
+// TestTheQueuedRowAgesTheWaitTheLandingsPanelShows draws one queued seat and
+// the Landings pane over the same bead: the seat has held it a quarter of an
+// hour, but it was submitted three minutes ago, and both panels must say three
+// minutes. The same submit dates both — the bead's last write — so the seat's
+// age keeps the hook time in its tooltip rather than standing in the cell
+// (gt-iv7jf).
+func TestTheQueuedRowAgesTheWaitTheLandingsPanelShows(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	submitted := base.Add(-3 * time.Minute).Format(time.RFC3339)
+	p := seat("gastown", "dementus", "queued", "gt-iv7jf", "the wait", "deepseek-flash", 15*time.Minute)
+	p["slung"], p["state_since"] = base.Add(-15*time.Minute).Format(time.RFC3339), submitted
+	p["last_active"] = base.Add(-time.Minute).Format(time.RFC3339)
+	q := workQueueReading(0, 1, 0, 0)
+	q["landing"] = []any{map[string]any{
+		"id": "gt-iv7jf", "rig": "gastown", "title": "the wait",
+		"assignee": "gastown/polecats/dementus", "updated_at": submitted,
+	}}
+	st := workState([]any{p}, q)
+	st["summary_at"], st["queue"].(map[string]any)["at"] = base.Format(time.RFC3339), base.Format(time.RFC3339)
+	for _, r := range st["reads"].(map[string]any) {
+		r.(map[string]any)["at"] = base.Format(time.RFC3339)
+	}
+
+	dom := newPageDOM(t)
+	workClock(t, dom, base)
+	dom.call(t, "renderWork", st)
+	dom.call(t, "renderTrend", st)
+
+	cells := workCells(t, dom, "wnum")
+	if len(cells) != 1 {
+		t.Fatalf("the panel drew %d age cells, want 1", len(cells))
+	}
+	// The Landings pane draws the waiting bead's When cell first: the panel's
+	// caption, then the table, then the header row, then this bead.
+	when := dom.descend(t, "trend", 0, 1, 1, 0)
+	if cells[0].Text != "3m" || when.Text != "waiting 3m" {
+		t.Errorf("the Work row reads %q and the Landings row %q, want the same 3m wait", cells[0].Text, when.Text)
+	}
+	if !strings.Contains(cells[0].Title, "in queued for 3m") || !strings.Contains(cells[0].Title, "on the hook for 15m") {
+		t.Errorf("the age cell's title reads %q, want the state's clock and the hook time", cells[0].Title)
+	}
+}
+
+// TestTheWorkPanelWarnsASpawningRowPastFiveMinutes drives a seat slung six
+// minutes ago and one slung two minutes ago: a spawning row past five minutes
+// is not starting, so its age wears the warning colour and says so in words,
+// while a younger one reads plain (gt-iv7jf).
+func TestTheWorkPanelWarnsASpawningRowPastFiveMinutes(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	slung := func(name, bead string, ago time.Duration) map[string]any {
+		p := seat("gastown", name, "spawning", bead, "a sling", "deepseek-flash", ago)
+		p["slung"], p["last_active"] = base.Add(-ago).Format(time.RFC3339), base.Add(-ago).Format(time.RFC3339)
+		return p
+	}
+	stuck, young := slung("dementus", "gt-1", 6*time.Minute), slung("furiosa", "gt-2", 2*time.Minute)
+
+	dom := newPageDOM(t)
+	workClock(t, dom, base)
+	dom.call(t, "renderWork", workState([]any{stuck, young}, workQueueReading(0, 0, 0, 0)))
+
+	cells := workCells(t, dom, "wnum")
+	if len(cells) != 2 {
+		t.Fatalf("the panel drew %d age cells, want 2", len(cells))
+	}
+	if cells[0].Text != "6m" || !strings.Contains(cells[0].Class, "warnc") || !strings.Contains(cells[0].Title, "still spawning after 6m") {
+		t.Errorf("the six-minute spawning row reads %+v, want 6m warned and told why", cells[0])
+	}
+	if cells[1].Text != "2m" || strings.Contains(cells[1].Class, "warnc") || strings.Contains(cells[1].Title, "still spawning") {
+		t.Errorf("the two-minute spawning row reads %+v, want 2m plain", cells[1])
+	}
+}
+
 // TestTheWorkPanelNamesTheLandingsAndOrdersTheIdleByThem reads the polecat's
 // cell of a seat that landed beads: its title carries the 24-hour landings the
 // old table drew as columns, and the idle seats are folded most-landed first.
