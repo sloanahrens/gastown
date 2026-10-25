@@ -11,7 +11,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
+
+// TestMain runs the unit tier's checks, which fail the run on a goroutine that
+// outlives its tests.
+func TestMain(m *testing.M) {
+	os.Exit(unittier.Main(m))
+}
 
 // rowKeys is the schema's field order. A row written in another order still
 // reads, but two samplers writing one file should differ in values only.
@@ -156,6 +164,7 @@ func null(row map[string]any, key string) bool {
 }
 
 func TestFirstTick(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
 	lister := &fakeLister{processes: []Process{
@@ -261,6 +270,7 @@ func expectedModes(t *testing.T) (dir, file fs.FileMode) {
 }
 
 func TestCPUDeltaPerComponent(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
 	lister := &fakeLister{processes: []Process{
@@ -312,6 +322,7 @@ func TestCPUDeltaPerComponent(t *testing.T) {
 }
 
 func TestDeltaGuards(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		second    Process
@@ -389,6 +400,7 @@ func TestDeltaGuards(t *testing.T) {
 func cpu(percent float64) *float64 { return &percent }
 
 func TestCPURounding(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
 	lister := &fakeLister{processes: []Process{
@@ -406,6 +418,7 @@ func TestCPURounding(t *testing.T) {
 }
 
 func TestInterval(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		advance      time.Duration
@@ -448,6 +461,7 @@ func TestInterval(t *testing.T) {
 }
 
 func TestProcessListFailure(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
 	lister := &fakeLister{processes: []Process{
@@ -489,6 +503,7 @@ func TestProcessListFailure(t *testing.T) {
 }
 
 func TestEmptyProcessListWritesNothing(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
 	lister := &fakeLister{}
@@ -512,6 +527,7 @@ func TestEmptyProcessListWritesNothing(t *testing.T) {
 }
 
 func TestAppendAcrossTicksAndDays(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Date(2026, 10, 24, 23, 59, 0, 0, time.UTC)}
 	lister := &fakeLister{processes: []Process{
@@ -537,6 +553,7 @@ func TestAppendAcrossTicksAndDays(t *testing.T) {
 }
 
 func TestAppendFailureReturnsRows(t *testing.T) {
+	t.Parallel()
 	blocked := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(blocked, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write blocker: %v", err)
@@ -557,6 +574,7 @@ func TestAppendFailureReturnsRows(t *testing.T) {
 }
 
 func TestHostComponent(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		command string
 		want    string
@@ -610,6 +628,7 @@ func TestHostComponent(t *testing.T) {
 }
 
 func TestClassOf(t *testing.T) {
+	t.Parallel()
 	tests := map[string]string{
 		"dolt":      "control-plane",
 		"gtbd":      "control-plane",
@@ -630,6 +649,7 @@ func TestClassOf(t *testing.T) {
 }
 
 func TestParsePS(t *testing.T) {
+	t.Parallel()
 	out := strings.Join([]string{
 		"  100  1000 00:00:10 01:00:00 /usr/local/bin/dolt sql-server",
 		"  200  2000 00:00:05.5 00:10:00 /usr/local/bin/claude --dangerously",
@@ -656,6 +676,7 @@ func TestParsePS(t *testing.T) {
 }
 
 func TestParsePSTime(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		text string
 		want time.Duration
