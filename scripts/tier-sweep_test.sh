@@ -16,9 +16,17 @@ fail() { echo "FAIL: $1"; FAILS=$((FAILS + 1)); }
 # scripts/tier-sweep.sh is the real one. The stub names itself so the sweep's
 # own dedupe, which reads each tracked test's path back out of SHELL_TESTS,
 # runs it once and not twice.
+# tmpbase is the temp dir without a trailing slash. macOS TMPDIR ends in one, so
+# "${TMPDIR}/x" holds a "//" that the shell's normalized cwd (what the stub go
+# logs) does not, and the cases that compare the two exactly failed on a Mac.
+tmpbase() {
+  local t=${TMPDIR:-/tmp}
+  printf '%s' "${t%/}"
+}
+
 new_repo() {
   local body=$1 r
-  r=$(mktemp -d "${TMPDIR:-/tmp}/tier-sweep.XXXXXX")
+  r=$(mktemp -d "$(tmpbase)/tier-sweep.XXXXXX")
   git -C "$r" init -q -b main
   git -C "$r" config user.email t@example.com
   git -C "$r" config user.name t
@@ -103,7 +111,7 @@ rm -rf "$R"
 #   gt   runs the argv after `slot run --`.
 new_integration_repo() {
   local pkgs=${1:-} root_tagged=${2:-} stray=${3:-} docker=${4:-} pkg r
-  r=$(mktemp -d "${TMPDIR:-/tmp}/tier-sweep.XXXXXX")
+  r=$(mktemp -d "$(tmpbase)/tier-sweep.XXXXXX")
   [ -d "$r" ] || { echo "new_integration_repo: mktemp failed" >&2; exit 1; }
   git -C "$r" init -q -b main
   git -C "$r" config user.email t@example.com
