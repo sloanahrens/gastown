@@ -90,12 +90,22 @@ tr.live{background:#101a13}
 .cmd{display:inline-block;margin:2px 6px 0 0;padding:0 6px;border:1px solid var(--line);border-radius:4px;color:var(--dim);background:none;font:inherit;font-size:11px;cursor:pointer;text-align:left}
 .cmd:hover{color:var(--text);border-color:var(--dim)}.cmd.done{color:var(--green);border-color:var(--green)}
 .skip{padding:3px 0;border-top:1px solid var(--line)}.skip .why{color:var(--dim);display:block}
-/* The Work panel's seat rows. The columns are polecat, agent, bead, state, age,
-   in that order, and each track is named for the cell it holds so a swap in
-   workHead cannot leave the template describing the old order. Only the bead
-   takes what is left of the width, and every track may shrink to nothing, so a
-   long bead title cannot carry a row past its panel. */
-.workrow{display:grid;grid-template-columns:[polecat] minmax(0,max-content) [agent] minmax(0,max-content) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch);gap:2px 8px;align-items:baseline;padding:4px 0;border-top:1px solid var(--line)}
+/* The Work panel's seat table. One grid owns the columns — polecat, agent,
+   bead, state, age, in that order — and the header row, every seat row and the
+   rows of every fold take their tracks from it, so a column is as wide as the
+   table's widest cell rather than the widest cell in one row, and a row cannot
+   start a column where its neighbour started another (gt-n7yb8). Each track is
+   named for the cell it holds so a swap in workHead cannot leave the template
+   describing the old order. Only the bead takes what is left of the width, and
+   every track may shrink to nothing, so a long bead title cannot carry a row
+   past its panel. */
+.wtable{display:grid;grid-template-columns:[polecat] minmax(0,max-content) [agent] minmax(0,max-content) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch);gap:2px 8px;align-items:baseline}
+.workrow{grid-column:1 / -1;display:grid;grid-template-columns:subgrid;align-items:baseline;padding:4px 0;border-top:1px solid var(--line)}
+/* A fold's summary spans the table, and its rows are a subgrid of it, so a
+   collapsed group hides rows that would still line up with the live ones. */
+.wfold{grid-column:1 / -1}
+.wfoldrows{grid-column:1 / -1;display:grid;grid-template-columns:subgrid;align-items:baseline}
+.wfoldrows[hidden]{display:none}
 .workrow>*{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .workrow.whead{color:var(--dim);font-size:11px;border-top:0}
 .workrow .wagent,.workrow .wname{color:var(--dim)}
@@ -677,11 +687,13 @@ const STATE_HELP = {
   unknown: "tmux could not be read, so this polecat cannot be told apart from a working one",
   idle: "holds nothing"
 };
-// The Work panel's folds (idle seats, parked-rig seats, the queue list) last for
-// the session and are not stored. The queue list starts open, so the operator
-// reads the beads without a click; closing it holds across the polls.
+// The Work panel's folds (the seats that need a look, idle seats, parked-rig
+// seats, the queue list) last for the session and are not stored. The queue
+// list starts open, so the operator reads the beads without a click; closing it
+// holds across the polls.
 let openIdle = false;
 let openParkedRig = false;
+let openNeedsLook = false;
 let openQueueList = true;
 // The om panel's Stats and Scores sections start closed and keep the viewer's
 // choice across the periodic redraw and a reload, keyed by section name. Storage
@@ -779,8 +791,8 @@ function worseRead(a, b) {
   return (a.ageSec || 0) >= (b.ageSec || 0) ? a : b;
 }
 
-// workHead is a row of the same grid as the seats, so a column cannot drift
-// from its heading.
+// workHead is a row of the seat table's grid, spanning the same five columns as
+// a seat row, so a heading cannot drift from the cells under it (gt-n7yb8).
 function workHead() {
   const tr = el("div", "workrow whead");
   [["Polecat", "the polecat, with its rig and last-24-hour landings on hover"], ["Agent", "the agent the seat's session was started with"],
@@ -894,8 +906,18 @@ function workRow(names, p, now) {
   return tr;
 }
 
-// workSeats draws the seats holding something, then the idle and parked-rig
-// seats folded.
+// The seat order in the Work table: the seats the town is using rank first,
+// and a state that wants an operator is folded below them (gt-n7yb8). A state
+// this table does not name draws with the live seats, last, so a state added
+// later is seen rather than hidden.
+const WORK_RANK = {working: 0, spawning: 1, queued: 2, gating: 3, quiet: 4,
+  "needs-human": 5, stalled: 6, unknown: 7, recovery: 8, "review-needed": 9};
+const WORK_LOOK = new Set(["needs-human", "stalled", "unknown", "recovery", "review-needed"]);
+const workRank = p => WORK_RANK[p.state] == null ? 10 : WORK_RANK[p.state];
+
+// workSeats draws the seats in the table: the live seats first in rank order,
+// then the seats that want an operator, the parked rigs and the idle pool, each
+// folded under a summary.
 function workSeats(box, s, pcs, r) {
   workSeatRows = [];
   if (!pcs.length) {
@@ -907,19 +929,30 @@ function workSeats(box, s, pcs, r) {
   const names = polecatNames(pcs);
   const now = Date.now();
   const byName = (x, y) => (x.rig + x.name).localeCompare(y.rig + y.name);
-  const busy = pcs.filter(p => p.state !== "idle" && !p.rig_parked);
+  const ranked = list => list.sort((x, y) => workRank(x) - workRank(y) || byName(x, y));
+  const live = ranked(pcs.filter(p => !p.rig_parked && p.state !== "idle" && !WORK_LOOK.has(p.state)));
+  const look = ranked(pcs.filter(p => !p.rig_parked && p.state !== "idle" && WORK_LOOK.has(p.state)));
   const parked = pcs.filter(p => p.rig_parked).sort((x, y) => (x.state === "idle") - (y.state === "idle") || byName(x, y));
   const idle = pcs.filter(p => p.state === "idle" && !p.rig_parked).sort((x, y) => ((y.landed_24h || 0) - (x.landed_24h || 0)) || byName(x, y));
-  box.append(workHead());
-  busy.forEach(p => box.append(workRow(names, p, now)));
+  const table = el("div", "wtable");
+  box.append(table);
+  table.append(workHead());
+  live.forEach(p => table.append(workRow(names, p, now)));
+  // A fold is a details holding only its summary; its rows ride beside it in
+  // the table's grid through a wrapper, so a collapsed group's rows still line
+  // up with the live ones when it opens (gt-n7yb8).
   const fold = (label, list, open, set) => {
     const d = document.createElement("details");
+    d.className = "wfold";
     d.open = open;
-    d.ontoggle = () => set(d.open);
+    const rows = el("div", "wfoldrows");
+    rows.hidden = !open;
+    d.ontoggle = () => { set(d.open); rows.hidden = !d.open; };
     d.append(el("summary", "title", label));
-    list.forEach(p => d.append(workRow(names, p, now)));
-    box.append(d);
+    list.forEach(p => rows.append(workRow(names, p, now)));
+    table.append(d, rows);
   };
+  if (look.length) fold("needs a look (" + look.length + ")", look, openNeedsLook, v => { openNeedsLook = v; });
   if (parked.length) fold(parked.length + " in parked rigs (stood down on purpose; not alerts)", parked, openParkedRig, v => { openParkedRig = v; });
   if (idle.length) fold(idle.length + " idle (free to take work; the model is chosen when work is dispatched)", idle, openIdle, v => { openIdle = v; });
 }
