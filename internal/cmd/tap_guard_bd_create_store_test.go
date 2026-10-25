@@ -558,11 +558,15 @@ func TestTapGuardBdCreateStoreDashCTownSubdir(t *testing.T) {
 	}
 }
 
-// TestTapGuardBdCreateStoreLauncherChdir pins gt-m5bb4: env -C and sudo -D run
-// the command behind them in that directory, so bd create resolves its store
-// from there the way bd -C does. A relative value resolves against the shell's
-// directory, bd -C still overrides the launcher, and a value the guard cannot
-// place is refused.
+// TestTapGuardBdCreateStoreLauncherChdir pins gt-m5bb4: env -C/--chdir and
+// sudo -D/--chdir run the command behind them in that directory, so bd create
+// resolves its store from there the way bd -C does. A relative value resolves
+// against the shell's directory, bd -C still overrides the launcher, and a
+// value the guard cannot place is refused.
+//
+// Each blocked case names the refusal it must give, so a create refused for the
+// wrong reason (a directory that never reached the town, an unplaceable
+// launcher value) fails the case instead of passing as blocked (gt-p911n).
 func TestTapGuardBdCreateStoreLauncherChdir(t *testing.T) {
 	t.Parallel()
 	b := newBdStoreTown(t)
@@ -570,41 +574,44 @@ func TestTapGuardBdCreateStoreLauncherChdir(t *testing.T) {
 	tests := []struct {
 		name    string
 		command string
-		blocked bool
+		reason  string // the refusal the guard must give; "" for allowed
 	}{
-		{"env -C town", `env -C ` + b.town + ` bd create --title=x`, true},
-		{"env -C town, glued", `env -C` + b.town + ` bd create --title=x`, true},
-		{"env --chdir town", `env --chdir ` + b.town + ` bd create --title=x`, true},
-		{"env --chdir= town", `env --chdir=` + b.town + ` bd create --title=x`, true},
-		{"env -i -C town", `env -i -C ` + b.town + ` bd create --title=x`, true},
-		{"env -C town subdir without .beads", `env -C ` + filepath.Join(b.town, "mayor") + ` bd create --title=x`, true},
-		{"env -C relative up to town", `env -C ` + upToTown + ` bd create --title=x`, true},
-		{"env -C rig dir", `env -C ` + b.rigDir + ` bd create --title=x`, false},
-		{"env -C worktree", `env -C ` + b.worktree + ` bd create --title=x`, false},
-		{"env -C town, bd -C back to the rig", `env -C ` + b.town + ` bd -C ` + b.rigDir + ` create --title=x`, false},
-		{"env -C town over an inline rig BEADS_DIR", `env -C ` + b.town + ` BEADS_DIR=` + filepath.Join(b.rigDir, "mayor", "rig", ".beads") + ` bd create --title=x`, false},
-		{"env -C rig with inline town BEADS_DIR", `env -C ` + b.rigDir + ` BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` bd create --title=x`, true},
-		{"env -C unexpanded variable", `env -C $TOWN_DIR bd create --title=x`, true},
-		{"env -C value from an assignment on the line", `TOWN_DIR=` + b.town + ` env -C $TOWN_DIR bd create --title=x`, true},
-		{"env -C nowhere", `env -C ` + filepath.Join(t.TempDir(), "nowhere") + ` bd create --title=x`, true},
-		{"cd town then env -C .", `cd ` + b.town + ` && env -C . bd create --title=x`, true},
-		{"sudo -D town", `sudo -D ` + b.town + ` bd create --title=x`, true},
-		{"sudo -D rig", `sudo -D ` + b.rigDir + ` bd create --title=x`, false},
-		{"env -C town, nested shell", `env -C ` + b.town + ` bash -c 'bd create --title=x'`, true},
-		{"env -C rig, nested shell", `env -C ` + b.rigDir + ` bash -c 'bd create --title=x'`, false},
+		{"env -C town", `env -C ` + b.town + ` bd create --title=x`, bdCreateTownRefusal},
+		{"env -C town, glued", `env -C` + b.town + ` bd create --title=x`, bdCreateTownRefusal},
+		{"env --chdir town", `env --chdir ` + b.town + ` bd create --title=x`, bdCreateTownRefusal},
+		{"env --chdir= town", `env --chdir=` + b.town + ` bd create --title=x`, bdCreateTownRefusal},
+		{"env -i -C town", `env -i -C ` + b.town + ` bd create --title=x`, bdCreateTownRefusal},
+		{"env -C town subdir without .beads", `env -C ` + filepath.Join(b.town, "mayor") + ` bd create --title=x`, bdCreateTownRefusal},
+		{"env -C relative up to town", `env -C ` + upToTown + ` bd create --title=x`, bdCreateTownRefusal},
+		{"env -C rig dir", `env -C ` + b.rigDir + ` bd create --title=x`, ""},
+		{"env -C worktree", `env -C ` + b.worktree + ` bd create --title=x`, ""},
+		{"env -C town, bd -C back to the rig", `env -C ` + b.town + ` bd -C ` + b.rigDir + ` create --title=x`, ""},
+		{"env -C town over an inline rig BEADS_DIR", `env -C ` + b.town + ` BEADS_DIR=` + filepath.Join(b.rigDir, "mayor", "rig", ".beads") + ` bd create --title=x`, ""},
+		{"env -C rig with inline town BEADS_DIR", `env -C ` + b.rigDir + ` BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` bd create --title=x`, bdCreateTownRefusal},
+		{"env -C unexpanded variable", `env -C $TOWN_DIR bd create --title=x`, bdCreateLauncherDirUnplaceable},
+		{"env -C value from an assignment on the line", `TOWN_DIR=` + b.town + ` env -C $TOWN_DIR bd create --title=x`, bdCreateTownRefusal},
+		{"env -C nowhere", `env -C ` + filepath.Join(t.TempDir(), "nowhere") + ` bd create --title=x`, bdCreateNoStore},
+		{"cd town then env -C .", `cd ` + b.town + ` && env -C . bd create --title=x`, bdCreateTownRefusal},
+		{"sudo -D town", `sudo -D ` + b.town + ` bd create --title=x`, bdCreateTownRefusal},
+		{"sudo --chdir town", `sudo --chdir ` + b.town + ` bd create --title=x`, bdCreateTownRefusal},
+		{"sudo --chdir= town", `sudo --chdir=` + b.town + ` bd create --title=x`, bdCreateTownRefusal},
+		{"sudo -D rig", `sudo -D ` + b.rigDir + ` bd create --title=x`, ""},
+		{"sudo --chdir rig", `sudo --chdir ` + b.rigDir + ` bd create --title=x`, ""},
+		{"env -C town, nested shell", `env -C ` + b.town + ` bash -c 'bd create --title=x'`, bdCreateTownRefusal},
+		{"env -C rig, nested shell", `env -C ` + b.rigDir + ` bash -c 'bd create --title=x'`, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			stderr, err := b.run(t, polecatRole, b.worktree, tt.command)
-			if !tt.blocked {
+			if tt.reason == "" {
 				if err != nil || stderr != "" {
 					t.Fatalf("want allowed, got err=%v stderr=%q", err, stderr)
 				}
 				return
 			}
-			if err == nil || !strings.Contains(stderr, bdCreateStoreRefusal) {
-				t.Fatalf("want blocked, got err=%v stderr=%q", err, stderr)
+			if err == nil || !strings.Contains(stderr, bdCreateStoreRefusal) || !strings.Contains(stderr, tt.reason) {
+				t.Fatalf("want blocked with %q, got err=%v stderr=%q", tt.reason, err, stderr)
 			}
 		})
 	}

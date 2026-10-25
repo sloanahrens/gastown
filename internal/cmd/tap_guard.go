@@ -180,7 +180,7 @@ var prWorkflowLaunchers = map[string]prWorkflowLauncher{
 	"stdbuf":  {valueFlags: map[string]bool{"-i": true, "-o": true, "-e": true}},
 	"sudo": {valueFlags: map[string]bool{
 		"-u": true, "-g": true, "-C": true, "-h": true, "-p": true, "-r": true,
-		"-t": true, "-T": true, "-U": true, "-D": true,
+		"-t": true, "-T": true, "-U": true, "-D": true, "--chdir": true,
 	}},
 	"setsid":     {},
 	"doas":       {valueFlags: map[string]bool{"-u": true, "-C": true}},
