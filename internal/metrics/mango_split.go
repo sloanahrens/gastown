@@ -11,7 +11,7 @@ import (
 
 // mangoTargets are the landing outcomes mango explores, in the order the
 // Python run reports them.
-var mangoTargets = []string{"rejected_before_landing", "manual_rescue", "reached_overrun_stop"}
+var mangoTargets = []string{"rejected_before_landing", "reached_overrun_stop"}
 
 // mangoIdentity are dropped from the predictors because each is unique or
 // derived per landing: a box over one restates the row, not a pattern.
@@ -20,10 +20,6 @@ var mangoIdentity = []string{"bead", "landed_at", "week"}
 // mangoDuplicate is dropped because it carries the same value as
 // dominant_model at landing level.
 var mangoDuplicate = []string{"model"}
-
-// mangoLeak is dropped per target because the column defines that target: a
-// box over route would only restate manual_rescue.
-var mangoLeak = map[string][]string{"manual_rescue": {"route"}}
 
 // defaultTrainFraction is the share of the earliest landings that train a box;
 // the rest are held out to check it.
@@ -88,9 +84,6 @@ func Prepare(header []string, rows []Row, explainOnly []string, target string) P
 		drop[c] = true
 	}
 	for _, c := range mangoDuplicate {
-		drop[c] = true
-	}
-	for _, c := range mangoLeak[target] {
 		drop[c] = true
 	}
 	predictors := make([]string, 0, len(header))

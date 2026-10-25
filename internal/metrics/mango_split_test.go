@@ -111,14 +111,12 @@ func TestPrepareDropsEachRule(t *testing.T) {
 	}{
 		{"explain-only", []string{"gate_result", "lines_total", "rig"}, []string{"gate_result", "lines_total"},
 			"rejected_before_landing", []string{"rig"}},
-		{"targets", []string{"manual_rescue", "reached_overrun_stop", "rig"}, nil,
-			"manual_rescue", []string{"rig"}},
+		{"targets", []string{"rejected_before_landing", "reached_overrun_stop", "rig"}, nil,
+			"reached_overrun_stop", []string{"rig"}},
 		{"identity", []string{"bead", "landed_at", "week", "rig"}, nil,
 			"rejected_before_landing", []string{"rig"}},
 		{"duplicate", []string{"model", "rig"}, nil,
 			"rejected_before_landing", []string{"rig"}},
-		{"manual_rescue leak", []string{"route", "rig"}, nil,
-			"manual_rescue", []string{"rig"}},
 		{"route under another target", []string{"route", "rig"}, nil,
 			"reached_overrun_stop", []string{"route", "rig"}},
 	}
@@ -143,9 +141,7 @@ func TestPrepareBuildsPredictorsFromTheExtractHeader(t *testing.T) {
 		want   string
 	}{
 		{"rejected_before_landing",
-			"rig,route,type,priority,shaped,label_count,om_threshold,dominant_model,unknown_metric"},
-		{"manual_rescue",
-			"rig,type,priority,shaped,label_count,om_threshold,dominant_model,unknown_metric"},
+			"rig,route,manual_rescue,type,priority,shaped,label_count,om_threshold,dominant_model,unknown_metric"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.target, func(t *testing.T) {

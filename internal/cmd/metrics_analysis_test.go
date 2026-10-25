@@ -66,7 +66,7 @@ func TestMetricsAnalysePrintsTheReceiptOfWhatItDid(t *testing.T) {
 		if err := runMetricsAnalyseWith(context.Background(), &out, env, analysisPaths(town)); err != nil {
 			t.Fatalf("runMetricsAnalyseWith: %v", err)
 		}
-		want := "analyse " + analyseNow.Format(time.RFC3339) + ": 0 landings, 3 targets -> " +
+		want := "analyse " + analyseNow.Format(time.RFC3339) + ": 0 landings, 2 targets -> " +
 			filepath.Join(town, ".runtime", "metrics", "latest", "panel.json") + "\n"
 		if got := out.String(); got != want || strings.Count(got, "\n") != 1 {
 			t.Fatalf("receipt = %q, want %q", got, want)

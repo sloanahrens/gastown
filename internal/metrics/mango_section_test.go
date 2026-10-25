@@ -253,6 +253,9 @@ func TestMangoSectionHoldoutWithoutPositivesSaysSo(t *testing.T) {
 			route = "overseer-manual"
 		}
 		rows[i] = mangoSectionLanding(i, i%2, "", route)
+		if i == 9 {
+			rows[i]["reached_overrun_stop"] = "1" // the only positive, in train, on 2026-10-10
+		}
 		if i < 28 {
 			rows[i]["landed_at"] = fmt.Sprintf("2026-10-%02dT00:00:00Z", 1+i)
 		} else {
@@ -262,7 +265,7 @@ func TestMangoSectionHoldoutWithoutPositivesSaysSo(t *testing.T) {
 	// The positives all land in October, so the date split puts every one of
 	// them in train and the holdout has none to check a box on.
 	result := `{
-  "target": "manual_rescue", "positive": 1, "baseline": 0.1, "rows": 28,
+  "target": "reached_overrun_stop", "positive": 1, "baseline": 0.1, "rows": 28,
   "hypercubes": [{"ranges": [{"column": "rig", "categories": ["a"]}], "n": 28, "purity": 0.4}],
   "stats": {"generate": {"iterations": 10, "germsTried": 200, "generated": 50, "valid": 1,
                          "significant": 1, "skippedColumns": []}, "candidates": 1}
@@ -270,18 +273,18 @@ func TestMangoSectionHoldoutWithoutPositivesSaysSo(t *testing.T) {
 	dir := mangoSectionTown(t, rows)
 	run, _ := mangoSectionRun(t, result)
 	text := mangoSection(t, dir, run, 1)
-	start, end := strings.Index(text, "### manual_rescue"), strings.Index(text, "### reached_overrun_stop")
+	start, end := strings.Index(text, "### reached_overrun_stop"), len(text)
 	if start < 0 || end <= start {
-		t.Fatalf("text = %q, want a manual_rescue part before reached_overrun_stop", text)
+		t.Fatalf("text = %q, want a reached_overrun_stop part at the end", text)
 	}
 	part := text[start:end]
 	for _, want := range []string{"Holdout has no positives", "Last positive landed 2026-10-10"} {
 		if !strings.Contains(part, want) {
-			t.Errorf("manual_rescue part = %q, want it to hold %q", part, want)
+			t.Errorf("reached_overrun_stop part = %q, want it to hold %q", part, want)
 		}
 	}
 	if strings.Contains(part, "| replicates |") {
-		t.Errorf("manual_rescue part = %q, want no table when there is nothing to check", part)
+		t.Errorf("reached_overrun_stop part = %q, want no table when there is nothing to check", part)
 	}
 }
 
@@ -383,7 +386,7 @@ func TestMangoSectionRendersTheBoxTableWithExplainMeans(t *testing.T) {
 	dir := mangoSectionTown(t, rows)
 	run, _ := mangoSectionRun(t, result)
 	text := mangoSection(t, dir, run, 1)
-	start, end := strings.Index(text, "### rejected_before_landing"), strings.Index(text, "### manual_rescue")
+	start, end := strings.Index(text, "### rejected_before_landing"), strings.Index(text, "### reached_overrun_stop")
 	if start < 0 || end <= start {
 		t.Fatalf("text = %q, want a rejected_before_landing part", text)
 	}
