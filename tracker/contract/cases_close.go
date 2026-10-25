@@ -12,6 +12,7 @@ func init() {
 	register(Case{Name: "close records the reason and time, and a closed issue leaves the default list", Run: closeBasics})
 	register(Case{Name: "close refuses open children unless forced", Run: closeOpenChildren})
 	register(Case{Name: "close is all-or-nothing and tolerates an already closed issue", Run: closeAllOrNothing})
+	register(Case{Name: "closing a parent together with its children, or a blocked issue with its blocker, works in one call", Run: closeSetTogether})
 	register(Case{Name: "update to closed obeys the same fences and reopen clears the close", Run: closeViaUpdateAndReopen})
 	register(Case{Name: "delete removes issues, orphans their children, and is all-or-nothing", Run: deleteBasics})
 }
@@ -130,4 +131,35 @@ func mustGetMaybe(t *testing.T, s store.Store, id string) (api.Issue, bool) {
 	}
 	is, ok := got[id]
 	return is, ok
+}
+
+func closeSetTogether(t *testing.T, s store.Store) {
+	parent := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "parent"})
+	kid := mustCreate(t, s, api.CreateParams{Parent: parent.ID, Title: "kid"})
+	grand := mustCreate(t, s, api.CreateParams{Parent: kid.ID, Title: "grand"})
+	// Listed parent-first, which is also id order: the set must not depend on it.
+	if err := s.CloseIssues(ctx(), []string{parent.ID, kid.ID, grand.ID}, "all done", false); err != nil {
+		t.Fatalf("closing a whole subtree in one call: %v", err)
+	}
+	for _, id := range []string{parent.ID, kid.ID, grand.ID} {
+		if got := mustGet(t, s, id); got.Status != "closed" {
+			t.Errorf("%s is %s after the batch, want closed", id, got.Status)
+		}
+	}
+	blocker := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "blocker"})
+	work := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "work"})
+	mustDep(t, s, work.ID, blocker.ID, "blocks")
+	if err := s.CloseIssues(ctx(), []string{work.ID, blocker.ID}, "both", false); err != nil {
+		t.Errorf("closing an issue together with its blocker: %v", err)
+	}
+	// A child left out of the set still fences its parent.
+	p2 := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "p2"})
+	mustCreate(t, s, api.CreateParams{Parent: p2.ID, Title: "left out"})
+	other := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "other"})
+	if err := s.CloseIssues(ctx(), []string{p2.ID, other.ID}, "r", false); !errors.Is(err, api.ErrConflict) {
+		t.Errorf("closing a parent without its open child = %v, want api.ErrConflict", err)
+	}
+	if got := mustGet(t, s, other.ID); got.Status != "open" {
+		t.Error("the refused batch closed an unrelated member")
+	}
 }

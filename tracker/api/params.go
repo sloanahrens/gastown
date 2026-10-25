@@ -57,8 +57,11 @@ type UpdatePatch struct {
 	SetLabels    []string `json:"set_labels,omitempty"`
 	AppendNotes  string   `json:"append_notes,omitempty"`
 	Persistent   bool     `json:"persistent,omitempty"`
-	Force        bool     `json:"force,omitempty"`
-	Actor        string   `json:"actor,omitempty"`
+	// DeferUntil sets when a deferred or open issue becomes workable again; a
+	// pointer to the zero time clears it.
+	DeferUntil *time.Time `json:"defer_until,omitempty"`
+	Force      bool       `json:"force,omitempty"`
+	Actor      string     `json:"actor,omitempty"`
 }
 
 // Guard makes a write conditional: it applies only while the issue's assignee

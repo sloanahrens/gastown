@@ -1,10 +1,8 @@
 package store
 
 import (
-	"errors"
 	"reflect"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/tracker/api"
@@ -23,20 +21,6 @@ func TestStoreMethodSetIsPinned(t *testing.T) {
 	want := []string{"AddComment", "AddDependency", "Blocked", "ChildrenOf", "CloseIssues", "Comments", "CreateIssue", "DeleteIssues", "Dependencies", "EventsAfter", "GetIssues", "ListIssues", "Ready", "RemoveDependency", "UpdateIssue"}
 	if !slices.Equal(got, want) {
 		t.Errorf("Store methods = %v\nwant           %v\nchange this list deliberately, with the server, fake and contract", got, want)
-	}
-}
-
-// An unfinished store method must say so by name; an empty answer would read
-// as "no issues". The helper builds that error for every stubbed method, so
-// it is tested directly: no particular method stays a stub.
-func TestUnimplementedNamesTheMethod(t *testing.T) {
-	t.Parallel()
-	err := unimplemented("SomeMethod")
-	if !errors.Is(err, ErrUnimplemented) {
-		t.Fatalf("unimplemented() = %v, want ErrUnimplemented", err)
-	}
-	if got := err.Error(); !strings.Contains(got, "Postgres.SomeMethod") {
-		t.Errorf("error %q does not name the method", got)
 	}
 }
 

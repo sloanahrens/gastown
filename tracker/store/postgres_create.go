@@ -161,6 +161,11 @@ VALUES ($1, $2, $3, 'open', $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)`,
 	if err := appendEvent(ctx, tx, "created", id, p.Actor, nil, &title, nil); err != nil {
 		return api.Issue{}, err
 	}
+	for _, label := range uniqueStrings(p.Labels) {
+		if err := appendEvent(ctx, tx, "label_added", id, p.Actor, nil, &label, nil); err != nil {
+			return api.Issue{}, err
+		}
+	}
 	is, err := scanIssue(tx.QueryRow(ctx, "SELECT "+issueColumns+" FROM tracker.issues WHERE id = $1", id))
 	if err != nil {
 		return api.Issue{}, fmt.Errorf("store: read back %s: %w", id, err)

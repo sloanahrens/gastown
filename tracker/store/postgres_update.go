@@ -136,6 +136,14 @@ func updateInTx(ctx context.Context, tx pgx.Tx, id string, patch api.UpdatePatch
 		sets = append(sets, "notes = "+arg(appendNote(cur.notes, patch.AppendNotes)))
 		events = append(events, ev{op: "updated", comment: str("notes")})
 	}
+	if patch.DeferUntil != nil {
+		if patch.DeferUntil.IsZero() {
+			sets = append(sets, "defer_until = NULL")
+		} else {
+			sets = append(sets, "defer_until = "+arg(*patch.DeferUntil))
+		}
+		events = append(events, ev{op: "updated", comment: str("defer_until")})
+	}
 	if patch.Persistent && cur.ephemeral {
 		sets = append(sets, "ephemeral = false")
 		events = append(events, ev{op: "updated", comment: str("promoted to persistent")})
@@ -189,7 +197,7 @@ func updateInTx(ctx context.Context, tx pgx.Tx, id string, patch api.UpdatePatch
 	// Closing is checked last but shares this transaction: a refused close
 	// (open children or blockers) rolls back every change made above.
 	if closing {
-		return closeRow(ctx, tx, id, "", patch.Force, patch.Actor)
+		return closeRow(ctx, tx, id, "", patch.Force, patch.Actor, []string{id})
 	}
 	return nil
 }
