@@ -3,6 +3,8 @@ package tiertrigger
 import (
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -38,21 +40,19 @@ func (f *fakeFiles) WriteFile(path string, data []byte) error {
 	return nil
 }
 
-// fakeGit is the repository the due decision reads: changes is keyed by the
-// commit a package recorded, so a test sees which base was asked for.
+// fakeGit is the repository the due decision reads: changes and errs are keyed
+// by the commit a package recorded, so a test sees which base was asked for
+// and can fail one package's diff alone.
 type fakeGit struct {
-	head    string
 	changes map[string][]string
+	errs    map[string]error
 	asked   []string
-	err     error
 }
-
-func (g *fakeGit) Rev(string) (string, error) { return g.head, nil }
 
 func (g *fakeGit) DiffNameOnly(base, _ string) ([]string, error) {
 	g.asked = append(g.asked, base)
-	if g.err != nil {
-		return nil, g.err
+	if err := g.errs[base]; err != nil {
+		return nil, err
 	}
 	return g.changes[base], nil
 }
@@ -61,6 +61,13 @@ func (g *fakeGit) DiffNameOnly(base, _ string) ([]string, error) {
 // opened, so only a change or a later window makes it due again.
 func rec(tb testing.TB, commit string) Record {
 	return Record{Commit: commit, At: at(tb, 2026, 10, 25, 4, 0, 0)}
+}
+
+// sameRecord compares the fields, not the struct: a time.Time also carries its
+// location pointer and wall/ext encoding, so == is false for the same instant
+// once the value has been through JSON.
+func sameRecord(got, want Record) bool {
+	return got.Commit == want.Commit && got.At.Equal(want.At)
 }
 
 func TestStoreLoad(t *testing.T) {
@@ -122,7 +129,7 @@ func TestStoreLoad(t *testing.T) {
 				t.Fatalf("Load() = %v; want %v", st, tc.want)
 			}
 			for pkg, want := range tc.want {
-				if got := st[pkg]; got != want {
+				if got := st[pkg]; !sameRecord(got, want) {
 					t.Errorf("Load()[%q] = %v; want %v", pkg, got, want)
 				}
 			}
@@ -143,7 +150,7 @@ func TestStoreSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() after Save(): %v", err)
 	}
-	if want := in["internal/beads"]; got["internal/beads"] != want {
+	if want := in["internal/beads"]; !sameRecord(got["internal/beads"], want) {
 		t.Fatalf("round trip = %v; want %v", got, want)
 	}
 	if err := (Store{Path: "/nil.json", Files: files}).Save(nil); err != nil {
@@ -154,6 +161,65 @@ func TestStoreSave(t *testing.T) {
 	}
 	if err := (Store{Path: "/x", Files: &fakeFiles{writeErr: fs.ErrPermission}}).Save(in); err == nil {
 		t.Error("Save() over an unwritable file returned nil")
+	}
+}
+
+// TestStatePath pins the path the sweep reads and writes, spelled out rather
+// than rebuilt from the helper it exercises.
+func TestStatePath(t *testing.T) {
+	t.Parallel()
+	if got, want := StatePath("/town"), "/town/.runtime/tiertrigger/state.json"; got != want {
+		t.Errorf("StatePath(/town) = %q; want %q", got, want)
+	}
+}
+
+// TestStoreOSFiles covers what the fake filesystem cannot: Save creates the
+// runtime directory, replaces the file without leaving its temp file behind,
+// and Load reads a missing file through the real os.ReadFile as an empty
+// state.
+func TestStoreOSFiles(t *testing.T) {
+	t.Parallel()
+	path := StatePath(t.TempDir())
+	store := Store{Path: path, Files: OSFiles{}}
+
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load() before any Save: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Load() before any Save = %v; want an empty state", got)
+	}
+
+	st := State{}
+	st.Ran("internal/beads", "c1", at(t, 2026, 10, 25, 4, 0, 0))
+	if err := store.Save(st); err != nil {
+		t.Fatalf("Save(): %v", err)
+	}
+	got, err = store.Load()
+	if err != nil {
+		t.Fatalf("Load() after Save(): %v", err)
+	}
+	if len(got) != 1 || !sameRecord(got["internal/beads"], st["internal/beads"]) {
+		t.Fatalf("round trip = %v; want %v", got, st)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != StateFileName {
+		t.Fatalf("state dir holds %v; want only %s", entries, StateFileName)
+	}
+
+	st.Ran("internal/beads", "c2", at(t, 2026, 10, 26, 4, 0, 0))
+	if err := store.Save(st); err != nil {
+		t.Fatalf("Save() over an existing file: %v", err)
+	}
+	got, err = store.Load()
+	if err != nil {
+		t.Fatalf("Load() after the second Save(): %v", err)
+	}
+	if len(got) != 1 || !sameRecord(got["internal/beads"], st["internal/beads"]) {
+		t.Errorf("record after a second Save = %v; want %v", got, st["internal/beads"])
 	}
 }
 
@@ -176,7 +242,7 @@ func TestStateChanged(t *testing.T) {
 	if _, err := st.Changed(g, "internal/testutil"); !errors.Is(err, ErrNoRecord) {
 		t.Errorf("Changed(no record) = %v; want ErrNoRecord", err)
 	}
-	if _, err := st.Changed(&fakeGit{err: errors.New("bad object")}, "internal/beads"); err == nil {
+	if _, err := st.Changed(&fakeGit{errs: map[string]error{"c1": errors.New("bad object")}}, "internal/beads"); err == nil {
 		t.Error("Changed() over a failing git returned nil")
 	}
 }
@@ -198,7 +264,6 @@ func TestDue(t *testing.T) {
 		git       *fakeGit
 		want      []string
 		wantAsked []string
-		wantErr   bool
 	}{
 		{
 			name:  "a package with no record runs",
@@ -268,27 +333,32 @@ func TestDue(t *testing.T) {
 			wantAsked: []string{"c1", "c2"},
 		},
 		{
-			name:      "a git read that fails is an error",
+			name:      "a record whose commit cannot be read runs that package",
 			state:     State{"internal/beads": rec(t, "c1")},
 			pkgs:      []Package{beads},
-			git:       &fakeGit{err: errors.New("bad object c1")},
+			git:       &fakeGit{errs: map[string]error{"c1": errors.New("bad object c1")}},
+			want:      []string{"internal/beads"},
 			wantAsked: []string{"c1"},
-			wantErr:   true,
+		},
+		{
+			name: "one unreadable record leaves the rest of the sweep going",
+			state: State{
+				"internal/beads":    rec(t, "c1"),
+				"internal/testutil": rec(t, "c2"),
+			},
+			pkgs: []Package{beads, testutil},
+			git: &fakeGit{
+				errs:    map[string]error{"c1": errors.New("bad object c1")},
+				changes: map[string][]string{"c2": {"internal/cmd/root.go"}},
+			},
+			want:      []string{"internal/beads"},
+			wantAsked: []string{"c1", "c2"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := Due(tc.state, tc.pkgs, tc.git, at(t, 2026, 10, 25, 5, 0, 0), loc)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("Due() = %q, nil; want an error", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("Due(): %v", err)
-			}
+			got, _ := Due(tc.state, tc.pkgs, tc.git, at(t, 2026, 10, 25, 5, 0, 0), loc)
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Errorf("Due() = %q; want %q", got, tc.want)
 			}
@@ -296,5 +366,25 @@ func TestDue(t *testing.T) {
 				t.Errorf("asked git for %q; want %q", tc.git.asked, tc.wantAsked)
 			}
 		})
+	}
+}
+
+// gt-42nss: a record whose diff fails runs its package and is reported with the
+// error, so a broken repository is visible instead of a silent full run.
+func TestDueReportsEachUnreadableRecord(t *testing.T) {
+	t.Parallel()
+	loc, err := DailyZoneLocation()
+	if err != nil {
+		t.Fatalf("DailyZoneLocation: %v", err)
+	}
+	beads := Package{Name: "internal/beads", Triggers: []string{"internal/beads"}}
+	state := State{"internal/beads": Record{Commit: "gone", At: at(t, 2026, 10, 25, 4, 0, 0)}}
+	git := &fakeGit{errs: map[string]error{"gone": errors.New("unknown revision")}}
+	due, unreadable := Due(state, []Package{beads}, git, at(t, 2026, 10, 25, 5, 0, 0), loc)
+	if strings.Join(due, ",") != "internal/beads" {
+		t.Errorf("Due() = %q; want the unreadable package to run", due)
+	}
+	if _, ok := unreadable["internal/beads"]; !ok {
+		t.Errorf("unreadable = %v; want internal/beads named with its diff error", unreadable)
 	}
 }

@@ -53,10 +53,8 @@ func (st State) Changed(g Git, pkg string) ([]string, error) {
 	return paths, nil
 }
 
-// Git is the repository the due decision reads and a sweep records its tip
-// through.
+// Git is the repository the due decision reads.
 type Git interface {
-	Rev(ref string) (string, error)
 	DiffNameOnly(base, head string) ([]string, error)
 }
 
@@ -70,11 +68,16 @@ type Package struct {
 // with no recorded run, those whose daily window has passed since their last
 // run, and those with a change on a trigger path since their recorded commit.
 // The result is in pkgs' order. An empty state runs every package, so a
-// missing state file runs every package.
+// missing state file runs every package. A record whose commit can no longer
+// be diffed — history rewritten or garbage-collected — runs its package too,
+// since unreadable is not unchanged and one stale record must not stop the
+// sweep (gt-42nss). Those packages are also returned in unreadable with the
+// diff error, so the caller can name them: a persistently broken repository
+// otherwise turns every package into a full run with no signal (om, gt-42nss).
 //
 // loc is the zone the daily window is read in and must not be nil.
-func Due(st State, pkgs []Package, g Git, now time.Time, loc *time.Location) ([]string, error) {
-	var due []string
+func Due(st State, pkgs []Package, g Git, now time.Time, loc *time.Location) (due []string, unreadable map[string]error) {
+	unreadable = map[string]error{}
 	for _, pkg := range pkgs {
 		rec, ok := st[pkg.Name]
 		if !ok || DailyRunDue(rec.At, now, loc) {
@@ -83,13 +86,15 @@ func Due(st State, pkgs []Package, g Git, now time.Time, loc *time.Location) ([]
 		}
 		changed, err := st.Changed(g, pkg.Name)
 		if err != nil {
-			return nil, err
+			unreadable[pkg.Name] = err
+			due = append(due, pkg.Name)
+			continue
 		}
 		if Runs(pkg.Triggers, changed, false) {
 			due = append(due, pkg.Name)
 		}
 	}
-	return due, nil
+	return due, unreadable
 }
 
 // Files is the file interface the state file is read and written through.
