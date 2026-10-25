@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 // mangoTargets are the landing outcomes mango explores, in the order the
@@ -31,11 +34,20 @@ const defaultTrainFraction = 0.7
 
 // SplitByDate returns rows ordered by landed_at, cut so that train holds the
 // earliest int(len(rows)*trainFraction + 1e-9) of them and holdout the rest.
+// A fraction outside [0, 1] cuts at the nearer end of rows.
 func SplitByDate(rows []Row, trainFraction float64) (train, holdout []Row) {
 	ordered := make([]Row, len(rows))
 	copy(ordered, rows)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i]["landed_at"] < ordered[j]["landed_at"] })
 	k := int(float64(len(ordered))*trainFraction + 1e-9)
+	// An out-of-range fraction, or a NaN, puts the cut past a slice bound; the
+	// caller gets an end-of-rows split instead of a panic.
+	if k < 0 {
+		k = 0
+	}
+	if k > len(ordered) {
+		k = len(ordered)
+	}
 	return ordered[:k], ordered[k:]
 }
 
@@ -60,8 +72,8 @@ type Prepared struct {
 	Predictors []string
 	// Columns are the columns WriteSplit writes: Predictors then the target.
 	Columns []string
-	// TrainPositives and HoldoutPositives count the rows whose target cell is
-	// "1".
+	// TrainPositives and HoldoutPositives count the rows whose target cell
+	// reads positive.
 	TrainPositives, HoldoutPositives int
 	// LastPositiveAt is the latest landed_at among the positives, empty when
 	// there is none.
@@ -107,18 +119,29 @@ func Prepare(header []string, rows []Row, explainOnly []string, target string) P
 	}
 	// landed_at sorts as text because the extract writes ISO timestamps.
 	for _, r := range train {
-		if r[target] == "1" {
+		if positive(r[target]) {
 			p.TrainPositives++
 			p.LastPositiveAt = later(p.LastPositiveAt, r["landed_at"])
 		}
 	}
 	for _, r := range holdout {
-		if r[target] == "1" {
+		if positive(r[target]) {
 			p.HoldoutPositives++
 			p.LastPositiveAt = later(p.LastPositiveAt, r["landed_at"])
 		}
 	}
 	return p
+}
+
+// positive reads a target cell as the flag it is: the extract writes the three
+// targets as int(flag), so "1" is the ordinary positive, and a cell another
+// table wrote as a non-zero number or as a Python bool still counts.
+func positive(cell string) bool {
+	c := strings.TrimSpace(cell)
+	if f, err := strconv.ParseFloat(c, 64); err == nil {
+		return f != 0 && !math.IsNaN(f)
+	}
+	return strings.EqualFold(c, "true")
 }
 
 // later returns whichever of a and b is the later timestamp, treating "" as
