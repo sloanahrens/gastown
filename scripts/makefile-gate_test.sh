@@ -241,6 +241,8 @@ mkrig() {
   git -C "$dir" -c user.name=t -c user.email=t@example.invalid commit -q -m first
   local first
   first=$(git -C "$dir" rev-parse HEAD)
+  # A canonical checkout keeps origin/main at its pin; the pin-drift guard reads it.
+  git -C "$dir" update-ref refs/remotes/origin/main "$first"
   echo two >"$dir/second.txt"
   git -C "$dir" add second.txt
   git -C "$dir" -c user.name=t -c user.email=t@example.invalid commit -q -m second
@@ -266,7 +268,7 @@ fi
 printf 'fx %s\n' "0000000000000000000000000000000000000000" >"$seedtown/pins"
 if sout=$(seedmk polecat-seed-stage 2>&1); then
   fail "polecat-seed-stage stops on a pin the checkout does not hold" "exited 0: $sout"
-elif grep -q -F 'cannot stage rig fx at 0000000000000000000000000000000000000000' <<<"$sout"; then
+elif grep -q -F 'rig fx pin 000000000000 is not readable in its canonical checkout' <<<"$sout"; then
   pass "polecat-seed-stage stops on a pin the checkout does not hold, naming the rig and sha"
 else
   fail "polecat-seed-stage stops on a pin the checkout does not hold, naming the rig and sha" "$sout"
