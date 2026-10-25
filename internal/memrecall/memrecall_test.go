@@ -104,7 +104,14 @@ func TestParse(t *testing.T) {
 		wantScope: "rig",
 		verified:  time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC),
 	}, {
-		// An unknown first segment is not a type: the spec names four, and
+		name:      "legacy value takes a user type from the key",
+		key:       "gt.user.prefs",
+		value:     "Prefers table-driven tests.",
+		wantType:  "user",
+		wantBody:  "Prefers table-driven tests.",
+		wantScope: "rig",
+	}, {
+		// An unknown first segment is not a type: the format defines five, and
 		// anything else is general.
 		name:      "legacy value with an unknown type segment",
 		key:       "gt.housekeeping.tidy-the-kv",
@@ -172,6 +179,61 @@ func TestParse(t *testing.T) {
 				t.Errorf("Verified = %v, want %v", got.Verified, tc.verified)
 			}
 		})
+	}
+}
+
+// TestKeyType pins the types a key can name, including user, which the prime
+// index listed long before recall scoring recognized it (gt-fg4rh).
+func TestKeyType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"gt.user.prefs", "user"},
+		{"gt.feedback.absence-is-not-evidence", "feedback"},
+		{"gt.project.merge-freeze", "project"},
+		{"gt.reference.grafana-dashboard", "reference"},
+		{"gt.general.some-insight", "general"},
+		{"gt.housekeeping.tidy-the-kv", "general"},
+		{"gt.refinery-worktree", "general"},
+		{"memory.user.prefs", "user"},
+		{"memory.feedback.always-use-race-flag", "feedback"},
+		{"memory.refinery-worktree", "general"},
+		{"gt.", "general"},
+		{"memory.", "general"},
+		{"elsewhere.key", "general"},
+	}
+	for _, tc := range tests {
+		if got := KeyType(tc.key); got != tc.want {
+			t.Errorf("KeyType(%q) = %q, want %q", tc.key, got, tc.want)
+		}
+	}
+}
+
+// TestKeySlug pins that a typed key's slug excludes the type segment in either
+// namespace, so the type word does not also score as a key word (gt-fg4rh).
+func TestKeySlug(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"gt.user.prefs", "prefs"},
+		{"gt.feedback.absence-is-not-evidence", "absence-is-not-evidence"},
+		{"gt.housekeeping.tidy-the-kv", "housekeeping.tidy-the-kv"},
+		{"gt.refinery-worktree", "refinery-worktree"},
+		{"memory.user.prefs", "prefs"},
+		{"memory.feedback.always-use-race-flag", "always-use-race-flag"},
+		{"memory.refinery-worktree", "refinery-worktree"},
+		{"gt.", ""},
+		{"memory.", ""},
+		{"elsewhere.key", "elsewhere.key"},
+	}
+	for _, tc := range tests {
+		if got := KeySlug(tc.key); got != tc.want {
+			t.Errorf("KeySlug(%q) = %q, want %q", tc.key, got, tc.want)
+		}
 	}
 }
 

@@ -564,6 +564,14 @@ func TestParseMemoryKey(t *testing.T) {
 			wantKey:  "senior-go-dev",
 		},
 		{
+			// The index and recall scoring share one resolver, so this row is
+			// also pinned by memrecall's TestKeyType/TestKeySlug (gt-fg4rh).
+			name:     "typed user prefs key",
+			kvKey:    "gt.user.prefs",
+			wantType: "user",
+			wantKey:  "prefs",
+		},
+		{
 			name:     "typed reference key",
 			kvKey:    "gt.reference.grafana-dashboard",
 			wantType: "reference",
