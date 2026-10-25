@@ -72,15 +72,46 @@ func TestPublicDirsReadProcessEnv(t *testing.T) {
 	}
 }
 
+// TestIsEnabled_EnvOverride holds the rule the zsh hook mirrors (see
+// TestShellHookEnabledRule): disabled wins, then enabled, then the state file.
 func TestIsEnabled_EnvOverride(t *testing.T) {
 	t.Parallel()
-	// XDG_STATE_HOME points at an empty dir so the state file cannot decide.
-	dir := t.TempDir()
-	if testEnviron(map[string]string{"XDG_STATE_HOME": dir, "GASTOWN_DISABLED": "1"}).isEnabled() {
-		t.Error("isEnabled() should return false when GASTOWN_DISABLED=1")
+
+	enabled, disabled := true, false
+	tests := []struct {
+		name  string
+		vars  map[string]string
+		state *bool // state file at the XDG state path; nil leaves it absent
+		want  bool
+	}{
+		{"GASTOWN_DISABLED=1 disables over an enabled state file", map[string]string{"GASTOWN_DISABLED": "1"}, &enabled, false},
+		{"GASTOWN_DISABLED=1 disables with no state file", map[string]string{"GASTOWN_DISABLED": "1"}, nil, false},
+		{"GASTOWN_DISABLED=0 leaves the state file in charge", map[string]string{"GASTOWN_DISABLED": "0"}, &enabled, true},
+		{"GASTOWN_DISABLED=0 with no state file is disabled", map[string]string{"GASTOWN_DISABLED": "0"}, nil, false},
+		{"GASTOWN_ENABLED=1 enables over a disabled state file", map[string]string{"GASTOWN_ENABLED": "1"}, &disabled, true},
+		{"GASTOWN_ENABLED=1 enables with no state file", map[string]string{"GASTOWN_ENABLED": "1"}, nil, true},
+		{"GASTOWN_DISABLED=1 beats GASTOWN_ENABLED=1", map[string]string{"GASTOWN_DISABLED": "1", "GASTOWN_ENABLED": "1"}, &enabled, false},
+		{"state file at XDG_STATE_HOME decides", nil, &enabled, true},
 	}
-	if !testEnviron(map[string]string{"XDG_STATE_HOME": dir, "GASTOWN_ENABLED": "1"}).isEnabled() {
-		t.Error("isEnabled() should return true when GASTOWN_ENABLED=1")
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			vars := map[string]string{"XDG_STATE_HOME": t.TempDir()}
+			for k, v := range tt.vars {
+				vars[k] = v
+			}
+			e := testEnviron(vars)
+			if tt.state != nil {
+				if err := e.save(&State{Enabled: *tt.state}); err != nil {
+					t.Fatalf("writing state file: %v", err)
+				}
+			}
+			if got := e.isEnabled(); got != tt.want {
+				t.Errorf("isEnabled() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
