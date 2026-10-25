@@ -2,6 +2,8 @@ package metrics
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,7 +19,8 @@ const (
 	ageColumn   = "snap_age_min"
 )
 
-// Coverage says how much of the joined table the snapshots actually filled.
+// Coverage says how much of the joined table the snapshots actually filled,
+// and how many of the snapshots could not be indexed at all.
 type Coverage struct {
 	// Cells is the number of snap_ cells across the joined landings.
 	Cells int
@@ -25,6 +28,10 @@ type Coverage struct {
 	Filled int
 	// Pct is Filled as a percent of Cells, and 0 when there are no cells.
 	Pct float64
+	// Skipped is how many of the given snapshots had a ts that does not
+	// parse, so they neither matched a landing nor named a column. It is how
+	// a caller tells a snapshot log it could not read from an empty result.
+	Skipped int
 }
 
 // Join appends to every landing the snapshot in force when it landed: the
@@ -33,19 +40,21 @@ type Coverage struct {
 // placement becomes snap_place_<component>, and the lag becomes snap_age_min;
 // a landing with no snapshot in force keeps every snap_ cell empty.
 //
-// The output header is landingColumns in the extract's order, then every other
-// column the rows or the snapshots name, sorted, so it is the same for every
-// call with the same inputs. With no snapshot to join (none given, or none
-// with a ts that parses), the header is the input's and the rows pass through
-// unchanged.
-func Join(rows []Row, snaps []Record, maxAge time.Duration) (header []string, joined []Row, cov Coverage) {
+// The output header is columns in their order, then every other column the
+// rows or the snapshots name, sorted, so it is the same for every call with
+// the same inputs. With no snapshot to join (none given, or none with a ts
+// that parses), Join adds no column of its own and no cell changes, whatever
+// header the input carried.
+func Join(columns []string, rows []Row, snaps []Record, maxAge time.Duration) (header []string, joined []Row, cov Coverage) {
 	flat := flattenSnapshots(snaps)
-	header = joinHeader(rows, flat)
+	header = joinHeader(columns, rows, flat)
 	joined = make([]Row, len(rows))
 	for i, row := range rows {
 		joined[i] = joinedRow(row, header, flat, maxAge)
 	}
-	return header, joined, coverage(joined, header)
+	cov = coverage(joined, header)
+	cov.Skipped = len(snaps) - len(flat)
+	return header, joined, cov
 }
 
 // flatSnap is one snapshot as the cells it contributes, flattened once for
@@ -67,28 +76,44 @@ func flattenSnapshots(snaps []Record) []flatSnap {
 		if err != nil {
 			continue
 		}
-		cells := make(map[string]string, len(rec.Groups)+len(rec.Placement))
-		for group, cols := range rec.Groups {
-			for name, value := range cols {
-				cells[snapPrefix+group+"_"+name] = cell(value)
-			}
-		}
-		for component, place := range rec.Placement {
-			cells[placePrefix+component] = cell(place)
-		}
-		flat = append(flat, flatSnap{at: at, cells: cells})
+		flat = append(flat, flatSnap{at: at, cells: flattenCells(rec)})
 	}
 	sort.SliceStable(flat, func(i, j int) bool { return flat[i].at.Before(flat[j].at) })
 	return flat
 }
 
-// joinHeader lists the output's columns. Join takes no header, so a column the
-// rows name is the only record that the extract wrote it; it lands in the
-// sorted tail beside the snapshot columns rather than being lost.
-func joinHeader(rows []Row, flat []flatSnap) []string {
-	header := make([]string, 0, len(landingColumns)+16)
-	seen := make(map[string]bool, len(landingColumns)+16)
-	for _, name := range landingColumns {
+// flattenCells is one snapshot's cells keyed by output column. Two cells can
+// flatten to one name: a group named place reaches into the placement
+// namespace, and an underscore inside a group or column name is
+// indistinguishable from the separator. Placement is written first and the
+// groups in sorted order, each keeping a name an earlier one took, so every
+// run on one snapshot resolves the collision the same way.
+func flattenCells(rec Record) map[string]string {
+	cells := make(map[string]string, len(rec.Groups)+len(rec.Placement))
+	for component, place := range rec.Placement {
+		cells[placePrefix+component] = cell(place)
+	}
+	for _, group := range slices.Sorted(maps.Keys(rec.Groups)) {
+		cols := rec.Groups[group]
+		for _, name := range slices.Sorted(maps.Keys(cols)) {
+			key := snapPrefix + group + "_" + name
+			if _, taken := cells[key]; taken {
+				continue
+			}
+			cells[key] = cell(cols[name])
+		}
+	}
+	return cells
+}
+
+// joinHeader lists the output's columns: the input's own header in its order,
+// then every column the rows or the snapshots name that it does not. The tail
+// is sorted, and a column outside the header still travels because a Row is
+// the only record that the extract wrote it.
+func joinHeader(columns []string, rows []Row, flat []flatSnap) []string {
+	header := make([]string, 0, len(columns)+16)
+	seen := make(map[string]bool, len(columns)+16)
+	for _, name := range columns {
 		header = append(header, name)
 		seen[name] = true
 	}

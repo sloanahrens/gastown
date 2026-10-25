@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +51,7 @@ func TestJoinPicksTheLatestEarlierSnapshotWithinMaxAge(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, joined, _ := Join([]Row{landing(tc.at)}, tc.snaps, tc.maxAge)
+			_, joined, _ := Join(landingColumns, []Row{landing(tc.at)}, tc.snaps, tc.maxAge)
 			if got := joined[0]["snap_queue_open"]; got != tc.want {
 				t.Errorf("snap_queue_open = %q, want %q", got, tc.want)
 			}
@@ -76,7 +77,7 @@ func TestJoinFlattensNullGroupsNullValuesAndPlacement(t *testing.T) {
 			Groups: map[string]map[string]any{"money": {"spend": 4.5}},
 		},
 	}
-	header, joined, _ := Join([]Row{landing("2026-10-24T12:15:00Z"), landing("2026-10-24T13:00:00Z")}, snaps, joinMaxAge)
+	header, joined, _ := Join(landingColumns, []Row{landing("2026-10-24T12:15:00Z"), landing("2026-10-24T13:00:00Z")}, snaps, joinMaxAge)
 
 	wantTail := []string{
 		"snap_age_min", "snap_host_cpu_idle_pct", "snap_host_open",
@@ -123,11 +124,11 @@ func TestJoinFlattensNullGroupsNullValuesAndPlacement(t *testing.T) {
 func TestJoinWithNoSnapshotsWritesTheInputByteForByte(t *testing.T) {
 	t.Parallel()
 	want := landingsFixture(t)
-	_, rows, err := ReadLandings(bytes.NewReader(want))
+	header, rows, err := ReadLandings(bytes.NewReader(want))
 	if err != nil {
 		t.Fatalf("read the fixture: %v", err)
 	}
-	header, joined, cov := Join(rows, nil, joinMaxAge)
+	header, joined, cov := Join(header, rows, nil, joinMaxAge)
 	var buf bytes.Buffer
 	if err := WriteLandings(&buf, header, joined); err != nil {
 		t.Fatalf("write the join: %v", err)
@@ -140,12 +141,122 @@ func TestJoinWithNoSnapshotsWritesTheInputByteForByte(t *testing.T) {
 	}
 }
 
+func TestJoinKeepsTheHeaderItWasGiven(t *testing.T) {
+	t.Parallel()
+	input := []byte("rig,bead,notes\r\ngastown,gt-a,\"x,y\"\r\ngastown,gt-b,\r\n")
+	columns, rows, err := ReadLandings(bytes.NewReader(input))
+	if err != nil {
+		t.Fatalf("read the input: %v", err)
+	}
+	header, joined, cov := Join(columns, rows, nil, joinMaxAge)
+	if want := []string{"rig", "bead", "notes"}; !slices.Equal(header, want) {
+		t.Errorf("header = %v, want the input's %v", header, want)
+	}
+	var buf bytes.Buffer
+	if err := WriteLandings(&buf, header, joined); err != nil {
+		t.Fatalf("write the join: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), input) {
+		t.Errorf("joined bytes\n got: %q\nwant: %q", buf.String(), input)
+	}
+	if cov != (Coverage{}) {
+		t.Errorf("coverage = %+v, want the zero value with no snapshots", cov)
+	}
+
+	// A snapshot in force leaves the input's columns leading and joins the
+	// snapshot's to the sorted tail, whatever the input's order was.
+	header, _, _ = Join([]string{"rig", "notes"}, []Row{{"rig": "gastown", "notes": ""}},
+		[]Record{atQueue("2026-10-24T12:00:00Z", 2)}, joinMaxAge)
+	if want := []string{"rig", "notes", "snap_age_min", "snap_queue_open"}; !slices.Equal(header, want) {
+		t.Errorf("header = %v, want the input's columns then the snapshot's %v", header, want)
+	}
+}
+
+func TestJoinReportsSnapshotsItCouldNotIndex(t *testing.T) {
+	t.Parallel()
+	rows := []Row{landing("2026-10-24T12:10:00Z")}
+	unreadable := Record{V: Version, TS: "yesterday", Groups: map[string]map[string]any{"queue": {"open": 9}}}
+	readable := atQueue("2026-10-24T12:00:00Z", 2)
+	tests := []struct {
+		name  string
+		snaps []Record
+		open  string
+		want  Coverage
+	}{
+		{"no snapshots at all", nil, "", Coverage{}},
+		{"only an unreadable snapshot", []Record{unreadable}, "", Coverage{Skipped: 1}},
+		{"an unreadable snapshot beside a readable one", []Record{readable, unreadable}, "2", Coverage{Cells: 2, Filled: 2, Pct: 100, Skipped: 1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, joined, cov := Join(landingColumns, rows, tc.snaps, joinMaxAge)
+			if cov != tc.want {
+				t.Errorf("coverage = %+v, want %+v", cov, tc.want)
+			}
+			if got := joined[0]["snap_queue_open"]; got != tc.open {
+				t.Errorf("snap_queue_open = %q, want %q", got, tc.open)
+			}
+		})
+	}
+}
+
+func TestJoinResolvesColumnNameCollisions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		rec  Record
+		want map[string]string
+	}{
+		{
+			"a group named place does not take the placement namespace",
+			Record{V: Version, TS: "2026-10-24T12:00:00Z",
+				Groups:    map[string]map[string]any{"place": {"dolt": "from the group"}},
+				Placement: map[string]any{"dolt": "from placement"}},
+			map[string]string{"snap_place_dolt": "from placement"},
+		},
+		{
+			"an underscore in a group name collides with one in a column name and the group sorting first keeps the cell",
+			Record{V: Version, TS: "2026-10-24T12:00:00Z", Groups: map[string]map[string]any{
+				"host_a": {"b": "from host_a"},
+				"host":   {"a_b": "from host"},
+			}},
+			map[string]string{"snap_host_a_b": "from host"},
+		},
+		{
+			"a group named age with a column min feeds the column the lag owns and the lag keeps it",
+			Record{V: Version, TS: "2026-10-24T12:00:00Z", Groups: map[string]map[string]any{"age": {"min": 42}}},
+			map[string]string{"snap_age_min": "0"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, joined, _ := Join(landingColumns, []Row{landing("2026-10-24T12:00:00Z")}, []Record{tc.rec}, joinMaxAge)
+			for name, want := range tc.want {
+				if got := joined[0][name]; got != want {
+					t.Errorf("%s = %q, want %q", name, got, want)
+				}
+			}
+		})
+	}
+
+	// A row that already carries a snap_ cell loses it to the snapshot: the
+	// cell is Join's to write, so a second join replaces rather than keeps it.
+	row := landing("2026-10-24T12:10:00Z")
+	row["snap_queue_open"] = "stale"
+	_, joined, _ := Join(landingColumns, []Row{row}, []Record{atQueue("2026-10-24T12:00:00Z", 3)}, joinMaxAge)
+	if got := joined[0]["snap_queue_open"]; got != "3" {
+		t.Errorf("snap_queue_open = %q, want the snapshot's 3 over the row's stale cell", got)
+	}
+}
+
 func TestJoinCarriesColumnsItDoesNotKnow(t *testing.T) {
 	t.Parallel()
 	row := landing("2026-10-24T13:00:00Z")
 	row["future_column"] = "kept"
 	row["another"] = "also kept"
-	header, joined, _ := Join([]Row{row}, []Record{atQueue("2026-10-24T12:00:00Z", 1)}, joinMaxAge)
+	header, joined, _ := Join(landingColumns, []Row{row}, []Record{atQueue("2026-10-24T12:00:00Z", 1)}, joinMaxAge)
 	wantTail := []string{"another", "future_column", "snap_age_min", "snap_queue_open"}
 	if got := header[len(landingColumns):]; strings.Join(got, ",") != strings.Join(wantTail, ",") {
 		t.Errorf("header tail = %v, want the unknown columns then the snapshot's, sorted", got)
@@ -158,7 +269,7 @@ func TestJoinCarriesColumnsItDoesNotKnow(t *testing.T) {
 func TestJoinLeavesSnapCellsEmptyWithoutALandingTime(t *testing.T) {
 	t.Parallel()
 	for _, at := range []string{"", "not-a-time", "2026-10-24 13:00:00"} {
-		_, joined, cov := Join([]Row{landing(at)}, []Record{atQueue("2026-10-24T12:00:00Z", 1)}, joinMaxAge)
+		_, joined, cov := Join(landingColumns, []Row{landing(at)}, []Record{atQueue("2026-10-24T12:00:00Z", 1)}, joinMaxAge)
 		if got := joined[0]["snap_queue_open"]; got != "" {
 			t.Errorf("landed_at %q: snap_queue_open = %q, want empty", at, got)
 		}
@@ -190,7 +301,7 @@ func TestJoinCoverageCountsTheSnapshotCellsItFilled(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, _, cov := Join(tc.rows, snaps, joinMaxAge)
+			_, _, cov := Join(landingColumns, tc.rows, snaps, joinMaxAge)
 			if cov != tc.want {
 				t.Errorf("coverage = %+v, want %+v", cov, tc.want)
 			}
@@ -206,7 +317,7 @@ func TestJoinRendersSnapshotValuesAsCells(t *testing.T) {
 		"quiet":        true,
 		"names":        []any{"a", "b"},
 	}}}
-	_, joined, _ := Join([]Row{landing("2026-10-24T12:00:00Z")}, []Record{snap}, joinMaxAge)
+	_, joined, _ := Join(landingColumns, []Row{landing("2026-10-24T12:00:00Z")}, []Record{snap}, joinMaxAge)
 	want := map[string]string{
 		"snap_host_cpu_idle_pct": "41.5",
 		"snap_host_open":         "12",

@@ -115,7 +115,7 @@ func TestJoinPeaksWithNoPeaksFileLeavesTheJoinOutputByteForByte(t *testing.T) {
 	t.Parallel()
 	snaps := []Record{atQueue("2026-10-24T12:00:00Z", 4)}
 	rows := []Row{landing("2026-10-24T12:30:00Z"), beadLanding("gt-tj446")}
-	header, joined, _ := Join(rows, snaps, joinMaxAge)
+	header, joined, _ := Join(landingColumns, rows, snaps, joinMaxAge)
 	var want bytes.Buffer
 	if err := WriteLandings(&want, header, joined); err != nil {
 		t.Fatalf("write the join's output: %v", err)
