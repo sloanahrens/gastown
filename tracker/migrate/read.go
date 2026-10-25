@@ -7,13 +7,6 @@ import (
 	"strings"
 )
 
-// DoltDSN builds a connection string for a Dolt database served on addr
-// (host:port), with datetimes parsed as UTC times. The password stays out of
-// any error: callers pass the result straight to sql.Open.
-func DoltDSN(user, password, addr, database string) string {
-	return fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true&loc=UTC&charset=utf8mb4", user, password, addr, database)
-}
-
 // tablesPresent lists the tables of the connected database.
 func tablesPresent(ctx context.Context, db *sql.DB) (map[string]bool, error) {
 	rows, err := db.QueryContext(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()")

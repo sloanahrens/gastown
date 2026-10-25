@@ -5,6 +5,7 @@ package migrate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -167,8 +168,9 @@ func TestAFailingRowRollsBackTheWholeImport(t *testing.T) {
 	t.Parallel()
 	pool := newPool(t)
 	ds := sample()
-	ds.Issues = append(ds.Issues, IssueRow{ID: "no-prefix-id-ok", Title: "t", Status: "open", Type: "task", CreatedAt: at(0), UpdatedAt: at(0)})
-	ds.Issues[len(ds.Issues)-1].ID = "weird" // no dash: the id/rig check refuses it
+	// An id with no rig prefix is refused by the schema, after the good rows
+	// above it were already copied inside the transaction.
+	ds.Issues = append(ds.Issues, IssueRow{ID: "weird", Title: "t", Status: "open", Type: "task", CreatedAt: at(0), UpdatedAt: at(0)})
 	if _, err := Import(context.Background(), pool, ds, Options{}); err == nil {
 		t.Fatal("an import with an unusable row succeeded")
 	}
@@ -212,5 +214,72 @@ func TestVerifyNamesWhatChangedAfterTheImport(t *testing.T) {
 				t.Errorf("Verify after %s = %v, want a problem naming %q", name, diff.Problems, tc.want)
 			}
 		})
+	}
+}
+
+func TestVerifyFailsLoudlyWhenAQueryFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool, ds := newPool(t), sample()
+	if _, err := Import(ctx, pool, ds, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "DROP TABLE tracker.custom_statuses"); err != nil {
+		t.Fatal(err)
+	}
+	ds.CustomStatuses = nil // a count of 0 from the error would equal this expected 0
+	if diff, err := Verify(ctx, pool, ds); err == nil {
+		t.Errorf("Verify = %v, nil; a failed count query must be an error, not a zero", diff.Problems)
+	}
+}
+
+func TestVerifyCountsEveryProblemEvenPastTheListLimit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool := newPool(t)
+	ds := &Dataset{}
+	for i := 0; i < 3*problemLimit; i++ {
+		ds.Issues = append(ds.Issues, IssueRow{ID: fmt.Sprintf("gt-%03d", i), Title: "t", Status: "open", Type: "task", CreatedAt: at(0), UpdatedAt: at(0)})
+	}
+	if _, err := Import(ctx, pool, ds, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE tracker.issues SET title = title || '!'"); err != nil {
+		t.Fatal(err)
+	}
+	diff, err := Verify(ctx, pool, ds)
+	if err != nil || diff.Total != len(ds.Issues) {
+		t.Fatalf("Verify total = %d, %v; want %d (every changed issue counted)", diff.Total, err, len(ds.Issues))
+	}
+	if len(diff.Problems) > problemLimit+1 {
+		t.Errorf("listed %d problems, want at most %d plus one summary line", len(diff.Problems), problemLimit)
+	}
+	if !strings.Contains(diff.Problems[len(diff.Problems)-1], "in all") {
+		t.Errorf("last line %q should say how many there are in all", diff.Problems[len(diff.Problems)-1])
+	}
+}
+
+func TestImportRefusesAndRollsBackWhenItsCopyDoesNotMatch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool, ds := newPool(t), sample()
+	// A trigger that alters titles as they are copied makes the copy differ
+	// from the dataset: Import must notice before it commits.
+	for _, q := range []string{
+		"CREATE FUNCTION tracker.mangle() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.title := NEW.title || '?'; RETURN NEW; END $$",
+		"CREATE TRIGGER mangle BEFORE INSERT ON tracker.issues FOR EACH ROW EXECUTE FUNCTION tracker.mangle()",
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := Import(ctx, pool, ds, Options{})
+	var ve *VerifyError
+	if !errors.As(err, &ve) || ve.Diff.Total == 0 {
+		t.Fatalf("Import = %v, want a *VerifyError listing the differences", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM tracker.issues").Scan(&n); err != nil || n != 0 {
+		t.Errorf("issues after a mismatching import = %d, %v; want 0, nothing committed", n, err)
 	}
 }

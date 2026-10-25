@@ -28,6 +28,14 @@ type Report struct {
 	Skipped map[string]int
 }
 
+// VerifyError is returned by Import when the written data does not match the
+// dataset. Nothing was committed.
+type VerifyError struct{ Diff Diff }
+
+func (e *VerifyError) Error() string {
+	return fmt.Sprintf("migrate: the import does not match Dolt (%d difference(s)); nothing was committed", e.Diff.Total)
+}
+
 func newReport() Report { return Report{Written: map[string]int{}, Skipped: map[string]int{}} }
 
 // Import writes ds into the tracker in one transaction: all of it or none.
@@ -43,6 +51,15 @@ func Import(ctx context.Context, pool *pgxpool.Pool, ds *Dataset, opt Options) (
 	if err := importAll(ctx, tx, ds, opt, &rep); err != nil {
 		return Report{}, err
 	}
+	// Prove the copy before committing: a mismatch rolls everything back, so
+	// the tracker never holds an import that does not match Dolt.
+	diff, err := Verify(ctx, tx, ds)
+	if err != nil {
+		return Report{}, err
+	}
+	if !diff.Equal() {
+		return Report{}, &VerifyError{Diff: diff}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Report{}, fmt.Errorf("migrate: commit: %w", err)
 	}
@@ -55,6 +72,11 @@ func importAll(ctx context.Context, tx pgx.Tx, ds *Dataset, opt Options, rep *Re
 	for i, is := range ds.Issues {
 		ids[i] = is.ID
 		have[is.ID] = true
+	}
+	// Writers of tracker.issues wait here until this transaction ends, so the
+	// existence check below cannot be overtaken by a concurrent import.
+	if _, err := tx.Exec(ctx, "LOCK TABLE tracker.issues IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+		return fmt.Errorf("migrate: lock issues: %w", err)
 	}
 	var existing int
 	if err := tx.QueryRow(ctx, "SELECT count(*) FROM tracker.issues WHERE id = ANY($1)", ids).Scan(&existing); err != nil {

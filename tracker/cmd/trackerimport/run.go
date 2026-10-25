@@ -33,6 +33,21 @@ func (r rigNames) Set(v string) error {
 // run is trackerimport. Both DSNs hold passwords, so they come only from the
 // environment and appear in no output or error.
 func run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {
+	return runWith(ctx, args, getenv, stdout, stderr, readDolt)
+}
+
+// readDolt opens the Dolt database named by dsn and reads it.
+func readDolt(ctx context.Context, dsn string) (*migrate.Dataset, error) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, errors.New("cannot use DOLT_DSN as a connection string")
+	}
+	defer db.Close()
+	return migrate.Read(ctx, db)
+}
+
+// runWith is run with the Dolt reader injected, so tests need no Dolt server.
+func runWith(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, read func(context.Context, string) (*migrate.Dataset, error)) error {
 	fs := flag.NewFlagSet("trackerimport", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dry := fs.Bool("dry-run", false, "read Dolt and report what would be imported; write nothing")
@@ -49,12 +64,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		return errors.New("TRACKER_DSN is not set (a Postgres connection string)")
 	}
 
-	db, err := sql.Open("mysql", doltDSN)
-	if err != nil {
-		return errors.New("cannot use DOLT_DSN as a connection string")
-	}
-	defer db.Close()
-	ds, err := migrate.Read(ctx, db)
+	ds, err := read(ctx, doltDSN)
 	if err != nil {
 		return err
 	}
@@ -77,11 +87,20 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	}
 	defer pool.Close()
 	rep, err := migrate.Import(ctx, pool, ds, migrate.Options{RigNames: names})
+	var ve *migrate.VerifyError
+	if errors.As(err, &ve) {
+		for _, p := range ve.Diff.Problems {
+			fmt.Fprintln(stdout, "DIFF:", p)
+		}
+		return err // nothing was committed
+	}
 	if err != nil {
 		return err
 	}
 	printCounts(stdout, "written", rep.Written)
 	printCounts(stdout, "skipped", rep.Skipped)
+	// The import verified itself before committing; check the committed
+	// state once more, from the pool, as the final word.
 	diff, err := migrate.Verify(ctx, pool, ds)
 	if err != nil {
 		return err
@@ -90,7 +109,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		for _, p := range diff.Problems {
 			fmt.Fprintln(stdout, "DIFF:", p)
 		}
-		return fmt.Errorf("verification found %d difference(s); the import is committed but does not match Dolt", len(diff.Problems))
+		return fmt.Errorf("the committed data differs from Dolt in %d place(s) although the import verified before commit; investigate before using it", diff.Total)
 	}
 	fmt.Fprintln(stdout, "verified: the tracker holds what Dolt held")
 	return nil
