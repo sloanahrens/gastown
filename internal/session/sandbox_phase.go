@@ -44,23 +44,22 @@ func newSandboxPhaseWatch() *sandboxPhaseWatch {
 // failing records that name's phase read as a terminal failure at now and
 // returns how long it has read that way, this reading included.
 //
-// since is when the gateway says the sandbox stopped being Ready. It seeds a
-// clock that this watch has not started yet, so the clock starts at the
-// failure rather than at the first reading to notice it, which can trail by
-// minutes (gt-j18af). A since older than that first reading is taken as the
-// start of the failure, so on the first reading a stale since can already
-// have spent the grace: the seat is dead at once. A zero or future since seeds
-// nothing and the clock starts at now. Once the watch has a start for name,
-// a later since never moves it.
+// since is when the gateway says the sandbox stopped being Ready, and the
+// gateway's word is taken as the start of the failure. The earlier of since
+// and the start already recorded wins, on any reading, so a clock that began
+// at a late first reading moves back to the gateway's time (gt-j18af). A
+// stale since is therefore trusted too: on the first reading it can already
+// have spent the grace, and the seat is dead at once. A zero or future since
+// is ignored; with no start recorded the clock starts at now.
 func (w *sandboxPhaseWatch) failing(name string, since, now time.Time) time.Duration {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	start, ok := w.since[name]
+	if !since.IsZero() && !since.After(now) && (!ok || since.Before(start)) {
+		start, ok = since, true
+	}
 	if !ok {
 		start = now
-		if !since.IsZero() && !since.After(now) {
-			start = since
-		}
 	}
 	if start.After(now) {
 		// A clock that reads backwards is never a failure duration, and the

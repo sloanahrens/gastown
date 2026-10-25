@@ -443,10 +443,10 @@ func (p unansweredProbe) GetSessionCreatedTime(string) (time.Time, error) {
 	return time.Time{}, p.err
 }
 
-// A transition time that arrives after the watch started the clock cannot move
-// the start earlier, so a stale Ready condition cannot skip the grace this
-// watch is measuring (gt-h4yci).
-func TestSandboxPhaseStaleTransitionTimeKeepsTheWatchStart(t *testing.T) {
+// A first reading with no transition time starts the clock at the reading; a
+// later transition time that predates it moves the clock back to the failure,
+// as gt-j18af requires (gt-h4yci).
+func TestSandboxPhaseLaterEarlierTransitionTimeMovesTheClock(t *testing.T) {
 	t.Parallel()
 	w := newSandboxPhaseWatch()
 	t0 := time.Unix(1760000000, 0)
@@ -454,8 +454,23 @@ func TestSandboxPhaseStaleTransitionTimeKeepsTheWatchStart(t *testing.T) {
 	if got := w.failing("gt-a", time.Time{}, t0); got != 0 {
 		t.Fatalf("first reading = %s, want 0", got)
 	}
-	if got := w.failing("gt-a", t0.Add(-time.Hour), t0.Add(time.Minute)); got != time.Minute {
-		t.Fatalf("reading with a stale transition time = %s, want the minute since the first reading", got)
+	if got := w.failing("gt-a", t0.Add(-time.Hour), t0.Add(time.Minute)); got != time.Hour+time.Minute {
+		t.Fatalf("reading with an earlier transition time = %s, want 1h1m0s from the transition", got)
+	}
+}
+
+// A transition time after the clock has started does not move it: the start
+// stays at the earliest failure time the watch has been given (gt-h4yci).
+func TestSandboxPhaseLaterTransitionTimeDoesNotMoveTheClock(t *testing.T) {
+	t.Parallel()
+	w := newSandboxPhaseWatch()
+	t0 := time.Unix(1760000000, 0)
+
+	if got := w.failing("gt-a", t0, t0); got != 0 {
+		t.Fatalf("first reading = %s, want 0", got)
+	}
+	if got := w.failing("gt-a", t0.Add(30*time.Second), t0.Add(time.Minute)); got != time.Minute {
+		t.Fatalf("reading with a later transition time = %s, want the minute from the first transition", got)
 	}
 }
 
