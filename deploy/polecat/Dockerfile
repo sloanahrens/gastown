@@ -44,6 +44,12 @@ ARG NODE_MAJOR=22
 ARG NODE_VERSION=22.23.4-1nodesource1
 # sha256 of https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key on 2026-10-22.
 ARG NODESOURCE_KEYFILE_DIGEST=b42e0321dabdc24e892115da705cf061167eac12a317f23d329862d0aa0a271d
+ARG PG_MAJOR=17
+ARG PG_VERSION=17.11-1.pgdg24.04+2
+# sha256 of https://www.postgresql.org/media/keys/ACCC4CF8.asc as served, computed on
+# the host on 2026-10-25 (primary key fingerprint B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8).
+# Update a digest only together with PG_VERSION.
+ARG PGDG_KEYFILE_DIGEST=0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76
 ARG CLAUDE_CODE_VERSION=2.1.309
 ARG GOLANGCI_LINT_VERSION=v2.13.2
 
@@ -67,6 +73,21 @@ RUN mkdir -p /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
+
+# PostgreSQL 17 server binaries from PGDG for the tracker's integration tests
+# (signing key checked by digest, package version pinned). The package would create
+# a default cluster at install, so cluster creation is switched off first: no
+# service runs and no data directory is made here. Tests make their own cluster in a temp dir.
+# PG_VERSION was taken from the noble-pgdg Packages index on 2026-10-25, on the host.
+RUN mkdir -p /etc/apt/keyrings /etc/postgresql-common \
+    && printf 'create_main_cluster = false\n' > /etc/postgresql-common/createcluster.conf \
+    && curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && echo "${PGDG_KEYFILE_DIGEST}  /tmp/pgdg.asc" | sha256sum -c - \
+    && gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg < /tmp/pgdg.asc && rm /tmp/pgdg.asc \
+    && echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+       > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update && apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}=${PG_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
 
 # Go from the official tarball, checked against the published digest.
 RUN ARCH=$(dpkg --print-architecture) \
