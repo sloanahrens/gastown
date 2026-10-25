@@ -135,16 +135,16 @@ RUN groupadd -g 10001 polecat \
     && useradd -M -u 10001 -g 10001 -d /sandbox -s /bin/bash polecat
 
 # Seeded Go caches (gt-ieuvf): a cold sandbox otherwise compiles every dependency
-# of the rigs' modules before a presubmit can run. The module cache is read-only
-# in a sandbox and the build cache writable, so they take the two paths
-# deploy/polecat/policy.yaml grants those modes.
+# of the rigs' modules before a presubmit can run. Both sit in /tmp, which
+# deploy/polecat/policy.yaml grants read_write, so a sandbox can also fill them.
 #
 # Both live outside /sandbox, which the workspace-init container copies into every
-# sandbox's volume: outside it, one image layer is shared and writes fall to the
+# sandbox's volume: outside it, one image layer is shared and a write falls to the
 # sandbox's own layer. /tmp gets no mount of its own (a live sandbox's
-# /proc/mounts), so the seeded build cache is there at runtime. The module cache
-# is read-only in a sandbox, so a module the seed lacks cannot be fetched there:
-# a build that needs one points GOMODCACHE elsewhere.
+# /proc/mounts), so the seeded caches are there at runtime. A branch that moved
+# its go.mod ahead of the image needs a module the seed lacks, and the writable
+# path is what fetches it: the new files land in the sandbox's layer, the seeded
+# ones stay as built and shared (gt-pvudz).
 #
 # The sources are the checkouts `make polecat-seed-stage` writes into
 # deploy/polecat/seed: gastown at the commit the image is built at, every other
@@ -164,7 +164,7 @@ RUN groupadd -g 10001 polecat \
 # build. The chmod for uid 10001 is in this same RUN, as one in a later layer
 # would copy every file again.
 ENV GOCACHE=/tmp/gocache \
-    GOMODCACHE=/usr/local/share/gomodcache
+    GOMODCACHE=/tmp/gomodcache
 RUN --mount=type=bind,source=seed,target=/seed \
     export PATH="/usr/local/go/bin:$PATH" GOFLAGS="-p=4 -modcacherw" \
     && mkdir -p "$GOCACHE" "$GOMODCACHE" \
