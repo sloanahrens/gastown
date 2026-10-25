@@ -549,40 +549,35 @@ func (h *Hub) pollOM() {
 	h.publishLocked()
 }
 
-// pollModels fills the header strip. The models come from the reader, but the
-// seats are the hub's own polecat list: the seats pane and the strip must count
-// the same polecats, and the one place both can read is here. A seat is held by
-// a polecat the dispatcher counts toward capacity (CountsTowardCapacity), so the
-// town's idle done polecats do not inflate the strip. Parked rigs are stood down
-// on purpose, so their polecats hold no seat either.
+// pollModels fills the header strip. The models come from the reader; the seat
+// counts come from the dispatcher's roster, the occupancy a sling is refused
+// against (gt-ly90n). The polecat list cannot count them: it carries polecats
+// queued, spawning or already released, which hold no working seat.
 func (h *Hub) pollModels() {
 	m := h.cfg.Models()
 	if m == nil {
 		return
 	}
+	// The roster is a bd-backed read, so it runs outside the lock and does not
+	// hold up a publish.
+	var roster SeatRoster
+	if h.cfg.SeatRoster != nil {
+		roster = h.cfg.SeatRoster()
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.state.Summary != nil {
-		live := 0
-		byAgent := map[string]int{}
-		for _, p := range h.polecats {
-			if p.CountsTowardCapacity && !p.RigParked {
-				live++
-				// A session with no recorded agent is counted the way the
-				// dispatcher's roster counts it: on the map's only seat.
-				agent := p.Agent
-				if agent == "" {
-					agent = m.Unrecorded
+	if h.cfg.SeatRoster != nil {
+		if roster.Read {
+			m.Seats = &ModelsSeats{Live: roster.Total, Cap: m.SeatCap}
+			for i := range m.SeatRows {
+				if m.SeatRows[i].Closed || m.SeatRows[i].Unknown {
+					continue
 				}
-				byAgent[agent]++
-			}
-		}
-		m.Seats = &ModelsSeats{Live: live, Cap: m.SeatCap}
-		for i := range m.SeatRows {
-			if !m.SeatRows[i].Closed {
-				n := byAgent[m.SeatRows[i].Agent]
+				n := roster.Live[m.SeatRows[i].Agent]
 				m.SeatRows[i].Live = &n
 			}
+		} else {
+			m.SeatsUnreadable = true
 		}
 	}
 	h.state.Models = m

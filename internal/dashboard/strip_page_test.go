@@ -263,8 +263,8 @@ func TestTheStripNeverDrawsAReadingNobodyMade(t *testing.T) {
 
 // The strip's seats are the open ones: a seat nothing may fill is left to the
 // models line, and a seat nobody could read says unknown rather than passing as
-// a seat nobody runs. A seat whose polecats have not been read shows no count
-// (gt-ywlei).
+// a seat nobody runs. A seat whose roster has not been read shows no count
+// (gt-ywlei, gt-ly90n).
 func TestTheStripNamesTheOpenSeatsAndTheRetiredSeatIsGone(t *testing.T) {
 	t.Parallel()
 
@@ -276,11 +276,23 @@ func TestTheStripNamesTheOpenSeatsAndTheRetiredSeatIsGone(t *testing.T) {
 		`if (sr.unknown) {`,
 		`"seats unknown"`,
 		`if (sr.closed) continue;`,
-		`(sr.live == null ? "–" : sr.live)`,
+		`const c = seatCount(sr, m);`,
 		`sr.key || "no config key recorded"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("seatFacts has no %q", want)
+		}
+	}
+	// A count the strip does not have is the number, or the dash for a read
+	// not yet made, or the question mark for one that failed.
+	count := pageFunc(t, "seatCount")
+	for _, want := range []string{
+		`if (sr.live != null) return {text: String(sr.live), why: ""};`,
+		`if (m && m.seats_unreadable) return {text: "?", why: "the dispatcher's roster could not be read"};`,
+		`return {text: "–", why: "the dispatcher's roster has not been read yet"};`,
+	} {
+		if !strings.Contains(count, want) {
+			t.Errorf("seatCount has no %q", want)
 		}
 	}
 	// No seat read at all is not a town with no seats, and no seat open is a
@@ -292,6 +304,40 @@ func TestTheStripNamesTheOpenSeatsAndTheRetiredSeatIsGone(t *testing.T) {
 	} {
 		if !strings.Contains(strip, want) {
 			t.Errorf("renderStrip has no %q", want)
+		}
+	}
+}
+
+// A seat count the strip does not have says which way it is missing: "–" for a
+// roster read not yet made, "?" for one that failed, and the number once the
+// roster has been read, so the two missing counts never draw alike (gt-ly90n).
+func TestTheStripTellsAFailedSeatReadFromOneNotMade(t *testing.T) {
+	t.Parallel()
+
+	const seat = "deepseek-flash-sandbox-k8s"
+	unread := map[string]any{"agent": seat, "cap": 3, "state": "open", "key": "gastown." + seat}
+	read := map[string]any{"agent": seat, "cap": 3, "state": "open", "key": "gastown." + seat, "live": 3}
+	dom := newPageDOM(t)
+	for _, c := range []struct {
+		name   string
+		models map[string]any
+		cell   string
+		why    string
+	}{
+		{"not yet read", map[string]any{"seat_rows": []any{unread}}, "k8s-sbx –/3", "has not been read yet"},
+		{"read failed", map[string]any{"seat_rows": []any{unread}, "seats_unreadable": true}, "k8s-sbx ?/3", "could not be read"},
+		{"read", map[string]any{"seat_rows": []any{read}}, "k8s-sbx 3/3", ""},
+	} {
+		dom.call(t, "renderStrip", map[string]any{"models": c.models})
+		cell := dom.cellWithText(t, "strip", c.cell)
+		if c.why == "" {
+			if want := seat + " · gastown." + seat; cell.Title != want {
+				t.Errorf("%s: the seat carries title %q, want %q", c.name, cell.Title, want)
+			}
+			continue
+		}
+		if !strings.Contains(cell.Title, c.why) {
+			t.Errorf("%s: the seat carries title %q, want it to name why the count is missing (%q)", c.name, cell.Title, c.why)
 		}
 	}
 }

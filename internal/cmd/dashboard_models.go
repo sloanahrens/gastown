@@ -15,14 +15,15 @@ import (
 )
 
 // The header strip answers what the town is running on: the model the polecat
-// role resolves to, the pool's seats, and the model the reviewer runs. Each is
-// read from config the town already keeps — settings/config.json, and the
-// reviewer's own config — and re-read whole on every poll, so a model switched
-// in settings shows on the page within one. Nothing here writes, and nothing
-// here runs a command: a dashboard that changed what the town runs on would not
-// be a read of it. The models panel under the strip reads the same files and
-// two more — the daemon's patrol config and the town model table — to list the
-// seats and the model per role.
+// role resolves to, the pool's seats, and the model the reviewer runs. The
+// models are read from config the town already keeps — settings/config.json,
+// and the reviewer's own config — and re-read whole on every poll, so a model
+// switched in settings shows on the page within one. The seat counts are the
+// dispatcher's roster (dashboardSeatRoster), so the strip counts the occupancy
+// a sling is refused against. Nothing here writes: a dashboard that changed
+// what the town runs on would not be a read of it. The models panel under the
+// strip reads the same files and two more — the daemon's patrol config and the
+// town model table — to list the seats and the model per role.
 
 // modelsReader reads the strip's models.
 type modelsReader struct {
@@ -218,6 +219,15 @@ func loadDashPatrols(townRoot string) (*config.PatrolsConfig, error) {
 		return nil, err
 	}
 	return pc.Patrols, nil
+}
+
+// dashboardSeatRoster is the strip's seat count: the roster the spec dispatcher
+// counts, so the page reads the occupancy a sling is refused against, never
+// every polecat the inventory lists (gt-ly90n). A read that fails is no count
+// at all; poolLiveFor is one batched seat read, on a poll that runs only while
+// a page is open (gt-lj299).
+func dashboardSeatRoster(live poolShowLive) dashboard.SeatRoster {
+	return dashboard.SeatRoster{Live: live.live, Total: live.total, Read: live.ok}
 }
 
 // modelSeatRows is the panel's seat table: one row per entry of

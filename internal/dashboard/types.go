@@ -334,10 +334,14 @@ type Models struct {
 	// OM is the model the reviewer runs, shortened to the name a person uses
 	// for it, empty when the reviewer's config cannot be read or names none.
 	OM string `json:"om,omitempty"`
-	// Seats is the live polecat count against SeatCap. It is nil until the
-	// seats have been read once: a strip that has not read them says so
-	// instead of showing an empty town.
+	// Seats is the live polecat count against SeatCap, from the dispatcher's
+	// roster. It is nil until the seats have been read once: a strip that has
+	// not read them says so instead of showing an empty town.
 	Seats *ModelsSeats `json:"seats,omitempty"`
+	// SeatsUnreadable says the roster read failed on this poll: Seats and the
+	// rows' Live counts are nil for a reason, which the page says apart from a
+	// read it has not made yet.
+	SeatsUnreadable bool `json:"seats_unreadable,omitempty"`
 	// SeatRows is the models panel's seat table: every polecat seat, an open
 	// one with its agent, cap and live count and a closed one marked closed.
 	SeatRows []ModelSeat `json:"seat_rows,omitempty"`
@@ -379,8 +383,8 @@ type ModelSeat struct {
 	// Unknown is a seat map whose config could not be read: neither open nor
 	// closed, as far as the page can tell. It is a single row with no agent.
 	Unknown bool `json:"unknown,omitempty"`
-	// Live is the polecats holding the seat, filled by the hub from the same
-	// polecat list the seats pane counts; nil until that list has been read.
+	// Live is the live seats the agent holds, filled by the hub from the
+	// dispatcher's roster; nil until that read has succeeded.
 	Live *int `json:"live,omitempty"`
 	// Key is the config the seat was read from.
 	Key string `json:"key"`
@@ -411,6 +415,20 @@ type ModelRole struct {
 type ModelsSeats struct {
 	Live int `json:"live"`
 	Cap  int `json:"cap,omitempty"`
+}
+
+// SeatRoster is the pool occupancy the spec dispatcher counts: the live working
+// seats per agent and their total, which the header strip shows so its count is
+// the one a sling is refused against.
+type SeatRoster struct {
+	// Live is the number of live seats each agent holds.
+	Live map[string]int
+	// Total is the live seats across every agent, including any counted under
+	// config.UnknownSeatAgent, which fills no row.
+	Total int
+	// Read is false when the occupancy could not be read: the counts are then
+	// unknown, which is not the same as not yet read.
+	Read bool
 }
 
 // SkippedBead is a bead the dispatcher considered and did not sling, with the
@@ -764,6 +782,9 @@ type Config struct {
 	Attention func() ([]attention.Event, attention.Acks)
 	// Models reads the header strip's models from the configs the town keeps.
 	Models func() *Models
+	// SeatRoster reads the occupancy the spec dispatcher counts, for the
+	// strip's seat counts. Nil leaves them unread.
+	SeatRoster func() SeatRoster
 	// Queue reads the work queue lists; Bead reads one bead's text on request.
 	Queue func() *Queue
 	Bead  func(rig, id string) (*BeadDetail, error)

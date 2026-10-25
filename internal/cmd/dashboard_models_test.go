@@ -12,6 +12,48 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
+// The strip's seat count is the dispatcher's roster read over the same seat
+// picture, so the page cannot disagree with the occupancy a sling is refused
+// against: a 3-cap seat with three live polecats and two released parked seats
+// reads 3/3, never 5/3 (gt-ly90n).
+func TestTheHeaderSeatCountsAreTheDispatchersRoster(t *testing.T) {
+	t.Parallel()
+
+	const seat = "deepseek-flash-sandbox-k8s"
+	root := poolTestTown(t, `{"type":"town-settings","version":1,`+
+		`"agents":{"deepseek-flash-sandbox-k8s":{"command":"claude"}},`+
+		`"polecat_pool":{"seats":{"deepseek-flash-sandbox-k8s":{"cap":3}}}}`, "")
+	writeTestRigsConfig(t, root, "gastown")
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seatSession := func(name string) poolSession {
+		return poolSession{name: name, agent: seat, rig: "gastown", polecat: name}
+	}
+	sessions := []poolSession{
+		seatSession("a"), seatSession("b"), seatSession("c"),
+		// Two seats the town released: their polecats are parked, and a
+		// released seat holds no cap.
+		{name: "dead/gastown/d", agent: seat, rig: "gastown", polecat: "d", parkedStale: true},
+		{name: "dead/gastown/e", agent: seat, rig: "gastown", polecat: "e", parkedStale: true},
+	}
+	got := dashboardSeatRoster(poolLiveForWith(root, func(*config.PolecatPool) ([]poolSession, error) {
+		return sessions, nil
+	}))
+	if !got.Read {
+		t.Fatal("the strip could not read the roster")
+	}
+	want := specRosterFrom(sessions, ts)
+	if got.Live[seat] != want.Live[seat] || got.Live[seat] != 3 {
+		t.Errorf("the strip's %s count = %d, the dispatcher's roster = %d, want 3",
+			seat, got.Live[seat], want.Live[seat])
+	}
+	if got.Total != 3 {
+		t.Errorf("the strip's seat total = %d, want the roster's 3, not the inventory's 5", got.Total)
+	}
+}
+
 // The header strip names the model a reviewer runs, not the command that runs
 // it: a backend is an argv, and its raw command line says nothing about which
 // model an operator is looking at (gt-bj47s).

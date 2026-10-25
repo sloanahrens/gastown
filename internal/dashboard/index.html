@@ -448,9 +448,20 @@ function renderHealth(h) {
   $("healthline").textContent = h && h.line ? h.line : "no health report";
 }
 
-// seatFacts is the strip's seats: what each open seat runs and how full it is,
-// off the seat rows the hub fills from the same polecats the Work panel's seat
-// rows draw, so the two cannot disagree. A closed seat — nothing may fill it — is
+// seatCount is a seat's live count as the strip and the models panel print it:
+// the number the dispatcher's roster counts, "–" before that read is made,
+// and "?" when it failed, so a failed read is not drawn as one not yet made.
+// why names the missing count for the cell's hover.
+function seatCount(sr, m) {
+  if (sr.live != null) return {text: String(sr.live), why: ""};
+  if (m && m.seats_unreadable) return {text: "?", why: "the dispatcher's roster could not be read"};
+  return {text: "–", why: "the dispatcher's roster has not been read yet"};
+}
+
+// seatFacts is the strip's seats: what each open seat runs and how full it
+// is, off the seat rows the reader fills from the dispatcher's roster, so the
+// strip counts the seats a sling is refused against rather than every polecat
+// the inventory lists (gt-ly90n). A closed seat — nothing may fill it — is
 // left to the models line, and a seat whose config nobody could read says
 // unknown rather than passing as a seat nobody runs. No rows at all is a
 // settings read that has not come back, not a town with no seats: the reader
@@ -462,9 +473,10 @@ function seatFacts(m) {
     const key = sr.key || "no config key recorded";
     if (sr.unknown) { out.push({text: "seats unknown", title: "the seat map could not be read · " + key}); continue; }
     if (sr.closed) continue;
+    const c = seatCount(sr, m);
     out.push({
-      text: (sr.agent ? seatName(sr.agent) : "no agent") + " " + (sr.live == null ? "–" : sr.live) + "/" + sr.cap,
-      title: (sr.agent ? sr.agent + " · " : "") + key + (sr.live == null ? " · the polecats have not been read yet" : ""),
+      text: (sr.agent ? seatName(sr.agent) : "no agent") + " " + c.text + "/" + sr.cap,
+      title: (sr.agent ? sr.agent + " · " : "") + key + (c.why ? " · " + c.why : ""),
     });
   }
   return out;
@@ -473,10 +485,10 @@ function seatFacts(m) {
 // renderStrip is the page's one status strip, and the whole of its top: the
 // day's shape and what needs the operator as one line of facts, each drawn once
 // from the reader that owns it — the landings off the Landings pane's own
-// window, the seats off the polecats the Work panel's rows draw, the queue off
-// the ready read, the host and the install off the Machine pane's. A reading
-// nobody has made says so, in the strip's own dim: a strip that drew a zero it
-// had not read would answer the operator with a fact it invented.
+// window, the seats off the dispatcher's roster, the queue off the ready read,
+// the host and the install off the Machine pane's. A reading nobody has made
+// says so, in the strip's own dim: a strip that drew a zero it had not read
+// would answer the operator with a fact it invented.
 function renderStrip(s) {
   const box = $("strip");
   box.replaceChildren();
@@ -630,7 +642,10 @@ function renderModelsPanel(s) {
     tr.append(name);
     tr.append(el("td", sr.closed || sr.unknown ? "title" : "", sr.unknown ? "the seat map could not be read" : sr.state || ""));
     const open = !sr.closed && !sr.unknown;
-    tr.append(el("td", "n", open ? (sr.live != null ? sr.live : "–") + "/" + sr.cap : ""));
+    const c = seatCount(sr, m);
+    const count = el("td", "n", open ? c.text + "/" + sr.cap : "");
+    if (open && c.why) count.title = c.why;
+    tr.append(count);
     return tr;
   });
   const roleRows = roles.map(rr => {
