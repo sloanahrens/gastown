@@ -23,7 +23,7 @@ import (
 // returns api.ErrUnknownToken for a token it does not know, has revoked, or
 // has expired (the server answers 401 for it).
 type Authenticator interface {
-	ActorForToken(ctx context.Context, token string) (actor string, err error)
+	Identify(ctx context.Context, token string) (api.Identity, error)
 }
 
 // Health reports whether the database is usable: Ping that it answers,
@@ -150,7 +150,7 @@ func (s *Server) authenticated(next http.Handler) http.Handler {
 			writeAPIError(w, http.StatusUnauthorized, api.Invalid("a bearer token is required"))
 			return
 		}
-		actor, err := s.cfg.Auth.ActorForToken(r.Context(), token)
+		id, err := s.cfg.Auth.Identify(r.Context(), token)
 		if errors.Is(err, api.ErrUnknownToken) {
 			writeAPIError(w, http.StatusUnauthorized, api.Invalid("unknown or expired bearer token"))
 			return
@@ -159,7 +159,7 @@ func (s *Server) authenticated(next http.Handler) http.Handler {
 			writeError(w, err, s.cfg.Log)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(api.WithActor(r.Context(), actor)))
+		next.ServeHTTP(w, r.WithContext(api.WithIdentity(r.Context(), id)))
 	})
 }
 
@@ -212,4 +212,17 @@ func writeError(w http.ResponseWriter, err error, log Logger) {
 	}
 	log.Printf("internal error: %v", err)
 	writeAPIError(w, http.StatusServiceUnavailable, api.Unavailable("internal error; see the server log"))
+}
+
+// requireAdmin lets only an admin-scope token through to next. A seat token
+// gets a 403 naming the scope, not a 401: it is a valid token that may not do
+// this. A context with no scope (not authenticated) is refused too.
+func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if api.ScopeFrom(r.Context()) != api.ScopeAdmin {
+			writeAPIError(w, http.StatusForbidden, api.Forbidden("this needs an admin token"))
+			return
+		}
+		next(w, r)
+	}
 }

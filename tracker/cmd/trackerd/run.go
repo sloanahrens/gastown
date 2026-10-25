@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/steveyegge/gastown/tracker/api"
 	"github.com/steveyegge/gastown/tracker/server"
 	"github.com/steveyegge/gastown/tracker/store"
 )
@@ -34,12 +35,17 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	listen := fs.String("listen", defaultListen, "loopback address to serve on")
 	migrate := fs.Bool("migrate", false, "bring the schema up to date, then exit")
 	issueFor := fs.String("issue-token", "", "create a token for this actor, then exit (needs -token-file)")
+	scopeFlag := fs.String("scope", string(api.ScopeSeat), "scope of an issued token: seat, or admin for the daemon and operators")
 	tokenFile := fs.String("token-file", "", "file to write an issued token to, mode 0600, created exclusively")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if (*issueFor == "") != (*tokenFile == "") {
 		return errors.New("-issue-token and -token-file go together")
+	}
+	scope := api.Scope(*scopeFlag)
+	if !scope.Valid() {
+		return fmt.Errorf("-scope must be seat or admin, got %q", *scopeFlag)
 	}
 	if err := server.RequireLoopback(*listen); err != nil {
 		return err
@@ -68,7 +74,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		fmt.Fprintf(stdout, "schema at level %d\n", level)
 		return nil
 	case *issueFor != "":
-		return issueToken(ctx, pg, *issueFor, *tokenFile, stdout)
+		return issueToken(ctx, pg, *issueFor, scope, *tokenFile, stdout)
 	}
 
 	level, err := store.CurrentLevel(ctx, pool)
@@ -107,17 +113,17 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 
 // tokenIssuer is what issueToken needs of the store.
 type tokenIssuer interface {
-	IssueToken(ctx context.Context, actor string, expires *time.Time) (string, error)
+	IssueTokenScoped(ctx context.Context, actor string, scope api.Scope, expires *time.Time) (string, error)
 }
 
 // issueToken creates a token and writes it to path (0600, exclusive, so an
 // existing file is never overwritten). The token is never printed.
-func issueToken(ctx context.Context, pg tokenIssuer, actor, path string, stdout io.Writer) error {
+func issueToken(ctx context.Context, pg tokenIssuer, actor string, scope api.Scope, path string, stdout io.Writer) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: path is the operator's own flag
 	if err != nil {
 		return fmt.Errorf("token file: %w", err)
 	}
-	token, err := pg.IssueToken(ctx, actor, nil)
+	token, err := pg.IssueTokenScoped(ctx, actor, scope, nil)
 	if err == nil {
 		_, err = f.WriteString(token + "\n")
 	}
@@ -128,6 +134,6 @@ func issueToken(ctx context.Context, pg tokenIssuer, actor, path string, stdout 
 		_ = os.Remove(path)
 		return fmt.Errorf("issue token: %w", err)
 	}
-	fmt.Fprintf(stdout, "token for %s written to %s\n", actor, path)
+	fmt.Fprintf(stdout, "%s token for %s written to %s\n", scope, actor, path)
 	return nil
 }

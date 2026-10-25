@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Kind is the class of an API failure. The five kinds are the wire contract:
+// Kind is the class of an API failure. The six kinds are the wire contract:
 // clients map them to behavior (retry, give up, treat as a lost race), so
 // they are named in the design (section 5) and change only deliberately.
 type Kind string
@@ -19,6 +19,8 @@ const (
 	KindConflict Kind = "conflict"
 	// KindInvalid: the request is malformed or refused by a rule (a missing title, a bad id prefix).
 	KindInvalid Kind = "invalid"
+	// KindForbidden: the token is valid but its scope does not allow the verb (a seat token used for an admin route).
+	KindForbidden Kind = "forbidden"
 	// KindUnavailable: the service cannot answer now (database down, shutting down); retrying may help.
 	KindUnavailable Kind = "unavailable"
 )
@@ -49,6 +51,8 @@ func (e *Error) HTTPStatus() int {
 		return 409
 	case KindInvalid:
 		return 400
+	case KindForbidden:
+		return 403
 	case KindUnavailable:
 		return 503
 	}
@@ -61,6 +65,7 @@ var (
 	ErrGuardFailed = &Error{Kind: KindGuardFailed}
 	ErrConflict    = &Error{Kind: KindConflict}
 	ErrInvalid     = &Error{Kind: KindInvalid}
+	ErrForbidden   = &Error{Kind: KindForbidden}
 	ErrUnavailable = &Error{Kind: KindUnavailable}
 )
 
@@ -78,6 +83,11 @@ func Conflict(format string, args ...any) *Error {
 // Invalid is an invalid Error.
 func Invalid(format string, args ...any) *Error {
 	return &Error{Kind: KindInvalid, Message: fmt.Sprintf(format, args...)}
+}
+
+// Forbidden is a forbidden Error; msg says what scope the verb needs.
+func Forbidden(format string, args ...any) *Error {
+	return &Error{Kind: KindForbidden, Message: fmt.Sprintf(format, args...)}
 }
 
 // Unavailable is an unavailable Error.

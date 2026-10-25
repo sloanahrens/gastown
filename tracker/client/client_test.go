@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -64,7 +65,7 @@ func TestRequestsCarryTheTokenAndSchemaLevel(t *testing.T) {
 	if gotAuth != "Bearer trk_secret-token-value" {
 		t.Errorf("Authorization = %q, want the bearer token", gotAuth)
 	}
-	if gotSchema != "1" {
+	if gotSchema != strconv.Itoa(api.SchemaLevel) {
 		t.Errorf("%s = %q, want the api schema level", api.SchemaHeader, gotSchema)
 	}
 	if gotTag != "tick-7" {
