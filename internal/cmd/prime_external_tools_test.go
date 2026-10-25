@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // These tests run prime's external tools through primeTools with a fake
@@ -88,11 +89,21 @@ func (f *fakePrimeRunner) callLines() []string {
 }
 
 // newFakePrimeTools returns primeTools wired to f, a fake clock, and a buffer
-// that collects everything prime prints.
+// that collects everything prime prints. The kv read goes through the beads
+// seam in production; here it goes through the same fake runner, so a test
+// scripts the argv bd would get.
 func newFakePrimeTools(f *fakePrimeRunner) (primeTools, *clockwork.FakeClock, *bytes.Buffer) {
 	clk := clockwork.NewFakeClockAt(primeTestEpoch)
 	var out bytes.Buffer
-	return primeTools{run: f.run, clock: clk, out: &out}, clk, &out
+	p := primeTools{run: f.run, clock: clk, out: &out}
+	p.kv = func(workDir string) (map[string]string, error) {
+		stdout, _, err := p.command(workDir, "bd", "kv", "list", "--json")
+		if err != nil {
+			return nil, err
+		}
+		return beads.ParseKVListJSON(stdout.Bytes())
+	}
+	return p, clk, &out
 }
 
 // primeTestEpoch is where every fake clock in the prime tests starts, so a

@@ -1923,6 +1923,121 @@ func lastLineOfText(s string) string {
 	return s
 }
 
+// KVList returns the rig database's key-value store, values rendered as text.
+func (b *Beads) KVList() (map[string]string, error) {
+	out, err := b.run("kv", "list", "--json")
+	if err != nil {
+		return nil, err
+	}
+	return ParseKVListJSON(out)
+}
+
+// KVGet returns the value stored at key, or an error wrapping ErrNotFound when
+// the store has no such key. A key bd would read as a flag is refused before
+// it reaches argv.
+func (b *Beads) KVGet(key string) (string, error) {
+	if key == "" || strings.HasPrefix(key, "-") {
+		return "", fmt.Errorf("kv get: invalid key %q", key)
+	}
+	out, err := b.run("kv", "get", key, "--json")
+	if err != nil {
+		return "", err
+	}
+	return ParseKVGetJSON(out)
+}
+
+// The key prefixes that name a memory: gt.* and the legacy memory.*. The
+// memory index (internal/cmd) reads the same prefixes.
+const (
+	kvMemoryKeyPrefix       = "gt."
+	kvMemoryLegacyKeyPrefix = "memory."
+)
+
+// IsMemoryKey reports whether a kv key holds a memory.
+func IsMemoryKey(key string) bool {
+	return strings.HasPrefix(key, kvMemoryKeyPrefix) || strings.HasPrefix(key, kvMemoryLegacyKeyPrefix)
+}
+
+// ParseKVListJSON reads bd kv list's payload, machine envelope or the bare
+// --json object an older bd prints. A string value is kept as itself. A
+// non-string value is kept as its compact JSON text only under a memory key,
+// so bd's metadata keys do not leak into the store's view, and null is no
+// entry. An envelope with no data is an empty store.
+func ParseKVListJSON(out []byte) (map[string]string, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(kvPayload(out), &raw); err != nil {
+		return nil, fmt.Errorf("parsing kv list: %w", err)
+	}
+	kvs := make(map[string]string, len(raw))
+	for k, v := range raw {
+		var s *string
+		if err := json.Unmarshal(v, &s); err == nil {
+			if s != nil {
+				kvs[k] = *s
+			}
+			continue
+		}
+		if !IsMemoryKey(k) {
+			continue
+		}
+		if text, ok := kvValueText(v); ok {
+			kvs[k] = text
+		}
+	}
+	return kvs, nil
+}
+
+// ParseKVGetJSON reads bd kv get's payload, machine envelope or the bare
+// --json object, and answers ErrNotFound when bd reported found=false.
+func ParseKVGetJSON(out []byte) (string, error) {
+	var kv struct {
+		Found bool            `json:"found"`
+		Key   string          `json:"key"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := json.Unmarshal(kvPayload(out), &kv); err != nil {
+		return "", fmt.Errorf("parsing kv get: %w", err)
+	}
+	if !kv.Found {
+		return "", fmt.Errorf("bd kv get %s: %w", kv.Key, ErrNotFound)
+	}
+	s, _ := kvValueText(kv.Value)
+	return s, nil
+}
+
+// kvPayload is the data of bd's machine envelope, or out when out is the bare
+// payload bd printed before machine mode. run unwraps the envelope already;
+// the parsers repeat it so a caller may hand them either form. An envelope
+// with no data is null, never the envelope itself: parsed as a map, its own
+// fields would read as entries.
+func kvPayload(out []byte) []byte {
+	env, ok, err := decodeMachineEnvelope(out, "bd")
+	if err != nil || !ok {
+		return out
+	}
+	if len(env.Data) == 0 {
+		return []byte("null")
+	}
+	return env.Data
+}
+
+// kvValueText renders one kv value as text: a string as itself, any other
+// non-null JSON value as its compact JSON text, and null as not an entry.
+func kvValueText(raw json.RawMessage) (string, bool) {
+	var s *string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if s == nil {
+			return "", false
+		}
+		return *s, true
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return "", false
+	}
+	return compact.String(), true
+}
+
 // wrapError wraps bd errors with context.
 // ZFC: Avoid parsing stderr to make decisions. Transport errors to agents instead.
 // Exceptions: ErrNotInstalled (exec.ErrNotFound), ErrGuardNotHeld (bd's

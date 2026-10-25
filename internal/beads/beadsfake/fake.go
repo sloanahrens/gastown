@@ -62,6 +62,7 @@ type Fake struct {
 
 	// The maintenance surface (admin.go).
 	config   map[string]string
+	kv       map[string]string
 	sql      func(query string) ([][]string, error)
 	sqlLog   []string
 	inits    []beads.InitOptions

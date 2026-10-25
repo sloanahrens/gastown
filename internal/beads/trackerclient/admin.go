@@ -2,6 +2,8 @@ package trackerclient
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -28,6 +30,20 @@ func (c *Client) ConfigGet(key string) (string, error) {
 // ConfigSet sets a configuration key.
 func (c *Client) ConfigSet(key, value string) error {
 	return mapErr(c.tc.ConfigSet(ctx(), c.configKey(key), value))
+}
+
+// errTrackerKV is the answer for the key-value store: the tracker keeps none
+// yet (task B4 of docs/plans/2026-10-25-town-tracker-plan.md). It is an error,
+// not an empty store, so a rig on the tracker cannot read as having no
+// memories without anyone being told.
+var errTrackerKV = errors.New("tracker: the key-value store is not built yet (plan task B4)")
+
+// KVList is not built on the tracker yet.
+func (c *Client) KVList() (map[string]string, error) { return nil, errTrackerKV }
+
+// KVGet is not built on the tracker yet.
+func (c *Client) KVGet(key string) (string, error) {
+	return "", fmt.Errorf("kv get %s: %w", key, errTrackerKV)
 }
 
 // CountIssues counts the rig's durable issues, closed ones included and wisps

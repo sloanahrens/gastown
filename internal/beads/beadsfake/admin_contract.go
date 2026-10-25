@@ -2,6 +2,7 @@ package beadsfake
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,7 @@ var adminCases = []struct {
 	run  func(t *testing.T, s *adminScope)
 }{
 	{"config", adminConfig},
+	{"kv store", adminKV},
 	{"counts and stats", adminCounts},
 	{"wisp list", adminWispList},
 	{"wisp gc candidates", adminWispGCCandidates},
@@ -103,6 +105,31 @@ func adminConfig(t *testing.T, s *adminScope) {
 	mustDo(t, "ConfigSet again", s.ConfigSet("types.custom", "agent"))
 	if v, err := s.ConfigGet("types.custom"); err != nil || v != "agent" {
 		t.Errorf("ConfigGet after overwrite = %q, %v", v, err)
+	}
+}
+
+// adminKV pins the kv store's two answers against each other: every key KVList
+// reports is a key KVGet finds with the same value, and a key the store does
+// not hold is ErrNotFound rather than an empty value a caller cannot tell from
+// a stored "". The databases this runs on hold no memories yet, so the list
+// loop pins the read pair without seeding a store Admin cannot write.
+func adminKV(t *testing.T, s *adminScope) {
+	all, err := s.KVList()
+	if err != nil {
+		t.Fatalf("KVList: %v", err)
+	}
+	for k, want := range all {
+		got, err := s.KVGet(k)
+		if err != nil {
+			t.Errorf("KVGet(%q), listed by KVList: %v", k, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("KVGet(%q) = %q, KVList says %q", k, got, want)
+		}
+	}
+	if _, err := s.KVGet("kv.contract_probe"); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("KVGet(unset) = %v, want beads.ErrNotFound", err)
 	}
 }
 
