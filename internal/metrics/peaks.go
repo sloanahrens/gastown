@@ -48,22 +48,24 @@ type Peak struct {
 // A .gz sibling holds the sampler's rotated older rows, so one that cannot be
 // read or decompressed costs those rows only and the join still runs. The skip
 // is reported on the process log with the file and its error, so a damaged
-// sibling is not mistaken for beads with no rows. A read error on the plain file
-// is returned: that is the file the sampler writes, so its loss is not one the
-// join can carry past.
+// sibling is not mistaken for beads with no rows, and every skipped file is
+// returned by name so the analysis receipt can name the loss on its own output.
+// A read error on the plain file is returned: that is the file the sampler
+// writes, so its loss is not one the join can carry past.
 //
 // A line that is not a JSON object is skipped, as is a row with no bead: the
 // sampler appends while this reads, so the last line may be partial, and a row
 // with no bead names no landing. Unknown keys are ignored.
-func ReadPeaks(env Env) ([]Peak, error) {
+func ReadPeaks(env Env) ([]Peak, []string, error) {
 	return readPeaks(env, log.Printf)
 }
 
 // readPeaks is ReadPeaks taking the report's sink, so a test sees a skip without
 // the process log.
-func readPeaks(env Env, reportf func(format string, args ...any)) ([]Peak, error) {
+func readPeaks(env Env, reportf func(format string, args ...any)) ([]Peak, []string, error) {
 	dir := filepath.Join(env.Town, ".runtime", "metrics", "resources")
 	var peaks []Peak
+	var skipped []string
 	for _, name := range []string{peaksFile + ".gz", peaksFile} {
 		compressed := filepath.Ext(name) == ".gz"
 		data, err := env.ReadFile(filepath.Join(dir, name))
@@ -75,14 +77,15 @@ func readPeaks(env Env, reportf func(format string, args ...any)) ([]Peak, error
 		}
 		if err != nil {
 			if !compressed {
-				return nil, fmt.Errorf("%s: %w", name, err)
+				return nil, nil, fmt.Errorf("%s: %w", name, err)
 			}
 			reportf("metrics: %s: %v; its rows are skipped, not the join", name, err)
+			skipped = append(skipped, name)
 			continue
 		}
 		peaks = append(peaks, parsePeaks(data)...)
 	}
-	return peaks, nil
+	return peaks, skipped, nil
 }
 
 // gunzip returns the decompressed bytes of a gzip file.

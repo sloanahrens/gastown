@@ -101,6 +101,39 @@ func TestMetricsAnalysePrintsTheReceiptOfWhatItDid(t *testing.T) {
 			t.Fatalf("receipt = %q, want it to end with %q", got, skipped)
 		}
 	})
+	t.Run("a legacy peak gz that is not gzip is named", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		day := filepath.Join(town, ".runtime", "metrics", "2026-10-01")
+		if err := os.MkdirAll(day, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(day, "landings.csv"), []byte("bead,rig,landed_at\r\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		resources := filepath.Join(town, ".runtime", "metrics", "resources")
+		if err := os.MkdirAll(resources, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(resources, "bead-peaks.jsonl.gz"), []byte("not gzip, just text"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		env := metrics.Env{
+			Town:     town,
+			Now:      func() time.Time { return analyseNow },
+			ReadFile: os.ReadFile,
+			Run:      func(context.Context, []string) ([]byte, error) { return nil, errors.New("mango must not run") },
+			RunEnv:   analyseRunEnv(t, day),
+		}
+		var out bytes.Buffer
+		if err := runMetricsAnalyseWith(context.Background(), &out, env, analysisPaths(town)); err != nil {
+			t.Fatalf("runMetricsAnalyseWith: %v", err)
+		}
+		const skipped = "analyse: 1 peak file(s) skipped, their rows are not joined: bead-peaks.jsonl.gz\n"
+		if got := out.String(); !strings.HasSuffix(got, skipped) {
+			t.Fatalf("receipt = %q, want it to end with %q", got, skipped)
+		}
+	})
 	t.Run("failed", func(t *testing.T) {
 		t.Parallel()
 		town := t.TempDir()

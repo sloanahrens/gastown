@@ -120,6 +120,9 @@ type AnalysisResult struct {
 	// SnapshotsSkipped is how many snapshots had a ts that does not parse, so
 	// the join could not place them.
 	SnapshotsSkipped int
+	// PeaksSkipped names the peak files the join could not read, so the receipt
+	// names the loss rather than leaving it to the report log.
+	PeaksSkipped []string
 }
 
 // RunAnalysis runs the daily analysis when its stamp is older than Every, and
@@ -186,7 +189,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	if err != nil {
 		return res, err
 	}
-	peaks, err := ReadPeaks(env)
+	peaks, peaksSkipped, err := ReadPeaks(env)
 	if err != nil {
 		return res, err
 	}
@@ -222,6 +225,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 		return res, err
 	}
 	res.Ran, res.Landings, res.Panel, res.SnapshotsSkipped = true, len(joined), panel, cov.Skipped
+	res.PeaksSkipped = peaksSkipped
 	return res, nil
 }
 
