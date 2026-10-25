@@ -58,7 +58,7 @@ func TestSameCommandExpandsHome(t *testing.T) {
 	if sameCommandIn(home, []string{"~/.local/bin/claude"}, []string{"/opt/claude"}) {
 		t.Error("different commands read as the same")
 	}
-	if sameCommandIn("", []string{"~/bin/claude"}, []string{"~/bin/claude"}) != true {
+	if !sameCommandIn("", []string{"~/bin/claude"}, []string{"~/bin/claude"}) {
 		t.Error("with no home, two spelled-out table paths stopped reading as the same command")
 	}
 }

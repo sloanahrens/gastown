@@ -162,6 +162,11 @@ func (t *Table) ProfileNames() string {
 // kept as it was read, so a field a newer gt writes is not dropped by this one;
 // a new file carries the version its reader expects (gt-jaagc).
 func (t *Table) Save(path string) error {
+	// A table no write may carry is not written, so the file never holds a table
+	// apply would refuse (gt-jaagc).
+	if err := t.Validate(); err != nil {
+		return err
+	}
 	doc := make(map[string]json.RawMessage, len(t.raw)+3)
 	for k, v := range t.raw {
 		doc[k] = v
