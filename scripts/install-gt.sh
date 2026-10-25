@@ -152,8 +152,22 @@ IMAGE_LOG="${INSTALL_GT_IMAGE_LOG:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-imag
 IMAGE_LOCK="${INSTALL_GT_IMAGE_LOCK:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-image.lock}}"
 IMAGE_ALARM="${INSTALL_GT_IMAGE_ALARM:-1200}"
 IMAGE_PERL="${INSTALL_GT_PERL:-perl}"
+# image_daemon_env KEY: the value of daemon.env.KEY in settings/config.json, the one
+# source the daemon gives its plugin runs (gt-jmd9n). Empty when the file, jq or the
+# key is absent, so the build then runs local-only, as it always has.
+image_daemon_env() {
+  local cfg="$TOWN_ROOT/settings/config.json"
+  [ -f "$cfg" ] && command -v jq >/dev/null 2>&1 || return 0
+  jq -r --arg k "$1" '.daemon.env[$k] // empty' "$cfg" 2>/dev/null || true
+}
 polecat_image_step() {
   local run="$1" logfile="$2" commit="$3"
+  local image_registry image_crane
+  image_registry="$(image_daemon_env POLECAT_IMAGE_REGISTRY)"
+  image_crane="$(image_daemon_env POLECAT_IMAGE_CRANE)"
+  if [ -z "$image_registry" ]; then
+    log "polecat image: no POLECAT_IMAGE_REGISTRY in settings/config.json daemon.env, so the build is local only and not published"
+  fi
   if [ -z "$run" ] || [ ! -f "$run" ]; then
     log "polecat image: no plugin at '${run:-?}', not rebuilt"
     return 0
@@ -177,7 +191,9 @@ polecat_image_step() {
   # run.sh gets this install's town root, gt and lock (POLECAT_IMAGE_TOWN_ROOT,
   # POLECAT_IMAGE_GT, POLECAT_IMAGE_LOCK; case 43 pins them), not whatever HOME
   # and PATH resolve to, so the image is built for the install that asked for it.
-  ( POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$GT" POLECAT_IMAGE_LOCK="$IMAGE_LOCK" \
+  ( if [ -n "$image_registry" ]; then export POLECAT_IMAGE_REGISTRY="$image_registry"; fi
+    if [ -n "$image_crane" ]; then export POLECAT_IMAGE_CRANE="$image_crane"; fi
+    POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$GT" POLECAT_IMAGE_LOCK="$IMAGE_LOCK" \
       "$IMAGE_PERL" -MPOSIX -MFile::Path=remove_tree -e '
         my ($secs, $lock, @cmd) = @ARGV;
         POSIX::setsid(); POSIX::close($_) for 3..255;

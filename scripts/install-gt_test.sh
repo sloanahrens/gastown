@@ -1195,6 +1195,41 @@ wait_for "$T/image-env.txt" || true
   && pass "image: run.sh gets the install's town root, gt binary and lock" \
   || fail "image: run.sh env: rc=$rc got='$(cat "$T/image-env.txt" 2>/dev/null)' want='$T $T/bin/gt $T/image.lock'"
 
+# --- Case 45: the build gets the registry settings the daemon gives its plugin,
+# read from settings/config.json daemon.env, so one build is also the publish
+# (gt-jmd9n). Without the file, the build runs local-only and says so. ---
+T=$(make_world); mkdir -p "$T/plugin" "$T/settings"
+cat > "$T/plugin/run.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "${POLECAT_IMAGE_REGISTRY:-unset} ${POLECAT_IMAGE_CRANE:-unset}" > "$T_WORLD/image-env2.txt"
+STUB
+chmod +x "$T/plugin/run.sh"
+cat > "$T/settings/config.json" <<'JSON'
+{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":"localhost:5001","POLECAT_IMAGE_CRANE":"/crane/bin/crane"}}}
+JSON
+install_stub "$T" "$(cat "$T/c1")"
+rc=$( export GT_TOWN_ROOT="$T"
+      IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
+wait_for "$T/image-env2.txt" || true
+[ "$rc" = "0" ] && [ "$(cat "$T/image-env2.txt" 2>/dev/null)" = "localhost:5001 /crane/bin/crane" ] \
+  && pass "image: run.sh gets the daemon's registry and crane settings from config.json" \
+  || fail "image: registry env: rc=$rc got='$(cat "$T/image-env2.txt" 2>/dev/null)'"
+
+T=$(make_world); mkdir -p "$T/plugin"
+cat > "$T/plugin/run.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "${POLECAT_IMAGE_REGISTRY:-unset} ${POLECAT_IMAGE_CRANE:-unset}" > "$T_WORLD/image-env2.txt"
+STUB
+chmod +x "$T/plugin/run.sh"
+install_stub "$T" "$(cat "$T/c1")"
+rc=$( export GT_TOWN_ROOT="$T"
+      IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
+wait_for "$T/image-env2.txt" || true
+[ "$rc" = "0" ] && grep -q "no POLECAT_IMAGE_REGISTRY in settings/config.json" "$T/run.out" \
+  && [ "$(cat "$T/image-env2.txt" 2>/dev/null)" = "unset unset" ] \
+  && pass "image: with no config the build runs local-only and says so" \
+  || fail "image: no-config case: rc=$rc got='$(cat "$T/image-env2.txt" 2>/dev/null)'"
+
 # --- Case 44: the alarm stops the whole image build and then removes the lock
 # run.sh took. The stub takes that lock and starts a child standing in for the
 # docker work, then waits on it. INSTALL_GT_IMAGE_ALARM is one second, so the
