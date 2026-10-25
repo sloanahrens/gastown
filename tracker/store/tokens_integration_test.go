@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/steveyegge/gastown/tracker/api"
 	"github.com/steveyegge/gastown/tracker/store/pgtest"
 )
@@ -79,15 +82,41 @@ func TestPingAndWriteProbeSucceedOnAPrimaryAndFailOnADeadPool(t *testing.T) {
 		t.Errorf("WriteProbe on a primary: %v", err)
 	}
 	var n int
-	if err := pool.QueryRow(ctx, "SELECT count(*) FROM tracker.config").Scan(&n); err != nil || n != 0 {
-		t.Errorf("WriteProbe left %d config rows (%v); it must leave nothing", n, err)
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM tracker.kv").Scan(&n); err != nil || n != 0 {
+		t.Errorf("WriteProbe left %d kv rows (%v); it must leave nothing", n, err)
 	}
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
 	if err := pg.Ping(cctx); err == nil {
-		t.Error("Ping with a cancelled context succeeded")
+		t.Error("Ping with a canceled context succeeded")
 	}
 	if err := pg.WriteProbe(cctx); err == nil {
-		t.Error("WriteProbe with a cancelled context succeeded")
+		t.Error("WriteProbe with a canceled context succeeded")
+	}
+}
+
+// A database that refuses writes must fail the write probe: that is what
+// /readyz exists to say. default_transaction_read_only models a read-only
+// primary; a standby fails the same way.
+func TestWriteProbeFailsOnAReadOnlyDatabase(t *testing.T) {
+	t.Parallel()
+	pool := pgtest.New(t, "migrated")
+	ctx := context.Background()
+	db := pool.Config().ConnConfig.Database
+	if _, err := pool.Exec(ctx, "ALTER DATABASE "+pgx.Identifier{db}.Sanitize()+" SET default_transaction_read_only = on"); err != nil {
+		t.Fatal(err)
+	}
+	// New connections pick the setting up; open a pool that has none yet.
+	ro, err := pgxpool.New(ctx, pool.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ro.Close)
+	pg := NewPostgres(ro)
+	if err := pg.Ping(ctx); err != nil {
+		t.Fatalf("Ping on a read-only database: %v (reads still work)", err)
+	}
+	if err := pg.WriteProbe(ctx); err == nil {
+		t.Error("WriteProbe succeeded on a read-only database; /readyz would report ready")
 	}
 }

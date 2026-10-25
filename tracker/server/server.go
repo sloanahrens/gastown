@@ -18,11 +18,9 @@ import (
 	"github.com/steveyegge/gastown/tracker/api"
 )
 
-// ErrUnknownToken is what an Authenticator returns for a token it does not
-// know, has revoked, or has expired. The server answers 401 for it.
-var ErrUnknownToken = api.ErrUnknownToken
-
-// Authenticator resolves a bearer token to the actor it was issued to.
+// Authenticator resolves a bearer token to the actor it was issued to, or
+// returns api.ErrUnknownToken for a token it does not know, has revoked, or
+// has expired (the server answers 401 for it).
 type Authenticator interface {
 	ActorForToken(ctx context.Context, token string) (actor string, err error)
 }
@@ -78,7 +76,7 @@ func New(cfg Config) *Server {
 	v1.HandleFunc("GET /v1/whoami", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"actor": ActorFrom(r.Context())})
 	})
-	s.mux.Handle("/v1/", s.schemaGate(s.authenticated(v1)))
+	s.mux.Handle("/v1/", s.authenticated(s.schemaGate(v1)))
 	return s
 }
 
@@ -88,19 +86,24 @@ func (s *Server) Handler() http.Handler { return s.mux }
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), readyTimeout)
 	defer cancel()
+	// The probe is unauthenticated, so its body says what failed and never
+	// why: the cause (a host, a user, a SQL state) goes to the log.
 	if err := s.cfg.Health.Ping(ctx); err != nil {
-		writeAPIError(w, http.StatusServiceUnavailable, api.Unavailable("database does not answer: %v", err))
+		s.cfg.Log.Printf("readyz: ping failed: %v", err)
+		writeAPIError(w, http.StatusServiceUnavailable, api.Unavailable("database does not answer"))
 		return
 	}
 	if err := s.cfg.Health.WriteProbe(ctx); err != nil {
-		writeAPIError(w, http.StatusServiceUnavailable, api.Unavailable("database does not accept writes: %v", err))
+		s.cfg.Log.Printf("readyz: write probe failed: %v", err)
+		writeAPIError(w, http.StatusServiceUnavailable, api.Unavailable("database does not accept writes"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "schema_level": s.cfg.SchemaLevel})
 }
 
 // schemaGate refuses a /v1 request whose schema level is missing, malformed
-// or different from the server's, before anything else looks at it.
+// or different from the server's, before any route sees it. It runs after
+// authentication, so only a caller with a token learns the server's level here.
 func (s *Server) schemaGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw := r.Header.Get(api.SchemaHeader)
@@ -140,7 +143,7 @@ func (s *Server) authenticated(next http.Handler) http.Handler {
 			return
 		}
 		actor, err := s.cfg.Auth.ActorForToken(r.Context(), token)
-		if errors.Is(err, ErrUnknownToken) {
+		if errors.Is(err, api.ErrUnknownToken) {
 			writeAPIError(w, http.StatusUnauthorized, api.Invalid("unknown or expired bearer token"))
 			return
 		}

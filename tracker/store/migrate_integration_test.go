@@ -201,6 +201,6 @@ func TestCurrentLevelDoesNotMistakeAFailureForNoSchema(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // every query on this context fails
 	if lvl, err := CurrentLevel(ctx, p); err == nil {
-		t.Errorf("CurrentLevel with a cancelled context = %d, nil; want an error, not level 0", lvl)
+		t.Errorf("CurrentLevel with a canceled context = %d, nil; want an error, not level 0", lvl)
 	}
 }

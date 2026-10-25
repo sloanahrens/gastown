@@ -30,7 +30,10 @@ func dsnEnv(t *testing.T) func(string) string {
 
 func do(t *testing.T, url string, hdr map[string]string) (int, string) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
@@ -38,8 +41,11 @@ func do(t *testing.T, url string, hdr map[string]string) (int, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return resp.StatusCode, string(b)
 }
 

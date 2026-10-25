@@ -105,9 +105,14 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	return nil
 }
 
+// tokenIssuer is what issueToken needs of the store.
+type tokenIssuer interface {
+	IssueToken(ctx context.Context, actor string, expires *time.Time) (string, error)
+}
+
 // issueToken creates a token and writes it to path (0600, exclusive, so an
 // existing file is never overwritten). The token is never printed.
-func issueToken(ctx context.Context, pg *store.Postgres, actor, path string, stdout io.Writer) error {
+func issueToken(ctx context.Context, pg tokenIssuer, actor, path string, stdout io.Writer) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: path is the operator's own flag
 	if err != nil {
 		return fmt.Errorf("token file: %w", err)

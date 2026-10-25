@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/tracker/api"
@@ -19,7 +21,7 @@ func (f fakeAuth) ActorForToken(_ context.Context, token string) (string, error)
 	if a, ok := f[token]; ok {
 		return a, nil
 	}
-	return "", ErrUnknownToken
+	return "", api.ErrUnknownToken
 }
 
 type fakeHealth struct{ ping, write error }
@@ -134,7 +136,7 @@ func TestUnauthorizedBodyIsATypedError(t *testing.T) {
 	}
 }
 
-func TestSchemaSkewIsRefusedBeforeAnythingElse(t *testing.T) {
+func TestSchemaSkewIsRefusedBeforeAnyRoute(t *testing.T) {
 	t.Parallel()
 	ts := newTestServer(t, fakeHealth{})
 	auth := "Bearer good-token"
@@ -194,5 +196,62 @@ func TestRequireLoopback(t *testing.T) {
 		if (err == nil) != ok {
 			t.Errorf("RequireLoopback(%q) = %v, want ok=%v", addr, err, ok)
 		}
+	}
+}
+
+type recLog struct {
+	mu   sync.Mutex
+	logs []string
+}
+
+func (r *recLog) Printf(format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logs = append(r.logs, fmt.Sprintf(format, args...))
+}
+
+func (r *recLog) all() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return strings.Join(r.logs, "\n")
+}
+
+// /readyz is unauthenticated: its body must not carry the database's own
+// error text (a host name, a user name), which belongs in the log.
+func TestReadyzBodyNeverCarriesTheDatabaseError(t *testing.T) {
+	t.Parallel()
+	for name, h := range map[string]fakeHealth{
+		"ping":  {ping: errors.New("dial tcp 10.1.2.3:5432: password authentication failed for user tracker_admin")},
+		"write": {write: errors.New("cannot execute INSERT in a read-only transaction (host db-internal)")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			log := &recLog{}
+			s := New(Config{Auth: fakeAuth{}, Health: h, SchemaLevel: 1, Log: log})
+			ts := httptest.NewServer(s.Handler())
+			t.Cleanup(ts.Close)
+			code, body := get(t, ts.URL+"/readyz", nil)
+			if code != 503 {
+				t.Fatalf("status = %d, want 503", code)
+			}
+			for _, leak := range []string{"10.1.2.3", "tracker_admin", "db-internal", "read-only", "password"} {
+				if strings.Contains(body, leak) {
+					t.Errorf("body %q leaks %q", body, leak)
+				}
+			}
+			if !strings.Contains(log.all(), "readyz") || (!strings.Contains(log.all(), "tracker_admin") && !strings.Contains(log.all(), "db-internal")) {
+				t.Errorf("the cause must be in the log, got %q", log.all())
+			}
+		})
+	}
+}
+
+// Skew is reported only to a caller who authenticated.
+func TestSchemaSkewIsNotDisclosedWithoutAToken(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t, fakeHealth{})
+	code, body := get(t, ts.URL+"/v1/whoami", map[string]string{api.SchemaHeader: "99"})
+	if code != 401 || strings.Contains(body, "skew") {
+		t.Errorf("unauthenticated skewed request = %d %q, want a plain 401 that says nothing of the schema level", code, body)
 	}
 }

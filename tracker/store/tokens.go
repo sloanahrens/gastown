@@ -86,17 +86,18 @@ func (p *Postgres) Ping(ctx context.Context) error {
 	return nil
 }
 
-// WriteProbe reports whether the database accepts writes: it takes a
-// transaction id, which a read-only standby refuses, and rolls back, so it
-// leaves nothing behind.
+// WriteProbe reports whether the database accepts writes: it inserts a row
+// into tracker.kv and rolls back, so it fails on a read-only database or a
+// standby, and on a schema that was never migrated, and leaves nothing
+// behind. (Taking a transaction id is not enough: a read-only transaction
+// still gets one.)
 func (p *Postgres) WriteProbe(ctx context.Context) error {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: write probe: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	var xid string
-	if err := tx.QueryRow(ctx, "SELECT pg_current_xact_id()::text").Scan(&xid); err != nil {
+	if _, err := tx.Exec(ctx, "INSERT INTO tracker.kv (key, value) VALUES ('_health_probe_' || gen_random_uuid()::text, 'probe')"); err != nil {
 		return fmt.Errorf("store: write probe: %w", err)
 	}
 	return nil
