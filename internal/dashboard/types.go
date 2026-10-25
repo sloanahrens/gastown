@@ -101,6 +101,11 @@ type Polecat struct {
 	// the hub's clock. The hub fills both.
 	Slung      *time.Time `json:"slung,omitempty"`
 	ElapsedSec int64      `json:"elapsed_sec,omitempty"`
+	// StateSince is when the seat entered the state State names, for the one
+	// state whose clock is not the hook: a bead submitted for landing entered
+	// queued at its last write, which is the wait the Landings panel ages
+	// (gt-iv7jf). Empty for every other state, whose clock is Slung.
+	StateSince *time.Time `json:"state_since,omitempty"`
 	// Hooked is the seat's own record of putting the bead on its hook: the
 	// agent bead's last write, which gt sling makes. The pane's On it falls
 	// back to it for a bead the feed has no dispatch line for (gt-jwmxo). A

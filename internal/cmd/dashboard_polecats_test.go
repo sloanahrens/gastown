@@ -354,6 +354,43 @@ func TestBuildDashPolecatsCarriesTheSeatsHookTime(t *testing.T) {
 	}
 }
 
+// A queued row is dated by its submit, not its hook: the bead's last write is
+// the label write gt done makes, which is the same field the Landings panel
+// ages the same bead's wait from, so the two readings cannot disagree
+// (gt-iv7jf). Every other state leaves the clock to the hook time the hub
+// fills.
+func TestBuildDashPolecatsDatesAQueuedRowByItsSubmit(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 25, 18, 0, 0, 0, time.UTC)
+	submitted := now.Add(-3 * time.Minute)
+	issue := &beads.Issue{ID: "gt-1", Title: "one", UpdatedAt: submitted.Format(time.RFC3339)}
+	got := buildDashPolecats(dashPolecatInputs{
+		Now: now, SessionsKnown: true, Ready: map[string]bool{"gt-1": true, "gt-3": true},
+		Seats: []dashSeat{
+			{Rig: "gastown", Name: "queued", HookedAt: now.Add(-15 * time.Minute),
+				Item: dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), Issue: issue},
+			{Rig: "gastown", Name: "working",
+				Item:  dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}),
+				Issue: &beads.Issue{ID: "gt-2", Title: "two", UpdatedAt: submitted.Format(time.RFC3339)}},
+			{Rig: "gastown", Name: "undated", HookedAt: now.Add(-15 * time.Minute),
+				Item: dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), Issue: &beads.Issue{ID: "gt-3", Title: "three"}},
+		},
+	})
+	byName := map[string]dashboard.Polecat{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+	if p := byName["queued"]; p.State != dashboard.StateQueued || p.StateSince == nil || !p.StateSince.Equal(submitted) {
+		t.Errorf("queued = %+v (want its state since the submit, %s)", p, submitted)
+	}
+	if p := byName["working"]; p.StateSince != nil {
+		t.Errorf("working = %+v (only the queued clock is not the hook time)", p)
+	}
+	if p := byName["undated"]; p.StateSince != nil {
+		t.Errorf("undated = %+v (a bead with no last write leaves the hook time)", p)
+	}
+}
+
 func TestBuildDashPolecatsCarriesTheRigParkedFlag(t *testing.T) {
 	t.Parallel()
 	got := buildDashPolecats(dashPolecatInputs{

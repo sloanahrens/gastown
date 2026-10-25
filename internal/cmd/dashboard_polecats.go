@@ -157,6 +157,22 @@ func dashPolecatState(item polecatInventoryItem, hasWork, ready bool, labels []s
 	return dashboard.StateIdle, ""
 }
 
+// dashPolecatStateSince is when a seat entered the state it is in, for the one
+// state the hook time does not date: a bead submitted for landing entered
+// queued at its last write, the label write gt done makes, which is the wait
+// the Landings panel ages from the same field. Every other state answers nil,
+// and the page reads the hub's hook time (gt-iv7jf).
+func dashPolecatStateSince(state string, issue *beads.Issue) *time.Time {
+	if state != dashboard.StateQueued || issue == nil {
+		return nil
+	}
+	at, err := time.Parse(time.RFC3339, issue.UpdatedAt)
+	if err != nil {
+		return nil
+	}
+	return &at
+}
+
 // buildDashPolecats joins the seats with their session, bead and record.
 func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 	type rec struct {
@@ -224,6 +240,9 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 			}
 		}
 		p.State, p.Reason = dashPolecatState(s.Item, hasWork, hasWork && in.Ready[p.Bead], labels)
+		if at := dashPolecatStateSince(p.State, s.Issue); at != nil {
+			p.StateSince = at
+		}
 		if !in.SessionsKnown && p.State == dashboard.StateStalled {
 			p.State, p.Reason = dashboard.StateUnknown, "tmux could not be read, so stalled cannot be told from working"
 		}
