@@ -114,10 +114,16 @@ RUN groupadd -g 10001 polecat \
     && useradd -M -u 10001 -g 10001 -d /sandbox -s /bin/bash polecat
 
 # Seeded Go caches (gt-ieuvf): a cold sandbox otherwise compiles every dependency
-# of the rigs' modules before a presubmit can run. They live OUTSIDE /sandbox: the
-# sandbox's workspace-init container copies this image's /sandbox into each
-# sandbox's volume, while a path outside it is one image layer every sandbox
-# shares (new entries go to the sandbox's own writable layer).
+# of the rigs' modules before a presubmit can run. The module cache is read-only
+# in a sandbox and the build cache writable, so they take the two paths
+# deploy/polecat/policy.yaml grants those modes.
+#
+# Both live outside /sandbox, which the workspace-init container copies into every
+# sandbox's volume: outside it, one image layer is shared and writes fall to the
+# sandbox's own layer. /tmp gets no mount of its own (a live sandbox's
+# /proc/mounts), so the seeded build cache is there at runtime. The read-only
+# module cache cannot take a module the seed lacks: point GOMODCACHE elsewhere
+# for that build.
 #
 # The sources are the pinned checkouts `make polecat-image` stages from
 # deploy/polecat/seed-pins into deploy/polecat/seed, bind-mounted for this one
@@ -127,8 +133,8 @@ RUN groupadd -g 10001 polecat \
 # publish. A failing vet or test compile is logged and skipped (a module may need
 # system headers the image lacks). The chmod for uid 10001 is in this same RUN,
 # as one in a later layer would copy every file again.
-ENV GOCACHE=/opt/gocache \
-    GOMODCACHE=/opt/gomod
+ENV GOCACHE=/tmp/gocache \
+    GOMODCACHE=/usr/local/share/gomodcache
 RUN --mount=type=bind,source=seed,target=/seed \
     export PATH="/usr/local/go/bin:$PATH" GOFLAGS="-p=4 -modcacherw" \
     && mkdir -p "$GOCACHE" "$GOMODCACHE" \

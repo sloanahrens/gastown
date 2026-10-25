@@ -36,7 +36,11 @@ func dockerfileInstructions(t *testing.T) []string {
 // sandbox's workspace-init container copies the image's /sandbox into each
 // sandbox's volume, so a seed under it would cost gigabytes of copy and disk per
 // sandbox, while a path outside is one shared image layer.
-func TestPolecatDockerfileSeedsGoCachesOutsideTheWorkspace(t *testing.T) {
+//
+// Each path is also one the sandbox policy grants (deploy/polecat/policy.yaml,
+// hq-gi754): GOMODCACHE under /usr, GOCACHE in /tmp, neither under the denied
+// /opt.
+func TestPolecatImageSeedSetsCachesOutsideTheWorkspace(t *testing.T) {
 	t.Parallel()
 	ins := dockerfileInstructions(t)
 
@@ -50,12 +54,22 @@ func TestPolecatDockerfileSeedsGoCachesOutsideTheWorkspace(t *testing.T) {
 			}
 		}
 	}
-	for _, k := range []string{"GOCACHE", "GOMODCACHE"} {
-		v := env[k]
-		if v == "" {
-			t.Errorf("the image sets no %s", k)
-		} else if v == "/sandbox" || strings.HasPrefix(v, "/sandbox/") {
-			t.Errorf("%s = %s is under /sandbox, which the sandbox copies into every volume; keep the seed outside it", k, v)
+	for _, want := range []struct{ key, path string }{
+		{"GOMODCACHE", "/usr/local/share/gomodcache"},
+		{"GOCACHE", "/tmp/gocache"},
+	} {
+		got := env[want.key]
+		if got != want.path {
+			t.Errorf("%s = %q, want %q: the seed must sit on a path the sandbox policy grants and outside /sandbox", want.key, got, want.path)
+		}
+		if got == "/sandbox" || strings.HasPrefix(got, "/sandbox/") {
+			t.Errorf("%s = %s is under /sandbox, which the sandbox copies into every volume; keep the seed outside it", want.key, got)
+		}
+	}
+	// The sandbox policy denies /opt (hq-gi754): no instruction may reach into it.
+	for _, in := range ins {
+		if strings.Contains(in, "/opt/") {
+			t.Errorf("instruction uses /opt, which the sandbox policy denies: %q", in)
 		}
 	}
 
@@ -91,10 +105,21 @@ func TestPolecatDockerfileSeedsGoCachesOutsideTheWorkspace(t *testing.T) {
 		}
 	}
 	// The chmod is in the seed's own instruction (checked above); a later RUN
-	// that re-chmods the cache would copy every file into another layer.
+	// that touches a cache would copy every file into another layer.
+	touches := []string{"$GOCACHE", "$GOMODCACHE"}
+	for _, key := range []string{"GOCACHE", "GOMODCACHE"} {
+		if v := env[key]; v != "" {
+			touches = append(touches, v)
+		}
+	}
 	for i, in := range ins {
-		if i > seedAt && strings.HasPrefix(in, "RUN ") && (strings.Contains(in, "/opt/gocache") || strings.Contains(in, "/opt/gomod") || strings.Contains(in, "$GOCACHE") || strings.Contains(in, "$GOMODCACHE")) {
-			t.Errorf("instruction %d touches the seeded caches after the seed layer (it would duplicate them): %q", i, in)
+		if i <= seedAt || !strings.HasPrefix(in, "RUN ") {
+			continue
+		}
+		for _, path := range touches {
+			if strings.Contains(in, path) {
+				t.Errorf("instruction %d touches the seeded cache %s after the seed layer (it would duplicate it): %q", i, path, in)
+			}
 		}
 	}
 }
