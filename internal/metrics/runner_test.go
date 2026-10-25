@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -70,6 +71,32 @@ func TestRunnerOSRunnerRejectsEmptyArgv(t *testing.T) {
 	t.Parallel()
 	if _, err := OSRunner(DefaultAllowEnv)(context.Background(), nil); err == nil {
 		t.Fatal("OSRunner ran an empty argv without an error")
+	}
+}
+
+func TestRunnerOSRunnerDirRejectsEmptyArgv(t *testing.T) {
+	t.Parallel()
+	if _, err := OSRunnerDir(DefaultAllowEnv)(context.Background(), t.TempDir(), nil); err == nil {
+		t.Fatal("OSRunnerDir ran an empty argv without an error")
+	}
+}
+
+// TestRunnerOSRunnerDirStartsTheChildInTheDirectory pins the seam's whole
+// contract: a command that resolves its town from the working directory reads
+// the directory it is given, never the snapshot process's.
+func TestRunnerOSRunnerDirStartsTheChildInTheDirectory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	out, err := OSRunnerDir(DefaultAllowEnv)(context.Background(), dir, []string{"/bin/sh", "-c", "pwd"})
+	if err != nil {
+		t.Fatalf("OSRunnerDir: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("the child ran in %q, want %q", got, want)
 	}
 }
 

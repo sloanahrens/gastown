@@ -37,23 +37,40 @@ func OSRunner(allowEnv []string) Runner {
 // is an error carrying the tail of stderr.
 func OSRunnerEnv(allowEnv []string) RunnerEnv {
 	return func(ctx context.Context, argv, extraEnv []string) ([]byte, error) {
-		if len(argv) == 0 {
-			return nil, errors.New("run: empty command")
-		}
-		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-		cmd.Env = childEnv(allowEnv, extraEnv, os.LookupEnv)
-		cmd.WaitDelay = killGrace
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, fmt.Errorf("%s: %w", argv[0], ctxErr)
-			}
-			return nil, fmt.Errorf("%s: %w: %s", argv[0], err, tailString(stderr.String(), 400))
-		}
-		return stdout.Bytes(), nil
+		return osRun(ctx, "", argv, childEnv(allowEnv, extraEnv, os.LookupEnv))
 	}
+}
+
+// OSRunnerDir returns a RunnerDir that runs argv as a child process in dir,
+// with no environment beyond the allowlist. dir is the child's working
+// directory, so a command that resolves its town from it reads the named town
+// and not the snapshot process's.
+func OSRunnerDir(allowEnv []string) RunnerDir {
+	return func(ctx context.Context, dir string, argv []string) ([]byte, error) {
+		return osRun(ctx, dir, argv, childEnv(allowEnv, nil, os.LookupEnv))
+	}
+}
+
+// osRun starts argv in dir (empty: the current directory) with env and returns
+// its stdout. A non-zero exit is an error carrying the tail of stderr.
+func osRun(ctx context.Context, dir string, argv, env []string) ([]byte, error) {
+	if len(argv) == 0 {
+		return nil, errors.New("run: empty command")
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.WaitDelay = killGrace
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("%s: %w", argv[0], ctxErr)
+		}
+		return nil, fmt.Errorf("%s: %w: %s", argv[0], err, tailString(stderr.String(), 400))
+	}
+	return stdout.Bytes(), nil
 }
 
 // childEnv builds the child's environment from the allowlisted names that

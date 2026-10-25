@@ -80,6 +80,12 @@ func configTestEnv(t *testing.T, files map[string]string, errs map[string]error,
 	}
 	if run != nil {
 		env.Run = run
+		env.RunDir = func(ctx context.Context, dir string, argv []string) ([]byte, error) {
+			if dir != configTestTown {
+				t.Errorf("ran %q in %q, want the snapshot's town %q", strings.Join(argv, " "), dir, configTestTown)
+			}
+			return run(ctx, argv)
+		}
 	}
 	return env
 }
@@ -306,6 +312,40 @@ func TestSourceConfigOmThresholds(t *testing.T) {
 	}
 }
 
+// The parked count answers for the town the snapshot was given, not the
+// directory the snapshot process runs in: the probe starts `gt rig list` in
+// env.Town, so a town the test process does not run in still answers
+// (gt-kj6sx).
+func TestSourceConfigParkedRigsRunsInTheSnapshotsTown(t *testing.T) {
+	t.Parallel()
+	settings, rigs, _, _ := configTestPaths()
+	files := map[string]string{
+		settings:              configSettingsFixture,
+		rigs:                  configRigsFixture("beads"),
+		configOmPath("beads"): `{"threshold": 0.75}`,
+	}
+	env := configTestEnv(t, files, nil, nil)
+	var ranIn []string
+	env.RunDir = func(_ context.Context, dir string, _ []string) ([]byte, error) {
+		ranIn = append(ranIn, dir)
+		return []byte(`[{"name": "beads", "status": "parked"}]`), nil
+	}
+
+	got, err := configSource{}.Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(ranIn) != 1 || ranIn[0] != env.Town {
+		t.Fatalf("`gt rig list` ran in %v, want once in the snapshot's town %q", ranIn, env.Town)
+	}
+	if got["parked_rigs"] != 1 {
+		t.Errorf("parked_rigs = %v, want 1", got["parked_rigs"])
+	}
+	if got["config_probe_failures"] != 0 {
+		t.Errorf("config_probe_failures = %v, want 0", got["config_probe_failures"])
+	}
+}
+
 // The parked count costs its own column: a `gt rig list` that fails, prints
 // nothing, prints prose or prints a broken array leaves parked_rigs nil and
 // counts the failure, and every other column still fills.
@@ -431,6 +471,42 @@ func TestSourceConfigMissingOrMalformedSettingsIsANilGroup(t *testing.T) {
 			}
 			if got != nil {
 				t.Fatalf("Collect = %v, want a nil group", got)
+			}
+		})
+	}
+}
+
+// A probe with no town must not count the rigs of the process's own working
+// directory: no command runs and the count is no value. A missing runner is the
+// same failure, not a panic.
+func TestConfigParkedRigsIsAFailedProbeWithoutATownOrARunner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		town   string
+		runDir bool
+	}{
+		{"an empty town", "", true},
+		{"no runner for the town", configTestTown, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := envAt(fixedNow())
+			env.Town = tc.town
+			ran := 0
+			if tc.runDir {
+				env.RunDir = func(_ context.Context, _ string, _ []string) ([]byte, error) {
+					ran++
+					return []byte(`[{"name": "beads", "status": "parked"}]`), nil
+				}
+			}
+			value, ok := configSource{}.configParkedRigs(context.Background(), env)
+			if ok || value != nil {
+				t.Errorf("configParkedRigs = (%v, %v), want (nil, false)", value, ok)
+			}
+			if ran != 0 {
+				t.Errorf("`gt rig list` ran %d times, want none", ran)
 			}
 		})
 	}
