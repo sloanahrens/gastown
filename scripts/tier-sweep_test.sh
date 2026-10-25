@@ -87,19 +87,22 @@ else
 fi
 rm -rf "$R"
 
-# new_integration_repo NESTED_PKGS [MODULE_ROOT_TAGGED] prints a throwaway repo
-# holding the real sweep, a root module with one integration-tagged package
-# (./internal/root) and a nested module tracker/ whose NESTED_PKGS
-# (space-separated, module relative such as store/pgtest) are integration
-# tagged — with MODULE_ROOT_TAGGED set, a tagged file at tracker/ itself too.
-# Its stub/ holds the go and gt the sweep calls:
+# new_integration_repo NESTED_PKGS [MODULE_ROOT_TAGGED] [STRAY_GO_MOD]
+# [DOCKER_PKG] prints a throwaway repo holding the real sweep, a root module
+# with one integration-tagged package (./internal/root) and a nested module
+# tracker/ whose NESTED_PKGS (space-separated, module relative such as
+# store/pgtest) are integration tagged — with MODULE_ROOT_TAGGED set, a tagged
+# file at tracker/ itself too. STRAY_GO_MOD adds that file and a tagged test
+# beside it, a directory that merely contains a file ending in go.mod.
+# DOCKER_PKG lists that package in docker.txt, the untagged run. Its stub/
+# holds the go and gt the sweep calls:
 #
 #   go   appends "cwd|pkg" to $STUB_LOG, refuses a package inside a nested
 #        module when run from the root (the real toolchain's "main module ...
 #        does not contain package"), and fails each package $STUB_FAIL names.
 #   gt   runs the argv after `slot run --`.
 new_integration_repo() {
-  local pkgs=${1:-} root_tagged=${2:-} pkg r
+  local pkgs=${1:-} root_tagged=${2:-} stray=${3:-} docker=${4:-} pkg r
   r=$(mktemp -d "${TMPDIR:-/tmp}/tier-sweep.XXXXXX")
   [ -d "$r" ] || { echo "new_integration_repo: mktemp failed" >&2; exit 1; }
   git -C "$r" init -q -b main
@@ -116,6 +119,14 @@ new_integration_repo() {
     mkdir -p "$r/tracker/$pkg"
     printf '//go:build integration\n\npackage fixture\n' >"$r/tracker/$pkg/integration_test.go"
   done
+  if [ -n "$stray" ]; then
+    mkdir -p "$r/$(dirname "$stray")"
+    printf 'not a module: a file whose name merely ends in go.mod\n' >"$r/$stray"
+    printf '//go:build integration\n\npackage fixture\n' >"$r/$(dirname "$stray")/integration_test.go"
+  fi
+  if [ -n "$docker" ]; then
+    printf '%s\n' $docker >"$r/internal/testpolicy/docker.txt"
+  fi
   cat >"$r/stub/go" <<'STUB'
 #!/usr/bin/env bash
 pkg=""
@@ -235,6 +246,60 @@ if [ "$rc" = 0 ] \
   pass "nested module: a module-root package runs inside tracker ($line)"
 else
   fail "nested module root: rc=$rc line=$line ran=$(tr '\n' ';' <"$R/stub.log") out=$out"
+fi
+rm -rf "$R"
+
+# --- A root failure survives a nested module that reports nothing ---
+#
+# The failed names accumulate across the root run, each module and the
+# untagged run. A module with no failure must add nothing: appending its empty
+# name unguarded reset the list, so this RED line named no failure at all and
+# the operator saw counts with nothing to chase.
+R=$(new_integration_repo store)
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" STUB_FAIL="./internal/root" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" != 0 ] \
+  && grep -Eq '^tier-sweep: integration RED passed=1 failed=1 skipped=0 failed: \./internal/root \(logs [^)]*\) in ' <<<"$line"; then
+  pass "failed names: a passing nested module keeps ./internal/root in failed: ($line)"
+else
+  fail "failed names across a passing module: rc=$rc line=$line out=$out"
+fi
+rm -rf "$R"
+
+# --- A nested failure precedes the untagged: group ---
+#
+# "untagged:" labels the names that follow it, so a nested failure appended
+# after the marker reads as one of the untagged packages. Both failures here:
+# the nested one first, then untagged:./internal/docker.
+R=$(new_integration_repo "store store/pgtest" "" "" "internal/docker")
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" STUB_FAIL="./store/pgtest ./internal/docker" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" != 0 ] \
+  && grep -Eq '^tier-sweep: integration RED passed=2 failed=2 skipped=0 failed: \./tracker/store/pgtest untagged:\./internal/docker \(logs [^)]*\) in ' <<<"$line"; then
+  pass "failed names: the nested failure comes before untagged: ($line)"
+else
+  fail "failed names order: rc=$rc line=$line out=$out"
+fi
+rm -rf "$R"
+
+# --- A file whose name merely ends in go.mod is not a module ---
+#
+# nested_modules' pathspec names go.mod itself. '*go.mod' also matched
+# extra/notgo.mod, so extra/ left the root list and ran as if it were a
+# module: here it is a root package and must run from the repo root.
+R=$(new_integration_repo store "" "extra/notgo.mod")
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" = 0 ] \
+  && grep -Eq '^tier-sweep: integration GREEN passed=3 failed=0 skipped=0 \(logs [^)]*\) in ' <<<"$line" \
+  && grep -Fxq "$R|./extra" "$R/stub.log" \
+  && ! grep -Fq "$R/extra|" "$R/stub.log"; then
+  pass "not a module: extra/notgo.mod leaves extra/ in the root list ($line)"
+else
+  fail "not a module: rc=$rc line=$line ran=$(tr '\n' ';' <"$R/stub.log") out=$out"
 fi
 rm -rf "$R"
 

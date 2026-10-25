@@ -85,9 +85,11 @@ summary() {
 }
 
 # nested_modules prints this repo's nested module directories: every go.mod
-# below the root, as the Makefile's NESTED_MODULES finds them.
+# below the root, as the Makefile's NESTED_MODULES finds them. The pathspec
+# names the file exactly: '*go.mod' also matches a file such as extra/notgo.mod,
+# whose directory would then wrongly leave the root list.
 nested_modules() {
-	git ls-files '*go.mod' | grep -v -e '^testdata/' -e '/testdata/' -e '^vendor/' -e '/vendor/' | awk -v OFS=/ -F/ 'NF > 1 { NF--; print }' | LC_ALL=C sort -u
+	git ls-files '*/go.mod' | grep -v -e '^testdata/' -e '/testdata/' -e '^vendor/' -e '/vendor/' | awk -v OFS=/ -F/ 'NF > 1 { NF--; print }' | LC_ALL=C sort -u
 }
 
 # tagged_dirs prints ./path for each directory of THIS module (the cwd's) that
@@ -181,8 +183,11 @@ for tier in "${tiers[@]}"; do
 		read -r p1 f1 s1 n1 < <(go_tier integration . gt slot run -- env GT_TEST_DOCKER=1 :: -tags integration :: ${tagged[@]+"${tagged[@]}"})
 		read -r p2 f2 s2 n2 < <(go_tier integration-docker . gt slot run -- env GT_TEST_DOCKER=1 :: :: ${docker[@]+"${docker[@]}"})
 		p=$((p1 + p2)) f=$((f1 + f2)) s=$((s1 + s2))
+		# The modules' names come before the untagged ones: "untagged:"
+		# labels the group that follows it, so a nested name appended later
+		# would read as one of them. Each append stays guarded: appending an
+		# empty nm unconditionally empties names, dropping the root run's.
 		names="$n1"
-		[ -n "$n2" ] && names="${names:+$names }untagged:$n2"
 		for m in ${modules[@]+"${modules[@]}"}; do
 			deeper=()
 			for o in ${mods[@]+"${mods[@]}"}; do case "$o" in "./$m/"*) deeper+=("$o") ;; esac; done
@@ -196,8 +201,9 @@ for tier in "${tiers[@]}"; do
 			[ ${#pkgs[@]} -eq 0 ] && continue
 			read -r pm fm sm nm < <(go_tier integration "$m" gt slot run -- env GT_TEST_DOCKER=1 :: -tags integration :: "${pkgs[@]}")
 			p=$((p + pm)) f=$((f + fm)) s=$((s + sm))
-			names="${nm:+${names:+$names }$nm}"
+			[ -n "$nm" ] && names="${names:+$names }$nm"
 		done
+		[ -n "$n2" ] && names="${names:+$names }untagged:$n2"
 		summary integration "$p" "$f" "$s" "$names" "$((SECONDS - tier_start))"
 		;;
 	race)
