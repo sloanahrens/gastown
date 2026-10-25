@@ -178,57 +178,6 @@ func CommandContextWithPath(ctx context.Context, bin, dir string, env []string, 
 	return &Cmd{Cmd: cmd}
 }
 
-// RunBdJSONAllowStale runs bd in dir with bd's stale-read bypass and returns
-// its stdout. A failure carries bd's stderr instead of a bare "exit status 1".
-// An inherited BEADS_DIR is stripped and the command pinned to dir's own
-// resolved database, so bd answers about the directory the caller named.
-//
-// keep-raw (gt-7iwy0.4.12): this is the one survivor of the RunBdJSON* family
-// that bdjson.go held. gt spec's ready query must run its filters server-side
-// against the rig's own database and asks bd's stale-read bypass, which no
-// Client method does; the other variants had no caller left and went with
-// the file.
-func RunBdJSONAllowStale(dir string, args ...string) ([]byte, error) {
-	verb := "bd"
-	if len(args) > 0 {
-		verb = args[0]
-	}
-	// The environment the deleted BdCmd.Build built: the parent's, less
-	// BEADS_DIR, then the subprocess-mode policy pinned to dir's own database.
-	env := StripEnvKey(os.Environ(), "BEADS_DIR")
-	mode := MutationRouting
-	if ArgsAreReadOnly(args) {
-		mode = ReadOnlyRouting
-	}
-	beadsDir := ""
-	if dir != "" {
-		beadsDir = ResolveBeadsDir(dir)
-		if mode == ReadOnlyRouting {
-			mode = ReadOnlyPinned
-		} else {
-			mode = MutationPinned
-		}
-	}
-	env = EnvForSubprocessMode(env, beadsDir, mode)
-	// An installed bd that rejects --allow-stale must still run, so the flag
-	// travels only when the binary supports it.
-	if BdSupportsAllowStaleWithEnv(env) {
-		args = append([]string{"--allow-stale"}, args...)
-	}
-
-	var stdout, stderr bytes.Buffer
-	cmd := CommandWithEnv(dir, env, args...)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
-			return nil, fmt.Errorf("bd %s: %s", verb, errMsg)
-		}
-		return nil, fmt.Errorf("bd %s: %w", verb, err)
-	}
-	return stdout.Bytes(), nil
-}
-
 // policyEnv is the environment EnvForSubprocessMode builds from the parent's,
 // less machine mode for the exempt verbs (machineExempt).
 func policyEnv(args []string, fallbackBeadsDir string, mode SubprocessEnvMode) []string {

@@ -4,9 +4,6 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -136,42 +133,3 @@ func TestContextConstructorsAreContextBound(t *testing.T) {
 	}
 }
 
-// TestRunBdJSONAllowStale_FailureCarriesBdsStderr pins the contract gt spec
-// relies on when its ready query fails: the error names the verb and carries
-// bd's own stderr, not a bare "exit status 1". It came over from the deleted
-// bdjson.go with the one RunBdJSON variant that still has a caller.
-func TestRunBdJSONAllowStale_FailureCarriesBdsStderr(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell stub")
-	}
-	binDir := t.TempDir()
-	writeBDStub(t, binDir, "#!/bin/sh\necho 'database locked' >&2\nexit 1\n", "")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	_, err := RunBdJSONAllowStale(t.TempDir(), "show", "gt-x", "--json")
-	if err == nil {
-		t.Fatal("RunBdJSONAllowStale succeeded, want bd's failure")
-	}
-	if !strings.Contains(err.Error(), "bd show: database locked") {
-		t.Errorf("err = %q, want it to carry bd's stderr", err)
-	}
-}
-
-// writeBDStub writes a fake bd into binDir and returns its path.
-func writeBDStub(t *testing.T, binDir string, unixScript string, windowsScript string) string {
-	t.Helper()
-
-	if runtime.GOOS == "windows" {
-		path := filepath.Join(binDir, "bd.cmd")
-		if err := os.WriteFile(path, []byte(windowsScript), 0644); err != nil {
-			t.Fatalf("write bd stub: %v", err)
-		}
-		return path
-	}
-
-	path := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(path, []byte(unixScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	return path
-}

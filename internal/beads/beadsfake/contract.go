@@ -97,6 +97,7 @@ var contractCases = []contractCase{
 	{"dependencies and ready", contractDependencies},
 	{"typed dependencies", contractTypedDependencies},
 	{"ready filter", contractReadyFilter},
+	{"ReadyFiltered", contractReadyFiltered},
 	{"children", contractChildren},
 	{"delete issues", contractDeleteIssues},
 	{"release", contractRelease},
@@ -851,6 +852,37 @@ func contractReadyFilter(t *testing.T, s *scope) {
 	s.want(t, "Ready", ready, err, work.ID, parent.ID, kid.ID)
 	all, err := s.ReadyAll()
 	s.want(t, "ReadyAll", all, err, work.ID, parent.ID, kid.ID)
+}
+
+// contractReadyFiltered pins ReadyFiltered: the store's ready rule (open,
+// unblocked, ephemeral left out) with the caller's filters applied, and no
+// exclusions the caller did not name.
+func contractReadyFiltered(t *testing.T, s *scope) {
+	work := s.mustCreate(t, beads.CreateOptions{Title: "work", Priority: -1})
+	mail := s.mustCreate(t, beads.CreateOptions{Title: "mail", Labels: []string{s.label("mail")}, Priority: -1})
+	assigned := s.mustCreate(t, beads.CreateOptions{Title: "assigned", Priority: -1})
+	mustDo(t, "assign", s.Update(assigned.ID, beads.UpdateOptions{Assignee: ptr(s.who("alice"))}))
+	blocker := s.mustCreate(t, beads.CreateOptions{Title: "blocker", Priority: -1})
+	held := s.mustCreate(t, beads.CreateOptions{Title: "held", Priority: -1})
+	mustDo(t, "AddDependency(held)", s.AddDependency(held.ID, blocker.ID))
+	s.mustCreate(t, beads.CreateOptions{Title: "wisp", Priority: -1, Ephemeral: true})
+
+	all, err := s.ReadyFiltered(beads.ReadyOptions{})
+	s.want(t, "ReadyFiltered()", all, err, work.ID, mail.ID, assigned.ID, blocker.ID)
+	filtered, err := s.ReadyFiltered(beads.ReadyOptions{
+		Unassigned:    true,
+		ExcludeLabels: []string{s.label("mail")},
+		ExcludeTypes:  []string{"epic"},
+	})
+	s.want(t, "ReadyFiltered(unassigned, excludes)", filtered, err, work.ID, blocker.ID)
+
+	first, err := s.ReadyFiltered(beads.ReadyOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("ReadyFiltered(limit 1): %v", err)
+	}
+	if len(first) != 1 {
+		t.Errorf("ReadyFiltered(limit 1) = %v, want exactly one issue", ids(first))
+	}
 }
 
 func contractChildren(t *testing.T, s *scope) {

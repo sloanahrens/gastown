@@ -141,6 +141,30 @@ func (c *Client) ReadyAll() ([]*beads.Issue, error) {
 	return issues(all), nil
 }
 
+// ReadyFiltered returns the ready issues matching opts. A zero Limit asks for
+// the whole board, so it pages the tracker's ready query to the end; a
+// positive one is that one page.
+func (c *Client) ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error) {
+	f := api.ReadyFilter{
+		Unassigned:    opts.Unassigned,
+		ExcludeLabels: opts.ExcludeLabels,
+		ExcludeTypes:  opts.ExcludeTypes,
+		Limit:         opts.Limit,
+	}
+	if opts.Limit == 0 {
+		all, err := c.tc.ReadyAll(ctx(), f)
+		if err != nil {
+			return nil, mapErr(err)
+		}
+		return issues(all), nil
+	}
+	page, err := c.tc.Ready(ctx(), f)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return issues(page.Issues), nil
+}
+
 // Children returns the direct children of parentID.
 func (c *Client) Children(parentID string) ([]*beads.Issue, error) {
 	m, err := c.ChildrenOf(parentID)

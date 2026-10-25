@@ -2911,6 +2911,59 @@ func (b *Beads) ReadyAll() ([]*Issue, error) {
 	return issues, nil
 }
 
+// ReadyFiltered runs one ready query with opts' filters server-side
+// (gt-p85pw.7). Zero Limit asks for the whole board and a page bd cuts short
+// anyway is an error, as ReadyAll's is; a positive Limit is a page request, so
+// a cut page comes back with *ErrReadyTruncated instead.
+//
+// The flags go out in one fixed order, the one the spec dispatcher's board
+// query has always used (internal/cmd/spec.go): --unassigned, one
+// comma-joined --exclude-label, one comma-joined --exclude-type, --limit.
+func (b *Beads) ReadyFiltered(opts ReadyOptions) ([]*Issue, error) {
+	out, err := b.runMachine(readyFilteredArgs(opts)...)
+	if err != nil {
+		return nil, err
+	}
+	env, isEnvelope, err := decodeMachineEnvelope(out, "bd ready")
+	if err != nil {
+		return nil, err
+	}
+	data := bytes.TrimSpace(out)
+	if isEnvelope {
+		data = env.Data
+	}
+	var issues []*Issue
+	if err := json.Unmarshal(data, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd ready output: %w", err)
+	}
+	if !isEnvelope || env.Pagination == nil || !env.Pagination.Truncated {
+		return issues, nil
+	}
+	if opts.Limit == 0 {
+		return nil, fmt.Errorf("bd ready --limit 0 returned a truncated page (%d issues); refusing to read it as the whole board", env.Pagination.Returned)
+	}
+	trueCount := 0
+	if env.Pagination.Total != nil {
+		trueCount = *env.Pagination.Total
+	}
+	return issues, &ErrReadyTruncated{Found: env.Pagination.Returned, Cap: opts.Limit, TrueCount: trueCount}
+}
+
+// readyFilteredArgs is ReadyFiltered's argv.
+func readyFilteredArgs(o ReadyOptions) []string {
+	args := []string{"ready", "--json"}
+	if o.Unassigned {
+		args = append(args, "--unassigned")
+	}
+	if len(o.ExcludeLabels) > 0 {
+		args = append(args, "--exclude-label", strings.Join(o.ExcludeLabels, ","))
+	}
+	if len(o.ExcludeTypes) > 0 {
+		args = append(args, "--exclude-type", strings.Join(o.ExcludeTypes, ","))
+	}
+	return append(args, "--limit", strconv.Itoa(o.Limit))
+}
+
 // readyDispatchable is the *Beads path behind the exported free function
 // ReadyDispatchable (ready_helpers.go): ready issues with the town's
 // bookkeeping families (mail, escalations, identity, merge queue, event
