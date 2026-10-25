@@ -12,6 +12,48 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
+// The strip's seat count is the dispatcher's roster read over the same seat
+// picture, so the page cannot disagree with the occupancy a sling is refused
+// against: a 3-cap seat with three live polecats and two released parked seats
+// reads 3/3, never 5/3 (gt-ly90n).
+func TestTheHeaderSeatCountsAreTheDispatchersRoster(t *testing.T) {
+	t.Parallel()
+
+	const seat = "deepseek-flash-sandbox-k8s"
+	root := poolTestTown(t, `{"type":"town-settings","version":1,`+
+		`"agents":{"deepseek-flash-sandbox-k8s":{"command":"claude"}},`+
+		`"polecat_pool":{"seats":{"deepseek-flash-sandbox-k8s":{"cap":3}}}}`, "")
+	writeTestRigsConfig(t, root, "gastown")
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seatSession := func(name string) poolSession {
+		return poolSession{name: name, agent: seat, rig: "gastown", polecat: name}
+	}
+	sessions := []poolSession{
+		seatSession("a"), seatSession("b"), seatSession("c"),
+		// Two seats the town released: their polecats are parked, and a
+		// released seat holds no cap.
+		{name: "dead/gastown/d", agent: seat, rig: "gastown", polecat: "d", parkedStale: true},
+		{name: "dead/gastown/e", agent: seat, rig: "gastown", polecat: "e", parkedStale: true},
+	}
+	got := dashboardSeatRoster(poolLiveForWith(root, func(*config.PolecatPool) ([]poolSession, error) {
+		return sessions, nil
+	}))
+	if !got.Read {
+		t.Fatal("the strip could not read the roster")
+	}
+	want := specRosterFrom(sessions, ts)
+	if got.Live[seat] != want.Live[seat] || got.Live[seat] != 3 {
+		t.Errorf("the strip's %s count = %d, the dispatcher's roster = %d, want 3",
+			seat, got.Live[seat], want.Live[seat])
+	}
+	if got.Total != 3 {
+		t.Errorf("the strip's seat total = %d, want the roster's 3, not the inventory's 5", got.Total)
+	}
+}
+
 // The header strip names the model a reviewer runs, not the command that runs
 // it: a backend is an argv, and its raw command line says nothing about which
 // model an operator is looking at (gt-bj47s).
@@ -481,5 +523,23 @@ func TestDashboardModelsWithNoLandingsSaysNothing(t *testing.T) {
 	r := &modelsReader{townRoot: t.TempDir(), omPath: filepath.Join(t.TempDir(), "missing.json")}
 	if got := r.read().Activity; len(got) != 0 {
 		t.Errorf("activity = %+v, want none for a town with no landings", got)
+	}
+}
+
+// A roster read that failed is not a roster of zero: the strip must be told the
+// read did not answer, so it says so instead of showing an empty seat. A read
+// that succeeded passes its counts through (gt-ly90n).
+func TestDashboardSeatRosterFailedReadIsNotARoster(t *testing.T) {
+	t.Parallel()
+	failed := dashboardSeatRoster(poolShowLive{})
+	if failed.Read {
+		t.Errorf("a failed roster read reports Read = true, want the read not answered")
+	}
+	if len(failed.Live) != 0 || failed.Total != 0 {
+		t.Errorf("a failed roster read counted seats: %+v", failed)
+	}
+	answered := dashboardSeatRoster(poolShowLive{ok: true, live: map[string]int{"seat": 2}, total: 2})
+	if !answered.Read || answered.Total != 2 || answered.Live["seat"] != 2 {
+		t.Errorf("an answered roster read = %+v, want its counts passed through", answered)
 	}
 }

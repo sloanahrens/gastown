@@ -826,3 +826,22 @@ func TestPoolShowReadsNoSeatPictureWithoutARigRegistry(t *testing.T) {
 		t.Errorf("a town with no rigs has no polecats to count: seat line = %q\n%s", got, out)
 	}
 }
+
+// A seat read that fails leaves the count not ok, so the dashboard's roster and
+// `gt pool show` say the seats were not read rather than showing zero seats in
+// use (gt-ly90n).
+func TestPoolLiveForWithAFailedSeatReadIsNotOK(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type":"town-settings","version":1,"agents":{"deepseek-flash":{"command":"claude"}},`+
+		`"polecat_pool":{"seats":{"deepseek-flash":{"cap":3}},"max_total":4}}`, "")
+	writeTestRigsConfig(t, root, "gastown")
+	live := poolLiveForWith(root, func(*config.PolecatPool) ([]poolSession, error) {
+		return nil, fmt.Errorf("tmux server unreachable")
+	})
+	if live.ok {
+		t.Errorf("live.ok = true after a failed seat read, want the count not read")
+	}
+	if live.total != 0 || len(live.live) != 0 {
+		t.Errorf("a failed seat read counted seats: total %d, live %v", live.total, live.live)
+	}
+}

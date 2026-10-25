@@ -443,6 +443,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Dispatch:     om.dispatch,
 		Attention:    dashboard.NewAttentionFollower(townRoot).Read,
 		Models:       models.read,
+		SeatRoster:   func() dashboard.SeatRoster { return dashboardSeatRoster(poolLiveFor(townRoot)) },
 		Queue:        func() *dashboard.Queue { return queue.read(time.Now()) },
 		Bead:         queue.detail,
 		RigTheme:     newDashRigThemes(townRoot),
