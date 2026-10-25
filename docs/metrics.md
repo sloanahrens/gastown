@@ -31,7 +31,6 @@ Done when the array parses and holds the new entry, and no earlier entry was cha
 A source fills one column group of the snapshot. Add one only when the move needs a value the log does not record yet. Otherwise skip this step.
 
 - The hourly log is written by `gt metrics snapshot`, which the town-metrics plugin runs. A Go source is a `source_<group>.go` in `internal/metrics/`, registered in `Sources()` in `internal/metrics/sources.go`.
-- The Python snapshot (`scripts/town_metrics/snapshot.py`) discovers each module in `scripts/town_metrics/sources/` that sets `GROUP` and defines `collect(town, run, now)`. A new module needs no other change.
 
 Done when the new source's columns appear in a snapshot row, and `git diff` shows the source as the only change.
 
