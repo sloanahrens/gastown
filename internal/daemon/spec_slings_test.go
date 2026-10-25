@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"slices"
 	"strings"
@@ -271,6 +272,7 @@ func TestADeadBackgroundSlingProcessLabelsItsBead(t *testing.T) {
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
 	d.clock = newSlingClock()
+	// The bead is unowned, so the failure label applies (gt-nosod).
 	bd := newWorkBD(t)
 	bd.seed("gt-z", "open", time.Now())
 	d.openWorkBeads = bd.open
@@ -322,6 +324,35 @@ func TestFailSpecSlingSkipsLabelWhenBeadHooked(t *testing.T) {
 	}
 }
 
+// A read that failed says nothing about whether the sling hooked the bead, and
+// the label is the one write nothing clears without an operator, so the bead is
+// left unlabeled (gt-nosod).
+func TestFailSpecSlingSkipsLabelWhenTheBeadCannotBeRead(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func(args []string) cliReply {
+		if args[1] == "sling" {
+			return cliReply{stderr: "signal: killed", code: 1}
+		}
+		return cliReply{stdout: string(wireOut(plannedTick(slingJob("gt-z", "claude-sonnet"))))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	d.clock = newSlingClock()
+	bd := newWorkBD(t)
+	bd.showErr = errors.New("dolt: connection refused")
+	d.openWorkBeads = bd.open
+
+	d.runSpecDispatch()
+	waitSlings(t, d)
+
+	if got := fake.argvs("bead"); len(got) != 0 {
+		t.Errorf("bead writes = %v, want none when the bead could not be read", got)
+	}
+	if n := countContaining(lines(), "spec_dispatch: gt-z: the bead could not be read before the failure label"); n != 1 {
+		t.Errorf("unreadable line = %d, want one saying the bead was left unlabeled: %v", n, lines())
+	}
+}
+
 // A sling cut because the daemon is shutting down failed through no fault of
 // its bead, which stays ready for the next daemon.
 func TestAShutdownCutSlingDoesNotLabelItsBead(t *testing.T) {
@@ -364,6 +395,7 @@ func TestAFailedFailureWriteIsLoggedNotFatal(t *testing.T) {
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
 	d.clock = newSlingClock()
+	// The bead is unowned, so the failure label is attempted (gt-nosod).
 	bd := newWorkBD(t)
 	bd.seed("gt-z", "open", time.Now())
 	d.openWorkBeads = bd.open

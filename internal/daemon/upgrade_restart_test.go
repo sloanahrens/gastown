@@ -1147,6 +1147,30 @@ func TestUpgradeHoldWaitsForYoungestSlingBound(t *testing.T) {
 	}
 }
 
+// The wait is frozen when the drain begins, so a sling that starts afterwards
+// cannot move its end: a dispatch that kept handing back slings would otherwise
+// hold the restart for ever (gt-nosod).
+func TestUpgradeSlingWaitIsNotExtendedByASlingStartedAfterTheDrain(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+	now := time.Now()
+	bound := specSlingBound()
+	d.specSlings.begin(specSlingFlight{Bead: "gt-a", Rig: "gastown", started: now})
+	if d.checkUpgradeRestart(now) {
+		t.Fatal("restarted under a running sling inside its bound")
+	}
+
+	d.specSlings.begin(specSlingFlight{Bead: "gt-b", Rig: "gastown", started: now.Add(bound - time.Minute)})
+	if !d.checkUpgradeRestart(now.Add(bound)) {
+		t.Fatal("a sling started after the drain extended the wait; want the restart at the frozen youngest's bound")
+	}
+}
+
 // gt-cbaoy: a tick that ends inside its bound releases the restart at once; the
 // restart does not wait out the rest of the bound.
 func TestUpgradeRestartGoesWhenTheSpecDispatchTickEnds(t *testing.T) {

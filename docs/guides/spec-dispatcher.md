@@ -139,7 +139,9 @@ scheduled job on one model (deep reviews never run on DeepSeek, gt-co54d), set
 `"run_agent": "<agent>"` on the entry: the patrol labels each run bead
 `agent:<agent>`, so only that agent's seats take it (gt-tplg6). The agent needs a
 seat in `polecat_pool.seats`; the config load refuses an entry without one, and
-the patrol fails the tick rather than create a bead no seat can take. The open
+the patrol fails the tick rather than create a bead no seat can take. It also
+refuses `run_agent` on an entry whose `dispatch` is not `"spec"`, which the
+patrol could only skip on every tick (gt-nosod). The open
 bead is the queue: the entry's skip-open rule holds the next run, and the patrol
 never retires it as stalled however long a full pool keeps it waiting. The bead's
 priority is the entry's `priority` (3 when unset), held at

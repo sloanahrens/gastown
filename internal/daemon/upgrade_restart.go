@@ -482,6 +482,12 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	}
 
 	// Landing workers finish their pass and start no new one from here on.
+	if !d.upgradeRestartPending.Load() {
+		// The sling wait is frozen here, where the drain turns on: no sling
+		// starts after this, so the set only shrinks and its youngest member
+		// gets the bound it had when the drain began (gt-nosod).
+		d.upgradeSlingSince, _ = d.specSlings.newest()
+	}
 	d.upgradeRestartPending.Store(true)
 
 	if hold != nil {
@@ -560,11 +566,15 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 	}
 
 	// The slings a tick handed back to run in the background hold the restart
-	// the same way, each up to the sling's own bound from the youngest one's
-	// start: the restart waits for the in-flight set to empty, not forever
-	// (gt-5h70s), and the youngest's bound is the first moment every sling in
-	// the set has been cut (gt-nosod).
+	// the same way, each up to the sling's own bound. The wait runs from the
+	// youngest start the drain froze, not the oldest's: from the oldest's it
+	// ended when that sling was cut while a younger one still had most of its
+	// own left (gt-nosod). It does not run from a sling that started after the
+	// drain, which would let new slings extend it for ever (gt-5h70s).
 	slingSince, slinging := d.specSlings.newest()
+	if slinging && !d.upgradeSlingSince.IsZero() {
+		slingSince = d.upgradeSlingSince
+	}
 	slingWaited := max(now.Sub(slingSince), 0)
 
 	switch {
@@ -675,7 +685,7 @@ func (d *Daemon) upgradeDrainDeferred(hold *daemonWork) bool {
 // was already on — a landing pass or other hold had it going — ends here, and
 // its end line says for how long it held landings (gt-9vjw8).
 func (d *Daemon) deferUpgradeDrain(now time.Time) {
-	d.upgradeRestartPending.Store(false)
+	d.resumeDispatchAfterDrain()
 	d.reportDrainHeld(now)
 	if d.upgradeWaitLogged != tierSweepHoldLabel {
 		d.logger.Printf("upgrade-restart: landing passes continue while %s holds the restart; the drain starts when it closes or after %s",
@@ -689,10 +699,18 @@ func (d *Daemon) deferUpgradeDrain(now time.Time) {
 // pending (marker gone, covered, or already tried without effect). A drain that
 // was on ends here and reports how long it held landings (gt-9vjw8).
 func (d *Daemon) endUpgradeDrain(now time.Time) {
-	d.upgradeRestartPending.Store(false)
+	d.resumeDispatchAfterDrain()
 	d.reportDrainHeld(now)
 	d.upgradeWaitLogged = ""
 	d.resetUpgradeGCHold()
+}
+
+// resumeDispatchAfterDrain lets spec slings start again: no restart is pending,
+// and the sling wait is unfrozen so the next drain measures its own youngest
+// start (gt-nosod).
+func (d *Daemon) resumeDispatchAfterDrain() {
+	d.upgradeRestartPending.Store(false)
+	d.upgradeSlingSince = time.Time{}
 }
 
 // reportDrainHeld writes the one line a drain leaves behind when it ends: how
@@ -784,7 +802,7 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State, now time.Time) error {
 		// next heartbeat decides again; keeping the flag would hold them for as
 		// long as the stamp keeps failing (gt-21cr0).
 		d.upgradeRestartRequested.Store(false)
-		d.upgradeRestartPending.Store(false)
+		d.resumeDispatchAfterDrain()
 		return nil
 	}
 	// A drain that is on ends with this restart: name the time it cost before

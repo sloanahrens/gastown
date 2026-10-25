@@ -651,6 +651,27 @@ func TestOverseerReportLeftPassesInFlight(t *testing.T) {
 	}
 }
 
+// A set of running slings that cannot be written down fails the LEFT read; a
+// dry run without --in-flight would list the running bead as next and count
+// its seat free, the reading the flag exists to prevent (gt-nosod).
+func TestOverseerReportLeftFailsWhenTheInFlightSetCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func([]string) cliReply {
+		return cliReply{stdout: string(wireOut(`{"roster": "claude-sonnet 0/2"}`))}
+	})
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, ctx: t.Context(), logger: discardLogger, gtPath: "gt", execCmd: fake.run}
+	// A year time.Time cannot marshal is the one way the in-flight payload
+	// fails to write.
+	d.specSlings.begin(specSlingFlight{Bead: "gt-a", Rig: "gastown", started: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)})
+
+	if _, err := d.overseerReportLeft(); err == nil {
+		t.Fatal("overseerReportLeft returned no error for an in-flight set that cannot be written")
+	}
+	if got := fake.argvs("spec", "dispatch"); len(got) != 0 {
+		t.Errorf("dry runs = %v, want none without the flag", got)
+	}
+}
+
 func TestOverseerReportLeftSortsTheDryRun(t *testing.T) {
 	t.Parallel()
 	left, err := overseerReportLeftFrom(specDispatchTickReport{
