@@ -65,6 +65,10 @@ chmod +x "$TMP/bin/gt"
 TOWN="$TMP/town"
 mkdir -p "$TOWN/.runtime"
 LOCK="$TOWN/.runtime/town-metrics.lock"
+# A pid above any kernel's pid_max is never handed to a process, so this dead
+# holder cannot come back to life mid-test the way a reaped child's pid can
+# (Linux caps pids at 4194304, macOS at 99999).
+dead_pid=4194305
 RECEIPT="snapshot 2026-10-24T21:00:00Z appended to $TOWN/.runtime/metrics/snapshots.jsonl (8 groups, 0 errors)"
 ANALYSIS="analyse 2026-10-25T02:00:00Z: 44 landings, 3 targets -> $TOWN/.runtime/metrics/latest/panel.json"
 
@@ -156,18 +160,78 @@ else
 fi
 
 echo "town-metrics: a lock whose run is gone is taken over"
-# A reaped child's pid is a pid with nothing behind it: exactly what a killed
-# run leaves, and kill -0 says so.
-"$BASH_BIN" -c 'exit 0' &
-dead=$!
-wait "$dead" 2>/dev/null || true
-printf '%s\n' "$dead" >"$LOCK"
+printf '%s\n' "$dead_pid" >"$LOCK"
 run_wrapper "$TMP/out" 0 "$RECEIPT"
 if [ "$rc" == 0 ] && [ "$(calls)" == "$(want_calls)" ] && [ ! -e "$LOCK" ]; then
   pass "a stale lock does not block the next run, and is not left behind"
 else
   fail "a stale lock does not block the next run (rc=$rc, calls=$(calls | tr '\n' '|'), lock=$(cat "$LOCK" 2>&1))"
 fi
+
+echo "town-metrics: a lock with no pid in it is left alone while it is young"
+: >"$LOCK"
+run_wrapper "$TMP/out"
+if [ "$rc" == 0 ] && [ -z "$(calls)" ] && [ -e "$LOCK" ] && [ ! -s "$LOCK" ] \
+  && grep -qF "[plugin-result skipped]" "$TMP/out"; then
+  pass "an empty lock: the run skips and leaves the file for its writer"
+else
+  fail "an empty lock: the run skips and leaves the file (rc=$rc, calls=$(calls | tr '\n' '|'), $(cat "$TMP/out"))"
+fi
+
+echo "town-metrics: a lock with no pid that outlived a run is taken over"
+: >"$LOCK"
+touch -t 200001010000 "$LOCK"
+run_wrapper "$TMP/out" 0 "$RECEIPT"
+if [ "$rc" == 0 ] && [ "$(calls)" == "$(want_calls)" ] && [ ! -e "$LOCK" ]; then
+  pass "an old empty lock does not block the next run, and is not left behind"
+else
+  fail "an old empty lock does not block the next run (rc=$rc, calls=$(calls | tr '\n' '|'), lock=$(cat "$LOCK" 2>&1))"
+fi
+
+echo "town-metrics: a takeover leaves a lock another run took meanwhile"
+: >"$STATE/calls"
+rm -f "$LOCK"
+# The lock path is a symlink to a FIFO: a claim fails on it without blocking,
+# and the takeover's read of it blocks, so the test can replace the path with a
+# live run's lock after that read has returned.
+mkfifo "$STATE/lockfifo"
+ln -s "$STATE/lockfifo" "$LOCK"
+mkfifo "$STATE/opened" "$STATE/release"
+exec 3<>"$STATE/opened"
+PATH="$TMP/bin:$PATH" GT_TOWN_ROOT="$TOWN" STUB_STATE="$STATE" \
+  "$BASH_BIN" "$RUN" >"$TMP/takeover" 2>&1 &
+takeover_pid=$!
+# The feeder supplies the pid the takeover reads and holds the FIFO open until
+# the test releases it; it signals once the takeover has the read side open.
+"$BASH_BIN" -c '
+  exec 4>"$1" || exit 1
+  printf "%s\n" "$2" >&4
+  printf "opened\n" >"$3"
+  read -r -t 30 _ <"$4" || true
+' _ "$STATE/lockfifo" "$dead_pid" "$STATE/opened" "$STATE/release" &
+feeder_pid=$!
+if read -r -t 20 -u 3 _; then
+  rm -f "$LOCK"
+  printf '%s\n' "$$" >"$LOCK"
+  printf 'go\n' >"$STATE/release"
+  takeover_rc=0
+  wait "$takeover_pid" || takeover_rc=$?
+  wait "$feeder_pid" 2>/dev/null || true
+  leftover=$(find "$TOWN/.runtime" -maxdepth 1 -name 'town-metrics.lock.*' | wc -l | tr -d ' ')
+  if [ "$takeover_rc" == 0 ] && [ "$(cat "$LOCK")" == "$$" ] && [ "$leftover" == 0 ] \
+    && grep -qF "[plugin-result skipped]" "$TMP/takeover"; then
+    pass "the takeover leaves the newer lock in place and skips"
+  else
+    fail "the takeover leaves the newer lock in place and skips (rc=$takeover_rc, lock=$(cat "$LOCK" 2>&1), leftovers=$leftover, $(cat "$TMP/takeover"))"
+  fi
+else
+  kill "$feeder_pid" "$takeover_pid" 2>/dev/null || true
+  wait "$feeder_pid" 2>/dev/null || true
+  wait "$takeover_pid" 2>/dev/null || true
+  fail "the takeover never reached its read within 20 s"
+fi
+exec 3>&-
+rm -f "$STATE/opened" "$STATE/release" "$STATE/lockfifo" "$LOCK"
 
 echo "town-metrics: a run that overlaps another skips instead of snapshotting twice"
 : >"$STATE/calls"

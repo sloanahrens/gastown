@@ -20,22 +20,61 @@ holder_alive() {
   [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
 }
 
-# take_lock claims LOCK_FILE for this run, and reports whether it did. The
-# write is a noclobber create, so the pid is in the file from the moment it
-# exists and two claimers cannot both win it. A stale file is renamed aside by
-# one takeover and the other's rename then fails, so the takeover is single too.
+# LOCK_STALE_AFTER_MIN is how long a lock naming no readable pid sits before it
+# is debris: the daemon kills a script plugin at its [execution] timeout
+# (plugin.md), so a lock older than that plus a margin has no writer behind it.
+LOCK_STALE_AFTER_MIN=20
+
+# lock_aged reports whether LOCK_FILE has sat unmodified for
+# LOCK_STALE_AFTER_MIN minutes. A lock file is written once, at claim, so its
+# mtime is when its run started.
+lock_aged() {
+  [ -n "$(find "$LOCK_FILE" -mmin "+$LOCK_STALE_AFTER_MIN" 2>/dev/null)" ]
+}
+
+# claim_pid PID publishes PID as this run's claim on LOCK_FILE, and reports
+# whether it did. The pid is written to a private file and that file is linked
+# into place, so the lock never exists empty or half-written: ln fails when the
+# path is taken, which is the exclusive create this needs, and a reader sees a
+# whole pid or no file at all.
+claim_pid() {
+  local claim="$LOCK_FILE.claim.$$" rc=0
+  if ! printf '%s\n' "$1" >"$claim" 2>/dev/null; then
+    rm -f "$claim"
+    return 1
+  fi
+  ln "$claim" "$LOCK_FILE" 2>/dev/null || rc=1
+  rm -f "$claim"
+  return "$rc"
+}
+
+# take_lock claims LOCK_FILE for this run, and reports whether it did. A lock
+# naming a live run is that run's. A lock naming a dead pid is a crash
+# leftover; the rename that takes it over is checked against the pid found
+# dead, because a run that claims the lock between that read and the rename
+# must keep it. A lock naming no readable pid is a claim in progress or debris,
+# and only its age tells them apart.
 take_lock() {
-  local dir
+  local dir holder aside
   dir="$(dirname "$LOCK_FILE")"
   mkdir -p "$dir" 2>/dev/null || fail "cannot create $dir"
-  if (set -o noclobber; printf '%s\n' "$$" >"$LOCK_FILE") 2>/dev/null; then
-    return 0
-  fi
-  holder_alive "$(cat "$LOCK_FILE" 2>/dev/null || true)" && return 1
-  local aside="$LOCK_FILE.stale.$$"
+  claim_pid "$$" && return 0
+  holder="$(cat "$LOCK_FILE" 2>/dev/null || true)"
+  case "$holder" in
+    ''|*[!0-9]*) lock_aged || return 1 ;;
+    *) holder_alive "$holder" && return 1 ;;
+  esac
+  aside="$LOCK_FILE.stale.$$"
   mv "$LOCK_FILE" "$aside" 2>/dev/null || return 1
+  if [ "$(cat "$aside" 2>/dev/null || true)" != "$holder" ]; then
+    # The lock on the path is not the one judged stale: another run took it in
+    # between, so give the path back to that run.
+    ln "$aside" "$LOCK_FILE" 2>/dev/null || true
+    rm -f "$aside"
+    return 1
+  fi
   rm -f "$aside"
-  (set -o noclobber; printf '%s\n' "$$" >"$LOCK_FILE") 2>/dev/null
+  claim_pid "$$"
 }
 
 # release_lock removes the lock only while it still names this run: after a
