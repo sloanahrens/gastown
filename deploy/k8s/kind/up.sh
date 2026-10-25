@@ -208,6 +208,13 @@ kubectl -n agent-sandbox-system patch deployment agent-sandbox-controller --type
   -p '{"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
 kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=180s
 
+# helm_release_deployed answers whether openshell is a deployed release. helm
+# status exits 0 for a failed release too, and skipping helm for one would leave
+# the gateway down while the marker says it is installed.
+helm_release_deployed() {
+  [ "$(helm list --namespace openshell --deployed --filter '^openshell$' --short 2>/dev/null)" = openshell ]
+}
+
 # The chart's certificate job is a helm pre-install AND pre-upgrade hook, so
 # every `helm upgrade` regenerates the CA and every certificate and rolls the
 # gateway: each exported copy of the client certificates (the town
@@ -217,7 +224,7 @@ kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controll
 helm_marker="$CHART_VERSION:$(sha256_of "$VALUES")"
 helm_recorded="$(kubectl -n openshell get configmap gt-bootstrap -o 'jsonpath={.data.helm}' 2>/dev/null || true)"
 if [ -z "${GT_K8S_FORCE_HELM:-}" ] && [ "$helm_recorded" = "$helm_marker" ] &&
-  helm status openshell --namespace openshell >/dev/null 2>&1; then
+  helm_release_deployed; then
   say "OpenShell chart $CHART_VERSION and its values are unchanged; not running helm (every helm upgrade regenerates the gateway's certificates)"
 else
   say "installing OpenShell chart $CHART_VERSION"
@@ -255,6 +262,15 @@ export_certs() { # export_certs MTLS_DIR
   umask "$old_umask"
 }
 
+# gateway_healthy reads the status gateway info reports. A word match would call
+# a gateway healthy on a line like "last check: the certificate is not healthy",
+# so only the Status field counts and only when it is exactly healthy.
+gateway_healthy() { # gateway_healthy INFO_OUTPUT
+  local status
+  status="$(sed -n 's/^[[:space:]]*Status:[[:space:]]*\([^[:space:]]*\).*/\1/p' <<<"$1")"
+  [ "$status" = healthy ]
+}
+
 # Exact field match: a gateway named k8s-other in the list is not this one.
 gateway_registered() {
   openshell gateway list 2>/dev/null |
@@ -282,7 +298,7 @@ while [ "$attempts" -gt 0 ]; do
   gateway_registered ||
     openshell gateway add "https://127.0.0.1:$GATEWAY_PORT" --local --name "$GATEWAY_NAME"
   info="$(openshell -g "$GATEWAY_NAME" gateway info 2>&1 || true)"
-  if grep -qw healthy <<<"$info"; then healthy=1; break; fi
+  if gateway_healthy "$info"; then healthy=1; break; fi
   attempts=$((attempts - 1))
   say "gateway not healthy yet ($(tr '\n' ' ' <<<"$info" | tr -s ' ' | cut -c1-110)); re-exporting client certificates ($attempts tries left)"
   sleep "$interval"
@@ -354,7 +370,7 @@ if [ "$register_town" = 1 ]; then
   # the rollback armed, so the previous entry and active gateway come back.
   town_unverified=1
   town_tries="${GT_K8S_CERT_TRIES:-30}"
-  until town_info="$(town_openshell -g "$GATEWAY_NAME" gateway info 2>&1 || true)"; grep -qw healthy <<<"$town_info"; do
+  until town_info="$(town_openshell -g "$GATEWAY_NAME" gateway info 2>&1 || true)"; gateway_healthy "$town_info"; do
     town_tries=$((town_tries - 1))
     [ "$town_tries" -gt 0 ] ||
       die "$GATEWAY_NAME is not healthy under $TOWN_CONFIG: $(tr '\n' ' ' <<<"$town_info" | tr -s ' ' | cut -c1-160)"
