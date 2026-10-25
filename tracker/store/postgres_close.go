@@ -49,8 +49,23 @@ func stringsFrom(ctx context.Context, q querier, sql string, args ...any) ([]str
 // closeRow closes one locked, not-yet-closed issue in tx. Unless force, it
 // refuses while the issue has open children or an open blocker, and says
 // which; members of closing (the set closed in the same call) do not count.
-func closeRow(ctx context.Context, tx pgx.Tx, id, reason string, force bool, actor string, closing []string) error {
+// fromClose is true for the close verb and false for an update to status
+// closed: only the close verb also refuses a pinned issue and an issue
+// assigned to someone other than the actor, as bd does.
+func closeRow(ctx context.Context, tx pgx.Tx, id, reason string, force bool, actor string, closing []string, fromClose bool) error {
 	if !force {
+		if fromClose {
+			var status, assignee string
+			if err := tx.QueryRow(ctx, "SELECT status, assignee FROM tracker.issues WHERE id = $1", id).Scan(&status, &assignee); err != nil {
+				return fmt.Errorf("store: read %s: %w", id, err)
+			}
+			if status == "pinned" {
+				return api.Conflict("%s is pinned (release it, or force)", id)
+			}
+			if assignee != "" && assignee != actor {
+				return api.Conflict("%s is assigned to %s, not to %s (release it, or force)", id, assignee, actor)
+			}
+		}
 		if kids, err := openChildren(ctx, tx, id, closing); err != nil {
 			return err
 		} else if len(kids) > 0 {
@@ -87,7 +102,7 @@ func (p *Postgres) CloseIssues(ctx context.Context, ids []string, reason string,
 			if status[id] == "closed" {
 				continue
 			}
-			if err := closeRow(ctx, tx, id, reason, force, actor, ids); err != nil {
+			if err := closeRow(ctx, tx, id, reason, force, actor, ids, true); err != nil {
 				return err
 			}
 		}

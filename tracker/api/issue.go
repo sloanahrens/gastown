@@ -44,6 +44,13 @@ type Issue struct {
 	AgentState   string     `json:"agent_state,omitempty"`
 	LastActivity *time.Time `json:"last_activity,omitempty"`
 
+	// Dependencies are what the issue depends on, each with its relation,
+	// title and status. Targets that are not issues of this database
+	// (external references) are left out. Only a read of named issues
+	// (GetIssues) fills them, and BlockedBy there: the open targets of its
+	// `blocks` links. A list leaves both empty, and Blocked fills BlockedBy.
+	Dependencies []IssueDep `json:"dependencies,omitempty"`
+
 	// Counts the list endpoints fill in without loading the rows.
 	CommentCount    int `json:"comment_count,omitempty"`
 	DependencyCount int `json:"dependency_count,omitempty"`
