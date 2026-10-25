@@ -599,6 +599,14 @@ func TestSandboxProfileValidate(t *testing.T) {
 			p.Driver = "kubernetes"
 			p.Tolerations = []SandboxToleration{{Operator: "Exists", Effect: "NoExecute"}}
 		}, ""},
+		{"toleration with no operator", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Tolerations = []SandboxToleration{{Key: "k", Value: "v", Effect: "NoSchedule"}}
+		}, ""},
+		{"toleration with no effect", func(p *SandboxProfile) {
+			p.Driver = "kubernetes"
+			p.Tolerations = []SandboxToleration{{Key: "k", Operator: "Equal", Value: "v"}}
+		}, ""},
 		{"docker profile with a node selector", func(p *SandboxProfile) { p.NodeSelector = map[string]string{"gt.dev/pool": "sandbox"} }, `sandboxes.p.node_selector: only a kubernetes driver sends pod placement and resources; remove it or set driver to kubernetes`},
 		{"docker profile with tolerations", func(p *SandboxProfile) {
 			p.Tolerations = []SandboxToleration{{Key: "gt.dev/sandbox", Operator: "Exists", Effect: "NoSchedule"}}
@@ -662,5 +670,21 @@ func TestSandboxProfileValidate(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, c.wantErr)
 			}
 		})
+	}
+}
+
+// A quantity outside the patterns Validate checks must not compare as zero:
+// the comparison reports the parse failure instead (gt-wgfku).
+func TestSandboxQuantityValueRejectsUnparsable(t *testing.T) {
+	t.Parallel()
+
+	if _, err := sandboxQuantityValue("lots"); err == nil {
+		t.Fatal("want an error for a quantity that does not parse")
+	}
+	if got, err := sandboxQuantityValue("1.5Gi"); err != nil || got != 1.5*(1<<30) {
+		t.Fatalf("1.5Gi = %v, %v; want %v", got, err, 1.5*(1<<30))
+	}
+	if got, err := sandboxQuantityValue("500m"); err != nil || got != 0.5 {
+		t.Fatalf("500m = %v, %v; want 0.5", got, err)
 	}
 }

@@ -1697,9 +1697,9 @@ type SandboxProfile struct {
 // SandboxToleration is one Kubernetes toleration a sandbox pod carries.
 type SandboxToleration struct {
 	Key      string `json:"key,omitempty"`
-	Operator string `json:"operator,omitempty"` // Equal or Exists
+	Operator string `json:"operator,omitempty"` // Equal or Exists; "" means Equal
 	Value    string `json:"value,omitempty"`
-	Effect   string `json:"effect,omitempty"` // NoSchedule, PreferNoSchedule or NoExecute
+	Effect   string `json:"effect,omitempty"` // NoSchedule, PreferNoSchedule or NoExecute; "" matches every effect
 }
 
 // SandboxResources is a container's requests or limits as Kubernetes
@@ -1826,13 +1826,15 @@ func (p SandboxProfile) validateKubernetes(name string) error {
 		}
 	}
 	for i, tol := range p.Tolerations {
+		// Kubernetes defaults an empty effect to every effect and an empty
+		// operator to Equal, so both empty forms are valid.
 		switch tol.Effect {
-		case "NoSchedule", "PreferNoSchedule", "NoExecute":
+		case "", "NoSchedule", "PreferNoSchedule", "NoExecute":
 		default:
 			return fmt.Errorf("sandboxes.%s.tolerations[%d].effect %q: want NoSchedule, PreferNoSchedule or NoExecute", name, i, tol.Effect)
 		}
 		switch tol.Operator {
-		case "Equal", "Exists":
+		case "", "Equal", "Exists":
 		default:
 			return fmt.Errorf("sandboxes.%s.tolerations[%d].operator %q: want Equal or Exists", name, i, tol.Operator)
 		}
@@ -1855,7 +1857,15 @@ func (p SandboxProfile) validateKubernetes(name string) error {
 			if c.req == "" || c.lim == "" {
 				continue
 			}
-			if sandboxQuantityValue(c.req) > sandboxQuantityValue(c.lim) {
+			req, err := sandboxQuantityValue(c.req)
+			if err != nil {
+				return fmt.Errorf("sandboxes.%s.requests.%s %q: %w", name, c.field, c.req, err)
+			}
+			lim, err := sandboxQuantityValue(c.lim)
+			if err != nil {
+				return fmt.Errorf("sandboxes.%s.limits.%s %q: %w", name, c.field, c.lim, err)
+			}
+			if req > lim {
 				return fmt.Errorf("sandboxes.%s.requests.%s %q: want no more than limits.%s %q", name, c.field, c.req, c.field, c.lim)
 			}
 		}
@@ -1877,8 +1887,9 @@ func (r SandboxResources) validate(name, block string) error {
 
 // sandboxQuantityValue converts a quantity the CPU and memory patterns accept
 // to base units: CPU cores, or memory bytes. The patterns admit only a plain
-// or decimal number with one suffix, so the parse cannot fail.
-func sandboxQuantityValue(q string) float64 {
+// or decimal number with one suffix, so a validated quantity parses; a value
+// that does not is reported rather than compared as zero.
+func sandboxQuantityValue(q string) (float64, error) {
 	mult := 1.0
 	for _, s := range []struct {
 		suffix string
@@ -1894,9 +1905,9 @@ func sandboxQuantityValue(q string) float64 {
 	}
 	n, err := strconv.ParseFloat(q, 64)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return n * mult
+	return n * mult, nil
 }
 
 // The k8s quantity shapes a profile's CPU and Memory may take: a plain or
