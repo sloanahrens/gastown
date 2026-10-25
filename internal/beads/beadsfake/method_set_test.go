@@ -175,6 +175,7 @@ var engineVerbs = map[string]string{
 	"UpdateAgentDescriptionFields": "read-modify-writes an agent bead's description fields under its lock",
 	"Wisp":                         "creates a molecule wisp through the engine (sling formula)",
 	"WithTimeout":                  "returns a plain wrapper whose bd calls are killed after d",
+	"WithProcessGroup":             "returns a plain wrapper whose bd calls run in their own process group",
 }
 
 // TestBeadsMethodSetIsClientAdminAndEngine is the *Beads half of the
