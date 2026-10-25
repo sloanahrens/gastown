@@ -12,6 +12,8 @@ package metrics
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 )
 
 // Version is the schema version written as v. A reader keys its parsing on it.
@@ -44,6 +46,35 @@ type Record struct {
 type Error struct {
 	Group string `json:"group"`
 	Error string `json:"error"`
+}
+
+// ReadSnapshots reads one record per line, in file order. The log is appended
+// to while this reads, so an unfinished last line is skipped; a line that is
+// not a record anywhere else in the file is an error, because then the file is
+// not the snapshot log. A blank line names no record and is skipped.
+func ReadSnapshots(r io.Reader) ([]Record, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("snapshots: %w", err)
+	}
+	text := string(data)
+	lines := strings.Split(text, "\n")
+	records := make([]Record, 0, len(lines))
+	for i, line := range lines {
+		last := i == len(lines)-1
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec Record
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			if last && !strings.HasSuffix(text, "\n") {
+				break // a record an append is still writing
+			}
+			return nil, fmt.Errorf("snapshot line %d: %w", i+1, err)
+		}
+		records = append(records, rec)
+	}
+	return records, nil
 }
 
 // fixedKey reports whether name is one of the record's own keys, which a

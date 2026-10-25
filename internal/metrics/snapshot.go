@@ -38,6 +38,7 @@ func OSEnv(town string) Env {
 	return Env{
 		Town:     town,
 		Run:      OSRunner(DefaultAllowEnv),
+		RunEnv:   OSRunnerEnv(DefaultAllowEnv),
 		Now:      time.Now,
 		ReadFile: os.ReadFile,
 		ReadDir:  listDir,

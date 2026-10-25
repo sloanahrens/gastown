@@ -9,6 +9,11 @@ import (
 // runner from Env, so a test answers without a process.
 type Runner func(ctx context.Context, argv []string) ([]byte, error)
 
+// RunnerEnv runs argv with extraEnv added to the child's environment and
+// returns its stdout, for a caller that must pass a value to the child rather
+// than read it back afterwards.
+type RunnerEnv func(ctx context.Context, argv, extraEnv []string) ([]byte, error)
+
 // Env is everything a source reaches outside its own process. Every read of
 // the town, the clock or a file goes through these seams, so a source has no
 // os or time call of its own and its test needs no host.
@@ -17,6 +22,10 @@ type Env struct {
 	Town string
 	// Run runs a command and returns its stdout.
 	Run Runner
+	// RunEnv runs a command with environment the caller names. The analysis
+	// takes it for the extract, which keeps itself inside the town by the
+	// environment it is given.
+	RunEnv RunnerEnv
 	// Now is the time the snapshot is taken; Collect writes it as the record's ts.
 	Now func() time.Time
 	// ReadFile reads a whole file.
