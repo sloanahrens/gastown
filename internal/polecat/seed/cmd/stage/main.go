@@ -8,6 +8,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/steveyegge/gastown/internal/polecat/seed"
@@ -47,10 +48,12 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "polecat-seed: %v\n", err)
 		return 1
 	}
-	if err := seed.Guard(pinned, *buildRig, *town, seed.ExecGit); err != nil {
+	notes, err := seed.Guard(pinned, *buildRig, *town, seed.ExecGit)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "polecat-seed: %v\n", err)
 		return 1
 	}
+	printNotes(os.Stdout, notes)
 	for _, s := range sources {
 		how := "pinned"
 		if s.Rig == *buildRig {
@@ -63,4 +66,12 @@ func run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// printNotes writes each guard note once, on its own line, with the stage's
+// prefix.
+func printNotes(w io.Writer, notes []string) {
+	for _, n := range notes {
+		fmt.Fprintf(w, "polecat-seed: %s\n", n)
+	}
 }
