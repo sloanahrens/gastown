@@ -241,6 +241,8 @@ mkrig() {
   git -C "$dir" -c user.name=t -c user.email=t@example.invalid commit -q -m first
   local first
   first=$(git -C "$dir" rev-parse HEAD)
+  # A canonical checkout keeps origin/main at its pin; the pin-drift guard reads it.
+  git -C "$dir" update-ref refs/remotes/origin/main "$first"
   echo two >"$dir/second.txt"
   git -C "$dir" add second.txt
   git -C "$dir" -c user.name=t -c user.email=t@example.invalid commit -q -m second
@@ -266,7 +268,7 @@ fi
 printf 'fx %s\n' "0000000000000000000000000000000000000000" >"$seedtown/pins"
 if sout=$(seedmk polecat-seed-stage 2>&1); then
   fail "polecat-seed-stage stops on a pin the checkout does not hold" "exited 0: $sout"
-elif grep -q -F 'cannot stage rig fx at 0000000000000000000000000000000000000000' <<<"$sout"; then
+elif grep -q -F 'rig fx pin 000000000000 is not readable in its canonical checkout' <<<"$sout"; then
   pass "polecat-seed-stage stops on a pin the checkout does not hold, naming the rig and sha"
 else
   fail "polecat-seed-stage stops on a pin the checkout does not hold, naming the rig and sha" "$sout"
@@ -305,6 +307,43 @@ fi
 rm -rf "$SEEDTMP"
 phony="$(sed -n '1p' "$ROOT/Makefile")"
 missing=""
+# The pin-drift guard (gt-n3ewt) runs inside the stage, and the stage runs before
+# the image build: a stale committed pin stops the image before it is built, and
+# nothing is staged.
+if od=$(dry polecat-image BD_SRC=/somewhere/else) \
+  && stage_line=$(grep -n 'internal/polecat/seed/cmd/stage' <<<"$od" | head -1 | cut -d: -f1) \
+  && build_line=$(grep -n 'docker build' <<<"$od" | head -1 | cut -d: -f1) \
+  && [[ -n "$stage_line" && -n "$build_line" && "$stage_line" -lt "$build_line" ]]; then
+  pass "polecat-image runs the seed stage, with the pin-drift guard, before docker build"
+else
+  fail "polecat-image runs the seed stage, with the pin-drift guard, before docker build" "$od"
+fi
+gtown2="$SEEDTMP/behindtown"
+mkdir -p "$gtown2/fx/mayor/rig"
+git -C "$gtown2/fx/mayor/rig" init -q -b main
+echo one >"$gtown2/fx/mayor/rig/a.txt"
+git -C "$gtown2/fx/mayor/rig" add a.txt
+git -C "$gtown2/fx/mayor/rig" -c user.name=t -c user.email=t@example.invalid commit -q -m first
+bpin=$(git -C "$gtown2/fx/mayor/rig" rev-parse HEAD)
+echo two >"$gtown2/fx/mayor/rig/b.txt"
+git -C "$gtown2/fx/mayor/rig" add b.txt
+git -C "$gtown2/fx/mayor/rig" -c user.name=t -c user.email=t@example.invalid commit -q -m second
+git -C "$gtown2/fx/mayor/rig" update-ref refs/remotes/origin/main "$(git -C "$gtown2/fx/mayor/rig" rev-parse HEAD)"
+mkdir -p "$gtown2/gastown/mayor/rig"
+git -C "$gtown2/gastown/mayor/rig" init -q -b main
+echo g >"$gtown2/gastown/mayor/rig/g.txt"
+git -C "$gtown2/gastown/mayor/rig" add g.txt
+git -C "$gtown2/gastown/mayor/rig" -c user.name=t -c user.email=t@example.invalid commit -q -m build
+gbuild2=$(git -C "$gtown2/gastown/mayor/rig" rev-parse HEAD)
+printf 'fx %s\n' "$bpin" >"$gtown2/pins"
+if bout=$(make -C "$ROOT" --no-print-directory polecat-seed-stage POLE_TOWN="$gtown2" POLE_SEED_PINS="$gtown2/pins" POLE_SEED_DIR="$gtown2/out" POLE_SEED_RIGS=fx POLE_COMMIT="$gbuild2" 2>&1); then
+  fail "a stale committed pin stops the seed stage before anything is staged" "exited 0: $bout"
+elif grep -q -F 'pin-drift guard: rig fx pin' <<<"$bout" && grep -q -F 'behind its main' <<<"$bout" && [[ ! -e "$gtown2/out/fx" ]]; then
+  pass "a stale committed pin stops the seed stage before anything is staged"
+else
+  fail "a stale committed pin stops the seed stage before anything is staged" "$bout"
+fi
+
 for t in polecat-image polecat-seed-stage polecat-seed-pins polecat-caches openshell-providers; do
   grep -q -E "^$t:" "$ROOT/Makefile" && grep -q -E "^\.PHONY:.* $t( |\$)" <<<"$phony" || missing="$missing $t"
 done
