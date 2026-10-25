@@ -16,7 +16,7 @@ import (
 
 // builtinStatuses are the statuses every database has; others come from
 // tracker.custom_statuses.
-var builtinStatuses = []string{"open", "in_progress", "closed", "deferred", "hooked"}
+var builtinStatuses = []string{"open", "in_progress", "closed", "deferred", "hooked", "pinned"}
 
 func isBuiltinStatus(s string) bool { return slices.Contains(builtinStatuses, s) }
 
@@ -197,7 +197,7 @@ func updateInTx(ctx context.Context, tx pgx.Tx, id string, patch api.UpdatePatch
 	// Closing is checked last but shares this transaction: a refused close
 	// (open children or blockers) rolls back every change made above.
 	if closing {
-		return closeRow(ctx, tx, id, "", patch.Force, patch.Actor, []string{id})
+		return closeRow(ctx, tx, id, "", patch.Force, patch.Actor, []string{id}, false)
 	}
 	return nil
 }

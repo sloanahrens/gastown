@@ -31,9 +31,13 @@ type Issue struct {
 	Children           []string   `json:"children,omitempty"`
 	DependsOn          []string   `json:"depends_on,omitempty"`
 	BlockedBy          []string   `json:"blocked_by,omitempty"`
-	Labels             []string   `json:"labels,omitempty"`
-	Ephemeral          bool       `json:"ephemeral,omitempty"`
-	WispType           string     `json:"wisp_type,omitempty"`
+	// Dependencies are what the issue depends on, each with its relation,
+	// title and status. Only a read of single issues (GetIssues) fills them;
+	// targets in other rigs' databases (external) are left out.
+	Dependencies []IssueDep `json:"dependencies,omitempty"`
+	Labels       []string   `json:"labels,omitempty"`
+	Ephemeral    bool       `json:"ephemeral,omitempty"`
+	WispType     string     `json:"wisp_type,omitempty"`
 
 	// Event beads (issue_type "event").
 	EventKind string `json:"event_kind,omitempty"`
