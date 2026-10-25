@@ -117,6 +117,9 @@ type AnalysisResult struct {
 	Dir      string
 	Landings int
 	Panel    Panel
+	// SnapshotsSkipped is how many snapshots had a ts that does not parse, so
+	// the join could not place them.
+	SnapshotsSkipped int
 }
 
 // RunAnalysis runs the daily analysis when its stamp is older than Every, and
@@ -188,7 +191,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 		return res, err
 	}
 
-	joinHeader, joined, _ := Join(columns, rows, snaps, o.MaxAge)
+	joinHeader, joined, cov := Join(columns, rows, snaps, o.MaxAge)
 	joinHeader, joined = JoinPeaks(joinHeader, joined, peaks)
 	targets, err := analyseTargets(ctx, env, o, joinHeader, joined, explainOnly)
 	if err != nil {
@@ -218,7 +221,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	if err := PublishAtomic(dir, stampName, []byte(now.Format(time.RFC3339)+"\n")); err != nil {
 		return res, err
 	}
-	res.Ran, res.Landings, res.Panel = true, len(joined), panel
+	res.Ran, res.Landings, res.Panel, res.SnapshotsSkipped = true, len(joined), panel, cov.Skipped
 	return res, nil
 }
 
