@@ -65,8 +65,8 @@ type OmStatsGroup struct {
 	Rate       float64 `json:"rate"`
 }
 
-// OmStatsRounds counts beads by the highest attempt they reached: one om
-// round, two, or three and more.
+// OmStatsRounds counts beads by the highest attempt their review records
+// reached: one om round, two, or three and more.
 type OmStatsRounds struct {
 	One       int `json:"1"`
 	Two       int `json:"2"`
@@ -86,9 +86,11 @@ type OmStatsBead struct {
 //
 // The review records are the source. The log fills only the days before the
 // first record — the record starts 2026-10-16 — and those days are marked
-// Fallback. A nil reader reads nothing. A record line that is not one, or
-// carries no instant, is skipped and counted; any other line of the daemon log
-// is not a verdict and is ignored, not counted.
+// Fallback. The log counts in the day table alone: it names no rig, no seat and
+// no attempt, so Rounds and TopBeads come from the review records. A nil
+// reader reads nothing. A record line that is not one, or carries no instant,
+// is skipped and counted; any other line of the daemon log is not a verdict and
+// is ignored, not counted.
 func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) {
 	sinceDay := omStatsDayStart(since)
 	stats := OmStats{
@@ -124,9 +126,9 @@ func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) 
 			rigCounts := omStatsCountsFor(rigs, rig)
 			agentCounts := omStatsCountsFor(agents, agent)
 			if rec.IsRejection() {
-				counts.addRejection(float64(rec.Findings), rec.Score)
-				rigCounts.addRejection(float64(rec.Findings), rec.Score)
-				agentCounts.addRejection(float64(rec.Findings), rec.Score)
+				counts.addRejection(float64(rec.Findings), rec.Score, true, true)
+				rigCounts.addRejection(float64(rec.Findings), rec.Score, true, true)
+				agentCounts.addRejection(float64(rec.Findings), rec.Score, true, true)
 				bead := omStatsBeadFor(beads, rec.BeadID)
 				bead.rejections++
 				if rec.Rig != "" {
@@ -160,7 +162,7 @@ func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) 
 			counts := omStatsCountsFor(days, ev.day)
 			counts.fallback = true
 			if ev.rejected {
-				counts.addRejection(ev.findings, ev.score)
+				counts.addRejection(ev.findings, ev.score, ev.hasFindings, ev.hasScore)
 				continue
 			}
 			// One approval per bead per day: a repair pass logs both "landed"
@@ -216,12 +218,19 @@ func omStatsCountsFor(m map[string]*omStatsCounts, key string) *omStatsCounts {
 	return c
 }
 
-func (c *omStatsCounts) addRejection(findings, score float64) {
+// addRejection counts one rejection; hasFindings and hasScore say whether the
+// source named that figure. A daemon-log line can name one and not the other,
+// and an absent figure stays out of its mean rather than entering as a zero.
+func (c *omStatsCounts) addRejection(findings, score float64, hasFindings, hasScore bool) {
 	c.rejections++
-	c.findings += findings
-	c.findingsN++
-	c.score += score
-	c.scoreN++
+	if hasFindings {
+		c.findings += findings
+		c.findingsN++
+	}
+	if hasScore {
+		c.score += score
+		c.scoreN++
+	}
 }
 
 func (c *omStatsCounts) rate() float64 {
@@ -340,13 +349,16 @@ func readOmStatsRecords(r io.Reader) ([]ReviewRecord, int, error) {
 }
 
 // omStatsLogEvent is one landing the daemon log records: a review rejection
-// or a landing that reached the target.
+// or a landing that reached the target. hasFindings and hasScore say whether
+// the line named that figure, so an unnamed one enters no mean.
 type omStatsLogEvent struct {
-	day      string
-	bead     string
-	rejected bool
-	findings float64
-	score    float64
+	day         string
+	bead        string
+	rejected    bool
+	findings    float64
+	hasFindings bool
+	score       float64
+	hasScore    bool
 }
 
 var (
@@ -384,12 +396,12 @@ func readOmStatsLog(r io.Reader) ([]omStatsLogEvent, error) {
 			ev.rejected = true
 			if sm := omStatsLogScoreRe.FindStringSubmatch(m[3]); sm != nil {
 				if v, err := strconv.ParseFloat(sm[1], 64); err == nil {
-					ev.score = v
+					ev.score, ev.hasScore = v, true
 				}
 			}
 			if fm := omStatsLogFindRe.FindStringSubmatch(m[3]); fm != nil {
 				if v, err := strconv.Atoi(fm[1]); err == nil {
-					ev.findings = float64(v)
+					ev.findings, ev.hasFindings = float64(v), true
 				}
 			}
 		case omStatsLogLandedRe.MatchString(m[3]):

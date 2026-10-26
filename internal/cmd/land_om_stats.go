@@ -42,7 +42,8 @@ ten beads rejected most.
 The review record starts 2026-10-16. Days before it are filled from the
 landing worker's daemon log and marked with a * in the table, or fallback in
 the JSON; the log names no rig and no seat, so those days count in the day
-table alone.
+table alone. Rounds per bead and the beads rejected most come from the review
+records, because a log line names neither an attempt nor a rig.
 
 The command reads only: it writes no file. --json prints the same data as the
 table.
@@ -67,28 +68,33 @@ func runLandOmStats(cmd *cobra.Command, _ []string) error {
 	return landOmStatsReport(cmd.OutOrStdout(), landOmStatsSince, landOmStatsRecords, landOmStatsLog, landOmStatsJSON)
 }
 
+// landOmStatsFS is the read-only filesystem the report reads its two sources
+// through, so a test supplies an in-memory one and the command has no way to
+// write.
+type landOmStatsFS interface {
+	Open(name string) (io.ReadCloser, error)
+}
+
+type landOmStatsDisk struct{}
+
+func (landOmStatsDisk) Open(name string) (io.ReadCloser, error) { return os.Open(name) }
+
 // landOmStatsReport is the command body over explicitly named inputs, so a
 // test drives every path without swapping the shared flag variables.
 func landOmStatsReport(out io.Writer, sinceValue, recordsFlag, logFlag string, asJSON bool) error {
+	return landOmStatsReportFrom(landOmStatsDisk{}, workspace.FindFromCwdOrError, out, sinceValue, recordsFlag, logFlag, asJSON)
+}
+
+func landOmStatsReportFrom(fsys landOmStatsFS, findTown func() (string, error), out io.Writer, sinceValue, recordsFlag, logFlag string, asJSON bool) error {
 	since, err := parseLandOmStatsSince(sinceValue)
 	if err != nil {
 		return err
 	}
-	recordsPath := strings.TrimSpace(recordsFlag)
-	logPath := strings.TrimSpace(logFlag)
-	if recordsPath == "" || logPath == "" {
-		townRoot, err := workspace.FindFromCwdOrError()
-		if err != nil {
-			return fmt.Errorf("resolving the town: %w", err)
-		}
-		if recordsPath == "" {
-			recordsPath = land.TownReviewsFile(townRoot).Path
-		}
-		if logPath == "" {
-			logPath = filepath.Join(townRoot, "daemon", daemonlog.FileName)
-		}
+	inputs, err := landOmStatsResolvePaths(recordsFlag, logFlag, findTown)
+	if err != nil {
+		return err
 	}
-	stats, err := landOmStatsFromFiles(recordsPath, logPath, since)
+	stats, err := landOmStatsFromFiles(fsys, inputs, since)
 	if err != nil {
 		return err
 	}
@@ -97,6 +103,38 @@ func landOmStatsReport(out io.Writer, sinceValue, recordsFlag, logFlag string, a
 	}
 	writeLandOmStatsTable(out, stats, since)
 	return nil
+}
+
+// landOmStatsInputs is the two files a report reads, and whether the operator
+// named each one rather than leaving it to the town default.
+type landOmStatsInputs struct {
+	records, log           string
+	recordsNamed, logNamed bool
+}
+
+// landOmStatsResolvePaths fills each empty flag with the town's file. A named
+// path must exist, so a typo cannot read as a clean empty report; a default may
+// be missing, because a town that has landed nothing yet has neither file.
+func landOmStatsResolvePaths(recordsFlag, logFlag string, findTown func() (string, error)) (landOmStatsInputs, error) {
+	in := landOmStatsInputs{
+		records: strings.TrimSpace(recordsFlag),
+		log:     strings.TrimSpace(logFlag),
+	}
+	in.recordsNamed, in.logNamed = in.records != "", in.log != ""
+	if in.recordsNamed && in.logNamed {
+		return in, nil
+	}
+	townRoot, err := findTown()
+	if err != nil {
+		return landOmStatsInputs{}, fmt.Errorf("resolving the town: %w", err)
+	}
+	if !in.recordsNamed {
+		in.records = land.TownReviewsFile(townRoot).Path
+	}
+	if !in.logNamed {
+		in.log = filepath.Join(townRoot, "daemon", daemonlog.FileName)
+	}
+	return in, nil
 }
 
 // parseLandOmStatsSince reads --since as a calendar day. An empty value is the
@@ -113,16 +151,14 @@ func parseLandOmStatsSince(value string) (time.Time, error) {
 	return at, nil
 }
 
-// landOmStatsFromFiles opens both sources and aggregates them. A file that is
-// not there yet is no lines: a town that has not recorded a landing still
-// reports.
-func landOmStatsFromFiles(recordsPath, logPath string, since time.Time) (land.OmStats, error) {
-	records, closeRecords, err := openLandOmStatsSource(recordsPath)
+// landOmStatsFromFiles opens both sources and aggregates them.
+func landOmStatsFromFiles(fsys landOmStatsFS, in landOmStatsInputs, since time.Time) (land.OmStats, error) {
+	records, closeRecords, err := openLandOmStatsSource(fsys, in.records, in.recordsNamed)
 	if err != nil {
 		return land.OmStats{}, err
 	}
 	defer closeRecords()
-	logFile, closeLog, err := openLandOmStatsSource(logPath)
+	logFile, closeLog, err := openLandOmStatsSource(fsys, in.log, in.logNamed)
 	if err != nil {
 		return land.OmStats{}, err
 	}
@@ -130,11 +166,14 @@ func landOmStatsFromFiles(recordsPath, logPath string, since time.Time) (land.Om
 	return land.AggregateOmStats(records, logFile, since)
 }
 
-// openLandOmStatsSource opens path for reading; a missing file is a nil reader
-// with nothing to close.
-func openLandOmStatsSource(path string) (io.Reader, func(), error) {
-	f, err := os.Open(path)
+// openLandOmStatsSource opens path for reading; a missing named path is an
+// error, a missing default is a nil reader with nothing to close.
+func openLandOmStatsSource(fsys landOmStatsFS, path string, named bool) (io.Reader, func(), error) {
+	f, err := fsys.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
+		if named {
+			return nil, nil, fmt.Errorf("%s does not exist: %w", path, err)
+		}
 		return nil, func() {}, nil
 	}
 	if err != nil {

@@ -2,10 +2,9 @@ package cmd
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,15 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/daemonlog"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
-// omStatsFixture writes the two sources gt land om-stats reads into dir and
-// returns their paths: three verdicts on two days, and a daemon-log day before
-// the first record.
-func omStatsFixture(t *testing.T) (recordsPath, logPath string) {
+// omStatsFixtureLines renders the two sources gt land om-stats reads: three
+// verdicts on two days, and a daemon-log day before the first record.
+func omStatsFixtureLines(t *testing.T) (records, log string) {
 	t.Helper()
-	dir := t.TempDir()
 	day := func(d, hour int) time.Time { return time.Date(2026, 10, d, hour, 0, 0, 0, time.Local) }
 	recs := []land.ReviewRecord{
 		{BeadID: "gt-a", Rig: "gastown", Attempt: 1, Score: 0.40, Verdict: land.VerdictRequestChanges, Agent: "opus", Findings: 2, Bar: 0.8, At: day(16, 10)},
@@ -36,20 +34,54 @@ func omStatsFixture(t *testing.T) (recordsPath, logPath string) {
 		}
 		lines = append(lines, string(line))
 	}
-	recordsPath = filepath.Join(dir, land.ReviewsFileName)
-	if err := os.WriteFile(recordsPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
-		t.Fatalf("writing the records: %v", err)
-	}
-
-	logPath = filepath.Join(dir, "daemon.log")
-	log := strings.Join([]string{
+	log = strings.Join([]string{
 		"2026/10/14 23:10:00 landing_worker: [land] gt-old: rejected (review): om requested changes (score 0.55, 3 finding(s))",
 		"2026/10/14 23:40:00 landing_worker: [land] gt-old2: landed abc1234 on origin/main (patch-id def5678)",
 	}, "\n") + "\n"
+	return strings.Join(lines, "\n") + "\n", log
+}
+
+// omStatsFixture writes the fixture into a temporary directory and returns the
+// two paths, for the tests that drive the real filesystem.
+func omStatsFixture(t *testing.T) (recordsPath, logPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	records, log := omStatsFixtureLines(t)
+	recordsPath = filepath.Join(dir, land.ReviewsFileName)
+	if err := os.WriteFile(recordsPath, []byte(records), 0o600); err != nil {
+		t.Fatalf("writing the records: %v", err)
+	}
+	logPath = filepath.Join(dir, "daemon.log")
 	if err := os.WriteFile(logPath, []byte(log), 0o600); err != nil {
 		t.Fatalf("writing the log: %v", err)
 	}
 	return recordsPath, logPath
+}
+
+// landOmStatsFakeFS is the in-memory filesystem the write test hands the
+// command. It exposes Open and nothing else, so the command has no way to
+// write; opened records every path the command reached.
+type landOmStatsFakeFS struct {
+	files  map[string]string
+	opened []string
+}
+
+func (f *landOmStatsFakeFS) Open(name string) (io.ReadCloser, error) {
+	f.opened = append(f.opened, name)
+	data, ok := f.files[name]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	return io.NopCloser(strings.NewReader(data)), nil
+}
+
+// omStatsNoTown fails the test if the report resolves the town, which it must
+// not do when the operator named both sources.
+func omStatsNoTown(t *testing.T) func() (string, error) {
+	return func() (string, error) {
+		t.Errorf("the report resolved the town with both sources named")
+		return "", nil
+	}
 }
 
 // runLandOmStatsOutput runs the command body with the flags the operator would
@@ -172,59 +204,44 @@ func TestLandOmStatsSinceFiltersBothForms(t *testing.T) {
 	}
 }
 
-// TestLandOmStatsWritesNothing: the command is a read. Every file under the
-// fixture root has the same bytes, size and modification time after both
-// forms run, and no file appeared.
+// TestLandOmStatsWritesNothing: the command is a read. Both forms run over a
+// fake filesystem that offers Open alone, and its files are byte-identical
+// afterwards with no path added.
 func TestLandOmStatsWritesNothing(t *testing.T) {
 	t.Parallel()
-	recordsPath, logPath := omStatsFixture(t)
-	root := filepath.Dir(recordsPath)
-	before := omStatsSnapshot(t, root)
+	records, log := omStatsFixtureLines(t)
+	fake := &landOmStatsFakeFS{files: map[string]string{
+		"/town/reviews.jsonl": records,
+		"/town/daemon.log":    log,
+	}}
+	before := map[string]string{}
+	for name, data := range fake.files {
+		before[name] = data
+	}
 
-	_ = runLandOmStatsOutput(t, recordsPath, logPath, "", false)
-	_ = runLandOmStatsOutput(t, recordsPath, logPath, "2026-10-16", true)
+	for _, tc := range []struct {
+		since  string
+		asJSON bool
+	}{{"", false}, {"2026-10-16", true}} {
+		var out bytes.Buffer
+		if err := landOmStatsReportFrom(fake, omStatsNoTown(t), &out, tc.since, "/town/reviews.jsonl", "/town/daemon.log", tc.asJSON); err != nil {
+			t.Fatalf("landOmStatsReportFrom: %v", err)
+		}
+	}
 
-	after := omStatsSnapshot(t, root)
-	if len(before) != len(after) {
-		t.Fatalf("file count %d -> %d: the command wrote a file", len(before), len(after))
+	if len(fake.files) != len(before) {
+		t.Fatalf("file count %d -> %d: the command wrote a file", len(before), len(fake.files))
 	}
 	for name, want := range before {
-		got, ok := after[name]
-		if !ok || got != want {
+		if got := fake.files[name]; got != want {
 			t.Errorf("%s changed: %q -> %q", name, want, got)
 		}
 	}
-}
-
-// omStatsSnapshot fingerprints every file under root: its size, mode,
-// modification time and content hash.
-func omStatsSnapshot(t *testing.T, root string) map[string]string {
-	t.Helper()
-	snap := map[string]string{}
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	for _, name := range fake.opened {
+		if _, ok := before[name]; !ok {
+			t.Errorf("the command opened %q, which is not one of its sources", name)
 		}
-		name, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		entry := fmt.Sprintf("%d %s %d", info.Size(), info.Mode(), info.ModTime().UnixNano())
-		if !info.IsDir() {
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			sum := sha256.Sum256(data)
-			entry += " " + hex.EncodeToString(sum[:])
-		}
-		snap[name] = entry
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("snapshotting %s: %v", root, err)
 	}
-	return snap
 }
 
 // TestLandOmStatsRejectsABadSince keeps a mistyped day from silently reporting
@@ -244,21 +261,63 @@ func TestLandOmStatsRejectsABadSince(t *testing.T) {
 	}
 }
 
-// TestLandOmStatsMissingSources reads nothing rather than failing: a town that
-// has not landed yet has neither file.
-func TestLandOmStatsMissingSources(t *testing.T) {
+// TestLandOmStatsNamedSourceMustExist keeps a mistyped --records or --log from
+// reading as a clean, empty report: the run fails and names the path.
+func TestLandOmStatsNamedSourceMustExist(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	text := runLandOmStatsOutput(t, filepath.Join(dir, "no-records.jsonl"), filepath.Join(dir, "no-daemon.log"), "", false)
-	if !strings.Contains(text, "no om verdicts in range") {
-		t.Errorf("table = %q, want an empty report", text)
+	records, log := omStatsFixtureLines(t)
+	fake := &landOmStatsFakeFS{files: map[string]string{
+		"/town/reviews.jsonl": records,
+		"/town/daemon.log":    log,
+	}}
+	for _, tc := range []struct{ name, recordsPath, logPath, missing string }{
+		{"records", "/town/no-reviews.jsonl", "/town/daemon.log", "/town/no-reviews.jsonl"},
+		{"log", "/town/reviews.jsonl", "/town/no-daemon.log", "/town/no-daemon.log"},
+	} {
+		var out bytes.Buffer
+		err := landOmStatsReportFrom(fake, omStatsNoTown(t), &out, "", tc.recordsPath, tc.logPath, false)
+		if err == nil {
+			t.Errorf("%s: missing explicit %s read as a report:\n%s", tc.name, tc.name, out.String())
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.missing) {
+			t.Errorf("%s: error %q does not name %q", tc.name, err, tc.missing)
+		}
+		if out.Len() != 0 {
+			t.Errorf("%s: printed a report after the error:\n%s", tc.name, out.String())
+		}
 	}
-	raw := runLandOmStatsOutput(t, filepath.Join(dir, "no-records.jsonl"), filepath.Join(dir, "no-daemon.log"), "", true)
-	var stats land.OmStats
-	if err := json.Unmarshal([]byte(raw), &stats); err != nil {
-		t.Fatalf("--json output does not decode: %v", err)
+}
+
+// TestLandOmStatsReadsAndToleratesTheTownDefaults: empty flags resolve to the
+// town's two files. A town that has not landed yet has neither, and still
+// reports an empty range rather than failing.
+func TestLandOmStatsReadsAndToleratesTheTownDefaults(t *testing.T) {
+	t.Parallel()
+	town := "/town"
+	findTown := func() (string, error) { return town, nil }
+	report := func(fake *landOmStatsFakeFS) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := landOmStatsReportFrom(fake, findTown, &out, "", "", "", false); err != nil {
+			t.Fatalf("landOmStatsReportFrom: %v", err)
+		}
+		return out.String()
 	}
-	if len(stats.Days) != 0 || len(stats.Rigs) != 0 || len(stats.Agents) != 0 || len(stats.TopBeads) != 0 {
-		t.Errorf("empty sources read %+v, want no rows", stats)
+
+	if got := report(&landOmStatsFakeFS{files: map[string]string{}}); !strings.Contains(got, "no om verdicts in range") {
+		t.Errorf("a town without either default file printed %q, want an empty report", got)
+	}
+
+	records, log := omStatsFixtureLines(t)
+	fake := &landOmStatsFakeFS{files: map[string]string{
+		land.TownReviewsFile(town).Path:                   records,
+		filepath.Join(town, "daemon", daemonlog.FileName): log,
+	}}
+	got := report(fake)
+	for _, want := range []string{"2026-10-14*", "2026-10-16", "2026-10-17"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("defaults did not reach the town's files: %q missing from\n%s", want, got)
+		}
 	}
 }

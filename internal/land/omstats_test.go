@@ -247,6 +247,27 @@ func TestAggregateOmStatsWithoutRecordsFallsBackEntirely(t *testing.T) {
 	}
 }
 
+// TestAggregateOmStatsLogMeansIgnoreAbsentFigures: a daemon-log rejection that
+// names no score or no findings length enters neither mean, so a partial line
+// does not pull the average toward zero.
+func TestAggregateOmStatsLogMeansIgnoreAbsentFigures(t *testing.T) {
+	t.Parallel()
+	log := strings.Join([]string{
+		"2026/10/15 10:00:00 landing_worker: [land] gt-a: rejected (review): om requested changes",
+		"2026/10/15 11:00:00 landing_worker: [land] gt-b: rejected (review): om requested changes (score 0.20)",
+		"2026/10/15 12:00:00 landing_worker: [land] gt-c: rejected (review): om requested changes (2 finding(s))",
+		"2026/10/16 10:00:00 landing_worker: [land] gt-d: rejected (review): om requested changes (score 0.00, 0 finding(s))",
+	}, "\n") + "\n"
+
+	stats, err := AggregateOmStats(nil, strings.NewReader(log), time.Time{})
+	if err != nil {
+		t.Fatalf("AggregateOmStats: %v", err)
+	}
+	wantOmStatsDay(t, stats, OmStatsDay{Day: "2026-10-15", Rejections: 3, Rate: 1, MeanFindings: 2, MeanScore: 0.20, Fallback: true})
+	// A named zero is a sample, unlike an absent figure.
+	wantOmStatsDay(t, stats, OmStatsDay{Day: "2026-10-16", Rejections: 1, Rate: 1, MeanScore: 0, Fallback: true})
+}
+
 // TestAggregateOmStatsOrdersTopBeads: the ten-bead table keeps the highest
 // counts, then the lowest bead id, so the same fixture always prints the same
 // rows.
