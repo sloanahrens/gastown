@@ -268,6 +268,7 @@ button.arow-head:hover{background:#19212b}
 .agroup{margin-top:6px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 .agroup:first-child{margin-top:0}
 .arow .heldby{color:var(--dim)}
+.arow .nh{color:var(--dim);margin-right:6px}
 .arow .waiting{color:var(--blue)}
 .arow .badc{display:block}
 .arow .qcmd,.arow .qrec{margin-top:3px}
@@ -2862,7 +2863,7 @@ function attnItemKey(r) { return r.kind + ":" + (r.id || ""); }
 // stays out: it moves with every publish, and a row that only aged is the row
 // the reader folded.
 function attnStamp(r) {
-  const said = [r.owner, r.severity, r.level, r.rule, r.priority, r.effort, r.state, r.title,
+  const said = [r.owner, r.severity, r.level, r.rule, r.needs_human, r.priority, r.effort, r.state, r.title,
     r.question, r.recommended, r.held_count, (r.held || []).join(","), r.malformed, r.escalated_by].join("\u0000");
   let h = 2166136261;
   for (let i = 0; i < said.length; i++) h = Math.imul(h ^ said.charCodeAt(i), 16777619);
@@ -2962,6 +2963,9 @@ function drawAttention() {
   // A reader that has not reported yet is not a reader that found nothing, so
   // its absence is named before the empty line can stand for it.
   if (pending.length) box.append(el("div", "empty", "the " + pending.join(" and the ") + " have not been read yet"));
+  // The rows are read; only Jev's answers behind them are not. The panel says
+  // so beside the rows rather than rendering them as a queue nothing scored.
+  if (at.scores_failed) box.append(el("div", "empty", "Jev's needs_human answers could not be read: every queue item reads needs ?"));
   const shown = (at.rows || []).filter(ownerShown);
   if (!shown.length) {
     // A filter with no chip on is the reader's own doing; otherwise the panel is
@@ -3051,6 +3055,14 @@ function attentionRow(r) {
     // "owner", which the row's own owner tag already says and says differently.
     if (r.held_by) head.append(el("span", "heldby", "held by " + r.held_by));
     if (r.waiting_on) head.append(el("span", "waiting", "waiting on " + r.waiting_on));
+    // Jev's needs_human probability is drawn beside the row the server ordered
+    // by it inside its alert level, so a low score sinks it without hiding it. A
+    // dash is an item no answer names yet, which still stands in the list; a
+    // question mark says the answers log could not be read, which is not the
+    // same claim (gt-b9j3o.2).
+    head.append(el("span", "nh", r.needs_human == null
+      ? (attentionState && attentionState.attention && attentionState.attention.scores_failed ? "needs ?" : "needs –")
+      : "needs " + r.needs_human.toFixed(2)));
   } else {
     head.append(el("span", "bead", r.id || ""));
   }

@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"slices"
 	"strconv"
@@ -390,6 +391,59 @@ func TestThePanelDrawsTheThreeKindsOfRow(t *testing.T) {
 		if !strings.Contains(i.Text, want) {
 			t.Errorf("the queue item row reads %q, with no %q", i.Text, want)
 		}
+	}
+}
+
+// A queue item draws Jev's needs_human answer beside it, and an item no answer
+// names draws a dash rather than a made-up zero: the reader sees the number the
+// row is ranked by, and an unanswered item still stands in the list.
+func TestThePanelDrawsTheNeedsHumanScore(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{
+		map[string]any{"kind": "item", "owner": "overseer", "id": "stall:gastown/opal", "title": "opal is stalled",
+			"level": "warn", "rule": "polecat.stalled", "age_sec": 60, "needs_human": 0.87},
+		map[string]any{"kind": "item", "owner": "overseer", "id": "red-main:gastown", "title": "main is red",
+			"level": "crit", "rule": "red-main", "age_sec": 30},
+	}}))
+	switchOwner(t, dom, "overseer")
+
+	rows := panelRows(t, dom)
+	if len(rows) != 2 {
+		t.Fatalf("the panel drew %d rows (%+v), want both queue items", len(rows), rows)
+	}
+	if !strings.Contains(rows[0].Text, "needs 0.87") || !panelCells(rows[0], "span nh") {
+		t.Errorf("the scored row reads %q with cells %v, want its 0.87 drawn", rows[0].Text, rows[0].Cells)
+	}
+	if !strings.Contains(rows[1].Text, "needs –") {
+		t.Errorf("the unanswered row reads %q, want a dash rather than a score", rows[1].Text)
+	}
+
+	// An answers log nobody could read is not a dash: the panel says the read
+	// failed and the rows read "?" instead, so the two states stay apart
+	// (gt-b9j3o.2). The owner chip is already on the overseer's rows.
+	dom.call(t, "renderAttention", attentionState(map[string]any{
+		"scores_failed": true,
+		"rows": []any{
+			map[string]any{"kind": "item", "owner": "overseer", "id": "red-main:gastown", "title": "main is red",
+				"level": "crit", "rule": "red-main", "age_sec": 30},
+		}}))
+	rows = panelRows(t, dom)
+	var item *panelDrawn
+	for i := range rows {
+		if rows[i].Owner == "overseer" {
+			item = &rows[i]
+		}
+	}
+	if item == nil {
+		t.Fatalf("the panel drew %+v, want the one item", rows)
+	}
+	if !strings.Contains(item.Text, "needs ?") {
+		t.Errorf("a row of an unreadable answers log reads %q, want needs ?", item.Text)
+	}
+	if body := dom.element(t, "attention").Text; !strings.Contains(body, "needs_human answers could not be read") {
+		t.Errorf("the panel does not say the answers log could not be read: %q", body)
 	}
 }
 
@@ -1374,6 +1428,58 @@ func itemAge(t *testing.T, h *Hub) int64 {
 	}
 	t.Fatal("the list holds no queue item")
 	return 0
+}
+
+// The hub draws the panel's rows from the answers reader it was given, and names
+// the read when the log could not be read: the rows keep standing either way,
+// and an unread log never reads as a queue Jev answered nothing about
+// (gt-b9j3o.2).
+func TestTheHubScoresThePanelFromTheAnswersReader(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	f := NewAttentionFollower(town)
+	fail := false
+	scores := attention.Scores{attention.LifeKey("host:disk", alertBase): 0.87}
+	h := NewHub(Config{
+		Now:       func() time.Time { return alertBase },
+		Attention: f.Read,
+		NeedsHuman: func() (attention.Scores, error) {
+			if fail {
+				return nil, errors.New("reading attention.jsonl: permission denied")
+			}
+			return scores, nil
+		},
+	})
+	writeAttentionEvents(t, town, attention.Event{TS: alertBase, Class: attention.KindRiskPath, Severity: attention.SeverityLow,
+		Text: "record", Key: "risk:x", State: attention.EventNew, Rule: attention.RuleRiskPath, Handled: attention.HandledInfo})
+	h.pollAttention() // opens the tail; the file held only an info line
+
+	writeAttentionEvents(t, town, wakeEvent(attention.RuleHostDiskCrit, "host:disk", "the volume is 96% full", attention.SeverityHigh))
+	h.pollAttention()
+	rows := h.State().Attention.Rows
+	if len(rows) != 1 {
+		t.Fatalf("the panel holds %+v, want the host reading alone", rows)
+	}
+	if rows[0].NeedsHuman == nil || *rows[0].NeedsHuman != 0.87 {
+		t.Errorf("the row carries the score %v, want the reader's 0.87", rows[0].NeedsHuman)
+	}
+
+	// The log becomes unreadable, and the next raise redraws the panel.
+	fail = true
+	writeAttentionEvents(t, town, wakeEvent(attention.RuleRedMain, "red-main:gastown", "main is red", attention.SeverityHigh))
+	h.pollAttention()
+	at := h.State().Attention
+	if len(at.Rows) != 2 {
+		t.Fatalf("an unreadable answers log dropped a row: %+v", at.Rows)
+	}
+	if !at.ScoresFailed {
+		t.Error("an unreadable answers log left the panel saying the scores were read")
+	}
+	if at.NeedsYou.Count != 2 || len(at.Failed) != 0 {
+		t.Errorf("an unreadable answers log left %d needs-you rows and failed %v, want the rows read and no failed reader",
+			at.NeedsYou.Count, at.Failed)
+	}
 }
 
 // /api/state carries the panel's two groups with their counts and with the

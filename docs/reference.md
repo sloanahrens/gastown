@@ -939,13 +939,28 @@ the path that reads it.
 overseer judgment, and acknowledges an item.
 
 ```bash
-gt attention                 # the queue, oldest first
+gt attention                 # the queue, highest needs_human score first
 gt attention --all           # include acked items
 gt attention --json          # state.json
 gt attention -f              # stream new transitions as they append
 gt attention --follow --wake-only   # only the events that need a decision
 gt attention ack <key> --disposition needed-human  # hide it until it clears
 ```
+
+The `NEEDS` column is Jev's `needs_human` probability for the item, read from
+`<town>/.runtime/jev/attention.jsonl` (see **Attention battery**); `gt attention
+--help` states the order it gives the queue. The score clears nothing, because
+its precision (43.8% at 98% recall over 228 labels, as `gt jev scorecard
+--battery attention` reports it) is too low for that: every item stays listed
+and a low score only sinks it. The dashboard's Attention panel draws the same
+number beside each queue item and orders each alert level by it.
+
+A `-` in `NEEDS` is an item no answer names yet, and a log that was never
+written leaves every item at `-`. A log that exists but cannot be read is a
+different state: the table prints a `NEEDS unavailable` header and its cells
+read `?`, so an unread answers log never looks like a queue Jev declined to
+score. A failed read has one cause to look for — the file's mode, or a
+directory where the log should be.
 
 An ack must say what the item needed: `needed-human`, `fixed-by-overseer` or
 `noise`. `gt attention ack` records it in `acks-history.jsonl`. `--disposition`

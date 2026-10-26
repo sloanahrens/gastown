@@ -824,6 +824,12 @@ type Config struct {
 	// from (NewAttentionFollower.Items). An error names the read among the ones
 	// the panel says failed; nil leaves every queue row act.
 	AttentionItems func() ([]attention.Item, error)
+	// NeedsHuman returns Jev's needs_human answers by item life, keyed as
+	// attention.LifeKey names them (jev/attention.NewScoreReader), and the
+	// error of a log that exists but could not be read: the panel then says
+	// the scores are unreadable rather than drawing them as unanswered. A nil
+	// function, or a nil error with no answers, leaves every item unscored.
+	NeedsHuman func() (attention.Scores, error)
 	// Models reads the header strip's models from the configs the town keeps.
 	Models func() *Models
 	// SeatRoster reads the occupancy the spec dispatcher counts, for the

@@ -22,6 +22,7 @@ import (
 	"github.com/google/shlex"
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
@@ -428,6 +429,10 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	rework := newDashReworkReader(townRoot).withStages(om.stagesSince)
 	loads := newDashLoads(townRoot, time.Now)
 	mango := dashboardMangoPath(townRoot, mangoDir)
+	// One reader for the panel's whole life: it reads only what Jev appended
+	// since the last publish, and it is read from the shared attention package
+	// so the dashboard does not reach into the battery's own (gt-b9j3o.2).
+	attentionScoreReader := attention.NewScoreReader(attention.AnswersPath(townRoot))
 	return dashboard.NewHub(dashboard.Config{
 		Feed:           feed,
 		Summary:        func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
@@ -456,6 +461,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Dispatch:       om.dispatch,
 		Attention:      dashboard.NewAttentionFollower(townRoot).Read,
 		AttentionItems: dashboard.NewAttentionFollower(townRoot).Items,
+		NeedsHuman:     attentionScoreReader.Scores,
 		Models:         models.read,
 		SeatRoster:     func() dashboard.SeatRoster { return dashboardSeatRoster(poolLiveFor(townRoot)) },
 		Queue:          func() *dashboard.Queue { return queue.read(time.Now()) },

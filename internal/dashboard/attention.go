@@ -79,6 +79,11 @@ type AttentionRow struct {
 	// WaitingOn is a queue item's own waiting-on line: what clears it. Empty
 	// when the item waits on nothing it can name.
 	WaitingOn string `json:"waiting_on,omitempty"`
+	// NeedsHuman is Jev's needs_human probability for a queue item: nil when no
+	// answer names it yet, and for the row kinds the queue's battery does not
+	// score. It ranks the item rows inside their alert level and is drawn
+	// beside each one, so a low score sinks a row without hiding it.
+	NeedsHuman *float64 `json:"needs_human,omitempty"`
 	// Urgency orders the rows inside one owner and kind, lowest first: an
 	// escalation's severity, a question's priority, an item's alert level.
 	Urgency int `json:"-"`
@@ -126,6 +131,11 @@ type Attention struct {
 	// Failed names the readers behind the list that could not be read
 	// ("escalations", "questions", "attention queue").
 	Failed []string `json:"failed,omitempty"`
+	// ScoresFailed says Jev's answers log exists and could not be read. It is
+	// not a failed row reader: the rows and their owners were read, so the
+	// panel keeps its groups and counts and draws "?" where a score would be,
+	// rather than claiming Jev answered nothing (gt-b9j3o.2).
+	ScoresFailed bool `json:"scores_failed,omitempty"`
 	// Pending names the readers that have not reported yet.
 	Pending []string `json:"pending,omitempty"`
 }
@@ -141,17 +151,27 @@ type AttentionQueue struct {
 	Failed bool
 }
 
+// ScoresRead is one read of Jev's needs_human answers: the answers by item
+// life, and the error of a log that exists but could not be read. An error is
+// not an empty set of answers: the panel then names the read instead of
+// drawing every row as unanswered.
+type ScoresRead struct {
+	Scores attention.Scores
+	Err    error
+}
+
 // buildAttention merges the three readers into the one list. items are the
 // attention alerts that stand now (Alerter.Standing), queue the attention
-// queue's own items as the daemon last wrote them, and now is the read time the
-// items' ages are taken against.
+// queue's own items as the daemon last wrote them, scores the needs_human
+// answers by item life, and now is the read time the items' ages are taken
+// against.
 //
 // A standing alert is matched to its queue item by key for the class, owner and
 // waiting-on the row carries. A key the queue does not hold — a cleared item
 // whose line has not arrived, or a state nobody could read — is act, so a
 // condition nobody could classify is seen rather than filed away. A read that
 // failed says so in Failed beside the rows it could not classify.
-func buildAttention(esc *Escalations, ask *Questions, items []Alert, queue AttentionQueue, now time.Time) *Attention {
+func buildAttention(esc *Escalations, ask *Questions, items []Alert, queue AttentionQueue, scores ScoresRead, now time.Time) *Attention {
 	byKey := make(map[string]attention.Item, len(queue.Items))
 	for _, it := range queue.Items {
 		byKey[it.Key] = it
@@ -163,6 +183,7 @@ func buildAttention(esc *Escalations, ask *Questions, items []Alert, queue Atten
 	if queue.Failed {
 		at.Failed = append(at.Failed, "attention queue")
 	}
+	at.ScoresFailed = scores.Err != nil
 	if esc == nil {
 		at.Pending = append(at.Pending, "escalations")
 	}
@@ -244,6 +265,9 @@ func buildAttention(esc *Escalations, ask *Questions, items []Alert, queue Atten
 			sec := int64(age.Seconds())
 			row.AgeSec = &sec
 		}
+		if score, ok := scores.Scores[attention.LifeKey(al.Key, al.At)]; ok {
+			row.NeedsHuman = &score
+		}
 		at.Rows = append(at.Rows, row)
 	}
 
@@ -288,8 +312,15 @@ func coveredByABead(rule string) bool {
 
 // attentionBefore orders the panel: the human's rows above the overseer's, the
 // questions above the other kinds (a question stops the town until it is
-// answered), then the loudest first and, at one loudness, the longest wait
-// first.
+// answered), then the loudest first. Inside one alert level of queue items,
+// Jev's needs_human answer ranks them, highest first; an item with no answer
+// sorts after the answered ones. At one score, and for the row kinds the
+// battery does not score, the longest wait leads.
+//
+// The level leads because this is the page that raises alarms: a crit row must
+// not sink under a warn one, so the score orders each level and never buries or
+// hides a row (gt-b9j3o.2). The queue's own table has no alert levels and ranks
+// by the score alone (attention.OrderByNeedsHuman).
 func attentionBefore(a, b AttentionRow) bool {
 	if a.Owner != b.Owner {
 		return ownerRank(a.Owner) < ownerRank(b.Owner)
@@ -299,6 +330,16 @@ func attentionBefore(a, b AttentionRow) bool {
 	}
 	if a.Urgency != b.Urgency {
 		return a.Urgency < b.Urgency
+	}
+	switch {
+	case a.NeedsHuman != nil && b.NeedsHuman != nil:
+		if *a.NeedsHuman != *b.NeedsHuman {
+			return *a.NeedsHuman > *b.NeedsHuman
+		}
+	case a.NeedsHuman != nil:
+		return true
+	case b.NeedsHuman != nil:
+		return false
 	}
 	return ageOf(a.AgeSec) > ageOf(b.AgeSec)
 }
