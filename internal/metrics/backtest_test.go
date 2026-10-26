@@ -214,16 +214,44 @@ func TestBacktestSectionListsEveryMetric(t *testing.T) {
 	}
 }
 
-func TestBacktestTargetMetricNamesOnlyMangoTargets(t *testing.T) {
-	t.Parallel()
-	run := make(map[string]bool, len(mangoTargets))
-	for _, target := range mangoTargets {
+// targetMapping is one targetMetric entry: a mango target and the metric a box
+// on it speaks for.
+type targetMapping = struct{ target, metric string }
+
+// targetsMangoDropped returns the targets in mapped that runTargets does not
+// name: a target mango dropped answers nothing about its metric.
+func targetsMangoDropped(mapped []targetMapping, runTargets []string) []string {
+	run := make(map[string]bool, len(runTargets))
+	for _, target := range runTargets {
 		run[target] = true
 	}
-	for _, tm := range targetMetric {
+	var dropped []string
+	for _, tm := range mapped {
 		if !run[tm.target] {
-			t.Errorf("targetMetric maps %q, which mango no longer runs", tm.target)
+			dropped = append(dropped, tm.target)
 		}
+	}
+	return dropped
+}
+
+func TestBacktestTargetMetricNamesOnlyMangoTargets(t *testing.T) {
+	t.Parallel()
+	if dropped := targetsMangoDropped(targetMetric, mangoTargets); len(dropped) != 0 {
+		t.Errorf("targetMetric maps %v, which mango no longer runs", dropped)
+	}
+}
+
+// TestBacktestTargetMetricGuardReportsADroppedTarget drives the guard's failing
+// branch: a mapping naming a target mango dropped must come back by name, or
+// the guard cannot catch the drift it exists for.
+func TestBacktestTargetMetricGuardReportsADroppedTarget(t *testing.T) {
+	t.Parallel()
+	mapped := []targetMapping{
+		{"kept", "rework depth"},
+		{"dropped", "non-conservative merges"},
+	}
+	if got := targetsMangoDropped(mapped, []string{"kept"}); len(got) != 1 || got[0] != "dropped" {
+		t.Errorf("targetsMangoDropped(mapped, [kept]) = %v, want [dropped]", got)
 	}
 }
 
