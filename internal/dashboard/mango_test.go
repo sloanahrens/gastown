@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,22 +29,48 @@ func mangoFixture(t *testing.T, panel string) string {
 	return dir
 }
 
-// mangoPanelJSON builds a valid panel around the targets given, generated at
-// gen, with one landing count and one snapshot-hour count.
-func mangoPanelJSON(t *testing.T, gen string, targets ...map[string]any) string {
-	t.Helper()
-	p := map[string]any{
+// mangoPanelMap is a valid panel's fields around the targets given, for tests
+// that add keys of their own beside them.
+func mangoPanelMap(gen string, targets ...map[string]any) map[string]any {
+	return map[string]any{
 		"schema_version": mangoSchema,
 		"generated_at":   gen,
 		"items":          412,
 		"snapshot_hours": 168,
 		"targets":        targets,
 	}
+}
+
+// mangoJSON marshals a panel map, failing the test on a value JSON cannot carry.
+func mangoJSON(t *testing.T, p map[string]any) string {
+	t.Helper()
 	b, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// mangoPanelJSON builds a valid panel around the targets given, generated at
+// gen, with one landing count and one snapshot-hour count.
+func mangoPanelJSON(t *testing.T, gen string, targets ...map[string]any) string {
+	t.Helper()
+	return mangoJSON(t, mangoPanelMap(gen, targets...))
+}
+
+// mangoConditionRow is one best-box condition as the writer writes it.
+func mangoConditionRow(text string, share float64, narrows bool) map[string]any {
+	return map[string]any{"text": text, "share": share, "narrows": narrows}
+}
+
+// mangoWeekRow is one week of the trend as the writer writes it.
+func mangoWeekRow(week string, landings int, share float64) map[string]any {
+	return map[string]any{"week": week, "landings": landings, "rejected_share": share}
+}
+
+// mangoEventRow is one regime event as the writer writes it.
+func mangoEventRow(date, what string) map[string]any {
+	return map[string]any{"date": date, "what": what}
 }
 
 func mangoTargetMap(target string, positives int, verdict, box string) map[string]any {
@@ -549,4 +576,487 @@ func TestMangoRefusesANonRegularPanel(t *testing.T) {
 	if m := ReadMango(dir, mangoNow); m.State != MangoError {
 		t.Errorf("a symlinked panel reads %q note %q, want %q", m.State, m.Note, MangoError)
 	}
+}
+
+// The best box's conditions and the target's last positive day reach the page
+// from the golden panel: the box's own order, each share and narrows flag as
+// written, and neither key on a target that was never run. Guards
+// `row.Conditions = mangoConditions(t.Conditions)` and the `mangoDay` check on
+// last_positive in mangoTargets.
+func TestMangoReadsTheConditionsAndLastPositive(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile(filepath.Join("testdata", "mango_panel.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := ReadMango(mangoFixture(t, string(raw)), mangoNow)
+	if m.State != MangoFresh {
+		t.Fatalf("state %q note %q", m.State, m.Note)
+	}
+	if len(m.Targets) != 3 {
+		t.Fatalf("%d targets, want 3", len(m.Targets))
+	}
+
+	earning := m.Targets[0]
+	want := []MangoCondition{
+		{Text: "model in {opus}", Share: 0.58, Narrows: true},
+		{Text: "attempts in [3, 4]", Share: 0.41, Narrows: true},
+	}
+	if !reflect.DeepEqual(earning.Conditions, want) {
+		t.Errorf("the earning target's conditions read %+v, want %+v", earning.Conditions, want)
+	}
+	if earning.LastPositive != "2026-10-20" {
+		t.Errorf("the earning target's last positive reads %q", earning.LastPositive)
+	}
+
+	noSignal := m.Targets[1]
+	if len(noSignal.Conditions) != 2 {
+		t.Fatalf("the no-signal target's conditions read %+v, want two", noSignal.Conditions)
+	}
+	if c := noSignal.Conditions[1]; c.Text != "files_touched in {none}" || c.Share != 0.94 || c.Narrows {
+		t.Errorf("a condition the box does not narrow reads %+v", c)
+	}
+	if noSignal.LastPositive != "2026-10-21" {
+		t.Errorf("the no-signal target's last positive reads %q", noSignal.LastPositive)
+	}
+
+	if skipped := m.Targets[2]; skipped.Conditions != nil || skipped.LastPositive != "" {
+		t.Errorf("a target with no box reads conditions %+v and last positive %q", skipped.Conditions, skipped.LastPositive)
+	}
+}
+
+// The panel's weekly series and regime events reach the page from the golden
+// panel in the writer's oldest-first order, every field intact. Guards the
+// `m.Weekly, m.Events = mangoWeeks(p.Weekly), mangoEvents(p.Events)` assignment.
+func TestMangoReadsTheWeeklySeriesAndEvents(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile(filepath.Join("testdata", "mango_panel.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := ReadMango(mangoFixture(t, string(raw)), mangoNow)
+	if m.State != MangoFresh {
+		t.Fatalf("state %q note %q", m.State, m.Note)
+	}
+	want := []MangoWeek{
+		{Week: "2026-10-05", Landings: 27, RejectedShare: 0.25},
+		{Week: "2026-10-12", Landings: 34, RejectedShare: 0.125},
+	}
+	if !reflect.DeepEqual(m.Weekly, want) {
+		t.Errorf("the weekly series reads %+v, want %+v", m.Weekly, want)
+	}
+	wantEvents := []MangoEvent{{Date: "2026-10-10", What: "flash seats replaced by Sonnet seats"}}
+	if !reflect.DeepEqual(m.Events, wantEvents) {
+		t.Errorf("the events read %+v, want %+v", m.Events, wantEvents)
+	}
+}
+
+// A panel from the writer before the trend keys existed reads as before, and
+// one the reader never read still hands the page an empty list: weekly and
+// events marshal as [] rather than null, and a target carries neither
+// conditions nor a last positive. Guards the Weekly and Events initializers in
+// ReadMango and mangoWeeks' and mangoEvents' empty returns.
+func TestMangoReadsAPanelWithoutTheTrend(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		dir  string
+	}{
+		{"panel without the keys", mangoFixture(t, mangoPanelJSON(t, mangoNow.Format(time.RFC3339),
+			mangoTargetMap("manual_rescue", 37, MangoNoSignal, "attempts in q3")))},
+		{"no panel at all", mangoFixture(t, "")},
+	} {
+		m := ReadMango(tc.dir, mangoNow)
+		if m.Weekly == nil || len(m.Weekly) != 0 {
+			t.Errorf("%s: weekly reads %+v, want an empty list", tc.name, m.Weekly)
+		}
+		if m.Events == nil || len(m.Events) != 0 {
+			t.Errorf("%s: events read %+v, want an empty list", tc.name, m.Events)
+		}
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(b, &payload); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"weekly", "events"} {
+			if got := string(payload[key]); got != "[]" {
+				t.Errorf("%s: %s marshals as %s, want []", tc.name, key, got)
+			}
+		}
+	}
+
+	m := ReadMango(mangoFixture(t, mangoPanelJSON(t, mangoNow.Format(time.RFC3339),
+		mangoTargetMap("manual_rescue", 37, MangoNoSignal, "attempts in q3"))), mangoNow)
+	b, err := json.Marshal(m.Targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"conditions", "last_positive"} {
+		if strings.Contains(string(b), `"`+key+`"`) {
+			t.Errorf("an absent %q reached the page's payload: %s", key, b)
+		}
+	}
+}
+
+// Every row the reader cannot place is dropped on its own and the panel still
+// reads fresh: a bad share, a date that is not a calendar day, negative
+// landings and a share outside 0..1 each cost their row, never the rest of the
+// panel. Guards the `!mangoFraction(c.Share)` check in mangoConditions, the
+// `mangoDay` check on last_positive, and the week, landings and share checks in
+// mangoWeeks and the date check in mangoEvents.
+func TestMangoDropsTheRowsItCannotPlace(t *testing.T) {
+	t.Parallel()
+
+	oneTarget := func(mutate func(row map[string]any)) string {
+		row := mangoTargetMap("manual_rescue", 37, MangoNoSignal, "attempts in q3")
+		mutate(row)
+		return mangoPanelJSON(t, mangoNow.Format(time.RFC3339), row)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		panel string
+		want  func(t *testing.T, m *Mango)
+	}{
+		{
+			name: "a condition share below zero",
+			panel: oneTarget(func(row map[string]any) {
+				row["conditions"] = []map[string]any{
+					mangoConditionRow("kept", 0.4, true),
+					mangoConditionRow("dropped", -0.01, true),
+				}
+			}),
+			want: func(t *testing.T, m *Mango) {
+				if got := m.Targets[0].Conditions; len(got) != 1 || got[0].Text != "kept" {
+					t.Errorf("conditions read %+v, want only the kept one", got)
+				}
+			},
+		},
+		{
+			name: "a condition share above one",
+			panel: oneTarget(func(row map[string]any) {
+				row["conditions"] = []map[string]any{mangoConditionRow("dropped", 1.01, true)}
+			}),
+			want: func(t *testing.T, m *Mango) {
+				if got := m.Targets[0].Conditions; len(got) != 0 {
+					t.Errorf("conditions read %+v, want none", got)
+				}
+			},
+		},
+		{
+			name: "shares at the bounds are proportions",
+			panel: oneTarget(func(row map[string]any) {
+				row["conditions"] = []map[string]any{
+					mangoConditionRow("none", 0, false),
+					mangoConditionRow("all", 1, true),
+				}
+			}),
+			want: func(t *testing.T, m *Mango) {
+				if got := m.Targets[0].Conditions; len(got) != 2 ||
+					got[0].Share != 0 || got[1].Share != 1 || got[0].Narrows {
+					t.Errorf("conditions at the bounds read %+v", got)
+				}
+			},
+		},
+		{
+			name: "a last positive that is not a calendar day",
+			panel: oneTarget(func(row map[string]any) {
+				row["last_positive"] = "2026-10-5"
+			}),
+			want: func(t *testing.T, m *Mango) {
+				if got := m.Targets[0].LastPositive; got != "" {
+					t.Errorf("a last positive that is not a day reads %q", got)
+				}
+			},
+		},
+		{
+			name: "a last positive that is a calendar day",
+			panel: oneTarget(func(row map[string]any) {
+				row["last_positive"] = "2026-10-20"
+			}),
+			want: func(t *testing.T, m *Mango) {
+				if got := m.Targets[0].LastPositive; got != "2026-10-20" {
+					t.Errorf("a last positive day reads %q", got)
+				}
+			},
+		},
+		{
+			name: "a week that is not a calendar day",
+			panel: withTrend(t, []map[string]any{
+				mangoWeekRow("2026-10-5", 27, 0.25),
+				mangoWeekRow("2026-10-12", 34, 0.125),
+			}, nil),
+			want: func(t *testing.T, m *Mango) {
+				if len(m.Weekly) != 1 || m.Weekly[0].Week != "2026-10-12" {
+					t.Errorf("weekly reads %+v, want only the later week", m.Weekly)
+				}
+			},
+		},
+		{
+			name: "a week with negative landings",
+			panel: withTrend(t, []map[string]any{
+				mangoWeekRow("2026-10-05", -1, 0.25),
+				mangoWeekRow("2026-10-12", 34, 0.125),
+			}, nil),
+			want: func(t *testing.T, m *Mango) {
+				if len(m.Weekly) != 1 || m.Weekly[0].Landings != 34 {
+					t.Errorf("weekly reads %+v, want only the positive week", m.Weekly)
+				}
+			},
+		},
+		{
+			name: "a week share below zero",
+			panel: withTrend(t, []map[string]any{
+				mangoWeekRow("2026-10-05", 27, -0.01),
+			}, nil),
+			want: func(t *testing.T, m *Mango) {
+				if len(m.Weekly) != 0 {
+					t.Errorf("weekly reads %+v, want none", m.Weekly)
+				}
+			},
+		},
+		{
+			name: "a week share above one",
+			panel: withTrend(t, []map[string]any{
+				mangoWeekRow("2026-10-05", 27, 1.01),
+			}, nil),
+			want: func(t *testing.T, m *Mango) {
+				if len(m.Weekly) != 0 {
+					t.Errorf("weekly reads %+v, want none", m.Weekly)
+				}
+			},
+		},
+		{
+			name: "a week share at the bounds",
+			panel: withTrend(t, []map[string]any{
+				mangoWeekRow("2026-10-05", 27, 0),
+				mangoWeekRow("2026-10-12", 34, 1),
+			}, nil),
+			want: func(t *testing.T, m *Mango) {
+				if len(m.Weekly) != 2 {
+					t.Errorf("weekly at the bounds reads %+v", m.Weekly)
+				}
+			},
+		},
+		{
+			name: "an event date that is not a calendar day",
+			panel: withTrend(t, nil, []map[string]any{
+				mangoEventRow("2026-13-01", "dropped"),
+				mangoEventRow("2026-10-10", "kept"),
+			}),
+			want: func(t *testing.T, m *Mango) {
+				if len(m.Events) != 1 || m.Events[0].What != "kept" {
+					t.Errorf("events read %+v, want only the kept one", m.Events)
+				}
+			},
+		},
+	} {
+		m := ReadMango(mangoFixture(t, tc.panel), mangoNow)
+		if m.State != MangoFresh {
+			t.Errorf("%s: state %q note %q, want %q", tc.name, m.State, m.Note, MangoFresh)
+			continue
+		}
+		if m.Items != 412 || m.SnapshotHours != 168 {
+			t.Errorf("%s: the drop took the panel's coverage: %+v", tc.name, m)
+		}
+		tc.want(t, m)
+	}
+}
+
+// withTrend is a valid panel at mangoNow carrying the weekly and event rows
+// given beside one target, each list left out when nil.
+func withTrend(t *testing.T, weekly, events []map[string]any) string {
+	t.Helper()
+	p := mangoPanelMap(mangoNow.Format(time.RFC3339),
+		mangoTargetMap("manual_rescue", 37, MangoNoSignal, "attempts in q3"))
+	if weekly != nil {
+		p["weekly"] = weekly
+	}
+	if events != nil {
+		p["events"] = events
+	}
+	return mangoJSON(t, p)
+}
+
+// A list over its cap keeps its newest entries: 27 weeks keep the last 26, 17
+// events the last 16. Guards `out = out[len(out)-mangoWeeklyMax:]` in
+// mangoWeeks and `out = out[len(out)-mangoEventsMax:]` in mangoEvents.
+func TestMangoKeepsTheNewestRowsPastTheCap(t *testing.T) {
+	t.Parallel()
+
+	day := func(i int) string {
+		return time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, i).Format(mangoDayLayout)
+	}
+	var weeks []map[string]any
+	for i := 0; i < mangoWeeklyMax+1; i++ {
+		weeks = append(weeks, mangoWeekRow(day(i), i, 0.25))
+	}
+	var events []map[string]any
+	for i := 0; i < mangoEventsMax+1; i++ {
+		events = append(events, mangoEventRow(day(i), "event"))
+	}
+	m := ReadMango(mangoFixture(t, withTrend(t, weeks, events)), mangoNow)
+	if m.State != MangoFresh {
+		t.Fatalf("state %q note %q", m.State, m.Note)
+	}
+	if len(m.Weekly) != mangoWeeklyMax {
+		t.Fatalf("%d weeks, want the %d-row cap", len(m.Weekly), mangoWeeklyMax)
+	}
+	if first, last := m.Weekly[0], m.Weekly[len(m.Weekly)-1]; first.Landings != 1 || last.Landings != mangoWeeklyMax {
+		t.Errorf("the kept weeks read %d..%d, want the newest (%d..%d)", first.Landings, last.Landings, 1, mangoWeeklyMax)
+	}
+	if len(m.Events) != mangoEventsMax {
+		t.Fatalf("%d events, want the %d-event cap", len(m.Events), mangoEventsMax)
+	}
+	if got := m.Events[len(m.Events)-1].Date; got != day(mangoEventsMax) {
+		t.Errorf("the kept events end at %s, want the newest %s", got, day(mangoEventsMax))
+	}
+}
+
+// A box with more conditions than the cap contributes its first 16 in the box's
+// own order, the writer's own rule, and a dropped share does not shorten the
+// list below the cap. Guards the `len(out) == mangoConditionsMax` break in
+// mangoConditions.
+func TestMangoCapsConditionsAtTheBoxsFirst(t *testing.T) {
+	t.Parallel()
+
+	build := func(n int, badFirst bool) string {
+		var conditions []map[string]any
+		if badFirst {
+			conditions = append(conditions, mangoConditionRow("dropped", 2, true))
+		}
+		for i := 0; i < n; i++ {
+			conditions = append(conditions, mangoConditionRow(fmt.Sprintf("condition %d", i), 0.1, true))
+		}
+		row := mangoTargetMap("manual_rescue", 37, MangoNoSignal, "attempts in q3")
+		row["conditions"] = conditions
+		return mangoPanelJSON(t, mangoNow.Format(time.RFC3339), row)
+	}
+
+	m := ReadMango(mangoFixture(t, build(mangoConditionsMax+1, false)), mangoNow)
+	if m.State != MangoFresh {
+		t.Fatalf("state %q note %q", m.State, m.Note)
+	}
+	if got := m.Targets[0].Conditions; len(got) != mangoConditionsMax {
+		t.Fatalf("%d conditions, want the %d cap", len(got), mangoConditionsMax)
+	}
+	if got := m.Targets[0].Conditions[mangoConditionsMax-1].Text; got != fmt.Sprintf("condition %d", mangoConditionsMax-1) {
+		t.Errorf("the last kept condition reads %q, want the box's first %d in order", got, mangoConditionsMax)
+	}
+
+	m = ReadMango(mangoFixture(t, build(mangoConditionsMax, true)), mangoNow)
+	if m.State != MangoFresh {
+		t.Fatalf("state %q note %q", m.State, m.Note)
+	}
+	if got := m.Targets[0].Conditions; len(got) != mangoConditionsMax {
+		t.Errorf("%d conditions after one bad share, want the cap filled from the rest", len(got))
+	}
+}
+
+// A condition's text and an event's what are another process's text: the
+// invisible runes are stripped, an over-long one is marked at the 120-rune cap,
+// and the markup that is left is drawn as text by the page. Guards
+// `cloudText(c.Text, mangoFreeTextMax)` in mangoConditions and
+// `cloudText(e.What, mangoFreeTextMax)` in mangoEvents.
+func TestMangoStripsAndCapsTheTrendText(t *testing.T) {
+	t.Parallel()
+
+	hostile := "bell:\x07 esc:\x1b[31m rlo:‮ invisible:​ <b>bold</b> " + strings.Repeat("é", 130)
+	row := mangoTargetMap("manual_rescue", 37, MangoNoSignal, "attempts in q3")
+	row["conditions"] = []map[string]any{mangoConditionRow(hostile, 0.4, true)}
+	p := mangoPanelMap(mangoNow.Format(time.RFC3339), row)
+	p["events"] = []map[string]any{mangoEventRow("2026-10-10", hostile)}
+	m := ReadMango(mangoFixture(t, mangoJSON(t, p)), mangoNow)
+	if m.State != MangoFresh {
+		t.Fatalf("state %q note %q", m.State, m.Note)
+	}
+	if n := len(m.Targets[0].Conditions); n != 1 || len(m.Events) != 1 {
+		t.Fatalf("%d conditions and %d events, want one of each", n, len(m.Events))
+	}
+	for name, s := range map[string]string{
+		"a condition's text": m.Targets[0].Conditions[0].Text,
+		"an event's what":    m.Events[0].What,
+	} {
+		for _, r := range s {
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+				t.Errorf("%s kept the invisible rune %U: %q", name, r, s)
+			}
+		}
+		if !strings.HasPrefix(s, "bell: esc:[31m rlo: invisible: <b>bold</b> ") {
+			t.Errorf("%s lost text it should have kept: %q", name, s)
+		}
+		if n := len([]rune(s)); n != mangoFreeTextMax+1 || !strings.HasSuffix(s, "…") {
+			t.Errorf("%s is %d runes and does not end at the %d-rune cap: %q", name, n, mangoFreeTextMax, s)
+		}
+	}
+}
+
+// mangoObject is a JSON object from a marshalled payload, failing the test when
+// v is not one.
+func mangoObject(t *testing.T, v any) map[string]any {
+	t.Helper()
+	obj, ok := v.(map[string]any)
+	if !ok {
+		t.Fatalf("%T is not a JSON object", v)
+	}
+	return obj
+}
+
+// mangoFirstObject is the first element of a JSON array of objects, failing the
+// test when v is not one.
+func mangoFirstObject(t *testing.T, v any) map[string]any {
+	t.Helper()
+	arr, ok := v.([]any)
+	if !ok || len(arr) == 0 {
+		t.Fatalf("%T is not a non-empty JSON array", v)
+	}
+	return mangoObject(t, arr[0])
+}
+
+// The page payload names the new keys as the writer's file does, so the reader
+// and the page speak one schema. Guards the json tags on Mango.Weekly,
+// MangoWeek, MangoEvent, MangoTarget.Conditions, MangoCondition and
+// MangoTarget.LastPositive.
+func TestMangoPayloadCarriesTheWritersKeyNames(t *testing.T) {
+	t.Parallel()
+
+	row := mangoTargetMap("manual_rescue", 37, MangoNoSignal, "attempts in q3")
+	row["conditions"] = []map[string]any{mangoConditionRow("attempts in [3, 4]", 0.4, true)}
+	row["last_positive"] = "2026-10-20"
+	p := mangoPanelMap(mangoNow.Format(time.RFC3339), row)
+	p["weekly"] = []map[string]any{mangoWeekRow("2026-10-05", 27, 0.25)}
+	p["events"] = []map[string]any{mangoEventRow("2026-10-10", "flash seats")}
+	m := ReadMango(mangoFixture(t, mangoJSON(t, p)), mangoNow)
+	if m.State != MangoFresh {
+		t.Fatalf("state %q note %q", m.State, m.Note)
+	}
+
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(b, &payload); err != nil {
+		t.Fatal(err)
+	}
+	keys := func(at string, obj map[string]any, want ...string) {
+		t.Helper()
+		for _, k := range want {
+			if _, ok := obj[k]; !ok {
+				t.Errorf("%s carries no %q: %v", at, k, obj)
+			}
+		}
+	}
+	keys("the panel", payload, "weekly", "events")
+	keys("a week", mangoFirstObject(t, payload["weekly"]), "week", "landings", "rejected_share")
+	keys("an event", mangoFirstObject(t, payload["events"]), "date", "what")
+	target := mangoFirstObject(t, payload["targets"])
+	keys("a target", target, "conditions", "last_positive")
+	keys("a condition", mangoFirstObject(t, target["conditions"]), "text", "share", "narrows")
 }

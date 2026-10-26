@@ -42,6 +42,22 @@ const (
 	// mangoLabelMax caps a target's plain-words title, which the page draws in
 	// the column a target id used to fill.
 	mangoLabelMax = 60
+
+	// The caps on the panel's lists, in entries. The writer trims each list to
+	// the same count; the reader trims again because a panel from another hand
+	// is not the writer's, and a row taller than the page has room for. A dated
+	// list reads oldest first, so its cap keeps the newest entries.
+	mangoConditionsMax = 16
+	mangoWeeklyMax     = 26
+	mangoEventsMax     = 16
+
+	// mangoFreeTextMax caps a condition's text and an event's what, the two
+	// strings the page draws whose length the writer does not bound, in runes.
+	mangoFreeTextMax = 120
+
+	// mangoDayLayout is the writer's date format for a week, an event and a
+	// target's last positive: a calendar day with no time of day.
+	mangoDayLayout = "2006-01-02"
 )
 
 // The reasons the writer gives a not-yet target. The page has a sentence for
@@ -92,29 +108,58 @@ type mangoPanel struct {
 	GeneratedAt   string        `json:"generated_at"`
 	Items         int           `json:"items"`
 	SnapshotHours int           `json:"snapshot_hours"`
+	Weekly        []mangoWeek   `json:"weekly"`
+	Events        []mangoEvent  `json:"events"`
 	Targets       []mangoTarget `json:"targets"`
+}
+
+// mangoWeek is one week of the panel's trend as the file writes it: the landings
+// that week across every rig and the share of them rejected before landing.
+type mangoWeek struct {
+	Week          string  `json:"week"`
+	Landings      int     `json:"landings"`
+	RejectedShare float64 `json:"rejected_share"`
+}
+
+// mangoEvent is one regime event the trend is marked with, as the file writes
+// it: the day the regime changed and what changed.
+type mangoEvent struct {
+	Date string `json:"date"`
+	What string `json:"what"`
+}
+
+// mangoCondition is one range of a target's best box read alone, as the file
+// writes it: the range's text, the share of the prepared landings it holds by
+// itself, and whether that share is small enough for the page to draw it as a
+// chip.
+type mangoCondition struct {
+	Text    string  `json:"text"`
+	Share   float64 `json:"share"`
+	Narrows bool    `json:"narrows"`
 }
 
 // mangoTarget is one target as the file writes it. A target skipped for too few
 // positives carries its name and its positives with no box, and the writer's
-// not-yet verdict. The box's counts, interval, thin flag and the target's label
-// and reason are the writer's newer optional keys: a panel from before they
-// existed leaves them absent.
+// not-yet verdict. The box's counts, interval, thin flag and conditions, and
+// the target's label, reason and last positive day, are the writer's newer
+// optional keys: a panel from before they existed leaves them absent.
 type mangoTarget struct {
-	Target           string   `json:"target"`
-	Label            string   `json:"label"`
-	Positives        int      `json:"positives"`
-	Skipped          bool     `json:"skipped"`
-	BestBox          string   `json:"best_box"`
-	HoldoutPositives *int     `json:"holdout_positives"`
-	HoldoutN         int      `json:"holdout_n"`
-	HoldoutRate      float64  `json:"holdout_rate"`
-	CILow            *float64 `json:"ci_low"`
-	CIHigh           *float64 `json:"ci_high"`
-	Thin             *bool    `json:"thin"`
-	Baseline         float64  `json:"baseline"`
-	Verdict          string   `json:"verdict"`
-	Reason           string   `json:"reason"`
+	Target           string           `json:"target"`
+	Label            string           `json:"label"`
+	Positives        int              `json:"positives"`
+	Skipped          bool             `json:"skipped"`
+	BestBox          string           `json:"best_box"`
+	Conditions       []mangoCondition `json:"conditions"`
+	HoldoutPositives *int             `json:"holdout_positives"`
+	HoldoutN         int              `json:"holdout_n"`
+	HoldoutRate      float64          `json:"holdout_rate"`
+	CILow            *float64         `json:"ci_low"`
+	CIHigh           *float64         `json:"ci_high"`
+	Thin             *bool            `json:"thin"`
+	Baseline         float64          `json:"baseline"`
+	Verdict          string           `json:"verdict"`
+	Reason           string           `json:"reason"`
+	LastPositive     string           `json:"last_positive"`
 }
 
 // MangoTarget is one target as the page draws it, every string stripped and
@@ -122,20 +167,50 @@ type mangoTarget struct {
 // zeroed for the page to draw. HoldoutRate and Baseline are fractions of the
 // holdout and of the whole set the box was measured against.
 type MangoTarget struct {
-	Target           string   `json:"target"`
-	Label            string   `json:"label,omitempty"`
-	Positives        int      `json:"positives"`
-	Skipped          bool     `json:"skipped,omitempty"`
-	BestBox          string   `json:"best_box,omitempty"`
-	HoldoutPositives *int     `json:"holdout_positives,omitempty"`
-	HoldoutN         int      `json:"holdout_n"`
-	HoldoutRate      float64  `json:"holdout_rate"`
-	CILow            *float64 `json:"ci_low,omitempty"`
-	CIHigh           *float64 `json:"ci_high,omitempty"`
-	Thin             *bool    `json:"thin,omitempty"`
-	Baseline         float64  `json:"baseline"`
-	Verdict          string   `json:"verdict"` // earning, no-signal or not-yet
-	Reason           string   `json:"reason,omitempty"`
+	Target    string `json:"target"`
+	Label     string `json:"label,omitempty"`
+	Positives int    `json:"positives"`
+	Skipped   bool   `json:"skipped,omitempty"`
+	BestBox   string `json:"best_box,omitempty"`
+	// Conditions is the box's ranges read alone, in the box's own order, absent
+	// when the target has no box.
+	Conditions       []MangoCondition `json:"conditions,omitempty"`
+	HoldoutPositives *int             `json:"holdout_positives,omitempty"`
+	HoldoutN         int              `json:"holdout_n"`
+	HoldoutRate      float64          `json:"holdout_rate"`
+	CILow            *float64         `json:"ci_low,omitempty"`
+	CIHigh           *float64         `json:"ci_high,omitempty"`
+	Thin             *bool            `json:"thin,omitempty"`
+	Baseline         float64          `json:"baseline"`
+	Verdict          string           `json:"verdict"` // earning, no-signal or not-yet
+	Reason           string           `json:"reason,omitempty"`
+	// LastPositive is the day the target's latest positive landed, absent
+	// unless the panel carried a calendar day the reader could parse.
+	LastPositive string `json:"last_positive,omitempty"`
+}
+
+// MangoCondition is one range of a target's best box as the page draws it: the
+// range's text, the share of the recent landings it holds by itself, and
+// whether that share is narrow enough to draw as a chip.
+type MangoCondition struct {
+	Text    string  `json:"text"`
+	Share   float64 `json:"share"`
+	Narrows bool    `json:"narrows"`
+}
+
+// MangoWeek is one week of the panel's trend: the landings that week and the
+// share of them rejected before landing.
+type MangoWeek struct {
+	Week          string  `json:"week"`
+	Landings      int     `json:"landings"`
+	RejectedShare float64 `json:"rejected_share"`
+}
+
+// MangoEvent is one regime change the trend is marked with: the day and what
+// changed.
+type MangoEvent struct {
+	Date string `json:"date"`
+	What string `json:"what"`
 }
 
 // MangoCounts is how many targets carry each verdict, which is the panel's
@@ -159,17 +234,22 @@ type Mango struct {
 	GeneratedAt *time.Time `json:"generated_at,omitempty"`
 	// Items and SnapshotHours are what the analysis covered: landings and the
 	// hours of snapshots joined to them.
-	Items         int           `json:"items"`
-	SnapshotHours int           `json:"snapshot_hours"`
-	Targets       []MangoTarget `json:"targets"`
-	Counts        MangoCounts   `json:"counts"`
+	Items         int `json:"items"`
+	SnapshotHours int `json:"snapshot_hours"`
+	// Weekly is the rejected-share trend, oldest first, and Events the regime
+	// changes drawn against it. Both are empty lists, never null, on a panel
+	// that carried neither.
+	Weekly  []MangoWeek   `json:"weekly"`
+	Events  []MangoEvent  `json:"events"`
+	Targets []MangoTarget `json:"targets"`
+	Counts  MangoCounts   `json:"counts"`
 }
 
 // ReadMango returns the town-metrics panel in dir as it stands at now. A panel
 // that is not there reads as missing, one the reader cannot use as error, and
 // one generated more than mangoStale before now as stale.
 func ReadMango(dir string, now time.Time) *Mango {
-	m := &Mango{At: now, Targets: []MangoTarget{}}
+	m := &Mango{At: now, Targets: []MangoTarget{}, Weekly: []MangoWeek{}, Events: []MangoEvent{}}
 	raw, err := readRegularCloudFile(filepath.Join(dir, mangoPanelFile), mangoPanelMaxBytes, errMangoOversize)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -206,6 +286,7 @@ func ReadMango(dir string, now time.Time) *Mango {
 	}
 	m.GeneratedAt = &gen
 	m.Items, m.SnapshotHours = p.Items, p.SnapshotHours
+	m.Weekly, m.Events = mangoWeeks(p.Weekly), mangoEvents(p.Events)
 	m.Targets, m.Counts = targets, counts
 	m.State, m.Note = mangoFreshness(gen, now)
 	return m
@@ -247,6 +328,10 @@ func mangoTargets(in []mangoTarget) ([]MangoTarget, MangoCounts, string) {
 		row.HoldoutPositives = mangoHoldoutPositives(t)
 		row.CILow, row.CIHigh = mangoInterval(t)
 		row.Thin = t.Thin
+		row.Conditions = mangoConditions(t.Conditions)
+		if mangoDay(t.LastPositive) {
+			row.LastPositive = t.LastPositive
+		}
 		switch row.Verdict {
 		case MangoEarning:
 			counts.Earning++
@@ -302,4 +387,75 @@ func mangoReason(s string) string {
 		return r
 	}
 	return ""
+}
+
+// mangoConditions builds a row's chips from the box's conditions: the text is
+// stripped and capped, and a share that is not a proportion drops that condition
+// alone. The writer's order and narrows flag are kept as written, since the page
+// greys the conditions that do not narrow rather than reordering them. The cap
+// counts the conditions the page draws, so a dropped one does not shorten the
+// list below it.
+func mangoConditions(in []mangoCondition) []MangoCondition {
+	out := make([]MangoCondition, 0, len(in))
+	for _, c := range in {
+		if !mangoFraction(c.Share) {
+			continue
+		}
+		out = append(out, MangoCondition{
+			Text:    cloudText(c.Text, mangoFreeTextMax),
+			Share:   c.Share,
+			Narrows: c.Narrows,
+		})
+		if len(out) == mangoConditionsMax {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// mangoWeeks builds the page's trend from the panel's: a row whose week is not a
+// calendar day, whose landings are negative or whose share is not a proportion
+// is dropped, and the rest keep the writer's oldest-first order. A list over the
+// cap keeps its newest weeks, since the newest is the end of the trend the page
+// draws.
+func mangoWeeks(in []mangoWeek) []MangoWeek {
+	out := make([]MangoWeek, 0, len(in))
+	for _, w := range in {
+		if !mangoDay(w.Week) || w.Landings < 0 || !mangoFraction(w.RejectedShare) {
+			continue
+		}
+		out = append(out, MangoWeek{Week: w.Week, Landings: w.Landings, RejectedShare: w.RejectedShare})
+	}
+	if len(out) > mangoWeeklyMax {
+		out = out[len(out)-mangoWeeklyMax:]
+	}
+	return out
+}
+
+// mangoEvents builds the page's markers from the panel's: a row whose date is
+// not a calendar day is dropped, and what is stripped and capped like every
+// other string. A list over the cap keeps its newest events, the same end of the
+// list the trend's cap keeps.
+func mangoEvents(in []mangoEvent) []MangoEvent {
+	out := make([]MangoEvent, 0, len(in))
+	for _, e := range in {
+		if !mangoDay(e.Date) {
+			continue
+		}
+		out = append(out, MangoEvent{Date: e.Date, What: cloudText(e.What, mangoFreeTextMax)})
+	}
+	if len(out) > mangoEventsMax {
+		out = out[len(out)-mangoEventsMax:]
+	}
+	return out
+}
+
+// mangoDay reports whether s is a calendar day in the writer's date format. The
+// layout has no time of day, so a timestamp is not a day this page can place.
+func mangoDay(s string) bool {
+	_, err := time.Parse(mangoDayLayout, s)
+	return err == nil
 }
