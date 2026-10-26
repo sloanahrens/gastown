@@ -151,6 +151,63 @@ func TestRoundsLedgerSettleReachesEveryRoundAndReportsAnUnknownFinding(t *testin
 	if err := l.Settle(key, Outcome("ignored")); err == nil {
 		t.Error("Settle of an outcome the ledger never writes reported no error")
 	}
+	if err := l.Settle(FindingKey{File: "a.go"}, OutcomeFixed); err == nil {
+		t.Error("Settle of a key without an id reported no error")
+	}
+}
+
+// TestRoundsLedgerSettleByName: a key naming only the id settles the finding in
+// every file that raises it, the way a bare id in a comment does, and a key
+// naming a file settles only that file's (gt-yphcl).
+func TestRoundsLedgerSettleByName(t *testing.T) {
+	t.Parallel()
+	l := ledgerIn(t, "gt-abc")
+	if err := l.Append(1, "head1", []Finding{
+		{ID: "F1", Path: "a.go", Title: "in a"},
+		{ID: "F1", Path: "b.go", Title: "in b"},
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := l.Settle(FindingKey{File: "b.go", ID: "F1"}, OutcomeRebutted); err != nil {
+		t.Fatalf("Settle by file: %v", err)
+	}
+	byFile := renderedOf(t, l, 0)[0].Findings
+	if byFile[0].Outcome != string(OutcomeOpen) || byFile[1].Outcome != string(OutcomeRebutted) {
+		t.Errorf("settling b.go's F1 left %q and %q, want open and rebutted", byFile[0].Outcome, byFile[1].Outcome)
+	}
+	if err := l.Settle(FindingKey{ID: "F1"}, OutcomeFixed); err != nil {
+		t.Fatalf("Settle by id: %v", err)
+	}
+	for _, f := range renderedOf(t, l, 0)[0].Findings {
+		if f.Outcome != string(OutcomeFixed) {
+			t.Errorf("settling a bare id left %s at %q, want fixed in every file", f.File, f.Outcome)
+		}
+	}
+}
+
+// TestRoundsLedgerReappendDoesNotSettleIdlessFindings: om findings need not
+// have ids, two of them in one file share a key, and neither inherits its
+// neighbor's outcome on a re-append (gt-yphcl).
+func TestRoundsLedgerReappendDoesNotSettleIdlessFindings(t *testing.T) {
+	t.Parallel()
+	l := ledgerIn(t, "gt-abc")
+	// A ledger that records one id-less finding settled and its neighbor not:
+	// the two share a key, so the re-append must settle neither from the other.
+	doc := `{"bead":"gt-abc","rounds":[{"round":1,"head":"head1","findings":[` +
+		`{"id":"","file":"a.go","text":"first","outcome":"fixed"},` +
+		`{"id":"","file":"a.go","text":"second","outcome":"open"}]}]}`
+	if err := os.WriteFile(filepath.Join(l.OutDir, "rounds-gt-abc.json"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idless := []Finding{{Path: "a.go", Title: "first"}, {Path: "a.go", Title: "second"}}
+	if err := l.Append(1, "head1", idless); err != nil {
+		t.Fatalf("re-append: %v", err)
+	}
+	findings := renderedOf(t, l, 0)[0].Findings
+	if findings[0].Outcome != string(OutcomeOpen) || findings[1].Outcome != string(OutcomeOpen) {
+		t.Errorf("re-appended outcomes = %q and %q, want both open: an id-less finding cannot be told from its neighbor",
+			findings[0].Outcome, findings[1].Outcome)
+	}
 }
 
 // TestRoundsLedgerReappendKeepsSettledOutcomes: a retry of the same attempt
@@ -281,6 +338,7 @@ func TestFindingOutcome(t *testing.T) {
 		{Author: "town/crew/overseer", Text: "REBUTTAL: F3 the guard runs on the write path too", CreatedAt: at},
 		{Author: "town/crew/overseer", Text: "ACCEPTED-RISK: internal/land/rounds.go:F4 approved there too", CreatedAt: at},
 		{Author: "Sloan Ahrens", Text: "ACCEPTED-RISK:F7 approved with no space after the marker", CreatedAt: at},
+		{Author: "Sloan Ahrens", Text: "ACCEPTED-RISK: internal/land/other.go:F1 approved there", CreatedAt: at},
 		{Author: "gastown/polecats/immortan", Text: "ACCEPTED-RISK: F1 my own work is fine", CreatedAt: at},
 		{Author: "gastown/polecats/immortan", Text: "REBUTTAL: F6 not my problem", CreatedAt: at},
 	}
@@ -300,6 +358,7 @@ func TestFindingOutcome(t *testing.T) {
 		{name: "a rebuttal names it", key: FindingKey{ID: "F3"}, want: OutcomeRebutted},
 		{name: "an accepted risk names its file and id", key: FindingKey{File: "internal/land/rounds.go", ID: "F4"}, want: OutcomeAccepted},
 		{name: "an accepted risk names a bare id with no space after the marker", key: FindingKey{ID: "F7"}, want: OutcomeAccepted},
+		{name: "a file scoped comment does not settle the id in another file", key: inFile, class: ClassificationUnresolved, want: OutcomeOpen},
 		{name: "an accepted risk is not reopened by omission", key: FindingKey{ID: "F2"}, prev: OutcomeAccepted, class: ClassificationUnresolved, want: OutcomeAccepted},
 		{name: "an unmatched finding stays open", key: FindingKey{ID: "F9"}, class: ClassificationUnresolved, want: OutcomeOpen},
 		{name: "a polecat's accepted risk is ignored", key: inFile, class: ClassificationUnresolved, want: OutcomeOpen},
@@ -357,7 +416,7 @@ func TestLandRoundsLedgerRoundIsTheReviewsLogAttempt(t *testing.T) {
 			t.Errorf("ledger round %d names attempt %d, but reviews record %d is attempt %d", i+1, rounds[i].Round, i+1, rec.Attempt)
 		}
 		if rounds[i].Head != f.work.Head {
-			t.Errorf("round %d records head %q, want the judged head %q", rounds[i].Round, rounds[i].Head, f.work.Head)
+			t.Errorf("round %d records head %q, want the submitted head %q", rounds[i].Round, rounds[i].Head, f.work.Head)
 		}
 		if rounds[i].OpenAtLand != 1 {
 			t.Errorf("round %d reports open_at_land %d, want its one unsettled finding", rounds[i].Round, rounds[i].OpenAtLand)

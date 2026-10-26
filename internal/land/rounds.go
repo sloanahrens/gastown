@@ -16,7 +16,8 @@ import (
 )
 
 // DefaultRoundsCap bounds Render's output in bytes when the caller names no
-// cap: the size om keeps of a file it is given before it truncates.
+// cap: the 16 KiB a landing's rounds file is designed to stay under, small
+// enough for om to read whole (gt-yphcl).
 const DefaultRoundsCap = 16 << 10
 
 // ErrRoundsCorrupt reports a ledger file that does not parse: a caller treats
@@ -85,10 +86,10 @@ func (f Finding) Key() FindingKey { return FindingKey{File: f.Path, ID: f.ID} }
 const rebuttalMarker = "REBUTTAL:"
 
 // RoundsLedger is one landing's record of what each om round raised and what
-// became of it, stored at <OutDir>/rounds-<bead>.json (gt-yphcl). A round is
-// the landing's rework attempt, the number the reviews log records as
-// ReviewRecord.Attempt. The landing path appends; gt-3l5qy settles the round
-// against the next one's classification and hands om the rendered history.
+// became of it, stored at <OutDir>/rounds-<bead>.json, where a round is the
+// landing's rework attempt, the number the reviews log records as
+// ReviewRecord.Attempt (gt-yphcl). The landing path appends; gt-3l5qy settles
+// the history and hands it to om.
 type RoundsLedger struct {
 	// OutDir is the directory the ledger file lives in.
 	OutDir string
@@ -131,8 +132,8 @@ type ledgerDoc struct {
 	Rounds []ledgerRound `json:"rounds"`
 }
 
-// ledgerRound is one om round as stored: the attempt it belongs to, the head
-// it judged, and its findings with what became of each.
+// ledgerRound is one om round as stored: the attempt it belongs to, the work
+// branch head it was submitted at, and its findings with what became of each.
 type ledgerRound struct {
 	Round    int             `json:"round"`
 	Head     string          `json:"head"`
@@ -169,11 +170,11 @@ type renderedFinding struct {
 	Outcome Outcome `json:"outcome"`
 }
 
-// Append records one round of findings, the head it judged and the moment the
-// injected clock reports. A round already in the ledger is replaced, keeping
-// the outcome every finding it does not re-raise still carries: a retry of the
-// same attempt re-reviews the same findings, and a settled outcome is the
-// bead's, not the retry's.
+// Append records one round of findings for head, the work branch head the
+// round was submitted at, stamped with the injected clock. A round already in
+// the ledger is replaced, keeping the outcome every finding it does not
+// re-raise still carries: a retry of the same attempt re-reviews the same
+// findings, and a settled outcome is the bead's, not the retry's.
 func (l *RoundsLedger) Append(round int, head string, findings []Finding) error {
 	if round < 1 {
 		return fmt.Errorf("rounds ledger: round %d is not a landing attempt", round)
@@ -202,9 +203,14 @@ func (l *RoundsLedger) Append(round int, head string, findings []Finding) error 
 }
 
 // Settle records what became of one finding, updating every round that
-// carries it. It reports an error when no round does, so a caller learns its
-// key was wrong rather than settling nothing.
+// carries it. A key with no file settles every finding carrying its id, the
+// way a bare id in a comment does. It reports an error when no round records
+// the finding or the key names none, so a caller learns its key was wrong
+// rather than settling nothing.
 func (l *RoundsLedger) Settle(key FindingKey, outcome Outcome) error {
+	if key.ID == "" {
+		return errors.New("rounds ledger: a finding without an id cannot be settled")
+	}
 	if !outcome.valid() {
 		return fmt.Errorf("rounds ledger: %q is not an outcome", outcome)
 	}
@@ -215,7 +221,8 @@ func (l *RoundsLedger) Settle(key FindingKey, outcome Outcome) error {
 	settled := 0
 	for i := range doc.Rounds {
 		for j := range doc.Rounds[i].Findings {
-			if doc.Rounds[i].Findings[j].key() != key {
+			have := doc.Rounds[i].Findings[j].key()
+			if have.ID != key.ID || (key.File != "" && have.File != key.File) {
 				continue
 			}
 			doc.Rounds[i].Findings[j].Outcome = outcome
@@ -285,22 +292,19 @@ func FindingOutcome(prev Outcome, class Classification, comments []beads.Comment
 // acceptedFinding reports whether an allowlisted accepted-risk comment names
 // key.
 func acceptedFinding(comments []beads.Comment, key FindingKey) bool {
-	for _, c := range acceptedRiskComments(comments) {
-		if commentNamesFinding(c.text, key) {
-			return true
-		}
-	}
-	return false
+	return anyCommentNames(comments, acceptedRiskMarker, key)
 }
 
 // rebuttedFinding reports whether an allowlisted REBUTTAL: comment names key.
 func rebuttedFinding(comments []beads.Comment, key FindingKey) bool {
+	return anyCommentNames(comments, rebuttalMarker, key)
+}
+
+// anyCommentNames reports whether a comment that opens with marker and whose
+// author may write it names key.
+func anyCommentNames(comments []beads.Comment, marker string, key FindingKey) bool {
 	for _, c := range comments {
-		text := strings.TrimSpace(c.Text)
-		if !strings.HasPrefix(text, rebuttalMarker) || !isAcceptedRiskAuthor(c.Author) {
-			continue
-		}
-		if commentNamesFinding(text, key) {
+		if text, ok := decisionComment(c, marker); ok && commentNamesFinding(text, key) {
 			return true
 		}
 	}
@@ -309,11 +313,15 @@ func rebuttedFinding(comments []beads.Comment, key FindingKey) bool {
 
 // commentNamesFinding reports whether text names key as one of its words: the
 // finding's id, its file and id joined by a colon, or its base name and id.
-// om's ids repeat across files, so a bare id settles every finding carrying it.
+// om's ids repeat across files, so a bare id settles every finding carrying
+// it, while a file:id names one.
 func commentNamesFinding(text string, key FindingKey) bool {
 	if key.ID == "" {
 		return false
 	}
+	// A comment that omits the space after the marker — "ACCEPTED-RISK:F2" —
+	// names the finding the same as one that keeps it.
+	text = strings.TrimPrefix(strings.TrimPrefix(text, acceptedRiskMarker), rebuttalMarker)
 	names := []string{key.ID}
 	if key.File != "" {
 		names = append(names, key.File+":"+key.ID, path.Base(key.File)+":"+key.ID)
@@ -323,11 +331,6 @@ func commentNamesFinding(text string, key FindingKey) bool {
 			if strings.EqualFold(word, name) {
 				return true
 			}
-		}
-		// The id right after a marker reads as one word — "ACCEPTED-RISK:F2" —
-		// and names the finding the same as a space after the marker does.
-		if i := strings.LastIndex(word, ":"); i >= 0 && strings.EqualFold(word[i+1:], key.ID) {
-			return true
 		}
 	}
 	return false
@@ -364,14 +367,21 @@ func recordFindings(findings []Finding) []ledgerFinding {
 	return out
 }
 
-// outcome is what this round recorded for key.
+// outcome is what this round recorded for key, reported only when exactly one
+// finding carries it: om's findings need not have ids, and id-less ones share
+// a key, so a neighbor's outcome is not theirs to inherit.
 func (r ledgerRound) outcome(key FindingKey) (Outcome, bool) {
-	for _, f := range r.Findings {
-		if f.key() == key {
-			return f.Outcome, true
-		}
+	if key.ID == "" {
+		return "", false
 	}
-	return "", false
+	found, out := 0, Outcome("")
+	for _, f := range r.Findings {
+		if f.key() != key {
+			continue
+		}
+		found, out = found+1, f.Outcome
+	}
+	return out, found == 1
 }
 
 // renderRounds is rounds as Render emits them, oldest first.

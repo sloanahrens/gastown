@@ -146,9 +146,9 @@ func CountRejections(notes string) int {
 }
 
 // reviewAttempt is the rework attempt a verdict on notes belongs to: the
-// rejections the bead carries, plus one. The reviews log, the rounds ledger
-// and the rejection note itself all read the number from here, so a landing's
-// round names the same attempt everywhere (gt-yphcl).
+// rejections the bead carries, plus one. The reviews log and the rounds ledger
+// both read it here, so a reviewed round and its record cannot disagree about
+// which attempt it is (gt-yphcl).
 func reviewAttempt(notes string) int {
 	return CountRejections(notes) + 1
 }
