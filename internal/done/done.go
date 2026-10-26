@@ -1330,8 +1330,8 @@ func submitForLanding(r *doneRun) error {
 
 	// Jev's claims_verified flag shows the polecat its own risk before the
 	// rebase and the gate. It never blocks the submission (gt-b9j3o.11).
-	if g, ok := repo.(claimsGit); ok {
-		showClaimsFlags(context.Background(), os.Stdout, g, sub.sourceIssue, baseRef)
+	if g, ok := repo.(claimsGit); ok && r.deps.claims != nil {
+		showClaimsFlags(context.Background(), os.Stdout, g, r.deps.claims, sub.sourceIssue, baseRef)
 	}
 
 	if err := rebaseOntoTarget(repo, baseRef); err != nil {

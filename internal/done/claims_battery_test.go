@@ -27,6 +27,20 @@ func (f *fakeClaimsGit) DiffNumstat(base, head string) (string, error) {
 	return f.numstat, f.err
 }
 
+// fakeClaimsBattery answers with one fixed probability, and records the state
+// it was asked about.
+type fakeClaimsBattery struct {
+	p     float64
+	ok    bool
+	state string
+	asked bool
+}
+
+func (f *fakeClaimsBattery) Answer(ctx context.Context, state string) (float64, bool) {
+	f.asked, f.state = true, state
+	return f.p, f.ok
+}
+
 // fakeClaimsAsker answers the claims question with one probability, or fails.
 type fakeClaimsAsker struct {
 	p     float64
@@ -43,25 +57,10 @@ func (f *fakeClaimsAsker) Ask(ctx context.Context, state any, qs map[string]jev.
 	return &jev.Answers{Noul: map[string]float64{submission.QClaimsVerified: f.p}}, nil
 }
 
-// swapClaimsBattery replaces the battery client for one test and restores it.
-func swapClaimsBattery(t *testing.T, client func() (claimsAsker, error)) {
-	t.Helper()
-	oldClient := claimsBatteryClient
-	t.Cleanup(func() { claimsBatteryClient = oldClient })
-	claimsBatteryClient = client
-}
-
-// fakeClaimsAnswer replaces the whole battery call with one fixed answer.
-func fakeClaimsAnswer(t *testing.T, p float64, ok bool) {
-	t.Helper()
-	old := claimsBatteryAnswer
-	t.Cleanup(func() { claimsBatteryAnswer = old })
-	claimsBatteryAnswer = func(context.Context, string) (float64, bool) { return p, ok }
-}
-
 // The flag is shown below the threshold and silent at or above it, over the
 // flagged and unflagged answers (gt-b9j3o.11).
 func TestShowClaimsFlagsTable(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		p       float64
@@ -76,9 +75,9 @@ func TestShowClaimsFlagsTable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fakeClaimsAnswer(t, tc.p, tc.ok)
+			b := &fakeClaimsBattery{p: tc.p, ok: tc.ok}
 			var out bytes.Buffer
-			showClaimsFlags(context.Background(), &out, &fakeClaimsGit{}, &beads.Issue{ID: "gt-1"}, "origin/main")
+			showClaimsFlags(context.Background(), &out, &fakeClaimsGit{}, b, &beads.Issue{ID: "gt-1"}, "origin/main")
 			if tc.wantOut == "" {
 				if out.Len() != 0 {
 					t.Fatalf("printed %q, want nothing", out.String())
@@ -95,11 +94,12 @@ func TestShowClaimsFlagsTable(t *testing.T) {
 // A battery that cannot answer prints nothing and returns nothing, so the
 // submission carries on (gt-b9j3o.11).
 func TestClaimsBatteryFailureDoesNotStopTheSubmission(t *testing.T) {
-	swapClaimsBattery(t, func() (claimsAsker, error) {
+	t.Parallel()
+	b := jevClaimsBattery{newAsker: func() (claimsAsker, error) {
 		return &fakeClaimsAsker{err: errors.New("jev unreachable")}, nil
-	})
+	}}
 	var out bytes.Buffer
-	showClaimsFlags(context.Background(), &out, &fakeClaimsGit{}, &beads.Issue{ID: "gt-1"}, "origin/main")
+	showClaimsFlags(context.Background(), &out, &fakeClaimsGit{}, b, &beads.Issue{ID: "gt-1"}, "origin/main")
 	if out.Len() != 0 {
 		t.Fatalf("printed %q for a failed battery, want nothing", out.String())
 	}
@@ -107,8 +107,9 @@ func TestClaimsBatteryFailureDoesNotStopTheSubmission(t *testing.T) {
 
 // A client that cannot be built is also a battery that cannot answer.
 func TestClaimsBatteryWithoutAClientSaysNothing(t *testing.T) {
-	swapClaimsBattery(t, func() (claimsAsker, error) { return nil, errors.New("no key") })
-	if p, ok := claimsBatteryAnswer(context.Background(), "state"); ok {
+	t.Parallel()
+	b := jevClaimsBattery{newAsker: func() (claimsAsker, error) { return nil, errors.New("no key") }}
+	if p, ok := b.Answer(context.Background(), "state"); ok {
 		t.Fatalf("answer = %v, want no answer", p)
 	}
 }
@@ -116,12 +117,13 @@ func TestClaimsBatteryWithoutAClientSaysNothing(t *testing.T) {
 // The battery reads the submission's state for this bead and branch, and asks
 // only the claims_verified question (gt-b9j3o.11).
 func TestShowClaimsFlagsAsksTheClaimsQuestionAboutTheBranch(t *testing.T) {
+	t.Parallel()
 	asker := &fakeClaimsAsker{p: 0.9}
-	swapClaimsBattery(t, func() (claimsAsker, error) { return asker, nil })
+	b := jevClaimsBattery{newAsker: func() (claimsAsker, error) { return asker, nil }}
 	git := &fakeClaimsGit{subjects: []string{"fix the landing tick"}, numstat: "3\t1\tinternal/done/done.go\n"}
 	issue := &beads.Issue{ID: "gt-1", Title: "fix the landing tick"}
 
-	showClaimsFlags(context.Background(), &bytes.Buffer{}, git, issue, "origin/main")
+	showClaimsFlags(context.Background(), &bytes.Buffer{}, git, b, issue, "origin/main")
 
 	state, ok := asker.state.(string)
 	if !ok {
@@ -137,14 +139,14 @@ func TestShowClaimsFlagsAsksTheClaimsQuestionAboutTheBranch(t *testing.T) {
 
 // A missing issue or a failed git read says nothing and asks nothing.
 func TestShowClaimsFlagsSkipsWithoutAnIssueOrGitReads(t *testing.T) {
-	asker := &fakeClaimsAsker{p: 0.1}
-	swapClaimsBattery(t, func() (claimsAsker, error) { return asker, nil })
+	t.Parallel()
+	b := &fakeClaimsBattery{p: 0.1, ok: true}
 	var out bytes.Buffer
 
-	showClaimsFlags(context.Background(), &out, &fakeClaimsGit{}, nil, "origin/main")
-	showClaimsFlags(context.Background(), &out, &fakeClaimsGit{err: errors.New("bad ref")}, &beads.Issue{ID: "gt-1"}, "origin/main")
+	showClaimsFlags(context.Background(), &out, &fakeClaimsGit{}, b, nil, "origin/main")
+	showClaimsFlags(context.Background(), &out, &fakeClaimsGit{err: errors.New("bad ref")}, b, &beads.Issue{ID: "gt-1"}, "origin/main")
 
-	if out.Len() != 0 || asker.state != nil {
-		t.Fatalf("printed %q and asked %v, want neither", out.String(), asker.state)
+	if out.Len() != 0 || b.asked {
+		t.Fatalf("printed %q and asked the battery %v, want neither", out.String(), b.asked)
 	}
 }

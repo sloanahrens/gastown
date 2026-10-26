@@ -31,16 +31,28 @@ type claimsAsker interface {
 	Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error)
 }
 
-// claimsBatteryClient builds the Jev client. Tests replace it so no model runs.
-var claimsBatteryClient = func() (claimsAsker, error) {
+// claimsBattery answers the claims_verified question about a state, and returns
+// the probability that the MR notes describe a verification that was run. ok is
+// false when the battery cannot answer.
+type claimsBattery interface {
+	Answer(ctx context.Context, state string) (p float64, ok bool)
+}
+
+// jevClaimsBattery asks Jev through a client built by newAsker. The submit
+// path builds it with newJevClaimsAsker; a unit test passes a fake.
+type jevClaimsBattery struct {
+	newAsker func() (claimsAsker, error)
+}
+
+// newJevClaimsAsker builds the hosted Jev client from its key files.
+func newJevClaimsAsker() (claimsAsker, error) {
 	return jev.NewClient()
 }
 
-// claimsBatteryAnswer asks the claims_verified question about the state and
-// returns the probability that the MR notes describe a verification that was
-// run. Any failure reports ok=false: a battery that cannot answer says nothing.
-var claimsBatteryAnswer = func(ctx context.Context, state string) (float64, bool) {
-	c, err := claimsBatteryClient()
+// Answer asks the claims question under claimsBatteryTimeout. Any failure
+// reports ok=false: a battery that cannot answer says nothing.
+func (b jevClaimsBattery) Answer(ctx context.Context, state string) (float64, bool) {
+	c, err := b.newAsker()
 	if err != nil {
 		return 0, false
 	}
@@ -60,7 +72,7 @@ var claimsBatteryAnswer = func(ctx context.Context, state string) (float64, bool
 // showClaimsFlags shows the polecat the claims_verified flag for the branch
 // when the battery answers below claimsFlagBelow. It prints nothing otherwise
 // and returns nothing, so no battery outcome can stop the submission.
-func showClaimsFlags(ctx context.Context, w io.Writer, g claimsGit, issue *beads.Issue, baseRef string) {
+func showClaimsFlags(ctx context.Context, w io.Writer, g claimsGit, b claimsBattery, issue *beads.Issue, baseRef string) {
 	if issue == nil {
 		return
 	}
@@ -72,7 +84,7 @@ func showClaimsFlags(ctx context.Context, w io.Writer, g claimsGit, issue *beads
 	if err != nil {
 		return
 	}
-	p, ok := claimsBatteryAnswer(ctx, submission.ClaimsState(issue, subjects, numstat))
+	p, ok := b.Answer(ctx, submission.ClaimsState(issue, subjects, numstat))
 	if !ok || p >= claimsFlagBelow {
 		return
 	}
