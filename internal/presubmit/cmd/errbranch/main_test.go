@@ -2,11 +2,17 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/presubmit"
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(unittier.Main(m))
+}
 
 // TestReportNamesEachFindingAndFailsOnIt: a run with findings prints each one and returns an error;
 // a run with none returns nil. Either way the counts of what was judged are printed (gt-b9j3o.5).
