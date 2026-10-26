@@ -83,8 +83,9 @@ func writeInstallLock(t *testing.T, d *Daemon) string {
 	return path
 }
 
-// holdInstallLock takes an exclusive flock on path (as install-gt.sh's perl
-// does) through a separate open file, released when the test ends.
+// holdInstallLock takes an exclusive flock on path (as install-gt.sh's
+// install-lock helper does) through a separate open file, released when the
+// test ends.
 func holdInstallLock(t *testing.T, path string) {
 	t.Helper()
 	l := flock.New(path)

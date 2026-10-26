@@ -33,9 +33,10 @@
 #   3  busy: the install lock or the container-gate slot was not free in time
 # The last stdout line is always "install-gt: RESULT <event> <commit> <prev> <reason>",
 # and the exit code is always 0-3 — an EXIT trap (below) guarantees both even
-# on a path nothing here anticipated (a bad flag, a "${VAR:?}" guard, perl
-# dying on the lock for a reason other than the timeout, cp/mv of gt.prev
-# failing under `set -e`, ...): it reports "failed ... unexpected" and exits 1.
+# on a path nothing here anticipated (a bad flag, a "${VAR:?}" guard, the
+# install-lock helper dying for a reason other than the timeout, cp/mv of
+# gt.prev failing under `set -e`, ...): it reports "failed ... unexpected" and
+# exits 1.
 #
 # Besides the binary it installs the OpenShell gateway's launchd agent
 # (igt_gateway_agent in lib/install-gt-lib.sh) once the operator has written
@@ -61,16 +62,18 @@ SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
 # directly), so RESULT_EMITTED marks that the last-line contract was met. The
 # EXIT trap catches everything else — including exit codes bash's own guards
 # produce (a `${TOWN_ROOT:?...}` abort, `set -e` killing the script mid cp/mv
-# or mid python-write) and a perl exit status that was never meant to be a
-# contract value (only 75, the lock-wait timeout, is; anything else perl
-# returns — e.g. it couldn't even open the lock file — must not leak through
+# or mid python-write) and an install-lock exit status that was never meant to
+# be a contract value (only 75, the lock-wait timeout, is; anything else the
+# helper returns — e.g. it could not open the lock file — must not leak through
 # as a bare exit code outside 0-3). It is intentionally conservative: it does
 # not call escalate() (GT/BIN_DIR may not be resolved yet this early) and
 # only attempts a receipt when DAEMON_DIR is already known.
 RESULT_EMITTED=0
+HELPER_DIR=""
 result_line() { RESULT_EMITTED=1; igt_result "$@"; }
 on_exit() {
   local ec=$?
+  [ -z "$HELPER_DIR" ] || rm -rf "$HELPER_DIR"
   [ "$RESULT_EMITTED" = "1" ] && exit "$ec"
   if [ -n "${DAEMON_DIR:-}" ]; then
     igt_receipt failed "${EXPECTED:-${FULL_SHA:-${SHA:-}}}" "${PREV:-}" unexpected "${MERGED_AT:-}" "${START:-}" || true
@@ -355,39 +358,45 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 # --- Lock ---------------------------------------------------------------------
-# flock(2) through perl (macOS has no flock(1)). The script re-execs itself with
-# the lock fd inherited ($^F keeps it open across exec), so the kernel drops
-# the lock if this process dies — a mkdir-lock would outlive a crash.
+# flock(2) through the Go helper in cmd/install-lock (macOS has no flock(1)).
+# The helper takes the lock, keeps its fd open across exec, and then execs the
+# re-exec'd script itself, so the process holding the lock IS the install and
+# the lock lives exactly as long as the install does. The kernel drops it if
+# that process dies, which a mkdir-lock would not (gt-1jgci). Nothing runs
+# beside the install that could outlive it.
 #
-# perl's exec() replaces a CHILD process (the one bash forked to run perl),
-# never this shell, so on the happy path this outer bash and the re-exec'd
-# "bash $SCRIPT_PATH" that does the real work are two separate processes —
-# RESULT_EMITTED in one is invisible to the other. A MARKER file tells this
-# outer instance which happened: perl unlinks it immediately before exec, so
-# if it still exists once the subprocess returns, exec was never reached
-# (perl died first — e.g. it could not even open the lock file) and this
-# instance's own EXIT trap should print the fallback RESULT line below; if it
-# is gone, the re-exec'd instance ran to completion and already printed its
-# own — RESULT_EMITTED is set here too, purely to stop this instance's trap
-# from printing a second one on top of it.
+# The lock fd is inherited by every descendant of the install, not only the
+# install. The ones that can outlive it are handled: git runs with auto
+# maintenance off (GIT_NO_AUTO_GC below), and the image-build supervisor closes
+# every inherited fd, so neither can hold the lock past the install.
+#
+# The helper is built from this checkout, because an install can run before any
+# gt exists and this clone is then the only source there is. The Go toolchain is
+# already required: 'make build' below needs it. There is no shell fallback.
+#
+# The exec'd install is the same process the helper was, but it is a separate
+# bash from this one, so its RESULT_EMITTED is invisible here. A MARKER file
+# tells this instance which happened: the helper removes it just before the
+# exec, so if it still exists once the helper returns, the exec was never
+# reached (the lock file could not be opened, bash could not be started, ...)
+# and this instance's own EXIT trap should print the fallback RESULT line below;
+# if it is gone, the install ran and already printed its own — RESULT_EMITTED is
+# set here too, purely to stop this instance's trap from printing a second one
+# on top of it. The status is the install's own (0 to 3, above, or 128+n if it
+# is killed), so 75 can only be the helper reporting that the lock wait ran out.
 if [ -z "${INSTALL_GT_LOCKED:-}" ]; then
   mkdir -p "$DAEMON_DIR"
+  HELPER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/install-gt-lock.XXXXXX")
+  if ! (cd "$SCRIPT_DIR/.." && CGO_ENABLED=0 go build -buildvcs=false -o "$HELPER_DIR/install-lock" ./cmd/install-lock); then
+    log "Cannot build cmd/install-lock in $SCRIPT_DIR; the install lock is unavailable."
+    exit 1
+  fi
   MARKER="$DAEMON_DIR/.install-gt.pre-exec.$$"
   : > "$MARKER"
   rc=0
-  INSTALL_GT_LOCKED=1 perl -e '
-    use Fcntl qw(:flock);
-    $^F = 255;
-    my ($lock, $wait, $marker, @cmd) = @ARGV;
-    open(my $fh, ">>", $lock) or die "install-gt: cannot open $lock: $!\n";
-    my $deadline = time + $wait;
-    until (flock($fh, LOCK_EX | LOCK_NB)) {
-      exit 75 if time >= $deadline;
-      select(undef, undef, undef, 0.5);
-    }
-    unlink($marker);
-    exec @cmd or die "install-gt: exec failed: $!\n";
-  ' "$DAEMON_DIR/install-gt.lock" "$LOCK_WAIT" "$MARKER" bash "$SCRIPT_PATH" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} || rc=$?
+  INSTALL_GT_LOCKED=1 "$HELPER_DIR/install-lock" \
+    --lock "$DAEMON_DIR/install-gt.lock" --wait "$LOCK_WAIT" --marker "$MARKER" \
+    -- bash "$SCRIPT_PATH" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} || rc=$?
   if [ "$rc" = "75" ]; then
     rm -f "$MARKER"
     log "Another install held the lock for ${LOCK_WAIT}s; not installing $SHA."
@@ -431,9 +440,9 @@ PY
 }
 
 # git fetch/merge can fork a detached 'gc --auto' or 'maintenance --auto' that
-# inherits the lock fd ($^F above keeps it open across exec) and would hold the
-# install lock long after this run ends; rebuild-gt closes fd 9 for the same
-# reason. Disable auto maintenance on the calls that can trigger it.
+# inherits the lock fd (the install-lock helper leaves it open across exec) and
+# would hold the install lock long after this run ends; rebuild-gt closes fd 9
+# for the same reason. Disable auto maintenance on the calls that can trigger it.
 GIT_NO_AUTO_GC=(-c gc.auto=0 -c maintenance.auto=false)
 
 # --- Resolve the target ---------------------------------------------------------
