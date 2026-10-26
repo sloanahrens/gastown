@@ -960,10 +960,11 @@ func TestMangoCapsConditionsAtTheBoxsFirst(t *testing.T) {
 }
 
 // A condition's text and an event's what are another process's text: the
-// invisible runes are stripped, an over-long one is marked at the 120-rune cap,
+// invisible runes are stripped, an over-long one is cut at the 120-rune cap,
 // and the markup that is left is drawn as text by the page. Guards
 // `cloudText(c.Text, mangoFreeTextMax)` in mangoConditions and
-// `cloudText(e.What, mangoFreeTextMax)` in mangoEvents.
+// `cloudText(e.What, mangoFreeTextMax)` in mangoEvents. The mark cloudText puts
+// on a cut string is that helper's contract, which cloud_test.go pins.
 func TestMangoStripsAndCapsTheTrendText(t *testing.T) {
 	t.Parallel()
 
@@ -991,8 +992,12 @@ func TestMangoStripsAndCapsTheTrendText(t *testing.T) {
 		if !strings.HasPrefix(s, "bell: esc:[31m rlo: invisible: <b>bold</b> ") {
 			t.Errorf("%s lost text it should have kept: %q", name, s)
 		}
-		if n := len([]rune(s)); n != mangoFreeTextMax+1 || !strings.HasSuffix(s, "…") {
-			t.Errorf("%s is %d runes and does not end at the %d-rune cap: %q", name, n, mangoFreeTextMax, s)
+		// The reader cuts the field at the free-text cap. The cleaned input is
+		// longer than the cap, so a cap's worth of runes is kept; the mark
+		// ClipText appends may cost one more, and its shape is that helper's
+		// contract (cloud_test.go).
+		if n := len([]rune(s)); n < mangoFreeTextMax || n > mangoFreeTextMax+1 {
+			t.Errorf("%s is %d runes, want the %d-rune cap applied: %q", name, n, mangoFreeTextMax, s)
 		}
 	}
 }
