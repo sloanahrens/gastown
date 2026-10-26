@@ -117,6 +117,7 @@ town's own overrides layered on top:
 | nudge-drain | PostToolUse | polecats |
 | polecat-stop-check | Stop | polecats |
 | polecat-paths, question-tool guards | PreToolUse | polecats |
+| script-files guard (`gt tap guard script-files`, gt-b43ra): a new script in a worker's worktree is denied | PreToolUse | polecats, crew |
 | permission-request guard | PermissionRequest | polecats |
 | crew compaction handoff (`gt handoff --cycle --reason compaction`) | PreCompact (replaces) | crew |
 

@@ -28,6 +28,7 @@ Available guards:
   dangerous-command  - Block rm -rf, force push, hard reset, git clean
   container-suite    - Block unwrapped go test/make test on testcontainers-backed packages
   polecat-paths      - Block Edit/Write/Bash targets outside the polecat's own worktree
+  script-files       - Deny a new script file in a worker's worktree (write testable Go instead)
   bd-close-invariant - Block raw bd close of a bead whose branch carries unmerged work
   bd-create-store    - Block a polecat's bd create that would file into the town (hq) store
   question-tool      - Deny AskUserQuestion in a session with nobody at the pane
