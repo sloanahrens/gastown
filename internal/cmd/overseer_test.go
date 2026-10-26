@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -101,5 +102,53 @@ func TestOverseerCommandsAreRegistered(t *testing.T) {
 	}
 	if overseerBeatCmd.Flags().Lookup("state") == nil || overseerLogCmd.Flags().Lookup("bead") == nil {
 		t.Error("gt overseer beat --state or gt overseer log --bead is missing")
+	}
+}
+
+// A working beat is refused while attention items are unacknowledged or
+// escalations are open, and the refusal names them; the heartbeat stays as it
+// was. The readers are passed in, so the test needs no town and no beads.
+func TestOverseerBeatRefusesWorkingWhileItemsAreOpen(t *testing.T) {
+	t.Parallel()
+	open := func(keys []string, escalations int) overseerOpenWork {
+		return overseerOpenWork{
+			items:       func(string) ([]string, error) { return keys, nil },
+			escalations: func(string) (int, error) { return escalations, nil },
+		}
+	}
+
+	town := t.TempDir()
+	var out bytes.Buffer
+	busy := open([]string{"escalation:hq-a", "risk:gt-b:1"}, 1)
+	if err := overseerBeatWith(&out, town, overseer.StateWorking, "overseer", overseerNow, busy); err == nil {
+		t.Fatal("a working beat with open items was recorded")
+	} else {
+		for _, want := range []string{"2 unacked attention item(s)", "1 open escalation(s)", "escalation:hq-a", "risk:gt-b:1"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("refusal = %q, want it to name %q", err, want)
+			}
+		}
+	}
+	if hb, have, _ := overseer.ReadHeartbeat(town); have {
+		t.Errorf("a refused working beat wrote a heartbeat: %+v", hb)
+	}
+
+	// Other states are not refused: an idle overseer may still record itself.
+	if err := overseerBeatWith(&out, town, overseer.StateIdle, "overseer", overseerNow, busy); err != nil {
+		t.Errorf("an idle beat with open items was refused: %v", err)
+	}
+
+	// Once everything is triaged, working is recorded.
+	if err := overseerBeatWith(&out, town, overseer.StateWorking, "overseer", overseerNow, open(nil, 0)); err != nil {
+		t.Errorf("a working beat with nothing open was refused: %v", err)
+	}
+
+	// A reader that fails refuses the beat instead of recording it.
+	broken := overseerOpenWork{
+		items:       func(string) ([]string, error) { return nil, errors.New("unreadable") },
+		escalations: func(string) (int, error) { return 0, nil },
+	}
+	if err := overseerBeatWith(&out, t.TempDir(), overseer.StateWorking, "overseer", overseerNow, broken); err == nil || !strings.Contains(err.Error(), "reading attention") {
+		t.Errorf("a failing attention reader = %v, want a refusal naming it", err)
 	}
 }
