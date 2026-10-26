@@ -10,8 +10,12 @@ import (
 
 var _ beads.FormulaVerbs = (*Fake)(nil)
 
-// fakeFormula is one formula the fake holds: the fields of bd's formula list
-// JSON that a caller can observe without the engine.
+// fakeFormulaSource is the source the fake names for a formula: bd names the
+// .formula.toml it read, and the fake reads none.
+const fakeFormulaSource = "fake"
+
+// fakeFormula is one formula the fake holds: the identity fields of bd's
+// formula payload that a caller can observe without the engine.
 type fakeFormula struct {
 	name        string
 	kind        string
@@ -39,8 +43,10 @@ func (f *Fake) formula(name string) (fakeFormula, bool) {
 	return fakeFormula{}, false
 }
 
-// FormulaList returns the registered formulas as bd's formula list --json
-// payload does, and "null" when there are none, as bd prints it.
+// FormulaList returns the registered formulas in the shape bd's formula list
+// --json prints, and "null" when there are none, as bd prints it. The fake
+// holds no step tree, so an entry leaves out bd's steps and vars counts rather
+// than reporting zeros for them.
 func (f *Fake) FormulaList() ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -55,14 +61,12 @@ func (f *Fake) FormulaList() ([]byte, error) {
 		Type        string `json:"type"`
 		Description string `json:"description,omitempty"`
 		Source      string `json:"source"`
-		Steps       int    `json:"steps"`
-		Vars        int    `json:"vars"`
 	}
 	entries := make([]entry, 0, len(f.formulas))
 	for _, fm := range f.formulas {
 		entries = append(entries, entry{
 			Name: fm.name, Type: fm.kind, Description: fm.description,
-			Source: "fake", // a formula file bd would name; the fake has none
+			Source: fakeFormulaSource,
 		})
 	}
 	out, err := json.MarshalIndent(entries, "", "  ")
@@ -91,8 +95,9 @@ func (f *Fake) FormulaListText() ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-// FormulaShow returns name's formula as bd's formula show payload, which
-// names the formula; a name no formula has is an error.
+// FormulaShow returns name's formula in the shape bd's formula show --json
+// prints: the identity fields, and not the steps and vars of a tree the fake
+// does not hold. A name no formula has is an error.
 func (f *Fake) FormulaShow(formula string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -105,6 +110,7 @@ func (f *Fake) FormulaShow(formula string) ([]byte, error) {
 	}
 	out, err := json.MarshalIndent(map[string]string{
 		"formula": fm.name, "type": fm.kind, "description": fm.description,
+		"source": fakeFormulaSource,
 	}, "", "  ")
 	if err != nil {
 		return nil, err
@@ -124,5 +130,6 @@ func (f *Fake) FormulaShowText(formula string) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("formula not found: %q", formula)
 	}
-	return []byte(fmt.Sprintf("📐 %s\n   Type: %s\n   Description: %s\n", fm.name, fm.kind, fm.description)), nil
+	return []byte(fmt.Sprintf("\n📋 %s\n   Type: %s\n   Description: %s\n   Source: %s\n",
+		fm.name, fm.kind, fm.description, fakeFormulaSource)), nil
 }

@@ -297,7 +297,8 @@ func writeFormulaShowRaw(out io.Writer, verbs beads.FormulaVerbs, formulaName st
 
 // writeFormulaAnswer prints one formula verb's answer to out, then returns
 // the seam's error, so a failure reaches the operator as the command's error
-// (gt-p85pw.11).
+// (gt-p85pw.11). bd runs with its output piped rather than on the terminal, so
+// its stderr arrives inside that error, not live as it writes it.
 func writeFormulaAnswer(out io.Writer, answer []byte, answerErr error) error {
 	if len(answer) > 0 {
 		if _, writeErr := out.Write(answer); writeErr != nil {

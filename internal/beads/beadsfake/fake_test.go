@@ -38,11 +38,15 @@ func TestShowText(t *testing.T) {
 	contractShowText(t, newScope(t, New()))
 }
 
-// TestFormulaList runs the formula seam contract on its own, so the case is
-// runnable alone: go test ./internal/beads/beadsfake -run FormulaList.
-func TestFormulaList(t *testing.T) {
+// TestFormulaContract runs the formula seam contract on the fake, so the case
+// is runnable alone: go test ./internal/beads/beadsfake -run Formula.
+func TestFormulaContract(t *testing.T) {
 	t.Parallel()
-	contractFormulaList(t, New())
+	RunFormulaContract(t, func(t *testing.T) beads.FormulaVerbs {
+		f := New()
+		SeedSampleFormula(f)
+		return f
+	})
 }
 
 // TestFormulaListSeeded pins what the fake adds beyond the contract: a

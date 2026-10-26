@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 )
 
 // WithWorkDir runs bd from dir instead of the wrapper's default directory.
@@ -50,33 +52,39 @@ type FormulaVerbs interface {
 
 var _ FormulaVerbs = (*Beads)(nil)
 
-// FormulaShow returns what bd formula show prints for formula. bd can exit
-// 0 for a formula it did not find, printing nothing (or a JSON null), so a
-// caller checks the output too.
+// FormulaShow returns bd's JSON payload for formula. A name no formula has is
+// an error, so a nil error means the formula exists: bd normally exits 1
+// naming the name, and an empty or null answer is read as the same case.
+//
+// A failure keeps bd's own text rather than the envelope's message: bd puts
+// the reason on stderr (`formula not found: ...` and its search paths) and the
+// envelope only says "details are on stderr" (gt-p85pw.11).
 func (b *Beads) FormulaShow(formula string) ([]byte, error) {
-	out, err := b.run("formula", "show", formula)
+	out, err := b.run("formula", "show", "--", formula)
 	if err != nil {
-		return nil, withBDMessage(err)
+		return nil, err
 	}
-	return out, nil
+	return requireFormula(formula, out)
 }
 
 // FormulaShowText returns bd formula show's prose for formula, the form the
-// operator's terminal wants; bd writes it only outside machine mode.
+// operator's terminal wants; bd writes it only outside machine mode. A name no
+// formula has is an error, as FormulaShow's is.
 func (b *Beads) FormulaShowText(formula string) ([]byte, error) {
-	out, err := b.runText("formula", "show", formula)
+	out, err := b.runText("formula", "show", "--", formula)
 	if err != nil {
-		return nil, withBDMessage(err)
+		return nil, err
 	}
-	return out, nil
+	return requireFormula(formula, out)
 }
 
 // FormulaList returns bd formula list's JSON payload (bd formula list
-// --json), the form FormulaShow answers one formula in.
+// --json), the form FormulaShow answers one formula in. No formulas is bd's
+// null, not an error.
 func (b *Beads) FormulaList() ([]byte, error) {
 	out, err := b.run("formula", "list", "--json")
 	if err != nil {
-		return nil, withBDMessage(err)
+		return nil, err
 	}
 	return out, nil
 }
@@ -86,7 +94,18 @@ func (b *Beads) FormulaList() ([]byte, error) {
 func (b *Beads) FormulaListText() ([]byte, error) {
 	out, err := b.runText("formula", "list")
 	if err != nil {
-		return nil, withBDMessage(err)
+		return nil, err
+	}
+	return out, nil
+}
+
+// requireFormula is out when bd printed a formula and an error when it printed
+// none: the empty answer, or the JSON null, a bd that exits 0 for a name it
+// did not find leaves. Both show forms pass through it, so every
+// FormulaVerbs answer means "this formula exists" when the error is nil.
+func requireFormula(formula string, out []byte) ([]byte, error) {
+	if s := strings.TrimSpace(string(out)); s == "" || s == "null" {
+		return nil, fmt.Errorf("formula %q: bd printed no formula", formula)
 	}
 	return out, nil
 }
