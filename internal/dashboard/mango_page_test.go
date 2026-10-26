@@ -1355,7 +1355,7 @@ func topRule(t *testing.T, sel string) string {
 	t.Helper()
 
 	var found string
-	for _, rule := range strings.Split(pageStyle(t), "}") {
+	for _, rule := range strings.Split(withoutMediaBlocks(pageStyle(t)), "}") {
 		s, body, ok := strings.Cut(rule, "{")
 		if ok && strings.TrimSpace(s) == sel {
 			found = body
@@ -1447,6 +1447,36 @@ func cssPxValue(t *testing.T, v string) float64 {
 
 // pageStyle is index.html's stylesheet with its comments removed, so a rule can
 // be read without a comment's braces or semicolons interfering.
+// withoutMediaBlocks returns css with every @media block removed, braces
+// matched, so a rule nested in one cannot be read as a top-level rule.
+func withoutMediaBlocks(css string) string {
+	var out strings.Builder
+	for {
+		at := strings.Index(css, "@media")
+		if at < 0 {
+			out.WriteString(css)
+			return out.String()
+		}
+		out.WriteString(css[:at])
+		depth, end := 0, -1
+		for i := at; i < len(css) && end < 0; i++ {
+			switch css[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = i + 1
+				}
+			}
+		}
+		if end < 0 {
+			return out.String()
+		}
+		css = css[end:]
+	}
+}
+
 func pageStyle(t *testing.T) string {
 	t.Helper()
 
@@ -1702,4 +1732,22 @@ func mangoCell(t *testing.T, dom *pageDOM, row, col int) drawn {
 	t.Helper()
 
 	return dom.descend(t, "mango", 0, 1, row, col)
+}
+
+// Every rule inside an @media block is dropped, not only the first, so topRule
+// never reads another viewport's rule as the page's own.
+func TestWithoutMediaBlocksDropsEveryRuleInside(t *testing.T) {
+	t.Parallel()
+	css := "body{a:1} @media (max-width:600px){ .a{p:1} .b{p:2} } .c{p:3}"
+	got := withoutMediaBlocks(css)
+	for _, gone := range []string{".a", ".b"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("withoutMediaBlocks kept %q from inside @media: %q", gone, got)
+		}
+	}
+	for _, kept := range []string{"body{a:1}", ".c{p:3}"} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("withoutMediaBlocks dropped top-level %q: %q", kept, got)
+		}
+	}
 }
