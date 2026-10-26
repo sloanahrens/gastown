@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -246,8 +247,14 @@ func TestRunFailureKeepsOlderDumpsAndLeavesNoPartial(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			b, _ := newBackup(t, c.fake, 7)
-			writeFile(t, b.dir, "2026-01-08.dump", "yesterday")
+			// keep=1 is the sharp setting: a successful run would prune every
+			// older dump here, so their survival proves a failed run prunes
+			// nothing.
+			b, stdout := newBackup(t, c.fake, 1)
+			older := []string{"2026-01-02.dump", "2026-01-05.dump", "2026-01-08.dump"}
+			for _, name := range older {
+				writeFile(t, b.dir, name, name)
+			}
 			err := b.Run(context.Background())
 			if err == nil {
 				t.Fatalf("Run succeeded, want an error naming %q", c.want)
@@ -260,13 +267,96 @@ func TestRunFailureKeepsOlderDumpsAndLeavesNoPartial(t *testing.T) {
 					t.Errorf("error leaks %q: %q", secret, err)
 				}
 			}
-			got, err := os.ReadFile(filepath.Join(b.dir, "2026-01-08.dump"))
-			if err != nil || string(got) != "yesterday" {
-				t.Errorf("the older dump changed: %q, %v", got, err)
+			for _, name := range older {
+				if got, err := os.ReadFile(filepath.Join(b.dir, name)); err != nil || string(got) != name {
+					t.Errorf("%s was deleted or changed by a failed run: %q, %v", name, got, err)
+				}
 			}
-			for _, name := range []string{"2026-01-09.dump", "2026-01-09.dump.partial"} {
-				if _, err := os.Stat(filepath.Join(b.dir, name)); !os.IsNotExist(err) {
-					t.Errorf("%s must not exist after a failed run (stat err = %v)", name, err)
+			entries, derr := os.ReadDir(b.dir)
+			if derr != nil {
+				t.Fatalf("read backup directory: %v", derr)
+			}
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), "2026-01-09.") {
+					t.Errorf("%s exists after a failed run", e.Name())
+				}
+			}
+			if strings.Contains(stdout.String(), "wrote") {
+				t.Errorf("stdout = %q, want no publish line from a failed run", stdout.String())
+			}
+		})
+	}
+}
+
+// No credential reaches the streams a scheduler captures: on the success path,
+// on each failure path, and in the warnings a published dump can still
+// produce, neither the log lines nor the returned error carry the password or
+// the DSN, in any spelling (gt-p85pw.64).
+func TestRunLogsNoSecrets(t *testing.T) {
+	t.Parallel()
+	const password = "pa55 word!"
+	base := url.URL{Scheme: "postgres", User: url.UserPassword("tracker", password), Host: "db.internal:5433", Path: "/tracker"}
+	cases := []struct {
+		name    string
+		fake    *fakeDump
+		dsn     string
+		files   []string
+		wantErr bool
+	}{
+		{name: "a published dump", fake: &fakeDump{body: []byte("dump")}},
+		{
+			name:    "pg_dump fails and echoes the DSN",
+			fake:    &fakeDump{body: []byte("half a dump"), fail: fmt.Errorf("connection to %s failed for tracker:%s (%s)", base.String(), password, url.QueryEscape(password))},
+			wantErr: true,
+		},
+		{name: "pg_dump writes an empty dump", fake: &fakeDump{empty: true}, wantErr: true},
+		{
+			name:  "retention warns about a future dump after publishing",
+			fake:  &fakeDump{body: []byte("dump")},
+			files: []string{"2999-01-01.dump"},
+		},
+		{
+			name:    "an unparsable DSN is refused",
+			fake:    &fakeDump{body: []byte("dump")},
+			dsn:     "postgres://tracker:" + url.QueryEscape(password) + "@db.internal:not-a-port/tracker",
+			wantErr: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dsn := c.dsn
+			if dsn == "" {
+				dsn = base.String()
+			}
+			// The spellings redact covers: the password as written, the whole
+			// DSN, and the percent-encoded forms a URI or a form carries.
+			quoted := url.QueryEscape(password)
+			secrets := []string{password, dsn, quoted, strings.ReplaceAll(quoted, "+", "%20"), url.PathEscape(password)}
+			dir := t.TempDir()
+			for _, name := range c.files {
+				writeFile(t, dir, name, "older")
+			}
+			var stdout, stderr bytes.Buffer
+			getenv := func(k string) string {
+				if k == "TRACKER_DSN" {
+					return dsn
+				}
+				return ""
+			}
+			err := runWith(context.Background(), []string{"-dir", dir}, getenv, &stdout, &stderr, c.fake)
+			if gotErr := err != nil; gotErr != c.wantErr {
+				t.Fatalf("Run error = %v, want error %t", err, c.wantErr)
+			}
+			logs := map[string]string{"stdout": stdout.String(), "stderr": stderr.String()}
+			if err != nil {
+				logs["error"] = err.Error()
+			}
+			for where, text := range logs {
+				for _, secret := range secrets {
+					if strings.Contains(text, secret) {
+						t.Errorf("%s leaks %q: %q", where, secret, text)
+					}
 				}
 			}
 		})
