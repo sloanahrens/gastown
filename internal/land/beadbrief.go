@@ -86,7 +86,13 @@ func BeadBrief(description string, comments []beads.Comment) string {
 	if budget < 0 {
 		budget = 0
 	}
-	return head + beadBriefDecisionsHeading + capEntries(entries, budget) + "\n"
+	// No heading for a list that fits no comment: an empty heading reads as a
+	// section with nothing in it.
+	kept := capEntries(entries, budget)
+	if kept == "" {
+		return head
+	}
+	return head + beadBriefDecisionsHeading + kept + "\n"
 }
 
 // WriteBeadBrief writes BeadBrief's text to a 0600 temp file named
@@ -110,7 +116,7 @@ func beadBriefHead(description string) string {
 		if body == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "\n## %s\n\n%s\n", name, demoteSectionHeadings(body))
+		fmt.Fprintf(&b, "\n## %s\n\n%s\n", name, quoteBody(demoteSectionHeadings(body)))
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
@@ -190,7 +196,11 @@ func beadBriefDecisionEntry(marker string, c beads.Comment) string {
 	if date == "" {
 		date = "an unrecorded date"
 	}
-	return fmt.Sprintf("[%s from %s, %s]\n%s", marker, headerField(c.Author), date, quoteBody(strings.TrimSpace(c.Text)))
+	author := headerField(c.Author)
+	if author == "" {
+		author = "unknown author"
+	}
+	return fmt.Sprintf("[%s from %s, %s]\n%s", marker, author, date, quoteBody(strings.TrimSpace(c.Text)))
 }
 
 // quoteBody puts every line of a comment's text under a ">" marker, so a line
