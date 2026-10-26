@@ -38,11 +38,19 @@ const (
 	ruleLandingReviewFail = "landing:review-fail"
 )
 
+// The sources a landing label comes from. The report counts them apart so a
+// polecat's second look and the overseer's review are never read as one.
+const (
+	landingSourcePolecat  = "polecat"
+	landingSourceOverseer = "overseer"
+)
+
 func init() {
 	Register(LandingBattery, func(townRoot string) Adapter {
 		return &landingAdapter{
-			log:   landing.LogPath(townRoot),
-			notes: &townNotes{town: townRoot, stores: map[string]*beads.Beads{}},
+			log:     landing.LogPath(townRoot),
+			notes:   &townNotes{town: townRoot, stores: map[string]*beads.Beads{}},
+			reviews: &cloneReviews{git: &townClone{town: townRoot}},
 		}
 	})
 }
@@ -120,12 +128,16 @@ func (t *townNotes) store(rig string) (*beads.Beads, error) {
 	return b, nil
 }
 
-// landingAdapter labels each logged landing from the overseer's review of the
-// head it logged. The landing log writes landing.Line, whose answers carry the
-// fields Answer reads; its confidence is not scored.
+// landingAdapter labels each logged landing from a review of the head it
+// logged: the overseer's note on the bead, or failing that a polecat's review
+// document. The landing log writes landing.Line, whose answers carry the fields
+// Answer reads; its confidence is not scored.
 type landingAdapter struct {
 	log   string
 	notes landingNotes
+	// reviews reads the polecat review documents. A nil source leaves an item
+	// without an overseer verdict unlabeled.
+	reviews reviewDocs
 
 	// findings gathers the finding beads Label sees, for Context.
 	findings findingTally
@@ -235,16 +247,19 @@ func (a *landingAdapter) Parse(raw []byte) (Item, error) {
 	}, nil
 }
 
-// Label reads the work bead's notes. A PASS of the logged head labels
-// needs_review_now and risk false: the overseer read the diff and let it stand.
+// Label reads the work bead's notes and, when they hold no verdict, the
+// bead's polecat review document. A PASS of the logged head labels
+// needs_review_now and risk false: a reviewer read the diff and let it stand.
 // A FAIL labels both true: the diff should have been read before the wake, and
-// the landing was at least level 2 risk. A WAIVED or AUDITED line leaves the
-// head without a PASS or FAIL, and no line yet is unlabeled, and so is a
-// landing whose bead no longer exists in its rig. A rig with no beads
+// the landing was at least level 2 risk. The overseer's note wins over the
+// polecat's document, and its WAIVED or AUDITED line falls through to the
+// document: the note records that head as unreviewed, so the document is the
+// only review it has. No verdict at all leaves the item unlabeled, and so does
+// a landing whose bead no longer exists in its rig. A rig with no beads
 // directory fails the report, like any other failure to read the notes: it
 // would otherwise leave every landing of that rig unlabeled with a clean exit.
 // A FAIL's finding beads are collected for Context.
-func (a *landingAdapter) Label(_ context.Context, item Item) (Labeling, error) {
+func (a *landingAdapter) Label(ctx context.Context, item Item) (Labeling, error) {
 	rig := landingRig(item)
 	notes, batched := a.batched[rig+"/"+item.ID]
 	if !batched {
@@ -257,18 +272,25 @@ func (a *landingAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 			return Labeling{}, fmt.Errorf("reading %s's notes: %w", item.ID, err)
 		}
 	}
-	verdict, ok := land.OverseerReviewVerdict(notes, item.Refs[refHead])
+	head := item.Refs[refHead]
+	verdict, ok := land.OverseerReviewVerdict(notes, head)
+	source := landingSourceOverseer
+	if !ok || (verdict != land.OverseerReviewPass && verdict != land.OverseerReviewFail) {
+		var err error
+		verdict, ok, err = a.polecatVerdict(ctx, item.ID, head)
+		if err != nil {
+			return Labeling{}, err
+		}
+		source = landingSourcePolecat
+	}
 	if !ok {
 		return Labeling{}, nil
 	}
 	failed := verdict == land.OverseerReviewFail
-	if !failed && verdict != land.OverseerReviewPass {
-		return Labeling{}, nil
-	}
 	rule := ruleLandingReviewPass
 	if failed {
 		rule = ruleLandingReviewFail
-		a.findings.add(land.OverseerReviewFindings(notes, item.Refs[refHead]))
+		a.findings.add(land.OverseerReviewFindings(notes, head))
 	}
 	return Labeling{
 		Labeled: true,
@@ -276,8 +298,25 @@ func (a *landingAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 			QuestionID(landing.QNeedsReviewNow): failed,
 			QuestionID(landing.QRisk):           failed,
 		},
-		Rule: rule,
+		Rule:   rule,
+		Source: source,
 	}, nil
+}
+
+// polecatVerdict returns the verdict the bead's polecat review documents record
+// for head. No review source leaves the item without one.
+func (a *landingAdapter) polecatVerdict(ctx context.Context, bead, head string) (string, bool, error) {
+	if a.reviews == nil {
+		return "", false, nil
+	}
+	verdict, ok, err := a.reviews.Verdict(ctx, bead, head)
+	if err != nil {
+		return "", false, fmt.Errorf("reading %s's polecat review: %w", bead, err)
+	}
+	if !ok || (verdict != land.OverseerReviewPass && verdict != land.OverseerReviewFail) {
+		return "", false, nil
+	}
+	return verdict, true, nil
 }
 
 // Context reports the finding beads the FAIL lines named, each once, and

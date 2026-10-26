@@ -59,6 +59,10 @@ type Labeling struct {
 	Labels map[QuestionID]bool
 	// Rule is the stable name of the rule that set Labels.
 	Rule string
+	// Source names where the label came from, such as a polecat's review or
+	// the overseer's, so the report counts them apart. An adapter with one
+	// source leaves it empty.
+	Source string
 }
 
 // Adapter reads one battery's log and labels its items from the ground truth
