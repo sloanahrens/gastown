@@ -121,11 +121,6 @@ RUN ln -sf /usr/local/bin/make /usr/bin/make \
 RUN GOBIN=/usr/local/bin GOFLAGS= /usr/local/go/bin/go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
     && rm -rf /root/go /root/.cache
 
-# Town binaries, cross-compiled by `make polecat-image` (CGO_ENABLED=0 linux/arm64).
-COPY bin/gt /usr/local/bin/gt
-COPY bin/bd /usr/local/bin/bd
-RUN chmod 0755 /usr/local/bin/gt /usr/local/bin/bd
-
 # Non-root sandbox user; OpenShell runs the workload as the image USER and
 # uses /sandbox as the workspace.
 RUN userdel -r ubuntu 2>/dev/null || true \
@@ -187,6 +182,14 @@ RUN --mount=type=bind,source=seed,target=/seed \
        done \
     && rm -f /tmp/seed.log \
     && chmod -R a+rwX "$GOCACHE" "$GOMODCACHE"
+
+# Town binaries, cross-compiled by `make polecat-image` (CGO_ENABLED=0 linux/arm64).
+# After the seed RUN, not before it: bin/gt and bin/bd change every commit, and a
+# layer above the seed would invalidate the seed's cache on every build (gt-b3jyq
+# measurement, 2026-10-26). The seed does not use gt or bd.
+COPY bin/gt /usr/local/bin/gt
+COPY bin/bd /usr/local/bin/bd
+RUN chmod 0755 /usr/local/bin/gt /usr/local/bin/bd
 
 ENV PATH="/usr/local/go/bin:/sandbox/go/bin:${PATH}" \
     GOPATH=/sandbox/go \
