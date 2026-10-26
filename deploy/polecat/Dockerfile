@@ -152,17 +152,17 @@ RUN groupadd -g 10001 polecat \
 # this one RUN so none of it lands in the image. Each module gets the commands
 # the rigs' presubmits run, with their default flags (no -trimpath, default CGO)
 # so the cache keys match. `go mod download` runs first because a linux build
-# fetches only the modules linux imports, while a rig's test can build for
-# another platform: devops' TestCloudqueryBinPinsAreARebuildOfTheCommit builds
-# for darwin/arm64 and needs the pulumi sdk's darwin-only purego (gt-mukre). The
-# darwin build then compiles those modules into the build cache too.
+# fetches only the modules linux imports. There is no darwin build here: the
+# one presubmit test that cross-built for darwin/arm64 (devops'
+# TestCloudqueryBinPinsAreARebuildOfTheCommit, gt-mukre) moved to the host tier
+# in dv-0qre, so the sandbox's unit tier never needs the darwin cache. Macos
+# builds stay off the Linux image.
 #
 # A failing linux `go build` or `go mod download` fails the image: the seed
 # would otherwise publish a hole that the read-only cache cannot fill at
-# runtime. A failing vet, test compile or darwin build is logged and skipped: a
-# module may need system headers the image lacks, or a dependency with no darwin
-# build. The chmod for uid 10001 is in this same RUN, as one in a later layer
-# would copy every file again.
+# runtime. A failing vet or test compile is logged and skipped: a module may
+# need system headers the image lacks. The chmod for uid 10001 is in this same
+# RUN, as one in a later layer would copy every file again.
 ENV GOCACHE=/tmp/gocache \
     GOMODCACHE=/tmp/gomodcache
 RUN --mount=type=bind,source=seed,target=/seed \
@@ -171,8 +171,7 @@ RUN --mount=type=bind,source=seed,target=/seed \
     && for gomod in $(find /seed -name go.mod -not -path '*/testdata/*' | sort); do \
          dir=$(dirname "$gomod"); echo "seed: $dir"; \
          for step in "go mod download" "go build ./..." "go vet ./..." \
-                     "go test -count=1 -run ^\$ ./..." \
-                     "GOOS=darwin GOARCH=arm64 go build ./..."; do \
+                     "go test -count=1 -run ^\$ ./..."; do \
            if ! (cd "$dir" && $step >/tmp/seed.log 2>&1); then \
              echo "seed: '$step' failed in $dir:"; tail -n 5 /tmp/seed.log; \
              case "$step" in "go build ./..."|"go mod download") exit 1 ;; esac; \

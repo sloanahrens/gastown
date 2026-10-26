@@ -110,15 +110,16 @@ func TestPolecatImageSeedSetsCachesOutsideTheWorkspace(t *testing.T) {
 			t.Errorf("the seed RUN lacks %q", want)
 		}
 	}
-	// A linux build fetches only the modules linux imports, while a rig's test
-	// can build for darwin/arm64 (gt-mukre). Without both commands the sandbox
-	// finds its read-only module cache missing a module the seed never fetched.
-	for _, want := range []string{"go mod download", "GOOS=darwin GOARCH=arm64 go build ./..."} {
-		if !strings.Contains(seed, want) {
-			t.Errorf("the seed RUN lacks %q", want)
-		}
+	// A linux build fetches only the modules linux imports, so the seed runs go
+	// mod download first. Without it the sandbox finds its read-only module cache
+	// missing a module the seed never fetched.
+	if !strings.Contains(seed, "go mod download") {
+		t.Errorf("the seed RUN lacks %q", "go mod download")
 	}
-	for _, bad := range []string{"-trimpath", "CGO_ENABLED"} {
+	// There is no darwin build in the image: the one check that cross-built for
+	// darwin/arm64 moved to the host tier (dv-0qre), and macOS builds stay off the
+	// Linux image.
+	for _, bad := range []string{"-trimpath", "CGO_ENABLED", "GOOS=darwin"} {
 		if strings.Contains(seed, bad) {
 			t.Errorf("the seed RUN sets %q, which changes the cache keys the presubmits use", bad)
 		}
