@@ -64,7 +64,7 @@ allowlist fails the gate with the same redirect.
 
 The guard fails closed: a hook payload it cannot read or parse, or a worker
 session whose own worktree it cannot place, is denied rather than passed
-through unjudged. A session with no role, or an unrecognised one, is judged as
+through unjudged. A session with no role, or an unrecognized one, is judged as
 a worker. A path that cannot be resolved is denied when its name ends in a
 denied script suffix, since the request is still to create a script.
 
@@ -120,10 +120,7 @@ func tapGuardScriptFiles(stdin io.Reader, stderr io.Writer, proc guardProcess) e
 		printScriptFileUnjudgeable(stderr, "the hook payload could not be parsed")
 		return NewSilentExit(2)
 	}
-	scope, worker, ok := resolveScriptFileScope(hook.Cwd, proc)
-	if !worker {
-		return nil // not a worker session — outside this guard's remit
-	}
+	scope, ok := resolveScriptFileScope(hook.Cwd, proc)
 	if !ok {
 		printScriptFileUnjudgeable(stderr, "the session's own worktree could not be resolved")
 		return NewSilentExit(2)
@@ -149,17 +146,12 @@ type scriptFileScope struct {
 	proc     guardProcess
 }
 
-// resolveScriptFileScope identifies the worker session and its worktree.
-// worker reports whether the session is one this guard polices at all (a
-// polecat or a crew member); ok reports whether its own worktree could be
-// named. A worker whose tree cannot be named is a refusal, not an allow: the
-// guard exists to stop a new script, and not being able to see where the
-// session stands is not evidence that no script is being written (gt-b43ra).
-func resolveScriptFileScope(payloadCwd string, proc guardProcess) (scope scriptFileScope, worker, ok bool) {
-	role, worker := scriptFileWorkerRole(proc)
-	if !worker {
-		return scriptFileScope{}, false, false
-	}
+// resolveScriptFileScope identifies the session's worktree. ok reports whether
+// it could be named. A session whose tree cannot be named is a refusal, not an
+// allow: the guard exists to stop a new script, and not being able to see where
+// the session stands is not evidence that no script is being written (gt-b43ra).
+func resolveScriptFileScope(payloadCwd string, proc guardProcess) (scope scriptFileScope, ok bool) {
+	role := scriptFileWorkerRole(proc)
 	cwd := ""
 	if payloadCwd != "" && filepath.IsAbs(payloadCwd) {
 		if canonical, ok := canonicalizeToolPath(proc, payloadCwd, ""); ok {
@@ -174,7 +166,7 @@ func resolveScriptFileScope(payloadCwd string, proc guardProcess) (scope scriptF
 		}
 	}
 	if cwd == "" {
-		return scriptFileScope{}, true, false
+		return scriptFileScope{}, false
 	}
 
 	worktree := ""
@@ -196,35 +188,32 @@ func resolveScriptFileScope(payloadCwd string, proc guardProcess) (scope scriptF
 		}
 	}
 	if worktree == "" {
-		return scriptFileScope{}, true, false
+		return scriptFileScope{}, false
 	}
-	return scriptFileScope{worktree: worktree, cwd: cwd, proc: proc}, true, true
+	return scriptFileScope{worktree: worktree, cwd: cwd, proc: proc}, true
 }
 
-// scriptFileWorkerRole reports the role this guard polices for this process:
-// a polecat or a crew member. GT_ROLE decides whenever it is set — a
-// coordinator can carry a stale GT_POLECAT from having spawned polecats — as
-// it does for the rest of the guard family.
-func scriptFileWorkerRole(proc guardProcess) (Role, bool) {
+// scriptFileWorkerRole reports the role whose worktree this guard looks for.
+// GT_ROLE decides whenever it is set — a coordinator can carry a stale
+// GT_POLECAT from having spawned polecats — as it does for the rest of the
+// guard family. Every session is judged: only a recognized polecat or crew role
+// names a worktree by role, and any other session (an unrecognized role, or no
+// identifying variable at all) is judged as a worker, fail closed (gt-b43ra).
+func scriptFileWorkerRole(proc guardProcess) Role {
 	if role := strings.TrimSpace(proc.getenv("GT_ROLE")); role != "" {
-		// Only a recognised polecat or crew role names a worker's tree. Any other
-		// value, recognised or not, is judged as a worker: an unrecognised role
-		// must not exempt the session (gt-b43ra).
 		parsed, _, _ := parseRoleString(role)
 		if parsed == RolePolecat || parsed == RoleCrew {
-			return parsed, true
+			return parsed
 		}
-		return "", true
+		return ""
 	}
 	switch {
 	case proc.getenv("GT_POLECAT") != "":
-		return RolePolecat, true
+		return RolePolecat
 	case proc.getenv("GT_CREW") != "":
-		return RoleCrew, true
+		return RoleCrew
 	}
-	// No identifying variable: the guard is installed only in worker and crew
-	// settings, so the session is judged as a worker (fail closed, gt-b43ra).
-	return "", true
+	return ""
 }
 
 // gitWorktreeRoot returns the directory containing cwd's ".git" entry, which

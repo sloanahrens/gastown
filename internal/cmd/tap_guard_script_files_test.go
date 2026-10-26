@@ -275,7 +275,7 @@ func TestScriptFileGuardCrewSession(t *testing.T) {
 	assertVerdict(t, err, false, "crew Write into a polecat worktree")
 }
 
-// TestScriptFileGuardNoImplicitAllowlist pins by behaviour the gt-b43ra
+// TestScriptFileGuardNoImplicitAllowlist pins by behavior the gt-b43ra
 // constraint that the allowlist starts empty: a new script is refused whatever
 // plausible repo name it carries, so nothing is exempt without an explicit
 // entry that a reviewer can see.
@@ -308,9 +308,9 @@ func TestScriptFileGuardBashIsNotJudged(t *testing.T) {
 	assertVerdict(t, err, false, "Bash touch of a new script")
 }
 
-// An unrecognised GT_ROLE does not exempt the session: it is judged as a
+// An unrecognized GT_ROLE does not exempt the session: it is judged as a
 // worker, so a new script in its worktree is denied (gt-b43ra).
-func TestScriptFileGuardUnrecognisedRoleIsJudged(t *testing.T) {
+func TestScriptFileGuardUnrecognizedRoleIsJudged(t *testing.T) {
 	t.Parallel()
 	town := newScriptFileTestTown(t)
 	proc := fakeGuardProcess(map[string]string{
@@ -318,5 +318,5 @@ func TestScriptFileGuardUnrecognisedRoleIsJudged(t *testing.T) {
 	}, "")
 	err := town.run(t, proc, town.worktree, "Write",
 		fileInput(filepath.Join(town.worktree, "deploy.sh")), io.Discard)
-	assertVerdict(t, err, true, "unrecognised GT_ROLE Write of a new script")
+	assertVerdict(t, err, true, "unrecognized GT_ROLE Write of a new script")
 }
