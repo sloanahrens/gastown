@@ -199,6 +199,15 @@ func (f *fakeLandings) Recent(n int) ([]land.LandingRecord, error) {
 	return f.recs, f.err
 }
 
+// failingCommentStore is the fake whose comment write fails: reads and
+// updates reach the bead, the comment never does.
+type failingCommentStore struct {
+	*beadsfake.Fake
+	err error
+}
+
+func (s failingCommentStore) AddComment(string, string) error { return s.err }
+
 type harness struct {
 	w       *Worker
 	bd      *beadsfake.Fake
@@ -318,24 +327,81 @@ func TestPassReworkRejectionCommentsAndClearsIntent(t *testing.T) {
 		t.Fatalf("report %v; want one rejection", rep)
 	}
 	cs := h.comments(t, "gt-abc")
-	if len(cs) != 1 || !strings.Contains(cs[0], ReworkComment) || !strings.Contains(cs[0], "gate") {
-		t.Fatalf("comments %q; want the rework instruction", cs)
+	// The rework comment is pinned whole: its wording is what the returning
+	// polecat acts on, so a change to it is a deliberate one.
+	want := "Landing rejected (gate): gate failed on the merged tree. Back to the polecat as rework: " + ReworkComment + "."
+	if len(cs) != 1 || cs[0] != want {
+		t.Fatalf("comments %q; want the rework instruction %q", cs, want)
 	}
 	if len(h.cleared) != 1 {
 		t.Fatalf("intent cleared %v; want once", h.cleared)
 	}
 }
 
-func TestPassHumanRejectionLeavesNoReworkComment(t *testing.T) {
+// TestPassHumanRejectionCommentsTheVerdict: a rejection left for a human
+// leaves the same verdict, score, summary and findings a rework rejection
+// does, and its first sentence says the loop is escalated instead of
+// reworked (gt-7nidu).
+func TestPassHumanRejectionCommentsTheVerdict(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Rework: false, Reason: "om requested changes (score 0.41, 2 finding(s))",
+			ReviewScore: 0.41, ReviewVerdict: land.VerdictRequestChanges, ReviewSummary: "Retry loop drops the last error.",
+			Findings: []land.Finding{{Severity: "major", Path: "a.go", Line: 9, Title: "error dropped"}, {Severity: "minor", Path: "b.go", Title: "naming"}}}
+	}
+	h.w.Pass(context.Background())
+	cs := h.comments(t, "gt-abc")
+	if len(cs) != 1 {
+		t.Fatalf("comments %q; want exactly one on the work bead", cs)
+	}
+	first := strings.SplitN(cs[0], "\n", 2)[0]
+	if !strings.Contains(first, "escalated to a human") || !strings.Contains(first, "not reworked again") {
+		t.Errorf("the first sentence does not say the loop is escalated:\n%s", cs[0])
+	}
+	for _, want := range []string{"om verdict: request_changes, score 0.41", "Retry loop drops the last error.", "[major] a.go:9 error dropped", "[minor] b.go naming"} {
+		if !strings.Contains(cs[0], want) {
+			t.Errorf("comment lacks %q:\n%s", want, cs[0])
+		}
+	}
+	if strings.Contains(cs[0], ReworkComment) {
+		t.Errorf("a human rejection tells the polecat to rework:\n%s", cs[0])
+	}
+}
+
+// TestPassHumanRejectionCommentFailureIsLogged: a comment that does not reach
+// the store is logged, and the escalation happens anyway (gt-7nidu).
+func TestPassHumanRejectionCommentFailureIsLogged(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.w.Beads = failingCommentStore{Fake: h.bd, err: errors.New("bd down")}
+	var mu sync.Mutex
+	var logs []string
+	h.w.Logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	var escalations atomic.Int32
+	h.w.Escalate = func(string, string) { escalations.Add(1) }
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
 		return land.Result{}, &land.Rejection{Kind: land.RejectPolicy, Reason: "no_merge work never lands", Rework: false}
 	}
-	rep := h.w.Pass(context.Background())
-	if rep.Rejected != 1 || len(h.comments(t, "gt-abc")) != 0 {
-		t.Fatalf("report %v, comments %q; want a rejection with no rework comment", rep, h.comments(t, "gt-abc"))
+	h.w.Pass(context.Background())
+	h.w.escWG.Wait()
+	if n := escalations.Load(); n != 1 {
+		t.Fatalf("escalated %d times; want 1", n)
+	}
+	mu.Lock()
+	joined := strings.Join(logs, "\n")
+	mu.Unlock()
+	if !strings.Contains(joined, "adding the human-rejection comment: bd down") {
+		t.Fatalf("logs %q; want the comment failure logged", joined)
+	}
+	if cs := h.comments(t, "gt-abc"); len(cs) != 0 {
+		t.Fatalf("comments %q; the fake store refused the write", cs)
 	}
 }
 

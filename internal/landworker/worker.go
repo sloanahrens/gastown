@@ -778,6 +778,10 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 			return
 		}
 		w.endFailureRun(work.BeadID)
+		msg := humanMessage(rej)
+		if cerr := w.Beads.AddComment(work.BeadID, msg); cerr != nil {
+			w.logf("%s: adding the human-rejection comment: %v", work.BeadID, cerr)
+		}
 		w.clearIntent(work)
 	case outRace:
 		// Target moved during the gate: nothing written; land again next pass.
@@ -935,15 +939,31 @@ func errorLine(err error) string {
 	return line
 }
 
-// maxCommentFindings bounds the om findings one rework comment lists.
+// maxCommentFindings bounds the om findings one rejection comment lists.
 const maxCommentFindings = 15
 
 // reworkMessage is the comment a rework rejection leaves on the work bead.
 // An om rejection carries om's verdict text and findings in the same
 // comment: one comment on the work bead, never a bead per finding.
 func reworkMessage(rej *land.Rejection) string {
+	return rejectionComment(rej, fmt.Sprintf("Landing rejected (%s): %s. Back to the polecat as rework: %s.",
+		rej.Kind, land.NoteField(rej.Reason), ReworkComment))
+}
+
+// humanMessage is the comment a rejection left for a human leaves: the same
+// verdict word, score, summary and findings a rework rejection gets, with a
+// first sentence saying the loop is escalated so a reader of the comments
+// sees it is not reworked again (gt-7nidu).
+func humanMessage(rej *land.Rejection) string {
+	return rejectionComment(rej, fmt.Sprintf("Landing rejected (%s) and escalated to a human, not reworked again: %s.",
+		rej.Kind, land.NoteField(rej.Reason)))
+}
+
+// rejectionComment appends an om rejection's verdict word, score, summary and
+// findings to the rejection's first sentence.
+func rejectionComment(rej *land.Rejection, first string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Landing rejected (%s): %s. Back to the polecat as rework: %s.", rej.Kind, land.NoteField(rej.Reason), ReworkComment)
+	fmt.Fprint(&b, first)
 	if rej.Kind == land.RejectReview {
 		fmt.Fprintf(&b, "\n\nom verdict: %s, score %.2f", reviewVerdictWord(rej.ReviewVerdict), rej.ReviewScore)
 		if s := strings.TrimSpace(rej.ReviewSummary); s != "" {
