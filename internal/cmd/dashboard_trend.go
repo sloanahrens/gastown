@@ -133,10 +133,12 @@ func buildTrend(now time.Time, recs []omRecord, stages []omStage, rejs []omRejec
 	return tr
 }
 
-// recentLandingRows is how many finished landings and rejections the Landings
-// table holds: zero is every landing in the window, which the pane scrolls. The
-// live rows, running and failing in backoff, sit above them and are not counted.
-const recentLandingRows = 0
+// recentLandingRows is the most finished landings and rejections the Landings
+// table keeps. A busy day lands a few hundred rows and the pane scrolls all of
+// them, so the cap never cuts a real day: it is the table's bound against a log
+// that runs wild, not a display limit. The live rows, running and failing in
+// backoff, sit above the finished ones and are not counted.
+const recentLandingRows = 2000
 
 // recentTitleRows is how many of those rows look up a bead title. A title is a
 // bd read (cached after the first), so the rows past it show their bead id and
@@ -144,13 +146,14 @@ const recentLandingRows = 0
 const recentTitleRows = 10
 
 // buildRecentLandings joins the last 24 hours of landings and rejections with
-// the stage lines that say what each cost, newest first, capped at limit. live
-// is the landings in flight, which go above the cap rather than inside it: a
-// landing running now is not one of the day's finished rows. The title of a
-// bead is asked for only once the rows to show are known, so the lookups are
-// bounded by limit, not by the day's traffic. ship reads a landing's ship
-// reading off the deploy tracker, by its rig because what ships a landing
-// depends on the rig; a rejection never carries one.
+// the stage lines that say what each cost, newest first, keeping the newest
+// limit rows: limit is the table's row bound, and the caller always passes one
+// (gt-1j1bf). live is the landings in flight, which go above the bound rather
+// than inside it: a landing running now is not one of the day's finished rows.
+// The title of a bead is asked for only once the rows to show are known, so the
+// lookups are bounded by limit, not by the day's traffic. ship reads a
+// landing's ship reading off the deploy tracker, by its rig because what ships
+// a landing depends on the rig; a rejection never carries one.
 func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow
@@ -201,7 +204,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		rows = append(rows, row)
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].At.After(rows[j].At) })
-	if limit > 0 && len(rows) > limit {
+	if len(rows) > limit {
 		rows = rows[:limit]
 	}
 	if len(live) > 0 {
