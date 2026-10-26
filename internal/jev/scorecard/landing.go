@@ -312,7 +312,8 @@ func (a *landingAdapter) reviewVerdict(ctx context.Context, notes, bead, head st
 }
 
 // polecatVerdict returns the verdict the bead's polecat review documents record
-// for head. No review source leaves the item without one.
+// for head, in the review lines' words (PASS or FAIL). No review source leaves
+// the item without one.
 func (a *landingAdapter) polecatVerdict(ctx context.Context, bead, head string) (string, bool, error) {
 	if a.reviews == nil {
 		return "", false, nil
