@@ -440,17 +440,20 @@ type SkippedBead struct {
 
 // Dispatch is the spec dispatcher's most recent tick.
 type Dispatch struct {
-	At         time.Time     `json:"at"`
-	Candidates int           `json:"candidates"`
-	Roster     string        `json:"roster"` // "deepseek-flash 2/3"
-	Dispatched int           `json:"dispatched"`
-	Refused    int           `json:"refused"`
-	Planning   int           `json:"planning"`
-	Skipped    int           `json:"skipped"`
-	Failed     int           `json:"failed"`
-	Held       int           `json:"held"` // held by the failed label
-	Named      []SkippedBead `json:"named,omitempty"`
-	More       int           `json:"more,omitempty"` // skipped beads the line did not name
+	At         time.Time `json:"at"`
+	Candidates int       `json:"candidates"`
+	Roster     string    `json:"roster"` // "deepseek-flash 2/3"
+	Dispatched int       `json:"dispatched"`
+	Refused    int       `json:"refused"`
+	Planning   int       `json:"planning"`
+	Skipped    int       `json:"skipped"`
+	Failed     int       `json:"failed"`
+	Held       int       `json:"held"` // held by the failed label
+	// Bypassed counts the P0 and P1 candidates dispatched despite overlapping
+	// work in flight (gt-iydx1).
+	Bypassed int           `json:"bypassed,omitempty"`
+	Named    []SkippedBead `json:"named,omitempty"`
+	More     int           `json:"more,omitempty"` // skipped beads the line did not name
 }
 
 // TrendHour is one local hour of the last 24: how many landings and rejections

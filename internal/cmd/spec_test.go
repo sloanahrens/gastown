@@ -694,6 +694,111 @@ func TestSpecDispatchHoldsASecondFilingOfHeldWork(t *testing.T) {
 	})
 }
 
+// A P0 or P1 candidate that overlaps work in flight takes its seat anyway and
+// the tick reports the bypass naming the holder; a P2 candidate on the same
+// overlap is held as before (gt-iydx1).
+func TestSpecDispatchBypassesTheOverlapHoldForUrgentWork(t *testing.T) {
+	t.Parallel()
+	const guard = "internal/daemon/overrun_guard.go"
+	const seat = "gastown/polecats/capable"
+	filing := func(id string, priority int) specdispatch.Spec {
+		s := cleanSpec(id, priority, "2026-10-26T10:00:00Z")
+		s.Title = "overrun guard nudge uses wait-idle under a 30s context"
+		s.Description = specTestDescription + "\n\nToday internal/daemon/overrun_guard.go (~254) calls Nudge with a 30 s context."
+		return s
+	}
+	held := []specdispatch.HeldBead{{ID: "gt-t61ft", Assignee: seat, Paths: []string{guard}}}
+	for _, tc := range []struct {
+		name     string
+		priority int
+	}{
+		{"P0 bypasses", 0},
+		{"P1 bypasses", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeSpecTown(filing("gt-urgent", tc.priority))
+			f.held["gastown"] = held
+			r := runSpecDispatchCycle(f.env())
+			if got := strings.Join(f.slung, " "); got != "gt-urgent" {
+				t.Fatalf("slung %q, want the urgent bead dispatched despite the overlap", got)
+			}
+			want := fmt.Sprintf("gt-urgent: overlap hold bypassed for P%d (would be held by gt-t61ft held by %s)", tc.priority, seat)
+			if len(r.Bypassed) != 1 || r.Bypassed[0].Line != want {
+				t.Fatalf("bypassed = %+v, want %q", r.Bypassed, want)
+			}
+			if len(r.Skipped) != 0 {
+				t.Errorf("skipped = %+v, want the urgent bead not held", r.Skipped)
+			}
+		})
+	}
+
+	t.Run("P2 keeps the hold", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(filing("gt-normal", 2))
+		f.held["gastown"] = held
+		r := runSpecDispatchCycle(f.env())
+		if len(f.slung) != 0 {
+			t.Fatalf("slung a P2 bead overlapping held work: %v", f.slung)
+		}
+		if len(r.Bypassed) != 0 {
+			t.Errorf("bypassed = %+v, want no bypass for P2", r.Bypassed)
+		}
+		if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipHeld) {
+			t.Fatalf("skipped = %+v, want the P2 bead held", r.Skipped)
+		}
+	})
+}
+
+// A P0 candidate that overlaps nothing is dispatched with no bypass entry: the
+// report names only the holds the priority answered (gt-iydx1).
+func TestSpecDispatchNoBypassWithoutAnOverlap(t *testing.T) {
+	t.Parallel()
+	s := cleanSpec("gt-clear", 0, "2026-10-26T10:00:00Z")
+	s.Description = specTestDescription + "\n\ninternal/notify/send.go retries once on a refused send."
+	f := newFakeSpecTown(s)
+	f.held["gastown"] = []specdispatch.HeldBead{{ID: "gt-t61ft", Assignee: "gastown/polecats/capable", Paths: []string{"internal/daemon/overrun_guard.go"}}}
+	r := runSpecDispatchCycle(f.env())
+	if got := strings.Join(f.slung, " "); got != "gt-clear" {
+		t.Fatalf("slung %q, want gt-clear dispatched", got)
+	}
+	if len(r.Bypassed) != 0 {
+		t.Fatalf("bypassed = %+v, want none for a bead naming no held path", r.Bypassed)
+	}
+}
+
+// The dry run's printout carries the bypass twice: the tick's summary line
+// counts it and a bypassed line names the bead with what would have held it
+// (gt-iydx1).
+func TestSpecDispatchDryRunReportsTheOverlapBypass(t *testing.T) {
+	t.Parallel()
+	const guard = "internal/daemon/overrun_guard.go"
+	const seat = "gastown/polecats/capable"
+	s := cleanSpec("gt-urgent", 0, "2026-10-26T10:00:00Z")
+	s.Title = "overrun guard nudge uses wait-idle under a 30s context"
+	s.Description = specTestDescription + "\n\nToday internal/daemon/overrun_guard.go (~254) calls Nudge with a 30 s context."
+	f := newFakeSpecTown(s)
+	f.held["gastown"] = []specdispatch.HeldBead{{ID: "gt-t61ft", Assignee: seat, Paths: []string{guard}}}
+	env := f.env()
+	env.DryRun = true
+	r := runSpecDispatchCycle(env)
+	if len(f.slung) != 0 {
+		t.Fatalf("dry run slung %v", f.slung)
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	printSpecDispatchReport(cmd, r)
+	for _, want := range []string{
+		"1 overlap hold bypassed",
+		"gt-urgent: overlap hold bypassed for P0 (would be held by gt-t61ft held by " + seat + ")",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("dry-run output %q does not carry %q", out.String(), want)
+		}
+	}
+}
+
 // An overlapping cluster — the dv-nnjl/dv-613z/dv-fec7.10 shapes seen on
 // devops 2026-10-25 — dispatches exactly the bead that precedes the others:
 // the dispatcher holds the rest on the shared test before a seat is charged or
@@ -895,7 +1000,7 @@ func TestSpecHeldHoldSkipsAnUnassignedInProgressBead(t *testing.T) {
 	}}
 	candidate := cleanSpec("gt-second", 2, "2026-10-19T10:00:00Z")
 	candidate.Description += "\nToday " + guard + " calls Nudge with a 30 s context.\n"
-	if why, err := specHeldHold(env, "gastown", candidate, map[string]heldRead{}); err != nil || why != "" {
+	if why, _, err := specHeldHold(env, "gastown", candidate, map[string]heldRead{}); err != nil || why != "" {
 		t.Fatalf("specHeldHold = %q, %v; want no hold from an unassigned bead", why, err)
 	}
 }
@@ -926,13 +1031,15 @@ func TestHeldBeadsFromSkipsEpics(t *testing.T) {
 	env := specDispatchEnv{Held: func(string) ([]specdispatch.HeldBead, error) {
 		return heldBeadsFrom(db, func(string, error) {}, dir)
 	}}
-	why, err := specHeldHold(env, "gastown", child, map[string]heldRead{})
+	why, _, err := specHeldHold(env, "gastown", child, map[string]heldRead{})
 	if err != nil || why != "" {
 		t.Fatalf("specHeldHold = %q, %v; want no hold for a child naming the epic's file", why, err)
 	}
-	other := cleanSpec("gt-other", 1, "2026-09-29T10:00:00Z")
+	// P2, so the overlap hold is the rule under test rather than the urgent
+	// priority's bypass (gt-iydx1).
+	other := cleanSpec("gt-other", 2, "2026-09-29T10:00:00Z")
 	other.Description += "\nThe fix lands in b.go.\n"
-	if why, err := specHeldHold(env, "gastown", other, map[string]heldRead{}); err != nil || why == "" {
+	if why, _, err := specHeldHold(env, "gastown", other, map[string]heldRead{}); err != nil || why == "" {
 		t.Fatalf("specHeldHold = %q, %v; want a hold for a candidate naming the hooked task's file", why, err)
 	}
 }
@@ -1036,7 +1143,7 @@ func TestSpecHeldHoldReferenceDocsDoNotHold(t *testing.T) {
 			}}
 			candidate := cleanSpec("gt-second", 2, "2026-10-19T10:00:00Z")
 			candidate.Description = c.candidate
-			why, err := specHeldHold(env, "gastown", candidate, map[string]heldRead{})
+			why, _, err := specHeldHold(env, "gastown", candidate, map[string]heldRead{})
 			if err != nil {
 				t.Fatalf("specHeldHold: %v", err)
 			}

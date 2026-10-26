@@ -13,7 +13,9 @@ import (
 const dispatchTickMarker = "spec_dispatch: tick:"
 
 var (
-	dispatchTickRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) spec_dispatch: tick: (\d+) candidate\(s\), roster (.*?), (\d+) dispatched, (\d+) refused, (\d+) planning, (\d+) skipped, (\d+) failed, (\d+) held by the failed label(.*)$`)
+	// The overlap-hold bypass count is written only when nonzero, so it is an
+	// optional segment between the counts and the skipped list (gt-iydx1).
+	dispatchTickRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) spec_dispatch: tick: (\d+) candidate\(s\), roster (.*?), (\d+) dispatched, (\d+) refused, (\d+) planning, (\d+) skipped, (\d+) failed, (\d+) held by the failed label(?:, (\d+) overlap hold bypassed)?(.*)$`)
 	skippedItemRe  = regexp.MustCompile(`^([A-Za-z0-9]+-[A-Za-z0-9.]+) \((.*)\)$`)
 	skippedMoreRe  = regexp.MustCompile(` \+(\d+) more$`)
 )
@@ -34,9 +36,9 @@ func parseDispatchTick(line string) *dashboard.Dispatch {
 	n := func(i int) int { v, _ := strconv.Atoi(m[i]); return v }
 	d := &dashboard.Dispatch{
 		At: at, Candidates: n(2), Roster: m[3], Dispatched: n(4), Refused: n(5),
-		Planning: n(6), Skipped: n(7), Failed: n(8), Held: n(9),
+		Planning: n(6), Skipped: n(7), Failed: n(8), Held: n(9), Bypassed: n(10),
 	}
-	rest := strings.TrimSpace(m[10])
+	rest := strings.TrimSpace(m[11])
 	rest = strings.TrimPrefix(rest, ";")
 	rest = strings.TrimSpace(rest)
 	const label = "skipped:"

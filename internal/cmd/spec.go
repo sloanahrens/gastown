@@ -180,7 +180,11 @@ A candidate is held when its own text names a path a bead already hooked to a
 working seat names: two beads on one defect filed inside a dispatch window
 share no wording but do share the files that carry the fix, and the second seat
 would duplicate the first (gt-z80p9). The held bead is the record — no state
-file remembers a dispatch — and the hold lifts when that bead closes.
+file remembers a dispatch — and the hold lifts when that bead closes. A P0 or
+P1 candidate takes its seat anyway, and the tick reports an "overlap hold
+bypassed for P<n>" line naming the bead that would have held it: an urgent
+bead waits behind no seat's rework, and a merge conflict at rebase is cheaper
+(gt-iydx1).
 
 A clean candidate is re-read once more immediately before its sling and dropped
 if the bead has changed since the board was read — a submission in that window
@@ -646,7 +650,10 @@ func specPeerHeldBySeat(peer sling.Duplicate, pool []sling.Duplicate) string {
 	if len(held) == 0 {
 		return ""
 	}
-	return specdispatch.HeldOverlap(specHoldFiles(peer.Refs.Files, peer.Ready.Description), peer.Refs.Tests, held)
+	// The peer's own priority decides whether the hold takes it: an urgent peer
+	// the tick would sling despite an overlap is next, so the guard refuses the
+	// candidate behind it exactly as it does for an unheld peer (gt-iydx1).
+	return specdispatch.HeldOverlap(specHoldFiles(peer.Refs.Files, peer.Ready.Description), peer.Refs.Tests, peer.Priority, held).Reason
 }
 
 // specSeatHolds reports whether a bead in status is one a working seat has in
@@ -851,6 +858,11 @@ type specDispatchReport struct {
 	Planning       []specDispatchEntry `json:"planning"`
 	Skipped        []specDispatchEntry `json:"skipped"`
 	Failed         []specDispatchEntry `json:"failed"`
+	// Bypassed lists the P0 and P1 candidates that overlapped work in flight
+	// and took a seat anyway, each naming the bead and seat that would have
+	// held it (gt-iydx1). The tick line counts them, so a dry run and the
+	// dashboard show the overlap the hold did not answer.
+	Bypassed []specDispatchEntry `json:"bypassed,omitempty"`
 	// Deferred is the sling-stage part of Skipped: the candidates the tick
 	// chose a seat for and whose sling was then deferred (content overlap, a
 	// pool backpressure refusal). The entries stay in Skipped too, so the tick
@@ -1187,13 +1199,17 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// The beads the working seats hold are the record of the work already
 		// in flight: a candidate whose own text names a path one of them names
 		// is that work's defect filed a second time, and a seat spent on it
-		// duplicates a session already on the fix (gt-z80p9).
-		if why, err := specHeldHold(env, c.Rig, full, heldReads); err != nil {
+		// duplicates a session already on the fix (gt-z80p9). A P0 or P1
+		// candidate takes the seat anyway, and the bypass is reported so the
+		// operator sees the overlap the hold did not answer (gt-iydx1).
+		if why, bypass, err := specHeldHold(env, c.Rig, full, heldReads); err != nil {
 			report.Errors = append(report.Errors, err.Error())
 			continue
 		} else if why != "" {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
 			continue
+		} else if bypass != "" {
+			report.Bypassed = append(report.Bypassed, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: overlap hold bypassed for P%d (would be held by %s)", id, full.Priority, bypass)})
 		}
 
 		// A bead whose children are open is a container, not a unit of work:
@@ -1550,19 +1566,23 @@ func specPendingRefs(full specdispatch.Spec) (paths, tests []string) {
 	return specHoldFiles(refs.Files, full.Description), refs.Tests
 }
 
-// specHeldHold is the pre-dispatch overlap hold: the reason a candidate is the
-// same defect a working seat already holds, empty when it is not, and an error
-// when the held set could not be read — an unreadable set is not an empty one,
-// so the candidate waits for the next tick rather than duplicating a seat
-// (gt-z80p9). The hold reads the paths and the tests the candidate names, the
-// two signals the sling-time guard refuses on, so a sling the guard would
-// refuse is not attempted at all: no seat is charged for it and no sling
-// start costs the tick its seconds (gt-mqa3r). A candidate naming neither
-// cannot be caught this way, so it never pays for the read.
-func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads map[string]heldRead) (string, error) {
+// specHeldHold is the pre-dispatch overlap hold: the hold a candidate takes as
+// the same defect a working seat already has, the hold an urgent candidate
+// (P0 or P1) bypasses, and an error when the held set could not be read — an
+// unreadable set is not an empty one, so the candidate waits for the next tick
+// rather than duplicating a seat (gt-z80p9). The hold reads the paths and the
+// tests the candidate names, the two signals the sling-time guard refuses on,
+// so a sling the guard would refuse is not attempted at all: no seat is
+// charged for it and no sling start costs the tick its seconds (gt-mqa3r). A
+// candidate naming neither cannot be caught this way, so it never pays for
+// the read.
+//
+// bypass names the bead and seat an urgent candidate would have been held by,
+// empty when it takes its hold or overlaps nothing (gt-iydx1).
+func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads map[string]heldRead) (why, bypass string, err error) {
 	paths, tests := specPendingRefs(full)
 	if len(paths) == 0 && len(tests) == 0 {
-		return "", nil
+		return "", "", nil
 	}
 	read := reads[rig]
 	if !read.loaded {
@@ -1571,10 +1591,14 @@ func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads
 		reads[rig] = read
 	}
 	if read.err != nil {
-		return "", fmt.Errorf("%s: cannot read the beads the seats hold: %v", full.ID, read.err)
+		return "", "", fmt.Errorf("%s: cannot read the beads the seats hold: %v", full.ID, read.err)
 	}
 	held := append(append([]specdispatch.HeldBead(nil), read.beads...), read.noted...)
-	return specdispatch.HeldOverlap(paths, tests, held), nil
+	match := specdispatch.HeldOverlap(paths, tests, full.Priority, held)
+	if match.Bypassed {
+		return "", match.Holder, nil
+	}
+	return match.Reason, "", nil
 }
 
 // specHoldFiles is the file set the overlap hold reads for one bead: the paths
@@ -2107,11 +2131,14 @@ func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
 	if r.LabeledFailed > 0 {
 		summary += fmt.Sprintf(", %d held by %s", r.LabeledFailed, specdispatch.DispatchFailedLabel)
 	}
+	if len(r.Bypassed) > 0 {
+		summary += fmt.Sprintf(", %d overlap hold bypassed", len(r.Bypassed))
+	}
 	fmt.Fprintf(w, "%s; roster %s; template %s\n", summary, r.Roster, r.Template)
 	for _, group := range []struct {
 		name    string
 		entries []specDispatchEntry
-	}{{"dispatched", r.Dispatched}, {"refused", r.Refused}, {"planning", r.Planning}, {"skipped", r.Skipped}, {"failed", r.Failed}} {
+	}{{"dispatched", r.Dispatched}, {"refused", r.Refused}, {"planning", r.Planning}, {"bypassed", r.Bypassed}, {"skipped", r.Skipped}, {"failed", r.Failed}} {
 		for _, e := range group.entries {
 			fmt.Fprintf(w, "  %-10s %s\n", group.name, e.Line)
 		}
