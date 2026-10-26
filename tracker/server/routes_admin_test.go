@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,7 +34,14 @@ func (s adminStub) ConfigGet(ctx context.Context, k string) (string, bool, error
 }
 func (s adminStub) ConfigSet(ctx context.Context, k, v string) error { return s.set(ctx, k, v) }
 
-var adminHTTP = &http.Client{Timeout: 5 * time.Second}
+// adminHTTP owns its transport, with keep-alives off, because httptest's
+// Server.Close closes http.DefaultTransport's idle connections: on that shared
+// transport a parallel test's cleanup can close the connection a sibling's
+// request is using, and a PUT is not retried (gt-djzxe).
+var adminHTTP = &http.Client{
+	Timeout:   5 * time.Second,
+	Transport: &http.Transport{DisableKeepAlives: true},
+}
 
 func adminServer(t *testing.T, st store.Store) *httptest.Server {
 	t.Helper()
@@ -195,11 +204,14 @@ func TestClientAdminAgreesWithTheRoutes(t *testing.T) {
 	st.get = func(_ context.Context, k string) (string, bool, error) { v, ok := vals[k]; return v, ok, nil }
 	st.set = func(_ context.Context, k, v string) error { vals[k] = v; return nil }
 	ts := adminServer(t, st)
-	c, err := client.New(client.Config{BaseURL: ts.URL, Token: "good-token", SchemaLevel: 3})
+	// The server's own client, so ts.Close closes only connections this test
+	// opened, not http.DefaultTransport's shared with its siblings (gt-djzxe).
+	hc := ts.Client()
+	c, err := client.New(client.Config{BaseURL: ts.URL, Token: "good-token", SchemaLevel: 3, HTTP: hc})
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := client.New(client.Config{BaseURL: ts.URL, Token: "admin-token", SchemaLevel: 3})
+	admin, err := client.New(client.Config{BaseURL: ts.URL, Token: "admin-token", SchemaLevel: 3, HTTP: hc})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,6 +261,32 @@ func TestAnUnknownTokenIsStill401NotForbidden(t *testing.T) {
 	ts := adminServer(t, okAdmin())
 	if code, _ := adminCallAs(t, "PUT", ts.URL+"/v1/config/k", `{"value":"v"}`, "nope"); code != 401 {
 		t.Errorf("an unknown token on an admin route = %d, want 401", code)
+	}
+}
+
+// Each request gets its own connection, so the shared adminHTTP never hands a
+// parallel test a pooled connection that test's cleanup has already closed
+// (gt-djzxe).
+func TestTheAdminClientOpensAConnectionPerRequest(t *testing.T) {
+	t.Parallel()
+	var conns atomic.Int64
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	ts.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	ts.Start()
+	t.Cleanup(ts.Close)
+	for i := 0; i < 2; i++ {
+		if code, body := adminCallAs(t, "PUT", ts.URL+"/v1/config/k", `{"value":"v"}`, "admin-token"); code != http.StatusNoContent {
+			t.Fatalf("request %d = %d %q, want 204", i, code, body)
+		}
+	}
+	if got := conns.Load(); got != 2 {
+		t.Errorf("two requests opened %d connections, want 2", got)
 	}
 }
 
