@@ -133,5 +133,5 @@ func sysFileID(fi os.FileInfo) (fileID, error) {
 	if !ok {
 		return fileID{}, fmt.Errorf("no device and inode for %s", fi.Name())
 	}
-	return fileID{dev: uint64(st.Dev), ino: uint64(st.Ino)}, nil
+	return fileID{dev: uint64(st.Dev), ino: st.Ino}, nil
 }
