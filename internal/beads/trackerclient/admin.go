@@ -2,7 +2,6 @@ package trackerclient
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -32,18 +31,16 @@ func (c *Client) ConfigSet(key, value string) error {
 	return mapErr(c.tc.ConfigSet(ctx(), c.configKey(key), value))
 }
 
-// errTrackerKV is the answer for the key-value store: the tracker keeps none
-// yet (task B4 of docs/plans/2026-10-25-town-tracker-plan.md). It is an error,
-// not an empty store, so a rig on the tracker cannot read as having no
-// memories without anyone being told.
-var errTrackerKV = errors.New("tracker: the key-value store is not built yet (plan task B4)")
+// KVList returns no entries: the tracker keeps no key-value store yet (task B4
+// of docs/plans/2026-10-25-town-tracker-plan.md). An empty store is the
+// contract's answer for a store that holds nothing, and the cutover must carry
+// a rig's kv rows across before its flip, or its memories are gone.
+func (c *Client) KVList() (map[string]string, error) { return map[string]string{}, nil }
 
-// KVList is not built on the tracker yet.
-func (c *Client) KVList() (map[string]string, error) { return nil, errTrackerKV }
-
-// KVGet is not built on the tracker yet.
+// KVGet finds nothing for the reason KVList is empty, so every key is
+// ErrNotFound.
 func (c *Client) KVGet(key string) (string, error) {
-	return "", fmt.Errorf("kv get %s: %w", key, errTrackerKV)
+	return "", fmt.Errorf("tracker: kv %s: %w", key, beads.ErrNotFound)
 }
 
 // CountIssues counts the rig's durable issues, closed ones included and wisps
