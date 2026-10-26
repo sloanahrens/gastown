@@ -82,3 +82,23 @@ func TestCheckMachineCommandRunsEachFlagAndFailsOnANotice(t *testing.T) {
 		t.Errorf("a command with no machine flag was checked: %v", err)
 	}
 }
+
+// TestMachineStdoutProblemRefusesAnUnknownMode: a mode the checker does not know is an error, not a
+// pass, so a new flag cannot skip the check by accident (gt-b9j3o.7).
+func TestMachineStdoutProblemRefusesAnUnknownMode(t *testing.T) {
+	t.Parallel()
+	if err := machineStdoutProblem("yaml", []byte("a: 1")); err == nil {
+		t.Error("an unknown mode passed the check")
+	}
+}
+
+// TestCheckMachineCommandNamesTheCommand: a failure names the command and the flag, so the operator
+// knows which command wrote the line (gt-b9j3o.7).
+func TestCheckMachineCommandNamesTheCommand(t *testing.T) {
+	t.Parallel()
+	run := func(args []string) ([]byte, error) { return []byte("note: x\n"), nil }
+	err := checkMachineCommand(machineTestCommand("json"), run)
+	if err == nil || !strings.Contains(err.Error(), "probe") {
+		t.Errorf("the failure = %v, want it to name the command probe", err)
+	}
+}
