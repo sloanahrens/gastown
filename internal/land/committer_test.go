@@ -7,12 +7,11 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 )
 
-// landingEnvValue is the value git reads for key: the last entry, since that
-// is the one os/exec keeps when a key appears twice.
-func landingEnvValue(env []string, key string) (string, bool) {
+// envValue is the value env carries for key, if any.
+func envValue(env []string, key string) (string, bool) {
 	prefix := key + "="
-	for i := len(env) - 1; i >= 0; i-- {
-		if v, ok := strings.CutPrefix(env[i], prefix); ok {
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, prefix); ok {
 			return v, true
 		}
 	}
@@ -28,7 +27,7 @@ func TestCommittingEnvSetsOnlyTheCommitterName(t *testing.T) {
 		t.Fatalf("CommittingEnv = %q, want only GIT_COMMITTER_NAME=%s", env, LandingCommitterName)
 	}
 	for _, key := range []string{"GIT_COMMITTER_EMAIL", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"} {
-		if v, ok := landingEnvValue(env, key); ok {
+		if v, ok := envValue(env, key); ok {
 			t.Errorf("%s = %q; a landing sets no committer email and no author", key, v)
 		}
 	}
@@ -43,20 +42,7 @@ func TestLandMergeWorktreeCarriesTheLandingCommitter(t *testing.T) {
 	if !ok {
 		t.Fatalf("Lander.open returned %T, want *git.Git", opened)
 	}
-	if v, _ := landingEnvValue(g.Environ(), "GIT_COMMITTER_NAME"); v != LandingCommitterName {
+	if v, _ := envValue(g.Environ(), "GIT_COMMITTER_NAME"); v != LandingCommitterName {
 		t.Fatalf("merge worktree GIT_COMMITTER_NAME = %q, want %q", v, LandingCommitterName)
-	}
-}
-
-// A committer name the environment already carried does not win over the
-// landing one: the handle's entry is appended after the process's, and exec
-// keeps the last entry for a key (gt-dc4y3). The integration tier repeats
-// this against a real inherited environment.
-func TestLandingCommitterFollowsAnEarlierCommitterName(t *testing.T) {
-	t.Parallel()
-	g := CommittingGit(t.TempDir())
-	inherited := []string{"GIT_COMMITTER_NAME=Sloan Ahrens"}
-	if v, _ := landingEnvValue(append(inherited, g.Environ()...), "GIT_COMMITTER_NAME"); v != LandingCommitterName {
-		t.Fatalf("effective GIT_COMMITTER_NAME = %q, want %q; handle env %q", v, LandingCommitterName, g.Environ())
 	}
 }
