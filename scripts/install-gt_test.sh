@@ -1377,9 +1377,9 @@ got=$(PROC_ROOT="$T/no-proc" proc_state $$)
 registry_case() {
   # registry_case NAME CONFIG_BODY_OR_EMPTY(missing) EXPECT_ENV EXPECT_LOG [AMBIENT]
   # AMBIENT is "<registry> <crane>": the values the daemon exports to its own
-  # runs. Every case starts from neither, and a case that names them gets them in
-  # the run's subshell only, so a case sees the config it writes and nothing
-  # leaks to this shell or to a later case (gt-g3l7s, gt-ijudv).
+  # runs. Every case starts with both cleared and gets the AMBIENT it names in
+  # the run's subshell only, so it sees the config it writes and nothing leaks to
+  # this shell or to a later case (gt-g3l7s, gt-ijudv).
   local name="$1" body="$2" want_env="$3" want_log="$4" ambient="${5-}"
   local amb_registry="" amb_crane="" T
   if [ -n "$ambient" ]; then
