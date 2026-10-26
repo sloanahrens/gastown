@@ -172,6 +172,7 @@ var errNoDatabase = errors.New("bd: Error: no beads database found")
 type noBeadsDB struct{}
 
 func (noBeadsDB) Show(string) (*beads.Issue, error)                      { return nil, errNoDatabase }
+func (noBeadsDB) ShowText(string, []string) (string, error)              { return "", errNoDatabase }
 func (noBeadsDB) ShowMultiple([]string) (map[string]*beads.Issue, error) { return nil, errNoDatabase }
 func (noBeadsDB) List(beads.ListOptions) ([]*beads.Issue, error)         { return nil, errNoDatabase }
 func (noBeadsDB) ListByAssignee(string) ([]*beads.Issue, error)          { return nil, errNoDatabase }

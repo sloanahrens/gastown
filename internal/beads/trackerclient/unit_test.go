@@ -205,6 +205,19 @@ func serve(t *testing.T, handler http.HandlerFunc) *Client {
 	return New(tc, "gt")
 }
 
+func TestShowTextRefusesWithoutARequest(t *testing.T) {
+	t.Parallel()
+	var asked int
+	c := serve(t, func(http.ResponseWriter, *http.Request) { asked++ })
+	text, err := c.ShowText("gt-x", []string{"gt-x"})
+	if text != "" || !errors.Is(err, ErrShowText) {
+		t.Errorf("ShowText = %q, %v; want \"\" and ErrShowText", text, err)
+	}
+	if asked != 0 {
+		t.Errorf("ShowText sent %d requests, want none", asked)
+	}
+}
+
 func TestEventsTailMapsOpsStatusAndPaging(t *testing.T) {
 	t.Parallel()
 	status := func(s string) json.RawMessage { return json.RawMessage(`{"status":"` + s + `"}`) }

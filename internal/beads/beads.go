@@ -3346,6 +3346,31 @@ func (b *Beads) Show(id string) (*Issue, error) {
 	return issues[0], nil
 }
 
+// ShowText returns bd show's text for one issue, with args passed through
+// unchanged; id chooses the database, unless the wrapper is unrouted (NewPlain).
+func (b *Beads) ShowText(id string, args []string) (string, error) {
+	target := b
+	if !b.noRoute {
+		target = b.forIssueID(id)
+	}
+	// bd reads the Dolt port file from its working directory, not BEADS_DIR, so
+	// the call runs in the database's own directory: forIssueID sets that
+	// directory, and a polecat worktree's .beads holds only a redirect
+	// (gt-p85pw.10).
+	target = target.pinnedToBeadsDir(target.getResolvedBeadsDir())
+	out, err := target.runText(append([]string{"show"}, args...)...)
+	return string(out), err
+}
+
+// runText runs one read-only bd call whose stdout is bd's own prose, printed
+// for a person: no machine envelope to unwrap, and no write mode to inherit.
+func (b *Beads) runText(args ...string) ([]byte, error) {
+	beadsDir := b.getResolvedBeadsDir()
+	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
+	runEnv = forceBDReadOnly(WithoutMachineEnv(runEnv))
+	return b.runBdWithRetry(nil, runEnv, args)
+}
+
 // ListByIDs reads the issues with the given ids from c in one `bd list --id`
 // query, whatever their status, and returns them by id. An id the
 // store does not hold is left out, and so is a wisp: the query reads the issues
