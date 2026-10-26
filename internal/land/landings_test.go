@@ -7,8 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 )
 
 // tornTail writes raw onto the end of f's file with no trailing newline: the
@@ -316,5 +320,188 @@ func TestRepairRecordSurvivesATornLanding(t *testing.T) {
 	}
 	if res != nil {
 		t.Fatalf("repairRecord = %+v; want nothing to repair", res)
+	}
+}
+
+// spanEpoch is the fixed time the polecat-span fixtures' clocks read, so an
+// attempt's length is the number the test wrote and not the run's speed.
+var spanEpoch = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+
+// spanClock is a fixed spans.Clock.
+type spanClock struct{ at time.Time }
+
+func (c *spanClock) Now() time.Time { return c.at }
+
+// lastLine reads the record Append wrote last, both as a record and as the
+// JSON keys it carried, so a test can tell an omitted field from a zero one.
+func lastLine(t *testing.T, f *LandingsFile) (LandingRecord, map[string]json.RawMessage) {
+	t.Helper()
+	data, err := os.ReadFile(f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	raw := []byte(lines[len(lines)-1])
+	var rec LandingRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatalf("last line %q: %v", raw, err)
+	}
+	var keyed map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keyed); err != nil {
+		t.Fatal(err)
+	}
+	return rec, keyed
+}
+
+// spansFor builds a span store whose two attempts on bead close after secs
+// each, the shape a polecat landing's log has.
+func spansFor(t *testing.T, town, bead string, attempts ...time.Duration) *spans.Store {
+	t.Helper()
+	store := spans.New(spans.DefaultDir(town), &spanClock{at: spanEpoch})
+	for i, d := range attempts {
+		seat := fmt.Sprintf("gastown/seat%d", i)
+		if err := store.Start(bead, seat); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.End(bead, seat, spans.ReasonDone, spanEpoch.Add(d)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return store
+}
+
+// TestLandingsFileAppendFillsPolecatTime: a polecat landing whose bead has two
+// closed spans gets their sum and one entry per span (gt-yxl22).
+func TestLandingsFileAppendFillsPolecatTime(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Spans = spansFor(t, town, "gt-abc", 60*time.Second, 90*time.Second)
+	if err := f.Append(LandingRecord{BeadID: "gt-abc", LandedCommit: "c1"}); err != nil {
+		t.Fatal(err)
+	}
+	rec, keyed := lastLine(t, f)
+	if rec.PolecatSecs != 150 {
+		t.Errorf("polecat_secs = %v, want 150", rec.PolecatSecs)
+	}
+	want := []PolecatAttempt{
+		{Seat: "gastown/seat0", Secs: 60},
+		{Seat: "gastown/seat1", Secs: 90},
+	}
+	if !reflect.DeepEqual(rec.PolecatAttempts, want) {
+		t.Errorf("polecat_attempts = %+v, want %+v", rec.PolecatAttempts, want)
+	}
+	if rec.PolecatLowerBound {
+		t.Error("polecat_lower_bound set on two closed spans")
+	}
+	for _, key := range []string{"polecat_secs", "polecat_attempts"} {
+		if _, ok := keyed[key]; !ok {
+			t.Errorf("%s missing from %v", key, keyed)
+		}
+	}
+	// The lower bound is false, so it is left out rather than written false.
+	if _, ok := keyed["polecat_lower_bound"]; ok {
+		t.Errorf("polecat_lower_bound written false: %v", keyed["polecat_lower_bound"])
+	}
+}
+
+// TestLandingsFileAppendMarksAnOpenSpanLowerBound: a span its seat never ended
+// contributes no time, and the record says the total is a floor (gt-yxl22).
+func TestLandingsFileAppendMarksAnOpenSpanLowerBound(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := spans.New(spans.DefaultDir(town), &spanClock{at: spanEpoch})
+	if err := store.Start("gt-abc", "gastown/opal"); err != nil {
+		t.Fatal(err)
+	}
+	f.Spans = store
+	if err := f.Append(LandingRecord{BeadID: "gt-abc", LandedCommit: "c1"}); err != nil {
+		t.Fatal(err)
+	}
+	rec, keyed := lastLine(t, f)
+	if !rec.PolecatLowerBound {
+		t.Error("polecat_lower_bound unset on an open span")
+	}
+	want := []PolecatAttempt{{Seat: "gastown/opal", Secs: 0, LowerBound: true}}
+	if !reflect.DeepEqual(rec.PolecatAttempts, want) {
+		t.Errorf("polecat_attempts = %+v, want %+v", rec.PolecatAttempts, want)
+	}
+	// An open attempt adds no time, so the sum stays zero and is omitted.
+	if _, ok := keyed["polecat_secs"]; ok {
+		t.Errorf("polecat_secs written for an open span: %v", keyed["polecat_secs"])
+	}
+}
+
+// TestLandingsFileAppendOmitsPolecatTimeWithoutSpans: a crew landing has no
+// seat and so no log, and a record for a bead with no spans carries none of
+// the three fields (gt-yxl22).
+func TestLandingsFileAppendOmitsPolecatTimeWithoutSpans(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		spans SpanSummarizer
+	}{
+		{"crew landing", spans.New(spans.DefaultDir(t.TempDir()), nil)},
+		{"no span store", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			f, err := RigLandingsFile(t.TempDir(), "gastown")
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.Spans = c.spans
+			if err := f.Append(LandingRecord{BeadID: "gt-crew", LandedCommit: "c1"}); err != nil {
+				t.Fatal(err)
+			}
+			rec, keyed := lastLine(t, f)
+			if rec.LandedCommit != "c1" {
+				t.Fatalf("record = %+v; the landing must still be written", rec)
+			}
+			for key := range keyed {
+				if strings.HasPrefix(key, "polecat_") {
+					t.Errorf("a landing without spans wrote %s", key)
+				}
+			}
+		})
+	}
+}
+
+// TestLandingsFileAppendLeavesPolecatTimeOutWhenTheLogCannotBeRead: the time
+// is not worth the landing, so an unreadable log is logged and left out
+// (gt-yxl22).
+func TestLandingsFileAppendLeavesPolecatTimeOutWhenTheLogCannotBeRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	dir := spans.DefaultDir(town)
+	if err := os.MkdirAll(filepath.Join(dir, "gt-abc.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	f.Spans = spans.New(dir, nil)
+	if err := f.Append(LandingRecord{BeadID: "gt-abc", LandedCommit: "c1"}); err != nil {
+		t.Fatalf("Append with an unreadable span log: %v; the landing must still be written", err)
+	}
+	rec, keyed := lastLine(t, f)
+	if rec.LandedCommit != "c1" || rec.PolecatSecs != 0 || rec.PolecatAttempts != nil || rec.PolecatLowerBound {
+		t.Fatalf("record = %+v; want the landing with no polecat time", rec)
+	}
+	if _, ok := keyed["polecat_attempts"]; ok {
+		t.Error("polecat_attempts written from an unreadable log")
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "gt-abc") {
+		t.Errorf("logged = %q; want one line naming the bead", logged)
 	}
 }

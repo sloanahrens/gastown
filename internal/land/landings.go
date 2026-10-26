@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 )
 
 // LandingsFile is a rig's append-only landing log: one JSON LandingRecord per
@@ -28,6 +29,10 @@ type LandingsFile struct {
 	// one worth warning; a reader that builds its own per poll leaves it nil
 	// rather than repeat the same warning every few seconds.
 	Logf func(format string, args ...any)
+	// Spans, when set, is the span store each appended record's polecat time
+	// is read from; the landing worker sets the town's store and no other
+	// caller writes. Nil means records carry no polecat time (gt-yxl22).
+	Spans SpanSummarizer
 
 	write func(*os.File, []byte) (int, error) // test seam: writes one record; nil means the file's own Write
 
@@ -45,19 +50,53 @@ func RigLandingsFile(townRoot, rig string) (*LandingsFile, error) {
 	return &LandingsFile{Path: filepath.Join(constants.TownRuntimePath(townRoot), "landings", rig+".jsonl")}, nil
 }
 
-// Append writes rec as one line. The directory must be 0700-safe (owned by
-// this user, not group- or world-writable) and the file must not be a
-// symlink, so no other account can redirect or forge the log.
+// SpanSummarizer is the part of *spans.Store Append reads: one bead's polecat
+// time.
+type SpanSummarizer interface {
+	Summarize(bead string) (spans.Summary, error)
+}
+
+// Append writes rec as one line, with rec's polecat time read from Spans. The
+// directory must be 0700-safe (owned by this user, not group- or
+// world-writable) and the file must not be a symlink, so no other account can
+// redirect or forge the log.
 //
 // A tail left torn (a crash or a short write stopped mid-record, so the file
 // does not end in a newline) is repaired first, and a short write of rec is
 // rolled back, so no append can glue its record onto a partial one.
 func (f *LandingsFile) Append(rec LandingRecord) error {
+	rec.PolecatSecs, rec.PolecatAttempts, rec.PolecatLowerBound = f.polecatTime(rec.BeadID)
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("encoding landing record: %w", err)
 	}
 	return appendJSONLine(f.Path, append(line, '\n'), f.write)
+}
+
+// polecatTime is the record's polecat time: the time the bead's seats spent
+// hooked on it, or nothing for a crew landing, whose bead has no seat to log,
+// and for a bead whose log records nothing. A log that cannot be read is
+// logged and left out: the record is the landing, and the time is not worth
+// one (gt-yxl22).
+func (f *LandingsFile) polecatTime(bead string) (secs float64, attempts []PolecatAttempt, lowerBound bool) {
+	if f.Spans == nil || bead == "" {
+		return 0, nil, false
+	}
+	sum, err := f.Spans.Summarize(bead)
+	if err != nil {
+		if f.Logf != nil {
+			f.Logf("landings file %s: no polecat time for %s: %v; the record is written without it", f.Path, bead, err)
+		}
+		return 0, nil, false
+	}
+	if len(sum.Attempts) == 0 {
+		return 0, nil, false
+	}
+	attempts = make([]PolecatAttempt, len(sum.Attempts))
+	for i, a := range sum.Attempts {
+		attempts[i] = PolecatAttempt{Seat: a.Seat, Secs: a.Secs, LowerBound: a.LowerBound}
+	}
+	return sum.Secs, attempts, sum.LowerBound
 }
 
 // appendJSONLine appends one newline-terminated record to the log at path with
