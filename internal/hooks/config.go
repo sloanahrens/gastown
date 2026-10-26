@@ -379,9 +379,10 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// shellExecutingToolMatcher entry rather than replacing it, so the town-wide guards (pr-
 		// workflow, dangerous-command, container-suite) stay in force here.
 		//
-		// The same two matchers carry the script-files guard (gt-b43ra), which
+		// The Edit/Write matcher carries the script-files guard (gt-b43ra), which
 		// denies a new shell, Perl or Ruby file in the worktree and redirects
-		// the agent to a testable Go package; crew get it too, below.
+		// the agent to a testable Go package; crew get it too, below. Bash is
+		// not judged by it: repo guard gt-lpm8b catches a Bash-made script.
 		//
 		// It also drains the session's nudge queue after every tool call
 		// (gt-drwph). The overrun guard queues its split-proposal nudge, and the
@@ -417,10 +418,6 @@ func DefaultOverrides() map[string]*HooksConfig {
 						{
 							Type:    "command",
 							Command: gtCommand("gt tap guard polecat-paths"),
-						},
-						{
-							Type:    "command",
-							Command: gtCommand("gt tap guard script-files"),
 						},
 					},
 				},
@@ -491,17 +488,9 @@ func DefaultOverrides() map[string]*HooksConfig {
 		//
 		// Crew carry the script-files guard (gt-b43ra) beside the polecats: a
 		// new one-off script is debt whichever worker writes it, and the guard
-		// finds a crew checkout from cwd. Both matchers are bare tool names, so
-		// they union into the base guards rather than replace them.
+		// finds a crew checkout from cwd.
 		"crew": {
 			PreToolUse: []HookEntry{
-				{
-					Matcher: shellExecutingToolMatcher,
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: gtCommand("gt tap guard script-files"),
-					}},
-				},
 				{
 					Matcher: "Edit|Write|MultiEdit|NotebookEdit",
 					Hooks: []Hook{{

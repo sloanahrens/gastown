@@ -762,7 +762,18 @@ func TestComputeExpectedWorkerRolesGetScriptFilesGuard(t *testing.T) {
 		if err != nil {
 			t.Fatalf("home.computeExpected(%s): %v", target, err)
 		}
-		requireUngatedGuardCommand(t, target, cfg, guardCommand)
+		// Bash is not judged by this guard (gt-b43ra): no entry under a shell
+		// matcher may carry it.
+		for _, entry := range cfg.PreToolUse {
+			if !strings.Contains(entry.Matcher, "Bash") {
+				continue
+			}
+			for _, h := range entry.Hooks {
+				if strings.Contains(h.Command, guardCommand) {
+					t.Errorf("%s: script-files is registered under the shell matcher %q; Bash is not judged", target, entry.Matcher)
+				}
+			}
+		}
 		fileEntry, ok := findPreToolUse(cfg, "Edit|Write|MultiEdit|NotebookEdit")
 		if !ok {
 			t.Fatalf("%s: missing the file-writing guard matcher", target)
