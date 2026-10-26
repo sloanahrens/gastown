@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
@@ -177,6 +178,17 @@ type Lander struct {
 	// one item. An error is logged and never fails the landing. Nil reports
 	// nothing.
 	AcceptedRiskAlert func(key, message string) error
+	// BirdOwned, when set, reports whether a bead's assignee is a bird — a
+	// crew or operator identity, not a polecat seat — and so keeps the bead
+	// when its landing is rejected (gt-h4cvi). Nil reports no bead bird-owned,
+	// which is the polecat behavior: every rejection resets the bead to open
+	// and unassigned.
+	BirdOwned func(assignee string) bool
+	// RejectionAlert, when set, raises the attention item a bird-owned
+	// rejection leaves for the bead's owner (gt-h4cvi): the key names the bead,
+	// so a second refusal updates the one item. An error is logged and never
+	// fails the rejection. Nil reports nothing.
+	RejectionAlert func(key, message string) error
 	// auditTimeout overrides commentTimeout for the accepted-risk writes, so a
 	// test can reach the timeout without waiting it out. Zero keeps
 	// commentTimeout.
@@ -266,10 +278,11 @@ const (
 )
 
 // Rejection is a landing refused because of the work itself. Land has
-// already written it to the work bead (a MERGE REJECTION block), set the bead
-// open and unassigned, and swapped the ready label for rework (or
-// gt:needs-human when Rework is false). RecordErr is set when that write
-// failed; the rejection still stands.
+// already written it to the work bead (a MERGE REJECTION block), swapped the
+// ready label for rework (or gt:needs-human when Rework is false), and
+// released the bead to dispatch by reopening and unassigning it — except a
+// bird-owned bead, which keeps its assignee and status (BirdOwned). RecordErr
+// is set when that write failed; the rejection still stands.
 type Rejection struct {
 	Kind        RejectionKind
 	Reason      string
@@ -2178,29 +2191,86 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		other = LabelRework
 	}
 	remove := []string{LabelReadyToLand, other}
-	open := string(beads.StatusOpen)
 	update := beads.UpdateOptions{
-		Status:       &open,
 		AddLabels:    []string{label},
 		RemoveLabels: remove,
-		// The author's claim is over: gt done handed the work to the landing
-		// worker. The re-read above established nobody else took it since, so
-		// the write may reopen the bead whatever its assignee says.
+		// gt done handed the claim to the landing worker, and the re-read above
+		// established nobody else took it since, so the write may change the
+		// bead's labels whatever its assignee says.
 		Force: true,
 	}
-	// A human-only bead goes back to the holder that submitted it, not to
-	// dispatch: only a person can produce its branch, and an unassigned one is
-	// a bead the next tick slings onto a seat that cannot land it (gt-me800).
-	// The crew that holds it reads the rejection and asks the human for a new
-	// branch.
-	if !dispatch.HasLabel(now.Labels, dispatch.HumanOnlyLabel) {
-		unassigned := ""
-		update.Assignee = &unassigned
+	// A bird keeps the bead it claimed: a crew or operator submitted the
+	// branch itself, so re-queuing the bead for dispatch would hand the
+	// rework to a polecat seat that never wrote it, and the owner would learn
+	// of the refusal only by asking (gt-h4cvi). The owner reads it as the
+	// attention item raised below instead. A polecat's claim ends at gt done,
+	// so its bead goes back to the queue.
+	birdOwned := l.BirdOwned != nil && l.BirdOwned(now.Assignee)
+	if !birdOwned {
+		open := string(beads.StatusOpen)
+		update.Status = &open
+		// A human-only bead goes back to the holder that submitted it, not to
+		// dispatch: only a person can produce its branch, and an unassigned one
+		// is a bead the next tick slings onto a seat that cannot land it
+		// (gt-me800). The crew that holds it reads the rejection and asks the
+		// human for a new branch.
+		if !dispatch.HasLabel(now.Labels, dispatch.HumanOnlyLabel) {
+			unassigned := ""
+			update.Assignee = &unassigned
+		}
 	}
 	if err := l.Beads.Update(w.BeadID, update); err != nil {
 		rej.RecordErr = fmt.Errorf("reopening the bead: %w", err)
+		return rej
+	}
+	// Raised only after the write, so an interrupted rejection reaches the
+	// owner on the pass that finishes it and never twice: a pass that failed
+	// the write left the bead ready, and the retry is what completes it
+	// (gt-h4cvi).
+	if birdOwned {
+		l.raiseRejectionAlert(w, rej, now.Assignee, now.Status)
 	}
 	return rej
+}
+
+// raiseRejectionAlert tells the owner that their landing was refused: the
+// attention queue is where a bird reads the town's unresolved items, so the
+// item names the bead as its key and the owner and refusal in its text
+// (gt-h4cvi). Delivery is fail-soft; the rejection stands either way.
+func (l *Lander) raiseRejectionAlert(w Work, rej *Rejection, owner, status string) {
+	if l.RejectionAlert == nil {
+		return
+	}
+	msg := fmt.Sprintf("Landing of %s (%s) was rejected (%s): %s; the bead stays with %s (status %s)",
+		w.BeadID, w.Branch, rej.Kind, alertField(rej.Reason), owner, strings.TrimSpace(status))
+	if summary := alertField(rej.ReviewSummary); summary != "" {
+		msg += fmt.Sprintf("; om: %s", summary)
+	}
+	if err := l.RejectionAlert("rejected:"+w.BeadID, msg); err != nil {
+		l.logf("%s: the rejection attention item was not raised: %v", w.BeadID, err)
+	}
+}
+
+// rejectionAlertMax bounds the refusal text an attention item carries: the
+// queue is a headline the owner reads at a glance, while the whole reason and
+// the gate's output stay in the bead's rejection note, which already bounds
+// each quoted line (gt-h4cvi).
+const rejectionAlertMax = 300
+
+// alertField makes s one line of bounded length for an attention item: a
+// refusal reason can be a gate step's whole command line, and the item is read
+// in a terminal, so a runaway reason is cut at a rune boundary rather than
+// pasted whole.
+func alertField(s string) string {
+	s = NoteField(s)
+	if len(s) <= rejectionAlertMax {
+		return s
+	}
+	cut := rejectionAlertMax
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + " …"
 }
 
 // gateRecord is the gate line of a landing record: the gate's own summary and

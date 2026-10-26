@@ -1515,3 +1515,99 @@ func TestRevertWorktreeCarriesTheLandingCommitter(t *testing.T) {
 		}
 	}
 }
+
+// TestBirdOwnedAssignee: any assignee carrying a polecats path segment is a
+// seat whose rejected bead goes back to dispatch; a crew, a town crew, and a
+// bare town handle are birds that keep their claim. A shape this function does
+// not expect still reads as a seat, so an odd assignee releases the bead to
+// dispatch rather than stalling it with an owner who is not there (gt-h4cvi).
+func TestBirdOwnedAssignee(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		assignee string
+		want     bool
+	}{
+		{"gastown/polecats/opal", false},
+		{"otherrig/polecats/furiosa", false},
+		{"gastown/polecats", false},
+		{"gastown/polecats/opal/extra", false},
+		{"polecats/opal", false},
+		{"gastown/crew/sloan", true},
+		{"town/crew/robin", true},
+		{"dipper", true},
+		{"", false},
+		{"  ", false},
+	} {
+		if got := birdOwnedAssignee(tc.assignee); got != tc.want {
+			t.Errorf("birdOwnedAssignee(%q) = %v, want %v", tc.assignee, got, tc.want)
+		}
+	}
+}
+
+// TestRejectionAlertReturnsADeliveryThatFailed: the lander logs a refused
+// attention item rather than failing the rejection, so the daemon's adapter
+// hands the delivery error back instead of swallowing it (gt-h4cvi).
+func TestRejectionAlertReturnsADeliveryThatFailed(t *testing.T) {
+	t.Parallel()
+	d, rec := daemonWithRecorder(t)
+	rec.Fail(notifyfake.KindEscalate, errors.New("gt escalate: exit status 1 (bd: database not found)"))
+	clk := newFixedClock()
+	d.clock = clk
+	var err error
+	runOnClock(t, clk, time.Second, func() {
+		err = d.rejectionAlert()("rejected:gt-abc", "Landing of gt-abc was rejected (gate)")
+	})
+	if err == nil || !strings.Contains(err.Error(), "database not found") {
+		t.Errorf("alert error = %v, want the refused delivery", err)
+	}
+}
+
+// TestNewRigLandingWorker_WiresTheBirdRejectionPath: a rejected bird landing
+// keeps its bead and reaches its owner through the attention queue, so the
+// rig's lander carries the assignee classifier and a sink that raises the item
+// as a keyed MEDIUM escalation (gt-h4cvi).
+func TestNewRigLandingWorker_WiresTheBirdRejectionPath(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	forgejoRigConfig(t, townRoot, rigName)
+
+	tokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	rec := notifyfake.New()
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: rec,
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+			Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}}}}}
+	f := useGitfake(t, d)
+	forgejoLandingRemote(t, f, townRoot, rigName)
+
+	w, err := d.newRigLandingWorker(rigName)
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	lander, ok := w.Lander.(*land.Lander)
+	if !ok {
+		t.Fatalf("Lander = %T, want *land.Lander", w.Lander)
+	}
+	if lander.BirdOwned == nil || lander.RejectionAlert == nil {
+		t.Fatalf("BirdOwned set = %v, RejectionAlert set = %v; want the bird rejection path wired",
+			lander.BirdOwned != nil, lander.RejectionAlert != nil)
+	}
+	if !lander.BirdOwned("gastown/crew/sloan") || lander.BirdOwned("gastown/polecats/opal") {
+		t.Error("the wired classifier does not tell a crew from a polecat seat")
+	}
+	const key = "rejected:gt-abc"
+	if err := lander.RejectionAlert(key, "Landing of gt-abc was rejected (gate)"); err != nil {
+		t.Fatalf("rejection alert: %v", err)
+	}
+	got := rec.Escalations()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %+v, want one", got)
+	}
+	if got[0].Escalation.Severity != "MEDIUM" || got[0].Escalation.Fingerprint != key {
+		t.Errorf("escalation = %+v, want MEDIUM keyed %q", got[0].Escalation, key)
+	}
+}
