@@ -402,7 +402,9 @@ func runModelShow(w io.Writer, env modelEnv) error {
 		return err
 	}
 	printModelView(w, p, v)
-	if d := v.drifted(); len(d) > 0 {
+	// A town with no table has no declared role to check the live values against,
+	// so the check cannot pass: it exits 4, as drift does (gt-jaagc).
+	if d := v.drifted(); len(d) > 0 || !v.table.Loaded() {
 		return NewSilentExit(4)
 	}
 	return nil

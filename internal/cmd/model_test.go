@@ -163,8 +163,8 @@ func TestModelShowWritesNothing(t *testing.T) {
 	town := t.TempDir()
 	before := modelFiles(t, town)
 	var out bytes.Buffer
-	if err := runModelShow(&out, modelEnvFor(town, "")); err != nil {
-		t.Errorf("show of a town with no table = %v, want no error:\n%s", err, out.String())
+	if code := exitCodeForError(runModelShow(&out, modelEnvFor(town, ""))); code != 4 {
+		t.Errorf("show of a town with no table exits %d, want 4 (nothing to check against):\n%s", code, out.String())
 	}
 	if after := modelFiles(t, town); !reflect.DeepEqual(before, after) {
 		t.Errorf("show wrote %v", after)
@@ -759,5 +759,60 @@ func TestModelWritesFailNamesAFileItCannotPutBack(t *testing.T) {
 	err := ws.fail(errors.New("the live write failed"))
 	if err == nil || !strings.Contains(err.Error(), "could not be put back") {
 		t.Errorf("fail = %v, want an error saying the file could not be put back", err)
+	}
+}
+
+// A town with no table has nothing to check the live values against, so show's
+// drift check cannot pass: it exits 4, as drift does (gt-jaagc).
+func TestModelShowExitsFourWithNoTable(t *testing.T) {
+	t.Parallel()
+
+	town := modelTown(t)
+	om := modelOMConfig(t, `{"backend":["/x/claude","-p","--model","sonnet"]}`)
+
+	var out bytes.Buffer
+	err := runModelShow(&out, modelEnvFor(town, om))
+	if code := exitCodeForError(err); code != 4 {
+		t.Errorf("show with no table exits %d, want 4:\n%s", code, out.String())
+	}
+}
+
+// A "roles": null table is a table with no roles, so set-role assigns into it and
+// writes the role, instead of panicking on a nil map (gt-jaagc).
+func TestModelSetRoleAcceptsANullRolesKey(t *testing.T) {
+	t.Parallel()
+
+	town := modelTown(t)
+	modelPutTable(t, town, `{"roles":null}`)
+	om := modelOMConfig(t, `{"backend":["/x/claude","-p","--model","sonnet"]}`)
+
+	var out bytes.Buffer
+	if err := runModelSetRole(&out, modelEnvFor(town, om), "crew", "haiku"); err != nil {
+		t.Fatalf("set-role on a null roles key = %v, want the role written:\n%s", err, out.String())
+	}
+	if b := string(mustRead(t, modelTablePath(town))); !strings.Contains(b, `"crew": "haiku"`) {
+		t.Errorf("the table does not hold crew haiku after set-role:\n%s", b)
+	}
+}
+
+// The settings reader is strict: a settings file with a key the config does not
+// know is refused, so set-role refuses to write it and does not drop the key.
+// The file is left as it was (gt-jaagc).
+func TestModelSetRoleRefusesASettingsFileWithAnUnknownKey(t *testing.T) {
+	t.Parallel()
+
+	town := modelTown(t)
+	modelPutTable(t, town, modelTableFixture)
+	modelWrite(t, modelSettingsPath(town), `{"type":"town-settings","version":1,
+		"custom_setting":{"keep":true},"role_agents":{"mayor":"claude-opus"}}`)
+	before := mustRead(t, modelSettingsPath(town))
+	om := modelOMConfig(t, `{"backend":["/x/claude","-p","--model","sonnet"]}`)
+
+	var out bytes.Buffer
+	if err := runModelSetRole(&out, modelEnvFor(town, om), "crew", "sonnet"); err == nil {
+		t.Fatalf("set-role on a settings file with an unknown key = nil, want a refusal:\n%s", out.String())
+	}
+	if after := mustRead(t, modelSettingsPath(town)); !bytes.Equal(before, after) {
+		t.Errorf("a refused set-role changed the settings file:\n%s", after)
 	}
 }

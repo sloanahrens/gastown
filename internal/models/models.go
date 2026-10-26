@@ -274,14 +274,16 @@ func RoleKnown(role string) bool {
 	return false
 }
 
-// ReviewerModel is the model this profile names for the reviewer. A profile that
-// names both a model and an om_backend must have them agree: ValidateRole refuses
-// one that does not, so the model named here is the one the backend runs.
+// ReviewerModel is the model the reviewer runs under this profile. When the profile
+// names an om_backend, that backend is what runs, so its model is the answer. A
+// profile that names both a model and a backend that runs another is refused by
+// ValidateRole before anything is written, so the answer here is never a model
+// the reviewer does not run (gt-477ut).
 func (p Profile) ReviewerModel() string {
-	if p.Model != "" {
-		return p.Model
+	if len(p.OMBackend) > 0 {
+		return ModelName(p.OMBackend)
 	}
-	return ModelName(p.OMBackend)
+	return p.Model
 }
 
 // reviewerDisagreement is the refusal for a profile whose model and om_backend
