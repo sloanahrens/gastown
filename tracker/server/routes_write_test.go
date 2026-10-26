@@ -62,8 +62,15 @@ func writeCall(t *testing.T, method, url, body string) (int, string) {
 	return resp.StatusCode, string(b)
 }
 
-// writeHTTP bounds every request: a handler that hangs fails the test fast.
-var writeHTTP = &http.Client{Timeout: 5 * time.Second}
+// writeHTTP bounds every request, so a handler that hangs fails the test fast,
+// and owns its transport with keep-alives off: httptest's Server.Close closes
+// http.DefaultTransport's idle connections, so a sibling's cleanup could drop
+// the connection under an in-flight write, and a write is not retried
+// (gt-djzxe, gt-vcgnd).
+var writeHTTP = &http.Client{
+	Timeout:   5 * time.Second,
+	Transport: &http.Transport{DisableKeepAlives: true},
+}
 
 const tokenActor = "town/crew/dipper"
 
