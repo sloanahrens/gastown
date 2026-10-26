@@ -221,12 +221,25 @@ registry_problem() {
   command -v "$CRANE" >/dev/null 2>&1 || echo "POLECAT_IMAGE_REGISTRY=$REGISTRY is set but $CRANE is not installed"
 }
 
+# FIRST_PUSHED is the ref the registry accepted first, and so is what tells a
+# later failure it left the image only partly published. push_to_registry clears
+# it at the start of every attempt.
+FIRST_PUSHED=""
+
+# publish_state says what the registry holds after a failed publish: nothing
+# before the first push, the pushed tags after it. The failure log and the
+# fail-closed error both use it, so one run does not report the image as partly
+# published in one line and as not published in the next.
+publish_state() {
+  if [ -n "$FIRST_PUSHED" ]; then echo "only partly published"; else echo "not published"; fi
+}
+
 # publish_tags tags and pushes each local tag of the image. The image is saved
 # and pushed once, under its first tag, through TAR_DIR; every other tag is made
 # on the registry with crane tag, which copies no layer (gt-roa0c). It stops at
 # the first failure and logs why; nothing is removed.
 publish_tags() {
-  local repo="${IMAGE%%:*}" ref tag reg tar out refs first=""
+  local repo="${IMAGE%%:*}" ref tag reg tar out refs
   if ! refs="$("$DOCKER" image inspect --format "$REPO_TAGS_FORMAT" "$IMAGE" 2>&1)"; then
     log "registry: cannot read the tags of $IMAGE ($(last_line "$refs")); the image is not published"
     return 1
@@ -244,12 +257,12 @@ publish_tags() {
     esac
     reg="$REGISTRY/$ref"
     if ! out="$("$DOCKER" tag "$ref" "$reg" 2>&1)"; then
-      log "registry: cannot tag $reg ($(last_line "$out")); the image is not published"
+      log "registry: cannot tag $reg ($(last_line "$out")); the image is $(publish_state)"
       return 1
     fi
-    if [ -n "$first" ]; then
-      if ! out="$("$CRANE" tag --insecure "$first" "$tag" 2>&1)"; then
-        log "registry: tagging $reg failed ($(last_line "$out")); the image is not published"
+    if [ -n "$FIRST_PUSHED" ]; then
+      if ! out="$("$CRANE" tag --insecure "$FIRST_PUSHED" "$tag" 2>&1)"; then
+        log "registry: tagging $reg failed ($(last_line "$out")); the image is $(publish_state)"
         return 1
       fi
       log "registry: tagged $reg"
@@ -265,7 +278,7 @@ publish_tags() {
       return 1
     fi
     rm -f "$tar"
-    first="$reg"
+    FIRST_PUSHED="$reg"
     log "registry: pushed $reg"
   done <<<"$refs"
 }
@@ -280,7 +293,7 @@ fail_closed() {
 # publish_unfinished ends the run when FAIL_CLOSED is set; the caller has logged
 # why the push did not complete.
 publish_unfinished() {
-  fail_closed "the image is not published to $REGISTRY, so this run fails"
+  fail_closed "the image is $(publish_state) to $REGISTRY, so this run fails"
 }
 
 # defer MSG logs why the run is deferring and ends it: exit 0 best effort, but
@@ -296,6 +309,7 @@ defer() {
 # run carries on unless FAIL_CLOSED is set, which makes it the run's failure.
 push_to_registry() {
   local why
+  FIRST_PUSHED=""
   [ -n "$REGISTRY" ] || return 0
   why="$(registry_problem)"
   if [ -n "$why" ]; then

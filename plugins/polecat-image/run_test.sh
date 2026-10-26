@@ -686,8 +686,22 @@ new_case regtagfail abc1234 "$(full 1111111)"
 echo "MANIFEST_UNKNOWN: manifest unknown" >"$STUB_STATE/crane-tag-fail"
 POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
 if [ "$RC" = 0 ] && [ "$(pushes)" = "localhost:5001/gastown-polecat:dev " ] \
-  && grep -qF "registry: tagging localhost:5001/gastown-polecat:abc1234 failed (MANIFEST_UNKNOWN: manifest unknown); the image is not published" <<<"$OUT" \
+  && grep -qF "registry: tagging localhost:5001/gastown-polecat:abc1234 failed (MANIFEST_UNKNOWN: manifest unknown); the image is only partly published" <<<"$OUT" \
   && [ "$(pushdirs)" = 0 ]; then pass "a failed crane tag: the reason is logged, exit 0, and the tarball directory is gone"; else fail "regtagfail: rc=$RC pushes=[$(pushes)] dirs=$(pushdirs) out=$OUT"; fi
+
+# The first tag was pushed before the crane tag failed and no stamp was written,
+# so the next run retries the whole publish. The stub's crane log spans both
+# runs, so the two pushes and two retags asserted below are one per run.
+new_case regretagfail abc1234 "$(full 1111111)"
+echo "MANIFEST_UNKNOWN: manifest unknown" >"$STUB_STATE/crane-tag-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+FIRST=$OUT
+rm "$STUB_STATE/crane-tag-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && grep -qF "the image is only partly published" <<<"$FIRST" \
+  && [ "$(pushes)" = "localhost:5001/gastown-polecat:dev localhost:5001/gastown-polecat:dev " ] \
+  && [ "$(retags)" = "localhost:5001/gastown-polecat:dev abc1234,localhost:5001/gastown-polecat:dev abc1234," ] \
+  && [ -f "$POLECAT_IMAGE_TOWN_ROOT/.runtime/polecat-image.published" ]; then pass "a failed crane tag is retried by the next run, which pushes and tags without a build"; else fail "regretag: rc=$RC builds=$(builds) pushes=[$(pushes)] retags=[$(retags)] out=$OUT"; fi
 new_case regleak abc1234 "$(full 1111111)"
 echo "UNAUTHORIZED: authentication required" >"$STUB_STATE/crane-fail"
 POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
@@ -700,6 +714,7 @@ if [ "$RC" = 0 ] && [ "$(pushdirs)" = 0 ]; then pass "a failed push leaves no ta
 # fails too.
 echo "--- POLECAT_IMAGE_FAIL_CLOSED=1: an image that is not built and published fails the run"
 CLOSED_ERR="ERROR: the image is not published to localhost:5001, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)"
+CLOSED_PARTLY="ERROR: the image is only partly published to localhost:5001, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)"
 CLOSED_DEFER="ERROR: the image was not built and published at the installed commit, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)"
 new_case regclosedpush abc1234 "$(full 1111111)"
 echo "UNAUTHORIZED: authentication required" >"$STUB_STATE/crane-fail"
@@ -710,8 +725,8 @@ if [ "$RC" != 0 ] && grep -qF "registry: pushing localhost:5001/gastown-polecat:
 new_case regclosedtag abc1234 "$(full 1111111)"
 echo "MANIFEST_UNKNOWN: manifest unknown" >"$STUB_STATE/crane-tag-fail"
 POLECAT_IMAGE_REGISTRY=localhost:5001 POLECAT_IMAGE_FAIL_CLOSED=1 run_it
-if [ "$RC" != 0 ] && grep -qF "registry: tagging localhost:5001/gastown-polecat:abc1234 failed (MANIFEST_UNKNOWN: manifest unknown); the image is not published" <<<"$OUT" \
-  && grep -qF "$CLOSED_ERR" <<<"$OUT" && [ "$(pushdirs)" = 0 ]; then pass "a failed crane tag fails the run too"; else fail "regclosedtag: rc=$RC dirs=$(pushdirs) out=$OUT"; fi
+if [ "$RC" != 0 ] && grep -qF "registry: tagging localhost:5001/gastown-polecat:abc1234 failed (MANIFEST_UNKNOWN: manifest unknown); the image is only partly published" <<<"$OUT" \
+  && grep -qF "$CLOSED_PARTLY" <<<"$OUT" && ! grep -qF "$CLOSED_ERR" <<<"$OUT" && [ "$(pushdirs)" = 0 ]; then pass "a failed crane tag fails the run too, and the error says partly published like the log"; else fail "regclosedtag: rc=$RC dirs=$(pushdirs) out=$OUT"; fi
 new_case regclosedcrane abc1234 "$(full 1111111)"
 POLECAT_IMAGE_REGISTRY=localhost:5001 POLECAT_IMAGE_CRANE="$CASE/no-crane" POLECAT_IMAGE_FAIL_CLOSED=1 run_it
 if [ "$RC" != 0 ] && grep -qF "registry: POLECAT_IMAGE_REGISTRY=localhost:5001 is set but $CASE/no-crane is not installed; the image is not published" <<<"$OUT" \
