@@ -162,6 +162,11 @@ func (t *Table) ProfileNames() string {
 // kept as it was read, so a field a newer gt writes is not dropped by this one;
 // a new file carries the version its reader expects (gt-jaagc).
 func (t *Table) Save(path string) error {
+	// A table no write may carry is not written, so the file never holds a table
+	// apply would refuse (gt-jaagc).
+	if err := t.Validate(); err != nil {
+		return err
+	}
 	doc := make(map[string]json.RawMessage, len(t.raw)+3)
 	for k, v := range t.raw {
 		doc[k] = v
@@ -269,12 +274,15 @@ func RoleKnown(role string) bool {
 	return false
 }
 
-// ReviewerModel is the model this profile has the reviewer run.
+// ReviewerModel is the model this profile has the reviewer run. When the profile
+// names an om_backend, that backend is what runs, so its model is the answer even
+// if the profile also names a model: ReviewerBackend writes the backend, and the
+// two must agree (gt-477ut).
 func (p Profile) ReviewerModel() string {
-	if p.Model != "" {
-		return p.Model
+	if len(p.OMBackend) > 0 {
+		return ModelName(p.OMBackend)
 	}
-	return ModelName(p.OMBackend)
+	return p.Model
 }
 
 // ReviewerBackend is the backend argv this profile gives the reviewer: its own

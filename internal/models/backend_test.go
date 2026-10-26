@@ -58,7 +58,7 @@ func TestSameCommandExpandsHome(t *testing.T) {
 	if sameCommandIn(home, []string{"~/.local/bin/claude"}, []string{"/opt/claude"}) {
 		t.Error("different commands read as the same")
 	}
-	if sameCommandIn("", []string{"~/bin/claude"}, []string{"~/bin/claude"}) != true {
+	if !sameCommandIn("", []string{"~/bin/claude"}, []string{"~/bin/claude"}) {
 		t.Error("with no home, two spelled-out table paths stopped reading as the same command")
 	}
 }
@@ -136,5 +136,20 @@ func TestReviewerModelIsTheProfilesModelOrItsCommands(t *testing.T) {
 	}
 	if got := (Profile{Preset: "claude-haiku"}).ReviewerModel(); got != "" {
 		t.Errorf("ReviewerModel of a profile with no model and no backend = %q, want none", got)
+	}
+}
+
+// A profile that names both a model and an om_backend gives the reviewer the
+// backend's model: the backend is what runs, so ReviewerModel and ReviewerBackend
+// agree (gt-477ut).
+func TestReviewerModelFollowsTheBackendWhenAProfileNamesBoth(t *testing.T) {
+	t.Parallel()
+	p := Profile{Model: "haiku", OMBackend: []string{"/x/claude", "-p", "--model", "sonnet"}}
+	if got := p.ReviewerModel(); got != "sonnet" {
+		t.Errorf("ReviewerModel = %q, want the backend's sonnet", got)
+	}
+	got, err := p.ReviewerBackendIn(t.TempDir(), nil)
+	if err != nil || ModelName(got) != p.ReviewerModel() {
+		t.Errorf("ReviewerBackendIn = %v, %v; want it to run %q", got, err, p.ReviewerModel())
 	}
 }

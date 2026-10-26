@@ -282,3 +282,27 @@ func TestLoadNullRolesIsAnEmptyTable(t *testing.T) {
 		t.Error("the roles map did not keep an assignment")
 	}
 }
+
+// Save then Load gives back the table it saved: the roles and the default survive
+// the round trip, so what the file says is what the table held (gt-jaagc).
+func TestSaveThenLoadRoundTripsTheTable(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	first := filepath.Join(dir, "models.json")
+	writeModelFile(t, first, `{"default":"sonnet","roles":{"crew":"haiku"}}`)
+	table, err := Load(first, testBuiltins)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	saved := filepath.Join(dir, "saved.json")
+	if err := table.Save(saved); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	again, err := Load(saved, testBuiltins)
+	if err != nil {
+		t.Fatalf("Load after Save: %v", err)
+	}
+	if again.Default != "sonnet" || again.Roles["crew"] != "haiku" || len(again.Roles) != 1 {
+		t.Errorf("loaded after Save = default %q, roles %v; want sonnet and crew haiku", again.Default, again.Roles)
+	}
+}
