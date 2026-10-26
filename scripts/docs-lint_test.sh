@@ -143,6 +143,37 @@ echo "docs-lint: --words"
 words="$(DOCS_LINT_ROOT="$TMP" bash "$LINT" --words)"
 if [[ "$words" =~ ^[0-9]+$ ]]; then assert_eq "words is a number" "ok" "ok"; else assert_eq "words is a number" "a number" "$words"; fi
 
+echo "docs-lint: the word ceiling and --words ignore the caller's locale (gt-shrnc)"
+# 1,498 words plus five em dashes: 1,503 when a dash counts as a word, 1,498
+# when the caller's C locale makes it a delimiter.
+setup_globless_root
+awk 'BEGIN { for (i = 0; i < 1498; i++) printf "a "; for (i = 0; i < 5; i++) printf "\342\200\224 "; print "" }' > "$TMP/AGENTS.md"
+ceiling_finding="AGENTS.md:1: word-ceiling: 1503 words, ceiling 1500"
+for caller in C C.UTF-8 en_US.UTF-8; do
+  # stderr is dropped: a host without this caller locale makes bash warn, and
+  # the warning is not a finding.
+  set +e
+  findings="$(LC_ALL="$caller" DOCS_LINT_ROOT="$TMP" bash "$LINT" 2>/dev/null)"; rc=$?
+  total="$(LC_ALL="$caller" DOCS_LINT_ROOT="$TMP" bash "$LINT" --words 2>/dev/null)"
+  set -e
+  assert_eq "the alarm is raised under LC_ALL=$caller" "$ceiling_finding" "$findings"
+  assert_eq "and exits 1 under LC_ALL=$caller" "1" "$rc"
+  assert_eq "--words is 1503 under LC_ALL=$caller" "1503" "$total"
+done
+
+echo "docs-lint: with no UTF-8 locale the count stops instead of unpinning (gt-shrnc)"
+# A `locale` that reports the C charmap for every query stands in for a host
+# with neither candidate installed; the run must not fall back to the caller's.
+mkdir -p "$TMP/bin"
+printf '#!/bin/sh\necho ANSI_X3.4-1968\n' > "$TMP/bin/locale"
+chmod +x "$TMP/bin/locale"
+set +e
+err="$(PATH="$TMP/bin:$PATH" DOCS_LINT_ROOT="$TMP" bash "$LINT" 2>&1 >/dev/null)"; rc=$?
+set -e
+assert_eq "a host with no UTF-8 locale exits 2" "2" "$rc"
+assert_eq "and names the locales it tried" \
+  "docs-lint: cannot count words: neither C.UTF-8 nor en_US.UTF-8 is installed" "$err"
+
 echo
 echo "passed: $PASS failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]

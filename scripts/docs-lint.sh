@@ -216,9 +216,35 @@ check_polecat_main_push() {
   done
 }
 
+# word_locale: the first installed UTF-8 locale, echoed; with neither C.UTF-8
+# nor en_US.UTF-8, one stderr line naming them and exit 2. The count must not
+# fall back to the caller's locale (gt-shrnc).
+word_locale() {
+  local l
+  for l in C.UTF-8 en_US.UTF-8; do
+    [[ "$(LC_ALL="$l" locale charmap 2>/dev/null)" == UTF-8 ]] && { echo "$l"; return 0; }
+  done
+  echo "docs-lint: cannot count words: neither C.UTF-8 nor en_US.UTF-8 is installed" >&2
+  exit 2
+}
+
+# word_count <file>: the word total the ceiling is measured against, counted
+# under WORD_LOCALE. A wc that fails or prints no count exits 2 rather than
+# reading as zero.
+word_count() {
+  [[ -n "$WORD_LOCALE" ]] || WORD_LOCALE="$(word_locale)"
+  local n rc=0
+  n="$(LC_ALL="$WORD_LOCALE" wc -w < "$1" | tr -d ' ')" || rc=$?
+  if [[ "$rc" -ne 0 || ! "$n" =~ ^[0-9]+$ ]]; then
+    echo "docs-lint: cannot count words in $1 (wc -w status $rc, output '$n')" >&2
+    exit 2
+  fi
+  printf '%s\n' "$n"
+}
+
 check_word_ceiling() {
   tier_ceiling | while IFS= read -r f; do
-    w="$(wc -w < "$f" | tr -d ' ')"
+    w="$(word_count "$f")"
     [[ "$w" -gt "$CEILING" ]] && finding "$f" 1 word-ceiling "$w words, ceiling $CEILING"
     true
   done
@@ -246,7 +272,10 @@ run_checks() {
 case "${1:-}" in
   --list) list_tier "${2:?tier}" ;;
   --slice) slice "${2:?docs count}" "${3:?go count}" ;;
-  --words) tier_agent_facing | xargs wc -w 2>/dev/null | tail -1 | awk '{print $1}' ;;
-  "") run_checks ;;
+  --words) WORD_LOCALE="$(word_locale)"
+           tier_agent_facing | while IFS= read -r f; do word_count "$f"; done \
+             | awk '{n += $1} END {print n + 0}' ;;
+  "") WORD_LOCALE="$(word_locale)"
+      run_checks ;;
   *) echo "docs-lint: unknown option '$1'" >&2; exit 2 ;;
 esac
