@@ -85,7 +85,9 @@ type Panel struct {
 // name and positives with no box, because it was never run. The box's keys are
 // pointers so a target without a box, or an interval with no rows behind it,
 // stays absent rather than reading as a zero the dashboard would draw. Its
-// conditions are absent the same way, so a target with no box carries none.
+// conditions are absent the same way, so only a target whose box replicated
+// carries them: a condition is a predictor, and a box that did not replicate
+// predicts nothing.
 type PanelTarget struct {
 	Target           string           `json:"target"`
 	Label            string           `json:"label"`
@@ -152,10 +154,11 @@ func newest[T any](items []T, max int) []T {
 	return items
 }
 
-// panelTarget is one result as the panel writes it: the best box's conditions
-// and holdout counts when the target was run, and the target's own holdout rate
-// as the baseline the box was measured against. A not-yet target names its
-// reason, and a box carries its interval and whether its count is thin.
+// panelTarget is one result as the panel writes it: the best box's holdout
+// counts when the target was run, its conditions when the box replicated, and
+// the target's own holdout rate as the baseline the box was measured against. A
+// not-yet target names its reason, and a box carries its interval and whether
+// its count is thin.
 func panelTarget(t TargetResult) PanelTarget {
 	out := PanelTarget{
 		Target:    t.Target,
@@ -173,7 +176,9 @@ func panelTarget(t TargetResult) PanelTarget {
 	}
 	if t.Best != nil && !out.Skipped {
 		out.BestBox = t.Best.Box
-		out.Conditions = t.Conditions
+		if t.Best.Replicates {
+			out.Conditions = t.Conditions
+		}
 		out.HoldoutN = t.Best.N
 		out.HoldoutRate = t.Best.Rate
 		k, thin := t.Best.K, t.Best.N < MangoThinHoldout
