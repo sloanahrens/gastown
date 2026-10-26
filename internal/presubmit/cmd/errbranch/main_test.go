@@ -141,3 +141,14 @@ func TestReportDoesNotFailExcluded(t *testing.T) {
 		t.Errorf("report = %q, want the excluded return named as excluded", out.String())
 	}
 }
+
+// TestBuildExcludedInFailsClosedOnAnUnreadableFile: a file the build-constraint match cannot read is
+// not treated as excluded, so an added error return in it stays a failure: the error branch fails
+// closed (gt-b9j3o.5; the survivor the overseer accepted, closed here).
+func TestBuildExcludedInFailsClosedOnAnUnreadableFile(t *testing.T) {
+	t.Parallel()
+	linux := &build.Context{GOOS: "linux", GOARCH: "amd64", Compiler: "gc"}
+	if buildExcludedIn(t.TempDir(), linux)("missing.go") {
+		t.Error("an unreadable file was treated as excluded: it must fail closed")
+	}
+}
