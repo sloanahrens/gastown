@@ -188,6 +188,23 @@ button.jvfold:hover{color:var(--text)}
    the first body row drops the rule under the header. */
 .mgtable td{vertical-align:top;padding:6px 10px 6px 0;border-top:1px solid var(--line)}
 .mgtable tbody tr:first-child td{border-top:0}
+/* The Mango table takes its column widths from the shares below rather than
+   from what its cells hold, so a long target label or condition text breaks
+   inside its own column instead of widening the row and leaving the best box a
+   sliver. The prose cells break anywhere, so no word runs past the panel
+   (gt-6q7zj). */
+.mgtable{table-layout:fixed}
+.mgtable .mgc-target{width:14%}
+.mgtable .mgc-verdict{width:12%}
+.mgtable .mgc-rate{width:17%}
+.mgtable .mgc-interval{width:17%}
+.mgtable .mgc-evidence{width:22%}
+.mgtable .mgc-box{width:18%}
+.mgtable td.jvname{white-space:normal;overflow-wrap:anywhere}
+.mgtable .mgbox{overflow-wrap:anywhere}
+.mgtable .jvchip{white-space:normal;overflow-wrap:anywhere}
+.mgtable .mgcond{flex-wrap:wrap}
+.mgtable .mgcondtext{overflow-wrap:anywhere}
 .mgbig{font-size:20px;font-weight:700;line-height:1.2;white-space:nowrap}
 .mgof{font-size:12px;font-weight:400;color:var(--dim)}
 .mgvs,.mggroup{color:var(--dim);font-size:12px}
@@ -3641,7 +3658,9 @@ function renderMango(s) {
 
   const table = el("table", "jvtable mgtable");
   const head = el("tr");
-  head.append(el("th", "", "target"), el("th", "", "verdict"), el("th", "", "rate"), el("th", "", "interval"), el("th", "", "evidence"), el("th", "", "best box"));
+  // The header row names each column so the stylesheet can give that column a
+  // share of the row; a fixed-layout table reads its widths from this row.
+  head.append(el("th", "mgc-target", "target"), el("th", "mgc-verdict", "verdict"), el("th", "mgc-rate", "rate"), el("th", "mgc-interval", "interval"), el("th", "mgc-evidence", "evidence"), el("th", "mgc-box", "best box"));
   const thead = document.createElement("thead"); thead.append(head); table.append(thead);
   const body = document.createElement("tbody"); table.append(body);
   box.append(table);
