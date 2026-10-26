@@ -262,19 +262,20 @@ func (s scriptFileScope) checkFileTarget(raw, tool string, stderr io.Writer) err
 		start = target
 	}
 	chain, final, walked := followWriteChain(start)
-	switch {
-	case walked:
+	if walked {
 		return s.judgeNewScript(final, tool, stderr)
-	case ok:
-		return s.judgeNewScript(target, tool, stderr)
 	}
-	// Neither walk reached the end: the target is unknown. The names on the way
-	// decide, as an unresolvable path always does.
+	// The walk hit its cap, so the chain's end is unknown to it. A script name on
+	// the way denies, whichever resolver then answers; otherwise the kernel-like
+	// answer decides, and an unresolved path follows the unresolvable rule.
 	for _, name := range chain {
 		if scriptFileNamed(name) {
 			printScriptFileRefusal(stderr, tool, name)
 			return NewSilentExit(2)
 		}
+	}
+	if ok {
+		return s.judgeNewScript(target, tool, stderr)
 	}
 	return s.refuseUnresolvedTarget(raw, tool, stderr)
 }
