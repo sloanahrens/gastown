@@ -244,7 +244,7 @@ func pluginProcess(ctx context.Context, p *plugin.Plugin) (*exec.Cmd, error) {
 		if err != nil {
 			return nil, err
 		}
-		return exec.CommandContext(ctx, bin), nil //nolint:gosec // G204: fixed argv, path confined to the plugin directory
+		return exec.CommandContext(ctx, bin), nil //nolint:gosec // G204: the argv is empty; BinaryPath refused a path that leaves the plugin directory
 	}
 	return exec.CommandContext(ctx, "bash", "run.sh"), nil //nolint:gosec // G204: fixed argv, plugin dir from the scanner
 }

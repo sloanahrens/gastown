@@ -129,7 +129,8 @@ type Execution struct {
 
 	// Binary is the program, named relative to the plugin directory, that the
 	// daemon runs in place of run.sh for a script-type plugin. A path that
-	// leaves the plugin directory fails parsing.
+	// leaves the plugin directory, directly or through a symlink, fails
+	// parsing.
 	Binary string `json:"binary,omitempty" toml:"binary,omitempty"`
 
 	// Timeout is the maximum execution time (e.g., "5m").

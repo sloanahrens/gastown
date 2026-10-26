@@ -15,6 +15,21 @@ them; see Scheduling below.
 Each plugin is a directory containing:
 - plugin.md - Plugin definition with TOML frontmatter
 
+## Script entry point
+
+A script-type plugin names what the daemon runs under `[execution]`:
+
+- `binary = "bin/thing"` — a program inside the plugin directory, exec'd
+  directly with no shell and no arguments.
+- `run.sh` beside `plugin.md` and no `binary` — run as `bash run.sh`.
+
+A plugin that sets both runs the binary; the shim is a stepping stone to a
+port, not a second entry point. The binary path resolves inside the plugin
+directory: an absolute path, a `..` that leaves it, or a symlink whose target
+lies outside fails parsing, and the scanner warns and skips the plugin. A
+timeout, an exit code, `[plugin-result skipped]`, a deferral and the run
+receipt read the same for either entry point.
+
 ## Gate Types
 
 - cooldown: Time since last run (e.g., 24h)
@@ -26,8 +41,8 @@ Each plugin is a directory containing:
 
 The daemon heartbeat is the only scheduler: it reads every plugin's gate on
 each heartbeat and runs the ones whose gate is open — a script-type plugin
-(`[execution] type = "script"` with a `run.sh`) in-process, recording a
-plugin-run receipt. A failed run is logged and escalated with `gt escalate`
+(`[execution] type = "script"` with a `run.sh` or a `binary`) in-process,
+recording a plugin-run receipt. A failed run is logged and escalated with `gt escalate`
 under the fingerprint `plugin:<name>:failed`; the plugin's next good run
 (success or skipped) closes it. Nothing runs markdown-instruction ("agent")
 plugins any more: a cooldown plugin without a script `run.sh` is logged as
@@ -41,13 +56,14 @@ instructions and nothing more, so whoever runs it executes the instructions
 and records the result (`gt plugin record-run`) (gt-o1z7). A script-type
 plugin is refused by `gt plugin run` — the command has no script interpreter —
 so a script plugin on a manual gate has no `gt plugin run` path and is run by
-invoking its `run.sh` directly (gt-o1z7).
+invoking its entry point (the `binary`, else `run.sh`) directly (gt-o1z7).
 
 `cron`, `condition` and `event` are parsed but nothing dispatches them
 (gt-qehkn); a plugin on one of these gates has no automatic path today.
 `gt plugin run <name>` still works on instruction plugins, printing their
 instructions same as a manual gate, minus the cooldown check; a script-type
-plugin is refused here too, so it is run by invoking `run.sh` directly.
+plugin is refused here too, so it is run by invoking its entry point (the
+`binary`, else `run.sh`) directly.
 
 ## Querying your own run receipts
 

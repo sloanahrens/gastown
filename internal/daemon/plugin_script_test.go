@@ -130,7 +130,9 @@ func TestRunPluginScript_SuccessCapturesOutputAndEnv(t *testing.T) {
 }
 
 // A plugin that names a binary is exec'd directly: that path under the plugin
-// directory, an empty argv, and no bash in between.
+// directory, an empty argv, and no bash in between. fakeCLI (cli_fake_test.go)
+// records the process the runner builds instead of running it, which is why a
+// binary path that only exists in the frontmatter can report success here.
 func TestRunPluginScript_ExecutesNamedBinaryWithoutAShell(t *testing.T) {
 	t.Parallel()
 	p := binaryPlugin(t, "go-bin", "bin/work")
@@ -178,8 +180,19 @@ func TestRunPluginScript_BinaryKeepsTheScriptResultReading(t *testing.T) {
 // execute a program the plugin did not ship.
 func TestRunPluginScript_RefusesABinaryOutsideThePluginDirectory(t *testing.T) {
 	t.Parallel()
-	for _, binary := range []string{"../evil", "/bin/sh"} {
+	for _, binary := range []string{"../evil", "/bin/sh", "link"} {
 		p := binaryPlugin(t, "escape", binary)
+		if binary == "link" {
+			// A symlink inside the plugin directory is a way out the lexical
+			// check cannot see; the run must resolve it and refuse.
+			outside := filepath.Join(t.TempDir(), "evil")
+			if err := os.WriteFile(outside, []byte("work\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, filepath.Join(p.Path, "link")); err != nil {
+				t.Fatal(err)
+			}
+		}
 		fake := newFakeCLI(nil)
 		res := runPluginScript(context.Background(), fake.run, scriptEnv{}, p, "/town", 5*time.Second)
 		if res.ok() || res.err == nil {

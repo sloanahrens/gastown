@@ -818,7 +818,7 @@ func TestParsePluginMD_Binary(t *testing.T) {
 // whatever it points at.
 func TestParsePluginMD_RefusesBinaryOutsideThePluginDirectory(t *testing.T) {
 	t.Parallel()
-	for _, binary := range []string{"/usr/bin/env", "../escape", "bin/../../escape", ".."} {
+	for _, binary := range []string{"/usr/bin/env", "../escape", "bin/../../escape", "..", "."} {
 		t.Run(binary, func(t *testing.T) {
 			t.Parallel()
 			content := []byte("+++\nname = \"go-plugin\"\n[execution]\ntype = \"script\"\nbinary = \"" + binary + "\"\n+++\n")
@@ -826,6 +826,38 @@ func TestParsePluginMD_RefusesBinaryOutsideThePluginDirectory(t *testing.T) {
 				t.Fatalf("binary %q must be refused at parse time", binary)
 			}
 		})
+	}
+}
+
+// A symlink inside the plugin directory is a way out the lexical check cannot
+// see, so the parse resolves it and refuses a plugin whose binary points
+// elsewhere; the scanner then warns and skips the plugin.
+func TestParsePluginMD_RefusesBinaryThatEscapesThroughASymlink(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "evil")
+	if err := os.WriteFile(outside, []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "work")); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("+++\nname = \"go-plugin\"\n[execution]\ntype = \"script\"\nbinary = \"work\"\n+++\n")
+	if _, err := parsePluginMD(content, dir, LocationTown, ""); err == nil {
+		t.Fatal("a binary that resolves outside the plugin directory must be refused at parse time")
+	}
+
+	// A plugin whose binary really lives under its directory parses.
+	inside := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(inside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inside, "work"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	content = []byte("+++\nname = \"go-plugin\"\n[execution]\ntype = \"script\"\nbinary = \"bin/work\"\n+++\n")
+	if _, err := parsePluginMD(content, dir, LocationTown, ""); err != nil {
+		t.Fatalf("a binary under the plugin directory must parse: %v", err)
 	}
 }
 
