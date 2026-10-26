@@ -16,7 +16,8 @@ import (
 // RunClientContract checks the behavior every beads.Client must share: the
 // fake in the unit tier, *beads.Beads against bd and a Dolt test database in
 // the integration tier. Every behavior the fake documents is pinned here,
-// the refusals and missing-issue paths included.
+// the refusals and missing-issue paths included, except the suites below that
+// a store without bd cannot run.
 //
 // newClient may return the same database to every case: cases run in
 // parallel and each asserts only on the issues it created, under its own
@@ -31,6 +32,19 @@ func RunClientContract(t *testing.T, newClient func(t *testing.T) beads.Client) 
 			c.run(t, newScope(t, newClient(t)))
 		})
 	}
+}
+
+// RunShowTextContract checks that ShowText renders the issue as bd show prints
+// it: the id and title appear, and a missing id is an error. It is separate
+// from RunClientContract because a store with no bd to render through refuses
+// ShowText by design (trackerclient refuses with ErrShowText); such a store
+// does not run this suite and pins its refusal in its own tests.
+func RunShowTextContract(t *testing.T, newClient func(t *testing.T) beads.Client) {
+	t.Helper()
+	t.Run("show text", func(t *testing.T) {
+		t.Parallel()
+		contractShowText(t, newScope(t, newClient(t)))
+	})
 }
 
 // RunCreatorOptionContract checks that CreateOptions.Actor names the creator
@@ -81,7 +95,6 @@ type contractCase struct {
 
 var contractCases = []contractCase{
 	{"create and show", contractCreateShow},
-	{"show text", contractShowText},
 	{"missing issue", contractMissing},
 	{"flag-like title", contractFlagTitle},
 	{"show multiple", contractShowMultiple},
@@ -223,9 +236,10 @@ func labels(is *beads.Issue) []string {
 	return sorted(is.Labels...)
 }
 
-// contractShowText pins what every store can say about the terminal render:
-// the id and title appear, and a missing id is an error. bd's text mode has
-// no typed not-found status, so the kind of that error is not pinned.
+// contractShowText pins what a store with a bd behind it can say about the
+// terminal render: the id and title appear, and a missing id is an error. bd's
+// text mode has no typed not-found status, so the kind of that error is not
+// pinned.
 func contractShowText(t *testing.T, s *scope) {
 	is := s.mustCreate(t, beads.CreateOptions{Title: "showable", Priority: -1})
 	text, err := s.ShowText(is.ID, []string{is.ID})
