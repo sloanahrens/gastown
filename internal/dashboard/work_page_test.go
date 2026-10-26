@@ -1126,7 +1126,7 @@ func TestTheQueuedRowAgesTheWaitTheLandingsPanelShows(t *testing.T) {
 	}
 	// The Landings pane draws the waiting bead's When cell first: the panel's
 	// caption, then the table, then the header row, then this bead.
-	when := dom.descend(t, "trend", 0, 1, 1, 0)
+	when := dom.descend(t, "trend", 0, 1, 0, 1, 0)
 	if cells[0].Text != "3m" || when.Text != "waiting 3m" {
 		t.Errorf("the Work row reads %q and the Landings row %q, want the same 3m wait", cells[0].Text, when.Text)
 	}

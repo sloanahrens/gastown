@@ -134,9 +134,14 @@ func buildTrend(now time.Time, recs []omRecord, stages []omStage, rejs []omRejec
 }
 
 // recentLandingRows is how many finished landings and rejections the Landings
-// table shows. Ten fits the pane at a glance; the live rows, running and failing
-// in backoff, sit above it and are not counted in it.
-const recentLandingRows = 10
+// table holds: zero is every landing in the window, which the pane scrolls. The
+// live rows, running and failing in backoff, sit above them and are not counted.
+const recentLandingRows = 0
+
+// recentTitleRows is how many of those rows look up a bead title. A title is a
+// bd read (cached after the first), so the rows past it show their bead id and
+// no title, which keeps a day of landings from costing a read per row (gt-1kttu).
+const recentTitleRows = 10
 
 // buildRecentLandings joins the last 24 hours of landings and rejections with
 // the stage lines that say what each cost, newest first, capped at limit. live
@@ -196,7 +201,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		rows = append(rows, row)
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].At.After(rows[j].At) })
-	if len(rows) > limit {
+	if limit > 0 && len(rows) > limit {
 		rows = rows[:limit]
 	}
 	if len(live) > 0 {
@@ -205,6 +210,9 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 	if title != nil {
 		seen := map[string]string{}
 		for i := range rows {
+			if i >= recentTitleRows {
+				break
+			}
 			key := rows[i].Rig + "/" + rows[i].Bead
 			t, ok := seen[key]
 			if !ok {

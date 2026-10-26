@@ -170,6 +170,8 @@ section.collapsed>h2{border-bottom:0}
 .ltable td{vertical-align:top}
 .ltable td.n,.ltable th.n{padding-left:14px}
 .ltable td:nth-child(2){overflow-wrap:anywhere}
+.lrows{max-height:70vh;overflow:auto}
+.lrows th{position:sticky;top:0;background:var(--panel)}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
 /* The JEV panel's chips. A chip is inline-block, so a battery's questions wrap
    inside their cell; the battery name is nowrap, so a name never splits. */
@@ -1337,7 +1339,11 @@ function landingTable(s, names, rows, waiting) {
     tr.append(ship);
     tbl.append(tr);
   }
-  wrap.append(el("div", "k title", "landings: waiting to land first, then the ones running now and the ones failing in backoff, then the last 10 finished (newest first; hover a row for the commit and stage times)"), tbl);
+  // Every finished landing of the window is a row; the rows scroll inside a fixed
+  // height, the header row stays put, as the Work panel's beads table does (gt-1kttu).
+  const lrows = el("div", "lrows");
+  lrows.append(tbl);
+  wrap.append(el("div", "k title", "landings: waiting to land first, then the ones running now and the ones failing in backoff, then every finished landing in the last 24 hours (newest first; hover a row for the commit and stage times)"), lrows);
   if (more) wrap.append(el("div", "empty", "and " + more + " more waiting to land — see the Queue pane's “Waiting to land” tab"));
   return wrap;
 }
