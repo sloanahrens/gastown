@@ -20,7 +20,7 @@ var machineExemptCallers = map[string]string{
 	"internal/beads/machine.go:machineEnvForCall": "bd sql (machineExempt)",
 	"internal/beads/beads.go:runWithStdin":        "bd sql (machineExempt)",
 	"internal/beads/beads.go:runWithRouting":      "bd sql (machineExempt)",
-	"internal/cmd/show.go:newBdShowInvocation":    "gt show replaces the process with bd show, which prints for the operator's terminal",
+	"internal/beads/beads.go:runText":             "gt show prints bd show's prose for the operator's terminal",
 	"internal/cmd/formula.go:passBdFormulaOutput": "gt formula list/show without --json prints bd's prose for the operator's terminal",
 }
 

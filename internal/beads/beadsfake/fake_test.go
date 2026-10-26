@@ -30,6 +30,13 @@ func TestReadyFiltered(t *testing.T) {
 	contractReadyFiltered(t, newScope(t, New()))
 }
 
+// TestShowText runs the ShowText contract case on its own, so the case is
+// runnable alone: go test ./internal/beads/beadsfake -run ShowText.
+func TestShowText(t *testing.T) {
+	t.Parallel()
+	contractShowText(t, newScope(t, New()))
+}
+
 // TestGateCheck runs the GateCheck contract case on its own, so the case is
 // runnable alone: go test ./internal/beads/beadsfake -run GateCheck.
 func TestGateCheck(t *testing.T) {

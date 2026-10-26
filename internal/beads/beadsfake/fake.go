@@ -178,6 +178,28 @@ func (f *Fake) Show(id string) (*beads.Issue, error) {
 	return f.snapshot(r), nil
 }
 
+// ShowText renders one issue as bd show prints it for a person. The fake has
+// no bd to hand the flags to, so it models the plain `bd show <id>` form and
+// ignores args; a test of a flag asserts on the argv *Beads records instead.
+func (f *Fake) ShowText(id string, args []string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failure("show"); err != nil {
+		return "", err
+	}
+	r, ok := f.issues[id]
+	if !ok {
+		return "", notFound(id)
+	}
+	is := f.snapshot(r)
+	var b strings.Builder
+	fmt.Fprintf(&b, "◇ %s · %s   [P%d · %s]\n", is.ID, is.Title, is.Priority, strings.ToUpper(is.Status))
+	if is.Description != "" {
+		fmt.Fprintf(&b, "\nDESCRIPTION\n\n%s\n", is.Description)
+	}
+	return b.String(), nil
+}
+
 // ShowMultiple returns the issues that exist among ids; missing IDs are left
 // out without an error, as bd does.
 func (f *Fake) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {

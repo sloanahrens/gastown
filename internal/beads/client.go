@@ -40,6 +40,10 @@ type ReadyOptions struct {
 type Client interface {
 	// Show returns one issue, or an error wrapping ErrNotFound.
 	Show(id string) (*Issue, error)
+	// ShowText returns one issue as bd show prints it for a person, with args
+	// passed to bd unchanged (gt show's passthrough); id only chooses the
+	// database. A store with no bd to render through refuses it.
+	ShowText(id string, args []string) (string, error)
 	// ShowMultiple returns the issues that exist among ids, keyed by ID.
 	ShowMultiple(ids []string) (map[string]*Issue, error)
 	// List returns the issues matching opts.

@@ -19,7 +19,7 @@ var showCmd = &cobra.Command{
 	Short: "Show details of a bead",
 	Long: `Displays the full details of a bead by ID.
 
-Delegates to 'bd show' - all bd show flags are supported.
+Prints bd show's output - all bd show flags are supported.
 Works with any bead prefix (gt-, bd-, hq-, etc.) and routes
 to the correct beads database automatically.
 
@@ -30,6 +30,7 @@ Examples:
   gt show gt-abc123 --json   # Output as JSON
   gt show gt-abc123 -v       # Verbose output`,
 	DisableFlagParsing: true, // Pass all flags through to bd show
+	SilenceUsage:       true, // bd show prints no usage; a failure stays the message bd wrote
 	RunE:               runShow,
 }
 
@@ -43,7 +44,17 @@ func runShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("bead ID required\n\nUsage: gt show <bead-id> [flags]")
 	}
 
-	return execBdShow(args)
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	text, err := beads.New(cwd).ShowText(extractBeadIDFromArgs(args), args)
+	if text != "" {
+		if _, writeErr := os.Stdout.WriteString(text); writeErr != nil {
+			return writeErr
+		}
+	}
+	return err
 }
 
 // extractBeadIDFromArgs returns the first positional bead ID, falling back to
@@ -92,48 +103,4 @@ func showFlagConsumesNextArg(arg string) bool {
 	default:
 		return false
 	}
-}
-
-type bdShowInvocation struct {
-	Dir         string
-	Env         []string
-	ExecArgs    []string
-	CommandArgs []string
-}
-
-// newBdShowInvocation builds the bd show for args in environ, run in the
-// directory resolveDir names for the bead (resolveBeadDir in production).
-func newBdShowInvocation(args []string, environ []string, resolveDir func(beadID string) string) bdShowInvocation {
-	dir := ""
-	if beadID := extractBeadIDFromArgs(args); beadID != "" {
-		if resolved := resolveDir(beadID); resolved != "" && resolved != "." {
-			dir = resolved
-		}
-	}
-
-	// Keep-raw: bd show replaces this process (syscall exec) and prints to the
-	// operator's terminal, so it takes bd's argv as given and cannot go
-	// through a typed Client method. The environment is the read-only policy
-	// every bd call gets: pinned to the bead's database when dir names one,
-	// prefix-routed when it does not.
-	mode, beadsDir := beads.ReadOnlyRouting, ""
-	if dir != "" {
-		mode, beadsDir = beads.ReadOnlyPinned, beads.ResolveBeadsDir(dir)
-	}
-	cmd := beads.CommandWithEnv(dir, beads.EnvForSubprocessMode(append([]string{}, environ...), beadsDir, mode),
-		append([]string{"show"}, args...)...)
-	commandArgs := append([]string(nil), cmd.Args[1:]...)
-
-	// bd show replaces this process and prints to the operator's terminal, so
-	// it runs without machine mode.
-	return bdShowInvocation{
-		Dir:         cmd.Dir,
-		Env:         beads.WithoutMachineEnv(cmd.Env),
-		ExecArgs:    cmd.Args,
-		CommandArgs: commandArgs,
-	}
-}
-
-func currentBdShowInvocation(args []string) bdShowInvocation {
-	return newBdShowInvocation(args, os.Environ(), resolveBeadDir)
 }

@@ -81,6 +81,7 @@ type contractCase struct {
 
 var contractCases = []contractCase{
 	{"create and show", contractCreateShow},
+	{"show text", contractShowText},
 	{"missing issue", contractMissing},
 	{"flag-like title", contractFlagTitle},
 	{"show multiple", contractShowMultiple},
@@ -220,6 +221,23 @@ func sorted(in ...string) []string {
 
 func labels(is *beads.Issue) []string {
 	return sorted(is.Labels...)
+}
+
+// contractShowText pins what every store can say about the terminal render:
+// the id and title appear, and a missing id is an error. bd's text mode has
+// no typed not-found status, so the kind of that error is not pinned.
+func contractShowText(t *testing.T, s *scope) {
+	is := s.mustCreate(t, beads.CreateOptions{Title: "showable", Priority: -1})
+	text, err := s.ShowText(is.ID, []string{is.ID})
+	if err != nil {
+		t.Fatalf("ShowText(%s): %v", is.ID, err)
+	}
+	if !strings.Contains(text, is.ID) || !strings.Contains(text, "showable") {
+		t.Errorf("ShowText = %q, want the id and title bd show prints", text)
+	}
+	if text, err := s.ShowText("gt-nosuch-show-text", []string{"gt-nosuch-show-text"}); err == nil {
+		t.Errorf("ShowText(missing) = %q, want an error", text)
+	}
 }
 
 func contractCreateShow(t *testing.T, s *scope) {

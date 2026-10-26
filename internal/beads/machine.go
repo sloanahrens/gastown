@@ -96,8 +96,8 @@ func WithMachineEnvIn(dir string, env []string) []string {
 }
 
 // WithoutMachineEnv is the one way out of machine mode, for a bd call whose
-// stdout is not parsed as JSON: one that hands the operator's terminal over
-// (gt show execs bd show) prints for a person, and an envelope is not that.
+// stdout is not parsed as JSON: one that prints for a person (gt show) shows
+// bd's own prose, and an envelope is not that.
 // Each caller is named in machineExemptCallers (machine_policy_test.go).
 func WithoutMachineEnv(env []string) []string {
 	return StripEnvKey(env, "BD_MACHINE")
