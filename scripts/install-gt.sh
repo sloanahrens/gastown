@@ -180,7 +180,6 @@ IMAGE_ALARM="${INSTALL_GT_IMAGE_ALARM:-1200}"
 lock_floor=1200
 if [[ "$IMAGE_ALARM" =~ ^[1-9][0-9]*$ ]]; then lock_floor=$IMAGE_ALARM; fi
 LOCK_WAIT="${INSTALL_GT_LOCK_WAIT:-$((lock_floor + 60))}"
-IMAGE_PERL="${INSTALL_GT_PERL:-perl}"
 # image_daemon_env KEY: sets IMAGE_ENV_VALUE to daemon.env.KEY in
 # settings/config.json (the one source the daemon gives its plugin runs, gt-jmd9n)
 # and IMAGE_ENV_REASON to why it is empty. Each failure has its own reason, so the
@@ -225,70 +224,47 @@ image_daemon_env() {
   IMAGE_ENV_VALUE="$value"
 }
 
-# image_build SECS LOCK BINARY RUN [FINGERPRINT] — run.sh under the alarm
-# supervisor. Call it in a subshell.
-#
-# With a FINGERPRINT the supervisor reports a detached build, which has no
-# caller left to do it (gt-vhn89): a build that does not finish escalates under
-# the fingerprint (tried twice), and one that finishes clears it.
+# image_build SECS LOCK BINARY RUN [FINGERPRINT] — run.sh under cmd/image-supervisor,
+# built by image_supervisor_prepare. What the supervisor does with the alarm, the
+# lock and the fingerprint is stated once, in internal/imagebuild. Call this in a
+# subshell, and let it exec: the supervisor closes every fd it inherits, the
+# install lock among them, and a bash left waiting on it would keep that fd open.
 #
 # It exports the registry and crane it was given and points run.sh at this
 # install's town root, the binary whose commit the image is built at, and its
 # lock (POLECAT_IMAGE_TOWN_ROOT, POLECAT_IMAGE_GT, POLECAT_IMAGE_LOCK; case 43
 # pins them). HOME and PATH are not used, so the image is built for the install
 # that asked for it.
-# The perl that stays up is the supervisor: run.sh runs in its own process
-# group, so on the alarm the whole build (run.sh and the docker it started)
-# is stopped, and only then is the lock run.sh took removed. Removing it while
-# a docker child still runs would let the next install build beside it. Its
-# POSIX::close(3..255) also drops the install lock fd this script inherited, so
-# a detached build never holds the install lock past the install — which is why
-# the exec matters: a forked bash waiting on perl would keep that fd open.
 image_build() {
   local secs="$1" lock="$2" bin="$3" run="$4" fingerprint="${5:-}"
+  local report=()
+  if [ -n "$fingerprint" ]; then report=(--gt "$GT" --fingerprint "$fingerprint"); fi
   export POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$bin" POLECAT_IMAGE_LOCK="$lock"
   if [ -n "$image_registry" ]; then export POLECAT_IMAGE_REGISTRY="$image_registry"; fi
   if [ -n "$image_crane" ]; then export POLECAT_IMAGE_CRANE="$image_crane"; fi
-  exec "$IMAGE_PERL" -MPOSIX -MFile::Path=remove_tree -e '
-      my ($secs, $lock, $gt, $fp, @cmd) = @ARGV;
-      POSIX::setsid(); POSIX::close($_) for 3..255;
-      # Escalate a failed build from here: the supervisor is the one process
-      # still running when it ends, and it has closed the install lock fd.
-      sub finish {
-        my $code = shift;
-        if (length $fp && length $gt) {
-          my @esc = $code
-            ? ($gt, "escalate", "install-gt: the detached image build did not finish (exit $code); the binary stands, and stale-image slings are refused until it is rebuilt", "-s", "medium", "--source", "script:install-gt", "--fingerprint", $fp)
-            : ($gt, "escalate", "clear", "--fingerprint", $fp, "--reason", "install-gt: a detached image build finished");
-          # A second try, then the build log: the one place a detached build
-          # result is still read from.
-          my $rc = system(@esc) && system(@esc);
-          print STDERR "polecat image: the escalation for this build did not reach the town (exit ", $rc >> 8, ")\n" if $rc != 0;
-        }
-        exit $code;
-      }
-      my $child = fork();
-      die "fork: $!" unless defined $child;
-      if ($child == 0) { POSIX::setpgid(0, 0); exec @cmd or die "exec: $!"; }
-      $SIG{ALRM} = sub {
-        kill "TERM", -$child;
-        sleep 1;
-        kill "KILL", -$child;
-        if (length $lock && open(my $fh, "<", "$lock/pid")) {
-          my $pid = <$fh>;
-          close $fh;
-          chomp $pid;
-          remove_tree($lock) if $pid == $child;
-        }
-        print STDERR "polecat image: alarm after $secs s stopped the build\n";
-        finish(124);
-      };
-      alarm $secs;
-      waitpid($child, 0);
-      # A build killed by a signal is a failure; $? >> 8 alone reads it as 0.
-      my $st = $?;
-      finish($st & 127 ? 128 + ($st & 127) : $st >> 8);
-    ' "$secs" "$lock" "$GT" "$fingerprint" bash "$run"
+  exec "$IMAGE_SUPERVISOR" --alarm "$secs" --lock "$lock" ${report[@]+"${report[@]}"} -- bash "$run"
+}
+
+# image_supervisor_prepare — build cmd/image-supervisor from this checkout into a
+# temp dir (HELPER_DIR, removed on exit) and set IMAGE_SUPERVISOR to it, or set
+# IMAGE_SUPERVISOR_WHY to why it could not be. Like the install lock, it comes
+# from the checkout because an install can run before any gt exists, and the Go
+# toolchain is already required: 'make build' needs it. There is no shell
+# fallback.
+image_supervisor_prepare() {
+  IMAGE_SUPERVISOR=""
+  IMAGE_SUPERVISOR_WHY=""
+  if [ -z "$HELPER_DIR" ] && ! HELPER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/install-gt-image.XXXXXX"); then
+    HELPER_DIR=""
+    IMAGE_SUPERVISOR_WHY="cannot make a temp directory"
+    return 1
+  fi
+  local out
+  if ! out=$(cd "$SCRIPT_DIR/.." && CGO_ENABLED=0 go build -buildvcs=false -o "$HELPER_DIR/image-supervisor" ./cmd/image-supervisor 2>&1); then
+    IMAGE_SUPERVISOR_WHY="go build ./cmd/image-supervisor in $SCRIPT_DIR failed: $(printf '%s' "$out" | tail -n 1)"
+    return 1
+  fi
+  IMAGE_SUPERVISOR="$HELPER_DIR/image-supervisor"
 }
 
 polecat_image_step() {
@@ -317,8 +293,8 @@ polecat_image_step() {
     log "polecat image: no build output at $bin, so the image was not built"
     return "$fail_rc"
   fi
-  if ! command -v "$IMAGE_PERL" >/dev/null 2>&1; then
-    log "polecat image: $IMAGE_PERL is not installed, so the image cannot be built $order the swap; $consequence"
+  if ! image_supervisor_prepare; then
+    log "polecat image: $IMAGE_SUPERVISOR_WHY, so the image cannot be built $order the swap; $consequence"
     return "$fail_rc"
   fi
   # An alarm of 0 or a non-number would leave the build with no bound at all.

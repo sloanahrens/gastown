@@ -139,21 +139,29 @@ echo "launchctl $*" >> "$T_WORLD/launchctl.log"
 [ "$1" != "print" ] || [ -e "$T_WORLD/gw_loaded" ]
 LCTL
   chmod +x "$t/stubs/launchctl"
-  # go stub: install-gt.sh builds cmd/install-lock from its own checkout (-o
-  # names the output). Hand it the helper the suite built once, instead of a
-  # compile per case (gt-1jgci).
+  # go stub: install-gt.sh builds cmd/install-lock and cmd/image-supervisor from
+  # its own checkout (-o names the output, the last argument the package). Hand
+  # it the binary the suite built once, instead of a compile per case (gt-1jgci,
+  # gt-k6v12). fail_go_supervisor fails only the supervisor's build.
   cat > "$t/stubs/go" <<GO
 #!/usr/bin/env bash
 echo "go \$*" >> "\$T_WORLD/go.log"
 [ ! -e "\$T_WORLD/require_checkout" ] || [ -f go.mod ] || { echo "stub go: not run at a checkout root: \$PWD" >&2; exit 2; }
 [ ! -e "\$T_WORLD/fail_go" ] || { echo "go: build failed" >&2; exit 2; }
+pkg="\${@: -1}"
+case "\$pkg" in
+  *image-supervisor) [ ! -e "\$T_WORLD/fail_go_supervisor" ] || { echo "go: build failed" >&2; exit 2; } ;;
+esac
 out=""; prev=""
 for a in "\$@"; do
   [ "\$prev" = "-o" ] && out="\$a"
   prev="\$a"
 done
 [ -n "\$out" ] || { echo "stub go: no -o" >&2; exit 2; }
-cp "$LOCK_HELPER" "\$out"
+case "\$pkg" in
+  *image-supervisor) cp "$SUPERVISOR_HELPER" "\$out" ;;
+  *) cp "$LOCK_HELPER" "\$out" ;;
+esac
 chmod +x "\$out"
 GO
   chmod +x "$t/stubs/go"
@@ -230,6 +238,7 @@ reported() { "$1/bin/gt" stale --json | python3 -c 'import json,sys; print(json.
 # into the path the script asks for (gt-1jgci).
 LOCK_HELPER_DIR=$(mktemp -d)
 LOCK_HELPER="$LOCK_HELPER_DIR/install-lock"
+SUPERVISOR_HELPER="$LOCK_HELPER_DIR/image-supervisor"
 
 # The template is a whole temp world, and a case that trips set -e exits before
 # the signing section claims the EXIT trap, so this trap has to exist from here
@@ -242,6 +251,8 @@ trap cleanup_world_template EXIT
 
 (cd "$SCRIPT_DIR/.." && CGO_ENABLED=0 go build -buildvcs=false -o "$LOCK_HELPER" ./cmd/install-lock) \
   || { echo "FAIL: cannot build cmd/install-lock for the lock cases"; exit 1; }
+(cd "$SCRIPT_DIR/.." && CGO_ENABLED=0 go build -buildvcs=false -o "$SUPERVISOR_HELPER" ./cmd/image-supervisor) \
+  || { echo "FAIL: cannot build cmd/image-supervisor for the image cases"; exit 1; }
 
 # The world make_world copies. Built here, in the script's own shell: every
 # case calls make_world inside a command substitution, and an assignment made
@@ -1265,16 +1276,15 @@ rc=$( export INSTALL_DIR="$T/otherbin"
 [ "$rc" = "0" ] && grep -q "C=\"$(cat "$T/c2")\"" "$T/bin/gt" && [ ! -e "$T/otherbin/gt" ] \
   && pass "both set: INSTALL_GT_BIN_DIR wins" || fail "both set: rc=$rc, bin $(grep -o 'C="[^"]*"' "$T/bin/gt" 2>/dev/null), otherbin $(ls "$T/otherbin" 2>&1)"
 
-# --- Case 41: perl is missing, so the rebuild cannot start at all: nothing was
-# attempted, so nothing failed. The install says so on its own line and
-# proceeds. INSTALL_GT_PERL is the seam: it names the interpreter. ---
-T=$(make_world); image_stub "$T"
-rc=$( export INSTALL_GT_PERL="$T/no-such-perl"
-      IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
-[ "$rc" != "0" ] && grep -q "polecat image: $T/no-such-perl is not installed.*the binary was not swapped" "$T/run.out" \
+# --- Case 41: the image supervisor cannot be built, so the image cannot be
+# built under its alarm: nothing runs, the install fails closed before the swap,
+# and the log says why. ---
+T=$(make_world); image_stub "$T"; touch "$T/fail_go_supervisor"
+rc=$( IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
+[ "$rc" != "0" ] && grep -q "polecat image: go build ./cmd/image-supervisor in .* failed: go: build failed, so the image cannot be built before the swap; the binary was not swapped" "$T/run.out" \
   && ! grep -q "^run.sh" "$T/make.log" && [ "$(reported "$T")" != "$(cat "$T/c2")" ] \
-  && pass "image: no perl: the install fails closed, the binary is not swapped, and the log says why" \
-  || fail "image: no perl: rc=$rc $(tail -3 "$T/run.out")"
+  && pass "image: no supervisor: the install fails closed, the binary is not swapped, and the log says why" \
+  || fail "image: no supervisor: rc=$rc $(tail -3 "$T/run.out")"
 
 # --- Case 42: --dry-run ends with the RESULT line the header contract promises
 # (gt-87hlc). It changes nothing, so the commit it names is the one it was
@@ -1329,27 +1339,10 @@ wait_for_alarm "$T/image.log" || true
   && pass "image: the alarm stops the build, removes the lock run.sh took, and the install fails closed" \
   || fail "image: alarm: rc=$rc child=${CHILD:-none} live=$(is_live "${CHILD:-0}" && echo yes || echo no) lock=$([ -e "$T/image.lock" ] && echo held || echo free) reported=$(reported "$T") want=$(cat "$T/c1") marker=$([ -e "$T/daemon/restart-pending.json" ] && echo yes || echo no) out=$(tail -2 "$T/image.log" 2>/dev/null)"
 
-# --- Case 45: the alarm removes only a lock that names the build it stopped.
-# This stub's lock names its parent (the supervisor), not its own pid, so the
-# alarm stops the build and leaves that lock in place. ---
-T=$(make_world); mkdir -p "$T/plugin"
-cat > "$T/plugin/run.sh" <<'STUB'
-#!/usr/bin/env bash
-mkdir "$T_WORLD/image.lock" && echo "$PPID" > "$T_WORLD/image.lock/pid"
-sleep 30 &
-echo "$!" > "$T_WORLD/image-child.pid"
-wait
-STUB
-chmod +x "$T/plugin/run.sh"
-install_stub "$T" "$(cat "$T/c1")"
-rc=$( export INSTALL_GT_IMAGE_ALARM=1
-      IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
-wait_for "$T/image-child.pid" || true
-CHILD=$(cat "$T/image-child.pid" 2>/dev/null || true)
-wait_for_alarm "$T/image.log" || true
-[ "$rc" = "1" ] && [ -n "$CHILD" ] && [ -e "$T/image.lock/pid" ] && ! is_live "$CHILD" \
-  && pass "image: the alarm leaves a lock that names another process" \
-  || fail "image: foreign lock: rc=$rc child=${CHILD:-none} lock=$([ -e "$T/image.lock" ] && echo held || echo free) out=$(tail -2 "$T/image.log" 2>/dev/null)"
+# The alarm removes only a lock that names the build it stopped: that is
+# TestIntegrationLockOfAnotherProcessStaysAfterTheStop in internal/imagebuild,
+# where the lock and the build are real and the check needs no install.
+
   # gt-vhn89: a detached build that the alarm stops escalates its own failure,
   # and the install stands, since the binary was swapped before the build.
   T=$(make_world); mkdir -p "$T/plugin"
