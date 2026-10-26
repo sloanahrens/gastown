@@ -326,15 +326,15 @@ func TestCommandKillsTheVetProcessGroup(t *testing.T) {
 }
 
 // awaitBound bounds every wait in the concurrency test: a regression that serializes the
-// vets fails with a message instead of hanging the suite. The bound is the test's own
-// deadline when there is one, else awaitFallback from now.
+// vets fails with a message after awaitFallback, instead of hanging until the test binary's
+// -timeout. The test's own deadline still wins when it is sooner.
 const awaitFallback = 30 * time.Second
 
 func awaitBound(t *testing.T) context.Context {
 	t.Helper()
-	deadline, ok := t.Deadline()
-	if !ok {
-		deadline = time.Now().Add(awaitFallback)
+	deadline := time.Now().Add(awaitFallback)
+	if d, ok := t.Deadline(); ok && d.Before(deadline) {
+		deadline = d
 	}
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	t.Cleanup(cancel)

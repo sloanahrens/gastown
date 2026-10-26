@@ -241,6 +241,7 @@ func vetAll(ctx context.Context, root string, modules []module, jobs int, run ru
 	var wg sync.WaitGroup
 	results := make([]result, len(modules))
 	for i, m := range modules {
+		i, m := i, m // each goroutine owns its own copies, whatever the Go version's loop semantics
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

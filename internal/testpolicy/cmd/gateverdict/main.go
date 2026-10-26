@@ -1,6 +1,6 @@
 // Command gateverdict prints the verdict of the gate's unit tier and integration vet, and exits
-// with the gate's status. The Makefile's gate recipe calls it once both stages have finished, so
-// the branches that decide the verdict are tested here rather than in the recipe (gt-w3aby).
+// with the gate's status. It is not called by the Makefile yet: wiring the gate stage is tracked on
+// gt-tpg0p. Its verdict is tested here so that wiring can call it without a shell harness (gt-w3aby).
 //
 //	go run ./internal/testpolicy/cmd/gateverdict -unit 0 -vet 0 -wall 42
 package main
