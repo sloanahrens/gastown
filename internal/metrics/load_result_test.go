@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -149,6 +150,15 @@ func TestTypedWeeklyTurnsCellsIntoValues(t *testing.T) {
 				"landings": "3.9", "rho_numerator": "-1.9"},
 			WeeklyMetrics{Week: "w", Rig: "r", Landings: 3, RhoNumerator: -1},
 		},
+		{
+			// 2^63-2048 and -2^63 are the last values either side that an int
+			// holds and that a float64 names exactly.
+			"the largest and smallest counts an int holds",
+			Row{"week": "w", "rig": "r", "thin": "False", "dominant_model": "",
+				"landings": "9223372036854773760", "rho_denominator": "-9223372036854775808"},
+			WeeklyMetrics{Week: "w", Rig: "r", Landings: 9223372036854773760,
+				RhoDenominator: -9223372036854775808},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -178,10 +188,12 @@ func TestTypedWeeklyRejectsARowItCannotType(t *testing.T) {
 		row  Row
 	}{
 		{"no week column", Row{"rig": "r", "thin": "False", "dominant_model": ""}},
+		{"no thin column", Row{"week": "w", "rig": "r", "dominant_model": ""}},
 		{"no dominant_model column", Row{"week": "w", "rig": "r", "thin": "False"}},
 		{"a figure that is not a number", row("size_median", "big")},
 		{"a count that is not finite", row("landings", "nan")},
 		{"a count beyond int's range", row("landings", "1e300")},
+		{"a count of exactly 2^63, the first value past an int", row("landings", "9223372036854775808")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -201,7 +213,79 @@ func TestLoadResultNamesTheFileItCouldNotRead(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadResult of an empty directory succeeded, want an error")
 	}
-	if want := footerName; !bytes.Contains([]byte(err.Error()), []byte(want)) {
+	if want := footerName; !strings.Contains(err.Error(), want) {
 		t.Errorf("LoadResult error = %q, want it to name %s", err, want)
+	}
+}
+
+// TestLoadResultRefusesADamagedOutputDirectory drives each read load_result
+// can fail: a footer that is not one object, and a weekly.csv that is missing
+// or holds a row the typing refuses. A report must see the error, not an empty
+// week.
+func TestLoadResultRefusesADamagedOutputDirectory(t *testing.T) {
+	t.Parallel()
+	footer := func() []byte {
+		return []byte(`{"rows_read":{},"rows_dropped":[],"gaps":[],"sources_unreadable":[]}`)
+	}
+	weekly := func(t *testing.T, mutate func(Row)) []byte {
+		t.Helper()
+		row := loadResultRow(t, loadResultWeekly())
+		if mutate != nil {
+			mutate(row)
+		}
+		var buf bytes.Buffer
+		if err := WriteCSV(&buf, []Row{row}, WeeklyColumns); err != nil {
+			t.Fatalf("WriteCSV: %v", err)
+		}
+		return buf.Bytes()
+	}
+	tests := []struct {
+		name  string
+		files map[string][]byte
+		want  string
+	}{
+		{
+			"a footer that is not JSON",
+			map[string][]byte{footerName: []byte("not json"), weeklyName: weekly(t, nil)},
+			footerName,
+		},
+		{
+			"a second value after the footer's object",
+			map[string][]byte{footerName: append(footer(), " {}"...), weeklyName: weekly(t, nil)},
+			"after the top-level object",
+		},
+		{
+			"a missing weekly.csv",
+			map[string][]byte{footerName: footer()},
+			weeklyName,
+		},
+		{
+			"a weekly.csv whose row has the wrong field count",
+			map[string][]byte{footerName: footer(), weeklyName: []byte("week,rig\nw,r,extra\n")},
+			weeklyName,
+		},
+		{
+			"a weekly row whose count is not a number",
+			map[string][]byte{footerName: footer(), weeklyName: weekly(t, func(r Row) { r["landings"] = "big" })},
+			weeklyName,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			for name, data := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+					t.Fatalf("write %s: %v", name, err)
+				}
+			}
+			got, err := LoadResult(Env{ReadFile: os.ReadFile}, dir)
+			if err == nil {
+				t.Fatalf("LoadResult = %+v, want an error", got)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("LoadResult error = %q, want it to contain %q", err, tc.want)
+			}
+		})
 	}
 }

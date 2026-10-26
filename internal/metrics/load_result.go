@@ -87,24 +87,28 @@ func TypedWeekly(rows []Row) ([]WeeklyMetrics, error) {
 // typedWeeklyRow turns one weekly.csv row into the typed row it describes.
 func typedWeeklyRow(r Row) (WeeklyMetrics, error) {
 	var m WeeklyMetrics
+	// The Python reads the label columns with r["..."], which raises KeyError
+	// when the row lacks one, and the numeric columns with r.get(c, ""), which
+	// makes an absent column the value the week lacks. The two arms differ on
+	// purpose: requiredCell is r["..."], weeklyCellFloat is r.get(c, "").
 	for _, c := range []struct {
 		name string
 		dst  *string
 	}{{"week", &m.Week}, {"rig", &m.Rig}} {
-		v, ok := r[c.name]
-		if !ok {
-			return WeeklyMetrics{}, fmt.Errorf("no %s column", c.name)
+		v, err := requiredCell(r, c.name)
+		if err != nil {
+			return WeeklyMetrics{}, err
 		}
 		*c.dst = v
 	}
-	thin, ok := r["thin"]
-	if !ok {
-		return WeeklyMetrics{}, errors.New("no thin column")
+	thin, err := requiredCell(r, "thin")
+	if err != nil {
+		return WeeklyMetrics{}, err
 	}
 	m.Thin = thin == "True"
-	model, ok := r["dominant_model"]
-	if !ok {
-		return WeeklyMetrics{}, errors.New("no dominant_model column")
+	model, err := requiredCell(r, "dominant_model")
+	if err != nil {
+		return WeeklyMetrics{}, err
 	}
 	if model != "" {
 		m.DominantModel = &model
@@ -162,8 +166,19 @@ func typedWeeklyRow(r Row) (WeeklyMetrics, error) {
 	return m, nil
 }
 
-// weeklyCellFloat reads one numeric cell: an empty cell, or a column the row
-// does not carry, is a figure the week lacks (the Python's None).
+// requiredCell returns r's cell for a column typed_weekly reads as r[name]: a
+// row without the column is an error, where the Python raises KeyError.
+func requiredCell(r Row, name string) (string, error) {
+	v, ok := r[name]
+	if !ok {
+		return "", fmt.Errorf("no %s column", name)
+	}
+	return v, nil
+}
+
+// weeklyCellFloat reads one numeric cell the way typed_weekly reads it with
+// r.get(column, ""): an empty cell, or a column the row does not carry, is a
+// figure the week lacks (the Python's None).
 func weeklyCellFloat(r Row, column string) (*float64, error) {
 	cell := r[column]
 	if cell == "" {
@@ -185,11 +200,16 @@ func weeklyCellInt(r Row, column string) (int, error) {
 	if err != nil || v == nil {
 		return 0, err
 	}
-	// int() raises on NaN and infinity, where a Go conversion is undefined;
-	// a count beyond int's range is an error for the same reason, though the
-	// Python's arbitrary-precision int() would carry it.
-	if math.IsNaN(*v) || math.IsInf(*v, 0) || *v > float64(math.MaxInt) || *v < float64(math.MinInt) {
+	if !fitsInt(*v) {
 		return 0, fmt.Errorf("%s: %v is not a count an int can hold", column, *v)
 	}
 	return int(*v), nil
+}
+
+// fitsInt reports whether v is a value an int can hold. The upper bound is
+// exclusive because float64(math.MaxInt) rounds up to 2^63: a count of exactly
+// 2^63 is out of an int's range, where the Python's arbitrary-precision int()
+// would carry it. NaN and infinity fail the comparisons too.
+func fitsInt(v float64) bool {
+	return v >= float64(math.MinInt) && v < float64(math.MaxInt)
 }
