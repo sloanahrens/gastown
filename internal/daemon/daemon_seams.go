@@ -1,13 +1,18 @@
 package daemon
 
 import (
+	"context"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmuxsweep"
 )
 
 // daemonSeams holds the collaborators tests replace in the heartbeat, the
-// upgrade restart, the legacy-socket cleanup and the test-pollution sweep.
-// Each nil field is the production behavior; the methods below pick.
+// upgrade restart, the legacy-socket cleanup, the test-pollution sweep and
+// the bd call census. Each nil field is the production behavior; the methods
+// below pick.
 type daemonSeams struct {
 	heartbeatWork        func(d *Daemon, s *State, lifecycle bool)
 	heartbeatStep        func(d *Daemon, step heartbeatStep)
@@ -18,6 +23,27 @@ type daemonSeams struct {
 	testSocketSweep      func() (tmuxsweep.Report, error)
 	imposterSweep        func(townRoot string)
 	orphanReap           func()
+	censusTicker         func(interval time.Duration) (ticks <-chan time.Time, stop func())
+	censusLog            func(ctx context.Context, every <-chan time.Time, logf func(string, ...any))
+}
+
+// startCensusTicker returns the census's tick channel and the func that stops
+// it.
+func (s daemonSeams) startCensusTicker(interval time.Duration) (<-chan time.Time, func()) {
+	if s.censusTicker != nil {
+		return s.censusTicker(interval)
+	}
+	ticker := time.NewTicker(interval)
+	return ticker.C, ticker.Stop
+}
+
+// runCensusLog blocks while logging one census line per tick until ctx ends.
+func (s daemonSeams) runCensusLog(ctx context.Context, every <-chan time.Time, logf func(string, ...any)) {
+	if s.censusLog != nil {
+		s.censusLog(ctx, every, logf)
+		return
+	}
+	beads.StartCensusLog(ctx, every, logf)
 }
 
 // upgradeHealJobFor names the launchd job the upgrade heal helper arms under,
