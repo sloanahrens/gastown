@@ -51,10 +51,11 @@ type failingTestBeads interface {
 }
 
 // ciTestWatch records every CI-gate failure a rig's landing worker sees and,
-// when one package's test has failed on two different beads inside a day,
-// raises one escalation keyed on that test and files one repair bead for it
-// (gt-xvw20). It reruns nothing: a red gate is a verdict, and a test that
-// fails on beads that did not touch it is a test to fix or remove.
+// when one package's test has failed on two different beads inside a day and
+// on main too, raises one escalation keyed on that test and files one repair
+// bead for it (gt-xvw20, gt-42ulv). It reruns nothing: a red gate is a verdict,
+// and a test that fails on beads that did not touch it is a test to fix or
+// remove.
 type ciTestWatch struct {
 	// Rig is the rig whose landing worker reports, and the scope a repeat is
 	// counted in: another rig's package is a different test.
@@ -73,6 +74,16 @@ type ciTestWatch struct {
 	// which is the landing's: a rejection must not wait on a retrying alert.
 	// nil runs them inline, which is what a test wants.
 	Async func(call func())
+	// MainRed reports whether the rig's latest main status is RED and names the
+	// package, so a test failing for two beads that passes on main is not filed
+	// as one to repair (gt-42ulv). nil is an unread main status, which files.
+	MainRed func(rig, pkg string) bool
+}
+
+// ciWindowText is ciFailureWindow as the escalation, the bead and the log name
+// it: one wording for one span.
+func ciWindowText() string {
+	return fmt.Sprintf("%.0f hours", ciFailureWindow.Hours())
 }
 
 func (w *ciTestWatch) logf(format string, args ...any) {
@@ -96,9 +107,61 @@ func (w *ciTestWatch) run(call func()) {
 	w.Async(call)
 }
 
+// mainRed reports whether main is red for pkg. An unwired seam is an unknown
+// main, and an unknown main files: a repair bead a worker reads costs one look,
+// while a suppressed real failure leaves main red (gt-42ulv).
+func (w *ciTestWatch) mainRed(pkg string) bool {
+	if w.MainRed == nil {
+		return true
+	}
+	return w.MainRed(w.Rig, pkg)
+}
+
+// mainRedFromStatus is the MainRed seam over the red-main status the landing
+// worker already writes. The file is read per repeat rather than captured, so a
+// main that went red or green since the watch was built is seen. A status that
+// cannot be read says nothing is red, which is what an unwritten record means
+// too (gt-42ulv).
+func mainRedFromStatus(townRoot string) func(rig, pkg string) bool {
+	return func(rig, pkg string) bool {
+		data, err := os.ReadFile(RedMainStatusPath(townRoot, rig)) //nolint:gosec // G304: town runtime path
+		if err != nil {
+			return false
+		}
+		return redMainStatusNamesPackage(string(data), pkg)
+	}
+}
+
+// redMainStatusNamesPackage reports whether a red-main status line lists pkg
+// among the RED packages. The line is "<stamp> main RED at <sha> (<by>):
+// <pkg> [<bead>], ...", and a "; flaky (passed on rerun):" tail names packages
+// that passed, so it is not part of the RED list (gt-42ulv).
+func redMainStatusNamesPackage(status, pkg string) bool {
+	line := strings.TrimSpace(status)
+	i := strings.Index(line, " main RED at ")
+	if i < 0 {
+		return false
+	}
+	line = line[i+len(" main RED at "):]
+	colon := strings.Index(line, ": ")
+	if colon < 0 {
+		return false
+	}
+	list := line[colon+2:]
+	if semi := strings.Index(list, ";"); semi >= 0 {
+		list = list[:semi]
+	}
+	for _, entry := range strings.Split(list, ", ") {
+		if field, _, ok := strings.Cut(strings.TrimSpace(entry), " ["); ok && field == pkg {
+			return true
+		}
+	}
+	return false
+}
+
 // Record logs f and reports every test in it that has now failed on a second
-// bead. A tail that named no test is recorded as unparsed and reported to
-// nobody.
+// bead and also fails on the rig's main. A tail that named no test is recorded
+// as unparsed and reported to nobody.
 func (w *ciTestWatch) Record(f land.CIFailure) {
 	now := w.now()
 	recs, err := recordCIFailure(w.Ledger, w.Rig, f, now)
@@ -108,6 +171,14 @@ func (w *ciTestWatch) Record(f land.CIFailure) {
 	for _, t := range distinctTests(f) {
 		beads := w.beadsFor(recs, t, now)
 		if len(beads) < 2 {
+			continue
+		}
+		// A test that passes on main fails for these beads because their diffs
+		// break what it guards, so the repair is in the diff: a P1 for the test
+		// sends a worker to the wrong file (gt-42ulv).
+		if !w.mainRed(t.Package) {
+			w.logf("landing_worker: %s: %s %s failed on %d beads within %s: not filed: passes on main",
+				w.Rig, t.Package, t.Test, len(beads), ciWindowText())
 			continue
 		}
 		w.run(func() { w.report(t, beads) })
@@ -162,7 +233,7 @@ func failingTestTitle(rig, pkg, test string) string {
 // report raises the one escalation for t and files the one repair bead, or
 // comments on the bead already filed for the test, whatever status it is in.
 func (w *ciTestWatch) report(t land.TestFailure, beadIDs []string) {
-	window := fmt.Sprintf("%.0f hours", ciFailureWindow.Hours())
+	window := ciWindowText()
 	msg := fmt.Sprintf("%s %s has failed on %d beads on rig %s within %s: %s. Nothing is retried, so this test is to be fixed or removed (gt-xvw20).",
 		t.Package, t.Test, len(beadIDs), w.Rig, window, strings.Join(beadIDs, ", "))
 	if w.Escalate != nil {

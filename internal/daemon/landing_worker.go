@@ -546,9 +546,10 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// Every use of an accepted risk reaches the overseer, whether or not the
 	// follow-up feed is on (gt-tvhg8).
 	lander.AcceptedRiskAlert = d.acceptedRiskAlert()
-	// A test that keeps failing for beads that did not touch it is the daemon's
-	// to escalate and file a repair for (gt-xvw20); the watch does that off the
-	// landing's goroutine, where a retrying alert cannot hold up a rejection.
+	// A test that keeps failing for beads that did not touch it, and on main too,
+	// is the daemon's to escalate and file a repair for (gt-xvw20); the watch does
+	// that off the landing's goroutine, where a retrying alert cannot hold up a
+	// rejection.
 	ciWatch := &ciTestWatch{
 		Rig:    rigName,
 		Ledger: ciFailureLedgerPath(townRoot),
@@ -556,8 +557,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Escalate: func(key, message string) {
 			d.escalateAlert(key, "landing_worker", message)
 		},
-		Logf: d.logger.Printf,
-		Now:  func() time.Time { return d.clk().Now() },
+		Logf:    d.logger.Printf,
+		Now:     func() time.Time { return d.clk().Now() },
+		MainRed: mainRedFromStatus(townRoot),
 		Async: func(call func()) {
 			go func() {
 				defer func() {
