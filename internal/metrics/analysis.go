@@ -93,7 +93,8 @@ type AnalysisOptions struct {
 	// MaxAge is the oldest snapshot the join accepts; zero is JoinMaxAge.
 	MaxAge time.Duration
 	// Reportf takes the notes a run does not fail on: a file it skipped and the
-	// events its panel could not mark. Nil writes them to the process log.
+	// panel's trend or events it could not draw. Nil writes them to the process
+	// log.
 	Reportf func(format string, args ...any)
 }
 
@@ -139,7 +140,9 @@ type AnalysisResult struct {
 //
 // A failed step returns its error with the old panel.json and the old stamp
 // still in place, so the failure costs the next run's retry rather than a day
-// of a stale panel with a fresh stamp beside it.
+// of a stale panel with a fresh stamp beside it. The panel's trend and events
+// are not steps: an input the run cannot use costs that list and goes on the
+// report line, so the day's panel still publishes.
 func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisResult, error) {
 	o := opts.withDefaults()
 	dir := filepath.Join(env.Town, ".runtime", "metrics", analysisDirName)
@@ -203,10 +206,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 
 	joinHeader, joined, cov := Join(columns, rows, snaps, o.MaxAge)
 	joinHeader, joined = JoinPeaks(joinHeader, joined, peaks)
-	weekly, err := panelWeekly(joined)
-	if err != nil {
-		return res, err
-	}
+	weekly := panelWeekly(joined, o.Reportf)
 	targets, err := analyseTargets(ctx, env, o, joinHeader, joined, explainOnly)
 	if err != nil {
 		return res, err
@@ -373,12 +373,16 @@ func snapshotHours(snaps []Record) int {
 }
 
 // panelWeekly is the panel's trend: the town's own weeks, the thin ones and the
-// ones no rejected share could be read from left out. The weekly builder sorts
-// its rows oldest first, so BuildPanel keeps the newest of them.
-func panelWeekly(landings []Row) ([]PanelWeek, error) {
+// ones no rejected share could be read from left out. A builder error goes on
+// the analysis's report line and leaves the series empty, the same policy as
+// panelEvents' file, so a trend the panel cannot draw costs the trend rather
+// than the day's panel. The builder sorts its rows oldest first, so BuildPanel
+// keeps the newest of them.
+func panelWeekly(landings []Row, reportf func(format string, args ...any)) []PanelWeek {
 	rows, err := BuildWeekly(landings, nil, nil, nil, nil, nil)
 	if err != nil {
-		return nil, fmt.Errorf("weekly: %w", err)
+		reportf("metrics: %v; the panel carries no weekly trend", err)
+		return nil
 	}
 	series := make([]PanelWeek, 0, len(rows))
 	for _, row := range rows {
@@ -387,10 +391,11 @@ func panelWeekly(landings []Row) ([]PanelWeek, error) {
 		}
 		series = append(series, PanelWeek{Week: row.Week, Landings: row.Landings, RejectedShare: *row.RejectedShare})
 	}
-	return series, nil
+	return series
 }
 
-// panelEvents is the regime events the panel marks, oldest first. A file the
+// panelEvents is the regime events the panel marks, as the reader returns them;
+// BuildPanel establishes the order, validity and cap it writes. A file the
 // reader cannot use costs the panel its marks rather than the run, so it goes
 // on the analysis's own report line and the list stays empty.
 func panelEvents(env Env, reportf func(format string, args ...any)) []PanelEvent {

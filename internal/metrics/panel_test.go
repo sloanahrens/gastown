@@ -284,6 +284,49 @@ func TestBuildPanelCapsTheSeriesAtTheNewest(t *testing.T) {
 	}
 }
 
+// TestBuildPanelOrdersAndValidatesTheEvents hands BuildPanel the marks a
+// hand-built meta could carry: only the calendar days with text are written,
+// trimmed and oldest first, so neither the newest cap nor the drawing depends
+// on the order or the care of whoever built the meta.
+func TestBuildPanelOrdersAndValidatesTheEvents(t *testing.T) {
+	t.Parallel()
+
+	got := BuildPanel(nil, PanelMeta{Events: []PanelEvent{
+		{Date: "2026-10-10", What: "  sonnet seats replaced flash seats  "},
+		{Date: "2026-10-32", What: "a day that does not exist"},
+		{Date: "2026-09-28", What: "gate raised"},
+		{Date: "2026-1-5", What: "a day the page cannot place"},
+		{Date: "2026-10-12", What: "   "},
+		{Date: "", What: "no date at all"},
+	}}, panelGoldenNow).Events
+	want := []PanelEvent{
+		{Date: "2026-09-28", What: "gate raised"},
+		{Date: "2026-10-10", What: "sonnet seats replaced flash seats"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("panel events = %+v, want the valid ones trimmed, oldest first: %+v", got, want)
+	}
+}
+
+// TestBuildPanelCapsTheNewestEventsFromAnyOrder is the cap after the panel's own
+// ordering: a caller may hand the events newest first and the panel still keeps
+// the sixteen latest days.
+func TestBuildPanelCapsTheNewestEventsFromAnyOrder(t *testing.T) {
+	t.Parallel()
+
+	events := make([]PanelEvent, panelEventsMax+1)
+	for i := range events {
+		events[i] = PanelEvent{Date: fmt.Sprintf("2026-09-%02d", panelEventsMax+1-i), What: "a change"}
+	}
+	got := BuildPanel(nil, PanelMeta{Events: events}, panelGoldenNow).Events
+	if len(got) != panelEventsMax {
+		t.Fatalf("%d events, want %d", len(got), panelEventsMax)
+	}
+	if first, last := got[0].Date, got[len(got)-1].Date; first != "2026-09-02" || last != "2026-09-17" {
+		t.Errorf("events keep %s..%s, want 2026-09-02..2026-09-17", first, last)
+	}
+}
+
 // TestBuildPanelWritesTheSeriesAsLists writes an empty weekly series and an
 // empty event list as [], so the page draws a list rather than a null.
 func TestBuildPanelWritesTheSeriesAsLists(t *testing.T) {
