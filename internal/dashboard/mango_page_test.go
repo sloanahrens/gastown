@@ -689,6 +689,168 @@ func TestMangoEventLabelsTakeDistinctHeightsAndFlipAtTheRightEdge(t *testing.T) 
 	}
 }
 
+// mangoLabelBox is one event label as its text covers the chart: the span the
+// drawn characters occupy and the height they sit on.
+type mangoLabelBox struct {
+	Text  string
+	Y, Lo float64
+	Hi    float64
+}
+
+// mangoLabelFontEm is the advance of the page's monospace font as a fraction of
+// the font size (0.6em for Menlo, SF Mono and Consolas). A label's drawn width
+// is its rune count times this, measured here so a page that under-measures its
+// labels is caught by the text they actually cover rather than by its own
+// arithmetic.
+const mangoLabelFontEm = 0.6
+
+// mangoLabelBoxes reads the event labels back as the boxes their text covers at
+// the font-size the page draws them at.
+func mangoLabelBoxes(t *testing.T, dom *pageDOM) []mangoLabelBox {
+	t.Helper()
+
+	xs := mangoAttrs(t, dom, "mgtwhat", "x")
+	ys := mangoAttrs(t, dom, "mgtwhat", "y")
+	anchors := mangoAttrs(t, dom, "mgtwhat", "text-anchor")
+	texts := mangoTexts(t, dom, "mgtwhat")
+	if len(xs) != len(ys) || len(xs) != len(anchors) || len(xs) != len(texts) {
+		t.Fatalf("the event labels read %d x, %d y, %d anchors and %d texts, want one of each", len(xs), len(ys), len(anchors), len(texts))
+	}
+	boxes := make([]mangoLabelBox, 0, len(texts))
+	for i := range texts {
+		x, y := mustFloat(t, xs[i]), mustFloat(t, ys[i])
+		w := float64(len([]rune(texts[i]))) * mangoLabelFontEm * 9
+		b := mangoLabelBox{Text: texts[i], Y: y, Lo: x, Hi: x + w}
+		if anchors[i] == "end" {
+			b.Lo, b.Hi = x-w, x
+		}
+		boxes = append(boxes, b)
+	}
+	return boxes
+}
+
+// Event labels never cover each other's text and never leave the chart's box,
+// at any page width: the page draws the chart as a viewBox it scales as one
+// piece, so a layout that parts its labels in chart units parts them on screen
+// too, and one that overlaps covers text at 1760px as at any other width
+// (gt-ejvpk).
+func TestMangoTrendEventLabelsKeepTheirTextApartAndInsideTheChart(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	state := mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 96, 0.42, 0.25, MangoEarning))
+	state["weekly"] = []map[string]any{
+		mangoPageWeek("2026-09-28", 31, 0.35),
+		mangoPageWeek("2026-10-05", 27, 0.25),
+		mangoPageWeek("2026-10-12", 34, 0.125),
+		mangoPageWeek("2026-10-19", 29, 0.31),
+	}
+	// The events the dashboard drew on top of each other on 2026-10-26, and one
+	// on each side of them, where a label runs into the chart's edge.
+	state["events"] = []map[string]any{
+		mangoPageEvent("2026-09-28", "the first week of the span has a change of its own to name"),
+		mangoPageEvent("2026-10-02", "from gate threshold 0.75 on gastown the queue waited a day"),
+		mangoPageEvent("2026-10-06", "from gate threshold 0.6 to 0.7 on gastown"),
+		mangoPageEvent("2026-10-07", "haiku seats become the dominant model on the rig"),
+		mangoPageEvent("2026-10-09", "the queue opened early and every branch waited a full day"),
+		mangoPageEvent("2026-10-25", "the last day of the span gets a change of its own too"),
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": state})
+
+	boxes := mangoLabelBoxes(t, dom)
+	if len(boxes) != 6 {
+		t.Fatalf("the trend draws %d event labels, want one per event (6)", len(boxes))
+	}
+	const chartW = 700.0
+	for _, b := range boxes {
+		if b.Lo < 0 || b.Hi > chartW {
+			t.Errorf("the label %q covers x %.0f..%.0f, want it inside the chart's 0..%.0f", b.Text, b.Lo, b.Hi, chartW)
+		}
+	}
+	for i := 0; i < len(boxes); i++ {
+		for j := i + 1; j < len(boxes); j++ {
+			a, b := boxes[i], boxes[j]
+			if a.Y != b.Y || a.Hi <= b.Lo || b.Hi <= a.Lo {
+				continue
+			}
+			t.Errorf("the labels %q and %q share the row at y=%.0f and cover the same text at x %.0f..%.0f", a.Text, b.Text, a.Y, math.Max(a.Lo, b.Lo), math.Min(a.Hi, b.Hi))
+		}
+	}
+}
+
+// A row already taken is not reused: a fourth colliding label adds a row and
+// the page lengthens the chart so the row has height above the plot, where the
+// markers stay on the dates they mark (gt-ejvpk).
+func TestMangoTrendAddsARowAndLengthensTheChartForAFourthLabel(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	state := mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 96, 0.42, 0.25, MangoEarning))
+	state["weekly"] = []map[string]any{
+		mangoPageWeek("2026-10-05", 27, 0.25),
+		mangoPageWeek("2026-10-12", 34, 0.125),
+	}
+	dates := []string{"2026-10-07", "2026-10-08", "2026-10-09", "2026-10-10"}
+	events := make([]map[string]any, 0, len(dates))
+	var want []string
+	for _, date := range dates {
+		what := "a change on " + date + " that no other label has room beside"
+		events = append(events, mangoPageEvent(date, what))
+		want = append(want, what)
+	}
+	state["events"] = events
+	dom.call(t, "renderMango", map[string]any{"mango": state})
+
+	y := mangoAttrs(t, dom, "mgtwhat", "y")
+	if len(y) != len(want) {
+		t.Fatalf("the trend draws %d event labels, want one per event (%d)", len(y), len(want))
+	}
+	if got := strings.Join(mangoTexts(t, dom, "mgtwhat"), "|"); got != strings.Join(want, "|") {
+		t.Fatalf("the event labels read %q, want every label drawn in date order", got)
+	}
+	seen := map[string]bool{}
+	for _, h := range y {
+		if seen[h] {
+			t.Errorf("two colliding labels share the row at y=%s, want each on a row of its own", h)
+		}
+		seen[h] = true
+	}
+	marks := mangoAttrs(t, dom, "mgtmark", "y1")
+	if len(marks) != len(want) {
+		t.Fatalf("the trend draws %d event markers, want one per event (%d)", len(marks), len(want))
+	}
+	// The marker runs from the plot's top to its bottom; the labels sit above it.
+	top := mustFloat(t, marks[0])
+	for _, h := range y {
+		if got := mustFloat(t, h); got >= top {
+			t.Errorf("the label at y=%.0f starts below the plot top at y=%.0f, want every row above it", got, top)
+		}
+	}
+	// Two weeks span fourteen days, so the x axis is not moved by the rows the
+	// labels take: each marker sits on its own day of that span.
+	first := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
+	xs := mangoAttrs(t, dom, "mgtmark", "x1")
+	for i, date := range []string{"2026-10-07", "2026-10-08", "2026-10-09", "2026-10-10"} {
+		d, err := time.Parse("2006-01-02", date)
+		if err != nil {
+			t.Fatalf("reading the event date %q: %v", date, err)
+		}
+		wantX := 44 + float64(d.Sub(first))/(float64(14*24*time.Hour))*(656-44)
+		if got := mustFloat(t, xs[i]); math.Abs(got-wantX) > 0.05 {
+			t.Errorf("the marker for %s is at x=%.1f, want x=%.1f", date, got, wantX)
+		}
+	}
+	boxes := mangoAttrs(t, dom, "mgchart", "viewBox")
+	if len(boxes) != 1 || !strings.HasPrefix(boxes[0], "0 0 700 ") {
+		t.Fatalf("the chart's viewBox reads %q, want one at width 700", boxes)
+	}
+	if h := mustFloat(t, strings.TrimPrefix(boxes[0], "0 0 700 ")); h <= 170 {
+		t.Errorf("the chart is %.0f tall with four label rows, want it lengthened past its base 170", h)
+	}
+}
+
 // Three labels that all overlap take three height bands: each one's own extent
 // decides its band, so a stack of them never overprints two lines of text.
 func TestMangoTrendStacksThreeCollidingLabels(t *testing.T) {
