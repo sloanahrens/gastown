@@ -3347,7 +3347,7 @@ func (b *Beads) Show(id string) (*Issue, error) {
 }
 
 // ShowText returns bd show's text for one issue, with args passed through
-// unchanged; id chooses the database.
+// unchanged; id chooses the database, unless the wrapper is unrouted (NewPlain).
 func (b *Beads) ShowText(id string, args []string) (string, error) {
 	target := b
 	if !b.noRoute {

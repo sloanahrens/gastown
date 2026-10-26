@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -52,12 +53,18 @@ func runShow(cmd *cobra.Command, args []string) error {
 	// the operator's terminal, so it prints without a tty. Its stderr is in the
 	// returned error, not shown directly.
 	text, err := beads.New(cwd).ShowText(extractBeadIDFromArgs(args), args)
+	return writeShowText(os.Stdout, text, err)
+}
+
+// writeShowText prints bd show's text to out, then returns bd's error, so the
+// failure reaches the operator as the command's error (gt-p85pw.10).
+func writeShowText(out io.Writer, text string, showErr error) error {
 	if text != "" {
-		if _, writeErr := os.Stdout.WriteString(text); writeErr != nil {
+		if _, writeErr := io.WriteString(out, text); writeErr != nil {
 			return writeErr
 		}
 	}
-	return err
+	return showErr
 }
 
 // extractBeadIDFromArgs returns the first positional bead ID, falling back to

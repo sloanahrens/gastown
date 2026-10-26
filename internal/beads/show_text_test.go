@@ -65,3 +65,38 @@ func TestShowTextRoutesTheIDToItsDatabase(t *testing.T) {
 		t.Errorf("BEADS_DOLT_SERVER_DATABASE = %q, want gt (the rig's database)", db)
 	}
 }
+
+// Each id is answered by its own database, and a BEADS_DIR left in the
+// environment by the caller does not pull a rig's read to another store: the
+// cases the deleted cmd test covered (gt-p85pw.10).
+func TestShowTextRoutesEachPrefixAndIgnoresStaleEnv(t *testing.T) {
+	t.Parallel()
+	townRoot, _ := townWithRoutes(t)
+	cases := []struct {
+		name, id, wantDir string
+	}{
+		{"a rig id", "gt-abc", filepath.Join(townRoot, "gastown", "mayor", "rig")},
+		{"a hq id routes to the town", "hq-abc", townRoot},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRecorder(nil)
+			b := newBeads(beadsFields{workDir: townRoot, baseEnv: []string{"PATH=/usr/bin", "BEADS_DIR=/stale/elsewhere"}, exec: r.exec})
+			if _, err := b.ShowText(tc.id, []string{tc.id}); err != nil {
+				t.Fatalf("ShowText: %v", err)
+			}
+			calls := r.calls()
+			if len(calls) != 1 {
+				t.Fatalf("calls = %d, want one", len(calls))
+			}
+			if calls[0].dir != tc.wantDir {
+				t.Errorf("dir = %q, want %q", calls[0].dir, tc.wantDir)
+			}
+			beadsDir, _ := lastEnvValue(calls[0].env, "BEADS_DIR")
+			if want := filepath.Join(tc.wantDir, ".beads"); beadsDir != want {
+				t.Errorf("BEADS_DIR = %q, want %q (the stale value must not survive)", beadsDir, want)
+			}
+		})
+	}
+}
