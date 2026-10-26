@@ -260,18 +260,18 @@ bd count --status=closed --closed-after=2025-01-01
 
 ### Model Comparison
 
-When agents use different underlying models, attribution enables A/B comparison:
+A bead's `agent:<alias>` label pins it to the seat that works it, and
+`gt config agent list` resolves each alias to the model it runs. Grouping closed
+beads by that label compares models:
 
 ```bash
-# Tag agents by model
-# gastown/polecats/claude-1 uses Claude
-# gastown/polecats/gpt-1 uses GPT-4
+# Completed work per model (the `agent:` label rows)
+bd count --status=closed --by-label
 
-# Compare quality signals: each issue's revision count is in its history
-bd history gt-xyz
-
-# The actor behind each of those changes
-bd history gt-xyz --events
+# One model's completed beads, then the subset still carrying the `rework`
+# label a rejected landing adds
+bd count --status=closed --label=agent:claude-sonnet
+bd count --status=closed --label=agent:claude-sonnet --label=rework
 ```
 
-Lower revision counts suggest higher first-pass quality.
+A model whose beads need rework less often has the higher first-pass quality.
