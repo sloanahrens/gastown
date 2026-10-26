@@ -494,3 +494,24 @@ func TestBuildRuntimeArchiveRefusesWhenTheRenderDirectoryCannotBeMade(t *testing
 		t.Errorf("error does not name the prompt file: %v", err)
 	}
 }
+
+// A store that cannot be written is logged in the spawn log, and the archive is
+// still built: the prompt store never fails a spawn (gt-js6di).
+func TestBuildRuntimeArchiveSurvivesAStoreFailure(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	// A file where the store directory should be makes the store fail.
+	if err := os.MkdirAll(filepath.Join(town, ".runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, polecatPromptDir), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var logged bytes.Buffer
+	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, &logged, openshellPromptRender); err != nil {
+		t.Fatalf("a store failure failed the spawn: %v", err)
+	}
+	if !strings.Contains(logged.String(), "system prompt store "+openshellTestPolecat+":") {
+		t.Errorf("the store failure is not in the spawn log:\n%s", logged.String())
+	}
+}
