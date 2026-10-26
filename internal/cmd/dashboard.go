@@ -424,6 +424,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Cloud:        func() *dashboard.Cloud { return cloud.Read(time.Now()) },
 		Mango:        func() *dashboard.Mango { return dashboard.ReadMango(mango, time.Now()) },
 		Spend:        dashboardSpend(resolveSpendCmd(spendCmd)),
+		SpendHours:   dashboardSpendHours(),
 		JevSpend:     dashboardJevSpend(jevSpendArgv),
 		JevScorecard: dashboardJevScorecard(jevScorecardArgv),
 		OM:           func() *dashboard.OM { return om.read(time.Now()) },
@@ -931,6 +932,30 @@ func rigForgejoRepos(townRoot string) []string {
 		out = append(out, owner+"/"+repo)
 	}
 	return out
+}
+
+// dashboardSpendHours reads the day's spend by hour from the balance ledger the
+// spend watcher appends to, the same file the spend command reads its history
+// from. Without a home directory there is no ledger, so there is no read.
+func dashboardSpendHours() func() dashboard.SpendRead {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return dashboardSpendHoursFrom(filepath.Join(home, ".claude", "docs", "research", "deepseek-spend", "balance.log"))
+}
+
+// dashboardSpendHoursFrom is the ledger read for the given path. A read that
+// fails is an empty read, so the hourly chart is absent instead of drawing a day
+// of zeros, and the malformed lines it skipped are carried to the chart.
+func dashboardSpendHoursFrom(ledger string) func() dashboard.SpendRead {
+	return func() dashboard.SpendRead {
+		hours, skipped, err := dashboard.ReadSpendHours(ledger, time.Now())
+		if err != nil {
+			return dashboard.SpendRead{}
+		}
+		return dashboard.SpendRead{Hours: hours, Skipped: skipped}
+	}
 }
 
 // dashboardSpend runs the spend command and returns its JSON, nil when it

@@ -203,3 +203,107 @@ func TestPctTextRoundsHalfAwayFromZero(t *testing.T) {
 		}
 	}
 }
+
+// The hub rebuilds the Cost panel's charts on every spend poll, so the hours
+// that move while the spend report fails still reach the page, and the daily
+// chart keeps its last good figures.
+func TestPollSpendRebuildsTheChartsOnEveryPoll(t *testing.T) {
+	t.Parallel()
+	first := costChartsHours()
+	second := costChartsHours()
+	second[1].Spent = 0.90 // the 18:00 hour grows between polls
+	hours := first
+	h := NewHub(Config{
+		Spend:      func() json.RawMessage { return nil },
+		SpendHours: func() SpendRead { return SpendRead{Hours: hours} },
+		SpendEvery: time.Minute,
+	})
+	h.pollSpend()
+	hours = second
+	h.pollSpend()
+
+	h.mu.Lock()
+	charts := h.state.CostCharts
+	h.mu.Unlock()
+	if charts == nil || charts.Hourly == nil {
+		t.Fatal("no hourly chart after two polls with a failed spend report")
+	}
+	if got := charts.Hourly.Bars[1].Value; got != 0.90 {
+		t.Errorf("18:00 bar = %v after the second poll, want the new 0.90", got)
+	}
+}
+
+// A projection of exactly 0% is a figure, so the limit label names it.
+func TestBuildCostChartsDailyNamesAZeroProjection(t *testing.T) {
+	t.Parallel()
+	c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, &ClaudePlan{WeeklyValueUSD: 70, ProjectedPctAtReset: 0}).Daily
+	if c.Limit == nil || !strings.Contains(c.Limit.Label, "reset at 0%") {
+		t.Errorf("limit label = %+v, want it to name a 0%% projection", c.Limit)
+	}
+}
+
+// A ledger read that fails drops the hourly chart: the read has no hours, so the
+// chart is absent rather than drawing the hours of an earlier poll as current.
+func TestPollSpendDropsTheHoursWhenTheLedgerReadFails(t *testing.T) {
+	t.Parallel()
+	reads := []SpendRead{{Hours: costChartsHours()}, {}}
+	h := NewHub(Config{
+		Spend:      func() json.RawMessage { return nil },
+		SpendHours: func() SpendRead { r := reads[0]; reads = reads[1:]; return r },
+		SpendEvery: time.Minute,
+	})
+	h.pollSpend()
+	h.pollSpend()
+
+	h.mu.Lock()
+	charts := h.state.CostCharts
+	h.mu.Unlock()
+	if charts == nil {
+		t.Fatal("no charts after a failed ledger read")
+	}
+	if charts.Hourly != nil {
+		t.Errorf("hourly chart = %+v after a failed read, want it absent", charts.Hourly)
+	}
+}
+
+// The skipped count from the ledger read reaches the hourly chart on the hub.
+func TestPollSpendCarriesTheSkippedLedgerLines(t *testing.T) {
+	t.Parallel()
+	h := NewHub(Config{
+		Spend:      func() json.RawMessage { return nil },
+		SpendHours: func() SpendRead { return SpendRead{Hours: costChartsHours(), Skipped: 3} },
+		SpendEvery: time.Minute,
+	})
+	h.pollSpend()
+
+	h.mu.Lock()
+	charts := h.state.CostCharts
+	h.mu.Unlock()
+	if charts == nil || charts.Hourly == nil || charts.Hourly.Skipped != 3 {
+		t.Fatalf("hourly skipped = %+v, want 3 from the read", charts)
+	}
+}
+
+// A plan poll rebuilds the charts too, so the weekly limit line reaches the page
+// once the plan has reported.
+func TestPollClaudePlanRebuildsTheLimitLine(t *testing.T) {
+	t.Parallel()
+	perDay := json.RawMessage(`{"per_day":{"2026-10-24":{"spent":1.5},"2026-10-25":{"spent":2.0}}}`)
+	h := NewHub(Config{
+		Spend:      func() json.RawMessage { return perDay },
+		ClaudePlan: func() *ClaudePlan { return &ClaudePlan{WeeklyValueUSD: 70, ProjectedPctAtReset: 83} },
+		SpendEvery: time.Minute,
+	})
+	h.pollSpend()
+	h.pollClaudePlan()
+
+	h.mu.Lock()
+	charts := h.state.CostCharts
+	h.mu.Unlock()
+	if charts == nil || charts.Daily == nil || charts.Daily.Limit == nil {
+		t.Fatal("the weekly limit line is missing after the plan poll")
+	}
+	if math.Abs(charts.Daily.Limit.Value-10) > 1e-9 {
+		t.Errorf("limit = %v, want 10 a day", charts.Daily.Limit.Value)
+	}
+}
