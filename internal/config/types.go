@@ -1696,6 +1696,10 @@ type SandboxProfile struct {
 	ForgejoHost      string   `json:"forgejo_host,omitempty"` // the sandbox's Forgejo host; "" = ControlPlaneHost
 	CacheVolume      string   `json:"cache_volume,omitempty"` // "{rig}" expands to the rig name
 	Driver           string   `json:"driver,omitempty"`       // the gateway's compute driver: "docker" (default) or "kubernetes"
+	// KubernetesCacheClaim names a shared PersistentVolumeClaim the kubernetes
+	// driver mounts at /sandbox/.cache; "" means no cache mount. Validate refuses
+	// it on a docker profile (the Docker cache path is closed).
+	KubernetesCacheClaim string `json:"kubernetes_cache_claim,omitempty"`
 
 	// Kubernetes pod placement and sizing, sent as driver config only for a
 	// kubernetes driver. Validate refuses them on a docker profile.
@@ -1756,7 +1760,9 @@ func (p SandboxProfile) WithDefaults() SandboxProfile {
 // named; CPU and Memory, when set, must be k8s quantities; ForgejoHost, when
 // set, must be a bare host name; Driver, when set, is docker or kubernetes,
 // and a kubernetes profile sets no CacheVolume (a Docker volume does not exist
-// there; a k8s cache is a separate design). The kubernetes scheduling fields
+// there; a k8s cache is a separate design), and a kubernetes profile may name a
+// KubernetesCacheClaim that is a DNS-1123 name, which a docker profile may not
+// (gt-jofne). The kubernetes scheduling fields
 // are refused on a docker profile and checked for the pod and resources the
 // gateway accepts.
 func (p SandboxProfile) Validate(name string) error {
@@ -1785,12 +1791,18 @@ func (p SandboxProfile) Validate(name string) error {
 	}
 	switch p.Driver {
 	case "", SandboxDriverDocker:
+		if p.KubernetesCacheClaim != "" {
+			return fmt.Errorf("sandboxes.%s.kubernetes_cache_claim %q: only a kubernetes driver mounts a cache claim; remove it or set driver to kubernetes", name, p.KubernetesCacheClaim)
+		}
 		if field := p.kubernetesOnlyField(); field != "" {
 			return fmt.Errorf("sandboxes.%s.%s: only a kubernetes driver sends pod placement and resources; remove it or set driver to kubernetes", name, field)
 		}
 	case SandboxDriverKubernetes:
 		if p.CacheVolume != "" {
 			return fmt.Errorf("sandboxes.%s.cache_volume %q: a kubernetes driver has no docker volumes; remove it", name, p.CacheVolume)
+		}
+		if p.KubernetesCacheClaim != "" && !validDNS1123Label(p.KubernetesCacheClaim) {
+			return fmt.Errorf("sandboxes.%s.kubernetes_cache_claim %q: want a DNS-1123 name: lowercase letters, digits and hyphens, at most 63 characters, starting and ending with a letter or digit", name, p.KubernetesCacheClaim)
 		}
 		if err := p.validateKubernetes(name); err != nil {
 			return err
@@ -1800,6 +1812,15 @@ func (p SandboxProfile) Validate(name string) error {
 	}
 	return nil
 }
+
+// validDNS1123Label reports whether name is a DNS-1123 label, the form a
+// Kubernetes object name takes: lowercase letters, digits and hyphens, at most 63
+// characters, starting and ending with a letter or digit.
+func validDNS1123Label(name string) bool {
+	return len(name) <= 63 && dns1123LabelRe.MatchString(name)
+}
+
+var dns1123LabelRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
 // kubernetesOnlyField names the first pod placement or resources field p
 // sets, or "" when it sets none.
