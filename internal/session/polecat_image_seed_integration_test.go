@@ -118,10 +118,10 @@ func TestIntegrationSeedRunToleratesAVetOnlyFailure(t *testing.T) {
 	}
 }
 
-// A darwin-only compile failure must not fail the image: a rig's tree, or one of
-// its dependencies, may hold a package that only builds for another platform
-// (gt-mukre). The failure stays in the build log.
-func TestIntegrationSeedRunToleratesADarwinOnlyFailure(t *testing.T) {
+// The image carries no darwin build: a package that only builds for darwin must
+// neither fail the image nor be built by the seed (dv-0qre moved the macOS-only
+// check to the host tier, so the seed no longer runs a darwin step).
+func TestIntegrationSeedRunDoesNotBuildForDarwin(t *testing.T) {
 	t.Parallel()
 	out, err, _, _ := runSeed(t, map[string]string{
 		"go.mod":           seedGoMod,
@@ -129,10 +129,10 @@ func TestIntegrationSeedRunToleratesADarwinOnlyFailure(t *testing.T) {
 		"broken_darwin.go": "//go:build darwin\n\npackage main\n\nvar _ = undefinedCall\n",
 	})
 	if err != nil {
-		t.Fatalf("seed RUN failed on a module that builds for linux but not darwin: %v\n%s", err, out)
+		t.Fatalf("seed RUN failed on a darwin-only broken file: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "'GOOS=darwin GOARCH=arm64 go build ./...' failed") {
-		t.Errorf("the darwin build failure is not reported in the build log:\n%s", out)
+	if strings.Contains(out, "GOOS=darwin") {
+		t.Errorf("the seed RUN still runs a darwin step:\n%s", out)
 	}
 }
 
