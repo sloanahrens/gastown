@@ -9,11 +9,12 @@ import (
 )
 
 // writeTownRoutes writes a town's routes file in a temporary directory, so the
-// check reads nothing outside the test (gt-rtxfy).
+// check reads nothing outside the test. The path is spelled out here rather
+// than taken from the function under test (gt-rtxfy).
 func writeTownRoutes(t *testing.T, routes string) string {
 	t.Helper()
 	town := t.TempDir()
-	dir := beads.GetTownBeadsPath(town)
+	dir := filepath.Join(town, ".beads")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -46,5 +47,20 @@ func TestTrackerKVCheckQuietWithoutTrackerRigs(t *testing.T) {
 	}
 	if res := NewTrackerKVCheck().Run(&CheckContext{TownRoot: t.TempDir()}); res.Status != StatusOK {
 		t.Errorf("status with no routes file = %v, want OK", res.Status)
+	}
+}
+
+// A routes file that cannot be read is a warning, not OK: an OK here would
+// hide tracker-routed rigs behind a read failure (gt-rtxfy).
+func TestTrackerKVCheckWarnsWhenRoutesCannotBeRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory where the routes file belongs cannot be read as one.
+	if err := os.MkdirAll(filepath.Join(town, ".beads", beads.RoutesFileName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res := NewTrackerKVCheck().Run(&CheckContext{TownRoot: town})
+	if res.Status != StatusWarning {
+		t.Fatalf("status with an unreadable routes file = %v, want a warning", res.Status)
 	}
 }

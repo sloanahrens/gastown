@@ -30,6 +30,11 @@ func (c *TrackerKVCheck) Run(ctx *CheckContext) *CheckResult {
 	res := &CheckResult{Name: c.Name(), Category: c.Category(), Status: StatusOK, Message: "no rig is routed to the tracker"}
 	routes, err := beads.LoadRoutes(beads.GetTownBeadsPath(ctx.TownRoot))
 	if err != nil {
+		// An unreadable routes file hides which rigs are on the tracker, so the
+		// check cannot say they are fine (fail closed).
+		res.Status = StatusWarning
+		res.Message = "cannot read the town routes, so tracker-routed rigs are not checked"
+		res.Details = []string{err.Error()}
 		return res
 	}
 	var rigs []string
@@ -42,7 +47,7 @@ func (c *TrackerKVCheck) Run(ctx *CheckContext) *CheckResult {
 		return res
 	}
 	res.Status = StatusWarning
-	res.Message = fmt.Sprintf("%d rig(s) on the tracker have no key-value store yet (plan task B4)", len(rigs))
+	res.Message = fmt.Sprintf("%d rig(s) on the tracker have no key-value store yet", len(rigs))
 	res.Details = rigs
 	res.FixHint = "import each rig's kv rows before its flip, or its memories are not read"
 	return res

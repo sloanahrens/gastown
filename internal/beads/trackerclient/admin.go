@@ -31,10 +31,14 @@ func (c *Client) ConfigSet(key, value string) error {
 	return mapErr(c.tc.ConfigSet(ctx(), c.configKey(key), value))
 }
 
-// KVList returns no entries: the tracker has no key-value store.
+// KVList returns no entries. The tracker has no key-value store yet, and this
+// is decision A: an empty store is the contract's answer, and a rig's kv rows
+// are imported before its flip, with the tracker-kv-store doctor check
+// reporting tracker-routed rigs until then.
 func (c *Client) KVList() (map[string]string, error) { return map[string]string{}, nil }
 
-// KVGet finds nothing for the same reason, so every key is ErrNotFound.
+// KVGet reports every key as unset, the same answer KVList gives: the store
+// holds nothing, so no key is found.
 func (c *Client) KVGet(key string) (string, error) {
 	return "", fmt.Errorf("tracker: kv %s: %w", key, beads.ErrNotFound)
 }

@@ -338,9 +338,9 @@ func TestReadyFilteredCarriesTheFilterAndSignalsACutPage(t *testing.T) {
 	}
 }
 
-// The tracker's key-value store is empty and answers every key as unset, the
-// answer the admin contract requires of a store that holds nothing. The test
-// runs hermetically: no tracker server is started (gt-rtxfy).
+// Decision A (gt-rtxfy): the tracker's key-value store is empty and answers
+// every key as unset, which the admin contract requires of a store that holds
+// nothing. This test pins that decision. It starts no tracker server.
 func TestTrackerKVIsEmptyAndAnswersUnset(t *testing.T) {
 	t.Parallel()
 	c := &Client{}
