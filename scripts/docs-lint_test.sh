@@ -144,8 +144,13 @@ words="$(DOCS_LINT_ROOT="$TMP" bash "$LINT" --words)"
 if [[ "$words" =~ ^[0-9]+$ ]]; then assert_eq "words is a number" "ok" "ok"; else assert_eq "words is a number" "a number" "$words"; fi
 
 echo "docs-lint: the word ceiling and --words ignore the caller's locale (gt-shrnc)"
-# 1,498 words plus five em dashes: 1,503 when a dash counts as a word, 1,498
-# when the caller's C locale makes it a delimiter.
+# 1,498 words plus five lone em dashes. gt-shrnc was found where wc counted a lone
+# em dash differently under en_US.UTF-8 and C.UTF-8, so the verdict depended on
+# the caller's locale. The count must be the same whatever the caller sets, and
+# each caller locale here is checked against the one total. On a host whose wc
+# counts the dashes the same everywhere (this one) the loop cannot tell a pinned
+# locale from an unpinned one; the case below, where no UTF-8 locale is installed,
+# is what proves the run never falls back to the caller's.
 setup_globless_root
 awk 'BEGIN { for (i = 0; i < 1498; i++) printf "a "; for (i = 0; i < 5; i++) printf "\342\200\224 "; print "" }' > "$TMP/AGENTS.md"
 ceiling_finding="AGENTS.md:1: word-ceiling: 1503 words, ceiling 1500"
@@ -173,6 +178,42 @@ set -e
 assert_eq "a host with no UTF-8 locale exits 2" "2" "$rc"
 assert_eq "and names the locales it tried" \
   "docs-lint: cannot count words: neither C.UTF-8 nor en_US.UTF-8 is installed" "$err"
+
+echo "docs-lint: a word count that fails stops the run and says why (gt-shrnc)"
+# A wc that cannot count stands in for one that cannot read a file or prints no
+# count. The stub counts normally unless its input carries a marker, so the first
+# agent-facing file is counted and the second is not: a run that carried on, or
+# printed what it had, would show it. AGENTS.md sorts before docs/HOOKS.md.
+setup_globless_root
+mkdir -p "$TMP/bin" "$TMP/docs"
+real_wc="$(command -v wc)"
+cat > "$TMP/bin/wc" <<STUB
+#!/bin/sh
+input="\$(cat)"
+case "\$input" in
+  *COUNT-FAILS*) exit 1 ;;
+  *COUNT-GARBAGE*) echo "no count here"; exit 0 ;;
+esac
+printf '%s\n' "\$input" | $real_wc "\$@"
+STUB
+chmod +x "$TMP/bin/wc"
+printf '# Agents\n\nthree words here\n' > "$TMP/AGENTS.md"
+for marker in COUNT-FAILS COUNT-GARBAGE; do
+  printf '# Hooks\n\n%s\n' "$marker" > "$TMP/docs/HOOKS.md"
+  for mode in "" "--words"; do
+    set +e
+    out="$(PATH="$TMP/bin:$PATH" DOCS_LINT_ROOT="$TMP" bash "$LINT" $mode 2>"$TMP/stderr")"; rc=$?
+    set -e
+    err="$(cat "$TMP/stderr")"
+    label="${mode:-the lint} with $marker"
+    assert_eq "$label exits 2" "2" "$rc"
+    assert_eq "$label prints nothing on stdout: no finding, no partial total" "" "$out"
+    case "$err" in
+      "docs-lint: cannot count words in docs/HOOKS.md"*) assert_eq "$label names the file it could not count" "ok" "ok" ;;
+      *) assert_eq "$label names the file it could not count" "docs-lint: cannot count words in docs/HOOKS.md ..." "$err" ;;
+    esac
+  done
+done
 
 echo
 echo "passed: $PASS failed: $FAIL"

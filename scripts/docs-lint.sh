@@ -244,7 +244,10 @@ word_count() {
 
 check_word_ceiling() {
   tier_ceiling | while IFS= read -r f; do
-    w="$(word_count "$f")"
+    # run_checks reads these checks inside a command substitution, where set -e is
+    # not in force: without this exit a count that failed would leave w empty and
+    # the file would pass. The status reaches run_checks through pipefail.
+    w="$(word_count "$f")" || exit 2
     [[ "$w" -gt "$CEILING" ]] && finding "$f" 1 word-ceiling "$w words, ceiling $CEILING"
     true
   done
@@ -273,8 +276,15 @@ case "${1:-}" in
   --list) list_tier "${2:?tier}" ;;
   --slice) slice "${2:?docs count}" "${3:?go count}" ;;
   --words) WORD_LOCALE="$(word_locale)"
-           tier_agent_facing | while IFS= read -r f; do word_count "$f"; done \
-             | awk '{n += $1} END {print n + 0}' ;;
+           # The total is printed once, after every file is counted: a count that
+           # fails stops the run (exit 2) with nothing on stdout, never a partial
+           # total that reads as a result.
+           total=0
+           while IFS= read -r f; do
+             n="$(word_count "$f")"
+             total=$((total + n))
+           done < <(tier_agent_facing)
+           echo "$total" ;;
   "") WORD_LOCALE="$(word_locale)"
       run_checks ;;
   *) echo "docs-lint: unknown option '$1'" >&2; exit 2 ;;
