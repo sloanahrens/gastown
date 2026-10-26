@@ -112,9 +112,10 @@ type MangoSummary struct {
 
 // targetMetric maps a mango target to the metric a box on it speaks for: the
 // post-hoc columns only explain boxes, so the target itself is the metric.
+// Every target here is one mango runs, which the test holds against
+// mangoTargets; a target mango dropped answers nothing about its metric.
 var targetMetric = []struct{ target, metric string }{
 	{"rejected_before_landing", "rework depth"},
-	{"manual_rescue", "non-conservative merges"},
 }
 
 // CorrelatedPair is two weekly columns whose values move together, and how
