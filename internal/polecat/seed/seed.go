@@ -62,10 +62,11 @@ func Pins(data []byte) ([]Source, error) {
 	return out, nil
 }
 
-// Plan returns the rigs a stage writes, buildRig first: buildRig at
-// buildCommit, then each pinned rig at its pin. A pin for buildRig is an error:
-// that rig's seed is the build commit, and a pin for it would be a line that
-// reads as the source while nothing reads it (gt-1rz2r).
+// Plan returns the rigs a stage writes, buildRig first: buildRig at its pin when
+// seed-pins names one, else at buildCommit; then each other pinned rig at its pin.
+// A pinned seed keeps the image's cache identical across commits, so the seed
+// layer is reused (the build commit changes every commit, which rebuilt it).
+// Guard checks the pin against buildCommit, so the image still builds.
 func Plan(pins []Source, buildRig, buildCommit string) ([]Source, error) {
 	if buildRig == "" {
 		return nil, errors.New("no build rig named")
@@ -73,13 +74,18 @@ func Plan(pins []Source, buildRig, buildCommit string) ([]Source, error) {
 	if !isCommit(buildCommit) {
 		return nil, fmt.Errorf("cannot read the build commit: %q is not a 7+ character hex commit, so build from a git checkout", buildCommit)
 	}
-	out := make([]Source, 0, len(pins)+1)
-	out = append(out, Source{Rig: buildRig, Commit: buildCommit})
+	seedAt := buildCommit
 	for _, p := range pins {
 		if p.Rig == buildRig {
-			return nil, fmt.Errorf("seed-pins pins %s, but that rig is seeded from the build commit: drop the line (make polecat-seed-pins)", p.Rig)
+			seedAt = p.Commit
 		}
-		out = append(out, p)
+	}
+	out := make([]Source, 0, len(pins)+1)
+	out = append(out, Source{Rig: buildRig, Commit: seedAt})
+	for _, p := range pins {
+		if p.Rig != buildRig {
+			out = append(out, p)
+		}
 	}
 	return out, nil
 }

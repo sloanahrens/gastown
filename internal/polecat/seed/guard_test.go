@@ -72,7 +72,7 @@ func TestGuardPassesWhenThePinIsMain(t *testing.T) {
 		mainSHA: {"go.mod": goMod("example/devops", "github.com/x/a")},
 	})
 	pins := []Source{{Rig: "devops", Commit: mainSHA}}
-	if _, err := Guard(pins, "gastown", town, f.run); err != nil {
+	if _, err := Guard(pins, "gastown", "", town, f.run); err != nil {
 		t.Fatalf("Guard on a pin equal to main = %v, want nil", err)
 	}
 }
@@ -86,7 +86,7 @@ func TestGuardPassesABehindPinWithTheSameModulesWithANote(t *testing.T) {
 	})
 	f.answer[rigDir("devops")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
 	f.answer[rigDir("devops")+" rev-list --count "+pinSHA+".."+mainSHA] = "14\n"
-	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", "", town, f.run)
 	if err != nil {
 		t.Fatalf("Guard on a behind pin with the same modules = %v, want nil", err)
 	}
@@ -103,7 +103,7 @@ func TestGuardFailsWhenABehindPinLacksAModuleMainRequires(t *testing.T) {
 		mainSHA: {"go.mod": goMod("example/devops", "github.com/x/a", "github.com/x/new")},
 	})
 	f.answer[rigDir("devops")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
-	_, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	_, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", "", town, f.run)
 	if err == nil {
 		t.Fatal("Guard on a pin lacking a module main requires = nil, want an error")
 	}
@@ -129,7 +129,7 @@ func TestGuardNamesANestedModuleThePinLacks(t *testing.T) {
 	})
 	f.answer[rigDir("gastown")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
 	pins := []Source{{Rig: "gastown", Commit: pinSHA}}
-	_, err := Guard(pins, "devops", town, f.run)
+	_, err := Guard(pins, "devops", "", town, f.run)
 	if err == nil {
 		t.Fatal("Guard on a pin that lacks a nested module = nil, want an error")
 	}
@@ -139,15 +139,29 @@ func TestGuardNamesANestedModuleThePinLacks(t *testing.T) {
 	}
 }
 
-func TestGuardSkipsTheBuildRig(t *testing.T) {
+// The build rig's pin is checked against the build commit, the code the image
+// compiles: a pin lacking a module that commit requires is refused at build time.
+func TestGuardChecksTheBuildRigPinAgainstTheBuildCommit(t *testing.T) {
+	t.Parallel()
+	f := &guardGit{answer: map[string]string{}}
+	seedRig(f, "gastown", mainSHA, map[string]map[string]string{
+		pinSHA:  {"go.mod": goMod("example/gastown", "github.com/x/a")},
+		mainSHA: {"go.mod": goMod("example/gastown", "github.com/x/a", "github.com/x/new")},
+	})
+	f.answer[rigDir("gastown")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
+	_, err := Guard([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, f.run)
+	if err == nil || !strings.Contains(err.Error(), "github.com/x/new") {
+		t.Fatalf("Guard on a build-rig pin lacking a module the build commit requires = %v, want an error naming it", err)
+	}
+}
+
+// A build-rig pin equal to the build commit has nothing to compare: no error.
+func TestGuardPassesABuildRigPinAtTheBuildCommit(t *testing.T) {
 	t.Parallel()
 	f := &guardGit{answer: map[string]string{}}
 	pins := []Source{{Rig: "gastown", Commit: pinSHA}}
-	if _, err := Guard(pins, "gastown", town, f.run); err != nil {
-		t.Fatalf("Guard on the build rig = %v, want nil", err)
-	}
-	if len(f.calls) != 0 {
-		t.Errorf("Guard read git for the build rig: %v", f.calls)
+	if _, err := Guard(pins, "gastown", pinSHA, town, f.run); err != nil {
+		t.Fatalf("Guard with the pin at the build commit = %v, want nil", err)
 	}
 }
 
@@ -155,7 +169,7 @@ func TestGuardFailsWhenMainCannotBeRead(t *testing.T) {
 	t.Parallel()
 	f := &guardGit{answer: map[string]string{}}
 	pins := []Source{{Rig: "devops", Commit: pinSHA}}
-	_, err := Guard(pins, "gastown", town, f.run)
+	_, err := Guard(pins, "gastown", "", town, f.run)
 	if err == nil {
 		t.Fatal("Guard with no origin/main = nil, want an error naming the rig")
 	}
@@ -172,7 +186,7 @@ func TestGuardPassesAnAheadOrDivergedPinWithEqualModulesWithANote(t *testing.T) 
 		mainSHA: {"go.mod": goMod("example/devops")},
 	})
 	// no merge-base answer: the pin is not an ancestor of main
-	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", "", town, f.run)
 	if err != nil {
 		t.Fatalf("Guard on an ahead or diverged pin with equal modules = %v, want nil", err)
 	}
@@ -187,7 +201,7 @@ func TestGuardNamesAPinThatIsNotInItsCheckout(t *testing.T) {
 	dir := rigDir("devops")
 	f.answer[dir+" rev-parse --verify origin/main^{commit}"] = mainSHA + "\n"
 	// no ls-tree answer for the pin: the commit is not in this checkout
-	_, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	_, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", "", town, f.run)
 	if err == nil {
 		t.Fatal("Guard on a pin the checkout lacks = nil, want an error")
 	}
@@ -204,7 +218,7 @@ func TestGuardReadsOnlyGitQueries(t *testing.T) {
 	seedRig(f, "devops", mainSHA, map[string]map[string]string{
 		mainSHA: {"go.mod": goMod("example/devops")},
 	})
-	_, _ = Guard([]Source{{Rig: "devops", Commit: mainSHA}}, "gastown", town, f.run)
+	_, _ = Guard([]Source{{Rig: "devops", Commit: mainSHA}}, "gastown", "", town, f.run)
 	allowed := map[string]bool{}
 	for _, v := range ReadOnlyGitVerbs {
 		allowed[v] = true
@@ -232,7 +246,7 @@ func TestGuardNotesABehindPinWithoutACountWhenTheCountCannotBeRead(t *testing.T)
 	})
 	f.answer[rigDir("devops")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
 	// no rev-list answer: the count cannot be read
-	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", "", town, f.run)
 	if err != nil {
 		t.Fatalf("Guard = %v, want nil", err)
 	}

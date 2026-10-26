@@ -185,8 +185,8 @@ RUN --mount=type=bind,source=seed,target=/seed \
 
 # Town binaries, cross-compiled by `make polecat-image` (CGO_ENABLED=0 linux/arm64).
 # After the seed RUN, not before it: bin/gt and bin/bd change every commit, and a
-# layer above the seed would invalidate the seed's cache on every build (gt-b3jyq
-# measurement, 2026-10-26). The seed does not use gt or bd.
+# layer above the seed would invalidate the seed's cache on every build (measured
+# 2026-10-26). The seed does not use gt or bd.
 COPY bin/gt /usr/local/bin/gt
 COPY bin/bd /usr/local/bin/bd
 RUN chmod 0755 /usr/local/bin/gt /usr/local/bin/bd

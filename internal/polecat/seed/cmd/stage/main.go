@@ -48,7 +48,7 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "polecat-seed: %v\n", err)
 		return 1
 	}
-	notes, err := seed.Guard(pinned, *buildRig, *town, seed.ExecGit)
+	notes, err := seed.Guard(pinned, *buildRig, *buildCommit, *town, seed.ExecGit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "polecat-seed: %v\n", err)
 		return 1
