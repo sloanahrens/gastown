@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -29,25 +31,39 @@ func (s *censusLogSink) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// next waits for one more line and returns it.
-func (s *censusLogSink) next(t *testing.T) string {
+// waitForLine fails unless the logger records a line containing want.
+func (s *censusLogSink) waitForLine(t *testing.T, want string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	select {
-	case <-s.wrote:
-	case <-ctx.Done():
-		t.Fatal("the daemon logger received no census line")
+	for {
+		s.mu.Lock()
+		lines := append([]string(nil), s.lines...)
+		s.mu.Unlock()
+		for _, line := range lines {
+			if strings.Contains(line, want) {
+				return
+			}
+		}
+		select {
+		case <-s.wrote:
+		case <-ctx.Done():
+			t.Fatalf("the daemon logger never logged %q; it logged %q", want, lines)
+		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.lines[len(s.lines)-1]
 }
 
-func (s *censusLogSink) count() int {
+// countContaining counts the lines the logger received that carry substr.
+func (s *censusLogSink) countContaining(substr string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.lines)
+	n := 0
+	for _, line := range s.lines {
+		if strings.Contains(line, substr) {
+			n++
+		}
+	}
+	return n
 }
 
 // censusLogProbe stands in for beads.StartCensusLog: it names each tick it
@@ -87,15 +103,29 @@ func sendCensusTick(t *testing.T, ticks chan<- time.Time, at time.Time) {
 	}
 }
 
-// TestCensusLogTicksEveryMinuteIntoTheDaemonLogger pins the daemon's census
-// wiring (gt-7h3vm): a one-minute ticker whose ticks the census logs, one line
-// per tick, through the daemon's own logger, until the daemon's context ends
-// and the ticker is stopped.
-func TestCensusLogTicksEveryMinuteIntoTheDaemonLogger(t *testing.T) {
+// TestRunStartsTheCensusLogOnMinuteTicks pins the daemon's census wiring
+// (gt-7h3vm) at the call site that gives it life: a Run start asks for a
+// one-minute ticker, hands the census the daemon's own context and logger,
+// logs one line per tick through that logger, and stops the ticker when Run
+// returns.
+func TestRunStartsTheCensusLogOnMinuteTicks(t *testing.T) {
 	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	sink := newCensusLogSink()
-	ctx, cancel := context.WithCancel(context.Background())
-	d := &Daemon{ctx: ctx, logger: log.New(sink, "", 0)}
+	d := &Daemon{config: DefaultConfig(town), logger: log.New(sink, "", 0)}
+	// The rest of Run's startup is out of scope, and each of these does real
+	// host work: the heartbeat dispatches and restarts sessions, the sweep
+	// touches the tmux socket directory, and the probes reach the network.
+	d.disabledPatrols = map[string]bool{
+		"landing_infra":    true,
+		"resource_sampler": true,
+		"spec_dispatch":    true,
+	}
+	d.seams.heartbeatWork = func(*Daemon, *State, bool) {}
+	d.seams.cleanupLegacySockets = func(string) (int, int) { return 0, 0 }
 
 	ticks := make(chan time.Time)
 	var intervals []time.Duration
@@ -106,48 +136,41 @@ func TestCensusLogTicksEveryMinuteIntoTheDaemonLogger(t *testing.T) {
 	}
 	probe := &censusLogProbe{started: make(chan struct{}), stopped: make(chan struct{})}
 	d.seams.censusLog = probe.start
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-probe.started:
-		default:
-			return // the wiring started nothing, so there is no goroutine to wait for
-		}
-		ctx, done := context.WithTimeout(context.Background(), 5*time.Second)
-		defer done()
-		select {
-		case <-probe.stopped:
-		case <-ctx.Done():
-			t.Error("the census kept running after the daemon's context ended")
-		}
-	})
 
-	stop := d.startCensusLog()
-	waitForSignal(t, probe.started, "the daemon's wiring never started the census")
+	d.ctx, d.cancel = context.WithCancel(context.Background())
+	t.Cleanup(d.cancel)
+	done := make(chan error, 1)
+	go func() { done <- d.Run() }()
 
+	waitForSignal(t, probe.started, "Run never started the census: the start path does not wire it in")
 	if len(intervals) != 1 || intervals[0] != time.Minute {
-		t.Fatalf("ticker intervals = %v, want one of %v", intervals, time.Minute)
+		t.Fatalf("Run asked for ticker intervals %v, want one of %v", intervals, time.Minute)
 	}
 
 	first := time.Date(2026, time.October, 26, 11, 30, 0, 0, time.UTC)
 	sendCensusTick(t, ticks, first)
-	if line := sink.next(t); !strings.Contains(line, "census tick at 2026-10-26T11:30:00Z") {
-		t.Errorf("line = %q, want the tick the ticker delivered", line)
-	}
+	sink.waitForLine(t, "census tick at 2026-10-26T11:30:00Z")
 
 	sendCensusTick(t, ticks, first.Add(time.Minute))
-	if line := sink.next(t); !strings.Contains(line, "census tick at 2026-10-26T11:31:00Z") {
-		t.Errorf("second line = %q, want the second tick", line)
-	}
-	if lines := sink.count(); lines != 2 {
-		t.Errorf("logged %d lines for 2 ticks, want one per tick", lines)
+	sink.waitForLine(t, "census tick at 2026-10-26T11:31:00Z")
+	if lines := sink.countContaining("census tick at"); lines != 2 {
+		t.Errorf("logged %d census lines for 2 ticks, want one per tick", lines)
 	}
 
-	cancel()
-	waitForSignal(t, probe.stopped, "the census kept running after the daemon's context ended")
+	d.cancel()
+	bounded, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after the daemon context ended = %v, want a clean shutdown", err)
+		}
+	case <-bounded.Done():
+		t.Fatal("Run did not return after the daemon context ended")
+	}
 
-	stop()
+	waitForSignal(t, probe.stopped, "the census kept running after the daemon context ended")
 	if stops != 1 {
-		t.Errorf("ticker stopped %d times, want once", stops)
+		t.Errorf("ticker stopped %d times on Run's exit, want once", stops)
 	}
 }
