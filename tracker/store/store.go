@@ -28,6 +28,9 @@ type Store interface {
 	GetIssues(ctx context.Context, ids []string) (map[string]api.Issue, error)
 	// ListIssues returns the page of issues matching f.
 	ListIssues(ctx context.Context, f api.ListFilter) (api.IssuePage, error)
+	// Assigned returns one page of the issues whose assignee is in
+	// req.Assignees and whose status is in req.Statuses, keyed by assignee.
+	Assigned(ctx context.Context, req api.AssignedRequest) (api.AssignedPage, error)
 	// UpdateIssue applies patch to the issue while g holds; a guard that does
 	// not hold returns api.ErrGuardFailed and writes nothing.
 	UpdateIssue(ctx context.Context, id string, patch api.UpdatePatch, g api.Guard) error

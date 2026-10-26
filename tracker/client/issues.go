@@ -36,6 +36,20 @@ func (c *Client) List(ctx context.Context, f api.ListFilter) (api.IssuePage, err
 	return out, err
 }
 
+// Assigned returns one page of the issues assigned to req.Assignees in one of
+// req.Statuses, keyed by assignee; pass the page's NextCursor in req.Cursor
+// for the next one. The map is never nil.
+func (c *Client) Assigned(ctx context.Context, req api.AssignedRequest) (api.AssignedPage, error) {
+	var out api.AssignedPage
+	if err := c.do(ctx, http.MethodPost, "/v1/assigned", req, &out, true); err != nil {
+		return api.AssignedPage{}, err
+	}
+	if out.Assigned == nil {
+		out.Assigned = map[string][]api.Issue{}
+	}
+	return out, nil
+}
+
 // ListAll returns every issue matching f, following the cursor to the end.
 func (c *Client) ListAll(ctx context.Context, f api.ListFilter) ([]api.Issue, error) {
 	return All(ctx, func(ctx context.Context, cursor string) ([]api.Issue, string, error) {

@@ -7,11 +7,31 @@ import (
 )
 
 // registerIssueRoutes registers the read routes: GET /v1/issues/{id},
-// POST /v1/issues:show-many and POST /v1/issues:list.
+// POST /v1/issues:show-many, POST /v1/issues:list and POST /v1/assigned.
 func (s *Server) registerIssueRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/issues/{id}", s.getIssue)
 	mux.HandleFunc("POST /v1/issues:show-many", s.showMany)
 	mux.HandleFunc("POST /v1/issues:list", s.listIssues)
+	mux.HandleFunc("POST /v1/assigned", s.assigned)
+}
+
+// assigned answers several assignees' issues in one call: the per-seat read
+// the dispatch tick used to pay for once per status, per seat.
+func (s *Server) assigned(w http.ResponseWriter, r *http.Request) {
+	var req api.AssignedRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	page, err := s.cfg.Store.Assigned(r.Context(), req)
+	if err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if page.Assigned == nil {
+		page.Assigned = map[string][]api.Issue{}
+	}
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) getIssue(w http.ResponseWriter, r *http.Request) {

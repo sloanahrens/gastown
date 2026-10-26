@@ -1,6 +1,8 @@
 // Package storetest holds the in-memory store.Store for the unit tier. It
-// models the behavior the contract pins, nothing more: methods whose beads
-// have not landed return store.ErrUnimplemented, like Postgres.
+// implements CreateIssue and GetIssues, the methods the contract's Fake cases
+// cover, and nothing more: every other method returns store.ErrUnimplemented,
+// so a unit test that reaches past them fails loudly rather than reading a
+// store that only looks modeled.
 package storetest
 
 import (
@@ -102,6 +104,9 @@ func unimplemented(method string) error {
 
 func (*Fake) ListIssues(context.Context, api.ListFilter) (api.IssuePage, error) {
 	return api.IssuePage{}, unimplemented("ListIssues")
+}
+func (*Fake) Assigned(context.Context, api.AssignedRequest) (api.AssignedPage, error) {
+	return api.AssignedPage{}, unimplemented("Assigned")
 }
 func (*Fake) UpdateIssue(context.Context, string, api.UpdatePatch, api.Guard) error {
 	return unimplemented("UpdateIssue")
