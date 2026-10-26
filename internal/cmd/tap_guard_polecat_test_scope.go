@@ -161,8 +161,8 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, cwdKn
 var polecatWholeSuiteMakeGoals = []string{"test", "gate", "gate-test", "test-slow", "test-integration", "test-integration-wall", "tier-check", "test-timing"}
 
 // testTimingMakeGoal is the one whole-suite goal that PKGS narrows: its recipe
-// is `bash scripts/test-timing.sh $(PKGS)`, and the script runs ./... only when
-// PKGS is empty.
+// is `go run ./internal/testpolicy/cmd/testtiming -- $(PKGS)`, and the program
+// runs ./... only when PKGS is empty.
 const testTimingMakeGoal = "test-timing"
 
 // makeTestTimingPKGSBounded reports whether a `make test-timing` invocation

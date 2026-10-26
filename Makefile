@@ -548,7 +548,7 @@ test-integration-wall:
 # acceptance measurement for docs/plans/2026-09-27-test-rewrite-design.md.
 # PKGS narrows the run, e.g. make test-timing PKGS=./internal/tmux/...
 test-timing:
-	bash scripts/test-timing.sh $(PKGS)
+	go run ./internal/testpolicy/cmd/testtiming -- $(PKGS)
 
 # test-makefile runs the shell tests from scripts/test-makefile.sh, the one
 # list test-slow runs too: a second copy here drifted from it and made

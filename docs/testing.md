@@ -58,7 +58,7 @@ A package whose unit-tier test files call a container entry point is Docker-back
 | unit | in-process only: fakes, fake clock, `t.TempDir`, `git` (not in a package listed in `gitfree.txt`) | none | `TestX` | `make gate` |
 | integration | real tmux, Docker, bd, Dolt, the gt binary, real processes | `//go:build integration` | `TestIntegrationX` in a converted package (`integration-name` fails any other `Test…` name except `TestMain`; packages in `unconverted.txt` are exempt until converted). The tier run has no name filter: the build tag alone selects it | `make test-integration` |
 
-- `make test-timing PKGS=./internal/<pkg>/...` measures the unit tier in a tmux pane that launchd starts. It is not part of `make gate`. macOS scans every new executable there, which is the town's condition after a reboot. The script first prints a probe (ms per new executable; a taxed pane shows 50 or more), then the seconds taken. A converted package's target is 5 s or less in that pane; pass `TARGET_SECONDS=5` to hold the run to it. The integration tier's target is 60 s or less.
+- `make test-timing PKGS=./internal/<pkg>/...` measures the unit tier in a tmux pane that launchd starts. It is not part of `make gate`. macOS scans every new executable there, which is the town's condition after a reboot. The program first prints a probe (ms per new executable; a taxed pane shows 50 or more), then the seconds taken. A converted package's target is 5 s or less in that pane; pass `TARGET_SECONDS=5` to hold the run to it. The integration tier's target is 60 s or less.
 
 ### The time budget
 
