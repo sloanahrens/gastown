@@ -52,11 +52,18 @@ ARG PG_VERSION=17.11-1.pgdg24.04+2
 ARG PGDG_KEYFILE_DIGEST=0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76
 ARG CLAUDE_CODE_VERSION=2.1.309
 ARG GOLANGCI_LINT_VERSION=v2.13.2
+# libicu-dev supplies the ICU headers dolthub/go-icu-regex's cgo build needs, so
+# the seed's vet and test compile steps cache instead of failing (gt-gu1b7).
+# Version read with `apt-cache policy libicu-dev` in ubuntu:24.04 on 2026-10-26;
+# re-read it if the base image tag moves or noble supersedes the candidate, since
+# the exact pin fails the build once superseded.
+ARG LIBICU_VERSION=74.2-1ubuntu3.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential ca-certificates curl git gnupg jq openssh-client \
+    "libicu-dev=${LIBICU_VERSION}" \
     ripgrep tmux unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
