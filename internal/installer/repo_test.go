@@ -38,8 +38,8 @@ func TestGitRepoDisablesAutoMaintenanceWhereItCanFork(t *testing.T) {
 	}
 }
 
-// Each read parses git's output and, where the script discarded a failure,
-// answers what the script answered.
+// Each read parses git's output. A read the refusal gates depend on reports
+// the failure, so the gate can end the run instead of passing.
 func TestGitRepoReads(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -57,7 +57,7 @@ func TestGitRepoReads(t *testing.T) {
 			read:     func(r Repo) any { return r.Resolve("origin/main") },
 			out:      " abc123\n",
 			want:     "abc123",
-			wantCall: []string{"git", "-C", "/rig", "rev-parse", "--verify", "--quiet", "origin/main^{commit}"},
+			wantCall: []string{"git", "-C", "/rig", "rev-parse", "--verify", "--quiet", "--end-of-options", "origin/main^{commit}"},
 		},
 		{
 			name:        "an empty ref is not resolved",
@@ -76,7 +76,7 @@ func TestGitRepoReads(t *testing.T) {
 			read:     func(r Repo) any { v, _ := r.CommitTime("c1"); return v },
 			out:      "1700000000\n",
 			want:     time.Unix(1700000000, 0).UTC(),
-			wantCall: []string{"git", "-C", "/rig", "log", "-1", "--format=%ct", "c1"},
+			wantCall: []string{"git", "-C", "/rig", "log", "-1", "--format=%ct", "--end-of-options", "c1"},
 		},
 		{
 			name:    "a merge time git cannot give is an error",
@@ -97,21 +97,21 @@ func TestGitRepoReads(t *testing.T) {
 		},
 		{
 			name:     "tracked edits are dirty",
-			read:     func(r Repo) any { return r.Dirty() },
+			read:     func(r Repo) any { v, _ := r.Dirty(); return v },
 			out:      " M tracked.txt\n",
 			want:     true,
 			wantCall: []string{"git", "-C", "/rig", "status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude).beads"},
 		},
 		{
 			name: "an empty status is clean",
-			read: func(r Repo) any { return r.Dirty() },
+			read: func(r Repo) any { v, _ := r.Dirty(); return v },
 			want: false,
 		},
 		{
-			name: "a status git cannot give is clean, as the script's 2>/dev/null reads it",
-			read: func(r Repo) any { return r.Dirty() },
-			err:  errors.New("not a repository"),
-			want: false,
+			name:    "a status git cannot give is an error, not a clean checkout",
+			read:    func(r Repo) any { _, err := r.Dirty(); return err },
+			err:     errors.New("not a repository"),
+			wantErr: true,
 		},
 		{
 			name: "the branch is trimmed",
@@ -139,22 +139,22 @@ func TestGitRepoReads(t *testing.T) {
 		},
 		{
 			name:     "the commit count is a number",
-			read:     func(r Repo) any { return r.AheadOf("origin/main") },
+			read:     func(r Repo) any { v, _ := r.AheadOf("origin/main"); return v },
 			out:      "3\n",
 			want:     3,
-			wantCall: []string{"git", "-C", "/rig", "rev-list", "--count", "origin/main..HEAD"},
+			wantCall: []string{"git", "-C", "/rig", "rev-list", "--count", "--end-of-options", "origin/main..HEAD"},
 		},
 		{
-			name: "a count git cannot give is none",
-			read: func(r Repo) any { return r.AheadOf("origin/main") },
-			err:  errors.New("no ref"),
-			want: 0,
+			name:    "a count git cannot give is an error, not up to date",
+			read:    func(r Repo) any { _, err := r.AheadOf("origin/main"); return err },
+			err:     errors.New("no ref"),
+			wantErr: true,
 		},
 		{
-			name: "a count that is not a number is none",
-			read: func(r Repo) any { return r.AheadOf("origin/main") },
-			out:  "many",
-			want: 0,
+			name:    "a count that is not a number is an error, not up to date",
+			read:    func(r Repo) any { _, err := r.AheadOf("origin/main"); return err },
+			out:     "many",
+			wantErr: true,
 		},
 	}
 	for _, tc := range cases {

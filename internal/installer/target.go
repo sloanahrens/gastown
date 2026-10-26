@@ -42,32 +42,47 @@ func (r *Run) ResolveTarget() (Exit, bool) {
 }
 
 // Refuse is the script's "Refusals" section, the checks that keep a build from
-// installing something local work has made unrepresentative of main. The
-// fast-forward is the one that moves the checkout: a target the local main
-// cannot reach without a reset is a human's call (gt-4g1m).
+// installing something local work has made unrepresentative of main. Every read
+// that fails ends the run in the guard rather than passing the gate, and the
+// fast-forward runs last so a refused run has not moved the checkout
+// (gt-tpg0p.10).
 func (r *Run) Refuse() (Exit, bool) {
-	if r.Repo.Dirty() {
+	dirty, err := r.Repo.Dirty()
+	if err != nil {
+		return ExitFailed, true
+	}
+	if dirty {
 		return r.refuse("dirty", r.Paths.RigDir+" has uncommitted changes")
 	}
 	if branch := r.Repo.Branch(); branch != "main" {
 		return r.refuse("wrong-branch", r.Paths.RigDir+" is on '"+branch+"', not main")
 	}
-	if err := r.Repo.FastForward(r.Target.FullSHA); err != nil {
-		return r.refuse("diverged", "local main cannot fast-forward to "+r.Target.FullSHA)
+	ahead, err := r.Repo.AheadOf("origin/main")
+	if err != nil {
+		return ExitFailed, true
 	}
-	if r.Repo.AheadOf("origin/main") > 0 {
+	if ahead > 0 {
 		return r.refuse("diverged", "local main has commits origin/main lacks")
 	}
 	head, err := r.Repo.Head()
 	if err != nil {
 		return ExitFailed, true
 	}
-	if r.Target.Prev != "" && !r.Repo.IsAncestor(r.Target.Prev, head) {
-		return r.refuse("not-forward", "installed "+r.Target.Prev+" is not an ancestor of "+head+" (would be a downgrade)")
-	}
 	// HEAD can be past FullSHA when the checkout was already on a newer main;
 	// that is forward and contains the commit, so HEAD is what gets built.
-	r.C.Expected = head
+	expected := r.Target.FullSHA
+	if r.Repo.IsAncestor(r.Target.FullSHA, head) {
+		expected = head
+	}
+	if r.Target.Prev != "" && !r.Repo.IsAncestor(r.Target.Prev, expected) {
+		return r.refuse("not-forward", "installed "+r.Target.Prev+" is not an ancestor of "+expected+" (would be a downgrade)")
+	}
+	// ff-only, never reset: a target the local main cannot reach without a reset
+	// is a human's call (gt-4g1m).
+	if err := r.Repo.FastForward(r.Target.FullSHA); err != nil {
+		return r.refuse("diverged", "local main cannot fast-forward to "+r.Target.FullSHA)
+	}
+	r.C.Expected = expected
 	return ExitOK, false
 }
 

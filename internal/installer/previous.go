@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // errNoPrevious is a rollback with nothing to restore.
@@ -18,7 +19,7 @@ func (r *Run) KeepPrevious() error {
 	}
 	// The pid keeps two runs from writing one temporary file; the rename leaves
 	// gt.prev as either the old copy or the new one, never a partial write.
-	tmp := fmt.Sprintf("%s/.gt.prev.%d", r.Paths.BinDir, os.Getpid())
+	tmp := filepath.Join(r.Paths.BinDir, fmt.Sprintf(".gt.prev.%d", os.Getpid()))
 	if err := r.Files.copy(tmp, gt); err != nil {
 		return err
 	}
@@ -39,7 +40,7 @@ func (r *Run) Rollback() error {
 		return errNoPrevious
 	}
 	gt := r.Paths.GT()
-	tmp := fmt.Sprintf("%s/.gt.rollback.%d", r.Paths.BinDir, os.Getpid())
+	tmp := filepath.Join(r.Paths.BinDir, fmt.Sprintf(".gt.rollback.%d", os.Getpid()))
 	if err := r.Files.copy(tmp, prev); err != nil {
 		return err
 	}

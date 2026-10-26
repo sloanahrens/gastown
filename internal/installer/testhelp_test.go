@@ -58,13 +58,13 @@ func newTestRun(t *testing.T) *testRun {
 			Resolve:    func(ref string) string { return ref },
 			CommitTime: func(string) (time.Time, error) { return testNow, nil },
 			IsAncestor: func(string, string) bool { return false },
-			Dirty:      func() bool { return false },
+			Dirty:      func() (bool, error) { return false, nil },
 			Branch:     func() string { return "main" },
 			FastForward: func(string) error {
 				return nil
 			},
 			Head:    func() (string, error) { return "abc123", nil },
-			AheadOf: func(string) int { return 0 },
+			AheadOf: func(string) (int, error) { return 0, nil },
 		},
 		Files: Files{Exists: func(string) bool { return true }},
 		Bin:   Binary{Commit: func(string, string) string { return "" }},

@@ -126,29 +126,38 @@ func TestResolveTarget(t *testing.T) {
 	}
 }
 
-// Refuse follows the script's "Refusals" in order: dirty, off main, a
-// fast-forward that cannot happen, local commits, and a downgrade. A run that
-// passes all five carries HEAD forward as the expected commit.
+// Refuse follows the script's "Refusals": dirty, off main, local commits, a
+// downgrade, and the fast-forward a refused run must not have made. A run that
+// passes all of them carries HEAD forward as the expected commit.
 func TestRefuse(t *testing.T) {
 	t.Parallel()
 	const target = "c2222222"
 	cases := []struct {
-		name     string
-		setup    func(*testRun)
-		ended    bool
-		exit     Exit
-		lines    []string
-		expected string
+		name        string
+		setup       func(*testRun)
+		ended       bool
+		exit        Exit
+		lines       []string
+		expected    string
+		fastForward bool
 	}{
 		{
 			name:  "tracked edits outside .beads refuse",
-			setup: func(tr *testRun) { tr.Repo.Dirty = func() bool { return true } },
+			setup: func(tr *testRun) { tr.Repo.Dirty = func() (bool, error) { return true, nil } },
 			ended: true,
 			exit:  ExitRefused,
 			lines: []string{
 				"[install-gt] Refused: /tmp/rig has uncommitted changes",
 				"install-gt: RESULT refused " + target + " c1111111 dirty",
 			},
+		},
+		{
+			name: "a status git cannot give ends the run in the guard",
+			setup: func(tr *testRun) {
+				tr.Repo.Dirty = func() (bool, error) { return false, errors.New("not a repository") }
+			},
+			ended: true,
+			exit:  ExitFailed,
 		},
 		{
 			name:  "a checkout off main refuses",
@@ -171,24 +180,20 @@ func TestRefuse(t *testing.T) {
 			},
 		},
 		{
-			name:  "a main that cannot fast-forward refuses",
-			setup: func(tr *testRun) { tr.Repo.FastForward = func(string) error { return errors.New("not possible") } },
-			ended: true,
-			exit:  ExitRefused,
-			lines: []string{
-				"[install-gt] Refused: local main cannot fast-forward to " + target,
-				"install-gt: RESULT refused " + target + " c1111111 diverged",
-			},
-		},
-		{
 			name:  "local commits refuse",
-			setup: func(tr *testRun) { tr.Repo.AheadOf = func(string) int { return 2 } },
+			setup: func(tr *testRun) { tr.Repo.AheadOf = func(string) (int, error) { return 2, nil } },
 			ended: true,
 			exit:  ExitRefused,
 			lines: []string{
 				"[install-gt] Refused: local main has commits origin/main lacks",
 				"install-gt: RESULT refused " + target + " c1111111 diverged",
 			},
+		},
+		{
+			name:  "a count git cannot give ends the run in the guard",
+			setup: func(tr *testRun) { tr.Repo.AheadOf = func(string) (int, error) { return 0, errors.New("no ref") } },
+			ended: true,
+			exit:  ExitFailed,
 		},
 		{
 			name: "an installed binary HEAD does not contain refuses",
@@ -198,17 +203,41 @@ func TestRefuse(t *testing.T) {
 			ended: true,
 			exit:  ExitRefused,
 			lines: []string{
-				"[install-gt] Refused: installed c1111111 is not an ancestor of abc123 (would be a downgrade)",
+				"[install-gt] Refused: installed c1111111 is not an ancestor of " + target + " (would be a downgrade)",
 				"install-gt: RESULT refused " + target + " c1111111 not-forward",
 			},
+		},
+		{
+			name: "a main that cannot fast-forward refuses",
+			setup: func(tr *testRun) {
+				tr.Repo.IsAncestor = ancestors([2]string{"c1111111", target})
+				tr.Repo.FastForward = func(string) error { return errors.New("not possible") }
+			},
+			ended: true,
+			exit:  ExitRefused,
+			lines: []string{
+				"[install-gt] Refused: local main cannot fast-forward to " + target,
+				"install-gt: RESULT refused " + target + " c1111111 diverged",
+			},
+			fastForward: true,
 		},
 		{
 			name: "a clean checkout on main carries HEAD as the expected commit",
 			setup: func(tr *testRun) {
 				tr.Repo.Head = func() (string, error) { return "abc124", nil }
-				tr.Repo.IsAncestor = ancestors([2]string{"c1111111", "abc124"})
+				tr.Repo.IsAncestor = ancestors([2]string{target, "abc124"}, [2]string{"c1111111", "abc124"})
 			},
-			expected: "abc124",
+			expected:    "abc124",
+			fastForward: true,
+		},
+		{
+			name: "a checkout behind the target carries the target as the expected commit",
+			setup: func(tr *testRun) {
+				tr.Repo.Head = func() (string, error) { return "abc123", nil }
+				tr.Repo.IsAncestor = ancestors([2]string{"c1111111", target})
+			},
+			expected:    target,
+			fastForward: true,
 		},
 		{
 			name:  "a HEAD read that fails ends the run in the guard",
@@ -226,6 +255,12 @@ func TestRefuse(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(tr)
 			}
+			fastForwarded := false
+			fastForward := tr.Repo.FastForward
+			tr.Repo.FastForward = func(ref string) error {
+				fastForwarded = true
+				return fastForward(ref)
+			}
 
 			exit, ended := tr.Refuse()
 
@@ -237,6 +272,9 @@ func TestRefuse(t *testing.T) {
 			}
 			if !tc.ended && tr.C.Expected != tc.expected {
 				t.Errorf("Contract.Expected = %q, want %q", tr.C.Expected, tc.expected)
+			}
+			if fastForwarded != tc.fastForward {
+				t.Errorf("fast-forwarded = %v, want %v", fastForwarded, tc.fastForward)
 			}
 		})
 	}

@@ -58,11 +58,11 @@ func staleCommit(out []byte) string {
 	return stale.BinaryCommit
 }
 
-// versionCommit is the commit in 'gt version'. From a cwd outside a repo the
-// line carries no "@", so the main ref before the commit is optional
-// (gt-b5mpe).
+// versionPattern matches the commit in 'gt version'. From a cwd outside a repo
+// the line carries no "@", so the ref before the commit is optional (gt-b5mpe).
 var versionPattern = regexp.MustCompile(`\([^:()]+: ([^@()]*@)?([0-9a-f]{7,40})\)`)
 
+// versionCommit is the commit in 'gt version', or "" when the line names none.
 func versionCommit(out []byte) string {
 	m := versionPattern.FindSubmatch(out)
 	if m == nil {

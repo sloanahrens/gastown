@@ -37,6 +37,13 @@ var errNoTown = errors.New("install-gt: no town found (set GT_TOWN_ROOT); on a m
 // else from the town root. start is the directory the town root is searched
 // above when GT_TOWN_ROOT is empty.
 func ResolvePaths(getenv func(string) string, home, start string) (Paths, error) {
+	return resolvePaths(getenv, home, start, isTownRoot)
+}
+
+// resolvePaths is ResolvePaths with the town marker check injected, so a test
+// reads a tree it built rather than whatever sits above its temporary
+// directory.
+func resolvePaths(getenv func(string) string, home, start string, isTown func(string) bool) (Paths, error) {
 	binDir := getenv("INSTALL_GT_BIN_DIR")
 	if binDir == "" {
 		binDir = getenv("INSTALL_DIR")
@@ -46,7 +53,7 @@ func ResolvePaths(getenv func(string) string, home, start string) (Paths, error)
 	}
 	townRoot := getenv("GT_TOWN_ROOT")
 	if townRoot == "" {
-		townRoot = townRootAbove(start)
+		townRoot = townRootAbove(start, isTown)
 	}
 	p := Paths{BinDir: binDir, DaemonDir: getenv("INSTALL_GT_DAEMON_DIR"), RigDir: getenv("INSTALL_GT_RIG_DIR")}
 	if p.DaemonDir == "" {
@@ -67,14 +74,14 @@ func ResolvePaths(getenv func(string) string, home, start string) (Paths, error)
 // townRootAbove is the outermost ancestor of dir holding the town marker: a rig
 // can carry a mayor/ of its own, so the outermost is the town
 // (lib/install-gt-lib.sh's igt_town_root_above).
-func townRootAbove(dir string) string {
+func townRootAbove(dir string, isTown func(string) bool) string {
 	d, err := filepath.Abs(dir)
 	if err != nil {
 		return ""
 	}
 	found := ""
 	for {
-		if _, err := os.Stat(filepath.Join(d, "mayor", "town.json")); err == nil {
+		if isTown(d) {
 			found = d
 		}
 		parent := filepath.Dir(d)
@@ -83,4 +90,10 @@ func townRootAbove(dir string) string {
 		}
 		d = parent
 	}
+}
+
+// isTownRoot reports whether dir holds the town marker.
+func isTownRoot(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "mayor", "town.json"))
+	return err == nil
 }

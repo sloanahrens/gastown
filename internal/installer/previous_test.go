@@ -122,7 +122,8 @@ func TestRollbackRenameFails(t *testing.T) {
 	tr := newTestRun(t)
 	putFile(t, tr.Paths.Prev(), "previous", 0o755)
 	putFile(t, tr.Paths.GT(), "broken", 0o755)
-	var restored []string
+	var cleared, restored []string
+	tr.Files.ClearImmutable = func(path string) { cleared = append(cleared, path) }
 	tr.Files.SetImmutable = func(path string) { restored = append(restored, path) }
 	tr.Files.Rename = func(string, string) error { return errors.New("read-only") }
 
@@ -132,6 +133,9 @@ func TestRollbackRenameFails(t *testing.T) {
 
 	if got, want := read(t, tr.Paths.GT()), "broken"; got != want {
 		t.Errorf("gt = %q, want %q", got, want)
+	}
+	if want := []string{tr.Paths.GT()}; !reflect.DeepEqual(cleared, want) {
+		t.Errorf("cleared the flag on %q, want %q", cleared, want)
 	}
 	if want := []string{tr.Paths.GT()}; !reflect.DeepEqual(restored, want) {
 		t.Errorf("restored the flag on %q, want %q", restored, want)

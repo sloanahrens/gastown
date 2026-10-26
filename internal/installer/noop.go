@@ -17,9 +17,17 @@ func (r *Run) Noop() (Exit, bool) {
 	if prev == "" || !r.Repo.IsAncestor(fullSHA, prev) {
 		return ExitOK, false
 	}
-	daemon := r.resolve(r.jsonCommit("state.json"))
-	if daemon != "" && !r.Repo.IsAncestor(fullSHA, daemon) {
-		pending := r.resolve(r.jsonCommit("restart-pending.json"))
+	recorded, ok := r.jsonCommit("state.json")
+	if !ok {
+		r.C.Log("Installed " + prev + " already contains " + fullSHA + "; nothing to do.")
+	} else if daemon := r.Repo.Resolve(recorded); daemon == "" {
+		// The daemon names a commit the checkout does not have, so its build
+		// cannot be compared with the target. That is not evidence it already
+		// holds the target, so the run installs rather than reporting a no-op.
+		r.C.Log("WARNING: the daemon's commit " + recorded + " is not in " + r.Paths.RigDir + "; installing rather than leaving the daemon on an unknown build.")
+		return ExitOK, false
+	} else if !r.Repo.IsAncestor(fullSHA, daemon) {
+		pending := r.resolve(r.pendingCommit())
 		if pending != "" && r.Repo.IsAncestor(fullSHA, pending) {
 			r.C.Log("A pending restart marker for " + pending + " already contains " + fullSHA + "; leaving it in place.")
 		} else {
@@ -72,20 +80,27 @@ func (r *Run) WriteRestartMarker(commit string) error {
 	return nil
 }
 
-// jsonCommit is the "commit" field of name in the daemon directory, or "" when
-// the file is missing, unreadable, not JSON, or names no commit.
-func (r *Run) jsonCommit(name string) string {
+// jsonCommit is the "commit" field of name in the daemon directory. ok is false
+// when the file is missing, unreadable, not JSON, or names no commit, which is
+// a daemon that recorded nothing rather than one on an unknown build.
+func (r *Run) jsonCommit(name string) (commit string, ok bool) {
 	data, err := r.Files.readFile(filepath.Join(r.Paths.DaemonDir, name))
 	if err != nil {
-		return ""
+		return "", false
 	}
 	var record struct {
 		Commit string `json:"commit"`
 	}
-	if json.Unmarshal(data, &record) != nil {
-		return ""
+	if json.Unmarshal(data, &record) != nil || record.Commit == "" {
+		return "", false
 	}
-	return record.Commit
+	return record.Commit, true
+}
+
+// pendingCommit is the commit an earlier install left in the restart marker.
+func (r *Run) pendingCommit() string {
+	commit, _ := r.jsonCommit("restart-pending.json")
+	return commit
 }
 
 // resolve is a commit the daemon recorded as the checkout's full hash, or ""

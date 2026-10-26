@@ -127,7 +127,7 @@ func TestNoop(t *testing.T) {
 }`,
 		},
 		{
-			name: "a daemon commit the checkout lacks does nothing",
+			name: "a daemon commit the checkout lacks installs rather than reporting a no-op",
 			setup: func(tr *testRun) {
 				tr.Target = Target{FullSHA: full, Prev: installed}
 				tr.Repo.IsAncestor = ancestors([2]string{full, installed})
@@ -139,11 +139,8 @@ func TestNoop(t *testing.T) {
 				}
 				tr.write(t, "state.json", `{"commit": "deadbeef"}`)
 			},
-			ended: true,
-			exit:  ExitOK,
 			lines: []string{
-				"[install-gt] Installed " + installed + " already contains " + full + "; nothing to do.",
-				"install-gt: RESULT noop " + full + " " + installed + " already-installed",
+				"[install-gt] WARNING: the daemon's commit deadbeef is not in RIG; installing rather than leaving the daemon on an unknown build.",
 			},
 		},
 		{
@@ -192,8 +189,12 @@ func TestNoop(t *testing.T) {
 			if ended != tc.ended || exit != tc.exit {
 				t.Errorf("Noop() = (%d, %v), want (%d, %v)", exit, ended, tc.exit, tc.ended)
 			}
-			if got := tr.lines(); !reflect.DeepEqual(got, tc.lines) {
-				t.Errorf("stdout = %q, want %q", got, tc.lines)
+			var wantLines []string
+			for _, line := range tc.lines {
+				wantLines = append(wantLines, strings.ReplaceAll(line, "RIG", tr.Paths.RigDir))
+			}
+			if got := tr.lines(); !reflect.DeepEqual(got, wantLines) {
+				t.Errorf("stdout = %q, want %q", got, wantLines)
 			}
 			marker, err := os.ReadFile(tr.Paths.Marker())
 			switch {

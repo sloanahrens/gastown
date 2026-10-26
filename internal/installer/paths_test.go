@@ -48,7 +48,7 @@ func TestResolvePaths(t *testing.T) {
 			t.Parallel()
 			getenv := func(key string) string { return tc.env[key] }
 
-			got, err := ResolvePaths(getenv, "/home/u", t.TempDir())
+			got, err := resolvePaths(getenv, "/home/u", t.TempDir(), noTown)
 
 			if tc.wantErr {
 				if err == nil {
@@ -69,20 +69,22 @@ func TestResolvePaths(t *testing.T) {
 	}
 }
 
+// noTown is a tree with no town above any of it.
+func noTown(string) bool { return false }
+
 // Without GT_TOWN_ROOT the town is found above the directory the installer
 // runs from, and the outermost marker wins: a rig can carry a mayor/ of its
-// own.
+// own. The marker check is the case's own, so which directories sit above the
+// test's temporary tree cannot change the answer.
 func TestResolvePathsFindsTheOutermostTown(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	writeMarker(t, town)
-	writeMarker(t, filepath.Join(town, "gastown"))
 	start := filepath.Join(town, "gastown", "scripts")
-	if err := os.MkdirAll(start, 0o755); err != nil {
-		t.Fatal(err)
+	isTown := func(dir string) bool {
+		return dir == town || dir == filepath.Join(town, "gastown")
 	}
 
-	got, err := ResolvePaths(func(string) string { return "" }, "/home/u", start)
+	got, err := resolvePaths(func(string) string { return "" }, "/home/u", start, isTown)
 
 	if err != nil {
 		t.Fatalf("ResolvePaths: %v", err)
@@ -97,14 +99,21 @@ func TestResolvePathsFindsTheOutermostTown(t *testing.T) {
 	}
 }
 
-// writeMarker makes dir a town: the marker townRootAbove looks for.
-func writeMarker(t *testing.T, dir string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Join(dir, "mayor"), 0o755); err != nil {
+// isTownRoot is the real check: the marker file, nothing else.
+func TestIsTownRoot(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if isTownRoot(town) {
+		t.Fatalf("isTownRoot(%q) = true with no marker", town)
+	}
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "mayor", "town.json"), []byte("{}"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if !isTownRoot(town) {
+		t.Errorf("isTownRoot(%q) = false with the marker", town)
 	}
 }
 

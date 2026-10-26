@@ -1,8 +1,10 @@
 package main
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -111,14 +113,16 @@ func TestRunWithoutABuildCheckout(t *testing.T) {
 	}
 }
 
-// --dry-run changes nothing, and until the gateway step lands (gt-tpg0p.9) it
-// ends in the guard: the checkout is never even checked for.
+// --dry-run changes nothing but the receipt the exit contract always leaves,
+// and until the gateway step lands (gt-tpg0p.9) it ends in the guard: the
+// checkout exists but is never read.
 func TestRunDryRunTouchesNothing(t *testing.T) {
 	t.Parallel()
 	env, root := testEnv(t)
 	if err := os.MkdirAll(filepath.Join(root, "rig", ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	before := snapshot(t, root)
 	var out, errOut strings.Builder
 
 	code := runWith([]string{"--dry-run"}, &out, &errOut, env)
@@ -129,7 +133,50 @@ func TestRunDryRunTouchesNothing(t *testing.T) {
 	if want := "install-gt: RESULT failed origin/main - unexpected\n"; out.String() != want {
 		t.Errorf("stdout = %q, want %q", out.String(), want)
 	}
-	if _, err := os.Stat(filepath.Join(root, "daemon", "restart-pending.json")); !os.IsNotExist(err) {
-		t.Errorf("a dry run wrote a restart marker")
+	after := snapshot(t, root)
+	receipts := filepath.Join("daemon", "install-receipts.jsonl")
+	content, ok := after[receipts]
+	if !ok {
+		t.Fatalf("no receipt at %s", receipts)
 	}
+	// The receipt writer creates the daemon directory the way the script's
+	// mkdir -p does; that directory and the receipt are the whole change.
+	delete(after, receipts)
+	delete(after, "daemon")
+	if !reflect.DeepEqual(after, before) {
+		t.Errorf("the tree changed:\nbefore %v\nafter  %v", before, after)
+	}
+	if !strings.Contains(content, `"reason": "unexpected"`) {
+		t.Errorf("receipts = %q, want the guard's unexpected receipt", content)
+	}
+}
+
+// snapshot is every path under root, with a file's contents, so a test can say
+// what a run changed.
+func snapshot(t *testing.T, root string) map[string]string {
+	t.Helper()
+	tree := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			tree[rel] = "dir"
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		tree[rel] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", root, err)
+	}
+	return tree
 }

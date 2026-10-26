@@ -40,14 +40,14 @@ type environment struct {
 	home   func() (string, error)
 }
 
-// run is the process's one way out. The deferred OnExit is the script's EXIT
-// trap: whatever happens, the last line states a result and the status is 0-3.
+// run is runWith against the process's own environment.
 func run(args []string, stdout, stderr io.Writer) int {
 	return runWith(args, stdout, stderr, environment{os.Getenv, os.Getwd, os.UserHomeDir})
 }
 
 // runWith is run against env, so a test can point every directory at a
-// temporary tree.
+// temporary tree. The deferred OnExit is the script's EXIT trap: whatever
+// happens, the last line states a result and the status is 0-3.
 func runWith(args []string, stdout, stderr io.Writer, env environment) (code int) {
 	cfg, err := installer.Parse(args)
 	c := &installer.Contract{
