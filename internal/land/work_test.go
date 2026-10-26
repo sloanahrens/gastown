@@ -206,7 +206,7 @@ func TestOverseerReviewVerdict(t *testing.T) {
 func TestPolecatReviewVerdict(t *testing.T) {
 	t.Parallel()
 	head := "0123456789abcdef0123456789abcdef01234567"
-	other := "0123456789abcdef0123456789abcdef01234568"
+	other := "fedcba9876543210fedcba9876543210fedcba98"
 	for _, tc := range []struct {
 		name string
 		doc  string
@@ -215,6 +215,9 @@ func TestPolecatReviewVerdict(t *testing.T) {
 	}{
 		{"PASS", "review\n" + PolecatReviewMarker + " " + head + " PASS\n", "PASS", true},
 		{"FAIL with its defect", "review\n" + PolecatReviewMarker + " " + head + " FAIL: internal/x.go:12 ignores the error\n", "FAIL", true},
+		{"an abbreviated head names it", PolecatReviewMarker + " " + head[:13] + " PASS", "PASS", true},
+		{"a seven-digit abbreviation names it", PolecatReviewMarker + " " + head[:7] + " FAIL: defect", "FAIL", true},
+		{"an abbreviation of another head does not", PolecatReviewMarker + " " + other[:13] + " PASS", "", false},
 		{"FAIL after PASS", PolecatReviewMarker + " " + head + " PASS\n" + PolecatReviewMarker + " " + head + " FAIL: defect", "FAIL", true},
 		{"PASS after FAIL", PolecatReviewMarker + " " + head + " FAIL: defect\n" + PolecatReviewMarker + " " + head + " PASS", "PASS", true},
 		{"only another head", PolecatReviewMarker + " " + other + " PASS", "", false},

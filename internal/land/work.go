@@ -331,18 +331,25 @@ func OverseerReviewFindings(notes, head string) []string {
 var polecatReviewLine = regexp.MustCompile(`^POLECAT REVIEW ([0-9a-f]{7,64}) (PASS|FAIL)\b`)
 
 // PolecatReviewVerdict returns the verdict (PASS or FAIL) of the latest verdict
-// line in doc that names exactly head, and whether there is one. A document
-// naming only another head reviewed a different commit, so it says nothing
-// about head.
+// line in doc that names head, and whether there is one. The line may name the
+// head by an abbreviation of at least 7 hex digits, as a review document
+// commonly does. A document naming only another head reviewed a different
+// commit, so it says nothing about head.
 func PolecatReviewVerdict(doc, head string) (string, bool) {
 	if head == "" {
 		return "", false
 	}
 	verdict, found := "", false
 	for _, line := range strings.Split(doc, "\n") {
-		if m := polecatReviewLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil && m[1] == head {
+		if m := polecatReviewLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil && namesHead(m[1], head) {
 			verdict, found = m[2], true
 		}
 	}
 	return verdict, found
+}
+
+// namesHead reports whether sha and head name the same commit, either whole or
+// as the shorter one's prefix.
+func namesHead(sha, head string) bool {
+	return strings.HasPrefix(head, sha) || strings.HasPrefix(sha, head)
 }

@@ -12,18 +12,20 @@ import (
 
 // TestIntegrationCloneReviewsReadsTheRepo drives the review-document reader
 // over a real repository: the bead is named by a dated file, and only the
-// verdict line for the reviewed head counts (gt-b9j3o.1).
+// verdict line for the reviewed head counts. Documents name the head by an
+// abbreviation and the query gives it whole, as a landing record does
+// (gt-b9j3o.1).
 func TestIntegrationCloneReviewsReadsTheRepo(t *testing.T) {
 	t.Parallel()
-	head := "b25963ac729a"
-	other := "c46d60c1aaaa"
+	head := "b25963ac729a403d8b5a7dcb90f03a8bf11a6ce3"
+	other := "c46d60c1aaaabbbbccccddddeeeeffff00001111"
 	dir := fixtureRepo(t, []fixtureCommit{{
 		at: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
 		files: map[string]string{
 			"docs/reviews/2026-10-26-gt-x.md": "review of the landing\n" +
-				land.PolecatReviewMarker + " " + head + " PASS\n",
+				land.PolecatReviewMarker + " " + head[:13] + " PASS\n",
 			"docs/reviews/2026-10-24-gt-y.md": "second look\n" +
-				land.PolecatReviewMarker + " " + other + " FAIL: internal/x.go:12 ignores the error\n",
+				land.PolecatReviewMarker + " " + other[:12] + " FAIL: internal/x.go:12 ignores the error\n",
 			"docs/reviews/notes.txt": "not a review document",
 		},
 	}})
