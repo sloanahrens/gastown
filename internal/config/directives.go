@@ -41,7 +41,8 @@ func LoadRoleDirective(role, townRoot, rigName string) string {
 	sources := RoleDirectiveSources(role, townRoot, rigName)
 	parts := make([]string, 0, len(sources))
 	for _, path := range sources {
-		parts = append(parts, readDirectiveContent(path))
+		text, _ := readDirectiveFile(path)
+		parts = append(parts, strings.TrimSpace(text))
 	}
 	return strings.Join(parts, "\n")
 }
@@ -52,7 +53,7 @@ func LoadRoleDirective(role, townRoot, rigName string) string {
 func RoleDirectiveSources(role, townRoot, rigName string) []string {
 	var sources []string
 	for _, path := range directivePaths(role, townRoot, rigName) {
-		if readDirectiveContent(path) != "" {
+		if text, _ := readDirectiveFile(path); strings.TrimSpace(text) != "" {
 			sources = append(sources, path)
 		}
 	}
@@ -77,21 +78,18 @@ type RoleDirective struct {
 func ReadRoleDirectives(role, townRoot, rigName string) ([]RoleDirective, error) {
 	var out []RoleDirective
 	for _, path := range directivePaths(role, townRoot, rigName) {
-		data, err := os.ReadFile(path) //nolint:gosec // G304: path is from trusted config
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
+		text, err := readDirectiveFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("directive %s: %w", path, err)
+			return nil, err
 		}
-		if strings.TrimSpace(string(data)) == "" {
+		if strings.TrimSpace(text) == "" {
 			continue
 		}
 		out = append(out, RoleDirective{
 			Scope: directiveScope(path, townRoot),
 			Name:  strings.TrimSuffix(filepath.Base(path), ".md"),
 			Path:  path,
-			Text:  string(data),
+			Text:  text,
 		})
 	}
 	return out, nil
@@ -111,12 +109,21 @@ func directiveScope(path, townRoot string) string {
 	return "town"
 }
 
-func readDirectiveContent(path string) string {
-	content, err := os.ReadFile(path) //nolint:gosec // G304: path is from trusted config
-	if err != nil {
-		return ""
+// readDirectiveFile is the one reader of a directive file: the system-prompt
+// file, the hook and directive show all read through it, so they cannot drift.
+// It returns the file's text as written. A file that does not exist is "" with
+// no error. Any other read failure is returned, so a caller that renders a
+// prompt fails closed; a caller that only displays (the hook, directive show)
+// ignores the error and treats the file as absent, as it always did.
+func readDirectiveFile(path string) (string, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is from trusted config
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
 	}
-	return strings.TrimSpace(string(content))
+	if err != nil {
+		return "", fmt.Errorf("directive %s: %w", path, err)
+	}
+	return string(data), nil
 }
 
 // directivePaths returns the directive files that render for role, broadest

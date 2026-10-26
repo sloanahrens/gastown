@@ -14,7 +14,10 @@ import (
 func renderDirectiveSection(directives []config.RoleDirective) string {
 	var b strings.Builder
 	for _, d := range directives {
-		b.WriteString("\n## Directive: " + d.Scope + " " + d.Name + "\n\n")
+		// The scope and name come from file paths, so they are flattened to one
+		// line: a heading cannot start a new line in the prompt.
+		heading := strings.Join(strings.Fields(d.Scope+" "+d.Name), " ")
+		b.WriteString("\n## Directive: " + heading + "\n\n")
 		b.WriteString(d.Text)
 		if !strings.HasSuffix(d.Text, "\n") {
 			b.WriteString("\n")

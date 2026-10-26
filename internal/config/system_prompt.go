@@ -118,6 +118,19 @@ func ResolveRoleAgentConfigWithOverride(role, townRoot, rigPath, agentOverride, 
 			return nil, err
 		}
 	}
+	// A polecat or crew session takes its directives from the system-prompt file,
+	// so a directive source that cannot be read stops the spawn here (gt-qwcdz).
+	// Degrading to a start without the file would run the agent with none of
+	// its operator policy, and nothing downstream would stop it.
+	if role == constants.RolePolecat || role == constants.RoleCrew {
+		rigName := ""
+		if rigPath != "" {
+			rigName = filepath.Base(rigPath)
+		}
+		if _, err := ReadRoleDirectives(role, townRoot, rigName); err != nil {
+			return nil, fmt.Errorf("%s: directives unreadable, spawn refused: %w", role, err)
+		}
+	}
 	reg := AgentRegistryFor(townRoot, rigPath)
 	rc = withRoleSettingsFlag(rc, role, rigPath)
 	return withRoleSystemPromptFlag(reg, rc, role, townRoot, rigPath, agentName), nil
