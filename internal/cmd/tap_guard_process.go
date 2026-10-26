@@ -20,6 +20,10 @@ type guardProcess struct {
 	// hostTemp are the well-known host temp dirs scratchRoots adds beside
 	// $TMPDIR (hostTempScratchDirs in production).
 	hostTemp []string
+	// checkoutBound is the directory the checkout walk stops at, inclusive; ""
+	// walks to the filesystem root (production). A test sets its fake root, so
+	// the walk never reads the real filesystem above it (gt-b43ra).
+	checkoutBound string
 	// originURL is `git remote get-url origin` for the process's cwd.
 	originURL func() (string, error)
 	// cpuIdle samples the percent of the host's CPU that is idle.

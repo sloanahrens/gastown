@@ -438,10 +438,12 @@ func TestComputeExpected(t *testing.T) {
 		t.Errorf("expected gastown/crew SessionStart, got %v", expected.SessionStart)
 	}
 	// On-disk base has no PreToolUse, so DefaultBase's shellExecutingToolMatcher
-	// guard entry is backfilled. The crew override adds its own Bash(git*) entry.
+	// guard entry is backfilled. The built-in crew override adds the
+	// file-writing matcher entry — its shell matcher unions into the base entry
+	// instead of adding one — and the on-disk override adds its Bash(git*) entry.
 	defaultPTU := len(DefaultBase().PreToolUse)
-	if len(expected.PreToolUse) != defaultPTU+1 {
-		t.Errorf("expected %d PreToolUse (default %d + crew 1), got %d", defaultPTU+1, defaultPTU, len(expected.PreToolUse))
+	if len(expected.PreToolUse) != defaultPTU+2 {
+		t.Errorf("expected %d PreToolUse (default %d + crew file matcher + on-disk crew 1), got %d", defaultPTU+2, defaultPTU, len(expected.PreToolUse))
 	}
 	// Verify crew-guard is present
 	hasCrewGuard := false
@@ -737,6 +739,69 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 				for _, h := range entry.Hooks {
 					if strings.Contains(h.Command, guardCommand) {
 						t.Errorf("%s must not receive the polecat-paths guard (matcher %q)", target, entry.Matcher)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestComputeExpectedWorkerRolesGetScriptFilesGuard pins the gt-b43ra wiring:
+// polecats and crew carry the script-files guard on the shell-executing and
+// file-writing matchers, and no other role does. Losing it from either worker
+// config re-opens the one-off script path the guard exists to close; giving it
+// to an operator session would judge files outside a worker worktree.
+func TestComputeExpectedWorkerRolesGetScriptFilesGuard(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	home := configHome{home: tmpDir}
+
+	const guardCommand = "tap guard script-files"
+	for _, target := range []string{"gastown/polecats", "crew"} {
+		cfg, err := home.computeExpected(target)
+		if err != nil {
+			t.Fatalf("home.computeExpected(%s): %v", target, err)
+		}
+		// Bash is not judged by this guard (gt-b43ra): no entry under a shell
+		// matcher may carry it.
+		for _, entry := range cfg.PreToolUse {
+			if !strings.Contains(entry.Matcher, "Bash") {
+				continue
+			}
+			for _, h := range entry.Hooks {
+				if strings.Contains(h.Command, guardCommand) {
+					t.Errorf("%s: script-files is registered under the shell matcher %q; Bash is not judged", target, entry.Matcher)
+				}
+			}
+		}
+		fileEntry, ok := findPreToolUse(cfg, "Edit|Write|MultiEdit|NotebookEdit")
+		if !ok {
+			t.Fatalf("%s: missing the file-writing guard matcher", target)
+		}
+		found := false
+		for _, h := range fileEntry.Hooks {
+			if strings.Contains(h.Command, guardCommand) {
+				found = true
+				if h.If != "" {
+					t.Errorf("%s: script-files must self-filter (If=\"\"), got If=%q", target, h.If)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s: file-writing matcher missing %q, got: %+v", target, guardCommand, fileEntry.Hooks)
+		}
+	}
+
+	for _, target := range []string{"mayor", "witness", "refinery", "deacon"} {
+		cfg, err := home.computeExpected(target)
+		if err != nil {
+			t.Fatalf("home.computeExpected(%s): %v", target, err)
+		}
+		for _, eventType := range EventTypes {
+			for _, entry := range cfg.GetEntries(eventType) {
+				for _, h := range entry.Hooks {
+					if strings.Contains(h.Command, guardCommand) {
+						t.Errorf("%s must not receive the script-files guard (event %s, matcher %q)", target, eventType, entry.Matcher)
 					}
 				}
 			}

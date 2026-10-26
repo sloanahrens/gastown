@@ -421,10 +421,16 @@ func DefaultOverrides() map[string]*HooksConfig {
 					// writing call instead of four (gt-5ihs documents the bare
 					// tool-name matcher form).
 					Matcher: "Edit|Write|MultiEdit|NotebookEdit",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: gtCommand("gt tap guard polecat-paths"),
-					}},
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: gtCommand("gt tap guard polecat-paths"),
+						},
+						{
+							Type:    "command",
+							Command: gtCommand("gt tap guard script-files"),
+						},
+					},
 				},
 				{
 					// The interactive question tool is never answerable here,
@@ -472,7 +478,17 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// Instead of compacting (lossy), replace with fresh session that
 		// inherits hooked work. The --cycle flag does: collect state →
 		// send handoff mail → respawn pane with fresh Claude instance.
+		//
 		"crew": {
+			PreToolUse: []HookEntry{
+				{
+					Matcher: "Edit|Write|MultiEdit|NotebookEdit",
+					Hooks: []Hook{{
+						Type:    "command",
+						Command: gtCommand("gt tap guard script-files"),
+					}},
+				},
+			},
 			PreCompact: []HookEntry{
 				{
 					Matcher: "",
