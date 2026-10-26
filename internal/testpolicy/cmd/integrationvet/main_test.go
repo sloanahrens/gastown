@@ -48,6 +48,36 @@ func fixtureTree(t *testing.T) string {
 	return root
 }
 
+// reportSpool puts the run's report file in a directory of the test's own, and
+// reports the path it created so a case can prove the run removed that file
+// rather than never making one.
+func reportSpool(t *testing.T) (create func() (*spool, error), path func() string) {
+	t.Helper()
+	dir := t.TempDir()
+	var made string
+	create = func() (*spool, error) {
+		s, err := createSpoolIn(dir)
+		if err == nil {
+			made = s.path
+		}
+		return s, err
+	}
+	return create, func() string { return made }
+}
+
+// assertReportRemoved fails if the run never created a report file, which
+// would make the check pass on an absence rather than a removal, or left it
+// behind.
+func assertReportRemoved(t *testing.T, path string) {
+	t.Helper()
+	if path == "" {
+		t.Fatal("the run never created its report file")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("report file %s still exists (stat: %v)", path, err)
+	}
+}
+
 // vetCall is one program the command ran: where, what, and with which argv.
 type vetCall struct {
 	dir  string
@@ -89,9 +119,11 @@ func TestRunVetsEachModuleInOneCall(t *testing.T) {
 	t.Parallel()
 	root := fixtureTree(t)
 	run, calls := recordingRun(t, root)
+	spooled, reportPath := reportSpool(t)
 	var out bytes.Buffer
 
-	code := runWith(context.Background(), []string{"-root", root, "-jobs", "2"}, &out, run)
+	code := runWith(context.Background(), []string{"-root", root, "-jobs", "2"}, &out, run, spooled)
+	assertReportRemoved(t, reportPath())
 
 	if code != 1 {
 		t.Fatalf("run = %d, want 1; output:\n%s", code, out.String())
@@ -114,9 +146,11 @@ func TestRunPassesWhenEveryPackageTypeChecks(t *testing.T) {
 	t.Parallel()
 	root := fixtureTree(t)
 	run, _ := recordingRun(t, "")
+	spooled, reportPath := reportSpool(t)
 	var out bytes.Buffer
 
-	code := runWith(context.Background(), []string{"-root", root}, &out, run)
+	code := runWith(context.Background(), []string{"-root", root}, &out, run, spooled)
+	assertReportRemoved(t, reportPath())
 
 	if code != 0 {
 		t.Fatalf("run = %d, want 0; output:\n%s", code, out.String())
@@ -144,9 +178,11 @@ func TestRunRefusesASelectionThatFindsNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, calls := recordingRun(t, "")
+	spooled, reportPath := reportSpool(t)
 	var out bytes.Buffer
 
-	code := runWith(context.Background(), []string{"-root", root}, &out, run)
+	code := runWith(context.Background(), []string{"-root", root}, &out, run, spooled)
+	assertReportRemoved(t, reportPath())
 
 	if code != 2 {
 		t.Fatalf("run = %d, want 2; output:\n%s", code, out.String())
@@ -163,7 +199,113 @@ func TestRunRejectsZeroJobs(t *testing.T) {
 	t.Parallel()
 	run, _ := recordingRun(t, "")
 	var out bytes.Buffer
-	if code := runWith(context.Background(), []string{"-jobs", "0"}, &out, run); code != 2 {
+	if code := runWith(context.Background(), []string{"-jobs", "0"}, &out, run, createSpool); code != 2 {
 		t.Fatalf("run = %d, want 2", code)
+	}
+}
+
+// TestRunVetsModulesAtOnce proves the modules are vetted concurrently: each
+// fake vet blocks on a channel of its own, the test takes both entries before
+// releasing either, and releases them in the opposite order of start. A
+// serialized vetAll never delivers the second entry, so the test hangs instead
+// of passing (gt-w3aby).
+func TestRunVetsModulesAtOnce(t *testing.T) {
+	t.Parallel()
+	root := fixtureTree(t)
+	release := map[string]chan struct{}{
+		root:                          make(chan struct{}),
+		filepath.Join(root, "nested"): make(chan struct{}),
+	}
+	started := make(chan string)
+	finished := make(chan string)
+	run := func(_ context.Context, dir, _ string, _ ...string) (string, error) {
+		started <- dir
+		<-release[dir]
+		finished <- dir
+		return "", nil
+	}
+	spooled, _ := reportSpool(t)
+
+	var out bytes.Buffer
+	code := make(chan int, 1)
+	go func() { code <- runWith(context.Background(), []string{"-root", root}, &out, run, spooled) }()
+
+	first, second := <-started, <-started
+	close(release[second])
+	if got := <-finished; got != second {
+		t.Fatalf("the first release finished %q, want %q", got, second)
+	}
+	close(release[first])
+	if got := <-finished; got != first {
+		t.Fatalf("the second release finished %q, want %q", got, first)
+	}
+	if got := <-code; got != 0 {
+		t.Fatalf("run = %d, want 0; output:\n%s", got, out.String())
+	}
+}
+
+// TestRunRemovesTheReportOnInterrupt pins the interrupt path: the cancelled
+// context stops the vets, run returns 130, and the report file is gone, which
+// the gate's shell temp log used to leak (gt-w3aby).
+func TestRunRemovesTheReportOnInterrupt(t *testing.T) {
+	t.Parallel()
+	root := fixtureTree(t)
+	spooled, reportPath := reportSpool(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	run := func(ctx context.Context, _, _ string, _ ...string) (string, error) {
+		cancel()
+		return "", ctx.Err()
+	}
+	var out bytes.Buffer
+
+	code := runWith(ctx, []string{"-root", root}, &out, run, spooled)
+
+	if code != 130 {
+		t.Fatalf("run = %d, want 130; output:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "integration vet: interrupted") {
+		t.Errorf("output does not report the interruption:\n%s", out.String())
+	}
+	assertReportRemoved(t, reportPath())
+}
+
+// TestRunRemovesTheReportWhenSelectionFails covers the other failure exit: a
+// root the walk cannot read returns 2 and removes the report file.
+func TestRunRemovesTheReportWhenSelectionFails(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "missing")
+	spooled, reportPath := reportSpool(t)
+	run, calls := recordingRun(t, "")
+	var out bytes.Buffer
+
+	code := runWith(context.Background(), []string{"-root", missing}, &out, run, spooled)
+
+	if code != 2 {
+		t.Fatalf("run = %d, want 2; output:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "selecting packages") {
+		t.Errorf("output does not name the selection failure:\n%s", out.String())
+	}
+	if len(calls()) != 0 {
+		t.Errorf("a failed selection still vetted %+v", calls())
+	}
+	assertReportRemoved(t, reportPath())
+}
+
+// TestCommandKillsTheVetProcessGroup pins that cancellation reaches the vet
+// tool go vet spawns: the command runs in a process group of its own and has a
+// Cancel hook that signals the group (gt-w3aby).
+func TestCommandKillsTheVetProcessGroup(t *testing.T) {
+	t.Parallel()
+	cmd := command(context.Background(), t.TempDir(), "go", "vet")
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		t.Errorf("command SysProcAttr = %+v, want Setpgid", cmd.SysProcAttr)
+	}
+	if cmd.Cancel == nil {
+		t.Error("command has no Cancel hook, so cancellation would stop only go vet")
+	}
+	if cmd.WaitDelay == 0 {
+		t.Error("command has no WaitDelay, so a descendant holding the output pipe can outlive cancellation")
 	}
 }

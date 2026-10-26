@@ -370,11 +370,10 @@ SHELL_TESTS ?= scripts/test-makefile.sh
 # drive the warning path with a stub.
 EXEC_TAX_PREFLIGHT ?= go run ./internal/exectax/cmd/preflight
 
-# The integration tag's type check (gt-w3aby): go vet -tags integration on
-# every package the tag adds files to. It runs beside the unit tier, so a
-# break in integration-only code fails the gate without a serial stage
-# (docs/testing.md, "The gate"). A make variable only so
-# scripts/makefile-gate_test.sh can drive both paths with a stub.
+# The integration tag's type check. Before changing its stage, read
+# docs/testing.md, "The gate": that section is the one description of what it
+# runs and where. A make variable only so scripts/makefile-gate_test.sh can
+# drive both paths with a stub.
 INTEGRATION_VET ?= go run ./internal/testpolicy/cmd/integrationvet
 
 # The gate's lint waits its turn on golangci-lint's module lock instead of
@@ -414,18 +413,14 @@ gate-test:
 	@# The suite runs in the background so the trap fires at once on INT or
 	@# TERM (bash defers traps until a foreground child exits); the trap finds
 	@# it as this shell's child (pgrep -P) and stops it before its children.
-	@# The integration tag's type check starts here too, beside the unit tier:
-	@# it is the only stage that type-checks integration-only code (gt-w3aby).
-	@# Its output is held in a temp file so the two runs' lines do not interleave,
-	@# and the trap removes that file on an interrupt, which reaches it only
-	@# through the trap: the `rm` after the wait never runs then.
-	@vetlog=$$(mktemp); trap 'for p in $$(pgrep -P $$$$); do k=$$(pgrep -P $$p); kill $$p 2>/dev/null; [ -n "$$k" ] && kill $$k 2>/dev/null; done; rm -f "$$vetlog"; exit 130' INT TERM; \
-	$(INTEGRATION_VET) >"$$vetlog" 2>&1 & vet=$$!; \
+	@# The integration tag's type check starts beside the unit tier and holds
+	@# its report until the run ends (docs/testing.md, "The gate").
+	@trap 'for p in $$(pgrep -P $$$$); do k=$$(pgrep -P $$p); kill $$p 2>/dev/null; [ -n "$$k" ] && kill $$k 2>/dev/null; done; exit 130' INT TERM; \
+	$(INTEGRATION_VET) & vet=$$!; \
 	GT_TEST_DOCKER=0 go test -timeout 20m ./... & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
 	if [ $$go_rc -eq 0 ]; then for m in $(TESTED_MODULES); do echo "gate: vet and unit tier in $$m" >&2; (cd "$$m" && go vet ./... && GT_TEST_DOCKER=0 go test ./...) || { go_rc=$$?; break; }; done; fi; \
 	vet_rc=0; wait $$vet || vet_rc=$$?; \
-	cat "$$vetlog" >&2; rm -f "$$vetlog"; \
 	wall=$$(( $$(date +%s) - $(GATE_START) )); \
 	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc) after $${wall}s wall" >&2; exit 1; fi; \
 	if [ $$vet_rc -ne 0 ]; then echo "gate: FAILED at integration vet (exit $$vet_rc) after $${wall}s wall" >&2; exit 1; fi; \

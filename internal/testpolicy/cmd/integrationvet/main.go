@@ -4,9 +4,10 @@
 //
 //	go run ./internal/testpolicy/cmd/integrationvet
 //
-// `make gate` runs it beside the unit tier. It runs go vet with the tag and no
-// test binary: vet type-checks each selected package and its tests, and
-// analyzes them, but it builds nothing it runs.
+// It runs go vet with the tag and no test binary: vet type-checks each selected
+// package and its tests, and analyzes them, but it builds nothing it runs.
+// Before changing the gate stage that runs it, read docs/testing.md, "The
+// gate": that section is the one description of the stage.
 package main
 
 import (
@@ -26,11 +27,12 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/testpolicy"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
-// maxJobs caps the packages go vet works on at once in one module. The gate
-// runs this beside the unit tier, which is already compiling the same tree, so
-// a wider fan-out buys little wall and costs the host.
+// maxJobs caps the packages go vet works on at once in one module. The unit
+// tier is already compiling the same tree beside it, so a wider fan-out buys
+// little wall and costs the host.
 const maxJobs = 4
 
 func main() {
@@ -40,9 +42,10 @@ func main() {
 }
 
 // run returns 0 when every selected package type-checks, 1 when one does not,
-// and 2 when the selection itself could not be made.
+// 2 when the selection or the report file could not be made, and 130 when the
+// run was interrupted.
 func run(ctx context.Context, args []string, out io.Writer) int {
-	return runWith(ctx, args, out, runCommand)
+	return runWith(ctx, args, out, runCommand, createSpool)
 }
 
 // runner runs one program in dir and returns its combined output and its error.
@@ -50,8 +53,8 @@ func run(ctx context.Context, args []string, out io.Writer) int {
 // binary would get; runCommand is the real one.
 type runner func(ctx context.Context, dir, name string, args ...string) (string, error)
 
-// runWith is run with the program's invocation injectable.
-func runWith(ctx context.Context, args []string, out io.Writer, run runner) int {
+// runWith is run with the program's invocation and its report file injectable.
+func runWith(ctx context.Context, args []string, out io.Writer, run runner, newSpool func() (*spool, error)) (code int) {
 	fs := flag.NewFlagSet("integrationvet", flag.ContinueOnError)
 	fs.SetOutput(out)
 	root := fs.String("root", ".", "directory to search for packages the integration tag adds files to")
@@ -63,21 +66,38 @@ func runWith(ctx context.Context, args []string, out io.Writer, run runner) int 
 		fmt.Fprintf(out, "integration vet: -jobs must be 1 or more, got %d\n", *jobs)
 		return 2
 	}
+	report, err := newSpool()
+	if err != nil {
+		fmt.Fprintf(out, "integration vet: creating the report file: %v\n", err)
+		return 2
+	}
+	// The report prints as one block when the run ends, so the unit tier's
+	// lines running beside it never split a module's diagnostics, and every
+	// exit path removes the file, an interrupted run included (gt-w3aby).
+	defer func() {
+		if err := report.copyTo(out); err != nil {
+			fmt.Fprintf(out, "integration vet: writing the report: %v\n", err)
+		}
+		if err := report.remove(); err != nil {
+			fmt.Fprintf(out, "integration vet: removing the report file %s: %v\n", report.path, err)
+		}
+	}()
+
 	cleanRoot := filepath.Clean(*root)
 	// make polecat-image stages whole rig checkouts here for its build cache;
 	// they are copies of other trees, not this module.
 	pkgs, err := testpolicy.IntegrationPackages(cleanRoot, "deploy/polecat/seed")
 	if err != nil {
-		fmt.Fprintf(out, "integration vet: selecting packages: %v\n", err)
+		fmt.Fprintf(report, "integration vet: selecting packages: %v\n", err)
 		return 2
 	}
 	if len(pkgs) == 0 {
-		fmt.Fprintf(out, "integration vet: no package under %s adds files with the integration tag; the selection or -root is wrong\n", cleanRoot)
+		fmt.Fprintf(report, "integration vet: no package under %s adds files with the integration tag; the selection or -root is wrong\n", cleanRoot)
 		return 2
 	}
 	modules, err := groupByModule(cleanRoot, pkgs)
 	if err != nil {
-		fmt.Fprintf(out, "integration vet: %v\n", err)
+		fmt.Fprintf(report, "integration vet: %v\n", err)
 		return 2
 	}
 
@@ -85,7 +105,7 @@ func runWith(ctx context.Context, args []string, out io.Writer, run runner) int 
 	results := vetAll(ctx, cleanRoot, modules, *jobs, run)
 	wall := time.Since(start).Round(100 * time.Millisecond)
 	if ctx.Err() != nil {
-		fmt.Fprintf(out, "integration vet: interrupted after %s\n", wall)
+		fmt.Fprintf(report, "integration vet: interrupted after %s\n", wall)
 		return 130
 	}
 	failed := 0
@@ -94,17 +114,60 @@ func runWith(ctx context.Context, args []string, out io.Writer, run runner) int 
 			continue
 		}
 		failed++
-		fmt.Fprintf(out, "--- %s (%d packages, go vet -tags integration)\n%s", r.module, len(r.pkgs), r.output)
+		fmt.Fprintf(report, "--- %s (%d packages, go vet -tags integration)\n%s", r.module, len(r.pkgs), r.output)
 		if r.output != "" && r.output[len(r.output)-1] != '\n' {
-			fmt.Fprintln(out)
+			fmt.Fprintln(report)
 		}
 	}
 	if failed > 0 {
-		fmt.Fprintf(out, "integration vet: FAILED in %d of %d modules after %s\n", failed, len(results), wall)
+		fmt.Fprintf(report, "integration vet: FAILED in %d of %d modules after %s\n", failed, len(results), wall)
 		return 1
 	}
-	fmt.Fprintf(out, "integration vet: %d packages in %d modules type-check with -tags integration in %s\n", len(pkgs), len(results), wall)
+	fmt.Fprintf(report, "integration vet: %d packages in %d modules type-check with -tags integration in %s\n", len(pkgs), len(results), wall)
 	return 0
+}
+
+// spool is the temp file a run writes its report to and copies to the gate's
+// stream when it ends.
+type spool struct {
+	path string
+	f    *os.File
+}
+
+// createSpool writes the report in the system temp directory.
+func createSpool() (*spool, error) {
+	return createSpoolIn("")
+}
+
+// createSpoolIn writes the report in dir, which is "" for the system temp
+// directory.
+func createSpoolIn(dir string) (*spool, error) {
+	f, err := os.CreateTemp(dir, "integration-vet-*.log")
+	if err != nil {
+		return nil, err
+	}
+	return &spool{path: f.Name(), f: f}, nil
+}
+
+func (s *spool) Write(p []byte) (int, error) {
+	return s.f.Write(p)
+}
+
+// copyTo writes what the run wrote, once, so the report reaches out as one
+// block.
+func (s *spool) copyTo(out io.Writer) error {
+	if _, err := s.f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	_, err := io.Copy(out, s.f)
+	return err
+}
+
+func (s *spool) remove() error {
+	if err := s.f.Close(); err != nil {
+		return err
+	}
+	return os.Remove(s.path)
 }
 
 // module is one go.mod directory and the selected packages under it, as paths
@@ -193,10 +256,19 @@ func vetAll(ctx context.Context, root string, modules []module, jobs int, run ru
 // runCommand is the real runner: the named program in dir, its output
 // combined.
 func runCommand(ctx context.Context, dir, name string, args ...string) (string, error) {
+	output, err := command(ctx, dir, name, args...).CombinedOutput()
+	return string(output), err
+}
+
+// command builds one vet invocation in its own process group, so cancellation
+// stops the vet tool go vet spawns, not only go vet. The WaitDelay bounds the
+// wait on a descendant that escaped the group and kept the output pipe open.
+func command(ctx context.Context, dir, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	output, err := cmd.CombinedOutput()
-	return string(output), err
+	cmd.WaitDelay = util.ProcessGroupKillGrace
+	util.SetProcessGroup(cmd)
+	return cmd
 }
 
 // vetArgs is the go vet command line for one module: its selected packages,
