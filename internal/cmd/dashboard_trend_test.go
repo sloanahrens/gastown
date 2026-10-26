@@ -278,9 +278,9 @@ func TestBuildRecentLandingsJoinsStagesAndOrdersNewestFirst(t *testing.T) {
 	}
 }
 
-// Every landing in the window is a row, newest first, so the pane can scroll all
-// of them; a title is looked up only for the first recentTitleRows of them, since
-// each lookup can be a bd read (gt-1kttu).
+// Every landing in the window, up to the table's row bound, is a row, newest
+// first, so the pane can scroll all of them; a title is looked up only for the
+// first recentTitleRows of them, since each lookup can be a bd read (gt-1kttu).
 func TestBuildRecentLandingsKeepsEveryRowAndAsksTitlesOnlyForTheFirstTen(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
@@ -476,9 +476,11 @@ func TestRunningLandingsDropOutOfWindow(t *testing.T) {
 }
 
 // TestBuildRecentLandingsPutsRunningRowsOnTopUncapped is the table's contract
-// for a live landing: it is a row above every finished one, and the
-// recentLandingRows cap counts finished landings only, so a busy day cannot
-// hide a landing in flight. The cap keeps the newest finished rows.
+// for a live landing: it is a row above every finished one, and the cap counts
+// finished landings only, so a busy day cannot hide a landing in flight. The
+// cap keeps the newest finished rows; the limit here is the test's own, and
+// what production passes is pinned by
+// TestBuildRecentLandingsBoundsTheTableAtTheProductionCap (gt-1j1bf).
 func TestBuildRecentLandingsPutsRunningRowsOnTopUncapped(t *testing.T) {
 	const capRows = 10
 	t.Parallel()
@@ -503,6 +505,31 @@ func TestBuildRecentLandingsPutsRunningRowsOnTopUncapped(t *testing.T) {
 	}
 	if rows[1].Bead != "gt-0" || rows[capRows].Bead != fmt.Sprintf("gt-%d", capRows-1) {
 		t.Errorf("finished rows run %s..%s, want the newest cap (gt-0..gt-%d)", rows[1].Bead, rows[capRows].Bead, capRows-1)
+	}
+}
+
+// TestBuildRecentLandingsBoundsTheTableAtTheProductionCap pins the row bound
+// production passes: a non-positive value would bound nothing, and a day with
+// more rows than the cap keeps the newest ones rather than growing the table
+// with the log (gt-1j1bf).
+func TestBuildRecentLandingsBoundsTheTableAtTheProductionCap(t *testing.T) {
+	t.Parallel()
+	if recentLandingRows <= 0 {
+		t.Fatalf("recentLandingRows = %d: a non-positive cap bounds nothing", recentLandingRows)
+	}
+	now := time.Date(2026, 10, 4, 19, 40, 0, 0, time.UTC)
+	const over = 5
+	recs := make([]omRecord, 0, recentLandingRows+over)
+	for i := range recentLandingRows + over {
+		recs = append(recs, omTestRec(fmt.Sprintf("gt-%d", i), "approve", 0.9, "daemon", now.Add(-time.Duration(i)*time.Second)))
+	}
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, recentLandingRows)
+	if len(rows) != recentLandingRows {
+		t.Fatalf("rows = %d, want %d: the table keeps its bound", len(rows), recentLandingRows)
+	}
+	last := recentLandingRows - 1
+	if rows[0].Bead != "gt-0" || rows[last].Bead != fmt.Sprintf("gt-%d", last) {
+		t.Errorf("rows run %s..%s, want the newest %d (gt-0..gt-%d)", rows[0].Bead, rows[last].Bead, recentLandingRows, last)
 	}
 }
 
