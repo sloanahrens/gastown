@@ -45,8 +45,8 @@ func TestMangoPanelIsHiddenUntilTheHubReadsIt(t *testing.T) {
 
 // A fresh panel's title line carries the landings, the snapshot hours, the
 // analysis age and the verdict counts as chips; its table has a collection row
-// saying the state, then one row per target. A skipped target says it had too
-// few positives to check, in dashes rather than figures.
+// saying the state, then one row per checkable target. A target the panel could
+// not check leaves the table and becomes one line under it.
 func TestMangoFreshPanelDrawsItsTitleLineAndTargets(t *testing.T) {
 	t.Parallel()
 
@@ -61,7 +61,7 @@ func TestMangoFreshPanelDrawsItsTitleLineAndTargets(t *testing.T) {
 	if note.Class != "r" {
 		t.Errorf("a fresh panel's title is %q, want the plain title class", note.Class)
 	}
-	for _, want := range []string{"412 landings", "168 snapshot hours", "analysed 2h00m ago", "fresh", "1 earning", "0 no-signal", "1 not-yet"} {
+	for _, want := range []string{"412 landings", "168 snapshot hours", "analysed 2h00m ago", "fresh", "1 earning", "0 no-signal", "1 not checkable"} {
 		if !strings.Contains(note.Text, want) {
 			t.Errorf("the title line %q has no %q", note.Text, want)
 		}
@@ -70,8 +70,8 @@ func TestMangoFreshPanelDrawsItsTitleLineAndTargets(t *testing.T) {
 		t.Error("the panel is hidden while it holds a fresh reading")
 	}
 
-	if n := dom.descend(t, "mango", 0, 1).Kids; n != 3 {
-		t.Fatalf("the table has %d rows, want the collection row and two targets", n)
+	if n := dom.descend(t, "mango", 0, 1).Kids; n != 2 {
+		t.Fatalf("the table has %d rows, want the collection row and the one checkable target", n)
 	}
 	for _, tc := range []struct {
 		row, col int
@@ -80,24 +80,27 @@ func TestMangoFreshPanelDrawsItsTitleLineAndTargets(t *testing.T) {
 		{0, 0, "collection"},
 		{0, 5, "fresh"},
 		{1, 0, "rejected_before_landing"},
-		{1, 1, "earning"},
-		{1, 2, "48"},
-		{1, 3, "42.0% of 96"},
-		{1, 4, "25.0%"},
 		{1, 5, "model = opus and attempts in q4"},
-		{2, 0, "reached_overrun_stop"},
-		{2, 1, "not-yet"},
-		{2, 2, "12"},
-		{2, 3, "-"},
-		{2, 4, "-"},
-		{2, 5, "too few positives to check"},
 	} {
 		if got := mangoCell(t, dom, tc.row, tc.col).Text; got != tc.want {
 			t.Errorf("row %d cell %d = %q, want %q", tc.row, tc.col, got, tc.want)
 		}
 	}
+	if got := mangoCell(t, dom, 1, 1).Text; got != "earning" {
+		t.Errorf("the target's verdict chip reads %q, want the panel's word", got)
+	}
+	if got := mangoCell(t, dom, 1, 2).Text; !strings.Contains(got, "42.0% of 96") || !strings.Contains(got, "vs 25.0% across all recent landings") {
+		t.Errorf("the target's rate cell reads %q, want the rate of its group against the baseline", got)
+	}
 	if class := dom.descend(t, "mango", 0, 1, 1).Class; class != "" {
 		t.Errorf("a fresh target row is drawn as %q, want no greying", class)
+	}
+
+	line := dom.descend(t, "mango", 1)
+	for _, want := range []string{"not checkable", "reached_overrun_stop", "12 positives", "too few positives to check"} {
+		if !strings.Contains(line.Text, want) {
+			t.Errorf("the not-checkable line %q has no %q", line.Text, want)
+		}
 	}
 }
 
@@ -243,10 +246,15 @@ func TestMangoUnknownVerdictAndMissingRateAreNotReadings(t *testing.T) {
 	if !strings.Contains(chip.Title, "does not know") {
 		t.Errorf("an unknown verdict's tooltip is %q, want it to say the page does not know the verdict", chip.Title)
 	}
-	for _, col := range []int{3, 4} {
-		if got := mangoCell(t, dom, 2, col).Text; got != "-" {
-			t.Errorf("a missing rate in column %d reads %q, want a dash", col, got)
-		}
+	rates := mangoCell(t, dom, 2, 2)
+	if big := dom.descend(t, "mango", 0, 1, 2, 2, 0).Text; big != "-" {
+		t.Errorf("a missing rate reads %q, want a dash", big)
+	}
+	if strings.Contains(rates.Text, "0.0%") {
+		t.Errorf("a missing rate is drawn as %q, want no figure the analysis never gave", rates.Text)
+	}
+	if vs := dom.descend(t, "mango", 0, 1, 2, 2, 1).Text; vs != "vs - across all recent landings" {
+		t.Errorf("a missing baseline reads %q, want a dash", vs)
 	}
 }
 
@@ -270,6 +278,241 @@ func TestMangoBestBoxWithMarkupRendersAsText(t *testing.T) {
 		if got.Kids != 0 {
 			t.Errorf("cell %d holds %d elements, want its text alone", col, got.Kids)
 		}
+	}
+}
+
+// A replicating target draws its plain label, a thin chip naming the holdout its
+// rate rests on, the rate against the baseline with its lift and the group's
+// count, an interval bar, a chip for each condition that narrows the group, and
+// a fold holding every condition including the one that does not narrow.
+func TestMangoReplicatingThinTargetDrawsItsNumbers(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	target := mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 36, 0.417, 0.198, MangoEarning)
+	target["label"] = "Landings rejected before they land"
+	target["holdout_positives"] = 15
+	target["ci_low"] = 0.271
+	target["ci_high"] = 0.578
+	target["thin"] = true
+	target["conditions"] = []any{
+		map[string]any{"text": "model = opus", "share": 0.12, "narrows": true},
+		map[string]any{"text": "attempts in q4", "share": 0.18, "narrows": true},
+		map[string]any{"text": "rig = gastown", "share": 0.71, "narrows": false},
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
+
+	if n := dom.descend(t, "mango", 0, 1).Kids; n != 2 {
+		t.Fatalf("the table has %d rows, want the collection row and the target", n)
+	}
+	if got := mangoCell(t, dom, 1, 0).Text; got != "Landings rejected before they land" {
+		t.Errorf("the target's title is %q, want the panel's plain label", got)
+	}
+	thin := dom.descend(t, "mango", 0, 1, 1, 1, 1)
+	if thin.Class != "jvchip jvthin" {
+		t.Errorf("the thin chip is drawn as %q, want the dashed chip class", thin.Class)
+	}
+	if !strings.Contains(thin.Text, "thin") || !strings.Contains(thin.Text, "n=36") {
+		t.Errorf("the thin chip %q does not name thin and the holdout it rests on", thin.Text)
+	}
+	rates := mangoCell(t, dom, 1, 2)
+	for _, want := range []string{"41.7%", "vs 19.8% across all recent landings", "2.1x as likely", "15 of 36 recent landings in the group"} {
+		if !strings.Contains(rates.Text, want) {
+			t.Errorf("the rate cell %q has no %q", rates.Text, want)
+		}
+	}
+
+	bar := dom.descend(t, "mango", 0, 1, 1, 3, 0)
+	if bar.Kids != 4 {
+		t.Fatalf("the interval bar holds %d parts, want the track, the baseline marker, the bar and the rate dot", bar.Kids)
+	}
+	for i, class := range []string{"mgtrack", "mgbase", "mgci", "mgdot"} {
+		if got := dom.descend(t, "mango", 0, 1, 1, 3, 0, i).Class; got != class {
+			t.Errorf("the interval bar's part %d is drawn as %q, want %q", i, got, class)
+		}
+	}
+
+	evidence := dom.descend(t, "mango", 0, 1, 1, 4)
+	if evidence.Kids != 3 {
+		t.Fatalf("the evidence cell holds %d parts, want two narrowing chips and the fold", evidence.Kids)
+	}
+	for i, want := range []string{"model = opus 12.0% of landings", "attempts in q4 18.0% of landings"} {
+		chip := dom.descend(t, "mango", 0, 1, 1, 4, i)
+		if chip.Text != want {
+			t.Errorf("the narrowing chip %d reads %q, want %q", i, chip.Text, want)
+		}
+		if chip.Class != "jvchip mgcondchip" {
+			t.Errorf("the narrowing chip %d is drawn as %q", i, chip.Class)
+		}
+	}
+	if got := dom.descend(t, "mango", 0, 1, 1, 4, 2, 0).Text; got != "how it was found" {
+		t.Errorf("the fold is named %q, want how it was found", got)
+	}
+	list := dom.descend(t, "mango", 0, 1, 1, 4, 2, 1)
+	if list.Kids != 3 {
+		t.Fatalf("the fold holds %d conditions, want all three", list.Kids)
+	}
+	for i, want := range []string{"model = opus", "attempts in q4", "rig = gastown"} {
+		if got := dom.descend(t, "mango", 0, 1, 1, 4, 2, 1, i).Text; !strings.Contains(got, want) || !strings.Contains(got, "of landings") {
+			t.Errorf("the fold's condition %d reads %q, want %q and its share", i, got, want)
+		}
+	}
+	last := dom.descend(t, "mango", 0, 1, 1, 4, 2, 1, 2)
+	if last.Class != "mgcond jvstale" {
+		t.Errorf("the condition that does not narrow is drawn as %q, want it greyed", last.Class)
+	}
+	if !strings.Contains(last.Text, "doesn't narrow") {
+		t.Errorf("the condition that does not narrow reads %q, want it marked", last.Text)
+	}
+}
+
+// A target the panel could not check is one line under the table, with the
+// not-checkable chip, its plain label, its positives and the reason in words,
+// and it is no table row.
+func TestMangoNotCheckableTargetDrawsOneLineAndNoRow(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	target := mangoPageTarget("reached_overrun_stop", 12, true, "", 0, 0, 0.03, MangoNotYet)
+	target["label"] = "Beads stopped by the overrun guard"
+	target["reason"] = "no_holdout_positives"
+	target["last_positive"] = "2026-10-19"
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
+
+	if n := dom.descend(t, "mango", 0, 1).Kids; n != 1 {
+		t.Fatalf("the table has %d rows, want the collection row alone: a not-checkable target is no row", n)
+	}
+	line := dom.descend(t, "mango", 1)
+	if line.Class != "mgnot" {
+		t.Errorf("the not-checkable line is drawn as %q, want the line class", line.Class)
+	}
+	if chip := dom.descend(t, "mango", 1, 0); chip.Text != "not checkable" || chip.Class != "jvchip jv-notyet" {
+		t.Errorf("the line's chip is %q (%q), want the dim not-checkable chip", chip.Text, chip.Class)
+	}
+	for _, want := range []string{"Beads stopped by the overrun guard", "12 positives", "no positives in the recent landings to check it on, its last positive was 2026-10-19"} {
+		if !strings.Contains(line.Text, want) {
+			t.Errorf("the not-checkable line %q has no %q", line.Text, want)
+		}
+	}
+}
+
+// The title line counts each verdict in the panel's counts: the two verdicts it
+// calls by name and the not-yet targets it calls not checkable.
+func TestMangoTitleLineCountsVerdictsForAMixedPanel(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	m := mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 96, 0.42, 0.25, MangoEarning),
+		mangoPageTarget("manual_rescue", 37, false, "attempts in q3", 54, 0.11, 0.09, MangoEarning),
+		mangoPageTarget("reached_overrun_stop", 12, false, "model = haiku", 50, 0.08, 0.04, MangoNoSignal),
+		mangoPageTarget("slow_landing", 3, true, "", 0, 0, 0.02, MangoNotYet),
+		mangoPageTarget("failed_gate", 2, true, "", 0, 0, 0.01, MangoNotYet),
+		mangoPageTarget("parked_bead", 1, true, "", 0, 0, 0.05, MangoNotYet),
+	)
+	m["counts"] = map[string]any{"earning": 2, "no_signal": 1, "not_yet": 3}
+	dom.call(t, "renderMango", map[string]any{"mango": m})
+
+	note := dom.element(t, "mangonote")
+	for _, want := range []string{"2 earning", "1 no-signal", "3 not checkable"} {
+		if !strings.Contains(note.Text, want) {
+			t.Errorf("the title line %q has no %q", note.Text, want)
+		}
+	}
+	if strings.Contains(note.Text, "not-yet") {
+		t.Errorf("the title line %q counts not-yet targets by a word the panel does not use", note.Text)
+	}
+}
+
+// An older panel carries none of the newer target keys and still draws one row
+// per target with its id, its rate of its group, its baseline, its best box and
+// no condition chips.
+func TestMangoOldPanelKeepsItsColumns(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("rejected_before_landing", 48, false, "model = opus and attempts in q4", 96, 0.42, 0.25, MangoEarning),
+		mangoPageTarget("reached_overrun_stop", 12, false, "model = haiku", 50, 0.08, 0.04, MangoNoSignal),
+	)})
+
+	if n := dom.descend(t, "mango", 0, 1).Kids; n != 3 {
+		t.Fatalf("the table has %d rows, want the collection row and two targets", n)
+	}
+	for _, tc := range []struct {
+		row, col int
+		want     string
+	}{
+		{1, 0, "rejected_before_landing"},
+		{2, 0, "reached_overrun_stop"},
+		{1, 5, "model = opus and attempts in q4"},
+		{2, 5, "model = haiku"},
+	} {
+		if got := mangoCell(t, dom, tc.row, tc.col).Text; got != tc.want {
+			t.Errorf("row %d cell %d = %q, want %q", tc.row, tc.col, got, tc.want)
+		}
+	}
+	if got := mangoCell(t, dom, 1, 2).Text; !strings.Contains(got, "42.0% of 96") || !strings.Contains(got, "vs 25.0% across all recent landings") {
+		t.Errorf("the target's rate cell reads %q, want the rate of its group against the baseline", got)
+	}
+	if n := dom.descend(t, "mango", 0, 1, 1, 4).Kids; n != 1 {
+		t.Errorf("an old panel's evidence cell holds %d parts, want the fold alone and no chips", n)
+	}
+	if got := dom.descend(t, "mango", 0, 1, 1, 4, 0, 1, 0).Text; got != "model = opus and attempts in q4" {
+		t.Errorf("the fold holds %q, want the old best box", got)
+	}
+}
+
+// A condition's text is the panel's own string: markup in it is drawn as those
+// characters, in the chip and in the fold, as one text run with no element.
+func TestMangoConditionWithMarkupRendersAsText(t *testing.T) {
+	t.Parallel()
+
+	const text = `<b>model = opus</b>`
+	dom := newPageDOM(t)
+	target := mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 36, 0.4, 0.2, MangoEarning)
+	target["conditions"] = []any{map[string]any{"text": text, "share": 0.12, "narrows": true}}
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
+
+	chip := dom.descend(t, "mango", 0, 1, 1, 4, 0)
+	if chip.Text != text+" 12.0% of landings" {
+		t.Errorf("the chip draws %q, want the raw condition text and its share", chip.Text)
+	}
+	if chip.Kids != 0 {
+		t.Errorf("the chip holds %d elements, want its text alone", chip.Kids)
+	}
+	folded := dom.descend(t, "mango", 0, 1, 1, 4, 1, 1, 0, 0)
+	if folded.Text != text {
+		t.Errorf("the fold draws %q, want the raw condition text", folded.Text)
+	}
+	if folded.Kids != 0 {
+		t.Errorf("the fold's condition holds %d elements, want its text alone", folded.Kids)
+	}
+}
+
+// A panel that reports one interval bound, or a high bound below its low, has
+// not measured a range, so the page draws no interval bar for it.
+func TestMangoIntervalBarNeedsBothBounds(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		low  any
+		high any
+	}{
+		{"a lone bound", 0.3, nil},
+		{"a reversed pair", 0.5, 0.3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dom := newPageDOM(t)
+			target := mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 36, 0.4, 0.2, MangoEarning)
+			target["ci_low"], target["ci_high"] = tc.low, tc.high
+			dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
+
+			if n := dom.descend(t, "mango", 0, 1, 1, 3).Kids; n != 0 {
+				t.Errorf("the interval cell holds %d parts, want no bar", n)
+			}
+		})
 	}
 }
 
