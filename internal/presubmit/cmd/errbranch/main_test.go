@@ -51,3 +51,16 @@ func TestModulePathRefusesAFailedListing(t *testing.T) {
 		t.Errorf("modulePath = %q, %v; want github.com/x/y", got, err)
 	}
 }
+
+// TestReportFailsWhenNothingWasJudged: added error returns the profile names no file of are a
+// check that judged nothing, which must fail, not read as a clean branch (gt-b9j3o.5).
+func TestReportFailsWhenNothingWasJudged(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	if err := report(&out, presubmit.Result{Added: 3, Judged: 0}); err == nil {
+		t.Error("three added error returns with none judged passed the check")
+	}
+	if err := report(&out, presubmit.Result{Added: 0, Judged: 0}); err != nil {
+		t.Errorf("a branch with no added error returns failed: %v", err)
+	}
+}

@@ -31,8 +31,10 @@ func main() {
 	}
 	defer profile.Close()
 
+	// The prefixes are pinned: diff.noprefix or diff.mnemonicPrefix in the operator's config would
+	// otherwise change the paths the check reads.
 	diff := exec.Command("git", "-c", "core.quotePath=false",
-		"diff", "--no-color", "--no-ext-diff", "--unified=0", *base+"...HEAD")
+		"diff", "--no-color", "--no-ext-diff", "--unified=0", "--src-prefix=a/", "--dst-prefix=b/", *base+"...HEAD")
 	diff.Stderr = os.Stderr
 	out, err := diff.Output()
 	if err != nil {
@@ -57,6 +59,9 @@ func main() {
 func report(w io.Writer, res presubmit.Result) error {
 	fmt.Fprintf(w, "errbranch: judged %d of %d added error returns in Go sources (%d in quoted paths, not read)\n",
 		res.Judged, res.Added, res.Quoted)
+	if res.Added > 0 && res.Judged == 0 {
+		return fmt.Errorf("errbranch: judged none of the %d added error returns: the cover profile names none of their files, so nothing was checked", res.Added)
+	}
 	if len(res.Findings) == 0 {
 		return nil
 	}

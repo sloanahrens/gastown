@@ -38,19 +38,16 @@ type Result struct {
 	Quoted int
 }
 
-// UntestedErrorBranches reads the error returns diff adds in Go sources and the cover profile
-// of the branch's tests, and reports the ones the profile records as never executed. module is
-// the module path the profile names files by (go test writes github.com/x/y/pkg/file.go).
+// UntestedErrorBranches reports the added Go error returns that the cover profile records as never
+// executed.
 //
-// A return is the last line of a failure path, so an uncovered one is a failure path no test
-// drives. The forms counted as an error return are the ones the diff text can name: the error
-// value err or an Err-named one, EOF, and the constructors that build an error. A call that
-// returns an error without naming it, such as `return f.Close()`, cannot be told from one that
-// does not without types, so it is left unjudged.
-//
-// A profile file is matched by its full name, module plus the diff path, and nothing else: a
-// file of another package with the same base name never judges this one. Tests in _test.go
-// files, fixtures under testdata and directories the go tool skips are not sources.
+// The rules: a return is the last line of a failure path, so an uncovered one is a failure path no
+// test drives. The forms counted as an error return are the ones the diff text can name (err, an
+// Err-named value, EOF, fmt.Errorf, errors.New, errors.Join); a call that returns an error without
+// naming it, such as `return f.Close()`, is left unjudged. A profile file is matched by its full
+// name, module plus the diff path, and nothing else, so a same-named file in another package never
+// judges this one. Tests, testdata and directories the go tool skips are not sources. module is the
+// module path the profile names files by (go test writes github.com/x/y/pkg/file.go).
 func UntestedErrorBranches(diff, cover io.Reader, module string) (Result, error) {
 	var res Result
 	added, err := addedLines(diff)
