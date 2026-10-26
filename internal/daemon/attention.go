@@ -940,13 +940,19 @@ func (s *attentionSources) collectRejectedTwice(ctx context.Context) ([]attentio
 			if n < attentionRejectedTwice {
 				continue
 			}
+			waiting := fmt.Sprintf("rework, attempt %d", n)
+			if owner := strings.TrimSpace(is.Assignee); owner != "" {
+				waiting = fmt.Sprintf("rework by %s, attempt %d", owner, n)
+			}
 			out = append(out, attention.Item{
-				Key:      "rework:" + is.ID,
-				Kind:     attention.KindRejectedTwice,
-				Severity: attention.SeverityHigh,
-				Rig:      rig,
-				Bead:     is.ID,
-				Summary:  fmt.Sprintf("%s rejected %d times", is.ID, n),
+				Key:       "rework:" + is.ID,
+				Kind:      attention.KindRejectedTwice,
+				Severity:  attention.SeverityHigh,
+				Rig:       rig,
+				Bead:      is.ID,
+				Owner:     strings.TrimSpace(is.Assignee),
+				WaitingOn: waiting,
+				Summary:   fmt.Sprintf("%s rejected %d times", is.ID, n),
 			})
 		}
 	}

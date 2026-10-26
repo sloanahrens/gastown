@@ -229,6 +229,9 @@ func TestAttentionCollector_RejectedTwice(t *testing.T) {
 	if items[0].Key != "rework:gt-twice" || items[0].Kind != attention.KindRejectedTwice {
 		t.Errorf("item = %+v, want rework:gt-twice", items[0])
 	}
+	if items[0].Owner != "" || items[0].WaitingOn != "rework, attempt 2" {
+		t.Errorf("owner %q waiting %q, want no owner and rework, attempt 2", items[0].Owner, items[0].WaitingOn)
+	}
 
 	// Once the bead lands it is closed, so the read stops listing it.
 	f.src.rework = func(context.Context, string) ([]*beads.Issue, error) { return nil, nil }
