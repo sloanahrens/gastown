@@ -1,6 +1,8 @@
 // Package storetest holds the in-memory store.Store for the unit tier. It
-// models the behavior the contract pins, nothing more: methods whose beads
-// have not landed return store.ErrUnimplemented, like Postgres.
+// implements CreateIssue and GetIssues, the methods the contract's Fake cases
+// cover, and nothing more: every other method returns store.ErrUnimplemented,
+// so a unit test that reaches past them fails loudly rather than reading a
+// store that only looks modeled.
 package storetest
 
 import (

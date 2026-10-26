@@ -78,8 +78,10 @@ type AssignedRequest struct {
 	Rig string `json:"rig,omitempty"`
 	// IncludeWisps adds the wisps, which are left out by default.
 	IncludeWisps bool `json:"include_wisps,omitempty"`
-	// Limit, Cursor and the page's NextCursor page as in ListFilter.
-	Limit  int    `json:"limit,omitempty"`
+	// Limit is the most rows one page holds; 0 takes the server's default page
+	// size, and a page with more rows left carries NextCursor.
+	Limit int `json:"limit,omitempty"`
+	// Cursor is the previous page's NextCursor; empty reads the first page.
 	Cursor string `json:"cursor,omitempty"`
 }
 

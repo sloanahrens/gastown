@@ -59,9 +59,15 @@ func assignedByStatus(t *testing.T, s store.Store) {
 	if page.Count != 4 || page.NextCursor != "" {
 		t.Errorf("count/cursor = %d/%q, want 4 and none", page.Count, page.NextCursor)
 	}
-	if len(page.Assigned["seat-b"]) == 1 && !slices.Equal(page.Assigned["seat-b"][0].Labels, []string{"x"}) {
-		t.Errorf("listed Labels = %v, want [x]: a fan-out row carries what a list row does", page.Assigned["seat-b"][0].Labels)
+	if rows := page.Assigned["seat-b"]; len(rows) != 1 {
+		t.Errorf("seat-b has %d rows, want 1", len(rows))
+	} else if !slices.Equal(rows[0].Labels, []string{"x"}) {
+		t.Errorf("listed Labels = %v, want [x]: a fan-out row carries what a list row does", rows[0].Labels)
 	}
+
+	// An empty entry beside a real one is dropped, not looked up as a custom
+	// status and refused as unknown.
+	sameSet(t, "empty entries beside values", field(mustAssigned(t, s, api.AssignedRequest{Assignees: []string{"seat-a", ""}, Statuses: []string{"", "open"}}), "seat-a"), aOpen.ID, hqOpen.ID)
 
 	sameSet(t, "in_progress is not asked for", field(mustAssigned(t, s, api.AssignedRequest{Assignees: []string{"seat-a"}, Statuses: []string{"open"}}), "seat-a"), aOpen.ID, hqOpen.ID)
 	sameSet(t, "one rig", field(mustAssigned(t, s, api.AssignedRequest{Assignees: []string{"seat-a"}, Statuses: []string{"open"}, Rig: "hq"}), "seat-a"), hqOpen.ID)

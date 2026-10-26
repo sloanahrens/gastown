@@ -15,7 +15,9 @@ func (p *Postgres) Assigned(ctx context.Context, req api.AssignedRequest) (api.A
 	if err := req.Validate(); err != nil {
 		return api.AssignedPage{}, err
 	}
-	statuses := uniqueStrings(req.Statuses)
+	// uniqueStrings drops empty entries, so an empty status beside a real one
+	// never reaches the unknown-status check and is not refused as unknown.
+	assignees, statuses := uniqueStrings(req.Assignees), uniqueStrings(req.Statuses)
 	if err := p.validateAssignedStatuses(ctx, statuses); err != nil {
 		return api.AssignedPage{}, err
 	}
@@ -24,7 +26,7 @@ func (p *Postgres) Assigned(ctx context.Context, req api.AssignedRequest) (api.A
 		return api.AssignedPage{}, err
 	}
 	size := pageSize(req.Limit)
-	q, args := buildAssignedQuery(uniqueStrings(req.Assignees), statuses, req.Rig, req.IncludeWisps, cur, size)
+	q, args := buildAssignedQuery(assignees, statuses, req.Rig, req.IncludeWisps, cur, size)
 	rows, err := p.pool.Query(ctx, q, args...)
 	if err != nil {
 		return api.AssignedPage{}, fmt.Errorf("store: assigned: %w", err)

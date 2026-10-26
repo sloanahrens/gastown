@@ -107,7 +107,9 @@ func TestAssignedAcrossTheWire(t *testing.T) {
 	if page.Count != 3 || page.NextCursor != "" {
 		t.Errorf("count/cursor = %d/%q, want 3 and none", page.Count, page.NextCursor)
 	}
-	if rows := page.Assigned["seat-a"]; len(rows) == 3 && rows[0].Title != "a open" {
+	if rows := page.Assigned["seat-a"]; len(rows) != 3 {
+		t.Errorf("seat-a has %d rows, want 3", len(rows))
+	} else if rows[0].Title != "a open" {
 		t.Errorf("row title = %q, want the issue to cross the wire whole", rows[0].Title)
 	}
 	if _, ok := page.Assigned["seat-b"]; ok {
