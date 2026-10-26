@@ -205,16 +205,20 @@ func serve(t *testing.T, handler http.HandlerFunc) *Client {
 	return New(tc, "gt")
 }
 
-func TestShowTextRefusesWithoutARequest(t *testing.T) {
+// ShowText renders the issue's id and title from one Show, as the shared
+// contract requires of every store (gt-trackershow).
+func TestShowTextRendersTheIssueLine(t *testing.T) {
 	t.Parallel()
-	var asked int
-	c := serve(t, func(http.ResponseWriter, *http.Request) { asked++ })
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"gt-x","title":"showable","priority":1,"status":"open"}`))
+	})
 	text, err := c.ShowText("gt-x", []string{"gt-x"})
-	if text != "" || !errors.Is(err, ErrShowText) {
-		t.Errorf("ShowText = %q, %v; want \"\" and ErrShowText", text, err)
+	if err != nil {
+		t.Fatalf("ShowText: %v", err)
 	}
-	if asked != 0 {
-		t.Errorf("ShowText sent %d requests, want none", asked)
+	if !strings.Contains(text, "gt-x") || !strings.Contains(text, "showable") || !strings.Contains(text, "P1") {
+		t.Errorf("ShowText = %q, want the id, title and priority", text)
 	}
 }
 
@@ -363,5 +367,32 @@ func TestTrackerKVIsEmptyAndAnswersUnset(t *testing.T) {
 	}
 	if _, err := c.KVGet("kv.contract_probe"); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("KVGet(unset) = %v, want beads.ErrNotFound", err)
+	}
+}
+
+// A missing issue is an error from ShowText, not an empty render (gt-trackershow).
+func TestShowTextMissingIssueIsAnError(t *testing.T) {
+	t.Parallel()
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"no such issue"}}`))
+	})
+	text, err := c.ShowText("gt-missing", []string{"gt-missing"})
+	if err == nil || text != "" {
+		t.Errorf("ShowText of a missing issue = %q, %v; want \"\" and an error", text, err)
+	}
+}
+
+// A bd flag passed to ShowText is refused before any request (gt-rtxfy).
+func TestShowTextRefusesAFlagWithoutARequest(t *testing.T) {
+	t.Parallel()
+	var asked int
+	c := serve(t, func(http.ResponseWriter, *http.Request) { asked++ })
+	if _, err := c.ShowText("gt-x", []string{"gt-x", "--json"}); err == nil {
+		t.Error("ShowText with --json returned no error")
+	}
+	if asked != 0 {
+		t.Errorf("ShowText with a flag sent %d requests, want none", asked)
 	}
 }

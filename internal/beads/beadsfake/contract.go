@@ -34,11 +34,9 @@ func RunClientContract(t *testing.T, newClient func(t *testing.T) beads.Client) 
 	}
 }
 
-// RunShowTextContract checks that ShowText renders the issue as bd show prints
-// it: the id and title appear, and a missing id is an error. It is separate
-// from RunClientContract because a store with no bd to render through refuses
-// ShowText by design (trackerclient refuses with ErrShowText); such a store
-// does not run this suite and pins its refusal in its own tests.
+// RunShowTextContract checks that ShowText renders the issue's id and title,
+// and that a missing id is an error. The fake and bd render through bd's own
+// text; trackerclient renders one line from its Show. Each store runs it.
 func RunShowTextContract(t *testing.T, newClient func(t *testing.T) beads.Client) {
 	t.Helper()
 	t.Run("show text", func(t *testing.T) {

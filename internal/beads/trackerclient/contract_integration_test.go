@@ -44,9 +44,7 @@ func newTracker(t *testing.T, actor string, scope api.Scope) *trackerclient.Clie
 }
 
 // The adapter must behave like bd on every case the fake and bd are held to,
-// except the two suites it cannot run. RunShowTextContract is bd's terminal
-// rendering, which a tracker does not do: ShowText refuses with ErrShowText,
-// pinned in unit_test.go. RunCreatorOptionContract is a creator named in the
+// except the one suite it cannot run. RunCreatorOptionContract is a creator named in the
 // request: the tracker records the token's actor instead (see Client.Create),
 // and RunActorContract below pins who it records.
 //
@@ -56,6 +54,12 @@ func newTracker(t *testing.T, actor string, scope api.Scope) *trackerclient.Clie
 // close rules (unit_test.go).
 func TestIntegrationTrackerClientSatisfiesTheClientContract(t *testing.T) {
 	beadsfake.RunClientContract(t, func(t *testing.T) beads.Client { return newTracker(t, "town/crew/dipper", api.ScopeSeat) })
+}
+
+// The show-text suite runs against the tracker: ShowText renders the id and
+// title, and a missing id is an error.
+func TestIntegrationTrackerClientShowText(t *testing.T) {
+	beadsfake.RunShowTextContract(t, func(t *testing.T) beads.Client { return newTracker(t, "town/crew/dipper", api.ScopeSeat) })
 }
 
 func TestIntegrationTrackerClientSatisfiesTheActorContract(t *testing.T) {
