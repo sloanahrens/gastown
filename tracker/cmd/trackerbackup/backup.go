@@ -30,8 +30,7 @@ const (
 	// opens half a dump.
 	partialSuffix = ".partial"
 
-	defaultKeep  = 7
-	defaultPGBin = "/opt/homebrew/opt/postgresql@17/bin"
+	defaultKeep = 7
 )
 
 // run is trackerbackup. The DSN holds a password: it comes from the
@@ -47,7 +46,7 @@ func runWith(ctx context.Context, args []string, getenv func(string) string, std
 	fs.SetOutput(stderr)
 	dir := fs.String("dir", defaultDir(), "directory that holds the dumps; created 0700 when missing")
 	keep := fs.Int("keep", defaultKeep, "how many dumps to keep, tonight's included")
-	pgBin := fs.String("pg-bin", defaultPGBin, "directory holding pg_dump")
+	pgBin := fs.String("pg-bin", "", "directory holding pg_dump; empty uses the pg_dump on PATH")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -67,6 +66,7 @@ func runWith(ctx context.Context, args []string, getenv func(string) string, std
 		run:    r,
 		remove: os.Remove,
 		stdout: stdout,
+		stderr: stderr,
 	}
 	return b.Run(ctx)
 }
@@ -141,7 +141,38 @@ type backup struct {
 	run    runner
 	remove func(string) error
 	stdout io.Writer
+	stderr io.Writer
 }
+
+// dumpArgv is the pg_dump command. The DSN is passed without its password, so
+// argv, which every local user can list, holds no credential; the password
+// travels in PGPASSWORD (see dumpEnv). pgBin empty leaves pg_dump to PATH.
+func dumpArgv(pgBin, partial, dsnNoPassword string) []string {
+	name := "pg_dump"
+	if pgBin != "" {
+		name = filepath.Join(pgBin, "pg_dump")
+	}
+	return []string{name, "-Fc", "-f", partial, "-d", dsnNoPassword}
+}
+
+// dsnWithoutPassword is dsn with its password removed and every other setting
+// kept, so sslmode and the rest reach pg_dump. The error never quotes the DSN.
+func dsnWithoutPassword(dsn string) (string, error) {
+	if strings.Contains(dsn, "://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return "", errors.New("cannot use TRACKER_DSN as a connection string")
+		}
+		if u.User != nil {
+			u.User = url.User(u.User.Username())
+		}
+		return u.String(), nil
+	}
+	return keywordPassword.ReplaceAllString(dsn, ""), nil
+}
+
+// keywordPassword matches a password setting in a libpq keyword string.
+var keywordPassword = regexp.MustCompile(`(?i)\s*\bpassword\s*=\s*('[^']*'|"[^"]*"|\S+)`)
 
 // Run writes today's dump, publishes it only after pg_dump has exited 0 with a
 // non-empty file, then deletes the oldest dumps beyond keep. Any failure leaves
@@ -157,10 +188,22 @@ func (b *backup) Run(ctx context.Context) error {
 	if err := os.MkdirAll(b.dir, 0o700); err != nil {
 		return fmt.Errorf("create backup directory %s: %w", b.dir, err)
 	}
+	// One run at a time: a second run's stale-partial sweep would otherwise
+	// delete the partial this one is writing.
+	unlock, err := lockBackupDir(b.dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	b.removeStalePartials()
 
-	target := filepath.Join(b.dir, b.clock.Now().Format(dateLayout)+dumpSuffix)
+	now := b.clock.Now()
+	target := filepath.Join(b.dir, now.Format(dateLayout)+dumpSuffix)
 	partial := target + partialSuffix
+	noPassword, err := dsnWithoutPassword(b.dsn)
+	if err != nil {
+		return err
+	}
 
 	// The file is opened 0600 here rather than left to pg_dump, whose new file
 	// the umask would open to every local user; pg_dump truncates this one and
@@ -174,7 +217,7 @@ func (b *backup) Run(ctx context.Context) error {
 		return fmt.Errorf("create %s: %w", partial, err)
 	}
 
-	argv := []string{filepath.Join(b.pgBin, "pg_dump"), "-Fc", "-f", partial}
+	argv := dumpArgv(b.pgBin, partial, noPassword)
 	if err := b.run.Run(ctx, argv, dumpEnv(os.Environ(), creds)); err != nil {
 		_ = b.remove(partial)
 		return fmt.Errorf("pg_dump: %s", redact(err.Error(), b.dsn, creds.password))
@@ -188,15 +231,33 @@ func (b *backup) Run(ctx context.Context) error {
 		_ = b.remove(partial)
 		return fmt.Errorf("pg_dump exited 0 but wrote an empty dump at %s", partial)
 	}
+	// The dump is flushed to disk before it is published under its final name,
+	// so a crash cannot leave a .dump whose bytes never reached the disk.
+	if err := syncFile(partial); err != nil {
+		_ = b.remove(partial)
+		return fmt.Errorf("flush %s: %w", partial, err)
+	}
 	if err := os.Rename(partial, target); err != nil {
 		_ = b.remove(partial)
 		return fmt.Errorf("publish %s: %w", target, err)
 	}
-	if err := b.prune(); err != nil {
-		return err
+	// The dump is published, so a retention failure is a warning, not a failed
+	// run: the operator still gets the dump and the reason its old ones stayed.
+	if err := b.prune(now); err != nil && b.stderr != nil {
+		fmt.Fprintf(b.stderr, "trackerbackup: warning: %v (the dump was published)\n", err)
 	}
 	fmt.Fprintf(b.stdout, "wrote %s (%d bytes)\n", target, info.Size())
 	return nil
+}
+
+// syncFile flushes path's contents to stable storage.
+func syncFile(path string) error {
+	f, err := os.Open(path) //nolint:gosec // G304: path is the partial this run wrote
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }
 
 // removeStalePartials deletes dated .partial files a killed run left behind:
@@ -221,15 +282,19 @@ func (b *backup) removeStalePartials() {
 
 // prune deletes the oldest dumps beyond keep. A name qualifies only when it is
 // YYYY-MM-DD.dump and a real calendar date, so every other file in the
-// directory, a dump whose date does not parse included, is left alone.
-func (b *backup) prune() error {
+// directory, a dump whose date does not parse included, is left alone. A dump
+// dated after today is not a candidate and does not count toward keep, so a
+// future-dated file can never push today's dump out.
+func (b *backup) prune(now time.Time) error {
 	entries, err := os.ReadDir(b.dir)
 	if err != nil {
 		return fmt.Errorf("read backup directory %s: %w", b.dir, err)
 	}
+	today := dumpDate(now.Format(dateLayout) + dumpSuffix)
 	var dumps []string
 	for _, e := range entries {
-		if e.Type().IsRegular() && !dumpDate(e.Name()).IsZero() {
+		date := dumpDate(e.Name())
+		if e.Type().IsRegular() && !date.IsZero() && !date.After(today) {
 			dumps = append(dumps, e.Name())
 		}
 	}
@@ -321,15 +386,12 @@ var credentialPatterns = []struct {
 
 // redact removes the secrets from text that came from outside this process: a
 // child can echo the connection string, and a URI DSN carries the password
-// percent-encoded, so the escaped spellings are matched too. A secret shorter
-// than four bytes is matched only in credential position, because replacing it
-// everywhere would shred the message that explains the failure.
+// percent-encoded, so the escaped spellings are matched too. Every spelling is
+// replaced wherever it appears, however short: a masked word in an error line
+// costs less than a password left readable in one.
 func redact(text string, secrets ...string) string {
 	for _, secret := range secrets {
 		for _, s := range secretSpellings(secret) {
-			if len(s) < 4 {
-				continue
-			}
 			text = strings.ReplaceAll(text, s, "***")
 		}
 	}

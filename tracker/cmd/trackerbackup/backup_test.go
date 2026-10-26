@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -91,6 +92,7 @@ func newBackup(t *testing.T, fake *fakeDump, keep int) (*backup, *bytes.Buffer) 
 		run:    fake,
 		remove: os.Remove,
 		stdout: &stdout,
+		stderr: &bytes.Buffer{},
 	}, &stdout
 }
 
@@ -142,7 +144,7 @@ func TestRunWritesDatedDump(t *testing.T) {
 	// argv is visible to every local user in a process listing, so the
 	// credentials must not be in it.
 	for _, a := range fake.argv {
-		for _, secret := range []string{testPassword, testDSN, "postgres://"} {
+		for _, secret := range []string{testPassword, testDSN, "tracker:s3cr3t"} {
 			if strings.Contains(a, secret) {
 				t.Errorf("argv %q holds credential material %q", a, secret)
 			}
@@ -332,7 +334,7 @@ func TestPruneReportsRemoveFailure(t *testing.T) {
 	writeFile(t, b.dir, "2026-01-01.dump", "old")
 	writeFile(t, b.dir, "2026-01-02.dump", "newer")
 	b.remove = func(string) error { return errors.New("read-only file system") }
-	err := b.prune()
+	err := b.prune(testNow)
 	if err == nil || !strings.Contains(err.Error(), "delete old dump 2026-01-01.dump") {
 		t.Fatalf("prune error = %v, want it to name the dump it could not delete", err)
 	}
@@ -356,15 +358,12 @@ func TestRunWithFlags(t *testing.T) {
 	if want := filepath.Join(bin, "pg_dump"); fake.argv[0] != want {
 		t.Errorf("argv[0] = %q, want -pg-bin to choose %q", fake.argv[0], want)
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read -dir: %v", err)
+	dumps := dumpsIn(t, dir)
+	if len(dumps) != 1 {
+		t.Fatalf("-dir holds dumps %v, want one", dumps)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("-dir holds %d entries, want one dump", len(entries))
-	}
-	if !strings.Contains(stdout.String(), entries[0].Name()) {
-		t.Errorf("stdout = %q, want it to name %s", stdout.String(), entries[0].Name())
+	if !strings.Contains(stdout.String(), dumps[0]) {
+		t.Errorf("stdout = %q, want it to name %s", stdout.String(), dumps[0])
 	}
 }
 
@@ -372,6 +371,9 @@ func TestRunWithDefaultDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	fake := &fakeDump{body: []byte("dump")}
+	// The clock is read before the run, so a midnight between the run and the
+	// check cannot make the test name a different day's dump.
+	today := time.Now().Format(dateLayout)
 	var stdout, stderr bytes.Buffer
 	getenv := func(k string) string {
 		if k == "TRACKER_DSN" {
@@ -383,12 +385,8 @@ func TestRunWithDefaultDir(t *testing.T) {
 		t.Fatalf("runWith: %v (stderr %q)", err, stderr.String())
 	}
 	dir := filepath.Join(home, "gt-backups", "tracker")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("default -dir %s: %v", dir, err)
-	}
-	if len(entries) != 1 || entries[0].Name() != time.Now().Format(dateLayout)+dumpSuffix {
-		t.Fatalf("%s holds %v, want tonight's dump only", dir, entries)
+	if dumps := dumpsIn(t, dir); len(dumps) != 1 || dumps[0] != today+dumpSuffix {
+		t.Fatalf("%s holds dumps %v, want tonight's dump only", dir, dumps)
 	}
 }
 
@@ -523,10 +521,10 @@ func TestRedact(t *testing.T) {
 			want: "postgres://tracker:***@db.internal/tracker",
 		},
 		{
-			name:    "short password leaves the prose alone",
+			name:    "short password is masked wherever it appears",
 			text:    "abc is not a valid option",
 			secrets: []string{"abc"},
-			want:    "abc is not a valid option",
+			want:    "*** is not a valid option",
 		},
 		{
 			name:    "short password in credential position",
@@ -597,4 +595,159 @@ func TestLastLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The password is out of argv and in PGPASSWORD, and every other DSN setting,
+// sslmode included, reaches pg_dump in the -d argument (gt-p85pw.48).
+func TestRunKeepsTheDSNSettingsButNotThePassword(t *testing.T) {
+	t.Parallel()
+	fake := &fakeDump{body: []byte("dump")}
+	b, _ := newBackup(t, fake, 7)
+	b.dsn = "postgres://tracker:s3cr3t-Pa55w0rd@db.internal:5433/tracker?sslmode=verify-full"
+	if err := b.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	d := argValue(fake.argv, "-d")
+	if !strings.Contains(d, "sslmode=verify-full") {
+		t.Errorf("-d = %q, want the sslmode setting kept", d)
+	}
+	if strings.Contains(d, testPassword) {
+		t.Errorf("-d = %q holds the password", d)
+	}
+	if vals := envValues(fake.env, "PGPASSWORD"); len(vals) != 1 || vals[0] != testPassword {
+		t.Errorf("PGPASSWORD = %q, want the password once", vals)
+	}
+}
+
+// A keyword DSN loses only its password setting (gt-p85pw.48).
+func TestDsnWithoutPasswordKeywordForm(t *testing.T) {
+	t.Parallel()
+	got, err := dsnWithoutPassword("host=db port=5433 user=tracker password='s3cr t' dbname=tracker sslmode=require")
+	if err != nil {
+		t.Fatalf("dsnWithoutPassword: %v", err)
+	}
+	if strings.Contains(got, "password") || strings.Contains(got, "s3cr") || !strings.Contains(got, "sslmode=require") {
+		t.Errorf("keyword DSN without password = %q", got)
+	}
+}
+
+// A second run in the same directory finds the lock held and writes nothing
+// (gt-p85pw.48).
+func TestRunRefusesASecondRunInTheSameDir(t *testing.T) {
+	t.Parallel()
+	fake := &fakeDump{body: []byte("dump")}
+	b, _ := newBackup(t, fake, 7)
+	unlock, err := lockBackupDir(b.dir)
+	if err != nil {
+		t.Fatalf("lockBackupDir: %v", err)
+	}
+	defer unlock()
+	err = b.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "holds the lock") {
+		t.Fatalf("Run with the lock held = %v, want the lock refusal", err)
+	}
+	if fake.argv != nil {
+		t.Errorf("pg_dump ran while another run held the lock: %q", fake.argv)
+	}
+}
+
+// A retention failure after the dump is published is a warning, not a failed
+// run (gt-p85pw.48).
+func TestRunWarnsWhenRetentionFailsAfterPublish(t *testing.T) {
+	t.Parallel()
+	b, stdout := newBackup(t, &fakeDump{body: []byte("dump")}, 1)
+	writeFile(t, b.dir, "2026-01-01.dump", "old")
+	b.remove = func(name string) error {
+		if strings.HasSuffix(name, "2026-01-01.dump") {
+			return errors.New("read-only file system")
+		}
+		return os.Remove(name)
+	}
+	var stderr bytes.Buffer
+	b.stderr = &stderr
+	if err := b.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v, want success: the dump was published", err)
+	}
+	if !strings.Contains(stderr.String(), "warning") || !strings.Contains(stdout.String(), "wrote") {
+		t.Errorf("stderr %q, stdout %q: want the retention warning and the publish line", stderr.String(), stdout.String())
+	}
+}
+
+// Dumps dated after today are never pruned and do not count toward keep
+// (gt-p85pw.48).
+func TestPruneIgnoresFutureDumps(t *testing.T) {
+	t.Parallel()
+	b, _ := newBackup(t, &fakeDump{}, 2)
+	writeFile(t, b.dir, "2026-01-07.dump", "older")
+	writeFile(t, b.dir, "2026-01-08.dump", "yesterday")
+	writeFile(t, b.dir, "2026-01-09.dump", "today")
+	writeFile(t, b.dir, "2026-02-01.dump", "future")
+	if err := b.prune(testNow); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	for _, gone := range []string{"2026-01-07.dump"} {
+		if _, err := os.Stat(filepath.Join(b.dir, gone)); !os.IsNotExist(err) {
+			t.Errorf("%s survived keep=2", gone)
+		}
+	}
+	for _, kept := range []string{"2026-01-08.dump", "2026-01-09.dump", "2026-02-01.dump"} {
+		if _, err := os.Stat(filepath.Join(b.dir, kept)); err != nil {
+			t.Errorf("%s was pruned: %v", kept, err)
+		}
+	}
+}
+
+// The real execution path: execRunner runs a child, passes its environment,
+// and reports its failure. The child is this test binary, re-entered through
+// TestHelperPgDump, so no shell or pg_dump is needed (gt-p85pw.48).
+func TestExecRunnerRunsTheChild(t *testing.T) {
+	t.Parallel()
+	partial := filepath.Join(t.TempDir(), "d.dump.partial")
+	argv := []string{os.Args[0], "-test.run=^TestHelperPgDump$", "--", "-f", partial}
+	env := []string{"GO_WANT_HELPER_PROCESS=1"}
+	if err := (execRunner{}).Run(context.Background(), argv, env); err != nil {
+		t.Fatalf("execRunner.Run: %v", err)
+	}
+	if info, err := os.Stat(partial); err != nil || info.Size() == 0 {
+		t.Fatalf("child did not write the dump: %v", err)
+	}
+
+	failArgv := []string{os.Args[0], "-test.run=^TestHelperPgDump$", "--", "-f", partial}
+	err := (execRunner{}).Run(context.Background(), failArgv, []string{"GO_WANT_HELPER_PROCESS=1", "GO_HELPER_FAIL=1"})
+	if err == nil || !strings.Contains(err.Error(), "helper: no tracker") {
+		t.Errorf("failing child = %v, want its last stderr line", err)
+	}
+}
+
+// TestHelperPgDump is the child execRunner starts: it writes -f, or fails with
+// a stderr line when GO_HELPER_FAIL is set. It does nothing in a normal run.
+func TestHelperPgDump(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	if os.Getenv("GO_HELPER_FAIL") == "1" {
+		fmt.Fprintln(os.Stderr, "helper: no tracker database")
+		os.Exit(1)
+	}
+	if err := os.WriteFile(argValue(os.Args, "-f"), []byte("dump"), 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// dumpsIn lists the dump files in dir, leaving out the run lock.
+func dumpsIn(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), dumpSuffix) {
+			names = append(names, e.Name())
+		}
+	}
+	return names
 }
