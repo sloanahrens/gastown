@@ -4,11 +4,13 @@ import (
 	"os"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/testutil/unittier"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
+// The command runs the built gt in a temp town; the hermetic harness keeps the test binary off the
+// live town's state, as every package that can reach it must.
 func TestMain(m *testing.M) {
-	os.Exit(unittier.Main(m))
+	os.Exit(testutil.HermeticMain(m))
 }
 
 // TestJudgeSkipsWhatItCannotJudge: a run that times out or exits non-zero is skipped with its reason,
