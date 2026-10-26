@@ -415,15 +415,19 @@ else
 fi
 
 # polecat-image compiles gt from the working tree, so its gt-commit label (HEAD)
-# is only true of a tree with no changes. A scratch repo holding just the
-# Makefile shows the guard refusing an untracked file before go or docker runs,
-# and letting a clean tree on to the go build. The rig go.mod guard sits between
-# the two, so the clean tree is given a fixture town: the case checks the
-# clean-tree guard, not whether this host's town holds a rig checkout (gt-vw2qu).
+# is only true of a tree with no changes. A scratch repo holding the Makefile
+# and a compilable cmd/gt shows the guard refusing an untracked file before go
+# or docker runs, and letting a clean tree on to the go build. The rig go.mod
+# guard sits between the two, so the clean tree is given a fixture town: the
+# case checks the clean-tree guard, not whether this host's town holds a rig
+# checkout (gt-vw2qu).
 pdir="$(mktemp -d)"
 cp "$ROOT/Makefile" "$pdir/"
+mkdir -p "$pdir/cmd/gt"
+printf 'module example.invalid/scratch\n\ngo 1.21\n' >"$pdir/go.mod"
+printf 'package main\n\nfunc main() {}\n' >"$pdir/cmd/gt/main.go"
 git -C "$pdir" init -q
-git -C "$pdir" add Makefile
+git -C "$pdir" add Makefile go.mod cmd/gt/main.go
 git -C "$pdir" -c user.name=test -c user.email=test@example.invalid commit -q -m init
 echo 'package main' >"$pdir/scratch.go"
 drc=0
@@ -437,11 +441,18 @@ rm -f "$pdir/scratch.go"
 ptown="$(mktemp -d)"
 mkdir -p "$ptown/fx/mayor/rig"
 printf 'module example.invalid/fx\n\ngo 1.21\n' >"$ptown/fx/mayor/rig/go.mod"
-cout=$(make -C "$pdir" --no-print-directory polecat-image BD_SRC=/nonexistent POLE_TOWN="$ptown" 2>&1) || true
-if grep -q -F 'go build' <<<"$cout" && ! grep -q -F 'uncommitted or untracked' <<<"$cout"; then
+# make echoes a recipe line before running it, so a match on `go build` in the
+# output says only that the line was reached; the binary the recipe writes at
+# its -o path shows the build ran. BD_SRC=/nonexistent then fails the next
+# line, which is why a run that got this far still exits non-zero (gt-t2smk).
+crc=0
+cout=$(make -C "$pdir" --no-print-directory polecat-image BD_SRC=/nonexistent POLE_TOWN="$ptown" 2>&1) || crc=$?
+built=no
+if [[ -x "$pdir/deploy/polecat/bin/gt" ]]; then built=yes; fi
+if [[ "$crc" == 2 && "$built" == yes ]] && ! grep -q -F 'uncommitted or untracked' <<<"$cout"; then
   pass "polecat-image lets a clean tree past its guard to the build"
 else
-  fail "polecat-image lets a clean tree past its guard to the build" "$cout"
+  fail "polecat-image lets a clean tree past its guard to the build (rc=$crc, binary=$built)" "$cout"
 fi
 rm -rf "$pdir" "$ptown"
 
