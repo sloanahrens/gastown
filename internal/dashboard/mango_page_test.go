@@ -1081,87 +1081,373 @@ func TestMangoStalePanelGreysTheTrend(t *testing.T) {
 	}
 }
 
-// TestMangoBestBoxColumnKeepsItsWidth holds the Mango table to a layout that
-// cannot squeeze its last column: a fixed layout sizes every column from the
-// share the stylesheet gives it, not from what a cell holds, so a long target
-// label or condition text breaks inside its own column and the row stays in
-// the panel (gt-6q7zj). The unit tier has no browser to measure the row, so
-// the declarations are the claim; the header row and a target row are driven
-// to show the columns and cells those declarations govern.
-func TestMangoBestBoxColumnKeepsItsWidth(t *testing.T) {
+// TestMangoRowFitsThePanelAtTheWidthItIsReadAt lays the Mango table out the way
+// the page declares and measures the text each body cell draws against the
+// column it lands in, at the 1760px page the panel is read at: the table fills
+// its panel and lays out fixed, so a column takes its declared share and no
+// cell's text can size it, and every body cell breaks its text, so no unbroken
+// run is wider than its column and nothing crosses the panel's right edge. The
+// best box takes the widest column because it carries the row's longest prose,
+// so a condition wraps as words rather than a character a line (gt-6q7zj).
+func TestMangoRowFitsThePanelAtTheWidthItIsReadAt(t *testing.T) {
 	t.Parallel()
 
-	if got := cssDecls(t, "mgtable")["table-layout"]; got != "fixed" {
-		t.Errorf("the Mango table lays out as %q, want fixed so a cell's text sizes no column", got)
+	table := cssDecls(t, "mgtable")
+	if got := table["table-layout"]; got != "fixed" {
+		t.Errorf("the Mango table lays out %q, want fixed so a cell's text sizes no column", got)
+	}
+	if got := table["width"]; got != "100%" {
+		t.Errorf("the Mango table takes %q of the panel, want 100%% so its shares are the whole row", got)
 	}
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh",
-		mangoPageTarget("rejected_before_landing", 48, false, "model = opus and attempts in q4", 96, 0.42, 0.25, MangoEarning))})
+	target := mangoPageTarget("rejected_before_landing", 48, false, "model = opus and attempts in q4", 96, 0.42, 0.25, MangoEarning)
+	target["label"] = "Landings rejected before they land"
+	target["conditions"] = []any{
+		map[string]any{"text": "model = opus", "share": 0.12, "narrows": true},
+		map[string]any{"text": "attempts in q4", "share": 0.18, "narrows": true},
+		map[string]any{"text": "rig = gastown", "share": 0.71, "narrows": false},
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
 
-	// Every header cell names its column, and each named column takes a share
-	// of the row. The shares add up to the row, so a column keeps the width it
-	// was given instead of taking whatever the others leave.
-	const columns = 6
-	total, boxWidth, boxAt := 0.0, -1.0, -1
-	for i := 0; i < columns; i++ {
-		th := dom.descend(t, "mango", 0, 0, 0, i)
-		class := strings.Fields(th.Class)
-		if len(class) != 1 {
-			t.Fatalf("the Mango header's column %d is drawn as %q, want one class naming the column", i, th.Class)
+	widths, boxAt := mangoColumnWidths(t, dom, 1760)
+
+	// The box draws the panel's longest prose — a condition runs to 240
+	// characters where a label stops at 60 (mango.go) — so no other column may
+	// take the room it needs to wrap in.
+	for i, w := range widths {
+		if w > widths[boxAt]+0.5 {
+			t.Errorf("the %s column takes %gpx of the row, more than the best box's %gpx, though the box carries its longest prose", mangoColumnName(t, dom, i), w, widths[boxAt])
 		}
-		width := cssDecls(t, class[0])["width"]
-		pct, err := strconv.ParseFloat(strings.TrimSuffix(width, "%"), 64)
-		if err != nil || !strings.HasSuffix(width, "%") {
-			t.Fatalf("the Mango column %q takes width %q, want a share of the row", th.Text, width)
+	}
+
+	// Every cell of every row keeps its text inside its column at the page's
+	// font. A run the cell cannot break, wider than the space left by its
+	// padding, is text past the panel's right edge.
+	pad := boxSide(t, topRule(t, ".mgtable td"), "padding", "right")
+	lastPad := boxSide(t, topRule(t, ".mgtable td:last-child"), "padding", "right")
+	base := mangoText{whiteSpace: "normal", font: cssPxValue(t, declOf(t, topRule(t, "html,body"), "font"))}
+	for r, row := range mangoRows(t, dom) {
+		if len(row) != len(widths) {
+			t.Fatalf("body row %d draws %d cells, want the header's %d columns", r, len(row), len(widths))
 		}
-		total += pct
+		for c, cell := range row {
+			avail := widths[c] - pad
+			if c == len(row)-1 {
+				avail = widths[c] - lastPad
+			}
+			for _, run := range cell.runs(t, base) {
+				text := float64(len([]rune(run.Text))) * run.Font * monospaceAdvance
+				if text > avail+0.5 {
+					t.Errorf("body row %d column %d draws the unbroken %q in %gpx, wider than the %gpx its cell leaves: the text would cross the panel's right edge", r, c, run.Text, text, avail)
+				}
+			}
+		}
+	}
+}
+
+// mangoColumnWidths reads the Mango table's columns in pixels at a page
+// viewport: each header cell names a class, that class declares its share of
+// the row, and the table is as wide as its panel. The shares must add up to the
+// row, or a column takes what the others leave and the box's room is a guess.
+// It returns the widths and the best box's index.
+func mangoColumnWidths(t *testing.T, dom *pageDOM, viewport float64) ([]float64, int) {
+	t.Helper()
+
+	const expr = `JSON.stringify((function () {
+  var table = __byId["mango"].children.find(function (c) { return String(c.className).split(" ").indexOf("mgtable") >= 0; });
+  return table.children[0].children[0].children.map(function (th) { return {text: th.textContent, class: th.className}; });
+})())`
+	v, err := dom.vm.RunString(expr)
+	if err != nil {
+		t.Fatalf("reading the Mango header: %v", err)
+	}
+	var head []drawn
+	if err := json.Unmarshal([]byte(v.String()), &head); err != nil {
+		t.Fatalf("reading the Mango header: %v", err)
+	}
+	if len(head) == 0 {
+		t.Fatal("the Mango table draws no header")
+	}
+
+	tablePx := mangoTableWidth(t, viewport)
+	widths := make([]float64, len(head))
+	boxAt, total := -1, 0.0
+	for i, th := range head {
+		share := 0.0
+		for _, class := range strings.Fields(th.Class) {
+			if w, ok := cssDecls(t, class)["width"]; ok {
+				pct, err := strconv.ParseFloat(strings.TrimSuffix(w, "%"), 64)
+				if err != nil || !strings.HasSuffix(w, "%") {
+					t.Fatalf("the Mango column %q takes width %q, want a share of the row", th.Text, w)
+				}
+				share = pct
+			}
+		}
+		if share == 0 {
+			t.Fatalf("the Mango header's column %q is drawn as %q and declares no share of the row", th.Text, th.Class)
+		}
+		widths[i] = tablePx * share / 100
+		total += share
 		if th.Text == "best box" {
-			boxWidth, boxAt = pct, i
+			boxAt = i
 		}
 	}
 	if math.Abs(total-100) > 0.5 {
-		t.Errorf("the Mango columns take %g%% of the row, want 100%%: the widths are the layout, not a hint the content can override", total)
+		t.Errorf("the Mango columns take %g%% of the row, want 100%%, or the row does not fill the panel", total)
 	}
 	if boxAt < 0 {
 		t.Fatal("the Mango header names no best box column")
 	}
-	// The box is prose drawn a few lines deep; a column under an eighth of the
-	// row leaves it too narrow to break into readable lines.
-	if boxWidth < 12.5 {
-		t.Errorf("the best box column takes %g%% of the row, want at least an eighth", boxWidth)
-	}
-
-	// Every cell that holds prose carries the rule that breaks it, so the
-	// width above is kept rather than overflowed.
-	for _, c := range []struct{ class, prop, want string }{
-		{"jvname", "white-space", "normal"},
-		{"mgbox", "overflow-wrap", "anywhere"},
-		{"jvchip", "white-space", "normal"},
-		{"mgcond", "flex-wrap", "wrap"},
-	} {
-		if got := cssDecls(t, c.class)[c.prop]; got != c.want {
-			t.Errorf(".%s sets %s:%q, want %q, so its text breaks inside its column instead of running past the panel", c.class, c.prop, got, c.want)
-		}
-	}
-
-	// The row draws the label and the box in the cells those classes mark, so
-	// the rules above style the row the page builds rather than a class no
-	// element wears.
-	if label := mangoCell(t, dom, 1, 0); !hasClass(label, "jvname") {
-		t.Errorf("the target's label is drawn as %q, want the jvname class its wrap rule is set through", label.Class)
-	}
-	if box := mangoCell(t, dom, 1, boxAt); !hasClass(box, "mgbox") {
-		t.Errorf("the target's best box is drawn as %q, want the mgbox class its break rule is set through", box.Class)
-	}
+	return widths, boxAt
 }
 
-// cssDecls returns the declarations the page's stylesheet sets on class, keyed
-// by property: every rule whose selector names the class contributes, later
-// rules last, so a Mango rule written to override a panel-wide one is read the
-// way the browser applies it. A test names the class the page draws rather
-// than the text a selector is spelled in.
-func cssDecls(t *testing.T, class string) map[string]string {
+// mangoColumnName is the header text of the Mango table's column, for a
+// failure that names the column rather than its index.
+func mangoColumnName(t *testing.T, dom *pageDOM, i int) string {
+	t.Helper()
+
+	return dom.descend(t, "mango", 0, 0, 0, i).Text
+}
+
+// mangoTableWidth is the width the Mango table gets at a page viewport, read
+// from the page's own layout: *{box-sizing:border-box} makes body's 1500px cap
+// include its 16px of padding, .grid splits what is left after its 12px gap
+// between its two tracks, and the Mango section's border and its .body's
+// padding sit between the left column and the table. The Mango panel is in the
+// left column.
+func mangoTableWidth(t *testing.T, viewport float64) float64 {
+	t.Helper()
+
+	body := topRule(t, "body")
+	content := math.Min(viewport, cssPxValue(t, declOf(t, body, "max-width"))) -
+		boxSide(t, body, "padding", "left") - boxSide(t, body, "padding", "right")
+	grid := topRule(t, ".grid")
+	tracks := frTracks(t, declOf(t, grid, "grid-template-columns"))
+	left := (content - cssPxValue(t, declOf(t, grid, "gap"))) * tracks[0] / (tracks[0] + tracks[1])
+	panel := topRule(t, "section")
+	pad := topRule(t, ".body")
+	inset := 2*cssPxValue(t, declOf(t, panel, "border")) + boxSide(t, pad, "padding", "left") + boxSide(t, pad, "padding", "right")
+	return left - inset
+}
+
+// mangoNode is one element the Mango table draws, with the classes of the
+// elements it sits inside, outermost first, and the text its subtree holds.
+type mangoNode struct {
+	Classes []string    `json:"classes"`
+	Text    string      `json:"text"`
+	All     string      `json:"all"`
+	Kids    []mangoNode `json:"kids"`
+}
+
+// mangoText is the text style an element draws its content with: a white-space
+// rule that keeps a line together, an overflow-wrap that lets one break
+// anywhere, and the font size it sets. The properties inherit, so a node starts
+// from its parent's and applies what its own classes declare.
+type mangoText struct {
+	whiteSpace string
+	wrap       string
+	font       float64
+}
+
+// mangoRun is one stretch of text the browser cannot break across lines, at the
+// font size it draws it.
+type mangoRun struct {
+	Text string
+	Font float64
+}
+
+// apply returns the style the node's classes give it, outermost class first, as
+// the cascade serves an inner rule over the outer one it was written against.
+func (s mangoText) apply(t *testing.T, classes []string) mangoText {
+	t.Helper()
+
+	for _, class := range classes {
+		decls := cssDecls(t, class)
+		if v, ok := decls["white-space"]; ok {
+			s.whiteSpace = v
+		}
+		if v, ok := decls["overflow-wrap"]; ok {
+			s.wrap = v
+		}
+		if v, ok := decls["font-size"]; ok {
+			s.font = cssPxValue(t, v)
+		}
+	}
+	return s
+}
+
+// runs is every stretch of the node's text the browser cannot break: a nowrap
+// element keeps its whole content on one line, a leaf breaks anywhere when its
+// style lets it, and otherwise breaks at its longest word.
+func (n mangoNode) runs(t *testing.T, s mangoText) []mangoRun {
+	t.Helper()
+
+	s = s.apply(t, n.Classes)
+	if s.whiteSpace == "nowrap" && strings.TrimSpace(n.All) != "" {
+		return []mangoRun{{Text: n.All, Font: s.font}}
+	}
+	if len(n.Kids) == 0 {
+		text := strings.TrimSpace(n.Text)
+		switch {
+		case text == "":
+			return nil
+		case s.wrap == "anywhere":
+			return []mangoRun{{Text: string([]rune(text)[:1]), Font: s.font}}
+		}
+		longest := ""
+		for _, word := range strings.Fields(text) {
+			if len([]rune(word)) > len([]rune(longest)) {
+				longest = word
+			}
+		}
+		return []mangoRun{{Text: longest, Font: s.font}}
+	}
+	var out []mangoRun
+	for _, kid := range n.Kids {
+		out = append(out, kid.runs(t, s)...)
+	}
+	return out
+}
+
+// mangoRows reads every body cell of the Mango table as the element tree the
+// page built, so a test measures the row the page draws rather than the rules
+// it draws it from.
+func mangoRows(t *testing.T, dom *pageDOM) [][]mangoNode {
+	t.Helper()
+
+	const expr = `JSON.stringify((function () {
+  var table = __byId["mango"].children.find(function (c) { return String(c.className).split(" ").indexOf("mgtable") >= 0; });
+  return table.children[1].children.map(function (tr) {
+    return tr.children.map(function (td) {
+      return (function walk(n, chain) {
+        var here = chain.concat(String(n.className || "").split(" ").filter(function (x) { return x; }));
+        return {
+          classes: here,
+          text: n.children.length ? "" : String(n.textContent || ""),
+          all: String(n.textContent || ""),
+          kids: n.children.map(function (c) { return walk(c, here); })
+        };
+      })(td, []);
+    });
+  });
+})())`
+	v, err := dom.vm.RunString(expr)
+	if err != nil {
+		t.Fatalf("reading the Mango table's rows: %v", err)
+	}
+	var rows [][]mangoNode
+	if err := json.Unmarshal([]byte(v.String()), &rows); err != nil {
+		t.Fatalf("reading the Mango table's rows: %v", err)
+	}
+	return rows
+}
+
+// monospaceAdvance is one monospace character in ems. The page's font stack is
+// monospace and Menlo, its widest named face, advances 0.6em, so measuring at
+// 0.6em measures the text no narrower than any face draws it.
+const monospaceAdvance = 0.6
+
+// topRule returns one rule's declarations from the top level of the page's
+// stylesheet. A rule inside an @media block is another viewport's layout and is
+// skipped.
+func topRule(t *testing.T, sel string) string {
+	t.Helper()
+
+	var found string
+	for _, rule := range strings.Split(pageStyle(t), "}") {
+		s, body, ok := strings.Cut(rule, "{")
+		if ok && strings.TrimSpace(s) == sel {
+			found = body
+		}
+	}
+	if found == "" {
+		t.Fatalf("index.html has no %s rule", sel)
+	}
+	return found
+}
+
+// declOf returns one property of a rule's declarations.
+func declOf(t *testing.T, decls, prop string) string {
+	t.Helper()
+
+	for _, decl := range strings.Split(decls, ";") {
+		if k, v, ok := strings.Cut(decl, ":"); ok && strings.TrimSpace(k) == prop {
+			return strings.TrimSpace(v)
+		}
+	}
+	t.Fatalf("no %s in %q", prop, decls)
+	return ""
+}
+
+// boxSide returns one side of a box's padding or border: a longhand
+// declaration wins over the shorthand, which expands as CSS writes it.
+func boxSide(t *testing.T, decls, prop, side string) float64 {
+	t.Helper()
+
+	if strings.Contains(decls, prop+"-"+side+":") {
+		return cssPxValue(t, declOf(t, decls, prop+"-"+side))
+	}
+	fields := strings.Fields(declOf(t, decls, prop))
+	switch len(fields) {
+	case 1:
+		return cssPxValue(t, fields[0])
+	case 2:
+		fields = []string{fields[0], fields[1], fields[0], fields[1]}
+	case 3:
+		fields = []string{fields[0], fields[1], fields[2], fields[1]}
+	}
+	at := map[string]int{"top": 0, "right": 1, "bottom": 2, "left": 3}[side]
+	return cssPxValue(t, fields[at])
+}
+
+// frTracks reads the share of each track in a grid-template-columns value.
+func frTracks(t *testing.T, template string) []float64 {
+	t.Helper()
+
+	var out []float64
+	for i := 0; i < len(template); i++ {
+		if !strings.HasPrefix(template[i:], "fr") {
+			continue
+		}
+		j := i
+		for j > 0 && (template[j-1] >= '0' && template[j-1] <= '9' || template[j-1] == '.') {
+			j--
+		}
+		n, err := strconv.ParseFloat(template[j:i], 64)
+		if err != nil {
+			t.Fatalf("reading the tracks of %q: %v", template, err)
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		t.Fatalf("grid-template-columns %q declares no track", template)
+	}
+	return out
+}
+
+// cssPxValue reads a declaration's leading pixel measurement: "1500px" is 1500,
+// "1px solid var(--line)" is 1, and a unitless "0" is 0 as CSS reads it.
+func cssPxValue(t *testing.T, v string) float64 {
+	t.Helper()
+
+	if strings.TrimSpace(v) == "0" {
+		return 0
+	}
+	end := strings.IndexFunc(v, func(r rune) bool { return (r < '0' || r > '9') && r != '.' })
+	if end <= 0 || !strings.HasPrefix(v[end:], "px") {
+		t.Fatalf("%q is not a pixel measurement", v)
+	}
+	n, err := strconv.ParseFloat(v[:end], 64)
+	if err != nil {
+		t.Fatalf("%q is not a pixel measurement: %v", v, err)
+	}
+	return n
+}
+
+// pageStyle is index.html's stylesheet with its comments removed, so a rule can
+// be read without a comment's braces or semicolons interfering.
+func pageStyle(t *testing.T) string {
 	t.Helper()
 
 	page := string(indexHTML)
@@ -1173,17 +1459,26 @@ func cssDecls(t *testing.T, class string) map[string]string {
 	for {
 		start := strings.Index(css, "/*")
 		if start < 0 {
-			break
+			return css
 		}
 		end := strings.Index(css[start:], "*/")
 		if end < 0 {
-			break
+			return css
 		}
 		css = css[:start] + css[start+end+2:]
 	}
+}
+
+// cssDecls returns the declarations the page's stylesheet sets on class, keyed
+// by property: every rule whose selector names the class contributes, later
+// rules last, so a Mango rule written to override a panel-wide one is read the
+// way the browser applies it. A test names the class the page draws rather
+// than the text a selector is spelled in.
+func cssDecls(t *testing.T, class string) map[string]string {
+	t.Helper()
 
 	decls := map[string]string{}
-	for _, rule := range strings.Split(css, "}") {
+	for _, rule := range strings.Split(pageStyle(t), "}") {
 		sel, body, ok := strings.Cut(rule, "{")
 		if !ok || !selectsClass(sel, class) {
 			continue
@@ -1199,11 +1494,16 @@ func cssDecls(t *testing.T, class string) map[string]string {
 	return decls
 }
 
-// selectsClass reports whether one selector names class as a whole class, so
-// .mgbox matches a selector and .mgboxes does not.
+// selectsClass reports whether a selector's subject — its last compound, the
+// element the rule styles — names class as a whole class: .mgtable .mgbox
+// styles the box and not the table, and .mgboxes is not .mgbox.
 func selectsClass(sel, class string) bool {
-	for _, token := range strings.Fields(sel) {
-		for _, name := range strings.Split(token, ".") {
+	for _, one := range strings.Split(sel, ",") {
+		fields := strings.Fields(one)
+		if len(fields) == 0 {
+			continue
+		}
+		for _, name := range strings.Split(fields[len(fields)-1], ".") {
 			if name == class {
 				return true
 			}
