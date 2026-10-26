@@ -28,10 +28,11 @@
 #   make presubmit         gt done's pre-submit check (gt-ssyxd): lint, `go build
 #                          ./...`, then `go test` of only the packages the branch
 #                          changed against origin/main and of the tree-wide guard
-#                          tests its changed paths trigger (gt-ydzwb). The
-#                          landing worker runs `make gate` on the merged tree, so
-#                          this is the cheap first look, not the gate. No
-#                          containers, no slot.
+#                          tests its changed paths trigger (gt-ydzwb), then the
+#                          error returns the branch adds with no unit test
+#                          behind them (gt-b9j3o.5). The landing worker runs
+#                          `make gate` on the merged tree, so this is the cheap
+#                          first look, not the gate. No containers, no slot.
 #   make test-slow         the post-landing check: the gate, then the shell
 #                          tests (scripts/test-makefile.sh, which `make
 #                          test-makefile` also runs alone), with
@@ -457,6 +458,12 @@ tier-check:
 # internal/cmd and internal/polecat take minutes each, the guard test inside
 # them a second. Otherwise a branch that breaks a guard learns it from the
 # landing gate minutes later, which is what gt-ydzwb exists to stop.
+#
+# The profile the changed packages' test run writes is judged too
+# (internal/presubmit, gt-b9j3o.5): an error return the branch adds that no
+# unit test executes fails here rather than as an om finding at landing. That
+# run passes -coverprofile, which go test cannot cache, so the changed
+# packages' tests rerun even when nothing else about them changed.
 # PRESUBMIT_BASE is the ref the branch is compared against.
 PRESUBMIT_BASE ?= origin/main
 presubmit: LINT_RUNNER_FLAGS := --allow-serial-runners
@@ -468,15 +475,21 @@ presubmit: lint
 	@for m in $(TESTED_MODULES); do if ! git diff --quiet $(PRESUBMIT_BASE)...HEAD -- "$$m"; then echo "presubmit: vet and tests in $$m" >&2; (cd "$$m" && go vet ./... && GT_TEST_DOCKER=0 go test -timeout 10m ./...) || { echo "presubmit: FAILED at tests ($$m)" >&2; exit 1; }; fi; done
 	@pkgs=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE)) || { echo "presubmit: FAILED computing the changed packages against $(PRESUBMIT_BASE)" >&2; exit 1; }; \
 	guards=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE) -guards) || { echo "presubmit: FAILED computing the tree-wide guard tests against $(PRESUBMIT_BASE)" >&2; exit 1; }; \
+	cover=; \
 	if [ -z "$$pkgs" ] && [ -z "$$guards" ]; then echo "presubmit: neither a Go package nor a tree-wide guard input changed against $(PRESUBMIT_BASE); no tests to run" >&2; \
 	else \
 		if [ -n "$$pkgs" ]; then \
+			cover=$$(mktemp "$${TMPDIR:-/tmp}/gt-presubmit-cover.XXXXXX") || { echo "presubmit: FAILED making room for the cover profile" >&2; exit 1; }; \
+			trap 'rm -f "$$cover"' EXIT; \
 			echo "presubmit: go test of the changed packages:" $$pkgs >&2; \
-			GT_TEST_DOCKER=0 go test -timeout 10m $$pkgs || { echo "presubmit: FAILED at tests" >&2; exit 1; }; \
+			GT_TEST_DOCKER=0 go test -timeout 10m -coverprofile="$$cover" $$pkgs || { echo "presubmit: FAILED at tests" >&2; exit 1; }; \
 		fi; \
 		if [ -n "$$guards" ]; then \
 			echo "presubmit: go test of the tree-wide guard tests:" $$guards >&2; \
 			GT_TEST_DOCKER=0 go test -timeout 10m $$guards || { echo "presubmit: FAILED at the tree-wide guard tests" >&2; exit 1; }; \
+		fi; \
+		if [ -n "$$cover" ]; then \
+			go run ./internal/presubmit/cmd/errbranch -base $(PRESUBMIT_BASE) -cover "$$cover" || { echo "presubmit: FAILED at the error-branch check" >&2; exit 1; }; \
 		fi; \
 	fi; \
 	echo "presubmit: PASSED in $$(( $$(date +%s) - $(GATE_START) ))s wall" >&2
