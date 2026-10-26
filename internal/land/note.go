@@ -145,6 +145,14 @@ func CountRejections(notes string) int {
 	return len(rejectionBlockRE.FindAllStringIndex(notes, -1))
 }
 
+// reviewAttempt is the rework attempt a verdict on notes belongs to: the
+// rejections the bead carries, plus one. The reviews log, the rounds ledger
+// and the rejection note itself all read the number from here, so a landing's
+// round names the same attempt everywhere (gt-yphcl).
+func reviewAttempt(notes string) int {
+	return CountRejections(notes) + 1
+}
+
 // rejectionBlockRE finds a rejection block's header. The marker must open a
 // line: findings, reasons and gate tails are agent-supplied text, and a
 // marker quoted inside one of them is content, not a block (gt-9bioi.1).

@@ -144,8 +144,12 @@ type Lander struct {
 	// Reviews, when set, receives one line per om verdict that judged a tree,
 	// the log the dashboard's rework table reads. Nil means off (gt-mctxx).
 	Reviews *ReviewsFile
-	Out     io.Writer
-	Now     func() time.Time
+	// RoundsDir, when set, holds one rounds-<bead>.json per landing: the
+	// findings each om round raised and what became of them, the history om
+	// reads through --rounds-file (gt-yphcl). Empty means off.
+	RoundsDir string
+	Out       io.Writer
+	Now       func() time.Time
 	// Followups, when set, is the beads surface the post-landing follow-up
 	// feed files through: a landing om approved at or above the rig's bar gets
 	// shaped beads for the minor findings that were not worth blocking on, or a
@@ -943,11 +947,26 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict, re
 	if err != nil {
 		l.logf("%s: could not read the review bar for the reviews log (%v); it is logged as 0", w.BeadID, err)
 	}
-	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: CountRejections(issue.Notes) + 1,
+	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: reviewAttempt(issue.Notes),
 		Score: v.Score, Verdict: v.Verdict, Rejected: rejected, Agent: w.Agent, Findings: len(v.Findings), Bar: bar, At: l.now().UTC()}
 	if err := l.Reviews.Append(rec); err != nil {
 		l.logf("%s: could not append to the reviews log (%v); the landing is unaffected", w.BeadID, err)
 		l.commentReviewLogFailure(w, rec, err)
+	}
+}
+
+// logRounds records this round's findings in the landing's rounds ledger, the
+// history om reads through --rounds-file. The round is the attempt the reviews
+// log records, taken from the same read, and a ledger write never holds a
+// landing: the record is the landing's history, not its precondition
+// (gt-yphcl).
+func (l *Lander) logRounds(issue *beads.Issue, w Work, v Verdict) {
+	if l.RoundsDir == "" || (v.Verdict != VerdictApprove && v.Verdict != VerdictRequestChanges) {
+		return
+	}
+	ledger := RoundsLedger{OutDir: l.RoundsDir, Bead: w.BeadID, Now: l.now}
+	if err := ledger.Append(reviewAttempt(issue.Notes), w.Head, v.Findings); err != nil {
+		l.logf("%s: could not record the round in the rounds ledger (%v); the landing is unaffected", w.BeadID, err)
 	}
 }
 
@@ -1371,6 +1390,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// approval they bounce is logged as the rejection it is (gt-vu18r).
 	findingsRej := findingsRejection(verdict)
 	l.logReview(issue, w, dir, verdict, findingsRej != nil)
+	l.logRounds(issue, w, verdict)
 	l.commentVerdict(w, verdict, reviewStart, time.Now())
 	if verdict.Verdict == VerdictRequestChanges {
 		rej := &Rejection{Kind: RejectReview, Rework: true, Reason: fmt.Sprintf("om requested changes (score %.2f, %d finding(s))", verdict.Score, len(verdict.Findings))}
@@ -2016,7 +2036,7 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		rej.RecordErr = err
 		return rej
 	}
-	attempt := CountRejections(issue.Notes) + 1
+	attempt := reviewAttempt(issue.Notes)
 	if repeat {
 		attempt = recorded.Attempt
 	}

@@ -467,6 +467,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		return nil, fmt.Errorf("landing work root: %w", err)
 	}
 	var reviewer land.Reviewer = land.SkipReviewer{}
+	// The rig's om directory holds the transient verdict files and the rounds
+	// ledgers that outlive them, both named after the work bead (gt-yphcl).
+	omDir := filepath.Join(townRoot, ".runtime", "landing-om", rigName)
 	if landingReviewEnabled(d.patrolConfig) {
 		home, _ := os.UserHomeDir()
 		omPath := resolveOMPath(cfg.OMPath, exec.LookPath, home)
@@ -474,7 +477,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			d.logger.Printf("landing_worker: %s: WARNING om not found at %s (%v); landings will record om_verdict error:<reason> until it is", rigName, omPath, err)
 		}
 		d.logger.Printf("landing_worker: %s: om review on (%s)", rigName, omPath)
-		reviewer = land.OMReviewer{Path: omPath, OutDir: filepath.Join(townRoot, ".runtime", "landing-om", rigName),
+		reviewer = land.OMReviewer{Path: omPath, OutDir: omDir,
 			Timeout: landingWorkerDuration(cfg.OMTimeoutStr, land.DefaultOMTimeout)}
 	} else {
 		d.logger.Printf("landing_worker: %s: om review OFF (patrols.landing_worker.review=false); landings record om_verdict skipped", rigName)
@@ -488,6 +491,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Beads:              bd,
 		Landings:           landings,
 		Reviews:            land.TownReviewsFile(townRoot),
+		RoundsDir:          omDir,
 		Out:                out,
 		RangeChecks:        []land.RangeCheck{land.AttributionCheck},
 		ReviewErrorRejects: true,
