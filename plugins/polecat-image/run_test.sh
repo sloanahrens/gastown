@@ -199,13 +199,21 @@ fi
 STUB
 cat >"$BIN/crane" <<'STUB'
 #!/usr/bin/env bash
-# `crane push --insecure <tarball> <ref>`: each call is recorded in crane, with
-# a missing-tarball line first when the docker save stub wrote nothing (or the
-# plugin removed it too early). crane-fail holds the message of a push that
-# fails.
-[ "${1:-}" = push ] || { echo "unexpected crane call: $*" >&2; exit 2; }
-[ -s "${3:-}" ] || echo "missing-tarball ${4:-}" >>"$STUB_STATE/crane"
+# `crane push --insecure <tarball> <ref>` and `crane tag --insecure <ref> <tag>`:
+# each call is recorded in crane, with a missing-tarball line first when the
+# docker save stub wrote nothing (or the plugin removed it too early) for a push.
+# crane-fail holds the message of a call that fails.
+case "${1:-}" in
+  push) [ -s "${3:-}" ] || echo "missing-tarball ${4:-}" >>"$STUB_STATE/crane" ;;
+  tag) ;;
+  *) echo "unexpected crane call: $*" >&2; exit 2 ;;
+esac
 echo "$*" >>"$STUB_STATE/crane"
+# crane-tag-fail holds the message of a crane tag call that fails; a push still works.
+if [ "${1:-}" = tag ] && [ -f "$STUB_STATE/crane-tag-fail" ]; then
+  cat "$STUB_STATE/crane-tag-fail" >&2
+  exit 1
+fi
 if [ -f "$STUB_STATE/crane-fail" ]; then
   cat "$STUB_STATE/crane-fail" >&2
   exit 1
@@ -594,6 +602,8 @@ echo "--- POLECAT_IMAGE_REGISTRY publishes the image it builds (gt-mm7q6)"
 # given; the tarball path varies, so only the destination is compared.
 tags_made() { if [ -f "$STUB_STATE/tags" ]; then sed 's/^tag //' "$STUB_STATE/tags" | tr '\n' ' '; fi; }
 pushes() { if [ -f "$STUB_STATE/crane" ]; then grep '^push ' "$STUB_STATE/crane" | sed 's/^push --insecure [^ ]* //' | tr '\n' ' '; fi; }
+# retags lists the registry-side tags crane tag made: "<pushed ref> <new tag>".
+retags() { if [ -f "$STUB_STATE/crane" ]; then grep '^tag ' "$STUB_STATE/crane" | sed 's/^tag --insecure //' | tr '\n' ',' ; fi; }
 
 new_case regunset abc1234 "$(full 1111111)"
 run_it
@@ -602,25 +612,25 @@ if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && [ ! -f "$STUB_STATE/tags" ] && [ ! -f
 new_case regpush abc1234 "$(full 1111111)"
 POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
 if [ "$RC" = 0 ] && [ "$(tags_made)" = "gastown-polecat:dev localhost:5001/gastown-polecat:dev gastown-polecat:abc1234 localhost:5001/gastown-polecat:abc1234 " ]; then pass ":dev and the commit tag each get the registry reference locally"; else fail "regpush tags: rc=$RC tags=[$(tags_made)] out=$OUT"; fi
-if [ "$(pushes)" = "localhost:5001/gastown-polecat:dev localhost:5001/gastown-polecat:abc1234 " ] && grep -q "registry: pushed localhost:5001/gastown-polecat:dev" <<<"$OUT"; then pass "both references are pushed, and the pushes are logged"; else fail "regpush pushes=[$(pushes)] out=$OUT"; fi
+if [ "$(pushes)" = "localhost:5001/gastown-polecat:dev " ] && [ "$(retags)" = "localhost:5001/gastown-polecat:dev abc1234," ] && grep -q "registry: pushed localhost:5001/gastown-polecat:dev" <<<"$OUT" && grep -q "registry: tagged localhost:5001/gastown-polecat:abc1234" <<<"$OUT"; then pass "both references are pushed, and the pushes are logged"; else fail "regpush pushes=[$(pushes)] out=$OUT"; fi
 if [ -f "$STUB_STATE/crane" ] && ! grep -q missing-tarball "$STUB_STATE/crane"; then pass "crane is handed a tarball docker save wrote"; else fail "regpush tarball: $(cat "$STUB_STATE/crane" 2>/dev/null)"; fi
 if ! grep -q "localhost:5001/localhost:5001" <<<"$(tags_made)$(pushes)"; then pass "the alias a previous push left is not prefixed a second time"; else fail "regpush double prefix: tags=[$(tags_made)] pushes=[$(pushes)]"; fi
 
 new_case regcurrent abc1234 "$(full abc1234)"
 printf 'gastown-polecat:dev\ngastown-polecat:abc1234\n' >"$STUB_STATE/repo-tags"
 POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
-if [ "$RC" = 0 ] && [ "$(builds)" = 0 ] && [ "$(pushes)" = "localhost:5001/gastown-polecat:dev localhost:5001/gastown-polecat:abc1234 " ] && grep -q "current at" <<<"$OUT"; then pass "a current image never published is pushed without a build"; else fail "regcurrent: rc=$RC builds=$(builds) pushes=[$(pushes)] out=$OUT"; fi
+if [ "$RC" = 0 ] && [ "$(builds)" = 0 ] && [ "$(pushes)" = "localhost:5001/gastown-polecat:dev " ] && [ "$(retags)" = "localhost:5001/gastown-polecat:dev abc1234," ] && grep -q "current at" <<<"$OUT"; then pass "a current image never published is pushed without a build"; else fail "regcurrent: rc=$RC builds=$(builds) pushes=[$(pushes)] out=$OUT"; fi
 POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
-if [ "$RC" = 0 ] && [ "$(grep -c '^push ' "$STUB_STATE/crane")" = 2 ] && [ ! -d "$LOCK" ]; then pass "once pushed, a current image is not pushed again, and the lock is released"; else fail "regstamp: rc=$RC pushes=[$(pushes)] out=$OUT"; fi
+if [ "$RC" = 0 ] && [ "$(grep -c '^push ' "$STUB_STATE/crane")" = 1 ] && [ ! -d "$LOCK" ]; then pass "once pushed, a current image is not pushed again, and the lock is released"; else fail "regstamp: rc=$RC pushes=[$(pushes)] out=$OUT"; fi
 POLECAT_IMAGE_REGISTRY=localhost:6000 run_it
-if [ "$RC" = 0 ] && [ "$(pushes)" = "localhost:5001/gastown-polecat:dev localhost:5001/gastown-polecat:abc1234 localhost:6000/gastown-polecat:dev localhost:6000/gastown-polecat:abc1234 " ]; then pass "a different registry is pushed to even though the image is current"; else fail "regother: rc=$RC pushes=[$(pushes)] out=$OUT"; fi
+if [ "$RC" = 0 ] && [ "$(pushes)" = "localhost:5001/gastown-polecat:dev localhost:6000/gastown-polecat:dev " ]; then pass "a different registry is pushed to even though the image is current"; else fail "regother: rc=$RC pushes=[$(pushes)] out=$OUT"; fi
 
 new_case regretry abc1234 "$(full 1111111)"
 echo "UNAUTHORIZED: authentication required" >"$STUB_STATE/crane-fail"
 POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
 rm "$STUB_STATE/crane-fail"
 POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
-if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && [ "$(pushes)" = "localhost:5001/gastown-polecat:dev localhost:5001/gastown-polecat:dev localhost:5001/gastown-polecat:abc1234 " ]; then pass "a failed push is retried by the next run while the image stays current"; else fail "regretry: rc=$RC builds=$(builds) pushes=[$(pushes)] out=$OUT"; fi
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && [ "$(pushes)" = "localhost:5001/gastown-polecat:dev localhost:5001/gastown-polecat:dev " ] && [ "$(retags)" = "localhost:5001/gastown-polecat:dev abc1234," ]; then pass "a failed push is retried by the next run while the image stays current"; else fail "regretry: rc=$RC builds=$(builds) pushes=[$(pushes)] out=$OUT"; fi
 
 new_case reglocked abc1234 "$(full abc1234)"
 mkdir "$LOCK"
@@ -671,7 +681,13 @@ pushdirs() { find "$BUILD_ROOT" -maxdepth 1 -name 'push.*' 2>/dev/null | wc -l |
 new_case regrounds abc1234 "$(full 1111111)"
 echo def5678 >"$STUB_STATE/move-after-build"
 POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
-if [ "$RC" = 0 ] && [ "$(builds)" = 2 ] && [ "$(grep -c '^push ' "$STUB_STATE/crane")" = 4 ] && [ "$(pushdirs)" = 0 ]; then pass "two build rounds publish twice and leave no tarball directory"; else fail "regrounds: rc=$RC builds=$(builds) dirs=$(pushdirs) out=$OUT"; fi
+if [ "$RC" = 0 ] && [ "$(builds)" = 2 ] && [ "$(grep -c '^push ' "$STUB_STATE/crane")" = 2 ] && [ "$(pushdirs)" = 0 ]; then pass "two build rounds publish twice and leave no tarball directory"; else fail "regrounds: rc=$RC builds=$(builds) dirs=$(pushdirs) out=$OUT"; fi
+new_case regtagfail abc1234 "$(full 1111111)"
+echo "MANIFEST_UNKNOWN: manifest unknown" >"$STUB_STATE/crane-tag-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
+if [ "$RC" = 0 ] && [ "$(pushes)" = "localhost:5001/gastown-polecat:dev " ] \
+  && grep -qF "registry: tagging localhost:5001/gastown-polecat:abc1234 failed (MANIFEST_UNKNOWN: manifest unknown); the image is not published" <<<"$OUT" \
+  && [ "$(pushdirs)" = 0 ]; then pass "a failed crane tag: the reason is logged, exit 0, and the tarball directory is gone"; else fail "regtagfail: rc=$RC pushes=[$(pushes)] dirs=$(pushdirs) out=$OUT"; fi
 new_case regleak abc1234 "$(full 1111111)"
 echo "UNAUTHORIZED: authentication required" >"$STUB_STATE/crane-fail"
 POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
