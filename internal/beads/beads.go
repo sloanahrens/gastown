@@ -3346,18 +3346,17 @@ func (b *Beads) Show(id string) (*Issue, error) {
 	return issues[0], nil
 }
 
-// ShowText returns one issue as bd show prints it for a person, with args
-// passed to bd unchanged (gt show's passthrough); id only chooses the
-// database, and args carries the issue id itself.
+// ShowText returns bd show's text for one issue, with args passed through
+// unchanged; id chooses the database.
 func (b *Beads) ShowText(id string, args []string) (string, error) {
 	target := b
 	if !b.noRoute {
 		target = b.forIssueID(id)
 	}
-	// bd reads the Dolt port file from the working directory rather than
-	// BEADS_DIR, so run from the database's own directory: gt show chdir'd
-	// there before the seam, and a polecat worktree's .beads holds only a
-	// redirect (gt-p85pw.10).
+	// bd reads the Dolt port file from its working directory, not BEADS_DIR, so
+	// the call runs in the database's own directory: forIssueID sets that
+	// directory, and a polecat worktree's .beads holds only a redirect
+	// (gt-p85pw.10).
 	target = target.pinnedToBeadsDir(target.getResolvedBeadsDir())
 	out, err := target.runText(append([]string{"show"}, args...)...)
 	return string(out), err

@@ -26,6 +26,9 @@ func TestShowTextHandsBdTheFlagsUnchanged(t *testing.T) {
 		t.Errorf("argv = %v, want %v", got, want)
 	}
 	calls := r.calls()
+	if _, ok := lastEnvValue([]string{"BD_MACHINE=1"}, "BD_MACHINE"); !ok {
+		t.Fatal("lastEnvValue cannot see a BD_MACHINE it is given: the absence check below would pass for any env")
+	}
 	if _, ok := lastEnvValue(calls[0].env, "BD_MACHINE"); ok {
 		t.Error("BD_MACHINE must be absent: gt show prints bd's prose, not the envelope")
 	}

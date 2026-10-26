@@ -48,6 +48,9 @@ func runShow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve working directory: %w", err)
 	}
+	// Decision (gt-p85pw.10): bd now runs with its stdout piped to gt, not on
+	// the operator's terminal, so it prints without a tty. Its stderr is in the
+	// returned error, not shown directly.
 	text, err := beads.New(cwd).ShowText(extractBeadIDFromArgs(args), args)
 	if text != "" {
 		if _, writeErr := os.Stdout.WriteString(text); writeErr != nil {
