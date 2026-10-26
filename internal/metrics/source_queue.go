@@ -87,14 +87,11 @@ const queueRigParallel = 3
 // queueLogMaxLines is how many of the log's last lines the parse keeps.
 const queueLogMaxLines = 2000
 
-// queueLogLineBytes is the line the byte bound allows for: a tick line naming
-// every skipped bead passes a kilobyte.
-const queueLogLineBytes = 1024
-
-// queueLogTailBytes is the most Env.Tail reads. Env.Tail takes bytes, not
-// lines, so the line bound is applied to what was read; this size holds the
-// last queueLogMaxLines lines of the daemon's usual line length.
-const queueLogTailBytes = queueLogMaxLines * queueLogLineBytes
+// queueLogTailBytes is the most Env.Tail reads: an hour of the daemon log,
+// which holds the last queueLogMaxLines lines of its usual line length (a tick
+// line naming every skipped bead passes a kilobyte). Env.Tail takes bytes, not
+// lines, so the line bound is applied to what was read.
+const queueLogTailBytes = daemonLogHourBytes
 
 // queueTickRe matches the dispatcher's tick line (internal/daemon's
 // specDispatchTickLine) after its "spec_dispatch: " prefix is trimmed. The
@@ -322,7 +319,7 @@ func queueAddLogColumns(env Env, cols map[string]any) {
 	cols["last_tick_secs"] = nil
 	cols["dispatch_newest_tick_age_s"] = nil
 	cols["dispatch_unparsed_lines"] = nil
-	data, err := env.Tail(filepath.Join(env.Town, "daemon", daemonlog.FileName), queueLogTailBytes)
+	data, err := env.Tail(daemonLogPath(env.Town), queueLogTailBytes)
 	if err != nil {
 		return
 	}

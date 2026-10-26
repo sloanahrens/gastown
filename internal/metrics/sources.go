@@ -14,5 +14,6 @@ func Sources() []Source {
 		configSource{},
 		resourcesSource{},
 		placementSource{},
+		sweepSource{},
 	}
 }

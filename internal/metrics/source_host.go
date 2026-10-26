@@ -10,8 +10,9 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
-// hostCommandTimeout bounds each host probe separately, so a wedged top, bd,
-// lsof or docker costs its own column and leaves the other three filled.
+// hostCommandTimeout bounds each host probe separately, so a wedged top,
+// sysctl, bd, lsof or docker costs its own column and leaves the others
+// filled.
 const hostCommandTimeout = 5 * time.Second
 
 // hostSource is the host group: the machine the snapshot runs on, read with
@@ -85,10 +86,19 @@ type hostProbe struct {
 }
 
 // probes are the group's columns, in the order they run. They run one after
-// another, so Collect costs at most four timeouts (20 s), under the group's own
+// another, so Collect costs at most five timeouts (25 s), under the group's own
 // deadline (SourceTimeout).
 func (s hostSource) probes() []hostProbe {
 	return []hostProbe{
+		{
+			// The one-minute load average, so the record's seat counts are read
+			// against the host they share (gt-b9j3o.3). One minute is the window
+			// the snapshot's hour is about; the five- and fifteen-minute figures
+			// wash it out.
+			column: "load1",
+			argv:   []string{"/usr/sbin/sysctl", "-n", "vm.loadavg"},
+			parse:  parseLoadAvg1,
+		},
 		{
 			column: "cpu_idle_pct",
 			argv:   []string{"/usr/bin/top", "-l", "2", "-n", "0", "-s", "1"},
@@ -143,6 +153,23 @@ func (p hostProbe) read(ctx context.Context, env Env, timeout time.Duration) (an
 		return nil, false
 	}
 	return value, true
+}
+
+// parseLoadAvg1 reads the one-minute load average off sysctl's vm.loadavg,
+// which prints "{ 1.23 4.56 7.89 }". All three fields are required, so a
+// truncated or reordered answer is a missing reading rather than a wrong one.
+// macOS counts runnable threads into this number, so it is read beside the idle
+// share rather than as a saturation (internal/hoststat).
+func parseLoadAvg1(out string) (any, error) {
+	fields := strings.Fields(strings.Trim(strings.TrimSpace(out), "{}"))
+	if len(fields) < 3 {
+		return nil, fmt.Errorf("vm.loadavg printed %d load fields, want 3", len(fields))
+	}
+	load, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return nil, fmt.Errorf("vm.loadavg one-minute load %q: %w", fields[0], err)
+	}
+	return load, nil
 }
 
 // parseCPUIdlePct reads the idle share off top's last CPU line. A two-sample

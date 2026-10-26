@@ -14,7 +14,7 @@ import (
 // command and reads no file whatever the sources do.
 func TestSourcesRegistersEveryGroup(t *testing.T) {
 	t.Parallel()
-	want := []string{"attention", "config", "host", "host_cpu", "money", "placement", "queue", "resources", "review"}
+	want := []string{"attention", "config", "host", "host_cpu", "money", "placement", "queue", "resources", "review", "sweep"}
 	var got []string
 	for _, src := range Sources() {
 		got = append(got, src.Group())

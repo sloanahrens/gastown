@@ -2,7 +2,10 @@ package metrics
 
 import (
 	"context"
+	"path/filepath"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/daemonlog"
 )
 
 // Runner runs argv and returns its stdout. A source that shells out takes its
@@ -78,6 +81,17 @@ type DirEntry struct {
 // sourceLogTailBytes bounds what a source reads of an append-only log through
 // Env.Tail, so a series that has run for months costs one read.
 const sourceLogTailBytes = 512 << 10
+
+// daemonLogHourBytes bounds what a source reads of the daemon log to cover the
+// hour its columns window. A shorter read silently shortens the window, so
+// this holds an hour of the daemon's usual line length.
+const daemonLogHourBytes = 2000 * 1024
+
+// daemonLogPath is the daemon's live log under town, where the sources that
+// count an hour of daemon work read it from.
+func daemonLogPath(town string) string {
+	return filepath.Join(town, "daemon", daemonlog.FileName)
+}
 
 // Source fills one group of the snapshot. A group is the source's identity in
 // the record, so it is never renamed.
