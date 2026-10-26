@@ -242,7 +242,7 @@ new_case() {
   export POLECAT_IMAGE_STALE_MINUTES=20
   export POLECAT_IMAGE_GT="$BIN/gt" POLECAT_IMAGE_DOCKER="$BIN/docker" POLECAT_IMAGE_GIT="$BIN/git"
   export POLECAT_IMAGE_MAKE="$BIN/make" POLECAT_IMAGE_OPENSHELL="$BIN/openshell" POLECAT_IMAGE_PGREP="$BIN/pgrep"
-  unset POLECAT_IMAGE_REGISTRY
+  unset POLECAT_IMAGE_REGISTRY POLECAT_IMAGE_FAIL_CLOSED
   export POLECAT_IMAGE_CRANE="$BIN/crane"
   mkdir -p "$POLECAT_IMAGE_TOWN_ROOT/.runtime"
   LOCK="$POLECAT_IMAGE_TOWN_ROOT/.runtime/polecat-image.lock"
@@ -692,6 +692,58 @@ new_case regleak abc1234 "$(full 1111111)"
 echo "UNAUTHORIZED: authentication required" >"$STUB_STATE/crane-fail"
 POLECAT_IMAGE_REGISTRY=localhost:5001 run_it
 if [ "$RC" = 0 ] && [ "$(pushdirs)" = 0 ]; then pass "a failed push leaves no tarball directory"; else fail "regleak: rc=$RC dirs=$(pushdirs) out=$OUT"; fi
+
+# POLECAT_IMAGE_FAIL_CLOSED=1 (gt-efupr) makes a run that leaves the image
+# unbuilt or unpublished fail. install-gt.sh sets it for the build before the
+# binary swap, so an install never succeeds with an image that is not in place.
+# A deferral leaves the image unbuilt just the same, so under the switch it
+# fails too.
+echo "--- POLECAT_IMAGE_FAIL_CLOSED=1: an image that is not built and published fails the run"
+CLOSED_ERR="ERROR: the image is not published to localhost:5001, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)"
+CLOSED_DEFER="ERROR: the image was not built and published at the installed commit, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)"
+new_case regclosedpush abc1234 "$(full 1111111)"
+echo "UNAUTHORIZED: authentication required" >"$STUB_STATE/crane-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 POLECAT_IMAGE_FAIL_CLOSED=1 run_it
+if [ "$RC" != 0 ] && grep -qF "registry: pushing localhost:5001/gastown-polecat:dev failed (UNAUTHORIZED: authentication required); the image is not published" <<<"$OUT" \
+  && grep -qF "$CLOSED_ERR" <<<"$OUT" && [ ! -f "$POLECAT_IMAGE_TOWN_ROOT/.runtime/polecat-image.published" ] \
+  && [ "$(pushdirs)" = 0 ] && [ ! -d "$LOCK" ]; then pass "a failed push: the reason and the switch are logged, non-zero, no stamp or tarball left, lock released"; else fail "regclosedpush: rc=$RC dirs=$(pushdirs) lock=$([ -d "$LOCK" ] && echo held) out=$OUT"; fi
+new_case regclosedtag abc1234 "$(full 1111111)"
+echo "MANIFEST_UNKNOWN: manifest unknown" >"$STUB_STATE/crane-tag-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 POLECAT_IMAGE_FAIL_CLOSED=1 run_it
+if [ "$RC" != 0 ] && grep -qF "registry: tagging localhost:5001/gastown-polecat:abc1234 failed (MANIFEST_UNKNOWN: manifest unknown); the image is not published" <<<"$OUT" \
+  && grep -qF "$CLOSED_ERR" <<<"$OUT" && [ "$(pushdirs)" = 0 ]; then pass "a failed crane tag fails the run too"; else fail "regclosedtag: rc=$RC dirs=$(pushdirs) out=$OUT"; fi
+new_case regclosedcrane abc1234 "$(full 1111111)"
+POLECAT_IMAGE_REGISTRY=localhost:5001 POLECAT_IMAGE_CRANE="$CASE/no-crane" POLECAT_IMAGE_FAIL_CLOSED=1 run_it
+if [ "$RC" != 0 ] && grep -qF "registry: POLECAT_IMAGE_REGISTRY=localhost:5001 is set but $CASE/no-crane is not installed; the image is not published" <<<"$OUT" \
+  && grep -qF "$CLOSED_ERR" <<<"$OUT" && [ ! -f "$STUB_STATE/tags" ]; then pass "a missing crane fails the run instead of exiting 0"; else fail "regclosedcrane: rc=$RC tags=[$(tags_made)] out=$OUT"; fi
+new_case regclosedpath abc1234 "$(full 1111111)"
+POLECAT_IMAGE_REGISTRY=/Users/x/gt/.runtime/sandboxes POLECAT_IMAGE_FAIL_CLOSED=1 run_it
+if [ "$RC" != 0 ] && grep -qF "is a path, not a host:port" <<<"$OUT" && grep -qF "ERROR: the image is not published to /Users/x/gt/.runtime/sandboxes, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)" <<<"$OUT"; then pass "a refused registry fails the run"; else fail "regclosedpath: rc=$RC out=$OUT"; fi
+new_case regclosedcurrent abc1234 "$(full abc1234)"
+printf 'gastown-polecat:dev\ngastown-polecat:abc1234\n' >"$STUB_STATE/repo-tags"
+echo "UNAUTHORIZED: authentication required" >"$STUB_STATE/crane-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 POLECAT_IMAGE_FAIL_CLOSED=1 run_it
+if [ "$RC" != 0 ] && [ "$(builds)" = 0 ] && grep -qF "$CLOSED_ERR" <<<"$OUT"; then pass "a current image whose retried publish fails fails the run, with no build"; else fail "regclosedcurrent: rc=$RC builds=$(builds) out=$OUT"; fi
+new_case regclosednone abc1234 "$(full 1111111)"
+POLECAT_IMAGE_FAIL_CLOSED=1 run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && [ ! -f "$STUB_STATE/crane" ] && ! grep -q "registry:" <<<"$OUT"; then pass "with no POLECAT_IMAGE_REGISTRY there is nothing to publish, so the switch changes nothing"; else fail "regclosednone: rc=$RC builds=$(builds) out=$OUT"; fi
+new_case regclosedlock abc1234 "$(full abc1234)"
+mkdir "$LOCK"
+POLECAT_IMAGE_REGISTRY=localhost:5001 POLECAT_IMAGE_FAIL_CLOSED=1 run_it
+if [ "$RC" != 0 ] && [ ! -f "$STUB_STATE/crane" ] && [ -d "$LOCK" ] && grep -q "registry: already running" <<<"$OUT" \
+  && grep -qF "$CLOSED_DEFER" <<<"$OUT"; then pass "a lock another run holds is a deferral: non-zero, lock untouched, the publish is left to that run"; else fail "regclosedlock: rc=$RC out=$OUT"; fi
+new_case regcloseddown abc1234 "$(full 1111111)"
+touch "$STUB_STATE/docker-down"
+POLECAT_IMAGE_REGISTRY=localhost:5001 POLECAT_IMAGE_FAIL_CLOSED=1 run_it
+if [ "$RC" != 0 ] && grep -q "deferred: docker unavailable" <<<"$OUT" && grep -qF "$CLOSED_DEFER" <<<"$OUT"; then pass "docker down fails the run under the switch"; else fail "regcloseddown: rc=$RC out=$OUT"; fi
+new_case regclosedsling abc1234 "$(full 1111111)"
+touch "$STUB_STATE/sling-running"
+POLECAT_IMAGE_REGISTRY=localhost:5001 POLECAT_IMAGE_FAIL_CLOSED=1 run_it
+if [ "$RC" != 0 ] && grep -q "deferred: sandbox sling in progress" <<<"$OUT" && grep -qF "$CLOSED_DEFER" <<<"$OUT"; then pass "a running sling fails the run under the switch"; else fail "regclosedsling: rc=$RC out=$OUT"; fi
+new_case regclosednotone abc1234 "$(full 1111111)"
+echo "UNAUTHORIZED: authentication required" >"$STUB_STATE/crane-fail"
+POLECAT_IMAGE_REGISTRY=localhost:5001 POLECAT_IMAGE_FAIL_CLOSED=0 run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && grep -q "registry: pushing .* failed" <<<"$OUT" && ! grep -q "POLECAT_IMAGE_FAIL_CLOSED=1" <<<"$OUT"; then pass "only 1 turns the switch on: a failed push stays best effort"; else fail "regclosednotone: rc=$RC builds=$(builds) out=$OUT"; fi
 
 # The registry alias of a per-commit tag goes with the tag: the image stays on
 # disk while any tag names it.

@@ -20,6 +20,12 @@ SANDBOX_RECORDS="${POLECAT_IMAGE_SANDBOX_RECORDS:-$TOWN_ROOT/.runtime/sandboxes}
 IMAGE="${POLECAT_IMAGE_NAME:-gastown-polecat:dev}"
 # Empty REGISTRY publishes nothing (plugin.md, "Publishing to a registry").
 REGISTRY="${POLECAT_IMAGE_REGISTRY:-}"
+# FAIL_CLOSED=1 makes a run that leaves the image unbuilt or unpublished fail
+# instead of deferring or logging (gt-efupr); plugin.md, "Publishing to a
+# registry", has the contract. Only 1 turns it on, so a stray
+# POLECAT_IMAGE_FAIL_CLOSED=0 cannot fail a run.
+FAIL_CLOSED=0
+if [ "${POLECAT_IMAGE_FAIL_CLOSED:-}" = 1 ]; then FAIL_CLOSED=1; fi
 # PUBLISHED holds "<image id> <registry>" once that image is fully pushed.
 PUBLISHED="${POLECAT_IMAGE_PUBLISHED:-$TOWN_ROOT/.runtime/polecat-image.published}"
 LABEL="org.gastown.gt-commit"
@@ -264,25 +270,50 @@ publish_tags() {
   done <<<"$refs"
 }
 
+# fail_closed WHY ends the run non-zero when FAIL_CLOSED is set; WHY says what
+# the run did not get done, and every caller logs the cause first. Unset, it
+# lets the caller carry on.
+fail_closed() {
+  [ "$FAIL_CLOSED" = 0 ] || die "$1 (POLECAT_IMAGE_FAIL_CLOSED=1)"
+}
+
+# publish_unfinished ends the run when FAIL_CLOSED is set; the caller has logged
+# why the push did not complete.
+publish_unfinished() {
+  fail_closed "the image is not published to $REGISTRY, so this run fails"
+}
+
+# defer MSG logs why the run is deferring and ends it: exit 0 best effort, but
+# under FAIL_CLOSED the image the run was asked for is not in place, so it fails.
+defer() {
+  log "$1"
+  fail_closed "the image was not built and published at the installed commit, so this run fails"
+  return 0
+}
+
 # push_to_registry publishes the image to POLECAT_IMAGE_REGISTRY (gt-mm7q6) and
 # records the push in PUBLISHED when every tag went. A failure is logged and the
-# run carries on.
+# run carries on unless FAIL_CLOSED is set, which makes it the run's failure.
 push_to_registry() {
   local why
   [ -n "$REGISTRY" ] || return 0
   why="$(registry_problem)"
   if [ -n "$why" ]; then
     log "registry: $why; the image is not published"
+    publish_unfinished
     return 0
   fi
   mkdir -p "$BUILD_ROOT"
   if ! TAR_DIR="$(mktemp -d "$BUILD_ROOT/push.XXXXXX")"; then
     TAR_DIR=""
     log "registry: cannot make a directory under $BUILD_ROOT; the image is not published"
+    publish_unfinished
     return 0
   fi
   if publish_tags; then
     publish_stamp >"$PUBLISHED" || log "registry: cannot write $PUBLISHED; the next run pushes again"
+  else
+    publish_unfinished
   fi
   rm -rf "$TAR_DIR"
   TAR_DIR=""
@@ -293,7 +324,7 @@ push_to_registry() {
 republish() {
   publish_pending || return 0
   if ! take_lock; then
-    log "registry: already running (lock $LOCK_DIR); the publish waits for the next run"
+    defer "registry: already running (lock $LOCK_DIR); the publish waits for the next run"
     return 0
   fi
   HAVE_LOCK=1
@@ -308,7 +339,7 @@ main() {
   # cooldown: without the check an unreachable docker reads as "no image" and
   # the build then fails.
   if ! "$DOCKER" info >/dev/null 2>&1; then
-    log "deferred: docker unavailable"
+    defer "deferred: docker unavailable"
     return 0
   fi
   image="$(image_commit)"
@@ -319,11 +350,11 @@ main() {
   fi
   reason="$(defer_reason)"
   if [ -n "$reason" ]; then
-    log "deferred: $reason"
+    defer "deferred: $reason"
     return 0
   fi
   if ! take_lock; then
-    log "already running (lock $LOCK_DIR)"
+    defer "already running (lock $LOCK_DIR)"
     return 0
   fi
   HAVE_LOCK=1
@@ -338,7 +369,7 @@ main() {
     # A sling can start between rounds, and a build is long.
     reason="$(defer_reason)"
     if [ -n "$reason" ]; then
-      log "deferred: $reason"
+      defer "deferred: $reason"
       return 0
     fi
     build_at "$installed"
