@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
-
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -54,21 +52,13 @@ func omStatsFixture(t *testing.T) (recordsPath, logPath string) {
 	return recordsPath, logPath
 }
 
-// runLandOmStatsOutput runs the command as the operator would, with the flags
-// pinned and the output captured.
+// runLandOmStatsOutput runs the command body with the flags the operator would
+// pass, and returns what it printed.
 func runLandOmStatsOutput(t *testing.T, recordsPath, logPath, since string, asJSON bool) string {
 	t.Helper()
-	oldSince, oldRecords, oldLog, oldJSON := landOmStatsSince, landOmStatsRecords, landOmStatsLog, landOmStatsJSON
-	t.Cleanup(func() {
-		landOmStatsSince, landOmStatsRecords, landOmStatsLog, landOmStatsJSON = oldSince, oldRecords, oldLog, oldJSON
-	})
-	landOmStatsSince, landOmStatsRecords, landOmStatsLog, landOmStatsJSON = since, recordsPath, logPath, asJSON
-
-	cmd := &cobra.Command{}
 	var out bytes.Buffer
-	cmd.SetOut(&out)
-	if err := runLandOmStats(cmd, nil); err != nil {
-		t.Fatalf("runLandOmStats: %v", err)
+	if err := landOmStatsReport(&out, since, recordsPath, logPath, asJSON); err != nil {
+		t.Fatalf("landOmStatsReport: %v", err)
 	}
 	return out.String()
 }
@@ -77,6 +67,7 @@ func runLandOmStatsOutput(t *testing.T, recordsPath, logPath, since string, asJS
 // carries the same days and figures the JSON does, and a fallback day is marked
 // in both.
 func TestLandOmStatsTextAndJSONAgree(t *testing.T) {
+	t.Parallel()
 	recordsPath, logPath := omStatsFixture(t)
 
 	text := runLandOmStatsOutput(t, recordsPath, logPath, "", false)
@@ -155,6 +146,7 @@ func TestLandOmStatsTextAndJSONAgree(t *testing.T) {
 // TestLandOmStatsSinceFiltersBothForms pins --since to the day tables and the
 // JSON alike: nothing before the day is reported, including a fallback day.
 func TestLandOmStatsSinceFiltersBothForms(t *testing.T) {
+	t.Parallel()
 	recordsPath, logPath := omStatsFixture(t)
 
 	text := runLandOmStatsOutput(t, recordsPath, logPath, "2026-10-17", false)
@@ -184,6 +176,7 @@ func TestLandOmStatsSinceFiltersBothForms(t *testing.T) {
 // fixture root has the same bytes, size and modification time after both
 // forms run, and no file appeared.
 func TestLandOmStatsWritesNothing(t *testing.T) {
+	t.Parallel()
 	recordsPath, logPath := omStatsFixture(t)
 	root := filepath.Dir(recordsPath)
 	before := omStatsSnapshot(t, root)
@@ -237,6 +230,7 @@ func omStatsSnapshot(t *testing.T, root string) map[string]string {
 // TestLandOmStatsRejectsABadSince keeps a mistyped day from silently reporting
 // nothing.
 func TestLandOmStatsRejectsABadSince(t *testing.T) {
+	t.Parallel()
 	for _, value := range []string{"2026-13-01", "16/10/2026", "yesterday"} {
 		if _, err := parseLandOmStatsSince(value); err == nil {
 			t.Errorf("parseLandOmStatsSince(%q) = nil error, want a refusal", value)
@@ -253,6 +247,7 @@ func TestLandOmStatsRejectsABadSince(t *testing.T) {
 // TestLandOmStatsMissingSources reads nothing rather than failing: a town that
 // has not landed yet has neither file.
 func TestLandOmStatsMissingSources(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	text := runLandOmStatsOutput(t, filepath.Join(dir, "no-records.jsonl"), filepath.Join(dir, "no-daemon.log"), "", false)
 	if !strings.Contains(text, "no om verdicts in range") {

@@ -64,12 +64,18 @@ func init() {
 }
 
 func runLandOmStats(cmd *cobra.Command, _ []string) error {
-	since, err := parseLandOmStatsSince(landOmStatsSince)
+	return landOmStatsReport(cmd.OutOrStdout(), landOmStatsSince, landOmStatsRecords, landOmStatsLog, landOmStatsJSON)
+}
+
+// landOmStatsReport is the command body over explicitly named inputs, so a
+// test drives every path without swapping the shared flag variables.
+func landOmStatsReport(out io.Writer, sinceValue, recordsFlag, logFlag string, asJSON bool) error {
+	since, err := parseLandOmStatsSince(sinceValue)
 	if err != nil {
 		return err
 	}
-	recordsPath := strings.TrimSpace(landOmStatsRecords)
-	logPath := strings.TrimSpace(landOmStatsLog)
+	recordsPath := strings.TrimSpace(recordsFlag)
+	logPath := strings.TrimSpace(logFlag)
 	if recordsPath == "" || logPath == "" {
 		townRoot, err := workspace.FindFromCwdOrError()
 		if err != nil {
@@ -86,8 +92,7 @@ func runLandOmStats(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	out := cmd.OutOrStdout()
-	if landOmStatsJSON {
+	if asJSON {
 		return writeLandOmStatsJSON(out, stats)
 	}
 	writeLandOmStatsTable(out, stats, since)
