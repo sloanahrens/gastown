@@ -236,9 +236,14 @@ func (c *Client) GateCheck(types ...string) (string, error) { return "", nil }
 
 // ShowText returns one issue as a short terminal line: its id, title, priority
 // and status. The tracker serves issues, not bd's prose, so the line is this
-// client's own render; the args are not bd flags here and are ignored. A
-// missing issue is the error Show returns.
-func (c *Client) ShowText(id string, _ []string) (string, error) {
+// client's own render. A flag in args is an error, not a silent drop, and no
+// request is sent for it. A missing issue is the error Show returns.
+func (c *Client) ShowText(id string, args []string) (string, error) {
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			return "", fmt.Errorf("trackerclient: ShowText takes no bd flags, got %q", a)
+		}
+	}
 	is, err := c.Show(id)
 	if err != nil {
 		return "", err

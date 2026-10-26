@@ -56,6 +56,12 @@ func TestIntegrationTrackerClientSatisfiesTheClientContract(t *testing.T) {
 	beadsfake.RunClientContract(t, func(t *testing.T) beads.Client { return newTracker(t, "town/crew/dipper", api.ScopeSeat) })
 }
 
+// The show-text suite runs against the tracker: ShowText renders the id and
+// title, and a missing id is an error.
+func TestIntegrationTrackerClientShowText(t *testing.T) {
+	beadsfake.RunShowTextContract(t, func(t *testing.T) beads.Client { return newTracker(t, "town/crew/dipper", api.ScopeSeat) })
+}
+
 func TestIntegrationTrackerClientSatisfiesTheActorContract(t *testing.T) {
 	beadsfake.RunActorContract(t, func(t *testing.T, actor string) beads.Client { return newTracker(t, actor, api.ScopeSeat) })
 }

@@ -383,3 +383,16 @@ func TestShowTextMissingIssueIsAnError(t *testing.T) {
 		t.Errorf("ShowText of a missing issue = %q, %v; want \"\" and an error", text, err)
 	}
 }
+
+// A bd flag passed to ShowText is refused before any request (gt-rtxfy).
+func TestShowTextRefusesAFlagWithoutARequest(t *testing.T) {
+	t.Parallel()
+	var asked int
+	c := serve(t, func(http.ResponseWriter, *http.Request) { asked++ })
+	if _, err := c.ShowText("gt-x", []string{"gt-x", "--json"}); err == nil {
+		t.Error("ShowText with --json returned no error")
+	}
+	if asked != 0 {
+		t.Errorf("ShowText with a flag sent %d requests, want none", asked)
+	}
+}
