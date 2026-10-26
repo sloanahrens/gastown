@@ -166,6 +166,10 @@ func dsnWithoutPassword(dsn string) (string, error) {
 		if u.User != nil {
 			u.User = url.User(u.User.Username())
 		}
+		// A password can also ride in the query string (?password=...).
+		q := u.Query()
+		q.Del("password")
+		u.RawQuery = q.Encode()
 		return u.String(), nil
 	}
 	return keywordPassword.ReplaceAllString(dsn, ""), nil
@@ -232,7 +236,8 @@ func (b *backup) Run(ctx context.Context) error {
 		return fmt.Errorf("pg_dump exited 0 but wrote an empty dump at %s", partial)
 	}
 	// The dump is flushed to disk before it is published under its final name,
-	// so a crash cannot leave a .dump whose bytes never reached the disk.
+	// so a crash cannot leave a .dump whose bytes never reached the disk. The
+	// directory is flushed after the rename, so the name itself is durable.
 	if err := syncFile(partial); err != nil {
 		_ = b.remove(partial)
 		return fmt.Errorf("flush %s: %w", partial, err)
@@ -240,6 +245,9 @@ func (b *backup) Run(ctx context.Context) error {
 	if err := os.Rename(partial, target); err != nil {
 		_ = b.remove(partial)
 		return fmt.Errorf("publish %s: %w", target, err)
+	}
+	if err := syncFile(b.dir); err != nil {
+		return fmt.Errorf("flush backup directory %s: %w", b.dir, err)
 	}
 	// The dump is published, so a retention failure is a warning, not a failed
 	// run: the operator still gets the dump and the reason its old ones stayed.

@@ -699,11 +699,11 @@ func TestPruneIgnoresFutureDumps(t *testing.T) {
 
 // The real execution path: execRunner runs a child, passes its environment,
 // and reports its failure. The child is this test binary, re-entered through
-// TestHelperPgDump, so no shell or pg_dump is needed (gt-p85pw.48).
+// TestMain, so no shell or pg_dump is needed (gt-p85pw.48).
 func TestExecRunnerRunsTheChild(t *testing.T) {
 	t.Parallel()
 	partial := filepath.Join(t.TempDir(), "d.dump.partial")
-	argv := []string{os.Args[0], "-test.run=^TestHelperPgDump$", "--", "-f", partial}
+	argv := []string{os.Args[0], "--", "-f", partial}
 	env := []string{"GO_WANT_HELPER_PROCESS=1"}
 	if err := (execRunner{}).Run(context.Background(), argv, env); err != nil {
 		t.Fatalf("execRunner.Run: %v", err)
@@ -712,28 +712,72 @@ func TestExecRunnerRunsTheChild(t *testing.T) {
 		t.Fatalf("child did not write the dump: %v", err)
 	}
 
-	failArgv := []string{os.Args[0], "-test.run=^TestHelperPgDump$", "--", "-f", partial}
+	failArgv := []string{os.Args[0], "--", "-f", partial}
 	err := (execRunner{}).Run(context.Background(), failArgv, []string{"GO_WANT_HELPER_PROCESS=1", "GO_HELPER_FAIL=1"})
 	if err == nil || !strings.Contains(err.Error(), "helper: no tracker") {
 		t.Errorf("failing child = %v, want its last stderr line", err)
 	}
 }
 
-// TestHelperPgDump is the child execRunner starts: it writes -f, or fails with
-// a stderr line when GO_HELPER_FAIL is set. It does nothing in a normal run.
-func TestHelperPgDump(t *testing.T) {
-	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
-		return
+// TestMain re-enters this binary as a fake pg_dump when GO_WANT_HELPER_PROCESS
+// is set: a child process that writes -f, or fails with a stderr line when
+// GO_HELPER_FAIL is set. Otherwise the tests run as usual (gt-p85pw.48).
+func TestMain(m *testing.M) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") == "1" {
+		if os.Getenv("GO_HELPER_FAIL") == "1" {
+			fmt.Fprintln(os.Stderr, "helper: no tracker database")
+			os.Exit(1)
+		}
+		if err := os.WriteFile(argValue(os.Args, "-f"), []byte("dump"), 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
-	if os.Getenv("GO_HELPER_FAIL") == "1" {
-		fmt.Fprintln(os.Stderr, "helper: no tracker database")
-		os.Exit(1)
+	os.Exit(m.Run())
+}
+
+// The whole run with the real exec runner: -pg-bin names a directory holding
+// this test binary as pg_dump, so the run starts a real child and reads the
+// dump it wrote. The test sets an environment variable, so it does not run in
+// parallel (gt-p85pw.48).
+func TestRunEndToEndWithTheExecRunner(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(argValue(os.Args, "-f"), []byte("dump"), 0o600); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	pgBin := t.TempDir()
+	if err := os.Symlink(self, filepath.Join(pgBin, "pg_dump")); err != nil {
+		t.Fatal(err)
 	}
-	os.Exit(0)
+	dir := t.TempDir()
+	today := time.Now().Format(dateLayout)
+	getenv := func(k string) string {
+		if k == "TRACKER_DSN" {
+			return testDSN
+		}
+		return ""
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runWith(context.Background(), []string{"-dir", dir, "-pg-bin", pgBin}, getenv, &stdout, &stderr, execRunner{}); err != nil {
+		t.Fatalf("runWith with the exec runner: %v (stderr %q)", err, stderr.String())
+	}
+	if got := dumpsIn(t, dir); len(got) != 1 || got[0] != today+dumpSuffix {
+		t.Fatalf("dumps = %v, want tonight's dump", got)
+	}
+}
+
+// A password in the query string is removed too (gt-p85pw.48).
+func TestDsnWithoutPasswordQueryForm(t *testing.T) {
+	t.Parallel()
+	got, err := dsnWithoutPassword("postgres://tracker:uripw@db.internal/tracker?sslmode=require&password=qpw")
+	if err != nil {
+		t.Fatalf("dsnWithoutPassword: %v", err)
+	}
+	if strings.Contains(got, "qpw") || strings.Contains(got, "uripw") || !strings.Contains(got, "sslmode=require") {
+		t.Errorf("URI DSN without password = %q", got)
+	}
 }
 
 // dumpsIn lists the dump files in dir, leaving out the run lock.

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,7 +19,10 @@ func lockBackupDir(dir string) (func(), error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("another trackerbackup run holds the lock in %s", dir)
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("another trackerbackup run holds the lock in %s", dir)
+		}
+		return nil, fmt.Errorf("lock %s: %w", dir, err)
 	}
 	return func() { _ = f.Close() }, nil
 }
