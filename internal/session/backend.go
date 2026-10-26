@@ -29,6 +29,9 @@ type Profile struct {
 	ForgejoHost      string   // how the sandbox reaches Forgejo when it differs from Dolt; "" = ControlPlaneHost
 	CacheVolume      string   // named volume for /sandbox/.cache; "{rig}" expands; "" = none
 	Driver           string   // the gateway's compute driver: DriverDocker or DriverKubernetes; "" means docker
+	// KubernetesCacheClaim is the shared claim a kubernetes driver mounts at
+	// /sandbox/.cache; "" means no cache mount (gt-zl804).
+	KubernetesCacheClaim string
 
 	// Kubernetes pod placement and sizing; only a kubernetes driver sends
 	// them (as driver config). Nil and empty mean the gateway's defaults.

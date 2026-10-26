@@ -845,6 +845,19 @@ func TestOpenShellKubernetesDriverConfigSendsOnlyWhatIsSet(t *testing.T) {
 			mutate: func(p *Profile) { p.Requests = &config.SandboxResources{} },
 			want:   "",
 		},
+		{
+			name:   "a cache claim alone mounts the shared claim at the cache dir",
+			mutate: func(p *Profile) { p.KubernetesCacheClaim = "gt-shared-cache" },
+			want:   `{"kubernetes":{"containers":{"agent":{"volume_mounts":[{"name":"gt-cache","mount_path":"/sandbox/.cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`,
+		},
+		{
+			name: "a cache claim with limits sends both",
+			mutate: func(p *Profile) {
+				p.KubernetesCacheClaim = "gt-shared-cache"
+				p.Limits = &config.SandboxResources{Memory: "4Gi"}
+			},
+			want: `{"kubernetes":{"containers":{"agent":{"resources":{"limits":{"memory":"4Gi"}},"volume_mounts":[{"name":"gt-cache","mount_path":"/sandbox/.cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`,
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
