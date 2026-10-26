@@ -256,7 +256,7 @@ func (t *Table) ValidateRole(role string) error {
 		if p.ReviewerModel() == "" {
 			return fmt.Errorf("role %s runs profile %q, which names no model and no om_backend, so it cannot set the reviewer's backend", role, name)
 		}
-		return nil
+		return reviewerDisagreement(role, name, p)
 	}
 	if p.Preset == "" {
 		return fmt.Errorf("role %s runs profile %q, which names no preset to write to role_agents.%s", role, name, role)
@@ -274,15 +274,29 @@ func RoleKnown(role string) bool {
 	return false
 }
 
-// ReviewerModel is the model this profile has the reviewer run. When the profile
-// names an om_backend, that backend is what runs, so its model is the answer even
-// if the profile also names a model: ReviewerBackend writes the backend, and the
-// two must agree (gt-477ut).
+// ReviewerModel is the model the reviewer runs under this profile. When the profile
+// names an om_backend, that backend is what runs, so its model is the answer. A
+// profile that names both a model and a backend that runs another is refused by
+// ValidateRole before anything is written, so the answer here is never a model
+// the reviewer does not run (gt-477ut).
 func (p Profile) ReviewerModel() string {
 	if len(p.OMBackend) > 0 {
 		return ModelName(p.OMBackend)
 	}
 	return p.Model
+}
+
+// reviewerDisagreement is the refusal for a profile whose model and om_backend
+// name different models, or nil when they agree or one of them names none.
+func reviewerDisagreement(role, name string, p Profile) error {
+	if p.Model == "" || len(p.OMBackend) == 0 {
+		return nil
+	}
+	runs := ModelName(p.OMBackend)
+	if runs == "" || runs == p.Model {
+		return nil
+	}
+	return fmt.Errorf("role %s runs profile %q, which names model %s and an om_backend that runs %s; the two must agree", role, name, p.Model, runs)
 }
 
 // ReviewerBackend is the backend argv this profile gives the reviewer: its own

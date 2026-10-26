@@ -139,17 +139,19 @@ func TestReviewerModelIsTheProfilesModelOrItsCommands(t *testing.T) {
 	}
 }
 
-// A profile that names both a model and an om_backend gives the reviewer the
-// backend's model: the backend is what runs, so ReviewerModel and ReviewerBackend
-// agree (gt-477ut).
-func TestReviewerModelFollowsTheBackendWhenAProfileNamesBoth(t *testing.T) {
+// A profile that names a model and an om_backend running a different one is
+// refused by validation, so the table never holds it and set-role and apply never
+// write it (gt-477ut).
+func TestValidateRefusesAProfileWhoseBackendRunsAnotherModel(t *testing.T) {
 	t.Parallel()
-	p := Profile{Model: "haiku", OMBackend: []string{"/x/claude", "-p", "--model", "sonnet"}}
-	if got := p.ReviewerModel(); got != "sonnet" {
-		t.Errorf("ReviewerModel = %q, want the backend's sonnet", got)
+	path := filepath.Join(t.TempDir(), "models.json")
+	writeModelFile(t, path, `{"profiles":{"mixed":{"model":"haiku","om_backend":["/x/claude","-p","--model","sonnet"]}},"roles":{"om-review":"mixed"}}`)
+	table, err := Load(path, testBuiltins)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
 	}
-	got, err := p.ReviewerBackendIn(t.TempDir(), nil)
-	if err != nil || ModelName(got) != p.ReviewerModel() {
-		t.Errorf("ReviewerBackendIn = %v, %v; want it to run %q", got, err, p.ReviewerModel())
+	err = table.ValidateRole(OMReview)
+	if err == nil || !strings.Contains(err.Error(), "runs sonnet") {
+		t.Errorf("ValidateRole of a mismatched profile = %v, want a refusal naming the backend's sonnet", err)
 	}
 }

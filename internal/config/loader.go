@@ -2850,3 +2850,21 @@ func (c *EscalationConfig) GetMaxReescalations() int {
 	}
 	return *c.MaxReescalations
 }
+
+// LoadTownSettings reads a town's settings file. A missing file is nil settings
+// and no error: a town that never wrote one has set nothing, which a reader
+// reports as unset rather than borrowing the defaults a spawn would resolve to.
+func LoadTownSettings(path string) (*TownSettings, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var settings TownSettings
+	if err := DecodeJSONFile(path, data, &settings); err != nil {
+		return nil, err
+	}
+	return &settings, nil
+}
