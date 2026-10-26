@@ -1369,17 +1369,23 @@ got=$(PROC_ROOT="$T/no-proc" proc_state $$)
   && pass "proc_state: falls back to ps when /proc has no stat line" \
   || fail "proc_state: ps branch read '$got', want '$want'"
 
-# --- Cases 54-58: the build's registry settings come from settings/config.json
+# --- Cases 54-60: the build's registry settings come from settings/config.json
 # daemon.env (gt-jmd9n). Each way the read can fail is its own case: the build runs
 # local-only and the log says why. Every case uses its own temp town root; the
 # world template may carry a settings/config.json, so each case removes or writes
 # its own. ---
 registry_case() {
-  # registry_case NAME CONFIG_BODY_OR_EMPTY(missing) EXPECT_ENV EXPECT_LOG
-  local name="$1" body="$2" want_env="$3" want_log="$4" T
-  # The daemon exports these to its own runs; the cases must see only the config
-  # they write, so they are cleared here (gt-g3l7s).
-  unset POLECAT_IMAGE_REGISTRY POLECAT_IMAGE_CRANE
+  # registry_case NAME CONFIG_BODY_OR_EMPTY(missing) EXPECT_ENV EXPECT_LOG [AMBIENT]
+  # AMBIENT is "<registry> <crane>": the values the daemon exports to its own
+  # runs. Every case starts with both cleared and gets the AMBIENT it names in
+  # the run's subshell only, so it sees the config it writes and nothing leaks to
+  # this shell or to a later case (gt-g3l7s, gt-ijudv).
+  local name="$1" body="$2" want_env="$3" want_log="$4" ambient="${5-}"
+  local amb_registry="" amb_crane="" T
+  if [ -n "$ambient" ]; then
+    amb_registry="${ambient%% *}"
+    case "$ambient" in *" "*) amb_crane="${ambient#* }" ;; esac
+  fi
   T=$(make_world); mkdir -p "$T/plugin"; rm -rf "$T/settings"
   cat > "$T/plugin/run.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -1388,7 +1394,10 @@ STUB
   chmod +x "$T/plugin/run.sh"
   if [ -n "$body" ]; then mkdir -p "$T/settings"; printf '%s' "$body" > "$T/settings/config.json"; fi
   install_stub "$T" "$(cat "$T/c1")"
-  rc=$( export GT_TOWN_ROOT="$T"
+  rc=$( unset POLECAT_IMAGE_REGISTRY POLECAT_IMAGE_CRANE
+        [ -z "$amb_registry" ] || export POLECAT_IMAGE_REGISTRY="$amb_registry"
+        [ -z "$amb_crane" ] || export POLECAT_IMAGE_CRANE="$amb_crane"
+        export GT_TOWN_ROOT="$T"
         IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
   wait_for "$T/image-env.txt" || true
   if [ "$rc" = "0" ] && [ "$(cat "$T/image-env.txt" 2>/dev/null)" = "$want_env" ] && grep -q -F "$want_log" "$T/run.out"; then
@@ -1397,6 +1406,12 @@ STUB
     fail "image: $name: rc=$rc env='$(cat "$T/image-env.txt" 2>/dev/null)' want env='$want_env' log='$want_log'"
   fi
 }
+# What the daemon already exported is what a run inherits when the config is
+# silent for that key; a key the config sets is what the build gets (gt-ijudv).
+# These stand in for the daemon's values and stay in this shell: the cases below
+# clear them in each run's subshell only.
+POLECAT_IMAGE_REGISTRY="daemon.example:5000" POLECAT_IMAGE_CRANE="/daemon/crane"
+export POLECAT_IMAGE_REGISTRY POLECAT_IMAGE_CRANE
 registry_case "registry and crane come from config.json daemon.env" \
   '{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":"localhost:5001","POLECAT_IMAGE_CRANE":"/crane/bin/crane"}}}' \
   "localhost:5001 /crane/bin/crane" "" 
@@ -1408,6 +1423,15 @@ registry_case "a daemon.env that is not an object runs local-only and says so" \
   '{"daemon":{"env":"oops"}}' "unset unset" "daemon.env in"
 registry_case "a missing key runs local-only and names the key" \
   '{"daemon":{"env":{"POLECAT_IMAGE_CRANE":"/crane/bin/crane"}}}' "unset /crane/bin/crane" "no POLECAT_IMAGE_REGISTRY in daemon.env"
+registry_case "a config value wins over the ambient one for the same key" \
+  '{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":"localhost:5001"}}}' \
+  "localhost:5001 unset" "" "localhost:7001"
+registry_case "an ambient value fills the key the config leaves out" \
+  '{"daemon":{"env":{"POLECAT_IMAGE_CRANE":"/crane/bin/crane"}}}' \
+  "localhost:7001 /crane/bin/crane" "" "localhost:7001 /ambient/crane"
+[ "$POLECAT_IMAGE_REGISTRY" = "daemon.example:5000" ] && [ "$POLECAT_IMAGE_CRANE" = "/daemon/crane" ] \
+  && pass "image: the registry cases clear the daemon's variables in each run, not in this shell" \
+  || fail "image: registry cases changed this shell's variables: registry='${POLECAT_IMAGE_REGISTRY-}' crane='${POLECAT_IMAGE_CRANE-}'"
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
