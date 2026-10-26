@@ -59,6 +59,58 @@ func RoleDirectiveSources(role, townRoot, rigName string) []string {
 	return sources
 }
 
+// RoleDirective is one directive file that renders for a role: its scope (the
+// word "town", or the rig's name), its file stem ("_common" or the role), the
+// file's path, and its full text, unchanged.
+type RoleDirective struct {
+	Scope string
+	Name  string
+	Path  string
+	Text  string
+}
+
+// ReadRoleDirectives returns every directive file that renders for role, in
+// resolution order, with its full text. A file that does not exist is absent,
+// and so is one that holds only whitespace, as RoleDirectiveSources treats it.
+// A file that exists and cannot be read is an error: a caller that renders a
+// prompt from these must not silently drop a policy (fail closed).
+func ReadRoleDirectives(role, townRoot, rigName string) ([]RoleDirective, error) {
+	var out []RoleDirective
+	for _, path := range directivePaths(role, townRoot, rigName) {
+		data, err := os.ReadFile(path) //nolint:gosec // G304: path is from trusted config
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("directive %s: %w", path, err)
+		}
+		if strings.TrimSpace(string(data)) == "" {
+			continue
+		}
+		out = append(out, RoleDirective{
+			Scope: directiveScope(path, townRoot),
+			Name:  strings.TrimSuffix(filepath.Base(path), ".md"),
+			Path:  path,
+			Text:  string(data),
+		})
+	}
+	return out, nil
+}
+
+// directiveScope names the scope of a directive file: "town" for one under
+// <townRoot>/directives, otherwise the rig directory it sits in.
+func directiveScope(path, townRoot string) string {
+	rel, err := filepath.Rel(townRoot, path)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) >= 3 {
+		return parts[0]
+	}
+	return "town"
+}
+
 func readDirectiveContent(path string) string {
 	content, err := os.ReadFile(path) //nolint:gosec // G304: path is from trusted config
 	if err != nil {
