@@ -426,6 +426,18 @@ var treeWideGuards = []treeWideGuard{
 		judges:  func(rel string) bool { return rel == ".om.json" },
 		removal: true,
 	},
+	{
+		// Any .sh file is the guard's input: it holds the tracked scripts to
+		// the shrinking allowlist in internal/repoguard/shell-scripts.txt
+		// (gt-lpm8b). The real listing is git ls-files, so the tree check is
+		// integration-tier — the unit tier runs no git (realgit.txt), and its
+		// guard takes an injected lister. A deletion or a rename counts too:
+		// the script's allowlist line must go in the same change.
+		pkg:     "internal/repoguard",
+		tests:   []string{"TestIntegrationNoNewShellScripts"},
+		judges:  func(rel string) bool { return strings.HasSuffix(rel, ".sh") },
+		removal: true,
+	},
 }
 
 // treeWideGuard is one guard package's inputs: the test functions to run and
