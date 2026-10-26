@@ -3,6 +3,9 @@ package dashboard
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -206,9 +209,10 @@ func TestLandingsShipCellNamesWhatShipsEachRig(t *testing.T) {
 
 // The Polecat column reads a landing's polecat time in seconds, minutes, or
 // hours and minutes. A whole hour drops its empty minutes ("26h", not
-// "26h00m"), a total that may understate the time carries a +, and a landing
-// with no reading — a crew landing, or one landed before the record kept it —
-// is a dash (gt-90wi1).
+// "26h00m"), a total that may understate the time carries a +, a positive
+// reading under a second is "<1s" rather than a zero, and a landing with no
+// reading — a crew landing, or one landed before the record kept it — is a
+// dash (gt-90wi1).
 func TestThePolecatTimeColumnFormatsItsReadings(t *testing.T) {
 	t.Parallel()
 
@@ -222,9 +226,21 @@ func TestThePolecatTimeColumnFormatsItsReadings(t *testing.T) {
 		{`undefined`, false, "–"},
 		{`0`, false, "–"},
 		{`0`, true, "–"},
+		{`0.4`, false, "<1s"},
+		{`0.6`, false, "<1s"},
+		{`0.4`, true, "<1s+"},
+		{`1`, false, "1s"},
 		{`59`, false, "59s"},
+		{`60`, false, "60s"},
+		{`75`, false, "75s"},
+		{`89`, false, "89s"},
+		{`90`, false, "2m"},
 		{`1380`, false, "23m"},
+		{`3569.6`, false, "1h"},
+		{`3570`, false, "1h"},
+		{`3600`, false, "1h"},
 		{`4320`, false, "1h12m"},
+		{`5400`, false, "1h30m"},
 		{`93600`, false, "26h"},
 		{`1380`, true, "23m+"},
 	} {
@@ -238,84 +254,137 @@ func TestThePolecatTimeColumnFormatsItsReadings(t *testing.T) {
 	}
 }
 
+// polecatCell is one row of the Landings table as the page drew it: the bead,
+// and the Polecat cell's text and hover.
+type polecatCell struct {
+	Bead  string `json:"bead"`
+	Text  string `json:"text"`
+	Title string `json:"title"`
+}
+
+// drawnPolecatColumn renders the Landings table and reads its Polecat column
+// back cell by cell, finding both columns by their heading so a column that
+// moves does not move the expectation with it.
+func drawnPolecatColumn(t *testing.T, dom *pageDOM) []polecatCell {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+  let tbl = null;
+  (function walk(n) {
+    if (tbl) return;
+    if (n.className === "ltable") { tbl = n; return; }
+    for (const c of (n.children || [])) walk(c);
+  })(document.getElementById("trend"));
+  if (!tbl) return [];
+  const col = name => tbl.children[0].children.findIndex(th => th.textContent === name);
+  const beadCol = col("Landing"), polecatCol = col("Polecat");
+  if (beadCol < 0 || polecatCol < 0) throw new Error("the table has no Landing and Polecat headings");
+  return tbl.children.slice(1).map(tr => ({
+    bead: tr.children[beadCol].textContent,
+    text: tr.children[polecatCol].textContent,
+    title: tr.children[polecatCol].title,
+  }));
+})())`)
+	if err != nil {
+		t.Fatalf("reading the drawn landings table: %v", err)
+	}
+	var cells []polecatCell
+	if err := json.Unmarshal([]byte(v.String()), &cells); err != nil {
+		t.Fatalf("decoding the drawn table: %v", err)
+	}
+	return cells
+}
+
 // The Landings pane draws the polecat time in a column of its own, and lists
 // the attempts that make it up on the cell's hover. A landing whose record
-// carries no reading draws a dash, as a crew landing does, and an attempt
-// whose span never closed reads "open" (gt-90wi1).
+// carries no reading draws a dash, as a crew landing does; an attempt whose
+// span never closed reads "open"; and an attempt that is itself a floor keeps
+// its + in the hover, as the total does. The golden is the column written by
+// hand from these fixtures, not from a run of the page (gt-90wi1).
 func TestTheLandingsPaneDrawsThePolecatTimeColumn(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 26, 14, 0, 0, 0, time.Local)
 	dom := newPageDOM(t)
 	dom.call(t, "renderTrend", map[string]any{"trend": map[string]any{
-		"hours": []map[string]any{{"hour": now.Format(time.RFC3339), "landed": 3}},
+		"hours": []map[string]any{{"hour": now.Format(time.RFC3339), "landed": 5}},
 		"recent": []map[string]any{
 			{
 				"at": now.Add(-time.Minute).Format(time.RFC3339), "bead": "gt-attempts", "outcome": "landed",
-				"polecat_secs": 1380, "polecat_lower_bound": true,
+				"polecat_secs": 1380,
 				"polecat_attempts": []map[string]any{
 					{"seat": "gastown/opal", "secs": 840},
 					{"seat": "gastown/jade", "secs": 540},
 				},
 			},
-			{"at": now.Add(-2 * time.Minute).Format(time.RFC3339), "bead": "gt-crew", "outcome": "landed"},
 			{
-				"at": now.Add(-3 * time.Minute).Format(time.RFC3339), "bead": "gt-open", "outcome": "landed",
+				"at": now.Add(-2 * time.Minute).Format(time.RFC3339), "bead": "gt-lower-attempts", "outcome": "landed",
+				"polecat_secs": 1380, "polecat_lower_bound": true,
+				"polecat_attempts": []map[string]any{
+					{"seat": "gastown/opal", "secs": 840, "lower_bound": true},
+					{"seat": "gastown/jade", "secs": 540},
+				},
+			},
+			{"at": now.Add(-3 * time.Minute).Format(time.RFC3339), "bead": "gt-crew", "outcome": "landed"},
+			{
+				"at": now.Add(-4 * time.Minute).Format(time.RFC3339), "bead": "gt-open", "outcome": "landed",
 				"polecat_lower_bound": true,
 				"polecat_attempts":    []map[string]any{{"seat": "gastown/onyx", "secs": 0, "lower_bound": true}},
+			},
+			{
+				"at": now.Add(-5 * time.Minute).Format(time.RFC3339), "bead": "gt-subsecond", "outcome": "landed",
+				"polecat_secs": 0.4,
 			},
 		},
 	}})
 
-	v, err := dom.vm.RunString(`JSON.stringify((() => {
-  const out = [];
-  (function walk(n) {
-    if (n.className === "ltable") {
-      for (const tr of n.children) out.push(tr.children.map(td => ({text: td.textContent, title: td.title})));
-      return;
-    }
-    for (const c of (n.children || [])) walk(c);
-  })(document.getElementById("trend"));
-  return out;
-})())`)
+	got := drawnPolecatColumn(t, dom)
+	raw, err := os.ReadFile(filepath.Join("testdata", "landings_polecat_column.golden"))
 	if err != nil {
-		t.Fatalf("reading the drawn landings table: %v", err)
+		t.Fatalf("reading the golden: %v", err)
 	}
-	var table [][]struct{ Text, Title string }
-	if err := json.Unmarshal([]byte(v.String()), &table); err != nil {
-		t.Fatalf("decoding the drawn table: %v", err)
+	var want []polecatCell
+	if err := json.Unmarshal(raw, &want); err != nil {
+		t.Fatalf("decoding the golden: %v", err)
 	}
-	if len(table) < 4 {
-		t.Fatalf("the table drew %d rows, want a header and three landings", len(table))
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the drawn Polecat column:\n got %+v\nwant %+v", got, want)
 	}
+}
 
-	col := -1
-	for i, cell := range table[0] {
-		if cell.Text == "Polecat" {
-			col = i
-		}
+// A reading of a minute or more is still drawn in seconds while it stays under
+// a minute and a half, then rounds to whole minutes; the band is fmtDur's own,
+// so the Polecat column's format does not move it. Every value is asserted as
+// drawn, so a change to the rounding fails on the value that changed
+// (gt-eswib).
+func TestThePolecatColumnDrawsTheSecondsBand(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 26, 14, 0, 0, 0, time.Local)
+	recent := make([]map[string]any, 0, 5)
+	for i, secs := range []float64{59, 60, 75, 89, 90} {
+		recent = append(recent, map[string]any{
+			"at":           now.Add(-time.Duration(i+1) * time.Minute).Format(time.RFC3339),
+			"bead":         fmt.Sprintf("gt-%ds", int(secs)),
+			"outcome":      "landed",
+			"polecat_secs": secs,
+		})
 	}
-	if col < 0 {
-		t.Fatalf("the header has no Polecat column: %+v", table[0])
+	dom := newPageDOM(t)
+	dom.call(t, "renderTrend", map[string]any{"trend": map[string]any{
+		"hours":  []map[string]any{{"hour": now.Format(time.RFC3339), "landed": len(recent)}},
+		"recent": recent,
+	}})
+
+	got := drawnPolecatColumn(t, dom)
+	want := []polecatCell{
+		{"gt-59s", "59s", ""},
+		{"gt-60s", "60s", ""},
+		{"gt-75s", "75s", ""},
+		{"gt-89s", "89s", ""},
+		{"gt-90s", "2m", ""},
 	}
-	for _, want := range []struct{ bead, text, title string }{
-		{"gt-attempts", "23m+", "2 attempts: 14m + 9m"},
-		{"gt-crew", "–", ""},
-		{"gt-open", "–", "1 attempt: open"},
-	} {
-		var row []struct{ Text, Title string }
-		for _, r := range table[1:] {
-			for _, cell := range r {
-				if cell.Text == want.bead {
-					row = r
-				}
-			}
-		}
-		if row == nil {
-			t.Fatalf("the table has no row for %s", want.bead)
-		}
-		if row[col].Text != want.text || row[col].Title != want.title {
-			t.Errorf("%s reads %q (%q) in the Polecat column, want %q (%q)", want.bead, row[col].Text, row[col].Title, want.text, want.title)
-		}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the drawn seconds band:\n got %+v\nwant %+v", got, want)
 	}
 }
