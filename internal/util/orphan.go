@@ -4,6 +4,7 @@ package util
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -83,9 +84,12 @@ func liveSweepDeps() sweepDeps {
 	return sweepDeps{
 		snapshot:  psSnapshot,
 		tmuxPanes: getTmuxSessionPIDs,
-		tmuxProbe: func() error { return tmux.BuildCommand("list-sessions").Run() },
-		townRoot:  resolveTownRoot,
-		isIDE:     isIDEClaudeProcess,
+		tmuxProbe: func() error {
+			out, err := tmux.BuildCommand("list-sessions").CombinedOutput()
+			return classifyTmuxProbe(out, err)
+		},
+		townRoot: resolveTownRoot,
+		isIDE:    isIDEClaudeProcess,
 		processTTY: func(pid int) (string, error) {
 			out, err := exec.Command("ps", "-o", "tty=", "-p", strconv.Itoa(pid)).Output()
 			return strings.TrimSpace(string(out)), err
@@ -111,9 +115,41 @@ func sweepPaneGuard(d sweepDeps) (map[int]bool, error) {
 		return pids, nil
 	}
 	if err := d.tmuxProbe(); err != nil {
+		if errors.Is(err, ErrTmuxNoServer) {
+			// No server is no evidence either way: a TTY-less claude may belong to a
+			// live session, so the sweep refuses. The caller reports nothing for it.
+			return nil, fmt.Errorf("no tmux server, so the sweep signals nothing: %w", err)
+		}
 		return nil, fmt.Errorf("tmux not available: %w", err)
 	}
 	return nil, nil
+}
+
+// ErrTmuxNoServer means tmux is installed and found no server to ask. The sweep
+// refuses to signal then, and the daemon does not log that refusal as a failure
+// (gt-r2kvf).
+var ErrTmuxNoServer = errors.New("no tmux server running")
+
+// classifyTmuxProbe reads a `tmux list-sessions` answer. tmux exits 1 with
+// "no server running" or "error connecting to ... (No such file or directory)"
+// when no server exists; that is ErrTmuxNoServer. A missing binary and every
+// other failure are returned as they are.
+func classifyTmuxProbe(out []byte, err error) error {
+	if err == nil {
+		return nil
+	}
+	// Any error that carries an exit status, as *exec.ExitError does, is a tmux
+	// answer; a binary that did not start carries none.
+	var coded interface{ ExitCode() int }
+	if !errors.As(err, &coded) {
+		return err
+	}
+	text := string(out)
+	if strings.Contains(text, "no server running") ||
+		(strings.Contains(text, "error connecting to") && strings.Contains(text, "No such file or directory")) {
+		return ErrTmuxNoServer
+	}
+	return err
 }
 
 // getTmuxSessionPIDs returns a set of PIDs belonging to ANY tmux session

@@ -3599,6 +3599,10 @@ func (d *Daemon) killIdlePolecat(rigName, polecatName, sessionName string, idleD
 func (d *Daemon) cleanupOrphanedProcesses() {
 	results, err := util.CleanupOrphanedClaudeProcesses()
 	if err != nil {
+		// No tmux server is the sweep refusing to signal, not a failure (gt-r2kvf).
+		if errors.Is(err, util.ErrTmuxNoServer) {
+			return
+		}
 		d.logger.Printf("Warning: orphan process cleanup failed: %v", err)
 		return
 	}
