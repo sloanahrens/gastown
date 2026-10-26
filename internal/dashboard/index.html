@@ -184,6 +184,36 @@ button.jvfold{cursor:pointer}
 button.jvfold:hover{color:var(--text)}
 .jvmore{margin-top:2px}
 .jvstale td{color:var(--dim)}
+/* The Mango panel's target blocks: each checkable target is one row of title,
+   verdict and thin chips, rate against its baseline, interval bar, narrowing
+   chips and fold. A not-checkable target is one line under the table. */
+.mgtable td{vertical-align:top;padding:6px 10px 6px 0;border-top:1px solid var(--line)}
+.mgtable tbody tr:first-child td{border-top:0}
+.mgbig{font-size:20px;font-weight:700;line-height:1.2;white-space:nowrap}
+.mgof{font-size:12px;font-weight:400;color:var(--dim)}
+.mgvs,.mggroup{color:var(--dim);font-size:12px}
+.mglift{color:var(--green);font-size:12px;font-weight:700}
+.jvstale .mglift{color:var(--dim)}
+.jvchip.jvthin{border-style:dashed}
+.mgbar{position:relative;width:120px;height:16px;margin-top:3px}
+.mgtrack,.mgci,.mgbase,.mgdot{position:absolute}
+.mgtrack{left:0;right:0;top:7px;height:2px;background:var(--line)}
+.mgci{top:5px;height:6px;border-radius:3px;background:var(--teal);opacity:.45}
+.mgbase{top:0;height:16px;border-left:1px dashed var(--dim)}
+.mgdot{top:4px;width:8px;height:8px;margin-left:-4px;border-radius:50%;background:var(--teal)}
+.mgevidence .jvchip{margin:0 4px 2px 0}
+.mgfold{margin-top:4px;font-size:12px}
+.mgfold summary{cursor:pointer;color:var(--dim)}
+.mgcond{display:flex;gap:8px;padding:1px 0}
+.mgcond.jvstale{color:var(--dim)}
+.mgcondshare{color:var(--dim)}
+.mgcondtag{font-style:italic}
+.mgnot{color:var(--dim);padding:6px 0;border-top:1px solid var(--line)}
+.mgnot .jvchip{margin-right:8px}
+.mgnotlabel{color:var(--text);font-weight:700;margin-right:8px}
+.mgnot.jvstale .mgnotlabel{color:var(--dim)}
+.mgnotpos{margin-right:8px}
+.mgnotwhy{overflow-wrap:anywhere}
 .sweepico{font-weight:700}
 #alertsctl{cursor:pointer;background:none;font:inherit;font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
 #alertsctl.on{color:var(--teal);border-color:var(--teal)}
@@ -3568,9 +3598,23 @@ function renderJev(s) {
   for (const b of batteries) body.append(jevRow(b));
 }
 
-// renderMango draws the Mango panel. A missing or unreadable panel draws no
-// target rows: the last analysis would pass as current. Every string is the
-// reader's, already stripped and capped, and is set with textContent only.
+// The Mango panel's words for the three verdicts. The title line counts a target
+// the panel could not check as "not checkable"; a target row and the Jev panel
+// keep the panel's own verdict word. The meanings are Mango's, not the Jev
+// panel's labels.
+const MG_WORDS = {earning: "earning", "no-signal": "no-signal", "not-yet": "not checkable"};
+const MG_MEANING = {
+  earning: "enough positives and a signal replicated on the holdout",
+  "no-signal": "enough positives, nothing beyond the base rate",
+  "not-yet": "too few positives, or none in the holdout, to check",
+};
+
+// renderMango draws the Mango panel: the collection row, then one block per
+// checkable target, then a single line for each target the panel could not
+// check. A not-yet target is not a verdict to line up with the others, so it
+// leaves the table. A missing or unreadable panel draws no target rows: the last
+// analysis would pass as current. Every string is the reader's, already stripped
+// and capped, and is set with textContent only.
 function renderMango(s) {
   const sec = $("mangosec"), box = $("mango"), note = $("mangonote");
   const m = s.mango;
@@ -3585,16 +3629,16 @@ function renderMango(s) {
     const parts = [m.items + (m.items === 1 ? " landing" : " landings"), m.snapshot_hours + " snapshot hours", m.generated_at ? "analysed " + age(m.generated_at) + " ago" : "analysis age unknown", m.note];
     note.append(document.createTextNode(parts.join(" · ")));
     const counts = {earning: c.earning || 0, "no-signal": c.no_signal || 0, "not-yet": c.not_yet || 0};
-    for (const v of JV_VERDICTS) note.append(document.createTextNode(" "), jevChip(v, counts[v] + " " + v, JV_MEANING[v]));
+    for (const v of JV_VERDICTS) note.append(document.createTextNode(" "), jevChip(v, counts[v] + " " + MG_WORDS[v], MG_MEANING[v]));
     if (stale) note.className = "r warnc";
   } else {
     note.className = m.state === "error" ? "r badc" : "r";
     note.textContent = m.note;
   }
 
-  const table = el("table", "jvtable");
+  const table = el("table", "jvtable mgtable");
   const head = el("tr");
-  head.append(el("th", "", "target"), el("th", "", "verdict"), el("th", "n", "positives"), el("th", "n", "holdout"), el("th", "n", "baseline"), el("th", "", "best box"));
+  head.append(el("th", "", "target"), el("th", "", "verdict"), el("th", "", "rate"), el("th", "", "interval"), el("th", "", "evidence"), el("th", "", "best box"));
   const thead = document.createElement("thead"); thead.append(head); table.append(thead);
   const body = document.createElement("tbody"); table.append(body);
   box.append(table);
@@ -3602,29 +3646,123 @@ function renderMango(s) {
   const col = el("tr", stale ? "jvstale" : "");
   col.append(el("td", "jvname", "collection"), el("td"), el("td", "n"), el("td", "n"), el("td", "n"), el("td", m.state === "error" ? "badc" : "empty", m.note));
   body.append(col);
-  if (read) for (const t of m.targets || []) body.append(mangoRow(t, stale));
+  if (!read) return;
+  const unchecked = [];
+  for (const t of m.targets || []) {
+    // A target the panel could not check is not a verdict to line up with the
+    // others; it goes under the table as one line saying why.
+    if (t.verdict === "not-yet") unchecked.push(t);
+    else body.append(mangoRow(t, stale));
+  }
+  for (const t of unchecked) box.append(mangoUnchecked(t, stale));
 }
 
-// mangoRow draws one target: its verdict chip, its positives, the holdout's rate
-// over its size and the baseline it is measured against, then its best box. A
-// skipped target had too few positives to check a box, so its cells say so.
+// mangoRow draws one checkable target as a block: its plain title and verdict
+// chips, its rate against the baseline, its interval, the conditions that narrow
+// the group and their fold, and the old best box.
 function mangoRow(t, stale) {
   const tr = el("tr", stale ? "jvstale" : "");
-  const verdict = el("td");
+  // The label is the panel's plain-words title; a target it has no title for
+  // shows its id, so a target added to the analysis still draws a row.
+  tr.append(el("td", "jvname", t.label || t.target));
+
+  const verdict = el("td", "mgverdict");
   // A verdict this page does not know keeps the panel's word and stays dim, so
   // it never wears a counted verdict's colour.
-  verdict.append(jevChip(t.verdict, t.verdict, JV_MEANING[t.verdict] || "a verdict this page does not know"));
-  tr.append(el("td", "jvname", t.target), verdict, el("td", "n", String(t.positives)));
-  if (t.skipped) {
-    tr.append(el("td", "n", "-"), el("td", "n", "-"), el("td", "empty", "too few positives to check"));
-  } else {
-    // A rate the panel did not report is a dash: as a number, jevPct would draw
-    // it as 0.0%, a figure the analysis never gave.
-    const pct = v => v == null ? "-" : jevPct(v);
-    const holdout = t.holdout_rate == null ? "-" : jevPct(t.holdout_rate) + " of " + t.holdout_n;
-    tr.append(el("td", "n", holdout), el("td", "n", pct(t.baseline)), el("td", "", t.best_box || "-"));
-  }
+  verdict.append(jevChip(t.verdict, t.verdict, MG_MEANING[t.verdict] || "a verdict this page does not know"));
+  // A thin box's rate rests on too few positives to read as a measurement; the
+  // chip names the count it rests on.
+  if (t.thin) verdict.append(el("span", "jvchip jvthin", "thin n=" + t.holdout_n));
+  tr.append(verdict);
+
+  tr.append(mangoRates(t));
+  tr.append(mangoInterval(t));
+  tr.append(mangoEvidence(t));
+  tr.append(el("td", "mgbox", t.best_box || "-"));
   return tr;
+}
+
+// mangoRates draws the holdout's rate over its group, the baseline it is
+// measured against, and its lift over that baseline. A rate or baseline the
+// panel did not report is a dash, never a zero. A baseline of zero makes the
+// lift a division by zero rather than a large effect, so it is left out.
+function mangoRates(t) {
+  const td = el("td", "mgrates");
+  const pct = v => v == null ? "-" : jevPct(v);
+  const big = el("div", "mgbig");
+  big.append(el("span", "", pct(t.holdout_rate)));
+  // An older panel carries no holdout positives, so the group's count is the
+  // rate's own "of N" and the numerator is not drawn.
+  if (t.holdout_rate != null && t.holdout_positives == null && t.holdout_n) big.append(el("span", "mgof", " of " + t.holdout_n));
+  td.append(big);
+  td.append(el("div", "mgvs", "vs " + pct(t.baseline) + " across all recent landings"));
+  if (t.baseline > 0 && t.holdout_rate != null) td.append(el("div", "mglift", (t.holdout_rate / t.baseline).toFixed(1) + "x as likely"));
+  if (t.holdout_positives != null) td.append(el("div", "mggroup", t.holdout_positives + " of " + t.holdout_n + " recent landings in the group"));
+  return td;
+}
+
+// mangoInterval draws the box's interval on a 0..100% track: a bar from the low
+// to the high bound and a dot at the rate, with the baseline marked dashed. A
+// panel that carried no interval, or only one bound, draws no bar: a range the
+// writer did not measure is not drawn.
+function mangoInterval(t) {
+  const td = el("td", "mginterval");
+  if (t.ci_low == null || t.ci_high == null || t.ci_high < t.ci_low) return td;
+  const at = v => (v * 100).toFixed(1) + "%";
+  const bar = el("div", "mgbar");
+  bar.setAttribute("role", "img");
+  bar.setAttribute("aria-label", (t.holdout_rate == null ? "no rate" : jevPct(t.holdout_rate)) + ", interval " + jevPct(t.ci_low) + " to " + jevPct(t.ci_high));
+  bar.append(el("div", "mgtrack"));
+  if (t.baseline != null) {
+    const base = el("div", "mgbase"); base.style.left = at(t.baseline); bar.append(base);
+  }
+  const ci = el("div", "mgci"); ci.style.left = at(t.ci_low); ci.style.width = at(t.ci_high - t.ci_low); bar.append(ci);
+  if (t.holdout_rate != null) {
+    const dot = el("div", "mgdot"); dot.style.left = at(t.holdout_rate); bar.append(dot);
+  }
+  td.append(bar);
+  return td;
+}
+
+// mangoEvidence draws the box's conditions over the row and in a closed fold:
+// a condition that narrows the group is a chip, and every condition is a line in
+// "how it was found", the ones that do not narrow greyed and marked. A target
+// with no conditions keeps its old best box inside the fold.
+function mangoEvidence(t) {
+  const td = el("td", "mgevidence");
+  const conds = t.conditions || [];
+  for (const c of conds) if (c.narrows) td.append(el("span", "jvchip mgcondchip", c.text + " " + jevPct(c.share) + " of landings"));
+  const fold = el("details", "mgfold");
+  fold.append(el("summary", "", "how it was found"));
+  const list = el("div", "mgcondlist");
+  for (const c of conds) {
+    const row = el("div", "mgcond" + (c.narrows ? "" : " jvstale"));
+    row.append(el("span", "mgcondtext", c.text), el("span", "mgcondshare", jevPct(c.share) + " of landings"));
+    if (!c.narrows) row.append(el("span", "mgcondtag", "doesn't narrow"));
+    list.append(row);
+  }
+  if (!conds.length) list.append(el("div", "mgbox", t.best_box || "-"));
+  fold.append(list);
+  td.append(fold);
+  return td;
+}
+
+// mangoUnchecked draws a target the panel could not check as one line under the
+// table: the not-checkable chip, its plain title and its positives, then the
+// reason in words and, when none landed recently, the day it was last positive.
+// A reason this page has no sentence for is not drawn; a skipped target from an
+// older panel still says why it was skipped.
+function mangoUnchecked(t, stale) {
+  const line = el("div", "mgnot" + (stale ? " jvstale" : ""));
+  line.append(el("span", "jvchip jv-notyet", "not checkable"), el("span", "mgnotlabel", t.label || t.target), el("span", "mgnotpos", t.positives + (t.positives === 1 ? " positive" : " positives")));
+  let why = "";
+  if (t.reason === "few_positives") why = "too few positives to check";
+  else if (t.reason === "no_holdout_positives") {
+    why = "no positives in the recent landings to check it on";
+    if (t.last_positive) why += ", its last positive was " + t.last_positive;
+  } else if (t.skipped) why = "too few positives to check";
+  if (why) line.append(el("span", "mgnotwhy", why));
+  return line;
 }
 
 // costBarChart draws one of the Cost panel's charts from its data, which the
