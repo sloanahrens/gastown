@@ -9,12 +9,14 @@ import (
 // Collect takes one snapshot over sources, giving each its own perSource
 // deadline. It always returns a record: a source that returns an error, panics
 // or misses its deadline leaves a null group and an errors entry, and the
-// other groups still fill. The sources run at once, so a hung one costs
+// other groups still fill. A group name two sources claim keeps the first
+// source's columns and is an errors entry for the second, because one key
+// holds one source's answer. The sources run at once, so a hung one costs
 // perSource once rather than once per source.
 func Collect(ctx context.Context, env Env, sources []Source, perSource time.Duration) Record {
 	rec := Record{
 		V:      Version,
-		TS:     env.Now().UTC().Format(time.RFC3339),
+		TS:     env.now().UTC().Format(time.RFC3339),
 		Groups: make(map[string]map[string]any, len(sources)),
 	}
 	done := make([]chan collectedGroup, len(sources))
@@ -33,6 +35,7 @@ func Collect(ctx context.Context, env Env, sources []Source, perSource time.Dura
 			done[i] <- collectedGroup{cols: cols, err: err}
 		}(i, src)
 	}
+	seen := make(map[string]bool, len(sources))
 	for i, src := range sources {
 		group := src.Group()
 		var got collectedGroup
@@ -48,7 +51,13 @@ func Collect(ctx context.Context, env Env, sources []Source, perSource time.Dura
 				// The source ignored its context or lost the race with it. Its
 				// result, if it ever comes, is discarded: done is buffered and
 				// nothing reads it again.
-				got.err = fmt.Errorf("no result within %s: %w", perSource, deadlines[i].Err())
+				if err := ctx.Err(); err != nil {
+					// The snapshot's own context ended, so the caller gave up
+					// rather than the source missing its deadline.
+					got.err = fmt.Errorf("canceled before the group returned: %w", err)
+				} else {
+					got.err = fmt.Errorf("no result within %s: %w", perSource, deadlines[i].Err())
+				}
 			}
 		}
 		cancels[i]()
@@ -56,6 +65,11 @@ func Collect(ctx context.Context, env Env, sources []Source, perSource time.Dura
 			rec.Errors = append(rec.Errors, Error{Group: group, Error: fmt.Sprintf("group name %q is reserved", group)})
 			continue
 		}
+		if seen[group] {
+			rec.Errors = append(rec.Errors, Error{Group: group, Error: fmt.Sprintf("group name %q is claimed twice; kept the first source", group)})
+			continue
+		}
+		seen[group] = true
 		var cols map[string]any
 		if got.err != nil {
 			rec.Errors = append(rec.Errors, Error{Group: group, Error: got.err.Error()})
