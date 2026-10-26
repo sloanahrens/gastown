@@ -125,6 +125,10 @@ type Item struct {
 	Bead string `json:"bead,omitempty"`
 	// SHA is the commit the condition names, when it has one.
 	SHA string `json:"sha,omitempty"`
+	// Owner names who holds the condition now, when a person or seat does.
+	Owner string `json:"owner,omitempty"`
+	// WaitingOn says what the condition is waiting on, in words.
+	WaitingOn string `json:"waiting_on,omitempty"`
 	// Summary is the one-line human description shown in the queue.
 	Summary string `json:"summary"`
 	// FirstSeen is when the condition was first observed. It survives every
@@ -234,4 +238,33 @@ func AckedKey(acks Acks, key string) bool {
 		}
 	}
 	return false
+}
+
+// Class says whether an item needs the overseer to act, or is only work in the
+// pipeline that clears by itself when someone else's landing happens.
+type Class string
+
+const (
+	// ClassAct is an item that needs the overseer or a person.
+	ClassAct Class = "act"
+	// ClassPipeline is an item that is only waiting on work already in flight.
+	ClassPipeline Class = "pipeline"
+)
+
+// Classify derives an item's class from its kind and its owner and waiting-on
+// fields. Rejected-twice, tier-sweep-red and risk-path items are pipeline when
+// someone owns them or they wait on something; review-backlog is always
+// pipeline. Every other kind, an unknown kind included, is act, so an unknown
+// condition is seen rather than hidden (gt-x3qra).
+func Classify(it Item) Class {
+	switch it.Kind {
+	case KindRejectedTwice, KindTierSweepRed, KindRiskPath:
+		if it.Owner != "" || it.WaitingOn != "" {
+			return ClassPipeline
+		}
+		return ClassAct
+	case KindReviewBacklog:
+		return ClassPipeline
+	}
+	return ClassAct
 }
