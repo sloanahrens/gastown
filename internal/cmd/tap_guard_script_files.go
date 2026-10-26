@@ -38,11 +38,11 @@ const scriptFilePythonExtension = ".py"
 // scriptFilePolicy is the whole redirect this guard delivers, in one constant
 // so the denial message, the unreadable-payload denial and the tests cannot
 // drift apart (gt-b43ra).
-const scriptFilePolicy = `Write a Go package with unit tests and seams for the clock, filesystem and
-process runner: ~/.claude/docs/standards/test-engineering.md, "Scripts are debt".
-A procedure that is only operator steps is a runbook, not a script.
-Bash-created scripts are to be caught at commit by the repo guard gt-lpm8b,
-which is still open; until it lands, nothing here judges a Bash command.`
+const scriptFilePolicy = `Scripts are debt: write a Go package with unit tests and seams for the
+clock, filesystem and process runner instead of a one-off script. A procedure
+that is only operator steps is a runbook, not a script.
+Bash is not judged by this guard. The planned commit gate gt-lpm8b, not yet
+landed, is to catch a Bash-created script when it is committed.`
 
 var tapGuardScriptFilesCmd = &cobra.Command{
 	Use:   "script-files",
@@ -52,9 +52,9 @@ var tapGuardScriptFilesCmd = &cobra.Command{
 Edit/Write/MultiEdit/NotebookEdit are denied when the target is inside the
 session's own worktree, does not exist yet, and ends in .sh, .bash, .zsh, .pl
 or .rb. Editing a script that already exists is allowed, and removing one is
-always allowed. Bash is not judged here: a Bash-created script is caught at
-commit time by the repo guard gt-lpm8b, where a tracked script outside the
-allowlist fails the gate with the same redirect.
+always allowed. Bash is not judged here, so the Bash route is open in this
+guard. The planned commit gate gt-lpm8b is to catch a Bash-created script when
+it is committed; it has not landed yet, so it is not an existing check.
 
 The guard fails closed on what it can name: a hook payload it cannot read or
 parse, or a session whose worktree it cannot place, is denied when the payload
@@ -134,9 +134,9 @@ type scriptFileScope struct {
 }
 
 // resolveScriptFileScope identifies the session's worktree. ok reports whether
-// it could be named. A session whose tree cannot be named is a refusal, not an
-// allow: the guard exists to stop a new script, and not being able to see where
-// the session stands is not evidence that no script is being written (gt-b43ra).
+// it could be named. When it cannot, the hook does not judge the call against
+// a worktree: unjudgedWorktree denies only a file-writing target whose name ends
+// in a denied script suffix and allows the rest (gt-b43ra).
 func resolveScriptFileScope(payloadCwd string, proc guardProcess) (scope scriptFileScope, ok bool) {
 	role := scriptFileWorkerRole(proc)
 	cwd := ""

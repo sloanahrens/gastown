@@ -16,9 +16,8 @@ import (
 //	<root>/gt/<rig>/crew/<member>             a crew member's worktree
 //	<root>/scratch                            scratch outside every worktree
 //
-// The polecat worktree seeds "build.sh" (a script the guard must let the
-// session edit), "release.txt" (a non-script operand an install command copies)
-// and "bin/" (an install -t directory).
+// The polecat worktree seeds "build.sh", a script the guard must let the
+// session edit.
 type scriptFileTestTown struct {
 	root     string
 	rigRoot  string
@@ -49,7 +48,6 @@ func newScriptFileTestTown(t *testing.T) scriptFileTestTown {
 		town.sibling,
 		town.crew,
 		town.scratch,
-		filepath.Join(worktree, "bin"),
 	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("creating %s: %v", dir, err)
@@ -67,8 +65,6 @@ func newScriptFileTestTown(t *testing.T) scriptFileTestTown {
 	// no-exec-files violation (internal/testpolicy).
 	for _, file := range []struct{ path, content string }{
 		{filepath.Join(worktree, "build.sh"), "go build ./...\n"},
-		{filepath.Join(worktree, "release.txt"), "notes\n"},
-		{filepath.Join(town.sibling, "build.sh"), "go build ./...\n"},
 	} {
 		if err := os.WriteFile(file.path, []byte(file.content), 0o644); err != nil {
 			t.Fatalf("seeding %s: %v", file.path, err)
