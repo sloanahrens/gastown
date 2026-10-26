@@ -173,7 +173,7 @@ type MangoTarget struct {
 	Skipped   bool   `json:"skipped,omitempty"`
 	BestBox   string `json:"best_box,omitempty"`
 	// Conditions is the box's ranges read alone, in the box's own order, absent
-	// when the target has no box.
+	// when the target has no box or its box did not replicate.
 	Conditions       []MangoCondition `json:"conditions,omitempty"`
 	HoldoutPositives *int             `json:"holdout_positives,omitempty"`
 	HoldoutN         int              `json:"holdout_n"`

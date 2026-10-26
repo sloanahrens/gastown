@@ -578,11 +578,12 @@ func TestMangoRefusesANonRegularPanel(t *testing.T) {
 	}
 }
 
-// The best box's conditions and the target's last positive day reach the page
-// from the golden panel: the box's own order, each share and narrows flag as
-// written, and neither key on a target that was never run. Guards
-// `row.Conditions = mangoConditions(t.Conditions)` and the `mangoDay` check on
-// last_positive in mangoTargets.
+// The replicating best box's conditions and the target's last positive day
+// reach the page from the golden panel: the box's own order, each share and
+// narrows flag as written, and neither key on a target whose box did not
+// replicate or that was never run. Guards `row.Conditions =
+// mangoConditions(t.Conditions)` and the `mangoDay` check on last_positive in
+// mangoTargets.
 func TestMangoReadsTheConditionsAndLastPositive(t *testing.T) {
 	t.Parallel()
 
@@ -611,11 +612,8 @@ func TestMangoReadsTheConditionsAndLastPositive(t *testing.T) {
 	}
 
 	noSignal := m.Targets[1]
-	if len(noSignal.Conditions) != 2 {
-		t.Fatalf("the no-signal target's conditions read %+v, want two", noSignal.Conditions)
-	}
-	if c := noSignal.Conditions[1]; c.Text != "files_touched in {none}" || c.Share != 0.94 || c.Narrows {
-		t.Errorf("a condition the box does not narrow reads %+v", c)
+	if noSignal.Conditions != nil {
+		t.Errorf("a box that did not replicate reads conditions %+v, want none", noSignal.Conditions)
 	}
 	if noSignal.LastPositive != "2026-10-21" {
 		t.Errorf("the no-signal target's last positive reads %q", noSignal.LastPositive)

@@ -18,11 +18,13 @@ var panelGoldenNow = time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
 // panelGoldenResults is the analysis the dashboard's golden panel records: one
 // earning target, one with a box that does not replicate, and one skipped for
 // too few training positives. Each box's K and N are what its rate is, and K
-// stays within the target's own holdout positives. Each boxed target carries
-// its best box's conditions in the box's own order; the skipped target has
-// none, because it was never run. The two run targets record the day their last
-// positive landed, and the skipped one records none, so the golden carries the
-// key both present and absent.
+// stays within the target's own holdout positives. The analysis measures every
+// boxed target's conditions, but the golden carries only the earning target's,
+// in the box's own order: the no-signal target's box did not replicate, so the
+// panel writes none, and the skipped target has none because it was never run.
+// The two run targets record the day their last positive landed, and the
+// skipped one records none, so the golden carries the key both present and
+// absent.
 func panelGoldenResults() []TargetResult {
 	return []TargetResult{
 		{
@@ -335,19 +337,19 @@ func TestPanelTargetBoxKeys(t *testing.T) {
 }
 
 // TestPanelTargetConditions writes the best box's conditions from the measured
-// result, and writes none for a target with no box or one skipped before it was
-// run.
+// result when that box replicated, and writes none for a target with no box,
+// one skipped before it was run, or a box that did not replicate.
 func TestPanelTargetConditions(t *testing.T) {
 	t.Parallel()
 
 	conditions := []MangoCondition{{Text: "priority in [1, 2]", Share: 0.6, Narrows: true}}
 	boxed := panelTarget(TargetResult{
 		Target: "rejected_before_landing", TrainPositives: 40, HoldoutN: 100, HoldoutPositives: 10,
-		Best:       &BoxCheck{Box: "a box", N: 40, K: 8, Rate: 0.2},
+		Best:       &BoxCheck{Box: "a box", N: 40, K: 8, Rate: 0.2, Replicates: true},
 		Conditions: conditions,
 	})
 	if !reflect.DeepEqual(boxed.Conditions, conditions) {
-		t.Errorf("a boxed target writes conditions %+v, want %+v", boxed.Conditions, conditions)
+		t.Errorf("a replicating box writes conditions %+v, want %+v", boxed.Conditions, conditions)
 	}
 
 	tests := []struct {
@@ -355,9 +357,14 @@ func TestPanelTargetConditions(t *testing.T) {
 		target TargetResult
 	}{
 		{"no best box", TargetResult{Target: "rejected_before_landing", TrainPositives: 40, HoldoutN: 100, HoldoutPositives: 10}},
+		{"box does not replicate", TargetResult{
+			Target: "manual_rescue", TrainPositives: 40, HoldoutN: 100, HoldoutPositives: 10,
+			Best:       &BoxCheck{Box: "a box", N: 40, K: 8, Rate: 0.2},
+			Conditions: conditions,
+		}},
 		{"skipped", TargetResult{
 			Target: "reached_overrun_stop", TrainPositives: MangoMinSupport - 1, HoldoutN: 100, HoldoutPositives: 10,
-			Best:       &BoxCheck{Box: "a box", N: 40, K: 8, Rate: 0.2},
+			Best:       &BoxCheck{Box: "a box", N: 40, K: 8, Rate: 0.2, Replicates: true},
 			Conditions: conditions,
 		}},
 	}
