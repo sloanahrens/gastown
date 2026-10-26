@@ -75,6 +75,13 @@ const (
 // doltServerReadyLog is the line dolt sql-server prints once it listens.
 const doltServerReadyLog = "Server ready. Accepting connections."
 
+// errDoltReadinessProbe marks a start whose container reached "Server ready"
+// and published its port, but whose readiness probe did not answer (gt-f6msc:
+// the first read through the published port sat past the DSN's read timeout).
+// Retried, because the replacement is a different container on a new port; the
+// bound and the reap of the failed container are what keep it from looping.
+var errDoltReadinessProbe = errors.New("dolt readiness probe")
+
 // portLookup returns the host port Docker published for a container port.
 type portLookup func(ctx context.Context, containerPort string) (string, error)
 
@@ -179,7 +186,9 @@ func runDoltContainer(ctx context.Context) (ctr testcontainers.Container, err er
 		return ctr, err
 	}
 	if err := pingDolt(ctx, port); err != nil {
-		return ctr, fmt.Errorf("dolt readiness probe: %w", err)
+		// Both wraps: the sentinel decides retriability, the probe error is
+		// what a reader needs to see.
+		return ctr, fmt.Errorf("%w: %w", errDoltReadinessProbe, err)
 	}
 	return ctr, nil
 }
@@ -249,10 +258,12 @@ func isPortNotMappedErr(err error) bool {
 
 // isRetriableContainerStartErr reports whether a failed container start is one
 // a replacement attempt clears: the reaper still removing the previous
-// container's status, or a port binding Docker had not published yet
-// (gt-jvve).
+// container's status, a port binding Docker had not published yet (gt-jvve),
+// or a readiness probe the container did not answer (gt-f6msc). A probe error
+// that ran an attempt out of its budget is a stall, not a bad container:
+// retryContainerStart names that case before this is asked.
 func isRetriableContainerStartErr(err error) bool {
-	return isReaperRemovingErr(err) || isPortNotMappedErr(err)
+	return isReaperRemovingErr(err) || isPortNotMappedErr(err) || errors.Is(err, errDoltReadinessProbe)
 }
 
 // settleDoltContainer waits for ctr's published port so the daemon that
@@ -354,10 +365,14 @@ func retryContainerStart(ctx context.Context, hooks containerStartHooks) (testco
 		if err == nil {
 			return ctr, nil
 		}
-		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		stalled := errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
+		if stalled {
 			err = fmt.Errorf("container start did not finish within %s (gt-16rk2): %w", hooks.attemptTimeout, err)
 		}
-		retriable := isRetriableContainerStartErr(err)
+		// A stalled start is reported even when its failure is otherwise
+		// retriable (a probe that ran the attempt out of budget): the load
+		// that stalled it is still there for the next attempt.
+		retriable := !stalled && isRetriableContainerStartErr(err)
 		if retriable && isPortNotMappedErr(err) {
 			hooks.settle(ctx, ctr)
 		}

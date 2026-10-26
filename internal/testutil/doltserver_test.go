@@ -19,6 +19,14 @@ func portNotMappedErr() error {
 	return fmt.Errorf("starting Dolt container: initialize: port %q not found", doltContainerPort)
 }
 
+// doltReadinessProbeErr is the startup failure gt-f6msc is about: the
+// container logged "Server ready" and published its port, and the first read
+// through that port timed out.
+func doltReadinessProbeErr() error {
+	return fmt.Errorf("%w: %w", errDoltReadinessProbe,
+		errors.New("read tcp 127.0.0.1:62289->127.0.0.1:55432: i/o timeout"))
+}
+
 // A container that answers on the first lookup is not delayed at all.
 func TestWaitForMappedPortImmediate(t *testing.T) {
 	t.Parallel()
@@ -196,6 +204,79 @@ func TestRetryContainerStartExhaustedReportsLogs(t *testing.T) {
 	}
 }
 
+// A readiness probe that stalls is retried on a replacement container: the
+// first read through the published port timing out says nothing about the
+// container that answers the second (gt-f6msc).
+func TestRetryContainerStartRetriesReadinessProbe(t *testing.T) {
+	t.Parallel()
+	f := &fakeContainerStart{
+		t:        t,
+		ctr:      &testcontainers.DockerContainer{},
+		failures: []error{doltReadinessProbeErr(), nil},
+	}
+
+	ctr, err := retryContainerStart(context.Background(), f.hooks())
+	if err != nil || ctr != f.ctr {
+		t.Fatalf("retryContainerStart = (%v, %v), want the replacement container and no error", ctr, err)
+	}
+	if f.attempts != 2 || f.settles != 0 || f.reaps != 1 {
+		t.Fatalf("attempts = %d, settles = %d, reaps = %d, want 2, 0, 1", f.attempts, f.settles, f.reaps)
+	}
+	if len(f.sleeps) != 1 || f.sleeps[0] != startupRetryDelay {
+		t.Fatalf("sleeps = %v, want [%s]", f.sleeps, startupRetryDelay)
+	}
+}
+
+// After startupAttempts stalled probes the start fails with the probe error
+// and the last container's logs, so the failure says what the container did.
+func TestRetryContainerStartExhaustedReadinessProbeReportsLogs(t *testing.T) {
+	t.Parallel()
+	f := &fakeContainerStart{
+		t:        t,
+		ctr:      &testcontainers.DockerContainer{},
+		failures: []error{doltReadinessProbeErr(), doltReadinessProbeErr(), doltReadinessProbeErr()},
+		logTail:  "Server ready. Accepting connections.",
+	}
+
+	ctr, err := retryContainerStart(context.Background(), f.hooks())
+	if ctr != nil {
+		t.Fatalf("ctr = %v, want nil after every attempt failed", ctr)
+	}
+	if err == nil || !errors.Is(err, errDoltReadinessProbe) || !strings.Contains(err.Error(), "i/o timeout") {
+		t.Fatalf("err = %v, want the readiness-probe failure", err)
+	}
+	if !strings.Contains(err.Error(), "Server ready. Accepting connections.") {
+		t.Fatalf("err = %v, want the container log tail attached", err)
+	}
+	if f.attempts != startupAttempts || f.reaps != startupAttempts || f.settles != 0 {
+		t.Fatalf("attempts = %d, reaps = %d, settles = %d, want %d attempts and reaps, no settle",
+			f.attempts, f.reaps, f.settles, startupAttempts)
+	}
+	if len(f.sleeps) != startupAttempts-1 || f.sleeps[0] != startupRetryDelay || f.sleeps[1] != 2*startupRetryDelay {
+		t.Fatalf("sleeps = %v, want [%s %s]", f.sleeps, startupRetryDelay, 2*startupRetryDelay)
+	}
+}
+
+// A probe that ran its attempt out of budget is a stalled start, and is
+// reported at once rather than retried under the load that stalled it.
+func TestRetryContainerStartDoesNotRetryProbeThatRanOutOfBudget(t *testing.T) {
+	t.Parallel()
+	probeTimeout := fmt.Errorf("%w: %w", errDoltReadinessProbe, context.DeadlineExceeded)
+	f := &fakeContainerStart{
+		t:        t,
+		ctr:      &testcontainers.DockerContainer{},
+		failures: []error{probeTimeout, nil},
+	}
+
+	_, err := retryContainerStart(context.Background(), f.hooks())
+	if err == nil || !strings.Contains(err.Error(), "did not finish within") {
+		t.Fatalf("err = %v, want the attempt budget named", err)
+	}
+	if f.attempts != 1 || f.reaps != 1 || len(f.sleeps) != 0 {
+		t.Fatalf("attempts = %d, reaps = %d, sleeps = %v, want one attempt, reaped", f.attempts, f.reaps, f.sleeps)
+	}
+}
+
 // An error the retry does not recognise is reported at once, still with the
 // container's logs, and the container it left is reaped rather than leaked.
 func TestRetryContainerStartDoesNotRetryOtherFailures(t *testing.T) {
@@ -316,6 +397,7 @@ func TestIsRetriableContainerStartErr(t *testing.T) {
 		{name: "nil", err: nil, want: false},
 		{name: "unmapped port", err: portNotMappedErr(), want: true},
 		{name: "reaper removing", err: errors.New("unexpected container status \"removing\""), want: true},
+		{name: "readiness probe", err: doltReadinessProbeErr(), want: true},
 		{name: "missing image", err: errors.New("pull access denied for dolthub/dolt-sql-server"), want: false},
 		{name: "init failure", err: errors.New("initialize: error creating database gt_test: connection refused"), want: false},
 	}
