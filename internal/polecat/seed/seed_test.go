@@ -190,8 +190,12 @@ func tarStream(t *testing.T, entries ...tarEntry) []byte {
 func TestUnpackRefusesAPathOutsideTheSeed(t *testing.T) {
 	t.Parallel()
 	tree := tarStream(t, tarEntry{h: tar.Header{Name: "../escape", Mode: 0o644, Typeflag: tar.TypeReg}, body: "x"})
-	if err := Unpack(filepath.Join(t.TempDir(), "rig"), tree); err == nil {
+	err := Unpack(filepath.Join(t.TempDir(), "rig"), tree)
+	if err == nil {
 		t.Fatal("Unpack wrote an entry outside the seed directory")
+	}
+	if !strings.Contains(err.Error(), `archive entry "../escape" escapes the seed directory`) {
+		t.Errorf("Unpack: error does not name the escaping entry: %v", err)
 	}
 }
 
@@ -236,21 +240,77 @@ func TestUnpackWritesARelativeSymlinkThatStaysInside(t *testing.T) {
 	}
 }
 
-// A symlink to an absolute path or out of the seed is refused: the archive may
-// write only inside the seed, wherever the link's target lies (gt-eu4u0).
+// A link that names an absolute path, or one whose ".." climbs past the seed,
+// points outside wherever the seed is unpacked, so Unpack refuses it: the seed
+// sits under the repository and must stay there (gt-eu4u0).
 func TestUnpackRefusesASymlinkOutOfTheSeed(t *testing.T) {
 	t.Parallel()
 	for _, linkname := range []string{"/etc", "../outside", "a/../../outside"} {
 		tree := tarStream(t, tarEntry{h: tar.Header{Name: "link", Mode: 0o777, Linkname: linkname, Typeflag: tar.TypeSymlink}})
-		if err := Unpack(filepath.Join(t.TempDir(), "rig"), tree); err == nil {
+		err := Unpack(filepath.Join(t.TempDir(), "rig"), tree)
+		if err == nil {
 			t.Errorf("Unpack accepted a symlink to %q", linkname)
+			continue
 		}
+		if !strings.Contains(err.Error(), `archive symlink "link" escapes the seed directory`) {
+			t.Errorf("Unpack of a link to %q: error does not name the escaping link: %v", linkname, err)
+		}
+	}
+}
+
+// A link's name is not where it points: here "." resolves b to the seed itself,
+// so b/c/../.. ends one level above it while the written name stays inside.
+// Unpack follows the links in the seed and refuses the one that leaves.
+func TestUnpackRefusesALinkRoutingThroughAnotherLinkOutOfTheSeed(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	if err := os.Mkdir(filepath.Join(parent, "outside"), 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	tree := tarStream(t,
+		tarEntry{h: tar.Header{Name: "c", Mode: 0o755, Typeflag: tar.TypeDir}},
+		tarEntry{h: tar.Header{Name: "b", Mode: 0o777, Linkname: ".", Typeflag: tar.TypeSymlink}},
+		tarEntry{h: tar.Header{Name: "l", Mode: 0o777, Linkname: "b/c/../../outside", Typeflag: tar.TypeSymlink}},
+	)
+	err := Unpack(filepath.Join(parent, "rig"), tree)
+	if err == nil {
+		t.Fatal("Unpack accepted a link that resolves outside the seed through another link")
+	}
+	if !strings.Contains(err.Error(), `archive symlink "l" escapes the seed directory`) {
+		t.Errorf("Unpack: error does not name the escaping link: %v", err)
+	}
+}
+
+// A link that routes through another link and lands inside the seed is one git
+// can hold, so Unpack writes it: the refusal is for the links that leave.
+func TestUnpackWritesALinkRoutingThroughAnotherLinkInsideTheSeed(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "rig")
+	tree := tarStream(t,
+		tarEntry{h: tar.Header{Name: "c", Mode: 0o755, Typeflag: tar.TypeDir}},
+		tarEntry{h: tar.Header{Name: "b", Mode: 0o777, Linkname: ".", Typeflag: tar.TypeSymlink}},
+		tarEntry{h: tar.Header{Name: "l", Mode: 0o777, Linkname: "b/c", Typeflag: tar.TypeSymlink}},
+	)
+	if err := Unpack(dir, tree); err != nil {
+		t.Fatalf("Unpack: %v", err)
+	}
+}
+
+func TestUnpackRefusesASymlinkCycle(t *testing.T) {
+	t.Parallel()
+	tree := tarStream(t,
+		tarEntry{h: tar.Header{Name: "a", Mode: 0o777, Linkname: "b", Typeflag: tar.TypeSymlink}},
+		tarEntry{h: tar.Header{Name: "b", Mode: 0o777, Linkname: "a", Typeflag: tar.TypeSymlink}},
+	)
+	err := Unpack(filepath.Join(t.TempDir(), "rig"), tree)
+	if err == nil || !strings.Contains(err.Error(), "too many levels of symbolic links") {
+		t.Errorf("Unpack of a link cycle: got %v, want an error naming the cycle", err)
 	}
 }
 
 // A file entry whose parent is a symlink is refused even when the link stays
 // inside the seed: git never puts a path under a symlink, so such a tree is not
-// one a seed holds (gt-eu4u0).
+// one a seed holds, and the write would land wherever the link points.
 func TestUnpackRefusesAnEntryUnderASymlink(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "rig")
@@ -259,18 +319,21 @@ func TestUnpackRefusesAnEntryUnderASymlink(t *testing.T) {
 		tarEntry{h: tar.Header{Name: "sub", Mode: 0o777, Linkname: "real", Typeflag: tar.TypeSymlink}},
 		tarEntry{h: tar.Header{Name: "sub/x", Mode: 0o644, Typeflag: tar.TypeReg}, body: "x"},
 	)
-	if err := Unpack(dir, tree); err == nil {
+	err := Unpack(dir, tree)
+	if err == nil {
 		t.Fatal("Unpack wrote an entry through a symlink")
+	}
+	if !strings.Contains(err.Error(), `archive entry "sub/x" writes through symlink "sub"`) {
+		t.Errorf("Unpack: error does not name the link the entry writes through: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "real", "x")); !os.IsNotExist(err) {
 		t.Errorf("the entry was written through the link: %v", err)
 	}
 }
 
-// The escape the mutation review found: a tar that links to a directory
-// outside the seed and then writes a file through it must leave that file
-// unwritten. The target directory exists here, so only the guard stops the
-// write (gt-eu4u0).
+// A file written through a link that leaves the seed lands outside it, so the
+// write is refused before it happens; the target directory exists here, which
+// leaves only the guard as the thing that stops it.
 func TestUnpackRefusesAFileWrittenThroughAnEscapingSymlink(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
@@ -282,8 +345,12 @@ func TestUnpackRefusesAFileWrittenThroughAnEscapingSymlink(t *testing.T) {
 		tarEntry{h: tar.Header{Name: "a", Mode: 0o777, Linkname: "../outside", Typeflag: tar.TypeSymlink}},
 		tarEntry{h: tar.Header{Name: "a/x", Mode: 0o644, Typeflag: tar.TypeReg}, body: "escaped"},
 	)
-	if err := Unpack(filepath.Join(parent, "rig"), tree); err == nil {
+	err := Unpack(filepath.Join(parent, "rig"), tree)
+	if err == nil {
 		t.Fatal("Unpack accepted a tar that writes through an escaping symlink")
+	}
+	if !strings.Contains(err.Error(), `archive entry "a/x" writes through symlink "a"`) {
+		t.Errorf("Unpack: error does not name the link the entry writes through: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(outside, "x")); !os.IsNotExist(err) {
 		t.Errorf("a file was written outside the seed: %v", err)

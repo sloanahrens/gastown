@@ -107,9 +107,9 @@ func Stage(dest, town string, sources []Source, git Git) error {
 }
 
 // Unpack writes a `git archive --format=tar` stream into dir, which it creates.
-// It refuses any entry that would write outside dir: the directory sits under
-// the repository, so an escaping link followed by a file through it would
-// unpack the tree elsewhere (gt-eu4u0).
+// It refuses a tree that would write outside dir: the seed sits under the
+// repository, so an escaping link followed by a file through it would unpack
+// the tree elsewhere (gt-eu4u0).
 func Unpack(dir string, tree []byte) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -118,7 +118,7 @@ func Unpack(dir string, tree []byte) error {
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
-			return nil
+			return checkSymlinks(dir)
 		}
 		if err != nil {
 			return err
@@ -145,10 +145,6 @@ func Unpack(dir string, tree []byte) error {
 		case tar.TypeReg:
 			err = writeFile(target, tr, fs.FileMode(h.Mode).Perm())
 		case tar.TypeSymlink:
-			resolved := filepath.Join(filepath.Dir(name), h.Linkname) //nolint:gosec // G305: the link's target is checked, never opened
-			if filepath.IsAbs(h.Linkname) || !filepath.IsLocal(resolved) {
-				return fmt.Errorf("archive symlink %q -> %q escapes the seed directory", h.Name, h.Linkname)
-			}
 			os.Remove(target)
 			err = os.Symlink(h.Linkname, target)
 		}
@@ -156,6 +152,90 @@ func Unpack(dir string, tree []byte) error {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}
+}
+
+// maxLinkHops bounds the symlinks followed while resolving one path: a seed
+// whose links form a cycle names no target that can be checked.
+const maxLinkHops = 40
+
+// checkSymlinks refuses a seed that holds a symlink resolving outside dir: a
+// link's name alone does not say where it points, because the link can route
+// through another link in the same seed, so each is resolved as the kernel
+// would.
+func checkSymlinks(dir string) error {
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return err
+	}
+	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.Type()&fs.ModeSymlink == 0 {
+			return err
+		}
+		resolved, err := resolvePath(root, p)
+		if err != nil {
+			return err
+		}
+		if resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+			rel, err := filepath.Rel(root, p)
+			if err != nil {
+				rel = p
+			}
+			return fmt.Errorf("archive symlink %q escapes the seed directory", rel)
+		}
+		return nil
+	})
+}
+
+// resolvePath returns the path that p, an absolute path under root, refers to
+// once every symlink in the seed is followed. A component that does not exist
+// ends the walk there, since nothing below it is a link.
+func resolvePath(root, p string) (string, error) {
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return "", err
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	cur := root
+	exists := true
+	hops := maxLinkHops
+	for len(parts) > 0 {
+		part := parts[0]
+		parts = parts[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+			continue
+		}
+		next := filepath.Join(cur, part)
+		if !exists {
+			cur = next
+			continue
+		}
+		fi, err := os.Lstat(next)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			exists = false
+		case err != nil:
+			return "", err
+		case fi.Mode()&fs.ModeSymlink != 0:
+			if hops--; hops < 0 {
+				return "", fmt.Errorf("%s: too many levels of symbolic links", rel)
+			}
+			link, err := os.Readlink(next)
+			if err != nil {
+				return "", err
+			}
+			if filepath.IsAbs(link) {
+				return link, nil
+			}
+			parts = append(strings.Split(link, string(filepath.Separator)), parts...)
+			continue
+		}
+		cur = next
+	}
+	return cur, nil
 }
 
 // symlinkInPath returns the first component of name inside dir that is a
