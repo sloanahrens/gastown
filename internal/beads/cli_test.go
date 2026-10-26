@@ -93,6 +93,54 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 	}
 }
 
+// ConfigGet answers from the store the wrapper is pinned to: bd runs with
+// BEADS_DIR set to that store and any inherited BD_EVENTS_JOURNAL cleared, so
+// the caller's environment cannot make a store whose journal is off answer as
+// one whose journal is on (gt-7iwy0.7). An unset key is "" with no error —
+// bd's contract, which gt tail reports as a journal that is off — and a failed
+// bd is that failure, never "".
+func TestConfigGetPinsTheStoreAndPassesBdFailureThrough(t *testing.T) {
+	t.Parallel()
+	beadsDir := t.TempDir()
+	r := newRecorder(func([]string) reply {
+		return reply{stdout: `{"key":"events-journal","value":"false"}`}
+	})
+	b := newBeads(beadsFields{
+		workDir:  t.TempDir(),
+		beadsDir: beadsDir,
+		baseEnv:  []string{"BD_EVENTS_JOURNAL=1", "BEADS_DIR=/somewhere/else", "PATH=/usr/bin"},
+		exec:     r.exec,
+	})
+	v, err := b.ConfigGet("events-journal")
+	if err != nil || v != "false" {
+		t.Fatalf("ConfigGet = %q, %v", v, err)
+	}
+	calls := r.calls()
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %v", r.argvs())
+	}
+	if want := []string{"config", "get", "events-journal"}; !reflect.DeepEqual(calls[0].args, want) {
+		t.Fatalf("argv = %v, want %v", calls[0].args, want)
+	}
+	if got, ok := lastEnvValue(calls[0].env, "BEADS_DIR"); !ok || got != ResolveBeadsDir(beadsDir) {
+		t.Errorf("BEADS_DIR = %q (set %v), want the store's %q", got, ok, ResolveBeadsDir(beadsDir))
+	}
+	if got, ok := lastEnvValue(calls[0].env, "BD_EVENTS_JOURNAL"); ok {
+		t.Errorf("BD_EVENTS_JOURNAL = %q reached bd; the store's config must answer alone", got)
+	}
+	if got, _ := lastEnvValue(calls[0].env, "BD_MACHINE"); got != "1" {
+		t.Errorf("BD_MACHINE = %q, want 1: an unset key then reads as value \"\"", got)
+	}
+
+	failing := newRecorder(func([]string) reply {
+		return reply{stderr: "database not found\n", err: errors.New("exit status 1")}
+	})
+	f := newBeads(beadsFields{workDir: t.TempDir(), beadsDir: beadsDir, exec: failing.exec})
+	if _, err := f.ConfigGet("events-journal"); err == nil || !strings.Contains(err.Error(), "database not found") {
+		t.Fatalf("bd failure = %v, want bd's stderr in the error", err)
+	}
+}
+
 func TestSQLCSVParsesStdoutOnly(t *testing.T) {
 	t.Parallel()
 	r := newRecorder(func([]string) reply {

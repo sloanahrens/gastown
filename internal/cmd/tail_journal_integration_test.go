@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/deps"
 )
 
 // fakeBDScript answers the calls a viewer's journal makes and logs every start
@@ -31,9 +30,8 @@ exit 0
 // A viewer left open for a minute starts a handful of bd processes — the
 // events-journal config read its client makes once — where it used to start one
 // per poll (gt-jw9sr). The count is of real starts, which the unit tier cannot
-// make: its harness refuses every bd start, so the same criterion is pinned
-// there at the client's own bd seam
-// (TestTailJournalStore_MinuteOfPollsRunsNoBDPerPoll).
+// make: its harness refuses every bd start, so the client's reads are counted
+// there instead (TestTailJournalStore_MinuteOfPollsRunsNoBDPerPoll).
 func TestIntegrationTailJournalSpawnsNoBDPerPoll(t *testing.T) {
 	binDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBDScript), 0o755); err != nil {
@@ -44,11 +42,7 @@ func TestIntegrationTailJournalSpawnsNoBDPerPoll(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	beadsDir := t.TempDir()
-	journal := newTailJournalStore(&tailBDJournal{
-		Beads: beads.NewWithBeadsDir(t.TempDir(), beadsDir),
-		dir:   beadsDir,
-		run:   deps.NewBDProcessRunner(beadsDir),
-	}, func() (tailJournalRead, error) {
+	journal := newTailJournalStore(beads.NewWithBeadsDir(t.TempDir(), beadsDir), func() (tailJournalRead, error) {
 		return &stubJournalRead{records: []beads.EventRecord{
 			{Seq: 1, TS: "2026-09-30T13:59:00Z", Op: "create", IssueID: "gt-1", Status: "open"},
 		}}, nil

@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"compress/gzip"
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -722,29 +721,17 @@ func TestDaemonSource_CorruptBackupIsOneLineAndTheLogStillReads(t *testing.T) {
 	}
 }
 
-func TestTailBDJournal_ConfigGetReadsTheStoreConfigNotGtsOverride(t *testing.T) {
+// The seam answers "" both for a key the store does not set and for one it
+// sets to an empty value (bd's contract for config get). The journal is off
+// either way, and saying so is what keeps an unset key from reading as a
+// healthy store that journals nothing.
+func TestEventsSource_UnsetConfigSaysTheJournalIsOff(t *testing.T) {
 	t.Parallel()
-	var gotEnv, gotArgs []string
-	j := &tailBDJournal{dir: "/town/gastown/mayor/rig/.beads", run: func(_ context.Context, env []string, args ...string) ([]byte, []byte, error) {
-		gotEnv, gotArgs = env, args
-		return []byte(`{"key":"events-journal","location":"config.yaml","value":"false"}`), nil, nil
-	}}
-	v, err := j.ConfigGet("events-journal")
-	if err != nil || v != "false" {
-		t.Fatalf("ConfigGet = %q, %v", v, err)
-	}
-	if want := []string{"config", "get", "events-journal", "--json"}; !reflect.DeepEqual(gotArgs, want) {
-		t.Fatalf("argv = %v", gotArgs)
-	}
-	if want := []string{"BEADS_DIR=/town/gastown/mayor/rig/.beads", "BD_EVENTS_JOURNAL=", "BD_MACHINE=1"}; !reflect.DeepEqual(gotEnv, want) {
-		t.Fatalf("env = %v", gotEnv)
-	}
-
-	j.run = func(context.Context, []string, ...string) ([]byte, []byte, error) {
-		return nil, []byte("database not found\n"), errors.New("exit status 1")
-	}
-	if _, err := j.ConfigGet("events-journal"); err == nil || !strings.Contains(err.Error(), "database not found") {
-		t.Fatalf("failure = %v", err)
+	j := &fakeTailJournal{config: ""}
+	s := &eventsSource{rig: "hq", journal: j, cutoff: tailNow, now: fixedNow}
+	want := []string{"hq events journal off in config (events-journal=): nothing is journaled"}
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q\nwant %q", got, want)
 	}
 }
 
