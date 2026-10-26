@@ -351,9 +351,8 @@ func producerPayloads(segment []string) []string {
 //
 // A bare "<<<" takes the words after it as its text: the shell word-splits an
 // unquoted body, so the run of words up to the next redirection is the script.
-// Reading only its first word left "bash <<< bd create --title=x" unjudged
-// (gt-norvx); that word is still read on its own, so a body of several words
-// adds a reading rather than replacing the one a single word drew.
+// The first word is read on its own as well, so a body of several words adds a
+// reading rather than replacing the one a single word drew (gt-norvx).
 func splitHereStrings(args []string) (rest, texts []string) {
 	for i := 0; i < len(args); i++ {
 		fd, tail, ok := redirectionFD(args[i])

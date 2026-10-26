@@ -70,6 +70,11 @@ func newBdStoreTown(t *testing.T) bdStoreTown {
 const polecatRole = "gastown/polecats/ruby"
 
 func (b bdStoreTown) run(t *testing.T, role, cwd, command string) (string, error) {
+	return b.runWithEnv(t, role, cwd, command, nil)
+}
+
+// runWithEnv runs run with extra keys in the guard process's env.
+func (b bdStoreTown) runWithEnv(t *testing.T, role, cwd, command string, extraEnv map[string]string) (string, error) {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{
 		"tool_name":  "Bash",
@@ -79,7 +84,11 @@ func (b bdStoreTown) run(t *testing.T, role, cwd, command string) (string, error
 	if err != nil {
 		t.Fatal(err)
 	}
-	proc := fakeGuardProcess(map[string]string{"GT_ROLE": role, "HOME": b.home}, "")
+	env := map[string]string{"GT_ROLE": role, "HOME": b.home}
+	for k, v := range extraEnv {
+		env[k] = v
+	}
+	proc := fakeGuardProcess(env, "")
 	var stderr strings.Builder
 	err = tapGuardBdCreateStore(strings.NewReader(string(payload)), &stderr, proc)
 	return stderr.String(), err
@@ -288,11 +297,6 @@ func TestTapGuardBdCreateStoreProcessEnvDB(t *testing.T) {
 		{"BD_DB rig with BEADS_DIR town", map[string]string{"BD_DB": rigDB, "BEADS_DIR": filepath.Join(b.town, ".beads")}, `bd create --title=x`, true},
 		{"inline BEADS_DIR rig replaces env town", map[string]string{"BEADS_DIR": filepath.Join(b.town, ".beads")}, `BEADS_DIR=` + filepath.Join(b.rigDir, "mayor", "rig", ".beads") + ` bd create --title=x`, false},
 		{"inline BEADS_DIR town replaces env rig", map[string]string{"BEADS_DIR": filepath.Join(b.rigDir, "mayor", "rig", ".beads")}, `BEADS_DIR=` + filepath.Join(b.town, ".beads") + ` bd create --title=x`, true},
-		// A nested shell inherits the process env, so the store it selects
-		// reaches the bd create it runs.
-		{"BEADS_DB town into bash -c", map[string]string{"BEADS_DB": townDB}, `bash -c 'bd create --title=x'`, true},
-		{"BEADS_DB rig into bash -c", map[string]string{"BEADS_DB": rigDB}, `bash -c 'bd create --title=x'`, false},
-		{"BEADS_DB town into a bare here-string", map[string]string{"BEADS_DB": townDB}, `bash <<< bd create --title=x`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -460,12 +464,12 @@ func TestTapGuardBdCreateStoreEnvPrefixAndExport(t *testing.T) {
 // TestTapGuardBdCreateStoreNestedSelectors pins gt-norvx: a bd create run by a
 // shell the line starts files into the store the line selects for it. The
 // selector reaches that shell as the segment's own inline assignment, as the
-// value an export earlier on the line leaves behind, or as the process env
-// (TestTapGuardBdCreateStoreProcessEnvDB), so `BEADS_DB=<town db> bash -c 'bd
-// create'` files into the town however the line spells it, and the same line
-// under the rig's database stays allowed. A here-string body is script text as
-// well: quoted it is one word, and written across the operator's words the
-// shell word-splits it, so the guard reads every word after the operator.
+// value an export earlier on the line leaves behind, or as the process env the
+// shell inherits, so `BEADS_DB=<town db> bash -c 'bd create'` files into the
+// town however the line spells it, and the same line under the rig's database
+// stays allowed. A here-string body is script text as well: quoted it is one
+// word, and written across the operator's words the shell word-splits it, so
+// the guard reads every word after the operator.
 func TestTapGuardBdCreateStoreNestedSelectors(t *testing.T) {
 	t.Parallel()
 	b := newBdStoreTown(t)
@@ -475,40 +479,45 @@ func TestTapGuardBdCreateStoreNestedSelectors(t *testing.T) {
 	rigBeads := filepath.Join(b.rigDir, "mayor", "rig", ".beads")
 	tests := []struct {
 		name    string
+		env     map[string]string
 		command string
 		blocked bool
 	}{
-		{"inline BEADS_DB town into bash -c", `BEADS_DB=` + townDB + ` bash -c 'bd create --title=x'`, true},
-		{"inline BEADS_DB rig into bash -c", `BEADS_DB=` + rigDB + ` bash -c 'bd create --title=x'`, false},
-		{"inline BEADS_DIR town into bash -c", `BEADS_DIR=` + townBeads + ` bash -c 'bd create --title=x'`, true},
-		{"inline BEADS_DIR rig into bash -c", `BEADS_DIR=` + rigBeads + ` bash -c 'bd create --title=x'`, false},
-		{"inline BD_DB town into sh -c", `BD_DB=` + townDB + ` sh -c 'bd create --title=x'`, true},
-		{"inline BD_DB rig into sh -c", `BD_DB=` + rigDB + ` sh -c 'bd create --title=x'`, false},
-		{"exported BEADS_DB town into bash -c", `export BEADS_DB=` + townDB + `; bash -c 'bd create --title=x'`, true},
-		{"exported BEADS_DB rig into bash -c", `export BEADS_DB=` + rigDB + `; bash -c 'bd create --title=x'`, false},
-		{"exported BEADS_DIR town into bash -c", `export BEADS_DIR=` + townBeads + `; bash -c 'bd create --title=x'`, true},
-		{"exported BEADS_DIR rig into bash -c", `export BEADS_DIR=` + rigBeads + `; bash -c 'bd create --title=x'`, false},
-		{"exported BEADS_DB town into a bare here-string", `export BEADS_DB=` + townDB + `; bash <<< bd create --title=x`, true},
+		{"inline BEADS_DB town into bash -c", nil, `BEADS_DB=` + townDB + ` bash -c 'bd create --title=x'`, true},
+		{"inline BEADS_DB rig into bash -c", nil, `BEADS_DB=` + rigDB + ` bash -c 'bd create --title=x'`, false},
+		{"inline BEADS_DIR town into bash -c", nil, `BEADS_DIR=` + townBeads + ` bash -c 'bd create --title=x'`, true},
+		{"inline BEADS_DIR rig into bash -c", nil, `BEADS_DIR=` + rigBeads + ` bash -c 'bd create --title=x'`, false},
+		{"inline BD_DB town into sh -c", nil, `BD_DB=` + townDB + ` sh -c 'bd create --title=x'`, true},
+		{"inline BD_DB rig into sh -c", nil, `BD_DB=` + rigDB + ` sh -c 'bd create --title=x'`, false},
+		{"exported BEADS_DB town into bash -c", nil, `export BEADS_DB=` + townDB + `; bash -c 'bd create --title=x'`, true},
+		{"exported BEADS_DB rig into bash -c", nil, `export BEADS_DB=` + rigDB + `; bash -c 'bd create --title=x'`, false},
+		{"exported BEADS_DIR town into bash -c", nil, `export BEADS_DIR=` + townBeads + `; bash -c 'bd create --title=x'`, true},
+		{"exported BEADS_DIR rig into bash -c", nil, `export BEADS_DIR=` + rigBeads + `; bash -c 'bd create --title=x'`, false},
+		{"exported BEADS_DB town into a bare here-string", nil, `export BEADS_DB=` + townDB + `; bash <<< bd create --title=x`, true},
 		// A bare here-string body is word-split, so the words after the
 		// operator are the script, with or without a backslash-newline
 		// between the operator and the first word.
-		{"inline BEADS_DB town into a bare here-string", `BEADS_DB=` + townDB + ` bash <<< bd create --title=x`, true},
-		{"inline BEADS_DB rig into a bare here-string", `BEADS_DB=` + rigDB + ` bash <<< bd create --title=x`, false},
-		{"inline BEADS_DIR town into a bare here-string", `BEADS_DIR=` + townBeads + ` bash <<< bd create --title=x`, true},
-		{"inline BEADS_DIR rig into a bare here-string", `BEADS_DIR=` + rigBeads + ` bash <<< bd create --title=x`, false},
-		{"inline BD_DB town into a bare here-string", `BD_DB=` + townDB + ` sh <<< bd create --title=x`, true},
-		{"backslash-newline before the bare body", `BEADS_DB=` + townDB + ` bash <<< \
+		{"inline BEADS_DB town into a bare here-string", nil, `BEADS_DB=` + townDB + ` bash <<< bd create --title=x`, true},
+		{"inline BEADS_DB rig into a bare here-string", nil, `BEADS_DB=` + rigDB + ` bash <<< bd create --title=x`, false},
+		{"inline BEADS_DIR town into a bare here-string", nil, `BEADS_DIR=` + townBeads + ` bash <<< bd create --title=x`, true},
+		{"inline BEADS_DIR rig into a bare here-string", nil, `BEADS_DIR=` + rigBeads + ` bash <<< bd create --title=x`, false},
+		{"inline BD_DB town into a bare here-string", nil, `BD_DB=` + townDB + ` sh <<< bd create --title=x`, true},
+		{"backslash-newline before the bare body", nil, `BEADS_DB=` + townDB + ` bash <<< \
 bd create --title=x`, true},
-		{"quoted here-string body", `BEADS_DB=` + townDB + ` bash <<< 'bd create --title=x'`, true},
+		{"quoted here-string body", nil, `BEADS_DB=` + townDB + ` bash <<< 'bd create --title=x'`, true},
 		// The here-string is read as the text it feeds, not as a bd create by
 		// its own name: a body that files nothing stays allowed either way.
-		{"bare here-string body that files nothing", `BEADS_DB=` + townDB + ` bash <<< echo hi`, false},
-		{"here-string body under the rig store", `BEADS_DB=` + rigDB + ` bash <<< bd create --title=x`, false},
+		{"bare here-string body that files nothing", nil, `BEADS_DB=` + townDB + ` bash <<< echo hi`, false},
+		// The shell the line starts inherits the guard process's env, so a
+		// selector the line never names reaches the bd create it runs.
+		{"process env BEADS_DB town into bash -c", map[string]string{"BEADS_DB": townDB}, `bash -c 'bd create --title=x'`, true},
+		{"process env BEADS_DB rig into bash -c", map[string]string{"BEADS_DB": rigDB}, `bash -c 'bd create --title=x'`, false},
+		{"process env BEADS_DB town into a bare here-string", map[string]string{"BEADS_DB": townDB}, `bash <<< bd create --title=x`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			stderr, err := b.run(t, polecatRole, b.worktree, tt.command)
+			stderr, err := b.runWithEnv(t, polecatRole, b.worktree, tt.command, tt.env)
 			if !tt.blocked {
 				if err != nil || stderr != "" {
 					t.Fatalf("want allowed, got err=%v stderr=%q", err, stderr)
