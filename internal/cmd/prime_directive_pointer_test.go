@@ -118,3 +118,42 @@ func TestPlainPrimeKeepsTheFullTextWithAPromptFile(t *testing.T) {
 		t.Errorf("plain prime must show the directive text, not a pointer:\n%s", out)
 	}
 }
+
+// TestDirectivePointerRefusesEveryBrokenInput drives each early return of
+// directivePointer: an empty path, a missing file, a directory, and a directive
+// source that cannot be read. Each must answer "" so the hook prints the capped
+// text, never a pointer to directives it could not render.
+func TestDirectivePointerRefusesEveryBrokenInput(t *testing.T) {
+	t.Parallel()
+	ctx, _ := pointerTown(t)
+	dirPrompt := filepath.Join(ctx.TownRoot, "prompt-dir")
+	if err := os.MkdirAll(dirPrompt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Make the town directive unreadable: a directory where its file should be.
+	unreadable := filepath.Join(ctx.TownRoot, "directives", "_common.md")
+	if err := os.Remove(unreadable); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(unreadable, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, path string
+	}{
+		{"empty path", ""},
+		{"missing file", filepath.Join(ctx.TownRoot, "no-such-prompt.md")},
+		{"a directory", dirPrompt},
+	}
+	for _, tc := range cases {
+		if got := directivePointer(ctx, tc.path); got != "" {
+			t.Errorf("%s: directivePointer = %q, want no pointer", tc.name, got)
+		}
+	}
+	// An unreadable directive: a prompt file exists, but the source cannot be read.
+	file := filepath.Join(ctx.TownRoot, "prompt-ok.md")
+	writeDirectiveFile(t, file, "anything\n")
+	if got := directivePointer(ctx, file); got != "" {
+		t.Errorf("unreadable directive: directivePointer = %q, want no pointer", got)
+	}
+}
