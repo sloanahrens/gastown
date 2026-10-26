@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -19,12 +21,48 @@ func portNotMappedErr() error {
 	return fmt.Errorf("starting Dolt container: initialize: port %q not found", doltContainerPort)
 }
 
-// doltReadinessProbeErr is the startup failure gt-f6msc is about: the
-// container logged "Server ready" and published its port, and the first read
-// through that port timed out.
-func doltReadinessProbeErr() error {
-	return fmt.Errorf("%w: %w", errDoltReadinessProbe,
-		errors.New("read tcp 127.0.0.1:62289->127.0.0.1:55432: i/o timeout"))
+// probeFailure is the startup failure gt-f6msc is about: the container logged
+// "Server ready" and published its port, and the first read through that port
+// timed out. The timeout is the driver's own read error, a *net.OpError, and it
+// is wrapped by the same awaitDoltReady call runDoltContainer makes, so the
+// error under test is the one production builds.
+func probeFailure(t *testing.T) error {
+	t.Helper()
+	readTimeout := &net.OpError{
+		Op:     "read",
+		Net:    "tcp",
+		Source: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 62289},
+		Addr:   &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 55432},
+		Err:    os.ErrDeadlineExceeded,
+	}
+	err := awaitDoltReady(context.Background(),
+		func(context.Context, string) (string, error) { return "55432", nil },
+		func(context.Context, string) error { return readTimeout },
+	)
+	if err == nil {
+		t.Fatalf("awaitDoltReady returned no error for a probe that timed out")
+	}
+	return err
+}
+
+// unmappedPortDeadlineErr is the startup failure of a port lookup that ran out
+// of its budget and still had Docker answering that the Dolt port was never
+// published: a port-not-mapped failure that also wraps the deadline.
+func unmappedPortDeadlineErr(t *testing.T) error {
+	t.Helper()
+	err := awaitDoltReady(context.Background(),
+		func(_ context.Context, containerPort string) (string, error) {
+			return "", fmt.Errorf("getting mapped port: port %q not found: %w", containerPort, context.DeadlineExceeded)
+		},
+		func(context.Context, string) error {
+			t.Fatalf("probe ran for a container whose port was never published")
+			return nil
+		},
+	)
+	if err == nil {
+		t.Fatalf("awaitDoltReady returned no error for an unpublished port")
+	}
+	return err
 }
 
 // A container that answers on the first lookup is not delayed at all.
@@ -212,7 +250,7 @@ func TestRetryContainerStartRetriesReadinessProbe(t *testing.T) {
 	f := &fakeContainerStart{
 		t:        t,
 		ctr:      &testcontainers.DockerContainer{},
-		failures: []error{doltReadinessProbeErr(), nil},
+		failures: []error{probeFailure(t), nil},
 	}
 
 	ctr, err := retryContainerStart(context.Background(), f.hooks())
@@ -234,7 +272,7 @@ func TestRetryContainerStartExhaustedReadinessProbeReportsLogs(t *testing.T) {
 	f := &fakeContainerStart{
 		t:        t,
 		ctr:      &testcontainers.DockerContainer{},
-		failures: []error{doltReadinessProbeErr(), doltReadinessProbeErr(), doltReadinessProbeErr()},
+		failures: []error{probeFailure(t), probeFailure(t), probeFailure(t)},
 		logTail:  "Server ready. Accepting connections.",
 	}
 
@@ -242,8 +280,8 @@ func TestRetryContainerStartExhaustedReadinessProbeReportsLogs(t *testing.T) {
 	if ctr != nil {
 		t.Fatalf("ctr = %v, want nil after every attempt failed", ctr)
 	}
-	if err == nil || !errors.Is(err, errDoltReadinessProbe) || !strings.Contains(err.Error(), "i/o timeout") {
-		t.Fatalf("err = %v, want the readiness-probe failure", err)
+	if err == nil || !errors.Is(err, errDoltReadinessProbe) || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("err = %v, want the readiness-probe failure and its read timeout", err)
 	}
 	if !strings.Contains(err.Error(), "Server ready. Accepting connections.") {
 		t.Fatalf("err = %v, want the container log tail attached", err)
@@ -257,23 +295,26 @@ func TestRetryContainerStartExhaustedReadinessProbeReportsLogs(t *testing.T) {
 	}
 }
 
-// A probe that ran its attempt out of budget is a stalled start, and is
-// reported at once rather than retried under the load that stalled it.
-func TestRetryContainerStartDoesNotRetryProbeThatRanOutOfBudget(t *testing.T) {
+// The probe retry is additive: a port-not-mapped failure that also wraps the
+// attempt deadline keeps the retry and settle it had before gt-f6msc, because
+// no gate may turn a stalled-looking error into a reported one.
+func TestRetryContainerStartStillRetriesAndSettlesUnmappedPortDeadline(t *testing.T) {
 	t.Parallel()
-	probeTimeout := fmt.Errorf("%w: %w", errDoltReadinessProbe, context.DeadlineExceeded)
 	f := &fakeContainerStart{
 		t:        t,
 		ctr:      &testcontainers.DockerContainer{},
-		failures: []error{probeTimeout, nil},
+		failures: []error{unmappedPortDeadlineErr(t), nil},
 	}
 
-	_, err := retryContainerStart(context.Background(), f.hooks())
-	if err == nil || !strings.Contains(err.Error(), "did not finish within") {
-		t.Fatalf("err = %v, want the attempt budget named", err)
+	ctr, err := retryContainerStart(context.Background(), f.hooks())
+	if err != nil || ctr != f.ctr {
+		t.Fatalf("retryContainerStart = (%v, %v), want the replacement container and no error", ctr, err)
 	}
-	if f.attempts != 1 || f.reaps != 1 || len(f.sleeps) != 0 {
-		t.Fatalf("attempts = %d, reaps = %d, sleeps = %v, want one attempt, reaped", f.attempts, f.reaps, f.sleeps)
+	if f.attempts != 2 || f.settles != 1 || f.reaps != 1 {
+		t.Fatalf("attempts = %d, settles = %d, reaps = %d, want 2, 1, 1", f.attempts, f.settles, f.reaps)
+	}
+	if len(f.sleeps) != 1 || f.sleeps[0] != startupRetryDelay {
+		t.Fatalf("sleeps = %v, want [%s]", f.sleeps, startupRetryDelay)
 	}
 }
 
@@ -397,7 +438,7 @@ func TestIsRetriableContainerStartErr(t *testing.T) {
 		{name: "nil", err: nil, want: false},
 		{name: "unmapped port", err: portNotMappedErr(), want: true},
 		{name: "reaper removing", err: errors.New("unexpected container status \"removing\""), want: true},
-		{name: "readiness probe", err: doltReadinessProbeErr(), want: true},
+		{name: "readiness probe", err: probeFailure(t), want: true},
 		{name: "missing image", err: errors.New("pull access denied for dolthub/dolt-sql-server"), want: false},
 		{name: "init failure", err: errors.New("initialize: error creating database gt_test: connection refused"), want: false},
 	}

@@ -75,11 +75,11 @@ const (
 // doltServerReadyLog is the line dolt sql-server prints once it listens.
 const doltServerReadyLog = "Server ready. Accepting connections."
 
-// errDoltReadinessProbe marks a start whose container reached "Server ready"
-// and published its port, but whose readiness probe did not answer (gt-f6msc:
-// the first read through the published port sat past the DSN's read timeout).
-// Retried, because the replacement is a different container on a new port; the
-// bound and the reap of the failed container are what keep it from looping.
+// errDoltReadinessProbe marks a start whose container published its port but
+// did not answer the readiness probe (gt-f6msc: the first read through the
+// published port sat past the DSN's read timeout). The retry replaces such a
+// container with a different one on a new port, and startupAttempts bounds how
+// many replacements a start may burn.
 var errDoltReadinessProbe = errors.New("dolt readiness probe")
 
 // portLookup returns the host port Docker published for a container port.
@@ -181,16 +181,26 @@ func runDoltContainer(ctx context.Context) (ctr testcontainers.Container, err er
 	if err != nil {
 		return ctr, fmt.Errorf("run dolt: %w", err)
 	}
-	port, err := waitForMappedPort(ctx, doltPortLookup(ctr))
-	if err != nil {
+	if err := awaitDoltReady(ctx, doltPortLookup(ctr), pingDolt); err != nil {
 		return ctr, err
 	}
-	if err := pingDolt(ctx, port); err != nil {
+	return ctr, nil
+}
+
+// awaitDoltReady is runDoltContainer's readiness step: wait for the port Docker
+// published, then probe it. A probe failure wraps errDoltReadinessProbe, which
+// is what makes the start retriable (gt-f6msc).
+func awaitDoltReady(ctx context.Context, lookup portLookup, probe func(ctx context.Context, port string) error) error {
+	port, err := waitForMappedPort(ctx, lookup)
+	if err != nil {
+		return err
+	}
+	if err := probe(ctx, port); err != nil {
 		// Both wraps: the sentinel decides retriability, the probe error is
 		// what a reader needs to see.
-		return ctr, fmt.Errorf("%w: %w", errDoltReadinessProbe, err)
+		return fmt.Errorf("%w: %w", errDoltReadinessProbe, err)
 	}
-	return ctr, nil
+	return nil
 }
 
 // pingDolt opens a session on the server at port and pings it, bounded by ctx
@@ -259,9 +269,7 @@ func isPortNotMappedErr(err error) bool {
 // isRetriableContainerStartErr reports whether a failed container start is one
 // a replacement attempt clears: the reaper still removing the previous
 // container's status, a port binding Docker had not published yet (gt-jvve),
-// or a readiness probe the container did not answer (gt-f6msc). A probe error
-// that ran an attempt out of its budget is a stall, not a bad container:
-// retryContainerStart names that case before this is asked.
+// or a readiness probe the container did not answer (gt-f6msc).
 func isRetriableContainerStartErr(err error) bool {
 	return isReaperRemovingErr(err) || isPortNotMappedErr(err) || errors.Is(err, errDoltReadinessProbe)
 }
@@ -365,14 +373,10 @@ func retryContainerStart(ctx context.Context, hooks containerStartHooks) (testco
 		if err == nil {
 			return ctr, nil
 		}
-		stalled := errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
-		if stalled {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			err = fmt.Errorf("container start did not finish within %s (gt-16rk2): %w", hooks.attemptTimeout, err)
 		}
-		// A stalled start is reported even when its failure is otherwise
-		// retriable (a probe that ran the attempt out of budget): the load
-		// that stalled it is still there for the next attempt.
-		retriable := !stalled && isRetriableContainerStartErr(err)
+		retriable := isRetriableContainerStartErr(err)
 		if retriable && isPortNotMappedErr(err) {
 			hooks.settle(ctx, ctr)
 		}
