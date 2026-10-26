@@ -218,6 +218,29 @@ func TestCompileBuildsTheCommitFromACleanWorktree(t *testing.T) {
 	}
 }
 
+func TestCompileResolvesARelativeOutputOutsideTheWorktree(t *testing.T) {
+	t.Parallel()
+	git := &fakeGit{revParse: fullCommit}
+	build := &fakeGo{}
+	if _, err := Compile(Options{Src: "/beads", Out: "deploy/polecat/bin/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run); err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	want, err := filepath.Abs("deploy/polecat/bin/bd")
+	if err != nil {
+		t.Fatalf("resolving the expected output: %v", err)
+	}
+	add := git.find("worktree", "add")
+	if add == nil {
+		t.Fatalf("Compile did not check the commit out; git calls: %v", git.calls)
+	}
+	if build.args[5] != want {
+		t.Errorf("Compile wrote the binary to %q, want %q", build.args[5], want)
+	}
+	if strings.HasPrefix(build.args[5], add[4]) {
+		t.Errorf("Compile wrote the binary inside the worktree %q, which it deletes", add[4])
+	}
+}
+
 func TestCompileDropsHostVariablesThatChangeTheBuild(t *testing.T) {
 	t.Parallel()
 	git := &fakeGit{revParse: fullCommit}
@@ -228,6 +251,7 @@ func TestCompileDropsHostVariablesThatChangeTheBuild(t *testing.T) {
 		"GOCACHE=/home/dev/.cache/go-build",
 		"GOMODCACHE=/home/dev/go/pkg/mod",
 		"GOPROXY=https://proxy.example",
+		"GOENV=/home/dev/.config/go/env",
 		"GOFLAGS=-tags=hostjob",
 		"GOEXPERIMENT=loopvar",
 		"GOARM64=v9.0",
@@ -241,11 +265,14 @@ func TestCompileDropsHostVariablesThatChangeTheBuild(t *testing.T) {
 		"PATH=/usr/bin:/bin", "HOME=/home/dev",
 		"GOCACHE=/home/dev/.cache/go-build", "GOMODCACHE=/home/dev/go/pkg/mod",
 		"GOPROXY=https://proxy.example",
-		"GOOS=linux", "GOARCH=arm64", "CGO_ENABLED=0",
+		"GOOS=linux", "GOARCH=arm64", "CGO_ENABLED=0", "GOENV=off",
 	} {
 		if !contains(build.env, want) {
 			t.Errorf("Compile built with env %v, which lacks %q", build.env, want)
 		}
+	}
+	if contains(build.env, "GOENV=/home/dev/.config/go/env") {
+		t.Errorf("Compile pointed the build at the host's go env file; GOENV=off disables it")
 	}
 	for _, dropped := range []string{"GOFLAGS=", "GOEXPERIMENT=", "GOARM64=", "GOTOOLCHAIN=", "GOWORK="} {
 		for _, kv := range build.env {
@@ -287,15 +314,22 @@ func TestCompileRemovesTheWorktreeWhenTheBuildFails(t *testing.T) {
 	}
 }
 
-func TestCompileFallsBackToPruneWhenTheRemovalFails(t *testing.T) {
+func TestCompileDeletesTheWorktreeWhenGitCannotRemoveIt(t *testing.T) {
 	t.Parallel()
 	git := &fakeGit{revParse: fullCommit, removeErr: errors.New("exit status 1")}
 	build := &fakeGo{}
 	if _, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run); err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
-	if git.find("worktree", "prune") == nil {
-		t.Errorf("Compile did not fall back to worktree prune when remove failed; git calls: %v", git.calls)
+	if git.find("worktree", "prune") != nil {
+		t.Errorf("Compile ran worktree prune on the operator's checkout; git calls: %v", git.calls)
+	}
+	add := git.find("worktree", "add")
+	if add == nil {
+		t.Fatalf("Compile did not check the commit out; git calls: %v", git.calls)
+	}
+	if _, err := os.Stat(add[4]); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Compile left the worktree %q behind after git's remove failed: %v", add[4], err)
 	}
 }
 

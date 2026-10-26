@@ -55,10 +55,8 @@ detached, escalating a failure under `install-gt:image-build-failed`.
 4. Makes a detached worktree of the rig repo at the installed commit under
    `~/gt/gastown/.polecat-image-build/<sha>`, runs `make polecat-image
    BD_SRC=~/gt/beads/mayor/rig` there, removes the worktree, and checks the
-   label it ended with. The image's bd is compiled from the commit the installed
-   bd reports, out of that checkout's object store, so host and sandbox share
-   one schema ceiling; a commit the checkout does not hold fails the build
-   (gt-7b7a5).
+   labels it ended with; the Makefile's `BD_COMMIT` comment says which bd
+   commit goes into the image and why (gt-7b7a5).
 5. Reads the installed commit again; if a newer install landed during the
    build it builds again, at most 3 rounds.
 6. With `POLECAT_IMAGE_REGISTRY` set, publishes what it just built there, and

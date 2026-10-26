@@ -4,6 +4,7 @@ package bdbuild
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,7 +23,7 @@ func TestIntegrationCompileRefusesACommitTheCheckoutDoesNotHold(t *testing.T) {
 	}
 	buildDir := t.TempDir()
 	build := &fakeGo{}
-	_, err := Compile(Options{Src: src, Out: filepath.Join(src, "bd"), Commit: otherCommit, BuildDir: buildDir}, ExecGit, build.run)
+	_, err := Compile(Options{Src: src, Out: filepath.Join(src, "bd"), Commit: otherCommit, BuildDir: buildDir}, isolatedGit, build.run)
 	if err == nil {
 		t.Fatalf("Compile built %s, which %s does not hold", otherCommit, src)
 	}
@@ -52,7 +53,7 @@ func initScratchRepo(t *testing.T, dir, marker string) string {
 	}
 	scratchGit(t, dir, "add", "-A")
 	scratchGit(t, dir, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "init")
-	out, err := ExecGit(dir, "rev-parse", "HEAD")
+	out, err := isolatedGit(dir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatalf("reading the scratch commit: %v", err)
 	}
@@ -61,7 +62,16 @@ func initScratchRepo(t *testing.T, dir, marker string) string {
 
 func scratchGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	if _, err := ExecGit(dir, args...); err != nil {
+	if _, err := isolatedGit(dir, args...); err != nil {
 		t.Fatalf("git %v in %s: %v", args, dir, err)
 	}
+}
+
+// isolatedGit runs git with the host's global and system configuration out of
+// the picture, so a machine's commit.gpgsign, hooks or default branch cannot
+// change the fixture.
+func isolatedGit(dir string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull)
+	return cmd.Output()
 }

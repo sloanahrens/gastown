@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/deps"
@@ -28,7 +29,8 @@ const (
 // locate the toolchain, the Go caches and the module proxy, so the compile
 // reuses what the host already has. Anything else — a shell's GOFLAGS,
 // GOEXPERIMENT, GOARM64, GOTOOLCHAIN or GOWORK — would change what gets
-// compiled, so it is dropped.
+// compiled, so it is dropped. buildEnv also sets GOENV=off, so the host's
+// `go env -w` file cannot set those variables either.
 var hostEnv = map[string]struct{}{
 	"PATH": {}, "HOME": {}, "TMPDIR": {},
 	"GOROOT": {}, "GOPATH": {}, "GOCACHE": {}, "GOMODCACHE": {},
@@ -41,11 +43,13 @@ var hostEnv = map[string]struct{}{
 
 // buildEnv returns the environment the compile runs with: hostEnv's variables
 // from environ, plus the cross-compile settings. A nil environ reads the host's.
+// GOENV=off stops the host's `go env -w` file from setting GOFLAGS, GOWORK or
+// anything else that changes what is compiled.
 func buildEnv(environ []string) []string {
 	if environ == nil {
 		environ = os.Environ()
 	}
-	env := make([]string, 0, len(environ)+3)
+	env := make([]string, 0, len(environ)+4)
 	for _, kv := range environ {
 		if key, _, ok := strings.Cut(kv, "="); ok {
 			if _, keep := hostEnv[key]; keep {
@@ -53,7 +57,7 @@ func buildEnv(environ []string) []string {
 			}
 		}
 	}
-	return append(env, "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED="+cgo)
+	return append(env, "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED="+cgo, "GOENV=off")
 }
 
 // Git runs git with args in dir and returns its standard output; a directory
@@ -135,7 +139,8 @@ type Options struct {
 	Env []string
 }
 
-// Compile writes opt.Out built from opt.Commit in a clean worktree of opt.Src,
+// Compile writes opt.Out (resolved to an absolute path, so it survives the
+// worktree's removal) built from opt.Commit in a clean worktree of opt.Src,
 // and returns the commit's full sha. The commit is read from the checkout's
 // object store and nothing is fetched, so one the checkout does not hold is
 // refused with a message naming it. The worktree is removed afterwards.
@@ -149,11 +154,17 @@ func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	if !isCommit(opt.Commit) {
 		return "", fmt.Errorf("cannot build bd from %q: not a 7+ character hex commit", opt.Commit)
 	}
-	out, err := git(opt.Src, "rev-parse", "--verify", opt.Commit+"^{commit}")
+	// Resolve the output before entering the worktree: a relative path would
+	// otherwise be written inside the worktree, which is deleted afterwards.
+	out, err := filepath.Abs(opt.Out)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve the bd output path %q: %w", opt.Out, err)
+	}
+	rev, err := git(opt.Src, "rev-parse", "--verify", opt.Commit+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("the beads checkout %s does not hold commit %s: %w\n  fix: fetch it there, or install a bd built from a commit the checkout holds", opt.Src, opt.Commit, err)
 	}
-	commit := strings.TrimSpace(string(out))
+	commit := strings.TrimSpace(string(rev))
 
 	dir, err := os.MkdirTemp(opt.BuildDir, "bd-"+shortCommit(commit)+"-")
 	if err != nil {
@@ -168,20 +179,18 @@ func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	env := buildEnv(opt.Env)
 	// -X main.Commit stamps the commit `bd version --json` reports, the same
 	// variable scripts/refresh-bd-command-tree.sh stamps.
-	if _, err := goBuild(dir, env, "build", "-trimpath", "-ldflags", "-X main.Commit="+commit, "-o", opt.Out, "./cmd/bd"); err != nil {
+	if _, err := goBuild(dir, env, "build", "-trimpath", "-ldflags", "-X main.Commit="+commit, "-o", out, "./cmd/bd"); err != nil {
 		return "", fmt.Errorf("cannot build bd at %s: %w", commit, err)
 	}
 	return commit, nil
 }
 
 // removeWorktree unregisters dir from src and deletes it. A removal that fails
-// is left to `git worktree prune`: the build has already succeeded, so it is
-// not the build's error.
+// leaves a stale registration for the operator's next `git worktree prune`; the
+// build has already succeeded, so it is not the build's error, and pruning here
+// could also drop worktrees the operator has registered.
 func removeWorktree(src, dir string, git Git) {
-	if _, err := git(src, "worktree", "remove", "--force", dir); err == nil {
-		return
-	}
-	_, _ = git(src, "worktree", "prune")
+	_, _ = git(src, "worktree", "remove", "--force", dir)
 	os.RemoveAll(dir)
 }
 
