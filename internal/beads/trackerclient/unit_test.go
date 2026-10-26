@@ -350,3 +350,18 @@ func TestReadyFilteredCarriesTheFilterAndSignalsACutPage(t *testing.T) {
 		t.Errorf("filter = %+v, want the caller's filters carried across", f)
 	}
 }
+
+// Decision A (gt-rtxfy): the tracker's key-value store is empty and answers
+// every key as unset, which the admin contract requires of a store that holds
+// nothing. This test pins that decision. It starts no tracker server.
+func TestTrackerKVIsEmptyAndAnswersUnset(t *testing.T) {
+	t.Parallel()
+	c := &Client{}
+	kvs, err := c.KVList()
+	if err != nil || len(kvs) != 0 {
+		t.Errorf("KVList = %v, %v; want an empty map and no error", kvs, err)
+	}
+	if _, err := c.KVGet("kv.contract_probe"); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("KVGet(unset) = %v, want beads.ErrNotFound", err)
+	}
+}
