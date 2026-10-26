@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
@@ -219,10 +222,13 @@ func TestRunVetsModulesAtOnce(t *testing.T) {
 	started := make(chan string)
 	finished := make(chan string)
 	run := func(_ context.Context, dir, _ string, _ ...string) (string, error) {
-		started <- dir
-		<-release[dir]
-		finished <- dir
-		return "", nil
+		if err := sendWithin(started, dir); err != nil {
+			return "", err
+		}
+		if err := awaitWithin(release[dir]); err != nil {
+			return "", err
+		}
+		return "", sendWithin(finished, dir)
 	}
 	spooled, _ := reportSpool(t)
 
@@ -230,16 +236,16 @@ func TestRunVetsModulesAtOnce(t *testing.T) {
 	code := make(chan int, 1)
 	go func() { code <- runWith(context.Background(), []string{"-root", root}, &out, run, spooled) }()
 
-	first, second := <-started, <-started
+	first, second := recvWithin(t, started), recvWithin(t, started)
 	close(release[second])
-	if got := <-finished; got != second {
+	if got := recvWithin(t, finished); got != second {
 		t.Fatalf("the first release finished %q, want %q", got, second)
 	}
 	close(release[first])
-	if got := <-finished; got != first {
+	if got := recvWithin(t, finished); got != first {
 		t.Fatalf("the second release finished %q, want %q", got, first)
 	}
-	if got := <-code; got != 0 {
+	if got := recvWithin(t, code); got != 0 {
 		t.Fatalf("run = %d, want 0; output:\n%s", got, out.String())
 	}
 }
@@ -298,14 +304,61 @@ func TestRunRemovesTheReportWhenSelectionFails(t *testing.T) {
 // Cancel hook that signals the group (gt-w3aby).
 func TestCommandKillsTheVetProcessGroup(t *testing.T) {
 	t.Parallel()
+	var got *exec.Cmd
+	saved := cancelGroup
+	cancelGroup = func(cmd *exec.Cmd) error { got = cmd; return nil }
+	t.Cleanup(func() { cancelGroup = saved })
 	cmd := command(context.Background(), t.TempDir(), "go", "vet")
+	if cmd.Cancel == nil {
+		t.Fatal("command has no Cancel hook, so cancellation would stop only go vet")
+	}
+	if err := cmd.Cancel(); err != nil {
+		t.Fatalf("Cancel = %v", err)
+	}
+	if got != cmd {
+		t.Errorf("Cancel did not reach the group killer with this command")
+	}
 	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
 		t.Errorf("command SysProcAttr = %+v, want Setpgid", cmd.SysProcAttr)
 	}
-	if cmd.Cancel == nil {
-		t.Error("command has no Cancel hook, so cancellation would stop only go vet")
-	}
 	if cmd.WaitDelay == 0 {
 		t.Error("command has no WaitDelay, so a descendant holding the output pipe can outlive cancellation")
+	}
+}
+
+// awaitTimeout bounds every wait in the concurrency test: a regression that serializes
+// the vets fails here with a message instead of hanging the suite.
+const awaitTimeout = 30 * time.Second
+
+// recvWithin receives from ch or fails the test after awaitTimeout.
+func recvWithin[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(awaitTimeout):
+		t.Fatalf("nothing arrived within %s: the vets did not run concurrently, or one hung", awaitTimeout)
+		var zero T
+		return zero
+	}
+}
+
+// sendWithin sends v on ch, or returns an error after awaitTimeout.
+func sendWithin[T any](ch chan<- T, v T) error {
+	select {
+	case ch <- v:
+		return nil
+	case <-time.After(awaitTimeout):
+		return fmt.Errorf("the test did not take %v within %s", v, awaitTimeout)
+	}
+}
+
+// awaitWithin waits for ch to close, or returns an error after awaitTimeout.
+func awaitWithin[T any](ch <-chan T) error {
+	select {
+	case <-ch:
+		return nil
+	case <-time.After(awaitTimeout):
+		return fmt.Errorf("the test never released this vet within %s", awaitTimeout)
 	}
 }

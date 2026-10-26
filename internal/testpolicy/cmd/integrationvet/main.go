@@ -263,11 +263,16 @@ func runCommand(ctx context.Context, dir, name string, args ...string) (string, 
 // command builds one vet invocation in its own process group, so cancellation
 // stops the vet tool go vet spawns, not only go vet. The WaitDelay bounds the
 // wait on a descendant that escaped the group and kept the output pipe open.
+// cancelGroup is what cancellation calls on the vet's command: util's group kill (SIGTERM,
+// then SIGKILL after the grace). A variable so a test sees the hook is wired through it.
+var cancelGroup = util.KillProcessGroup
+
 func command(ctx context.Context, dir, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.WaitDelay = util.ProcessGroupKillGrace
-	util.SetProcessGroup(cmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return cancelGroup(cmd) }
 	return cmd
 }
 
