@@ -1,10 +1,13 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSystemPromptFilePath_PerRole(t *testing.T) {
@@ -414,10 +417,11 @@ func TestWithRoleSystemPromptFlag_RendersMissingFileFirst(t *testing.T) {
 		t.Fatalf("env %s = %q, want %q", EnvSystemPromptFile, got.Env[EnvSystemPromptFile], want)
 	}
 
-	// The file now exists: a second resolution must not render again.
+	// The file now exists: a second spawn still renders, so a stale file is
+	// replaced rather than reused (gt-zqj9t).
 	got = withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
-	if len(calls) != 1 {
-		t.Fatalf("renderer must not run when the file exists; calls = %v", calls)
+	if len(calls) != 2 {
+		t.Fatalf("renderer must run on every spawn; calls = %v", calls)
 	}
 	if _, ok := hasSystemPromptFlag(got); !ok {
 		t.Fatalf("flag missing on the second spawn: %v", got.Args)
@@ -461,5 +465,111 @@ func TestWithRoleSystemPromptFlag_RendererNotCalledWithoutAFile(t *testing.T) {
 
 	if calls != 0 {
 		t.Fatalf("renderer ran %d times for roles that take no system prompt file", calls)
+	}
+}
+
+// A spawn renders the role's file even when one exists, so a file from an
+// earlier day that holds other directives is replaced by the current render
+// (gt-zqj9t). The renderer is the call site under test: deleting it leaves the
+// old content in place and this test goes red.
+func TestWithRoleSystemPromptFlag_ReplacesAStaleFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	rig := filepath.Join(town, "myrig")
+	want := SystemPromptFilePath("polecat", town, rig, "chumbucket")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(want, []byte("stale directives from an earlier day\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := rendererReg(func(role, townRoot, rigPath, agentName, path string) error {
+		return os.WriteFile(path, []byte("current twelve rules\n"), 0o644)
+	})
+
+	got := withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "polecat", town, rig, "chumbucket")
+
+	data, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "current twelve rules\n" {
+		t.Errorf("spawn used the stale file: %q, want the current render", data)
+	}
+	if path, ok := hasSystemPromptFlag(got); !ok || path != want {
+		t.Errorf("flag = %q, %v; want the replaced file attached", path, ok)
+	}
+}
+
+// A render that matches the file on disk does not rewrite it: the file keeps
+// its modification time (gt-zqj9t). The fake renderer writes only when the
+// content differs, as the production renderer does.
+func TestWithRoleSystemPromptFlag_UnchangedRenderKeepsTheFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	rig := filepath.Join(town, "myrig")
+	want := SystemPromptFilePath("polecat", town, rig, "marble")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const text = "current twelve rules\n"
+	if err := os.WriteFile(want, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(want, old, old); err != nil {
+		t.Fatal(err)
+	}
+	reg := rendererReg(func(role, townRoot, rigPath, agentName, path string) error {
+		if cur, err := os.ReadFile(path); err == nil && string(cur) == text {
+			return nil
+		}
+		return os.WriteFile(path, []byte(text), 0o644)
+	})
+
+	withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "polecat", town, rig, "marble")
+
+	info, err := os.Stat(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(old) {
+		t.Errorf("unchanged render rewrote the file: mtime %v, want %v", info.ModTime(), old)
+	}
+}
+
+// A render that fails over an existing file warns, names the file and its age,
+// and the spawn still carries the file (gt-zqj9t).
+func TestWithRoleSystemPromptFlag_WarnsWhenARenderFailsOverAStaleFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	rig := filepath.Join(town, "myrig")
+	want := SystemPromptFilePath("polecat", town, rig, "nux")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(want, []byte("old directives\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-72 * time.Hour)
+	if err := os.Chtimes(want, old, old); err != nil {
+		t.Fatal(err)
+	}
+	var warn bytes.Buffer
+	h := fakeHost(nil)
+	h.renderSystemPrompt = func(role, townRoot, rigPath, agentName, path string) error {
+		return errors.New("template missing")
+	}
+	h.warn = &warn
+	reg := agentRegistryFor(h, "", "")
+
+	got := withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
+
+	if path, ok := hasSystemPromptFlag(got); !ok || path != want {
+		t.Errorf("flag = %q, %v; the spawn must still carry the existing file", path, ok)
+	}
+	msg := warn.String()
+	if !strings.Contains(msg, want) || !strings.Contains(msg, "template missing") || !strings.Contains(msg, "written 72h") {
+		t.Errorf("warning = %q, want the file, the render error and its age", msg)
 	}
 }
