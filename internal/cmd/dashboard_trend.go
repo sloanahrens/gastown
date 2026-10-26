@@ -153,7 +153,9 @@ const recentTitleRows = 10
 // The title of a bead is asked for only once the rows to show are known, so the
 // lookups are bounded by limit, not by the day's traffic. ship reads a
 // landing's ship reading off the deploy tracker, by its rig because what ships
-// a landing depends on the rig; a rejection never carries one.
+// a landing depends on the rig; a rejection never carries one. The polecat
+// time a landing's record carries — the spans-log reading the worker writes
+// (gt-yxl22) — comes with it, for the pane's Polecat column (gt-90wi1).
 func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow
@@ -187,6 +189,14 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			s := ship(rec.Rig, rec.Bead)
 			row.ShipSecs, row.ShipPending = s.Secs, s.Pending
 			row.ShipVia, row.ShipFailed, row.ShipRunState = s.Via, s.Failed, s.RunState
+		}
+		if rec.PolecatSecs > 0 {
+			secs := rec.PolecatSecs
+			row.PolecatSecs = &secs
+		}
+		row.PolecatLowerBound = rec.PolecatLowerBound
+		for _, a := range rec.PolecatAttempts {
+			row.PolecatAttempts = append(row.PolecatAttempts, dashboard.PolecatAttempt{Seat: a.Seat, Secs: a.Secs, LowerBound: a.LowerBound})
 		}
 		timing(&row, omStageFor(stages, rec.Bead, rec.LandedAt))
 		rows = append(rows, row)

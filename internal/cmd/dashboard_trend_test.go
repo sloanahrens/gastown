@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
 )
 
@@ -631,5 +633,51 @@ func TestDashLoadsTrimsTheFilePeriodically(t *testing.T) {
 	}
 	if fi, err := os.Stat(path); err == nil && fi.Mode().Perm() != 0o644 {
 		t.Errorf("file mode = %v, want 0644", fi.Mode().Perm())
+	}
+}
+
+// TestBuildRecentLandingsCarriesThePolecatTime covers the column's row data: a
+// landing's record carries the time its bead's polecat seats spent hooked on
+// it, with the attempts that make it up and the lower-bound mark; a record
+// with no time of its own (a crew landing, or one written before the reading
+// existed) carries none, so the page draws a dash (gt-90wi1).
+func TestBuildRecentLandingsCarriesThePolecatTime(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 26, 14, 0, 0, 0, time.UTC)
+	recs := []omRecord{
+		{Record: landings.Record{
+			Bead: "gt-timed", Rig: "gastown", Branch: "polecat/opal/gt-timed+x", OMVerdict: "approve", LandedAt: now.Add(-time.Minute),
+			PolecatSecs: 1380, PolecatLowerBound: true,
+			PolecatAttempts: []land.PolecatAttempt{{Seat: "gastown/opal", Secs: 840}, {Seat: "gastown/jade", Secs: 540}},
+		}},
+		{Record: landings.Record{
+			Bead: "gt-open", Rig: "gastown", Branch: "polecat/onyx/gt-open+y", OMVerdict: "approve", LandedAt: now.Add(-2 * time.Minute),
+			PolecatLowerBound: true,
+			PolecatAttempts:   []land.PolecatAttempt{{Seat: "gastown/onyx", LowerBound: true}},
+		}},
+		{Record: landings.Record{
+			Bead: "gt-crew", Rig: "gastown", Branch: "sloan/dashboard", OMVerdict: "skipped", LandedAt: now.Add(-3 * time.Minute),
+		}},
+	}
+
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, 30)
+	byBead := map[string]dashboard.LandingRow{}
+	for _, r := range rows {
+		byBead[r.Bead] = r
+	}
+
+	if r := byBead["gt-timed"]; r.PolecatSecs == nil || *r.PolecatSecs != 1380 || !r.PolecatLowerBound {
+		t.Errorf("timed row polecat time = %v lower bound %v, want 1380 and a lower bound", r.PolecatSecs, r.PolecatLowerBound)
+	}
+	if got, want := byBead["gt-timed"].PolecatAttempts, []dashboard.PolecatAttempt{{Seat: "gastown/opal", Secs: 840}, {Seat: "gastown/jade", Secs: 540}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("timed row attempts = %+v, want %+v", got, want)
+	}
+	// An open attempt adds no time to the record: the column draws a dash and
+	// the hover still lists the attempt, marked a floor as the record has it.
+	if r := byBead["gt-open"]; r.PolecatSecs != nil || !r.PolecatLowerBound || len(r.PolecatAttempts) != 1 || !r.PolecatAttempts[0].LowerBound {
+		t.Errorf("open-attempt row = %+v, want no time and one lower-bound attempt", r)
+	}
+	if r := byBead["gt-crew"]; r.PolecatSecs != nil || r.PolecatLowerBound || r.PolecatAttempts != nil {
+		t.Errorf("crew row carries a polecat time: %+v", r)
 	}
 }

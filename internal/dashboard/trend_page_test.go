@@ -1,8 +1,11 @@
 package dashboard
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The Landings pane shows the beads waiting for the landing worker: a bead
@@ -198,5 +201,121 @@ func TestLandingsShipCellNamesWhatShipsEachRig(t *testing.T) {
 	}
 	if strings.Contains(tbl, "innerHTML") {
 		t.Error("the landings table builds markup instead of text")
+	}
+}
+
+// The Polecat column reads a landing's polecat time in seconds, minutes, or
+// hours and minutes. A whole hour drops its empty minutes ("26h", not
+// "26h00m"), a total that may understate the time carries a +, and a landing
+// with no reading — a crew landing, or one landed before the record kept it —
+// is a dash (gt-90wi1).
+func TestThePolecatTimeColumnFormatsItsReadings(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	for _, c := range []struct {
+		secs  string // a JS expression, so the unknown reading can be null
+		lower bool
+		want  string
+	}{
+		{`null`, false, "–"},
+		{`undefined`, false, "–"},
+		{`0`, false, "–"},
+		{`0`, true, "–"},
+		{`59`, false, "59s"},
+		{`1380`, false, "23m"},
+		{`4320`, false, "1h12m"},
+		{`93600`, false, "26h"},
+		{`1380`, true, "23m+"},
+	} {
+		v, err := dom.vm.RunString(fmt.Sprintf("polecatDur(%s, %t)", c.secs, c.lower))
+		if err != nil {
+			t.Fatalf("polecatDur(%s, %t): %v", c.secs, c.lower, err)
+		}
+		if got := v.String(); got != c.want {
+			t.Errorf("polecatDur(%s, %t) = %q, want %q", c.secs, c.lower, got, c.want)
+		}
+	}
+}
+
+// The Landings pane draws the polecat time in a column of its own, and lists
+// the attempts that make it up on the cell's hover. A landing whose record
+// carries no reading draws a dash, as a crew landing does, and an attempt
+// whose span never closed reads "open" (gt-90wi1).
+func TestTheLandingsPaneDrawsThePolecatTimeColumn(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 26, 14, 0, 0, 0, time.Local)
+	dom := newPageDOM(t)
+	dom.call(t, "renderTrend", map[string]any{"trend": map[string]any{
+		"hours": []map[string]any{{"hour": now.Format(time.RFC3339), "landed": 3}},
+		"recent": []map[string]any{
+			{
+				"at": now.Add(-time.Minute).Format(time.RFC3339), "bead": "gt-attempts", "outcome": "landed",
+				"polecat_secs": 1380, "polecat_lower_bound": true,
+				"polecat_attempts": []map[string]any{
+					{"seat": "gastown/opal", "secs": 840},
+					{"seat": "gastown/jade", "secs": 540},
+				},
+			},
+			{"at": now.Add(-2 * time.Minute).Format(time.RFC3339), "bead": "gt-crew", "outcome": "landed"},
+			{
+				"at": now.Add(-3 * time.Minute).Format(time.RFC3339), "bead": "gt-open", "outcome": "landed",
+				"polecat_lower_bound": true,
+				"polecat_attempts":    []map[string]any{{"seat": "gastown/onyx", "secs": 0, "lower_bound": true}},
+			},
+		},
+	}})
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+  const out = [];
+  (function walk(n) {
+    if (n.className === "ltable") {
+      for (const tr of n.children) out.push(tr.children.map(td => ({text: td.textContent, title: td.title})));
+      return;
+    }
+    for (const c of (n.children || [])) walk(c);
+  })(document.getElementById("trend"));
+  return out;
+})())`)
+	if err != nil {
+		t.Fatalf("reading the drawn landings table: %v", err)
+	}
+	var table [][]struct{ Text, Title string }
+	if err := json.Unmarshal([]byte(v.String()), &table); err != nil {
+		t.Fatalf("decoding the drawn table: %v", err)
+	}
+	if len(table) < 4 {
+		t.Fatalf("the table drew %d rows, want a header and three landings", len(table))
+	}
+
+	col := -1
+	for i, cell := range table[0] {
+		if cell.Text == "Polecat" {
+			col = i
+		}
+	}
+	if col < 0 {
+		t.Fatalf("the header has no Polecat column: %+v", table[0])
+	}
+	for _, want := range []struct{ bead, text, title string }{
+		{"gt-attempts", "23m+", "2 attempts: 14m + 9m"},
+		{"gt-crew", "–", ""},
+		{"gt-open", "–", "1 attempt: open"},
+	} {
+		var row []struct{ Text, Title string }
+		for _, r := range table[1:] {
+			for _, cell := range r {
+				if cell.Text == want.bead {
+					row = r
+				}
+			}
+		}
+		if row == nil {
+			t.Fatalf("the table has no row for %s", want.bead)
+		}
+		if row[col].Text != want.text || row[col].Title != want.title {
+			t.Errorf("%s reads %q (%q) in the Polecat column, want %q (%q)", want.bead, row[col].Text, row[col].Title, want.text, want.title)
+		}
 	}
 }

@@ -342,6 +342,27 @@ const fmtDur = s => {
   if (h >= 48) return Math.floor(h / 24) + "d";
   return h + "h" + String(m % 60).padStart(2, "0") + "m";
 };
+// polecatDur is the Landings pane's Polecat column: the time a bead's polecat
+// seats spent hooked on it. Seconds under a minute and a half, then whole
+// minutes, then hours and minutes; a whole hour drops its empty minutes
+// ("26h", not "26h00m"), and a total that may understate the time takes a +.
+// Null or zero is a dash: a crew landing, or a record written before the
+// reading existed (gt-90wi1).
+const polecatDur = (secs, lower) => {
+  if (secs == null || !(secs > 0)) return "–";
+  const s = Math.round(secs);
+  let out;
+  if (s < 90) out = s + "s";
+  else {
+    const m = Math.round(s / 60);
+    if (m < 60) out = m + "m";
+    else {
+      const h = Math.floor(m / 60);
+      out = h + "h" + (m % 60 ? String(m % 60).padStart(2, "0") + "m" : "");
+    }
+  }
+  return lower ? out + "+" : out;
+};
 const age = iso => iso ? fmtDur((Date.now() - new Date(iso).getTime()) / 1000) : "–";
 // fmtMS is a span in minutes and seconds, the form the om rework table draws a
 // review's time in: "0:48", "12:05". fmtDur rounds to the nearest unit, which
@@ -1271,10 +1292,10 @@ function landingTable(s, names, rows, waiting) {
   const thr = s.om && s.om.threshold != null ? s.om.threshold : null;
   const tbl = el("table", "ltable");
   const hr = el("tr");
-  [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Score", "om's score", 1], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Ship", "total ship time in minutes: dispatched to deployed, which is the staging deploy for an app rig and the daemon restart for gastown", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
+  [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Polecat", "the time the bead's polecat seats spent hooked on it, read from the spans log; hover for each attempt, and + marks a total that may understate the time", 1], ["Score", "om's score", 1], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Ship", "total ship time in minutes: dispatched to deployed, which is the staging deploy for an app rig and the daemon restart for gastown", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
   tbl.append(hr);
   const today = new Date().toDateString();
-  // No stage has run yet, so the four cost columns are dashes and the wait is
+  // No stage has run yet, so the cost columns are dashes and the wait is
   // aged from the bead's last update — the label write gt done makes is
   // normally its last write. The worker's order is not known to this page, so a
   // row says waiting and nothing about position.
@@ -1294,7 +1315,7 @@ function landingTable(s, names, rows, waiting) {
     const by = el("td", "title");
     if (h.name) { by.textContent = names.label(h.rig, h.name); by.title = h.rig ? h.rig + "/" + h.name : h.name; }
     else by.textContent = "–";
-    tr.append(by, el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"));
+    tr.append(by, el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"));
     tr.title = "submitted and waiting for the landing worker to take it";
     tbl.append(tr);
   }
@@ -1328,6 +1349,14 @@ function landingTable(s, names, rows, waiting) {
     else if (r.outcome === "running" && r.rig) by.textContent = r.rig;
     else by.textContent = "–";
     tr.append(by);
+    // The polecat time the landing's record carries, and on hover each seat's
+    // share of it: "2 attempts: 14m + 9m". An attempt whose span never closed
+    // adds no time to the record and reads "open", which is why the total may
+    // be a lower bound (gt-90wi1).
+    const pc = el("td", "n", polecatDur(r.polecat_secs, r.polecat_lower_bound));
+    const pa = r.polecat_attempts || [];
+    if (pa.length) pc.title = pa.length + (pa.length === 1 ? " attempt: " : " attempts: ") + pa.map(a => a.secs > 0 ? polecatDur(a.secs) : "open").join(" + ");
+    tr.append(pc);
     tr.append(el("td", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
     tr.append(el("td", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
     tr.append(el("td", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : "–"));
