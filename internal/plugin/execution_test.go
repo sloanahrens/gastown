@@ -36,6 +36,14 @@ func TestResolveBinary(t *testing.T) {
 	if err := os.Symlink(work, insideLink); err != nil {
 		t.Fatal(err)
 	}
+	danglingOut := filepath.Join(dir, "dangling-out")
+	if err := os.Symlink(filepath.Join(outside, "not-yet"), danglingOut); err != nil {
+		t.Fatal(err)
+	}
+	danglingIn := filepath.Join(dir, "dangling-in")
+	if err := os.Symlink(filepath.Join(dir, "bin", "later"), danglingIn); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, tc := range []struct {
 		name    string
@@ -53,6 +61,8 @@ func TestResolveBinary(t *testing.T) {
 		{"the plugin directory itself", ".", "", true},
 		{"symlink to a file outside", "file-link", "", true},
 		{"symlink to a directory outside", "dir-link/evil", "", true},
+		{"dangling symlink to a path outside", "dangling-out", "", true},
+		{"dangling symlink to a path inside", "dangling-in", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

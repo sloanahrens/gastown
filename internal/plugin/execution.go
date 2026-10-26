@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -30,6 +31,14 @@ func resolveBinary(dir, rel string) (string, error) {
 	full := filepath.Join(dir, rel)
 	if err := escapesDir(dir, full); err != nil {
 		return "", fmt.Errorf("binary %q escapes the plugin directory: %w", rel, err)
+	}
+	// A symlink that resolves to nothing is not a binary yet: the lexical check
+	// below would pass it, and a target that appears later would be run from
+	// wherever the link points (dv-7k25.4's sibling finding, gt-tpg0p.1).
+	if fi, err := os.Lstat(full); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if _, err := filepath.EvalSymlinks(full); err != nil {
+			return "", fmt.Errorf("binary %q is a dangling symlink: %w", rel, err)
+		}
 	}
 
 	resolvedDir, err := filepath.EvalSymlinks(dir)
