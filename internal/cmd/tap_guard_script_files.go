@@ -42,12 +42,18 @@ const scriptFilePythonExtension = ".py"
 // YAML) do not carry one of these extensions at all.
 var scriptFileAllowlist = []string{}
 
+// scriptFilePolicy is the whole redirect this guard delivers, in one constant
+// so the denial message, the unreadable-payload denial and the tests cannot
+// drift apart (gt-b43ra).
+const scriptFilePolicy = `Write a Go package with unit tests and seams for the clock, filesystem and
+process runner: ~/.claude/docs/standards/test-engineering.md, "Scripts are debt".
+A procedure that is only operator steps is a runbook, not a script.`
+
 // scriptFileCreatingVerbs are the shell commands whose operands name a file
-// they create. A redirection creates one the same way and is read off the raw
-// line (redirectTargets), because the tokenizer keeps "echo x>y.sh" or the
-// target of "cat > y.sh" from reaching an operand-shaped check.
+// they create. A redirection creates one the same way, read from the same
+// segment's tokens (redirectFileTargets).
 var scriptFileCreatingVerbs = map[string]bool{
-	"touch": true, "tee": true, "install": true,
+	"touch": true, "tee": true, "install": true, "cp": true, "mv": true, "ln": true,
 }
 
 // scriptVerbValueFlags are the options of scriptFileCreatingVerbs that own a
@@ -64,6 +70,16 @@ var scriptVerbValueFlags = map[string]map[string]bool{
 		"-g": true, "--group": true, "-t": true, "--target-directory": true,
 		"-S": true, "--suffix": true,
 	},
+	"cp": targetDirectoryValueFlags,
+	"mv": targetDirectoryValueFlags,
+	"ln": targetDirectoryValueFlags,
+}
+
+// targetDirectoryValueFlags are the options cp, mv, ln and install share that
+// own a value: -t/--target-directory names the directory the copies land in,
+// and -S/--suffix is a backup-name suffix.
+var targetDirectoryValueFlags = map[string]bool{
+	"-t": true, "--target-directory": true, "-S": true, "--suffix": true,
 }
 
 var tapGuardScriptFilesCmd = &cobra.Command{
@@ -73,18 +89,22 @@ var tapGuardScriptFilesCmd = &cobra.Command{
 
 Edit/Write/MultiEdit/NotebookEdit are denied when the target is inside the
 session's own worktree, does not exist yet, and ends in .sh, .bash, .zsh, .pl
-or .rb. Bash and Monitor are denied when a redirection, touch, tee or install
-would create such a file. Editing a script that already exists is allowed, and
+or .rb. Bash and Monitor are denied when a redirection, touch, tee, install,
+cp, mv or ln would create such a file, judged in the directory the shell has
+reached at that point of the line (so a relative target after a cd is checked
+where the cd went). Editing a script that already exists is allowed, and
 removing one is always allowed.
+
+The guard fails closed: a hook payload it cannot read or parse, or a worker
+session whose own worktree it cannot place, is denied rather than passed
+through unjudged. A path that cannot be resolved is denied when its name ends
+in a denied script suffix, since the request is still to create a script.
 
 A new .py file is allowed with an advisory on stderr asking for the reason to
 be recorded in the bead: Python is allowed when it genuinely is the best tool,
 so it gets a reminder rather than a denial.
 
-The denial redirects: write a Go package with unit tests and a seam for the
-clock, filesystem and process runner — ~/.claude/docs/standards/
-test-engineering.md, "Scripts are debt". A procedure that is only operator
-steps is a runbook, not a script.
+The denial redirects: ` + scriptFilePolicy + `
 
 Scope: a polecat or crew session working inside its own Gas Town worktree
 (<rig>/polecats/<name>/<repo> or <rig>/crew/<name>). Paths outside every
@@ -121,17 +141,24 @@ type scriptFileInput struct {
 func tapGuardScriptFiles(stdin io.Reader, stderr io.Writer, proc guardProcess) error {
 	input, err := io.ReadAll(stdin)
 	if err != nil || len(input) == 0 {
-		// No payload to judge: a harness wrapper that drains stdin (gt-wisp-52y4)
-		// must not turn every call into a denial.
-		return nil
+		// Fail closed (gt-b43ra): a payload the guard cannot read names no
+		// call, and "I saw nothing" is not evidence that no script is being
+		// written.
+		printScriptFileUnjudgeable(stderr, "the hook payload could not be read")
+		return NewSilentExit(2)
 	}
 	var hook scriptFileInput
 	if err := json.Unmarshal(input, &hook); err != nil {
-		return nil
+		printScriptFileUnjudgeable(stderr, "the hook payload could not be parsed")
+		return NewSilentExit(2)
 	}
-	scope, ok := resolveScriptFileScope(hook.Cwd, proc)
+	scope, worker, ok := resolveScriptFileScope(hook.Cwd, proc)
+	if !worker {
+		return nil // not a worker session — outside this guard's remit
+	}
 	if !ok {
-		return nil // not a worker session in a worktree — outside this guard's remit
+		printScriptFileUnjudgeable(stderr, "the session's own worktree could not be resolved")
+		return NewSilentExit(2)
 	}
 	switch hook.ToolName {
 	case "Edit", "Write", "MultiEdit":
@@ -158,13 +185,16 @@ type scriptFileScope struct {
 	proc     guardProcess
 }
 
-// resolveScriptFileScope identifies the worker session and its worktree, or
-// reports ok=false when the session is neither a polecat's nor a crew
-// member's, or its worktree cannot be named.
-func resolveScriptFileScope(payloadCwd string, proc guardProcess) (scriptFileScope, bool) {
-	role, ok := scriptFileWorkerRole(proc)
-	if !ok {
-		return scriptFileScope{}, false
+// resolveScriptFileScope identifies the worker session and its worktree.
+// worker reports whether the session is one this guard polices at all (a
+// polecat or a crew member); ok reports whether its own worktree could be
+// named. A worker whose tree cannot be named is a refusal, not an allow: the
+// guard exists to stop a new script, and not being able to see where the
+// session stands is not evidence that no script is being written (gt-b43ra).
+func resolveScriptFileScope(payloadCwd string, proc guardProcess) (scope scriptFileScope, worker, ok bool) {
+	role, worker := scriptFileWorkerRole(proc)
+	if !worker {
+		return scriptFileScope{}, false, false
 	}
 	cwd := ""
 	if payloadCwd != "" && filepath.IsAbs(payloadCwd) {
@@ -180,7 +210,7 @@ func resolveScriptFileScope(payloadCwd string, proc guardProcess) (scriptFileSco
 		}
 	}
 	if cwd == "" {
-		return scriptFileScope{}, false
+		return scriptFileScope{}, true, false
 	}
 
 	worktree := ""
@@ -200,9 +230,9 @@ func resolveScriptFileScope(payloadCwd string, proc guardProcess) (scriptFileSco
 		}
 	}
 	if worktree == "" {
-		return scriptFileScope{}, false
+		return scriptFileScope{}, true, false
 	}
-	return scriptFileScope{worktree: worktree, cwd: cwd, proc: proc}, true
+	return scriptFileScope{worktree: worktree, cwd: cwd, proc: proc}, true, true
 }
 
 // scriptFileWorkerRole reports the role this guard polices for this process:
@@ -261,9 +291,10 @@ func isWorkerWorktreeForRole(root string, role Role) bool {
 func (s scriptFileScope) checkFileTarget(raw, tool string, stderr io.Writer) error {
 	target, ok := s.resolveTarget(raw, s.cwd)
 	if !ok {
-		// This guard denies what it can positively name: an unresolvable path is
-		// the polecat-paths guard's to refuse, not evidence of a new script here.
-		return nil
+		// A path this guard cannot resolve is the polecat-paths guard's to
+		// refuse for its own scope; here the script suffix in the name is
+		// still a request to create a script, so that request is refused.
+		return s.refuseUnresolvedTarget(raw, tool, stderr)
 	}
 	return s.judgeNewScript(target, tool, stderr)
 }
@@ -319,24 +350,29 @@ func (s scriptFileScope) checkBashFrom(command, base string, cwdKnown bool, dept
 		return nil
 	}
 	stripped := stripHeredocBodies(command)
-	tokens := shellTokenize(stripped)
+	tokens := shellTokenize(spaceOutOutputRedirections(stripped))
 	vars := shellVarAssignments(tokens)
 
-	var dirs []string
-	seen := make(map[string]bool)
 	var segment []string
 	start := 0
+	// judge reads one segment in the directory the shell has reached at that
+	// point, so "cd bin && echo hi > gen.sh" is judged in bin. The segment's
+	// own verb and its redirections are judged against the same directory.
 	judge := func(words []string, from int) error {
 		dir, known := segmentWalkRoot(s.proc, tokens, from, base, vars)
 		known = known && cwdKnown
 		if !known {
 			dir = base
 		}
-		if !seen[dir] {
-			seen[dir] = true
-			dirs = append(dirs, dir)
+		if err := s.checkBashSegment(words, dir, known, depth, stderr); err != nil {
+			return err
 		}
-		return s.checkBashSegment(words, dir, known, depth, stderr)
+		for _, target := range redirectFileTargets(words) {
+			if err := s.judgeBashTarget(target, dir, known, "redirection", stderr); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	for i, token := range tokens {
 		if shellCommandSeparators[token] {
@@ -351,23 +387,6 @@ func (s scriptFileScope) checkBashFrom(command, base string, cwdKnown bool, dept
 	}
 	if err := judge(segment, start); err != nil {
 		return err
-	}
-
-	// A redirect target is read off the raw line (the tokenizer cannot see one
-	// glued to its word), so it carries no segment of its own. With one
-	// directory it is judged there exactly; after a cd the target's directory
-	// is ambiguous, so only a path from a fixed root — where the reading cannot
-	// depend on the cd — is judged rather than guessing.
-	oneDir := len(dirs) == 1
-	for _, target := range redirectTargets(stripped) {
-		if !oneDir && !fixedRootPath(target) {
-			continue
-		}
-		for _, dir := range dirs {
-			if err := s.judgeBashTarget(target, dir, true, "redirection", stderr); err != nil {
-				return err
-			}
-		}
 	}
 
 	// A heredoc fed to a shell is a body of commands the shell runs, not data:
@@ -395,7 +414,7 @@ func (s scriptFileScope) checkBashSegment(segment []string, dir string, known bo
 	}
 	base := strings.ToLower(filepath.Base(word))
 	if scriptFileCreatingVerbs[base] {
-		for _, target := range createdScriptTargets(base, args) {
+		for _, target := range createdScriptTargets(base, args, dir) {
 			if err := s.judgeBashTarget(target, dir, known, base, stderr); err != nil {
 				return err
 			}
@@ -417,14 +436,29 @@ func (s scriptFileScope) checkBashSegment(segment []string, dir string, known bo
 
 // judgeBashTarget decides one path a command line creates.
 func (s scriptFileScope) judgeBashTarget(raw, dir string, known bool, via string, stderr io.Writer) error {
-	if !known && !fixedRootPath(raw) {
-		return nil
-	}
 	target, ok := s.resolveTarget(raw, dir)
 	if !ok {
-		return nil
+		return s.refuseUnresolvedTarget(raw, via, stderr)
+	}
+	if !known && !fixedRootPath(raw) {
+		// The shell's directory is unknown, so this relative target may name
+		// any tree: a script-shaped name is refused rather than guessed,
+		// because either guess is a hole a model can aim at.
+		return s.refuseUnresolvedTarget(raw, via, stderr)
 	}
 	return s.judgeNewScript(target, via, stderr)
+}
+
+// refuseUnresolvedTarget is the fail-closed reading of a path the guard cannot
+// place: a name ending in a denied script suffix is still a request to create
+// a script, so it is refused; any other name is allowed, because the guard
+// denies only what it can name (gt-b43ra).
+func (s scriptFileScope) refuseUnresolvedTarget(raw, via string, stderr io.Writer) error {
+	if !scriptFileNamed(raw) {
+		return nil
+	}
+	printScriptFileRefusal(stderr, via, raw)
+	return NewSilentExit(2)
 }
 
 // fixedRootPath reports whether raw names a path from a fixed root, so the
@@ -433,28 +467,200 @@ func fixedRootPath(raw string) bool {
 	return strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "~")
 }
 
-// createdScriptTargets returns the paths one creating verb names. touch and
-// tee create every operand; install creates its last operand, or each operand
-// under -t DIR.
-func createdScriptTargets(verb string, args []string) []string {
+// spaceOutOutputRedirections separates an output redirection from the words
+// around it, so a target glued to its operator or its command ("echo
+// hi>gen.sh", "cat >gen.sh") becomes a token of its own. shellTokenize leaves
+// that glue inside one word, which kept redirectFileTargets from seeing the
+// target at all (gt-b43ra).
+//
+// Quoted and escaped ">" stays untouched (it is data, not an operator), and an
+// "&" that belongs to the operator ("&>log", "2>&1") stays attached to it.
+func spaceOutOutputRedirections(command string) string {
+	var b strings.Builder
+	runes := []rune(command)
+	var quote rune
+	last := rune(0)
+	write := func(r rune) {
+		b.WriteRune(r)
+		last = r
+	}
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case quote != 0:
+			write(r)
+			if r == '\\' && quote == '"' && i+1 < len(runes) {
+				i++
+				write(runes[i])
+				continue
+			}
+			if r == quote {
+				quote = 0
+			}
+		case r == '\\' && i+1 < len(runes):
+			write(r)
+			i++
+			write(runes[i])
+		case r == '\'' || r == '"':
+			quote = r
+			write(r)
+		case r == '>':
+			if last != 0 && last != ' ' && last != '\t' && last != '\n' && last != '&' {
+				write(' ')
+			}
+			for i < len(runes) && runes[i] == '>' {
+				write('>')
+				i++
+			}
+			i-- // the operator's last rune; the loop's i++ steps past it
+			if i+1 < len(runes) && runes[i+1] == '|' {
+				i++
+				write('|')
+			}
+			if i+1 < len(runes) && runes[i+1] == '&' {
+				i++
+				write('&')
+			}
+			write(' ')
+		default:
+			write(r)
+		}
+	}
+	return b.String()
+}
+
+// redirectFileTargets returns the files the output redirections in one
+// segment's tokens create, in shell order. A redirection that reads ("<",
+// "<<") or duplicates a descriptor (">&2", ">&-") creates no file and is
+// skipped. Reading the redirects from the segment, rather than off the whole
+// line, is what lets a redirect after a cd be judged in the directory the cd
+// reached (gt-b43ra).
+func redirectFileTargets(tokens []string) []string {
+	var targets []string
+	for i := 0; i < len(tokens); i++ {
+		width := redirectionWidth(tokens[i])
+		if width == 0 {
+			continue
+		}
+		operator, glued := splitRedirection(tokens[i])
+		target := glued
+		if target == "" && width == 2 && i+1 < len(tokens) {
+			target = tokens[i+1]
+		}
+		i += width - 1
+		if !strings.Contains(operator, ">") || target == "" || isFileDescriptorWord(target) {
+			continue
+		}
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+// splitRedirection returns a redirection token's operator and the target glued
+// to it ("2>>log" -> ">>", "log"); the target is "" when it is a word of its
+// own ("<<- EOF").
+func splitRedirection(token string) (operator, target string) {
+	i := 0
+	if strings.HasPrefix(token, "{") {
+		end := strings.IndexByte(token, '}')
+		if end < 0 {
+			return "", ""
+		}
+		i = end + 1
+	} else {
+		for i < len(token) && token[i] >= '0' && token[i] <= '9' {
+			i++
+		}
+	}
+	if i+1 < len(token) && token[i] == '&' && token[i+1] == '>' {
+		i++
+	}
+	if i >= len(token) || (token[i] != '<' && token[i] != '>') {
+		return "", ""
+	}
+	start := i
+	for i < len(token) && (token[i] == '<' || token[i] == '>') {
+		i++
+	}
+	if i < len(token) && token[i] == '|' && token[start:i] == ">" {
+		i++
+	}
+	if i < len(token) && token[i] == '&' {
+		i++
+	}
+	return token[start:i], token[i:]
+}
+
+// createdScriptTargets returns the paths one creating verb names. touch and tee
+// create every operand. install, cp, mv and ln create a destination: each
+// operand under -t DIR, or the last operand — with each source's own name when
+// that destination is an existing directory.
+func createdScriptTargets(verb string, args []string, dir string) []string {
+	args = withoutRedirections(args)
 	if verb == "install" && (hasShortFlag(args, 'd') || slices.Contains(args, "--directory")) {
 		return nil // install -d creates directories, not files
 	}
 	operands := scriptVerbOperands(verb, args)
-	if verb != "install" {
-		return operands
-	}
-	if targetDir := installTargetDir(args); targetDir != "" {
+	if targetDir := targetDirectoryFlag(args); targetDir != "" {
 		targets := make([]string, 0, len(operands))
 		for _, operand := range operands {
 			targets = append(targets, filepath.Join(targetDir, filepath.Base(operand)))
 		}
 		return targets
 	}
+	switch verb {
+	case "touch", "tee":
+		return operands
+	case "ln":
+		switch len(operands) {
+		case 0:
+			return nil
+		case 1:
+			// "ln -s target" names the link after the target, in the cwd.
+			return []string{filepath.Base(operands[0])}
+		default:
+			return operands[len(operands)-1:]
+		}
+	}
 	if len(operands) == 0 {
 		return nil
 	}
-	return operands[len(operands)-1:]
+	dest := operands[len(operands)-1]
+	if len(operands) > 1 && isExistingDirectoryUnder(dir, dest) {
+		targets := make([]string, 0, len(operands)-1)
+		for _, source := range operands[:len(operands)-1] {
+			targets = append(targets, filepath.Join(dest, filepath.Base(source)))
+		}
+		return targets
+	}
+	return []string{dest}
+}
+
+// withoutRedirections returns args with every redirection and its target
+// removed, so an operand scan does not read a redirect's file as an operand.
+// The redirections are judged separately, by redirectFileTargets.
+func withoutRedirections(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		width := redirectionWidth(args[i])
+		if width == 0 {
+			out = append(out, args[i])
+			continue
+		}
+		i += width - 1
+	}
+	return out
+}
+
+// isExistingDirectoryUnder reports whether path, read relative to dir when it is
+// relative, names a directory that exists — which is what makes a copy's last
+// operand a destination for the sources rather than the file they become.
+func isExistingDirectoryUnder(dir, path string) bool {
+	if !filepath.IsAbs(path) && dir != "" {
+		path = filepath.Join(dir, path)
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // scriptVerbOperands returns the non-flag words of args, stepping over each
@@ -485,9 +691,8 @@ func scriptVerbOperands(verb string, args []string) []string {
 	return operands
 }
 
-// installTargetDir returns the directory install's -t/--target-directory
-// names, or "".
-func installTargetDir(args []string) string {
+// targetDirectoryFlag returns the directory -t/--target-directory names, or "".
+func targetDirectoryFlag(args []string) string {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -514,6 +719,13 @@ func hasShortFlag(args []string, letter byte) bool {
 		}
 	}
 	return false
+}
+
+// scriptFileNamed reports whether raw's own text ends in a denied script
+// suffix. It is read even when the path cannot be resolved, because the request
+// to create a script is visible in the name alone.
+func scriptFileNamed(raw string) bool {
+	return scriptFileExtension(strings.Trim(strings.TrimSpace(raw), `"'`))
 }
 
 // scriptFileExtension reports whether path ends in one of the denied script
@@ -550,12 +762,27 @@ func scriptFileAllowlisted(target string) bool {
 	return false
 }
 
+// printScriptFilePolicy writes the redirect under a denial, indented as the
+// continuation of the ❌ line.
+func printScriptFilePolicy(w io.Writer) {
+	for _, line := range strings.Split(scriptFilePolicy, "\n") {
+		fmt.Fprintf(w, "   %s\n", line)
+	}
+}
+
 // printScriptFileRefusal is the denial: it names the redirect the model is to
 // take, not just the ban.
 func printScriptFileRefusal(w io.Writer, via, target string) {
 	fmt.Fprintf(w, "\n❌ NO NEW SCRIPTS: %s (%s) would create a new script file.\n", target, via)
-	fmt.Fprintln(w, "   Write a Go package with unit tests and seams for the clock, filesystem and")
-	fmt.Fprintln(w, "   process runner: ~/.claude/docs/standards/test-engineering.md, \"Scripts are debt\".")
-	fmt.Fprintln(w, "   A procedure that is only operator steps is a runbook, not a script.")
+	printScriptFilePolicy(w)
 	fmt.Fprintln(w, "   Editing an existing script and removing one are allowed.")
+}
+
+// printScriptFileUnjudgeable denies a call the guard cannot judge. It fails
+// closed on purpose (gt-b43ra): passing an unchecked call through is the hole
+// this guard exists to close, so "cannot tell" reads as "no".
+func printScriptFileUnjudgeable(w io.Writer, why string) {
+	fmt.Fprintf(w, "\n❌ NO NEW SCRIPTS: %s, so this call is denied rather than passed through unchecked.\n", why)
+	printScriptFilePolicy(w)
+	fmt.Fprintln(w, "   If every call is denied this way, escalate to your witness: the hook harness is not delivering the payload.")
 }
