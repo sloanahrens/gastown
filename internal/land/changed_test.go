@@ -207,6 +207,8 @@ var guardTriggers = []struct {
 	{"internal/testutil", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/land", "M\x00.om.json\x00"},
 	{"internal/repoguard", "A\x00scripts/new.sh\x00"},
+	{"internal/repoguard", "D\x00scripts/gone.sh\x00"},
+	{"internal/repoguard", "R100\x00scripts/old.sh\x00scripts/new.sh\x00"},
 	{"internal/session", "M\x00deploy/polecat/policy.yaml\x00"},
 }
 

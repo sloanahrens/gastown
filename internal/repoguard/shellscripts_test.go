@@ -8,43 +8,18 @@ import (
 	"testing"
 )
 
-// maxShellScripts is the number of entries shell-scripts.txt holds: every
-// tracked .sh file on 2026-10-26, when the tree stopped adding scripts
-// (gt-lpm8b). Deleting a script deletes its line AND lowers this, in the same
-// change, so a new line cannot pass by adding its script too.
-const maxShellScripts = 79
+// The literal alarm text is pinned here, not read back from the guard: a test
+// that reuses the production string passes when the message loses the rule or
+// the offending path.
+const (
+	newScriptAlarm     = "no new .sh files; write Go (scripts are debt: see .om.json, scripts-are-debt)"
+	removedScriptAlarm = "allowlisted .sh file is no longer tracked; the shell-scripts.txt line is stale"
+)
 
-// TestNoNewShellScripts holds every tracked .sh file to shell-scripts.txt,
-// whose allowlist only shrinks.
-func TestNoNewShellScripts(t *testing.T) {
-	t.Parallel()
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
-		t.Fatalf("repo root %s has no go.mod: %v", root, err)
-	}
-	allowed, err := ReadAllowlist("shell-scripts.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(allowed) > maxShellScripts {
-		t.Errorf("shell-scripts.txt has %d entries, want at most %d: the list only shrinks — deleting a script deletes its line here AND lowers maxShellScripts", len(allowed), maxShellScripts)
-	}
-	findings, err := CheckShellScripts(func() ([]string, error) { return TrackedShellScripts(root) }, allowed)
-	if err != nil {
-		t.Fatalf("listing the tracked .sh files: %v", err)
-	}
-	for _, f := range findings {
-		t.Error(f)
-	}
-}
-
-// TestCheckShellScriptsFixtures covers the answers the guard must tell apart:
-// a tracked script with no allowlist line, an allowlist line whose script is
-// gone, and a tree where the two sets match. The lister is injected, so no
-// case needs a working tree.
+// TestCheckShellScriptsFixtures drives each branch of the guard through an
+// injected lister: a tracked script with no allowlist line, an allowlist line
+// whose script is gone, both at once, and a tree where the two sets match.
+// Each failure asserts the alarm names the offending path and the rule.
 func TestCheckShellScriptsFixtures(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -59,24 +34,24 @@ func TestCheckShellScriptsFixtures(t *testing.T) {
 			allowed: []string{"scripts/a.sh", "scripts/b.sh"},
 		},
 		{
-			name:    "new",
+			name:    "new file not in the allowlist",
 			tracked: []string{"scripts/a.sh", "scripts/new.sh"},
 			allowed: []string{"scripts/a.sh"},
-			want:    []string{"scripts/new.sh: no new .sh files; write Go (see ~/.claude/docs/standards/test-engineering.md, Scripts are debt)"},
+			want:    []string{"scripts/new.sh: " + newScriptAlarm},
 		},
 		{
-			name:    "removed",
+			name:    "allowlist line whose file is gone",
 			tracked: []string{"scripts/a.sh"},
 			allowed: []string{"scripts/a.sh", "scripts/old.sh"},
-			want:    []string{"scripts/old.sh: allowlisted .sh file no longer exists; delete its line so shell-scripts.txt only shrinks"},
+			want:    []string{"scripts/old.sh: " + removedScriptAlarm},
 		},
 		{
-			name:    "new and removed",
+			name:    "new file and a gone line together",
 			tracked: []string{"scripts/a.sh", "scripts/new.sh"},
 			allowed: []string{"scripts/a.sh", "scripts/old.sh"},
 			want: []string{
-				"scripts/new.sh: no new .sh files; write Go (see ~/.claude/docs/standards/test-engineering.md, Scripts are debt)",
-				"scripts/old.sh: allowlisted .sh file no longer exists; delete its line so shell-scripts.txt only shrinks",
+				"scripts/new.sh: " + newScriptAlarm,
+				"scripts/old.sh: " + removedScriptAlarm,
 			},
 		},
 	}
@@ -100,9 +75,12 @@ func TestCheckShellScriptsFixtures(t *testing.T) {
 func TestCheckShellScriptsListerError(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("git is not on PATH")
-	_, err := CheckShellScripts(func() ([]string, error) { return nil, wantErr }, nil)
+	findings, err := CheckShellScripts(func() ([]string, error) { return nil, wantErr }, map[string]bool{"scripts/a.sh": true})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if findings != nil {
+		t.Errorf("findings = %q with a lister error, want nil", findings)
 	}
 }
 
