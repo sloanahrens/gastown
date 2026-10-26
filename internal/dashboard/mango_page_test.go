@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -661,6 +662,38 @@ func TestMangoEventLabelsTakeDistinctHeightsAndFlipAtTheRightEdge(t *testing.T) 
 	}
 }
 
+// Three labels that all overlap take three height bands: each one's own extent
+// decides its band, so a stack of them never overprints two lines of text.
+func TestMangoTrendStacksThreeCollidingLabels(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	state := mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 96, 0.42, 0.25, MangoEarning))
+	state["weekly"] = []map[string]any{
+		mangoPageWeek("2026-10-05", 27, 0.25),
+		mangoPageWeek("2026-10-12", 34, 0.125),
+	}
+	state["events"] = []map[string]any{
+		mangoPageEvent("2026-10-16", "the queue opened early and every branch waited a full day"),
+		mangoPageEvent("2026-10-17", "the gate closed early and every branch waited two days"),
+		mangoPageEvent("2026-10-18", "the gate reopened late and every branch ran one at a time"),
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": state})
+
+	y := mangoAttrs(t, dom, "mgtwhat", "y")
+	if len(y) != 3 {
+		t.Fatalf("the trend draws %d event labels, want three", len(y))
+	}
+	for i := 0; i < len(y); i++ {
+		for j := i + 1; j < len(y); j++ {
+			if y[i] == y[j] {
+				t.Errorf("the colliding labels at y=%s and y=%s share a height, want each on its own band", y[i], y[j])
+			}
+		}
+	}
+}
+
 // Fewer than two weeks is not a trend: the block says so and draws no chart. A
 // panel with no weekly key at all is an older panel, which gets no trend block
 // and still draws its table.
@@ -689,6 +722,11 @@ func TestMangoTrendWithoutTwoWeeksSaysSoAndWithoutTheKeyDrawsNoBlock(t *testing.
 			}
 			if got := mangoAttrs(t, dom, "mgchart", "viewBox"); len(got) != 0 {
 				t.Errorf("the panel draws a chart from %q, want none with fewer than two weeks", got)
+			}
+			for _, class := range []string{"mgtline", "mgtdot", "mgtmark"} {
+				if got := mangoAttrs(t, dom, class, "class"); len(got) != 0 {
+					t.Errorf("the panel draws %d %q marks with no chart, want none", len(got), class)
+				}
 			}
 			if got := mangoTexts(t, dom, "mgtcap"); len(got) != 0 {
 				t.Errorf("the panel draws the caption %q with no chart, want none", got)
@@ -737,6 +775,123 @@ func TestMangoEventWithMarkupRendersAsText(t *testing.T) {
 	}
 }
 
+// An event's what longer than the chart's label width is cut at a word boundary
+// and ends in an ellipsis, so the text stays inside the viewBox instead of
+// running past its edge, where the SVG would clip it without a sign.
+func TestMangoTrendTruncatesALongEventLabel(t *testing.T) {
+	t.Parallel()
+
+	const long = "the merge queue landed one branch at a time for the whole of the season while the gate stayed closed"
+	dom := newPageDOM(t)
+	state := mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 96, 0.42, 0.25, MangoEarning))
+	state["weekly"] = []map[string]any{
+		mangoPageWeek("2026-10-05", 27, 0.25),
+		mangoPageWeek("2026-10-12", 34, 0.125),
+	}
+	state["events"] = []map[string]any{mangoPageEvent("2026-10-08", long)}
+	dom.call(t, "renderMango", map[string]any{"mango": state})
+
+	whats := mangoTexts(t, dom, "mgtwhat")
+	if len(whats) != 1 {
+		t.Fatalf("the trend draws %d event labels, want one", len(whats))
+	}
+	got := whats[0]
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("the long event label reads %q, want it cut with an ellipsis", got)
+	}
+	kept := strings.TrimSuffix(got, "…")
+	if !strings.HasPrefix(long, kept) {
+		t.Errorf("the label reads %q, which is not the start of the what %q", got, long)
+	}
+	if len(kept) >= len(long) {
+		t.Errorf("the label reads %q, want the long what cut", got)
+	}
+	if long[len(kept)] != ' ' {
+		t.Errorf("the label cuts the what mid-word at %q, want a word boundary", kept)
+	}
+	if len([]rune(got)) > 60 {
+		t.Errorf("the label is %d characters, want at most the chart's 60", len([]rune(got)))
+	}
+}
+
+// The caption names the number of weeks the chart holds, so a series that is
+// not four weeks does not read as four.
+func TestMangoTrendCaptionNamesTheWeeksItHolds(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	state := mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 96, 0.42, 0.25, MangoEarning))
+	state["weekly"] = []map[string]any{
+		mangoPageWeek("2026-09-14", 20, 0.10),
+		mangoPageWeek("2026-09-21", 24, 0.12),
+		mangoPageWeek("2026-09-28", 19, 0.15),
+		mangoPageWeek("2026-10-05", 27, 0.25),
+		mangoPageWeek("2026-10-12", 34, 0.125),
+		mangoPageWeek("2026-10-19", 21, 0.30),
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": state})
+
+	caps := mangoTexts(t, dom, "mgtcap")
+	want := "Landings per week in brackets. Six weeks is too few to say what caused the rise; the dates mark when things changed."
+	if len(caps) != 1 || caps[0] != want {
+		t.Errorf("the caption reads %q, want %q", caps, want)
+	}
+}
+
+// A week whose share is not a number is not a point: the page drops it rather
+// than drawing a mark at NaN, which the SVG would not draw at all.
+func TestMangoTrendDropsAWeekWithNoShare(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	state := mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 96, 0.42, 0.25, MangoEarning))
+	state["weekly"] = []map[string]any{
+		mangoPageWeek("2026-10-05", 27, 0.25),
+		{"week": "2026-10-12", "landings": 34},
+		mangoPageWeek("2026-10-19", 21, 0.30),
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": state})
+
+	cx, cy := mangoAttrs(t, dom, "mgtdot", "cx"), mangoAttrs(t, dom, "mgtdot", "cy")
+	if len(cx) != 2 || len(cy) != 2 {
+		t.Fatalf("the trend draws %d dots at %v, want the two weeks with a share", len(cx), cx)
+	}
+	for i := range cx {
+		if v := mustFloat(t, cx[i]); math.IsNaN(v) {
+			t.Errorf("a dot is drawn at x=%q, want a number", cx[i])
+		}
+		if v := mustFloat(t, cy[i]); math.IsNaN(v) {
+			t.Errorf("a dot is drawn at y=%q, want a number", cy[i])
+		}
+	}
+	if weeks := strings.Join(mangoTexts(t, dom, "mgtwk"), "|"); strings.Contains(weeks, "10-12") {
+		t.Errorf("the week labels %q have the week with no share, want it dropped", weeks)
+	}
+}
+
+// A stale panel greys the trend with the rest of it: the trend is drawn from
+// the same last analysis the rows say is old.
+func TestMangoStalePanelGreysTheTrend(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	state := mangoPageState(MangoStale, "stale",
+		mangoPageTarget("manual_rescue", 37, false, "attempts in q3..q4", 54, 0.11, 0.09, MangoNoSignal))
+	state["weekly"] = []map[string]any{
+		mangoPageWeek("2026-10-05", 27, 0.25),
+		mangoPageWeek("2026-10-12", 34, 0.125),
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": state})
+
+	classes := mangoClassValues(t, dom, "mgt", "c.className")
+	if len(classes) != 1 || !strings.Contains(classes[0], "jvstale") {
+		t.Errorf("a stale panel's trend block is drawn as %q, want the jvstale class", classes)
+	}
+}
+
 // mangoPageWeek is one week of the trend as the hub hands it to the page: the
 // week's first day, its landings and the share of them rejected.
 func mangoPageWeek(week string, landings int, share float64) map[string]any {
@@ -761,9 +916,9 @@ func mustFloat(t *testing.T, s string) float64 {
 }
 
 // mangoClassValues walks the elements the page drew under #mango and returns
-// one JavaScript value from each whose class holds class, in draw order. The
-// trend's marks are SVG elements, whose class the page sets with setAttribute
-// while an HTML element's class is set as className, so the walk reads both.
+// one JavaScript value from each whose class holds class, in draw order. An
+// HTML element's class is the className property while the page sets an SVG
+// element's class with setAttribute, so the walk reads both.
 func mangoClassValues(t *testing.T, dom *pageDOM, class, value string) []string {
 	t.Helper()
 
@@ -772,7 +927,7 @@ func mangoClassValues(t *testing.T, dom *pageDOM, class, value string) []string 
   (function walk(n) {
     for (var i = 0; i < (n.children || []).length; i++) {
       var c = n.children[i];
-      var cls = String(c.className || "") + " " + String(c["attr_class"] || "");
+      var cls = String(c.className || "") + " " + String(c.getAttribute("class") || "");
       if (cls.split(/\s+/).indexOf(` + quoteJS(class) + `) >= 0) out.push(` + value + `);
       walk(c);
     }
@@ -804,7 +959,7 @@ func mangoTexts(t *testing.T, dom *pageDOM, class string) []string {
 func mangoAttrs(t *testing.T, dom *pageDOM, class, name string) []string {
 	t.Helper()
 
-	return mangoClassValues(t, dom, class, `c["attr_" + `+quoteJS(name)+`]`)
+	return mangoClassValues(t, dom, class, `String(c.getAttribute(`+quoteJS(name)+`) || "")`)
 }
 
 // mangoKids counts the children of every element drawn under #mango whose class

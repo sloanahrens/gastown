@@ -3678,7 +3678,12 @@ function mangoTrend(m, stale) {
   const block = el("div", "mgt" + (stale ? " jvstale" : ""));
   const head = el("div", "mgthead");
   block.append(head);
-  const weeks = m.weekly;
+  const DAYMS = 864e5;
+  const day = s => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10));
+  // The reader drops a week it cannot place or whose share is not a proportion;
+  // the page makes the same check so a state that skipped the reader cannot
+  // draw a point at NaN, which an SVG renders as nothing at all.
+  const weeks = m.weekly.filter(w => w && typeof w.week === "string" && Number.isFinite(day(w.week)) && Number.isFinite(w.rejected_share));
   if (weeks.length < 2) {
     head.textContent = "not enough weeks yet";
     return block;
@@ -3688,8 +3693,6 @@ function mangoTrend(m, stale) {
   // The side margins leave room for a week label centred on either end of the
   // span and for the share scale's labels on the left.
   const W = 700, H = 170, left = 44, right = W - 44, top = 46, bottom = 132;
-  const DAYMS = 864e5;
-  const day = s => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10));
   // The x span runs from the first week to a week past the last one, so the
   // newest dot is not drawn against the right edge; an event outside the span
   // has no x on the trend and is left out.
@@ -3738,26 +3741,41 @@ function mangoTrend(m, stale) {
   // drawn at different heights instead of overprinting. Three bands fit above
   // the plot; past them a band is reused rather than a regime change going
   // unlabelled.
+  // The viewBox clips anything past its edge, so a label is cut to the width it
+  // is measured at, at a word boundary and with an ellipsis, rather than losing
+  // its end where no one can see it was cut.
+  const labelChars = 60;
+  const labelText = what => {
+    if (what.length <= labelChars) return what;
+    const cut = what.slice(0, labelChars - 1);
+    const space = cut.lastIndexOf(" ");
+    return (space > labelChars / 2 ? cut.slice(0, space) : cut).trimEnd() + "…";
+  };
   const bands = [];
   for (const e of marks) {
     const x = xAt(day(e.date));
     svg.append(svgEl("line", {x1: x.toFixed(1), x2: x.toFixed(1), y1: top, y2: bottom, class: "mgtmark", stroke: "currentColor", "stroke-dasharray": "3 3", "stroke-opacity": "0.55"}));
-    const what = String(e.what || "");
-    const width = Math.min(what.length, 60) * 4.6 + 6;
+    // 4.6px is the chart's estimate for a character at font-size 9.
+    const shown = labelText(String(e.what || ""));
+    const width = shown.length * 4.6 + 6;
     const flip = x + 4 + width > right;
     const labelSpan = flip ? [x - 4 - width, x - 4] : [x + 4, x + 4 + width];
     let band = 0;
-    const touches = (band, span) => band.some(iv => iv[0] < span[1] && span[0] < iv[1]);
+    const touches = (used, span) => used.some(iv => iv[0] < span[1] && span[0] < iv[1]);
     while (band < bands.length && touches(bands[band], labelSpan)) band++;
     (bands[band] = bands[band] || []).push(labelSpan);
     const label = svgEl("text", {x: (flip ? x - 4 : x + 4).toFixed(1), y: String(11 + Math.min(band, 2) * 12), "text-anchor": flip ? "end" : "start", class: "mgtwhat", fill: "currentColor", "font-size": "9", "fill-opacity": "0.8"});
-    label.textContent = what;
+    label.textContent = shown;
     svg.append(label);
   }
   block.append(svg);
 
+  // The caption names the number of weeks the chart holds: a fixed count would
+  // misstate a series that is not four weeks long.
+  const countWords = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+  const count = countWords[weeks.length] || String(weeks.length);
   const cap = el("div", "mgtcap");
-  cap.textContent = "Landings per week in brackets. Four weeks is too few to say what caused the rise; the dates mark when things changed.";
+  cap.textContent = "Landings per week in brackets. " + count.charAt(0).toUpperCase() + count.slice(1) + " weeks is too few to say what caused the rise; the dates mark when things changed.";
   block.append(cap);
   return block;
 }
