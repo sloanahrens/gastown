@@ -33,9 +33,11 @@ are the operator's sanctioned way to act on that queue.
 
 Subcommands:
   requeue   Put a rejected landing back in the queue unchanged
+  om-stats  Report how often om rejects landings, by day, rig and agent
 
 Examples:
-  gt land requeue gt-3e1z4 --reason "the gate failed on a runner fault, not the diff"`,
+  gt land requeue gt-3e1z4 --reason "the gate failed on a runner fault, not the diff"
+  gt land om-stats --since 2026-10-20`,
 	RunE: requireSubcommand,
 }
 

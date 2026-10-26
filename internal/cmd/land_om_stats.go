@@ -1,0 +1,222 @@
+package cmd
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/daemonlog"
+	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/workspace"
+)
+
+var (
+	landOmStatsSince   string
+	landOmStatsRecords string
+	landOmStatsLog     string
+	landOmStatsJSON    bool
+)
+
+// landOmStatsCmd is the operator's quick view of om's verdicts. Merlin's mango
+// pipeline reads the same records for its CSV; this writes nothing.
+var landOmStatsCmd = &cobra.Command{
+	Use:   "om-stats",
+	Short: "Report how often om rejects landings, by day, rig and agent",
+	Long: `Report how often om rejects landings.
+
+Reads the town's review records (.runtime/landings/reviews.jsonl), one line
+per om verdict, and aggregates them: per day the approvals, rejections and
+rejection rate, the mean findings and score of the rejections; per rig and per
+author seat the same counts; how many rounds each bead took to land; and the
+ten beads rejected most.
+
+The review record starts 2026-10-16. Days before it are filled from the
+landing worker's daemon log and marked with a * in the table, or fallback in
+the JSON; the log names no rig and no seat, so those days count in the day
+table alone.
+
+The command reads only: it writes no file. --json prints the same data as the
+table.
+
+Examples:
+  gt land om-stats
+  gt land om-stats --since 2026-10-20
+  gt land om-stats --json --records /tmp/reviews.jsonl`,
+	Args: cobra.NoArgs,
+	RunE: runLandOmStats,
+}
+
+func init() {
+	landOmStatsCmd.Flags().StringVar(&landOmStatsSince, "since", "", "first day to report, as YYYY-MM-DD (default: every day on record)")
+	landOmStatsCmd.Flags().StringVar(&landOmStatsRecords, "records", "", "review records file (default: <town>/.runtime/landings/reviews.jsonl)")
+	landOmStatsCmd.Flags().StringVar(&landOmStatsLog, "log", "", "daemon log for the days before the first record (default: <town>/daemon/daemon.log)")
+	landOmStatsCmd.Flags().BoolVar(&landOmStatsJSON, "json", false, "print the report as JSON")
+	landCmd.AddCommand(landOmStatsCmd)
+}
+
+func runLandOmStats(cmd *cobra.Command, _ []string) error {
+	since, err := parseLandOmStatsSince(landOmStatsSince)
+	if err != nil {
+		return err
+	}
+	recordsPath := strings.TrimSpace(landOmStatsRecords)
+	logPath := strings.TrimSpace(landOmStatsLog)
+	if recordsPath == "" || logPath == "" {
+		townRoot, err := workspace.FindFromCwdOrError()
+		if err != nil {
+			return fmt.Errorf("resolving the town: %w", err)
+		}
+		if recordsPath == "" {
+			recordsPath = land.TownReviewsFile(townRoot).Path
+		}
+		if logPath == "" {
+			logPath = filepath.Join(townRoot, "daemon", daemonlog.FileName)
+		}
+	}
+	stats, err := landOmStatsFromFiles(recordsPath, logPath, since)
+	if err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	if landOmStatsJSON {
+		return writeLandOmStatsJSON(out, stats)
+	}
+	writeLandOmStatsTable(out, stats, since)
+	return nil
+}
+
+// parseLandOmStatsSince reads --since as a calendar day. An empty value is the
+// zero time, which filters nothing.
+func parseLandOmStatsSince(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, nil
+	}
+	at, err := time.ParseInLocation(land.OmStatsDayLayout, value, time.Local)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("--since %q: want a day as YYYY-MM-DD", value)
+	}
+	return at, nil
+}
+
+// landOmStatsFromFiles opens both sources and aggregates them. A file that is
+// not there yet is no lines: a town that has not recorded a landing still
+// reports.
+func landOmStatsFromFiles(recordsPath, logPath string, since time.Time) (land.OmStats, error) {
+	records, closeRecords, err := openLandOmStatsSource(recordsPath)
+	if err != nil {
+		return land.OmStats{}, err
+	}
+	defer closeRecords()
+	logFile, closeLog, err := openLandOmStatsSource(logPath)
+	if err != nil {
+		return land.OmStats{}, err
+	}
+	defer closeLog()
+	return land.AggregateOmStats(records, logFile, since)
+}
+
+// openLandOmStatsSource opens path for reading; a missing file is a nil reader
+// with nothing to close.
+func openLandOmStatsSource(path string) (io.Reader, func(), error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, func() {}, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	return f, func() { _ = f.Close() }, nil
+}
+
+// writeLandOmStatsJSON prints the report as the struct the table renders, so a
+// reader can take every figure without scraping the columns.
+func writeLandOmStatsJSON(w io.Writer, stats land.OmStats) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(stats); err != nil {
+		return fmt.Errorf("writing the report: %w", err)
+	}
+	return nil
+}
+
+// writeLandOmStatsTable prints the report one question at a time: how a day,
+// a rig and a seat land, and which beads take the most rounds.
+func writeLandOmStatsTable(w io.Writer, stats land.OmStats, since time.Time) {
+	header := "om landings, all days"
+	if !since.IsZero() {
+		header = "om landings since " + since.Format(land.OmStatsDayLayout)
+	}
+	fmt.Fprintln(w, header)
+	if len(stats.Days) == 0 {
+		fmt.Fprintln(w, "no om verdicts in range")
+	}
+	if len(stats.Days) > 0 {
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "Day\tApprovals\tRejections\tRate\tMean findings\tMean score")
+		fallback := false
+		for _, d := range stats.Days {
+			mark := ""
+			if d.Fallback {
+				mark, fallback = "*", true
+			}
+			fmt.Fprintf(tw, "%s%s\t%d\t%d\t%s\t%.1f\t%.2f\n", d.Day, mark, d.Approvals, d.Rejections,
+				landOmStatsPercent(d.Rate), d.MeanFindings, d.MeanScore)
+		}
+		_ = tw.Flush()
+		if fallback {
+			fmt.Fprintln(w, "\n* filled from the daemon log: no review record for the day")
+		}
+	}
+	if len(stats.Rigs) > 0 {
+		fmt.Fprintln(w)
+		writeLandOmStatsGroups(w, "Rig", stats.Rigs)
+	}
+	if len(stats.Agents) > 0 {
+		fmt.Fprintln(w)
+		writeLandOmStatsGroups(w, "Agent", stats.Agents)
+	}
+	fmt.Fprintf(w, "\nRounds per bead: %d took one, %d two, %d three or more\n",
+		stats.Rounds.One, stats.Rounds.Two, stats.Rounds.ThreePlus)
+	if len(stats.TopBeads) > 0 {
+		fmt.Fprintln(w, "\nBeads rejected most")
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "Bead\tRig\tRejections")
+		for _, b := range stats.TopBeads {
+			fmt.Fprintf(tw, "%s\t%s\t%d\n", b.Bead, landOmStatsRig(b.Rig), b.Rejections)
+		}
+		_ = tw.Flush()
+	}
+	if stats.Skipped > 0 {
+		fmt.Fprintf(w, "\n%d unparseable review-record line(s) skipped\n", stats.Skipped)
+	}
+}
+
+func writeLandOmStatsGroups(w io.Writer, title string, groups []land.OmStatsGroup) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(tw, "%s\tApprovals\tRejections\tRate\n", title)
+	for _, g := range groups {
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%s\n", g.Name, g.Approvals, g.Rejections, landOmStatsPercent(g.Rate))
+	}
+	_ = tw.Flush()
+}
+
+func landOmStatsPercent(rate float64) string {
+	return fmt.Sprintf("%.1f%%", rate*100)
+}
+
+func landOmStatsRig(rig string) string {
+	if strings.TrimSpace(rig) == "" {
+		return land.OmStatsUnnamed
+	}
+	return rig
+}
