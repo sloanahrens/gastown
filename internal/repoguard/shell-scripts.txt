@@ -75,7 +75,6 @@ scripts/test-capacity/run-gate.sh
 scripts/test-capacity/sample-capacity.sh
 scripts/test-gce-install.sh
 scripts/test-makefile.sh
-scripts/test-timing.sh
 scripts/tier-sweep.sh
 scripts/tier-sweep_test.sh
 scripts/town_metrics_test.sh
