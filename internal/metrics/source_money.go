@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"path/filepath"
 	"strings"
@@ -61,10 +60,14 @@ import (
 // outside the window, so the columns a snapshot carries do not change as a
 // model's use moves in and out of the hour.
 //
-// Two columns count what the group could not use, so a nil column that came
+// Three columns count what the group could not use, so a nil column that came
 // from a broken input is distinguishable from one whose file is simply not
 // there:
 //
+//	money_read_failures       the plan series, the spend document or the usage
+//	                          listing the group could not read at all: only
+//	                          that input's columns stay nil, and the other two
+//	                          still answer
 //	money_unreadable_records  usage record files the directory listed and the
 //	                          read failed for, so the token sums cover the
 //	                          records that could be read and this counts the
@@ -77,13 +80,16 @@ import (
 //
 // A file that is not there leaves its columns nil: no reading is not a reading
 // of zero, and a town without a Claude plan or a usage scan still records its
-// other spending. A read that fails for any other reason fails Collect, so the
-// group is null and the error is in the record. A line of the series that will
-// not parse, and a spend document that will not decode or carries no
-// timestamp, are skipped rather than failing the group, and counted. A usage
-// record that cannot be read or decoded is skipped too — it is one run of a
-// directory of them, not the group's input — and counted in the column for how
-// it failed.
+// other spending. A read that fails for any other reason is one failed input,
+// not a failed group: its columns stay nil, money_read_failures counts it, and
+// Collect carries on with the inputs that still answer. The group has no
+// failure of its own, so Collect returns no error: an unreadable usage
+// directory costs its token sums and a count, not the DeepSeek rate or the
+// plan percentages. A line of the series that will not parse, and a spend
+// document that will not decode or carries no timestamp, are skipped rather
+// than failing the group, and counted. A usage record that cannot be read or
+// decoded is skipped too — it is one run of a directory of them, not the
+// group's input — and counted in the column for how it failed.
 type moneySource struct{}
 
 var (
@@ -105,23 +111,21 @@ func (moneySource) Collect(_ context.Context, env Env) (map[string]any, error) {
 		"deepseek_spend_age_s":               nil,
 	}
 	gaps := &moneyGaps{}
-	if err := moneyAddClaudePlan(env, cols, gaps); err != nil {
-		return nil, err
-	}
-	if err := moneyAddDeepSeek(env, cols, gaps); err != nil {
-		return nil, err
-	}
-	if err := moneyAddTokens(env, cols, gaps); err != nil {
-		return nil, err
-	}
+	moneyAddClaudePlan(env, cols, gaps)
+	moneyAddDeepSeek(env, cols, gaps)
+	moneyAddTokens(env, cols, gaps)
 	cols["money_unreadable_records"] = gaps.unreadableRecords
 	cols["money_unparsed_inputs"] = gaps.unparsedInputs
+	cols["money_read_failures"] = gaps.readFailures
 	return cols, nil
 }
 
 // moneyGaps counts what the group could not use, so an input that broke is a
 // number in the record and not a column that silently reads as absent.
 type moneyGaps struct {
+	// readFailures is the inputs the group could not read at all, other than a
+	// file that is not there. Each costs only its own columns.
+	readFailures int
 	// unreadableRecords is usage record files the listing named but the read
 	// failed for, other than a file that went away between the two.
 	unreadableRecords int
@@ -131,13 +135,14 @@ type moneyGaps struct {
 }
 
 // moneyAddClaudePlan fills the plan columns from the status line's tail.
-func moneyAddClaudePlan(env Env, cols map[string]any, gaps *moneyGaps) error {
+func moneyAddClaudePlan(env Env, cols map[string]any, gaps *moneyGaps) {
 	data, err := env.Tail(filepath.Join(constants.TownRuntimePath(env.Town), moneyClaudePlanFile), sourceLogTailBytes)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return
 	}
 	if err != nil {
-		return fmt.Errorf("reading %s: %w", moneyClaudePlanFile, err)
+		gaps.readFailures++
+		return
 	}
 	var samples []dashboard.ClaudePlanSample
 	for _, line := range bytes.Split(data, []byte("\n")) {
@@ -156,25 +161,25 @@ func moneyAddClaudePlan(env Env, cols map[string]any, gaps *moneyGaps) error {
 		samples = append(samples, sample)
 	}
 	if len(samples) == 0 {
-		return nil
+		return
 	}
 	plan := dashboard.ComputeClaudePlan(samples, env.Now(), dashboard.ClaudePlanDefaultUSD)
 	cols["claude_plan_weekly_pct"] = plan.WeeklyPct
 	cols["claude_plan_five_hour_pct"] = plan.FiveHourPct
 	cols["claude_plan_weekly_pace_per_day_1h"] = plan.PacePerDay1h
 	cols["claude_plan_stale"] = plan.Stale
-	return nil
 }
 
 // moneyAddDeepSeek fills the DeepSeek columns from the watch's reading.
-func moneyAddDeepSeek(env Env, cols map[string]any, gaps *moneyGaps) error {
+func moneyAddDeepSeek(env Env, cols map[string]any, gaps *moneyGaps) {
 	path := filepath.Join(constants.TownRuntimePath(env.Town), moneySpendFile)
 	data, err := env.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return
 	}
 	if err != nil {
-		return fmt.Errorf("reading %s: %w", moneySpendFile, err)
+		gaps.readFailures++
+		return
 	}
 	var doc struct {
 		TS      time.Time `json:"ts"`
@@ -186,11 +191,11 @@ func moneyAddDeepSeek(env Env, cols map[string]any, gaps *moneyGaps) error {
 	// that has never written the file.
 	if err := json.Unmarshal(data, &doc); err != nil {
 		gaps.unparsedInputs++
-		return nil
+		return
 	}
 	if doc.TS.IsZero() {
 		gaps.unparsedInputs++
-		return nil
+		return
 	}
 	now := env.Now()
 	if doc.PerHour != nil {
@@ -200,24 +205,24 @@ func moneyAddDeepSeek(env Env, cols map[string]any, gaps *moneyGaps) error {
 		cols["deepseek_balance"] = *doc.Balance
 	}
 	cols["deepseek_spend_age_s"] = int64(now.Sub(doc.TS) / time.Second)
-	return nil
 }
 
 // moneyAddTokens fills one column per model from the usage scan's records.
-func moneyAddTokens(env Env, cols map[string]any, gaps *moneyGaps) error {
+func moneyAddTokens(env Env, cols map[string]any, gaps *moneyGaps) {
 	// An Env built for sources that never list a directory has no seam to
 	// read the usage files with; there is no scan to report, and the token
 	// columns stay out rather than panicking.
 	if env.ReadDir == nil {
-		return nil
+		return
 	}
 	dir := filepath.Join(constants.TownRuntimePath(env.Town), moneyUsageDir)
 	entries, err := env.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return
 	}
 	if err != nil {
-		return fmt.Errorf("listing %s: %w", moneyUsageDir, err)
+		gaps.readFailures++
+		return
 	}
 	now := env.Now()
 	cutoff := now.Add(-time.Hour)
@@ -263,7 +268,6 @@ func moneyAddTokens(env Env, cols map[string]any, gaps *moneyGaps) error {
 			cols[key] = nil
 		}
 	}
-	return nil
 }
 
 // moneyTokenColumn is a model's name as a column: letters, digits, '-' and '_'
