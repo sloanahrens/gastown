@@ -81,7 +81,8 @@ retried is in `run.sh` beside the publish functions.
 - **Why `crane`.** Docker Desktop's list of insecure registries belongs to the
   overseer, so the plugin pushes with `crane` from a `docker save` tarball and
   tags the image locally with the registry reference, which is what the sandbox
-  backend's drift check inspects.
+  backend's drift check inspects. The image is saved and pushed once; its other
+  tags are made on the registry with `crane tag`, which copies no layer.
 - **Failure never breaks the plugin.** A missing `crane` or a failed list, tag,
   save or push is logged with its reason and the run exits 0; nothing is removed.
   A push that did not complete is retried by the next run even when the image is

@@ -215,10 +215,12 @@ registry_problem() {
   command -v "$CRANE" >/dev/null 2>&1 || echo "POLECAT_IMAGE_REGISTRY=$REGISTRY is set but $CRANE is not installed"
 }
 
-# publish_tags tags and pushes each local tag of the image through TAR_DIR. It
-# stops at the first failure and logs why; nothing is removed.
+# publish_tags tags and pushes each local tag of the image. The image is saved
+# and pushed once, under its first tag, through TAR_DIR; every other tag is made
+# on the registry with crane tag, which copies no layer (gt-roa0c). It stops at
+# the first failure and logs why; nothing is removed.
 publish_tags() {
-  local repo="${IMAGE%%:*}" ref tag reg tar out refs
+  local repo="${IMAGE%%:*}" ref tag reg tar out refs first=""
   if ! refs="$("$DOCKER" image inspect --format "$REPO_TAGS_FORMAT" "$IMAGE" 2>&1)"; then
     log "registry: cannot read the tags of $IMAGE ($(last_line "$refs")); the image is not published"
     return 1
@@ -239,6 +241,14 @@ publish_tags() {
       log "registry: cannot tag $reg ($(last_line "$out")); the image is not published"
       return 1
     fi
+    if [ -n "$first" ]; then
+      if ! out="$("$CRANE" tag --insecure "$first" "$tag" 2>&1)"; then
+        log "registry: tagging $reg failed ($(last_line "$out")); the image is not published"
+        return 1
+      fi
+      log "registry: tagged $reg"
+      continue
+    fi
     rm -f "$tar"
     if ! out="$("$DOCKER" save -o "$tar" "$reg" 2>&1)"; then
       log "registry: cannot save $reg to a tarball ($(last_line "$out")); the image is not published"
@@ -249,6 +259,7 @@ publish_tags() {
       return 1
     fi
     rm -f "$tar"
+    first="$reg"
     log "registry: pushed $reg"
   done <<<"$refs"
 }
