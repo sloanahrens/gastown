@@ -230,6 +230,15 @@ func staticRoleTextWarn(errOut io.Writer, ctx RoleContext) (text string, fromTem
 		outputPrimeContextFallback(&buf, ctx)
 		text = buf.String()
 	}
+	// The operator's directives go into the same text as the template, so the
+	// system-prompt file carries them whole (gt-qwcdz). A source that cannot be
+	// read fails the render: an agent must not start without a policy it was
+	// meant to have.
+	directives, err := config.ReadRoleDirectives(string(ctx.Role), ctx.TownRoot, ctx.Rig)
+	if err != nil {
+		return "", false, err
+	}
+	text += renderDirectiveSection(directives)
 	contextPath := filepath.Join(ctx.TownRoot, "CONTEXT.md")
 	data, readErr := os.ReadFile(contextPath)
 	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
