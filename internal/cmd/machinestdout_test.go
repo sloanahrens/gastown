@@ -23,6 +23,7 @@ func TestMachineStdoutProblem(t *testing.T) {
 		{"json with nothing written", "json", "", false},
 		{"json with a notice first", "json", "note: rebuilding cache\n{\"ok\":true}\n", true},
 		{"json with a trailing notice", "json", "{\"ok\":true}\nnote: done\n", true},
+		{"json lines, one value a line", "json", "{\"n\":1}\n{\"n\":2}\n", false},
 		{"quiet with nothing written", "quiet", "", false},
 		{"quiet with a line", "quiet", "done\n", true},
 	}
@@ -30,6 +31,9 @@ func TestMachineStdoutProblem(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			err := machineStdoutProblem(tc.mode, []byte(tc.stdout))
+			if err != nil && strings.Contains(err.Error(), "note:") {
+				t.Errorf("the error echoes the captured stdout: %v", err)
+			}
 			if (err != nil) != tc.fails {
 				t.Errorf("machineStdoutProblem(%q, %q) = %v, want a problem: %v", tc.mode, tc.stdout, err, tc.fails)
 			}
