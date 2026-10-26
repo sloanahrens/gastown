@@ -795,10 +795,34 @@ type kubernetesDriverConfigJSON struct {
 // kubernetesPodDriverConfig is placement under pod and the agent container's
 // sizing under containers.agent.resources.
 type kubernetesPodDriverConfig struct {
-	// Containers precedes Pod so the marshaled keys stay alphabetical, the
-	// order the golden tests pin.
+	// Containers precedes Pod and Volumes follows them so the marshaled keys stay
+	// alphabetical, the order the golden tests pin.
 	Containers *kubernetesContainers `json:"containers,omitempty"`
 	Pod        *kubernetesPod        `json:"pod,omitempty"`
+	Volumes    []kubernetesVolume    `json:"volumes,omitempty"`
+}
+
+// kubernetesVolume is one volume of the sandbox pod: the shared claim the agent
+// mounts as its cache (gt-zl804).
+type kubernetesVolume struct {
+	Name                  string                `json:"name"`
+	PersistentVolumeClaim kubernetesClaimSource `json:"persistent_volume_claim"`
+}
+
+// kubernetesClaimSource names the PersistentVolumeClaim a volume uses.
+type kubernetesClaimSource struct {
+	ClaimName string `json:"claim_name"`
+	ReadOnly  bool   `json:"read_only"`
+}
+
+// kubernetesCacheVolumeName is the fixed name of the cache volume in the pod.
+const kubernetesCacheVolumeName = "gt-cache"
+
+// kubernetesVolumeMount mounts one of the pod's volumes into a container.
+type kubernetesVolumeMount struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mount_path"`
+	ReadOnly  bool   `json:"read_only"`
 }
 
 // kubernetesContainers sizes the agent container by name; agent is the only
@@ -808,7 +832,8 @@ type kubernetesContainers struct {
 }
 
 type kubernetesContainer struct {
-	Resources kubernetesResources `json:"resources"`
+	Resources    *kubernetesResources    `json:"resources,omitempty"`
+	VolumeMounts []kubernetesVolumeMount `json:"volume_mounts,omitempty"`
 }
 
 // kubernetesResources carries the container's limits and requests, limits first
@@ -846,10 +871,21 @@ func kubernetesDriverConfig(p Profile) (string, error) {
 	if p.Limits != nil && *p.Limits != (config.SandboxResources{}) {
 		resources.Limits = p.Limits
 	}
+	agent := kubernetesContainer{}
 	if resources != (kubernetesResources{}) {
-		cfg.Kubernetes.Containers = &kubernetesContainers{Agent: kubernetesContainer{Resources: resources}}
+		agent.Resources = &resources
 	}
-	if cfg.Kubernetes.Pod == nil && cfg.Kubernetes.Containers == nil {
+	if p.KubernetesCacheClaim != "" {
+		cfg.Kubernetes.Volumes = []kubernetesVolume{{
+			Name:                  kubernetesCacheVolumeName,
+			PersistentVolumeClaim: kubernetesClaimSource{ClaimName: p.KubernetesCacheClaim},
+		}}
+		agent.VolumeMounts = []kubernetesVolumeMount{{Name: kubernetesCacheVolumeName, MountPath: sandboxCacheDir}}
+	}
+	if agent.Resources != nil || agent.VolumeMounts != nil {
+		cfg.Kubernetes.Containers = &kubernetesContainers{Agent: agent}
+	}
+	if cfg.Kubernetes.Pod == nil && cfg.Kubernetes.Containers == nil && cfg.Kubernetes.Volumes == nil {
 		return "", nil
 	}
 	cfgJSON, err := json.Marshal(cfg)

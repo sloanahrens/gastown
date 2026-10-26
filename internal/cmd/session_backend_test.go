@@ -79,3 +79,33 @@ func TestSessionBackendForAgentFollowsTheSeat(t *testing.T) {
 		t.Fatalf("profile handed to the backend = %+v: the kubernetes fields must survive the conversion", got)
 	}
 }
+
+// A kubernetes sandbox profile's cache claim reaches the profile the resolver is
+// handed, so the driver config can mount it (gt-zl804 call site).
+func TestSessionBackendForAgentCarriesTheCacheClaim(t *testing.T) {
+	t.Parallel()
+	host := tmux.NewTmuxWithSocket("gt-test")
+	ts := config.NewTownSettings()
+	ts.PolecatPool = &config.PolecatPool{Seats: map[string]config.SeatConfig{
+		"deepseek-flash-sandbox-k8s": {Cap: 1, Backend: config.BackendOpenShell, Sandbox: "polecat-k8s"},
+	}}
+	ts.Sandboxes = map[string]config.SandboxProfile{"polecat-k8s": {
+		Image:                "gastown-polecat:dev",
+		Policy:               "deploy/polecat/policy.yaml",
+		Driver:               config.SandboxDriverKubernetes,
+		KubernetesCacheClaim: "gt-shared-cache",
+	}}
+	var got session.Profile
+	resolve := func(seat, backend string, p session.Profile, townRoot string, host *tmux.Tmux) (session.Backend, error) {
+		return session.ResolveWith(func(_ string, p session.Profile) (session.Backend, error) {
+			got = p
+			return session.NewTmuxBackend(host), nil
+		}, seat, backend, p, townRoot, host)
+	}
+	if _, err := sessionBackendForAgentWith(resolve, ts, t.TempDir(), "deepseek-flash-sandbox-k8s", host); err != nil {
+		t.Fatal(err)
+	}
+	if got.KubernetesCacheClaim != "gt-shared-cache" {
+		t.Fatalf("KubernetesCacheClaim = %q handed to the resolver, want the profile's claim", got.KubernetesCacheClaim)
+	}
+}
