@@ -2020,6 +2020,13 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	if repeat {
 		attempt = recorded.Attempt
 	}
+	// The count stops at the ceiling (gt-ern0y): a bead resubmitted after it
+	// is escalated keeps accumulating notes, but there is no attempt four of a
+	// three-round budget, so the header and the escalation text below never
+	// name a number above MaxReworkAttempts.
+	if attempt > MaxReworkAttempts {
+		attempt = MaxReworkAttempts
+	}
 	// The attempt ceiling (gt-28ibg): the rejection count decides, before the
 	// note is written, whether this round is the last one a polecat gets.
 	capped := rej.Rework && attempt >= MaxReworkAttempts

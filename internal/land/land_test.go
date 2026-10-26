@@ -655,6 +655,64 @@ func TestLandCapsTheReworkLoop(t *testing.T) {
 	}
 }
 
+// TestLandRejectionAfterTheCeilingRecordsTheCeiling is gt-ern0y: a bead can be
+// resubmitted after it has been escalated, and its notes keep accumulating, so
+// the raw rejection count would record the next refusal as "attempt 4 of 3".
+// The recorded attempt, and the escalation text, stop at MaxReworkAttempts.
+func TestLandRejectionAfterTheCeilingRecordsTheCeiling(t *testing.T) {
+	t.Parallel()
+	for _, prior := range []int{0, 1, MaxReworkAttempts - 1, MaxReworkAttempts, MaxReworkAttempts + 2} {
+		prior := prior
+		t.Run(fmt.Sprintf("%d_prior_rejections", prior), func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			for i := 1; i <= prior; i++ {
+				// Another head, so this block is never read as an unfinished
+				// repeat of the rejection the landing below records.
+				block := FormatRejectionNote(RejectionNote{
+					Attempt: i, Kind: string(RejectGate), Reason: "earlier refusal",
+					Branch: f.work.Branch, Target: f.work.Target, MR: f.work.BeadID,
+					Head: fmt.Sprintf("%040d", i),
+				})
+				if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AppendNotes: block}); err != nil {
+					t.Fatalf("%d: seeding the notes: %v", i, err)
+				}
+			}
+			f.gate.fn = func(string) GateResult {
+				return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
+			}
+			_, err := f.lander().Land(context.Background(), f.work)
+			var rej *Rejection
+			if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
+				t.Fatalf("Land = %T %v, want a recorded gate rejection", err, err)
+			}
+			want := min(prior+1, MaxReworkAttempts)
+			notes := f.bead().Notes
+			if got := CountRejections(notes); got != prior+1 {
+				t.Fatalf("%d rejection block(s) recorded, want %d", got, prior+1)
+			}
+			last, ok := ParseRejectionNote(notes)
+			if !ok || last.Attempt != want {
+				t.Fatalf("last block attempt = %d (ok=%v), want the ceiling %d", last.Attempt, ok, want)
+			}
+			if prior+1 > MaxReworkAttempts && strings.Contains(notes, fmt.Sprintf("attempt %d of", prior+1)) {
+				t.Errorf("the escalation text names attempt %d, above the ceiling %d:\n%s", prior+1, MaxReworkAttempts, notes)
+			}
+			capped := prior+1 >= MaxReworkAttempts
+			if !capped {
+				if !rej.Rework || strings.Contains(notes, "the loop is escalated") {
+					t.Errorf("rejection %d of %d was escalated early: rework=%v\n%s", prior+1, MaxReworkAttempts, rej.Rework, notes)
+				}
+				return
+			}
+			escalation := fmt.Sprintf("attempt %d of %d: the loop is escalated", want, MaxReworkAttempts)
+			if rej.Rework || !strings.Contains(notes, escalation) {
+				t.Errorf("capped rejection records rework=%v, want false and %q:\n%s", rej.Rework, escalation, notes)
+			}
+		})
+	}
+}
+
 // requeue applies gt land requeue to the fixture's bead the way the command
 // does: it restores the ready label, drops the rework label, and records the
 // REQUEUED comment naming the rejection attempt it undid.
