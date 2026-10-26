@@ -36,14 +36,18 @@ var landOmStatsCmd = &cobra.Command{
 Reads the town's review records (.runtime/landings/reviews.jsonl), one line
 per om verdict, and aggregates them: per day the approvals, rejections and
 rejection rate, the mean findings and score of the rejections; per rig and per
-author seat the same counts; how many rounds each bead took to land; and the
-ten beads rejected most.
+author seat the same counts; how many review rounds each bead's records
+reached (its highest attempt); and the ten beads rejected most.
 
-The review record starts 2026-10-16. Days before it are filled from the
-landing worker's daemon log and marked with a * in the table, or fallback in
-the JSON; the log names no rig and no seat, so those days count in the day
-table alone. Rounds per bead and the beads rejected most come from the review
-records, because a log line names neither an attempt nor a rig.
+Days before the first review record are filled from the landing worker's
+daemon log and marked with a * in the table, or fallback in the JSON; the log
+names no rig and no seat, so those days count in the day table alone. Rounds
+per bead and the beads rejected most come from the review records, because a
+log line names neither an attempt nor a rig.
+
+A path given with --records or --log must exist, so a typo is an error. The
+town's two defaults may be absent — a town that has not landed yet has
+neither — and that is an empty report, not a failure.
 
 The command reads only: it writes no file. --json prints the same data as the
 table.

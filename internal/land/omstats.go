@@ -28,8 +28,8 @@ const OmStatsTopBeads = 10
 const OmStatsUnnamed = "(none)"
 
 // OmStats is the town's om verdicts aggregated: how often om rejects a
-// landing, by day, rig and author seat, how many rounds a bead took, and the
-// beads rejected most.
+// landing, by day, rig and author seat, how many review rounds each bead's
+// records reached, and the beads rejected most.
 type OmStats struct {
 	Days     []OmStatsDay   `json:"days"`
 	Rigs     []OmStatsGroup `json:"rigs"`
@@ -65,8 +65,10 @@ type OmStatsGroup struct {
 	Rate       float64 `json:"rate"`
 }
 
-// OmStatsRounds counts beads by the highest attempt their review records
-// reached: one om round, two, or three and more.
+// OmStatsRounds buckets every bead with a review record by the highest attempt
+// that record reached: one om round, two, or three and more. A bead is counted
+// whether or not it landed, because a record is written for each verdict, not
+// only for a landing.
 type OmStatsRounds struct {
 	One       int `json:"1"`
 	Two       int `json:"2"`
@@ -85,12 +87,18 @@ type OmStatsBead struct {
 // after since (the zero time for all of them).
 //
 // The review records are the source. The log fills only the days before the
-// first record — the record starts 2026-10-16 — and those days are marked
-// Fallback. The log counts in the day table alone: it names no rig, no seat and
-// no attempt, so Rounds and TopBeads come from the review records. A nil
-// reader reads nothing. A record line that is not one, or carries no instant,
-// is skipped and counted; any other line of the daemon log is not a verdict and
-// is ignored, not counted.
+// first review record — when the reviews file begins — and those days are
+// marked Fallback. The log counts in the day table alone: it names no rig, no
+// seat and no attempt, so Rounds and TopBeads come from the review records. A
+// nil reader reads nothing.
+//
+// A record line that is not one, or carries no instant, is skipped and counted,
+// however long it is; a line the reader cannot read fails the report. Any other
+// line of the daemon log is not a verdict and is ignored, not counted.
+//
+// A review record always names its score and findings, so a zero there is a
+// sample. A daemon-log line may omit either, and an absent figure stays out of
+// its mean rather than entering as zero.
 func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) {
 	sinceDay := omStatsDayStart(since)
 	stats := OmStats{
@@ -112,7 +120,8 @@ func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) 
 			return OmStats{}, err
 		}
 		stats.Skipped = skipped
-		for _, rec := range recs {
+		for _, line := range recs {
+			rec := line.rec
 			at := rec.At.In(time.Local)
 			day := at.Format(OmStatsDayLayout)
 			if firstRecordDay.IsZero() || at.Before(firstRecordDay) {
@@ -126,9 +135,10 @@ func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) 
 			rigCounts := omStatsCountsFor(rigs, rig)
 			agentCounts := omStatsCountsFor(agents, agent)
 			if rec.IsRejection() {
-				counts.addRejection(float64(rec.Findings), rec.Score, true, true)
-				rigCounts.addRejection(float64(rec.Findings), rec.Score, true, true)
-				agentCounts.addRejection(float64(rec.Findings), rec.Score, true, true)
+				findings, score := float64(rec.Findings), rec.Score
+				counts.addRejection(findings, score, line.hasFindings, line.hasScore)
+				rigCounts.addRejection(findings, score, line.hasFindings, line.hasScore)
+				agentCounts.addRejection(findings, score, line.hasFindings, line.hasScore)
 				bead := omStatsBeadFor(beads, rec.BeadID)
 				bead.rejections++
 				if rec.Rig != "" {
@@ -323,29 +333,81 @@ func omStatsMostRejected(m map[string]*omStatsBeadAcc) []OmStatsBead {
 	return out
 }
 
+// omStatsReviewRecord is one decoded review-record line and whether that line
+// named its two mean figures. A ReviewRecord always carries them, but an older
+// or hand-written line may not, and an absent figure must stay out of a mean
+// instead of entering as zero.
+type omStatsReviewRecord struct {
+	rec                   ReviewRecord
+	hasScore, hasFindings bool
+}
+
+// parseOmStatsReviewRecord decodes raw as one ReviewRecord line. The outer
+// score and findings fields win over the embedded record's, so the pointers
+// report whether the line named each figure.
+func parseOmStatsReviewRecord(raw []byte) (omStatsReviewRecord, bool) {
+	var line struct {
+		ReviewRecord
+		Score    *float64 `json:"score"`
+		Findings *int     `json:"findings"`
+	}
+	if err := json.Unmarshal(raw, &line); err != nil || line.At.IsZero() {
+		return omStatsReviewRecord{}, false
+	}
+	out := omStatsReviewRecord{
+		rec:         line.ReviewRecord,
+		hasScore:    line.Score != nil,
+		hasFindings: line.Findings != nil,
+	}
+	if out.hasScore {
+		out.rec.Score = *line.Score
+	}
+	if out.hasFindings {
+		out.rec.Findings = *line.Findings
+	}
+	return out, true
+}
+
 // readOmStatsRecords reads the review-record lines of r. A line that does not
 // decode as a ReviewRecord, or carries no instant, is skipped and counted.
-func readOmStatsRecords(r io.Reader) ([]ReviewRecord, int, error) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	var recs []ReviewRecord
+func readOmStatsRecords(r io.Reader) ([]omStatsReviewRecord, int, error) {
+	var recs []omStatsReviewRecord
 	skipped := 0
-	for sc.Scan() {
-		raw := bytes.TrimSpace(sc.Bytes())
+	err := omStatsScanLines(r, func(raw []byte) {
+		raw = bytes.TrimSpace(raw)
 		if len(raw) == 0 {
-			continue
+			return
 		}
-		var rec ReviewRecord
-		if err := json.Unmarshal(raw, &rec); err != nil || rec.At.IsZero() {
+		rec, ok := parseOmStatsReviewRecord(raw)
+		if !ok {
 			skipped++
-			continue
+			return
 		}
 		recs = append(recs, rec)
-	}
-	if err := sc.Err(); err != nil {
+	})
+	if err != nil {
 		return nil, skipped, fmt.Errorf("reading review records: %w", err)
 	}
 	return recs, skipped, nil
+}
+
+// omStatsScanLines calls fn for each line of r without its line break. It reads
+// through a bufio.Reader, so no line has a length limit: one enormous line is
+// data for fn to judge, not a read error that kills the whole report.
+func omStatsScanLines(r io.Reader, fn func(line []byte)) error {
+	br := bufio.NewReader(r)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			fn(bytes.TrimRight(line, "\r\n"))
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // omStatsLogEvent is one landing the daemon log records: a review rejection
@@ -378,17 +440,15 @@ var (
 
 // readOmStatsLog reads the landing-worker lines of r that count as a verdict.
 func readOmStatsLog(r io.Reader) ([]omStatsLogEvent, error) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	var events []omStatsLogEvent
-	for sc.Scan() {
-		m := omStatsLogLineRe.FindStringSubmatch(sc.Text())
+	err := omStatsScanLines(r, func(line []byte) {
+		m := omStatsLogLineRe.FindStringSubmatch(string(line))
 		if m == nil {
-			continue
+			return
 		}
 		at, err := time.ParseInLocation(daemonlog.Stamp, m[1], time.Local)
 		if err != nil {
-			continue
+			return
 		}
 		ev := omStatsLogEvent{day: at.Format(OmStatsDayLayout), bead: m[2]}
 		switch {
@@ -406,11 +466,11 @@ func readOmStatsLog(r io.Reader) ([]omStatsLogEvent, error) {
 			}
 		case omStatsLogLandedRe.MatchString(m[3]):
 		default:
-			continue
+			return
 		}
 		events = append(events, ev)
-	}
-	if err := sc.Err(); err != nil {
+	})
+	if err != nil {
 		return nil, fmt.Errorf("reading the daemon log: %w", err)
 	}
 	return events, nil
