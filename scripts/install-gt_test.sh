@@ -1299,16 +1299,18 @@ rc=$( export GT_TOWN_ROOT="$T"
   && pass "image: run.sh gets the install's town root, built binary and lock" \
   || fail "image: run.sh env: rc=$rc got='$(cat "$T/image-env.txt" 2>/dev/null)' want='$T $T/rig/gt $T/image.lock'"
 
-# --- Cases 44 and 45 are gone (gt-oem0r). From here they watched the alarm
-# stop a build's process group: the group signalled, its child gone, the lock
-# removed once the group was. Where a sandbox refuses a signal to another
-# process group (EPERM) — the sweep's and the post-landing check's environment —
-# neither case can see that stop, so both failed the shell tier on every landing.
-# The stop is internal/imagebuild's own behaviour, tested there without an
-# install in the way: supervisor_test.go's alarm cases (the stop, the KILL after
-# TERM, and a stop that cannot be confirmed) and the process-level
-# TestIntegrationAlarmStopsTheBuildAndEverythingItStarted and
-# TestIntegrationLockOfAnotherProcessStaysAfterTheStop. ---
+# --- Cases 44 and 45 are gone (gt-oem0r): neither can see a process-group stop
+# where the host refuses the signal (EPERM), the sweep's and the post-landing
+# check's environment. What they asserted is owned as follows. In
+# internal/imagebuild: the stop, the lock removed only once the group is gone,
+# and the alarm line are TestAlarmStopsTheGroupAndRemovesTheLockOnlyOnceItIsGone;
+# the KILL after TERM is TestAlarmKillsAGroupThatIgnoresTerm; an unconfirmed stop
+# keeping the lock is TestAlarmKeepsTheLockWhenTheStopCannotBeConfirmed; exit 124
+# and its escalation are TestStoppedBuildEscalatesAsExit124; the real process
+# group is TestIntegrationAlarmStopsTheBuildAndEverythingItStarted. Here: the
+# install failing closed (rc=1, the old binary, no restart marker) is cases 37,
+# 38 and 38b, which reach it through any non-zero supervisor exit, and the
+# detached build's escalation with the install standing is case 51. ---
 
 # --- Case 46: an INSTALL_GT_IMAGE_ALARM that is not a whole number above zero
 # is named in the log, and the build still starts under the default bound. Zero

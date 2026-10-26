@@ -506,6 +506,8 @@ func TestAlarmWithNoLockConfiguredRemovesNothing(t *testing.T) {
 	}
 }
 
+// A detached build's escalation is its only report to the town (gt-vhn89), so
+// the alarm's stop must carry the fingerprint a stalled image is found by.
 func TestStoppedBuildEscalatesAsExit124(t *testing.T) {
 	t.Parallel()
 	g := newGroup(syscall.SIGTERM)
@@ -516,8 +518,14 @@ func TestStoppedBuildEscalatesAsExit124(t *testing.T) {
 	if got != ExitAlarm {
 		t.Errorf("status %d, want %d", got, ExitAlarm)
 	}
-	if len(r.esc.calls) != 1 || !strings.Contains(strings.Join(r.esc.calls[0], " "), "did not finish (exit 124)") {
-		t.Errorf("escalations %v, want one for exit 124", r.esc.calls)
+	if len(r.esc.calls) != 1 {
+		t.Fatalf("%d commands, want one escalation: %v", len(r.esc.calls), r.esc.calls)
+	}
+	line := strings.Join(r.esc.calls[0], " ")
+	for _, want := range []string{"/bin/gt escalate ", "did not finish (exit 124)", "-s medium", "--source script:install-gt", "--fingerprint install-gt:image-build-failed"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("escalation %q does not contain %q", line, want)
+		}
 	}
 }
 
