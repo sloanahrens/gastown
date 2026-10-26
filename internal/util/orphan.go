@@ -115,22 +115,24 @@ func sweepPaneGuard(d sweepDeps) (map[int]bool, error) {
 		return pids, nil
 	}
 	if err := d.tmuxProbe(); err != nil {
-		if errors.Is(err, errTmuxNoServer) {
-			return nil, nil
+		if errors.Is(err, ErrTmuxNoServer) {
+			// No server is no evidence either way: a TTY-less claude may belong to a
+			// live session, so the sweep refuses. The caller reports nothing for it.
+			return nil, fmt.Errorf("no tmux server, so the sweep signals nothing: %w", err)
 		}
 		return nil, fmt.Errorf("tmux not available: %w", err)
 	}
 	return nil, nil
 }
 
-// errTmuxNoServer means tmux is installed and found no server to ask: there
-// are no sessions, so there is nothing to protect and nothing the sweep can
-// mistake for a live pane. It is not a failure to report.
-var errTmuxNoServer = errors.New("no tmux server running")
+// ErrTmuxNoServer means tmux is installed and found no server to ask. The sweep
+// refuses to signal then, and the daemon does not log that refusal as a failure
+// (gt-r2kvf).
+var ErrTmuxNoServer = errors.New("no tmux server running")
 
 // classifyTmuxProbe reads a `tmux list-sessions` answer. tmux exits 1 with
 // "no server running" or "error connecting to ... (No such file or directory)"
-// when no server exists; that is errTmuxNoServer. A missing binary and every
+// when no server exists; that is ErrTmuxNoServer. A missing binary and every
 // other failure are returned as they are.
 func classifyTmuxProbe(out []byte, err error) error {
 	if err == nil {
@@ -145,7 +147,7 @@ func classifyTmuxProbe(out []byte, err error) error {
 	text := string(out)
 	if strings.Contains(text, "no server running") ||
 		(strings.Contains(text, "error connecting to") && strings.Contains(text, "No such file or directory")) {
-		return errTmuxNoServer
+		return ErrTmuxNoServer
 	}
 	return err
 }
