@@ -260,18 +260,25 @@ bd count --status=closed --closed-after=2025-01-01
 
 ### Model Comparison
 
-A bead's `agent:<alias>` label pins it to the seat that works it, and
-`gt config agent list` resolves each alias to the model it runs. Grouping closed
-beads by that label compares models:
+A bead's `agent:<alias>` label pins it to the seat that works it (the pin is read
+in `poolPinnedAgent`, `internal/cmd/sling_pool.go`), and `gt config agent list`
+names the model each alias runs. Count closed beads per label to compare models:
 
 ```bash
-# Completed work per model (the `agent:` label rows)
+# Completed work per model: the agent: label rows
 bd count --status=closed --by-label
 
-# One model's completed beads, then the subset still carrying the `rework`
-# label a rejected landing adds
+# One model: completed beads, then those a landing sent back (the rework label)
 bd count --status=closed --label=agent:claude-sonnet
 bd count --status=closed --label=agent:claude-sonnet --label=rework
 ```
 
-A model whose beads need rework less often has the higher first-pass quality.
+The rework rate for a model is its rework-labelled count divided by its completed
+count. Compare the rates, not the raw counts: a model that ran more beads has more
+rework-labelled beads in absolute terms.
+
+The rework label is a proxy, not a measure of first-pass quality. Handback
+(`internal/polecat/handback.go`) and the landing worker (`internal/land/work.go`)
+set it when a landing sends a bead back. It records that a landing did so, not how
+many attempts a bead took or which attempt failed, so a rate says how often a
+model's beads were sent back, not how often its first attempt was wrong.
