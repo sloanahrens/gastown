@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -325,11 +326,12 @@ func TestCommandKillsTheVetProcessGroup(t *testing.T) {
 	}
 }
 
+// awaitFallback is how long the concurrency test waits for any one step before it fails.
+const awaitFallback = 30 * time.Second
+
 // awaitBound bounds every wait in the concurrency test: a regression that serializes the
 // vets fails with a message after awaitFallback, instead of hanging until the test binary's
 // -timeout. The test's own deadline still wins when it is sooner.
-const awaitFallback = 30 * time.Second
-
 func awaitBound(t *testing.T) context.Context {
 	t.Helper()
 	deadline := time.Now().Add(awaitFallback)
@@ -371,5 +373,24 @@ func awaitWithin[T any](ctx context.Context, ch <-chan T) error {
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("the test never released this vet before its bound")
+	}
+}
+
+// TestSpoolReportsAFailedWrite: a report line that cannot be written is an error at copyTo, so the
+// report never reads as clean when lines were dropped (gt-w3aby).
+func TestSpoolReportsAFailedWrite(t *testing.T) {
+	t.Parallel()
+	s, err := createSpoolIn(t.TempDir())
+	if err != nil {
+		t.Fatalf("createSpoolIn: %v", err)
+	}
+	if err := s.f.Close(); err != nil {
+		t.Fatalf("closing the spool: %v", err)
+	}
+	if _, err := s.Write([]byte("line\n")); err == nil {
+		t.Fatal("a write to a closed spool succeeded")
+	}
+	if err := s.copyTo(io.Discard); err == nil {
+		t.Error("copyTo reported a clean report after a dropped write")
 	}
 }

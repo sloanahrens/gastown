@@ -6,8 +6,7 @@
 //
 // It runs go vet with the tag and no test binary: vet type-checks each selected
 // package and its tests, and analyzes them, but it builds nothing it runs.
-// Before changing the gate stage that runs it, read docs/testing.md, "The
-// gate": that section is the one description of the stage.
+// docs/testing.md describes where it runs.
 package main
 
 import (
@@ -132,6 +131,9 @@ func runWith(ctx context.Context, args []string, out io.Writer, run runner, newS
 type spool struct {
 	path string
 	f    *os.File
+	// writeErr is the first error a write to the report returned. Report lines are written with
+	// Fprintf, so copyTo returns this instead of letting a dropped write read as a clean report.
+	writeErr error
 }
 
 // createSpool writes the report in the system temp directory.
@@ -150,12 +152,19 @@ func createSpoolIn(dir string) (*spool, error) {
 }
 
 func (s *spool) Write(p []byte) (int, error) {
-	return s.f.Write(p)
+	n, err := s.f.Write(p)
+	if err != nil && s.writeErr == nil {
+		s.writeErr = err
+	}
+	return n, err
 }
 
 // copyTo writes what the run wrote, once, so the report reaches out as one
 // block.
 func (s *spool) copyTo(out io.Writer) error {
+	if s.writeErr != nil {
+		return s.writeErr
+	}
 	if _, err := s.f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
