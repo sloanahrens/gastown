@@ -41,17 +41,15 @@ func TestSpanLockHolderHelper(t *testing.T) {
 	lk.unlock()
 }
 
-// The append lock is a record lock, so another process holding it makes an
-// append in this process wait until that process releases it (gt-rm0ab).
-func TestAppend_WaitsForAnotherProcessToReleaseTheLog(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	st := New(dir, fixedClock{at: testEpoch})
-	lockPath := filepath.Join(dir, "gt-abc.jsonl.lock")
-
+// startSpanLockHolder starts a child process that takes the span log's append
+// lock at path, and returns once the child says it holds the lock. The returned
+// stop releases the lock and waits for the child to exit. A holder still running
+// when the test ends is killed, not left behind.
+func startSpanLockHolder(t *testing.T, path string) (stop func()) {
+	t.Helper()
 	//testpolicy:allow no-subprocess — the record lock is per process, so the holder must be another process: this test re-runs the test binary as the holder
 	cmd := exec.Command(os.Args[0], "-test.run=^TestSpanLockHolderHelper$", "-test.count=1")
-	cmd.Env = append(os.Environ(), spanLockHoldEnv+"="+lockPath)
+	cmd.Env = append(os.Environ(), spanLockHoldEnv+"="+path)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatalf("holder stdin: %v", err)
@@ -63,9 +61,9 @@ func TestAppend_WaitsForAnotherProcessToReleaseTheLog(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start the holder: %v", err)
 	}
-	// A holder still running when the test ends is killed, not left behind.
+	stopped := false
 	t.Cleanup(func() {
-		if cmd.ProcessState == nil {
+		if !stopped {
 			cmd.Process.Kill()
 			cmd.Wait()
 		}
@@ -88,6 +86,23 @@ func TestAppend_WaitsForAnotherProcessToReleaseTheLog(t *testing.T) {
 		cmd.Process.Kill()
 		t.Fatal("holder never reported that it took the lock")
 	}
+	return func() {
+		stdin.Close()
+		stopped = true
+		if err := cmd.Wait(); err != nil {
+			t.Errorf("holder exited with %v", err)
+		}
+	}
+}
+
+// The append lock is a record lock, so another process holding it makes an
+// append in this process wait until that process releases it (gt-rm0ab).
+func TestAppend_WaitsForAnotherProcessToReleaseTheLog(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := New(dir, fixedClock{at: testEpoch})
+	lockPath := filepath.Join(dir, "gt-abc.jsonl.lock")
+	stop := startSpanLockHolder(t, lockPath)
 
 	done := make(chan error, 1)
 	go func() { done <- st.Start("gt-abc", "organic") }()
@@ -95,8 +110,7 @@ func TestAppend_WaitsForAnotherProcessToReleaseTheLog(t *testing.T) {
 	// negative check needs a window; the wait is the one the writer is in.
 	select {
 	case err := <-done:
-		stdin.Close()
-		cmd.Wait()
+		stop()
 		t.Fatalf("Start completed while another process held the log's lock: %v", err)
 	//testpolicy:allow no-sleep — a lock the writer must wait on has no event to select on
 	case <-time.After(50 * time.Millisecond):
@@ -105,15 +119,11 @@ func TestAppend_WaitsForAnotherProcessToReleaseTheLog(t *testing.T) {
 	// The holder still holds the lock after the window: the negative wait above
 	// was against a live lock, not one that had already gone.
 	if !recordLockHeld(t, lockPath) {
-		stdin.Close()
-		cmd.Wait()
+		stop()
 		t.Fatal("the holder had released the lock during the wait, so the wait proved nothing")
 	}
 
-	stdin.Close()
-	if err := cmd.Wait(); err != nil {
-		t.Errorf("holder exited with %v", err)
-	}
+	stop()
 	select {
 	case err := <-done:
 		if err != nil {
