@@ -417,7 +417,9 @@ fi
 # polecat-image compiles gt from the working tree, so its gt-commit label (HEAD)
 # is only true of a tree with no changes. A scratch repo holding just the
 # Makefile shows the guard refusing an untracked file before go or docker runs,
-# and letting a clean tree on to the go build.
+# and letting a clean tree on to the go build. The rig go.mod guard sits between
+# the two, so the clean tree is given a fixture town: the case checks the
+# clean-tree guard, not whether this host's town holds a rig checkout (gt-vw2qu).
 pdir="$(mktemp -d)"
 cp "$ROOT/Makefile" "$pdir/"
 git -C "$pdir" init -q
@@ -432,13 +434,16 @@ else
   fail "polecat-image refuses a tree with an untracked file, before building anything (rc=$drc)" "$dout"
 fi
 rm -f "$pdir/scratch.go"
-cout=$(make -C "$pdir" --no-print-directory polecat-image BD_SRC=/nonexistent 2>&1) || true
+ptown="$(mktemp -d)"
+mkdir -p "$ptown/fx/mayor/rig"
+printf 'module example.invalid/fx\n\ngo 1.21\n' >"$ptown/fx/mayor/rig/go.mod"
+cout=$(make -C "$pdir" --no-print-directory polecat-image BD_SRC=/nonexistent POLE_TOWN="$ptown" 2>&1) || true
 if grep -q -F 'go build' <<<"$cout" && ! grep -q -F 'uncommitted or untracked' <<<"$cout"; then
   pass "polecat-image lets a clean tree past its guard to the build"
 else
   fail "polecat-image lets a clean tree past its guard to the build" "$cout"
 fi
-rm -rf "$pdir"
+rm -rf "$pdir" "$ptown"
 
 # The container suite's test-Dolt init pool must be as wide as the scheduler
 # town slot count (gt-ik4a1.4.12). Package beads reads the pool override in
