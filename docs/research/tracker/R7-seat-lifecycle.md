@@ -210,7 +210,7 @@ config groundwork, (4)-(8) the seat wiring, (9)-(12) cleanup and the k8s route.
    store contract uses, or put TLS in front of trackerd for sandbox callers. Decide this in the
    bead that wires (8); it is the only item here that changes tracker code rather than gt code.
 10. **Revoke on polecat removal.** `removeWithOptionsLocked`
-    (`internal/polecat/manager.go:1584-1743`), next to `clearIntentRecord` `:1751` — that is the
+    (`internal/polecat/manager.go:1584-1744`), next to `clearIntentRecord` `:1751` — that is the
     one place `gt polecat nuke` (`internal/cmd/polecat.go:3388`), `gt shutdown`
     (`internal/cmd/start.go:474`) and the spawn rollbacks (`polecat_spawn.go:764-768`) all reach.
     Revoke with the admin credential from (2); a failed revoke is a warning, never a refusal to
