@@ -3601,6 +3601,22 @@ func (g *Git) DiffNumstat(base, head string) (string, error) {
 	return g.run("diff", "--numstat", "--no-renames", base+".."+head)
 }
 
+// CommitSubjects returns the subject line of each commit on base..head, newest
+// first.
+func (g *Git) CommitSubjects(base, head string) ([]string, error) {
+	out, err := g.run("log", "--format=%s", base+".."+head)
+	if err != nil {
+		return nil, err
+	}
+	var subjects []string
+	for _, line := range strings.Split(out, "\n") {
+		if line != "" {
+			subjects = append(subjects, line)
+		}
+	}
+	return subjects, nil
+}
+
 // For example, CommitsAhead("main", "feature") returns how many commits
 // are on feature that are not on main.
 func (g *Git) CommitsAhead(base, branch string) (int, error) {
