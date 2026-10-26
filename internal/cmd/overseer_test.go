@@ -213,3 +213,49 @@ func TestOverseerRefusalQuotesEachKey(t *testing.T) {
 		t.Fatalf("refusal = %v, want the key quoted so its newline cannot start a line", err)
 	}
 }
+
+// TestOverseerBeatLiveReaderCountsAcksFromAcksJSON: an item acknowledged in acks.json is not
+// counted, though the daemon leaves its state item unacked; the rest are refused by key. A corrupt
+// acks.json refuses the beat, since the acks cannot be read (gt-smdcj).
+func TestOverseerBeatLiveReaderCountsAcksFromAcksJSON(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	live := liveOverseerOpenWork(func(string) beads.Client { return beadsfake.New() })
+	var out bytes.Buffer
+
+	if err := attention.WriteState(town, attention.State{Updated: overseerNow, Items: []attention.Item{
+		{Key: "risk:gt-a:1"}, {Key: "risk:gt-b:1"}, {Key: "red-main:gastown:internal/cmd"},
+	}}); err != nil {
+		t.Fatalf("writing the attention state: %v", err)
+	}
+	if err := attention.WriteAcks(town, attention.Acks{Acks: []attention.Ack{
+		{Key: "risk:gt-a:1", At: overseerNow}, {Key: "red-main:gastown:internal/cmd", At: overseerNow},
+	}}); err != nil {
+		t.Fatalf("writing acks.json: %v", err)
+	}
+	err := overseerBeatWith(&out, town, overseer.StateWorking, "overseer", overseerNow, live)
+	if err == nil || !strings.Contains(err.Error(), "1 unacked attention item(s)") ||
+		!strings.Contains(err.Error(), `"risk:gt-b:1"`) || strings.Contains(err.Error(), "risk:gt-a:1") ||
+		strings.Contains(err.Error(), "red-main") {
+		t.Fatalf("working with 2 of 3 items acked in acks.json = %v, want only risk:gt-b:1 refused", err)
+	}
+
+	// Every item acked: the beat is recorded.
+	if err := attention.WriteAcks(town, attention.Acks{Acks: []attention.Ack{
+		{Key: "risk:gt-a:1", At: overseerNow}, {Key: "risk:gt-b:1", At: overseerNow}, {Key: "red-main:gastown:internal/cmd", At: overseerNow},
+	}}); err != nil {
+		t.Fatalf("writing acks.json: %v", err)
+	}
+	if err := overseerBeatWith(&out, town, overseer.StateWorking, "overseer", overseerNow, live); err != nil {
+		t.Fatalf("working with every item acked = %v, want the heartbeat recorded", err)
+	}
+
+	// An unreadable acks.json refuses rather than counting or hiding items.
+	if err := os.WriteFile(attention.AcksPath(town), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("corrupting acks.json: %v", err)
+	}
+	err = overseerBeatWith(&out, town, overseer.StateWorking, "overseer", overseerNow, live)
+	if err == nil || !strings.Contains(err.Error(), "reading acks") {
+		t.Fatalf("working with a corrupt acks.json = %v, want a refusal naming the acks", err)
+	}
+}

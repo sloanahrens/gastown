@@ -132,11 +132,19 @@ func overseerUnackedItems(townRoot string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Acks live in acks.json (gt attention ack writes them there); the daemon does not copy them
+	// into the state items, so an item's AckedAt alone says nothing. An unreadable acks.json is an
+	// error, so the beat refuses rather than counting every item as unacked or none (gt-smdcj).
+	acks, err := attention.ReadAcks(townRoot)
+	if err != nil {
+		return nil, fmt.Errorf("reading acks: %w", err)
+	}
 	var keys []string
 	for _, item := range state.Items {
-		if item.AckedAt == nil {
-			keys = append(keys, item.Key)
+		if item.AckedAt != nil || attention.AckedKey(acks, item.Key) {
+			continue
 		}
+		keys = append(keys, item.Key)
 	}
 	return keys, nil
 }
