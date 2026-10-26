@@ -136,6 +136,73 @@ func TestHandoffBytesSumsNotesAndComments(t *testing.T) {
 	if want := map[string]int{"gt-1": 9}; !reflect.DeepEqual(got, want) {
 		t.Errorf("sizes = %v, want %v", got, want)
 	}
+	if want := []string{"show", "--json", "--", "gt-1"}; len(calls) != 1 || !reflect.DeepEqual(calls[0].args, want) {
+		t.Errorf("bd calls = %+v, want one call with args %v", calls, want)
+	}
+}
+
+// A bd show that fails is retried once and then named as dropped; no size is
+// written to the cache for it.
+func TestHandoffBytesFailedShowIsDroppedAndNotCached(t *testing.T) {
+	t.Parallel()
+	var calls []bdCall
+	var d Dropped
+	cache := map[string]int{}
+	got := HandoffBytes(fakeBd("", false, &calls), map[string]string{"gt-1": "/g"}, &d, 150, cache)
+	if len(got) != 0 || len(cache) != 0 {
+		t.Errorf("sizes = %v, cache = %v; want neither for a failed show", got, cache)
+	}
+	if len(calls) != 2 {
+		t.Errorf("bd calls = %d, want the call and one retry", len(calls))
+	}
+	if want := []DroppedItem{{Source: "bd:gt-1", Reason: "bd show failed"}}; !reflect.DeepEqual(d.Items, want) {
+		t.Errorf("dropped = %+v, want %+v", d.Items, want)
+	}
+}
+
+// A show whose output is JSON but holds no bead is dropped the same way.
+func TestHandoffBytesShowWithNoBeadIsDropped(t *testing.T) {
+	t.Parallel()
+	for _, out := range []string{"null", "[]", "{}"} {
+		var calls []bdCall
+		var d Dropped
+		got := HandoffBytes(fakeBd(out, true, &calls), map[string]string{"gt-1": "/g"}, &d, 150, nil)
+		if len(got) != 0 {
+			t.Errorf("output %s: sizes = %v, want none", out, got)
+		}
+		if want := []DroppedItem{{Source: "bd:gt-1", Reason: "bd show failed"}}; !reflect.DeepEqual(d.Items, want) {
+			t.Errorf("output %s: dropped = %+v, want %+v", out, d.Items, want)
+		}
+	}
+}
+
+// A bd list whose output is JSON null, an object or a list of non-beads is a
+// failed source, not a listing with no beads.
+func TestLoadBeadsRefusesAListingThatIsNotAnArrayOfBeads(t *testing.T) {
+	t.Parallel()
+	for _, out := range []string{"null", `{"id": "gt-1"}`, "[1, 2]"} {
+		var calls []bdCall
+		var d Dropped
+		rows := LoadBeads(fakeBd(out, true, &calls), []string{"/g"}, &d)
+		if len(rows) != 0 {
+			t.Errorf("output %s: rows = %d, want none", out, len(rows))
+		}
+		if want := []string{"bd:/g"}; !reflect.DeepEqual(d.Failed, want) {
+			t.Errorf("output %s: failed = %v, want %v", out, d.Failed, want)
+		}
+	}
+}
+
+// A nil log is a log nobody reads: a refusal must not panic the loader.
+func TestLoadersAcceptANilDroppedLog(t *testing.T) {
+	t.Parallel()
+	var calls []bdCall
+	if rows := LoadBeads(fakeBd("", false, &calls), []string{"/g"}, nil); len(rows) != 0 {
+		t.Errorf("rows = %d, want none", len(rows))
+	}
+	if got := HandoffBytes(fakeBd("", false, &calls), map[string]string{"gt-1": "/g"}, nil, 150, nil); len(got) != 0 {
+		t.Errorf("sizes = %v, want none", got)
+	}
 }
 
 func TestHandoffBytesRespectsTheCallCap(t *testing.T) {
