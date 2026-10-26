@@ -27,7 +27,13 @@ func (s *censusLogSink) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	s.lines = append(s.lines, strings.TrimSpace(string(p)))
 	s.mu.Unlock()
-	s.wrote <- struct{}{}
+	// Wake any waiter without ever blocking the daemon logger: a full buffer
+	// already holds the wakeup it needs, and waitForLine rescans the lines it
+	// holds before every wait, so a coalesced signal cannot be missed.
+	select {
+	case s.wrote <- struct{}{}:
+	default:
+	}
 	return len(p), nil
 }
 
@@ -64,6 +70,25 @@ func (s *censusLogSink) countContaining(substr string) int {
 		}
 	}
 	return n
+}
+
+// TestCensusLogSinkWriteNeverBlocksTheLogger pins the sink's write path: a
+// logger writing while no test is waiting must not block on the wakeup buffer.
+func TestCensusLogSinkWriteNeverBlocksTheLogger(t *testing.T) {
+	t.Parallel()
+	sink := newCensusLogSink()
+	for i := 0; i < cap(sink.wrote); i++ {
+		sink.wrote <- struct{}{} // the buffer is full and nobody is draining it
+	}
+	wrote := make(chan struct{})
+	go func() {
+		sink.Write([]byte("census tick at 11:30"))
+		close(wrote)
+	}()
+	waitForSignal(t, wrote, "the log sink blocked the logger on a full wakeup buffer")
+	if got := sink.countContaining("census tick at"); got != 1 {
+		t.Errorf("the sink recorded %d lines, want the one written", got)
+	}
 }
 
 // censusLogProbe stands in for beads.StartCensusLog: it names each tick it
