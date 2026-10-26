@@ -75,6 +75,13 @@ const (
 // doltServerReadyLog is the line dolt sql-server prints once it listens.
 const doltServerReadyLog = "Server ready. Accepting connections."
 
+// errDoltReadinessProbe marks a start whose container published its port but
+// did not answer the readiness probe (gt-f6msc: the first read through the
+// published port sat past the DSN's read timeout). The retry replaces such a
+// container with a different one on a new port, and startupAttempts bounds how
+// many replacements a start may burn.
+var errDoltReadinessProbe = errors.New("dolt readiness probe")
+
 // portLookup returns the host port Docker published for a container port.
 type portLookup func(ctx context.Context, containerPort string) (string, error)
 
@@ -174,14 +181,26 @@ func runDoltContainer(ctx context.Context) (ctr testcontainers.Container, err er
 	if err != nil {
 		return ctr, fmt.Errorf("run dolt: %w", err)
 	}
-	port, err := waitForMappedPort(ctx, doltPortLookup(ctr))
-	if err != nil {
+	if err := awaitDoltReady(ctx, doltPortLookup(ctr), pingDolt); err != nil {
 		return ctr, err
 	}
-	if err := pingDolt(ctx, port); err != nil {
-		return ctr, fmt.Errorf("dolt readiness probe: %w", err)
-	}
 	return ctr, nil
+}
+
+// awaitDoltReady is runDoltContainer's readiness step: wait for the port Docker
+// published, then probe it. A probe failure wraps errDoltReadinessProbe, which
+// is what makes the start retriable (gt-f6msc).
+func awaitDoltReady(ctx context.Context, lookup portLookup, probe func(ctx context.Context, port string) error) error {
+	port, err := waitForMappedPort(ctx, lookup)
+	if err != nil {
+		return err
+	}
+	if err := probe(ctx, port); err != nil {
+		// Both wraps: the sentinel decides retriability, the probe error is
+		// what a reader needs to see.
+		return fmt.Errorf("%w: %w", errDoltReadinessProbe, err)
+	}
+	return nil
 }
 
 // pingDolt opens a session on the server at port and pings it, bounded by ctx
@@ -249,10 +268,10 @@ func isPortNotMappedErr(err error) bool {
 
 // isRetriableContainerStartErr reports whether a failed container start is one
 // a replacement attempt clears: the reaper still removing the previous
-// container's status, or a port binding Docker had not published yet
-// (gt-jvve).
+// container's status, a port binding Docker had not published yet (gt-jvve),
+// or a readiness probe the container did not answer (gt-f6msc).
 func isRetriableContainerStartErr(err error) bool {
-	return isReaperRemovingErr(err) || isPortNotMappedErr(err)
+	return isReaperRemovingErr(err) || isPortNotMappedErr(err) || errors.Is(err, errDoltReadinessProbe)
 }
 
 // settleDoltContainer waits for ctr's published port so the daemon that
