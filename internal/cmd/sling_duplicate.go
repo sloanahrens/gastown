@@ -52,7 +52,8 @@ import (
 // that dependency closes (gt-mknmb). The rule lives in sling.Blocking /
 // sling.DecideDuplicates, so the CLI and the dispatcher cannot disagree about
 // it, and the peer's dispatchability is answered here (specPeerHeldFrom),
-// from the peer's own pool row, because deciding it is the dispatcher's rule.
+// from the peer's own pool row and the pool's held seats, because deciding it
+// is the dispatcher's rule.
 
 const (
 	// duplicateLookback bounds the recently-closed half of the comparison pool.
@@ -315,7 +316,7 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 	}
 	matches := findDuplicateMatches(*candidate, pool)
 	matches = dropRelatedMatches(*candidate, pool, matches)
-	return candidate, p.resolvePeerHolds(townRoot, beadsDir, *candidate, matches), nil
+	return candidate, p.resolvePeerHolds(townRoot, beadsDir, *candidate, pool, matches), nil
 }
 
 // resolvePeerHolds stamps each unstarted peer the guard's rank is about to
@@ -324,12 +325,14 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 // that is open and ahead of the candidate is asked — those are the only ones
 // an answer changes (sling.Blocking) — so the question costs one read per peer
 // that could refuse rather than one per pool bead. What the verdict is read
-// from is the peer's own pool row, so the question itself costs no bd read.
+// from is the peer's own pool row plus the pool itself, so the question itself
+// costs no bd read: the pool is what tells the guard whether a working seat
+// already has that peer's defect.
 //
 // A pool built without a resolver leaves every peer un-asked, which is the
 // conservative reading of the same silence: each still holds the sling on its
 // rank alone.
-func (p *duplicatePools) resolvePeerHolds(townRoot, beadsDir string, candidate duplicateCandidate, matches []duplicateMatch) []duplicateMatch {
+func (p *duplicatePools) resolvePeerHolds(townRoot, beadsDir string, candidate duplicateCandidate, pool []duplicateCandidate, matches []duplicateMatch) []duplicateMatch {
 	if p.held == nil || len(matches) == 0 {
 		return matches
 	}
@@ -339,7 +342,7 @@ func (p *duplicatePools) resolvePeerHolds(townRoot, beadsDir string, candidate d
 		if peer.Status != "open" || !sling.Precedes(peer, candidate) {
 			continue
 		}
-		matches[i].Bead.Held = p.held(townRoot, beadsDir, peer)
+		matches[i].Bead.Held = p.held(townRoot, beadsDir, peer, pool)
 		asked = true
 	}
 	if asked {
@@ -485,17 +488,17 @@ type duplicatePools struct {
 	// held reports why the dispatcher would not sling a bead, "" when it would
 	// (sling.Duplicate.Held). It is a parameter of the check rather than part
 	// of the pool fetch because it is a question about the dispatcher's own
-	// knobs — the priority ceiling, the shape gate, the child set — asked of
-	// the few peers the rank is weighing, and it reads the peer's pool row
-	// rather than asking bd about the bead again (gt-mknmb). A nil resolver is
-	// the conservative reading: no peer is known to be held, so each still
-	// holds the sling on its rank.
-	held  func(townRoot, beadsDir string, peer duplicateCandidate) string
+	// knobs — the priority ceiling, the shape gate, the child set, the seats'
+	// held beads — asked of the few peers the rank is weighing, and it reads
+	// the peer's pool row and the pool rather than asking bd about the bead
+	// again (gt-mknmb). A nil resolver is the conservative reading: no peer is
+	// known to be held, so each still holds the sling on its rank.
+	held  func(townRoot, beadsDir string, peer duplicateCandidate, pool []duplicateCandidate) string
 	mu    sync.Mutex
 	cache map[string]*duplicatePoolEntry
 }
 
-func newDuplicatePools(fetch func(beadsDir string) ([]duplicateCandidate, error), held func(townRoot, beadsDir string, peer duplicateCandidate) string) *duplicatePools {
+func newDuplicatePools(fetch func(beadsDir string) ([]duplicateCandidate, error), held func(townRoot, beadsDir string, peer duplicateCandidate, pool []duplicateCandidate) string) *duplicatePools {
 	return &duplicatePools{fetch: fetch, held: held, cache: map[string]*duplicatePoolEntry{}}
 }
 

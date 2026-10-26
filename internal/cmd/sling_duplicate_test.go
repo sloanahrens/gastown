@@ -618,8 +618,8 @@ func TestCheckSlingDuplicatesReadiesTheCandidate(t *testing.T) {
 	}
 	pools := newDuplicatePools(
 		func(string) ([]duplicateCandidate, error) { return nil, nil },
-		func(_, _ string, peer duplicateCandidate) string {
-			return specPeerHeldFrom(beadsfake.New(), knobs, peer)
+		func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+			return specPeerHeldFrom(beadsfake.New(), knobs, peer, pool)
 		},
 	)
 
@@ -639,7 +639,7 @@ func TestCheckSlingDuplicatesReadiesTheCandidate(t *testing.T) {
 	if candidate == nil {
 		t.Fatal("the bead names TestFoo, so the guard has to inspect it")
 	}
-	if got := specPeerHeldFrom(beadsfake.New(), knobs, *candidate); got != "" {
+	if got := specPeerHeldFrom(beadsfake.New(), knobs, *candidate, nil); got != "" {
 		t.Errorf("the candidate's own row holds it from dispatch: %q, want the dispatcher's to sling", got)
 	}
 }
@@ -883,7 +883,7 @@ func mustPool(t *testing.T, pools *duplicatePools, beadsDir string) []duplicateC
 // noPeerHolds is the resolver for a pool whose test varies something other
 // than the peer-hold question: no peer is known to be held, so the guard's
 // rank decides alone, exactly as it did before the holds existed.
-func noPeerHolds(string, string, duplicateCandidate) string { return "" }
+func noPeerHolds(string, string, duplicateCandidate, []duplicateCandidate) string { return "" }
 
 func assertStrings(t *testing.T, label string, got, want []string) {
 	t.Helper()
@@ -1142,7 +1142,9 @@ func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 					t.Errorf("enrichment of %s failed: %v", dir, err)
 				}, beadsDir)
 			},
-			func(_, _ string, peer duplicateCandidate) string { return specPeerHeldFrom(db, knobs, peer) },
+			func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+				return specPeerHeldFrom(db, knobs, peer, pool)
+			},
 		)
 		beadsDir := duplicateBeadsDir(townRoot, "gt-head")
 		if beadsDir == "" {
@@ -1154,7 +1156,7 @@ func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 		}
 		var slung []string
 		for _, id := range []string{"gt-head", "gt-mid", "gt-tail"} {
-			if specPeerHeldFrom(db, knobs, poolRow(t, pool, id)) != "" {
+			if specPeerHeldFrom(db, knobs, poolRow(t, pool, id), pool) != "" {
 				continue
 			}
 			issue, err := db.Show(id)
@@ -1273,7 +1275,9 @@ func TestOpenClusterBurstKeepsRefusingANotedDispatchedPeer(t *testing.T) {
 				t.Errorf("enrichment of %s failed: %v", dir, err)
 			}, beadsDir)
 		},
-		func(_, _ string, peer duplicateCandidate) string { return specPeerHeldFrom(db, knobs, peer) },
+		func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+			return specPeerHeldFrom(db, knobs, peer, pool)
+		},
 	)
 	beadsDir := duplicateBeadsDir(townRoot, "gt-lead")
 	if beadsDir == "" {
@@ -1421,7 +1425,9 @@ func TestBatchSlingRefusesPeerOfJustSlungHeldLead(t *testing.T) {
 				t.Errorf("enrichment of %s failed: %v", dir, err)
 			}, beadsDir)
 		},
-		func(_, _ string, peer duplicateCandidate) string { return specPeerHeldFrom(db, knobs, peer) },
+		func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+			return specPeerHeldFrom(db, knobs, peer, pool)
+		},
 	)
 	beadsDir := duplicateBeadsDir(townRoot, "gt-a")
 	if beadsDir == "" {
@@ -1448,7 +1454,8 @@ func TestBatchSlingRefusesPeerOfJustSlungHeldLead(t *testing.T) {
 
 	// The case only exists while gt-a is held: dispatchable, it outranks gt-b and
 	// refuses it on the rank alone.
-	if why := specPeerHeldFrom(db, knobs, poolRow(t, mustPool(t, pools, beadsDir), "gt-a")); why == "" {
+	pool := mustPool(t, pools, beadsDir)
+	if why := specPeerHeldFrom(db, knobs, poolRow(t, pool, "gt-a"), pool); why == "" {
 		t.Fatal("gt-a must be held, or it refuses gt-b before the batch reaches it")
 	}
 
@@ -1586,7 +1593,7 @@ func TestSpecPeerHeldFrom(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := specPeerHeldFrom(tc.db, tc.knobs, tc.peer); got != tc.want {
+			if got := specPeerHeldFrom(tc.db, tc.knobs, tc.peer, nil); got != tc.want {
 				t.Errorf("specPeerHeldFrom = %q, want %q", got, tc.want)
 			}
 		})
@@ -1623,7 +1630,7 @@ func TestOverlapGuardLetsTheClusterPastAPeerInStartupBackoff(t *testing.T) {
 		if len(matches) != 1 {
 			t.Fatalf("matches = %+v, want the peer's shared test", matches)
 		}
-		return specPeerHeldFrom(beadsfake.New(), knobs, matches[0].Bead)
+		return specPeerHeldFrom(beadsfake.New(), knobs, matches[0].Bead, nil)
 	}
 
 	// With no failure record the head is the dispatcher's next move, so the
@@ -1649,6 +1656,101 @@ func TestOverlapGuardLetsTheClusterPastAPeerInStartupBackoff(t *testing.T) {
 	matches[0].Bead.Held = held
 	if decideSlingDuplicates(candidate, matches).Blocked {
 		t.Fatalf("the guard refused the cluster's next bead while the head rested (%s)", held)
+	}
+
+	// The answer is worth exactly the rest. Once the window has run out the
+	// head is the dispatcher's next move again, so the guard refuses the tail
+	// on its rank as it did before the failure: the exemption must not outlive
+	// the record it reads (gt-36qvt).
+	aged := fmt.Sprintf(`{"bead_id":%q,"count":1,"last_failure":%q,"reason":"session start failed"}`,
+		peer.ID, time.Now().Add(-dispatch.StartupBackoffBase-time.Minute).UTC().Format(time.RFC3339))
+	record := filepath.Join(townRoot, ".runtime", "sling-startup-failures", peer.ID+".json")
+	if err := os.WriteFile(record, []byte(aged), 0o600); err != nil {
+		t.Fatalf("aging the startup-failure record: %v", err)
+	}
+	if held := heldReason(); held != "" {
+		t.Fatalf("held = %q after the rest elapsed, want the head next again", held)
+	}
+	matches = findDuplicateMatches(candidate, []duplicateCandidate{peer})
+	if !decideSlingDuplicates(candidate, matches).Blocked {
+		t.Fatal("the guard let the tail past a head whose rest had run out")
+	}
+
+	// The answer excuses a bead with no session, never one working the defect:
+	// a head that took the seat is refused as live work on the shared test
+	// even while a backoff record rests it. That refusal is sling.Blocking's
+	// in-flight rule, not the backoff answer outliving its window (gt-36qvt).
+	if err := dispatch.RecordStartupFailure(townRoot, peer.ID, "session start failed again"); err != nil {
+		t.Fatalf("recording the second startup failure: %v", err)
+	}
+	held = heldReason()
+	if held == "" {
+		t.Fatal("a fresh rest was not answered")
+	}
+	live := peer
+	live.Status = "in_progress"
+	liveMatches := findDuplicateMatches(candidate, []duplicateCandidate{live})
+	liveMatches[0].Bead.Held = held
+	if !decideSlingDuplicates(candidate, liveMatches).Blocked {
+		t.Fatalf("the backoff answer excused live work on the same test (%s)", held)
+	}
+}
+
+// A peer the dispatcher will not sling because a working seat already has its
+// defect is not the cluster's next move, however eligible it is. Without that
+// question the peer-hold answer lapsed as soon as a rest ended: the head was
+// next again, so the guard refused its cluster while the live work that held
+// the head could run for hours — a refusal outliving the rest it replaced
+// (gt-36qvt).
+func TestOverlapGuardLetsTheClusterPastAPeerLiveWorkHolds(t *testing.T) {
+	t.Parallel()
+	townRoot := duplicateTown(t)
+	db := beadsfake.New()
+	// The head names two tests, one of which the live seat holds. The tail
+	// names only the other, so it is no duplicate of the live work — only of
+	// the head the live work keeps off the board.
+	db.Seed(
+		beads.Issue{ID: "gt-head", Type: "task", Title: "host rehearsal: the red tier sweep fails",
+			Status: "open", Priority: 1, CreatedAt: "2026-10-25T18:40:00Z",
+			Description: "TestHostRehearsal and TestPeerOnly fail."},
+		beads.Issue{ID: "gt-peerwork", Type: "task", Title: "the peer-only sweep",
+			Status: "in_progress", Priority: 1, Assignee: "gastown/polecats/capable",
+			CreatedAt: "2026-10-25T18:30:00Z", Description: "TestPeerOnly fails."},
+		beads.Issue{ID: "gt-tail", Type: "task", Title: "rework: the sweep again",
+			Status: "open", Priority: 2, CreatedAt: "2026-10-25T19:00:00Z",
+			Description: "TestHostRehearsal fails."},
+	)
+	knobs := specHoldKnobs{
+		MaxPriority: 3, ShapeGate: specdispatch.ShapeGateOff, Warn: io.Discard,
+		Backoff: func(string) string { return "" },
+	}
+	pools := newDuplicatePools(
+		func(beadsDir string) ([]duplicateCandidate, error) {
+			return fetchDuplicatePoolFrom(db, func(dir string, err error) {
+				t.Errorf("enrichment of %s failed: %v", dir, err)
+			}, beadsDir)
+		},
+		func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+			return specPeerHeldFrom(db, knobs, peer, pool)
+		},
+	)
+	tail, err := db.Show("gt-tail")
+	if err != nil {
+		t.Fatalf("read gt-tail: %v", err)
+	}
+	candidate, matches, err := pools.check(townRoot, "gt-tail", beadInfoOf(tail))
+	if err != nil {
+		t.Fatalf("check gt-tail: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Bead.ID != "gt-head" {
+		t.Fatalf("matches = %+v, want the head alone", matches)
+	}
+	held := matches[0].Bead.Held
+	if !strings.Contains(held, "gt-peerwork") {
+		t.Fatalf("Held = %q, want the live seat's bead named: the head is skipped, not next", held)
+	}
+	if d := decideSlingDuplicates(*candidate, matches); d.Blocked {
+		t.Fatalf("the guard refused the cluster behind a head live work holds (%s): %s", held, d.Message)
 	}
 }
 
