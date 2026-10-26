@@ -64,6 +64,69 @@ type ChildrenOfResponse struct {
 	Children map[string][]Issue `json:"children"`
 }
 
+// AssignedRequest asks for the issues of several assignees in one call, each
+// restricted to the request's statuses. Assignees and Statuses are required:
+// an empty list is an invalid error naming the field, not an answer about
+// every seat.
+type AssignedRequest struct {
+	// Assignees are the assignee strings as stored on the issue, such as
+	// "gastown/polecats/bullet".
+	Assignees []string `json:"assignees"`
+	// Statuses are the statuses an issue must have to be answered.
+	Statuses []string `json:"statuses"`
+	// Rig restricts the answer to one rig's issues; empty reads every rig.
+	Rig string `json:"rig,omitempty"`
+	// IncludeWisps adds the wisps, which are left out by default.
+	IncludeWisps bool `json:"include_wisps,omitempty"`
+	// Limit, Cursor and the page's NextCursor page as in ListFilter.
+	Limit  int    `json:"limit,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
+// Bounds on one assigned request.
+const (
+	MaxAssignedAssignees = 256
+	MaxAssignedStatuses  = 8
+)
+
+// Validate refuses a request with no assignee or no status, naming the empty
+// field, and one over either bound.
+func (r AssignedRequest) Validate() error {
+	n := countNonEmpty(r.Assignees)
+	if n == 0 {
+		return Invalid("assignees is required")
+	}
+	if n > MaxAssignedAssignees {
+		return Invalid("assignees has %d entries, at most %d", n, MaxAssignedAssignees)
+	}
+	if n = countNonEmpty(r.Statuses); n == 0 {
+		return Invalid("statuses is required")
+	}
+	if n > MaxAssignedStatuses {
+		return Invalid("statuses has %d entries, at most %d", n, MaxAssignedStatuses)
+	}
+	return nil
+}
+
+func countNonEmpty(ss []string) int {
+	n := 0
+	for _, s := range ss {
+		if s != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// AssignedPage is one page of the assigned read, keyed by assignee. Rows keep
+// list order (priority, then creation, then id); an assignee with no row on
+// this page is absent. Count is the number of rows across the map.
+type AssignedPage struct {
+	Assigned   map[string][]Issue `json:"assigned"`
+	Count      int                `json:"count"`
+	NextCursor string             `json:"next_cursor,omitempty"`
+}
+
 // DispatchBoardRequest asks for everything one dispatch tick reads about the
 // work board: per rig the ready issues, the issues a seat holds and the
 // children of the ready issues, plus the status of a few named issues.

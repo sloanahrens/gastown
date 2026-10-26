@@ -103,6 +103,9 @@ func unimplemented(method string) error {
 func (*Fake) ListIssues(context.Context, api.ListFilter) (api.IssuePage, error) {
 	return api.IssuePage{}, unimplemented("ListIssues")
 }
+func (*Fake) Assigned(context.Context, api.AssignedRequest) (api.AssignedPage, error) {
+	return api.AssignedPage{}, unimplemented("Assigned")
+}
 func (*Fake) UpdateIssue(context.Context, string, api.UpdatePatch, api.Guard) error {
 	return unimplemented("UpdateIssue")
 }
