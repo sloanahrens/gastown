@@ -1,51 +1,89 @@
 package formula
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
 )
 
-// patrolGuardCount matches the two bead-count assignments in the dispatch
-// step: the safety valve's OPEN_COUNT and the dedup guard's EXISTING.
-var patrolGuardCount = regexp.MustCompile(`(?m)^\s*(?:OPEN_COUNT|EXISTING)=.*$`)
+// The patrol's two guards once counted `bd list`'s human output with `wc -l`,
+// whose header and footer added 6 to every count (gt-497s7). That made the
+// dedup guard skip every finding and let the safety valve trip early. A count
+// alone does not fix that: a failed `bd list` must not read as zero open beads,
+// or the patrol dispatches duplicates and never trips its valve.
+//
+// The behaviour under a failing bd is held by the integration tier
+// (TestIntegrationPRFeedbackPatrolGuardsFailClosed, which runs the blocks); the
+// gate tier holds the fence below, so the fail-open fallback cannot come back
+// unnoticed by a gate that never starts a shell.
+const patrolTestMaxOpen = 3
 
-// TestPRFeedbackPatrolCountsBeadsNotOutputLines guards gt-497s7: both guards
-// counted `bd list`'s human output with `wc -l`, whose header and footer added
-// 6 to every count. That made the dedup guard skip every finding and let the
-// safety valve trip early. A guard counts beads from bd's JSON array instead,
-// and each keeps its rule: the valve compares against max_open_beads, the dedup
-// guard asks whether any bead exists.
-func TestPRFeedbackPatrolCountsBeadsNotOutputLines(t *testing.T) {
-	t.Parallel()
+var patrolBashBlock = regexp.MustCompile("(?s)```bash\n(.*?)```")
+
+// patrolDispatchBlocks returns the dispatch step's fenced bash blocks (the
+// safety valve first, then the dedup loop), rendered with test variables.
+func patrolDispatchBlocks(t *testing.T) []string {
+	t.Helper()
 	raw, err := GetEmbeddedFormulaContent("mol-pr-feedback-patrol")
 	if err != nil {
 		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
 	}
 	text := string(raw)
-
-	guards := patrolGuardCount.FindAllString(text, -1)
-	if len(guards) != 2 {
-		t.Fatalf("dispatch step carries %d bead-count assignments, want 2 (valve and dedup guard): %q", len(guards), guards)
+	start := strings.Index(text, `id = "dispatch-work"`)
+	if start < 0 {
+		t.Fatal("the patrol has no dispatch-work step")
 	}
-	for _, guard := range guards {
-		if strings.Contains(guard, "wc -l") {
-			t.Errorf("guard counts output lines, not beads: %s", guard)
-		}
-		// jq -e, not jq: an empty or failed read prints nothing and exits 4, so
-		// the fallback hands the comparison a 0 instead of an empty string.
-		for _, want := range []string{"bd list", "--json", "jq -e", "length", `echo "0"`} {
-			if !strings.Contains(guard, want) {
-				t.Errorf("guard does not count beads from bd's JSON array with an empty fallback (missing %q): %s", want, guard)
+	step := text[start:]
+	if end := strings.Index(step, "[[steps]]"); end >= 0 {
+		step = step[:end]
+	}
+	matches := patrolBashBlock.FindAllStringSubmatch(step, -1)
+	if len(matches) != 2 {
+		t.Fatalf("dispatch step carries %d bash blocks, want 2 (safety valve and dedup loop)", len(matches))
+	}
+	render := strings.NewReplacer(
+		"{{patrol_label}}", "patrol-test",
+		"{{max_open_beads}}", fmt.Sprint(patrolTestMaxOpen),
+		"{{rig}}", "testrig",
+	)
+	blocks := make([]string, len(matches))
+	for i, m := range matches {
+		blocks[i] = render.Replace(m[1])
+	}
+	return blocks
+}
+
+// TestPRFeedbackPatrolGuardsReadBeadsFromJSON holds the shape both guards need:
+// a count of beads from bd's JSON array with no row cap (bd list defaults to
+// 50, so a capped read undercounts a backlog and the valve never trips), and a
+// failure branch that stops the guard instead of supplying a zero.
+func TestPRFeedbackPatrolGuardsReadBeadsFromJSON(t *testing.T) {
+	t.Parallel()
+	blocks := patrolDispatchBlocks(t)
+	valve, dedup := blocks[0], blocks[1]
+
+	for name, block := range map[string]string{"safety valve": valve, "dedup guard": dedup} {
+		for _, want := range []string{"bd list", "--json", "--limit 0", "jq -e 'length'"} {
+			if !strings.Contains(block, want) {
+				t.Errorf("%s does not count beads from bd's JSON array (missing %q):\n%s", name, want, block)
 			}
 		}
+		if strings.Contains(block, "wc -l") {
+			t.Errorf("%s counts output lines, not beads:\n%s", name, block)
+		}
+		if strings.Contains(block, `echo "0"`) {
+			t.Errorf("%s supplies a zero when bd list fails, so the patrol cannot tell a failed read from an empty one:\n%s", name, block)
+		}
 	}
 
+	// Each guard keeps its rule once the count is readable.
+	both := valve + dedup
 	for _, rule := range []string{
-		`if [ "$OPEN_COUNT" -ge {{max_open_beads}} ]; then`,
+		fmt.Sprintf(`if [ "$OPEN_COUNT" -ge %d ]; then`, patrolTestMaxOpen),
 		`if [ "$EXISTING" -gt 0 ]; then`,
 	} {
-		if !strings.Contains(text, rule) {
+		if !strings.Contains(both, rule) {
 			t.Errorf("dispatch step no longer carries %q", rule)
 		}
 	}
