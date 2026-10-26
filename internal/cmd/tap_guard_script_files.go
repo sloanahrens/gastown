@@ -52,9 +52,8 @@ var tapGuardScriptFilesCmd = &cobra.Command{
 Edit/Write/MultiEdit/NotebookEdit are denied when the target is inside the
 session's own worktree, does not exist yet, and ends in .sh, .bash, .zsh, .pl
 or .rb. Editing a script that already exists is allowed, and removing one is
-always allowed. Bash is not judged here, so the Bash route is open in this
-guard. The planned commit gate gt-lpm8b is to catch a Bash-created script when
-it is committed; it has not landed yet, so it is not an existing check.
+always allowed. Bash is not judged here; the denial redirect says where Bash-created scripts
+are to be caught.
 
 The guard fails closed on what it can name: a hook payload it cannot read or
 parse, or a session whose worktree it cannot place, is denied when the payload
@@ -73,7 +72,8 @@ Scope: file-writing tools in a polecat or crew session's own Gas Town worktree
 worktree are not judged. Every other session is judged as a worker.
 
 Exit codes:
-  0 - Allowed (not a worker session, not a new script, or the target exists)
+  0 - Allowed (not a new script, or the target exists). A file write allowed
+      because the worktree could not be placed prints a warning on stderr.
   2 - DENIED (one-line reason on stderr, so the model self-corrects)`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -239,6 +239,16 @@ func isWorkerWorktreeForRole(root string, role Role) bool {
 
 // checkFileTarget decides one Edit/Write/MultiEdit/NotebookEdit call.
 func (s scriptFileScope) checkFileTarget(raw, tool string, stderr io.Writer) error {
+	// The name the agent wrote is judged even when it is a dangling symlink,
+	// because resolving the link would judge its target's name instead.
+	named := raw
+	if !filepath.IsAbs(named) {
+		named = filepath.Join(s.cwd, named)
+	}
+	if scriptFileNamed(raw) && isDanglingSymlink(named) {
+		printScriptFileRefusal(stderr, tool, raw)
+		return NewSilentExit(2)
+	}
 	target, ok := s.resolveTarget(raw, s.cwd)
 	if !ok {
 		// A path this guard cannot resolve is the polecat-paths guard's to
@@ -319,8 +329,23 @@ func pythonFileExtension(path string) bool {
 // isNewFilePath reports whether path does not exist yet, which is what makes
 // creating it a new script rather than an edit of an existing one.
 func isNewFilePath(path string) bool {
+	if isDanglingSymlink(path) {
+		return true
+	}
 	_, err := os.Lstat(path)
 	return err != nil
+}
+
+// isDanglingSymlink reports whether path is a symlink whose target does not
+// exist. Writing it creates the target, so it is a new file, not an existing
+// one, and the name the agent chose is the name to judge (gt-b43ra).
+func isDanglingSymlink(path string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	_, statErr := os.Stat(path)
+	return statErr != nil
 }
 
 // printScriptFilePolicy writes the redirect under a denial, indented as the
@@ -365,15 +390,20 @@ func unjudgedWorktree(hook scriptFileInput, stderr io.Writer) error {
 			printScriptFileRefusal(stderr, hook.ToolName, target)
 			return NewSilentExit(2)
 		}
+		// The write is allowed, but not silently: the warning names the cause
+		// so an unjudged write shows up in the session's output (gt-b43ra).
+		fmt.Fprintf(stderr, "script-files: WARNING: the session's worktree could not be placed, so %s to %s was not judged for new scripts.\n", hook.ToolName, target)
 	}
 	return nil
 }
 
-// payloadNamesScriptSuffix reports whether raw text carries a denied script
-// suffix ending a path-like word: the suffix followed by a quote, space, comma,
-// brace or the end of the text. A bare substring would also match prose.
-var payloadScriptSuffix = regexp.MustCompile(`\.(sh|bash|zsh|pl|rb)(["'\s,}]|$)`)
+// payloadScriptSuffix matches a denied script suffix, in any case, ending a
+// path-like word: the suffix followed by a quote, space, comma, brace or the
+// end of the text.
+var payloadScriptSuffix = regexp.MustCompile(`(?i)\.(sh|bash|zsh|pl|rb)(["'\s,}]|$)`)
 
+// payloadNamesScriptSuffix reports whether raw text carries a denied script
+// suffix as a path-like word. A bare substring would also match prose.
 func payloadNamesScriptSuffix(raw string) bool {
 	return payloadScriptSuffix.MatchString(raw)
 }

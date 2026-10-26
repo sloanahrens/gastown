@@ -382,8 +382,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// The Edit/Write matcher carries the script-files guard (gt-b43ra), which
 		// denies a new shell, Perl or Ruby file in the worktree and redirects
 		// the agent to a testable Go package; crew get it too, below. Bash is
-		// not judged by it, so the Bash route stays open here until the planned
-		// commit gate gt-lpm8b lands.
+		// not judged by it (see its help).
 		//
 		// It also drains the session's nudge queue after every tool call
 		// (gt-drwph). The overrun guard queues its split-proposal nudge, and the

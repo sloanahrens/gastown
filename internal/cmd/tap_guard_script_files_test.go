@@ -63,6 +63,10 @@ func newScriptFileTestTown(t *testing.T) scriptFileTestTown {
 	// The seeded scripts carry no shebang: the guard judges a path by its
 	// existence and suffix, and a shebang literal in a test file is itself a
 	// no-exec-files violation (internal/testpolicy).
+	// A dangling symlink: its target is missing, so writing it creates one.
+	if err := os.Symlink(filepath.Join(worktree, "missing-target"), filepath.Join(worktree, "ghost.sh")); err != nil {
+		t.Fatalf("seeding a dangling symlink: %v", err)
+	}
 	for _, file := range []struct{ path, content string }{
 		{filepath.Join(worktree, "build.sh"), "go build ./...\n"},
 	} {
@@ -141,6 +145,7 @@ func TestScriptFileGuardFileTools(t *testing.T) {
 		{"edit creates a new sh", "Edit", filepath.Join(town.worktree, "deploy.sh"), true},
 		{"multiedit creates a new sh", "MultiEdit", filepath.Join(town.worktree, "deploy.sh"), true},
 		{"editing an existing script", "Edit", filepath.Join(town.worktree, "build.sh"), false},
+		{"writing a dangling symlink named as a script", "Write", filepath.Join(town.worktree, "ghost.sh"), true},
 		{"multiedit an existing script", "MultiEdit", filepath.Join(town.worktree, "build.sh"), false},
 		{"rewriting an existing script", "Write", filepath.Join(town.worktree, "build.sh"), false},
 		{"a non-script file", "Write", filepath.Join(town.worktree, "notes.txt"), false},
@@ -212,6 +217,11 @@ func TestScriptFileGuardUnparseablePayload(t *testing.T) {
 	var stderr strings.Builder
 	err := tapGuardScriptFiles(strings.NewReader("not a hook payload"), &stderr, town.polecatProc())
 	assertVerdict(t, err, false, "unparseable payload naming no script")
+
+	// The suffix match ignores case: an upper-case script name is a script.
+	stderr.Reset()
+	err = tapGuardScriptFiles(strings.NewReader(`{"tool_input":{"file_path":"DEPLOY.SH"`), &stderr, town.polecatProc())
+	assertVerdict(t, err, true, "unparseable payload naming an upper-case script")
 }
 
 // A worker session whose own worktree cannot be placed denies a file-writing
@@ -232,8 +242,12 @@ func TestScriptFileGuardUnresolvedWorktreeDeniesOnlyScriptTargets(t *testing.T) 
 	assertVerdict(t, err, true, "unresolvable worker tree, script target")
 	assertPolicyIn(t, stderr.String(), "unresolvable worker tree, script target")
 
-	err = town.run(t, proc, town.scratch, "Write", fileInput("notes.txt"), io.Discard)
+	stderr.Reset()
+	err = town.run(t, proc, town.scratch, "Write", fileInput("notes.txt"), &stderr)
 	assertVerdict(t, err, false, "unresolvable worker tree, non-script target")
+	if !strings.Contains(stderr.String(), "was not judged for new scripts") {
+		t.Errorf("unresolved worktree write printed no warning: %q", stderr.String())
+	}
 }
 
 // assertPolicyIn checks a denial carries every line of the guarded redirect.
