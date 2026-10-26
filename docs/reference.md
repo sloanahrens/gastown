@@ -462,7 +462,7 @@ echo '{"polecat_branch_template": "adam/{year}/{month}/{description}"}' > \
   ~/gt/.beads-wisp/config/myrig.json
 
 # Or set via rig identity bead labels (persistent)
-bd update gt-rig-myrig --add-label=polecat_branch_template:adam/{year}/{month}/{description}
+gt bead update gt-rig-myrig --add-label=polecat_branch_template:adam/{year}/{month}/{description}
 ```
 
 **Template Variables:**
@@ -816,7 +816,7 @@ Note: "Swarm" is ephemeral (workers on an epic's issues).
 
 ```bash
 # Standard workflow: order the batch, then sling each bead
-bd dep add gt-def gt-abc                 # gt-def waits for gt-abc to land
+gt bead dep add gt-def gt-abc            # gt-def waits for gt-abc to land
 gt sling gt-abc <rig>                    # Assign to polecat
 gt sling gt-abc <rig> --agent claude-haiku  # Override the agent for this sling/spawn
 gt sling <proto> --on gt-def <rig>       # With workflow template
@@ -2245,15 +2245,22 @@ kind.
 
 ## Beads Commands (bd)
 
+Read with `bd`:
+
 ```bash
 bd ready                     # Work with no blockers
 bd list --status=open
 bd list --status=in_progress
 bd show <id>
-bd create --title="..." --type=task
-bd update <id> --status=in_progress
-bd close <id>
-bd dep add <child> <parent>  # child depends on parent
+```
+
+Write with `gt bead`:
+
+```bash
+gt bead create "..." --type=task   # File a bead
+gt bead claim <id>                 # in_progress, assigned to you
+gt bead close <id>
+gt bead dep add <child> <parent>   # child depends on parent
 ```
 
 ### Reading a bead's history
