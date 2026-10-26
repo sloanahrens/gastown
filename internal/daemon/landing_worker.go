@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/promote"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -439,6 +440,10 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	landings.Logf = func(format string, args ...any) {
 		d.logger.Printf("landing_worker: %s: %s", rigName, fmt.Sprintf(format, args...))
 	}
+	// The polecat time each record carries is the seats' own span log, read
+	// once per landing; a read that fails costs the time, not the landing
+	// (gt-yxl22).
+	landings.Spans = spans.New(spans.DefaultDir(townRoot), nil)
 	// The rig's failing landings, the snapshot the dashboard's Landings pane
 	// and the town health field read (gt-fn9e6.44).
 	backoff, err := land.RigBackoffFile(townRoot, rigName)

@@ -44,6 +44,13 @@ type Record struct {
 	// Agent is the agent the landing's polecat seat ran on, written from its
 	// agent bead; a crew landing has no seat and leaves it empty (gt-mukgk.6).
 	Agent string `json:"agent,omitempty"`
+	// PolecatSecs, PolecatAttempts and PolecatLowerBound are the time the
+	// bead's polecat seats spent hooked on it, as the landing worker read them
+	// from the spans log; a crew landing, and a record written before the
+	// fields existed, leaves all three at zero (gt-yxl22).
+	PolecatSecs       float64               `json:"polecat_secs,omitempty"`
+	PolecatAttempts   []land.PolecatAttempt `json:"polecat_attempts,omitempty"`
+	PolecatLowerBound bool                  `json:"polecat_lower_bound,omitempty"`
 }
 
 // Path is <town>/.runtime/landings/<rig>.jsonl, the file the landing worker

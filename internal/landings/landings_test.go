@@ -8,6 +8,8 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // d2Line is a landing as the D2 landing worker (gt-v4ssj.9) writes it:
@@ -32,6 +34,12 @@ func TestRecord_MatchesD2LandFields(t *testing.T) {
 	if !reflect.DeepEqual(rec, want) {
 		t.Fatalf("got %+v\nwant %+v", rec, want)
 	}
+	// A line written before the polecat time existed reads with it zero, and
+	// the rewrite below leaves it out: the three fields are additive
+	// (gt-yxl22).
+	if rec.PolecatSecs != 0 || rec.PolecatAttempts != nil || rec.PolecatLowerBound {
+		t.Fatalf("polecat time = %v, %+v, %v; an old line carries none", rec.PolecatSecs, rec.PolecatAttempts, rec.PolecatLowerBound)
+	}
 	// Every d2-land key maps to a field and back: no key is dropped.
 	out, err := json.Marshal(rec)
 	if err != nil {
@@ -39,6 +47,45 @@ func TestRecord_MatchesD2LandFields(t *testing.T) {
 	}
 	if keys(t, out) != keys(t, []byte(d2Line)) {
 		t.Fatalf("key set drifted:\n got %s\nwant %s", keys(t, out), keys(t, []byte(d2Line)))
+	}
+}
+
+// TestRecord_ReadsTheWritersPolecatTime: the polecat time the landing worker
+// writes from the spans log reads back unchanged here, so the two records
+// agree on its keys (gt-yxl22).
+func TestRecord_ReadsTheWritersPolecatTime(t *testing.T) {
+	t.Parallel()
+	writer := land.LandingRecord{
+		BeadID: "gt-abc", Rig: "gastown", Branch: "polecat/opal/gt-abc", Head: "1111111111111111111111111111111111111111",
+		Target: "main", Base: "2222222222222222222222222222222222222222",
+		LandedCommit: "3333333333333333333333333333333333333333",
+		PatchID:      "4444444444444444444444444444444444444444",
+		GateResult:   "pass", OMVerdict: "approve", OMScore: 0.92, Route: "daemon",
+		LandedAt:          time.Date(2026, 9, 30, 14, 5, 6, 0, time.UTC),
+		PolecatSecs:       150,
+		PolecatAttempts:   []land.PolecatAttempt{{Seat: "gastown/opal", Secs: 60}, {Seat: "gastown/jade", Secs: 90, LowerBound: true}},
+		PolecatLowerBound: true,
+	}
+	line, err := json.Marshal(writer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec Record
+	if err := json.Unmarshal(line, &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.PolecatSecs != 150 || !rec.PolecatLowerBound {
+		t.Fatalf("polecat time = %v, %v; want 150 and a lower bound", rec.PolecatSecs, rec.PolecatLowerBound)
+	}
+	if !reflect.DeepEqual(rec.PolecatAttempts, writer.PolecatAttempts) {
+		t.Fatalf("polecat_attempts = %+v, want %+v", rec.PolecatAttempts, writer.PolecatAttempts)
+	}
+	out, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys(t, out) != keys(t, line) {
+		t.Fatalf("key set drifted from the writer's:\n got %s\nwant %s", keys(t, out), keys(t, line))
 	}
 }
 
