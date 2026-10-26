@@ -103,6 +103,13 @@ func outputRoleDirectives(ctx RoleContext, w io.Writer, explainEnabled bool) {
 // outputRoleDirectivesCapped is outputRoleDirectives with the hook-mode cap
 // on a long directive applied when capped is set.
 func outputRoleDirectivesCapped(ctx RoleContext, w io.Writer, explainEnabled, capped bool) {
+	outputRoleDirectivesWith(ctx, w, explainEnabled, capped, os.Getenv(config.EnvSystemPromptFile))
+}
+
+// outputRoleDirectivesWith is outputRoleDirectivesCapped with the agent's
+// system-prompt file given. In hook mode, when that file holds the directives,
+// the section is one pointer line and no directive text (gt-gh2jw).
+func outputRoleDirectivesWith(ctx RoleContext, w io.Writer, explainEnabled, capped bool, promptPath string) {
 	role := string(ctx.Role)
 	townRoot := ctx.TownRoot
 	rigName := ctx.Rig
@@ -132,6 +139,15 @@ func outputRoleDirectivesCapped(ctx RoleContext, w io.Writer, explainEnabled, ca
 			explainf("Role directives: also checked %s", rigPath)
 		}
 		return
+	}
+
+	if capped {
+		if ptr := directivePointer(ctx, promptPath); ptr != "" {
+			explainf("Role directives: in the system prompt file, pointer only")
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, ptr)
+			return
+		}
 	}
 
 	// The header and the truncation pointer name the files that were loaded,
