@@ -181,11 +181,17 @@ func isAcceptedRiskAuthor(author string) bool {
 }
 
 // capAcceptedRisks joins entries oldest first and keeps the longest run of the
-// newest that fits acceptedRiskCap, in one pass from the newest entry back. A
-// newest entry larger than the cap is cut rather than dropped: om truncates the
-// file at that size anyway, and half the newest record is worth more than a
-// whole older one.
+// newest that fits acceptedRiskCap.
 func capAcceptedRisks(entries []string) string {
+	return capEntries(entries, acceptedRiskCap)
+}
+
+// capEntries joins entries oldest first and keeps the longest run of the newest
+// that fits limit bytes, in one pass from the newest entry back. A newest entry
+// larger than the limit is cut rather than dropped: om truncates the file at
+// that size anyway, and half the newest record is worth more than a whole older
+// one. The cut lands on a rune boundary.
+func capEntries(entries []string, limit int) string {
 	const sep = "\n\n"
 	size, keep := 0, len(entries)
 	for keep > 0 {
@@ -193,13 +199,13 @@ func capAcceptedRisks(entries []string) string {
 		if keep < len(entries) {
 			grown += len(sep)
 		}
-		if keep < len(entries) && grown > acceptedRiskCap {
+		if keep < len(entries) && grown > limit {
 			break
 		}
 		size = grown
 		keep--
 	}
-	return cutToBytes(strings.Join(entries[keep:], sep), acceptedRiskCap)
+	return cutToBytes(strings.Join(entries[keep:], sep), limit)
 }
 
 // cutToBytes returns s's first n bytes, stopping on a rune boundary so a
