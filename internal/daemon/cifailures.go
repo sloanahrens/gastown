@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,26 +120,34 @@ func (w *ciTestWatch) mainRed(pkg string) bool {
 }
 
 // mainRedFromStatus is the MainRed seam over the red-main status the landing
-// worker already writes. The file is read per repeat rather than captured, so a
-// main that went red or green since the watch was built is seen. A status that
-// cannot be read says nothing is red, which is what an unwritten record means
-// too (gt-42ulv).
+// worker writes after every post-land verdict. The file is read per repeat
+// rather than captured, so a main that went red or green since the watch was
+// built is seen. A missing status is a rig with no verdict, which names
+// nothing; any other read error leaves main unknown, and an unknown main files
+// (gt-42ulv).
 func mainRedFromStatus(townRoot string) func(rig, pkg string) bool {
 	return func(rig, pkg string) bool {
 		data, err := os.ReadFile(RedMainStatusPath(townRoot, rig)) //nolint:gosec // G304: town runtime path
-		if err != nil {
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
 			return false
+		case err != nil:
+			// Returning false here would suppress a repair for a real failure
+			// on the strength of a status the daemon could not read.
+			return true
 		}
 		return redMainStatusNamesPackage(string(data), pkg)
 	}
 }
 
-// redMainStatusNamesPackage reports whether a red-main status line lists pkg
-// among the RED packages. The line is "<stamp> main RED at <sha> (<by>):
-// <pkg> [<bead>], ...", and a "; flaky (passed on rerun):" tail names packages
-// that passed, so it is not part of the RED list (gt-42ulv).
+// redMainStatusNamesPackage reports whether a red-main status names pkg among
+// the RED packages. A status is one stamped line, "<stamp> main RED at <sha>
+// (<by>): <pkg> [<bead>], ...", and its last line is the current verdict; a
+// "; flaky (passed on rerun):" tail names packages that passed, so it is not
+// part of the RED list (gt-42ulv).
 func redMainStatusNamesPackage(status, pkg string) bool {
-	line := strings.TrimSpace(status)
+	lines := strings.Split(strings.TrimSpace(status), "\n")
+	line := strings.TrimSpace(lines[len(lines)-1])
 	i := strings.Index(line, " main RED at ")
 	if i < 0 {
 		return false

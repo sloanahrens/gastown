@@ -227,6 +227,11 @@ func TestRedMainStatusNamesPackage(t *testing.T) {
 		{"flaky tail names the package", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/b [gt-flaky]; flaky (passed on rerun): github.com/x/a", false},
 		{"green", stamp + "main GREEN at 1a2b3c4d (landed by gt-one)", false},
 		{"red names no package", stamp + "main RED at 1a2b3c4d (landed by gt-one): (no Go package named) [gt-flaky]", false},
+		{"red with the newline the writer appends", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/a [gt-flaky]\n", true},
+		{"newest line is red after a green verdict", stamp + "main GREEN at 1a2b3c4d (landed by gt-one)\n" + stamp + "main RED at 5e6f7a8b (landed by gt-two): github.com/x/a [gt-flaky]", true},
+		{"newest line is green after a red verdict", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/a [gt-flaky]\n" + stamp + "main GREEN at 5e6f7a8b (landed by gt-two)", false},
+		{"revert tail after the red list", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/a [gt-flaky]; reverting gt-cul as gt-rev", true},
+		{"reverted red list names another package", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/b [gt-flaky]; reverting gt-cul as gt-rev", false},
 		{"empty", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -260,6 +265,22 @@ func TestMainRedFromStatusReadsTheRigsStatusLine(t *testing.T) {
 	}
 	if mainRed("norig", "github.com/x/a") {
 		t.Error("mainRed(norig, github.com/x/a) = true, want false: a rig with no status line has no red main")
+	}
+}
+
+// A status file that exists but cannot be read leaves main unknown, and an
+// unknown main files: suppressing the repair on an unread status would hide a
+// real failure (gt-42ulv).
+func TestMainRedFromStatusFilesWhenTheStatusCannotBeRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory at the status path fails ReadFile with EISDIR, which is not
+	// the missing-file case.
+	if err := os.MkdirAll(RedMainStatusPath(town, "gastown"), 0o755); err != nil {
+		t.Fatalf("making the status path a directory: %v", err)
+	}
+	if !mainRedFromStatus(town)("gastown", "github.com/x/a") {
+		t.Error("mainRed = false for an unreadable status, want true: an unknown main files")
 	}
 }
 
