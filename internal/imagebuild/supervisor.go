@@ -202,11 +202,11 @@ func (s system) stop(cfg Config, pgid int) {
 // waitGone probes the process group until no process is left in it, for at
 // most limit. A group the supervisor may not signal (EPERM) is still there.
 func (s system) waitGone(pgid int, limit time.Duration) bool {
-	for waited := time.Duration(0); ; waited += s.pollInterval {
+	for elapsed := time.Duration(0); ; elapsed += s.pollInterval {
 		if err := s.signal(pgid, 0); errors.Is(err, syscall.ESRCH) {
 			return true
 		}
-		if waited >= limit {
+		if elapsed >= limit {
 			return false
 		}
 		s.sleep(s.pollInterval)

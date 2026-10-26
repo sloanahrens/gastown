@@ -83,11 +83,17 @@ func runAsSupervisor() int {
 			buf := make([]byte, 1)
 			for {
 				n, err := unix.Read(0, buf)
-				if n > 0 || (err != nil && !errors.Is(err, unix.EINTR)) {
-					break
+				if errors.Is(err, unix.EINTR) {
+					continue
 				}
+				// A line fires the alarm. End of file, or an error, means the
+				// test is done with this supervisor and never fires it: the
+				// reader ends instead of spinning on a zero-byte read.
+				if n > 0 {
+					close(ch)
+				}
+				return
 			}
-			close(ch)
 		}()
 		return ch
 	}

@@ -523,36 +523,47 @@ func TestStoppedBuildEscalatesAsExit124(t *testing.T) {
 
 func TestCloseInheritableClosesOnlyWhatAChildWouldInherit(t *testing.T) {
 	t.Parallel()
-	var inheritable [2]int
-	if err := unix.Pipe(inheritable[:]); err != nil {
+	// The descriptors are moved to high numbers first. Whatever else this
+	// process opens is handed the lowest free number, so a number this high is
+	// not reused between the close and the check that it is closed.
+	const floor = 100
+	var pipe [2]int
+	if err := unix.Pipe(pipe[:]); err != nil {
 		t.Fatal(err)
 	}
-	var protected [2]int
-	if err := unix.Pipe(protected[:]); err != nil {
-		t.Fatal(err)
+	t.Cleanup(func() { unix.Close(pipe[0]); unix.Close(pipe[1]) })
+	inheritable := highFd(t, pipe[0], floor, false)
+	protected := highFd(t, pipe[1], floor, true)
+	t.Cleanup(func() { unix.Close(protected) })
+
+	got := closeInheritable(inheritable, inheritable)
+	if len(got) != 1 || got[0] != inheritable {
+		t.Errorf("closed %v, want the inheritable fd %d", got, inheritable)
 	}
-	unix.CloseOnExec(protected[0])
-	unix.CloseOnExec(protected[1])
-	t.Cleanup(func() {
-		for _, fd := range []int{protected[0], protected[1]} {
-			unix.Close(fd)
-		}
-	})
-	// A descriptor number belongs to this test alone, so each is closed by
-	// itself rather than by a range that other tests' descriptors fall in.
-	if got := closeInheritable(inheritable[0], inheritable[0]); len(got) != 1 || got[0] != inheritable[0] {
-		t.Errorf("closed %v, want the inheritable fd %d", got, inheritable[0])
+	if err := unix.Fstat(inheritable, &unix.Stat_t{}); !errors.Is(err, unix.EBADF) {
+		t.Errorf("fd %d after closeInheritable: Fstat = %v, want EBADF (it was not closed)", inheritable, err)
 	}
-	if got := closeInheritable(inheritable[1], inheritable[1]); len(got) != 1 {
-		t.Errorf("closed %v, want the inheritable fd %d", got, inheritable[1])
-	}
-	// Whether a closed descriptor is still open is not asked: another test, or
-	// the race runtime, can be handed its number the moment it is free. What
-	// closeInheritable returns is only what it closed.
-	if got := closeInheritable(protected[0], protected[0]); len(got) != 0 {
+	if got := closeInheritable(protected, protected); len(got) != 0 {
 		t.Errorf("closed %v: a close-on-exec descriptor is the runtime's or the caller's, not an inherited one", got)
 	}
-	if err := unix.Fstat(protected[0], &unix.Stat_t{}); err != nil {
-		t.Errorf("the close-on-exec fd %d was closed: %v", protected[0], err)
+	if err := unix.Fstat(protected, &unix.Stat_t{}); err != nil {
+		t.Errorf("the close-on-exec fd %d was closed: %v", protected, err)
 	}
+}
+
+// highFd duplicates fd to the lowest free number at or above floor, close-on-exec
+// when cloexec is set. F_DUPFD leaves it inheritable.
+func highFd(t *testing.T, fd, floor int, cloexec bool) int {
+	t.Helper()
+	n, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD, floor)
+	if err != nil {
+		t.Fatalf("duplicate fd %d above %d: %v", fd, floor, err)
+	}
+	if n > 255 {
+		t.Fatalf("fd %d is above the range closeInheritable covers: this process has over %d descriptors open", n, floor)
+	}
+	if cloexec {
+		unix.CloseOnExec(n)
+	}
+	return n
 }

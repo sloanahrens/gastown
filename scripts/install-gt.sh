@@ -224,19 +224,11 @@ image_daemon_env() {
   IMAGE_ENV_VALUE="$value"
 }
 
-# image_build SECS LOCK BINARY RUN [FINGERPRINT] — run.sh under the alarm
-# supervisor, cmd/image-supervisor, built by image_supervisor_prepare. Call it in
-# a subshell.
-#
-# The supervisor runs run.sh in a process group of its own and, on the alarm,
-# stops the whole group and removes the lock run.sh took once the group is gone
-# (internal/imagebuild). It detaches first, closing every descriptor it
-# inherited, so a detached build never holds the install lock past the install:
-# that is why this execs it, as a forked bash waiting on it would keep the fd.
-#
-# With a FINGERPRINT the supervisor reports a detached build, which has no
-# caller left to do it (gt-vhn89): a build that does not finish escalates under
-# the fingerprint (tried twice), and one that finishes clears it.
+# image_build SECS LOCK BINARY RUN [FINGERPRINT] — run.sh under cmd/image-supervisor,
+# built by image_supervisor_prepare. What the supervisor does with the alarm, the
+# lock and the fingerprint is stated once, in internal/imagebuild. Call this in a
+# subshell, and let it exec: the supervisor closes every fd it inherits, the
+# install lock among them, and a bash left waiting on it would keep that fd open.
 #
 # It exports the registry and crane it was given and points run.sh at this
 # install's town root, the binary whose commit the image is built at, and its
