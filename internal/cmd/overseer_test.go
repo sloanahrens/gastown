@@ -278,3 +278,24 @@ func TestOverseerBeatMissingAcksCountsEveryItem(t *testing.T) {
 		t.Fatalf("working with no acks.json = %v, want both items named as unacked", err)
 	}
 }
+
+// TestOverseerBeatCountsAnAckedAtAsAcked: a state item that carries acked_at, with no entry in
+// acks.json, is not listed as unacked (gt-smdcj).
+func TestOverseerBeatCountsAnAckedAtAsAcked(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	live := liveOverseerOpenWork(func(string) beads.Client { return beadsfake.New() })
+	acked := overseerNow
+	if err := attention.WriteState(town, attention.State{Updated: overseerNow, Items: []attention.Item{
+		{Key: "risk:gt-a:1", AckedAt: &acked},
+	}}); err != nil {
+		t.Fatalf("writing the attention state: %v", err)
+	}
+	if err := attention.WriteAcks(town, attention.Acks{}); err != nil {
+		t.Fatalf("writing acks.json: %v", err)
+	}
+	var out bytes.Buffer
+	if err := overseerBeatWith(&out, town, overseer.StateWorking, "overseer", overseerNow, live); err != nil {
+		t.Fatalf("working with an item acked only by acked_at = %v, want the heartbeat recorded", err)
+	}
+}
