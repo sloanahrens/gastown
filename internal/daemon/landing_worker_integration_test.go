@@ -384,6 +384,15 @@ func TestIntegrationRedMainRevertsTheCulpritThroughLand(t *testing.T) {
 	if last := status[len(status)-1]; !strings.Contains(last, "reverting gt-cul as ") {
 		t.Fatalf("status %q", last)
 	}
+	// The revert is a landing commit too: the automation is its committer and
+	// the bare's configured email is kept (gt-dc4y3).
+	refs := strings.Fields(lwGit(t, origin, "for-each-ref", "--format=%(refname)", "refs/heads/revert/"))
+	if len(refs) != 1 {
+		t.Fatalf("origin revert branches = %v, want the one the revert builder pushed", refs)
+	}
+	if got := lwGit(t, origin, "show", "-s", "--format=%cn|%ce", refs[0]); got != land.LandingCommitterName+"|t@example.com" {
+		t.Fatalf("revert commit committer = %q, want %s|t@example.com", got, land.LandingCommitterName)
+	}
 
 	if rep := w.Pass(context.Background()); rep.Landed != 1 {
 		t.Fatalf("landing the revert: %s", rep)

@@ -233,3 +233,26 @@ func TestIntegrationLandPastADeadLandingsWorktree(t *testing.T) {
 		t.Errorf("the dead landing's worktree is still registered after the landing:\n%s", out)
 	}
 }
+
+// TestIntegrationLandingCommitsAsTheAutomation: a real land's merge commit
+// carries the landing committer name and the clone's configured email, while
+// the author stays the range's and a GIT_COMMITTER_NAME inherited from the
+// process environment does not win (gt-dc4y3).
+func TestIntegrationLandingCommitsAsTheAutomation(t *testing.T) {
+	t.Setenv("GIT_AUTHOR_NAME", "Test Author")
+	t.Setenv("GIT_AUTHOR_EMAIL", "author@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "Sloan Ahrens")
+	f := newRealLandFixture(t)
+	gitT(t, f.repo, "config", "user.name", "Configured User")
+	gitT(t, f.repo, "config", "user.email", "configured@example.com")
+
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	got := gitT(t, f.origin, "show", "-s", "--format=%cn%n%ce%n%an%n%ae", res.LandedCommit)
+	want := strings.Join([]string{LandingCommitterName, "configured@example.com", "Test Author", "author@example.com"}, "\n")
+	if got != want {
+		t.Fatalf("land commit identity:\n%s\nwant committer|email|author|email:\n%s", got, want)
+	}
+}

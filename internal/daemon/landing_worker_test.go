@@ -1496,3 +1496,22 @@ func TestLandingStuckWatchSurvivesAPanickingAlert(t *testing.T) {
 	clk.Advance(landingStuckAfter() + time.Minute)
 	end()
 }
+
+// The red-main revert is a landing commit too, so the worktree it is made in
+// hands git the landing committer, with no committer email and no author set
+// beside it (gt-dc4y3).
+func TestRevertWorktreeCarriesTheLandingCommitter(t *testing.T) {
+	t.Parallel()
+	env := revertWorktree(t.TempDir()).Environ()
+	want := "GIT_COMMITTER_NAME=" + land.LandingCommitterName
+	if !slices.Contains(env, want) {
+		t.Fatalf("revert worktree env = %q, want %s", env, want)
+	}
+	for _, key := range []string{"GIT_COMMITTER_EMAIL=", "GIT_AUTHOR_NAME=", "GIT_AUTHOR_EMAIL="} {
+		for _, e := range env {
+			if strings.HasPrefix(e, key) {
+				t.Errorf("revert worktree env carries %q; a revert sets no committer email and no author", e)
+			}
+		}
+	}
+}

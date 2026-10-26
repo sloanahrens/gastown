@@ -48,3 +48,10 @@ func (g *Git) WithEnv(env []string) *Git {
 	c.env = append(append([]string(nil), g.env...), env...)
 	return &c
 }
+
+// Environ returns the environment WithEnv added, in order: what g hands git
+// over the process's own. A test reads it to check a handle's environment
+// without running git.
+func (g *Git) Environ() []string {
+	return append([]string(nil), g.env...)
+}

@@ -781,7 +781,9 @@ func (l *Lander) open(dir string) Repo {
 	if l.openRepo != nil {
 		return l.openRepo(dir)
 	}
-	return git.NewGit(dir)
+	// The merge candidate is a landing commit, so the handle its merge runs
+	// through carries the landing committer (gt-dc4y3).
+	return CommittingGit(dir)
 }
 
 // rescoreMargin is how far below the rig's bar a rejection may score, with no
