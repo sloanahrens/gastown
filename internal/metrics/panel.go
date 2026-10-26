@@ -30,11 +30,41 @@ const (
 	ReasonNoHoldoutPositives = "no_holdout_positives"
 )
 
+// How much of a series the panel carries: a trend long enough to see and short
+// enough that the page draws it at a glance.
+const (
+	panelWeeklyMax = 26
+	panelEventsMax = 16
+)
+
+// panelDateLen is how many bytes a calendar day takes, which is the whole of a
+// regime event's date and the day part of a target's last positive.
+const panelDateLen = 10
+
+// PanelWeek is one week of the panel's trend: the landings that week across
+// every rig and the share rejected before they landed.
+type PanelWeek struct {
+	Week          string  `json:"week"`
+	Landings      int     `json:"landings"`
+	RejectedShare float64 `json:"rejected_share"`
+}
+
+// PanelEvent is one regime event the trend is marked with: the day the regime
+// changed and what changed.
+type PanelEvent struct {
+	Date string `json:"date"`
+	What string `json:"what"`
+}
+
 // PanelMeta is the panel's context outside its targets: how many landings the
-// analysis read and how many hours of snapshots it joined.
+// analysis read, how many hours of snapshots it joined, the weekly series and
+// the regime events. Weekly and Events read oldest first; BuildPanel keeps the
+// newest of each, so a caller may hand it all of history.
 type PanelMeta struct {
 	Items         int
 	SnapshotHours int
+	Weekly        []PanelWeek
+	Events        []PanelEvent
 }
 
 // Panel is the panel.json the dashboard reads. Its keys are the dashboard
@@ -46,6 +76,8 @@ type Panel struct {
 	GeneratedAt   string        `json:"generated_at"`
 	Items         int           `json:"items"`
 	SnapshotHours int           `json:"snapshot_hours"`
+	Weekly        []PanelWeek   `json:"weekly"`
+	Events        []PanelEvent  `json:"events"`
 	Targets       []PanelTarget `json:"targets"`
 }
 
@@ -70,6 +102,10 @@ type PanelTarget struct {
 	Baseline         float64          `json:"baseline"`
 	Verdict          string           `json:"verdict"`
 	Reason           string           `json:"reason,omitempty"`
+	// LastPositive is the day the target's latest positive landed, so a target
+	// too thin to check says how long it has been too thin; absent when the
+	// split held no positive.
+	LastPositive string `json:"last_positive,omitempty"`
 }
 
 // Verdict returns the panel's verdict for a target: not-yet while the training
@@ -86,20 +122,34 @@ func Verdict(t TargetResult, minPositives int) string {
 }
 
 // BuildPanel builds the panel for results in the order given, with each
-// target's verdict from Verdict under MangoMinSupport and generated_at stamped
-// from now in UTC.
+// target's verdict from Verdict under MangoMinSupport, generated_at stamped
+// from now in UTC, and the newest of the meta's weekly series and events.
 func BuildPanel(results []TargetResult, meta PanelMeta, now time.Time) Panel {
 	p := Panel{
 		SchemaVersion: panelSchema,
 		GeneratedAt:   now.UTC().Format(time.RFC3339),
 		Items:         meta.Items,
 		SnapshotHours: meta.SnapshotHours,
+		Weekly:        newest(meta.Weekly, panelWeeklyMax),
+		Events:        newest(meta.Events, panelEventsMax),
 		Targets:       make([]PanelTarget, 0, len(results)),
 	}
 	for _, t := range results {
 		p.Targets = append(p.Targets, panelTarget(t))
 	}
 	return p
+}
+
+// newest is the last max of items, a series read oldest first, and an empty
+// list for a nil one: the page draws these keys as lists, never as null.
+func newest[T any](items []T, max int) []T {
+	if items == nil {
+		return []T{}
+	}
+	if len(items) > max {
+		return items[len(items)-max:]
+	}
+	return items
 }
 
 // panelTarget is one result as the panel writes it: the best box's conditions
@@ -118,6 +168,9 @@ func panelTarget(t TargetResult) PanelTarget {
 	if out.Verdict == VerdictNotYet {
 		out.Reason = notYetReason(t)
 	}
+	if t.LastPositiveAt != "" {
+		out.LastPositive = panelLastPositive(t.LastPositiveAt)
+	}
 	if t.Best != nil && !out.Skipped {
 		out.BestBox = t.Best.Box
 		out.Conditions = t.Conditions
@@ -131,6 +184,15 @@ func panelTarget(t TargetResult) PanelTarget {
 		}
 	}
 	return out
+}
+
+// panelLastPositive is the day a target's latest positive landed: the date
+// part of the ISO timestamp Prepared records, and "" when it records none.
+func panelLastPositive(at string) string {
+	if len(at) <= panelDateLen {
+		return at
+	}
+	return at[:panelDateLen]
 }
 
 // notYetReason names why a target is not-yet, as the writer derived it: the

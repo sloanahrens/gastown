@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -105,34 +106,54 @@ func analysisTown(t *testing.T) (town, dayDir string) {
 	return town, dayDir
 }
 
+// analysisWeeks is how many landings each of five consecutive weeks from
+// 2026-09-14 holds: the first three are thick enough for the weekly series and
+// the last two are thin.
+var analysisWeeks = []int{12, 12, 12, 4, 4}
+
 // analysisLandings is 44 landings whose first 30 train rejected_before_landing:
-// enough positives for that target's mango stage, none for the other two.
+// enough positives for that target's mango stage, none for the other two. Each
+// landing's week is its landed_at's Monday, so the panel's trend holds the
+// three thick weeks and leaves the two thin ones out.
 func analysisLandings() (header []string, rows []Row) {
-	base := time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC)
-	for i := 0; i < analyseRows; i++ {
-		row := make(Row, len(landingColumns))
-		for _, name := range landingColumns {
-			row[name] = ""
-		}
-		row["bead"] = fmt.Sprintf("gt-a%03d", i)
-		row["rig"] = "gastown"
-		row["landed_at"] = base.Add(time.Duration(i) * time.Hour).Format(time.RFC3339)
-		row["week"] = "2026-W43"
-		row["route"] = "om"
-		row["om_verdict"] = "approve"
-		row["gate_result"] = "pass"
-		row["model"] = "opus"
-		row["dominant_model"] = "opus"
-		row["type"] = "task"
-		row["priority"] = "2"
-		row["lines_total"] = "100"
-		if i < 30 {
-			row["rejected_before_landing"] = "1"
-		} else {
+	base := time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC)
+	for week, count := range analysisWeeks {
+		monday := base.AddDate(0, 0, 7*week)
+		for n := 0; n < count; n++ {
+			i := len(rows)
+			row := make(Row, len(landingColumns))
+			for _, name := range landingColumns {
+				row[name] = ""
+			}
+			row["bead"] = fmt.Sprintf("gt-a%03d", i)
+			row["rig"] = "gastown"
+			row["landed_at"] = monday.Add(time.Duration(n) * time.Hour).Format(time.RFC3339)
+			row["week"] = monday.Format("2006-01-02")
+			row["route"] = "om"
+			row["om_verdict"] = "approve"
+			row["gate_result"] = "pass"
+			row["model"] = "opus"
+			row["dominant_model"] = "opus"
+			row["type"] = "task"
+			row["priority"] = "2"
+			row["lines_total"] = "100"
+			row["attempts"] = "1"
+			row["unreadable"] = "0"
 			row["rejected_before_landing"] = "0"
-			row["manual_rescue"] = "1"
+			row["manual_rescue"] = "0"
+			row["reached_overrun_stop"] = "0"
+			if i < 30 {
+				row["rejected_before_landing"] = "1"
+			} else {
+				row["manual_rescue"] = "1"
+			}
+			// The overrun guard stopped one late landing, so the target skipped
+			// for too few positives still has a day to report.
+			if i == analyseRows-4 {
+				row["reached_overrun_stop"] = "1"
+			}
+			rows = append(rows, row)
 		}
-		rows = append(rows, row)
 	}
 	return append([]string(nil), landingColumns...), rows
 }
@@ -279,6 +300,27 @@ func TestAnalysePublishesThePanelOverTheRunners(t *testing.T) {
 	if published.GeneratedAt != analyseNow.Format(time.RFC3339) || published.Items != analyseRows {
 		t.Errorf("published panel = %+v, want generated_at %s over %d landings", published, analyseNow.Format(time.RFC3339), analyseRows)
 	}
+	// The fixture's three thick weeks, oldest first; the two four-landing weeks
+	// are thin and the panel leaves them out.
+	wantWeekly := []PanelWeek{
+		{Week: "2026-09-14", Landings: 12, RejectedShare: 1},
+		{Week: "2026-09-21", Landings: 12, RejectedShare: 1},
+		{Week: "2026-09-28", Landings: 12, RejectedShare: 0.5},
+	}
+	if !reflect.DeepEqual(published.Weekly, wantWeekly) {
+		t.Errorf("panel.json weekly = %+v, want the thick weeks in order: %+v", published.Weekly, wantWeekly)
+	}
+	if published.Events == nil || len(published.Events) != 0 {
+		t.Errorf("panel.json events = %+v with no events file, want an empty list", published.Events)
+	}
+	// The day each target's last positive landed comes from its split, so it is
+	// on the panel whether or not the target was run.
+	if got := published.Targets[0].LastPositive; got != "2026-09-28" {
+		t.Errorf("the run target's last positive = %q, want 2026-09-28", got)
+	}
+	if got := published.Targets[1].LastPositive; got != "2026-10-12" {
+		t.Errorf("the skipped target's last positive = %q, want 2026-10-12", got)
+	}
 	stamp, err := os.ReadFile(filepath.Join(dir, stampName))
 	if err != nil {
 		t.Fatalf("stamp: %v", err)
@@ -338,6 +380,63 @@ func TestAnalysePublishesThePanelOverTheRunners(t *testing.T) {
 	}
 	if len(*calls) != before {
 		t.Errorf("the not-due run ran %d commands, want none", len(*calls)-before)
+	}
+}
+
+// TestAnalyseMarksTheRegimeEvents writes the town's events file out of date
+// order and requires the panel's events in it, oldest first.
+func TestAnalyseMarksTheRegimeEvents(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	writeTownFile(t, filepath.Join(town, regimeEventsFile),
+		`{"v":1,"events":[{"date":"2026-10-10","what":"sonnet seats replaced flash seats"},`+
+			`{"date":"2026-09-28","what":"gate raised"}]}`)
+	env, _ := analysisEnv(t, town, dayDir, nil)
+
+	res, err := RunAnalysis(context.Background(), env, analysisOptions(town))
+	if err != nil {
+		t.Fatalf("RunAnalysis: %v", err)
+	}
+	want := []PanelEvent{
+		{Date: "2026-09-28", What: "gate raised"},
+		{Date: "2026-10-10", What: "sonnet seats replaced flash seats"},
+	}
+	if !reflect.DeepEqual(res.Panel.Events, want) {
+		t.Errorf("panel events = %+v, want the file's events in date order: %+v", res.Panel.Events, want)
+	}
+}
+
+// TestAnalyseWritesThePanelWhenTheEventsFileIsUnreadable keeps a failed events
+// read off the run's critical path: the panel still publishes, with no events,
+// and the report line names the file the reader could not use.
+func TestAnalyseWritesThePanelWhenTheEventsFileIsUnreadable(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	writeTownFile(t, filepath.Join(town, regimeEventsFile), "not json\n")
+	env, _ := analysisEnv(t, town, dayDir, nil)
+	opts := analysisOptions(town)
+	var reported []string
+	opts.Reportf = func(format string, args ...any) { reported = append(reported, fmt.Sprintf(format, args...)) }
+
+	res, err := RunAnalysis(context.Background(), env, opts)
+	if err != nil {
+		t.Fatalf("RunAnalysis: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(res.Dir, panelName))
+	if err != nil {
+		t.Fatalf("panel.json: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"events": []`)) {
+		t.Errorf("panel.json = %s, want it written with an empty events list", raw)
+	}
+	named := false
+	for _, line := range reported {
+		if strings.Contains(line, regimeEventsFile) {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the run reported %v, want a line naming %s", reported, regimeEventsFile)
 	}
 }
 
