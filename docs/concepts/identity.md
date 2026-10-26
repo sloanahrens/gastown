@@ -260,25 +260,27 @@ bd count --status=closed --closed-after=2025-01-01
 
 ### Model Comparison
 
-A bead's `agent:<alias>` label pins it to the seat that works it (the pin is read
-in `poolPinnedAgent`, `internal/cmd/sling_pool.go`), and `gt config agent list`
-names the model each alias runs. Count closed beads per label to compare models:
+A bead's `agent:<alias>` label pins it to the seat that works it (read by
+`poolPinnedAgent`, `internal/cmd/sling_pool.go`). `gt config agent list` shows
+each agent's command and arguments, not a model name, so map an alias to its
+model through the seat map (`gt pool show`) rather than assuming one.
+
+Count closed beads per label to compare agents:
 
 ```bash
-# Completed work per model: the agent: label rows
+# Completed work per agent label
 bd count --status=closed --by-label
 
-# One model: completed beads, then those a landing sent back (the rework label)
+# One agent: completed beads, then those the rework label marks
 bd count --status=closed --label=agent:claude-sonnet
 bd count --status=closed --label=agent:claude-sonnet --label=rework
 ```
 
-The rework rate for a model is its rework-labelled count divided by its completed
-count. Compare the rates, not the raw counts: a model that ran more beads has more
-rework-labelled beads in absolute terms.
-
-The rework label is a proxy, not a measure of first-pass quality. Handback
-(`internal/polecat/handback.go`) and the landing worker (`internal/land/work.go`)
-set it when a landing sends a bead back. It records that a landing did so, not how
-many attempts a bead took or which attempt failed, so a rate says how often a
-model's beads were sent back, not how often its first attempt was wrong.
+The rework label is current state, not history. A landing or a revert sets it
+(`internal/land/land.go`, `internal/landworker/revert.go`), and so does a polecat
+handback (`internal/polecat/handback.go`). A requeue, a revert and a `done`
+resubmission clear it (`internal/cmd/land.go`, `internal/landworker/revert.go`,
+`internal/done/done.go`). The second count is therefore a lower bound on the
+beads a landing sent back: it misses any that were cleared. Dividing it by the
+completed count gives a floor on the rework rate, not a measure of first-pass
+quality, and the counts cannot show which attempt failed.
