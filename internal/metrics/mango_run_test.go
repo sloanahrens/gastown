@@ -272,6 +272,46 @@ func TestCheckHoldoutMeasuresATarget(t *testing.T) {
 	}
 }
 
+// TestMeasureTargetSplitsTheBestBoxOverEveryPreparedRow hands the panel the
+// best box's conditions, each with its share of the train and holdout rows
+// together: a share taken over one side of the split would be a different
+// fraction.
+func TestMeasureTargetSplitsTheBestBoxOverEveryPreparedRow(t *testing.T) {
+	t.Parallel()
+
+	rows := make([]Row, 10)
+	for i := range rows {
+		rows[i] = Row{
+			"landed_at": fmt.Sprintf("2026-10-%02dT00:00:00Z", i+1),
+			"rig":       "a",
+			"t":         "1",
+		}
+	}
+	for i := 7; i < len(rows); i++ {
+		rows[i]["rig"] = "b"
+		rows[i]["t"] = "0"
+	}
+	rows[8]["t"] = "1"
+	p := Prepare([]string{"landed_at", "rig", "t"}, rows, nil, "t")
+	boxes := []Box{{Cube: Cube{Ranges: []Range{
+		{Column: "rig", Categories: []string{"a"}},
+		{Column: "t", Min: 1, Max: 1},
+	}}, N: 7, Purity: 1}}
+
+	got := measureTarget("t", p, boxes, 1)
+	want := []MangoCondition{
+		{Text: "rig in {a}", Share: 0.7, Narrows: true},
+		{Text: "t = 1", Share: 0.8, Narrows: true},
+	}
+	if !reflect.DeepEqual(got.Conditions, want) {
+		t.Errorf("conditions = %+v, want %+v over all ten prepared rows", got.Conditions, want)
+	}
+
+	if got := measureTarget("t", p, nil, 1); got.Conditions != nil {
+		t.Errorf("a target with no boxes carries conditions %+v, want none", got.Conditions)
+	}
+}
+
 func TestBestBoxPicksTheReplicatingBoxThenTheLowestP(t *testing.T) {
 	t.Parallel()
 	// c is shorthand for a check with only the fields BestBox reads.
@@ -302,7 +342,7 @@ func TestBestBoxPicksTheReplicatingBoxThenTheLowestP(t *testing.T) {
 			if got == nil {
 				t.Fatalf("BestBox = nil, want check %d", tc.want)
 			}
-			if *got != tc.checks[tc.want] {
+			if !reflect.DeepEqual(*got, tc.checks[tc.want]) {
 				t.Errorf("BestBox = %+v, want check %d %+v", *got, tc.want, tc.checks[tc.want])
 			}
 		})

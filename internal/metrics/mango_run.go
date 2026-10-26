@@ -185,6 +185,9 @@ type BoxCheck struct {
 	P          float64 // Holm-adjusted p
 	Replicates bool
 	Label      string
+	// Cube is the box it was built from, so the panel can split it into its
+	// single conditions.
+	Cube Cube
 }
 
 // CheckHoldout measures every box on rows, the held-out split, against the
@@ -227,6 +230,7 @@ func CheckHoldout(boxes []Box, rows []Row, target string, minSupport int) []BoxC
 		}
 		checks[i] = BoxCheck{
 			Box:       Describe(box.Cube),
+			Cube:      box.Cube,
 			TrainN:    box.N,
 			TrainRate: box.Purity,
 			N:         n,
@@ -295,10 +299,14 @@ type TargetResult struct {
 	HoldoutN, HoldoutPositives int
 	Boxes, Replicating         int
 	Best                       *BoxCheck // nil when mango found no boxes
+	// Conditions is the best box split into its single conditions, each with
+	// its share of every prepared row; nil when mango found no boxes.
+	Conditions []MangoCondition
 }
 
 // measureTarget pairs a prepared split with the boxes mango found on its
-// training split.
+// training split, and splits the best of them into its conditions over every
+// prepared row.
 func measureTarget(target string, p Prepared, boxes []Box, minSupport int) TargetResult {
 	checks := CheckHoldout(boxes, p.Holdout, target, minSupport)
 	t := TargetResult{
@@ -315,5 +323,16 @@ func measureTarget(target string, p Prepared, boxes []Box, minSupport int) Targe
 			t.Replicating++
 		}
 	}
+	if t.Best != nil {
+		t.Conditions = MangoConditions(t.Best.Cube, preparedRows(p))
+	}
 	return t
+}
+
+// preparedRows is the target's rows together, train then holdout: a condition's
+// share is over every landing the split prepared, not one side of it.
+func preparedRows(p Prepared) []Row {
+	rows := make([]Row, 0, len(p.Train)+len(p.Holdout))
+	rows = append(rows, p.Train...)
+	return append(rows, p.Holdout...)
 }

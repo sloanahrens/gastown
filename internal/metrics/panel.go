@@ -52,22 +52,24 @@ type Panel struct {
 // PanelTarget is one target's line in the panel. A skipped target carries its
 // name and positives with no box, because it was never run. The box's keys are
 // pointers so a target without a box, or an interval with no rows behind it,
-// stays absent rather than reading as a zero the dashboard would draw.
+// stays absent rather than reading as a zero the dashboard would draw. Its
+// conditions are absent the same way, so a target with no box carries none.
 type PanelTarget struct {
-	Target           string   `json:"target"`
-	Label            string   `json:"label"`
-	Positives        int      `json:"positives"`
-	Skipped          bool     `json:"skipped"`
-	BestBox          string   `json:"best_box"`
-	HoldoutPositives *int     `json:"holdout_positives,omitempty"`
-	HoldoutN         int      `json:"holdout_n"`
-	HoldoutRate      float64  `json:"holdout_rate"`
-	CILow            *float64 `json:"ci_low,omitempty"`
-	CIHigh           *float64 `json:"ci_high,omitempty"`
-	Thin             *bool    `json:"thin,omitempty"`
-	Baseline         float64  `json:"baseline"`
-	Verdict          string   `json:"verdict"`
-	Reason           string   `json:"reason,omitempty"`
+	Target           string           `json:"target"`
+	Label            string           `json:"label"`
+	Positives        int              `json:"positives"`
+	Skipped          bool             `json:"skipped"`
+	BestBox          string           `json:"best_box"`
+	Conditions       []MangoCondition `json:"conditions,omitempty"`
+	HoldoutPositives *int             `json:"holdout_positives,omitempty"`
+	HoldoutN         int              `json:"holdout_n"`
+	HoldoutRate      float64          `json:"holdout_rate"`
+	CILow            *float64         `json:"ci_low,omitempty"`
+	CIHigh           *float64         `json:"ci_high,omitempty"`
+	Thin             *bool            `json:"thin,omitempty"`
+	Baseline         float64          `json:"baseline"`
+	Verdict          string           `json:"verdict"`
+	Reason           string           `json:"reason,omitempty"`
 }
 
 // Verdict returns the panel's verdict for a target: not-yet while the training
@@ -100,10 +102,10 @@ func BuildPanel(results []TargetResult, meta PanelMeta, now time.Time) Panel {
 	return p
 }
 
-// panelTarget is one result as the panel writes it: the best box's holdout
-// counts when the target was run, and the target's own holdout rate as the
-// baseline the box was measured against. A not-yet target names its reason, and
-// a box carries its interval and whether its count is thin.
+// panelTarget is one result as the panel writes it: the best box's conditions
+// and holdout counts when the target was run, and the target's own holdout rate
+// as the baseline the box was measured against. A not-yet target names its
+// reason, and a box carries its interval and whether its count is thin.
 func panelTarget(t TargetResult) PanelTarget {
 	out := PanelTarget{
 		Target:    t.Target,
@@ -118,6 +120,7 @@ func panelTarget(t TargetResult) PanelTarget {
 	}
 	if t.Best != nil && !out.Skipped {
 		out.BestBox = t.Best.Box
+		out.Conditions = t.Conditions
 		out.HoldoutN = t.Best.N
 		out.HoldoutRate = t.Best.Rate
 		k, thin := t.Best.K, t.Best.N < MangoThinHoldout

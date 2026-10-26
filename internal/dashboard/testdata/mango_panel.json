@@ -10,6 +10,18 @@
       "positives": 48,
       "skipped": false,
       "best_box": "model = opus and attempts in q4",
+      "conditions": [
+        {
+          "text": "model in {opus}",
+          "share": 0.58,
+          "narrows": true
+        },
+        {
+          "text": "attempts in [3, 4]",
+          "share": 0.41,
+          "narrows": true
+        }
+      ],
       "holdout_positives": 21,
       "holdout_n": 50,
       "holdout_rate": 0.42,
@@ -25,6 +37,18 @@
       "positives": 37,
       "skipped": false,
       "best_box": "attempts in q3..q4 and files_touched = none",
+      "conditions": [
+        {
+          "text": "attempts in [3, 4]",
+          "share": 0.35,
+          "narrows": true
+        },
+        {
+          "text": "files_touched in {none}",
+          "share": 0.94,
+          "narrows": false
+        }
+      ],
       "holdout_positives": 5,
       "holdout_n": 49,
       "holdout_rate": 0.10204081632653061,
