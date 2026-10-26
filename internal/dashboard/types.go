@@ -517,10 +517,19 @@ type LandingRow struct {
 	// title. Both are absent on every other row.
 	ShipFailed   bool   `json:"ship_failed,omitempty"`
 	ShipRunState string `json:"ship_run_state,omitempty"`
-	Commit       string `json:"commit,omitempty"`
-	Route        string `json:"route,omitempty"`
-	Risk         bool   `json:"risk,omitempty"`
-	Detail       string `json:"detail,omitempty"`
+	// PolecatSecs is the time the bead's polecat seats spent hooked on it, as
+	// the landing worker read it from the spans log; PolecatAttempts is each
+	// seat's share of it, which the cell's title lists, and PolecatLowerBound
+	// marks a total that may understate the time. A crew landing and a record
+	// written before the fields existed carry none of them, and the page draws
+	// a dash (gt-yxl22, gt-90wi1).
+	PolecatSecs       *float64         `json:"polecat_secs,omitempty"`
+	PolecatAttempts   []PolecatAttempt `json:"polecat_attempts,omitempty"`
+	PolecatLowerBound bool             `json:"polecat_lower_bound,omitempty"`
+	Commit            string           `json:"commit,omitempty"`
+	Route             string           `json:"route,omitempty"`
+	Risk              bool             `json:"risk,omitempty"`
+	Detail            string           `json:"detail,omitempty"`
 	// Stage is the landing stage a "backoff" row's last attempt failed at,
 	// the text after "landing failed at". Failures is how many attempts in a
 	// row have failed there, and NextTry when the worker tries again. The
@@ -529,6 +538,15 @@ type LandingRow struct {
 	Stage    string     `json:"stage,omitempty"`
 	Failures int        `json:"failures,omitempty"`
 	NextTry  *time.Time `json:"next_try,omitempty"`
+}
+
+// PolecatAttempt is one seat's time on a landing's bead, an entry of a row's
+// polecat_attempts: what the Landings pane's Polecat cell lists on hover. Secs
+// is the attempt's duration and LowerBound marks it a floor (gt-90wi1).
+type PolecatAttempt struct {
+	Seat       string  `json:"seat"`
+	Secs       float64 `json:"secs"`
+	LowerBound bool    `json:"lower_bound,omitempty"`
 }
 
 // Trend is the last 24 hours as the page draws it: landings and rejections by
