@@ -67,6 +67,16 @@ func newScriptFileTestTown(t *testing.T) scriptFileTestTown {
 	if err := os.Symlink(filepath.Join(worktree, "missing-target"), filepath.Join(worktree, "ghost.sh")); err != nil {
 		t.Fatalf("seeding a dangling symlink: %v", err)
 	}
+	// A dangling link whose target is a script, and a link to an existing file.
+	if err := os.Symlink(filepath.Join(worktree, "x.sh"), filepath.Join(worktree, "alias.txt")); err != nil {
+		t.Fatalf("seeding a dangling link to a script: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "readme.txt"), []byte("notes\n"), 0o644); err != nil {
+		t.Fatalf("seeding readme.txt: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(worktree, "readme.txt"), filepath.Join(worktree, "readme-link")); err != nil {
+		t.Fatalf("seeding a link to readme.txt: %v", err)
+	}
 	for _, file := range []struct{ path, content string }{
 		{filepath.Join(worktree, "build.sh"), "go build ./...\n"},
 	} {
@@ -81,22 +91,29 @@ func newScriptFileTestTown(t *testing.T) scriptFileTestTown {
 // the worktree and GT_POLECAT_PATH names the same tree, as the session manager
 // sets them.
 func (town scriptFileTestTown) polecatProc() guardProcess {
-	return fakeGuardProcess(map[string]string{
+	return town.bounded(fakeGuardProcess(map[string]string{
 		"GT_ROLE":         "gastown/polecats/ace",
 		"GT_RIG":          "gastown",
 		"GT_POLECAT":      "ace",
 		"GT_POLECAT_PATH": town.worktree,
-	}, "")
+	}, ""))
+}
+
+// bounded stops the checkout walk at the fake root, so a test never reads the
+// real filesystem above its temporary directory (gt-b43ra).
+func (town scriptFileTestTown) bounded(proc guardProcess) guardProcess {
+	proc.checkoutBound = town.root
+	return proc
 }
 
 // crewProc is a crew session in town's crew checkout. Crew carry no worktree
 // variable: the guard finds the checkout from cwd.
 func (town scriptFileTestTown) crewProc() guardProcess {
-	return fakeGuardProcess(map[string]string{
+	return town.bounded(fakeGuardProcess(map[string]string{
 		"GT_ROLE": "gastown/crew/alice",
 		"GT_RIG":  "gastown",
 		"GT_CREW": "alice",
-	}, "")
+	}, ""))
 }
 
 // run invokes the guard as the PreToolUse hook does: a payload on stdin, the
@@ -146,6 +163,8 @@ func TestScriptFileGuardFileTools(t *testing.T) {
 		{"multiedit creates a new sh", "MultiEdit", filepath.Join(town.worktree, "deploy.sh"), true},
 		{"editing an existing script", "Edit", filepath.Join(town.worktree, "build.sh"), false},
 		{"writing a dangling symlink named as a script", "Write", filepath.Join(town.worktree, "ghost.sh"), true},
+		{"writing a dangling symlink to a script", "Write", filepath.Join(town.worktree, "alias.txt"), true},
+		{"writing a symlink to an existing non-script", "Write", filepath.Join(town.worktree, "readme-link"), false},
 		{"multiedit an existing script", "MultiEdit", filepath.Join(town.worktree, "build.sh"), false},
 		{"rewriting an existing script", "Write", filepath.Join(town.worktree, "build.sh"), false},
 		{"a non-script file", "Write", filepath.Join(town.worktree, "notes.txt"), false},
@@ -231,10 +250,10 @@ func TestScriptFileGuardUnparseablePayload(t *testing.T) {
 func TestScriptFileGuardUnresolvedWorktreeDeniesOnlyScriptTargets(t *testing.T) {
 	t.Parallel()
 	town := newScriptFileTestTown(t)
-	proc := fakeGuardProcess(map[string]string{
+	proc := town.bounded(fakeGuardProcess(map[string]string{
 		"GT_ROLE":    "gastown/polecats/ace",
 		"GT_POLECAT": "ace",
-	}, "")
+	}, ""))
 	// The payload cwd is outside any worker worktree and the proc names no
 	// GT_POLECAT_PATH, so the guard's own tree cannot be resolved.
 	var stderr strings.Builder
@@ -268,7 +287,7 @@ func assertPolicyIn(t *testing.T, stderr, label string) {
 func TestScriptFileGuardNoIdentitySessionIsJudged(t *testing.T) {
 	t.Parallel()
 	town := newScriptFileTestTown(t)
-	proc := fakeGuardProcess(map[string]string{}, "")
+	proc := town.bounded(fakeGuardProcess(map[string]string{}, ""))
 	err := town.run(t, proc, town.worktree, "Write",
 		fileInput(filepath.Join(town.worktree, "deploy.sh")), io.Discard)
 	assertVerdict(t, err, true, "unidentified Write of a new script")
@@ -312,8 +331,9 @@ func TestScriptFileGuardNoImplicitAllowlist(t *testing.T) {
 	}
 }
 
-// The guard judges file tools only: Bash-created scripts are caught at commit
-// time by the repo guard, so a Bash command is not judged here (gt-b43ra).
+// The guard judges file tools only. Bash-created scripts are to be caught at
+// commit by the planned repo guard gt-lpm8b, which has not landed, so a Bash
+// command is not judged here (gt-b43ra).
 func TestScriptFileGuardBashIsNotJudged(t *testing.T) {
 	t.Parallel()
 	town := newScriptFileTestTown(t)
@@ -327,10 +347,54 @@ func TestScriptFileGuardBashIsNotJudged(t *testing.T) {
 func TestScriptFileGuardUnrecognizedRoleIsJudged(t *testing.T) {
 	t.Parallel()
 	town := newScriptFileTestTown(t)
-	proc := fakeGuardProcess(map[string]string{
+	proc := town.bounded(fakeGuardProcess(map[string]string{
 		"GT_ROLE": "gastown/witness/ace",
-	}, "")
+	}, ""))
 	err := town.run(t, proc, town.worktree, "Write",
 		fileInput(filepath.Join(town.worktree, "deploy.sh")), io.Discard)
 	assertVerdict(t, err, true, "unrecognized GT_ROLE Write of a new script")
+}
+
+// A symlink chain longer than the guard follows is judged by the names on it:
+// a script name on the way denies, and a chain of plain names is allowed. The
+// chains live in the test's own temporary worktree (gt-b43ra).
+func TestScriptFileGuardLongSymlinkChain(t *testing.T) {
+	t.Parallel()
+	town := newScriptFileTestTown(t)
+	proc := town.polecatProc()
+
+	// hops builds a chain of n links from first to a missing final name, with
+	// each link's name taken from names (or a name derived from first).
+	hops := func(first string, n int, names map[int]string) {
+		t.Helper()
+		name := func(i int) string {
+			if v, ok := names[i]; ok {
+				return v
+			}
+			return fmt.Sprintf("%s-link%d.txt", strings.TrimSuffix(first, ".txt"), i)
+		}
+		for i := 0; i < n; i++ {
+			from := filepath.Join(town.worktree, name(i))
+			if i == 0 {
+				from = filepath.Join(town.worktree, first)
+			}
+			to := filepath.Join(town.worktree, name(i+1))
+			if i+1 == n {
+				to = filepath.Join(town.worktree, "missing-final.txt")
+			}
+			if err := os.Symlink(to, from); err != nil {
+				t.Fatalf("linking %s: %v", from, err)
+			}
+		}
+	}
+
+	hops("plain-head.txt", 40, nil)
+	err := town.run(t, proc, town.worktree, "Write",
+		fileInput(filepath.Join(town.worktree, "plain-head.txt")), io.Discard)
+	assertVerdict(t, err, false, "a long chain of plain names")
+
+	hops("script-head.txt", 40, map[int]string{3: "hidden.sh"})
+	err = town.run(t, proc, town.worktree, "Write",
+		fileInput(filepath.Join(town.worktree, "script-head.txt")), io.Discard)
+	assertVerdict(t, err, true, "a long chain with a script name on the way")
 }

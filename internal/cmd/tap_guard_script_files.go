@@ -57,9 +57,8 @@ are to be caught.
 
 The guard fails closed on what it can name: a hook payload it cannot read or
 parse, or a session whose worktree it cannot place, is denied when the payload
-or the target names a script suffix. A session with no role, or an unrecognized
-one, is judged as a worker. A path that cannot be resolved is denied when its
-name ends in a denied script suffix.
+or the target names a script suffix. A path that cannot be resolved is denied
+when its name ends in a denied script suffix.
 
 A new .py file is allowed with an advisory on stderr asking for the reason to
 be recorded in the bead: Python is allowed when it genuinely is the best tool,
@@ -170,7 +169,7 @@ func resolveScriptFileScope(payloadCwd string, proc guardProcess) (scope scriptF
 		// session runs in, found by walking up to its .git. A session with no
 		// role says nothing about which tree is its own, so any checkout it
 		// stands in is judged.
-		if root, ok := gitWorktreeRoot(cwd); ok && (role == "" || isWorkerWorktreeForRole(root, role)) {
+		if root, ok := gitWorktreeRoot(cwd, proc.checkoutBound); ok && (role == "" || isWorkerWorktreeForRole(root, role)) {
 			worktree = root
 		}
 	}
@@ -205,10 +204,13 @@ func scriptFileWorkerRole(proc guardProcess) Role {
 
 // gitWorktreeRoot returns the directory containing cwd's ".git" entry, which
 // is the top of the checkout a crew member works in.
-func gitWorktreeRoot(cwd string) (string, bool) {
+func gitWorktreeRoot(cwd, bound string) (string, bool) {
 	for dir := cwd; ; {
 		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
 			return dir, true
+		}
+		if bound != "" && dir == bound {
+			return "", false
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -249,14 +251,63 @@ func (s scriptFileScope) checkFileTarget(raw, tool string, stderr io.Writer) err
 		printScriptFileRefusal(stderr, tool, raw)
 		return NewSilentExit(2)
 	}
+	// The write lands at the end of any symlink chain. This walk follows the
+	// chain itself, up to maxWriteHops, so a link's target is judged even when
+	// the kernel-like resolver gives up on the chain (gt-b43ra).
 	target, ok := s.resolveTarget(raw, s.cwd)
-	if !ok {
-		// A path this guard cannot resolve is the polecat-paths guard's to
-		// refuse for its own scope; here the script suffix in the name is
-		// still a request to create a script, so that request is refused.
-		return s.refuseUnresolvedTarget(raw, tool, stderr)
+	// Walk from the canonical path so it compares with the worktree's canonical
+	// root; a lexical start would miss a worktree under a symlinked directory.
+	start := named
+	if ok {
+		start = target
 	}
-	return s.judgeNewScript(target, tool, stderr)
+	chain, final, walked := followWriteChain(start)
+	switch {
+	case walked:
+		return s.judgeNewScript(final, tool, stderr)
+	case ok:
+		return s.judgeNewScript(target, tool, stderr)
+	}
+	// Neither walk reached the end: the target is unknown. The names on the way
+	// decide, as an unresolvable path always does.
+	for _, name := range chain {
+		if scriptFileNamed(name) {
+			printScriptFileRefusal(stderr, tool, name)
+			return NewSilentExit(2)
+		}
+	}
+	return s.refuseUnresolvedTarget(raw, tool, stderr)
+}
+
+// maxWriteHops bounds how many symlinks followWriteChain follows itself. Past
+// it the write's target is unknown, and the names on the chain decide.
+const maxWriteHops = 8
+
+// followWriteChain follows path's symlinks to the file a write to it creates.
+// It returns the names it passed, the final path, and whether the chain ended
+// within maxWriteHops. A dangling link ends the chain at its missing target,
+// which is where the write lands.
+func followWriteChain(path string) (chain []string, final string, walked bool) {
+	p := filepath.Clean(path)
+	chain = []string{p}
+	for hop := 0; ; hop++ {
+		fi, err := os.Lstat(p)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			return chain, p, true
+		}
+		if hop == maxWriteHops {
+			return chain, "", false
+		}
+		text, err := os.Readlink(p)
+		if err != nil || text == "" {
+			return chain, "", false
+		}
+		if !filepath.IsAbs(text) {
+			text = filepath.Join(filepath.Dir(p), text)
+		}
+		p = filepath.Clean(text)
+		chain = append(chain, p)
+	}
 }
 
 // resolveTarget canonicalises raw against dir, reporting ok=false when the
@@ -368,6 +419,11 @@ func printScriptFileRefusal(w io.Writer, via, target string) {
 // only when the raw payload names a denied script suffix, the one fact left to
 // read from it (gt-b43ra).
 func unjudgedPayload(input []byte, stderr io.Writer, why string) error {
+	// A Bash or Monitor call is not judged by this guard at all, even when its
+	// payload cannot be read: the tool name is the one fact the guard can see.
+	if payloadNamesShellTool(string(input)) {
+		return nil
+	}
 	if !payloadNamesScriptSuffix(string(input)) {
 		fmt.Fprintf(stderr, "script-files: %s, and it names no script, so this call is allowed.\n", why)
 		return nil
@@ -401,6 +457,14 @@ func unjudgedWorktree(hook scriptFileInput, stderr io.Writer) error {
 // path-like word: the suffix followed by a quote, space, comma, brace or the
 // end of the text.
 var payloadScriptSuffix = regexp.MustCompile(`(?i)\.(sh|bash|zsh|pl|rb)(["'\s,}]|$)`)
+
+// payloadShellTool matches a payload's tool name when it is a shell tool.
+var payloadShellTool = regexp.MustCompile(`"tool_name"\s*:\s*"(Bash|Monitor)"`)
+
+// payloadNamesShellTool reports whether raw text names a shell tool.
+func payloadNamesShellTool(raw string) bool {
+	return payloadShellTool.MatchString(raw)
+}
 
 // payloadNamesScriptSuffix reports whether raw text carries a denied script
 // suffix as a path-like word. A bare substring would also match prose.
