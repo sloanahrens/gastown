@@ -62,6 +62,24 @@ func moneyTestPaths() (plan, spend, usage string) {
 		filepath.Join(runtime, "usage", "beads")
 }
 
+// moneyHealthyInputs is a town whose three money inputs all answer, so a test
+// can fail one and watch only its columns go nil.
+func moneyHealthyInputs(t *testing.T) (files map[string]string, dirs map[string][]DirEntry) {
+	t.Helper()
+	plan, spend, usage := moneyTestPaths()
+	now := fixedNow()
+	resetsAt := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC).Unix()
+	files = map[string]string{
+		plan:  planSample(now.Add(-time.Minute), 30, 24, resetsAt) + "\n",
+		spend: `{"ts":"2026-10-24T12:57:00Z","per_hour":2.5,"balance":18.2}`,
+		filepath.Join(usage, "gt-a1.work.json"): usageRecord(now.Add(-10*time.Minute), true, map[string][3]int64{
+			"claude-opus-4-6": {100, 50, 10},
+		}),
+	}
+	dirs = map[string][]DirEntry{usage: {{Name: "gt-a1.work.json"}}}
+	return files, dirs
+}
+
 // planSample is one line of the status line's series, in the shape
 // dashboard.ClaudePlanSample decodes.
 func planSample(at time.Time, fiveHour, sevenDay float64, resetsAt int64) string {
@@ -147,6 +165,7 @@ func TestSourceMoneyReadsTheCostPanelsFiles(t *testing.T) {
 		"tokens_anthropic_claude-x_1h":       int64(5),
 		"tokens_claude-sonnet-5-5_1h":        nil,
 		"tokens_claude-haiku-5-5_1h":         nil,
+		"money_read_failures":                0,
 		"money_unreadable_records":           0,
 		"money_unparsed_inputs":              3,
 	}
@@ -169,6 +188,7 @@ func TestSourceMoneyMissingInputsLeaveNilColumns(t *testing.T) {
 		"deepseek_per_hour":                  nil,
 		"deepseek_balance":                   nil,
 		"deepseek_spend_age_s":               nil,
+		"money_read_failures":                0,
 		"money_unreadable_records":           0,
 		"money_unparsed_inputs":              0,
 	}
@@ -202,8 +222,11 @@ func TestSourceMoneySkipsWhatItCannotPlace(t *testing.T) {
 	if cols["money_unreadable_records"] != 0 {
 		t.Errorf("money_unreadable_records = %v; want 0 for records that were listed and read", cols["money_unreadable_records"])
 	}
-	if len(cols) != 9 {
-		t.Errorf("money = %v; want the seven readings, the two counts and no token column", cols)
+	if cols["money_read_failures"] != 0 {
+		t.Errorf("money_read_failures = %v; want 0 for inputs that were read", cols["money_read_failures"])
+	}
+	if len(cols) != 10 {
+		t.Errorf("money = %v; want the seven readings, the three counts and no token column", cols)
 	}
 }
 
@@ -226,28 +249,79 @@ func TestSourceMoneyReportsABalanceWithNoRate(t *testing.T) {
 	}
 }
 
-func TestSourceMoneyAnUnreadableInputLeavesTheGroupNull(t *testing.T) {
+func TestSourceMoneyAnUnreadableInputLeavesOnlyItsOwnColumnsNil(t *testing.T) {
 	t.Parallel()
 	plan, spend, usage := moneyTestPaths()
 	tests := []struct {
 		name string
 		path string
+		// nilColumns are the columns the failed input owns: it could not be
+		// read, so none of them has a reading.
+		nilColumns []string
+		// filledColumns are the columns the other two inputs own, which must
+		// keep their readings.
+		filledColumns []string
 	}{
-		{name: "the Claude plan series", path: plan},
-		{name: "the DeepSeek reading", path: spend},
-		{name: "the usage records directory", path: usage},
+		{
+			name: "the Claude plan series",
+			path: plan,
+			nilColumns: []string{
+				"claude_plan_weekly_pct", "claude_plan_five_hour_pct",
+				"claude_plan_weekly_pace_per_day_1h", "claude_plan_stale",
+			},
+			filledColumns: []string{
+				"deepseek_per_hour", "deepseek_balance", "deepseek_spend_age_s",
+				"tokens_claude-opus-4-6_1h",
+			},
+		},
+		{
+			name:       "the DeepSeek reading",
+			path:       spend,
+			nilColumns: []string{"deepseek_per_hour", "deepseek_balance", "deepseek_spend_age_s"},
+			filledColumns: []string{
+				"claude_plan_weekly_pct", "claude_plan_five_hour_pct",
+				"claude_plan_stale", "tokens_claude-opus-4-6_1h",
+			},
+		},
+		{
+			name:          "the usage records directory",
+			path:          usage,
+			nilColumns:    []string{"tokens_claude-opus-4-6_1h"},
+			filledColumns: []string{"claude_plan_weekly_pct", "claude_plan_five_hour_pct", "deepseek_per_hour", "deepseek_balance"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			env := moneyTestEnv(t, nil, nil, map[string]error{tc.path: fs.ErrPermission})
+			files, dirs := moneyHealthyInputs(t)
+			env := moneyTestEnv(t, files, dirs, map[string]error{tc.path: fs.ErrPermission})
 			cols, err := moneySource{}.Collect(context.Background(), env)
-			if err == nil || cols != nil {
-				t.Fatalf("Collect = %v, %v; want an error and no columns", cols, err)
+			if err != nil {
+				t.Fatalf("Collect: %v; want no error from one input that could not be read", err)
 			}
+			for _, column := range tc.nilColumns {
+				// A token column can be absent rather than nil: the models are
+				// what the listing names, and an unlistable directory names none.
+				if value, ok := cols[column]; ok && value != nil {
+					t.Errorf("%s = %v; want no reading from the input that could not be read", column, value)
+				}
+			}
+			for _, column := range tc.filledColumns {
+				if cols[column] == nil {
+					t.Errorf("%s = nil; want the other inputs' readings to survive", column)
+				}
+			}
+			if cols["money_read_failures"] != 1 {
+				t.Errorf("money_read_failures = %v, want 1 for the one input that could not be read", cols["money_read_failures"])
+			}
+			if cols["money_unreadable_records"] != 0 || cols["money_unparsed_inputs"] != 0 {
+				t.Errorf("money_unreadable_records, money_unparsed_inputs = %v, %v; want 0, 0 from inputs that were only unreadable",
+					cols["money_unreadable_records"], cols["money_unparsed_inputs"])
+			}
+			// The group is in the record: no read failure nulls it.
 			rec := Collect(context.Background(), env, []Source{moneySource{}}, SourceTimeout)
-			if rec.Groups["money"] != nil || len(rec.Errors) != 1 || rec.Errors[0].Group != "money" {
-				t.Errorf("record money = %v, errors = %v; want null and one money error", rec.Groups["money"], rec.Errors)
+			if rec.Groups["money"] == nil || len(rec.Errors) != 0 {
+				t.Errorf("record money = %v, errors = %v; want the group with no error", rec.Groups["money"], rec.Errors)
 			}
 		})
 	}
@@ -305,6 +379,11 @@ func TestSourceMoneyCountsUnreadableUsageRecords(t *testing.T) {
 	if cols["money_unparsed_inputs"] != 0 {
 		t.Errorf("money_unparsed_inputs = %v; want 0, since both other files were readable or gone", cols["money_unparsed_inputs"])
 	}
+	// One record that will not read is a gap in the token sums, not a failed
+	// input: the listing itself answered.
+	if cols["money_read_failures"] != 0 {
+		t.Errorf("money_read_failures = %v; want 0 when the usage directory itself was read", cols["money_read_failures"])
+	}
 }
 
 func TestSourceMoneyTokenColumnsFollowTheDirectoryNotTheHour(t *testing.T) {
@@ -356,8 +435,8 @@ func TestSourceMoneyWithNoReadDirLeavesTheTokenColumnsOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
-	if len(cols) != 9 {
-		t.Errorf("money = %v; want the seven readings and the two counts, with no token column", cols)
+	if len(cols) != 10 {
+		t.Errorf("money = %v; want the seven readings and the three counts, with no token column", cols)
 	}
 	for key := range cols {
 		if strings.HasPrefix(key, "tokens_") {
