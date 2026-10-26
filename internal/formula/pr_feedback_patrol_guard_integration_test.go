@@ -135,7 +135,8 @@ func TestIntegrationPRFeedbackPatrolGuardsFailClosed(t *testing.T) {
 
 	t.Run("valve", func(t *testing.T) {
 		t.Parallel()
-		valve := patrolDispatchBlocks(t)[0] + "\necho dispatch-continued\n"
+		valve, _ := patrolDispatchBlocks(t)
+		valve += "\necho dispatch-continued\n"
 		cases := []struct {
 			name         string
 			mode         string
@@ -200,7 +201,8 @@ func TestIntegrationPRFeedbackPatrolGuardsFailClosed(t *testing.T) {
 				}
 				// The findings file is production state the block shares with a
 				// running patrol; the test points it at its own temp file.
-				loop := strings.ReplaceAll(patrolDispatchBlocks(t)[1], "/tmp/patrol-findings.txt", h.findings)
+				_, loop := patrolDispatchBlocks(t)
+				loop = strings.ReplaceAll(loop, "/tmp/patrol-findings.txt", h.findings)
 
 				stdout, stderr, err := h.run(t, loop,
 					fmt.Sprintf("BD_MODE=%s", tc.mode),

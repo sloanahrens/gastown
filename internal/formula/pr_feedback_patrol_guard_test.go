@@ -17,13 +17,17 @@ import (
 // (TestIntegrationPRFeedbackPatrolGuardsFailClosed, which runs the blocks); the
 // gate tier holds the fence below, so the fail-open fallback cannot come back
 // unnoticed by a gate that never starts a shell.
+
+// patrolTestMaxOpen is the {{max_open_beads}} the dispatch blocks are rendered
+// with; the valve cases bracket it.
 const patrolTestMaxOpen = 3
 
 var patrolBashBlock = regexp.MustCompile("(?s)```bash\n(.*?)```")
 
-// patrolDispatchBlocks returns the dispatch step's fenced bash blocks (the
-// safety valve first, then the dedup loop), rendered with test variables.
-func patrolDispatchBlocks(t *testing.T) []string {
+// patrolDispatchBlocks returns the dispatch step's safety valve and dedup-loop
+// blocks, rendered with test variables and picked by the count they assign so a
+// reordered step cannot hand the tests the wrong one.
+func patrolDispatchBlocks(t *testing.T) (valve, dedup string) {
 	t.Helper()
 	raw, err := GetEmbeddedFormulaContent("mol-pr-feedback-patrol")
 	if err != nil {
@@ -38,20 +42,24 @@ func patrolDispatchBlocks(t *testing.T) []string {
 	if end := strings.Index(step, "[[steps]]"); end >= 0 {
 		step = step[:end]
 	}
-	matches := patrolBashBlock.FindAllStringSubmatch(step, -1)
-	if len(matches) != 2 {
-		t.Fatalf("dispatch step carries %d bash blocks, want 2 (safety valve and dedup loop)", len(matches))
-	}
 	render := strings.NewReplacer(
 		"{{patrol_label}}", "patrol-test",
 		"{{max_open_beads}}", fmt.Sprint(patrolTestMaxOpen),
 		"{{rig}}", "testrig",
 	)
-	blocks := make([]string, len(matches))
-	for i, m := range matches {
-		blocks[i] = render.Replace(m[1])
+	for _, m := range patrolBashBlock.FindAllStringSubmatch(step, -1) {
+		block := render.Replace(m[1])
+		switch {
+		case strings.Contains(block, "OPEN_COUNT="):
+			valve = block
+		case strings.Contains(block, "EXISTING="):
+			dedup = block
+		}
 	}
-	return blocks
+	if valve == "" || dedup == "" {
+		t.Fatal("dispatch step must carry a safety valve assigning OPEN_COUNT and a dedup loop assigning EXISTING")
+	}
+	return valve, dedup
 }
 
 // TestPRFeedbackPatrolGuardsReadBeadsFromJSON holds the shape both guards need:
@@ -60,8 +68,7 @@ func patrolDispatchBlocks(t *testing.T) []string {
 // failure branch that stops the guard instead of supplying a zero.
 func TestPRFeedbackPatrolGuardsReadBeadsFromJSON(t *testing.T) {
 	t.Parallel()
-	blocks := patrolDispatchBlocks(t)
-	valve, dedup := blocks[0], blocks[1]
+	valve, dedup := patrolDispatchBlocks(t)
 
 	for name, block := range map[string]string{"safety valve": valve, "dedup guard": dedup} {
 		for _, want := range []string{"bd list", "--json", "--limit 0", "jq -e 'length'"} {
