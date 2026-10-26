@@ -120,7 +120,10 @@ func TestBuildRuntimeArchiveLogsTheHashOfTheUploadedPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail)
+	// The real build, with its spawn log captured: the line it writes must be
+	// the hash of the entry it put in the archive, read back from the archive.
+	var logged bytes.Buffer
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, &logged)
 	if err != nil {
 		t.Fatalf("buildRuntimeArchive: %v", err)
 	}
@@ -129,12 +132,10 @@ func TestBuildRuntimeArchiveLogsTheHashOfTheUploadedPrompt(t *testing.T) {
 	if uploaded != want {
 		t.Fatalf("uploaded prompt is not the rewritten prompt with the sandbox note:\n%s", uploaded)
 	}
-	var logged bytes.Buffer
-	logSystemPrompt(&logged, openshellTestPolecat, []byte(uploaded))
-	sum := sha256.Sum256([]byte(want))
-	line := "system prompt " + openshellTestPolecat + ": " + strconv.Itoa(len(want)) + " bytes sha256 " + hex.EncodeToString(sum[:]) + "\n"
+	sum := sha256.Sum256([]byte(uploaded))
+	line := "system prompt " + openshellTestPolecat + ": " + strconv.Itoa(len(uploaded)) + " bytes sha256 " + hex.EncodeToString(sum[:]) + "\n"
 	if logged.String() != line {
-		t.Errorf("logged line = %q, want %q", logged.String(), line)
+		t.Errorf("spawn log = %q, want the hash of the uploaded entry %q", logged.String(), line)
 	}
 }
 

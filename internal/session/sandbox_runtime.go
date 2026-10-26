@@ -55,6 +55,12 @@ type runtimeFile struct {
 // command names it; a missing system prompt is skipped. A rig or polecat name
 // that is not one path segment is an error too.
 func buildRuntimeArchive(spec SpawnSpec, gitEmail string) ([]byte, error) {
+	return buildRuntimeArchiveLogging(spec, gitEmail, os.Stderr)
+}
+
+// buildRuntimeArchiveLogging is buildRuntimeArchive with the spawn log given, so a
+// test can capture the uploaded prompt's hash line from the real build (gt-uoo5j).
+func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Writer) ([]byte, error) {
 	if err := requireRuntimeSegment("rig", spec.Rig); err != nil {
 		return nil, err
 	}
@@ -99,7 +105,7 @@ func buildRuntimeArchive(spec SpawnSpec, gitEmail string) ([]byte, error) {
 	}
 	promptBytes := []byte(RewriteTownRoot(string(prompt), spec.TownRoot, sandboxTownRoot) + sandboxPromptNote)
 	files = append(files, runtimeFile{path.Join(claudeDir, promptName), promptBytes, 0o644})
-	logSystemPrompt(os.Stderr, spec.Polecat, promptBytes)
+	logSystemPrompt(promptLog, spec.Polecat, promptBytes)
 
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
