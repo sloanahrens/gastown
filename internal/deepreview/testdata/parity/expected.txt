@@ -1,0 +1,11 @@
+mode=landings
+quiet=false
+landings=3
+records=5
+unparsed=1
+reviewed_until_old=2026-10-10T02:30:00+01:00
+reviewed_until_new=2026-10-10T05:00:00.9Z
+docs=0
+slice_files=0
+slice_bytes=0
+out=internal/deepreview/testdata/parity
