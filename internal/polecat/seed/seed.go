@@ -107,6 +107,9 @@ func Stage(dest, town string, sources []Source, git Git) error {
 }
 
 // Unpack writes a `git archive --format=tar` stream into dir, which it creates.
+// It refuses any entry that would write outside dir: the directory sits under
+// the repository, so an escaping link followed by a file through it would
+// unpack the tree elsewhere (gt-eu4u0).
 func Unpack(dir string, tree []byte) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -128,12 +131,24 @@ func Unpack(dir string, tree []byte) error {
 			return fmt.Errorf("archive entry %q escapes the seed directory", h.Name)
 		}
 		target := filepath.Join(dir, name)
+		// A symlink entry may replace the last component, and only it: every
+		// ancestor must be a real directory.
+		throughLast := h.Typeflag != tar.TypeSymlink
+		if link, err := symlinkInPath(dir, name, throughLast); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		} else if link != "" {
+			return fmt.Errorf("archive entry %q writes through symlink %q", h.Name, link)
+		}
 		switch h.Typeflag {
 		case tar.TypeDir:
 			err = os.MkdirAll(target, 0o755)
 		case tar.TypeReg:
 			err = writeFile(target, tr, fs.FileMode(h.Mode).Perm())
 		case tar.TypeSymlink:
+			resolved := filepath.Join(filepath.Dir(name), h.Linkname) //nolint:gosec // G305: the link's target is checked, never opened
+			if filepath.IsAbs(h.Linkname) || !filepath.IsLocal(resolved) {
+				return fmt.Errorf("archive symlink %q -> %q escapes the seed directory", h.Name, h.Linkname)
+			}
 			os.Remove(target)
 			err = os.Symlink(h.Linkname, target)
 		}
@@ -141,6 +156,31 @@ func Unpack(dir string, tree []byte) error {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}
+}
+
+// symlinkInPath returns the first component of name inside dir that is a
+// symlink, checking the last component too when last is set, or "" when none
+// is. It stops at the first component that does not exist: the entries below
+// it have not been written yet.
+func symlinkInPath(dir, name string, last bool) (string, error) {
+	parts := strings.Split(name, string(filepath.Separator))
+	if !last {
+		parts = parts[:len(parts)-1]
+	}
+	rel := ""
+	for _, part := range parts {
+		rel = filepath.Join(rel, part)
+		fi, err := os.Lstat(filepath.Join(dir, rel))
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return "", nil
+		case err != nil:
+			return "", err
+		case fi.Mode()&fs.ModeSymlink != 0:
+			return rel, nil
+		}
+	}
+	return "", nil
 }
 
 // writeFile writes r to target at mode, making its directory.
