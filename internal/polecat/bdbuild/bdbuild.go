@@ -24,6 +24,38 @@ const (
 	cgo    = "0"
 )
 
+// hostEnv names the host variables the compile passes through: those that
+// locate the toolchain, the Go caches and the module proxy, so the compile
+// reuses what the host already has. Anything else — a shell's GOFLAGS,
+// GOEXPERIMENT, GOARM64, GOTOOLCHAIN or GOWORK — would change what gets
+// compiled, so it is dropped.
+var hostEnv = map[string]struct{}{
+	"PATH": {}, "HOME": {}, "TMPDIR": {},
+	"GOROOT": {}, "GOPATH": {}, "GOCACHE": {}, "GOMODCACHE": {},
+	"GOPROXY": {}, "GOSUMDB": {}, "GONOSUMDB": {}, "GONOSUMCHECK": {},
+	"GOPRIVATE": {}, "GONOPROXY": {}, "GOINSECURE": {}, "GOAUTH": {},
+	"SSL_CERT_FILE": {}, "SSL_CERT_DIR": {},
+	"HTTP_PROXY": {}, "HTTPS_PROXY": {}, "NO_PROXY": {},
+	"http_proxy": {}, "https_proxy": {}, "no_proxy": {},
+}
+
+// buildEnv returns the environment the compile runs with: hostEnv's variables
+// from environ, plus the cross-compile settings. A nil environ reads the host's.
+func buildEnv(environ []string) []string {
+	if environ == nil {
+		environ = os.Environ()
+	}
+	env := make([]string, 0, len(environ)+3)
+	for _, kv := range environ {
+		if key, _, ok := strings.Cut(kv, "="); ok {
+			if _, keep := hostEnv[key]; keep {
+				env = append(env, kv)
+			}
+		}
+	}
+	return append(env, "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED="+cgo)
+}
+
 // Git runs git with args in dir and returns its standard output; a directory
 // that is not a git checkout fails the way git does.
 type Git func(dir string, args ...string) ([]byte, error)
@@ -40,7 +72,7 @@ func ExecGit(dir string, args ...string) ([]byte, error) {
 	return out, nil
 }
 
-// Go runs one go command in dir with env added to the environment and returns
+// Go runs one go command in dir with env as its whole environment and returns
 // its standard output.
 type Go func(dir string, env []string, args ...string) ([]byte, error)
 
@@ -49,7 +81,7 @@ type Go func(dir string, env []string, args ...string) ([]byte, error)
 func ExecGo(dir string, env []string, args ...string) ([]byte, error) {
 	cmd := exec.Command("go", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = env
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -97,6 +129,10 @@ type Options struct {
 	// BuildDir is the directory the clean worktree is made in. Empty makes a
 	// temporary one.
 	BuildDir string
+	// Env is the environment the compile starts from. Nil reads the host's.
+	// Compile drops the variables that would change what is compiled and sets
+	// GOOS, GOARCH and CGO_ENABLED itself.
+	Env []string
 }
 
 // Compile writes opt.Out built from opt.Commit in a clean worktree of opt.Src,
@@ -129,9 +165,9 @@ func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	}
 	defer removeWorktree(opt.Src, dir, git)
 
-	env := []string{"GOOS=" + goos, "GOARCH=" + goarch, "CGO_ENABLED=" + cgo}
-	// main.Commit is the variable bd reports as its commit, and the one the beads
-	// Makefile stamps; scripts/refresh-bd-command-tree.sh builds bd the same way.
+	env := buildEnv(opt.Env)
+	// -X main.Commit stamps the commit `bd version --json` reports, the same
+	// variable scripts/refresh-bd-command-tree.sh stamps.
 	if _, err := goBuild(dir, env, "build", "-trimpath", "-ldflags", "-X main.Commit="+commit, "-o", opt.Out, "./cmd/bd"); err != nil {
 		return "", fmt.Errorf("cannot build bd at %s: %w", commit, err)
 	}

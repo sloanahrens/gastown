@@ -218,6 +218,44 @@ func TestCompileBuildsTheCommitFromACleanWorktree(t *testing.T) {
 	}
 }
 
+func TestCompileDropsHostVariablesThatChangeTheBuild(t *testing.T) {
+	t.Parallel()
+	git := &fakeGit{revParse: fullCommit}
+	build := &fakeGo{}
+	host := []string{
+		"PATH=/usr/bin:/bin",
+		"HOME=/home/dev",
+		"GOCACHE=/home/dev/.cache/go-build",
+		"GOMODCACHE=/home/dev/go/pkg/mod",
+		"GOPROXY=https://proxy.example",
+		"GOFLAGS=-tags=hostjob",
+		"GOEXPERIMENT=loopvar",
+		"GOARM64=v9.0",
+		"GOTOOLCHAIN=go1.99.0",
+		"GOWORK=/elsewhere/go.work",
+	}
+	if _, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, Env: host}, git.run, build.run); err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	for _, want := range []string{
+		"PATH=/usr/bin:/bin", "HOME=/home/dev",
+		"GOCACHE=/home/dev/.cache/go-build", "GOMODCACHE=/home/dev/go/pkg/mod",
+		"GOPROXY=https://proxy.example",
+		"GOOS=linux", "GOARCH=arm64", "CGO_ENABLED=0",
+	} {
+		if !contains(build.env, want) {
+			t.Errorf("Compile built with env %v, which lacks %q", build.env, want)
+		}
+	}
+	for _, dropped := range []string{"GOFLAGS=", "GOEXPERIMENT=", "GOARM64=", "GOTOOLCHAIN=", "GOWORK="} {
+		for _, kv := range build.env {
+			if strings.HasPrefix(kv, dropped) {
+				t.Errorf("Compile passed %q to the build; %s changes what gets compiled", kv, dropped)
+			}
+		}
+	}
+}
+
 func TestCompileRefusesACommitTheCheckoutDoesNotHold(t *testing.T) {
 	t.Parallel()
 	git := &fakeGit{revErr: errors.New("fatal: Needed a single revision")}

@@ -167,9 +167,12 @@ polecat-image:
 	@test -n "$(POLE_RIG_GO_MODS)" || { echo "polecat-image: no rig go.mod under $(POLE_TOWN)/*/mayor/rig; set POLE_TOWN=<town root>" >&2; exit 2; }
 	@mkdir -p deploy/polecat/bin
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/gt ./cmd/gt
-	@go run ./internal/polecat/bdbuild/cmd/build -src "$(BD_SRC)" -out $(CURDIR)/deploy/polecat/bin/bd -commit "$(BD_COMMIT)" > deploy/polecat/bin/bd.commit
+	@bd_commit=$$(go run ./internal/polecat/bdbuild/cmd/build -src "$(BD_SRC)" -out $(CURDIR)/deploy/polecat/bin/bd -commit "$(BD_COMMIT)") || { echo "polecat-image: the bd build failed, so the image has no bd commit to label" >&2; exit 2; }; \
+	test -n "$$bd_commit" || { echo "polecat-image: the bd build printed no commit, so the image's bd cannot be labelled" >&2; exit 2; }; \
+	printf '%s\n' "$$bd_commit" > deploy/polecat/bin/bd.commit
 	@$(MAKE) --no-print-directory polecat-seed-stage
 	bd_commit=$$(cat deploy/polecat/bin/bd.commit) || { echo "polecat-image: no bd commit recorded, so the image's bd cannot be labelled; the bd build did not finish" >&2; exit 2; }; \
+	test -n "$$bd_commit" || { echo "polecat-image: the bd commit file is empty, so the image's bd cannot be labelled" >&2; exit 2; }; \
 	floor=$$(bash deploy/polecat/go-floor.sh rig $(POLE_RIG_GO_MODS)) || { echo "polecat-image: cannot read the rig Go floor from $(POLE_RIG_GO_MODS)" >&2; exit 2; }; \
 	docker build --platform linux/arm64 --label org.gastown.gt-commit=$(POLE_COMMIT) --label org.gastown.bd-commit="$$bd_commit" --build-arg GO_FLOOR="$$floor" -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
 	@$(MAKE) --no-print-directory polecat-node-prune

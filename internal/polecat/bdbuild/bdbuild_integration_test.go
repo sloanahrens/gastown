@@ -1,0 +1,67 @@
+//go:build integration
+
+package bdbuild
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// TestIntegrationCompileRefusesACommitTheCheckoutDoesNotHold pins the refusal
+// to real git, which alone decides which commits an object store holds.
+func TestIntegrationCompileRefusesACommitTheCheckoutDoesNotHold(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	srcCommit := initScratchRepo(t, src, "src")
+	other := t.TempDir()
+	otherCommit := initScratchRepo(t, other, "other")
+	if srcCommit == otherCommit {
+		t.Fatalf("both scratch repositories made commit %s; the test needs a commit %s lacks", srcCommit, src)
+	}
+	buildDir := t.TempDir()
+	build := &fakeGo{}
+	_, err := Compile(Options{Src: src, Out: filepath.Join(src, "bd"), Commit: otherCommit, BuildDir: buildDir}, ExecGit, build.run)
+	if err == nil {
+		t.Fatalf("Compile built %s, which %s does not hold", otherCommit, src)
+	}
+	for _, want := range []string{otherCommit, src, "does not hold"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Compile: error lacks %q: %v", want, err)
+		}
+	}
+	if build.dir != "" {
+		t.Errorf("Compile built in %q after the commit was refused", build.dir)
+	}
+	if entries, statErr := os.ReadDir(buildDir); statErr != nil {
+		t.Fatalf("reading the build directory: %v", statErr)
+	} else if len(entries) != 0 {
+		t.Errorf("Compile left %d entries in %s after the commit was refused", len(entries), buildDir)
+	}
+}
+
+// initScratchRepo makes a git repository at dir with one commit naming marker
+// in its go.mod, and returns that commit's full sha.
+func initScratchRepo(t *testing.T, dir, marker string) string {
+	t.Helper()
+	scratchGit(t, dir, "init", "-q")
+	gomod := "module example.invalid/" + marker + "\n\ngo 1.21\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644); err != nil {
+		t.Fatalf("writing the scratch go.mod: %v", err)
+	}
+	scratchGit(t, dir, "add", "-A")
+	scratchGit(t, dir, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "init")
+	out, err := ExecGit(dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("reading the scratch commit: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func scratchGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if _, err := ExecGit(dir, args...); err != nil {
+		t.Fatalf("git %v in %s: %v", args, dir, err)
+	}
+}
