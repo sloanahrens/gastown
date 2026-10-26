@@ -3,6 +3,7 @@ package cmd
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,15 +103,19 @@ func duplicateGuardTranscript(t *testing.T, pools *duplicatePools) string {
 }
 
 // duplicateGuardHolds answers the dispatcher's hold question from a pool row
-// as the daemon's tick does, so a peer behind an open blocker reads as held.
-func duplicateGuardHolds() func(townRoot, beadsDir string, peer duplicateCandidate) string {
+// and the pool, as the daemon's tick does, so a peer behind an open blocker or
+// behind a working seat reads as held. The backoff is stubbed to "not
+// resting": the golden pins the questions the pool answers.
+func duplicateGuardHolds() func(townRoot, beadsDir string, peer duplicateCandidate, pool []duplicateCandidate) string {
 	knobs := specHoldKnobs{
 		MaxPriority: 4,
 		ShapeGate:   specdispatch.ShapeGateOff,
 		Template:    specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
+		Warn:        io.Discard,
+		Backoff:     func(string) string { return "" },
 	}
-	return func(_, _ string, peer duplicateCandidate) string {
-		return specPeerHeldFrom(beadsfake.New(), knobs, peer)
+	return func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+		return specPeerHeldFrom(beadsfake.New(), knobs, peer, pool)
 	}
 }
 

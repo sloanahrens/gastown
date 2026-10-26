@@ -3060,7 +3060,7 @@ func TestSpecPeerHeldFromWarnsOnReadFailure(t *testing.T) {
 		townRoot := duplicateTown(t)
 		writeModelsSettings(t, townRoot, "{not json")
 
-		if got := specPeerHeldPinnedTo(&warned, townRoot, filepath.Join(townRoot, "gastown", "mayor", "rig"), peer); got != "" {
+		if got := specPeerHeldPinnedTo(&warned, townRoot, filepath.Join(townRoot, "gastown", "mayor", "rig"), peer, nil); got != "" {
 			t.Errorf("unreadable settings held the peer: %q, want not held", got)
 		}
 		if out := warned.String(); !strings.Contains(out, "config.json") || !strings.Contains(out, "not held") {
@@ -3072,9 +3072,10 @@ func TestSpecPeerHeldFromWarnsOnReadFailure(t *testing.T) {
 		t.Parallel()
 		var warned bytes.Buffer
 		knobs := specHoldKnobs{MaxPriority: 2, ShapeGate: specdispatch.ShapeGateOff, Warn: &warned}
+		knobs.Backoff = func(string) string { return "" }
 
 		store := childrenFailBD{err: errors.New("dial tcp 127.0.0.1:3307: connection refused")}
-		if got := specPeerHeldFrom(store, knobs, peer); got != "" {
+		if got := specPeerHeldFrom(store, knobs, peer, nil); got != "" {
 			t.Errorf("an unreadable child set held the peer: %q, want not held", got)
 		}
 		if out := warned.String(); !strings.Contains(out, "gt-peer") || !strings.Contains(out, "connection refused") {
@@ -3082,18 +3083,49 @@ func TestSpecPeerHeldFromWarnsOnReadFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("readable inputs stay silent", func(t *testing.T) {
+	// A nil backoff reader is a caller that never wired the question, not a
+	// bead with no record to read: the guard reads a resting head as next and
+	// refuses its whole cluster, silently, so it has to say so (gt-mqa3r).
+	t.Run("unwired backoff reader", func(t *testing.T) {
 		t.Parallel()
 		var warned bytes.Buffer
 		knobs := specHoldKnobs{MaxPriority: 2, ShapeGate: specdispatch.ShapeGateOff, Warn: &warned}
 
-		if got := specPeerHeldFrom(beadsfake.New(), knobs, peer); got != "" {
+		if got := specPeerHeldFrom(beadsfake.New(), knobs, peer, nil); got != "" {
+			t.Errorf("a peer with no backoff reader was held: %q", got)
+		}
+		if out := warned.String(); !strings.Contains(out, "startup backoff") || !strings.Contains(out, "no backoff reader configured") {
+			t.Errorf("warning = %q, want one naming the unanswered backoff question", out)
+		}
+	})
+
+	t.Run("readable inputs stay silent", func(t *testing.T) {
+		t.Parallel()
+		var warned bytes.Buffer
+		knobs := specHoldKnobs{MaxPriority: 2, ShapeGate: specdispatch.ShapeGateOff, Warn: &warned}
+		knobs.Backoff = func(string) string { return "" }
+
+		if got := specPeerHeldFrom(beadsfake.New(), knobs, peer, nil); got != "" {
 			t.Errorf("a clean peer was held: %q", got)
 		}
 		if warned.Len() != 0 {
 			t.Errorf("a clean read warned: %q", warned.String())
 		}
 	})
+}
+
+// TestSpecHoldKnobsWarnWriter: a knob set built without a writer still reports
+// an unanswered question, because the answer it falls back to — "not held" —
+// otherwise fails open in silence (gt-36qvt).
+func TestSpecHoldKnobsWarnWriter(t *testing.T) {
+	t.Parallel()
+	var sink bytes.Buffer
+	if got := (specHoldKnobs{Warn: &sink}).warnWriter(); got != &sink {
+		t.Errorf("warnWriter() = %v, want the knob set's own writer", got)
+	}
+	if got := (specHoldKnobs{}).warnWriter(); got != specHoldWarn {
+		t.Errorf("warnWriter() with no writer = %v, want the package's stderr writer", got)
+	}
 }
 
 func TestSpecBudgetFromSeatMap(t *testing.T) {
