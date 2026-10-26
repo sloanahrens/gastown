@@ -139,6 +139,24 @@ echo "launchctl $*" >> "$T_WORLD/launchctl.log"
 [ "$1" != "print" ] || [ -e "$T_WORLD/gw_loaded" ]
 LCTL
   chmod +x "$t/stubs/launchctl"
+  # go stub: install-gt.sh builds cmd/install-lock from its own checkout (-o
+  # names the output). Hand it the helper the suite built once, instead of a
+  # compile per case (gt-1jgci).
+  cat > "$t/stubs/go" <<GO
+#!/usr/bin/env bash
+echo "go \$*" >> "\$T_WORLD/go.log"
+[ ! -e "\$T_WORLD/require_checkout" ] || [ -f go.mod ] || { echo "stub go: not run at a checkout root: \$PWD" >&2; exit 2; }
+[ ! -e "\$T_WORLD/fail_go" ] || { echo "go: build failed" >&2; exit 2; }
+out=""; prev=""
+for a in "\$@"; do
+  [ "\$prev" = "-o" ] && out="\$a"
+  prev="\$a"
+done
+[ -n "\$out" ] || { echo "stub go: no -o" >&2; exit 2; }
+cp "$LOCK_HELPER" "\$out"
+chmod +x "\$out"
+GO
+  chmod +x "$t/stubs/go"
   mkdir -p "$t/home"
   echo "$t"
 }
@@ -202,21 +220,33 @@ actors() { sort -u "$1/actors.log" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
 # a successful install always runs (the stub logs 'escalate' plus its argv).
 escalations() { grep "^escalate " "$1/gt.log" 2>/dev/null | grep -v -- "escalate clear" || true; }
 
+# wait_for FILE: wait until FILE exists, checked every 0.1 s for 5 s.
+wait_for() { local i; for i in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 # reported T -> the commit the installed gt stub reports
 reported() { "$1/bin/gt" stale --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["binary_commit"])'; }
 
-# The world make_world copies. Built here, in the script's own shell: every
-# case calls make_world inside a command substitution, and an assignment made
-# in one of those dies with the subshell.
-WORLD_TEMPLATE=$(build_world)
+# The install lock is cmd/install-lock, which install-gt.sh builds from its own
+# checkout. The suite builds it once, for real; each world's go stub copies it
+# into the path the script asks for (gt-1jgci).
+LOCK_HELPER_DIR=$(mktemp -d)
+LOCK_HELPER="$LOCK_HELPER_DIR/install-lock"
 
 # The template is a whole temp world, and a case that trips set -e exits before
 # the signing section claims the EXIT trap, so this trap has to exist from here
 # on; that one chains it instead of replacing it (gt-m8y0b).
 cleanup_world_template() {
   [ -z "${WORLD_TEMPLATE:-}" ] || rm -rf "$WORLD_TEMPLATE"
+  [ -z "${LOCK_HELPER_DIR:-}" ] || rm -rf "$LOCK_HELPER_DIR"
 }
 trap cleanup_world_template EXIT
+
+(cd "$SCRIPT_DIR/.." && CGO_ENABLED=0 go build -buildvcs=false -o "$LOCK_HELPER" ./cmd/install-lock) \
+  || { echo "FAIL: cannot build cmd/install-lock for the lock cases"; exit 1; }
+
+# The world make_world copies. Built here, in the script's own shell: every
+# case calls make_world inside a command substitution, and an assignment made
+# in one of those dies with the subshell.
+WORLD_TEMPLATE=$(build_world)
 
 echo "=== install-gt.sh tests ==="
 
@@ -432,13 +462,18 @@ touch "$T/already_at_head"
 rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
 [ "$rc" = "0" ] && [ "$(last_receipt "$T" event)" = "noop" ] && pass "already at HEAD: noop" || fail "already at HEAD: rc=$rc"
 
-# --- Case 9: another install holds the lock past the wait -> exit 3, lock-busy ---
+# --- Case 9: another install holds the lock past the wait -> exit 3, lock-busy.
+# The holder is the install-lock helper itself, so the same binary that tests
+# the wait is the one that holds the lock in production. Its command signals
+# readiness before the probe runs, so the case never races a sleep. ---
 T=$(make_world)
-perl -e 'use Fcntl qw(:flock); open(my $f, ">>", $ARGV[0]) or die; flock($f, LOCK_EX) or die; sleep 20' "$T/daemon/install-gt.lock" &
+"$LOCK_HELPER" --lock "$T/daemon/install-gt.lock" --wait 0 \
+  -- sh -c 'echo ready > "$1"; exec sleep 20' sh "$T/holder-ready" &
 HOLDER=$!
-sleep 1
+wait_for "$T/holder-ready" || fail "lock busy: the lock holder never started"
 rc=$(LOCK_WAIT=1 run_install "$T" --sha "$(cat "$T/c2")" --source manual)
 kill "$HOLDER" 2>/dev/null || true
+wait "$HOLDER" 2>/dev/null || true
 [ "$rc" = "3" ] && [ ! -e "$T/make.log" ] && pass "lock busy: exit 3, no build" || fail "lock busy: rc=$rc $(cat "$T/run.out")"
 [ "$(last_receipt "$T" reason)" = "lock-busy" ] && pass "lock busy: receipt reason" || fail "lock busy: reason $(last_receipt "$T" reason)"
 
@@ -607,6 +642,15 @@ for sub in fetch merge; do
     *) fail "no auto gc: $sub line: '$line'" ;;
   esac
 done
+
+# --- Case 16b: the helper cannot be built -> the RESULT-line/exit-0-3 contract
+# still holds: exit 1, no build, RESULT failed/unexpected. ---
+T=$(make_world)
+touch "$T/fail_go"
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+[ "$rc" = "1" ] && [ "$(tail -1 "$T/run.out")" = "install-gt: RESULT failed $(cat "$T/c2") - unexpected" ] \
+  && pass "lock helper build fails: exit 1 with a RESULT line" || fail "lock helper build fails: rc=$rc $(cat "$T/run.out")"
+[ ! -e "$T/make.log" ] && pass "lock helper build fails: nothing built" || fail "lock helper build fails: make ran"
 
 # --- Case 17: gt-aigsx — gt-vya0s can leave the installed binary OS-immutable
 # (chflags uchg / chattr +i) between installs; rollback must still be able to
@@ -1073,7 +1117,6 @@ exit 0
 STUB
   chmod +x "$t/plugin/run.sh"
 }
-wait_for() { local i; for i in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 # wait_for_text FILE TEXT: wait until FILE holds TEXT, checked every 0.1 s for 5 s.
 wait_for_text() { local i; for i in $(seq 1 50); do grep -q -- "$2" "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
 wait_for_alarm() { wait_for_text "$1" 'alarm after'; }
