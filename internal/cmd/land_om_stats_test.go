@@ -349,7 +349,7 @@ func TestLandOmStatsNamedSourceMustExist(t *testing.T) {
 // both flags empty, the report finds the town by walking up from its working
 // directory and opens the town's two defaults.
 //
-//testpolicy:allow no-chdir — the working directory is the input under test: the command finds the town by walking up from it
+//testpolicy:allow parallel — reads the working directory, which another parallel test must not change mid-run
 func TestLandOmStatsResolvesTheTownFromCwd(t *testing.T) {
 	town := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
@@ -373,6 +373,7 @@ func TestLandOmStatsResolvesTheTownFromCwd(t *testing.T) {
 	if err := os.WriteFile(logPath, []byte(log), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	//testpolicy:allow no-chdir — the working directory is the input under test: the command finds the town by walking up from it
 	t.Chdir(town)
 
 	var out bytes.Buffer
