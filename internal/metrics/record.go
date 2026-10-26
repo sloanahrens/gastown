@@ -88,8 +88,10 @@ func fixedKey(name string) bool {
 }
 
 // MarshalJSON writes one flat object: the fixed keys and one key per group.
-// The keys come out in the order json.Marshal gives a map, so the bytes are
-// stable and the golden fixture can pin them.
+// A group named a fixed key is left out, because the fixed key is the record's
+// own and the group's columns have nowhere to go. The keys come out in the
+// order json.Marshal gives a map, so the bytes are stable and the golden
+// fixture can pin them.
 func (r Record) MarshalJSON() ([]byte, error) {
 	out := make(map[string]any, len(r.Groups)+4)
 	out["v"] = r.V
@@ -101,6 +103,9 @@ func (r Record) MarshalJSON() ([]byte, error) {
 	}
 	out["errors"] = errs
 	for name, cols := range r.Groups {
+		if fixedKey(name) {
+			continue
+		}
 		out[name] = cols
 	}
 	return json.Marshal(out)

@@ -16,7 +16,7 @@ func TestSnapshotAppendsExactlyOneParseableLine(t *testing.T) {
 	town := t.TempDir()
 	env := envAt(fixedNow())
 	env.Town = town
-	rec, path, err := RunSnapshot(context.Background(), env, []Source{healthy("queue")}, perSource)
+	rec, path, err := RunSnapshot(context.Background(), env, []Source{healthy("queue")}, noDeadline)
 	if err != nil {
 		t.Fatalf("RunSnapshot: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestSnapshotAppendFailureIsAnError(t *testing.T) {
 	}
 	env := envAt(fixedNow())
 	env.Town = town
-	if _, _, err := RunSnapshot(context.Background(), env, nil, perSource); err == nil {
+	if _, _, err := RunSnapshot(context.Background(), env, nil, noDeadline); err == nil {
 		t.Fatal("RunSnapshot returned no error when the log cannot be written")
 	}
 }

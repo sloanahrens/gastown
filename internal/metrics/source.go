@@ -35,7 +35,8 @@ type Env struct {
 	// town from its working directory takes it, so the snapshot's own working
 	// directory never decides which town is read.
 	RunDir RunnerDir
-	// Now is the time the snapshot is taken; Collect writes it as the record's ts.
+	// Now is the time the snapshot is taken; Collect writes it as the record's
+	// ts. nil means the wall clock.
 	Now func() time.Time
 	// ReadFile reads a whole file.
 	ReadFile func(string) ([]byte, error)
@@ -50,6 +51,15 @@ type Env struct {
 	// Tail reads at most maxBytes from the end of path, for a log too large to
 	// read whole.
 	Tail func(path string, maxBytes int64) ([]byte, error)
+}
+
+// now is the time the snapshot is taken: Env.Now when the caller set one, the
+// wall clock otherwise, so a zero Env still stamps its record.
+func (e Env) now() time.Time {
+	if e.Now != nil {
+		return e.Now()
+	}
+	return time.Now()
 }
 
 // DirEntry is one entry of a directory listing: the name and whether it is a

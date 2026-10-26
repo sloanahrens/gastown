@@ -87,6 +87,46 @@ func TestRecordMarshalFixedKeysAlwaysPresent(t *testing.T) {
 	}
 }
 
+// A group named a fixed key has no key of its own to write, so the fixed key
+// keeps its value and the group is left out.
+func TestRecordMarshalKeepsFixedKeysOverGroups(t *testing.T) {
+	t.Parallel()
+	rec := Record{
+		V:  Version,
+		TS: "2026-10-24T13:00:00Z",
+		Groups: map[string]map[string]any{
+			"v":         {"n": 1},
+			"ts":        {"n": 2},
+			"placement": {"n": 3},
+			"errors":    {"n": 4},
+			"host":      {"cpu_idle_pct": 41.5},
+		},
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal the record: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("the record does not hold flat keys: %v", err)
+	}
+	want := map[string]string{
+		"v":         `1`,
+		"ts":        `"2026-10-24T13:00:00Z"`,
+		"placement": `null`,
+		"errors":    `[]`,
+		"host":      `{"cpu_idle_pct":41.5}`,
+	}
+	for key, wantValue := range want {
+		if got := string(fields[key]); got != wantValue {
+			t.Errorf("%s = %s, want %s", key, got, wantValue)
+		}
+	}
+	if len(fields) != len(want) {
+		t.Errorf("record keys = %v, want only %v", fields, want)
+	}
+}
+
 func TestRecordUnmarshalCarriesUnknownKeysAsGroups(t *testing.T) {
 	t.Parallel()
 	data := []byte(`{"v":1,"ts":"2026-10-24T13:00:00Z","placement":null,"errors":[],"future_group":{"n":1}}`)
