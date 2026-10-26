@@ -1,7 +1,7 @@
 // Command testtiming measures the unit tier inside a tmux server that launchd
 // started, which macOS does not exempt from its scan of new executables — the
-// town's condition after a reboot. It prints a probe (ms per new executable;
-// a taxed pane shows 50 or more), then the tier's seconds against
+// town's condition after a reboot. It prints a probe (the mean ms per new
+// executable; a taxed pane shows 50 or more), then the tier's seconds against
 // TARGET_SECONDS (default 90) (gt-tpg0p.17).
 //
 //	make test-timing PKGS=./internal/tmux/... TARGET_SECONDS=5
@@ -58,7 +58,7 @@ const (
 	// the exec tax; below it the measurement does not prove the target.
 	probeRed = 50
 	// probeSamples is how many fresh executables the probe runs. One per
-	// package the tier builds, roughly, so the median is a tier-wide cost.
+	// package the tier builds, roughly, so the mean is a tier-wide cost.
 	probeSamples = 20
 
 	// defaultTarget is TARGET_SECONDS' default, the wall the unit tier is
@@ -175,7 +175,11 @@ func runTiming(ctx context.Context, h host, args []string, stdout, stderr io.Wri
 		return 2
 	}
 
-	line := paneCommandLine(exe, work, repo, pkgsOrDefault(args))
+	line, err := paneCommandLine(exe, work, repo, pkgsOrDefault(args))
+	if err != nil {
+		fmt.Fprintf(stderr, "test-timing: %v\n", err)
+		return 2
+	}
 	if err := h.run(ctx, command{name: tmuxBin, args: []string{"-L", sock, "send-keys", "-t", session, line, "Enter"}}); err != nil {
 		fmt.Fprintf(stderr, "test-timing: send-keys: %v\n", err)
 		return 2
@@ -217,13 +221,18 @@ func runTiming(ctx context.Context, h host, args []string, stdout, stderr io.Wri
 }
 
 // paneCommandLine is what send-keys types into the pane's shell: this binary
-// running itself in pane mode, with every word quoted against the shell.
-func paneCommandLine(exe, work, repo string, pkgs []string) string {
+// running itself in pane mode, with every word quoted against the shell. A
+// word holding a newline cannot be typed — send-keys would submit it as Enter
+// — so it is refused rather than run as a command the caller did not ask for.
+func paneCommandLine(exe, work, repo string, pkgs []string) (string, error) {
 	words := append([]string{exe, paneFlag, "-work", work, "-repo", repo}, pkgs...)
 	for i, w := range words {
+		if strings.ContainsAny(w, "\r\n") {
+			return "", fmt.Errorf("the pane cannot type a word holding a newline: %q", w)
+		}
 		words[i] = shellQuote(w)
 	}
-	return strings.Join(words, " ")
+	return strings.Join(words, " "), nil
 }
 
 // shellQuote quotes w for a POSIX shell: single quotes keep every byte
@@ -361,13 +370,27 @@ func runPaneJob(ctx context.Context, h host, o paneOptions, stderr io.Writer) in
 }
 
 // measure is the probe in this pane: the exec tax every test binary the tier
-// builds will pay.
+// builds will pay, as the mean of the samples. exectax.Result's median is the
+// gate preflight's statistic, not this line's.
 func measure(ctx context.Context, h host) (int, error) {
 	res, err := h.probe(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return int(res.Median.Milliseconds()), nil
+	if len(res.Samples) == 0 {
+		return 0, errors.New("the probe took no samples")
+	}
+	return int(mean(res.Samples).Milliseconds()), nil
+}
+
+// mean is the average of ds, the statistic the 50 ms line is calibrated on
+// (gt-tpg0p.17).
+func mean(ds []time.Duration) time.Duration {
+	var total time.Duration
+	for _, d := range ds {
+		total += d
+	}
+	return total / time.Duration(len(ds))
 }
 
 // runTier runs the unit tier in this pane and returns go test's exit code, or

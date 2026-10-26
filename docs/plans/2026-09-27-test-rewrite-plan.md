@@ -1,4 +1,5 @@
 > Status: approved plan, 2026-09-27. Tracked in claude-a3e.2. Execution ledger: `.superpowers/sdd/2026-09-27-test-rewrite-plan/progress.md` in the crew clone.
+> Superseded in part (2026-10): `scripts/test-timing.sh` is now `internal/testpolicy/cmd/testtiming`, Go (gt-tpg0p.17); the shell below is the record of the original.
 
 # Test Suite Rewrite — Implementation Plan
 

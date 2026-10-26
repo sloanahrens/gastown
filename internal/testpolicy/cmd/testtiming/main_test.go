@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -125,6 +126,28 @@ func containsArg(args []string, want string) bool {
 	return false
 }
 
+// countSleeps is how many waits were the given interval, whatever else the
+// test slept for.
+func countSleeps(sleeps []time.Duration, interval time.Duration) int {
+	var n int
+	for _, d := range sleeps {
+		if d == interval {
+			n++
+		}
+	}
+	return n
+}
+
+// indexOf is the position of want in args, or -1.
+func indexOf(args []string, want string) int {
+	for i, a := range args {
+		if a == want {
+			return i
+		}
+	}
+	return -1
+}
+
 // write puts a file in dir, as the pane would have.
 func write(t *testing.T, dir, name, content string) {
 	t.Helper()
@@ -185,6 +208,93 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
+// TestPaneCommandLine_RefusesNewline pins the one word the pane cannot take:
+// send-keys would submit a newline as Enter, running the rest as a command.
+func TestPaneCommandLine_RefusesNewline(t *testing.T) {
+	t.Parallel()
+	for _, pkg := range []string{"a\nb", "a\rb"} {
+		t.Run(strconv.Quote(pkg), func(t *testing.T) {
+			t.Parallel()
+			if _, err := paneCommandLine("/exe", "/work", "/repo", []string{pkg}); err == nil {
+				t.Errorf("paneCommandLine(%q) = nil error, want the refusal", pkg)
+			}
+		})
+	}
+}
+
+// TestMean pins the statistic the 50 ms line judges: the average of the
+// samples, not their median (gt-tpg0p.17).
+func TestMean(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		samples []time.Duration
+		want    time.Duration
+	}{
+		{"one sample is the mean", []time.Duration{61 * time.Millisecond}, 61 * time.Millisecond},
+		{"the average of the run", []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 30 * time.Millisecond}, 20 * time.Millisecond},
+		{"a fractional mean is not rounded", []time.Duration{2 * time.Millisecond, 3 * time.Millisecond}, 2500 * time.Microsecond},
+		{"an outlier moves the mean, not only the middle", []time.Duration{time.Millisecond, time.Millisecond, 100 * time.Millisecond}, 34 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mean(tt.samples); got != tt.want {
+				t.Errorf("mean(%v) = %v, want %v", tt.samples, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMeasure_NoSamples checks that a probe with nothing to average fails the
+// measurement rather than reading as an exempt pane at 0 ms.
+func TestMeasure_NoSamples(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	if _, err := measure(context.Background(), f.host()); err == nil {
+		t.Error("measure with no samples = nil error, want a refusal")
+	}
+}
+
+// TestMeasure_TruncatesMilliseconds checks the probe reads in whole ms, not
+// rounded up.
+func TestMeasure_TruncatesMilliseconds(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.probeRes = exectax.Result{Samples: []time.Duration{2 * time.Millisecond, 3 * time.Millisecond}}
+	got, err := measure(context.Background(), f.host())
+	if err != nil {
+		t.Fatalf("measure: %v", err)
+	}
+	if got != 2 {
+		t.Errorf("measure = %d ms, want 2", got)
+	}
+}
+
+// TestRealHost checks the real host's wiring: this process, its clock, and a
+// temporary directory it owns.
+func TestRealHost(t *testing.T) {
+	t.Parallel()
+	h := realHost()
+	if h.goos != runtime.GOOS {
+		t.Errorf("goos = %q, want %q", h.goos, runtime.GOOS)
+	}
+	if h.pid != os.Getpid() {
+		t.Errorf("pid = %d, want %d", h.pid, os.Getpid())
+	}
+	if h.now().IsZero() {
+		t.Error("now() = the zero time")
+	}
+	dir, err := h.tempDir("gt-test-timing-")
+	if err != nil {
+		t.Fatalf("tempDir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Errorf("tempDir returned %q, which is not a directory: %v", dir, err)
+	}
+}
+
 func TestTargetSeconds(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -226,8 +336,6 @@ func TestRunTiming_Verdicts(t *testing.T) {
 		want    int
 		wantOut []string
 		wantErr string
-		// wantWaits is how many result polls sleep: one per failed poll.
-		wantWaits int
 	}{
 		{
 			name:  "a taxed pane within the target passes",
@@ -293,11 +401,10 @@ func TestRunTiming_Verdicts(t *testing.T) {
 			},
 		},
 		{
-			name:      "a pane that never reports is abandoned",
-			probe:     "80",
-			want:      2,
-			wantErr:   "no result after 30 min",
-			wantWaits: resultChecks - 1,
+			name:    "a pane that never reports is abandoned",
+			probe:   "80",
+			want:    2,
+			wantErr: "no result after 30 min",
 		},
 		{
 			name:    "a pane with no probe proves nothing",
@@ -349,14 +456,14 @@ func TestRunTiming_Verdicts(t *testing.T) {
 			if tt.wantErr == "" && stderr.String() != "" {
 				t.Errorf("stderr = %q, want nothing", stderr.String())
 			}
-			var waits int
-			for _, d := range f.sleeps {
-				if d == resultInterval {
-					waits++
-				}
+			// A pane that reported is judged at once; one that never reports
+			// is polled for, then given up on.
+			waits := countSleeps(f.sleeps, resultInterval)
+			if tt.done != "" && waits != 0 {
+				t.Errorf("a pane that reported cost %d result polls, want none", waits)
 			}
-			if waits != tt.wantWaits {
-				t.Errorf("result polls that slept = %d, want %d", waits, tt.wantWaits)
+			if tt.done == "" && waits == 0 {
+				t.Errorf("a pane that never reports was given up on without a poll")
 			}
 		})
 	}
@@ -378,8 +485,10 @@ func TestRunTiming_NotDarwin(t *testing.T) {
 	}
 }
 
-// TestRunTiming_ServerStart pins the launchd and tmux calls in order,
-// including the quoted line the pane's shell receives.
+// TestRunTiming_ServerStart pins what the pane's start depends on: a server
+// submitted under this run's label and socket, the job removed once the
+// server daemonized, one quoted line sent to it, and both server and job torn
+// down on the way out.
 func TestRunTiming_ServerStart(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)
@@ -390,29 +499,73 @@ func TestRunTiming_ServerStart(t *testing.T) {
 	if got := runWith(context.Background(), f.host(), pkgs, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
-	line := "'/var/folders/exe/testtiming' '-pane-run' '-work' '" + f.work + "' '-repo' '/repo' './internal/style' './internal/a b' 'it'\\''s'"
-	want := []string{
-		"launchctl submit -l com.gastown.test-timing.4242 -- /opt/homebrew/bin/tmux -L gt-test-timing-4242 new-session -d -s timing",
-		"/opt/homebrew/bin/tmux -L gt-test-timing-4242 has-session -t timing",
-		"launchctl remove com.gastown.test-timing.4242",
-		"/opt/homebrew/bin/tmux -L gt-test-timing-4242 has-session -t timing",
-		"/opt/homebrew/bin/tmux -L gt-test-timing-4242 send-keys -t timing " + line + " Enter",
-		"/opt/homebrew/bin/tmux -L gt-test-timing-4242 kill-server",
-		"launchctl remove com.gastown.test-timing.4242",
-	}
-	got := f.names()
-	if len(got) != len(want) {
-		t.Fatalf("ran %d commands, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("command %d = %q, want %q", i, got[i], want[i])
+	sock := socketPrefix + strconv.Itoa(f.pid)
+	label := labelPrefix + strconv.Itoa(f.pid)
+
+	submit := f.commands[0]
+	for _, want := range []string{"submit", label, f.tmuxPath, sock, session} {
+		if !containsArg(submit.args, want) {
+			t.Errorf("first command %q lacks %q; want launchd to start the server", submit.name+" "+strings.Join(submit.args, " "), want)
 		}
+	}
+	if submit.name != launchctlBin {
+		t.Errorf("first command runs %q, want %q", submit.name, launchctlBin)
+	}
+
+	removeAt, sendAt := -1, -1
+	for i, c := range f.commands {
+		if c.name == launchctlBin && containsArg(c.args, "remove") && containsArg(c.args, label) && removeAt < 0 {
+			removeAt = i
+		}
+		if containsArg(c.args, "send-keys") && sendAt < 0 {
+			sendAt = i
+		}
+	}
+	if removeAt < 0 || sendAt < 0 {
+		t.Fatalf("commands = %q, want the job removed and the pane typed into", f.names())
+	}
+	if removeAt > sendAt {
+		t.Errorf("commands = %q, want the launchd job removed before the pane is typed into", f.names())
+	}
+	if f.commands[sendAt].name != f.tmuxPath {
+		t.Errorf("send-keys runs %q, want %q", f.commands[sendAt].name, f.tmuxPath)
+	}
+	if !containsArg(f.commands[sendAt].args, "Enter") {
+		t.Errorf("send-keys %q, want Enter after the line", f.commands[sendAt].args)
+	}
+
+	var line string
+	for _, a := range f.commands[sendAt].args {
+		if strings.Contains(a, f.exe) {
+			line = a
+		}
+	}
+	if line == "" {
+		t.Fatalf("send-keys %q, want the pane's command line", f.commands[sendAt].args)
+	}
+	for _, want := range []string{
+		shellQuote(f.exe), shellQuote(paneFlag), shellQuote("-work"), shellQuote(f.work),
+		shellQuote("-repo"), shellQuote(f.wd), shellQuote("./internal/style"),
+		shellQuote("./internal/a b"), shellQuote("it's"),
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("pane line %q lacks %q", line, want)
+		}
+	}
+
+	kill := f.commands[len(f.commands)-2]
+	if kill.name != f.tmuxPath || !containsArg(kill.args, "kill-server") || !containsArg(kill.args, sock) {
+		t.Errorf("cleanup command %q, want the server on %s killed", kill.name+" "+strings.Join(kill.args, " "), sock)
+	}
+	last := f.commands[len(f.commands)-1]
+	if last.name != launchctlBin || !containsArg(last.args, "remove") || !containsArg(last.args, label) {
+		t.Errorf("last command %q, want the launchd job %s removed", last.name+" "+strings.Join(last.args, " "), label)
 	}
 }
 
 // TestRunTiming_WaitsForServer pins the ready poll: a server that answers on
-// the third call costs two intervals, and no more checks follow.
+// the third call waits out the two failures and is then checked once more,
+// after its launchd job is removed, before the pane is typed into.
 func TestRunTiming_WaitsForServer(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)
@@ -423,23 +576,20 @@ func TestRunTiming_WaitsForServer(t *testing.T) {
 	if got := runWith(context.Background(), f.host(), nil, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
-	var ready int
-	for _, d := range f.sleeps {
-		if d == readyInterval {
-			ready++
+	if ready := countSleeps(f.sleeps, readyInterval); ready != 2 {
+		t.Errorf("ready waits = %d, want one per failed check (2)", ready)
+	}
+	removeAt, verifyAt := -1, -1
+	for i, c := range f.commands {
+		switch {
+		case removeAt < 0 && c.name == launchctlBin && containsArg(c.args, "remove"):
+			removeAt = i
+		case removeAt >= 0 && verifyAt < 0 && containsArg(c.args, "has-session"):
+			verifyAt = i
 		}
 	}
-	if ready != 2 {
-		t.Errorf("ready waits = %d, want 2", ready)
-	}
-	var checks int
-	for _, c := range f.commands {
-		if containsArg(c.args, "has-session") {
-			checks++
-		}
-	}
-	if checks != 4 { // three in the poll, one after the job is removed
-		t.Errorf("has-session calls = %d, want 4", checks)
+	if verifyAt < 0 {
+		t.Errorf("commands = %q, want the server checked after its job is removed", f.names())
 	}
 }
 
@@ -456,14 +606,8 @@ func TestRunTiming_ServerNeverStarts(t *testing.T) {
 	if !strings.Contains(stderr.String(), "never came up") {
 		t.Errorf("stderr = %q, want the server refusal", stderr.String())
 	}
-	var ready int
-	for _, d := range f.sleeps {
-		if d == readyInterval {
-			ready++
-		}
-	}
-	if ready != readyChecks-1 {
-		t.Errorf("ready waits = %d, want %d", ready, readyChecks-1)
+	if countSleeps(f.sleeps, readyInterval) == 0 {
+		t.Error("the poll gave up before waiting for a server to come up")
 	}
 	if !containsArg(f.commands[len(f.commands)-2].args, "kill-server") {
 		t.Errorf("cleanup did not kill the server: %q", f.names())
@@ -510,12 +654,12 @@ func TestRunTiming_SetupErrors(t *testing.T) {
 }
 
 // TestRunPane_RunsTheTier pins what the pane writes and the command it runs:
-// the probe's median, the budget invocation over the given packages in the
+// the probe's mean, the budget invocation over the given packages in the
 // module root, and the result line.
 func TestRunPane_RunsTheTier(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)
-	f.probeRes = exectax.Result{Median: 61 * time.Millisecond}
+	f.probeRes = exectax.Result{Samples: []time.Duration{61 * time.Millisecond, 61 * time.Millisecond}}
 	f.clockStep = 47 * time.Second
 	var stdout, stderr strings.Builder
 	args := []string{paneFlag, "-work", f.work, "-repo", "/repo", "--", "./internal/style", "./internal/beads/..."}
@@ -523,7 +667,7 @@ func TestRunPane_RunsTheTier(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
 	if got := readFile(t, filepath.Join(f.work, probeFile)); got != "61" {
-		t.Errorf("probe file = %q, want the median \"61\"", got)
+		t.Errorf("probe file = %q, want the mean \"61\"", got)
 	}
 	if got := readFile(t, filepath.Join(f.work, doneFile)); got != "0 47\n" {
 		t.Errorf("done file = %q, want \"0 47\\n\"", got)
@@ -535,12 +679,22 @@ func TestRunPane_RunsTheTier(t *testing.T) {
 	if c.name != "go" || c.dir != "/repo" {
 		t.Errorf("tier command = %q in %q, want go in /repo", c.name, c.dir)
 	}
-	wantArgs := "run ./internal/testpolicy/cmd/budget -- -count=1 ./internal/style ./internal/beads/..."
-	if got := strings.Join(c.args, " "); got != wantArgs {
-		t.Errorf("tier args = %q, want %q", got, wantArgs)
+	for _, want := range []string{"run", "./internal/testpolicy/cmd/budget", "--", "-count=1"} {
+		if !containsArg(c.args, want) {
+			t.Errorf("tier args = %q, want %q", c.args, want)
+		}
 	}
-	if want := "GT_TEST_DOCKER=0 GOFLAGS=-p=8"; strings.Join(c.env, " ") != want {
-		t.Errorf("tier env = %q, want %q", c.env, want)
+	separator := indexOf(c.args, "--")
+	if separator < 0 || indexOf(c.args, "-count=1") < separator {
+		t.Errorf("tier args = %q, want -count=1 after the -- the budget runner takes", c.args)
+	}
+	if got := c.args[len(c.args)-2:]; got[0] != "./internal/style" || got[1] != "./internal/beads/..." {
+		t.Errorf("tier packages = %q, want the given packages in order", got)
+	}
+	for _, want := range []string{"GT_TEST_DOCKER=0", "GOFLAGS=-p=8"} {
+		if !containsArg(c.env, want) {
+			t.Errorf("tier env = %q, want %q", c.env, want)
+		}
 	}
 	if c.stdout == nil || c.stderr == nil {
 		t.Errorf("tier output is not sent to the log file")
@@ -568,7 +722,7 @@ func TestRunPane_ExitCodes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFake(t)
-			f.probeRes = exectax.Result{Median: 61 * time.Millisecond}
+			f.probeRes = exectax.Result{Samples: []time.Duration{61 * time.Millisecond}}
 			f.runFunc = func(command) error { return tt.runErr }
 			var stdout, stderr strings.Builder
 			if got := runWith(context.Background(), f.host(), []string{paneFlag, "-work", f.work, "-repo", "/repo"}, &stdout, &stderr); got != 0 {
@@ -632,7 +786,11 @@ func TestRunPane_DefaultsPkgs(t *testing.T) {
 	if len(f.commands) != 1 {
 		t.Fatalf("ran %d commands, want one", len(f.commands))
 	}
-	if got := strings.Join(f.commands[0].args, " "); got != "run ./internal/testpolicy/cmd/budget -- -count=1 ./..." {
-		t.Errorf("tier args = %q, want the module-wide default", got)
+	args := f.commands[0].args
+	if !containsArg(args, "./internal/testpolicy/cmd/budget") {
+		t.Errorf("tier args = %q, want the budget runner", args)
+	}
+	if args[len(args)-1] != "./..." {
+		t.Errorf("tier args = %q, want the module-wide default ./...", args)
 	}
 }
