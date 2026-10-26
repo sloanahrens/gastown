@@ -2,10 +2,12 @@ package land
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -26,6 +28,24 @@ func omStatsRecords(t *testing.T, recs ...ReviewRecord) string {
 		lines = append(lines, omStatsRecordLine(t, rec))
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// omStatsRecordWithoutFigures renders rec with the named JSON fields removed,
+// for a line written before that figure was always present.
+func omStatsRecordWithoutFigures(t *testing.T, rec ReviewRecord, fields ...string) string {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(omStatsRecordLine(t, rec)), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, field := range fields {
+		delete(m, field)
+	}
+	line, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(line)
 }
 
 func omStatsAt(day int, hour, min, sec int) time.Time {
@@ -307,4 +327,67 @@ func TestAggregateOmStatsOrdersTopBeads(t *testing.T) {
 	if stats.Rounds.ThreePlus != 1 || stats.Rounds.One != OmStatsTopBeads+1 {
 		t.Errorf("rounds = %+v, want one bead at three rounds", stats.Rounds)
 	}
+}
+
+// TestAggregateOmStatsSkipsAnOversizedLine: one enormous line is malformed
+// data to skip and count, not a read error that discards every other record.
+func TestAggregateOmStatsSkipsAnOversizedLine(t *testing.T) {
+	t.Parallel()
+	records := omStatsRecordLine(t, ReviewRecord{
+		BeadID: "gt-a", Rig: "gastown", Attempt: 1, Score: 0.90,
+		Verdict: VerdictApprove, Agent: "opus", At: omStatsAt(16, 10, 0, 0),
+	}) + "\n" + strings.Repeat("x", 2<<20) + "\n"
+
+	stats, err := AggregateOmStats(strings.NewReader(records), nil, time.Time{})
+	if err != nil {
+		t.Fatalf("AggregateOmStats: %v", err)
+	}
+	if stats.Skipped != 1 {
+		t.Errorf("skipped = %d, want 1", stats.Skipped)
+	}
+	wantOmStatsDay(t, stats, OmStatsDay{Day: "2026-10-16", Approvals: 1, Rate: 0})
+}
+
+// TestAggregateOmStatsReturnsAReadError: a source that fails is an error, not a
+// partial report that reads as the whole truth.
+func TestAggregateOmStatsReturnsAReadError(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	if _, err := AggregateOmStats(iotest.ErrReader(boom), nil, time.Time{}); err == nil || !strings.Contains(err.Error(), "review records") {
+		t.Errorf("records read error = %v, want it to name the review records", err)
+	}
+	records := omStatsRecords(t, ReviewRecord{
+		BeadID: "gt-a", Rig: "gastown", Attempt: 1, Score: 0.90,
+		Verdict: VerdictApprove, At: omStatsAt(16, 10, 0, 0),
+	})
+	if _, err := AggregateOmStats(strings.NewReader(records), iotest.ErrReader(boom), time.Time{}); err == nil || !strings.Contains(err.Error(), "daemon log") {
+		t.Errorf("log read error = %v, want it to name the daemon log", err)
+	}
+}
+
+// TestAggregateOmStatsRecordMeansIgnoreAbsentFigures: a record line that names
+// no score or no findings — an older or hand-written line — stays out of that
+// mean, while a named zero is a sample.
+func TestAggregateOmStatsRecordMeansIgnoreAbsentFigures(t *testing.T) {
+	t.Parallel()
+	named := omStatsRecordLine(t, ReviewRecord{
+		BeadID: "gt-a", Rig: "gastown", Attempt: 1, Score: 0.60,
+		Verdict: VerdictRequestChanges, Findings: 4, At: omStatsAt(16, 10, 0, 0),
+	})
+	absent := omStatsRecordWithoutFigures(t, ReviewRecord{
+		BeadID: "gt-b", Rig: "gastown", Attempt: 1, Verdict: VerdictRequestChanges,
+		At: omStatsAt(16, 11, 0, 0),
+	}, "score", "findings")
+	zero := omStatsRecordLine(t, ReviewRecord{
+		BeadID: "gt-c", Rig: "gastown", Attempt: 1, Verdict: VerdictRequestChanges,
+		At: omStatsAt(16, 12, 0, 0),
+	})
+
+	stats, err := AggregateOmStats(strings.NewReader(strings.Join([]string{named, absent, zero}, "\n")+"\n"), nil, time.Time{})
+	if err != nil {
+		t.Fatalf("AggregateOmStats: %v", err)
+	}
+	// The absent line is a rejection but no sample, so the named figures and
+	// gt-c's named zeros are the two samples: findings 4/2, score 0.60/2.
+	wantOmStatsDay(t, stats, OmStatsDay{Day: "2026-10-16", Rejections: 3, Rate: 1, MeanFindings: 2, MeanScore: 0.30})
 }

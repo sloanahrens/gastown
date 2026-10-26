@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -41,11 +42,16 @@ func omStatsFixtureLines(t *testing.T) (records, log string) {
 	return strings.Join(lines, "\n") + "\n", log
 }
 
-// omStatsFixture writes the fixture into a temporary directory and returns the
-// two paths, for the tests that drive the real filesystem.
+// omStatsFixture writes the fixture into a fresh temporary directory and
+// returns the two paths, for the tests that drive the real filesystem.
 func omStatsFixture(t *testing.T) (recordsPath, logPath string) {
 	t.Helper()
-	dir := t.TempDir()
+	return writeOmStatsFixture(t, t.TempDir())
+}
+
+// writeOmStatsFixture writes the fixture's two files into dir.
+func writeOmStatsFixture(t *testing.T, dir string) (recordsPath, logPath string) {
+	t.Helper()
 	records, log := omStatsFixtureLines(t)
 	recordsPath = filepath.Join(dir, land.ReviewsFileName)
 	if err := os.WriteFile(recordsPath, []byte(records), 0o600); err != nil {
@@ -56,6 +62,41 @@ func omStatsFixture(t *testing.T) (recordsPath, logPath string) {
 		t.Fatalf("writing the log: %v", err)
 	}
 	return recordsPath, logPath
+}
+
+// omStatsTree snapshots every path under dir: for a directory its kind, for a
+// file its size, modification time and bytes. Adding, removing or rewriting a
+// file changes the snapshot; reading leaves it alone.
+func omStatsTree(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	tree := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			tree[rel] = "dir"
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		tree[rel] = fmt.Sprintf("%d %d %s", info.Size(), info.ModTime().UnixNano(), data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshotting %s: %v", dir, err)
+	}
+	return tree
 }
 
 // landOmStatsFakeFS is the in-memory filesystem the write test hands the
@@ -204,41 +245,56 @@ func TestLandOmStatsSinceFiltersBothForms(t *testing.T) {
 	}
 }
 
-// TestLandOmStatsWritesNothing: the command is a read. Both forms run over a
-// fake filesystem that offers Open alone, and its files are byte-identical
-// afterwards with no path added.
+// TestLandOmStatsWritesNothing: the command is a read. Both forms run against
+// a real temporary directory, whose tree is snapshotted before and after, so a
+// write through os — even one that leaves the bytes the same — changes a size,
+// a modification time or the entry list and fails the test. The in-memory fake
+// runs beside it and pins the read: the command opens its two sources and
+// nothing else.
 func TestLandOmStatsWritesNothing(t *testing.T) {
 	t.Parallel()
-	records, log := omStatsFixtureLines(t)
-	fake := &landOmStatsFakeFS{files: map[string]string{
-		"/town/reviews.jsonl": records,
-		"/town/daemon.log":    log,
-	}}
-	before := map[string]string{}
-	for name, data := range fake.files {
-		before[name] = data
-	}
+	dir := t.TempDir()
+	recordsPath, logPath := writeOmStatsFixture(t, dir)
+	before := omStatsTree(t, dir)
 
 	for _, tc := range []struct {
 		since  string
 		asJSON bool
 	}{{"", false}, {"2026-10-16", true}} {
 		var out bytes.Buffer
-		if err := landOmStatsReportFrom(fake, omStatsNoTown(t), &out, tc.since, "/town/reviews.jsonl", "/town/daemon.log", tc.asJSON); err != nil {
-			t.Fatalf("landOmStatsReportFrom: %v", err)
+		if err := landOmStatsReport(&out, tc.since, recordsPath, logPath, tc.asJSON); err != nil {
+			t.Fatalf("landOmStatsReport: %v", err)
 		}
 	}
 
-	if len(fake.files) != len(before) {
-		t.Fatalf("file count %d -> %d: the command wrote a file", len(before), len(fake.files))
+	// The town defaults are the other paths a write could reach: point them at
+	// the same directory through the fake, so an os-level write there lands in
+	// the snapshot too.
+	records, log := omStatsFixtureLines(t)
+	townRecords := land.TownReviewsFile(dir).Path
+	townLog := filepath.Join(dir, "daemon", daemonlog.FileName)
+	fake := &landOmStatsFakeFS{files: map[string]string{
+		townRecords: records,
+		townLog:     log,
+	}}
+	var out bytes.Buffer
+	if err := landOmStatsReportFrom(fake, func() (string, error) { return dir, nil }, &out, "", "", "", false); err != nil {
+		t.Fatalf("landOmStatsReportFrom: %v", err)
+	}
+
+	after := omStatsTree(t, dir)
+	if len(after) != len(before) {
+		t.Fatalf("tree entries %d -> %d: the command wrote a path", len(before), len(after))
 	}
 	for name, want := range before {
-		if got := fake.files[name]; got != want {
+		if got, ok := after[name]; !ok {
+			t.Errorf("%s disappeared: the command wrote the tree", name)
+		} else if got != want {
 			t.Errorf("%s changed: %q -> %q", name, want, got)
 		}
 	}
 	for _, name := range fake.opened {
-		if _, ok := before[name]; !ok {
+		if name != townRecords && name != townLog {
 			t.Errorf("the command opened %q, which is not one of its sources", name)
 		}
 	}
@@ -285,6 +341,47 @@ func TestLandOmStatsNamedSourceMustExist(t *testing.T) {
 		}
 		if out.Len() != 0 {
 			t.Errorf("%s: printed a report after the error:\n%s", tc.name, out.String())
+		}
+	}
+}
+
+// TestLandOmStatsResolvesTheTownFromCwd drives the production resolver: with
+// both flags empty, the report finds the town by walking up from its working
+// directory and opens the town's two defaults.
+//
+//testpolicy:allow no-chdir — the working directory is the input under test: the command finds the town by walking up from it
+func TestLandOmStatsResolvesTheTownFromCwd(t *testing.T) {
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	records, log := omStatsFixtureLines(t)
+	recordsPath := land.TownReviewsFile(town).Path
+	if err := os.MkdirAll(filepath.Dir(recordsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordsPath, []byte(records), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(town, "daemon", daemonlog.FileName)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(town)
+
+	var out bytes.Buffer
+	if err := landOmStatsReport(&out, "", "", "", false); err != nil {
+		t.Fatalf("landOmStatsReport with empty flags: %v", err)
+	}
+	for _, want := range []string{"2026-10-14*", "2026-10-16", "2026-10-17"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the town's defaults did not reach the report: %q missing from\n%s", want, out.String())
 		}
 	}
 }
