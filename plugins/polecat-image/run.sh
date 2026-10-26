@@ -52,7 +52,7 @@ OPENSHELL="${POLECAT_IMAGE_OPENSHELL:-openshell}"
 CRANE="${POLECAT_IMAGE_CRANE:-crane}"
 PGREP="${POLECAT_IMAGE_PGREP:-pgrep}"
 
-log() { echo "[polecat-image] $*"; }
+log() { echo "[polecat-image] $(date +%H:%M:%S) $*"; }
 die() { log "ERROR: $*"; exit 1; }
 
 # installed_commit prints the commit the installed gt was built from: the last
@@ -181,12 +181,14 @@ build_at() {
   rm -rf "$WORKTREE"
   "$GIT" -C "$RIG_REPO" worktree add --detach "$WORKTREE" "$full" >/dev/null 2>&1 || die "cannot make a worktree of $full under $BUILD_ROOT"
   log "building $IMAGE at ${full:0:12} (BD_SRC=$BD_SRC)"
+  local build_t0=$SECONDS
   if ! out="$(cd "$WORKTREE" && "$MAKE" polecat-image "BD_SRC=$BD_SRC" 2>&1)"; then
     printf '%s\n' "$out" | tail -n 15
     die "make polecat-image failed at ${full:0:12}"
   fi
   "$GIT" -C "$RIG_REPO" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || rm -rf "$WORKTREE"
   WORKTREE=""
+  log "build took $((SECONDS - build_t0))s at ${full:0:12}"
   same_commit "$(image_commit)" "$full" || die "after the build $IMAGE carries '$(image_commit)', not ${full:0:12}"
 }
 
