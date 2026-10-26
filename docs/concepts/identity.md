@@ -261,9 +261,12 @@ bd count --status=closed --closed-after=2025-01-01
 ### Model Comparison
 
 A bead's `agent:<alias>` label pins it to the seat that works it (read by
-`poolPinnedAgent`, `internal/cmd/sling_pool.go`). `gt config agent list` shows
-each agent's command and arguments, not a model name, so map an alias to its
-model through the seat map (`gt pool show`) rather than assuming one.
+`poolPinnedAgent`, `internal/cmd/sling_pool.go`). The alias is an agent's name,
+and the model is in that agent's arguments: `gt config agent list` prints each
+agent's `Args`, and the Claude presets carry a `--model` flag there
+(`claude-sonnet` runs `--model sonnet[1m]`, `claude-haiku` runs `--model haiku`;
+`internal/config/cost_tier.go`). An agent with no `--model` flag runs the CLI's
+default model, so read the model from the arguments, not from the alias.
 
 Count closed beads per label to compare agents:
 
@@ -271,7 +274,8 @@ Count closed beads per label to compare agents:
 # Completed work per agent label
 bd count --status=closed --by-label
 
-# One agent: completed beads, then those the rework label marks
+# One agent: completed beads, then those the rework label marks.
+# Repeated --label flags are ANDed (bd count --help: "must have ALL").
 bd count --status=closed --label=agent:claude-sonnet
 bd count --status=closed --label=agent:claude-sonnet --label=rework
 ```
