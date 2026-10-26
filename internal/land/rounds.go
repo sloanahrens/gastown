@@ -87,7 +87,8 @@ const rebuttalMarker = "REBUTTAL:"
 // RoundsLedger is one landing's record of what each om round raised and what
 // became of it, stored at <OutDir>/rounds-<bead>.json (gt-yphcl). A round is
 // the landing's rework attempt, the number the reviews log records as
-// ReviewRecord.Attempt.
+// ReviewRecord.Attempt. The landing path appends; gt-3l5qy settles the round
+// against the next one's classification and hands om the rendered history.
 type RoundsLedger struct {
 	// OutDir is the directory the ledger file lives in.
 	OutDir string
@@ -168,10 +169,11 @@ type renderedFinding struct {
 	Outcome Outcome `json:"outcome"`
 }
 
-// Append records one round of findings, stamped with the injected clock. A
-// round already in the ledger is replaced, keeping the outcome every finding
-// it does not re-raise still carries: a retry of the same attempt re-reviews
-// the same findings, and a settled outcome is the bead's, not the retry's.
+// Append records one round of findings, the head it judged and the moment the
+// injected clock reports. A round already in the ledger is replaced, keeping
+// the outcome every finding it does not re-raise still carries: a retry of the
+// same attempt re-reviews the same findings, and a settled outcome is the
+// bead's, not the retry's.
 func (l *RoundsLedger) Append(round int, head string, findings []Finding) error {
 	if round < 1 {
 		return fmt.Errorf("rounds ledger: round %d is not a landing attempt", round)
