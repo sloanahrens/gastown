@@ -1,11 +1,12 @@
-// Command integrationvet compiles every package the integration build tag adds
-// files to, so an integration-only file that stops building fails the gate
-// instead of the post-merge rehearsal (gt-w3aby).
+// Command integrationvet type-checks every package the integration build tag
+// adds files to, so an integration-only file that stops type-checking fails the
+// gate instead of the post-merge rehearsal (gt-w3aby).
 //
 //	go run ./internal/testpolicy/cmd/integrationvet
 //
-// `make gate` runs it beside the unit tier. It is compile-only: go vet builds
-// each selected package and its tests, and no test binary runs.
+// `make gate` runs it beside the unit tier. It runs go vet with the tag and no
+// test binary: vet type-checks each selected package and its tests, and
+// analyzes them, but it builds nothing it runs.
 package main
 
 import (
@@ -38,21 +39,23 @@ func main() {
 	os.Exit(run(ctx, os.Args[1:], os.Stderr))
 }
 
-// run returns 0 when every selected package compiles, 1 when one does not, and
-// 2 when the selection itself could not be made.
+// run returns 0 when every selected package type-checks, 1 when one does not,
+// and 2 when the selection itself could not be made.
 func run(ctx context.Context, args []string, out io.Writer) int {
-	return runWith(ctx, args, out, vetModule)
+	return runWith(ctx, args, out, runCommand)
 }
 
-// vetter runs one module's go vet invocation and returns its output with its
-// error. runWith takes it so a test can drive the verdict without a go binary.
-type vetter func(ctx context.Context, root string, m module, jobs int) (string, error)
+// runner runs one program in dir and returns its combined output and its error.
+// runWith takes it so a test sees the argv and the working directory the go
+// binary would get; runCommand is the real one.
+type runner func(ctx context.Context, dir, name string, args ...string) (string, error)
 
-func runWith(ctx context.Context, args []string, out io.Writer, vet vetter) int {
+// runWith is run with the program's invocation injectable.
+func runWith(ctx context.Context, args []string, out io.Writer, run runner) int {
 	fs := flag.NewFlagSet("integrationvet", flag.ContinueOnError)
 	fs.SetOutput(out)
 	root := fs.String("root", ".", "directory to search for packages the integration tag adds files to")
-	jobs := fs.Int("jobs", defaultJobs(), "packages go vet compiles at once in one module")
+	jobs := fs.Int("jobs", defaultJobs(), "packages go vet type-checks at once in one module")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -79,7 +82,7 @@ func runWith(ctx context.Context, args []string, out io.Writer, vet vetter) int 
 	}
 
 	start := time.Now()
-	results := vetAll(ctx, cleanRoot, modules, *jobs, vet)
+	results := vetAll(ctx, cleanRoot, modules, *jobs, run)
 	wall := time.Since(start).Round(100 * time.Millisecond)
 	if ctx.Err() != nil {
 		fmt.Fprintf(out, "integration vet: interrupted after %s\n", wall)
@@ -100,7 +103,7 @@ func runWith(ctx context.Context, args []string, out io.Writer, vet vetter) int 
 		fmt.Fprintf(out, "integration vet: FAILED in %d of %d modules after %s\n", failed, len(results), wall)
 		return 1
 	}
-	fmt.Fprintf(out, "integration vet: %d packages in %d modules compile with -tags integration in %s\n", len(pkgs), len(results), wall)
+	fmt.Fprintf(out, "integration vet: %d packages in %d modules type-check with -tags integration in %s\n", len(pkgs), len(results), wall)
 	return 0
 }
 
@@ -169,15 +172,16 @@ type result struct {
 }
 
 // vetAll vets every module, one go vet invocation per module so go's own
-// parallelism and result cache serve its packages.
-func vetAll(ctx context.Context, root string, modules []module, jobs int, vet vetter) []result {
+// parallelism and result cache serve its packages. Each runs from its own
+// module directory, so a nested module resolves its own go.mod.
+func vetAll(ctx context.Context, root string, modules []module, jobs int, run runner) []result {
 	var wg sync.WaitGroup
 	results := make([]result, len(modules))
 	for i, m := range modules {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			output, err := vet(ctx, root, m, jobs)
+			output, err := run(ctx, filepath.Join(root, m.dir), "go", vetArgs(m, jobs)...)
 			results[i] = result{module: m.dir, pkgs: m.pkgs, output: output, err: err}
 		}()
 	}
@@ -186,11 +190,11 @@ func vetAll(ctx context.Context, root string, modules []module, jobs int, vet ve
 	return results
 }
 
-// vetModule runs go vet with the integration tag on a module's selected
-// packages, from the module directory so nested modules resolve their own.
-func vetModule(ctx context.Context, root string, m module, jobs int) (string, error) {
-	cmd := exec.CommandContext(ctx, "go", vetArgs(m, jobs)...)
-	cmd.Dir = filepath.Join(root, m.dir)
+// runCommand is the real runner: the named program in dir, its output
+// combined.
+func runCommand(ctx context.Context, dir, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }

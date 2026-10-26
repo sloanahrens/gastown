@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Tests for the Makefile's gate contract (docs/testing.md, "The gate"):
-# `make gate`, `make test-slow` and `make test-integration` are the test
-# tiers (`make test` only chains them), the gate runs the exec-tax preflight
-# (a warning fails nothing, gt-2ycne.1), lint, build and the unit
-# tier over every package in that order (no slow tier since gt-ik4a1.9), with
-# the integration tag's compile check beside the unit tier (gt-w3aby),
+# Tests for the Makefile's gate contract. Before changing a gate recipe, read
+# docs/testing.md, "The gate": that section is the one description of the
+# stages and their order, and this script checks the recipe against it
+# (gt-2ycne.1, gt-ik4a1.9, gt-w3aby).
+# The names the cases below lean on: `make gate`, `make test-slow` and
+# `make test-integration` are the test tiers (`make test` only chains them),
 # test-slow runs the gate and then the shell tests, neither starts a container
 # or takes the container-gate slot, the integration tier runs every
 # Docker-backed package listed in internal/testpolicy/docker.txt, and
@@ -58,17 +58,10 @@ if [[ -z "$shell" ]]; then
 else
   fail "gate leaves the shell tests (scripts/test-makefile.sh) to test-slow" "$out"
 fi
-# The integration tag's compile check (gt-w3aby) starts on the unit tier's
-# line rather than as a stage of its own: it shares the wait that line already
-# has, and a tree whose integration-only code stopped building is red.
-vet=$(line_of "$out" "cmd/integrationvet")
-if [[ -n "$vet" && "$((vet + 1))" == "$unit" ]] \
-  && grep -q -F 'integrationvet >"$vetlog" 2>&1 & vet=$!;' <<<"$out" \
-  && grep -q -F 'GT_TEST_DOCKER=0 go test -timeout 20m ./... & gt=$!;' <<<"$out"; then
-  pass "gate starts the integration vet on the line before the unit tier, in the same shell (gt-w3aby)"
-else
-  fail "gate starts the integration vet on the line before the unit tier, in the same shell (lines: vet=$vet unit=$unit)" "$out"
-fi
+# The integration tag's type check shares the unit tier's wait rather than
+# opening a stage of its own (gt-w3aby). -n prints no concurrency, so that
+# property is shown below by the stubs: the vet stub logs only while the unit
+# tier is running, which a serial recipe cannot produce.
 # gt-s1vff: the gate's unit tier is plain go test, so the test result cache
 # reruns only the packages a landing can affect; the budget runner's -exec
 # wrapper bypassed the cache and reran every test on every landing. Budgets
@@ -592,6 +585,17 @@ cat >"$TMP/bin/go" <<'STUB'
 #!/usr/bin/env bash
 echo "go $1 GT_TEST_DOCKER=${GT_TEST_DOCKER:-unset}" >>"$STUB_LOG"
 [[ "${PWD##*/}" == tracker ]] && echo "go $1 in tracker" >>"$STUB_LOG"
+# The unit tier holds this marker open until the integration vet stub has
+# logged against it, so the green case can tell a vet running beside the tier
+# from one that ran before or after it (gt-w3aby). Cases whose target runs no
+# vet skip the wait, which is bounded either way.
+if [[ "$1" == test ]]; then
+  : >"${STUB_UNIT_STARTED:-/dev/null}"
+  if [[ -n "${STUB_VET_EXPECTED:-}" ]]; then
+    for _ in $(seq 1 30); do [[ -e "${STUB_VET_DONE:-/nonexistent}" ]] && break; sleep 0.1; done
+  fi
+  rm -f "${STUB_UNIT_STARTED:-/dev/null}"
+fi
 if [[ "$1" == test && -n "${STUB_GO_INTERRUPT:-}" ]]; then
   # Signal the recipe shell (the parent), then wait to be killed.
   kill -TERM "$PPID"
@@ -637,10 +641,23 @@ exit 0
 STUB
 # The integration vet, which the real gate reaches through `go run`: the go
 # stub cannot vet, so every case below points INTEGRATION_VET at this stub. It
-# fails only when STUB_VET_FAIL is set, and logs its run either way.
+# fails only when STUB_VET_FAIL is set. It logs whether it saw the unit tier
+# running, then releases the go stub's wait; a recipe that serialized the two
+# logs "apart" and fails the green case instead of hanging the suite
+# (gt-w3aby).
 cat >"$TMP/vet.sh" <<'STUB'
 #!/usr/bin/env bash
-echo "integration-vet" >>"$STUB_LOG"
+beside=0
+for _ in $(seq 1 50); do
+  [[ -e "${STUB_UNIT_STARTED:-/nonexistent}" ]] && { beside=1; break; }
+  sleep 0.1
+done
+if [[ "$beside" == 1 ]]; then
+  echo "integration-vet beside the unit tier" >>"$STUB_LOG"
+else
+  echo "integration-vet apart from the unit tier" >>"$STUB_LOG"
+fi
+: >"${STUB_VET_DONE:-/dev/null}"
 if [[ -n "${STUB_VET_FAIL:-}" ]]; then
   echo "broken/b.go:2:2: undefined: missing" >&2
   exit 1
@@ -660,26 +677,33 @@ run_gate() {
   while [[ $# -gt 0 && "$1" != -- ]]; do flags+=("$1"); shift; done
   [[ $# -gt 0 ]] && shift
   : >"$TMP/calls"
+  rm -f "$TMP/unit-started" "$TMP/vet-done"
+  # A tmpdir of its own, emptied per case, so a case can assert the recipe left
+  # no temp file behind.
+  rm -rf "$TMP/tmpdir"; mkdir -p "$TMP/tmpdir"
+  local vet_expected=1
+  case "${TARGET:-gate}" in presubmit|test-integration) vet_expected=0 ;; esac
   local rc=0
-  env "$@" STUB_LOG="$TMP/calls" GT_TEST_DOCKER=1 PATH="$TMP/bin:$PATH" \
+  env "$@" STUB_LOG="$TMP/calls" STUB_UNIT_STARTED="$TMP/unit-started" STUB_VET_DONE="$TMP/vet-done" \
+    STUB_VET_EXPECTED="$vet_expected" GT_TEST_DOCKER=1 TMPDIR="$TMP/tmpdir" PATH="$TMP/bin:$PATH" \
     make -C "$ROOT" --no-print-directory "${flags[@]}" "${TARGET:-gate}" SHELL_TESTS="$TMP/shell-tests.sh" EXEC_TAX_PREFLIGHT="$TMP/preflight.sh" INTEGRATION_VET="$TMP/vet.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
   echo "$rc"
 }
 
 rc=$(run_gate)
-if [[ "$rc" == 0 ]] && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -x 'go test GT_TEST_DOCKER=0' "$TMP/calls" && grep -q -x 'integration-vet' "$TMP/calls" && ! grep -q -x 'shell-tests' "$TMP/calls" && grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' "$TMP/calls"; then
-  pass "green stubs: exit 0 with the wall printed, lint waited on the lock, the Go suite and integration vet ran, and the suite saw GT_TEST_DOCKER=0 despite an inherited 1"
+if [[ "$rc" == 0 ]] && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -x 'go test GT_TEST_DOCKER=0' "$TMP/calls" && grep -q -x 'integration-vet beside the unit tier' "$TMP/calls" && ! grep -q -x 'shell-tests' "$TMP/calls" && grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' "$TMP/calls"; then
+  pass "green stubs: exit 0 with the wall printed, lint waited on the lock, the integration vet ran beside the Go suite, and the suite saw GT_TEST_DOCKER=0 despite an inherited 1"
 else
-  fail "green stubs: exit 0 with the wall printed, lint waited on the lock, the Go suite and integration vet ran, and the suite saw GT_TEST_DOCKER=0 despite an inherited 1 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+  fail "green stubs: exit 0 with the wall printed, lint waited on the lock, the integration vet ran beside the Go suite, and the suite saw GT_TEST_DOCKER=0 despite an inherited 1 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
 # The integration vet's own failure fails the gate and names its stage, after
-# printing what the compile said (gt-w3aby).
+# printing what vet said (gt-w3aby).
 rc=$(run_gate -o lint -- STUB_VET_FAIL=1)
 if [[ "$rc" != 0 ]] && grep -q -F 'undefined: missing' "$TMP/err" && grep -q -F 'gate: FAILED at integration vet' "$TMP/err" && ! grep -q -F 'gate: PASSED' "$TMP/err"; then
-  pass "integration vet fails: non-zero, prints the compiler error, and names the stage"
+  pass "integration vet fails: non-zero, prints vet's error, and names the stage"
 else
-  fail "integration vet fails: non-zero, prints the compiler error, and names the stage (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+  fail "integration vet fails: non-zero, prints vet's error, and names the stage (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
 # The preflight's warning path: a taxed host says so, and the gate still
@@ -786,6 +810,14 @@ if [[ "$rc" != 0 ]] && ! grep -q -F 'gate: PASSED' "$TMP/err" && ! grep -q -F 's
   pass "interrupted gate: non-zero, and the trap stopped the running suite"
 else
   fail "interrupted gate: non-zero, and the trap stopped the running suite (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+# The interrupt reaches the vet's temp log only through the trap: the `rm`
+# after the wait is never reached (gt-w3aby).
+left=$(find "$TMP/tmpdir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)
+if [[ -z "$left" ]]; then
+  pass "interrupted gate: the trap removed the vet's temp log"
+else
+  fail "interrupted gate: the trap removed the vet's temp log" "$(ls -la "$TMP/tmpdir")"
 fi
 
 rc=$(TARGET=test-slow run_gate -o lint)

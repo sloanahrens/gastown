@@ -48,24 +48,24 @@ func fixtureTree(t *testing.T) string {
 	return root
 }
 
-// vetCall is one module the command asked the vetter to compile.
+// vetCall is one program the command ran: where, what, and with which argv.
 type vetCall struct {
-	module string
-	pkgs   []string
-	jobs   int
+	dir  string
+	name string
+	args []string
 }
 
-// recordingVet is a vetter that records its calls and fails the module at
-// failDir with a compiler error.
-func recordingVet(t *testing.T, failDir string) (vetter, func() []vetCall) {
+// recordingRun is a runner that records its calls and fails the run in failDir
+// with a compiler error.
+func recordingRun(t *testing.T, failDir string) (runner, func() []vetCall) {
 	t.Helper()
 	var mu sync.Mutex
 	var calls []vetCall
-	vet := func(_ context.Context, _ string, m module, jobs int) (string, error) {
+	run := func(_ context.Context, dir, name string, args ...string) (string, error) {
 		mu.Lock()
-		calls = append(calls, vetCall{module: m.dir, pkgs: append([]string(nil), m.pkgs...), jobs: jobs})
+		calls = append(calls, vetCall{dir: dir, name: name, args: append([]string(nil), args...)})
 		mu.Unlock()
-		if m.dir == failDir {
+		if dir == failDir {
 			return "broken/b.go:2:2: undefined: missing\n", errors.New("exit status 1")
 		}
 		return "", nil
@@ -74,19 +74,24 @@ func recordingVet(t *testing.T, failDir string) (vetter, func() []vetCall) {
 		mu.Lock()
 		defer mu.Unlock()
 		out := append([]vetCall(nil), calls...)
-		sort.Slice(out, func(i, j int) bool { return out[i].module < out[j].module })
+		sort.Slice(out, func(i, j int) bool { return out[i].dir < out[j].dir })
 		return out
 	}
-	return vet, got
+	return run, got
 }
 
+// TestRunVetsEachModuleInOneCall pins the whole invocation a unit test can see
+// without the go tool: one call per module, the module's own directory as the
+// working directory, the integration tag, the parallel cap, and a pattern for
+// every selected package. A go vet run at the wrong directory sees the wrong
+// module, so the directory is part of the contract.
 func TestRunVetsEachModuleInOneCall(t *testing.T) {
 	t.Parallel()
 	root := fixtureTree(t)
-	vet, calls := recordingVet(t, ".")
+	run, calls := recordingRun(t, root)
 	var out bytes.Buffer
 
-	code := runWith(context.Background(), []string{"-root", root, "-jobs", "2"}, &out, vet)
+	code := runWith(context.Background(), []string{"-root", root, "-jobs", "2"}, &out, run)
 
 	if code != 1 {
 		t.Fatalf("run = %d, want 1; output:\n%s", code, out.String())
@@ -97,32 +102,32 @@ func TestRunVetsEachModuleInOneCall(t *testing.T) {
 		}
 	}
 	want := []vetCall{
-		{module: ".", pkgs: []string{"broken", "tagged"}, jobs: 2},
-		{module: "nested", pkgs: []string{"integrated"}, jobs: 2},
+		{dir: root, name: "go", args: []string{"vet", "-tags", "integration", "-p", "2", "./broken", "./tagged"}},
+		{dir: filepath.Join(root, "nested"), name: "go", args: []string{"vet", "-tags", "integration", "-p", "2", "./integrated"}},
 	}
 	if got := calls(); !reflect.DeepEqual(got, want) {
-		t.Errorf("vet calls = %+v, want %+v", got, want)
+		t.Errorf("runs = %+v, want %+v", got, want)
 	}
 }
 
-func TestRunPassesWhenEveryPackageCompiles(t *testing.T) {
+func TestRunPassesWhenEveryPackageTypeChecks(t *testing.T) {
 	t.Parallel()
 	root := fixtureTree(t)
-	vet, _ := recordingVet(t, "")
+	run, _ := recordingRun(t, "")
 	var out bytes.Buffer
 
-	code := runWith(context.Background(), []string{"-root", root}, &out, vet)
+	code := runWith(context.Background(), []string{"-root", root}, &out, run)
 
 	if code != 0 {
 		t.Fatalf("run = %d, want 0; output:\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "3 packages in 2 modules compile with -tags integration") {
+	if !strings.Contains(out.String(), "3 packages in 2 modules type-check with -tags integration") {
 		t.Errorf("output does not report the selected packages:\n%s", out.String())
 	}
 }
 
-// TestVetArgs pins the command line, which is the one thing a vetter seam
-// cannot show: the tag, the parallel cap, and a pattern for every package.
+// TestVetArgs covers a package at the module root, which is a bare "." to go
+// rather than a "./" pattern the fixture trees do not contain.
 func TestVetArgs(t *testing.T) {
 	t.Parallel()
 	got := vetArgs(module{dir: ".", pkgs: []string{".", "internal/git"}}, 3)
@@ -138,10 +143,10 @@ func TestRunRefusesASelectionThatFindsNothing(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	vet, calls := recordingVet(t, "")
+	run, calls := recordingRun(t, "")
 	var out bytes.Buffer
 
-	code := runWith(context.Background(), []string{"-root", root}, &out, vet)
+	code := runWith(context.Background(), []string{"-root", root}, &out, run)
 
 	if code != 2 {
 		t.Fatalf("run = %d, want 2; output:\n%s", code, out.String())
@@ -156,9 +161,9 @@ func TestRunRefusesASelectionThatFindsNothing(t *testing.T) {
 
 func TestRunRejectsZeroJobs(t *testing.T) {
 	t.Parallel()
-	vet, _ := recordingVet(t, "")
+	run, _ := recordingRun(t, "")
 	var out bytes.Buffer
-	if code := runWith(context.Background(), []string{"-jobs", "0"}, &out, vet); code != 2 {
+	if code := runWith(context.Background(), []string{"-jobs", "0"}, &out, run); code != 2 {
 		t.Fatalf("run = %d, want 2", code)
 	}
 }

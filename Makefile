@@ -4,18 +4,11 @@
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
 # shell.
 #
-#   make gate              the landing gate: the exec-tax preflight (a warning
-#                          at worst, gt-2ycne.1), then lint, then `go build
-#                          ./...`, then the unit tier: plain `go test -timeout
-#                          20m ./...` over every package, through go test's
-#                          result cache (there is no slow tier: internal/cmd
-#                          and internal/beads run here since gt-ik4a1.9;
-#                          gt-s1vff), with the integration tag's compile check
-#                          beside it (go vet -tags integration on every package
-#                          the tag adds files to, gt-w3aby). The gate runs no
-#                          budget runner and measures no wall, CPU or idle time,
-#                          so a landing is never refused for contention
-#                          (gt-z7qtk). Prints its wall time at the end.
+#   make gate              the landing gate. Before changing its stages, read
+#                          docs/testing.md, "The gate": that section is the one
+#                          description of what runs, in what order, and what a
+#                          landing path leaves out. Prints its wall time at the
+#                          end.
 #   make tier-check        the unit tier through the budget runner, whose only
 #                          caller it is: the runner judges each package's CPU
 #                          budget and wall time, and a wall overrun fails
@@ -377,11 +370,11 @@ SHELL_TESTS ?= scripts/test-makefile.sh
 # drive the warning path with a stub.
 EXEC_TAX_PREFLIGHT ?= go run ./internal/exectax/cmd/preflight
 
-# The integration tag's compile check (gt-w3aby): go vet -tags integration on
+# The integration tag's type check (gt-w3aby): go vet -tags integration on
 # every package the tag adds files to. It runs beside the unit tier, so a
-# break in integration-only code fails the gate without a serial stage. A make
-# variable only so scripts/makefile-gate_test.sh can drive both paths with a
-# stub.
+# break in integration-only code fails the gate without a serial stage
+# (docs/testing.md, "The gate"). A make variable only so
+# scripts/makefile-gate_test.sh can drive both paths with a stub.
 INTEGRATION_VET ?= go run ./internal/testpolicy/cmd/integrationvet
 
 # The gate's lint waits its turn on golangci-lint's module lock instead of
@@ -421,11 +414,13 @@ gate-test:
 	@# The suite runs in the background so the trap fires at once on INT or
 	@# TERM (bash defers traps until a foreground child exits); the trap finds
 	@# it as this shell's child (pgrep -P) and stops it before its children.
-	@# The integration tag's compile check starts here too, beside the unit
-	@# tier: it is the only stage that compiles integration-only code (gt-w3aby).
-	@# Its output is held in a temp file so the two runs' lines do not interleave.
-	@trap 'for p in $$(pgrep -P $$$$); do k=$$(pgrep -P $$p); kill $$p 2>/dev/null; [ -n "$$k" ] && kill $$k 2>/dev/null; done; exit 130' INT TERM; \
-	vetlog=$$(mktemp); $(INTEGRATION_VET) >"$$vetlog" 2>&1 & vet=$$!; \
+	@# The integration tag's type check starts here too, beside the unit tier:
+	@# it is the only stage that type-checks integration-only code (gt-w3aby).
+	@# Its output is held in a temp file so the two runs' lines do not interleave,
+	@# and the trap removes that file on an interrupt, which reaches it only
+	@# through the trap: the `rm` after the wait never runs then.
+	@vetlog=$$(mktemp); trap 'for p in $$(pgrep -P $$$$); do k=$$(pgrep -P $$p); kill $$p 2>/dev/null; [ -n "$$k" ] && kill $$k 2>/dev/null; done; rm -f "$$vetlog"; exit 130' INT TERM; \
+	$(INTEGRATION_VET) >"$$vetlog" 2>&1 & vet=$$!; \
 	GT_TEST_DOCKER=0 go test -timeout 20m ./... & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
 	if [ $$go_rc -eq 0 ]; then for m in $(TESTED_MODULES); do echo "gate: vet and unit tier in $$m" >&2; (cd "$$m" && go vet ./... && GT_TEST_DOCKER=0 go test ./...) || { go_rc=$$?; break; }; done; fi; \
