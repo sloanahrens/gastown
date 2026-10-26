@@ -273,15 +273,9 @@ func (a *landingAdapter) Label(ctx context.Context, item Item) (Labeling, error)
 		}
 	}
 	head := item.Refs[refHead]
-	verdict, ok := land.OverseerReviewVerdict(notes, head)
-	source := landingSourceOverseer
-	if !ok || (verdict != land.OverseerReviewPass && verdict != land.OverseerReviewFail) {
-		var err error
-		verdict, ok, err = a.polecatVerdict(ctx, item.ID, head)
-		if err != nil {
-			return Labeling{}, err
-		}
-		source = landingSourcePolecat
+	verdict, source, ok, err := a.reviewVerdict(ctx, notes, item.ID, head)
+	if err != nil {
+		return Labeling{}, err
 	}
 	if !ok {
 		return Labeling{}, nil
@@ -301,6 +295,20 @@ func (a *landingAdapter) Label(ctx context.Context, item Item) (Labeling, error)
 		Rule:   rule,
 		Source: source,
 	}, nil
+}
+
+// reviewVerdict returns the verdict recorded for head and the source that
+// records it: the overseer's note on the bead, else the bead's polecat review
+// documents. It reports no verdict when neither holds one.
+func (a *landingAdapter) reviewVerdict(ctx context.Context, notes, bead, head string) (verdict, source string, ok bool, err error) {
+	if v, found := land.OverseerReviewVerdict(notes, head); found && (v == land.OverseerReviewPass || v == land.OverseerReviewFail) {
+		return v, landingSourceOverseer, true, nil
+	}
+	v, found, err := a.polecatVerdict(ctx, bead, head)
+	if err != nil {
+		return "", "", false, err
+	}
+	return v, landingSourcePolecat, found, nil
 }
 
 // polecatVerdict returns the verdict the bead's polecat review documents record
