@@ -250,6 +250,10 @@ func TestScriptFileGuardBash(t *testing.T) {
 		{"a path the guard cannot resolve", "touch $UNKNOWN_DIR/x.sh", true},
 		{"a non-script path the guard cannot resolve", "touch $UNKNOWN_DIR/notes.txt", false},
 		{"a script after an unplaceable cd", "cd $UNKNOWN_DIR && touch x.sh", true},
+		{"a runtime suffix with no suffix literal", "touch build.$EXT", false},
+		{"a runtime suffix beside a suffix literal", "touch build.$EXT; echo .sh", true},
+		{"touch -t takes a time, not a directory", "touch -t 202601010000 deploy.sh", true},
+		{"touch -t on a non-script", "touch -t 202601010000 notes.txt", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -315,13 +319,16 @@ func assertPolicyIn(t *testing.T, stderr, label string) {
 
 // TestScriptFileGuardNonWorkerSessionAllowed pins the scope: a session that is
 // neither a polecat nor crew is never judged, even inside a worker's tree.
-func TestScriptFileGuardNonWorkerSessionAllowed(t *testing.T) {
+// A session with no identifying variable is judged as a worker: the guard is
+// installed only in worker and crew settings, so an unidentified session fails
+// closed rather than allowed (gt-b43ra).
+func TestScriptFileGuardNoIdentitySessionIsJudged(t *testing.T) {
 	t.Parallel()
 	town := newScriptFileTestTown(t)
 	proc := fakeGuardProcess(map[string]string{}, "")
 	err := town.run(t, proc, town.worktree, "Write",
 		fileInput(filepath.Join(town.worktree, "deploy.sh")), io.Discard)
-	assertVerdict(t, err, false, "non-worker Write of a new script")
+	assertVerdict(t, err, true, "unidentified Write of a new script")
 }
 
 // TestScriptFileGuardCrewSession pins the crew half of the registration: a
@@ -359,6 +366,34 @@ func TestScriptFileGuardNoImplicitAllowlist(t *testing.T) {
 			err := town.run(t, proc, town.worktree, "Write",
 				fileInput(filepath.Join(town.worktree, name)), io.Discard)
 			assertVerdict(t, err, true, "new script named "+name)
+		})
+	}
+}
+
+// TestScriptFileGuardMonitorAndCrewBash pins the two Bash paths the table above
+// does not cover: a Monitor command is judged like a Bash one, and a crew
+// member's Bash is judged in the crew checkout (gt-b43ra).
+func TestScriptFileGuardMonitorAndCrewBash(t *testing.T) {
+	t.Parallel()
+	town := newScriptFileTestTown(t)
+	cases := []struct {
+		name    string
+		proc    guardProcess
+		cwd     string
+		tool    string
+		command string
+		blocked bool
+	}{
+		{"monitor redirect to a script", town.polecatProc(), town.worktree, "Monitor", "echo hi > watch.sh", true},
+		{"monitor read of a script", town.polecatProc(), town.worktree, "Monitor", "cat build.sh", false},
+		{"crew redirect to a script", town.crewProc(), town.crew, "Bash", "echo hi > deploy.sh", true},
+		{"crew touch of a non-script", town.crewProc(), town.crew, "Bash", "touch notes.txt", false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := town.run(t, tt.proc, tt.cwd, tt.tool, commandInput(tt.command), io.Discard)
+			assertVerdict(t, err, tt.blocked, tt.command)
 		})
 	}
 }

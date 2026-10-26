@@ -47,7 +47,9 @@ var scriptFileAllowlist = []string{}
 // drift apart (gt-b43ra).
 const scriptFilePolicy = `Write a Go package with unit tests and seams for the clock, filesystem and
 process runner: ~/.claude/docs/standards/test-engineering.md, "Scripts are debt".
-A procedure that is only operator steps is a runbook, not a script.`
+A procedure that is only operator steps is a runbook, not a script.
+Limit: a Bash path the shell builds at runtime is judged only when its command
+names a script suffix; this guard is best effort for Bash and exact for files.`
 
 // scriptFileCreatingVerbs are the shell commands whose operands name a file
 // they create. A redirection creates one the same way, read from the same
@@ -183,6 +185,9 @@ type scriptFileScope struct {
 	worktree string // canonical own worktree; the only tree this guard polices
 	cwd      string // canonical directory relative targets resolve from
 	proc     guardProcess
+	// namesScript is set for the command line being judged when its text names
+	// a denied suffix: a target built at runtime is then refused, not allowed.
+	namesScript bool
 }
 
 // resolveScriptFileScope identifies the worker session and its worktree.
@@ -224,8 +229,10 @@ func resolveScriptFileScope(payloadCwd string, proc guardProcess) (scope scriptF
 	}
 	if worktree == "" {
 		// Crew have no worktree variable: their checkout is the directory the
-		// session runs in, found by walking up to its .git.
-		if root, ok := gitWorktreeRoot(cwd); ok && isWorkerWorktreeForRole(root, role) {
+		// session runs in, found by walking up to its .git. A session with no
+		// role says nothing about which tree is its own, so any checkout it
+		// stands in is judged.
+		if root, ok := gitWorktreeRoot(cwd); ok && (role == "" || isWorkerWorktreeForRole(root, role)) {
 			worktree = root
 		}
 	}
@@ -250,7 +257,9 @@ func scriptFileWorkerRole(proc guardProcess) (Role, bool) {
 	case proc.getenv("GT_CREW") != "":
 		return RoleCrew, true
 	}
-	return "", false
+	// No identifying variable: the guard is installed only in worker and crew
+	// settings, so the session is judged as a worker (fail closed, gt-b43ra).
+	return "", true
 }
 
 // gitWorktreeRoot returns the directory containing cwd's ".git" entry, which
@@ -332,7 +341,20 @@ func (s scriptFileScope) judgeNewScript(target, via string, stderr io.Writer) er
 
 // checkBashCommand judges a shell command line as starting in the session cwd.
 func (s scriptFileScope) checkBashCommand(command string, depth int, stderr io.Writer) error {
+	s.namesScript = commandNamesScriptSuffix(command)
 	return s.checkBashFrom(command, s.cwd, true, depth, stderr)
+}
+
+// commandNamesScriptSuffix reports whether a command line's text carries a
+// denied suffix as a literal. A target the shell builds at runtime is judged
+// only when it does: this is the documented limit of the Bash judgement.
+func commandNamesScriptSuffix(command string) bool {
+	for _, denied := range scriptFileExtensions {
+		if strings.Contains(command, denied) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkBashFrom judges command as a shell starting in base; cwdKnown is false
@@ -454,7 +476,7 @@ func (s scriptFileScope) judgeBashTarget(raw, dir string, known bool, via string
 // a script, so it is refused; any other name is allowed, because the guard
 // denies only what it can name (gt-b43ra).
 func (s scriptFileScope) refuseUnresolvedTarget(raw, via string, stderr io.Writer) error {
-	if !scriptFileNamed(raw) {
+	if !scriptFileNamed(raw) && !s.namesScript {
 		return nil
 	}
 	printScriptFileRefusal(stderr, via, raw)
@@ -601,7 +623,11 @@ func createdScriptTargets(verb string, args []string, dir string) []string {
 		return nil // install -d creates directories, not files
 	}
 	operands := scriptVerbOperands(verb, args)
-	if targetDir := targetDirectoryFlag(args); targetDir != "" {
+	targetDir := ""
+	if verb != "touch" && verb != "tee" { // touch -t takes a time, tee takes no -t
+		targetDir = targetDirectoryFlag(args)
+	}
+	if targetDir != "" {
 		targets := make([]string, 0, len(operands))
 		for _, operand := range operands {
 			targets = append(targets, filepath.Join(targetDir, filepath.Base(operand)))
