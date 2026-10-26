@@ -10,9 +10,8 @@ import (
 )
 
 // The openers a decision comment may use. Each is matched case-sensitively at
-// the start of the comment's trimmed text. ACCEPTED-RISK: reuses
-// acceptedRiskMarker, so the brief and the accepted-risk context file read the
-// same record.
+// the start of the comment's trimmed text. An opener grants nothing by itself:
+// the author recorded on the comment is what entitles it (gt-0sztd).
 const (
 	sloanDecisionOpener = "SLOAN DECISION"
 	overseerOpener      = "OVERSEER"
@@ -44,10 +43,12 @@ type decisionMarker struct {
 	entitled func(author string) bool
 }
 
-// decisionMarkers is every comment the brief carries. An opener selects a
-// comment only for an author entitled to it: the text alone is no authority,
-// since a comment's author is whatever the writer typed and any commenter can
-// type an opener (gt-0sztd).
+// decisionMarkers is every comment the brief carries. Entitlement comes from
+// the comment's Author field and nowhere else: an opener selects a comment only
+// when that field is an identity entitled to the opener, since any commenter
+// can type an opener (gt-0sztd). ACCEPTED-RISK: is acceptedRiskMarker, the
+// opener criteria.go defines, read here with the same allowlist the
+// accepted-risk context file uses.
 var decisionMarkers = []decisionMarker{
 	{sloanDecisionOpener, isSloanAuthor},
 	{acceptedRiskMarker, isAcceptedRiskAuthor},
@@ -59,12 +60,18 @@ var decisionMarkers = []decisionMarker{
 // bead's Goal, Constraints, Out of scope and Gate sections, then its decision
 // comments oldest first, each under a line naming the author who wrote it.
 //
-// A section the description lacks or leaves empty is omitted. The text is
-// capped at beadBriefCap bytes by dropping the oldest comment first; the newest
-// is kept even when the sections must be cut to make room for it, and cut to fit
-// when it alone outgrows the cap. The cut lands on a rune boundary, so the file
-// is valid UTF-8. A description with no sections and a bead with no qualifying
-// comment leave the title alone.
+// A section the description lacks or leaves empty is omitted, and a "## " line
+// inside a section body is demoted to "### " so the body cannot open a section
+// the description never had. The text is capped at beadBriefCap bytes by
+// dropping the oldest comment first; the newest is kept even when the sections
+// must be cut to make room for it, and cut to fit when it alone outgrows the
+// cap. The cut lands on a rune boundary, so the file is valid UTF-8. A
+// description with no sections and a bead with no qualifying comment leave the
+// title alone.
+//
+// An attribution line is built only from the comment's Author and date fields.
+// A comment's text is quoted line by line under it (quoteBody), so no line a
+// commenter wrote can open a line that reads as an attribution of its own.
 func BeadBrief(description string, comments []beads.Comment) string {
 	head := beadBriefHead(description)
 	entries := beadBriefDecisionEntries(comments)
@@ -84,7 +91,9 @@ func BeadBrief(description string, comments []beads.Comment) string {
 
 // WriteBeadBrief writes BeadBrief's text to a 0600 temp file named
 // om-brief-*.txt in dir and returns its path; the caller removes it after the
-// review (gt-0sztd). The lander passes it to om as --bead-file (gt-3l5qy).
+// review (gt-0sztd). The lander passes it to om as --bead-file (gt-3l5qy),
+// which is why nothing in this bead calls it: the wiring is gt-3l5qy's, and
+// deleting the writer would leave that bead to rebuild it.
 func WriteBeadBrief(dir, description string, comments []beads.Comment) (string, error) {
 	return writeTemp(dir, "om-brief-*.txt", []byte(BeadBrief(description, comments)))
 }
@@ -101,9 +110,32 @@ func beadBriefHead(description string) string {
 		if body == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "\n## %s\n\n%s\n", name, body)
+		fmt.Fprintf(&b, "\n## %s\n\n%s\n", name, demoteSectionHeadings(body))
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
+// demoteSectionHeadings moves any "## " line in a section body down to "### ",
+// so the body cannot open a section of its own. A body reaches here with such a
+// line as example text, from a fenced code block specdispatch.Sections keeps
+// whole; in the brief it stays text too (gt-0sztd).
+func demoteSectionHeadings(body string) string {
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		code := strings.TrimLeft(line, " \t")
+		if !opensSectionHeading(code) {
+			continue
+		}
+		lines[i] = line[:len(line)-len(code)] + "#" + code
+	}
+	return strings.Join(lines, "\n")
+}
+
+// opensSectionHeading reports whether line opens with a second-level heading
+// marker: two hashes, then a space or a tab.
+func opensSectionHeading(line string) bool {
+	rest, ok := strings.CutPrefix(line, "##")
+	return ok && (rest == "" || strings.HasPrefix(rest, " ") || strings.HasPrefix(rest, "\t"))
 }
 
 // beadBriefDecisionEntries returns the decision comments oldest first, each
@@ -150,13 +182,32 @@ func decisionMarkerFor(text, author string) (string, bool) {
 
 // beadBriefDecisionEntry renders one comment under the line that attributes it:
 // om weighs a named author's decision, and an assertion with no one behind it is
-// not a decision to weigh.
+// not a decision to weigh. The line is built from the Author and date fields
+// alone, and the text is quoted beneath it, so a body that embeds an
+// attribution header of its own stays body (gt-0sztd).
 func beadBriefDecisionEntry(marker string, c beads.Comment) string {
 	date := headerField(c.CreatedAt)
 	if date == "" {
 		date = "an unrecorded date"
 	}
-	return fmt.Sprintf("[%s from %s, %s]\n%s", marker, headerField(c.Author), date, strings.TrimSpace(c.Text))
+	return fmt.Sprintf("[%s from %s, %s]\n%s", marker, headerField(c.Author), date, quoteBody(strings.TrimSpace(c.Text)))
+}
+
+// quoteBody puts every line of a comment's text under a ">" marker, so a line
+// that would read as an attribution header is quoted instead: the header om
+// weighs is the one the code wrote from Author and date, never text the
+// commenter supplied (gt-0sztd).
+func quoteBody(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		line = strings.TrimSuffix(line, "\r")
+		if line == "" {
+			lines[i] = ">"
+			continue
+		}
+		lines[i] = "> " + line
+	}
+	return strings.Join(lines, "\n")
 }
 
 // isSloanAuthor reports whether author is the human who records SLOAN DECISION
