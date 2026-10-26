@@ -101,10 +101,10 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 		{"gt-other", "sloan", "sloan"},
 	} {
 		row := i + 1
-		if main := dom.descend(t, "trend", 0, 1, row, 1).Text; !strings.Contains(main, want.bead) {
+		if main := dom.descend(t, "trend", 0, 1, 0, row, 1).Text; !strings.Contains(main, want.bead) {
 			t.Fatalf("row %d is the bead %q, want %s", row, main, want.bead)
 		}
-		by := dom.descend(t, "trend", 0, 1, row, 2)
+		by := dom.descend(t, "trend", 0, 1, 0, row, 2)
 		if by.Text != want.by || by.Title != want.title {
 			t.Errorf("%s reads %q (%q) in the By column, want %q (%q)", want.bead, by.Text, by.Title, want.by, want.title)
 		}
