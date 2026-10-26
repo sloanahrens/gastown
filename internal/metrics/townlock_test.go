@@ -48,7 +48,6 @@ func TestTownLockHolderHelper(t *testing.T) {
 // when the lock is taken, and each wait is bounded by townLockWait.
 func startTownLockHolder(t *testing.T, path string) (stop func()) {
 	t.Helper()
-	// testpolicy exemption: cross-process contention is the property under test; a record lock never conflicts within one process, so the holder must be another process.
 	//testpolicy:allow no-subprocess — cross-process contention is the property under test: a record lock never conflicts within one process, so the holder must be another process
 	cmd := exec.Command(os.Args[0], "-test.run=^TestTownLockHolderHelper$", "-test.count=1")
 	cmd.Env = append(os.Environ(), townLockHoldEnv+"="+path)

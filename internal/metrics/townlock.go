@@ -23,9 +23,9 @@ var heldTownLocks sync.Map // map[string]struct{}
 // record of holding it.
 //
 // A POSIX record lock belongs to the process, and a child process does not
-// inherit it. flock(2) was the first choice and is wrong here: its lock belongs
-// to the open file description, which a forked child holds until it execs, so
-// a release could leave the lock held by a child still in flight. With a record
+// inherit it. flock(2) is not used: its lock belongs to the open file
+// description, which a forked child holds until it execs, so a release can leave
+// the lock held by a child still in flight. With a record
 // lock, releasing closes this process's descriptor and nothing else holds the
 // lock. The kernel drops it when the holder exits, however it exits, so a run
 // the daemon killed leaves nothing behind to take over.
