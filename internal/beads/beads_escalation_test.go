@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -473,6 +474,34 @@ func readEscalationStubLog(t *testing.T, logPath string) string {
 	return string(data)
 }
 
+// escalationStubListArgv returns the argv of the one routed `list` invocation in
+// the stub log. Each invocation starts with its env line, which separates the
+// capability probe ("--allow-stale version") from the call under test.
+func escalationStubListArgv(t *testing.T, logPath string) []string {
+	t.Helper()
+	log := readEscalationStubLog(t, logPath)
+	var invocations [][]string
+	for _, line := range strings.Split(log, "\n") {
+		switch {
+		case strings.HasPrefix(line, "env "):
+			invocations = append(invocations, nil)
+		case strings.HasPrefix(line, "arg "):
+			if len(invocations) == 0 {
+				t.Fatalf("arg line outside an invocation in bd log: %q", line)
+			}
+			last := len(invocations) - 1
+			invocations[last] = append(invocations[last], strings.TrimPrefix(line, "arg "))
+		}
+	}
+	for _, argv := range invocations {
+		if len(argv) > 0 && argv[0] == "list" {
+			return argv
+		}
+	}
+	t.Fatalf("no routed list invocation in bd log:\n%s", log)
+	return nil
+}
+
 // TestListEscalationsAcrossRigsInjectsFlatAndRoutes covers the two independent
 // ways the routed display path could fail while looking correct.
 //
@@ -528,6 +557,43 @@ func TestListEscalationsAcrossRigsRetriesWithoutFlatOnOldBd(t *testing.T) {
 	log := readEscalationStubLog(t, logPath)
 	if !strings.Contains(log, "arg --flat") {
 		t.Errorf("expected an initial attempt carrying --flat before the retry:\n%s", log)
+	}
+}
+
+// TestListEscalationsRoutedAsksForEveryRow pins the routed read's exact argv
+// for both display entry points. bd list pages at 50 without --limit=0, so the
+// count behind `gt escalate list`, `gt status` and the dashboard silently
+// stopped at 50 open escalations past that many (gt-mm38p). The whole argv is
+// asserted, not just the flag, so no other flag's shape can restore a page.
+func TestListEscalationsRoutedAsksForEveryRow(t *testing.T) {
+	tests := []struct {
+		name string
+		read func(Client) ([]*Issue, error)
+		want []string
+	}{
+		{
+			name: "open",
+			read: ListEscalationsAcrossRigs,
+			want: []string{"list", "--label=gt:escalation", "--status=open", "--include-infra", "--limit=0", "--json", "--flat"},
+		},
+		{
+			name: "all",
+			read: ListAllEscalationsAcrossRigs,
+			want: []string{"list", "--label=gt:escalation", "--status=all", "--include-infra", "--limit=0", "--json", "--flat"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logPath := escalationBDStub(t, false)
+			if _, err := tt.read(New(t.TempDir())); err != nil {
+				t.Fatalf("routed read: %v", err)
+			}
+
+			if got := escalationStubListArgv(t, logPath); !slices.Equal(got, tt.want) {
+				t.Errorf("routed list argv = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
