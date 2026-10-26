@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -371,8 +373,9 @@ func TestRunWithDefaultDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	fake := &fakeDump{body: []byte("dump")}
-	// The clock is read before the run, so a midnight between the run and the
-	// check cannot make the test name a different day's dump.
+	// The date is read before the run. A midnight that falls between this read
+	// and the run's own clock read can still name the next day's dump, so the
+	// test assumes the run does not cross midnight, which it never does here.
 	today := time.Now().Format(dateLayout)
 	var stdout, stderr bytes.Buffer
 	getenv := func(k string) string {
@@ -794,4 +797,35 @@ func dumpsIn(t *testing.T, dir string) []string {
 		}
 	}
 	return names
+}
+
+// An escaped quote inside a quoted keyword password is one value, so no part
+// of it is left in argv (gt-p85pw.48).
+func TestDsnWithoutPasswordEscapedQuote(t *testing.T) {
+	t.Parallel()
+	got, err := dsnWithoutPassword(`host=db password='pa\'ss word' sslmode=require`)
+	if err != nil {
+		t.Fatalf("dsnWithoutPassword: %v", err)
+	}
+	if strings.Contains(got, "word") || strings.Contains(got, `\'`) || !strings.Contains(got, "sslmode=require") {
+		t.Errorf("keyword DSN with an escaped quote = %q", got)
+	}
+}
+
+// A dump dated after today is named on stderr, and it is never pruned.
+func TestPruneWarnsAboutFutureDumps(t *testing.T) {
+	t.Parallel()
+	b, _ := newBackup(t, &fakeDump{}, 7)
+	var stderr bytes.Buffer
+	b.stderr = &stderr
+	writeFile(t, b.dir, "2026-02-01.dump", "future")
+	if err := b.prune(testNow); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "2026-02-01.dump") {
+		t.Errorf("stderr = %q, want a warning that names the future dump", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(b.dir, "2026-02-01.dump")); err != nil {
+		t.Errorf("future dump was removed: %v", err)
+	}
 }

@@ -176,7 +176,7 @@ func dsnWithoutPassword(dsn string) (string, error) {
 }
 
 // keywordPassword matches a password setting in a libpq keyword string.
-var keywordPassword = regexp.MustCompile(`(?i)\s*\bpassword\s*=\s*('[^']*'|"[^"]*"|\S+)`)
+var keywordPassword = regexp.MustCompile(`(?i)\s*\bpassword\s*=\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|\S+)`)
 
 // Run writes today's dump, publishes it only after pg_dump has exited 0 with a
 // non-empty file, then deletes the oldest dumps beyond keep. Any failure leaves
@@ -212,7 +212,13 @@ func (b *backup) Run(ctx context.Context) error {
 	// The file is opened 0600 here rather than left to pg_dump, whose new file
 	// the umask would open to every local user; pg_dump truncates this one and
 	// keeps its mode.
-	f, err := os.OpenFile(partial, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // G304: partial is built from the -dir flag
+	// A leftover path of any kind is removed first, and the file is created
+	// exclusively: a symlink planted at the partial name cannot be followed into
+	// another file.
+	if err := os.Remove(partial); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clear %s: %w", partial, err)
+	}
+	f, err := os.OpenFile(partial, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600) //nolint:gosec // G304: partial is built from the -dir flag
 	if err != nil {
 		return fmt.Errorf("create %s: %w", partial, err)
 	}
@@ -246,8 +252,10 @@ func (b *backup) Run(ctx context.Context) error {
 		_ = b.remove(partial)
 		return fmt.Errorf("publish %s: %w", target, err)
 	}
-	if err := syncFile(b.dir); err != nil {
-		return fmt.Errorf("flush backup directory %s: %w", b.dir, err)
+	// The name is published; a failed directory flush is a warning, as a failed
+	// retention is, so the operator still gets the dump and the reason.
+	if err := syncFile(b.dir); err != nil && b.stderr != nil {
+		fmt.Fprintf(b.stderr, "trackerbackup: warning: flush backup directory %s: %v (the dump was published)\n", b.dir, err)
 	}
 	// The dump is published, so a retention failure is a warning, not a failed
 	// run: the operator still gets the dump and the reason its old ones stayed.
@@ -302,6 +310,9 @@ func (b *backup) prune(now time.Time) error {
 	var dumps []string
 	for _, e := range entries {
 		date := dumpDate(e.Name())
+		if e.Type().IsRegular() && !date.IsZero() && date.After(today) && b.stderr != nil {
+			fmt.Fprintf(b.stderr, "trackerbackup: warning: %s is dated after today and is not counted or pruned\n", e.Name())
+		}
 		if e.Type().IsRegular() && !date.IsZero() && !date.After(today) {
 			dumps = append(dumps, e.Name())
 		}
