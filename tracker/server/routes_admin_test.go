@@ -206,7 +206,11 @@ func TestClientAdminAgreesWithTheRoutes(t *testing.T) {
 	ts := adminServer(t, st)
 	// The server's own client, so ts.Close closes only connections this test
 	// opened, not http.DefaultTransport's shared with its siblings (gt-djzxe).
+	// ts.Client() has no timeout of its own; restore the bound adminHTTP put
+	// on each request, so this client is cut off at 5 s and not the client's
+	// 10 s default.
 	hc := ts.Client()
+	hc.Timeout = adminHTTP.Timeout
 	c, err := client.New(client.Config{BaseURL: ts.URL, Token: "good-token", SchemaLevel: 3, HTTP: hc})
 	if err != nil {
 		t.Fatal(err)
@@ -264,10 +268,13 @@ func TestAnUnknownTokenIsStill401NotForbidden(t *testing.T) {
 	}
 }
 
-// Each request gets its own connection, so the shared adminHTTP never hands a
-// parallel test a pooled connection that test's cleanup has already closed
-// (gt-djzxe).
-func TestTheAdminClientOpensAConnectionPerRequest(t *testing.T) {
+// A sibling test's cleanup calls httptest.Server.Close, which calls
+// http.DefaultTransport's CloseIdleConnections -- closing every idle connection
+// the shared client pooled, including one this test's next PUT would be handed,
+// and a PUT that loses its connection is not retried (gt-djzxe). So adminHTTP
+// must hold no connection between requests: after a sibling's cleanup it still
+// opens a fresh one for each request rather than reusing a pooled connection.
+func TestASiblingServersCleanupCannotBreakTheAdminClient(t *testing.T) {
 	t.Parallel()
 	var conns atomic.Int64
 	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -280,13 +287,22 @@ func TestTheAdminClientOpensAConnectionPerRequest(t *testing.T) {
 	}
 	ts.Start()
 	t.Cleanup(ts.Close)
-	for i := 0; i < 2; i++ {
+
+	sibling := adminServer(t, okAdmin())
+	put := func(i int) {
+		t.Helper()
 		if code, body := adminCallAs(t, "PUT", ts.URL+"/v1/config/k", `{"value":"v"}`, "admin-token"); code != http.StatusNoContent {
 			t.Fatalf("request %d = %d %q, want 204", i, code, body)
 		}
 	}
-	if got := conns.Load(); got != 2 {
-		t.Errorf("two requests opened %d connections, want 2", got)
+	put(0)
+	sibling.Close() // exactly what the sibling test's t.Cleanup(ts.Close) does
+	put(1)
+	put(2)
+	// One connection per request: the last request was not handed a connection
+	// the sibling's cleanup could have closed under it.
+	if got := conns.Load(); got != 3 {
+		t.Errorf("three requests after a sibling's cleanup opened %d connections, want 3 (no connection survives the cleanup for reuse)", got)
 	}
 }
 
