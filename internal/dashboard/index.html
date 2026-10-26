@@ -184,9 +184,8 @@ button.jvfold{cursor:pointer}
 button.jvfold:hover{color:var(--text)}
 .jvmore{margin-top:2px}
 .jvstale td{color:var(--dim)}
-/* The Mango panel's target blocks: each checkable target is one row of title,
-   verdict and thin chips, rate against its baseline, interval bar, narrowing
-   chips and fold. A not-checkable target is one line under the table. */
+/* A Mango row is a multi-line block, so every cell aligns to its top and only
+   the first body row drops the rule under the header. */
 .mgtable td{vertical-align:top;padding:6px 10px 6px 0;border-top:1px solid var(--line)}
 .mgtable tbody tr:first-child td{border-top:0}
 .mgbig{font-size:20px;font-weight:700;line-height:1.2;white-space:nowrap}
@@ -3604,10 +3603,9 @@ function renderJev(s) {
   for (const b of batteries) body.append(jevRow(b));
 }
 
-// The Mango panel's words for the three verdicts. The title line counts a target
-// the panel could not check as "not checkable"; a target row and the Jev panel
-// keep the panel's own verdict word. The meanings are Mango's, not the Jev
-// panel's labels.
+// MG_WORDS gives the title line a word to count each verdict by, where a target
+// row keeps the panel's own word; MG_MEANING says what a verdict means for the
+// chip's tooltip in Mango's terms, not the Jev panel's labels.
 const MG_WORDS = {earning: "earning", "no-signal": "no-signal", "not-yet": "not checkable"};
 const MG_MEANING = {
   earning: "enough positives and a signal replicated on the holdout",
@@ -3615,12 +3613,11 @@ const MG_MEANING = {
   "not-yet": "too few positives, or none in the holdout, to check",
 };
 
-// renderMango draws the Mango panel: the collection row, then one block per
-// checkable target, then a single line for each target the panel could not
-// check. A not-yet target is not a verdict to line up with the others, so it
-// leaves the table. A missing or unreadable panel draws no target rows: the last
-// analysis would pass as current. Every string is the reader's, already stripped
-// and capped, and is set with textContent only.
+// renderMango draws the Mango panel. A not-yet target is not a verdict to line up
+// with the others, so it leaves the table for a line of its own. A missing or
+// unreadable panel draws no target rows: the last analysis would pass as current.
+// Every string is the reader's, already stripped and capped, and is set with
+// textContent only.
 function renderMango(s) {
   const sec = $("mangosec"), box = $("mango"), note = $("mangonote");
   const m = s.mango;
@@ -3779,9 +3776,8 @@ function mangoTrend(m, stale) {
   return block;
 }
 
-// mangoRow draws one checkable target as a block: its plain title and verdict
-// chips, its rate against the baseline, its interval, the conditions that narrow
-// the group and their fold, and the old best box.
+// mangoRow draws one checkable target as a row of the panel's table, so its
+// cells stay under the columns the collection row sets.
 function mangoRow(t, stale) {
   const tr = el("tr", stale ? "jvstale" : "");
   // The label is the panel's plain-words title; a target it has no title for
@@ -3804,10 +3800,10 @@ function mangoRow(t, stale) {
   return tr;
 }
 
-// mangoRates draws the holdout's rate over its group, the baseline it is
-// measured against, and its lift over that baseline. A rate or baseline the
-// panel did not report is a dash, never a zero. A baseline of zero makes the
-// lift a division by zero rather than a large effect, so it is left out.
+// mangoRates draws the rate beside the baseline it is measured against. A rate
+// or baseline the panel did not report is a dash, never a zero. A baseline of
+// zero makes the lift a division by zero rather than a large effect, so it is
+// left out.
 function mangoRates(t) {
   const td = el("td", "mgrates");
   const pct = v => v == null ? "-" : jevPct(v);
@@ -3823,10 +3819,9 @@ function mangoRates(t) {
   return td;
 }
 
-// mangoInterval draws the box's interval on a 0..100% track: a bar from the low
-// to the high bound and a dot at the rate, with the baseline marked dashed. A
-// panel that carried no interval, or only one bound, draws no bar: a range the
-// writer did not measure is not drawn.
+// mangoInterval draws the box's interval on a 0..100% track. A panel that
+// carried no interval, or only one bound, draws no bar: a range the writer did
+// not measure is not drawn.
 function mangoInterval(t) {
   const td = el("td", "mginterval");
   if (t.ci_low == null || t.ci_high == null || t.ci_high < t.ci_low) return td;
@@ -3846,10 +3841,10 @@ function mangoInterval(t) {
   return td;
 }
 
-// mangoEvidence draws the box's conditions over the row and in a closed fold:
-// a condition that narrows the group is a chip, and every condition is a line in
-// "how it was found", the ones that do not narrow greyed and marked. A target
-// with no conditions keeps its old best box inside the fold.
+// mangoEvidence draws the box's conditions so a reader can see what the box was
+// built from: the ones that narrow the group as chips, the rest only in a closed
+// fold, greyed and marked, where they cost no row space. A target from an older
+// panel carries no conditions, so its best box stands in for them in the fold.
 function mangoEvidence(t) {
   const td = el("td", "mgevidence");
   const conds = t.conditions || [];
@@ -3870,10 +3865,9 @@ function mangoEvidence(t) {
 }
 
 // mangoUnchecked draws a target the panel could not check as one line under the
-// table: the not-checkable chip, its plain title and its positives, then the
-// reason in words and, when none landed recently, the day it was last positive.
-// A reason this page has no sentence for is not drawn; a skipped target from an
-// older panel still says why it was skipped.
+// table. The reason is the line's whole use, so a word the page has no sentence
+// for is still drawn as the panel's own word; a skipped target from an older
+// panel carries no reason key, and too few positives is that writer's only skip.
 function mangoUnchecked(t, stale) {
   const line = el("div", "mgnot" + (stale ? " jvstale" : ""));
   line.append(el("span", "jvchip jv-notyet", "not checkable"), el("span", "mgnotlabel", t.label || t.target), el("span", "mgnotpos", t.positives + (t.positives === 1 ? " positive" : " positives")));
@@ -3882,7 +3876,8 @@ function mangoUnchecked(t, stale) {
   else if (t.reason === "no_holdout_positives") {
     why = "no positives in the recent landings to check it on";
     if (t.last_positive) why += ", its last positive was " + t.last_positive;
-  } else if (t.skipped) why = "too few positives to check";
+  } else if (t.reason) why = "a reason this page does not know: " + t.reason;
+  else if (t.skipped) why = "too few positives to check";
   if (why) line.append(el("span", "mgnotwhy", why));
   return line;
 }

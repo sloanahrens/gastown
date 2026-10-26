@@ -98,10 +98,13 @@ func TestMangoFreshPanelDrawsItsTitleLineAndTargets(t *testing.T) {
 		t.Errorf("a fresh target row is drawn as %q, want no greying", class)
 	}
 
-	line := dom.descend(t, "mango", 1)
+	lines := mangoTexts(t, dom, "mgnot")
+	if len(lines) != 1 {
+		t.Fatalf("the panel draws %d not-checkable lines, want one", len(lines))
+	}
 	for _, want := range []string{"not checkable", "reached_overrun_stop", "12 positives", "too few positives to check"} {
-		if !strings.Contains(line.Text, want) {
-			t.Errorf("the not-checkable line %q has no %q", line.Text, want)
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("the not-checkable line %q has no %q", lines[0], want)
 		}
 	}
 }
@@ -249,13 +252,13 @@ func TestMangoUnknownVerdictAndMissingRateAreNotReadings(t *testing.T) {
 		t.Errorf("an unknown verdict's tooltip is %q, want it to say the page does not know the verdict", chip.Title)
 	}
 	rates := mangoCell(t, dom, 2, 2)
-	if big := dom.descend(t, "mango", 0, 1, 2, 2, 0).Text; big != "-" {
+	if big := mangoTexts(t, dom, "mgbig"); len(big) != 2 || big[1] != "-" {
 		t.Errorf("a missing rate reads %q, want a dash", big)
 	}
 	if strings.Contains(rates.Text, "0.0%") {
 		t.Errorf("a missing rate is drawn as %q, want no figure the analysis never gave", rates.Text)
 	}
-	if vs := dom.descend(t, "mango", 0, 1, 2, 2, 1).Text; vs != "vs - across all recent landings" {
+	if vs := mangoTexts(t, dom, "mgvs"); len(vs) != 2 || vs[1] != "vs - across all recent landings" {
 		t.Errorf("a missing baseline reads %q, want a dash", vs)
 	}
 }
@@ -310,12 +313,12 @@ func TestMangoReplicatingThinTargetDrawsItsNumbers(t *testing.T) {
 	if got := mangoCell(t, dom, 1, 0).Text; got != "Landings rejected before they land" {
 		t.Errorf("the target's title is %q, want the panel's plain label", got)
 	}
-	thin := dom.descend(t, "mango", 0, 1, 1, 1, 1)
-	if thin.Class != "jvchip jvthin" {
-		t.Errorf("the thin chip is drawn as %q, want the dashed chip class", thin.Class)
+	thin := mangoElements(t, dom, "jvthin")
+	if len(thin) != 1 {
+		t.Fatalf("the row draws %d thin chips, want one", len(thin))
 	}
-	if !strings.Contains(thin.Text, "thin") || !strings.Contains(thin.Text, "n=36") {
-		t.Errorf("the thin chip %q does not name thin and the holdout it rests on", thin.Text)
+	if !strings.Contains(thin[0].Text, "thin") || !strings.Contains(thin[0].Text, "n=36") {
+		t.Errorf("the thin chip %q does not name thin and the holdout it rests on", thin[0].Text)
 	}
 	rates := mangoCell(t, dom, 1, 2)
 	for _, want := range []string{"41.7%", "vs 19.8% across all recent landings", "2.1x as likely", "15 of 36 recent landings in the group"} {
@@ -324,47 +327,44 @@ func TestMangoReplicatingThinTargetDrawsItsNumbers(t *testing.T) {
 		}
 	}
 
-	bar := dom.descend(t, "mango", 0, 1, 1, 3, 0)
-	if bar.Kids != 4 {
-		t.Fatalf("the interval bar holds %d parts, want the track, the baseline marker, the bar and the rate dot", bar.Kids)
+	bar := mangoElements(t, dom, "mgbar")
+	if len(bar) != 1 || bar[0].Kids != 4 {
+		t.Fatalf("the interval draws %v, want one bar of four parts", bar)
 	}
-	for i, class := range []string{"mgtrack", "mgbase", "mgci", "mgdot"} {
-		if got := dom.descend(t, "mango", 0, 1, 1, 3, 0, i).Class; got != class {
-			t.Errorf("the interval bar's part %d is drawn as %q, want %q", i, got, class)
-		}
+	if got := mangoAttrs(t, dom, "mgbar", "aria-label"); len(got) != 1 || got[0] != "41.7%, interval 27.1% to 57.8%" {
+		t.Errorf("the interval bar's label is %q, want the rate and the interval it draws", got)
 	}
 
-	evidence := dom.descend(t, "mango", 0, 1, 1, 4)
-	if evidence.Kids != 3 {
-		t.Fatalf("the evidence cell holds %d parts, want two narrowing chips and the fold", evidence.Kids)
+	chips := mangoElements(t, dom, "mgcondchip")
+	if len(chips) != 2 {
+		t.Fatalf("the row draws %d narrowing chips, want two", len(chips))
 	}
 	for i, want := range []string{"model = opus 12.0% of landings", "attempts in q4 18.0% of landings"} {
-		chip := dom.descend(t, "mango", 0, 1, 1, 4, i)
-		if chip.Text != want {
-			t.Errorf("the narrowing chip %d reads %q, want %q", i, chip.Text, want)
-		}
-		if chip.Class != "jvchip mgcondchip" {
-			t.Errorf("the narrowing chip %d is drawn as %q", i, chip.Class)
+		if chips[i].Text != want {
+			t.Errorf("the narrowing chip %d reads %q, want %q", i, chips[i].Text, want)
 		}
 	}
-	if got := dom.descend(t, "mango", 0, 1, 1, 4, 2, 0).Text; got != "how it was found" {
-		t.Errorf("the fold is named %q, want how it was found", got)
+	fold := mangoTexts(t, dom, "mgfold")
+	if len(fold) != 1 || !strings.Contains(fold[0], "how it was found") {
+		t.Fatalf("the fold reads %q, want it named how it was found", fold)
 	}
-	list := dom.descend(t, "mango", 0, 1, 1, 4, 2, 1)
-	if list.Kids != 3 {
-		t.Fatalf("the fold holds %d conditions, want all three", list.Kids)
+	conds := mangoElements(t, dom, "mgcond")
+	if len(conds) != 3 {
+		t.Fatalf("the fold holds %d conditions, want all three", len(conds))
 	}
 	for i, want := range []string{"model = opus", "attempts in q4", "rig = gastown"} {
-		if got := dom.descend(t, "mango", 0, 1, 1, 4, 2, 1, i).Text; !strings.Contains(got, want) || !strings.Contains(got, "of landings") {
-			t.Errorf("the fold's condition %d reads %q, want %q and its share", i, got, want)
+		if !strings.Contains(conds[i].Text, want) || !strings.Contains(conds[i].Text, "of landings") {
+			t.Errorf("the fold's condition %d reads %q, want %q and its share", i, conds[i].Text, want)
 		}
 	}
-	last := dom.descend(t, "mango", 0, 1, 1, 4, 2, 1, 2)
-	if last.Class != "mgcond jvstale" {
-		t.Errorf("the condition that does not narrow is drawn as %q, want it greyed", last.Class)
+	if hasClass(conds[0], "jvstale") || hasClass(conds[1], "jvstale") {
+		t.Errorf("a condition that narrows is greyed: %q and %q", conds[0].Class, conds[1].Class)
 	}
-	if !strings.Contains(last.Text, "doesn't narrow") {
-		t.Errorf("the condition that does not narrow reads %q, want it marked", last.Text)
+	if !hasClass(conds[2], "jvstale") {
+		t.Errorf("the condition that does not narrow is drawn as %q, want it greyed", conds[2].Class)
+	}
+	if !strings.Contains(conds[2].Text, "doesn't narrow") {
+		t.Errorf("the condition that does not narrow reads %q, want it marked", conds[2].Text)
 	}
 }
 
@@ -384,17 +384,36 @@ func TestMangoNotCheckableTargetDrawsOneLineAndNoRow(t *testing.T) {
 	if n := dom.descend(t, "mango", 0, 1).Kids; n != 1 {
 		t.Fatalf("the table has %d rows, want the collection row alone: a not-checkable target is no row", n)
 	}
-	line := dom.descend(t, "mango", 1)
-	if line.Class != "mgnot" {
-		t.Errorf("the not-checkable line is drawn as %q, want the line class", line.Class)
+	line := mangoTexts(t, dom, "mgnot")
+	if len(line) != 1 {
+		t.Fatalf("the panel draws %d not-checkable lines, want one", len(line))
 	}
-	if chip := dom.descend(t, "mango", 1, 0); chip.Text != "not checkable" || chip.Class != "jvchip jv-notyet" {
-		t.Errorf("the line's chip is %q (%q), want the dim not-checkable chip", chip.Text, chip.Class)
+	if chip := mangoTexts(t, dom, "jv-notyet"); len(chip) != 1 || chip[0] != "not checkable" {
+		t.Errorf("the line's chip is %q, want the dim not-checkable chip", chip)
 	}
 	for _, want := range []string{"Beads stopped by the overrun guard", "12 positives", "no positives in the recent landings to check it on, its last positive was 2026-10-19"} {
-		if !strings.Contains(line.Text, want) {
-			t.Errorf("the not-checkable line %q has no %q", line.Text, want)
+		if !strings.Contains(line[0], want) {
+			t.Errorf("the not-checkable line %q has no %q", line[0], want)
 		}
+	}
+}
+
+// A reason word the page has no sentence for is drawn as the panel's own word:
+// a line that dropped it would leave the operator with no reason at all.
+func TestMangoNotCheckableKeepsAReasonItCannotName(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	target := mangoPageTarget("reached_overrun_stop", 12, true, "", 0, 0, 0.03, MangoNotYet)
+	target["reason"] = "warmup_landings"
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
+
+	line := mangoTexts(t, dom, "mgnot")
+	if len(line) != 1 {
+		t.Fatalf("the panel draws %d not-checkable lines, want one", len(line))
+	}
+	if !strings.Contains(line[0], "warmup_landings") {
+		t.Errorf("the not-checkable line %q drops the panel's reason word", line[0])
 	}
 }
 
@@ -457,11 +476,13 @@ func TestMangoOldPanelKeepsItsColumns(t *testing.T) {
 	if got := mangoCell(t, dom, 1, 2).Text; !strings.Contains(got, "42.0% of 96") || !strings.Contains(got, "vs 25.0% across all recent landings") {
 		t.Errorf("the target's rate cell reads %q, want the rate of its group against the baseline", got)
 	}
-	if n := dom.descend(t, "mango", 0, 1, 1, 4).Kids; n != 1 {
-		t.Errorf("an old panel's evidence cell holds %d parts, want the fold alone and no chips", n)
+	if chips := mangoElements(t, dom, "mgcondchip"); len(chips) != 0 {
+		t.Errorf("an old panel draws %d condition chips, want none", len(chips))
 	}
-	if got := dom.descend(t, "mango", 0, 1, 1, 4, 0, 1, 0).Text; got != "model = opus and attempts in q4" {
-		t.Errorf("the fold holds %q, want the old best box", got)
+	if fold := mangoTexts(t, dom, "mgfold"); len(fold) != 2 {
+		t.Errorf("the two rows draw %d folds, want one each", len(fold))
+	} else if !strings.Contains(fold[0], "model = opus and attempts in q4") {
+		t.Errorf("the fold holds %q, want the old best box", fold[0])
 	}
 }
 
@@ -476,19 +497,25 @@ func TestMangoConditionWithMarkupRendersAsText(t *testing.T) {
 	target["conditions"] = []any{map[string]any{"text": text, "share": 0.12, "narrows": true}}
 	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
 
-	chip := dom.descend(t, "mango", 0, 1, 1, 4, 0)
-	if chip.Text != text+" 12.0% of landings" {
-		t.Errorf("the chip draws %q, want the raw condition text and its share", chip.Text)
+	chip := mangoElements(t, dom, "mgcondchip")
+	if len(chip) != 1 {
+		t.Fatalf("the row draws %d narrowing chips, want one", len(chip))
 	}
-	if chip.Kids != 0 {
-		t.Errorf("the chip holds %d elements, want its text alone", chip.Kids)
+	if chip[0].Text != text+" 12.0% of landings" {
+		t.Errorf("the chip draws %q, want the raw condition text and its share", chip[0].Text)
 	}
-	folded := dom.descend(t, "mango", 0, 1, 1, 4, 1, 1, 0, 0)
-	if folded.Text != text {
-		t.Errorf("the fold draws %q, want the raw condition text", folded.Text)
+	if chip[0].Kids != 0 {
+		t.Errorf("the chip holds %d elements, want its text alone", chip[0].Kids)
 	}
-	if folded.Kids != 0 {
-		t.Errorf("the fold's condition holds %d elements, want its text alone", folded.Kids)
+	folded := mangoElements(t, dom, "mgcondtext")
+	if len(folded) != 1 {
+		t.Fatalf("the fold draws %d condition texts, want one", len(folded))
+	}
+	if folded[0].Text != text {
+		t.Errorf("the fold draws %q, want the raw condition text", folded[0].Text)
+	}
+	if folded[0].Kids != 0 {
+		t.Errorf("the fold's condition holds %d elements, want its text alone", folded[0].Kids)
 	}
 }
 
@@ -511,8 +538,8 @@ func TestMangoIntervalBarNeedsBothBounds(t *testing.T) {
 			target["ci_low"], target["ci_high"] = tc.low, tc.high
 			dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
 
-			if n := dom.descend(t, "mango", 0, 1, 1, 3).Kids; n != 0 {
-				t.Errorf("the interval cell holds %d parts, want no bar", n)
+			if bars := mangoElements(t, dom, "mgbar"); len(bars) != 0 {
+				t.Errorf("the interval draws %d bars, want none", len(bars))
 			}
 		})
 	}
@@ -951,6 +978,48 @@ func mangoTexts(t *testing.T, dom *pageDOM, class string) []string {
 	t.Helper()
 
 	return mangoClassValues(t, dom, class, "c.textContent")
+}
+
+// mangoElements reads back every element drawn under #mango whose class holds
+// class, in draw order. A test finds a part by the class that marks it rather
+// than by its position among its siblings or by its whole class list, either of
+// which drawing order and styling can change.
+func mangoElements(t *testing.T, dom *pageDOM, class string) []drawn {
+	t.Helper()
+
+	expr := `(function () {
+  var out = [];
+  (function walk(n) {
+    for (var i = 0; i < (n.children || []).length; i++) {
+      var c = n.children[i];
+      var cls = String(c.className || "") + " " + String(c.getAttribute("class") || "");
+      if (cls.split(/\s+/).indexOf(` + quoteJS(class) + `) >= 0) out.push({text: c.textContent, class: String(c.className || ""), kids: c.children.length});
+      walk(c);
+    }
+  })(__byId["mango"]);
+  return out;
+})()`
+	v, err := dom.vm.RunString("JSON.stringify(" + expr + ")")
+	if err != nil {
+		t.Fatalf("reading the %q elements under #mango: %v", class, err)
+	}
+	var out []drawn
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the %q elements under #mango: %v", class, err)
+	}
+	return out
+}
+
+// hasClass reports whether the element wears class as one token of its class
+// list: the page greys with that token, and the rest of the list is the
+// stylesheet's business rather than a test's.
+func hasClass(d drawn, class string) bool {
+	for _, c := range strings.Fields(d.Class) {
+		if c == class {
+			return true
+		}
+	}
+	return false
 }
 
 // mangoAttrs reads one attribute from every element drawn under #mango whose
