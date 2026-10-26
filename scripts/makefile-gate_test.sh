@@ -198,10 +198,10 @@ else
   fail "make -n polecat-image exits 0" "$pout"
 fi
 pcross=$(grep -c -F 'GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build' <<<"$pout" || true)
-if [[ "$pcross" == 2 ]] && grep -q -F './cmd/gt' <<<"$pout" && grep -q -F './cmd/bd' <<<"$pout"; then
-  pass "polecat-image cross-compiles gt and bd for linux/arm64"
+if [[ "$pcross" == 1 ]] && grep -q -F './cmd/gt' <<<"$pout" && grep -q -F 'go run ./internal/polecat/bdbuild/cmd/build' <<<"$pout"; then
+  pass "polecat-image cross-compiles gt for linux/arm64 and builds bd through the bd build helper"
 else
-  fail "polecat-image cross-compiles gt and bd for linux/arm64 (builds: $pcross)" "$pout"
+  fail "polecat-image cross-compiles gt for linux/arm64 and builds bd through the bd build helper (builds: $pcross)" "$pout"
 fi
 pdev=$(grep -c -F 'gastown-polecat:dev' <<<"$pout" || true)
 if grep -q -E 'docker build --platform linux/arm64 .*-t gastown-polecat:[^ ]+ -t gastown-polecat:dev -f deploy/polecat/Dockerfile deploy/polecat' <<<"$pout" && [[ "$pdev" == 1 ]]; then
@@ -210,10 +210,23 @@ else
   fail "polecat-image builds deploy/polecat/Dockerfile, tagged both the short sha and :dev" "$pout"
 fi
 # BD_SRC is the only source of bd: a checkout outside this repo.
-if bdsrc=$(dry polecat-image BD_SRC=/somewhere/else) && grep -q -F 'cd /somewhere/else &&' <<<"$bdsrc"; then
+if bdsrc=$(dry polecat-image BD_SRC=/somewhere/else) && grep -q -F -- '-src "/somewhere/else"' <<<"$bdsrc"; then
   pass "polecat-image takes BD_SRC pointing at another beads checkout"
 else
   fail "polecat-image takes BD_SRC pointing at another beads checkout" "$bdsrc"
+fi
+# The image records the commit its bd was built from, read from the file the
+# helper wrote, so a host bd the checkout predates cannot leave the label
+# naming another commit (gt-7b7a5).
+if bdlabel=$(dry polecat-image BD_SRC=/somewhere/else BD_COMMIT=3b90ab0) \
+  && grep -q -F -- '-commit "3b90ab0"' <<<"$bdlabel" \
+  && grep -q -F -- 'bd_commit=$(go run ./internal/polecat/bdbuild/cmd/build' <<<"$bdlabel" \
+  && grep -q -F -- 'test -n "$bd_commit"' <<<"$bdlabel" \
+  && grep -q -F -- 'bd_commit=$(cat deploy/polecat/bin/bd.commit)' <<<"$bdlabel" \
+  && grep -q -F -- '--label org.gastown.bd-commit="$bd_commit"' <<<"$bdlabel"; then
+  pass "polecat-image labels the image with the bd commit the helper built"
+else
+  fail "polecat-image labels the image with the bd commit the helper built" "$bdlabel"
 fi
 if cout=$(dry polecat-caches RIGS="gastown om") && grep -q -F 'scripts/polecat-caches.sh gastown om' <<<"$cout"; then
   pass "make -n polecat-caches passes RIGS to the script"
@@ -455,6 +468,89 @@ else
   fail "polecat-image lets a clean tree past its guard to the build (rc=$crc, binary=$built)" "$cout"
 fi
 rm -rf "$pdir" "$ptown"
+
+# The image's bd label is the commit the build helper compiled, carried from the
+# helper's stdout into docker's --label (gt-7b7a5). A scratch repo runs the whole
+# recipe against stub go and docker: the stub helper prints a known sha, and
+# docker's recorded arguments show it in the label. The same run drives the
+# helper failing and printing nothing, each of which must stop the recipe before
+# docker runs. The stub go logs every invocation, so the run's node prune is
+# checked too, and each refusal is checked to have stopped before it.
+lrepo="$(mktemp -d)"
+lbin="$(mktemp -d)"
+cp "$ROOT/Makefile" "$lrepo/"
+mkdir -p "$lrepo/cmd/gt" "$lrepo/deploy/polecat"
+printf 'module example.invalid/scratch\n\ngo 1.21\n' >"$lrepo/go.mod"
+printf 'package main\n\nfunc main() {}\n' >"$lrepo/cmd/gt/main.go"
+printf 'fx 92b9e510ac2f9ff8c80b0291f312ac482bf96c38\n' >"$lrepo/deploy/polecat/seed-pins"
+printf '#!/bin/sh\necho 1.21\n' >"$lrepo/deploy/polecat/go-floor.sh"
+cat >"$lbin/go" <<'FAKE'
+#!/bin/sh
+# A fake go: every invocation is logged so a test can see which recipe lines
+# ran; any -o path a recipe names is created so the recipe runs on, and the bd
+# helper's stdout is STUB_BD_COMMIT, or nothing when that is empty.
+[ -n "$GO_ARGS_LOG" ] && printf '%s\n' "$*" >>"$GO_ARGS_LOG"
+out=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "-o" ] && out="$a"
+  prev="$a"
+done
+if [ -n "$out" ]; then mkdir -p "$(dirname "$out")" && : >"$out"; fi
+if [ "$1" = "run" ] && [ "$2" = "./internal/polecat/bdbuild/cmd/build" ]; then
+  [ -n "$STUB_BD_EXIT" ] && exit "$STUB_BD_EXIT"
+  printf '%s\n' "$STUB_BD_COMMIT"
+fi
+exit 0
+FAKE
+cat >"$lbin/docker" <<'FAKE'
+#!/bin/sh
+printf '%s\n' "$*" >>"$DOCKER_ARGS_LOG"
+FAKE
+chmod +x "$lbin/go" "$lbin/docker"
+git -C "$lrepo" init -q
+git -C "$lrepo" add -A
+git -C "$lrepo" -c user.name=test -c user.email=test@example.invalid commit -q -m init
+# POLE_TOWN points into the scratch tree: the recipe reads the town root, and
+# the gate must not read the live one.
+limg=(make -C "$lrepo" --no-print-directory polecat-image BD_SRC=/somewhere/else
+  POLE_TOWN="$lrepo/town" POLE_SEED_DIR="$lrepo/seed" POLE_RIG_GO_MODS="$lrepo/go.mod")
+stubcommit=3b90ab0c0ffee0000000000000000000000000aa
+lrc=0
+lout=$(PATH="$lbin:$PATH" STUB_BD_COMMIT="$stubcommit" DOCKER_ARGS_LOG="$lbin/docker.args" GO_ARGS_LOG="$lbin/go.args" "${limg[@]}" 2>&1) || lrc=$?
+if [[ "$lrc" == 0 ]] \
+  && grep -q -F -- "--label org.gastown.bd-commit=$stubcommit" "$lbin/docker.args" 2>/dev/null \
+  && grep -q -F 'run ./cmd/nodeprune' "$lbin/go.args" 2>/dev/null; then
+  pass "polecat-image labels the image with the commit the bd build helper printed"
+else
+  fail "polecat-image labels the image with the commit the bd build helper printed (rc=$lrc)" "$lout / $(cat "$lbin/docker.args" 2>/dev/null) / $(cat "$lbin/go.args" 2>/dev/null)"
+fi
+# A failed helper and an empty commit each stop the recipe before docker, so no
+# image is built carrying a label for a commit that was not compiled, and before
+# the node prune. A run leaves the binaries it built in the scratch tree, and the
+# recipe refuses a tree with untracked files, so each case starts from the
+# committed tree.
+lclean() { rm -rf "$lrepo/deploy/polecat/bin" "$lrepo/deploy/polecat/seed"; }
+lclean
+rm -f "$lbin/docker.args" "$lbin/go.args"
+lrc=0
+lout=$(PATH="$lbin:$PATH" STUB_BD_EXIT=1 DOCKER_ARGS_LOG="$lbin/docker.args" GO_ARGS_LOG="$lbin/go.args" "${limg[@]}" 2>&1) || lrc=$?
+if [[ "$lrc" != 0 ]] && grep -q -F 'the bd build failed' <<<"$lout" && [[ ! -e "$lbin/docker.args" ]] \
+  && ! grep -q -F 'run ./cmd/nodeprune' "$lbin/go.args" 2>/dev/null; then
+  pass "polecat-image stops before docker when the bd build fails"
+else
+  fail "polecat-image stops before docker when the bd build fails (rc=$lrc)" "$lout / $(cat "$lbin/go.args" 2>/dev/null)"
+fi
+lclean
+rm -f "$lbin/docker.args" "$lbin/go.args"
+lrc=0
+lout=$(PATH="$lbin:$PATH" STUB_BD_COMMIT= DOCKER_ARGS_LOG="$lbin/docker.args" GO_ARGS_LOG="$lbin/go.args" "${limg[@]}" 2>&1) || lrc=$?
+if [[ "$lrc" != 0 ]] && grep -q -F 'printed no commit' <<<"$lout" && [[ ! -e "$lbin/docker.args" ]] \
+  && ! grep -q -F 'run ./cmd/nodeprune' "$lbin/go.args" 2>/dev/null; then
+  pass "polecat-image refuses an empty bd commit before docker builds the image"
+else
+  fail "polecat-image refuses an empty bd commit before docker builds the image (rc=$lrc)" "$lout / $(cat "$lbin/go.args" 2>/dev/null)"
+fi
+rm -rf "$lrepo" "$lbin"
 
 # The container suite's test-Dolt init pool must be as wide as the scheduler
 # town slot count (gt-ik4a1.4.12). Package beads reads the pool override in

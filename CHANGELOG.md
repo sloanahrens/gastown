@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The polecat image's bd is built from the installed bd's commit** (gt-7b7a5)
+  — `make polecat-image` reads `bd version --json` and compiles bd from exactly
+  that commit, checked out of `BD_SRC`'s object store into a clean worktree and
+  never fetched, instead of compiling whatever HEAD that checkout sat on. Host
+  and sandbox therefore share one schema ceiling. A commit the checkout does not
+  hold fails the build, naming it; `BD_COMMIT=<sha>` builds another commit. The
+  image records the commit in its `org.gastown.bd-commit` label.
+
 - **`forgejo_host` on a sandbox profile is checked at load** (gt-qhxm6) — it
   must be a bare host name (dot-separated labels of letters, digits and hyphens),
   with no port, IPv6 literal, scheme or underscore. A value such as
