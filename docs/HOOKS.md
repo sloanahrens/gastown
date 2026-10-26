@@ -64,13 +64,12 @@ They deny the question tool too (`gt tap guard question-tool`, gt-163k8, matcher
 sat 4h26m on one.
 
 It also carries `gt tap nudge-drain` (gt-drwph) as a `PostToolUse` hook on the
-empty `""` matcher, so it runs after every tool call: it drains the session's
-queued nudges, hands them to the model once as hook `additionalContext` (a
-drained nudge leaves the queue) and exits 0. The `UserPromptSubmit` hook below
-is the only other drain and never fires while a seat runs tool turns, so the
-overrun guard's queued split-proposal nudge expired unseen. Hooks arrive only in
-the `--settings` file, a Claude CLI flag: the Claude CLI is the only runtime
-(gt-be0z).
+empty `""` matcher: it drains the session's queued nudges, hands them to the
+model once as hook `additionalContext` (a drained nudge leaves the queue) and
+exits 0. The `UserPromptSubmit` hook below is the only other drain and never
+fires while a seat runs tool turns, so the overrun guard's queued
+split-proposal nudge expired unseen. Hooks arrive only in the `--settings` file;
+the Claude CLI is the only runtime (gt-be0z).
 
 The `bd-close-invariant` guard (`gt tap guard bd-close-invariant`, gt-arno) runs
 on the `Bash|Monitor` matcher for every role, from `DefaultBase()`. It is the
@@ -84,8 +83,8 @@ judged; other closes and unresolvable input pass.
 
 The `bd-create-store` guard refuses a polecat's `bd create` that would file into the town's `hq` store, judged from the effective cwd.
 
-Settings are passed to Claude Code via `--settings <path>`, which loads them as
-a separate priority tier that merges additively with project settings.
+`--settings <path>` is a separate priority tier that merges additively with
+project settings.
 
 ## Commands
 
@@ -117,7 +116,7 @@ town's own overrides layered on top:
 | nudge-drain | PostToolUse | polecats |
 | polecat-stop-check | Stop | polecats |
 | polecat-paths, question-tool guards | PreToolUse | polecats |
-| script-files guard (`gt tap guard script-files`, gt-b43ra): a new script in a worker's worktree is denied | PreToolUse | polecats, crew |
+| script-files guard (`gt tap guard script-files`) | PreToolUse | polecats, crew |
 | permission-request guard | PermissionRequest | polecats |
 | crew compaction handoff (`gt handoff --cycle --reason compaction`) | PreCompact (replaces) | crew |
 
