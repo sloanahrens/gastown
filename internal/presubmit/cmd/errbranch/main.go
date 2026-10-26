@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"go/build"
 	"io"
 	"os"
 	"os/exec"
@@ -46,7 +47,7 @@ func main() {
 	if err != nil {
 		failf("errbranch: %v", err)
 	}
-	res, err := presubmit.UntestedErrorBranches(bytes.NewReader(out), profile, module, nestedModuleIn("."))
+	res, err := presubmit.UntestedErrorBranches(bytes.NewReader(out), profile, module, nestedModuleIn("."), buildExcludedIn(".", &build.Default))
 	if err != nil {
 		failf("errbranch: %v", err)
 	}
@@ -60,6 +61,9 @@ func main() {
 func report(w io.Writer, res presubmit.Result) error {
 	fmt.Fprintf(w, "errbranch: judged %d of %d added error returns in Go sources (%d unjudged, %d in quoted paths, not read)\n",
 		res.Judged, res.Added, len(res.Unjudged), res.Quoted)
+	for _, f := range res.Excluded {
+		fmt.Fprintf(w, "%s:%d: excluded by build constraints on this platform, not judged: %s\n", f.Path, f.Line, f.Text)
+	}
 	for _, f := range res.Unjudged {
 		fmt.Fprintf(w, "%s:%d: added error return in a file the cover profile does not name: %s\n", f.Path, f.Line, f.Text)
 	}
@@ -89,6 +93,17 @@ func nestedModuleIn(root string) func(path string) bool {
 			}
 		}
 		return false
+	}
+}
+
+// buildExcludedIn returns the predicate that reports whether the build constraints of ctx (GOOS,
+// GOARCH, build tags, //go:build lines) exclude a file of root: a file no build on this platform
+// compiles can never be in the profile, so it is reported rather than failed (gt-b9j3o.5).
+func buildExcludedIn(root string, ctx *build.Context) func(path string) bool {
+	return func(p string) bool {
+		dir := filepath.Join(root, filepath.FromSlash(pathDir(p)))
+		ok, err := ctx.MatchFile(dir, filepath.Base(filepath.FromSlash(p)))
+		return err == nil && !ok
 	}
 }
 

@@ -189,7 +189,7 @@ func TestUntestedErrorBranches(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := UntestedErrorBranches(strings.NewReader(tt.diff), strings.NewReader(tt.cover), testModule, nil)
+			got, err := UntestedErrorBranches(strings.NewReader(tt.diff), strings.NewReader(tt.cover), testModule, nil, nil)
 			if err != nil {
 				t.Fatalf("UntestedErrorBranches: %v", err)
 			}
@@ -228,7 +228,7 @@ func TestUntestedErrorBranchesRefusesInputItCannotRead(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := UntestedErrorBranches(strings.NewReader(tt.diff), strings.NewReader(tt.cover), testModule, nil); err == nil {
+			if _, err := UntestedErrorBranches(strings.NewReader(tt.diff), strings.NewReader(tt.cover), testModule, nil, nil); err == nil {
 				t.Error("UntestedErrorBranches accepted input it cannot read")
 			}
 		})
@@ -244,10 +244,10 @@ func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
 func TestUntestedErrorBranchesReportsAReadError(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("read failed")
-	if _, err := UntestedErrorBranches(failingReader{boom}, strings.NewReader(coverOf()), testModule, nil); !errors.Is(err, boom) {
+	if _, err := UntestedErrorBranches(failingReader{boom}, strings.NewReader(coverOf()), testModule, nil, nil); !errors.Is(err, boom) {
 		t.Errorf("diff read error = %v, want %v", err, boom)
 	}
-	if _, err := UntestedErrorBranches(strings.NewReader(""), failingReader{boom}, testModule, nil); !errors.Is(err, boom) {
+	if _, err := UntestedErrorBranches(strings.NewReader(""), failingReader{boom}, testModule, nil, nil); !errors.Is(err, boom) {
 		t.Errorf("cover read error = %v, want %v", err, boom)
 	}
 }
@@ -259,7 +259,7 @@ func TestUntestedErrorBranchesJudgesOnlyTheNamedFile(t *testing.T) {
 	t.Parallel()
 	diff := addDiff("errbranch.go", 7, `	return err`)
 	cover := coverOf(testModule + "/internal/other/errbranch.go:7.2,7.11 1 0")
-	got, err := UntestedErrorBranches(strings.NewReader(diff), strings.NewReader(cover), testModule, nil)
+	got, err := UntestedErrorBranches(strings.NewReader(diff), strings.NewReader(cover), testModule, nil, nil)
 	if err != nil {
 		t.Fatalf("UntestedErrorBranches: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestUntestedErrorBranchesCountsWhatItJudged(t *testing.T) {
 		addDiff("internal/unbuilt/x.go", 3, `	return err`) +
 		"diff --git a/x b/x\n--- a/x\n+++ \"b/internal/quoted name.go\"\n@@ -0,0 +4 @@\n+\treturn err\n"
 	cover := coverOf(appCoverPath + ":12.3,12.44 1 0")
-	got, err := UntestedErrorBranches(strings.NewReader(diff), strings.NewReader(cover), testModule, nil)
+	got, err := UntestedErrorBranches(strings.NewReader(diff), strings.NewReader(cover), testModule, nil, nil)
 	if err != nil {
 		t.Fatalf("UntestedErrorBranches: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestUntestedErrorBranchesMatchesColumns(t *testing.T) {
 	// The return sits at column 3. An executed block on the same line ends before it (columns 1-2),
 	// and the return's own block (columns 3-10) was not executed: a line-granular match would pass it.
 	cover := coverOf(appCoverPath+":12.1,12.2 1 1", appCoverPath+":12.3,12.10 1 0")
-	got, err := UntestedErrorBranches(strings.NewReader(diff), strings.NewReader(cover), testModule, nil)
+	got, err := UntestedErrorBranches(strings.NewReader(diff), strings.NewReader(cover), testModule, nil, nil)
 	if err != nil {
 		t.Fatalf("UntestedErrorBranches: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestUntestedErrorBranchesFailsAnUnprofiledRootFile(t *testing.T) {
 	t.Parallel()
 	diff := addDiff(appPath, 12, `		return fmt.Errorf("load: %w", err)`) + addDiff("root.go", 3, `	return err`)
 	cover := coverOf(appCoverPath + ":12.3,12.44 1 1")
-	got, err := UntestedErrorBranches(strings.NewReader(diff), strings.NewReader(cover), testModule, nil)
+	got, err := UntestedErrorBranches(strings.NewReader(diff), strings.NewReader(cover), testModule, nil, nil)
 	if err != nil {
 		t.Fatalf("UntestedErrorBranches: %v", err)
 	}
@@ -324,11 +324,26 @@ func TestUntestedErrorBranchesLeavesNestedModulesOut(t *testing.T) {
 	t.Parallel()
 	diff := addDiff("tracker/x.go", 3, `	return err`)
 	nested := func(p string) bool { return strings.HasPrefix(p, "tracker/") }
-	got, err := UntestedErrorBranches(strings.NewReader(diff), strings.NewReader(coverOf()), testModule, nested)
+	got, err := UntestedErrorBranches(strings.NewReader(diff), strings.NewReader(coverOf()), testModule, nested, nil)
 	if err != nil {
 		t.Fatalf("UntestedErrorBranches: %v", err)
 	}
 	if got.Added != 0 || len(got.Unjudged) != 0 {
 		t.Errorf("a nested-module return was counted: added %d unjudged %+v", got.Added, got.Unjudged)
+	}
+}
+
+// TestUntestedErrorBranchesReportsExcludedFiles: an unjudged return in a file the build constraints
+// exclude is reported as excluded and is not unjudged, so it does not fail (gt-b9j3o.5).
+func TestUntestedErrorBranchesReportsExcludedFiles(t *testing.T) {
+	t.Parallel()
+	diff := addDiff("root_darwin.go", 3, `	return err`)
+	excluded := func(p string) bool { return p == "root_darwin.go" }
+	got, err := UntestedErrorBranches(strings.NewReader(diff), strings.NewReader(coverOf()), testModule, nil, excluded)
+	if err != nil {
+		t.Fatalf("UntestedErrorBranches: %v", err)
+	}
+	if len(got.Excluded) != 1 || len(got.Unjudged) != 0 {
+		t.Errorf("excluded = %+v unjudged = %+v, want the darwin-only return excluded and nothing unjudged", got.Excluded, got.Unjudged)
 	}
 }

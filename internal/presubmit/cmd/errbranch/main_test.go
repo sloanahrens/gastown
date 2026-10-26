@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"go/build"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,5 +98,46 @@ func TestNestedModuleIn(t *testing.T) {
 	}
 	if nested("internal/a.go") {
 		t.Error("a root-module file was called nested")
+	}
+}
+
+// TestBuildExcludedInFollowsTheTargetPlatform: a file the target platform's constraints exclude is
+// reported as excluded, a file it builds is not, and the host's own GOOS does not matter: the
+// context is given (gt-b9j3o.5).
+func TestBuildExcludedInFollowsTheTargetPlatform(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for name, body := range map[string]string{
+		"a_darwin.go": "package a\n",
+		"b_linux.go":  "package a\n",
+		"c.go":        "//go:build ignore\n\npackage a\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	linux := &build.Context{GOOS: "linux", GOARCH: "amd64", Compiler: "gc"}
+	excluded := buildExcludedIn(root, linux)
+	if !excluded("a_darwin.go") {
+		t.Error("a darwin-only file was not excluded on linux")
+	}
+	if excluded("b_linux.go") {
+		t.Error("a linux file was excluded on linux")
+	}
+	if !excluded("c.go") {
+		t.Error("a file behind //go:build ignore was not excluded")
+	}
+}
+
+// TestReportDoesNotFailExcluded: excluded returns are printed as excluded and do not fail the report.
+func TestReportDoesNotFailExcluded(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	res := presubmit.Result{Added: 1, Judged: 1, Excluded: []presubmit.Finding{{Path: "a_darwin.go", Line: 3, Text: "return err"}}}
+	if err := report(&out, res); err != nil {
+		t.Errorf("an excluded return failed the report: %v", err)
+	}
+	if !strings.Contains(out.String(), "excluded by build constraints") {
+		t.Errorf("report = %q, want the excluded return named as excluded", out.String())
 	}
 }

@@ -40,6 +40,10 @@ type Result struct {
 	// were not built with coverage, so nothing checked them, and they fail the check even when
 	// other returns in the diff are judged (gt-b9j3o.5, overseer ruling).
 	Unjudged []Finding
+	// Excluded are the unjudged returns in files the build constraints of the target platform
+	// exclude (GOOS, GOARCH, //go:build): no build can cover them there, so they are reported and
+	// do not fail the check.
+	Excluded []Finding
 }
 
 // UntestedErrorBranches reports the added Go error returns that the cover profile records as never
@@ -52,7 +56,7 @@ type Result struct {
 // name, module plus the diff path, and nothing else, so a same-named file in another package never
 // judges this one. Tests, testdata and directories the go tool skips are not sources. module is the
 // module path the profile names files by (go test writes github.com/x/y/pkg/file.go).
-func UntestedErrorBranches(diff, cover io.Reader, module string, nested func(path string) bool) (Result, error) {
+func UntestedErrorBranches(diff, cover io.Reader, module string, nested, excluded func(path string) bool) (Result, error) {
 	var res Result
 	added, err := addedLines(diff)
 	if err != nil {
@@ -77,7 +81,11 @@ func UntestedErrorBranches(diff, cover io.Reader, module string, nested func(pat
 		f := Finding{Path: line.path, Line: line.line, Text: strings.TrimSpace(line.text)}
 		judged, driven := driveStatus(blocks, module+"/"+line.path, line.line, returnColumn(line.text))
 		if !judged {
-			res.Unjudged = append(res.Unjudged, f)
+			if excluded != nil && excluded(line.path) {
+				res.Excluded = append(res.Excluded, f)
+			} else {
+				res.Unjudged = append(res.Unjudged, f)
+			}
 			continue
 		}
 		res.Judged++
