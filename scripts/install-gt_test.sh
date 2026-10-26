@@ -1137,9 +1137,6 @@ STUB
 }
 # wait_for_text FILE TEXT: wait until FILE holds TEXT, checked every 0.1 s for 5 s.
 wait_for_text() { local i; for i in $(seq 1 50); do grep -q -- "$2" "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
-# wait_for_state PID STATE: wait until proc_state reads STATE for PID, with no
-# /proc stat line (so the ps branch answers), checked every 0.1 s for 5 s.
-wait_for_state() { local i; for i in $(seq 1 50); do [ "$(PROC_ROOT="$T/no-proc" proc_state "$1")" = "$2" ] && return 0; sleep 0.1; done; return 1; }
 # proc_state PID: the one-letter state of PID (R, S, Z ...); empty once it is gone.
 # PROC_ROOT stands in for /proc, so both readers can be checked on either host.
 proc_state() {
@@ -1370,21 +1367,17 @@ echo "4242 (sh) S 1 4242 4242 0 -1 4194304" > "$T/fakeproc/4242/stat"
   && pass "proc_state: reads the state from a /proc stat line" \
   || fail "proc_state: /proc branch read '$(PROC_ROOT="$T/fakeproc" proc_state 4242)', want S"
 
-# Case 49: with no /proc stat line, proc_state asks ps. A child stopped with
-# SIGSTOP reads T on macOS and on Linux, so the answer is known in advance. The
-# test shell's own state is not used: it changes while the test runs, and two
-# samples of it raced (the case failed as S against R).
-sleep 60 &
-stopped=$!
-kill -STOP "$stopped"
-wait_for_state "$stopped" T || true
-got=$(PROC_ROOT="$T/no-proc" proc_state "$stopped")
-kill -CONT "$stopped" 2>/dev/null || true
-kill "$stopped" 2>/dev/null || true
-wait "$stopped" 2>/dev/null || true
+# Case 49: with no /proc stat line, proc_state asks ps and reads the state it
+# prints. A fake ps stands in for the real one: it prints T for the pid asked
+# about and nothing else. No real process is started, stopped or waited on, so
+# the case cannot race the host's load (gt-rfqtg).
+mkdir -p "$T/fakeps"
+printf '%s\n' '#!/bin/sh' 'case "$*" in *"-p 4242"*) echo T ;; esac' > "$T/fakeps/ps"
+chmod +x "$T/fakeps/ps"
+got=$(PATH="$T/fakeps:$PATH" PROC_ROOT="$T/no-proc" proc_state 4242)
 [ "$got" = T ] \
   && pass "proc_state: falls back to ps when /proc has no stat line" \
-  || fail "proc_state: ps branch read '$got', want T (a stopped child)"
+  || fail "proc_state: ps branch read '$got', want T from the fake ps"
 
 # --- Case 50: --no-image-first keeps the old order for an urgent daemon fix:
 # the binary is swapped and the restart marker written without waiting for the
