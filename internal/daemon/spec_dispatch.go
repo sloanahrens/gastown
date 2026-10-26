@@ -201,10 +201,11 @@ func (d *Daemon) triggerSpecDispatch() bool {
 		d.logger.Printf("spec_dispatch: operator dispatch hold lifted; ticker resuming")
 	}
 	// A pending restart waits for the tick in flight, up to that tick's own
-	// bound. A tick started now would outlast the wait and be cut by the
-	// restart, leaving a sling half done (gt-cbaoy), so it starts after the
-	// restart, from the new daemon.
-	if d.upgradeRestartPending.Load() {
+	// bound: a tick started now would outlast the wait and be cut by the
+	// restart, leaving a sling half done, so it starts after the restart, from
+	// the new daemon (gt-cbaoy). The drain being off does not license one
+	// (gt-u1fzb); specDispatchParked says which notice parks the ticker.
+	if d.specDispatchParked() {
 		if d.specDispatchDeferLogged.CompareAndSwap(false, true) {
 			d.logger.Printf("spec_dispatch: not ticking: an upgrade restart is pending; the next tick runs after it")
 		}
@@ -243,6 +244,13 @@ func (d *Daemon) triggerSpecDispatch() bool {
 		d.runSpecDispatchUnder(run.bound)
 	}()
 	return true
+}
+
+// specDispatchParked reports whether an upgrade restart keeps the ticker from
+// starting a tick: the landing drain is on, or the restart waits on the tick in
+// flight, where a new one would start behind it and extend the wait (gt-u1fzb).
+func (d *Daemon) specDispatchParked() bool {
+	return d.upgradeRestartPending.Load() || d.upgradeTickWaiting.Load()
 }
 
 // specSeatsReady reads the seat settings the next tick will run with and

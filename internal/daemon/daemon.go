@@ -413,7 +413,7 @@ type Daemon struct {
 	upgradeGCCallStart   int64     // UnixNano start of the gc call upgradeGCHoldSince times (0 = none)
 	upgradeGCBeat        time.Time // the last heartbeat that read the gc hold
 	upgradeWaitEscalated bool
-	upgradeWaitLogged    string    // the hold the last wait line named (tierSweepHoldLabel while a sweep holds it)
+	upgradeWaitLogged    string    // the hold the last wait line named (the hold's label while it holds the restart)
 	upgradeDrainLogged   bool      // the once-per-marker drain line has been logged
 	upgradeDrainSince    time.Time // when the drain line was written, so its end can say how long landings were held (zero = no drain)
 	upgradeDrainWait     string    // the last hold a wait line named while the drain was on, for the drain end line
@@ -541,10 +541,18 @@ type Daemon struct {
 	landingPassFn func()
 
 	// upgradeRestartPending is true while a restart marker the daemon must
-	// act on exists. The landing workers drain on it: they finish the pass in
-	// flight and start no new one, so the restart finds an idle moment
-	// (gt-nxvpe). Cleared when the marker is gone or covered.
+	// act on exists and the landing drain is on. The landing workers drain on it:
+	// they finish the pass in flight and start no new one, so the restart finds
+	// an idle moment (gt-nxvpe). Cleared when the marker is gone or covered.
 	upgradeRestartPending atomic.Bool
+
+	// upgradeTickWaiting is true while the restart waits on the spec dispatch
+	// tick in flight with the drain deferred, where upgradeRestartPending is
+	// false and cannot keep a new tick from starting behind the one it waits on
+	// (gt-u1fzb). The ticker is parked while either flag is set, so the
+	// transition between them sets the arriving flag before it clears the
+	// leaving one; see deferUpgradeDrain and endDispatchTickWait.
+	upgradeTickWaiting atomic.Bool
 
 	// landingDrainedCh carries one wake per drained landing pass, so the run
 	// loop restarts at the pass's end instead of at the next heartbeat
