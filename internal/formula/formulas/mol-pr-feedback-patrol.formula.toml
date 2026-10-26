@@ -7,14 +7,12 @@ A dedup guard prevents re-slinging polecats for PRs that already have open beads
 
 ## Purpose
 
-Without this patrol, review feedback and CI failures on open PRs go unnoticed
-until someone manually checks GitHub. This patrol closes that gap by running
-continuously and dispatching polecats to address findings.
+Review feedback and CI failures go unnoticed until someone manually checks
+GitHub; this patrol runs continuously and dispatches polecats to address them.
 
 ## Rig Parameterization
 
-The patrol is generic — it operates on a specified rig. Run one patrol instance
-per rig, or configure a single instance to scan multiple repos.
+The patrol is generic: one instance per rig, or one scanning several repos.
 
 ## Dispatch Strategy
 
@@ -22,8 +20,6 @@ For each actionable PR finding, the patrol:
 1. Checks for an existing open bead tagged with the PR number (dedup guard)
 2. If no existing bead, creates a new bead with PR context (URL, type, check names)
 3. Slings a polecat to the appropriate rig to address the finding
-
-One bead per PR item. If a bead already exists for that PR, it is skipped.
 
 ## PR Actionability Criteria
 
@@ -198,9 +194,10 @@ For each finding in /tmp/patrol-findings.txt, create a work bead and sling a pol
 
 **Safety valve — check open bead count first:**
 ```bash
-OPEN_COUNT=$(bd list --label {{patrol_label}} --status open 2>/dev/null | wc -l || echo "0")
+OPEN_COUNT=$(bd list --label {{patrol_label}} --status open --json --limit 0 2>/dev/null | jq -e 'length')
+[ "${OPEN_COUNT:-x}" -ge 0 ] 2>/dev/null || { echo "bd list failed; skipping dispatch" >&2; exit 1; }
 if [ "$OPEN_COUNT" -ge {{max_open_beads}} ]; then
-  echo "Safety valve: ${OPEN_COUNT} open patrol beads already exist (max {{max_open_beads}}). Skipping dispatch."
+  echo "Safety valve: ${OPEN_COUNT} open patrol beads (max {{max_open_beads}}). Skipping dispatch."
   exit 0
 fi
 ```
@@ -209,7 +206,8 @@ fi
 ```bash
 while IFS=: read -r TYPE PR_NUM PR_URL PR_TITLE EXTRA; do
   # Dedup guard: check for existing open bead for this PR + type
-  EXISTING=$(bd list --label "pr-num-${PR_NUM}" --label "{{patrol_label}}" --status open 2>/dev/null | wc -l || echo "0")
+  EXISTING=$(bd list --label "pr-num-${PR_NUM}" --label "{{patrol_label}}" --status open --json --limit 0 2>/dev/null | jq -e 'length')
+  [ "${EXISTING:-x}" -ge 0 ] 2>/dev/null || { echo "bd list failed; skipping PR #${PR_NUM} (${TYPE})" >&2; continue; }
   if [ "$EXISTING" -gt 0 ]; then
     echo "Skipping PR #${PR_NUM} (${TYPE}): open bead already exists"
     continue
@@ -269,8 +267,8 @@ Dispatched by mol-pr-feedback-patrol."
 done < /tmp/patrol-findings.txt
 ```
 
-**Exit criteria:** All actionable PRs have either a newly created+slung bead, or were
-skipped because an open bead already exists.
+**Exit criteria:** Every actionable PR has either a newly created+slung bead, or
+a printed reason for skipping.
 """
 
 [[steps]]
