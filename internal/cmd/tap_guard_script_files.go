@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -34,20 +35,14 @@ var scriptFileExtensions = []string{".sh", ".bash", ".zsh", ".pl", ".rb"}
 // with the advisory judgeNewScript prints.
 const scriptFilePythonExtension = ".py"
 
-// scriptFileAllowlist names repo paths that legitimately end in a script
-// extension — files that only look like scripts. It starts empty and is never
-// added to (gt-b43ra): a new script is the debt this guard exists to stop, and
-// the files a repo must hold under these names (a Makefile, a Dockerfile, CI
-// YAML) do not carry one of these extensions at all.
-var scriptFileAllowlist = []string{}
-
 // scriptFilePolicy is the whole redirect this guard delivers, in one constant
 // so the denial message, the unreadable-payload denial and the tests cannot
 // drift apart (gt-b43ra).
 const scriptFilePolicy = `Write a Go package with unit tests and seams for the clock, filesystem and
 process runner: ~/.claude/docs/standards/test-engineering.md, "Scripts are debt".
 A procedure that is only operator steps is a runbook, not a script.
-Bash-created scripts are caught at commit by the repo guard gt-lpm8b.`
+Bash-created scripts are to be caught at commit by the repo guard gt-lpm8b,
+which is still open; until it lands, nothing here judges a Bash command.`
 
 var tapGuardScriptFilesCmd = &cobra.Command{
 	Use:   "script-files",
@@ -270,9 +265,9 @@ func (s scriptFileScope) resolveTarget(raw, dir string) (string, bool) {
 // judgeNewScript denies target when it is a new script file inside the
 // worktree, and prints an advisory (never a denial) for a new Python file.
 func (s scriptFileScope) judgeNewScript(target, via string, stderr io.Writer) error {
-	if !isWithinPath(target, s.worktree) || scriptFileAllowlisted(target) || !isNewFilePath(target) {
-		// Outside the worktree, allowlisted, or an existing file being edited or
-		// re-created — all allowed.
+	if !isWithinPath(target, s.worktree) || !isNewFilePath(target) {
+		// Outside the worktree, or an existing file being edited or re-created —
+		// all allowed.
 		return nil
 	}
 	if scriptFileExtension(target) {
@@ -328,16 +323,6 @@ func isNewFilePath(path string) bool {
 	return err != nil
 }
 
-// scriptFileAllowlisted reports whether target is a path the allowlist exempts.
-func scriptFileAllowlisted(target string) bool {
-	for _, allowed := range scriptFileAllowlist {
-		if isWithinPath(target, allowed) {
-			return true
-		}
-	}
-	return false
-}
-
 // printScriptFilePolicy writes the redirect under a denial, indented as the
 // continuation of the ❌ line.
 func printScriptFilePolicy(w io.Writer) {
@@ -354,14 +339,12 @@ func printScriptFileRefusal(w io.Writer, via, target string) {
 	fmt.Fprintln(w, "   Editing an existing script and removing one are allowed.")
 }
 
-// printScriptFileUnjudgeable denies a call the guard cannot judge. It fails
-// closed on purpose (gt-b43ra): passing an unchecked call through is the hole
-// this guard exists to close, so "cannot tell" reads as "no".
 // unjudgedPayload is the answer to a payload the guard cannot parse: it denies
 // only when the raw payload names a denied script suffix, the one fact left to
 // read from it (gt-b43ra).
 func unjudgedPayload(input []byte, stderr io.Writer, why string) error {
 	if !payloadNamesScriptSuffix(string(input)) {
+		fmt.Fprintf(stderr, "script-files: %s, and it names no script, so this call is allowed.\n", why)
 		return nil
 	}
 	printScriptFileUnjudgeable(stderr, why)
@@ -387,16 +370,17 @@ func unjudgedWorktree(hook scriptFileInput, stderr io.Writer) error {
 }
 
 // payloadNamesScriptSuffix reports whether raw text carries a denied script
-// suffix anywhere in it.
+// suffix ending a path-like word: the suffix followed by a quote, space, comma,
+// brace or the end of the text. A bare substring would also match prose.
+var payloadScriptSuffix = regexp.MustCompile(`\.(sh|bash|zsh|pl|rb)(["'\s,}]|$)`)
+
 func payloadNamesScriptSuffix(raw string) bool {
-	for _, denied := range scriptFileExtensions {
-		if strings.Contains(raw, denied) {
-			return true
-		}
-	}
-	return false
+	return payloadScriptSuffix.MatchString(raw)
 }
 
+// printScriptFileUnjudgeable denies a call the guard cannot judge. It fails
+// closed on purpose (gt-b43ra): passing an unchecked call through is the hole
+// this guard exists to close, so "cannot tell" reads as "no".
 func printScriptFileUnjudgeable(w io.Writer, why string) {
 	fmt.Fprintf(w, "\n❌ NO NEW SCRIPTS: %s, so this call is denied rather than passed through unchecked.\n", why)
 	printScriptFilePolicy(w)

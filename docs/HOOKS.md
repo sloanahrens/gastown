@@ -116,7 +116,7 @@ town's own overrides layered on top:
 | mail-check (`gt mail check --inject`) | UserPromptSubmit | all |
 | nudge-drain | PostToolUse | polecats |
 | polecat-stop-check | Stop | polecats |
-| polecat-paths, question-tool, script-files guards | PreToolUse | polecats, crew |
+| polecat-paths, question-tool guards (polecats); script-files (both) | PreToolUse | polecats, crew |
 | permission-request guard | PermissionRequest | polecats |
 | crew compaction handoff (`gt handoff --cycle --reason compaction`) | PreCompact (replaces) | crew |
 

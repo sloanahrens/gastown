@@ -280,10 +280,9 @@ func TestScriptFileGuardCrewSession(t *testing.T) {
 	assertVerdict(t, err, false, "crew Write into a polecat worktree")
 }
 
-// TestScriptFileGuardNoImplicitAllowlist pins by behavior the gt-b43ra
-// constraint that the allowlist starts empty: a new script is refused whatever
-// plausible repo name it carries, so nothing is exempt without an explicit
-// entry that a reviewer can see.
+// TestScriptFileGuardNoImplicitAllowlist pins by behavior that no name exempts a
+// new script: a new script is refused whatever plausible repo name it carries
+// (gt-b43ra).
 func TestScriptFileGuardNoImplicitAllowlist(t *testing.T) {
 	t.Parallel()
 	town := newScriptFileTestTown(t)
