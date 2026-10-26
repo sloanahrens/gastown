@@ -492,9 +492,10 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	}
 	d.upgradeRestartPending.Store(true)
 	// The drain is on from here, and that is what parks the ticker: the tick
-	// wait belonged to the deferred wait above, so it ends with it. Cleared after
-	// the drain is set, so there is no heartbeat where neither one parks it.
-	d.upgradeTickWaiting.Store(false)
+	// wait belonged to the deferred wait above, so it ends with it. It is
+	// cleared after the drain is set, so no ticker pass sees a restart that
+	// parks nothing (gt-u1fzb).
+	d.endDispatchTickWait()
 
 	if hold != nil {
 		// One line per heartbeat naming the hold: a heartbeat that finds the
@@ -568,7 +569,7 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 	specWaited := d.specDispatchRestartWait(now, waited)
 	var specBound time.Duration
 	if spec {
-		specBound = d.specDispatchRunBound()
+		specBound = d.upgradeHoldBound(specDispatchHoldLabel)
 	}
 
 	// The slings a tick handed back to run in the background hold the restart
@@ -709,24 +710,30 @@ func (d *Daemon) upgradeDrainDeferred(hold *daemonWork) bool {
 // hold had it going — ends here, and its end line says for how long it held
 // landings (gt-9vjw8).
 func (d *Daemon) deferUpgradeDrain(now time.Time, name string) {
-	d.resumeDispatchAfterDrain()
-	// The deferral just cleared upgradeRestartPending, the flag that keeps the
-	// ticker from starting a tick behind the one the restart waits on. While the
-	// hold is that tick, this flag takes its place: a tick started now would
-	// outlast the wait and be cut by the restart, leaving a sling half done
-	// (gt-cbaoy, gt-u1fzb).
+	// The ticker is parked by upgradeRestartPending while the drain is on, and
+	// this call is what clears it. While the hold is the tick in flight, the tick
+	// wait is set before the clear, so no ticker pass sees a restart that is
+	// waiting park nothing: a tick started in the gap would outlast the wait and
+	// be cut by the restart, leaving a sling half done (gt-cbaoy, gt-u1fzb).
 	d.upgradeTickWaiting.Store(name == specDispatchHoldLabel)
+	d.resumeDispatchAfterDrain()
 	d.reportDrainHeld(now)
 	if d.upgradeWaitLogged != name {
-		bound := tierSweepRestartCap
-		if name == specDispatchHoldLabel {
-			bound = d.specDispatchRunBound()
-		}
-		d.logger.Printf("upgrade-restart: landing passes continue while %s holds the restart; the drain starts when it closes or after %s",
-			name, bound)
+		d.logger.Printf("upgrade-restart: landing passes continue while %s holds the restart; the drain starts when it closes or after its %s bound",
+			name, d.upgradeHoldBound(name))
 	}
 	d.upgradeWaitLogged = name
 	d.logger.Printf("upgrade-restart: waiting for %s (%dm)", name, int(now.Sub(d.upgradeWaitSince).Minutes()))
+}
+
+// upgradeHoldBound is how long the restart gives a hold with its own bound. The
+// wait and the deferral line read it the same way, so the line names the bound
+// the restart enforces (gt-u1fzb).
+func (d *Daemon) upgradeHoldBound(name string) time.Duration {
+	if name == specDispatchHoldLabel {
+		return d.specDispatchRunBound()
+	}
+	return tierSweepRestartCap
 }
 
 // endUpgradeDrain lets the landing workers start passes again: no restart is
@@ -734,6 +741,9 @@ func (d *Daemon) deferUpgradeDrain(now time.Time, name string) {
 // was on ends here and reports how long it held landings (gt-9vjw8).
 func (d *Daemon) endUpgradeDrain(now time.Time) {
 	d.resumeDispatchAfterDrain()
+	// A wait on the dispatch tick in flight ends with the drain: a tick the
+	// restart no longer waits on does not keep the ticker parked (gt-u1fzb).
+	d.endDispatchTickWait()
 	d.reportDrainHeld(now)
 	d.upgradeWaitLogged = ""
 	d.resetUpgradeGCHold()
@@ -741,14 +751,22 @@ func (d *Daemon) endUpgradeDrain(now time.Time) {
 
 // resumeDispatchAfterDrain lets spec slings start again: no restart is pending,
 // and the sling wait is unfrozen so the next drain measures its own youngest
-// start (gt-nosod). A wait on the dispatch tick in flight ends with it: a tick
-// the restart no longer waits on does not keep the ticker parked. deferUpgradeDrain
-// sets that flag again after this call when the restart is still waiting.
+// start (gt-nosod). It leaves the tick wait alone: deferUpgradeDrain sets it
+// before this call while the restart still waits on a tick, and the paths that
+// end the wait clear it with endDispatchTickWait.
 func (d *Daemon) resumeDispatchAfterDrain() {
 	d.upgradeRestartPending.Store(false)
-	d.upgradeTickWaiting.Store(false)
 	d.upgradeSlingSince = time.Time{}
 	d.upgradeSlingFrozen = false
+}
+
+// endDispatchTickWait clears the notice that the restart waits on the spec
+// dispatch tick in flight. Every path that ends that wait clears it — the drain
+// taking over, and the wait ending with the marker — so the ticker is never left
+// parked by a wait nobody is in (gt-u1fzb). Clearing it never unparks a drain:
+// the drain's own flag is what parks the ticker there.
+func (d *Daemon) endDispatchTickWait() {
+	d.upgradeTickWaiting.Store(false)
 }
 
 // reportDrainHeld writes the one line a drain leaves behind when it ends: how
@@ -847,6 +865,7 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State, now time.Time) error {
 		// long as the stamp keeps failing (gt-21cr0).
 		d.upgradeRestartRequested.Store(false)
 		d.resumeDispatchAfterDrain()
+		d.endDispatchTickWait()
 		return nil
 	}
 	// A drain that is on ends with this restart: name the time it cost before

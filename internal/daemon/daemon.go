@@ -541,16 +541,17 @@ type Daemon struct {
 	landingPassFn func()
 
 	// upgradeRestartPending is true while a restart marker the daemon must
-	// act on exists. The landing workers drain on it: they finish the pass in
-	// flight and start no new one, so the restart finds an idle moment
-	// (gt-nxvpe). Cleared when the marker is gone or covered.
+	// act on exists and the landing drain is on. The landing workers drain on it:
+	// they finish the pass in flight and start no new one, so the restart finds
+	// an idle moment (gt-nxvpe). Cleared when the marker is gone or covered.
 	upgradeRestartPending atomic.Bool
 
-	// upgradeTickWaiting is true while the pending restart waits on the spec
-	// dispatch tick in flight with the drain deferred, so upgradeRestartPending
-	// is false there and cannot keep a new tick from starting behind the one the
-	// restart waits on (gt-u1fzb). The ticker reads it; upgrade_restart.go sets
-	// it with the deferral and clears it where the drain ends.
+	// upgradeTickWaiting is true while the restart waits on the spec dispatch
+	// tick in flight with the drain deferred, where upgradeRestartPending is
+	// false and cannot keep a new tick from starting behind the one it waits on
+	// (gt-u1fzb). The ticker is parked while either flag is set, so the
+	// transition between them sets the arriving flag before it clears the
+	// leaving one; see deferUpgradeDrain and endDispatchTickWait.
 	upgradeTickWaiting atomic.Bool
 
 	// landingDrainedCh carries one wake per drained landing pass, so the run
