@@ -214,17 +214,42 @@ func TestBacktestSectionListsEveryMetric(t *testing.T) {
 	}
 }
 
+func TestBacktestTargetMetricNamesOnlyMangoTargets(t *testing.T) {
+	t.Parallel()
+	run := make(map[string]bool, len(mangoTargets))
+	for _, target := range mangoTargets {
+		run[target] = true
+	}
+	for _, tm := range targetMetric {
+		if !run[tm.target] {
+			t.Errorf("targetMetric maps %q, which mango no longer runs", tm.target)
+		}
+	}
+}
+
 func TestBacktestReplicatedFromSummaryMapsTargets(t *testing.T) {
 	t.Parallel()
 	summary := map[string]MangoSummary{
 		"rejected_before_landing": {Boxes: 10, Replicating: 3, HoldoutPositives: 158},
-		"manual_rescue":           {Boxes: 6, Replicating: 0, HoldoutPositives: 0},
+		"manual_rescue":           {Boxes: 6, Replicating: 4, HoldoutPositives: 40},
 		"reached_overrun_stop":    {Boxes: 0, Replicating: 0, HoldoutPositives: 37},
 	}
 	got := ReplicatedFromSummary(summary)
-	// no holdout positives or no boxes: nothing to say
 	if len(got) != 1 || !isTrue(got["rework depth"]) {
 		t.Errorf("ReplicatedFromSummary = %v, want only rework depth: true", got)
+	}
+	if _, ok := got["non-conservative merges"]; ok {
+		t.Errorf("ReplicatedFromSummary answers non-conservative merges from manual_rescue, which mango no longer runs")
+	}
+}
+
+func TestBacktestReplicatedFromSummaryOmitsATargetWithoutBoxesOrHoldout(t *testing.T) {
+	t.Parallel()
+	got := ReplicatedFromSummary(map[string]MangoSummary{
+		"rejected_before_landing": {Boxes: 0, Replicating: 0, HoldoutPositives: 0},
+	})
+	if len(got) != 0 {
+		t.Errorf("ReplicatedFromSummary = %v, want no answer", got)
 	}
 }
 
