@@ -1,0 +1,558 @@
+package imagebuild
+
+import (
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+const buildPid = 4242
+
+// fakeGroup is the build's process group. A signal in diesOn ends it, after
+// leaveAfter further probes: the group does not leave the instant it is
+// signalled. probeErr, when set, is what probing a group that is still there
+// returns (EPERM, for a group the supervisor may not signal).
+type fakeGroup struct {
+	mu         sync.Mutex
+	alive      bool
+	diesOn     map[syscall.Signal]bool
+	leaveAfter int
+	probeErr   error
+
+	sent     []syscall.Signal
+	probes   int
+	dying    bool
+	leftIn   int
+	exited   chan struct{}
+	exitOnce sync.Once
+}
+
+func newGroup(diesOn ...syscall.Signal) *fakeGroup {
+	g := &fakeGroup{alive: true, diesOn: map[syscall.Signal]bool{}, exited: make(chan struct{})}
+	for _, s := range diesOn {
+		g.diesOn[s] = true
+	}
+	return g
+}
+
+func (g *fakeGroup) signal(pgid int, sig syscall.Signal) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if pgid != buildPid {
+		return fmt.Errorf("signalled group %d, want the build's %d", pgid, buildPid)
+	}
+	if sig == 0 {
+		g.probes++
+		if g.dying {
+			if g.leftIn > 0 {
+				g.leftIn--
+			}
+			if g.leftIn == 0 {
+				g.alive = false
+				g.exitOnce.Do(func() { close(g.exited) })
+			}
+		}
+		if !g.alive {
+			return syscall.ESRCH
+		}
+		return g.probeErr
+	}
+	g.sent = append(g.sent, sig)
+	if g.diesOn[sig] {
+		g.dying, g.leftIn = true, g.leaveAfter
+	}
+	return nil
+}
+
+func (g *fakeGroup) isAlive() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.alive
+}
+
+func (g *fakeGroup) signals() []syscall.Signal {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]syscall.Signal(nil), g.sent...)
+}
+
+// fakeBuild ends when its result is sent, when its group is gone, or when the
+// test ends: the goroutine that waits on it must not outlive the test.
+type fakeBuild struct {
+	g        *fakeGroup
+	result   chan waited
+	stop     chan struct{}
+	started  bool
+	entered  chan struct{}
+	returned chan struct{}
+}
+
+func newBuild(t *testing.T, g *fakeGroup) *fakeBuild {
+	b := &fakeBuild{g: g, result: make(chan waited, 1), stop: make(chan struct{}),
+		entered: make(chan struct{}), returned: make(chan struct{})}
+	t.Cleanup(func() {
+		close(b.stop)
+		if b.started {
+			<-b.returned // Wait returns once stop is closed
+		}
+	})
+	return b
+}
+
+func (b *fakeBuild) Pid() int { return buildPid }
+
+func (b *fakeBuild) Wait() (int, syscall.Signal) {
+	close(b.entered)
+	defer close(b.returned)
+	var gone <-chan struct{}
+	if b.g != nil {
+		gone = b.g.exited
+	}
+	select {
+	case <-gone:
+		return 0, syscall.SIGKILL
+	case r := <-b.result:
+		return r.code, r.sig
+	case <-b.stop:
+		return 0, syscall.SIGKILL
+	}
+}
+
+// finishing is a build that ends by itself with code or sig.
+func finishing(t *testing.T, code int, sig syscall.Signal) *fakeBuild {
+	b := newBuild(t, nil)
+	b.result <- waited{code, sig}
+	return b
+}
+
+// lockFS is the lock directory, in memory.
+type lockFS struct {
+	files   map[string]string
+	removed []string
+	// atRemoval is the group's state the moment the lock is removed.
+	atRemoval func()
+}
+
+func (f *lockFS) read(path string) ([]byte, error) {
+	if v, ok := f.files[path]; ok {
+		return []byte(v), nil
+	}
+	return nil, errors.New("no such file")
+}
+
+func (f *lockFS) remove(path string) error {
+	if f.atRemoval != nil {
+		f.atRemoval()
+	}
+	f.removed = append(f.removed, path)
+	return nil
+}
+
+// escalations records the commands the supervisor ran, failing the first
+// failFirst of them.
+type escalations struct {
+	calls     [][]string
+	failFirst int
+	err       error
+}
+
+func (e *escalations) run(name string, args ...string) error {
+	e.calls = append(e.calls, append([]string{name}, args...))
+	if len(e.calls) <= e.failFirst {
+		if e.err != nil {
+			return e.err
+		}
+		return errors.New("escalate failed")
+	}
+	return nil
+}
+
+// rig builds a system around a build, with an alarm that fires at once when
+// alarm is true and never otherwise.
+type rig struct {
+	sys    system
+	fs     *lockFS
+	esc    *escalations
+	slept  time.Duration
+	stderr strings.Builder
+}
+
+func newRig(b *fakeBuild, g *fakeGroup, alarm bool) *rig {
+	r := &rig{fs: &lockFS{files: map[string]string{}}, esc: &escalations{}}
+	r.sys = system{
+		start: func(Config) (build, error) {
+			if b == nil {
+				return nil, errors.New("no build")
+			}
+			b.started = true
+			return b, nil
+		},
+		signal:       g.signalOrNone,
+		after:        func(time.Duration) <-chan time.Time { return alarmChan(alarm) },
+		sleep:        func(d time.Duration) { r.slept += d },
+		readFile:     r.fs.read,
+		removeAll:    r.fs.remove,
+		command:      r.esc.run,
+		termGrace:    time.Second,
+		killGrace:    5 * time.Second,
+		pollInterval: 50 * time.Millisecond,
+	}
+	return r
+}
+
+// signalOrNone lets a rig with no group (a build that finishes by itself) share
+// the constructor.
+func (g *fakeGroup) signalOrNone(pgid int, sig syscall.Signal) error {
+	if g == nil {
+		return syscall.ESRCH
+	}
+	return g.signal(pgid, sig)
+}
+
+func alarmChan(fire bool) <-chan time.Time {
+	if !fire {
+		return nil
+	}
+	ch := make(chan time.Time)
+	close(ch)
+	return ch
+}
+
+func (r *rig) config(mutate ...func(*Config)) Config {
+	cfg := Config{
+		Alarm:   7 * time.Second,
+		Lock:    "/town/image.lock",
+		Command: []string{"bash", "run.sh"},
+		Stderr:  &r.stderr,
+	}
+	for _, m := range mutate {
+		m(&cfg)
+	}
+	return cfg
+}
+
+func withFingerprint(c *Config) { c.GT, c.Fingerprint = "/bin/gt", "install-gt:image-build-failed" }
+
+func TestFinishedBuildReturnsItsOwnStatus(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		code int
+		sig  syscall.Signal
+		want int
+	}{
+		{"success", 0, 0, 0},
+		{"failure", 3, 0, 3},
+		{"killed by a signal", 0, syscall.SIGKILL, 128 + int(syscall.SIGKILL)},
+		{"terminated", 0, syscall.SIGTERM, 128 + int(syscall.SIGTERM)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(finishing(t, tc.code, tc.sig), nil, false)
+
+			got := r.sys.run(r.config())
+
+			if got != tc.want {
+				t.Errorf("status %d, want %d", got, tc.want)
+			}
+			if len(r.esc.calls) != 0 {
+				t.Errorf("escalated without a fingerprint: %v", r.esc.calls)
+			}
+			if r.stderr.Len() != 0 {
+				t.Errorf("a build that finished wrote %q", r.stderr.String())
+			}
+		})
+	}
+}
+
+func TestFailedBuildEscalatesAndFinishedBuildClears(t *testing.T) {
+	t.Parallel()
+	t.Run("failed", func(t *testing.T) {
+		r := newRig(finishing(t, 3, 0), nil, false)
+
+		got := r.sys.run(r.config(withFingerprint))
+
+		if got != 3 {
+			t.Errorf("status %d, want 3", got)
+		}
+		if len(r.esc.calls) != 1 {
+			t.Fatalf("%d commands, want one escalation: %v", len(r.esc.calls), r.esc.calls)
+		}
+		line := strings.Join(r.esc.calls[0], " ")
+		for _, want := range []string{"/bin/gt escalate ", "did not finish (exit 3)", "-s medium", "--source script:install-gt", "--fingerprint install-gt:image-build-failed"} {
+			if !strings.Contains(line, want) {
+				t.Errorf("escalation %q does not contain %q", line, want)
+			}
+		}
+	})
+	t.Run("finished", func(t *testing.T) {
+		r := newRig(finishing(t, 0, 0), nil, false)
+
+		got := r.sys.run(r.config(withFingerprint))
+
+		if got != 0 {
+			t.Errorf("status %d, want 0", got)
+		}
+		want := "/bin/gt escalate clear --fingerprint install-gt:image-build-failed --reason install-gt: a detached image build finished"
+		if len(r.esc.calls) != 1 || strings.Join(r.esc.calls[0], " ") != want {
+			t.Errorf("commands %v, want exactly %q", r.esc.calls, want)
+		}
+	})
+}
+
+func TestRefusedEscalationIsTriedTwiceThenNamedInTheLog(t *testing.T) {
+	t.Parallel()
+	t.Run("second try works", func(t *testing.T) {
+		r := newRig(finishing(t, 1, 0), nil, false)
+		r.esc.failFirst = 1
+
+		r.sys.run(r.config(withFingerprint))
+
+		if len(r.esc.calls) != 2 {
+			t.Errorf("%d tries, want 2", len(r.esc.calls))
+		}
+		if r.stderr.Len() != 0 {
+			t.Errorf("logged %q though the second try reached the town", r.stderr.String())
+		}
+	})
+	t.Run("both refused", func(t *testing.T) {
+		r := newRig(finishing(t, 1, 0), nil, false)
+		r.esc.failFirst = 2
+
+		got := r.sys.run(r.config(withFingerprint))
+
+		if len(r.esc.calls) != 2 {
+			t.Errorf("%d tries, want 2", len(r.esc.calls))
+		}
+		if got != 1 {
+			t.Errorf("status %d, want the build's 1", got)
+		}
+		if !strings.Contains(r.stderr.String(), "the escalation for this build did not reach the town") {
+			t.Errorf("log %q does not name the lost escalation", r.stderr.String())
+		}
+	})
+}
+
+func TestNoEscalationWithoutBothGTAndFingerprint(t *testing.T) {
+	t.Parallel()
+	for name, mutate := range map[string]func(*Config){
+		"fingerprint only": func(c *Config) { c.Fingerprint = "fp" },
+		"gt only":          func(c *Config) { c.GT = "/bin/gt" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(finishing(t, 1, 0), nil, false)
+
+			r.sys.run(r.config(mutate))
+
+			if len(r.esc.calls) != 0 {
+				t.Errorf("escalated: %v", r.esc.calls)
+			}
+		})
+	}
+}
+
+func TestBuildThatCannotStartIsAFailureOfTheBuild(t *testing.T) {
+	t.Parallel()
+	r := newRig(nil, nil, false)
+	r.sys.start = func(Config) (build, error) { return nil, errors.New("exec format error") }
+
+	got := r.sys.run(r.config(withFingerprint))
+
+	if got != ExitStart {
+		t.Errorf("status %d, want %d", got, ExitStart)
+	}
+	if !strings.Contains(r.stderr.String(), "exec format error") {
+		t.Errorf("log %q does not name why the build did not start", r.stderr.String())
+	}
+	if len(r.esc.calls) != 1 || !strings.Contains(strings.Join(r.esc.calls[0], " "), "(exit 127)") {
+		t.Errorf("escalations %v, want one for exit 127", r.esc.calls)
+	}
+}
+
+// lockNaming is a lock directory whose pid file holds pid.
+func lockNaming(r *rig, pid string) {
+	r.fs.files[filepath.Join("/town/image.lock", "pid")] = pid
+}
+
+func TestAlarmStopsTheGroupAndRemovesTheLockOnlyOnceItIsGone(t *testing.T) {
+	t.Parallel()
+	g := newGroup(syscall.SIGTERM)
+	g.leaveAfter = 3
+	r := newRig(newBuild(t, g), g, true)
+	lockNaming(r, fmt.Sprintf("%d\n", buildPid))
+	aliveAtRemoval := true
+	r.fs.atRemoval = func() { aliveAtRemoval = g.isAlive() }
+
+	got := r.sys.run(r.config())
+
+	if got != ExitAlarm {
+		t.Errorf("status %d, want %d", got, ExitAlarm)
+	}
+	if sent := g.signals(); len(sent) != 1 || sent[0] != syscall.SIGTERM {
+		t.Errorf("signals %v, want only TERM: the group left within its grace", sent)
+	}
+	if len(r.fs.removed) != 1 || r.fs.removed[0] != "/town/image.lock" {
+		t.Errorf("removed %v, want the build's lock", r.fs.removed)
+	}
+	if aliveAtRemoval {
+		t.Error("the lock was removed while the group was still alive")
+	}
+	if !strings.Contains(r.stderr.String(), "alarm after 7 s stopped the build") {
+		t.Errorf("log %q does not say the alarm stopped the build", r.stderr.String())
+	}
+	if r.slept == 0 || r.slept >= time.Second {
+		t.Errorf("waited %s for a group that leaves in 3 probes, want a few polls and under the grace", r.slept)
+	}
+}
+
+func TestAlarmKillsAGroupThatIgnoresTerm(t *testing.T) {
+	t.Parallel()
+	g := newGroup(syscall.SIGKILL)
+	r := newRig(newBuild(t, g), g, true)
+	lockNaming(r, fmt.Sprint(buildPid))
+
+	got := r.sys.run(r.config())
+
+	if got != ExitAlarm {
+		t.Errorf("status %d, want %d", got, ExitAlarm)
+	}
+	if sent := g.signals(); len(sent) != 2 || sent[0] != syscall.SIGTERM || sent[1] != syscall.SIGKILL {
+		t.Errorf("signals %v, want TERM then KILL", sent)
+	}
+	if r.slept < time.Second {
+		t.Errorf("waited %s, want at least the 1s TERM grace before KILL", r.slept)
+	}
+	if len(r.fs.removed) != 1 {
+		t.Errorf("removed %v, want the lock once the group is gone", r.fs.removed)
+	}
+}
+
+func TestAlarmKeepsTheLockWhenTheStopCannotBeConfirmed(t *testing.T) {
+	t.Parallel()
+	cases := map[string]*fakeGroup{
+		"the group survives KILL":          newGroup(),
+		"the group refuses probes (EPERM)": func() *fakeGroup { g := newGroup(); g.probeErr = syscall.EPERM; return g }(),
+		"the group stays after the signal": func() *fakeGroup { g := newGroup(syscall.SIGKILL); g.leaveAfter = 1 << 30; return g }(),
+	}
+	for name, g := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(newBuild(t, g), g, true)
+			lockNaming(r, fmt.Sprint(buildPid))
+
+			got := r.sys.run(r.config())
+
+			if got != ExitAlarm {
+				t.Errorf("status %d, want %d", got, ExitAlarm)
+			}
+			if len(r.fs.removed) != 0 {
+				t.Errorf("removed %v: a lock must stay when the group may still be running", r.fs.removed)
+			}
+			if !strings.Contains(r.stderr.String(), "could not confirm the build stopped; the lock was not removed") {
+				t.Errorf("log %q does not say the stop was not confirmed", r.stderr.String())
+			}
+			if sent := g.signals(); len(sent) != 2 {
+				t.Errorf("signals %v, want TERM then KILL", sent)
+			}
+			bound := r.sys.termGrace + r.sys.killGrace + 2*r.sys.pollInterval
+			if r.slept > bound {
+				t.Errorf("waited %s, want at most %s: every wait is bounded", r.slept, bound)
+			}
+		})
+	}
+}
+
+func TestAlarmLeavesALockThatNamesAnotherProcess(t *testing.T) {
+	t.Parallel()
+	cases := map[string]func(*rig){
+		"another pid":    func(r *rig) { lockNaming(r, "99999") },
+		"not a number":   func(r *rig) { lockNaming(r, "garbage") },
+		"empty pid file": func(r *rig) { lockNaming(r, "") },
+		"no pid file":    func(r *rig) {},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			g := newGroup(syscall.SIGTERM)
+			r := newRig(newBuild(t, g), g, true)
+			setup(r)
+
+			got := r.sys.run(r.config())
+
+			if got != ExitAlarm || len(r.fs.removed) != 0 {
+				t.Errorf("status %d, removed %v: a lock that is not the stopped build's must stay", got, r.fs.removed)
+			}
+			if !strings.Contains(r.stderr.String(), "stopped the build") {
+				t.Errorf("log %q: the build was stopped and should say so", r.stderr.String())
+			}
+		})
+	}
+}
+
+func TestAlarmWithNoLockConfiguredRemovesNothing(t *testing.T) {
+	t.Parallel()
+	g := newGroup(syscall.SIGTERM)
+	r := newRig(newBuild(t, g), g, true)
+
+	r.sys.run(r.config(func(c *Config) { c.Lock = "" }))
+
+	if len(r.fs.removed) != 0 {
+		t.Errorf("removed %v with no lock configured", r.fs.removed)
+	}
+}
+
+func TestStoppedBuildEscalatesAsExit124(t *testing.T) {
+	t.Parallel()
+	g := newGroup(syscall.SIGTERM)
+	r := newRig(newBuild(t, g), g, true)
+
+	got := r.sys.run(r.config(withFingerprint))
+
+	if got != ExitAlarm {
+		t.Errorf("status %d, want %d", got, ExitAlarm)
+	}
+	if len(r.esc.calls) != 1 || !strings.Contains(strings.Join(r.esc.calls[0], " "), "did not finish (exit 124)") {
+		t.Errorf("escalations %v, want one for exit 124", r.esc.calls)
+	}
+}
+
+func TestCloseInheritableClosesOnlyWhatAChildWouldInherit(t *testing.T) {
+	t.Parallel()
+	var inheritable [2]int
+	if err := unix.Pipe(inheritable[:]); err != nil {
+		t.Fatal(err)
+	}
+	var protected [2]int
+	if err := unix.Pipe(protected[:]); err != nil {
+		t.Fatal(err)
+	}
+	unix.CloseOnExec(protected[0])
+	unix.CloseOnExec(protected[1])
+	t.Cleanup(func() {
+		for _, fd := range []int{protected[0], protected[1]} {
+			unix.Close(fd)
+		}
+	})
+	// A descriptor number belongs to this test alone, so each is closed by
+	// itself rather than by a range that other tests' descriptors fall in.
+	if got := closeInheritable(inheritable[0], inheritable[0]); len(got) != 1 || got[0] != inheritable[0] {
+		t.Errorf("closed %v, want the inheritable fd %d", got, inheritable[0])
+	}
+	if got := closeInheritable(inheritable[1], inheritable[1]); len(got) != 1 {
+		t.Errorf("closed %v, want the inheritable fd %d", got, inheritable[1])
+	}
+	// Whether a closed descriptor is still open is not asked: another test, or
+	// the race runtime, can be handed its number the moment it is free. What
+	// closeInheritable returns is only what it closed.
+	if got := closeInheritable(protected[0], protected[0]); len(got) != 0 {
+		t.Errorf("closed %v: a close-on-exec descriptor is the runtime's or the caller's, not an inherited one", got)
+	}
+	if err := unix.Fstat(protected[0], &unix.Stat_t{}); err != nil {
+		t.Errorf("the close-on-exec fd %d was closed: %v", protected[0], err)
+	}
+}
