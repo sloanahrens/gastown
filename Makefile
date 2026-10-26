@@ -492,6 +492,11 @@ presubmit: lint
 			go run ./internal/presubmit/cmd/errbranch -base $(PRESUBMIT_BASE) -cover "$$cover" || { echo "presubmit: FAILED at the error-branch check" >&2; exit 1; }; \
 		fi; \
 	fi; \
+	gtdir=$$(mktemp -d) || { echo "presubmit: FAILED making room for the machine-stdout check" >&2; exit 1; }; \
+	$(MAKE) --no-print-directory build BUILD_DIR="$$gtdir" >/dev/null || { rm -rf "$$gtdir"; echo "presubmit: FAILED building gt for the machine-stdout check" >&2; exit 1; }; \
+	echo "presubmit: machine-readable stdout check (go run ./cmd/machinecheck)" >&2; \
+	go run ./cmd/machinecheck -gt "$$gtdir/$(BINARY)" || { rm -rf "$$gtdir"; echo "presubmit: FAILED at the machine-stdout check" >&2; exit 1; }; \
+	rm -rf "$$gtdir"; \
 	echo "presubmit: PASSED in $$(( $$(date +%s) - $(GATE_START) ))s wall" >&2
 
 # test-slow is the post-landing check: the gate, then the shell tests. There

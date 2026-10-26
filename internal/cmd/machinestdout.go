@@ -72,3 +72,36 @@ func checkMachineCommand(cmd *cobra.Command, run func(args []string) ([]byte, er
 	}
 	return nil
 }
+
+// CheckMachineStdout reports whether captured stdout breaks the machine-readable contract of a
+// command run with --json (one JSON value, or JSON lines) or --quiet (nothing). It is the check the
+// presubmit's machine-stdout stage applies to each real command's output (gt-keakj).
+func CheckMachineStdout(mode string, stdout []byte) error {
+	return machineStdoutProblem(mode, stdout)
+}
+
+// MachineCommand is one command that takes a machine-output flag: its path below the root and the
+// flags (json, quiet) it defines.
+type MachineCommand struct {
+	Path  []string
+	Modes []string
+}
+
+// MachineCommands lists every leaf command in the gt tree that defines --json or --quiet, in tree
+// order. A group command (one with subcommands) is not listed: running it prints help, which is not
+// machine output, so its own flags have no meaning there and its subcommands are the ones checked. Hidden
+// commands are included: they are still a machine reader's command if they print.
+func MachineCommands() []MachineCommand {
+	var out []MachineCommand
+	var walk func(c *cobra.Command, path []string)
+	walk = func(c *cobra.Command, path []string) {
+		if modes := machineModes(c); len(modes) > 0 && len(path) > 0 && !c.HasSubCommands() {
+			out = append(out, MachineCommand{Path: path, Modes: modes})
+		}
+		for _, sub := range c.Commands() {
+			walk(sub, append(append([]string{}, path...), sub.Name()))
+		}
+	}
+	walk(rootCmd, nil)
+	return out
+}
