@@ -49,7 +49,6 @@ func TestAppend_WaitsForAnotherProcessToReleaseTheLog(t *testing.T) {
 	st := New(dir, fixedClock{at: testEpoch})
 	lockPath := filepath.Join(dir, "gt-abc.jsonl.lock")
 
-	// testpolicy exemption: the holder must be another process, since a record lock never conflicts within one process; this test starts it by re-running the test binary.
 	//testpolicy:allow no-subprocess — the record lock is per process, so the holder must be another process: this test re-runs the test binary as the holder
 	cmd := exec.Command(os.Args[0], "-test.run=^TestSpanLockHolderHelper$", "-test.count=1")
 	cmd.Env = append(os.Environ(), spanLockHoldEnv+"="+lockPath)
@@ -64,6 +63,13 @@ func TestAppend_WaitsForAnotherProcessToReleaseTheLog(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start the holder: %v", err)
 	}
+	// A holder still running when the test ends is killed, not left behind.
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			cmd.Process.Kill()
+			cmd.Wait()
+		}
+	})
 	line := make(chan string, 1)
 	go func() {
 		s, _ := bufio.NewReader(stdout).ReadString('\n')
@@ -94,6 +100,14 @@ func TestAppend_WaitsForAnotherProcessToReleaseTheLog(t *testing.T) {
 		t.Fatalf("Start completed while another process held the log's lock: %v", err)
 	//testpolicy:allow no-sleep — a lock the writer must wait on has no event to select on
 	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The holder still holds the lock after the window: the negative wait above
+	// was against a live lock, not one that had already gone.
+	if !recordLockHeld(t, lockPath) {
+		stdin.Close()
+		cmd.Wait()
+		t.Fatal("the holder had released the lock during the wait, so the wait proved nothing")
 	}
 
 	stdin.Close()

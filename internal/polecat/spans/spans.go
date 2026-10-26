@@ -189,7 +189,7 @@ func (s *Store) Summarize(bead string) (Summary, error) {
 	path := s.path(bead)
 	// Open first, then stat the descriptor: a stat before the open could describe
 	// a different file than the one read if the path changes between the two.
-	f, err := os.Open(path)
+	f, err := openLogNoBlock(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		// A dangling symlink is present in the store but resolves to nothing;

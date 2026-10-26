@@ -4,6 +4,7 @@ package spans
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"sync"
 	"syscall"
@@ -47,7 +48,9 @@ func lockLog(path string) (*logLock, error) {
 	logMutexesMu.Unlock()
 
 	m.mu.Lock()
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	// O_NOFOLLOW: a symlink at the lock path is refused, not followed to a file the
+	// store does not own (gt-rm0ab).
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o644)
 	if err != nil {
 		m.mu.Unlock()
 		releaseLogMutex(path, m)
@@ -80,4 +83,16 @@ func releaseLogMutex(path string, m *logMutex) {
 	if m.refs == 0 {
 		delete(logMutexes, path)
 	}
+}
+
+// openLogNoBlock opens a span log without blocking on a FIFO or device: a named
+// pipe at the log's path would otherwise hold Summarize until a writer appears,
+// before the regular-file check could refuse it. The caller checks the descriptor
+// is a regular file (gt-rm0ab).
+func openLogNoBlock(path string) (*os.File, error) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(fd), path), nil
 }
