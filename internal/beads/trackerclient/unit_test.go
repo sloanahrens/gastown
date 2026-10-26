@@ -369,3 +369,17 @@ func TestTrackerKVIsEmptyAndAnswersUnset(t *testing.T) {
 		t.Errorf("KVGet(unset) = %v, want beads.ErrNotFound", err)
 	}
 }
+
+// A missing issue is an error from ShowText, not an empty render (gt-trackershow).
+func TestShowTextMissingIssueIsAnError(t *testing.T) {
+	t.Parallel()
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"no such issue"}}`))
+	})
+	text, err := c.ShowText("gt-missing", []string{"gt-missing"})
+	if err == nil || text != "" {
+		t.Errorf("ShowText of a missing issue = %q, %v; want \"\" and an error", text, err)
+	}
+}
