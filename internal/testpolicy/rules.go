@@ -10,6 +10,7 @@ import (
 const (
 	RuleNoSleep        = "no-sleep"
 	RuleNoEnv          = "no-env"
+	RuleNoHostEnv      = "no-host-env"
 	RuleNoChdir        = "no-chdir"
 	RuleNoSkip         = "no-skip"
 	RuleNoSubprocess   = "no-subprocess"
@@ -206,6 +207,18 @@ func checkTestCall(c *ast.CallExpr, imp map[string]string, add func(ast.Node, st
 		if len(c.Args) == 2 && execMode(c.Args[1]) {
 			add(c, RuleNoExecFiles, "makes a file executable")
 		}
+	case "os.Getenv", "os.LookupEnv":
+		// A unit test's answer must not depend on the shell that ran it. SHELL
+		// and HOME are the developer's own; a test that reads them declares why.
+		if len(c.Args) == 1 {
+			if name := stringLit(c.Args[0]); name == "SHELL" || name == "HOME" {
+				add(c, RuleNoHostEnv, "reads "+name+", the developer's environment; declare the read or inject the value")
+			}
+		}
+	case "os.UserHomeDir", "os.UserConfigDir", "os.UserCacheDir":
+		// The live town tree (~/gt) lives under the home directory, so a test
+		// that resolves it reads the real town. Use t.TempDir() or declare it.
+		add(c, RuleNoHostEnv, full+" reads the home directory; use t.TempDir() or declare the read")
 	}
 }
 

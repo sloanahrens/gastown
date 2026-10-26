@@ -66,6 +66,7 @@ func TestDetectShell(t *testing.T) {
 	}
 
 	// DetectShell reads $SHELL from the process environment.
+	//testpolicy:allow no-host-env — DetectShell reads the developer's SHELL by design; the test compares it with the same read
 	if got, want := DetectShell(), detectShell(os.Getenv("SHELL")); got != want {
 		t.Errorf("DetectShell() = %q, want %q", got, want)
 	}
@@ -73,6 +74,7 @@ func TestDetectShell(t *testing.T) {
 
 func TestRCFilePath(t *testing.T) {
 	t.Parallel()
+	//testpolicy:allow no-host-env — the rc file paths are joined under the real home; the test checks the join, not what is in the home
 	home, _ := os.UserHomeDir()
 
 	tests := []struct {

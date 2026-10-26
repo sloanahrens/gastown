@@ -229,6 +229,7 @@ func TestClaudeProjectDirsFor_ResolvesProcessRoots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.ClaudeConfigDir: %v", err)
 	}
+	//testpolicy:allow no-host-env — the expected roots include the real home, the same value claudeProjectDirsFor resolves; nothing is written there
 	home, _ := os.UserHomeDir()
 	want := roots(t, workDir, configDir, home)
 

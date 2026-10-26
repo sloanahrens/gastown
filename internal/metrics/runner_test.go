@@ -137,6 +137,7 @@ func TestRunnerOSRunnerExecsWithTheAllowlistedEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OSRunner: %v", err)
 	}
+	//testpolicy:allow no-host-env — the child must echo the HOME it was given, and this process's HOME is the allowlisted value under test
 	if got, want := string(out), os.Getenv("HOME"); got != want {
 		t.Fatalf("the child's HOME = %q, want the allowlisted %q", got, want)
 	}

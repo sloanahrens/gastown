@@ -7,6 +7,7 @@ import (
 
 func TestExpandHome_TildePath(t *testing.T) {
 	t.Parallel()
+	//testpolicy:allow no-host-env — ExpandHome is checked against the real home; the expansion is the input under test
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatalf("cannot determine home directory: %v", err)
@@ -53,6 +54,7 @@ func TestExpandHome_Empty(t *testing.T) {
 
 func TestExpandHome_TildeSlash(t *testing.T) {
 	t.Parallel()
+	//testpolicy:allow no-host-env — ExpandHome is checked against the real home; the expansion is the input under test
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatalf("cannot determine home directory: %v", err)

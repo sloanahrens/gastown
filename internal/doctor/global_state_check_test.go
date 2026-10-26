@@ -113,6 +113,7 @@ source "$DOTFILES_DIR/zsh/$PROFILE.zsh"
 func TestHasShellIntegration_TildeExpansion(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+	//testpolicy:allow no-host-env — the ~ expansion is the input under test, so the marker must sit under the real home; the test removes it
 	home, _ := os.UserHomeDir()
 
 	// Create a file under the actual home dir with the marker

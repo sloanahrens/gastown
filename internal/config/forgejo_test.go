@@ -22,6 +22,7 @@ func writeTownSettings(t *testing.T, town, body string) {
 func TestForgejoDirDefaultsToHomeForgejo(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
+	//testpolicy:allow no-host-env — the default forgejo dir is under the real home by design; the test asserts that default and reads nothing else
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +53,7 @@ func TestForgejoDirExpandsTilde(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	writeTownSettings(t, town, `{"type":"town-settings","version":1,"forgejo":{"dir":"~/stacks/forgejo"}}`)
+	//testpolicy:allow no-host-env — the ~/stacks path is expanded against the real home; the expansion is the input under test
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)

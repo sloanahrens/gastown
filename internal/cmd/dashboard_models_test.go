@@ -381,6 +381,7 @@ func TestModelsReaderMarksDriftFromTheModelTable(t *testing.T) {
 
 	// The table's "~/" path is the live absolute one: the same backend is not
 	// drift.
+	//testpolicy:allow no-host-env — the table's ~/ path is expanded against the real home, the same value the reader expands; nothing is written there
 	home, _ := os.UserHomeDir()
 	same := writeOMConfig(t, `{"backend":["`+filepath.Join(home, ".local/bin/claude")+`","-p","--model","sonnet"]}`)
 	if r := panelRole(t, (&modelsReader{townRoot: town, omPath: same}).read().Roles, "om-review"); r.Drift != "" {
