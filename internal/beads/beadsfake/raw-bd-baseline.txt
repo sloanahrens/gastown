@@ -9,7 +9,6 @@
 internal/cmd/beads_db_init_test.go argv 4
 internal/cmd/beads_routing_integration_test.go argv 2
 internal/cmd/done_open_source_consumers_integration_test.go argv 1
-internal/cmd/formula.go argv 1
 internal/cmd/install_integration_test.go argv 4
 internal/cmd/prime.go argv 1
 internal/cmd/scheduler_integration_test.go argv 8

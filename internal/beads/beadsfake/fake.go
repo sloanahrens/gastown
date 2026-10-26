@@ -60,6 +60,9 @@ type Fake struct {
 	seq    int
 	issues map[string]*record
 
+	// The formula verb surface (formula.go).
+	formulas []fakeFormula
+
 	// The maintenance surface (admin.go).
 	config   map[string]string
 	kv       map[string]string

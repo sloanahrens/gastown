@@ -17,12 +17,35 @@ import (
 // control; none may be a bd verb a consumer reaches past Client for.
 var fakeControls = map[string]bool{
 	"Seed":          true,
+	"SeedFormula":   true,
 	"FailWith":      true,
 	"OnSQL":         true,
 	"SQLStatements": true,
 	"SQLCSV":        true,
 	"InitDatabase":  true,
 	"Inits":         true,
+}
+
+// seamSurfaces are the narrow interfaces in internal/beads that a fake
+// models beside Client and Admin: a verb a Client cannot express, which a
+// consumer test injects.
+var seamSurfaces = []reflect.Type{
+	reflect.TypeOf((*beads.FormulaVerbs)(nil)).Elem(),
+}
+
+// surfaceMethods is every method the Fake may implement: Client, Admin and
+// the seam interfaces.
+func surfaceMethods() map[string]bool {
+	surface := methodNames(reflect.TypeOf((*beads.Client)(nil)).Elem())
+	for name := range methodNames(reflect.TypeOf((*beads.Admin)(nil)).Elem()) {
+		surface[name] = true
+	}
+	for _, t := range seamSurfaces {
+		for name := range methodNames(t) {
+			surface[name] = true
+		}
+	}
+	return surface
 }
 
 func methodNames(t reflect.Type) map[string]bool {
@@ -53,16 +76,14 @@ func sortedVerbNames(m map[string]string) []string {
 }
 
 // TestFakeMethodSetMatchesClient is the one-interface rule (gt-7iwy0.4): the
-// shared fake implements exactly beads.Client and beads.Admin plus its
-// listed test controls. A method on the fake that is on neither interface is
-// a verb consumers would reach through the concrete fake; a method on the
-// interfaces the fake lacks fails to compile already.
+// shared fake implements exactly beads.Client, beads.Admin and the named
+// seam interfaces (seamSurfaces) plus its listed test controls. A method on
+// the fake that is on none of them is a verb consumers would reach through
+// the concrete fake; a method on the interfaces the fake lacks fails to
+// compile already.
 func TestFakeMethodSetMatchesClient(t *testing.T) {
 	t.Parallel()
-	surface := methodNames(reflect.TypeOf((*beads.Client)(nil)).Elem())
-	for name := range methodNames(reflect.TypeOf((*beads.Admin)(nil)).Elem()) {
-		surface[name] = true
-	}
+	surface := surfaceMethods()
 	fake := methodNames(reflect.TypeOf((*Fake)(nil)))
 
 	var extra, missing []string
@@ -85,7 +106,7 @@ func TestFakeMethodSetMatchesClient(t *testing.T) {
 		}
 	}
 	if len(extra) > 0 {
-		t.Errorf("Fake methods on neither beads.Client nor beads.Admin: %v\n"+
+		t.Errorf("Fake methods on no beads surface: %v\n"+
 			"add each to the interface (with a contract case) or list it in fakeControls", extra)
 	}
 	if len(missing) > 0 {
@@ -153,7 +174,6 @@ var engineVerbs = map[string]string{
 	"DemoteToWisp":                 "moves an ephemeral-flagged issue into the wisps table (doctor's misclassified-wisp repair)",
 	"FindMRForBranchAny":           "finds a merge-request bead for a branch in any status (polecat recovery)",
 	"ForAgentBead":                 "hands back a Client scoped to the agent-bead store, the agent write helpers' entry point",
-	"FormulaShow":                  "prints a formula's body through the engine (sling formula)",
 	"GetAgentBead":                 "reads an agent bead and its parsed fields (the agent-bead read helpers' entry point)",
 	"GetAgentBeadInStoreOnly":      "reads an agent bead without the town-database fallback (identity reconcile)",
 	"InitDatabase":                 "creates the Dolt database a rig's bead store lives in",
@@ -179,17 +199,14 @@ var engineVerbs = map[string]string{
 }
 
 // TestBeadsMethodSetIsClientAdminAndEngine is the *Beads half of the
-// one-interface rule: the concrete store exposes Client and Admin plus the
-// named engine verbs above, and nothing else. Any other exported method is a
-// wrapper whose free version already exists — move its callers to the free
-// function and delete it, rather than teaching consumers a second name for
-// the same operation.
+// one-interface rule: the concrete store exposes Client, Admin and the named
+// seam interfaces plus the named engine verbs above, and nothing else. Any
+// other exported method is a wrapper whose free version already exists —
+// move its callers to the free function and delete it, rather than teaching
+// consumers a second name for the same operation.
 func TestBeadsMethodSetIsClientAdminAndEngine(t *testing.T) {
 	t.Parallel()
-	surface := methodNames(reflect.TypeOf((*beads.Client)(nil)).Elem())
-	for name := range methodNames(reflect.TypeOf((*beads.Admin)(nil)).Elem()) {
-		surface[name] = true
-	}
+	surface := surfaceMethods()
 	methods := methodNames(reflect.TypeOf((*beads.Beads)(nil)))
 
 	var unlisted []string

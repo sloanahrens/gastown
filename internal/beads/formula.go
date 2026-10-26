@@ -36,11 +36,55 @@ func (b *Beads) Bond(proto, beadID string, vars []string) ([]byte, error) {
 	return out, nil
 }
 
+// FormulaVerbs is the formula-verb seam gt formula prints through: the list
+// and one formula, each as bd's JSON payload (FormulaList, FormulaShow) or as
+// its prose (FormulaListText, FormulaShowText). It is not Client because a
+// formula lives in files, not the issue store, so a tracker-backed Client has
+// no answer (gt-p85pw.11).
+type FormulaVerbs interface {
+	FormulaList() ([]byte, error)
+	FormulaListText() ([]byte, error)
+	FormulaShow(formula string) ([]byte, error)
+	FormulaShowText(formula string) ([]byte, error)
+}
+
+var _ FormulaVerbs = (*Beads)(nil)
+
 // FormulaShow returns what bd formula show prints for formula. bd can exit
 // 0 for a formula it did not find, printing nothing (or a JSON null), so a
 // caller checks the output too.
 func (b *Beads) FormulaShow(formula string) ([]byte, error) {
 	out, err := b.run("formula", "show", formula)
+	if err != nil {
+		return nil, withBDMessage(err)
+	}
+	return out, nil
+}
+
+// FormulaShowText returns bd formula show's prose for formula, the form the
+// operator's terminal wants; bd writes it only outside machine mode.
+func (b *Beads) FormulaShowText(formula string) ([]byte, error) {
+	out, err := b.runText("formula", "show", formula)
+	if err != nil {
+		return nil, withBDMessage(err)
+	}
+	return out, nil
+}
+
+// FormulaList returns bd formula list's JSON payload (bd formula list
+// --json), the form FormulaShow answers one formula in.
+func (b *Beads) FormulaList() ([]byte, error) {
+	out, err := b.run("formula", "list", "--json")
+	if err != nil {
+		return nil, withBDMessage(err)
+	}
+	return out, nil
+}
+
+// FormulaListText returns bd formula list's prose, the form the operator's
+// terminal wants; bd writes it only outside machine mode.
+func (b *Beads) FormulaListText() ([]byte, error) {
+	out, err := b.runText("formula", "list")
 	if err != nil {
 		return nil, withBDMessage(err)
 	}
