@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
 )
@@ -66,20 +67,27 @@ func withRoleSystemPromptFlag(reg *AgentRegistry, rc *RuntimeConfig, role, townR
 	if path == "" {
 		return rc
 	}
-	if !systemPromptFileReady(path) {
-		render := reg.host().systemPromptRenderer()
-		if render == nil {
-			return rc
-		}
+	// Render on every spawn, not only when the file is missing: a file left by
+	// an earlier spawn holds that day's directives, and the renderer rewrites it
+	// only when the content differs (gt-zqj9t).
+	w := reg.host().warnWriter()
+	if render := reg.host().systemPromptRenderer(); render != nil {
 		if err := render(role, townRoot, rigPath, agentName, path); err != nil {
-			// Degrade loudly: the session still starts (gt prime prints the
-			// static text), but a broken template must not hide here.
-			fmt.Fprintf(os.Stderr, "gt: system prompt for %s not rendered (%v); the first prime will carry it\n", role, err)
-			return rc
+			if info, statErr := os.Stat(path); statErr == nil && !info.IsDir() {
+				// Degrade loudly: the spawn runs on the file it has, and the
+				// warning says how old that file is.
+				age := time.Since(info.ModTime()).Round(time.Minute)
+				fmt.Fprintf(w, "gt: system prompt for %s not re-rendered (%v); using %s, written %s ago\n", role, err, path, age)
+			} else {
+				// Degrade loudly: the session still starts (gt prime prints the
+				// static text), but a broken template must not hide here.
+				fmt.Fprintf(w, "gt: system prompt for %s not rendered (%v); the first prime will carry it\n", role, err)
+				return rc
+			}
 		}
-		if !systemPromptFileReady(path) {
-			return rc
-		}
+	}
+	if !systemPromptFileReady(path) {
+		return rc
 	}
 	for _, arg := range rc.Args {
 		if arg == "--append-system-prompt-file" {
