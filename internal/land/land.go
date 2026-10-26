@@ -145,8 +145,8 @@ type Lander struct {
 	// the log the dashboard's rework table reads. Nil means off (gt-mctxx).
 	Reviews *ReviewsFile
 	// RoundsDir, when set, holds one rounds-<bead>.json per landing: the
-	// findings each om round raised and what became of them, the history om
-	// reads through --rounds-file (gt-yphcl). Empty means off.
+	// findings each om round raised and what became of them, the history
+	// gt-3l5qy hands om through --rounds-file (gt-yphcl). Empty means off.
 	RoundsDir string
 	Out       io.Writer
 	Now       func() time.Time
@@ -956,9 +956,9 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict, re
 }
 
 // logRounds records this round's findings in the landing's rounds ledger, the
-// history om reads through --rounds-file. The round is the attempt the reviews
-// log records, taken from the same read, and a ledger write never holds a
-// landing: the record is the landing's history, not its precondition
+// history gt-3l5qy hands om through --rounds-file. The round is the attempt
+// the reviews log records, taken from the same read, and a ledger write never
+// holds a landing: the record is the landing's history, not its precondition
 // (gt-yphcl).
 func (l *Lander) logRounds(issue *beads.Issue, w Work, v Verdict) {
 	if l.RoundsDir == "" || (v.Verdict != VerdictApprove && v.Verdict != VerdictRequestChanges) {

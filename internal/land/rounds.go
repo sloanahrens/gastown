@@ -152,7 +152,8 @@ type ledgerFinding struct {
 // key is the finding's identity across rounds.
 func (f ledgerFinding) key() FindingKey { return FindingKey{File: f.File, ID: f.ID} }
 
-// renderedRound is one round as Render emits it: what om's --rounds-file reads.
+// renderedRound is one round as Render emits it: the shape gt-3l5qy hands om
+// through --rounds-file.
 type renderedRound struct {
 	Round    int               `json:"round"`
 	Head     string            `json:"head"`
@@ -235,11 +236,11 @@ func (l *RoundsLedger) Settle(key FindingKey, outcome Outcome) error {
 	return l.save(doc)
 }
 
-// Render returns the ledger as the JSON array om reads, newest rounds first
-// kept: an output over maxBytes loses its oldest rounds whole, and the newest
-// round stays even alone over the cap. Zero or negative maxBytes means
-// DefaultRoundsCap. A ledger that does not parse is ErrRoundsCorrupt, which
-// the caller treats as no history.
+// Render returns the ledger as the JSON array gt-3l5qy writes for om, newest
+// rounds first kept: an output over maxBytes loses its oldest rounds whole,
+// and the newest round stays even alone over the cap. Zero or negative
+// maxBytes means DefaultRoundsCap. A ledger that does not parse is
+// ErrRoundsCorrupt, which the caller treats as no history.
 func (l *RoundsLedger) Render(maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultRoundsCap

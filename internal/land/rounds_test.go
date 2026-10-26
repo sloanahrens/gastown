@@ -21,8 +21,8 @@ func ledgerIn(t *testing.T, bead string) *RoundsLedger {
 	}}
 }
 
-// rendered is Render's output as the test reads it: the schema om's
-// --rounds-file is given.
+// rendered is Render's output as the test reads it: the schema gt-3l5qy hands
+// om through --rounds-file.
 type rendered []struct {
 	Round      int    `json:"round"`
 	Head       string `json:"head"`
