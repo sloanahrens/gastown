@@ -1027,6 +1027,10 @@ gt overseer beat [--state working|idle|away]   # heartbeat.json: {ts, state, ses
 gt overseer log <kind> "<text>" [--bead ID]    # one line of journal.jsonl: {ts, kind, text, bead}
 ```
 
+`--state working` is refused while any attention item is unacknowledged or any escalation is open
+that no attention item already names (an `esc:` item is the same escalation). The refusal names each
+unacked key, quoted, and the counts, and no heartbeat is written. `idle` and `away` are not refused.
+
 `kind` is one of `file_bead`, `review`, `config_edit`, `hold`, `install`,
 `nuke_seat`, `answer`, `decision`, `fix_by_hand`; any other kind is refused with
 that list. The text is cut to 300 characters and collapsed to one line. The

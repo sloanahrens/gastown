@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/overseer"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -88,14 +91,116 @@ func runOverseerBeat(cmd *cobra.Command, _ []string) error {
 	return overseerBeat(cmd.OutOrStdout(), townRoot, overseerBeatState, session, time.Now())
 }
 
-// overseerBeat writes the heartbeat at now.
+// overseerOpenWork reads what a working beat must see at zero: the keys of the
+// unacknowledged attention items and the count of open escalations. It is a
+// parameter and not a package variable, so a test passes its own readers.
+type overseerOpenWork struct {
+	items       func(townRoot string) ([]string, error)
+	escalations func(townRoot string) (int, error)
+}
+
+// liveOverseerOpenWork reads the town's attention store and the bead plane. newClient gives the
+// bead client for a town; production passes overseerBeadsClient, a test passes a fake.
+func liveOverseerOpenWork(newClient func(townRoot string) beads.Client) overseerOpenWork {
+	return overseerOpenWork{
+		items: overseerUnackedItems,
+		escalations: func(townRoot string) (int, error) {
+			return countOpenEscalations(newClient(townRoot))
+		},
+	}
+}
+
+// overseerBeadsClient is the bead client the live readers use for a town.
+func overseerBeadsClient(townRoot string) beads.Client {
+	return beads.New(beads.ResolveBeadsDir(townRoot))
+}
+
+// countOpenEscalations counts the open escalations on the client's bead plane.
+func countOpenEscalations(c beads.Client) (int, error) {
+	issues, err := beads.ListEscalationsAcrossRigs(c)
+	if err != nil {
+		return 0, err
+	}
+	return len(issues), nil
+}
+
+// overseerUnackedItems lists the keys of the attention items no human has
+// acknowledged yet. An escalation the daemon raised also appears here, so the
+// escalations counted separately are the ones an ack has hidden.
+func overseerUnackedItems(townRoot string) ([]string, error) {
+	state, err := attention.ReadState(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	for _, item := range state.Items {
+		if item.AckedAt == nil {
+			keys = append(keys, item.Key)
+		}
+	}
+	return keys, nil
+}
+
+// overseerBeat writes the heartbeat at now, reading the live town for the
+// working-beat check.
 func overseerBeat(out io.Writer, townRoot, state, session string, now time.Time) error {
+	return overseerBeatWith(out, townRoot, state, session, now, liveOverseerOpenWork(overseerBeadsClient))
+}
+
+// overseerBeatWith writes the heartbeat at now. A working beat is refused while
+// an attention item is unacknowledged or an escalation is open: the overseer has
+// to triage them before it can say it is working, and the refusal lists them.
+func overseerBeatWith(out io.Writer, townRoot, state, session string, now time.Time, open overseerOpenWork) error {
+	if state == overseer.StateWorking {
+		if err := overseerRefuseIfOpen(townRoot, open); err != nil {
+			return err
+		}
+	}
 	hb := overseer.Heartbeat{TS: now.UTC(), State: state, Session: session}
 	if err := overseer.WriteHeartbeat(townRoot, hb); err != nil {
 		return fmt.Errorf("gt overseer beat: %w", err)
 	}
 	fmt.Fprintf(out, "heartbeat %s at %s\n", state, hb.TS.Format(time.RFC3339))
 	return nil
+}
+
+// overseerRefuseIfOpen returns an error naming every open item, or nil when
+// there are none.
+func overseerRefuseIfOpen(townRoot string, open overseerOpenWork) error {
+	keys, err := open.items(townRoot)
+	if err != nil {
+		return fmt.Errorf("gt overseer beat: reading attention: %w", err)
+	}
+	escalations, err := open.escalations(townRoot)
+	if err != nil {
+		return fmt.Errorf("gt overseer beat: counting escalations: %w", err)
+	}
+	// A daemon-raised escalation is counted in both lists: its attention item's key is esc:<id>.
+	// Only the escalations with no such item are added to the count, so each is named once.
+	extra := escalations - escalationItemKeys(keys)
+	if extra < 0 {
+		extra = 0
+	}
+	if len(keys) == 0 && extra == 0 {
+		return nil
+	}
+	quoted := make([]string, len(keys))
+	for i, k := range keys {
+		quoted[i] = strconv.Quote(k)
+	}
+	return fmt.Errorf("gt overseer beat: refusing to record working with %d unacked attention item(s) and %d open escalation(s) with no attention item; triage each with gt attention ack <key> --disposition needed-human|fixed-by-overseer|noise, then gt escalate close:\n  %s",
+		len(keys), extra, strings.Join(quoted, "\n  "))
+}
+
+// escalationItemKeys counts the attention keys that name an escalation.
+func escalationItemKeys(keys []string) int {
+	n := 0
+	for _, k := range keys {
+		if strings.HasPrefix(k, "esc:") {
+			n++
+		}
+	}
+	return n
 }
 
 func runOverseerLog(cmd *cobra.Command, args []string) error {
