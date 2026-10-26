@@ -255,9 +255,15 @@ func TestSourceMoneyAnUnreadableInputLeavesOnlyItsOwnColumnsNil(t *testing.T) {
 	tests := []struct {
 		name string
 		path string
-		// nilColumns are the columns the failed input owns: it could not be
-		// read, so none of them has a reading.
+		// nilColumns are the columns the failed input owns. The group
+		// registers them before it reads anything, so each must be present
+		// and nil: a column that vanished is a different bug from one that
+		// carries no reading.
 		nilColumns []string
+		// absentColumns are the columns the failed input would have
+		// registered from the models its listing names. A listing the group
+		// could not read names none, so the column is not there at all.
+		absentColumns []string
 		// filledColumns are the columns the other two inputs own, which must
 		// keep their readings.
 		filledColumns []string
@@ -286,7 +292,7 @@ func TestSourceMoneyAnUnreadableInputLeavesOnlyItsOwnColumnsNil(t *testing.T) {
 		{
 			name:          "the usage records directory",
 			path:          usage,
-			nilColumns:    []string{"tokens_claude-opus-4-6_1h"},
+			absentColumns: []string{"tokens_claude-opus-4-6_1h"},
 			filledColumns: []string{"claude_plan_weekly_pct", "claude_plan_five_hour_pct", "deepseek_per_hour", "deepseek_balance"},
 		},
 	}
@@ -300,10 +306,18 @@ func TestSourceMoneyAnUnreadableInputLeavesOnlyItsOwnColumnsNil(t *testing.T) {
 				t.Fatalf("Collect: %v; want no error from one input that could not be read", err)
 			}
 			for _, column := range tc.nilColumns {
-				// A token column can be absent rather than nil: the models are
-				// what the listing names, and an unlistable directory names none.
-				if value, ok := cols[column]; ok && value != nil {
+				value, ok := cols[column]
+				if !ok {
+					t.Errorf("%s is absent; want the column present with no reading", column)
+					continue
+				}
+				if value != nil {
 					t.Errorf("%s = %v; want no reading from the input that could not be read", column, value)
+				}
+			}
+			for _, column := range tc.absentColumns {
+				if value, ok := cols[column]; ok {
+					t.Errorf("%s = %v; want no column from a listing that could not be read", column, value)
 				}
 			}
 			for _, column := range tc.filledColumns {
