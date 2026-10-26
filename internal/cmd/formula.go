@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base32"
@@ -232,14 +231,33 @@ func init() {
 	rootCmd.AddCommand(formulaCmd)
 }
 
-// runFormulaList delegates to bd formula list
-func runFormulaList(cmd *cobra.Command, args []string) error {
-	bdArgs := []string{"formula", "list"}
-	if formulaListJSON {
-		bdArgs = append(bdArgs, "--json")
+// realFormulaVerbs returns the formula seam at the command's working
+// directory: bd searches formula directories from its cwd.
+func realFormulaVerbs() (beads.FormulaVerbs, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
 	}
+	return beads.New(cwd), nil
+}
 
-	return passBdFormulaOutput(bdArgs, formulaListJSON)
+// runFormulaList prints bd's formula list, as JSON with --json.
+func runFormulaList(cmd *cobra.Command, args []string) error {
+	verbs, err := realFormulaVerbs()
+	if err != nil {
+		return err
+	}
+	return writeFormulaList(os.Stdout, verbs, formulaListJSON)
+}
+
+// writeFormulaList prints the seam's list answer to out, as JSON when asJSON.
+func writeFormulaList(out io.Writer, verbs beads.FormulaVerbs, asJSON bool) error {
+	if asJSON {
+		answer, err := verbs.FormulaList()
+		return writeFormulaAnswer(out, answer, err)
+	}
+	answer, err := verbs.FormulaListText()
+	return writeFormulaAnswer(out, answer, err)
 }
 
 // runFormulaShow shows a formula as bd cooks it (the steps an agent runs,
@@ -259,38 +277,35 @@ func runFormulaShow(cmd *cobra.Command, args []string) error {
 		renderCookedFormula(os.Stdout, f)
 		return nil
 	}
-	bdArgs := []string{"formula", "show", formulaName}
-	if formulaShowJSON {
-		bdArgs = append(bdArgs, "--json")
-	}
-
-	return passBdFormulaOutput(bdArgs, formulaShowJSON)
-}
-
-// passBdFormulaOutput prints bd's answer for the operator. With asJSON the
-// caller gets the --json payload (the envelope's data); without it bd's own
-// prose, which machine mode replaces with the envelope, so that run opts out.
-func passBdFormulaOutput(bdArgs []string, asJSON bool) error {
-	// Keep-raw (gt-7iwy0.4.1): bd formula list/show prints for the operator,
-	// prose and --json payload alike, and the caller opts out of machine mode
-	// itself; no typed Client method expresses that passthrough.
-	bdCmd := beads.CommandWithEnv("", nil, bdArgs...)
-	bdCmd.Stderr = os.Stderr
-	if !asJSON {
-		bdCmd.Env = beads.WithoutMachineEnv(bdCmd.Env)
-		bdCmd.Stdout = os.Stdout
-		return bdCmd.Run()
-	}
-
-	// A buffer, not os.Stdout, so beads.Cmd unwraps the envelope. A failure
-	// leaves its envelope in the buffer; bd's message is already on stderr.
-	var stdout bytes.Buffer
-	bdCmd.Stdout = &stdout
-	if err := bdCmd.Run(); err != nil {
+	verbs, err := realFormulaVerbs()
+	if err != nil {
 		return err
 	}
-	_, err := os.Stdout.Write(stdout.Bytes())
-	return err
+	return writeFormulaShowRaw(os.Stdout, verbs, formulaName, formulaShowJSON)
+}
+
+// writeFormulaShowRaw prints the seam's formula show answer to out, as JSON
+// when asJSON.
+func writeFormulaShowRaw(out io.Writer, verbs beads.FormulaVerbs, formulaName string, asJSON bool) error {
+	if asJSON {
+		answer, err := verbs.FormulaShow(formulaName)
+		return writeFormulaAnswer(out, answer, err)
+	}
+	answer, err := verbs.FormulaShowText(formulaName)
+	return writeFormulaAnswer(out, answer, err)
+}
+
+// writeFormulaAnswer prints one formula verb's answer to out, then returns
+// the seam's error, so a failure reaches the operator as the command's error
+// (gt-p85pw.11). bd runs with its output piped rather than on the terminal, so
+// its stderr arrives inside that error, not live as it writes it.
+func writeFormulaAnswer(out io.Writer, answer []byte, answerErr error) error {
+	if len(answer) > 0 {
+		if _, writeErr := out.Write(answer); writeErr != nil {
+			return writeErr
+		}
+	}
+	return answerErr
 }
 
 // runFormulaRun executes a workflow formula: it creates step beads with their

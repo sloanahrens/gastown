@@ -1,6 +1,7 @@
 package beadsfake
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,38 @@ func TestReadyFiltered(t *testing.T) {
 func TestShowText(t *testing.T) {
 	t.Parallel()
 	contractShowText(t, newScope(t, New()))
+}
+
+// TestFormulaContract runs the formula seam contract on the fake, so the case
+// is runnable alone: go test ./internal/beads/beadsfake -run Formula.
+func TestFormulaContract(t *testing.T) {
+	t.Parallel()
+	RunFormulaContract(t, func(t *testing.T) beads.FormulaVerbs {
+		f := New()
+		SeedSampleFormula(f)
+		return f
+	})
+}
+
+// TestFormulaListSeeded pins what the fake adds beyond the contract: a
+// registered formula appears in both list forms and in both show forms.
+func TestFormulaListSeeded(t *testing.T) {
+	t.Parallel()
+	f := New()
+	f.SeedFormula("mol-widget", "workflow", "widgets, made")
+
+	if out, err := f.FormulaList(); err != nil || !strings.Contains(string(out), `"mol-widget"`) {
+		t.Errorf("FormulaList = %q, %v; want the seeded name", out, err)
+	}
+	if out, err := f.FormulaListText(); err != nil || !strings.Contains(string(out), "mol-widget") {
+		t.Errorf("FormulaListText = %q, %v; want the seeded name", out, err)
+	}
+	if out, err := f.FormulaShow("mol-widget"); err != nil || !strings.Contains(string(out), "mol-widget") {
+		t.Errorf("FormulaShow = %q, %v; want the seeded name", out, err)
+	}
+	if out, err := f.FormulaShowText("mol-widget"); err != nil || !strings.Contains(string(out), "mol-widget") {
+		t.Errorf("FormulaShowText = %q, %v; want the seeded name", out, err)
+	}
 }
 
 // TestGateCheck runs the GateCheck contract case on its own, so the case is
