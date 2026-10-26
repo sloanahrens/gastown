@@ -45,7 +45,7 @@ func judge(mode string, exitCode int, timedOut bool, stdout []byte) outcome {
 // runOne runs gt with args in dir, with the environment that keeps it out of the operator's town,
 // and returns the judged outcome.
 func runOne(ctx context.Context, gt, town string, args []string, mode string) outcome {
-	c := exec.CommandContext(ctx, gt, args...)
+	c := exec.CommandContext(ctx, gt, args...) //nolint:gosec // G204: gt is the binary the presubmit just built, named by -gt; args are a command path and one machine flag
 	c.Dir = town
 	c.Env = []string{"HOME=" + town, "GT_TOWN_ROOT=" + town, "PATH=" + os.Getenv("PATH"), "TMPDIR=" + os.TempDir()}
 	c.WaitDelay = time.Second
