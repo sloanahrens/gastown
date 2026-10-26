@@ -36,6 +36,21 @@ func scriptPlugin(t *testing.T, name, script string) *plugin.Plugin {
 	}
 }
 
+// binaryPlugin is a script-type plugin with no run.sh whose [execution] block
+// names a binary inside the plugin directory.
+func binaryPlugin(t *testing.T, name, binary string) *plugin.Plugin {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &plugin.Plugin{
+		Name:      name,
+		Path:      dir,
+		Execution: &plugin.Execution{Type: plugin.ExecTypeScript, Binary: binary, Timeout: "5s"},
+	}
+}
+
 func TestRunsAsScript(t *testing.T) {
 	t.Parallel()
 	p := scriptPlugin(t, "s", "exit 0\n")
@@ -44,8 +59,13 @@ func TestRunsAsScript(t *testing.T) {
 	}
 	p.HasRunScript = false
 	if runsAsScript(p) {
-		t.Error("script type without run.sh must not run as a script")
+		t.Error("script type without run.sh or binary must not run")
 	}
+	p.Execution.Binary = "bin/work"
+	if !runsAsScript(p) {
+		t.Error("script plugin naming a binary must run without run.sh")
+	}
+	p.Execution.Binary = ""
 	p.HasRunScript = true
 	p.Execution.Type = plugin.ExecTypeAgent
 	if runsAsScript(p) {
@@ -105,6 +125,71 @@ func TestRunPluginScript_SuccessCapturesOutputAndEnv(t *testing.T) {
 	} {
 		if got := calls[0].getenv(key); got != want {
 			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// A plugin that names a binary is exec'd directly: that path under the plugin
+// directory, an empty argv, and no bash in between.
+func TestRunPluginScript_ExecutesNamedBinaryWithoutAShell(t *testing.T) {
+	t.Parallel()
+	p := binaryPlugin(t, "go-bin", "bin/work")
+	fake := newFakeCLI(nil)
+	res := runPluginScript(context.Background(), fake.run, scriptEnv{environ: []string{"PATH=/usr/bin"}}, p, "/town", 5*time.Second)
+	if !res.ok() {
+		t.Fatalf("expected success, got %+v", res)
+	}
+	calls := fake.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("ran %d processes, want 1", len(calls))
+	}
+	if calls[0].name != "work" || len(calls[0].args) != 0 || calls[0].dir != p.Path {
+		t.Fatalf("ran %+v, want the plugin's binary with no arguments in the plugin directory", calls[0])
+	}
+	for key, want := range map[string]string{
+		"PATH": "/usr/bin", "GT_ROOT": "/town", "GT_TOWN_ROOT": "/town", "GT_PLUGIN_NAME": "go-bin",
+		"GT_PLUGIN_RUNNER": "daemon", "GT_ROLE": "daemon/plugin", "BD_ACTOR": "daemon",
+	} {
+		if got := calls[0].getenv(key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// The binary's exit code and skip marker read exactly as a script's do: the
+// receipt handling belongs to the runner, not the entry point.
+func TestRunPluginScript_BinaryKeepsTheScriptResultReading(t *testing.T) {
+	t.Parallel()
+	p := binaryPlugin(t, "go-bin", "bin/work")
+	res := runPluginScript(context.Background(), scriptBash(cliReply{stderr: "boom\n", code: 7}).run, scriptEnv{}, p, "/town", 5*time.Second)
+	if res.ok() || res.exitCode != 7 || !strings.Contains(res.output, "boom") {
+		t.Fatalf("expected exit 7 with its output, got %+v", res)
+	}
+
+	p = binaryPlugin(t, "go-skip", "bin/work")
+	res = runPluginScript(context.Background(), scriptBash(cliReply{stdout: "[plugin-result skipped]\n"}).run, scriptEnv{}, p, "/town", 5*time.Second)
+	if !res.ok() || !res.skipped() {
+		t.Fatalf("expected a skipped run, got %+v", res)
+	}
+}
+
+// A binary path that escapes the plugin directory is refused at run time too,
+// so a plugin value that never passed the scanner's parse check still cannot
+// execute a program the plugin did not ship.
+func TestRunPluginScript_RefusesABinaryOutsideThePluginDirectory(t *testing.T) {
+	t.Parallel()
+	for _, binary := range []string{"../evil", "/bin/sh"} {
+		p := binaryPlugin(t, "escape", binary)
+		fake := newFakeCLI(nil)
+		res := runPluginScript(context.Background(), fake.run, scriptEnv{}, p, "/town", 5*time.Second)
+		if res.ok() || res.err == nil {
+			t.Errorf("binary %q must not run: %+v", binary, res)
+		}
+		if !strings.HasPrefix(res.status(), "could not run:") {
+			t.Errorf("status = %q, want a run that never started", res.status())
+		}
+		if n := len(fake.recorded()); n != 0 {
+			t.Errorf("binary %q: %d processes ran, want none", binary, n)
 		}
 	}
 }

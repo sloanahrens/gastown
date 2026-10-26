@@ -185,6 +185,14 @@ func parsePluginMD(content []byte, pluginDir string, location Location, rigName 
 		return nil, fmt.Errorf("missing required field: name")
 	}
 
+	// Refuse an escaping binary path here, where the scanner's warning names
+	// the plugin, instead of at the run that would exec it.
+	if fm.Execution != nil && fm.Execution.Binary != "" {
+		if _, err := resolveBinary(pluginDir, fm.Execution.Binary); err != nil {
+			return nil, err
+		}
+	}
+
 	plugin := &Plugin{
 		Name:         fm.Name,
 		Description:  fm.Description,

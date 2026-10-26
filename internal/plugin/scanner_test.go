@@ -787,6 +787,48 @@ Wraps polecat sessions in an exitbox sandbox for filesystem and network isolatio
 	}
 }
 
+// A binary named under the plugin directory is where the daemon looks for a
+// program to run in place of run.sh; a path that steps back inside after
+// cleaning still resolves inside.
+func TestParsePluginMD_Binary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, binary, want string }{
+		{"nested", "bin/work", "/town/plugins/go-plugin/bin/work"},
+		{"steps back inside", "bin/../run.sh", "/town/plugins/go-plugin/run.sh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			content := []byte("+++\nname = \"go-plugin\"\n[execution]\ntype = \"script\"\nbinary = \"" + tc.binary + "\"\n+++\n")
+			p, err := parsePluginMD(content, "/town/plugins/go-plugin", LocationTown, "")
+			if err != nil {
+				t.Fatalf("parsePluginMD failed: %v", err)
+			}
+			if p.Execution == nil || p.Execution.Binary != tc.binary {
+				t.Fatalf("execution = %+v, want binary %q", p.Execution, tc.binary)
+			}
+			if got, err := p.BinaryPath(); err != nil || got != tc.want {
+				t.Errorf("BinaryPath() = %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// The runner execs the named binary itself, so a path outside the plugin
+// directory is refused when the plugin is parsed, not when a run would start
+// whatever it points at.
+func TestParsePluginMD_RefusesBinaryOutsideThePluginDirectory(t *testing.T) {
+	t.Parallel()
+	for _, binary := range []string{"/usr/bin/env", "../escape", "bin/../../escape", ".."} {
+		t.Run(binary, func(t *testing.T) {
+			t.Parallel()
+			content := []byte("+++\nname = \"go-plugin\"\n[execution]\ntype = \"script\"\nbinary = \"" + binary + "\"\n+++\n")
+			if _, err := parsePluginMD(content, "/town/plugins/go-plugin", LocationTown, ""); err == nil {
+				t.Fatalf("binary %q must be refused at parse time", binary)
+			}
+		})
+	}
+}
+
 func TestPlugin_IsExecWrapper_False(t *testing.T) {
 	t.Parallel()
 	// Regular plugin should not be an exec-wrapper
