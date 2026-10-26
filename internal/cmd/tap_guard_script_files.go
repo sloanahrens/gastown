@@ -47,8 +47,7 @@ var scriptFileAllowlist = []string{}
 const scriptFilePolicy = `Write a Go package with unit tests and seams for the clock, filesystem and
 process runner: ~/.claude/docs/standards/test-engineering.md, "Scripts are debt".
 A procedure that is only operator steps is a runbook, not a script.
-Limit: a Bash path the shell builds at runtime is judged only when its command
-names a script suffix; this guard is best effort for Bash and exact for files.`
+Bash-created scripts are caught at commit by the repo guard gt-lpm8b.`
 
 var tapGuardScriptFilesCmd = &cobra.Command{
 	Use:   "script-files",
@@ -62,11 +61,11 @@ always allowed. Bash is not judged here: a Bash-created script is caught at
 commit time by the repo guard gt-lpm8b, where a tracked script outside the
 allowlist fails the gate with the same redirect.
 
-The guard fails closed: a hook payload it cannot read or parse, or a worker
-session whose own worktree it cannot place, is denied rather than passed
-through unjudged. A session with no role, or an unrecognized one, is judged as
-a worker. A path that cannot be resolved is denied when its name ends in a
-denied script suffix, since the request is still to create a script.
+The guard fails closed on what it can name: a hook payload it cannot read or
+parse, or a session whose worktree it cannot place, is denied when the payload
+or the target names a script suffix. A session with no role, or an unrecognized
+one, is judged as a worker. A path that cannot be resolved is denied when its
+name ends in a denied script suffix.
 
 A new .py file is allowed with an advisory on stderr asking for the reason to
 be recorded in the bead: Python is allowed when it genuinely is the best tool,
@@ -74,10 +73,9 @@ so it gets a reminder rather than a denial.
 
 The denial redirects: ` + scriptFilePolicy + `
 
-Scope: a polecat or crew session working inside its own Gas Town worktree
+Scope: file-writing tools in a polecat or crew session's own Gas Town worktree
 (<rig>/polecats/<name>/<repo> or <rig>/crew/<name>). Paths outside every
-worktree are not judged, and a session that is neither a polecat nor crew is
-never judged.
+worktree are not judged. Every other session is judged as a worker.
 
 Exit codes:
   0 - Allowed (not a worker session, not a new script, or the target exists)
@@ -109,21 +107,15 @@ type scriptFileInput struct {
 func tapGuardScriptFiles(stdin io.Reader, stderr io.Writer, proc guardProcess) error {
 	input, err := io.ReadAll(stdin)
 	if err != nil || len(input) == 0 {
-		// Fail closed (gt-b43ra): a payload the guard cannot read names no
-		// call, and "I saw nothing" is not evidence that no script is being
-		// written.
-		printScriptFileUnjudgeable(stderr, "the hook payload could not be read")
-		return NewSilentExit(2)
+		return unjudgedPayload(input, stderr, "the hook payload could not be read")
 	}
 	var hook scriptFileInput
 	if err := json.Unmarshal(input, &hook); err != nil {
-		printScriptFileUnjudgeable(stderr, "the hook payload could not be parsed")
-		return NewSilentExit(2)
+		return unjudgedPayload(input, stderr, "the hook payload could not be parsed")
 	}
 	scope, ok := resolveScriptFileScope(hook.Cwd, proc)
 	if !ok {
-		printScriptFileUnjudgeable(stderr, "the session's own worktree could not be resolved")
-		return NewSilentExit(2)
+		return unjudgedWorktree(hook, stderr)
 	}
 	switch hook.ToolName {
 	case "Edit", "Write", "MultiEdit":
@@ -365,6 +357,46 @@ func printScriptFileRefusal(w io.Writer, via, target string) {
 // printScriptFileUnjudgeable denies a call the guard cannot judge. It fails
 // closed on purpose (gt-b43ra): passing an unchecked call through is the hole
 // this guard exists to close, so "cannot tell" reads as "no".
+// unjudgedPayload is the answer to a payload the guard cannot parse: it denies
+// only when the raw payload names a denied script suffix, the one fact left to
+// read from it (gt-b43ra).
+func unjudgedPayload(input []byte, stderr io.Writer, why string) error {
+	if !payloadNamesScriptSuffix(string(input)) {
+		return nil
+	}
+	printScriptFileUnjudgeable(stderr, why)
+	return NewSilentExit(2)
+}
+
+// unjudgedWorktree is the answer when the session's own worktree cannot be
+// placed: a file-writing call denies only a target whose name ends in a denied
+// script suffix, and every other call is allowed (gt-b43ra).
+func unjudgedWorktree(hook scriptFileInput, stderr io.Writer) error {
+	target := hook.ToolInput.FilePath
+	if hook.ToolName == "NotebookEdit" && hook.ToolInput.NotebookPath != "" {
+		target = hook.ToolInput.NotebookPath
+	}
+	switch hook.ToolName {
+	case "Edit", "Write", "MultiEdit", "NotebookEdit":
+		if scriptFileNamed(target) {
+			printScriptFileRefusal(stderr, hook.ToolName, target)
+			return NewSilentExit(2)
+		}
+	}
+	return nil
+}
+
+// payloadNamesScriptSuffix reports whether raw text carries a denied script
+// suffix anywhere in it.
+func payloadNamesScriptSuffix(raw string) bool {
+	for _, denied := range scriptFileExtensions {
+		if strings.Contains(raw, denied) {
+			return true
+		}
+	}
+	return false
+}
+
 func printScriptFileUnjudgeable(w io.Writer, why string) {
 	fmt.Fprintf(w, "\n❌ NO NEW SCRIPTS: %s, so this call is denied rather than passed through unchecked.\n", why)
 	printScriptFilePolicy(w)

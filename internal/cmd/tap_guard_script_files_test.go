@@ -192,46 +192,52 @@ func TestScriptFileGuardPythonAdvisory(t *testing.T) {
 	}
 }
 
-// TestScriptFileGuardFailsClosedOnUnreadablePayload pins the gt-b43ra
-// fail-closed rule: a payload the guard cannot read denies, and the denial
-// carries the same redirect as a refused script, so the model is never left
-// with a silent pass it can exploit by accident.
-func TestScriptFileGuardFailsClosedOnUnreadablePayload(t *testing.T) {
+// An unreadable payload denies when it names a denied script suffix, with the
+// same redirect as a refused script; an unreadable payload that names none is
+// allowed, because no script is named in it (gt-b43ra).
+func TestScriptFileGuardUnreadablePayload(t *testing.T) {
 	t.Parallel()
 	town := newScriptFileTestTown(t)
 	var stderr strings.Builder
 	err := tapGuardScriptFiles(failingReader{}, &stderr, town.polecatProc())
-	assertVerdict(t, err, true, "unreadable payload")
-	assertPolicyIn(t, stderr.String(), "unreadable payload")
+	assertVerdict(t, err, false, "unreadable payload naming no script")
+
+	stderr.Reset()
+	err = tapGuardScriptFiles(strings.NewReader(`{"tool_input":{"file_path":"deploy.sh"`), &stderr, town.polecatProc())
+	assertVerdict(t, err, true, "unparseable payload naming a script")
+	assertPolicyIn(t, stderr.String(), "unparseable payload naming a script")
 }
 
-// TestScriptFileGuardFailsClosedOnUnparseablePayload pins the same rule for a
-// payload that is not the hook JSON.
-func TestScriptFileGuardFailsClosedOnUnparseablePayload(t *testing.T) {
+// An unparseable payload denies on a script suffix it names and is allowed
+// otherwise (gt-b43ra).
+func TestScriptFileGuardUnparseablePayload(t *testing.T) {
 	t.Parallel()
 	town := newScriptFileTestTown(t)
 	var stderr strings.Builder
 	err := tapGuardScriptFiles(strings.NewReader("not a hook payload"), &stderr, town.polecatProc())
-	assertVerdict(t, err, true, "unparseable payload")
-	assertPolicyIn(t, stderr.String(), "unparseable payload")
+	assertVerdict(t, err, false, "unparseable payload naming no script")
 }
 
-// TestScriptFileGuardFailsClosedWhenWorkerTreeIsUnknown pins the scope half of
-// the fail-closed rule: a worker session whose own worktree cannot be named is
-// refused, because "I cannot see where you are" is not evidence of no script.
-func TestScriptFileGuardFailsClosedWhenWorkerTreeIsUnknown(t *testing.T) {
+// A worker session whose own worktree cannot be placed denies a file-writing
+// call whose target names a denied script suffix, and allows every other call:
+// the guard cannot see where the session stands, so it denies only what it can
+// name (gt-b43ra).
+func TestScriptFileGuardUnresolvedWorktreeDeniesOnlyScriptTargets(t *testing.T) {
 	t.Parallel()
 	town := newScriptFileTestTown(t)
 	proc := fakeGuardProcess(map[string]string{
 		"GT_ROLE":    "gastown/polecats/ace",
 		"GT_POLECAT": "ace",
 	}, "")
-	var stderr strings.Builder
 	// The payload cwd is outside any worker worktree and the proc names no
 	// GT_POLECAT_PATH, so the guard's own tree cannot be resolved.
+	var stderr strings.Builder
 	err := town.run(t, proc, town.scratch, "Write", fileInput("deploy.sh"), &stderr)
-	assertVerdict(t, err, true, "unresolvable worker tree")
-	assertPolicyIn(t, stderr.String(), "unresolvable worker tree")
+	assertVerdict(t, err, true, "unresolvable worker tree, script target")
+	assertPolicyIn(t, stderr.String(), "unresolvable worker tree, script target")
+
+	err = town.run(t, proc, town.scratch, "Write", fileInput("notes.txt"), io.Discard)
+	assertVerdict(t, err, false, "unresolvable worker tree, non-script target")
 }
 
 // assertPolicyIn checks a denial carries every line of the guarded redirect.
@@ -245,11 +251,10 @@ func assertPolicyIn(t *testing.T, stderr, label string) {
 	}
 }
 
-// TestScriptFileGuardNonWorkerSessionAllowed pins the scope: a session that is
-// neither a polecat nor crew is never judged, even inside a worker's tree.
-// A session with no identifying variable is judged as a worker: the guard is
-// installed only in worker and crew settings, so an unidentified session fails
-// closed rather than allowed (gt-b43ra).
+// TestScriptFileGuardNoIdentitySessionIsJudged pins the no-identity rule: a
+// session with no identifying variable is judged as a worker, because the guard
+// is installed only in worker and crew settings, so an unidentified session
+// fails closed rather than allowed (gt-b43ra).
 func TestScriptFileGuardNoIdentitySessionIsJudged(t *testing.T) {
 	t.Parallel()
 	town := newScriptFileTestTown(t)

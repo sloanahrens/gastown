@@ -414,12 +414,10 @@ func DefaultOverrides() map[string]*HooksConfig {
 			PreToolUse: []HookEntry{
 				{
 					Matcher: shellExecutingToolMatcher,
-					Hooks: []Hook{
-						{
-							Type:    "command",
-							Command: gtCommand("gt tap guard polecat-paths"),
-						},
-					},
+					Hooks: []Hook{{
+						Type:    "command",
+						Command: gtCommand("gt tap guard polecat-paths"),
+					}},
 				},
 				{
 					// One regex matcher rather than four entries (Edit, Write,
