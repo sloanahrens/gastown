@@ -138,21 +138,19 @@ The format supports programmatic parsing:
 
 ## Audit Queries
 
-Attribution enables powerful audit queries:
+Attribution makes each issue's history auditable:
 
 ```bash
-# All work by an agent
-bd audit --actor=gastown/crew/joe
-
-# All work in a rig
-bd audit --actor=gastown/*
-
-# All polecat work
-bd audit --actor=*/polecats/*
+# Every state change on one issue, with the actor that made it
+bd history gt-xyz --events
 
 # Git history by agent
 git log --author="gastown/crew/joe"
 ```
+
+`bd` filters issues by assignee, not by the actor who created or changed one,
+and it has no actor wildcard; the actor of each event is reported per issue.
+`bd --help` lists the reports it does provide.
 
 ## Design Principles
 
@@ -212,7 +210,10 @@ Your CV emerges from querying work evidence:
 ```bash
 # All work by owner (across all agents)
 git log --author="steve@example.com"
-bd list --owner=steve@example.com
+
+# Beads records an owner on each issue but has no owner filter;
+# --assignee lists the issues assigned to an agent
+bd list --assignee=gastown/crew/joe
 
 # Skills derived from evidence
 # - .go files touched → Go skill
@@ -225,9 +226,9 @@ bd list --owner=steve@example.com
 A human with multiple towns has one CV:
 
 ```bash
-# Future: federated CV query
-bd cv steve@example.com
-# Discovers all towns, aggregates work, derives skills
+# Future: a federated CV query that discovers all towns, aggregates work,
+# and derives skills. bd today reads one town's database; bd --help lists
+# the reports it has.
 ```
 
 See `~/gt/docs/hop/decisions/008-identity-model.md` for architectural rationale.
@@ -240,18 +241,21 @@ See `~/gt/docs/hop/decisions/008-identity-model.md` for architectural rationale.
 # Who touched this file in the last 90 days?
 git log --since="90 days ago" -- path/to/sensitive/file.go
 
-# All changes by a specific agent
-bd audit --actor=gastown/polecats/toast --since=2025-01-01
+# All changes by a specific agent since a date
+git log --author="gastown/polecats/toast" --since=2025-01-01
+
+# The actor-attributed history of one issue
+bd history gt-xyz --events
 ```
 
 ### Performance Tracking
 
 ```bash
-# Completion rate by agent
-bd stats --group-by=actor
+# Completed work by agent
+bd count --status=closed --by-assignee
 
-# Average time to completion
-bd stats --actor=gastown/polecats/* --metric=cycle-time
+# Completions in a window
+bd count --status=closed --closed-after=2025-01-01
 ```
 
 ### Model Comparison
@@ -263,9 +267,11 @@ When agents use different underlying models, attribution enables A/B comparison:
 # gastown/polecats/claude-1 uses Claude
 # gastown/polecats/gpt-1 uses GPT-4
 
-# Compare quality signals
-bd stats --actor=gastown/polecats/claude-* --metric=revision-count
-bd stats --actor=gastown/polecats/gpt-* --metric=revision-count
+# Compare quality signals: each issue's revision count is in its history
+bd history gt-xyz
+
+# The actor behind each of those changes
+bd history gt-xyz --events
 ```
 
 Lower revision counts suggest higher first-pass quality.
