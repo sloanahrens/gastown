@@ -3,10 +3,13 @@ package dashboard
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
+	"math"
+	"strings"
+	"time"
 )
 
-// costDailyDays is how many days the daily spend chart draws.
+// costDailyDays is how many days the daily spend chart draws: the seven calendar
+// days ending today, each a bar or a gap.
 const costDailyDays = 7
 
 // CostCharts is what the Cost panel draws its two charts from. The page draws
@@ -18,11 +21,13 @@ type CostCharts struct {
 }
 
 // CostChart is one bar chart: its bars in order, an optional horizontal line
-// (the weekly limit), and the aria-label that carries its numbers.
+// (the weekly limit), the number of malformed ledger lines skipped while reading
+// it, and the aria-label that carries its numbers.
 type CostChart struct {
-	Bars  []CostBar `json:"bars"`
-	Limit *CostLine `json:"limit,omitempty"`
-	Aria  string    `json:"aria"`
+	Bars    []CostBar `json:"bars"`
+	Limit   *CostLine `json:"limit,omitempty"`
+	Skipped int       `json:"skipped,omitempty"`
+	Aria    string    `json:"aria"`
 }
 
 // CostBar is one bar: its value in dollars, the label under it, the hover
@@ -41,40 +46,38 @@ type CostLine struct {
 	Label string  `json:"label"`
 }
 
-// BuildCostCharts builds the Cost panel's charts. perDay is the spend report's
-// per-day spend, nil when there is no report; hours is the day's spend by hour
-// from the balance ledger; plan is the Claude plan block, nil when it has not
-// reported. A missing input leaves its chart out rather than drawing zeros.
-func BuildCostCharts(perDay map[string]float64, hours []SpendHour, plan *ClaudePlan) CostCharts {
+// BuildCostCharts builds the Cost panel's charts. now is the clock the days and
+// hours end at; perDay is the spend report's per-day spend, nil when there is no
+// report; hours is the day's spend by hour from the balance ledger, and skipped
+// is how many malformed ledger lines the read skipped; plan is the Claude plan
+// block, nil when it has not reported. A missing input leaves its chart out
+// rather than drawing zeros.
+func BuildCostCharts(now time.Time, perDay map[string]float64, hours []SpendHour, skipped int, plan *ClaudePlan) CostCharts {
 	return CostCharts{
-		Daily:  buildDailyChart(perDay, plan),
-		Hourly: buildHourlyChart(hours),
+		Daily:  buildDailyChart(now, perDay, plan),
+		Hourly: buildHourlyChart(hours, skipped),
 	}
 }
 
-// buildDailyChart draws the last seven days of spend. A day with a top-up (a
-// negative spend) is a zero bar, since a rise is money added, not spent. The
-// weekly limit is its value spread over seven days, so it reads beside the bars
-// in dollars, and its label says where the week's percentage lands at reset.
-func buildDailyChart(perDay map[string]float64, plan *ClaudePlan) *CostChart {
+// buildDailyChart draws the seven calendar days ending today, local time. A day
+// with no figure is a gap, not a zero bar. A day with a top-up (a negative spend)
+// is a zero bar, since a rise is money added, not spent. The weekly limit is its
+// value spread over seven days, so it reads beside the bars in dollars, and its
+// label says where the week's percentage lands at reset.
+func buildDailyChart(now time.Time, perDay map[string]float64, plan *ClaudePlan) *CostChart {
 	if len(perDay) == 0 {
 		return nil
 	}
-	days := make([]string, 0, len(perDay))
-	for day := range perDay {
-		days = append(days, day)
-	}
-	sort.Strings(days)
-	if len(days) > costDailyDays {
-		days = days[len(days)-costDailyDays:]
-	}
-	chart := &CostChart{Bars: make([]CostBar, 0, len(days))}
+	y, m, d := now.In(time.Local).Date()
+	chart := &CostChart{Bars: make([]CostBar, 0, costDailyDays)}
 	var words []string
-	for _, day := range days {
-		spent := perDay[day]
-		label := day
-		if len(day) >= 5 {
-			label = day[len(day)-5:]
+	for i := costDailyDays - 1; i >= 0; i-- {
+		day := time.Date(y, m, d-i, 0, 0, 0, 0, time.Local).Format("2006-01-02")
+		spent, ok := perDay[day]
+		label := day[len(day)-5:]
+		if !ok {
+			chart.Bars = append(chart.Bars, CostBar{Label: label, Gap: true, Title: day + " no figure"})
+			continue
 		}
 		bar := CostBar{Label: label, Value: max(spent, 0), Title: day + " " + money(spent)}
 		if spent < 0 {
@@ -83,31 +86,34 @@ func buildDailyChart(perDay map[string]float64, plan *ClaudePlan) *CostChart {
 		chart.Bars = append(chart.Bars, bar)
 		words = append(words, bar.Title)
 	}
-	aria := fmt.Sprintf("Daily spend, last %d days: ", len(days)) + joinWords(words)
+	aria := fmt.Sprintf("Daily spend, last %d days: ", costDailyDays)
+	if len(words) > 0 {
+		aria += strings.Join(words, ", ")
+	} else {
+		aria += "no figures"
+	}
 	if plan != nil && plan.WeeklyValueUSD > 0 {
 		daily := plan.WeeklyValueUSD / costDailyDays
-		label := "weekly limit " + money(daily) + "/day"
-		aria += ". Weekly limit " + money(daily) + " a day"
-		// A projection of exactly 0% is a real figure, so the label always names it.
-		label += fmt.Sprintf(" · reset at %d%%", int(plan.ProjectedPctAtReset+0.5))
-		aria += fmt.Sprintf(". Projected at reset %d%% of the weekly limit", int(plan.ProjectedPctAtReset+0.5))
-		chart.Limit = &CostLine{Value: daily, Label: label}
+		pct := pctText(plan.ProjectedPctAtReset)
+		chart.Limit = &CostLine{Value: daily, Label: "weekly limit " + money(daily) + "/day · reset at " + pct}
+		aria += ". Weekly limit " + money(daily) + " a day. Projected at reset " + pct + " of the weekly limit"
 	}
 	chart.Aria = aria
 	return chart
 }
 
 // buildHourlyChart draws the day's spend by hour. An hour with no ledger sample
-// is a gap, labeled, not a bar of zero.
-func buildHourlyChart(hours []SpendHour) *CostChart {
+// is a gap, labeled, not a bar of zero. Malformed ledger lines the read skipped
+// are named in the aria-label and counted on the chart.
+func buildHourlyChart(hours []SpendHour, skipped int) *CostChart {
 	if len(hours) == 0 {
 		return nil
 	}
-	chart := &CostChart{Bars: make([]CostBar, 0, len(hours))}
+	chart := &CostChart{Bars: make([]CostBar, 0, len(hours)), Skipped: skipped}
 	var words []string
 	gaps := 0
 	for _, h := range hours {
-		hr := h.Start.Local().Format("15") + ":00"
+		hr := h.Start.Format("15") + ":00"
 		if h.Samples == 0 {
 			gaps++
 			chart.Bars = append(chart.Bars, CostBar{Label: hr, Gap: true, Title: hr + " no ledger sample"})
@@ -121,16 +127,15 @@ func buildHourlyChart(hours []SpendHour) *CostChart {
 	}
 	aria := fmt.Sprintf("Hourly spend, last %d hours", len(hours))
 	if len(words) > 0 {
-		aria += ": " + joinWords(words)
+		aria += ": " + strings.Join(words, ", ")
 	} else {
 		aria += ": no spend"
 	}
 	if gaps > 0 {
-		if gaps == 1 {
-			aria += ". 1 hour has no ledger sample"
-		} else {
-			aria += fmt.Sprintf(". %d hours have no ledger sample", gaps)
-		}
+		aria += fmt.Sprintf(". %d %s no ledger sample", gaps, plural(gaps, "hour has", "hours have"))
+	}
+	if skipped > 0 {
+		aria += fmt.Sprintf(". %d malformed ledger %s skipped", skipped, plural(skipped, "line", "lines"))
 	}
 	chart.Aria = aria
 	return chart
@@ -159,16 +164,18 @@ func SpendPerDay(raw json.RawMessage) map[string]float64 {
 	return out
 }
 
-// joinWords joins the parts with the separator the panel uses between figures.
-func joinWords(parts []string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += ", "
-		}
-		out += p
+// pctText is a percentage as a whole number, rounded half away from zero, so a
+// negative projection rounds the same way a positive one does.
+func pctText(p float64) string {
+	return fmt.Sprintf("%d%%", int(math.Round(p)))
+}
+
+// plural is one or many, by n.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
 	}
-	return out
+	return many
 }
 
 // money formats a dollar figure as the page does.

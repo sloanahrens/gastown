@@ -10,6 +10,8 @@ import (
 
 // costChartsPerDay is nine days of spend, so the daily chart keeps the last
 // seven; 2026-10-22 is a top-up (a negative spend).
+var costChartsNow = time.Date(2026, 10, 25, 16, 30, 0, 0, time.Local)
+
 var costChartsPerDay = map[string]float64{
 	"2026-10-17": 1.00,
 	"2026-10-18": 2.00,
@@ -38,7 +40,7 @@ func costChartsHours() []SpendHour {
 
 func TestBuildCostChartsDailyKeepsTheLastSevenDaysAsBars(t *testing.T) {
 	t.Parallel()
-	c := BuildCostCharts(costChartsPerDay, nil, nil).Daily
+	c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, nil).Daily
 	if c == nil {
 		t.Fatal("no daily chart from nine days of spend")
 	}
@@ -52,7 +54,7 @@ func TestBuildCostChartsDailyKeepsTheLastSevenDaysAsBars(t *testing.T) {
 
 func TestBuildCostChartsDailyDrawsATopUpAsNoSpend(t *testing.T) {
 	t.Parallel()
-	c := BuildCostCharts(costChartsPerDay, nil, nil).Daily
+	c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, nil).Daily
 	// 2026-10-22 is inside the window and is a top-up: its bar is zero and its
 	// hover says money was added, not spent.
 	var topUp *CostBar
@@ -72,7 +74,7 @@ func TestBuildCostChartsDailyDrawsATopUpAsNoSpend(t *testing.T) {
 func TestBuildCostChartsDailyDrawsTheWeeklyLimitAsALine(t *testing.T) {
 	t.Parallel()
 	plan := &ClaudePlan{WeeklyValueUSD: 70, ProjectedPctAtReset: 83.4}
-	c := BuildCostCharts(costChartsPerDay, nil, plan).Daily
+	c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, plan).Daily
 	if c.Limit == nil {
 		t.Fatal("no limit line with a weekly value")
 	}
@@ -91,17 +93,17 @@ func TestBuildCostChartsDailyDrawsTheWeeklyLimitAsALine(t *testing.T) {
 
 func TestBuildCostChartsDailyHasNoLimitWithoutAPlan(t *testing.T) {
 	t.Parallel()
-	if c := BuildCostCharts(costChartsPerDay, nil, nil).Daily; c.Limit != nil {
+	if c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, nil).Daily; c.Limit != nil {
 		t.Errorf("limit = %+v with no plan, want none", c.Limit)
 	}
-	if c := BuildCostCharts(costChartsPerDay, nil, &ClaudePlan{}).Daily; c.Limit != nil {
+	if c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, &ClaudePlan{}).Daily; c.Limit != nil {
 		t.Errorf("limit = %+v with a zero weekly value, want none", c.Limit)
 	}
 }
 
 func TestBuildCostChartsHourlyHasOneBarPerHourAndGapsAreNotZeroBars(t *testing.T) {
 	t.Parallel()
-	c := BuildCostCharts(nil, costChartsHours(), nil).Hourly
+	c := BuildCostCharts(costChartsNow, nil, costChartsHours(), 0, nil).Hourly
 	if c == nil {
 		t.Fatal("no hourly chart from 24 hours")
 	}
@@ -127,7 +129,7 @@ func TestBuildCostChartsHourlyHasOneBarPerHourAndGapsAreNotZeroBars(t *testing.T
 
 func TestBuildCostChartsLeavesAChartOutWithNoData(t *testing.T) {
 	t.Parallel()
-	c := BuildCostCharts(nil, nil, nil)
+	c := BuildCostCharts(costChartsNow, nil, nil, 0, nil)
 	if c.Daily != nil || c.Hourly != nil {
 		t.Errorf("charts with no data = %+v, want neither", c)
 	}
@@ -145,5 +147,59 @@ func TestSpendPerDayReadsTheReportAndSkipsAnUnsetDay(t *testing.T) {
 	}
 	if SpendPerDay(nil) != nil {
 		t.Error("an absent report is not nil")
+	}
+}
+
+// The daily chart is always seven calendar days ending today: a day with no
+// figure is a gap, so a fortnight of two-day history still draws seven bars
+// (gt-idfec).
+func TestBuildCostChartsDailyIsSevenDaysWithGapsWhenFewerExist(t *testing.T) {
+	t.Parallel()
+	perDay := map[string]float64{"2026-10-24": 1.5, "2026-10-25": 2.0}
+	c := BuildCostCharts(costChartsNow, perDay, nil, 0, &ClaudePlan{WeeklyValueUSD: 70}).Daily
+	if c == nil || len(c.Bars) != costDailyDays {
+		t.Fatalf("daily bars = %d, want seven calendar days", len(c.Bars))
+	}
+	gaps := 0
+	for _, b := range c.Bars {
+		if b.Gap {
+			gaps++
+		}
+	}
+	if gaps != costDailyDays-2 {
+		t.Errorf("gaps = %d, want the five days with no figure", gaps)
+	}
+	if c.Bars[costDailyDays-1].Label != "10-25" || c.Bars[costDailyDays-2].Label != "10-24" {
+		t.Errorf("the last bars run %q, %q; want the two known days ending today",
+			c.Bars[costDailyDays-2].Label, c.Bars[costDailyDays-1].Label)
+	}
+	if c.Limit == nil {
+		t.Error("no weekly limit line with a plan that names a weekly value")
+	}
+}
+
+// Malformed ledger lines the read skipped reach the hourly chart: counted on it
+// and named in its aria-label (gt-idfec).
+func TestBuildCostChartsReportsTheSkippedLedgerLines(t *testing.T) {
+	t.Parallel()
+	c := BuildCostCharts(costChartsNow, nil, costChartsHours(), 2, nil).Hourly
+	if c == nil || c.Skipped != 2 {
+		t.Fatalf("hourly skipped = %+v, want 2 on the chart", c)
+	}
+	if !strings.Contains(c.Aria, "2 malformed ledger lines skipped") {
+		t.Errorf("aria %q does not name the skipped lines", c.Aria)
+	}
+}
+
+// A projection rounds the same way on either side of zero, half away from zero.
+func TestPctTextRoundsHalfAwayFromZero(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		in   float64
+		want string
+	}{{82.5, "83%"}, {82.4, "82%"}, {-0.5, "-1%"}, {-0.4, "0%"}, {0, "0%"}} {
+		if got := pctText(tc.in); got != tc.want {
+			t.Errorf("pctText(%v) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
