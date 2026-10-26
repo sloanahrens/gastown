@@ -50,6 +50,12 @@ type ReviewRecord struct {
 	At  time.Time `json:"at"`
 }
 
+// IsRejection reports whether the landing refused the work on this verdict:
+// om asked for changes, or the worker turned an approval away on its findings.
+func (r ReviewRecord) IsRejection() bool {
+	return r.Rejected || r.Verdict == VerdictRequestChanges
+}
+
 // ReviewsFile is the town's append-only om review log, one ReviewRecord per
 // line. The landing worker writes it; the dashboard reads it, because the
 // daemon's own log is not a source it may parse.
