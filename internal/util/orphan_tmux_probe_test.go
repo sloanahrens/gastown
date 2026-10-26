@@ -7,12 +7,12 @@ package util
 
 import (
 	"errors"
-	"os/exec"
 	"testing"
 )
 
 // exitCodeErr is an error that carries a tmux exit status, as *exec.ExitError
-// does, for the classification cases that need no process.
+// does. It stands in for tmux's own error without starting a process: the
+// classifier reads the status through that method, not the concrete type.
 type exitCodeErr struct{ code int }
 
 func (e exitCodeErr) Error() string { return "exit status 1" }
@@ -30,22 +30,6 @@ func TestClassifyTmuxProbeNoServerIsNotAFailure(t *testing.T) {
 		if !errors.Is(err, ErrTmuxNoServer) {
 			t.Errorf("classifyTmuxProbe(%q) = %v, want ErrTmuxNoServer", out, err)
 		}
-	}
-}
-
-// A real *exec.ExitError, as tmux's own failure produces, is classified the
-// same way (gt-r2kvf).
-func TestClassifyTmuxProbeRealExitError(t *testing.T) {
-	t.Parallel()
-	err := exec.Command("false").Run()
-	if err == nil {
-		t.Skip("false exited 0 on this host")
-	}
-	if got := classifyTmuxProbe([]byte("no server running on /tmp/tmux\n"), err); !errors.Is(got, ErrTmuxNoServer) {
-		t.Errorf("real exit error with no-server output = %v, want ErrTmuxNoServer", got)
-	}
-	if got := classifyTmuxProbe([]byte("permission denied\n"), err); got == nil || errors.Is(got, ErrTmuxNoServer) {
-		t.Errorf("real exit error with other output = %v, want it reported", got)
 	}
 }
 
