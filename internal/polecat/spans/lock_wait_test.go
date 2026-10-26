@@ -101,7 +101,11 @@ func TestLockLogAt_GivesUpAtTheDefaultWait(t *testing.T) {
 	}
 
 	clk.Advance(time.Nanosecond)
-	err = <-gaveUp
+	select {
+	case err = <-gaveUp:
+	case <-ctx.Done():
+		t.Fatal("the waiter did not return after the limit; the deadlock guard ran out")
+	}
 	if err == nil {
 		t.Fatal("lockLogAt took a lock another goroutine holds, want it to give up at the limit")
 	}
