@@ -286,6 +286,23 @@ branch is gone from the remote; it never re-queues a head that has not passed pr
 leaves the bead open, and tells the polecat to ask for a `gt land requeue` if the
 rejection was environmental, or to make a new commit otherwise.
 
+**Recording a decision on a review finding (gt-yphcl).** Each om round's findings are kept
+in `rounds-<bead>.json` under the rig's om directory (`.runtime/landing-om/<rig>/`), with
+what became of each. A comment on the work bead records a decision about one, and only the
+overseer or Sloan may write it: a polecat describes the disagreement in a plain comment and
+lets them decide.
+
+    ACCEPTED-RISK: F2 the mount is approved by design 5.5
+    REBUTTAL: F3 the guard runs on the write path too
+
+`ACCEPTED-RISK:` records a decision already made, so a finding that restates it is info.
+`REBUTTAL:` records that the finding is wrong. Each line of the comment names one finding
+by its exact id, the word after the marker, so a comment carries one line per finding. A
+line that only mentions an id in prose settles nothing, and a file name settles nothing:
+the ledger's identity for a finding is the (file, id) pair, and a comment names only the id.
+Wiring the settlement into the landing review is gt-3l5qy's; until it lands, every finding
+the ledger records stays open.
+
 Never poll the slot, and never script a retry around `gt done` or `gt slot`: a
 polling loop holds the gate every other agent is queued behind, one pass at a
 time (gt-7dxw). The dangerous-command guard refuses the loop shape — a

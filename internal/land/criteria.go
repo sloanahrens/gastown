@@ -103,18 +103,30 @@ func acceptedRiskComments(comments []beads.Comment) []acceptedRiskComment {
 	kept := make([]acceptedRiskComment, 0, len(comments))
 	dated := true
 	for _, c := range comments {
-		text := strings.TrimSpace(c.Text)
-		if !strings.HasPrefix(text, acceptedRiskMarker) || !isAcceptedRiskAuthor(c.Author) {
+		text, ok := decisionComment(c, acceptedRiskMarker)
+		if !ok {
 			continue
 		}
-		at, ok := commentTime(c.CreatedAt)
-		dated = dated && ok
+		at, datedOK := commentTime(c.CreatedAt)
+		dated = dated && datedOK
 		kept = append(kept, acceptedRiskComment{comment: c, text: text, at: at})
 	}
 	if dated {
 		sort.SliceStable(kept, func(i, j int) bool { return kept[i].at < kept[j].at })
 	}
 	return kept
+}
+
+// decisionComment is one comment that records a decision about a finding: its
+// text, trimmed, when marker opens it and the author may write that marker.
+// ACCEPTED-RISK and REBUTTAL read this one check, so the two markers cannot
+// disagree about who may settle a finding (gt-yphcl).
+func decisionComment(c beads.Comment, marker string) (string, bool) {
+	text := strings.TrimSpace(c.Text)
+	if !strings.HasPrefix(text, marker) || !isAcceptedRiskAuthor(c.Author) {
+		return "", false
+	}
+	return text, true
 }
 
 // commentTime reads a comment's creation time in unix seconds. It reports false
