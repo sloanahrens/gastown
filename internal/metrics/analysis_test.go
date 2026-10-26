@@ -440,6 +440,65 @@ func TestAnalyseWritesThePanelWhenTheEventsFileIsUnreadable(t *testing.T) {
 	}
 }
 
+// TestPanelWeeklyReportsARowItCannotRead keeps a bad landings row off the run's
+// critical path: the trend is empty and the report line names it, so the panel
+// publishes without a trend rather than not at all, the same as a failed events
+// read.
+func TestPanelWeeklyReportsARowItCannotRead(t *testing.T) {
+	t.Parallel()
+
+	var reported []string
+	got := panelWeekly([]Row{{"week": "2026-10-05", "rig": "gastown", "attempts": "not a number"}},
+		func(format string, args ...any) { reported = append(reported, fmt.Sprintf(format, args...)) })
+	if len(got) != 0 {
+		t.Errorf("panelWeekly = %+v, want no trend from a row it cannot read", got)
+	}
+	if len(reported) == 0 || !strings.Contains(reported[0], "weekly") {
+		t.Errorf("panelWeekly reported %v, want one line naming the weekly trend's failure", reported)
+	}
+}
+
+// TestAnalysePublishesThePanelWhenTheTrendCannotBeBuilt is the weekly twin of
+// the unreadable events file: a landings row the weekly builder cannot read
+// leaves weekly [] on the published panel, names the row on the report line, and
+// does not fail the run.
+func TestAnalysePublishesThePanelWhenTheTrendCannotBeBuilt(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	header, rows := analysisLandings()
+	rows[3]["attempts"] = "not a number"
+	var csv bytes.Buffer
+	if err := WriteLandings(&csv, header, rows); err != nil {
+		t.Fatal(err)
+	}
+	writeTownFile(t, filepath.Join(dayDir, landingsName), csv.String())
+	env, _ := analysisEnv(t, town, dayDir, nil)
+	opts := analysisOptions(town)
+	var reported []string
+	opts.Reportf = func(format string, args ...any) { reported = append(reported, fmt.Sprintf(format, args...)) }
+
+	res, err := RunAnalysis(context.Background(), env, opts)
+	if err != nil {
+		t.Fatalf("RunAnalysis: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(res.Dir, panelName))
+	if err != nil {
+		t.Fatalf("panel.json: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"weekly": []`)) {
+		t.Errorf("panel.json = %s, want it written with an empty weekly series", raw)
+	}
+	named := false
+	for _, line := range reported {
+		if strings.Contains(line, "landings row") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the run reported %v, want a line naming the landings row", reported)
+	}
+}
+
 // callWith is the first recorded call whose argv[0] is name.
 func callWith(calls []recordedCall, name string) *recordedCall {
 	for i, call := range calls {

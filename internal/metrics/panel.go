@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -58,8 +60,9 @@ type PanelEvent struct {
 
 // PanelMeta is the panel's context outside its targets: how many landings the
 // analysis read, how many hours of snapshots it joined, the weekly series and
-// the regime events. Weekly and Events read oldest first; BuildPanel keeps the
-// newest of each, so a caller may hand it all of history.
+// the regime events. Weekly reads oldest first and BuildPanel keeps the newest
+// of it. Events need no order from the caller: BuildPanel establishes the order
+// it writes, so a caller may hand it all of history in any order.
 type PanelMeta struct {
 	Items         int
 	SnapshotHours int
@@ -133,7 +136,7 @@ func BuildPanel(results []TargetResult, meta PanelMeta, now time.Time) Panel {
 		Items:         meta.Items,
 		SnapshotHours: meta.SnapshotHours,
 		Weekly:        newest(meta.Weekly, panelWeeklyMax),
-		Events:        newest(meta.Events, panelEventsMax),
+		Events:        newest(panelEventList(meta.Events), panelEventsMax),
 		Targets:       make([]PanelTarget, 0, len(results)),
 	}
 	for _, t := range results {
@@ -142,16 +145,37 @@ func BuildPanel(results []TargetResult, meta PanelMeta, now time.Time) Panel {
 	return p
 }
 
-// newest is the last max of items, a series read oldest first, and an empty
-// list for a nil one: the page draws these keys as lists, never as null.
-func newest[T any](items []T, max int) []T {
+// newest is the last keep items of a series read oldest first, and an empty list
+// for a nil one: the page draws these keys as lists, never as null.
+func newest[T any](items []T, keep int) []T {
 	if items == nil {
 		return []T{}
 	}
-	if len(items) > max {
-		return items[len(items)-max:]
+	if len(items) > keep {
+		return items[len(items)-keep:]
 	}
 	return items
+}
+
+// panelEventList is events as the panel may write them: each a calendar day in
+// the writer's format and a non-empty what, oldest first, so the newest cap
+// keeps the newest marks whatever order the caller handed them in. An event the
+// page could not place is left out rather than written as a mark the reader must
+// discard, and two events on one day keep the caller's order.
+func panelEventList(events []PanelEvent) []PanelEvent {
+	marks := make([]PanelEvent, 0, len(events))
+	for _, event := range events {
+		if _, err := time.Parse(regimeEventsDateLayout, event.Date); err != nil {
+			continue
+		}
+		what := strings.TrimSpace(event.What)
+		if what == "" {
+			continue
+		}
+		marks = append(marks, PanelEvent{Date: event.Date, What: what})
+	}
+	sort.SliceStable(marks, func(i, j int) bool { return marks[i].Date < marks[j].Date })
+	return marks
 }
 
 // panelTarget is one result as the panel writes it: the best box's holdout
