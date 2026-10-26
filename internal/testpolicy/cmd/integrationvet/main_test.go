@@ -214,6 +214,7 @@ func TestRunRejectsZeroJobs(t *testing.T) {
 // of passing (gt-w3aby).
 func TestRunVetsModulesAtOnce(t *testing.T) {
 	t.Parallel()
+	bound := awaitBound(t)
 	root := fixtureTree(t)
 	release := map[string]chan struct{}{
 		root:                          make(chan struct{}),
@@ -222,13 +223,13 @@ func TestRunVetsModulesAtOnce(t *testing.T) {
 	started := make(chan string)
 	finished := make(chan string)
 	run := func(_ context.Context, dir, _ string, _ ...string) (string, error) {
-		if err := sendWithin(started, dir); err != nil {
+		if err := sendWithin(bound, started, dir); err != nil {
 			return "", err
 		}
-		if err := awaitWithin(release[dir]); err != nil {
+		if err := awaitWithin(bound, release[dir]); err != nil {
 			return "", err
 		}
-		return "", sendWithin(finished, dir)
+		return "", sendWithin(bound, finished, dir)
 	}
 	spooled, _ := reportSpool(t)
 
@@ -236,16 +237,16 @@ func TestRunVetsModulesAtOnce(t *testing.T) {
 	code := make(chan int, 1)
 	go func() { code <- runWith(context.Background(), []string{"-root", root}, &out, run, spooled) }()
 
-	first, second := recvWithin(t, started), recvWithin(t, started)
+	first, second := recvWithin(t, bound, started), recvWithin(t, bound, started)
 	close(release[second])
-	if got := recvWithin(t, finished); got != second {
+	if got := recvWithin(t, bound, finished); got != second {
 		t.Fatalf("the first release finished %q, want %q", got, second)
 	}
 	close(release[first])
-	if got := recvWithin(t, finished); got != first {
+	if got := recvWithin(t, bound, finished); got != first {
 		t.Fatalf("the second release finished %q, want %q", got, first)
 	}
-	if got := recvWithin(t, code); got != 0 {
+	if got := recvWithin(t, bound, code); got != 0 {
 		t.Fatalf("run = %d, want 0; output:\n%s", got, out.String())
 	}
 }
@@ -305,10 +306,8 @@ func TestRunRemovesTheReportWhenSelectionFails(t *testing.T) {
 func TestCommandKillsTheVetProcessGroup(t *testing.T) {
 	t.Parallel()
 	var got *exec.Cmd
-	saved := cancelGroup
-	cancelGroup = func(cmd *exec.Cmd) error { got = cmd; return nil }
-	t.Cleanup(func() { cancelGroup = saved })
-	cmd := command(context.Background(), t.TempDir(), "go", "vet")
+	cancel := func(cmd *exec.Cmd) error { got = cmd; return nil }
+	cmd := command(context.Background(), t.TempDir(), cancel, "go", "vet")
 	if cmd.Cancel == nil {
 		t.Fatal("command has no Cancel hook, so cancellation would stop only go vet")
 	}
@@ -326,39 +325,51 @@ func TestCommandKillsTheVetProcessGroup(t *testing.T) {
 	}
 }
 
-// awaitTimeout bounds every wait in the concurrency test: a regression that serializes
-// the vets fails here with a message instead of hanging the suite.
-const awaitTimeout = 30 * time.Second
+// awaitBound bounds every wait in the concurrency test: a regression that serializes the
+// vets fails with a message instead of hanging the suite. The bound is the test's own
+// deadline when there is one, else awaitFallback from now.
+const awaitFallback = 30 * time.Second
 
-// recvWithin receives from ch or fails the test after awaitTimeout.
-func recvWithin[T any](t *testing.T, ch <-chan T) T {
+func awaitBound(t *testing.T) context.Context {
+	t.Helper()
+	deadline, ok := t.Deadline()
+	if !ok {
+		deadline = time.Now().Add(awaitFallback)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// recvWithin receives from ch or fails the test when ctx is done first.
+func recvWithin[T any](t *testing.T, ctx context.Context, ch <-chan T) T {
 	t.Helper()
 	select {
 	case v := <-ch:
 		return v
-	case <-time.After(awaitTimeout):
-		t.Fatalf("nothing arrived within %s: the vets did not run concurrently, or one hung", awaitTimeout)
+	case <-ctx.Done():
+		t.Fatalf("nothing arrived before the test's bound: the vets did not run concurrently, or one hung")
 		var zero T
 		return zero
 	}
 }
 
-// sendWithin sends v on ch, or returns an error after awaitTimeout.
-func sendWithin[T any](ch chan<- T, v T) error {
+// sendWithin sends v on ch, or returns an error when ctx is done first.
+func sendWithin[T any](ctx context.Context, ch chan<- T, v T) error {
 	select {
 	case ch <- v:
 		return nil
-	case <-time.After(awaitTimeout):
-		return fmt.Errorf("the test did not take %v within %s", v, awaitTimeout)
+	case <-ctx.Done():
+		return fmt.Errorf("the test did not take %v before its bound", v)
 	}
 }
 
-// awaitWithin waits for ch to close, or returns an error after awaitTimeout.
-func awaitWithin[T any](ch <-chan T) error {
+// awaitWithin waits for ch to close, or returns an error when ctx is done first.
+func awaitWithin[T any](ctx context.Context, ch <-chan T) error {
 	select {
 	case <-ch:
 		return nil
-	case <-time.After(awaitTimeout):
-		return fmt.Errorf("the test never released this vet within %s", awaitTimeout)
+	case <-ctx.Done():
+		return fmt.Errorf("the test never released this vet before its bound")
 	}
 }
