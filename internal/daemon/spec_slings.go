@@ -129,7 +129,9 @@ func specSlingBound() time.Duration { return specDispatchTimeout }
 // the start the stagger measures from (gt-vames).
 type specTickFlight struct {
 	specSlingFlight
-	Started time.Time `json:"started,omitempty"`
+	// omitzero: omitempty has no effect on a time.Time, so a flight with no
+	// start time would be written as 0001-01-01T00:00:00Z (gt-fzcge).
+	Started time.Time `json:"started,omitzero"`
 }
 
 // specTickArgs are the flags every tick runs with: the slings are handed back

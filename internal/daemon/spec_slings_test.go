@@ -230,6 +230,27 @@ func TestTheTickIsToldWhenEachRunningSlingStarted(t *testing.T) {
 	}
 }
 
+// A flight with no start time is still named, so it takes its seat, and it
+// leaves the started key out rather than stamping it 0001-01-01T00:00:00Z
+// (gt-fzcge).
+func TestAFlightWithNoStartLeavesStartedOut(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{}
+	d.specSlings.begin(specSlingFlight{Bead: "gt-a", Rig: "gastown", Agent: "claude-sonnet"})
+
+	args, err := d.specTickArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.Index(args, "--in-flight")
+	if i < 0 {
+		t.Fatalf("args = %v, want --in-flight naming gt-a", args)
+	}
+	if !strings.Contains(args[i+1], `"bead":"gt-a"`) || strings.Contains(args[i+1], `"started"`) {
+		t.Errorf("--in-flight = %s, want gt-a with no started key", args[i+1])
+	}
+}
+
 func TestAFailedBackgroundSlingIsLoggedLikeAForegroundFailure(t *testing.T) {
 	t.Parallel()
 	fake := newFakeCLI(func(args []string) cliReply {
