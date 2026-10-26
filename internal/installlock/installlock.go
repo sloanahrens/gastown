@@ -17,6 +17,9 @@
 // process's. The status Run itself returns that the caller treats specially is
 // ExitLockBusy, and only when the wait ran out. Which statuses the install can
 // exit with is stated in the header of scripts/install-gt.sh.
+//
+// Acquire takes the same lock for a caller that keeps running: the Go installer
+// holds it from the binary swap to the end of the run (gt-tpg0p.13).
 package installlock
 
 import (
@@ -36,8 +39,39 @@ import (
 // wait. scripts/install-gt.sh maps it to its busy exit 3.
 const ExitLockBusy = 75
 
-// retryInterval is how often a waiting Run retries the lock.
+// ErrBusy reports that the lock did not free within the wait.
+var ErrBusy = errors.New("install lock stayed locked")
+
+// retryInterval is how often a waiting acquisition retries the lock.
 const retryInterval = 500 * time.Millisecond
+
+// Acquire takes the exclusive lock on path, waiting up to wait, and returns the
+// function that releases it. It returns ErrBusy when the wait ran out, and
+// another error when the lock file cannot be opened or locked. The lock is held
+// until the release runs or the process exits, so a caller that keeps running
+// holds it across the work it guards rather than for the process's whole life.
+func Acquire(path string, wait time.Duration) (release func(), err error) {
+	return acquire(path, wait, time.Now, time.Sleep)
+}
+
+// acquire is Acquire with the wait's clock and sleep injected, so a unit test
+// runs out a wait without spending it.
+func acquire(path string, wait time.Duration, now func() time.Time, sleep func(time.Duration)) (func(), error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	locked, err := lockUntil(f, now, sleep, wait)
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("lock %s: %w", path, err)
+	}
+	if !locked {
+		_ = f.Close()
+		return nil, ErrBusy
+	}
+	return func() { _ = f.Close() }, nil
+}
 
 // Config is one acquisition of the install lock and the command that replaces
 // the process once it is held.
@@ -103,7 +137,7 @@ func (r runner) run(cfg Config) int {
 	// Reached on every return below; a successful exec never returns.
 	defer f.Close()
 
-	locked, err := r.lock(f, cfg.Wait)
+	locked, err := lockUntil(f, r.now, r.sleep, cfg.Wait)
 	if err != nil {
 		fmt.Fprintf(cfg.Stderr, "install-gt: cannot lock %s: %v\n", cfg.LockPath, err)
 		return 1
@@ -139,10 +173,11 @@ func (r runner) run(cfg Config) int {
 	return 1
 }
 
-// lock tries for the exclusive flock on f until wait runs out. It reports
-// (false, nil) when the wait ran out first.
-func (r runner) lock(f *os.File, wait time.Duration) (bool, error) {
-	deadline := r.now().Add(wait)
+// lockUntil tries for the exclusive flock on f until wait runs out, sleeping
+// between tries on the injected clock. It reports (false, nil) when the wait ran
+// out first.
+func lockUntil(f *os.File, now func() time.Time, sleep func(time.Duration), wait time.Duration) (bool, error) {
+	deadline := now().Add(wait)
 	for {
 		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
@@ -151,14 +186,14 @@ func (r runner) lock(f *os.File, wait time.Duration) (bool, error) {
 		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
 			return false, err
 		}
-		if !r.now().Before(deadline) {
+		if !now().Before(deadline) {
 			return false, nil
 		}
 		pause := retryInterval
-		if remaining := deadline.Sub(r.now()); remaining < pause {
+		if remaining := deadline.Sub(now()); remaining < pause {
 			pause = remaining
 		}
-		r.sleep(pause)
+		sleep(pause)
 	}
 }
 
