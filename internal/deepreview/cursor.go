@@ -32,9 +32,22 @@ type Timestamp struct {
 	Text string
 }
 
+// ledgerTimestamp is the shape the shell's ts rule parses: whole seconds, an
+// optional fraction after a dot, and Z or ±HH:MM.
+//
+// Go's RFC3339 parser also takes a comma for a fraction's point. The ledger
+// never writes one, and the shell reads such a line as an unreadable cursor or
+// a record it cannot trust, so the shape is checked here before the instant is
+// parsed. A cursor the plan echoed from a comma spelling would stop every later
+// run.
+var ledgerTimestamp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$`)
+
 // ParseTimestamp parses an RFC3339 timestamp as the landing record writes one:
 // with an optional fraction and a Z or ±HH:MM offset.
 func ParseTimestamp(s string) (Timestamp, error) {
+	if !ledgerTimestamp.MatchString(s) {
+		return Timestamp{}, fmt.Errorf("not an RFC3339 timestamp: %q", s)
+	}
 	at, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
 		return Timestamp{}, fmt.Errorf("not an RFC3339 timestamp: %q", s)
