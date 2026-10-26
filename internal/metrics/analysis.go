@@ -92,6 +92,9 @@ type AnalysisOptions struct {
 	Every time.Duration
 	// MaxAge is the oldest snapshot the join accepts; zero is JoinMaxAge.
 	MaxAge time.Duration
+	// Reportf takes the notes a run does not fail on: a file it skipped and the
+	// events its panel could not mark. Nil writes them to the process log.
+	Reportf func(format string, args ...any)
 }
 
 // withDefaults fills the zero fields with the daily run's values.
@@ -107,6 +110,9 @@ func (o AnalysisOptions) withDefaults() AnalysisOptions {
 	}
 	if o.MaxAge == 0 {
 		o.MaxAge = JoinMaxAge
+	}
+	if o.Reportf == nil {
+		o.Reportf = log.Printf
 	}
 	return o
 }
@@ -190,18 +196,27 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	if err != nil {
 		return res, err
 	}
-	peaks, peaksSkipped, err := readPeaks(env, log.Printf)
+	peaks, peaksSkipped, err := readPeaks(env, o.Reportf)
 	if err != nil {
 		return res, err
 	}
 
 	joinHeader, joined, cov := Join(columns, rows, snaps, o.MaxAge)
 	joinHeader, joined = JoinPeaks(joinHeader, joined, peaks)
+	weekly, err := panelWeekly(joined)
+	if err != nil {
+		return res, err
+	}
 	targets, err := analyseTargets(ctx, env, o, joinHeader, joined, explainOnly)
 	if err != nil {
 		return res, err
 	}
-	panel := BuildPanel(targets, PanelMeta{Items: len(joined), SnapshotHours: snapshotHours(snaps)}, now)
+	panel := BuildPanel(targets, PanelMeta{
+		Items:         len(joined),
+		SnapshotHours: snapshotHours(snaps),
+		Weekly:        weekly,
+		Events:        panelEvents(env, o.Reportf),
+	}, now)
 	panelJSON, err := json.MarshalIndent(panel, "", "  ")
 	if err != nil {
 		return res, fmt.Errorf("panel: %w", err)
@@ -357,6 +372,40 @@ func snapshotHours(snaps []Record) int {
 	return int(last.Sub(first).Round(time.Hour) / time.Hour)
 }
 
+// panelWeekly is the panel's trend: the town's own weeks, the thin ones and the
+// ones no rejected share could be read from left out. The weekly builder sorts
+// its rows oldest first, so BuildPanel keeps the newest of them.
+func panelWeekly(landings []Row) ([]PanelWeek, error) {
+	rows, err := BuildWeekly(landings, nil, nil, nil, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("weekly: %w", err)
+	}
+	series := make([]PanelWeek, 0, len(rows))
+	for _, row := range rows {
+		if row.Rig != "ALL" || row.Thin || row.RejectedShare == nil {
+			continue
+		}
+		series = append(series, PanelWeek{Week: row.Week, Landings: row.Landings, RejectedShare: *row.RejectedShare})
+	}
+	return series, nil
+}
+
+// panelEvents is the regime events the panel marks, oldest first. A file the
+// reader cannot use costs the panel its marks rather than the run, so it goes
+// on the analysis's own report line and the list stays empty.
+func panelEvents(env Env, reportf func(format string, args ...any)) []PanelEvent {
+	events, err := ReadRegimeEvents(env)
+	if err != nil {
+		reportf("metrics: %v; the panel carries no events", err)
+		return nil
+	}
+	marked := make([]PanelEvent, 0, len(events))
+	for _, event := range events {
+		marked = append(marked, PanelEvent{Date: event.Date, What: event.What})
+	}
+	return marked
+}
+
 // ensureMango rebuilds the mango binary when origin/main moved since the build
 // that made it, and records the new head in <MangoBin>.sha only after the build
 // succeeds, so a failed build leaves the old head to be retried.
@@ -486,6 +535,7 @@ func skipTarget(target string, p Prepared) TargetResult {
 		TrainPositives:   p.TrainPositives,
 		HoldoutN:         len(p.Holdout),
 		HoldoutPositives: p.HoldoutPositives,
+		LastPositiveAt:   p.LastPositiveAt,
 	}
 }
 

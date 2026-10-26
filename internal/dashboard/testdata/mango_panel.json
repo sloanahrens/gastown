@@ -3,6 +3,24 @@
   "generated_at": "2026-10-24T12:00:00Z",
   "items": 412,
   "snapshot_hours": 168,
+  "weekly": [
+    {
+      "week": "2026-10-05",
+      "landings": 27,
+      "rejected_share": 0.25
+    },
+    {
+      "week": "2026-10-12",
+      "landings": 34,
+      "rejected_share": 0.125
+    }
+  ],
+  "events": [
+    {
+      "date": "2026-10-10",
+      "what": "flash seats replaced by Sonnet seats"
+    }
+  ],
   "targets": [
     {
       "target": "rejected_before_landing",
@@ -29,7 +47,8 @@
       "ci_high": 0.5576680331222217,
       "thin": false,
       "baseline": 0.25,
-      "verdict": "earning"
+      "verdict": "earning",
+      "last_positive": "2026-10-20"
     },
     {
       "target": "manual_rescue",
@@ -56,7 +75,8 @@
       "ci_high": 0.21756624164970087,
       "thin": true,
       "baseline": 0.09,
-      "verdict": "no-signal"
+      "verdict": "no-signal",
+      "last_positive": "2026-10-21"
     },
     {
       "target": "reached_overrun_stop",

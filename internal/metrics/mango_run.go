@@ -302,6 +302,9 @@ type TargetResult struct {
 	// Conditions is the best box split into its single conditions, each with
 	// its share of every prepared row; nil when mango found no boxes.
 	Conditions []MangoCondition
+	// LastPositiveAt is the split's latest landed_at among the positives, empty
+	// when it holds none; the panel reports its day.
+	LastPositiveAt string
 }
 
 // measureTarget pairs a prepared split with the boxes mango found on its
@@ -317,6 +320,7 @@ func measureTarget(target string, p Prepared, boxes []Box, minSupport int) Targe
 		HoldoutPositives: p.HoldoutPositives,
 		Boxes:            len(boxes),
 		Best:             BestBox(checks),
+		LastPositiveAt:   p.LastPositiveAt,
 	}
 	for _, c := range checks {
 		if c.Replicates {

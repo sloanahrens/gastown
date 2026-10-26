@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,7 +20,9 @@ var panelGoldenNow = time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
 // too few training positives. Each box's K and N are what its rate is, and K
 // stays within the target's own holdout positives. Each boxed target carries
 // its best box's conditions in the box's own order; the skipped target has
-// none, because it was never run.
+// none, because it was never run. The two run targets record the day their last
+// positive landed, and the skipped one records none, so the golden carries the
+// key both present and absent.
 func panelGoldenResults() []TargetResult {
 	return []TargetResult{
 		{
@@ -29,6 +33,7 @@ func panelGoldenResults() []TargetResult {
 				{Text: "model in {opus}", Share: 0.58, Narrows: true},
 				{Text: "attempts in [3, 4]", Share: 0.41, Narrows: true},
 			},
+			LastPositiveAt: "2026-10-20T13:05:00Z",
 		},
 		{
 			Target: "manual_rescue", TrainN: 412, TrainPositives: 37,
@@ -38,10 +43,27 @@ func panelGoldenResults() []TargetResult {
 				{Text: "attempts in [3, 4]", Share: 0.35, Narrows: true},
 				{Text: "files_touched in {none}", Share: 0.94},
 			},
+			LastPositiveAt: "2026-10-21T09:30:00Z",
 		},
 		{
 			Target: "reached_overrun_stop", TrainN: 412, TrainPositives: 12,
 			HoldoutN: 100, HoldoutPositives: 3,
+		},
+	}
+}
+
+// panelGoldenMeta is the context the golden panel records: the coverage and the
+// trend the analysis read beside the targets.
+func panelGoldenMeta() PanelMeta {
+	return PanelMeta{
+		Items:         412,
+		SnapshotHours: 168,
+		Weekly: []PanelWeek{
+			{Week: "2026-10-05", Landings: 27, RejectedShare: 0.25},
+			{Week: "2026-10-12", Landings: 34, RejectedShare: 0.125},
+		},
+		Events: []PanelEvent{
+			{Date: "2026-10-10", What: "flash seats replaced by Sonnet seats"},
 		},
 	}
 }
@@ -85,7 +107,7 @@ func TestBuildPanelMatchesTheDashboardGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := json.MarshalIndent(BuildPanel(panelGoldenResults(), PanelMeta{Items: 412, SnapshotHours: 168}, panelGoldenNow), "", "  ")
+	got, err := json.MarshalIndent(BuildPanel(panelGoldenResults(), panelGoldenMeta(), panelGoldenNow), "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +217,84 @@ func TestPanelTargetReason(t *testing.T) {
 				t.Errorf("reason for %+v = %q, want %q", tc.target, got.Reason, tc.want)
 			}
 		})
+	}
+}
+
+// TestPanelTargetLastPositive writes the day the target's latest positive
+// landed, in the timestamp's own date, and writes no key for a split that held
+// no positive.
+func TestPanelTargetLastPositive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		at   string
+		want string
+	}{
+		{"a UTC timestamp writes its day", "2026-10-20T13:05:00Z", "2026-10-20"},
+		{"a timestamp's own offset decides the day", "2026-10-20T23:30:00+09:00", "2026-10-20"},
+		{"no positive writes no key", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := panelTarget(TargetResult{
+				Target: "rejected_before_landing", TrainPositives: 40, HoldoutN: 100,
+				HoldoutPositives: 10, LastPositiveAt: tc.at,
+			})
+			if got.LastPositive != tc.want {
+				t.Errorf("last positive of %q = %q, want %q", tc.at, got.LastPositive, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildPanelCapsTheSeriesAtTheNewest keeps the newest of a trend longer
+// than the panel's cap: the oldest weeks and events fall off the front.
+func TestBuildPanelCapsTheSeriesAtTheNewest(t *testing.T) {
+	t.Parallel()
+
+	weekly := make([]PanelWeek, panelWeeklyMax+1)
+	for i := range weekly {
+		weekly[i] = PanelWeek{
+			Week:          fmt.Sprintf("2026-%02d-%02d", 1+i/4, 1+i%4*7),
+			Landings:      i,
+			RejectedShare: float64(i) / 100,
+		}
+	}
+	events := make([]PanelEvent, panelEventsMax+1)
+	for i := range events {
+		events[i] = PanelEvent{Date: fmt.Sprintf("2026-10-%02d", i+1), What: fmt.Sprintf("change %d", i)}
+	}
+
+	p := BuildPanel(nil, PanelMeta{Weekly: weekly, Events: events}, panelGoldenNow)
+	if len(p.Weekly) != panelWeeklyMax {
+		t.Fatalf("%d weekly rows, want %d", len(p.Weekly), panelWeeklyMax)
+	}
+	if first, last := p.Weekly[0], p.Weekly[len(p.Weekly)-1]; first.Week != weekly[1].Week || last.Week != weekly[len(weekly)-1].Week {
+		t.Errorf("weekly keeps %s..%s, want %s..%s", first.Week, last.Week, weekly[1].Week, weekly[len(weekly)-1].Week)
+	}
+	if len(p.Events) != panelEventsMax {
+		t.Fatalf("%d events, want %d", len(p.Events), panelEventsMax)
+	}
+	if first, last := p.Events[0], p.Events[len(p.Events)-1]; first.Date != events[1].Date || last.Date != events[len(events)-1].Date {
+		t.Errorf("events keep %s..%s, want %s..%s", first.Date, last.Date, events[1].Date, events[len(events)-1].Date)
+	}
+}
+
+// TestBuildPanelWritesTheSeriesAsLists writes an empty weekly series and an
+// empty event list as [], so the page draws a list rather than a null.
+func TestBuildPanelWritesTheSeriesAsLists(t *testing.T) {
+	t.Parallel()
+
+	got, err := json.Marshal(BuildPanel(nil, PanelMeta{}, panelGoldenNow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"weekly":[]`, `"events":[]`} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Errorf("a panel with no series writes %s, want it to contain %s", got, want)
+		}
 	}
 }
 
