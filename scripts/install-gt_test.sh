@@ -27,7 +27,9 @@ case "$1 ${2:-}" in
   "version "*)
     if [ -n "$C" ]; then echo "gt version $C (dev: main@$C)"; else echo "gt version dev"; fi ;;
   "formula sync"|"plugin sync") echo "synced $1"; echo "sync $1" >> "$T_WORLD/gt.log" ;;
-  "escalate "*) echo "escalate $*" >> "$T_WORLD/gt.log" ;;
+  "escalate "*)
+    echo "escalate $*" >> "$T_WORLD/gt.log"
+    if [ -e "$T_WORLD/escalate-fail" ]; then echo "escalate refused" >&2; exit 1; fi ;;
   "slot run")
     echo "slot run $*" >> "$T_WORLD/gt.log"
     shift 2
@@ -1062,6 +1064,7 @@ image_stub() {
   cat > "$t/plugin/run.sh" <<STUB
 #!/usr/bin/env bash
 printf '%s | %s\n' "\$("\$POLECAT_IMAGE_GT" version | head -1)" "\$("$t/bin/gt" version | head -1)" >> "$t/image-calls.log"
+echo "\$\$" > "$t/image-run.pid"
 echo "run.sh" >> "\$T_WORLD/make.log"
 sleep \${IMAGE_STUB_SLEEP:-0}
 if [ -n "\${IMAGE_STUB_REASON:-}" ]; then echo "ERROR: \$IMAGE_STUB_REASON" >&2; exit 1; fi
@@ -1071,9 +1074,12 @@ STUB
   chmod +x "$t/plugin/run.sh"
 }
 wait_for() { local i; for i in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
-wait_for_alarm() { local i; for i in $(seq 1 100); do grep -q 'alarm after' "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
 # wait_for_text FILE TEXT: wait until FILE holds TEXT, checked every 0.1 s for 5 s.
 wait_for_text() { local i; for i in $(seq 1 50); do grep -q -- "$2" "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+wait_for_alarm() { wait_for_text "$1" 'alarm after'; }
+# wait_for_state PID STATE: wait until proc_state reads STATE for PID, with no
+# /proc stat line (so the ps branch answers), checked every 0.1 s for 5 s.
+wait_for_state() { local i; for i in $(seq 1 50); do [ "$(PROC_ROOT="$T/no-proc" proc_state "$1")" = "$2" ] && return 0; sleep 0.1; done; return 1; }
 # group_signal_ok: this host lets one process signal another's process group,
 # which is what the alarm's kill(-pgid) needs to stop a build. A
 # seccomp-filtered sandbox refuses it with EPERM, and the two alarm cases below
@@ -1337,9 +1343,9 @@ STUB
   rc=$( export INSTALL_GT_IMAGE_ALARM=1
         IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
   wait_for_alarm "$T/image.log" || true
-  # Passing here would claim a stop nobody saw: the bound is observed, the
-  # kill is not, so the case fails by name until a host that can signal runs it.
-  fail "image: alarm bound: this host refuses process-group signals (EPERM), so the alarm's stop of the build cannot be verified; rc=$rc reported=$(reported "$T") want=$(cat "$T/c1") make=[$(sed 's/ .*//' "$T/make.log" | tr '\n' ' ')] out=$(tail -2 "$T/image.log" 2>/dev/null)"
+  # Passing here would claim a stop nobody saw, so this host fails the case by
+  # name until one that can signal a process group runs it.
+  fail "image: alarm bound: this host refuses process-group signals (EPERM), so the alarm's stop of the build cannot be verified (rc=$rc, log: $(tail -1 "$T/image.log" 2>/dev/null))"
 fi
 
 # --- Case 46: an INSTALL_GT_IMAGE_ALARM that is not a whole number above zero
@@ -1407,7 +1413,7 @@ echo "4242 (sh) S 1 4242 4242 0 -1 4194304" > "$T/fakeproc/4242/stat"
 sleep 60 &
 stopped=$!
 kill -STOP "$stopped"
-for _ in $(seq 1 50); do [ "$(PROC_ROOT="$T/no-proc" proc_state "$stopped")" = T ] && break; sleep 0.1; done
+wait_for_state "$stopped" T || true
 got=$(PROC_ROOT="$T/no-proc" proc_state "$stopped")
 kill -CONT "$stopped" 2>/dev/null || true
 kill "$stopped" 2>/dev/null || true
@@ -1438,9 +1444,11 @@ wait_for "$T/image-calls.log" || true
   && pass "no-image-first: the binary is swapped and marked without waiting; the build starts detached" \
   || fail "no-image-first: rc=$rc elapsed=${elapsed}s reported=$(reported "$T") want=$(cat "$T/c2") marker=$([ -e "$T/daemon/restart-pending.json" ] && echo yes || echo no) calls=$(cat "$T/image-calls.log" 2>/dev/null) out=$(tail -4 "$T/run.out")"
 rc2=$( LOCK_WAIT=1 run_install "$T" --sha "$(cat "$T/c2")" )
-[ "$rc2" != "3" ] \
+[ "$rc2" = "0" ] \
   && pass "no-image-first: the detached build does not hold the install lock" \
   || fail "no-image-first: a second install was refused the lock (rc=$rc2) while the image build ran"
+# End the detached build: it would otherwise outlive the case by its sleep.
+kill "$(cat "$T/image-run.pid" 2>/dev/null)" 2>/dev/null || true
 
 # --- Case 51: under --no-image-first a build that fails after the swap is not
 # the install's failure: the new binary and its restart marker stand, the
@@ -1459,6 +1467,31 @@ wait_for_text "$T/gt.log" "--fingerprint install-gt:image-build-failed" || true
   && grep -q "escalate .*did not finish.*--fingerprint install-gt:image-build-failed" "$T/gt.log" \
   && pass "no-image-first: a failed background build leaves the install standing and escalates" \
   || fail "no-image-first failing build: rc=$rc reported=$(reported "$T") want=$(cat "$T/c2") receipt=$(last_receipt "$T" event) log=$(tail -2 "$T/image.log" 2>/dev/null)"
+
+# --- Case 51b: when the escalation of a failed detached build is itself refused,
+# it is tried twice and the build log says it did not reach the town: the log is
+# the last record a detached build has (gt-vhn89). ---
+T=$(make_world); image_stub "$T"
+install_stub "$T" "$(cat "$T/c1")"
+: > "$T/escalate-fail"
+rc=$( IMAGE_STUB_REASON="docker is down" IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --no-image-first )
+wait_for_text "$T/image.log" "did not reach the town" || true
+tries=$(grep -c "escalate .*did not finish.*--fingerprint install-gt:image-build-failed" "$T/gt.log" 2>/dev/null || true)
+[ "$rc" = "0" ] && [ "$tries" = "2" ] \
+  && grep -q "polecat image: the escalation for this build did not reach the town" "$T/image.log" \
+  && pass "no-image-first: a refused escalation is tried twice and named in the build log" \
+  || fail "no-image-first refused escalation: rc=$rc tries=$tries log=$(tail -2 "$T/image.log" 2>/dev/null)"
+
+# --- Case 51c: a detached build that finishes clears the escalation an earlier
+# failed one raised, so it does not outlive the problem. ---
+T=$(make_world); image_stub "$T"
+install_stub "$T" "$(cat "$T/c1")"
+rc=$( IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --no-image-first )
+wait_for_text "$T/gt.log" "escalate clear --fingerprint install-gt:image-build-failed" || true
+[ "$rc" = "0" ] && grep -q "escalate clear --fingerprint install-gt:image-build-failed" "$T/gt.log" \
+  && ! grep -q "escalate .*did not finish" "$T/gt.log" \
+  && pass "no-image-first: a detached build that finishes clears its escalation" \
+  || fail "no-image-first clear: rc=$rc gt.log=$(tail -3 "$T/gt.log" 2>/dev/null)"
 
 # --- Case 52: with --no-image-first a missing plugin is named, and the install
 # still succeeds: the old order never failed an install for the image's sake. ---

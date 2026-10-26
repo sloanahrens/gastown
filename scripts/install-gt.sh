@@ -223,14 +223,17 @@ image_daemon_env() {
 }
 
 # image_build SECS LOCK BINARY RUN [FINGERPRINT] — run.sh under the alarm
-# supervisor. With a FINGERPRINT, a build that does not finish escalates it
-# (gt-vhn89): a detached build has no caller left to report it, so the
-# supervisor does. Call it in a subshell: it exports the registry and crane it
-# was given and points run.sh at this install's town root, the binary whose
-# commit the image is built at, and its lock (POLECAT_IMAGE_TOWN_ROOT,
-# POLECAT_IMAGE_GT, POLECAT_IMAGE_LOCK; case 43 pins them), not whatever HOME
-# and PATH resolve to, so the image is built for the install that asked for it.
+# supervisor. Call it in a subshell.
 #
+# With a FINGERPRINT the supervisor reports a detached build, which has no
+# caller left to do it (gt-vhn89): a build that does not finish escalates under
+# the fingerprint (tried twice), and one that finishes clears it.
+#
+# It exports the registry and crane it was given and points run.sh at this
+# install's town root, the binary whose commit the image is built at, and its
+# lock (POLECAT_IMAGE_TOWN_ROOT, POLECAT_IMAGE_GT, POLECAT_IMAGE_LOCK; case 43
+# pins them). HOME and PATH are not used, so the image is built for the install
+# that asked for it.
 # The perl that stays up is the supervisor: run.sh runs in its own process
 # group, so on the alarm the whole build (run.sh and the docker it started)
 # is stopped, and only then is the lock run.sh took removed. Removing it while
@@ -250,11 +253,14 @@ image_build() {
       # still running when it ends, and it has closed the install lock fd.
       sub finish {
         my $code = shift;
-        if ($code && length $fp && length $gt) {
-          # The result of the escalation itself goes to the build log, the one
-          # place a detached build result is still read from.
-          my $esc = system($gt, "escalate", "install-gt: the detached image build did not finish (exit $code); the binary stands, and stale-image slings are refused until it is rebuilt", "-s", "medium", "--source", "script:install-gt", "--fingerprint", $fp);
-          print STDERR "polecat image: the escalation for this failed build did not reach the town (exit ", $esc >> 8, ")\n" if $esc != 0;
+        if (length $fp && length $gt) {
+          my @esc = $code
+            ? ($gt, "escalate", "install-gt: the detached image build did not finish (exit $code); the binary stands, and stale-image slings are refused until it is rebuilt", "-s", "medium", "--source", "script:install-gt", "--fingerprint", $fp)
+            : ($gt, "escalate", "clear", "--fingerprint", $fp, "--reason", "install-gt: a detached image build finished");
+          # A second try, then the build log: the one place a detached build
+          # result is still read from.
+          my $rc = system(@esc) && system(@esc);
+          print STDERR "polecat image: the escalation for this build did not reach the town (exit ", $rc >> 8, ")\n" if $rc != 0;
         }
         exit $code;
       }
@@ -682,7 +688,9 @@ fi
 # $GT with it yet. build-failed is one reason for both builds: rebuild-gt
 # already escalates it, and a new install-gt reason would reach it as a second
 # alert (rebuild_gt.go). --no-image-first skips this wait and builds the image
-# after the restart marker instead (gt-vhn89).
+# after the restart marker instead (gt-vhn89). That detached build does have
+# a reason of its own, install-gt:image-build-failed: the install stands, so
+# rebuild-gt has no failure to report, and only the supervisor sees this one.
 if [ "$IMAGE_FIRST" = "1" ] && ! polecat_image_step "$IMAGE_RUN" "$IMAGE_LOG" "$IMAGE_BIN" "$EXPECTED"; then
   fail_install build-failed "the sandbox image for $EXPECTED was not built and published; $GT was left at ${PREV:-the previous build} and the daemon was not told to restart" \
     medium install-gt:build-failed failed

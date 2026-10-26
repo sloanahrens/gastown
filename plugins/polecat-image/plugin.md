@@ -29,6 +29,11 @@ hand.
 about 48 times a day; a build is two cross-compiles and a `docker build`, about
 a minute.
 
+`make install` (`scripts/install-gt.sh`) runs this plugin itself: by default it
+builds the image before it swaps the binary and fails the install if the build
+does not finish, and `--no-image-first` swaps first and builds the image
+detached, escalating a failure under `install-gt:image-build-failed`.
+
 ## What it does
 
 1. Reads the installed gt's commit (`gt version`) and the commit label of
