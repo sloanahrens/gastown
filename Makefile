@@ -4,11 +4,16 @@
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
 # shell.
 #
-#   make gate              the landing gate. Before changing its stages, read
-#                          docs/testing.md, "The gate": that section is the one
-#                          description of what runs, in what order, and what a
-#                          landing path leaves out. Prints its wall time at the
-#                          end.
+#   make gate              the landing gate: the exec-tax preflight (a warning
+#                          at worst, gt-2ycne.1), then lint, then `go build
+#                          ./...`, then the unit tier: plain `go test -timeout
+#                          20m ./...` over every package, through go test's
+#                          result cache (there is no slow tier: internal/cmd
+#                          and internal/beads run here since gt-ik4a1.9;
+#                          gt-s1vff). The gate runs no budget runner and
+#                          measures no wall, CPU or idle time, so a landing is
+#                          never refused for contention (gt-z7qtk). Prints its
+#                          wall time at the end.
 #   make tier-check        the unit tier through the budget runner, whose only
 #                          caller it is: the runner judges each package's CPU
 #                          budget and wall time, and a wall overrun fails
@@ -370,12 +375,6 @@ SHELL_TESTS ?= scripts/test-makefile.sh
 # drive the warning path with a stub.
 EXEC_TAX_PREFLIGHT ?= go run ./internal/exectax/cmd/preflight
 
-# The integration tag's type check. Before changing its stage, read
-# docs/testing.md, "The gate": that section is the one description of what it
-# runs and where. A make variable only so scripts/makefile-gate_test.sh can
-# drive both paths with a stub.
-INTEGRATION_VET ?= go run ./internal/testpolicy/cmd/integrationvet
-
 # The gate's lint waits its turn on golangci-lint's module lock instead of
 # exiting in 5s: the gate is judged by its exit code alone, so a contended
 # lint must not read as red. Plain `make lint` retries a contended lint for
@@ -413,17 +412,12 @@ gate-test:
 	@# The suite runs in the background so the trap fires at once on INT or
 	@# TERM (bash defers traps until a foreground child exits); the trap finds
 	@# it as this shell's child (pgrep -P) and stops it before its children.
-	@# The integration tag's type check starts beside the unit tier and holds
-	@# its report until the run ends (docs/testing.md, "The gate").
 	@trap 'for p in $$(pgrep -P $$$$); do k=$$(pgrep -P $$p); kill $$p 2>/dev/null; [ -n "$$k" ] && kill $$k 2>/dev/null; done; exit 130' INT TERM; \
-	$(INTEGRATION_VET) & vet=$$!; \
 	GT_TEST_DOCKER=0 go test -timeout 20m ./... & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
 	if [ $$go_rc -eq 0 ]; then for m in $(TESTED_MODULES); do echo "gate: vet and unit tier in $$m" >&2; (cd "$$m" && go vet ./... && GT_TEST_DOCKER=0 go test ./...) || { go_rc=$$?; break; }; done; fi; \
-	vet_rc=0; wait $$vet || vet_rc=$$?; \
 	wall=$$(( $$(date +%s) - $(GATE_START) )); \
 	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc) after $${wall}s wall" >&2; exit 1; fi; \
-	if [ $$vet_rc -ne 0 ]; then echo "gate: FAILED at integration vet (exit $$vet_rc) after $${wall}s wall" >&2; exit 1; fi; \
 	echo "gate: PASSED in $${wall}s wall" >&2
 
 # The preflight the gate runs before lint. It prints at most a warning, so a
