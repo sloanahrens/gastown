@@ -31,10 +31,31 @@ type HeldBead struct {
 // (maxNamedChildren's rule, gt-z80p9).
 const maxNamedHeldSignals = 3
 
-// HeldOverlap reports why a candidate is the same defect a working seat is
-// already on: a bead in held names a path or a test the candidate's own text
-// names too, and the reason names that bead, the seat holding it, and what the
-// two share (gt-z80p9, gt-xrog0, gt-mqa3r).
+// heldBypassPriority is the priority below which a candidate skips the
+// content-overlap hold: P0 and P1 wait behind no seat's rework, because a merge
+// conflict at rebase costs less than that delay (gt-iydx1). P2 and lower keep
+// the hold.
+const heldBypassPriority = 2
+
+// HeldMatch is the overlap rule's answer for one candidate: the hold it takes,
+// or the hold its priority skips.
+type HeldMatch struct {
+	// Reason is why the candidate is held: the held bead, the seat holding it,
+	// and what the two share. Empty when nothing overlaps, and when the
+	// candidate's priority bypasses the hold.
+	Reason string
+	// Bypassed is set when the candidate is urgent enough to skip a hold it
+	// would otherwise take; the tick logs Holder instead of skipping the bead.
+	Bypassed bool
+	// Holder names the held bead and the seat holding it, as "<bead> held by
+	// <seat>". Empty when nothing overlaps.
+	Holder string
+}
+
+// HeldOverlap reports why a candidate of the given priority is the same defect
+// a working seat is already on: a bead in held names a path or a test the
+// candidate's own text names too, and the reason names that bead, the seat
+// holding it, and what the two share (gt-z80p9, gt-xrog0, gt-mqa3r).
 //
 // Paths and tests decide it, and only against work a seat already has in hand.
 // Two beads describing one defect from different vantage points share no
@@ -47,9 +68,12 @@ const maxNamedHeldSignals = 3
 // (gt-mqa3r). Naming the lowest overlapping id keeps the line a candidate held
 // twice reports identical. An entry with no assignee never holds: the hold
 // fails open rather than blocking a candidate on a bead no seat is working.
-func HeldOverlap(paths, tests []string, held []HeldBead) string {
+//
+// A candidate below heldBypassPriority takes no hold: the match comes back
+// with Bypassed set and the holder named, for the tick to log (gt-iydx1).
+func HeldOverlap(paths, tests []string, priority int, held []HeldBead) HeldMatch {
 	if len(paths) == 0 && len(tests) == 0 || len(held) == 0 {
-		return ""
+		return HeldMatch{}
 	}
 	mine := make(map[string]bool, len(paths))
 	for _, p := range paths {
@@ -77,14 +101,18 @@ func HeldOverlap(paths, tests []string, held []HeldBead) string {
 		match, assignee, sharedPaths, sharedTests = h.ID, h.Assignee, bothPaths, bothTests
 	}
 	if match == "" {
-		return ""
+		return HeldMatch{}
+	}
+	holder := fmt.Sprintf("%s held by %s", match, assignee)
+	if priority < heldBypassPriority {
+		return HeldMatch{Bypassed: true, Holder: holder}
 	}
 	work, more := heldWork(sharedPaths, sharedTests)
 	reason := fmt.Sprintf("%s (held by %s) is already hooked to a working seat and %s", match, assignee, work)
 	if more > 0 {
 		reason += fmt.Sprintf(" (+%d more)", more)
 	}
-	return reason + "; the hold lifts when that bead closes"
+	return HeldMatch{Reason: reason + "; the hold lifts when that bead closes", Holder: holder}
 }
 
 // sharedTestNames returns the candidate's test identifiers that name the same

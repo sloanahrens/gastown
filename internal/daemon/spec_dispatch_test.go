@@ -85,6 +85,27 @@ func TestFormatSpecDispatchReport(t *testing.T) {
 	}
 }
 
+// An urgent bead dispatched through an overlap logs its bypass on its own line
+// and the tick line counts it, so the dashboard shows the hold the priority
+// answered (gt-iydx1).
+func TestFormatSpecDispatchReportLogsOverlapBypass(t *testing.T) {
+	t.Parallel()
+	out := wireOut(`{"candidates": 1,
+		"dispatched": [{"bead": "gt-u", "line": "gt-u: slung to gastown/p"}],
+		"bypassed": [{"bead": "gt-u", "line": "gt-u: overlap hold bypassed for P0 (would be held by gt-t61ft held by gastown/polecats/capable)"}]}`)
+	lines := (&Daemon{}).formatSpecDispatchReport(out)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(lines[0], "1 overlap hold bypassed") {
+		t.Errorf("tick line %q does not count the bypass", lines[0])
+	}
+	if !strings.Contains(joined, "bypassed: gt-u: overlap hold bypassed for P0") {
+		t.Errorf("bypass line missing from:\n%s", joined)
+	}
+	if strings.Contains(joined, "deferred: gt-u") {
+		t.Errorf("a bypassed sling was logged as deferred:\n%s", joined)
+	}
+}
+
 // The tick line names every skipped bead with its reason after the counts, so
 // the feed says why a candidate did not dispatch instead of only how many
 // stayed ready (gt-gzav5).

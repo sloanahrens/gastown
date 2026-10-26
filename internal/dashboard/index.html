@@ -2734,6 +2734,7 @@ function drawDispatch(panel, s) {
   add(d.candidates, "candidates");
   add(d.dispatched, "dispatched", d.dispatched ? "good" : "");
   add(d.skipped, "skipped", d.skipped ? "warnc" : "");
+  if (d.bypassed) add(d.bypassed, "overlap hold bypassed", "warnc");
   if (d.refused) add(d.refused, "refused", "warnc");
   if (d.failed) add(d.failed, "failed", "badc");
   if (d.held) add(d.held, "held (failed label)", "warnc");

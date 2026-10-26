@@ -21,6 +21,23 @@ func TestParseDispatchTickCountsOnly(t *testing.T) {
 	}
 }
 
+// The overlap-hold bypass count sits between the failed-label count and the
+// skipped list, and only on a tick that bypassed one; the skipped beads after
+// it still parse (gt-iydx1).
+func TestParseDispatchTickReadsTheOverlapBypassCount(t *testing.T) {
+	t.Parallel()
+	d := parseDispatchTick("2026/10/26 17:14:32 spec_dispatch: tick: 2 candidate(s), roster deepseek-flash 1/3, 1 dispatched, 0 refused, 0 planning, 1 skipped, 0 failed, 0 held by the failed label, 1 overlap hold bypassed; skipped: gt-b (no seat: full)")
+	if d == nil {
+		t.Fatal("a tick line with a bypass count did not parse")
+	}
+	if d.Bypassed != 1 || d.Dispatched != 1 || d.Skipped != 1 {
+		t.Errorf("tick = %+v", d)
+	}
+	if len(d.Named) != 1 || d.Named[0].Bead != "gt-b" {
+		t.Errorf("named = %+v, want the skipped bead after the bypass count", d.Named)
+	}
+}
+
 func TestParseDispatchTickNamesSkippedBeadsAndReasons(t *testing.T) {
 	t.Parallel()
 	d := parseDispatchTick("2026/10/03 17:24:40 spec_dispatch: tick: 3 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 3 skipped, 0 failed, 0 held by the failed label; skipped: gt-aoltu (unshaped: ## Goal, ## Constraints, acceptance); gt-b.1 (no seat: claude-sonnet 2/2); hq-c (held) +4 more")

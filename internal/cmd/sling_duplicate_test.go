@@ -1600,6 +1600,46 @@ func TestSpecPeerHeldFrom(t *testing.T) {
 	}
 }
 
+// An urgent peer is not held by an overlap: the dispatcher would sling it
+// anyway, so the guard reads it as the cluster's next move and refuses the
+// bead behind it instead of letting both go (gt-iydx1). A P2 peer keeps the
+// hold and lets the cluster past.
+func TestSpecPeerHeldFromUrgentPeerSkipsTheOverlapHold(t *testing.T) {
+	t.Parallel()
+	knobs := specHoldKnobs{MaxPriority: 2, ShapeGate: specdispatch.ShapeGateOff, Warn: io.Discard}
+	pool := []sling.Duplicate{
+		{ID: "gt-peer", Status: "open", IssueType: "task", Priority: 0,
+			Ready: sling.Readiness{Description: specTestDescription, Acceptance: specTestAcceptance},
+			Refs:  sling.ContentRefs{Tests: []string{"TestHostRehearsal"}}},
+		{ID: "gt-work", Status: "in_progress", Priority: 1, Ready: sling.Readiness{Assignee: "gastown/polecats/capable"},
+			Refs: sling.ContentRefs{Tests: []string{"TestHostRehearsal"}}},
+	}
+	for _, tc := range []struct {
+		name     string
+		priority int
+	}{
+		{"P0 peer is the dispatcher's next move", 0},
+		{"P1 peer is the dispatcher's next move", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			peer := pool[0]
+			peer.Priority = tc.priority
+			if got := specPeerHeldFrom(beadsfake.New(), knobs, peer, pool); got != "" {
+				t.Errorf("P%d peer held = %q, want no hold", tc.priority, got)
+			}
+		})
+	}
+	t.Run("P2 peer is held by the live seat", func(t *testing.T) {
+		t.Parallel()
+		peer := pool[0]
+		peer.Priority = 2
+		if got := specPeerHeldFrom(beadsfake.New(), knobs, peer, pool); !strings.Contains(got, "gt-work") {
+			t.Errorf("P2 peer held = %q, want the live seat's bead named", got)
+		}
+	})
+}
+
 // A peer resting after a failed session start is a bead the dispatcher will not
 // sling for up to an hour (dispatch.StartupBackoff). Read as the cluster's next
 // move, it refused every bead sharing its test for the length of its rest: on
@@ -1710,8 +1750,10 @@ func TestOverlapGuardLetsTheClusterPastAPeerLiveWorkHolds(t *testing.T) {
 	// names only the other, so it is no duplicate of the live work — only of
 	// the head the live work keeps off the board.
 	db.Seed(
+		// P2: a P0 or P1 head skips the overlap hold, so the dispatcher would
+		// sling it and the tail waits for it rather than passing (gt-iydx1).
 		beads.Issue{ID: "gt-head", Type: "task", Title: "host rehearsal: the red tier sweep fails",
-			Status: "open", Priority: 1, CreatedAt: "2026-10-25T18:40:00Z",
+			Status: "open", Priority: 2, CreatedAt: "2026-10-25T18:40:00Z",
 			Description: "TestHostRehearsal and TestPeerOnly fail."},
 		beads.Issue{ID: "gt-peerwork", Type: "task", Title: "the peer-only sweep",
 			Status: "in_progress", Priority: 1, Assignee: "gastown/polecats/capable",

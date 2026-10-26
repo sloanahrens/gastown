@@ -144,6 +144,10 @@ type specDispatchTickReport struct {
 	Planning       []specDispatchTickEntry `json:"planning"`
 	Skipped        []specDispatchTickEntry `json:"skipped"`
 	Failed         []specDispatchTickEntry `json:"failed"`
+	// Bypassed is the P0 and P1 candidates the tick dispatched despite an
+	// overlap with work in flight, each naming what would have held it
+	// (gt-iydx1). The tick line counts them.
+	Bypassed []specDispatchTickEntry `json:"bypassed,omitempty"`
 	// Deferred is the sling-stage part of Skipped, logged one line per entry
 	// rather than only inside the tick line's capped skip list (gt-4wcqd).
 	Deferred []specDispatchTickEntry `json:"deferred,omitempty"`
@@ -600,7 +604,7 @@ func (d *Daemon) formatSpecDispatchReport(out []byte) []string {
 	for _, group := range []struct {
 		name    string
 		entries []specDispatchTickEntry
-	}{{"dispatched", r.Dispatched}, {"refused", r.Refused}, {"planning", r.Planning}, {"failed", r.Failed}, {"deferred", r.Deferred}} {
+	}{{"dispatched", r.Dispatched}, {"refused", r.Refused}, {"planning", r.Planning}, {"bypassed", r.Bypassed}, {"failed", r.Failed}, {"deferred", r.Deferred}} {
 		for _, e := range group.entries {
 			lines = append(lines, group.name+": "+e.Line)
 		}
@@ -618,10 +622,14 @@ func (d *Daemon) formatSpecDispatchReport(out []byte) []string {
 // specDispatchTickLine renders the tick's counts and, after them, the beads it
 // skipped with their reasons, capped at specDispatchSkipCap and then "+N more"
 // (gt-gzav5). The counts text is unchanged so a monitor parsing the numbers
-// still reads the same fields.
+// still reads the same fields; the overlap-hold bypass count is appended only
+// when it is nonzero, for the same reason (gt-iydx1).
 func specDispatchTickLine(r specDispatchTickReport) string {
 	line := fmt.Sprintf("tick: %d candidate(s), roster %s, %d dispatched, %d refused, %d planning, %d skipped, %d failed, %d held by the failed label",
 		r.Candidates, r.Roster, len(r.Dispatched), len(r.Refused), len(r.Planning), len(r.Skipped), len(r.Failed), r.LabeledFailed)
+	if len(r.Bypassed) > 0 {
+		line += fmt.Sprintf(", %d overlap hold bypassed", len(r.Bypassed))
+	}
 	if r.DetailsFetched > 0 || r.DetailsCached > 0 || r.DetailsUnread > 0 {
 		line += fmt.Sprintf("; design/notes: %d fetched, %d cached", r.DetailsFetched, r.DetailsCached)
 		if r.DetailsUnread > 0 {
