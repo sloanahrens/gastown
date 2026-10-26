@@ -639,8 +639,12 @@ func listEscalationsAcrossRigs(c Client, status string) ([]*Issue, error) {
 
 // listEscalationsRouted is the *Beads cross-database read: bd's native prefix
 // routing via routes.jsonl, without the BEADS_DIR pin run/runWithStdin apply.
+//
+// --limit=0 because bd list pages at 50 by default (as buildListArgs does), and
+// the counts behind `gt escalate list`, `gt status` and the dashboard silently
+// capped there (gt-mm38p).
 func listEscalationsRouted(b *Beads, status string) ([]*Issue, error) {
-	out, err := b.runWithRouting("list", "--label=gt:escalation", "--status="+status, "--include-infra", "--json")
+	out, err := b.runWithRouting("list", "--label=gt:escalation", "--status="+status, "--include-infra", "--limit=0", "--json")
 	if err != nil {
 		return nil, err
 	}
