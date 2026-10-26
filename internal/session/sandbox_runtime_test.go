@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -85,20 +88,61 @@ func TestBuildRuntimeArchiveHoldsTheRenderedSettingsAndPrompt(t *testing.T) {
 	}
 }
 
-func TestBuildRuntimeArchiveSkipsAMissingPromptButNotMissingSettings(t *testing.T) {
+// A polecat without its system prompt file fails the build and the error names
+// the file: a polecat must not start with none of its policy (gt-uoo5j).
+func TestBuildRuntimeArchiveFailsWithoutAPromptNamingTheFile(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	claudeDir := filepath.Join(town, openshellTestRig, "polecats", ".claude")
-	if err := os.Remove(filepath.Join(claudeDir, "system-prompt-"+openshellTestPolecat+".md")); err != nil {
+	promptName := "system-prompt-" + openshellTestPolecat + ".md"
+	if err := os.Remove(filepath.Join(claudeDir, promptName)); err != nil {
 		t.Fatal(err)
 	}
-	data, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail)
+	_, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail)
+	if err == nil {
+		t.Fatal("buildRuntimeArchive without a system prompt = nil error; the polecat would start with none of its policy")
+	}
+	if !strings.Contains(err.Error(), promptName) {
+		t.Errorf("error does not name the missing file %s: %v", promptName, err)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("error does not wrap the not-exist cause: %v", err)
+	}
+}
+
+// The uploaded prompt's hash line is the hash of the bytes the archive carries:
+// the town root rewritten and the sandbox note appended, not the file as written.
+func TestBuildRuntimeArchiveLogsTheHashOfTheUploadedPrompt(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	claudeDir := filepath.Join(town, openshellTestRig, "polecats", ".claude")
+	raw, err := os.ReadFile(filepath.Join(claudeDir, "system-prompt-"+openshellTestPolecat+".md"))
 	if err != nil {
-		t.Fatalf("buildRuntimeArchive without a system prompt: %v", err)
+		t.Fatal(err)
 	}
-	if got := untarRuntime(t, data); len(got) != 4 {
-		t.Fatalf("archive entries = %v, want .claude.json, .gitconfig, .githelper and settings.json only", got)
+	// The real build, with its spawn log captured: the line it writes must be
+	// the hash of the entry it put in the archive, read back from the archive.
+	var logged bytes.Buffer
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, &logged)
+	if err != nil {
+		t.Fatalf("buildRuntimeArchive: %v", err)
 	}
+	uploaded := untarRuntime(t, data)["gt/"+openshellTestRig+"/polecats/.claude/system-prompt-"+openshellTestPolecat+".md"].body
+	want := RewriteTownRoot(string(raw), town, sandboxTownRoot) + sandboxPromptNote
+	if uploaded != want {
+		t.Fatalf("uploaded prompt is not the rewritten prompt with the sandbox note:\n%s", uploaded)
+	}
+	sum := sha256.Sum256([]byte(uploaded))
+	line := "system prompt " + openshellTestPolecat + ": " + strconv.Itoa(len(uploaded)) + " bytes sha256 " + hex.EncodeToString(sum[:]) + "\n"
+	if logged.String() != line {
+		t.Errorf("spawn log = %q, want the hash of the uploaded entry %q", logged.String(), line)
+	}
+}
+
+func TestBuildRuntimeArchiveFailsWithoutSettings(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	claudeDir := filepath.Join(town, openshellTestRig, "polecats", ".claude")
 	if err := os.Remove(filepath.Join(claudeDir, "settings.json")); err != nil {
 		t.Fatal(err)
 	}

@@ -4,10 +4,11 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
+	"io"
 	"net/url"
 	"os"
 	"path"
@@ -54,6 +55,12 @@ type runtimeFile struct {
 // command names it; a missing system prompt is skipped. A rig or polecat name
 // that is not one path segment is an error too.
 func buildRuntimeArchive(spec SpawnSpec, gitEmail string) ([]byte, error) {
+	return buildRuntimeArchiveLogging(spec, gitEmail, os.Stderr)
+}
+
+// buildRuntimeArchiveLogging is buildRuntimeArchive with the spawn log given, so a
+// test can capture the uploaded prompt's hash line from the real build (gt-uoo5j).
+func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Writer) ([]byte, error) {
 	if err := requireRuntimeSegment("rig", spec.Rig); err != nil {
 		return nil, err
 	}
@@ -89,14 +96,16 @@ func buildRuntimeArchive(spec SpawnSpec, gitEmail string) ([]byte, error) {
 		{".gitconfig", []byte(sandboxGitConfig(spec.Polecat, gitEmail)), 0o644},
 	}
 
+	// A polecat without its system prompt file would start with none of its
+	// policy, so a missing file fails the build and names the file (gt-uoo5j).
 	promptName := "system-prompt-" + spec.Polecat + ".md"
 	prompt, err := os.ReadFile(filepath.Join(dir, promptName))
-	switch {
-	case err == nil:
-		files = append(files, runtimeFile{path.Join(claudeDir, promptName), []byte(RewriteTownRoot(string(prompt), spec.TownRoot, sandboxTownRoot) + sandboxPromptNote), 0o644})
-	case !errors.Is(err, fs.ErrNotExist):
-		return nil, fmt.Errorf("polecat system prompt: %w", err)
+	if err != nil {
+		return nil, fmt.Errorf("polecat system prompt %s: %w", promptName, err)
 	}
+	promptBytes := []byte(RewriteTownRoot(string(prompt), spec.TownRoot, sandboxTownRoot) + sandboxPromptNote)
+	files = append(files, runtimeFile{path.Join(claudeDir, promptName), promptBytes, 0o644})
+	logSystemPrompt(promptLog, spec.Polecat, promptBytes)
 
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
@@ -203,3 +212,12 @@ or any token value, and do not go looking for a credential: the sandbox-secrets
 guard blocks those commands, and a placeholder that reaches this conversation
 ends your session.
 `
+
+// logSystemPrompt writes the one line that proves what a polecat receives: the
+// size and sha256 of the exact bytes uploaded for its system prompt, after the
+// town root rewrite and the sandbox note (gt-uoo5j). The line is the same whether
+// the spawn log or a test reads it.
+func logSystemPrompt(w io.Writer, polecat string, data []byte) {
+	sum := sha256.Sum256(data)
+	fmt.Fprintf(w, "system prompt %s: %d bytes sha256 %s\n", polecat, len(data), hex.EncodeToString(sum[:]))
+}
