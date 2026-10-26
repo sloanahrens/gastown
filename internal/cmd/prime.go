@@ -250,7 +250,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		return err
 	}
 	if !primeDryRun && fromTemplate {
-		if _, err := writeSystemPromptFile(systemPromptPathFor(ctx), staticText); err != nil {
+		if err := refreshSystemPromptFile(os.Getenv, systemPromptPathFor(ctx), staticText); err != nil {
 			fmt.Fprintf(os.Stderr, "gt prime: could not refresh system prompt file: %v\n", err)
 		}
 	}
