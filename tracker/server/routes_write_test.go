@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -80,6 +82,40 @@ func okStub() writeStub {
 		update: func(context.Context, string, api.UpdatePatch, api.Guard) error { return nil },
 		close:  func(context.Context, []string, string, bool) error { return nil },
 		del:    func(context.Context, []string) error { return nil },
+	}
+}
+
+// A sibling test's cleanup calls httptest.Server.Close, which closes
+// http.DefaultTransport's idle connections -- including the one this test's next
+// write would be handed -- and a write that loses its connection is not retried
+// (gt-djzxe). So writeHTTP holds no connection between requests: after a
+// sibling's cleanup it still opens a fresh one for each write (gt-ivx7r).
+func TestASiblingServersCleanupCannotBreakTheWriteClient(t *testing.T) {
+	t.Parallel()
+	var conns atomic.Int64
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	ts.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	ts.Start()
+	t.Cleanup(ts.Close)
+	sibling := writeServer(t, okStub())
+	write := func(i int) {
+		t.Helper()
+		if code, body := writeCall(t, "POST", ts.URL, `{"title":"t"}`); code != http.StatusNoContent {
+			t.Fatalf("write %d = %d %q, want 204", i, code, body)
+		}
+	}
+	write(0)
+	sibling.Close() // exactly what the sibling test's t.Cleanup(ts.Close) does
+	write(1)
+	write(2)
+	if got := conns.Load(); got != 3 {
+		t.Errorf("three writes after a sibling's cleanup opened %d connections, want 3 (no connection survives the cleanup for reuse)", got)
 	}
 }
 
