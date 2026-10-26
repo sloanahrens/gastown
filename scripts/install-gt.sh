@@ -159,10 +159,15 @@ gateway_step() {
 # "after" is the old order --no-image-first keeps for an urgent daemon fix: the
 # build is started detached, the install says where its output goes, and the
 # function returns 0, so the already-swapped binary is neither held nor rolled
-# back for the image's sake (gt-vhn89). The plugin's deferrals — docker down, a
-# sling running, another run holding its lock — exit 0 and let the install
-# through, since blocking on an in-flight sling would starve the install path
-# this step exists to keep free.
+# back for the image's sake (gt-vhn89); there the plugin's deferrals — docker
+# down, a sling running, another run holding its lock — exit 0 and let the
+# install through, since blocking on an in-flight sling would starve the install
+# path this step exists to keep free.
+#
+# The pre-swap build gets POLECAT_IMAGE_FAIL_CLOSED=1 (gt-efupr); before changing
+# what it makes fail, read plugin.md, "Publishing to a registry", since the
+# install stands behind every failure the switch raises. The detached build
+# leaves it unset.
 #
 # BINARY is the build output, never the installed $GT: run.sh reads the commit to
 # build from `gt version`, and before the swap $GT still reports the old commit.
@@ -315,7 +320,8 @@ polecat_image_step() {
     return 0
   fi
   local rc=0
-  ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" ) </dev/null >>"$logfile" 2>&1 || rc=$?
+  ( export POLECAT_IMAGE_FAIL_CLOSED=1
+    image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" ) </dev/null >>"$logfile" 2>&1 || rc=$?
   if [ "$rc" = "0" ]; then
     log "polecat image: in force at $commit"
     return 0

@@ -125,6 +125,13 @@ case "$target" in
     if [ -e "$T_WORLD/simulate_immutable_replace" ]; then
       chflags uchg "$inst/gt" 2>/dev/null || chattr +i "$inst/gt" 2>/dev/null || true
     fi ;;
+  polecat-image)
+    # The plugin's own build target, reached only by a case that runs the real
+    # run.sh (gt-efupr). run.sh builds in a detached worktree of the commit, so
+    # HEAD is the image label run.sh checks afterwards, whatever the worktree is
+    # called.
+    git rev-parse HEAD > "$T_WORLD/image-label"
+    exit 0 ;;
   *) echo "stub make: unhandled target $target" >&2; exit 2 ;;
 esac
 MAKE
@@ -1603,6 +1610,109 @@ registry_case "an ambient value fills the key the config leaves out" \
 [ "$POLECAT_IMAGE_REGISTRY" = "daemon.example:5000" ] && [ "$POLECAT_IMAGE_CRANE" = "/daemon/crane" ] \
   && pass "image: the registry cases clear the daemon's variables in each run, not in this shell" \
   || fail "image: registry cases changed this shell's variables: registry='${POLECAT_IMAGE_REGISTRY-}' crane='${POLECAT_IMAGE_CRANE-}'"
+
+# --- Case 61: the build before the swap is told to fail closed on a publish
+# that did not complete, so the install cannot succeed with an image the
+# registry does not hold (gt-efupr). --no-image-first swapped the binary
+# already and keeps the best-effort publish, so it is not told. ---
+closed_case() {
+  # closed_case NAME ARGS... -> the switch's value as the plugin ran with it
+  local name="$1" T rc; shift
+  T=$(make_world); mkdir -p "$T/plugin"
+  cat > "$T/plugin/run.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "${POLECAT_IMAGE_FAIL_CLOSED:-unset}" >> "$T_WORLD/closed.txt"
+STUB
+  chmod +x "$T/plugin/run.sh"
+  install_stub "$T" "$(cat "$T/c1")"
+  rc=$( unset POLECAT_IMAGE_FAIL_CLOSED
+        IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" "$@" )
+  # --no-image-first starts the plugin detached, so its line lands after the
+  # install returned; waiting keeps the case from reading the file too early.
+  wait_for "$T/closed.txt" || true
+  if [ "$rc" = "0" ] && [ "$(cat "$T/closed.txt" 2>/dev/null)" = "$WANT_CLOSED" ]; then
+    pass "image: $name"
+  else
+    fail "image: $name: rc=$rc switch='$(cat "$T/closed.txt" 2>/dev/null)' want='$WANT_CLOSED'"
+  fi
+}
+WANT_CLOSED=1 closed_case "the build before the swap is told to fail closed on an incomplete publish" --source rebuild-gt
+WANT_CLOSED=unset closed_case "no-image-first keeps the best-effort publish" --no-image-first
+
+# --- Case 62: a build that finishes but cannot publish fails the install
+# closed (gt-efupr). The real run.sh runs under the install with stub docker,
+# crane, pgrep and openshell and the world's make; the crane stub refuses every
+# push. The install's own POLECAT_IMAGE_FAIL_CLOSED=1 is what turns that refused
+# push into its exit 1, so this case covers the switch end to end. ---
+T=$(make_world); install_stub "$T" "$(cat "$T/c1")"
+mkdir -p "$T/plugin" "$T/pstubs" "$T/settings"
+cat > "$T/pstubs/docker" <<'STUB'
+#!/usr/bin/env bash
+# The three calls run.sh makes before a refused push: is the daemon up, the
+# image's commit label, and the image's tags; plus `tag` and `save`, which hand
+# crane a tarball to push.
+case "${1:-}" in
+  info) exit 0 ;;
+  image)
+    case "${4:-}" in
+      *Labels*) [ -f "$T_WORLD/image-label" ] && cat "$T_WORLD/image-label" && exit 0; exit 1 ;;
+      *RepoTags*) printf 'gastown-polecat:dev\ngastown-polecat:%s\n' "$(cut -c1-7 "$T_WORLD/image-label" 2>/dev/null)" ;;
+    esac
+    exit 0 ;;
+  tag) exit 0 ;;
+  save)
+    out=""
+    while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2 ;; *) shift ;; esac; done
+    printf 'tarball\n' > "$out"; exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+printf '#!/usr/bin/env bash\necho "$*" >> "$T_WORLD/crane.log"\necho "UNAUTHORIZED: authentication required" >&2\nexit 1\n' > "$T/pstubs/crane"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$T/pstubs/pgrep"
+printf '#!/usr/bin/env bash\necho "No sandboxes found."\n' > "$T/pstubs/openshell"
+chmod +x "$T/pstubs"/*
+printf '%s' '{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":"localhost:5001","POLECAT_IMAGE_CRANE":"'"$T"'/pstubs/crane"}}}' > "$T/settings/config.json"
+cat > "$T/plugin/run.sh" <<STUB
+#!/usr/bin/env bash
+export POLECAT_IMAGE_DOCKER="$T/pstubs/docker" POLECAT_IMAGE_PGREP="$T/pstubs/pgrep" \\
+  POLECAT_IMAGE_OPENSHELL="$T/pstubs/openshell" POLECAT_IMAGE_RIG_REPO="$T/origin.git" \\
+  POLECAT_IMAGE_BUILD_ROOT="$T/image-build"
+exec bash "$SCRIPT_DIR/../plugins/polecat-image/run.sh"
+STUB
+chmod +x "$T/plugin/run.sh"
+rc=$( export GT_TOWN_ROOT="$T"
+      IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
+[ "$rc" = "1" ] && [ "$(reported "$T")" = "$(cat "$T/c1")" ] \
+  && [ ! -e "$T/daemon/restart-pending.json" ] && ! grep -q "install-local" "$T/make.log" \
+  && grep -q "polecat image: the build for .* did not finish (exit 1); the binary was not swapped" "$T/run.out" \
+  && grep -qF "registry: pushing localhost:5001/gastown-polecat:dev failed (UNAUTHORIZED: authentication required); the image is not published" "$T/run.out" \
+  && grep -qF "ERROR: the image is not published to localhost:5001, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)" "$T/run.out" \
+  && grep -q "RESULT failed .* build-failed" "$T/run.out" \
+  && pass "image: an unpublished image fails the install closed, with the plugin's push failure in the message" \
+  || fail "image: fail-closed publish: rc=$rc reported=$(reported "$T") want=$(cat "$T/c1") marker=$([ -e "$T/daemon/restart-pending.json" ] && echo yes || echo no) make=[$(sed 's/ .*//' "$T/make.log" 2>/dev/null | tr '\n' ' ')] image-log=$(tail -3 "$T/image.log" 2>/dev/null) out=$(tail -4 "$T/run.out")"
+
+# --- Case 63: a deferral under the switch fails the install closed too
+# (gt-efupr). Docker down is the simplest deferral: no image is built, so the
+# install must keep the old binary rather than swap a binary whose image is not
+# in place. ---
+T=$(make_world); install_stub "$T" "$(cat "$T/c1")"
+mkdir -p "$T/plugin" "$T/pstubs"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$T/pstubs/docker"
+chmod +x "$T/pstubs/docker"
+cat > "$T/plugin/run.sh" <<STUB
+#!/usr/bin/env bash
+export POLECAT_IMAGE_DOCKER="$T/pstubs/docker"
+exec bash "$SCRIPT_DIR/../plugins/polecat-image/run.sh"
+STUB
+chmod +x "$T/plugin/run.sh"
+rc=$( export GT_TOWN_ROOT="$T"
+      IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
+[ "$rc" = "1" ] && [ "$(reported "$T")" = "$(cat "$T/c1")" ] \
+  && [ ! -e "$T/daemon/restart-pending.json" ] && ! grep -q "install-local" "$T/make.log" \
+  && grep -q "deferred: docker unavailable" "$T/run.out" \
+  && grep -qF "ERROR: the image was not built and published at the installed commit, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)" "$T/run.out" \
+  && pass "image: a deferral under the switch fails the install closed, with the old binary in place" \
+  || fail "image: fail-closed deferral: rc=$rc reported=$(reported "$T") want=$(cat "$T/c1") marker=$([ -e "$T/daemon/restart-pending.json" ] && echo yes || echo no) make=[$(sed 's/ .*//' "$T/make.log" 2>/dev/null | tr '\n' ' ')] out=$(tail -4 "$T/run.out")"
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"

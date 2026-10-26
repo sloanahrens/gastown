@@ -46,6 +46,8 @@ detached, escalating a failure under `install-gt:image-build-failed`.
    a Prepare's image check and its create. A probe that cannot answer (`pgrep`
    or `openshell sandbox list` exiting with an error) defers too, never reads as
    "nothing running". The same check runs again before each build round.
+   `POLECAT_IMAGE_FAIL_CLOSED` makes a deferral fail; "Publishing to a registry"
+   has why.
 3. Takes the lock `~/gt/.runtime/polecat-image.lock` (a lock older than 20
    minutes is taken over by renaming it aside, and only the run that wins the
    rename proceeds); a second run while it is held prints `already running` and
@@ -84,9 +86,16 @@ retried is in `run.sh` beside the publish functions.
   backend's drift check inspects. The image is saved and pushed once; its other
   tags are made on the registry with `crane tag`, which copies no layer.
 - **Failure never breaks the plugin.** A missing `crane` or a failed list, tag,
-  save or push is logged with its reason and the run exits 0; nothing is removed.
-  A push that did not complete is retried by the next run even when the image is
-  already current.
+  save or push is logged with its reason and the run exits 0, unless
+  `POLECAT_IMAGE_FAIL_CLOSED=1` (below); nothing is removed. A push that did not
+  complete is retried by the next run even when the image is already current.
+- **Failing closed where it matters.** `POLECAT_IMAGE_FAIL_CLOSED=1` makes a
+  run that leaves the image unbuilt or unpublished exit non-zero: every publish
+  failure above, and every deferral (docker down, a sling running, the lock
+  held). `install-gt.sh` sets it for the build that runs before the binary
+  swap, so an install cannot swap a binary whose image is not in place
+  (gt-efupr). Unset, as the daemon's own runs leave it, every path above keeps
+  its exit 0.
 
 ## Old images
 
