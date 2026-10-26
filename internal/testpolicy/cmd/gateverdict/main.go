@@ -12,8 +12,8 @@ import (
 )
 
 // verdict returns the gate's last line and its status for the two stage results. The unit tier is
-// checked first, as it was before the integration vet joined the gate: a red unit tier is named
-// even when the vet also failed.
+// checked first, the order the gate recipe reports its stages in: a red unit tier is named even
+// when the vet also failed.
 func verdict(unitRC, vetRC, wall int) (string, int) {
 	switch {
 	case unitRC != 0:

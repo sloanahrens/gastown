@@ -1,12 +1,10 @@
-// Command integrationvet type-checks every package the integration build tag
-// adds files to, so an integration-only file that stops type-checking fails the
-// gate instead of the post-merge rehearsal (gt-w3aby).
+// Command integrationvet runs go vet with the integration build tag over every package the tag adds
+// files to, so an integration-only file that stops compiling is reported by the vet (gt-w3aby).
 //
 //	go run ./internal/testpolicy/cmd/integrationvet
 //
-// It runs go vet with the tag and no test binary: vet type-checks each selected
-// package and its tests, and analyzes them, but it builds nothing it runs.
-// docs/testing.md describes where it runs.
+// Vet type-checks each selected package and its tests, runs its analyzers, and builds no test
+// binary. It is not wired into make gate yet; the wiring is tracked on gt-tpg0p.
 package main
 
 import (

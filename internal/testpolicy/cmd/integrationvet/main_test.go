@@ -254,7 +254,7 @@ func TestRunVetsModulesAtOnce(t *testing.T) {
 
 // TestRunRemovesTheReportOnInterrupt pins the interrupt path: the cancelled
 // context stops the vets, run returns 130, and the report file is gone, which
-// the gate's shell temp log used to leak (gt-w3aby).
+// the report file is removed on that path too (gt-w3aby).
 func TestRunRemovesTheReportOnInterrupt(t *testing.T) {
 	t.Parallel()
 	root := fixtureTree(t)

@@ -12,7 +12,7 @@ func TestMain(m *testing.M) {
 }
 
 // TestVerdict: each branch of the gate's verdict, with the unit tier named first when both stages
-// failed. The lines are the ones the gate has always printed.
+// failed. The lines match the messages the gate recipe prints, so wiring the command keeps the output unchanged.
 func TestVerdict(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
