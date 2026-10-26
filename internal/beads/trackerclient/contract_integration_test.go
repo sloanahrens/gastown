@@ -43,10 +43,12 @@ func newTracker(t *testing.T, actor string, scope api.Scope) *trackerclient.Clie
 	return trackerclient.New(tc, "gt")
 }
 
-// The adapter must behave like bd on every case the fake and bd are held to.
-// The one suite it does not run is RunCreatorOptionContract: the tracker
-// records the creator as the token's actor and ignores one named in a request
-// (see Client.Create), and RunActorContract below pins who it records.
+// The adapter must behave like bd on every case the fake and bd are held to,
+// except the two suites it cannot run. RunShowTextContract is bd's terminal
+// rendering, which a tracker does not do: ShowText refuses with ErrShowText,
+// pinned in unit_test.go. RunCreatorOptionContract is a creator named in the
+// request: the tracker records the token's actor instead (see Client.Create),
+// and RunActorContract below pins who it records.
 //
 // This is integration tier because it needs a real Postgres; the integration
 // sweep runs it on every landing, and the tracker's own store contract runs on
