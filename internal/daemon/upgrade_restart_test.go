@@ -514,6 +514,156 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 	})
 }
 
+// gt-u1fzb: a spec dispatch tick in flight is soft work with no landing pass to
+// protect, so a tick that began before the marker holds the restart without
+// draining landings for its whole bound, as a tier sweep does (gt-du6xl). A tick
+// that began after the marker keeps the drain, as a late sweep does.
+func TestUpgradeDispatchTickAloneDoesNotDrainLandings(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a tick from before the marker holds without draining", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		// The tick began before the marker's wait clock starts at now.
+		tick := &specDispatchTickRun{started: now.Add(-time.Minute)}
+		d.specDispatchRunning.Store(true)
+		d.specDispatchTick.Store(tick)
+		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(time.Minute)) {
+			t.Fatal("restarted under a running spec dispatch tick before its bound")
+		}
+		if d.upgradeRestartPending.Load() {
+			t.Fatal("landing workers were drained while only the dispatch tick held the restart")
+		}
+		if !d.upgradeTickWaiting.Load() {
+			t.Fatal("the restart did not report waiting on the tick in flight")
+		}
+		if got := strings.Count(logs.String(), "landing passes continue while a spec dispatch tick holds the restart"); got != 1 {
+			t.Fatalf("deferral line logged %d times, want once per hold:\n%s", got, logs.String())
+		}
+		if got := strings.Count(logs.String(), "waiting for a spec dispatch tick"); got != 2 {
+			t.Fatalf("tick wait line logged %d times, want once per heartbeat:\n%s", got, logs.String())
+		}
+		if strings.Contains(logs.String(), "tier sweep") {
+			t.Fatalf("a wait on the dispatch tick named the tier sweep:\n%s", logs.String())
+		}
+		if strings.Contains(logs.String(), "draining: no new landing pass") {
+			t.Fatalf("drain line logged while the drain was deferred:\n%s", logs.String())
+		}
+
+		// The drain is off, so upgradeRestartPending cannot keep the ticker from
+		// starting a tick behind the one the restart waits on: the tick wait does.
+		d.logger = log.New(io.Discard, "", 0)
+		if d.triggerSpecDispatch() {
+			t.Fatal("a tick started behind the one the restart waits on")
+		}
+		if got := d.specDispatchTick.Load(); got != tick {
+			t.Fatalf("the ticker replaced the running tick's start: %+v", got)
+		}
+
+		// The tick closes: the restart goes, and the drain was on for it.
+		d.specDispatchRunning.Store(false)
+		d.specDispatchTick.Store(nil)
+		if !d.checkUpgradeRestart(now.Add(2 * time.Minute)) {
+			t.Fatal("a closed spec dispatch tick must not hold the restart")
+		}
+		if !d.upgradeRestartPending.Load() {
+			t.Fatal("the restart did not drain the landing workers for its own moment")
+		}
+	})
+
+	t.Run("a tick that began after the marker keeps the drain", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		// A tick from before the marker starts the wait, then closes.
+		d.specDispatchRunning.Store(true)
+		d.specDispatchTick.Store(&specDispatchTickRun{started: now.Add(-time.Minute)})
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a running spec dispatch tick before its bound")
+		}
+		d.specDispatchRunning.Store(false)
+		d.specDispatchTick.Store(nil)
+
+		// A new tick starts after the marker: it is not the one the wait deferred
+		// for, so the drain goes on.
+		later := now.Add(time.Minute)
+		d.specDispatchRunning.Store(true)
+		d.specDispatchTick.Store(&specDispatchTickRun{started: later})
+		if d.checkUpgradeRestart(later) {
+			t.Fatal("restarted under a tick that began after the marker")
+		}
+		if !d.upgradeRestartPending.Load() {
+			t.Fatal("a tick that began after the marker must drain the landing workers")
+		}
+		if d.upgradeTickWaiting.Load() {
+			t.Fatal("the restart waits on a tick with the drain on, where the drain is what parks the ticker")
+		}
+	})
+
+	t.Run("the restart goes past the tick's bound with the drain off", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		bound := d.specDispatchTickBound()
+		d.specDispatchRunning.Store(true)
+		d.specDispatchTick.Store(&specDispatchTickRun{started: now.Add(-time.Minute), bound: bound})
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a running spec dispatch tick before its bound")
+		}
+		if d.upgradeRestartPending.Load() {
+			t.Fatal("landing workers were drained while only the dispatch tick held the restart")
+		}
+		if !d.checkUpgradeRestart(now.Add(bound)) {
+			t.Fatal("a tick still running at its bound must not hold the restart further")
+		}
+		if !d.upgradeRestartPending.Load() {
+			t.Fatal("the drain did not start at the tick's bound")
+		}
+		if !strings.Contains(logs.String(), "a spec dispatch tick is still in flight after its") {
+			t.Fatalf("no cut-short line at the tick's bound:\n%s", logs.String())
+		}
+	})
+}
+
+// gt-u1fzb: with the drain off the deferral clears upgradeRestartPending, the
+// flag that parks the ticker. The tick wait parks it in its place, so no tick
+// starts behind the one the restart waits on and extends the wait.
+func TestUpgradeTickWaitParksTheTicker(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	d.upgradeTickWaiting.Store(true)
+	if d.triggerSpecDispatch() {
+		t.Fatal("a tick started while the restart waited on the tick in flight")
+	}
+	if d.specDispatchRunning.Load() {
+		t.Fatal("a deferred tick left its single-flight guard set")
+	}
+	d.upgradeTickWaiting.Store(false)
+	if !d.triggerSpecDispatch() {
+		t.Fatal("tick did not start once the restart stopped waiting on a tick")
+	}
+	d.specDispatchCycles.Wait()
+}
+
 // gt-oucgn: a maintenance gc cycle in flight holds a pending upgrade restart —
 // a shutdown cancels the gc call's context, so the restart aborts the call with
 // nothing recorded and the database stays due — but only up to the gc's own

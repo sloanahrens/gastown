@@ -203,8 +203,12 @@ func (d *Daemon) triggerSpecDispatch() bool {
 	// A pending restart waits for the tick in flight, up to that tick's own
 	// bound. A tick started now would outlast the wait and be cut by the
 	// restart, leaving a sling half done (gt-cbaoy), so it starts after the
-	// restart, from the new daemon.
-	if d.upgradeRestartPending.Load() {
+	// restart, from the new daemon. The drain is off while the restart waits on
+	// a tick that began before the marker, so upgradeRestartPending is false
+	// there and upgradeTickWaiting carries the same rule: without it a tick
+	// could start behind the one the restart waits on and extend the wait
+	// (gt-u1fzb).
+	if d.upgradeRestartPending.Load() || d.upgradeTickWaiting.Load() {
 		if d.specDispatchDeferLogged.CompareAndSwap(false, true) {
 			d.logger.Printf("spec_dispatch: not ticking: an upgrade restart is pending; the next tick runs after it")
 		}
