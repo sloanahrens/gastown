@@ -89,6 +89,19 @@ func TestPruneNodeFailsClosedWhenContainersCannotBeListed(t *testing.T) {
 	}
 }
 
+// Output InUse cannot parse is a node whose containers are unknown, just as a
+// failed list is: reading it as "no containers" would plan every image for
+// removal, so the node is left alone.
+func TestPruneNodeFailsClosedWhenTheContainerListIsUnparseable(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.ps = "crictl: ps is not json"
+	res := PruneNode("gt-sbx-worker", f.crictl, 0, false)
+	if res.Err == nil || len(f.rmis) != 0 || res.Ok() {
+		t.Errorf("PruneNode with an unparseable container list = %+v rmis=%v, want an error and no removal", res, f.rmis)
+	}
+}
+
 // An image whose creation time cannot be read is kept, not removed.
 func TestPruneNodeKeepsAnImageWhoseAgeIsUnknown(t *testing.T) {
 	t.Parallel()
