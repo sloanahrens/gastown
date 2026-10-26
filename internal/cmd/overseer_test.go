@@ -255,7 +255,26 @@ func TestOverseerBeatLiveReaderCountsAcksFromAcksJSON(t *testing.T) {
 		t.Fatalf("corrupting acks.json: %v", err)
 	}
 	err = overseerBeatWith(&out, town, overseer.StateWorking, "overseer", overseerNow, live)
-	if err == nil || !strings.Contains(err.Error(), "reading acks") {
-		t.Fatalf("working with a corrupt acks.json = %v, want a refusal naming the acks", err)
+	if err == nil || !strings.Contains(err.Error(), "reading acks") || !strings.Contains(err.Error(), "acks.json") {
+		t.Fatalf("working with a corrupt acks.json = %v, want a refusal naming the acks file", err)
+	}
+}
+
+// TestOverseerBeatMissingAcksCountsEveryItem: with no acks.json yet, every item is unacked and is
+// named in the refusal (gt-smdcj).
+func TestOverseerBeatMissingAcksCountsEveryItem(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	live := liveOverseerOpenWork(func(string) beads.Client { return beadsfake.New() })
+	if err := attention.WriteState(town, attention.State{Updated: overseerNow, Items: []attention.Item{
+		{Key: "risk:gt-a:1"}, {Key: "risk:gt-b:1"},
+	}}); err != nil {
+		t.Fatalf("writing the attention state: %v", err)
+	}
+	var out bytes.Buffer
+	err := overseerBeatWith(&out, town, overseer.StateWorking, "overseer", overseerNow, live)
+	if err == nil || !strings.Contains(err.Error(), "2 unacked attention item(s)") ||
+		!strings.Contains(err.Error(), `"risk:gt-a:1"`) || !strings.Contains(err.Error(), `"risk:gt-b:1"`) {
+		t.Fatalf("working with no acks.json = %v, want both items named as unacked", err)
 	}
 }
