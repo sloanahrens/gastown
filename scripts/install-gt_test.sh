@@ -27,7 +27,9 @@ case "$1 ${2:-}" in
   "version "*)
     if [ -n "$C" ]; then echo "gt version $C (dev: main@$C)"; else echo "gt version dev"; fi ;;
   "formula sync"|"plugin sync") echo "synced $1"; echo "sync $1" >> "$T_WORLD/gt.log" ;;
-  "escalate "*) echo "escalate $*" >> "$T_WORLD/gt.log" ;;
+  "escalate "*)
+    echo "escalate $*" >> "$T_WORLD/gt.log"
+    if [ -e "$T_WORLD/escalate-fail" ]; then echo "escalate refused" >&2; exit 1; fi ;;
   "slot run")
     echo "slot run $*" >> "$T_WORLD/gt.log"
     shift 2
@@ -1062,6 +1064,7 @@ image_stub() {
   cat > "$t/plugin/run.sh" <<STUB
 #!/usr/bin/env bash
 printf '%s | %s\n' "\$("\$POLECAT_IMAGE_GT" version | head -1)" "\$("$t/bin/gt" version | head -1)" >> "$t/image-calls.log"
+echo "\$\$" > "$t/image-run.pid"
 echo "run.sh" >> "\$T_WORLD/make.log"
 sleep \${IMAGE_STUB_SLEEP:-0}
 if [ -n "\${IMAGE_STUB_REASON:-}" ]; then echo "ERROR: \$IMAGE_STUB_REASON" >&2; exit 1; fi
@@ -1071,7 +1074,12 @@ STUB
   chmod +x "$t/plugin/run.sh"
 }
 wait_for() { local i; for i in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
-wait_for_alarm() { local i; for i in $(seq 1 100); do grep -q 'alarm after' "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+# wait_for_text FILE TEXT: wait until FILE holds TEXT, checked every 0.1 s for 5 s.
+wait_for_text() { local i; for i in $(seq 1 50); do grep -q -- "$2" "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+wait_for_alarm() { wait_for_text "$1" 'alarm after'; }
+# wait_for_state PID STATE: wait until proc_state reads STATE for PID, with no
+# /proc stat line (so the ps branch answers), checked every 0.1 s for 5 s.
+wait_for_state() { local i; for i in $(seq 1 50); do [ "$(PROC_ROOT="$T/no-proc" proc_state "$1")" = "$2" ] && return 0; sleep 0.1; done; return 1; }
 # group_signal_ok: this host lets one process signal another's process group,
 # which is what the alarm's kill(-pgid) needs to stop a build. A
 # seccomp-filtered sandbox refuses it with EPERM, and the two alarm cases below
@@ -1299,8 +1307,45 @@ wait_for_alarm "$T/image.log" || true
 [ "$rc" = "1" ] && [ -n "$CHILD" ] && [ -e "$T/image.lock/pid" ] && ! is_live "$CHILD" \
   && pass "image: the alarm leaves a lock that names another process" \
   || fail "image: foreign lock: rc=$rc child=${CHILD:-none} lock=$([ -e "$T/image.lock" ] && echo held || echo free) out=$(tail -2 "$T/image.log" 2>/dev/null)"
+  # gt-vhn89: a detached build that the alarm stops escalates its own failure,
+  # and the install stands, since the binary was swapped before the build.
+  T=$(make_world); mkdir -p "$T/plugin"
+  cat > "$T/plugin/run.sh" <<'STUB'
+#!/usr/bin/env bash
+echo $$ > "$T_WORLD/image-child.pid"
+sleep 30
+STUB
+  chmod +x "$T/plugin/run.sh"
+  install_stub "$T" "$(cat "$T/c1")"
+  rc=$( export INSTALL_GT_IMAGE_ALARM=1
+        IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --no-image-first --source rebuild-gt )
+  wait_for_alarm "$T/image.log" || true
+  wait_for_text "$T/gt.log" "--fingerprint install-gt:image-build-failed" || true
+  [ "$rc" = "0" ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] && [ -e "$T/daemon/restart-pending.json" ] \
+    && grep -q 'polecat image: alarm after 1 s stopped the build' "$T/image.log" \
+    && grep -q "escalate .*did not finish.*--fingerprint install-gt:image-build-failed" "$T/gt.log" \
+    && pass "image: a detached build the alarm stops escalates, and the install stands" \
+    || fail "image: detached alarm: rc=$rc reported=$(reported "$T") want=$(cat "$T/c2") gt.log=$(tail -2 "$T/gt.log" 2>/dev/null)"
+
 else
-  fail "this host refuses a signal to a process group (EPERM), so the alarm's stop of the image build cannot be tested here"
+  # This host refuses a signal to another process group (EPERM), so the kill
+  # cannot stop the build and the child and lock assertions above cannot hold.
+  # The bound itself is still observable: the supervisor's own alarm ends it,
+  # the install fails closed before the swap, and the log names the alarm.
+  T=$(make_world); mkdir -p "$T/plugin"
+  cat > "$T/plugin/run.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "run.sh" >> "$T_WORLD/make.log"
+sleep 30
+STUB
+  chmod +x "$T/plugin/run.sh"
+  install_stub "$T" "$(cat "$T/c1")"
+  rc=$( export INSTALL_GT_IMAGE_ALARM=1
+        IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt )
+  wait_for_alarm "$T/image.log" || true
+  # Passing here would claim a stop nobody saw, so this host fails the case by
+  # name until one that can signal a process group runs it.
+  fail "image: alarm bound: this host refuses process-group signals (EPERM), so the alarm's stop of the build cannot be verified (rc=$rc, log: $(tail -1 "$T/image.log" 2>/dev/null))"
 fi
 
 # --- Case 46: an INSTALL_GT_IMAGE_ALARM that is not a whole number above zero
@@ -1361,13 +1406,103 @@ echo "4242 (sh) S 1 4242 4242 0 -1 4194304" > "$T/fakeproc/4242/stat"
   && pass "proc_state: reads the state from a /proc stat line" \
   || fail "proc_state: /proc branch read '$(PROC_ROOT="$T/fakeproc" proc_state 4242)', want S"
 
-# Case 49: with no /proc stat line, proc_state asks ps. This test shell is alive,
-# so ps has a state for it, and the first letter of that state is the answer.
-want=$(ps -o stat= -p $$ | cut -c1)
-got=$(PROC_ROOT="$T/no-proc" proc_state $$)
-[ -n "$want" ] && [ "$got" = "$want" ] \
+# Case 49: with no /proc stat line, proc_state asks ps. A child stopped with
+# SIGSTOP reads T on macOS and on Linux, so the answer is known in advance. The
+# test shell's own state is not used: it changes while the test runs, and two
+# samples of it raced (the case failed as S against R).
+sleep 60 &
+stopped=$!
+kill -STOP "$stopped"
+wait_for_state "$stopped" T || true
+got=$(PROC_ROOT="$T/no-proc" proc_state "$stopped")
+kill -CONT "$stopped" 2>/dev/null || true
+kill "$stopped" 2>/dev/null || true
+wait "$stopped" 2>/dev/null || true
+[ "$got" = T ] \
   && pass "proc_state: falls back to ps when /proc has no stat line" \
-  || fail "proc_state: ps branch read '$got', want '$want'"
+  || fail "proc_state: ps branch read '$got', want T (a stopped child)"
+
+# --- Case 50: --no-image-first keeps the old order for an urgent daemon fix:
+# the binary is swapped and the restart marker written without waiting for the
+# image, which is then started detached (gt-vhn89). The build sleeps far longer
+# than the install is allowed here, so an install that waited would be caught by
+# the elapsed check as well as by the missing line. A second install with a
+# one-second lock wait then shows the detached build does not hold the install
+# lock. ---
+T=$(make_world); image_stub "$T"
+install_stub "$T" "$(cat "$T/c1")"
+start=$(date +%s)
+rc=$( IMAGE_STUB_SLEEP=20 IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --no-image-first )
+elapsed=$(( $(date +%s) - start ))
+wait_for "$T/image-calls.log" || true
+[ "$rc" = "0" ] && [ "$elapsed" -lt 10 ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] \
+  && [ -e "$T/daemon/restart-pending.json" ] \
+  && [ "$(last_receipt "$T" event)" = "installed" ] \
+  && grep -q "polecat image: rebuild for .* started in the background" "$T/run.out" \
+  && [ "$(tail -1 "$T/run.out" | cut -d' ' -f2-3)" = "RESULT installed" ] \
+  && grep -q "^gt version $(cat "$T/c2")" "$T/image-calls.log" \
+  && pass "no-image-first: the binary is swapped and marked without waiting; the build starts detached" \
+  || fail "no-image-first: rc=$rc elapsed=${elapsed}s reported=$(reported "$T") want=$(cat "$T/c2") marker=$([ -e "$T/daemon/restart-pending.json" ] && echo yes || echo no) calls=$(cat "$T/image-calls.log" 2>/dev/null) out=$(tail -4 "$T/run.out")"
+rc2=$( LOCK_WAIT=1 run_install "$T" --sha "$(cat "$T/c2")" )
+[ "$rc2" = "0" ] \
+  && pass "no-image-first: the detached build does not hold the install lock" \
+  || fail "no-image-first: a second install was refused the lock (rc=$rc2) while the image build ran"
+# End the detached build: it would otherwise outlive the case by its sleep.
+kill "$(cat "$T/image-run.pid" 2>/dev/null)" 2>/dev/null || true
+
+# --- Case 51: under --no-image-first a build that fails after the swap is not
+# the install's failure: the new binary and its restart marker stand, the
+# receipt says installed, and the plugin's own reason is in the image log. ---
+T=$(make_world); image_stub "$T"
+install_stub "$T" "$(cat "$T/c1")"
+rc=$( IMAGE_STUB_REASON="docker is down" IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --no-image-first )
+wait_for "$T/image-calls.log" || true
+wait_for_text "$T/image.log" "ERROR: docker is down" || true
+wait_for_text "$T/gt.log" "--fingerprint install-gt:image-build-failed" || true
+[ "$rc" = "0" ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] \
+  && [ -e "$T/daemon/restart-pending.json" ] \
+  && [ "$(last_receipt "$T" event)" = "installed" ] \
+  && grep -q "ERROR: docker is down" "$T/image.log" \
+  && ! grep -q "ERROR: docker is down" "$T/run.out" \
+  && grep -q "escalate .*did not finish.*--fingerprint install-gt:image-build-failed" "$T/gt.log" \
+  && pass "no-image-first: a failed background build leaves the install standing and escalates" \
+  || fail "no-image-first failing build: rc=$rc reported=$(reported "$T") want=$(cat "$T/c2") receipt=$(last_receipt "$T" event) log=$(tail -2 "$T/image.log" 2>/dev/null)"
+
+# --- Case 51b: when the escalation of a failed detached build is itself refused,
+# it is tried twice and the build log says it did not reach the town: the log is
+# the last record a detached build has (gt-vhn89). ---
+T=$(make_world); image_stub "$T"
+install_stub "$T" "$(cat "$T/c1")"
+: > "$T/escalate-fail"
+rc=$( IMAGE_STUB_REASON="docker is down" IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --no-image-first )
+wait_for_text "$T/image.log" "did not reach the town" || true
+tries=$(grep -c "escalate .*did not finish.*--fingerprint install-gt:image-build-failed" "$T/gt.log" 2>/dev/null || true)
+[ "$rc" = "0" ] && [ "$tries" = "2" ] \
+  && grep -q "polecat image: the escalation for this build did not reach the town" "$T/image.log" \
+  && pass "no-image-first: a refused escalation is tried twice and named in the build log" \
+  || fail "no-image-first refused escalation: rc=$rc tries=$tries log=$(tail -2 "$T/image.log" 2>/dev/null)"
+
+# --- Case 51c: a detached build that finishes clears the escalation an earlier
+# failed one raised, so it does not outlive the problem. ---
+T=$(make_world); image_stub "$T"
+install_stub "$T" "$(cat "$T/c1")"
+rc=$( IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --no-image-first )
+wait_for_text "$T/gt.log" "escalate clear --fingerprint install-gt:image-build-failed" || true
+[ "$rc" = "0" ] && grep -q "escalate clear --fingerprint install-gt:image-build-failed" "$T/gt.log" \
+  && ! grep -q "escalate .*did not finish" "$T/gt.log" \
+  && pass "no-image-first: a detached build that finishes clears its escalation" \
+  || fail "no-image-first clear: rc=$rc gt.log=$(tail -3 "$T/gt.log" 2>/dev/null)"
+
+# --- Case 52: with --no-image-first a missing plugin is named, and the install
+# still succeeds: the old order never failed an install for the image's sake. ---
+T=$(make_world)
+install_stub "$T" "$(cat "$T/c1")"
+rc=$( NO_IMAGE_PLUGIN=1 run_install "$T" --sha "$(cat "$T/c2")" --no-image-first )
+[ "$rc" = "0" ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] \
+  && [ -e "$T/daemon/restart-pending.json" ] \
+  && grep -q "polecat image: no plugin at '$T/no-image-plugin/run.sh', so the image cannot be built after the swap; the binary was already swapped" "$T/run.out" \
+  && pass "no-image-first: a missing plugin is named and the install still succeeds" \
+  || fail "no-image-first no plugin: rc=$rc reported=$(reported "$T") want=$(cat "$T/c2") out=$(tail -3 "$T/run.out")"
 
 # --- Cases 54-60: the build's registry settings come from settings/config.json
 # daemon.env (gt-jmd9n). Each way the read can fail is its own case: the build runs

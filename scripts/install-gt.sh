@@ -8,10 +8,13 @@
 #
 # The sandbox image is built and published for the target commit before the
 # binary swap, and a build that does not finish fails the install with the old
-# binary still in place (gt-xzo8a).
+# binary still in place (gt-xzo8a). --no-image-first keeps the old order for an
+# urgent daemon fix: the binary is swapped without waiting, and the image is
+# rebuilt afterwards, detached and best effort (gt-vhn89).
 #
 #   install-gt.sh [--sha REF] [--source manual|rebuild-gt|post-land]
 #                 [--slot-role ROLE] [--slot-timeout SECONDS] [--dry-run]
+#                 [--no-image-first]
 #
 # --dry-run builds and installs nothing and takes no lock: it prints the
 # launchd actions an install would take for the OpenShell gateway agent and
@@ -78,7 +81,7 @@ on_exit() {
 trap on_exit EXIT
 
 ORIG_ARGS=("$@")
-SHA="origin/main" SOURCE="manual" SLOT_ROLE="" SLOT_TIMEOUT=600 DRY_RUN=0
+SHA="origin/main" SOURCE="manual" SLOT_ROLE="" SLOT_TIMEOUT=600 DRY_RUN=0 IMAGE_FIRST=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --sha) SHA="${2:-}"; shift 2 ;;
@@ -86,6 +89,7 @@ while [ $# -gt 0 ]; do
     --slot-role) SLOT_ROLE="${2:-}"; shift 2 ;;
     --slot-timeout) SLOT_TIMEOUT="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --no-image-first) IMAGE_FIRST=0; shift ;;
     *) echo "install-gt: unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -143,15 +147,19 @@ gateway_step() {
   igt_gateway_agent "$mode" "$tmpl" "$GATEWAY_HOME" | while IFS= read -r line; do log "$line"; done || true
 }
 
-# polecat_image_step RUN LOG BINARY COMMIT builds and publishes the sandbox
-# polecat image at COMMIT, waits for it, and returns non-zero when the build did
-# not finish. It runs before install-local swaps the binary, so a failed build
-# leaves the old binary in place: a sling is refused while the image carries
-# another commit, and the plugin's own cooldown can hold that window for 10
-# minutes after an install (gt-pmxo9, gt-xzo8a). The plugin's deferrals — docker
-# down, a sling running, another run holding its lock — exit 0 and let the
-# install through, since blocking on an in-flight sling would starve the install
-# path this step exists to keep free.
+# polecat_image_step RUN LOG BINARY COMMIT [before|after] builds and publishes
+# the sandbox polecat image at COMMIT. "before" (the default) waits for the
+# build and returns non-zero when it did not finish; it runs before install-local
+# swaps the binary, so a failed build leaves the old binary in place: a sling is
+# refused while the image carries another commit, and the plugin's own cooldown
+# can hold that window for 10 minutes after an install (gt-pmxo9, gt-xzo8a).
+# "after" is the old order --no-image-first keeps for an urgent daemon fix: the
+# build is started detached, the install says where its output goes, and the
+# function returns 0, so the already-swapped binary is neither held nor rolled
+# back for the image's sake (gt-vhn89). The plugin's deferrals — docker down, a
+# sling running, another run holding its lock — exit 0 and let the install
+# through, since blocking on an in-flight sling would starve the install path
+# this step exists to keep free.
 #
 # BINARY is the build output, never the installed $GT: run.sh reads the commit to
 # build from `gt version`, and before the swap $GT still reports the old commit.
@@ -214,8 +222,80 @@ image_daemon_env() {
   IMAGE_ENV_VALUE="$value"
 }
 
+# image_build SECS LOCK BINARY RUN [FINGERPRINT] — run.sh under the alarm
+# supervisor. Call it in a subshell.
+#
+# With a FINGERPRINT the supervisor reports a detached build, which has no
+# caller left to do it (gt-vhn89): a build that does not finish escalates under
+# the fingerprint (tried twice), and one that finishes clears it.
+#
+# It exports the registry and crane it was given and points run.sh at this
+# install's town root, the binary whose commit the image is built at, and its
+# lock (POLECAT_IMAGE_TOWN_ROOT, POLECAT_IMAGE_GT, POLECAT_IMAGE_LOCK; case 43
+# pins them). HOME and PATH are not used, so the image is built for the install
+# that asked for it.
+# The perl that stays up is the supervisor: run.sh runs in its own process
+# group, so on the alarm the whole build (run.sh and the docker it started)
+# is stopped, and only then is the lock run.sh took removed. Removing it while
+# a docker child still runs would let the next install build beside it. Its
+# POSIX::close(3..255) also drops the install lock fd this script inherited, so
+# a detached build never holds the install lock past the install — which is why
+# the exec matters: a forked bash waiting on perl would keep that fd open.
+image_build() {
+  local secs="$1" lock="$2" bin="$3" run="$4" fingerprint="${5:-}"
+  export POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$bin" POLECAT_IMAGE_LOCK="$lock"
+  if [ -n "$image_registry" ]; then export POLECAT_IMAGE_REGISTRY="$image_registry"; fi
+  if [ -n "$image_crane" ]; then export POLECAT_IMAGE_CRANE="$image_crane"; fi
+  exec "$IMAGE_PERL" -MPOSIX -MFile::Path=remove_tree -e '
+      my ($secs, $lock, $gt, $fp, @cmd) = @ARGV;
+      POSIX::setsid(); POSIX::close($_) for 3..255;
+      # Escalate a failed build from here: the supervisor is the one process
+      # still running when it ends, and it has closed the install lock fd.
+      sub finish {
+        my $code = shift;
+        if (length $fp && length $gt) {
+          my @esc = $code
+            ? ($gt, "escalate", "install-gt: the detached image build did not finish (exit $code); the binary stands, and stale-image slings are refused until it is rebuilt", "-s", "medium", "--source", "script:install-gt", "--fingerprint", $fp)
+            : ($gt, "escalate", "clear", "--fingerprint", $fp, "--reason", "install-gt: a detached image build finished");
+          # A second try, then the build log: the one place a detached build
+          # result is still read from.
+          my $rc = system(@esc) && system(@esc);
+          print STDERR "polecat image: the escalation for this build did not reach the town (exit ", $rc >> 8, ")\n" if $rc != 0;
+        }
+        exit $code;
+      }
+      my $child = fork();
+      die "fork: $!" unless defined $child;
+      if ($child == 0) { POSIX::setpgid(0, 0); exec @cmd or die "exec: $!"; }
+      $SIG{ALRM} = sub {
+        kill "TERM", -$child;
+        sleep 1;
+        kill "KILL", -$child;
+        if (length $lock && open(my $fh, "<", "$lock/pid")) {
+          my $pid = <$fh>;
+          close $fh;
+          chomp $pid;
+          remove_tree($lock) if $pid == $child;
+        }
+        print STDERR "polecat image: alarm after $secs s stopped the build\n";
+        finish(124);
+      };
+      alarm $secs;
+      waitpid($child, 0);
+      # A build killed by a signal is a failure; $? >> 8 alone reads it as 0.
+      my $st = $?;
+      finish($st & 127 ? 128 + ($st & 127) : $st >> 8);
+    ' "$secs" "$lock" "$GT" "$fingerprint" bash "$run"
+}
+
 polecat_image_step() {
   local run="$1" logfile="$2" bin="$3" commit="$4"
+  # "before" fails the install closed; "after" is detached and best effort, so
+  # every preflight failure below is a log line and a return 0 on that path.
+  local when="${5:-before}" order="before" consequence="the binary was not swapped" fail_rc=1
+  if [ "$when" = "after" ]; then
+    order="after"; consequence="the binary was already swapped"; fail_rc=0
+  fi
   local image_registry image_crane
   image_daemon_env POLECAT_IMAGE_REGISTRY
   image_registry="$IMAGE_ENV_VALUE"
@@ -225,18 +305,18 @@ polecat_image_step() {
   image_daemon_env POLECAT_IMAGE_CRANE
   image_crane="$IMAGE_ENV_VALUE"
   if [ -z "$run" ] || [ ! -f "$run" ]; then
-    log "polecat image: no plugin at '${run:-?}', so the image cannot be built before the swap; the binary was not swapped"
-    return 1
+    log "polecat image: no plugin at '${run:-?}', so the image cannot be built $order the swap; $consequence"
+    return "$fail_rc"
   fi
   # Without the build output run.sh would read the old commit from $GT and build
   # an image for the binary this install is about to replace.
   if [ ! -x "$bin" ]; then
     log "polecat image: no build output at $bin, so the image was not built"
-    return 1
+    return "$fail_rc"
   fi
   if ! command -v "$IMAGE_PERL" >/dev/null 2>&1; then
-    log "polecat image: $IMAGE_PERL is not installed, so the image cannot be built before the swap; the binary was not swapped"
-    return 1
+    log "polecat image: $IMAGE_PERL is not installed, so the image cannot be built $order the swap; $consequence"
+    return "$fail_rc"
   fi
   # An alarm of 0 or a non-number would leave the build with no bound at all.
   local alarm="$IMAGE_ALARM"
@@ -246,50 +326,22 @@ polecat_image_step() {
   fi
   [ -n "$logfile" ] || logfile=/dev/null
   mkdir -p "$(dirname "$logfile")" 2>/dev/null || true
+  log "polecat image: building $commit $order the binary swap (log $logfile)"
+  if [ "$when" = "after" ]; then
+    # Detached, as before gt-xzo8a: the subshell exits at once, so the install
+    # never waits on the build, and image_build's fd closes keep the install
+    # lock out of it.
+    ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" install-gt:image-build-failed </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null
+    log "polecat image: rebuild for $commit started in the background (log $logfile)"
+    return 0
+  fi
   local rc=0
-  log "polecat image: building $commit before the binary swap (log $logfile)"
-  # The perl that stays up is the supervisor: run.sh runs in its own process
-  # group, so on the alarm the whole build (run.sh and the docker it started)
-  # is stopped, and only then is the lock run.sh took removed. Removing it while
-  # a docker child still runs would let the next install build beside it.
-  # run.sh gets this install's town root, the binary whose commit the image is
-  # built at, and its lock (POLECAT_IMAGE_TOWN_ROOT, POLECAT_IMAGE_GT,
-  # POLECAT_IMAGE_LOCK; case 43 pins them), not whatever HOME and PATH resolve
-  # to, so the image is built for the install that asked for it.
-  ( if [ -n "$image_registry" ]; then export POLECAT_IMAGE_REGISTRY="$image_registry"; fi
-    if [ -n "$image_crane" ]; then export POLECAT_IMAGE_CRANE="$image_crane"; fi
-    POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$bin" POLECAT_IMAGE_LOCK="$IMAGE_LOCK" \
-      "$IMAGE_PERL" -MPOSIX -MFile::Path=remove_tree -e '
-        my ($secs, $lock, @cmd) = @ARGV;
-        POSIX::setsid(); POSIX::close($_) for 3..255;
-        my $child = fork();
-        die "fork: $!" unless defined $child;
-        if ($child == 0) { POSIX::setpgid(0, 0); exec @cmd or die "exec: $!"; }
-        $SIG{ALRM} = sub {
-          kill "TERM", -$child;
-          sleep 1;
-          kill "KILL", -$child;
-          if (length $lock && open(my $fh, "<", "$lock/pid")) {
-            my $pid = <$fh>;
-            close $fh;
-            chomp $pid;
-            remove_tree($lock) if $pid == $child;
-          }
-          print STDERR "polecat image: alarm after $secs s stopped the build\n";
-          exit 124;
-        };
-        alarm $secs;
-        waitpid($child, 0);
-        # A build killed by a signal is a failure; $? >> 8 alone reads it as 0.
-        my $st = $?;
-        exit($st & 127 ? 128 + ($st & 127) : $st >> 8);
-      ' "$alarm" "$IMAGE_LOCK" bash "$run"
-  ) </dev/null >>"$logfile" 2>&1 || rc=$?
+  ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" ) </dev/null >>"$logfile" 2>&1 || rc=$?
   if [ "$rc" = "0" ]; then
     log "polecat image: in force at $commit"
     return 0
   fi
-  log "polecat image: the build for $commit did not finish (exit $rc); the binary was not swapped"
+  log "polecat image: the build for $commit did not finish (exit $rc); $consequence"
   if [ "$logfile" != /dev/null ]; then
     tail -n 5 "$logfile" 2>/dev/null | while IFS= read -r line; do log "polecat image: $line"; done || true
   fi
@@ -635,8 +687,11 @@ fi
 # IMAGE_BIN is the commit that was just built; install-local has not replaced
 # $GT with it yet. build-failed is one reason for both builds: rebuild-gt
 # already escalates it, and a new install-gt reason would reach it as a second
-# alert (rebuild_gt.go).
-if ! polecat_image_step "$IMAGE_RUN" "$IMAGE_LOG" "$IMAGE_BIN" "$EXPECTED"; then
+# alert (rebuild_gt.go). --no-image-first skips this wait and builds the image
+# after the restart marker instead (gt-vhn89). That detached build does have
+# a reason of its own, install-gt:image-build-failed: the install stands, so
+# rebuild-gt has no failure to report, and only the supervisor sees this one.
+if [ "$IMAGE_FIRST" = "1" ] && ! polecat_image_step "$IMAGE_RUN" "$IMAGE_LOG" "$IMAGE_BIN" "$EXPECTED"; then
   fail_install build-failed "the sandbox image for $EXPECTED was not built and published; $GT was left at ${PREV:-the previous build} and the daemon was not told to restart" \
     medium install-gt:build-failed failed
 fi
@@ -694,5 +749,12 @@ fi
 igt_receipt installed "$EXPECTED" "$PREV" "" "$MERGED_AT" "$START"
 "$GT" escalate clear --fingerprint install-gt:build-failed --fingerprint install-gt:smoke-failed \
   --reason "install-gt: $EXPECTED is in force" >/dev/null 2>&1 || true
+# --no-image-first: the old order. The binary and the restart marker are in
+# place and the daemon has been told; the image is rebuilt detached and best
+# effort, so an urgent daemon fix never waits on a docker build, and a build
+# that fails or overruns its alarm leaves this install standing (gt-vhn89).
+if [ "$IMAGE_FIRST" != "1" ]; then
+  polecat_image_step "$IMAGE_RUN" "$IMAGE_LOG" "$IMAGE_BIN" "$EXPECTED" after || true
+fi
 log "In force: ${PREV:-unknown} -> $EXPECTED. The daemon restarts itself when idle."
 result_line installed "$EXPECTED" "$PREV" ""
