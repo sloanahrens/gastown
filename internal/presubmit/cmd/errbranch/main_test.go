@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -35,5 +36,18 @@ func TestReportNamesEachFindingAndFailsOnIt(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "judged 0 of 0") {
 		t.Errorf("a clean branch printed %q, want the judged count", out.String())
+	}
+}
+
+// TestModulePathRefusesAFailedListing: when go list -m fails, the check refuses rather than
+// judging against an empty module path (gt-b9j3o.5).
+func TestModulePathRefusesAFailedListing(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("no go.mod")
+	if got, err := modulePath(func() ([]byte, error) { return nil, boom }); !errors.Is(err, boom) || got != "" {
+		t.Errorf("modulePath = %q, %v; want the listing's error and no module", got, err)
+	}
+	if got, err := modulePath(func() ([]byte, error) { return []byte("github.com/x/y\n"), nil }); err != nil || got != "github.com/x/y" {
+		t.Errorf("modulePath = %q, %v; want github.com/x/y", got, err)
 	}
 }

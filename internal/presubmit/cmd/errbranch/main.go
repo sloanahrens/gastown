@@ -39,7 +39,7 @@ func main() {
 		failf("errbranch: git diff %s...HEAD failed: %v", *base, err)
 	}
 
-	module, err := modulePath()
+	module, err := modulePath(goListModule)
 	if err != nil {
 		failf("errbranch: %v", err)
 	}
@@ -66,13 +66,19 @@ func report(w io.Writer, res presubmit.Result) error {
 	return fmt.Errorf("errbranch: %d added error branch no test drives; add a unit test that takes the failure path", len(res.Findings))
 }
 
-// modulePath is the module the profile names files by, read from the module itself.
-func modulePath() (string, error) {
-	out, err := exec.Command("go", "list", "-m").Output()
+// modulePath is the module the profile names files by, read from the module itself. run is the
+// go list call; main passes the real one, and a test passes its own.
+func modulePath(run func() ([]byte, error)) (string, error) {
+	out, err := run()
 	if err != nil {
 		return "", fmt.Errorf("go list -m: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// goListModule runs go list -m in the working directory.
+func goListModule() ([]byte, error) {
+	return exec.Command("go", "list", "-m").Output()
 }
 
 func failf(format string, args ...any) {
