@@ -1,0 +1,7 @@
+# Plugin run.sh files still waiting on their porting bead (gt-tpg0p.2).
+# One repo-relative path and its one-line reason per line, tab-separated.
+# The list only shrinks: the porting change deletes its line.
+plugins/app-promote/run.sh	the promotion gate ports to Go in gt-tpg0p.4
+plugins/polecat-image/run.sh	the build, publish and prune steps port to Go in gt-tpg0p.5 through gt-tpg0p.7
+plugins/tool-updater/run.sh	the Homebrew report ports to Go in gt-tpg0p.3
+plugins/town-metrics/run.sh	still cd's before exec'ing gt metrics run; gt-98pgy drops it once a plugin can name its binary (gt-tpg0p.1)

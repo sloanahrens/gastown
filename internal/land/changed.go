@@ -433,9 +433,15 @@ var treeWideGuards = []treeWideGuard{
 		// integration-tier — the unit tier runs no git (realgit.txt), and its
 		// guard takes an injected lister. A deletion or a rename counts too:
 		// the script's allowlist line must go in the same change.
-		pkg:     "internal/repoguard",
-		tests:   []string{"TestIntegrationNoNewShellScripts"},
-		judges:  func(rel string) bool { return strings.HasSuffix(rel, ".sh") },
+		//
+		// The plugin shim guard reads the same .sh paths through Glob and
+		// ReadFile, so its checkout test is integration-tier too; the shim
+		// allowlist is an input the branch can change on its own.
+		pkg:   "internal/repoguard",
+		tests: []string{"TestIntegrationNoNewShellScripts", "TestIntegrationPluginRunShTree"},
+		judges: func(rel string) bool {
+			return strings.HasSuffix(rel, ".sh") || rel == "internal/repoguard/plugin-run-sh.txt"
+		},
 		removal: true,
 	},
 }
