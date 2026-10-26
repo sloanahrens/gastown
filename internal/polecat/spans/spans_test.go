@@ -1,3 +1,5 @@
+//go:build unix
+
 package spans
 
 import (
@@ -473,6 +475,43 @@ func TestSummarize_ReportsCorruptLines(t *testing.T) {
 	}
 }
 
+// TestAppend_SerializesOnThePerBeadLock: a writer waits for the bead's lock
+// file, so the whole-line guarantee does not rest on what O_APPEND promises on
+// this platform.
+func TestAppend_SerializesOnThePerBeadLock(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := New(dir, fixedClock{at: testEpoch})
+	if err := st.Start("gt-abc", "organic"); err != nil {
+		t.Fatal(err)
+	}
+
+	held, err := lockLog(filepath.Join(dir, "gt-abc.jsonl.lock"))
+	if err != nil {
+		t.Fatalf("locking the span log: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- st.End("gt-abc", "organic", ReasonDone, testEpoch.Add(time.Second)) }()
+	select {
+	case err := <-done:
+		held.unlock()
+		t.Fatalf("End completed while another holder had the log's lock: %v", err)
+	//testpolicy:allow no-sleep — a lock the writer must wait on has no event to select on
+	case <-time.After(50 * time.Millisecond):
+	}
+	held.unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("End after the lock was released: %v", err)
+		}
+	//testpolicy:allow no-sleep — bound the wait for a blocked writer, which fails rather than hangs
+	case <-time.After(10 * time.Second):
+		t.Fatal("End did not complete after the lock was released")
+	}
+}
+
 func TestAppend_ConcurrentSeatsNeverInterleave(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -545,6 +584,86 @@ func TestBeadID_RefusedWhenNotAPathComponent(t *testing.T) {
 	}
 }
 
+// TestSummarize_FinalLineWithoutNewlineIsRead: a writer killed mid-append or a
+// hand-edited file can leave the last record without its newline; the record
+// still closes its attempt.
+func TestSummarize_FinalLineWithoutNewlineIsRead(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	bead := "gt-abc"
+	body := logLines(t, event{Bead: bead, Seat: "organic", Event: EventStart, At: formatTime(testEpoch)})
+	body += strings.TrimSuffix(logLines(t,
+		event{Bead: bead, Seat: "organic", Event: EventEnd, At: formatTime(testEpoch.Add(90 * time.Second))}), "\n")
+	writeLog(t, dir, bead, body)
+
+	sum, err := New(dir, fixedClock{at: testEpoch}).Summarize(bead)
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Secs != 90 || sum.Corrupt != 0 || sum.Skipped != 0 || sum.LowerBound {
+		t.Errorf("Secs/Corrupt/Skipped/LowerBound = %v/%d/%d/%v, want 90/0/0/false",
+			sum.Secs, sum.Corrupt, sum.Skipped, sum.LowerBound)
+	}
+	if len(sum.Attempts) != 1 || sum.Attempts[0].Open || sum.Attempts[0].Secs != 90 {
+		t.Errorf("Attempts = %+v, want the unterminated end to close the one 90s attempt", sum.Attempts)
+	}
+}
+
+// TestSummarize_TornFinalLineIsCountedNotFatal: half a record at the end is
+// damage the read counts, and the whole records before it still summarize.
+func TestSummarize_TornFinalLineIsCountedNotFatal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	bead := "gt-abc"
+	body := logLines(t, event{Bead: bead, Seat: "organic", Event: EventStart, At: formatTime(testEpoch)})
+	body += `{"bead":"gt-abc","seat":"organic","event":"end"`
+	writeLog(t, dir, bead, body)
+
+	sum, err := New(dir, fixedClock{at: testEpoch}).Summarize(bead)
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Corrupt != 1 {
+		t.Errorf("Corrupt = %d, want 1 for the torn final line", sum.Corrupt)
+	}
+	if len(sum.Attempts) != 1 || !sum.Attempts[0].Open || !sum.LowerBound {
+		t.Errorf("summary = %+v, want the start left open and lower bound", sum)
+	}
+}
+
+// TestSummarize_PresentButUnreadableStoreIsNotAnEmptyRead: a store entry that
+// is there and cannot be read is an error, not the zero summary a bead with no
+// log returns.
+func TestSummarize_PresentButUnreadableStoreIsNotAnEmptyRead(t *testing.T) {
+	t.Parallel()
+
+	plant := map[string]func(t *testing.T, dir, path string){
+		"directory": func(t *testing.T, _, path string) {
+			t.Helper()
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"dangling symlink": func(t *testing.T, dir, path string) {
+			t.Helper()
+			if err := os.Symlink(filepath.Join(dir, "gone.jsonl"), path); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, plant := range plant {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			plant(t, dir, filepath.Join(dir, "gt-abc.jsonl"))
+			sum, err := New(dir, fixedClock{at: testEpoch}).Summarize("gt-abc")
+			if err == nil {
+				t.Fatalf("Summarize = %+v, nil error; want an unreadable store to fail the read", sum)
+			}
+		})
+	}
+}
+
 func TestSummarize_MissingLogIsZeroAttempts(t *testing.T) {
 	t.Parallel()
 	st := New(t.TempDir(), fixedClock{at: testEpoch})
@@ -555,6 +674,33 @@ func TestSummarize_MissingLogIsZeroAttempts(t *testing.T) {
 	}
 	if sum.Secs != 0 || len(sum.Attempts) != 0 || sum.LowerBound || sum.Skipped != 0 || sum.Corrupt != 0 {
 		t.Errorf("summary = %+v, want the zero value", sum)
+	}
+}
+
+// TestStartEnd_RejectASeatThatIsNotOneToken: a new attempt names its seat as one
+// token, since the seat keys the start/end pairing and is shown to operators, so
+// whitespace and control characters are refused as a bead id that is not a path
+// component is. A close refuses only an empty seat: a log written before this
+// rule can hold an attempt under a seat with a space in it, and that attempt
+// must still be closable (gt-rm0ab).
+func TestStartEnd_RejectASeatThatIsNotOneToken(t *testing.T) {
+	t.Parallel()
+	st := New(t.TempDir(), fixedClock{at: testEpoch})
+
+	bad := []string{"", " ", "organic\tdipper", "organic\ndipper", "organic dipper", "organic\x00"}
+	for _, seat := range bad {
+		if err := st.Start("gt-abc", seat); err == nil {
+			t.Errorf("Start(%q) = nil, want an error", seat)
+		}
+	}
+	if err := st.End("gt-abc", "", ReasonDone, testEpoch); err == nil {
+		t.Errorf("End(\"\") = nil, want an error")
+	}
+	if _, err := st.EndOpen("gt-abc", "", ReasonDead, testEpoch); err == nil {
+		t.Errorf("EndOpen(\"\") = nil error, want an error")
+	}
+	if err := st.Start("gt-abc", "gastown/polecats/organic"); err != nil {
+		t.Errorf("Start rejected the rig/name seat: %v", err)
 	}
 }
 
@@ -581,5 +727,57 @@ func TestDefaultDir(t *testing.T) {
 	want := filepath.Join(townRoot, ".runtime", "polecat-spans")
 	if got := DefaultDir(townRoot); got != want {
 		t.Errorf("DefaultDir = %q, want %q", got, want)
+	}
+}
+
+// A log written before the whitespace rule still reads as it did: a seat with a
+// space in it is an attempt, not a corrupt line, so a tightened rule does not
+// change the totals of spans already recorded (gt-rm0ab).
+func TestSummarize_ReadsALegacySeatWithAWhitespaceAsItDid(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	bead := "gt-abc"
+	writeLog(t, dir, bead, logLines(t,
+		event{Bead: bead, Seat: "old seat", Event: EventStart, At: formatTime(testEpoch)},
+		event{Bead: bead, Seat: "old seat", Event: EventEnd, At: formatTime(testEpoch.Add(30 * time.Second))},
+	))
+
+	sum, err := New(dir, fixedClock{at: testEpoch}).Summarize(bead)
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Corrupt != 0 {
+		t.Errorf("Corrupt = %d, want the legacy seat read, not counted corrupt", sum.Corrupt)
+	}
+	if sum.Secs != 30 || len(sum.Attempts) != 1 {
+		t.Errorf("summary = %+v, want the one 30s attempt", sum)
+	}
+}
+
+// An attempt a log holds under a seat with a space in it can still be closed:
+// the close refuses only an empty seat, so the attempt does not stay open
+// forever behind the whitespace rule (gt-rm0ab).
+func TestEndOpen_ClosesALegacySeatWithAWhitespace(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	bead := "gt-abc"
+	writeLog(t, dir, bead, logLines(t,
+		event{Bead: bead, Seat: "old seat", Event: EventStart, At: formatTime(testEpoch)},
+	))
+	st := New(dir, fixedClock{at: testEpoch.Add(time.Minute)})
+
+	closed, err := st.EndOpen(bead, "old seat", ReasonDone, testEpoch.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("EndOpen on a legacy seat: %v", err)
+	}
+	if !closed {
+		t.Fatal("EndOpen found no open attempt under the legacy seat")
+	}
+	sum, err := st.Summarize(bead)
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Secs != 30 || len(sum.Attempts) != 1 || sum.Attempts[0].Open {
+		t.Errorf("summary = %+v, want the legacy attempt closed at 30s", sum)
 	}
 }

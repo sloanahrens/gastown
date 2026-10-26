@@ -2,7 +2,8 @@
 // summarizes that time per bead (gt-es74m).
 //
 // The log is append-only JSONL, one file per bead, so recording never touches
-// bd or Dolt and concurrent seats (and the daemon) append without a lock.
+// bd or Dolt. Appends serialize on a per-bead lock file, so concurrent seats
+// (and the daemon) cannot interleave a line.
 package spans
 
 import (
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/steveyegge/gastown/internal/constants"
 )
@@ -75,8 +77,8 @@ func (s *Store) Start(bead, seat string) error {
 	if err := validateBead(bead); err != nil {
 		return err
 	}
-	if seat == "" {
-		return fmt.Errorf("polecat spans: empty seat for bead %q", bead)
+	if err := validateSeat(seat, bead); err != nil {
+		return err
 	}
 	return s.append(bead, event{
 		Bead:  bead,
@@ -93,8 +95,8 @@ func (s *Store) End(bead, seat string, reason Reason, at time.Time) error {
 	if err := validateBead(bead); err != nil {
 		return err
 	}
-	if seat == "" {
-		return fmt.Errorf("polecat spans: empty seat for bead %q", bead)
+	if err := requireSeat(seat, bead); err != nil {
+		return err
 	}
 	if !validReason(reason) {
 		return fmt.Errorf("polecat spans: unknown reason %q for bead %q", reason, bead)
@@ -115,6 +117,9 @@ func (s *Store) End(bead, seat string, reason Reason, at time.Time) error {
 // dated before its start would be skipped on read instead of closing the
 // attempt.
 func (s *Store) EndOpen(bead, seat string, reason Reason, at time.Time) (bool, error) {
+	if err := requireSeat(seat, bead); err != nil {
+		return false, err
+	}
 	sum, err := s.Summarize(bead)
 	if err != nil {
 		return false, err
@@ -173,22 +178,37 @@ func (sum Summary) HasOpen(seat string) bool {
 	return false
 }
 
-// Summarize reads bead's log and pairs its start and end events. A bead with
-// no log summarizes to zero attempts; malformed and unpaired lines are counted
-// and never fail the read.
+// Summarize reads bead's log and pairs its start and end events. Only an absent
+// log is read as an empty one: a store that is there but cannot be read is an
+// error, and damage found in a readable log is counted in Corrupt and Skipped.
 func (s *Store) Summarize(bead string) (Summary, error) {
 	var sum Summary
 	if err := validateBead(bead); err != nil {
 		return sum, err
 	}
-	f, err := os.Open(s.path(bead))
-	if errors.Is(err, fs.ErrNotExist) {
+	path := s.path(bead)
+	// Open first, then stat the descriptor: a stat before the open could describe
+	// a different file than the one read if the path changes between the two.
+	f, err := openLogNoBlock(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// A dangling symlink is present in the store but resolves to nothing;
+		// only a path with no entry at all is a bead that recorded nothing.
+		if _, lerr := os.Lstat(path); lerr == nil {
+			return sum, fmt.Errorf("reading polecat spans for %q: %w", bead, err)
+		}
 		return sum, nil
-	}
-	if err != nil {
+	case err != nil:
 		return sum, fmt.Errorf("reading polecat spans for %q: %w", bead, err)
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return sum, fmt.Errorf("reading polecat spans for %q: %w", bead, err)
+	}
+	if !info.Mode().IsRegular() {
+		return sum, fmt.Errorf("reading polecat spans for %q: %s is not a regular file", bead, path)
+	}
 
 	open := map[string]openAttempt{}
 	r := bufio.NewReader(f)
@@ -237,6 +257,9 @@ func (sum *Summary) readLine(line, bead string, open map[string]openAttempt) {
 		return
 	}
 	at, err := time.Parse(time.RFC3339, ev.At)
+	// The read keeps the rule logs were written under: an empty seat is corrupt.
+	// The whitespace rule is for writes (validateSeat in append), so a log written
+	// before it still reads as it did.
 	if err != nil || ev.Bead != bead || ev.Seat == "" {
 		sum.Corrupt++
 		return
@@ -285,12 +308,19 @@ func (s *Store) append(bead string, ev event) error {
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return fmt.Errorf("creating polecat spans directory %s: %w", s.dir, err)
 	}
-	f, err := os.OpenFile(s.path(bead), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	path := s.path(bead)
+	lk, err := lockLog(path + ".lock")
+	if err != nil {
+		return fmt.Errorf("locking polecat span log for %q: %w", bead, err)
+	}
+	defer lk.unlock()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("opening polecat span log for %q: %w", bead, err)
 	}
-	// One O_APPEND write of the whole line keeps concurrent seats from
-	// interleaving their records without a lock.
+	// The lock, not the single write, is what keeps concurrent seats from
+	// interleaving: O_APPEND promises whole-line atomicity only on some
+	// platforms.
 	if _, err := f.Write(line); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("appending polecat span for %q: %w", bead, err)
@@ -303,6 +333,32 @@ func (s *Store) append(bead string, ev event) error {
 
 func (s *Store) path(bead string) string {
 	return filepath.Join(s.dir, bead+".jsonl")
+}
+
+// validateSeat keeps the seat one non-blank token. It keys the pairing of
+// starts and ends and is shown to operators, so a space or control character
+// would let one actor read as two.
+func validateSeat(seat, bead string) error {
+	if seat == "" {
+		return fmt.Errorf("polecat spans: empty seat for bead %q", bead)
+	}
+	if strings.IndexFunc(seat, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) >= 0 {
+		return fmt.Errorf("polecat spans: seat %q for bead %q contains whitespace or a control character", seat, bead)
+	}
+	return nil
+}
+
+// requireSeat is the check a close applies: the seat is non-empty. A close names
+// an attempt the log already holds, and a log written before the whitespace
+// rule (validateSeat, applied to new starts only) can hold a seat with a space in
+// it; refusing the close would leave that attempt open forever.
+func requireSeat(seat, bead string) error {
+	if seat == "" {
+		return fmt.Errorf("polecat spans: empty seat for bead %q", bead)
+	}
+	return nil
 }
 
 // validateBead keeps the bead id a single safe path component: a separator or
