@@ -242,10 +242,11 @@ func newTailJournalStore(bd tailJournal, open func() (tailJournalRead, error)) *
 	return &tailJournalStore{bd: bd, open: open, now: time.Now}
 }
 
-// ConfigGet answers from bd. The events-journal key is bd's own config
-// resolution — config.yaml, the store's config table, the environment — and a
-// second reader of it would report a store that journals nothing as one that
-// does. It is read once per run, not once per poll.
+// ConfigGet answers from the seam, pinned to this store: bd's own resolution
+// of the key — config.yaml and the store's config table, with any inherited
+// BD_EVENTS_JOURNAL cleared — and a second reader of it would report a store
+// that journals nothing as one that does. It is read once per run, not once
+// per poll.
 func (s *tailJournalStore) ConfigGet(key string) (string, error) { return s.bd.ConfigGet(key) }
 
 // EventsTail reads the journal over the connection, and through bd for a poll

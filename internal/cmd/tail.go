@@ -23,7 +23,6 @@ import (
 	"golang.org/x/term"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/landings"
@@ -474,7 +473,10 @@ func openTailJournal(townRoot, rig string) (tailJournal, error) {
 	if _, err := os.Stat(dir); err != nil {
 		return nil, fmt.Errorf("beads directory %s: %w", dir, err)
 	}
-	bd := &tailBDJournal{Beads: beads.NewWithBeadsDir(townRoot, dir), dir: dir, run: deps.NewBDProcessRunner(filepath.Dir(dir))}
+	// The seam pins bd to the store's beads directory and clears any inherited
+	// BD_EVENTS_JOURNAL, so events-journal answers from the store's config (as
+	// the daemon's startup check reads it), not the caller's environment.
+	bd := beads.NewWithBeadsDir(townRoot, dir)
 	return newTailJournalStore(bd, func() (tailJournalRead, error) { return openTailJournalSQL(townRoot, dir) }), nil
 }
 

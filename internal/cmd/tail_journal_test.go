@@ -85,22 +85,16 @@ func (j *countingBDJournal) EventsTail(since int64, limit int) (*beads.EventsPag
 	return page, nil
 }
 
-// A viewer left open for a minute runs bd once — the events-journal config read
-// its client makes once — where it used to run one per poll (gt-jw9sr). The
-// count is taken at the client's own bd seam, on the production tail client
-// rather than a stand-in for it, and the unit tier's harness refuses a bd start:
-// a poll that went back to one process per tick fails the run rather than
-// passing quietly.
+// A viewer left open for a minute makes one bd-backed read — the
+// events-journal config read — where it used to make one per poll
+// (gt-jw9sr). The count is of the client's reads of the seam; the bd starts
+// behind them are counted in the integration tier, whose harness can start a
+// bd (TestIntegrationTailJournalSpawnsNoBDPerPoll): the unit tier's refuses
+// every one.
 func TestTailJournalStore_MinuteOfPollsRunsNoBDPerPoll(t *testing.T) {
 	t.Parallel()
-	runs := 0
-	bd := &tailBDJournal{dir: "/town/gastown/mayor/rig/.beads", run: func(_ context.Context, env []string, args ...string) ([]byte, []byte, error) {
-		runs++
-		if want := []string{"config", "get", beads.EventsJournalKey, "--json"}; !reflect.DeepEqual(args, want) {
-			t.Errorf("bd argv = %v, want %v", args, want)
-		}
-		return []byte(`{"key":"events-journal","location":"config.yaml","value":"true"}`), nil, nil
-	}}
+	spawns := 0
+	bd := &countingBDJournal{spawns: &spawns}
 	direct := &stubJournalRead{records: []beads.EventRecord{
 		{Seq: 1, TS: "2026-09-30T13:59:00Z", Op: "create", IssueID: "gt-1", Status: "open"},
 	}}
@@ -115,8 +109,8 @@ func TestTailJournalStore_MinuteOfPollsRunsNoBDPerPoll(t *testing.T) {
 			t.Fatalf("poll %d reprinted: %q", i, got)
 		}
 	}
-	if runs != 1 {
-		t.Errorf("bd ran %d times over %d polls, want the config read alone", runs, tailPollCount)
+	if want := []string{"config"}; !reflect.DeepEqual(bd.calls, want) {
+		t.Errorf("bd-backed reads over %d polls = %v, want the config read alone", tailPollCount, bd.calls)
 	}
 	if direct.calls != tailPollCount {
 		t.Errorf("the connection answered %d of %d polls", direct.calls, tailPollCount)

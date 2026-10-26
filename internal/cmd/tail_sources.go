@@ -22,7 +22,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemonlog"
 	"github.com/steveyegge/gastown/internal/dashboard"
-	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
@@ -287,31 +286,13 @@ func (o *tailOnce) first(msg string) bool {
 
 func (o *tailOnce) clear() { o.last = "" }
 
-// tailJournal is the part of beads.Admin gt tail reads: the events journal
-// and its config key. It never writes.
+// tailJournal is the read-only slice of the beads seam gt tail reads: a
+// store's event journal and its config. Answers describe that store's own
+// database, never the caller's environment; ConfigGet returns "" for a key
+// the store does not set and an error only when bd failed.
 type tailJournal interface {
 	EventsTail(since int64, limit int) (*beads.EventsPage, error)
 	ConfigGet(key string) (string, error)
-}
-
-// tailBDJournal is the production tailJournal: the journal through
-// beads.EventsTail, and the events-journal key read with any inherited
-// BD_EVENTS_JOURNAL cleared, so the answer is the store's config (as the
-// daemon's startup check reads it), not the caller's environment.
-type tailBDJournal struct {
-	*beads.Beads
-	dir string
-	run deps.BDRunner
-}
-
-func (j *tailBDJournal) ConfigGet(key string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), beads.CommandTimeoutFor(j.dir))
-	defer cancel()
-	stdout, stderr, err := j.run(ctx, []string{"BEADS_DIR=" + j.dir, "BD_EVENTS_JOURNAL=", "BD_MACHINE=1"}, "config", "get", key, "--json")
-	if err != nil {
-		return "", fmt.Errorf("bd config get %s: %w (%s)", key, err, strings.TrimSpace(string(stderr)))
-	}
-	return beads.ParseConfigGetJSON(stdout)
 }
 
 // tailEventsPageSize bounds one bd events tail read.
