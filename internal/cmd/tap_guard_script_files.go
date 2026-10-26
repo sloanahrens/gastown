@@ -255,14 +255,22 @@ func (s scriptFileScope) checkFileTarget(raw, tool string, stderr io.Writer) err
 	// chain itself, up to maxWriteHops, so a link's target is judged even when
 	// the kernel-like resolver gives up on the chain (gt-b43ra).
 	target, ok := s.resolveTarget(raw, s.cwd)
-	// Walk from the canonical path so it compares with the worktree's canonical
-	// root; a lexical start would miss a worktree under a symlinked directory.
+	// Walk from the canonical directory with the name as written. Resolving the
+	// whole path first would replace the chain with its final target, and the
+	// names on the way (the reason for the walk) would be lost where the kernel
+	// resolves a long chain; the directory alone is canonicalized, so the walk
+	// compares with the worktree's canonical root.
 	start := named
-	if ok {
-		start = target
+	if dir, dirOK := s.resolveTarget(filepath.Dir(raw), s.cwd); dirOK {
+		start = filepath.Join(dir, filepath.Base(raw))
 	}
 	chain, final, walked := followWriteChain(start)
 	if walked {
+		// A link's text may spell the worktree through a symlinked directory, so
+		// the final path is canonicalized before it is compared with the worktree.
+		if canonical, cok := s.resolveTarget(final, s.cwd); cok {
+			final = canonical
+		}
 		return s.judgeNewScript(final, tool, stderr)
 	}
 	// The walk hit its cap, so the chain's end is unknown to it. A script name on
