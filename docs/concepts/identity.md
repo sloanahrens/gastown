@@ -260,18 +260,31 @@ bd count --status=closed --closed-after=2025-01-01
 
 ### Model Comparison
 
-When agents use different underlying models, attribution enables A/B comparison:
+A bead's `agent:<alias>` label pins it to the seat that works it (read by
+`poolPinnedAgent`, `internal/cmd/sling_pool.go`). The alias is an agent's name,
+and the model is in that agent's arguments: `gt config agent list` prints each
+agent's `Args`, and the Claude presets carry a `--model` flag there
+(`claude-sonnet` runs `--model sonnet[1m]`, `claude-haiku` runs `--model haiku`;
+`internal/config/cost_tier.go`). An agent with no `--model` flag runs the CLI's
+default model, so read the model from the arguments, not from the alias.
+
+Count closed beads per label to compare agents:
 
 ```bash
-# Tag agents by model
-# gastown/polecats/claude-1 uses Claude
-# gastown/polecats/gpt-1 uses GPT-4
+# Completed work per agent label
+bd count --status=closed --by-label
 
-# Compare quality signals: each issue's revision count is in its history
-bd history gt-xyz
-
-# The actor behind each of those changes
-bd history gt-xyz --events
+# One agent: completed beads, then those the rework label marks.
+# Repeated --label flags are ANDed (bd count --help: "must have ALL").
+bd count --status=closed --label=agent:claude-sonnet
+bd count --status=closed --label=agent:claude-sonnet --label=rework
 ```
 
-Lower revision counts suggest higher first-pass quality.
+The rework label is current state, not history. A landing or a revert sets it
+(`internal/land/land.go`, `internal/landworker/revert.go`), and so does a polecat
+handback (`internal/polecat/handback.go`). A requeue, a revert and a `done`
+resubmission clear it (`internal/cmd/land.go`, `internal/landworker/revert.go`,
+`internal/done/done.go`). The second count is therefore a lower bound on the
+beads a landing sent back: it misses any that were cleared. Dividing it by the
+completed count gives a floor on the rework rate, not a measure of first-pass
+quality, and the counts cannot show which attempt failed.
