@@ -491,7 +491,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Beads:              bd,
 		Landings:           landings,
 		Reviews:            land.TownReviewsFile(townRoot),
-		RoundsDir:          omDir,
+		RoundsDir:          roundsDirFor(reviewer, omDir),
 		Out:                out,
 		RangeChecks:        []land.RangeCheck{land.AttributionCheck},
 		ReviewErrorRejects: true,
@@ -1569,4 +1569,14 @@ func pruneLandingLogs(root string, now time.Time) {
 		}
 		_ = os.RemoveAll(filepath.Join(root, e.Name()))
 	}
+}
+
+// roundsDirFor is the directory the rounds ledger is written to: only when om
+// reviews the landing, since the ledger is the history om is handed and a
+// landing with review off has no om to hand it (gt-yphcl).
+func roundsDirFor(reviewer land.Reviewer, dir string) string {
+	if _, on := reviewer.(land.OMReviewer); !on {
+		return ""
+	}
+	return dir
 }

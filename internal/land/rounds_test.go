@@ -1,6 +1,7 @@
 package land
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -341,6 +342,7 @@ func TestFindingOutcome(t *testing.T) {
 		{Author: "Sloan Ahrens", Text: "ACCEPTED-RISK: internal/land/other.go:F1 approved there", CreatedAt: at},
 		{Author: "gastown/polecats/immortan", Text: "ACCEPTED-RISK: F1 my own work is fine", CreatedAt: at},
 		{Author: "gastown/polecats/immortan", Text: "REBUTTAL: F6 not my problem", CreatedAt: at},
+		{Author: "Sloan Ahrens", Text: "ACCEPTED-RISK: F5 approved\nACCEPTED-RISK: F10 approved too\nthe F8 mention here is prose", CreatedAt: at},
 	}
 	inFile := FindingKey{File: "internal/land/rounds.go", ID: "F1"}
 	tests := []struct {
@@ -356,7 +358,11 @@ func TestFindingOutcome(t *testing.T) {
 		{name: "om does not mention a fixed finding", key: inFile, prev: OutcomeFixed, class: ClassificationUnresolved, want: OutcomeFixed},
 		{name: "an accepted risk names it", key: FindingKey{ID: "F2"}, want: OutcomeAccepted},
 		{name: "a rebuttal names it", key: FindingKey{ID: "F3"}, want: OutcomeRebutted},
-		{name: "an accepted risk names its file and id", key: FindingKey{File: "internal/land/rounds.go", ID: "F4"}, want: OutcomeAccepted},
+		{name: "a file and id form settles nothing: a comment names an id", key: FindingKey{File: "internal/land/rounds.go", ID: "F4"}, want: OutcomeOpen},
+		{name: "one comment with two id lines settles each id", key: FindingKey{ID: "F5"}, want: OutcomeAccepted},
+		{name: "the second id line of one comment settles its id", key: FindingKey{ID: "F10"}, want: OutcomeAccepted},
+		{name: "a prose mention of an id settles nothing", key: FindingKey{ID: "F8"}, want: OutcomeOpen},
+		{name: "an id names one finding exactly: F10 does not settle F1", key: inFile, class: ClassificationUnresolved, want: OutcomeOpen},
 		{name: "an accepted risk names a bare id with no space after the marker", key: FindingKey{ID: "F7"}, want: OutcomeAccepted},
 		{name: "a file scoped comment does not settle the id in another file", key: inFile, class: ClassificationUnresolved, want: OutcomeOpen},
 		{name: "an accepted risk is not reopened by omission", key: FindingKey{ID: "F2"}, prev: OutcomeAccepted, class: ClassificationUnresolved, want: OutcomeAccepted},
@@ -446,5 +452,32 @@ func TestLandSurvivesACorruptRoundsLedger(t *testing.T) {
 	f.assertRejected(t, err, RejectReview, LabelRework)
 	if !strings.Contains(out.String(), "could not record the round in the rounds ledger") {
 		t.Errorf("the failed ledger write is not in the landing log:\n%s", out.String())
+	}
+}
+
+// An unreadable rounds ledger is named once for its bead, not on every round:
+// the review runs without rounds and the log says so once (gt-yphcl).
+func TestLogRoundsNamesAnUnreadableLedgerOncePerBead(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "landing-gt-yphcl")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rounds-gt-yphcl.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	l := &Lander{RoundsDir: dir, Out: &out}
+	issue := &beads.Issue{ID: "gt-yphcl"}
+	w := Work{BeadID: "gt-yphcl", Head: "abc123"}
+	v := Verdict{Verdict: VerdictRequestChanges}
+	for i := 0; i < 3; i++ {
+		l.logRounds(issue, w, v)
+	}
+	if n := strings.Count(out.String(), "could not record the round"); n != 1 {
+		t.Errorf("the unreadable ledger was named %d times, want once:\n%s", n, out.String())
+	}
+	if !l.firstRoundsWarning("other-bead") {
+		t.Error("a different bead is not named yet, but its warning was suppressed")
 	}
 }

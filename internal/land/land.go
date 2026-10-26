@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -148,8 +149,12 @@ type Lander struct {
 	// findings each om round raised and what became of them, the history
 	// gt-3l5qy hands om through --rounds-file (gt-yphcl). Empty means off.
 	RoundsDir string
-	Out       io.Writer
-	Now       func() time.Time
+	// roundsWarnMu guards roundsWarned: a bead whose ledger is unreadable is
+	// named once in the log, not on every round (gt-yphcl).
+	roundsWarnMu sync.Mutex
+	roundsWarned map[string]bool
+	Out          io.Writer
+	Now          func() time.Time
 	// Followups, when set, is the beads surface the post-landing follow-up
 	// feed files through: a landing om approved at or above the rig's bar gets
 	// shaped beads for the minor findings that were not worth blocking on, or a
@@ -966,8 +971,27 @@ func (l *Lander) logRounds(issue *beads.Issue, w Work, v Verdict) {
 	}
 	ledger := RoundsLedger{OutDir: l.RoundsDir, Bead: w.BeadID, Now: l.now}
 	if err := ledger.Append(reviewAttempt(issue.Notes), w.Head, v.Findings); err != nil {
-		l.logf("%s: could not record the round in the rounds ledger (%v); the landing is unaffected", w.BeadID, err)
+		if errors.Is(err, ErrRoundsCorrupt) && !l.firstRoundsWarning(w.BeadID) {
+			return
+		}
+		l.logf("%s: could not record the round in the rounds ledger (%v); the landing is unaffected, and om reviews without the rounds", w.BeadID, err)
 	}
+}
+
+// firstRoundsWarning reports whether bead has not been named for an unreadable
+// rounds ledger yet, and marks it named. The lander lives across beads, so the
+// marks are kept per bead (gt-yphcl).
+func (l *Lander) firstRoundsWarning(bead string) bool {
+	l.roundsWarnMu.Lock()
+	defer l.roundsWarnMu.Unlock()
+	if l.roundsWarned == nil {
+		l.roundsWarned = map[string]bool{}
+	}
+	if l.roundsWarned[bead] {
+		return false
+	}
+	l.roundsWarned[bead] = true
+	return true
 }
 
 func (l *Lander) now() time.Time {

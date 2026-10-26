@@ -5,19 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // DefaultRoundsCap bounds Render's output in bytes when the caller names no
 // cap: the 16 KiB a landing's rounds file is designed to stay under, small
-// enough for om to read whole (gt-yphcl).
+// enough for om to read whole. Over the cap Render drops the oldest rounds
+// whole and keeps the newest even alone over it (gt-yphcl).
 const DefaultRoundsCap = 16 << 10
 
 // ErrRoundsCorrupt reports a ledger file that does not parse: a caller treats
@@ -80,9 +79,9 @@ func (k FindingKey) String() string {
 // Key is the finding's identity in the rounds ledger.
 func (f Finding) Key() FindingKey { return FindingKey{File: f.Path, ID: f.ID} }
 
-// rebuttalMarker opens a bead comment that records a finding the later round
-// should re-judge. It settles like an accepted risk does, so it takes the same
-// allowlist: the decision is the overseer's or Sloan's, never the author's.
+// rebuttalMarker opens a bead comment that records a finding is wrong. Who may
+// write it is stated in docs/reference.md, under recording a decision on a review
+// finding.
 const rebuttalMarker = "REBUTTAL:"
 
 // RoundsLedger is one landing's record of what each om round raised and what
@@ -305,48 +304,37 @@ func rebuttedFinding(comments []beads.Comment, key FindingKey) bool {
 // author may write it names key.
 func anyCommentNames(comments []beads.Comment, marker string, key FindingKey) bool {
 	for _, c := range comments {
-		if text, ok := decisionComment(c, marker); ok && commentNamesFinding(text, key) {
+		if text, ok := decisionComment(c, marker); ok && commentNamesFinding(text, marker, key) {
 			return true
 		}
 	}
 	return false
 }
 
-// commentNamesFinding reports whether text names key as one of its words: the
-// finding's id, its file and id joined by a colon, or its base name and id.
-// om's ids repeat across files, so a bare id settles every finding carrying
-// it, while a file:id names one.
-func commentNamesFinding(text string, key FindingKey) bool {
+// commentNamesFinding reports whether a line of text opens with marker and names
+// key's id as the word after it. One line settles one id, and text that merely
+// mentions an id, or a file, settles nothing. Files and base names are never
+// matched: a comment names an id, and the ledger's identity is the (file, id)
+// pair. An id is matched exactly, so a comment that names F1 does not settle F10.
+func commentNamesFinding(text, marker string, key FindingKey) bool {
 	if key.ID == "" {
 		return false
 	}
-	// A comment that omits the space after the marker — "ACCEPTED-RISK:F2" —
-	// names the finding the same as one that keeps it.
-	text = strings.TrimPrefix(strings.TrimPrefix(text, acceptedRiskMarker), rebuttalMarker)
-	names := []string{key.ID}
-	if key.File != "" {
-		names = append(names, key.File+":"+key.ID, path.Base(key.File)+":"+key.ID)
-	}
-	for _, word := range findingWords(text) {
-		for _, name := range names {
-			if strings.EqualFold(word, name) {
-				return true
-			}
+	for _, line := range strings.Split(text, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), marker)
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			continue
+		}
+		// "ACCEPTED-RISK:F2" and "ACCEPTED-RISK: F2:" name the same id.
+		if strings.Trim(fields[0], ":.,;()") == key.ID {
+			return true
 		}
 	}
 	return false
-}
-
-// findingWords splits text into the words an id can be named by, trimming the
-// punctuation around each so "F1:", "(F1)" and "F1." all read as F1.
-func findingWords(text string) []string {
-	words := strings.Fields(text)
-	for i, word := range words {
-		words[i] = strings.TrimFunc(word, func(r rune) bool {
-			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '/' && r != '\\'
-		})
-	}
-	return words
 }
 
 // findingText is the ledger's text for a finding: om's title, or its detail

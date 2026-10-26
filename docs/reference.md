@@ -293,14 +293,15 @@ overseer or Sloan may write it: a polecat describes the disagreement in a plain 
 lets them decide.
 
     ACCEPTED-RISK: F2 the mount is approved by design 5.5
-    REBUTTAL: internal/land/rounds.go:F3 the guard runs on the write path too
+    REBUTTAL: F3 the guard runs on the write path too
 
 `ACCEPTED-RISK:` records a decision already made, so a finding that restates it is info.
-`REBUTTAL:` records that the finding is wrong. Both name the finding by its id, or by
-`file:id` when om reuses an id across files: a bare id settles every finding that carries
-it. The round history settles each finding from these comments and from the next round's
-classification once the om review reads it (gt-3l5qy); until then every finding the ledger
-records is open.
+`REBUTTAL:` records that the finding is wrong. Each line of the comment names one finding
+by its exact id, the word after the marker, so a comment carries one line per finding. A
+line that only mentions an id in prose settles nothing, and a file name settles nothing:
+the ledger's identity for a finding is the (file, id) pair, and a comment names only the id.
+Wiring the settlement into the landing review is gt-3l5qy's; until it lands, every finding
+the ledger records stays open.
 
 Never poll the slot, and never script a retry around `gt done` or `gt slot`: a
 polling loop holds the gate every other agent is queued behind, one pass at a
