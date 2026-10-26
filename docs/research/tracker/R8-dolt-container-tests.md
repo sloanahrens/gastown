@@ -12,12 +12,14 @@ R7 or R8 entry, so this report answers the bead's own acceptance boxes, not the 
 
 ## Answer
 
-Twenty-eight test files in **seven packages** call a Dolt-container entry point
-(`beads`, `cmd`, `daemon`, `mail`, `notify`, `polecat`, `testutil`). Three of them start a shared
-container in `TestMain` (`cmd`, `daemon`, `notify`), one starts it from inside a test (`beads`), and
-two start it lazily on the first `RequireDoltContainer` (`mail`, `polecat`); `internal/cmd` and
-`internal/testutil` also lease **scratch** containers (up to three more per process). A further five test files start, or impersonate, a real
-`dolt` **binary** instead. Nothing in `internal/slot`, `internal/doctor` or `internal/hooks`
+Twenty test files in **seven packages** call a Dolt-container entry point
+(`beads`, `cmd`, `daemon`, `mail`, `notify`, `polecat`, `testutil`); section 2 lists them in 25 rows
+because three of the files appear under more than one row. Three of them start a shared container in
+`TestMain` (`cmd`, `daemon`, `notify`), one starts it from inside a test (`beads`), and two start it
+lazily on the first `RequireDoltContainer` (`mail`, `polecat`); `internal/cmd` and `internal/testutil`
+also lease **scratch** containers (up to three more per process). A further five test files in three
+packages (`cmd`, `daemon`, `doltserver`) start, or impersonate, a real `dolt` **binary** instead
+(section 3). Nothing in `internal/slot`, `internal/doctor` or `internal/hooks`
 starts a Dolt container or server: their "dolt" hits are `docker ps` fixtures, the guard that blocks
 unwrapped container runs, and the image-name patterns of the container gate.
 
@@ -29,7 +31,8 @@ removal as a checkable fact, section 7 lists the gaps found, and section 8 is th
 
 The two entries in `internal/testpolicy/docker.txt` (`internal/beads`, `internal/testutil`) start no
 Dolt **test container** in their unit tier at all: `make test-integration`'s second command re-runs
-both packages with Docker opted in for nothing (section 4). That is the cheapest thing on this list.
+both packages with Docker opted in for nothing (section 4). That is the cheapest thing on this list;
+the delete starts with the static rule, not the list (section 4).
 
 ## 1. The entry points, and what each starts
 
@@ -62,7 +65,9 @@ the tree or on a bead; **no `make test-integration-wall` output is in the repo**
 |---|---|---|---|---|---|
 | 1 | `internal/beads/client_contract_integration_test.go:26` (`newDB` `:49`) | shared container, lazily, inside the test | **d** | 27 bd inits = **2 min** on the container (`:34-38`) | `bd` side of the seam contract; the tracker side already runs on `pgtest` (section 8). Stays until bd/the shim retires. |
 | 2 | `internal/cmd/integration_testmain_test.go:48` | shared container in `TestMain` for the whole package | **b** | not recorded (package total 320-607 s before conversion, `docs/plans/2026-09-30-d9-gate-plan.md:18`) | A town built by `gt install` routes to the tracker; the tier's store becomes `trackerd` + `pgtest`. |
-| 3 | `internal/cmd/dolt_test_helpers_test.go:23`, `:40` | require / scratch lease helpers | **a** / **b** / **d** by caller | not recorded | Follows its callers (rows 4-11). |
+| 3a | `internal/cmd/dolt_test_helpers_test.go:23` (`requireDoltServer`) | shared container | **d** | not recorded | Wrapper for the shim-kept cases (rows 7-9); deleted with them. |
+| 3b | `internal/cmd/dolt_test_helpers_test.go:40` (`requireScratchDoltServer`) | scratch container | **a** | not recorded | The artifact case (row 4) leases through it; the lease goes when that case reaches the unit tier. |
+| 3c | `internal/cmd/dolt_test_helpers_test.go:40` (`requireScratchDoltServer`) | scratch container | **b** | not recorded | The store-init cases (rows 5-6) lease through it; the lease ports with them. |
 | 4 | `internal/cmd/rig_integration_test.go:196`, `:400`, `:474`, `:528`, `:564`, `:626`, `:803` (7 leases) | scratch container | **a** | the pool exists because eight tests queued ~100 s of a 170 s package wall before it (`doltscratch.go:18-22`) | These assert directories, `rigs.json`, `config.json`, routes and worktree cleanliness; none reads the database. Needs one seam for `rig.Manager.InitBeads` (`internal/rig/manager.go:671`), then the unit tier carries them. |
 | 5 | `internal/cmd/rig_integration_test.go:323` `TestIntegrationRigAddInitializesBeads`, `:752` `TestIntegrationAgentBeadIDs` | scratch container | **b** | not recorded | Asserts the rig's store was initialised; port to the tracker's create path. |
 | 6 | `internal/cmd/beads_db_init_test.go:394` (via `newAdoptTown`), `:90`, `:460` | scratch container + `RunTestContainerInit` | **b** | "whole 60s" before the scratch pool (`:386`) | `gt rig add --adopt` creating a store; port to the tracker. |
@@ -113,8 +118,13 @@ the migration the pool's template removes (`internal/testutil/doltpool_template.
 
 The checkable consequence: `make test-integration`'s second command re-runs both `docker.txt`
 packages whole with `GT_TEST_DOCKER=1`, and neither starts a container in an untagged file. Their
-integration-tagged files already run in the first command. Dropping both entries and the Makefile's
-empty-list guard (`Makefile:509`) removes two whole-package runs with no coverage lost.
+integration-tagged files already run in the first command. Dropping both entries removes two
+whole-package runs with no coverage lost, but it is not a list edit: `TestDockerTier` applies the
+static name rule to these files and fails on a package that calls an entry point without being
+listed, so the rule must first stop counting the stub-bd `RunTestContainerInit` calls
+(`internal/beads/test_container_test.go`, `internal/beads/test_database_source_test.go`) and the
+fake harness's `WithDolt` calls (`internal/testutil/hermetic_test.go`); the two empty-list guards
+(`Makefile:509`, `:540`) go with the lines.
 
 ## 5. Dolt-surface tests that start nothing, deleted with S4
 
@@ -211,10 +221,13 @@ to serialize.
    startup (up to three containers) from `internal/cmd`, the largest single saving available today.
 2. Move `internal/mail/router_integration_test.go` (row 15) to the unit tier on the `Router.bd` and
    `Router.town` seams. `internal/mail` then starts no container at all and leaves the seven.
-3. Delete both entries from `internal/testpolicy/docker.txt` and the empty-list guard in
-   `Makefile:509`. Their untagged files start nothing (section 4), and their tagged files already run
-   in the tagged command. This drops two whole-package runs from the container tier with zero
-   coverage lost, and it needs no code, no flip, and no Postgres.
+3. Delete both entries from `internal/testpolicy/docker.txt`. Their untagged files start nothing
+   (section 4), and their tagged files already run in the tagged command. This drops two
+   whole-package runs from the container tier with zero coverage lost, and it needs no rig flip and
+   no Postgres, but it does need code: `TestDockerTier` keeps the list exact against the static name
+   rule (`internal/testpolicy/docker.go:19-28`), which still counts the two packages' stub-bd and
+   fake-harness calls, so narrow the rule first; then the empty-list guards in `Makefile:509` and
+   `:540` go with the lines.
 
 ### What the replacement already costs
 
