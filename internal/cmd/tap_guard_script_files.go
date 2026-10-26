@@ -29,7 +29,7 @@ import (
 // scriptFileExtensions are the suffixes of the files this guard refuses to
 // let a session create. They are compared lowercased, so "setup.SH" is the
 // same request as "setup.sh".
-var scriptFileExtensions = []string{".sh", ".bash", ".zsh", ".pl", ".rb"}
+var scriptFileExtensions = []string{".sh", ".bash", ".zsh", ".ksh", ".csh", ".tcsh", ".fish", ".pl", ".rb"}
 
 // scriptFilePythonExtension is the one script-shaped suffix that is allowed,
 // with the advisory judgeNewScript prints.
@@ -50,10 +50,10 @@ var tapGuardScriptFilesCmd = &cobra.Command{
 	Long: `Deny creating a new shell, Perl or Ruby script in a Gas Town worker's worktree.
 
 Edit/Write/MultiEdit/NotebookEdit are denied when the target is inside the
-session's own worktree, does not exist yet, and ends in .sh, .bash, .zsh, .pl
-or .rb. Editing a script that already exists is allowed, and removing one is
-always allowed. Bash is not judged here; the denial redirect says where Bash-created scripts
-are to be caught.
+session's own worktree, does not exist yet, and ends in .sh, .bash, .zsh,
+.ksh, .csh, .tcsh, .fish, .pl or .rb. Editing a script that already exists is
+allowed, and removing one is always allowed. Bash is not judged here: the
+planned commit gate gt-lpm8b, not landed yet, is to catch Bash-created scripts.
 
 The guard fails closed on what it can name: a hook payload it cannot read or
 parse, or a session whose worktree it cannot place, is denied when the payload
@@ -465,7 +465,17 @@ func unjudgedWorktree(hook scriptFileInput, stderr io.Writer) error {
 // payloadScriptSuffix matches a denied script suffix, in any case, ending a
 // path-like word: the suffix followed by a quote, space, comma, brace or the
 // end of the text.
-var payloadScriptSuffix = regexp.MustCompile(`(?i)\.(sh|bash|zsh|pl|rb)(["'\s,}]|$)`)
+var payloadScriptSuffix = regexp.MustCompile(`(?i)\.(` + scriptFileSuffixAlternation() + `)(["'\s,}]|$)`)
+
+// scriptFileSuffixAlternation is the denied suffixes as a regexp alternation,
+// so the payload check and scriptFileExtensions cannot drift apart.
+func scriptFileSuffixAlternation() string {
+	names := make([]string, 0, len(scriptFileExtensions))
+	for _, ext := range scriptFileExtensions {
+		names = append(names, regexp.QuoteMeta(strings.TrimPrefix(ext, ".")))
+	}
+	return strings.Join(names, "|")
+}
 
 // payloadShellTool matches a payload's tool name when it is a shell tool.
 var payloadShellTool = regexp.MustCompile(`"tool_name"\s*:\s*"(Bash|Monitor)"`)
@@ -481,9 +491,10 @@ func payloadNamesScriptSuffix(raw string) bool {
 	return payloadScriptSuffix.MatchString(raw)
 }
 
-// printScriptFileUnjudgeable denies a call the guard cannot judge. It fails
-// closed on purpose (gt-b43ra): passing an unchecked call through is the hole
-// this guard exists to close, so "cannot tell" reads as "no".
+// printScriptFileUnjudgeable denies a call the guard cannot judge. The caller
+// decides that the call names a script suffix: unjudgedPayload prints this only
+// then, and allows every other unreadable payload. Where it does deny, it fails
+// closed on purpose (gt-b43ra): "cannot tell" reads as "no".
 func printScriptFileUnjudgeable(w io.Writer, why string) {
 	fmt.Fprintf(w, "\n❌ NO NEW SCRIPTS: %s, so this call is denied rather than passed through unchecked.\n", why)
 	printScriptFilePolicy(w)

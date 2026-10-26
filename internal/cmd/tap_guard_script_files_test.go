@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/hooks"
 )
 
 // scriptFileTestTown is a hermetic Gas Town layout for the script-files guard:
@@ -60,9 +62,6 @@ func newScriptFileTestTown(t *testing.T) scriptFileTestTown {
 			t.Fatalf("marking %s as a checkout: %v", dir, err)
 		}
 	}
-	// The seeded scripts carry no shebang: the guard judges a path by its
-	// existence and suffix, and a shebang literal in a test file is itself a
-	// no-exec-files violation (internal/testpolicy).
 	// A dangling symlink: its target is missing, so writing it creates one.
 	if err := os.Symlink(filepath.Join(worktree, "missing-target"), filepath.Join(worktree, "ghost.sh")); err != nil {
 		t.Fatalf("seeding a dangling symlink: %v", err)
@@ -77,6 +76,9 @@ func newScriptFileTestTown(t *testing.T) scriptFileTestTown {
 	if err := os.Symlink(filepath.Join(worktree, "readme.txt"), filepath.Join(worktree, "readme-link")); err != nil {
 		t.Fatalf("seeding a link to readme.txt: %v", err)
 	}
+	// The seeded scripts carry no shebang: the guard judges a path by its
+	// existence and suffix, and a shebang literal in a test file is itself a
+	// no-exec-files violation (internal/testpolicy).
 	for _, file := range []struct{ path, content string }{
 		{filepath.Join(worktree, "build.sh"), "go build ./...\n"},
 	} {
@@ -312,6 +314,32 @@ func TestScriptFileGuardCrewSession(t *testing.T) {
 // TestScriptFileGuardNoImplicitAllowlist pins by behavior that no name exempts a
 // new script: a new script is refused whatever plausible repo name it carries
 // (gt-b43ra).
+// TestScriptFileGuardIsRegistered pins the cobra registration and the hook
+// config registration: removing either fails here (gt-b43ra).
+func TestScriptFileGuardIsRegistered(t *testing.T) {
+	t.Parallel()
+	c, _, err := rootCmd.Find([]string{"tap", "guard", "script-files"})
+	if err != nil || c == nil || c.Name() != "script-files" {
+		t.Fatalf("gt tap guard script-files is not registered: %v", err)
+	}
+	for role, cfg := range hooks.DefaultOverrides() {
+		if role != "polecats" && role != "crew" {
+			continue
+		}
+		listed := false
+		for _, entry := range cfg.PreToolUse {
+			for _, h := range entry.Hooks {
+				if strings.Contains(h.Command, "tap guard script-files") {
+					listed = true
+				}
+			}
+		}
+		if !listed {
+			t.Errorf("%s hook config does not list the script-files guard", role)
+		}
+	}
+}
+
 func TestScriptFileGuardNoImplicitAllowlist(t *testing.T) {
 	t.Parallel()
 	town := newScriptFileTestTown(t)
