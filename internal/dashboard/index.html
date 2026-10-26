@@ -50,6 +50,7 @@ td.n,th.n{text-align:right}
 .body.stale,#cost .spendpart.stale{opacity:.55}
 .spark{width:100%;height:56px;display:block}
 .chart{width:100%;height:64px;display:block}
+.dchart{width:100%;height:auto;display:block;margin:4px 0 2px}.dchart .bar{fill:var(--blue)}.dchart .axis{stroke:var(--line)}.dchart .limit{stroke:var(--amber);stroke-width:1.5;stroke-dasharray:4 3}.dchart text{fill:var(--dim);font-size:11px}.dchart .amt{fill:var(--text)}.dchart .limitlbl{fill:var(--amber)}.dchart .gap{stroke:var(--dim);stroke-width:1;stroke-dasharray:2 2}
 .hbars{display:flex;align-items:stretch;gap:2px;height:64px;margin:4px 0 2px}
 .hbar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;min-height:1px}
 .hbar i{display:block;min-height:1px}
@@ -3597,6 +3598,53 @@ function mangoRow(t, stale) {
   return tr;
 }
 
+// costBarChart draws one of the Cost panel's charts from its data, which the
+// server builds (CostChart): one bar or gap per entry, an optional limit line,
+// and the aria-label that carries the numbers. The page only places what it is
+// given; it decides no value, label or line of its own.
+function costBarChart(box, c, kind) {
+  if (!c || !Array.isArray(c.bars) || !c.bars.length) return;
+  const daily = kind === "daily";
+  const W = 700, H = daily ? 150 : 120, pad = 26, base = H - (daily ? 26 : 22);
+  const top = Math.max(0.01, c.limit ? c.limit.value : 0, ...c.bars.map(b => b.value || 0));
+  const y = v => base - (Math.max(0, v) / top) * (base - 16);
+  const slot = (W - 2 * pad) / c.bars.length;
+  const svg = svgEl("svg", {viewBox: "0 0 " + W + " " + H, class: "dchart " + kind, role: "img", "aria-label": c.aria});
+  svg.append(svgEl("line", {x1: pad, x2: W - pad, y1: base, y2: base, class: "axis"}));
+  c.bars.forEach((b, i) => {
+    const cx = pad + slot * i + slot / 2;
+    if (b.gap) {
+      svg.append(svgEl("line", {x1: cx, x2: cx, y1: base - 3, y2: base, class: "gap"}));
+    } else {
+      const w = slot * (daily ? 0.56 : 0.6);
+      const bar = svgEl("rect", {x: cx - w / 2, y: y(b.value), width: w, height: Math.max(0, base - y(b.value)), class: "bar"});
+      const t = svgEl("title", {}); t.textContent = b.title;
+      bar.append(t);
+      svg.append(bar);
+      if (daily) {
+        const amt = svgEl("text", {x: cx, y: y(b.value) - 4, class: "amt", "text-anchor": "middle"});
+        amt.textContent = money(b.value);
+        svg.append(amt);
+      }
+    }
+    if (daily || i % 3 === 0) {
+      const lbl = svgEl("text", {x: cx, y: H - (daily ? 8 : 6), class: "day", "text-anchor": "middle"});
+      lbl.textContent = b.label;
+      svg.append(lbl);
+    }
+  });
+  if (c.limit) {
+    svg.append(svgEl("line", {x1: pad, x2: W - pad, y1: y(c.limit.value), y2: y(c.limit.value), class: "limit"}));
+    const lt = svgEl("text", {x: W - pad, y: y(c.limit.value) - 4, class: "limitlbl", "text-anchor": "end"});
+    lt.textContent = c.limit.label;
+    svg.append(lt);
+  }
+  box.append(svg);
+}
+
+function costDailyChart(box, c) { costBarChart(box, c, "daily"); }
+function costHourlyChart(box, c) { costBarChart(box, c, "hourly"); }
+
 // The Cost panel: what the town is spending, in one place. DeepSeek's balance,
 // pace and credit, the Claude plan line and the Jev row under them, the usage
 // scan's estimate and slow runs, the GCP budget alert, and what each om review
@@ -3622,6 +3670,8 @@ function renderCost(s) {
     return;
   }
   const spendWords = costSpend(spendBox, d, r);
+  costDailyChart(spendBox, s.cost_charts && s.cost_charts.daily);
+  costHourlyChart(spendBox, s.cost_charts && s.cost_charts.hourly);
   costClaudePlan(box, s.claude_plan);
   costJev(box, s.jev_spend, readOf(s, "jev_spend"));
   costGCP(box, s.cloud);

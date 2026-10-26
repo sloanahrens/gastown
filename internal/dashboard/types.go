@@ -680,6 +680,15 @@ type State struct {
 	// worker's review log. It is nil until the reader first reports.
 	Rework *Rework         `json:"rework,omitempty"`
 	Spend  json.RawMessage `json:"spend,omitempty"`
+	// SpendHours is the last day's DeepSeek spend by hour, from the balance
+	// ledger. The page does not read it; the charts below are built from it.
+	SpendHours []SpendHour `json:"-"`
+	// SpendSkipped is how many malformed ledger lines the last read skipped.
+	SpendSkipped int `json:"-"`
+	// CostCharts is what the Cost panel draws its two charts from, built from
+	// the spend report, the hours and the Claude plan. Nil until one of them has
+	// reported.
+	CostCharts *CostCharts `json:"cost_charts,omitempty"`
 	// JevSpend is the Jev ledger's calls and dollars over the spend command's
 	// window, read beside the DeepSeek spend. It is nil until the reader first
 	// reports; a failed read keeps the last good value and says so in Reads.
@@ -740,6 +749,9 @@ type Config struct {
 	Mango func() *Mango
 	// Spend returns the DeepSeek spend report as JSON, nil when unavailable.
 	Spend func() json.RawMessage
+	// SpendHours returns the last day's spend by hour from the balance ledger,
+	// with the malformed lines it skipped. It is read with the spend report.
+	SpendHours func() SpendRead
 	// JevSpend returns the Jev spend row, nil when the read failed.
 	JevSpend func() *JevSpend
 	// JevScorecard returns the Jev batteries' scorecard lines, nil when the
@@ -904,4 +916,12 @@ func (c *Config) defaults() {
 	if c.RingSize <= 0 {
 		c.RingSize = 500
 	}
+}
+
+// SpendRead is one read of the balance ledger: the last day's hours, and how many
+// malformed lines the read skipped. A read that failed has no hours (nil), so
+// the hourly chart is absent rather than showing hours that stopped moving.
+type SpendRead struct {
+	Hours   []SpendHour
+	Skipped int
 }

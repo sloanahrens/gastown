@@ -716,6 +716,7 @@ func (h *Hub) pollClaudePlan() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.ClaudePlan = c
+	h.rebuildCostChartsLocked()
 	h.publishLocked()
 }
 
@@ -791,16 +792,36 @@ func (h *Hub) pollTrend() {
 
 func (h *Hub) pollSpend() {
 	sp := h.cfg.Spend()
+	var read SpendRead
+	if h.cfg.SpendHours != nil {
+		read = h.cfg.SpendHours()
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.cfg.SpendHours != nil {
+		h.state.SpendHours = read.Hours
+		h.state.SpendSkipped = read.Skipped
+	}
+	// The hours move on every poll, so the charts are rebuilt on every poll,
+	// whether or not the spend report answered: a failed report keeps its last
+	// good figures, and the hours are whatever the ledger read gave, or none.
 	if len(sp) == 0 {
+		h.rebuildCostChartsLocked()
 		h.readFailedLocked(SourceSpend, h.cfg.SpendEvery)
 		h.publishLocked()
 		return
 	}
 	h.state.Spend = sp
+	h.rebuildCostChartsLocked()
 	h.readOKLocked(SourceSpend, h.cfg.SpendEvery)
 	h.publishLocked()
+}
+
+// rebuildCostChartsLocked rebuilds the Cost panel's charts from the spend
+// report, the day's hours and the Claude plan. The caller holds h.mu.
+func (h *Hub) rebuildCostChartsLocked() {
+	charts := BuildCostCharts(time.Now(), SpendPerDay(h.state.Spend), h.state.SpendHours, h.state.SpendSkipped, h.state.ClaudePlan)
+	h.state.CostCharts = &charts
 }
 
 // pollJevSpend keeps the last good Jev row across a failed read, like the
