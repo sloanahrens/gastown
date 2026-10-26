@@ -1346,6 +1346,13 @@ func rigDefaultBranch(rigPath string) (string, error) {
 	return "main", nil
 }
 
+// revertWorktree opens the throwaway worktree's Git the revert commit is made
+// through. A revert is a landing commit, so it carries the landing committer
+// like the merge candidate does (gt-dc4y3).
+func revertWorktree(dir string) *git.Git {
+	return land.CommittingGit(dir)
+}
+
 // postLandRevert builds the revert of a landing in a throwaway worktree of
 // repo at the landed commit and pushes it to remote as branch, the rig's
 // configured landing remote (gt-fn9e6.9). A landing is a --no-ff merge
@@ -1369,7 +1376,7 @@ func postLandRevert(repo, workRoot, remote string) landworker.RevertBuilder {
 			_ = g.WorktreeRemove(dir, true)
 			_ = g.WorktreePrune()
 		}()
-		wt := git.NewGit(dir)
+		wt := revertWorktree(dir)
 		parents, err := wt.Parents(rec.LandedCommit)
 		if err != nil {
 			return "", err
