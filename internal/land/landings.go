@@ -56,16 +56,21 @@ type SpanSummarizer interface {
 	Summarize(bead string) (spans.Summary, error)
 }
 
-// Append writes rec as one line, with rec's polecat time read from Spans. The
-// directory must be 0700-safe (owned by this user, not group- or
-// world-writable) and the file must not be a symlink, so no other account can
-// redirect or forge the log.
+// Append writes rec as one line. The directory must be 0700-safe (owned by
+// this user, not group- or world-writable) and the file must not be a symlink,
+// so no other account can redirect or forge the log.
+//
+// The polecat time is Append's to write: it fills rec's three polecat fields
+// from Spans when rec carries none, and a caller that set them itself keeps
+// what it set rather than having the values replaced under it.
 //
 // A tail left torn (a crash or a short write stopped mid-record, so the file
 // does not end in a newline) is repaired first, and a short write of rec is
 // rolled back, so no append can glue its record onto a partial one.
 func (f *LandingsFile) Append(rec LandingRecord) error {
-	rec.PolecatSecs, rec.PolecatAttempts, rec.PolecatLowerBound = f.polecatTime(rec.BeadID)
+	if rec.PolecatSecs == 0 && len(rec.PolecatAttempts) == 0 && !rec.PolecatLowerBound {
+		rec.PolecatSecs, rec.PolecatAttempts, rec.PolecatLowerBound = f.polecatTime(rec.BeadID)
+	}
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("encoding landing record: %w", err)
@@ -76,18 +81,22 @@ func (f *LandingsFile) Append(rec LandingRecord) error {
 // polecatTime is the record's polecat time: the time the bead's seats spent
 // hooked on it, or nothing for a crew landing, whose bead has no seat to log,
 // and for a bead whose log records nothing. A log that cannot be read is
-// logged and left out: the record is the landing, and the time is not worth
-// one (gt-yxl22).
+// logged and its time left out, but the record still says the total is a
+// lower bound: the log was there, so there is time the record cannot count.
+// The landing is never worth failing over the time (gt-yxl22).
 func (f *LandingsFile) polecatTime(bead string) (secs float64, attempts []PolecatAttempt, lowerBound bool) {
-	if f.Spans == nil || bead == "" {
+	// A record's bead id is not trusted: the store names one file per bead, so
+	// an id that is not a single path component could only be refused. Check
+	// before the id can reach a path at all (Summarize checks again).
+	if f.Spans == nil || !spans.ValidBeadID(bead) {
 		return 0, nil, false
 	}
 	sum, err := f.Spans.Summarize(bead)
 	if err != nil {
 		if f.Logf != nil {
-			f.Logf("landings file %s: no polecat time for %s: %v; the record is written without it", f.Path, bead, err)
+			f.Logf("landings file %s: no polecat time for %s: %v; the record is written with a lower bound", f.Path, bead, err)
 		}
-		return 0, nil, false
+		return 0, nil, true
 	}
 	if len(sum.Attempts) == 0 {
 		return 0, nil, false

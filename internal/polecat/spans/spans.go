@@ -361,11 +361,17 @@ func requireSeat(seat, bead string) error {
 	return nil
 }
 
+// ValidBeadID reports whether bead is a single safe path component, the only
+// shape a span log's file name can take.
+func ValidBeadID(bead string) bool {
+	return bead != "" && bead != "." && bead != ".." &&
+		!strings.ContainsAny(bead, `/\`) && !strings.ContainsRune(bead, 0)
+}
+
 // validateBead keeps the bead id a single safe path component: a separator or
 // ".." would write outside the store's directory.
 func validateBead(bead string) error {
-	if bead == "" || bead == "." || bead == ".." ||
-		strings.ContainsAny(bead, `/\`) || strings.ContainsRune(bead, 0) {
+	if !ValidBeadID(bead) {
 		return fmt.Errorf("polecat spans: invalid bead id %q", bead)
 	}
 	return nil

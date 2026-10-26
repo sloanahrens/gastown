@@ -474,34 +474,112 @@ func TestLandingsFileAppendOmitsPolecatTimeWithoutSpans(t *testing.T) {
 	}
 }
 
-// TestLandingsFileAppendLeavesPolecatTimeOutWhenTheLogCannotBeRead: the time
-// is not worth the landing, so an unreadable log is logged and left out
+// unreadableSpans is a SpanSummarizer whose every read fails, the shape of a
+// span log that exists but the worker cannot open.
+type unreadableSpans struct {
+	err  error
+	read []string // every bead Summarize was asked for
+}
+
+func (u *unreadableSpans) Summarize(bead string) (spans.Summary, error) {
+	u.read = append(u.read, bead)
+	return spans.Summary{}, u.err
+}
+
+// TestLandingsFileAppendMarksPolecatTimeLowerBoundWhenTheLogCannotBeRead: the
+// time is not worth the landing, so the record is still written; the time is
+// left out (there is none to report), but the lower bound tells a reader the
+// log existed and the total is a floor rather than the crew landing's silence
 // (gt-yxl22).
-func TestLandingsFileAppendLeavesPolecatTimeOutWhenTheLogCannotBeRead(t *testing.T) {
+func TestLandingsFileAppendMarksPolecatTimeLowerBoundWhenTheLogCannotBeRead(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	dir := spans.DefaultDir(town)
-	if err := os.MkdirAll(filepath.Join(dir, "gt-abc.jsonl"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	f, err := RigLandingsFile(town, "gastown")
+	f, err := RigLandingsFile(t.TempDir(), "gastown")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var logged []string
 	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
-	f.Spans = spans.New(dir, nil)
+	store := &unreadableSpans{err: errors.New("permission denied")}
+	f.Spans = store
 	if err := f.Append(LandingRecord{BeadID: "gt-abc", LandedCommit: "c1"}); err != nil {
 		t.Fatalf("Append with an unreadable span log: %v; the landing must still be written", err)
 	}
 	rec, keyed := lastLine(t, f)
-	if rec.LandedCommit != "c1" || rec.PolecatSecs != 0 || rec.PolecatAttempts != nil || rec.PolecatLowerBound {
-		t.Fatalf("record = %+v; want the landing with no polecat time", rec)
+	if rec.LandedCommit != "c1" || rec.PolecatSecs != 0 || rec.PolecatAttempts != nil || !rec.PolecatLowerBound {
+		t.Fatalf("record = %+v; want the landing with the time as a lower bound", rec)
 	}
-	if _, ok := keyed["polecat_attempts"]; ok {
-		t.Error("polecat_attempts written from an unreadable log")
+	for _, key := range []string{"polecat_secs", "polecat_attempts"} {
+		if _, ok := keyed[key]; ok {
+			t.Errorf("%s written from an unreadable log: %v", key, keyed[key])
+		}
 	}
 	if len(logged) != 1 || !strings.Contains(logged[0], "gt-abc") {
 		t.Errorf("logged = %q; want one line naming the bead", logged)
+	}
+	if len(store.read) != 1 || store.read[0] != "gt-abc" {
+		t.Errorf("Summarize calls = %q; want one for gt-abc", store.read)
+	}
+}
+
+// TestLandingsFileAppendDoesNotHandAnUnsafeBeadIDToTheSpanStore: the span store
+// names one file per bead, so a record whose bead id is not a single path
+// component gets no time and never reaches the store or a path (gt-yxl22).
+func TestLandingsFileAppendDoesNotHandAnUnsafeBeadIDToTheSpanStore(t *testing.T) {
+	t.Parallel()
+	for _, bead := range []string{"../escape", "gt/abc", `gt\abc`, "..", ""} {
+		t.Run(bead, func(t *testing.T) {
+			t.Parallel()
+			f, err := RigLandingsFile(t.TempDir(), "gastown")
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := &unreadableSpans{err: errors.New("must not be read")}
+			f.Spans = store
+			if err := f.Append(LandingRecord{BeadID: bead, LandedCommit: "c1"}); err != nil {
+				t.Fatalf("Append(%q): %v; the landing must still be written", bead, err)
+			}
+			if len(store.read) != 0 {
+				t.Errorf("Summarize(%q) called with a bead id that is not a path component", bead)
+			}
+			rec, keyed := lastLine(t, f)
+			if rec.LandedCommit != "c1" || rec.PolecatLowerBound {
+				t.Fatalf("record = %+v; want the landing with no polecat time", rec)
+			}
+			for key := range keyed {
+				if strings.HasPrefix(key, "polecat_") {
+					t.Errorf("%q wrote %s", bead, key)
+				}
+			}
+		})
+	}
+}
+
+// TestLandingsFileAppendKeepsCallerSuppliedPolecatTime: a caller that sets the
+// polecat fields itself keeps them; Append fills them only when the record
+// carries none (gt-yxl22).
+func TestLandingsFileAppendKeepsCallerSuppliedPolecatTime(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &unreadableSpans{err: errors.New("must not be read")}
+	f.Spans = store
+	rec := LandingRecord{
+		BeadID: "gt-abc", LandedCommit: "c1",
+		PolecatSecs:       7,
+		PolecatAttempts:   []PolecatAttempt{{Seat: "gastown/opal", Secs: 7}},
+		PolecatLowerBound: true,
+	}
+	if err := f.Append(rec); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := lastLine(t, f)
+	if !reflect.DeepEqual(got.PolecatAttempts, rec.PolecatAttempts) || got.PolecatSecs != 7 || !got.PolecatLowerBound {
+		t.Errorf("polecat time = %+v; want the caller's, untouched", got)
+	}
+	if len(store.read) != 0 {
+		t.Errorf("Summarize called for a record that already carried its time: %q", store.read)
 	}
 }

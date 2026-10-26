@@ -420,9 +420,11 @@ type LandingRecord struct {
 	// PolecatSecs, PolecatAttempts and PolecatLowerBound are the time the
 	// bead's polecat seats spent hooked on it, read from the spans log when
 	// the record is written (Append). A crew landing has no seat and a bead
-	// with no spans has no entries, so all three are left out then; a total
-	// that may understate the time — an attempt still open, or one a dead seat
-	// closed — sets PolecatLowerBound (gt-yxl22).
+	// with no spans has no entries, so all three are left out then. A total
+	// that may understate the time sets PolecatLowerBound, with the time still
+	// recorded where there is any: an attempt that is still open adds no time,
+	// one a dead seat closed adds the time to its close, and an unreadable log
+	// leaves the time out entirely (gt-yxl22).
 	PolecatSecs       float64          `json:"polecat_secs,omitempty"`
 	PolecatAttempts   []PolecatAttempt `json:"polecat_attempts,omitempty"`
 	PolecatLowerBound bool             `json:"polecat_lower_bound,omitempty"`
@@ -432,8 +434,10 @@ type LandingRecord struct {
 // polecat_attempts (gt-yxl22).
 type PolecatAttempt struct {
 	Seat string `json:"seat"`
-	// Secs is the closed attempt's duration; an attempt its seat never ended
-	// contributes none and sets LowerBound.
+	// Secs is the attempt's duration: the time to its close. An attempt its
+	// seat never ended adds none. Either way LowerBound marks the duration a
+	// floor — the seat's time past the open attempt or the dead close is not in
+	// the record.
 	Secs       float64 `json:"secs"`
 	LowerBound bool    `json:"lower_bound,omitempty"`
 }
