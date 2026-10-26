@@ -134,6 +134,12 @@ POLE_COMMIT := $(shell git rev-parse HEAD 2>/dev/null)
 # bd is built from a beads fork checkout, not this repo. That checkout is host
 # state, so there is no default: the operator names it, BD_SRC=<checkout>.
 BD_SRC ?=
+# The commit of BD_SRC the image's bd is built from: empty builds the commit the
+# installed bd reports (`bd version --json`, gt-7b7a5), so host and sandbox
+# share one schema ceiling. The build refuses a commit the checkout's object
+# store does not hold; it never fetches, so a newer host bd needs a BD_SRC that
+# was fetched past it.
+BD_COMMIT ?=
 # The image's Go floor is the highest `go` line of the rigs' go.mod files, read
 # from each rig's canonical checkout under POLE_TOWN (deploy/polecat/go-floor.sh).
 # POLE_RIG_GO_MODS names the files; override it to read other checkouts.
@@ -161,10 +167,11 @@ polecat-image:
 	@test -n "$(POLE_RIG_GO_MODS)" || { echo "polecat-image: no rig go.mod under $(POLE_TOWN)/*/mayor/rig; set POLE_TOWN=<town root>" >&2; exit 2; }
 	@mkdir -p deploy/polecat/bin
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/gt ./cmd/gt
-	cd $(BD_SRC) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o $(CURDIR)/deploy/polecat/bin/bd ./cmd/bd
+	@go run ./internal/polecat/bdbuild/cmd/build -src "$(BD_SRC)" -out $(CURDIR)/deploy/polecat/bin/bd -commit "$(BD_COMMIT)" > deploy/polecat/bin/bd.commit
 	@$(MAKE) --no-print-directory polecat-seed-stage
+	bd_commit=$$(cat deploy/polecat/bin/bd.commit) || { echo "polecat-image: no bd commit recorded, so the image's bd cannot be labelled; the bd build did not finish" >&2; exit 2; }; \
 	floor=$$(bash deploy/polecat/go-floor.sh rig $(POLE_RIG_GO_MODS)) || { echo "polecat-image: cannot read the rig Go floor from $(POLE_RIG_GO_MODS)" >&2; exit 2; }; \
-	docker build --platform linux/arm64 --label org.gastown.gt-commit=$(POLE_COMMIT) --build-arg GO_FLOOR="$$floor" -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
+	docker build --platform linux/arm64 --label org.gastown.gt-commit=$(POLE_COMMIT) --label org.gastown.bd-commit="$$bd_commit" --build-arg GO_FLOOR="$$floor" -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
 	@$(MAKE) --no-print-directory polecat-node-prune
 
 # polecat-seed-stage writes POLE_SEED_DIR: each pinned rig at its pin, and
