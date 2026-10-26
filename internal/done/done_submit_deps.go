@@ -38,6 +38,9 @@ var _ doneRepo = (*git.Git)(nil)
 // global or process environment is read.
 type doneSubmitDeps struct {
 	repo doneRepo
+	// claims is the claims_verified battery whose flag gt done shows before it
+	// submits. Nil shows no flag: unit tests leave it unset, so no model runs.
+	claims claimsBattery
 	// source resolves the work bead through town routing and returns it
 	// with the client of the database that owns it.
 	source func(issueID string) (*beads.Issue, beads.Client, error)
@@ -127,7 +130,8 @@ func (r *doneRun) useRealSubmitDeps(o Options) {
 	localGate, sleep, delays := submitSeams(o)
 
 	r.deps = doneSubmitDeps{
-		repo: r.g,
+		repo:   r.g,
+		claims: jevClaimsBattery{newAsker: newJevClaimsAsker},
 		source: func(issueID string) (*beads.Issue, beads.Client, error) {
 			info, err := resolveSubmitSourceIssue(r.cwd, issueID)
 			if err != nil {
