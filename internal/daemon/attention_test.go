@@ -216,21 +216,41 @@ func TestAttentionCollector_RejectedTwice(t *testing.T) {
 	f := newAttentionFixture(t, now)
 	f.src.rework = func(context.Context, string) ([]*beads.Issue, error) {
 		return []*beads.Issue{
-			{ID: "gt-twice", Status: "open", UpdatedAt: "t2", Notes: reworkNotes(2)},
-			{ID: "gt-once", Status: "open", UpdatedAt: "t1", Notes: reworkNotes(1)},
-			{ID: "gt-parked", Status: "deferred", UpdatedAt: "t3", Notes: reworkNotes(2)},
+			{ID: "gt-twice", Status: "open", UpdatedAt: "t2", Assignee: "dipper", Notes: reworkNotes(2)},
+			{ID: "gt-orphan", Status: "open", UpdatedAt: "t4", Notes: reworkNotes(2)},
+			{ID: "gt-once", Status: "open", UpdatedAt: "t1", Assignee: "dipper", Notes: reworkNotes(1)},
+			{ID: "gt-parked", Status: "deferred", UpdatedAt: "t3", Assignee: "dipper", Notes: reworkNotes(2)},
 		}, nil
 	}
 
 	items := f.collect(t, f.src.collectRejectedTwice)
-	if len(items) != 1 {
-		t.Fatalf("items = %+v, want only the twice-rejected actionable bead", items)
+	if len(items) != 2 {
+		t.Fatalf("items = %+v, want only the two twice-rejected actionable beads", items)
 	}
-	if items[0].Key != "rework:gt-twice" || items[0].Kind != attention.KindRejectedTwice {
-		t.Errorf("item = %+v, want rework:gt-twice", items[0])
+	byKey := map[string]attention.Item{}
+	for _, it := range items {
+		byKey[it.Key] = it
 	}
-	if items[0].Owner != "" || items[0].WaitingOn != "rework, attempt 2" {
-		t.Errorf("owner %q waiting %q, want no owner and rework, attempt 2", items[0].Owner, items[0].WaitingOn)
+	owned, ok := byKey["rework:gt-twice"]
+	if !ok || owned.Kind != attention.KindRejectedTwice {
+		t.Fatalf("items = %+v, want rework:gt-twice", items)
+	}
+	if owned.Owner != "dipper" || owned.WaitingOn != "rework by dipper, attempt 2" {
+		t.Errorf("owned item owner %q waiting %q, want dipper and rework by dipper, attempt 2", owned.Owner, owned.WaitingOn)
+	}
+	if got := attention.Classify(owned); got != attention.ClassPipeline {
+		t.Errorf("owned rejected-twice classifies as %s, want pipeline", got)
+	}
+	// Nobody owns the orphan, so it waits on a person: the act path is reachable.
+	orphan, ok := byKey["rework:gt-orphan"]
+	if !ok {
+		t.Fatalf("items = %+v, want rework:gt-orphan", items)
+	}
+	if orphan.Owner != "" || orphan.WaitingOn != "" {
+		t.Errorf("orphan owner %q waiting %q, want neither", orphan.Owner, orphan.WaitingOn)
+	}
+	if got := attention.Classify(orphan); got != attention.ClassAct {
+		t.Errorf("orphan rejected-twice classifies as %s, want act", got)
 	}
 
 	// Once the bead lands it is closed, so the read stops listing it.

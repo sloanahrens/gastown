@@ -43,20 +43,25 @@ func TestClassifyTableOverEveryKind(t *testing.T) {
 func TestItemOwnerFieldsAreOmittedWhenEmpty(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
-	old := Item{Key: "esc:hq-1", Kind: KindEscalation, Severity: SeverityHigh, Summary: "s", FirstSeen: at, LastSeen: at}
+	// legacy is a state item as the daemon wrote it before the fields existed,
+	// spelled out so the test does not depend on the struct it checks.
+	const legacy = `{"key":"esc:hq-1","kind":"escalation","severity":"high","summary":"s",` +
+		`"first_seen":"2026-10-26T12:00:00Z","last_seen":"2026-10-26T12:00:00Z"}`
+	var back Item
+	if err := json.Unmarshal([]byte(legacy), &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Key != "esc:hq-1" || back.Owner != "" || back.WaitingOn != "" {
+		t.Errorf("legacy item read back as %+v, want its fields unchanged and no owner", back)
+	}
+	old := back
+	old.FirstSeen, old.LastSeen = at, at
 	data, err := json.Marshal(old)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := string(data); strings.Contains(got, "owner") || strings.Contains(got, "waiting_on") {
 		t.Errorf("empty owner fields are written: %s", got)
-	}
-	var back Item
-	if err := json.Unmarshal(data, &back); err != nil {
-		t.Fatal(err)
-	}
-	if back.Key != old.Key || back.Owner != "" || back.WaitingOn != "" {
-		t.Errorf("round trip = %+v, want %+v unchanged", back, old)
 	}
 
 	owned := old

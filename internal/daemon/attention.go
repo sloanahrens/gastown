@@ -940,8 +940,11 @@ func (s *attentionSources) collectRejectedTwice(ctx context.Context) ([]attentio
 			if n < attentionRejectedTwice {
 				continue
 			}
-			waiting := fmt.Sprintf("rework, attempt %d", n)
-			if owner := strings.TrimSpace(is.Assignee); owner != "" {
+			// The waiting-on line names an owner's rework. A bead nobody owns
+			// waits on a person, so it stays empty and classifies as act.
+			owner := strings.TrimSpace(is.Assignee)
+			waiting := ""
+			if owner != "" {
 				waiting = fmt.Sprintf("rework by %s, attempt %d", owner, n)
 			}
 			out = append(out, attention.Item{
@@ -950,7 +953,7 @@ func (s *attentionSources) collectRejectedTwice(ctx context.Context) ([]attentio
 				Severity:  attention.SeverityHigh,
 				Rig:       rig,
 				Bead:      is.ID,
-				Owner:     strings.TrimSpace(is.Assignee),
+				Owner:     owner,
 				WaitingOn: waiting,
 				Summary:   fmt.Sprintf("%s rejected %d times", is.ID, n),
 			})
