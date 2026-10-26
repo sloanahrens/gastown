@@ -36,6 +36,10 @@ type Result struct {
 	// Quoted is how many added error returns sit in a path git quoted, which the check
 	// does not read; they are counted here instead of being dropped without a word.
 	Quoted int
+	// Unjudged are the added error returns in root-module files the profile does not name. They
+	// were not built with coverage, so nothing checked them, and they fail the check even when
+	// other returns in the diff are judged (gt-b9j3o.5, overseer ruling).
+	Unjudged []Finding
 }
 
 // UntestedErrorBranches reports the added Go error returns that the cover profile records as never
@@ -48,7 +52,7 @@ type Result struct {
 // name, module plus the diff path, and nothing else, so a same-named file in another package never
 // judges this one. Tests, testdata and directories the go tool skips are not sources. module is the
 // module path the profile names files by (go test writes github.com/x/y/pkg/file.go).
-func UntestedErrorBranches(diff, cover io.Reader, module string) (Result, error) {
+func UntestedErrorBranches(diff, cover io.Reader, module string, nested func(path string) bool) (Result, error) {
 	var res Result
 	added, err := addedLines(diff)
 	if err != nil {
@@ -66,21 +70,19 @@ func UntestedErrorBranches(diff, cover io.Reader, module string) (Result, error)
 			res.Quoted++
 			continue
 		}
-		if !isGoSource(line.path) {
+		if !isGoSource(line.path) || (nested != nil && nested(line.path)) {
 			continue
 		}
 		res.Added++
-		judged, driven := driveStatus(blocks, module+"/"+line.path, line.line)
+		f := Finding{Path: line.path, Line: line.line, Text: strings.TrimSpace(line.text)}
+		judged, driven := driveStatus(blocks, module+"/"+line.path, line.line, returnColumn(line.text))
 		if !judged {
+			res.Unjudged = append(res.Unjudged, f)
 			continue
 		}
 		res.Judged++
 		if !driven {
-			res.Findings = append(res.Findings, Finding{
-				Path: line.path,
-				Line: line.line,
-				Text: strings.TrimSpace(line.text),
-			})
+			res.Findings = append(res.Findings, f)
 		}
 	}
 	return res, nil
@@ -291,15 +293,26 @@ func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 
 func isUpper(c byte) bool { return c >= 'A' && c <= 'Z' }
 
-// coverBlock is one statement range of a cover profile: the lines it spans and
-// how many times the instrumented code ran. go test writes a block for every
-// instrumented statement, so a block count of zero is a statement no test
-// executed, and a file with no blocks was not built with coverage.
+// coverBlock is one statement range of a cover profile: where it starts and ends (line and
+// column) and how many times the instrumented code ran. go test writes a block for every
+// instrumented statement, so a block count of zero is a statement no test executed, and a file
+// with no blocks was not built with coverage.
 type coverBlock struct {
-	file  string
-	start int
-	end   int
-	count int
+	file      string
+	startLine int
+	startCol  int
+	endLine   int
+	endCol    int
+	count     int
+}
+
+// returnColumn is the byte column of the return keyword in an added line, which is where the
+// statement a coverage block covers begins (go cover columns count bytes from 1).
+func returnColumn(text string) int {
+	if i := strings.Index(text, "return"); i >= 0 {
+		return i + 1
+	}
+	return 1
 }
 
 // parseCover reads a go test cover profile. A file without its "mode:" line is
@@ -347,52 +360,69 @@ func parseCoverBlock(line string) (coverBlock, error) {
 	if colon < 0 {
 		return coverBlock{}, fmt.Errorf("unreadable cover profile line %q", line)
 	}
-	start, end, err := parseCoverRange(fields[0][colon+1:])
+	sl, sc, el, ec, err := parseCoverRange(fields[0][colon+1:])
 	if err != nil {
 		return coverBlock{}, fmt.Errorf("unreadable cover profile line %q: %w", line, err)
 	}
-	return coverBlock{file: fields[0][:colon], start: start, end: end, count: count}, nil
+	return coverBlock{file: fields[0][:colon], startLine: sl, startCol: sc, endLine: el, endCol: ec, count: count}, nil
 }
 
-// parseCoverRange reads "start.col,end.col" and keeps the two line numbers.
-func parseCoverRange(s string) (int, int, error) {
+// parseCoverRange reads "startLine.startCol,endLine.endCol" and keeps all four numbers.
+func parseCoverRange(s string) (sl, sc, el, ec int, err error) {
 	bounds := strings.SplitN(s, ",", 2)
 	if len(bounds) != 2 {
-		return 0, 0, fmt.Errorf("range %q has no comma", s)
+		return 0, 0, 0, 0, fmt.Errorf("range %q has no comma", s)
 	}
-	start, err := lineOf(bounds[0])
+	sl, sc, err = posOf(bounds[0])
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, 0, err
 	}
-	end, err := lineOf(bounds[1])
+	el, ec, err = posOf(bounds[1])
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, 0, err
 	}
-	return start, end, nil
+	return sl, sc, el, ec, nil
 }
 
-func lineOf(s string) (int, error) {
-	before, _, found := strings.Cut(s, ".")
+// posOf reads "line.col".
+func posOf(s string) (int, int, error) {
+	line, col, found := strings.Cut(s, ".")
 	if !found {
-		return 0, fmt.Errorf("position %q has no column", s)
+		return 0, 0, fmt.Errorf("position %q has no column", s)
 	}
-	return strconv.Atoi(before)
+	l, err := strconv.Atoi(line)
+	if err != nil {
+		return 0, 0, err
+	}
+	c, err := strconv.Atoi(col)
+	if err != nil {
+		return 0, 0, err
+	}
+	return l, c, nil
 }
 
-// driveStatus reports whether the profile judged file at all and, if it did, whether one
-// executed block covers line. file is the full name the profile uses; a file the profile does not
-// name is unjudged: nothing built it with coverage.
-func driveStatus(blocks []coverBlock, file string, line int) (judged, driven bool) {
+// driveStatus reports whether the profile names file at all and, if it does, whether one executed
+// block covers the position (line, col). A block covers a position by its line.column range, so a
+// return that shares a line with an executed block is not covered by that block. A file the profile
+// does not name is unjudged: nothing built it with coverage.
+func driveStatus(blocks []coverBlock, file string, line, col int) (judged, driven bool) {
 	for _, b := range blocks {
 		if b.file != file {
 			continue
 		}
 		judged = true
-		if b.count > 0 && b.start <= line && line <= b.end {
+		if b.count > 0 && within(b, line, col) {
 			driven = true
 		}
 	}
 	return judged, driven
+}
+
+// within reports whether the position (line, col) lies in the block's range, both ends included.
+func within(b coverBlock, line, col int) bool {
+	afterStart := line > b.startLine || (line == b.startLine && col >= b.startCol)
+	beforeEnd := line < b.endLine || (line == b.endLine && col <= b.endCol)
+	return afterStart && beforeEnd
 }
 
 func newScanner(r io.Reader) *bufio.Scanner {
