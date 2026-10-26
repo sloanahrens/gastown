@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Tests for the Makefile's gate contract. Before changing a gate recipe, read
-# docs/testing.md, "The gate": that section is the one description of the
-# stages and their order, and this script checks the recipe against it
-# (gt-2ycne.1, gt-ik4a1.9, gt-w3aby).
-# The names the cases below lean on: `make gate`, `make test-slow` and
-# `make test-integration` are the test tiers (`make test` only chains them),
+# Tests for the Makefile's gate contract (docs/testing.md, "The gate"):
+# `make gate`, `make test-slow` and `make test-integration` are the test
+# tiers (`make test` only chains them), the gate runs the exec-tax preflight
+# (a warning fails nothing, gt-2ycne.1), lint, build and the unit
+# tier over every package in that order (no slow tier since gt-ik4a1.9),
 # test-slow runs the gate and then the shell tests, neither starts a container
 # or takes the container-gate slot, the integration tier runs every
 # Docker-backed package listed in internal/testpolicy/docker.txt, and
@@ -624,19 +623,7 @@ if [[ -n "${EXEC_TAX_WARN:-}" ]]; then
 fi
 exit 0
 STUB
-# The integration vet, which the real gate reaches through `go run`: the go
-# stub cannot vet, so every case below points INTEGRATION_VET at this stub. It
-# fails only when STUB_VET_FAIL is set.
-cat >"$TMP/vet.sh" <<'STUB'
-#!/usr/bin/env bash
-echo "integration-vet ran" >>"$STUB_LOG"
-if [[ -n "${STUB_VET_FAIL:-}" ]]; then
-  echo "broken/b.go:2:2: undefined: missing" >&2
-  exit 1
-fi
-exit 0
-STUB
-chmod +x "$TMP/bin/go" "$TMP/bin/golangci-lint" "$TMP/preflight.sh" "$TMP/vet.sh"
+chmod +x "$TMP/bin/go" "$TMP/bin/golangci-lint" "$TMP/preflight.sh"
 
 # run_gate [make flags] -- VAR=value... runs the real gate recipe against the
 # stubs, with an inherited GT_TEST_DOCKER=1 the recipe must override, and
@@ -651,24 +638,15 @@ run_gate() {
   : >"$TMP/calls"
   local rc=0
   env "$@" STUB_LOG="$TMP/calls" GT_TEST_DOCKER=1 PATH="$TMP/bin:$PATH" \
-    make -C "$ROOT" --no-print-directory "${flags[@]}" "${TARGET:-gate}" SHELL_TESTS="$TMP/shell-tests.sh" EXEC_TAX_PREFLIGHT="$TMP/preflight.sh" INTEGRATION_VET="$TMP/vet.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
+    make -C "$ROOT" --no-print-directory "${flags[@]}" "${TARGET:-gate}" SHELL_TESTS="$TMP/shell-tests.sh" EXEC_TAX_PREFLIGHT="$TMP/preflight.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
   echo "$rc"
 }
 
 rc=$(run_gate)
-if [[ "$rc" == 0 ]] && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -x 'go test GT_TEST_DOCKER=0' "$TMP/calls" && grep -q -x 'integration-vet ran' "$TMP/calls" && ! grep -q -x 'shell-tests' "$TMP/calls" && grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' "$TMP/calls"; then
-  pass "green stubs: exit 0 with the wall printed, lint waited on the lock, the integration vet ran, and the suite saw GT_TEST_DOCKER=0 despite an inherited 1"
+if [[ "$rc" == 0 ]] && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -x 'go test GT_TEST_DOCKER=0' "$TMP/calls" && ! grep -q -x 'shell-tests' "$TMP/calls" && grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' "$TMP/calls"; then
+  pass "green stubs: exit 0 with the wall printed, lint waited on the lock, only the Go suite ran, and it saw GT_TEST_DOCKER=0 despite an inherited 1"
 else
-  fail "green stubs: exit 0 with the wall printed, lint waited on the lock, the integration vet ran, and the suite saw GT_TEST_DOCKER=0 despite an inherited 1 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
-fi
-
-# The integration vet's own failure fails the gate and names its stage, after
-# printing what vet said (gt-w3aby).
-rc=$(run_gate -o lint -- STUB_VET_FAIL=1)
-if [[ "$rc" != 0 ]] && grep -q -F 'undefined: missing' "$TMP/err" && grep -q -F 'gate: FAILED at integration vet' "$TMP/err" && ! grep -q -F 'gate: PASSED' "$TMP/err"; then
-  pass "integration vet fails: non-zero, prints vet's error, and names the stage"
-else
-  fail "integration vet fails: non-zero, prints vet's error, and names the stage (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+  fail "green stubs: exit 0 with the wall printed, lint waited on the lock, only the Go suite ran, and it saw GT_TEST_DOCKER=0 despite an inherited 1 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
 # The preflight's warning path: a taxed host says so, and the gate still
@@ -776,6 +754,7 @@ if [[ "$rc" != 0 ]] && ! grep -q -F 'gate: PASSED' "$TMP/err" && ! grep -q -F 's
 else
   fail "interrupted gate: non-zero, and the trap stopped the running suite (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
+
 rc=$(TARGET=test-slow run_gate -o lint)
 if [[ "$rc" == 0 ]] && grep -q -x 'go test GT_TEST_DOCKER=0' "$TMP/calls" && grep -q -x 'shell-tests' "$TMP/calls" && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -F 'test-slow: PASSED' "$TMP/err"; then
   pass "test-slow green stubs: exit 0, the Go suite and the shell tests ran with GT_TEST_DOCKER=0"
