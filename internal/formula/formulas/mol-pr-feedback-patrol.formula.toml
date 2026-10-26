@@ -198,7 +198,7 @@ For each finding in /tmp/patrol-findings.txt, create a work bead and sling a pol
 
 **Safety valve — check open bead count first:**
 ```bash
-OPEN_COUNT=$(bd list --label {{patrol_label}} --status open 2>/dev/null | wc -l || echo "0")
+OPEN_COUNT=$(bd list --label {{patrol_label}} --status open --json --limit 0 2>/dev/null | jq -e 'length' 2>/dev/null || echo "0")
 if [ "$OPEN_COUNT" -ge {{max_open_beads}} ]; then
   echo "Safety valve: ${OPEN_COUNT} open patrol beads already exist (max {{max_open_beads}}). Skipping dispatch."
   exit 0
@@ -209,7 +209,7 @@ fi
 ```bash
 while IFS=: read -r TYPE PR_NUM PR_URL PR_TITLE EXTRA; do
   # Dedup guard: check for existing open bead for this PR + type
-  EXISTING=$(bd list --label "pr-num-${PR_NUM}" --label "{{patrol_label}}" --status open 2>/dev/null | wc -l || echo "0")
+  EXISTING=$(bd list --label "pr-num-${PR_NUM}" --label "{{patrol_label}}" --status open --json --limit 0 2>/dev/null | jq -e 'length' 2>/dev/null || echo "0")
   if [ "$EXISTING" -gt 0 ]; then
     echo "Skipping PR #${PR_NUM} (${TYPE}): open bead already exists"
     continue
