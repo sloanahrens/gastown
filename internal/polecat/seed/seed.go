@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // Source is one rig in a seed: the rig's name and the commit its sources are
@@ -171,11 +172,9 @@ func checkSymlinks(dir string) error {
 		if err != nil || d.Type()&fs.ModeSymlink == 0 {
 			return err
 		}
-		resolved, err := resolvePath(root, p)
-		if err != nil {
+		if _, inside, err := resolvePath(root, p); err != nil {
 			return err
-		}
-		if resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+		} else if !inside {
 			rel, err := filepath.Rel(root, p)
 			if err != nil {
 				rel = p
@@ -187,12 +186,16 @@ func checkSymlinks(dir string) error {
 }
 
 // resolvePath returns the path that p, an absolute path under root, refers to
-// once every symlink in the seed is followed. A component that does not exist
-// ends the walk there, since nothing below it is a link.
-func resolvePath(root, p string) (string, error) {
+// once every symlink in the seed is followed, and whether that path stays under
+// root. A component that does not exist, or one under a regular file, ends the
+// link walk: nothing below it can be a link, so the rest is read as written. An
+// absolute target is outside root: it names a path on the host, and the seed
+// must unpack the same tree wherever it is built, so the target's ".." cannot
+// be resolved against the host and compared with root's text.
+func resolvePath(root, p string) (resolved string, inside bool, err error) {
 	rel, err := filepath.Rel(root, p)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
 	cur := root
@@ -215,27 +218,37 @@ func resolvePath(root, p string) (string, error) {
 		}
 		fi, err := os.Lstat(next)
 		switch {
-		case errors.Is(err, fs.ErrNotExist):
+		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
 			exists = false
 		case err != nil:
-			return "", err
+			return "", false, err
 		case fi.Mode()&fs.ModeSymlink != 0:
 			if hops--; hops < 0 {
-				return "", fmt.Errorf("%s: too many levels of symbolic links", rel)
+				return "", false, fmt.Errorf("%s: too many levels of symbolic links", rel)
 			}
 			link, err := os.Readlink(next)
 			if err != nil {
-				return "", err
+				return "", false, err
 			}
 			if filepath.IsAbs(link) {
-				return link, nil
+				return filepath.Clean(link), false, nil
 			}
 			parts = append(strings.Split(link, string(filepath.Separator)), parts...)
 			continue
 		}
 		cur = next
 	}
-	return cur, nil
+	return cur, within(root, cur), nil
+}
+
+// within reports whether p is root itself or a path under it. Rel resolves ".."
+// in both paths, so a textual prefix of root does not count as inside.
+func within(root, p string) bool {
+	rel, err := filepath.Rel(root, p)
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // symlinkInPath returns the first component of name inside dir that is a

@@ -296,6 +296,61 @@ func TestUnpackWritesALinkRoutingThroughAnotherLinkInsideTheSeed(t *testing.T) {
 	}
 }
 
+// An absolute target is resolved against the host, not the seed, so one written
+// as the seed's own path followed by ".." points outside it while its text
+// still starts with the root: Unpack resolves the path instead of comparing its
+// prefix (gt-eu4u0).
+func TestUnpackRefusesAnAbsoluteSymlinkThatClimbsBackOutOfTheSeed(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "rig")
+	linkname := dir + "/../../outside"
+	tree := tarStream(t, tarEntry{h: tar.Header{Name: "link", Mode: 0o777, Linkname: linkname, Typeflag: tar.TypeSymlink}})
+	err := Unpack(dir, tree)
+	if err == nil {
+		t.Fatal("Unpack accepted an absolute symlink that resolves outside the seed")
+	}
+	if !strings.Contains(err.Error(), `archive symlink "link" escapes the seed directory`) {
+		t.Errorf("Unpack: error does not name the escaping link: %v", err)
+	}
+}
+
+// The seed must unpack the same tree wherever it is built, so an absolute
+// target is refused even when it names a path under dir: the target is a path
+// on the host, not one in the seed (gt-eu4u0).
+func TestUnpackRefusesAnAbsoluteSymlinkIntoTheSeed(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "rig")
+	tree := tarStream(t,
+		tarEntry{h: tar.Header{Name: "real", Mode: 0o755, Typeflag: tar.TypeDir}},
+		tarEntry{h: tar.Header{Name: "link", Mode: 0o777, Linkname: filepath.Join(dir, "real"), Typeflag: tar.TypeSymlink}},
+	)
+	err := Unpack(dir, tree)
+	if err == nil {
+		t.Fatal("Unpack accepted an absolute symlink target")
+	}
+	if !strings.Contains(err.Error(), `archive symlink "link" escapes the seed directory`) {
+		t.Errorf("Unpack: error does not name the escaping link: %v", err)
+	}
+}
+
+// A link that routes through a regular file reaches nothing that could be a
+// link, so Unpack writes the dangling link git holds instead of failing the
+// seed with a stat error (gt-eu4u0).
+func TestUnpackWritesALinkRoutingThroughARegularFile(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "rig")
+	tree := tarStream(t,
+		tarEntry{h: tar.Header{Name: "f", Mode: 0o644, Typeflag: tar.TypeReg}, body: "x"},
+		tarEntry{h: tar.Header{Name: "l", Mode: 0o777, Linkname: "f/x", Typeflag: tar.TypeSymlink}},
+	)
+	if err := Unpack(dir, tree); err != nil {
+		t.Fatalf("Unpack: %v", err)
+	}
+	if target, err := os.Readlink(filepath.Join(dir, "l")); err != nil || target != "f/x" {
+		t.Errorf("symlink: got %q, %v", target, err)
+	}
+}
+
 func TestUnpackRefusesASymlinkCycle(t *testing.T) {
 	t.Parallel()
 	tree := tarStream(t,
