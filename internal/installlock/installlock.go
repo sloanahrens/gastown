@@ -7,15 +7,16 @@
 // that process exits or dies. There is no helper left beside the install that
 // could outlive it, or die while the install runs on without the lock.
 //
-// Because the fd is inherited, anything the install starts inherits it too.
-// scripts/install-gt.sh deals with that where it matters: git runs with auto
-// maintenance off, and the image-build supervisor closes every inherited fd
-// (see image_build), so a detached build never holds the lock past the install.
+// Because the fd is inherited, every descendant of the install inherits it too,
+// not only the install itself. A descendant that outlives the install would
+// hold the lock past it. scripts/install-gt.sh closes that where it can happen:
+// git runs with auto maintenance off, and the image-build supervisor closes
+// every inherited fd, so a detached build never holds the lock.
 //
 // Because Run replaces the process, the install's own exit status is the
-// process's. The one status Run itself returns is ExitLockBusy, and that only
-// when the wait ran out; scripts/install-gt.sh exits only 0 to 3, so the two
-// cannot be confused.
+// process's. The status Run itself returns that the caller treats specially is
+// ExitLockBusy, and only when the wait ran out. Which statuses the install can
+// exit with is stated in the header of scripts/install-gt.sh.
 package installlock
 
 import (
@@ -118,14 +119,22 @@ func (r runner) run(cfg Config) int {
 		fmt.Fprintf(cfg.Stderr, "install-gt: cannot keep the lock across exec: %v\n", err)
 		return 1
 	}
+	// A marker that cannot be removed would tell the caller the command never
+	// started when it did, and the caller would print a second result over the
+	// install's own. Refuse to start rather than break that.
 	if cfg.Marker != "" {
-		_ = os.Remove(cfg.Marker)
+		if err := os.Remove(cfg.Marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(cfg.Stderr, "install-gt: cannot remove the marker %s, so the install is not started: %v\n", cfg.Marker, err)
+			return 1
+		}
 	}
 	err = r.exec(path, cfg.Command, withLocked(cfg.Env))
 	// exec returns only when it failed.
 	fmt.Fprintf(cfg.Stderr, "install-gt: cannot exec %s: %v\n", cfg.Command[0], err)
 	if cfg.Marker != "" {
-		_ = os.WriteFile(cfg.Marker, nil, 0o644)
+		if err := os.WriteFile(cfg.Marker, nil, 0o644); err != nil {
+			fmt.Fprintf(cfg.Stderr, "install-gt: cannot put the marker %s back, so the caller will not print its fallback result: %v\n", cfg.Marker, err)
+		}
 	}
 	return 1
 }

@@ -365,7 +365,8 @@ fi
 # that process dies, which a mkdir-lock would not (gt-1jgci). Nothing runs
 # beside the install that could outlive it.
 #
-# The lock fd is inherited by what the install starts. git runs with auto
+# The lock fd is inherited by every descendant of the install, not only the
+# install. The ones that can outlive it are handled: git runs with auto
 # maintenance off (GIT_NO_AUTO_GC below), and the image-build supervisor closes
 # every inherited fd, so neither can hold the lock past the install.
 #
@@ -381,8 +382,8 @@ fi
 # and this instance's own EXIT trap should print the fallback RESULT line below;
 # if it is gone, the install ran and already printed its own — RESULT_EMITTED is
 # set here too, purely to stop this instance's trap from printing a second one
-# on top of it. The status is the install's own, and the install exits only 0
-# to 3, so 75 can only be the helper reporting that the lock wait ran out.
+# on top of it. The status is the install's own (0 to 3, above, or 128+n if it
+# is killed), so 75 can only be the helper reporting that the lock wait ran out.
 if [ -z "${INSTALL_GT_LOCKED:-}" ]; then
   mkdir -p "$DAEMON_DIR"
   HELPER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/install-gt-lock.XXXXXX")

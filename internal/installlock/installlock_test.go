@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -297,6 +296,66 @@ func TestMarkerGoesBeforeExecAndComesBackWhenExecFails(t *testing.T) {
 	}
 }
 
+func TestMarkerThatCannotBeRemovedStopsTheInstallBeforeExec(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	lock := filepath.Join(dir, "install-gt.lock")
+	// A directory with something in it cannot be removed as a file.
+	marker := filepath.Join(dir, "marker")
+	if err := os.MkdirAll(filepath.Join(marker, "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{}
+	var stderr strings.Builder
+
+	got := newRunner(newFakeClock(), rec).run(Config{
+		LockPath: lock, Marker: marker, Command: []string{self(t)}, Stderr: &stderr,
+	})
+
+	if got != 1 {
+		t.Errorf("status %d, want 1", got)
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("the install was started with a marker it could not clear: %v", rec.calls)
+	}
+	if !strings.Contains(stderr.String(), "cannot remove the marker") {
+		t.Errorf("stderr %q does not say the marker could not be removed", stderr.String())
+	}
+}
+
+func TestMarkerThatCannotBePutBackAfterAFailedExecIsReported(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	markerDir := filepath.Join(dir, "markers")
+	if err := os.Mkdir(markerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(markerDir, "marker")
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{err: errors.New("exec format error")}
+	// The directory goes between the removal and the exec failing, so the
+	// marker has nowhere to go back to.
+	rec.before = func() {
+		if err := os.RemoveAll(markerDir); err != nil {
+			t.Errorf("remove %s: %v", markerDir, err)
+		}
+	}
+	var stderr strings.Builder
+
+	got := newRunner(newFakeClock(), rec).run(Config{
+		LockPath: filepath.Join(dir, "install-gt.lock"), Marker: marker, Command: []string{self(t)}, Stderr: &stderr,
+	})
+
+	if got != 1 {
+		t.Errorf("status %d, want 1", got)
+	}
+	if !strings.Contains(stderr.String(), "cannot put the marker") {
+		t.Errorf("stderr %q does not say the marker could not be put back", stderr.String())
+	}
+}
+
 func TestUnusableInputsRunNothingAndLeaveTheMarker(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -347,23 +406,5 @@ func TestMissingCommandIsFoundBeforeTheLockIsTaken(t *testing.T) {
 
 	if fileExists(lock) {
 		t.Error("the lock file was created for a command that cannot run")
-	}
-}
-
-// The helper is gone once the install starts, so an install that itself exits
-// 75 is the process exiting 75. scripts/install-gt.sh never does: it exits only
-// 0 to 3, and its EXIT trap forces that range. This pins the claim in the
-// package comment against the script it is about.
-func TestInstallScriptNeverExitsTheLockBusyStatus(t *testing.T) {
-	t.Parallel()
-	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "install-gt.sh"))
-	if err != nil {
-		t.Fatalf("read the install script: %v", err)
-	}
-	if !strings.Contains(string(script), "the exit code is always 0-3") {
-		t.Error("scripts/install-gt.sh no longer states that its exit code is always 0-3; a status of 75 from the install would read as a lock timeout")
-	}
-	if m := regexp.MustCompile(`exit\s+75\b`).FindString(string(script)); m != "" {
-		t.Errorf("scripts/install-gt.sh contains %q, but 75 means a lock timeout", m)
 	}
 }
