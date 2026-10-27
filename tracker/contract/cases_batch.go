@@ -114,6 +114,7 @@ func batchRollsBack(t *testing.T, s store.Store) {
 		want error
 	}{
 		"a create whose id is taken":    {api.BatchOperation{Op: api.BatchOpCreate, Create: &api.CreateParams{ID: "gt-taken", Title: "dup"}}, api.ErrConflict},
+		"a create with an empty title":  {api.BatchOperation{Op: api.BatchOpCreate, Create: &api.CreateParams{Rig: "gt", Title: " "}}, api.ErrInvalid},
 		"an update of a missing issue":  {api.BatchOperation{Op: api.BatchOpUpdate, Update: &api.BatchUpdate{ID: "gt-missing", Patch: api.UpdatePatch{Title: &title}}}, api.ErrNotFound},
 		"a guard that does not hold":    {api.BatchOperation{Op: api.BatchOpUpdate, Update: &api.BatchUpdate{ID: "gt-taken", Patch: api.UpdatePatch{Title: &title}, Guard: api.Guard{IfStatus: &inProgress}}}, api.ErrGuardFailed},
 		"a comment on a missing issue":  {api.BatchOperation{Op: api.BatchOpComment, Comment: &api.BatchComment{ID: "gt-missing", Text: "x"}}, api.ErrNotFound},

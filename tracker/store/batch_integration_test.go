@@ -27,8 +27,9 @@ func TestBatchCreateRetriesACollidingGeneratedID(t *testing.T) {
 	old := idSource
 	t.Cleanup(func() { idSource = old })
 	// Base-36 digits 10 and 11 spell aaaaa and bbbbb: the first draw repeats the
-	// id the store already holds, the second one is free.
-	draws := append(bytes.Repeat([]byte{10}, idAttempts+1), bytes.Repeat([]byte{11}, idAttempts+1)...)
+	// id the store already holds, the second one is free. An id takes one byte
+	// per character, so each draw is exactly issueIDChars bytes.
+	draws := append(bytes.Repeat([]byte{10}, issueIDChars), bytes.Repeat([]byte{11}, issueIDChars)...)
 	idSource = bytes.NewReader(draws)
 
 	res, err := p.Batch(ctx, api.BatchRequest{Operations: []api.BatchOperation{

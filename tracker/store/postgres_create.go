@@ -24,15 +24,9 @@ var idSource io.Reader = rand.Reader
 // field or the parent's id; an unknown rig is invalid and a taken id is a
 // conflict. A generated id that collides is retried with a fresh one.
 func (p *Postgres) CreateIssue(ctx context.Context, params api.CreateParams) (api.Issue, error) {
-	if strings.TrimSpace(params.Title) == "" {
-		return api.Issue{}, api.Invalid("title is required")
-	}
-	rig, err := rigForCreate(params)
+	rig, err := validateCreate(params)
 	if err != nil {
 		return api.Issue{}, err
-	}
-	if params.EventPayload != "" && !json.Valid([]byte(params.EventPayload)) {
-		return api.Issue{}, api.Invalid("event_payload is not valid JSON")
 	}
 	attempts := 1
 	if params.ID == "" && params.Parent == "" {
@@ -54,6 +48,23 @@ func (p *Postgres) CreateIssue(ctx context.Context, params api.CreateParams) (ap
 		return api.Issue{}, err
 	}
 	return api.Issue{}, err
+}
+
+// validateCreate refuses a create the store cannot apply, whatever the issue,
+// and returns the rig it names. Batch checks it for each create, so a batched
+// create refuses exactly what the single create refuses.
+func validateCreate(params api.CreateParams) (string, error) {
+	if strings.TrimSpace(params.Title) == "" {
+		return "", api.Invalid("title is required")
+	}
+	rig, err := rigForCreate(params)
+	if err != nil {
+		return "", err
+	}
+	if params.EventPayload != "" && !json.Valid([]byte(params.EventPayload)) {
+		return "", api.Invalid("event_payload is not valid JSON")
+	}
+	return rig, nil
 }
 
 // isIDCollision reports whether err is the api conflict createInTx returns

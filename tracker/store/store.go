@@ -76,8 +76,9 @@ type Store interface {
 	ChildrenOf(ctx context.Context, parents []string) (map[string][]api.Issue, error)
 	// Batch applies req's operations in order in one transaction: every write
 	// commits together, or the first failure rolls back the ones before it.
-	// The result holds one entry per operation, in request order; a failure is
-	// an api.Error naming the failing operation's index.
+	// On success the result holds one entry per operation, in request order.
+	// A failure answers no results, and its error names the failing
+	// operation's index when that operation raised an api.Error.
 	Batch(ctx context.Context, req api.BatchRequest) (api.BatchResult, error)
 	// CreateGraph creates every node of req and every link between them in one
 	// transaction, or nothing: a cycle, a missing target or a bad node leaves no

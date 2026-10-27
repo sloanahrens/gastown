@@ -59,7 +59,7 @@ func batchOpInTx(ctx context.Context, tx pgx.Tx, op api.BatchOperation, actor st
 	case api.BatchOpCreate:
 		params := *op.Create
 		params.Actor = actor // a body actor is ignored, as on POST /v1/issues
-		rig, err := rigForCreate(params)
+		rig, err := validateCreate(params)
 		if err != nil {
 			return api.BatchOperationResult{}, err
 		}

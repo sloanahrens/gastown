@@ -12,7 +12,8 @@ import (
 // /v1/batch (ordered operations, all or none), and the assignment verbs
 // POST /v1/issues/{id}/claim, /release and /transfer.
 // Every write is attributed to the actor of the request's token; an actor
-// named in a body is ignored.
+// named in a body is ignored. A batch comment is the exception: it carries no
+// author field, so a batch body that names one is refused before the store.
 func (s *Server) registerWriteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/issues", s.createIssue)
 	mux.HandleFunc("PATCH /v1/issues/{id}", s.updateIssue)
@@ -65,8 +66,9 @@ func (s *Server) transferIssue(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// batch answers one result per operation, in the order asked for. A failed
-// operation leaves no result: its error names the index instead.
+// batch answers one result per operation, in the order asked for. A batch
+// that fails answers no results, and an operation's api.Error names its index
+// instead.
 func (s *Server) batch(w http.ResponseWriter, r *http.Request) {
 	var req api.BatchRequest
 	if err := decodeJSON(r, &req); err != nil {
