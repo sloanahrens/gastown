@@ -58,6 +58,27 @@ func TestReceiptLine(t *testing.T) {
 				`"merged_at": "2026-10-26T19:10:00Z", "prev_commit": null, "reason": null, ` +
 				`"source": null, "ts": "2026-10-26T19:20:36Z"}`,
 		},
+		{
+			name: "non-ASCII is escaped, as python does",
+			in:   receipt{ts: ts, event: "failed", reason: "café & 日本"},
+			want: `{"commit": null, "duration_s": null, "event": "failed", "merged_at": null, ` +
+				`"prev_commit": null, "reason": "caf\u00e9 & \u65e5\u672c", "source": null, ` +
+				`"ts": "2026-10-26T19:20:36Z"}`,
+		},
+		{
+			name: "an astral character is a surrogate pair, as python writes it",
+			in:   receipt{ts: ts, event: "failed", reason: "\U0001F600"},
+			want: `{"commit": null, "duration_s": null, "event": "failed", "merged_at": null, ` +
+				`"prev_commit": null, "reason": "\ud83d\ude00", "source": null, ` +
+				`"ts": "2026-10-26T19:20:36Z"}`,
+		},
+		{
+			name: "control characters use python's short escapes where it has them",
+			in:   receipt{ts: ts, event: "failed", reason: "a\bb\fc\u0001d\u007fe"},
+			want: `{"commit": null, "duration_s": null, "event": "failed", "merged_at": null, ` +
+				`"prev_commit": null, "reason": "a\bb\fc\u0001d\u007fe", "source": null, ` +
+				`"ts": "2026-10-26T19:20:36Z"}`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

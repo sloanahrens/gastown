@@ -1,9 +1,10 @@
 package installer
 
 import (
-	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -55,45 +56,81 @@ type receipt struct {
 // until the script goes (gt-tpg0p.14), so a diff on it should mean a different
 // install, not a different encoder.
 func (r receipt) line() string {
-	var duration any
+	duration, hasDuration := 0, false
 	if !r.start.IsZero() {
-		duration = int(r.ts.Sub(r.start).Seconds())
+		duration, hasDuration = int(r.ts.Sub(r.start).Seconds()), true
 	}
-	var mergedAt any
+	mergedAt := ""
 	if !r.mergedAt.IsZero() {
 		mergedAt = r.mergedAt.UTC().Format(time.RFC3339)
 	}
 	fields := []string{
-		`"commit": ` + jsonValue(nullable(r.commit)),
-		`"duration_s": ` + jsonValue(duration),
-		`"event": ` + jsonValue(nullable(r.event)),
-		`"merged_at": ` + jsonValue(mergedAt),
-		`"prev_commit": ` + jsonValue(nullable(r.prev)),
-		`"reason": ` + jsonValue(nullable(r.reason)),
-		`"source": ` + jsonValue(nullable(r.source)),
-		`"ts": ` + jsonValue(r.ts.UTC().Format(time.RFC3339)),
+		`"commit": ` + jsonOptional(r.commit),
+		`"duration_s": ` + jsonOptionalInt(duration, hasDuration),
+		`"event": ` + jsonOptional(r.event),
+		`"merged_at": ` + jsonOptional(mergedAt),
+		`"prev_commit": ` + jsonOptional(r.prev),
+		`"reason": ` + jsonOptional(r.reason),
+		`"source": ` + jsonOptional(r.source),
+		`"ts": ` + jsonString(r.ts.UTC().Format(time.RFC3339)),
 	}
 	return "{" + strings.Join(fields, ", ") + "}"
 }
 
-// nullable is an empty field as JSON null, which is how the script writes one.
-func nullable(s string) any {
+// jsonOptional is s as a JSON string, or null when the run has nothing to say,
+// which is how the script writes an absent field.
+func jsonOptional(s string) string {
 	if s == "" {
-		return nil
-	}
-	return s
-}
-
-// jsonValue encodes one value without json.Marshal's HTML escaping, which
-// python does not do and would otherwise make the two writers' lines differ.
-func jsonValue(v any) string {
-	var b strings.Builder
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
 		return "null"
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	return jsonString(s)
+}
+
+// jsonOptionalInt is n as a JSON number, or null when the record does not hold
+// one.
+func jsonOptionalInt(n int, ok bool) string {
+	if !ok {
+		return "null"
+	}
+	return strconv.Itoa(n)
+}
+
+// jsonString quotes s the way python's json.dumps does at its defaults: every
+// character outside printable ASCII becomes a \uXXXX escape, astral ones a
+// surrogate pair, and \b and \f keep their short forms (gt-314j0).
+func jsonString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			switch {
+			case r >= 0x20 && r < 0x7f:
+				b.WriteRune(r)
+			case r > 0xffff:
+				n := r - 0x10000
+				fmt.Fprintf(&b, `\u%04x\u%04x`, 0xd800+(n>>10), 0xdc00+(n&0x3ff))
+			default:
+				fmt.Fprintf(&b, `\u%04x`, r)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // appendReceipt writes line as one more line of path, creating the directory

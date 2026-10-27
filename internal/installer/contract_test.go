@@ -58,6 +58,42 @@ func TestEscalateThatCannotBeDeliveredWarns(t *testing.T) {
 	}
 }
 
+// A town that does not answer costs one WARNING line, and the install does not
+// wait for it: Escalate returns at its deadline.
+func TestEscalateGivesUpAtItsDeadline(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	var out strings.Builder
+	c := &Contract{
+		Stdout:           &out,
+		GT:               "/town/bin/gt",
+		escalateDeadline: 10 * time.Millisecond,
+		Exec: func(string, ...string) ([]byte, error) {
+			<-release // a gt that never returns
+			return nil, nil
+		},
+	}
+	t.Cleanup(func() { close(release) })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.Escalate("HIGH", "install-gt:build-failed", "the build did not finish")
+	}()
+	//testpolicy:allow no-sleep — bound the wait for the give-up, which fails rather than hangs
+	gaveUp := time.After(30 * time.Second)
+	select {
+	case <-done:
+	case <-gaveUp:
+		t.Fatal("Escalate waited on an escalation that never answered")
+	}
+
+	want := "[install-gt] WARNING: escalation install-gt:build-failed did not reach the town\n"
+	if got := out.String(); got != want {
+		t.Errorf("wrote %q, want %q", got, want)
+	}
+}
+
 // A run that named its result keeps the status it chose.
 func TestOnExitPassesAStatedResultThrough(t *testing.T) {
 	t.Parallel()
@@ -158,6 +194,24 @@ func TestReceiptThatCannotBeWrittenWarnsOnly(t *testing.T) {
 	}
 	if want := "install-gt: RESULT failed - - unexpected\n"; out.String() != want {
 		t.Errorf("stdout = %q, want %q", out.String(), want)
+	}
+}
+
+// A run that already named its result writes no receipt when the trap runs,
+// even when it knows where receipts go: the line would describe an exit that
+// already happened.
+func TestOnExitAfterAReportWritesNoReceipt(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "daemon", "install-receipts.jsonl")
+	var out strings.Builder
+	c := &Contract{Stdout: &out, Receipts: path, Expected: "abc123", Prev: "def456"}
+	c.Report(Result{Event: "installed", Commit: "abc123", Prev: "def456"})
+
+	if got := c.OnExit(ExitOK); got != ExitOK {
+		t.Errorf("OnExit returned %d, want %d", got, ExitOK)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a reported run wrote %s (stat error: %v)", path, err)
 	}
 }
 
