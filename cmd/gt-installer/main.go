@@ -7,11 +7,10 @@
 //	             [--no-image-first]
 //
 // The install sections land one bead at a time: the OpenShell gateway step
-// (gt-tpg0p.9), then target resolution, the no-op path and the refusals
-// (gt-tpg0p.10). Until the build section lands (gt-tpg0p.11), a run that gets
-// that far ends in the exit guard as failed/unexpected with status 1, so a
-// caller wired to this program early fails loudly rather than believing an
-// install happened.
+// (gt-tpg0p.9), target resolution, the no-op path and the refusals
+// (gt-tpg0p.10), and the build, install, signing, smoke and syncs
+// (gt-tpg0p.11). The sandbox image step (gt-tpg0p.12) and the Makefile switch
+// (gt-tpg0p.14) are still to land.
 package main
 
 import (
@@ -41,11 +40,21 @@ type environment struct {
 	getwd  func() (string, error)
 	home   func() (string, error)
 	exe    func() (string, error)
+	// newRun builds the run itself, so a test hands the whole flow commands
+	// that are recorded rather than started and a filesystem under a temporary
+	// directory. Without it any test that reached the build, install, signing or
+	// smoke step would run make, gt and codesign for real (gt-tpg0p.11).
+	newRun func(cfg installer.Config, c *installer.Contract, paths installer.Paths) *installer.Run
 }
 
 // run is runWith against the process's own environment.
 func run(args []string, stdout, stderr io.Writer) int {
-	return runWith(args, stdout, stderr, environment{os.Getenv, os.Getwd, os.UserHomeDir, os.Executable})
+	return runWith(args, stdout, stderr, environment{
+		getenv: os.Getenv,
+		getwd:  os.Getwd,
+		home:   os.UserHomeDir,
+		exe:    os.Executable,
+	})
 }
 
 // runWith is run against env, so a test can point every directory at a
@@ -90,7 +99,12 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 	c.Receipts = paths.Receipts()
 	c.GT = paths.GT()
 
-	r := installer.NewRun(cfg, c, paths)
+	newRun := env.newRun
+	if newRun == nil {
+		newRun = installer.NewRun
+	}
+	r := newRun(cfg, c, paths)
+	r.Signing = installer.ResolveSigning(env.getenv, paths.TownRoot)
 	// --dry-run prints the gateway plan and changes nothing, before the checkout
 	// is read.
 	if cfg.DryRun {
@@ -110,6 +124,25 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 		fmt.Fprintln(stderr, err)
 		return int(installer.ExitFailed)
 	}
-	// The build, install, signing and smoke checks land in gt-tpg0p.11.
-	return int(installer.ExitFailed)
+	if code, ended := r.Build(); ended {
+		return int(code)
+	}
+	// The sandbox image is built and published here, before the swap; that step
+	// is gt-tpg0p.12.
+	if code, ended := r.Install(); ended {
+		return int(code)
+	}
+	// Signing runs on what install-local just put in place, before the smoke
+	// check runs it, and never changes the outcome (gt-426fo.1).
+	r.Sign()
+	if code, ended := r.Smoke(); ended {
+		return int(code)
+	}
+	r.Syncs()
+	// A gateway that fails is a failed install: the binary stays in force, but
+	// the result says the gateway step did not complete.
+	if !r.GatewayStep(installer.GatewayInstall) {
+		return int(c.Finish(installer.Result{Event: "failed", Commit: cfg.SHA, Reason: "gateway"}, installer.ExitFailed))
+	}
+	return int(r.Finalize())
 }

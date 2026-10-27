@@ -3,7 +3,6 @@ package installer
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"regexp"
 )
 
@@ -15,34 +14,31 @@ type Binary struct {
 	Commit func(dir, gt string) string
 }
 
-// Command runs one command from dir and returns its combined output.
-type Command func(dir, name string, args ...string) ([]byte, error)
-
 // StaleBinary is the real read: 'gt stale --json' binary_commit first, 'gt
 // version' as the fallback (lib/install-gt-lib.sh's igt_binary_commit_raw). run
-// executes the commands; nil runs them for real.
-func StaleBinary(run Command) Binary {
+// executes the commands; nil runs them for real. The stale read answers from
+// stdout alone, where the JSON has to be and nothing else; the version fallback
+// reads both streams, so a gt that announces its version on stderr still
+// answers. A read that did not exit 0 answers nothing.
+func StaleBinary(run Execute) Binary {
 	if run == nil {
-		run = func(dir, name string, args ...string) ([]byte, error) {
-			cmd := exec.Command(name, args...)
-			cmd.Dir = dir
-			return cmd.CombinedOutput()
-		}
+		run = RealExecute
 	}
 	return Binary{Commit: func(dir, gt string) string {
 		if !isExecutable(gt) {
 			return ""
 		}
-		if out, err := run(dir, gt, "stale", "--json"); err == nil {
+		if out, _, code := run(dir, gt, "stale", "--json"); code == 0 {
 			if commit := staleCommit(out); commit != "" {
 				return commit
 			}
 		}
-		out, err := run(dir, gt, "version")
-		if err != nil {
+		stdout, stderr, code := run(dir, gt, "version")
+		if code != 0 {
 			return ""
 		}
-		return versionCommit(out)
+		// A fresh slice: appending to stdout would write into the caller's.
+		return versionCommit(append(append([]byte(nil), stdout...), stderr...))
 	}}
 }
 

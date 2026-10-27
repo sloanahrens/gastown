@@ -575,3 +575,48 @@ func TestNoopRunsTheGatewayStep(t *testing.T) {
 		t.Errorf("ran %q, want %q", tr.execs, wantExecs)
 	}
 }
+
+// A gateway step that fails reports false, so the install can fail with it; a
+// clean install, and a gateway that was never configured, report true.
+func TestGatewayStepReportsItsFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		setup     func(g *testGateway)
+		failsBoot bool
+		want      bool
+	}{
+		{
+			name:  "a clean install reports true",
+			setup: func(g *testGateway) { g.prepared(t) },
+			want:  true,
+		},
+		{
+			name:      "a failed bootstrap reports false",
+			setup:     func(g *testGateway) { g.prepared(t) },
+			failsBoot: true,
+			want:      false,
+		},
+		{
+			name:  "a missing template reports false",
+			setup: func(g *testGateway) { writeFileAt(t, g.toml(), "") },
+			want:  false,
+		},
+		{
+			name:  "a gateway that was never configured reports true",
+			setup: func(g *testGateway) {},
+			want:  true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := newTestGateway(t)
+			g.failsBoot = tc.failsBoot
+			tc.setup(g)
+			if got := g.Step(GatewayInstall); got != tc.want {
+				t.Errorf("Step(GatewayInstall) = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

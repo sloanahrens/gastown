@@ -52,8 +52,8 @@ type Gateway struct {
 }
 
 // GatewayStep runs the OpenShell gateway step in mode; see Gateway.
-func (r *Run) GatewayStep(mode GatewayMode) {
-	Gateway{
+func (r *Run) GatewayStep(mode GatewayMode) bool {
+	return Gateway{
 		C:          r.C,
 		Files:      r.Files,
 		RigDir:     r.Paths.RigDir,
@@ -63,22 +63,25 @@ func (r *Run) GatewayStep(mode GatewayMode) {
 	}.Step(mode)
 }
 
-// Step performs the gateway step.
-func (g Gateway) Step(mode GatewayMode) {
+// Step performs the gateway step. It reports false when the step failed: a
+// template that is missing or cannot be rendered, a unit that cannot be written,
+// or a bootstrap that did not run. A gateway that was never configured is not a
+// failure and reports true.
+func (g Gateway) Step(mode GatewayMode) bool {
 	toml := filepath.Join(g.Home, ".config", "openshell", "gateway.toml")
 	if !g.Files.isFile(toml) {
 		g.C.Log("gateway: skipped, no " + toml)
-		return
+		return true
 	}
 	tmpl := g.template()
 	if !g.Files.isFile(tmpl) {
 		g.C.Warn("gateway: no template at " + tmpl)
-		return
+		return false
 	}
 	rendered, err := g.render(tmpl)
 	if err != nil {
 		g.C.Warn("gateway: could not render " + tmpl)
-		return
+		return false
 	}
 	plist := filepath.Join(g.launchdDir(), gatewayLabel+".plist")
 	changed := !g.current(plist, rendered)
@@ -91,23 +94,24 @@ func (g Gateway) Step(mode GatewayMode) {
 		if !loaded {
 			g.C.Log("gateway: would run: launchctl bootstrap " + domain + " " + plist)
 		}
-		return
+		return true
 	}
 	if changed && !g.writeUnit(plist, rendered) {
-		return
+		return false
 	}
 	if !loaded {
 		if _, err := g.C.exec("launchctl", "bootstrap", domain, plist); err != nil {
 			g.C.Warn("gateway: launchctl bootstrap " + domain + " " + plist + " failed")
-			return
+			return false
 		}
 		g.C.Log("gateway: bootstrapped " + gatewayLabel)
-		return
+		return true
 	}
 	if changed {
 		g.C.Log("gateway: " + gatewayLabel +
 			" is loaded and keeps its old unit until: launchctl kickstart -k " + domain + "/" + gatewayLabel)
 	}
+	return true
 }
 
 // template is the script's lookup: the checkout being installed first, then the

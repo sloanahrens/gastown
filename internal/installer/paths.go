@@ -10,6 +10,10 @@ import (
 type Paths struct {
 	// BinDir is where the installed binary lives.
 	BinDir string
+	// TownRoot is the town the daemon and the signing material sit under,
+	// empty when the town could not be found (a run that names its daemon and
+	// checkout itself needs none).
+	TownRoot string
 	// DaemonDir holds the daemon's state.json, its restart marker and the
 	// install receipts.
 	DaemonDir string
@@ -69,6 +73,7 @@ func resolvePaths(getenv func(string) string, home, start string, isTown func(st
 	}
 	p := Paths{
 		BinDir:     binDir,
+		TownRoot:   townRoot,
 		DaemonDir:  getenv("INSTALL_GT_DAEMON_DIR"),
 		RigDir:     getenv("INSTALL_GT_RIG_DIR"),
 		Home:       getenv("INSTALL_GT_GATEWAY_HOME"),

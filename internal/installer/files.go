@@ -24,6 +24,13 @@ type Files struct {
 	MkdirAll func(path string) error
 	IsFile   func(path string) bool
 	Exists   func(path string) bool
+	// IsExecutable reports whether path is a file someone can run, the
+	// script's -x test on the binary the container-gate slot is taken with.
+	IsExecutable func(path string) bool
+	// TempFile creates an empty file in dir and returns its path, the script's
+	// mktemp: signing runs codesign against a copy beside the binary, never
+	// against the live path.
+	TempFile func(dir, pattern string) (string, error)
 	// ClearImmutable and SetImmutable bracket a rename over the installed
 	// binary, which an install can leave OS-immutable; both are best effort
 	// because a platform without the flag has nothing to do (gt-vya0s).
@@ -87,6 +94,20 @@ func (f Files) exists(path string) bool {
 	return pathExists(path)
 }
 
+func (f Files) isExecutable(path string) bool {
+	if f.IsExecutable != nil {
+		return f.IsExecutable(path)
+	}
+	return isExecutable(path)
+}
+
+func (f Files) tempFile(dir, pattern string) (string, error) {
+	if f.TempFile != nil {
+		return f.TempFile(dir, pattern)
+	}
+	return createTempFile(dir, pattern)
+}
+
 func (f Files) clearImmutable(path string) {
 	if f.ClearImmutable != nil {
 		f.ClearImmutable(path)
@@ -117,9 +138,14 @@ func (f Files) sameContent(a, b string) bool {
 	return bytes.Equal(ab, bb)
 }
 
-// copyFile copies contents and mode, which is all a rollback needs. Unlike cp
-// -p it copies no platform flag, so a copy of an immutable binary is writable
-// before the flag is re-applied to the installed path (gt-vya0s).
+// copyFile copies contents and mode, which is all a rollback needs. The mode is
+// set after the write, and not only on the create: a destination that already
+// exists keeps the mode it has, and signing copies into the 0600 file mktemp
+// made beside the binary, so a write alone would leave a signed copy that
+// nothing can execute renamed over the installed binary (the script's
+// chmod --reference, gt-tpg0p.11). Unlike cp -p it copies no platform flag, so
+// a copy of an immutable binary is writable before the flag is re-applied to
+// the installed path (gt-vya0s).
 func copyFile(dst, src string) error {
 	info, err := os.Stat(src)
 	if err != nil {
@@ -129,7 +155,10 @@ func copyFile(dst, src string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, info.Mode().Perm())
+	if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
+		return err
+	}
+	return os.Chmod(dst, info.Mode().Perm())
 }
 
 func isRegularFile(path string) bool {
@@ -140,6 +169,19 @@ func isRegularFile(path string) bool {
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// createTempFile is mktemp: an empty file in dir whose name the pattern
+// decides. A close that fails is not the step's failure: the file exists
+// either way, and the copy that follows writes it again and reports its own
+// error if it cannot.
+func createTempFile(dir, pattern string) (string, error) {
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", err
+	}
+	_ = f.Close()
+	return f.Name(), nil
 }
 
 // clearImmutable strips the OS-immutable flag on macos (chflags) and Linux
