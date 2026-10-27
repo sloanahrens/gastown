@@ -143,6 +143,15 @@ if has_pid; then
 	finish 0
 fi
 
+# launchctl print reports an unloaded job with status 113 ("Could not find
+# service"). Any other failure, including launchctl that could not run at all
+# (126 or 127), says nothing about the job: leave it alone rather than read it
+# as unloaded and bootout a job that may be running (dv-7k25.4).
+case "$loaded" in
+0|113) ;;
+*) log "left alone: launchctl print could not run (status $loaded); $SVC state is unknown"; finish 0 ;;
+esac
+
 if [ -n "$(lsof -t -- "$LOCK" 2>/dev/null)" ]; then
 	log "left alone: $LOCK is held by a live process"
 	finish 0
