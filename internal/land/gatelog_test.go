@@ -3,6 +3,7 @@ package land
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,26 +14,17 @@ import (
 	"github.com/steveyegge/gastown/internal/forgejo"
 )
 
-// agedEntry is a kept log a fake directory lists beside its age: old enough for
-// the prune to want it gone unless the test says otherwise.
-type agedEntry struct {
-	name string
-	at   time.Time
+// agedEntry is a file a fake directory lists. Its name is its whole age: the
+// prune reads the unix time the name carries, and a stat it did not need is
+// reported as a failure of the row that asked for it.
+type agedEntry struct{ name string }
+
+func (e agedEntry) Name() string      { return e.name }
+func (e agedEntry) IsDir() bool       { return false }
+func (e agedEntry) Type() os.FileMode { return 0 }
+func (e agedEntry) Info() (os.FileInfo, error) {
+	return nil, errors.New("retention stat'ed a kept log instead of reading its name")
 }
-
-func (e agedEntry) Name() string               { return e.name }
-func (e agedEntry) IsDir() bool                { return false }
-func (e agedEntry) Type() os.FileMode          { return 0 }
-func (e agedEntry) Info() (os.FileInfo, error) { return agedInfo{e: e}, nil }
-
-type agedInfo struct{ e agedEntry }
-
-func (i agedInfo) Name() string       { return i.e.name }
-func (i agedInfo) Size() int64        { return 0 }
-func (i agedInfo) Mode() os.FileMode  { return 0o600 }
-func (i agedInfo) ModTime() time.Time { return i.e.at }
-func (i agedInfo) IsDir() bool        { return false }
-func (i agedInfo) Sys() any           { return nil }
 
 // TestKeepGateLogReportsItsFailures: a log that cannot be written costs the
 // log and not the rejection, while a log that cannot be pruned stays kept and
@@ -41,7 +33,6 @@ func (i agedInfo) Sys() any           { return nil }
 func TestKeepGateLogReportsItsFailures(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 27, 18, 0, 0, 0, time.UTC)
-	old := now.Add(-GateLogRetention - time.Hour)
 	okMkdir := func(string, os.FileMode) error { return nil }
 	okWrite := func(string, []byte, os.FileMode) error { return nil }
 	tests := []struct {
@@ -68,18 +59,9 @@ func TestKeepGateLogReportsItsFailures(t *testing.T) {
 				mkdirAll:  okMkdir,
 				writeFile: okWrite,
 				readDir: func(string) ([]os.DirEntry, error) {
-					return []os.DirEntry{agedEntry{name: "deadbeef-1.log", at: old}}, nil
+					return []os.DirEntry{agedEntry{name: "deadbeef-1.log"}}, nil
 				},
 				remove: func(string) error { return errors.New("stuck") },
-			},
-			wantPath: true,
-		},
-		{
-			name: "a kept log cannot be stat'ed",
-			fs: gateLogFS{
-				mkdirAll:  okMkdir,
-				writeFile: okWrite,
-				readDir:   func(string) ([]os.DirEntry, error) { return []os.DirEntry{brokenEntry{name: "deadbeef-1.log"}}, nil },
 			},
 			wantPath: true,
 		},
@@ -97,6 +79,30 @@ func TestKeepGateLogReportsItsFailures(t *testing.T) {
 				t.Fatalf("path = %q; a write that failed names no log", path)
 			}
 		})
+	}
+}
+
+// TestPruneGateLogsReadsTheNamesNotTheStat: retention is decided by the time a
+// log's name carries, so a kept log is aged by the clock that wrote it and not
+// by a filesystem mtime from another one (gt-zua7o). The entries here cannot be
+// stat'ed at all: a prune that asked would fail.
+func TestPruneGateLogsReadsTheNamesNotTheStat(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 27, 18, 0, 0, 0, time.UTC)
+	expired := fmt.Sprintf("deadbeef-%d.log", now.Add(-GateLogRetention-time.Hour).Unix())
+	recent := fmt.Sprintf("cafebabe-%d.log", now.Add(-GateLogRetention+time.Hour).Unix())
+	var removed []string
+	fs := gateLogFS{
+		readDir: func(string) ([]os.DirEntry, error) {
+			return []os.DirEntry{agedEntry{name: expired}, agedEntry{name: recent}}, nil
+		},
+		remove: func(path string) error { removed = append(removed, filepath.Base(path)); return nil },
+	}
+	if err := pruneGateLogs(fs, "/kept/gastown", now); err != nil {
+		t.Fatalf("pruneGateLogs: %v; the prune needs no stat", err)
+	}
+	if !slices.Equal(removed, []string{expired}) {
+		t.Fatalf("removed %v; want only the log whose name is past retention", removed)
 	}
 }
 
@@ -131,79 +137,49 @@ func gateLogPastTheTailCap(log string) string {
 	return log
 }
 
-// TestCandidateGateKeepsTheRejectedJobLog: a red candidate gate keeps the log
-// it read for its verdict under its log directory, named
+// TestCandidateGateKeepsTheRejectedJobLog: a red candidate gate keeps the whole
+// job log it read for its verdict under its log directory, named
 // <short-sha>-<unix-time>.log, so the note's excerpt can be checked against
-// everything that log holds after the run record is gone (gt-wwqx8).
+// everything that log holds after the run record is gone (gt-wwqx8, gt-zua7o).
 func TestCandidateGateKeepsTheRejectedJobLog(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	dir := writeGateWorkflow(t, gateWorkflowYAML)
-	// The three logs a red gate can hold: a cut tail that names the failure, a
-	// wider log that does, and the passing tail of a log whose failure sits
-	// past the cap the gate reads.
-	cutTail := gateLogPastTheTailCap(gateJobLog("--- FAIL: TestThing (0.01s)", "FAIL\tgithub.com/x/a\t0.2s"))
-	widerLog := gateLogPastTheTailCap(gateJobLog("⭐ Run Main actions/checkout@v4", "--- FAIL: TestThing (0.01s)", "FAIL\tgithub.com/x/a\t0.2s"))
-	passingTail := gateLogPastTheTailCap("")
+	now := time.Date(2026, 10, 27, 18, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name string
-		// tail is what the 16 KiB fetch returns; whole answers the wider one.
-		tail        string
-		whole       string
-		wholeErr    error
-		want        string
-		wantFetches []int64
+		log  string
 	}{
+		{name: "a short log", log: redGateLog()},
 		{
-			// The cut tail names the failure, so the verdict rests on it and it
-			// is kept as fetched: widening it would spend a second Forgejo
-			// request on every red (the bead's constraint).
-			name:        "the cut tail names the failure",
-			tail:        cutTail,
-			want:        cutTail,
-			wantFetches: []int64{candidateTailBytes},
-		},
-		{
-			// The tail of passing packages names no failure, so the gate widens
-			// once and the wider log is the one kept.
-			name:        "the failure sits past the tail cap",
-			tail:        passingTail,
-			whole:       widerLog,
-			want:        widerLog,
-			wantFetches: []int64{candidateTailBytes, candidateFullLogBytes},
-		},
-		{
-			// The wider fetch fails, so the tail the gate already holds is all
-			// there is: it is kept rather than losing the log to the failure.
-			name:        "the wider fetch fails",
-			tail:        passingTail,
-			wholeErr:    errors.New("forgejo: 502"),
-			want:        passingTail,
-			wantFetches: []int64{candidateTailBytes, candidateFullLogBytes},
+			// The failure sits above more than the excerpt's tail cap: the tail
+			// alone would name nothing, and the whole log is what is kept.
+			name: "a log past the tail cap",
+			log:  gateLogPastTheTailCap(redGateLog()),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client, sha := redCandidate(t, f, tt.tail)
-			client.fullLog, client.fullLogErr = tt.whole, tt.wholeErr
+			client, sha := redCandidate(t, f, tt.log)
 			logDir := filepath.Join(t.TempDir(), "gate-logs", "gastown")
 			gate := fastGate(client)
 			gate.GateLogDir = logDir
+			gate.Now = func() time.Time { return now }
 
 			res := gate.Run(context.Background(), f.git.Open(f.repo), dir, f.work, sha)
 			if res.State != CandidateFailed {
 				t.Fatalf("state = %v, want failed (err %v)", res.State, res.Err)
 			}
-			prefix := filepath.Join(logDir, shortSHA(sha)+"-")
-			if !strings.HasPrefix(res.GateLog, prefix) || !strings.HasSuffix(res.GateLog, ".log") {
-				t.Fatalf("GateLog = %q; want %s<unix-time>.log", res.GateLog, prefix)
+			want := filepath.Join(logDir, fmt.Sprintf("%s-%d.log", shortSHA(sha), now.Unix()))
+			if res.GateLog != want {
+				t.Fatalf("GateLog = %q; want %s", res.GateLog, want)
 			}
 			kept, err := os.ReadFile(res.GateLog)
 			if err != nil {
 				t.Fatalf("reading the kept log: %v", err)
 			}
-			if string(kept) != tt.want {
-				t.Fatalf("kept %d bytes; want the %d bytes the gate read", len(kept), len(tt.want))
+			if string(kept) != tt.log {
+				t.Fatalf("kept %d bytes; want the whole log the gate read, %d bytes", len(kept), len(tt.log))
 			}
 			// CI output can carry what a failing step printed, secrets included.
 			info, err := os.Stat(res.GateLog)
@@ -213,8 +189,8 @@ func TestCandidateGateKeepsTheRejectedJobLog(t *testing.T) {
 			if perm := info.Mode().Perm(); perm != 0o600 {
 				t.Fatalf("kept log mode = %o; want 0600", perm)
 			}
-			if !slices.Equal(client.limits, tt.wantFetches) {
-				t.Fatalf("log fetches %v; want %v", client.limits, tt.wantFetches)
+			if !slices.Equal(client.limits, []int64{candidateFullLogBytes}) {
+				t.Fatalf("log fetches %v; want the one read the kept log came from", client.limits)
 			}
 		})
 	}
@@ -304,8 +280,10 @@ func TestCandidateGateWithNoLogDirectoryKeepsNoLog(t *testing.T) {
 }
 
 // TestCandidateGatePrunesGateLogsPastRetention: writing a log deletes the kept
-// logs older than 14 days and leaves the newer files, so the directory stays
-// bounded without a second task (gt-wwqx8).
+// logs whose name dates them more than 14 days before the new one's clock and
+// leaves the newer files, so the directory stays bounded without a second task.
+// The age is the name's, so no test stages a filesystem mtime (gt-wwqx8,
+// gt-zua7o).
 func TestCandidateGatePrunesGateLogsPastRetention(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
@@ -314,26 +292,25 @@ func TestCandidateGatePrunesGateLogsPastRetention(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now()
-	expired := filepath.Join(dir, "deadbeef-1.log")
-	recent := filepath.Join(dir, "cafebabe-2.log")
-	// A file the gate did not write is not the prune's to remove.
+	now := time.Date(2026, 10, 27, 18, 0, 0, 0, time.UTC)
+	keptAt := func(at time.Time) string {
+		return filepath.Join(dir, fmt.Sprintf("deadbeef-%d.log", at.Unix()))
+	}
+	expired := keptAt(now.Add(-GateLogRetention - time.Hour))
+	recent := keptAt(now.Add(-GateLogRetention + time.Hour))
+	// Files the gate did not write are not the prune's to remove: another
+	// suffix, and log names that carry no time.
 	foreign := filepath.Join(dir, "notes.txt")
-	for path, age := range map[string]time.Duration{
-		expired: GateLogRetention + time.Hour,
-		recent:  GateLogRetention - time.Hour,
-		foreign: GateLogRetention + time.Hour,
-	} {
+	undated := filepath.Join(dir, "cafebabe.log")
+	unstamped := filepath.Join(dir, "deadbeef-x.log")
+	for _, path := range []string{expired, recent, foreign, undated, unstamped} {
 		if err := os.WriteFile(path, []byte("kept\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		at := now.Add(-age)
-		if err := os.Chtimes(path, at, at); err != nil {
 			t.Fatal(err)
 		}
 	}
 	gate := fastGate(client)
 	gate.GateLogDir = dir
+	gate.Now = func() time.Time { return now }
 
 	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
 	if res.State != CandidateFailed {
@@ -342,7 +319,7 @@ func TestCandidateGatePrunesGateLogsPastRetention(t *testing.T) {
 	if _, err := os.Stat(expired); !os.IsNotExist(err) {
 		t.Errorf("the log past retention was not removed (stat: %v)", err)
 	}
-	for _, path := range []string{recent, foreign, res.GateLog} {
+	for _, path := range []string{recent, foreign, undated, unstamped, res.GateLog} {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("%s was removed or never written: %v", path, err)
 		}
@@ -355,7 +332,7 @@ func TestRejectGateNoteNamesTheKeptGateLog(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	l := f.lander()
-	logPath := filepath.Join(t.TempDir(), "gate-logs", "gastown", "8cc7b0ab-1793123456123456789.log")
+	logPath := filepath.Join(t.TempDir(), "gate-logs", "gastown", "8cc7b0ab-1793123456.log")
 	cand := &fakeCandidate{res: CandidateResult{
 		State: CandidateFailed, Context: "ci / gate (push)", Tail: "--- FAIL: TestThing\n", GateLog: logPath, Pushed: true}}
 	l.Candidate = cand

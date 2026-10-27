@@ -16,10 +16,9 @@ func TestCandidateGatePackagesReadsTheGateJobLog(t *testing.T) {
 	t.Parallel()
 	dir := writeGateWorkflow(t, gateWorkflowYAML)
 	client := &fakeForgejo{
-		runs:    []forgejo.ActionRun{{ID: 7, CommitSHA: "abc123"}},
-		jobs:    []forgejo.ActionRunJob{{ID: 3, Name: "gate"}},
-		log:     "tail with no package lines\n",
-		fullLog: "ok  \texample.test/a\t0.1s\nFAIL\texample.test/b\t0.2s\nFAIL\n",
+		runs: []forgejo.ActionRun{{ID: 7, CommitSHA: "abc123"}},
+		jobs: []forgejo.ActionRunJob{{ID: 3, Name: "gate"}},
+		log:  "ok  \texample.test/a\t0.1s\nFAIL\texample.test/b\t0.2s\nFAIL\n",
 	}
 
 	got, err := fastGate(client).Packages(context.Background(), dir, CandidateResult{SHA: "abc123"})
@@ -101,7 +100,7 @@ func TestCandidateGatePackagesReadsTimestampedLines(t *testing.T) {
 	client := &fakeForgejo{
 		runs: []forgejo.ActionRun{{ID: 7, CommitSHA: "abc123"}},
 		jobs: []forgejo.ActionRunJob{{ID: 3, Name: "gate"}},
-		fullLog: "2026-10-21T14:03:40.2345678Z ok  \texample.test/a\t0.1s\n" +
+		log: "2026-10-21T14:03:40.2345678Z ok  \texample.test/a\t0.1s\n" +
 			"2026-10-21T14:03:41.2345678Z FAIL\texample.test/b\t0.2s\n",
 	}
 

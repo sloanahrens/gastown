@@ -33,12 +33,15 @@ const (
 	// it (the daemon's landingRigLandTimeout: this wait, plus the om timeout,
 	// plus the merge slack), or this window is unreachable (gt-fn9e6.26).
 	DefaultCandidateWaitTimeout = 20 * time.Minute
-	// candidateTailBytes bounds the job log fetched for a red verdict; the
-	// rework note's excerpt is built from it.
+	// candidateTailBytes is the tail the rework note's excerpt is read from when
+	// that tail already names a failure: the note carries the failure the
+	// verdict rested on rather than every earlier one.
 	candidateTailBytes = 16 * 1024
-	// candidateFullLogBytes bounds the second fetch, made only when the capped
-	// tail names no failure at all: the failure can sit far enough from the end
-	// that 16 KiB of passing packages hides it (gt-fn9e6.25).
+	// candidateFullLogBytes bounds the one job log read behind a red verdict. It
+	// is the log kept for a rejection, and the whole of it is what the note's
+	// excerpt falls back to when the tail names no failure: the failure can sit
+	// far enough from the end that 16 KiB of passing packages hides it
+	// (gt-fn9e6.25, gt-wwqx8).
 	candidateFullLogBytes = 2 << 20
 	// candidateStatusErrorTolerance is how many consecutive status read errors
 	// the wait absorbs before it gives up. A read error says nothing about the
@@ -203,10 +206,10 @@ type CandidateResult struct {
 	Tail string
 	// GateLog is the job log the gate read, kept on disk for a rejected gate so
 	// the rework note's excerpt can be checked against it after the run record
-	// is gone (gt-wwqx8). It is the whole log when the read reached the log's
-	// start, and the capped tail when that tail already named the failure.
-	// Empty when no log was kept: a gate built with no log directory, an
-	// unreadable log, or a write that failed.
+	// is gone (gt-wwqx8). It is the whole log, bounded at candidateFullLogBytes:
+	// a log longer than that is kept as the capped read, its last
+	// candidateFullLogBytes bytes. Empty when no log was kept: a gate built with
+	// no log directory, an unreadable log, or a write that failed.
 	GateLog string
 	// RunStatus is the status of the run that tested SHA: for a red context,
 	// whether the run behind it ran, or ended without judging the work. It is
@@ -259,6 +262,10 @@ type CandidateGate struct {
 	// GateLogDir is where a rejected gate's job log is kept, the rig's
 	// GateLogDir(townRoot, rig). Empty keeps no log.
 	GateLogDir string
+	// Now is the clock a kept log is named and dated with; nil means time.Now.
+	// It is one clock for both, so retention reads the time the name carries
+	// and never a filesystem mtime (gt-zua7o).
+	Now func() time.Time
 	// Out, when set, receives one line per poll, so a long wait is visible
 	// beside the rest of the landing's output.
 	Out io.Writer
@@ -457,22 +464,21 @@ func (g *CandidateGate) redVerdict(ctx context.Context, wf GateWorkflow, res *Ca
 			ErrCISilence, wf.Context(), contextState, shortSHA(res.SHA), run.Status, sig.name)
 	}
 	if logErr == nil {
-		res.Tail = failureExcerpt(log, gateTailLines)
+		res.Tail = failureExcerpt(excerptSource(log), gateTailLines)
 		g.keepGateLog(res, log)
 	}
 	return CandidateFailed, nil
 }
 
-// keepGateLog keeps the log the red verdict was read from and records where the
-// note names it. That log is what this bead allows: a wider one would be a
-// second Forgejo request per rejection (gt-wwqx8). A write that fails is logged
-// and leaves the rejection and its excerpt as they are, so a full disk costs
-// the log, never the verdict.
+// keepGateLog keeps the whole job log the red verdict was read from -- the one
+// read at candidateFullLogBytes -- and records where the note names it
+// (gt-wwqx8). A write that fails is logged and leaves the rejection and its
+// excerpt as they are, so a full disk costs the log, never the verdict.
 func (g *CandidateGate) keepGateLog(res *CandidateResult, log string) {
 	if g.GateLogDir == "" {
 		return
 	}
-	path, err := keepGateLog(gateLogFS{}, g.GateLogDir, res.SHA, log, time.Now())
+	path, err := keepGateLog(gateLogFS{}, g.GateLogDir, res.SHA, log, g.now())
 	if err != nil {
 		g.logf("%s: keeping the gate job log on %s failed: %v", res.Context, shortSHA(res.SHA), err)
 	}
@@ -500,13 +506,13 @@ func (g *CandidateGate) runFor(parent context.Context, sha string) (forgejo.Acti
 	return forgejo.ActionRun{}, fmt.Errorf("no workflow run tested %s", shortSHA(sha))
 }
 
-// jobLog reads the gate job's log in run. It returns the log and whether the
-// read reached the log's start (the server returned fewer bytes than the cap),
-// so the head -- where the runner prints a step marker -- is in hand. A tail
-// that names no failure is widened once, still bounded, so the rework note
-// names the failure when it sits far from the end. A tail cut at the cap that
-// already names the failure stands: widening it would spend a second Forgejo
-// request on every red whose failure is in the tail (gt-fn9e6.25, gt-wwqx8).
+// jobLog reads the gate job's log in run, bounded at candidateFullLogBytes: the
+// whole log the gate keeps for a rejection, and the source of the rework note's
+// excerpt. It also returns whether the read reached the log's start (the server
+// returned fewer bytes than the cap), so the head -- where the runner prints a
+// step marker -- is in hand. One read serves both: a kept log wider than the one
+// the verdict was read from would cost a second Forgejo request on every red
+// (gt-fn9e6.25, gt-wwqx8, gt-zua7o).
 func (g *CandidateGate) jobLog(parent context.Context, wf GateWorkflow, run forgejo.ActionRun) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(parent, g.callTimeout())
 	defer cancel()
@@ -514,26 +520,26 @@ func (g *CandidateGate) jobLog(parent context.Context, wf GateWorkflow, run forg
 	if err != nil {
 		return "", false, err
 	}
-	log, err := g.Client.JobLogsTail(ctx, g.Owner, g.RepoName, jobID, candidateTailBytes)
+	log, err := g.Client.JobLogsTail(ctx, g.Owner, g.RepoName, jobID, candidateFullLogBytes)
 	if err != nil {
 		return "", false, err
 	}
-	whole := len(log) < candidateTailBytes
-	if !logHasFailure(log) {
-		// The failure can be outside the byte cap. go test prints its packages
-		// in order, so the failing package is usually not the last one, and a
-		// tail of passing packages hides the reason for the red entirely: fetch
-		// the whole log once, still bounded, before falling back to the tail
-		// (gt-fn9e6.25).
-		full, ferr := g.Client.JobLogsTail(ctx, g.Owner, g.RepoName, jobID, candidateFullLogBytes)
-		switch {
-		case ferr != nil:
-			g.logf("%s: the tail of the gate job log on %s names no failure and the whole log could not be read: %v", wf.Context(), shortSHA(run.CommitSHA), ferr)
-		case logHasFailure(full):
-			log, whole = full, len(full) < candidateFullLogBytes
-		}
+	return log, len(log) < candidateFullLogBytes, nil
+}
+
+// excerptSource is the text failureExcerpt reads: the capped tail when that tail
+// already names a failure, so the note carries the failure the verdict rested on
+// and not the earlier ones, and the whole log when the tail names none, so a
+// failure far enough from the end is still named (gt-fn9e6.25).
+func excerptSource(log string) string {
+	if len(log) <= candidateTailBytes {
+		return log
 	}
-	return log, whole, nil
+	tail := log[len(log)-candidateTailBytes:]
+	if logHasFailure(tail) {
+		return tail
+	}
+	return log
 }
 
 // gateJobID is the job in run whose log the gate reads: the one named wf.Job,
@@ -607,7 +613,8 @@ func failureExcerpt(log string, budget int) string {
 }
 
 // logHasFailure reports whether a job log names a failure at all: what decides
-// whether a byte-capped tail is enough or the whole log has to be fetched.
+// whether the note's excerpt can be read from the capped tail or needs the
+// whole log.
 func logHasFailure(log string) bool {
 	for _, line := range logLines(log) {
 		if isFailureMarker(line) {
@@ -739,9 +746,9 @@ const failureContextLines = 2
 // isFailureMarker reports whether line is a failure's own first line. A rule
 // line is not one by itself: it carries no word of what failed, and the report
 // header that does carries the rule line through failureSpan. Reading a bare
-// rule line as a failure would stop jobLog widening a tail cut inside a report,
-// leaving the note with the report's guidance text and none of its reason
-// (gt-hqw8m).
+// rule line as a failure would stop the note reading the whole log when a tail
+// is cut inside a report, leaving the note with the report's guidance text and
+// none of its reason (gt-hqw8m).
 func isFailureMarker(line string) bool {
 	return failedTestRE.MatchString(line) || failLineRE.MatchString(line) ||
 		panicLineRE.MatchString(line) || makeErrorRE.MatchString(line) ||
@@ -795,6 +802,14 @@ func (g *CandidateGate) remote() string {
 		return "origin"
 	}
 	return g.Remote
+}
+
+// now is the clock a kept log is named and dated with.
+func (g *CandidateGate) now() time.Time {
+	if g.Now != nil {
+		return g.Now()
+	}
+	return time.Now()
 }
 
 func (g *CandidateGate) pollInterval() time.Duration {
