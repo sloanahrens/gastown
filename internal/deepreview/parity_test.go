@@ -15,8 +15,9 @@ import (
 // expectation: no value here is recomputed from the fixture.
 const (
 	parityDir = "testdata/parity"
-	// parityNow is the --now the recorded run passed: a cursor line sets the
-	// window here, so the value only has to sit after the ledger's landings.
+	// parityNow is the --now the recorded run passed. The notes' newest cursor
+	// line sets the window start, so --now reaches no compared value: it only
+	// has to not precede that cursor, which ReviewWindow refuses.
 	parityNow = "2026-10-10T10:00:00Z"
 )
 
