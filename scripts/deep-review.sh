@@ -40,7 +40,9 @@
 #
 # Ledger lines, written into the run bead's notes by the formula:
 #   cursor: <RFC3339 landed_at of the newest landing covered> [<last slice path>]
-#     (the path is optional: an empty slice leaves it empty, and it is only echoed)
+#     (the path is optional: an empty slice leaves it empty. It is only echoed,
+#     so it must be the shape git writes — relative, clean, slash-separated —
+#     and a line naming any other shape is refused like a malformed one)
 #   reviewed: <YYYY-MM-DD> <path>
 #   finding: <fingerprint> <bead id | digest-only>
 #   queued: <fingerprint> <P1|P2|P3> <file:line> <claim>
@@ -118,6 +120,17 @@ def ts:
   | [$e - $off, (((.f // "") + "000000000")[0:9])];
 # capture emits nothing on a non-match, so default to null
 def tsok: if type == "string" then ((try ts catch null) // null) else null end;
+# A cursor path is the shape git writes for a file in the tree: relative, clean
+# and slash-separated. It is echoed into the next cursor line, so ledger text
+# must not reach that value as anything but a path git wrote: an absolute path,
+# an empty, "." or ".." component, or a control character is refused like a
+# malformed line. An empty path is how an empty slice writes "no path".
+def pathok:
+  . as $p
+  | $p == ""
+    or (($p | startswith("/") | not)
+        and ($p | split("/") | all(.[]; . != "" and . != "." and . != ".."))
+        and ($p | explode | all(.[]; . >= 32 and . != 127 and (. < 128 or . > 159))));
 '
 
 valid_ts() { jq -n -e --arg t "$1" "$JQ_TS"'($t | tsok) != null' >/dev/null; }
@@ -256,12 +269,14 @@ cmd_batches() {
 # newest cursor line in the notes: prints "<timestamp>\t<path>", or nothing.
 # The path is optional: an empty slice leaves it empty, so "cursor: <timestamp>"
 # (with or without a trailing space) parses to that timestamp and an empty path.
+# A path that is not the shape git writes is refused like a malformed line.
 newest_cursor() {
   jq -R -s -r "$JQ_TS"'
     split("\n") | map(select(startswith("cursor: ")))
     | map((capture("^cursor: (?<t>\\S+)(?: (?<p>.*))?$") // error("malformed cursor line: " + .))
           | .p = (.p // "")
-          | if (.t | tsok) == null then error("bad timestamp in cursor line: " + .t) else . end)
+          | if (.t | tsok) == null then error("bad timestamp in cursor line: " + .t) else . end
+          | if (.p | pathok) then . else error("bad path in cursor line: " + .p) end)
     | if length == 0 then empty else max_by(.t | ts) | "\(.t)\t\(.p)" end
   ' "$1"
 }

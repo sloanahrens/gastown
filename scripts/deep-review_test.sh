@@ -53,13 +53,11 @@ mkrepo() { # dir file... : a git repo whose internal/ holds the given files
 REPO="$TMP/repo"
 mkrepo "$REPO" internal/a/one.go internal/a/two.go internal/a/two_test.go internal/b/three.go internal/b/four.go cmd/main.go
 
-LANDINGS="$TMP/landings.jsonl"
-cat > "$LANDINGS" <<'J'
-{"bead":"gt-1","head":"h1","landed_commit":"c1","landed_at":"2026-10-10T01:00:00.5Z","risk_paths":["internal/daemon/x.go"]}
-{"bead":"gt-2","head":"h2","landed_commit":"c2","landed_at":"2026-10-10T02:00:00Z"}
-{"bead":"gt-3","head":"h3","landed_commit":"c3","landed_at":"2026-10-10T03:00:00.123456Z","risk_paths":["internal/land/y.go"]}
-{torn
-J
+# The plan fixtures are the files internal/deepreview/plan_test.go plans from, so
+# the shell and the Go rows plan the same bytes rather than two copies.
+PLAN_FIXTURES="$SCRIPT_DIR/../internal/deepreview/testdata/plan"
+LANDINGS="$PLAN_FIXTURES/ledger.jsonl"
+INSTANTS="$PLAN_FIXTURES/instants.jsonl"
 : > "$TMP/none.txt"
 NOW="2026-10-10T10:00:00Z"
 
@@ -102,17 +100,12 @@ assert_eq "same slice" "internal/a/one.go internal/b/four.go" "$(joined "$TMP/o3
 assert_eq "old cursor echoed" "internal/a/gone.go" "$(field rotation_cursor_old)"
 
 echo "timestamps compare as instants, not strings"
-cat > "$TMP/ts.jsonl" <<'J'
-{"bead":"gt-a","head":"ha","landed_commit":"ca","landed_at":"2026-10-10T05:00:00.542005Z","risk_paths":["x"]}
-{"bead":"gt-b","head":"hb","landed_commit":"cb","landed_at":"2026-10-10T05:00:00.9Z","risk_paths":["x"]}
-{"bead":"gt-c","head":"hc","landed_commit":"cc","landed_at":"2026-10-10T06:30:00+02:00","risk_paths":["x"]}
-J
 printf 'cursor: 2026-10-10T05:00:00Z internal/a/one.go\n' > "$TMP/n5.txt"
-rc="$(plan_rc --landings "$TMP/ts.jsonl" --prev-notes "$TMP/n5.txt" --repo "$REPO" --now "$NOW" --out "$TMP/o5")"
+rc="$(plan_rc --landings "$INSTANTS" --prev-notes "$TMP/n5.txt" --repo "$REPO" --now "$NOW" --out "$TMP/o5")"
 assert_eq "fraction after a whole-second cursor is newer; +02:00 is 04:30Z, before it" "gt-a gt-b" "$(jq -r .bead "$TMP/o5/landings.jsonl" | tr '\n' ' ' | sed 's/ $//')"
 assert_eq "newest by instant" "2026-10-10T05:00:00.9Z" "$(field reviewed_until_new)"
 printf 'cursor: 2026-10-10T05:00:00.9Z internal/a/one.go\n' > "$TMP/n5b.txt"
-rc="$(plan_rc --landings "$TMP/ts.jsonl" --prev-notes "$TMP/n5b.txt" --repo "$REPO" --now "$NOW" --out "$TMP/o5b")"
+rc="$(plan_rc --landings "$INSTANTS" --prev-notes "$TMP/n5b.txt" --repo "$REPO" --now "$NOW" --out "$TMP/o5b")"
 assert_eq "a landing at the cursor instant is not reviewed again" "true" "$(field quiet)"
 
 echo "the quiet verdict fails closed"
@@ -120,11 +113,11 @@ echo "the quiet verdict fails closed"
 assert_eq "empty landings file" "3" "$(plan_rc --landings "$TMP/empty.jsonl" --prev-notes "$TMP/none.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e1")"
 printf '{"bead":"gt-1","landed_ts":"2026-10-10T01:00:00Z","risk_paths":["x"]}\n' > "$TMP/drift.jsonl"
 assert_eq "landed_at renamed" "3" "$(plan_rc --landings "$TMP/drift.jsonl" --prev-notes "$TMP/none.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e2")"
-{ cat "$TMP/ts.jsonl"; printf '{"bead":"gt-9","landed_at":"yesterday","risk_paths":["x"]}\n'; } > "$TMP/drift2.jsonl"
+{ cat "$INSTANTS"; printf '{"bead":"gt-9","landed_at":"yesterday","risk_paths":["x"]}\n'; } > "$TMP/drift2.jsonl"
 assert_eq "one drifted line among good ones" "3" "$(plan_rc --landings "$TMP/drift2.jsonl" --prev-notes "$TMP/none.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e3")"
-{ cat "$TMP/ts.jsonl"; printf '{"bead":"gt-9","landed_at":"2026-10-10T06:00:00Z","risk_paths":"x"}\n'; } > "$TMP/drift3.jsonl"
+{ cat "$INSTANTS"; printf '{"bead":"gt-9","landed_at":"2026-10-10T06:00:00Z","risk_paths":"x"}\n'; } > "$TMP/drift3.jsonl"
 assert_eq "risk_paths is not a list" "3" "$(plan_rc --landings "$TMP/drift3.jsonl" --prev-notes "$TMP/none.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e4")"
-{ printf 'garbage\n'; cat "$TMP/ts.jsonl"; } > "$TMP/mid.jsonl"
+{ printf 'garbage\n'; cat "$INSTANTS"; } > "$TMP/mid.jsonl"
 assert_eq "a non-JSON line before the last" "3" "$(plan_rc --landings "$TMP/mid.jsonl" --prev-notes "$TMP/none.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e5")"
 printf '[1,2]\n' > "$TMP/arr.jsonl"
 assert_eq "a JSON line that is not an object" "3" "$(plan_rc --landings "$TMP/arr.jsonl" --prev-notes "$TMP/none.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e6")"
@@ -132,6 +125,23 @@ printf 'cursor: not-a-time internal/a/one.go\n' > "$TMP/badcur.txt"
 assert_eq "cursor with a bad timestamp" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badcur.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e7")"
 printf 'cursor: \n' > "$TMP/badcur2.txt"
 assert_eq "cursor with no timestamp" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badcur2.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e8")"
+echo "a cursor path that is not the shape git writes is refused, as internal/deepreview/cursor.go refuses it"
+badpath() { # name notes : asserts the plan refuses the cursor path
+  printf '%s\n' "$2" > "$TMP/badpath.txt"
+  assert_eq "$1" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badpath.txt" --repo "$REPO" --now "$NOW" --out "$TMP/ebp")"
+}
+badpath "an absolute path" 'cursor: 2026-10-10T03:00:00.5Z /etc/passwd'
+badpath "a doubled slash" 'cursor: 2026-10-10T03:00:00.5Z internal//a/one.go'
+badpath "a trailing slash" 'cursor: 2026-10-10T03:00:00.5Z internal/a/'
+badpath "a dot component" 'cursor: 2026-10-10T03:00:00.5Z ./internal/a/one.go'
+badpath "a path that climbs out of the tree" 'cursor: 2026-10-10T03:00:00.5Z ../../etc/passwd'
+badpath "the parent directory itself" 'cursor: 2026-10-10T03:00:00.5Z ..'
+printf 'cursor: 2026-10-10T03:00:00.5Z internal/a/one.go\007\n' > "$TMP/badpath.txt"
+assert_eq "a control character in the path" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badpath.txt" --repo "$REPO" --now "$NOW" --out "$TMP/ebp")"
+badpath "a bad path older than a good line is refused too" 'cursor: 2026-10-10T01:00:00Z ../a/one.go
+cursor: 2026-10-10T03:00:00Z internal/a/two.go'
+printf 'cursor: 2026-10-10T03:00:00.5Z .github/workflows/ci.yml\n' > "$TMP/badpath.txt"
+assert_eq "a dotfile path is the shape git writes" "0" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badpath.txt" --repo "$REPO" --now "$NOW" --out "$TMP/ebp")"
 echo "a cursor line without a path (an empty slice wrote it) is read, not refused"
 # slice mode always prints rotation_cursor_old=, so an empty path is a present, empty line
 oldcur() { grep '^rotation_cursor_old=' "$TMP/plan.out" || echo "(no rotation_cursor_old line)"; }

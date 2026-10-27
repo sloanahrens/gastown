@@ -1,0 +1,4 @@
+{"bead":"gt-1","head":"h1","landed_commit":"c1","landed_at":"2026-10-10T01:00:00.5Z","risk_paths":["internal/daemon/x.go"]}
+{"bead":"gt-2","head":"h2","landed_commit":"c2","landed_at":"2026-10-10T02:00:00Z"}
+{"bead":"gt-3","head":"h3","landed_commit":"c3","landed_at":"2026-10-10T03:00:00.123456Z","risk_paths":["internal/land/y.go"]}
+{torn

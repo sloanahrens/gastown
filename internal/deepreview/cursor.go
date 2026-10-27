@@ -12,9 +12,11 @@ package deepreview
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // DefaultWindow is the span a run reviews when its ledger carries no cursor
@@ -82,6 +84,33 @@ type Cursor struct {
 // there does not match, and the shell refuses such a line too.
 var cursorLine = regexp.MustCompile(`^cursor: (\S+)(?: (.*))?$`)
 
+// cursorPathOK reports whether p is the shape git writes for a file in the
+// tree: clean, relative, slash-separated.
+//
+// The cursor path is echoed into the next cursor line the run writes, so ledger
+// text must not reach that value as anything but a path git wrote. A path is
+// refused when it is absolute, when path.Clean would rewrite it (a doubled or
+// trailing slash, a "." component), when it begins with "..", or when it holds
+// a control character. An empty path is how an empty slice writes "no path", so
+// it passes.
+func cursorPathOK(p string) bool {
+	if p == "" {
+		return true
+	}
+	if strings.HasPrefix(p, "/") || path.Clean(p) != p {
+		return false
+	}
+	if p == ".." || strings.HasPrefix(p, "../") {
+		return false
+	}
+	for _, r := range p {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
 // ParseCursor returns the newest cursor line in a ledger's notes.
 //
 // Newest is by timestamp, not by position: a replayed or hand-edited ledger can
@@ -91,7 +120,10 @@ var cursorLine = regexp.MustCompile(`^cursor: (\S+)(?: (.*))?$`)
 //
 // A line that starts "cursor: " is a cursor line, and one that does not parse
 // is an error rather than a line to skip: falling back to an older cursor would
-// review landings this ledger says are covered.
+// review landings this ledger says are covered. A path not of the shape git
+// writes is refused on the same terms: the path is echoed into the next cursor
+// line, so ledger text must not become a slice path there (gt-rrjql). The
+// shell's newest_cursor refuses it too, so one ledger reads the same both ways.
 func ParseCursor(notes string) (Cursor, bool, error) {
 	var newest Cursor
 	found := false
@@ -107,6 +139,9 @@ func ParseCursor(notes string) (Cursor, bool, error) {
 		if err != nil {
 			return Cursor{}, false, fmt.Errorf("bad timestamp in cursor line: %q", m[1])
 		}
+		if !cursorPathOK(m[2]) {
+			return Cursor{}, false, fmt.Errorf("bad path in cursor line: %q", m[2])
+		}
 		if !found || at.After(newest.At) {
 			newest = Cursor{At: at, Path: m[2]}
 			found = true
@@ -117,8 +152,9 @@ func ParseCursor(notes string) (Cursor, bool, error) {
 
 // Window is the span of a ledger one run reviews from.
 type Window struct {
-	// Since is the newest landing already covered; a landing at that instant
-	// is not reviewed again.
+	// Since is the instant the run starts reviewing after: the newest landing
+	// already covered, or now minus DefaultWindow when the ledger carries no
+	// cursor line. A landing at that instant is not reviewed again.
 	Since Timestamp
 	// Cursor is the slice path the newest cursor line named, empty when the
 	// ledger has no cursor line or that line named no path.

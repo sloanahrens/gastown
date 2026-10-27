@@ -180,6 +180,52 @@ func TestParseCursor(t *testing.T) {
 			notes:   "cursor: 2026-10-10T03:00:00Z\ncursor: not-a-time\n",
 			wantErr: true,
 		},
+		{
+			name:  "a dotfile path is the shape git writes",
+			notes: "cursor: 2026-10-10T03:00:00Z .github/workflows/ci.yml\n",
+			want:  Cursor{At: Timestamp{Time: utc(2026, 10, 10, 3, 0, 0, 0), Text: "2026-10-10T03:00:00Z"}, Path: ".github/workflows/ci.yml"},
+			found: true,
+		},
+		{
+			name:    "an absolute path is refused",
+			notes:   "cursor: 2026-10-10T03:00:00Z /etc/passwd\n",
+			wantErr: true,
+		},
+		{
+			name:    "a path with a doubled slash is refused",
+			notes:   "cursor: 2026-10-10T03:00:00Z internal//a/one.go\n",
+			wantErr: true,
+		},
+		{
+			name:    "a path with a trailing slash is refused",
+			notes:   "cursor: 2026-10-10T03:00:00Z internal/a/\n",
+			wantErr: true,
+		},
+		{
+			name:    "a path with a dot component is refused",
+			notes:   "cursor: 2026-10-10T03:00:00Z ./internal/a/one.go\n",
+			wantErr: true,
+		},
+		{
+			name:    "a path that climbs out of the tree is refused",
+			notes:   "cursor: 2026-10-10T03:00:00Z ../../etc/passwd\n",
+			wantErr: true,
+		},
+		{
+			name:    "a path of just the parent directory is refused",
+			notes:   "cursor: 2026-10-10T03:00:00Z ..\n",
+			wantErr: true,
+		},
+		{
+			name:    "a path holding a control character is refused",
+			notes:   "cursor: 2026-10-10T03:00:00Z internal/a/one.go\x07\n",
+			wantErr: true,
+		},
+		{
+			name:    "a bad path is refused even when its line is older than a good one",
+			notes:   "cursor: 2026-10-10T01:00:00Z ../a/one.go\ncursor: 2026-10-10T03:00:00Z internal/a/two.go\n",
+			wantErr: true,
+		},
 	} {
 		got, found, err := ParseCursor(tc.notes)
 		if tc.wantErr {
