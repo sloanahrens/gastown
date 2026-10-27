@@ -456,14 +456,20 @@ func TestNewMailboxWithBeadsDir(t *testing.T) {
 	}
 }
 
-// TestCloseInDirPassesActorMatchingAssignee guards against gt-ovem: bd's
+// TestCloseInDirActsAsAddressedIdentity guards against gt-ovem: bd's
 // assignee==actor close guard rejects a close whose actor differs from the
-// bead's assignee, so `gt mail archive` fails when the ambient actor bd would
-// otherwise fall back to (BD_ACTOR/git user.name) differs from the mailbox's
-// own identity. closeInDir must pass --actor explicitly using that identity so
-// the close always matches the assignee the message was filed under.
-func TestCloseInDirPassesActorMatchingAssignee(t *testing.T) {
-	t.Parallel()
+// bead's assignee, so `gt mail archive` fails when the ambient actor differs
+// from the mailbox's own identity. closeInDir must hand bd the mailbox's
+// identity as its actor — whichever variable bd resolves it from — and must
+// keep the session attribution the raw call passed, so the close is recorded
+// against the session that made it (decision 009-session-events-architecture).
+func TestCloseInDirActsAsAddressedIdentity(t *testing.T) {
+	t.Setenv("GT_SESSION_ID_ENV", "GT_TEST_SESSION_ID")
+	t.Setenv("GT_TEST_SESSION_ID", "sess-close-1")
+	// An ambient actor that disagrees with the mailbox must not survive into
+	// the call: mail's identity is the one the message was filed under.
+	t.Setenv("BD_ACTOR", "gastown/crew/someone-else")
+
 	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
 		if c.Args[0] == "close" {
 			return "", "", 0
@@ -476,9 +482,33 @@ func TestCloseInDirPassesActorMatchingAssignee(t *testing.T) {
 		t.Fatalf("closeInDir: %v", err)
 	}
 
-	if log := strings.Join(bd.argvs(), "\n"); !strings.Contains(log, "--actor=gastown/max") {
-		t.Fatalf("bd close missing --actor=gastown/max matching assignee identity; calls:\n%s", log)
+	calls := bd.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("got %d bd calls, want 1: %v", len(calls), bd.argvs())
 	}
+	if got, want := strings.Join(calls[0].Args, " "), "close gt-wisp-xv525 --session=sess-close-1"; got != want {
+		t.Errorf("bd args = %q, want %q", got, want)
+	}
+	for _, key := range []string{"BEADS_ACTOR", "BD_ACTOR"} {
+		if got, ok := envValue(calls[0], key); !ok || got != m.Identity() {
+			t.Errorf("%s = %q (set: %v), want the mailbox identity %q", key, got, ok, m.Identity())
+		}
+	}
+	// A close is a write: it must not inherit a read-only mode that would
+	// make bd refuse it.
+	if got, _ := envValue(calls[0], "BD_DOLT_AUTO_COMMIT"); got != "on" {
+		t.Errorf("BD_DOLT_AUTO_COMMIT = %q, want on (the write environment)", got)
+	}
+}
+
+// envValue returns the value key carries in one bd call's environment.
+func envValue(c bdCall, key string) (string, bool) {
+	for _, entry := range c.Env {
+		if k, v, ok := strings.Cut(entry, "="); ok && k == key {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 func TestMailboxListFromDirConvergesWispQueryAndFiltersStatuses(t *testing.T) {

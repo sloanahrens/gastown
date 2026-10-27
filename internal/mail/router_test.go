@@ -486,6 +486,9 @@ func TestPruneAnnounceClosesOldestFirst(t *testing.T) {
 			for _, c := range bd.recorded() {
 				if c.Args[0] == "close" {
 					closed = append(closed, c.Args[1])
+					if !strings.Contains(strings.Join(c.Args, " "), "--reason=retention pruning") {
+						t.Errorf("close %s does not record the retention reason: %v", c.Args[1], c.Args)
+					}
 				}
 			}
 			if strings.Join(closed, ",") != strings.Join(tt.wantClosedID, ",") {

@@ -16,7 +16,6 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/runtime"
 )
 
 // timeNow is a function that returns the current time. It can be overridden in tests.
@@ -678,31 +677,13 @@ func (m *Mailbox) markReadBeads(id string) error {
 
 // closeInDir closes a message in a specific beads directory.
 func (m *Mailbox) closeInDir(id, beadsDir string) error {
-	args := []string{"close", id}
 	// Close as the identity the message was addressed to, not whatever
-	// ambient actor bd would otherwise fall back to (BD_ACTOR/git user.name).
-	// When the addressed identity and the ambient actor differ, bd's
-	// assignee==actor close guard rejects the close and archive silently
-	// fails town-wide (gt-ovem, sibling of gt-cut).
-	if m.identity != "" {
-		args = append(args, "--actor="+m.identity)
-	}
-	// Pass session ID for work attribution if available
-	if sessionID := runtime.SessionIDFromEnv(); sessionID != "" {
-		args = append(args, "--session="+sessionID)
-	}
-
-	ctx, cancel := bdWriteCtx()
-	defer cancel()
-	_, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
-	if err != nil {
-		if isBdNotFound(err) {
-			return ErrMessageNotFound
-		}
-		return err
-	}
-
-	return nil
+	// ambient actor bd would otherwise fall back to: when the addressed
+	// identity and the ambient actor differ, bd's assignee==actor close guard
+	// rejects the close and archive silently fails town-wide (gt-ovem,
+	// sibling of gt-cut). The seam's Close passes the session id for work
+	// attribution, as the raw call did.
+	return mailWriteErr(bdWriteStore(m.bd, m.workDir, beadsDir, m.identity).Close(id), id)
 }
 
 func (m *Mailbox) markReadLegacy(id string) error {
@@ -748,34 +729,10 @@ func (m *Mailbox) markReadOnlyBeads(id string) error {
 		return err
 	}
 
-	// Add "read" label to mark as read without closing
-	args := []string{"label", "add", id, "read"}
-	primary := beads.ResolveBeadsDirForID(m.beadsDir, id)
-
-	ctx, cancel := bdWriteCtx()
-	defer cancel()
-	_, err := runBdCommand(ctx, m.bd, args, m.workDir, primary)
-	if err != nil {
-		if isBdNotFound(err) {
-			if primary != m.beadsDir {
-				// Cross-rig bead IDs (e.g. ne-*) may live in the home DB. See ne-bgr.
-				ctx2, cancel2 := bdWriteCtx()
-				defer cancel2()
-				_, err2 := runBdCommand(ctx2, m.bd, args, m.workDir, m.beadsDir)
-				if err2 != nil {
-					if isBdNotFound(err2) {
-						return ErrMessageNotFound
-					}
-					return err2
-				}
-				return nil
-			}
-			return ErrMessageNotFound
-		}
-		return err
-	}
-
-	return nil
+	// Add "read" label to mark as read without closing.
+	return m.writeInDirs(id, func(store beads.Client) error {
+		return store.Update(id, beads.UpdateOptions{AddLabels: []string{"read"}})
+	})
 }
 
 func (m *Mailbox) acknowledgeDeliveryForPrimary(id string) error {
@@ -793,9 +750,36 @@ func (m *Mailbox) acknowledgeDeliveryForPrimary(id string) error {
 	return acknowledgeDeliveryBead(m.bd, m.workDir, m.beadsDir, id, m.identity)
 }
 
-func isBdNotFound(err error) bool {
-	bdErr, ok := err.(*bdError)
-	return ok && (bdErr.ContainsError("not found") || bdErr.ContainsError("no issue found"))
+// writeInDirs runs write against the beads directory that owns id, then — when
+// that directory does not have the bead — against the mailbox's own directory.
+// A cross-rig id (ne-*) may live in the home database the router always writes
+// to (ne-bgr, GH#2423); a bead neither directory has is ErrMessageNotFound.
+func (m *Mailbox) writeInDirs(id string, write func(beads.Client) error) error {
+	primary := beads.ResolveBeadsDirForID(m.beadsDir, id)
+	err := write(bdWriteStore(m.bd, m.workDir, primary, m.identity))
+	if err == nil || primary == m.beadsDir || !isMessageNotFoundErr(err, id) {
+		return mailWriteErr(err, id)
+	}
+	return mailWriteErr(write(bdWriteStore(m.bd, m.workDir, m.beadsDir, m.identity)), id)
+}
+
+// mailWriteErr reports a failed write the way mail's callers expect: bd saying
+// the bead does not exist is ErrMessageNotFound, and every other failure is
+// returned as it came.
+func mailWriteErr(err error, id string) error {
+	if err != nil && isMessageNotFoundErr(err, id) {
+		return ErrMessageNotFound
+	}
+	return err
+}
+
+// labelAbsentErr reports a label removal bd refused because the bead does not
+// carry the label, which is the state a removal asks for. bd reports this
+// without a typed kind, so the text is what there is to read; only the remove
+// path asks, since a failed add is a failure whatever it says.
+func labelAbsentErr(err error) bool {
+	var cliErr *beads.CLIError
+	return errors.As(err, &cliErr) && strings.Contains(string(cliErr.Stderr), "does not have label")
 }
 
 // MarkUnreadOnly marks a message as unread (removes "read" label).
@@ -809,41 +793,16 @@ func (m *Mailbox) MarkUnreadOnly(id string) error {
 }
 
 func (m *Mailbox) markUnreadOnlyBeads(id string) error {
-	// Remove "read" label to mark as unread
-	args := []string{"label", "remove", id, "read"}
-	primary := beads.ResolveBeadsDirForID(m.beadsDir, id)
-
-	ctx, cancel := bdWriteCtx()
-	defer cancel()
-	_, err := runBdCommand(ctx, m.bd, args, m.workDir, primary)
-	if err != nil {
-		if isBdNotFound(err) {
-			if primary != m.beadsDir {
-				// Cross-rig bead IDs (e.g. ne-*) may live in the home DB. See ne-bgr.
-				ctx2, cancel2 := bdWriteCtx()
-				defer cancel2()
-				_, err2 := runBdCommand(ctx2, m.bd, args, m.workDir, m.beadsDir)
-				if err2 != nil {
-					if isBdNotFound(err2) {
-						return ErrMessageNotFound
-					}
-					if bdErr2, ok := err2.(*bdError); ok && bdErr2.ContainsError("does not have label") {
-						return nil
-					}
-					return err2
-				}
-				return nil
-			}
-			return ErrMessageNotFound
-		}
-		// Ignore error if label doesn't exist
-		if bdErr, ok := err.(*bdError); ok && bdErr.ContainsError("does not have label") {
-			return nil
-		}
-		return err
+	// Remove the "read" label to mark as unread. A message that does not
+	// carry it is already unread, so bd's refusal to remove a label that is
+	// not there is the state asked for.
+	err := m.writeInDirs(id, func(store beads.Client) error {
+		return store.Update(id, beads.UpdateOptions{RemoveLabels: []string{"read"}})
+	})
+	if labelAbsentErr(err) {
+		return nil
 	}
-
-	return nil
+	return err
 }
 
 // MarkUnread marks a message as unread (reopens in beads).
@@ -855,33 +814,14 @@ func (m *Mailbox) MarkUnread(id string) error {
 }
 
 func (m *Mailbox) markUnreadBeads(id string) error {
-	args := []string{"reopen", id}
-	primary := beads.ResolveBeadsDirForID(m.beadsDir, id)
-
-	ctx, cancel := bdWriteCtx()
-	defer cancel()
-	_, err := runBdCommand(ctx, m.bd, args, m.workDir, primary)
-	if err != nil {
-		if isBdNotFound(err) {
-			if primary != m.beadsDir {
-				// Cross-rig bead IDs (e.g. ne-*) may live in the home DB. See ne-bgr.
-				ctx2, cancel2 := bdWriteCtx()
-				defer cancel2()
-				_, err2 := runBdCommand(ctx2, m.bd, args, m.workDir, m.beadsDir)
-				if err2 != nil {
-					if isBdNotFound(err2) {
-						return ErrMessageNotFound
-					}
-					return err2
-				}
-				return nil
-			}
-			return ErrMessageNotFound
-		}
-		return err
-	}
-
-	return nil
+	// Reopen by status, because the seam has no reopen verb: update reaches
+	// the same state — status open, closed_at and close reason cleared, which
+	// RunClientContract's close-and-reopen case pins against bd — and bd
+	// reopen's extra is a Reopened event mail has no reader for.
+	return m.writeInDirs(id, func(store beads.Client) error {
+		open := "open"
+		return store.Update(id, beads.UpdateOptions{Status: &open})
+	})
 }
 
 func (m *Mailbox) markUnreadLegacy(id string) error {
