@@ -329,31 +329,53 @@ func TestSourceReviewStopsAtTheBeadReadCap(t *testing.T) {
 }
 
 // The per-call deadline and the cap bound one factor each; the budget bounds all
-// the reads together. Every read here answers well inside its own deadline, and
-// each takes longer than a third of the budget, so only the budget can end the
-// loop: the attribution fails instead of holding the snapshot for the product of
-// the two bounds.
-func TestReviewBeadsStopsWhenTheReadsOutlastTheBudget(t *testing.T) {
+// the reads together. Every read runs under the one deadline the budget sets, not
+// a fresh per-call one, so the reads cannot outlast it however many there are.
+// The test reads the deadline each call was given, so it waits for nothing.
+func TestReviewBeadsGivesEveryReadTheSameBudgetDeadline(t *testing.T) {
 	t.Parallel()
 	reviews := []Review{
 		{Bead: "gt-b1", Rig: "gastown"},
 		{Bead: "gt-b2", Rig: "gastown"},
 		{Bead: "gt-b3", Rig: "gastown"},
 	}
-	const perRead = 30 * time.Millisecond
+	const budget = time.Second // well inside reviewBdTimeout, so only the budget can set it
+	var deadlines []time.Time
 	env := Env{Town: t.TempDir(), Run: func(ctx context.Context, argv []string) ([]byte, error) {
-		select {
-		case <-time.After(perRead):
-			return []byte("[" + reviewBeadJSON(argv[len(argv)-1], "polecat/opal/x+mv1") + "]"), nil
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Errorf("a read ran without a deadline")
 		}
+		deadlines = append(deadlines, deadline)
+		return []byte("[" + reviewBeadJSON(argv[len(argv)-1], "polecat/opal/x+mv1") + "]"), nil
 	}}
-	if rows, ok := reviewBeads(context.Background(), env, reviews, 2*perRead); ok || rows != nil {
-		t.Errorf("reviewBeads under a budget of two reads = %v, %v, want a failed attribution", rows, ok)
+	started := time.Now()
+	rows, ok := reviewBeads(context.Background(), env, reviews, budget)
+	if !ok || len(rows) != len(reviews) || len(deadlines) != len(reviews) {
+		t.Fatalf("reviewBeads = %d rows, %v, %d reads, want all %d read", len(rows), ok, len(deadlines), len(reviews))
 	}
-	if rows, ok := reviewBeads(context.Background(), env, reviews, time.Minute); !ok || len(rows) != 3 {
-		t.Errorf("reviewBeads under a generous budget = %v, %v, want all three beads read", rows, ok)
+	// The budget starts a moment after started; the per-call deadline would be
+	// reviewBdTimeout out, far past this slack.
+	if limit := started.Add(budget + reviewBdTimeout/2); deadlines[0].After(limit) {
+		t.Errorf("first read's deadline is %v past the budget's end: it got the per-call deadline instead", deadlines[0].Sub(limit))
+	}
+	for i, deadline := range deadlines[1:] {
+		if !deadline.Equal(deadlines[0]) {
+			t.Errorf("read %d's deadline differs from the first's by %v, want one shared deadline", i+2, deadline.Sub(deadlines[0]))
+		}
+	}
+}
+
+// A budget already spent fails the attribution at its first read, so the kind
+// columns are null like any other failed read.
+func TestReviewBeadsFailsWhenTheBudgetIsSpent(t *testing.T) {
+	t.Parallel()
+	env := Env{Town: t.TempDir(), Run: func(ctx context.Context, argv []string) ([]byte, error) {
+		return nil, ctx.Err()
+	}}
+	rows, ok := reviewBeads(context.Background(), env, []Review{{Bead: "gt-b1", Rig: "gastown"}}, -time.Second)
+	if ok || rows != nil {
+		t.Errorf("reviewBeads under a spent budget = %v, %v, want a failed attribution", rows, ok)
 	}
 }
 
