@@ -440,8 +440,14 @@ var treeWideGuards = []treeWideGuard{
 		// Both allowlists are inputs a branch can change on its own: a line
 		// that lost its reason, or a line added for a script that is gone,
 		// would otherwise run no guard until the landing gate (gt-tpg0p.15).
-		pkg:   "internal/repoguard",
-		tests: []string{"TestIntegrationNoNewShellScripts", "TestIntegrationPluginRunShTree"},
+		pkg: "internal/repoguard",
+		tests: []string{
+			"TestIntegrationNoNewShellScripts",
+			"TestIntegrationPluginRunShTree",
+			// The control turns the guard red on each bad line shape, which
+			// the clean-tree guard cannot (gt-kpn39).
+			"TestIntegrationAllowlistRejectsRealTree",
+		},
 		judges: func(rel string) bool {
 			return strings.HasSuffix(rel, ".sh") ||
 				rel == "internal/repoguard/plugin-run-sh.txt" ||

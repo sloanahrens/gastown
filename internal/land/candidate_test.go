@@ -655,23 +655,6 @@ func TestFailureExcerptNamesAUnitTierRuleReport(t *testing.T) {
 				"example.com/pkg.(*cache).enqueue(0xc0000b4000)",
 			},
 		},
-		{
-			// The byte-capped tail can start below the header, leaving the
-			// rule line as the block's only marker.
-			name: "a report whose header the cap cut still surfaces its rule block",
-			log: gateJobLog(append([]string{
-				"ok  \tgithub.com/x/aaa\t0.1s",
-				"",
-				"have returned by the time the test ends: stop it in t.Cleanup (cancel its",
-				"context, close its channel) and wait for it. \"created by\" names the",
-				"function that started it (docs/testing.md, \"The rules\").",
-				rule,
-			}, passingGatePackages()...)...),
-			want: []string{
-				"context, close its channel) and wait for it.",
-				rule,
-			},
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -701,6 +684,145 @@ func passingGatePackages() []string {
 		lines = append(lines, fmt.Sprintf("ok  \tgithub.com/x/later%03d\t0.1s", i))
 	}
 	return lines
+}
+
+// TestCandidateGateWidensPastACutRuleBlock: the byte cap can cut a unit-tier
+// report below its header, so the tail holds the report's guidance text and
+// its closing rule line and no word of what failed. A rule line names no
+// failure by itself, so the gate widens once and the note carries the report's
+// own line (gt-hqw8m).
+func TestCandidateGateWidensPastACutRuleBlock(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	rule := strings.Repeat("=", 72)
+	var tail strings.Builder
+	for tail.Len() < candidateTailBytes {
+		tail.WriteString(gateJobLog("ok  \tgithub.com/x/filler\t0.1s"))
+	}
+	tail.WriteString(gateJobLog(
+		"context, close its channel) and wait for it. \"created by\" names the",
+		"function that started it (docs/testing.md, \"The rules\").",
+		rule,
+	))
+	full := gateJobLog(append([]string{
+		runMainMarker + " actions/checkout@v4",
+		"ok  \tgithub.com/x/aaa\t0.1s",
+		"",
+		rule,
+		"GOROUTINE LEAK: 1 goroutine(s) outlived the unit tests",
+		"",
+		"goroutine 12 [chan receive]:",
+		"example.com/pkg.(*cache).enqueue(0xc0000b4000)",
+		"\t/src/pkg/cache.go:41 +0x2c",
+		"",
+		"A goroutine a test starts, or starts through the code under test, must",
+		"have returned by the time the test ends: stop it in t.Cleanup (cancel its",
+		"context, close its channel) and wait for it. \"created by\" names the",
+		"function that started it (docs/testing.md, \"The rules\").",
+		rule,
+	}, passingGatePackages()...)...)
+	client := &fakeForgejo{
+		statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
+		runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
+		jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
+		log:      tail.String(),
+		fullLog:  full,
+	}
+	res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.State != CandidateFailed {
+		t.Fatalf("state = %v, want failed (err %v)", res.State, res.Err)
+	}
+	if want := "GOROUTINE LEAK: 1 goroutine(s) outlived the unit tests"; !strings.Contains(res.Tail, want) {
+		t.Fatalf("tail %q; want it to carry %q", res.Tail, want)
+	}
+	if !slices.Equal(client.limits, []int64{candidateTailBytes, candidateFullLogBytes}) {
+		t.Fatalf("log fetches %v; want the cut tail then the whole log", client.limits)
+	}
+}
+
+// TestCandidateGateNoteNamesAHermeticReport: a run that fails only on a report
+// the unit tier's test main prints names no failing test, so the report's own
+// header is what has to reach the note (gt-mypuq).
+func TestCandidateGateNoteNamesAHermeticReport(t *testing.T) {
+	t.Parallel()
+	rule := strings.Repeat("=", 72)
+	tests := []struct {
+		name   string
+		header string
+		detail []string
+	}{
+		{
+			name:   "a hermetic tripwire report",
+			header: "HERMETIC TRIPWIRE: the unit tier started git 1 time(s) under WithoutGit",
+			detail: []string{"  - /tmp/a\tgit status --porcelain"},
+		},
+		{
+			name:   "a Dolt catalog guard report",
+			header: `DOLT CATALOG GUARD: database "beads" was created`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+			lines := []string{runMainMarker + " actions/checkout@v4", "ok  \tgithub.com/x/aaa\t0.1s", "", rule, tt.header}
+			lines = append(lines, tt.detail...)
+			lines = append(lines, "The refusal fails the run even when the code under test tolerated it.", rule)
+			lines = append(lines, passingGatePackages()...)
+			client := &fakeForgejo{
+				statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
+				runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
+				jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
+				log:      gateJobLog(lines...),
+			}
+			res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+			if res.State != CandidateFailed {
+				t.Fatalf("state = %v, want failed (err %v)", res.State, res.Err)
+			}
+			for _, want := range append([]string{tt.header}, tt.detail...) {
+				if !strings.Contains(res.Tail, want) {
+					t.Errorf("tail does not carry %q:\n%s", want, res.Tail)
+				}
+			}
+			if strings.Contains(res.Tail, "github.com/x/later") {
+				t.Errorf("tail is the passing packages, not the report:\n%s", res.Tail)
+			}
+		})
+	}
+}
+
+// TestCandidateGateNoteKeepsACutReportToTheLogEnd: the runner can die with a
+// report still printing, leaving no rule line to close it. The note keeps the
+// report to the log's last line, where the entries it names are (gt-hqw8m).
+func TestCandidateGateNoteKeepsACutReportToTheLogEnd(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	rule := strings.Repeat("=", 72)
+	log := gateJobLog(
+		runMainMarker+" actions/checkout@v4",
+		"ok  \tgithub.com/x/aaa\t0.1s",
+		"",
+		rule,
+		"SUBPROCESS TRIPWIRE: the unit tier started an external tool 2 time(s)",
+		"  - /tmp/a\ttmux -L x kill-server",
+		"  - /tmp/b\tps -p 1 -o args=",
+	)
+	client := &fakeForgejo{
+		statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
+		runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
+		jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
+		log:      log,
+	}
+	res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.State != CandidateFailed {
+		t.Fatalf("state = %v, want failed (err %v)", res.State, res.Err)
+	}
+	if want := "  - /tmp/b\tps -p 1 -o args="; !strings.Contains(res.Tail, want) {
+		t.Fatalf("tail %q; want it to carry the log's last line %q", res.Tail, want)
+	}
 }
 
 // TestFailureExcerptWithoutAMarkerIsTheTail: a log that names no failure --
