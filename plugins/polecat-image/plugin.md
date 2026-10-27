@@ -159,10 +159,11 @@ accepted rather than locked.
 
 Every failure exits non-zero with the tail of the failing command: a commit the
 rig repo does not know, a failed build, an image that still carries another
-commit afterwards, an installed gt whose commit cannot be read. A deferral is not a
-failure: it exits 0 and prints why, so a plugin whose receipts show `deferred:`
-run after run is stuck behind that reason (Docker stopped, a sling that never
-ends) and the image stays stale, with the sandbox sling's refusal as the net.
+commit afterwards, an installed gt whose commit cannot be read. A deferral exits 0
+and prints why, so a plugin whose receipts show `deferred:` run after run is
+stuck behind that reason and the image stays stale, with the sandbox sling's
+refusal as the net. Under `POLECAT_IMAGE_FAIL_CLOSED=1` it exits non-zero;
+"Publishing to a registry" states that contract.
 
 Run it directly; before building or syncing this plugin, read "Script entry
 point" in `plugins/README.md`:

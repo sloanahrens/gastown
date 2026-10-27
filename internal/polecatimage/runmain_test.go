@@ -184,6 +184,57 @@ func TestMainDefersWhenASlingIsRunning(t *testing.T) {
 	}
 }
 
+// TestMainDefersWhenASlingStartsBetweenRounds drives the check each build round
+// makes: a sling that started after the run took the lock stops the next build,
+// and under POLECAT_IMAGE_FAIL_CLOSED=1 it is the run's failure (gt-i893i).
+func TestMainDefersWhenASlingStartsBetweenRounds(t *testing.T) {
+	t.Parallel()
+	for _, failClosed := range []bool{false, true} {
+		name := "best effort"
+		if failClosed {
+			name = "fail closed"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTestRun(t)
+			tr.Cfg.FailClosed = failClosed
+			// A reinstall between the first build and the round after it, which
+			// is where the run asks again whether a sling is running.
+			reply := newRunReply("aaaaaaa", "aaaaaaa", "bbbbbbb")
+			reply.label = "9999999"
+			base := reply.answer(t, labelFormat(tr))
+			// No sling runs until the run's first build is done, so the
+			// pre-lock check and the first round see none, and the round after
+			// the build sees one start.
+			built := false
+			tr.reply = func(c command) result {
+				if c.name == "pgrep" && built {
+					return result{exit: 0}
+				}
+				if c.name == "make" {
+					built = true
+				}
+				return base(c)
+			}
+			t.Cleanup(tr.Cleanup)
+			err := tr.Main()
+			tr.wantLogged(t, "deferred: sandbox sling in progress")
+			if got := len(tr.callsTo("make")); got != 1 {
+				t.Errorf("make was called %d times, want one build: the sling stopped the round after it", got)
+			}
+			if failClosed {
+				if err == nil || !strings.Contains(err.Error(), "the image was not built and published at the installed commit, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)") {
+					t.Errorf("Main() = %v, want the run's failure under the switch", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("Main() = %v, want a deferred run to carry on", err)
+			}
+		})
+	}
+}
+
 func TestMainDefersToAnotherRunsLock(t *testing.T) {
 	t.Parallel()
 	for _, failClosed := range []bool{false, true} {
