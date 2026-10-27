@@ -215,15 +215,19 @@ func scrubURL(out, raw string) string {
 // execSeedRun answers SeedRunner on this container: the child inherits the container's environment,
 // which carries GOCACHE and GOMODCACHE, and runs as the uid SeedCmd names.
 func execSeedRun(c SeedCmd) (string, error) {
+	return runSeedChild(exec.Command, c)
+}
+
+// runSeedChild is execSeedRun with the spawn handed in, so a test fails a child without starting
+// one: the seed pass's tests are unit tests, and they run no process.
+func runSeedChild(spawn func(name string, arg ...string) *exec.Cmd, c SeedCmd) (string, error) {
 	if len(c.Argv) == 0 {
 		return "", errors.New("the seed pass ran no command")
 	}
-	cmd := exec.Command(c.Argv[0], c.Argv[1:]...)
+	cmd := spawn(c.Argv[0], c.Argv[1:]...)
 	cmd.Dir = c.Dir
 	if c.UID >= 0 {
-		if err := seedAs(cmd, c.UID, c.GID); err != nil {
-			return "", err
-		}
+		seedAs(cmd, c.UID, c.GID)
 	}
 	var out bytes.Buffer
 	cmd.Stdout = &out

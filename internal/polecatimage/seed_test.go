@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -332,6 +333,26 @@ func TestExecSeedRunRefusesAnEmptyCommand(t *testing.T) {
 	t.Parallel()
 	if _, err := execSeedRun(SeedCmd{}); err == nil {
 		t.Fatal("execSeedRun(nothing) = nil, want a refusal")
+	}
+}
+
+// TestRunSeedChildReportsAFailedChild: the spawn is handed in and its child never starts, so the
+// runner's own failure path is driven without running a process in a unit test.
+func TestRunSeedChildReportsAFailedChild(t *testing.T) {
+	t.Parallel()
+	var spawned []string
+	spawn := func(name string, arg ...string) *exec.Cmd {
+		spawned = append(spawned, name+" "+strings.Join(arg, " "))
+		c := exec.Command(name, arg...)
+		c.Err = errors.New("exit status 7")
+		return c
+	}
+	_, err := runSeedChild(spawn, SeedCmd{Dir: "/seed/gastown", Argv: []string{"go", "build", "./..."}, UID: cachevol.SeedUserID, GID: cachevol.SeedUserID})
+	if err == nil {
+		t.Fatal("runSeedChild() = nil, want the child's failure")
+	}
+	if len(spawned) != 1 || spawned[0] != "go build ./..." {
+		t.Errorf("ran %v, want the seed command alone", spawned)
 	}
 }
 
