@@ -34,11 +34,16 @@ type machineError struct {
 	Detail  json.RawMessage `json:"detail,omitempty"`
 }
 
-// decodeMachineEnvelope reads bd's machine-mode output. ok is false when out
-// is JSON but not an envelope: a bd from before machine mode ignores
-// BD_MACHINE and prints its legacy --json payload, which the caller may
-// still accept. Output that is not JSON at all is an error (RequireJSON),
-// and so is an envelope carrying an error.
+// decodeMachineEnvelope reads bd's machine-mode output. An envelope is an
+// object carrying both the data key and contract_version; bd writes the data
+// key in every envelope, null when it has no payload, error envelopes
+// included (gt-ij4fl). ok is false when out is JSON but not an envelope: a bd
+// from before machine mode ignores BD_MACHINE and prints its legacy --json
+// payload, which the caller may still accept. Output that is not JSON at all
+// is an error (RequireJSON), and so is an envelope carrying an error, and so
+// is an object claiming contract_version without the data key: that object is
+// malformed, and reading its fields as the data would answer a store bd never
+// reported (gt-ij4fl).
 func decodeMachineEnvelope(out []byte, what string) (env machineEnvelope, ok bool, err error) {
 	if err := RequireJSON(out, what); err != nil {
 		return env, false, err
@@ -51,11 +56,11 @@ func decodeMachineEnvelope(out []byte, what string) (env machineEnvelope, ok boo
 	if json.Unmarshal(trimmed, &probe) != nil {
 		return env, false, nil
 	}
-	if _, hasData := probe["data"]; !hasData {
-		return env, false, nil
-	}
 	if _, hasContract := probe["contract_version"]; !hasContract {
 		return env, false, nil
+	}
+	if _, hasData := probe["data"]; !hasData {
+		return env, false, fmt.Errorf("%s: bd machine envelope has no data key", what)
 	}
 	if err := json.Unmarshal(trimmed, &env); err != nil {
 		return env, false, fmt.Errorf("%s: parsing bd machine envelope: %w", what, err)

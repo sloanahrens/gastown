@@ -373,3 +373,21 @@ func TestCommandConstructorsPutBdInMachineMode(t *testing.T) {
 		}
 	}
 }
+
+// A bd envelope that carries contract_version but no data key is refused by
+// the shared decoder. Every caller reads that refusal: LegacyPayload and the
+// show recovery treat it as not an envelope and keep the raw output, kvPayload
+// returns the error, and ready and events return it (gt-ij4fl review round 3).
+func TestContractWithoutDataIsRefusedByEveryCaller(t *testing.T) {
+	t.Parallel()
+	out := []byte(`{"schema_version":1,"contract_version":1,"error":"not found"}`)
+	if _, ok, err := decodeMachineEnvelope(out, "bd show"); err == nil || ok {
+		t.Fatalf("decodeMachineEnvelope = ok %v, err %v; want ok false and a no-data error", ok, err)
+	}
+	if got := LegacyPayload([]string{"show"}, out); string(got) != string(out) {
+		t.Errorf("LegacyPayload changed the raw output: %s", got)
+	}
+	if _, err := kvPayload(out); err == nil {
+		t.Errorf("kvPayload accepted a contract-without-data object as a kv entry")
+	}
+}
