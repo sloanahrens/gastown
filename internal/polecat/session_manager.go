@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/sandbox"
@@ -88,6 +89,11 @@ type SessionManager struct {
 	// launchFn replaces launch when set: a seam so a test can see what Start
 	// has done by the time it launches.
 	launchFn func(polecat, sessionID string, opts SessionStartOptions) error
+	// clk stamps a stopped seat's span end; nil is the real clock.
+	clk clockwork.Clock
+	// warn reports a span end that could not be written; nil is
+	// style.PrintWarning.
+	warn func(format string, args ...any)
 }
 
 // SessionHooks route a SessionManager's kills through the supervisor
@@ -955,6 +961,7 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 		if err := m.hooks.Stop(sessionID); err != nil {
 			return fmt.Errorf("killing session: %w", err)
 		}
+		m.endSeatSpan(polecat)
 		return m.removeSandbox(sessionID)
 	}
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
@@ -962,8 +969,54 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 	if err := m.tmux.KillSessionWithProcesses(sessionID); err != nil {
 		return fmt.Errorf("killing session: %w", err)
 	}
+	m.endSeatSpan(polecat)
 
 	return m.removeSandbox(sessionID)
+}
+
+// endSeatSpan closes the attempt the stopped seat left open. The seat reported
+// no end of its own — a sandboxed one cannot, since it writes the log of the
+// sandbox's town rather than this one — and a stopping session is the last
+// moment the host sees it (gt-8yk78).
+//
+// The close reads only the span store: a stop runs in gt down and gt polecat
+// nuke, which must not wait on Dolt, so the store answers which bead the seat
+// held from its own logs (spans.Store.EndSeatOpen).
+//
+// The close is a lower bound: a stop ends the session, not the work, and a
+// seat resumed on the same bead continues the attempt with no second start, so
+// the time after the stop is missing from the log rather than wrong in it.
+// Nothing here fails the stop the caller asked for: the span is a measurement,
+// and a log that cannot be read costs the measurement, not the stop.
+func (m *SessionManager) endSeatSpan(polecat string) {
+	if m.rig == nil || m.rig.Path == "" || m.rig.Name == "" || polecat == "" {
+		return
+	}
+	seat := m.rig.Name + "/" + polecat
+	// A rig lives directly under the town: the span store is the town's.
+	store := spans.New(spans.DefaultDir(filepath.Dir(m.rig.Path)), nil)
+	if _, _, err := store.EndSeatOpen(seat, spans.ReasonStopped, m.clock().Now()); err != nil {
+		m.warnSpan("could not end the polecat span of %s: %v", seat, err)
+	}
+}
+
+// warnSpan reports an end that could not be written; nil is style.PrintWarning.
+// A caller that keeps a log (the daemon) can watch for a store it cannot read.
+func (m *SessionManager) warnSpan(format string, args ...any) {
+	if m.warn != nil {
+		m.warn(format, args...)
+		return
+	}
+	style.PrintWarning(format, args...)
+}
+
+// clock is the clock a stopped seat's span end is stamped with; nil is the
+// real clock.
+func (m *SessionManager) clock() clockwork.Clock {
+	if m.clk != nil {
+		return m.clk
+	}
+	return clockwork.NewRealClock()
 }
 
 // removeSandbox deletes the sandbox a stopped sandboxed session ran in, and its

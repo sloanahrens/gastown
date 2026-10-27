@@ -211,6 +211,50 @@ func TestSummarize_OpenAttemptIsLowerBound(t *testing.T) {
 	}
 }
 
+// TestSummarize_ClosedAndOpenSpans: a bead whose last attempt is still open
+// keeps the lower bound, and its Secs are the closed attempts' alone — the open
+// one adds no time rather than the time to now, which is not work (gt-8yk78).
+func TestSummarize_ClosedAndOpenSpans(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	clk := &stepClock{at: testEpoch}
+	st := New(dir, clk)
+
+	if err := st.Start("gt-abc", "organic"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.End("gt-abc", "organic", ReasonDone, testEpoch.Add(45*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	clk.at = testEpoch.Add(45 * time.Second)
+	if err := st.Start("gt-abc", "dipper"); err != nil {
+		t.Fatal(err)
+	}
+
+	sum, err := st.Summarize("gt-abc")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Secs != 45 {
+		t.Errorf("Secs = %v, want the closed attempt's 45", sum.Secs)
+	}
+	if !sum.LowerBound {
+		t.Error("LowerBound = false, want true while the last attempt is open")
+	}
+	want := []Attempt{
+		{Seat: "organic", StartedAt: testEpoch, Secs: 45},
+		{Seat: "dipper", StartedAt: testEpoch.Add(45 * time.Second), Open: true, LowerBound: true},
+	}
+	if len(sum.Attempts) != len(want) {
+		t.Fatalf("Attempts = %+v, want %+v", sum.Attempts, want)
+	}
+	for i := range want {
+		if sum.Attempts[i] != want[i] {
+			t.Errorf("Attempts[%d] = %+v, want %+v", i, sum.Attempts[i], want[i])
+		}
+	}
+}
+
 // TestEndOpen_ClosesTheSeatsOpenAttempt: the paths that end an attempt for a
 // seat that cannot end it itself (an overrun stop, a confirmed death) write
 // the end through EndOpen, which reports the attempt it found.
@@ -321,6 +365,177 @@ func TestEndOpen_RefusesABeadThatIsNotAPathComponent(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
 		t.Errorf("EndOpen wrote under %s: entries %v, err %v", dir, entries, err)
+	}
+}
+
+// TestEndSeatOpen_ClosesTheAttemptTheSeatLeftOnItsBead: a stop knows a
+// polecat's name, not the bead it held, and must not ask Dolt — so the store
+// finds the bead in its own logs and ends the attempt there. The close is a
+// lower bound, because a resumed seat continues it (gt-8yk78).
+func TestEndSeatOpen_ClosesTheAttemptTheSeatLeftOnItsBead(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := New(dir, fixedClock{at: testEpoch})
+	if err := st.Start("gt-abc", "gastown/onyx"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Start("gt-abc", "gastown/other"); err != nil {
+		t.Fatal(err)
+	}
+
+	bead, ended, err := st.EndSeatOpen("gastown/onyx", ReasonStopped, testEpoch.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("EndSeatOpen: %v", err)
+	}
+	if !ended || bead != "gt-abc" {
+		t.Fatalf("EndSeatOpen = %q, %v; want gt-abc closed", bead, ended)
+	}
+
+	sum, err := st.Summarize("gt-abc")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if len(sum.Attempts) != 2 {
+		t.Fatalf("Attempts = %+v, want both seats' attempts", sum.Attempts)
+	}
+	for _, a := range sum.Attempts {
+		switch a.Seat {
+		case "gastown/onyx":
+			if a.Open || !a.LowerBound || a.Secs != 120 {
+				t.Errorf("stopped attempt = %+v, want 120s closed as a lower bound", a)
+			}
+		case "gastown/other":
+			if !a.Open {
+				t.Errorf("attempt = %+v, want another seat's attempt left open", a)
+			}
+		}
+	}
+}
+
+// TestEndSeatOpen_ClosesOnlyTheNewestAttempt: a seat works one bead at a time,
+// so an older attempt still open on another bead is stale from an earlier turn.
+// Closing it at this stop would credit it with the time since, so it stays open
+// and only the newest attempt ends (gt-8yk78).
+func TestEndSeatOpen_ClosesOnlyTheNewestAttempt(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	clock := &stepClock{at: testEpoch}
+	st := New(dir, clock)
+	if err := st.Start("gt-old", "gastown/onyx"); err != nil {
+		t.Fatal(err)
+	}
+	clock.at = testEpoch.Add(10 * time.Minute)
+	if err := st.Start("gt-new", "gastown/onyx"); err != nil {
+		t.Fatal(err)
+	}
+
+	bead, ended, err := st.EndSeatOpen("gastown/onyx", ReasonStopped, testEpoch.Add(20*time.Minute))
+	if err != nil {
+		t.Fatalf("EndSeatOpen: %v", err)
+	}
+	if !ended || bead != "gt-new" {
+		t.Fatalf("EndSeatOpen = %q, %v; want the newest attempt gt-new closed", bead, ended)
+	}
+
+	old, err := st.Summarize("gt-old")
+	if err != nil {
+		t.Fatalf("Summarize(gt-old): %v", err)
+	}
+	if len(old.Attempts) != 1 || !old.Attempts[0].Open || old.Attempts[0].Secs != 0 {
+		t.Errorf("gt-old = %+v, want its stale attempt left open", old.Attempts)
+	}
+	newer, err := st.Summarize("gt-new")
+	if err != nil {
+		t.Fatalf("Summarize(gt-new): %v", err)
+	}
+	if len(newer.Attempts) != 1 || newer.Attempts[0].Open || newer.Attempts[0].Secs != 600 {
+		t.Errorf("gt-new = %+v, want 600s closed", newer.Attempts)
+	}
+}
+
+// TestEndSeatOpen_NoOpenAttemptWritesNothing: a seat that already ended its
+// attempt, or a store with no log for it, gains no line and no error.
+func TestEndSeatOpen_NoOpenAttemptWritesNothing(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st := New(dir, fixedClock{at: testEpoch})
+	if err := st.Start("gt-abc", "gastown/onyx"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.End("gt-abc", "gastown/onyx", ReasonDone, testEpoch.Add(30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	bead, ended, err := st.EndSeatOpen("gastown/onyx", ReasonStopped, testEpoch.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("EndSeatOpen: %v", err)
+	}
+	if ended || bead != "" {
+		t.Errorf("EndSeatOpen = %q, %v; want nothing to close", bead, ended)
+	}
+	if _, _, err := New(filepath.Join(dir, "absent"), fixedClock{at: testEpoch}).
+		EndSeatOpen("gastown/onyx", ReasonStopped, testEpoch); err != nil {
+		t.Errorf("EndSeatOpen on a store with no directory: %v, want no error", err)
+	}
+	sum, err := st.Summarize("gt-abc")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Secs != 30 || sum.Skipped != 0 {
+		t.Errorf("Secs/Skipped = %v/%d, want the one 30s attempt and no second end", sum.Secs, sum.Skipped)
+	}
+}
+
+// TestEndSeatOpen_ReportsALogItCannotReadAndStillClosesTheRest: one unreadable
+// log must not hide the seat's attempt in another, and must not be dropped
+// without a word: the close happens and the read failure goes back to the
+// caller (gt-8yk78).
+func TestEndSeatOpen_ReportsALogItCannotReadAndStillClosesTheRest(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st := New(dir, fixedClock{at: testEpoch})
+	if err := st.Start("gt-abc", "gastown/onyx"); err != nil {
+		t.Fatal(err)
+	}
+	// A dangling symlink is present in the store but resolves to nothing, so
+	// its bead cannot be read.
+	if err := os.Symlink(filepath.Join(dir, "gone"), filepath.Join(dir, "gt-broken.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+
+	bead, ended, err := st.EndSeatOpen("gastown/onyx", ReasonStopped, testEpoch.Add(time.Minute))
+	if err == nil {
+		t.Fatal("EndSeatOpen swallowed a log it could not read")
+	}
+	if !ended || bead != "gt-abc" {
+		t.Fatalf("EndSeatOpen = %q, %v; want gt-abc closed despite gt-broken", bead, ended)
+	}
+}
+
+// TestEndSeatOpen_ReportsAStoreItCannotRead: a store path that cannot be
+// listed is a read that failed, not an absent store. It goes back to the
+// caller instead of reading as "this seat holds no attempt" (gt-8yk78).
+func TestEndSeatOpen_ReportsAStoreItCannotRead(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "polecat-spans")
+	if err := os.WriteFile(storePath, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := New(storePath, fixedClock{at: testEpoch}).
+		EndSeatOpen("gastown/onyx", ReasonStopped, testEpoch); err == nil {
+		t.Fatal("EndSeatOpen read a store it could not list as an empty one")
+	}
+}
+
+func TestEndSeatOpen_RefusesAnEmptySeat(t *testing.T) {
+	t.Parallel()
+	if _, _, err := New(t.TempDir(), nil).EndSeatOpen("", ReasonStopped, testEpoch); err == nil {
+		t.Fatal("EndSeatOpen accepted an empty seat")
 	}
 }
 

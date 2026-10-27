@@ -33,8 +33,12 @@ type Reason string
 
 const (
 	ReasonDone      Reason = "done"
+	ReasonDeferred  Reason = "deferred"
 	ReasonOverrun   Reason = "overrun"
 	ReasonEscalated Reason = "escalated"
+	// ReasonStopped closes an attempt whose seat a stop or a nuke ended from
+	// outside: the seat reported nothing, so the host writes the end.
+	ReasonStopped Reason = "stopped"
 	// ReasonDead closes an attempt whose seat died without reporting an end:
 	// the elapsed time is a lower bound on the work done.
 	ReasonDead Reason = "dead"
@@ -90,7 +94,8 @@ func (s *Store) Start(bead, seat string) error {
 
 // End appends an end event for seat working bead at at. ReasonDead marks the
 // attempt as a lower bound: the seat died, so the time to its close is all the
-// record can claim.
+// record can claim. ReasonStopped is one too: a stop ends the session, not the
+// work, and a seat resumed on the same bead continues it with no second start.
 func (s *Store) End(bead, seat string, reason Reason, at time.Time) error {
 	if err := validateBead(bead); err != nil {
 		return err
@@ -107,7 +112,7 @@ func (s *Store) End(bead, seat string, reason Reason, at time.Time) error {
 		Event:      EventEnd,
 		At:         formatTime(at),
 		Reason:     string(reason),
-		LowerBound: reason == ReasonDead,
+		LowerBound: reason == ReasonDead || reason == ReasonStopped,
 	})
 }
 
@@ -134,6 +139,68 @@ func (s *Store) EndOpen(bead, seat string, reason Reason, at time.Time) (bool, e
 		return true, s.End(bead, seat, reason, at)
 	}
 	return false, nil
+}
+
+// EndSeatOpen ends the newest attempt seat left open in this store, and reports
+// the bead whose log it closed.
+//
+// It is what a stop writes: the host ends a seat's attempt from outside, and
+// must do it without asking Dolt which bead the seat held — gt down and gt
+// polecat nuke stop seats while the database is unreachable or being stopped.
+// The logs are the only record of which bead a seat held, so the store reads
+// its own directory (one file per bead) rather than keeping a second index that
+// could disagree with them.
+//
+// Only the newest open attempt is closed. A seat works one bead at a time, so
+// an older attempt still open is a stale one from an earlier turn, and closing
+// it at this stop would credit it with time the seat did not hold. A log that
+// cannot be read is skipped and reported: the other logs still answer, and the
+// caller's stop must stand either way.
+//
+// Every log is read, because any of them could hold the attempt: there is no
+// index, and a second one could disagree with the logs it points into. The
+// store is one small file per bead worked in this town, and a stop is rare, so
+// the read is a stop's cost and not a poll's.
+func (s *Store) EndSeatOpen(seat string, reason Reason, at time.Time) (string, bool, error) {
+	if seat == "" {
+		return "", false, errors.New("polecat spans: empty seat")
+	}
+	// An absent store is not a read that failed: no bead has a log yet, so the
+	// seat holds no attempt and there is nothing to close.
+	entries, err := os.ReadDir(s.dir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", false, fmt.Errorf("reading the polecat span store %s: %w", s.dir, err)
+	}
+	var bead string
+	var started time.Time
+	var skipped []error
+	for _, ent := range entries {
+		// One file per bead, named for the bead: anything else in the store is
+		// a lock or a file another writer left, and is not a seat's attempt.
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".jsonl") {
+			continue
+		}
+		name := strings.TrimSuffix(ent.Name(), ".jsonl")
+		if !ValidBeadID(name) {
+			continue
+		}
+		sum, err := s.Summarize(name)
+		if err != nil {
+			skipped = append(skipped, err)
+			continue
+		}
+		for _, a := range sum.Attempts {
+			if a.Seat != seat || !a.Open || (bead != "" && !a.StartedAt.After(started)) {
+				continue
+			}
+			bead, started = name, a.StartedAt
+		}
+	}
+	if bead == "" {
+		return "", false, errors.Join(skipped...)
+	}
+	ended, err := s.EndOpen(bead, seat, reason, at)
+	return bead, ended, errors.Join(err, errors.Join(skipped...))
 }
 
 // Summary is the time a bead's seats spent hooked on it across every attempt.
@@ -379,7 +446,7 @@ func validateBead(bead string) error {
 
 func validReason(reason Reason) bool {
 	switch reason {
-	case ReasonDone, ReasonOverrun, ReasonEscalated, ReasonDead:
+	case ReasonDone, ReasonDeferred, ReasonOverrun, ReasonEscalated, ReasonStopped, ReasonDead:
 		return true
 	}
 	return false

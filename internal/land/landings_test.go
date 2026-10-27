@@ -12,8 +12,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/jev/battery"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 )
+
+// seedFirstSight writes the host's first-sight record for bead's submission at
+// head: what the landing worker wrote from its own clock the first time it saw
+// the submission, and the only end a landing trusts on a seat's behalf.
+func seedFirstSight(t *testing.T, town, bead, head string, seen time.Time) {
+	t.Helper()
+	if err := battery.Append(SubmissionsSeenPath(town), SubmissionRecord{SeenAt: seen, Bead: bead, Head: head}); err != nil {
+		t.Fatalf("seeding the first-sight record: %v", err)
+	}
+}
 
 // tornTail writes raw onto the end of f's file with no trailing newline: the
 // tail an append leaves when it stops mid-record.
@@ -439,6 +450,265 @@ func TestLandingsFileAppendMarksAnOpenSpanLowerBound(t *testing.T) {
 	}
 }
 
+// TestLandingsFileAppendSubmittedClosesTheSubmittingSeatsOpenSpan: a sandboxed
+// seat cannot write this town's span log, so its attempt stays open until the
+// landing closes it at the submission the seat reported and the host saw. The
+// record then carries the seat's real seconds instead of a dash (gt-8yk78).
+func TestLandingsFileAppendSubmittedClosesTheSubmittingSeatsOpenSpan(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := spans.New(spans.DefaultDir(town), &spanClock{at: spanEpoch})
+	f.Spans = store
+	if err := store.Start("gt-abc", "gastown/opal"); err != nil {
+		t.Fatal(err)
+	}
+	seedFirstSight(t, town, "gt-abc", "h1", spanEpoch.Add(150*time.Second))
+
+	submitted := spanEpoch.Add(120 * time.Second)
+	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(180 * time.Second)}
+	if err := f.AppendSubmitted(rec0, "gastown/opal", submitted); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, _ := lastLine(t, f)
+	if rec.PolecatSecs != 120 {
+		t.Errorf("polecat_secs = %v, want the seat's 120 seconds", rec.PolecatSecs)
+	}
+	if rec.PolecatLowerBound {
+		t.Error("polecat_lower_bound set on an attempt the landing closed")
+	}
+	want := []PolecatAttempt{{Seat: "gastown/opal", Secs: 120}}
+	if !reflect.DeepEqual(rec.PolecatAttempts, want) {
+		t.Errorf("polecat_attempts = %+v, want %+v", rec.PolecatAttempts, want)
+	}
+	// The close is a log write, not a record rewrite: the seat's own attempt
+	// reads as ended from the log afterwards.
+	sum, err := store.Summarize("gt-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sum.Attempts) != 1 || sum.Attempts[0].Open {
+		t.Errorf("summary = %+v, want the attempt closed", sum)
+	}
+}
+
+// TestLandingsFileAppendSubmittedLeavesAnotherSeatsAttemptOpen: the landing
+// closes the attempt of the seat that submitted, and one an earlier seat left
+// open stays open — its end is unknown, so the record keeps the lower bound
+// rather than counting the time to someone else's submission as work (gt-8yk78).
+func TestLandingsFileAppendSubmittedLeavesAnotherSeatsAttemptOpen(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := spans.New(spans.DefaultDir(town), &spanClock{at: spanEpoch})
+	f.Spans = store
+	for _, seat := range []string{"gastown/opal", "gastown/nux"} {
+		if err := store.Start("gt-abc", seat); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedFirstSight(t, town, "gt-abc", "h1", spanEpoch.Add(2*time.Minute))
+
+	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(2 * time.Minute)}
+	if err := f.AppendSubmitted(rec0, "gastown/nux", spanEpoch.Add(90*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, _ := lastLine(t, f)
+	if rec.PolecatSecs != 90 {
+		t.Errorf("polecat_secs = %v, want the submitting seat's 90 alone", rec.PolecatSecs)
+	}
+	if !rec.PolecatLowerBound {
+		t.Error("polecat_lower_bound unset while an attempt is still open")
+	}
+	want := []PolecatAttempt{
+		{Seat: "gastown/opal", Secs: 0, LowerBound: true},
+		{Seat: "gastown/nux", Secs: 90},
+	}
+	if !reflect.DeepEqual(rec.PolecatAttempts, want) {
+		t.Errorf("polecat_attempts = %+v, want %+v", rec.PolecatAttempts, want)
+	}
+}
+
+// TestLandingsFileAppendSubmittedCutsAStampPastTheHostsFirstSight: the
+// submission stamp is the seat's own word, and a seat must not be able to write
+// time into a landing record it did not work. A stamp later than the host's
+// first sight of the submission is cut back to that sight, so the queue wait
+// after the turn ended is never credited as seat time (gt-8yk78).
+func TestLandingsFileAppendSubmittedCutsAStampPastTheHostsFirstSight(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := spans.New(spans.DefaultDir(town), &spanClock{at: spanEpoch})
+	f.Spans = store
+	if err := store.Start("gt-abc", "gastown/opal"); err != nil {
+		t.Fatal(err)
+	}
+	seedFirstSight(t, town, "gt-abc", "h1", spanEpoch.Add(100*time.Second))
+
+	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(200 * time.Second)}
+	if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, _ := lastLine(t, f)
+	if rec.PolecatSecs != 100 {
+		t.Errorf("polecat_secs = %v, want the host's first-sight 100, not the seat's hour", rec.PolecatSecs)
+	}
+}
+
+// TestLandingsFileAppendSubmittedBoundsAgainstItsClock: a record that carries
+// no landing stamp of its own is bounded by the file's clock, so the end is
+// never written past the landing in either shape (gt-8yk78).
+func TestLandingsFileAppendSubmittedBoundsAgainstItsClock(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.now = func() time.Time { return spanEpoch.Add(100 * time.Second) }
+	store := spans.New(spans.DefaultDir(town), &spanClock{at: spanEpoch})
+	f.Spans = store
+	if err := store.Start("gt-abc", "gastown/opal"); err != nil {
+		t.Fatal(err)
+	}
+	// A first sight the host clock cannot have read yet: only the landing's own
+	// clock can bound this end.
+	seedFirstSight(t, town, "gt-abc", "h1", spanEpoch.Add(200*time.Second))
+
+	if err := f.AppendSubmitted(LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1"}, "gastown/opal", spanEpoch.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, _ := lastLine(t, f)
+	if rec.PolecatSecs != 100 {
+		t.Errorf("polecat_secs = %v, want the file clock's 100, not the seat's hour", rec.PolecatSecs)
+	}
+}
+
+// TestLandingsFileAppendSubmittedLeavesTheAttemptOpenWithoutAFirstSight: the
+// seat's stamp alone is not evidence the seat worked the time it claims. With
+// no first-sight record the host saw no submission, so no end is written and
+// the record keeps the lower bound (gt-8yk78).
+func TestLandingsFileAppendSubmittedLeavesTheAttemptOpenWithoutAFirstSight(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	store := spans.New(spans.DefaultDir(town), &spanClock{at: spanEpoch})
+	f.Spans = store
+	if err := store.Start("gt-abc", "gastown/opal"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(2 * time.Minute)}
+	if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, _ := lastLine(t, f)
+	if rec.PolecatSecs != 0 || !rec.PolecatLowerBound {
+		t.Errorf("polecat time = %v (lower bound %v), want none and a lower bound: the seat's word is not a measurement",
+			rec.PolecatSecs, rec.PolecatLowerBound)
+	}
+	sum, err := store.Summarize("gt-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sum.Attempts) != 1 || !sum.Attempts[0].Open {
+		t.Errorf("summary = %+v, want the attempt left open", sum)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "first-sight") {
+		t.Errorf("logged = %q, want one line saying the first-sight record is missing", logged)
+	}
+}
+
+// TestLandingsFileAppendSubmittedWritesTheLandingWhenTheFirstSightCannotBeRead:
+// the first-sight log is the bound the end needs, so a log that cannot be read
+// leaves the attempt open rather than closing it on the seat's word, and the
+// landing is written anyway with a lower bound (gt-8yk78).
+func TestLandingsFileAppendSubmittedWritesTheLandingWhenTheFirstSightCannotBeRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	// A directory where the first-sight log belongs: the store the landing
+	// built reads it through FirstSeenIn, and every open of it fails.
+	if err := os.MkdirAll(SubmissionsSeenPath(town), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := spans.New(spans.DefaultDir(town), &spanClock{at: spanEpoch})
+	f.Spans = store
+	if err := store.Start("gt-abc", "gastown/opal"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(2 * time.Minute)}
+	if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(time.Minute)); err != nil {
+		t.Fatalf("AppendSubmitted with an unreadable first-sight log: %v", err)
+	}
+
+	rec, _ := lastLine(t, f)
+	if rec.PolecatSecs != 0 || !rec.PolecatLowerBound {
+		t.Errorf("polecat time = %v (lower bound %v), want none and a lower bound", rec.PolecatSecs, rec.PolecatLowerBound)
+	}
+	sum, err := store.Summarize("gt-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sum.Attempts) != 1 || !sum.Attempts[0].Open {
+		t.Errorf("summary = %+v, want the attempt left open", sum)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "first-sight") {
+		t.Errorf("logged = %q, want one line saying the first-sight log could not be read", logged)
+	}
+}
+
+// TestLandingsFileAppendSubmittedWritesTheLandingWhenTheCloseFails: the span is
+// a measurement, so a log that cannot be written costs the time and not the
+// landing record (gt-yxl22).
+func TestLandingsFileAppendSubmittedWritesTheLandingWhenTheCloseFails(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	f.Spans = &unreadableSpans{err: errors.New("permission denied")}
+	seedFirstSight(t, town, "gt-abc", "h1", spanEpoch.Add(90*time.Second))
+
+	if err := f.AppendSubmitted(LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1"}, "gastown/opal", spanEpoch.Add(time.Minute)); err != nil {
+		t.Fatalf("AppendSubmitted with an unwritable span log: %v; the landing must still be written", err)
+	}
+	if rec, _ := lastLine(t, f); rec.LandedCommit != "c1" {
+		t.Errorf("record = %+v, want the landing written", rec)
+	}
+	if len(logged) != 2 {
+		t.Errorf("logged = %q, want one line for the failed close and one for the unreadable log", logged)
+	}
+}
+
 // TestLandingsFileAppendOmitsPolecatTimeWithoutSpans: a crew landing has no
 // seat and so no log, and a record for a bead with no spans carries none of
 // the three fields (gt-yxl22).
@@ -474,8 +744,8 @@ func TestLandingsFileAppendOmitsPolecatTimeWithoutSpans(t *testing.T) {
 	}
 }
 
-// unreadableSpans is a SpanSummarizer whose every read fails, the shape of a
-// span log that exists but the worker cannot open.
+// unreadableSpans is a SpanSummarizer whose every read and write fails, the
+// shape of a span log that exists but the worker cannot open.
 type unreadableSpans struct {
 	err  error
 	read []string // every bead Summarize was asked for
@@ -484,6 +754,10 @@ type unreadableSpans struct {
 func (u *unreadableSpans) Summarize(bead string) (spans.Summary, error) {
 	u.read = append(u.read, bead)
 	return spans.Summary{}, u.err
+}
+
+func (u *unreadableSpans) EndOpen(string, string, spans.Reason, time.Time) (bool, error) {
+	return false, u.err
 }
 
 // TestLandingsFileAppendMarksPolecatTimeLowerBoundWhenTheLogCannotBeRead: the
