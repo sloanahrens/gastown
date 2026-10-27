@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/models"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
@@ -989,6 +990,22 @@ type specDispatchEnv struct {
 	// lint, warn holds a refused bead and comments the verdict, refuse also
 	// labels it needs-shape (polecat_pool.shape_gate, gt-cq5gb, gt-f8ppx).
 	ShapeGate string
+	// OMThreshold reads the review threshold from the rig's own .om.json: the
+	// number the overrun-stop box bands (gt-b9j3o.4). 0 is a rig that sets
+	// none, and an error is a read that failed, which the tick reports rather
+	// than reading as 0.
+	OMThreshold func(rig string) (float64, error)
+}
+
+// overrunThreshold asks the env for rig's review threshold. A tick built with no
+// reader is a construction error, not a rig that sets no rubric: it reports and
+// flags nothing, so the gap is visible rather than silently unflagging every
+// bead.
+func (e specDispatchEnv) overrunThreshold(rig string) (float64, error) {
+	if e.OMThreshold == nil {
+		return 0, errors.New("this tick reads no review threshold")
+	}
+	return e.OMThreshold(rig)
 }
 
 // showFresh is the read of a bead made at the last moment before its sling.
@@ -1070,6 +1087,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// One read per rig per tick of what the working seats already hold, which
 	// every candidate of that rig is compared against (gt-z80p9).
 	heldReads := map[string]heldRead{}
+	// The overrun box reads a rig's review threshold, once per rig, and its
+	// failure is reported once rather than once per candidate (gt-b9j3o.4).
+	thresholds := specOMThresholds{env: env, reads: map[string]specOMThresholdRead{}}
+	thresholdNoted := map[string]bool{}
 	inFlight := map[string]bool{}
 	for _, f := range env.InFlight {
 		inFlight[f.Bead] = true
@@ -1131,9 +1152,13 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
 			continue
 		}
+		// The verdict is read under every gate: the gate decides what a refusal
+		// does to the candidate, and the overrun box asks the lint the same
+		// question a dispatcher does — is this bead shaped — with no gate at all
+		// (gt-b9j3o.4).
+		verdict := specdispatch.Lint(full, env.Template)
 		shapeNote := ""
 		if env.ShapeGate != specdispatch.ShapeGateOff {
-			verdict := specdispatch.Lint(full, env.Template)
 			switch {
 			case verdict.Clean():
 			case full.HasLabel(specdispatch.ShapeWaivedLabel):
@@ -1283,6 +1308,27 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 				gone = recorded
 			}
 		}
+		// The overrun-stop flag, decided on the seat the tick just chose
+		// (gt-b9j3o.4): a bead in the box is slung as it would be, and the note
+		// travels with the sling rather than being written here — a note that
+		// says the bead was dispatched must not be written before the sling
+		// that dispatches it. A threshold that cannot be read is reported once
+		// for its rig and flags nothing: an unknown threshold is not a match.
+		overrunNote := ""
+		verdictOverrun, err := specdispatch.InOverrunBox(specdispatch.OverrunFacts{
+			Type: full.Type, Priority: full.Priority, Shaped: verdict.Clean(), Labels: len(full.Labels),
+			Model:     models.ModelFamily(seat.Agent),
+			Threshold: func() (float64, error) { return thresholds.get(c.Rig) },
+		})
+		switch {
+		case err != nil:
+			if !thresholdNoted[c.Rig] {
+				thresholdNoted[c.Rig] = true
+				report.Errors = append(report.Errors, fmt.Sprintf("%s: cannot read the overrun box's review threshold: %v", c.Rig, err))
+			}
+		case verdictOverrun.Match:
+			overrunNote = specdispatch.OverrunNote(models.ModelFamily(seat.Agent), verdictOverrun.Threshold)
+		}
 		// The warn-mode verdict goes on the bead beside its sling, once per
 		// distinct verdict (seat-refill's shape_note).
 		if shapeNote != "" && !env.DryRun {
@@ -1296,6 +1342,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			entry.Line += specFormulaNote(c.Run) + specResumeNote(resume, gone)
 			if shapeNote != "" {
 				entry.Line += "; " + shapeNote
+			}
+			if overrunNote != "" {
+				entry.Line += "; " + overrunNote
 			}
 			report.Dispatched = append(report.Dispatched, entry)
 			budget.Bump(seat.Agent, budget.Now)
@@ -1323,7 +1372,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// reads, was the tick: 45-70 s each in series, 2026-10-21).
 		c.order = len(pending)
 		paths, tests := specPendingRefs(full)
-		pending = append(pending, specPendingSling{c: c, id: id, seat: seat, resume: resume, gone: gone, shapeNote: shapeNote, entry: entry, paths: paths, tests: tests})
+		pending = append(pending, specPendingSling{c: c, id: id, seat: seat, resume: resume, gone: gone, shapeNote: shapeNote, overrunNote: overrunNote, entry: entry, paths: paths, tests: tests})
 		budget.Bump(seat.Agent, budget.Now)
 		// The slings run together, so a later candidate of this tick that
 		// names the same files is held now, as it was when the earlier sling
@@ -1342,6 +1391,32 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	return report
 }
 
+// specOMThresholdRead is one rig's review-threshold read: the value, or the
+// error it failed with. A failed read keeps its error rather than reading as 0,
+// so the box treats it as unknown and the tick logs it (gt-b9j3o.4).
+type specOMThresholdRead struct {
+	value float64
+	err   error
+}
+
+// specOMThresholds is a tick's memo of each rig's review threshold. The overrun
+// box asks it lazily and per candidate; the file it reads does not change
+// inside a tick, so the read happens once per rig.
+type specOMThresholds struct {
+	env   specDispatchEnv
+	reads map[string]specOMThresholdRead
+}
+
+// get answers rig's review threshold, reading it on the first ask.
+func (t *specOMThresholds) get(rig string) (float64, error) {
+	r, ok := t.reads[rig]
+	if !ok {
+		r.value, r.err = t.env.overrunThreshold(rig)
+		t.reads[rig] = r
+	}
+	return r.value, r.err
+}
+
 // specPendingSling is a candidate the tick has decided to sling: its seat is
 // chosen and counted on the budget; the last-moment re-read and the sling
 // itself are still to run.
@@ -1352,7 +1427,10 @@ type specPendingSling struct {
 	resume    string
 	gone      string
 	shapeNote string
-	entry     specDispatchEntry
+	// overrunNote is the overrun-stop flag the sling writes on its bead once it
+	// has dispatched it; empty for a bead outside the box (gt-b9j3o.4).
+	overrunNote string
+	entry       specDispatchEntry
 	// paths and tests are the files and test names the bead's text cites, for
 	// the overlap hold on the candidates after it (specPendingRefs).
 	paths []string
@@ -1524,7 +1602,15 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 	if p.shapeNote != "" {
 		entry.Line += "; " + p.shapeNote
 	}
-	o := specSlingOutcome{kind: specSlingDispatched, entry: entry}
+	o := specSlingOutcome{kind: specSlingDispatched}
+	if p.overrunNote != "" {
+		// The flag rides the outcome, not the tick: the note says the bead was
+		// dispatched, and a sling that deferred or failed dispatched nothing
+		// (gt-b9j3o.4).
+		entry.Line += "; " + p.overrunNote
+		o.notes = append(o.notes, [2]string{specdispatch.OverrunNoteKey, p.overrunNote})
+	}
+	o.entry = entry
 	if p.gone != "" {
 		note := fmt.Sprintf("%s%s: resume branch %s is gone from origin; dispatched fresh (gt-gzhin.3)", specDispatchNotePrefix, id, p.gone)
 		o.notes = append(o.notes, [2]string{note, note})
@@ -2021,6 +2107,12 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 
 		MaxPriority: maxPriority,
 		ShapeGate:   ts.PolecatPool.GetShapeGate(),
+		// The overrun box bands the reviewer's own threshold, read from the
+		// rig's checkout — the tree its landings are reviewed from
+		// (gt-b9j3o.4).
+		OMThreshold: func(rig string) (float64, error) {
+			return land.OMThreshold(filepath.Join(townRoot, rig))
+		},
 	}
 	report := runSpecDispatchCycle(env)
 	report.Notices = append(report.Notices, slingTraces.notices()...)

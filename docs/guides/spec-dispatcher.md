@@ -63,7 +63,8 @@ decides and reports without slinging, labeling or commenting.
    line. Order is priority, then created_at, then id.
 3. Each candidate is linted, and `polecat_pool.shape_gate` decides what the
    verdict does:
-   - `off` runs no lint at all;
+   - `off` holds and labels nothing the lint refuses (the verdict is still read
+     for the overrun-stop flag below);
    - `warn` (the default) holds a bead the lint refuses: it is skipped with the
      reason `unshaped: <fields>`, spends no seat, and wears one `SHAPE: ...`
      comment, never repeated for the same verdict. It also holds a bead that
@@ -78,6 +79,32 @@ decides and reports without slinging, labeling or commenting.
      waits for the operator.
 4. A spec that clears the shape gate takes the first free seat and is slung
    through the shared rig-dispatch path in-process, with no auto-convoy.
+5. A bead that takes a seat and matches the overrun-stop box is slung anyway
+   and wears one comment saying so (see below).
+
+## The overrun-stop flag
+
+Some bead shapes ran past the overrun guard more often than others on the rig
+the box was measured on (gt-b9j3o.4). The dispatcher therefore notes a
+candidate that matches that box as it slings it: the comment names the seat's
+model and the rig's review threshold, the two facts of the box the bead itself
+does not show.
+
+The flag is a note, not a hold. A matching bead is dispatched exactly as it
+would have been: no seat is withheld, nothing is labeled, and the bead's
+priority and order are unchanged. A note is written only when the sling
+dispatches the bead, so a bead whose sling deferred carries no flag.
+
+Before changing the box, read `specdispatch.InOverrunBox`
+(`internal/specdispatch/overrun.go`): the facts it reads, the band the rig's
+`.om.json` threshold has to fall in, and the seat model are defined there and
+nowhere else. A rig with no `.om.json`, or one whose threshold falls outside the
+measured band, is outside the box. A threshold that cannot be read is not a
+threshold of 0: the tick reports the failed read once for the rig and flags
+nothing that tick.
+
+The threshold is the rig checkout's own `.om.json` — the tree its landings are
+reviewed from — not the review config of a landing in flight.
 
 ## A red main defers to its revert
 

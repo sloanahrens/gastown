@@ -131,6 +131,13 @@ type fakeSpecTown struct {
 	// maxTotal is polecat_pool.max_total as the tick reads it: 0 is a town
 	// with no total cap, which is what the budget tests without one get.
 	maxTotal int
+	// omThreshold is each rig's review threshold as the overrun box reads it,
+	// omThresholdErr a rig whose read fails, and omThresholdReads how many
+	// times the tick asked for each rig (gt-b9j3o.4). A rig in neither map
+	// sets no threshold.
+	omThreshold      map[string]float64
+	omThresholdErr   map[string]error
+	omThresholdReads map[string]int
 }
 
 // specTestNow is the tick clock every dispatch test runs at.
@@ -165,7 +172,8 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	f := &fakeSpecTown{specs: map[string]specdispatch.Spec{}, rigHold: map[string]string{}, revert: map[string]*specdispatch.Revert{},
 		slingErrs: map[string][]error{}, originBranches: map[string]bool{}, notes: map[string][]string{}, labels: map[string][]string{},
 		children: map[string][]specdispatch.Child{}, childErrs: map[string]error{}, showSeq: map[string][]specRead{},
-		held: map[string][]specdispatch.HeldBead{}, heldErr: map[string]error{}, heldRigs: map[string]int{}}
+		held: map[string][]specdispatch.HeldBead{}, heldErr: map[string]error{}, heldRigs: map[string]int{},
+		omThreshold: map[string]float64{}, omThresholdErr: map[string]error{}, omThresholdReads: map[string]int{}}
 	for _, s := range specs {
 		f.specs[s.ID] = s
 	}
@@ -241,7 +249,14 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			}
 			return f.held[rig], nil
 		},
-		RigHold:        func(rig string) string { return f.rigHold[rig] },
+		RigHold: func(rig string) string { return f.rigHold[rig] },
+		OMThreshold: func(rig string) (float64, error) {
+			f.omThresholdReads[rig]++
+			if err := f.omThresholdErr[rig]; err != nil {
+				return 0, err
+			}
+			return f.omThreshold[rig], nil
+		},
 		RevertInFlight: func(rig string) *specdispatch.Revert { return f.revert[rig] },
 		BranchOnOrigin: func(rig, branch string) (bool, error) {
 			if f.originErr != nil {
