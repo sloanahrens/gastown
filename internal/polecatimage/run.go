@@ -63,6 +63,9 @@ type Run struct {
 	rename func(oldpath, newpath string) error
 	// claim makes the lock directory; nil means ClaimLock.
 	claim func() error
+	// writePID records the run's pid in the lock directory; nil means
+	// os.WriteFile.
+	writePID func(path string, data []byte) error
 	// unlock holds the flock a run that took the lock keeps until Cleanup;
 	// nil while the run does not hold the lock.
 	unlock func()
@@ -133,6 +136,13 @@ func (r *Run) claimer() func() error {
 		return r.claim
 	}
 	return r.ClaimLock
+}
+
+func (r *Run) pidWriter() func(string, []byte) error {
+	if r.writePID != nil {
+		return r.writePID
+	}
+	return func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) }
 }
 
 func (r *Run) pid() int {

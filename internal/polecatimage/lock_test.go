@@ -62,6 +62,24 @@ func TestClaimLockRefusesAHeldLock(t *testing.T) {
 	}
 }
 
+// TestClaimLockRemovesADirectoryItCouldNotRecord drives the write after the
+// directory: a lock with no pid file records nothing, so leaving it would block
+// the next run until it aged out.
+func TestClaimLockRemovesADirectoryItCouldNotRecord(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	if err := os.MkdirAll(filepath.Dir(tr.Cfg.LockDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tr.Run.writePID = func(string, []byte) error { return os.ErrPermission }
+	if err := tr.ClaimLock(); err == nil {
+		t.Fatal("ClaimLock() error = nil, want the write's error")
+	}
+	if exists(tr.Cfg.LockDir) {
+		t.Error("the lock directory is still there with no pid file in it")
+	}
+}
+
 // TestTakeLock is a second build's answer to the lock: it takes a free or a
 // stale one, and defers to a fresh one without touching it.
 func TestTakeLock(t *testing.T) {
@@ -195,6 +213,48 @@ func TestTakeLockReportsAPathItCannotMake(t *testing.T) {
 		t.Errorf("BuildLock() = %q with an error, want no defer line", line)
 	}
 	tr.wantLogged(t, "ERROR: cannot take the lock "+tr.Cfg.LockDir)
+}
+
+// TestTakeLockReportsAFlockItCannotMake drives the flock's answer when it is
+// not the contention case: a lock path the flock file cannot be made beside
+// fails the run, and must not read as another run holding it.
+func TestTakeLockReportsAFlockItCannotMake(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	// A directory where the flock file belongs makes the flock's open fail with
+	// something other than contention.
+	if err := os.MkdirAll(tr.Cfg.LockDir+".flock", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line, err := tr.BuildLock()
+	if err == nil || line != "" {
+		t.Fatalf("BuildLock() = %q, %v; want the flock's error and no defer line", line, err)
+	}
+	tr.wantLogged(t, "ERROR: cannot take the lock "+tr.Cfg.LockDir)
+}
+
+// TestTakeLockReportsAClaimItCannotMakeAfterTheTakeover drives the claim that
+// follows the stale directory's removal: it fails for a reason other than
+// another run's lock, which is an error, not a defer.
+func TestTakeLockReportsAClaimItCannotMakeAfterTheTakeover(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	makeLock(t, tr.Cfg.LockDir, "9999", testNow.Add(-21*time.Minute))
+	claims := 0
+	tr.Run.claim = func() error {
+		claims++
+		if claims == 1 {
+			return &fs.PathError{Op: "mkdir", Path: tr.Cfg.LockDir, Err: fs.ErrExist}
+		}
+		return os.ErrPermission
+	}
+	ok, err := tr.TakeLock()
+	if ok || err == nil {
+		t.Fatalf("TakeLock() = %v, %v; want the claim's error", ok, err)
+	}
+	if tr.HaveLock {
+		t.Error("HaveLock = true after the claim that follows the takeover failed")
+	}
 }
 
 // TestTakeLockClassifiesAClaimFailure is the claim's error told apart from

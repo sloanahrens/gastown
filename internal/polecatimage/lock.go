@@ -27,7 +27,7 @@ func (r *Run) ClaimLock() error {
 		return err
 	}
 	pid := []byte(strconv.Itoa(r.pid()) + "\n")
-	if err := os.WriteFile(filepath.Join(r.Cfg.LockDir, "pid"), pid, 0o644); err != nil {
+	if err := r.pidWriter()(filepath.Join(r.Cfg.LockDir, "pid"), pid); err != nil {
 		// A directory with no pid file would block the next run until it aged
 		// out with nothing to show for it.
 		_ = os.Remove(r.Cfg.LockDir)
@@ -85,8 +85,10 @@ func (r *Run) claimOrTakeOver() error {
 		return err
 	}
 	r.Logf("taking over a stale lock (%s)", r.Cfg.LockDir)
+	// The stale directory is off the lock path already, so failing to delete it
+	// leaves rubbish rather than a lock, and must not stop this run's claim.
 	if err := os.RemoveAll(aside); err != nil {
-		return err
+		r.Logf("cannot remove the stale lock directory (%s): %v", aside, err)
 	}
 	if err := claim(); err != nil {
 		if errors.Is(err, fs.ErrExist) {
