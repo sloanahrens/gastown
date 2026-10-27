@@ -92,6 +92,28 @@ func TestNewestRequeueWithoutARequeue(t *testing.T) {
 	}
 }
 
+// TestNewestRequeueKeepsTheFirstAttemptAndBlocks is gt-apu6f: the writer emits
+// one Attempt: line and one Blocks: line, so a later line of either name is
+// content, and the value the comment recorded is the first one to carry it.
+func TestNewestRequeueKeepsTheFirstAttemptAndBlocks(t *testing.T) {
+	t.Parallel()
+	const header = "REQUEUED: operator re-queued this rejected landing unchanged\nBranch: b\nHead: abc\n"
+	for name, tc := range map[string]struct {
+		text    string
+		attempt int
+		blocks  int
+	}{
+		"a later Attempt: line":                     {text: header + "Attempt: 2\nBlocks: 1\nAttempt: 7\n", attempt: 2, blocks: 1},
+		"a later Blocks: line":                      {text: header + "Attempt: 2\nBlocks: 1\nBlocks: 9\n", attempt: 2, blocks: 1},
+		"a later Attempt: line that does not parse": {text: header + "Attempt: 2\nAttempt: three\n", attempt: 2},
+	} {
+		got, ok := NewestRequeue([]beads.Comment{{Text: tc.text}})
+		if !ok || got.Attempt != tc.attempt || got.Blocks != tc.blocks {
+			t.Errorf("%s: NewestRequeue = %+v, %v; want attempt %d, blocks %d", name, got, ok, tc.attempt, tc.blocks)
+		}
+	}
+}
+
 // TestNewestRequeueWithoutABlockCount is gt-kwe1l's fallback: a comment written
 // before the Blocks: line existed still names its attempt, with no count.
 func TestNewestRequeueWithoutABlockCount(t *testing.T) {

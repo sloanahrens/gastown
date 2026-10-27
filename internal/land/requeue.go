@@ -34,12 +34,14 @@ type Requeued struct {
 	Attempt int
 	// Blocks is how many MERGE REJECTION blocks the notes held when the comment
 	// was written; the last of them is the one the re-queue undid. Zero means
-	// the comment carries no Blocks: line.
+	// the comment names no count.
 	Blocks int
 }
 
 // NewestRequeue reads the newest REQUEUED comment on a bead; ok is false when
 // there is none, or it names no attempt (written before the Attempt: line).
+// The first Attempt: and Blocks: lines are the ones the writer recorded; a
+// later line of either name cannot override them (gt-apu6f).
 func NewestRequeue(comments []beads.Comment) (Requeued, bool) {
 	for i := len(comments) - 1; i >= 0; i-- {
 		text := comments[i].Text
@@ -47,18 +49,20 @@ func NewestRequeue(comments []beads.Comment) (Requeued, bool) {
 			continue
 		}
 		var q Requeued
-		named := false
+		named, counted := false, false
 		for _, line := range strings.Split(text, "\n") {
 			line = strings.TrimSpace(line)
-			if value, found := strings.CutPrefix(line, "Attempt:"); found {
+			if value, found := strings.CutPrefix(line, "Attempt:"); found && !named {
+				named = true
 				n, err := strconv.Atoi(strings.TrimSpace(value))
 				if err != nil {
 					return Requeued{}, false
 				}
-				q.Attempt, named = n, true
+				q.Attempt = n
 				continue
 			}
-			if value, found := strings.CutPrefix(line, "Blocks:"); found {
+			if value, found := strings.CutPrefix(line, "Blocks:"); found && !counted {
+				counted = true
 				if n, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
 					q.Blocks = n
 				}
