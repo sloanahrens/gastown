@@ -117,6 +117,55 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 	}
 }
 
+// The By column is still the column that says who built a landing, heading and
+// hover alike, so the name a rejected or failing row now carries reads as that
+// landing's submitter rather than as a new kind of column (gt-gclus).
+func TestTheLandingsByColumnStillSaysWhoBuiltIt(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 26, 20, 30, 0, 0, time.Local)
+	dom := newPageDOM(t)
+	dom.call(t, "renderTrend", map[string]any{"trend": map[string]any{
+		"hours": []map[string]any{{"hour": now.Truncate(time.Hour).Format(time.RFC3339), "landed": 1, "rejected": 1}},
+		"recent": []map[string]any{{
+			"at": now.Format(time.RFC3339), "bead": "gt-rejected", "rig": "gastown",
+			"outcome": "rejected", "kind": "review", "polecat": "agate",
+		}},
+	}})
+
+	// The table is found by its class rather than by its index: the day's
+	// figures sit above it in the same box, and a column that moves must not
+	// move the expectation with it.
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+  let tbl = null;
+  (function walk(n) {
+    if (tbl) return;
+    if (n.className === "ltable") { tbl = n; return; }
+    for (const c of (n.children || [])) walk(c);
+  })(document.getElementById("trend"));
+  if (!tbl) return null;
+  const head = tbl.children[0].children[2], cell = tbl.children[1].children[2];
+  return {head: head.textContent, tip: head.title, cell: cell.textContent};
+})())`)
+	if err != nil {
+		t.Fatalf("reading the drawn landings table: %v", err)
+	}
+	var got struct {
+		Head string `json:"head"`
+		Tip  string `json:"tip"`
+		Cell string `json:"cell"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("decoding the drawn table: %v", err)
+	}
+	if got.Head != "By" || !strings.Contains(got.Tip, "who built it") {
+		t.Errorf("the By heading reads %q (%q), want the column that says who built it", got.Head, got.Tip)
+	}
+	if got.Cell != "agate" {
+		t.Errorf("the rejected row's By cell reads %q, want the submitter the server named", got.Cell)
+	}
+}
+
 // The queued rows are capped at ten — dequeued beads are the point of the pane,
 // not a wall of them — and the rest are counted with a pointer to the tab that
 // holds them rather than dropped silently (gt-zc45r).

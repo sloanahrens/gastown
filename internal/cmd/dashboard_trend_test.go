@@ -252,7 +252,7 @@ func TestBuildRecentLandingsJoinsStagesAndOrdersNewestFirst(t *testing.T) {
 	rejs := []omRejection{{At: now.Add(-20 * time.Minute), Bead: "gt-new", Kind: "review", Detail: "om requested changes (score 0.55, 5 finding(s))", Score: &score}}
 
 	var asked []string
-	rows := buildRecentLandings(now, recs, stages, rejs, nil, nil, func(rig, id string) string { asked = append(asked, rig+"/"+id); return "title of " + id }, 30)
+	rows := buildRecentLandings(now, recs, stages, rejs, nil, nil, func(rig, id string) string { asked = append(asked, rig+"/"+id); return "title of " + id }, nil, 30)
 
 	if len(rows) != 4 {
 		t.Fatalf("%d rows, want 4 (the 30-hour-old landing is outside the day): %+v", len(rows), rows)
@@ -291,7 +291,7 @@ func TestBuildRecentLandingsKeepsEveryRowAndAsksTitlesOnlyForTheFirstTen(t *test
 		recs = append(recs, omRecord{Record: landings.Record{Bead: fmt.Sprintf("gt-%d", i), Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Duration(i) * time.Minute)}})
 	}
 	asked := 0
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, func(rig, id string) string { asked++; return "" }, recentLandingRows)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, func(rig, id string) string { asked++; return "" }, nil, recentLandingRows)
 	if len(rows) != 50 {
 		t.Fatalf("rows = %d, want every landing in the window (50): the pane scrolls them, nothing is cut at ten", len(rows))
 	}
@@ -331,7 +331,7 @@ func TestBuildRecentLandingsFillsShipTime(t *testing.T) {
 	}
 	rejs := []omRejection{{At: at("2026-10-03T17:15:00Z"), Bead: "gt-rejected", Kind: "review"}}
 
-	rows := buildRecentLandings(now, recs, nil, rejs, nil, track.shipStatus, func(string, string) string { return "" }, 30)
+	rows := buildRecentLandings(now, recs, nil, rejs, nil, track.shipStatus, func(string, string) string { return "" }, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead+":"+r.Outcome] = r
@@ -386,7 +386,7 @@ func TestBuildRecentLandingsShipCellPerRig(t *testing.T) {
 		{Record: landings.Record{Bead: "dv-nothing", Rig: "devops", OMVerdict: "approve", LandedAt: at("2026-10-03T17:02:00Z")}},
 	}
 
-	rows := buildRecentLandings(now, recs, nil, nil, nil, track.shipStatus, func(string, string) string { return "" }, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, track.shipStatus, func(string, string) string { return "" }, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -414,6 +414,134 @@ func TestPolecatOfBranch(t *testing.T) {
 	} {
 		if got := polecatOfBranch(in); got != want {
 			t.Errorf("polecatOfBranch(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A rejected landing's By column names the agent or polecat that submitted it:
+// the one on its last submitted branch, "polecat/<name>/..." or
+// "crew/<name>/...". The name is read off the submission records, never off the
+// bead, so the reassignment and the reset to open a rejection makes cannot
+// change it — a row whose record names a different holder still shows the
+// submitter (gt-gclus).
+func TestBuildRecentLandingsNamesARejectedRowFromItsBranch(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 26, 20, 30, 0, 0, time.UTC)
+	subs := []land.SubmissionRecord{
+		// gt-resubmitted was submitted twice: the newest branch is the name.
+		{Rig: "gastown", Bead: "gt-resubmitted", Branch: "polecat/mica/gt-resubmitted+old", SeenAt: now.Add(-3 * time.Hour)},
+		{Rig: "gastown", Bead: "gt-resubmitted", Branch: "polecat/agate/gt-resubmitted+new", SeenAt: now.Add(-time.Hour)},
+		{Rig: "gastown", Bead: "gt-crew", Branch: "crew/heron/gt-js6di-merge", SeenAt: now.Add(-2 * time.Hour)},
+	}
+	// The review log's agent is the fallback for a bead with no branch, and the
+	// holder a bead read would name is not the name: gt-resubmitted's review
+	// ran on another agent, and the row must not show it.
+	revs := []land.ReviewRecord{
+		{Rig: "gastown", BeadID: "gt-resubmitted", Agent: "claude-sonnet", Verdict: "request_changes", At: now.Add(-time.Hour)},
+		{Rig: "gastown", BeadID: "gt-agent", Agent: "claude-haiku", Verdict: "request_changes", At: now.Add(-time.Hour)},
+	}
+	rejs := []omRejection{
+		{At: now.Add(-50 * time.Minute), Bead: "gt-resubmitted", Kind: "review"},
+		{At: now.Add(-50 * time.Minute), Bead: "gt-crew", Kind: "conflict"},
+		{At: now.Add(-50 * time.Minute), Bead: "gt-agent", Kind: "review"},
+		{At: now.Add(-50 * time.Minute), Bead: "gt-unknown", Kind: "review"},
+	}
+
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNameLookup(subs, revs), 30)
+	byBead := map[string]dashboard.LandingRow{}
+	for _, r := range rows {
+		byBead[r.Bead] = r
+	}
+	for bead, want := range map[string]string{
+		"gt-resubmitted": "agate",
+		"gt-crew":        "heron",
+		"gt-agent":       "claude-haiku",
+		"gt-unknown":     "",
+	} {
+		if got := byBead[bead].Polecat; got != want {
+			t.Errorf("%s By = %q, want %q", bead, got, want)
+		}
+	}
+
+	// A caller with no lookup names no one: the rejection is still a row, and
+	// nothing is read to fill its By in.
+	for _, r := range buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, nil, 30) {
+		if r.Polecat != "" {
+			t.Errorf("%s By = %q with no lookup, want a dash", r.Bead, r.Polecat)
+		}
+	}
+}
+
+// A landed row's By is unchanged: it keeps the polecat or crew member its own
+// landing record's branch names, and takes no name from the submission or
+// review records, which may name an earlier submission of the bead or the
+// agent the seat ran on. A landed record with no branch stays a dash (gt-gclus).
+func TestBuildRecentLandingsLeavesALandedRowsByAlone(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 26, 20, 30, 0, 0, time.UTC)
+	subs := []land.SubmissionRecord{
+		{Rig: "gastown", Bead: "gt-landed", Branch: "polecat/agate/gt-landed+1", SeenAt: now.Add(-2 * time.Hour)},
+	}
+	revs := []land.ReviewRecord{
+		{Rig: "gastown", BeadID: "gt-landed", Agent: "claude-haiku", Verdict: "approve", At: now.Add(-time.Hour)},
+		{Rig: "gastown", BeadID: "gt-nobranch", Agent: "claude-haiku", Verdict: "approve", At: now.Add(-time.Hour)},
+	}
+	recs := []omRecord{
+		{Record: landings.Record{Bead: "gt-landed", Rig: "gastown", Branch: "crew/heron/gt-landed", OMVerdict: "approve", LandedAt: now.Add(-time.Hour)}},
+		{Record: landings.Record{Bead: "gt-nobranch", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Hour)}},
+	}
+
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNameLookup(subs, revs), 30)
+	byBead := map[string]dashboard.LandingRow{}
+	for _, r := range rows {
+		byBead[r.Bead] = r
+	}
+	if got := byBead["gt-landed"].Polecat; got != "heron" {
+		t.Errorf("landed row By = %q, want heron from its own record's branch", got)
+	}
+	if got := byBead["gt-nobranch"].Polecat; got != "" {
+		t.Errorf("landed row with no branch By = %q, want a dash", got)
+	}
+}
+
+// The names the dashboard shows come from the records the landing worker
+// writes, at the paths it writes them to: the first-sight submission log and
+// the om review log. The beads are never read, so no reassignment can change
+// what a row says (gt-gclus).
+func TestDashSubmittersReadsTheLandingWorkersRecords(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 10, 26, 21, 0, 0, 0, time.UTC)
+
+	subPath := land.SubmissionsSeenPath(town)
+	if err := os.MkdirAll(filepath.Dir(subPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	subs := `{"seen_at":"2026-10-26T19:00:00Z","bead":"gt-rejected","rig":"gastown","branch":"crew/heron/gt-rejected","head":"1111aaaa"}
+{"seen_at":"2026-10-26T19:30:00Z","bead":"gt-other","rig":"gastown","branch":"polecat/mica/gt-other+1","head":"2222bbbb"}
+`
+	if err := os.WriteFile(subPath, []byte(subs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	revFile := land.TownReviewsFile(town)
+	if err := os.MkdirAll(filepath.Dir(revFile.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	revs := `{"bead":"gt-agent","rig":"gastown","attempt":1,"score":0.4,"verdict":"request_changes","agent":"claude-haiku","findings":2,"bar":0.8,"at":"2026-10-26T19:30:00Z"}
+`
+	if err := os.WriteFile(revFile.Path, []byte(revs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	who := newDashSubmitters(town).get(now)
+	for bead, want := range map[string]string{
+		"gt-rejected": "heron",
+		"gt-other":    "mica",
+		"gt-agent":    "claude-haiku",
+		"gt-nobody":   "",
+	} {
+		if got := who("gastown", bead); got != want {
+			t.Errorf("%s By = %q, want %q", bead, got, want)
 		}
 	}
 }
@@ -492,7 +620,7 @@ func TestBuildRecentLandingsPutsRunningRowsOnTopUncapped(t *testing.T) {
 		recs = append(recs, omTestRec(fmt.Sprintf("gt-%d", i), "approve", 0.9, "daemon", now.Add(-time.Duration(i+1)*time.Minute)))
 	}
 	live := []dashboard.LandingRow{{At: now.Add(-time.Minute), Bead: "gt-live", Rig: "gastown", Outcome: "running"}}
-	rows := buildRecentLandings(now, recs, nil, nil, live, nil, nil, capRows)
+	rows := buildRecentLandings(now, recs, nil, nil, live, nil, nil, nil, capRows)
 
 	if len(rows) != capRows+1 {
 		t.Fatalf("rows = %d, want %d: the live row is not one of the capped finished rows", len(rows), capRows+1)
@@ -525,7 +653,7 @@ func TestBuildRecentLandingsBoundsTheTableAtTheProductionCap(t *testing.T) {
 	for i := range recentLandingRows + over {
 		recs = append(recs, omTestRec(fmt.Sprintf("gt-%d", i), "approve", 0.9, "daemon", now.Add(-time.Duration(i)*time.Second)))
 	}
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, recentLandingRows)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, nil, recentLandingRows)
 	if len(rows) != recentLandingRows {
 		t.Fatalf("rows = %d, want %d: the table keeps its bound", len(rows), recentLandingRows)
 	}
@@ -660,7 +788,7 @@ func TestBuildRecentLandingsCarriesThePolecatTime(t *testing.T) {
 		}},
 	}
 
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r

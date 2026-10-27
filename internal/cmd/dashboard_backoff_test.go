@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
 )
 
@@ -67,17 +68,59 @@ func TestWithBackoffRowsPutsThemOnTop(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	finished := []dashboard.LandingRow{{At: now, Bead: "gt-done", Outcome: "landed"}}
 
-	if got := withBackoffRows(finished, nil, nil); len(got) != 1 || got[0].Bead != "gt-done" {
+	if got := withBackoffRows(finished, nil, nil, nil); len(got) != 1 || got[0].Bead != "gt-done" {
 		t.Fatalf("rows = %+v; want the finished rows alone with nothing failing", got)
 	}
 
 	backoff := []dashboard.LandingRow{{At: now, Bead: "gt-abc", Rig: "gastown", Outcome: "backoff"}}
-	got := withBackoffRows(finished, backoff, func(rig, bead string) string { return rig + "/" + bead })
+	got := withBackoffRows(finished, backoff, func(rig, bead string) string { return rig + "/" + bead }, nil)
 	if len(got) != 2 || got[0].Bead != "gt-abc" || got[1].Bead != "gt-done" {
 		t.Fatalf("rows = %+v; want the failing landing above the finished one", got)
 	}
 	if got[0].Title != "gastown/gt-abc" {
 		t.Errorf("title %q, want the bead named like the rows below it", got[0].Title)
+	}
+}
+
+// A landing the worker keeps retrying names the polecat or crew member its
+// submitted branch names, like a rejected row: a landing in backoff is one that
+// was submitted and is not clearing, and the bead's current holder is not who
+// submitted it. A bead with no submission record keeps the dash (gt-gclus).
+func TestWithBackoffRowsNamesTheSubmitter(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	backoff := []dashboard.LandingRow{
+		{At: now, Bead: "gt-polecat", Rig: "gastown", Outcome: "backoff"},
+		{At: now, Bead: "gt-crew", Rig: "gastown", Outcome: "backoff"},
+		{At: now, Bead: "gt-quiet", Rig: "gastown", Outcome: "backoff"},
+	}
+	who := landingNameLookup([]land.SubmissionRecord{
+		{Rig: "gastown", Bead: "gt-polecat", Branch: "polecat/agate/gt-polecat+1", SeenAt: now.Add(-time.Hour)},
+		{Rig: "gastown", Bead: "gt-crew", Branch: "crew/heron/gt-crew", SeenAt: now.Add(-time.Hour)},
+	}, nil)
+
+	got := withBackoffRows(nil, backoff, nil, who)
+	for bead, want := range map[string]string{"gt-polecat": "agate", "gt-crew": "heron", "gt-quiet": ""} {
+		found := false
+		for _, r := range got {
+			if r.Bead == bead {
+				found = true
+				if r.Polecat != want {
+					t.Errorf("%s By = %q, want %q", bead, r.Polecat, want)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%s is not a row", bead)
+		}
+	}
+
+	// With no lookup the rows keep the dash, and the join still puts them on
+	// top.
+	for _, r := range withBackoffRows(nil, backoff, nil, nil) {
+		if r.Polecat != "" {
+			t.Errorf("%s By = %q with no lookup, want a dash", r.Bead, r.Polecat)
+		}
 	}
 }
 
