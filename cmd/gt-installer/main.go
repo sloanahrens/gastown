@@ -68,7 +68,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 func runWith(args []string, stdout, stderr io.Writer, env environment) (code int) {
 	// A detached image build's worker is not an install: it names no result
 	// line, takes no exit contract and changes nothing in the town beyond the
-	// build it was started for (gt-tpg0p.12).
+	// build it was started for (gt-tpg0p.12). It is routed on the first argument
+	// alone, before Parse, because it is not one of the installer's arguments
+	// and Parse would refuse it.
 	if len(args) > 0 && args[0] == installer.ImageWorkerFlag {
 		worker := env.imageWorker
 		if worker == nil {

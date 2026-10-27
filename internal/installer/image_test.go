@@ -144,10 +144,10 @@ func TestImageStepBuildsBeforeTheSwap(t *testing.T) {
 	if build.GT != "" || build.Fingerprint != "" {
 		t.Errorf("escalation = %q/%q, want none before the swap", build.GT, build.Fingerprint)
 	}
+	// A run with no town root names no town root and no lock: an empty setting
+	// would overwrite whatever the build inherits.
 	wantEnv := []string{
-		"POLECAT_IMAGE_TOWN_ROOT=",
 		"POLECAT_IMAGE_GT=" + ir.buildOutput(),
-		"POLECAT_IMAGE_LOCK=",
 		imageFailClosedEnv + "=1",
 	}
 	if strings.Join(build.Env, "\n") != strings.Join(wantEnv, "\n") {
@@ -220,7 +220,7 @@ func TestImageStepTailsAtMostFiveLogLines(t *testing.T) {
 
 // A build the step cannot start is a build that did not finish: no plugin on
 // disk, or no build output to name the commit with, both fail the install
-// before the swap and run nothing (cases 36 and 38b).
+// before the swap and run nothing.
 func TestImageStepRefusesWithoutTheProgramOrBuildOutput(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -269,7 +269,7 @@ func TestImageStepRefusesWithoutTheProgramOrBuildOutput(t *testing.T) {
 
 // An alarm that is not a whole number of seconds above zero would leave the
 // build with no bound: the default is used and the value named, and a usable
-// one is used as given (case 46).
+// one is used as given.
 func TestImageStepAlarm(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -307,7 +307,7 @@ func TestImageStepAlarm(t *testing.T) {
 
 // The registry and crane come from the town's settings/config.json daemon.env,
 // and every way that read can fail runs the build local-only with its own
-// reason (cases 54-60). A value the config gives is exported to the build; one
+// reason. A value the config gives is exported to the build; one
 // it leaves out is absent from the environment the build inherits, so an
 // ambient value still answers for it.
 func TestImageStepDaemonEnv(t *testing.T) {
@@ -316,6 +316,7 @@ func TestImageStepDaemonEnv(t *testing.T) {
 		name    string
 		body    string
 		noFile  bool
+		readErr error
 		wantWhy string
 		wantEnv []string
 		notEnv  []string
@@ -329,6 +330,13 @@ func TestImageStepDaemonEnv(t *testing.T) {
 			name:    "a missing config.json",
 			noFile:  true,
 			wantWhy: "TOWN/settings/config.json is missing",
+			notEnv:  []string{"POLECAT_IMAGE_REGISTRY="},
+		},
+		{
+			name:    "a config.json that cannot be read",
+			body:    `{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":"localhost:5001"}}}`,
+			readErr: errors.New("permission denied"),
+			wantWhy: "TOWN/settings/config.json could not be read",
 			notEnv:  []string{"POLECAT_IMAGE_REGISTRY="},
 		},
 		{
@@ -382,6 +390,15 @@ func TestImageStepDaemonEnv(t *testing.T) {
 			town := ir.town(t)
 			if !tc.noFile {
 				ir.config(t, tc.body)
+			}
+			if tc.readErr != nil {
+				cfg := filepath.Join(town, "settings", "config.json")
+				ir.Run.Files.ReadFile = func(path string) ([]byte, error) {
+					if path == cfg {
+						return nil, tc.readErr
+					}
+					return os.ReadFile(path)
+				}
 			}
 			if code := ir.step(t); code != ExitOK {
 				t.Fatalf("ImageStep() = %d, want %d:\n%s", code, ExitOK, ir.output())
@@ -558,22 +575,61 @@ func TestImageAfterSpawnFailureEscalates(t *testing.T) {
 	}
 }
 
-// With no plugin on disk the detached order only says so: --no-image-first
-// never failed an install for the image's sake (case 52).
-func TestImageAfterWithoutTheProgramLeavesTheInstallStanding(t *testing.T) {
+// A detached rebuild its preflight refuses never fails the install, but it does
+// escalate under the build's own fingerprint: nothing else reports a rebuild that
+// never ran, and the image stays stale until someone notices (gt-tpg0p.12).
+func TestImageAfterWithoutAProgramOrBuildOutputEscalates(t *testing.T) {
 	t.Parallel()
-	ir := newImageRun(t)
-	delete(ir.files, ir.program())
-
-	ir.resolved("c1111111")
-	ir.ImageAfter()
-
-	if want := "polecat image: no plugin at '" + ir.program() +
-		"', so the image cannot be built after the swap; the binary was already swapped"; !ir.has(want) {
-		t.Errorf("output lacks %q:\n%s", want, ir.output())
+	cases := []struct {
+		name    string
+		setup   func(*imageRun)
+		wantLog string
+		wantWhy string
+	}{
+		{
+			name: "no plugin",
+			setup: func(ir *imageRun) {
+				delete(ir.files, ir.program())
+			},
+			wantLog: "polecat image: no plugin at '" +
+				filepath.Join("RIG", "plugins", "polecat-image", "bin", "polecat-image") +
+				"', so the image cannot be built after the swap; the binary was already swapped",
+			wantWhy: "no plugin at 'RIG/plugins/polecat-image/bin/polecat-image'",
+		},
+		{
+			name: "no build output",
+			setup: func(ir *imageRun) {
+				ir.addFile(ir.buildOutput(), false)
+			},
+			wantLog: "polecat image: no build output at RIG/gt, so the image was not built",
+			wantWhy: "no build output at RIG/gt",
+		},
 	}
-	if len(ir.builds) != 0 || len(ir.execs) != 0 {
-		t.Errorf("builds = %+v, escalations = %q; want none", ir.builds, ir.execs)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ir := newImageRun(t)
+			tc.setup(ir)
+
+			ir.resolved("c1111111")
+			ir.ImageAfter()
+
+			if want := strings.ReplaceAll(tc.wantLog, "RIG", ir.Paths.RigDir); !ir.has(want) {
+				t.Errorf("output lacks %q:\n%s", want, ir.output())
+			}
+			if len(ir.builds) != 0 {
+				t.Errorf("builds = %+v, want none", ir.builds)
+			}
+			if got := ir.fingerprint(); got != imageBuildFailed {
+				t.Errorf("escalation fingerprint = %q, want %s", got, imageBuildFailed)
+			}
+			if want := strings.ReplaceAll(tc.wantWhy, "RIG", ir.Paths.RigDir); !strings.Contains(strings.Join(ir.escalation(), " "), want) {
+				t.Errorf("escalation does not name the reason %q:\n%q", want, ir.escalation())
+			}
+			if ir.has("RESULT") {
+				t.Errorf("output names a result line: %q", ir.output())
+			}
+		})
 	}
 }
 
@@ -610,6 +666,27 @@ func TestFinalizeRebuildsTheImageAfterTheSwapWhenAsked(t *testing.T) {
 				t.Errorf("output lacks %q:\n%s", want, ir.output())
 			}
 		})
+	}
+}
+
+// A detached rebuild that never runs escalates without changing the install's
+// own result: the binary is already in place, so the run still reports
+// installed, and the escalation is what says the image is stale (gt-tpg0p.12).
+func TestFinalizeStatesInstalledWhenTheRebuildNeverRuns(t *testing.T) {
+	t.Parallel()
+	ir := newImageRun(t)
+	ir.Cfg.ImageFirst = false
+	delete(ir.files, ir.program())
+	ir.resolved("c1111111")
+
+	if code := ir.Finalize(); code != ExitOK {
+		t.Fatalf("Finalize() = %d, want %d:\n%s", code, ExitOK, ir.output())
+	}
+	if want := "install-gt: RESULT installed c2222222 c1111111 -"; !containsLine(ir.lines(), want) {
+		t.Errorf("output lacks %q:\n%s", want, ir.output())
+	}
+	if got := ir.fingerprint(); got != imageBuildFailed {
+		t.Errorf("escalation fingerprint = %q, want %s", got, imageBuildFailed)
 	}
 }
 

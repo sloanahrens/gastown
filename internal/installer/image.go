@@ -85,9 +85,10 @@ type ImageRunner func(ImageBuild) (int, error)
 // carrying another commit (gt-pmxo9, gt-xzo8a). A build that does not finish
 // ends the run failed/build-failed with the old binary still in place.
 //
-// It is the image callback Contract.Swap calls before it takes the install
-// lock: the build holds only the plugin's own lock, so an install queued behind
-// one waits for that lock, not for the whole build (gt-tpg0p.13).
+// The caller runs it before Install, which is the swap (see runWith). The build
+// takes only the plugin's own lock and never the install-wide one, so an install
+// that takes that lock afterwards does not hold it for the length of a build
+// (gt-tpg0p.13).
 func (r *Run) ImageStep() Exit {
 	return r.imageStep(false)
 }
@@ -124,14 +125,14 @@ func (r *Run) imageStep(detached bool) Exit {
 		}
 		r.C.Log("polecat image: no plugin at '" + at + "', so the image cannot be built " +
 			order + " the swap; " + consequence)
-		return r.imageNotBuilt(detached)
+		return r.imageNotBuilt(detached, "no plugin at '"+at+"'")
 	}
 	// Without the build output, the program would read the old commit from the
 	// installed gt and build an image for the binary this install replaces.
 	bin := r.imageBinary()
 	if !r.Files.isExecutable(bin) {
 		r.C.Log("polecat image: no build output at " + bin + ", so the image was not built")
-		return r.imageNotBuilt(detached)
+		return r.imageNotBuilt(detached, "no build output at "+bin)
 	}
 	alarm := r.imageAlarm()
 	logPath := r.imageLog()
@@ -177,14 +178,18 @@ func (r *Run) imageStep(detached bool) Exit {
 	return r.imageFail()
 }
 
-// imageNotBuilt is the answer to a build whose preflight could not pass: the
-// build before the swap fails the install closed, and the detached one says so
-// and leaves the install standing.
-func (r *Run) imageNotBuilt(detached bool) Exit {
-	if detached {
-		return ExitOK
+// imageNotBuilt is the answer to a build whose preflight could not pass (why
+// says which one): the build before the swap fails the install closed, and the
+// detached one leaves the install standing but still escalates under the build's
+// own fingerprint. Nothing else reports a rebuild that never ran, so a silent
+// return would leave a stale image with no notice beyond the log (gt-tpg0p.12).
+func (r *Run) imageNotBuilt(detached bool, why string) Exit {
+	if !detached {
+		return r.imageFail()
 	}
-	return r.imageFail()
+	r.C.Escalate("medium", imageBuildFailed, "the sandbox image rebuild for "+r.C.Expected+
+		" could not be started ("+why+"); stale-image slings are refused until it is rebuilt")
+	return ExitOK
 }
 
 // imageFail is fail_install for the image: the old binary is still in place,
@@ -290,19 +295,22 @@ func (r *Run) imageAlarm() int {
 // imageEnv is what the build is told about this install: the town root it reads
 // its settings from, the build output whose commit it builds, and its own lock
 // (gt-87hlc). The registry and crane are added only when the town's config.json
-// gives them, so a value the config leaves out still comes from the environment
-// the build inherits.
+// gives them, and the town root and lock only when this run has them, so a value
+// this run gives nothing for still comes from the environment the build
+// inherits rather than being blanked.
 func (r *Run) imageEnv(registry, crane, bin string, failClosed bool) []string {
-	env := []string{
+	// The build output names the commit and is always set; every other setting is
+	// left out when this run has none, so it overwrites no inherited value.
+	env := []string{"POLECAT_IMAGE_GT=" + bin}
+	for _, pair := range []string{
 		"POLECAT_IMAGE_TOWN_ROOT=" + r.Paths.TownRoot,
-		"POLECAT_IMAGE_GT=" + bin,
 		"POLECAT_IMAGE_LOCK=" + r.imageLock(),
-	}
-	if registry != "" {
-		env = append(env, "POLECAT_IMAGE_REGISTRY="+registry)
-	}
-	if crane != "" {
-		env = append(env, "POLECAT_IMAGE_CRANE="+crane)
+		"POLECAT_IMAGE_REGISTRY=" + registry,
+		"POLECAT_IMAGE_CRANE=" + crane,
+	} {
+		if _, value, _ := strings.Cut(pair, "="); value != "" {
+			env = append(env, pair)
+		}
 	}
 	if failClosed {
 		env = append(env, imageFailClosedEnv+"=1")
@@ -324,7 +332,7 @@ func (r *Run) imageDaemonEnv(key string) (value, why string) {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", cfg + " is missing"
 		}
-		return "", cfg + " is not readable JSON"
+		return "", cfg + " could not be read"
 	}
 	var doc struct {
 		Daemon json.RawMessage `json:"daemon"`
