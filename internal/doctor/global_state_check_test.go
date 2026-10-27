@@ -12,7 +12,7 @@ func TestHasShellIntegration_DirectMarker(t *testing.T) {
 	rc := filepath.Join(dir, ".zshrc")
 	os.WriteFile(rc, []byte("# --- Gas Town Integration (managed by gt) ---\nsource hook.sh\n# --- End Gas Town ---\n"), 0644)
 
-	if !hasShellIntegration(rc) {
+	if !hasShellIntegration(rc, "") {
 		t.Error("expected integration to be detected with marker in RC file")
 	}
 }
@@ -23,14 +23,14 @@ func TestHasShellIntegration_NoMarker(t *testing.T) {
 	rc := filepath.Join(dir, ".zshrc")
 	os.WriteFile(rc, []byte("# nothing here\n"), 0644)
 
-	if hasShellIntegration(rc) {
+	if hasShellIntegration(rc, "") {
 		t.Error("expected no integration detected")
 	}
 }
 
 func TestHasShellIntegration_MissingFile(t *testing.T) {
 	t.Parallel()
-	if hasShellIntegration("/nonexistent/.zshrc") {
+	if hasShellIntegration("/nonexistent/.zshrc", "") {
 		t.Error("expected false for missing file")
 	}
 }
@@ -46,7 +46,7 @@ func TestHasShellIntegration_MarkerInSourcedFile(t *testing.T) {
 	rc := filepath.Join(dir, ".zshrc")
 	os.WriteFile(rc, []byte("source "+sub+"\n"), 0644)
 
-	if !hasShellIntegration(rc) {
+	if !hasShellIntegration(rc, "") {
 		t.Error("expected integration found via sourced file")
 	}
 }
@@ -64,7 +64,7 @@ func TestHasShellIntegration_HookScriptReferenceInSourcedFile(t *testing.T) {
 	rc := filepath.Join(dir, ".zshrc")
 	os.WriteFile(rc, []byte("source "+profile+"\n"), 0644)
 
-	if !hasShellIntegration(rc) {
+	if !hasShellIntegration(rc, "") {
 		t.Error("expected integration found via shell-hook.sh reference in sourced file")
 	}
 }
@@ -83,7 +83,7 @@ source "$DOTFILES_DIR/zsh/common.zsh"
 `
 	os.WriteFile(rc, []byte(content), 0644)
 
-	if !hasShellIntegration(rc) {
+	if !hasShellIntegration(rc, "") {
 		t.Error("expected integration found after variable expansion")
 	}
 }
@@ -105,7 +105,7 @@ source "$DOTFILES_DIR/zsh/$PROFILE.zsh"
 `
 	os.WriteFile(rc, []byte(content), 0644)
 
-	if !hasShellIntegration(rc) {
+	if !hasShellIntegration(rc, "") {
 		t.Error("expected integration found via glob fallback for unresolved variable")
 	}
 }
@@ -113,12 +113,12 @@ source "$DOTFILES_DIR/zsh/$PROFILE.zsh"
 func TestHasShellIntegration_TildeExpansion(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	home, _ := os.UserHomeDir()
+	// The home dir is the test's own: the marker sits under it, so a "~" that
+	// did not expand to home would not find it.
+	home := t.TempDir()
 
-	// Create a file under the actual home dir with the marker
 	testDir := filepath.Join(home, ".gastown-test-"+filepath.Base(dir))
 	os.MkdirAll(testDir, 0755)
-	defer os.RemoveAll(testDir)
 
 	sub := filepath.Join(testDir, "integration.zsh")
 	os.WriteFile(sub, []byte("# --- Gas Town Integration (managed by gt) ---\n"), 0644)
@@ -126,8 +126,11 @@ func TestHasShellIntegration_TildeExpansion(t *testing.T) {
 	rc := filepath.Join(dir, ".zshrc")
 	os.WriteFile(rc, []byte("source ~/"+filepath.Base(testDir)+"/integration.zsh\n"), 0644)
 
-	if !hasShellIntegration(rc) {
+	if !hasShellIntegration(rc, home) {
 		t.Error("expected integration found via tilde expansion")
+	}
+	if hasShellIntegration(rc, "") {
+		t.Error("found integration with no home to expand ~ to")
 	}
 }
 
@@ -167,7 +170,7 @@ func TestHasShellIntegration_DepthLimit(t *testing.T) {
 	os.WriteFile(rc, []byte("source "+filepath.Join(dir, "level7.zsh")+"\n"), 0644)
 
 	// Depth limit is 5, so level0 at depth 8 should not be reached
-	if hasShellIntegration(rc) {
+	if hasShellIntegration(rc, "") {
 		t.Error("expected depth limit to prevent finding deeply nested marker")
 	}
 
@@ -176,7 +179,7 @@ func TestHasShellIntegration_DepthLimit(t *testing.T) {
 	rc2 := filepath.Join(dir, ".zshrc2")
 	os.WriteFile(rc2, []byte("source "+filepath.Join(dir, "level4.zsh")+"\n"), 0644)
 
-	if !hasShellIntegration(rc2) {
+	if !hasShellIntegration(rc2, "") {
 		t.Error("expected integration found within depth limit")
 	}
 }
@@ -192,7 +195,7 @@ func TestHasShellIntegration_CircularSourcePrevention(t *testing.T) {
 	os.WriteFile(b, []byte("source "+a+"\n"), 0644)
 
 	// Should not infinite loop; should return false
-	if hasShellIntegration(a) {
+	if hasShellIntegration(a, "") {
 		t.Error("expected false for circular source chain without marker")
 	}
 }
@@ -207,7 +210,7 @@ func TestHasShellIntegration_ConditionalOrSource(t *testing.T) {
 	rc := filepath.Join(dir, ".zshrc")
 	os.WriteFile(rc, []byte("[[ ! -f "+sub+" ]] || source "+sub+"\n"), 0644)
 
-	if !hasShellIntegration(rc) {
+	if !hasShellIntegration(rc, "") {
 		t.Error("expected integration found via || source pattern")
 	}
 }

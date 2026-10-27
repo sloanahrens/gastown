@@ -10,6 +10,7 @@ import (
 const (
 	RuleNoSleep        = "no-sleep"
 	RuleNoEnv          = "no-env"
+	RuleNoHostEnv      = "no-host-env"
 	RuleNoChdir        = "no-chdir"
 	RuleNoSkip         = "no-skip"
 	RuleNoSubprocess   = "no-subprocess"
@@ -52,7 +53,7 @@ var bannedTestMethods = map[string]string{
 	"Skip": RuleNoSkip, "Skipf": RuleNoSkip, "SkipNow": RuleNoSkip,
 }
 
-func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool) []Violation {
+func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool, consts map[string]string) []Violation {
 	imp := imports(f)
 	var vs []Violation
 	add := func(n ast.Node, rule, msg string) {
@@ -67,7 +68,7 @@ func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool) []
 		switch n := n.(type) {
 		case *ast.CallExpr:
 			markReadOnlyLits(n, imp, readOnly)
-			checkTestCall(n, imp, add)
+			checkTestCall(n, imp, consts, add)
 		case *ast.CompositeLit:
 			// A net.Dialer or net.ListenConfig is only built to dial or listen,
 			// whether as a literal, a zero-value var, or new(...).
@@ -151,7 +152,7 @@ func markReadOnlyLits(c *ast.CallExpr, imp map[string]string, readOnly map[*ast.
 	}
 }
 
-func checkTestCall(c *ast.CallExpr, imp map[string]string, add func(ast.Node, string, string)) {
+func checkTestCall(c *ast.CallExpr, imp map[string]string, consts map[string]string, add func(ast.Node, string, string)) {
 	if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "new" && id.Obj == nil && len(c.Args) == 1 {
 		if name := netDialerType(c.Args[0], imp); name != "" {
 			add(c, RuleNoNetwork, "builds a net."+name+"; script the connection through a seam")
@@ -206,6 +207,27 @@ func checkTestCall(c *ast.CallExpr, imp map[string]string, add func(ast.Node, st
 		if len(c.Args) == 2 && execMode(c.Args[1]) {
 			add(c, RuleNoExecFiles, "makes a file executable")
 		}
+	case "os.Getenv", "os.LookupEnv":
+		// A unit test's answer must not depend on the shell that ran it. SHELL
+		// and HOME are the developer's own; a test that reads them declares why.
+		if len(c.Args) != 1 {
+			return
+		}
+		name, judged := envName(c.Args[0], consts)
+		if !judged {
+			// A name the scan cannot read is not a name it may pass: the read
+			// is reported as unjudged, for the author to name or declare.
+			add(c, RuleNoHostEnv, full+" reads a variable whose name is not a string constant, so whether it is the developer's is unjudged; name it literally or declare the read")
+			return
+		}
+		if name == "SHELL" || name == "HOME" {
+			add(c, RuleNoHostEnv, "reads "+name+", the developer's environment; inject the value or declare the read")
+		}
+	case "os.UserHomeDir", "os.UserConfigDir", "os.UserCacheDir":
+		// Each resolves a directory under the developer's home, where their own
+		// config and the live town tree (~/gt) live. A test injects the value
+		// or declares the read.
+		add(c, RuleNoHostEnv, full+" resolves the developer's home directory; inject the value or declare the read")
 	}
 }
 
@@ -304,6 +326,44 @@ func callsMethodOn(body *ast.BlockStmt, recv, method string) bool {
 		return true
 	})
 	return found
+}
+
+// envName returns the variable name an environment read asks for, and whether
+// that name could be read at all: a string literal, or a constant whose
+// declaration is one, in this file or the package. A name reached any other
+// way — a variable, a call, a field — is unjudged, and the caller reports it
+// rather than passing it.
+func envName(e ast.Expr, consts map[string]string) (string, bool) {
+	if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+		s, err := strconv.Unquote(lit.Value)
+		return s, err == nil
+	}
+	id, ok := e.(*ast.Ident)
+	if !ok {
+		return "", false
+	}
+	if id.Obj != nil {
+		// The parser resolves the names this file declares, constants and
+		// variables alike; only a constant has a value to read.
+		return constValue(id.Obj.Decl)
+	}
+	name, ok := consts[id.Name]
+	return name, ok
+}
+
+// constValue returns the string a constant declaration gives its name, when it
+// is a single name bound to a single string literal.
+func constValue(decl any) (string, bool) {
+	vs, ok := decl.(*ast.ValueSpec)
+	if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
+		return "", false
+	}
+	lit, ok := vs.Values[0].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	s, err := strconv.Unquote(lit.Value)
+	return s, err == nil
 }
 
 func stringLit(e ast.Expr) string {

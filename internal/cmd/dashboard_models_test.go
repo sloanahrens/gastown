@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/models"
 )
 
 // The strip's seat count is the dispatcher's roster read over the same seat
@@ -380,9 +381,9 @@ func TestModelsReaderMarksDriftFromTheModelTable(t *testing.T) {
 	}
 
 	// The table's "~/" path is the live absolute one: the same backend is not
-	// drift.
-	home, _ := os.UserHomeDir()
-	same := writeOMConfig(t, `{"backend":["`+filepath.Join(home, ".local/bin/claude")+`","-p","--model","sonnet"]}`)
+	// drift. The absolute spelling comes from models.ExpandHome, the expansion
+	// the reader itself compares through.
+	same := writeOMConfig(t, `{"backend":["`+models.ExpandHome("~/.local/bin/claude")+`","-p","--model","sonnet"]}`)
 	if r := panelRole(t, (&modelsReader{townRoot: town, omPath: same}).read().Roles, "om-review"); r.Drift != "" {
 		t.Errorf("a backend equal to the table's, once ~ is expanded, is marked: %+v", r)
 	}

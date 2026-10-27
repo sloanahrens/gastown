@@ -65,31 +65,62 @@ func TestDetectShell(t *testing.T) {
 		})
 	}
 
-	// DetectShell reads $SHELL from the process environment.
-	if got, want := DetectShell(), detectShell(os.Getenv("SHELL")); got != want {
-		t.Errorf("DetectShell() = %q, want %q", got, want)
+	// Whatever the process's SHELL, the shell it names is one of the two.
+	if got := DetectShell(); got != "zsh" && got != "bash" {
+		t.Errorf("DetectShell() = %q, want zsh or bash", got)
+	}
+}
+
+// TestDetectShellFromReadsShell pins the read DetectShell makes: the value must
+// come from SHELL, and nothing else.
+func TestDetectShellFromReadsShell(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct{ shellEnv, want string }{
+		"bash":     {"/bin/bash", "bash"},
+		"zsh":      {"/usr/bin/zsh", "zsh"},
+		"unset":    {"", "zsh"},
+		"unlikely": {"/bin/fish", "zsh"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			getenv := func(k string) string {
+				if k == "SHELL" {
+					return tt.shellEnv
+				}
+				return "/bin/bash"
+			}
+			if got := DetectShellFrom(getenv); got != tt.want {
+				t.Errorf("DetectShellFrom(SHELL=%q) = %q, want %q", tt.shellEnv, got, tt.want)
+			}
+		})
 	}
 }
 
 func TestRCFilePath(t *testing.T) {
 	t.Parallel()
-	home, _ := os.UserHomeDir()
-
 	tests := []struct {
 		shell string
 		want  string
 	}{
-		{"zsh", filepath.Join(home, ".zshrc")},
-		{"bash", filepath.Join(home, ".bashrc")},
+		{"zsh", "/home/tester/.zshrc"},
+		{"bash", "/home/tester/.bashrc"},
+		{"fish", "/home/tester/.zshrc"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.shell, func(t *testing.T) {
-			got := RCFilePath(tt.shell)
+			got := rcFilePath(tt.shell, "/home/tester")
 			if got != tt.want {
-				t.Errorf("RCFilePath(%q) = %q, want %q", tt.shell, got, tt.want)
+				t.Errorf("rcFilePath(%q) = %q, want %q", tt.shell, got, tt.want)
 			}
 		})
+	}
+
+	// The exported wrapper joins under the process's home, so its answer is an
+	// absolute path.
+	if got := RCFilePath("zsh"); !filepath.IsAbs(got) || !strings.HasSuffix(got, ".zshrc") {
+		t.Errorf("RCFilePath(zsh) = %q, want an absolute .zshrc path", got)
 	}
 }
 
