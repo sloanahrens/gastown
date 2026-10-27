@@ -608,13 +608,13 @@ func TestRejectionForAttemptPrefersTheReviewBlock(t *testing.T) {
 	}) + "\n" + land.FormatRejectionNote(land.RejectionNote{
 		Attempt: 1, Kind: string(land.RejectGate), Reason: "two", Branch: "b", Target: "main", MR: "m", Head: "gate-head",
 	})
-	if rej, ok := rejectionForAttempt(notes, 1); !ok || rej.Head != "review-head" {
+	if rej, ok := land.RejectionForAttempt(notes, 1); !ok || rej.Head != "review-head" {
 		t.Errorf("attempt 1 = %+v, %v; want the review block that opened it", rej, ok)
 	}
 	only := land.FormatRejectionNote(land.RejectionNote{
 		Attempt: 1, Kind: string(land.RejectGate), Reason: "two", Branch: "b", Target: "main", MR: "m", Head: "gate-head",
 	})
-	if rej, ok := rejectionForAttempt(only, 1); !ok || rej.Head != "gate-head" {
+	if rej, ok := land.RejectionForAttempt(only, 1); !ok || rej.Head != "gate-head" {
 		t.Errorf("attempt 1 = %+v, %v; want the gate block where no review block carries it", rej, ok)
 	}
 }

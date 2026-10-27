@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -234,7 +233,7 @@ func (p *Pass) ask(ctx context.Context, rec land.ReviewRecord) (Line, error) {
 	if err != nil {
 		return Line{}, errUnreadable
 	}
-	rej, ok := rejectionForAttempt(notes, rec.Attempt)
+	rej, ok := land.RejectionForAttempt(notes, rec.Attempt)
 	if !ok {
 		return Line{}, errUnreadable
 	}
@@ -292,42 +291,6 @@ func (p *Pass) warnf(format string, args ...any) {
 	if p.Warnf != nil {
 		p.Warnf(format, args...)
 	}
-}
-
-// rejectionHeaderRE finds the header line of each MERGE REJECTION block, so the
-// notes can be cut into one block per attempt.
-var rejectionHeaderRE = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(land.MergeRejectionNoteMarker) + ` \(attempt [0-9]+\): `)
-
-// rejectionForAttempt returns the MERGE REJECTION block that opened attempt in
-// notes. land's parser reads the last block of the text it is given, so each
-// block is cut out up to the next header before it is parsed.
-//
-// A review block opened the round an attempt names. A gate or policy block
-// numbers itself among its own kind, so its count can equal an attempt number
-// and it is read only where no review block carries that attempt (gt-l3zak).
-func rejectionForAttempt(notes string, attempt int) (land.RejectionNote, bool) {
-	starts := rejectionHeaderRE.FindAllStringIndex(notes, -1)
-	var review, other land.RejectionNote
-	haveReview, haveOther := false, false
-	for i, s := range starts {
-		end := len(notes)
-		if i+1 < len(starts) {
-			end = starts[i+1][0]
-		}
-		rej, parsed := land.ParseRejectionNote(notes[s[0]:end])
-		if !parsed || rej.Attempt != attempt {
-			continue
-		}
-		if rej.Kind == "" || rej.Kind == string(land.RejectReview) {
-			review, haveReview = rej, true
-		} else {
-			other, haveOther = rej, true
-		}
-	}
-	if haveReview {
-		return review, true
-	}
-	return other, haveOther
 }
 
 // fileChange is one changed file and its line counts. A binary file counts 0.
