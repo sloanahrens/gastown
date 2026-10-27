@@ -192,6 +192,25 @@ func TestParseRepoAllowlist(t *testing.T) {
 	}
 }
 
+// failReader fails every Read, standing in for an allowlist that errors part
+// way through: the parser returns the error rather than the entries so far.
+type failReader struct{}
+
+func (failReader) Read([]byte) (int, error) { return 0, errors.New("cannot read") }
+
+// TestParseRepoAllowlistReadError: a document that errors mid-read is an error,
+// never an allowlist with the lines read before it.
+func TestParseRepoAllowlistReadError(t *testing.T) {
+	t.Parallel()
+	entries, err := ParseRepoAllowlist(failReader{})
+	if err == nil {
+		t.Fatal("ParseRepoAllowlist on a failing reader = nil error, want the read error")
+	}
+	if entries != nil {
+		t.Errorf("entries = %v with a read error, want nil", entries)
+	}
+}
+
 func fixedReader(entries []Entry) Reader {
 	return func() ([]Entry, error) { return entries, nil }
 }

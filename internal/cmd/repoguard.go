@@ -61,8 +61,8 @@ Exit codes:
 	return cmd
 }
 
-// runRepoGuardCommand wires the real seams: git for the tree and the base
-// revision, the working tree for the allowlist.
+// runRepoGuardCommand reads the flags and hands the run to the git the
+// command really uses.
 func runRepoGuardCommand(cmd *cobra.Command, _ []string) error {
 	base, err := cmd.Flags().GetString("base")
 	if err != nil {
@@ -72,16 +72,22 @@ func runRepoGuardCommand(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	root, err := repoGuardRoot()
+	return repoGuardRun(cmd.OutOrStdout(), cmd.ErrOrStderr(), base, initFlag, repoGuardGit)
+}
+
+// repoGuardRun wires the inputs around run: git for the tree and the base
+// revision, the working tree for the allowlist.
+func repoGuardRun(out, warn io.Writer, base string, initFlag bool, run gitRunner) error {
+	root, err := repoGuardRoot(run)
 	if err != nil {
 		return err
 	}
-	readBase, notice, err := repoGuardBaseReader(root, base, initFlag)
+	readBase, notice, err := repoGuardBaseReader(run, root, base, initFlag)
 	if err != nil {
 		return err
 	}
-	return runRepoGuard(cmd.OutOrStdout(), cmd.ErrOrStderr(), repoGuardInputs{
-		listFiles:         repoGuardListFiles(root),
+	return runRepoGuard(out, warn, repoGuardInputs{
+		listFiles:         repoGuardListFiles(run, root),
 		readAllowlist:     repoGuardReadAllowlist(filepath.Join(root, repoguardAllowlist)),
 		readBaseAllowlist: readBase,
 		notice:            notice,
@@ -122,17 +128,21 @@ func runRepoGuard(out, warn io.Writer, in repoGuardInputs) error {
 	}
 }
 
+// gitRunner runs one git command in root and returns its stdout. A test
+// injects a fake, so a git refusal is judged without a process.
+type gitRunner func(root string, args ...string) ([]byte, error)
+
 // repoGuardRoot is the repository the current directory belongs to.
-func repoGuardRoot() (string, error) {
-	out, err := repoGuardGit("", "rev-parse", "--show-toplevel")
+func repoGuardRoot(run gitRunner) (string, error) {
+	out, err := run("", "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", fmt.Errorf("repoguard: not inside a git repository: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
-// repoGuardGit runs git and returns stdout with stderr in the error, since
-// git explains a refusal on stderr and a bare exit status would hide why.
+// repoGuardGit runs git and returns stdout, with git's stderr folded into the
+// error.
 func repoGuardGit(root string, args ...string) ([]byte, error) {
 	argv := args
 	if root != "" {
@@ -143,20 +153,25 @@ func repoGuardGit(root string, args ...string) ([]byte, error) {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, msg)
-		}
-		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		return nil, repoGuardGitError(args, stderr.String(), err)
 	}
 	return out, nil
 }
 
+// repoGuardGitError names a failed git call and quotes what git said, since a
+// bare exit status would hide why it refused.
+func repoGuardGitError(args []string, stderr string, err error) error {
+	if msg := strings.TrimSpace(stderr); msg != "" {
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, msg)
+	}
+	return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+}
+
 // repoGuardListFiles lists every path git tracks, split on NUL so a path with
 // a newline cannot become two paths.
-func repoGuardListFiles(root string) func() ([]string, error) {
+func repoGuardListFiles(run gitRunner, root string) func() ([]string, error) {
 	return func() ([]string, error) {
-		out, err := repoGuardGit(root, "ls-files", "-z")
+		out, err := run(root, "ls-files", "-z")
 		if err != nil {
 			return nil, err
 		}
@@ -190,14 +205,14 @@ func repoGuardReadAllowlist(path string) repoguard.Reader {
 // repoGuardBaseReader resolves base now and returns a reader of its allowlist,
 // nil when the base holds none. The notice says so, since a run that skips the
 // growth check must not look like one that passed it.
-func repoGuardBaseReader(root, base string, init bool) (repoguard.Reader, string, error) {
+func repoGuardBaseReader(run gitRunner, root, base string, init bool) (repoguard.Reader, string, error) {
 	if err := repoGuardCheckBase(base); err != nil {
 		return nil, "", err
 	}
-	if _, err := repoGuardGit(root, "rev-parse", "--verify", "--quiet", "--end-of-options", base+"^{commit}"); err != nil {
+	if _, err := run(root, "rev-parse", "--verify", "--quiet", "--end-of-options", base+"^{commit}"); err != nil {
 		return nil, "", fmt.Errorf("repoguard: base revision %s does not resolve: %w", base, err)
 	}
-	tree, err := repoGuardGit(root, "ls-tree", "-z", "--name-only", base, "--", repoguardAllowlist)
+	tree, err := run(root, "ls-tree", "-z", "--name-only", base, "--", repoguardAllowlist)
 	if err != nil {
 		return nil, "", err
 	}
@@ -206,7 +221,7 @@ func repoGuardBaseReader(root, base string, init bool) (repoguard.Reader, string
 		return nil, notice, err
 	}
 	return func() ([]repoguard.Entry, error) {
-		out, err := repoGuardGit(root, "show", base+":"+repoguardAllowlist)
+		out, err := run(root, "show", base+":"+repoguardAllowlist)
 		if err != nil {
 			return nil, err
 		}

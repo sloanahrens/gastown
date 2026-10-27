@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -205,6 +207,232 @@ func TestRepoGuardBasePlan(t *testing.T) {
 				t.Errorf("notice = %q, want it to name --init and %s", notice, repoguardAllowlist)
 			}
 		})
+	}
+}
+
+// fakeGit is a gitRunner over a handler, recording each command it answered so
+// a wiring test can assert the guard asked for what it needed.
+func fakeGit(calls *[]string, handle func(args []string) ([]byte, error)) gitRunner {
+	return func(_ string, args ...string) ([]byte, error) {
+		*calls = append(*calls, strings.Join(args, " "))
+		return handle(args)
+	}
+}
+
+// cleanGit answers the five calls a clean run makes, with the base allowlist
+// holding scripts/a.sh.
+func cleanGit(root string) func(args []string) ([]byte, error) {
+	return func(args []string) ([]byte, error) {
+		switch strings.Join(args, " ") {
+		case "rev-parse --show-toplevel":
+			return []byte(root + "\n"), nil
+		case "rev-parse --verify --quiet --end-of-options origin/main^{commit}":
+			return nil, nil
+		case "ls-tree -z --name-only origin/main -- .repoguard-allowlist":
+			return []byte(".repoguard-allowlist\x00"), nil
+		case "show origin/main:.repoguard-allowlist":
+			return []byte(repoAllowlistBody), nil
+		case "ls-files -z":
+			return []byte("scripts/a.sh\x00"), nil
+		}
+		return nil, fmt.Errorf("unexpected git call %q", args)
+	}
+}
+
+// repoAllowlistBody lists the one script the fixtures track.
+const repoAllowlistBody = "scripts/a.sh\tneeds the real shell\n"
+
+// TestRepoGuardRunClean: the real wiring, over a fake git and a temp tree,
+// exits 0 and asks git for exactly the tree, the base and the tracked files.
+func TestRepoGuardRunClean(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, repoguardAllowlist), []byte(repoAllowlistBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	var out, warn bytes.Buffer
+	err := repoGuardRun(&out, &warn, "origin/main", false, fakeGit(&calls, cleanGit(root)))
+	if err != nil {
+		t.Fatalf("repoGuardRun on a clean tree = %v, want nil", err)
+	}
+	if out.String() != "" || warn.String() != "" {
+		t.Errorf("out = %q, warn = %q, want both empty", out.String(), warn.String())
+	}
+	if len(calls) != 5 {
+		t.Errorf("git calls = %q, want the five a clean run makes", calls)
+	}
+}
+
+// TestRepoGuardRunGitRefusals drives every git failure the wiring reports: a
+// directory outside a repository, a base that does not resolve, a base the
+// tree or the allowlist read fails on, a missing base allowlist, and a file
+// list that cannot be read.
+func TestRepoGuardRunGitRefusals(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, repoguardAllowlist), []byte(repoAllowlistBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused := errors.New("git refused")
+	tests := []struct {
+		name     string
+		failCall string
+		noBase   bool // the base revision holds no allowlist
+		wantErr  string
+	}{
+		{name: "outside a repository", failCall: "rev-parse --show-toplevel", wantErr: "not inside a git repository"},
+		{name: "base does not resolve", failCall: "rev-parse --verify --quiet --end-of-options origin/main^{commit}", wantErr: "does not resolve"},
+		{name: "base tree unreadable", failCall: "ls-tree -z --name-only origin/main -- .repoguard-allowlist"},
+		{name: "base allowlist unreadable", failCall: "show origin/main:.repoguard-allowlist"},
+		{name: "tracked files unreadable", failCall: "ls-files -z"},
+		{name: "base has no allowlist", noBase: true, wantErr: "pass --init"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []string
+			handle := cleanGit(root)
+			run := fakeGit(&calls, func(args []string) ([]byte, error) {
+				call := strings.Join(args, " ")
+				if call == tc.failCall {
+					return nil, refused
+				}
+				if tc.noBase && call == "ls-tree -z --name-only origin/main -- .repoguard-allowlist" {
+					return nil, nil
+				}
+				return handle(args)
+			})
+			var out, warn bytes.Buffer
+			err := repoGuardRun(&out, &warn, "origin/main", false, run)
+			if err == nil {
+				t.Fatal("repoGuardRun = nil, want the git refusal")
+			}
+			if !tc.noBase && !errors.Is(err, refused) {
+				t.Errorf("error = %v, want it to carry the git failure", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestRepoGuardRunRefusesDashBase: a --base git would read as an option is
+// refused before any command carrying it runs.
+func TestRepoGuardRunRefusesDashBase(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	var calls []string
+	run := fakeGit(&calls, func(args []string) ([]byte, error) {
+		if strings.Join(args, " ") != "rev-parse --show-toplevel" {
+			t.Errorf("git %q ran for a dash base", args)
+		}
+		return []byte(root + "\n"), nil
+	})
+	var out, warn bytes.Buffer
+	err := repoGuardRun(&out, &warn, "-n", false, run)
+	if err == nil || !strings.Contains(err.Error(), "starts with '-'") {
+		t.Fatalf("repoGuardRun with --base -n = %v, want a refusal", err)
+	}
+	if len(calls) != 1 {
+		t.Errorf("git calls = %q, want only the repository lookup", calls)
+	}
+}
+
+// TestRepoGuardReadAllowlist: a missing allowlist is no entries, so the
+// scripts it would hold fail as unlisted, while a path that cannot be read is
+// an error rather than a clean tree.
+func TestRepoGuardReadAllowlist(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("missing file", func(t *testing.T) {
+		t.Parallel()
+		entries, err := repoGuardReadAllowlist(filepath.Join(dir, "absent"))()
+		if err != nil || entries != nil {
+			t.Fatalf("entries = %v, err = %v; want no entries and no error", entries, err)
+		}
+	})
+	t.Run("unreadable path", func(t *testing.T) {
+		t.Parallel()
+		if _, err := repoGuardReadAllowlist(filepath.Join(file, "under-a-file"))(); err == nil {
+			t.Fatal("repoGuardReadAllowlist on a path under a file = nil, want an error")
+		}
+	})
+}
+
+// TestRepoGuardGitError pins what a failed git call reports: the command, and
+// git's own words when it wrote any.
+func TestRepoGuardGitError(t *testing.T) {
+	t.Parallel()
+	args := []string{"rev-parse", "--verify", "origin/main"}
+	cause := errors.New("exit status 128")
+	withStderr := repoGuardGitError(args, " fatal: not a git repository \n", cause)
+	if !errors.Is(withStderr, cause) {
+		t.Errorf("error = %v, want it to wrap git's failure", withStderr)
+	}
+	if want := "git rev-parse --verify origin/main: exit status 128: fatal: not a git repository"; withStderr.Error() != want {
+		t.Errorf("error = %q, want %q", withStderr, want)
+	}
+	silent := repoGuardGitError(args, "", cause)
+	if want := "git rev-parse --verify origin/main: exit status 128"; silent.Error() != want {
+		t.Errorf("error = %q, want %q", silent, want)
+	}
+}
+
+// TestRunRepoGuardReaderError: an unread allowlist is returned, never read as
+// a clean tree.
+func TestRunRepoGuardReaderError(t *testing.T) {
+	t.Parallel()
+	wantErr := errors.New("allowlist is unreadable")
+	var out bytes.Buffer
+	err := runRepoGuard(&out, io.Discard, repoGuardInputs{
+		listFiles:     func() ([]string, error) { return []string{"scripts/a.sh"}, nil },
+		readAllowlist: func() ([]repoguard.Entry, error) { return nil, wantErr },
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("runRepoGuard = %v, want the reader's %v", err, wantErr)
+	}
+	if out.String() != "" {
+		t.Errorf("out = %q, want nothing printed for an unread tree", out.String())
+	}
+}
+
+// TestRunRepoGuardCountedFindings: more than one violation is counted in the
+// error a gate reads.
+func TestRunRepoGuardCountedFindings(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	err := runRepoGuard(&out, io.Discard, repoGuardInputs{
+		listFiles:     func() ([]string, error) { return []string{"scripts/a.sh", "scripts/b.sh"}, nil },
+		readAllowlist: entriesReader(nil),
+	})
+	if err == nil || !strings.Contains(err.Error(), "2 violations") {
+		t.Fatalf("runRepoGuard = %v, want it to report 2 violations", err)
+	}
+	for _, want := range []string{"scripts/a.sh", "scripts/b.sh"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("out = %q, want %s named", out.String(), want)
+		}
+	}
+}
+
+// TestRepoGuardCommandFlagErrors: a command without the flags reports the
+// lookup failure instead of running the guard.
+func TestRepoGuardCommandFlagErrors(t *testing.T) {
+	t.Parallel()
+	bare := &cobra.Command{}
+	if err := runRepoGuardCommand(bare, nil); err == nil {
+		t.Fatal("runRepoGuardCommand on a command with no --base = nil, want an error")
+	}
+	onlyBase := &cobra.Command{}
+	onlyBase.Flags().String("base", "origin/main", "")
+	if err := runRepoGuardCommand(onlyBase, nil); err == nil {
+		t.Fatal("runRepoGuardCommand on a command with no --init = nil, want an error")
 	}
 }
 
