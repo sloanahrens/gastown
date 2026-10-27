@@ -1,81 +1,89 @@
 # Every .sh file git tracked on 2026-10-26, when the tree stopped adding
-# scripts. The list only shrinks: deleting a script deletes its line here in
-# the same change.
-# TestIntegrationNoNewShellScripts fails on any tracked .sh file not listed
-# and on any listed file that is gone (gt-lpm8b, gt-tpg0p).
-.githooks/pre-push_test.sh
-.runtime/setup-hooks/01-git-config.sh
-deploy/gke-probe/probe.sh
-deploy/gke-probe/probe_test.sh
-deploy/k8s/kind/common.sh
-deploy/k8s/kind/down.sh
-deploy/k8s/kind/kind_test.sh
-deploy/k8s/kind/up.sh
-deploy/k8s/render-policy.sh
-deploy/k8s/render-policy_test.sh
-deploy/polecat/go-floor.sh
-deploy/polecat/probe-bootstrap.sh
-docker-entrypoint.sh
-gt-model-eval/scripts/results-to-discussion.sh
-plugins/app-promote/run.sh
-plugins/polecat-image/run.sh
-plugins/polecat-image/run_test.sh
-plugins/tool-updater/run.sh
-plugins/town-metrics/run.sh
-scripts/bootstrap-local-rig.sh
-scripts/bump-version.sh
-scripts/check-deploy-source.sh
-scripts/check-deploy-source_test.sh
-scripts/check-install-path_test.sh
-scripts/deep-review.sh
-scripts/deep-review_test.sh
-scripts/docs-lint.sh
-scripts/docs-lint_test.sh
-scripts/flake-sweep.sh
-scripts/flake-sweep_test.sh
-scripts/forgejo-cutover.sh
-scripts/forgejo-cutover_test.sh
-scripts/forgejo-probe.sh
-scripts/forgejo-probe_test.sh
-scripts/forgejo-provision.sh
-scripts/forgejo-provision_test.sh
-scripts/forgejo-resync.sh
-scripts/forgejo-resync_test.sh
-scripts/gate-vs-load_test.sh
-scripts/guards/context-budget-guard.sh
-scripts/guards/context-budget-guard_test.sh
-scripts/install-binary.sh
-scripts/install-binary_test.sh
-scripts/install-gt.sh
-scripts/install-gt_test.sh
-scripts/install-local_test.sh
-scripts/install-om.sh
-scripts/install-om_test.sh
-scripts/lib/common.sh
-scripts/lib/install-gt-lib.sh
-scripts/lint-lock-wait.sh
-scripts/makefile-gate_test.sh
-scripts/openshell-providers.sh
-scripts/openshell-providers_test.sh
-scripts/polecat-caches.sh
-scripts/polecat-go-floor_test.sh
-scripts/post-land-shell.sh
-scripts/post-land-shell_test.sh
-scripts/refresh-bd-command-tree.sh
-scripts/repo-guards.sh
-scripts/repo-guards_test.sh
-scripts/resource-sampler_test.sh
-scripts/run-boot-scraper-vm.sh
-scripts/run-hardener.sh
-scripts/test-capacity/dolt-gate-metrics.sh
-scripts/test-capacity/paired-run.sh
-scripts/test-capacity/run-gate.sh
-scripts/test-capacity/sample-capacity.sh
-scripts/test-gce-install.sh
-scripts/test-makefile.sh
-scripts/tier-sweep.sh
-scripts/tier-sweep_test.sh
-scripts/town_metrics_test.sh
-scripts/uninstall-gt.sh
-scripts/uninstall-gt_test.sh
-scripts/update-nix-flake.sh
+# scripts. One line per file: the path, a tab, and the reason the file is
+# still here. The reasons are closed:
+#   port: <bead id>                  the bead that deletes this line
+#   platform: container entrypoint   docker-entrypoint.sh, named by the runtime
+#   platform: git hook               an extensionless file in .githooks/
+# The guard binds each platform reason to the path it may exempt, so a file
+# that stays without a port needs a change in shellscripts.go, not a line here.
+#
+# The list only shrinks: deleting a script deletes its line here in the same
+# change. TestIntegrationNoNewShellScripts fails on any tracked .sh file not
+# listed, on any listed file that is gone (gt-lpm8b, gt-tpg0p), and on any
+# line whose reason is missing or does not fit (gt-tpg0p.15).
+.githooks/pre-push_test.sh	port: gt-tpg0p
+.runtime/setup-hooks/01-git-config.sh	port: gt-tpg0p
+deploy/gke-probe/probe.sh	port: gt-tpg0p
+deploy/gke-probe/probe_test.sh	port: gt-tpg0p
+deploy/k8s/kind/common.sh	port: gt-tpg0p
+deploy/k8s/kind/down.sh	port: gt-tpg0p
+deploy/k8s/kind/kind_test.sh	port: gt-tpg0p
+deploy/k8s/kind/up.sh	port: gt-tpg0p
+deploy/k8s/render-policy.sh	port: gt-tpg0p
+deploy/k8s/render-policy_test.sh	port: gt-tpg0p
+deploy/polecat/go-floor.sh	port: gt-tpg0p
+deploy/polecat/probe-bootstrap.sh	port: gt-tpg0p
+docker-entrypoint.sh	platform: container entrypoint
+gt-model-eval/scripts/results-to-discussion.sh	port: gt-tpg0p
+plugins/app-promote/run.sh	port: gt-tpg0p
+plugins/polecat-image/run.sh	port: gt-tpg0p.7
+plugins/polecat-image/run_test.sh	port: gt-tpg0p.7
+plugins/tool-updater/run.sh	port: gt-tpg0p
+plugins/town-metrics/run.sh	port: gt-tpg0p
+scripts/bootstrap-local-rig.sh	port: gt-tpg0p
+scripts/bump-version.sh	port: gt-tpg0p
+scripts/check-deploy-source.sh	port: gt-tpg0p
+scripts/check-deploy-source_test.sh	port: gt-tpg0p
+scripts/check-install-path_test.sh	port: gt-tpg0p
+scripts/deep-review.sh	port: gt-tpg0p
+scripts/deep-review_test.sh	port: gt-tpg0p
+scripts/docs-lint.sh	port: gt-tpg0p
+scripts/docs-lint_test.sh	port: gt-tpg0p
+scripts/flake-sweep.sh	port: gt-tpg0p
+scripts/flake-sweep_test.sh	port: gt-tpg0p
+scripts/forgejo-cutover.sh	port: gt-tpg0p
+scripts/forgejo-cutover_test.sh	port: gt-tpg0p
+scripts/forgejo-probe.sh	port: gt-tpg0p
+scripts/forgejo-probe_test.sh	port: gt-tpg0p
+scripts/forgejo-provision.sh	port: gt-tpg0p
+scripts/forgejo-provision_test.sh	port: gt-tpg0p
+scripts/forgejo-resync.sh	port: gt-tpg0p
+scripts/forgejo-resync_test.sh	port: gt-tpg0p
+scripts/gate-vs-load_test.sh	port: gt-tpg0p
+scripts/guards/context-budget-guard.sh	port: gt-tpg0p
+scripts/guards/context-budget-guard_test.sh	port: gt-tpg0p
+scripts/install-binary.sh	port: gt-tpg0p
+scripts/install-binary_test.sh	port: gt-tpg0p
+scripts/install-gt.sh	port: gt-tpg0p.14
+scripts/install-gt_test.sh	port: gt-tpg0p.14
+scripts/install-local_test.sh	port: gt-tpg0p
+scripts/install-om.sh	port: gt-tpg0p.16
+scripts/install-om_test.sh	port: gt-tpg0p.16
+scripts/lib/common.sh	port: gt-tpg0p
+scripts/lib/install-gt-lib.sh	port: gt-tpg0p.14
+scripts/lint-lock-wait.sh	port: gt-tpg0p
+scripts/makefile-gate_test.sh	port: gt-tpg0p
+scripts/openshell-providers.sh	port: gt-tpg0p
+scripts/openshell-providers_test.sh	port: gt-tpg0p
+scripts/polecat-caches.sh	port: gt-tpg0p
+scripts/polecat-go-floor_test.sh	port: gt-tpg0p
+scripts/post-land-shell.sh	port: gt-tpg0p
+scripts/post-land-shell_test.sh	port: gt-tpg0p
+scripts/refresh-bd-command-tree.sh	port: gt-tpg0p
+scripts/repo-guards.sh	port: gt-tpg0p
+scripts/repo-guards_test.sh	port: gt-tpg0p
+scripts/resource-sampler_test.sh	port: gt-tpg0p
+scripts/run-boot-scraper-vm.sh	port: gt-tpg0p
+scripts/run-hardener.sh	port: gt-tpg0p
+scripts/test-capacity/dolt-gate-metrics.sh	port: gt-tpg0p
+scripts/test-capacity/paired-run.sh	port: gt-tpg0p
+scripts/test-capacity/run-gate.sh	port: gt-tpg0p
+scripts/test-capacity/sample-capacity.sh	port: gt-tpg0p
+scripts/test-gce-install.sh	port: gt-tpg0p
+scripts/test-makefile.sh	port: gt-tpg0p
+scripts/tier-sweep.sh	port: gt-tpg0p
+scripts/tier-sweep_test.sh	port: gt-tpg0p
+scripts/town_metrics_test.sh	port: gt-tpg0p
+scripts/uninstall-gt.sh	port: gt-tpg0p
+scripts/uninstall-gt_test.sh	port: gt-tpg0p
+scripts/update-nix-flake.sh	port: gt-tpg0p
