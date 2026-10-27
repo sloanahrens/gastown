@@ -412,6 +412,21 @@ func TestReportRejectionsQueryKeepsTheSameFilters(t *testing.T) {
 	}
 }
 
+// TestReportRejectionsQueryFailsWhenTheListFails: a store that cannot list
+// makes the rejection window an error, not an empty list, so the section
+// reads as unavailable rather than as a quiet hour.
+func TestReportRejectionsQueryFailsWhenTheListFails(t *testing.T) {
+	t.Parallel()
+	store := WrapStore(beads.New(t.TempDir(), beads.WithRunner(
+		func(_ context.Context, args []string) ([]byte, []byte, error) {
+			return nil, []byte("bd: database is down"), errors.New("exit status 1")
+		})))
+	_, err := store.RejectedSince(reportWindowEnd)
+	if err == nil || !strings.Contains(err.Error(), "listing the beads a rejection touched") {
+		t.Fatalf("RejectedSince = %v, want the list failure named", err)
+	}
+}
+
 // TestReportHourWindowIsTimezoneAware pins the window's two ends in both
 // zones the sources use: daemon.log and the landings file are local time, bd
 // JSON is UTC. Each source contributes a line just inside and just outside
