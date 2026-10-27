@@ -139,6 +139,10 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 		return int(code)
 	}
 	r.Syncs()
-	r.GatewayStep(installer.GatewayInstall)
+	// A gateway that fails is a failed install: the binary stays in force, but
+	// the result says the gateway step did not complete.
+	if !r.GatewayStep(installer.GatewayInstall) {
+		return int(c.Finish(installer.Result{Event: "failed", Commit: cfg.SHA, Reason: "gateway"}, installer.ExitFailed))
+	}
 	return int(r.Finalize())
 }
