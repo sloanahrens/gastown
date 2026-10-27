@@ -34,18 +34,22 @@ func TestPlanSeedsTheBuildRigAtTheBuildCommit(t *testing.T) {
 	}
 }
 
-func TestPlanRefusesAPinForTheBuildRig(t *testing.T) {
+// A pinned build rig is seeded at its pin, not at the build commit, so the seed
+// is the same for every commit that the pin covers. The build commit is still
+// what the image compiles.
+func TestPlanSeedsTheBuildRigAtTheCommitItIsGiven(t *testing.T) {
 	t.Parallel()
 	pins := []Source{
 		{Rig: "devops", Commit: "92b9e510"},
 		{Rig: "gastown", Commit: "914de8c6"},
 	}
-	_, err := Plan(pins, "gastown", "f05e821c")
-	if err == nil {
-		t.Fatal("Plan accepted a pin for the build rig; the pin would read as gastown's source while the build commit is used")
+	plan, err := Plan(pins, "gastown", "914de8c6")
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
 	}
-	if !strings.Contains(err.Error(), "gastown, but that rig is seeded from the build commit") {
-		t.Errorf("Plan: error does not name the build rig: %v", err)
+	want := []Source{{Rig: "gastown", Commit: "914de8c6"}, {Rig: "devops", Commit: "92b9e510"}}
+	if len(plan) != len(want) || plan[0] != want[0] || plan[1] != want[1] {
+		t.Errorf("Plan = %v, want %v", plan, want)
 	}
 }
 

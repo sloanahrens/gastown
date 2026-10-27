@@ -62,24 +62,23 @@ func Pins(data []byte) ([]Source, error) {
 	return out, nil
 }
 
-// Plan returns the rigs a stage writes, buildRig first: buildRig at
-// buildCommit, then each pinned rig at its pin. A pin for buildRig is an error:
-// that rig's seed is the build commit, and a pin for it would be a line that
-// reads as the source while nothing reads it (gt-1rz2r).
-func Plan(pins []Source, buildRig, buildCommit string) ([]Source, error) {
+// Plan returns the rigs a stage writes, buildRig first at seedAt (the commit
+// BuildRigSeed chose: its pin, or the build commit), then each other pinned rig
+// at its pin. The build rig is never seeded from a pin line here: that choice
+// belongs to BuildRigSeed, which checks the pin before using it.
+func Plan(pins []Source, buildRig, seedAt string) ([]Source, error) {
 	if buildRig == "" {
 		return nil, errors.New("no build rig named")
 	}
-	if !isCommit(buildCommit) {
-		return nil, fmt.Errorf("cannot read the build commit: %q is not a 7+ character hex commit, so build from a git checkout", buildCommit)
+	if !isCommit(seedAt) {
+		return nil, fmt.Errorf("cannot read the build commit: %q is not a 7+ character hex commit", seedAt)
 	}
 	out := make([]Source, 0, len(pins)+1)
-	out = append(out, Source{Rig: buildRig, Commit: buildCommit})
+	out = append(out, Source{Rig: buildRig, Commit: seedAt})
 	for _, p := range pins {
-		if p.Rig == buildRig {
-			return nil, fmt.Errorf("seed-pins pins %s, but that rig is seeded from the build commit: drop the line (make polecat-seed-pins)", p.Rig)
+		if p.Rig != buildRig {
+			out = append(out, p)
 		}
-		out = append(out, p)
 	}
 	return out, nil
 }

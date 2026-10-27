@@ -43,7 +43,12 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "polecat-seed: %s: %v\n", *pins, err)
 		return 1
 	}
-	sources, err := seed.Plan(pinned, *buildRig, *buildCommit)
+	seedAt, buildNotes, err := seed.BuildRigSeed(pinned, *buildRig, *buildCommit, *town, seed.ExecGit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "polecat-seed: %v\n", err)
+		return 1
+	}
+	sources, err := seed.Plan(pinned, *buildRig, seedAt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "polecat-seed: %v\n", err)
 		return 1
@@ -53,11 +58,14 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "polecat-seed: %v\n", err)
 		return 1
 	}
-	printNotes(os.Stdout, notes)
+	printNotes(os.Stdout, append(buildNotes, notes...))
 	for _, s := range sources {
 		how := "pinned"
 		if s.Rig == *buildRig {
 			how = "the build commit"
+			if s.Commit != *buildCommit {
+				how = "its pin"
+			}
 		}
 		fmt.Printf("polecat-seed: %s at %.12s (%s)\n", s.Rig, s.Commit, how)
 	}
