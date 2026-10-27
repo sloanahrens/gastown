@@ -149,7 +149,7 @@ func (p *Postgres) Blocked(ctx context.Context, f api.ReadyFilter) (api.IssuePag
 	if err != nil {
 		return api.IssuePage{}, err
 	}
-	return page, p.fillBlockedBy(ctx, page.Issues)
+	return page, fillBlockedBy(ctx, p.pool, page.Issues)
 }
 
 func readyPage(ctx context.Context, q querier, f api.ReadyFilter, blocked bool) (api.IssuePage, error) {
@@ -185,7 +185,7 @@ func readyPage(ctx context.Context, q querier, f api.ReadyFilter, blocked bool) 
 }
 
 // fillBlockedBy sets each issue's BlockedBy to its direct open blockers.
-func (p *Postgres) fillBlockedBy(ctx context.Context, issues []api.Issue) error {
+func fillBlockedBy(ctx context.Context, q querier, issues []api.Issue) error {
 	if len(issues) == 0 {
 		return nil
 	}
@@ -194,7 +194,7 @@ func (p *Postgres) fillBlockedBy(ctx context.Context, issues []api.Issue) error 
 	for i, is := range issues {
 		ids[i], at[is.ID] = is.ID, i
 	}
-	rows, err := p.pool.Query(ctx, `SELECT d.issue_id, d.depends_on FROM tracker.dependencies d
+	rows, err := q.Query(ctx, `SELECT d.issue_id, d.depends_on FROM tracker.dependencies d
 JOIN tracker.issues t ON t.id = d.depends_on
 WHERE d.issue_id = ANY($1) AND d.type IN `+blocking+` AND `+unresolved+` ORDER BY d.issue_id, d.depends_on`, ids)
 	if err != nil {
