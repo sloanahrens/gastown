@@ -401,6 +401,28 @@ func TestCloneURL(t *testing.T) {
 	}
 }
 
+// TestRunCommandReportsAMissingKubectl drives the wrapper's failure path: a
+// binary that cannot be started is named in the error, and no process runs
+// because the path names no directory.
+func TestRunCommandReportsAMissingKubectl(t *testing.T) {
+	t.Parallel()
+	_, err := runCommand("no-such-dir/kubectl", nil, "apply", "-f", "-")
+	if err == nil || !strings.Contains(err.Error(), "no-such-dir/kubectl apply -f -") {
+		t.Fatalf("runCommand on a missing binary = %v, want the command named", err)
+	}
+}
+
+// TestForgejoRemoteRefusesARigWithNoBlock pins the resolution rule: a rig with
+// no merge_queue.forgejo block has no URL for the Job to clone, and the error
+// names the setting rather than failing later in the cluster.
+func TestForgejoRemoteRefusesARigWithNoBlock(t *testing.T) {
+	t.Parallel()
+	_, err := forgejoRemote(t.TempDir(), "gastown")
+	if err == nil || !strings.Contains(err.Error(), "merge_queue.forgejo.remote_url") {
+		t.Fatalf("forgejoRemote on a town that configures no rig = %v, want the missing block named", err)
+	}
+}
+
 // seedPins decodes the pins document the Job's containers take as argv.
 func seedPins(t *testing.T, job cachevol.SeedJob) []cachevol.Pin {
 	t.Helper()

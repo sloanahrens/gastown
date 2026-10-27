@@ -52,12 +52,19 @@ func prodDeps() deps {
 // execKubectl is the thin wrapper around kubectl: applying a manifest is
 // platform work, so the only logic here is wiring the process's streams.
 func execKubectl(stdin io.Reader, args ...string) ([]byte, error) {
-	cmd := exec.Command("kubectl", args...) //nolint:gosec // G204: fixed verb and flag words plus the Job's DNS-1123 name, which the builder validated; no shell, no user text
+	return runCommand("kubectl", stdin, args...)
+}
+
+// runCommand runs name, feeds it stdin and passes its stderr straight to the
+// terminal, and reports its stdout. A failure names the command and never
+// carries its output, which can hold a secret.
+func runCommand(name string, stdin io.Reader, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...) //nolint:gosec // G204: kubectl in production; the verb and flag words are fixed and the Job name is a validated DNS-1123 label, so no shell and no user text
 	cmd.Stdin = stdin
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("kubectl %s: %w", strings.Join(args, " "), err)
+		return nil, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
 	return out, nil
 }
