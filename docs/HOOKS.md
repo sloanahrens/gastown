@@ -45,12 +45,13 @@ Town-level target:
 The `polecats` override adds the polecat-paths guard (`gt tap guard
 polecat-paths`, gt-hmaf) on the `Bash|Monitor` and
 `Edit|Write|MultiEdit|NotebookEdit` matchers: a cross-worktree edit corrupts a
-branch its owner cannot see. File-writing tools are checked against the
-polecat's own worktree, and shell writes — interpreters, `curl -o`,
-redirections, `cd` and `git -C` targets — are blocked when they name a town
-path outside it, its polecat directory, or its rig's `.repo.git`. Work stays
-under `~/gt`: scratch files, trace logs and test data go in the worktree,
-never `/tmp`, `/private/tmp`, `HOME` or a session scratchpad (gt-3n4e0).
+branch its owner cannot see. File-writing tools are limited to the polecat's
+own worktree, and a temp-dir or session-scratchpad edit passes too; where
+work belongs is the worktree steer on escalation hq-wisp-dvrty,
+read before writing a trace or log file (gt-3n4e0). Shell writes —
+interpreters, `curl -o`, redirections, `cd` and `git -C` targets — are blocked
+when they name a town path outside the worktree, its polecat directory, or its
+rig's `.repo.git`.
 `$HOME/.local/bin`, the `gt`/`bd` install directory shared by all agents, is
 denied to every write (gt-tnts5). Reads stay allowed anywhere; an
 unresolvable target is blocked, as is a write target reached through a variable

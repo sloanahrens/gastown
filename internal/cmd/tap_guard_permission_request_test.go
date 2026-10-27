@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // bashPermissionPayload is the hook payload shape Claude Code sends for a Bash
@@ -353,7 +356,7 @@ func TestPermissionRequestTreatsMonitorAsShell(t *testing.T) {
 // town store.
 func fakeParkedPromptSteer(err error) (parkedPromptSteerFunc, *[]string) {
 	var sent []string
-	return func(seat, text string) error {
+	return func(_ context.Context, seat, text string) error {
 		sent = append(sent, seat+"\n"+text)
 		return err
 	}, &sent
@@ -460,21 +463,62 @@ func TestPermissionRequestSteerFailureIsNonFatal(t *testing.T) {
 	}
 }
 
-// TestPermissionRequestSteerIsBounded pins the hook-budget rule: a store that
-// never answers must not hold the denial open.
+// TestPermissionRequestSteerIsBounded pins the hook-budget rule twice: a store
+// that never answers must not hold the denial open, and the write it makes
+// runs under that same deadline, so it cannot continue after the hook returns
+// (gt-cg96w review, finding baac2cfec612).
 func TestPermissionRequestSteerIsBounded(t *testing.T) {
 	t.Parallel()
-	release := make(chan struct{})
-	defer close(release)
-	blocked := func(string, string) error {
-		<-release
-		return nil
+	var storeCtx context.Context
+	blocked := func(ctx context.Context, _, _ string) error {
+		storeCtx = ctx
+		// The fake's own bound keeps a missing deadline a failure rather than
+		// a hang.
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+		}
+		return ctx.Err()
 	}
 
 	began := time.Now()
-	commentParkedPromptSteerWithin("gastown/polecats/obsidian", "steer", blocked, 20*time.Millisecond)
+	commentParkedPromptSteerWithin(context.Background(), "gastown/polecats/obsidian", "steer", blocked, 20*time.Millisecond)
 	if elapsed := time.Since(began); elapsed > 2*time.Second {
 		t.Fatalf("a blocked steer held the caller for %v", elapsed)
+	}
+	if err := storeCtx.Err(); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("steer context after the call = %v, want the deadline already passed", err)
+	}
+}
+
+// TestPermissionRequestSteerSkipsWithoutASeatOrSteer pins the two inputs that
+// leave no comment to write: a session with no seat, and a guard built with no
+// steer at all. Neither may reach the store.
+func TestPermissionRequestSteerSkipsWithoutASeatOrSteer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		seat    string
+		noSteer bool
+	}{
+		{"no seat", "", false},
+		{"no steer", "gastown/polecats/obsidian", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			steer := parkedPromptSteerFunc(func(context.Context, string, string) error {
+				calls++
+				return nil
+			})
+			if tt.noSteer {
+				steer = nil
+			}
+			commentParkedPromptSteerWithin(context.Background(), tt.seat, "steer", steer, time.Hour)
+			if calls != 0 {
+				t.Fatalf("steer ran %d times, want 0", calls)
+			}
+		})
 	}
 }
 
@@ -483,10 +527,118 @@ func TestPermissionRequestSteerIsBounded(t *testing.T) {
 func TestPermissionRequestSteerReportsAnUnreadableTown(t *testing.T) {
 	t.Parallel()
 	townFailure := errors.New("no town root")
-	err := steerParkedPromptInTown("gastown/polecats/obsidian", "steer",
-		func() (string, error) { return "", townFailure })
+	err := steerParkedPromptInTown(context.Background(), "gastown/polecats/obsidian", "steer",
+		func() (string, error) { return "", townFailure },
+		func(context.Context, string, string) parkedPromptStore {
+			t.Fatal("an unreadable town still opened a store")
+			return parkedPromptStore{}
+		})
 	if !errors.Is(err, townFailure) {
 		t.Fatalf("steer in an unreadable town = %v, want %v", err, townFailure)
+	}
+}
+
+// TestPermissionRequestSteerResolvesTheSeatRigStore pins the store the steer
+// opens: the seat's own rig under the town, opened within the steer's context,
+// and the comment on the bead that read named (gt-cg96w review, finding
+// 845391f18744).
+func TestPermissionRequestSteerResolvesTheSeatRigStore(t *testing.T) {
+	t.Parallel()
+	type deadlineKey struct{}
+	ctx := context.WithValue(context.Background(), deadlineKey{}, "steer deadline")
+
+	var openedTown, openedRig string
+	var openedCtx context.Context
+	var commented []string
+	open := func(ctx context.Context, townRoot, rig string) parkedPromptStore {
+		openedTown, openedRig, openedCtx = townRoot, rig, ctx
+		return parkedPromptStore{
+			active: func(seat string) string {
+				if seat != "beads/polecats/obsidian" {
+					t.Errorf("active bead read for seat %q, want the session's seat", seat)
+				}
+				return "gt-abc"
+			},
+			comment: func(id, text string) error {
+				commented = append(commented, id+"\n"+text)
+				return nil
+			},
+		}
+	}
+	if err := steerParkedPromptInTown(ctx, "beads/polecats/obsidian", "steer text",
+		func() (string, error) { return "/home/u/gt", nil }, open); err != nil {
+		t.Fatalf("steer: %v", err)
+	}
+	if openedTown != "/home/u/gt" || openedRig != "beads" {
+		t.Errorf("store opened at town %q rig %q, want /home/u/gt and beads", openedTown, openedRig)
+	}
+	if openedCtx.Value(deadlineKey{}) != "steer deadline" {
+		t.Errorf("store opened outside the steer's context, so its deadline does not bound bd")
+	}
+	if len(commented) != 1 || commented[0] != "gt-abc\nsteer text" {
+		t.Errorf("comments = %v, want the steer on gt-abc", commented)
+	}
+}
+
+// TestPermissionRequestSteerBindsTheDeadlineToTheStore pins the line that
+// makes the bound real: the store's bd calls run under the steer's context, so
+// the deadline that ends the wait also kills the write still in flight
+// (gt-cg96w review, finding baac2cfec612).
+func TestPermissionRequestSteerBindsTheDeadlineToTheStore(t *testing.T) {
+	t.Parallel()
+	type ctxKey struct{}
+
+	ctx := context.WithValue(context.Background(), ctxKey{}, "steer deadline")
+	var ranUnder context.Context
+	var argv []string
+	runner := func(ctx context.Context, args []string) ([]byte, []byte, error) {
+		ranUnder, argv = ctx, args
+		return []byte(`{}`), nil, nil
+	}
+
+	store := openParkedPromptStore(ctx, t.TempDir(), "gastown", beads.WithRunner(runner))
+	if err := store.comment("gt-abc", "steer text"); err != nil {
+		t.Fatalf("comment through the fake runner: %v", err)
+	}
+	if ranUnder == nil || ranUnder.Value(ctxKey{}) != "steer deadline" {
+		t.Fatalf("bd ran outside the steer's context, so the deadline does not bound the write")
+	}
+	if got := strings.Join(argv, " "); !strings.Contains(got, "comments add gt-abc") {
+		t.Errorf("bd argv = %q, want the comment on gt-abc", got)
+	}
+}
+
+// TestPermissionRequestSteerRejectsASeatOutsideTheTown pins the guard on the
+// one input that becomes a path: GT_ROLE is the session's environment, so a
+// seat that would resolve the store outside the town must open nothing
+// (gt-cg96w review, finding c5e71b55f417).
+func TestPermissionRequestSteerRejectsASeatOutsideTheTown(t *testing.T) {
+	t.Parallel()
+	seats := []string{
+		"",
+		"gastown",
+		"gastown/polecats",
+		"gastown/polecats/",
+		"gastown/polecats/obsidian/x",
+		"gastown/polecats/..",
+		"gastown/polecats/../../../etc",
+		"../poison/polecats/obsidian",
+		"gastown/crew/sloan",
+	}
+	for _, seat := range seats {
+		opened := false
+		open := func(context.Context, string, string) parkedPromptStore {
+			opened = true
+			return parkedPromptStore{}
+		}
+		err := steerParkedPromptInTown(context.Background(), seat, "steer",
+			func() (string, error) { return "/home/u/gt", nil }, open)
+		if err == nil {
+			t.Errorf("seat %q was accepted", seat)
+		}
+		if opened {
+			t.Errorf("seat %q still opened a store", seat)
+		}
 	}
 }
 
@@ -506,6 +658,8 @@ func TestPromptSeat(t *testing.T) {
 		{"no role reads the cwd", nil, worktree, "gastown/polecats/obsidian"},
 		{"crew role is not a polecat seat", map[string]string{"GT_ROLE": "gastown/crew/sloan"}, worktree, ""},
 		{"cwd outside the polecats tree names no seat", nil, "/home/u/gt/gastown/crew", ""},
+		{"role escaping the town names no seat", map[string]string{"GT_ROLE": "../poison/polecats/obsidian"}, worktree, ""},
+		{"cwd with a dot-dot rig names no seat", nil, "/home/u/gt/../polecats/obsidian/gastown", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

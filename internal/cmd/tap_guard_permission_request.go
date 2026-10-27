@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -316,8 +318,10 @@ func promptSteerText(shape string) string {
 	return fmt.Sprintf("Parked prompt denied (%s). %s", shape, parkedPromptSteer)
 }
 
-// parkedPromptSteerFunc leaves the steer on the bead active for seat.
-type parkedPromptSteerFunc func(seat, text string) error
+// parkedPromptSteerFunc leaves the steer on the bead active for seat, within
+// the deadline ctx carries: the store call the steer makes is the one that
+// must not outlive the hook.
+type parkedPromptSteerFunc func(ctx context.Context, seat, text string) error
 
 // parkedPromptSteerTimeout bounds the steer comment, the same reason the
 // escalation is bounded: a slow store must not hold the denial past the hook's
@@ -328,38 +332,61 @@ const parkedPromptSteerTimeout = 5 * time.Second
 // one is known. The error is dropped: the denial is already the model's
 // signal, and a bead write must not change it (gt-cg96w).
 func commentParkedPromptSteer(seat, text string, steer parkedPromptSteerFunc) {
-	commentParkedPromptSteerWithin(seat, text, steer, parkedPromptSteerTimeout)
+	commentParkedPromptSteerWithin(context.Background(), seat, text, steer, parkedPromptSteerTimeout)
 }
 
-// commentParkedPromptSteerWithin is commentParkedPromptSteer with its deadline
-// injected, so a test can drive the timeout without waiting the full bound.
-func commentParkedPromptSteerWithin(seat, text string, steer parkedPromptSteerFunc, timeout time.Duration) {
+// commentParkedPromptSteerWithin is commentParkedPromptSteer with its parent
+// context and deadline injected, so a test can drive the timeout without
+// waiting the full bound. The write runs on the caller's goroutine under that
+// deadline rather than in a goroutine the return could orphan: a store call
+// started here is killed by ctx when the bound passes, so nothing writes after
+// the hook returns (gt-cg96w review, finding baac2cfec612).
+func commentParkedPromptSteerWithin(ctx context.Context, seat, text string, steer parkedPromptSteerFunc, timeout time.Duration) {
 	if seat == "" || steer == nil {
 		return
 	}
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		_ = steer(seat, text)
-	}()
-	select {
-	case <-finished:
-	case <-time.After(timeout):
-	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	_ = steer(ctx, seat, text)
 }
 
 // promptSeat names the polecat seat ("rig/polecats/name") the denied session
 // runs as, or "" when neither the environment nor the payload cwd names one.
 // A role that is not a polecat returns "" rather than falling back to the cwd:
-// a crew member working inside a polecat worktree is not that polecat.
+// a crew member working inside a polecat worktree is not that polecat. A
+// candidate of another shape is also "": the seat becomes a directory under
+// the town, so only the exact shape may pass (gt-cg96w review, finding
+// c5e71b55f417).
 func promptSeat(cwd string, getenv func(string) string) string {
+	seat := seatFromPolecatPath(cwd)
 	if role := strings.TrimSpace(getenv("GT_ROLE")); role != "" && role != constants.RolePolecat {
-		if strings.Contains(role, "/polecats/") {
-			return role
+		if !strings.Contains(role, "/polecats/") {
+			return ""
 		}
+		seat = role
+	}
+	if !validPolecatSeat(seat) {
 		return ""
 	}
-	return seatFromPolecatPath(cwd)
+	return seat
+}
+
+// validPolecatSeat reports whether seat is "<rig>/polecats/<name>" with every
+// part usable as a single path segment. GT_ROLE comes from the session's
+// environment, and the steer resolves the rig store as a directory under the
+// town, so a part holding ".." or a separator would put the store outside it
+// (gt-cg96w review, finding c5e71b55f417).
+func validPolecatSeat(seat string) bool {
+	parts := strings.Split(seat, "/")
+	if len(parts) != 3 || parts[1] != "polecats" {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." || strings.ContainsAny(part, "\\\x00") {
+			return false
+		}
+	}
+	return true
 }
 
 // seatFromPolecatPath reads the seat out of a worktree path
@@ -377,22 +404,51 @@ func seatFromPolecatPath(cwd string) string {
 // defaultParkedPromptSteer comments the steer on the seat's active bead. A
 // seat with no active bead leaves the comment unwritten; an error is reported
 // for the caller to drop.
-func defaultParkedPromptSteer(seat, text string) error {
-	return steerParkedPromptInTown(seat, text, workspace.FindFromCwdOrError)
+func defaultParkedPromptSteer(ctx context.Context, seat, text string) error {
+	open := func(callCtx context.Context, townRoot, rig string) parkedPromptStore {
+		return openParkedPromptStore(callCtx, townRoot, rig)
+	}
+	return steerParkedPromptInTown(ctx, seat, text, workspace.FindFromCwdOrError, open)
 }
 
-// steerParkedPromptInTown is defaultParkedPromptSteer with its town lookup
-// injected, so a test can drive the unreadable-town path.
-func steerParkedPromptInTown(seat, text string, findTown func() (string, error)) error {
+// parkedPromptStore is the seat's rig store as the steer uses it: the read
+// that names the active bead and the write that comments on it.
+type parkedPromptStore struct {
+	active  func(seat string) string
+	comment func(id, text string) error
+}
+
+// parkedPromptStoreOpener opens the store of rig under townRoot within ctx, so
+// a test can pin the rig the seat resolves to without a town store.
+type parkedPromptStoreOpener func(ctx context.Context, townRoot, rig string) parkedPromptStore
+
+// openParkedPromptStore opens the bead store of rig under townRoot. ctx parents
+// every bd call, so the steer's deadline ends the comment itself rather than
+// only the caller's wait for it. opts carry a test's runner, the seam that
+// watches the context bd is handed.
+func openParkedPromptStore(ctx context.Context, townRoot, rig string, opts ...beads.Option) parkedPromptStore {
+	clientOpts := append([]beads.Option{beads.WithCallContext(ctx)}, opts...)
+	bd := beads.New(filepath.Join(townRoot, rig), clientOpts...)
+	return parkedPromptStore{
+		active:  func(seat string) string { return done.FindHookedBeadForAgent(bd, seat) },
+		comment: bd.AddComment,
+	}
+}
+
+// steerParkedPromptInTown is defaultParkedPromptSteer with its town lookup and
+// store opening injected, so a test can drive the unreadable-town and
+// store-resolution paths.
+func steerParkedPromptInTown(ctx context.Context, seat, text string, findTown func() (string, error), openStore parkedPromptStoreOpener) error {
+	if !validPolecatSeat(seat) {
+		return errors.New("steer seat is not a rig/polecats/name seat")
+	}
 	townRoot, err := findTown()
 	if err != nil {
 		return err
 	}
 	rig, _, _ := strings.Cut(seat, "/")
-	bd := beads.NewWithBeadsDir(filepath.Join(townRoot, rig), "")
-	return steerParkedPromptBead(seat, text,
-		func(seat string) string { return done.FindHookedBeadForAgent(bd, seat) },
-		bd.AddComment)
+	store := openStore(ctx, townRoot, rig)
+	return steerParkedPromptBead(seat, text, store.active, store.comment)
 }
 
 // steerParkedPromptBead is defaultParkedPromptSteer with its store reads
