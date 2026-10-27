@@ -20,6 +20,9 @@ func (p *Postgres) Batch(ctx context.Context, req api.BatchRequest) (api.BatchRe
 	actor := api.ActorFrom(ctx)
 	var res api.BatchResult
 	err := p.inTx(ctx, func(tx pgx.Tx) error {
+		if err := lockBatchTargets(ctx, tx, req.Operations); err != nil {
+			return err
+		}
 		var err error
 		res, err = batchInTx(ctx, tx, req, actor)
 		return err
@@ -60,9 +63,14 @@ func batchOpInTx(ctx context.Context, tx pgx.Tx, op api.BatchOperation, actor st
 		if err != nil {
 			return api.BatchOperationResult{}, err
 		}
-		// No collision retry here, unlike CreateIssue: a failed statement
-		// aborts the transaction the retry would need.
-		is, err := createInTx(ctx, tx, params, rig)
+		// A generated id collides by chance as a single create's does, so the
+		// batch retries it too rather than failing an operation the caller
+		// cannot fix.
+		attempts := 1
+		if params.ID == "" && params.Parent == "" {
+			attempts = idAttempts // only a random id can collide by chance
+		}
+		is, err := createRetryingCollisions(ctx, tx, params, rig, attempts)
 		if err != nil {
 			return api.BatchOperationResult{}, err
 		}
@@ -84,18 +92,93 @@ func batchOpInTx(ctx context.Context, tx pgx.Tx, op api.BatchOperation, actor st
 		}
 		return api.BatchOperationResult{IDs: ids}, nil
 	case api.BatchOpComment:
-		author := op.Comment.Author
-		if author == "" {
-			author = actor
-		}
-		if err := validateComment(author, op.Comment.Text); err != nil {
+		if err := validateComment(actor, op.Comment.Text); err != nil {
 			return api.BatchOperationResult{}, err
 		}
-		if err := addCommentInTx(ctx, tx, op.Comment.ID, author, op.Comment.Text); err != nil {
+		if err := addCommentInTx(ctx, tx, op.Comment.ID, actor, op.Comment.Text); err != nil {
 			return api.BatchOperationResult{}, err
 		}
 		return api.BatchOperationResult{IDs: []string{op.Comment.ID}}, nil
 	}
 	// Validate refuses an op with no case here before the transaction opens.
 	return api.BatchOperationResult{}, fmt.Errorf("store: batch: op %q has no case", op.Op)
+}
+
+// createRetryingCollisions creates the issue, taking a fresh generated id while
+// the last attempt collided, up to attempts times.
+func createRetryingCollisions(ctx context.Context, tx pgx.Tx, params api.CreateParams, rig string, attempts int) (api.Issue, error) {
+	var err error
+	for i := 0; i < attempts; i++ {
+		var is api.Issue
+		if is, err = createInSavepoint(ctx, tx, params, rig); err == nil {
+			return is, nil
+		}
+		if !isIDCollision(err) {
+			return api.Issue{}, err
+		}
+	}
+	return api.Issue{}, err
+}
+
+// createInSavepoint runs createInTx under a savepoint, so a failed statement
+// rolls back to it instead of aborting the batch's transaction.
+func createInSavepoint(ctx context.Context, tx pgx.Tx, params api.CreateParams, rig string) (api.Issue, error) {
+	sub, err := tx.Begin(ctx)
+	if err != nil {
+		return api.Issue{}, fmt.Errorf("store: create savepoint: %w", err)
+	}
+	is, err := createInTx(ctx, sub, params, rig)
+	if err != nil {
+		_ = sub.Rollback(context.WithoutCancel(ctx))
+		return api.Issue{}, err
+	}
+	if err := sub.Commit(ctx); err != nil {
+		return api.Issue{}, fmt.Errorf("store: create savepoint: %w", err)
+	}
+	return is, nil
+}
+
+// lockBatchTargets takes the batch's row locks in id order before any operation
+// runs, so batches whose request orders disagree queue instead of deadlocking.
+// A missing id is left to the operation that names it, which reports it with
+// its index.
+func lockBatchTargets(ctx context.Context, tx pgx.Tx, ops []api.BatchOperation) error {
+	ids := batchLockIDs(ops)
+	if len(ids) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, "SELECT 1 FROM tracker.issues WHERE id = ANY($1) ORDER BY id FOR UPDATE", ids); err != nil {
+		return fmt.Errorf("store: lock batch targets: %w", err)
+	}
+	return nil
+}
+
+// batchLockIDs is the ids a batch locks up front: every issue an update, close
+// or comment names that no create in the same batch supplies, sorted, so the
+// order never depends on the request order.
+func batchLockIDs(ops []api.BatchOperation) []string {
+	created := map[string]bool{}
+	for _, op := range ops {
+		if op.Op == api.BatchOpCreate && op.Create != nil && op.Create.ID != "" {
+			created[op.Create.ID] = true
+		}
+	}
+	var ids []string
+	for _, op := range ops {
+		switch {
+		case op.Op == api.BatchOpUpdate && op.Update != nil:
+			ids = append(ids, op.Update.ID)
+		case op.Op == api.BatchOpComment && op.Comment != nil:
+			ids = append(ids, op.Comment.ID)
+		case op.Op == api.BatchOpClose && op.Close != nil:
+			ids = append(ids, op.Close.IDs...)
+		}
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range uniqueStrings(ids) {
+		if !created[id] {
+			out = append(out, id)
+		}
+	}
+	return out
 }

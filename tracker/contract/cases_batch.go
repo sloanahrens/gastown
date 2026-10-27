@@ -15,6 +15,37 @@ func init() {
 	register(Case{Name: "a batch applies its operations in order and commits them together", Run: batchCommits})
 	register(Case{Name: "a failed batch operation rolls back the earlier ones and names its index", Run: batchRollsBack})
 	register(Case{Name: "a batch over the size bound is refused before any write", Run: batchSizeBound})
+	register(Case{Name: "a batch of creates commits together or leaves none behind", Run: batchCreates, Fake: true})
+}
+
+// batchCreates is the fake's part of the batch contract: it models the creates
+// a batch applies and the all-or-nothing rule, not the other op kinds.
+func batchCreates(t *testing.T, s store.Store) {
+	const actor = "town/crew/dipper"
+	res, err := s.Batch(asActor(actor), api.BatchRequest{Operations: []api.BatchOperation{
+		{Op: api.BatchOpCreate, Create: &api.CreateParams{ID: "gt-batch-a", Title: "first", Actor: "mallory"}},
+		{Op: api.BatchOpCreate, Create: &api.CreateParams{ID: "gt-batch-b", Title: "second"}},
+	}})
+	if err != nil {
+		t.Fatalf("Batch of creates: %v", err)
+	}
+	if len(res.Results) != 2 || res.Results[1].Index != 1 {
+		t.Fatalf("Results = %+v, want one per operation, in order", res.Results)
+	}
+	if made := res.Results[0].Issue; made == nil || made.ID != "gt-batch-a" || made.CreatedBy != actor {
+		t.Errorf("create result = %+v, want gt-batch-a created by the token's actor, not the body's mallory", made)
+	}
+	_, err = s.Batch(asActor(actor), api.BatchRequest{Operations: []api.BatchOperation{
+		{Op: api.BatchOpCreate, Create: &api.CreateParams{ID: "gt-batch-c", Title: "third"}},
+		{Op: api.BatchOpCreate, Create: &api.CreateParams{ID: "gt-batch-a", Title: "taken"}},
+	}})
+	if !errors.Is(err, api.ErrConflict) || !strings.Contains(err.Error(), "operation 1") {
+		t.Fatalf("Batch holding a taken id = %v, want a conflict naming operation 1", err)
+	}
+	got, err := s.GetIssues(ctx(), []string{"gt-batch-a", "gt-batch-b", "gt-batch-c"})
+	if err != nil || len(got) != 2 {
+		t.Errorf("GetIssues after the refused batch = %v, %v; want only the two it committed, not gt-batch-c", got, err)
+	}
 }
 
 // batchCommits proves the order by having each operation work on what the

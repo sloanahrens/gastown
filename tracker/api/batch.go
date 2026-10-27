@@ -49,12 +49,11 @@ type BatchClose struct {
 	Force  bool     `json:"force,omitempty"`
 }
 
-// BatchComment appends a comment to the issue id. Author defaults to the
-// token's actor; a caller sets it to write on someone else's behalf.
+// BatchComment appends a comment to the issue id by the token's actor: the
+// request names no author, so a batch cannot write a comment as someone else.
 type BatchComment struct {
-	ID     string `json:"id"`
-	Text   string `json:"text"`
-	Author string `json:"author,omitempty"`
+	ID   string `json:"id"`
+	Text string `json:"text"`
 }
 
 // BatchResult holds one entry per operation, in request order.

@@ -1,14 +1,15 @@
 // Package storetest holds the in-memory store.Store for the unit tier. It
 // implements the methods its Fake-flagged contract cases cover (create and
-// get, the claim, release and transfer guards, and the plain close those
-// guards refuse) and nothing more: every other method returns
-// store.ErrUnimplemented, so a unit test that reaches past them fails loudly
-// rather than reading a store that only looks modeled.
+// get, the claim, release and transfer guards, the plain close those guards
+// refuse, and the creates a Batch applies) and nothing more: every other
+// method returns store.ErrUnimplemented, so a unit test that reaches past them
+// fails loudly rather than reading a store that only looks modeled.
 package storetest
 
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -48,6 +49,11 @@ func rigOf(id string) string {
 func (f *Fake) CreateIssue(_ context.Context, p api.CreateParams) (api.Issue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.createLocked(p)
+}
+
+// createLocked applies p with f.mu held, so Batch can write through it.
+func (f *Fake) createLocked(p api.CreateParams) (api.Issue, error) {
 	if strings.TrimSpace(p.Title) == "" {
 		return api.Issue{}, api.Invalid("title is required")
 	}
@@ -235,8 +241,34 @@ func (*Fake) Blocked(context.Context, api.ReadyFilter) (api.IssuePage, error) {
 func (*Fake) ChildrenOf(context.Context, []string) (map[string][]api.Issue, error) {
 	return nil, unimplemented("ChildrenOf")
 }
-func (*Fake) Batch(context.Context, api.BatchRequest) (api.BatchResult, error) {
-	return api.BatchResult{}, unimplemented("Batch")
+// Batch applies the creates the fake models in request order, and restores the
+// issues it already holds when one fails: a refused batch leaves nothing. Any
+// other op kind is unimplemented, as the fake models no update, close or
+// comment.
+func (f *Fake) Batch(ctx context.Context, req api.BatchRequest) (api.BatchResult, error) {
+	if err := req.Validate(); err != nil {
+		return api.BatchResult{}, err
+	}
+	actor := api.ActorFrom(ctx)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	before, next := maps.Clone(f.issues), f.next
+	res := api.BatchResult{Results: make([]api.BatchOperationResult, 0, len(req.Operations))}
+	for i, op := range req.Operations {
+		if op.Op != api.BatchOpCreate {
+			f.issues, f.next = before, next // a refused batch writes none of its operations
+			return api.BatchResult{}, unimplemented("Batch")
+		}
+		params := *op.Create
+		params.Actor = actor
+		is, err := f.createLocked(params)
+		if err != nil {
+			f.issues, f.next = before, next
+			return api.BatchResult{}, api.BatchError(i, err)
+		}
+		res.Results = append(res.Results, api.BatchOperationResult{Index: i, IDs: []string{is.ID}, Issue: &is})
+	}
+	return res, nil
 }
 func (*Fake) CreateGraph(context.Context, api.GraphRequest) (api.GraphResult, error) {
 	return api.GraphResult{}, unimplemented("CreateGraph")

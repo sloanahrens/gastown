@@ -23,7 +23,7 @@ func (s batchStub) Batch(ctx context.Context, req api.BatchRequest) (api.BatchRe
 }
 
 // Unit tier: httptest, stub store, no Postgres; milliseconds per case.
-func TestBatchPassesTheRequestAndAnswersOneResultPerOperation(t *testing.T) {
+func TestBatchPassesEveryOperationAndTheTokensActorToTheStore(t *testing.T) {
 	t.Parallel()
 	var got api.BatchRequest
 	var ctxActor string
@@ -115,6 +115,24 @@ func TestBatchRefusesEmptyAndUnknownFieldBodies(t *testing.T) {
 		if code, resp := writeCall(t, "POST", ts.URL+"/v1/batch", body); code != 400 {
 			t.Errorf("%s = %d %q, want 400", name, code, resp)
 		}
+	}
+}
+
+// A batch comment is the caller's, so a body author is refused rather than
+// dropped: one token cannot speak as another through a batch.
+func TestBatchRefusesACommentThatNamesItsAuthor(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	ts := writeServer(t, batchStub{batch: func(context.Context, api.BatchRequest) (api.BatchResult, error) {
+		calls++
+		return api.BatchResult{}, nil
+	}})
+	code, body := writeCall(t, "POST", ts.URL+"/v1/batch", `{"operations":[{"op":"comment","comment":{"id":"gt-a","text":"hi","author":"mallory"}}]}`)
+	if code != http.StatusBadRequest {
+		t.Errorf("a batch comment naming an author = %d %q, want 400", code, body)
+	}
+	if calls != 0 {
+		t.Errorf("the store was called %d times, want the body refused before it", calls)
 	}
 }
 
