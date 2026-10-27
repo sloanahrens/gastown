@@ -89,8 +89,8 @@ func TestSign(t *testing.T) {
 		// keychain.pass carries; testPassword when empty.
 		password string
 		// wantUnlock is the whole line the unlock read on stdin, with KEYCHAIN
-		// standing for the run's keychain; the default is the quoted password
-		// and keychain.
+		// standing for the run's keychain. The default treats the password and
+		// the keychain as words that need no quoting.
 		wantUnlock string
 	}{
 		{
@@ -162,7 +162,11 @@ func TestSign(t *testing.T) {
 			wantCmds: 1,
 		},
 		{
-			name: "codesign that fails leaves the binary alone",
+			// security -i's status is not proof the unlock took, so a status
+			// of 0 over a keychain that stayed locked must end in an ad-hoc
+			// install: the codesign that needed the keychain fails, and it is
+			// exactly one WARNING (gt-4ucnp).
+			name: "an unlock whose status says success but did not take installs ad-hoc",
 			respond: func(dir, name string, args []string) ([]byte, []byte, int) {
 				if name == "codesign" {
 					return nil, []byte("errSecInternalComponent\nmore detail\n"), 1
@@ -291,11 +295,17 @@ func TestSign(t *testing.T) {
 			if args := strings.Join(w.cmds[0], " "); strings.Contains(args, password) {
 				t.Errorf("unlock argv %q holds the password", w.cmds[0])
 			}
+			// The expectation is written out here rather than built with
+			// quoteLine: an expectation computed by the code under test agrees
+			// with it however that code is broken.
 			wantUnlock := tc.wantUnlock
 			if wantUnlock == "" {
-				wantUnlock = "unlock-keychain -p " + quoteLine(password) + " KEYCHAIN"
+				wantUnlock = "unlock-keychain -p " + password + " KEYCHAIN"
 			}
-			wantUnlock = strings.ReplaceAll(wantUnlock, "KEYCHAIN", quoteLine(w.keychain)) + "\n"
+			if strings.ContainsAny(w.keychain, " \t\"'\\") {
+				t.Fatalf("the temporary keychain path %q needs quoting; this expectation is written for a bare word", w.keychain)
+			}
+			wantUnlock = strings.ReplaceAll(wantUnlock, "KEYCHAIN", w.keychain) + "\n"
 			if got := w.stdins[0]; got != wantUnlock {
 				t.Errorf("unlock stdin = %q, want %q", got, wantUnlock)
 			}

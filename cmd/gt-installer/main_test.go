@@ -396,9 +396,26 @@ func TestRunInstallsEndToEnd(t *testing.T) {
 		}
 	}
 	// The keychain password reaches security on stdin, never in the argv the
-	// process table shows while the unlock runs (gt-4ucnp).
-	if got, line := f.stdins[2], "unlock-keychain -p test-password "; !strings.HasPrefix(got, line) || !strings.Contains(got, keychain) {
+	// process table shows while the unlock runs (gt-4ucnp). The unlock is
+	// found by its argv rather than by its position, so a command added before
+	// it cannot make this read another command's stdin.
+	unlock := -1
+	for i, cmd := range f.commands {
+		if reflect.DeepEqual(cmd, []string{"security", "-i"}) {
+			unlock = i
+			break
+		}
+	}
+	if unlock < 0 {
+		t.Fatalf("commands = %q, want the keychain unlock's security -i", f.commands)
+	}
+	if got, line := f.stdins[unlock], "unlock-keychain -p test-password "; !strings.HasPrefix(got, line) || !strings.Contains(got, keychain) {
 		t.Errorf("unlock stdin = %q, want it to start %q and name %q", got, line, keychain)
+	}
+	for i, cmd := range f.commands {
+		if strings.Contains(strings.Join(cmd, " "), "test-password") {
+			t.Errorf("command %d argv %q holds the password, want it only on the unlock's stdin", i, cmd)
+		}
 	}
 	// Nothing ran through the exit contract either: no escalation and no
 	// gateway, which this run skips for want of a gateway.toml.

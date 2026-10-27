@@ -65,9 +65,11 @@ func (s Signing) PasswordFile() string { return filepath.Join(s.Dir, "keychain.p
 // would read as a second command rather than part of the password.
 //
 // security -i's parser handling of quotes is not documented, so this quotes
-// only what it must and escapes what it can. A form the parser rejects fails
-// the unlock: the install goes ad-hoc with one WARNING, never signed with a
-// password it misread.
+// only what it must and escapes what it can.
+// TestIntegrationSecurityReadsTheUnlockLineFromStdin runs the real security
+// with this line against a throwaway keychain on macOS, which is where the
+// form is checked. A form the parser rejects fails the unlock: the install
+// goes ad-hoc with one WARNING, never signed with a password it misread.
 func unlockLine(password, keychain string) (string, bool) {
 	if strings.ContainsAny(password, "\r\n") {
 		return "", false
@@ -132,6 +134,12 @@ func (r *Run) Sign() {
 	// The password reaches security on stdin and nowhere else: it is never in
 	// the unlock's argv, where ps shows it for as long as the unlock takes, and
 	// never logged, never echoed and never handed to codesign (gt-4ucnp).
+	//
+	// A status of 0 is not taken as proof the keychain opened: what security -i
+	// reports for the command it reads is undocumented, and the macOS form is
+	// pinned by TestIntegrationSecurityReadsTheUnlockLineFromStdin. The status
+	// only says when to stop; codesign is the arbiter, and a keychain that
+	// stayed locked fails it below, which installs ad-hoc with one WARNING.
 	if _, _, code := r.Cmd.runInput("", "security", []byte(line), "-i"); code != 0 {
 		r.C.Log("WARNING: installing ad-hoc: cannot unlock " + r.Signing.Keychain())
 		return
