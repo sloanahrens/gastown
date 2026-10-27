@@ -8,9 +8,10 @@
 //
 // The install sections land one bead at a time: the OpenShell gateway step
 // (gt-tpg0p.9), target resolution, the no-op path and the refusals
-// (gt-tpg0p.10), and the build, install, signing, smoke and syncs
-// (gt-tpg0p.11). The sandbox image step (gt-tpg0p.12) and the Makefile switch
-// (gt-tpg0p.14) are still to land.
+// (gt-tpg0p.10), the build, install, signing, smoke and syncs (gt-tpg0p.11),
+// and the sandbox image step (gt-tpg0p.12), whose detached rebuild is this same
+// program under --image-build-worker. The Makefile switch (gt-tpg0p.14) is
+// still to land.
 package main
 
 import (
@@ -45,6 +46,10 @@ type environment struct {
 	// directory. Without it any test that reached the build, install, signing or
 	// smoke step would run make, gt and codesign for real (gt-tpg0p.11).
 	newRun func(cfg installer.Config, c *installer.Contract, paths installer.Paths) *installer.Run
+	// imageWorker runs a detached image build's worker; nil runs the real one.
+	// It is a seam so a test can check the routing without starting a process
+	// (gt-tpg0p.12).
+	imageWorker func(args []string, stderr io.Writer) int
 }
 
 // run is runWith against the process's own environment.
@@ -61,6 +66,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 // temporary tree. The deferred OnExit is the script's EXIT trap: whatever
 // happens, the last line states a result and the status is 0-3.
 func runWith(args []string, stdout, stderr io.Writer, env environment) (code int) {
+	// A detached image build's worker is not an install: it names no result
+	// line, takes no exit contract and changes nothing in the town beyond the
+	// build it was started for (gt-tpg0p.12).
+	if len(args) > 0 && args[0] == installer.ImageWorkerFlag {
+		worker := env.imageWorker
+		if worker == nil {
+			worker = installer.ImageWorker
+		}
+		return worker(args[1:], stderr)
+	}
 	cfg, err := installer.Parse(args)
 	c := &installer.Contract{
 		Stdout:   stdout,
@@ -104,6 +119,7 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 		newRun = installer.NewRun
 	}
 	r := newRun(cfg, c, paths)
+	r.Getenv = env.getenv
 	r.Signing = installer.ResolveSigning(env.getenv, paths.TownRoot)
 	// --dry-run prints the gateway plan and changes nothing, before the checkout
 	// is read.
@@ -127,8 +143,14 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 	if code, ended := r.Build(); ended {
 		return int(code)
 	}
-	// The sandbox image is built and published here, before the swap; that step
-	// is gt-tpg0p.12.
+	// The sandbox image is built and published here, before the swap, so a
+	// failed build keeps the old binary in place. --no-image-first skips the
+	// wait and rebuilds after the restart marker instead (gt-tpg0p.12).
+	if r.Cfg.ImageFirst {
+		if code := r.ImageStep(); code != installer.ExitOK {
+			return int(code)
+		}
+	}
 	if code, ended := r.Install(); ended {
 		return int(code)
 	}

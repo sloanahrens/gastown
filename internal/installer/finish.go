@@ -37,8 +37,12 @@ func (r *Run) Finalize() Exit {
 	r.C.Receipt("installed", expected, prev, "")
 	r.clearEscalations()
 	// --no-image-first rebuilds the sandbox image here, detached and best
-	// effort, once the daemon has been told to restart; that step is
-	// gt-tpg0p.12.
+	// effort, once the binary and its restart marker are in place: an urgent
+	// daemon fix never waits on a docker build (gt-vhn89). It cannot change the
+	// outcome this run reports (gt-tpg0p.12).
+	if !r.Cfg.ImageFirst {
+		r.ImageAfter()
+	}
 	r.C.Log("In force: " + unknownIfEmpty(prev) + " -> " + expected + ". The daemon restarts itself when idle.")
 	return r.C.Finish(Result{Event: "installed", Commit: expected, Prev: prev}, ExitOK)
 }

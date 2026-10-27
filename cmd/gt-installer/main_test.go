@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -68,6 +69,13 @@ type fakeRun struct {
 	// command seam, and execs those the exit contract ran.
 	commands [][]string
 	execs    [][]string
+	// imageBuilds is every sandbox image build the flow asked for, and
+	// imageAfterSwap is set when one was asked for after install-local had
+	// already put the binary in place.
+	imageBuilds    []installer.ImageBuild
+	imageAfterSwap bool
+	// imageCode is the status the image build ends with.
+	imageCode int
 }
 
 func (f *fakeRun) newRun(cfg installer.Config, c *installer.Contract, paths installer.Paths) *installer.Run {
@@ -98,6 +106,16 @@ func (f *fakeRun) newRun(cfg installer.Config, c *installer.Contract, paths inst
 			// these tests watch.
 			ClearImmutable: func(string) {},
 			SetImmutable:   func(string) {},
+			// The sandbox image step's build output is answered rather than
+			// created: a unit test writes no executable file (gt-tpg0p.12).
+			// Everything else is the real check.
+			IsExecutable: func(path string) bool {
+				if path == filepath.Join(paths.RigDir, "gt") {
+					return true
+				}
+				info, err := os.Stat(path)
+				return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
+			},
 		},
 		Bin: installer.Binary{Commit: func(string, string) string {
 			if f.installed {
@@ -112,6 +130,16 @@ func (f *fakeRun) newRun(cfg installer.Config, c *installer.Contract, paths inst
 	run.Cmd = func(dir, name string, args ...string) ([]byte, []byte, int) {
 		f.commands = append(f.commands, append([]string{name}, args...))
 		return f.respond(name, args)
+	}
+	// The image build is recorded, never started: the step's preflight reads
+	// real files under the temporary root and the build itself is the seam
+	// (gt-tpg0p.12).
+	run.ImageRunner = func(b installer.ImageBuild) (int, error) {
+		if f.installed {
+			f.imageAfterSwap = true
+		}
+		f.imageBuilds = append(f.imageBuilds, b)
+		return f.imageCode, nil
 	}
 	return run
 }
@@ -301,32 +329,10 @@ func TestRunDryRunWithoutAProgramDirectory(t *testing.T) {
 // a test that let one of them through would run it on the host (gt-tpg0p.11).
 func TestRunInstallsEndToEnd(t *testing.T) {
 	t.Parallel()
-	env, root, f := newTestEnv(t)
-	binDir, signDir := filepath.Join(root, "bin"), filepath.Join(root, "signing")
+	env, root, f := installedTown(t)
+	binDir := filepath.Join(root, "bin")
+	signDir := filepath.Join(root, "signing")
 	keychain := filepath.Join(signDir, "gastown-signing.keychain-db")
-	// The build checkout, the daemon directory, the signing material and the
-	// binary being replaced, as an installed town has them.
-	for _, dir := range []string{filepath.Join(root, "rig", ".git"), filepath.Join(root, "daemon")} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	files := map[string]struct {
-		body string
-		mode os.FileMode
-	}{
-		keychain:                                {"keychain", 0o600},
-		filepath.Join(signDir, "keychain.pass"): {"test-password\n", 0o600},
-		filepath.Join(binDir, "gt"):             {"old binary", 0o644},
-	}
-	for path, file := range files {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(file.body), file.mode); err != nil {
-			t.Fatal(err)
-		}
-	}
 	var out, errOut strings.Builder
 
 	code := runWith(nil, &out, &errOut, env)
@@ -337,6 +343,16 @@ func TestRunInstallsEndToEnd(t *testing.T) {
 	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
 	if want := "install-gt: RESULT installed " + fullSHA + " " + prevSHA + " -"; lines[len(lines)-1] != want {
 		t.Errorf("last line = %q, want %q", lines[len(lines)-1], want)
+	}
+	// The sandbox image was built once, from the checkout's program and build
+	// output, and the swap waited for it (gt-tpg0p.12).
+	if len(f.imageBuilds) != 1 {
+		t.Fatalf("image builds = %+v, want one", f.imageBuilds)
+	}
+	if image := f.imageBuilds[0]; image.Detached || f.imageAfterSwap {
+		t.Errorf("image build = %+v, want it before the swap", image)
+	} else if want := filepath.Join(root, "rig", "plugins", "polecat-image", "bin", "polecat-image"); image.Program != want {
+		t.Errorf("image program = %q, want %q", image.Program, want)
 	}
 	gt := filepath.Join(binDir, "gt")
 	// codesign's last argument is the mktemp copy beside the binary, whose name
@@ -393,6 +409,128 @@ func TestRunInstallsEndToEnd(t *testing.T) {
 	receipts := readFile(t, filepath.Join(root, "daemon", "install-receipts.jsonl"))
 	if !strings.Contains(receipts, `"event": "installed"`) || !strings.Contains(receipts, `"commit": "`+fullSHA+`"`) {
 		t.Errorf("receipts = %q, want the installed event for %s", receipts, fullSHA)
+	}
+}
+
+// installedTown is a town a run can install into: the build checkout, the
+// daemon directory, the signing material and the binary being replaced, under
+// the temporary root newTestEnv made.
+func installedTown(t *testing.T) (environment, string, *fakeRun) {
+	t.Helper()
+	env, root, f := newTestEnv(t)
+	binDir, signDir := filepath.Join(root, "bin"), filepath.Join(root, "signing")
+	for _, dir := range []string{filepath.Join(root, "rig", ".git"), filepath.Join(root, "daemon")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string]struct {
+		body string
+		mode os.FileMode
+	}{
+		filepath.Join(signDir, "gastown-signing.keychain-db"): {"keychain", 0o600},
+		filepath.Join(signDir, "keychain.pass"):               {"test-password\n", 0o600},
+		filepath.Join(binDir, "gt"):                           {"old binary", 0o644},
+		// The checkout's plugin program; the build output beside it is
+		// answered executable by the run's file seam, since creating one would
+		// be an executable file in a unit test (gt-tpg0p.12).
+		filepath.Join(root, "rig", "plugins", "polecat-image", "bin", "polecat-image"): {"program", 0o644},
+	}
+	for path, file := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(file.body), file.mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return env, root, f
+}
+
+// An image build that does not finish stops the install before the swap: the
+// run ends failed/build-failed, install-local never runs, and no restart marker
+// is written, so the town keeps the binary it has (gt-xzo8a, gt-tpg0p.12).
+func TestRunFailsBeforeTheSwapWhenTheImageBuildFails(t *testing.T) {
+	t.Parallel()
+	env, root, f := installedTown(t)
+	f.imageCode = 1
+	var out, errOut strings.Builder
+
+	code := runWith(nil, &out, &errOut, env)
+
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1\nstdout %q\nstderr %q", code, out.String(), errOut.String())
+	}
+	for _, cmd := range f.commands {
+		if len(cmd) > 0 && cmd[len(cmd)-1] == "install-local" {
+			t.Fatalf("commands = %q, want no install-local after a failed image build", f.commands)
+		}
+	}
+	if f.installed {
+		t.Error("the binary was swapped after a failed image build")
+	}
+	if _, err := os.Stat(filepath.Join(root, "daemon", "restart-pending.json")); err == nil {
+		t.Error("a restart marker was written after a failed image build")
+	}
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if want := "install-gt: RESULT failed " + fullSHA + " " + prevSHA + " build-failed"; lines[len(lines)-1] != want {
+		t.Errorf("last line = %q, want %q", lines[len(lines)-1], want)
+	}
+}
+
+// --no-image-first swaps the binary and writes its restart marker without
+// waiting for the image, then rebuilds it detached: the run still reports
+// installed, and the build was asked for after the swap (gt-vhn89).
+func TestRunNoImageFirstBuildsTheImageAfterTheSwap(t *testing.T) {
+	t.Parallel()
+	env, root, f := installedTown(t)
+	var out, errOut strings.Builder
+
+	code := runWith([]string{"--no-image-first"}, &out, &errOut, env)
+
+	if code != 0 {
+		t.Fatalf("run(--no-image-first) = %d, want 0\nstdout %q\nstderr %q", code, out.String(), errOut.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if want := "install-gt: RESULT installed " + fullSHA + " " + prevSHA + " -"; lines[len(lines)-1] != want {
+		t.Errorf("last line = %q, want %q", lines[len(lines)-1], want)
+	}
+	if len(f.imageBuilds) != 1 {
+		t.Fatalf("image builds = %+v, want one", f.imageBuilds)
+	}
+	image := f.imageBuilds[0]
+	if !image.Detached || !f.imageAfterSwap {
+		t.Errorf("image build = %+v (after the swap: %v), want it detached after the swap", image, f.imageAfterSwap)
+	}
+	if image.Fingerprint != "install-gt:image-build-failed" || image.GT != filepath.Join(root, "bin", "gt") {
+		t.Errorf("escalation = %q/%q, want the detached build's own", image.GT, image.Fingerprint)
+	}
+	if !strings.Contains(out.String(), "polecat image: rebuild for "+fullSHA+" started in the background") {
+		t.Errorf("output lacks the detached start line:\n%s", out.String())
+	}
+}
+
+// A detached image build's worker is not an install: its arguments go to the
+// worker and the run writes no result line of its own (gt-tpg0p.12).
+func TestRunRoutesTheImageWorker(t *testing.T) {
+	t.Parallel()
+	env, _ := testEnv(t)
+	var got []string
+	env.imageWorker = func(args []string, stderr io.Writer) int {
+		got = args
+		return 7
+	}
+	var out, errOut strings.Builder
+
+	args := []string{installer.ImageWorkerFlag, "--alarm", "60", "--", "/rig/polecat-image"}
+	if code := runWith(args, &out, &errOut, env); code != 7 {
+		t.Errorf("run(%q) = %d, want the worker's 7", args, code)
+	}
+	if want := args[1:]; !reflect.DeepEqual(got, want) {
+		t.Errorf("worker args = %q, want %q", got, want)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing: a worker names no result line", out.String())
 	}
 }
 

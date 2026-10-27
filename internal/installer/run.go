@@ -1,6 +1,9 @@
 package installer
 
-import "os/exec"
+import (
+	"os"
+	"os/exec"
+)
 
 // Run is one install: the arguments it was given, the exit contract it reports
 // through, the paths it writes, and the seams it reads and moves files with.
@@ -22,6 +25,12 @@ type Run struct {
 	// Found is a command named on PATH, the script's `command -v`; nil asks
 	// exec.LookPath.
 	Found func(name string) bool
+	// Getenv reads the INSTALL_GT_IMAGE_* settings the sandbox image step
+	// takes; nil reads the process's (gt-tpg0p.12).
+	Getenv func(key string) string
+	// ImageRunner runs the sandbox image build; nil runs it for real, in this
+	// process before the swap and as a worker process after it (gt-tpg0p.12).
+	ImageRunner ImageRunner
 }
 
 // NewRun is a run against the real checkout at paths.RigDir, the real
@@ -43,4 +52,12 @@ func (r *Run) found(name string) bool {
 	}
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+// getenv reads one of the run's settings, through the seam when one is set.
+func (r *Run) getenv(name string) string {
+	if r.Getenv != nil {
+		return r.Getenv(name)
+	}
+	return os.Getenv(name)
 }
