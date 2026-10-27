@@ -84,6 +84,10 @@ type AttentionRow struct {
 	// score. It ranks the item rows inside their alert level and is drawn
 	// beside each one, so a low score sinks a row without hiding it.
 	NeedsHuman *float64 `json:"needs_human,omitempty"`
+	// NeedsHumanStale says NeedsHuman is the last good answer for this item, kept
+	// across a failed read of Jev's answers log: the score is old, not current,
+	// so the panel marks it stale rather than drawing it as this read's answer.
+	NeedsHumanStale bool `json:"needs_human_stale,omitempty"`
 	// Urgency orders the rows inside one owner and kind, lowest first: an
 	// escalation's severity, a question's priority, an item's alert level.
 	Urgency int `json:"-"`
@@ -267,6 +271,7 @@ func buildAttention(esc *Escalations, ask *Questions, items []Alert, queue Atten
 		}
 		if score, ok := scores.Scores[attention.LifeKey(al.Key, al.At)]; ok {
 			row.NeedsHuman = &score
+			row.NeedsHumanStale = scores.Err != nil
 		}
 		at.Rows = append(at.Rows, row)
 	}

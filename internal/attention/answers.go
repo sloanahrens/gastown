@@ -88,7 +88,10 @@ func (r *ScoreReader) Scores() (Scores, error) {
 	f, err := os.Open(r.path) //nolint:gosec // G304: the path is the town's own runtime file
 	if err != nil {
 		if os.IsNotExist(err) {
-			return r.copy(), nil // the battery has not run: no item has an answer yet
+			// the battery has not run, or the log was removed: no item has an answer,
+			// so the answers last read from it are dropped rather than served
+			r.offset, r.scores, r.tail, r.stat = 0, nil, nil, nil
+			return r.copy(), nil
 		}
 		return r.copy(), fmt.Errorf("reading %s: %w", r.path, err)
 	}
