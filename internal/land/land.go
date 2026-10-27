@@ -981,12 +981,12 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, comments []beads.Comment,
 		l.logf("%s: could not read the review bar for the reviews log (%v); it is logged as 0", w.BeadID, err)
 	}
 	attempt := reviewAttempt(issue.Notes)
-	// A refused round's block stops counting at MaxReworkAttempts (gt-ern0y), so
-	// the line names that same attempt: the rework pass matches a record to its
+	// A refused round's block stops counting at the ceiling (gt-ern0y), so the
+	// line names that same attempt: the rework pass matches a record to its
 	// block by number and skips a record with no block (gt-k10bq). An approval
 	// writes no block, so its line is its own round.
 	if v.Verdict == VerdictRequestChanges || rejected {
-		attempt = min(attempt, MaxReworkAttempts)
+		attempt = attemptAtCeiling(attempt)
 	}
 	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: attempt,
 		Score: v.Score, Verdict: v.Verdict, Rejected: rejected, Agent: w.Agent, Findings: len(v.Findings), Bar: bar, At: l.now().UTC(),
@@ -2091,6 +2091,16 @@ func mergedDiffLines(g Repo, base, head string) (int, bool) {
 // config.DefaultRecoveryMaxBeadRespawns.
 const MaxReworkAttempts = 3
 
+// attemptAtCeiling is the number a review refusal past MaxReworkAttempts is
+// recorded under. The MERGE REJECTION block's header stops at the ceiling and
+// the reviews log names that same number, so the rework pass can match a line
+// to the block it judges by number (gt-ern0y, gt-k10bq). The rounds ledger
+// keeps its own count and calls nothing here: an over-ceiling round is still a
+// round (gt-yphcl).
+func attemptAtCeiling(attempt int) int {
+	return min(attempt, MaxReworkAttempts)
+}
+
 // rejectionAlreadyRecorded reports whether the last MERGE REJECTION block in
 // issue's notes is the one rej would write — same head, same kind — left
 // unfinished by an earlier pass. A block is unfinished
@@ -2172,8 +2182,8 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	// is escalated keeps accumulating notes, but there is no attempt four of a
 	// three-round budget, so the header and the escalation text below never
 	// name a review round above MaxReworkAttempts.
-	if kind == string(RejectReview) && attempt > MaxReworkAttempts {
-		attempt = MaxReworkAttempts
+	if kind == string(RejectReview) {
+		attempt = attemptAtCeiling(attempt)
 	}
 	// The attempt ceiling (gt-28ibg): the reviews the bead carries decide,
 	// before the note is written, whether this round is the last one a polecat

@@ -447,6 +447,42 @@ func TestLandRoundsLedgerRoundIsTheReviewsLogAttempt(t *testing.T) {
 	}
 }
 
+// TestLandRoundsLedgerCountsPastTheCeilingTheReviewsLogStopsAt pins the one
+// place the two records deliberately diverge (gt-k10bq): a round above
+// MaxReworkAttempts is still a round, so the ledger keeps its own count, while
+// the reviews log stops at the ceiling so its line matches the MERGE REJECTION
+// block the landing writes (gt-ern0y). Clamping either side loses what the
+// other reads.
+func TestLandRoundsLedgerCountsPastTheCeilingTheReviewsLogStopsAt(t *testing.T) {
+	t.Parallel()
+	f := barFixture(t, "0.8")
+	seedReviewRejections(t, f, MaxReworkAttempts)
+	reviews := reviewsFileIn(t)
+	l := f.lander()
+	l.Reviews = reviews
+	l.RoundsDir = t.TempDir()
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{Verdict: VerdictRequestChanges, Score: 0.4, Findings: []Finding{
+			{ID: "F4", Severity: "major", Path: "b.txt", Line: 1, Title: "still not atomic"}}}, nil
+	}
+	_, err := l.Land(context.Background(), f.work)
+	var rej *Rejection
+	if !errors.As(err, &rej) || rej.Kind != RejectReview || rej.RecordErr != nil {
+		t.Fatalf("Land = %T %v, want a recorded review rejection", err, err)
+	}
+	recs, err := reviews.Since(time.Time{})
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("reviews log = %+v, %v; want this landing's one line", recs, err)
+	}
+	if recs[0].Attempt != MaxReworkAttempts {
+		t.Errorf("reviews log names attempt %d, want the ceiling %d its block carries", recs[0].Attempt, MaxReworkAttempts)
+	}
+	rounds := renderedOf(t, &RoundsLedger{OutDir: l.RoundsDir, Bead: f.work.BeadID}, 0)
+	if len(rounds) != 1 || rounds[0].Round != MaxReworkAttempts+1 {
+		t.Fatalf("ledger rounds = %+v, want the landing's own round %d, unclamped", rounds, MaxReworkAttempts+1)
+	}
+}
+
 // TestLandSurvivesACorruptRoundsLedger: the ledger is the landing's history,
 // not its precondition, so a file that does not parse costs a log line and the
 // landing rejects exactly as it did before (gt-yphcl).

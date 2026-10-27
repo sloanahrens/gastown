@@ -1236,6 +1236,95 @@ func TestLandInterruptedPassAfterRequeuedCappedRejectionIsFinished(t *testing.T)
 	}
 }
 
+// TestLandCappedRejectionAfterARequeueIsANewBlock: the refusal a re-queued
+// landing earns when it fails again is recorded as a new block, even though the
+// ceiling clamps its attempt to the number the re-queue undid (gt-ern0y,
+// gt-kwe1l). Only the block count separates them: a pass that read the clamp as
+// the matching attempt would finish the re-queued block in place, and the new
+// verdict would be lost.
+func TestLandCappedRejectionAfterARequeueIsANewBlock(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	// The blocks carry this head, so without the re-queue they read as one
+	// interrupted pass (gt-zqqcr).
+	for attempt := 1; attempt <= MaxReworkAttempts; attempt++ {
+		block := FormatRejectionNote(RejectionNote{
+			Attempt: attempt, Kind: string(RejectReview), Reason: "earlier refusal",
+			Branch: f.work.Branch, Target: f.work.Target, MR: f.work.BeadID, Head: f.work.Head,
+		})
+		if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AppendNotes: block}); err != nil {
+			t.Fatalf("seeding rejection %d: %v", attempt, err)
+		}
+	}
+	f.requeue(MaxReworkAttempts)
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
+	}
+
+	_, err := f.lander().Land(context.Background(), f.work)
+	var rej *Rejection
+	if !errors.As(err, &rej) || rej.Kind != RejectReview || rej.RecordErr != nil {
+		t.Fatalf("Land = %T %v, want a recorded review rejection", err, err)
+	}
+	notes := f.bead().Notes
+	if got := RejectionBlocks(notes); got != MaxReworkAttempts+1 {
+		t.Fatalf("%d rejection block(s) after the re-queue, want the refusal recorded as a new one (%d):\n%s",
+			got, MaxReworkAttempts+1, notes)
+	}
+	last, ok := ParseRejectionNote(notes)
+	if !ok || last.Attempt != MaxReworkAttempts {
+		t.Errorf("last block = attempt %d, %v; want the clamped attempt %d", last.Attempt, ok, MaxReworkAttempts)
+	}
+	if last.Receipt == nil || last.Receipt.Score != 0.4 {
+		t.Errorf("last block carries receipt %+v, want the new refusal's 0.4", last.Receipt)
+	}
+}
+
+// TestLandRejectionAfterALegacyRequeueIsTheNextAttempt is gt-kwe1l's fallback:
+// a REQUEUED comment written before the Blocks: line existed names its attempt
+// and no count, and the attempt alone decides. The block it undid is history,
+// so the refusal that follows is a new block, not the same one completed.
+func TestLandRejectionAfterALegacyRequeueIsTheNextAttempt(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	block := FormatRejectionNote(RejectionNote{
+		Attempt: 1, Kind: string(RejectReview), Reason: "earlier refusal",
+		Branch: f.work.Branch, Target: f.work.Target, MR: f.work.BeadID, Head: f.work.Head,
+	})
+	if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AppendNotes: block}); err != nil {
+		t.Fatalf("seeding the rejection: %v", err)
+	}
+	legacy := strings.Replace(FormatRequeueComment("operator", f.work.Branch, f.work.Head, 1, 0, "runner fault, not the diff"),
+		"\nBlocks: 0", "", 1)
+	if err := f.bd.AddCommentAs(f.work.BeadID, "operator", legacy); err != nil {
+		t.Fatalf("legacy requeue comment: %v", err)
+	}
+	comments, err := f.bd.Comments(f.work.BeadID)
+	if err != nil {
+		t.Fatalf("comments: %v", err)
+	}
+	if q, ok := NewestRequeue(comments); !ok || q.Attempt != 1 || q.Blocks != 0 {
+		t.Fatalf("the seeded comment reads %+v, %v; want a legacy re-queue naming attempt 1 and no count", q, ok)
+	}
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
+	}
+
+	_, landErr := f.lander().Land(context.Background(), f.work)
+	var rej *Rejection
+	if !errors.As(landErr, &rej) || rej.Kind != RejectReview || rej.RecordErr != nil {
+		t.Fatalf("Land = %T %v, want a recorded review rejection", landErr, landErr)
+	}
+	notes := f.bead().Notes
+	if got := RejectionBlocks(notes); got != 2 {
+		t.Fatalf("%d rejection block(s) after the legacy re-queue, want 2 — the block it undid is history:\n%s", got, notes)
+	}
+	last, ok := ParseRejectionNote(notes)
+	if !ok || last.Attempt != 2 {
+		t.Errorf("last block = attempt %d, %v; want the next attempt (2)", last.Attempt, ok)
+	}
+}
+
 func TestLandRequestChangesRejectsWithFindings(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
