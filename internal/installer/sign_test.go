@@ -134,7 +134,7 @@ func TestSign(t *testing.T) {
 		{
 			name:     "a password spanning more than one line installs ad-hoc",
 			password: "two\nlines",
-			want:     "[install-gt] WARNING: installing ad-hoc: the password in PASSWORD spans more than one line",
+			want:     "[install-gt] WARNING: installing ad-hoc: the password or the keychain path spans more than one line",
 		},
 		{
 			name: "a temp file that cannot be created beside the binary installs ad-hoc",
@@ -162,11 +162,11 @@ func TestSign(t *testing.T) {
 			wantCmds: 1,
 		},
 		{
-			// security -i's status is not proof the unlock took, so a status
-			// of 0 over a keychain that stayed locked must end in an ad-hoc
-			// install: the codesign that needed the keychain fails, and it is
+			// The seam can only script statuses, so this stands in for an
+			// unlock that reported success but did not take: the codesign that
+			// needed the keychain fails, and the install goes ad-hoc with
 			// exactly one WARNING (gt-4ucnp).
-			name: "an unlock whose status says success but did not take installs ad-hoc",
+			name: "a codesign that fails after an unlock reporting success installs ad-hoc",
 			respond: func(dir, name string, args []string) ([]byte, []byte, int) {
 				if name == "codesign" {
 					return nil, []byte("errSecInternalComponent\nmore detail\n"), 1
@@ -392,6 +392,12 @@ func TestUnlockLineQuotesWhatTheParserNeeds(t *testing.T) {
 			name:     "a password spanning two lines is refused",
 			password: "a\nb",
 			keychain: "/k",
+			refused:  true,
+		},
+		{
+			name:     "a keychain path spanning two lines is refused",
+			password: "pw",
+			keychain: "/a\nb",
 			refused:  true,
 		},
 	}

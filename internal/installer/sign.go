@@ -58,20 +58,18 @@ func (s Signing) Keychain() string { return filepath.Join(s.Dir, "gastown-signin
 // PasswordFile is the 0600 file holding the keychain's password.
 func (s Signing) PasswordFile() string { return filepath.Join(s.Dir, "keychain.pass") }
 
-// unlockLine is the one command security -i reads from stdin: the unlock with
-// the password on that line rather than in argv, since security(1) has no form
-// that takes a password unattended from anywhere else (gt-4ucnp). It reports
-// false for a password that cannot be written on one line, which security -i
-// would read as a second command rather than part of the password.
+// unlockLine is the one command security -i reads from stdin to unlock the
+// keychain: the password and the keychain path are words on that line rather
+// than in argv, so ps shows neither for the length of the unlock (gt-4ucnp).
 //
-// security -i's parser handling of quotes is not documented, so this quotes
-// only what it must and escapes what it can.
-// TestIntegrationSecurityReadsTheUnlockLineFromStdin runs the real security
-// with this line against a throwaway keychain on macOS, which is where the
-// form is checked. A form the parser rejects fails the unlock: the install
-// goes ad-hoc with one WARNING, never signed with a password it misread.
+// It reports false when either word spans a line break. security -i reads a
+// line at a time, so a word carrying a newline would become a second command
+// rather than part of the first.
+//
+// security -i's parser is undocumented: an ordinary word passes as it is and
+// only a word that needs quoting is wrapped and escaped.
 func unlockLine(password, keychain string) (string, bool) {
-	if strings.ContainsAny(password, "\r\n") {
+	if strings.ContainsAny(password, "\r\n") || strings.ContainsAny(keychain, "\r\n") {
 		return "", false
 	}
 	return "unlock-keychain -p " + quoteLine(password) + " " + quoteLine(keychain) + "\n", true
@@ -128,7 +126,7 @@ func (r *Run) Sign() {
 	password := strings.TrimRight(string(data), "\n")
 	line, ok := unlockLine(password, r.Signing.Keychain())
 	if !ok {
-		r.C.Log("WARNING: installing ad-hoc: the password in " + r.Signing.PasswordFile() + " spans more than one line")
+		r.C.Log("WARNING: installing ad-hoc: the password or the keychain path spans more than one line")
 		return
 	}
 	// The password reaches security on stdin and nowhere else: it is never in

@@ -24,11 +24,10 @@ const securityDeadline = 30 * time.Second
 // line Sign builds, against a throwaway keychain whose password needs quoting.
 // It pins the three things Sign assumes: the line parses, the unlock takes (an
 // item added before the lock reads back after it), and security -i exits 0 on
-// a successful unlock, which is the status Sign reads.
+// a successful unlock, which Sign reads.
 //
-// The keychain lives in a temporary directory and is deleted afterwards;
-// create-keychain puts it in the search list, and delete-keychain takes it out
-// again.
+// The keychain lives in a temporary directory and is deleted afterwards. The
+// user keychain search list, which create-keychain changes, is put back too.
 func TestIntegrationSecurityReadsTheUnlockLineFromStdin(t *testing.T) {
 	if _, err := exec.LookPath("security"); err != nil {
 		t.Fatalf("security is not on PATH: %v", err)
@@ -43,41 +42,102 @@ func TestIntegrationSecurityReadsTheUnlockLineFromStdin(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			before := userSearchList(t)
 			keychain := filepath.Join(t.TempDir(), "gt-unlock-test.keychain-db")
-			securityRun(t, "create-keychain", tc.password, "", "create-keychain", "-p", tc.password, keychain)
-			t.Cleanup(func() {
-				// Never fatal: a keychain left in the search list outlives the
-				// test, and the next run should still be able to start.
-				ctx, cancel := context.WithTimeout(context.Background(), securityDeadline)
-				defer cancel()
-				if err := exec.CommandContext(ctx, "security", "delete-keychain", keychain).Run(); err != nil {
-					t.Logf("delete-keychain %s: %v; remove it by hand if it stays in the search list", keychain, err)
-				}
-			})
-			securityRun(t, "unlock-keychain", tc.password, "", "unlock-keychain", "-p", tc.password, keychain)
-			securityRun(t, "add-generic-password", tc.password, "",
-				"add-generic-password", "-a", "gt-4ucnp", "-s", "gt-4ucnp", "-w", "probe-value", keychain)
-			securityRun(t, "lock-keychain", tc.password, "", "lock-keychain", keychain)
+			t.Cleanup(func() { removeKeychainAndRestore(t, keychain, before) })
+
+			// The setup never puts the keychain password in argv either: every
+			// line that carries it goes through security -i on stdin, the same
+			// way Sign unlocks.
+			requireSecurityLines(t,
+				"create-keychain -p "+lineWord(tc.password)+" "+lineWord(keychain),
+				"add-generic-password -a gt-4ucnp -s gt-4ucnp -w probe-value "+lineWord(keychain),
+				"lock-keychain "+lineWord(keychain),
+			)
 
 			line, ok := unlockLine(tc.password, keychain)
 			if !ok {
 				t.Fatalf("unlockLine refused a one-line password")
 			}
-			stdout, stderr, code := securityRun(t, "security -i", tc.password, line, "-i")
-			if code != 0 {
-				t.Fatalf("security -i exited %d on the unlock line (stdout %q, stderr %q); Sign reads 0 as the unlock's success and skips codesign, so sign.go must be changed to stop reading this status", code, stdout, stderr)
+			if _, _, code := securityRun(t, "security -i", tc.password, line, "-i"); code != 0 {
+				// The output can hold the password, so it never reaches this
+				// message: securityRun reports a leak separately. Sign reads 0
+				// as the unlock's success, so a non-zero here means Sign must
+				// stop reading this status.
+				t.Fatalf("security -i exited %d on the unlock line", code)
 			}
 			// The item was unreadable while the keychain was locked, so reading
 			// it back is the unlock taking effect.
-			stdout, stderr, code = securityRun(t, "find-generic-password", tc.password, "",
+			stdout, _, code := securityRun(t, "find-generic-password", "", "",
 				"find-generic-password", "-a", "gt-4ucnp", "-s", "gt-4ucnp", "-w", keychain)
 			if code != 0 {
-				t.Fatalf("find-generic-password exited %d after the unlock (stdout %q, stderr %q); the keychain stayed locked, so the line security -i read did not unlock it", code, stdout, stderr)
+				t.Fatalf("find-generic-password exited %d after the unlock; the keychain stayed locked, so the line security -i read did not unlock it", code)
 			}
 			if got := strings.TrimSpace(stdout); got != "probe-value" {
 				t.Errorf("read back %q, want the probe value the locked keychain held", got)
 			}
 		})
+	}
+}
+
+// requireSecurityLines runs each line through security -i, which is how the
+// test creates and locks its keychain without putting the password in argv.
+// A line that carries the password is not passed as the secret to check: the
+// output of a setup command is not what this test is about, and the unlock
+// call below is the one whose output must stay clean.
+func requireSecurityLines(t *testing.T, lines ...string) {
+	t.Helper()
+	for _, line := range lines {
+		label := strings.Fields(line)[0] + " via security -i"
+		if _, _, code := securityRun(t, label, "", line+"\n", "-i"); code != 0 {
+			t.Fatalf("%s exited %d; security -i did not accept a setup line", label, code)
+		}
+	}
+}
+
+// lineWord quotes one word of a security -i line. It is written here rather
+// than taken from the production quoteLine so that broken production quoting
+// is caught by the unlock assertions instead of being reused to build the
+// setup the test starts from.
+func lineWord(word string) string {
+	if word != "" && !strings.ContainsAny(word, " \t\"'\\") {
+		return word
+	}
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(word) + `"`
+}
+
+// userSearchList is the developer's user keychain search list, which
+// create-keychain changes; the test puts it back so a run leaves no trace.
+func userSearchList(t *testing.T) []string {
+	t.Helper()
+	out, _, code := securityRun(t, "list-keychains", "", "", "list-keychains", "-d", "user")
+	if code != 0 {
+		t.Fatalf("list-keychains exited %d", code)
+	}
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.Trim(strings.TrimSpace(line), `"`); line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths
+}
+
+// removeKeychainAndRestore deletes the throwaway keychain and sets the user
+// search list back to what it was. Both are best effort: a cleanup failure is
+// logged, never fatal, so it cannot mask the test's own result.
+func removeKeychainAndRestore(t *testing.T, keychain string, before []string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), securityDeadline)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "security", "delete-keychain", keychain).Run(); err != nil {
+		t.Logf("delete-keychain %s: %v; remove it by hand if it stays in the search list", keychain, err)
+	}
+	if len(before) > 0 {
+		args := append([]string{"list-keychains", "-d", "user", "-s"}, before...)
+		if err := exec.CommandContext(ctx, "security", args...).Run(); err != nil {
+			t.Logf("restore the user keychain search list: %v", err)
+		}
 	}
 }
 
