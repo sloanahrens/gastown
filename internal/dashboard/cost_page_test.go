@@ -34,7 +34,7 @@ func TestCostPanelReplacesTheDeepSeekAndUsagePanels(t *testing.T) {
 	cost := pageFunc(t, "renderCost")
 	for _, want := range []string{
 		// All three parts, in the order the panel reads: DeepSeek, GCP, Usage.
-		`costSpend(spendBox, d, r)`,
+		`costSpend(spendBox, d, r, s.cost_charts && s.cost_charts.headline)`,
 		`costGCP(box, s.cloud)`,
 		`costUsage(box, u, s)`,
 		// Neither a spend report nor usage records is one line.
@@ -285,12 +285,12 @@ func TestCostPanelKeepsEveryDeepSeekField(t *testing.T) {
 
 	spend := pageFunc(t, "costSpend")
 	for _, want := range []string{
-		`add(money(d.balance), "balance"`,
-		`"spent (sampled" + (since ? " since " + since[0] : "") + ")"`,
-		`add(money(d.spent_total), "spent since top-up")`,
-		`"last 1h"`,
-		`"last 24h"`,
-		`"runway"`,
+		`add(money(d.balance), "DeepSeek balance"`,
+		`"DeepSeek spent (sampled" + (since ? " since " + since[0] : "") + ")"`,
+		`add(money(d.spent_total), "DeepSeek spent since top-up")`,
+		`"DeepSeek last 1h"`,
+		`"DeepSeek last 24h"`,
+		`"DeepSeek runway"`,
 		`money(d.cash) + " cash + " + money(d.credit) + " credit"`,
 		`"credit lasts ~" + cr.toFixed(1) + "d, then cash"`,
 		`Object.entries(d.per_day || {})`,

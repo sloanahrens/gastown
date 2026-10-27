@@ -29,7 +29,7 @@ func TestSpendPanelShowsCashVersusCreditAndTheCreditEvents(t *testing.T) {
 		`" +" + money(c.amount)`,
 		// the spent tile reads the ledger and names where it starts.
 		`d.spent_ledger != null`,
-		`"spent (sampled" + (since ? " since " + since[0] : "") + ")"`,
+		`"DeepSeek spent (sampled" + (since ? " since " + since[0] : "") + ")"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("costSpend does not draw the credit view: no %q", want)
@@ -63,7 +63,7 @@ func TestSpendPanelToleratesAReportWithoutTheCreditFields(t *testing.T) {
 		// credits must be an array before it is read.
 		`Array.isArray(d.credits) ?`,
 		// the old tile stays only when there is no ledger total.
-		`} else add(money(d.spent_total), "spent since top-up")`,
+		`} else add(money(d.spent_total), "DeepSeek spent since top-up")`,
 		// a ledger_since that is not a date is left out of the label.
 		`/^\d{4}-\d{2}-\d{2}/.exec(String(d.ledger_since || ""))`,
 		// no runway number, no runway line.

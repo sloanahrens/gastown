@@ -2466,26 +2466,29 @@ function renderForgejo(s) {
 }
 
 // The DeepSeek lines of the Cost panel, drawn into box from the spend report d
-// and the status r of the read that brought it. Returns the report's own words
-// for the panel's caption: the ledger's last sample and the read's age.
-function costSpend(box, d, r) {
+// and the status r of the read that brought it. The headline row carries the
+// Claude plan-equivalent dollars beside them from h, the server's CostHeadline.
+// Returns the report's own words for the panel's caption: the ledger's last
+// sample and the read's age.
+function costSpend(box, d, r, h) {
   // No spend command is configured at all — no reader, so no status either —
   // which is not the same as one that failed or has not answered yet (gt-q6h8e).
   if (!d) { box.append(el("div", "empty", r ? "unavailable — the spend read failed" : "no spend report")); return []; }
   const live = d.live || {};
   const kv = el("div", "kv");
   const add = (v, k, cls) => { const x = el("div"); x.append(el("b", cls || "", v), el("span", "", k)); kv.append(x); };
-  add(money(d.balance), "balance", live.available === false ? "badc" : "");
+  add(money(d.balance), "DeepSeek balance", live.available === false ? "badc" : "");
   // Spent is the sum of the sampled drops from ledger_since; only a report with
   // no ledger total falls back to spent_total.
   if (d.spent_ledger != null) {
     const since = /^\d{4}-\d{2}-\d{2}/.exec(String(d.ledger_since || ""));
-    add(money(d.spent_ledger), "spent (sampled" + (since ? " since " + since[0] : "") + ")");
-  } else add(money(d.spent_total), "spent since top-up");
-  add(d.pace_1h ? money(d.pace_1h.per_hour) + "/h" : "–", "last 1h");
-  add(d.pace_24h ? money(d.pace_24h.per_hour) + "/h" : "–", "last 24h");
+    add(money(d.spent_ledger), "DeepSeek spent (sampled" + (since ? " since " + since[0] : "") + ")");
+  } else add(money(d.spent_total), "DeepSeek spent since top-up");
+  add(d.pace_1h ? money(d.pace_1h.per_hour) + "/h" : "–", "DeepSeek last 1h");
+  add(d.pace_24h ? money(d.pace_24h.per_hour) + "/h" : "–", "DeepSeek last 24h");
   const rw = d.runway_days_at_24h_pace;
-  add(rw == null ? "–" : rw.toFixed(1) + "d", "runway", rw != null && rw < 3 ? "badc" : rw != null && rw < 7 ? "warnc" : "");
+  add(rw == null ? "–" : rw.toFixed(1) + "d", "DeepSeek runway", rw != null && rw < 3 ? "badc" : rw != null && rw < 7 ? "warnc" : "");
+  costClaudeHeadline(kv, h);
   box.append(kv);
   // Cash and credit under the balance, how long the credit alone covers the 24h
   // rate on the same line: granted credit is not money paid in, and the two are
@@ -2541,6 +2544,27 @@ function costSpend(box, d, r) {
   if (live.ok === false) box.append(el("div", "badc", "live balance unreachable; showing the ledger"));
   if (d.watcher_pid == null || d.watcher_pid === "") box.append(el("div", "badc", "spend watcher is not running"));
   return [d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null];
+}
+
+// costClaudeHeadline draws the Claude plan-equivalent dollars into kv, the
+// headline row beside the DeepSeek figures: today's spend and the last 24
+// hours' hourly rate, priced by the server from the same samples the charts
+// draw. A series the server could not build is said on the tile, never drawn as
+// a zero that reads as a plan nobody used (gt-iazpv).
+function costClaudeHeadline(kv, h) {
+  const name = (h && h.name) || "Claude, plan-equivalent estimate";
+  const tile = el("div");
+  if (!h || h.why) {
+    tile.append(el("b", "empty", "not available"), el("span", "", name + " — " + ((h && h.why) || "the series has not been read yet")));
+    kv.append(tile);
+    return;
+  }
+  const parts = [
+    h.today != null ? "~" + money(h.today) + " today" : "– today",
+    h.per_hour_24h != null ? "~" + money(h.per_hour_24h) + "/h last 24h" : "– last 24h",
+  ];
+  tile.append(el("b", "", parts.join(" · ")), el("span", "", name + (h.hours_read > 0 && h.hours_read < 24 ? " · " + h.hours_read + " of 24 hours read" : "")));
+  kv.append(tile);
 }
 
 function sec(v) { return v == null ? "–" : fmtDur(v); }
@@ -3236,8 +3260,8 @@ function costUsage(box, u, s) {
   const byClass = u.by_class_model || [], deep = u.deep_review_runs || [], top = u.top_beads || [], over = u.over20 || [];
   const est = byClass.filter(r => isDeepSeek(r.model)).reduce((sum, r) => sum + (r.est_cost_usd || 0), 0);
   const caption = {
-    text: "est. " + money(est) + " · " + over.length + " over 20m",
-    title: "estimated DeepSeek spend over the last " + (u.window || "24h") + "; beads that ran over twenty minutes in the last 48 hours",
+    text: "DeepSeek est. " + money(est) + " · " + over.length + (over.length === 1 ? " bead" : " beads") + " over 20m",
+    title: "DeepSeek spend estimated from the usage records over the last " + (u.window || "24h") + "; beads that ran over twenty minutes in the last 48 hours",
     warn: over.length > 0,
   };
 
@@ -4079,7 +4103,7 @@ function renderCost(s) {
     costGCP(box, s.cloud);
     return;
   }
-  const spendWords = costSpend(spendBox, d, r);
+  const spendWords = costSpend(spendBox, d, r, s.cost_charts && s.cost_charts.headline);
   costDailyChart(spendBox, s.cost_charts && s.cost_charts.daily);
   costHourlyChart(spendBox, s.cost_charts && s.cost_charts.hourly);
   costClaudePlan(box, s.claude_plan);

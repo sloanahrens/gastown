@@ -12,12 +12,14 @@ import (
 // days ending today, each a bar or a gap.
 const costDailyDays = 7
 
-// CostCharts is what the Cost panel draws its two charts from. The page draws
-// only these values: every bar, the limit line and every label are decided
-// here, so the unit tests can check them from fixture records.
+// CostCharts is what the Cost panel draws its two charts and its headline's
+// Claude figures from. The page draws only these values: every bar, the limit
+// line, every label and every dollar are decided here, so the unit tests can
+// check them from fixture records.
 type CostCharts struct {
-	Daily  *CostChart `json:"daily,omitempty"`
-	Hourly *CostChart `json:"hourly,omitempty"`
+	Headline *CostHeadline `json:"headline,omitempty"`
+	Daily    *CostChart    `json:"daily,omitempty"`
+	Hourly   *CostChart    `json:"hourly,omitempty"`
 }
 
 // CostChart is one bar chart: its bars in order, the Claude series on the same
@@ -73,9 +75,23 @@ type CostLine struct {
 func BuildCostCharts(now time.Time, perDay map[string]float64, hours []SpendHour, skipped int, plan *ClaudePlan, samples PlanSamples) CostCharts {
 	weeklyUSD := claudeWeekUSD(plan)
 	return CostCharts{
-		Daily:  buildDailyChart(now, perDay, plan, samples, weeklyUSD),
-		Hourly: buildHourlyChart(hours, skipped, samples, weeklyUSD),
+		Headline: claudeHeadline(now, samples, weeklyUSD),
+		Daily:    buildDailyChart(now, perDay, plan, samples, weeklyUSD),
+		Hourly:   buildHourlyChart(hours, skipped, samples, weeklyUSD),
 	}
+}
+
+// costDailyBuckets is the daily chart's buckets: the seven local calendar days
+// ending on now's day.
+func costDailyBuckets(now time.Time) []costBucket {
+	y, m, d := now.In(time.Local).Date()
+	buckets := make([]costBucket, 0, costDailyDays)
+	for i := costDailyDays - 1; i >= 0; i-- {
+		start := time.Date(y, m, d-i, 0, 0, 0, 0, time.Local)
+		day := start.Format("2006-01-02")
+		buckets = append(buckets, costBucket{Label: day[len(day)-5:], Name: day, Start: start})
+	}
+	return buckets
 }
 
 // buildDailyChart draws the seven calendar days ending today, local time. A day
@@ -87,23 +103,18 @@ func buildDailyChart(now time.Time, perDay map[string]float64, plan *ClaudePlan,
 	if len(perDay) == 0 {
 		return nil
 	}
-	y, m, d := now.In(time.Local).Date()
 	chart := &CostChart{Bars: make([]CostBar, 0, costDailyDays)}
-	buckets := make([]costBucket, 0, costDailyDays)
+	buckets := costDailyBuckets(now)
 	var words []string
-	for i := costDailyDays - 1; i >= 0; i-- {
-		start := time.Date(y, m, d-i, 0, 0, 0, 0, time.Local)
-		day := start.Format("2006-01-02")
-		label := day[len(day)-5:]
-		buckets = append(buckets, costBucket{Label: label, Name: day, Start: start})
-		spent, ok := perDay[day]
+	for _, b := range buckets {
+		spent, ok := perDay[b.Name]
 		if !ok {
-			chart.Bars = append(chart.Bars, CostBar{Label: label, Gap: true, Title: day + " no figure"})
+			chart.Bars = append(chart.Bars, CostBar{Label: b.Label, Gap: true, Title: b.Name + " no figure"})
 			continue
 		}
-		bar := CostBar{Label: label, Value: max(spent, 0), Title: day + " " + money(spent)}
+		bar := CostBar{Label: b.Label, Value: max(spent, 0), Title: b.Name + " " + money(spent)}
 		if spent < 0 {
-			bar.Title = day + " +" + money(-spent) + " added"
+			bar.Title = b.Name + " +" + money(-spent) + " added"
 		}
 		chart.Bars = append(chart.Bars, bar)
 		words = append(words, bar.Title)
@@ -120,7 +131,7 @@ func buildDailyChart(now time.Time, perDay map[string]float64, plan *ClaudePlan,
 		chart.Limit = &CostLine{Value: daily, Label: "weekly limit " + money(daily) + "/day · reset at " + pct}
 		aria += ". Weekly limit " + money(daily) + " a day. Projected at reset " + pct + " of the weekly limit"
 	}
-	lastEnd := time.Date(y, m, d+1, 0, 0, 0, 0, time.Local)
+	lastEnd := buckets[len(buckets)-1].Start.AddDate(0, 0, 1)
 	chart.Claude, chart.ClaudeWhy = claudeCostSeries(buckets, lastEnd, samples, weeklyUSD)
 	if chart.Claude != nil {
 		aria += claudeSeriesAria(chart.Claude)
