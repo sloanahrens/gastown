@@ -77,16 +77,14 @@ func AuthorKind(branch string) string {
 	return AuthorKindCrew
 }
 
-// AttributedRecord is one review record with the author the review attribution
-// derived for it: the seat that wrote the branch its bead names, and that
-// seat's kind. A table reads the kind from here and never from a branch of its
+// AttributedRecord is one review record with the author kind the review
+// attribution derived for it: the kind of the seat that wrote the branch its
+// bead names. A table reads the kind from here and never from a branch of its
 // own, so every table counts the one derived author_kind (gt-b9j3o.14).
 type AttributedRecord struct {
 	Record land.ReviewRecord
-	// Author is the seat the branch names, "" when the bead names none.
-	Author string
-	// AuthorKind is that seat's kind, AuthorKindUnknown when the bead names no
-	// branch this town uses.
+	// AuthorKind is the branch's seat kind, AuthorKindUnknown when the bead
+	// names no branch this town uses.
 	AuthorKind string
 }
 
@@ -138,7 +136,7 @@ func AttributeRecords(ctx context.Context, env Env, records []land.ReviewRecord)
 		}
 		attributed := AttributeReviews(reviews, beads)
 		for i, rec := range groups[rig] {
-			out = append(out, AttributedRecord{Record: rec, Author: attributed[i].Author, AuthorKind: attributed[i].AuthorKind})
+			out = append(out, AttributedRecord{Record: rec, AuthorKind: attributed[i].AuthorKind})
 		}
 	}
 	return out, nil

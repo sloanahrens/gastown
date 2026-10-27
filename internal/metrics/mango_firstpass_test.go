@@ -462,8 +462,8 @@ func TestMangoFirstPassSectionReadsBeadsInChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MangoFirstPassSection: %v", err)
 	}
-	if want := beads / reviewBeadChunk; len(calls) < want {
-		t.Errorf("bd show ran %d time(s), want the %d chunks' reads", len(calls), want+1)
+	if want := (beads + reviewBeadChunk - 1) / reviewBeadChunk; len(calls) != want {
+		t.Errorf("bd show ran %d time(s), want one read per chunk of %d ids (%d)", len(calls), reviewBeadChunk, want)
 	}
 	for i, asked := range calls {
 		if len(asked) > reviewBeadChunk {
