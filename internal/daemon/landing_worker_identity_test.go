@@ -3,7 +3,10 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 // overseerTestName is the human identity the landing worker fixtures record:
@@ -60,5 +63,22 @@ func TestNewRigLandingWorkerRefusesATownWithNoOverseerIdentity(t *testing.T) {
 	}
 	if _, err := d.newRigLandingWorker("gastown"); err == nil {
 		t.Fatal("a town with no overseer identity built a landing worker; it could not check a submission's actor")
+	}
+	// The refusal is an outage the operator must hear about: the rig lands
+	// nothing until the identity is readable, so the alarm is raised under the
+	// rig's own key and says which rig stopped.
+	rec, ok := d.notifier.(*notifyfake.Recorder)
+	if !ok {
+		t.Fatalf("daemon notifier is %T, want the recording fake", d.notifier)
+	}
+	esc := rec.Escalations()
+	if len(esc) != 1 {
+		t.Fatalf("escalations = %+v, want exactly one alarm for the unreadable identity", esc)
+	}
+	if got, want := esc[0].Escalation.Fingerprint, "landing-human-identity:gastown"; got != want {
+		t.Errorf("alarm fingerprint = %q, want %q", got, want)
+	}
+	if reason := esc[0].Escalation.Reason; !strings.Contains(reason, "rig gastown") || !strings.Contains(reason, "nothing is landing") {
+		t.Errorf("alarm reason = %q, want it to name rig gastown and say nothing is landing", reason)
 	}
 }
