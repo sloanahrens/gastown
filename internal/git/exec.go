@@ -14,12 +14,13 @@ import (
 
 // gitCall is one git invocation: the arguments after "git" (any --git-dir
 // prefix already applied), the directory it runs in ("" means the process
-// cwd), extra environment on top of the process's own, stdin, and a deadline
-// (0 means none).
+// cwd), extra environment on top of the process's own, the keys taken out of
+// it, stdin, and a deadline (0 means none).
 type gitCall struct {
 	dir     string
 	args    []string
 	env     []string
+	unset   []string
 	stdin   string
 	timeout time.Duration
 }
@@ -59,8 +60,8 @@ func realRun(c gitCall) (string, string, error) {
 	}
 	cmd := exec.CommandContext(ctx, "git", c.args...)
 	cmd.Dir = c.dir
-	if len(c.env) > 0 {
-		cmd.Env = append(os.Environ(), c.env...)
+	if len(c.env) > 0 || len(c.unset) > 0 {
+		cmd.Env = callEnv(c.env, c.unset)
 	}
 	if c.stdin != "" {
 		cmd.Stdin = strings.NewReader(c.stdin)
@@ -86,6 +87,40 @@ func realRun(c gitCall) (string, string, error) {
 		return stdout, stderr, errTimedOut
 	}
 	return stdout, stderr, err
+}
+
+// callEnv is the environment a git call runs with: the process's own, less the
+// keys the call unsets, plus the variables it adds. A key in both keeps the
+// added value, because os/exec runs the last entry for a key.
+//
+// Unsetting is a removal rather than an empty value on purpose: git reads an
+// empty GIT_DIR as the current directory (it reports "not a git repository"
+// with an empty path) and an empty GIT_WORK_TREE as an invalid path, so
+// exporting them empty breaks every command instead of clearing them.
+func callEnv(extra, unset []string) []string {
+	env := os.Environ()
+	if len(unset) > 0 {
+		kept := make([]string, 0, len(env))
+		for _, entry := range env {
+			key, _, _ := strings.Cut(entry, "=")
+			if containsKey(unset, key) {
+				continue
+			}
+			kept = append(kept, entry)
+		}
+		env = kept
+	}
+	return append(env, extra...)
+}
+
+// containsKey reports whether keys holds key.
+func containsKey(keys []string, key string) bool {
+	for _, k := range keys {
+		if k == key {
+			return true
+		}
+	}
+	return false
 }
 
 // exitCode returns the exit status err carries, or -1 when it carries none
