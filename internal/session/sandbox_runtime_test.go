@@ -456,3 +456,18 @@ func TestBuildRuntimeArchiveFailsWhenThePromptWillNotRenderNamingTheFile(t *test
 		t.Errorf("error does not name the prompt file: %v", err)
 	}
 }
+
+// A renderer that reports success but leaves no file cannot be uploaded: the build refuses and names the
+// file, rather than uploading an empty or missing prompt (gt-uvwi6).
+func TestBuildRuntimeArchiveRefusesARenderThatWritesNoFileNamingTheFile(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	silent := func(_, _, _, _, _ string, _ config.SystemPromptTarget) error { return nil }
+	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, silent)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("error = %v, want the missing rendered file wrapped", err)
+	}
+	if !strings.Contains(err.Error(), "system-prompt-"+openshellTestPolecat+".md") {
+		t.Errorf("error does not name the prompt file: %v", err)
+	}
+}
