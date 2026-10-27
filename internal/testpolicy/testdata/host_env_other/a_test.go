@@ -5,10 +5,11 @@ import (
 	"testing"
 )
 
+// pathEnvVariable names PATH, which is not the developer's own environment.
+const pathEnvVariable = "PATH"
+
 func TestOther(t *testing.T) {
 	t.Parallel()
 	_ = os.Getenv("PATH")
-	_ = os.Getenv(name())
+	_ = os.Getenv(pathEnvVariable)
 }
-
-func name() string { return "PATH" }

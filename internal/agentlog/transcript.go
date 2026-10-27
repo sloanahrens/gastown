@@ -60,15 +60,24 @@ func claudeProjectDirFor(workDir string) (string, error) {
 // for that whole seat class (gt-jxfe). The town's root is named by the caller,
 // because the daemon's own environment does not carry the seats' config dir.
 func claudeProjectDirsFor(townRoot, workDir string) ([]string, error) {
+	return claudeProjectDirsWith(townRoot, workDir, config.ClaudeConfigDir, os.UserHomeDir)
+}
+
+// claudeProjectDirsWith is claudeProjectDirsFor over the process environment the
+// caller names, so a caller with a config dir and home of its own — a test,
+// above all — does not read the process environment. A home that cannot be
+// resolved names no legacy root; the town's root and the caller's config dir
+// still apply.
+func claudeProjectDirsWith(townRoot, workDir string, configDirFor, userHomeDir func() (string, error)) ([]string, error) {
 	hash, err := claudeProjectHashFor(workDir)
 	if err != nil {
 		return nil, err
 	}
-	configDir, err := config.ClaudeConfigDir()
+	configDir, err := configDirFor()
 	if err != nil {
 		return nil, fmt.Errorf("resolving Claude config dir: %w", err)
 	}
-	home, herr := os.UserHomeDir()
+	home, herr := userHomeDir()
 	if herr != nil {
 		home = ""
 	}

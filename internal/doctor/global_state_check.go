@@ -66,8 +66,9 @@ func (c *GlobalStateCheck) Run(ctx *CheckContext) *CheckResult {
 		details = append(details, "Machine ID: "+s.MachineID)
 	}
 
+	home, _ := os.UserHomeDir()
 	rcPath := shell.RCFilePath(shell.DetectShell())
-	if hasShellIntegration(rcPath) {
+	if hasShellIntegration(rcPath, home) {
 		details = append(details, "Shell integration: installed ("+rcPath+")")
 	} else {
 		warnings = append(warnings, "Shell integration not installed")
@@ -77,7 +78,7 @@ func (c *GlobalStateCheck) Run(ctx *CheckContext) *CheckResult {
 	if _, err := os.Stat(hookPath); err == nil {
 		details = append(details, "Hook script: present")
 	} else {
-		if hasShellIntegration(rcPath) {
+		if hasShellIntegration(rcPath, home) {
 			errors = append(errors, "Hook script missing but shell integration installed")
 		}
 	}
@@ -103,18 +104,21 @@ func (c *GlobalStateCheck) Run(ctx *CheckContext) *CheckResult {
 	return result
 }
 
-func hasShellIntegration(rcPath string) bool {
+// hasShellIntegration reports whether rcPath or a file it sources carries the
+// shell integration. home is the directory a "~" or $HOME in a source directive
+// stands for.
+func hasShellIntegration(rcPath, home string) bool {
 	// Look for the official marker written by `gt install --shell`, or a manual
 	// source of the hook script.
 	markers := []string{"Gas Town Integration", "shell-hook.sh"}
-	return checkSourceChain(rcPath, markers, make(map[string]bool), 0)
+	return checkSourceChain(rcPath, home, markers, make(map[string]bool), 0)
 }
 
 // checkSourceChain reads filePath, checks for any marker string, and
 // recursively follows source/. directives found in the file. This handles
 // users with modular shell configs (e.g. .zshrc sources profile-specific
 // files that source the Gas Town hook script).
-func checkSourceChain(filePath string, markers []string, visited map[string]bool, depth int) bool {
+func checkSourceChain(filePath, home string, markers []string, visited map[string]bool, depth int) bool {
 	if depth > 5 {
 		return false
 	}
@@ -140,12 +144,11 @@ func checkSourceChain(filePath string, markers []string, visited map[string]bool
 		}
 	}
 
-	homeDir, _ := os.UserHomeDir()
-	vars := extractShellVars(content, homeDir)
+	vars := extractShellVars(content, home)
 
 	for _, line := range strings.Split(content, "\n") {
-		for _, sourced := range resolveSourcePaths(line, homeDir, vars) {
-			if checkSourceChain(sourced, markers, visited, depth+1) {
+		for _, sourced := range resolveSourcePaths(line, home, vars) {
+			if checkSourceChain(sourced, home, markers, visited, depth+1) {
 				return true
 			}
 		}

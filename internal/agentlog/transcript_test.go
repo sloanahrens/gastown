@@ -1,17 +1,22 @@
 package agentlog
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/config"
 )
 
 // testEpoch dates every transcript fixture in this package.
 var testEpoch = time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+
+// The failures a process environment of the test's own can report.
+var (
+	errNoConfigDir = errors.New("no config dir")
+	errNoHome      = errors.New("no home")
+)
 
 func TestClaudeProjectDirFor(t *testing.T) {
 	t.Parallel()
@@ -220,30 +225,48 @@ func TestLatestTranscript_FindsTownConfigTranscript(t *testing.T) {
 	}
 }
 
-// TestClaudeProjectDirsFor_ResolvesProcessRoots pins the exported entry
-// points to the process's own config dir and home.
-func TestClaudeProjectDirsFor_ResolvesProcessRoots(t *testing.T) {
+// TestClaudeProjectDirsWith_ResolvesTheNamedRoots pins the roots to the config
+// dir and home the caller names, so the expected values are the test's own
+// rather than the process's.
+func TestClaudeProjectDirsWith_ResolvesTheNamedRoots(t *testing.T) {
 	t.Parallel()
 	workDir := filepath.Join(t.TempDir(), "polecats", "onyx", "gastown")
-	configDir, err := config.ClaudeConfigDir()
-	if err != nil {
-		t.Fatalf("config.ClaudeConfigDir: %v", err)
-	}
-	//testpolicy:allow no-host-env — the expected roots include the real home, the same value claudeProjectDirsFor resolves; nothing is written there
-	home, _ := os.UserHomeDir()
+	const configDir, home = "/cfg", "/home/tester"
 	want := roots(t, workDir, configDir, home)
 
-	got, err := claudeProjectDirsFor("", workDir)
+	got, err := claudeProjectDirsWith("", workDir, func() (string, error) { return configDir, nil }, func() (string, error) { return home, nil })
 	if err != nil {
-		t.Fatalf("claudeProjectDirsFor: %v", err)
+		t.Fatalf("claudeProjectDirsWith: %v", err)
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Errorf("claudeProjectDirsFor = %q, want %q", got, want)
+		t.Errorf("claudeProjectDirsWith = %q, want %q", got, want)
 	}
-	if primary, err := ClaudeProjectDirFor(workDir); err != nil || primary != want[0] {
-		t.Errorf("ClaudeProjectDirFor = %q, %v; want %q, nil", primary, err, want[0])
+
+	// A config dir that cannot be resolved is an error, not a guess.
+	if _, err := claudeProjectDirsWith("", workDir, func() (string, error) { return "", errNoConfigDir }, func() (string, error) { return home, nil }); err == nil {
+		t.Error("claudeProjectDirsWith resolved an unreadable config dir")
 	}
-	// workDir is fresh, so neither root holds a transcript for it.
+	// A home that cannot be resolved names no legacy root; the config dir's
+	// root still resolves.
+	got, err = claudeProjectDirsWith("", workDir, func() (string, error) { return configDir, nil }, func() (string, error) { return "", errNoHome })
+	if err != nil {
+		t.Fatalf("claudeProjectDirsWith with no home: %v", err)
+	}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Errorf("claudeProjectDirsWith with no home = %q, want only %q", got, want[0])
+	}
+}
+
+// TestClaudeProjectDirFor_ResolvesAgainstTheProcess pins the exported entry
+// points to a resolved root for a fresh work dir; what that root is belongs to
+// the process, and no assertion here depends on it.
+func TestClaudeProjectDirFor_ResolvesAgainstTheProcess(t *testing.T) {
+	t.Parallel()
+	workDir := filepath.Join(t.TempDir(), "polecats", "onyx", "gastown")
+	if primary, err := ClaudeProjectDirFor(workDir); err != nil || primary == "" {
+		t.Errorf("ClaudeProjectDirFor = %q, %v; want a project dir, nil", primary, err)
+	}
+	// workDir is fresh, so no root holds a transcript for it.
 	if latest, err := LatestTranscript("", workDir); err != nil || latest != "" {
 		t.Errorf("LatestTranscript = %q, %v; want \"\", nil", latest, err)
 	}

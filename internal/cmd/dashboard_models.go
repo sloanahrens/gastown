@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/models"
 )
 
 // The header strip answers what the town is running on: the model the polecat
@@ -361,7 +362,7 @@ func modelRoleRows(in modelRoleInputs) []dashboard.ModelRole {
 	om.Model = omModelName(in.omBackend)
 	if om.Model == "" {
 		om.Note = "the om config could not be read or names no backend"
-	} else if want := in.table.wantBackend("om-review"); len(want) > 0 && !sameCommand(want, in.omBackend) {
+	} else if want := in.table.wantBackend("om-review"); len(want) > 0 && !models.SameCommand(want, in.omBackend) {
 		// The family is what the page shows; a table that differs only in
 		// flags shows the command itself, or the badge would read "sonnet vs
 		// sonnet".
@@ -394,25 +395,4 @@ func scheduledSling(p *config.PatrolsConfig, name string) *config.ScheduledSling
 		}
 	}
 	return nil
-}
-
-// sameCommand compares two reviewer commands word for word, a leading "~/"
-// standing for the home directory, which is how the table spells its paths.
-func sameCommand(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	home, _ := os.UserHomeDir()
-	expand := func(s string) string {
-		if home != "" && strings.HasPrefix(s, "~/") {
-			return filepath.Join(home, s[2:])
-		}
-		return s
-	}
-	for i := range a {
-		if expand(a[i]) != expand(b[i]) {
-			return false
-		}
-	}
-	return true
 }

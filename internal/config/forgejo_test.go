@@ -22,17 +22,12 @@ func writeTownSettings(t *testing.T, town, body string) {
 func TestForgejoDirDefaultsToHomeForgejo(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	//testpolicy:allow no-host-env — the default forgejo dir is under the real home by design; the test asserts that default and reads nothing else
-	home, err := os.UserHomeDir()
+	got, err := config.ForgejoDirFrom(town, fixedHome("/home/tester"))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("ForgejoDirFrom: %v", err)
 	}
-	got, err := config.ForgejoDir(town)
-	if err != nil {
-		t.Fatalf("ForgejoDir: %v", err)
-	}
-	if want := filepath.Join(home, "forgejo"); got != want {
-		t.Errorf("ForgejoDir = %q, want %q", got, want)
+	if want := "/home/tester/forgejo"; got != want {
+		t.Errorf("ForgejoDirFrom = %q, want %q", got, want)
 	}
 }
 
@@ -53,18 +48,19 @@ func TestForgejoDirExpandsTilde(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	writeTownSettings(t, town, `{"type":"town-settings","version":1,"forgejo":{"dir":"~/stacks/forgejo"}}`)
-	//testpolicy:allow no-host-env — the ~/stacks path is expanded against the real home; the expansion is the input under test
-	home, err := os.UserHomeDir()
+	got, err := config.ForgejoDirFrom(town, fixedHome("/home/tester"))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("ForgejoDirFrom: %v", err)
 	}
-	got, err := config.ForgejoDir(town)
-	if err != nil {
-		t.Fatalf("ForgejoDir: %v", err)
+	if want := filepath.Join("/home/tester", "stacks", "forgejo"); got != want {
+		t.Errorf("ForgejoDirFrom = %q, want %q", got, want)
 	}
-	if want := filepath.Join(home, "stacks", "forgejo"); got != want {
-		t.Errorf("ForgejoDir = %q, want %q", got, want)
-	}
+}
+
+// fixedHome is a home directory for a test's own use, in place of the
+// process's.
+func fixedHome(home string) func() (string, error) {
+	return func() (string, error) { return home, nil }
 }
 
 func TestForgejoDirRejectsUnknownKey(t *testing.T) {

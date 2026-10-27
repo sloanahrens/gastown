@@ -65,10 +65,11 @@ func ScanDirWithExemptions(dir string) ([]Violation, []Exemption, error) {
 		}
 	}
 	pkgVars := packageVars(prod)
+	consts := packageConsts(append(append([]*ast.File{}, prod...), tests...))
 	clocked := importsPath(prod, "github.com/jonboulle/clockwork")
 	var vs []Violation
 	for _, f := range tests {
-		vs = append(vs, checkTestFile(fset, f, pkgVars)...)
+		vs = append(vs, checkTestFile(fset, f, pkgVars, consts)...)
 	}
 	for _, f := range prod {
 		vs = append(vs, checkProdFile(fset, f, clocked)...)
@@ -106,6 +107,33 @@ func packageVars(files []*ast.File) map[string]bool {
 		}
 	}
 	return vars
+}
+
+// packageConsts returns the package-level constants that hold a string
+// literal, so a read like os.Getenv(lockEnvVar) is judged by the name the
+// constant holds. The parser resolves only the names declared in the file it
+// reads, so a constant used from another file of the package arrives here with
+// no object attached.
+func packageConsts(files []*ast.File) map[string]string {
+	consts := map[string]string{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, s := range gd.Specs {
+				vs, ok := s.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				if v, ok := constValue(vs); ok {
+					consts[vs.Names[0].Name] = v
+				}
+			}
+		}
+	}
+	return consts
 }
 
 func importsPath(files []*ast.File, path string) bool {

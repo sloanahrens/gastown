@@ -24,9 +24,10 @@ func TestScanDirFixtures(t *testing.T) {
 		"shebang_passthrough":   {RuleNoExecFiles, RuleNoExecFiles, RuleNoExecFiles}, // TrimPrefix, CutPrefix, Cut return the literal
 		"shebang_written":       {RuleNoExecFiles, RuleNoExecFiles},                  // a "#!" literal outside a comparison, even beside one
 		"global_swap":           {RuleNoGlobalSwap},
-		"host_env_reads":        {RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv}, // Getenv HOME, LookupEnv SHELL, UserHomeDir, UserConfigDir, UserCacheDir
+		"host_env_reads":        {RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv}, // Getenv HOME, LookupEnv SHELL, UserHomeDir, UserConfigDir, UserCacheDir, and HOME through a constant
 		"host_env_declared":     nil,
-		"host_env_other":        nil, // PATH, and a name passed as a variable the rule cannot read
+		"host_env_other":        nil,                            // PATH, and PATH through a constant, are not the developer's environment
+		"host_env_unjudged":     {RuleNoHostEnv, RuleNoHostEnv}, // a call and a variable name the scan cannot read
 		"global_shadow":         nil,
 		"global_blank":          nil,
 		"parallel_missing":      {RuleParallel},

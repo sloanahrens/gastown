@@ -54,7 +54,13 @@ func Remove() error {
 }
 
 func DetectShell() string {
-	return detectShell(os.Getenv("SHELL"))
+	return DetectShellFrom(os.Getenv)
+}
+
+// DetectShellFrom is DetectShell over getenv, so a caller with an environment of
+// its own — a test, above all — does not read the process environment.
+func DetectShellFrom(getenv func(string) string) string {
+	return detectShell(getenv("SHELL"))
 }
 
 // detectShell maps a $SHELL value to "zsh" or "bash", defaulting to zsh.
@@ -70,6 +76,12 @@ func detectShell(shell string) string {
 
 func RCFilePath(shell string) string {
 	home, _ := os.UserHomeDir()
+	return rcFilePath(shell, home)
+}
+
+// rcFilePath is RCFilePath against home, so a test with a home of its own does
+// not read the process environment.
+func rcFilePath(shell, home string) string {
 	switch shell {
 	case "bash":
 		return filepath.Join(home, ".bashrc")

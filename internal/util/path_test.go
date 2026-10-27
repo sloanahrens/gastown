@@ -1,21 +1,17 @@
 package util
 
 import (
-	"os"
 	"testing"
 )
 
+const testHome = "/home/tester"
+
 func TestExpandHome_TildePath(t *testing.T) {
 	t.Parallel()
-	//testpolicy:allow no-host-env — ExpandHome is checked against the real home; the expansion is the input under test
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("cannot determine home directory: %v", err)
-	}
-	got := ExpandHome("~/.claude-accounts/work")
-	want := home + "/.claude-accounts/work"
+	got := expandHome("~/.claude-accounts/work", testHome)
+	want := testHome + "/.claude-accounts/work"
 	if got != want {
-		t.Errorf("ExpandHome(~/.claude-accounts/work) = %q, want %q", got, want)
+		t.Errorf("expandHome(~/.claude-accounts/work) = %q, want %q", got, want)
 	}
 }
 
@@ -54,15 +50,19 @@ func TestExpandHome_Empty(t *testing.T) {
 
 func TestExpandHome_TildeSlash(t *testing.T) {
 	t.Parallel()
-	//testpolicy:allow no-host-env — ExpandHome is checked against the real home; the expansion is the input under test
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("cannot determine home directory: %v", err)
-	}
-	got := ExpandHome("~/")
-	want := home + "/"
+	got := expandHome("~/", testHome)
+	want := testHome + "/"
 	if got != want {
-		t.Errorf("ExpandHome(~/) = %q, want %q", got, want)
+		t.Errorf("expandHome(~/) = %q, want %q", got, want)
+	}
+}
+
+// TestExpandHome_ReadsTheProcessHome pins the exported wrapper to the package's
+// own home resolver: an expansion against it must be what ExpandHome returns.
+func TestExpandHome_ReadsTheProcessHome(t *testing.T) {
+	t.Parallel()
+	if got, want := ExpandHome("~/x"), expandHome("~/x", cachedHomeDir()); got != want {
+		t.Errorf("ExpandHome(~/x) = %q, want %q, the expansion over the process home", got, want)
 	}
 }
 

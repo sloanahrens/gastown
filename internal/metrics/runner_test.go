@@ -130,16 +130,17 @@ func TestRunnerOSRunnerFailureCarriesTheStderrTail(t *testing.T) {
 // TestRunnerOSRunnerExecsWithTheAllowlistedEnvironment checks the allowlist at
 // the exec, not just in childEnv: childEnv's ruling only protects a child if
 // the runner hands it to os/exec. childEnv's own tests pin which names the
-// ruling admits, so this one only proves the child receives it.
+// ruling admits, so this one only proves the child receives the value the
+// allowlist admits. PATH stands in for the developer's own HOME: it is on the
+// allowlist, and comparing the two takes no view of which host this runs on.
 func TestRunnerOSRunnerExecsWithTheAllowlistedEnvironment(t *testing.T) {
 	t.Parallel()
-	out, err := OSRunner(DefaultAllowEnv)(context.Background(), []string{"/bin/sh", "-c", `printf %s "$HOME"`})
+	out, err := OSRunner(DefaultAllowEnv)(context.Background(), []string{"/bin/sh", "-c", `printf %s "$PATH"`})
 	if err != nil {
 		t.Fatalf("OSRunner: %v", err)
 	}
-	//testpolicy:allow no-host-env — the child must echo the HOME it was given, and this process's HOME is the allowlisted value under test
-	if got, want := string(out), os.Getenv("HOME"); got != want {
-		t.Fatalf("the child's HOME = %q, want the allowlisted %q", got, want)
+	if got, want := string(out), os.Getenv("PATH"); got != want {
+		t.Fatalf("the child's PATH = %q, want the allowlisted %q", got, want)
 	}
 }
 
