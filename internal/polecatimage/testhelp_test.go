@@ -55,6 +55,9 @@ func newTestRun(t *testing.T) *testRun {
 			Published:      filepath.Join(root, "runtime", "polecat-image.published"),
 			Crane:          "crane",
 			PID:            4242,
+			Keep:           "3",
+			BuilderKeep:    "8GB",
+			CacheCap:       "10GB",
 		},
 		run: tr.record,
 		now: func() time.Time { return tr.now },
@@ -109,6 +112,19 @@ func (tr *testRun) wantArgs(t *testing.T, name string, want ...string) {
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("%s called with %q, want %q", name, got, want)
 	}
+}
+
+// wantCall fails unless some call to name carried exactly want as its arguments,
+// which pins a program's argv where the first call to it is not the one under
+// test.
+func (tr *testRun) wantCall(t *testing.T, name string, want ...string) {
+	t.Helper()
+	for _, c := range tr.callsTo(name) {
+		if strings.Join(c.args, " ") == strings.Join(want, " ") {
+			return
+		}
+	}
+	t.Errorf("no %s call carried %q; calls: %v", name, strings.Join(want, " "), callLines(tr, name))
 }
 
 // wantLogged fails unless the run logged want as a substring.

@@ -198,10 +198,10 @@ else
   fail "make -n polecat-image exits 0" "$pout"
 fi
 pcross=$(grep -c -F 'GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build' <<<"$pout" || true)
-if [[ "$pcross" == 1 ]] && grep -q -F './cmd/gt' <<<"$pout" && grep -q -F 'go run ./internal/polecat/bdbuild/cmd/build' <<<"$pout"; then
-  pass "polecat-image cross-compiles gt for linux/arm64 and builds bd through the bd build helper"
+if [[ "$pcross" == 2 ]] && grep -q -F './cmd/gt' <<<"$pout" && grep -q -F './plugins/polecat-image' <<<"$pout" && grep -q -F 'go run ./internal/polecat/bdbuild/cmd/build' <<<"$pout"; then
+  pass "polecat-image cross-compiles gt and the cache-trim helper for linux/arm64 and builds bd through the bd build helper"
 else
-  fail "polecat-image cross-compiles gt for linux/arm64 and builds bd through the bd build helper (builds: $pcross)" "$pout"
+  fail "polecat-image cross-compiles gt and the cache-trim helper for linux/arm64 and builds bd through the bd build helper (builds: $pcross)" "$pout"
 fi
 pdev=$(grep -c -F 'gastown-polecat:dev' <<<"$pout" || true)
 if grep -q -E 'docker build --platform linux/arm64 .*-t gastown-polecat:[^ ]+ -t gastown-polecat:dev -f deploy/polecat/Dockerfile deploy/polecat' <<<"$pout" && [[ "$pdev" == 1 ]]; then

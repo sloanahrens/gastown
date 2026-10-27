@@ -1,7 +1,8 @@
-// Package polecatimage is the Go port of the build, lock, publish and cleanup
-// part of plugins/polecat-image/run.sh (gt-tpg0p.5, gt-tpg0p.6). Each method is
-// one function of the script and keeps its messages; the prune port
-// (gt-tpg0p.7) finishes the program that script becomes a shim of.
+// Package polecatimage is the polecat-image plugin: it keeps the
+// gastown-polecat:dev image at the installed gt's commit, publishes what it
+// builds, and trims the image tags, build cache and per-rig cache volumes that
+// runs accumulate (gt-tpg0p.5 through gt-tpg0p.7). plugins/polecat-image/plugin.md
+// is the contract.
 package polecatimage
 
 import (
@@ -46,6 +47,16 @@ type Config struct {
 	// FailClosed makes a run that leaves the image unbuilt or unpublished fail
 	// instead of deferring (POLECAT_IMAGE_FAIL_CLOSED=1).
 	FailClosed bool
+	// Keep is how many of the newest per-commit tags a prune leaves, carried as
+	// the operator wrote it: a value that is not a count stops that prune alone,
+	// never a build or a publish (POLECAT_IMAGE_KEEP, gt-tpg0p.7).
+	Keep string
+	// BuilderKeep is how much of the build cache the trim leaves, as docker's
+	// --keep-storage value (POLECAT_IMAGE_BUILDER_KEEP).
+	BuilderKeep string
+	// CacheCap bounds each per-rig cache volume, as written: a value that is not
+	// a size stops the cache trim alone (POLECAT_CACHE_CAP).
+	CacheCap string
 	// PID is the pid a claim records and Cleanup compares; 0 means this
 	// process's.
 	PID int

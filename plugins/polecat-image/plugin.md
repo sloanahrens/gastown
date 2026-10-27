@@ -13,6 +13,7 @@ digest = true
 
 [execution]
 type = "script"
+binary = "bin/polecat-image"
 timeout = "15m"
 +++
 
@@ -26,7 +27,7 @@ plugin every sandbox sling would be refused until someone rebuilt the image by
 hand.
 
 `rebuild_gt` installs at most once per 30 minutes, so this plugin builds at most
-about 48 times a day; a build is two cross-compiles and a `docker build`, about
+about 48 times a day; a build is three cross-compiles and a `docker build`, about
 a minute.
 
 `make install` (`scripts/install-gt.sh`) runs this plugin itself: by default it
@@ -110,7 +111,9 @@ removal keeps the tag and logs docker's own reason, `kept ... (rmi failed:
 <reason>)`, so a container using the image and a real error read differently.
 With a registry set, the tag's `<registry>/…:<sha>` alias is untagged first (it
 would keep the image on disk); an alias docker refuses to untag keeps the tag.
-The build cache is not touched.
+The build cache is not touched. A `POLECAT_IMAGE_KEEP` that is not a whole
+number, or a tag listing docker cannot answer, keeps every tag and logs why; the
+rest of the run carries on.
 
 ## Build cache
 
@@ -135,20 +138,22 @@ the plugin brings each `gt-cache-<rig>` volume back under `POLECAT_CACHE_CAP`
 (default 10GB; a K, M, G, T or P suffix, so `512M` works):
 
 A volume with a container attached is skipped (`in use by N container(s);
-skipped`). A probe the plugin cannot read (daemon, listing, inspect, container
-query, the cap, the helper's answer) trims nothing and logs which one, so a
+skipped`). A probe the plugin cannot read trims nothing and logs which one, so a
 failure never reads as "nothing to do".
 
-Over the cap, a short-lived container from the polecat image deletes files
-under `go-build`, least recently used first, until the volume fits. "Used" is
-the later of a file's atime and mtime, because Go touches the mtime of a cache
-entry it reuses and a noatime mount leaves atime stale. `go/pkg/mod` goes only
-when the build cache alone cannot reach the cap. No volume is removed and no
-`docker volume prune` runs.
+Over the cap, a short-lived container of the polecat image runs
+`bin/polecat-image trim-cache` and deletes files under `go-build`, least recently
+used first, until the volume fits. The trim runs in the image because a docker
+volume has no host path: the volume is its only mount. "Used" is the later of a
+file's atime and mtime, because Go touches the mtime of a cache entry it reuses
+and a noatime mount leaves atime stale. `go/pkg/mod` goes only when the build
+cache alone cannot reach the cap. The helper follows no symlink, so it never
+removes a path outside the volume. No volume is removed and no `docker volume
+prune` runs.
 
-A sandbox that starts between the in-use check and the helper can lose cache
-entries it would have read. Go reads a missing entry as a miss and rebuilds it,
-so the window is accepted rather than locked.
+A sandbox starting between the in-use check and the helper can lose a cache
+entry it would have read; Go reads a miss and rebuilds it, so the window is
+accepted rather than locked.
 
 Every failure exits non-zero with the tail of the failing command: a commit the
 rig repo does not know, a failed build, an image that still carries another
@@ -157,10 +162,11 @@ failure: it exits 0 and prints why, so a plugin whose receipts show `deferred:`
 run after run is stuck behind that reason (Docker stopped, a sling that never
 ends) and the image stays stale, with the sandbox sling's refusal as the net.
 
-Run it directly:
+Run it directly; before building or syncing this plugin, read "Script entry
+point" in `plugins/README.md`:
 
 ```bash
-bash ~/gt/plugins/polecat-image/run.sh
+~/gt/plugins/polecat-image/bin/polecat-image
 ```
 
-Its tests are `run_test.sh` beside it (stubbed gt, docker, git, make, openshell).
+Tests: `go test ./internal/polecatimage/`.
