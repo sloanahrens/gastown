@@ -215,8 +215,9 @@ local merged-tree gate and the force-with-lease push to the target that this
 diagram used to show are gone.
 
 A rejection is written to the work bead and the bead goes back for rework, or
-to a person at `land.MaxReworkAttempts` rejections, where the loop is the
-failure rather than the refusal (gt-28ibg). Polecats never push main. Polecats manage their own lifecycle up to `gt done`;
+to a person at `land.MaxReworkAttempts` review rejections, where the loop is the
+failure rather than the refusal (gt-28ibg); a gate or policy refusal spends no
+attempt, since it is fixed before om reviews (gt-l3zak). Polecats never push main. Polecats manage their own lifecycle up to `gt done`;
 the daemon restarts a session only when it is dead while holding work.
 
 A work bead carrying `gt:install-now` asks for the installed `gt` binary to be

@@ -449,6 +449,27 @@ func TestSubmissionRejectionForAttemptPicksTheBlockOfThatAttempt(t *testing.T) {
 	}
 }
 
+// TestSubmissionRejectionForAttemptPrefersTheReviewBlock is gt-l3zak: a gate
+// block numbers itself among the gates, so it can carry the same count as a
+// later review round, and the review block is the one that opened it.
+func TestSubmissionRejectionForAttemptPrefersTheReviewBlock(t *testing.T) {
+	t.Parallel()
+	notes := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: string(land.RejectReview), Reason: "one",
+		Branch: "b", Target: "main", MR: "m"}) + "\n" +
+		land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: string(land.RejectGate), Reason: "two",
+			Branch: "b", Target: "main", MR: "m"})
+
+	rej, ok := rejectionForAttempt(notes, 1)
+	if !ok || rej.Kind != string(land.RejectReview) || rej.Reason != "one" {
+		t.Errorf("attempt 1 = %+v, %v; want the review block that opened it", rej, ok)
+	}
+	only := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: string(land.RejectGate), Reason: "two",
+		Branch: "b", Target: "main", MR: "m"})
+	if rej, ok := rejectionForAttempt(only, 1); !ok || rej.Kind != string(land.RejectGate) {
+		t.Errorf("attempt 1 = %+v, %v; want the gate block when no review block carries it", rej, ok)
+	}
+}
+
 func TestSubmissionParseReadsTheLogLine(t *testing.T) {
 	t.Parallel()
 	a := &submissionAdapter{}
