@@ -288,6 +288,66 @@ func TestAggregateOmStatsLogMeansIgnoreAbsentFigures(t *testing.T) {
 	wantOmStatsDay(t, stats, OmStatsDay{Day: "2026-10-16", Rejections: 1, Rate: 1, MeanScore: 0, Fallback: true})
 }
 
+// TestAggregateOmStatsLogCountsABouncedApproval covers gt-9wxef: an approving
+// verdict whose findings refuse it is logged as the review rejection it is, so
+// a fallback day counts it like a request for changes. Its reason names no
+// score and no finding count, so it enters neither mean, and a review that
+// returned no verdict is not counted at all.
+func TestAggregateOmStatsLogCountsABouncedApproval(t *testing.T) {
+	t.Parallel()
+	const major = "2026/10/15 10:00:00 landing_worker: [land] gt-major: rejected (review): a major finding blocks the landing at any score"
+	const minors = "2026/10/15 11:00:00 landing_worker: [land] gt-minors: rejected (review): more than 5 minor findings: fix the most important and resubmit"
+	cases := []struct {
+		name string
+		log  []string
+		want []OmStatsDay
+	}{
+		{
+			name: "a major finding bounces the approval",
+			log:  []string{major},
+			want: []OmStatsDay{{Day: "2026-10-15", Rejections: 1, Rate: 1, Fallback: true}},
+		},
+		{
+			name: "a critical finding bounces the approval",
+			log: []string{
+				"2026/10/15 10:00:00 landing_worker: [land] gt-critical: rejected (review): a critical finding blocks the landing at any score (target tip abc1234)",
+			},
+			want: []OmStatsDay{{Day: "2026-10-15", Rejections: 1, Rate: 1, Fallback: true}},
+		},
+		{
+			name: "both findings refusals count on one day",
+			log:  []string{major, minors},
+			want: []OmStatsDay{{Day: "2026-10-15", Rejections: 2, Rate: 1, Fallback: true}},
+		},
+		{
+			// A review that returned no verdict judged nothing, so it has
+			// no record and is not an om rejection (reviewlog.go).
+			name: "a review that returned no verdict is not one",
+			log: []string{
+				"2026/10/15 10:00:00 landing_worker: [land] gt-noverdict: rejected (review): om review returned no verdict on a green merged tree, so it does not land unreviewed: om exited 1",
+			},
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			log := strings.Join(tc.log, "\n") + "\n"
+			stats, err := AggregateOmStats(nil, strings.NewReader(log), time.Time{})
+			if err != nil {
+				t.Fatalf("AggregateOmStats: %v", err)
+			}
+			if len(stats.Days) != len(tc.want) {
+				t.Fatalf("days = %+v, want %+v", stats.Days, tc.want)
+			}
+			for i, want := range tc.want {
+				if stats.Days[i] != want {
+					t.Errorf("day %d = %+v, want %+v", i, stats.Days[i], want)
+				}
+			}
+		})
+	}
+}
+
 // TestAggregateOmStatsOrdersTopBeads: the ten-bead table keeps the highest
 // counts, then the lowest bead id, so the same fixture always prints the same
 // rows.
