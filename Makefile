@@ -168,6 +168,10 @@ POLE_SEED_DIR ?= $(CURDIR)/deploy/polecat/seed
 # The rig this repo is: its seed is the commit the image is built at, never a
 # pin, so a sandbox always has the modules of the gt it runs (gt-1rz2r).
 POLE_SEED_BUILD_RIG ?= gastown
+# Removing the old images from the sandbox nodes is opt-in, so a build changes
+# only the image registry unless the operator asks for the cluster too: set
+# POLE_NODE_PRUNE=1 to run polecat-node-prune after the build (gt-06ni7).
+POLE_NODE_PRUNE ?= 0
 
 # Cross-compile gt, bd and the plugin's cache-trim helper for the sandbox
 # image, then build it. The Dockerfile copies deploy/polecat/bin/, so that
@@ -188,7 +192,9 @@ polecat-image:
 	test -n "$$bd_commit" || { echo "polecat-image: the bd commit file is empty, so the image's bd cannot be labelled" >&2; exit 2; }; \
 	floor=$$(bash deploy/polecat/go-floor.sh rig $(POLE_RIG_GO_MODS)) || { echo "polecat-image: cannot read the rig Go floor from $(POLE_RIG_GO_MODS)" >&2; exit 2; }; \
 	docker build --platform linux/arm64 --label org.gastown.gt-commit=$(POLE_COMMIT) --label org.gastown.bd-commit="$$bd_commit" --build-arg GO_FLOOR="$$floor" -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
+ifeq ($(POLE_NODE_PRUNE),1)
 	@$(MAKE) --no-print-directory polecat-node-prune
+endif
 
 # polecat-seed-stage writes POLE_SEED_DIR: each pinned rig at its pin, and
 # POLE_SEED_BUILD_RIG at POLE_COMMIT. The Dockerfile bind-mounts the directory for
