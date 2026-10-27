@@ -15,11 +15,22 @@ recomputed exactly as `land.RiskPaths` does: the paths `git diff --name-only
 sorted. Every record's `risk_paths` is consistent with the bead: a record has
 paths exactly when the bead carries `gt:overseer-review-wanted`.
 
-Two differences from the live line are known and do not change what the plan
-reads:
+The test holds the copy to the ledger's own shape, so it cannot drift into a
+reconstruction again:
+
+- every line is re-encoded byte for byte by `land.LandingRecord`, the record
+  the landing worker writes, which pins field order, the omitted `risk_paths`
+  and every value's JSON spelling;
+- each record's `base` is the previous record's `landed_commit`, so the lines
+  are one contiguous run of the ledger;
+- every record names the `gastown` rig, and `landed_at` rises in ledger order.
+
+A line edited by hand fails one of those before the job sees it.
+
+Two differences in value are known; neither changes what the plan reads:
 
 - `landed_at` carries whole seconds, which is the precision the bead's note
-  records (`time.RFC3339`); a live line has nanoseconds.
+  records (`time.RFC3339`); a live line may carry a fraction.
 - `polecat_secs`, `polecat_attempts` and `polecat_lower_bound` are absent. The
   note does not carry the spans they are read from, and the plan and the run
   note never read them.

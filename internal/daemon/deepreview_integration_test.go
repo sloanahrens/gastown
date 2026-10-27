@@ -12,6 +12,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/deepreview"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // deepReviewRunCap bounds the runs of the shadow job on the real ledger's
@@ -27,6 +30,12 @@ var deepReviewCopyNow = time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 
 // deepReviewCopyRig is the rig whose ledger the copy holds.
 const deepReviewCopyRig = "gastown"
+
+// deepReviewSliceFiles is the row bound the runs below set on the job: three
+// rows a run, so the copy's risky landings take three runs and the cursor has
+// to cross two run-bead notes to reach the end. It bounds the job, not the
+// expectations: the rows each run reviews are derived from the copy.
+const deepReviewSliceFiles = 3
 
 // deepReviewRow is the part of a reviewed landing's JSON line the assertions
 // read: the job writes the plan's records back in the landings.jsonl shape.
@@ -53,17 +62,24 @@ type deepReviewRunWant struct {
 // bounded runs that carry their cursor from one run bead's notes to the next.
 //
 // The copy is testdata/deepreview/gastown-ledger.jsonl: the newest thirteen
-// records of gastown's ledger, rebuilt from the landing records the worker
-// wrote (see the README beside it). The test reads that file and writes its
-// bytes into the town's landings path, so the job reads a copy; the live file
-// is never opened. The copy is left byte-identical, and the town's file is
-// too: the job reads a ledger and writes only bead notes.
+// records of gastown's ledger (see the README beside it). The test reads that
+// file and writes its bytes into the town's landings path, so the job reads a
+// copy; the live file is never opened. Every line is held to the shape the
+// landing worker's own encoder writes, and the records chain base to
+// landed_commit, so the copy is a copy and not a reconstruction beside the
+// ledger (gt-hd53j).
 //
 // Both rows take the acceptance reading: every risky landing in the copy is
 // reviewed exactly once, in plan order, the cursor moves to the newest one,
 // and the runs finish inside deepReviewRunCap. The second row is the ledger a
 // crash leaves behind: a torn last record, which the plan counts as unparsed
-// rather than refusing the run.
+// rather than refusing the run. The expectations — each run's rows, windows
+// and landings — are derived from the copy, so a fixture edit moves them
+// rather than being typed here twice (gt-4ur7s).
+//
+// The job's only write is the plan, in the notes of the bead each run creates:
+// the copy and the town's file are byte-identical afterwards, no other bead
+// gains a note, and no note carries a line the plan refused (gt-4ur7s).
 func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 	t.Parallel()
 	fixture := filepath.Join("testdata", "deepreview", "gastown-ledger.jsonl")
@@ -75,29 +91,30 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat of the ledger copy: %v", err)
 	}
-	// The copy's own records, by bead: every reviewed line must re-encode the
-	// one the copy holds, which is what tells a copy read from a line invented
-	// along the way.
+	deepReviewCheckCopyShape(t, copyBytes)
+
+	// The copy's own records, by bead and in ledger order: every reviewed line
+	// must re-encode the one the copy holds, which is what tells a copy read
+	// from a line invented along the way.
 	copyRows := map[string]deepReviewRow{}
-	for _, line := range strings.Split(strings.TrimSuffix(string(copyBytes), "\n"), "\n") {
+	var copyOrder []deepReviewRow
+	for _, line := range deepReviewLines(copyBytes) {
 		var row deepReviewRow
 		if err := json.Unmarshal([]byte(line), &row); err != nil {
 			t.Fatalf("the ledger copy's line is not a landing record: %v: %q", err, line)
 		}
 		copyRows[row.Bead] = row
+		copyOrder = append(copyOrder, row)
 	}
 
-	// Three rows a run, so the copy's eight risky landings take three runs and
-	// the cursor has to cross two notes to reach the end.
-	want := []deepReviewRunWant{
-		{rows: 3, skipped: 5, since: "2026-10-26T12:00:00Z", until: "2026-10-27T04:29:57Z"},
-		{rows: 3, skipped: 2, since: "2026-10-27T04:29:57Z", until: "2026-10-27T06:43:22Z"},
-		{rows: 2, skipped: 0, since: "2026-10-27T06:43:22Z", until: "2026-10-27T07:33:50Z"},
-	}
-	wantReviewed := []string{
-		"gt-b9j3o.6", "gt-b9j3o.8", "gt-uxqb9",
-		"gt-l3zak", "gt-lh0sc", "gt-pyxj0",
-		"gt-p85pw.13", "gt-37ne7",
+	// The runs the job must produce, from the copy itself: its risky records in
+	// ledger order, grouped by the instant they landed and taken
+	// deepReviewSliceFiles rows a run, each run starting where the previous
+	// one's cursor landed (gt-4ur7s).
+	want, wantReviewed := deepReviewRunsOfCopy(copyOrder, deepReviewSliceFiles, deepReviewCopyNow)
+	if len(want) < 2 {
+		t.Fatalf("the copy yields %d run(s) at %d rows a run; the test needs two so the cursor crosses a run-bead note",
+			len(want), deepReviewSliceFiles)
 	}
 	// A crash or a short write stops the writer mid-record, and the file ends
 	// without a newline: the plan reads that one line as unparsed.
@@ -106,26 +123,31 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 	tests := []struct {
 		name string
 		// ledger is the town's landings file.
-		ledger            []byte
-		records, unparsed string
+		ledger []byte
 	}{
-		{name: "the copy", ledger: copyBytes, records: "13", unparsed: "0"},
-		{name: "a torn last record", ledger: torn, records: "13", unparsed: "1"},
+		{name: "the copy", ledger: copyBytes},
+		{name: "a torn last record", ledger: torn},
 	}
 	start := time.Now()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := &fakeScheduledRunner{now: deepReviewCopyNow}
 			e := shadowEntry()
-			e.Vars[shadowSliceFilesVar] = "3"
+			e.Vars[shadowSliceFilesVar] = strconv.Itoa(deepReviewSliceFiles)
 			d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, f)
 			d.config.TownRoot = t.TempDir()
 			writeShadowLedger(t, d.config.TownRoot, deepReviewCopyRig, string(tt.ledger))
 
-			var reviewed []string
+			// The ledger's own counts, as the plan takes them: a line that
+			// parses as a landing record is a record, and one that does not is
+			// unparsed. Both come from the bytes the test hands the job.
+			records, unparsed := deepReviewCounts(t, tt.ledger)
+
+			var reviewed, runIDs []string
 			for i, w := range want {
 				run := i + 1
 				f.createID = fmt.Sprintf("gt-shadow%d", run)
+				runIDs = append(runIDs, f.createID)
 				if err := d.runShadowDeepReview(context.Background(), f, e, f.beads, "deep-review 2026-10-27", deepReviewCopyNow); err != nil {
 					t.Fatalf("run %d: %v", run, err)
 				}
@@ -140,8 +162,8 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 					"quiet=":              "false",
 					"landings=":           strconv.Itoa(w.rows),
 					"skipped=":            strconv.Itoa(w.skipped),
-					"records=":            tt.records,
-					"unparsed=":           tt.unparsed,
+					"records=":            strconv.Itoa(records),
+					"unparsed=":           strconv.Itoa(unparsed),
 					"reviewed_until_old=": w.since,
 					"reviewed_until_new=": w.until,
 				} {
@@ -174,6 +196,33 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 				for j := range f.beads {
 					if f.beads[j].ID == f.createID {
 						f.beads[j].Notes = note
+					}
+				}
+			}
+
+			// The read-only side of the job's write: the ledger is not touched by
+			// the runs below, and neither is any bead outside the ones they
+			// created. A finished run bead's note is written once and left
+			// alone, and no note carries a line the plan refused — the torn row
+			// is the one with such a line (gt-4ur7s).
+			runIDSet := map[string]bool{}
+			for _, id := range runIDs {
+				runIDSet[id] = true
+			}
+			for id, notes := range f.notes {
+				if !runIDSet[id] {
+					t.Errorf("the job appended a note to %s, a bead it did not create", id)
+				}
+				if len(notes) != 1 {
+					t.Errorf("%s holds %d notes after the runs, want the one its run wrote", id, len(notes))
+				}
+			}
+			for _, refused := range deepReviewUnparsed(tt.ledger) {
+				for id, notes := range f.notes {
+					for _, note := range notes {
+						if strings.Contains(note, refused) {
+							t.Errorf("the note on %s carries %q, a line the plan counted as unparsed", id, refused)
+						}
 					}
 				}
 			}
@@ -228,6 +277,126 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 	} else if !info.ModTime().Equal(copyInfo.ModTime()) {
 		t.Errorf("the ledger copy's mtime moved from %v to %v", copyInfo.ModTime(), info.ModTime())
 	}
+}
+
+// deepReviewCheckCopyShape holds the copy to the shape the landing worker
+// writes, so it is a copy of the real ledger and not a reconstruction beside
+// it (gt-hd53j): every line re-encodes byte for byte as the production record,
+// the records chain base to landed_commit as the ledger's landings do, each
+// names this rig, and landed_at rises in ledger order. A line edited by hand
+// stops being a copy here.
+func deepReviewCheckCopyShape(t *testing.T, copyBytes []byte) {
+	t.Helper()
+	var prev land.LandingRecord
+	for i, line := range deepReviewLines(copyBytes) {
+		var rec land.LandingRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("copy line %d is not a landing record: %v", i+1, err)
+		}
+		encoded, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("copy line %d: %v", i+1, err)
+		}
+		if string(encoded) != line {
+			t.Errorf("copy line %d is not what the landing worker's encoder writes:\n got: %s\nwant: %s", i+1, line, encoded)
+		}
+		if rec.Rig != deepReviewCopyRig {
+			t.Errorf("copy line %d (bead %s) names rig %q, want %q", i+1, rec.BeadID, rec.Rig, deepReviewCopyRig)
+		}
+		if i > 0 {
+			if rec.Base != prev.LandedCommit {
+				t.Errorf("copy line %d (bead %s) bases on %s, want the previous record's landed_commit %s",
+					i+1, rec.BeadID, rec.Base, prev.LandedCommit)
+			}
+			if !rec.LandedAt.After(prev.LandedAt) {
+				t.Errorf("copy line %d (bead %s) landed at %s, not after line %d's %s: the copy is not in ledger order",
+					i+1, rec.BeadID, rec.LandedAt.Format(time.RFC3339), i, prev.LandedAt.Format(time.RFC3339))
+			}
+		}
+		prev = rec
+	}
+}
+
+// deepReviewRunsOfCopy derives the runs the job must produce from the copy:
+// its risky records in ledger order, grouped by the instant they landed, taken
+// while they fit sliceFiles rows. A group that would cross the bound is left
+// whole for the next run and the head group is taken even past it, which is
+// boundLandings' cut. The copy is far inside the default byte bound, so the
+// row bound is the only cut. Each run starts where the previous one's cursor
+// landed, and the first at the default window before now.
+func deepReviewRunsOfCopy(rows []deepReviewRow, sliceFiles int, now time.Time) (want []deepReviewRunWant, reviewed []string) {
+	since := now.UTC().Truncate(time.Second).Add(-deepreview.DefaultWindow).Format(time.RFC3339)
+	var risky []deepReviewRow
+	for _, row := range rows {
+		if len(row.RiskPaths) > 0 {
+			risky = append(risky, row)
+		}
+	}
+	for taken := 0; taken < len(risky); {
+		runRows := 0
+		for i := taken; i < len(risky); {
+			end := i + 1
+			for end < len(risky) && risky[end].LandedAt == risky[i].LandedAt {
+				end++
+			}
+			if runRows > 0 && runRows+end-i > sliceFiles {
+				break
+			}
+			runRows += end - i
+			i = end
+		}
+		for _, row := range risky[taken : taken+runRows] {
+			reviewed = append(reviewed, row.Bead)
+		}
+		until := risky[taken+runRows-1].LandedAt
+		want = append(want, deepReviewRunWant{rows: runRows, skipped: len(risky) - taken - runRows, since: since, until: until})
+		since = until
+		taken += runRows
+	}
+	return want, reviewed
+}
+
+// deepReviewLines splits a landings file into its non-blank lines, blank lines
+// ignored as both the plan and the landing worker's reader ignore them.
+func deepReviewLines(ledger []byte) []string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSuffix(string(ledger), "\n"), "\n") {
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// deepReviewCounts is a ledger's records and unparsed lines as the plan reads
+// them: a line that parses as a landing record is a record, and one that does
+// not is unparsed. Both are read from the bytes the test hands the job, so
+// neither count is typed beside the fixture (gt-4ur7s).
+func deepReviewCounts(t *testing.T, ledger []byte) (records, unparsed int) {
+	t.Helper()
+	for _, line := range deepReviewLines(ledger) {
+		var row deepReviewRow
+		if err := json.Unmarshal([]byte(line), &row); err == nil {
+			records++
+		} else {
+			unparsed++
+		}
+	}
+	return records, unparsed
+}
+
+// deepReviewUnparsed returns the ledger lines that do not parse as a landing
+// record: the lines the plan counts as unparsed, which a run's note must not
+// carry.
+func deepReviewUnparsed(ledger []byte) []string {
+	var out []string
+	for _, line := range deepReviewLines(ledger) {
+		var row deepReviewRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 // splitDeepReviewNote splits a run note into its key=value header, keyed by the

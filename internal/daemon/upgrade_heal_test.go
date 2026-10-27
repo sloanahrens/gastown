@@ -507,6 +507,62 @@ func TestUpgradeRestartHealWedgedLaunchctlIsBounded(t *testing.T) {
 	}
 }
 
+// TestUpgradeRestartHealFakeToolWriteHoldsTheForkLock checks writeFakeTool
+// writes and closes the fake under the fork lock: a fork that runs while the
+// write descriptor is open hands the child a copy of it, and the kernel then
+// refuses to exec the fake as text file busy (gt-e96f7). The runtime takes the
+// lock's read side across a fork, so the test holds that side and asserts the
+// helper neither finishes nor creates the file while it is held, then lets go
+// and finds the fake written (gt-wio5g).
+//
+// The fork is simulated by holding the read side rather than started: the unit
+// tier refuses an external tool, and a started child is not needed to show the
+// helper waits for one.
+func TestUpgradeRestartHealFakeToolWriteHoldsTheForkLock(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "gate")
+
+	locked := true
+	defer func() {
+		if locked {
+			syscall.ForkLock.RUnlock()
+		}
+	}()
+	syscall.ForkLock.RLock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		writeFakeTool(t, dir, "gate", "exit 0")
+	}()
+	select {
+	case <-done:
+		syscall.ForkLock.RUnlock()
+		locked = false
+		t.Fatal("writeFakeTool finished while a fork held the read side: the fake is not written under the lock")
+	case <-time.After(250 * time.Millisecond): //testpolicy:allow no-sleep — proving the write waits needs a window: the read side is held and cannot release itself
+	}
+	if _, err := os.Stat(fake); !errors.Is(err, os.ErrNotExist) {
+		syscall.ForkLock.RUnlock()
+		locked = false
+		t.Fatalf("the fake exists while a fork holds the read side (stat err %v): the write runs outside the lock", err)
+	}
+	syscall.ForkLock.RUnlock()
+	locked = false
+	select {
+	case <-done:
+	case <-time.After(time.Minute): //testpolicy:allow no-sleep — a hang guard only: the write must resume once the read side is released
+		t.Fatal("writeFakeTool did not finish after the fork lock was released")
+	}
+	info, err := os.Stat(fake)
+	if err != nil {
+		t.Fatalf("the fake was not written: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Errorf("the fake's mode = %v, want 0755", got)
+	}
+}
+
 // writeFakeTool writes an executable /bin/sh stand-in for name into dir.
 func writeFakeTool(t *testing.T, dir, name, body string) {
 	t.Helper()
