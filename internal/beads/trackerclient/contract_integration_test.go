@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -44,9 +45,11 @@ func newTracker(t *testing.T, actor string, scope api.Scope) *trackerclient.Clie
 }
 
 // The adapter must behave like bd on every case the fake and bd are held to,
-// except the one suite it cannot run. RunCreatorOptionContract is a creator named in the
-// request: the tracker records the token's actor instead (see Client.Create),
-// and RunActorContract below pins who it records.
+// except two suites it cannot run. RunNotesFilterContract reads notes and
+// update time, which the tracker's list query cannot express; the test below
+// pins that refusal on the real store instead (gt-c3ygl). RunCreatorOptionContract
+// names a creator in the request, and the tracker records the token's actor
+// instead (see Client.Create); RunActorContract below pins who it records.
 //
 // This is integration tier because it needs a real Postgres; the integration
 // sweep runs it on every landing, and the tracker's own store contract runs on
@@ -60,6 +63,29 @@ func TestIntegrationTrackerClientSatisfiesTheClientContract(t *testing.T) {
 // title, and a missing id is an error.
 func TestIntegrationTrackerClientShowText(t *testing.T) {
 	beadsfake.RunShowTextContract(t, func(t *testing.T) beads.Client { return newTracker(t, "town/crew/dipper", api.ScopeSeat) })
+}
+
+// The tracker's list query cannot express the notes and update-time filters, so
+// List refuses them rather than answer with a wider set, even when an issue
+// carrying the text exists. This is the tracker's side of the contract that
+// RunNotesFilterContract holds the fake and bd to (gt-c3ygl).
+func TestIntegrationTrackerClientRefusesTheNotesFilters(t *testing.T) {
+	c := newTracker(t, "town/crew/dipper", api.ScopeSeat)
+	is, err := c.Create(beads.CreateOptions{Title: "noted", Priority: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AppendNotes(is.ID, "MERGE REJECTION (build): red"); err != nil {
+		t.Fatal(err)
+	}
+	for name, opts := range map[string]beads.ListOptions{
+		"NotesContains": {NotesContains: "merge rejection", Priority: -1},
+		"UpdatedAfter":  {UpdatedAfter: time.Now().Add(-time.Hour), Priority: -1},
+	} {
+		if got, err := c.List(opts); !errors.Is(err, trackerclient.ErrListFilter) {
+			t.Errorf("List{%s} = %d issues, %v; want an ErrListFilter refusal", name, len(got), err)
+		}
+	}
 }
 
 func TestIntegrationTrackerClientSatisfiesTheActorContract(t *testing.T) {

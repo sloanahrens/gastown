@@ -88,6 +88,8 @@ func TestIntegrationClientContract(t *testing.T) {
 		t.Parallel()
 		beadsfake.RunCreatorOptionContract(t, func(t *testing.T) beads.Client { return newDB(t, t.TempDir()) })
 	})
+	// RunNotesFilterContract names its own subtest (gt-dm8xz).
+	beadsfake.RunNotesFilterContract(t, func(t *testing.T) beads.Client { return newDB(t, t.TempDir()) })
 	t.Run("actor", func(t *testing.T) {
 		t.Parallel()
 		// The isolated client strips the inherited BD_ACTOR, so the actor
