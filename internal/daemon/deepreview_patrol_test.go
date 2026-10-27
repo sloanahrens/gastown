@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -293,7 +294,7 @@ func TestShadowPlanNoteRendersTheShellPlanShape(t *testing.T) {
 			if err != nil {
 				t.Fatalf("render: %v", err)
 			}
-			if got, want := strings.Split(note, "\n"), tc.want; !equalLines(got, want) {
+			if got, want := strings.Split(note, "\n"), tc.want; !slices.Equal(got, want) {
 				t.Errorf("note =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
 			if strings.HasSuffix(note, "\n") {
@@ -301,19 +302,6 @@ func TestShadowPlanNoteRendersTheShellPlanShape(t *testing.T) {
 			}
 		})
 	}
-}
-
-// equalLines compares two line slices without pulling in a diff helper.
-func equalLines(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // TestReadLandingsLedger pins the production reader: the file's bytes, and an
@@ -345,7 +333,7 @@ func TestReadLandingsLedger(t *testing.T) {
 func TestListBeadsCarriesTheNotesTheLedgerNeeds(t *testing.T) {
 	t.Parallel()
 	bd := beadsfake.New()
-	withLabel, err := bd.Create(beads.CreateOptions{Title: "run", Labels: []string{"scheduled:" + "deep-review-shadow"}})
+	withLabel, err := bd.Create(beads.CreateOptions{Title: "run", Labels: []string{"scheduled:deep-review-shadow"}})
 	if err != nil {
 		t.Fatal(err)
 	}
