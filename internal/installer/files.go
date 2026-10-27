@@ -138,9 +138,14 @@ func (f Files) sameContent(a, b string) bool {
 	return bytes.Equal(ab, bb)
 }
 
-// copyFile copies contents and mode, which is all a rollback needs. Unlike cp
-// -p it copies no platform flag, so a copy of an immutable binary is writable
-// before the flag is re-applied to the installed path (gt-vya0s).
+// copyFile copies contents and mode, which is all a rollback needs. The mode is
+// set after the write, and not only on the create: a destination that already
+// exists keeps the mode it has, and signing copies into the 0600 file mktemp
+// made beside the binary, so a write alone would leave a signed copy that
+// nothing can execute renamed over the installed binary (the script's
+// chmod --reference, gt-tpg0p.11). Unlike cp -p it copies no platform flag, so
+// a copy of an immutable binary is writable before the flag is re-applied to
+// the installed path (gt-vya0s).
 func copyFile(dst, src string) error {
 	info, err := os.Stat(src)
 	if err != nil {
@@ -150,7 +155,10 @@ func copyFile(dst, src string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, info.Mode().Perm())
+	if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
+		return err
+	}
+	return os.Chmod(dst, info.Mode().Perm())
 }
 
 func isRegularFile(path string) bool {

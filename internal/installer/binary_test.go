@@ -61,13 +61,15 @@ func TestVersionCommit(t *testing.T) {
 func TestStaleBinary(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name       string
-		mode       os.FileMode
-		staleOut   string
-		staleErr   error
-		versionOut string
-		want       string
-		wantCalls  []string
+		name          string
+		mode          os.FileMode
+		staleOut      string
+		staleErrOut   string
+		staleErr      error
+		versionOut    string
+		versionErrOut string
+		want          string
+		wantCalls     []string
 	}{
 		{
 			name:      "the stale read answers",
@@ -91,6 +93,25 @@ func TestStaleBinary(t *testing.T) {
 			versionOut: "gt version 1.0.0 (dev: main@c2222222)\n",
 			want:       "c2222222",
 			wantCalls:  []string{"stale --json", "version"},
+		},
+		{
+			// The version fallback reads both streams: a gt that says it on
+			// stderr still answers, as the read before the port did.
+			name:          "a version line on stderr answers",
+			mode:          0o755,
+			staleOut:      `{"stale": true}`,
+			versionErrOut: "gt version 1.0.0 (dev: main@c2222222)\n",
+			want:          "c2222222",
+			wantCalls:     []string{"stale --json", "version"},
+		},
+		{
+			// The stale read does not: that stream has to be the JSON and
+			// nothing else.
+			name:        "a stale answer on stderr does not count",
+			mode:        0o755,
+			staleErrOut: `{"binary_commit": "c1111111"}`,
+			want:        "",
+			wantCalls:   []string{"stale --json", "version"},
 		},
 		{
 			name:      "neither read answers",
@@ -129,9 +150,9 @@ func TestStaleBinary(t *testing.T) {
 					if tc.staleErr != nil {
 						return []byte(tc.staleOut), nil, 1
 					}
-					return []byte(tc.staleOut), nil, 0
+					return []byte(tc.staleOut), []byte(tc.staleErrOut), 0
 				}
-				return []byte(tc.versionOut), nil, 0
+				return []byte(tc.versionOut), []byte(tc.versionErrOut), 0
 			}
 
 			got := StaleBinary(run).Commit("/rig", gt)

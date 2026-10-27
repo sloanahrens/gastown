@@ -237,13 +237,26 @@ func TestInstall(t *testing.T) {
 		},
 		{
 			name:    "a binary already at HEAD is a no-op, not a failure",
-			stdout:  "check-forward-only: gt is already at HEAD\n",
+			stdout:  "Binary is already at HEAD, nothing to do\n",
 			status:  1,
 			ended:   true,
 			exit:    ExitOK,
 			receipt: "already-installed",
-			want: "check-forward-only: gt is already at HEAD\n" +
+			want: "Binary is already at HEAD, nothing to do\n" +
 				"install-gt: RESULT noop c2222222 c1111111 already-installed\n",
+		},
+		{
+			// Only check-forward-only's own sentence is a no-op: a failure that
+			// mentions the phrase in passing still ends the run failed.
+			name:    "a failure that mentions HEAD is not a no-op",
+			stdout:  "check-forward-only: the binary is not already at HEAD\n",
+			status:  1,
+			ended:   true,
+			exit:    ExitFailed,
+			receipt: "build-failed",
+			want: "check-forward-only: the binary is not already at HEAD\n" +
+				"[install-gt] FAILED: make install-local failed for c2222222\n" +
+				"install-gt: RESULT failed c2222222 c1111111 build-failed\n",
 		},
 	}
 	for _, tc := range cases {

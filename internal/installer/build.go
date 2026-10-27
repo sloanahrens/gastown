@@ -70,6 +70,13 @@ func (r *Run) buildInSlot() (stdout, stderr []byte, status int, ended bool, code
 	return nil, nil, 0, true, r.C.Finish(Result{Event: "refused", Commit: r.C.Expected, Prev: r.C.Prev, Reason: "slot-busy"}, ExitBusy)
 }
 
+// alreadyAtHead is what the Makefile's check-forward-only prints just before it
+// exits 1. The no-op is matched on that whole sentence, not on "already at
+// HEAD": a failure that mentions the phrase in passing (a check that says the
+// binary is NOT already at HEAD) must end the run failed, not exit 0 with the
+// install it did not make (gt-tpg0p.11).
+const alreadyAtHead = "Binary is already at HEAD, nothing to do"
+
 // Install is the swap: `make install-local` puts the build in place. A run of
 // install-local that exits 1 because the binary is already at HEAD is a no-op,
 // not a failure — reachable only when the installed commit could not be read
@@ -84,7 +91,7 @@ func (r *Run) Install() (Exit, bool) {
 	if status == 0 {
 		return ExitOK, false
 	}
-	if strings.Contains(combined, "already at HEAD") {
+	if strings.Contains(combined, alreadyAtHead) {
 		r.C.Receipt("noop", r.C.Expected, r.C.Prev, "already-installed")
 		return r.C.Finish(Result{Event: "noop", Commit: r.C.Expected, Prev: r.C.Prev, Reason: "already-installed"}, ExitOK), true
 	}

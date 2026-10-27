@@ -16,9 +16,10 @@ type Binary struct {
 
 // StaleBinary is the real read: 'gt stale --json' binary_commit first, 'gt
 // version' as the fallback (lib/install-gt-lib.sh's igt_binary_commit_raw). run
-// executes the commands; nil runs them for real. Only stdout is read, as the
-// script's pipelines into python do, and a read that did not exit 0 answers
-// nothing.
+// executes the commands; nil runs them for real. The stale read answers from
+// stdout alone, where the JSON has to be and nothing else; the version fallback
+// reads both streams, so a gt that announces its version on stderr still
+// answers. A read that did not exit 0 answers nothing.
 func StaleBinary(run Execute) Binary {
 	if run == nil {
 		run = RealExecute
@@ -32,11 +33,12 @@ func StaleBinary(run Execute) Binary {
 				return commit
 			}
 		}
-		out, _, code := run(dir, gt, "version")
+		stdout, stderr, code := run(dir, gt, "version")
 		if code != 0 {
 			return ""
 		}
-		return versionCommit(out)
+		// A fresh slice: appending to stdout would write into the caller's.
+		return versionCommit(append(append([]byte(nil), stdout...), stderr...))
 	}}
 }
 

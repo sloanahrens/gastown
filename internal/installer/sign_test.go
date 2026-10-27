@@ -13,6 +13,24 @@ import (
 // carries.
 const testPassword = "test-password\n"
 
+// signedBinary is what the fake codesign writes into the file it signs, so a
+// test can tell the renamed copy from the binary it replaced: a copy that
+// happened to keep the old bytes would pass unnoticed (gt-tpg0p.11).
+const signedBinary = "signed binary"
+
+// signsCopy answers a run the way a working codesign does: the unlock succeeds
+// and the file it is handed is rewritten in place, keeping the mode the copy
+// was given.
+func signsCopy(dir, name string, args []string) ([]byte, []byte, int) {
+	if name == "security" {
+		return nil, nil, 0
+	}
+	if err := os.WriteFile(args[len(args)-1], []byte(signedBinary), 0o755); err != nil {
+		return []byte(err.Error()), nil, 1
+	}
+	return nil, nil, 0
+}
+
 // signWorld is a run with a binary installed and the town's signing material
 // beside it: a keychain and the 0600 password file that unlocks it. A case
 // removes or breaks the part it is about.
@@ -62,6 +80,15 @@ func TestSign(t *testing.T) {
 			name:  "nothing installed is not signed",
 			setup: func(w *signWorld) { _ = os.Remove(w.bin) },
 			want:  "[install-gt] WARNING: not signing: nothing installed at BIN",
+		},
+		{
+			name: "no signing material directory installs ad-hoc",
+			// A run that found no town and was given no INSTALL_GT_SIGN_DIR has
+			// no directory to look in; an empty Dir must not resolve to the
+			// current directory, where a stray keychain and password file would
+			// be signed with.
+			setup: func(w *signWorld) { w.Signing.Dir = "" },
+			want:  "[install-gt] WARNING: installing ad-hoc: no signing material directory (no town found; set INSTALL_GT_SIGN_DIR)",
 		},
 		{
 			name:  "no keychain installs ad-hoc",
@@ -131,6 +158,7 @@ func TestSign(t *testing.T) {
 		},
 		{
 			name:       "a good sign replaces the binary with the signed copy",
+			respond:    signsCopy,
 			want:       "[install-gt] Signed BIN as com.gastown.gt",
 			wantCmds:   2,
 			wantSigned: true,
@@ -140,6 +168,7 @@ func TestSign(t *testing.T) {
 			setup: func(w *signWorld) {
 				w.Found = func(name string) bool { return name == "timeout" }
 			},
+			respond:      signsCopy,
 			want:         "[install-gt] Signed BIN as com.gastown.gt",
 			wantCmds:     2,
 			wantSigned:   true,
@@ -150,6 +179,7 @@ func TestSign(t *testing.T) {
 			setup: func(w *signWorld) {
 				w.Found = func(name string) bool { return name == "gtimeout" }
 			},
+			respond:      signsCopy,
 			want:         "[install-gt] Signed BIN as com.gastown.gt",
 			wantCmds:     2,
 			wantSigned:   true,
@@ -193,8 +223,18 @@ func TestSign(t *testing.T) {
 			}
 			w.checkCodesign(t, tc.codesignName)
 			if tc.wantSigned {
-				if got, want := read(t, w.bin), "old binary"; got != want {
-					t.Errorf("installed binary = %q, want %q", got, want)
+				// The installed file is the copy codesign rewrote, not the
+				// binary it replaced, and it is executable: the mktemp that
+				// held the copy was 0600.
+				if got, want := read(t, w.bin), signedBinary; got != want {
+					t.Errorf("installed binary = %q, want the signed copy %q", got, want)
+				}
+				info, err := os.Stat(w.bin)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if info.Mode().Perm()&0o111 == 0 {
+					t.Errorf("installed binary mode = %v, want it executable", info.Mode().Perm())
 				}
 				if want := []string{w.bin}; !reflect.DeepEqual(w.set, want) {
 					t.Errorf("immutable set on %q, want %q", w.set, want)
@@ -234,6 +274,52 @@ func (w *signWorld) checkCodesign(t *testing.T, name string) {
 	signed := got[8]
 	if dir, base := filepath.Dir(signed), filepath.Base(signed); dir != filepath.Dir(w.bin) || !strings.HasPrefix(base, ".gt.signed.") {
 		t.Errorf("signed path = %q, want a .gt.signed.* copy beside %q", signed, w.bin)
+	}
+}
+
+// TestResolveSigning pins where the signing material is looked for: the
+// environment first, the town's own directory second, and nothing at all when
+// the run found no town — never a path relative to wherever it happens to run.
+func TestResolveSigning(t *testing.T) {
+	t.Parallel()
+	env := func(values map[string]string) func(string) string {
+		return func(key string) string { return values[key] }
+	}
+	cases := []struct {
+		name     string
+		getenv   func(string) string
+		townRoot string
+		want     Signing
+	}{
+		{
+			name:     "a town's own signing directory",
+			getenv:   env(nil),
+			townRoot: "/town",
+			want:     Signing{Dir: "/town/.runtime/signing", Identity: "gastown-dev-unattended", Timeout: "30"},
+		},
+		{
+			name: "the environment overrides every default",
+			getenv: env(map[string]string{
+				"INSTALL_GT_SIGN_DIR":      "/material",
+				"INSTALL_GT_SIGN_IDENTITY": "someone-else",
+				"INSTALL_GT_SIGN_TIMEOUT":  "5",
+			}),
+			townRoot: "/town",
+			want:     Signing{Dir: "/material", Identity: "someone-else", Timeout: "5"},
+		},
+		{
+			name:   "no town leaves no directory",
+			getenv: env(nil),
+			want:   Signing{Dir: "", Identity: "gastown-dev-unattended", Timeout: "30"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ResolveSigning(tc.getenv, tc.townRoot); got != tc.want {
+				t.Errorf("ResolveSigning() = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 

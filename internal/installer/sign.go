@@ -30,7 +30,10 @@ type Signing struct {
 
 // ResolveSigning reads the signing settings from the environment, taking the
 // script's defaults for the ones it does not set. townRoot is empty when the
-// run could not find a town, and then there is no default material directory.
+// run could not find a town, and then Dir stays empty: there is no default
+// material directory, and an empty Dir must not become a relative one, which
+// would read a keychain and password out of whatever directory the install
+// happens to run in (gt-tpg0p.11).
 func ResolveSigning(getenv func(string) string, townRoot string) Signing {
 	s := Signing{
 		Dir:      getenv("INSTALL_GT_SIGN_DIR"),
@@ -74,6 +77,12 @@ func (r *Run) Sign() {
 	case !r.Files.isFile(bin):
 		r.C.Log("WARNING: not signing: nothing installed at " + bin)
 		return
+	case r.Signing.Dir == "":
+		// A run with no town and no INSTALL_GT_SIGN_DIR has no material
+		// directory. Reading one from an empty Dir would resolve beside the
+		// current directory, so the step installs ad-hoc instead.
+		r.C.Log("WARNING: installing ad-hoc: no signing material directory (no town found; set INSTALL_GT_SIGN_DIR)")
+		return
 	case !r.Files.isFile(r.Signing.Keychain()):
 		r.C.Log("WARNING: installing ad-hoc: no keychain at " + r.Signing.Keychain())
 		return
@@ -89,7 +98,9 @@ func (r *Run) Sign() {
 	password := strings.TrimRight(string(data), "\n")
 	// The password reaches this one call, in its argv, for as long as the
 	// unlock takes. It is never logged, never echoed and never handed to
-	// codesign.
+	// codesign. security(1) offers no quieter form: with no -p it prompts on
+	// the controlling terminal, which a daemon-run install does not have, so a
+	// password on stdin does not unlock the keychain at all.
 	if _, _, code := r.Cmd.run("", "security", "unlock-keychain", "-p", password, r.Signing.Keychain()); code != 0 {
 		r.C.Log("WARNING: installing ad-hoc: cannot unlock " + r.Signing.Keychain())
 		return
@@ -97,7 +108,9 @@ func (r *Run) Sign() {
 	// Sign a temporary copy beside the binary: signing the live path in place
 	// would rewrite the bytes of a binary the town may be exec'ing, and a
 	// codesign that dies mid-write would leave a half-signed file there. The
-	// copy is renamed over the binary only once codesign has succeeded.
+	// copy is renamed over the binary only once codesign has succeeded, and it
+	// carries the binary's mode, so the rename cannot leave the installed file
+	// as the 0600 mktemp created.
 	tmp, err := r.Files.tempFile(filepath.Dir(bin), "."+filepath.Base(bin)+".signed.*")
 	if err != nil {
 		r.C.Log("WARNING: installing ad-hoc: cannot create a temp file beside " + bin)
