@@ -164,18 +164,16 @@ func pathExists(path string) bool {
 }
 
 // createTempFile is mktemp: an empty file in dir whose name the pattern
-// decides, closed before it is handed back.
+// decides. A close that fails is not the step's failure: the file exists
+// either way, and the copy that follows writes it again and reports its own
+// error if it cannot.
 func createTempFile(dir, pattern string) (string, error) {
 	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return "", err
 	}
-	name := f.Name()
-	if err := f.Close(); err != nil {
-		_ = os.Remove(name)
-		return "", err
-	}
-	return name, nil
+	_ = f.Close()
+	return f.Name(), nil
 }
 
 // clearImmutable strips the OS-immutable flag on macos (chflags) and Linux

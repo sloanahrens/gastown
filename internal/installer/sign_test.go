@@ -87,6 +87,19 @@ func TestSign(t *testing.T) {
 			wantCmds: 1,
 		},
 		{
+			name: "a temp file that cannot be created beside the binary installs ad-hoc",
+			setup: func(w *signWorld) {
+				// The material reads as present, but the binary sits in a
+				// directory that does not exist, so mktemp for its copy fails.
+				w.Files.IsFile = func(string) bool { return true }
+				w.Files.ReadFile = func(string) ([]byte, error) { return []byte(testPassword), nil }
+				w.Paths.BinDir = filepath.Join(filepath.Dir(w.Paths.BinDir), "missing", "bin")
+				w.bin = w.Paths.GT()
+			},
+			want:     "[install-gt] WARNING: installing ad-hoc: cannot create a temp file beside BIN",
+			wantCmds: 1,
+		},
+		{
 			name: "codesign that fails leaves the binary alone",
 			respond: func(dir, name string, args []string) ([]byte, []byte, int) {
 				if name == "codesign" {
