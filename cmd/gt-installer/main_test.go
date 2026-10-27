@@ -66,8 +66,10 @@ type fakeRun struct {
 	// bin is the installed binary the install step writes.
 	bin string
 	// commands is the argv of every command the steps ran through the run's
-	// command seam, and execs those the exit contract ran.
+	// command seam, stdins the standard input each was fed, and execs those the
+	// exit contract ran.
 	commands [][]string
+	stdins   []string
 	execs    [][]string
 	// imageBuilds is every sandbox image build the flow asked for, and
 	// imageAfterSwap is set when one was asked for after install-local had
@@ -127,8 +129,9 @@ func (f *fakeRun) newRun(cfg installer.Config, c *installer.Contract, paths inst
 		// unwrapped, as it does where neither is installed.
 		Found: func(string) bool { return false },
 	}
-	run.Cmd = func(dir, name string, args ...string) ([]byte, []byte, int) {
+	run.Cmd = func(dir, name string, stdin []byte, args ...string) ([]byte, []byte, int) {
 		f.commands = append(f.commands, append([]string{name}, args...))
+		f.stdins = append(f.stdins, string(stdin))
 		return f.respond(name, args)
 	}
 	// The image build is recorded, never started: the step's preflight reads
@@ -361,7 +364,7 @@ func TestRunInstallsEndToEnd(t *testing.T) {
 	prefix := [][]string{
 		{"make", "SKIP_UPDATE_CHECK=1", "build"},
 		{"make", "SKIP_UPDATE_CHECK=1", "INSTALL_DIR=" + binDir, "install-local"},
-		{"security", "unlock-keychain", "-p", "test-password", keychain},
+		{"security", "-i"},
 		{"codesign", "--force", "--keychain", keychain, "-s", "gastown-dev-unattended", "-i", "com.gastown.gt"},
 	}
 	suffix := [][]string{
@@ -390,6 +393,28 @@ func TestRunInstallsEndToEnd(t *testing.T) {
 	for i, want := range suffix {
 		if got := f.commands[len(prefix)+i]; !reflect.DeepEqual(got, want) {
 			t.Errorf("command %d = %q, want %q", len(prefix)+i, got, want)
+		}
+	}
+	// The keychain password reaches security on stdin, never in the argv the
+	// process table shows while the unlock runs (gt-4ucnp). The unlock is
+	// found by its argv rather than by its position, so a command added before
+	// it cannot make this read another command's stdin.
+	unlock := -1
+	for i, cmd := range f.commands {
+		if reflect.DeepEqual(cmd, []string{"security", "-i"}) {
+			unlock = i
+			break
+		}
+	}
+	if unlock < 0 {
+		t.Fatalf("commands = %q, want the keychain unlock's security -i", f.commands)
+	}
+	if got, line := f.stdins[unlock], "unlock-keychain -p test-password "; !strings.HasPrefix(got, line) || !strings.Contains(got, keychain) {
+		t.Errorf("unlock stdin = %q, want it to start %q and name %q", got, line, keychain)
+	}
+	for i, cmd := range f.commands {
+		if strings.Contains(strings.Join(cmd, " "), "test-password") {
+			t.Errorf("command %d argv %q holds the password, want it only on the unlock's stdin", i, cmd)
 		}
 	}
 	// Nothing ran through the exit contract either: no escalation and no

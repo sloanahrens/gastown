@@ -58,6 +58,38 @@ func (s Signing) Keychain() string { return filepath.Join(s.Dir, "gastown-signin
 // PasswordFile is the 0600 file holding the keychain's password.
 func (s Signing) PasswordFile() string { return filepath.Join(s.Dir, "keychain.pass") }
 
+// unlockLine is the one command security -i reads from stdin to unlock the
+// keychain: the password and the keychain path are words on that line rather
+// than in argv, so ps shows neither for the length of the unlock (gt-4ucnp).
+//
+// It reports false when either word spans a line break. security -i reads a
+// line at a time, so a word carrying a newline would become a second command
+// rather than part of the first.
+//
+// security -i's parser is undocumented, so the quoting is what it was observed
+// to accept (gt-4ucnp, checked by hand on macOS against a throwaway keychain: a
+// word holding a space, a quote and a backslash unlocks, and a wrong password
+// fails with status 51): an ordinary word passes as it is and only a word that
+// needs quoting is wrapped and escaped.
+func unlockLine(password, keychain string) (string, bool) {
+	if strings.ContainsAny(password, "\r\n") || strings.ContainsAny(keychain, "\r\n") {
+		return "", false
+	}
+	return "unlock-keychain -p " + quoteLine(password) + " " + quoteLine(keychain) + "\n", true
+}
+
+// quoteLine quotes one word of the line security -i reads. A word that is
+// non-empty and holds none of a space, a tab, a double quote, an apostrophe or
+// a backslash passes as it is; any other word, the empty one included, is
+// wrapped in double quotes with its backslashes and double quotes escaped.
+func quoteLine(word string) string {
+	if word != "" && !strings.ContainsAny(word, " \t\n\"'\\") {
+		return word
+	}
+	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(word)
+	return `"` + escaped + `"`
+}
+
 // Sign is the script's sign_binary over the installed binary: what
 // install-local just put in place is signed before the smoke check runs it, so
 // the smoke check exercises exactly the artifact the town will execute and
@@ -96,12 +128,21 @@ func (r *Run) Sign() {
 		return
 	}
 	password := strings.TrimRight(string(data), "\n")
-	// The password reaches this one call, in its argv, for as long as the
-	// unlock takes; it is never logged, never echoed and never handed to
-	// codesign. security(1) offers no quieter form an unattended install can
-	// use: with no -p it prompts on the controlling terminal, which the install
-	// has none of. The argv window is tracked as gt-4ucnp.
-	if _, _, code := r.Cmd.run("", "security", "unlock-keychain", "-p", password, r.Signing.Keychain()); code != 0 {
+	line, ok := unlockLine(password, r.Signing.Keychain())
+	if !ok {
+		r.C.Log("WARNING: installing ad-hoc: the password or the keychain path spans more than one line")
+		return
+	}
+	// The password reaches security on stdin and nowhere else: it is never in
+	// the unlock's argv, where ps shows it for as long as the unlock takes, and
+	// never logged, never echoed and never handed to codesign (gt-4ucnp).
+	//
+	// A status of 0 is not taken as proof the keychain opened: what security -i
+	// reports for the command it reads is undocumented, and the macOS form is
+	// pinned by TestIntegrationSecurityReadsTheUnlockLineFromStdin. The status
+	// only says when to stop; codesign is the arbiter, and a keychain that
+	// stayed locked fails it below, which installs ad-hoc with one WARNING.
+	if _, _, code := r.Cmd.runInput("", "security", []byte(line), "-i"); code != 0 {
 		r.C.Log("WARNING: installing ad-hoc: cannot unlock " + r.Signing.Keychain())
 		return
 	}

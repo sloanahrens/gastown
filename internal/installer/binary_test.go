@@ -134,7 +134,10 @@ func TestStaleBinary(t *testing.T) {
 				t.Fatal(err)
 			}
 			var calls []string
-			run := func(dir, name string, args ...string) ([]byte, []byte, int) {
+			run := func(dir, name string, stdin []byte, args ...string) ([]byte, []byte, int) {
+				if stdin != nil {
+					t.Errorf("fed %q on stdin, want none", stdin)
+				}
 				if dir != "/rig" || name != gt {
 					t.Errorf("ran %q from %q, want %q from /rig", name, dir, gt)
 				}

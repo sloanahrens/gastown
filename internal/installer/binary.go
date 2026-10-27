@@ -28,12 +28,12 @@ func StaleBinary(run Execute) Binary {
 		if !isExecutable(gt) {
 			return ""
 		}
-		if out, _, code := run(dir, gt, "stale", "--json"); code == 0 {
+		if out, _, code := run.run(dir, gt, "stale", "--json"); code == 0 {
 			if commit := staleCommit(out); commit != "" {
 				return commit
 			}
 		}
-		stdout, stderr, code := run(dir, gt, "version")
+		stdout, stderr, code := run.run(dir, gt, "version")
 		if code != 0 {
 			return ""
 		}

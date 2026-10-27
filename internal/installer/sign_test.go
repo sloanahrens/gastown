@@ -85,6 +85,13 @@ func TestSign(t *testing.T) {
 		wantSigned   bool
 		wantNoBinary bool
 		codesignName string
+		// password is written to the password file, one line with the newline
+		// keychain.pass carries; testPassword when empty.
+		password string
+		// wantUnlock is the whole line the unlock read on stdin, with KEYCHAIN
+		// standing for the run's keychain. The default treats the password and
+		// the keychain as words that need no quoting.
+		wantUnlock string
 	}{
 		{
 			name:         "nothing installed is not signed",
@@ -125,6 +132,11 @@ func TestSign(t *testing.T) {
 			wantCmds: 1,
 		},
 		{
+			name:     "a password spanning more than one line installs ad-hoc",
+			password: "two\nlines",
+			want:     "[install-gt] WARNING: installing ad-hoc: the password or the keychain path spans more than one line",
+		},
+		{
 			name: "a temp file that cannot be created beside the binary installs ad-hoc",
 			setup: func(w *signWorld) {
 				// The material reads as present, but the binary sits in a
@@ -150,7 +162,11 @@ func TestSign(t *testing.T) {
 			wantCmds: 1,
 		},
 		{
-			name: "codesign that fails leaves the binary alone",
+			// The seam can only script statuses, so this stands in for an
+			// unlock that reported success but did not take: the codesign that
+			// needed the keychain fails, and the install goes ad-hoc with
+			// exactly one WARNING (gt-4ucnp).
+			name: "a codesign that fails after an unlock reporting success installs ad-hoc",
 			respond: func(dir, name string, args []string) ([]byte, []byte, int) {
 				if name == "codesign" {
 					return nil, []byte("errSecInternalComponent\nmore detail\n"), 1
@@ -187,6 +203,15 @@ func TestSign(t *testing.T) {
 			wantSigned: true,
 		},
 		{
+			name:       "a password with a space is quoted on the unlock's stdin",
+			respond:    signsCopy,
+			want:       "[install-gt] Signed BIN as com.gastown.gt",
+			wantCmds:   2,
+			wantSigned: true,
+			password:   "two words",
+			wantUnlock: `unlock-keychain -p "two words" KEYCHAIN`,
+		},
+		{
 			name: "timeout bounds codesign where timeout(1) is on PATH",
 			setup: func(w *signWorld) {
 				w.Found = func(name string) bool { return name == "timeout" }
@@ -213,6 +238,9 @@ func TestSign(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			w := newSignWorld(t)
+			if tc.password != "" {
+				putFile(t, w.Signing.PasswordFile(), tc.password+"\n", 0o600)
+			}
 			if tc.setup != nil {
 				tc.setup(w)
 			}
@@ -230,6 +258,21 @@ func TestSign(t *testing.T) {
 			if len(w.cmds) != tc.wantCmds {
 				t.Fatalf("commands = %q, want %d", w.cmds, tc.wantCmds)
 			}
+			// Each way of not signing is exactly one WARNING and a sign that
+			// works warns about nothing: an install never sees a warning and a
+			// failure buried under a second one saying the same thing.
+			warnings, wantWarnings := 0, 1
+			if tc.wantSigned {
+				wantWarnings = 0
+			}
+			for _, line := range w.lines() {
+				if strings.Contains(line, "WARNING:") {
+					warnings++
+				}
+			}
+			if warnings != wantWarnings {
+				t.Errorf("warnings = %d (%q), want exactly %d", warnings, w.lines(), wantWarnings)
+			}
 			// Every way of not signing leaves the binary it was handed exactly
 			// as it was: the step is best effort, never a change it cannot
 			// finish (gt-tpg0p.11).
@@ -239,13 +282,35 @@ func TestSign(t *testing.T) {
 			if tc.wantCmds == 0 {
 				return
 			}
-			// The password reaches the unlock and nothing else: it is never in
-			// the output and never in codesign's argv.
-			if out := w.out.String() + w.errOut.String(); strings.Contains(out, strings.TrimSpace(testPassword)) {
-				t.Error("the password reached the output")
+			password := tc.password
+			if password == "" {
+				password = strings.TrimSpace(testPassword)
 			}
-			if got, want := w.cmds[0], []string{"security", "unlock-keychain", "-p", strings.TrimSpace(testPassword), w.keychain}; !reflect.DeepEqual(got, want) {
+			// The password reaches the unlock's stdin and nothing else: it is
+			// never in the argv ps would show it in, never in the output and
+			// never in codesign's argv (gt-4ucnp).
+			if got, want := w.cmds[0], []string{"security", "-i"}; !reflect.DeepEqual(got, want) {
 				t.Errorf("unlock argv = %q, want %q", got, want)
+			}
+			if args := strings.Join(w.cmds[0], " "); strings.Contains(args, password) {
+				t.Errorf("unlock argv %q holds the password", w.cmds[0])
+			}
+			// The expectation is written out here rather than built with
+			// quoteLine: an expectation computed by the code under test agrees
+			// with it however that code is broken.
+			wantUnlock := tc.wantUnlock
+			if wantUnlock == "" {
+				wantUnlock = "unlock-keychain -p " + password + " KEYCHAIN"
+			}
+			if strings.ContainsAny(w.keychain, " \t\"'\\") {
+				t.Fatalf("the temporary keychain path %q needs quoting; this expectation is written for a bare word", w.keychain)
+			}
+			wantUnlock = strings.ReplaceAll(wantUnlock, "KEYCHAIN", w.keychain) + "\n"
+			if got := w.stdins[0]; got != wantUnlock {
+				t.Errorf("unlock stdin = %q, want %q", got, wantUnlock)
+			}
+			if out := w.out.String() + w.errOut.String(); strings.Contains(out, password) {
+				t.Error("the password reached the output")
 			}
 			if tc.wantCmds < 2 {
 				return
@@ -274,6 +339,77 @@ func TestSign(t *testing.T) {
 			}
 			if leftovers := strayFiles(t, filepath.Dir(w.bin)); len(leftovers) != 0 {
 				t.Errorf("temporary copies left behind: %q", leftovers)
+			}
+		})
+	}
+}
+
+// TestUnlockLineQuotesWhatTheParserNeeds pins the one line security -i reads:
+// an ordinary word passes as it is, and a word holding a space or a quote is
+// wrapped in double quotes with its backslashes and double quotes escaped. A
+// form the parser cannot read fails the unlock — one WARNING and an ad-hoc
+// install — rather than signing with a password it misread (gt-4ucnp).
+func TestUnlockLineQuotesWhatTheParserNeeds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		password string
+		keychain string
+		want     string
+		refused  bool
+	}{
+		{
+			name:     "ordinary words pass as they are",
+			password: "s3cret",
+			keychain: "/material/k.keychain-db",
+			want:     "unlock-keychain -p s3cret /material/k.keychain-db\n",
+		},
+		{
+			name:     "a space is quoted",
+			password: "two words",
+			keychain: "/material/k.keychain-db",
+			want:     `unlock-keychain -p "two words" /material/k.keychain-db` + "\n",
+		},
+		{
+			name:     "a double quote is escaped inside the quotes",
+			password: `a"b`,
+			keychain: "/k",
+			want:     `unlock-keychain -p "a\"b" /k` + "\n",
+		},
+		{
+			name:     "a lone backslash is quoted and escaped",
+			password: `a\b`,
+			keychain: "/k",
+			want:     `unlock-keychain -p "a\\b" /k` + "\n",
+		},
+		{
+			name:     "a keychain path with a space is quoted too",
+			password: "pw",
+			keychain: "/my material/k",
+			want:     `unlock-keychain -p pw "/my material/k"` + "\n",
+		},
+		{
+			name:     "a password spanning two lines is refused",
+			password: "a\nb",
+			keychain: "/k",
+			refused:  true,
+		},
+		{
+			name:     "a keychain path spanning two lines is refused",
+			password: "pw",
+			keychain: "/a\nb",
+			refused:  true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := unlockLine(tc.password, tc.keychain)
+			if wantOK := !tc.refused; ok != wantOK {
+				t.Errorf("unlockLine() ok = %v for %q, want %v", ok, tc.password, wantOK)
+			}
+			if got != tc.want {
+				t.Errorf("unlockLine() = %q, want %q", got, tc.want)
 			}
 		})
 	}
