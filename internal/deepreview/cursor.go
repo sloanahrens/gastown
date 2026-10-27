@@ -121,9 +121,9 @@ func cursorPathOK(p string) bool {
 // A line that starts "cursor: " is a cursor line, and one that does not parse
 // is an error rather than a line to skip: falling back to an older cursor would
 // review landings this ledger says are covered. A path not of the shape git
-// writes is refused on the same terms, though the shell merely echoes it: the
-// path is echoed into the next cursor line, so ledger text must not become a
-// slice path there (gt-rrjql).
+// writes is refused on the same terms: the path is echoed into the next cursor
+// line, so ledger text must not become a slice path there (gt-rrjql). The
+// shell's newest_cursor refuses it too, so one ledger reads the same both ways.
 func ParseCursor(notes string) (Cursor, bool, error) {
 	var newest Cursor
 	found := false

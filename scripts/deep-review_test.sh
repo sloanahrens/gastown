@@ -125,6 +125,23 @@ printf 'cursor: not-a-time internal/a/one.go\n' > "$TMP/badcur.txt"
 assert_eq "cursor with a bad timestamp" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badcur.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e7")"
 printf 'cursor: \n' > "$TMP/badcur2.txt"
 assert_eq "cursor with no timestamp" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badcur2.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e8")"
+echo "a cursor path that is not the shape git writes is refused, as internal/deepreview/cursor.go refuses it"
+badpath() { # name notes : asserts the plan refuses the cursor path
+  printf '%s\n' "$2" > "$TMP/badpath.txt"
+  assert_eq "$1" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badpath.txt" --repo "$REPO" --now "$NOW" --out "$TMP/ebp")"
+}
+badpath "an absolute path" 'cursor: 2026-10-10T03:00:00.5Z /etc/passwd'
+badpath "a doubled slash" 'cursor: 2026-10-10T03:00:00.5Z internal//a/one.go'
+badpath "a trailing slash" 'cursor: 2026-10-10T03:00:00.5Z internal/a/'
+badpath "a dot component" 'cursor: 2026-10-10T03:00:00.5Z ./internal/a/one.go'
+badpath "a path that climbs out of the tree" 'cursor: 2026-10-10T03:00:00.5Z ../../etc/passwd'
+badpath "the parent directory itself" 'cursor: 2026-10-10T03:00:00.5Z ..'
+printf 'cursor: 2026-10-10T03:00:00.5Z internal/a/one.go\007\n' > "$TMP/badpath.txt"
+assert_eq "a control character in the path" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badpath.txt" --repo "$REPO" --now "$NOW" --out "$TMP/ebp")"
+badpath "a bad path older than a good line is refused too" 'cursor: 2026-10-10T01:00:00Z ../a/one.go
+cursor: 2026-10-10T03:00:00Z internal/a/two.go'
+printf 'cursor: 2026-10-10T03:00:00.5Z .github/workflows/ci.yml\n' > "$TMP/badpath.txt"
+assert_eq "a dotfile path is the shape git writes" "0" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badpath.txt" --repo "$REPO" --now "$NOW" --out "$TMP/ebp")"
 echo "a cursor line without a path (an empty slice wrote it) is read, not refused"
 # slice mode always prints rotation_cursor_old=, so an empty path is a present, empty line
 oldcur() { grep '^rotation_cursor_old=' "$TMP/plan.out" || echo "(no rotation_cursor_old line)"; }

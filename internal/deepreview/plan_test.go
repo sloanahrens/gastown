@@ -10,6 +10,15 @@ import (
 // planDir is where the fixtures below live: the very files
 // scripts/deep-review_test.sh plans from, so the rows here and the shell's rows
 // plan the same bytes rather than two copies that can drift apart.
+//
+// The expected values below are written out here rather than recorded from the
+// shell. A unit test may not run a subprocess (the town's hermetic-test policy,
+// and the shell needs a git repo and jq to plan at all), so this tier cannot
+// ask the shell what it would say. The recording that does is
+// TestBuildPlanMatchesTheRecordedShellPlan in parity_test.go, where the shell's
+// own output is the expectation; these rows pin the same bytes and the same
+// shell test asserts the same values, so a rule that changes on one side fails
+// on both.
 const planDir = "testdata/plan"
 
 // planFixture reads one shared plan fixture, failing with its path so a moved
@@ -138,6 +147,15 @@ func TestBuildPlan(t *testing.T) {
 			notes:       "cursor: not-a-time\n",
 			ledger:      testLedger,
 			wantErrPart: "bad timestamp in cursor line",
+		},
+		{
+			// The rows in cursor_test.go pin the path shapes ParseCursor
+			// refuses; this one pins the refusal reaching the caller that
+			// builds a plan, so the guard cannot be dropped from the chain.
+			name:        "a refused cursor path is an error, not a window",
+			notes:       "cursor: 2026-10-10T01:00:00.5Z ../../etc/passwd\n",
+			ledger:      testLedger,
+			wantErrPart: "bad path in cursor line",
 		},
 	} {
 		got, err := BuildPlan(tc.notes, []byte(tc.ledger), now)
