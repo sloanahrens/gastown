@@ -235,6 +235,9 @@ func (*Fake) Blocked(context.Context, api.ReadyFilter) (api.IssuePage, error) {
 func (*Fake) ChildrenOf(context.Context, []string) (map[string][]api.Issue, error) {
 	return nil, unimplemented("ChildrenOf")
 }
+func (*Fake) Batch(context.Context, api.BatchRequest) (api.BatchResult, error) {
+	return api.BatchResult{}, unimplemented("Batch")
+}
 func (*Fake) CreateGraph(context.Context, api.GraphRequest) (api.GraphResult, error) {
 	return api.GraphResult{}, unimplemented("CreateGraph")
 }

@@ -74,6 +74,11 @@ type Store interface {
 	// ChildrenOf returns the direct children of each of parents, wisps
 	// included, keyed by parent; a parent with no children is absent.
 	ChildrenOf(ctx context.Context, parents []string) (map[string][]api.Issue, error)
+	// Batch applies req's operations in order in one transaction: every write
+	// commits together, or the first failure rolls back the ones before it.
+	// The result holds one entry per operation, in request order; a failure is
+	// an api.Error naming the failing operation's index.
+	Batch(ctx context.Context, req api.BatchRequest) (api.BatchResult, error)
 	// CreateGraph creates every node of req and every link between them in one
 	// transaction, or nothing: a cycle, a missing target or a bad node leaves no
 	// issue behind. Ephemeral nodes get wisp ids. The result maps node keys to

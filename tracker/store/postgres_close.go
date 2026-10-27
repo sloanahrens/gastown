@@ -88,26 +88,33 @@ func closeRow(ctx context.Context, tx pgx.Tx, id, reason string, force bool, act
 // closed issue is skipped, so closing twice is not an error. Unless force, an
 // issue with open children or an open blocker refuses and nothing is closed.
 func (p *Postgres) CloseIssues(ctx context.Context, ids []string, reason string, force bool) error {
+	if len(uniqueStrings(ids)) == 0 {
+		return nil
+	}
+	actor := api.ActorFrom(ctx)
+	return p.inTx(ctx, func(tx pgx.Tx) error { return closeAllInTx(ctx, tx, ids, reason, force, actor) })
+}
+
+// closeAllInTx closes every id not already closed, or none: it locks them all
+// first, so a missing id refuses the set before anything changes.
+func closeAllInTx(ctx context.Context, tx pgx.Tx, ids []string, reason string, force bool, actor string) error {
 	ids = uniqueStrings(ids)
 	if len(ids) == 0 {
 		return nil
 	}
-	actor := api.ActorFrom(ctx)
-	return p.inTx(ctx, func(tx pgx.Tx) error {
-		status, err := lockStatuses(ctx, tx, ids)
-		if err != nil {
+	status, err := lockStatuses(ctx, tx, ids)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if status[id] == "closed" {
+			continue
+		}
+		if err := closeRow(ctx, tx, id, reason, force, actor, ids, true); err != nil {
 			return err
 		}
-		for _, id := range ids {
-			if status[id] == "closed" {
-				continue
-			}
-			if err := closeRow(ctx, tx, id, reason, force, actor, ids, true); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // lockStatuses locks ids in id order (a fixed order, so concurrent callers
