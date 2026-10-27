@@ -98,11 +98,19 @@ func Main(args []string) int {
 	return runProgram(args, os.Stdout, os.Stderr, os.Getenv)
 }
 
-// runProgram answers Main: no arguments runs one plugin run, and "trim-cache"
-// is the helper a cache volume's short-lived container runs.
+// runProgram answers Main: no arguments runs one plugin run, and "trim-cache",
+// "seed-clone" and "seed-cache" are the helpers a container of the image runs in
+// the seed and trim Jobs.
 func runProgram(args []string, stdout, stderr io.Writer, get func(string) string) int {
-	if len(args) > 0 && args[0] == "trim-cache" {
-		return trimCacheMain(args[1:], stdout, stderr)
+	if len(args) > 0 {
+		switch args[0] {
+		case "trim-cache":
+			return trimCacheMain(args[1:], stdout, stderr)
+		case "seed-clone":
+			return seedCloneMain(args[1:], stdout, stderr)
+		case "seed-cache":
+			return seedCacheMain(args[1:], stdout, stderr)
+		}
 	}
 	return runMain(stdout, get)
 }
@@ -154,4 +162,57 @@ func trimCacheMain(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "trimmed %d %d\n", res.Before, res.After)
 	return 0
+}
+
+// seedCloneMain runs the seed Job's init container: it checks each pin out under
+// --dest from the pin's clone URL. Exit 3 with a reason on stderr means a pin
+// could not be cloned, and the Job stops before the seed container touches the
+// claim.
+func seedCloneMain(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("seed-clone", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	pinsText := flags.String("pins", "", "the seed pins, as the seed Job renders them")
+	dest := flags.String("dest", defaultSeedSource, "the directory each pinned rig is checked out under")
+	if err := flags.Parse(args); err != nil {
+		return 3
+	}
+	pins, err := decodePins(*pinsText)
+	if err == nil {
+		err = CloneSeed(*dest, pins, execSeedRun, outLogf(stdout))
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "seed-clone: %v\n", err)
+		return 3
+	}
+	return 0
+}
+
+// seedCacheMain runs the seed Job's seed container: it fills the claim at --root
+// from the checkouts under --source. Exit 3 with a reason on stderr means the
+// claim was not seeded to completion, so the Job reports itself and leaves no
+// marker for a rerun to mistake for a finished seed.
+func seedCacheMain(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("seed-cache", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	pinsText := flags.String("pins", "", "the seed pins, as the seed Job renders them")
+	root := flags.String("root", defaultSeedRoot, "the shared cache claim to fill")
+	source := flags.String("source", defaultSeedSource, "the directory holding each pinned rig's checkout")
+	if err := flags.Parse(args); err != nil {
+		return 3
+	}
+	pins, err := decodePins(*pinsText)
+	if err == nil {
+		pass := &SeedPass{Root: *root, Source: *source, Pins: pins, Files: OSFiles{}, Run: execSeedRun, Logf: outLogf(stdout)}
+		err = pass.Seed()
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "seed-cache: %v\n", err)
+		return 3
+	}
+	return 0
+}
+
+// outLogf writes a seed helper's progress to stdout, where the Job's log holds it.
+func outLogf(w io.Writer) func(string, ...any) {
+	return func(format string, args ...any) { fmt.Fprintf(w, format+"\n", args...) }
 }

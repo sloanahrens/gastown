@@ -1,21 +1,23 @@
-// Package cachevol plans the shared polecat cache: the seed steps the seed Job runs for each pinned
-// rig, and the trim that keeps the shared claim under its cap. Both are pure: the seed pins, the file
-// listing and the sandbox state are inputs, and nothing here touches a filesystem, a cluster or a
-// clock (design: docs/plans/2026-10-26-k8s-shared-cache-design.md, "The seed pass" and "Cap and trim").
+// Package cachevol plans the shared polecat cache: the seed Job that fills it, the seed steps that
+// Job runs for each pinned rig, and the trim that keeps the claim under its cap. All of it is pure:
+// the seed pins, the file listing and the sandbox state are inputs, and nothing here touches a
+// filesystem, a cluster or a clock (design: docs/plans/2026-10-26-k8s-shared-cache-design.md, "The
+// seed pass" and "Cap and trim").
 package cachevol
 
 import (
-	"errors"
 	"fmt"
 	"regexp"
 	"sort"
 	"time"
 )
 
-// Pin is one rig's seed source: the commit the seed Job clones and seeds from.
+// Pin is one rig's seed source: the rig, the commit the seed Job checks out, and the URL the Job's
+// init container clones it from.
 type Pin struct {
-	Rig    string
-	Commit string
+	Rig    string `json:"rig"`
+	Commit string `json:"commit"`
+	URL    string `json:"url"`
 }
 
 // Step is one seed command run in a module directory. Required steps fail the seed when they fail;
@@ -34,16 +36,17 @@ type RigSeed struct {
 
 var commitRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// PlanSeed returns the linux seed steps for each pin, in the order the pins were given. A pin with no
-// rig name, a commit that is not a full sha, or a rig named twice is refused, so the seed never runs
-// from a pins file it cannot read whole.
+// PlanSeed returns the linux seed steps for each pin, in the order the pins were given. A rig name
+// that is not a DNS-1123 label (it becomes a directory name in the seed Job), a commit that is not a
+// full sha, or a rig named twice is refused, so the seed never runs from a pins file it cannot read
+// whole.
 func PlanSeed(pins []Pin) ([]RigSeed, error) {
 	seen := make(map[string]bool, len(pins))
 	out := make([]RigSeed, 0, len(pins))
 	for _, p := range pins {
 		switch {
-		case p.Rig == "":
-			return nil, errors.New("a seed pin names no rig")
+		case !validDNS1123Label(p.Rig):
+			return nil, fmt.Errorf("the seed pin rig %q is not a DNS-1123 label: lowercase letters, digits and hyphens, at most 63 characters", p.Rig)
 		case !commitRE.MatchString(p.Commit):
 			return nil, fmt.Errorf("the seed pin for %s is not a full 40-hex commit", p.Rig)
 		case seen[p.Rig]:
@@ -165,3 +168,12 @@ func sortedLRU(listing []Entry, c Cache) []Entry {
 	})
 	return out
 }
+
+// validDNS1123Label reports whether name is a DNS-1123 label, the form a rig takes as a directory
+// name in the seed Job and as a Kubernetes object name: lowercase letters, digits and hyphens, at
+// most 63 characters, starting and ending with a letter or digit.
+func validDNS1123Label(name string) bool {
+	return len(name) <= 63 && dns1123LabelRE.MatchString(name)
+}
+
+var dns1123LabelRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
