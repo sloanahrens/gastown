@@ -531,6 +531,18 @@ func TestRealEnvRefusesACacheItCannotDecode(t *testing.T) {
 	}
 }
 
+func TestRealEnvRefusesACacheItCannotRead(t *testing.T) {
+	t.Parallel()
+	// A cache that is there and denied reads as no cache at all if the failure
+	// is taken for absence, so the read's error is the wiring's to report.
+	path := filepath.Join(townOfSeam, ".runtime", "metrics", "cache", handoffCacheName)
+	files := seamFiles{errs: map[string]error{path: fs.ErrPermission}}
+	_, err := seamWired(t, files)
+	if !errors.Is(err, fs.ErrPermission) || !strings.Contains(err.Error(), handoffCacheName) {
+		t.Errorf("RealEnv error = %v, want %s's permission failure", err, handoffCacheName)
+	}
+}
+
 func TestRealEnvTownDefaults(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
