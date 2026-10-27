@@ -820,6 +820,18 @@ repository through `gitHygieneRepoPath` in `internal/daemon/git_hygiene.go`,
 which prefers the rig's shared bare repo (`.repo.git/`) to what this field
 reports.
 
+### Repository Guards
+
+`gt repoguard` holds the current directory's repository to a shrinking
+`.repoguard-allowlist` at its root; `gt repoguard --help` carries the line
+format, the flags and the exit codes.
+
+It exists for repos with no Go module to carry a test of their own, so the rule
+that a script is debt travels with the binary (gt-7zfre); a rig opts in by
+putting the command in its gate. gastown's own scripts are held instead by
+`TestIntegrationNoNewShellScripts` in `internal/repoguard`, which reads
+`shell-scripts.txt`: different list, different file, not shared.
+
 ### Work Tracking (Primary Dashboard)
 
 ```bash

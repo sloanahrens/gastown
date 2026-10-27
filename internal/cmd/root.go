@@ -54,6 +54,7 @@ var beadsExemptCommands = map[string]bool{
 	"prime":       true,
 	"nudge":       true,
 	"doctor":      true,
+	"repoguard":   true, // Reads git and an allowlist file; runs in a repo with no town and no beads
 	"dolt":        true,
 	"handoff":     true,
 	"rig":         true,
