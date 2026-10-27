@@ -34,7 +34,7 @@ func TestCostPanelReplacesTheDeepSeekAndUsagePanels(t *testing.T) {
 	cost := pageFunc(t, "renderCost")
 	for _, want := range []string{
 		// All three parts, in the order the panel reads: DeepSeek, GCP, Usage.
-		`costSpend(spendBox, d, r)`,
+		`costSpend(spendBox, d, r, s.cost_charts && s.cost_charts.headline)`,
 		`costGCP(box, s.cloud)`,
 		`costUsage(box, u, s)`,
 		// Neither a spend report nor usage records is one line.
@@ -285,13 +285,13 @@ func TestCostPanelKeepsEveryDeepSeekField(t *testing.T) {
 
 	spend := pageFunc(t, "costSpend")
 	for _, want := range []string{
-		`add(money(d.balance), "balance"`,
-		`"spent (sampled" + (since ? " since " + since[0] : "") + ")"`,
-		`add(money(d.spent_total), "spent since top-up")`,
-		`"last 1h"`,
-		`"last 24h"`,
-		`"runway"`,
-		`money(d.cash) + " cash + " + money(d.credit) + " credit"`,
+		`add(money(d.balance), "DeepSeek balance"`,
+		`"DeepSeek spent (sampled" + (since ? " since " + since[0] : "") + ")"`,
+		`add(money(d.spent_total), "DeepSeek spent since top-up")`,
+		`"DeepSeek last 1h"`,
+		`"DeepSeek last 24h"`,
+		`"DeepSeek runway"`,
+		`"DeepSeek " + money(d.cash) + " cash + " + money(d.credit) + " credit"`,
 		`"credit lasts ~" + cr.toFixed(1) + "d, then cash"`,
 		`Object.entries(d.per_day || {})`,
 		`d.credits.slice().reverse()`,
@@ -352,7 +352,7 @@ func TestCostPanelPutsCashCreditAndTheRunwayOnOneLine(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("the spend part drew %d dim lines: %+v, want the split alone", len(lines), lines)
 	}
-	want := "$5.20 cash + $17.98 credit · credit lasts ~1.1d, then cash"
+	want := "DeepSeek $5.20 cash + $17.98 credit · credit lasts ~1.1d, then cash"
 	if lines[0].Text != want {
 		t.Errorf("the line under the balance = %q, want %q", lines[0].Text, want)
 	}
@@ -360,7 +360,7 @@ func TestCostPanelPutsCashCreditAndTheRunwayOnOneLine(t *testing.T) {
 	// Credit spent down to nothing: the split stays and the runway goes, since
 	// there is no credit left to run out.
 	lines = dimLines(t, spendReport(5.2, 0, 0))
-	if len(lines) != 1 || lines[0].Text != "$5.20 cash + $0.00 credit" {
+	if len(lines) != 1 || lines[0].Text != "DeepSeek $5.20 cash + $0.00 credit" {
 		t.Errorf("a report with no credit = %+v, want the split with no runway", lines)
 	}
 

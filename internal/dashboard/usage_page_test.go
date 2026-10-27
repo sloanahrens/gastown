@@ -18,7 +18,7 @@ func TestUsagePanelDrawsThePayload(t *testing.T) {
 		// The panel's header reads without opening the part: the DeepSeek
 		// estimate and the count of beads over twenty minutes.
 		`byClass.filter(r => isDeepSeek(r.model))`,
-		`text: "est. " + money(est) + " · " + over.length + " over 20m"`,
+		`text: "DeepSeek est. " + money(est) + " · " + over.length + (over.length === 1 ? " bead" : " beads") + " over 20m"`,
 		`warn: over.length > 0,`,
 		// Claude rows are tokens, DeepSeek rows are dollars labelled est.
 		`isDeepSeek(r.model) ? "est. " + money(r.est_cost_usd) : fmtTokens(r.uncached) + " tokens"`,

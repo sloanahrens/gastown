@@ -39,6 +39,86 @@ type costBucket struct {
 	Start time.Time
 }
 
+// CostHeadline is the Claude plan-equivalent dollars the Cost panel's headline
+// row shows beside the DeepSeek figures, priced from the same samples the
+// charts draw.
+type CostHeadline struct {
+	// Name is the series' name, the label the charts' legend uses.
+	Name string `json:"name"`
+	// Today and PerHour24h are nil when the series has no reading for them, so
+	// the page draws a dash rather than a zero nobody spent.
+	Today      *float64 `json:"today,omitempty"`
+	PerHour24h *float64 `json:"per_hour_24h,omitempty"`
+	// WindowHours is the window PerHour24h is read over and HoursRead how many
+	// of its hours had a sample: PerHour24h is the rate over those hours, and a
+	// reader weighs it by their count.
+	WindowHours int `json:"window_hours"`
+	HoursRead   int `json:"hours_read,omitempty"`
+	// Why is why no figure is drawn: the samples could not be read, none was
+	// written, or none falls in the window.
+	Why string `json:"why,omitempty"`
+}
+
+// costHeadlineHours is the window the headline's hourly rate is read over.
+const costHeadlineHours = 24
+
+// costHourlyWindow is the last 24 hours' buckets ending at now's hour: the
+// window the headline's hourly rate is read over. The buckets are cut on the
+// clock now carries, so an hourly rate lines up with the hours the reader sees
+// (gt-iazpv).
+func costHourlyWindow(now time.Time) []costBucket {
+	last := costHourStart(now)
+	first := last.Add(-time.Duration(costHeadlineHours-1) * time.Hour)
+	buckets := make([]costBucket, costHeadlineHours)
+	for i := range buckets {
+		start := first.Add(time.Duration(i) * time.Hour)
+		hr := start.Format("15") + ":00"
+		buckets[i] = costBucket{Label: hr, Name: hr, Start: start}
+	}
+	return buckets
+}
+
+// costHourStart is the start of t's own hour on the clock t carries. Truncate
+// counts from the epoch, so in a zone whose offset is not a whole hour it would
+// start half an hour into the hour.
+func costHourStart(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, t.Location())
+}
+
+// claudeHeadline prices the series into the headline's two figures: today's
+// spend, off the day buckets the daily chart draws, and the last 24 hours' rate,
+// off one bucket an hour. A window with no sample for some hours prices the
+// rate over the hours it read and counts them, since a rate over a window the
+// series did not read would read as spend that never happened (gt-iazpv).
+func claudeHeadline(now time.Time, samples PlanSamples, weeklyUSD float64) *CostHeadline {
+	h := &CostHeadline{Name: claudePlanSeriesName, WindowHours: costHeadlineHours}
+	days := costDailyBuckets(now)
+	if daily, _ := claudeCostSeries(days, days[len(days)-1].Start.AddDate(0, 0, 1), samples, weeklyUSD); daily != nil {
+		if last := daily.Bars[len(daily.Bars)-1]; !last.Gap {
+			v := last.Value
+			h.Today = &v
+		}
+	}
+	hours := costHourlyWindow(now)
+	hourly, why := claudeCostSeries(hours, hours[len(hours)-1].Start.Add(time.Hour), samples, weeklyUSD)
+	if hourly == nil {
+		h.Why = why
+		return h
+	}
+	var total float64
+	for _, b := range hourly.Bars {
+		if !b.Gap {
+			total += b.Value
+			h.HoursRead++
+		}
+	}
+	if h.HoursRead > 0 {
+		v := roundTo2(total / float64(h.HoursRead))
+		h.PerHour24h = &v
+	}
+	return h
+}
+
 // claudeCostSeries folds the samples into plan-equivalent dollars on the
 // chart's buckets, or says why it has no series to draw.
 //
