@@ -14,6 +14,7 @@ digest = true
 
 [execution]
 type = "script"
+binary = "bin/tool-updater"
 +++
 
 # Tool Updater
@@ -24,8 +25,12 @@ nothing.
 Run it directly:
 
 ```bash
-bash ~/gt/plugins/tool-updater/run.sh
+~/gt/plugins/tool-updater/bin/tool-updater
 ```
+
+Before building or syncing this plugin, read "Script entry point" in
+`plugins/README.md`; it states why a plugin that names a binary must build it
+before a sync.
 
 ## Upgrades are manual
 

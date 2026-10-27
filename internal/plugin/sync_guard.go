@@ -97,8 +97,14 @@ func gitBlobID(data []byte) string {
 // would destroy: content the source repo never held at that path (a hand
 // edit, or a file that exists only in the runtime copy). A file identical to
 // the current source, or to any version the repo held, is an older copy and
-// safe to replace. With nil history every differing file counts (fail closed).
+// safe to replace. The plugin's declared binary is also replaced: it is a
+// build artifact, so a rebuilt copy differs by its build stamp rather than by
+// an operator's hand, and plugin.md names exactly the path the runner execs
+// (gt-tpg0p.3). A source without that binary protects the runtime one rather
+// than shipping a plugin with no entry point. With nil history every other
+// differing file counts (fail closed).
 func runtimeEdits(name, srcPluginDir, dstPluginDir string, hist blobHistory, prefix string) ([]string, error) {
+	binary := declaredBinaryOf(srcPluginDir)
 	var edits []string
 	err := filepath.WalkDir(dstPluginDir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -111,6 +117,7 @@ func runtimeEdits(name, srcPluginDir, dstPluginDir string, hist blobHistory, pre
 		if err != nil {
 			return err
 		}
+		relSlash := filepath.ToSlash(rel)
 		data, err := os.ReadFile(p) //nolint:gosec // G304: walking the town's plugin directory
 		if err != nil {
 			return err
@@ -118,11 +125,16 @@ func runtimeEdits(name, srcPluginDir, dstPluginDir string, hist blobHistory, pre
 		if src, err := os.ReadFile(filepath.Join(srcPluginDir, rel)); err == nil && bytes.Equal(src, data) { //nolint:gosec // G304: trusted source tree
 			return nil
 		}
-		repoPath := path.Join(prefix, name, filepath.ToSlash(rel))
+		if binary != "" && relSlash == binary {
+			if _, err := os.Stat(filepath.Join(srcPluginDir, rel)); err == nil {
+				return nil
+			}
+		}
+		repoPath := path.Join(prefix, name, relSlash)
 		if hist != nil && hist[repoPath][gitBlobID(data)] {
 			return nil
 		}
-		edits = append(edits, filepath.ToSlash(rel))
+		edits = append(edits, relSlash)
 		return nil
 	})
 	sort.Strings(edits)

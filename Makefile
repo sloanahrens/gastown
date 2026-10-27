@@ -111,6 +111,11 @@ endif
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gt
+	@# A plugin's binary is a build artifact that lives beside its plugin.md:
+	@# the runner execs it there and gt plugin sync copies the directory, so an
+	@# install that skips this leaves the runtime copy with no entry point.
+	@mkdir -p plugins/tool-updater/bin
+	go build -ldflags "$(LDFLAGS)" -o plugins/tool-updater/bin/tool-updater ./plugins/tool-updater
 
 # golangci-lint must be built with a Go >= go.mod's version and understand .golangci.yml version 2;
 # a stale ~/go/bin/golangci-lint fails every run with "can't load config" (2026-09-17). `make lint-tools`

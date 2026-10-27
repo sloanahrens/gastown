@@ -22,7 +22,6 @@ plugins/app-promote/run_test.sh
 plugins/polecat-image/run.sh
 plugins/polecat-image/run_test.sh
 plugins/tool-updater/run.sh
-plugins/tool-updater/run_test.sh
 plugins/town-metrics/run.sh
 scripts/bootstrap-local-rig.sh
 scripts/bump-version.sh

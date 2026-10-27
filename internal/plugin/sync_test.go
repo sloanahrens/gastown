@@ -586,6 +586,98 @@ func TestSyncPlugins_ProtectsRuntimeOnlyFile(t *testing.T) {
 	}
 }
 
+// A rebuilt plugin binary is a build artifact, not a runtime edit: plugin.md
+// names the path the runner execs, so the source's newer copy replaces the
+// runtime one instead of protecting it (gt-tpg0p.3).
+func TestSyncPlugins_ReplacesARebuiltBinary(t *testing.T) {
+	t.Parallel()
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	hist := &fakeHistory{}
+	manifest := "+++\nname = \"p\"\n\n[execution]\ntype = \"script\"\nbinary = \"bin/p\"\n+++\n"
+	writePluginBinary(t, srcDir, "p", manifest, "rebuilt")
+	hist.commit(t, srcDir)
+	writePluginBinary(t, dstDir, "p", manifest, "shipped")
+
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{}, hist.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(result.Copied, []string{"p"}) || len(result.Protected) != 0 {
+		t.Errorf("Copied = %v, Protected = %v; want p copied", result.Copied, result.Protected)
+	}
+	data, _ := os.ReadFile(filepath.Join(dstDir, "p", "bin", "p"))
+	if string(data) != "rebuilt" {
+		t.Errorf("runtime binary = %q, want the rebuilt copy", data)
+	}
+}
+
+// The exemption is the declared binary alone: a differing file beside it is
+// still an operator edit.
+func TestSyncPlugins_ProtectsAFileBesideTheBinary(t *testing.T) {
+	t.Parallel()
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	hist := &fakeHistory{}
+	manifest := "+++\nname = \"p\"\n\n[execution]\ntype = \"script\"\nbinary = \"bin/p\"\n+++\n"
+	writePluginBinary(t, srcDir, "p", manifest, "same")
+	hist.commit(t, srcDir)
+	writePluginBinary(t, dstDir, "p", manifest, "same")
+	if err := os.WriteFile(filepath.Join(dstDir, "p", "bin", "helper"), []byte("hand written\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{}, hist.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string][]string{"p": {"bin/helper"}}; !reflect.DeepEqual(result.Protected, want) {
+		t.Errorf("Protected = %v, want %v", result.Protected, want)
+	}
+}
+
+// An unbuilt source names a binary it does not carry yet; the runtime copy's
+// entry point is kept, since copying would leave the plugin with nothing to
+// run.
+func TestSyncPlugins_ProtectsTheBinaryAnUnbuiltSourceLacks(t *testing.T) {
+	t.Parallel()
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	hist := &fakeHistory{}
+	manifest := "+++\nname = \"p\"\n\n[execution]\ntype = \"script\"\nbinary = \"bin/p\"\n+++\n"
+	createTestPlugin(t, srcDir, "p", manifest, nil)
+	hist.commit(t, srcDir)
+	writePluginBinary(t, dstDir, "p", manifest, "shipped")
+
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{}, hist.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string][]string{"p": {"bin/p"}}; !reflect.DeepEqual(result.Protected, want) {
+		t.Errorf("Protected = %v, want %v", result.Protected, want)
+	}
+	data, _ := os.ReadFile(filepath.Join(dstDir, "p", "bin", "p"))
+	if string(data) != "shipped" {
+		t.Errorf("runtime binary = %q, want it kept", data)
+	}
+}
+
+// writePluginBinary writes a plugin whose plugin.md declares bin/<name>, and
+// that binary with the given content.
+func writePluginBinary(t *testing.T, dir, name, manifest, binary string) {
+	t.Helper()
+	binDir := filepath.Join(dir, name, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name, "plugin.md"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, name), []byte(binary), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSyncPluginsWithOptions_ForceOverwritesRuntimeEdit(t *testing.T) {
 	t.Parallel()
 	srcDir := t.TempDir()

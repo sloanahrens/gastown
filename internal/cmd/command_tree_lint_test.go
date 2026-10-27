@@ -73,6 +73,10 @@ func TestCommandTokensResolve(t *testing.T) {
 	// tool-updater still calls gt from a plugin, so the floor dropped with it.
 	// The tool-updater report rewrite (gt-th5it) dropped that plugin's `bd
 	// version` call, leaving `gt plugin record-run` its one invocation: floor 1.
+	// The tool-updater port to Go (gt-tpg0p.3) moved that invocation into a .go
+	// file, which this scanner does not read, taking plugins to 18. The floor
+	// stays 1: the other plugins still call gt from run.sh and plugin.md, so it
+	// remains the canary that the scanner reads the plugins directory at all.
 	// The mayor role's retirement (gt-rwp7z.13) deleted mayor.md.tmpl and
 	// mol-gastown-boot.formula.toml and rewrote the templates and formulas that
 	// addressed the role: templates fell from 338 to 279 and formulas from 216
