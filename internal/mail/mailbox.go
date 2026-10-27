@@ -361,10 +361,13 @@ func (m *Mailbox) queryWispMessages(beadsDir string, identities []string) ([]wis
 }
 
 // queryWispMessages reads the open and hooked gt:message wisps assigned to, or
-// cc'ing, any of identities. List cannot ask for "assignee in this set", so one
-// read of the gt:message wisps serves every identity and the match flags are
-// taken off each record; the call count stays off the identity list
-// (gt-p85pw.16).
+// cc'ing, any of identities. The status set is pushed to the query; the
+// identity set stays in Go, because no List filter answers "assigned to one of
+// these identities or carrying one of their cc: labels", and this read is
+// shared with BatchMailSummaries, whose two-call contract holds whatever the
+// address count (gt-978i). What comes back is therefore every live gt:message
+// wisp, not every wisp, and each record carries the flags its own fields
+// decide (gt-p85pw.16).
 func queryWispMessages(store beads.Client, identities []string) ([]wispQueryMessage, error) {
 	if len(identities) == 0 {
 		return nil, nil
@@ -378,7 +381,8 @@ func queryWispMessages(store beads.Client, identities []string) ([]wispQueryMess
 
 	issues, err := store.List(beads.ListOptions{
 		Ephemeral: true,
-		Labels:    []string{"gt:message"},
+		Label:     "gt:message",
+		Status:    wispMessageStatuses,
 	})
 	if err != nil {
 		return nil, err // Wisps table may not exist yet.
@@ -387,9 +391,6 @@ func queryWispMessages(store beads.Client, identities []string) ([]wispQueryMess
 	var out []wispQueryMessage
 	for _, issue := range issues {
 		if issue == nil {
-			continue
-		}
-		if issue.Status != "open" && issue.Status != "hooked" {
 			continue
 		}
 		ccMatch := false
@@ -414,6 +415,10 @@ func queryWispMessages(store beads.Client, identities []string) ([]wispQueryMess
 	}
 	return out, nil
 }
+
+// wispMessageStatuses are the statuses mail reads as live mail: open, or
+// hooked (auto-assigned handoff mail).
+const wispMessageStatuses = "open,hooked"
 
 func parseWispTimestamp(value string) (time.Time, bool) {
 	for _, layout := range []string{
@@ -455,10 +460,10 @@ type issueBatchRow struct {
 
 // queryIssueMessagesBatch fetches the open/hooked gt:message issues assigned
 // to, or CC'ing, any of the given identities, one row per message. It reads
-// the open gt:message issues in a single List call and matches the identity
-// set in Go: List cannot ask for "assignee in this set", and one read keeps
-// the call count off the address list the dashboard asks about (gt-978i).
-// Used by Router.BatchMailSummaries.
+// the open and hooked gt:message issues in a single List call (the comma status
+// set bd list accepts) and matches the identity set in Go: List cannot ask for
+// "assignee in this set", and one read keeps the call count off the address
+// list the dashboard asks about (gt-978i). Used by Router.BatchMailSummaries.
 func queryIssueMessagesBatch(run bdRunner, workDir, beadsDir string, identities []string) ([]issueBatchRow, error) {
 	if len(identities) == 0 {
 		return nil, nil
@@ -597,7 +602,7 @@ func (m *Mailbox) getBeads(id string) (*Message, error) {
 func (m *Mailbox) getFromDir(id, beadsDir string) (*Message, error) {
 	issue, err := bdStore(m.bd, m.workDir, beadsDir).Show(id)
 	if err != nil {
-		if isMessageNotFoundErr(err) {
+		if isMessageNotFoundErr(err, id) {
 			return nil, ErrMessageNotFound
 		}
 		return nil, err
@@ -613,13 +618,24 @@ func (m *Mailbox) getFromDir(id, beadsDir string) (*Message, error) {
 
 // isMessageNotFoundErr reports a read bd answered with "no such issue", which
 // mail reports as ErrMessageNotFound: the seam's typed absence, or the text an
-// older bd or a scripted answer carries.
-func isMessageNotFoundErr(err error) bool {
+// older bd prints when it fails with no envelope to classify. A failure that
+// merely mentions something not being found is not that answer — an older bd
+// says "no issue found", or names the id it could not find — and neither is
+// any error that did not come from bd at all: mail says the read failed rather
+// than that the message does not exist.
+func isMessageNotFoundErr(err error, id string) bool {
 	if errors.Is(err, beads.ErrNotFound) {
 		return true
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not found") || strings.Contains(msg, "no issue found")
+	var cliErr *beads.CLIError
+	if !errors.As(err, &cliErr) {
+		return false
+	}
+	text := strings.ToLower(string(cliErr.Stderr))
+	if strings.Contains(text, "no issue found") {
+		return true
+	}
+	return id != "" && strings.Contains(text, "not found") && strings.Contains(text, strings.ToLower(id))
 }
 
 func (m *Mailbox) getLegacy(id string) (*Message, error) {

@@ -2520,7 +2520,9 @@ func (b *Beads) listEphemeral(opts ListOptions) ([]*Issue, error) {
 		clauses = append(clauses, "created>="+quoteBDQueryValue(opts.CreatedAfter.UTC().Format(time.RFC3339)))
 	}
 	if opts.Status != "" && opts.Status != "all" {
-		clauses = append(clauses, "status="+quoteBDQueryValue(opts.Status))
+		if clause := statusQueryClause(opts.Status); clause != "" {
+			clauses = append(clauses, clause)
+		}
 	}
 	if priority, filter := opts.Priority.bd(); filter {
 		clauses = append(clauses, fmt.Sprintf("priority=%d", priority))
@@ -2560,6 +2562,28 @@ func (b *Beads) listEphemeral(opts ListOptions) ([]*Issue, error) {
 	}
 
 	return issues, nil
+}
+
+// statusQueryClause renders ListOptions.Status as a bd query condition. One
+// status is a plain status= condition. Several — the comma-joined form
+// ListOptions documents and bd list accepts — become one OR group, because bd
+// query rejects the comma spelling outright ("invalid status: open,hooked",
+// gt-p85pw.16).
+func statusQueryClause(status string) string {
+	parts := make([]string, 0, 2)
+	for _, part := range strings.Split(status, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			parts = append(parts, "status="+quoteBDQueryValue(part))
+		}
+	}
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	default:
+		return "(" + strings.Join(parts, " OR ") + ")"
+	}
 }
 
 func quoteBDQueryValue(value string) string {

@@ -489,20 +489,19 @@ func TestMailboxListFromDirConvergesWispQueryAndFiltersStatuses(t *testing.T) {
 	}
 
 	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
-		argv := strings.Join(c.Args, " ")
-		switch c.Args[0] {
-		case "list":
-			switch {
-			case strings.Contains(argv, "assignee=gastown/synth"):
-				return `[{"id":"issue-direct-open","title":"Direct open","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:05Z","labels":["gt:message","from:mayor/"]},{"id":"issue-direct-hooked","title":"Direct hooked","description":"","status":"hooked","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:04Z","labels":["gt:message","from:mayor/"]},{"id":"issue-direct-closed","title":"Direct closed","description":"","status":"closed","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:03Z","labels":["gt:message","from:mayor/"]}]`, "", 0
-			case strings.Contains(argv, "cc:gastown/synth"):
-				return `[{"id":"issue-cc-open","title":"CC open","description":"","status":"open","priority":2,"assignee":"mayor/","created_at":"2026-06-12T12:00:02Z","labels":["gt:message","cc:gastown/synth","from:mayor/"]},{"id":"issue-cc-hooked","title":"CC hooked","description":"","status":"hooked","priority":2,"assignee":"mayor/","created_at":"2026-06-12T12:00:01Z","labels":["gt:message","cc:gastown/synth","from:mayor/"]}]`, "", 0
-			}
-			return "[]", "", 0
-		case "query":
+		// The argv is matched whole: a substring would also accept the wrong
+		// filter (a label where an assignee is asked for), and a fixture that
+		// answers a broken call proves nothing about the call.
+		switch argv := strings.Join(c.Args, " "); argv {
+		case "list --json --label=gt:message --assignee=gastown/synth --limit=0 --flat":
+			return `[{"id":"issue-direct-open","title":"Direct open","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:05Z","labels":["gt:message","from:mayor/"]},{"id":"issue-direct-hooked","title":"Direct hooked","description":"","status":"hooked","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:04Z","labels":["gt:message","from:mayor/"]},{"id":"issue-direct-closed","title":"Direct closed","description":"","status":"closed","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:03Z","labels":["gt:message","from:mayor/"]}]`, "", 0
+		case "list --json --label=gt:message --label=cc:gastown/synth --limit=0 --flat":
+			return `[{"id":"issue-cc-open","title":"CC open","description":"","status":"open","priority":2,"assignee":"mayor/","created_at":"2026-06-12T12:00:02Z","labels":["gt:message","cc:gastown/synth","from:mayor/"]},{"id":"issue-cc-hooked","title":"CC hooked","description":"","status":"hooked","priority":2,"assignee":"mayor/","created_at":"2026-06-12T12:00:01Z","labels":["gt:message","cc:gastown/synth","from:mayor/"]}]`, "", 0
+		case `query --json ephemeral=true AND label="gt:message" AND (status="open" OR status="hooked") --limit=0`:
 			return `[{"id":"wisp-direct-open","title":"Wisp direct open","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:00Z","labels":["gt:message","from:mayor/"]},{"id":"wisp-direct-hooked","title":"Wisp direct hooked","description":"","status":"hooked","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T11:59:59Z","labels":["gt:message","from:mayor/"]},{"id":"wisp-cc-open","title":"Wisp CC open","description":"","status":"open","priority":2,"assignee":"mayor/","created_at":"2026-06-12T11:59:58Z","labels":["gt:message","cc:gastown/synth","from:mayor/"]},{"id":"wisp-cc-hooked","title":"Wisp CC hooked","description":"","status":"hooked","priority":2,"assignee":"mayor/","created_at":"2026-06-12T11:59:57Z","labels":["gt:message","cc:gastown/synth","from:mayor/"]},{"id":"issue-direct-open","title":"Duplicate wisp","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T11:59:56Z","labels":["gt:message","from:mayor/"]},{"id":"wisp-unrelated","title":"Someone else's wisp","description":"","status":"open","priority":2,"assignee":"other/agent","created_at":"2026-06-12T11:59:55Z","labels":["gt:message"]}]`, "", 0
+		default:
+			return "", "unexpected bd args: " + argv, 1
 		}
-		return "", "unexpected bd args: " + argv, 1
 	}}
 
 	m := NewMailboxWithBeadsDir("gastown/synth", t.TempDir(), beadsDir)
@@ -549,8 +548,13 @@ func TestMailboxListFromDirConvergesWispQueryAndFiltersStatuses(t *testing.T) {
 		}
 	}
 
-	// The wisp read stays one call whatever the identity list: the dedupe and
-	// the match flags are read off each record.
+	// Three reads: assignee list, cc list, one wisp query. The wisp read stays
+	// one call whatever the identity list: the match flags are read off each
+	// record, and its status set is pushed into the query.
+	calls := bd.argvs()
+	if len(calls) != 3 {
+		t.Fatalf("bd calls = %d, want 3 (assignee, cc, wisps); calls:\n%s", len(calls), strings.Join(calls, "\n"))
+	}
 	queries := 0
 	for _, c := range bd.recorded() {
 		if c.Args[0] == "query" {
@@ -558,31 +562,62 @@ func TestMailboxListFromDirConvergesWispQueryAndFiltersStatuses(t *testing.T) {
 		}
 	}
 	if queries != 1 {
-		t.Fatalf("bd query calls = %d, want 1; calls:\n%s", queries, strings.Join(bd.argvs(), "\n"))
+		t.Fatalf("bd query calls = %d, want 1; calls:\n%s", queries, strings.Join(calls, "\n"))
 	}
 }
 
 // TestMailboxGetBeads: the show a Get runs returns the message, and bd's
 // absence reaches the caller as ErrMessageNotFound — the error every mail path
 // matches on — whether bd spells it as its typed not-found exit status or only
-// in the text an older bd prints.
+// in the text an older bd prints. A read that failed for any other reason is
+// not an absence: it must surface as the failure it is, not as a missing
+// message.
 func TestMailboxGetBeads(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		stdout  string
-		stderr  string
-		code    int
-		wantErr error
-		wantSub string
+		name        string
+		stdout      string
+		stderr      string
+		code        int
+		wantErr     error // nil with wantFailure: any error but ErrMessageNotFound
+		wantFailure bool
+		wantSub     string
 	}{
 		{
 			name:    "record",
 			stdout:  `[{"id":"gt-msg","title":"Subject line","description":"Body text","status":"open","labels":["gt:message"]}]`,
 			wantSub: "Subject line",
 		},
-		{name: "typed absence", stderr: "Error: not found\n", code: 20, wantErr: ErrMessageNotFound},
+		{
+			// The typed status alone: bd's stderr says nothing to read.
+			name:    "typed absence",
+			stderr:  "Error: exit status 20\n",
+			code:    20,
+			wantErr: ErrMessageNotFound,
+		},
 		{name: "text absence", stderr: "Error: no issue found\n", code: 1, wantErr: ErrMessageNotFound},
+		{
+			// An older bd names the id it could not find.
+			name:    "text absence naming the id",
+			stderr:  "Error: issue gt-msg not found\n",
+			code:    1,
+			wantErr: ErrMessageNotFound,
+		},
+		{
+			// A failure, not an answer: the store was unreachable.
+			name:        "store failure",
+			stderr:      "dial tcp 127.0.0.1:3307: connect: connection refused\n",
+			code:        1,
+			wantFailure: true,
+		},
+		{
+			// "not found" about something else must not read as a missing
+			// message.
+			name:        "unrelated not-found text",
+			stderr:      "Error: config file not found: /nonexistent/config.yaml\n",
+			code:        1,
+			wantFailure: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -598,6 +633,15 @@ func TestMailboxGetBeads(t *testing.T) {
 			m.bd = bd.run
 
 			msg, err := m.Get("gt-msg")
+			if tt.wantFailure {
+				if err == nil {
+					t.Fatalf("Get error = nil, want the read's failure")
+				}
+				if errors.Is(err, ErrMessageNotFound) {
+					t.Fatalf("Get error = %v, want the failure, not a missing message", err)
+				}
+				return
+			}
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("Get error = %v, want %v", err, tt.wantErr)
 			}
@@ -617,14 +661,15 @@ func TestMailboxGetBeads(t *testing.T) {
 // A wisp assigned to one identity and cc'ing another must carry both match
 // flags — the read serves every identity at once, so neither match may be lost
 // because the record arrived from the other one's point of view — and a wisp
-// naming none of them must not come back at all.
+// naming none of them must not come back at all. The read is one query whose
+// status set is pushed down, whatever the identity list.
 func TestQueryWispMessagesKeepsBothMatchFlags(t *testing.T) {
 	t.Parallel()
 	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
-		if c.Args[0] == "query" {
+		if argv := strings.Join(c.Args, " "); argv == `query --json ephemeral=true AND label="gt:message" AND (status="open" OR status="hooked") --limit=0` {
 			return `[{"id":"wisp-both","title":"Both","status":"open","priority":2,"assignee":"mayor/","created_at":"2026-06-12T12:00:00Z","labels":["gt:message","cc:mayor"]},{"id":"wisp-unrelated","title":"Unrelated","status":"open","priority":2,"assignee":"rig/other","created_at":"2026-06-12T12:00:00Z","labels":["gt:message"]}]`, "", 0
 		}
-		return "[]", "", 0
+		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
 	}}
 
 	m := NewMailboxWithBeadsDir("mayor/", t.TempDir(), t.TempDir())
@@ -638,6 +683,9 @@ func TestQueryWispMessagesKeepsBothMatchFlags(t *testing.T) {
 	}
 	if !wisps[0].assigneeMatch || !wisps[0].ccMatch {
 		t.Fatalf("match flags = assignee:%v cc:%v, want both set", wisps[0].assigneeMatch, wisps[0].ccMatch)
+	}
+	if calls := bd.argvs(); len(calls) != 1 {
+		t.Fatalf("bd calls = %d, want one query whatever the identity list; calls:\n%s", len(calls), strings.Join(calls, "\n"))
 	}
 }
 

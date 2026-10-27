@@ -105,6 +105,32 @@ func TestListEphemeralQuotesQueryValuesAndDisablesLimit(t *testing.T) {
 	}
 }
 
+// TestListEphemeralCommaStatusIsORGroup: ListOptions.Status documents the
+// comma-joined form, and bd's query language rejects that spelling outright
+// ("invalid status: open,hooked", gt-p85pw.16), so listEphemeral renders it as
+// the OR group bd does accept — with the spaces trimmed, since a caller
+// writing "open, hooked" means the same set.
+func TestListEphemeralCommaStatusIsORGroup(t *testing.T) {
+	ResetBdAllowStaleCacheForTest()
+	logPath := installMockBDRecorder(t)
+
+	b := New(t.TempDir())
+	_, err := b.List(ListOptions{
+		Status:    "open, hooked",
+		Label:     "gt:message",
+		Ephemeral: true,
+		Limit:     0,
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	want := `query --json ephemeral=true AND label="gt:message" AND (status="open" OR status="hooked") --limit=0`
+	if logOutput := readMockBDLog(t, logPath); !strings.Contains(logOutput, want) {
+		t.Fatalf("bd log missing %q\nlog:\n%s", want, logOutput)
+	}
+}
+
 // TestListEphemeralPinsLabelsAndCreatedAfter pins the wisp query's two added
 // clauses (gt-7iwy0.4.2): Labels is one label= condition per label, which the
 // query language ANDs the way bd list ANDs repeated --label, and CreatedAfter

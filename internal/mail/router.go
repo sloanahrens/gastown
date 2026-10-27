@@ -803,7 +803,9 @@ func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, 
 	issueBeads, issuesErr := bdStore(r.bd, filepath.Dir(beadsDir), beadsDir).
 		List(beads.ListOptions{Label: "gt:agent"})
 
-	// Also query the wisps table for migrated agent beads.
+	// Also query the wisps table for migrated agent beads. `mol wisp list` is a
+	// mol verb, not a List filter, so it stays on the runner until B10c
+	// (gt-p85pw.18) converts the mol calls.
 	wispCtx, wispCancel := bdReadCtx()
 	defer wispCancel()
 	wispOut, wispErr := runBdCommand(wispCtx, r.bd, []string{"mol", "wisp", "list", "--json"}, filepath.Dir(beadsDir), beadsDir)
@@ -918,7 +920,7 @@ func (r *Router) wispAgentBeads(beadsDir string, out []byte) ([]*agentBead, erro
 	}
 	for _, agent := range agents {
 		bead, ok := byID[agent.ID]
-		if !ok {
+		if !ok || bead == nil {
 			continue
 		}
 		if bead.Description != "" {
@@ -1771,15 +1773,17 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 		return fmt.Errorf("querying announce messages: %w", err)
 	}
 	// Oldest first: the prune closes the front of the list, and List returns
-	// its records unordered. A record whose created time does not parse orders
-	// by its raw value instead of jumping the queue.
-	sort.SliceStable(messages, func(i, j int) bool {
-		ti, iok := parseWispTimestamp(messages[i].CreatedAt)
-		tj, jok := parseWispTimestamp(messages[j].CreatedAt)
-		if iok && jok {
-			return ti.Before(tj)
+	// its records unordered. A sparse store may place a nil record in the
+	// slice; it carries no message to close and no order to read.
+	live := messages[:0]
+	for _, message := range messages {
+		if message != nil {
+			live = append(live, message)
 		}
-		return messages[i].CreatedAt < messages[j].CreatedAt
+	}
+	messages = live
+	sort.SliceStable(messages, func(i, j int) bool {
+		return announceOrderKeyOf(messages[i]).before(announceOrderKeyOf(messages[j]))
 	})
 
 	// Calculate how many to delete (we're about to add 1 more)
@@ -1800,6 +1804,35 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 	}
 
 	return nil
+}
+
+// announceOrderKey is the sort key pruneAnnounce orders an announce channel's
+// messages by: the created time when it parses, with the raw value breaking
+// ties. A record whose time does not parse is not evidence of being old, so
+// every dated record sorts before every undated one and the undated sort by
+// raw value among themselves — the prune closes what it can date, and keeps
+// the rest. Taking a key first keeps the comparison a total order; branching
+// inside the comparator — times for one pair, raw strings for another — is not
+// transitive, which leaves the order to the sort's internals.
+type announceOrderKey struct {
+	dated   bool
+	created time.Time
+	raw     string
+}
+
+func announceOrderKeyOf(issue *beads.Issue) announceOrderKey {
+	created, dated := parseWispTimestamp(issue.CreatedAt)
+	return announceOrderKey{dated: dated, created: created, raw: issue.CreatedAt}
+}
+
+func (k announceOrderKey) before(other announceOrderKey) bool {
+	if k.dated != other.dated {
+		return k.dated
+	}
+	if !k.created.Equal(other.created) {
+		return k.created.Before(other.created)
+	}
+	return k.raw < other.raw
 }
 
 // isSelfMail returns true if sender and recipient are the same identity.
