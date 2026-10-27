@@ -19,7 +19,11 @@
 // exit with is stated in the header of scripts/install-gt.sh.
 //
 // Acquire takes the same lock for a caller that keeps running: the Go installer
-// holds it from the binary swap to the end of the run (gt-tpg0p.13).
+// holds it from the binary swap to the end of the run (gt-tpg0p.13). Its lock
+// file is close-on-exec, so no command the caller starts inherits it; the lock
+// is the caller's alone, and its release drops the lock for any process that
+// still holds the open file description, such as a child forked in the instant
+// before its exec (gt-ubj9e).
 package installlock
 
 import (
@@ -29,6 +33,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -61,7 +66,8 @@ func acquire(path string, wait time.Duration, now func() time.Time, sleep func(t
 	if err != nil {
 		return nil, err
 	}
-	return func() { unlockAndClose(f) }, nil
+	var once sync.Once
+	return func() { once.Do(func() { unlockAndClose(f) }) }, nil
 }
 
 // acquireFile takes the flock on path and returns the open lock file.

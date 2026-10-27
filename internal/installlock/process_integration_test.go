@@ -333,3 +333,30 @@ func TestIntegrationSecondInstallProcessExitsLockBusyWhileTheFirstRuns(t *testin
 		t.Error("the second install's marker was removed though it never started")
 	}
 }
+
+// A real child holding the lock file's open file description does not keep the
+// lock past the release: the case the dup in the unit tier stands in for, with
+// the descriptor handed to a running process (gt-ubj9e).
+func TestIntegrationReleaseDropsTheLockWhileAChildHoldsTheDescription(t *testing.T) {
+	t.Parallel()
+	lock := filepath.Join(t.TempDir(), "install-gt.lock")
+	f, err := acquireFile(lock, time.Second, time.Now, time.Sleep)
+	if err != nil {
+		t.Fatalf("acquireFile: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	child := exec.CommandContext(ctx, "sleep", "60")
+	child.ExtraFiles = []*os.File{f}
+	if err := child.Start(); err != nil {
+		unlockAndClose(f)
+		t.Fatalf("start the child that holds the description: %v", err)
+	}
+	defer func() { cancel(); _ = child.Wait() }()
+
+	unlockAndClose(f)
+
+	if !acquireFree(t, lock) {
+		t.Error("the lock was still held after the release while a running child held the file description")
+	}
+}
