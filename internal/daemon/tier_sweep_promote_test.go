@@ -54,6 +54,7 @@ func newForgejoPromoteDaemon(t *testing.T, townRoot, sweptRig string) *Daemon {
 	// seam, so the unit tier reads a fake world rather than starting git.
 	f := useGitfake(t, d)
 	forgejoLandingRemote(t, f, townRoot, "gastown")
+	writeOverseerIdentity(t, townRoot, overseerTestName)
 	return d
 }
 

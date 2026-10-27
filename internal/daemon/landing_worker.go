@@ -636,14 +636,27 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			}
 		},
 	}
+	// The human's recorded identity is what the worker refuses a submission
+	// under, so a town whose overseer identity cannot be read gets no worker:
+	// without the name no submission can be checked, and landing one would
+	// pass the check by default (gt-2ge3z). Construction is the seam because
+	// the manager retries it every interval, which is what lets a rig resume
+	// on its own once the identity is readable.
+	human, err := config.LoadOverseerConfig(config.OverseerConfigPath(townRoot))
+	if err != nil {
+		d.escalateAlert("landing-human-identity:"+rigName, "landing_worker",
+			fmt.Sprintf("the town's overseer identity cannot be read, so the landing worker for rig %s is not running and nothing is landing: %v", rigName, err))
+		return nil, fmt.Errorf("reading the town's overseer identity: %w", err)
+	}
 	return &landworker.Worker{
-		Rig:      rigName,
-		Beads:    bd,
-		Remote:   gitRemote{g: git.NewGit(repo), remote: landingRemote},
-		Lander:   lander,
-		Landings: landings,
-		Backoff:  backoff,
-		PostLand: postLand,
+		Rig:        rigName,
+		HumanActor: human.Name,
+		Beads:      bd,
+		Remote:     gitRemote{g: git.NewGit(repo), remote: landingRemote},
+		Lander:     lander,
+		Landings:   landings,
+		Backoff:    backoff,
+		PostLand:   postLand,
 		// The landing merges on the remote, which moves main there and leaves
 		// the author seat's remote-tracking ref for it stale (gt-fn9e6.55).
 		RefreshAuthorSeat: refreshAuthorSeat,

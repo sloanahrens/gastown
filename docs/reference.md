@@ -271,6 +271,15 @@ The bead comes from `--bead`, else from a branch name carrying a routed bead id;
 `BD_ACTOR` falls back to `git config user.name`. A polecat's `gt done` refuses
 `--pre-verified`.
 
+**The submission's actor (gt-2ge3z).** The landing worker refuses a submission recorded under
+the human's own identity, the town's overseer name, and leaves one comment naming that actor:
+an agent must submit it, for example the overseer from its crew session. The actor is the
+author of the newest `Submitted for landing` comment naming the submission's branch and head,
+which is what a crew session records, else the READY TO LAND block's `Worker` line, which a
+polecat's `gt done` writes. A submission whose actor cannot be read lands nothing, and neither
+does any submission on a town whose overseer identity cannot be read: that town builds no
+landing worker until the identity is fixed.
+
 **Re-queueing a rejected landing (gt-3e1z4).** A landing the worker refuses labels the
 bead `rework` (removing `gt:ready-to-land`) and appends a `MERGE REJECTION` note naming
 the head it refused. A bead the human-only label holds keeps its assignee: its branch
