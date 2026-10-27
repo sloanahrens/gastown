@@ -147,3 +147,28 @@ func TestDirectiveChangelogBlockIsLeftOut(t *testing.T) {
 		t.Errorf("directive text = %q, want the rules without the changelog block", got)
 	}
 }
+
+// A directive layer that cannot be listed is an error the scan returns, not an
+// empty layer: a directory that is a file fails for each layer (gt-80rnu).
+func TestScanDirectiveFilesReportsAnUnlistableLayer(t *testing.T) {
+	t.Parallel()
+	for _, layer := range []string{"central", "legacy"} {
+		t.Run(layer, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			dir := CentralDirectiveDir(town)
+			if layer == "legacy" {
+				dir = filepath.Join(town, "directives")
+			}
+			if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ScanDirectiveFiles(town, "alpha"); err == nil {
+				t.Errorf("ScanDirectiveFiles returned no error for an unlistable %s layer", layer)
+			}
+		})
+	}
+}
