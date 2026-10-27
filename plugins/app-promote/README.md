@@ -19,7 +19,9 @@ plugin refuses and how it reports a failure. This file covers installing it.
 ## Installing it, and adding a rig
 
 The plugin runs from `~/gt/plugins/`, which `gt plugin sync` fills from the
-gastown checkout's `plugins/`. Sync, then confirm:
+gastown checkout's `plugins/`. Before building or syncing it, read "Script
+entry point" in `plugins/README.md`; it states why a plugin that names a binary
+must build it before a sync. Sync, then confirm:
 
 ```bash
 gt plugin sync --dry-run     # see what would change
@@ -36,7 +38,7 @@ lists it and exits non-zero (gt-o848l).
 ## Running it, and reading what it did
 
 ```bash
-bash ~/gt/plugins/app-promote/run.sh
+~/gt/plugins/app-promote/bin/app-promote
 ```
 
 A run that promoted prints one line per rig; one with nothing to promote prints

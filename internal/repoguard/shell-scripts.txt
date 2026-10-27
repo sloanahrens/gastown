@@ -18,7 +18,6 @@ deploy/polecat/probe-bootstrap.sh
 docker-entrypoint.sh
 gt-model-eval/scripts/results-to-discussion.sh
 plugins/app-promote/run.sh
-plugins/app-promote/run_test.sh
 plugins/polecat-image/run.sh
 plugins/polecat-image/run_test.sh
 plugins/tool-updater/run.sh
