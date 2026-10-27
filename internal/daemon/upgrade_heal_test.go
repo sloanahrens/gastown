@@ -513,8 +513,8 @@ func writeFakeTool(t *testing.T, dir, name, body string) {
 	// A fork that runs while this write descriptor is open hands the child a copy
 	// of it, and the kernel then refuses to exec the fake as text file busy. The
 	// fork lock is held across the write and the close (gt-e96f7, dv-bums).
-	//testpolicy:allow no-exec-files — the test is the process boundary: the helper script finds these fakes first on PATH
 	syscall.ForkLock.Lock()
+	//testpolicy:allow no-exec-files — the test is the process boundary: the helper script finds these fakes first on PATH
 	err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755)
 	syscall.ForkLock.Unlock()
 	if err != nil {
