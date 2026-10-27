@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -12,6 +13,25 @@ import (
 // sweepMinutes is a wanted reading: a minute count, or nil for a column that
 // must be left absent.
 func sweepMinutes(v float64) *float64 { return &v }
+
+// sweepStampedPad and sweepUnstampedPad fill a read past daemonLogHourBytes, so
+// a test can put a stamp at the head and the tail around filler and hand
+// Collect the shape a byte-bounded read returns: one that filled the bound.
+var (
+	sweepStampedPad   = strings.Repeat("2026/10/24 12:30:00 daemon: patrol tick complete\n", daemonLogHourBytes/48+1)
+	sweepUnstampedPad = strings.Repeat("daemon: patrol tick complete\n", daemonLogHourBytes/26+1)
+)
+
+// sweepFullTail builds a log read that used up the whole byte bound, with the
+// head and tail lines a test wants around the filler.
+func sweepFullTail(t *testing.T, head, pad, tail string) string {
+	t.Helper()
+	log := head + pad + tail
+	if len(log) < daemonLogHourBytes {
+		t.Fatalf("fixture is %d bytes, want at least %d", len(log), daemonLogHourBytes)
+	}
+	return log
+}
 
 func TestSourceSweepSumsTheStagesFinishedInTheHour(t *testing.T) {
 	t.Parallel()
@@ -86,6 +106,35 @@ func TestSourceSweepSumsTheStagesFinishedInTheHour(t *testing.T) {
 			log: "tier_sweep: gastown: shell finished (exit 0) in 20m0s; last lines:\n" +
 				"2026/10/24 12:30:00 tier_sweep: gastown: shell finished (exit 0) in 1m0s; last lines:\n",
 			want: sweepMinutes(1),
+		},
+		{
+			// The read filled its byte bound before it reached the start of
+			// the hour, so the sum is the tail's sweep time, not the hour's.
+			// The column is nil rather than a number that would read as a
+			// quiet hour.
+			name: "a full read that begins inside the hour leaves the column nil",
+			log: sweepFullTail(t,
+				"2026/10/24 12:00:30 daemon: patrol tick complete\n", sweepStampedPad,
+				"2026/10/24 12:40:00 tier_sweep: gastown: shell finished (exit 0) in 20m0s; last lines:\n"),
+			want: nil,
+		},
+		{
+			// A full read that still reaches past the cutoff saw the whole
+			// hour, so its sum stands.
+			name: "a full read that reaches back past the cutoff still sums",
+			log: sweepFullTail(t,
+				"2026/10/24 11:50:00 daemon: patrol tick complete\n", sweepStampedPad,
+				"2026/10/24 12:40:00 tier_sweep: gastown: shell finished (exit 0) in 20m0s; last lines:\n"),
+			want: sweepMinutes(20),
+		},
+		{
+			// A full read with no stamp at all can be placed nowhere, so it
+			// cannot show that it covered the hour either.
+			name: "a full read with no stamp leaves the column nil",
+			log: sweepFullTail(t,
+				"daemon: patrol tick complete\n", sweepUnstampedPad,
+				"tier_sweep: gastown: shell finished (exit 0) in 20m0s; last lines:\n"),
+			want: nil,
 		},
 	}
 	for _, tc := range tests {
