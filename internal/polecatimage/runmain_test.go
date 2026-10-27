@@ -2,6 +2,7 @@ package polecatimage
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -201,6 +202,94 @@ func TestMainDefersToAnotherRunsLock(t *testing.T) {
 	if got := lockPID(t, tr.Cfg.LockDir); got != "9999" {
 		t.Errorf("the other run's lock now records pid %q, want 9999", got)
 	}
+}
+
+// TestMainReturnsARepublishFailure drives the current image's retry: a lock it
+// cannot make is the run's failure, not a push left for the next run.
+func TestMainReturnsARepublishFailure(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	reply := newRunReply("abc1234")
+	reply.label = "abc1234"
+	tr.reply = reply.answer(t, labelFormat(tr))
+	tr.Cfg.LockDir = blockedLockDir(t, tr)
+	err := tr.Main()
+	if err == nil || !strings.Contains(err.Error(), "cannot take the lock") {
+		t.Errorf("Main() = %v, want the retry's lock failure", err)
+	}
+}
+
+// TestMainReturnsALockFailure drives the lock a build runs under: one it cannot
+// make fails the run instead of deferring.
+func TestMainReturnsALockFailure(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	reply := newRunReply("abc1234")
+	reply.label = "9999999"
+	tr.reply = reply.answer(t, labelFormat(tr))
+	tr.Cfg.LockDir = blockedLockDir(t, tr)
+	err := tr.Main()
+	if err == nil || !strings.Contains(err.Error(), "cannot take the lock") {
+		t.Errorf("Main() = %v, want the lock failure", err)
+	}
+	if got := len(tr.callsTo("make")); got != 0 {
+		t.Errorf("make was called %d times, want none", got)
+	}
+}
+
+// TestMainReturnsABuildFailure drives a build that fails: the run answers it
+// rather than going on to publish an image it does not have.
+func TestMainReturnsABuildFailure(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	reply := newRunReply("abc1234")
+	reply.label = "9999999"
+	reply.build = result{exit: 1, stderr: "compile error\n"}
+	tr.reply = reply.answer(t, labelFormat(tr))
+	t.Cleanup(tr.Cleanup)
+	err := tr.Main()
+	if err == nil || !strings.Contains(err.Error(), "make polecat-image failed at abc123400000") {
+		t.Errorf("Main() = %v, want the failed build", err)
+	}
+	if anyCallNamed(tr.callsTo("docker"), "save") {
+		t.Error("the run published an image the build did not produce")
+	}
+}
+
+// TestMainReturnsAPublishFailure drives a build whose publish fails under
+// POLECAT_IMAGE_FAIL_CLOSED=1: the run fails rather than reporting the image
+// current.
+func TestMainReturnsAPublishFailure(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	tr.Cfg.FailClosed = true
+	reply := newRunReply("abc1234")
+	reply.label = "9999999"
+	base := reply.answer(t, labelFormat(tr))
+	tr.reply = func(c command) result {
+		if c.name == "crane" && hasArg(c.args, "push") {
+			return result{exit: 1, stderr: "unauthorized"}
+		}
+		return base(c)
+	}
+	t.Cleanup(tr.Cleanup)
+	err := tr.Main()
+	if err == nil || !strings.Contains(err.Error(), "so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)") {
+		t.Errorf("Main() = %v, want the failed publish under the switch", err)
+	}
+	if strings.Contains(tr.output(), "current at abc1234") {
+		t.Error("the run reported current after a publish that failed closed")
+	}
+}
+
+// blockedLockDir is a lock path under a file, which no run can make.
+func blockedLockDir(t *testing.T, tr *testRun) string {
+	t.Helper()
+	blocked := filepath.Join(tr.root, "blocked")
+	if err := os.WriteFile(blocked, []byte("a file where a directory belongs"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(blocked, "polecat-image.lock")
 }
 
 func TestMainFailsWhenTheInstalledCommitIsUnreadable(t *testing.T) {

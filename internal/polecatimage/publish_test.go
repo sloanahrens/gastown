@@ -543,6 +543,28 @@ func TestPublishUnfinishedNamesTheState(t *testing.T) {
 	}
 }
 
+// TestRepublishReportsALockItCannotMake keeps a lock path this run cannot make
+// apart from one another run holds: the retry fails rather than reporting the
+// push as left to that run.
+func TestRepublishReportsALockItCannotMake(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	tr.reply = publishReply{id: result{stdout: "sha256:abc\n"}}.answer(t)
+	blocked := filepath.Join(tr.root, "blocked")
+	if err := os.WriteFile(blocked, []byte("a file where a directory belongs"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr.Cfg.LockDir = filepath.Join(blocked, "polecat-image.lock")
+	err := tr.Republish()
+	if err == nil || !strings.Contains(err.Error(), "cannot take the lock "+tr.Cfg.LockDir) {
+		t.Errorf("Republish() = %v, want the lock it cannot make", err)
+	}
+	if anyCallNamed(tr.callsTo("docker"), "save") {
+		t.Error("the push ran without the lock")
+	}
+	tr.wantLogged(t, "ERROR: cannot take the lock "+tr.Cfg.LockDir)
+}
+
 func TestRepublish(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
