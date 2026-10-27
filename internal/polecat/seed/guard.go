@@ -31,21 +31,17 @@ var ReadOnlyGitVerbs = []string{"rev-parse", "ls-tree", "show", "merge-base", "r
 // error only, when it failed on any pin behind main). The only caller in the
 // repository is the stage command (internal/polecat/seed/cmd/stage), which prints
 // the notes; no other package imports internal/polecat/seed's Guard.
-func Guard(pins []Source, buildRig, buildCommit, town string, git Git) (notes []string, err error) {
+func Guard(pins []Source, buildRig, town string, git Git) (notes []string, err error) {
 	for _, src := range pins {
-		dir := path.Join(town, src.Rig, "mayor", "rig")
-		var main string
 		if src.Rig == buildRig {
-			// The build rig's pin seeds the cache, while the image compiles the
-			// build commit: the pin must cover the modules that commit requires.
-			main = buildCommit
-		} else {
-			out, err := git(dir, "rev-parse", "--verify", "origin/main^{commit}")
-			if err != nil {
-				return nil, fmt.Errorf("pin-drift guard: cannot read origin/main of rig %s in %s (%v): fetch that checkout through the town's path, then rerun", src.Rig, dir, err)
-			}
-			main = strings.TrimSpace(string(out))
+			continue
 		}
+		dir := path.Join(town, src.Rig, "mayor", "rig")
+		out, err := git(dir, "rev-parse", "--verify", "origin/main^{commit}")
+		if err != nil {
+			return nil, fmt.Errorf("pin-drift guard: cannot read origin/main of rig %s in %s (%v): fetch that checkout through the town's path, then rerun", src.Rig, dir, err)
+		}
+		main := strings.TrimSpace(string(out))
 		if src.Commit == main {
 			continue
 		}

@@ -37,13 +37,13 @@ func TestPlanSeedsTheBuildRigAtTheBuildCommit(t *testing.T) {
 // A pinned build rig is seeded at its pin, not at the build commit, so the seed
 // is the same for every commit that the pin covers. The build commit is still
 // what the image compiles.
-func TestPlanSeedsTheBuildRigAtItsPin(t *testing.T) {
+func TestPlanSeedsTheBuildRigAtTheCommitItIsGiven(t *testing.T) {
 	t.Parallel()
 	pins := []Source{
 		{Rig: "devops", Commit: "92b9e510"},
 		{Rig: "gastown", Commit: "914de8c6"},
 	}
-	plan, err := Plan(pins, "gastown", "f05e821c")
+	plan, err := Plan(pins, "gastown", "914de8c6")
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
