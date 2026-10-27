@@ -61,9 +61,16 @@ Exit codes:
 	return cmd
 }
 
-// runRepoGuardCommand reads the flags and hands the run to the git the
-// command really uses.
-func runRepoGuardCommand(cmd *cobra.Command, _ []string) error {
+// runRepoGuardCommand hands the registered command's run to the git it really
+// uses.
+func runRepoGuardCommand(cmd *cobra.Command, args []string) error {
+	return repoGuardCommandWith(cmd, args, repoGuardGit)
+}
+
+// repoGuardCommandWith reads the flags and hands the run to git, which a test
+// injects so the flag-reading path is driven with real values instead of a
+// stand-in body.
+func repoGuardCommandWith(cmd *cobra.Command, _ []string, git gitRunner) error {
 	base, err := cmd.Flags().GetString("base")
 	if err != nil {
 		return err
@@ -72,7 +79,7 @@ func runRepoGuardCommand(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return repoGuardRun(cmd.OutOrStdout(), cmd.ErrOrStderr(), base, initFlag, repoGuardGit)
+	return repoGuardRun(cmd.OutOrStdout(), cmd.ErrOrStderr(), base, initFlag, git)
 }
 
 // repoGuardRun wires the inputs around run: git for the tree and the base

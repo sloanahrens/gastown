@@ -135,6 +135,61 @@ func TestRepoGuardCommandPath(t *testing.T) {
 	}
 }
 
+// TestRepoGuardCommandFlagsDriveTheRun drives the real flag-reading body over
+// a fake git: the --base value is the revision git is asked about, and --init
+// decides whether a base with no allowlist skips the growth check or fails.
+func TestRepoGuardCommandFlagsDriveTheRun(t *testing.T) {
+	t.Parallel()
+	const base = "upstream/main"
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, repoguardAllowlist), []byte(repoAllowlistBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name             string
+		args             []string
+		baseHasAllowlist bool
+		wantErr          string
+		wantNotice       bool
+	}{
+		{name: "base flag reaches git", args: []string{"--base", base}, baseHasAllowlist: true},
+		{name: "init skips a base with no allowlist and says so", args: []string{"--base", base, "--init"}, wantNotice: true},
+		{name: "base with no allowlist fails without init", args: []string{"--base", base}, wantErr: "pass --init"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []string
+			run := fakeGit(&calls, guardGit(root, base, tc.baseHasAllowlist))
+			c := newRepoGuardCommand(func(cmd *cobra.Command, args []string) error {
+				return repoGuardCommandWith(cmd, args, run)
+			})
+			var out, warn bytes.Buffer
+			c.SetOut(&out)
+			c.SetErr(&warn)
+			if err := c.ParseFlags(tc.args); err != nil {
+				t.Fatalf("parsing %q = %v", tc.args, err)
+			}
+			err := c.RunE(c, nil)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("RunE = %v, want nil", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("RunE = %v, want an error containing %q", err, tc.wantErr)
+			}
+			if gotNotice := warn.String() != ""; gotNotice != tc.wantNotice {
+				t.Errorf("warn = %q, want a notice: %v", warn.String(), tc.wantNotice)
+			}
+			// The fake answers only base's calls, so a run that got past it
+			// asked git about the revision --base named.
+			if len(calls) == 0 {
+				t.Error("git was never asked anything")
+			}
+		})
+	}
+}
+
 // TestRepoGuardCheckBase: a base git would read as an option is refused before
 // it reaches any git command, and a plain revision passes.
 func TestRepoGuardCheckBase(t *testing.T) {
@@ -219,24 +274,33 @@ func fakeGit(calls *[]string, handle func(args []string) ([]byte, error)) gitRun
 	}
 }
 
-// cleanGit answers the five calls a clean run makes, with the base allowlist
-// holding scripts/a.sh.
-func cleanGit(root string) func(args []string) ([]byte, error) {
+// guardGit answers the calls a run against base makes, with the base allowlist
+// holding scripts/a.sh. Any other base or call is an error, so a test proves
+// the revision it asked for reached git.
+func guardGit(root, base string, baseHasAllowlist bool) func(args []string) ([]byte, error) {
 	return func(args []string) ([]byte, error) {
 		switch strings.Join(args, " ") {
 		case "rev-parse --show-toplevel":
 			return []byte(root + "\n"), nil
-		case "rev-parse --verify --quiet --end-of-options origin/main^{commit}":
+		case "rev-parse --verify --quiet --end-of-options " + base + "^{commit}":
 			return nil, nil
-		case "ls-tree -z --name-only origin/main -- .repoguard-allowlist":
+		case "ls-tree -z --name-only " + base + " -- .repoguard-allowlist":
+			if !baseHasAllowlist {
+				return nil, nil
+			}
 			return []byte(".repoguard-allowlist\x00"), nil
-		case "show origin/main:.repoguard-allowlist":
+		case "show " + base + ":.repoguard-allowlist":
 			return []byte(repoAllowlistBody), nil
 		case "ls-files -z":
 			return []byte("scripts/a.sh\x00"), nil
 		}
 		return nil, fmt.Errorf("unexpected git call %q", args)
 	}
+}
+
+// cleanGit answers the calls a clean run against origin/main makes.
+func cleanGit(root string) func(args []string) ([]byte, error) {
+	return guardGit(root, "origin/main", true)
 }
 
 // repoAllowlistBody lists the one script the fixtures track.
@@ -281,25 +345,22 @@ func TestRepoGuardRunGitRefusals(t *testing.T) {
 		noBase   bool // the base revision holds no allowlist
 		wantErr  string
 	}{
-		{name: "outside a repository", failCall: "rev-parse --show-toplevel", wantErr: "not inside a git repository"},
-		{name: "base does not resolve", failCall: "rev-parse --verify --quiet --end-of-options origin/main^{commit}", wantErr: "does not resolve"},
-		{name: "base tree unreadable", failCall: "ls-tree -z --name-only origin/main -- .repoguard-allowlist"},
-		{name: "base allowlist unreadable", failCall: "show origin/main:.repoguard-allowlist"},
-		{name: "tracked files unreadable", failCall: "ls-files -z"},
+		{name: "outside a repository", failCall: "rev-parse --show-toplevel", wantErr: "not inside a git repository: git refused: rev-parse --show-toplevel"},
+		{name: "base does not resolve", failCall: "rev-parse --verify --quiet --end-of-options origin/main^{commit}", wantErr: "does not resolve: git refused: rev-parse --verify"},
+		{name: "base tree unreadable", failCall: "ls-tree -z --name-only origin/main -- .repoguard-allowlist", wantErr: "git refused: ls-tree -z --name-only origin/main"},
+		{name: "base allowlist unreadable", failCall: "show origin/main:.repoguard-allowlist", wantErr: "git refused: show origin/main:.repoguard-allowlist"},
+		{name: "tracked files unreadable", failCall: "ls-files -z", wantErr: "git refused: ls-files -z"},
 		{name: "base has no allowlist", noBase: true, wantErr: "pass --init"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var calls []string
-			handle := cleanGit(root)
+			handle := guardGit(root, "origin/main", !tc.noBase)
 			run := fakeGit(&calls, func(args []string) ([]byte, error) {
 				call := strings.Join(args, " ")
 				if call == tc.failCall {
-					return nil, refused
-				}
-				if tc.noBase && call == "ls-tree -z --name-only origin/main -- .repoguard-allowlist" {
-					return nil, nil
+					return nil, fmt.Errorf("%w: %s", refused, call)
 				}
 				return handle(args)
 			})

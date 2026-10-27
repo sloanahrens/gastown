@@ -142,7 +142,7 @@ func TestCheckScriptsReaderErrors(t *testing.T) {
 	clean := fixedReader(nil)
 	tests := []struct {
 		name     string
-		list     Lister
+		list     func() ([]string, error)
 		read     Reader
 		readBase Reader
 	}{

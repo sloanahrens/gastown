@@ -46,11 +46,11 @@ func ParseRepoAllowlist(r io.Reader) ([]Entry, error) {
 	return entries, nil
 }
 
-// CheckScripts holds the tracked files list returns to the allowlist: every
-// script file is listed with a reason, every listed path is still tracked, and
-// every entry is in the base allowlist. A nil readBaseAllowlist skips the
-// growth check; only --init passes nil, for a repo whose base holds no
-// allowlist yet. One finding per violation, sorted by path.
+// CheckScripts holds the tracked files that list returns to the allowlist:
+// every script file is listed with a reason, every listed path is still
+// tracked, and every entry is in the base allowlist. A nil readBaseAllowlist
+// skips the growth check; only --init passes nil, for a repo whose base holds
+// no allowlist yet. One finding per violation, sorted by path.
 func CheckScripts(list func() ([]string, error), readAllowlist, readBaseAllowlist Reader) ([]string, error) {
 	tracked, err := list()
 	if err != nil {
