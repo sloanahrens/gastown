@@ -14,6 +14,7 @@ func TestFakeClientContract(t *testing.T) {
 	RunClientContract(t, func(t *testing.T) beads.Client { return New() })
 	RunShowTextContract(t, func(t *testing.T) beads.Client { return New() })
 	RunCreatorOptionContract(t, func(t *testing.T) beads.Client { return New() })
+	RunNotesFilterContract(t, func(t *testing.T) beads.Client { return New() })
 }
 
 // TestFakeClientContractSharedDatabase runs the contract the way the
@@ -25,6 +26,7 @@ func TestFakeClientContractSharedDatabase(t *testing.T) {
 	RunClientContract(t, func(t *testing.T) beads.Client { return shared })
 	RunShowTextContract(t, func(t *testing.T) beads.Client { return shared })
 	RunCreatorOptionContract(t, func(t *testing.T) beads.Client { return shared })
+	RunNotesFilterContract(t, func(t *testing.T) beads.Client { return shared })
 }
 
 // TestReadyFiltered runs the ReadyFiltered contract case on its own, so the

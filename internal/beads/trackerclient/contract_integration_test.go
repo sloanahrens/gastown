@@ -44,7 +44,10 @@ func newTracker(t *testing.T, actor string, scope api.Scope) *trackerclient.Clie
 }
 
 // The adapter must behave like bd on every case the fake and bd are held to,
-// except the one suite it cannot run. RunCreatorOptionContract is a creator named in the
+// except the two suites it cannot run. RunNotesFilterContract reads notes and
+// update time, which the tracker's list query cannot express: List refuses
+// both filters with ErrListFilter (pinned in unit_test.go, gt-c3ygl).
+// RunCreatorOptionContract is a creator named in the
 // request: the tracker records the token's actor instead (see Client.Create),
 // and RunActorContract below pins who it records.
 //
