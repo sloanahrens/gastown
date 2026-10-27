@@ -671,14 +671,10 @@ func contractEvents(t *testing.T, s *scope) {
 	s.want(t, "List{IssueType:task}", tasks, err, task.ID)
 }
 
-// RunNotesFilterContract checks the two list filters that read an issue's
-// notes or its update time: NotesContains keeps only the issues whose notes
-// hold the text (case-insensitively, as bd's --notes-contains does), and
-// UpdatedAfter keeps only what was updated at or after the bound. It is
-// separate from RunClientContract because the tracker's list query cannot
-// express either filter and refuses them by design (ErrListFilter, pinned in
-// its unit test; dropping a filter would answer a narrower question with a
-// wider set); a store that can express them runs this suite (gt-c3ygl).
+// RunNotesFilterContract checks the NotesContains and UpdatedAfter list
+// filters. The tracker's list query cannot express them and refuses them, so
+// RunClientContract leaves them out and the tracker's own test pins the refusal
+// (gt-c3ygl).
 func RunNotesFilterContract(t *testing.T, newClient func(t *testing.T) beads.Client) {
 	t.Helper()
 	t.Run("notes filter", func(t *testing.T) {
