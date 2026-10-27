@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,6 +49,62 @@ func (f *fakeStore) SchemaLevel() (int, error) {
 // storeRetryNow is the retry interval the handshake tests run with: the checks
 // are the loop, not the wait, so they drive it as fast as they can.
 const storeRetryNow = time.Millisecond
+
+// fakeClock is the handshake's clock in a test: a budget that lasts the retry
+// waits the case passes and then ends, so a case that runs out of budget runs
+// out on the retry the clock ends and never on how fast the machine answered
+// (gt-3hcp9).
+type fakeClock struct {
+	done   chan struct{}
+	passes int   // retry waits that pass before the budget ends
+	waits  int   // retry waits asked for so far
+	err    error // what Err reports once the budget ended
+}
+
+// newFakeClock returns a clock whose budget ends on the wait after passes waits
+// have passed.
+func newFakeClock(passes int) *fakeClock {
+	return &fakeClock{done: make(chan struct{}), passes: passes, err: context.DeadlineExceeded}
+}
+
+func (c *fakeClock) Done() <-chan struct{} { return c.done }
+
+func (c *fakeClock) Err() error {
+	select {
+	case <-c.done:
+		return c.err
+	default:
+		return nil
+	}
+}
+
+// After passes the waits the clock has budget for and ends the budget on the
+// first one it does not: the channel it returns then never receives, so the
+// retry loop takes its Done arm instead of waiting it out.
+func (c *fakeClock) After(time.Duration) <-chan time.Time {
+	c.waits++
+	if c.waits > c.passes {
+		c.end()
+		return make(chan time.Time)
+	}
+	return elapsed
+}
+
+// end ends the budget at once, for a case that fires it while a read waits.
+func (c *fakeClock) end() {
+	select {
+	case <-c.done:
+	default:
+		close(c.done)
+	}
+}
+
+// elapsed is a channel already past: a fake clock's retry wait that passed.
+var elapsed = func() <-chan time.Time {
+	c := make(chan time.Time)
+	close(c)
+	return c
+}()
 
 func TestCheckBDHandshake_AcceptsForkBuildAtDBLevel(t *testing.T) {
 	t.Parallel()
@@ -235,13 +292,16 @@ func storeAnswer(sqlOut string, sqlStderr string, sqlErr error) func(context.Con
 // answers and classifies its failures and the handshake decides on those: a
 // missing bd, a store that did not answer, a bd ahead of its database, a
 // version read that failed, and a read the handshake's own budget ended are
-// judged from bd's reports, not from a fake returning a sentinel.
+// judged from bd's reports, not from a fake returning a sentinel. Each case
+// carries the clock its budget comes from, so no case waits on a wall-clock
+// deadline (gt-3hcp9).
 func TestCheckBDHandshake_JudgesWhatTheSeamProduces(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		answer   func(context.Context, []string) ([]byte, []byte, error)
-		budget   time.Duration // 0 is the case's default
+		clock    *fakeClock
+		minReads int // database reads the case must have made; 0 is no bound
 		want     []string
 		wantDolt bool
 	}{
@@ -250,17 +310,23 @@ func TestCheckBDHandshake_JudgesWhatTheSeamProduces(t *testing.T) {
 			answer: func(context.Context, []string) ([]byte, []byte, error) {
 				return nil, nil, &exec.Error{Name: "bd", Err: exec.ErrNotFound}
 			},
-			want: []string{"bd not found on PATH"},
+			clock: newFakeClock(0),
+			want:  []string{"bd not found on PATH"},
 		},
 		{
-			name:     "store unavailable",
-			answer:   storeAnswer("", "store unavailable", exitStatus(25)),
+			name:   "store unavailable",
+			answer: storeAnswer("", "store unavailable", exitStatus(25)),
+			// One retry wait passes, so the store is read again and the
+			// clock ends the handshake on the wait after that.
+			clock:    newFakeClock(1),
+			minReads: 2,
 			want:     []string{"Dolt is not reachable", "gt dolt start", "store unavailable"},
 			wantDolt: true,
 		},
 		{
 			name:   "database ahead of bd",
 			answer: storeAnswer("", "schema skew", exitStatus(26)),
+			clock:  newFakeClock(0),
 			want:   []string{"database schema is ahead of this bd", "make safe-install"},
 		},
 		{
@@ -272,28 +338,27 @@ func TestCheckBDHandshake_JudgesWhatTheSeamProduces(t *testing.T) {
 				}
 				return nil, []byte("bd: boom"), exitStatus(2)
 			},
-			want: []string{"bd: boom", "make safe-install"},
+			clock: newFakeClock(0),
+			want:  []string{"bd: boom", "make safe-install"},
 		},
 		{
 			name:   "database read fails",
 			answer: storeAnswer("", "bd sql: boom", exitStatus(2)),
+			clock:  newFakeClock(0),
 			want:   []string{"bd sql: boom", "make safe-install"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			budget := tc.budget
-			if budget == 0 {
-				// A store that stays unavailable is retried until the
-				// budget ends, so every case carries one.
-				budget = 50 * time.Millisecond
+			reads := 0
+			answer := func(ctx context.Context, args []string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[0] == "sql" {
+					reads++
+				}
+				return tc.answer(ctx, args)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), budget)
-			defer cancel()
-			// The store carries the handshake's context, as the production
-			// stores do, so its budget bounds the bd calls themselves.
-			store := beads.New(t.TempDir(), beads.WithRunner(tc.answer), beads.WithCallContext(ctx))
-			_, err := checkBDHandshake(ctx, "/usr/local/bin/bd", store, storeRetryNow)
+			store := beads.New(t.TempDir(), beads.WithRunner(answer))
+			_, err := checkBDHandshakeClock("/usr/local/bin/bd", store, storeRetryNow, tc.clock)
 			if err == nil {
 				t.Fatal("want refusal, got nil")
 			}
@@ -307,6 +372,9 @@ func TestCheckBDHandshake_JudgesWhatTheSeamProduces(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("refusal lacks %q:\n%s", want, err)
 				}
+			}
+			if reads < tc.minReads {
+				t.Errorf("the database was read %d times, want at least %d: the budget ends the retry, not the first read", reads, tc.minReads)
 			}
 		})
 	}
@@ -402,17 +470,28 @@ func TestNewHandshakeStoreReadsATownLayout(t *testing.T) {
 // reinstall, so the refusal names neither the install hint nor Dolt.
 func TestCheckBDHandshake_VersionReadKilledByTheBudget(t *testing.T) {
 	t.Parallel()
-	answer := func(ctx context.Context, args []string) ([]byte, []byte, error) {
+	clock := newFakeClock(0)
+	reading := make(chan struct{})
+	var once sync.Once
+	answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
 		if len(args) == 2 && args[0] == "--allow-stale" {
 			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
 		}
-		<-ctx.Done()
-		return nil, nil, fmt.Errorf("the version read did not finish: %w", ctx.Err())
+		once.Do(func() { close(reading) })
+		<-clock.Done()
+		return nil, nil, fmt.Errorf("the version read did not finish: %w", clock.Err())
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	store := NewHandshakeStore(ctx, t.TempDir(), beads.WithRunner(answer))
-	_, err := checkBDHandshake(ctx, "/usr/local/bin/bd", store, storeRetryNow)
+	store := beads.New(t.TempDir(), beads.WithRunner(answer))
+	var err error
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		_, err = checkBDHandshakeClock("/usr/local/bin/bd", store, storeRetryNow, clock)
+	}()
+	// The budget ends while the version read is still waiting on it.
+	<-reading
+	clock.end()
+	<-finished
 	if err == nil {
 		t.Fatal("want refusal, got nil")
 	}
@@ -443,9 +522,7 @@ func TestCheckBDHandshake_StoreDownNamesDolt(t *testing.T) {
 	s := &fakeStore{info: bdInfoFork, levelFn: func(int) (int, error) {
 		return 0, fmt.Errorf("%w: bd exit 25: store unavailable", beads.ErrStoreUnavailable)
 	}}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	_, err := checkBDHandshake(ctx, "/usr/local/bin/bd", s, storeRetryNow)
+	_, err := checkBDHandshakeClock("/usr/local/bin/bd", s, storeRetryNow, newFakeClock(1))
 	if err == nil {
 		t.Fatal("want refusal, got nil")
 	}
@@ -463,8 +540,8 @@ func TestCheckBDHandshake_StoreDownNamesDolt(t *testing.T) {
 			t.Errorf("refusal must not blame bd with %q:\n%s", unwanted, msg)
 		}
 	}
-	if s.reads < 1 {
-		t.Error("the handshake refused without reading the database")
+	if s.reads < 2 {
+		t.Errorf("schema reads = %d, want at least 2: the clock ends the retry, not the first read", s.reads)
 	}
 }
 
@@ -477,11 +554,9 @@ func TestCheckBDHandshake_DeadlineKillNamesDolt(t *testing.T) {
 	s := &fakeStore{info: bdInfoFork, levelFn: func(int) (int, error) {
 		return 0, fmt.Errorf("%w: the read did not finish: %w", beads.ErrStoreUnavailable, context.DeadlineExceeded)
 	}}
-	// The store never stops being unavailable, so the handshake's own budget
-	// is what ends the retries.
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	_, err := checkBDHandshake(ctx, "/usr/local/bin/bd", s, storeRetryNow)
+	// The store never stops being unavailable, so the handshake's clock is
+	// what ends the retries.
+	_, err := checkBDHandshakeClock("/usr/local/bin/bd", s, storeRetryNow, newFakeClock(1))
 	if err == nil {
 		t.Fatal("want refusal, got nil")
 	}
@@ -526,16 +601,17 @@ func TestCheckBDHandshake_BDFailureBeforeDeadlineBlamesBD(t *testing.T) {
 	}
 }
 
-// TestWaitForStoreRetryEndsWithTheBudget pins the bound on the retry loop: an
-// ended context stops it, and one with budget left lets the next attempt run.
+// TestWaitForStoreRetryEndsWithTheBudget pins the bound on the retry loop: a
+// clock whose budget has ended stops it, and one with budget left lets the next
+// attempt run.
 func TestWaitForStoreRetryEndsWithTheBudget(t *testing.T) {
 	t.Parallel()
-	ended, cancel := context.WithCancel(context.Background())
-	cancel()
-	if waitForStoreRetry(ended, time.Second) {
-		t.Error("waitForStoreRetry let the loop continue after the context ended")
+	ended := newFakeClock(0)
+	ended.end()
+	if waitForStoreRetry(ended, bdStoreRetryWait) {
+		t.Error("waitForStoreRetry let the loop continue after the budget ended")
 	}
-	if !waitForStoreRetry(context.Background(), time.Millisecond) {
+	if !waitForStoreRetry(newFakeClock(1), bdStoreRetryWait) {
 		t.Error("waitForStoreRetry stopped a loop with budget left")
 	}
 }
