@@ -193,6 +193,11 @@ type fakeScheduledRunner struct {
 	closedWhy     []string
 	now           time.Time
 
+	// notes holds the text appended to each bead's notes, in order; noteErr
+	// fails the append after recording it.
+	notes   map[string][]string
+	noteErr error
+
 	// gate answers: the n-th runGate call returns gateAnswers[n], the last one
 	// repeating. gateDeadlines records the time left on each call's context.
 	gateAnswers   []gateAnswer
@@ -291,6 +296,14 @@ func (f *fakeScheduledRunner) sling(ctx context.Context, beadID, branch string, 
 		return f.slingHook(ctx, f, beadID)
 	}
 	return f.slingErr
+}
+
+func (f *fakeScheduledRunner) appendNote(_ context.Context, _, beadID, note string) error {
+	if f.notes == nil {
+		f.notes = map[string][]string{}
+	}
+	f.notes[beadID] = append(f.notes[beadID], note)
+	return f.noteErr
 }
 
 func (f *fakeScheduledRunner) closeBead(_ context.Context, _, beadID, reason string) error {

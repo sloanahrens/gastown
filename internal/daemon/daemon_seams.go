@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -25,6 +26,19 @@ type daemonSeams struct {
 	orphanReap           func()
 	censusTicker         func(interval time.Duration) (ticks <-chan time.Time, stop func())
 	censusLog            func(ctx context.Context, every <-chan time.Time, logf func(string, ...any))
+	// shadowEncodeJSON encodes one reviewed landing into the deep-review
+	// shadow note's landings.jsonl line. A record's fields are strings and
+	// timestamps, so the production encoder cannot fail; the seam exists so
+	// the note's failure branch has a test.
+	shadowEncodeJSON func(any) ([]byte, error)
+}
+
+// encodeShadowLanding renders one landing for the shadow note's JSON lines.
+func (s daemonSeams) encodeShadowLanding(v any) ([]byte, error) {
+	if s.shadowEncodeJSON != nil {
+		return s.shadowEncodeJSON(v)
+	}
+	return json.Marshal(v)
 }
 
 // startCensusTicker returns the census's tick channel and the func that stops

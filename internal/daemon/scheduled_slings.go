@@ -73,6 +73,9 @@ type scheduledBead struct {
 	CloseReason  string
 	CreatedAt    time.Time
 	ResumeBranch string
+	// Notes is the bead's notes as bd list returns them. A shadow run reads
+	// the ledger's cursor lines from here (see shadowNotes).
+	Notes string
 }
 
 // scheduledSlingFailureMarker prefixes the close reason the patrol writes on a
@@ -219,6 +222,7 @@ func scheduledBeadsOf(issues []*beads.Issue) []scheduledBead {
 			CloseReason:  is.CloseReason,
 			CreatedAt:    beads.ParseIssueTime(is.CreatedAt),
 			ResumeBranch: patrolscan.ResumeBranchFromNotes(is.Notes),
+			Notes:        is.Notes,
 		})
 	}
 	return out
@@ -240,6 +244,9 @@ type scheduledSlingRunner interface {
 	// runGate runs the entry's gate_command under ctx's deadline and returns
 	// its combined output and run error (see scheduledGateAllows).
 	runGate(ctx context.Context, e ScheduledSlingEntry) ([]byte, error)
+	// appendNote appends note to a bead's notes, bd's --append-notes. A shadow
+	// run writes its plan here and nowhere else.
+	appendNote(ctx context.Context, rig, beadID, note string) error
 	// admit reports the town's reason for refusing this entry's sling right
 	// now — the pool at its cap, the merge queue over its limit — or "" when
 	// the sling has a seat (dispatch.SlingRefusalMarker is the shared contract).
@@ -289,6 +296,11 @@ func (r *execScheduledSlingRunner) listBeads(_ context.Context, rig, label strin
 // closeBead closes a run bead with a reason.
 func (r *execScheduledSlingRunner) closeBead(_ context.Context, rig, beadID, reason string) error {
 	return r.store(rig).CloseWithReason(reason, beadID)
+}
+
+// appendNote appends note to a run bead's notes.
+func (r *execScheduledSlingRunner) appendNote(_ context.Context, rig, beadID, note string) error {
+	return r.store(rig).Update(beadID, beads.UpdateOptions{AppendNotes: note})
 }
 
 // originHasBranch asks the rig's bare repo whether origin carries branch.
@@ -573,9 +585,9 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	}
 	// Asking before the run bead exists costs one probe; the sling's own refusal
 	// costs a bead created and failed-closed on every tick the town stays full
-	// (gt-ttqq8). A spec-dispatched run is not slung by this patrol, so it has
-	// no capacity to pre-check.
-	if e.Dispatch != scheduledDispatchSpec {
+	// (gt-ttqq8). A spec-dispatched run is not slung by this patrol, and a
+	// shadow run slings nothing at all, so neither has capacity to pre-check.
+	if e.Dispatch != scheduledDispatchSpec && e.Dispatch != scheduledDispatchShadow {
 		reason, err := d.scheduledSlingAdmits(ctx, r, e)
 		if err != nil {
 			// A probe that cannot answer is not the town at capacity (the pool's
@@ -594,6 +606,9 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	title := fmt.Sprintf("%s %s", e.Name, now.UTC().Format("2006-01-02"))
 	if e.Dispatch == scheduledDispatchSpec {
 		return d.createSpecDispatchedRun(ctx, r, e, title)
+	}
+	if e.Dispatch == scheduledDispatchShadow {
+		return d.runShadowDeepReview(ctx, r, e, beadsForLabel, title, now)
 	}
 	desc := fmt.Sprintf("Scheduled run of formula %s on rig %s, created by the daemon's scheduled_slings patrol. Label %s is the run's identity; while this bead is open no second run is dispatched.", e.Formula, e.Rig, scheduledSlingLabel(e))
 	id, err := r.createBead(ctx, e.Rig, scheduledRunBead{Title: title, Labels: []string{scheduledSlingLabel(e)}, Description: desc, Priority: scheduledSlingPriority(e)})

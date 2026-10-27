@@ -1014,6 +1014,9 @@ type ScheduledSlingEntry struct {
 	// The dispatcher chooses the seat and the moment, so a "spec" entry runs
 	// on any agent with a free seat (or RunAgent's), and cannot carry an Agent:
 	// the file does not load with one (retired_keys.go, gt-mukgk).
+	// "shadow" means the scheduler runs the deep-review plan from the host's
+	// landings ledger itself, appends the plan to the run bead's notes and
+	// closes the bead; nothing is slung, so it carries no Agent either.
 	Dispatch string `json:"dispatch,omitempty"`
 
 	// RunAgent is the agent a "spec" entry's run beads must run on: the
