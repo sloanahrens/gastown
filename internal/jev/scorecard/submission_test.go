@@ -437,14 +437,14 @@ func TestSubmissionRejectionForAttemptPicksTheBlockOfThatAttempt(t *testing.T) {
 		land.FormatRejectionNote(land.RejectionNote{Attempt: 2, Reason: "two", Branch: "b", Target: "main", MR: "m",
 			Findings: []land.Finding{{ID: "gt-f2", Severity: "low", Path: "b.go", Line: 2, Title: "second"}}})
 
-	rej, ok := rejectionForAttempt(notes, 2)
+	rej, ok := land.RejectionForAttempt(notes, 2)
 	if !ok || rej.Attempt != 2 || len(rej.Findings) != 1 || rej.Findings[0].Title != "second" {
 		t.Errorf("attempt 2 = %+v, %v; want its own block with the second finding", rej, ok)
 	}
-	if _, ok := rejectionForAttempt(notes, 3); ok {
+	if _, ok := land.RejectionForAttempt(notes, 3); ok {
 		t.Error("attempt 3 has no block and was found")
 	}
-	if _, ok := rejectionForAttempt("", 1); ok {
+	if _, ok := land.RejectionForAttempt("", 1); ok {
 		t.Error("empty notes hold no block and one was found")
 	}
 }
@@ -459,13 +459,13 @@ func TestSubmissionRejectionForAttemptPrefersTheReviewBlock(t *testing.T) {
 		land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: string(land.RejectGate), Reason: "two",
 			Branch: "b", Target: "main", MR: "m"})
 
-	rej, ok := rejectionForAttempt(notes, 1)
+	rej, ok := land.RejectionForAttempt(notes, 1)
 	if !ok || rej.Kind != string(land.RejectReview) || rej.Reason != "one" {
 		t.Errorf("attempt 1 = %+v, %v; want the review block that opened it", rej, ok)
 	}
 	only := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: string(land.RejectGate), Reason: "two",
 		Branch: "b", Target: "main", MR: "m"})
-	if rej, ok := rejectionForAttempt(only, 1); !ok || rej.Kind != string(land.RejectGate) {
+	if rej, ok := land.RejectionForAttempt(only, 1); !ok || rej.Kind != string(land.RejectGate) {
 		t.Errorf("attempt 1 = %+v, %v; want the gate block when no review block carries it", rej, ok)
 	}
 }

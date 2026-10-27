@@ -86,10 +86,6 @@ func phraseRE(phrases []string) *regexp.Regexp {
 // refSubmitted is the Item ref that holds a submission's submitted time.
 const refSubmitted = "submitted"
 
-// rejectionHeaderRE finds the header line of each MERGE REJECTION block, so the
-// notes can be cut into one block per attempt.
-var rejectionHeaderRE = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(land.MergeRejectionNoteMarker) + ` \(attempt [0-9]+\): `)
-
 func init() {
 	Register(SubmissionBattery, func(townRoot string) Adapter {
 		return &submissionAdapter{
@@ -202,7 +198,7 @@ func (a *submissionAdapter) Label(_ context.Context, item Item) (Labeling, error
 	if err != nil {
 		return Labeling{}, err
 	}
-	if rej, ok := rejectionForAttempt(notes, row.Attempt); ok {
+	if rej, ok := land.RejectionForAttempt(notes, row.Attempt); ok {
 		for id, v := range submissionFindingLabels(rej.Findings) {
 			labels[id] = v
 		}
@@ -323,38 +319,6 @@ func (a *submissionAdapter) nextSubmission(bead string, after time.Time) (time.T
 		}
 	}
 	return next, found
-}
-
-// rejectionForAttempt reads the MERGE REJECTION block that opened attempt in
-// notes. land's parser reads the last block of the text it is given, so each
-// block is cut out up to the next header before it is parsed.
-//
-// A review block opened the round an attempt names. A gate or policy block
-// numbers itself among its own kind, so its count can equal an attempt number
-// and it is read only where no review block carries that attempt (gt-l3zak).
-func rejectionForAttempt(notes string, attempt int) (land.RejectionNote, bool) {
-	starts := rejectionHeaderRE.FindAllStringIndex(notes, -1)
-	var review, other land.RejectionNote
-	haveReview, haveOther := false, false
-	for i, s := range starts {
-		end := len(notes)
-		if i+1 < len(starts) {
-			end = starts[i+1][0]
-		}
-		rej, parsed := land.ParseRejectionNote(notes[s[0]:end])
-		if !parsed || rej.Attempt != attempt {
-			continue
-		}
-		if rej.Kind == "" || rej.Kind == string(land.RejectReview) {
-			review, haveReview = rej, true
-		} else {
-			other, haveOther = rej, true
-		}
-	}
-	if haveReview {
-		return review, true
-	}
-	return other, haveOther
 }
 
 // submissionFindingLabels labels tests_cover_change and beyond_goal from the
