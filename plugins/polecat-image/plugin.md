@@ -170,17 +170,3 @@ point" in `plugins/README.md`:
 ```
 
 Tests: `go test ./internal/polecatimage/`.
-
-## The shared cache claim's seed Job
-
-Before changing what the seed Job runs, read `internal/polecat/cachevol/seedjob.go`:
-its containers run this binary's `seed-clone` and `seed-cache` helpers.
-
-Run it directly; before building or syncing this plugin, read "Script entry
-point" in `plugins/README.md`:
-
-```bash
-~/gt/plugins/polecat-image/bin/polecat-image
-```
-
-Tests: `go test ./internal/polecatimage/`.
