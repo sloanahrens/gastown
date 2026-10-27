@@ -761,8 +761,7 @@ func cacheVolumeName(volume, rig string) string {
 var cacheVolumePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
 // ensureCacheVolume creates volume when docker does not have it, labeled the
-// way the gateway attaches it: the same `docker volume create` that
-// scripts/polecat-caches.sh runs, so a new rig needs no onboarding step. An
+// way the gateway attaches it, so a new rig needs no onboarding step. An
 // existing volume is left alone. Only docker's "no such volume" answer to the
 // inspect means the volume is absent; any other inspect failure, such as a
 // daemon that is down, is ErrCacheVolume with no create attempted. A name
