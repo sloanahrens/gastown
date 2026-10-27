@@ -132,6 +132,18 @@ func TestSign(t *testing.T) {
 			wantCmds: 1,
 		},
 		{
+			name: "a copy that cannot be written installs ad-hoc",
+			setup: func(w *signWorld) {
+				// mktemp hands back a directory, so the copy into it is the
+				// step that fails.
+				w.Files.TempFile = func(string, string) (string, error) {
+					return filepath.Dir(w.bin), nil
+				}
+			},
+			want:     "[install-gt] WARNING: installing ad-hoc: cannot copy BIN",
+			wantCmds: 1,
+		},
+		{
 			name: "codesign that fails leaves the binary alone",
 			respond: func(dir, name string, args []string) ([]byte, []byte, int) {
 				if name == "codesign" {
