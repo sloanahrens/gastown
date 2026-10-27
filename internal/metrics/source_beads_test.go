@@ -56,8 +56,8 @@ func seamEnv(t *testing.T, run func(dir string, args []string) ([]byte, []byte, 
 	}
 	env.Tail = func(string, int64) ([]byte, error) { return nil, fs.ErrNotExist }
 	env.Beads = func(ctx context.Context, dir string) BeadStore {
-		return beads.New(dir, beads.WithCallContext(ctx), beads.WithRunner(func(_ context.Context, args []string) ([]byte, []byte, error) {
-			return run(dir, args)
+		return beads.New(dir, beads.WithCallContext(ctx), beads.WithDirRunner(func(_ context.Context, bdDir string, args []string) ([]byte, []byte, error) {
+			return run(bdDir, args)
 		}))
 	}
 	return env
