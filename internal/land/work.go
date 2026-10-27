@@ -94,6 +94,28 @@ func (w Work) Candidate() string {
 	return "land/" + w.BeadID
 }
 
+// PolecatBranchPrefix opens the branch a polecat's work is pushed as:
+// polecat/<polecat>/<bead>, sometimes with a +<mutation> suffix.
+const PolecatBranchPrefix = "polecat/"
+
+// seat is the seat a landing's spans belong to, or "" when the landing has no
+// polecat seat. It is read from the branch, which the landing fetched from the
+// remote and verified carries the head it merged, rather than from the worker
+// line of the ready note: that line is the seat's own word, and a seat must not
+// be able to name the attempt its end closes (gt-8yk78). A crew branch has no
+// seat, and neither has a branch that is not a polecat's.
+func (w Work) seat() string {
+	rest, ok := strings.CutPrefix(w.Branch, PolecatBranchPrefix)
+	if !ok || w.Rig == "" {
+		return ""
+	}
+	polecat, _, ok := strings.Cut(rest, "/")
+	if !ok || polecat == "" {
+		return ""
+	}
+	return w.Rig + "/" + polecat
+}
+
 // FormatReadyNote renders the READY TO LAND block for w. Every value is
 // collapsed onto one line, so no field can inject a line the parser reads.
 // Submitted is left out while it is zero.

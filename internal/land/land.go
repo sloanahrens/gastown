@@ -2319,7 +2319,7 @@ func (l *Lander) record(g Repo, w Work, res Result) error {
 	if err := l.writeLandedRef(g, rec); err != nil {
 		return err
 	}
-	if err := l.Landings.Append(rec); err != nil {
+	if err := l.Landings.AppendSubmitted(rec, w.seat(), w.Submitted); err != nil {
 		return fmt.Errorf("landings file: %w", err)
 	}
 	return l.recordBead(w, rec)

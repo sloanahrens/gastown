@@ -275,12 +275,8 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 		default:
 			done.NotifyDoneEscalated(hookBd, hookedBeadID)
 		}
-		// The attempt ends with the turn: the seat stopped on a blocker and
-		// holds nothing more. A resume after the escalation closes starts a
-		// fresh attempt through the sling path (gt-dz78b).
-		if roleInfo.Role == RolePolecat && roleInfo.Polecat != "" {
-			recordSpanEnd(e.spanStoreAt(townRoot), hookedBeadID, roleInfo.Rig+"/"+roleInfo.Polecat, spans.ReasonEscalated)
-		}
+		// The attempt is ended below, with every other exit: the seat stopped
+		// on a blocker and holds nothing more (gt-dz78b).
 	}
 
 	// A DEFERRED exit keeps the bead for the next session — but only a bead
@@ -433,9 +429,6 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 				if err := hookBd.AddComment(hookedBeadID, note); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: couldn't record the submission on %s: %v\n", hookedBeadID, err)
 				}
-				if roleInfo.Role == RolePolecat && roleInfo.Polecat != "" {
-					recordSpanEnd(e.spanStoreAt(townRoot), hookedBeadID, roleInfo.Rig+"/"+roleInfo.Polecat, spans.ReasonDone)
-				}
 			} else if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open; see the warning above.\n")
@@ -511,7 +504,30 @@ doneStateUpdate:
 
 	// Clear legacy checkpoints on clean exit — gt done completed successfully.
 	clearDoneCheckpoints(agentBd, agentBeadID)
+
+	// The seat's turn ends here, whatever the exit: the time a bead's seats
+	// spent hooked on it is what its landing record reports, so an attempt left
+	// open costs the record its seconds (gt-8yk78). Every exit that reaches
+	// this point ends the turn; the error returns above do not, because the
+	// session stays up to retry the same turn.
+	if hookedBeadID != "" && roleInfo.Role == RolePolecat && roleInfo.Polecat != "" {
+		recordSpanEnd(e.spanStoreAt(townRoot), hookedBeadID, roleInfo.Rig+"/"+roleInfo.Polecat, spanEndReason(exitType))
+	}
 	return consumed, nil
+}
+
+// spanEndReason is how exitType ended the seat's turn, in the span log's
+// vocabulary: done is the turn ending normally, whether it submitted the bead,
+// closed it or found nothing left to do; a turn that deferred or escalated
+// says so.
+func spanEndReason(exitType string) spans.Reason {
+	switch exitType {
+	case done.ExitEscalated:
+		return spans.ReasonEscalated
+	case done.ExitDeferred:
+		return spans.ReasonDeferred
+	}
+	return spans.ReasonDone
 }
 
 // recordSpanEnd ends seat's open attempt on bead with reason, the way its turn

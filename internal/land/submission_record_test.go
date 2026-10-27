@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/jev/battery"
 )
 
 // fakeSubmissionGit answers the clone reads from scripted commits and stat, and
@@ -279,5 +280,57 @@ func TestSubmissionsSeenPathIsUnderTheJevRuntime(t *testing.T) {
 	want := filepath.Join("/town", ".runtime", "jev", "submissions-seen.jsonl")
 	if got != want {
 		t.Errorf("SubmissionsSeenPath = %q, want %q", got, want)
+	}
+}
+
+// TestFirstSeenInAnswersTheOldestRecordForTheKey: the first sight is the first
+// record of a bead at a head, so a later write of the same key does not move
+// it, and a key with no record answers zero rather than a time (gt-8yk78).
+func TestFirstSeenInAnswersTheOldestRecordForTheKey(t *testing.T) {
+	t.Parallel()
+	path := SubmissionsSeenPath(t.TempDir())
+	later := time.Date(2026, 10, 25, 12, 10, 0, 0, time.UTC)
+	first := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	for _, rec := range []SubmissionRecord{
+		{SeenAt: later, Bead: "gt-b", Head: "h1"},
+		{SeenAt: later, Bead: "gt-a", Head: "h1"},
+		{SeenAt: first, Bead: "gt-a", Head: "h1"},
+		{SeenAt: later, Bead: "gt-a", Head: "h2"},
+	} {
+		if err := battery.Append(path, rec); err != nil {
+			t.Fatalf("seeding the first-sight log: %v", err)
+		}
+	}
+	lookup := FirstSeenIn(path)
+
+	got, err := lookup("gt-a", "h1")
+	if err != nil {
+		t.Fatalf("FirstSeenIn: %v", err)
+	}
+	if !got.Equal(first) {
+		t.Errorf("first sight = %s, want the oldest record's %s", got, first)
+	}
+	got, err = lookup("gt-a", "h3")
+	if err != nil {
+		t.Fatalf("FirstSeenIn for an unseen head: %v", err)
+	}
+	if !got.IsZero() {
+		t.Errorf("first sight of an unseen head = %s, want zero", got)
+	}
+}
+
+// TestFirstSeenInReportsALogItCannotRead: a log that exists but cannot be read
+// is an error, not an empty log: the caller must not read "I saw nothing" from
+// "I could not look" (gt-8yk78).
+func TestFirstSeenInReportsALogItCannotRead(t *testing.T) {
+	t.Parallel()
+	path := SubmissionsSeenPath(t.TempDir())
+	// A directory where the log belongs: every open of it fails.
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := FirstSeenIn(path)("gt-a", "h1"); err == nil {
+		t.Fatal("FirstSeenIn on an unreadable log = nil, want an error")
 	}
 }

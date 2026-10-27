@@ -68,6 +68,30 @@ func ReadSubmissionRecords(path string) ([]SubmissionRecord, error) {
 	return ReadRecentSubmissionRecords(path, math.MaxInt)
 }
 
+// FirstSeenIn answers when the host first saw a bead's submission at a head,
+// from the first-sight log at path. The answer is the oldest record for the
+// key, because that is the first sight; a bead and head with no record answers
+// zero and no error, and the caller must read that as "the host saw nothing",
+// not as a time (gt-8yk78).
+func FirstSeenIn(path string) func(bead, head string) (time.Time, error) {
+	return func(bead, head string) (time.Time, error) {
+		recs, err := ReadSubmissionRecords(path)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("reading the first-sight log: %w", err)
+		}
+		var seen time.Time
+		for _, rec := range recs {
+			if rec.Bead != bead || rec.Head != head {
+				continue
+			}
+			if seen.IsZero() || rec.SeenAt.Before(seen) {
+				seen = rec.SeenAt
+			}
+		}
+		return seen, nil
+	}
+}
+
 // ReadRecentSubmissionRecords returns the newest n records in the log at path,
 // oldest first. A missing log is empty, and a line that does not parse is
 // skipped before the n are taken.

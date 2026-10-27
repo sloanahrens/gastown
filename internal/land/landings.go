@@ -33,8 +33,15 @@ type LandingsFile struct {
 	// is read from; the landing worker sets the town's store and no other
 	// caller writes. Nil means records carry no polecat time (gt-yxl22).
 	Spans SpanSummarizer
+	// FirstSeen, when set, answers when the host first saw a bead's submission
+	// at a head: the first-sight record the landing worker writes from its own
+	// clock before it lands anything. It is the end a landing trusts for a seat
+	// that could not write its own; the seat's submission stamp may pull that
+	// end earlier, never later (gt-8yk78).
+	FirstSeen func(bead, head string) (time.Time, error)
 
 	write func(*os.File, []byte) (int, error) // test seam: writes one record; nil means the file's own Write
+	now   func() time.Time                    // test seam: the landing's clock; nil means time.Now
 
 	// mu guards warned: the daemon hands this file to both the landing
 	// worker and its post-landing run.
@@ -47,13 +54,17 @@ func RigLandingsFile(townRoot, rig string) (*LandingsFile, error) {
 	if rig == "" || strings.ContainsAny(rig, `/\`) || rig == "." || rig == ".." || rig+".jsonl" == ReviewsFileName {
 		return nil, fmt.Errorf("invalid rig name %q for a landings file", rig)
 	}
-	return &LandingsFile{Path: filepath.Join(constants.TownRuntimePath(townRoot), "landings", rig+".jsonl")}, nil
+	return &LandingsFile{
+		Path:      filepath.Join(constants.TownRuntimePath(townRoot), "landings", rig+".jsonl"),
+		FirstSeen: FirstSeenIn(SubmissionsSeenPath(townRoot)),
+	}, nil
 }
 
-// SpanSummarizer is the part of *spans.Store Append reads: one bead's polecat
-// time.
+// SpanSummarizer is the part of *spans.Store a landing uses: one bead's polecat
+// time, and the close of an attempt the seat left open (AppendSubmitted).
 type SpanSummarizer interface {
 	Summarize(bead string) (spans.Summary, error)
+	EndOpen(bead, seat string, reason spans.Reason, at time.Time) (bool, error)
 }
 
 // Append writes rec as one line. The directory must be 0700-safe (owned by
@@ -68,7 +79,22 @@ type SpanSummarizer interface {
 // does not end in a newline) is repaired first, and a short write of rec is
 // rolled back, so no append can glue its record onto a partial one.
 func (f *LandingsFile) Append(rec LandingRecord) error {
+	return f.AppendSubmitted(rec, "", time.Time{})
+}
+
+// AppendSubmitted is Append for a record whose seat and submission time the
+// caller knows: it ends the attempt that seat left open, so the record carries
+// the seat's seconds instead of a dash.
+//
+// A sandboxed seat cannot end its own attempt: its gt done writes the log of
+// the sandbox's own town, which is deleted with the sandbox, while the sling's
+// start is in this town's log. The host ends the attempt instead, at the time
+// it first saw the submission, pulled earlier when the seat's own stamp says
+// its turn ended sooner. A seat that already ended the attempt writes nothing
+// here (gt-8yk78).
+func (f *LandingsFile) AppendSubmitted(rec LandingRecord, seat string, submitted time.Time) error {
 	if rec.PolecatSecs == 0 && len(rec.PolecatAttempts) == 0 && !rec.PolecatLowerBound {
+		f.closeSubmittedSpan(rec, seat, submitted)
 		rec.PolecatSecs, rec.PolecatAttempts, rec.PolecatLowerBound = f.polecatTime(rec.BeadID)
 	}
 	line, err := json.Marshal(rec)
@@ -76,6 +102,61 @@ func (f *LandingsFile) Append(rec LandingRecord) error {
 		return fmt.Errorf("encoding landing record: %w", err)
 	}
 	return appendJSONLine(f.Path, append(line, '\n'), f.write)
+}
+
+// landedAt is when this record landed: its own stamp, or the file's clock when
+// the caller built the record without one.
+func (f *LandingsFile) landedAt(rec LandingRecord) time.Time {
+	if !rec.LandedAt.IsZero() {
+		return rec.LandedAt
+	}
+	if f.now != nil {
+		return f.now()
+	}
+	return time.Now()
+}
+
+// closeSubmittedSpan ends seat's open attempt on rec's bead. A read or write
+// that fails is logged and the record is written anyway: the landing is never
+// worth failing over the time, and the attempt staying open is exactly what
+// leaves the record a lower bound (gt-yxl22).
+//
+// The end is the host's, not the seat's. The submission stamp is the seat's own
+// word for when its turn ended, and a seat must not be able to write time into
+// a landing record it did not work, so the stamp may only pull the end earlier:
+// the end is the earlier of the stamp and the host's first sight of the
+// submission, and the landing's own time caps both. With no first-sight record
+// the host has seen no submission at all, and the attempt stays open — no
+// credit is better than the seat's word for it (gt-8yk78).
+func (f *LandingsFile) closeSubmittedSpan(rec LandingRecord, seat string, submitted time.Time) {
+	if f.Spans == nil || f.FirstSeen == nil || seat == "" || submitted.IsZero() || !spans.ValidBeadID(rec.BeadID) {
+		return
+	}
+	seen, err := f.FirstSeen(rec.BeadID, rec.Head)
+	if err != nil {
+		if f.Logf != nil {
+			f.Logf("landings file %s: no first-sight record to bound %s on %s: %v", f.Path, seat, rec.BeadID, err)
+		}
+		return
+	}
+	if seen.IsZero() {
+		if f.Logf != nil {
+			f.Logf("landings file %s: no first-sight record for %s, so %s's end is not written and its time stays a lower bound", f.Path, rec.BeadID, seat)
+		}
+		return
+	}
+	end := submitted
+	if seen.Before(end) {
+		end = seen
+	}
+	if landed := f.landedAt(rec); landed.Before(end) {
+		end = landed
+	}
+	if _, err := f.Spans.EndOpen(rec.BeadID, seat, spans.ReasonDone, end); err != nil {
+		if f.Logf != nil {
+			f.Logf("landings file %s: no end for %s on %s: %v", f.Path, seat, rec.BeadID, err)
+		}
+	}
 }
 
 // polecatTime is the record's polecat time: the time the bead's seats spent

@@ -109,6 +109,79 @@ func TestCompletedDoneClosesTheSpanItsSlingStarted(t *testing.T) {
 	}
 }
 
+// TestDoneEndsTheSpanOnEveryExit: the span is what the bead's landing record
+// reports, so every exit that ends the seat's turn ends the attempt — not just
+// the submission — and the reason says which way the turn ended (gt-8yk78).
+func TestDoneEndsTheSpanOnEveryExit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		exit string
+		bead beads.Issue
+		want spans.Reason
+	}{
+		{
+			name: "deferred keeps the bead and ends the turn",
+			exit: done.ExitDeferred,
+			bead: beads.Issue{ID: "gt-base-123", Title: "paused work", Type: "task",
+				Status: string(beads.StatusHooked), Assignee: "gastown/polecats/nux"},
+			want: spans.ReasonDeferred,
+		},
+		{
+			name: "completed on a bead the seat closed itself",
+			exit: done.ExitCompleted,
+			bead: beads.Issue{ID: "gt-base-123", Title: "nothing to implement", Type: "task",
+				Status: string(beads.StatusClosed), Assignee: "gastown/polecats/nux"},
+			want: spans.ReasonDone,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := escalatedTown(t)
+			db := beadsfake.New(beadsfake.WithPrefix("gt"))
+			db.Seed(doneAgentBead(), tt.bead)
+			store := spans.New(spans.DefaultDir(townRoot), nil)
+			if err := store.Start("gt-base-123", "gastown/nux"); err != nil {
+				t.Fatalf("start span: %v", err)
+			}
+
+			if _, err := updateAgentStateOnDoneIn(submittedSpanEnv(db), filepath.Join(townRoot, "gastown"), townRoot, tt.exit, "gt-base-123", beads.AgentFieldUpdates{}); err != nil {
+				t.Fatalf("gt done %s: %v", tt.exit, err)
+			}
+
+			events := readSpanLog(t, townRoot, "gt-base-123")
+			if len(events) != 2 {
+				t.Fatalf("span log = %+v, want the start and one end", events)
+			}
+			if end := events[1]; end.Event != spans.EventEnd || end.Reason != string(tt.want) || end.Seat != "gastown/nux" {
+				t.Errorf("end event = %+v, want gastown/nux closing with reason %q", end, tt.want)
+			}
+		})
+	}
+}
+
+// TestCrewDoneWritesNoPolecatSpan: only a polecat seat opens an attempt, so
+// gt done as a crew member ends none (gt-8yk78).
+func TestCrewDoneWritesNoPolecatSpan(t *testing.T) {
+	t.Parallel()
+	townRoot, db := submittedSpanTown(t)
+	env := submittedSpanEnv(db)
+	env.getenv = envMap(map[string]string{"GT_ROLE": "crew", "GT_RIG": "gastown", "GT_CREW": "sloan"})
+	store := spans.New(spans.DefaultDir(townRoot), nil)
+	if err := store.Start("gt-base-123", "gastown/nux"); err != nil {
+		t.Fatalf("start span: %v", err)
+	}
+
+	if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123", beads.AgentFieldUpdates{}); err != nil {
+		t.Fatalf("crew gt done: %v", err)
+	}
+
+	if events := readSpanLog(t, townRoot, "gt-base-123"); len(events) != 1 {
+		t.Errorf("span log = %+v, want the start alone", events)
+	}
+}
+
 // TestEscalatedDoneClosesTheSpanItsSlingStarted: an ESCALATED exit ends the
 // attempt like any other turn — the seat stopped on a blocker — so a bead that
 // is resumed and escalated again reads as two attempts, not one that never
@@ -207,6 +280,66 @@ func TestCompletedDoneSurvivesAFailedSpanEnd(t *testing.T) {
 	fields := beads.ParseAgentFields(mustShowBead(t, db, "gt-gastown-polecat-nux").Description)
 	if fields.AgentState != string(beads.AgentStateDone) {
 		t.Errorf("agent_state = %q, want done after a failed span write", fields.AgentState)
+	}
+}
+
+// showFailingBeads answers no Show, the shape of a bead read that failed for a
+// reason other than absence: gt done refuses the turn instead of guessing.
+type showFailingBeads struct{ beads.Client }
+
+func (showFailingBeads) Show(string) (*beads.Issue, error) {
+	return nil, errors.New("dolt: connection refused")
+}
+
+// TestAFailedDoneLeavesTheSpanOpen: an exit that returns an error does not end
+// the seat's turn — the session stays up to retry the same turn — so the
+// attempt stays open rather than reading as time the seat did not spend
+// (gt-8yk78).
+func TestAFailedDoneLeavesTheSpanOpen(t *testing.T) {
+	t.Parallel()
+	townRoot, db := submittedSpanTown(t)
+	store := spans.New(spans.DefaultDir(townRoot), nil)
+	if err := store.Start("gt-base-123", "gastown/nux"); err != nil {
+		t.Fatalf("start span: %v", err)
+	}
+	env := submittedSpanEnv(db)
+	env.source = func(string, string) beads.Client { return showFailingBeads{Client: db} }
+
+	if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123", beads.AgentFieldUpdates{}); err == nil {
+		t.Fatal("gt done = nil, want the failed bead read to refuse the turn")
+	}
+
+	if events := readSpanLog(t, townRoot, "gt-base-123"); len(events) != 1 {
+		t.Errorf("span log = %+v, want the start alone after a failed turn", events)
+	}
+	sum, err := store.Summarize("gt-base-123")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if len(sum.Attempts) != 1 || !sum.Attempts[0].Open {
+		t.Errorf("summary = %+v, want the attempt left open for the retry", sum)
+	}
+}
+
+// TestCompletedDoneSurvivesAnUnreadableSpanLog: the span is a measurement, not
+// a gate — a log that cannot be read is reported and the submission stands,
+// with no end written on the strength of a read that failed (gt-8yk78).
+func TestCompletedDoneSurvivesAnUnreadableSpanLog(t *testing.T) {
+	t.Parallel()
+	townRoot, db := submittedSpanTown(t)
+	store := &fakeSpanStore{sumErr: errors.New("permission denied")}
+	env := submittedSpanEnv(db)
+	env.spanLog = func(string) spanStore { return store }
+
+	if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123", beads.AgentFieldUpdates{}); err != nil {
+		t.Fatalf("gt done failed on an unreadable span log: %v", err)
+	}
+	if len(store.ends) != 0 {
+		t.Errorf("ends = %v, want none written from a log that could not be read", store.ends)
+	}
+	fields := beads.ParseAgentFields(mustShowBead(t, db, "gt-gastown-polecat-nux").Description)
+	if fields.AgentState != string(beads.AgentStateDone) {
+		t.Errorf("agent_state = %q, want done after an unreadable span log", fields.AgentState)
 	}
 }
 
