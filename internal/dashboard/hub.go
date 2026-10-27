@@ -719,9 +719,11 @@ func (h *Hub) pollUsage() {
 	h.publishLocked()
 }
 
-// pollClaudePlan reads the Claude plan meter from the status line's samples. The
-// status line appends one at most every ten minutes, so it keeps the minute
-// clock the other slow readers use.
+// pollClaudePlan reads the Claude plan meter, and the samples the Cost charts'
+// Claude series is folded from, in one poll: the payload carries the series its
+// own read returned, so the file is opened once and the charts cannot be drawn
+// from a read that did not happen. The status line appends one at most every ten
+// minutes, so it keeps the minute clock the other slow readers use.
 func (h *Hub) pollClaudePlan() {
 	c := h.cfg.ClaudePlan()
 	if c == nil {
@@ -730,6 +732,7 @@ func (h *Hub) pollClaudePlan() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.ClaudePlan = c
+	h.state.PlanSamples = c.Samples
 	h.rebuildCostChartsLocked()
 	h.publishLocked()
 }
@@ -833,9 +836,10 @@ func (h *Hub) pollSpend() {
 }
 
 // rebuildCostChartsLocked rebuilds the Cost panel's charts from the spend
-// report, the day's hours and the Claude plan. The caller holds h.mu.
+// report, the day's hours, the Claude plan and the samples its dollars come
+// from. The caller holds h.mu.
 func (h *Hub) rebuildCostChartsLocked() {
-	charts := BuildCostCharts(time.Now(), SpendPerDay(h.state.Spend), h.state.SpendHours, h.state.SpendSkipped, h.state.ClaudePlan)
+	charts := BuildCostCharts(time.Now(), SpendPerDay(h.state.Spend), h.state.SpendHours, h.state.SpendSkipped, h.state.ClaudePlan, h.state.PlanSamples)
 	h.state.CostCharts = &charts
 }
 

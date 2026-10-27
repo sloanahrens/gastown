@@ -40,7 +40,7 @@ func costChartsHours() []SpendHour {
 
 func TestBuildCostChartsDailyKeepsTheLastSevenDaysAsBars(t *testing.T) {
 	t.Parallel()
-	c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, nil).Daily
+	c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, nil, PlanSamples{}).Daily
 	if c == nil {
 		t.Fatal("no daily chart from nine days of spend")
 	}
@@ -54,7 +54,7 @@ func TestBuildCostChartsDailyKeepsTheLastSevenDaysAsBars(t *testing.T) {
 
 func TestBuildCostChartsDailyDrawsATopUpAsNoSpend(t *testing.T) {
 	t.Parallel()
-	c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, nil).Daily
+	c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, nil, PlanSamples{}).Daily
 	// 2026-10-22 is inside the window and is a top-up: its bar is zero and its
 	// hover says money was added, not spent.
 	var topUp *CostBar
@@ -74,7 +74,7 @@ func TestBuildCostChartsDailyDrawsATopUpAsNoSpend(t *testing.T) {
 func TestBuildCostChartsDailyDrawsTheWeeklyLimitAsALine(t *testing.T) {
 	t.Parallel()
 	plan := &ClaudePlan{WeeklyValueUSD: 70, ProjectedPctAtReset: 83.4}
-	c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, plan).Daily
+	c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, plan, PlanSamples{}).Daily
 	if c.Limit == nil {
 		t.Fatal("no limit line with a weekly value")
 	}
@@ -93,17 +93,17 @@ func TestBuildCostChartsDailyDrawsTheWeeklyLimitAsALine(t *testing.T) {
 
 func TestBuildCostChartsDailyHasNoLimitWithoutAPlan(t *testing.T) {
 	t.Parallel()
-	if c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, nil).Daily; c.Limit != nil {
+	if c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, nil, PlanSamples{}).Daily; c.Limit != nil {
 		t.Errorf("limit = %+v with no plan, want none", c.Limit)
 	}
-	if c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, &ClaudePlan{}).Daily; c.Limit != nil {
+	if c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, &ClaudePlan{}, PlanSamples{}).Daily; c.Limit != nil {
 		t.Errorf("limit = %+v with a zero weekly value, want none", c.Limit)
 	}
 }
 
 func TestBuildCostChartsHourlyHasOneBarPerHourAndGapsAreNotZeroBars(t *testing.T) {
 	t.Parallel()
-	c := BuildCostCharts(costChartsNow, nil, costChartsHours(), 0, nil).Hourly
+	c := BuildCostCharts(costChartsNow, nil, costChartsHours(), 0, nil, PlanSamples{}).Hourly
 	if c == nil {
 		t.Fatal("no hourly chart from 24 hours")
 	}
@@ -129,7 +129,7 @@ func TestBuildCostChartsHourlyHasOneBarPerHourAndGapsAreNotZeroBars(t *testing.T
 
 func TestBuildCostChartsLeavesAChartOutWithNoData(t *testing.T) {
 	t.Parallel()
-	c := BuildCostCharts(costChartsNow, nil, nil, 0, nil)
+	c := BuildCostCharts(costChartsNow, nil, nil, 0, nil, PlanSamples{})
 	if c.Daily != nil || c.Hourly != nil {
 		t.Errorf("charts with no data = %+v, want neither", c)
 	}
@@ -156,7 +156,7 @@ func TestSpendPerDayReadsTheReportAndSkipsAnUnsetDay(t *testing.T) {
 func TestBuildCostChartsDailyIsSevenDaysWithGapsWhenFewerExist(t *testing.T) {
 	t.Parallel()
 	perDay := map[string]float64{"2026-10-24": 1.5, "2026-10-25": 2.0}
-	c := BuildCostCharts(costChartsNow, perDay, nil, 0, &ClaudePlan{WeeklyValueUSD: 70}).Daily
+	c := BuildCostCharts(costChartsNow, perDay, nil, 0, &ClaudePlan{WeeklyValueUSD: 70}, PlanSamples{}).Daily
 	if c == nil || len(c.Bars) != costDailyDays {
 		t.Fatalf("daily bars = %d, want seven calendar days", len(c.Bars))
 	}
@@ -182,7 +182,7 @@ func TestBuildCostChartsDailyIsSevenDaysWithGapsWhenFewerExist(t *testing.T) {
 // and named in its aria-label (gt-idfec).
 func TestBuildCostChartsReportsTheSkippedLedgerLines(t *testing.T) {
 	t.Parallel()
-	c := BuildCostCharts(costChartsNow, nil, costChartsHours(), 2, nil).Hourly
+	c := BuildCostCharts(costChartsNow, nil, costChartsHours(), 2, nil, PlanSamples{}).Hourly
 	if c == nil || c.Skipped != 2 {
 		t.Fatalf("hourly skipped = %+v, want 2 on the chart", c)
 	}
@@ -236,7 +236,7 @@ func TestPollSpendRebuildsTheChartsOnEveryPoll(t *testing.T) {
 // A projection of exactly 0% is a figure, so the limit label names it.
 func TestBuildCostChartsDailyNamesAZeroProjection(t *testing.T) {
 	t.Parallel()
-	c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, &ClaudePlan{WeeklyValueUSD: 70, ProjectedPctAtReset: 0}).Daily
+	c := BuildCostCharts(costChartsNow, costChartsPerDay, nil, 0, &ClaudePlan{WeeklyValueUSD: 70, ProjectedPctAtReset: 0}, PlanSamples{}).Daily
 	if c.Limit == nil || !strings.Contains(c.Limit.Label, "reset at 0%") {
 		t.Errorf("limit label = %+v, want it to name a 0%% projection", c.Limit)
 	}

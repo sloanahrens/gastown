@@ -51,6 +51,7 @@ td.n,th.n{text-align:right}
 .spark{width:100%;height:56px;display:block}
 .chart{width:100%;height:64px;display:block}
 .dchart{width:100%;height:auto;display:block;margin:4px 0 2px}.dchart .bar{fill:var(--blue)}.dchart .axis{stroke:var(--line)}.dchart .limit{stroke:var(--amber);stroke-width:1.5;stroke-dasharray:4 3}.dchart text{fill:var(--dim);font-size:11px}.dchart .amt{fill:var(--text)}.dchart .limitlbl{fill:var(--amber)}.dchart .gap{stroke:var(--dim);stroke-width:1;stroke-dasharray:2 2}
+.dchart .cbar{fill:var(--violet)}.dchart .cgap{opacity:.35}.dchart .hatch{stroke:var(--violet);stroke-width:1}
 .hbars{display:flex;align-items:stretch;gap:2px;height:64px;margin:4px 0 2px}
 .hbar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;min-height:1px}
 .hbar i{display:block;min-height:1px}
@@ -3962,34 +3963,52 @@ function mangoUnchecked(t, stale) {
 }
 
 // costBarChart draws one of the Cost panel's charts from its data, which the
-// server builds (CostChart): one bar or gap per entry, an optional limit line,
-// and the aria-label that carries the numbers. The page only places what it is
-// given; it decides no value, label or line of its own.
+// server builds (CostChart): one bar or gap per entry, the Claude series beside
+// them on the same buckets, an optional limit line, and the aria-label that
+// carries the numbers. The page only places what it is given; it decides no
+// value, label or line of its own.
 function costBarChart(box, c, kind) {
   if (!c || !Array.isArray(c.bars) || !c.bars.length) return;
   const daily = kind === "daily";
+  // The Claude series is drawn only when it lines up bucket for bucket; a series
+  // the server built on other buckets would put one day's dollars over another.
+  // A series dropped for that says so under the chart, like one the server left
+  // out: a chart without Claude dollars never goes quiet about why.
+  let claudeWhy = c.claude_why || "";
+  let cl = null;
+  if (c.claude) {
+    if (Array.isArray(c.claude.bars) && c.claude.bars.length === c.bars.length) cl = c.claude;
+    else claudeWhy = "the series does not line up with the chart's buckets: it has " + (Array.isArray(c.claude.bars) ? c.claude.bars.length : "no") + " where the chart has " + c.bars.length;
+  }
   const W = 700, H = daily ? 150 : 120, pad = 26, base = H - (daily ? 26 : 22);
-  const top = Math.max(0.01, c.limit ? c.limit.value : 0, ...c.bars.map(b => b.value || 0));
+  const top = Math.max(0.01, c.limit ? c.limit.value : 0, ...c.bars.map(b => b.value || 0), ...(cl ? cl.bars.map(b => b.value || 0) : []));
   const y = v => base - (Math.max(0, v) / top) * (base - 16);
   const slot = (W - 2 * pad) / c.bars.length;
+  const wide = slot * (daily ? 0.56 : 0.6);
+  const w = cl ? wide / 2 - 1 : wide;
   const svg = svgEl("svg", {viewBox: "0 0 " + W + " " + H, class: "dchart " + kind, role: "img", "aria-label": c.aria});
+  if (cl) svg.append(claudeHatch(kind));
   svg.append(svgEl("line", {x1: pad, x2: W - pad, y1: base, y2: base, class: "axis"}));
   c.bars.forEach((b, i) => {
     const cx = pad + slot * i + slot / 2;
+    // A shared chart sets the two bars side by side in the slot; the DeepSeek
+    // bar keeps the left half and the Claude bar the right.
+    const dx = cl ? cx - w - 1 : cx - w / 2;
+    const mid = dx + w / 2;
     if (b.gap) {
-      svg.append(svgEl("line", {x1: cx, x2: cx, y1: base - 3, y2: base, class: "gap"}));
+      svg.append(svgEl("line", {x1: mid, x2: mid, y1: base - 3, y2: base, class: "gap"}));
     } else {
-      const w = slot * (daily ? 0.56 : 0.6);
-      const bar = svgEl("rect", {x: cx - w / 2, y: y(b.value), width: w, height: Math.max(0, base - y(b.value)), class: "bar"});
+      const bar = svgEl("rect", {x: dx, y: y(b.value), width: w, height: Math.max(0, base - y(b.value)), class: "bar"});
       const t = svgEl("title", {}); t.textContent = b.title;
       bar.append(t);
       svg.append(bar);
       if (daily) {
-        const amt = svgEl("text", {x: cx, y: y(b.value) - 4, class: "amt", "text-anchor": "middle"});
+        const amt = svgEl("text", {x: mid, y: y(b.value) - 4, class: "amt", "text-anchor": "middle"});
         amt.textContent = money(b.value);
         svg.append(amt);
       }
     }
+    if (cl) costClaudeBar(svg, cl.bars[i], cx + 1, w, base, y, kind);
     if (daily || i % 3 === 0) {
       const lbl = svgEl("text", {x: cx, y: H - (daily ? 8 : 6), class: "day", "text-anchor": "middle"});
       lbl.textContent = b.label;
@@ -4003,6 +4022,34 @@ function costBarChart(box, c, kind) {
     svg.append(lt);
   }
   box.append(svg);
+  // The legend names both series, since the colour is the only thing that tells
+  // them apart, and the Claude entry says in full what its dollars are.
+  if (cl) box.append(legend([["var(--blue)", "DeepSeek"], ["var(--violet)", cl.name]]));
+  // A chart with no Claude series says why on the panel, so an absent series is
+  // not read as a week of no plan spend.
+  if (!cl && claudeWhy) box.append(el("div", "title", "Claude series not drawn — " + claudeWhy));
+}
+
+// claudeHatch is the pattern a Claude bucket with no sample is filled with: the
+// absence of a reading is marked, never drawn as a bar of zero, which would read
+// as a quiet bucket.
+function claudeHatch(kind) {
+  const defs = svgEl("defs", {});
+  const pat = svgEl("pattern", {id: "dhatch-" + kind, width: "4", height: "4", patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)"});
+  pat.append(svgEl("line", {x1: "0", y1: "0", x2: "0", y2: "4", class: "hatch"}));
+  defs.append(pat);
+  return defs;
+}
+
+// costClaudeBar draws one bucket of the Claude series at x: a bar, or a hatched
+// column where the series has no sample.
+function costClaudeBar(svg, b, x, w, base, y, kind) {
+  const r = b.gap
+    ? svgEl("rect", {x: x, y: 16, width: w, height: base - 16, class: "cgap", fill: "url(#dhatch-" + kind + ")"})
+    : svgEl("rect", {x: x, y: y(b.value), width: w, height: Math.max(0, base - y(b.value)), class: "cbar"});
+  const t = svgEl("title", {}); t.textContent = b.title;
+  r.append(t);
+  svg.append(r);
 }
 
 function costDailyChart(box, c) { costBarChart(box, c, "daily"); }

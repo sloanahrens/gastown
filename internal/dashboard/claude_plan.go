@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"sort"
@@ -153,6 +154,12 @@ type ClaudePlan struct {
 
 	// ClaudePlanMonth is the billing month's rollup (gt-bcq4m).
 	ClaudePlanMonth
+
+	// Samples is the series this read returned, kept so the Cost charts' Claude
+	// dollars are folded from the same read rather than a second one that could
+	// fail on its own. It stays off the wire: the charts carry what the page
+	// draws.
+	Samples PlanSamples `json:"-"`
 }
 
 // ClaudePlanReader reads a status line series from the path it was given, and
@@ -229,6 +236,7 @@ func (r *ClaudePlanReader) Read(now time.Time) *ClaudePlan {
 			stateErrs = append(stateErrs, err)
 		}
 	}
+	p.Samples = costSamples(samples, err)
 	// The history outlives the series, so an unreadable series still reports the
 	// months already recorded.
 	weeks, err := r.claudePlanWeeks(samples, now)
@@ -240,6 +248,21 @@ func (r *ClaudePlanReader) Read(now time.Time) *ClaudePlan {
 		p.StateError = strings.ReplaceAll(err.Error(), "\n", "; ")
 	}
 	return &p
+}
+
+// costSamples is a poll's read of the series as the Cost charts' Claude dollars
+// need it: the samples, and whether the read failed. A failed read is reported
+// rather than drawn as a series of zeros. A file that is not there yet is a
+// status line that has not written a sample, which the charts say instead of a
+// failure.
+func costSamples(samples []ClaudePlanSample, err error) PlanSamples {
+	switch {
+	case err == nil:
+		return PlanSamples{Samples: samples, Read: true}
+	case errors.Is(err, fs.ErrNotExist):
+		return PlanSamples{Read: true}
+	}
+	return PlanSamples{Read: true, Failed: true}
 }
 
 // attachAPIEquivalent joins the API-equivalent figures to a payload the series
