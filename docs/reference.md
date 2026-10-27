@@ -946,10 +946,14 @@ the `events.jsonl` line, and `--since DURATION` replays that window first. One
 
 The dashboard's Attention panel lists the wake events that stand: a `wake=true`
 raised line is a row keyed by its `key` and tagged with its rule id until a
-cleared line or an ack takes it off. Each new one is also announced as an alert,
-which is a toast and a browser notification while the operator has alerts on.
-Where the dashboard's own alert covers the same condition (red main, an open
-escalation, a polecat stall, a stuck queue), only the attention alert fires.
+cleared line or an ack takes it off. The panel groups its rows into "Needs you"
+and "In the pipeline" by `attention.Classify`, with each group's count in its
+header: a pipeline row is work already in flight, and it names who holds it and
+what it waits on. The strip's needs-you pill draws the human's rows from the
+first group alone. Each new one is also announced as an alert, which is a toast
+and a browser notification while the operator has alerts on. Where the
+dashboard's own alert covers the same condition (red main, an open escalation, a
+polecat stall, a stuck queue), only the attention alert fires.
 
 The queue is four files under `<town>/.runtime/attention/`. The daemon keeps a
 fifth there, `tips.json`: the origin tips the direct-push check has seen, so a

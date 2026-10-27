@@ -223,6 +223,42 @@ func eventKeys(evs []attention.Event) []string {
 	return out
 }
 
+// Items reads the queue's items off state.json, where each standing row's class,
+// owner and waiting-on come from. A state the daemon has not written yet is no
+// items and no error, the same as the queue itself reads it; a state that is
+// there and cannot be read returns its error rather than passing for an empty
+// queue (gt-tv5v2).
+func TestAttentionFollowerReadsTheQueueItems(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f := NewAttentionFollower(town)
+	if items, err := f.Items(); err != nil || len(items) != 0 {
+		t.Fatalf("a missing state read %+v, %v, want none and no error", items, err)
+	}
+
+	item := attention.Item{Key: "rejected-twice:gt-9", Kind: attention.KindRejectedTwice,
+		Owner: "opal", WaitingOn: "rework by opal, attempt 2", FirstSeen: alertBase, LastSeen: alertBase}
+	if err := attention.WriteState(town, attention.State{Updated: alertBase, Items: []attention.Item{item}}); err != nil {
+		t.Fatalf("writing the queue's state: %v", err)
+	}
+	items, err := f.Items()
+	if err != nil {
+		t.Fatalf("reading the queue's state: %v", err)
+	}
+	if len(items) != 1 || items[0].Key != item.Key || items[0].Owner != "opal" || items[0].WaitingOn != item.WaitingOn {
+		t.Errorf("the follower read %+v, want the queue's item with its owner and waiting-on", items)
+	}
+
+	// .runtime is a file here, so the state under it cannot be opened.
+	broken := t.TempDir()
+	if err := os.WriteFile(filepath.Join(broken, ".runtime"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if items, err := NewAttentionFollower(broken).Items(); err == nil || items != nil {
+		t.Errorf("an unreadable state read %+v, %v, want none and the error", items, err)
+	}
+}
+
 // A town with no events file, or one that cannot be read, raises nothing, and
 // the follower picks the file up when it appears.
 func TestAttentionFollowerSurvivesAMissingOrUnreadableFile(t *testing.T) {

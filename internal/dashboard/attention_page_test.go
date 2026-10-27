@@ -17,6 +17,12 @@ import (
 // (page_harness_test.go) rather than matching its source: a render function
 // that mentions the right names draws nothing (gt-tq4ee).
 
+// attnRowsJS is the panel's rows as #attention holds them, in the panel's
+// order, without the group headings the panel draws between them: the headings
+// are the panel's, and a test that counted them as rows would read the two
+// groups as two more items (gt-tv5v2).
+const attnRowsJS = `Array.from(__byId["attention"].children).filter(c => !c.classList.contains("agroup"))`
+
 // panelDrawn is one row of the panel as the page drew it: the text the operator
 // reads, the owner tag the row carries, the classes of its cells and whether
 // the owner filter has hidden it.
@@ -33,7 +39,7 @@ type panelDrawn struct {
 func panelRows(t *testing.T, dom *pageDOM) []panelDrawn {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["attention"].children.map(c => ({
+	v, err := dom.vm.RunString(`JSON.stringify(` + attnRowsJS + `.map(c => ({
 		text: c.textContent, owner: c.dataset.owner || "", hidden: !!c.hidden,
 		cells: (function walk(e) {
 			return Array.from(e.children).reduce((out, k) =>
@@ -116,7 +122,7 @@ func readRow(t *testing.T, dom *pageDOM, i int) panelRow {
 	t.Helper()
 
 	js := `JSON.stringify((() => {
-		const r = __byId["attention"].children[` + strconv.Itoa(i) + `];
+		const r = (` + attnRowsJS + `)[` + strconv.Itoa(i) + `];
 		if (!r) return null;
 		const head = Array.from(r.children).find(c => c.className === "arow-head");
 		return {tag: r.tagName.toLowerCase(), head: head ? head.tagName.toLowerCase() : "",
@@ -142,7 +148,7 @@ func clickRow(t *testing.T, dom *pageDOM, i int) {
 	t.Helper()
 
 	js := `(() => {
-		const r = __byId["attention"].children[` + strconv.Itoa(i) + `];
+		const r = (` + attnRowsJS + `)[` + strconv.Itoa(i) + `];
 		if (!r) throw new Error("the panel drew no row ` + strconv.Itoa(i) + `");
 		const head = Array.from(r.children).find(c => c.className === "arow-head");
 		if (!head) throw new Error("row ` + strconv.Itoa(i) + ` drew no header line to click");
@@ -158,7 +164,7 @@ func clickRow(t *testing.T, dom *pageDOM, i int) {
 func rowFolds(t *testing.T, dom *pageDOM) []string {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`JSON.stringify(Array.from(__byId["attention"].children).map(r => {
+	v, err := dom.vm.RunString(`JSON.stringify((` + attnRowsJS + `).map(r => {
 		const head = Array.from(r.children).find(c => c.className === "arow-head");
 		return head ? head.getAttribute("aria-expanded") : null;
 	}))`)
@@ -280,7 +286,7 @@ func TestThePanelOpensOnTheHumanRowsAndTheChipsAddTheRest(t *testing.T) {
 	}
 	// The note counts what the panel is showing, so the chip redraws it too
 	// rather than leaving it counting the rows the filter held back.
-	if note := dom.element(t, "attentionnote").Text; note != "3 waiting" {
+	if note := dom.element(t, "attentionnote").Text; note != "3 need you · 0 in the pipeline" {
 		t.Errorf("the note reads %q with the whole list shown, want it counting the three rows", note)
 	}
 
@@ -387,6 +393,89 @@ func TestThePanelDrawsTheThreeKindsOfRow(t *testing.T) {
 	}
 }
 
+// The panel draws the rows in the two groups the reader acts on: what needs a
+// person, then what is only waiting on work already in flight, with each
+// group's count in the panel's header. A pipeline row names who holds it and
+// what it waits on, on its one line, so work in flight never reads as a
+// decision nobody made (gt-tv5v2).
+func TestThePanelGroupsNeedsYouAndInThePipeline(t *testing.T) {
+	t.Parallel()
+
+	act := map[string]any{"kind": "item", "owner": "sloan", "class": "act", "id": "host:disk",
+		"title": "the volume is 96% full", "level": "crit", "rule": "host.disk_crit", "age_sec": 60}
+	held := map[string]any{"kind": "item", "owner": "overseer", "class": "pipeline", "id": "rejected-twice:gt-9",
+		"title": "gt-9 was rejected twice", "level": "warn", "rule": "landing.rejected_twice",
+		"held_by": "opal", "waiting_on": "rework by opal, attempt 2", "age_sec": 120}
+	ownerOnly := map[string]any{"kind": "item", "owner": "overseer", "class": "pipeline", "id": "risk:gt-7:deadbeef",
+		"title": "gt-7 landed touching internal/cmd", "level": "warn", "rule": "landing.risk_path",
+		"held_by": "opal", "age_sec": 180}
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{act, held, ownerOnly}}))
+	switchOwner(t, dom, "overseer") // the panel opens on the human's rows; the overseer's are one click away
+
+	if note := dom.element(t, "attentionnote").Text; note != "1 need you · 2 in the pipeline" {
+		t.Errorf("the header reads %q, want the two groups' counts", note)
+	}
+
+	// The groups are drawn in the order the reader acts on them, each under its
+	// heading, and every row sits under its own group's heading.
+	v, err := dom.vm.RunString(`JSON.stringify(Array.from(__byId["attention"].children).map(c => ({
+		group: c.classList.contains("agroup"), text: c.textContent})))`)
+	if err != nil {
+		t.Fatalf("reading the panel's groups: %v", err)
+	}
+	var drawn []struct {
+		Group bool   `json:"group"`
+		Text  string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &drawn); err != nil {
+		t.Fatalf("reading the panel's groups: %v", err)
+	}
+	var order []string
+	for _, d := range drawn {
+		if d.Group {
+			order = append(order, d.Text)
+		}
+	}
+	if len(order) != 2 || order[0] != "Needs you" || order[1] != "In the pipeline" {
+		t.Fatalf("the panel draws the headings %v, want Needs you then In the pipeline", order)
+	}
+	rows := panelRows(t, dom)
+	if len(rows) != 3 || !strings.Contains(rows[0].Text, "the volume is 96% full") {
+		t.Fatalf("the panel drew %+v, want the act row first and the two pipeline rows behind it", rows)
+	}
+	found := map[string]panelDrawn{}
+	for _, r := range rows[1:] {
+		switch {
+		case strings.Contains(r.Text, "gt-9 was rejected twice"):
+			found["held"] = r
+		case strings.Contains(r.Text, "gt-7 landed touching internal/cmd"):
+			found["owner"] = r
+		}
+	}
+	if len(found) != 2 {
+		t.Fatalf("the panel drew %+v, want the two pipeline rows in its pipeline group", rows)
+	}
+
+	// One line per pipeline row, naming who holds it and what it waits on. A
+	// row with no waiting-on line shows its owner alone, and neither has a
+	// folded body to open: an item has nothing under its header line.
+	for _, want := range []string{"held by opal", "waiting on rework by opal, attempt 2"} {
+		if !strings.Contains(found["held"].Text, want) {
+			t.Errorf("the held pipeline row reads %q, with no %q", found["held"].Text, want)
+		}
+	}
+	if r := found["owner"]; !strings.Contains(r.Text, "held by opal") || strings.Contains(r.Text, "waiting on") {
+		t.Errorf("the unheld pipeline row reads %q, want its owner alone", r.Text)
+	}
+	for _, r := range found {
+		if !panelCells(r, "div arow-head") || panelCells(r, "div arow-body") {
+			t.Errorf("the pipeline row %q has the cells %v, want its header line and nothing under it", r.Text, r.Cells)
+		}
+	}
+}
+
 // A row folds on its own: the click takes the words under its header line off
 // the pane and the next click brings them back, one row at a time, so one long
 // question stops taking the pane the rows beside it share (gt-1kaed).
@@ -442,7 +531,7 @@ func TestTheAnswerLineIsOutsideTheButtonThatFoldsTheRow(t *testing.T) {
 	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": attentionFoldRows()}))
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const row = __byId["attention"].children[0];
+		const row = (` + attnRowsJS + `)[0];
 		const head = Array.from(row.children).find(c => c.className === "arow-head");
 		const body = Array.from(row.children).find(c => c.className === "arow-body");
 		const cmd = body && Array.from(body.children).find(c => c.className === "qcmd");
@@ -560,9 +649,9 @@ func TestTheKeyboardStaysOnTheRowTheReaderFolded(t *testing.T) {
 	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": attentionFoldRows()}))
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const head = Array.from(__byId["attention"].children[0].children).find(c => c.className === "arow-head");
+		const head = Array.from((` + attnRowsJS + `)[0].children).find(c => c.className === "arow-head");
 		__click(head);
-		const after = Array.from(__byId["attention"].children[0].children).find(c => c.className === "arow-head");
+		const after = Array.from((` + attnRowsJS + `)[0].children).find(c => c.className === "arow-head");
 		return {same: after === head, focused: document.activeElement === after, expanded: after.getAttribute("aria-expanded")};
 	})())`)
 	if err != nil {
@@ -895,20 +984,20 @@ func TestThePanelNoteCountsTheRowsAndAgesTheOldestQuestion(t *testing.T) {
 			name:      "one row of a longer queue",
 			rows:      []any{map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy"}},
 			more:      2,
-			wantNote:  "1 of 3 waiting",
+			wantNote:  "1 need you · 0 in the pipeline · 1 of 3",
 			wantClass: "r",
 		},
 		{
 			name: "a question past four hours is marked",
 			rows: []any{map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1",
 				"title": "retry policy", "age_sec": 5 * 3600}},
-			wantNote:  "1 waiting · oldest question 5h00m",
+			wantNote:  "1 need you · 0 in the pipeline · oldest question 5h00m",
 			wantClass: "r warnc",
 		},
 		{
 			name:       "a fresh question is not",
 			rows:       []any{map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy", "age_sec": 600}},
-			wantNote:   "1 waiting",
+			wantNote:   "1 need you · 0 in the pipeline",
 			wantClass:  "r",
 			wantAbsent: "oldest question",
 		},
@@ -921,7 +1010,7 @@ func TestThePanelNoteCountsTheRowsAndAgesTheOldestQuestion(t *testing.T) {
 				map[string]any{"kind": "escalation", "owner": "overseer", "id": "hq-9", "title": "slot held"},
 			},
 			more:      3,
-			wantNote:  "1 waiting",
+			wantNote:  "1 need you · 0 in the pipeline",
 			wantClass: "r",
 		},
 	}
@@ -994,6 +1083,73 @@ func TestTheStripDrawsTheHumanCountAsAFloor(t *testing.T) {
 				t.Errorf("the strip reads %q, with no %q", text, tc.want)
 			}
 		})
+	}
+}
+
+// The strip's needs-you pill counts only the rows that need a person: a row in
+// the pipeline is work already in flight and clears without the human, so a
+// pipeline item leaves the pill's figures where they were (gt-tv5v2).
+func TestTheStripPillCountsOnlyTheRowsThatNeedAPerson(t *testing.T) {
+	t.Parallel()
+
+	act := map[string]any{"kind": "item", "owner": "sloan", "class": "act", "id": "host:disk", "title": "disk"}
+	pipe := map[string]any{"kind": "item", "owner": "overseer", "class": "pipeline", "id": "rejected-twice:gt-9", "title": "rework",
+		"held_by": "opal", "waiting_on": "rework by opal, attempt 2"}
+
+	// readPill draws the strip over one reading and returns the needs-you fact
+	// as the operator reads it: its value and the title behind it. The feed's
+	// mine is the rows that need a person which the human owns, so the fixture
+	// counts it the way the reader does rather than pinning a number a miscount
+	// would leave standing.
+	readPill := func(rows []any) (value, tip string) {
+		t.Helper()
+
+		mine := 0
+		for _, row := range rows {
+			if m, ok := row.(map[string]any); ok && m["owner"] == "sloan" && m["class"] != "pipeline" {
+				mine++
+			}
+		}
+		dom := newPageDOM(t)
+		dom.call(t, "renderStrip", map[string]any{"attention": map[string]any{"rows": rows, "mine": mine}})
+		v, err := dom.vm.RunString(`JSON.stringify((() => {
+			const f = Array.from(__byId["strip"].children).find(c => c.textContent.indexOf("needs you") >= 0);
+			return f ? {value: f.textContent, tip: f.title} : null;
+		})())`)
+		if err != nil {
+			t.Fatalf("reading the strip's needs-you fact: %v", err)
+		}
+		var got struct {
+			Value string `json:"value"`
+			Tip   string `json:"tip"`
+		}
+		if v.String() == "null" || json.Unmarshal([]byte(v.String()), &got) != nil {
+			t.Fatalf("the strip drew no needs-you fact: %s", v.String())
+		}
+		return got.Value, got.Tip
+	}
+
+	aloneValue, aloneTip := readPill([]any{act})
+	if aloneValue != "1 needs you" {
+		t.Errorf("the pill reads %q, want the human's one row", aloneValue)
+	}
+	if !strings.Contains(aloneTip, "1 of the 1 rows needing a person") {
+		t.Errorf("the pill titles %q, want it counting the row that needs a person", aloneTip)
+	}
+
+	// Two pipeline items join the list and neither figure moves.
+	withValue, withTip := readPill([]any{act, pipe, pipe})
+	if withValue != aloneValue || withTip != aloneTip {
+		t.Errorf("the pill reads %q/%q with two pipeline rows, want the %q/%q it read without them",
+			withValue, withTip, aloneValue, aloneTip)
+	}
+
+	// A pipeline row the human owns is still work in flight: the pill counts it
+	// nowhere (gt-tv5v2).
+	minePipe := map[string]any{"kind": "item", "owner": "sloan", "class": "pipeline", "id": "risk:gt-7:deadbeef",
+		"title": "risk", "held_by": "opal", "waiting_on": "the review round"}
+	if value, _ := readPill([]any{minePipe}); value != "0 needs you" {
+		t.Errorf("the pill reads %q with only the human's pipeline row standing, want 0 needs you", value)
 	}
 }
 
@@ -1218,6 +1374,60 @@ func itemAge(t *testing.T, h *Hub) int64 {
 	}
 	t.Fatal("the list holds no queue item")
 	return 0
+}
+
+// /api/state carries the panel's two groups with their counts and with the
+// owner and waiting-on a pipeline row names, so a consumer of the feed reads
+// what needs a person apart from what is already in flight (gt-tv5v2).
+func TestTheGroupsReachTheAPI(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	f := NewAttentionFollower(town)
+	h := NewHub(Config{
+		Now:            func() time.Time { return alertBase },
+		Attention:      f.Read,
+		AttentionItems: f.Items,
+	})
+	// The daemon's state holds the two items; the events raise the two rows.
+	if err := attention.WriteState(town, attention.State{Updated: alertBase, Items: []attention.Item{
+		{Key: "host:disk", Kind: attention.KindHostDisk, Severity: attention.SeverityHigh,
+			Summary: "the volume is 96% full", FirstSeen: alertBase, LastSeen: alertBase},
+		{Key: "rejected-twice:gt-9", Kind: attention.KindRejectedTwice, Severity: attention.SeverityHigh,
+			Summary: "gt-9 was rejected twice", Owner: "opal", WaitingOn: "rework by opal, attempt 2",
+			FirstSeen: alertBase, LastSeen: alertBase},
+	}}); err != nil {
+		t.Fatalf("writing the queue's state: %v", err)
+	}
+	writeAttentionEvents(t, town,
+		wakeEvent(attention.RuleHostDiskCrit, "host:disk", "the volume is 96% full", attention.SeverityHigh),
+		wakeEvent(attention.RuleRejectedTwice, "rejected-twice:gt-9", "gt-9 was rejected twice", attention.SeverityHigh))
+	h.pollAttention()
+
+	req := httptest.NewRequest("GET", "/api/state", nil)
+	req.Host = "127.0.0.1:8787"
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /api/state = %d", rec.Code)
+	}
+	var got struct {
+		Attention Attention `json:"attention"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("/api/state is not the page's JSON: %v", err)
+	}
+	if got.Attention.NeedsYou.Count != 1 || len(got.Attention.NeedsYou.Rows) != 1 ||
+		got.Attention.NeedsYou.Rows[0].ID != "host:disk" {
+		t.Errorf("/api/state carries the needs-you group as %+v, want the host reading alone", got.Attention.NeedsYou)
+	}
+	if got.Attention.Pipeline.Count != 1 || len(got.Attention.Pipeline.Rows) != 1 {
+		t.Fatalf("/api/state carries the pipeline group as %+v, want the rejected bead alone", got.Attention.Pipeline)
+	}
+	if r := got.Attention.Pipeline.Rows[0]; r.ID != "rejected-twice:gt-9" || r.HeldBy != "opal" ||
+		r.WaitingOn != "rework by opal, attempt 2" {
+		t.Errorf("the pipeline row reaches the feed as %+v, want the queue's owner and waiting-on line", r)
+	}
 }
 
 // The page reads the list off /api/state, so a panel that renders it needs no

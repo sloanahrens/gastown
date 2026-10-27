@@ -813,6 +813,11 @@ type Config struct {
 	// Attention returns the attention queue's transitions that appeared since
 	// its last call, and the acks as they stand (NewAttentionFollower).
 	Attention func() ([]attention.Event, attention.Acks)
+	// AttentionItems returns the queue's items as the daemon's state.json holds
+	// them, which is where a standing row's class, owner and waiting-on come
+	// from (NewAttentionFollower.Items). An error names the read among the ones
+	// the panel says failed; nil leaves every queue row act.
+	AttentionItems func() ([]attention.Item, error)
 	// Models reads the header strip's models from the configs the town keeps.
 	Models func() *Models
 	// SeatRoster reads the occupancy the spec dispatcher counts, for the

@@ -66,14 +66,41 @@ type AttentionRow struct {
 	// panel draws.
 	State     string `json:"state,omitempty"`
 	Malformed bool   `json:"malformed,omitempty"`
+	// Class is whether the row needs a person (attention.ClassAct) or waits on
+	// work already in flight (attention.ClassPipeline): the two groups the
+	// panel draws. Every escalation and question is act; a queue item's class
+	// is attention.Classify's, and an item the queue no longer holds is act, so
+	// an unread condition is seen rather than filed away (gt-tv5v2).
+	Class string `json:"class,omitempty"`
+	// HeldBy is a queue item's own owner: who holds the condition now, which is
+	// not the owner tag above (that is who has to move). Empty when the item
+	// names nobody.
+	HeldBy string `json:"held_by,omitempty"`
+	// WaitingOn is a queue item's own waiting-on line: what clears it. Empty
+	// when the item waits on nothing it can name.
+	WaitingOn string `json:"waiting_on,omitempty"`
 	// Urgency orders the rows inside one owner and kind, lowest first: an
 	// escalation's severity, a question's priority, an item's alert level.
 	Urgency int `json:"-"`
 }
 
+// AttentionGroup is one half of the panel: the rows the panel draws under one
+// heading, in the panel's own order, and how many they are. The count is the
+// number the header prints, so a reader of the JSON does not have to count the
+// rows to know what the header says (gt-tv5v2).
+type AttentionGroup struct {
+	Rows  []AttentionRow `json:"rows"`
+	Count int            `json:"count"`
+}
+
 // Attention is the panel's payload: everything waiting on a decision or an
 // action, the human's rows and the overseer's in one list, each tagged with its
 // owner so a reader of either role sees the whole of what is waiting (gt-bi6w0).
+//
+// The same rows are also split by Class into the two groups the panel draws:
+// NeedsYou, the rows that need a person, and Pipeline, the rows waiting on work
+// already in flight (gt-tv5v2). Rows keeps the whole list in the panel's order
+// for the readers that filter it by owner.
 //
 // It is built from the readers that already exist rather than read again: the
 // escalation beads, the overseer's questions, and the attention queue's items
@@ -82,27 +109,59 @@ type AttentionRow struct {
 // things to tell the operator.
 type Attention struct {
 	Rows []AttentionRow `json:"rows"`
+	// NeedsYou is the group that needs a person, and Pipeline the group waiting
+	// on work in flight: the two halves of Rows, each with the count the panel's
+	// header prints.
+	NeedsYou AttentionGroup `json:"needs_you"`
+	Pipeline AttentionGroup `json:"pipeline"`
 	// More counts the rows the readers capped out of Rows.
 	More int `json:"more,omitempty"`
-	// Mine is how many of Rows the human owns, which is the number the strip's
-	// "needs you" fact draws. A non-zero More makes it a floor rather than a
-	// whole: the owner of a row the reader capped out is what that read never
-	// took (stripNeedsYouAlarm).
+	// Mine is how many of the rows that need a person the human owns, which is
+	// the number the strip's "needs you" fact draws. A pipeline row is left out
+	// even when the human owns it: it clears without them, and counting it is
+	// what leaves the pill loud with nothing for them to do (gt-tv5v2). A
+	// non-zero More makes it a floor rather than a whole: the owner of a row the
+	// reader capped out is what that read never took (stripNeedsYouAlarm).
 	Mine int `json:"mine"`
 	// Failed names the readers behind the list that could not be read
-	// ("escalations", "questions").
+	// ("escalations", "questions", "attention queue").
 	Failed []string `json:"failed,omitempty"`
 	// Pending names the readers that have not reported yet.
 	Pending []string `json:"pending,omitempty"`
 }
 
+// AttentionQueue is what one read of the attention queue's state gave back: the
+// items as the daemon last wrote them, and whether that read could be made at
+// all (NewAttentionFollower.Items).
+type AttentionQueue struct {
+	Items []attention.Item
+	// Failed says the state could not be read, which is not the same as a queue
+	// holding nothing: the panel's rows still stand, and only the class, owner
+	// and waiting-on they carry are missing (gt-tv5v2).
+	Failed bool
+}
+
 // buildAttention merges the three readers into the one list. items are the
-// attention alerts that stand now (Alerter.Standing), now is the read time the
+// attention alerts that stand now (Alerter.Standing), queue the attention
+// queue's own items as the daemon last wrote them, and now is the read time the
 // items' ages are taken against.
-func buildAttention(esc *Escalations, ask *Questions, items []Alert, now time.Time) *Attention {
+//
+// A standing alert is matched to its queue item by key for the class, owner and
+// waiting-on the row carries. A key the queue does not hold — a cleared item
+// whose line has not arrived, or a state nobody could read — is act, so a
+// condition nobody could classify is seen rather than filed away. A read that
+// failed says so in Failed beside the rows it could not classify.
+func buildAttention(esc *Escalations, ask *Questions, items []Alert, queue AttentionQueue, now time.Time) *Attention {
+	byKey := make(map[string]attention.Item, len(queue.Items))
+	for _, it := range queue.Items {
+		byKey[it.Key] = it
+	}
 	at := &Attention{
 		Rows:   []AttentionRow{},
 		Failed: failedReads(esc, ask),
+	}
+	if queue.Failed {
+		at.Failed = append(at.Failed, "attention queue")
 	}
 	if esc == nil {
 		at.Pending = append(at.Pending, "escalations")
@@ -125,6 +184,7 @@ func buildAttention(esc *Escalations, ask *Questions, items []Alert, now time.Ti
 				AgeSec:      r.AgeSec,
 				EscalatedBy: r.EscalatedBy,
 				Severity:    r.Severity,
+				Class:       string(attention.ClassAct),
 				Urgency:     severityUrgency(r.Severity),
 			})
 		}
@@ -155,6 +215,7 @@ func buildAttention(esc *Escalations, ask *Questions, items []Alert, now time.Ti
 				Effort:      r.Effort,
 				State:       r.State,
 				Malformed:   r.Malformed,
+				Class:       string(attention.ClassAct),
 				Urgency:     r.Priority,
 			})
 		}
@@ -171,7 +232,13 @@ func buildAttention(esc *Escalations, ask *Questions, items []Alert, now time.Ti
 			ID:      al.Key,
 			Title:   al.Text,
 			Level:   al.Level,
+			Class:   string(attention.ClassAct),
 			Urgency: levelUrgency(al.Level),
+		}
+		if it, ok := byKey[al.Key]; ok {
+			row.Class = string(attention.Classify(it))
+			row.HeldBy = it.Owner
+			row.WaitingOn = it.WaitingOn
 		}
 		if age := now.Sub(al.At); !al.At.IsZero() && age >= 0 {
 			sec := int64(age.Seconds())
@@ -181,11 +248,25 @@ func buildAttention(esc *Escalations, ask *Questions, items []Alert, now time.Ti
 	}
 
 	sort.SliceStable(at.Rows, func(i, j int) bool { return attentionBefore(at.Rows[i], at.Rows[j]) })
+	at.NeedsYou = AttentionGroup{Rows: []AttentionRow{}}
+	at.Pipeline = AttentionGroup{Rows: []AttentionRow{}}
 	for _, r := range at.Rows {
+		if r.Class == string(attention.ClassPipeline) {
+			at.Pipeline.Rows = append(at.Pipeline.Rows, r)
+			continue
+		}
+		at.NeedsYou.Rows = append(at.NeedsYou.Rows, r)
+	}
+	// Only the rows that need a person: a pipeline row the human owns clears
+	// without them, and counting it would make the pill loud with nothing to do
+	// (gt-tv5v2).
+	for _, r := range at.NeedsYou.Rows {
 		if r.Owner == string(attention.OwnerSloan) {
 			at.Mine++
 		}
 	}
+	at.NeedsYou.Count = len(at.NeedsYou.Rows)
+	at.Pipeline.Count = len(at.Pipeline.Rows)
 	return at
 }
 

@@ -43,7 +43,7 @@ func TestBuildAttentionMergesTheReadersIntoOneTaggedList(t *testing.T) {
 			Title: attention.RuleHostDiskCrit, Text: "the volume is 96% full", Rule: attention.RuleHostDiskCrit},
 	}
 
-	at := buildAttention(esc, ask, items, attentionNow)
+	at := buildAttention(esc, ask, items, AttentionQueue{}, attentionNow)
 	if len(at.Failed) != 0 || len(at.Pending) != 0 {
 		t.Errorf("a list built from reads that reported names %v failed and %v pending", at.Failed, at.Pending)
 	}
@@ -121,7 +121,7 @@ func TestAttentionPanelSortsTheAlarmsAboveReviewDebt(t *testing.T) {
 	}
 	ask := &Questions{Rows: []QuestionRow{{ID: "gt-q1", Title: "retry policy", Priority: 0, State: QuestionAwaiting}}}
 
-	at := buildAttention(nil, ask, items, attentionNow)
+	at := buildAttention(nil, ask, items, AttentionQueue{}, attentionNow)
 	want := []string{"gt-q1", "host.docker_stack_down", "red-main:gastown:internal/cmd", "risk:gt-abc:deadbeef"}
 	if len(at.Rows) != len(want) {
 		t.Fatalf("the list holds %+v, want the question and the three queue items", at.Rows)
@@ -184,7 +184,7 @@ func TestARejectionIsNotARowOfThePanel(t *testing.T) {
 	a.Observe(State{}, State{}, []Entry{{Seq: 1, At: alertBase, Kind: "landings",
 		Text: "[land] gt-9: rejected (review): om requested changes"}})
 
-	if at := buildAttention(nil, nil, a.Standing(), alertBase); len(at.Rows) != 0 {
+	if at := buildAttention(nil, nil, a.Standing(), AttentionQueue{}, alertBase); len(at.Rows) != 0 {
 		t.Errorf("a rejection reached the attention list: %+v", at.Rows)
 	}
 }
@@ -213,7 +213,7 @@ func TestARejectedTwiceRowIsTheOverseersAndNotTheHumans(t *testing.T) {
 		t.Fatalf("the line raised %+v, want the one row: a rule that wakes still lists it", raised)
 	}
 
-	at := buildAttention(&Escalations{}, &Questions{}, a.Standing(), attentionNow)
+	at := buildAttention(&Escalations{}, &Questions{}, a.Standing(), AttentionQueue{}, attentionNow)
 	if len(at.Rows) != 1 {
 		t.Fatalf("the panel holds %+v, want the rejected bead's own row", at.Rows)
 	}
@@ -243,7 +243,7 @@ func TestAttentionDoesNotListABeadTwice(t *testing.T) {
 		{Key: "stall:gastown/opal", Rule: attention.RulePolecatStall, Title: attention.RulePolecatStall, Text: "opal is stalled", At: attentionNow},
 	}
 
-	at := buildAttention(esc, ask, items, attentionNow)
+	at := buildAttention(esc, ask, items, AttentionQueue{}, attentionNow)
 	if len(at.Rows) != 3 {
 		t.Fatalf("the list holds %d rows (%+v), want the bead's two and the queue's one", len(at.Rows), at.Rows)
 	}
@@ -263,7 +263,7 @@ func TestAttentionCountsTheHumanRowsBesideTheCap(t *testing.T) {
 	at := buildAttention(
 		&Escalations{Rows: []EscalationRow{{ID: "hq-1", Title: "disk full", Severity: "high"}}, More: 4},
 		&Questions{Rows: []QuestionRow{{ID: "gt-q1", Title: "retry?", State: QuestionAwaiting}}, More: 1},
-		nil, attentionNow,
+		nil, AttentionQueue{}, attentionNow,
 	)
 	if at.Mine != 1 || at.More != 5 {
 		t.Errorf("the list counts %d rows for the human beside %d capped out, want the one awaiting question and both caps",
@@ -277,14 +277,19 @@ func TestAttentionCountsTheHumanRowsBesideTheCap(t *testing.T) {
 func TestBuildAttentionNamesTheReadsBehindTheList(t *testing.T) {
 	t.Parallel()
 
-	failed := buildAttention(&Escalations{Unavailable: true}, &Questions{}, nil, attentionNow)
+	failed := buildAttention(&Escalations{Unavailable: true}, &Questions{}, nil, AttentionQueue{}, attentionNow)
 	if len(failed.Failed) != 1 || failed.Failed[0] != "escalations" {
 		t.Errorf("a failed escalations read names %v", failed.Failed)
 	}
-	if n := buildAttention(&Escalations{}, &Questions{Unavailable: true}, nil, attentionNow); len(n.Failed) != 1 || n.Failed[0] != "questions" {
+	if n := buildAttention(&Escalations{}, &Questions{Unavailable: true}, nil, AttentionQueue{}, attentionNow); len(n.Failed) != 1 || n.Failed[0] != "questions" {
 		t.Errorf("a failed questions read names %v", n.Failed)
 	}
-	both := buildAttention(nil, nil, nil, attentionNow)
+	// A queue state that could not be read is not an empty queue: the rows still
+	// stand, and the read that would have classified them is named.
+	if n := buildAttention(&Escalations{}, &Questions{}, nil, AttentionQueue{Failed: true}, attentionNow); len(n.Failed) != 1 || n.Failed[0] != "attention queue" {
+		t.Errorf("a failed queue read names %v", n.Failed)
+	}
+	both := buildAttention(nil, nil, nil, AttentionQueue{}, attentionNow)
 	if len(both.Pending) != 2 || both.Pending[0] != "escalations" || both.Pending[1] != "questions" {
 		t.Errorf("neither reader having reported names %v pending", both.Pending)
 	}
@@ -294,9 +299,126 @@ func TestBuildAttentionNamesTheReadsBehindTheList(t *testing.T) {
 
 	// The rows the reader that did report returned are listed beside the name of
 	// the one that failed, and only those are counted for the human.
-	half := buildAttention(&Escalations{}, &Questions{Rows: []QuestionRow{{ID: "gt-q1", State: QuestionAwaiting}}}, nil, attentionNow)
+	half := buildAttention(&Escalations{}, &Questions{Rows: []QuestionRow{{ID: "gt-q1", State: QuestionAwaiting}}}, nil, AttentionQueue{}, attentionNow)
 	if len(half.Rows) != 1 || half.Mine != 1 {
 		t.Errorf("a half-read list holds %+v with %d for the human, want the one question", half.Rows, half.Mine)
+	}
+}
+
+// The panel's rows are split by class into the two groups it draws: what needs
+// a person and what is only waiting on work already in flight. The split is
+// read off the queue's own items, so a pipeline row names who holds it and what
+// it waits on, while a row the queue does not hold is act (gt-tv5v2).
+func TestBuildAttentionSplitsTheRowsIntoNeedsYouAndPipeline(t *testing.T) {
+	t.Parallel()
+
+	items := []Alert{
+		{ID: "alert-1", At: attentionNow.Add(-time.Minute), Level: LevelCrit, Key: "host:disk",
+			Title: attention.RuleHostDiskCrit, Text: "the volume is 96% full", Rule: attention.RuleHostDiskCrit},
+		{ID: "alert-2", At: attentionNow.Add(-2 * time.Minute), Level: LevelWarn, Key: "rejected-twice:gt-9",
+			Title: attention.RuleRejectedTwice, Text: "gt-9 was rejected twice", Rule: attention.RuleRejectedTwice},
+		{ID: "alert-3", At: attentionNow.Add(-3 * time.Minute), Level: LevelWarn, Key: "risk:gt-7:deadbeef",
+			Title: attention.RuleRiskPath, Text: "gt-7 landed touching internal/cmd", Rule: attention.RuleRiskPath},
+		{ID: "alert-4", At: attentionNow.Add(-4 * time.Minute), Level: LevelWarn, Key: "review:backlog",
+			Title: attention.RuleReviewBacklog, Text: "the review queue is long", Rule: attention.RuleReviewBacklog},
+	}
+	// The queue holds the three items it knows; the risk item's owner is enough
+	// to make it pipeline with no waiting-on line, and the review backlog is
+	// pipeline with neither.
+	queue := []attention.Item{
+		{Key: "rejected-twice:gt-9", Kind: attention.KindRejectedTwice, Owner: "opal", WaitingOn: "rework by opal, attempt 2"},
+		{Key: "risk:gt-7:deadbeef", Kind: attention.KindRiskPath, Owner: "opal"},
+		{Key: "review:backlog", Kind: attention.KindReviewBacklog},
+	}
+
+	at := buildAttention(&Escalations{}, &Questions{}, items, AttentionQueue{Items: queue}, attentionNow)
+	if at.NeedsYou.Count != 1 || len(at.NeedsYou.Rows) != 1 {
+		t.Errorf("the needs-you group holds %d rows (%+v), want the host reading alone", at.NeedsYou.Count, at.NeedsYou.Rows)
+	}
+	if at.Pipeline.Count != 3 || len(at.Pipeline.Rows) != 3 {
+		t.Errorf("the pipeline group holds %d rows (%+v), want the three items in flight", at.Pipeline.Count, at.Pipeline.Rows)
+	}
+	if got := at.NeedsYou.Rows[0].ID; got != "host:disk" {
+		t.Errorf("the needs-you group leads with %q, want the host reading", got)
+	}
+
+	rows := map[string]AttentionRow{}
+	for _, r := range at.Rows {
+		rows[r.ID] = r
+	}
+	if r := rows["host:disk"]; r.Class != string(attention.ClassAct) || r.HeldBy != "" || r.WaitingOn != "" {
+		t.Errorf("the host row is class %q held by %q waiting on %q, want act with neither", r.Class, r.HeldBy, r.WaitingOn)
+	}
+	if r := rows["rejected-twice:gt-9"]; r.Class != string(attention.ClassPipeline) ||
+		r.HeldBy != "opal" || r.WaitingOn != "rework by opal, attempt 2" {
+		t.Errorf("the rejected-twice row is class %q held by %q waiting on %q, want the queue's owner and line",
+			r.Class, r.HeldBy, r.WaitingOn)
+	}
+	if r := rows["risk:gt-7:deadbeef"]; r.Class != string(attention.ClassPipeline) || r.HeldBy != "opal" || r.WaitingOn != "" {
+		t.Errorf("the risk row is class %q held by %q waiting on %q, want pipeline with its owner alone",
+			r.Class, r.HeldBy, r.WaitingOn)
+	}
+	if r := rows["review:backlog"]; r.Class != string(attention.ClassPipeline) {
+		t.Errorf("the review-backlog row is class %q, want pipeline", r.Class)
+	}
+}
+
+// The strip's count is the human's rows that need a person and nothing else. A
+// pipeline row clears without them, so one the human's rule owns is left out of
+// both the count and the alarm; a load that counts it is red with nothing for
+// them to do (gt-tv5v2).
+func TestMineCountsOnlyTheRowsThatNeedAPerson(t *testing.T) {
+	t.Parallel()
+
+	// host.gpu.hot is a rule the owner table has no row for, so it reads by its
+	// family as the human's — the way a rule a newer daemon writes reaches the
+	// human's panel — and the queue holds it as a review backlog, the kind that
+	// is work in flight whenever somebody owns it.
+	pipeOnly := []Alert{
+		{Key: "host:gpu", Rule: "host.gpu.hot", Text: "the GPU is hot", At: attentionNow, Level: LevelWarn},
+	}
+	queue := AttentionQueue{Items: []attention.Item{
+		{Key: "host:gpu", Kind: attention.KindReviewBacklog, Owner: "opal", WaitingOn: "the next review round"},
+	}}
+	at := buildAttention(&Escalations{}, &Questions{}, pipeOnly, queue, attentionNow)
+	if len(at.Pipeline.Rows) != 1 || at.Pipeline.Rows[0].Owner != string(attention.OwnerSloan) {
+		t.Fatalf("the fixture drew %+v in the pipeline group, want one row the human's rule owns", at.Pipeline.Rows)
+	}
+	if at.Mine != 0 {
+		t.Errorf("the list counts %d rows for the human, want none: the human's one row is in the pipeline", at.Mine)
+	}
+	if got := stripNeedsYouAlarm(at); got != "" {
+		t.Errorf("the strip alarms %q with only a pipeline row standing, want no alarm", got)
+	}
+
+	// The row that does need a person, beside it, is what the count is made of.
+	withAct := append(append([]Alert{}, pipeOnly...),
+		Alert{Key: "host:disk", Rule: attention.RuleHostDiskCrit, Text: "the volume is 96% full", At: attentionNow, Level: LevelCrit})
+	at = buildAttention(&Escalations{}, &Questions{}, withAct, queue, attentionNow)
+	if len(at.NeedsYou.Rows) != 1 || at.Pipeline.Count != 1 {
+		t.Fatalf("the groups hold %+v and %+v, want the host reading and the GPU row", at.NeedsYou.Rows, at.Pipeline.Rows)
+	}
+	if at.Mine != 1 {
+		t.Errorf("the list counts %d rows for the human, want the one reading that needs a person", at.Mine)
+	}
+}
+
+// A standing row whose item the queue no longer holds is act: the panel cannot
+// see what the item waits on, and a condition it could not classify is shown
+// rather than filed away (gt-tv5v2).
+func TestBuildAttentionShowsARowTheQueueCannotClassify(t *testing.T) {
+	t.Parallel()
+
+	items := []Alert{
+		{Key: "rejected-twice:gt-9", Rule: attention.RuleRejectedTwice, Title: attention.RuleRejectedTwice,
+			Text: "gt-9 was rejected twice", At: attentionNow, Level: LevelWarn},
+	}
+	at := buildAttention(&Escalations{}, &Questions{}, items, AttentionQueue{}, attentionNow)
+	if len(at.Rows) != 1 || at.Rows[0].Class != string(attention.ClassAct) {
+		t.Fatalf("the list holds %+v, want the row shown as act", at.Rows)
+	}
+	if at.NeedsYou.Count != 1 || at.Pipeline.Count != 0 {
+		t.Errorf("the groups hold %d and %d rows, want the row in the needs-you group", at.NeedsYou.Count, at.Pipeline.Count)
 	}
 }
 
