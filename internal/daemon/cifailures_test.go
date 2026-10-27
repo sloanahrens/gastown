@@ -253,6 +253,8 @@ func TestMainVerdictOf(t *testing.T) {
 		{"revert tail after the red list", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/a [gt-flaky]; reverting gt-cul as gt-rev", mainRed},
 		{"reverted red list names another package", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/b [gt-flaky]; reverting gt-cul as gt-rev", mainGreen},
 		{"red with no list", stamp + "main RED at 1a2b3c4d (landed by gt-one)", mainUnknown},
+		{"red with an empty list", stamp + "main RED at 1a2b3c4d (landed by gt-one): ", mainUnknown},
+		{"red with a list that names no bracketed bead", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/a", mainUnknown},
 		{"text naming neither verdict", stamp + "main UNKNOWN", mainUnknown},
 		{"empty", "", mainUnknown},
 	} {

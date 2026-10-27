@@ -171,10 +171,29 @@ func mainVerdictOf(status, pkg string) mainVerdict {
 	if colon < 0 {
 		return mainUnknown
 	}
-	if redListNamesPackage(rest[colon+2:], pkg) {
+	list := rest[colon+2:]
+	if !redListReadable(list) {
+		return mainUnknown
+	}
+	if redListNamesPackage(list, pkg) {
 		return mainRed
 	}
 	return mainGreen
+}
+
+// redListReadable reports whether a RED list has at least one "<pkg> [<bead>]"
+// entry. A RED line whose list cannot be read is not a verdict that pkg passes:
+// it is an unknown main, the same as a line the watch cannot read at all.
+func redListReadable(list string) bool {
+	if semi := strings.Index(list, ";"); semi >= 0 {
+		list = list[:semi]
+	}
+	for _, entry := range strings.Split(list, ", ") {
+		if _, _, ok := strings.Cut(strings.TrimSpace(entry), " ["); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // redListNamesPackage reports whether a RED list, "<pkg> [<bead>], ...", names
