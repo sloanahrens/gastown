@@ -3118,10 +3118,6 @@ type preserveOutcome struct {
 	AlreadyThere bool
 }
 
-// errBranchNotPreserved means no remote ref could be shown to contain the
-// branch tip, so deleting the local branch would destroy its only copy.
-var errBranchNotPreserved = errors.New("branch not preserved on remote")
-
 // preserveBranchBeforeNuke pushes branch's tip to remote so that the worktree
 // and local branch can be deleted without losing work. It FAILS CLOSED: it
 // returns nil only when a remote ref is confirmed to contain the tip, and the
@@ -3133,68 +3129,33 @@ var errBranchNotPreserved = errors.New("branch not preserved on remote")
 // worktree and local branch while claiming success. Nothing was lost only
 // because the commits happened to exist on a sibling ref (gt-yxys).
 //
-// Order of checks, each cheaper than the one after it:
-//
-//  1. Fetch, then test REACHABILITY from remote-tracking branches. Tip
-//     membership is not enough: work already merged into main is an ancestor of
-//     origin/main, so grepping `ls-remote` for the branch name finds nothing
-//     even though the commit is preserved.
-//  2. Push branch:branch and verify the remote tip is exactly the branch tip.
-//  3. On a rejected push, push to <branch>-<sha7> instead. That ref cannot
-//     conflict, so a rejection there means the remote is unusable and the work
-//     has nowhere safe to go.
-func preserveBranchBeforeNuke(g *git.Git, branch, remote string) (preserveOutcome, error) {
-	ref := "refs/heads/" + branch
-	tip, err := g.Rev(ref)
+// git.PreserveBranch does the work: it skips a tip the remote already holds,
+// and otherwise pushes from a checkout whose HEAD is the branch — the branch's
+// own worktree, or a temporary one under workRoot (gt-7cps5).
+func preserveBranchBeforeNuke(g branchPreserver, branch, remote, workRoot string) (preserveOutcome, error) {
+	result, err := g.PreserveBranch(branch, remote, workRoot)
 	if err != nil {
-		return preserveOutcome{}, fmt.Errorf("resolve %s: %w", ref, err)
+		// Returned as it happened: a push that did not leave the tip on the
+		// remote carries git.ErrBranchNotPreserved, anything before it does
+		// not, and the nuke blocks on either.
+		return preserveOutcome{}, err
 	}
-	tip = strings.TrimSpace(tip)
-	if tip == "" {
-		return preserveOutcome{}, fmt.Errorf("resolve %s: empty sha", ref)
-	}
-
-	// Refresh remote-tracking refs before deciding anything: every check below
-	// reads the remote's state, and a stale origin/main is how work that exists
-	// only locally gets classified as preserved. Prune too: a branch deleted
-	// unmerged on the remote leaves a stale refs/remotes/<remote>/<branch> at
-	// the tip, and the daemon's prune would drop it right after the nuke.
-	if err := g.FetchPrune(remote); err != nil {
-		return preserveOutcome{}, fmt.Errorf("fetch %s before nuke: %w", remote, err)
-	}
-	if refs, err := g.RemoteRefsContaining(tip); err == nil && len(refs) > 0 {
-		return preserveOutcome{RemoteRef: refs[0], AlreadyThere: true}, nil
-	}
-
-	// Preserve under the branch's own name when possible: the merge queue and
-	// the refinery look for it there.
-	pushTo := branch
-	if err := g.Push(remote, branch+":"+pushTo, false); err != nil {
-		// Non-fast-forward: the remote branch is at a commit this tip is not a
-		// descendant of. A side ref cannot conflict, so it is the fallback —
-		// not a reason to delete the branch anyway.
-		pushTo = branch + "-" + refSuffixSHA(tip)
-		if fallbackErr := g.Push(remote, branch+":"+pushTo, false); fallbackErr != nil {
-			return preserveOutcome{}, fmt.Errorf("%w: push %s:%s failed (%v) and fallback push %s:%s failed (%v)",
-				errBranchNotPreserved, branch, branch, err, branch, pushTo, fallbackErr)
-		}
-	}
-
-	// Never trust the push exit code alone — the entire point of this step is
-	// to know the work is on the remote before deleting the only other copy.
-	if err := g.VerifyPushedCommit(remote, pushTo, tip); err != nil {
-		return preserveOutcome{}, fmt.Errorf("%w: %v", errBranchNotPreserved, err)
-	}
-	return preserveOutcome{RemoteRef: remote + "/" + pushTo}, nil
+	return preserveOutcome{RemoteRef: result.RemoteRef, AlreadyThere: result.AlreadyThere}, nil
 }
 
-// refSuffixSHA is the short-sha suffix for a fallback preserve ref
-// (<branch>-<sha7>): enough to identify the commit, short enough to read.
-func refSuffixSHA(sha string) string {
-	if len(sha) > 7 {
-		return sha[:7]
-	}
-	return sha
+// branchPreserver is the part of *git.Git the preserve step drives: a unit test
+// hands in one whose preserve fails without a repository to run git in.
+type branchPreserver interface {
+	PreserveBranch(branch, remote, workRoot string) (git.PreserveResult, error)
+}
+
+// preserveWorkRoot is where a preserve push that finds no checkout of its
+// branch adds a temporary one: the rig's .runtime, not the town's, because
+// internal/git refuses a worktree target under the town root
+// (ErrUnsafeTownRootGitMutation) and gt-7cps5 rules out widening that guard.
+// The rig's own .runtime is on this host's disk, outside /tmp, and gitignored.
+func preserveWorkRoot(rigPath string) string {
+	return filepath.Join(rigPath, ".runtime", "preserve")
 }
 
 // preserveFailureBlocker decides whether a nuke may proceed after its
@@ -3277,9 +3238,9 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	// is not waiting on the refinery.
 	var alreadyOnRemote bool
 	if branchToDelete != "" {
-		// Pick a repo that actually holds the branch. The worktree (when it
-		// still exists) is preferred because it has the session's latest
-		// commits; the bare repo is the fallback once the worktree is gone.
+		// Pick a repo that holds the branch's ref. Which checkout the push runs
+		// from is decided inside PreserveBranch, from the worktrees' HEADs; this
+		// only has to find one repository that can read the branch.
 		// Use ClonePath from the polecat record — the worktree lives at
 		// <rig>/polecats/<name>/<rigName>/, not <rig>/polecats/<name>/.
 		var candidates []*git.Git
@@ -3304,7 +3265,7 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		preserve := deps.Preserve
 		if preserve == nil {
 			preserve = func(branch string) (preserveOutcome, error) {
-				return preserveBranchBeforeNuke(pushGit, branch, "origin")
+				return preserveBranchBeforeNuke(pushGit, branch, "origin", preserveWorkRoot(r.Path))
 			}
 		}
 

@@ -115,6 +115,7 @@ type Git struct {
 	exec    runFunc       // runs git; nil means the real git on PATH
 	timeout time.Duration // deadline for every call when set (WithTimeout)
 	env     []string      // added to every call's environment (WithEnv)
+	unset   []string      // removed from every call's environment (WithoutEnv)
 }
 
 // ErrUnsafeTownRootGitMutation is returned when a mutating git operation would
@@ -238,7 +239,7 @@ func (g *Git) runOutput(args ...string) (string, error) {
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, timeout: g.timeout})
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, unset: g.unset, timeout: g.timeout})
 	if err != nil {
 		if g.timeout > 0 && errors.Is(err, errTimedOut) {
 			return "", &timeoutError{command: args[0], after: g.timeout}
@@ -334,7 +335,7 @@ func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _
 	}
 
 	timeout = g.deadline(timeout)
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, timeout: timeout})
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, unset: g.unset, timeout: timeout})
 	if err != nil {
 		if errors.Is(err, errTimedOut) {
 			return "", &timeoutError{command: args[0], after: timeout}
@@ -362,7 +363,7 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	}
 
 	timeout = g.deadline(timeout)
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: append(append([]string(nil), g.env...), extraEnv...), timeout: timeout})
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: append(append([]string(nil), g.env...), extraEnv...), unset: g.unset, timeout: timeout})
 	if err != nil {
 		if timeout > 0 && errors.Is(err, errTimedOut) {
 			return "", &timeoutError{command: args[0], after: timeout}
@@ -384,7 +385,7 @@ func (g *Git) runWithStdin(stdin string, args ...string) (string, error) {
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, stdin: stdin, timeout: g.timeout})
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, unset: g.unset, stdin: stdin, timeout: g.timeout})
 	if err != nil {
 		if g.timeout > 0 && errors.Is(err, errTimedOut) {
 			return "", &timeoutError{command: args[0], after: g.timeout}
@@ -2808,7 +2809,7 @@ func (g *Git) runMergeCheck(args ...string) (string, error) {
 		return "", err
 	}
 
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, timeout: g.timeout})
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, unset: g.unset, timeout: g.timeout})
 	if err != nil {
 		if g.timeout > 0 && errors.Is(err, errTimedOut) {
 			return "", &timeoutError{command: args[0], after: g.timeout}
@@ -3416,6 +3417,20 @@ func (g *Git) WorktreeAddExisting(path, branch string) error {
 		return err
 	}
 	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
+}
+
+// WorktreeAddExistingNoSubmodules creates a worktree on an existing branch
+// without initializing its submodules, for a caller that needs only a checkout
+// standing on the branch (a push's HEAD) and throws it away right after.
+// WorktreeAddExisting would fetch submodules the caller never reads.
+func (g *Git) WorktreeAddExistingNoSubmodules(path, branch string) error {
+	// "--" ends the options: the branch is a ref read from the repository, but
+	// an argument shaped like an option must never be parsed as one.
+	_, err := g.runWithEnv(
+		[]string{"worktree", "add", path, "--", branch},
+		[]string{"GIT_LFS_SKIP_SMUDGE=1"},
+	)
+	return err
 }
 
 // WorktreeAddExistingForce creates a new worktree even if the branch is already checked out elsewhere.
