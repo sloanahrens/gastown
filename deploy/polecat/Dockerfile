@@ -189,7 +189,10 @@ RUN --mount=type=bind,source=seed,target=/seed \
 # 2026-10-26). The seed does not use gt or bd.
 COPY bin/gt /usr/local/bin/gt
 COPY bin/bd /usr/local/bin/bd
-RUN chmod 0755 /usr/local/bin/gt /usr/local/bin/bd
+# The trim helper a cache-volume container runs; plugin.md, "Per-rig cache
+# volumes", says why the trim has to run in the image.
+COPY bin/polecat-image /usr/local/bin/polecat-image
+RUN chmod 0755 /usr/local/bin/gt /usr/local/bin/bd /usr/local/bin/polecat-image
 
 ENV PATH="/usr/local/go/bin:/sandbox/go/bin:${PATH}" \
     GOPATH=/sandbox/go \

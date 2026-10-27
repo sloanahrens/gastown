@@ -265,6 +265,13 @@ trap cleanup_world_template EXIT
   || { echo "FAIL: cannot build cmd/install-lock for the lock cases"; exit 1; }
 (cd "$SCRIPT_DIR/.." && CGO_ENABLED=0 go build -buildvcs=false -o "$SUPERVISOR_HELPER" ./cmd/image-supervisor) \
   || { echo "FAIL: cannot build cmd/image-supervisor for the image cases"; exit 1; }
+# The image cases exec the real plugin, whose run.sh is an exec shim of
+# plugins/polecat-image/bin/polecat-image — a binary only `make build` writes,
+# and the stub worlds run no make build. Built once here, as the helpers above
+# are (gt-tpg0p.7).
+PLUGIN_BIN="$LOCK_HELPER_DIR/polecat-image"
+(cd "$SCRIPT_DIR/.." && CGO_ENABLED=0 go build -buildvcs=false -o "$PLUGIN_BIN" ./plugins/polecat-image) \
+  || { echo "FAIL: cannot build plugins/polecat-image for the image cases"; exit 1; }
 
 # The world make_world copies. Built here, in the script's own shell: every
 # case calls make_world inside a command substitution, and an assignment made
@@ -1602,7 +1609,7 @@ cat > "$T/plugin/run.sh" <<STUB
 export POLECAT_IMAGE_DOCKER="$T/pstubs/docker" POLECAT_IMAGE_PGREP="$T/pstubs/pgrep" \\
   POLECAT_IMAGE_OPENSHELL="$T/pstubs/openshell" POLECAT_IMAGE_RIG_REPO="$T/origin.git" \\
   POLECAT_IMAGE_BUILD_ROOT="$T/image-build"
-exec bash "$SCRIPT_DIR/../plugins/polecat-image/run.sh"
+exec "$PLUGIN_BIN"
 STUB
 chmod +x "$T/plugin/run.sh"
 rc=$( export GT_TOWN_ROOT="$T"
@@ -1627,7 +1634,7 @@ chmod +x "$T/pstubs/docker"
 cat > "$T/plugin/run.sh" <<STUB
 #!/usr/bin/env bash
 export POLECAT_IMAGE_DOCKER="$T/pstubs/docker"
-exec bash "$SCRIPT_DIR/../plugins/polecat-image/run.sh"
+exec "$PLUGIN_BIN"
 STUB
 chmod +x "$T/plugin/run.sh"
 rc=$( export GT_TOWN_ROOT="$T"

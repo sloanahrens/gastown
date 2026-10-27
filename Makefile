@@ -118,6 +118,8 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o plugins/tool-updater/bin/tool-updater ./plugins/tool-updater
 	@mkdir -p plugins/app-promote/bin
 	go build -ldflags "$(LDFLAGS)" -o plugins/app-promote/bin/app-promote ./plugins/app-promote
+	@mkdir -p plugins/polecat-image/bin
+	go build -ldflags "$(LDFLAGS)" -o plugins/polecat-image/bin/polecat-image ./plugins/polecat-image
 
 # golangci-lint must be built with a Go >= go.mod's version and understand .golangci.yml version 2;
 # a stale ~/go/bin/golangci-lint fails every run with "can't load config" (2026-09-17). `make lint-tools`
@@ -165,16 +167,17 @@ POLE_SEED_DIR ?= $(CURDIR)/deploy/polecat/seed
 # pin, so a sandbox always has the modules of the gt it runs (gt-1rz2r).
 POLE_SEED_BUILD_RIG ?= gastown
 
-# Cross-compile gt and bd for the sandbox image, then build it. The Dockerfile
-# copies deploy/polecat/bin/, so that directory is the build context's payload.
-# The guard is the first recipe line, so a run without BD_SRC stops before
-# anything is built.
+# Cross-compile gt, bd and the plugin's cache-trim helper for the sandbox
+# image, then build it. The Dockerfile copies deploy/polecat/bin/, so that
+# directory is the build context's payload. The guard is the first recipe line,
+# so a run without BD_SRC stops before anything is built.
 polecat-image:
 	@test -n "$(BD_SRC)" || { echo "polecat-image: BD_SRC is unset; run make polecat-image BD_SRC=<beads checkout>" >&2; exit 2; }
 	@test -z "$$(git status --porcelain -- . ':(exclude).beads')" || { echo "polecat-image: the tree has uncommitted or untracked changes, so its gt is not the commit the label names ($(POLE_COMMIT)); commit or remove them first" >&2; exit 2; }
 	@test -n "$(POLE_RIG_GO_MODS)" || { echo "polecat-image: no rig go.mod under $(POLE_TOWN)/*/mayor/rig; set POLE_TOWN=<town root>" >&2; exit 2; }
 	@mkdir -p deploy/polecat/bin
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/gt ./cmd/gt
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/polecat-image ./plugins/polecat-image
 	@bd_commit=$$(go run ./internal/polecat/bdbuild/cmd/build -src "$(BD_SRC)" -out $(CURDIR)/deploy/polecat/bin/bd -commit "$(BD_COMMIT)") || { echo "polecat-image: the bd build failed, so the image has no bd commit to label" >&2; exit 2; }; \
 	test -n "$$bd_commit" || { echo "polecat-image: the bd build printed no commit, so the image's bd cannot be labelled" >&2; exit 2; }; \
 	printf '%s\n' "$$bd_commit" > deploy/polecat/bin/bd.commit

@@ -169,11 +169,16 @@ gateway_step() {
 # install stands behind every failure the switch raises. The detached build
 # leaves it unset.
 #
-# BINARY is the build output, never the installed $GT: run.sh reads the commit to
-# build from `gt version`, and before the swap $GT still reports the old commit.
-# Handing run.sh the build output pins it to the commit about to be installed,
-# with no run.sh change (dunlin is porting it to Go).
-IMAGE_RUN="${INSTALL_GT_IMAGE_RUN:-${TOWN_ROOT:+$TOWN_ROOT/plugins/polecat-image/run.sh}}"
+# BINARY is the build output, never the installed $GT: the plugin reads the
+# commit to build from `gt version`, and before the swap $GT still reports the
+# old commit.
+#
+# The plugin is the rig checkout's, which this install just built: its run.sh
+# execs plugins/polecat-image/bin/polecat-image, a binary only `make build`
+# writes, and the town's runtime copy is not synced until further down. Running
+# that copy here would exec a binary it does not have yet on the first install
+# after the port (gt-tpg0p.7).
+IMAGE_RUN="${INSTALL_GT_IMAGE_RUN:-${RIG_DIR:+$RIG_DIR/plugins/polecat-image/run.sh}}"
 # What `make build` leaves in RIG_DIR and install-local copies from.
 IMAGE_BIN="${INSTALL_GT_IMAGE_BINARY:-$RIG_DIR/gt}"
 IMAGE_LOG="${INSTALL_GT_IMAGE_LOG:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-image-install.log}}"
