@@ -42,16 +42,21 @@ func scheduledSpecLabels(e ScheduledSlingEntry) []string {
 // vars" section. A spec entry that still names an agent is not rejected: the
 // patrol skips an invalid entry, so refusing it would silently stop a config
 // that ran before. The agent is ignored and createSpecDispatchedRun says so.
+// A shadow entry's agent is rejected instead: a shadow run slings nothing, so
+// no agent could run, and reading it as one would mislead the operator.
 func scheduledSlingValidateDispatch(e ScheduledSlingEntry) error {
 	if e.RunAgent != "" && e.Dispatch != scheduledDispatchSpec {
 		return fmt.Errorf("scheduled_slings[%s]: run_agent is valid only with dispatch %q", e.Name, scheduledDispatchSpec)
 	}
+	if e.Agent != "" && e.Dispatch == scheduledDispatchShadow {
+		return fmt.Errorf("scheduled_slings[%s]: agent is valid only for a slung entry; dispatch %q slings nothing", e.Name, scheduledDispatchShadow)
+	}
 	switch e.Dispatch {
 	case "":
 		return nil
-	case scheduledDispatchSpec:
+	case scheduledDispatchSpec, scheduledDispatchShadow:
 	default:
-		return fmt.Errorf("scheduled_slings[%s]: dispatch %q must be empty or %q", e.Name, e.Dispatch, scheduledDispatchSpec)
+		return fmt.Errorf("scheduled_slings[%s]: dispatch %q must be empty, %q or %q", e.Name, e.Dispatch, scheduledDispatchSpec, scheduledDispatchShadow)
 	}
 	for k, v := range e.Vars {
 		// One var is one line of the section: a newline would end it early, a
