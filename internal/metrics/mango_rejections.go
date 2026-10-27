@@ -281,12 +281,30 @@ func MangoRejectionsSection(ctx context.Context, env Env) (string, error) {
 	case env.Run == nil:
 		return "", errors.New("rejections section: Env.Run is unset")
 	}
+	records, skipped, err := townReviewRecords(env)
+	if err != nil {
+		return "", err
+	}
+	return mangoRejectionsSection(ctx, env, records, skipped)
+}
+
+// townReviewRecords reads the town's review log: the records the digest's
+// tables join, and the lines that are not records. The digest reads it once
+// and hands the same lines to the refusal tables and the first-pass table
+// (gt-b9j3o.15).
+func townReviewRecords(env Env) ([]land.ReviewRecord, int, error) {
 	path := land.TownReviewsFile(env.Town).Path
 	data, err := env.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("reviews.jsonl: %s: %w", path, err)
+		return nil, 0, fmt.Errorf("reviews.jsonl: %s: %w", path, err)
 	}
 	records, skipped := parseReviewRecords(data)
+	return records, skipped, nil
+}
+
+// mangoRejectionsSection renders the tables from records the caller already
+// read.
+func mangoRejectionsSection(ctx context.Context, env Env, records []land.ReviewRecord, skipped int) (string, error) {
 	stores, err := rejectionStores(env.Town, records)
 	if err != nil {
 		return "", err

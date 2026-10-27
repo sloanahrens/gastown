@@ -687,7 +687,7 @@ func TestMangoSectionCarriesTheRejectionTables(t *testing.T) {
 	var asked []string
 	run := rejectionDigestRunner(t,
 		rejectionBd(t, map[string]string{"gt-a": rejectionNote(1, "failing branch has no assertion")}, &asked), mango)
-	text, err := MangoSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, Run: run},
+	text, err := MangoSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: run},
 		dir, "/opt/mango", MangoSectionOptions{MinPositives: 1})
 	if err != nil {
 		t.Fatalf("MangoSection: %v", err)
@@ -719,7 +719,7 @@ func TestMangoSectionFailsWhenTheRejectionLogFails(t *testing.T) {
 		}
 		return os.ReadFile(path)
 	}
-	_, err := MangoSection(context.Background(), Env{Town: "/town", ReadFile: readFile, Run: mango},
+	_, err := MangoSection(context.Background(), Env{Town: "/town", ReadFile: readFile, ReadDir: listDir, Run: mango},
 		dir, "/opt/mango", MangoSectionOptions{MinPositives: 1})
 	if err == nil || !strings.Contains(err.Error(), "reviews.jsonl") {
 		t.Fatalf("err = %v, want a refusal naming the review log", err)
