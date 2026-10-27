@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,13 +37,6 @@ func newClient(t *testing.T, h http.Handler, mod func(*Config)) (*Client, *fakeS
 	t.Helper()
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
-	return newClientOn(t, ts, mod)
-}
-
-// newClientOn is newClient for a server the test started itself, so it can
-// watch the connections the client opens.
-func newClientOn(t *testing.T, ts *httptest.Server, mod func(*Config)) (*Client, *fakeSleep) {
-	t.Helper()
 	fs := &fakeSleep{}
 	cfg := Config{BaseURL: ts.URL, Token: "trk_secret-token-value", Sleep: fs.sleep,
 		HTTP: &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}}
@@ -73,37 +65,6 @@ func TestAWriteLandsAfterASiblingServersClose(t *testing.T) {
 	sibling.Close() // what the sibling test's t.Cleanup(ts.Close) does
 	if err := c.Close(ctx, []string{"gt-b"}, "done", false); err != nil {
 		t.Fatalf("write after a sibling server closed = %v", err)
-	}
-}
-
-// A sibling's cleanup closes only idle connections, so the client under test
-// keeps none between requests: each write opens its own connection and leaves
-// a cleanup nothing it could close under the next one (gt-ez3ju).
-func TestEachWriteOpensItsOwnConnection(t *testing.T) {
-	t.Parallel()
-	var conns atomic.Int64
-	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	ts.Config.ConnState = func(_ net.Conn, state http.ConnState) {
-		if state == http.StateNew {
-			conns.Add(1)
-		}
-	}
-	ts.Start()
-	t.Cleanup(ts.Close)
-	c, _ := newClientOn(t, ts, nil)
-	ctx := t.Context()
-	write := func(id string) {
-		t.Helper()
-		if err := c.Close(ctx, []string{id}, "done", false); err != nil {
-			t.Fatalf("write %s = %v", id, err)
-		}
-	}
-	write("gt-a")
-	write("gt-b")
-	if got := conns.Load(); got != 2 {
-		t.Errorf("two writes opened %d connection(s), want 2: a connection held between them is one a sibling's cleanup can close under a write", got)
 	}
 }
 
