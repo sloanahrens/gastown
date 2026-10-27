@@ -57,6 +57,15 @@ func Acquire(path string, wait time.Duration) (release func(), err error) {
 // acquire is Acquire with the wait's clock and sleep injected, so a unit test
 // runs out a wait without spending it.
 func acquire(path string, wait time.Duration, now func() time.Time, sleep func(time.Duration)) (func(), error) {
+	f, err := acquireFile(path, wait, now, sleep)
+	if err != nil {
+		return nil, err
+	}
+	return func() { unlockAndClose(f) }, nil
+}
+
+// acquireFile takes the flock on path and returns the open lock file.
+func acquireFile(path string, wait time.Duration, now func() time.Time, sleep func(time.Duration)) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
@@ -72,7 +81,18 @@ func acquire(path string, wait time.Duration, now func() time.Time, sleep func(t
 		_ = f.Close()
 		return nil, ErrBusy
 	}
-	return func() { _ = f.Close() }, nil
+	return f, nil
+}
+
+// unlockAndClose releases the flock before closing the file. flock belongs to
+// the open file description, not to this descriptor, so a child another
+// goroutine forked while the lock was held keeps the description, and the
+// lock, alive until it execs; closing alone would leave the lock held after
+// the release (gt-ubj9e, the same class as gt-0ph7q). LOCK_UN drops it for
+// every holder of the description.
+func unlockAndClose(f *os.File) {
+	_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	_ = f.Close()
 }
 
 // Config is one acquisition of the install lock and the command that replaces
