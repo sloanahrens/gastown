@@ -502,6 +502,30 @@ func escalationStubListArgv(t *testing.T, logPath string) []string {
 	return nil
 }
 
+// splitBdListArgv separates the positional arguments from the flag tokens and
+// sorts the flags, so two calls that differ only in flag order compare equal.
+// bd spells a flag's value inside its own token (--limit=0), so a caller that
+// separates one lands an extra positional and the comparison still fails.
+func splitBdListArgv(argv []string) (positional, flags []string) {
+	for _, arg := range argv {
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+			continue
+		}
+		positional = append(positional, arg)
+	}
+	slices.Sort(flags)
+	return positional, flags
+}
+
+// sameBdListArgv reports whether got asks bd for exactly what want asks for,
+// regardless of the order the caller passes the flags in.
+func sameBdListArgv(got, want []string) bool {
+	gotPositional, gotFlags := splitBdListArgv(got)
+	wantPositional, wantFlags := splitBdListArgv(want)
+	return slices.Equal(gotPositional, wantPositional) && slices.Equal(gotFlags, wantFlags)
+}
+
 // TestListEscalationsAcrossRigsInjectsFlatAndRoutes covers the two independent
 // ways the routed display path could fail while looking correct.
 //
@@ -560,11 +584,15 @@ func TestListEscalationsAcrossRigsRetriesWithoutFlatOnOldBd(t *testing.T) {
 	}
 }
 
-// TestListEscalationsRoutedAsksForEveryRow pins the routed read's exact argv
-// for both display entry points. bd list pages at 50 without --limit=0, so the
-// count behind `gt escalate list`, `gt status` and the dashboard silently
-// stopped at 50 open escalations past that many (gt-mm38p). The whole argv is
-// asserted, not just the flag, so no other flag's shape can restore a page.
+// TestListEscalationsRoutedAsksForEveryRow pins what the routed read asks bd
+// for, at both display entry points. bd list pages at 50 without --limit=0, so
+// the count behind `gt escalate list`, `gt status` and the dashboard silently
+// stopped at 50 open escalations past that many (gt-mm38p). Every flag is
+// asserted, so no other flag's shape can restore a page.
+//
+// The want lists are sets, written with their flags in alphabetical order
+// rather than the order the call site passes them, so a reshuffle there cannot
+// fail the test while a dropped flag still does.
 func TestListEscalationsRoutedAsksForEveryRow(t *testing.T) {
 	tests := []struct {
 		name string
@@ -574,12 +602,12 @@ func TestListEscalationsRoutedAsksForEveryRow(t *testing.T) {
 		{
 			name: "open",
 			read: ListEscalationsAcrossRigs,
-			want: []string{"list", "--label=gt:escalation", "--status=open", "--include-infra", "--limit=0", "--json", "--flat"},
+			want: []string{"list", "--flat", "--include-infra", "--json", "--label=gt:escalation", "--limit=0", "--status=open"},
 		},
 		{
 			name: "all",
 			read: ListAllEscalationsAcrossRigs,
-			want: []string{"list", "--label=gt:escalation", "--status=all", "--include-infra", "--limit=0", "--json", "--flat"},
+			want: []string{"list", "--flat", "--include-infra", "--json", "--label=gt:escalation", "--limit=0", "--status=all"},
 		},
 	}
 
@@ -590,8 +618,8 @@ func TestListEscalationsRoutedAsksForEveryRow(t *testing.T) {
 				t.Fatalf("routed read: %v", err)
 			}
 
-			if got := escalationStubListArgv(t, logPath); !slices.Equal(got, tt.want) {
-				t.Errorf("routed list argv = %q, want %q", got, tt.want)
+			if got := escalationStubListArgv(t, logPath); !sameBdListArgv(got, tt.want) {
+				t.Errorf("routed list argv = %q, want %q (same flags, any order)", got, tt.want)
 			}
 		})
 	}
