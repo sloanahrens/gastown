@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -33,52 +32,56 @@ const RejectionPatternUnclassified = "unclassified"
 const RejectionPatternNoNote = "no note"
 
 // rejectionPattern is one rule of the om checklist as the section measures it.
-// The checklist is the polecat directive's "What om rejects" list; a pattern's
-// phrases are fragments of the finding titles om writes when that rule is what
-// it refuses, never a bullet of the checklist itself, so the rule is counted by
+// The checklist is the directive's "What om rejects" list; a pattern's phrases
+// are fragments of the finding titles om writes when that rule is what it
+// refuses, never a bullet of the checklist itself, so the rule is counted by
 // the wording a rejection actually carries. A rule the directive rewords is
 // re-read from the findings it files, not translated from the new bullet.
 type rejectionPattern struct {
 	// Name is the row label the section prints.
 	Name string
-	// Phrases are lowercase substrings of a rejection note that name the
-	// pattern. A note matching none of them is unclassified.
+	// Rule is the rule's number in the directive's list, which the phrases are
+	// read from so a reworded rule is re-read rather than translated.
+	Rule int
+	// Phrases are lowercase substrings of a rejection's finding titles that
+	// name the pattern. A rejection matching none of them is unclassified.
 	Phrases []string
 }
 
 // rejectionPatterns is the pattern table, in classification order: the first
 // pattern holding one of its phrases names the rejection. The order is the
-// checklist's, so a note that names two rules counts as the earlier one and a
-// week's pattern rows add up to its rejections.
+// checklist's, so a refusal whose findings name two rules counts as the
+// earlier one.
 //
-// Every phrase is demonstrated by an om finding title in rejectionFixtures,
-// which TestEveryRejectionPhraseIsInAFindingTitle holds, so the table cannot
+// Before adding or changing a phrase, read the rule's own wording in
+// directives/polecat.md's "What om rejects" section: each phrase below is a
+// fragment of what that file quotes om filing for the same rule, and
+// TestEveryRejectionPhraseIsInTheDirective holds it there, so the table cannot
 // drift into matching the checklist's own prose.
 //
 // The kind word a note's header opens with (conflict, gate, review) is a
-// different axis: ClassifyRejection reads that one, and this table reads why
-// om refused, from the finding's wording.
+// different axis: this table reads why om refused, from the finding's wording.
 var rejectionPatterns = []rejectionPattern{
-	{Name: "fail_open", Phrases: []string{"fail-open"}},
-	{Name: "criterion_untested", Phrases: []string{"has no test"}},
-	{Name: "refusal_untested", Phrases: []string{"failing branch", "branch has no assertion"}},
-	{Name: "forged_authority", Phrases: []string{"prefix alone", "can forge", "authority is granted by"}},
-	{Name: "self_review", Phrases: []string{"self-rebut", "rebut its own"}},
-	{Name: "unshown_verification", Phrases: []string{"no shown output", "verification claim"}},
-	{Name: "hermeticity", Phrases: []string{"not hermetic", "$shell", "live town tree"}},
-	{Name: "script", Phrases: []string{"shell script", "python script", "new script"}},
-	{Name: "out_of_scope", Phrases: []string{"outside the stated scope", "unexplained transitive dependency"}},
-	{Name: "call_site_untested", Phrases: []string{"helper directly", "call site"}},
-	{Name: "helper_fail_open", Phrases: []string{"does not apply", "fail closed"}},
-	{Name: "secrets_in_errors", Phrases: []string{"captured output", "captured command output"}},
+	{Name: "fail_open", Rule: 1, Phrases: []string{"fail-open"}},
+	{Name: "criterion_untested", Rule: 2, Phrases: []string{"has no test"}},
+	{Name: "refusal_untested", Rule: 3, Phrases: []string{"failing branch", "branch has no assertion"}},
+	{Name: "forged_authority", Rule: 4, Phrases: []string{"prefix alone", "can forge", "authority is granted by"}},
+	{Name: "self_review", Rule: 5, Phrases: []string{"self-rebut", "rebut its own"}},
+	{Name: "unshown_verification", Rule: 6, Phrases: []string{"no shown output", "verification claim"}},
+	{Name: "hermeticity", Rule: 7, Phrases: []string{"not hermetic", "$shell", "live town tree"}},
+	{Name: "script", Rule: 8, Phrases: []string{"shell script", "python script"}},
+	{Name: "out_of_scope", Rule: 9, Phrases: []string{"outside the stated scope", "unexplained transitive dependency"}},
+	{Name: "call_site_untested", Rule: 10, Phrases: []string{"helper directly", "call site"}},
+	{Name: "helper_fail_open", Rule: 11, Phrases: []string{"does not apply", "fail closed"}},
+	{Name: "secrets_in_errors", Rule: 12, Phrases: []string{"captured output", "captured command output"}},
 }
 
-// classifyRejectionPattern names the pattern note matches: the first rule in
+// classifyRejectionPattern names the pattern findings match: the first rule in
 // rejectionPatterns holding one of its phrases, else
 // RejectionPatternUnclassified. Case is ignored, because a finding's wording
 // reaches a note through free text.
-func classifyRejectionPattern(note string) string {
-	text := strings.ToLower(note)
+func classifyRejectionPattern(findings []string) string {
+	text := strings.ToLower(strings.Join(findings, "\n"))
 	for _, pattern := range rejectionPatterns {
 		for _, phrase := range pattern.Phrases {
 			if strings.Contains(text, phrase) {
@@ -93,42 +96,84 @@ func classifyRejectionPattern(note string) string {
 // land.ParseRejectionNote anchors it: a marker quoted inside a finding is
 // content, not a block. Only the boundary is read here; the fields inside a
 // block belong to land (gt-9bioi.1).
-var rejectionBlockRE = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(land.MergeRejectionNoteMarker) + ` \(attempt ([0-9]+)\): `)
+var rejectionBlockRE = regexp.MustCompile(`^` + regexp.QuoteMeta(land.MergeRejectionNoteMarker) + ` \(attempt ([0-9]+)\): `)
+
+// rejectionFindingRE reads a rejection block's finding line, the
+// "- id:<id> sev:<severity> <path>:<line> — <title>" FormatRejectionNote
+// writes. The title is what the pattern table reads.
+var rejectionFindingRE = regexp.MustCompile(`^- id:\S+ sev:\S+ .*:[0-9]+ — (.*)$`)
+
+// rejectionFieldRE matches a line a rejection block carries besides its
+// findings: the fields FormatRejectionNote writes and the gate tail's quoted
+// lines.
+var rejectionFieldRE = regexp.MustCompile(`^(Branch|Target|MR|Score|Unresolved|Head|Conflicting): |^Gate tail:$|^  \| `)
 
 // rejectionBlock is one MERGE REJECTION block of a bead's notes: the attempt
-// it refused and the block's text.
+// it refused and the titles of the findings it filed.
 type rejectionBlock struct {
 	Attempt int
-	Text    string
+	// Findings are the finding titles. A block's other lines are not read: a
+	// pattern is a finding om filed, and the gate tail can quote any output.
+	Findings []string
 }
 
-// rejectionBlocks splits notes at the anchors of its rejection blocks, in
-// order. A note with no block yields none.
+// rejectionBlocks splits notes at the headers of its rejection blocks, in
+// order. A block is its header and the lines that continue it: the fields and
+// findings FormatRejectionNote writes, and the gate tail. The notes carry
+// later notes after a block, and their prose is not part of the refusal, so a
+// block ends at its first line the block's grammar does not admit
+// (gt-b9j3o.10). A note with no block yields none.
 func rejectionBlocks(notes string) []rejectionBlock {
-	headers := rejectionBlockRE.FindAllStringSubmatchIndex(notes, -1)
-	blocks := make([]rejectionBlock, 0, len(headers))
-	for i, header := range headers {
-		attempt, err := strconv.Atoi(notes[header[2]:header[3]])
-		if err != nil {
-			// The header regex admits digits only, so this cannot happen.
+	lines := strings.Split(notes, "\n")
+	var blocks []rejectionBlock
+	for i := 0; i < len(lines); i++ {
+		header := rejectionBlockRE.FindStringSubmatch(lines[i])
+		if header == nil {
 			continue
 		}
-		end := len(notes)
-		if i+1 < len(headers) {
-			end = headers[i+1][0]
+		attempt, err := strconv.Atoi(header[1])
+		if err != nil {
+			// The header admits any run of digits, and a run too long for an
+			// int overflows here, so this is not a header land's parser accepts
+			// either. No review names such an attempt, so the block is skipped
+			// rather than read as another attempt's note.
+			continue
 		}
-		blocks = append(blocks, rejectionBlock{Attempt: attempt, Text: notes[header[0]:end]})
+		var findings []string
+		end := i + 1
+		for ; end < len(lines); end++ {
+			line := lines[end]
+			if m := rejectionFindingRE.FindStringSubmatch(line); m != nil {
+				findings = append(findings, m[1])
+				continue
+			}
+			if line == "" || !rejectionFieldRE.MatchString(line) {
+				break
+			}
+		}
+		blocks = append(blocks, rejectionBlock{Attempt: attempt, Findings: findings})
+		i = end - 1
 	}
 	return blocks
 }
 
-// rejectionPatternFor is the pattern of record's refusal: the block its
-// attempt wrote, classified, or RejectionPatternNoNote when the bead has no
-// block for that attempt.
-func rejectionPatternFor(rec land.ReviewRecord, notes map[string]string) string {
-	for _, block := range rejectionBlocks(notes[rec.BeadID]) {
+// RejectionNoteKey names one bead's notes in the join: the rig whose store
+// lists it ("" is the town's own store) and its id. A bead id alone is not
+// unique across a town's stores, so a join keyed by id would read one store's
+// notes for another store's bead.
+type RejectionNoteKey struct {
+	Rig  string
+	Bead string
+}
+
+// rejectionPatternFor is the pattern of rec's refusal: the findings of the
+// block its attempt wrote, classified, or RejectionPatternNoNote when the bead
+// has no block for that attempt.
+func rejectionPatternFor(rec land.ReviewRecord, notes map[RejectionNoteKey]string) string {
+	key := RejectionNoteKey{Rig: rec.Rig, Bead: rec.BeadID}
+	for _, block := range rejectionBlocks(notes[key]) {
 		if block.Attempt == rec.Attempt {
-			return classifyRejectionPattern(block.Text)
+			return classifyRejectionPattern(block.Findings)
 		}
 	}
 	return RejectionPatternNoNote
@@ -152,9 +197,9 @@ type RejectionWeekGroup struct {
 // A record is one verdict; a rejection is a verdict that refused the work,
 // whether om asked for changes or the worker turned an approval away on its
 // findings. Each rejection is counted once, under the first checklist rule its
-// note matches, so a week's pattern rejections add up to its rejections. A
-// record that names no seat counts as land.OmStatsUnnamed.
-func RejectionRates(records []land.ReviewRecord, notes map[string]string) (byPattern, bySeat []RejectionWeekGroup, err error) {
+// note's findings match, so a week's pattern rejections add up to its
+// rejections. A record that names no seat counts as land.OmStatsUnnamed.
+func RejectionRates(records []land.ReviewRecord, notes map[RejectionNoteKey]string) (byPattern, bySeat []RejectionWeekGroup, err error) {
 	weekVerdicts := map[string]int{}
 	seatVerdicts := map[[2]string]int{}
 	patternRejections := map[[2]string]int{}
@@ -219,11 +264,18 @@ func rejectionGroups(verdicts, rejections map[[2]string]int) []RejectionWeekGrou
 }
 
 // MangoRejectionsSection renders the digest's rejection tables, reading the
-// town's review log and the notes of the beads it refused through env. A town
-// with no review log yet has no verdicts and says so; an unreadable log or a
-// bead listing that fails is an error, never an empty table.
+// town's review log and the notes of the beads it refused through env: one
+// review-log read, then one bd show per store a refusal names, asking for the
+// refused beads alone.
+//
+// A town with a log but no verdicts yet says so; a missing or unreadable log
+// is an error naming its path, and so is a bead whose notes the store does not
+// return, because a join that read them as absent would report a refusal as
+// note-less instead of saying the read broke.
 func MangoRejectionsSection(ctx context.Context, env Env) (string, error) {
 	switch {
+	case env.Town == "":
+		return "", errors.New("rejections section: Env.Town is unset")
 	case env.ReadFile == nil:
 		return "", errors.New("rejections section: Env.ReadFile is unset")
 	case env.Run == nil:
@@ -231,18 +283,15 @@ func MangoRejectionsSection(ctx context.Context, env Env) (string, error) {
 	}
 	path := land.TownReviewsFile(env.Town).Path
 	data, err := env.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "### Rejections by pattern\n\nNo review records yet: " + path + " does not exist.", nil
-	}
 	if err != nil {
-		return "", fmt.Errorf("reviews.jsonl: %w", err)
+		return "", fmt.Errorf("reviews.jsonl: %s: %w", path, err)
 	}
 	records, skipped := parseReviewRecords(data)
-	dirs, err := rejectionNoteDirs(env.Town, records)
+	stores, err := rejectionStores(env.Town, records)
 	if err != nil {
 		return "", err
 	}
-	notes, err := loadRejectionNotes(ctx, env, dirs)
+	notes, err := loadRejectionNotes(ctx, env, stores)
 	if err != nil {
 		return "", err
 	}
@@ -275,61 +324,94 @@ func parseReviewRecords(data []byte) ([]land.ReviewRecord, int) {
 	return records, skipped
 }
 
-// rejectionNoteDirs is the bead stores the join reads: one per rig a refused
-// record names, and the town's own store for a record that names none. Only
-// refusals need notes, so an approval alone costs no bd call.
+// rejectionStore is one bead store the join reads: the rig the review log
+// names ("" is the town's own store), the directory bd reads it in, and the
+// refused beads whose notes the section asks for.
+type rejectionStore struct {
+	Rig   string
+	Dir   string
+	Beads []string
+}
+
+// rejectionStores is the bead stores the join reads, with the beads each one
+// holds: one store per rig a refused record names, and the town's own store
+// for a record that names none. Only refusals need notes, so an approval alone
+// costs no bd call.
 //
 // A rig that is not one path element is an error: the record comes from a
 // file, and a rig name reaching filepath.Join unchecked could point bd at a
 // directory the town never named.
-func rejectionNoteDirs(town string, records []land.ReviewRecord) ([]string, error) {
-	seen := map[string]bool{}
-	var dirs []string
+func rejectionStores(town string, records []land.ReviewRecord) ([]rejectionStore, error) {
+	beads := map[string]map[string]bool{}
 	for _, rec := range records {
 		if !rec.IsRejection() {
 			continue
 		}
-		dir := town
-		if rec.Rig != "" {
-			if rec.Rig != filepath.Base(rec.Rig) || rec.Rig == "." || rec.Rig == ".." {
-				return nil, fmt.Errorf("review of %s names rig %q, which is not one path element", rec.BeadID, rec.Rig)
-			}
-			dir = filepath.Join(town, rec.Rig)
+		if rec.Rig != "" && (rec.Rig != filepath.Base(rec.Rig) || rec.Rig == "." || rec.Rig == "..") {
+			return nil, fmt.Errorf("review of %s names rig %q, which is not one path element", rec.BeadID, rec.Rig)
 		}
-		if !seen[dir] {
-			seen[dir] = true
-			dirs = append(dirs, dir)
+		if beads[rec.Rig] == nil {
+			beads[rec.Rig] = map[string]bool{}
 		}
+		beads[rec.Rig][rec.BeadID] = true
 	}
-	sort.Strings(dirs)
-	return dirs, nil
+	stores := make([]rejectionStore, 0, len(beads))
+	for rig, ids := range beads {
+		store := rejectionStore{Rig: rig, Dir: town}
+		if rig != "" {
+			store.Dir = filepath.Join(town, rig)
+		}
+		store.Beads = make([]string, 0, len(ids))
+		for id := range ids {
+			store.Beads = append(store.Beads, id)
+		}
+		sort.Strings(store.Beads)
+		stores = append(stores, store)
+	}
+	sort.Slice(stores, func(i, j int) bool { return stores[i].Dir < stores[j].Dir })
+	return stores, nil
 }
 
-// loadRejectionNotes reads each store's bead list through env.Run and returns
-// the beads' notes by id. A listing that fails, or that is not a bead list,
-// fails the section: a join missing one rig's notes would report its refusals
-// as note-less rather than say the read broke.
-func loadRejectionNotes(ctx context.Context, env Env, dirs []string) (map[string]string, error) {
-	notes := map[string]string{}
-	for _, dir := range dirs {
-		out, err := env.Run(ctx, []string{"bd", "-C", dir, "list", "--all", "--limit", "0", "--json"})
+// loadRejectionNotes reads the refused beads' notes, one bd show per store,
+// keyed by the store and the bead. A call that fails, that is not a bead list,
+// or that does not return every bead asked for fails the section: a join
+// missing one bead's notes would report its refusals as note-less rather than
+// say the read broke.
+func loadRejectionNotes(ctx context.Context, env Env, stores []rejectionStore) (map[RejectionNoteKey]string, error) {
+	notes := map[RejectionNoteKey]string{}
+	for _, store := range stores {
+		argv := []string{"bd", "-C", store.Dir, "show", "--json"}
+		for _, bead := range store.Beads {
+			// --id keeps a bead id from being read as a flag: the ids come
+			// from the review log, which this section does not write.
+			argv = append(argv, "--id="+bead)
+		}
+		out, err := env.Run(ctx, argv)
 		if err != nil {
-			return nil, fmt.Errorf("bd list in %s: %w", dir, err)
+			return nil, fmt.Errorf("bd show in %s: %w", store.Dir, err)
 		}
 		// A JSON null decodes into a nil slice without an error, which would
-		// report the store's refusals as note-less rather than say the listing
+		// report the store's refusals as note-less rather than say the read
 		// broke; only an array is a bead list.
 		trimmed := bytes.TrimSpace(out)
 		if len(trimmed) == 0 || trimmed[0] != '[' {
-			return nil, fmt.Errorf("bd list in %s: the output is not a bead list", dir)
+			return nil, fmt.Errorf("bd show in %s: the output is not a bead list", store.Dir)
 		}
 		var rows []bdListBead
 		if err := json.Unmarshal(trimmed, &rows); err != nil {
-			return nil, fmt.Errorf("bd list in %s: the output is not a bead list", dir)
+			return nil, fmt.Errorf("bd show in %s: the output is not a bead list", store.Dir)
 		}
+		found := make(map[string]bool, len(rows))
 		for _, row := range rows {
-			if row.ID != "" {
-				notes[row.ID] = row.Notes
+			if row.ID == "" {
+				continue
+			}
+			found[row.ID] = true
+			notes[RejectionNoteKey{Rig: store.Rig, Bead: row.ID}] = row.Notes
+		}
+		for _, bead := range store.Beads {
+			if !found[bead] {
+				return nil, fmt.Errorf("bd show in %s: %s is not in the store the review log names", store.Dir, bead)
 			}
 		}
 	}
@@ -349,9 +431,9 @@ func rejectionSectionText(byPattern, bySeat []RejectionWeekGroup, skipped int) s
 	var b strings.Builder
 	b.WriteString("### Rejections by pattern\n\n")
 	b.WriteString("A rejection is one verdict that refused a landing, counted under the first om " +
-		"checklist rule its bead's MERGE REJECTION note matches. Rate is the pattern's rejections " +
+		"checklist rule its bead's MERGE REJECTION findings match. Rate is the pattern's rejections " +
 		"over every recorded verdict that week, so a week's rows add up to its rejection rate. " +
-		"A refusal whose note matched no rule is " + RejectionPatternUnclassified + "; one whose " +
+		"A refusal whose findings matched no rule is " + RejectionPatternUnclassified + "; one whose " +
 		"bead carries no note for that attempt is " + RejectionPatternNoNote + ".\n\n")
 	b.WriteString(rejectionTable([]string{"week", "pattern", "rejections", "verdicts", "rate"}, byPattern))
 	b.WriteString("\n\n### Rejections by agent seat\n\n")
