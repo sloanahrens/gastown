@@ -489,9 +489,9 @@ func TestCheckBDHandshake_VersionReadKilledByTheBudget(t *testing.T) {
 		_, err = checkBDHandshakeClock("/usr/local/bin/bd", store, storeRetryNow, clock)
 	}()
 	// The budget ends while the version read is still waiting on it.
-	<-reading
+	waitBounded(t, reading)
 	clock.end()
-	<-finished
+	waitBounded(t, finished)
 	if err == nil {
 		t.Fatal("want refusal, got nil")
 	}
@@ -659,5 +659,43 @@ func TestBdCommandTreeSnapshotMatchesContract(t *testing.T) {
 	if snap.ContractVersion != newest {
 		t.Fatalf("bd-command-tree.json is from %s at contract_version %d; the handshake's newest known contract is %d (KnownBDContractVersions %v): refresh the snapshot with make bd-command-tree, or fix KnownBDContractVersions",
 			snap.Source, snap.ContractVersion, newest, KnownBDContractVersions)
+	}
+}
+
+// waitBounded waits for ch to close. The fakes make every close deterministic,
+// so the bound only ends a test that would otherwise hang: it fails the test
+// rather than racing a clock (gt-3hcp9 review round 2).
+func waitBounded(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the test hung: a channel it waits on never closed")
+	}
+}
+
+// A real, already-expired deadline reaches the store through its call context.
+// The deadline is in the past, so the outcome does not depend on how fast the
+// machine is, and the refusal must still name the budget (gt-3hcp9 review round 2).
+func TestCheckBDHandshake_DeadlineThroughTheStore(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	answer := func(c context.Context, args []string) ([]byte, []byte, error) {
+		if len(args) == 2 && args[0] == "--allow-stale" {
+			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
+		}
+		return nil, nil, fmt.Errorf("the version read did not finish: %w", c.Err())
+	}
+	store := beads.New(t.TempDir(), beads.WithRunner(answer), beads.WithCallContext(ctx))
+	_, err := checkBDHandshake(ctx, "/usr/local/bin/bd", store, storeRetryNow)
+	if err == nil {
+		t.Fatal("want refusal, got nil")
+	}
+	if !errors.Is(err, ErrBDHandshake) {
+		t.Errorf("refusal does not wrap ErrBDHandshake: %v", err)
+	}
+	if !strings.Contains(err.Error(), "handshake budget ended before bd reported its version") {
+		t.Errorf("refusal does not name the budget:\n%s", err)
 	}
 }
