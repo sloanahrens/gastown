@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -11,7 +12,11 @@ import (
 // okTown is the town seam of a test about the exec: it resolves a town the
 // environment agrees with, so the run gets past placement.
 func okTown() (string, error) {
-	return resolveTown(func() (string, error) { return "/town", nil }, func(string) string { return "/town" })
+	return resolveTown(
+		func() (string, error) { return "/town", nil },
+		func(string) string { return "/town" },
+		func(path string) (string, error) { return path, nil },
+	)
 }
 
 // TestRunnerRunsTheHourAsGtMetricsRun holds the entry point to what the daemon
@@ -111,6 +116,7 @@ func TestRunnerRefusesAnHourItCannotPlace(t *testing.T) {
 		name     string
 		resolve  func() (string, error)
 		fromEnv  string
+		absErr   error
 		wantCode int
 		wantMsg  string
 	}{
@@ -143,6 +149,14 @@ func TestRunnerRefusesAnHourItCannotPlace(t *testing.T) {
 			wantCode: 1,
 			wantMsg:  "not in a Gas Town workspace",
 		},
+		{
+			name:     "GT_TOWN_ROOT cannot be made absolute",
+			resolve:  func() (string, error) { return "/town", nil },
+			fromEnv:  ".",
+			absErr:   errors.New("getting current directory"),
+			wantCode: 1,
+			wantMsg:  "getting current directory",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,12 +169,16 @@ func TestRunnerRefusesAnHourItCannotPlace(t *testing.T) {
 					return nil
 				},
 				townRoot: func() (string, error) {
+					abs := filepath.Abs
+					if tc.absErr != nil {
+						abs = func(string) (string, error) { return "", tc.absErr }
+					}
 					return resolveTown(tc.resolve, func(key string) string {
 						if key != "GT_TOWN_ROOT" {
 							t.Errorf("getenv(%q), want GT_TOWN_ROOT", key)
 						}
 						return tc.fromEnv
-					})
+					}, abs)
 				},
 			}
 			var stderr bytes.Buffer

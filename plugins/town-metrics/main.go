@@ -25,7 +25,9 @@ func main() {
 	os.Exit(runner{
 		lookPath: exec.LookPath,
 		exec:     syscall.Exec,
-		townRoot: func() (string, error) { return resolveTown(workspace.FindFromCwdOrError, os.Getenv) },
+		townRoot: func() (string, error) {
+			return resolveTown(workspace.FindFromCwdOrError, os.Getenv, filepath.Abs)
+		},
 	}.run(os.Environ(), os.Stderr))
 }
 
@@ -65,8 +67,10 @@ func (r runner) run(env []string, stderr io.Writer) int {
 // which is the one `gt metrics run` resolves from the same directory and
 // environment. The runner's contract names that town twice, as the plugin's
 // directory and as GT_TOWN_ROOT, so a pair that disagrees fails here rather
-// than let the record land in a town the runner never promised.
-func resolveTown(resolve func() (string, error), getenv func(string) string) (string, error) {
+// than let the record land in a town the runner never promised. abs makes a
+// hand run's relative GT_TOWN_ROOT absolute, since a cwd that cannot be read
+// leaves the two paths no way to be compared.
+func resolveTown(resolve func() (string, error), getenv func(string) string, abs func(string) (string, error)) (string, error) {
 	town, err := resolve()
 	if err != nil {
 		return "", err
@@ -75,9 +79,7 @@ func resolveTown(resolve func() (string, error), getenv func(string) string) (st
 	if fromEnv == "" {
 		return town, nil
 	}
-	// A hand run may name the town relative to the plugin directory, so the
-	// two are compared as paths rather than as strings.
-	envTown, err := filepath.Abs(fromEnv)
+	envTown, err := abs(fromEnv)
 	if err != nil {
 		return "", fmt.Errorf("resolving GT_TOWN_ROOT %q: %w", fromEnv, err)
 	}
