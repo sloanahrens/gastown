@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -208,7 +209,7 @@ func TestBackupFilePrunesOldCopies(t *testing.T) {
 			got, err := backupFile(path, "20261027T120000Z", backupRun{
 				now:   func() time.Time { return retentionNow },
 				write: write,
-				prune: pruneBackups,
+				prune: pruneCopies,
 			})
 			if err != nil {
 				t.Fatalf("BackupFile: %v", err)
@@ -286,7 +287,7 @@ func TestBackupFileFailsOnAShortCopy(t *testing.T) {
 	got, err := backupFile(path, "20261027T120000Z", backupRun{
 		now:   time.Now,
 		write: short,
-		prune: pruneBackups,
+		prune: pruneCopies,
 	})
 	if err == nil {
 		t.Fatalf("BackupFile with a short copy = %q, nil; want the short copy reported", got)
@@ -354,6 +355,98 @@ func TestBackupFileLeavesADirectoryAtTheNameAlone(t *testing.T) {
 		t.Errorf("the directory at %s = %v, %v; want it left alone", taken, fi, statErr)
 	}
 }
+
+// A directory the pruner cannot read, and a copy it cannot stat, are reported
+// rather than taken for an empty directory; the backup itself still stands
+// (gt-9tx8h).
+func TestBackupFileKeepsTheBackupWhenThePruneCannotSeeTheCopies(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		readDir func(string) ([]fs.DirEntry, error)
+	}{
+		{
+			name:    "the directory cannot be read",
+			readDir: func(string) ([]fs.DirEntry, error) { return nil, fs.ErrPermission },
+		},
+		{
+			name: "a copy cannot be stat'ed",
+			readDir: func(string) ([]fs.DirEntry, error) {
+				return []fs.DirEntry{unstatable{name: "config.json.bak-20260101T000000Z"}}, nil
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			body := `{"role_agents":{"crew":"claude-sonnet"}}`
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := backupFile(path, "20261027T120000Z", backupRun{
+				now:   func() time.Time { return retentionNow },
+				write: writeBackupCopy,
+				prune: func(path, keep string, now time.Time) error {
+					return pruneBackups(path, keep, now, c.readDir)
+				},
+			})
+			if err != nil {
+				t.Fatalf("BackupFile with a pruner that cannot see the copies = %v, want the backup kept", err)
+			}
+			if content, readErr := os.ReadFile(got); readErr != nil || string(content) != body {
+				t.Errorf("the copy = %q, %v; want the file's content", content, readErr)
+			}
+		})
+	}
+}
+
+// A copy that cannot be stat'ed is reported, not taken for the length wanted.
+func TestCheckCopySizeReportsACopyThatIsGone(t *testing.T) {
+	t.Parallel()
+
+	if err := checkCopySize(filepath.Join(t.TempDir(), "config.json.bak-gone"), 4); err == nil {
+		t.Fatal("checkCopySize of a copy that is gone = nil, want the stat's error")
+	}
+}
+
+// A write that fails after the copy was created removes it, so no partial
+// backup is left for an operator to restore (gt-9tx8h).
+func TestWriteAndSyncRemovesThePartialCopyOnFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "config.json.bak-20261027T120000Z")
+	if err := os.WriteFile(dst, []byte("partial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := os.Create(filepath.Join(dir, "closed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeAndSync(closed, dst, []byte("data\n")); err == nil {
+		t.Fatal("writeAndSync on a closed file = nil, want the write's error")
+	}
+	if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the partial copy is still there: %v, want it removed", statErr)
+	}
+}
+
+// unstatable is a directory entry whose stat fails, the case a copy vanishing
+// between the directory read and the stat leaves behind.
+type unstatable struct{ name string }
+
+func (e unstatable) Name() string               { return e.name }
+func (e unstatable) IsDir() bool                { return false }
+func (e unstatable) Type() fs.FileMode          { return 0 }
+func (e unstatable) Info() (fs.FileInfo, error) { return nil, fs.ErrPermission }
 
 // setMtime pins a file's modification time, which the retention window reads.
 func setMtime(t *testing.T, path string, when time.Time) {

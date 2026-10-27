@@ -54,7 +54,7 @@ type backupRun struct {
 // is an error, so a directory that collects copies is reported rather than
 // searched forever (gt-jaagc).
 func BackupFile(path, stamp string) (string, error) {
-	return backupFile(path, stamp, backupRun{now: time.Now, write: writeBackupCopy, prune: pruneBackups})
+	return backupFile(path, stamp, backupRun{now: time.Now, write: writeBackupCopy, prune: pruneCopies})
 }
 
 // backupFile is BackupFile with its clock, writer and pruner passed in: the
@@ -104,7 +104,13 @@ func writeBackupCopy(dst string, data []byte, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	_, err = out.Write(data)
+	return writeAndSync(out, dst, data)
+}
+
+// writeAndSync writes data to the copy, flushes it to disk and closes it,
+// removing the partial copy when any of that fails.
+func writeAndSync(out *os.File, dst string, data []byte) error {
+	_, err := out.Write(data)
 	if err == nil {
 		err = out.Sync()
 	}
@@ -139,15 +145,23 @@ func removeCopy(dst string) {
 	}
 }
 
+// pruneCopies is the pruner BackupFile runs: the retention window over the
+// directory that holds path.
+func pruneCopies(path, keep string, now time.Time) error {
+	return pruneBackups(path, keep, now, os.ReadDir)
+}
+
 // pruneBackups removes the copies of path in its directory that are past the
 // retention window: outside the newest backupRetentionCount and older than
 // backupRetentionAge. keep, the copy just written, is never removed, and no
 // name that is not <path>.bak-* is touched. It returns the errors it met, which
 // the caller logs: a directory that cannot be pruned must not cost the write.
-func pruneBackups(path, keep string, now time.Time) error {
+// readDir is os.ReadDir, so a test can hand it a directory it cannot read or an
+// entry it cannot stat.
+func pruneBackups(path, keep string, now time.Time, readDir func(string) ([]fs.DirEntry, error)) error {
 	dir := filepath.Dir(path)
 	prefix := filepath.Base(filepath.Clean(path)) + ".bak-"
-	entries, err := os.ReadDir(dir)
+	entries, err := readDir(dir)
 	if err != nil {
 		return err
 	}
