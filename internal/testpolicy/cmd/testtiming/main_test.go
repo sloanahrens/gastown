@@ -469,6 +469,54 @@ func TestRunTiming_Verdicts(t *testing.T) {
 	}
 }
 
+// TestRunTiming_RefusesNewlinePackage pins the refusal where the run makes it:
+// a package word holding a newline cannot be typed into the pane, so the run
+// stops with the measurement's failure code rather than typing a truncated
+// line and then waiting out the whole bound for a pane that never reports.
+func TestRunTiming_RefusesNewlinePackage(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	var stdout, stderr strings.Builder
+	got := runWith(context.Background(), f.host(), []string{"a\nb"}, &stdout, &stderr)
+	if got != 2 {
+		t.Errorf("exit code = %d, want 2 (stderr %q)", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "the pane cannot type a word holding a newline") {
+		t.Errorf("stderr = %q, want the pane's refusal", stderr.String())
+	}
+	for _, c := range f.commands {
+		if containsArg(c.args, "send-keys") {
+			t.Errorf("commands = %q, want nothing typed into the pane after the refusal", f.names())
+		}
+	}
+	if waits := f.sleeps; len(waits) != 0 {
+		t.Errorf("waits = %v, want none: the run refused before waiting on the pane, so it polled for no result and slept for no reason", waits)
+	}
+}
+
+// TestRunTiming_WaitBound pins the wall a silent pane is given: a poll every
+// interval but the last, and a refusal that states the bound those constants
+// give. The message is compared against the constants' own product, so the
+// two cannot disagree: setting resultChecks to 2 leaves the message stating
+// 30 min against a 4 s bound and this fails.
+func TestRunTiming_WaitBound(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	write(t, f.work, probeFile, "80")
+	var stdout, stderr strings.Builder
+	if got := runWith(context.Background(), f.host(), nil, &stdout, &stderr); got != 2 {
+		t.Fatalf("exit code = %d, want 2 (stderr %q)", got, stderr.String())
+	}
+	if waits := countSleeps(f.sleeps, resultInterval); waits != resultChecks-1 {
+		t.Errorf("result polls = %d, want %d: one per interval but the last", waits, resultChecks-1)
+	}
+	// The bound is stated once, by the constants; the message must agree.
+	bound := resultChecks * resultInterval
+	if want := "no result after " + strconv.Itoa(int(bound/time.Minute)) + " min"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q: the message must state the bound the constants give (%v)", stderr.String(), want, bound)
+	}
+}
+
 func TestRunTiming_NotDarwin(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)
