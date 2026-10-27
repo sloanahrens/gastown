@@ -231,3 +231,26 @@ func TestDispatchClockStartsIsACopy(t *testing.T) {
 		t.Fatal("deleting a bead from the returned map emptied the clock")
 	}
 }
+
+// A sling dated before a run's end belongs to the run that ended, even when the
+// log lists it after the end (a line written late): it must not start the next
+// run's clock. A sling dated exactly at the end is the new run's dispatch
+// (gt-tzbtf).
+func TestDispatchStartIgnoresASlingDatedBeforeTheRunEnd(t *testing.T) {
+	t.Parallel()
+	late := []Event{
+		dispatchEv(TypeDone, t11, "gt-a"),
+		dispatchEv(TypeSling, t10, "gt-a"),
+	}
+	if got, ok := DispatchStart(late, "gt-a"); ok {
+		t.Errorf("start = %v, want none: the only sling is dated before the run's end", got)
+	}
+	atEnd := []Event{
+		dispatchEv(TypeDone, t11, "gt-a"),
+		dispatchEv(TypeSling, t11, "gt-a"),
+	}
+	got, ok := DispatchStart(atEnd, "gt-a")
+	if !ok || !got.Equal(mustTime(t, t11)) {
+		t.Errorf("start = %v, %v, want %s: a sling dated at the end is the new run's dispatch", got, ok, t11)
+	}
+}
