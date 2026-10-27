@@ -328,6 +328,35 @@ func TestSourceReviewStopsAtTheBeadReadCap(t *testing.T) {
 	})
 }
 
+// The per-call deadline and the cap bound one factor each; the budget bounds all
+// the reads together. Every read here answers well inside its own deadline, and
+// each takes longer than a third of the budget, so only the budget can end the
+// loop: the attribution fails instead of holding the snapshot for the product of
+// the two bounds.
+func TestReviewBeadsStopsWhenTheReadsOutlastTheBudget(t *testing.T) {
+	t.Parallel()
+	reviews := []Review{
+		{Bead: "gt-b1", Rig: "gastown"},
+		{Bead: "gt-b2", Rig: "gastown"},
+		{Bead: "gt-b3", Rig: "gastown"},
+	}
+	const perRead = 30 * time.Millisecond
+	env := Env{Town: t.TempDir(), Run: func(ctx context.Context, argv []string) ([]byte, error) {
+		select {
+		case <-time.After(perRead):
+			return []byte("[" + reviewBeadJSON(argv[len(argv)-1], "polecat/opal/x+mv1") + "]"), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}}
+	if rows, ok := reviewBeads(context.Background(), env, reviews, 2*perRead); ok || rows != nil {
+		t.Errorf("reviewBeads under a budget of two reads = %v, %v, want a failed attribution", rows, ok)
+	}
+	if rows, ok := reviewBeads(context.Background(), env, reviews, time.Minute); !ok || len(rows) != 3 {
+		t.Errorf("reviewBeads under a generous budget = %v, %v, want all three beads read", rows, ok)
+	}
+}
+
 // A snapshot with no runner cannot attribute, so its kind columns are null: a
 // review whose branch was never read is not a review by an unknown author.
 func TestSourceReviewWithoutARunnerLeavesTheKindsNull(t *testing.T) {

@@ -65,6 +65,13 @@ const reviewBdTimeout = 5 * time.Second
 // unattributed rather than holding the snapshot open on a log's ids.
 const reviewBeadReadCap = 64
 
+// reviewBdBudget bounds all the reads of one collection together. The per-call
+// deadline and the cap each bound one factor of the total, so a slow bd on every
+// one of the capped reads could still hold the snapshot for their product; the
+// budget is what keeps the kind columns from costing the snapshot more than this.
+// When it runs out the kind columns are null, like any failed read.
+const reviewBdBudget = 30 * time.Second
+
 func (reviewSource) Group() string { return "review" }
 
 func (reviewSource) Collect(ctx context.Context, env Env) (map[string]any, error) {
@@ -156,7 +163,7 @@ func reviewKinds(ctx context.Context, env Env, reviews []Review) map[string]int 
 	if len(reviews) == 0 {
 		return counts
 	}
-	beads, ok := reviewBeads(ctx, env, reviews)
+	beads, ok := reviewBeads(ctx, env, reviews, reviewBdBudget)
 	if !ok {
 		return nil
 	}
@@ -169,9 +176,9 @@ func reviewKinds(ctx context.Context, env Env, reviews []Review) map[string]int 
 // reviewBeads reads each reviewed bead once with `bd show`, so a review of a
 // bead bd no longer holds is left out and attributed to an unknown author.
 // ok is false when a read fails, a rig is not under the town, or the hour names
-// more beads than reviewBeadReadCap, since that bead's branch is unknown
-// rather than absent.
-func reviewBeads(ctx context.Context, env Env, reviews []Review) ([]BeadRow, bool) {
+// more beads than reviewBeadReadCap, or the reads together outlast budget, since
+// that bead's branch is unknown rather than absent.
+func reviewBeads(ctx context.Context, env Env, reviews []Review, budget time.Duration) ([]BeadRow, bool) {
 	if env.Run == nil {
 		return nil, false
 	}
@@ -192,6 +199,8 @@ func reviewBeads(ctx context.Context, env Env, reviews []Review) ([]BeadRow, boo
 	if len(reads) > reviewBeadReadCap {
 		return nil, false
 	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 	var rows []BeadRow
 	for _, r := range reads {
 		out, err := reviewBdShow(ctx, env, r.dir, r.bead)
