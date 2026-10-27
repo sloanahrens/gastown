@@ -2970,12 +2970,12 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 			if alive, serr := d.tmux.HasSession(sessionName); serr == nil && !alive {
 				age := parkedAge(now.Sub(st.PausedAt))
 				d.crashSkipLog.logAs(d.logger.Printf, rigName+"/"+polecatName, "parked-released",
-					fmt.Sprintf("Skipping crash detection for %s/%s: parked %s ago (%s); seat released; recover with gt polecat check-recovery %s/%s",
-						rigName, polecatName, age, rec.HoldReason(), rigName, polecatName))
+					fmt.Sprintf("Skipping crash detection for %s/%s: polecat seat paused %s ago (%s); seat released; recover with gt polecat check-recovery %s/%s; this is the seat, not the rig (gt rig status %s: 🅿️ parked, ⚫ nothing running)",
+						rigName, polecatName, age, rec.HoldReason(), rigName, polecatName, rigName))
 				return
 			}
 		}
-		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: agent is parked (%s)",
+		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: polecat seat paused (%s)",
 			rigName, polecatName, rec.HoldReason())
 		return
 	}

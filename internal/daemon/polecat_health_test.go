@@ -1063,13 +1063,20 @@ func TestCheckPolecatHealth_StaleParkIsLoggedAsReleased(t *testing.T) {
 	if strings.Contains(got, "CRASH DETECTED") {
 		t.Errorf("a stale park must not trigger CRASH DETECTED, got: %q", got)
 	}
-	if n := strings.Count(got, "parked 31m"); n != 1 {
-		t.Errorf("got %d \"parked 31m\" lines over two passes, want 1: %q", n, got)
+	if n := strings.Count(got, "polecat seat paused 31m"); n != 1 {
+		t.Errorf("got %d \"polecat seat paused 31m\" lines over two passes, want 1: %q", n, got)
 	}
 	if n := strings.Count(got, "seat released"); n != 1 {
 		t.Errorf("got %d release lines over three passes with the age moving from 31m to 32m, want 1: %q", n, got)
 	}
-	for _, want := range []string{"overrun (20 minute rule)", "seat released", "gt polecat check-recovery myr/mycat"} {
+	for _, want := range []string{
+		"polecat seat paused 31m ago (parked: overrun (20 minute rule))",
+		"seat released",
+		"gt polecat check-recovery myr/mycat",
+		// A paused seat read as the rig being parked once (gt-q66sz); the
+		// line now names the rig's own state and where to read it.
+		"this is the seat, not the rig (gt rig status myr: 🅿️ parked, ⚫ nothing running)",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("log does not contain %q: %q", want, got)
 		}
@@ -1120,8 +1127,8 @@ func TestCheckPolecatHealth_StaleParkWithLiveSessionIsNotReleased(t *testing.T) 
 	if strings.Contains(got, "seat released") {
 		t.Errorf("a live session holds the seat, so the daemon must not log it released: %q", got)
 	}
-	if !strings.Contains(got, "agent is parked (parked: overrun (20 minute rule))") {
-		t.Errorf("expected the plain parked line, got: %q", got)
+	if !strings.Contains(got, "polecat seat paused (parked: overrun (20 minute rule))") {
+		t.Errorf("expected the plain paused-seat line, got: %q", got)
 	}
 
 	// The session dies: the pool releases the seat now, and the daemon says
@@ -1180,8 +1187,8 @@ func TestCheckPolecatHealth_StaleParkSessionReadErrorKeepsParkedLine(t *testing.
 	if strings.Contains(got, "seat released") {
 		t.Errorf("an unanswered session read proves nothing, so the daemon must not log the seat released: %q", got)
 	}
-	if !strings.Contains(got, "agent is parked (parked: overrun (20 minute rule))") {
-		t.Errorf("expected the plain parked line, got: %q", got)
+	if !strings.Contains(got, "polecat seat paused (parked: overrun (20 minute rule))") {
+		t.Errorf("expected the plain paused-seat line, got: %q", got)
 	}
 
 	// The read answers and finds no session: the pool releases the seat now,
@@ -1235,7 +1242,7 @@ func TestCheckPolecatHealth_StaleFreezeWithDeadSessionKeepsParkedLine(t *testing
 	if strings.Contains(got, "CRASH DETECTED") {
 		t.Errorf("a frozen seat must not trigger CRASH DETECTED, got: %q", got)
 	}
-	if !strings.Contains(got, "agent is parked (frozen: restart budget exhausted)") {
-		t.Errorf("expected the plain held line for the freeze, got: %q", got)
+	if !strings.Contains(got, "polecat seat paused (frozen: restart budget exhausted)") {
+		t.Errorf("expected the plain paused-seat line for the freeze, got: %q", got)
 	}
 }
