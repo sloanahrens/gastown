@@ -17,6 +17,11 @@ const (
 	GateLogRetention = 14 * 24 * time.Hour
 	// gateLogExt is the suffix of a kept log. The prune touches nothing else.
 	gateLogExt = ".log"
+	// gateLogNanoFloor is the smallest stamp a kept log's name can carry in
+	// nanoseconds. A unix time in seconds stays below it for tens of thousands
+	// of years, a unix time in nanoseconds passed it in 1970, so one comparison
+	// tells the two resolutions apart (gt-zua7o).
+	gateLogNanoFloor = int64(1_000_000_000_000)
 )
 
 // GateLogDir is the directory a rig's kept gate logs live in:
@@ -135,17 +140,23 @@ func pruneGateLogs(fs gateLogFS, dir string, now time.Time) error {
 }
 
 // gateLogTime is when a kept log's name says it was written: the unix time
-// keepGateLog puts after the short sha. It reports false for a name that
-// carries none.
+// keepGateLog puts after the short sha, in nanoseconds for the logs kept before
+// gt-zua7o. It reports false for a name that carries none.
 func gateLogTime(name string) (time.Time, bool) {
 	stamp := strings.TrimSuffix(name, gateLogExt)
 	dash := strings.LastIndexByte(stamp, '-')
 	if dash < 0 {
 		return time.Time{}, false
 	}
-	sec, err := strconv.ParseInt(stamp[dash+1:], 10, 64)
+	v, err := strconv.ParseInt(stamp[dash+1:], 10, 64)
 	if err != nil {
 		return time.Time{}, false
 	}
-	return time.Unix(sec, 0), true
+	// A legacy name read as seconds would date its log to the year 58 million,
+	// so the prune would keep it forever. Reading both resolutions is what
+	// retires those files (gt-zua7o).
+	if v >= gateLogNanoFloor {
+		return time.Unix(0, v), true
+	}
+	return time.Unix(v, 0), true
 }

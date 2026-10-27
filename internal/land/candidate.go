@@ -41,7 +41,9 @@ const (
 	// is the log kept for a rejection, and the whole of it is what the note's
 	// excerpt falls back to when the tail names no failure: the failure can sit
 	// far enough from the end that 16 KiB of passing packages hides it
-	// (gt-fn9e6.25, gt-wwqx8).
+	// (gt-fn9e6.25, gt-wwqx8). The bound is a ceiling on the request, not its
+	// size: the server returns a shorter log whole, so only a log longer than
+	// this transfers this much (gt-zua7o).
 	candidateFullLogBytes = 2 << 20
 	// candidateStatusErrorTolerance is how many consecutive status read errors
 	// the wait absorbs before it gives up. A read error says nothing about the
@@ -206,10 +208,10 @@ type CandidateResult struct {
 	Tail string
 	// GateLog is the job log the gate read, kept on disk for a rejected gate so
 	// the rework note's excerpt can be checked against it after the run record
-	// is gone (gt-wwqx8). It is the whole log, bounded at candidateFullLogBytes:
-	// a log longer than that is kept as the capped read, its last
-	// candidateFullLogBytes bytes. Empty when no log was kept: a gate built with
-	// no log directory, an unreadable log, or a write that failed.
+	// is gone (gt-wwqx8). It is the whole log: a log longer than
+	// candidateFullLogBytes is kept as its last candidateFullLogBytes bytes,
+	// the widest read this bead allows. Empty when no log was kept: a gate built
+	// with no log directory, an unreadable log, or a write that failed.
 	GateLog string
 	// RunStatus is the status of the run that tested SHA: for a red context,
 	// whether the run behind it ran, or ended without judging the work. It is
@@ -512,7 +514,9 @@ func (g *CandidateGate) runFor(parent context.Context, sha string) (forgejo.Acti
 // returned fewer bytes than the cap), so the head -- where the runner prints a
 // step marker -- is in hand. One read serves both: a kept log wider than the one
 // the verdict was read from would cost a second Forgejo request on every red
-// (gt-fn9e6.25, gt-wwqx8, gt-zua7o).
+// (gt-fn9e6.25, gt-wwqx8, gt-zua7o). It is also the cheapest read that holds the
+// whole log: the old tail-then-widen pair could spend two requests where this
+// spends one, and a log under the cap is returned at its own length.
 func (g *CandidateGate) jobLog(parent context.Context, wf GateWorkflow, run forgejo.ActionRun) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(parent, g.callTimeout())
 	defer cancel()

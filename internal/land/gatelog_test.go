@@ -85,24 +85,30 @@ func TestKeepGateLogReportsItsFailures(t *testing.T) {
 // TestPruneGateLogsReadsTheNamesNotTheStat: retention is decided by the time a
 // log's name carries, so a kept log is aged by the clock that wrote it and not
 // by a filesystem mtime from another one (gt-zua7o). The entries here cannot be
-// stat'ed at all: a prune that asked would fail.
+// stat'ed at all: a prune that asked would fail. A name written before
+// gt-zua7o carries the same time in nanoseconds and ages the same way.
 func TestPruneGateLogsReadsTheNamesNotTheStat(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 27, 18, 0, 0, 0, time.UTC)
 	expired := fmt.Sprintf("deadbeef-%d.log", now.Add(-GateLogRetention-time.Hour).Unix())
 	recent := fmt.Sprintf("cafebabe-%d.log", now.Add(-GateLogRetention+time.Hour).Unix())
+	legacyExpired := fmt.Sprintf("deadbeef-%d.log", now.Add(-GateLogRetention-time.Hour).UnixNano())
+	legacyRecent := fmt.Sprintf("cafebabe-%d.log", now.Add(-GateLogRetention+time.Hour).UnixNano())
 	var removed []string
 	fs := gateLogFS{
 		readDir: func(string) ([]os.DirEntry, error) {
-			return []os.DirEntry{agedEntry{name: expired}, agedEntry{name: recent}}, nil
+			return []os.DirEntry{
+				agedEntry{name: expired}, agedEntry{name: recent},
+				agedEntry{name: legacyExpired}, agedEntry{name: legacyRecent},
+			}, nil
 		},
 		remove: func(path string) error { removed = append(removed, filepath.Base(path)); return nil },
 	}
 	if err := pruneGateLogs(fs, "/kept/gastown", now); err != nil {
 		t.Fatalf("pruneGateLogs: %v; the prune needs no stat", err)
 	}
-	if !slices.Equal(removed, []string{expired}) {
-		t.Fatalf("removed %v; want only the log whose name is past retention", removed)
+	if !slices.Equal(removed, []string{expired, legacyExpired}) {
+		t.Fatalf("removed %v; want only the logs whose name is past retention, seconds or nanoseconds", removed)
 	}
 }
 
@@ -146,16 +152,29 @@ func TestCandidateGateKeepsTheRejectedJobLog(t *testing.T) {
 	f := newLandFixture(t)
 	dir := writeGateWorkflow(t, gateWorkflowYAML)
 	now := time.Date(2026, 10, 27, 18, 0, 0, 0, time.UTC)
+	tailCapLog := gateLogPastTheTailCap(redGateLog())
+	// A log longer than the read bound: the gate keeps its last
+	// candidateFullLogBytes bytes, the widest read the bead allows.
+	fullCapLog := strings.Repeat(gateJobLog("ok  \tgithub.com/x/filler\t0.1s"), candidateFullLogBytes/40+1) + redGateLog()
 	tests := []struct {
 		name string
 		log  string
+		// want is the part of the log the gate keeps: all of it, or the last
+		// candidateFullLogBytes bytes of a log past the bound.
+		want string
 	}{
-		{name: "a short log", log: redGateLog()},
+		{name: "a short log", log: redGateLog(), want: redGateLog()},
 		{
 			// The failure sits above more than the excerpt's tail cap: the tail
 			// alone would name nothing, and the whole log is what is kept.
 			name: "a log past the tail cap",
-			log:  gateLogPastTheTailCap(redGateLog()),
+			log:  tailCapLog,
+			want: tailCapLog,
+		},
+		{
+			name: "a log past the full cap",
+			log:  fullCapLog,
+			want: fullCapLog[len(fullCapLog)-candidateFullLogBytes:],
 		},
 	}
 	for _, tt := range tests {
@@ -178,8 +197,8 @@ func TestCandidateGateKeepsTheRejectedJobLog(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reading the kept log: %v", err)
 			}
-			if string(kept) != tt.log {
-				t.Fatalf("kept %d bytes; want the whole log the gate read, %d bytes", len(kept), len(tt.log))
+			if string(kept) != tt.want {
+				t.Fatalf("kept %d bytes; want the %d bytes of the log the gate keeps", len(kept), len(tt.want))
 			}
 			// CI output can carry what a failing step printed, secrets included.
 			info, err := os.Stat(res.GateLog)
@@ -298,12 +317,19 @@ func TestCandidateGatePrunesGateLogsPastRetention(t *testing.T) {
 	}
 	expired := keptAt(now.Add(-GateLogRetention - time.Hour))
 	recent := keptAt(now.Add(-GateLogRetention + time.Hour))
+	// Logs kept before gt-zua7o carry the same time in nanoseconds. They are
+	// dated by it, so the expired one goes and the recent one stays.
+	keptAtNano := func(at time.Time) string {
+		return filepath.Join(dir, fmt.Sprintf("cafebabe-%d.log", at.UnixNano()))
+	}
+	legacyExpired := keptAtNano(now.Add(-GateLogRetention - time.Hour))
+	legacyRecent := keptAtNano(now.Add(-GateLogRetention + time.Hour))
 	// Files the gate did not write are not the prune's to remove: another
 	// suffix, and log names that carry no time.
 	foreign := filepath.Join(dir, "notes.txt")
 	undated := filepath.Join(dir, "cafebabe.log")
 	unstamped := filepath.Join(dir, "deadbeef-x.log")
-	for _, path := range []string{expired, recent, foreign, undated, unstamped} {
+	for _, path := range []string{expired, recent, legacyExpired, legacyRecent, foreign, undated, unstamped} {
 		if err := os.WriteFile(path, []byte("kept\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -316,10 +342,12 @@ func TestCandidateGatePrunesGateLogsPastRetention(t *testing.T) {
 	if res.State != CandidateFailed {
 		t.Fatalf("state = %v, want failed (err %v)", res.State, res.Err)
 	}
-	if _, err := os.Stat(expired); !os.IsNotExist(err) {
-		t.Errorf("the log past retention was not removed (stat: %v)", err)
+	for _, path := range []string{expired, legacyExpired} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("the log past retention was not removed (stat: %v)", err)
+		}
 	}
-	for _, path := range []string{recent, foreign, undated, unstamped, res.GateLog} {
+	for _, path := range []string{recent, legacyRecent, foreign, undated, unstamped, res.GateLog} {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("%s was removed or never written: %v", path, err)
 		}
