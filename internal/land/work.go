@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/authorkind"
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
@@ -102,8 +103,9 @@ func (w Work) Candidate() string {
 }
 
 // PolecatBranchPrefix opens the branch a polecat's work is pushed as:
-// polecat/<polecat>/<bead>, sometimes with a +<mutation> suffix.
-const PolecatBranchPrefix = "polecat/"
+// polecat/<polecat>/<bead>, sometimes with a +<mutation> suffix. It is the
+// prefix the author-kind rule reads a seat from (authorkind.PolecatPrefix).
+const PolecatBranchPrefix = authorkind.PolecatPrefix
 
 // seat is the seat a landing's spans belong to, or "" when the landing has no
 // polecat seat. It is read from the branch, which the landing fetched from the

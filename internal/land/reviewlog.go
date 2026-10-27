@@ -44,6 +44,22 @@ type ReviewRecord struct {
 	// records none, and lines written before the field carry none
 	// (gt-mukgk.6).
 	Agent string `json:"agent,omitempty"`
+	// Branch is the branch the reviewed work was submitted on — the author's,
+	// not the merge candidate — so the review's seat is on the line rather
+	// than in the work bead's notes, which a rework and a hand edit rewrite
+	// (gt-b9j3o.16).
+	Branch string `json:"branch,omitempty"`
+	// AuthorKind is the kind of seat that wrote Branch: polecat, crew,
+	// overseer or unknown (authorkind.Kind). Lines written before the field
+	// carry none, and a reader attributes them from the bead's notes as it did
+	// before (gt-b9j3o.14, gt-b9j3o.16).
+	AuthorKind string `json:"author_kind,omitempty"`
+	// PromptSHA is the stored prompt the author seat ran: the sha256 the spawn
+	// stamped on the work bead (promptstamp.Format). It is written only when
+	// the bead carries that seat's stamp — a crew landing, an older bead and a
+	// spawn that stored no prompt carry no field rather than an empty one
+	// (gt-js6di, gt-b9j3o.16).
+	PromptSHA string `json:"prompt_sha,omitempty"`
 	// Findings is how many findings the verdict carried, whatever their
 	// severity.
 	Findings int `json:"findings"`

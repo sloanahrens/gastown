@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/authorkind"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/promptstamp"
 )
 
 // The reviews log is the file the dashboard's rework table reads: one line per
@@ -120,8 +122,10 @@ func TestLandLogsEachOMVerdict(t *testing.T) {
 	}
 	at := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	want := []ReviewRecord{
-		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 1, Score: 0.3, Verdict: VerdictRequestChanges, Findings: 1, Bar: 0.8, At: at},
-		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 2, Score: 0.92, Verdict: VerdictApprove, Findings: 1, Bar: 0.8, At: at},
+		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 1, Score: 0.3, Verdict: VerdictRequestChanges, Findings: 1, Bar: 0.8, At: at,
+			Branch: f.work.Branch, AuthorKind: authorkind.Polecat},
+		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 2, Score: 0.92, Verdict: VerdictApprove, Findings: 1, Bar: 0.8, At: at,
+			Branch: f.work.Branch, AuthorKind: authorkind.Polecat},
 	}
 	if len(recs) != len(want) || recs[0] != want[0] || recs[1] != want[1] {
 		t.Fatalf("review log = %+v, want %+v", recs, want)
@@ -315,5 +319,174 @@ func TestReviewRecordRejectedIsOptionalOnTheLine(t *testing.T) {
 	raw, _ := os.ReadFile(f.Path)
 	if strings.Contains(string(raw), `"rejected"`) {
 		t.Errorf("a record that is not rejected wrote the field:\n%s", raw)
+	}
+}
+
+// cutBranch makes branch on origin carry the fixture's change and points the
+// fixture's work and its ready note at it, so a review's author branch is not
+// the fixture's polecat branch.
+func (f *landFixture) cutBranch(branch string) {
+	f.t.Helper()
+	f.git.SetRef(f.t, f.origin, "refs/heads/"+branch, f.base)
+	head := f.git.Commit(f.t, f.origin, branch, "feat: add b", map[string]string{"b.txt": "work\n"})
+	f.work.Branch, f.work.Head = branch, head
+	f.bd.Seed(beads.Issue{ID: f.work.BeadID, Title: "add b", Status: "hooked", Type: "task",
+		Assignee: "gastown/polecats/opal", Labels: []string{LabelReadyToLand}, Notes: FormatReadyNote(f.work)})
+}
+
+// What the review log says about the author is on its line: the branch the
+// work came in on and the kind of seat that wrote it, so the per-kind view
+// reads no bead's notes (gt-b9j3o.16).
+func TestLandRecordsTheAuthorsBranchAndKind(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, branch, wantKind string }{
+		{"a polecat's branch", "polecat/opal/gt-abc+x1", authorkind.Polecat},
+		{"a crew member's branch", "crew/merlin/gt-abc", authorkind.Crew},
+		{"the overseer's own branch", "crew/overseer/gt-abc", authorkind.Overseer},
+		{"a branch the town does not name by prefix", "merlin/gt-abc", authorkind.Unknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := barFixture(t, "0.8")
+			f.cutBranch(tc.branch)
+			reviews := reviewsFileIn(t)
+			l := f.lander()
+			l.Reviews = reviews
+			if _, err := l.Land(context.Background(), f.work); err != nil {
+				t.Fatalf("Land: %v", err)
+			}
+			recs, err := reviews.Since(time.Time{})
+			if err != nil || len(recs) != 1 {
+				t.Fatalf("review log = %+v, %v; want the one verdict", recs, err)
+			}
+			if recs[0].Branch != tc.branch || recs[0].AuthorKind != tc.wantKind {
+				t.Errorf("record carries branch %q and kind %q, want %q and %q",
+					recs[0].Branch, recs[0].AuthorKind, tc.branch, tc.wantKind)
+			}
+			raw, err := os.ReadFile(reviews.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{`"branch":"` + tc.branch + `"`, `"author_kind":"` + tc.wantKind + `"`} {
+				if !strings.Contains(string(raw), want) {
+					t.Errorf("the log line lacks %s:\n%s", want, raw)
+				}
+			}
+		})
+	}
+}
+
+// The prompt the author seat ran is on the review's line when the spawn
+// stamped it on the work bead, and left out entirely when it did not: an empty
+// prompt_sha would read as a prompt nobody stored (gt-b9j3o.16). The stamps
+// are built with the spawn's own rule (promptstamp) and posted in the order a
+// bead's store keeps them, oldest first, so the last one a rework respawn
+// posted is the one the record names.
+func TestLandRecordsThePromptStampWhenTheBeadCarriesOne(t *testing.T) {
+	t.Parallel()
+	const stored = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	stamp := promptstamp.Format(stored, 4096)
+	seat := promptstamp.Author("gastown", "opal")
+	for _, tc := range []struct {
+		name, author string
+		comments     []string
+		want         string
+	}{
+		{"the author seat's stamp", seat, []string{stamp}, stored[:promptstamp.HashLen]},
+		{"the newest stamp, after a rework respawn stamped again", seat,
+			[]string{stamp, promptstamp.Format("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 4200)}, "ffffffffffff"},
+		{"no stamp on the bead", "", nil, ""},
+		{"a stamp another seat wrote", promptstamp.Author("gastown", "corpus"), []string{stamp}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := barFixture(t, "0.8")
+			for _, comment := range tc.comments {
+				if err := f.bd.AddCommentAs(f.work.BeadID, tc.author, comment); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reviews := reviewsFileIn(t)
+			l := f.lander()
+			l.Reviews = reviews
+			if _, err := l.Land(context.Background(), f.work); err != nil {
+				t.Fatalf("Land: %v", err)
+			}
+			recs, err := reviews.Since(time.Time{})
+			if err != nil || len(recs) != 1 {
+				t.Fatalf("review log = %+v, %v; want the one verdict", recs, err)
+			}
+			if recs[0].PromptSHA != tc.want {
+				t.Errorf("record carries prompt_sha %q, want %q", recs[0].PromptSHA, tc.want)
+			}
+			raw, err := os.ReadFile(reviews.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			has := strings.Contains(string(raw), `"prompt_sha"`)
+			if has != (tc.want != "") {
+				t.Errorf("the log line carries prompt_sha = %v, want %v:\n%s", has, tc.want != "", raw)
+			}
+		})
+	}
+}
+
+// A bead whose comments cannot be read is reviewed without the prompt stamp:
+// the record carries no prompt_sha rather than failing the landing, and the
+// log names the read that failed so the empty field is not read as a bead with
+// no stamp (gt-b9j3o.16).
+func TestLandRecordsNoPromptWhenTheBeadsCommentsCannotBeRead(t *testing.T) {
+	t.Parallel()
+	f := barFixture(t, "0.8")
+	if err := f.bd.AddCommentAs(f.work.BeadID, promptstamp.Author("gastown", "opal"),
+		promptstamp.Format("0123456789abcdef", 4096)); err != nil {
+		t.Fatal(err)
+	}
+	reviews := reviewsFileIn(t)
+	var logged strings.Builder
+	l := f.lander()
+	l.Reviews = reviews
+	l.Out = &logged
+	l.Beads = &failingBeads{Fake: f.bd, failComments: true}
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	recs, err := reviews.Since(time.Time{})
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("review log = %+v, %v; want the one verdict", recs, err)
+	}
+	if recs[0].PromptSHA != "" {
+		t.Errorf("record carries prompt_sha %q, want none when the comments could not be read", recs[0].PromptSHA)
+	}
+	// The work-item read's own line, not the accepted-risk read's, which fails
+	// on the same bead: dropping either would hide which half lost its input.
+	if s := logged.String(); !strings.Contains(s, "om reads the brief without them, and the review record carries no prompt") {
+		t.Errorf("the landing log does not name the failed work-item read:\n%s", s)
+	}
+}
+
+// A record line written before branch, author_kind and prompt_sha parses as
+// the record it was: the fields stay empty rather than making the line
+// unreadable or its author unknown-shaped (gt-b9j3o.16).
+func TestReviewRecordReadsALineFromBeforeTheAuthorFields(t *testing.T) {
+	t.Parallel()
+	f := reviewsFileIn(t)
+	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"bead":"gt-old","rig":"gastown","attempt":2,"score":0.7,"verdict":"request_changes","agent":"opus","findings":3,"bar":0.8,"at":"2026-10-24T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(f.Path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := f.Since(time.Time{})
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("Since = %+v, %v; want the old line read", recs, err)
+	}
+	got := recs[0]
+	if got.Branch != "" || got.AuthorKind != "" || got.PromptSHA != "" {
+		t.Errorf("the old line read as %+v, want no branch, author_kind or prompt_sha", got)
+	}
+	if got.Agent != "opus" || got.Attempt != 2 || got.Verdict != VerdictRequestChanges {
+		t.Errorf("the old line's own fields read as %+v", got)
 	}
 }
