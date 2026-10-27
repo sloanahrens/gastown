@@ -74,7 +74,7 @@ func (r *Run) RegistryProblem() string {
 	// sandbox-records directory, left in an environment.
 	if strings.HasPrefix(r.Cfg.Registry, "/") || strings.HasPrefix(r.Cfg.Registry, "./") ||
 		strings.HasPrefix(r.Cfg.Registry, "../") || strings.HasPrefix(r.Cfg.Registry, "~") {
-		return fmt.Sprintf("POLECAT_IMAGE_REGISTRY=%s is a path, not a host:port (the sandbox records directory is POLECAT_IMAGE_SANDBOX_RECORDS now)", r.Cfg.Registry)
+		return fmt.Sprintf("POLECAT_IMAGE_REGISTRY=%s is a path, not a host:port", r.Cfg.Registry)
 	}
 	if _, err := r.looker()(r.Cfg.Crane); err != nil {
 		return fmt.Sprintf("POLECAT_IMAGE_REGISTRY=%s is set but %s is not installed", r.Cfg.Registry, r.Cfg.Crane)
@@ -94,7 +94,8 @@ func (r *Run) PublishState() string {
 // PublishTags tags and pushes each local tag of the image. The image is saved
 // and pushed once, under its first tag, through TarDir; every other tag is made
 // on the registry with crane tag, which copies no layer (gt-roa0c). It stops at
-// the first failure, logs why, and removes nothing.
+// the first failure, logs why, and removes nothing. A tag list with nothing to
+// push is a failure too: the step did not publish the image.
 func (r *Run) PublishTags() error {
 	refs := r.call(r.Cfg.Docker, "image", "inspect", "--format", repoTagsFormat, r.Cfg.Image)
 	if refs.failed() {
@@ -102,6 +103,9 @@ func (r *Run) PublishTags() error {
 	}
 	repo, _, _ := strings.Cut(r.Cfg.Image, ":")
 	tar := filepath.Join(r.TarDir, "image.tar")
+	// published records that a tag of this image reached the registry, so an
+	// empty one is answered instead of reported complete.
+	published := false
 	// Only stdout counts: a docker warning on stderr must not read as a tag.
 	for _, ref := range strings.Split(refs.output(), "\n") {
 		if ref == "" {
@@ -125,6 +129,7 @@ func (r *Run) PublishTags() error {
 			if res.failed() {
 				return r.publishFailed(fmt.Sprintf("registry: tagging %s failed (%s); the image is %s", reg, lastLine(res.combined()), r.PublishState()))
 			}
+			published = true
 			r.Logf("registry: tagged %s", reg)
 			continue
 		}
@@ -137,7 +142,11 @@ func (r *Run) PublishTags() error {
 		}
 		_ = os.Remove(tar)
 		r.FirstPushed = reg
+		published = true
 		r.Logf("registry: pushed %s", reg)
+	}
+	if !published {
+		return r.publishFailed(fmt.Sprintf("registry: %s carries no tag to publish; the image is not published", r.Cfg.Image))
 	}
 	return nil
 }
@@ -179,6 +188,14 @@ func (r *Run) PublishUnfinished() error {
 func (r *Run) Defer(msg string) error {
 	r.Logf("%s", msg)
 	return r.FailClosed("the image was not built and published at the installed commit, so this run fails")
+}
+
+// DeferLockWait ends a run that left the image to the run holding the lock: nil
+// best effort, or a failure under fail-closed whose cause is the lock, not an
+// image that was never built.
+func (r *Run) DeferLockWait(msg string) error {
+	r.Logf("%s", msg)
+	return r.FailClosed(fmt.Sprintf("another run holds the lock %s, so this run fails", r.Cfg.LockDir))
 }
 
 // PushToRegistry publishes the image to Cfg.Registry (gt-mm7q6) and records the
@@ -227,7 +244,7 @@ func (r *Run) Republish() error {
 		return err
 	}
 	if why != "" {
-		return r.Defer("registry: " + why + "; the publish waits for the next run")
+		return r.DeferLockWait("registry: " + why + "; the publish waits for the next run")
 	}
 	return r.PushToRegistry()
 }

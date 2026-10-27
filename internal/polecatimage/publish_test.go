@@ -142,10 +142,10 @@ func TestRegistryProblem(t *testing.T) {
 		want     string
 	}{
 		{name: "a host and port", registry: testRegistry},
-		{name: "an absolute path", registry: "/tmp/records", want: "POLECAT_IMAGE_REGISTRY=/tmp/records is a path, not a host:port (the sandbox records directory is POLECAT_IMAGE_SANDBOX_RECORDS now)"},
-		{name: "a relative path", registry: "./records", want: "POLECAT_IMAGE_REGISTRY=./records is a path, not a host:port (the sandbox records directory is POLECAT_IMAGE_SANDBOX_RECORDS now)"},
-		{name: "a parent path", registry: "../records", want: "POLECAT_IMAGE_REGISTRY=../records is a path, not a host:port (the sandbox records directory is POLECAT_IMAGE_SANDBOX_RECORDS now)"},
-		{name: "a home path", registry: "~/.records", want: "POLECAT_IMAGE_REGISTRY=~/.records is a path, not a host:port (the sandbox records directory is POLECAT_IMAGE_SANDBOX_RECORDS now)"},
+		{name: "an absolute path", registry: "/tmp/records", want: "POLECAT_IMAGE_REGISTRY=/tmp/records is a path, not a host:port"},
+		{name: "a relative path", registry: "./records", want: "POLECAT_IMAGE_REGISTRY=./records is a path, not a host:port"},
+		{name: "a parent path", registry: "../records", want: "POLECAT_IMAGE_REGISTRY=../records is a path, not a host:port"},
+		{name: "a home path", registry: "~/.records", want: "POLECAT_IMAGE_REGISTRY=~/.records is a path, not a host:port"},
 		{name: "no crane", registry: testRegistry, noCrane: true, want: "POLECAT_IMAGE_REGISTRY=" + testRegistry + " is set but crane is not installed"},
 	}
 	for _, tc := range cases {
@@ -237,12 +237,18 @@ func TestPublishTagsKeepsOnlyThisImageTags(t *testing.T) {
 			tr := newTestRun(t)
 			tr.TarDir = t.TempDir()
 			tr.reply = publishReply{refs: result{stdout: tc.ref + "\n"}}.answer(t)
-			if err := tr.PublishTags(); err != nil {
-				t.Fatalf("PublishTags() failed: %v", err)
-			}
+			err := tr.PublishTags()
 			tagged := len(tr.callsTo("docker")) > 1
 			if tagged != tc.want {
 				t.Errorf("%q was tagged and pushed: %v, want %v", tc.ref, tagged, tc.want)
+			}
+			// A tag list with nothing this run may publish is the step's
+			// failure, not a quiet success.
+			if tc.want && err != nil {
+				t.Fatalf("PublishTags() failed: %v", err)
+			}
+			if !tc.want && !errors.Is(err, errPublish) {
+				t.Errorf("PublishTags() error = %v, want the publish step's failure", err)
 			}
 		})
 	}
@@ -256,8 +262,9 @@ func TestPublishTagsStopsAtTheFirstFailure(t *testing.T) {
 		name string
 		// refs is what docker lists for the image.
 		refs result
-		// fail answers the call that breaks.
-		fail map[string]result
+		// fail answers the call that breaks, given the scratch directory's
+		// tarball path.
+		fail func(tar string) map[string]result
 		// wantLog is the line the failure leaves.
 		wantLog string
 		// wantState is the publish state the line and the error carry.
@@ -273,29 +280,37 @@ func TestPublishTagsStopsAtTheFirstFailure(t *testing.T) {
 			notRun:    "docker tag gastown-polecat:dev " + first,
 		},
 		{
-			name:    "docker cannot tag",
-			refs:    result{stdout: "gastown-polecat:dev\n"},
-			fail:    map[string]result{callKey("docker", "tag", "gastown-polecat:dev", first): {exit: 1, stderr: "denied\n"}},
+			name: "docker cannot tag",
+			refs: result{stdout: "gastown-polecat:dev\n"},
+			fail: func(string) map[string]result {
+				return map[string]result{callKey("docker", "tag", "gastown-polecat:dev", first): {exit: 1, stderr: "denied\n"}}
+			},
 			wantLog: "registry: cannot tag " + first + " (denied); the image is not published",
 			notRun:  "docker save -o",
 		},
 		{
-			name:    "the image cannot be saved",
-			refs:    result{stdout: "gastown-polecat:dev\n"},
-			fail:    map[string]result{callKey("docker", "save", "-o", filepath.Join("PLACEHOLDER", "image.tar"), first): {exit: 1, stderr: "disk full\n"}},
+			name: "the image cannot be saved",
+			refs: result{stdout: "gastown-polecat:dev\n"},
+			fail: func(tar string) map[string]result {
+				return map[string]result{callKey("docker", "save", "-o", tar, first): {exit: 1, stderr: "disk full\n"}}
+			},
 			wantLog: "registry: cannot save " + first + " to a tarball (disk full); the image is not published",
 			notRun:  "crane push",
 		},
 		{
-			name:    "the image cannot be pushed",
-			refs:    result{stdout: "gastown-polecat:dev\n"},
-			fail:    map[string]result{callKey("crane", "push", "--insecure", filepath.Join("PLACEHOLDER", "image.tar"), first): {exit: 1, stderr: "unauthorized\n"}},
+			name: "the image cannot be pushed",
+			refs: result{stdout: "gastown-polecat:dev\n"},
+			fail: func(tar string) map[string]result {
+				return map[string]result{callKey("crane", "push", "--insecure", tar, first): {exit: 1, stderr: "unauthorized\n"}}
+			},
 			wantLog: "registry: pushing " + first + " failed (unauthorized); the image is not published",
 		},
 		{
-			name:      "a later tag cannot be made on the registry",
-			refs:      result{stdout: "gastown-polecat:dev\ngastown-polecat:abc1234\n"},
-			fail:      map[string]result{callKey("crane", "tag", "--insecure", first, "abc1234"): {exit: 1, stderr: "manifest unknown\n"}},
+			name: "a later tag cannot be made on the registry",
+			refs: result{stdout: "gastown-polecat:dev\ngastown-polecat:abc1234\n"},
+			fail: func(string) map[string]result {
+				return map[string]result{callKey("crane", "tag", "--insecure", first, "abc1234"): {exit: 1, stderr: "manifest unknown\n"}}
+			},
 			wantLog:   "registry: tagging " + second + " failed (manifest unknown); the image is only partly published",
 			wantState: "only partly published",
 		},
@@ -305,21 +320,15 @@ func TestPublishTagsStopsAtTheFirstFailure(t *testing.T) {
 			t.Parallel()
 			tr := newTestRun(t)
 			tr.TarDir = t.TempDir()
-			// The tarball's name is the scratch directory's, which the run makes;
-			// the save and push cases key on the call's other arguments instead.
-			fail := tc.fail
-			tr.reply = func() func(command) result {
-				base := publishReply{refs: tc.refs}.answer(t)
-				return func(c command) result {
-					for key, res := range fail {
-						real := strings.ReplaceAll(key, filepath.Join("PLACEHOLDER", "image.tar"), filepath.Join(tr.TarDir, "image.tar"))
-						if real == callKey(c.name, c.args...) {
-							return res
-						}
+			base := publishReply{refs: tc.refs}.answer(t)
+			tr.reply = func(c command) result {
+				if tc.fail != nil {
+					if res, ok := tc.fail(filepath.Join(tr.TarDir, "image.tar"))[callKey(c.name, c.args...)]; ok {
+						return res
 					}
-					return base(c)
 				}
-			}()
+				return base(c)
+			}
 			err := tr.PublishTags()
 			if !errors.Is(err, errPublish) {
 				t.Fatalf("PublishTags() error = %v, want the publish step's failure", err)
@@ -416,6 +425,13 @@ func TestFailedPublishFailsClosed(t *testing.T) {
 			},
 			wantLog: "registry: pushing",
 		},
+		{
+			name: "the image has no tag that can be published",
+			prepare: func(t *testing.T, tr *testRun) {
+				tr.reply = publishReply{id: result{stdout: "sha256:abc\n"}, refs: result{stdout: "gastown-polecat:latest\n"}}.answer(t)
+			},
+			wantLog: "registry: gastown-polecat:dev carries no tag to publish",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -447,6 +463,22 @@ func TestFailedPublishFailsClosed(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// TestPushToRegistryDoesNotRecordAPushThatTaggedNothing pins the record of a
+// push to a push that happened: an image whose tags are all ones the step
+// skips leaves the registry empty, and a stamp there would tell the next run
+// the image is published.
+func TestPushToRegistryDoesNotRecordAPushThatTaggedNothing(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	tr.reply = publishReply{id: result{stdout: "sha256:abc\n"}, refs: result{stdout: "gastown-polecat:latest\n"}}.answer(t)
+	if err := tr.PushToRegistry(); err != nil {
+		t.Fatalf("PushToRegistry() error = %v, want the best-effort run to carry on", err)
+	}
+	if _, err := os.Stat(tr.Cfg.Published); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the push was recorded although no tag reached the registry (stat error %v)", err)
 	}
 }
 
@@ -563,6 +595,24 @@ func TestRepublishReportsALockItCannotMake(t *testing.T) {
 		t.Error("the push ran without the lock")
 	}
 	tr.wantLogged(t, "ERROR: cannot take the lock "+tr.Cfg.LockDir)
+}
+
+// TestRepublishLockWaitNamesTheLockFailsClosed keeps the fail-closed cause of a
+// push left to the lock holder apart from one that was never built.
+func TestRepublishLockWaitNamesTheLockFailsClosed(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	tr.Cfg.FailClosed = true
+	tr.reply = publishReply{id: result{stdout: "sha256:abc\n"}}.answer(t)
+	makeLock(t, tr.Cfg.LockDir, "9999", testNow)
+	t.Cleanup(tr.Cleanup)
+	err := tr.Republish()
+	if err == nil || !strings.Contains(err.Error(), "another run holds the lock "+tr.Cfg.LockDir) {
+		t.Errorf("Republish() = %v, want the lock that holds the push", err)
+	}
+	if strings.Contains(err.Error(), "was not built") {
+		t.Errorf("Republish() = %v, want the lock named rather than a missing image", err)
+	}
 }
 
 func TestRepublish(t *testing.T) {

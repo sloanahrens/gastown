@@ -186,21 +186,41 @@ func TestMainDefersWhenASlingIsRunning(t *testing.T) {
 
 func TestMainDefersToAnotherRunsLock(t *testing.T) {
 	t.Parallel()
-	tr := newTestRun(t)
-	reply := newRunReply("abc1234")
-	reply.label = "9999999"
-	tr.reply = reply.answer(t, labelFormat(tr))
-	makeLock(t, tr.Cfg.LockDir, "9999", testNow)
-	t.Cleanup(tr.Cleanup)
-	if err := tr.Main(); err != nil {
-		t.Fatalf("Main() failed: %v", err)
-	}
-	tr.wantLogged(t, "already running (lock "+tr.Cfg.LockDir+")")
-	if got := len(tr.callsTo("make")); got != 0 {
-		t.Errorf("make was called %d times, want none", got)
-	}
-	if got := lockPID(t, tr.Cfg.LockDir); got != "9999" {
-		t.Errorf("the other run's lock now records pid %q, want 9999", got)
+	for _, failClosed := range []bool{false, true} {
+		name := "best effort"
+		if failClosed {
+			name = "fail closed"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTestRun(t)
+			tr.Cfg.FailClosed = failClosed
+			reply := newRunReply("abc1234")
+			reply.label = "9999999"
+			tr.reply = reply.answer(t, labelFormat(tr))
+			makeLock(t, tr.Cfg.LockDir, "9999", testNow)
+			t.Cleanup(tr.Cleanup)
+			err := tr.Main()
+			tr.wantLogged(t, "already running (lock "+tr.Cfg.LockDir+")")
+			if failClosed {
+				// The image a lock wait leaves unbuilt is not the cause; the
+				// run was never asked to build one this run may not touch.
+				if err == nil || !strings.Contains(err.Error(), "another run holds the lock "+tr.Cfg.LockDir) {
+					t.Errorf("Main() = %v, want the lock the run waited on", err)
+				}
+				if strings.Contains(err.Error(), "was not built") {
+					t.Errorf("Main() = %v, want the lock named rather than a missing image", err)
+				}
+			} else if err != nil {
+				t.Errorf("Main() = %v, want a deferred run to carry on", err)
+			}
+			if got := len(tr.callsTo("make")); got != 0 {
+				t.Errorf("make was called %d times, want none", got)
+			}
+			if got := lockPID(t, tr.Cfg.LockDir); got != "9999" {
+				t.Errorf("the other run's lock now records pid %q, want 9999", got)
+			}
+		})
 	}
 }
 

@@ -40,7 +40,8 @@ type Config struct {
 	// Published records the "<image id> <registry>" a complete push left, so
 	// the next run retries one that did not finish.
 	Published string
-	// Crane tags and pushes the image's later tags on the registry.
+	// Crane pushes the image's first tag and makes every later tag on the
+	// registry.
 	Crane string
 	// FailClosed makes a run that leaves the image unbuilt or unpublished fail
 	// instead of deferring (POLECAT_IMAGE_FAIL_CLOSED=1).

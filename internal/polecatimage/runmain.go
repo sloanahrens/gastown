@@ -32,7 +32,7 @@ func (r *Run) Main() error {
 		return err
 	}
 	if why != "" {
-		return r.Defer(why)
+		return r.DeferLockWait(why)
 	}
 	for i := 0; i < maxRounds; i++ {
 		installed = r.InstalledCommit()
