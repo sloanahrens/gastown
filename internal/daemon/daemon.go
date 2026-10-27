@@ -2938,6 +2938,23 @@ func parkedAge(d time.Duration) string {
 	return fmt.Sprintf("%dh%dm", m/60, m%60)
 }
 
+// The rig LED glyphs the crash-skip line quotes, as `gt rig list` prints them.
+// Their meanings are GetRigLED's (internal/cmd); this package cannot import
+// that one without a cycle, so the two states a paused seat can be confused
+// with are named once here instead of spelled into the log's format string
+// (gt-v7jod).
+const (
+	rigLEDParked  = "🅿️"
+	rigLEDStopped = "⚫"
+)
+
+// rigLEDLegend spells out the two rig states a paused polecat seat can leave
+// behind, for the crash-skip line that must tell a paused seat from a stopped
+// rig on its own.
+func rigLEDLegend() string {
+	return rigLEDParked + " parked, " + rigLEDStopped + " nothing running"
+}
+
 // checkPolecatHealth checks a single polecat's session health.
 // If the polecat has work-on-hook but the tmux session is dead, it's restarted.
 func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
@@ -2970,8 +2987,8 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 			if alive, serr := d.tmux.HasSession(sessionName); serr == nil && !alive {
 				age := parkedAge(now.Sub(st.PausedAt))
 				d.crashSkipLog.logAs(d.logger.Printf, rigName+"/"+polecatName, "parked-released",
-					fmt.Sprintf("Skipping crash detection for %s/%s: polecat seat paused %s ago (%s); seat released; recover with gt polecat check-recovery %s/%s; this is the seat, not the rig (gt rig status %s: 🅿️ parked, ⚫ nothing running)",
-						rigName, polecatName, age, rec.HoldReason(), rigName, polecatName, rigName))
+					fmt.Sprintf("Skipping crash detection for %s/%s: polecat seat paused %s ago (%s); seat released; recover with gt polecat check-recovery %s/%s; this is the seat, not the rig (gt rig status %s: %s)",
+						rigName, polecatName, age, rec.HoldReason(), rigName, polecatName, rigName, rigLEDLegend()))
 				return
 			}
 		}
