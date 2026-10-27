@@ -18,14 +18,14 @@ type doomedTx struct{ t *testing.T }
 func (d doomedTx) refuse() { d.t.Helper(); d.t.Fatal("the refused op kind reached the transaction") }
 
 func (d doomedTx) Begin(context.Context) (pgx.Tx, error) { d.refuse(); return nil, nil }
-func (d doomedTx) Commit(context.Context) error         { d.refuse(); return nil }
-func (d doomedTx) Rollback(context.Context) error       { d.refuse(); return nil }
+func (d doomedTx) Commit(context.Context) error          { d.refuse(); return nil }
+func (d doomedTx) Rollback(context.Context) error        { d.refuse(); return nil }
 func (d doomedTx) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error) {
 	d.refuse()
 	return 0, nil
 }
 func (d doomedTx) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { d.refuse(); return nil }
-func (d doomedTx) LargeObjects() pgx.LargeObjects                        { d.refuse(); return pgx.LargeObjects{} }
+func (d doomedTx) LargeObjects() pgx.LargeObjects                         { d.refuse(); return pgx.LargeObjects{} }
 func (d doomedTx) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
 	d.refuse()
 	return nil, nil
@@ -34,9 +34,12 @@ func (d doomedTx) Exec(context.Context, string, ...any) (pgconn.CommandTag, erro
 	d.refuse()
 	return pgconn.CommandTag{}, nil
 }
-func (d doomedTx) Query(context.Context, string, ...any) (pgx.Rows, error) { d.refuse(); return nil, nil }
-func (d doomedTx) QueryRow(context.Context, string, ...any) pgx.Row        { d.refuse(); return nil }
-func (d doomedTx) Conn() *pgx.Conn                                        { d.refuse(); return nil }
+func (d doomedTx) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	d.refuse()
+	return nil, nil
+}
+func (d doomedTx) QueryRow(context.Context, string, ...any) pgx.Row { d.refuse(); return nil }
+func (d doomedTx) Conn() *pgx.Conn                                  { d.refuse(); return nil }
 
 // The guard keeps an op kind that api gains without a case here from running
 // as a no-op write. It returns before the transaction, so the batch's own

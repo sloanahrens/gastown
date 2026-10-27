@@ -241,6 +241,7 @@ func (*Fake) Blocked(context.Context, api.ReadyFilter) (api.IssuePage, error) {
 func (*Fake) ChildrenOf(context.Context, []string) (map[string][]api.Issue, error) {
 	return nil, unimplemented("ChildrenOf")
 }
+
 // Batch applies the creates the fake models in request order, and restores the
 // issues it already holds when one fails: a refused batch leaves nothing. Any
 // other op kind is unimplemented, as the fake models no update, close or
