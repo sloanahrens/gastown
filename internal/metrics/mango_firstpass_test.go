@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,17 +75,23 @@ func firstPassVerdict(bead string, attempt int, verdict string) land.ReviewRecor
 }
 
 // firstPassBd answers a bd show with the Branch line each bead's notes carry,
-// as the attribution reads it, and records the directories it was asked in. A
-// bead the case names no branch for is a fixture bug, so the case fails rather
-// than answering a listing that would hide it.
-func firstPassBd(t *testing.T, branches map[string]string, dirs *[]string) Runner {
+// as the attribution reads it, and records the ids each call asked for. A bead
+// the case names no branch for is a fixture bug, so the case fails rather than
+// answering a listing that would hide it.
+func firstPassBd(t *testing.T, branches map[string]string, calls *[][]string) Runner {
 	t.Helper()
 	return func(_ context.Context, argv []string) ([]byte, error) {
 		if len(argv) < 4 || argv[0] != "bd" || argv[1] != "-C" || argv[3] != "show" {
 			t.Fatalf("argv = %v, want a bd show in -C", argv)
 		}
-		if dirs != nil {
-			*dirs = append(*dirs, argv[2])
+		var asked []string
+		for _, arg := range argv[4:] {
+			if id, ok := strings.CutPrefix(arg, "--id="); ok {
+				asked = append(asked, id)
+			}
+		}
+		if calls != nil {
+			*calls = append(*calls, asked)
 		}
 		var rows []bdListBead
 		for _, arg := range argv[4:] {
@@ -430,6 +438,58 @@ func TestMangoFirstPassSectionRefusesAFileThatNamesNoRig(t *testing.T) {
 	}
 }
 
+// TestMangoFirstPassSectionReadsBeadsInChunks holds the store read to bounded
+// command lines: a town whose merged beads outnumber reviewBeadChunk is one bd
+// call per chunk, never one call carrying every id.
+func TestMangoFirstPassSectionReadsBeadsInChunks(t *testing.T) {
+	t.Parallel()
+	const beads = 2*reviewBeadChunk + 2
+	landings := make([]land.LandingRecord, 0, beads)
+	reviews := make([]land.ReviewRecord, 0, beads)
+	branches := make(map[string]string, beads)
+	for i := 0; i < beads; i++ {
+		id := fmt.Sprintf("gt-%03d", i)
+		landings = append(landings, firstPassLanded(id, firstPassAt))
+		reviews = append(reviews, firstPassVerdict(id, 1, land.VerdictApprove))
+		branches[id] = "polecat/alfa/" + id
+	}
+	town := firstPassTown(t, map[string][]land.LandingRecord{"gastown": landings}, reviews...)
+	var calls [][]string
+	text, err := MangoFirstPassSection(context.Background(), Env{
+		Town: town, ReadFile: os.ReadFile, ReadDir: listDir,
+		Run: firstPassBd(t, branches, &calls),
+	}, time.Time{})
+	if err != nil {
+		t.Fatalf("MangoFirstPassSection: %v", err)
+	}
+	if want := beads / reviewBeadChunk; len(calls) < want {
+		t.Errorf("bd show ran %d time(s), want the %d chunks' reads", len(calls), want+1)
+	}
+	for i, asked := range calls {
+		if len(asked) > reviewBeadChunk {
+			t.Errorf("call %d asked for %d ids, want at most %d", i, len(asked), reviewBeadChunk)
+		}
+	}
+	want := fmt.Sprintf("| polecat | %d | %d | 100.0%% | %d | 1.0 |", beads, beads, beads)
+	if !strings.Contains(text, want) {
+		t.Errorf("text = %q, want it to hold %q", text, want)
+	}
+}
+
+// TestMangoFirstPassSectionRefusesAMissingLandingsDirectory drives a read that
+// cannot find the directory: it is an error naming the path, not a town that
+// merged nothing.
+func TestMangoFirstPassSectionRefusesAMissingLandingsDirectory(t *testing.T) {
+	t.Parallel()
+	_, err := mangoFirstPassSection(context.Background(), Env{
+		Town: t.TempDir(), ReadFile: os.ReadFile, Run: firstPassBd(t, nil, nil),
+		ReadDir: func(string) ([]DirEntry, error) { return nil, fs.ErrNotExist },
+	}, time.Time{}, nil, 0)
+	if err == nil || !strings.Contains(err.Error(), "landings directory") {
+		t.Fatalf("err = %v, want a refusal naming the landings directory", err)
+	}
+}
+
 // TestFirstPassReviewsRefusesARigThatIsNotOnePathElement holds the attribution
 // to a rig name it may join to a directory: the review log is a file, and a rig
 // read from it is never a path.
@@ -452,7 +512,10 @@ func TestCountFirstPassCountsABeadOnce(t *testing.T) {
 	t.Parallel()
 	table := CountFirstPass(
 		[]MergedBead{{Rig: "gastown", Bead: "gt-a"}, {Rig: "gastown", Bead: "gt-a"}},
-		[]FirstPassReview{{Rig: "gastown", Bead: "gt-a", Verdict: land.VerdictApprove, AuthorKind: AuthorKindPolecat}},
+		[]AttributedRecord{{
+			Record:     land.ReviewRecord{Rig: "gastown", BeadID: "gt-a", Verdict: land.VerdictApprove},
+			AuthorKind: AuthorKindPolecat,
+		}},
 	)
 	if got := table.Rows[0]; got.Beads != 1 || got.FirstPass != 1 || got.Reviews != 1 {
 		t.Errorf("polecat row = %+v, want one bead, one first pass, one review", got)
@@ -533,6 +596,21 @@ func TestMangoSectionNeedsItsSeams(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, c.want)
 			}
 		})
+	}
+}
+
+// TestOSEnvClearsTheDigestSeamCheck holds the town's own Env wiring to every
+// seam MangoSection requires: the section reads through OSEnv in production, so
+// the digest reaches its files rather than refusing a host for a seam the
+// production constructor leaves unset.
+func TestOSEnvClearsTheDigestSeamCheck(t *testing.T) {
+	t.Parallel()
+	_, err := MangoSection(context.Background(), OSEnv(t.TempDir()), t.TempDir(), "/opt/mango", MangoSectionOptions{})
+	if err == nil {
+		t.Fatal("MangoSection over OSEnv on an empty town succeeded, want the missing table's refusal")
+	}
+	if !strings.Contains(err.Error(), landingsName) {
+		t.Fatalf("err = %v, want the section past its seam check to %s", err, landingsName)
 	}
 }
 

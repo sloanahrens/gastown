@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -35,17 +34,6 @@ type MergedBead struct {
 	Bead string
 }
 
-// FirstPassReview is one review-log line with the author kind the review
-// attribution derived for it, so the table reads the derived kind and never
-// the branch prefix again.
-type FirstPassReview struct {
-	Rig        string
-	Bead       string
-	Verdict    string
-	Rejected   bool
-	AuthorKind string
-}
-
 // FirstPassKindRow is one author kind's line of the first-pass table: how many
 // merged beads are the kind's, how many of those were a first pass, and how
 // many reviews those beads took.
@@ -69,17 +57,17 @@ type FirstPassTable struct {
 	Unreviewed int
 }
 
-// CountFirstPass counts the merged beads by the author kind of their first
-// review: the first line the review log carries for that bead, since the log
-// is append-only and the first verdict it holds is the one the landing got
-// first. A bead is a first pass when that verdict is an approve the landing
-// did not turn away.
-func CountFirstPass(merged []MergedBead, reviews []FirstPassReview) FirstPassTable {
+// CountFirstPass counts the merged beads by the derived author kind of their
+// first review: the first line the review log carries for that bead, since the
+// log is append-only and the first verdict it holds is the one the landing got
+// first. A bead is a first pass when that verdict is an approve the landing did
+// not turn away.
+func CountFirstPass(merged []MergedBead, reviews []AttributedRecord) FirstPassTable {
 	type key struct{ Rig, Bead string }
-	first := make(map[key]FirstPassReview, len(merged))
+	first := make(map[key]AttributedRecord, len(merged))
 	lines := make(map[key]int, len(merged))
 	for _, review := range reviews {
-		k := key{Rig: review.Rig, Bead: review.Bead}
+		k := key{Rig: review.Record.Rig, Bead: review.Record.BeadID}
 		if _, ok := first[k]; !ok {
 			first[k] = review
 		}
@@ -112,7 +100,7 @@ func CountFirstPass(merged []MergedBead, reviews []FirstPassReview) FirstPassTab
 		}
 		rows[i].Beads++
 		rows[i].Reviews += lines[k]
-		if review.Verdict == land.VerdictApprove && !review.Rejected {
+		if review.Record.Verdict == land.VerdictApprove && !review.Record.Rejected {
 			rows[i].FirstPass++
 		}
 	}
@@ -131,17 +119,18 @@ func CountFirstPass(merged []MergedBead, reviews []FirstPassReview) FirstPassTab
 //
 // skipped is the landing-log lines that could not be read as a landing record,
 // which the section names so a table built from the lines around them says how
-// much of the log it could not read. A missing landings directory is a town
-// that has landed nothing yet, not a broken read.
+// much of the log it could not read.
+//
+// A missing landings directory is an error like any other failed read: the
+// review log is read from that directory first, so a section that cannot list
+// it would report a town whose landing logs it could not find as a town that
+// merged nothing.
 //
 // The caller checks Env.ReadDir and Env.ReadFile, as both section entry points
 // do.
 func mergedBeads(env Env, since time.Time) (merged []MergedBead, skipped int, err error) {
 	dir := filepath.Join(constants.TownRuntimePath(env.Town), "landings")
 	entries, err := env.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, 0, nil
-	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("landings directory %s: %w", dir, err)
 	}
@@ -195,9 +184,10 @@ func mergedBeads(env Env, since time.Time) (merged []MergedBead, skipped int, er
 }
 
 // MangoFirstPassSection renders the digest's first-pass table, reading the
-// town's review log and each rig's landing log through env, then the notes of
-// the merged beads the log reviewed, so the author kind is the one the review
-// attribution derives from the bead's branch (AttributeReviews).
+// town's review log and each rig's landing log through env and joining them to
+// the author kind the review attribution derived for each merged bead's reviews
+// (AttributeRecords), the same derived author_kind the snapshot's review group
+// counts. The section reads no branch and no bead's notes of its own.
 //
 // An unreadable log, a store whose read failed or was not a bead list, or a
 // rig that is not one path element under the town is an error: a table built
@@ -236,87 +226,22 @@ func mangoFirstPassSection(ctx context.Context, env Env, since time.Time, record
 	return firstPassSectionText(CountFirstPass(merged, reviews), since, skippedReviews, skippedLandings), nil
 }
 
-// firstPassReviews attributes the review-log records of the merged beads: the
-// author kind each verdict was judged under, derived from the branch its bead's
-// notes name, as the hourly review source derives it.
-func firstPassReviews(ctx context.Context, env Env, records []land.ReviewRecord, merged []MergedBead) ([]FirstPassReview, error) {
+// firstPassReviews joins the review records of the merged beads to the derived
+// author_kind the review attribution gives each of them (AttributeRecords).
+// Only the merged beads' records are derived: a review of a bead that never
+// merged counts in no row, so it costs no store read.
+func firstPassReviews(ctx context.Context, env Env, records []land.ReviewRecord, merged []MergedBead) ([]AttributedRecord, error) {
 	landed := make(map[MergedBead]bool, len(merged))
 	for _, bead := range merged {
 		landed[bead] = true
 	}
-	groups := map[string][]land.ReviewRecord{}
-	var rigs []string
+	wanted := make([]land.ReviewRecord, 0, len(records))
 	for _, rec := range records {
-		if !landed[MergedBead{Rig: rec.Rig, Bead: rec.BeadID}] {
-			continue
-		}
-		if _, ok := groups[rec.Rig]; !ok {
-			rigs = append(rigs, rec.Rig)
-		}
-		groups[rec.Rig] = append(groups[rec.Rig], rec)
-	}
-	sort.Strings(rigs)
-	var out []FirstPassReview
-	for _, rig := range rigs {
-		dir, ok := reviewDir(env.Town, rig)
-		if !ok {
-			return nil, fmt.Errorf("review of %s names rig %q, which is not one path element under the town",
-				groups[rig][0].BeadID, rig)
-		}
-		beads, err := firstPassBeads(ctx, env, dir, groups[rig])
-		if err != nil {
-			return nil, err
-		}
-		// Attribute each store's beads against that store's own rows: a bead
-		// id alone is not unique across a town's stores.
-		reviews := make([]Review, len(groups[rig]))
-		for i, rec := range groups[rig] {
-			reviews[i] = Review{Bead: rec.BeadID, Rig: rec.Rig}
-		}
-		attributed := AttributeReviews(reviews, beads)
-		for i, rec := range groups[rig] {
-			out = append(out, FirstPassReview{
-				Rig:        rec.Rig,
-				Bead:       rec.BeadID,
-				Verdict:    rec.Verdict,
-				Rejected:   rec.Rejected,
-				AuthorKind: attributed[i].AuthorKind,
-			})
+		if landed[MergedBead{Rig: rec.Rig, Bead: rec.BeadID}] {
+			wanted = append(wanted, rec)
 		}
 	}
-	return out, nil
-}
-
-// firstPassBeads reads the notes of the beads records names, one bd show in dir
-// for the store, so AttributeReviews can read each bead's branch. A call that
-// failed, or whose output is not a bead list, is an error; a bead the listing
-// leaves out is not, because its branch is then unknown rather than unread.
-func firstPassBeads(ctx context.Context, env Env, dir string, records []land.ReviewRecord) ([]BeadRow, error) {
-	seen := make(map[string]bool, len(records))
-	ids := make([]string, 0, len(records))
-	for _, rec := range records {
-		if seen[rec.BeadID] {
-			continue
-		}
-		seen[rec.BeadID] = true
-		ids = append(ids, rec.BeadID)
-	}
-	sort.Strings(ids)
-	argv := []string{"bd", "-C", dir, "show", "--json"}
-	for _, id := range ids {
-		// --id keeps a bead id from being read as a flag: the ids come from
-		// the review log, which this section does not write.
-		argv = append(argv, "--id="+id)
-	}
-	out, err := env.Run(ctx, argv)
-	if err != nil {
-		return nil, fmt.Errorf("bd show in %s: %w", dir, err)
-	}
-	beads, ok := ShownBeads(out)
-	if !ok {
-		return nil, fmt.Errorf("bd show in %s: the output is not a bead list", dir)
-	}
-	return beads, nil
+	return AttributeRecords(ctx, env, wanted)
 }
 
 // firstPassSectionText renders the table, the window it covers and the merged

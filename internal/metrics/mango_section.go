@@ -140,10 +140,10 @@ type MangoSectionOptions struct {
 // outDir's weekly.csv and each run target's split through env.Run, writes the
 // split under outDir/mango and the counts the backtest reads to
 // outDir/mango-summary.json. It then reads the town's review log, each rig's
-// landing log and the merged beads' notes, so the tables it ends with are the
-// digest's own reading rather than a second copy of gt land om-stats. An empty
-// binary is a host without mango: the text says so and names the directory
-// holding the CSVs, so a report still renders.
+// landing log and the derived author_kind of the merged beads' reviews, so the
+// tables it ends with are the digest's own reading rather than a second copy of
+// gt land om-stats. An empty binary is a host without mango: the text says so
+// and names the directory holding the CSVs, so a report still renders.
 func MangoSection(ctx context.Context, env Env, outDir, binary string, o MangoSectionOptions) (string, error) {
 	if o.MinSupport == 0 {
 		o.MinSupport = MangoMinSupport
