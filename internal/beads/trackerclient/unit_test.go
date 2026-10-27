@@ -96,6 +96,34 @@ func TestListFilterMapsStatusLabelsPriorityAndLeavesRigAlone(t *testing.T) {
 	}
 }
 
+// TestListRefusesFiltersTheTrackerCannotExpress: a filter the tracker's list
+// query has no field for is an error, not a silently wider answer, and List
+// sends no request for it.
+func TestListRefusesFiltersTheTrackerCannotExpress(t *testing.T) {
+	t.Parallel()
+	tc, err := client.New(client.Config{
+		BaseURL: "http://127.0.0.1:1", Token: "t", SchemaLevel: api.SchemaLevel, MaxRetries: -1,
+		HTTP: &http.Client{Transport: roundTrip(func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("List sent %s?%s for a filter it must refuse", r.URL.Path, r.URL.RawQuery)
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := New(tc, "gt")
+	for name, opts := range map[string]beads.ListOptions{
+		"NotesContains": {NotesContains: "MERGE REJECTION"},
+		"UpdatedAfter":  {UpdatedAfter: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)},
+	} {
+		if _, err := c.List(opts); !errors.Is(err, ErrListFilter) || !strings.Contains(err.Error(), name) {
+			t.Errorf("List(%s) = %v, want an ErrListFilter naming the filter", name, err)
+		}
+	}
+	if err := refusedListFilter(beads.ListOptions{Status: "all"}); err != nil {
+		t.Errorf("a filter the tracker expresses was refused: %v", err)
+	}
+}
+
 // roundTrip serves requests from handler in process: no listener, no network.
 type roundTrip http.HandlerFunc
 

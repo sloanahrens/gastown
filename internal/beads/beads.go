@@ -850,6 +850,12 @@ type ListOptions struct {
 	ClosedAfter time.Time
 	// CreatedAfter, when set, keeps only issues created at or after it.
 	CreatedAfter time.Time
+	// NotesContains, when set, keeps only issues whose notes contain it,
+	// case-insensitively (bd list --notes-contains). Issues only, not wisps.
+	NotesContains string
+	// UpdatedAfter, when set, keeps only issues updated at or after it (bd
+	// list --updated-after). Issues only, not wisps.
+	UpdatedAfter time.Time
 	// IDs, when set, keeps only the issues with these ids (bd list --id).
 	// Issues only, not wisps.
 	IDs []string
@@ -2367,6 +2373,12 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 	}
 	if !opts.CreatedAfter.IsZero() {
 		args = append(args, "--created-after="+opts.CreatedAfter.UTC().Format(time.RFC3339))
+	}
+	if opts.NotesContains != "" {
+		args = append(args, "--notes-contains="+opts.NotesContains)
+	}
+	if !opts.UpdatedAfter.IsZero() {
+		args = append(args, "--updated-after="+opts.UpdatedAfter.UTC().Format(time.RFC3339))
 	}
 	if len(opts.IDs) > 0 {
 		args = append(args, "--id="+strings.Join(opts.IDs, ","))

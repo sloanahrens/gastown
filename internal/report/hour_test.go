@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -184,6 +185,39 @@ func TestReportNoWriteGuardCoversClient(t *testing.T) {
 	}
 }
 
+// TestReportReadsBeadsThroughTheSeam pins that gt report reaches a store only
+// through beads.Client, never the raw bd escape hatch (Beads.Run). The escape
+// hatch hands out bd argv, which a non-bd adapter of the seam cannot serve,
+// so a call to it would pin the report to bd (gt-p85pw.15).
+func TestReportReadsBeadsThroughTheSeam(t *testing.T) {
+	t.Parallel()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Run" {
+				t.Errorf("%s: gt report calls Run, the raw bd escape hatch; use a beads.Client method",
+					fset.Position(call.Pos()))
+			}
+			return true
+		})
+	}
+}
+
 // reportTown writes a town from relative path → contents and returns its root.
 func reportTown(t *testing.T, files map[string]string) string {
 	t.Helper()
@@ -327,6 +361,70 @@ func TestReportHourIsReadOnly(t *testing.T) {
 	}
 	r, _ := reportRunFor(t, townRoot, guard)
 	r.Render(r.Collect())
+}
+
+// TestReportRejectionsQueryKeepsTheSameFilters pins the query gt report sends
+// for the rejection window: the seam's List call carries the same filters the
+// raw "bd list" argv used to — the MERGE REJECTION note, the window's start,
+// closed issues included, and no page cap.
+func TestReportRejectionsQueryKeepsTheSameFilters(t *testing.T) {
+	t.Parallel()
+	since := reportWindowEnd.Add(-reportHourWindow)
+	var got [][]string
+	store := WrapStore(beads.New(t.TempDir(), beads.WithRunner(
+		func(_ context.Context, args []string) ([]byte, []byte, error) {
+			got = append(got, args)
+			return []byte(`[{"id":"gt-rej","notes":"MERGE REJECTION (build): red"}]`), nil, nil
+		})))
+
+	issues, err := store.RejectedSince(since)
+	if err != nil || len(issues) != 1 || issues[0].ID != "gt-rej" {
+		t.Fatalf("RejectedSince = %v, %v; want the one issue bd listed", issues, err)
+	}
+	// The seam adds its own calls (a version handshake), so the list call is
+	// found by its verb; anything else it ran is not this query.
+	var list []string
+	for _, args := range got {
+		for _, a := range args {
+			if a == "list" {
+				list = args
+			}
+		}
+	}
+	if list == nil {
+		t.Fatalf("bd argv = %v, want a list call", got)
+	}
+	filters := map[string]string{}
+	for _, a := range list {
+		if flag, value, ok := strings.Cut(a, "="); ok {
+			filters[flag] = value
+		}
+	}
+	for flag, want := range map[string]string{
+		"--notes-contains": land.MergeRejectionNoteMarker,
+		"--updated-after":  since.UTC().Format(time.RFC3339),
+		"--status":         "all",
+		"--limit":          "0",
+	} {
+		if filters[flag] != want {
+			t.Errorf("bd %s = %q, want %q (argv %v)", flag, filters[flag], want, list)
+		}
+	}
+}
+
+// TestReportRejectionsQueryFailsWhenTheListFails: a store that cannot list
+// makes the rejection window an error, not an empty list, so the section
+// reads as unavailable rather than as a quiet hour.
+func TestReportRejectionsQueryFailsWhenTheListFails(t *testing.T) {
+	t.Parallel()
+	store := WrapStore(beads.New(t.TempDir(), beads.WithRunner(
+		func(_ context.Context, args []string) ([]byte, []byte, error) {
+			return nil, []byte("bd: database is down"), errors.New("exit status 1")
+		})))
+	_, err := store.RejectedSince(reportWindowEnd)
+	if err == nil || !strings.Contains(err.Error(), "listing the beads a rejection touched") {
+		t.Fatalf("RejectedSince = %v, want the list failure named", err)
+	}
 }
 
 // TestReportHourWindowIsTimezoneAware pins the window's two ends in both

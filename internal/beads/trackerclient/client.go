@@ -72,6 +72,12 @@ func (c *Client) Comments(id string) ([]beads.Comment, error) {
 // token's actor, which beadsfake.RunActorContract pins.
 var ErrActorOption = errors.New("trackerclient: CreateOptions.Actor is not supported: the tracker records the creator as the token's actor")
 
+// ErrListFilter is List refusing a ListOptions filter the tracker's list query
+// cannot express. Dropping one would answer the caller's narrower question
+// with a wider set, so, as with ErrActorOption, the filter is refused rather
+// than ignored, and no request is sent.
+var ErrListFilter = errors.New("trackerclient: the tracker's list query cannot express this filter")
+
 // ErrUnsupported is an admin verb the tracker does not serve: it holds issues,
 // not a bd build or a Dolt migration level, so Version and SchemaLevel have no
 // answer to give. The refusing method names itself and sends no request, so a

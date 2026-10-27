@@ -1,6 +1,7 @@
 package trackerclient
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -39,8 +40,24 @@ func listFilter(o beads.ListOptions) api.ListFilter {
 	return f
 }
 
+// refusedListFilter names the ListOptions filter the tracker's list query
+// cannot express, or nil. Dropping one would answer the caller's narrower
+// question with a wider set, so List refuses it instead.
+func refusedListFilter(o beads.ListOptions) error {
+	switch {
+	case o.NotesContains != "":
+		return fmt.Errorf("List{NotesContains}: %w", ErrListFilter)
+	case !o.UpdatedAfter.IsZero():
+		return fmt.Errorf("List{UpdatedAfter}: %w", ErrListFilter)
+	}
+	return nil
+}
+
 // List returns the issues matching opts.
 func (c *Client) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	if err := refusedListFilter(opts); err != nil {
+		return nil, err
+	}
 	f := listFilter(opts)
 	if f.Limit > 0 {
 		page, err := c.tc.List(ctx(), f)
