@@ -44,7 +44,7 @@ func assignClients(t *testing.T, actors ...string) map[string]*client.Client {
 
 // Integration tier: the guard is one row-locked step in the store and one
 // refusal kind on the wire, so two seats racing for an issue cannot both hold
-// it. ~300 ms.
+// it.
 func TestTwoClientsCannotBothClaimOneIssue(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

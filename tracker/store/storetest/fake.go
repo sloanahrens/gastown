@@ -1,8 +1,8 @@
 // Package storetest holds the in-memory store.Store for the unit tier. It
-// implements CreateIssue and GetIssues, the methods the contract's Fake cases
-// cover, and nothing more: every other method returns store.ErrUnimplemented,
-// so a unit test that reaches past them fails loudly rather than reading a
-// store that only looks modeled.
+// implements the methods its Fake-flagged contract cases cover (create and
+// get, and the claim, release and transfer guards) and nothing more: every
+// other method returns store.ErrUnimplemented, so a unit test that reaches
+// past them fails loudly rather than reading a store that only looks modeled.
 package storetest
 
 import (
@@ -111,12 +111,72 @@ func (*Fake) Assigned(context.Context, api.AssignedRequest) (api.AssignedPage, e
 func (*Fake) UpdateIssue(context.Context, string, api.UpdatePatch, api.Guard) error {
 	return unimplemented("UpdateIssue")
 }
-func (*Fake) Claim(context.Context, string) error { return unimplemented("Claim") }
-func (*Fake) Release(context.Context, string) error {
-	return unimplemented("Release")
+
+// assignVerb runs one assignment verb on issue id: it refuses a request with
+// no actor and a missing issue before change sees the row, so change only
+// decides the holder guard and the write.
+func (f *Fake) assignVerb(ctx context.Context, id, verb string, change func(*api.Issue, string) error) error {
+	actor := api.ActorFrom(ctx)
+	if actor == "" {
+		return api.Invalid("%s needs an actor; the request carries no identity", verb)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	is, ok := f.issues[id]
+	if !ok {
+		return api.NotFound(id)
+	}
+	if err := change(&is, actor); err != nil {
+		return err
+	}
+	f.issues[id] = is
+	return nil
 }
-func (*Fake) Transfer(context.Context, string, string, string) error {
-	return unimplemented("Transfer")
+
+// Claim moves the issue to in_progress for the actor on the context.
+func (f *Fake) Claim(ctx context.Context, id string) error {
+	return f.assignVerb(ctx, id, "claim", func(is *api.Issue, actor string) error {
+		if is.Assignee != "" && is.Assignee != actor {
+			return api.GuardFailed(fmt.Sprintf("%s is held by another actor", id))
+		}
+		if is.Assignee == actor && is.Status == "in_progress" {
+			return nil // nothing changes, so nothing is written
+		}
+		is.Status, is.Assignee, is.UpdatedAt = "in_progress", actor, f.now()
+		return nil
+	})
+}
+
+// Release returns the holder's issue to open and unassigned.
+func (f *Fake) Release(ctx context.Context, id string) error {
+	return f.assignVerb(ctx, id, "release", func(is *api.Issue, actor string) error {
+		if is.Assignee != actor {
+			return api.GuardFailed(fmt.Sprintf("%s is assigned to another actor", id))
+		}
+		is.Status, is.Assignee, is.UpdatedAt = "open", "", f.now()
+		return nil
+	})
+}
+
+// Transfer hands the holder's issue to assignee at status (the current status
+// when empty).
+func (f *Fake) Transfer(ctx context.Context, id, status, assignee string) error {
+	if assignee == "" {
+		return api.Invalid("transfer needs the assignee taking the issue; release leaves it unheld")
+	}
+	return f.assignVerb(ctx, id, "transfer", func(is *api.Issue, actor string) error {
+		if is.Assignee != actor {
+			return api.GuardFailed(fmt.Sprintf("%s is assigned to another actor", id))
+		}
+		if status == "" {
+			status = is.Status
+		}
+		if is.Status == status && is.Assignee == assignee {
+			return nil // nothing changes, so nothing is written
+		}
+		is.Status, is.Assignee, is.UpdatedAt = status, assignee, f.now()
+		return nil
+	})
 }
 func (*Fake) CloseIssues(context.Context, []string, string, bool) error {
 	return unimplemented("CloseIssues")

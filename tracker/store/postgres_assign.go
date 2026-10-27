@@ -24,6 +24,15 @@ func assignActor(ctx context.Context, verb string) (string, error) {
 	return actor, nil
 }
 
+// refuseClosed keeps a closed issue out of the assignment verbs: release and
+// transfer would put it back in the live set, and a claim would reopen it.
+func refuseClosed(id, status, verb string) error {
+	if status == "closed" {
+		return api.GuardFailed(fmt.Sprintf("%s is closed, so it cannot be %s", id, verb))
+	}
+	return nil
+}
+
 // Claim takes an unheld issue for the caller in one transaction.
 func (p *Postgres) Claim(ctx context.Context, id string) error {
 	actor, err := assignActor(ctx, "claim")
@@ -36,8 +45,11 @@ func (p *Postgres) Claim(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
+		if err := refuseClosed(id, cur.status, "claimed"); err != nil {
+			return err
+		}
 		if cur.assignee != "" && cur.assignee != actor {
-			return api.GuardFailed(fmt.Sprintf("%s is held by %q, not by %q", id, cur.assignee, actor))
+			return api.GuardFailed(fmt.Sprintf("%s is held by another actor", id))
 		}
 		return updateInTx(ctx, tx, id, api.UpdatePatch{Status: &inProgress, Assignee: &actor, Actor: actor}, api.Guard{})
 	})
@@ -51,7 +63,7 @@ func (p *Postgres) Release(ctx context.Context, id string) error {
 	}
 	open, unassigned := "open", ""
 	return p.inTx(ctx, func(tx pgx.Tx) error {
-		if _, err := requireHolder(ctx, tx, id, actor); err != nil {
+		if _, err := requireHolder(ctx, tx, id, actor, "released"); err != nil {
 			return err
 		}
 		return updateInTx(ctx, tx, id, api.UpdatePatch{Status: &open, Assignee: &unassigned, Actor: actor}, api.Guard{})
@@ -68,7 +80,7 @@ func (p *Postgres) Transfer(ctx context.Context, id, status, assignee string) er
 		return api.Invalid("transfer needs the assignee taking the issue; release leaves it unheld")
 	}
 	return p.inTx(ctx, func(tx pgx.Tx) error {
-		cur, err := requireHolder(ctx, tx, id, actor)
+		cur, err := requireHolder(ctx, tx, id, actor, "transferred")
 		if err != nil {
 			return err
 		}
@@ -79,15 +91,18 @@ func (p *Postgres) Transfer(ctx context.Context, id, status, assignee string) er
 	})
 }
 
-// requireHolder locks the issue and returns it, or refuses when actor is not
-// its assignee.
-func requireHolder(ctx context.Context, tx pgx.Tx, id, actor string) (current, error) {
+// requireHolder locks the issue and returns it, or refuses when it is closed or
+// actor is not its assignee.
+func requireHolder(ctx context.Context, tx pgx.Tx, id, actor, verb string) (current, error) {
 	cur, err := lockIssue(ctx, tx, id)
 	if err != nil {
 		return cur, err
 	}
+	if err := refuseClosed(id, cur.status, verb); err != nil {
+		return cur, err
+	}
 	if cur.assignee != actor {
-		return cur, api.GuardFailed(fmt.Sprintf("%s is assigned to %q, not to %q", id, cur.assignee, actor))
+		return cur, api.GuardFailed(fmt.Sprintf("%s is assigned to another actor", id))
 	}
 	return cur, nil
 }
