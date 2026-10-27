@@ -23,7 +23,10 @@
 #                            integration:./internal/cmd, and a nested module's
 #                            package as integration:./tracker/store
 #   <tier>:<pkg>:<regexp>    run it with go test -skip <regexp>
-# It defaults to empty: every tier is green (gt-6ox58).
+# It defaults to empty: every tier is green (gt-6ox58), and the container
+# trigger's entries join it (gt-e69b2).
+# TIER_SWEEP_TRIGGER=0 turns the container trigger off, so every docker.txt
+# package runs as it did before the trigger (gt-e69b2).
 # TIER_SWEEP_TIMEOUT is the per-package go test timeout (default 10m).
 # TIER_SWEEP_LOGDIR holds one log per run (default: a new temp dir).
 set -uo pipefail
@@ -47,6 +50,21 @@ skip_for() {
 		"$1:$2:"*) echo "${entry#"$1:$2:"}"; return ;;
 		esac
 	done
+}
+
+# trigger MODE ... is the sweep's whole share of the container trigger: the Go
+# command decides which docker.txt packages are due and records a passing run.
+# A failure is named here, in the sweep's own output, and leaves every container
+# package to run (gt-e69b2).
+trigger() {
+	[ "${TIER_SWEEP_TRIGGER:-1}" != 0 ] || return 0
+	go run ./internal/tiertrigger/cmd/tiertrigger "$@" && return 0
+	case "${1:-}" in
+	skips) echo "tier-sweep: TIER_SWEEP_TRIGGER: skips failed; every container package runs" >&2 ;;
+	record) echo "tier-sweep: TIER_SWEEP_TRIGGER: record failed; the next sweep runs the packages again" >&2 ;;
+	*) echo "tier-sweep: TIER_SWEEP_TRIGGER: ${1:-} failed" >&2 ;;
+	esac
+	return 0
 }
 
 red=0
@@ -167,6 +185,10 @@ for tier in "${tiers[@]}"; do
 		summary shell "$p" "$f" 0 "$names" "$((SECONDS - tier_start))"
 		;;
 	integration)
+		# TIER_SWEEP_TESTED is the commit this run tests: the record stamps it,
+		# and only while HEAD still is it (gt-e69b2).
+		export TIER_SWEEP_TESTED="$(git rev-parse HEAD 2>/dev/null || true)"
+		export TIER_SWEEP_SKIP="$TIER_SWEEP_SKIP $(trigger skips integration-docker)"
 		# A module's list leaves out every directory inside one of its nested
 		# modules: git ls-files sees those files, but the toolchain reports
 		# "main module ... does not contain package" for them. Each nested
@@ -182,6 +204,9 @@ for tier in "${tiers[@]}"; do
 		docker=($(sed -e 's/#.*//' internal/testpolicy/docker.txt | awk 'NF{print "./" $1}'))
 		read -r p1 f1 s1 n1 < <(go_tier integration . gt slot run -- env GT_TEST_DOCKER=1 :: -tags integration :: ${tagged[@]+"${tagged[@]}"})
 		read -r p2 f2 s2 n2 < <(go_tier integration-docker . gt slot run -- env GT_TEST_DOCKER=1 :: :: ${docker[@]+"${docker[@]}"})
+		# Only a passing untagged run earns the record; a red one leaves the
+		# state alone, so the next sweep runs those packages again (gt-e69b2).
+		[ "$f2" -eq 0 ] && trigger record integration-docker
 		p=$((p1 + p2)) f=$((f1 + f2)) s=$((s1 + s2))
 		# The modules' names come before the untagged ones: "untagged:"
 		# labels the group that follows it, so a nested name appended later

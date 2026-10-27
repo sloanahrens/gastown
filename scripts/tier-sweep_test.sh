@@ -4,7 +4,8 @@
 # Each case builds a throwaway repo holding the script under test and one stub
 # shell test, so no real tier runs. The integration cases add a nested module
 # and stub go and gt binaries, so which packages run where, and how a failure
-# is named, are the stubs' to report (gt-558i2).
+# is named, are the stubs' to report (gt-558i2). The trigger cases answer the
+# stub go's `run` with their own skips, failure count and exit code (gt-e69b2.3).
 set -uo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)/tier-sweep.sh"
@@ -43,7 +44,10 @@ new_repo() {
 run_tier() {
   local r=$1
   shift
-  out=$(cd "$r" && SHELL_TESTS=scripts/x_test.sh bash scripts/tier-sweep.sh "$@" 2>&1)
+  # Every case names the trigger's state: a case may not inherit one from the
+  # caller's environment. The shell tier has no container packages, so off is
+  # today's behaviour (gt-e69b2.3).
+  out=$(cd "$r" && SHELL_TESTS=scripts/x_test.sh TIER_SWEEP_TRIGGER=0 bash scripts/tier-sweep.sh "$@" 2>&1)
   rc=$?
 }
 
@@ -137,6 +141,23 @@ new_integration_repo() {
   fi
   cat >"$r/stub/go" <<'STUB'
 #!/usr/bin/env bash
+# `go run .../tiertrigger` is the container trigger: it logs its argv, answers
+# skips with STUB_TRIGGER_SKIPS, and fails a mode when STUB_TRIGGER_RC
+# (skips) or STUB_TRIGGER_RECORD_RC (record) says so.
+if [ "$1" = run ]; then
+  echo "run|$*" >>"$STUB_LOG"
+  rc=0
+  [ "${3:-}" = skips ] && rc=${STUB_TRIGGER_RC:-0}
+  [ "${3:-}" = record ] && rc=${STUB_TRIGGER_RECORD_RC:-0}
+  if [ "$rc" != 0 ]; then
+    echo "stub: the trigger could not run" >&2
+    exit "$rc"
+  fi
+  if [ "${3:-}" = skips ] && [ -n "${STUB_TRIGGER_SKIPS:-}" ]; then
+    printf '%s\n' ${STUB_TRIGGER_SKIPS}
+  fi
+  exit 0
+fi
 pkg=""
 for a in "$@"; do pkg=$a; done
 echo "$PWD|$pkg" >>"$STUB_LOG"
@@ -174,7 +195,7 @@ STUB
 # reports exactly that from the root only, so the old script is RED here.
 R=$(new_integration_repo store)
 : >"$R/stub.log"
-out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" TIER_SWEEP_TRIGGER=0 bash scripts/tier-sweep.sh integration 2>&1); rc=$?
 line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
 if [ "$rc" = 0 ] \
   && grep -Eq '^tier-sweep: integration GREEN passed=2 failed=0 skipped=0 \(logs [^)]*\) in ' <<<"$line" \
@@ -227,7 +248,7 @@ rm -rf "$R"
 # would print "dirname: missing operand" into the log of every sweep.
 R=$(new_integration_repo "")
 : >"$R/stub.log"
-out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" TIER_SWEEP_TRIGGER=0 bash scripts/tier-sweep.sh integration 2>&1); rc=$?
 line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
 if [ "$rc" = 0 ] \
   && grep -Eq '^tier-sweep: integration GREEN passed=1 failed=0 skipped=0 \(logs [^)]*\) in ' <<<"$line" \
@@ -245,7 +266,7 @@ rm -rf "$R"
 # it a second time.
 R=$(new_integration_repo "" 1)
 : >"$R/stub.log"
-out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" TIER_SWEEP_TRIGGER=0 bash scripts/tier-sweep.sh integration 2>&1); rc=$?
 line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
 if [ "$rc" = 0 ] \
   && grep -Eq '^tier-sweep: integration GREEN passed=2 failed=0 skipped=0 \(logs [^)]*\) in ' <<<"$line" \
@@ -299,7 +320,7 @@ rm -rf "$R"
 # module: here it is a root package and must run from the repo root.
 R=$(new_integration_repo store "" "extra/notgo.mod")
 : >"$R/stub.log"
-out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" TIER_SWEEP_TRIGGER=0 bash scripts/tier-sweep.sh integration 2>&1); rc=$?
 line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
 if [ "$rc" = 0 ] \
   && grep -Eq '^tier-sweep: integration GREEN passed=3 failed=0 skipped=0 \(logs [^)]*\) in ' <<<"$line" \
@@ -308,6 +329,85 @@ if [ "$rc" = 0 ] \
   pass "not a module: extra/notgo.mod leaves extra/ in the root list ($line)"
 else
   fail "not a module: rc=$rc line=$line ran=$(tr '\n' ';' <"$R/stub.log") out=$out"
+fi
+rm -rf "$R"
+
+# --- A package the trigger reports not due is skipped with today's text ---
+#
+# The sweep asks the Go command which docker.txt packages are due and folds the
+# answer into TIER_SWEEP_SKIP (gt-e69b2.3). The package the stub's skips call
+# names must not reach go test, and the line the operator reads is the one a
+# written skip list prints.
+R=$(new_integration_repo "" "" "" "internal/docker")
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" TIER_SWEEP_TRIGGER=1 STUB_TRIGGER_SKIPS="integration-docker:./internal/docker" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" = 0 ] \
+  && grep -Eq '^tier-sweep: integration GREEN passed=1 failed=0 skipped=1 \(logs [^)]*\) in ' <<<"$line" \
+  && grep -Fxq 'tier-sweep: integration-docker ./internal/docker SKIPPED (TIER_SWEEP_SKIP)' <<<"$out" \
+  && ! grep -Eq '\|\./internal/docker$' "$R/stub.log"; then
+  pass "trigger: a package it reports not due is skipped with today's text ($line)"
+else
+  fail "trigger skip: rc=$rc line=$line ran=$(tr '\n' ';' <"$R/stub.log") out=$out"
+fi
+rm -rf "$R"
+
+# --- A passing container run records the commit; a red one does not ---
+#
+# record is what lets the next sweep skip an unchanged package, and a record
+# from a red run would skip code that never passed (gt-e69b2.3).
+R=$(new_integration_repo "" "" "" "internal/docker")
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" TIER_SWEEP_TRIGGER=1 bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+if [ "$rc" = 0 ] && grep -q 'run ./internal/tiertrigger/cmd/tiertrigger record integration-docker' "$R/stub.log"; then
+  pass "trigger: a passing container run records it"
+else
+  fail "trigger record on green: rc=$rc ran=$(tr '\n' ';' <"$R/stub.log") out=$out"
+fi
+rm -rf "$R"
+
+R=$(new_integration_repo "" "" "" "internal/docker")
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" TIER_SWEEP_TRIGGER=1 STUB_FAIL="./internal/docker" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+if [ "$rc" != 0 ] && ! grep -q 'tiertrigger/cmd/tiertrigger record' "$R/stub.log"; then
+  pass "trigger: a red container run records nothing"
+else
+  fail "trigger record on red: rc=$rc ran=$(tr '\n' ';' <"$R/stub.log") out=$out"
+fi
+rm -rf "$R"
+
+# --- A trigger that cannot run warns and the sweep runs every package ---
+#
+# The failure costs a full container run, never a skipped one, and the sweep's
+# own line says so where the rest of its progress is printed (gt-e69b2.3).
+R=$(new_integration_repo "" "" "" "internal/docker")
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" TIER_SWEEP_TRIGGER=1 STUB_TRIGGER_RC=1 bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" = 0 ] \
+  && grep -q 'tier-sweep: TIER_SWEEP_TRIGGER: skips failed; every container package runs' <<<"$out" \
+  && grep -Eq '^tier-sweep: integration GREEN passed=2 failed=0 skipped=0 \(logs ' <<<"$line"; then
+  pass "trigger failure: warns in the sweep's own words and runs every package ($line)"
+else
+  fail "trigger failure: rc=$rc line=$line ran=$(tr '\n' ';' <"$R/stub.log") out=$out"
+fi
+rm -rf "$R"
+
+# --- A record that fails is named, and the sweep stays green ---
+#
+# The container run passed; only the stamp failed, so the next sweep runs the
+# packages again. That costs one run and skips nothing, so the sweep is not
+# RED, and the operator still reads why (gt-e69b2).
+R=$(new_integration_repo "" "" "" "internal/docker")
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" TIER_SWEEP_TRIGGER=1 STUB_TRIGGER_RECORD_RC=1 bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" = 0 ] \
+  && grep -q 'tier-sweep: TIER_SWEEP_TRIGGER: record failed; the next sweep runs the packages again' <<<"$out" \
+  && grep -Eq '^tier-sweep: integration GREEN passed=2 failed=0 skipped=0 \(logs ' <<<"$line"; then
+  pass "trigger record failure: named, and the sweep stays green ($line)"
+else
+  fail "trigger record failure: rc=$rc line=$line out=$out"
 fi
 rm -rf "$R"
 
