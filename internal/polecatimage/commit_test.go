@@ -58,7 +58,8 @@ func TestImageCommit(t *testing.T) {
 		{"blank lines after the label", result{stdout: "abc1234\n\n"}, "abc1234"},
 		{"no image", result{exit: 1}, ""},
 		{"stderr alone does not count", result{stderr: "warning: no such image\n", exit: 1}, ""},
-		{"label name spacing is docker's answer", result{stdout: "abc1234 \n"}, "abc1234 "},
+		{"trailing spacing is trimmed", result{stdout: "abc1234 \n"}, "abc1234"},
+		{"leading spacing is trimmed", result{stdout: " abc1234\n"}, "abc1234"},
 		{"missing label", result{stdout: "<no value>\n"}, "<no value>"},
 	}
 	for _, tc := range cases {

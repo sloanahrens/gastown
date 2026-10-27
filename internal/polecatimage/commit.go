@@ -29,15 +29,25 @@ func (r *Run) InstalledCommit() string {
 		field = field[at+1:]
 	}
 	field = strings.ReplaceAll(field, " ", "")
-	if len(field) < 7 {
+	if !isCommit(field) {
 		return ""
 	}
-	for i := 0; i < len(field); i++ {
-		if c := field[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return ""
+	return field
+}
+
+// isCommit reports a string that can only name a commit: lowercase hexadecimal
+// at least as long as the shortest sha git prints, so it cannot reach a program
+// as an option or a revision expression.
+func isCommit(s string) bool {
+	if len(s) < 7 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
 		}
 	}
-	return field
+	return true
 }
 
 // ImageCommit is the gt commit the image's label records, or "" when the image
@@ -47,7 +57,7 @@ func (r *Run) InstalledCommit() string {
 func (r *Run) ImageCommit() string {
 	format := `{{index .Config.Labels "` + r.Cfg.Label + `"}}`
 	res := r.call(r.Cfg.Docker, "image", "inspect", "--format", format, r.Cfg.Image)
-	return strings.TrimRight(res.output(), "\n")
+	return strings.TrimSpace(res.output())
 }
 
 // SameCommit reports whether two commits name the same one: each at least 7

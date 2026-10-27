@@ -47,10 +47,17 @@ func (r *Run) TakeLock() bool {
 		return false
 	}
 	if !r.StaleLock(aside) {
+		// Another run made this lock after this run read the stale one, so it
+		// goes back. When the path is taken again it stays aside instead of
+		// being removed: the directory holds that run's pid, and deleting it
+		// would release a lock its owner still believes it holds.
 		if !exists(r.Cfg.LockDir) {
-			_ = r.renamer()(aside, r.Cfg.LockDir)
+			if err := r.renamer()(aside, r.Cfg.LockDir); err != nil {
+				r.Logf("a fresh lock was renamed aside and could not be put back (%s)", aside)
+			}
+		} else {
+			r.Logf("a fresh lock was renamed aside and left in place (%s)", aside)
 		}
-		_ = os.RemoveAll(aside)
 		return false
 	}
 	r.Logf("taking over a stale lock (%s)", r.Cfg.LockDir)
@@ -60,6 +67,15 @@ func (r *Run) TakeLock() bool {
 	}
 	r.HaveLock = true
 	return true
+}
+
+// BuildLock takes the lock a build runs under, reporting "" when this run may
+// build and the script's line for a held lock otherwise.
+func (r *Run) BuildLock() string {
+	if r.TakeLock() {
+		return ""
+	}
+	return "already running (lock " + r.Cfg.LockDir + ")"
 }
 
 // LockHeld reports whether the lock names this run's pid, which is the only

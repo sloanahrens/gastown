@@ -144,8 +144,9 @@ func (r *Run) failf(format string, args ...any) error {
 }
 
 // execRun is the real runner: it starts the program with both streams captured
-// and reports 127 when it could not start, the status a shell gives it, so a
-// broken probe defers rather than reading as "nothing there".
+// and reports 127 when the program gave no exit status of its own — it could not
+// start, or a signal killed it — so every way a probe fails to answer is
+// nonzero and defers rather than reading as "nothing there".
 func execRun(c command) result {
 	cmd := exec.Command(c.name, c.args...)
 	cmd.Dir = c.dir

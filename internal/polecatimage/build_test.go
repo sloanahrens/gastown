@@ -116,14 +116,65 @@ func TestBuildAtBuildsInADetachedWorktree(t *testing.T) {
 	}
 }
 
+// TestBuildAtRefusesACommitThatIsNotHex keeps the exported entry from handing
+// git a value it could read as an option or a revision expression.
+func TestBuildAtRefusesACommitThatIsNotHex(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, commit string }{
+		{"a ref name", "main"},
+		{"an option", "--upload-pack=sh"},
+		{"a revision expression", "abc1234~1"},
+		{"uppercase hex", "ABC1234"},
+		{"too short", "abc123"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTestRun(t)
+			err := tr.BuildAt(tc.commit)
+			want := "the installed commit " + tc.commit + " is not a 7-character hex commit"
+			if err == nil || err.Error() != want {
+				t.Fatalf("BuildAt(%q) error = %v, want %q", tc.commit, err, want)
+			}
+			tr.wantLogged(t, "ERROR: "+want)
+			if calls := tr.callsTo("git"); len(calls) != 0 {
+				t.Errorf("git ran with a commit that is not hex: %q", calls)
+			}
+		})
+	}
+}
+
+// TestBuildAtRefusesAResolutionThatIsNotACommit covers a resolve that exits 0
+// with something other than a sha, which would otherwise become the worktree's
+// path.
+func TestBuildAtRefusesAResolutionThatIsNotACommit(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	b := okBuild()
+	b.resolve = result{stdout: "HEAD\n"}
+	tr.reply = b.answer(t)
+	err := tr.BuildAt(testFullSHA)
+	want := tr.Cfg.RigRepo + " resolved " + testFullSHA + ` to "HEAD", which is not a commit`
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("BuildAt() error = %v, want %q", err, want)
+	}
+	tr.wantLogged(t, "ERROR: "+want)
+	if calls := tr.callsTo("git"); len(calls) != 1 {
+		t.Errorf("git was called %d times after a resolution that is not a commit, want only the resolve", len(calls))
+	}
+	if tr.Worktree != "" {
+		t.Errorf("Worktree = %q after a refused build, want empty", tr.Worktree)
+	}
+}
+
 func TestBuildAtReportsAnUnknownCommit(t *testing.T) {
 	t.Parallel()
 	tr := newTestRun(t)
 	b := okBuild()
-	b.resolve = result{stderr: "fatal: bad revision 'nope^{commit}'\n", exit: 128}
+	b.resolve = result{stderr: "fatal: bad revision 'deadbeef^{commit}'\n", exit: 128}
 	tr.reply = b.answer(t)
-	err := tr.BuildAt("nope")
-	want := "the installed commit nope is not in " + tr.Cfg.RigRepo + ": fatal: bad revision 'nope^{commit}'"
+	err := tr.BuildAt("deadbeef")
+	want := "the installed commit deadbeef is not in " + tr.Cfg.RigRepo + ": fatal: bad revision 'deadbeef^{commit}'"
 	if err == nil || err.Error() != want {
 		t.Fatalf("BuildAt() error = %v, want %q", err, want)
 	}

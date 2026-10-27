@@ -25,10 +25,16 @@ func shortCommit(commit string) string {
 // The worktree it makes stays in Worktree for Cleanup, so a failure part way
 // through leaves nothing behind; the error it returns has already been logged.
 func (r *Run) BuildAt(commit string) error {
+	if !isCommit(commit) {
+		return r.failf("the installed commit %s is not a 7-character hex commit", commit)
+	}
 	resolved := r.call(r.Cfg.Git, "-C", r.Cfg.RigRepo, "rev-parse", "--verify", commit+"^{commit}")
-	full := strings.TrimRight(resolved.combined(), "\n")
+	full := strings.TrimSpace(resolved.combined())
 	if resolved.failed() {
 		return r.failf("the installed commit %s is not in %s: %s", commit, r.Cfg.RigRepo, full)
+	}
+	if !isCommit(full) {
+		return r.failf("%s resolved %s to %q, which is not a commit", r.Cfg.RigRepo, commit, full)
 	}
 	r.Worktree = filepath.Join(r.Cfg.BuildRoot, full)
 	if err := os.MkdirAll(r.Cfg.BuildRoot, 0o755); err != nil {

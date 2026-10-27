@@ -27,15 +27,39 @@ func TestDeferReason(t *testing.T) {
 			want:  "sandbox sling in progress",
 		},
 		{
-			name:  "nothing running",
+			name:  "an empty listing cannot be read",
 			sling: 1,
-			want:  "",
+			want:  "cannot read the sandbox listing (no NAME header)",
 		},
 		{
 			name:      "no sandboxes found",
 			sling:     1,
 			sandboxes: "No sandboxes found.\n",
 			want:      "",
+		},
+		{
+			name:      "no sandboxes found with padding",
+			sling:     1,
+			sandboxes: "  No sandboxes found.  \n",
+			want:      "",
+		},
+		{
+			name:      "a listing with no header cannot be read",
+			sling:     1,
+			sandboxes: "gt-corpus 2026-10-23\n",
+			want:      "cannot read the sandbox listing (no NAME header)",
+		},
+		{
+			name:      "a name that escapes the record directory cannot be read",
+			sling:     1,
+			sandboxes: "NAME CREATED\n../../etc/passwd 2026-10-23\n",
+			want:      "cannot read the sandbox listing (a sandbox name is not a plain file name)",
+		},
+		{
+			name:      "a dot-dot name cannot be read",
+			sling:     1,
+			sandboxes: "NAME CREATED\n.. 2026-10-23\n",
+			want:      "cannot read the sandbox listing (a sandbox name is not a plain file name)",
 		},
 		{
 			name:      "a recorded sandbox does not defer",
