@@ -86,9 +86,11 @@ const rebuttalMarker = "REBUTTAL:"
 
 // RoundsLedger is one landing's record of what each om round raised and what
 // became of it, stored at <OutDir>/rounds-<bead>.json, where a round is the
-// landing's rework attempt, the number the reviews log records as
-// ReviewRecord.Attempt (gt-yphcl). The landing path appends; gt-3l5qy settles
-// the history and hands it to om.
+// landing's rework attempt, counted from the same read as ReviewRecord.Attempt
+// but stopping at no ceiling: an over-ceiling round is still a round, and
+// clamping it would overwrite the record of the round it clamped to
+// (gt-yphcl, gt-k10bq). The landing path appends; gt-3l5qy settles the history
+// and hands it to om.
 type RoundsLedger struct {
 	// OutDir is the directory the ledger file lives in.
 	OutDir string
