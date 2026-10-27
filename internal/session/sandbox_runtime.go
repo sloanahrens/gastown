@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
@@ -121,6 +122,13 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 	}
 	files = append(files, runtimeFile{path.Join(claudeDir, promptName), promptBytes, 0o644})
 	logSystemPrompt(promptLog, spec.Polecat, promptBytes)
+	// The bytes are kept by hash so a rejection can be joined to the prompt its
+	// author had (gt-js6di). A store failure is logged and never fails the spawn.
+	if stored, _, storeErr := storePolecatPrompt(spec.TownRoot, promptBytes); storeErr != nil {
+		fmt.Fprintf(promptLog, "system prompt store %s: %v\n", spec.Polecat, storeErr)
+	} else if pruneErr := prunePolecatPrompts(spec.TownRoot, time.Now(), stored); pruneErr != nil {
+		fmt.Fprintf(promptLog, "system prompt store prune %s: %v\n", spec.Polecat, pruneErr)
+	}
 
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
