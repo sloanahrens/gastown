@@ -2,6 +2,7 @@ package beads
 
 import (
 	"errors"
+	"maps"
 	"strings"
 	"testing"
 )
@@ -111,8 +112,8 @@ func TestParseKVListJSONMalformed(t *testing.T) {
 	}
 }
 
-// An envelope with no data is an empty store, not the envelope read as a map
-// of entries (gt-p85pw.9).
+// An envelope whose data is null is an empty store, not the envelope read as a
+// map of entries (gt-p85pw.9, gt-ij4fl).
 func TestParseKVListJSONEnvelopeWithNoDataIsEmpty(t *testing.T) {
 	t.Parallel()
 	got, err := ParseKVListJSON([]byte(`{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":null}`))
@@ -121,6 +122,35 @@ func TestParseKVListJSONEnvelopeWithNoDataIsEmpty(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("entries = %v, want none", got)
+	}
+}
+
+// An object claiming bd's envelope contract without the data key is malformed:
+// bd writes the data key in every envelope, null when it has no payload, so
+// reading such an object as the store would answer entries bd never reported —
+// here, error=not found out of an error envelope (gt-ij4fl).
+func TestParseKVListJSONRefusesAnEnvelopeWithoutData(t *testing.T) {
+	t.Parallel()
+	for _, out := range []string{
+		`{"schema_version":1,"contract_version":1,"error":"not found"}`,
+		`{"contract_version":1}`,
+	} {
+		if got, err := ParseKVListJSON([]byte(out)); err == nil {
+			t.Errorf("ParseKVListJSON(%s) = %v, want an error", out, got)
+		}
+	}
+}
+
+// A bare payload carries no contract_version, so the refusal above leaves how
+// an older bd's --json output parses alone (gt-ij4fl).
+func TestParseKVListJSONKeepsTheLegacyBarePayload(t *testing.T) {
+	t.Parallel()
+	got, err := ParseKVListJSON([]byte(`{"gt.note":"text","error":"not found"}`))
+	if err != nil {
+		t.Fatalf("ParseKVListJSON: %v", err)
+	}
+	if want := map[string]string{"gt.note": "text", "error": "not found"}; !maps.Equal(got, want) {
+		t.Errorf("entries = %v, want %v", got, want)
 	}
 }
 

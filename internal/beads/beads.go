@@ -2029,10 +2029,15 @@ func IsMemoryKey(key string) bool {
 // --json object an older bd prints. A string value is kept as itself. A
 // non-string value is kept as its compact JSON text only under a memory key,
 // so bd's metadata keys do not leak into the store's view, and null is no
-// entry. An envelope with no data is an empty store.
+// entry. An envelope whose data is null is an empty store, and an object
+// claiming bd's envelope contract without the data key is refused (gt-ij4fl).
 func ParseKVListJSON(out []byte) (map[string]string, error) {
+	payload, err := kvPayload(out)
+	if err != nil {
+		return nil, fmt.Errorf("parsing kv list: %w", err)
+	}
 	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(kvPayload(out), &raw); err != nil {
+	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil, fmt.Errorf("parsing kv list: %w", err)
 	}
 	kvs := make(map[string]string, len(raw))
@@ -2062,7 +2067,11 @@ func ParseKVGetJSON(out []byte) (string, error) {
 		Key   string          `json:"key"`
 		Value json.RawMessage `json:"value"`
 	}
-	if err := json.Unmarshal(kvPayload(out), &kv); err != nil {
+	payload, err := kvPayload(out)
+	if err != nil {
+		return "", fmt.Errorf("parsing kv get: %w", err)
+	}
+	if err := json.Unmarshal(payload, &kv); err != nil {
 		return "", fmt.Errorf("parsing kv get: %w", err)
 	}
 	if !kv.Found {
@@ -2074,18 +2083,19 @@ func ParseKVGetJSON(out []byte) (string, error) {
 
 // kvPayload is the data of bd's machine envelope, or out when out is the bare
 // payload bd printed before machine mode. run unwraps the envelope already;
-// the parsers repeat it so a caller may hand them either form. An envelope
-// with no data is null, never the envelope itself: parsed as a map, its own
-// fields would read as entries.
-func kvPayload(out []byte) []byte {
+// the parsers repeat it so a caller may hand them either form. bd writes the
+// data key in every envelope, null when it has no payload, so an envelope
+// whose data is null is an empty store and never the envelope itself: parsed
+// as a map, its own fields would read as entries (gt-ij4fl).
+func kvPayload(out []byte) ([]byte, error) {
 	env, ok, err := decodeMachineEnvelope(out, "bd")
-	if err != nil || !ok {
-		return out
+	if err != nil {
+		return nil, err
 	}
-	if len(env.Data) == 0 {
-		return []byte("null")
+	if !ok {
+		return out, nil
 	}
-	return env.Data
+	return env.Data, nil
 }
 
 // kvValueText renders one kv value as text: a string as itself, any other
