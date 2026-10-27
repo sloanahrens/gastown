@@ -23,12 +23,25 @@ type Config struct {
 	// ImageFirst is --no-image-first's inverse: build and publish the sandbox
 	// image before the binary swap.
 	ImageFirst bool
+	// Worker says the arguments are a detached image build's worker, not an
+	// install: the worker runs a build this program started for
+	// --no-image-first and names no result line (gt-tpg0p.12).
+	Worker bool
+	// WorkerArgs is the worker's own arguments, after ImageWorkerFlag.
+	WorkerArgs []string
 }
 
 // Parse reads the arguments install-gt.sh accepts. On a bad argument it returns
 // the config read so far, because that is the commit the run's result line
 // still names: the script's trap reports the SHA it had reached.
 func Parse(args []string) (Config, error) {
+	// A detached image build's worker is not an install: its first argument
+	// alone routes it, before any install flag is read, because its own flags
+	// belong to the worker's parser. A worker token anywhere else is no more
+	// an install flag than any other unknown argument (gt-tpg0p.12).
+	if len(args) > 0 && args[0] == ImageWorkerFlag {
+		return Config{Worker: true, WorkerArgs: append([]string(nil), args[1:]...)}, nil
+	}
 	cfg := Config{SHA: "origin/main", Source: "manual", SlotTimeout: "600", ImageFirst: true}
 	for i := 0; i < len(args); i++ {
 		var target *string

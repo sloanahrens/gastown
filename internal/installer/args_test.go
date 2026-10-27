@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -83,12 +84,30 @@ func TestParse(t *testing.T) {
 			want: Config{SHA: "origin/main", Source: "manual", SlotRole: "--dry-run",
 				SlotTimeout: "600", ImageFirst: true},
 		},
+		{
+			name: "the worker flag first routes to the worker, unparsed as an install",
+			args: []string{ImageWorkerFlag, "--alarm", "60", "--", "/rig/polecat-image"},
+			want: Config{Worker: true, WorkerArgs: []string{"--alarm", "60", "--", "/rig/polecat-image"}},
+		},
+		{
+			name:    "the worker flag anywhere else is no install argument",
+			args:    []string{"--sha", "abc123", ImageWorkerFlag},
+			want:    Config{SHA: "abc123", Source: "manual", SlotTimeout: "600", ImageFirst: true},
+			wantErr: "install-gt: unknown argument: " + ImageWorkerFlag,
+		},
+		{
+			name: "the worker flag alone is the worker with no arguments",
+			args: []string{ImageWorkerFlag},
+			want: Config{Worker: true},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := Parse(tc.args)
-			if got != tc.want {
+			// The worker's arguments make a Config hold a slice, so the whole
+			// config is compared by value rather than by ==.
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("Parse(%q) = %+v, want %+v", tc.args, got, tc.want)
 			}
 			var gotErr string
