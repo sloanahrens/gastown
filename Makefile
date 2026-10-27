@@ -120,6 +120,8 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o plugins/app-promote/bin/app-promote ./plugins/app-promote
 	@mkdir -p plugins/polecat-image/bin
 	go build -ldflags "$(LDFLAGS)" -o plugins/polecat-image/bin/polecat-image ./plugins/polecat-image
+	@mkdir -p plugins/town-metrics/bin
+	go build -ldflags "$(LDFLAGS)" -o plugins/town-metrics/bin/town-metrics ./plugins/town-metrics
 
 # golangci-lint must be built with a Go >= go.mod's version and understand .golangci.yml version 2;
 # a stale ~/go/bin/golangci-lint fails every run with "can't load config" (2026-09-17). `make lint-tools`

@@ -13,6 +13,7 @@ digest = true
 
 [execution]
 type = "script"
+binary = "bin/town-metrics"
 timeout = "15m"
 notify_on_failure = true
 +++
@@ -26,9 +27,12 @@ without it the log holds only the rows someone collected by hand and the join
 of snapshots to landings has nothing to read, and the dashboard's panel ages
 past its 36h stale mark.
 
-`run.sh` is a script only because the daemon dispatches script plugins: it
-changes to the town root and execs `gt metrics run`. Everything the hour does is
-Go: `internal/cmd/metrics_run.go` (the hour), `internal/metrics/townlock.go` (the
+The daemon execs `bin/town-metrics`, the program in this directory that
+`make build` writes and `gt plugin sync` copies to the town. It hands the
+process to `gt metrics run` (gt-hg64t), so the hour has one implementation, and
+the runner starts it here with `GT_TOWN_ROOT` set, which is where that command
+resolves the town from. Everything the hour does is Go:
+`internal/cmd/metrics_run.go` (the hour), `internal/metrics/townlock.go` (the
 lock), and the two steps in `internal/cmd/metrics_snapshot.go` and
 `internal/cmd/metrics_analysis.go`. `gt metrics run` does three things and
 nothing more:
@@ -55,13 +59,14 @@ than a day (gt-xfx1k) ends the run after one line. The timeout is 15m because
 the run that is due also builds mango and explores three targets, where a
 snapshot alone (30s per source, `metrics.SourceTimeout`) finished in 5m.
 
-Run it directly:
+Run it directly, from inside the town or with `GT_TOWN_ROOT` set:
 
 ```bash
-bash ~/gt/plugins/town-metrics/run.sh
+~/gt/plugins/town-metrics/bin/town-metrics
 ```
 
 Its tests are Go: `internal/metrics/townlock_test.go` (the lock is held until
-released, records the holder's pid, and is not blocked by a dead run's leftover)
-and `internal/cmd/metrics_run_test.go` (a held lock skips the hour and appends
-nothing).
+released, records the holder's pid, and is not blocked by a dead run's leftover),
+`internal/cmd/metrics_run_test.go` (a held lock skips the hour and appends
+nothing), and `main_test.go` here (the entry point runs `gt metrics run`, and a
+gt missing from PATH fails the hour instead of skipping it).
