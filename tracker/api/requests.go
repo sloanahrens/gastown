@@ -82,10 +82,14 @@ type DeleteRequest struct {
 	IDs []string `json:"ids"`
 }
 
-// CommentRequest adds a comment. Author defaults to the caller's actor; a
-// caller sets it to write on someone else's behalf.
+// CommentRequest adds a comment.
 type CommentRequest struct {
-	Text   string `json:"text"`
+	Text string `json:"text"`
+	// Author is who the comment is recorded under, defaulting to the caller's
+	// actor. A body author overrides it: the override is the add-as contract
+	// that land's review records and done's completion notes rely on, so it
+	// stays, and limiting it to an operator-class token is the follow-up
+	// (gt-gpn1n).
 	Author string `json:"author,omitempty"`
 }
 

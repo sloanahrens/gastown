@@ -77,6 +77,10 @@ func okLinks() linkStub {
 }
 
 // Unit tier: httptest, stub store, no Postgres; milliseconds per case.
+//
+// This pins the add-as contract that CommentRequest.Author documents (gt-gpn1n):
+// dropping the override would break land's review records and done's notes, so
+// the explicit-author assertion is a contract, not a convenience.
 func TestAddCommentDefaultsTheAuthorToTheTokensActorAndHonorsAnExplicitOne(t *testing.T) {
 	t.Parallel()
 	var id, author, text string
