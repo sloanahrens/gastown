@@ -316,17 +316,29 @@ Per-role Markdown files that modify agent behavior at prime time:
 SYSTEM LAYER:   Embedded role template (compiled in)
                         │ if directive exists
                         ▼
-TOWN LAYER:     ~/gt/directives/_common.md      (every role)
-                ~/gt/directives/<role>.md
+CENTRAL LAYER:  <town>/gastown/mayor/rig/directives/_common.md  (every role, every rig)
+                <town>/gastown/mayor/rig/directives/<role>.md
                         │ concatenated with
                         ▼
-RIG LAYER:      ~/gt/<rig>/directives/_common.md (every role)
-                ~/gt/<rig>/directives/<role>.md
+RIG LAYER:      <town>/<rig>/mayor/rig/.gastown/directives/_common.md (every role in that rig)
+                <town>/<rig>/mayor/rig/.gastown/directives/<role>.md
 ```
 
-Every file that exists concatenates, broadest first: town `_common`, rig
-`_common`, town `<role>`, rig `<role>`. The most specific file appears last and
-wins conflicts (same as CSS specificity — later rules override earlier ones).
+`<town>` is the town root (`~/gt` on a default install). The central layer is
+the gastown repo's checkout; a rig's own layer sits in that rig's checkout. The
+pre-gt-oz73l directories `<town>/directives/` and `<town>/<rig>/directives/` are
+a fallback: a file there is read only when the layer's own path has no file of
+that name, and the reader logs the legacy path once.
+
+Every file that exists concatenates, broadest first: central `_common`, rig
+`_common`, central `<role>`, rig `<role>`. The most specific file appears last
+and wins conflicts (same as CSS specificity — later rules override earlier
+ones).
+
+`gt prime` renders the files for the role it primes, at an agent's spawn into
+its system prompt file. A session with an empty `GT_ROLE`, or one run from the
+town root, resolves to the unknown role, which owns no file: only `_common.md`
+reaches it.
 
 A file named for no role loads for no one. `gt directive list` marks it
 `UNUSED (no such role)`, `gt doctor` warns, and `gt prime` prints the list;

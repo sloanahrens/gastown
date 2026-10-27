@@ -29,25 +29,37 @@ formula they are running.
 **File layout:**
 
 ```
-~/gt/directives/_common.md             # Town-level, every role
-~/gt/<rig>/directives/_common.md       # Rig-level, every role in that rig
-~/gt/directives/<role>.md              # Town-level (all rigs)
-~/gt/<rig>/directives/<role>.md        # Rig-level
+<town>/gastown/mayor/rig/directives/_common.md   # Central, every role, every rig
+<town>/<rig>/mayor/rig/.gastown/directives/_common.md  # That rig, every role
+<town>/gastown/mayor/rig/directives/<role>.md    # Central, one role, every rig
+<town>/<rig>/mayor/rig/.gastown/directives/<role>.md   # That rig, one role
 ```
+
+`<town>` is the town root (`~/gt` on a default install). The central layer is
+the gastown repo's own checkout, so a directive there is tracked with the code
+and lands through the landing pipeline; a rig's layer sits in that rig's
+checkout and reaches that rig alone. The pre-gt-oz73l directories
+`<town>/directives/` and `<town>/<rig>/directives/` remain a fallback: a file
+there is read only where the layer's own path has no file of that name, and the
+reader logs the legacy path once.
 
 `_common.md` is reserved for policy that is not role-specific — host rules,
 testing norms. It exists so that such policy has one home rather than a copy in
 every role's file (R2 of `docs/writing-for-agents.md`).
 
-**Injection point:** After the role template, before context files and handoff
-content. Directives carry an authority marker: "Rig Policy — overrides formula
-instructions where they conflict."
+**Injection point:** `gt prime`, after the role template and before context
+files and handoff content. At an agent's spawn the rendered text goes into that
+agent's system prompt file, which the session is started with; a session with an
+empty `GT_ROLE`, or one run from the town root, resolves to the unknown role,
+which owns no file, so only `_common.md` reaches it. Directives carry an
+authority marker: "Rig Policy — overrides formula instructions where they
+conflict."
 
 **Precedence:** Every file that exists **concatenates**, broadest first and
-most specific last — town `_common`, rig `_common`, town `<role>`, rig
+most specific last — central `_common`, rig `_common`, central `<role>`, rig
 `<role>`. The role's own file gets the last word, so it overrides the shared
 policy on conflicting instructions, and within each pair the rig file overrides
-the town file.
+the central file.
 
 **A file named for no role is never loaded.** `config.LoadRoleDirective` reads
 `<name>.md` only for a name in `config.AllRoles()` or `_common`, so a typo such
