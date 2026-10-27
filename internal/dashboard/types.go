@@ -706,9 +706,13 @@ type State struct {
 	SpendHours []SpendHour `json:"-"`
 	// SpendSkipped is how many malformed ledger lines the last read skipped.
 	SpendSkipped int `json:"-"`
+	// PlanSamples is the status line's series as the last Claude poll read it,
+	// which the charts' Claude dollars are folded from. It stays off the wire:
+	// the charts carry what the page draws.
+	PlanSamples PlanSamples `json:"-"`
 	// CostCharts is what the Cost panel draws its two charts from, built from
-	// the spend report, the hours and the Claude plan. Nil until one of them has
-	// reported.
+	// the spend report, the hours, the Claude plan and the samples its dollars
+	// come from. Nil until one of them has reported.
 	CostCharts *CostCharts `json:"cost_charts,omitempty"`
 	// JevSpend is the Jev ledger's calls and dollars over the spend command's
 	// window, read beside the DeepSeek spend. It is nil until the reader first
@@ -802,7 +806,9 @@ type Config struct {
 	// Usage reads the town's spend over the last day from the usage scan's
 	// records.
 	Usage func() *Usage
-	// ClaudePlan reads the Claude plan meter from the status line's samples.
+	// ClaudePlan reads the Claude plan meter from the status line's samples; the
+	// payload carries the series it read, which the Cost charts fold their Claude
+	// dollars from.
 	ClaudePlan func() *ClaudePlan
 	// Rework reads the om rework table from the landing worker's review log.
 	Rework func() *Rework

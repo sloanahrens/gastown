@@ -161,3 +161,25 @@ func TestDashboardClaudePlanRenewalDayFlag(t *testing.T) {
 		t.Errorf("a reader renewing on the 1st drew its month from %d, want the 1st of this month", p.StartAt)
 	}
 }
+
+// The poll's read of the plan hands the Cost charts its series, so the charts
+// are drawn from the same single read of the file the meter is: a town whose
+// status line has written a sample reads it, and one whose file is not there yet
+// is no sample rather than a failed read, so the charts say the status line has
+// written nothing instead of that the series broke (gt-yxx98).
+func TestDashboardClaudePlanReaderHandsTheSamplesToTheCharts(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	now := time.Now()
+	path := writeClaudePlanSeries(t, root, now)
+	got := dashboard.NewClaudePlanReader(path, dashboardClaudePlanUSD).Read(now).Samples
+	if !got.Read || got.Failed || len(got.Samples) != 1 || got.Samples[0].SevenDay != 38 {
+		t.Errorf("the series the charts read = %+v, want the one written sample at 38%%", got)
+	}
+
+	missing := dashboard.NewClaudePlanReader(filepath.Join(root, "absent.jsonl"), dashboardClaudePlanUSD).Read(now).Samples
+	if !missing.Read || missing.Failed || len(missing.Samples) != 0 {
+		t.Errorf("a series the status line has not written yet = %+v, want a read with no samples and no failure", missing)
+	}
+}

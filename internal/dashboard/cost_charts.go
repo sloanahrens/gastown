@@ -20,14 +20,31 @@ type CostCharts struct {
 	Hourly *CostChart `json:"hourly,omitempty"`
 }
 
-// CostChart is one bar chart: its bars in order, an optional horizontal line
-// (the weekly limit), the number of malformed ledger lines skipped while reading
-// it, and the aria-label that carries its numbers.
+// CostChart is one bar chart: its bars in order, the Claude series on the same
+// buckets, an optional horizontal line (the weekly limit), the number of
+// malformed ledger lines skipped while reading it, and the aria-label that
+// carries its numbers.
 type CostChart struct {
-	Bars    []CostBar `json:"bars"`
-	Limit   *CostLine `json:"limit,omitempty"`
-	Skipped int       `json:"skipped,omitempty"`
-	Aria    string    `json:"aria"`
+	Bars   []CostBar         `json:"bars"`
+	Claude *CostClaudeSeries `json:"claude,omitempty"`
+	// ClaudeWhy is why the chart carries no Claude series: the samples could not
+	// be read, there are none, or none falls in the window.
+	ClaudeWhy string    `json:"claude_why,omitempty"`
+	Limit     *CostLine `json:"limit,omitempty"`
+	Skipped   int       `json:"skipped,omitempty"`
+	Aria      string    `json:"aria"`
+}
+
+// CostClaudeSeries is the Claude plan's plan-equivalent dollars on the chart's
+// own buckets, drawn in a second color: one bar or gap per bucket, so the
+// operator reads both spends against one axis.
+type CostClaudeSeries struct {
+	// Name is the legend entry and the label every tooltip ends with; it says
+	// the dollars are an estimate of the plan's share, not a metered bill.
+	Name string `json:"name"`
+	// Bars run in the same order as the chart's bars: a value, or a gap the page
+	// hatches because the series has no sample for that bucket.
+	Bars []CostBar `json:"bars"`
 }
 
 // CostBar is one bar: its value in dollars, the label under it, the hover
@@ -50,12 +67,14 @@ type CostLine struct {
 // hours end at; perDay is the spend report's per-day spend, nil when there is no
 // report; hours is the day's spend by hour from the balance ledger, and skipped
 // is how many malformed ledger lines the read skipped; plan is the Claude plan
-// block, nil when it has not reported. A missing input leaves its chart out
-// rather than drawing zeros.
-func BuildCostCharts(now time.Time, perDay map[string]float64, hours []SpendHour, skipped int, plan *ClaudePlan) CostCharts {
+// block, nil when it has not reported, and samples is the status line's series
+// the Claude dollars are folded from. A missing input leaves its chart out, or
+// its series out with the reason on the chart, rather than drawing zeros.
+func BuildCostCharts(now time.Time, perDay map[string]float64, hours []SpendHour, skipped int, plan *ClaudePlan, samples PlanSamples) CostCharts {
+	weeklyUSD := claudeWeekUSD(plan)
 	return CostCharts{
-		Daily:  buildDailyChart(now, perDay, plan),
-		Hourly: buildHourlyChart(hours, skipped),
+		Daily:  buildDailyChart(now, perDay, plan, samples, weeklyUSD),
+		Hourly: buildHourlyChart(hours, skipped, samples, weeklyUSD),
 	}
 }
 
@@ -64,17 +83,20 @@ func BuildCostCharts(now time.Time, perDay map[string]float64, hours []SpendHour
 // is a zero bar, since a rise is money added, not spent. The weekly limit is its
 // value spread over seven days, so it reads beside the bars in dollars, and its
 // label says where the week's percentage lands at reset.
-func buildDailyChart(now time.Time, perDay map[string]float64, plan *ClaudePlan) *CostChart {
+func buildDailyChart(now time.Time, perDay map[string]float64, plan *ClaudePlan, samples PlanSamples, weeklyUSD float64) *CostChart {
 	if len(perDay) == 0 {
 		return nil
 	}
 	y, m, d := now.In(time.Local).Date()
 	chart := &CostChart{Bars: make([]CostBar, 0, costDailyDays)}
+	buckets := make([]costBucket, 0, costDailyDays)
 	var words []string
 	for i := costDailyDays - 1; i >= 0; i-- {
-		day := time.Date(y, m, d-i, 0, 0, 0, 0, time.Local).Format("2006-01-02")
-		spent, ok := perDay[day]
+		start := time.Date(y, m, d-i, 0, 0, 0, 0, time.Local)
+		day := start.Format("2006-01-02")
 		label := day[len(day)-5:]
+		buckets = append(buckets, costBucket{Label: label, Name: day, Start: start})
+		spent, ok := perDay[day]
 		if !ok {
 			chart.Bars = append(chart.Bars, CostBar{Label: label, Gap: true, Title: day + " no figure"})
 			continue
@@ -98,6 +120,11 @@ func buildDailyChart(now time.Time, perDay map[string]float64, plan *ClaudePlan)
 		chart.Limit = &CostLine{Value: daily, Label: "weekly limit " + money(daily) + "/day · reset at " + pct}
 		aria += ". Weekly limit " + money(daily) + " a day. Projected at reset " + pct + " of the weekly limit"
 	}
+	lastEnd := time.Date(y, m, d+1, 0, 0, 0, 0, time.Local)
+	chart.Claude, chart.ClaudeWhy = claudeCostSeries(buckets, lastEnd, samples, weeklyUSD)
+	if chart.Claude != nil {
+		aria += claudeSeriesAria(chart.Claude)
+	}
 	chart.Aria = aria
 	return chart
 }
@@ -105,15 +132,17 @@ func buildDailyChart(now time.Time, perDay map[string]float64, plan *ClaudePlan)
 // buildHourlyChart draws the day's spend by hour. An hour with no ledger sample
 // is a gap, labeled, not a bar of zero. Malformed ledger lines the read skipped
 // are named in the aria-label and counted on the chart.
-func buildHourlyChart(hours []SpendHour, skipped int) *CostChart {
+func buildHourlyChart(hours []SpendHour, skipped int, samples PlanSamples, weeklyUSD float64) *CostChart {
 	if len(hours) == 0 {
 		return nil
 	}
 	chart := &CostChart{Bars: make([]CostBar, 0, len(hours)), Skipped: skipped}
+	buckets := make([]costBucket, len(hours))
 	var words []string
 	gaps := 0
-	for _, h := range hours {
+	for i, h := range hours {
 		hr := h.Start.Format("15") + ":00"
+		buckets[i] = costBucket{Label: hr, Name: hr, Start: h.Start}
 		if h.Samples == 0 {
 			gaps++
 			chart.Bars = append(chart.Bars, CostBar{Label: hr, Gap: true, Title: hr + " no ledger sample"})
@@ -136,6 +165,11 @@ func buildHourlyChart(hours []SpendHour, skipped int) *CostChart {
 	}
 	if skipped > 0 {
 		aria += fmt.Sprintf(". %d malformed ledger %s skipped", skipped, plural(skipped, "line", "lines"))
+	}
+	lastEnd := hours[len(hours)-1].Start.Add(time.Hour)
+	chart.Claude, chart.ClaudeWhy = claudeCostSeries(buckets, lastEnd, samples, weeklyUSD)
+	if chart.Claude != nil {
+		aria += claudeSeriesAria(chart.Claude)
 	}
 	chart.Aria = aria
 	return chart

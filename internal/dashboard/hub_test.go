@@ -51,6 +51,40 @@ func TestPollFeedFirstBurstNotDropped(t *testing.T) {
 	assert.Equal(t, preface, delivered, "every entry of the preface reaches the page")
 }
 
+// The Claude samples the plan poll reads reach the Cost charts, which is what
+// makes the plan-equivalent series appear beside the DeepSeek bars at all; a
+// chart rebuilt without them would be absent in the town and present in every
+// builder test (gt-yxx98).
+func TestClaudePollPutsTheSamplesOnTheCostCharts(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	spend, err := json.Marshal(map[string]any{
+		"per_day": map[string]any{now.Format("2006-01-02"): map[string]any{"spent": 1.0}},
+	})
+	require.NoError(t, err)
+	h := NewHub(Config{
+		Now:        func() time.Time { return now },
+		Spend:      func() json.RawMessage { return spend },
+		SpendHours: func() SpendRead { return SpendRead{} },
+		ClaudePlan: func() *ClaudePlan {
+			return &ClaudePlan{
+				PlanUSDMonth: ClaudePlanDefaultUSD,
+				Samples:      claudeSeries(ClaudePlanSample{T: now.Unix(), SevenDay: 40}),
+			}
+		},
+	})
+
+	h.pollSpend()
+	h.pollClaudePlan()
+
+	charts := h.State().CostCharts
+	require.NotNil(t, charts, "no Cost charts after both polls")
+	require.NotNil(t, charts.Daily, "the spend report drew no daily chart")
+	require.NotNil(t, charts.Daily.Claude, "the Claude samples did not reach the daily chart: %s", charts.Daily.ClaudeWhy)
+	assert.Equal(t, claudePlanSeriesName, charts.Daily.Claude.Name)
+}
+
 // pollFeed's burst frame is the whole ring, which the page has mostly drawn
 // already, so the page must replace its feed and counts on a backlog frame:
 // appending would draw every row twice (gt-2lbvr).
