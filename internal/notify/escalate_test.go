@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/mail"
 )
 
 // failingSenders fails the test if any outside channel is contacted.
@@ -162,6 +163,34 @@ func TestSendNotificationsReportsNoWithheldPushWithoutAPushAction(t *testing.T) 
 		if status.Channel == "push" {
 			t.Errorf("status %+v reports a withheld push for a route with no push action", status)
 		}
+	}
+}
+
+// A route with no mail action must not build the mail router at all: the
+// router resolves recipients through the town's tmux, so building one made a
+// delivery-free escalation depend on a tmux server, and a test binary that
+// inherited a live GT_TMUX_SOCKET (every live seat exports one) is refused by
+// tmux.NewTmux (gt-yav3).
+func TestSendNotificationsWithoutAMailTargetBuildsNoRouter(t *testing.T) {
+	t.Parallel()
+	built := false
+	senders := externalSenders{newRouter: func() *mail.Router {
+		built = true
+		return &mail.Router{}
+	}}
+	cfg := &config.EscalationConfig{
+		Routes: map[string][]string{"low": {"bead", "log"}},
+	}
+	req := EscalationRequest{
+		TownRoot: t.TempDir(), Severity: "low", Description: "x", EscalatedBy: "daemon",
+	}
+	for _, status := range sendNotifications(req, "hq-esc1", cfg, senders) {
+		if status.Channel == "mail" {
+			t.Errorf("status %+v reports a mail delivery for a route with no mail action", status)
+		}
+	}
+	if built {
+		t.Error("sendNotifications built a mail router for a route with no mail action")
 	}
 }
 

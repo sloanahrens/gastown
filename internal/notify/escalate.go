@@ -152,8 +152,20 @@ func sendNotifications(req EscalationRequest, issueID string, cfg *config.Escala
 	targets := MailTargets(actions)
 	owner := attention.EscalationOwner(agentID)
 
-	router := mail.NewRouter(townRoot, req.Prefixes)
-	defer router.WaitPendingNotifications()
+	// A route with no mail target sends no message, so it needs no router:
+	// the router resolves recipients through the town's tmux, and building one
+	// for a bead/log/exec route made an escalation that never mailed anyone
+	// depend on a tmux server (gt-yav3: a test binary that builds one inherits
+	// a live socket and is refused).
+	newRouter := senders.newRouter
+	if newRouter == nil {
+		newRouter = func() *mail.Router { return mail.NewRouter(townRoot, req.Prefixes) }
+	}
+	var router *mail.Router
+	if len(targets) > 0 {
+		router = newRouter()
+		defer router.WaitPendingNotifications()
+	}
 	statuses := []DeliveryStatus{{Channel: "bead", Created: true, Severity: severity}}
 	// The push gate (gt-71714): PushActions keeps the actions that reach a
 	// person only when the human owns the escalation, so a route this gate
