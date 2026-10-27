@@ -238,6 +238,25 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 	}
 }
 
+// The backend's commenter is the store a spawn's prompt stamp writes through:
+// Prepare stamps the work bead the spec names (gt-2lu00).
+func TestOpenShellPrepareStampsThePromptOnTheWorkBead(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	comments := &fakePromptComments{}
+	b.comments = comments
+	spec := openshellSpawn(town, work)
+	spec.WorkBeadID = "gt-2lu00"
+	if _, err := b.Prepare(context.Background(), spec); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(comments.calls) != 1 || comments.calls[0].id != spec.WorkBeadID {
+		t.Fatalf("comments = %v, want exactly one on %s", comments.calls, spec.WorkBeadID)
+	}
+}
+
 func TestOpenShellPrepareHandsBackTheSandboxEnv(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)

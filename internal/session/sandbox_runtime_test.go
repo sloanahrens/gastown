@@ -575,6 +575,18 @@ func TestBuildRuntimeArchiveStampsNothingWithoutAWorkBead(t *testing.T) {
 	}
 }
 
+// A build with no commenter posts nothing, which is what lets a caller that
+// does not stamp a bead pass nil (gt-2lu00).
+func TestBuildRuntimeArchiveStampsNothingWithoutACommenter(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	spec := openshellSpawn(town, work)
+	spec.WorkBeadID = "gt-2lu00"
+	if _, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, nil); err != nil {
+		t.Fatalf("buildRuntimeArchive with no commenter: %v", err)
+	}
+}
+
 // A comment that fails is logged in the spawn log and never fails the spawn
 // (gt-2lu00).
 func TestBuildRuntimeArchiveLogsACommentFailureAndStillBuilds(t *testing.T) {
