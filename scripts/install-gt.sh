@@ -31,12 +31,13 @@
 #   1  failed: build/install failed, or the smoke check failed (rolled back)
 #   2  refused: mayor/rig dirty, off main, diverged, not forward, unknown commit
 #   3  busy: the install lock or the container-gate slot was not free in time
-# The last stdout line is always "install-gt: RESULT <event> <commit> <prev> <reason>",
-# and the exit code is always 0-3 — an EXIT trap (below) guarantees both even
-# on a path nothing here anticipated (a bad flag, a "${VAR:?}" guard, the
-# install-lock helper dying for a reason other than the timeout, cp/mv of
+# The last stdout line is "install-gt: RESULT <event> <commit> <prev> <reason>",
+# and the exit status is one of the four above — an EXIT trap (below) guarantees
+# both even on a path nothing here anticipated (a bad flag, a "${VAR:?}" guard,
+# the install-lock helper dying for a reason other than the timeout, cp/mv of
 # gt.prev failing under `set -e`, ...): it reports "failed ... unexpected" and
-# exits 1.
+# exits 1. An install killed by a signal is the one case no trap covers — bash
+# runs no EXIT trap then — so its status is 128+n and no RESULT line is printed.
 #
 # Besides the binary it installs the OpenShell gateway's launchd agent
 # (igt_gateway_agent in lib/install-gt-lib.sh) once the operator has written
@@ -65,9 +66,9 @@ SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
 # or mid python-write) and an install-lock exit status that was never meant to
 # be a contract value (only 75, the lock-wait timeout, is; anything else the
 # helper returns — e.g. it could not open the lock file — must not leak through
-# as a bare exit code outside 0-3). It is intentionally conservative: it does
-# not call escalate() (GT/BIN_DIR may not be resolved yet this early) and
-# only attempts a receipt when DAEMON_DIR is already known.
+# as a bare exit code outside the range the header states). It is intentionally
+# conservative: it does not call escalate() (GT/BIN_DIR may not be resolved yet
+# this early) and only attempts a receipt when DAEMON_DIR is already known.
 RESULT_EMITTED=0
 HELPER_DIR=""
 result_line() { RESULT_EMITTED=1; igt_result "$@"; }
@@ -369,8 +370,8 @@ fi
 # and this instance's own EXIT trap should print the fallback RESULT line below;
 # if it is gone, the install ran and already printed its own — RESULT_EMITTED is
 # set here too, purely to stop this instance's trap from printing a second one
-# on top of it. The status is the install's own (0 to 3, above, or 128+n if it
-# is killed), so 75 can only be the helper reporting that the lock wait ran out.
+# on top of it. The status is the install's own (the ranges are in the header),
+# so 75 can only be the helper reporting that the lock wait ran out.
 if [ -z "${INSTALL_GT_LOCKED:-}" ]; then
   mkdir -p "$DAEMON_DIR"
   HELPER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/install-gt-lock.XXXXXX")
