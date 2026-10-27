@@ -202,11 +202,12 @@ func (r scriptResult) status() string {
 }
 
 // runsAsScript reports whether the daemon should execute p itself: the
-// plugin declares [execution] type = "script" and ships a run.sh. A plugin
-// that declares script without a run.sh has nothing to run; the handler
+// plugin declares [execution] type = "script" and ships a run.sh or names a
+// binary. A script-type plugin with neither has nothing to run; the handler
 // logs it as skipped every heartbeat so the mismatch stays visible.
 func runsAsScript(p *plugin.Plugin) bool {
-	return p != nil && p.HasRunScript && p.Execution != nil && p.Execution.Type == plugin.ExecTypeScript
+	return p != nil && p.Execution != nil && p.Execution.Type == plugin.ExecTypeScript &&
+		(p.HasRunScript || p.Execution.Binary != "")
 }
 
 // scriptTimeout returns the plugin's [execution] timeout, or the default
@@ -233,19 +234,38 @@ func daemonScriptEnv() scriptEnv {
 	return scriptEnv{environ: os.Environ(), tmuxSocket: tmux.GetDefaultSocket()}
 }
 
-// runPluginScript executes <p.Path>/run.sh with cwd = the plugin directory
-// and a process group of its own, so a timeout kills the whole tree rather
-// than the `bash` wrapper alone (gt-6t43 is the orphan this avoids). The
-// environment is env's plus the town identity a dog would have carried:
+// pluginProcess builds what a script-type plugin runs: the binary its
+// [execution] block names, with an empty argv and no shell in between, or
+// `bash run.sh`. A plugin that names a binary and still ships run.sh runs the
+// binary; the shim is a stepping stone, not a second entry point.
+func pluginProcess(ctx context.Context, p *plugin.Plugin) (*exec.Cmd, error) {
+	if p.Execution != nil && p.Execution.Binary != "" {
+		bin, err := p.BinaryPath()
+		if err != nil {
+			return nil, err
+		}
+		return exec.CommandContext(ctx, bin), nil //nolint:gosec // G204: the argv is empty; BinaryPath refused a path that leaves the plugin directory
+	}
+	return exec.CommandContext(ctx, "bash", "run.sh"), nil //nolint:gosec // G204: fixed argv, plugin dir from the scanner
+}
+
+// runPluginScript executes the plugin's entry point — the binary its
+// [execution] block names, else <p.Path>/run.sh — with cwd = the plugin
+// directory and a process group of its own, so a timeout kills the whole tree
+// rather than the `bash` wrapper alone (gt-6t43 is the orphan this avoids).
+// The environment is env's plus the town identity a dog would have carried:
 // scripts read GT_TOWN_ROOT/GT_ROOT, and bd inside them reads the
-// BEADS_DOLT_* endpoint the daemon exports. The script runs through run (nil
-// runs bash for real).
+// BEADS_DOLT_* endpoint the daemon exports. The process runs through run (nil
+// runs it for real).
 func runPluginScript(ctx context.Context, run cmdRunFunc, env scriptEnv, p *plugin.Plugin, townRoot string, timeout time.Duration) scriptResult {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bash", "run.sh") //nolint:gosec // G204: fixed argv, plugin dir from the scanner
+	cmd, err := pluginProcess(ctx, p)
+	if err != nil {
+		return scriptResult{duration: time.Since(start), err: err}
+	}
 	cmd.Dir = p.Path
 	cmd.Env = append(daemonGTEnv(env.environ),
 		"GT_ROOT="+townRoot,
@@ -423,11 +443,20 @@ func pluginFailureAlertKey(name string) string {
 	return "plugin:" + name + ":failed"
 }
 
+// pluginTarget names the file the runner executed, for escalations: the
+// binary the plugin names, else its run.sh.
+func pluginTarget(p *plugin.Plugin) string {
+	if p.Execution != nil && p.Execution.Binary != "" {
+		return filepath.Join(p.Path, p.Execution.Binary)
+	}
+	return filepath.Join(p.Path, "run.sh")
+}
+
 // escalatePluginFailure raises (or adds to) p's failure escalation with the
 // output tail, and remembers it so the next good run closes it.
 func (d *Daemon) escalatePluginFailure(p *plugin.Plugin, res scriptResult, townRoot string) {
-	msg := fmt.Sprintf("script plugin %s failed: %s\n\nThe daemon ran %s/run.sh; full output of the last run: %s\n\n%s",
-		p.Name, res.status(), p.Path, scriptLogPath(townRoot, p.Name), strings.TrimRight(res.output, "\n"))
+	msg := fmt.Sprintf("script plugin %s failed: %s\n\nThe daemon ran %s; full output of the last run: %s\n\n%s",
+		p.Name, res.status(), pluginTarget(p), scriptLogPath(townRoot, p.Name), strings.TrimRight(res.output, "\n"))
 	if err := d.escalateAlertErr(pluginFailureAlertKey(p.Name), "plugin:"+p.Name, msg); err != nil {
 		return
 	}

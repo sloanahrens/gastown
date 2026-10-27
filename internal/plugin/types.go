@@ -41,7 +41,7 @@ type Plugin struct {
 	Instructions string `json:"instructions,omitempty"`
 
 	// HasRunScript is true when a run.sh exists alongside plugin.md; the
-	// daemon runs it for a plugin whose [execution] type is "script".
+	// daemon runs it for a script-type plugin that names no binary.
 	HasRunScript bool `json:"has_run_script,omitempty"`
 }
 
@@ -111,7 +111,8 @@ const (
 	// runs them automatically since the dog pack was retired (gt-ckunw).
 	ExecTypeAgent ExecutionType = "agent"
 
-	// ExecTypeScript means a run.sh script is executed directly.
+	// ExecTypeScript means the daemon executes the plugin's run.sh, or the
+	// binary its [execution] block names, directly.
 	ExecTypeScript ExecutionType = "script"
 
 	// ExecTypeExecWrapper wraps session startup commands.
@@ -125,6 +126,12 @@ const (
 type Execution struct {
 	// Type is the execution type: "agent" (default), "script", or "exec-wrapper".
 	Type ExecutionType `json:"type,omitempty" toml:"type,omitempty"`
+
+	// Binary is the program, named relative to the plugin directory, that the
+	// daemon runs in place of run.sh for a script-type plugin. A path that
+	// leaves the plugin directory, directly or through a symlink, fails
+	// parsing.
+	Binary string `json:"binary,omitempty" toml:"binary,omitempty"`
 
 	// Timeout is the maximum execution time (e.g., "5m").
 	Timeout string `json:"timeout,omitempty" toml:"timeout,omitempty"`
