@@ -11,11 +11,12 @@ import (
 )
 
 // fakeCloneGit answers the two calls cloneReviews makes: the listing call and
-// the read of one document.
+// the read of one document. err fails every call; readErr fails one document.
 type fakeCloneGit struct {
-	tree string
-	docs map[string]string
-	err  error
+	tree    string
+	docs    map[string]string
+	err     error
+	readErr map[string]error
 }
 
 func (g *fakeCloneGit) Run(_ context.Context, args ...string) (string, error) {
@@ -30,9 +31,33 @@ func (g *fakeCloneGit) Run(_ context.Context, args ...string) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("unexpected show argument %q", args[1])
 		}
+		if err := g.readErr[path]; err != nil {
+			return "", err
+		}
 		return g.docs[path], nil
 	}
 	return "", fmt.Errorf("unexpected git %v", args)
+}
+
+// TestCloneReviewsFailsWhenADocumentCannotBeRead reports a document's read
+// failure, naming the document, instead of reading it as no verdict.
+func TestCloneReviewsFailsWhenADocumentCannotBeRead(t *testing.T) {
+	t.Parallel()
+	head := "a1a1a1a"
+	path := reviewDocsDir + "/2026-10-26-gt-x.md"
+	git := &fakeCloneGit{
+		tree:    path,
+		docs:    map[string]string{path: land.PolecatReviewMarker + " " + head + " PASS"},
+		readErr: map[string]error{path: errors.New("object not found")},
+	}
+	r := &cloneReviews{git: git}
+	_, _, err := r.Verdict(context.Background(), "gt-x", head)
+	if err == nil || !strings.Contains(err.Error(), "object not found") {
+		t.Fatalf("Verdict error = %v, want the document read failure", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("Verdict error = %v, want it to name %s", err, path)
+	}
 }
 
 // TestCloneReviewsReadsTheLatestVerdict reads the verdict line naming the head
