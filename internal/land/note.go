@@ -142,12 +142,12 @@ func defuseFindingPath(path string) string {
 	})
 }
 
-// CountRejections is the number of review rejections in notes: the attempt
-// counter the formula, the deacon and the rework cap read. Only a review
-// refusal spends a rework attempt; a gate, policy or conflict refusal costs no
-// om review and is fixed before the next round, so it does not count
-// (gt-l3zak). A block whose header names no class was written before kinds
-// existed, when every refusal was a review's, so it counts (gt-zqqcr).
+// CountRejections is the number of review rejections in notes: the review
+// round the bead is on. Only a review refusal spends a rework attempt; a gate,
+// policy or conflict refusal costs no om review and is fixed before the next
+// round, so it does not count (gt-l3zak). A block whose header names no class
+// counts as a review: a refusal nobody classified records no class at all
+// (gt-1jig).
 //
 // It counts the same anchored headers the parser finds, so marker text quoted
 // inside a reason or a finding title — anywhere but the start of a line — is
@@ -172,8 +172,8 @@ func reviewAttempt(notes string) int {
 }
 
 // rejectionKinds returns the class of every rejection block in notes, in the
-// order they were written. A legacy block with no class reads as a review, the
-// refusal it was before FormatRejectionNote recorded kinds (gt-l3zak).
+// order they were written. A block with no class reads as a review: a refusal
+// nobody classified records no class at all (gt-1jig).
 func rejectionKinds(notes string) []string {
 	blocks := rejectionBlockRE.FindAllStringIndex(notes, -1)
 	kinds := make([]string, len(blocks))

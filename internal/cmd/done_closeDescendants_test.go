@@ -335,6 +335,30 @@ func TestDoneLeavesReadyToLandBeadOpenWithSubmissionNote(t *testing.T) {
 	}
 }
 
+// TestDoneSubmissionCountsEveryRefusal: the attempt gt done records is the
+// submission's, and every refusal block a bead carries was a refused
+// submission, whatever its kind. A gate refusal spends no review attempt
+// (gt-l3zak), so counting review rounds would record the second submission as
+// the first (gt-phftg).
+func TestDoneSubmissionCountsEveryRefusal(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(doneAgentBead(), beads.Issue{ID: "gt-base-123", Title: "Base bead", Status: string(beads.StatusHooked),
+		Labels: []string{"gt:ready-to-land"},
+		Notes: "MERGE REJECTION (attempt 1): gate - the gate failed\n" +
+			"Branch: polecat/nux/gt-base-123\nTarget: main\nMR: gt-base-123\nHead: fedcba9876543210\n\n" +
+			"READY TO LAND\nBranch: polecat/nux/gt-base-123\nHead: 0123456789abcdef\nTarget: main\nWorker: nux"})
+	runDoneStateUpdate(t, db)
+
+	comments, err := db.Comments("gt-base-123")
+	if err != nil || len(comments) != 1 {
+		t.Fatalf("comments = %+v, %v; want one submission note", comments, err)
+	}
+	if want := "(attempt 2)"; !strings.Contains(comments[0].Text, want) {
+		t.Fatalf("submission comment = %q, want %q: the gate refusal was a submission too", comments[0].Text, want)
+	}
+}
+
 // envMap is a getenv over a fixed set of variables; any other is unset.
 func envMap(vars map[string]string) func(string) string {
 	return func(k string) string { return vars[k] }
