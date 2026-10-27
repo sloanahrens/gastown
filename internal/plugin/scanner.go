@@ -3,6 +3,7 @@ package plugin
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -154,35 +155,9 @@ func (s *Scanner) loadPlugin(pluginDir string, location Location, rigName string
 //	# Instructions
 //	...
 func parsePluginMD(content []byte, pluginDir string, location Location, rigName string) (*Plugin, error) {
-	str := string(content)
-
-	// Find TOML frontmatter delimiters
-	const delimiter = "+++"
-	start := strings.Index(str, delimiter)
-	if start == -1 {
-		return nil, fmt.Errorf("missing TOML frontmatter (no opening +++)")
-	}
-
-	// Find closing delimiter
-	end := strings.Index(str[start+len(delimiter):], delimiter)
-	if end == -1 {
-		return nil, fmt.Errorf("missing TOML frontmatter (no closing +++)")
-	}
-	end += start + len(delimiter)
-
-	// Extract frontmatter and body
-	frontmatter := str[start+len(delimiter) : end]
-	body := strings.TrimSpace(str[end+len(delimiter):])
-
-	// Parse TOML frontmatter
-	var fm PluginFrontmatter
-	if _, err := toml.Decode(frontmatter, &fm); err != nil {
-		return nil, fmt.Errorf("parsing TOML frontmatter: %w", err)
-	}
-
-	// Validate required fields
-	if fm.Name == "" {
-		return nil, fmt.Errorf("missing required field: name")
+	fm, body, err := pluginFrontmatter(content)
+	if err != nil {
+		return nil, err
 	}
 
 	// Refuse an escaping binary path here, where the scanner's warning names
@@ -207,6 +182,59 @@ func parsePluginMD(content []byte, pluginDir string, location Location, rigName 
 	}
 
 	return plugin, nil
+}
+
+// pluginFrontmatter splits a plugin.md into its decoded frontmatter and the
+// instruction body that follows it.
+func pluginFrontmatter(content []byte) (*PluginFrontmatter, string, error) {
+	str := string(content)
+
+	// Find TOML frontmatter delimiters
+	const delimiter = "+++"
+	start := strings.Index(str, delimiter)
+	if start == -1 {
+		return nil, "", fmt.Errorf("missing TOML frontmatter (no opening +++)")
+	}
+
+	// Find closing delimiter
+	end := strings.Index(str[start+len(delimiter):], delimiter)
+	if end == -1 {
+		return nil, "", fmt.Errorf("missing TOML frontmatter (no closing +++)")
+	}
+	end += start + len(delimiter)
+
+	// Extract frontmatter and body
+	frontmatter := str[start+len(delimiter) : end]
+	body := strings.TrimSpace(str[end+len(delimiter):])
+
+	// Parse TOML frontmatter
+	var fm PluginFrontmatter
+	if _, err := toml.Decode(frontmatter, &fm); err != nil {
+		return nil, "", fmt.Errorf("parsing TOML frontmatter: %w", err)
+	}
+
+	// Validate required fields
+	if fm.Name == "" {
+		return nil, "", fmt.Errorf("missing required field: name")
+	}
+
+	return &fm, body, nil
+}
+
+// declaredBinaryOf returns the binary path a plugin directory's plugin.md
+// declares, relative to that directory, or "" when it declares none or cannot
+// be read. The sync guard reads it to tell a rebuilt build artifact from an
+// operator edit (gt-tpg0p.3).
+func declaredBinaryOf(pluginDir string) string {
+	content, err := os.ReadFile(filepath.Join(pluginDir, "plugin.md"))
+	if err != nil {
+		return ""
+	}
+	fm, _, err := pluginFrontmatter(content)
+	if err != nil || fm.Execution == nil || fm.Execution.Binary == "" {
+		return ""
+	}
+	return filepath.ToSlash(path.Clean(fm.Execution.Binary))
 }
 
 // GetPlugin returns the plugin whose frontmatter name is name, deduplicated the

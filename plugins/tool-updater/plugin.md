@@ -14,6 +14,7 @@ digest = true
 
 [execution]
 type = "script"
+binary = "bin/tool-updater"
 +++
 
 # Tool Updater
@@ -24,8 +25,11 @@ nothing.
 Run it directly:
 
 ```bash
-bash ~/gt/plugins/tool-updater/run.sh
+~/gt/plugins/tool-updater/bin/tool-updater
 ```
+
+`make build` writes the binary into this directory, and `gt plugin sync` copies
+the directory into the town; `run.sh` beside it execs the same binary.
 
 ## Upgrades are manual
 

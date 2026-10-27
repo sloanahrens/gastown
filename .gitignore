@@ -7,6 +7,8 @@
 # Build
 /dist/
 /build/
+# A ported plugin's binary is a build artifact of `make build`, not source
+plugins/*/bin/
 # make polecat-image cross-compiles gt and bd here (gt-n0mr7)
 /deploy/polecat/bin/
 # make polecat-image stages the pinned seed sources here (gt-ieuvf)

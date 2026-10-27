@@ -24,7 +24,10 @@ A script-type plugin names what the daemon runs under `[execution]`:
 - `run.sh` beside `plugin.md` and no `binary` — run as `bash run.sh`.
 
 A plugin that sets both runs the binary; the shim is a stepping stone to a
-port, not a second entry point. The binary path resolves inside the plugin
+port, not a second entry point. The binary is a build artifact: `make build`
+writes it into the plugin directory, which `gt plugin sync` then copies to the
+town, so a sync ahead of a build ships a plugin whose entry point is missing.
+The binary path resolves inside the plugin
 directory: an absolute path, a `..` that leaves it, or a symlink whose target
 lies outside fails parsing, and the scanner warns and skips the plugin. A
 timeout, an exit code, `[plugin-result skipped]`, a deferral and the run
