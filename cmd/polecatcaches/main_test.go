@@ -5,11 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
+
+// The command reads the town config for each rig's Forgejo remote; the
+// hermetic harness keeps the test binary off the live town's state, as every
+// package that can reach it must.
+func TestMain(m *testing.M) {
+	os.Exit(testutil.HermeticMain(m))
+}
 
 const (
 	gastownCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -111,6 +120,7 @@ func appliedJob(t *testing.T, f *fake) cachevol.SeedJob {
 // lets changed pins reseed, then the apply of a root Job that fills the claim
 // with the named image.
 func TestRunAppliesTheSeedJobManifest(t *testing.T) {
+	t.Parallel()
 	f := newFake()
 	code, stdout, stderr := run(t, f, baseArgs()...)
 	if code != 0 {
@@ -150,6 +160,7 @@ func TestRunAppliesTheSeedJobManifest(t *testing.T) {
 // TestRunBuildsAPinForEachPinnedRig pins the pins the Job clones: one per row
 // of the pins file, in its order, at its commit and Forgejo URL.
 func TestRunBuildsAPinForEachPinnedRig(t *testing.T) {
+	t.Parallel()
 	f := newFake()
 	if code, _, stderr := run(t, f, baseArgs()...); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
@@ -172,6 +183,7 @@ func TestRunBuildsAPinForEachPinnedRig(t *testing.T) {
 // TestRunSeedsOnlyTheRigsNamedOnTheCommandLine keeps `make polecat-caches
 // RIGS=devops` seeding one rig, the way the target it replaces took rigs.
 func TestRunSeedsOnlyTheRigsNamedOnTheCommandLine(t *testing.T) {
+	t.Parallel()
 	f := newFake()
 	if code, _, stderr := run(t, f, baseArgs("devops")...); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
@@ -185,6 +197,7 @@ func TestRunSeedsOnlyTheRigsNamedOnTheCommandLine(t *testing.T) {
 // TestRunSwapsTheCloneHost points the Job's clones at the host it can reach
 // from the cluster, which is what -forgejo-host exists for.
 func TestRunSwapsTheCloneHost(t *testing.T) {
+	t.Parallel()
 	f := newFake()
 	if code, _, stderr := run(t, f, baseArgs("-forgejo-host", "forgejo.openshell:3000")...); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
@@ -199,6 +212,7 @@ func TestRunSwapsTheCloneHost(t *testing.T) {
 // TestRunPassesTheNamespaceToTheDeleteAndTheManifest keeps the Job and the
 // delete that precedes it in one namespace.
 func TestRunPassesTheNamespaceToTheDeleteAndTheManifest(t *testing.T) {
+	t.Parallel()
 	f := newFake()
 	if code, _, stderr := run(t, f, baseArgs("-namespace", "openshell")...); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
@@ -214,6 +228,7 @@ func TestRunPassesTheNamespaceToTheDeleteAndTheManifest(t *testing.T) {
 // TestRunReportsEveryRefusal drives each way a run stops before or during
 // kubectl, so a refusal cannot regress into a partial apply.
 func TestRunReportsEveryRefusal(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		args     []string
@@ -288,6 +303,7 @@ func TestRunReportsEveryRefusal(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			f := newFake()
 			if tt.mutate != nil {
 				tt.mutate(f)
@@ -309,6 +325,7 @@ func TestRunReportsEveryRefusal(t *testing.T) {
 // TestCloneURL pins the URL rule: the rig's remote as configured, rehosted
 // when asked, with userinfo never carried and never echoed.
 func TestCloneURL(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		remote  string
@@ -363,6 +380,7 @@ func TestCloneURL(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := cloneURL("gastown", tt.remote, tt.host)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
