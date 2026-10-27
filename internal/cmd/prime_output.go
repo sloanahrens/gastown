@@ -142,7 +142,7 @@ func outputRoleDirectivesWith(ctx RoleContext, w io.Writer, explainEnabled, capp
 	}
 
 	if capped {
-		if ptr := directivePointer(ctx, promptPath); ptr != "" {
+		if ptr := directivePointer(promptPath); ptr != "" {
 			explainf("Role directives: in the system prompt file, pointer only")
 			fmt.Fprintln(w)
 			fmt.Fprintln(w, ptr)
