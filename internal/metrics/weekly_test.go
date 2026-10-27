@@ -1,9 +1,23 @@
 package metrics
 
 import (
+	"slices"
 	"strconv"
 	"testing"
 )
+
+// TestWeeklyColumnsMatchThePythonExtract checks weekly.csv's header is the
+// Python extract's WEEKLY_COLUMNS, in its order.
+func TestWeeklyColumnsMatchThePythonExtract(t *testing.T) {
+	t.Parallel()
+	want := pythonStringList(t, "metrics.py", "WEEKLY_COLUMNS")
+	if len(want) == 0 {
+		t.Fatal("read no columns out of metrics.py")
+	}
+	if !slices.Equal(WeeklyColumns, want) {
+		t.Errorf("WeeklyColumns = %v, want the extract's %v", WeeklyColumns, want)
+	}
+}
 
 // floatPtr returns v's address, for one week of a ModeShift series.
 func floatPtr(v float64) *float64 {
