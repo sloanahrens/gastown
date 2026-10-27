@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -114,6 +115,7 @@ func TestShadowRunWritesItsPlanToTheRunBeadsNotesOnly(t *testing.T) {
 		"mode=landings",
 		"quiet=false",
 		"landings=2",
+		"skipped=0",
 		"records=2",
 		"unparsed=0",
 		"reviewed_until_old=2026-10-26T02:00:00Z",
@@ -122,6 +124,10 @@ func TestShadowRunWritesItsPlanToTheRunBeadsNotesOnly(t *testing.T) {
 		if i >= len(lines) || lines[i] != want {
 			t.Fatalf("plan note line %d = %q, want %q (note: %s)", i, lineAt(lines, i), want, notes[0])
 		}
+	}
+	// The cursor line is last, in the same append as the rows it covers.
+	if want, got := "cursor: 2026-10-26T04:00:00Z", lineAt(lines, len(lines)-1); got != want {
+		t.Errorf("last note line = %q, want the cursor %q", got, want)
 	}
 	// The landing lines are read with the fields the ledger writes, landed_at
 	// as a string, the way a consumer of landings.jsonl reads them.
@@ -135,9 +141,9 @@ func TestShadowRunWritesItsPlanToTheRunBeadsNotesOnly(t *testing.T) {
 		{"gt-b", "2026-10-26T04:00:00Z"},
 	} {
 		var rec noteLanding
-		line := lineAt(lines, 7+i)
+		line := lineAt(lines, 8+i)
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("plan note line %d is not the landings.jsonl shape: %v (%q)", 7+i, err, line)
+			t.Fatalf("plan note line %d is not the landings.jsonl shape: %v (%q)", 8+i, err, line)
 		}
 		if rec.Bead != want.bead || rec.LandedAt != want.landedAt || len(rec.RiskPaths) != 1 {
 			t.Errorf("plan note landing %d = %+v, want bead %s at %s with one risk path", i, rec, want.bead, want.landedAt)
@@ -159,6 +165,217 @@ func lineAt(lines []string, i int) string {
 		return ""
 	}
 	return lines[i]
+}
+
+// shadowTiedLedger is a ledger whose middle two landings share one landed_at:
+// the fixture a cut has to leave whole.
+const shadowTiedLedger = `
+{"bead":"gt-a","head":"aaaa","landed_commit":"c1","landed_at":"2026-10-26T03:00:00Z","risk_paths":["internal/daemon/a.go"]}
+{"bead":"gt-b","head":"bbbb","landed_commit":"c2","landed_at":"2026-10-26T04:00:00Z","risk_paths":["internal/daemon/b.go"]}
+{"bead":"gt-c","head":"cccc","landed_commit":"c3","landed_at":"2026-10-26T04:00:00Z","risk_paths":["internal/daemon/c.go"]}
+{"bead":"gt-d","head":"dddd","landed_commit":"c4","landed_at":"2026-10-26T05:00:00Z","risk_paths":["internal/daemon/d.go"]}
+`
+
+// noteLine returns the note's line starting with prefix, or "" when it holds
+// none, so a missing line fails on its value rather than on an index.
+func noteLine(note, prefix string) string {
+	for _, line := range strings.Split(note, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
+}
+
+// TestShadowRunBoundsTheSliceAndMovesTheCursor is the slice bound and the
+// cursor placement read together: the run reviews a bounded slice of the plan's
+// landings, reports how many it left, and puts the cursor on the last one it
+// reviewed so the next run starts there.
+func TestShadowRunBoundsTheSliceAndMovesTheCursor(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		ledger   string
+		vars     map[string]string
+		landings int
+		skipped  int
+		cursor   string
+	}{
+		{name: "under the bound", ledger: shadowLedger, vars: map[string]string{}, landings: 2, skipped: 0, cursor: "2026-10-26T04:00:00Z"},
+		{name: "row bound", ledger: shadowLedger, vars: map[string]string{shadowSliceFilesVar: "1"}, landings: 1, skipped: 1, cursor: "2026-10-26T03:00:00Z"},
+		{
+			name:   "a tie the bound would split is left whole",
+			ledger: shadowTiedLedger,
+			// Two rows fit, and the second is the first of a two-landing
+			// group: reviewing it alone would leave the other one behind the
+			// cursor for good.
+			vars:     map[string]string{shadowSliceFilesVar: "2"},
+			landings: 1, skipped: 3, cursor: "2026-10-26T03:00:00Z",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeScheduledRunner{createID: "gt-shadow1", now: shadowNow}
+			e := shadowEntry()
+			e.Vars = tc.vars
+			e.Vars[shadowModeVar] = shadowModeLandings
+			d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, f)
+			f.beads = []scheduledBead{{ID: "gt-prev", Status: "closed", CreatedAt: shadowNow.Add(-2 * 7 * 24 * time.Hour), Notes: shadowCursor}}
+			writeShadowLedger(t, d.config.TownRoot, e.Rig, tc.ledger)
+
+			if err := d.runScheduledSlingEntry(context.Background(), e, shadowNow); err != nil {
+				t.Fatalf("shadow run: %v", err)
+			}
+			note := noteAt(t, f, "gt-shadow1")
+			if want, got := fmt.Sprintf("landings=%d", tc.landings), noteLine(note, "landings="); got != want {
+				t.Errorf("%s, want %q", got, want)
+			}
+			if want, got := fmt.Sprintf("skipped=%d", tc.skipped), noteLine(note, "skipped="); got != want {
+				t.Errorf("%s, want %q", got, want)
+			}
+			until := "reviewed_until_new=" + tc.cursor
+			if got := noteLine(note, "reviewed_until_new="); got != until {
+				t.Errorf("%s, want %q", got, until)
+			}
+			lines := strings.Split(note, "\n")
+			if want, got := "cursor: "+tc.cursor, lines[len(lines)-1]; got != want {
+				t.Errorf("last note line = %q, want the cursor %q", got, want)
+			}
+			// Eight key lines, one landing line per reviewed landing, and the
+			// cursor line: anything else is a row the note invented or lost.
+			if got, want := len(lines), 8+tc.landings+1; got != want {
+				t.Errorf("note has %d lines, want %d (note: %s)", got, want, note)
+			}
+		})
+	}
+}
+
+// TestShadowRunMovesNoCursorOnAQuietDay pins the quiet run's note: nothing was
+// reviewed, so no cursor line is written and the next run asks for its window
+// again rather than resuming from a pinned start.
+func TestShadowRunMovesNoCursorOnAQuietDay(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-shadow1", now: shadowNow}
+	e := shadowEntry()
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, f)
+	f.beads = []scheduledBead{{ID: "gt-prev", Status: "closed", CreatedAt: shadowNow.Add(-2 * 7 * 24 * time.Hour), Notes: shadowCursor}}
+	// A ledger whose only record keeps no risk path: nothing to review.
+	writeShadowLedger(t, d.config.TownRoot, e.Rig,
+		`{"bead":"gt-a","head":"aaaa","landed_commit":"c1","landed_at":"2026-10-26T03:00:00Z","risk_paths":[]}`+"\n")
+
+	if err := d.runScheduledSlingEntry(context.Background(), e, shadowNow); err != nil {
+		t.Fatalf("quiet run: %v", err)
+	}
+	note := noteAt(t, f, "gt-shadow1")
+	if got := noteLine(note, "cursor: "); got != "" {
+		t.Errorf("quiet note carries %q, want no cursor line (note: %s)", got, note)
+	}
+	if want, got := "landings=0", noteLine(note, "landings="); got != want {
+		t.Errorf("%s, want %q", got, want)
+	}
+	if want, got := "reviewed_until_new=2026-10-26T02:00:00Z", noteLine(note, "reviewed_until_new="); got != want {
+		t.Errorf("%s, want the window start %q", got, want)
+	}
+}
+
+// noteAt is the single note appended to bead id, for a test that expects
+// exactly one.
+func noteAt(t *testing.T, f *fakeScheduledRunner, id string) string {
+	t.Helper()
+	notes := f.notes[id]
+	if len(notes) != 1 {
+		t.Fatalf("appended %d notes to %s, want 1: %v", len(notes), id, notes)
+	}
+	return notes[0]
+}
+
+// TestShadowRunMovesTheCursorOnlyAfterTheBeadIsWritten pins the ordering: a run
+// whose note never landed moved nothing, so the next run reads the same window
+// and reviews the same landings; a run whose note landed moved the cursor, and
+// the next run starts there.
+func TestShadowRunMovesTheCursorOnlyAfterTheBeadIsWritten(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// noteErr runs the first tick with a failing note append.
+		noteErr bool
+		// wantOld is what the second run starts from.
+		wantOld string
+	}{
+		{name: "note written", wantOld: "2026-10-26T04:00:00Z"},
+		{name: "note lost", noteErr: true, wantOld: "2026-10-26T02:00:00Z"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeScheduledRunner{createID: "gt-run1", now: shadowNow}
+			if tc.noteErr {
+				f.noteErr = errors.New("dolt down")
+			}
+			e := shadowEntry()
+			d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, f)
+			f.beads = []scheduledBead{{ID: "gt-prev", Status: "closed", CreatedAt: shadowNow.Add(-2 * 7 * 24 * time.Hour), Notes: shadowCursor}}
+			writeShadowLedger(t, d.config.TownRoot, e.Rig, shadowLedger)
+
+			if tc.noteErr {
+				if err := d.runScheduledSlingEntry(context.Background(), e, shadowNow); err == nil {
+					t.Fatal("the first run reported success, want the note error")
+				}
+				f.noteErr = nil
+			} else if err := d.runScheduledSlingEntry(context.Background(), e, shadowNow); err != nil {
+				t.Fatalf("first run: %v", err)
+			}
+			// A later list hands the notes back the way bd would, so the
+			// second run reads whatever cursor the first one recorded. A bead
+			// retired as a failed run has none: the fake records the note
+			// before failing the append, where bd writes nothing.
+			for i := range f.beads {
+				if strings.HasPrefix(f.beads[i].CloseReason, scheduledSlingFailureMarker) {
+					continue
+				}
+				if notes := f.notes[f.beads[i].ID]; len(notes) > 0 {
+					f.beads[i].Notes = strings.Join(notes, "\n")
+				}
+			}
+			// The second tick runs an interval later: it is due only if the
+			// first run's bead did not suppress it, which also pins the
+			// failure marker a lost note leaves behind.
+			f.createID, f.now = "gt-run2", shadowNow.Add(168*time.Hour)
+			if err := d.runScheduledSlingEntry(context.Background(), e, f.now); err != nil {
+				t.Fatalf("second run: %v", err)
+			}
+			note := noteAt(t, f, "gt-run2")
+			if want, got := "reviewed_until_old="+tc.wantOld, noteLine(note, "reviewed_until_old="); got != want {
+				t.Errorf("second run's %s, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestShadowRunRefusesASecondRunWhileOneIsOpen checks the one-run rule on the
+// shadow path: an open run bead means a run is in flight, so the tick creates
+// no second bead and writes no second cursor.
+func TestShadowRunRefusesASecondRunWhileOneIsOpen(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-shadow2", now: shadowNow}
+	e := shadowEntry()
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, f)
+	f.beads = []scheduledBead{{
+		ID:        "gt-inflight",
+		Status:    "open",
+		CreatedAt: shadowNow.Add(-time.Minute),
+		Notes:     "cursor: 2026-10-26T02:00:00Z",
+	}}
+	writeShadowLedger(t, d.config.TownRoot, e.Rig, shadowLedger)
+
+	if err := d.runScheduledSlingEntry(context.Background(), e, shadowNow); err != nil {
+		t.Fatalf("a skipped tick must not fail: %v", err)
+	}
+	if len(f.created) != 0 || len(f.notes) != 0 || len(f.closedIDs) != 0 || len(f.slungIDs) != 0 {
+		t.Errorf("a run in flight must leave the tick alone: created %v notes %v closed %v slung %v",
+			f.created, f.notes, f.closedIDs, f.slungIDs)
+	}
 }
 
 // TestShadowRunRefusesAPlanItCannotTrust is the no-bead half: a ledger, a mode
@@ -184,6 +401,7 @@ func TestShadowRunRefusesAPlanItCannotTrust(t *testing.T) {
 		{name: "mode slice", ledger: strPtr(shadowLedger), vars: map[string]string{shadowModeVar: "slice"}, want: "is not ported"},
 		{name: "landings_rig leaves the directory", ledger: strPtr(shadowLedger), vars: map[string]string{shadowModeVar: shadowModeLandings, shadowLandingsRigVar: "../evil"}, want: "invalid rig name"},
 		{name: "landings_rig empty", ledger: strPtr(shadowLedger), vars: map[string]string{shadowModeVar: shadowModeLandings, shadowLandingsRigVar: ""}, want: "invalid rig name"},
+		{name: "slice bound unparseable", ledger: strPtr(shadowLedger), vars: map[string]string{shadowModeVar: shadowModeLandings, shadowSliceBytesVar: "lots"}, want: "slice_bytes"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -298,48 +516,167 @@ func TestShadowRunReportsACreateItCouldNotMake(t *testing.T) {
 }
 
 // TestShadowPlanNoteRendersTheShellPlanShape pins the note to the shape
-// scripts/deep-review.sh plan prints: the seven key lines, then one landings
-// line per reviewed landing.
+// scripts/deep-review.sh plan prints: the key lines, then one landings line per
+// reviewed landing, then the cursor line the next run starts from.
 func TestShadowPlanNoteRendersTheShellPlanShape(t *testing.T) {
 	t.Parallel()
 	since := deepreview.Timestamp{Time: shadowNow.Add(-24 * time.Hour), Text: "2026-10-25T12:00:00Z"}
 	until := deepreview.Timestamp{Time: shadowNow, Text: "2026-10-26T12:00:00Z"}
+	line := `{"bead":"gt-a","head":"aaaa","landed_commit":"c1","landed_at":"2026-10-26T11:00:00Z","risk_paths":["internal/daemon/a.go"]}`
 	landing := deepreview.Record{
 		Bead: "gt-a", Head: "aaaa", LandedCommit: "c1",
 		LandedAt:  deepreview.Timestamp{Time: shadowNow.Add(-time.Hour), Text: "2026-10-26T11:00:00Z"},
 		RiskPaths: []string{"internal/daemon/a.go"},
 	}
 	cases := []struct {
-		name string
-		plan deepreview.Plan
-		want []string
+		name  string
+		plan  deepreview.Plan
+		slice shadowSlice
+		want  []string
 	}{
 		{
-			name: "quiet",
-			plan: deepreview.Plan{Since: since, ReviewedUntil: since, Quiet: true, Records: 4, Landings: []deepreview.Record{}},
-			want: []string{"mode=landings", "quiet=true", "landings=0", "records=4", "unparsed=0",
+			name:  "quiet",
+			plan:  deepreview.Plan{Since: since, ReviewedUntil: since, Quiet: true, Records: 4, Landings: []deepreview.Record{}},
+			slice: shadowSlice{Until: since},
+			// A quiet run reviewed nothing and so moves no cursor.
+			want: []string{"mode=landings", "quiet=true", "landings=0", "skipped=0", "records=4", "unparsed=0",
 				"reviewed_until_old=2026-10-25T12:00:00Z", "reviewed_until_new=2026-10-25T12:00:00Z"},
 		},
 		{
-			name: "landings",
-			plan: deepreview.Plan{Since: since, ReviewedUntil: until, Records: 4, Unparsed: 1, Landings: []deepreview.Record{landing}},
-			want: []string{"mode=landings", "quiet=false", "landings=1", "records=4", "unparsed=1",
-				"reviewed_until_old=2026-10-25T12:00:00Z", "reviewed_until_new=2026-10-26T12:00:00Z",
-				`{"bead":"gt-a","head":"aaaa","landed_commit":"c1","landed_at":"2026-10-26T11:00:00Z","risk_paths":["internal/daemon/a.go"]}`},
+			name:  "landings",
+			plan:  deepreview.Plan{Since: since, ReviewedUntil: until, Records: 4, Unparsed: 1, Landings: []deepreview.Record{landing}},
+			slice: shadowSlice{Lines: []string{line}, Until: landing.LandedAt},
+			want: []string{"mode=landings", "quiet=false", "landings=1", "skipped=0", "records=4", "unparsed=1",
+				"reviewed_until_old=2026-10-25T12:00:00Z", "reviewed_until_new=2026-10-26T11:00:00Z",
+				line, "cursor: 2026-10-26T11:00:00Z"},
+		},
+		{
+			name:  "bounded",
+			plan:  deepreview.Plan{Since: since, ReviewedUntil: until, Records: 4, Landings: []deepreview.Record{landing}},
+			slice: shadowSlice{Lines: []string{line}, Skipped: 3, Until: landing.LandedAt},
+			want: []string{"mode=landings", "quiet=false", "landings=1", "skipped=3", "records=4", "unparsed=0",
+				"reviewed_until_old=2026-10-25T12:00:00Z", "reviewed_until_new=2026-10-26T11:00:00Z",
+				line, "cursor: 2026-10-26T11:00:00Z"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			note, err := shadowPlanNote(shadowModeLandings, tc.plan, json.Marshal)
-			if err != nil {
-				t.Fatalf("render: %v", err)
-			}
-			if got, want := strings.Split(note, "\n"), tc.want; !slices.Equal(got, want) {
-				t.Errorf("note =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			note := shadowPlanNote(shadowModeLandings, tc.plan, tc.slice)
+			if got := strings.Split(note, "\n"); !slices.Equal(got, tc.want) {
+				t.Errorf("note =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(tc.want, "\n"))
 			}
 			if strings.HasSuffix(note, "\n") {
 				t.Error("the note ends in a newline, want the block to end on its last line")
+			}
+		})
+	}
+}
+
+// TestBoundLandings pins the cut: whole landed_at groups in plan order while
+// they fit, the head group taken whole past the bound, and a group the bound
+// would split left for the next run rather than half reviewed.
+func TestBoundLandings(t *testing.T) {
+	t.Parallel()
+	at := func(second int) deepreview.Timestamp {
+		ts := deepreview.Timestamp{Time: shadowNow.Add(time.Duration(second) * time.Second)}
+		ts.Text = ts.Time.Format(time.RFC3339)
+		return ts
+	}
+	rec := func(bead string, second int) deepreview.Record {
+		return deepreview.Record{Bead: bead, LandedAt: at(second), RiskPaths: []string{"internal/daemon/a.go"}}
+	}
+	render := func(r deepreview.Record) (string, error) { return r.Bead, nil }
+	cases := []struct {
+		name     string
+		landings []deepreview.Record
+		rows     int
+		bytes    int
+		want     []string
+	}{
+		{name: "nothing to review", rows: 4, bytes: 100, want: nil},
+		{name: "under the bounds", landings: []deepreview.Record{rec("gt-a", 1), rec("gt-b", 2)}, rows: 4, bytes: 100, want: []string{"gt-a", "gt-b"}},
+		{name: "row bound", landings: []deepreview.Record{rec("gt-a", 1), rec("gt-b", 2), rec("gt-c", 3)}, rows: 2, bytes: 100, want: []string{"gt-a", "gt-b"}},
+		{name: "byte bound", landings: []deepreview.Record{rec("gt-a", 1), rec("gt-bbbb", 2), rec("gt-c", 3)}, rows: 4, bytes: 9, want: []string{"gt-a"}},
+		{
+			name:     "a group the bound would split is left whole",
+			landings: []deepreview.Record{rec("gt-a", 1), rec("gt-b", 2), rec("gt-c", 2), rec("gt-d", 3)},
+			rows:     2, bytes: 100,
+			want: []string{"gt-a"},
+		},
+		{
+			name:     "the head group is taken past the bound",
+			landings: []deepreview.Record{rec("gt-a", 1), rec("gt-b", 1), rec("gt-c", 2)},
+			rows:     1, bytes: 100,
+			want: []string{"gt-a", "gt-b"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lines, err := boundLandings(tc.landings, tc.rows, tc.bytes, render)
+			if err != nil {
+				t.Fatalf("bound: %v", err)
+			}
+			if !slices.Equal(lines, tc.want) {
+				t.Errorf("slice = %v, want %v", lines, tc.want)
+			}
+		})
+	}
+}
+
+// TestBoundLandingsCarriesTheRenderError checks that a landing the encoder
+// cannot render stops the cut instead of leaving a row out of it.
+func TestBoundLandingsCarriesTheRenderError(t *testing.T) {
+	t.Parallel()
+	landings := []deepreview.Record{{Bead: "gt-a", LandedAt: deepreview.Timestamp{Time: shadowNow}}}
+	_, err := boundLandings(landings, 4, 100, func(deepreview.Record) (string, error) {
+		return "", errors.New("encoder refused")
+	})
+	if err == nil || !strings.Contains(err.Error(), "encoder refused") {
+		t.Fatalf("error = %v, want the render error carried", err)
+	}
+}
+
+// TestShadowSliceBounds pins the bound vars: deepreview's defaults when unset,
+// the entry's numbers when set, and a value that is not a positive whole number
+// refused rather than defaulted.
+func TestShadowSliceBounds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		vars      map[string]string
+		wantRows  int
+		wantBytes int
+		wantErr   string
+	}{
+		{name: "defaults", vars: map[string]string{}, wantRows: deepreview.DefaultSliceFiles, wantBytes: deepreview.DefaultSliceBytes},
+		{name: "set", vars: map[string]string{shadowSliceFilesVar: "3", shadowSliceBytesVar: "900"}, wantRows: 3, wantBytes: 900},
+		{name: "zero rows", vars: map[string]string{shadowSliceFilesVar: "0"}, wantErr: "slice_files"},
+		{name: "negative bytes", vars: map[string]string{shadowSliceBytesVar: "-1"}, wantErr: "slice_bytes"},
+		{name: "not a number", vars: map[string]string{shadowSliceFilesVar: "forty"}, wantErr: "slice_files"},
+		// Atoi answers ErrRange with the largest int, so the bound has to
+		// refuse the error and not read the number.
+		{name: "past the int range", vars: map[string]string{shadowSliceFilesVar: "99999999999999999999"}, wantErr: "slice_files"},
+		{name: "empty", vars: map[string]string{shadowSliceBytesVar: ""}, wantErr: "slice_bytes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := shadowEntry()
+			e.Vars = tc.vars
+			rows, bytes, err := shadowSliceBounds(e)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want it to name %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("bounds: %v", err)
+			}
+			if rows != tc.wantRows || bytes != tc.wantBytes {
+				t.Errorf("bounds = %d rows, %d bytes, want %d and %d", rows, bytes, tc.wantRows, tc.wantBytes)
 			}
 		})
 	}

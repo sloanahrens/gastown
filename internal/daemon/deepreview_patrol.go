@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,11 @@ const (
 	shadowModeVar        = "mode"
 	shadowModeLandings   = "landings"
 	shadowLandingsRigVar = "landings_rig"
+	// shadowSliceFilesVar and shadowSliceBytesVar bound the landings one run
+	// reviews, the way the shell's --slice and --slice-bytes do. Unset, they
+	// are deepreview's defaults.
+	shadowSliceFilesVar = "slice_files"
+	shadowSliceBytesVar = "slice_bytes"
 )
 
 // shadowNotesBeads bounds how many run beads' notes a shadow run reads the
@@ -97,28 +103,138 @@ func shadowNotes(runs []scheduledBead) string {
 	return b.String()
 }
 
-// shadowPlanNote renders a plan the way scripts/deep-review.sh plan prints it:
-// one key=value line per field, then one JSON object per reviewed landing in
-// the landings.jsonl shape. encode is the JSON encoder, injected so that its
-// failure branch is reachable from a test.
-func shadowPlanNote(mode string, p deepreview.Plan, encode func(any) ([]byte, error)) (string, error) {
-	var b strings.Builder
-	fmt.Fprintf(&b, "mode=%s\n", mode)
-	fmt.Fprintf(&b, "quiet=%t\n", p.Quiet)
-	fmt.Fprintf(&b, "landings=%d\n", len(p.Landings))
-	fmt.Fprintf(&b, "records=%d\n", p.Records)
-	fmt.Fprintf(&b, "unparsed=%d\n", p.Unparsed)
-	fmt.Fprintf(&b, "reviewed_until_old=%s\n", p.Since)
-	fmt.Fprintf(&b, "reviewed_until_new=%s\n", p.ReviewedUntil)
-	for _, rec := range p.Landings {
-		line, err := encode(rec)
-		if err != nil {
-			return "", fmt.Errorf("rendering landing %s: %w", rec.Bead, err)
-		}
-		b.Write(line)
-		b.WriteByte('\n')
+// shadowSlice is the bounded set of landings one run reviews, and the cursor
+// the next run starts from.
+type shadowSlice struct {
+	// Lines are the reviewed landings as the note carries them, one
+	// landings.jsonl object each, in plan order.
+	Lines []string
+	// Skipped counts the plan's landings the bound left for the next run.
+	Skipped int
+	// Until is the next cursor: the last reviewed landing's landed_at, or the
+	// plan's window start when the run reviewed none.
+	Until deepreview.Timestamp
+}
+
+// shadowSliceBounds returns the run's row and byte bounds: deepreview's
+// defaults, overridden by the entry's slice_files and slice_bytes vars.
+//
+// A bound that does not parse or is not positive is refused here rather than
+// defaulted: a run that silently reviewed everything, or nothing, under a typo
+// would move the cursor on a mistake.
+func shadowSliceBounds(e ScheduledSlingEntry) (maxRows, maxBytes int, err error) {
+	if maxRows, err = shadowSliceBound(e, shadowSliceFilesVar, deepreview.DefaultSliceFiles); err != nil {
+		return 0, 0, err
 	}
-	return strings.TrimSuffix(b.String(), "\n"), nil
+	maxBytes, err = shadowSliceBound(e, shadowSliceBytesVar, deepreview.DefaultSliceBytes)
+	return maxRows, maxBytes, err
+}
+
+// shadowSliceBound is one bound: the var's value, or def when the entry sets
+// none.
+func shadowSliceBound(e ScheduledSlingEntry, key string, def int) (int, error) {
+	raw, ok := e.Vars[key]
+	if !ok {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	// Atoi answers ErrRange with the largest int, so the error is refused
+	// rather than read: a bound past the range is a typo, not a wide slice.
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("scheduled_slings[%s]: vars.%s %q must be a positive whole number", e.Name, key, raw)
+	}
+	return n, nil
+}
+
+// boundLandings takes the landings one run reviews: whole groups of landings
+// that share one landed_at, in plan order, while they fit the row and byte
+// bounds.
+//
+// The cut is by group, not by row, because the next run's window starts
+// strictly after the cursor's instant: a landing left behind at that instant
+// would never be reviewed. deepreview.BuildSlice cuts row by row, so it cannot
+// make this cut. A group that would cross the bound is left whole for the next
+// run, and the head group is taken whole even past the bound, since a run that
+// dropped it would review nothing and never move the cursor.
+func boundLandings(landings []deepreview.Record, maxRows, maxBytes int, render func(deepreview.Record) (string, error)) ([]string, error) {
+	var (
+		lines []string
+		size  int
+	)
+	for i := 0; i < len(landings); {
+		end := i + 1
+		for end < len(landings) && landings[end].LandedAt.Time.Equal(landings[i].LandedAt.Time) {
+			end++
+		}
+		group := make([]string, 0, end-i)
+		groupBytes := 0
+		for _, rec := range landings[i:end] {
+			line, err := render(rec)
+			if err != nil {
+				return nil, fmt.Errorf("rendering landing %s: %w", rec.Bead, err)
+			}
+			group = append(group, line)
+			groupBytes += len(line)
+		}
+		if len(lines) > 0 && (len(lines)+len(group) > maxRows || size+groupBytes > maxBytes) {
+			break
+		}
+		lines = append(lines, group...)
+		size += groupBytes
+		i = end
+	}
+	return lines, nil
+}
+
+// shadowSliceOf cuts the plan's landings at the run's bounds and places the
+// cursor on the last one reviewed.
+func (d *Daemon) shadowSliceOf(plan deepreview.Plan, maxRows, maxBytes int) (shadowSlice, error) {
+	lines, err := boundLandings(plan.Landings, maxRows, maxBytes, func(rec deepreview.Record) (string, error) {
+		line, err := d.seams.encodeShadowLanding(rec)
+		return string(line), err
+	})
+	if err != nil {
+		return shadowSlice{}, err
+	}
+	s := shadowSlice{Lines: lines, Skipped: len(plan.Landings) - len(lines), Until: plan.Since}
+	if len(lines) > 0 {
+		s.Until = plan.Landings[len(lines)-1].LandedAt
+	}
+	return s, nil
+}
+
+// shadowPlanNote renders a run's note: the plan's key=value lines as
+// scripts/deep-review.sh plan prints them, the reviewed landings in the
+// landings.jsonl shape, and the cursor line last.
+//
+// landings= and reviewed_until_new= describe what this run reviewed, not what
+// the ledger held, so a bounded run reports its own slice and skipped= counts
+// the landings it left for the next run.
+//
+// A run that reviewed nothing writes no cursor line, as the shell writes none
+// on a quiet day: the line would pin the default window at its start and a
+// quiet week would put a week of landings in one run's window.
+//
+// The cursor line is last and in the same append as the rows, so a note read
+// back can never carry a cursor past rows that did not land; the bead is
+// created first (see runShadowDeepReview), which leaves a crash between the two
+// re-reading the same landings instead of skipping them.
+func shadowPlanNote(mode string, plan deepreview.Plan, s shadowSlice) string {
+	lines := []string{
+		"mode=" + mode,
+		fmt.Sprintf("quiet=%t", plan.Quiet),
+		fmt.Sprintf("landings=%d", len(s.Lines)),
+		fmt.Sprintf("skipped=%d", s.Skipped),
+		fmt.Sprintf("records=%d", plan.Records),
+		fmt.Sprintf("unparsed=%d", plan.Unparsed),
+		"reviewed_until_old=" + plan.Since.String(),
+		"reviewed_until_new=" + s.Until.String(),
+	}
+	lines = append(lines, s.Lines...)
+	if len(s.Lines) > 0 {
+		lines = append(lines, "cursor: "+s.Until.String())
+	}
+	return strings.Join(lines, "\n")
 }
 
 // shadowPlan builds a run's plan from the host's ledger and the entry's vars.
@@ -147,28 +263,35 @@ func (d *Daemon) shadowPlan(e ScheduledSlingEntry, runs []scheduledBead, now tim
 }
 
 // runShadowDeepReview is one shadow run: plan the deep review on the host,
-// write the plan to the run bead's notes, and stop.
+// write the slice it reviews and the cursor it moves to into the run bead's
+// notes, and stop.
 //
-// The plan is built before the bead exists, so a ledger the plan cannot trust
-// costs no bead. The note is the job's only content write and this bead is the
-// only bead it writes: the create carries the entry's identity label and a
-// fixed description, the close carries a fixed reason, and both say nothing
-// about the plan. Nothing is slung.
+// The plan and the note are built before the bead exists, so a ledger the plan
+// cannot trust, a bound that does not parse and a landing the encoder cannot
+// render all cost no bead. The note is the job's only content write and this
+// bead is the only bead it writes: the create carries the entry's identity
+// label and a fixed description, the close carries a fixed reason, and both say
+// nothing about the plan. Nothing is slung.
 //
-// A daemon that dies between the create and the note leaves an open bead with
-// no plan. The patrol reads it as skip-open until it outlives the sling budget,
-// then retires it as a failed run (retireStalledScheduledRuns), so the plan is
-// written on a later tick; the plan is idempotent, and a duplicate costs a note
-// because nothing was slung.
+// The cursor lives only in the bead's notes, and the bead is created before the
+// notes are appended, so a daemon that dies between the two moves no cursor:
+// the next run reads the same window and reviews the same landings again. The
+// plan is idempotent and a duplicate costs a note because nothing was slung,
+// where the other order would skip a run's landings for good.
 func (d *Daemon) runShadowDeepReview(ctx context.Context, r scheduledSlingRunner, e ScheduledSlingEntry, runs []scheduledBead, title string, now time.Time) error {
+	maxRows, maxBytes, err := shadowSliceBounds(e)
+	if err != nil {
+		return err
+	}
 	mode, plan, err := d.shadowPlan(e, runs, now)
 	if err != nil {
 		return err
 	}
-	note, err := shadowPlanNote(mode, plan, d.seams.encodeShadowLanding)
+	s, err := d.shadowSliceOf(plan, maxRows, maxBytes)
 	if err != nil {
 		return err
 	}
+	note := shadowPlanNote(mode, plan, s)
 	// Planning spent part of the entry's budget on a ledger read and a bead
 	// list; the create and the note write start a full one.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.scheduledSlingBudget())
@@ -197,7 +320,7 @@ func (d *Daemon) runShadowDeepReview(ctx context.Context, r scheduledSlingRunner
 		// one wait but not the plan.
 		return fmt.Errorf("deep-review shadow run bead %s recorded its plan and could not be closed: %w", id, err)
 	}
-	d.logger.Printf("scheduled_slings: %s: shadow run %s planned %d landing(s) into the bead's notes; nothing was slung", e.Name, id, len(plan.Landings))
+	d.logger.Printf("scheduled_slings: %s: shadow run %s reviewed %d landing(s) with %d left for the next run, and moved the cursor to %s; nothing was slung", e.Name, id, len(s.Lines), s.Skipped, s.Until)
 	return nil
 }
 
