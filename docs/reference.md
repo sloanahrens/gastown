@@ -275,7 +275,10 @@ The bead comes from `--bead`, else from a branch name carrying a routed bead id;
 bead `rework` (removing `gt:ready-to-land`) and appends a `MERGE REJECTION` note naming
 the head it refused. A bead the human-only label holds keeps its assignee: its branch
 comes from a person, so the refusal goes back to the crew that submitted it rather than
-onto the board (gt-me800). When the polecat's branch still sits on that head the
+onto the board (gt-me800). A bead a bird claimed — any assignee but a
+`<rig>/polecats/<name>` seat — keeps its assignee and `in_progress` status, and the owner
+hears of the refusal from a `rejected:<bead>` attention item instead (gt-h4cvi). When the
+polecat's branch still sits on that head the
 rejection came from something other than the diff, and nothing needs to change.
 `gt land requeue <bead> --reason "<why>"` removes `rework`, restores `gt:ready-to-land`
 and records the operator, the reason and the head as a bead comment, so the worker gates

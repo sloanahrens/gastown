@@ -504,6 +504,11 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		},
 		// A revert of a red main lands without om rather than wait on it.
 		ReviewErrorLandsLabels: []string{landworker.LabelRevert},
+		// A bird's rejection keeps the bead with the bird and reaches them as
+		// an attention item, where the town puts what its owners must read
+		// (gt-h4cvi).
+		BirdOwned:      birdOwnedAssignee,
+		RejectionAlert: d.rejectionAlert(),
 	}
 	// A rig lands through its Forgejo CI: the candidate gate runs the merged
 	// tree and the PR merger writes the target. merge_queue.forgejo is
@@ -1087,6 +1092,35 @@ func (d *Daemon) followupBackpressureAlert(rigName string) func(message string) 
 // names the bead and the head reviewed, so the escalation keeps one item per
 // head. A failed delivery goes back to the lander, which logs it and lands.
 func (d *Daemon) acceptedRiskAlert() func(key, message string) error {
+	return func(key, message string) error {
+		return d.escalateAlertSeverity("MEDIUM", key, "landing_worker", message)
+	}
+}
+
+// birdOwnedAssignee reports whether an assignee is a bird — a crew or
+// operator identity such as gastown/crew/sloan, town/crew/name, or a bare
+// town handle — rather than a polecat seat. Any assignee carrying a "polecats"
+// path segment counts as a seat, whatever the surrounding shape: a shape this
+// function does not expect must release the bead to dispatch, not leave it
+// with an owner nobody will act for. An unassigned bead has no owner to keep
+// it for, so it counts as a polecat's (gt-h4cvi).
+func birdOwnedAssignee(assignee string) bool {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" {
+		return false
+	}
+	for _, seg := range strings.Split(assignee, "/") {
+		if seg == "polecats" {
+			return false
+		}
+	}
+	return true
+}
+
+// rejectionAlert is the attention item a bird reads when the landing of its
+// bead is rejected: MEDIUM, like an accepted risk, because the owner must act
+// but nobody is paged (gt-h4cvi).
+func (d *Daemon) rejectionAlert() func(key, message string) error {
 	return func(key, message string) error {
 		return d.escalateAlertSeverity("MEDIUM", key, "landing_worker", message)
 	}
