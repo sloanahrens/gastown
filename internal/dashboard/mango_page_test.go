@@ -1170,6 +1170,357 @@ func TestMangoRowFitsThePanelAtTheWidthItIsReadAt(t *testing.T) {
 	}
 }
 
+// TestMangoRateReadsInTwoLinesAndItsRowStaysShort draws the row the Mango panel
+// is read at — the panel's own width at the 1760px page, its font stack at the
+// widest face it names — and lays the drawn cells out the way the stylesheet
+// says: the baseline line takes at most two lines, and no cell draws taller
+// than the 120px a reader takes in at a glance. The fixture is a full modern
+// row: a 34-character label, a rate with its group count, an interval, two
+// narrow condition chips and a 33-character best box (gt-g4vif).
+func TestMangoRateReadsInTwoLinesAndItsRowStaysShort(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	target := mangoPageTarget("rejected_before_landing", 48, false, "model = opus and attempts in q4", 96, 0.42, 0.243, MangoEarning)
+	target["label"] = "Landings rejected before they land"
+	target["holdout_positives"] = 44
+	target["ci_low"] = 0.31
+	target["ci_high"] = 0.53
+	target["conditions"] = []any{
+		map[string]any{"text": "model = opus", "share": 0.12, "narrows": true},
+		map[string]any{"text": "attempts in q4", "share": 0.18, "narrows": true},
+		map[string]any{"text": "rig = gastown", "share": 0.71, "narrows": false},
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
+
+	widths, _ := mangoColumnWidths(t, dom, 1760)
+	rows := mangoRows(t, dom)
+	if len(rows) < 2 {
+		t.Fatalf("the Mango table draws %d rows, want the collection row and the target's", len(rows))
+	}
+	row := rows[1]
+	if len(row) != len(widths) {
+		t.Fatalf("the target row draws %d cells, want the header's %d columns", len(row), len(widths))
+	}
+
+	rateAt := -1
+	for i := range widths {
+		if mangoColumnName(t, dom, i) == "rate" {
+			rateAt = i
+		}
+	}
+	if rateAt < 0 {
+		t.Fatal("the Mango header names no rate column")
+	}
+
+	// The line the bead measures: the baseline the rate is read against.
+	const baseline = "vs 24.3% across all recent landings"
+	base := mangoMeasureBase(t)
+	rateWidth := widths[rateAt] - mangoCellRightPadding(t)
+	vs := -1
+	for i, kid := range row[rateAt].Kids {
+		if mangoNamesClass(kid.Classes, "mgvs") {
+			vs = i
+		}
+	}
+	if vs < 0 {
+		t.Fatalf("the rate cell draws no baseline line, want %q", baseline)
+	}
+	if got := strings.TrimSpace(row[rateAt].Kids[vs].All); got != baseline {
+		t.Fatalf("the rate cell's baseline line reads %q, want %q", got, baseline)
+	}
+	if lines := mangoLineCount(t, row[rateAt].Kids[vs], base, rateWidth); lines > 2 {
+		t.Errorf("the baseline line %q takes %d lines in the %gpx the rate column leaves, want at most two", baseline, lines, rateWidth)
+	}
+
+	// A row is as tall as its tallest cell, its cells' padding included. 120px
+	// is one row a reader takes in at a glance rather than a column of words.
+	const limit = 120
+	lastPad := mangoLastCellRightPadding(t)
+	pad := mangoCellVerticalPadding(t)
+	for c, cell := range row {
+		avail := widths[c] - mangoCellRightPadding(t)
+		if c == len(row)-1 {
+			avail = widths[c] - lastPad
+		}
+		h := mangoCellHeight(t, cell, base, avail) + pad + mangoRowBorder(t)
+		if h > limit {
+			t.Errorf("the %s column draws %gpx tall at the 1760px page, over the %dpx a row may take", mangoColumnName(t, dom, c), h, limit)
+		}
+	}
+}
+
+// mangoMeasure is the text style a Mango cell draws with: the properties that
+// decide where a line breaks and how tall its line box is. The page writes a
+// unitless line-height, which inherits as a factor of each element's own font
+// size; a chip writes its line box in pixels instead.
+type mangoMeasure struct {
+	wrap     string
+	font     float64
+	lhFactor float64
+	lhPx     float64
+}
+
+// apply returns the style the node's classes give it, outermost class first, as
+// the cascade serves an inner rule over the outer one it was written against.
+func (m mangoMeasure) apply(t *testing.T, classes []string) mangoMeasure {
+	t.Helper()
+
+	for _, class := range classes {
+		decls := cssDecls(t, class)
+		if v, ok := decls["font-size"]; ok {
+			m.font = cssPxValue(t, v)
+		}
+		if v, ok := decls["overflow-wrap"]; ok {
+			m.wrap = v
+		}
+		if v, ok := decls["line-height"]; ok {
+			if strings.HasSuffix(v, "px") {
+				m.lhPx, m.lhFactor = cssPxValue(t, v), 0
+			} else {
+				f, err := strconv.ParseFloat(v, 64)
+				if err != nil {
+					t.Fatalf("line-height %q is neither a factor nor a pixel height", v)
+				}
+				m.lhFactor, m.lhPx = f, 0
+			}
+		}
+	}
+	return m
+}
+
+// lineBox is the height one of the style's lines takes.
+func (m mangoMeasure) lineBox() float64 {
+	if m.lhPx > 0 {
+		return m.lhPx
+	}
+	return m.font * m.lhFactor
+}
+
+// mangoMeasureBase is the style every cell starts from: the page sets the font
+// and its leading on html and body.
+func mangoMeasureBase(t *testing.T) mangoMeasure {
+	t.Helper()
+
+	size, lead, ok := strings.Cut(declOf(t, topRule(t, "html,body"), "font"), "/")
+	if !ok {
+		t.Fatal("html,body's font states no line-height")
+	}
+	lead, _, _ = strings.Cut(lead, " ")
+	factor, err := strconv.ParseFloat(strings.TrimSpace(lead), 64)
+	if err != nil {
+		t.Fatalf("html,body's line-height %q is not a factor: %v", lead, err)
+	}
+	return mangoMeasure{wrap: "normal", font: cssPxValue(t, size), lhFactor: factor}
+}
+
+// mangoLineCount is the number of lines text draws in a box of the given width:
+// a word starts the next line when it would cross the edge, and a word wider
+// than a whole line breaks inside it only where the page lets a line end at any
+// character.
+func mangoLineCount(t *testing.T, n mangoNode, base mangoMeasure, width float64) int {
+	t.Helper()
+
+	return mangoLines(strings.TrimSpace(n.All), base.apply(t, n.Classes), width)
+}
+
+// mangoLines is the number of lines the style's text draws in width pixels.
+func mangoLines(text string, m mangoMeasure, width float64) int {
+	if strings.TrimSpace(text) == "" || width <= 0 {
+		return 1
+	}
+	adv := m.font * monospaceAdvance
+	lines, used := 1, 0.0
+	for _, word := range strings.Fields(text) {
+		w := float64(len([]rune(word))) * adv
+		if used > 0 && used+adv+w > width {
+			lines++
+			used = 0
+		}
+		switch {
+		case w <= width:
+			if used > 0 {
+				used += adv
+			}
+			used += w
+		case m.wrap == "anywhere":
+			// The word fills this line and as many more as it needs.
+			left := w - (width - used)
+			more := int(math.Ceil(left / width))
+			lines += more
+			used = left - float64(more-1)*width
+		default:
+			// An unbreakable word stands as one line, past the edge.
+			used = w
+		}
+	}
+	return lines
+}
+
+// mangoCellHeight is the height one cell's content draws in a column of the
+// given width, in pixels: a block child stacks under the one before it, a
+// paragraph's words wrap inside the box its cell leaves, a chip wraps inside
+// its own border and padding, and a fold the reader has not opened draws only
+// its summary. Chips are inline-blocks that a browser could set two to a line;
+// this model gives each its own, so it measures no cell shorter than it draws.
+func mangoCellHeight(t *testing.T, n mangoNode, base mangoMeasure, width float64) float64 {
+	t.Helper()
+
+	m := base.apply(t, n.Classes)
+	switch {
+	case mangoNamesClass(n.Classes, "mgbar"):
+		decls := cssDecls(t, "mgbar")
+		return cssPxValue(t, decls["height"]) + mangoInset(t, "mgbar", "margin", "top")
+	case mangoNamesClass(n.Classes, "mgfold") && !n.Open && len(n.Kids) > 0:
+		// A fold the reader has not opened draws only its summary.
+		return mangoInset(t, "mgfold", "margin", "top") + mangoCellHeight(t, n.Kids[0], base, width)
+	case mangoNamesClass(n.Classes, "mgfold"):
+		top := mangoInset(t, "mgfold", "margin", "top")
+		h := 0.0
+		for _, kid := range n.Kids {
+			h += mangoCellHeight(t, kid, base, width)
+		}
+		return top + h
+	case mangoNamesClass(n.Classes, "jvchip"):
+		inner := width - mangoInset(t, "jvchip", "padding", "left") - mangoInset(t, "jvchip", "padding", "right") - 2*mangoChipBorder(t)
+		lines := mangoLines(strings.TrimSpace(n.All), m, inner)
+		return float64(lines)*m.lineBox() + 2*mangoChipBorder(t) + mangoInset(t, "jvchip", "margin", "top") + mangoInset(t, "jvchip", "margin", "bottom")
+	case len(n.Kids) == 0:
+		text := strings.TrimSpace(n.Text)
+		if text == "" {
+			return 0
+		}
+		return float64(mangoLines(text, m, width)) * m.lineBox()
+	}
+	if mangoInlineChildren(n.Kids) {
+		return mangoParagraphHeight(t, n, base, width)
+	}
+	total := 0.0
+	for _, kid := range n.Kids {
+		total += mangoCellHeight(t, kid, base, width)
+	}
+	return total
+}
+
+// mangoParagraphHeight is the height a node draws when everything inside it is
+// inline: its words share the cell's lines, and each word takes the line box of
+// the font it is drawn in. Every line is measured at the tallest font in the
+// paragraph, so the sum is no shorter than the browser's.
+func mangoParagraphHeight(t *testing.T, n mangoNode, base mangoMeasure, width float64) float64 {
+	t.Helper()
+
+	lines, box := 1, 0.0
+	used := 0.0
+	var walk func(node mangoNode)
+	walk = func(node mangoNode) {
+		m := base.apply(t, node.Classes)
+		if len(node.Kids) == 0 {
+			if box < m.lineBox() {
+				box = m.lineBox()
+			}
+			adv := m.font * monospaceAdvance
+			for _, word := range strings.Fields(node.Text) {
+				w := float64(len([]rune(word))) * adv
+				if used > 0 && used+adv+w > width {
+					lines++
+					used = 0
+				}
+				if used > 0 {
+					used += adv
+				}
+				used += w
+			}
+			return
+		}
+		for _, kid := range node.Kids {
+			walk(kid)
+		}
+	}
+	walk(n)
+	return float64(lines) * box
+}
+
+// mangoInlineChildren reports whether every child draws in the parent's inline
+// flow rather than starting a box of its own. A chip is an inline-block: it
+// flows with the text but carries its own border and padding.
+func mangoInlineChildren(kids []mangoNode) bool {
+	for _, kid := range kids {
+		switch kid.Tag {
+		case "SPAN", "BUTTON", "A", "B", "I", "EM", "STRONG", "CODE":
+			if mangoNamesClass(kid.Classes, "jvchip") {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return len(kids) > 0
+}
+
+// mangoNamesClass reports whether the class chain names class as a whole class.
+func mangoNamesClass(classes []string, class string) bool {
+	for _, name := range classes {
+		if name == class {
+			return true
+		}
+	}
+	return false
+}
+
+// mangoInset is one side of a class's padding, border or margin, read the way
+// the cascade applies it: a longhand declaration wins over the shorthand.
+func mangoInset(t *testing.T, class, prop, side string) float64 {
+	t.Helper()
+
+	decls := cssDecls(t, class)
+	if v, ok := decls[prop+"-"+side]; ok {
+		return cssPxValue(t, v)
+	}
+	v, ok := decls[prop]
+	if !ok {
+		return 0
+	}
+	return boxSide(t, prop+":"+v, prop, side)
+}
+
+// mangoChipBorder is the width of the one border a chip draws on each side.
+func mangoChipBorder(t *testing.T) float64 {
+	t.Helper()
+
+	return cssPxValue(t, cssDecls(t, "jvchip")["border"])
+}
+
+// mangoCellRightPadding is the space a column keeps between its cell's text and
+// the next column.
+func mangoCellRightPadding(t *testing.T) float64 {
+	t.Helper()
+
+	return boxSide(t, topRule(t, ".mgtable td"), "padding", "right")
+}
+
+// mangoLastCellRightPadding is the last column's, which drops the gutter so the
+// best box reaches the panel's edge.
+func mangoLastCellRightPadding(t *testing.T) float64 {
+	t.Helper()
+
+	return boxSide(t, topRule(t, ".mgtable td:last-child"), "padding", "right")
+}
+
+// mangoCellVerticalPadding is the space a cell keeps above and below its text.
+func mangoCellVerticalPadding(t *testing.T) float64 {
+	t.Helper()
+
+	decls := topRule(t, ".mgtable td")
+	return boxSide(t, decls, "padding", "top") + boxSide(t, decls, "padding", "bottom")
+}
+
+// mangoRowBorder is the rule the table draws above a body row after the first.
+func mangoRowBorder(t *testing.T) float64 {
+	t.Helper()
+
+	return boxSide(t, topRule(t, ".mgtable td"), "border", "top")
+}
+
 // mangoColumnWidths reads the Mango table's columns in pixels at a page
 // viewport: each header cell names a class, that class declares its share of
 // the row, and the table is as wide as its panel. The shares must add up to the
@@ -1258,7 +1609,9 @@ func mangoTableWidth(t *testing.T, viewport float64) float64 {
 // mangoNode is one element the Mango table draws, with the classes of the
 // elements it sits inside, outermost first, and the text its subtree holds.
 type mangoNode struct {
+	Tag     string      `json:"tag"`
 	Classes []string    `json:"classes"`
+	Open    bool        `json:"open"`
 	Text    string      `json:"text"`
 	All     string      `json:"all"`
 	Kids    []mangoNode `json:"kids"`
@@ -1347,6 +1700,8 @@ func mangoRows(t *testing.T, dom *pageDOM) [][]mangoNode {
       return (function walk(n, chain) {
         var here = chain.concat(String(n.className || "").split(" ").filter(function (x) { return x; }));
         return {
+          tag: String(n.tagName || ""),
+          open: !!n.open,
           classes: here,
           text: n.children.length ? "" : String(n.textContent || ""),
           all: String(n.textContent || ""),
