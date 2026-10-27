@@ -43,7 +43,7 @@ func TestRealExecuteReportsTheStatusBashWould(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			stdout, stderr, code := RealExecute("", tc.command)
+			stdout, stderr, code := RealExecute("", tc.command, nil)
 
 			if code != tc.want {
 				t.Errorf("RealExecute(%q) = %d, want %d (stdout %q, stderr %q)", tc.command, code, tc.want, stdout, stderr)

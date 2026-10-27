@@ -14,26 +14,41 @@ import (
 // check parses stdout as JSON with stderr discarded, as the script's
 // `2>/dev/null` does.
 //
+// stdin is what the command reads as its standard input, nil for every command
+// but the keychain unlock: its password is handed over on stdin so it never
+// appears in the argv ps shows to every user on the machine (gt-4ucnp).
+//
 // It is a distinct seam from Contract.Exec, which runs a command with no
 // working directory and returns its combined output: the contract's escalation
 // and the gateway only ask whether that worked, while these commands run in the
 // checkout being built and their answer is a status (gt-tpg0p.11).
-type Execute func(dir, name string, args ...string) (stdout, stderr []byte, code int)
+type Execute func(dir, name string, stdin []byte, args ...string) (stdout, stderr []byte, code int)
 
-// run runs one command through the seam, and for real when none was set.
+// run runs one command through the seam with nothing on its stdin, and for
+// real when none was set.
 func (e Execute) run(dir, name string, args ...string) (stdout, stderr []byte, code int) {
-	if e == nil {
-		return RealExecute(dir, name, args...)
-	}
-	return e(dir, name, args...)
+	return e.runInput(dir, name, nil, args...)
 }
 
-// RealExecute runs the command for real. A command that never started has
-// status 126 when it could not be executed and 127 when it was not found, the
-// two numbers bash reports, so a caller reads every answer as one status.
-func RealExecute(dir, name string, args ...string) (stdout, stderr []byte, code int) {
+// runInput runs one command through the seam, feeding it stdin.
+func (e Execute) runInput(dir, name string, stdin []byte, args ...string) (stdout, stderr []byte, code int) {
+	if e == nil {
+		return RealExecute(dir, name, stdin, args...)
+	}
+	return e(dir, name, stdin, args...)
+}
+
+// RealExecute runs the command for real, with stdin as its standard input (nil
+// leaves it at /dev/null, as a shell's unredirected command has it). A command
+// that never started has status 126 when it could not be executed and 127 when
+// it was not found, the two numbers bash reports, so a caller reads every
+// answer as one status.
+func RealExecute(dir, name string, stdin []byte, args ...string) (stdout, stderr []byte, code int) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut

@@ -22,9 +22,11 @@ type testRun struct {
 	errOut strings.Builder
 	execs  [][]string
 	// cmds is the argv of every command the install sections ran, through Cmd,
-	// and dirs the directory each ran in.
-	cmds [][]string
-	dirs []string
+	// dirs the directory each ran in, and stdins the standard input each was
+	// fed.
+	cmds   [][]string
+	dirs   []string
+	stdins []string
 	// respond answers a command; a case that leaves it nil gets status 0 and
 	// no output.
 	respond func(dir, name string, args []string) (stdout, stderr []byte, code int)
@@ -81,9 +83,10 @@ func newTestRun(t *testing.T) *testRun {
 		Signing: Signing{Dir: filepath.Join(root, "signing"), Identity: "gastown-dev-unattended", Timeout: "30"},
 		Found:   func(string) bool { return false },
 	}
-	tr.Cmd = func(dir, name string, args ...string) ([]byte, []byte, int) {
+	tr.Cmd = func(dir, name string, stdin []byte, args ...string) ([]byte, []byte, int) {
 		tr.cmds = append(tr.cmds, append([]string{name}, args...))
 		tr.dirs = append(tr.dirs, dir)
+		tr.stdins = append(tr.stdins, string(stdin))
 		if tr.respond != nil {
 			return tr.respond(dir, name, args)
 		}
