@@ -30,10 +30,15 @@ func WeekOf(ts string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return weekOf(t), nil
+}
+
+// weekOf is WeekOf for a timestamp the caller already holds.
+func weekOf(t time.Time) string {
 	y, m, d := t.Date()
 	day := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 	sinceMonday := (int(day.Weekday()) + 6) % 7
-	return day.AddDate(0, 0, -sinceMonday).Format("2006-01-02"), nil
+	return day.AddDate(0, 0, -sinceMonday).Format("2006-01-02")
 }
 
 // Entropy is the Shannon entropy in bits of the positive weights. Weights that

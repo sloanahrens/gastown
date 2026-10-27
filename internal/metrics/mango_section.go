@@ -127,13 +127,18 @@ type MangoSectionOptions struct {
 
 // MangoSection renders the digest's "Mango findings" text: the weekly table's
 // profile and, per target, the split's counts, the search's counters and the
-// boxes measured on the holdout.
+// boxes measured on the holdout. It ends with the rejection tables
+// MangoRejectionsSection renders, so the digest carries the refusal rate beside
+// the findings it explains.
 //
 // It reads outDir's landings.csv and landings.sidecar.json, runs mango over
 // outDir's weekly.csv and each run target's split through env.Run, writes the
 // split under outDir/mango and the counts the backtest reads to
-// outDir/mango-summary.json. An empty binary is a host without mango: the text
-// says so and names the directory holding the CSVs, so a report still renders.
+// outDir/mango-summary.json. It then reads the town's review log and, once per
+// store a refusal names, the refused beads' notes, so the tables it ends with
+// are the digest's own reading rather than a second copy of gt land om-stats.
+// An empty binary is a host without mango: the text says so and names the
+// directory holding the CSVs, so a report still renders.
 func MangoSection(ctx context.Context, env Env, outDir, binary string, o MangoSectionOptions) (string, error) {
 	if o.MinSupport == 0 {
 		o.MinSupport = MangoMinSupport
@@ -210,7 +215,11 @@ func MangoSection(ctx context.Context, env Env, outDir, binary string, o MangoSe
 	if err := writeMangoSummary(filepath.Join(outDir, "mango-summary.json"), summary); err != nil {
 		return "", err
 	}
-	return strings.Join(parts, "\n\n"), nil
+	rejections, err := MangoRejectionsSection(ctx, env)
+	if err != nil {
+		return "", fmt.Errorf("mango section: %w", err)
+	}
+	return strings.Join(parts, "\n\n") + "\n\n" + rejections, nil
 }
 
 // mangoProfile is the weekly table's profile: mango's output in a code block,
