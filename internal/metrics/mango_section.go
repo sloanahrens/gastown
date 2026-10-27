@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // The digest's "Mango findings" section: the weekly table's profile and, per
@@ -123,22 +124,26 @@ type MangoSectionOptions struct {
 	// MinPositives is the fewest positives a target's training split needs to
 	// be run; zero is MangoSectionMinPositives.
 	MinPositives int
+	// Since windows the first-pass table to beads merged at or after it; zero
+	// is every landing the logs hold.
+	Since time.Time
 }
 
 // MangoSection renders the digest's "Mango findings" text: the weekly table's
 // profile and, per target, the split's counts, the search's counters and the
 // boxes measured on the holdout. It ends with the rejection tables
-// MangoRejectionsSection renders, so the digest carries the refusal rate beside
-// the findings it explains.
+// MangoRejectionsSection renders and the first-pass table
+// MangoFirstPassSection renders, so the digest carries the refusal rate and
+// the author kinds' first-pass rate beside the findings they explain.
 //
 // It reads outDir's landings.csv and landings.sidecar.json, runs mango over
 // outDir's weekly.csv and each run target's split through env.Run, writes the
 // split under outDir/mango and the counts the backtest reads to
-// outDir/mango-summary.json. It then reads the town's review log and, once per
-// store a refusal names, the refused beads' notes, so the tables it ends with
-// are the digest's own reading rather than a second copy of gt land om-stats.
-// An empty binary is a host without mango: the text says so and names the
-// directory holding the CSVs, so a report still renders.
+// outDir/mango-summary.json. It then reads the town's review log, each rig's
+// landing log and the merged beads' notes, so the tables it ends with are the
+// digest's own reading rather than a second copy of gt land om-stats. An empty
+// binary is a host without mango: the text says so and names the directory
+// holding the CSVs, so a report still renders.
 func MangoSection(ctx context.Context, env Env, outDir, binary string, o MangoSectionOptions) (string, error) {
 	if o.MinSupport == 0 {
 		o.MinSupport = MangoMinSupport
@@ -150,6 +155,8 @@ func MangoSection(ctx context.Context, env Env, outDir, binary string, o MangoSe
 		return fmt.Sprintf("mango binary not found; CSVs written to %s, mango step skipped.", outDir), nil
 	}
 	switch {
+	case env.Town == "":
+		return "", errors.New("mango section: Env.Town is unset")
 	case env.ReadFile == nil:
 		return "", errors.New("mango section: Env.ReadFile is unset")
 	case env.Run == nil:
@@ -215,11 +222,19 @@ func MangoSection(ctx context.Context, env Env, outDir, binary string, o MangoSe
 	if err := writeMangoSummary(filepath.Join(outDir, "mango-summary.json"), summary); err != nil {
 		return "", err
 	}
-	rejections, err := MangoRejectionsSection(ctx, env)
+	records, skippedReviews, err := townReviewRecords(env)
 	if err != nil {
 		return "", fmt.Errorf("mango section: %w", err)
 	}
-	return strings.Join(parts, "\n\n") + "\n\n" + rejections, nil
+	rejections, err := mangoRejectionsSection(ctx, env, records, skippedReviews)
+	if err != nil {
+		return "", fmt.Errorf("mango section: %w", err)
+	}
+	firstPass, err := mangoFirstPassSection(ctx, env, o.Since, records, skippedReviews)
+	if err != nil {
+		return "", fmt.Errorf("mango section: %w", err)
+	}
+	return strings.Join(parts, "\n\n") + "\n\n" + rejections + "\n\n" + firstPass, nil
 }
 
 // mangoProfile is the weekly table's profile: mango's output in a code block,

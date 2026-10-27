@@ -687,7 +687,7 @@ func TestMangoSectionCarriesTheRejectionTables(t *testing.T) {
 	var asked []string
 	run := rejectionDigestRunner(t,
 		rejectionBd(t, map[string]string{"gt-a": rejectionNote(1, "failing branch has no assertion")}, &asked), mango)
-	text, err := MangoSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, Run: run},
+	text, err := MangoSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: run},
 		dir, "/opt/mango", MangoSectionOptions{MinPositives: 1})
 	if err != nil {
 		t.Fatalf("MangoSection: %v", err)

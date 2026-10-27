@@ -146,7 +146,7 @@ func mangoFlagValue(argv []string, flag string) string {
 // appends find no verdicts; the cases that read refusals pass their own town.
 func mangoSection(t *testing.T, dir string, run Runner, minPositives int) string {
 	t.Helper()
-	text, err := MangoSection(context.Background(), Env{Town: rejectionTown(t), ReadFile: os.ReadFile, Run: run}, dir,
+	text, err := MangoSection(context.Background(), Env{Town: rejectionTown(t), ReadFile: os.ReadFile, ReadDir: listDir, Run: run}, dir,
 		"/opt/mango", MangoSectionOptions{MinPositives: minPositives})
 	if err != nil {
 		t.Fatalf("MangoSection: %v", err)
@@ -341,7 +341,7 @@ func TestMangoSectionReportsASummaryWriteFailure(t *testing.T) {
 	// privileged test user.
 	mangoWriteFile(t, filepath.Join(dir, "mango-summary.json", "occupied"), "")
 	run, _ := mangoSectionRun(t, mangoSectionResult)
-	text, err := MangoSection(context.Background(), Env{ReadFile: os.ReadFile, Run: run}, dir,
+	text, err := MangoSection(context.Background(), Env{Town: t.TempDir(), ReadFile: os.ReadFile, Run: run}, dir,
 		"/opt/mango", MangoSectionOptions{MinPositives: 30})
 	if err == nil {
 		t.Fatalf("MangoSection = %q, want the summary write failure", text)
