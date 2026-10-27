@@ -36,8 +36,8 @@ type Receipt struct {
 
 // RejectionNote is one MERGE REJECTION block. The first part (header,
 // Branch, Target, MR, findings, receipt) is the refinery's format, moved here
-// unchanged so every reader keeps working (gt-s4f6). Head, Conflicting and
-// GateTail are Land's additions and are written only when set.
+// unchanged so every reader keeps working (gt-s4f6). Head, Conflicting,
+// GateTail and GateLog are Land's additions and are written only when set.
 type RejectionNote struct {
 	Attempt  int
 	Kind     string // failure class; empty means unclassified (gt-1jig)
@@ -54,6 +54,9 @@ type RejectionNote struct {
 	Head        string
 	Conflicting []string
 	GateTail    string
+	// GateLog is where the rejected gate's whole job log is kept, for reading
+	// the failure past the excerpt's cut (gt-wwqx8). Empty when none was kept.
+	GateLog string
 }
 
 // FormatRejectionNote renders n. Every agent-supplied field is collapsed onto
@@ -90,6 +93,9 @@ func FormatRejectionNote(n RejectionNote) string {
 			files[i] = NoteField(f)
 		}
 		note += "\nConflicting: " + strings.Join(files, ", ")
+	}
+	if logPath := NoteField(n.GateLog); logPath != "" {
+		note += "\nGate log: " + logPath
 	}
 	if tail := strings.TrimRight(n.GateTail, "\n"); tail != "" {
 		note += "\nGate tail:"
@@ -286,6 +292,8 @@ func ParseRejectionNote(notes string) (RejectionNote, bool) {
 				}
 			}
 			seen[key] = true
+		case "gate log":
+			n.GateLog, seen[key] = value, true
 		}
 	}
 	if len(tail) > 0 {

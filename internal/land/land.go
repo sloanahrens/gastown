@@ -290,9 +290,12 @@ const (
 // attention item could not be delivered — that pass leaves the bead ready so
 // the next one raises the item; either way the rejection still stands.
 type Rejection struct {
-	Kind        RejectionKind
-	Reason      string
-	GateTail    string
+	Kind     RejectionKind
+	Reason   string
+	GateTail string
+	// GateLog is where the rejected gate's whole job log is kept; the note
+	// names it so the excerpt can be checked against the full log (gt-wwqx8).
+	GateLog     string
 	Findings    []Finding
 	Conflicting []string
 	// ReviewSummary and ReviewScore are om's, when om asked for changes.
@@ -1413,7 +1416,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		}
 		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0, false))
 		l.discardCandidate(ctx, w, candRes)
-		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail}
+		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail, GateLog: candRes.GateLog}
 		return Result{}, l.reject(issue, w, rej, nil)
 	}
 	var (
@@ -2192,6 +2195,7 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		Head:        w.Head,
 		Conflicting: rej.Conflicting,
 		GateTail:    rej.GateTail,
+		GateLog:     rej.GateLog,
 	}
 	if verdict != nil {
 		rej.Findings = verdict.Findings

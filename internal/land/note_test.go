@@ -209,6 +209,7 @@ func TestParseRejectionNoteRoundTrips(t *testing.T) {
 		Findings:    []Finding{{ID: "abc", Severity: "major", Path: "internal/x/y.go", Line: 42, Title: "bad thing"}},
 		Receipt:     &Receipt{Score: 0.5, Unresolved: []string{"abc"}},
 		GateTail:    "FAIL\tpkg\nsome line",
+		GateLog:     "/home/x/gt/.runtime/gate-logs/gastown/8cc7b0ab-1793123456.log",
 	})
 	got, ok := ParseRejectionNote("some earlier prose\n" + note)
 	if !ok {
@@ -231,6 +232,9 @@ func TestParseRejectionNoteRoundTrips(t *testing.T) {
 	if got.GateTail != "FAIL\tpkg\nsome line" {
 		t.Errorf("gate tail = %q", got.GateTail)
 	}
+	if got.GateLog != "/home/x/gt/.runtime/gate-logs/gastown/8cc7b0ab-1793123456.log" {
+		t.Errorf("gate log = %q", got.GateLog)
+	}
 
 	// A resubmission appends a second block: the live attempt is the last one.
 	second := FormatRejectionNote(RejectionNote{Attempt: 3, Kind: "gate", Reason: "make test exit 2", Branch: "b", Target: "main", MR: "gt-x", Head: "feed"})
@@ -238,7 +242,7 @@ func TestParseRejectionNoteRoundTrips(t *testing.T) {
 	if !ok || last.Attempt != 3 || last.Kind != "gate" || last.Head != "feed" {
 		t.Fatalf("last block = %+v ok=%v", last, ok)
 	}
-	if last.GateTail != "" || len(last.Findings) != 0 {
+	if last.GateTail != "" || last.GateLog != "" || len(last.Findings) != 0 {
 		t.Errorf("fields bled from the earlier block: %+v", last)
 	}
 }

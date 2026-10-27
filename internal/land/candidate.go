@@ -201,6 +201,11 @@ type CandidateResult struct {
 	Context string
 	// Tail is the failing job's log tail, for CandidateFailed.
 	Tail string
+	// GateLog is the full job log kept on disk for a rejected gate, so the
+	// rework note's excerpt can be checked against the whole log after the fact
+	// (gt-wwqx8). Empty when no log was kept: a gate built with no log
+	// directory, an unreadable log, or a write that failed.
+	GateLog string
 	// RunStatus is the status of the run that tested SHA: for a red context,
 	// whether the run behind it ran, or ended without judging the work. It is
 	// "unknown" when no run could be read, so a red verdict never claims a run
@@ -249,6 +254,9 @@ type CandidateGate struct {
 	// PollInterval, CallTimeout and WaitTimeout bound the poll; a zero means
 	// the DefaultCandidate* constant.
 	PollInterval, CallTimeout, WaitTimeout time.Duration
+	// GateLogDir is where a rejected gate's job log is kept, the rig's
+	// GateLogDir(townRoot, rig). Empty keeps no log.
+	GateLogDir string
 	// Out, when set, receives one line per poll, so a long wait is visible
 	// beside the rest of the landing's output.
 	Out io.Writer
@@ -448,8 +456,26 @@ func (g *CandidateGate) redVerdict(ctx context.Context, wf GateWorkflow, res *Ca
 	}
 	if logErr == nil {
 		res.Tail = failureExcerpt(log, gateTailLines)
+		g.keepGateLog(res, log)
 	}
 	return CandidateFailed, nil
+}
+
+// keepGateLog keeps the rejected gate's job log for later reading and records
+// where the note can name it. A write that fails is logged and leaves the
+// rejection and its excerpt as they are, so a full disk costs the log, never
+// the verdict (gt-wwqx8).
+func (g *CandidateGate) keepGateLog(res *CandidateResult, log string) {
+	if g.GateLogDir == "" {
+		return
+	}
+	path, err := keepGateLog(gateLogFS{}, g.GateLogDir, res.SHA, log, time.Now())
+	if err != nil {
+		g.logf("%s: keeping the gate job log on %s failed: %v", res.Context, shortSHA(res.SHA), err)
+	}
+	if path != "" {
+		res.GateLog = path
+	}
 }
 
 // runFor is the run that tested sha: the one whose job log carries a red
@@ -472,10 +498,11 @@ func (g *CandidateGate) runFor(parent context.Context, sha string) (forgejo.Acti
 }
 
 // jobLog reads the gate job's log in run. It returns the log and whether the
-// fetch came back whole: the server returned less than the tail cap, so the
-// head -- where the runner prints a step marker -- is in hand. A tail that names
-// no failure is widened to the whole log, still bounded, so the rework note
-// names the failure even when it sits far from the end (gt-fn9e6.25).
+// server returned less than the byte cap, so the head -- where the runner
+// prints a step marker -- is in hand. A tail cut at the cap or naming no
+// failure is widened to the whole log, still bounded, so the rework note names
+// the failure wherever it sits and the kept log is never the capped tail
+// (gt-fn9e6.25, gt-wwqx8).
 func (g *CandidateGate) jobLog(parent context.Context, wf GateWorkflow, run forgejo.ActionRun) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(parent, g.callTimeout())
 	defer cancel()
@@ -488,18 +515,19 @@ func (g *CandidateGate) jobLog(parent context.Context, wf GateWorkflow, run forg
 		return "", false, err
 	}
 	whole := len(log) < candidateTailBytes
-	if !logHasFailure(log) {
+	if !whole || !logHasFailure(log) {
 		// The failure can be outside the byte cap. go test prints its packages
 		// in order, so the failing package is usually not the last one, and a
-		// tail of passing packages hides the reason for the red entirely: fetch
-		// the whole log once, still bounded, before falling back to the tail
-		// (gt-fn9e6.25).
+		// tail of passing packages hides the reason for the red entirely. A cut
+		// tail has no head at all, so the signature table cannot read it
+		// either. Fetch the whole log once, still bounded, before falling back
+		// to the tail (gt-fn9e6.25).
 		full, ferr := g.Client.JobLogsTail(ctx, g.Owner, g.RepoName, jobID, candidateFullLogBytes)
 		switch {
 		case ferr != nil:
-			g.logf("%s: the tail of the gate job log on %s names no failure and the whole log could not be read: %v", wf.Context(), shortSHA(run.CommitSHA), ferr)
-		case logHasFailure(full):
-			log = full
+			g.logf("%s: the whole gate job log on %s could not be read, so the %d-byte fetch stands: %v", wf.Context(), shortSHA(run.CommitSHA), len(log), ferr)
+		case !whole || logHasFailure(full):
+			log, whole = full, len(full) < candidateFullLogBytes
 		}
 	}
 	return log, whole, nil
