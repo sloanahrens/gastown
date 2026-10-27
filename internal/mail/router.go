@@ -1794,13 +1794,12 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 		return nil // No pruning needed
 	}
 
-	// Delete oldest messages
+	// Delete oldest messages, as the ambient actor: retention is the router's
+	// housekeeping, not a recipient reading its inbox.
+	store := bdWriteStore(r.bd, filepath.Dir(beadsDir), beadsDir)
 	for i := 0; i < toDelete && i < len(messages); i++ {
-		deleteArgs := []string{"close", messages[i].ID, "--reason=retention pruning"}
-		// Best-effort deletion - don't fail if one delete fails
-		delCtx, delCancel := bdWriteCtx()
-		_, _ = runBdCommand(delCtx, r.bd, deleteArgs, filepath.Dir(beadsDir), beadsDir)
-		delCancel()
+		// Best-effort deletion - don't fail if one close fails
+		_ = store.CloseWithReason("retention pruning", messages[i].ID)
 	}
 
 	return nil

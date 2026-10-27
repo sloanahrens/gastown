@@ -1,7 +1,6 @@
 package mail
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -98,19 +97,16 @@ func acknowledgeDeliveryBead(run bdRunner, workDir, beadsDir, beadID, recipientI
 		return nil
 	}
 
+	// The ack labels ride one update so a crash leaves the bead pending,
+	// never acked without the acked-by and acked-at that say who acked it.
+	// toWrite holds only the labels the bead lacks, so a retry writes what an
+	// earlier partial write missed and nothing else.
+	store := bdWriteStore(run, workDir, beadsDir)
 	toWrite := deliveryAckLabelsToWrite(recipientIdentity, timeNow().UTC(), existingLabels)
-	for _, label := range toWrite {
-		args := []string{"label", "add", beadID, label}
-		ctx, cancel := bdWriteCtx()
-		_, err := runBdCommand(ctx, run, args, workDir, beadsDir)
-		cancel()
-		if err == nil {
-			continue // bd label add silently succeeds on duplicate labels.
+	if len(toWrite) > 0 {
+		if err := store.Update(beadID, beads.UpdateOptions{AddLabels: toWrite}); err != nil {
+			return mailWriteErr(err, beadID)
 		}
-		if bdErr, ok := err.(*bdError); ok && (bdErr.ContainsError("not found") || bdErr.ContainsError("no issue found")) {
-			return ErrMessageNotFound
-		}
-		return err
 	}
 
 	labelsAfterAck := append(append([]string{}, existingLabels...), toWrite...)
@@ -135,27 +131,18 @@ func deliveryPendingRemovalNeeded(labels []string) bool {
 }
 
 func removeDeliveryPendingLabel(run bdRunner, workDir, beadsDir, beadID string) error {
-	args := []string{"label", "remove", beadID, DeliveryLabelPending}
-	ctx, cancel := bdWriteCtx()
-	_, err := runBdCommand(ctx, run, args, workDir, beadsDir)
-	cancel()
-	if err == nil {
+	// A pending label that is already gone is the state this write asks for,
+	// so bd refusing to remove a label that is not there is success.
+	err := bdWriteStore(run, workDir, beadsDir).Update(beadID, beads.UpdateOptions{RemoveLabels: []string{DeliveryLabelPending}})
+	if labelAbsentErr(err) {
 		return nil
 	}
-	if bdErr, ok := err.(*bdError); ok {
-		switch {
-		case bdErr.ContainsError("does not have label"):
-			return nil
-		case bdErr.ContainsError("not found") || bdErr.ContainsError("no issue found"):
-			return ErrMessageNotFound
-		}
-	}
-	return err
+	return mailWriteErr(err, beadID)
 }
 
 // deliveryAckLabelsToWrite returns the idempotent ack labels that are not
-// already present. This avoids duplicate bd label-add calls, which otherwise
-// attempt a Dolt commit and produce "nothing to commit" warnings.
+// already present, so a retry updates the bead with only what is missing
+// instead of re-adding labels it already carries.
 func deliveryAckLabelsToWrite(recipientIdentity string, at time.Time, existingLabels []string) []string {
 	sequence := DeliveryAckLabelSequence(recipientIdentity, at, existingLabels)
 	if len(existingLabels) == 0 {
@@ -177,8 +164,8 @@ func deliveryAckLabelsToWrite(recipientIdentity string, at time.Time, existingLa
 	return missing
 }
 
-// routedBeadsDirForID returns the BEADS_DIR value to pass into runBdCommand
-// so that beadID resolves correctly. Same-rig ids keep currentBeadsDir;
+// routedBeadsDirForID returns the beads directory a store for beadID is opened
+// on, so that beadID resolves correctly. Same-rig ids keep currentBeadsDir;
 // cross-rig ids return "" so bd's own prefix routing (via routes.jsonl in
 // the town's .beads) dispatches to the correct database. See au-ofe, au-b9d.
 func routedBeadsDirForID(currentBeadsDir, beadID string) string {
@@ -192,24 +179,17 @@ func routedBeadsDirForID(currentBeadsDir, beadID string) string {
 // readBeadLabelsShared reads the labels for a bead, returning an error on failure
 // instead of silently swallowing it.
 func readBeadLabelsShared(run bdRunner, workDir, beadsDir, id string) ([]string, error) {
-	args := []string{"show", id, "--json"}
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	stdout, err := runBdCommand(ctx, run, args, workDir, beadsDir)
+	issue, err := bdStore(run, workDir, beadsDir).Show(id)
 	if err != nil {
-		if bdErr, ok := err.(*bdError); ok && (bdErr.ContainsError("not found") || bdErr.ContainsError("no issue found")) {
+		if isMessageNotFoundErr(err, id) {
 			return nil, ErrMessageNotFound
 		}
 		return nil, fmt.Errorf("bd show %s: %w", id, err)
 	}
-	var bms []BeadsMessage
-	if err := json.Unmarshal(stdout, &bms); err != nil {
-		return nil, fmt.Errorf("parsing bd show %s: %w", id, err)
-	}
-	if len(bms) == 0 {
+	if issue == nil {
 		return nil, nil
 	}
-	return bms[0].Labels, nil
+	return issue.Labels, nil
 }
 
 // ParseDeliveryLabels derives delivery state and ack metadata from labels.

@@ -144,16 +144,42 @@ func firstArg(args []string) string {
 // pre-flight, and the read deadline. Verbs the seam cannot express stay on
 // runBdCommand.
 func bdStore(run bdRunner, workDir, beadsDir string) beads.Client {
+	return newBdStore(run, workDir, beadsDir, true, bdReadTimeout, "")
+}
+
+// bdWriteStore is bdStore for a write: the mutation environment and the write
+// deadline. It names no actor, so bd records the identity the environment
+// resolves, as the raw label and update commands it replaces did.
+func bdWriteStore(run bdRunner, workDir, beadsDir string) beads.Client {
+	return newBdStore(run, workDir, beadsDir, false, bdWriteTimeout, "")
+}
+
+// bdCloseStore is bdWriteStore for the one write that must name its identity:
+// bd's assignee==actor close guard refuses a close by any other actor, and a
+// refused close fails `gt mail archive` town-wide (gt-ovem, sibling of
+// gt-cut). The seam's Close carries no actor field, so the store adds the flag
+// mail's raw close always passed.
+func bdCloseStore(run bdRunner, workDir, beadsDir, actor string) beads.Client {
+	return newBdStore(run, workDir, beadsDir, false, bdWriteTimeout, actor)
+}
+
+func newBdStore(run bdRunner, workDir, beadsDir string, readOnly bool, timeout time.Duration, actor string) beads.Client {
 	if run == nil {
 		run = runBdProcess
 	}
-	env := bdSubprocessEnv(beads.WithMachineEnvIn(workDir, nil), beadsDir, true, nil)
+	env := bdSubprocessEnv(beads.WithMachineEnvIn(workDir, nil), beadsDir, readOnly, nil)
 	store := beads.NewPlain(workDir, env, beads.WithDirRunner(
 		func(ctx context.Context, dir string, args []string) ([]byte, []byte, error) {
 			beads.CleanStaleDoltServerPID(beadsDir)
+			if actor != "" {
+				// Copy, since the caller's argv may have spare capacity.
+				named := make([]string, len(args), len(args)+1)
+				copy(named, args)
+				args = append(named, "--actor="+actor)
+			}
 			return run(ctx, bdCall{Dir: dir, Env: env, Args: args})
 		}))
-	return store.WithProcessGroup().WithTimeout(bdReadTimeout)
+	return store.WithProcessGroup().WithTimeout(timeout)
 }
 
 func bdSubprocessEnv(baseEnv []string, beadsDir string, readOnly bool, extraEnv []string) []string {

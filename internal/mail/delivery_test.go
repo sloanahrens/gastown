@@ -241,48 +241,10 @@ func TestAcknowledgeDeliveryBeadConvergesPendingLabel(t *testing.T) {
 		t.Fatalf("write labels: %v", err)
 	}
 
-	// bd keeps the bead's labels in labelsPath: show lists them, label add
-	// appends one it lacks, label remove drops one or fails when it is not
-	// there.
-	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
-		args := c.Args
-		data, _ := os.ReadFile(labelsPath)
-		var labels []string
-		for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-			if l != "" {
-				labels = append(labels, l)
-			}
-		}
-		write := func(ls []string) {
-			_ = os.WriteFile(labelsPath, []byte(strings.Join(ls, "\n")+"\n"), 0o644)
-		}
-		switch {
-		case args[0] == "show":
-			quoted := make([]string, len(labels))
-			for i, l := range labels {
-				quoted[i] = `"` + l + `"`
-			}
-			return `[{"id":"` + args[1] + `","labels":[` + strings.Join(quoted, ",") + `]}]`, "", 0
-		case len(args) >= 4 && args[0] == "label" && args[1] == "add":
-			if !containsDeliveryTestLabel(labels, args[3]) {
-				write(append(labels, args[3]))
-			}
-			return "", "", 0
-		case len(args) >= 4 && args[0] == "label" && args[1] == "remove":
-			var kept []string
-			for _, l := range labels {
-				if l != args[3] {
-					kept = append(kept, l)
-				}
-			}
-			if len(kept) == len(labels) {
-				return "", "does not have label", 1
-			}
-			write(kept)
-			return "", "", 0
-		}
-		return "", "unsupported bd args: " + strings.Join(args, " "), 1
-	}}
+	// bd keeps the bead's labels in labelsPath: show lists them, update adds
+	// the labels it lacks and drops the ones asked for, failing to remove a
+	// label the bead does not carry.
+	bd := &bdScript{answer: labelStoreAnswer(labelsPath)}
 
 	if err := acknowledgeDeliveryBead(bd.run, tmp, "", "msg-1", "gastown/worker"); err != nil {
 		t.Fatalf("AcknowledgeDeliveryBead: %v", err)
@@ -302,8 +264,106 @@ func TestAcknowledgeDeliveryBeadConvergesPendingLabel(t *testing.T) {
 		t.Fatalf("%s should remain; labels=%v", DeliveryLabelAcked, labels)
 	}
 
-	if log := strings.Join(bd.argvs(), "\n"); !strings.Contains(log, "label remove msg-1 "+DeliveryLabelPending) {
+	if log := strings.Join(bd.argvs(), "\n"); !strings.Contains(log, "update msg-1 --remove-label="+DeliveryLabelPending) {
 		t.Fatalf("expected pending label removal command, calls:\n%s", log)
+	}
+}
+
+// labelStoreAnswer scripts bd against a bead whose labels live in labelsPath:
+// show reads them, update --add-label adds the missing ones and
+// --remove-label drops the named ones, failing on a label the bead does not
+// carry, as bd does.
+func labelStoreAnswer(labelsPath string) func(c bdCall) (string, string, int) {
+	return func(c bdCall) (string, string, int) {
+		args := c.Args
+		data, _ := os.ReadFile(labelsPath)
+		var labels []string
+		for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if l != "" {
+				labels = append(labels, l)
+			}
+		}
+		write := func(ls []string) {
+			_ = os.WriteFile(labelsPath, []byte(strings.Join(ls, "\n")+"\n"), 0o644)
+		}
+		switch {
+		case args[0] == "show":
+			quoted := make([]string, len(labels))
+			for i, l := range labels {
+				quoted[i] = `"` + l + `"`
+			}
+			return `[{"id":"` + args[1] + `","labels":[` + strings.Join(quoted, ",") + `]}]`, "", 0
+		case args[0] == "update":
+			var add, remove []string
+			for _, arg := range args[2:] {
+				if l, ok := strings.CutPrefix(arg, "--add-label="); ok {
+					add = append(add, l)
+				}
+				if l, ok := strings.CutPrefix(arg, "--remove-label="); ok {
+					remove = append(remove, l)
+				}
+			}
+			for _, gone := range remove {
+				var kept []string
+				for _, l := range labels {
+					if l != gone {
+						kept = append(kept, l)
+					}
+				}
+				if len(kept) == len(labels) {
+					return "", "Issue " + args[1] + " does not have label " + gone, 1
+				}
+				labels = kept
+			}
+			for _, l := range add {
+				if !containsDeliveryTestLabel(labels, l) {
+					labels = append(labels, l)
+				}
+			}
+			write(labels)
+			return "", "", 0
+		}
+		return "", "unsupported bd args: " + strings.Join(args, " "), 1
+	}
+}
+
+// TestAcknowledgeDeliveryBeadWritesAckLabelsInOneUpdate pins the crash-safety
+// claim in acknowledgeDeliveryBead: the terminal delivery:acked label and the
+// acked-by/acked-at metadata that explains it reach bd in the same write, so
+// an interrupted ack leaves the bead pending rather than acked without a
+// record of who acked it.
+func TestAcknowledgeDeliveryBeadWritesAckLabelsInOneUpdate(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	labelsPath := filepath.Join(tmp, "labels.txt")
+	if err := os.WriteFile(labelsPath, []byte(DeliveryLabelPending+"\n"), 0o644); err != nil {
+		t.Fatalf("write labels: %v", err)
+	}
+
+	bd := &bdScript{answer: labelStoreAnswer(labelsPath)}
+	if err := acknowledgeDeliveryBead(bd.run, tmp, "", "msg-1", "gastown/worker"); err != nil {
+		t.Fatalf("AcknowledgeDeliveryBead: %v", err)
+	}
+
+	var ackCalls []bdCall
+	for _, c := range bd.recorded() {
+		argv := " " + strings.Join(c.Args, " ") + " "
+		if c.Args[0] == "update" && strings.Contains(argv, " --add-label="+DeliveryLabelAcked+" ") {
+			ackCalls = append(ackCalls, c)
+		}
+	}
+	if len(ackCalls) != 1 {
+		t.Fatalf("ack labels written by %d updates, want 1: %v", len(ackCalls), bd.argvs())
+	}
+	argv := strings.Join(ackCalls[0].Args, " ")
+	for _, want := range []string{
+		"--add-label=delivery-acked-by:gastown/worker",
+		"--add-label=delivery-acked-at:",
+		"--add-label=" + DeliveryLabelAcked,
+	} {
+		if !strings.Contains(argv, want) {
+			t.Errorf("ack update %q missing %q", argv, want)
+		}
 	}
 }
 
