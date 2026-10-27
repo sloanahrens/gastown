@@ -90,6 +90,15 @@ type hostProbe struct {
 	parse  func(string) (any, error)
 }
 
+// hostIdleProbe reads the host's idle share. The burst sampler runs it alone
+// (BurstRow), so the snapshot's host group and the burst row read idle from one
+// command and one parser.
+var hostIdleProbe = hostProbe{
+	column: "cpu_idle_pct",
+	argv:   []string{"/usr/bin/top", "-l", "2", "-n", "0", "-s", "1"},
+	parse:  parseCPUIdlePct,
+}
+
 // probes are the group's columns, in the order they run. They run one after
 // another, so Collect costs at most one timeout per probe, which stays under
 // the group's own deadline (SourceTimeout) as
@@ -105,11 +114,7 @@ func (s hostSource) probes() []hostProbe {
 			argv:   []string{"/usr/sbin/sysctl", "-n", "vm.loadavg"},
 			parse:  parseLoadAvg1,
 		},
-		{
-			column: "cpu_idle_pct",
-			argv:   []string{"/usr/bin/top", "-l", "2", "-n", "0", "-s", "1"},
-			parse:  parseCPUIdlePct,
-		},
+		hostIdleProbe,
 		{
 			// One bd list in the town's store, read twice: the first read is
 			// an untimed warm-up of the seam, the second is the timed one.

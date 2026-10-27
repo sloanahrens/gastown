@@ -133,20 +133,28 @@ func queueBeadColumns() []queueBeadColumn {
 				})
 			},
 		},
-		{
-			// List adds no status filter of its own, so the label and bd's
-			// default list scope are the whole query, as they were for the
-			// pre-seam `bd list`; Limit 0 asks for the whole board rather than
-			// bd's default page, which is what the pre-seam --limit 0 did.
-			column: "waiting_to_land",
-			read: func(s BeadStore) ([]*beads.Issue, error) {
-				return s.List(beads.ListOptions{Label: "gt:ready-to-land", Limit: 0})
-			},
-		},
+		queueLandingColumn(),
 		{
 			column:        "blocked",
 			read:          func(s BeadStore) ([]*beads.Issue, error) { return s.Blocked() },
 			skipEphemeral: true,
+		},
+	}
+}
+
+// queueLandingColumn is the store read behind waiting_to_land, the beads
+// submitted and waiting to land. The burst row counts the same board
+// (BurstRow).
+//
+// List adds no status filter of its own, so the label and bd's default list
+// scope are the whole query, as they were for the pre-seam `bd list`; Limit 0
+// asks for the whole board rather than bd's default page, which is what the
+// pre-seam --limit 0 did.
+func queueLandingColumn() queueBeadColumn {
+	return queueBeadColumn{
+		column: "waiting_to_land",
+		read: func(s BeadStore) ([]*beads.Issue, error) {
+			return s.List(beads.ListOptions{Label: "gt:ready-to-land", Limit: 0})
 		},
 	}
 }
