@@ -1176,13 +1176,16 @@ func TestMangoRowFitsThePanelAtTheWidthItIsReadAt(t *testing.T) {
 // says: the baseline line takes at most two lines, and no cell draws taller
 // than the 120px a reader takes in at a glance. The fixture is a full modern
 // row: a 34-character label, a rate with its group count, an interval, two
-// narrow condition chips and a 33-character best box (gt-g4vif).
+// narrow condition chips and a 33-character best box. The unit tier renders
+// nothing, so the layout is measured from the declarations the stylesheet sets
+// against the text the row draws (gt-g4vif).
 func TestMangoRateReadsInTwoLinesAndItsRowStaysShort(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
+	const label = "Landings rejected before they land"
 	target := mangoPageTarget("rejected_before_landing", 48, false, "model = opus and attempts in q4", 96, 0.42, 0.243, MangoEarning)
-	target["label"] = "Landings rejected before they land"
+	target["label"] = label
 	target["holdout_positives"] = 44
 	target["ci_low"] = 0.31
 	target["ci_high"] = 0.53
@@ -1194,11 +1197,7 @@ func TestMangoRateReadsInTwoLinesAndItsRowStaysShort(t *testing.T) {
 	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
 
 	widths, _ := mangoColumnWidths(t, dom, 1760)
-	rows := mangoRows(t, dom)
-	if len(rows) < 2 {
-		t.Fatalf("the Mango table draws %d rows, want the collection row and the target's", len(rows))
-	}
-	row := rows[1]
+	row := mangoRowNamed(t, mangoRows(t, dom), label)
 	if len(row) != len(widths) {
 		t.Fatalf("the target row draws %d cells, want the header's %d columns", len(row), len(widths))
 	}
@@ -1720,6 +1719,20 @@ func mangoRows(t *testing.T, dom *pageDOM) [][]mangoNode {
 		t.Fatalf("reading the Mango table's rows: %v", err)
 	}
 	return rows
+}
+
+// mangoRowNamed returns the body row whose name cell draws label, so a test
+// measures the row it asked for wherever the table places it.
+func mangoRowNamed(t *testing.T, rows [][]mangoNode, label string) []mangoNode {
+	t.Helper()
+
+	for _, row := range rows {
+		if len(row) > 0 && strings.TrimSpace(row[0].All) == label {
+			return row
+		}
+	}
+	t.Fatalf("the Mango table draws no row named %q", label)
+	return nil
 }
 
 // monospaceAdvance is one monospace character in ems. The page's font stack is
