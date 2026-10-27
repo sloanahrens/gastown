@@ -597,3 +597,24 @@ func TestCauseOptionsAreFixedAndOrdered(t *testing.T) {
 		t.Error("two refusals of one fixture sent different requests: the question is not fixed")
 	}
 }
+
+// TestRejectionForAttemptPrefersTheReviewBlock is gt-l3zak: a gate block
+// numbers itself among the gates, so it can carry the same count as a review
+// round, and the review block is the one that opened it.
+func TestRejectionForAttemptPrefersTheReviewBlock(t *testing.T) {
+	t.Parallel()
+	notes := land.FormatRejectionNote(land.RejectionNote{
+		Attempt: 1, Kind: string(land.RejectReview), Reason: "one", Branch: "b", Target: "main", MR: "m", Head: "review-head",
+	}) + "\n" + land.FormatRejectionNote(land.RejectionNote{
+		Attempt: 1, Kind: string(land.RejectGate), Reason: "two", Branch: "b", Target: "main", MR: "m", Head: "gate-head",
+	})
+	if rej, ok := rejectionForAttempt(notes, 1); !ok || rej.Head != "review-head" {
+		t.Errorf("attempt 1 = %+v, %v; want the review block that opened it", rej, ok)
+	}
+	only := land.FormatRejectionNote(land.RejectionNote{
+		Attempt: 1, Kind: string(land.RejectGate), Reason: "two", Branch: "b", Target: "main", MR: "m", Head: "gate-head",
+	})
+	if rej, ok := rejectionForAttempt(only, 1); !ok || rej.Head != "gate-head" {
+		t.Errorf("attempt 1 = %+v, %v; want the gate block where no review block carries it", rej, ok)
+	}
+}

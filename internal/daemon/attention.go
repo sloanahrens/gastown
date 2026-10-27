@@ -967,7 +967,7 @@ func (s *attentionSources) collectRejectedTwice(ctx context.Context) ([]attentio
 // show recorded in the cache.
 func (s *attentionSources) rejectionCount(ctx context.Context, rig string, is *beads.Issue) (int, error) {
 	if is.Notes != "" {
-		return land.CountRejections(is.Notes), nil
+		return land.RejectionBlocks(is.Notes), nil
 	}
 	if c, ok := s.reworkNotes[is.ID]; ok && c.updatedAt == is.UpdatedAt {
 		return c.count, nil
@@ -976,7 +976,7 @@ func (s *attentionSources) rejectionCount(ctx context.Context, rig string, is *b
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", is.ID, err)
 	}
-	n := land.CountRejections(notes)
+	n := land.RejectionBlocks(notes)
 	if s.reworkNotes == nil {
 		s.reworkNotes = map[string]reworkNote{}
 	}

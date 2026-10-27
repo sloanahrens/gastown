@@ -38,8 +38,8 @@ func TestFormatRejectionNoteLandAdditions(t *testing.T) {
 			t.Errorf("note lacks %q:\n%s", want, got)
 		}
 	}
-	if CountRejections(got) != 1 {
-		t.Errorf("tail forged a rejection marker: %d", CountRejections(got))
+	if RejectionBlocks(got) != 1 {
+		t.Errorf("tail forged a rejection marker: %d", RejectionBlocks(got))
 	}
 	if _, ok := ParseReadyNote(got); ok {
 		t.Error("tail forged a ready block")
@@ -58,14 +58,50 @@ func TestFormatRejectionNoteLandAdditions(t *testing.T) {
 // the attempt count (gt-zqqcr).
 func TestCountRejectionsIgnoresQuotedMarkers(t *testing.T) {
 	t.Parallel()
-	notes := "MERGE REJECTION (attempt 1): gate - failed\nBranch: b\nTarget: main\nMR: gt-x\n" +
+	notes := "MERGE REJECTION (attempt 1): review - failed\nBranch: b\nTarget: main\nMR: gt-x\n" +
 		"- id:abc sev:major a.go:1 — see MERGE REJECTION (attempt 7): review - not a block\n" +
 		"prose mentioning MERGE REJECTION (attempt 8): review"
 	if got := CountRejections(notes); got != 1 {
 		t.Errorf("CountRejections = %d, want 1: quoted markers are content", got)
 	}
-	if got := CountRejections(notes + "\nMERGE REJECTION (attempt 2): gate - again\nBranch: b"); got != 2 {
+	if got := CountRejections(notes + "\nMERGE REJECTION (attempt 2): review - again\nBranch: b"); got != 2 {
 		t.Errorf("CountRejections = %d, want 2 for two real blocks", got)
+	}
+}
+
+// TestCountRejectionsCountsOnlyReviews is gt-l3zak: a gate or policy refusal
+// costs no om review, so it spends no rework attempt, while a block written
+// before kinds existed is the review refusal it was and still counts.
+func TestCountRejectionsCountsOnlyReviews(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		kinds []string
+		want  int
+	}{
+		"no blocks":              {nil, 0},
+		"one review":             {[]string{"review"}, 1},
+		"one gate":               {[]string{"gate"}, 0},
+		"one policy":             {[]string{"policy"}, 0},
+		"a legacy block":         {[]string{""}, 1},
+		"two gates":              {[]string{"gate", "gate"}, 0},
+		"two gates and a review": {[]string{"gate", "gate", "review"}, 1},
+		"mixed kinds":            {[]string{"review", "gate", "policy", "review", "conflict"}, 2},
+		"legacy beside a gate":   {[]string{"", "gate", "review"}, 2},
+	} {
+		var notes strings.Builder
+		for i, kind := range tc.kinds {
+			header := fmt.Sprintf("%s (attempt %d): ", MergeRejectionNoteMarker, i+1)
+			if kind != "" {
+				header += kind + " - "
+			}
+			notes.WriteString(header + "refused\nBranch: b\nTarget: main\nMR: gt-x\n\n")
+		}
+		if got := CountRejections(notes.String()); got != tc.want {
+			t.Errorf("%s: CountRejections = %d, want %d", name, got, tc.want)
+		}
+		if got := RejectionBlocks(notes.String()); got != len(tc.kinds) {
+			t.Errorf("%s: %d block(s), want %d", name, got, len(tc.kinds))
+		}
 	}
 }
 
@@ -88,8 +124,8 @@ func TestFormatRejectionNoteDefusesReasonAndTitle(t *testing.T) {
 			t.Errorf("note lacks %q:\n%s", want, got)
 		}
 	}
-	if CountRejections(got) != 1 {
-		t.Errorf("CountRejections = %d, want 1", CountRejections(got))
+	if RejectionBlocks(got) != 1 {
+		t.Errorf("%d rejection block(s), want 1", RejectionBlocks(got))
 	}
 }
 

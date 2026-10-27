@@ -136,21 +136,61 @@ func defuseFindingPath(path string) string {
 	})
 }
 
-// CountRejections is the number of MERGE REJECTION blocks in notes, the
-// attempt counter the formula and the deacon use. It counts the same anchored
-// headers the parser finds, so marker text quoted inside a reason or a finding
-// title — anywhere but the start of a line — is content, not a block, and does
-// not inflate the count (gt-zqqcr).
+// CountRejections is the number of review rejections in notes: the attempt
+// counter the formula, the deacon and the rework cap read. Only a review
+// refusal spends a rework attempt; a gate, policy or conflict refusal costs no
+// om review and is fixed before the next round, so it does not count
+// (gt-l3zak). A block whose header names no class was written before kinds
+// existed, when every refusal was a review's, so it counts (gt-zqqcr).
+//
+// It counts the same anchored headers the parser finds, so marker text quoted
+// inside a reason or a finding title — anywhere but the start of a line — is
+// content, not a block, and does not inflate the count (gt-zqqcr).
 func CountRejections(notes string) int {
+	return countKind(rejectionKinds(notes), string(RejectReview))
+}
+
+// RejectionBlocks is the number of rejection blocks in notes, whatever their
+// kind: how often the landing has refused the bead, which is what a loop
+// signal counts even when the refusals spend no rework attempt (gt-l3zak).
+func RejectionBlocks(notes string) int {
 	return len(rejectionBlockRE.FindAllStringIndex(notes, -1))
 }
 
-// reviewAttempt is the rework attempt a verdict on notes belongs to: the
+// reviewAttempt is the rework attempt a verdict on notes belongs to: the review
 // rejections the bead carries, plus one. The reviews log and the rounds ledger
 // both read it here, so a reviewed round and its record cannot disagree about
 // which attempt it is (gt-yphcl).
 func reviewAttempt(notes string) int {
 	return CountRejections(notes) + 1
+}
+
+// rejectionKinds returns the class of every rejection block in notes, in the
+// order they were written. A legacy block with no class reads as a review, the
+// refusal it was before FormatRejectionNote recorded kinds (gt-l3zak).
+func rejectionKinds(notes string) []string {
+	blocks := rejectionBlockRE.FindAllStringIndex(notes, -1)
+	kinds := make([]string, len(blocks))
+	for i, b := range blocks {
+		line, _, _ := strings.Cut(notes[b[0]:], "\n")
+		_, kind, _, _ := parseRejectionHeader(line)
+		if kind == "" {
+			kind = string(RejectReview)
+		}
+		kinds[i] = kind
+	}
+	return kinds
+}
+
+// countKind is how many of kinds name kind.
+func countKind(kinds []string, kind string) int {
+	n := 0
+	for _, k := range kinds {
+		if k == kind {
+			n++
+		}
+	}
+	return n
 }
 
 // rejectionBlockRE finds a rejection block's header. The marker must open a

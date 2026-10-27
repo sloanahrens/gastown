@@ -280,7 +280,7 @@ func (f *landFixture) assertRejected(t *testing.T, err error, kind RejectionKind
 	if b.Status != "open" || b.Assignee != "" || beads.HasLabel(b, LabelReadyToLand) || !beads.HasLabel(b, label) {
 		t.Errorf("bead after rejection: status=%s assignee=%q labels=%v", b.Status, b.Assignee, b.Labels)
 	}
-	if CountRejections(b.Notes) != 1 || !strings.Contains(b.Notes, "MERGE REJECTION (attempt 1): "+string(kind)+" - ") ||
+	if RejectionBlocks(b.Notes) != 1 || !strings.Contains(b.Notes, "MERGE REJECTION (attempt 1): "+string(kind)+" - ") ||
 		!strings.Contains(b.Notes, "\nHead: "+f.work.Head) || !strings.Contains(b.Notes, "\nBranch: "+f.work.Branch) {
 		t.Errorf("rejection note:\n%s", b.Notes)
 	}
@@ -316,7 +316,7 @@ func TestRejectKeepsTheHolderOfAHumanOnlyBead(t *testing.T) {
 			if b.Status != "open" || b.Assignee != crew || beads.HasLabel(b, LabelReadyToLand) || !beads.HasLabel(b, LabelRework) {
 				t.Errorf("bead after rejection: status=%s assignee=%q labels=%v", b.Status, b.Assignee, b.Labels)
 			}
-			if CountRejections(b.Notes) != 1 {
+			if RejectionBlocks(b.Notes) != 1 {
 				t.Errorf("rejection not recorded once:\n%s", b.Notes)
 			}
 		})
@@ -355,7 +355,7 @@ func TestRejectKeepsABirdsClaim(t *testing.T) {
 	if beads.HasLabel(b, LabelReadyToLand) || !beads.HasLabel(b, LabelRework) {
 		t.Errorf("labels after rejection = %v, want the ready label swapped for rework", b.Labels)
 	}
-	if CountRejections(b.Notes) != 1 {
+	if RejectionBlocks(b.Notes) != 1 {
 		t.Errorf("rejection not recorded once:\n%s", b.Notes)
 	}
 	if len(alerts) != 1 {
@@ -395,7 +395,7 @@ func TestRejectReleasesAPolecatsBead(t *testing.T) {
 	if b.Status != "open" || b.Assignee != "" {
 		t.Errorf("bead after rejection: status=%s assignee=%q, want it released to dispatch", b.Status, b.Assignee)
 	}
-	if CountRejections(b.Notes) != 1 {
+	if RejectionBlocks(b.Notes) != 1 {
 		t.Errorf("rejection not recorded once:\n%s", b.Notes)
 	}
 	if len(alerts) != 0 {
@@ -451,8 +451,8 @@ func TestBirdRejectionAlertIsRaisedBeforeTheWrite(t *testing.T) {
 		t.Errorf("bead after the failed write: status=%s assignee=%q labels=%v, want it ready with the bird's claim kept",
 			b.Status, b.Assignee, b.Labels)
 	}
-	if CountRejections(b.Notes) != 1 {
-		t.Fatalf("rejection recorded %d time(s) after the failed write, want once:\n%s", CountRejections(b.Notes), b.Notes)
+	if RejectionBlocks(b.Notes) != 1 {
+		t.Fatalf("rejection recorded %d time(s) after the failed write, want once:\n%s", RejectionBlocks(b.Notes), b.Notes)
 	}
 
 	_, err = l.Land(context.Background(), f.work)
@@ -472,8 +472,8 @@ func TestBirdRejectionAlertIsRaisedBeforeTheWrite(t *testing.T) {
 	if beads.HasLabel(b, LabelReadyToLand) || !beads.HasLabel(b, LabelRework) {
 		t.Errorf("labels after rejection = %v, want the ready label swapped for rework", b.Labels)
 	}
-	if CountRejections(b.Notes) != 1 {
-		t.Errorf("rejections recorded = %d, want the one block:\n%s", CountRejections(b.Notes), b.Notes)
+	if RejectionBlocks(b.Notes) != 1 {
+		t.Errorf("rejections recorded = %d, want the one block:\n%s", RejectionBlocks(b.Notes), b.Notes)
 	}
 }
 
@@ -514,8 +514,8 @@ func TestBirdRejectionAlertFailureIsSurfaced(t *testing.T) {
 		t.Errorf("bead after the failed delivery: status=%s assignee=%q labels=%v, want the claim kept and the bead still ready to retry",
 			b.Status, b.Assignee, b.Labels)
 	}
-	if CountRejections(b.Notes) != 1 {
-		t.Fatalf("rejection recorded %d time(s), want the note to stand for the retry:\n%s", CountRejections(b.Notes), b.Notes)
+	if RejectionBlocks(b.Notes) != 1 {
+		t.Fatalf("rejection recorded %d time(s), want the note to stand for the retry:\n%s", RejectionBlocks(b.Notes), b.Notes)
 	}
 
 	_, err = l.Land(context.Background(), f.work)
@@ -533,8 +533,8 @@ func TestBirdRejectionAlertFailureIsSurfaced(t *testing.T) {
 		t.Errorf("bead after the retry: status=%s assignee=%q labels=%v, want the bird's claim kept and rework recorded",
 			b.Status, b.Assignee, b.Labels)
 	}
-	if CountRejections(b.Notes) != 1 {
-		t.Errorf("rejection recorded %d time(s), want once:\n%s", CountRejections(b.Notes), b.Notes)
+	if RejectionBlocks(b.Notes) != 1 {
+		t.Errorf("rejection recorded %d time(s), want once:\n%s", RejectionBlocks(b.Notes), b.Notes)
 	}
 }
 
@@ -882,21 +882,44 @@ func TestLandRedGateNeverPushes(t *testing.T) {
 	}
 }
 
-// TestLandCapsTheReworkLoop is gt-28ibg: the rejection at MaxReworkAttempts
-// goes to a human instead of back to a polecat, so a refusal the author keeps
-// reproducing ends in an escalation rather than another redispatch.
+// TestLandCapsTheReworkLoop is gt-28ibg: the review rejection at
+// MaxReworkAttempts goes to a human instead of back to a polecat, so a refusal
+// the author keeps reproducing ends in an escalation rather than another
+// redispatch. Two gate refusals sit before each round and move nothing: a gate
+// failure is fixed before om reviews, so it spends no attempt (gt-l3zak).
 func TestLandCapsTheReworkLoop(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	f.gate.fn = func(string) GateResult {
+	redGate := func(string) GateResult {
 		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
+	}
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
 	}
 	l := f.lander()
 	for attempt := 1; attempt <= MaxReworkAttempts; attempt++ {
+		f.gate.fn = redGate
+		for i := 0; i < 2; i++ {
+			_, err := l.Land(context.Background(), f.work)
+			var rej *Rejection
+			if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
+				t.Fatalf("attempt %d gate refusal %d: Land = %T %v, want a recorded gate rejection", attempt, i+1, err, err)
+			}
+			if !rej.Rework || strings.Contains(f.bead().Notes, "the loop is escalated") {
+				t.Errorf("attempt %d gate refusal %d escalated on a gate failure: rework=%v\n%s", attempt, i+1, rej.Rework, f.bead().Notes)
+			}
+			if got := CountRejections(f.bead().Notes); got != attempt-1 {
+				t.Errorf("attempt %d gate refusal %d: %d review rejection(s), want the %d before this round",
+					attempt, i+1, got, attempt-1)
+			}
+			f.resubmit()
+		}
+
+		f.gate.fn = func(string) GateResult { return GateResult{Passed: true} }
 		_, err := l.Land(context.Background(), f.work)
 		var rej *Rejection
-		if !errors.As(err, &rej) || rej.Kind != RejectGate {
-			t.Fatalf("attempt %d: Land = %T %v, want a gate rejection", attempt, err, err)
+		if !errors.As(err, &rej) || rej.Kind != RejectReview {
+			t.Fatalf("attempt %d: Land = %T %v, want a review rejection", attempt, err, err)
 		}
 		if rej.RecordErr != nil {
 			t.Fatalf("attempt %d: rejection not recorded: %v", attempt, rej.RecordErr)
@@ -914,22 +937,62 @@ func TestLandCapsTheReworkLoop(t *testing.T) {
 			t.Errorf("attempt %d: labels after the rejection = %v, want %s", attempt, b.Labels, wantLabel)
 		}
 		if got := CountRejections(b.Notes); got != attempt {
-			t.Errorf("attempt %d: %d rejection block(s) in the notes", attempt, got)
+			t.Errorf("attempt %d: %d review rejection(s) in the notes", attempt, got)
 		}
 		if capped != strings.Contains(b.Notes, "the loop is escalated") {
 			t.Errorf("attempt %d: capped=%v, notes:\n%s", attempt, capped, b.Notes)
 		}
-		// The next round is a fresh submission of the same head, which is what
-		// a redispatched polecat's gt done produces.
-		if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AddLabels: []string{LabelReadyToLand}}); err != nil {
-			t.Fatalf("attempt %d: re-submitting: %v", attempt, err)
+		if !capped {
+			f.resubmit()
 		}
+	}
+}
+
+// TestLandHeaderNumbersTheRoundEachKindIsOn is gt-l3zak: a review block's
+// attempt is the review round it belongs to, so two gate refusals before it do
+// not make it attempt 3, and a gate block numbers itself among the gates.
+func TestLandHeaderNumbersTheRoundEachKindIsOn(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	redGate := func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
+	}
+	greenGate := func(string) GateResult { return GateResult{Passed: true} }
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
+	}
+	l := f.lander()
+	for _, round := range []struct {
+		gate   func(string) GateResult
+		kind   RejectionKind
+		header string
+	}{
+		{redGate, RejectGate, "MERGE REJECTION (attempt 1): gate - "},
+		{redGate, RejectGate, "MERGE REJECTION (attempt 2): gate - "},
+		{greenGate, RejectReview, "MERGE REJECTION (attempt 1): review - "},
+		{greenGate, RejectReview, "MERGE REJECTION (attempt 2): review - "},
+		{redGate, RejectGate, "MERGE REJECTION (attempt 3): gate - "},
+	} {
+		f.gate.fn = round.gate
+		_, err := l.Land(context.Background(), f.work)
+		var rej *Rejection
+		if !errors.As(err, &rej) || rej.Kind != round.kind || rej.RecordErr != nil {
+			t.Fatalf("%q: Land = %T %v, want a recorded %s rejection", round.header, err, err, round.kind)
+		}
+		notes := f.bead().Notes
+		if !strings.Contains(notes, "\n"+round.header) {
+			t.Errorf("notes lack the header %q:\n%s", round.header, notes)
+		}
+		if last, ok := ParseRejectionNote(notes); !ok || last.Kind != string(round.kind) {
+			t.Errorf("last block = %q (%v), want the %s block this round wrote", last.Kind, ok, round.kind)
+		}
+		f.resubmit()
 	}
 }
 
 // TestLandRejectionAfterTheCeilingRecordsTheCeiling is gt-ern0y: a bead can be
 // resubmitted after it has been escalated, and its notes keep accumulating, so
-// the raw rejection count would record the next refusal as "attempt 4 of 3".
+// the raw review count would record the next refusal as "attempt 4 of 3".
 // The recorded attempt, and the escalation text, stop at MaxReworkAttempts.
 func TestLandRejectionAfterTheCeilingRecordsTheCeiling(t *testing.T) {
 	t.Parallel()
@@ -942,7 +1005,7 @@ func TestLandRejectionAfterTheCeilingRecordsTheCeiling(t *testing.T) {
 				// Another head, so this block is never read as an unfinished
 				// repeat of the rejection the landing below records.
 				block := FormatRejectionNote(RejectionNote{
-					Attempt: i, Kind: string(RejectGate), Reason: "earlier refusal",
+					Attempt: i, Kind: string(RejectReview), Reason: "earlier refusal",
 					Branch: f.work.Branch, Target: f.work.Target, MR: f.work.BeadID,
 					Head: fmt.Sprintf("%040d", i),
 				})
@@ -950,13 +1013,13 @@ func TestLandRejectionAfterTheCeilingRecordsTheCeiling(t *testing.T) {
 					t.Fatalf("%d: seeding the notes: %v", i, err)
 				}
 			}
-			f.gate.fn = func(string) GateResult {
-				return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
+			f.review.fn = func(string) (Verdict, error) {
+				return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
 			}
 			_, err := f.lander().Land(context.Background(), f.work)
 			var rej *Rejection
-			if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
-				t.Fatalf("Land = %T %v, want a recorded gate rejection", err, err)
+			if !errors.As(err, &rej) || rej.Kind != RejectReview || rej.RecordErr != nil {
+				t.Fatalf("Land = %T %v, want a recorded review rejection", err, err)
 			}
 			want := min(prior+1, MaxReworkAttempts)
 			notes := f.bead().Notes
@@ -982,6 +1045,15 @@ func TestLandRejectionAfterTheCeilingRecordsTheCeiling(t *testing.T) {
 				t.Errorf("capped rejection records rework=%v, want false and %q:\n%s", rej.Rework, escalation, notes)
 			}
 		})
+	}
+}
+
+// resubmit re-adds the ready label the way a redispatched polecat's gt done
+// does, leaving the refusal label behind.
+func (f *landFixture) resubmit() {
+	f.t.Helper()
+	if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AddLabels: []string{LabelReadyToLand}}); err != nil {
+		f.t.Fatalf("re-submitting %s: %v", f.work.BeadID, err)
 	}
 }
 
@@ -1032,7 +1104,7 @@ func TestLandRejectionAfterRequeueRecordsTheNextAttempt(t *testing.T) {
 		t.Fatalf("second Land = %T %v, want a recorded gate rejection", err, err)
 	}
 	notes := f.bead().Notes
-	if got := CountRejections(notes); got != 2 {
+	if got := RejectionBlocks(notes); got != 2 {
 		t.Fatalf("%d rejection block(s) after the requeue, want 2:\n%s", got, notes)
 	}
 	last, ok := ParseRejectionNote(notes)
@@ -1044,20 +1116,23 @@ func TestLandRejectionAfterRequeueRecordsTheNextAttempt(t *testing.T) {
 	}
 }
 
-// TestLandRequeueLoopStillHitsTheAttemptCap: a requeue loop is rejections like
-// any other, so MaxReworkAttempts ends it. Before the requeue comment named the
-// attempt it undid, every round after the first collapsed into the first block,
-// the count never advanced and the cap could not trip (gt-en9gs).
+// TestLandRequeueLoopStillHitsTheAttemptCap: a requeue loop of review
+// rejections is rounds like any other, so MaxReworkAttempts ends it. Before the
+// requeue comment named the attempt it undid, every round after the first
+// collapsed into the first block, the count never advanced and the cap could
+// not trip (gt-en9gs).
 func TestLandRequeueLoopStillHitsTheAttemptCap(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	f.gate.fn = func(string) GateResult { return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}} }
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
+	}
 	l := f.lander()
 	for attempt := 1; attempt <= MaxReworkAttempts; attempt++ {
 		_, err := l.Land(context.Background(), f.work)
 		var rej *Rejection
-		if !errors.As(err, &rej) || rej.Kind != RejectGate {
-			t.Fatalf("attempt %d: Land = %T %v, want a gate rejection", attempt, err, err)
+		if !errors.As(err, &rej) || rej.Kind != RejectReview {
+			t.Fatalf("attempt %d: Land = %T %v, want a review rejection", attempt, err, err)
 		}
 		capped := attempt >= MaxReworkAttempts
 		if rej.Rework == capped {
@@ -1105,7 +1180,7 @@ func TestLandInterruptedPassAfterRequeueIsFinishedNotRepeated(t *testing.T) {
 			t.Fatalf("round %d: Land = %T %v, want a rejection whose reopen failed", round, err, err)
 		}
 		notes := f.bead().Notes
-		if got := CountRejections(notes); got != 2 {
+		if got := RejectionBlocks(notes); got != 2 {
 			t.Fatalf("round %d: %d rejection block(s), want 2 — the interrupted block completed, not repeated:\n%s", round, got, notes)
 		}
 		last, ok := ParseRejectionNote(notes)
@@ -2149,22 +2224,60 @@ func TestLandRejectionLeavesABeadThatChangedHands(t *testing.T) {
 	if b.Assignee != "mayor" || b.Status == "open" || beads.HasLabel(b, LabelRework) {
 		t.Errorf("bead taken from its new holder: status=%s assignee=%q labels=%v", b.Status, b.Assignee, b.Labels)
 	}
-	if CountRejections(b.Notes) != 1 {
+	if RejectionBlocks(b.Notes) != 1 {
 		t.Errorf("rejection not noted: %q", b.Notes)
 	}
 }
 
-// failingBeads fails AppendNotes, Update, or Show after the first call.
+// TestLandRepeatRejectionUnreadableCommentsIsNotGuessed: telling an interrupted
+// block from a requeued one reads the bead's comments, and a read that fails is
+// reported on RecordErr rather than read as either answer — the block the bead
+// carries is left exactly as it was.
+func TestLandRepeatRejectionUnreadableCommentsIsNotGuessed(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	// The shape a pass that wrote its block and died leaves: the block names
+	// this head and kind, and the bead still looks pre-rejection.
+	block := FormatRejectionNote(RejectionNote{
+		Attempt: 1, Kind: string(RejectGate), Reason: "earlier refusal",
+		Branch: f.work.Branch, Target: f.work.Target, MR: f.work.BeadID, Head: f.work.Head,
+	})
+	if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AppendNotes: block}); err != nil {
+		t.Fatalf("seeding the notes: %v", err)
+	}
+	f.gate.fn = func(string) GateResult { return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 1}}} }
+	l := f.lander()
+	l.Beads = &failingBeads{Fake: f.bd, failComments: true}
+	_, err := l.Land(context.Background(), f.work)
+	var rej *Rejection
+	if !errors.As(err, &rej) || rej.RecordErr == nil || !strings.Contains(rej.RecordErr.Error(), "comments") {
+		t.Fatalf("Land = %T %v, want a rejection whose comment read failed", err, err)
+	}
+	if got := RejectionBlocks(f.bead().Notes); got != 1 {
+		t.Errorf("%d rejection block(s), want the seeded one only", got)
+	}
+}
+
+// failingBeads fails AppendNotes, Update, Comments, or Show after the first
+// call.
 type failingBeads struct {
 	*beadsfake.Fake
-	failNotes  bool
-	failUpdate bool
-	shows      int
-	failShow   bool
+	failNotes    bool
+	failUpdate   bool
+	failComments bool
+	shows        int
+	failShow     bool
 	// failShowNow fails the first Show too, for a caller whose only read it
 	// is: the post-landing queue runs after every other read of the bead
 	// (gt-qtj72).
 	failShowNow bool
+}
+
+func (b *failingBeads) Comments(id string) ([]beads.Comment, error) {
+	if b.failComments {
+		return nil, errors.New("dolt: connection refused")
+	}
+	return b.Fake.Comments(id)
 }
 
 func (b *failingBeads) AppendNotes(id, note string) error {
@@ -2241,7 +2354,7 @@ func TestLandRejectionRetryDoesNotBurnAttempts(t *testing.T) {
 			t.Fatalf("round %d: RecordErr = %v, want the failed reopen", round, rej.RecordErr)
 		}
 		// The refusal never reached the author, so no round is a new attempt.
-		if got := CountRejections(f.bead().Notes); got != 1 {
+		if got := RejectionBlocks(f.bead().Notes); got != 1 {
 			t.Fatalf("round %d: %d rejection block(s), want 1", round, got)
 		}
 	}
