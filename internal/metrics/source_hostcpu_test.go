@@ -67,7 +67,10 @@ var hostCPUSampleTwo = hostCPUSample{
 type hostCPUFake struct {
 	samples []hostCPUSample
 	// fail is a command whose read fails outright.
-	fail   map[string]error
+	fail map[string]error
+	// failAt is the read number (1 based) of a command that fails while the
+	// other reads of it answer, so a failure in the second sample is its own.
+	failAt map[string]int
 	window time.Duration
 	at     time.Time
 	// ran is every command the source read with, in order.
@@ -80,6 +83,7 @@ func hostCPUFakeEnv(samples ...hostCPUSample) *hostCPUFake {
 	return &hostCPUFake{
 		samples: samples,
 		fail:    map[string]error{},
+		failAt:  map[string]int{},
 		window:  time.Second,
 		at:      time.Date(2026, 10, 26, 17, 7, 0, 0, time.UTC),
 	}
@@ -91,11 +95,14 @@ func (f *hostCPUFake) env() Env {
 		Run: func(_ context.Context, argv []string) ([]byte, error) {
 			key := strings.Join(argv, " ")
 			f.ran = append(f.ran, key)
+			i := reads[key]
+			reads[key]++
 			if err := f.fail[key]; err != nil {
 				return nil, err
 			}
-			i := reads[key]
-			reads[key]++
+			if f.failAt[key] == i+1 {
+				return nil, errors.New("ps failed")
+			}
 			var table string
 			switch key {
 			case strings.Join(hostCPUNameArgv, " "):
@@ -327,11 +334,14 @@ func TestHostCPUAnUnreadableProcessTableFailsTheGroup(t *testing.T) {
 	tests := []struct {
 		name   string
 		fail   string
+		later  bool
 		first  hostCPUSample
 		noWait bool
 	}{
 		{name: "the names cannot be read", fail: "names", first: hostCPUSampleOne},
+		{name: "the second sample's names cannot be read", fail: "names", later: true, first: hostCPUSampleOne},
 		{name: "the command lines cannot be read", fail: "args", first: hostCPUSampleOne},
+		{name: "a name line's CPU time is not one", first: hostCPUSample{names: "  400  12x:34.50 /opt/homebrew/bin/dolt\n", args: hostCPUSampleOne.args}},
 		{name: "the name table is not a table", first: hostCPUSample{names: "PID TIME COMM\n", args: hostCPUSampleOne.args}},
 		{name: "the name table is empty", first: hostCPUSample{names: "\n", args: hostCPUSampleOne.args}},
 		{name: "a name line names no program", first: hostCPUSample{names: "  400  12:34.50\n", args: hostCPUSampleOne.args}},
@@ -345,7 +355,11 @@ func TestHostCPUAnUnreadableProcessTableFailsTheGroup(t *testing.T) {
 			fake := hostCPUFakeEnv(tc.first, hostCPUSampleTwo)
 			switch tc.fail {
 			case "names":
-				fake.fail[strings.Join(hostCPUNameArgv, " ")] = errors.New("ps failed")
+				if tc.later {
+					fake.failAt[strings.Join(hostCPUNameArgv, " ")] = 2
+				} else {
+					fake.fail[strings.Join(hostCPUNameArgv, " ")] = errors.New("ps failed")
+				}
 			case "args":
 				fake.fail[strings.Join(hostCPUArgsArgv, " ")] = errors.New("ps failed")
 			}
@@ -425,6 +439,7 @@ func TestParseHostCPUTime(t *testing.T) {
 		{"no colon", "5", 0, true},
 		{"too many fields", "1:2:3:4", 0, true},
 		{"not a number", "0:0x.05", 0, true},
+		{"days that are not a number", "x-01:02:03", 0, true},
 		{"empty", "", 0, true},
 	}
 	for _, tc := range tests {
