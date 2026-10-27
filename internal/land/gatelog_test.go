@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -130,38 +131,61 @@ func gateLogPastTheTailCap(log string) string {
 	return log
 }
 
-// TestCandidateGateKeepsTheRejectedJobLog: a red candidate gate keeps the whole
-// gate job log under its log directory, named <short-sha>-<unix-time>.log, so
-// the note's excerpt can be checked against everything the job printed after
-// the run record is gone (gt-wwqx8).
+// TestCandidateGateKeepsTheRejectedJobLog: a red candidate gate keeps the log
+// it read for its verdict under its log directory, named
+// <short-sha>-<unix-time>.log, so the note's excerpt can be checked against
+// everything that log holds after the run record is gone (gt-wwqx8).
 func TestCandidateGateKeepsTheRejectedJobLog(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	dir := writeGateWorkflow(t, gateWorkflowYAML)
+	// The three logs a red gate can hold: a cut tail that names the failure, a
+	// wider log that does, and the passing tail of a log whose failure sits
+	// past the cap the gate reads.
+	cutTail := gateLogPastTheTailCap(gateJobLog("--- FAIL: TestThing (0.01s)", "FAIL\tgithub.com/x/a\t0.2s"))
+	widerLog := gateLogPastTheTailCap(gateJobLog("⭐ Run Main actions/checkout@v4", "--- FAIL: TestThing (0.01s)", "FAIL\tgithub.com/x/a\t0.2s"))
+	passingTail := gateLogPastTheTailCap("")
 	tests := []struct {
-		name  string
-		tail  string
-		whole string
+		name string
+		// tail is what the 16 KiB fetch returns; whole answers the wider one.
+		tail        string
+		whole       string
+		wholeErr    error
+		want        string
+		wantFetches []int64
 	}{
 		{
-			// The tail alone satisfies the note; the kept file still has to be
-			// the whole log the gate can fetch.
-			name:  "the tail names the failure",
-			tail:  gateLogPastTheTailCap(gateJobLog("--- FAIL: TestThing (0.01s)", "FAIL\tgithub.com/x/a\t0.2s")),
-			whole: gateJobLog("⭐ Run Main actions/checkout@v4", "--- FAIL: TestThing (0.01s)", "FAIL\tgithub.com/x/a\t0.2s"),
+			// The cut tail names the failure, so the verdict rests on it and it
+			// is kept as fetched: widening it would spend a second Forgejo
+			// request on every red (the bead's constraint).
+			name:        "the cut tail names the failure",
+			tail:        cutTail,
+			want:        cutTail,
+			wantFetches: []int64{candidateTailBytes},
 		},
 		{
-			// Neither fetch names the failure, and the wider one is still the
-			// log worth keeping.
-			name:  "the failure sits past the full-log cap",
-			tail:  gateLogPastTheTailCap(""),
-			whole: gateLogPastTheTailCap(gateJobLog("⭐ Run Main actions/checkout@v4")),
+			// The tail of passing packages names no failure, so the gate widens
+			// once and the wider log is the one kept.
+			name:        "the failure sits past the tail cap",
+			tail:        passingTail,
+			whole:       widerLog,
+			want:        widerLog,
+			wantFetches: []int64{candidateTailBytes, candidateFullLogBytes},
+		},
+		{
+			// The wider fetch fails, so the tail the gate already holds is all
+			// there is: it is kept rather than losing the log to the failure.
+			name:        "the wider fetch fails",
+			tail:        passingTail,
+			wholeErr:    errors.New("forgejo: 502"),
+			want:        passingTail,
+			wantFetches: []int64{candidateTailBytes, candidateFullLogBytes},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client, sha := redCandidate(t, f, tt.tail)
-			client.fullLog = tt.whole
+			client.fullLog, client.fullLogErr = tt.whole, tt.wholeErr
 			logDir := filepath.Join(t.TempDir(), "gate-logs", "gastown")
 			gate := fastGate(client)
 			gate.GateLogDir = logDir
@@ -178,8 +202,8 @@ func TestCandidateGateKeepsTheRejectedJobLog(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reading the kept log: %v", err)
 			}
-			if string(kept) != tt.whole {
-				t.Fatalf("kept %d bytes; want the whole %d-byte log, not the capped tail", len(kept), len(tt.whole))
+			if string(kept) != tt.want {
+				t.Fatalf("kept %d bytes; want the %d bytes the gate read", len(kept), len(tt.want))
 			}
 			// CI output can carry what a failing step printed, secrets included.
 			info, err := os.Stat(res.GateLog)
@@ -189,8 +213,37 @@ func TestCandidateGateKeepsTheRejectedJobLog(t *testing.T) {
 			if perm := info.Mode().Perm(); perm != 0o600 {
 				t.Fatalf("kept log mode = %o; want 0600", perm)
 			}
-			if len(client.limits) != 2 || client.limits[0] != candidateTailBytes || client.limits[1] != candidateFullLogBytes {
-				t.Fatalf("log fetches %v; want the tail, then the whole log", client.limits)
+			if !slices.Equal(client.limits, tt.wantFetches) {
+				t.Fatalf("log fetches %v; want %v", client.limits, tt.wantFetches)
+			}
+		})
+	}
+}
+
+// TestGateLogDirKeepsLogsUnderTheTownRuntime: a rig name resolves to a
+// directory under the town's runtime, and a name that could leave it -- empty,
+// relative, or carrying a separator -- resolves to no directory at all, so no
+// log is kept (gt-wwqx8).
+func TestGateLogDirKeepsLogsUnderTheTownRuntime(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		townRoot string
+		rig      string
+		want     string
+	}{
+		{name: "a plain rig", townRoot: "/home/x/gt", rig: "gastown", want: "/home/x/gt/.runtime/gate-logs/gastown"},
+		{name: "no town root", townRoot: "", rig: "gastown"},
+		{name: "no rig", townRoot: "/home/x/gt", rig: ""},
+		{name: "a parent", townRoot: "/home/x/gt", rig: ".."},
+		{name: "this directory", townRoot: "/home/x/gt", rig: "."},
+		{name: "a nested name", townRoot: "/home/x/gt", rig: "gastown/polecats"},
+		{name: "an absolute name", townRoot: "/home/x/gt", rig: "/etc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GateLogDir(tt.townRoot, tt.rig); got != tt.want {
+				t.Fatalf("GateLogDir(%q, %q) = %q; want %q", tt.townRoot, tt.rig, got, tt.want)
 			}
 		})
 	}
@@ -302,7 +355,7 @@ func TestRejectGateNoteNamesTheKeptGateLog(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	l := f.lander()
-	logPath := filepath.Join(t.TempDir(), "gate-logs", "gastown", "8cc7b0ab-1793123456.log")
+	logPath := filepath.Join(t.TempDir(), "gate-logs", "gastown", "8cc7b0ab-1793123456123456789.log")
 	cand := &fakeCandidate{res: CandidateResult{
 		State: CandidateFailed, Context: "ci / gate (push)", Tail: "--- FAIL: TestThing\n", GateLog: logPath, Pushed: true}}
 	l.Candidate = cand

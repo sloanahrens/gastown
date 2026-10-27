@@ -209,7 +209,7 @@ func TestParseRejectionNoteRoundTrips(t *testing.T) {
 		Findings:    []Finding{{ID: "abc", Severity: "major", Path: "internal/x/y.go", Line: 42, Title: "bad thing"}},
 		Receipt:     &Receipt{Score: 0.5, Unresolved: []string{"abc"}},
 		GateTail:    "FAIL\tpkg\nsome line",
-		GateLog:     "/home/x/gt/.runtime/gate-logs/gastown/8cc7b0ab-1793123456.log",
+		GateLog:     "/home/x/gt/.runtime/gate-logs/gastown/8cc7b0ab-1793123456123456789.log",
 	})
 	got, ok := ParseRejectionNote("some earlier prose\n" + note)
 	if !ok {
@@ -232,7 +232,7 @@ func TestParseRejectionNoteRoundTrips(t *testing.T) {
 	if got.GateTail != "FAIL\tpkg\nsome line" {
 		t.Errorf("gate tail = %q", got.GateTail)
 	}
-	if got.GateLog != "/home/x/gt/.runtime/gate-logs/gastown/8cc7b0ab-1793123456.log" {
+	if got.GateLog != "/home/x/gt/.runtime/gate-logs/gastown/8cc7b0ab-1793123456123456789.log" {
 		t.Errorf("gate log = %q", got.GateLog)
 	}
 

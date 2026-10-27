@@ -17,10 +17,23 @@ const (
 	gateLogExt = ".log"
 )
 
-// GateLogDir is the directory a rig's rejected candidate gate job logs are
-// kept in: <townRoot>/.runtime/gate-logs/<rig>.
+// GateLogDir is the directory a rig's kept gate logs live in:
+// <townRoot>/.runtime/gate-logs/<rig>, empty -- so no log is kept -- when
+// townRoot is unset or rig is not one plain path element.
 func GateLogDir(townRoot, rig string) string {
+	if townRoot == "" || !pathElement(rig) {
+		return ""
+	}
 	return filepath.Join(townRoot, ".runtime", "gate-logs", rig)
+}
+
+// pathElement reports whether name can be joined into a path as a single
+// element: a rig name reaching here is read from town config, but a name
+// carrying a separator or a ".." would put kept logs outside the town's
+// runtime directory, so it keeps none.
+func pathElement(name string) bool {
+	return name != "" && name != "." && name != ".." &&
+		!strings.ContainsRune(name, filepath.Separator) && filepath.VolumeName(name) == ""
 }
 
 // gateLogFS is the filesystem a kept log is written and pruned through; a nil
@@ -62,10 +75,10 @@ func (fs gateLogFS) rm(path string) error {
 	return os.Remove(path)
 }
 
-// keepGateLog writes log to dir as <short-sha>-<unix-nano>.log, deletes the
+// keepGateLog writes log to dir as <short-sha>-<unix-time>.log, deletes the
 // logs whose mtime is more than GateLogRetention before now, and returns the
-// path written. now is the clock the retention compares against, so a caller
-// with a test clock dates the files it stages in that clock.
+// path written. now is the wall clock the file name and the retention share:
+// a test with a fixed clock dates the files it stages in that same clock.
 //
 // A write that fails returns no path: the caller's rejection stands and has no
 // log to name. A prune that fails after the write returns the path with the
@@ -74,8 +87,9 @@ func keepGateLog(fs gateLogFS, dir, sha, log string, now time.Time) (string, err
 	if err := fs.mkdir(dir, 0o700); err != nil {
 		return "", fmt.Errorf("creating the gate log directory %s: %w", dir, err)
 	}
-	// Nanoseconds, not seconds: two rejections inside one second must not
-	// overwrite each other's log (gt-wwqx8).
+	// The unix time in nanoseconds: it is the unix time the bead names, at a
+	// resolution where two rejections in one second cannot overwrite each
+	// other's log (gt-wwqx8).
 	name := fmt.Sprintf("%s-%d%s", shortSHA(sha), now.UnixNano(), gateLogExt)
 	path := filepath.Join(dir, name)
 	// The log is private: CI output can carry what a failing step printed,
