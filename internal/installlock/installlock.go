@@ -61,7 +61,9 @@ func acquire(path string, wait time.Duration, now func() time.Time, sleep func(t
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	locked, err := lockUntil(f, now, sleep, wait)
+	// The wait is the runner's, bound to the same clock and sleep, so Acquire
+	// and Run cannot drift into two different waits.
+	locked, err := runner{now: now, sleep: sleep}.lock(f, wait)
 	if err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("lock %s: %w", path, err)
@@ -137,7 +139,7 @@ func (r runner) run(cfg Config) int {
 	// Reached on every return below; a successful exec never returns.
 	defer f.Close()
 
-	locked, err := lockUntil(f, r.now, r.sleep, cfg.Wait)
+	locked, err := r.lock(f, cfg.Wait)
 	if err != nil {
 		fmt.Fprintf(cfg.Stderr, "install-gt: cannot lock %s: %v\n", cfg.LockPath, err)
 		return 1
@@ -173,11 +175,12 @@ func (r runner) run(cfg Config) int {
 	return 1
 }
 
-// lockUntil tries for the exclusive flock on f until wait runs out, sleeping
-// between tries on the injected clock. It reports (false, nil) when the wait ran
-// out first.
-func lockUntil(f *os.File, now func() time.Time, sleep func(time.Duration), wait time.Duration) (bool, error) {
-	deadline := now().Add(wait)
+// lock tries for the exclusive flock on f until wait runs out, sleeping between
+// tries on the runner's clock. It reports (false, nil) when the wait ran out
+// first. Run and Acquire both wait through it, on the seams their caller
+// supplied, so there is one wait loop (gt-5f05j).
+func (r runner) lock(f *os.File, wait time.Duration) (bool, error) {
+	deadline := r.now().Add(wait)
 	for {
 		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
@@ -186,14 +189,14 @@ func lockUntil(f *os.File, now func() time.Time, sleep func(time.Duration), wait
 		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
 			return false, err
 		}
-		if !now().Before(deadline) {
+		if !r.now().Before(deadline) {
 			return false, nil
 		}
 		pause := retryInterval
-		if remaining := deadline.Sub(now()); remaining < pause {
+		if remaining := deadline.Sub(r.now()); remaining < pause {
 			pause = remaining
 		}
-		sleep(pause)
+		r.sleep(pause)
 	}
 }
 
