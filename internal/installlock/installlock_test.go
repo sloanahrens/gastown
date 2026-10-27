@@ -323,6 +323,33 @@ func TestMarkerThatCannotBeRemovedStopsTheInstallBeforeExec(t *testing.T) {
 	}
 }
 
+// A marker the caller already cleared, or one another run removed, must not be
+// read as a removal that failed: the install still starts (gt-trrf6).
+func TestMarkerThatIsAlreadyGoneLetsTheInstallStart(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "marker") // never created
+	rec := &recorder{err: errors.New("stop here")}
+	var markerAtExec bool
+	rec.before = func() { markerAtExec = fileExists(marker) }
+	var stderr strings.Builder
+
+	got := newRunner(newFakeClock(), rec).run(Config{
+		LockPath: filepath.Join(dir, "install-gt.lock"), Marker: marker,
+		Command: []string{self(t)}, Stderr: &stderr,
+	})
+
+	if len(rec.calls) != 1 {
+		t.Fatalf("the install was not started for a marker that was already gone (status %d, stderr: %s)", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "cannot remove the marker") {
+		t.Errorf("stderr %q reports a marker removal that failed only because the marker was gone", stderr.String())
+	}
+	if markerAtExec {
+		t.Error("a marker appeared at exec that the run did not create")
+	}
+}
+
 func TestMarkerThatCannotBePutBackAfterAFailedExecIsReported(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
