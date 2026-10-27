@@ -30,14 +30,18 @@ import (
 // specSlingJob is one sling the tick planned: the seat it chose and the
 // decisions the sling needs from the tick, which the sling does not read again.
 type specSlingJob struct {
-	Bead      string                  `json:"bead"`
-	Rig       string                  `json:"rig"`
-	Agent     string                  `json:"agent"`
-	Reason    string                  `json:"reason,omitempty"`
-	Resume    string                  `json:"resume,omitempty"`
-	Gone      string                  `json:"gone,omitempty"`
-	ShapeNote string                  `json:"shape_note,omitempty"`
-	Run       specdispatch.FormulaRun `json:"run"`
+	Bead      string `json:"bead"`
+	Rig       string `json:"rig"`
+	Agent     string `json:"agent"`
+	Reason    string `json:"reason,omitempty"`
+	Resume    string `json:"resume,omitempty"`
+	Gone      string `json:"gone,omitempty"`
+	ShapeNote string `json:"shape_note,omitempty"`
+	// OverrunNote is the overrun-stop flag the sling writes on its bead once it
+	// has dispatched it (gt-b9j3o.4): the tick that planned the sling decided
+	// the box, and the job carries the answer to the process that runs it.
+	OverrunNote string                  `json:"overrun_note,omitempty"`
+	Run         specdispatch.FormulaRun `json:"run"`
 	// Paths and Tests are the files and test names the bead's text cites, for
 	// the overlap hold on the candidates of later ticks while the sling runs.
 	Paths []string `json:"paths,omitempty"`
@@ -141,7 +145,7 @@ func specHandOffPendingSlings(pending []specPendingSling, report *specDispatchRe
 		report.Dispatched = append(report.Dispatched, entry)
 		report.Pending = append(report.Pending, specSlingJob{
 			Bead: p.id, Rig: p.c.Rig, Agent: p.seat.Agent, Reason: p.seat.Reason,
-			Resume: p.resume, Gone: p.gone, ShapeNote: p.shapeNote, Run: p.c.Run, Paths: p.paths, Tests: p.tests,
+			Resume: p.resume, Gone: p.gone, ShapeNote: p.shapeNote, OverrunNote: p.overrunNote, Run: p.c.Run, Paths: p.paths, Tests: p.tests,
 		})
 	}
 }
@@ -150,15 +154,16 @@ func specHandOffPendingSlings(pending []specPendingSling, report *specDispatchRe
 func (j specSlingJob) pending() specPendingSling {
 	spec := specdispatch.Spec{ID: j.Bead}
 	return specPendingSling{
-		c:         specCandidate{Spec: spec, Rig: j.Rig, Run: j.Run},
-		id:        j.Bead,
-		seat:      specdispatch.SeatChoice{Agent: j.Agent, Reason: j.Reason},
-		resume:    j.Resume,
-		gone:      j.Gone,
-		shapeNote: j.ShapeNote,
-		entry:     specDispatchEntry{Bead: j.Bead, Rig: j.Rig, Agent: j.Agent},
-		paths:     j.Paths,
-		tests:     j.Tests,
+		c:           specCandidate{Spec: spec, Rig: j.Rig, Run: j.Run},
+		id:          j.Bead,
+		seat:        specdispatch.SeatChoice{Agent: j.Agent, Reason: j.Reason},
+		resume:      j.Resume,
+		gone:        j.Gone,
+		shapeNote:   j.ShapeNote,
+		overrunNote: j.OverrunNote,
+		entry:       specDispatchEntry{Bead: j.Bead, Rig: j.Rig, Agent: j.Agent},
+		paths:       j.Paths,
+		tests:       j.Tests,
 	}
 }
 

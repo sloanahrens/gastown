@@ -28,12 +28,23 @@ func ModelName(argv []string) string {
 	if name == "" {
 		name = filepath.Base(argv[0])
 	}
+	if family := ModelFamily(name); family != "" {
+		return family
+	}
+	return name
+}
+
+// ModelFamily returns the family name carries — "haiku" for "claude-haiku" or
+// "claude-3-5-haiku-2026" — or "" when it names none. It is the word
+// ModelName shortens an argv's model to, for a caller that has the model's name
+// and not its command line (a seat's agent, which the town names claude-haiku).
+func ModelFamily(name string) string {
 	for _, family := range modelFamilies {
 		if modelWord(name, family) {
 			return family
 		}
 	}
-	return name
+	return ""
 }
 
 // backendModel returns the model an argv names: the value of --model or -m, in

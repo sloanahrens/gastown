@@ -33,6 +33,31 @@ func TestModelNameReadsTheModelAnArgvRuns(t *testing.T) {
 	}
 }
 
+// A name on its own reads to its family the same way an argv's model does, and
+// a name that carries none reads as no family rather than as itself: the caller
+// that asks this one is comparing families (gt-b9j3o.4).
+func TestModelFamilyReadsAName(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		{"claude-haiku", "haiku"},
+		{"claude-sonnet", "sonnet"},
+		{"claude-3-5-haiku-2026", "haiku"},
+		{"deepseek-flash", "flash"},
+		{"Haiku", "haiku"},
+		{"flashback", ""},
+		{"aider", ""},
+		{"", ""},
+	} {
+		if got := ModelFamily(tc.name); got != tc.want {
+			t.Errorf("ModelFamily(%q) = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // The family match is a word match: a backend called flashback is not flash.
 func TestModelNameMatchesWholeWords(t *testing.T) {
 	t.Parallel()
