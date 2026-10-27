@@ -21,6 +21,13 @@ type testRun struct {
 	out    strings.Builder
 	errOut strings.Builder
 	execs  [][]string
+	// cmds is the argv of every command the install sections ran, through Cmd,
+	// and dirs the directory each ran in.
+	cmds [][]string
+	dirs []string
+	// respond answers a command; a case that leaves it nil gets status 0 and
+	// no output.
+	respond func(dir, name string, args []string) (stdout, stderr []byte, code int)
 }
 
 func newTestRun(t *testing.T) *testRun {
@@ -69,8 +76,38 @@ func newTestRun(t *testing.T) *testRun {
 		},
 		Files: Files{Exists: func(string) bool { return true }},
 		Bin:   Binary{Commit: func(string, string) string { return "" }},
+		// Signing material under the temporary root, so a run that reaches the
+		// signing step reads nothing of the host's (gt-tpg0p.11).
+		Signing: Signing{Dir: filepath.Join(root, "signing"), Identity: "gastown-dev-unattended", Timeout: "30"},
+		Found:   func(string) bool { return false },
+	}
+	tr.Cmd = func(dir, name string, args ...string) ([]byte, []byte, int) {
+		tr.cmds = append(tr.cmds, append([]string{name}, args...))
+		tr.dirs = append(tr.dirs, dir)
+		if tr.respond != nil {
+			return tr.respond(dir, name, args)
+		}
+		return nil, nil, 0
 	}
 	return tr
+}
+
+// containsLine reports whether lines holds want.
+func containsLine(lines []string, want string) bool {
+	for _, line := range lines {
+		if line == want {
+			return true
+		}
+	}
+	return false
+}
+
+// command is the argv of the nth command the run made, 0 being the first.
+func (tr *testRun) command(n int) []string {
+	if n < 0 || n >= len(tr.cmds) {
+		return nil
+	}
+	return tr.cmds[n]
 }
 
 // resolved is the state ResolveTarget leaves, with prev as the installed

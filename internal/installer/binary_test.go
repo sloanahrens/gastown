@@ -113,7 +113,7 @@ func TestStaleBinary(t *testing.T) {
 				t.Fatal(err)
 			}
 			var calls []string
-			run := func(dir, name string, args ...string) ([]byte, error) {
+			run := func(dir, name string, args ...string) ([]byte, []byte, int) {
 				if dir != "/rig" || name != gt {
 					t.Errorf("ran %q from %q, want %q from /rig", name, dir, gt)
 				}
@@ -126,9 +126,12 @@ func TestStaleBinary(t *testing.T) {
 				}
 				calls = append(calls, call)
 				if args[0] == "stale" {
-					return []byte(tc.staleOut), tc.staleErr
+					if tc.staleErr != nil {
+						return []byte(tc.staleOut), nil, 1
+					}
+					return []byte(tc.staleOut), nil, 0
 				}
-				return []byte(tc.versionOut), nil
+				return []byte(tc.versionOut), nil, 0
 			}
 
 			got := StaleBinary(run).Commit("/rig", gt)

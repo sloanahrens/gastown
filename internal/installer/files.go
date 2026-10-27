@@ -24,6 +24,13 @@ type Files struct {
 	MkdirAll func(path string) error
 	IsFile   func(path string) bool
 	Exists   func(path string) bool
+	// IsExecutable reports whether path is a file someone can run, the
+	// script's -x test on the binary the container-gate slot is taken with.
+	IsExecutable func(path string) bool
+	// TempFile creates an empty file in dir and returns its path, the script's
+	// mktemp: signing runs codesign against a copy beside the binary, never
+	// against the live path.
+	TempFile func(dir, pattern string) (string, error)
 	// ClearImmutable and SetImmutable bracket a rename over the installed
 	// binary, which an install can leave OS-immutable; both are best effort
 	// because a platform without the flag has nothing to do (gt-vya0s).
@@ -87,6 +94,20 @@ func (f Files) exists(path string) bool {
 	return pathExists(path)
 }
 
+func (f Files) isExecutable(path string) bool {
+	if f.IsExecutable != nil {
+		return f.IsExecutable(path)
+	}
+	return isExecutable(path)
+}
+
+func (f Files) tempFile(dir, pattern string) (string, error) {
+	if f.TempFile != nil {
+		return f.TempFile(dir, pattern)
+	}
+	return createTempFile(dir, pattern)
+}
+
 func (f Files) clearImmutable(path string) {
 	if f.ClearImmutable != nil {
 		f.ClearImmutable(path)
@@ -140,6 +161,21 @@ func isRegularFile(path string) bool {
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// createTempFile is mktemp: an empty file in dir whose name the pattern
+// decides, closed before it is handed back.
+func createTempFile(dir, pattern string) (string, error) {
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	return name, nil
 }
 
 // clearImmutable strips the OS-immutable flag on macos (chflags) and Linux

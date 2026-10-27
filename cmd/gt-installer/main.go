@@ -7,11 +7,10 @@
 //	             [--no-image-first]
 //
 // The install sections land one bead at a time: the OpenShell gateway step
-// (gt-tpg0p.9), then target resolution, the no-op path and the refusals
-// (gt-tpg0p.10). Until the build section lands (gt-tpg0p.11), a run that gets
-// that far ends in the exit guard as failed/unexpected with status 1, so a
-// caller wired to this program early fails loudly rather than believing an
-// install happened.
+// (gt-tpg0p.9), target resolution, the no-op path and the refusals
+// (gt-tpg0p.10), and the build, install, signing, smoke and syncs
+// (gt-tpg0p.11). The sandbox image step (gt-tpg0p.12) and the Makefile switch
+// (gt-tpg0p.14) are still to land.
 package main
 
 import (
@@ -91,6 +90,7 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 	c.GT = paths.GT()
 
 	r := installer.NewRun(cfg, c, paths)
+	r.Signing = installer.ResolveSigning(env.getenv, paths.TownRoot)
 	// --dry-run prints the gateway plan and changes nothing, before the checkout
 	// is read.
 	if cfg.DryRun {
@@ -110,6 +110,21 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 		fmt.Fprintln(stderr, err)
 		return int(installer.ExitFailed)
 	}
-	// The build, install, signing and smoke checks land in gt-tpg0p.11.
-	return int(installer.ExitFailed)
+	if code, ended := r.Build(); ended {
+		return int(code)
+	}
+	// The sandbox image is built and published here, before the swap; that step
+	// is gt-tpg0p.12.
+	if code, ended := r.Install(); ended {
+		return int(code)
+	}
+	// Signing runs on what install-local just put in place, before the smoke
+	// check runs it, and never changes the outcome (gt-426fo.1).
+	r.Sign()
+	if code, ended := r.Smoke(); ended {
+		return int(code)
+	}
+	r.Syncs()
+	r.GatewayStep(installer.GatewayInstall)
+	return int(r.Finalize())
 }

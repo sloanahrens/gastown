@@ -36,7 +36,7 @@ func TestResolvePaths(t *testing.T) {
 		{
 			name: "the town root supplies the daemon and the checkout",
 			env:  map[string]string{"GT_TOWN_ROOT": "/town"},
-			want: Paths{BinDir: "/home/u/.local/bin", DaemonDir: "/town/daemon", RigDir: "/town/gastown/mayor/rig", Home: "/home/u"},
+			want: Paths{BinDir: "/home/u/.local/bin", TownRoot: "/town", DaemonDir: "/town/daemon", RigDir: "/town/gastown/mayor/rig", Home: "/home/u"},
 		},
 		{
 			name: "the gateway's own home and LaunchAgents directory win",
@@ -44,7 +44,7 @@ func TestResolvePaths(t *testing.T) {
 				"GT_TOWN_ROOT": "/town", "INSTALL_GT_GATEWAY_HOME": "/gw",
 				"INSTALL_GT_LAUNCHD_DIR": "/agents",
 			},
-			want: Paths{BinDir: "/home/u/.local/bin", DaemonDir: "/town/daemon",
+			want: Paths{BinDir: "/home/u/.local/bin", TownRoot: "/town", DaemonDir: "/town/daemon",
 				RigDir: "/town/gastown/mayor/rig", Home: "/gw", LaunchdDir: "/agents"},
 		},
 		{
@@ -100,6 +100,7 @@ func TestResolvePathsFindsTheOutermostTown(t *testing.T) {
 	}
 	want := Paths{
 		BinDir:    "/home/u/.local/bin",
+		TownRoot:  town,
 		DaemonDir: filepath.Join(town, "daemon"),
 		RigDir:    filepath.Join(town, "gastown", "mayor", "rig"),
 		Home:      "/home/u",
