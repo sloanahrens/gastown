@@ -53,7 +53,8 @@ already in polecat_pool.seats is never overwritten.
 
 It reads the files as raw JSON, so it works on a file the strict loader refuses.
 It checks that the converted files load before it writes, backs each file up
-beside it as <file>.bak-<UTC timestamp>-pool-migrate, and writes atomically.
+beside it as <file>.bak-<UTC timestamp>-pool-migrate (the newest 30 and the
+last 7 days are kept), and writes atomically.
 --dry-run prints what it would change and writes nothing. A second run finds
 nothing to do.
 
@@ -150,7 +151,7 @@ func runPoolMigrate(w io.Writer, townRoot string, dryRun bool, now time.Time) er
 		if reflect.DeepEqual(before, tree) {
 			return false, nil
 		}
-		if err := backupConfigFile(settingsPath, stamp); err != nil {
+		if _, err := config.BackupFile(settingsPath, stamp); err != nil {
 			return false, err
 		}
 		wroteSettings = true
@@ -171,7 +172,7 @@ func runPoolMigrate(w io.Writer, townRoot string, dryRun bool, now time.Time) er
 			if !takePatrolSeatKeys(tree).changed {
 				return false, nil
 			}
-			if err := backupConfigFile(patrolPath, stamp); err != nil {
+			if _, err := config.BackupFile(patrolPath, stamp); err != nil {
 				return false, err
 			}
 			return true, nil

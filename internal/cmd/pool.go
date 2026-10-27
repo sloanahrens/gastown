@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -74,7 +73,7 @@ The dispatcher reads the file on every tick, so a change holds from the next
 tick with no daemon restart.
 
 The file is written atomically and the previous copy is kept beside it as
-<file>.bak-<timestamp>.`,
+<file>.bak-<timestamp>; the newest 30 and the last 7 days are kept.`,
 	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		changes, err := parsePoolSeatCaps(args)
@@ -111,7 +110,8 @@ agents the live polecats run on.
 
 The change takes effect at the dispatcher's next tick and on the next sling.
 The file is written atomically and the previous copy is kept beside it as
-<file>.bak-<timestamp>. Keys gt pool does not own are left as they are.`,
+<file>.bak-<timestamp>; the newest 30 and the last 7 days are kept. Keys gt pool
+does not own are left as they are.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		n, err := strconv.Atoi(args[0])
@@ -536,30 +536,9 @@ func writeTownSeats(townRoot, stamp string, change func(*config.TownSettings) er
 		if !exists {
 			*ts = *config.NewTownSettings()
 		}
-		if err := backupConfigFile(config.WritePath(path), stamp); err != nil {
+		if _, err := config.BackupFile(config.WritePath(path), stamp); err != nil {
 			return err
 		}
 		return change(ts)
 	})
-}
-
-// backupConfigFile copies path to path.bak-<stamp> before a write replaces it.
-// A path that does not exist yet has nothing to keep.
-func backupConfigFile(path, stamp string) error {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: internal config path
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("backing up %s: %w", path, err)
-	}
-	mode := os.FileMode(0o600)
-	if fi, err := os.Stat(path); err == nil {
-		mode = fi.Mode().Perm()
-	}
-	dst := filepath.Clean(path) + ".bak-" + stamp
-	if err := os.WriteFile(dst, data, mode); err != nil {
-		return fmt.Errorf("backing up %s: %w", path, err)
-	}
-	return nil
 }

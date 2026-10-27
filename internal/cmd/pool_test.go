@@ -352,6 +352,39 @@ func TestPoolSetTotalWithoutAPoolSeat(t *testing.T) {
 
 // The write path is the seat sets' path: a backup beside the file, keys the
 // command does not own left alone (gt-bcpj5).
+// A second write inside one stamp's second keeps both copies: the earlier file
+// is the one an operator restores, and gt pool used to replace it (gt-9tx8h).
+func TestPoolSetKeepsBothCopiesOfALaterWriteInTheSameSecond(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, poolTestSettings, "")
+	stamp := "20261027T120000Z"
+	for _, n := range []int{2, 3} {
+		total := n
+		err := writeTownSeats(root, stamp, func(ts *config.TownSettings) error {
+			setMaxTotal(ts, total)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("writeTownSeats %d: %v", n, err)
+		}
+	}
+
+	baks, err := filepath.Glob(config.TownSettingsPath(root) + ".bak-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(baks) != 2 {
+		t.Fatalf("settings backups = %v, want the two writes' copies", baks)
+	}
+	slices.Sort(baks)
+	if got, _ := os.ReadFile(baks[0]); string(got) != poolTestSettings {
+		t.Errorf("the first copy = %q, want the file as it was before the first write", got)
+	}
+	if got, _ := os.ReadFile(baks[1]); !strings.Contains(string(got), `"max_total": 2`) {
+		t.Errorf("the second copy = %q, want the file as the first write left it", got)
+	}
+}
+
 func TestPoolSetTotalBacksUpTheFile(t *testing.T) {
 	t.Parallel()
 	root := poolTestTown(t, poolTestSettings, "")

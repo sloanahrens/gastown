@@ -81,7 +81,8 @@ switch for one role cannot change another role's model or a polecat's seat.
   gt model set-role om-review haiku
   gt model set-role crew sonnet
 
-The previous copy of each file is kept beside it as <file>.bak-<timestamp>.`,
+The previous copy of each file is kept beside it as <file>.bak-<timestamp>;
+the newest 30 and the last 7 days are kept.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		townRoot, err := workspace.FindFromCwdOrError()

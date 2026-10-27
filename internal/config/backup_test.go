@@ -1,11 +1,15 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A backup is the previous copy with the file's own mode, and a path that is not
@@ -104,4 +108,376 @@ func TestBackupFileStopsAfterBackupNameAttempts(t *testing.T) {
 	if !strings.Contains(err.Error(), "already exist") {
 		t.Errorf("BackupFile = %v, want it to say the names are taken", err)
 	}
+}
+
+// retentionNow is the fixed clock the retention tests run at, so a copy aged by
+// eight days is past the window whatever the host's clock says.
+var retentionNow = time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+
+// A copy is pruned only when it is outside the newest backupRetentionCount and
+// older than backupRetentionAge: the copy just written and every file whose
+// name is not <path>.bak-* stay (gt-9tx8h).
+func TestBackupFilePrunesOldCopies(t *testing.T) {
+	t.Parallel()
+
+	// copiesByAge names n copies, newest first: copy i is age plus i minutes
+	// before the clock, so each has its own place in the mtime order.
+	copiesByAge := func(prefix string, n int, age time.Duration) (map[string]time.Duration, []string) {
+		copies := map[string]time.Duration{}
+		var order []string
+		for i := range n {
+			name := fmt.Sprintf("config.json.bak-%s-%02d", prefix, i)
+			copies[name] = age + time.Duration(i)*time.Minute
+			order = append(order, name)
+		}
+		return copies, order
+	}
+	oldThirtyFive, oldOrder := copiesByAge("old", 35, 8*24*time.Hour)
+	youngForty, _ := copiesByAge("young", 40, time.Hour)
+	mixedYoung, _ := copiesByAge("myoung", 35, time.Hour)
+	mixedOld, mixedOldOrder := copiesByAge("mold", 3, 8*24*time.Hour)
+
+	cases := []struct {
+		name string
+		// copies are written before the backup, each aged before the clock.
+		copies map[string]time.Duration
+		// unrelated files are written too and must survive.
+		unrelated []string
+		// newAge is how old the copy this call writes is, so a case can put the
+		// just-written copy outside the window.
+		newAge   time.Duration
+		wantGone []string
+	}{
+		{
+			name:     "keeps the newest thirty once every copy is past the age window",
+			copies:   oldThirtyFive,
+			wantGone: oldOrder[29:],
+		},
+		{
+			name:     "keeps a copy younger than the age window beyond the thirty",
+			copies:   youngForty,
+			wantGone: nil,
+		},
+		{
+			name:     "drops an old copy while the young ones stay",
+			copies:   merge(mixedYoung, mixedOld),
+			wantGone: mixedOldOrder,
+		},
+		{
+			name:      "leaves a file whose name is not a backup",
+			copies:    oldThirtyFive,
+			unrelated: []string{"config.json.orig", "notes.txt", "backup-config.json", "config.json.bak"},
+			wantGone:  oldOrder[29:],
+		},
+		{
+			name:     "keeps the copy just written when it is the oldest",
+			copies:   oldThirtyFive,
+			newAge:   30 * 24 * time.Hour,
+			wantGone: oldOrder[30:],
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			if err := os.WriteFile(path, []byte(`{"live":true}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			for name, age := range c.copies {
+				copyPath := filepath.Join(dir, name)
+				if err := os.WriteFile(copyPath, []byte("old\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				setMtime(t, copyPath, retentionNow.Add(-age))
+			}
+			for _, name := range c.unrelated {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("not a backup\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// Every case sets the written copy's mtime itself, so the result never
+			// depends on what the host's clock reads.
+			write := func(dst string, data []byte, mode os.FileMode) error {
+				if err := writeBackupCopy(dst, data, mode); err != nil {
+					return err
+				}
+				setMtime(t, dst, retentionNow.Add(-c.newAge))
+				return nil
+			}
+			got, err := backupFile(path, "20261027T120000Z", backupRun{
+				now:   func() time.Time { return retentionNow },
+				write: write,
+				prune: pruneCopies,
+			})
+			if err != nil {
+				t.Fatalf("BackupFile: %v", err)
+			}
+			if want := filepath.Join(dir, "config.json.bak-20261027T120000Z"); got != want {
+				t.Fatalf("backup = %q, want %q", got, want)
+			}
+
+			present := dirNames(t, dir)
+			for _, name := range c.wantGone {
+				if present[name] {
+					t.Errorf("%s survived past the retention window", name)
+				}
+			}
+			for name := range c.copies {
+				if slices.Contains(c.wantGone, name) {
+					continue
+				}
+				if !present[name] {
+					t.Errorf("%s was removed, want it kept", name)
+				}
+			}
+			for _, name := range c.unrelated {
+				if !present[name] {
+					t.Errorf("%s was removed, want an unrelated file left alone", name)
+				}
+			}
+			if !present[filepath.Base(got)] {
+				t.Errorf("the copy just written, %s, was pruned", filepath.Base(got))
+			}
+		})
+	}
+}
+
+// The exported call prunes as well, on the wall clock the writers use.
+func TestBackupFilePrunesOnTheWallClock(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"live":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 35 {
+		copyPath := filepath.Join(dir, fmt.Sprintf("config.json.bak-20260101T000000Z-%02d", i))
+		if err := os.WriteFile(copyPath, []byte("old\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		setMtime(t, copyPath, time.Now().Add(-8*24*time.Hour-time.Duration(i)*time.Minute))
+	}
+
+	if _, err := BackupFile(path, "20261027T120000Z"); err != nil {
+		t.Fatalf("BackupFile: %v", err)
+	}
+	if got := len(dirNames(t, dir)); got != backupRetentionCount+1 {
+		t.Errorf("files left = %d, want the newest %d copies", got, backupRetentionCount)
+	}
+}
+
+// A copy cut short is an error and is not left behind: an operator who restores
+// it would get a truncated config (gt-9tx8h).
+func TestBackupFileFailsOnAShortCopy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"role_agents":{"crew":"claude-sonnet"}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	short := func(dst string, data []byte, mode os.FileMode) error {
+		return os.WriteFile(dst, data[:len(data)/2], mode)
+	}
+
+	got, err := backupFile(path, "20261027T120000Z", backupRun{
+		now:   time.Now,
+		write: short,
+		prune: pruneCopies,
+	})
+	if err == nil {
+		t.Fatalf("BackupFile with a short copy = %q, nil; want the short copy reported", got)
+	}
+	if !strings.Contains(err.Error(), "bytes") {
+		t.Errorf("BackupFile = %v, want it to name the copy's length", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "config.json.bak-20261027T120000Z")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the short copy is still there: %v, want it removed", statErr)
+	}
+	if live, readErr := os.ReadFile(path); readErr != nil || string(live) != body {
+		t.Errorf("the live file = %q, %v; want it untouched", live, readErr)
+	}
+}
+
+// A directory that cannot be pruned still gets its backup: the prune's error is
+// logged and the copy is kept (gt-9tx8h).
+func TestBackupFileKeepsTheBackupWhenThePruneFails(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"role_agents":{"crew":"claude-sonnet"}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	failing := func(string, string, time.Time) error { return errors.New("the directory cannot be read") }
+
+	got, err := backupFile(path, "20261027T120000Z", backupRun{
+		now:   func() time.Time { return retentionNow },
+		write: writeBackupCopy,
+		prune: failing,
+	})
+	if err != nil {
+		t.Fatalf("BackupFile with a failing prune = %v, want the backup kept", err)
+	}
+	if content, readErr := os.ReadFile(got); readErr != nil || string(content) != body {
+		t.Errorf("the copy = %q, %v; want the file's content", content, readErr)
+	}
+}
+
+// A directory that happens to carry a backup's name is neither written through
+// nor removed: the copy takes the next free name (gt-9tx8h).
+func TestBackupFileLeavesADirectoryAtTheNameAlone(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte("live\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	taken := path + ".bak-20261027T120000Z"
+	if err := os.Mkdir(taken, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := BackupFile(path, "20261027T120000Z")
+	if err != nil {
+		t.Fatalf("BackupFile: %v", err)
+	}
+	if want := taken + "-2"; got != want {
+		t.Errorf("backup = %q, want %q", got, want)
+	}
+	if fi, statErr := os.Stat(taken); statErr != nil || !fi.IsDir() {
+		t.Errorf("the directory at %s = %v, %v; want it left alone", taken, fi, statErr)
+	}
+}
+
+// A directory the pruner cannot read, and a copy it cannot stat, are reported
+// rather than taken for an empty directory; the backup itself still stands
+// (gt-9tx8h).
+func TestBackupFileKeepsTheBackupWhenThePruneCannotSeeTheCopies(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		readDir func(string) ([]fs.DirEntry, error)
+	}{
+		{
+			name:    "the directory cannot be read",
+			readDir: func(string) ([]fs.DirEntry, error) { return nil, fs.ErrPermission },
+		},
+		{
+			name: "a copy cannot be stat'ed",
+			readDir: func(string) ([]fs.DirEntry, error) {
+				return []fs.DirEntry{unstatable{name: "config.json.bak-20260101T000000Z"}}, nil
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			body := `{"role_agents":{"crew":"claude-sonnet"}}`
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := backupFile(path, "20261027T120000Z", backupRun{
+				now:   func() time.Time { return retentionNow },
+				write: writeBackupCopy,
+				prune: func(path, keep string, now time.Time) error {
+					return pruneBackups(path, keep, now, c.readDir)
+				},
+			})
+			if err != nil {
+				t.Fatalf("BackupFile with a pruner that cannot see the copies = %v, want the backup kept", err)
+			}
+			if content, readErr := os.ReadFile(got); readErr != nil || string(content) != body {
+				t.Errorf("the copy = %q, %v; want the file's content", content, readErr)
+			}
+		})
+	}
+}
+
+// A copy that cannot be stat'ed is reported, not taken for the length wanted.
+func TestCheckCopySizeReportsACopyThatIsGone(t *testing.T) {
+	t.Parallel()
+
+	if err := checkCopySize(filepath.Join(t.TempDir(), "config.json.bak-gone"), 4); err == nil {
+		t.Fatal("checkCopySize of a copy that is gone = nil, want the stat's error")
+	}
+}
+
+// A write that fails after the copy was created removes it, so no partial
+// backup is left for an operator to restore (gt-9tx8h).
+func TestWriteAndSyncRemovesThePartialCopyOnFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "config.json.bak-20261027T120000Z")
+	if err := os.WriteFile(dst, []byte("partial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := os.Create(filepath.Join(dir, "closed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeAndSync(closed, dst, []byte("data\n")); err == nil {
+		t.Fatal("writeAndSync on a closed file = nil, want the write's error")
+	}
+	if _, statErr := os.Stat(dst); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the partial copy is still there: %v, want it removed", statErr)
+	}
+}
+
+// unstatable is a directory entry whose stat fails, the case a copy vanishing
+// between the directory read and the stat leaves behind.
+type unstatable struct{ name string }
+
+func (e unstatable) Name() string               { return e.name }
+func (e unstatable) IsDir() bool                { return false }
+func (e unstatable) Type() fs.FileMode          { return 0 }
+func (e unstatable) Info() (fs.FileInfo, error) { return nil, fs.ErrPermission }
+
+// setMtime pins a file's modification time, which the retention window reads.
+func setMtime(t *testing.T, path string, when time.Time) {
+	t.Helper()
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// dirNames is the set of names in dir.
+func dirNames(t *testing.T, dir string) map[string]bool {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, e := range entries {
+		names[e.Name()] = true
+	}
+	return names
+}
+
+// merge returns both copy sets as one.
+func merge(a, b map[string]time.Duration) map[string]time.Duration {
+	out := map[string]time.Duration{}
+	for name, age := range a {
+		out[name] = age
+	}
+	for name, age := range b {
+		out[name] = age
+	}
+	return out
 }
