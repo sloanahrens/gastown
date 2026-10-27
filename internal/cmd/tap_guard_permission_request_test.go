@@ -463,28 +463,31 @@ func TestPermissionRequestSteerFailureIsNonFatal(t *testing.T) {
 	}
 }
 
-// TestPermissionRequestSteerIsBounded pins the hook-budget rule twice: a store
-// that never answers must not hold the denial open, and the write it makes
-// runs under that same deadline, so it cannot continue after the hook returns
-// (gt-cg96w review, finding baac2cfec612).
+// TestPermissionRequestSteerIsBounded pins the hook-budget rule: the store
+// call runs under the steer's deadline, so the wait that bound the call ends
+// it too and nothing writes after the hook returns (gt-cg96w review, finding
+// baac2cfec612). A zero timeout is a deadline already passed when the steer
+// starts, which drives that path without a wall-clock wait.
 func TestPermissionRequestSteerIsBounded(t *testing.T) {
 	t.Parallel()
 	var storeCtx context.Context
+	unbounded := false
 	blocked := func(ctx context.Context, _, _ string) error {
 		storeCtx = ctx
-		// The fake's own bound keeps a missing deadline a failure rather than
-		// a hang.
-		select {
-		case <-ctx.Done():
-		case <-time.After(5 * time.Second):
+		done := ctx.Done()
+		if done == nil {
+			// No deadline at all: record it and return instead of blocking, so
+			// the assertion below is the failure rather than a hung test.
+			unbounded = true
+			return nil
 		}
+		<-done
 		return ctx.Err()
 	}
 
-	began := time.Now()
-	commentParkedPromptSteerWithin(context.Background(), "gastown/polecats/obsidian", "steer", blocked, 20*time.Millisecond)
-	if elapsed := time.Since(began); elapsed > 2*time.Second {
-		t.Fatalf("a blocked steer held the caller for %v", elapsed)
+	commentParkedPromptSteerWithin(context.Background(), "gastown/polecats/obsidian", "steer", blocked, 0)
+	if unbounded {
+		t.Fatalf("the steer ran with no deadline, so a slow store would hold the denial open")
 	}
 	if err := storeCtx.Err(); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("steer context after the call = %v, want the deadline already passed", err)
