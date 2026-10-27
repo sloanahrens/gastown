@@ -787,6 +787,13 @@ type Daemon struct {
 	resourceSamplerMu  sync.Mutex
 	newResourceSampler newResourceSamplerFn
 
+	// burst is the burst sampler (burst_sampler.go), built on its first
+	// start; burstSeams replaces its sample, its wait and its Env in tests,
+	// and the zero value is production.
+	burst      *burstSampler
+	burstMu    sync.Mutex
+	burstSeams burstSamplerSeams
+
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
 	// predicate, so checkUpgradeRestart holds a restart for it separately, up
@@ -1503,6 +1510,13 @@ func (d *Daemon) Run() (err error) {
 		defer resourceSamplerTicker.Stop()
 		d.logger.Printf("Resource sampler ticker started (interval %v)", interval)
 	}
+
+	// The burst sampler runs beside it (gt-ztem6): its own goroutine, paced by
+	// the row's own cadence, so bursts.jsonl fills while the host is pressed.
+	// stopBurst cancels and joins the loop, so Run's return leaves no sample
+	// behind it.
+	stopBurst := d.startBurstSamplerIfEnabled()
+	defer stopBurst()
 
 	// No tmux pane-died respawn hooks: a dead session is restarted by the
 	// heartbeat through the supervisor, within its budget (gt-4k3fj.3).
