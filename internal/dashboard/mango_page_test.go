@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -1228,8 +1229,8 @@ func TestMangoRateReadsInTwoLinesAndItsRowStaysShort(t *testing.T) {
 	if got := strings.TrimSpace(row[rateAt].Kids[vs].All); got != baseline {
 		t.Fatalf("the rate cell's baseline line reads %q, want %q", got, baseline)
 	}
-	if lines := mangoLineCount(t, row[rateAt].Kids[vs], base, rateWidth); lines > 2 {
-		t.Errorf("the baseline line %q takes %d lines in the %gpx the rate column leaves, want at most two", baseline, lines, rateWidth)
+	if msg := mangoBaselineProblem(baseline, mangoLineCount(t, row[rateAt].Kids[vs], base, rateWidth), rateWidth); msg != "" {
+		t.Error(msg)
 	}
 
 	// A row is as tall as its tallest cell, its cells' padding included. 120px
@@ -1243,8 +1244,8 @@ func TestMangoRateReadsInTwoLinesAndItsRowStaysShort(t *testing.T) {
 			avail = widths[c] - lastPad
 		}
 		h := mangoCellHeight(t, cell, base, avail) + pad + mangoRowBorder(t)
-		if h > limit {
-			t.Errorf("the %s column draws %gpx tall at the 1760px page, over the %dpx a row may take", mangoColumnName(t, dom, c), h, limit)
+		if msg := mangoRowHeightProblem(mangoColumnName(t, dom, c), h, limit); msg != "" {
+			t.Error(msg)
 		}
 	}
 }
@@ -1325,8 +1326,13 @@ func mangoLineCount(t *testing.T, n mangoNode, base mangoMeasure, width float64)
 
 // mangoLines is the number of lines the style's text draws in width pixels.
 func mangoLines(text string, m mangoMeasure, width float64) int {
-	if strings.TrimSpace(text) == "" || width <= 0 {
+	if strings.TrimSpace(text) == "" {
 		return 1
+	}
+	if width <= 0 {
+		// A box with no room draws no line the page can read; counting it as one
+		// would pass a column that has collapsed.
+		return mangoUnfitLines
 	}
 	adv := m.font * monospaceAdvance
 	lines, used := 1, 0.0
@@ -2141,5 +2147,63 @@ func TestWithoutMediaBlocksDropsEveryRuleInside(t *testing.T) {
 		if !strings.Contains(got, kept) {
 			t.Errorf("withoutMediaBlocks dropped top-level %q: %q", kept, got)
 		}
+	}
+}
+
+// mangoUnfitLines is the line count a box with no width reports for text: more
+// than any limit the checks hold a cell to.
+const mangoUnfitLines = 1 << 20
+
+// mangoBaselineProblem is the check on the rate's baseline line: at most two
+// lines in the column the rate leaves (gt-g4vif).
+func mangoBaselineProblem(baseline string, lines int, width float64) string {
+	if lines > 2 {
+		return fmt.Sprintf("the baseline line %q takes %d lines in the %gpx the rate column leaves, want at most two", baseline, lines, width)
+	}
+	return ""
+}
+
+// mangoRowHeightProblem is the check on one cell of a row: a row may take 120px
+// (gt-g4vif).
+func mangoRowHeightProblem(column string, height float64, limit int) string {
+	if height > float64(limit) {
+		return fmt.Sprintf("the %s column draws %gpx tall at the 1760px page, over the %dpx a row may take", column, height, limit)
+	}
+	return ""
+}
+
+// TestMangoLayoutChecksFailWhereTheOldLayoutFailed drives the failing branch of
+// each check the layout test applies: the baseline that breaks to three lines at
+// 12px, a cell that stands over 120px at the page's 1.45 leading, and a column
+// that has no width at all (gt-g4vif).
+func TestMangoLayoutChecksFailWhereTheOldLayoutFailed(t *testing.T) {
+	t.Parallel()
+
+	const baseline = "vs 24.3% across all recent landings"
+	old := mangoMeasure{wrap: "normal", font: 12, lhFactor: 1.45}
+	fixed := mangoMeasure{wrap: "normal", font: 11, lhFactor: 1.2}
+	if got := mangoLines(baseline, old, 115); got != 3 {
+		t.Fatalf("the baseline at 12px in 115px takes %d lines, want the three the bead describes", got)
+	}
+	if got := mangoLines(baseline, fixed, 130); got != 2 {
+		t.Fatalf("the baseline at 11px in 130px takes %d lines, want two", got)
+	}
+	if mangoBaselineProblem(baseline, mangoLines(baseline, old, 115), 115) == "" {
+		t.Error("a baseline that takes three lines raises no problem")
+	}
+	if msg := mangoBaselineProblem(baseline, mangoLines(baseline, fixed, 130), 130); msg != "" {
+		t.Errorf("a baseline that takes two lines raises %q", msg)
+	}
+	if mangoRowHeightProblem("rate", 4*old.lineBox()+60, 120) == "" {
+		t.Error("a cell over 120px raises no problem")
+	}
+	if msg := mangoRowHeightProblem("rate", 4*fixed.lineBox()+60, 120); msg != "" {
+		t.Errorf("a cell of %gpx raises %q", 4*fixed.lineBox()+60, msg)
+	}
+	if mangoBaselineProblem(baseline, mangoLines(baseline, fixed, 0), 0) == "" {
+		t.Error("a column with no width is measured as fitting")
+	}
+	if mangoBaselineProblem(baseline, mangoLines(baseline, fixed, -4), -4) == "" {
+		t.Error("a column with negative width is measured as fitting")
 	}
 }
