@@ -116,9 +116,8 @@ func TestPolecatImageSeedSetsCachesOutsideTheWorkspace(t *testing.T) {
 	if !strings.Contains(seed, "go mod download") {
 		t.Errorf("the seed RUN lacks %q", "go mod download")
 	}
-	// There is no darwin build in the image: the one check that cross-built for
-	// darwin/arm64 moved to the host tier (dv-0qre), and macOS builds stay off the
-	// Linux image.
+	// Before adding a platform step or a build flag to the seed RUN, read why it
+	// has no darwin build: the seed comment in deploy/polecat/Dockerfile (dv-0qre).
 	for _, bad := range []string{"-trimpath", "CGO_ENABLED", "GOOS=darwin"} {
 		if strings.Contains(seed, bad) {
 			t.Errorf("the seed RUN sets %q, which changes the cache keys the presubmits use", bad)
