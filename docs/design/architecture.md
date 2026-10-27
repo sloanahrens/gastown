@@ -104,8 +104,7 @@ worker ([ADR 0004](../adr/0004-daemon-lands-work.md)).
 │   └── messaging.json          Mail lists, queues, channels
 └── <rig>/                      Project container (NOT a git clone)
     ├── config.json             Rig identity and beads prefix
-    ├── formula-overlays/       Rig-level formula overlays (full precedence)
-    │   └── <formula>.toml
+    ├── formula-overlays/       Not read (overlays are town-wide); gt doctor flags a file here
     ├── mayor/rig/              Canonical clone (beads live here, NOT an agent)
     │   ├── .beads/             Rig-level beads (redirected to Dolt)
     │   └── .gastown/directives/  Rig-level role directives (override the central layer)
@@ -307,9 +306,9 @@ are NOT embedded (and require `gt doctor` or `gt upgrade` to update):
 
 ## Role Directives and Formula Overlays
 
-Operators can customize agent behavior at the town or rig level without
-modifying the Go binary or embedded templates. This follows the property layer
-model (rig > town > system) and the hooks override precedent.
+Operators can customize agent behavior without modifying the Go binary or
+embedded templates: directives at the town or rig level, overlays at the town
+level. This follows the property layer model and the hooks override precedent.
 
 ### Role Directives
 
