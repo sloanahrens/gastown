@@ -209,6 +209,50 @@ func f(ctx context.Context, id, dir, bin string, env, args []string) {
 	)
 }
 
+func TestScanGoReadsTheBeadsSeamCalls(t *testing.T) {
+	t.Parallel()
+	// Every bd call internal/beads makes goes through one of these methods, so
+	// the argv there names a bd command the lint must resolve. Arguments built
+	// at runtime (args...) still yield nothing.
+	src := `package beads
+
+func f(b *Beads, id string, args []string) {
+	_, _ = b.run("config", "get", id)
+	_, _ = b.runMachine("update", id)
+	_, _ = b.runWithStdin("body", "create", id)
+	_, _ = b.runReadyCLI("ready", "--json")
+	_, _ = b.run(args...)
+}
+`
+	refs, err := ScanGo("internal/beads/cli.go", []byte(src))
+	if err != nil {
+		t.Fatalf("ScanGo: %v", err)
+	}
+	assertRefs(t, refs,
+		"4:bd config get",
+		"5:bd update",
+		"6:bd create",
+		"7:bd ready",
+	)
+}
+
+func TestScanGoIgnoresRunMethodsOutsideTheSeam(t *testing.T) {
+	t.Parallel()
+	// A method named b.run elsewhere is not bd: internal/session starts tar and
+	// sh with one, and reading it would fail the lint on commands bd lacks.
+	src := `package session
+
+func f(ctx context.Context, b *backend, path string) {
+	_ = b.run(ctx, "tar", "xzf", path)
+}
+`
+	refs, err := ScanGo("internal/session/backend_openshell.go", []byte(src))
+	if err != nil {
+		t.Fatalf("ScanGo: %v", err)
+	}
+	assertRefs(t, refs)
+}
+
 func TestScanRepoSelectsFiles(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

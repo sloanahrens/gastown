@@ -11,6 +11,18 @@ import (
 
 var _ beads.Admin = (*Client)(nil)
 
+// Version refuses: the tracker records issues, not a bd build, so there is no
+// version report to give.
+func (c *Client) Version() (beads.VersionInfo, error) {
+	return beads.VersionInfo{}, fmt.Errorf("Version: %w", ErrUnsupported)
+}
+
+// SchemaLevel refuses: the tracker knows the wire schema this client speaks,
+// which is not the migration level of the store behind it.
+func (c *Client) SchemaLevel() (int, error) {
+	return 0, fmt.Errorf("SchemaLevel: %w", ErrUnsupported)
+}
+
 // configKey is where a key lives in the tracker's one config table: under the
 // client's rig, like the importer writes it ("rig.gt.types.custom"), so rigs
 // that share a tracker do not read each other's settings.

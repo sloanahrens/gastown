@@ -1,35 +1,47 @@
 package doctor
 
 import (
-	"context"
+	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/deps"
 )
 
-type fakeExitStatus int
+const forkVersionJSON = `{"build":"da4983e","build_id":"da4983e","commit":"da4983e","contract_version":1,"db_schema_version":66,"version":"1.2.2"}`
 
-func (e fakeExitStatus) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
-func (e fakeExitStatus) ExitCode() int { return int(e) }
-
-const (
-	forkVersionJSON      = `{"build":"da4983e","build_id":"da4983e","commit":"da4983e","contract_version":1,"db_schema_version":66,"version":"1.2.2"}`
-	installedVersionJSON = `{"build":"537accb","commit":"537accbea9ca","schema_version":1,"version":"1.2.2"}`
+// The reports the stub in the integration tier and these cases answer with,
+// parsed as the store hands them to the handshake.
+var (
+	forkReport  = beads.VersionInfo{Version: "1.2.2", Build: "da4983e", BuildID: "da4983e", Commit: "da4983e", ContractVersion: 1, DBSchemaVersion: 66}
+	preD1Report = beads.VersionInfo{Version: "1.2.2", Build: "537accb", Commit: "537accbea9ca"}
 )
 
-func handshakeCheck(version string, versionErr error, dbLevel int) *BeadsBinaryCheck {
+// fakeStore answers the handshake's two reads: the report a test scripts and
+// the migration level of the database behind it.
+type fakeStore struct {
+	info     beads.VersionInfo
+	verErr   error
+	level    int
+	levelErr error
+}
+
+func (f fakeStore) Version() (beads.VersionInfo, error) { return f.info, f.verErr }
+
+func (f fakeStore) SchemaLevel() (int, error) {
+	if f.levelErr != nil {
+		return 0, f.levelErr
+	}
+	return f.level, nil
+}
+
+func handshakeCheck(info beads.VersionInfo, versionErr error, dbLevel int) *BeadsBinaryCheck {
 	c := NewBeadsBinaryCheck()
 	c.lookPath = func(string) (string, error) { return "/opt/bd", nil }
-	c.run = func(_ context.Context, _ []string, args ...string) ([]byte, []byte, error) {
-		if args[0] == "version" {
-			return []byte(version), nil, versionErr
-		}
-		return []byte(fmt.Sprintf(`[{"version": %d}]`, dbLevel)), nil, nil
-	}
+	c.store = fakeStore{info: info, verErr: versionErr, level: dbLevel}
 	return c
 }
 
@@ -49,7 +61,7 @@ func TestBeadsBinaryCheck_Metadata(t *testing.T) {
 
 func TestBeadsBinaryCheck_HandshakePasses(t *testing.T) {
 	t.Parallel()
-	result := handshakeCheck(forkVersionJSON, nil, 66).Run(&CheckContext{TownRoot: t.TempDir()})
+	result := handshakeCheck(forkReport, nil, 66).Run(&CheckContext{TownRoot: t.TempDir()})
 	if result.Status != StatusOK {
 		t.Fatalf("status = %v: %s %v", result.Status, result.Message, result.Details)
 	}
@@ -67,11 +79,11 @@ func TestBeadsBinaryCheck_Refusals(t *testing.T) {
 		check *BeadsBinaryCheck
 		want  string
 	}{
-		{"installed pre-D1 build", handshakeCheck(installedVersionJSON, nil, 66), "no contract_version"},
-		{"schema mismatch", handshakeCheck(forkVersionJSON, nil, 65), "database is at 65"},
-		{"not on PATH", handshakeCheck("", &exec.Error{Name: "bd", Err: exec.ErrNotFound}, 0), "not found on PATH"},
-		{"unparseable version", handshakeCheck("some garbage output", nil, 0), "not JSON"},
-		{"version fails", handshakeCheck("", fakeExitStatus(1), 0), "bd version --json failed"},
+		{"installed pre-D1 build", handshakeCheck(preD1Report, nil, 66), "no contract_version"},
+		{"schema mismatch", handshakeCheck(forkReport, nil, 65), "database is at 65"},
+		{"not on PATH", handshakeCheck(beads.VersionInfo{}, beads.ErrNotInstalled, 0), "not found on PATH"},
+		{"unparseable version", handshakeCheck(beads.VersionInfo{}, errors.New(`bd version --json output is not JSON: "some garbage output"`), 0), "not JSON"},
+		{"version fails", handshakeCheck(beads.VersionInfo{}, errors.New("bd version --json: exit status 1"), 0), "bd version --json"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -101,12 +113,7 @@ func TestBeadsBinaryCheck_DoltUnreachableNamesDolt(t *testing.T) {
 	c := NewBeadsBinaryCheck()
 	c.lookPath = func(string) (string, error) { return "/opt/bd", nil }
 	c.handshakeTimeout = 50 * time.Millisecond
-	c.run = func(_ context.Context, _ []string, args ...string) ([]byte, []byte, error) {
-		if args[0] == "version" {
-			return []byte(forkVersionJSON), nil, nil
-		}
-		return nil, []byte("Error: store unavailable"), fakeExitStatus(25)
-	}
+	c.store = fakeStore{info: forkReport, levelErr: fmt.Errorf("%w: bd exit 25: store unavailable", beads.ErrStoreUnavailable)}
 	result := c.Run(&CheckContext{TownRoot: t.TempDir()})
 	if result.Status != StatusError {
 		t.Fatalf("status = %v, want StatusError: %s", result.Status, result.Message)

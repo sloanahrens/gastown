@@ -5,7 +5,6 @@ package bdbuild
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -13,8 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/gastown/internal/deps"
-	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // The image runs its bd on linux/arm64 (deploy/polecat/Dockerfile), whatever
@@ -95,21 +93,22 @@ func ExecGo(dir string, env []string, args ...string) ([]byte, error) {
 	return out, nil
 }
 
+// Versioner reports what the installed bd says about itself; *beads.Beads is
+// the real one, so a caller tests the selection without a bd on PATH.
+type Versioner interface {
+	Version() (beads.VersionInfo, error)
+}
+
 // Commit returns the commit the image's bd is built from: override when it is
-// set, otherwise the commit `bd version --json` reports for the installed bd.
-// run is the bd runner, so a caller tests the selection without a bd on PATH.
-func Commit(ctx context.Context, override string, run deps.BDRunner) (string, error) {
+// set, otherwise the commit the installed bd reports through v.
+func Commit(override string, v Versioner) (string, error) {
 	if c := strings.TrimSpace(override); c != "" {
 		if !isCommit(c) {
 			return "", fmt.Errorf("commit %q is not a 7+ character hex commit", c)
 		}
 		return c, nil
 	}
-	stdout, stderr, err := run(ctx, nil, "version", "--json")
-	if err != nil {
-		return "", fmt.Errorf("cannot read the installed bd's commit: bd version --json failed: %v%s", err, stderrSuffix(stderr))
-	}
-	info, err := deps.ParseBDVersionJSON(stdout)
+	info, err := v.Version()
 	if err != nil {
 		return "", fmt.Errorf("cannot read the installed bd's commit: %w", err)
 	}
@@ -215,14 +214,6 @@ func shortCommit(commit string) string {
 		return commit[:12]
 	}
 	return commit
-}
-
-// stderrSuffix is git's or bd's own reason for a failure, when it printed one.
-func stderrSuffix(stderr []byte) string {
-	if s := strings.TrimSpace(string(stderr)); s != "" {
-		return ": " + util.FirstLine(s)
-	}
-	return ""
 }
 
 // lastLine prints the last non-blank line of s: a tool's reason for a failure

@@ -195,6 +195,22 @@ func TestCreateRefusesAnActorOptionLoudlyInsteadOfIgnoringIt(t *testing.T) {
 	}
 }
 
+// The version verbs have no tracker answer, so they refuse by name without
+// asking: an empty report or a zero level would read as a real answer.
+func TestVersionVerbsRefuseByNameWithoutARequest(t *testing.T) {
+	t.Parallel()
+	c, asked := closeServer(t, nil)
+	if _, err := c.Version(); !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "Version") {
+		t.Errorf("Version = %v, want ErrUnsupported naming the verb", err)
+	}
+	if _, err := c.SchemaLevel(); !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "SchemaLevel") {
+		t.Errorf("SchemaLevel = %v, want ErrUnsupported naming the verb", err)
+	}
+	if len(asked()) != 0 {
+		t.Errorf("a refused verb still reached the service: %v", asked())
+	}
+}
+
 // serve returns a Client whose service answers every request with handler.
 func serve(t *testing.T, handler http.HandlerFunc) *Client {
 	t.Helper()

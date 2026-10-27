@@ -101,4 +101,8 @@ func TestIntegrationClientContract(t *testing.T) {
 		t.Parallel()
 		beadsfake.RunAdminContract(t, func(t *testing.T) beadsfake.AdminClient { return newDB(t, t.TempDir()) })
 	})
+	t.Run("admin version", func(t *testing.T) {
+		t.Parallel()
+		beadsfake.RunVersionContract(t, func(t *testing.T) beadsfake.AdminClient { return newDB(t, t.TempDir()) })
+	})
 }

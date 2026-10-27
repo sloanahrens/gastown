@@ -7,33 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
-
-func TestParseBeadsVersion(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"bd version 0.55.4 (dev: main@3e1378e122c6)", "0.55.4"},
-		{"bd version 0.55.4", "0.55.4"},
-		{"bd version 1.2.3", "1.2.3"},
-		{"bd version 10.20.30 (release)", "10.20.30"},
-		{`{"version":"1.2.2","commit":"2357327","build":"2357327"}`, "1.2.2"},
-		{`{"schema_version":1,"contract_version":1,"data":{"version":"1.2.2"},"error":null}`, "1.2.2"},
-		{`{"version":"not-semver"}`, ""},
-		{`{"commit":"2357327"}`, ""},
-		{"some other output", ""},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		result := parseBeadsVersion(tt.input)
-		if result != tt.expected {
-			t.Errorf("parseBeadsVersion(%q) = %q, want %q", tt.input, result, tt.expected)
-		}
-	}
-}
 
 func TestCompareVersions(t *testing.T) {
 	t.Parallel()
@@ -57,29 +33,33 @@ func TestCompareVersions(t *testing.T) {
 	}
 }
 
-func TestBeadsStatusFromOutput(t *testing.T) {
+func TestBeadsStatusFromVersion(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
-		output      string
+		info        beads.VersionInfo
 		err         error
 		wantStatus  BeadsStatus
 		wantVersion string
 	}{
-		{"exec error", "bd version 0.60.0", errors.New("exit status 1"), BeadsUnknown, ""},
-		{"unparseable", "garbage", nil, BeadsUnknown, ""},
+		{"read error", beads.VersionInfo{}, errors.New("exit status 1"), BeadsUnknown, ""},
+		// The seam wraps ErrNotInstalled around a failed exec; the status
+		// must key on the chain, or a missing bd reads as a broken one.
+		{"bd not installed", beads.VersionInfo{}, fmt.Errorf("%w: exec: \"bd\": executable file not found in $PATH", beads.ErrNotInstalled), BeadsNotFound, ""},
+		{"unparseable", beads.VersionInfo{Version: "not-semver"}, nil, BeadsUnknown, ""},
+		{"no version", beads.VersionInfo{}, nil, BeadsUnknown, ""},
 		// No semver floor: an old number is not evidence of anything. The
 		// schema/contract handshake decides whether the town may run.
-		{"old semver", "bd version 0.1.0", nil, BeadsOK, "0.1.0"},
-		{"machine mode payload", `{"version":"1.2.2","commit":"2357327","contract_version":1}`, nil, BeadsOK, "1.2.2"},
-		{"fork with schema suffix", "bd version 1.2.2 (da4983e: da4983e) schema<=66", nil, BeadsOK, "1.2.2"},
+		{"old semver", beads.VersionInfo{Version: "0.1.0"}, nil, BeadsOK, "0.1.0"},
+		{"fork build", beads.VersionInfo{Version: "1.2.2", BuildID: "da4983e"}, nil, BeadsOK, "1.2.2"},
+		{"version with a suffix", beads.VersionInfo{Version: "1.2.2-rc1"}, nil, BeadsOK, "1.2.2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			status, version := beadsStatusFromOutput([]byte(tt.output), tt.err)
+			status, version := beadsStatusFromVersion(tt.info, tt.err)
 			if status != tt.wantStatus || version != tt.wantVersion {
-				t.Errorf("beadsStatusFromOutput(%q, %v) = %d, %q; want %d, %q", tt.output, tt.err, status, version, tt.wantStatus, tt.wantVersion)
+				t.Errorf("beadsStatusFromVersion(%+v, %v) = %d, %q; want %d, %q", tt.info, tt.err, status, version, tt.wantStatus, tt.wantVersion)
 			}
 		})
 	}

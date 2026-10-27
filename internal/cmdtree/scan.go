@@ -409,9 +409,26 @@ func ScanTOMLMarkdown(file, text string) []Ref {
 	return refs
 }
 
+// seamRunMethods names the *Beads methods that start a bd process, mapped to
+// the argument index where the bd command word begins: every bd call the seam
+// package makes goes through one of them, so a literal there names a bd
+// command exactly as exec.Command("bd", ...) does at a raw call site. They are
+// read only in internal/beads, where the receiver of that name is the seam. A
+// method taking its argv as a []string rather than variadic arguments is not
+// listed: the literals are in the caller, which is read like any other.
+var seamRunMethods = map[string]int{
+	"run":            0,
+	"runMachine":     0,
+	"runWithStdin":   1,
+	"runReadyCLI":    0,
+	"runWithRouting": 0,
+	"runText":        0,
+}
+
 // goCallArgs returns the binary and the argument expressions that follow it
 // for the call shapes that exec gt or bd, or "" when call is none of them.
-func goCallArgs(call *ast.CallExpr) (string, []ast.Expr) {
+// file decides whether the bd seam's own calls are read (seamRunMethods).
+func goCallArgs(file string, call *ast.CallExpr) (string, []ast.Expr) {
 	lit := func(i int) string {
 		if i >= len(call.Args) {
 			return ""
@@ -440,6 +457,11 @@ func goCallArgs(call *ast.CallExpr) (string, []ast.Expr) {
 		if !ok {
 			return "", nil
 		}
+		if strings.HasPrefix(file, "internal/beads/") && pkg.Name == "b" {
+			if at, ok := seamRunMethods[fn.Sel.Name]; ok {
+				return "bd", after(at)
+			}
+		}
 		switch pkg.Name + "." + fn.Sel.Name {
 		case "exec.Command":
 			if b := lit(0); b == "gt" || b == "bd" {
@@ -460,9 +482,10 @@ func goCallArgs(call *ast.CallExpr) (string, []ast.Expr) {
 	return "", nil
 }
 
-// ScanGo finds exec.Command("gt"|"bd", ...), BdCmd(...) and beads.Command*
-// calls and takes their leading string-literal arguments as the words.
-// Calls whose arguments are built at runtime (args...) yield nothing.
+// ScanGo finds exec.Command("gt"|"bd", ...), BdCmd(...), beads.Command*
+// calls and, in internal/beads, the seam methods every bd call goes through
+// (seamRunMethods), and takes their leading string-literal arguments as the
+// words. Calls whose arguments are built at runtime (args...) yield nothing.
 func ScanGo(file string, src []byte) ([]Ref, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, file, src, parser.SkipObjectResolution)
@@ -475,7 +498,7 @@ func ScanGo(file string, src []byte) ([]Ref, error) {
 		if !ok {
 			return true
 		}
-		bin, args := goCallArgs(call)
+		bin, args := goCallArgs(file, call)
 		if bin == "" {
 			return true
 		}

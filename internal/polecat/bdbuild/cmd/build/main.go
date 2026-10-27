@@ -10,13 +10,12 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 
-	"github.com/steveyegge/gastown/internal/deps"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 )
 
@@ -39,7 +38,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	rev, err := bdbuild.Commit(context.Background(), *commit, deps.NewBDProcessRunner(""))
+	// The installed bd, read where this command runs and with the BEADS target
+	// variables stripped: the report names bd, not a database.
+	rev, err := bdbuild.Commit(*commit, beads.NewPlain("", beads.StripBDTargetEnv(os.Environ())))
 	if err != nil {
 		fmt.Fprintf(stderr, "polecat-image: %v\n", err)
 		return 1

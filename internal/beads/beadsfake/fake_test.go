@@ -1,6 +1,7 @@
 package beadsfake
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,29 @@ func TestFakeActorContract(t *testing.T) {
 func TestFakeAdminContract(t *testing.T) {
 	t.Parallel()
 	RunAdminContract(t, func(t *testing.T) AdminClient { return New() })
+}
+
+// TestFakeAdminVersionContract runs the version suite against the fake, so it
+// is runnable alone: go test ./internal/beads/beadsfake -run Admin.
+func TestFakeAdminVersionContract(t *testing.T) {
+	t.Parallel()
+	RunVersionContract(t, func(t *testing.T) AdminClient { return New() })
+}
+
+// TestVersionReadsReportScriptedFailures: both version reads honor FailWith, so
+// a handshake test can script a store that did not answer.
+func TestVersionReadsReportScriptedFailures(t *testing.T) {
+	t.Parallel()
+	f := New()
+	boom := errors.New("boom")
+	f.FailWith("version", boom)
+	if _, err := f.Version(); !errors.Is(err, boom) {
+		t.Errorf("Version with FailWith(version) = %v, want boom", err)
+	}
+	f.FailWith("schema level", boom)
+	if _, err := f.SchemaLevel(); !errors.Is(err, boom) {
+		t.Errorf("SchemaLevel with FailWith(schema level) = %v, want boom", err)
+	}
 }
 
 func TestSeedStoresTheGivenID(t *testing.T) {

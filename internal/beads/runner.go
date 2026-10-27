@@ -3,6 +3,7 @@ package beads
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -172,10 +173,15 @@ func (e *CLIError) Output() string {
 	return strings.TrimSpace(string(e.Stdout) + string(e.Stderr))
 }
 
-// Unwrap exposes the process error, plus ErrNotFound when bd said the id
-// does not exist (bdSaidNotFound) or ErrUnavailable for every other
-// failure, as wrapError does for the policy path.
+// Unwrap exposes the process error, plus ErrNotInstalled when bd was not
+// there to run, ErrNotFound when bd said the id does not exist
+// (bdSaidNotFound) or ErrUnavailable for every other failure, as wrapError
+// does for the policy path.
 func (e *CLIError) Unwrap() []error {
+	var execErr *exec.Error
+	if errors.As(e.Err, &execErr) && errors.Is(execErr.Err, exec.ErrNotFound) {
+		return []error{e.Err, ErrNotInstalled}
+	}
 	if bdSaidNotFound(exitCodeOf(e.Err), e.Stdout) {
 		return []error{e.Err, ErrNotFound}
 	}
@@ -193,6 +199,9 @@ func (b *Beads) runPlain(stdin []byte, args []string) ([]byte, error) {
 // envelope.
 func (b *Beads) runPlainOut(stdin []byte, args []string) (stdout, stderr []byte, err error) {
 	ctx := context.Background()
+	if b.callCtx != nil {
+		ctx = b.callCtx
+	}
 	if b.plainTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, b.plainTimeout)

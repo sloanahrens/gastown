@@ -1,13 +1,10 @@
 package deps
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,7 +12,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // KnownBDContractVersions are the bd JSON contract versions (bd version
@@ -24,26 +20,18 @@ import (
 // changed a payload gt parses, so the town does not run on it.
 var KnownBDContractVersions = []int{1}
 
-// bdSchemaSkewExit is the exit status bd's machine mode reserves for a
-// database whose schema is ahead of the binary (kind schema_skew).
-const bdSchemaSkewExit = 26
-
-// bdStoreUnavailableExit is the exit status bd's machine mode reserves for a
-// store it cannot reach (kind store_unavailable; internal/beads
-// bdStoreUnavailableExit). At a cold boot the store is Dolt, still starting.
-const bdStoreUnavailableExit = 25
-
-// ErrBDHandshake marks a refusal to run the town against the bd on PATH.
+// ErrBDHandshake marks a refusal to run the town against the store it was
+// pointed at.
 var ErrBDHandshake = errors.New("bd handshake failed")
 
-// ErrDoltUnreachable marks a handshake that passed every check of the bd on
-// PATH and then could not read the database because the Dolt server behind it
-// did not answer. The bd is not the problem, so the operator's remedy is to
-// start Dolt, not to reinstall bd.
+// ErrDoltUnreachable marks a handshake that passed every check of the bd behind
+// the store and then could not read the database because the Dolt server did
+// not answer. The bd is not the problem, so the operator's remedy is to start
+// Dolt, not to reinstall bd.
 var ErrDoltUnreachable = errors.New("Dolt is not reachable")
 
 // bdStoreRetryWait is the pause between attempts to read the database
-// migration level while bd reports the store unavailable (gt-2gctr).
+// migration level while the store is unavailable (gt-2gctr).
 const bdStoreRetryWait = 5 * time.Second
 
 // BDInstallHint is the only supported way to install bd. gastown never
@@ -51,65 +39,38 @@ const bdStoreRetryWait = 5 * time.Second
 // never moves the schema backwards.
 const BDInstallHint = "install the beads fork's bd with `make safe-install` from the beads repository"
 
-// BDVersionInfo is what `bd version --json` reports. BuildID,
-// ContractVersion and DBSchemaVersion are empty on upstream bd and on fork
-// builds from before the machine surface (beads be-3xa.3).
-type BDVersionInfo struct {
-	Version         string `json:"version"`
-	Build           string `json:"build"`
-	BuildID         string `json:"build_id"`
-	Commit          string `json:"commit"`
-	ContractVersion int    `json:"contract_version"`
-	DBSchemaVersion int    `json:"db_schema_version"`
-}
-
-// BDRunner runs one bd invocation with extraEnv added to a clean environment
-// and returns its stdout and stderr. A failure that should read as a bd exit
-// status implements interface{ ExitCode() int }.
-type BDRunner func(ctx context.Context, extraEnv []string, args ...string) (stdout, stderr []byte, err error)
-
-// NewBDProcessRunner returns a BDRunner that runs the bd on PATH in dir, with
-// BEADS target variables stripped from the inherited environment so bd
-// resolves the database from dir alone.
-func NewBDProcessRunner(dir string) BDRunner {
-	return func(ctx context.Context, extraEnv []string, args ...string) ([]byte, []byte, error) {
-		env := bdRunnerEnv(extraEnv)
-		cmd := beads.CommandContextWithEnv(ctx, dir, env, args...)
-		// The constructor's machineEnvForCall runs after the environment it is
-		// handed and drops machine mode for `bd sql` (bdRunnerEnv); setting it
-		// again puts the runner's own environment back in charge.
-		cmd.Env = env
-		util.SetDetachedProcessGroup(cmd.Cmd)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		return stdout.Bytes(), stderr.Bytes(), err
-	}
-}
-
-// bdRunnerEnv is the environment NewBDProcessRunner gives bd: the inherited
-// environment with BEADS target variables stripped (so bd resolves the
-// database from the runner's dir alone), then the caller's extraEnv, then
-// machine mode.
+// Store is the part of a store the startup handshake reads: what the bd behind
+// it says about itself, and the migration level of the database it serves.
 //
-// The last step is why it is applied to the command after
-// beads.CommandContextWithEnv rather than left to it: that constructor's
-// machineEnvForCall exempts `bd sql` from machine mode, because its rows come
-// back as JSON objects with sorted keys, losing the SELECT order the doctor's
-// csv readers index by. readDBSchemaLevel wants the opposite — machine mode is
-// what makes a schema-ahead database fail with bd's typed schema_skew exit
-// instead of prose — and asks for it in extraEnv. Neither read this runner
-// makes is a csv read.
-func bdRunnerEnv(extraEnv []string) []string {
-	return beads.WithMachineEnv(append(beads.StripBDTargetEnv(os.Environ()), extraEnv...))
+// Build the store with the handshake's context (beads.WithCallContext), so the
+// handshake's budget bounds the bd calls and not only the retry wait.
+// SchemaLevel reports a read the budget ended while the store was silent as an
+// error wrapping beads.ErrStoreUnavailable; any other read the budget ends is
+// an error carrying context.DeadlineExceeded.
+type Store interface {
+	Version() (beads.VersionInfo, error)
+	SchemaLevel() (int, error)
+}
+
+// NewHandshakeStore returns the store CheckBDHandshake reads for the town at
+// townRoot: the town's own database, with the BEADS target variables stripped
+// from the inherited environment, so a stale BEADS_DIR or BEADS_DOLT_* in the
+// caller's shell cannot steer a startup gate to another database, and with
+// ctx parenting every bd call. opts are appended for a test that swaps the bd
+// those calls run through (beads.WithRunner); production passes none.
+func NewHandshakeStore(ctx context.Context, townRoot string, opts ...beads.Option) Store {
+	all := append([]beads.Option{
+		beads.WithEnv(beads.StripBDTargetEnv(os.Environ())),
+		beads.WithCallContext(ctx),
+	}, opts...)
+	return beads.New(townRoot, all...)
 }
 
 // BDHandshake is a bd that passed: its version report and the migration
 // level of the database it serves, which are equal.
 type BDHandshake struct {
 	Path     string
-	Found    BDVersionInfo
+	Found    beads.VersionInfo
 	DBSchema int
 }
 
@@ -119,55 +80,33 @@ func (h *BDHandshake) String() string {
 		h.Found.Version, h.Found.BuildID, h.Found.DBSchemaVersion, h.Found.ContractVersion, h.DBSchema)
 }
 
-// ParseBDVersionJSON reads `bd version --json`, bare or inside a machine-mode
-// envelope. Output that is not a JSON object with a version is an error.
-func ParseBDVersionJSON(out []byte) (BDVersionInfo, error) {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(bytes.TrimSpace(out), &raw); err != nil {
-		return BDVersionInfo{}, fmt.Errorf("bd version --json output is not JSON: %q", util.FirstLine(string(out)))
-	}
-	payload := bytes.TrimSpace(out)
-	if data, ok := raw["data"]; ok && len(data) > 0 && data[0] == '{' {
-		payload = data
-	}
-	var info BDVersionInfo
-	if err := json.Unmarshal(payload, &info); err != nil {
-		return BDVersionInfo{}, fmt.Errorf("bd version --json output is not a version object: %w", err)
-	}
-	if info.Version == "" {
-		return BDVersionInfo{}, fmt.Errorf("bd version --json output has no version: %q", util.FirstLine(string(out)))
-	}
-	return info, nil
-}
-
-// CheckBDHandshake decides whether the town may run against the bd run
-// reaches. It requires a fork build (build_id present) whose JSON contract
-// version this gt knows and whose schema level equals the migration level
-// of the database it serves, and that level must be beadsql.SchemaVersion,
-// the one gastown's SQL reads were written for. The database is read
-// through bd only after the version passes, waiting while bd reports the store
-// unavailable. Every refusal wraps ErrBDHandshake: a bd or schema problem
-// names what was found, what is required and how to install bd, while a Dolt
-// that did not answer wraps ErrDoltUnreachable and names Dolt instead; bdPath
-// is for the message.
-func CheckBDHandshake(ctx context.Context, bdPath string, run BDRunner) (*BDHandshake, error) {
-	return checkBDHandshake(ctx, bdPath, run, bdStoreRetryWait)
+// CheckBDHandshake decides whether the town may run against the store. It
+// requires a fork build (build_id present) whose JSON contract version this gt
+// knows and whose schema level equals the migration level of the database it
+// serves, and that level must be beadsql.SchemaVersion, the one gastown's SQL
+// reads were written for. The database is read only after the version passes,
+// waiting while the store is unavailable. Every refusal wraps ErrBDHandshake: a
+// bd or schema problem names what was found, what is required and how to
+// install bd, while a Dolt that did not answer wraps ErrDoltUnreachable and
+// names Dolt instead; bdPath is for the message.
+func CheckBDHandshake(ctx context.Context, bdPath string, store Store) (*BDHandshake, error) {
+	return checkBDHandshake(ctx, bdPath, store, bdStoreRetryWait)
 }
 
 // checkBDHandshake is CheckBDHandshake with the wait between store-unavailable
 // retries passed in, so a test drives the retry without spending it.
-func checkBDHandshake(ctx context.Context, bdPath string, run BDRunner, storeRetryWait time.Duration) (*BDHandshake, error) {
+func checkBDHandshake(ctx context.Context, bdPath string, store Store, storeRetryWait time.Duration) (*BDHandshake, error) {
 	hs := &BDHandshake{Path: bdPath}
-	stdout, stderr, err := run(ctx, nil, "version", "--json")
+	info, err := store.Version()
 	if err != nil {
-		var execErr *exec.Error
-		if errors.As(err, &execErr) && errors.Is(execErr.Err, exec.ErrNotFound) {
+		if errors.Is(err, beads.ErrNotInstalled) {
 			return nil, refuseBD(hs, false, "bd not found on PATH")
 		}
-		return nil, refuseBD(hs, false, fmt.Sprintf("bd version --json failed: %v%s", err, stderrSuffix(stderr)))
-	}
-	info, err := ParseBDVersionJSON(stdout)
-	if err != nil {
+		// A version read the caller's budget ended did not fail: bd never
+		// answered, so the operator gets the budget, not the install hint.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, refuseHandshakeBudget(hs, "the handshake budget ended before bd reported its version", ctxErr)
+		}
 		return nil, refuseBD(hs, false, err.Error())
 	}
 	hs.Found = info
@@ -188,9 +127,9 @@ func checkBDHandshake(ctx context.Context, bdPath string, run BDRunner, storeRet
 		return nil, refuseBD(hs, false, strings.Join(problems, "; "))
 	}
 
-	level, err := readDBSchemaLevelWaiting(ctx, run, storeRetryWait)
+	level, err := readSchemaLevelWaiting(ctx, store, storeRetryWait)
 	if err != nil {
-		if errors.Is(err, ErrDoltUnreachable) {
+		if errors.Is(err, beads.ErrStoreUnavailable) {
 			return nil, refuseDoltUnreachable(hs, err)
 		}
 		return nil, refuseBD(hs, false, err.Error())
@@ -207,19 +146,18 @@ func checkBDHandshake(ctx context.Context, bdPath string, run BDRunner, storeRet
 	return hs, nil
 }
 
-// readDBSchemaLevelWaiting reads the database migration level, waiting out a
+// readSchemaLevelWaiting reads the database migration level, waiting out a
 // Dolt server that has not started answering yet.
 //
-// A cold boot can start the daemon before Dolt accepts connections. In the
-// 2026-10-12 boot the handshake's version report still succeeded and this read
-// is the one that failed, with bd's store_unavailable exit (gt-2gctr), so that
-// exit is what the wait keys on. It is bounded by the caller's budget, and
+// A cold boot can start the daemon before Dolt accepts connections, and this
+// read is the one that fails, with bd's store_unavailable exit (gt-2gctr), so
+// that exit is what the wait keys on. It is bounded by the caller's budget, and
 // every other failure — a schema skew, a bd that will not run — returns at
 // once.
-func readDBSchemaLevelWaiting(ctx context.Context, run BDRunner, retryWait time.Duration) (int, error) {
+func readSchemaLevelWaiting(ctx context.Context, store Store, retryWait time.Duration) (int, error) {
 	for {
-		level, err := readDBSchemaLevel(ctx, run)
-		if err == nil || !errors.Is(err, ErrDoltUnreachable) {
+		level, err := store.SchemaLevel()
+		if err == nil || !errors.Is(err, beads.ErrStoreUnavailable) {
 			return level, err
 		}
 		if !waitForStoreRetry(ctx, retryWait) {
@@ -242,89 +180,29 @@ func waitForStoreRetry(ctx context.Context, wait time.Duration) bool {
 	}
 }
 
-// ReadDBSchemaLevel is readDBSchemaLevel for callers that check a database
-// other than the one the handshake reads, such as the daemon's per-store
-// compatibility check.
-func ReadDBSchemaLevel(ctx context.Context, run BDRunner) (int, error) {
-	return readDBSchemaLevel(ctx, run)
-}
-
-// readDBSchemaLevel asks bd for the highest applied migration. It runs in
-// machine mode so a database ahead of bd fails with bd's typed schema_skew
-// exit rather than prose. A store bd cannot reach, or a bd sql that ctx ended
-// while it waited, is reported as ErrDoltUnreachable, so the caller can tell
-// Dolt being down from bd being wrong.
-func readDBSchemaLevel(ctx context.Context, run BDRunner) (int, error) {
-	args, err := beadsql.SchemaLevel().BdArgs("--json")
-	if err != nil {
-		return 0, err
-	}
-	stdout, stderr, err := run(ctx, []string{"BD_MACHINE=1"}, args...)
-	if err != nil {
-		var coded interface{ ExitCode() int }
-		if errors.As(err, &coded) {
-			switch coded.ExitCode() {
-			case bdSchemaSkewExit:
-				return 0, fmt.Errorf("the database schema is ahead of this bd (bd exit %d%s)", bdSchemaSkewExit, stderrSuffix(stderr))
-			case bdStoreUnavailableExit:
-				// Only the store_unavailable exit means "ask again"; bd's
-				// other failures are its own answer (beads bd_failure.go).
-				return 0, fmt.Errorf("%w: bd exit %d%s", ErrDoltUnreachable, bdStoreUnavailableExit, stderrSuffix(stderr))
-			}
-		}
-		// A context that ended while bd sql was in flight killed it (exec's
-		// CommandContext), which reads as a bd exit of -1. bd was waiting on a
-		// Dolt that did not answer in time, so blaming bd would send the
-		// operator to reinstall it. A bd that exited on its own with the
-		// context still live is bd's own failure and falls through.
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return 0, fmt.Errorf("%w: the handshake budget ended (%v) while bd sql waited on the database (%v)%s",
-				ErrDoltUnreachable, ctxErr, err, stderrSuffix(stderr))
-		}
-		return 0, fmt.Errorf("could not read the database migration level: %v%s", err, stderrSuffix(stderr))
-	}
-	// beads.LegacyPayload is gastown's one envelope reader: bd runs in machine
-	// mode (NewBDProcessRunner), so the row list is the envelope's data.
-	// Output that is not an envelope passes through, as a bd from before
-	// machine mode printed it.
-	level, err := parseDBSchemaLevel(beads.LegacyPayload(args, stdout))
-	if err != nil {
-		return 0, fmt.Errorf("could not read the database migration level: %w", err)
-	}
-	return level, nil
-}
-
-func parseDBSchemaLevel(out []byte) (int, error) {
-	var rows []map[string]any
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return 0, fmt.Errorf("bd sql output is not a JSON row list: %q", util.FirstLine(string(out)))
-	}
-	if len(rows) != 1 {
-		return 0, fmt.Errorf("bd sql returned %d rows for MAX(version), want 1", len(rows))
-	}
-	switch v := rows[0]["version"].(type) {
-	case float64:
-		if v > 0 {
-			return int(v), nil
-		}
-	case string:
-		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
-			return n, nil
-		}
-	}
-	return 0, fmt.Errorf("schema_migrations has no applied version (got %v)", rows[0]["version"])
-}
-
 // refuseDoltUnreachable is the refusal when Dolt, not bd, is what failed: the
 // version report passed, so naming the bd install would send the operator down
-// the wrong path (gt-2gctr). The cause keeps bd's exit status for the log.
+// the wrong path (gt-2gctr). The cause keeps the store's own failure for the
+// log.
 func refuseDoltUnreachable(hs *BDHandshake, cause error) error {
 	bdPath := hs.Path
 	if bdPath == "" {
 		bdPath = "bd"
 	}
-	return fmt.Errorf("%w: %w\n  found:    bd at %s passed its version check, so the bd on PATH is not the problem\n  fix:      check Dolt with `gt dolt status`, then start it with `gt dolt start`",
-		ErrBDHandshake, cause, bdPath)
+	return fmt.Errorf("%w: %w: %w\n  found:    bd at %s passed its version check, so the bd on PATH is not the problem\n  fix:      check Dolt with `gt dolt status`, then start it with `gt dolt start`",
+		ErrBDHandshake, ErrDoltUnreachable, cause, bdPath)
+}
+
+// refuseHandshakeBudget is the refusal when the caller's budget ended before
+// bd answered. bd is not known to be wrong, so the message names the budget and
+// the thing to check instead of sending the operator to reinstall it.
+func refuseHandshakeBudget(hs *BDHandshake, what string, cause error) error {
+	bdPath := hs.Path
+	if bdPath == "" {
+		bdPath = "bd"
+	}
+	return fmt.Errorf("%w: %s (%v)\n  found:    bd at %s did not answer\n  fix:      check that bd runs, or raise the check's timeout",
+		ErrBDHandshake, what, cause, bdPath)
 }
 
 func refuseBD(hs *BDHandshake, dbRead bool, reason string) error {
@@ -361,13 +239,6 @@ func knownContractList() string {
 		parts[i] = strconv.Itoa(v)
 	}
 	return strings.Join(parts, " or ")
-}
-
-func stderrSuffix(stderr []byte) string {
-	if s := strings.TrimSpace(string(stderr)); s != "" {
-		return ": " + util.FirstLine(s)
-	}
-	return ""
 }
 
 func intOrUnknown(n int) string {

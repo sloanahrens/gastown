@@ -821,9 +821,9 @@ func execPrimeExternalCommand(ctx context.Context, workDir, name string, args ..
 		// typed method can name it; ConfigureCommand applies to it the same bd
 		// subprocess policy every other call gets. The other deliberate raw
 		// sites, each carrying its own note, are formula.go's `formula
-		// list/show` passthrough, show.go's exec'd `show`, deps/bd_handshake.go
-		// and deps/beads.go, cmdtree/gen-bd-tree, daemon/patrol_scan.go's gate
-		// check, mail/bd.go and testutil.
+		// list/show` passthrough, show.go's exec'd `show`,
+		// cmdtree/gen-bd-tree, daemon/patrol_scan.go's gate check, mail/bd.go
+		// and testutil.
 		beads.ConfigureCommand(cmd, workDir, beadsDir, mode)
 	} else {
 		cmd.Dir = workDir

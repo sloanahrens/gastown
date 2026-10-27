@@ -940,6 +940,10 @@ type Beads struct {
 	// actor, when set, is the BD_ACTOR every bd call runs as (WithActor,
 	// ActingAs), replacing the one the environment carries.
 	actor string
+	// callCtx, when set, is the parent of every bd call's deadline, so a
+	// caller with its own budget bounds the call rather than waiting out the
+	// subprocess budget (WithCallContext). nil is context.Background().
+	callCtx context.Context
 
 	// plain marks a wrapper built by NewPlain: bd runs in workDir with
 	// exactly plainEnv, and none of the routing policy below applies.
@@ -1041,6 +1045,8 @@ type beadsFields struct {
 	bin        string
 	baseEnv    []string
 	actor      string
+	// callCtx parents every call's deadline; nil is context.Background().
+	callCtx context.Context
 	// budget replaces every call's subprocess deadline; tests only.
 	budget time.Duration
 }
@@ -1073,6 +1079,34 @@ func WithEnv(env []string) Option {
 // An empty actor keeps the environment's.
 func WithActor(actor string) Option {
 	return func(f *beadsFields) { f.actor = actor }
+}
+
+// WithCallContext parents every bd call's deadline on ctx, so a caller with
+// its own budget (the startup handshake, a doctor check) spends that budget
+// instead of the seam's subprocess budget. A nil ctx keeps the subprocess
+// budget alone. A call the budget kills is an ErrUnavailable failure that
+// carries context.DeadlineExceeded, as a subprocess deadline kill is; only a
+// read that consults the database classifies the kill as the store not
+// answering (SchemaLevel, ErrStoreUnavailable).
+func WithCallContext(ctx context.Context) Option {
+	return func(f *beadsFields) { f.callCtx = ctx }
+}
+
+// WithRunner runs every bd call through run instead of starting a bd process.
+// args is the argv after "bd" and the runner answers with bd's stdout and
+// stderr; an error that carries an exit status implements
+// interface{ ExitCode() int }, as *exec.ExitError does. A nil run keeps the
+// real bd. A caller outside this package injects one to drive the parsers and
+// the failure classifiers against bd's answers without a bd.
+func WithRunner(run func(ctx context.Context, args []string) (stdout, stderr []byte, err error)) Option {
+	return func(f *beadsFields) {
+		if run == nil {
+			return
+		}
+		f.exec = func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
+			return run(ctx, c.args)
+		}
+	}
 }
 
 // ActingAs returns a copy of b whose bd calls run as actor (WithActor),
@@ -1134,6 +1168,7 @@ func newBeads(f beadsFields) *Beads {
 		bin:        f.bin,
 		baseEnv:    f.baseEnv,
 		actor:      f.actor,
+		callCtx:    f.callCtx,
 		budget:     f.budget,
 	}
 }
@@ -1788,9 +1823,22 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) ([]b
 
 	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
 	// blocking forever (under memory pressure that invites Jetsam SIGKILL).
-	// The context covers both the initial attempt and the --flat retry.
+	// The context covers both the initial attempt and the --flat retry. A
+	// caller with its own budget (WithCallContext) parents the deadline, so
+	// its budget ends the call instead of the subprocess budget.
+	parent := b.callCtx
+	if parent == nil {
+		parent = context.Background()
+	}
 	timeout := b.subprocessTimeout(args)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	// Name the budget that actually ends the call: a caller's deadline closer
+	// than the subprocess budget is the one a killed bd ran out of.
+	if deadline, ok := parent.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
+			timeout = remaining
+		}
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	run := func(argv []string) error {

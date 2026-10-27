@@ -2,15 +2,13 @@
 package deps
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"regexp"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // BeadsStatus represents the state of the beads installation.
@@ -22,44 +20,38 @@ const (
 	BeadsUnknown                     // bd found but its version could not be read
 )
 
+// beadsProbeTimeout bounds the presence probe, so a broken bd install cannot
+// hang every gt command. 10s is generous but necessary: under heavy CI load
+// (parallel test packages), even a trivial shell script can take >3s to start.
+const beadsProbeTimeout = 10 * time.Second
+
 // CheckBeads checks that bd is on PATH and reports a version. It is a cheap
 // presence probe, not a compatibility verdict: whether the town may run on
 // this bd is CheckBDHandshake's decision (schema level and JSON contract),
-// because a semver says nothing about either.
+// because a semver says nothing about either. It reads no database.
 // Returns status and the installed version (if found).
 func CheckBeads() (BeadsStatus, string) {
-	// Check if bd exists in PATH
-	path, err := exec.LookPath("bd")
-	if err != nil {
-		return BeadsNotFound, ""
-	}
-	_ = path // bd found
-
-	// Get version (with timeout to prevent hanging on broken bd installs).
-	// 10s is generous but necessary: under heavy CI load (parallel test
-	// packages), even a trivial shell script can take >3s to start.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Use a clean environment that strips BEADS target env vars
-	// to prevent stale shell state from leaking into version checks.
-	baseEnv := beads.StripBDTargetEnv(os.Environ())
-	// Keep-raw (gt-7iwy0.4.1): a presence probe, not a store read - it runs
-	// before any database is chosen, on an environment stripped of bd target
-	// vars, and only its version text is read. The handshake owns compatibility.
-	cmd := beads.CommandContextWithEnv(ctx, "", baseEnv, "version")
-	util.SetDetachedProcessGroup(cmd.Cmd)
-	output, err := cmd.Output()
-	return beadsStatusFromOutput(output, err)
+	// A plain wrapper: bd runs in the caller's directory with the BEADS target
+	// variables stripped from the environment, so a stale BEADS_DIR or
+	// BEADS_DOLT_* in the caller's shell cannot steer the probe, and bd
+	// resolves the workspace itself.
+	store := beads.NewPlain("", beads.StripBDTargetEnv(os.Environ())).
+		WithTimeout(beadsProbeTimeout).WithProcessGroup()
+	info, err := store.Version()
+	return beadsStatusFromVersion(info, err)
 }
 
-// beadsStatusFromOutput classifies the result of running "bd version".
-func beadsStatusFromOutput(output []byte, err error) (BeadsStatus, string) {
+// beadsStatusFromVersion classifies the store's answer: a report with a semver
+// is bd, a bd that was not there to run is BeadsNotFound, and anything else is
+// a bd whose version could not be read.
+func beadsStatusFromVersion(info beads.VersionInfo, err error) (BeadsStatus, string) {
 	if err != nil {
+		if errors.Is(err, beads.ErrNotInstalled) {
+			return BeadsNotFound, ""
+		}
 		return BeadsUnknown, ""
 	}
-
-	version := parseBeadsVersion(string(output))
+	version := beadsSemverRE.FindString(info.Version)
 	if version == "" {
 		return BeadsUnknown, ""
 	}
@@ -86,22 +78,6 @@ func beadsErrorForStatus(status BeadsStatus) error {
 	}
 }
 
-var (
-	beadsVersionTextRE = regexp.MustCompile(`bd version (\d+\.\d+\.\d+)`)
-	beadsSemverRE      = regexp.MustCompile(`^\d+\.\d+\.\d+`)
-)
-
-// parseBeadsVersion extracts the version from `bd version`: the JSON object
-// machine mode prints ({"version":"1.2.2",...}) or the text of a bd from
-// before it ("bd version X.Y.Z ...").
-func parseBeadsVersion(output string) string {
-	if info, err := ParseBDVersionJSON([]byte(output)); err == nil {
-		return beadsSemverRE.FindString(info.Version)
-	}
-	// Match patterns like "bd version 0.52.0" or "bd version 0.52.0 (dev: ...)"
-	matches := beadsVersionTextRE.FindStringSubmatch(output)
-	if len(matches) >= 2 {
-		return matches[1]
-	}
-	return ""
-}
+// beadsSemverRE trims a report's version to its semver: a bd may add a build
+// suffix, and "not-semver" is no version at all.
+var beadsSemverRE = regexp.MustCompile(`^\d+\.\d+\.\d+`)
