@@ -714,6 +714,24 @@ func TestOpenShellCheckSandboxGTAcceptsAnImageOnlyDocsBehind(t *testing.T) {
 	}
 }
 
+// The comparison runs in the town's gt source checkout. When that checkout
+// cannot be located the commits cannot be compared, and the image is refused
+// rather than accepted on no evidence (gt-v18z6).
+func TestOpenShellCheckSandboxGTRefusesWhenTheSourceCheckoutIsUnknown(t *testing.T) {
+	t.Parallel()
+	town, _ := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{
+		"exec": "gt version 1.2.1 (dev: main@" + openshellTestDriftedGT + ")\n",
+	})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	b.policyRoot = func(string) (string, error) { return "", errors.New("no gt source checkout") }
+
+	err := b.checkSandboxGT(context.Background(), openshellTestSession)
+	if !errors.Is(err, ErrImageDrift) {
+		t.Fatalf("checkSandboxGT = %v, want drift when the comparison cannot be made", err)
+	}
+}
+
 func TestOpenShellPrepareCreateFailureMakesNoFurtherCalls(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
