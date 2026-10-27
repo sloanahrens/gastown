@@ -153,9 +153,12 @@ func (s *Store) EndOpen(bead, seat string, reason Reason, at time.Time) (bool, e
 //
 // Only the newest open attempt is closed. A seat works one bead at a time, so
 // an older attempt still open is a stale one from an earlier turn, and closing
-// it at this stop would credit it with time the seat did not hold. A log that
-// cannot be read is skipped and reported: the other logs still answer, and the
-// caller's stop must stand either way.
+// it at this stop would credit it with time the seat did not hold. For the same
+// reason a log that cannot be read closes nothing: it could hold the seat's
+// newest attempt, and the newest readable one would then be a stale one. The
+// attempt stays open, which the summary reports as a lower bound and the
+// landing's first-sight close ends, and the read failure goes back to the
+// caller, whose stop stands either way.
 //
 // Every log is read, because any of them could hold the attempt: there is no
 // index, and a second one could disagree with the logs it points into. The
@@ -196,11 +199,11 @@ func (s *Store) EndSeatOpen(seat string, reason Reason, at time.Time) (string, b
 			bead, started = name, a.StartedAt
 		}
 	}
-	if bead == "" {
+	if bead == "" || len(skipped) > 0 {
 		return "", false, errors.Join(skipped...)
 	}
 	ended, err := s.EndOpen(bead, seat, reason, at)
-	return bead, ended, errors.Join(err, errors.Join(skipped...))
+	return bead, ended, err
 }
 
 // Summary is the time a bead's seats spent hooked on it across every attempt.

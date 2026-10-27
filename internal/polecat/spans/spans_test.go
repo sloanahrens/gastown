@@ -486,23 +486,23 @@ func TestEndSeatOpen_NoOpenAttemptWritesNothing(t *testing.T) {
 	}
 }
 
-// TestEndSeatOpen_ReportsALogItCannotReadAndStillClosesTheRest: one unreadable
-// log must not hide the seat's attempt in another, and must not be dropped
-// without a word: the close happens and the read failure goes back to the
-// caller (gt-8yk78).
-func TestEndSeatOpen_ReportsALogItCannotReadAndStillClosesTheRest(t *testing.T) {
+// TestEndSeatOpen_ClosesNothingWhileALogCannotBeRead: a log that cannot be read
+// could hold the seat's newest attempt, so closing the newest attempt of the
+// logs that can be read would credit a stale one with time the seat did not
+// hold. The read failure goes back to the caller, the readable attempt stays
+// open for the landing's close, and a later stop closes it once the log reads
+// (gt-8yk78).
+func TestEndSeatOpen_ClosesNothingWhileALogCannotBeRead(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	st := New(dir, fixedClock{at: testEpoch})
 	if err := st.Start("gt-abc", "gastown/onyx"); err != nil {
 		t.Fatal(err)
 	}
 	// A dangling symlink is present in the store but resolves to nothing, so
 	// its bead cannot be read.
-	if err := os.Symlink(filepath.Join(dir, "gone"), filepath.Join(dir, "gt-broken.jsonl")); err != nil {
+	broken := filepath.Join(dir, "gt-broken.jsonl")
+	if err := os.Symlink(filepath.Join(dir, "gone"), broken); err != nil {
 		t.Fatal(err)
 	}
 
@@ -510,8 +510,23 @@ func TestEndSeatOpen_ReportsALogItCannotReadAndStillClosesTheRest(t *testing.T) 
 	if err == nil {
 		t.Fatal("EndSeatOpen swallowed a log it could not read")
 	}
-	if !ended || bead != "gt-abc" {
-		t.Fatalf("EndSeatOpen = %q, %v; want gt-abc closed despite gt-broken", bead, ended)
+	if ended || bead != "" {
+		t.Fatalf("EndSeatOpen = %q, %v; want nothing closed while gt-broken cannot be read", bead, ended)
+	}
+	sum, err := st.Summarize("gt-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sum.HasOpen("gastown/onyx") {
+		t.Error("gt-abc's attempt was closed although a log that could hold a newer one was unreadable")
+	}
+
+	if err := os.Remove(broken); err != nil {
+		t.Fatal(err)
+	}
+	bead, ended, err = st.EndSeatOpen("gastown/onyx", ReasonStopped, testEpoch.Add(2*time.Minute))
+	if err != nil || !ended || bead != "gt-abc" {
+		t.Fatalf("EndSeatOpen after the log reads again = %q, %v, %v; want gt-abc closed", bead, ended, err)
 	}
 }
 
