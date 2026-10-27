@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// bdNotFoundExitCode is bd's machine-mode exit status for "no such issue"
-// (internal/beads' unexported bdNotFoundExit): the one failure the seam reads
-// as an absence rather than as an unanswerable store.
-const bdNotFoundExitCode = 20
+// bdNotFoundAnswer is how machine mode reports an issue that does not exist:
+// the seam classifies that envelope as ErrNotFound, which mail reads as a
+// missing message.
+const bdNotFoundAnswer = `{"error":{"kind":"not_found"}}`
 
 // messageAnswer scripts bd for a mailbox whose bead id exists and carries no
 // delivery labels: show answers it, update succeeds and is recorded, and any
@@ -41,8 +41,9 @@ func updateArgvs(bd *bdScript) []string {
 }
 
 // TestMarkReadOnlyAddsTheReadLabel pins the write behind marking a message
-// read without closing it: one update adding the read label, as the mailbox's
-// identity, in the mutation environment a write needs.
+// read without closing it: one update adding the read label in the mutation
+// environment a write needs. The write names no actor, so bd records the
+// ambient identity, as the label command it replaces did.
 func TestMarkReadOnlyAddsTheReadLabel(t *testing.T) {
 	t.Parallel()
 	const id = "gt-wisp-read1"
@@ -64,8 +65,8 @@ func TestMarkReadOnlyAddsTheReadLabel(t *testing.T) {
 		if got, _ := envValue(c, "BD_DOLT_AUTO_COMMIT"); got != "on" {
 			t.Errorf("BD_DOLT_AUTO_COMMIT = %q, want on (the write environment)", got)
 		}
-		if got, _ := envValue(c, "BEADS_ACTOR"); got != m.Identity() {
-			t.Errorf("BEADS_ACTOR = %q, want the mailbox identity %q", got, m.Identity())
+		if strings.Contains(strings.Join(c.Args, " "), "--actor=") {
+			t.Errorf("update names an actor: %v; a label write runs as the ambient identity", c.Args)
 		}
 	}
 }
@@ -218,7 +219,7 @@ func TestMailboxWritesFallBackToTheMailboxDir(t *testing.T) {
 					writeDirs = append(writeDirs, beadsDir)
 					return "", "", 0
 				}
-				return "", "Issue " + id + " not found", bdNotFoundExitCode
+				return bdNotFoundAnswer, "Issue " + id + " not found", 1
 			}}
 			m := NewMailboxWithBeadsDir("gastown/crew/max", t.TempDir(), townBeads)
 			m.bd = bd.run

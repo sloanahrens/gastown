@@ -101,7 +101,7 @@ func acknowledgeDeliveryBead(run bdRunner, workDir, beadsDir, beadID, recipientI
 	// never acked without the acked-by and acked-at that say who acked it.
 	// toWrite holds only the labels the bead lacks, so a retry writes what an
 	// earlier partial write missed and nothing else.
-	store := bdWriteStore(run, workDir, beadsDir, recipientIdentity)
+	store := bdWriteStore(run, workDir, beadsDir)
 	toWrite := deliveryAckLabelsToWrite(recipientIdentity, timeNow().UTC(), existingLabels)
 	if len(toWrite) > 0 {
 		if err := store.Update(beadID, beads.UpdateOptions{AddLabels: toWrite}); err != nil {
@@ -133,7 +133,7 @@ func deliveryPendingRemovalNeeded(labels []string) bool {
 func removeDeliveryPendingLabel(run bdRunner, workDir, beadsDir, beadID string) error {
 	// A pending label that is already gone is the state this write asks for,
 	// so bd refusing to remove a label that is not there is success.
-	err := bdWriteStore(run, workDir, beadsDir, "").Update(beadID, beads.UpdateOptions{RemoveLabels: []string{DeliveryLabelPending}})
+	err := bdWriteStore(run, workDir, beadsDir).Update(beadID, beads.UpdateOptions{RemoveLabels: []string{DeliveryLabelPending}})
 	if labelAbsentErr(err) {
 		return nil
 	}

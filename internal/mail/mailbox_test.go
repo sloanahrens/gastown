@@ -458,48 +458,69 @@ func TestNewMailboxWithBeadsDir(t *testing.T) {
 
 // TestCloseInDirActsAsAddressedIdentity guards against gt-ovem: bd's
 // assignee==actor close guard rejects a close whose actor differs from the
-// bead's assignee, so `gt mail archive` fails when the ambient actor differs
-// from the mailbox's own identity. closeInDir must hand bd the mailbox's
-// identity as its actor — in whichever variable bd resolves one from — and
-// leave the rest of the argv to the seam, which adds the session id
-// (beads' closeWithOptions) mail used to append by hand.
+// bead's assignee, so `gt mail archive` fails when the ambient identity
+// differs from the mailbox's own. closeInDir must name the mailbox's identity
+// on the close itself, the way mail's raw close always did.
 func TestCloseInDirActsAsAddressedIdentity(t *testing.T) {
 	t.Parallel()
-	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
-		if c.Args[0] == "close" {
-			return "", "", 0
-		}
-		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
-	}}
-	m := NewMailboxWithBeadsDir("gastown/crew/max", t.TempDir(), t.TempDir())
-	m.bd = bd.run
-	if err := m.closeInDir("gt-wisp-xv525", t.TempDir()); err != nil {
-		t.Fatalf("closeInDir: %v", err)
+	const id = "gt-wisp-xv525"
+	tests := []struct {
+		name      string
+		identity  string
+		wantActor bool
+	}{
+		{name: "named identity", identity: "gastown/crew/max", wantActor: true},
+		{name: "no identity", identity: ""},
 	}
 
-	calls := bd.recorded()
-	if len(calls) != 1 {
-		t.Fatalf("got %d bd calls, want 1: %v", len(calls), bd.argvs())
-	}
-	if len(calls[0].Args) < 2 || calls[0].Args[0] != "close" || calls[0].Args[1] != "gt-wisp-xv525" {
-		t.Fatalf("bd args = %v, want a close of gt-wisp-xv525", calls[0].Args)
-	}
-	// Mail names no actor flag of its own any more, and adds nothing else:
-	// the identity rides the environment below.
-	for _, arg := range calls[0].Args[2:] {
-		if !strings.HasPrefix(arg, "--session=") {
-			t.Errorf("unexpected bd close argument %q after the bead id", arg)
-		}
-	}
-	for _, key := range []string{"BEADS_ACTOR", "BD_ACTOR"} {
-		if got, ok := envValue(calls[0], key); !ok || got != m.Identity() {
-			t.Errorf("%s = %q (set: %v), want the mailbox identity %q", key, got, ok, m.Identity())
-		}
-	}
-	// A close is a write: it must not inherit a read-only mode that would
-	// make bd refuse it.
-	if got, _ := envValue(calls[0], "BD_DOLT_AUTO_COMMIT"); got != "on" {
-		t.Errorf("BD_DOLT_AUTO_COMMIT = %q, want on (the write environment)", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+				if c.Args[0] == "close" {
+					return "", "", 0
+				}
+				return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+			}}
+			m := NewMailboxWithBeadsDir(tt.identity, t.TempDir(), t.TempDir())
+			m.bd = bd.run
+			if err := m.closeInDir(id, t.TempDir()); err != nil {
+				t.Fatalf("closeInDir: %v", err)
+			}
+
+			calls := bd.recorded()
+			if len(calls) != 1 {
+				t.Fatalf("got %d bd calls, want 1: %v", len(calls), bd.argvs())
+			}
+			if len(calls[0].Args) < 2 || calls[0].Args[0] != "close" || calls[0].Args[1] != id {
+				t.Fatalf("bd args = %v, want a close of %s", calls[0].Args, id)
+			}
+			wantFlag := ""
+			if tt.wantActor {
+				wantFlag = "--actor=" + m.Identity()
+			}
+			namedActor := false
+			for _, arg := range calls[0].Args[2:] {
+				switch {
+				case arg == wantFlag && wantFlag != "":
+					namedActor = true
+				case strings.HasPrefix(arg, "--actor="):
+					t.Errorf("bd close named %q, want %q", arg, wantFlag)
+				case strings.HasPrefix(arg, "--session="):
+					// The seam's own flag, which mail no longer appends itself.
+				default:
+					t.Errorf("unexpected bd close argument %q after the bead id", arg)
+				}
+			}
+			if namedActor != tt.wantActor {
+				t.Errorf("bd close argv = %v, want actor flag %q", calls[0].Args, wantFlag)
+			}
+			// A close is a write: it must not inherit a read-only mode that
+			// would make bd refuse it.
+			if got, _ := envValue(calls[0], "BD_DOLT_AUTO_COMMIT"); got != "on" {
+				t.Errorf("BD_DOLT_AUTO_COMMIT = %q, want on (the write environment)", got)
+			}
+		})
 	}
 }
 

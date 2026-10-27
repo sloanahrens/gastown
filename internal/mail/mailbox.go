@@ -677,13 +677,11 @@ func (m *Mailbox) markReadBeads(id string) error {
 
 // closeInDir closes a message in a specific beads directory.
 func (m *Mailbox) closeInDir(id, beadsDir string) error {
-	// Close as the identity the message was addressed to, not whatever
-	// ambient actor bd would otherwise fall back to: when the addressed
-	// identity and the ambient actor differ, bd's assignee==actor close guard
-	// rejects the close and archive silently fails town-wide (gt-ovem,
-	// sibling of gt-cut). The seam's Close passes the session id for work
-	// attribution, as the raw call did.
-	return mailWriteErr(bdWriteStore(m.bd, m.workDir, beadsDir, m.identity).Close(id), id)
+	// Close as the identity the message was addressed to, not the ambient
+	// actor: bd's assignee==actor close guard rejects a close when the two
+	// differ, and that refusal fails `gt mail archive` town-wide (gt-ovem,
+	// sibling of gt-cut).
+	return mailWriteErr(bdCloseStore(m.bd, m.workDir, beadsDir, m.identity).Close(id), id)
 }
 
 func (m *Mailbox) markReadLegacy(id string) error {
@@ -756,11 +754,11 @@ func (m *Mailbox) acknowledgeDeliveryForPrimary(id string) error {
 // to (ne-bgr, GH#2423); a bead neither directory has is ErrMessageNotFound.
 func (m *Mailbox) writeInDirs(id string, write func(beads.Client) error) error {
 	primary := beads.ResolveBeadsDirForID(m.beadsDir, id)
-	err := write(bdWriteStore(m.bd, m.workDir, primary, m.identity))
+	err := write(bdWriteStore(m.bd, m.workDir, primary))
 	if err == nil || primary == m.beadsDir || !isMessageNotFoundErr(err, id) {
 		return mailWriteErr(err, id)
 	}
-	return mailWriteErr(write(bdWriteStore(m.bd, m.workDir, m.beadsDir, m.identity)), id)
+	return mailWriteErr(write(bdWriteStore(m.bd, m.workDir, m.beadsDir)), id)
 }
 
 // mailWriteErr reports a failed write the way mail's callers expect: bd saying

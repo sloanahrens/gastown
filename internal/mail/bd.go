@@ -148,10 +148,18 @@ func bdStore(run bdRunner, workDir, beadsDir string) beads.Client {
 }
 
 // bdWriteStore is bdStore for a write: the mutation environment and the write
-// deadline. A non-empty actor is the identity the write runs as: bd's
-// assignee==actor close guard refuses a close by anyone else, and a refused
-// close fails `gt mail archive` town-wide (gt-ovem, sibling of gt-cut).
-func bdWriteStore(run bdRunner, workDir, beadsDir, actor string) beads.Client {
+// deadline. It names no actor, so bd records the identity the environment
+// resolves, as the raw label and update commands it replaces did.
+func bdWriteStore(run bdRunner, workDir, beadsDir string) beads.Client {
+	return newBdStore(run, workDir, beadsDir, false, bdWriteTimeout, "")
+}
+
+// bdCloseStore is bdWriteStore for the one write that must name its identity:
+// bd's assignee==actor close guard refuses a close by any other actor, and a
+// refused close fails `gt mail archive` town-wide (gt-ovem, sibling of
+// gt-cut). The seam's Close carries no actor field, so the store adds the flag
+// mail's raw close always passed.
+func bdCloseStore(run bdRunner, workDir, beadsDir, actor string) beads.Client {
 	return newBdStore(run, workDir, beadsDir, false, bdWriteTimeout, actor)
 }
 
@@ -160,26 +168,18 @@ func newBdStore(run bdRunner, workDir, beadsDir string, readOnly bool, timeout t
 		run = runBdProcess
 	}
 	env := bdSubprocessEnv(beads.WithMachineEnvIn(workDir, nil), beadsDir, readOnly, nil)
-	if actor != "" {
-		env = withActorEnv(env, actor)
-	}
 	store := beads.NewPlain(workDir, env, beads.WithDirRunner(
 		func(ctx context.Context, dir string, args []string) ([]byte, []byte, error) {
 			beads.CleanStaleDoltServerPID(beadsDir)
+			if actor != "" {
+				// Copy, since the caller's argv may have spare capacity.
+				named := make([]string, len(args), len(args)+1)
+				copy(named, args)
+				args = append(named, "--actor="+actor)
+			}
 			return run(ctx, bdCall{Dir: dir, Env: env, Args: args})
 		}))
 	return store.WithProcessGroup().WithTimeout(timeout)
-}
-
-// withActorEnv makes bd record actor as a write's author, naming both
-// variables bd resolves one from: BEADS_ACTOR, which bd reads first, and
-// BD_ACTOR, the fallback the seam's WithActor sets (the pair gt's attribution
-// guard treats as a bd author's environment, internal/cmd/tap_guard_polecat_attribution.go).
-// The inherited values go first, because which of two entries for one key the
-// child reads is not something this code can rely on.
-func withActorEnv(env []string, actor string) []string {
-	env = beads.StripEnvKey(beads.StripEnvKey(env, "BD_ACTOR"), "BEADS_ACTOR")
-	return append(env, "BEADS_ACTOR="+actor, "BD_ACTOR="+actor)
 }
 
 func bdSubprocessEnv(baseEnv []string, beadsDir string, readOnly bool, extraEnv []string) []string {

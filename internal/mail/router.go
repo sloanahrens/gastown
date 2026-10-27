@@ -1796,7 +1796,7 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 
 	// Delete oldest messages, as the ambient actor: retention is the router's
 	// housekeeping, not a recipient reading its inbox.
-	store := bdWriteStore(r.bd, filepath.Dir(beadsDir), beadsDir, "")
+	store := bdWriteStore(r.bd, filepath.Dir(beadsDir), beadsDir)
 	for i := 0; i < toDelete && i < len(messages); i++ {
 		// Best-effort deletion - don't fail if one close fails
 		_ = store.CloseWithReason("retention pruning", messages[i].ID)
