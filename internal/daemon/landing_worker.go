@@ -557,9 +557,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Escalate: func(key, message string) {
 			d.escalateAlert(key, "landing_worker", message)
 		},
-		Logf:    d.logger.Printf,
-		Now:     func() time.Time { return d.clk().Now() },
-		MainRed: mainRedFromStatus(townRoot),
+		Logf:       d.logger.Printf,
+		Now:        func() time.Time { return d.clk().Now() },
+		MainStatus: mainStatusFromStatus(townRoot),
 		Async: func(call func()) {
 			go func() {
 				defer func() {
