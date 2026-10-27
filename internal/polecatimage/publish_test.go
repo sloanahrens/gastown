@@ -482,21 +482,43 @@ func TestPushToRegistryDoesNotRecordAPushThatTaggedNothing(t *testing.T) {
 	}
 }
 
+// TestPushToRegistryReportsAScratchDirectoryItCannotMake drives the save
+// directory the push makes under the lock: a run that cannot make it publishes
+// nothing, carries on, and under POLECAT_IMAGE_FAIL_CLOSED=1 fails (gt-i893i).
 func TestPushToRegistryReportsAScratchDirectoryItCannotMake(t *testing.T) {
 	t.Parallel()
-	tr := newTestRun(t)
-	blocked := filepath.Join(tr.root, "blocked")
-	if err := os.WriteFile(blocked, []byte("a file where a directory belongs"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	tr.Cfg.BuildRoot = blocked
-	tr.reply = publishReply{id: result{stdout: "sha256:abc\n"}, refs: result{stdout: "gastown-polecat:dev\n"}}.answer(t)
-	if err := tr.PushToRegistry(); err != nil {
-		t.Fatalf("PushToRegistry() error = %v, want the run to carry on", err)
-	}
-	tr.wantLogged(t, "registry: cannot make a directory under "+blocked+"; the image is not published")
-	if got := len(tr.callsTo("docker")); got != 0 {
-		t.Errorf("docker was called %d times, want none: nothing to push into", got)
+	for _, failClosed := range []bool{false, true} {
+		name := "best effort"
+		if failClosed {
+			name = "fail closed"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTestRun(t)
+			tr.Cfg.FailClosed = failClosed
+			blocked := filepath.Join(tr.root, "blocked")
+			if err := os.WriteFile(blocked, []byte("a file where a directory belongs"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			tr.Cfg.BuildRoot = blocked
+			tr.reply = publishReply{id: result{stdout: "sha256:abc\n"}, refs: result{stdout: "gastown-polecat:dev\n"}}.answer(t)
+			err := tr.PushToRegistry()
+			tr.wantLogged(t, "registry: cannot make a directory under "+blocked+"; the image is not published")
+			if got := len(tr.callsTo("docker")); got != 0 {
+				t.Errorf("docker was called %d times, want none: nothing to push into", got)
+			}
+			if !failClosed {
+				if err != nil {
+					t.Fatalf("PushToRegistry() error = %v, want the run to carry on", err)
+				}
+				return
+			}
+			// The failure's wording is PublishUnfinished's, pinned by
+			// TestPublishUnfinishedNamesTheState; here the branch must fail.
+			if err == nil {
+				t.Error("PushToRegistry() = nil, want the run's failure under the switch")
+			}
+		})
 	}
 }
 
@@ -537,8 +559,9 @@ func TestFailClosedAndDefer(t *testing.T) {
 			t.Errorf("FailClosed() = %v, want x (POLECAT_IMAGE_FAIL_CLOSED=1)", err)
 		}
 		tr.wantLogged(t, "ERROR: x (POLECAT_IMAGE_FAIL_CLOSED=1)")
-		if err := tr.Defer("deferred: because"); err == nil {
-			t.Error("Defer() = nil, want the run's failure under the switch")
+		want := "the image was not built and published at the installed commit, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)"
+		if err := tr.Defer("deferred: because"); err == nil || err.Error() != want {
+			t.Errorf("Defer() = %v, want %q", err, want)
 		}
 		tr.wantLogged(t, "deferred: because")
 	})
