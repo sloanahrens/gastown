@@ -143,11 +143,20 @@ func (p hostProbe) read(ctx context.Context, env Env, timeout time.Duration) (an
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if p.store {
-		// The start is read before the read runs, so the difference is the
-		// read's own time. An empty board is an answer, so only a failed read
-		// is a gap; its fast return is not a latency.
+		// Warm the seam before the clock starts. Its first call pays setup a
+		// later call does not — the --allow-stale capability probe and the
+		// town's config reads — so timing it would report first use rather
+		// than what a bead read costs now. The seam's container retry never
+		// applies to a town snapshot, so the timed call is one bd invocation.
+		//
+		// The start is read before the timed read runs, so the difference is
+		// that read's own time. An empty board is an answer, so only a failed
+		// read is a gap; its fast return is not a latency.
 		store := env.Beads(ctx, env.Town)
 		if store == nil {
+			return nil, false
+		}
+		if _, err := store.List(beads.ListOptions{Limit: 1}); err != nil {
 			return nil, false
 		}
 		start := env.Now()

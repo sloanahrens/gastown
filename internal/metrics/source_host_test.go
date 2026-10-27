@@ -53,12 +53,16 @@ const hostLoadFixture = "{ 13.77 12.84 11.49 }\n"
 // hostFake answers the probes with canned output. Its clock moves only when a
 // command runs, by that command's took duration, so a latency reading is the
 // difference the probe takes between the two Now calls around its Run. The
-// bead read takes "bd"'s time and fails when "bd" fails.
+// bead read takes "bd"'s time and fails when "bd" fails; firstRead, when set,
+// is what the store's first read costs, standing in for the seam's per-process
+// setup.
 type hostFake struct {
-	output map[string]string
-	fail   map[string]error
-	took   map[string]time.Duration
-	now    time.Time
+	output    map[string]string
+	fail      map[string]error
+	took      map[string]time.Duration
+	now       time.Time
+	firstRead time.Duration
+	reads     int
 	// dirs records each directory a bead store was opened for.
 	dirs []string
 }
@@ -102,7 +106,12 @@ func (f *hostFake) env() Env {
 type hostStore struct{ f *hostFake }
 
 func (s hostStore) List(beads.ListOptions) ([]*beads.Issue, error) {
-	s.f.now = s.f.now.Add(s.f.took["bd"])
+	took := s.f.took["bd"]
+	if s.f.reads == 0 && s.f.firstRead > 0 {
+		took = s.f.firstRead
+	}
+	s.f.reads++
+	s.f.now = s.f.now.Add(took)
 	if err := s.f.fail["bd"]; err != nil {
 		return nil, err
 	}
@@ -193,6 +202,22 @@ func TestSourceHostEmptyBoardIsAReading(t *testing.T) {
 	}
 	if len(fake.dirs) != 1 || fake.dirs[0] != "/town" {
 		t.Errorf("the bead read opened stores for %v, want the town root alone", fake.dirs)
+	}
+}
+
+// The reading is one steady-state read: the seam's first-use setup is spent
+// before the clock starts, so a slow first call does not inflate bd_latency_ms.
+func TestSourceHostLatencyExcludesTheSeamsFirstUse(t *testing.T) {
+	t.Parallel()
+	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
+	fake.firstRead = 1200 * time.Millisecond
+
+	got, err := newHostSource().Collect(context.Background(), fake.env())
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got["bd_latency_ms"] != 37.0 {
+		t.Errorf("bd_latency_ms = %v, want 37 for the read after the seam warm-up, not the first read's 1237", got["bd_latency_ms"])
 	}
 }
 

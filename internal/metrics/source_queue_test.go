@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"math"
@@ -410,20 +411,36 @@ func TestSourceQueueDropsAFirstLineCutByTheByteBound(t *testing.T) {
 	})
 }
 
-// A ready page the seam reports as cut is a failed read here too: a shortened
-// page must not be summed as the whole board.
-func TestSourceQueueTruncatedBoardNilsOnlyItsColumn(t *testing.T) {
+// A read the store could not turn into an answer nils only its column. The
+// seam parses bd now, so the shapes it refuses reach the source as errors: a
+// page bd reported as cut, an answer that is not JSON, and prose where the
+// JSON was asked for. Each must leave the other columns alone rather than
+// sum a shortened board as the whole queue.
+func TestSourceQueueUnreadableAnswersNilOnlyTheirColumn(t *testing.T) {
 	t.Parallel()
-	fake := &queueStores{
-		rows: map[string]int{"alpha/blocked": 2},
-		errs: map[string]error{"alpha/ready": &beads.ErrReadyTruncated{Found: 100, Cap: 100, TrueCount: 250}},
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "a truncated page", err: &beads.ErrReadyTruncated{Found: 100, Cap: 100, TrueCount: 250}},
+		{name: "an answer that is not JSON", err: fmt.Errorf("parsing bd list output: %w", errors.New("unexpected end of JSON input"))},
+		{name: "prose instead of JSON", err: fmt.Errorf("bd list: connection refused")},
 	}
-	env := queueTestEnv(t, queueTestRigs("alpha"), fake, nil)
-	cols, err := queueSource{}.Collect(context.Background(), env)
-	if err != nil {
-		t.Fatalf("Collect: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &queueStores{
+				rows: map[string]int{"alpha/blocked": 2},
+				errs: map[string]error{"alpha/ready": tc.err},
+			}
+			env := queueTestEnv(t, queueTestRigs("alpha"), fake, nil)
+			cols, err := queueSource{}.Collect(context.Background(), env)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			queueWantColumns(t, cols, map[string]any{"ready": nil, "blocked": 2})
+		})
 	}
-	queueWantColumns(t, cols, map[string]any{"ready": nil, "blocked": 2})
 }
 
 // An Env with no bead store is a wiring error, not an empty town.

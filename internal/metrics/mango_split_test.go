@@ -118,6 +118,9 @@ func TestSplitByDateKeepsInputOrderForEqualDates(t *testing.T) {
 	}
 }
 
+// beadIDs is each row's bead column. It cannot be named beads: sources_test.go
+// imports the beads package, and Go forbids one identifier in both a file block
+// and the package block.
 func beadIDs(rows []Row) []string {
 	out := make([]string, len(rows))
 	for i, r := range rows {
