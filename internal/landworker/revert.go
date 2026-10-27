@@ -18,6 +18,13 @@ import (
 // landing that turned main red (gt-v4ssj.4.1).
 const LabelRevert = "gt:revert"
 
+// RevertWorker is the submitter a revert bead's READY TO LAND block records:
+// the daemon files and queues the revert itself, so there is no polecat or crew
+// session to name. The landing worker refuses a submission that records no
+// submitter, and one under the human's identity, so a revert with an empty
+// worker would never land and a red main would stay red (gt-4xvel).
+const RevertWorker = "daemon"
+
 // LabelInstallNow marks a work bead whose landing an operator wants followed
 // by an install of gt at once, rather than at the next quiet point
 // (gt-3qmv4.2).
@@ -423,7 +430,7 @@ func (r *RedMain) fileRevert(rec land.LandingRecord, branch, head string) (strin
 	if err != nil {
 		return "", err
 	}
-	work := land.Work{Branch: branch, Head: head, Target: rec.Target, Submitted: time.Now().UTC()}
+	work := land.Work{Branch: branch, Head: head, Target: rec.Target, Worker: RevertWorker, Submitted: time.Now().UTC()}
 	if err := r.Beads.AppendNotes(is.ID, land.FormatReadyNote(work)+"\n\n"+FormatRevertNote(rec)); err != nil {
 		return "", fmt.Errorf("%s created but not queued: %w", is.ID, err)
 	}
