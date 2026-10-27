@@ -81,10 +81,9 @@ func TestIntegrationClientContract(t *testing.T) {
 			return l.db
 		})
 	})
-	t.Run("show text", func(t *testing.T) {
-		t.Parallel()
-		beadsfake.RunShowTextContract(t, func(t *testing.T) beads.Client { return newDB(t, t.TempDir()) })
-	})
+	// RunShowTextContract names its own subtest, so a wrapper here would give
+	// the test a doubled name (gt-dm8xz).
+	beadsfake.RunShowTextContract(t, func(t *testing.T) beads.Client { return newDB(t, t.TempDir()) })
 	t.Run("creator option", func(t *testing.T) {
 		t.Parallel()
 		beadsfake.RunCreatorOptionContract(t, func(t *testing.T) beads.Client { return newDB(t, t.TempDir()) })
