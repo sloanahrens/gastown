@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -165,6 +167,113 @@ func TestStop_SurvivesAFailedSpanClose(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "span not closed") {
 		t.Errorf("log lacks the failed span write:\n%s", buf.String())
+	}
+}
+
+// The run the stop ended is recorded on the bead before it is handed back. The
+// record must land while the bead is still hooked here: written afterwards, it
+// could date a re-sling that reached a new seat in between as the stopped run,
+// and that seat's clock would never start (gt-tzbtf).
+func TestStop_EndsTheRunBeforeTheHandBack(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	seams := f.seams()
+	var order []string
+	endRun, handBack := seams.endRun, seams.handBack
+	seams.endRun = func(seat overrunSeat) error {
+		order = append(order, "end-run")
+		return endRun(seat)
+	}
+	seams.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
+		order = append(order, "hand-back")
+		return handBack(seat, elapsed, note)
+	}
+
+	d.runOverrunGuard(seams)
+
+	if len(f.endRuns) != 1 || f.endRuns[0] != stopSeat.Bead {
+		t.Fatalf("run ends = %v, want one for %s", f.endRuns, stopSeat.Bead)
+	}
+	if want := []string{"end-run", "hand-back"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("order = %v, want %v", order, want)
+	}
+}
+
+// A run end that cannot be recorded holds the hand-back: handing the bead back
+// with its old clock intact would leave the next dispatch unpoliced, so the stop
+// stays pending and the next tick records the end and hands it back (gt-tzbtf).
+func TestStop_FailedRunEndHoldsTheHandBack(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.endRunErr = errors.New("events log is read-only")
+
+	d.runOverrunGuard(f.seams())
+
+	if len(f.handedBack) != 0 {
+		t.Errorf("handed back %q although the run's end was not recorded", f.handedBack)
+	}
+	st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.StoppedAt.IsZero() {
+		t.Error("stop marked finished although the run's end was not recorded")
+	}
+	if !strings.Contains(buf.String(), "the run's end could not be recorded") {
+		t.Errorf("log lacks the failed run-end record:\n%s", buf.String())
+	}
+
+	f.endRunErr = nil
+	d.runOverrunGuard(f.seams())
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-backs = %q, want the retried stop to hand the bead back", f.handedBack)
+	}
+}
+
+// The stop's own endRun closure is what writes the record, so it is checked
+// against the town's dispatch clock: the dispatch after the stop is the bead's
+// clock, not the sling the stopped seat ran on, so the handed-back bead is
+// policed afresh on its next run (gt-tzbtf).
+func TestEndRunSeamDatesTheDispatchAfterTheStopAfresh(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	slingLine := func(at time.Time) string {
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":"sling","actor":"x","payload":{"bead":%q,"target":"gastown/polecats/%s"}}`,
+			at.UTC().Format(time.RFC3339), stopSeat.Bead, stopSeat.Polecat)
+	}
+	logPath := filepath.Join(d.config.TownRoot, events.EventsFile)
+	first := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	if err := os.WriteFile(logPath, []byte(slingLine(first)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seams := d.overrunStopSeams(overrunSeams{})
+	if seams.endRun == nil {
+		t.Fatal("overrunStopSeams left endRun nil: nothing would end the run")
+	}
+	if err := seams.endRun(stopSeat); err != nil {
+		t.Fatalf("endRun: %v", err)
+	}
+	// A dispatch after the stop, which the stop's own record must make the new
+	// run's clock.
+	resling := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(slingLine(resling) + "\n"); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := (&overrunSlungReader{d: d}).slungAt(stopSeat.Bead, stopSeat.Rig, stopSeat.Polecat)
+	if !ok || !got.Equal(resling) {
+		t.Errorf("slungAt = %v (%t), want the dispatch after the stop, %v", got, ok, resling)
 	}
 }
 

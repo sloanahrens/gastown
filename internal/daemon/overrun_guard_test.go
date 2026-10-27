@@ -93,9 +93,12 @@ type overrunFake struct {
 	// handedBack lists the beads handBack received, with the branch it was given.
 	handedBack []string
 	// pushed lists the bead and branch each push received; agentBeadsReset the
-	// bead each agent-bead reset was for.
+	// bead each agent-bead reset was for; endRuns the bead whose run the stop
+	// ended, endRunErr what that record answers when it is set.
 	pushed          []string
 	agentBeadsReset []string
+	endRuns         []string
+	endRunErr       error
 	// handBackNotes lists the note each handBack call carried, in the same order.
 	handBackNotes []string
 	// spanEnd, when set, is the stop's span close; spanEnds records the
@@ -200,6 +203,13 @@ func (f *overrunFake) baseSeams() overrunSeams {
 				return err
 			}
 			f.pushed = append(f.pushed, seat.Bead+" "+seat.Branch)
+			return nil
+		},
+		endRun: func(seat overrunSeat) error {
+			if f.endRunErr != nil {
+				return f.endRunErr
+			}
+			f.endRuns = append(f.endRuns, seat.Bead)
 			return nil
 		},
 		resetAgentBead: func(seat overrunSeat) error {

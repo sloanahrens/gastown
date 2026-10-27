@@ -73,6 +73,29 @@ func TestDispatchStartCountsTheBeadsFirstDispatch(t *testing.T) {
 			want: "",
 		},
 		{
+			// The overrun guard's stop ends the run as gt done does: the seat's
+			// clock is done, and the dispatch after the stop is policed afresh
+			// rather than read as an old run that keeps its first sling.
+			name: "an overrun stop ends the run too",
+			evs: []Event{
+				dispatchEv(TypeSling, t9, "gt-a"),
+				dispatchEv(TypeOverrunStop, t10, "gt-a"),
+				dispatchEv(TypeSling, t11, "gt-a"),
+			},
+			want: t11,
+		},
+		{
+			// The boundary is inclusive: a sling written in the same second as
+			// the run's end is the new run's dispatch, not the old run's.
+			name: "a dispatch at the run end's own timestamp starts the new run",
+			evs: []Event{
+				dispatchEv(TypeSling, t9, "gt-a"),
+				dispatchEv(TypeDone, t10, "gt-a"),
+				dispatchEv(TypeSling, t10, "gt-a"),
+			},
+			want: t10,
+		},
+		{
 			name: "another bead's events do not date this one",
 			evs: []Event{
 				dispatchEv(TypeSling, t9, "gt-b"),
@@ -120,10 +143,11 @@ func TestDispatchStartsMatchesDispatchStartForEveryBead(t *testing.T) {
 		dispatchEv(TypeSling, t10, "gt-b"),
 		dispatchEv(TypeDone, t10, "gt-a"),
 		dispatchEv(TypeSling, t11, "gt-a"),
+		dispatchEv(TypeOverrunStop, t11, "gt-b"),
 		dispatchEv(TypeSling, t12, "gt-b"),
 	}
 	got := DispatchStarts(evs)
-	for bead, want := range map[string]string{"gt-a": t11, "gt-b": t10} {
+	for bead, want := range map[string]string{"gt-a": t11, "gt-b": t12} {
 		single, ok := DispatchStart(evs, bead)
 		if !ok || !single.Equal(mustTime(t, want)) {
 			t.Errorf("DispatchStart(%s) = %v (%t), want %v", bead, single, ok, want)

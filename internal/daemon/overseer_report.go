@@ -339,16 +339,23 @@ func (d *Daemon) overseerReportSeats() ([]townreport.SeatWork, error) {
 	if err != nil {
 		return nil, err
 	}
-	slung := &overrunSlungReader{d: d}
+	return overseerSeatWork(seats, (&overrunSlungReader{d: d}).slungAt), nil
+}
+
+// overseerSeatWork dates each seat that holds a bead from that bead's dispatch
+// clock (events.DispatchStart, else the seat's agent bead): the earliest sling
+// of the bead this run, not the sling that reached this seat, so a row whose
+// bead changed hands reads the time the work has been in progress.
+func overseerSeatWork(seats []overrunSeat, slungAt func(bead, rig, polecat string) (time.Time, bool)) []townreport.SeatWork {
 	out := make([]townreport.SeatWork, 0, len(seats))
 	for _, s := range seats {
 		if s.Bead == "" {
 			continue
 		}
-		since, _ := slung.slungAt(s.Bead, s.Rig, s.Polecat)
+		since, _ := slungAt(s.Bead, s.Rig, s.Polecat)
 		out = append(out, townreport.SeatWork{Rig: s.Rig, Polecat: s.Polecat, Bead: s.Bead, Since: since})
 	}
-	return out, nil
+	return out
 }
 
 // overseerReportLeft asks the spec dispatcher what it would do now, without

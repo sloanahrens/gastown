@@ -219,7 +219,7 @@ func TestPollsFillStateAndFeedReachesAPage(t *testing.T) {
 		Health:  func() Health { return Health{Line: "GREEN ok", Verdict: "green"} },
 		Machine: func() (Machine, error) { return Machine{Load1: 7.5, At: now}, nil },
 		Summary: func() Summary {
-			return Summary{Polecats: []Polecat{{Rig: "gastown", Name: "agate", Bead: "gt-abc", Title: "the title", State: StateWorking}}}
+			return Summary{Polecats: []Polecat{{Rig: "gastown", Name: "agate", Bead: "gt-abc", Title: "the title", State: StateWorking, Hooked: &now}}}
 		},
 		Now: func() time.Time { return now.Add(10 * time.Minute) },
 	})
@@ -262,40 +262,9 @@ func TestPollsFillStateAndFeedReachesAPage(t *testing.T) {
 	}
 }
 
-// The daemon's scheduled slings patrol logged this line for its 10-11 deep
-// review run, the dispatch the polecat pane showed no On it for (gt-jwmxo).
-const scheduledSlingLine = `scheduled_slings: deep-review: created gt-yx415, slinging mol-deep-review to gastown (agent "claude-sonnet")`
-
-// The scheduled slings patrol prints "scheduled_slings: <name>: created <bead>,
-// slinging <formula> to <rig>", which is neither of the "<bead> slung to"
-// shapes, so the polecat it dispatched to showed a blank On it.
-func TestScheduledSlingLineDatesItsBead(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 10, 11, 17, 53, 4, 0, time.UTC)
-	h := NewHub(Config{
-		Feed: func() []Entry {
-			return []Entry{{
-				At: now, Rig: "town", Kind: "daemon", Class: "dispatch",
-				Text: scheduledSlingLine,
-			}}
-		},
-		Summary: func() Summary {
-			return Summary{Polecats: []Polecat{{Rig: "gastown", Name: "dementus", Bead: "gt-yx415", State: StateWorking}}}
-		},
-		Now: func() time.Time { return now.Add(20 * time.Minute) },
-	})
-	h.pollSummary()
-	h.pollFeed()
-
-	p := h.State().Polecats[0]
-	if p.Slung == nil || !p.Slung.Equal(now) || p.ElapsedSec != 1200 {
-		t.Errorf("polecat = %+v (want the scheduled sling's own time, 1200s ago)", p)
-	}
-}
-
-// A bead the feed holds no dispatch line for — a polecat dispatched before the
-// feed's window opened — is dated by the seat's own record of the hook.
-func TestOnItFallsBackToTheSeatsHookTime(t *testing.T) {
+// The seat's dispatch time is carried to the pane as its age, so the row reads
+// the same clock the overrun guard judges.
+func TestTheSeatsDispatchTimeDatesTheAge(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 11, 18, 0, 0, 0, time.UTC)
 	hooked := now.Add(-90 * time.Minute)
@@ -338,18 +307,18 @@ func TestTheSeatsDispatchTimeDatesTheAgeOverALaterFeedLine(t *testing.T) {
 	}
 }
 
-// A seat with no dispatch time of its own is dated by the feed's dispatch
-// line, and by the earliest line in the ring: a bead re-slung inside the feed's
-// window is aged from the first sling, not the latest.
-func TestTheEarliestDispatchLineDatesASeatWithNoDispatchTime(t *testing.T) {
+// A seat with no dispatch time is not dated by the feed. The feed is a rolling
+// window with no record of the bead's done events, so one of its lines can
+// belong to an earlier run; the Age is left undated rather than dated from a
+// start the overrun guard does not use (gt-tzbtf).
+func TestAFeedDispatchLineDoesNotDateASeatWithNoDispatchTime(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 11, 18, 0, 0, 0, time.UTC)
-	first, reslung := now.Add(-90*time.Minute), now.Add(-10*time.Minute)
 	h := NewHub(Config{
 		Feed: func() []Entry {
 			return []Entry{
-				{At: first, Rig: "gastown", Kind: "daemon", Text: "gt-abc slung to agate (gastown)"},
-				{At: reslung, Rig: "gastown", Kind: "daemon", Text: "gt-abc slung to nux (gastown)"},
+				{At: now.Add(-90 * time.Minute), Rig: "gastown", Kind: "daemon", Text: "gt-abc slung to agate (gastown)"},
+				{At: now.Add(-10 * time.Minute), Rig: "gastown", Kind: "daemon", Text: "gt-abc slung to nux (gastown)"},
 			}
 		},
 		Summary: func() Summary {
@@ -360,27 +329,8 @@ func TestTheEarliestDispatchLineDatesASeatWithNoDispatchTime(t *testing.T) {
 	h.pollSummary()
 	h.pollFeed()
 
-	p := h.State().Polecats[0]
-	if p.Slung == nil || !p.Slung.Equal(first) || p.ElapsedSec != 5400 {
-		t.Errorf("polecat = %+v (want the first dispatch line, 5400s ago)", p)
-	}
-}
-
-func TestDispatchBeadReadsEveryDispatchLine(t *testing.T) {
-	t.Parallel()
-	cases := []struct{ text, want string }{
-		{"gt-m36as slung to agate (gastown)", "gt-m36as"},
-		{"spec_dispatch: dispatched: gt-4k3fj.14: slung to gastown/agate on x", "gt-4k3fj.14"},
-		{scheduledSlingLine, "gt-yx415"},
-		// A tick that dispatched nothing names no bead.
-		{"scheduled_slings: deep-review: skip-recent", ""},
-		{"scheduled_slings: deep-review: failure 2: gt sling failed", ""},
-	}
-	for _, c := range cases {
-		got, ok := dispatchBead(c.text)
-		if got != c.want || ok != (c.want != "") {
-			t.Errorf("dispatchBead(%q) = %q, %t, want %q", c.text, got, ok, c.want)
-		}
+	if p := h.State().Polecats[0]; p.Slung != nil || p.ElapsedSec != 0 {
+		t.Errorf("polecat = %+v (want no dispatch time, not the feed's line)", p)
 	}
 }
 
@@ -450,19 +400,6 @@ func TestSlowPageIsDropped(t *testing.T) {
 		t.Fatal("slow page still subscribed")
 	}
 	for range sub.C { // buffered frames drain, then the channel is closed
-	}
-}
-
-func TestSlungRegexReadsBothDispatchLineShapes(t *testing.T) {
-	t.Parallel()
-	for text, want := range map[string]string{
-		"gt-m36as slung to agate (gastown)":                                   "gt-m36as",
-		"spec_dispatch: dispatched: gt-4k3fj.14: slung to gastown/agate on x": "gt-4k3fj.14",
-	} {
-		m := slungRe.FindStringSubmatch(text)
-		if m == nil || m[1] != want {
-			t.Errorf("%q -> %v, want %q", text, m, want)
-		}
 	}
 }
 

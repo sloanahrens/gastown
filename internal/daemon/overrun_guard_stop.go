@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
@@ -39,9 +40,13 @@ const (
 //  4. push the kept branch to origin; a failed push is retried every tick,
 //     and the hand-back waits for it, so its comment never names a branch that
 //     exists only in the worktree (see below for when the push is given up);
-//  5. hand the bead back (status open, assignee cleared, needs-split) so the
-//     roster no longer counts the seat; a bead found closed or re-slung to
-//     another polecat is left alone. When the kept branch's head was already
+//  5. end the bead's run (events.TypeOverrunStop) and hand the bead back
+//     (status open, assignee cleared, needs-split) so the roster no longer
+//     counts the seat; a bead found closed or re-slung to another polecat is
+//     left alone. The run's end is recorded first, while the bead is still
+//     hooked here, so the dispatch after the hand-back is a new run the guard
+//     polices afresh; a failed record fails the step and the hand-back waits
+//     for it. When the kept branch's head was already
 //     origin's head for it before step 4's push, the checkpoint committed
 //     nothing (so the worktree was clean: a commit would have moved the head),
 //     and the seat committed that head after the sling began (a seat resumed
@@ -300,7 +305,14 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		}
 	}
 
-	// 5. Hand the bead back.
+	// 5. End the bead's run, then hand it back. The stop is what ended the
+	// run, so it is recorded on the bead before the hand-back: the dispatch
+	// after it is a new run, and the guard polices that run afresh instead of
+	// reading it as this one, already stopped, and leaving it alone until a
+	// done event the hand-back never writes. The record is written while the
+	// bead is still hooked to the stopped seat, so no re-sling can land before
+	// it. A failed write fails the step and the hand-back waits for the next
+	// tick: failing open here would leave the handed-back bead unpoliced.
 	handed := seat
 	handed.Bead, handed.Branch = st.Bead, branch
 	if !st.CheckpointGaveUp && !st.PushGaveUp {
@@ -316,6 +328,13 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		notes = append(notes, fmt.Sprintf("Branch %s exists only in the seat's worktree (%s): it could not be pushed to origin (%s); "+
 			"%s stays paused until an operator pushes it and runs gt agent resume.",
 			branch, d.overrunWorktreePath(seat), st.PushFailure, who))
+	}
+	if s.endRun != nil {
+		if err := s.endRun(handed); err != nil {
+			d.logger.Printf("overrun_guard: stop %s on %s: the run's end could not be recorded, so the bead is not handed back yet: %v",
+				who, st.Bead, err)
+			return
+		}
 	}
 	if err := s.handBack(handed, elapsed, strings.Join(notes, " ")); err != nil {
 		d.logger.Printf("overrun_guard: stop %s on %s: hand-back failed: %v", who, st.Bead, err)
@@ -493,6 +512,13 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		_, err := spans.New(spans.DefaultDir(d.config.TownRoot), nil).
 			EndOpen(seat.Bead, seat.Rig+"/"+seat.Polecat, spans.ReasonOverrun, at)
 		return err
+	}
+	s.endRun = func(seat overrunSeat) error {
+		// The town's event log is the clock both the guard and the dashboard
+		// read (events.DispatchStart), so the run's end is recorded there and
+		// nowhere else (gt-tzbtf).
+		return events.LogFeedTo(d.config.TownRoot, events.TypeOverrunStop, overrunActor,
+			map[string]interface{}{"bead": seat.Bead})
 	}
 	s.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)

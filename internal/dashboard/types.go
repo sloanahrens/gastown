@@ -96,10 +96,12 @@ type Polecat struct {
 	Priority *int     `json:"priority,omitempty"`
 	Labels   []string `json:"labels,omitempty"`
 
-	// Slung is when the seat's bead was dispatched — Hooked, else the feed's
-	// dispatch line — and ElapsedSec is that time read against the hub's
+	// Slung is when the seat's bead was dispatched (Hooked, when the dispatch
+	// record dates it) and ElapsedSec is that time read against the hub's
 	// clock. It is the overrun guard's clock for the bead, so the Age column
-	// and the guard agree (gt-tzbtf). The hub fills both.
+	// and the guard agree; the feed's dispatch lines are not used, since that
+	// window cannot tell one run of a bead from the next (gt-tzbtf). The hub
+	// fills both.
 	Slung      *time.Time `json:"slung,omitempty"`
 	ElapsedSec int64      `json:"elapsed_sec,omitempty"`
 	// StateSince is when the seat entered the state State names, for the one
@@ -108,11 +110,12 @@ type Polecat struct {
 	// (gt-iv7jf). Empty for every other state, whose clock is Slung.
 	StateSince *time.Time `json:"state_since,omitempty"`
 	// Hooked is when the seat's bead was dispatched: the bead's first sling
-	// since its last done event, the overrun guard's clock for the bead. A
-	// bead the events log does not dispatch falls back to the agent bead's
-	// last write, which gt sling makes; a later write on that bead — a submit,
-	// a patrol clearing the hook — dates the seat rather than the dispatch, so
-	// the fallback can only read too short (gt-jwmxo, gt-tzbtf).
+	// since its last run-end event (gt done, or the overrun guard's stop), the
+	// overrun guard's clock for the bead. A bead the events log does not
+	// dispatch falls back to the agent bead's last write, which gt sling makes;
+	// a later write on that bead — a submit, a patrol clearing the hook — dates
+	// the seat rather than the dispatch, so the fallback can only read too
+	// short (gt-jwmxo, gt-tzbtf).
 	Hooked     *time.Time `json:"hooked,omitempty"`
 	HasSession bool       `json:"has_session"`
 	LastActive *time.Time `json:"last_active,omitempty"`
