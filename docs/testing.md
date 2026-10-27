@@ -103,6 +103,7 @@ A test that needs a Dolt database on the shared test container leases one from t
 |---|---|
 | `no-sleep` | call `time.Sleep`, `time.After`, `time.AfterFunc`, `time.NewTimer`, `time.NewTicker` or `time.Tick` |
 | `no-env` | call `os.Setenv`, `os.Unsetenv` or `t.Setenv` |
+| `no-host-env` | read the developer's environment or home directory: call `os.Getenv` or `os.LookupEnv` on `SHELL`/`HOME` or on a name the scan cannot resolve to a string constant, call `os.UserHomeDir`, `os.UserConfigDir` or `os.UserCacheDir`, or use any of them as a value rather than calling it — as a call argument, a composite literal's value, an assignment or a return — since a seam handed `os.Getenv` reads the same environment a call does. Inject the value, or declare the read |
 | `no-chdir` | call `os.Chdir` or `t.Chdir` |
 | `no-skip` | call `t.Skip`, `t.Skipf` or `t.SkipNow` |
 | `no-subprocess` | run `exec.Command` on anything but `git`; a package in `gitfree.txt` may not run git either (the `no-git` rule, [below](#no-git-in-a-converted-packages-unit-tier)) |

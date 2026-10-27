@@ -305,8 +305,9 @@ rig is skipped.
 
 ## Role Directives and Formula Overlays
 
-Directives and overlays extend the property layer model to agent behavior.
-They follow the same rig > town > system precedence as other config.
+Directives extend the property layer model to agent behavior, with the same
+rig > town > system precedence as other config. Overlays add a single
+town-wide layer and no rig layer.
 
 ### Directives (Behavioral Policy)
 
@@ -365,7 +366,7 @@ Unlike directives, overlays have no rig layer: there is one overlay dir
 | Rig properties | First non-nil wins (override) | Standard config lookup |
 | Integer properties | Values stack (additive) | Allows adjustments |
 | Role directives | Concatenate (rig last) | Additive policy; rig gets last word |
-| Formula overlays | Rig replaces town | Step mods can conflict; full replacement is safer |
+| Formula overlays | One town-wide layer; no rig copy | A single copy leaves nothing to reconcile (gt-fd2cu.3) |
 
 See [directives-and-overlays.md](directives-and-overlays.md) for the full
 reference with TOML format, examples, and `gt doctor` integration.
