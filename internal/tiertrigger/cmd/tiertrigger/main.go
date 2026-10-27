@@ -59,19 +59,24 @@ type env struct {
 }
 
 // repo is the repository the command reads: HEAD, the change since a recorded
-// commit, the worktree the tests build, and the checkout's status.
+// commit, and the checkout's status.
 type repo interface {
-	tiertrigger.Git
 	Rev(ref string) (string, error)
+	DiffNameOnly(base, head string) ([]string, error)
 	Status() (*git.GitStatus, error)
 }
 
-// gitRepo is the real repository, with the worktree paths the due decision
-// reads taken from the checkout's status.
-type gitRepo struct{ *git.Git }
+// dueGit answers the due decision's reads from the command's repository. A
+// package's change since its record is the commits since that commit plus the
+// paths the checkout has uncommitted, which the container tests build too.
+type dueGit struct{ r repo }
 
-func (g gitRepo) Worktree() ([]string, error) {
-	status, err := g.Git.Status()
+func (g dueGit) DiffNameOnly(base, head string) ([]string, error) {
+	return g.r.DiffNameOnly(base, head)
+}
+
+func (g dueGit) Worktree() ([]string, error) {
+	status, err := g.r.Status()
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +111,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return runWith(args, env{
 		town:     os.Getenv("GT_TOWN_ROOT"),
 		now:      time.Now(),
-		repo:     gitRepo{git.NewGit(".")},
+		repo:     git.NewGit("."),
 		files:    tiertrigger.OSFiles{},
 		docker:   dockerList,
 		tested:   os.Getenv("TIER_SWEEP_TESTED"),
@@ -145,9 +150,6 @@ func listDeps(run func(args ...string) ([]byte, error), getwd func() (string, er
 	// directory with both spellings, keeps every repo import from reading as
 	// the module cache — which would silently shrink the trigger set to the
 	// package's own directory (om, gt-e69b2).
-	if root, err = filepath.Abs(root); err != nil {
-		return nil, fmt.Errorf("resolve the repo root: %w", err)
-	}
 	if root, err = filepath.EvalSymlinks(root); err != nil {
 		return nil, fmt.Errorf("resolve the repo root: %w", err)
 	}
@@ -321,9 +323,6 @@ func (e env) begin(tier string) error {
 // and a record that keeps failing would otherwise turn every sweep into a full
 // container run with nothing said about why.
 func (e env) notDue(tier string, stderr io.Writer) ([]string, error) {
-	if e.town == "" {
-		return nil, errors.New("GT_TOWN_ROOT is unset")
-	}
 	pkgs, err := e.packages()
 	if err != nil {
 		return nil, err
@@ -336,7 +335,7 @@ func (e env) notDue(tier string, stderr io.Writer) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	due, unreadable := tiertrigger.Due(state, pkgs, e.repo, e.now, loc)
+	due, unreadable := tiertrigger.Due(state, pkgs, dueGit{r: e.repo}, e.now, loc)
 	for _, name := range due {
 		if err, ok := unreadable[name]; ok {
 			fmt.Fprintf(stderr, "tiertrigger: skips %s: %s: %v: running it\n", tier, name, err)

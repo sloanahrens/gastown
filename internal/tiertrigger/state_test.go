@@ -211,12 +211,14 @@ func TestRunPath(t *testing.T) {
 	}
 }
 
-// TestOSFilesRemoveFile pins the removal's rule: the file goes, and a file that
-// is already gone is not a failure.
+// TestOSFilesRemoveFile pins the removal's rule: the file goes, a file that is
+// already gone is not a failure, and a removal that fails says so rather than
+// leaving a caller thinking the file is gone.
 func TestOSFilesRemoveFile(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "run.json")
-	if err := (OSFiles{}).WriteFile(path, []byte("{}")); err != nil {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run.json")
+	if err := (OSFiles{}).WriteFile(path, []byte("x\n")); err != nil {
 		t.Fatalf("WriteFile(): %v", err)
 	}
 	if err := (OSFiles{}).RemoveFile(path); err != nil {
@@ -227,6 +229,15 @@ func TestOSFilesRemoveFile(t *testing.T) {
 	}
 	if err := (OSFiles{}).RemoveFile(path); err != nil {
 		t.Errorf("RemoveFile() of a file that is gone = %v; want nil", err)
+	}
+	// A directory with a file in it is not removable, and that failure must
+	// come back rather than read as done.
+	holding := filepath.Join(dir, "holding")
+	if err := (OSFiles{}).WriteFile(filepath.Join(holding, "f"), []byte("x\n")); err != nil {
+		t.Fatalf("WriteFile(%s): %v", holding, err)
+	}
+	if err := (OSFiles{}).RemoveFile(holding); err == nil {
+		t.Errorf("RemoveFile() of the directory %s holding a file returned nil", holding)
 	}
 }
 
@@ -249,9 +260,9 @@ func TestRunRoundTrip(t *testing.T) {
 		t.Errorf("LoadRun(missing) = %v; want ErrNoRun", err)
 	}
 	for name, files := range map[string]*fakeFiles{
-		"unparseable": {files: map[string][]byte{"/r.json": []byte("{")}},
-		"no commit":   {files: map[string][]byte{"/r.json": []byte("{}")}},
-		"unreadable":  {readErr: fs.ErrPermission},
+		"no commit":  {files: map[string][]byte{"/r.json": []byte("\n")}},
+		"empty file": {files: map[string][]byte{"/r.json": nil}},
+		"unreadable": {readErr: fs.ErrPermission},
 	} {
 		if _, err := LoadRun(files, "/r.json"); err == nil {
 			t.Errorf("LoadRun(%s) returned nil", name)

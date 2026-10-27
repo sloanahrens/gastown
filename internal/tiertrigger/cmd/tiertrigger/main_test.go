@@ -98,13 +98,16 @@ type fakeRepo interface {
 // decision compares the recorded commit with HEAD. Each read fails on its own,
 // because the commands read different ones at different points in a run.
 type watchedRepo struct {
-	repo        fakeRepo
-	revErr      error
-	diffErr     error
-	statusErr   error
-	worktreeErr error
-	revs        []string
-	diffs       []string
+	repo      fakeRepo
+	revErr    error
+	diffErr   error
+	statusErr error
+	// statusFailFrom makes every Status call from the nth on fail, so a case can
+	// break the checkout after the sweep has saved how the run began.
+	statusFailFrom int
+	statusCalls    int
+	revs           []string
+	diffs          []string
 }
 
 func (w *watchedRepo) Rev(ref string) (string, error) {
@@ -124,23 +127,14 @@ func (w *watchedRepo) DiffNameOnly(base, head string) ([]string, error) {
 }
 
 func (w *watchedRepo) Status() (*git.GitStatus, error) {
+	w.statusCalls++
 	if w.statusErr != nil {
 		return nil, w.statusErr
 	}
+	if w.statusFailFrom > 0 && w.statusCalls >= w.statusFailFrom {
+		return nil, errors.New("index.lock exists")
+	}
 	return w.repo.Status()
-}
-
-// Worktree answers as the production repository does, from the checkout's
-// status.
-func (w *watchedRepo) Worktree() ([]string, error) {
-	if w.worktreeErr != nil {
-		return nil, w.worktreeErr
-	}
-	status, err := w.Status()
-	if err != nil {
-		return nil, err
-	}
-	return worktreePaths(status), nil
 }
 
 // head is the commit the checkout is on.
@@ -383,6 +377,31 @@ func TestSkips(t *testing.T) {
 			wantWarn: []string{"index.lock exists", "every container package runs"},
 			wantCode: 1,
 		},
+		{
+			name: "a HEAD read that fails runs every package",
+			setup: func(w *world) {
+				w.watch.revErr = errors.New("no commits yet")
+			},
+			wantWarn: []string{"read HEAD", "every container package runs"},
+			wantCode: 1,
+		},
+		{
+			// The sweep saved how the run began, then the status read broke: each
+			// package's uncommitted-change read fails, and a package whose change
+			// set cannot be read runs.
+			name: "a checkout that becomes unreadable during the decision runs every package",
+			setup: func(w *world) {
+				head := w.head()
+				w.seedState(map[string]tiertrigger.Record{
+					"./internal/beads":    {Commit: head, At: at(2026, 10, 25, 4, 0, 0)},
+					"./internal/testutil": {Commit: head, At: at(2026, 10, 25, 4, 0, 0)},
+				})
+				w.watch.statusFailFrom = 2
+			},
+			want:     "",
+			wantWarn: []string{"index.lock exists", "./internal/beads", "running it"},
+			wantDiff: 2,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -536,7 +555,7 @@ func TestRecord(t *testing.T) {
 			name: "a save that fails warns",
 			setup: func(w *world) {
 				// The run began cleanly; only writing the record fails.
-				w.files.files[w.runPath()] = []byte(`{"commit": "` + w.head() + `"}`)
+				w.files.files[w.runPath()] = []byte(w.head() + "\n")
 				w.files.writeErr = fs.ErrPermission
 			},
 			noRun:    true,
@@ -955,6 +974,14 @@ func TestListDeps(t *testing.T) {
 			untagged: f.dir("internal/beads") + "\n",
 			getwd:    func() (string, error) { return filepath.Join(f.root, "gone"), nil },
 			wantErr:  "resolve the repo root",
+		},
+		{
+			// The go tool's directories are absolute, so a root that stays
+			// relative cannot be compared with them: unknown runs the package.
+			name:     "a relative repo root fails the decision",
+			untagged: f.dir("internal/beads") + "\n",
+			getwd:    func() (string, error) { return "testdata", nil },
+			wantErr:  "locate",
 		},
 	}
 	for _, tc := range tests {

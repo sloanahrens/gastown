@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
@@ -31,8 +32,8 @@ var ErrNoRun = errors.New("no record of how the run began")
 // the run tested something other than the commit) from files the run itself
 // dirtied, which say nothing about what it tested (om, gt-e69b2).
 type Run struct {
-	Commit string   `json:"commit"`
-	Dirty  []string `json:"dirty,omitempty"`
+	Commit string
+	Dirty  []string
 }
 
 // RunPath is <town>/.runtime/tiertrigger/<tier>.run.json, the run's start state.
@@ -41,13 +42,12 @@ func RunPath(townRoot, tier string) string {
 	return filepath.Join(constants.TownRuntimePath(townRoot), "tiertrigger", tier+".run.json")
 }
 
-// SaveRun writes r to path through f.
+// SaveRun writes r to path through f: the commit on the first line, then one
+// differing path per line. The file is read by this package alone, and a plain
+// list keeps the format from failing on its own contents.
 func SaveRun(f Files, path string, r Run) error {
-	data, err := json.MarshalIndent(r, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := f.WriteFile(path, append(data, '\n')); err != nil {
+	lines := append([]string{r.Commit}, r.Dirty...)
+	if err := f.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n")); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
@@ -63,14 +63,11 @@ func LoadRun(f Files, path string) (Run, error) {
 	if err != nil {
 		return Run{}, fmt.Errorf("read %s: %w", path, err)
 	}
-	var r Run
-	if err := json.Unmarshal(data, &r); err != nil {
-		return Run{}, fmt.Errorf("parse %s: %w", path, err)
-	}
-	if r.Commit == "" {
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if lines[0] == "" {
 		return Run{}, fmt.Errorf("parse %s: no commit", path)
 	}
-	return r, nil
+	return Run{Commit: lines[0], Dirty: lines[1:]}, nil
 }
 
 // Record is one package's last passing container run: the commit its tests ran
