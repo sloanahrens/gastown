@@ -471,9 +471,9 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 			now := time.Now()
 			stages, rejects := om.trendInputs(trendWindowStart(now))
 			tr := buildTrend(now, recs.get(), stages, rejects, loads.points())
-			live := runningRows(om.running(now.Add(-trendHours*time.Hour)), rigOfBead, polecatFor)
-			title := func(rig, id string) string { return beadReads.title(rig, id) }
 			who := submitters.get()
+			live := runningRows(om.running(now.Add(-trendHours*time.Hour)), rigOfBead, livePolecatName(polecatFor, who))
+			title := func(rig, id string) string { return beadReads.title(rig, id) }
 			recent := buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, title, who, recentLandingRows)
 			tr.Recent = withBackoffRows(recent, backoff.get(), title, who)
 			return tr

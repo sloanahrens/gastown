@@ -332,6 +332,22 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 	return rows
 }
 
+// livePolecatName names the builder of a running landing. The bead's holder is
+// the polecat when a polecat holds it; a crew member (or a bead nobody holds)
+// names no polecat, and the row then names whoever submitted the bead, the same
+// name a rejected row draws. Without this fallback the page drew the route
+// (the rig's name) in the By cell for a crew-held landing (gt-3hcp9 at 13:52).
+func livePolecatName(polecatFor, who func(rig, bead string) string) func(rig, bead string) string {
+	return func(rig, bead string) string {
+		if polecatFor != nil {
+			if p := polecatFor(rig, bead); p != "" {
+				return p
+			}
+		}
+		return landingName(who, rig, bead)
+	}
+}
+
 // runningRows is the landings in flight as Landings rows, newest merge first.
 // A live row carries what the merge line holds and nothing the landing has not
 // logged yet: no verdict, score or stage times, because the stages line is
