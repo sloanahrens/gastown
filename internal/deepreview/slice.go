@@ -25,8 +25,8 @@ type Slice struct {
 	// Records counts the rows and Bytes sums their sizes.
 	Records int
 	Bytes   int
-	// Skipped counts the candidates the cut left out; the next run reviews
-	// them from Cursor onward.
+	// Skipped counts the candidates the cut left out. They all follow Cursor,
+	// which this run reviewed, so the next run resumes at the first of them.
 	Skipped int
 	// Cursor is the last included path, never one the cut skipped.
 	Cursor string
