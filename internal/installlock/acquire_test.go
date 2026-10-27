@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // acquireClock is the clock these tests arm: Sleep advances it, so waiting out
@@ -148,5 +150,31 @@ func TestAcquireErrorsWhenTheLockFileCannotBeOpened(t *testing.T) {
 	}
 	if errors.Is(err, ErrBusy) {
 		t.Errorf("got ErrBusy for an unopenable lock file: %v", err)
+	}
+}
+
+// The release drops the lock even while another descriptor still holds the
+// open file description, the way a child forked mid-hold does until it execs:
+// flock belongs to the description, so closing the lock file alone would leave
+// the lock held (gt-ubj9e). The test dups the descriptor in place of the fork,
+// so the case does not depend on the timing of a real one.
+func TestReleaseDropsTheLockWhileADuplicateDescriptorIsOpen(t *testing.T) {
+	t.Parallel()
+	lock := filepath.Join(t.TempDir(), "install-gt.lock")
+
+	f, err := acquireFile(lock, time.Second, time.Now, time.Sleep)
+	if err != nil {
+		t.Fatalf("acquireFile: %v", err)
+	}
+	dup, err := unix.Dup(int(f.Fd()))
+	if err != nil {
+		t.Fatalf("dup: %v", err)
+	}
+	defer func() { _ = unix.Close(dup) }()
+
+	unlockAndClose(f)
+
+	if !acquireFree(t, lock) {
+		t.Error("the lock was still held after the release while a duplicate descriptor was open")
 	}
 }
