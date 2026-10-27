@@ -155,66 +155,51 @@ const submissionNameRows = 500
 
 // dashSubmitters answers who submitted a bead's landing, for the Landings rows
 // whose own record carries no branch: a rejected landing, and one the worker is
-// retrying. The names come from the records the landing worker writes for a
-// submission — the first-sight log's branch (gt-l7ciu) and the om review log's
-// agent — and never from the bead, because a rejection reassigns the bead or
-// resets it to open, so its current holder is not who submitted it (gt-gclus).
+// retrying. The name comes from the first-sight submission log's branch
+// (gt-l7ciu), and never from the bead, because a rejection reassigns the bead
+// or resets it to open, so its current holder is not who submitted it
+// (gt-gclus). It does not come from the om review log either: that record's
+// agent field is the model the seat ran on ("claude-haiku"), not the polecat or
+// crew member the By column says built the landing, so a row with no branch
+// draws the dash rather than a model name.
 type dashSubmitters struct {
 	townRoot string
 
-	mu     sync.Mutex
-	stamps map[string]fileStamp
-	names  func(rig, bead string) string
+	mu    sync.Mutex
+	stamp fileStamp
+	read  bool
+	names func(rig, bead string) string
 }
 
 func newDashSubmitters(townRoot string) *dashSubmitters {
-	return &dashSubmitters{townRoot: townRoot, stamps: map[string]fileStamp{}}
+	return &dashSubmitters{townRoot: townRoot}
 }
 
-// get returns the name lookup, re-reading the records only when one of the
-// files moved. A file that cannot be read names no one: the rows it would have
-// named draw the page's dash, which says "not known" rather than naming
-// whoever holds the bead now.
-func (s *dashSubmitters) get(now time.Time) func(rig, bead string) string {
+// get returns the name lookup, re-reading the log only when it moved. A log
+// that cannot be read names no one: the rows it would have named draw the
+// page's dash, which says "not known" rather than naming whoever holds the
+// bead now, and the next poll tries the read again.
+func (s *dashSubmitters) get() func(rig, bead string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	subPath := land.SubmissionsSeenPath(s.townRoot)
-	revFile := land.TownReviewsFile(s.townRoot)
-	paths := []string{subPath, revFile.Path}
-	changed := len(s.stamps) != len(paths)
-	next := make(map[string]fileStamp, len(paths))
-	for _, p := range paths {
-		st, _ := stampFile(p)
-		next[p] = st
-		if old, ok := s.stamps[p]; !ok || old != st {
-			changed = true
-		}
-	}
-	if changed {
+	st, _ := stampFile(subPath)
+	if !s.read || st != s.stamp {
 		subs, err := land.ReadRecentSubmissionRecords(subPath, submissionNameRows)
 		if err != nil {
-			// A first-sight log that cannot be read is not a submission by no
-			// one; the rows it would have named are missing their name, not
-			// given a wrong one.
 			subs = nil
 		}
-		revs, err := revFile.Since(now.Add(-trendHours * time.Hour))
-		if err != nil {
-			revs = nil
-		}
-		s.names = landingNameLookup(subs, revs)
-		s.stamps = next
+		s.names, s.stamp, s.read = landingNameLookup(subs), st, true
 	}
 	return s.names
 }
 
 // landingNameLookup builds the lookup the Landings rows ask: the polecat or
 // crew member the bead's newest submission names in its branch
-// ("polecat/<name>/..." or "crew/<name>/..."), else the agent the bead's newest
-// om review ran on, else "" — the page draws that as a dash. A resubmission
-// supersedes an earlier branch, so the name is the one on the last submitted
-// branch.
-func landingNameLookup(subs []land.SubmissionRecord, revs []land.ReviewRecord) func(rig, bead string) string {
+// ("polecat/<name>/..." or "crew/<name>/..."), else "" — the page draws that as
+// a dash. A resubmission supersedes an earlier branch, so the name is the one
+// on the last submitted branch.
+func landingNameLookup(subs []land.SubmissionRecord) func(rig, bead string) string {
 	type beadKey struct{ rig, bead string }
 	branches := make(map[beadKey]string, len(subs))
 	for _, s := range subs {
@@ -224,18 +209,8 @@ func landingNameLookup(subs []land.SubmissionRecord, revs []land.ReviewRecord) f
 			branches[beadKey{s.Rig, s.Bead}] = s.Branch
 		}
 	}
-	agents := make(map[beadKey]string, len(revs))
-	for _, r := range revs {
-		if a := strings.TrimSpace(r.Agent); a != "" {
-			agents[beadKey{r.Rig, r.BeadID}] = a
-		}
-	}
 	return func(rig, bead string) string {
-		k := beadKey{rig, bead}
-		if name := polecatOfBranch(branches[k]); name != "" {
-			return name
-		}
-		return agents[k]
+		return polecatOfBranch(branches[beadKey{rig, bead}])
 	}
 }
 
@@ -261,7 +236,7 @@ func landingName(who func(rig, bead string) string, rig, bead string) string {
 // (gt-yxl22) — comes with it, for the pane's Polecat column (gt-90wi1). who
 // names who submitted a row whose record carries no branch: a rejection keeps
 // its branch on the bead's rejection note, which a row does not read, so the
-// name comes from the submission and review records instead (gt-gclus).
+// name comes from the first-sight submission log instead (gt-gclus).
 func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, who func(rig, bead string) string, limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow

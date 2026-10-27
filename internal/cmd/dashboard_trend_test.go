@@ -418,11 +418,10 @@ func TestPolecatOfBranch(t *testing.T) {
 	}
 }
 
-// A rejected landing's By column names the agent or polecat that submitted it:
-// the one on its last submitted branch, "polecat/<name>/..." or
-// "crew/<name>/...". The name is read off the submission records, never off the
-// bead, so the reassignment and the reset to open a rejection makes cannot
-// change it — a row whose record names a different holder still shows the
+// A rejected landing's By column names the polecat or crew member that
+// submitted it: the one on its last submitted branch, "polecat/<name>/..." or
+// "crew/<name>/...". A bead whose submission names no branch, and one with no
+// submission at all, draws the dash — never a model name, which is not a
 // submitter (gt-gclus).
 func TestBuildRecentLandingsNamesARejectedRowFromItsBranch(t *testing.T) {
 	t.Parallel()
@@ -432,22 +431,16 @@ func TestBuildRecentLandingsNamesARejectedRowFromItsBranch(t *testing.T) {
 		{Rig: "gastown", Bead: "gt-resubmitted", Branch: "polecat/mica/gt-resubmitted+old", SeenAt: now.Add(-3 * time.Hour)},
 		{Rig: "gastown", Bead: "gt-resubmitted", Branch: "polecat/agate/gt-resubmitted+new", SeenAt: now.Add(-time.Hour)},
 		{Rig: "gastown", Bead: "gt-crew", Branch: "crew/heron/gt-js6di-merge", SeenAt: now.Add(-2 * time.Hour)},
-	}
-	// The review log's agent is the fallback for a bead with no branch, and the
-	// holder a bead read would name is not the name: gt-resubmitted's review
-	// ran on another agent, and the row must not show it.
-	revs := []land.ReviewRecord{
-		{Rig: "gastown", BeadID: "gt-resubmitted", Agent: "claude-sonnet", Verdict: "request_changes", At: now.Add(-time.Hour)},
-		{Rig: "gastown", BeadID: "gt-agent", Agent: "claude-haiku", Verdict: "request_changes", At: now.Add(-time.Hour)},
+		{Rig: "gastown", Bead: "gt-nobranch", Branch: "", SeenAt: now.Add(-2 * time.Hour)},
 	}
 	rejs := []omRejection{
 		{At: now.Add(-50 * time.Minute), Bead: "gt-resubmitted", Kind: "review"},
 		{At: now.Add(-50 * time.Minute), Bead: "gt-crew", Kind: "conflict"},
-		{At: now.Add(-50 * time.Minute), Bead: "gt-agent", Kind: "review"},
+		{At: now.Add(-50 * time.Minute), Bead: "gt-nobranch", Kind: "review"},
 		{At: now.Add(-50 * time.Minute), Bead: "gt-unknown", Kind: "review"},
 	}
 
-	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNameLookup(subs, revs), 30)
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNameLookup(subs), 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -455,7 +448,7 @@ func TestBuildRecentLandingsNamesARejectedRowFromItsBranch(t *testing.T) {
 	for bead, want := range map[string]string{
 		"gt-resubmitted": "agate",
 		"gt-crew":        "heron",
-		"gt-agent":       "claude-haiku",
+		"gt-nobranch":    "",
 		"gt-unknown":     "",
 	} {
 		if got := byBead[bead].Polecat; got != want {
@@ -472,26 +465,60 @@ func TestBuildRecentLandingsNamesARejectedRowFromItsBranch(t *testing.T) {
 	}
 }
 
+// A rejection reassigns the bead, so by the time the row is drawn the bead's
+// holder is a different polecat: the running row the caller built names the new
+// holder (mica), and the rejected row still names the agent on the last
+// submitted branch (agate). Reading the bead instead would name the wrong one
+// (gt-gclus).
+func TestAReassignedBeadsRejectedRowStillNamesItsSubmitter(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 26, 20, 30, 0, 0, time.UTC)
+	subs := []land.SubmissionRecord{
+		{Rig: "gastown", Bead: "gt-reassigned", Branch: "polecat/agate/gt-reassigned+1", SeenAt: now.Add(-2 * time.Hour)},
+	}
+	// The bead is reassigned and resubmitted by mica: the running row is the
+	// holder the seat cache names, and the rejection is the earlier attempt.
+	live := runningRows(
+		[]omMerge{{At: now.Add(-10 * time.Minute), Bead: "gt-reassigned"}},
+		func(string) string { return "gastown" },
+		func(string, string) string { return "mica" },
+	)
+	rejs := []omRejection{{At: now.Add(-time.Hour), Bead: "gt-reassigned", Kind: "review"}}
+
+	rows := buildRecentLandings(now, nil, nil, rejs, live, nil, nil, landingNameLookup(subs), 30)
+	var rejected, running *dashboard.LandingRow
+	for i := range rows {
+		switch rows[i].Outcome {
+		case "rejected":
+			rejected = &rows[i]
+		case "running":
+			running = &rows[i]
+		}
+	}
+	if running == nil || running.Polecat != "mica" {
+		t.Fatalf("running row = %+v, want the bead's new holder mica", running)
+	}
+	if rejected == nil || rejected.Polecat != "agate" {
+		t.Fatalf("rejected row = %+v, want the submitter on the last submitted branch, agate", rejected)
+	}
+}
+
 // A landed row's By is unchanged: it keeps the polecat or crew member its own
-// landing record's branch names, and takes no name from the submission or
-// review records, which may name an earlier submission of the bead or the
-// agent the seat ran on. A landed record with no branch stays a dash (gt-gclus).
+// landing record's branch names, and takes no name from the submission log,
+// which may name an earlier submission of the bead. A landed record with no
+// branch stays a dash (gt-gclus).
 func TestBuildRecentLandingsLeavesALandedRowsByAlone(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 26, 20, 30, 0, 0, time.UTC)
 	subs := []land.SubmissionRecord{
 		{Rig: "gastown", Bead: "gt-landed", Branch: "polecat/agate/gt-landed+1", SeenAt: now.Add(-2 * time.Hour)},
 	}
-	revs := []land.ReviewRecord{
-		{Rig: "gastown", BeadID: "gt-landed", Agent: "claude-haiku", Verdict: "approve", At: now.Add(-time.Hour)},
-		{Rig: "gastown", BeadID: "gt-nobranch", Agent: "claude-haiku", Verdict: "approve", At: now.Add(-time.Hour)},
-	}
 	recs := []omRecord{
 		{Record: landings.Record{Bead: "gt-landed", Rig: "gastown", Branch: "crew/heron/gt-landed", OMVerdict: "approve", LandedAt: now.Add(-time.Hour)}},
 		{Record: landings.Record{Bead: "gt-nobranch", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Hour)}},
 	}
 
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNameLookup(subs, revs), 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNameLookup(subs), 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -504,14 +531,14 @@ func TestBuildRecentLandingsLeavesALandedRowsByAlone(t *testing.T) {
 	}
 }
 
-// The names the dashboard shows come from the records the landing worker
-// writes, at the paths it writes them to: the first-sight submission log and
-// the om review log. The beads are never read, so no reassignment can change
-// what a row says (gt-gclus).
-func TestDashSubmittersReadsTheLandingWorkersRecords(t *testing.T) {
+// The names the dashboard shows come from the first-sight submission log, at
+// the path the landing worker writes it to. The beads are never read, so no
+// reassignment can change what a row says. The om review log is not a source:
+// its agent field is the model the seat ran on, which the By column must not
+// show as the submitter (gt-gclus).
+func TestDashSubmittersReadsTheSubmissionLog(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	now := time.Date(2026, 10, 26, 21, 0, 0, 0, time.UTC)
 
 	subPath := land.SubmissionsSeenPath(town)
 	if err := os.MkdirAll(filepath.Dir(subPath), 0o700); err != nil {
@@ -523,6 +550,8 @@ func TestDashSubmittersReadsTheLandingWorkersRecords(t *testing.T) {
 	if err := os.WriteFile(subPath, []byte(subs), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A review record names the model gt-agent's seat ran on. It is not a
+	// submitter, so the lookup names no one for that bead.
 	revFile := land.TownReviewsFile(town)
 	if err := os.MkdirAll(filepath.Dir(revFile.Path), 0o700); err != nil {
 		t.Fatal(err)
@@ -533,16 +562,48 @@ func TestDashSubmittersReadsTheLandingWorkersRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	who := newDashSubmitters(town).get(now)
+	who := newDashSubmitters(town).get()
 	for bead, want := range map[string]string{
 		"gt-rejected": "heron",
 		"gt-other":    "mica",
-		"gt-agent":    "claude-haiku",
+		"gt-agent":    "",
 		"gt-nobody":   "",
 	} {
 		if got := who("gastown", bead); got != want {
 			t.Errorf("%s By = %q, want %q", bead, got, want)
 		}
+	}
+}
+
+// The lookup follows the log: once a bead is resubmitted the row names the
+// newest submitter, so a cached lookup that ignored the file's growth would
+// keep showing the old name (gt-gclus).
+func TestDashSubmittersRereadsWhenTheLogGrows(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	subPath := land.SubmissionsSeenPath(town)
+	if err := os.MkdirAll(filepath.Dir(subPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	first := `{"seen_at":"2026-10-26T19:00:00Z","bead":"gt-rework","rig":"gastown","branch":"polecat/agate/gt-rework+1","head":"1111aaaa"}
+`
+	if err := os.WriteFile(subPath, []byte(first), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := newDashSubmitters(town)
+	if got := s.get()("gastown", "gt-rework"); got != "agate" {
+		t.Fatalf("By = %q after the first submission, want agate", got)
+	}
+
+	// The bead comes back from rework and mica resubmits it: the last submitted
+	// branch is now mica's.
+	second := first + `{"seen_at":"2026-10-26T20:00:00Z","bead":"gt-rework","rig":"gastown","branch":"polecat/mica/gt-rework+2","head":"3333cccc"}
+`
+	if err := os.WriteFile(subPath, []byte(second), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.get()("gastown", "gt-rework"); got != "mica" {
+		t.Errorf("By = %q after the resubmission, want mica: the lookup must re-read a log that grew", got)
 	}
 }
 

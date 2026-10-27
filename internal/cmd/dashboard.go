@@ -385,8 +385,8 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	}
 	recs := newDashLandings(townRoot)
 	// Who submitted a landing, for the rows whose own record names no branch:
-	// read from the landing worker's submission and review records, never from
-	// the bead, which a rejection reassigns (gt-gclus).
+	// read from the landing worker's submission record, never from the bead,
+	// which a rejection reassigns (gt-gclus).
 	submitters := newDashSubmitters(townRoot)
 	seatCache := newDashSeatCache()
 	// Who holds a bead, read once per row: the Landings pane's live rows and
@@ -459,7 +459,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 			tr := buildTrend(now, recs.get(), stages, rejects, loads.points())
 			live := runningRows(om.running(now.Add(-trendHours*time.Hour)), rigOfBead, polecatFor)
 			title := func(rig, id string) string { return beadReads.title(rig, id) }
-			who := submitters.get(now)
+			who := submitters.get()
 			recent := buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, title, who, recentLandingRows)
 			tr.Recent = withBackoffRows(recent, backoff.get(), title, who)
 			return tr
