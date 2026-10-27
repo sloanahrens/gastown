@@ -1544,8 +1544,8 @@ func TestBirdOwnedAssignee(t *testing.T) {
 	}
 }
 
-// TestRejectionAlertReturnsADeliveryThatFailed: the lander logs a refused
-// attention item rather than failing the rejection, so the daemon's adapter
+// TestRejectionAlertReturnsADeliveryThatFailed: the lander retries a refused
+// attention item on its next pass and reports it, so the daemon's adapter
 // hands the delivery error back instead of swallowing it (gt-h4cvi).
 func TestRejectionAlertReturnsADeliveryThatFailed(t *testing.T) {
 	t.Parallel()

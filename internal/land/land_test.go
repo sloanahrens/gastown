@@ -403,69 +403,13 @@ func TestRejectReleasesAPolecatsBead(t *testing.T) {
 	}
 }
 
-// TestBirdRejectionAlertIsNotDuplicated: a pass that finds the rejection block
-// an earlier pass wrote finishes it rather than recording it again, and the
-// item it raises is keyed by the bead — so a repeated verdict on gt-abc
-// updates that one item instead of minting a second, however many times the
-// bead comes back ready (gt-h4cvi).
-func TestBirdRejectionAlertIsNotDuplicated(t *testing.T) {
-	t.Parallel()
-	f := newLandFixture(t)
-	const owner = "town/crew/robin"
-	// The interrupted pass's block, in the shape the earlier pass left: the
-	// bead is ready again and nothing requeued it, so rejectionAlreadyRecorded
-	// reads this block as unfinished and this rejection as its completion.
-	first := RejectionNote{Attempt: 1, Kind: string(RejectGate), Reason: "the gate failed",
-		Branch: f.work.Branch, Target: "main", MR: "gt-abc", Head: f.work.Head}
-	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "in_progress", Type: "task",
-		Assignee: owner, Labels: []string{LabelReadyToLand},
-		Notes: FormatReadyNote(f.work) + "\n" + FormatRejectionNote(first)})
-	f.gate.fn = func(string) GateResult {
-		return GateResult{Passed: false, Steps: []StepResult{{Name: "test", ExitCode: 1}}}
-	}
-	// The sink stands in for the notify layer, which keys an attention item by
-	// its fingerprint: two deliveries of one key are one item.
-	items := map[string]string{}
-	l := f.lander()
-	l.BirdOwned = func(assignee string) bool { return assignee == owner }
-	l.RejectionAlert = func(key, message string) error {
-		items[key] = message
-		return nil
-	}
-
-	_, err := l.Land(context.Background(), f.work)
-	var rej *Rejection
-	if !errors.As(err, &rej) || rej.RecordErr != nil {
-		t.Fatalf("Land = %T %v, want the completed rejection", err, err)
-	}
-	if b := f.bead(); CountRejections(b.Notes) != 1 {
-		t.Fatalf("the pass recorded a second rejection:\n%s", b.Notes)
-	}
-	if len(items) != 1 || items["rejected:gt-abc"] == "" {
-		t.Fatalf("items = %v, want one rejected:gt-abc", items)
-	}
-
-	// The same verdict arrives again: the bead is ready again and carries the
-	// block. Nothing new is recorded, and the item stays the one key.
-	b := f.bead()
-	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "in_progress", Type: "task",
-		Assignee: owner, Labels: []string{LabelReadyToLand}, Notes: b.Notes})
-	_, err = l.Land(context.Background(), f.work)
-	if !errors.As(err, &rej) || rej.RecordErr != nil {
-		t.Fatalf("second Land = %T %v, want the repeated verdict completed", err, err)
-	}
-	if len(items) != 1 {
-		t.Errorf("items = %v, want the one item updated, not a second", items)
-	}
-	if b := f.bead(); CountRejections(b.Notes) != 1 {
-		t.Errorf("rejections recorded = %d, want the one block:\n%s", CountRejections(b.Notes), b.Notes)
-	}
-}
-
-// TestBirdRejectionAlertWaitsForTheRejection: the pass whose bead write failed
-// raised nothing, so the retry that finishes the rejection is the one that
-// raises the item — once, not once per pass (gt-h4cvi).
-func TestBirdRejectionAlertWaitsForTheRejection(t *testing.T) {
+// TestBirdRejectionAlertIsRaisedBeforeTheWrite: the item is raised while the
+// bead still carries ready-to-land, because the write that takes the bead out
+// of the queue is the last thing that ever runs the rejection — an item raised
+// after it can be lost for good. A pass whose write failed raises again on the
+// next pass, and the two deliveries are one item because both carry the bead's
+// key (gt-h4cvi).
+func TestBirdRejectionAlertIsRaisedBeforeTheWrite(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	const owner = "town/crew/robin"
@@ -474,31 +418,122 @@ func TestBirdRejectionAlertWaitsForTheRejection(t *testing.T) {
 	f.gate.fn = func(string) GateResult {
 		return GateResult{Passed: false, Steps: []StepResult{{Name: "test", ExitCode: 1}}}
 	}
-	var alerts []string
+	// deliveries counts every raise, and items stands in for the notify layer,
+	// which keys an attention item by its fingerprint: two deliveries of one
+	// key are one item. A map alone would hide a duplicate raise, so both are
+	// recorded.
+	var deliveries []string
+	var readyAtDelivery []bool
+	items := map[string]string{}
 	l := f.lander()
 	l.Beads = &failFirstUpdate{Fake: f.bd}
 	l.BirdOwned = func(assignee string) bool { return assignee == owner }
 	l.RejectionAlert = func(key, message string) error {
-		alerts = append(alerts, key)
+		deliveries = append(deliveries, key)
+		readyAtDelivery = append(readyAtDelivery, beads.HasLabel(f.bead(), LabelReadyToLand))
+		items[key] = message
 		return nil
 	}
 
 	_, err := l.Land(context.Background(), f.work)
 	var rej *Rejection
-	if !errors.As(err, &rej) || rej.RecordErr == nil {
-		t.Fatalf("first Land = %T %v, want a rejection whose write failed", err, err)
+	if !errors.As(err, &rej) || rej.RecordErr == nil || !strings.Contains(rej.RecordErr.Error(), "reopening the bead") {
+		t.Fatalf("first Land = %T %v, want a rejection whose bead write failed", err, err)
 	}
-	if len(alerts) != 0 {
-		t.Fatalf("the interrupted pass raised %v, want nothing", alerts)
+	if len(deliveries) != 1 {
+		t.Fatalf("deliveries = %v, want the item raised before the failed write", deliveries)
 	}
+	if !readyAtDelivery[0] {
+		t.Error("the item was raised after the bead left ready-to-land; want it raised before the write")
+	}
+	b := f.bead()
+	if !beads.HasLabel(b, LabelReadyToLand) || b.Status != "in_progress" || b.Assignee != owner {
+		t.Errorf("bead after the failed write: status=%s assignee=%q labels=%v, want it ready with the bird's claim kept",
+			b.Status, b.Assignee, b.Labels)
+	}
+	if CountRejections(b.Notes) != 1 {
+		t.Fatalf("rejection recorded %d time(s) after the failed write, want once:\n%s", CountRejections(b.Notes), b.Notes)
+	}
+
 	_, err = l.Land(context.Background(), f.work)
 	if !errors.As(err, &rej) || rej.RecordErr != nil {
 		t.Fatalf("retry Land = %T %v, want the completed rejection", err, err)
 	}
-	if len(alerts) != 1 || alerts[0] != "rejected:gt-abc" {
-		t.Errorf("raised %v, want one rejected:gt-abc item", alerts)
+	if len(deliveries) != 2 {
+		t.Errorf("deliveries = %v, want the retry to raise again", deliveries)
 	}
-	if b := f.bead(); CountRejections(b.Notes) != 1 {
+	if len(items) != 1 || items["rejected:gt-abc"] == "" {
+		t.Errorf("items = %v, want one rejected:gt-abc however many times it is delivered", items)
+	}
+	b = f.bead()
+	if b.Status != "in_progress" || b.Assignee != owner {
+		t.Errorf("bead after rejection: status=%s assignee=%q, want the bird's claim kept", b.Status, b.Assignee)
+	}
+	if beads.HasLabel(b, LabelReadyToLand) || !beads.HasLabel(b, LabelRework) {
+		t.Errorf("labels after rejection = %v, want the ready label swapped for rework", b.Labels)
+	}
+	if CountRejections(b.Notes) != 1 {
+		t.Errorf("rejections recorded = %d, want the one block:\n%s", CountRejections(b.Notes), b.Notes)
+	}
+}
+
+// TestBirdRejectionAlertFailureIsSurfaced: the attention item is how the owner
+// hears of the refusal, so a sink that refuses it is not just logged. The pass
+// reports the failed delivery as RecordErr and leaves the bead ready, keeping
+// the claim, so the worker's next pass delivers the item and finishes the
+// rejection (gt-h4cvi).
+func TestBirdRejectionAlertFailureIsSurfaced(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	const owner = "gastown/crew/sloan"
+	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "in_progress", Type: "task",
+		Assignee: owner, Labels: []string{LabelReadyToLand}, Notes: FormatReadyNote(f.work)})
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Passed: false, Steps: []StepResult{{Name: "test", ExitCode: 1}}}
+	}
+	var attempts int
+	items := map[string]string{}
+	l := f.lander()
+	l.BirdOwned = func(assignee string) bool { return assignee == owner }
+	l.RejectionAlert = func(key, message string) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("bd: database is locked")
+		}
+		items[key] = message
+		return nil
+	}
+
+	_, err := l.Land(context.Background(), f.work)
+	var rej *Rejection
+	if !errors.As(err, &rej) || rej.RecordErr == nil || !strings.Contains(rej.RecordErr.Error(), "raising the rejection attention item") {
+		t.Fatalf("first Land = %T %v, want the failed delivery surfaced as RecordErr", err, err)
+	}
+	b := f.bead()
+	if b.Status != "in_progress" || b.Assignee != owner || !beads.HasLabel(b, LabelReadyToLand) {
+		t.Errorf("bead after the failed delivery: status=%s assignee=%q labels=%v, want the claim kept and the bead still ready to retry",
+			b.Status, b.Assignee, b.Labels)
+	}
+	if CountRejections(b.Notes) != 1 {
+		t.Fatalf("rejection recorded %d time(s), want the note to stand for the retry:\n%s", CountRejections(b.Notes), b.Notes)
+	}
+
+	_, err = l.Land(context.Background(), f.work)
+	if !errors.As(err, &rej) || rej.RecordErr != nil {
+		t.Fatalf("retry Land = %T %v, want the completed rejection", err, err)
+	}
+	if attempts != 2 {
+		t.Errorf("delivery attempts = %d, want the retry", attempts)
+	}
+	if len(items) != 1 || items["rejected:gt-abc"] == "" {
+		t.Errorf("items = %v, want the item delivered on the retry", items)
+	}
+	b = f.bead()
+	if b.Status != "in_progress" || b.Assignee != owner || !beads.HasLabel(b, LabelRework) {
+		t.Errorf("bead after the retry: status=%s assignee=%q labels=%v, want the bird's claim kept and rework recorded",
+			b.Status, b.Assignee, b.Labels)
+	}
+	if CountRejections(b.Notes) != 1 {
 		t.Errorf("rejection recorded %d time(s), want once:\n%s", CountRejections(b.Notes), b.Notes)
 	}
 }
@@ -516,45 +551,6 @@ func (b *failFirstUpdate) Update(id string, opts beads.UpdateOptions) error {
 		return errors.New("database is locked")
 	}
 	return b.Fake.Update(id, opts)
-}
-
-// TestBirdRejectionAlertFailureLeavesTheRejectionStanding: the attention item
-// is how the owner hears of the refusal, but delivering it is not what the
-// rejection rests on — a sink that refuses the item is logged and the
-// rejection, the kept claim and its status all stand (gt-h4cvi).
-func TestBirdRejectionAlertFailureLeavesTheRejectionStanding(t *testing.T) {
-	t.Parallel()
-	f := newLandFixture(t)
-	const owner = "gastown/crew/sloan"
-	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "in_progress", Type: "task",
-		Assignee: owner, Labels: []string{LabelReadyToLand}, Notes: FormatReadyNote(f.work)})
-	f.gate.fn = func(string) GateResult {
-		return GateResult{Passed: false, Steps: []StepResult{{Name: "test", ExitCode: 1}}}
-	}
-	var logged strings.Builder
-	var raised int
-	l := f.lander()
-	l.Out = &logged
-	l.BirdOwned = func(assignee string) bool { return assignee == owner }
-	l.RejectionAlert = func(key, message string) error {
-		raised++
-		return errors.New("bd: database is locked")
-	}
-
-	_, err := l.Land(context.Background(), f.work)
-	var rej *Rejection
-	if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
-		t.Fatalf("Land = %T %v, want the rejection recorded despite the failed item", err, err)
-	}
-	if b := f.bead(); b.Status != "in_progress" || b.Assignee != owner {
-		t.Errorf("bead after the failed item: status=%s assignee=%q, want the bird's claim kept", b.Status, b.Assignee)
-	}
-	if raised != 1 {
-		t.Errorf("raised %d item(s), want the one attempt the sink refused", raised)
-	}
-	if !strings.Contains(logged.String(), "the rejection attention item was not raised") {
-		t.Errorf("log = %q, want the refused item named", logged.String())
-	}
 }
 
 // TestBirdRejectionAlertBoundsTheReason: om's summary is free text of any

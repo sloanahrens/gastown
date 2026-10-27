@@ -186,8 +186,10 @@ type Lander struct {
 	BirdOwned func(assignee string) bool
 	// RejectionAlert, when set, raises the attention item a bird-owned
 	// rejection leaves for the bead's owner (gt-h4cvi): the key names the bead,
-	// so a second refusal updates the one item. An error is logged and never
-	// fails the rejection. Nil reports nothing.
+	// so a delivery repeated on a retried pass updates the one item. An error
+	// leaves the bead ready for that retry and is reported on the Rejection as
+	// RecordErr: the owner's only notice must not fail silently. Nil reports
+	// nothing.
 	RejectionAlert func(key, message string) error
 	// auditTimeout overrides commentTimeout for the accepted-risk writes, so a
 	// test can reach the timeout without waiting it out. Zero keeps
@@ -281,8 +283,11 @@ const (
 // already written it to the work bead (a MERGE REJECTION block), swapped the
 // ready label for rework (or gt:needs-human when Rework is false), and
 // released the bead to dispatch by reopening and unassigning it — except a
-// bird-owned bead, which keeps its assignee and status (BirdOwned). RecordErr
-// is set when that write failed; the rejection still stands.
+// bird-owned bead, which keeps its assignee and status and hears of the
+// refusal from a rejected:<bead> attention item (BirdOwned, RejectionAlert).
+// RecordErr is set when the bead write failed, or when a bird-owned bead's
+// attention item could not be delivered — that pass leaves the bead ready so
+// the next one raises the item; either way the rejection still stands.
 type Rejection struct {
 	Kind        RejectionKind
 	Reason      string
@@ -2206,6 +2211,22 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	// attention item raised below instead. A polecat's claim ends at gt done,
 	// so its bead goes back to the queue.
 	birdOwned := l.BirdOwned != nil && l.BirdOwned(now.Assignee)
+	// A bird hears of the refusal only through the attention item, so it is
+	// raised BEFORE the write that takes the bead out of the ready queue: once
+	// the write lands, nothing runs the rejection again, and an item raised
+	// after it could be lost for good. A failed raise leaves the bead ready
+	// (its rejection note already stands), so the worker's next pass retries
+	// it; the item is keyed by the bead, so the retry updates the one item
+	// instead of minting a second (gt-h4cvi).
+	if birdOwned {
+		if err := l.raiseRejectionAlert(w, rej, now.Assignee, now.Status); err != nil {
+			// Keep the claim and surface the delivery failure: the worker
+			// backs off and runs the rejection again, which is the owner's
+			// only path to hearing of it (gt-h4cvi).
+			rej.RecordErr = fmt.Errorf("raising the rejection attention item: %w", err)
+			return rej
+		}
+	}
 	if !birdOwned {
 		open := string(beads.StatusOpen)
 		update.Status = &open
@@ -2223,32 +2244,25 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		rej.RecordErr = fmt.Errorf("reopening the bead: %w", err)
 		return rej
 	}
-	// Raised only after the write, so an interrupted rejection reaches the
-	// owner on the pass that finishes it and never twice: a pass that failed
-	// the write left the bead ready, and the retry is what completes it
-	// (gt-h4cvi).
-	if birdOwned {
-		l.raiseRejectionAlert(w, rej, now.Assignee, now.Status)
-	}
 	return rej
 }
 
 // raiseRejectionAlert tells the owner that their landing was refused: the
 // attention queue is where a bird reads the town's unresolved items, so the
 // item names the bead as its key and the owner and refusal in its text
-// (gt-h4cvi). Delivery is fail-soft; the rejection stands either way.
-func (l *Lander) raiseRejectionAlert(w Work, rej *Rejection, owner, status string) {
+// (gt-h4cvi). The key makes the raise idempotent — a retried pass updates the
+// one item — and the delivery error goes back to the caller, which keeps the
+// bead ready to retry rather than logging the failure and moving on.
+func (l *Lander) raiseRejectionAlert(w Work, rej *Rejection, owner, status string) error {
 	if l.RejectionAlert == nil {
-		return
+		return nil
 	}
 	msg := fmt.Sprintf("Landing of %s (%s) was rejected (%s): %s; the bead stays with %s (status %s)",
 		w.BeadID, w.Branch, rej.Kind, alertField(rej.Reason), owner, strings.TrimSpace(status))
 	if summary := alertField(rej.ReviewSummary); summary != "" {
 		msg += fmt.Sprintf("; om: %s", summary)
 	}
-	if err := l.RejectionAlert("rejected:"+w.BeadID, msg); err != nil {
-		l.logf("%s: the rejection attention item was not raised: %v", w.BeadID, err)
-	}
+	return l.RejectionAlert("rejected:"+w.BeadID, msg)
 }
 
 // rejectionAlertMax bounds the refusal text an attention item carries: the
