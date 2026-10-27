@@ -12,6 +12,9 @@ import (
 // are one exact value.
 var testNow = time.Date(2026, 10, 26, 19, 20, 36, 0, time.UTC)
 
+// testRegistry is the host:port the default test configuration publishes to.
+const testRegistry = "registry.example:5000"
+
 // testRun is one run rooted in a temporary town: a case answers the program
 // calls it names, and every call is recorded whether it answered or not.
 type testRun struct {
@@ -26,6 +29,11 @@ type testRun struct {
 func newTestRun(t *testing.T) *testRun {
 	t.Helper()
 	root := t.TempDir()
+	// The town's runtime directory exists in production; the publish record and
+	// the lock live in it.
+	if err := os.MkdirAll(filepath.Join(root, "runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	tr := &testRun{root: root, now: testNow}
 	tr.Run = &Run{
 		Cfg: Config{
@@ -43,11 +51,17 @@ func newTestRun(t *testing.T) *testRun {
 			SandboxRecords: filepath.Join(root, "runtime", "sandboxes"),
 			Image:          "gastown-polecat:dev",
 			Label:          "org.gastown.gt-commit",
+			Registry:       testRegistry,
+			Published:      filepath.Join(root, "runtime", "polecat-image.published"),
+			Crane:          "crane",
 			PID:            4242,
 		},
 		run: tr.record,
 		now: func() time.Time { return tr.now },
 		out: &tr.logged,
+		// A test that needs crane missing sets look itself; no test reads the
+		// host's PATH.
+		look: func(name string) (string, error) { return "/stub/bin/" + name, nil },
 	}
 	return tr
 }

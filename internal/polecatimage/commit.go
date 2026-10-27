@@ -39,9 +39,11 @@ func (r *Run) InstalledCommit() string {
 // at least as long as the shortest sha git prints, so it cannot reach a program
 // as an option or a revision expression.
 func isCommit(s string) bool {
-	if len(s) < 7 {
-		return false
-	}
+	return len(s) >= 7 && isHex(s)
+}
+
+// isHex reports lowercase hexadecimal alone, of any length.
+func isHex(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
