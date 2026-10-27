@@ -343,9 +343,9 @@ func TestRunSeedChildReportsAFailedChild(t *testing.T) {
 	var spawned []string
 	spawn := func(name string, arg ...string) *exec.Cmd {
 		spawned = append(spawned, name+" "+strings.Join(arg, " "))
-		c := exec.Command(name, arg...)
-		c.Err = errors.New("exit status 7")
-		return c
+		// A command that refuses to start: Run reports Err without running a process, which is
+		// what a unit test is allowed to do.
+		return &exec.Cmd{Err: errors.New("exit status 7")}
 	}
 	_, err := runSeedChild(spawn, SeedCmd{Dir: "/seed/gastown", Argv: []string{"go", "build", "./..."}, UID: cachevol.SeedUserID, GID: cachevol.SeedUserID})
 	if err == nil {

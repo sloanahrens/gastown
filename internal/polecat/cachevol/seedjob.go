@@ -141,8 +141,8 @@ type EmptyDirVolumeSource struct{}
 // BuildSeedJob returns the seed Job for in, or the reason it cannot be rendered.
 //
 // A pin is a reviewed commit, because the Job compiles it into a cache every sandbox reads: the
-// builders refuse a clone URL that carries credentials, and the seed runs the compile as
-// SeedUserID, so root only creates the cache directories, hands them over, and writes the marker.
+// builder refuses a clone URL that carries credentials, and the seed container runs each compile as
+// SeedUserID, so root is left with the claim's handover.
 func BuildSeedJob(in SeedJobInput) (*SeedJob, error) {
 	name := in.Name
 	if name == "" {

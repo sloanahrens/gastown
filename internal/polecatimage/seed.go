@@ -17,8 +17,8 @@ import (
 
 // This file is the seed Job's two containers: the init container that checks the pinned commits
 // out, and the seed container that runs cachevol.PlanSeed's steps into the shared claim and hands
-// it to the cache user (gt-dv04y). They run inside the polecat image, so the logic lives in Go that
-// the image's own binary carries, not in a shell script the Job's manifest embeds.
+// it to the cache user (gt-dv04y). They run inside the polecat image, so their logic is Go in the
+// image's own binary.
 
 // defaultSeedRoot and defaultSeedSource are the container paths the seed Job mounts the claim and
 // the checkouts at, and the flags' defaults.
