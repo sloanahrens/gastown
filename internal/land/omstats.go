@@ -428,8 +428,17 @@ var (
 	// the text after it. A line with neither shape is some other daemon work.
 	omStatsLogLineRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \[land\] (\S+): (.*)$`)
 	// Only a review rejection counts: a gate or infrastructure rejection never
-	// reached om. The detail is "om requested changes (score S, N finding(s))".
-	omStatsLogRejectRe = regexp.MustCompile(`^rejected \(review\): om requested changes\b`)
+	// reached om. Three reasons are one: a request for changes, logged as "om
+	// requested changes (score S, N finding(s))", and the two findings refusals
+	// an approving verdict earns, which the worker logs as the review rejection
+	// they are (gt-oi4je, gt-9wxef). A review that returned no verdict is not
+	// one: it judged nothing and has no record (reviewlog.go), so its
+	// "rejected (review): om review returned no verdict ..." line stays out.
+	omStatsLogRejectRe = regexp.MustCompile(`^rejected \(review\): (?:` +
+		`om requested changes\b` +
+		`|a (?:` + omSeverityCritical + `|` + omSeverityMajor + `) finding blocks the landing at any score\b` +
+		`|more than \d+ minor findings: fix the most important and resubmit\b` +
+		`)`)
 	// A landing that reached the target. The earlier "merged" line is not one:
 	// the worker merges the candidate before om reviews it, so a rejected
 	// landing logs that line too.
