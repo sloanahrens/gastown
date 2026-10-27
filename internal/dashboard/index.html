@@ -194,7 +194,7 @@ button.jvfold:hover{color:var(--text)}
 .mglift{color:var(--green);font-size:12px;font-weight:700}
 .jvstale .mglift{color:var(--dim)}
 .jvchip.jvthin{border-style:dashed}
-.mgbar{position:relative;width:120px;height:16px;margin-top:3px}
+.mgbar{position:relative;width:120px;max-width:100%;height:16px;margin-top:3px}
 .mgtrack,.mgci,.mgbase,.mgdot{position:absolute}
 .mgtrack{left:0;right:0;top:7px;height:2px;background:var(--line)}
 .mgci{top:5px;height:6px;border-radius:3px;background:var(--teal);opacity:.45}
@@ -213,6 +213,23 @@ button.jvfold:hover{color:var(--text)}
 .mgnot.jvstale .mgnotlabel{color:var(--dim)}
 .mgnotpos{margin-right:8px}
 .mgnotwhy{overflow-wrap:anywhere}
+/* The Mango table takes its column widths from the shares below rather than
+   from what its cells hold, so a long target label or condition breaks inside
+   its own column instead of widening the row and squeezing the best box to a
+   sliver. The box carries the panel's longest prose — a condition runs to 240
+   characters — so it takes the widest column, and every prose cell breaks
+   anywhere so no word crosses the panel's right edge (gt-6q7zj). */
+.mgtable{table-layout:fixed;width:100%}
+.mgtable .mgc-target{width:15%}
+.mgtable .mgc-verdict{width:15%}
+.mgtable .mgc-rate{width:12%}
+.mgtable .mgc-interval{width:15%}
+.mgtable .mgc-evidence{width:20%}
+.mgtable .mgc-box{width:23%}
+.mgtable td:last-child{padding-right:0}
+.mgtable td.jvname,.mgtable .jvchip,.mgtable .mgbox,.mgtable .mgvs,.mgtable .mglift,.mgtable .mggroup,.mgtable .mgcondtext,.mgtable .mgcondshare,.mgtable .mgcondtag,.mgtable td.badc,.mgtable td.empty{overflow-wrap:anywhere}
+.mgtable td.jvname,.mgtable .jvchip,.mgtable .mgcondtext,.mgtable .mgcondshare,.mgtable .mgcondtag,.mgtable .mgbig{white-space:normal}
+.mgtable .mgcond{flex-wrap:wrap}
 /* The Mango panel's weekly trend. The chart is an inline SVG on a fixed
    viewBox, so it scales with the panel instead of redrawing at each width. */
 .mgt{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
@@ -3642,7 +3659,9 @@ function renderMango(s) {
 
   const table = el("table", "jvtable mgtable");
   const head = el("tr");
-  head.append(el("th", "", "target"), el("th", "", "verdict"), el("th", "", "rate"), el("th", "", "interval"), el("th", "", "evidence"), el("th", "", "best box"));
+  // The header row names each column so the stylesheet can give that column a
+  // share of the row; a fixed-layout table reads its widths from this row.
+  head.append(el("th", "mgc-target", "target"), el("th", "mgc-verdict", "verdict"), el("th", "mgc-rate", "rate"), el("th", "mgc-interval", "interval"), el("th", "mgc-evidence", "evidence"), el("th", "mgc-box", "best box"));
   const thead = document.createElement("thead"); thead.append(head); table.append(thead);
   const body = document.createElement("tbody"); table.append(body);
   box.append(table);
