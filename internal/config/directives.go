@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // SharedDirectiveName is the reserved directive filename that renders for every
@@ -98,6 +100,9 @@ func ReadRoleDirectives(role, townRoot, rigName string) ([]RoleDirective, error)
 // directiveScope names the scope of a directive file: "town" for one under
 // <townRoot>/directives, otherwise the rig directory it sits in.
 func directiveScope(path, townRoot string) string {
+	if strings.HasPrefix(path, CentralDirectiveDir(townRoot)+string(filepath.Separator)) {
+		return "town"
+	}
 	rel, err := filepath.Rel(townRoot, path)
 	if err != nil {
 		return ""
@@ -127,20 +132,75 @@ func readDirectiveFile(path string) (string, error) {
 }
 
 // directivePaths returns the directive files that render for role, broadest
-// first. Asking for the shared file yields it once rather than twice.
+// first: for each name (_common, then the role), the central layer and then the
+// rig layer. A layer's file is the new path when that file exists, and otherwise
+// the legacy path when that exists, which is warned about once per process
+// (gt-oz73l). Asking for the shared file yields it once rather than twice.
 func directivePaths(role, townRoot, rigName string) []string {
-	paths := []string{filepath.Join(townRoot, "directives", SharedDirectiveName+".md")}
-	if rigName != "" {
-		paths = append(paths, filepath.Join(townRoot, rigName, "directives", SharedDirectiveName+".md"))
+	names := []string{SharedDirectiveName}
+	if role != SharedDirectiveName {
+		names = append(names, role)
 	}
-	if role == SharedDirectiveName {
-		return paths
-	}
-	paths = append(paths, filepath.Join(townRoot, "directives", role+".md"))
-	if rigName != "" {
-		paths = append(paths, filepath.Join(townRoot, rigName, "directives", role+".md"))
+	var paths []string
+	for _, name := range names {
+		paths = append(paths, layerDirectivePath(CentralDirectiveDir(townRoot), filepath.Join(townRoot, "directives"), name))
+		if rigName != "" {
+			paths = append(paths, layerDirectivePath(RigDirectiveDir(townRoot, rigName), filepath.Join(townRoot, rigName, "directives"), name))
+		}
 	}
 	return paths
+}
+
+// CentralDirectiveDir is the central directive layer: the gastown repo's
+// canonical checkout, read for every rig (gt-oz73l).
+func CentralDirectiveDir(townRoot string) string {
+	return filepath.Join(townRoot, "gastown", "mayor", "rig", "directives")
+}
+
+// RigDirectiveDir is a rig's own directive layer, in the rig's canonical
+// checkout (gt-oz73l).
+func RigDirectiveDir(townRoot, rig string) string {
+	return filepath.Join(townRoot, rig, "mayor", "rig", ".gastown", "directives")
+}
+
+// layerDirectivePath is the file for name in one layer. The new directory's file
+// wins whenever it exists. Otherwise the legacy file is read when it exists, and
+// the new path (absent) is returned when neither does.
+func layerDirectivePath(newDir, legacyDir, name string) string {
+	newPath := filepath.Join(newDir, name+".md")
+	if directiveFileExists(newPath) {
+		return newPath
+	}
+	legacy := filepath.Join(legacyDir, name+".md")
+	if directiveFileExists(legacy) {
+		warnLegacyDirective(legacy)
+		return legacy
+	}
+	return newPath
+}
+
+// directiveFileExists reports whether a directive file is there to read. Any
+// stat failure other than absence counts as there, so the read reports it and a
+// caller fails closed.
+func directiveFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil || !errors.Is(err, fs.ErrNotExist)
+}
+
+// legacyDirectiveWarned is each legacy path already named this process.
+var legacyDirectiveWarned sync.Map
+
+// legacyDirectiveWarn is where a legacy directive path is named. A test swaps it
+// to capture the line.
+var legacyDirectiveWarn = func(line string) { log.Print(line) }
+
+// warnLegacyDirective names a legacy directive file once per process, so a
+// prompt rendered on every spawn does not repeat the line.
+func warnLegacyDirective(path string) {
+	if _, done := legacyDirectiveWarned.LoadOrStore(path, true); done {
+		return
+	}
+	legacyDirectiveWarn(fmt.Sprintf("directive %s is at a legacy path; move it under the gastown repo's directives (gt-oz73l)", path))
 }
 
 // DirectiveFile is one <name>.md file under a directives/ directory.
