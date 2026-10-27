@@ -162,6 +162,48 @@ func TestSchemaLevelEndsWithTheCallersBudget(t *testing.T) {
 	}
 }
 
+// TestSchemaLevelKeepsBdsAnswerAfterTheCallersBudgetEnded pins gt-p0ha3: a bd
+// read that exited with a status answered, even when the caller's deadline had
+// passed by the time the error was read, so its status classifies the failure.
+// Only a call the deadline itself ended is stamped as a timeout — the last row
+// keeps gt-824d's timeout text for that kill.
+func TestSchemaLevelKeepsBdsAnswerAfterTheCallersBudgetEnded(t *testing.T) {
+	t.Parallel()
+	// The deadline has ended before the read starts, as in the gt-strle gate
+	// log: bd's answer and the caller's deadline race, and the answer wins.
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	for _, tc := range []struct {
+		name          string
+		err           error
+		wantStore     bool
+		wantSubstring string
+	}{
+		{"schema skew answered", exitError{26}, false, "the database schema is ahead of this bd"},
+		{"other status answered", exitError{2}, false, "could not read the database migration level"},
+		{"killed at the deadline", errors.New("signal: killed"), true, "timed out after 1m0s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRecorder(func([]string) reply { return reply{stderr: "bd said so", err: tc.err} })
+			b := newBeads(beadsFields{workDir: t.TempDir(), isolated: true, noRoute: true, exec: r.exec, callCtx: expired, budget: time.Minute})
+			_, err := b.SchemaLevel()
+			if err == nil {
+				t.Fatal("SchemaLevel: want an error")
+			}
+			if got := errors.Is(err, ErrStoreUnavailable); got != tc.wantStore {
+				t.Errorf("errors.Is(err, ErrStoreUnavailable) = %v, want %v: %v", got, tc.wantStore, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantSubstring) {
+				t.Errorf("error %q lacks %q", err, tc.wantSubstring)
+			}
+			if !tc.wantStore && strings.Contains(err.Error(), "timed out after") {
+				t.Errorf("an answered read must keep bd's answer, not a deadline kill: %v", err)
+			}
+		})
+	}
+}
+
 // TestSchemaLevelClassifiesTheSeamBudgetKill: with no caller context, the
 // seam's own subprocess budget ends a read waiting on the database, and that
 // kill is the store not answering too.
