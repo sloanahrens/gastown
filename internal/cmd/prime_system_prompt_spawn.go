@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // The role templates render through this package (they need rig, session and
@@ -28,7 +29,7 @@ var errNoSystemPromptForRole = errors.New("role has no system prompt file")
 // exactly what gt prime would render inside the session, including the
 // working directory that the polecat template prints, so gt prime's refresh
 // on the first run finds the file already current.
-func renderSystemPromptFileForSpawn(role, townRoot, rigPath, agentName, path string) error {
+func renderSystemPromptFileForSpawn(role, townRoot, rigPath, agentName, path string, target config.SystemPromptTarget) error {
 	if path == "" {
 		return errNoSystemPromptForRole
 	}
@@ -44,6 +45,11 @@ func renderSystemPromptFileForSpawn(role, townRoot, rigPath, agentName, path str
 		// Only template-rendered text is worth persisting (gt prime applies
 		// the same rule); the hardcoded fallback stays in the hook output.
 		return errors.New("role template unavailable")
+	}
+	if target.Sandbox {
+		// The sandbox reads the host's text with its own town root and the sandbox note after it, so
+		// the bytes rendered here are the bytes it gets (gt-uvwi6).
+		text = session.RewriteTownRoot(text, townRoot, target.SandboxTownRoot) + target.Note
 	}
 	wrote, err := writeSystemPromptFile(path, text)
 	if err != nil {

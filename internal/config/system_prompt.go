@@ -42,12 +42,25 @@ func SystemPromptFilePath(role, townRoot, rigPath, agentName string) string {
 	return filepath.Join(dir, ".claude", name)
 }
 
+// SystemPromptTarget says where a rendered system prompt will run. The zero value is the host: the
+// file is the role template's text as it renders. A sandbox target is the sandbox's final bytes: the
+// host town root is rewritten to SandboxTownRoot and Note is appended, so the host renders the bytes
+// the sandbox reads and the upload copies them verbatim (gt-uvwi6).
+type SystemPromptTarget struct {
+	Sandbox         bool
+	SandboxTownRoot string
+	Note            string
+}
+
+// SystemPromptRender renders the static role text for role/agentName into path, for target.
+type SystemPromptRender func(role, townRoot, rigPath, agentName, path string, target SystemPromptTarget) error
+
 // SystemPromptRenderer renders the static role text for role/agentName into
 // path. internal/cmd installs the real renderer at init (the role templates
 // and their rig/session helpers import this package, so config cannot call
 // them directly). nil means "no renderer": the flag is then added only when
 // the file already exists, and gt prime prints the static text itself.
-var SystemPromptRenderer func(role, townRoot, rigPath, agentName, path string) error
+var SystemPromptRenderer SystemPromptRender
 
 // withRoleSystemPromptFlag appends --append-system-prompt-file <path> and sets
 // GT_SYSTEM_PROMPT_FILE for Claude agents once the role's rendered system
@@ -72,7 +85,7 @@ func withRoleSystemPromptFlag(reg *AgentRegistry, rc *RuntimeConfig, role, townR
 	// only when the content differs (gt-zqj9t).
 	w := reg.host().warnWriter()
 	if render := reg.host().systemPromptRenderer(); render != nil {
-		if err := render(role, townRoot, rigPath, agentName, path); err != nil {
+		if err := render(role, townRoot, rigPath, agentName, path, SystemPromptTarget{}); err != nil {
 			if info, statErr := os.Stat(path); statErr == nil && !info.IsDir() {
 				// Degrade loudly: the spawn runs on the file it has, and the
 				// warning says how old that file is.

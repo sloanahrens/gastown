@@ -141,8 +141,11 @@ type openshellBackend struct {
 	policyRoot func(townRoot string) (string, error)
 	// gitEmail reads the host's global git user.email, the address the sandbox's
 	// commits carry (host polecats commit with it too); "" when it is unset.
-	gitEmail    func() string
-	installedGT func() string
+	gitEmail func() string
+	// renderPrompt renders the sandbox's system prompt bytes on the host; nil means the installed
+	// renderer, read at the spawn (gt-uvwi6).
+	renderPrompt config.SystemPromptRender
+	installedGT  func() string
 	// phaseWatch is how long this session's gateway phase has been a terminal
 	// failure. Nil is the process's watch (sandboxPhases); tests set one.
 	phaseWatch *sandboxPhaseWatch
@@ -385,7 +388,7 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	// Also before anything is pushed or created: the agent command names these
 	// files, so a polecat whose settings are missing or cannot be rendered for
 	// the sandbox must stop here.
-	runtime, err := buildRuntimeArchive(spec, b.gitEmail())
+	runtime, err := buildRuntimeArchiveLogging(spec, b.gitEmail(), os.Stderr, b.promptRenderer())
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}
@@ -972,4 +975,13 @@ func gitEmailFrom(run func(name string, args ...string) ([]byte, error)) string 
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// promptRenderer is the renderer the sandbox's system prompt is rendered with: the backend's own, or
+// the installed one.
+func (b *openshellBackend) promptRenderer() config.SystemPromptRender {
+	if b.renderPrompt != nil {
+		return b.renderPrompt
+	}
+	return config.SystemPromptRenderer
 }
