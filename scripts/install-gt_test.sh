@@ -1391,6 +1391,21 @@ got=$(PATH="$T/fakeps:$PATH" PROC_ROOT="$T/no-proc" proc_state 4242)
   && pass "proc_state: falls back to ps when /proc has no stat line" \
   || fail "proc_state: ps branch read '$got', want T from the fake ps"
 
+# Case 49b: the same branch against the real ps, so a host whose ps rejects
+# '-o stat= -p' or prints a header is caught; the fake above prints what the
+# code expects whatever the host's ps does (gt-pb8cw). A sleep reads R or S and
+# never T or Z, so one sample is enough: nothing is waited for and no two
+# samples are compared, which is what raced under load (gt-rfqtg).
+sleep 60 &
+SLEEPING=$!
+got=$(PROC_ROOT="$T/no-proc" proc_state "$SLEEPING")
+kill "$SLEEPING" 2>/dev/null || true
+wait "$SLEEPING" 2>/dev/null || true
+case "$got" in
+  R|S) pass "proc_state: the ps branch reads a real sleep as R or S" ;;
+  *) fail "proc_state: the real ps branch read '$got' for a live sleep, want R or S" ;;
+esac
+
 # --- Case 50: --no-image-first keeps the old order for an urgent daemon fix:
 # the binary is swapped and the restart marker written without waiting for the
 # image, which is then started detached (gt-vhn89). The build sleeps far longer
