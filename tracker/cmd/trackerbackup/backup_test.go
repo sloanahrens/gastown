@@ -296,18 +296,30 @@ func TestRunLogsNoSecrets(t *testing.T) {
 	t.Parallel()
 	const password = "pa55 word!"
 	base := url.URL{Scheme: "postgres", User: url.UserPassword("tracker", password), Host: "db.internal:5433", Path: "/tracker"}
+	// A keyword DSN carries the password in the same field a URI does, in the
+	// other syntax libpq accepts, so the redaction is exercised for both.
+	keyword := "host=db.internal port=5433 user=tracker dbname=tracker password='" + password + "'"
 	cases := []struct {
 		name    string
 		fake    *fakeDump
 		dsn     string
 		files   []string
 		wantErr bool
+		want    string
 	}{
 		{name: "a published dump", fake: &fakeDump{body: []byte("dump")}},
 		{
 			name:    "pg_dump fails and echoes the DSN",
 			fake:    &fakeDump{body: []byte("half a dump"), fail: fmt.Errorf("connection to %s failed for tracker:%s (%s)", base.String(), password, url.QueryEscape(password))},
 			wantErr: true,
+		},
+		{
+			name:    "pg_dump fails and echoes a keyword DSN",
+			fake:    &fakeDump{body: []byte("half a dump"), fail: fmt.Errorf("connection to %s failed", keyword)},
+			dsn:     keyword,
+			wantErr: true,
+			// The fake ran, and the DSN it echoed was masked rather than dropped.
+			want: "connection to *** failed",
 		},
 		{name: "pg_dump writes an empty dump", fake: &fakeDump{empty: true}, wantErr: true},
 		{
@@ -320,6 +332,7 @@ func TestRunLogsNoSecrets(t *testing.T) {
 			fake:    &fakeDump{body: []byte("dump")},
 			dsn:     "postgres://tracker:" + url.QueryEscape(password) + "@db.internal:not-a-port/tracker",
 			wantErr: true,
+			want:    "cannot use TRACKER_DSN as a connection string",
 		},
 	}
 	for _, c := range cases {
@@ -347,6 +360,14 @@ func TestRunLogsNoSecrets(t *testing.T) {
 			err := runWith(context.Background(), []string{"-dir", dir}, getenv, &stdout, &stderr, c.fake)
 			if gotErr := err != nil; gotErr != c.wantErr {
 				t.Fatalf("Run error = %v, want error %t", err, c.wantErr)
+			}
+			if c.want != "" {
+				if err == nil {
+					t.Fatalf("Run succeeded, want an error naming %q", c.want)
+				}
+				if !strings.Contains(err.Error(), c.want) {
+					t.Errorf("Run error = %v, want it to name %q", err, c.want)
+				}
 			}
 			logs := map[string]string{"stdout": stdout.String(), "stderr": stderr.String()}
 			if err != nil {
@@ -814,11 +835,19 @@ func TestExecRunnerRunsTheChild(t *testing.T) {
 
 // TestMain re-enters this binary as a fake pg_dump when GO_WANT_HELPER_PROCESS
 // is set: a child process that writes -f, or fails with a stderr line when
-// GO_HELPER_FAIL is set. Otherwise the tests run as usual (gt-p85pw.48).
+// GO_HELPER_FAIL or GO_HELPER_ECHO_PASSWORD is set. Otherwise the tests run as
+// usual (gt-p85pw.48).
 func TestMain(m *testing.M) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") == "1" {
 		if os.Getenv("GO_HELPER_FAIL") == "1" {
 			fmt.Fprintln(os.Stderr, "helper: no tracker database")
+			os.Exit(1)
+		}
+		// A child that echoes the settings it was handed, the way a failing
+		// client prints the connection string it could not use.
+		if os.Getenv("GO_HELPER_ECHO_PASSWORD") == "1" {
+			dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s", os.Getenv("PGUSER"), os.Getenv("PGPASSWORD"), os.Getenv("PGHOST"), os.Getenv("PGPORT"), os.Getenv("PGDATABASE"))
+			fmt.Fprintf(os.Stderr, "pg_dump: error: connection to %s failed: password=%s\n", dsn, os.Getenv("PGPASSWORD"))
 			os.Exit(1)
 		}
 		if err := os.WriteFile(argValue(os.Args, "-f"), []byte("dump"), 0o600); err != nil {
@@ -858,6 +887,49 @@ func TestRunEndToEndWithTheExecRunner(t *testing.T) {
 	}
 	if got := dumpsIn(t, dir); len(got) != 1 || got[0] != today+dumpSuffix {
 		t.Fatalf("dumps = %v, want tonight's dump", got)
+	}
+}
+
+// The leak test above runs fakes, which cannot reach the one place a real
+// child's output enters this program: execRunner reads the child's stderr and
+// puts its last line into the error. Here a real child echoes the PGPASSWORD it
+// was handed, and neither the error nor either stream may carry the password
+// or the DSN (gt-nd1eu). The test sets an environment variable, so it does not
+// run in parallel.
+func TestRunRedactsTheExecRunnersStderr(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Setenv("GO_HELPER_ECHO_PASSWORD", "1")
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgBin := t.TempDir()
+	if err := os.Symlink(self, filepath.Join(pgBin, "pg_dump")); err != nil {
+		t.Fatal(err)
+	}
+	getenv := func(k string) string {
+		if k == "TRACKER_DSN" {
+			return testDSN
+		}
+		return ""
+	}
+	var stdout, stderr bytes.Buffer
+	err = runWith(context.Background(), []string{"-dir", t.TempDir(), "-pg-bin", pgBin}, getenv, &stdout, &stderr, execRunner{})
+	if err == nil {
+		t.Fatalf("runWith succeeded, want the child's failure (stderr %q)", stderr.String())
+	}
+	// The child's line reaches the error, masked rather than dropped, so the
+	// operator still learns what pg_dump said.
+	if want := "connection to *** failed: password=***"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to carry the child's line as %q", err, want)
+	}
+	logs := map[string]string{"stdout": stdout.String(), "stderr": stderr.String(), "error": err.Error()}
+	for where, text := range logs {
+		for _, secret := range []string{testPassword, testDSN} {
+			if strings.Contains(text, secret) {
+				t.Errorf("%s leaks %q: %q", where, secret, text)
+			}
+		}
 	}
 }
 
