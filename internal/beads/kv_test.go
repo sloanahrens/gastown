@@ -141,6 +141,17 @@ func TestParseKVListJSONRefusesAnEnvelopeWithoutData(t *testing.T) {
 	}
 }
 
+// The get side reads the same payload through the same helper, so an envelope
+// without the data key is refused there too, never answered as a missing key
+// (gt-ij4fl).
+func TestParseKVGetJSONRefusesAnEnvelopeWithoutData(t *testing.T) {
+	t.Parallel()
+	got, err := ParseKVGetJSON([]byte(`{"schema_version":1,"contract_version":1,"error":"not found"}`))
+	if err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("ParseKVGetJSON = %q, %v; want a parse error, not ErrNotFound", got, err)
+	}
+}
+
 // A bare payload carries no contract_version, so the refusal above leaves how
 // an older bd's --json output parses alone (gt-ij4fl).
 func TestParseKVListJSONKeepsTheLegacyBarePayload(t *testing.T) {
