@@ -178,6 +178,60 @@ func TestTrimCacheTreeRefusesASymlinkedRoot(t *testing.T) {
 	}
 }
 
+// TestTrimCacheTreeNamesAMeasureItCannotRepeat is the second measurement: the
+// tree was read, files were removed, and then it could not be read again, so the
+// trim reports that rather than a size it never saw (gt-tpg0p.7).
+func TestTrimCacheTreeNamesAMeasureItCannotRepeat(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	plantCacheFile(t, filepath.Join(root, "go-build", "a"), 400, testTime)
+	walk := diskTrimWalk()
+	removed := false
+	remove := walk.remove
+	walk.remove = func(path string) error {
+		removed = true
+		return remove(path)
+	}
+	list := walk.list
+	walk.list = func(dir string) ([]cacheFile, error) {
+		if removed && dir == root {
+			return nil, errors.New("input/output error")
+		}
+		return list(dir)
+	}
+	_, err := TrimCacheTree(root, 100, walk)
+	if err == nil || !strings.Contains(err.Error(), root) || !strings.Contains(err.Error(), "input/output error") {
+		t.Fatalf("TrimCacheTree() = %v, want the failed second measurement of %s", err, root)
+	}
+}
+
+// TestListCacheFilesReportsAWalkFailure drives the walk itself: a directory the
+// walk cannot read is an error, never an empty file list that would read as a
+// tree with nothing to trim.
+func TestListCacheFilesReportsAWalkFailure(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	plantCacheFile(t, filepath.Join(root, "a"), 1, testTime)
+	_, err := listCacheFilesWith(func(dir string, fn filepath.WalkFunc) error {
+		return fn(dir, nil, errors.New("permission denied"))
+	}, root)
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("listCacheFilesWith() = %v, want the walk's failure", err)
+	}
+}
+
+// TestListCacheFilesRefusesAPathThatIsNotADirectory is the root check: a file
+// where a directory belongs measures nothing rather than reading as an empty
+// tree.
+func TestListCacheFilesRefusesAPathThatIsNotADirectory(t *testing.T) {
+	t.Parallel()
+	file := plantCacheFile(t, filepath.Join(t.TempDir(), "file"), 1, testTime)
+	_, err := listCacheFiles(file)
+	if err == nil || !strings.Contains(err.Error(), "is not a directory") {
+		t.Fatalf("listCacheFiles() = %v, want the path refused", err)
+	}
+}
+
 // TestTrimCacheTreeNamesTheDirectoryItCouldNotList is the failure attribution:
 // the error names go-build, the subtree whose listing failed, and the module
 // cache is never touched (gt-tpg0p.7).

@@ -116,14 +116,23 @@ func trimCacheDir(w trimWalk, dir string, need int64) error {
 	return nil
 }
 
+// fileWalk is the directory walk a listing walks with; a test answers it so the
+// walk's own failure is driven rather than assumed.
+type fileWalk func(root string, fn filepath.WalkFunc) error
+
 // listCacheFiles returns the regular files under dir with their sizes and last
-// use.
+// use, walking with filepath.Walk.
+func listCacheFiles(dir string) ([]cacheFile, error) {
+	return listCacheFilesWith(filepath.Walk, dir)
+}
+
+// listCacheFilesWith is listCacheFiles over walk.
 //
 // A symlink is neither listed nor descended into, so the walk cannot leave the
 // tree it was given, and a dir that is a symlink is refused outright: a cache
 // volume is mounted as a directory, and trimming through a link would delete
 // the files of wherever it points.
-func listCacheFiles(dir string) ([]cacheFile, error) {
+func listCacheFilesWith(walk fileWalk, dir string) ([]cacheFile, error) {
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return nil, err
@@ -135,16 +144,12 @@ func listCacheFiles(dir string) ([]cacheFile, error) {
 		return nil, fmt.Errorf("%s is not a directory", dir)
 	}
 	var files []cacheFile
-	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	err = walk(dir, func(path string, info fs.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !d.Type().IsRegular() {
+		if !info.Mode().IsRegular() {
 			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
 		}
 		files = append(files, cacheFile{path: path, size: info.Size(), used: lastUsed(info)})
 		return nil
