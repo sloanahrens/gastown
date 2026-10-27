@@ -30,9 +30,9 @@ const (
 // SeedFiles is the filesystem the seed pass reads and writes: the marker, and the directories it
 // creates. The seed Job's container is the only caller of the os implementation.
 type SeedFiles interface {
-	ReadFile(path string) ([]byte, error)
-	WriteFile(path string, data []byte, perm os.FileMode) error
-	MkdirAll(path string, perm os.FileMode) error
+	ReadFile(name string) ([]byte, error)
+	WriteFile(name string, data []byte, perm os.FileMode) error
+	MkdirAll(name string, perm os.FileMode) error
 }
 
 // OSFiles is SeedFiles on the container's filesystem.
