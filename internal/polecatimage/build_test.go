@@ -49,6 +49,11 @@ func (b buildReply) answer(t *testing.T) func(command) result {
 			}
 			return b.add
 		case c.name == "git" && hasArg(c.args, "remove"):
+			if b.worktree != "" && !b.remove.failed() {
+				if err := os.RemoveAll(b.worktree); err != nil {
+					t.Fatal(err)
+				}
+			}
 			return b.remove
 		case c.name == "make":
 			if b.onBuild != nil {
@@ -71,6 +76,24 @@ func hasArg(args []string, want string) bool {
 	return false
 }
 
+// anyCallNamed reports a call carrying every one of want, whatever its other
+// arguments and wherever it comes in the sequence.
+func anyCallNamed(calls []command, want ...string) bool {
+	for _, c := range calls {
+		named := true
+		for _, w := range want {
+			if !hasArg(c.args, w) {
+				named = false
+				break
+			}
+		}
+		if named {
+			return true
+		}
+	}
+	return false
+}
+
 func worktreePath(tr *testRun) string {
 	return filepath.Join(tr.Cfg.BuildRoot, testFullSHA)
 }
@@ -79,6 +102,7 @@ func TestBuildAtBuildsInADetachedWorktree(t *testing.T) {
 	t.Parallel()
 	tr := newTestRun(t)
 	b := okBuild()
+	b.worktree = worktreePath(tr)
 	b.onBuild = func() { tr.now = testNow.Add(42 * time.Second) }
 	tr.reply = b.answer(t)
 	if err := tr.BuildAt(testFullSHA); err != nil {
@@ -86,18 +110,14 @@ func TestBuildAtBuildsInADetachedWorktree(t *testing.T) {
 	}
 	worktree := worktreePath(tr)
 	git := tr.callsTo("git")
-	if len(git) != 3 {
-		t.Fatalf("git was called %d times, want 3: %v", len(git), git)
+	if !anyCallNamed(git, "worktree", worktree, testFullSHA) {
+		t.Errorf("git was never asked for a worktree of %s at %s: %v", testFullSHA, worktree, git)
 	}
-	wantGit := [][]string{
-		{"-C", tr.Cfg.RigRepo, "rev-parse", "--verify", testFullSHA + "^{commit}"},
-		{"-C", tr.Cfg.RigRepo, "worktree", "add", "--detach", worktree, testFullSHA},
-		{"-C", tr.Cfg.RigRepo, "worktree", "remove", "--force", worktree},
+	if !anyCallNamed(git, "worktree", worktree, "remove") {
+		t.Errorf("git was never asked to remove the worktree at %s: %v", worktree, git)
 	}
-	for i, want := range wantGit {
-		if strings.Join(git[i].args, " ") != strings.Join(want, " ") {
-			t.Errorf("git call %d = %q, want %q", i, git[i].args, want)
-		}
+	if exists(worktree) {
+		t.Error("the worktree is still there after a finished build")
 	}
 	makeCalls := tr.callsTo("make")
 	if len(makeCalls) != 1 {

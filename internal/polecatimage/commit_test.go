@@ -60,7 +60,8 @@ func TestImageCommit(t *testing.T) {
 		{"stderr alone does not count", result{stderr: "warning: no such image\n", exit: 1}, ""},
 		{"trailing spacing is trimmed", result{stdout: "abc1234 \n"}, "abc1234"},
 		{"leading spacing is trimmed", result{stdout: " abc1234\n"}, "abc1234"},
-		{"missing label", result{stdout: "<no value>\n"}, "<no value>"},
+		{"the label docker does not carry", result{stdout: "<no value>\n"}, ""},
+		{"no value in the middle of other text is a value", result{stdout: "x <no value> y\n"}, "x <no value> y"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

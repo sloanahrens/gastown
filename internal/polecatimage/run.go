@@ -61,6 +61,11 @@ type Run struct {
 	out io.Writer
 	// rename moves the lock aside during a takeover; nil means os.Rename.
 	rename func(oldpath, newpath string) error
+	// claim makes the lock directory; nil means ClaimLock.
+	claim func() error
+	// unlock holds the flock a run that took the lock keeps until Cleanup;
+	// nil while the run does not hold the lock.
+	unlock func()
 }
 
 // command is one program invocation: its working directory, program and
@@ -121,6 +126,13 @@ func (r *Run) renamer() func(string, string) error {
 		return r.rename
 	}
 	return os.Rename
+}
+
+func (r *Run) claimer() func() error {
+	if r.claim != nil {
+		return r.claim
+	}
+	return r.ClaimLock
 }
 
 func (r *Run) pid() int {

@@ -1,10 +1,14 @@
 package polecatimage
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 // StaleLock reports whether the directory at dir has gone unmodified for longer
@@ -23,59 +27,91 @@ func (r *Run) ClaimLock() error {
 		return err
 	}
 	pid := []byte(strconv.Itoa(r.pid()) + "\n")
-	return os.WriteFile(filepath.Join(r.Cfg.LockDir, "pid"), pid, 0o644)
+	if err := os.WriteFile(filepath.Join(r.Cfg.LockDir, "pid"), pid, 0o644); err != nil {
+		// A directory with no pid file would block the next run until it aged
+		// out with nothing to show for it.
+		_ = os.Remove(r.Cfg.LockDir)
+		return err
+	}
+	return nil
 }
 
 // TakeLock takes the lock and reports whether it did, taking over one a dead run
-// left behind.
+// left behind; an error reports a lock it could not read or make.
 //
-// A takeover renames the stale directory aside first, so of two runs that both
-// saw it stale only one rename succeeds; it then re-checks the directory it
-// moved, because one that turns out fresh was another run's new lock and goes
-// back.
-func (r *Run) TakeLock() bool {
-	_ = os.MkdirAll(filepath.Dir(r.Cfg.LockDir), 0o755)
-	if r.ClaimLock() == nil {
+// The flock beside the directory is what makes the state changes of a run alone
+// in them: every claim and takeover holds it first, and a run that takes the
+// lock keeps it until Cleanup. A stale read and the rename it leads to cannot
+// then interleave with another run's, which is how two runs can otherwise move a
+// newer run's directory aside and each believe they hold the lock (gt-tpg0p.5).
+func (r *Run) TakeLock() (bool, error) {
+	r.HaveLock = false
+	if err := os.MkdirAll(filepath.Dir(r.Cfg.LockDir), 0o755); err != nil {
+		return false, err
+	}
+	unlock, err := lock.FlockTryAcquireStable(r.Cfg.LockDir + ".flock")
+	if err != nil {
+		if errors.Is(err, lock.ErrFlockHeld) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := r.claimOrTakeOver(); err != nil || !r.HaveLock {
+		unlock()
+		return r.HaveLock, err
+	}
+	r.unlock = unlock
+	return true, nil
+}
+
+// claimOrTakeOver claims LockDir under the flock, or replaces the directory
+// there when it has gone stale, and records in HaveLock whether the run holds
+// the lock afterwards.
+func (r *Run) claimOrTakeOver() error {
+	claim := r.claimer()
+	err := claim()
+	if err == nil {
 		r.HaveLock = true
-		return true
+		return nil
+	}
+	if !errors.Is(err, fs.ErrExist) {
+		return err
 	}
 	if !r.StaleLock(r.Cfg.LockDir) {
-		return false
+		return nil
 	}
 	aside := r.Cfg.LockDir + ".stale." + strconv.Itoa(r.pid())
 	if err := r.renamer()(r.Cfg.LockDir, aside); err != nil {
-		return false
-	}
-	if !r.StaleLock(aside) {
-		// Another run made this lock after this run read the stale one, so it
-		// goes back. When the path is taken again it stays aside instead of
-		// being removed: the directory holds that run's pid, and deleting it
-		// would release a lock its owner still believes it holds.
-		if !exists(r.Cfg.LockDir) {
-			if err := r.renamer()(aside, r.Cfg.LockDir); err != nil {
-				r.Logf("a fresh lock was renamed aside and could not be put back (%s)", aside)
-			}
-		} else {
-			r.Logf("a fresh lock was renamed aside and left in place (%s)", aside)
-		}
-		return false
+		return err
 	}
 	r.Logf("taking over a stale lock (%s)", r.Cfg.LockDir)
-	_ = os.RemoveAll(aside)
-	if r.ClaimLock() != nil {
-		return false
+	if err := os.RemoveAll(aside); err != nil {
+		return err
+	}
+	if err := claim(); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			// A run that takes no flock — the script, until gt-tpg0p.7 makes it
+			// a shim — claimed the freed path first. That run holds the lock.
+			return nil
+		}
+		return err
 	}
 	r.HaveLock = true
-	return true
+	return nil
 }
 
-// BuildLock takes the lock a build runs under, reporting "" when this run may
-// build and the script's line for a held lock otherwise.
-func (r *Run) BuildLock() string {
-	if r.TakeLock() {
-		return ""
+// BuildLock takes the lock a build runs under: "" when this run may build, the
+// script's line when another run holds the lock, and an error (already logged)
+// when the lock cannot be read or made.
+func (r *Run) BuildLock() (string, error) {
+	took, err := r.TakeLock()
+	if err != nil {
+		return "", r.failf("cannot take the lock %s: %v", r.Cfg.LockDir, err)
 	}
-	return "already running (lock " + r.Cfg.LockDir + ")"
+	if took {
+		return "", nil
+	}
+	return "already running (lock " + r.Cfg.LockDir + ")", nil
 }
 
 // LockHeld reports whether the lock names this run's pid, which is the only

@@ -1,6 +1,7 @@
 package polecatimage
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -109,8 +110,13 @@ func TestTakeLock(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			tr := newTestRun(t)
+			t.Cleanup(tr.Cleanup)
 			tc.prepare(t, tr)
-			if got := tr.TakeLock(); got != tc.took {
+			got, err := tr.TakeLock()
+			if err != nil {
+				t.Fatalf("TakeLock() error = %v, want none", err)
+			}
+			if got != tc.took {
 				t.Fatalf("TakeLock() = %v, want %v", got, tc.took)
 			}
 			if tr.HaveLock != tc.took {
@@ -132,108 +138,125 @@ func TestTakeLock(t *testing.T) {
 func TestTakeLockLogsTheTakeover(t *testing.T) {
 	t.Parallel()
 	tr := newTestRun(t)
+	t.Cleanup(tr.Cleanup)
 	makeLock(t, tr.Cfg.LockDir, "9999", testNow.Add(-21*time.Minute))
-	if !tr.TakeLock() {
-		t.Fatal("TakeLock() did not take over a stale lock")
+	if ok, err := tr.TakeLock(); !ok || err != nil {
+		t.Fatalf("TakeLock() = %v, %v; want the stale lock taken over", ok, err)
 	}
 	tr.wantLogged(t, "taking over a stale lock ("+tr.Cfg.LockDir+")")
 }
 
-// TestTakeLockNeverDeletesAnotherRunsFreshLock drives the takeover's re-check:
-// the directory the rename moved turns out to be a lock another run made fresh
-// after this run read the old one as stale, and a third run then took the path,
-// so the fresh lock stays aside for its owner rather than being removed.
-func TestTakeLockNeverDeletesAnotherRunsFreshLock(t *testing.T) {
+// TestTakeLockHoldsTheLockForTheRun is what the flock adds: a run that has
+// taken the lock keeps it when its directory ages past StaleAfter, as a long
+// build's does, and the next run takes over only once Cleanup has released it.
+func TestTakeLockHoldsTheLockForTheRun(t *testing.T) {
+	t.Parallel()
+	held := newTestRun(t)
+	makeLock(t, held.Cfg.LockDir, "9999", testNow.Add(-21*time.Minute))
+	if ok, err := held.TakeLock(); !ok || err != nil {
+		t.Fatalf("TakeLock() = %v, %v; want the stale lock taken over", ok, err)
+	}
+	t.Cleanup(held.Cleanup)
+	if err := os.Chtimes(held.Cfg.LockDir, testNow.Add(-time.Hour), testNow.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	next := newTestRun(t)
+	next.Cfg.LockDir = held.Cfg.LockDir
+	next.Cfg.PID = 5151
+	t.Cleanup(next.Cleanup)
+	if ok, err := next.TakeLock(); ok || err != nil {
+		t.Fatalf("TakeLock() = %v, %v; want a refusal while the first run holds the lock", ok, err)
+	}
+	if got := lockPID(t, held.Cfg.LockDir); got != "4242" {
+		t.Errorf("lock records pid %q, want the first run's 4242", got)
+	}
+	held.Cleanup()
+	if ok, err := next.TakeLock(); !ok || err != nil {
+		t.Fatalf("TakeLock() after Cleanup = %v, %v; want the lock", ok, err)
+	}
+}
+
+// TestTakeLockReportsAPathItCannotMake keeps a directory this run cannot make
+// apart from a lock another run holds: it fails the run instead of reporting
+// the lock as taken by another build.
+func TestTakeLockReportsAPathItCannotMake(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	blocked := filepath.Join(tr.root, "blocked")
+	if err := os.WriteFile(blocked, []byte("a file where a directory belongs"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr.Cfg.LockDir = filepath.Join(blocked, "polecat-image.lock")
+	line, err := tr.BuildLock()
+	if err == nil {
+		t.Fatal("BuildLock() error = nil, want the lock path it cannot make")
+	}
+	if line != "" {
+		t.Errorf("BuildLock() = %q with an error, want no defer line", line)
+	}
+	tr.wantLogged(t, "ERROR: cannot take the lock "+tr.Cfg.LockDir)
+}
+
+// TestTakeLockClassifiesAClaimFailure is the claim's error told apart from
+// another run's lock: only a directory already there is a run that holds it, so
+// only that one is the script's "already running" line.
+func TestTakeLockClassifiesAClaimFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		err      error
+		deferred bool
+	}{
+		{"a directory another run holds", &fs.PathError{Op: "mkdir", Path: "lock", Err: fs.ErrExist}, true},
+		{"a directory it cannot make", os.ErrPermission, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTestRun(t)
+			tr.Run.claim = func() error { return tc.err }
+			line, err := tr.BuildLock()
+			if tc.deferred {
+				if err != nil || line != "already running (lock "+tr.Cfg.LockDir+")" {
+					t.Fatalf("BuildLock() = %q, %v; want the defer line for a held lock", line, err)
+				}
+				return
+			}
+			if err == nil || line != "" {
+				t.Fatalf("BuildLock() = %q, %v; want the claim's error and no defer line", line, err)
+			}
+			tr.wantLogged(t, "ERROR: cannot take the lock "+tr.Cfg.LockDir)
+		})
+	}
+}
+
+// TestTakeLockYieldsToARunThatTookTheFreedPath covers the takeover's last race:
+// a run that takes no flock — the script, until gt-tpg0p.7 — claimed the path
+// between this run's rename and its claim. The other run holds the lock, so
+// this one defers rather than failing.
+func TestTakeLockYieldsToARunThatTookTheFreedPath(t *testing.T) {
 	t.Parallel()
 	tr := newTestRun(t)
 	makeLock(t, tr.Cfg.LockDir, "9999", testNow.Add(-21*time.Minute))
 	tr.Run.rename = func(oldpath, newpath string) error {
-		// The other run replaced the stale lock with its own between this run's
-		// stale read and its rename, so the rename moves that run's lock.
-		if err := os.RemoveAll(oldpath); err != nil {
+		if err := os.Rename(oldpath, newpath); err != nil {
 			return err
 		}
-		makeLock(t, newpath, "9999", testNow)
-		// A third run claimed the real path while the other run's lock was
-		// aside.
 		makeLock(t, oldpath, "7777", testNow)
 		return nil
 	}
-	if tr.TakeLock() {
-		t.Fatal("TakeLock() took a lock that turned out fresh")
+	ok, err := tr.TakeLock()
+	if ok || err != nil {
+		t.Fatalf("TakeLock() = %v, %v; want a refusal with no error", ok, err)
 	}
 	if tr.HaveLock {
-		t.Error("HaveLock = true after a refused takeover")
+		t.Error("HaveLock = true after the other run took the freed path")
 	}
 	if got := lockPID(t, tr.Cfg.LockDir); got != "7777" {
-		t.Errorf("lock records pid %q, want the third run's 7777", got)
-	}
-	left := asideDirs(t, tr.Cfg.LockDir)
-	if len(left) != 1 {
-		t.Fatalf("takeover left %q aside, want the other run's fresh lock kept in one", left)
-	}
-	if got := lockPID(t, left[0]); got != "9999" {
-		t.Errorf("the lock left aside records pid %q, want the other run's 9999", got)
-	}
-	tr.wantLogged(t, "left in place")
-}
-
-// TestTakeLockKeepsAFreshLockItCannotPutBack is the same re-check when the real
-// path is free but the rename back fails: the fresh lock stays aside, because
-// removing it would release a lock its owner still believes it holds.
-func TestTakeLockKeepsAFreshLockItCannotPutBack(t *testing.T) {
-	t.Parallel()
-	tr := newTestRun(t)
-	makeLock(t, tr.Cfg.LockDir, "9999", testNow.Add(-21*time.Minute))
-	calls := 0
-	tr.Run.rename = func(oldpath, newpath string) error {
-		calls++
-		if calls > 1 {
-			return os.ErrPermission
-		}
-		if err := os.RemoveAll(oldpath); err != nil {
-			return err
-		}
-		makeLock(t, newpath, "9999", testNow)
-		return nil
-	}
-	if tr.TakeLock() {
-		t.Fatal("TakeLock() took a lock that turned out fresh")
-	}
-	left := asideDirs(t, tr.Cfg.LockDir)
-	if len(left) != 1 {
-		t.Fatalf("takeover left %q aside, want the fresh lock kept in one", left)
-	}
-	if got := lockPID(t, left[0]); got != "9999" {
-		t.Errorf("the lock left aside records pid %q, want 9999", got)
-	}
-	tr.wantLogged(t, "could not be put back")
-}
-
-// TestTakeLockPutsAFreshLockBack drives the other half of the re-check: the
-// directory moved aside was fresh and no lock replaced it, so it goes back.
-func TestTakeLockPutsAFreshLockBack(t *testing.T) {
-	t.Parallel()
-	tr := newTestRun(t)
-	makeLock(t, tr.Cfg.LockDir, "9999", testNow.Add(-21*time.Minute))
-	tr.Run.rename = func(oldpath, newpath string) error {
-		if err := os.RemoveAll(oldpath); err != nil {
-			return err
-		}
-		makeLock(t, newpath, "9999", testNow)
-		return nil
-	}
-	if tr.TakeLock() {
-		t.Fatal("TakeLock() took a lock that turned out fresh")
-	}
-	if !exists(tr.Cfg.LockDir) {
-		t.Fatal("the fresh lock was not put back")
-	}
-	if got := lockPID(t, tr.Cfg.LockDir); got != "9999" {
-		t.Errorf("lock records pid %q, want 9999", got)
+		t.Errorf("lock records pid %q, want the other run's 7777", got)
 	}
 	if left := asideDirs(t, tr.Cfg.LockDir); len(left) != 0 {
-		t.Errorf("takeover left %q behind", left)
+		t.Errorf("takeover left the stale lock aside at %q", left)
 	}
 }
 
@@ -266,8 +289,12 @@ func TestBuildLock(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			tr := newTestRun(t)
+			t.Cleanup(tr.Cleanup)
 			tc.prepare(t, tr)
-			got := tr.BuildLock()
+			got, err := tr.BuildLock()
+			if err != nil {
+				t.Fatalf("BuildLock() error = %v, want none", err)
+			}
 			if !tc.refused {
 				if got != "" {
 					t.Fatalf("BuildLock() = %q, want empty: the run may build", got)
@@ -291,15 +318,24 @@ func TestBuildLock(t *testing.T) {
 	}
 }
 
-func TestTakeLockRefusesWhenTheRenameFails(t *testing.T) {
+// TestTakeLockReportsARenameItCannotMake also checks the refusal releases the
+// flock: the next run must not be blocked by a run that took nothing.
+func TestTakeLockReportsARenameItCannotMake(t *testing.T) {
 	t.Parallel()
 	tr := newTestRun(t)
 	makeLock(t, tr.Cfg.LockDir, "9999", testNow.Add(-21*time.Minute))
 	tr.Run.rename = func(string, string) error { return os.ErrPermission }
-	if tr.TakeLock() {
-		t.Fatal("TakeLock() took a lock it could not rename aside")
+	if ok, err := tr.TakeLock(); ok || err == nil {
+		t.Fatalf("TakeLock() = %v, %v; want the rename's error", ok, err)
 	}
 	if got := lockPID(t, tr.Cfg.LockDir); got != "9999" {
 		t.Errorf("lock records pid %q, want the untouched 9999", got)
+	}
+	next := newTestRun(t)
+	next.Cfg.LockDir = tr.Cfg.LockDir
+	next.Cfg.PID = 5151
+	t.Cleanup(next.Cleanup)
+	if ok, err := next.TakeLock(); !ok || err != nil {
+		t.Fatalf("TakeLock() by the next run = %v, %v; want the lock a refused run released", ok, err)
 	}
 }

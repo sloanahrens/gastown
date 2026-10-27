@@ -7,8 +7,9 @@ import "os"
 //
 // After a takeover the lock directory is another run's, and removing it would
 // let a third run build beside that one, so a run that lost the lock leaves it.
-// Every step is best effort: Cleanup runs on the way out of a failed run too,
-// and must not replace that run's failure with its own.
+// The flock goes last, so a takeover cannot start on a directory this run is
+// still removing. Every step is best effort: Cleanup runs on the way out of a
+// failed run too, and must not replace that run's failure with its own.
 func (r *Run) Cleanup() {
 	if r.TarDir != "" {
 		_ = os.RemoveAll(r.TarDir)
@@ -24,6 +25,10 @@ func (r *Run) Cleanup() {
 	}
 	if r.HaveLock && r.LockHeld() {
 		_ = os.RemoveAll(r.Cfg.LockDir)
-		r.HaveLock = false
+	}
+	r.HaveLock = false
+	if r.unlock != nil {
+		r.unlock()
+		r.unlock = nil
 	}
 }

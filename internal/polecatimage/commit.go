@@ -50,6 +50,10 @@ func isCommit(s string) bool {
 	return true
 }
 
+// dockerNoValue is what docker's template prints for a field the image does not
+// carry, which a missing label is.
+const dockerNoValue = "<no value>"
+
 // ImageCommit is the gt commit the image's label records, or "" when the image
 // or the label is missing.
 //
@@ -57,7 +61,11 @@ func isCommit(s string) bool {
 func (r *Run) ImageCommit() string {
 	format := `{{index .Config.Labels "` + r.Cfg.Label + `"}}`
 	res := r.call(r.Cfg.Docker, "image", "inspect", "--format", format, r.Cfg.Image)
-	return strings.TrimSpace(res.output())
+	label := strings.TrimSpace(res.output())
+	if label == dockerNoValue {
+		return ""
+	}
+	return label
 }
 
 // SameCommit reports whether two commits name the same one: each at least 7
