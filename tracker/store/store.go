@@ -68,6 +68,10 @@ type Store interface {
 	// snapshot: per rig the ready issues (no page limit), the held issues and
 	// the children of the ready issues, and the status of the probed ids.
 	DispatchBoard(ctx context.Context, req api.DispatchBoardRequest) (api.DispatchBoardResponse, error)
+	// TownSnapshot returns one page of the town's durable issues with their
+	// blocked verdicts, and the counts over the whole set, all read in one
+	// repeatable-read transaction so the page and the counts cannot disagree.
+	TownSnapshot(ctx context.Context, req api.SnapshotRequest) (api.TownSnapshot, error)
 	// Stats counts the durable issues of rig (every rig when empty) by status.
 	Stats(ctx context.Context, rig string) (api.Stats, error)
 	// ConfigGet returns a configuration key's value; ok is false when unset.

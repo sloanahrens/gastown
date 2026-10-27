@@ -90,6 +90,7 @@ func New(cfg Config) *Server {
 	s.registerWriteRoutes(v1)
 	s.registerLinkRoutes(v1)
 	s.registerBoardRoutes(v1)
+	s.registerSnapshotRoutes(v1)
 	s.registerEventRoutes(v1)
 	s.registerAdminRoutes(v1)
 	// Instrumentation sits inside authentication because it reads the actor

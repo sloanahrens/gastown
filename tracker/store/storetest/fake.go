@@ -145,6 +145,9 @@ func (*Fake) CreateGraph(context.Context, api.GraphRequest) (api.GraphResult, er
 func (*Fake) DispatchBoard(context.Context, api.DispatchBoardRequest) (api.DispatchBoardResponse, error) {
 	return api.DispatchBoardResponse{}, unimplemented("DispatchBoard")
 }
+func (*Fake) TownSnapshot(context.Context, api.SnapshotRequest) (api.TownSnapshot, error) {
+	return api.TownSnapshot{}, unimplemented("TownSnapshot")
+}
 func (*Fake) Stats(context.Context, string) (api.Stats, error) {
 	return api.Stats{}, unimplemented("Stats")
 }
