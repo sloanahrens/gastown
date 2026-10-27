@@ -11,7 +11,7 @@ import (
 
 func TestBuildRigSeedUsesThePinThatCoversTheBuildCommit(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := &guardGit{answer: map[string]string{rigDir("gastown") + " cat-file -t " + mainSHA: "commit"}}
 	seedRig(f, "gastown", mainSHA, map[string]map[string]string{
 		pinSHA:  {"go.mod": goMod("example/gastown", "github.com/x/a")},
 		mainSHA: {"go.mod": goMod("example/gastown", "github.com/x/a")},
@@ -30,7 +30,7 @@ func TestBuildRigSeedUsesThePinThatCoversTheBuildCommit(t *testing.T) {
 
 func TestBuildRigSeedFallsBackToTheBuildCommitWhenThePinLacksAModule(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := &guardGit{answer: map[string]string{rigDir("gastown") + " cat-file -t " + mainSHA: "commit"}}
 	seedRig(f, "gastown", mainSHA, map[string]map[string]string{
 		pinSHA:  {"go.mod": goMod("example/gastown", "github.com/x/a")},
 		mainSHA: {"go.mod": goMod("example/gastown", "github.com/x/a", "github.com/x/new")},
@@ -50,7 +50,7 @@ func TestBuildRigSeedFallsBackToTheBuildCommitWhenThePinLacksAModule(t *testing.
 
 func TestBuildRigSeedFailsWhenThePinCannotBeRead(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := &guardGit{answer: map[string]string{rigDir("gastown") + " cat-file -t " + mainSHA: "commit"}}
 	seedRig(f, "gastown", mainSHA, map[string]map[string]string{
 		mainSHA: {"go.mod": goMod("example/gastown", "github.com/x/a")},
 	})
@@ -62,7 +62,7 @@ func TestBuildRigSeedFailsWhenThePinCannotBeRead(t *testing.T) {
 
 func TestBuildRigSeedWithNoPinUsesTheBuildCommit(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := &guardGit{answer: map[string]string{rigDir("gastown") + " cat-file -t " + mainSHA: "commit"}}
 	commit, notes, err := BuildRigSeed(nil, "gastown", mainSHA, town, f.run)
 	if err != nil || commit != mainSHA || len(notes) != 0 {
 		t.Errorf("BuildRigSeed without a pin = %s, %v, %v; want the build commit and no notes", commit, notes, err)

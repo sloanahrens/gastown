@@ -25,6 +25,9 @@ func BuildRigSeed(pins []Source, buildRig, buildCommit, town string, git Git) (c
 		return buildCommit, nil, nil
 	}
 	dir := path.Join(town, buildRig, "mayor", "rig")
+	if _, err := git(dir, "cat-file", "-t", buildCommit); err != nil {
+		return "", nil, fmt.Errorf("cannot read the build commit %s in %s (%v): the checkout must hold the commit being built; fetch that checkout through the town's path, then rerun", short(buildCommit), dir, err)
+	}
 	missing, err := missingModules(git, dir, pin, buildCommit)
 	if err != nil {
 		return "", nil, fmt.Errorf("pin-drift guard: rig %s pin %s is not readable in its canonical checkout, so it cannot be compared with the build commit %s (%v): fetch or fix that checkout, then rerun", buildRig, short(pin), short(buildCommit), err)
