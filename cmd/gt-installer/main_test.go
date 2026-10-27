@@ -7,30 +7,141 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/gastown/internal/installer"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
 func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
+
+// The commits a fake run's checkout answers with: the one the installed binary
+// was built from, and the one being installed.
+const (
+	prevSHA = "c1111111"
+	fullSHA = "c2222222"
+)
 
 // testEnv is a process whose install tree is a temporary directory and which
 // has no town above its working directory, so a run never reads or writes the
 // host's install directory.
 func testEnv(t *testing.T) (environment, string) {
 	t.Helper()
+	env, root, _ := newTestEnv(t)
+	return env, root
+}
+
+// newTestEnv is testEnv with the run's seams, for a test that drives steps the
+// others never reach.
+func newTestEnv(t *testing.T) (environment, string, *fakeRun) {
+	t.Helper()
 	root := t.TempDir()
+	f := &fakeRun{}
 	values := map[string]string{
 		"INSTALL_GT_BIN_DIR":    filepath.Join(root, "bin"),
 		"INSTALL_GT_DAEMON_DIR": filepath.Join(root, "daemon"),
 		"INSTALL_GT_RIG_DIR":    filepath.Join(root, "rig"),
+		"INSTALL_GT_SIGN_DIR":   filepath.Join(root, "signing"),
 	}
 	env := environment{
 		getenv: func(key string) string { return values[key] },
 		getwd:  func() (string, error) { return root, nil },
 		home:   func() (string, error) { return root, nil },
 		exe:    func() (string, error) { return filepath.Join(root, "gt-installer"), nil },
+		newRun: f.newRun,
 	}
-	return env, root
+	return env, root, f
+}
+
+// fakeRun is the run a test's environment builds: every external command is
+// recorded and none is started, the checkout answers for itself, and the run
+// moves files in the temporary tree the test made. It is what keeps this
+// package's tests off make, gt and codesign (gt-tpg0p.11).
+type fakeRun struct {
+	// installed is set once the install step has put a binary in place, so the
+	// commit the binary reports moves from the replaced commit to the new one,
+	// as a real install's does.
+	installed bool
+	// bin is the installed binary the install step writes.
+	bin string
+	// commands is the argv of every command the steps ran through the run's
+	// command seam, and execs those the exit contract ran.
+	commands [][]string
+	execs    [][]string
+}
+
+func (f *fakeRun) newRun(cfg installer.Config, c *installer.Contract, paths installer.Paths) *installer.Run {
+	f.bin = paths.GT()
+	c.Exec = func(name string, args ...string) ([]byte, error) {
+		f.execs = append(f.execs, append([]string{name}, args...))
+		return nil, nil
+	}
+	run := &installer.Run{
+		Cfg:   cfg,
+		C:     c,
+		Paths: paths,
+		Repo: installer.Repo{
+			Fetch:      func() error { return nil },
+			Resolve:    resolved,
+			CommitTime: func(string) (time.Time, error) { return time.Unix(0, 0).UTC(), nil },
+			IsAncestor: func(ancestor, descendant string) bool {
+				return ancestor == descendant || (ancestor == prevSHA && descendant == fullSHA)
+			},
+			Dirty:       func() (bool, error) { return false, nil },
+			Branch:      func() string { return "main" },
+			FastForward: func(string) error { return nil },
+			Head:        func() (string, error) { return fullSHA, nil },
+			AheadOf:     func(string) (int, error) { return 0, nil },
+		},
+		Files: installer.Files{
+			// chflags and chattr are programs; the flag they set is not what
+			// these tests watch.
+			ClearImmutable: func(string) {},
+			SetImmutable:   func(string) {},
+		},
+		Bin: installer.Binary{Commit: func(string, string) string {
+			if f.installed {
+				return fullSHA
+			}
+			return prevSHA
+		}},
+		// Neither timeout(1) nor gtimeout is on the fake PATH, so codesign runs
+		// unwrapped, as it does where neither is installed.
+		Found: func(string) bool { return false },
+	}
+	run.Cmd = func(dir, name string, args ...string) ([]byte, []byte, int) {
+		f.commands = append(f.commands, append([]string{name}, args...))
+		return f.respond(name, args)
+	}
+	return run
+}
+
+// respond answers the commands the flow runs: a make install-local puts the
+// binary in place, as the real one does, and the stale read answers the commit
+// that binary was built from. Everything else succeeds with nothing to say.
+func (f *fakeRun) respond(name string, args []string) ([]byte, []byte, int) {
+	switch {
+	case name == "make" && len(args) > 0 && args[len(args)-1] == "install-local":
+		if err := os.WriteFile(f.bin, []byte("installed binary"), 0o755); err != nil {
+			return []byte(err.Error()), nil, 1
+		}
+		f.installed = true
+		return nil, nil, 0
+	case name == f.bin && len(args) == 2 && args[0] == "stale" && args[1] == "--json":
+		return []byte(`{"binary_commit": "` + fullSHA + `"}`), nil, 0
+	}
+	return nil, nil, 0
+}
+
+// resolved is the fake checkout's answer for a ref.
+func resolved(ref string) string {
+	switch ref {
+	case "origin/main", "HEAD", fullSHA:
+		return fullSHA
+	case prevSHA:
+		return prevSHA
+	}
+	return ""
 }
 
 // A bad argument is reported before any directory is resolved: the message on
@@ -176,6 +287,118 @@ func TestRunDryRunWithoutAProgramDirectory(t *testing.T) {
 	if after := snapshot(t, root); !reflect.DeepEqual(after, before) {
 		t.Errorf("the tree changed:\nbefore %v\nafter  %v", before, after)
 	}
+}
+
+// TestRunInstallsEndToEnd drives every step of a run — the target, the
+// refusals, the build, the install, the signing, the smoke check, the syncs and
+// the restart marker — with the run's commands recorded and none started. It is
+// the case the run seam exists for: the flow reaches make, gt and codesign, and
+// a test that let one of them through would run it on the host (gt-tpg0p.11).
+func TestRunInstallsEndToEnd(t *testing.T) {
+	t.Parallel()
+	env, root, f := newTestEnv(t)
+	binDir, signDir := filepath.Join(root, "bin"), filepath.Join(root, "signing")
+	keychain := filepath.Join(signDir, "gastown-signing.keychain-db")
+	// The build checkout, the daemon directory, the signing material and the
+	// binary being replaced, as an installed town has them.
+	for _, dir := range []string{filepath.Join(root, "rig", ".git"), filepath.Join(root, "daemon")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string]struct {
+		body string
+		mode os.FileMode
+	}{
+		keychain:                                {"keychain", 0o600},
+		filepath.Join(signDir, "keychain.pass"): {"test-password\n", 0o600},
+		filepath.Join(binDir, "gt"):             {"old binary", 0o755},
+	}
+	for path, file := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(file.body), file.mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out, errOut strings.Builder
+
+	code := runWith(nil, &out, &errOut, env)
+
+	if code != 0 {
+		t.Fatalf("run() = %d, want 0\nstdout %q\nstderr %q", code, out.String(), errOut.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if want := "install-gt: RESULT installed " + fullSHA + " " + prevSHA + " -"; lines[len(lines)-1] != want {
+		t.Errorf("last line = %q, want %q", lines[len(lines)-1], want)
+	}
+	gt := filepath.Join(binDir, "gt")
+	// codesign's last argument is the mktemp copy beside the binary, whose name
+	// nothing can predict, so the first rows are a prefix and that one row's
+	// path is checked by its shape.
+	prefix := [][]string{
+		{"make", "SKIP_UPDATE_CHECK=1", "build"},
+		{"make", "SKIP_UPDATE_CHECK=1", "INSTALL_DIR=" + binDir, "install-local"},
+		{"security", "unlock-keychain", "-p", "test-password", keychain},
+		{"codesign", "--force", "--keychain", keychain, "-s", "gastown-dev-unattended", "-i", "com.gastown.gt"},
+	}
+	suffix := [][]string{
+		{gt, "stale", "--json"},
+		{gt, "formula", "sync"},
+		{gt, "plugin", "sync"},
+		{gt, "escalate", "clear", "--fingerprint", "install-gt:build-failed",
+			"--fingerprint", "install-gt:smoke-failed", "--reason", "install-gt: " + fullSHA + " is in force"},
+	}
+	if want := len(prefix) + len(suffix); len(f.commands) != want {
+		t.Fatalf("commands = %q, want %d of them", f.commands, want)
+	}
+	for i, want := range prefix {
+		got := f.commands[i]
+		if i == len(prefix)-1 {
+			signed := got[len(want)]
+			got = got[:len(want)]
+			if dir, base := filepath.Dir(signed), filepath.Base(signed); dir != binDir || !strings.HasPrefix(base, ".gt.signed.") {
+				t.Errorf("signed path = %q, want a .gt.signed.* copy beside %q", signed, gt)
+			}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("command %d = %q, want %q", i, got, want)
+		}
+	}
+	for i, want := range suffix {
+		if got := f.commands[len(prefix)+i]; !reflect.DeepEqual(got, want) {
+			t.Errorf("command %d = %q, want %q", len(prefix)+i, got, want)
+		}
+	}
+	// Nothing ran through the exit contract either: no escalation and no
+	// gateway, which this run skips for want of a gateway.toml.
+	if len(f.execs) != 0 {
+		t.Errorf("contract commands = %q, want none", f.execs)
+	}
+	// The installed binary is the one the install wrote, and the install is
+	// recorded in the marker the daemon reads and the receipt it leaves.
+	if got := readFile(t, gt); got != "installed binary" {
+		t.Errorf("installed binary = %q, want the install step's", got)
+	}
+	marker := readFile(t, filepath.Join(root, "daemon", "restart-pending.json"))
+	if !strings.Contains(marker, `"commit": "`+fullSHA+`"`) || !strings.Contains(marker, `"source": "manual"`) {
+		t.Errorf("restart marker = %q, want the installed commit and its source", marker)
+	}
+	receipts := readFile(t, filepath.Join(root, "daemon", "install-receipts.jsonl"))
+	if !strings.Contains(receipts, `"event": "installed"`) || !strings.Contains(receipts, `"commit": "`+fullSHA+`"`) {
+		t.Errorf("receipts = %q, want the installed event for %s", receipts, fullSHA)
+	}
+}
+
+// readFile is a file's contents, for a test that a step wrote.
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
 }
 
 // snapshot is every path under root, with a file's contents, so a test can say

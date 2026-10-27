@@ -40,11 +40,21 @@ type environment struct {
 	getwd  func() (string, error)
 	home   func() (string, error)
 	exe    func() (string, error)
+	// newRun builds the run itself, so a test hands the whole flow commands
+	// that are recorded rather than started and a filesystem under a temporary
+	// directory. Without it any test that reached the build, install, signing or
+	// smoke step would run make, gt and codesign for real (gt-tpg0p.11).
+	newRun func(cfg installer.Config, c *installer.Contract, paths installer.Paths) *installer.Run
 }
 
 // run is runWith against the process's own environment.
 func run(args []string, stdout, stderr io.Writer) int {
-	return runWith(args, stdout, stderr, environment{os.Getenv, os.Getwd, os.UserHomeDir, os.Executable})
+	return runWith(args, stdout, stderr, environment{
+		getenv: os.Getenv,
+		getwd:  os.Getwd,
+		home:   os.UserHomeDir,
+		exe:    os.Executable,
+	})
 }
 
 // runWith is run against env, so a test can point every directory at a
@@ -89,7 +99,11 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 	c.Receipts = paths.Receipts()
 	c.GT = paths.GT()
 
-	r := installer.NewRun(cfg, c, paths)
+	newRun := env.newRun
+	if newRun == nil {
+		newRun = installer.NewRun
+	}
+	r := newRun(cfg, c, paths)
 	r.Signing = installer.ResolveSigning(env.getenv, paths.TownRoot)
 	// --dry-run prints the gateway plan and changes nothing, before the checkout
 	// is read.
