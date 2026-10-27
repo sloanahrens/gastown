@@ -57,7 +57,7 @@ func TestCostPanelDrawsItsChartsFromTheServersData(t *testing.T) {
 	hours[5].Spent = -0.50                                // a top-up: a rise is money added, drawn as a zero bar, not a gap
 	hours[3] = SpendHour{Start: first.Add(3 * time.Hour)} // no sample: a gap
 	plan := &ClaudePlan{WeeklyValueUSD: 70, ProjectedPctAtReset: 83}
-	charts := BuildCostCharts(time.Date(2026, 10, 25, 16, 30, 0, 0, time.Local), perDay, hours, 0, plan)
+	charts := BuildCostCharts(time.Date(2026, 10, 25, 16, 30, 0, 0, time.Local), perDay, hours, 0, plan, PlanSamples{})
 
 	spend, err := json.Marshal(map[string]any{
 		"live":         map[string]any{"ok": true, "available": true},
@@ -151,5 +151,182 @@ func TestCostPanelHeadlineReadsTheServersFigures(t *testing.T) {
 		if !strings.Contains(text.String(), want) {
 			t.Errorf("the Cost headline does not show %s from the server's figures:\n%s", want, text.String())
 		}
+	}
+}
+
+// costClaudeDraw is what a reader sees of the drawn Cost panel: every tooltip
+// under it, the charts' aria-labels, and the panel's text (where the legend
+// lives). It holds no class name, so a page that draws the series in different
+// elements still has to say the same things.
+type costClaudeDraw struct {
+	Titles []string `json:"titles"`
+	Aria   []string `json:"aria"`
+	Text   string   `json:"text"`
+}
+
+// costClaudeJS reads back the tooltips, aria-labels and words of the drawn Cost
+// panel, the way a reader hovering the chart or a screen reader has them.
+const costClaudeJS = `(function () {
+  var out = {titles: [], aria: [], text: ""};
+  function walk(n) {
+    if (!n || !n.children) return;
+    for (var i = 0; i < n.children.length; i++) {
+      var c = n.children[i];
+      if (String(c.tagName || "").toUpperCase() === "TITLE") out.titles.push(String(c.textContent));
+      var label = c.getAttribute ? c.getAttribute("aria-label") : null;
+      if (label) out.aria.push(String(label));
+      walk(c);
+    }
+  }
+  var root = document.getElementById("cost");
+  walk(root);
+  out.text = root.textContent;
+  return JSON.stringify(out);
+})()`
+
+// costClaudeDrawn renders the Cost panel over one payload and reads back what a
+// reader sees of it.
+func costClaudeDrawn(t *testing.T, p *pageDOM) costClaudeDraw {
+	t.Helper()
+
+	drawn, err := p.vm.RunString(costClaudeJS)
+	if err != nil {
+		t.Fatalf("reading the drawn Cost panel: %v", err)
+	}
+	var got costClaudeDraw
+	if err := json.Unmarshal([]byte(drawn.String()), &got); err != nil {
+		t.Fatalf("reading the drawn Cost panel: %v", err)
+	}
+	return got
+}
+
+// costRenderPayload is the spend report the Cost panel draws beside a charts
+// payload: the two days the fixtures' Claude series covers.
+func costRenderPayload(t *testing.T, days map[string]float64) json.RawMessage {
+	t.Helper()
+
+	perDay := map[string]any{}
+	for day, spent := range days {
+		perDay[day] = map[string]any{"spent": spent}
+	}
+	spend, err := json.Marshal(map[string]any{
+		"live":    map[string]any{"ok": true, "available": true},
+		"balance": 77.49,
+		"per_day": perDay,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return spend
+}
+
+// The Cost panel draws the Claude series inside the same daily chart as the
+// DeepSeek bars, with a legend that carries the plan-equivalent label, a tooltip
+// on every bucket it drew, and a hatch on the buckets the series has no sample
+// for instead of a bar of zero (gt-yxx98).
+func TestCostPanelDrawsTheClaudeSeriesInTheSameChart(t *testing.T) {
+	t.Parallel()
+
+	days := map[string]float64{"2026-10-19": 1.00, "2026-10-20": 2.00}
+	day := func(h int) time.Time { return time.Date(2026, 10, 19, h, 0, 0, 0, time.Local) }
+	charts := BuildCostCharts(time.Date(2026, 10, 25, 16, 30, 0, 0, time.Local), days, nil, 0, claudeSeriesPlan,
+		claudeSeries(claudeSampleAt(day(9), 10), claudeSampleAt(day(10), 12)))
+	if charts.Daily == nil || charts.Daily.Claude == nil {
+		t.Fatalf("the fixture built no Claude series on the daily chart: %+v", charts.Daily)
+	}
+
+	p := newPageDOM(t)
+	p.call(t, "renderCost", jsonValue(t, map[string]any{
+		"spend":       costRenderPayload(t, days),
+		"cost_charts": charts,
+	}))
+	got := costClaudeDrawn(t, p)
+
+	// Every bucket's mark is hoverable, and the tooltip says what the server
+	// charged that bucket: a bar's dollars, or that the series has no sample.
+	for _, b := range charts.Daily.Claude.Bars {
+		found := false
+		for _, tip := range got.Titles {
+			if strings.Contains(tip, claudePlanSeriesName) && strings.HasSuffix(tip, b.Title) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("no tooltip for the %s bucket %q among %v", b.Label, b.Title, got.Titles)
+		}
+	}
+	gaps := 0
+	for _, b := range charts.Daily.Claude.Bars {
+		if b.Gap {
+			gaps++
+		}
+	}
+	if gaps == 0 {
+		t.Error("the fixture has no bucket without a sample, so the hatch is untested")
+	}
+	if !strings.Contains(got.Text, "DeepSeek") || !strings.Contains(got.Text, claudePlanSeriesName) {
+		t.Errorf("the panel's legend does not name both series %q:\n%s", claudePlanSeriesName, got.Text)
+	}
+	named := 0
+	for _, label := range got.Aria {
+		if strings.Contains(label, claudePlanSeriesName) {
+			named++
+			if !strings.Contains(label, "bucket") {
+				t.Errorf("the chart's aria-label %q does not count the buckets with no sample", label)
+			}
+		}
+	}
+	if named == 0 {
+		t.Errorf("no chart's aria-label carries %q: %v", claudePlanSeriesName, got.Aria)
+	}
+}
+
+// A chart whose samples could not be read says so on the panel instead of
+// drawing a series of zeros, and so does one the page has to drop because it
+// does not line up with the chart's buckets: a chart without Claude dollars is
+// never silent about why (gt-yxx98).
+func TestCostPanelSaysWhyTheClaudeSeriesIsAbsent(t *testing.T) {
+	t.Parallel()
+
+	days := map[string]float64{"2026-10-25": 2.00}
+	now := time.Date(2026, 10, 25, 16, 30, 0, 0, time.Local)
+	unreadable := BuildCostCharts(now, days, nil, 0, claudeSeriesPlan, PlanSamples{Read: true, Failed: true})
+	// The same chart with a series the page cannot place: one bucket short of
+	// the bars it would be drawn beside.
+	misaligned := BuildCostCharts(now, days, nil, 0, claudeSeriesPlan,
+		claudeSeries(claudeSampleAt(time.Date(2026, 10, 25, 9, 0, 0, 0, time.Local), 40)))
+	if misaligned.Daily == nil || misaligned.Daily.Claude == nil {
+		t.Fatalf("the fixture built no Claude series to misalign: %+v", misaligned.Daily)
+	}
+	misaligned.Daily.Claude.Bars = misaligned.Daily.Claude.Bars[:len(misaligned.Daily.Claude.Bars)-1]
+
+	for _, tc := range []struct {
+		name   string
+		charts CostCharts
+		want   string
+	}{
+		{"unreadable samples", unreadable, "could not be read"},
+		{"a series the page cannot place", misaligned, "does not line up"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			p := newPageDOM(t)
+			p.call(t, "renderCost", jsonValue(t, map[string]any{
+				"spend":       costRenderPayload(t, days),
+				"cost_charts": tc.charts,
+			}))
+			got := costClaudeDrawn(t, p)
+			if !strings.Contains(got.Text, tc.want) {
+				t.Errorf("the Cost panel does not say %q about the Claude series:\n%s", tc.want, got.Text)
+			}
+			for _, tip := range got.Titles {
+				if strings.Contains(tip, claudePlanSeriesName) {
+					t.Errorf("the panel drew a Claude tooltip %q it said it could not draw", tip)
+				}
+			}
+		})
 	}
 }

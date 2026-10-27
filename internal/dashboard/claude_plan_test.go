@@ -264,12 +264,21 @@ func TestClaudePlanReaderTellsAMissingSeriesFromAnEmptyOne(t *testing.T) {
 	if missing.PlanUSDMonth != ClaudePlanDefaultUSD {
 		t.Errorf("an unavailable read priced the plan at %v, want the default", missing.PlanUSDMonth)
 	}
+	// A file the status line has not written yet is a read that found no
+	// samples, not a read that failed: the Cost charts say the status line has
+	// written nothing rather than that its series broke (gt-yxx98).
+	if !missing.Samples.Read || missing.Samples.Failed || len(missing.Samples.Samples) != 0 {
+		t.Errorf("a missing series handed the charts %+v, want a read with no samples and no failure", missing.Samples)
+	}
 
 	// The town root itself is not a series, and reading it is not a reading of
 	// nothing.
 	dir := NewClaudePlanReader(t.TempDir(), 200).Read(claudePlanNow)
 	if !dir.Unavailable {
 		t.Errorf("a directory read as %+v, want unavailable", dir)
+	}
+	if !dir.Samples.Read || !dir.Samples.Failed {
+		t.Errorf("an unreadable series handed the charts %+v, want a read that failed", dir.Samples)
 	}
 
 	empty := NewClaudePlanReader(claudePlanFile(t), 200).Read(claudePlanNow)
@@ -278,6 +287,9 @@ func TestClaudePlanReaderTellsAMissingSeriesFromAnEmptyOne(t *testing.T) {
 	}
 	if !empty.Stale || empty.WeeklyPct != 0 || empty.SampledAt != 0 {
 		t.Errorf("an empty series read as %+v, want a stale meter at zero", empty)
+	}
+	if !empty.Samples.Read || empty.Samples.Failed || len(empty.Samples.Samples) != 0 {
+		t.Errorf("an empty series handed the charts %+v, want a read with no samples and no failure", empty.Samples)
 	}
 }
 
