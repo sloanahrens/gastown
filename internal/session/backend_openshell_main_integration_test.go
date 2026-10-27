@@ -237,8 +237,35 @@ func TestIntegrationMainScriptCleanupKillsItsTmuxServer(t *testing.T) {
 	// kernel may hand the number to another process, which a signal-0 probe
 	// cannot tell from the server.
 	if !waitForGone(server, 5*time.Second) {
-		_ = syscall.Kill(server.PID, syscall.SIGKILL)
+		_ = killIfSame(server, syscall.SIGKILL)
 		t.Fatalf("tmux server %d outlived the test's cleanup: its kill-server did not reach the server under the test's TMUX_TMPDIR", server.PID)
+	}
+}
+
+// killIfSame sends sig to server's process only when the recorded start token
+// still names it, and reports whether a signal was sent. The pid alone may
+// belong to a stranger by now, which must never be signalled.
+func killIfSame(server procid.ID, sig syscall.Signal) bool {
+	if !server.Running(procid.StartToken) {
+		return false
+	}
+	return syscall.Kill(server.PID, sig) == nil
+}
+
+// TestIntegrationMainScriptCleanupSparesAStrangerOnTheServerPID drives the
+// fallback kill's refusal branch: when the recorded token no longer names the
+// pid's process, no signal may go out.
+func TestIntegrationMainScriptCleanupSparesAStrangerOnTheServerPID(t *testing.T) {
+	t.Parallel()
+	self, ok := procid.Of(os.Getpid())
+	if !ok {
+		t.Fatal("reading the test process's start time")
+	}
+	// SIGCONT stands in for SIGKILL: the guard decides before the signal, and
+	// a delivery to this live process is harmless should the guard regress.
+	reused := procid.ID{PID: self.PID, Start: self.Start + "-other"}
+	if killIfSame(reused, syscall.SIGCONT) {
+		t.Fatal("the fallback kill signalled a pid the recorded token does not name")
 	}
 }
 
@@ -249,26 +276,71 @@ func TestIntegrationMainScriptGoneCheckIgnoresAReusedPID(t *testing.T) {
 	t.Parallel()
 	self, ok := procid.Of(os.Getpid())
 	if !ok || !self.Running(procid.StartToken) {
-		t.Fatal("the test process's start time is not readable, so the check below would pass vacuously")
+		t.Fatal("the test process's start time is not readable, so the checks below would pass vacuously")
+	}
+	// The probe the check used before it read tokens reports the pid live
+	// whether the recorded process or a stranger holds it, so on its own it
+	// reads a recycled pid as the server still running. Both directions are
+	// asserted below, which is what the probe cannot do.
+	if err := syscall.Kill(self.PID, 0); err != nil {
+		t.Fatalf("a signal-0 probe of live pid %d failed (%v), so the case below tests nothing", self.PID, err)
+	}
+	if gone(self, procid.StartToken) {
+		t.Fatal("the test process's own record was counted as gone")
 	}
 	reused := procid.ID{PID: self.PID, Start: self.Start + "-other"}
+	if !gone(reused, procid.StartToken) {
+		t.Fatal("a reused pid with a different start time was not counted as gone")
+	}
 	if !waitForGone(reused, time.Second) {
-		t.Fatal("a reused pid with a different start time was counted as the server still running")
+		t.Fatal("the cleanup test's wait counted a reused pid as the server still running")
+	}
+}
+
+// TestIntegrationMainScriptGoneCheckDoesNotTrustAnUnreadableToken drives the
+// refusal branch: an alive pid whose start token cannot be read is not evidence
+// that the server died, so it must not read as gone.
+func TestIntegrationMainScriptGoneCheckDoesNotTrustAnUnreadableToken(t *testing.T) {
+	t.Parallel()
+	self, ok := procid.Of(os.Getpid())
+	if !ok {
+		t.Fatal("reading the test process's start time")
+	}
+	unreadable := func(int) (string, bool) { return "", false }
+	if gone(self, unreadable) {
+		t.Fatal("an unreadable start token was counted as the process gone")
 	}
 }
 
 // waitForGone reports whether server is gone within timeout. A pid alone is not
 // an identity: once its process dies the number can be reused, so a recorded
 // start token that no longer matches reads as gone.
+//
+// This poll is its own loop rather than a shared helper because waitForExit's
+// polling belongs to gt-yps37, which replaces the fixed sleep with a fake
+// clock; a shared loop here would collide with that rework.
 func waitForGone(server procid.ID, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if !server.Running(procid.StartToken) {
+		if gone(server, procid.StartToken) {
 			return true
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	return false
+}
+
+// gone reports whether server's process is gone, judging the start token through
+// start (StartToken outside tests). Only evidence that the pid no longer holds
+// the recorded process counts: the kernel saying the pid is free, or a readable
+// token naming a different process. A token that cannot be read is not proof of
+// death, so it keeps the process alive.
+func gone(server procid.ID, start func(int) (string, bool)) bool {
+	if !procid.ProbeAlive(syscall.Kill(server.PID, 0)) {
+		return true
+	}
+	token, ok := start(server.PID)
+	return ok && token != server.Start
 }
 
 // waitForExit reports whether pid is gone within timeout.
