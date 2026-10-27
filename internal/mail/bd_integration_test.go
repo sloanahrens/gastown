@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// TestIntegrationRunBdCommandUsesCentralEnvPolicy is the wiring guard for the
-// real subprocess: a bd on PATH sees the policy environment over an ambient
+// TestIntegrationStoresUseCentralEnvPolicy is the wiring guard for the real
+// subprocess: a bd on PATH sees the store's policy environment over an ambient
 // one that disagrees.
-func TestIntegrationRunBdCommandUsesCentralEnvPolicy(t *testing.T) {
+func TestIntegrationStoresUseCentralEnvPolicy(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "bd.log")
 	writeMailBDStub(t, binDir)
@@ -32,19 +34,17 @@ func TestIntegrationRunBdCommandUsesCentralEnvPolicy(t *testing.T) {
 	}
 	workDir := filepath.Dir(beadsDir)
 
-	// Use the same deadline production callers get via bdReadCtx (60s), not an
+	// The stores carry the same 60s deadlines production gets, not an
 	// arbitrary tighter one: under real town load (many concurrent agent
 	// subprocesses competing for CPU/fork), even this trivial shell stub can
 	// take longer than a few seconds to spawn, which previously made this
 	// test flake with "signal: killed" on a loaded box (gt-911, same family
 	// as gt-0nk).
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	if _, err := runBdCommand(ctx, nil, []string{"list", "--json"}, workDir, beadsDir, "BD_IDENTITY=gastown/chrome", "BD_READONLY=false", "BD_DOLT_AUTO_COMMIT=on"); err != nil {
-		t.Fatalf("run read bd command: %v", err)
+	if _, err := bdStore(nil, workDir, beadsDir).List(beads.ListOptions{Label: "gt:message"}); err != nil {
+		t.Fatalf("read through the store: %v", err)
 	}
 	readLog := readStubLog(t, logPath)
-	for _, want := range []string{"args:[list][--json][--flat]", "BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BEADS_NO_AUTO_IMPORT=1", "BD_IDENTITY=gastown/chrome", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
+	for _, want := range []string{"args:[list][--json][--label=gt:message][--limit=0][--flat]", "BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BEADS_NO_AUTO_IMPORT=1", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
 		if !strings.Contains(readLog, want) {
 			t.Fatalf("read command log missing %q:\n%s", want, readLog)
 		}
@@ -53,11 +53,11 @@ func TestIntegrationRunBdCommandUsesCentralEnvPolicy(t *testing.T) {
 	if err := os.WriteFile(logPath, nil, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runBdCommand(ctx, nil, []string{"label", "add", "hq-msg", "read"}, workDir, beadsDir, "BD_IDENTITY=gastown/chrome", "BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off"); err != nil {
-		t.Fatalf("run write bd command: %v", err)
+	if err := bdWriteStore(nil, workDir, beadsDir).Update("hq-msg", beads.UpdateOptions{AddLabels: []string{"read"}}); err != nil {
+		t.Fatalf("write through the store: %v", err)
 	}
 	writeLog := readStubLog(t, logPath)
-	for _, want := range []string{"args:[label][add][hq-msg][read]", "\nBD_READONLY=\n", "BD_DOLT_AUTO_COMMIT=on", "BEADS_NO_AUTO_IMPORT=1", "BD_IDENTITY=gastown/chrome", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
+	for _, want := range []string{"args:[update][hq-msg][--add-label=read]", "\nBD_READONLY=\n", "BD_DOLT_AUTO_COMMIT=on", "BEADS_NO_AUTO_IMPORT=1", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
 		if !strings.Contains(writeLog, want) {
 			t.Fatalf("write command log missing %q:\n%s", want, writeLog)
 		}

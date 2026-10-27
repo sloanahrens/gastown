@@ -370,6 +370,65 @@ func TestMailboxLegacyListByThread(t *testing.T) {
 	}
 }
 
+// TestListByThreadReadsTheThreadLabelEverywhere: a thread is the messages
+// that carry its thread:<id> label, whatever their status — a closed message
+// is a read message, not a removed one — and whichever table holds it, since
+// mail stores some messages as wisps. The read asks both tables and answers
+// oldest first.
+func TestListByThreadReadsTheThreadLabelEverywhere(t *testing.T) {
+	t.Parallel()
+	const threadID = "thread-A"
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		switch argv := strings.Join(c.Args, " "); argv {
+		case `list --json --status=all --label=thread:thread-A --limit=0 --flat`:
+			return `[{"id":"msg-002","title":"Second","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:02Z","labels":["gt:message","from:mayor/","thread:thread-A"]},` +
+				`{"id":"msg-001","title":"First","status":"closed","priority":2,"assignee":"mayor/","created_at":"2026-06-12T12:00:01Z","labels":["gt:message","from:gastown/max","thread:thread-A"]}]`, "", 0
+		case `query --json ephemeral=true AND label="thread:thread-A" --all --limit=0`:
+			return `[{"id":"msg-003","title":"Third","status":"open","priority":2,"assignee":"mayor/","created_at":"2026-06-12T12:00:03Z","labels":["gt:message","from:gastown/max","thread:thread-A"]}]`, "", 0
+		default:
+			return "", "unexpected bd args: " + argv, 1
+		}
+	}}
+	m := NewMailboxWithBeadsDir("gastown/max", t.TempDir(), t.TempDir())
+	m.bd = bd.run
+
+	thread, err := m.ListByThread(threadID)
+	if err != nil {
+		t.Fatalf("ListByThread: %v", err)
+	}
+	var ids []string
+	for _, msg := range thread {
+		ids = append(ids, msg.ID)
+		if msg.ThreadID != threadID {
+			t.Errorf("message %s carries thread %q, want %q", msg.ID, msg.ThreadID, threadID)
+		}
+	}
+	if got, want := strings.Join(ids, ","), "msg-001,msg-002,msg-003"; got != want {
+		t.Fatalf("thread = %s, want %s (oldest first, issues and wisps together)", got, want)
+	}
+	if !thread[0].Read {
+		t.Errorf("closed message msg-001 read as unread; a closed mail bead is a read one")
+	}
+}
+
+// TestListByThreadReportsAFailedWispRead: a wisp table that cannot answer is
+// a thread that was not read, not a thread with no wisp messages in it.
+func TestListByThreadReportsAFailedWispRead(t *testing.T) {
+	t.Parallel()
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		if c.Args[0] == "list" {
+			return "[]", "", 0
+		}
+		return "", "Error 1146 (42S02): Table 'beads.wisps' doesn't exist\n", 1
+	}}
+	m := NewMailboxWithBeadsDir("gastown/max", t.TempDir(), t.TempDir())
+	m.bd = bd.run
+
+	if _, err := m.ListByThread("thread-A"); err == nil {
+		t.Fatal("ListByThread answered nil error for a failed wisp read; a partial thread would read as the whole one")
+	}
+}
+
 func TestMailboxLegacyEmptyInbox(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
@@ -460,7 +519,8 @@ func TestNewMailboxWithBeadsDir(t *testing.T) {
 // assignee==actor close guard rejects a close whose actor differs from the
 // bead's assignee, so `gt mail archive` fails when the ambient identity
 // differs from the mailbox's own. closeInDir must name the mailbox's identity
-// on the close itself, the way mail's raw close always did.
+// as the close's actor — in whichever variable bd resolves one from — and
+// leave the argv to the seam.
 func TestCloseInDirActsAsAddressedIdentity(t *testing.T) {
 	t.Parallel()
 	const id = "gt-wisp-xv525"
@@ -495,25 +555,22 @@ func TestCloseInDirActsAsAddressedIdentity(t *testing.T) {
 			if len(calls[0].Args) < 2 || calls[0].Args[0] != "close" || calls[0].Args[1] != id {
 				t.Fatalf("bd args = %v, want a close of %s", calls[0].Args, id)
 			}
-			wantFlag := ""
-			if tt.wantActor {
-				wantFlag = "--actor=" + m.Identity()
-			}
-			namedActor := false
 			for _, arg := range calls[0].Args[2:] {
-				switch {
-				case arg == wantFlag && wantFlag != "":
-					namedActor = true
-				case strings.HasPrefix(arg, "--actor="):
-					t.Errorf("bd close named %q, want %q", arg, wantFlag)
-				case strings.HasPrefix(arg, "--session="):
-					// The seam's own flag, which mail no longer appends itself.
-				default:
+				if !strings.HasPrefix(arg, "--session=") {
 					t.Errorf("unexpected bd close argument %q after the bead id", arg)
 				}
 			}
-			if namedActor != tt.wantActor {
-				t.Errorf("bd close argv = %v, want actor flag %q", calls[0].Args, wantFlag)
+			// bd resolves the close's actor from BEADS_ACTOR (its --actor
+			// flag's default), and the seam's WithActor reads BD_ACTOR; both
+			// name the mailbox's identity, and neither may name anything else.
+			for _, key := range []string{"BEADS_ACTOR", "BD_ACTOR"} {
+				got, ok := envValue(calls[0], key)
+				switch {
+				case tt.wantActor && (!ok || got != m.Identity()):
+					t.Errorf("%s = %q present=%v, want the mailbox identity %q", key, got, ok, m.Identity())
+				case !tt.wantActor && ok && got != "":
+					t.Errorf("%s = %q, want unset with no identity", key, got)
+				}
 			}
 			// A close is a write: it must not inherit a read-only mode that
 			// would make bd refuse it.

@@ -1,189 +1,97 @@
 package mail
 
 import (
-	"bytes"
 	"context"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
-const (
-	// bdReadTimeout is the timeout for bd read operations (list, show, query).
-	// 60s accommodates concurrent agent load where multiple bd processes compete
-	// for Dolt locks and memory (was 30s, caused signal:killed under contention).
-	bdReadTimeout = 60 * time.Second
-	// bdWriteTimeout is the timeout for bd write operations (create, close, label, reopen).
-	bdWriteTimeout = 60 * time.Second
-)
+// bdTimeout bounds every bd call mail makes, read or write. 60s accommodates
+// concurrent agent load where several bd processes compete for Dolt locks and
+// memory (30s was killed with signal:killed under contention).
+const bdTimeout = 60 * time.Second
 
-// bdError represents an error from running a bd command.
-// It wraps the underlying error and includes the stderr output for inspection.
-type bdError struct {
-	Err    error
-	Stderr string
-}
-
-// Error implements the error interface.
-func (e *bdError) Error() string {
-	if e.Stderr != "" {
-		return e.Stderr
-	}
-	if e.Err != nil {
-		return e.Err.Error()
-	}
-	return "unknown bd error"
-}
-
-// Unwrap returns the underlying error for errors.Is/As compatibility.
-func (e *bdError) Unwrap() error {
-	return e.Err
-}
-
-// ContainsError checks if the stderr message contains the given substring.
-func (e *bdError) ContainsError(substr string) bool {
-	return strings.Contains(e.Stderr, substr)
-}
-
-// bdCall is one bd invocation as a bdRunner sees it: the argv after "bd",
-// the working directory and the whole environment.
+// bdCall is one bd invocation as mail's unit tier sees it: the working
+// directory, the whole environment bd was handed, and the argv after "bd".
+// Production builds the same environment and the seam runs bd with it; only
+// a test's bdAnswer is handed the call instead.
 type bdCall struct {
 	Dir  string
 	Env  []string
 	Args []string
 }
 
-// bdRunner runs one bd invocation under ctx. Mail keeps its own raw bd
-// runner rather than beads' typed client: every mail call carries a
-// caller's deadline (bdReadCtx, bdWriteCtx), so a hung bd cannot pin the
-// sender or the reader, and runs in its own process group so the deadline
-// kills bd's children too. A failure that should read as a bd exit status
-// implements interface{ ExitCode() int }.
-type bdRunner func(ctx context.Context, c bdCall) (stdout, stderr []byte, err error)
-
-// runBdCommand executes a bd command with a context timeout and proper environment setup.
-// ctx controls the deadline/timeout for the subprocess.
-// workDir is the directory to run the command in.
-// beadsDir is the BEADS_DIR environment variable value.
-// extraEnv contains additional environment variables to set (e.g., "BD_IDENTITY=...").
-// Returns stdout bytes on success, or a *bdError on failure.
-func runBdCommand(ctx context.Context, run bdRunner, args []string, workDir, beadsDir string, extraEnv ...string) (_ []byte, retErr error) {
-
-	// Remove stale dolt-server.pid before spawning bd. A stale PID file causes
-	// bd to connect to port 3307 which may be occupied by a different Dolt server
-	// serving different databases, resulting in hangs until the read timeout kills it.
-	beads.CleanStaleDoltServerPID(beadsDir)
-
-	// bd v0.59+ requires --flat for list --json to produce JSON output.
-	// Without it, bd returns human-readable tree format that fails JSON parsing.
-	// The mail package calls bd directly (not via beads.Run), so it needs its
-	// own injection. (GH#2746)
-	args = beads.InjectFlatForListJSON(args)
-
-	if run == nil {
-		run = runBdProcess
-	}
-	// WithMachineEnvIn is the environment CommandWithEnv built for this call
-	// before it was typed: the parent's environment with PWD=workDir (which
-	// bd's own file discovery reads) and machine mode on.
-	env := bdSubprocessEnv(beads.WithMachineEnvIn(workDir, nil), beadsDir, beads.ArgsAreReadOnly(args), extraEnv)
-
-	stdout, stderr, runErr := run(ctx, bdCall{Dir: workDir, Env: env, Args: args})
-
-	// If bd doesn't support --flat (< v0.59), retry without it.
-	// Same fallback pattern as beads.Run. (GH#2746)
-	if runErr != nil && strings.Contains(string(stderr), "unknown flag: --flat") {
-		retryArgs := make([]string, 0, len(args))
-		for _, a := range args {
-			if a != "--flat" {
-				retryArgs = append(retryArgs, a)
-			}
-		}
-		stdout, stderr, runErr = run(ctx, bdCall{Dir: workDir, Env: env, Args: retryArgs})
-	}
-
-	if runErr != nil {
-		return nil, &bdError{
-			Err:    runErr,
-			Stderr: strings.TrimSpace(string(stderr)),
-		}
-	}
-
-	return stdout, nil
-}
-
-// runBdProcess is the real bdRunner: bd on PATH, in its own detached
-// process group, with exactly the environment c carries.
-func runBdProcess(ctx context.Context, c bdCall) ([]byte, []byte, error) {
-	// Keep-raw (gt-7iwy0.4.1): the real half of mail's bdRunner seam. Mail
-	// carries a per-call deadline and runs bd in its own detached process
-	// group; the typed Client's methods take no context, so a hung bd could
-	// pin a sender or a reader if they went through one.
-	cmd := beads.CommandContextWithEnv(ctx, c.Dir, c.Env, c.Args...)
-	util.SetDetachedProcessGroup(cmd.Cmd)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.Bytes(), stderr.Bytes(), err
-}
-
-// firstArg returns args[0] or "" when the slice is empty.
-func firstArg(args []string) string {
-	if len(args) > 0 {
-		return args[0]
-	}
-	return ""
-}
+// bdAnswer answers one bd call in place of the process: mail's unit-tier
+// double, recording or scripting what bd would say. nil runs the real bd,
+// which the store's plain wrapper starts with the environment bdSubprocessEnv
+// derived, in its own process group and under the store's deadline.
+type bdAnswer func(ctx context.Context, c bdCall) (stdout, stderr []byte, err error)
 
 // bdStore returns the beads client mail reads through for one beads directory:
-// a plain wrapper over mail's own runner (the real bd in a detached process
-// group, or the one a test injects), the read-only environment, the stale-PID
-// pre-flight, and the read deadline. Verbs the seam cannot express stay on
-// runBdCommand.
-func bdStore(run bdRunner, workDir, beadsDir string) beads.Client {
-	return newBdStore(run, workDir, beadsDir, true, bdReadTimeout, "")
+// a plain wrapper carrying the read-only environment, the stale-PID
+// pre-flight and the deadline. The store runs bd itself; a test's bdAnswer
+// only replaces what bd answers.
+func bdStore(run bdAnswer, workDir, beadsDir string) beads.Client {
+	return newBdStore(run, workDir, beadsDir, true, "")
 }
 
-// bdWriteStore is bdStore for a write: the mutation environment and the write
-// deadline. It names no actor, so bd records the identity the environment
-// resolves, as the raw label and update commands it replaces did.
-func bdWriteStore(run bdRunner, workDir, beadsDir string) beads.Client {
-	return newBdStore(run, workDir, beadsDir, false, bdWriteTimeout, "")
+// bdAdminStore is bdStore's admin surface, for the store verbs Client does
+// not carry (the wisp list).
+func bdAdminStore(run bdAnswer, workDir, beadsDir string) beads.Admin {
+	return newBdStore(run, workDir, beadsDir, true, "")
+}
+
+// bdWriteStore is bdStore for a write: the mutation environment. It names no
+// actor, so bd records the identity the environment resolves, as the raw label
+// and update commands it replaces did.
+func bdWriteStore(run bdAnswer, workDir, beadsDir string) beads.Client {
+	return newBdStore(run, workDir, beadsDir, false, "")
 }
 
 // bdCloseStore is bdWriteStore for the one write that must name its identity:
 // bd's assignee==actor close guard refuses a close by any other actor, and a
 // refused close fails `gt mail archive` town-wide (gt-ovem, sibling of
-// gt-cut). The seam's Close carries no actor field, so the store adds the flag
-// mail's raw close always passed.
-func bdCloseStore(run bdRunner, workDir, beadsDir, actor string) beads.Client {
-	return newBdStore(run, workDir, beadsDir, false, bdWriteTimeout, actor)
+// gt-cut). The seam owns the argv now, so the identity rides the environment
+// bd resolves its --actor flag default from ("default: $BEADS_ACTOR, git
+// user.name, $USER"); the read and label stores keep the ambient identity.
+func bdCloseStore(run bdAnswer, workDir, beadsDir, actor string) beads.Client {
+	return newBdStore(run, workDir, beadsDir, false, actor)
 }
 
-func newBdStore(run bdRunner, workDir, beadsDir string, readOnly bool, timeout time.Duration, actor string) beads.Client {
-	if run == nil {
-		run = runBdProcess
+func newBdStore(run bdAnswer, workDir, beadsDir string, readOnly bool, actor string) *beads.Beads {
+	// Remove stale dolt-server.pid before bd runs. A stale PID file causes
+	// bd to connect to port 3307 which may be occupied by a different Dolt server
+	// serving different databases, resulting in hangs until the deadline kills it.
+	beads.CleanStaleDoltServerPID(beadsDir)
+
+	env := bdSubprocessEnv(beads.WithMachineEnvIn(workDir, nil), beadsDir, readOnly)
+	if actor != "" {
+		env = withActorEnv(env, actor)
 	}
-	env := bdSubprocessEnv(beads.WithMachineEnvIn(workDir, nil), beadsDir, readOnly, nil)
-	store := beads.NewPlain(workDir, env, beads.WithDirRunner(
-		func(ctx context.Context, dir string, args []string) ([]byte, []byte, error) {
-			beads.CleanStaleDoltServerPID(beadsDir)
-			if actor != "" {
-				// Copy, since the caller's argv may have spare capacity.
-				named := make([]string, len(args), len(args)+1)
-				copy(named, args)
-				args = append(named, "--actor="+actor)
-			}
-			return run(ctx, bdCall{Dir: dir, Env: env, Args: args})
-		}))
-	return store.WithProcessGroup().WithTimeout(timeout)
+	var opts []beads.Option
+	if run != nil {
+		opts = append(opts, beads.WithDirRunner(
+			func(ctx context.Context, dir string, args []string) ([]byte, []byte, error) {
+				return run(ctx, bdCall{Dir: dir, Env: env, Args: args})
+			}))
+	}
+	return beads.NewPlain(workDir, env, opts...).WithProcessGroup().WithTimeout(bdTimeout)
 }
 
-func bdSubprocessEnv(baseEnv []string, beadsDir string, readOnly bool, extraEnv []string) []string {
-	base := append(append([]string{}, baseEnv...), extraEnv...)
+// withActorEnv makes bd resolve actor as the call's author, naming both
+// variables bd reads one from: BEADS_ACTOR, which its --actor flag defaults
+// to, and BD_ACTOR, the fallback the seam's WithActor sets (the pair gt's
+// attribution guard treats as a bd author's environment,
+// internal/cmd/tap_guard_polecat_attribution.go). The inherited values go
+// first, because which of two entries for one key the child reads is not
+// something this code can rely on.
+func withActorEnv(env []string, actor string) []string {
+	env = beads.StripEnvKey(beads.StripEnvKey(env, "BD_ACTOR"), "BEADS_ACTOR")
+	return append(env, "BEADS_ACTOR="+actor, "BD_ACTOR="+actor)
+}
+
+func bdSubprocessEnv(baseEnv []string, beadsDir string, readOnly bool) []string {
 	mode := beads.MutationRouting
 	if readOnly {
 		mode = beads.ReadOnlyRouting
@@ -195,21 +103,5 @@ func bdSubprocessEnv(baseEnv []string, beadsDir string, readOnly bool, extraEnv 
 			mode = beads.MutationPinned
 		}
 	}
-	return beads.EnvForSubprocessMode(base, beadsDir, mode)
-}
-
-// bdReadCtx returns a context with the standard bd read timeout.
-//
-//nolint:gosec // The cancel function is returned to callers, who are responsible for invoking it.
-func bdReadCtx() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(context.Background(), bdReadTimeout)
-	return ctx, cancel
-}
-
-// bdWriteCtx returns a context with the standard bd write timeout.
-//
-//nolint:gosec // The cancel function is returned to callers, who are responsible for invoking it.
-func bdWriteCtx() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(context.Background(), bdWriteTimeout)
-	return ctx, cancel
+	return beads.EnvForSubprocessMode(baseEnv, beadsDir, mode)
 }

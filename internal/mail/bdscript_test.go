@@ -9,7 +9,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// bdScript is a bdRunner for the unit tier: it records every bd call
+// bdScript is a bdAnswer for the unit tier: it records every bd call
 // and answers it with answer (stdout, stderr and an exit code, 0 for
 // success). A nil answer prints nothing and succeeds.
 type bdScript struct {

@@ -556,7 +556,7 @@ func TestSendFromCrewWorkspace_AvoidsEphemeralPrefixMismatch(t *testing.T) {
 			if ephemeral && strings.HasPrefix(id, "msg-") {
 				return "", "prefix mismatch: database uses 'hq-' (allowed: hq,hq-cv) but ID '" + id + "' doesn't match any allowed prefix", 1
 			}
-			return "hq-testmail-1\n", "", 0
+			return `{"id":"hq-testmail-1"}`, "", 0
 		}
 		return "", "unsupported bd args: " + strings.Join(args, " "), 1
 	}}
@@ -639,7 +639,7 @@ func TestSendToSingle_BackfillsEmptyThreadID(t *testing.T) {
 			if ephemeral && strings.HasPrefix(id, "msg-") {
 				return "", "prefix mismatch: database uses 'hq-' (allowed: hq,hq-cv) but ID '" + id + "' doesn't match any allowed prefix", 1
 			}
-			return "hq-testmail-1\n", "", 0
+			return `{"id":"hq-testmail-1"}`, "", 0
 		}
 		return "", "unsupported bd args: " + strings.Join(args, " "), 1
 	}}

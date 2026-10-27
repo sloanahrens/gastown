@@ -58,7 +58,7 @@ func sendBd(show string) *bdScript {
 		case args[0] == "show":
 			return show, "", 0
 		case args[0] == "create":
-			return "hq-testmail-1\n", "", 0
+			return `{"id":"hq-testmail-1"}`, "", 0
 		}
 		return "", "unsupported bd args: " + strings.Join(args, " "), 1
 	}}
@@ -82,9 +82,9 @@ func createdTo(bd *bdScript) []string {
 		if c.Args[0] != "create" {
 			continue
 		}
-		for i, arg := range c.Args {
-			if arg == "--assignee" && i+1 < len(c.Args) {
-				out = append(out, c.Args[i+1])
+		for _, arg := range c.Args {
+			if assignee, ok := strings.CutPrefix(arg, "--assignee="); ok {
+				out = append(out, assignee)
 			}
 		}
 	}
@@ -142,7 +142,7 @@ func TestSendMessageFansOutOneCopyPerRecipient(t *testing.T) {
 		if !strings.HasPrefix(argv, "create ") {
 			continue
 		}
-		if !strings.Contains(argv, "--priority 2") || !strings.Contains(argv, "--ephemeral") {
+		if !strings.Contains(argv, "--priority=2") || !strings.Contains(argv, "--ephemeral") {
 			t.Errorf("delivered copy is not a normal-priority wisp: %s", argv)
 		}
 		if !strings.Contains(argv, "Convoy landed") {
