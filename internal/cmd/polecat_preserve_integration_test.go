@@ -181,6 +181,7 @@ func TestIntegrationPolecatBranchPreservation(t *testing.T) {
 		t.Parallel()
 		bare, seat, remote, branch := setupPreserveRig(t)
 		installOffBranchGuard(t, bare)
+		requireOffBranchPushRefused(t, bare, branch)
 		g := git.NewGitWithDir(bare, "")
 		if head := gitNow(t, bare, "symbolic-ref", "--short", "HEAD"); head != "main" {
 			t.Fatalf("fixture is wrong: the bare repository's HEAD is %q, want main", head)
@@ -213,6 +214,7 @@ func TestIntegrationPolecatBranchPreservation(t *testing.T) {
 		t.Parallel()
 		bare, seat, remote, branch := setupPreserveRig(t)
 		installOffBranchGuard(t, bare)
+		requireOffBranchPushRefused(t, bare, branch)
 		runGitCmd(t, seat, "checkout", "main")
 		g := git.NewGitWithDir(bare, "")
 		tip := gitNow(t, bare, "rev-parse", "refs/heads/"+branch)
@@ -287,14 +289,24 @@ func TestIntegrationPolecatBranchPreservation(t *testing.T) {
 }
 
 // installOffBranchGuard installs the refusal the town's pre-push hook carries,
-// in repo's own hooks directory: a push of a branch from a checkout standing on
-// another one is refused. A copy of the real hook would drag in the town's role
-// checks, which this fixture has no identity for; the rule under test is the
-// HEAD-mismatch one.
+// in the hooks directory git reads for repo: a push of a branch from a checkout
+// standing on another one is refused. The directory is asked of git rather than
+// assumed to be <repo>/.git/hooks, which a bare repository does not have — a
+// hook written there is never run, and the bare-rig cases below would pass
+// without exercising the guard at all (gt-7cps5).
+//
+// A copy of the real hook would drag in the town's role checks, which this
+// fixture has no identity for; the rule under test is the HEAD-mismatch one.
 func installOffBranchGuard(t *testing.T, repo string) {
 	t.Helper()
-	hook := filepath.Join(repo, ".git", "hooks", "pre-push")
-	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+	hooks := gitNow(t, repo, "rev-parse", "--git-path", "hooks")
+	if !filepath.IsAbs(hooks) {
+		// git prints the local repository's hooks directory relative to the
+		// repository root.
+		hooks = filepath.Join(repo, hooks)
+	}
+	hook := filepath.Join(hooks, "pre-push")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
 		t.Fatalf("make the hooks directory: %v", err)
 	}
 	body := "#!/bin/sh\n" +
@@ -308,6 +320,23 @@ func installOffBranchGuard(t *testing.T, repo string) {
 		"done\n"
 	if err := os.WriteFile(hook, []byte(body), 0o755); err != nil {
 		t.Fatalf("write the pre-push hook: %v", err)
+	}
+}
+
+// requireOffBranchPushRefused proves installOffBranchGuard's hook is live for
+// repo: a push of branch attempted from this checkout (whose HEAD is another
+// branch) is refused by the guard before any ref is written. The probe targets
+// a throwaway ref, so a guard that failed to install is the only way it can
+// write anything.
+func requireOffBranchPushRefused(t *testing.T, repo, branch string) {
+	t.Helper()
+	cmd := exec.Command("git", "-C", repo, "push", "origin", branch+":refs/heads/guard-probe")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("the off-branch guard did not refuse a push of %s from %s:\n%s", branch, repo, out)
+	}
+	if !strings.Contains(string(out), "BLOCKED") {
+		t.Fatalf("the push of %s from %s failed for a reason other than the guard:\n%s", branch, repo, out)
 	}
 }
 

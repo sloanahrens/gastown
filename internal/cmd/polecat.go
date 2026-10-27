@@ -3150,10 +3150,14 @@ type branchPreserver interface {
 }
 
 // preserveWorkRoot is where a preserve push that finds no checkout of its
-// branch adds a temporary one: the rig's .runtime, not the town's, because
-// internal/git refuses a worktree target under the town root
-// (ErrUnsafeTownRootGitMutation) and gt-7cps5 rules out widening that guard.
-// The rig's own .runtime is on this host's disk, outside /tmp, and gitignored.
+// branch adds a temporary one: the rig's .runtime, beside its .repo.git, never
+// /tmp. The town root's .runtime — where the bead put it — is refused by this
+// repository's own guard: internal/git's protectedTownRuntimePath treats a
+// worktree target under <town>/.runtime as a mutation of the town root
+// (ErrUnsafeTownRootGitMutation), and gt-7cps5 does not change what that guard
+// protects. The rig's .runtime is on the same host disk and outside every
+// checkout, so it meets the bead's requirement (a durable directory that is
+// removed on every path) without touching the guard.
 func preserveWorkRoot(rigPath string) string {
 	return filepath.Join(rigPath, ".runtime", "preserve")
 }
