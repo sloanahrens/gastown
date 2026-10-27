@@ -66,6 +66,34 @@ func TestShowTextRoutesTheIDToItsDatabase(t *testing.T) {
 	}
 }
 
+// TestShowTextRunsBdInTheRoutedDatabaseDirectoryFromAWorktree pins ShowText's
+// pin to the database directory: bd reads the Dolt port file from its working
+// directory, not BEADS_DIR, so a call placed in a polecat worktree whose .beads
+// holds only a redirect must run in the routed database's directory, not in the
+// worktree (gt-p85pw.10, gt-r1xcn).
+func TestShowTextRunsBdInTheRoutedDatabaseDirectoryFromAWorktree(t *testing.T) {
+	t.Parallel()
+	townRoot, rigWorktree := townWithRoutes(t)
+	r := newRecorder(nil)
+	b := newBeads(beadsFields{workDir: rigWorktree, baseEnv: []string{"PATH=/usr/bin"}, exec: r.exec})
+
+	if _, err := b.ShowText("gt-abc", []string{"gt-abc"}); err != nil {
+		t.Fatalf("ShowText: %v", err)
+	}
+	calls := r.calls()
+	if len(calls) != 1 {
+		t.Fatalf("calls = %d, want one", len(calls))
+	}
+	rigDir := filepath.Join(townRoot, "gastown", "mayor", "rig")
+	if got := calls[0].dir; got != rigDir {
+		t.Errorf("dir = %q, want %q (the routed database's directory, not the worktree %q)", got, rigDir, rigWorktree)
+	}
+	beadsDir, _ := lastEnvValue(calls[0].env, "BEADS_DIR")
+	if want := filepath.Join(rigDir, ".beads"); beadsDir != want {
+		t.Errorf("BEADS_DIR = %q, want %q", beadsDir, want)
+	}
+}
+
 // Each id is answered by its own database, and a BEADS_DIR left in the
 // environment by the caller does not pull a rig's read to another store: the
 // cases the deleted cmd test covered (gt-p85pw.10).
