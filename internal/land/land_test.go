@@ -885,7 +885,7 @@ func TestLandRedGateNeverPushes(t *testing.T) {
 // TestLandCapsTheReworkLoop is gt-28ibg: the review rejection at
 // MaxReworkAttempts goes to a human instead of back to a polecat, so a refusal
 // the author keeps reproducing ends in an escalation rather than another
-// redispatch. Two gate refusals sit before each round and move nothing: a gate
+// redispatch. Two gate refusals before the first round move nothing: a gate
 // failure is fixed before om reviews, so it spends no attempt (gt-l3zak).
 func TestLandCapsTheReworkLoop(t *testing.T) {
 	t.Parallel()
@@ -897,24 +897,25 @@ func TestLandCapsTheReworkLoop(t *testing.T) {
 		return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
 	}
 	l := f.lander()
-	for attempt := 1; attempt <= MaxReworkAttempts; attempt++ {
-		f.gate.fn = redGate
-		for i := 0; i < 2; i++ {
-			_, err := l.Land(context.Background(), f.work)
-			var rej *Rejection
-			if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
-				t.Fatalf("attempt %d gate refusal %d: Land = %T %v, want a recorded gate rejection", attempt, i+1, err, err)
-			}
-			if !rej.Rework || strings.Contains(f.bead().Notes, "the loop is escalated") {
-				t.Errorf("attempt %d gate refusal %d escalated on a gate failure: rework=%v\n%s", attempt, i+1, rej.Rework, f.bead().Notes)
-			}
-			if got := CountRejections(f.bead().Notes); got != attempt-1 {
-				t.Errorf("attempt %d gate refusal %d: %d review rejection(s), want the %d before this round",
-					attempt, i+1, got, attempt-1)
-			}
-			f.resubmit()
+	f.gate.fn = redGate
+	// One under the gate's own ceiling (gt-phftg), so this test measures the
+	// review cap: a gate refusal advances no review round's number.
+	for i := 0; i < MaxReworkAttempts-1; i++ {
+		_, err := l.Land(context.Background(), f.work)
+		var rej *Rejection
+		if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
+			t.Fatalf("gate refusal %d: Land = %T %v, want a recorded gate rejection", i+1, err, err)
 		}
+		if !rej.Rework || strings.Contains(f.bead().Notes, "the loop is escalated") {
+			t.Errorf("gate refusal %d escalated on a gate failure: rework=%v\n%s", i+1, rej.Rework, f.bead().Notes)
+		}
+		if got := CountRejections(f.bead().Notes); got != 0 {
+			t.Errorf("gate refusal %d: %d review rejection(s), want none", i+1, got)
+		}
+		f.resubmit()
+	}
 
+	for attempt := 1; attempt <= MaxReworkAttempts; attempt++ {
 		f.gate.fn = func(string) GateResult { return GateResult{Passed: true} }
 		_, err := l.Land(context.Background(), f.work)
 		var rej *Rejection
@@ -945,6 +946,120 @@ func TestLandCapsTheReworkLoop(t *testing.T) {
 		if !capped {
 			f.resubmit()
 		}
+	}
+}
+
+// TestLandCapsAGateLoop is gt-phftg: a gate refusal spends no review attempt
+// (gt-l3zak), but a bead the gate has refused MaxReworkAttempts times is a loop
+// all the same, so it goes to a human instead of another redispatch.
+func TestLandCapsAGateLoop(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
+	}
+	l := f.lander()
+	for attempt := 1; attempt <= MaxReworkAttempts; attempt++ {
+		_, err := l.Land(context.Background(), f.work)
+		var rej *Rejection
+		if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
+			t.Fatalf("gate refusal %d: Land = %T %v, want a recorded gate rejection", attempt, err, err)
+		}
+		capped := attempt >= MaxReworkAttempts
+		if rej.Rework == capped {
+			t.Errorf("gate refusal %d: rej.Rework = %v, want %v", attempt, rej.Rework, !capped)
+		}
+		b := f.bead()
+		wantLabel := LabelRework
+		if capped {
+			wantLabel = LabelNeedsHuman
+		}
+		if !beads.HasLabel(b, wantLabel) || beads.HasLabel(b, LabelReadyToLand) {
+			t.Errorf("gate refusal %d: labels = %v, want %s", attempt, b.Labels, wantLabel)
+		}
+		if got := CountRejections(b.Notes); got != 0 {
+			t.Errorf("gate refusal %d: %d review rejection(s), want none: a gate spends no review attempt", attempt, got)
+		}
+		if capped != strings.Contains(b.Notes, "the loop is escalated") {
+			t.Errorf("gate refusal %d: capped=%v, notes:\n%s", attempt, capped, b.Notes)
+		}
+		if !capped {
+			f.resubmit()
+		}
+	}
+}
+
+// TestLandCapsAPolicyLoop is gt-phftg on the other kind a polecat can fix: the
+// unchecked-criteria refusal spends no review attempt either, and
+// MaxReworkAttempts of them end the loop.
+func TestLandCapsAPolicyLoop(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "hooked", Type: "task",
+		AcceptanceCriteria: "- [x] one\n- [ ] two\n",
+		Labels:             []string{LabelReadyToLand}, Notes: FormatReadyNote(f.work)})
+	l := f.lander()
+	for attempt := 1; attempt <= MaxReworkAttempts; attempt++ {
+		_, err := l.Land(context.Background(), f.work)
+		var rej *Rejection
+		if !errors.As(err, &rej) || rej.Kind != RejectPolicy || rej.RecordErr != nil {
+			t.Fatalf("policy refusal %d: Land = %T %v, want a recorded policy rejection", attempt, err, err)
+		}
+		capped := attempt >= MaxReworkAttempts
+		if rej.Rework == capped {
+			t.Errorf("policy refusal %d: rej.Rework = %v, want %v", attempt, rej.Rework, !capped)
+		}
+		b := f.bead()
+		wantLabel := LabelRework
+		if capped {
+			wantLabel = LabelNeedsHuman
+		}
+		if !beads.HasLabel(b, wantLabel) || beads.HasLabel(b, LabelReadyToLand) {
+			t.Errorf("policy refusal %d: labels = %v, want %s", attempt, b.Labels, wantLabel)
+		}
+		if got := CountRejections(b.Notes); got != 0 {
+			t.Errorf("policy refusal %d: %d review rejection(s), want none: a policy refusal spends no review attempt", attempt, got)
+		}
+		if !capped {
+			f.resubmit()
+		}
+	}
+}
+
+// TestLandRepeatRejectionCountsTheBlockOnce: the block an interrupted pass
+// wrote is this refusal's own, so a repeat completes it in place and counts it
+// once. Two gate blocks with a repeat of the second is still the second gate,
+// not a third, so the repeat does not escalate (gt-zqqcr, gt-phftg).
+func TestLandRepeatRejectionCountsTheBlockOnce(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	var notes strings.Builder
+	for attempt := 1; attempt <= 2; attempt++ {
+		notes.WriteString(FormatRejectionNote(RejectionNote{
+			Attempt: attempt, Kind: string(RejectGate), Reason: "earlier refusal",
+			Branch: f.work.Branch, Target: f.work.Target, MR: f.work.BeadID, Head: f.work.Head,
+		}) + "\n\n")
+	}
+	f.bd.Seed(beads.Issue{ID: f.work.BeadID, Title: "add b", Status: "hooked", Type: "task",
+		Labels: []string{LabelReadyToLand}, Notes: notes.String()})
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
+	}
+
+	_, err := f.lander().Land(context.Background(), f.work)
+	var rej *Rejection
+	if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
+		t.Fatalf("Land = %T %v, want a recorded gate rejection", err, err)
+	}
+	if !rej.Rework || strings.Contains(f.bead().Notes, "the loop is escalated") {
+		t.Errorf("the repeated second gate block escalated: rework=%v, reason=%q", rej.Rework, rej.Reason)
+	}
+	b := f.bead()
+	if got := RejectionBlocks(b.Notes); got != 2 {
+		t.Errorf("%d rejection block(s), want the 2 the repeat completed in place:\n%s", got, b.Notes)
+	}
+	if !beads.HasLabel(b, LabelRework) || beads.HasLabel(b, LabelReadyToLand) {
+		t.Errorf("labels after the repeat = %v, want %s", b.Labels, LabelRework)
 	}
 }
 

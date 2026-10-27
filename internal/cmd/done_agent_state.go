@@ -421,7 +421,10 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 				// Submitted for landing: the landing worker closes it when it
 				// lands, with the landed commit (ADR 0004). "Closed" means
 				// landed; closing here would claim that for a pushed branch.
-				attempt := 1 + land.CountRejections(hookedBead.Notes)
+				// The attempt is the submission's: every refusal block a bead
+				// carries was one, whatever its kind. CountRejections counts
+				// review rounds only, which is not this number (gt-phftg).
+				attempt := 1 + land.RejectionBlocks(hookedBead.Notes)
 				note := fmt.Sprintf("Submitted for landing (attempt %d)", attempt)
 				if w, ok := land.ParseReadyNote(hookedBead.Notes); ok {
 					note = fmt.Sprintf("Submitted for landing: %s @ %s onto %s (attempt %d)", w.Branch, done.ShortSHA(w.Head), w.Target, attempt)

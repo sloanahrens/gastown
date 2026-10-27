@@ -306,9 +306,9 @@ type Rejection struct {
 	// rules refused. A reader told request_changes beside the approve score of
 	// 0.90 would be told the opposite of what om said (gt-oi4je).
 	ReviewVerdict string
-	// Rework is false when only a human can lift the refusal (no_merge), and
-	// past MaxReworkAttempts whatever the kind was: the loop, not the refusal,
-	// is what the ceiling stops.
+	// Rework is false when only a human can lift the refusal (no_merge), and at
+	// MaxReworkAttempts refusals of its kind, whatever that kind is: the loop,
+	// not the refusal, is what the ceiling stops (gt-phftg).
 	Rework bool
 	// TargetTip is the target commit the merge was built on, set on a conflict.
 	// The rejection line carries it because a conflicted merge writes no merge
@@ -2081,14 +2081,15 @@ func mergedDiffLines(g Repo, base, head string) (int, bool) {
 	return total, true
 }
 
-// MaxReworkAttempts is the count of review rejections that ends the rework
-// loop: a bead om has refused this many times goes to a human instead of back
-// to a polecat (gt-28ibg). Each round costs a polecat session and a gate run,
-// and by the third the rounds are repeating a refusal rather than converging
-// on a landing, so the loop is the failure a human has to look at. A gate or
-// policy refusal is fixed before om reviews, so it spends no attempt
-// (gt-l3zak). It matches the town's other circuit-breaker threshold,
-// config.DefaultRecoveryMaxBeadRespawns.
+// MaxReworkAttempts is the number of refusals of one kind that ends the rework
+// loop: a bead refused this many times by one kind goes to a human instead of
+// back to a polecat (gt-28ibg). Each round costs a polecat session
+// and a gate run, and by the third the rounds are repeating a refusal rather
+// than converging on a landing, so the loop is the failure a human has to look
+// at. A review is one kind; a gate or policy refusal is another and spends no
+// review attempt (gt-l3zak), but three of them are still a loop and reach the
+// same ceiling (gt-phftg). It matches the town's other circuit-breaker
+// threshold, config.DefaultRecoveryMaxBeadRespawns.
 const MaxReworkAttempts = 3
 
 // attemptAtCeiling is the number a review refusal past MaxReworkAttempts is
@@ -2156,27 +2157,17 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		rej.RecordErr = err
 		return rej
 	}
-	kinds := rejectionKinds(issue.Notes)
-	if repeat {
-		// The block an interrupted pass already wrote is this refusal's own,
-		// not one of the rounds before it (gt-zqqcr).
-		kinds = kinds[:len(kinds)-1]
-	}
 	kind := string(rej.Kind)
-	// reviews counts the round this refusal would be, so a review refusal is
-	// counted with the reviews before it plus itself, and a gate or policy
-	// refusal leaves the count where it was: only a review spends an attempt
-	// (gt-l3zak).
-	reviews := countKind(kinds, string(RejectReview))
-	if kind == string(RejectReview) {
-		reviews++
-	}
-	attempt := reviews
-	if kind != string(RejectReview) {
-		// Every other kind numbers itself by its own kind, so two gate refusals
-		// never write the same header and neither claims a review's number
-		// (gt-l3zak).
-		attempt = countKind(kinds, kind) + 1
+	// The number this refusal is on within its kind: the blocks of that kind
+	// the bead already carries, plus itself. A block an interrupted pass
+	// already wrote is this refusal's own, already counted among them, so a
+	// repeat completes it in place rather than counting it twice (gt-zqqcr).
+	// A review numbers among reviews, and every other kind among its own, so
+	// two gate refusals never write the same header and neither claims a
+	// review's number (gt-l3zak).
+	attempt := countKind(rejectionKinds(issue.Notes), kind)
+	if !repeat {
+		attempt++
 	}
 	// The count stops at the ceiling (gt-ern0y): a bead resubmitted after it
 	// is escalated keeps accumulating notes, but there is no attempt four of a
@@ -2185,15 +2176,16 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	if kind == string(RejectReview) {
 		attempt = attemptAtCeiling(attempt)
 	}
-	// The attempt ceiling (gt-28ibg): the reviews the bead carries decide,
+	// The attempt ceiling (gt-28ibg): a refusal at MaxReworkAttempts decides,
 	// before the note is written, whether this round is the last one a polecat
-	// gets. A gate or policy refusal is one only when the loop is already
-	// escalated (gt-l3zak).
-	capped := rej.Rework && reviews >= MaxReworkAttempts
+	// gets, whatever its kind. A gate or policy refusal spends no review
+	// attempt (gt-l3zak), but a loop of them is still a loop, so three gate or
+	// three policy refusals reach the same ceiling (gt-phftg).
+	capped := rej.Rework && attempt >= MaxReworkAttempts
 	reason := rej.Reason
 	if capped {
 		reason = fmt.Sprintf("%s (attempt %d of %d: the loop is escalated, not reworked again)",
-			reason, min(reviews, MaxReworkAttempts), MaxReworkAttempts)
+			reason, min(attempt, MaxReworkAttempts), MaxReworkAttempts)
 	}
 	note := RejectionNote{
 		Attempt:     attempt,
