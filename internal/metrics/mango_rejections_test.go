@@ -626,6 +626,30 @@ func TestMangoRejectionsSectionEscapesSeatNames(t *testing.T) {
 	}
 }
 
+// TestMangoRejectionsSectionSkipsAQueueLine: a follow-up queue line is the
+// feed's bookkeeping rather than a verdict, so the section does not report it
+// as a line it could not attribute (gt-3arxj).
+func TestMangoRejectionsSectionSkipsAQueueLine(t *testing.T) {
+	t.Parallel()
+	town := rejectionTown(t,
+		land.ReviewRecord{BeadID: "gt-b", Rig: "gastown", Verdict: land.VerdictApprove, Score: 0.9, At: rejectionAt},
+		land.ReviewRecord{BeadID: "gt-q", Rig: "gastown", At: rejectionAt, Queue: &land.FollowupQueue{
+			Landed: "abc123", Score: 0.7,
+			Findings: []land.ReviewFindingText{{File: "a.go", Line: 1, Title: "name the error", Claim: "it panics"}},
+		}},
+	)
+	text, err := MangoRejectionsSection(context.Background(), Env{
+		Town: town, ReadFile: os.ReadFile,
+		Run: func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil },
+	})
+	if err != nil {
+		t.Fatalf("MangoRejectionsSection: %v", err)
+	}
+	if strings.Contains(text, "not readable as records") {
+		t.Errorf("text = %q, want the queue line skipped and uncounted", text)
+	}
+}
+
 func TestMangoRejectionsSectionFailsOnAnUnreadableLog(t *testing.T) {
 	t.Parallel()
 	_, err := MangoRejectionsSection(context.Background(), Env{

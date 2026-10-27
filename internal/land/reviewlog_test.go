@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -38,10 +39,10 @@ func TestReviewsFileAppendAndSince(t *testing.T) {
 		}
 	}
 	recs, err := f.Since(day)
-	if err != nil || len(recs) != 1 || recs[0] != cur {
+	if err != nil || len(recs) != 1 || !reflect.DeepEqual(recs[0], cur) {
 		t.Fatalf("Since(%v) = %+v, %v; want only %+v", day, recs, err, cur)
 	}
-	if all, _ := f.Since(day.Add(-24 * time.Hour)); len(all) != 2 || all[0] != old {
+	if all, _ := f.Since(day.Add(-24 * time.Hour)); len(all) != 2 || !reflect.DeepEqual(all[0], old) {
 		t.Errorf("Since(a day earlier) = %+v, want both records in file order", all)
 	}
 	raw, err := os.ReadFile(f.Path)
@@ -81,6 +82,25 @@ func TestReviewsFileSurvivesATornLine(t *testing.T) {
 	}
 }
 
+// TestReviewsFileQueuedFailsOnAnOverlongLine: a line past the reader's bound is
+// a failed read rather than a queue that happens to lack it, since the feed
+// files from what it reads and a half-read queue would lose the rest silently
+// (gt-3arxj).
+func TestReviewsFileQueuedFailsOnAnOverlongLine(t *testing.T) {
+	t.Parallel()
+	f := reviewsFileIn(t)
+	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"bead":"gt-q","followup_queue":{"findings":[{"claim":"` + strings.Repeat("x", 2<<20) + `"}]}}`
+	if err := os.WriteFile(f.Path, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Queued(); err == nil || !strings.Contains(err.Error(), "reading reviews file") {
+		t.Fatalf("Queued on an overlong line = %v, want a read error", err)
+	}
+}
+
 // A rig named reviews would share a file with the log, so no landings file is
 // made for it.
 func TestRigLandingsFileRefusesTheReviewsLogName(t *testing.T) {
@@ -110,7 +130,7 @@ func TestLandLogsEachOMVerdict(t *testing.T) {
 
 	f.requeue(1)
 	f.review.fn = func(string) (Verdict, error) {
-		return Verdict{Verdict: VerdictApprove, Score: 0.92, Findings: []Finding{{ID: "f-2", Severity: "minor", Path: "b.txt", Line: 1, Title: "name"}}}, nil
+		return Verdict{Verdict: VerdictApprove, Score: 0.92, Findings: []Finding{{ID: "f-2", Severity: "minor", Path: "b.txt", Line: 1, Title: "name", Detail: "the error names nothing"}}}, nil
 	}
 	if _, err := l.Land(context.Background(), f.work); err != nil {
 		t.Fatalf("second Land: %v", err)
@@ -123,11 +143,13 @@ func TestLandLogsEachOMVerdict(t *testing.T) {
 	at := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	want := []ReviewRecord{
 		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 1, Score: 0.3, Verdict: VerdictRequestChanges, Findings: 1, Bar: 0.8, At: at,
-			Branch: f.work.Branch, AuthorKind: authorkind.Polecat},
+			Branch: f.work.Branch, AuthorKind: authorkind.Polecat,
+			FindingText: []ReviewFindingText{{ID: "f-1", Severity: "major", File: "b.txt", Line: 1, Title: "wrong"}}},
 		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 2, Score: 0.92, Verdict: VerdictApprove, Findings: 1, Bar: 0.8, At: at,
-			Branch: f.work.Branch, AuthorKind: authorkind.Polecat},
+			Branch: f.work.Branch, AuthorKind: authorkind.Polecat,
+			FindingText: []ReviewFindingText{{ID: "f-2", Severity: "minor", File: "b.txt", Line: 1, Title: "name", Claim: "the error names nothing"}}},
 	}
-	if len(recs) != len(want) || recs[0] != want[0] || recs[1] != want[1] {
+	if len(recs) != len(want) || !reflect.DeepEqual(recs, want) {
 		t.Fatalf("review log = %+v, want %+v", recs, want)
 	}
 }

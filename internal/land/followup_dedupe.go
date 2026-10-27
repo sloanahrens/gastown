@@ -93,14 +93,17 @@ type ExistingFollowup struct {
 }
 
 // FollowupCandidate is one finding awaiting a decision: an om finding, or a bead
-// the landing worker is about to file for it. Detail is the finding's body, kept
-// for the next bead's comment text; the decision itself needs only Path and
-// Title. Candidate is already the gate interface in this package (candidate.go),
-// hence the longer name.
+// the landing worker is about to file for it. Detail is the finding rendered as
+// a bead body lists it and Claim is om's own account of it, so a finding the
+// backpressure bound queues can be filed later from what it carries; the
+// decision itself needs only Path and Title. Candidate is already the gate
+// interface in this package (candidate.go), hence the longer name.
 type FollowupCandidate struct {
+	ID       string
 	Path     string
 	Title    string
 	Detail   string
+	Claim    string
 	Severity string
 	Line     int
 }

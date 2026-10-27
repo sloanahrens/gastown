@@ -50,16 +50,17 @@ func (f *followupFake) CreateFollowup(spec FollowupSpec) (string, error) {
 }
 
 // followupFixture is one approved landing whose feed runs: a worktree carrying
-// the rig's om threshold, the beads store the beads live in, and the fake the
-// feed files through.
+// the rig's om threshold, the beads store the beads live in, the reviews log the
+// feed queues held findings in, and the fake the feed files through.
 type followupFixture struct {
-	t      *testing.T
-	lander *Lander
-	fake   *followupFake
-	bd     *beadsfake.Fake
-	dir    string
-	work   Work
-	result Result
+	t       *testing.T
+	lander  *Lander
+	fake    *followupFake
+	bd      *beadsfake.Fake
+	dir     string
+	reviews *ReviewsFile
+	work    Work
+	result  Result
 }
 
 const followupThreshold = 0.6
@@ -78,9 +79,10 @@ func newFollowupFixture(t *testing.T, score float64, findings []Finding) *follow
 		beads.Issue{ID: "gt-old", Title: "an older finding", Status: "open", Type: "task"},
 	)
 	fake := &followupFake{}
+	reviews := reviewsFileIn(t)
 	return &followupFixture{
-		t: t, bd: bd, fake: fake, dir: dir,
-		lander: &Lander{Beads: bd, Followups: fake},
+		t: t, bd: bd, fake: fake, dir: dir, reviews: reviews,
+		lander: &Lander{Beads: bd, Followups: fake, Reviews: reviews},
 		work:   Work{BeadID: "gt-abc", Rig: "gastown", Branch: fixtureBranch, Head: "aaa1111", Target: "main"},
 		result: Result{LandedCommit: "0123456789abcdef0123456789abcdef01234567",
 			Verdict: Verdict{Verdict: VerdictApprove, Score: score, Findings: findings}},

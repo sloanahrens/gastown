@@ -408,6 +408,31 @@ func TestAggregateOmStatsSkipsAnOversizedLine(t *testing.T) {
 	wantOmStatsDay(t, stats, OmStatsDay{Day: "2026-10-16", Approvals: 1, Rate: 0})
 }
 
+// TestAggregateOmStatsLeavesOutAQueueLine: the follow-up feed's queue line
+// carries an instant and no verdict, and it is its own bookkeeping rather than
+// a review — it enters no count, no mean and not the skipped tally (gt-3arxj).
+func TestAggregateOmStatsLeavesOutAQueueLine(t *testing.T) {
+	t.Parallel()
+	queue := omStatsRecordLine(t, ReviewRecord{
+		BeadID: "gt-q", Rig: "gastown", At: omStatsAt(16, 10, 0, 0),
+		Queue: &FollowupQueue{Landed: "abc123", Score: 0.7,
+			Findings: []ReviewFindingText{{File: "a.go", Line: 1, Title: "name the error"}}},
+	})
+	records := omStatsRecordLine(t, ReviewRecord{
+		BeadID: "gt-a", Rig: "gastown", Attempt: 1, Score: 0.90, Findings: 2,
+		Verdict: VerdictApprove, Agent: "opus", At: omStatsAt(16, 10, 0, 0),
+	}) + "\n" + queue + "\n"
+
+	stats, err := AggregateOmStats(strings.NewReader(records), nil, time.Time{})
+	if err != nil {
+		t.Fatalf("AggregateOmStats: %v", err)
+	}
+	if stats.Skipped != 0 {
+		t.Errorf("skipped = %d, want 0: a queue line is not a line the report could not use", stats.Skipped)
+	}
+	wantOmStatsDay(t, stats, OmStatsDay{Day: "2026-10-16", Approvals: 1})
+}
+
 // TestAggregateOmStatsReturnsAReadError: a source that fails is an error, not a
 // partial report that reads as the whole truth.
 func TestAggregateOmStatsReturnsAReadError(t *testing.T) {
