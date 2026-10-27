@@ -3,6 +3,8 @@ package installer
 import (
 	"os"
 	"os/exec"
+
+	"github.com/steveyegge/gastown/internal/imagebuild"
 )
 
 // Run is one install: the arguments it was given, the exit contract it reports
@@ -31,6 +33,11 @@ type Run struct {
 	// ImageRunner runs the sandbox image build; nil runs it for real, in this
 	// process before the swap and as a worker process after it (gt-tpg0p.12).
 	ImageRunner ImageRunner
+	// ImageSupervisor runs one supervised build in this process; nil runs
+	// imagebuild.Run itself. It is a seam below ImageRunner, so a test can
+	// check what a build before the swap is started with without starting it
+	// (gt-tpg0p.12).
+	ImageSupervisor func(imagebuild.Config) int
 }
 
 // NewRun is a run against the real checkout at paths.RigDir, the real

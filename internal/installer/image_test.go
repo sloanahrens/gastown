@@ -2,6 +2,7 @@ package installer
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -267,9 +268,9 @@ func TestImageStepRefusesWithoutTheProgramOrBuildOutput(t *testing.T) {
 	}
 }
 
-// An alarm that is not a whole number of seconds above zero would leave the
-// build with no bound: the default is used and the value named, and a usable
-// one is used as given.
+// An alarm that is not a whole number of seconds above zero, or that is too
+// large for a duration, would leave the build with no bound: the default is
+// used and the value named, and a usable one is used as given.
 func TestImageStepAlarm(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -280,9 +281,12 @@ func TestImageStepAlarm(t *testing.T) {
 	}{
 		{name: "unset takes the default", value: "", wantAlarm: 1200 * time.Second},
 		{name: "a whole number is used", value: "900", wantAlarm: 900 * time.Second},
+		{name: "the largest duration is used", value: "9223372036", wantAlarm: 9223372036 * time.Second},
 		{name: "zero is named", value: "0", wantAlarm: 1200 * time.Second, wantNamed: true},
 		{name: "a word is named", value: "soon", wantAlarm: 1200 * time.Second, wantNamed: true},
 		{name: "a leading zero is named", value: "01200", wantAlarm: 1200 * time.Second, wantNamed: true},
+		{name: "a value a duration cannot hold is named", value: "9223372037", wantAlarm: 1200 * time.Second, wantNamed: true},
+		{name: "a value past int is named", value: "9223372036854775808", wantAlarm: 1200 * time.Second, wantNamed: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -297,7 +301,7 @@ func TestImageStepAlarm(t *testing.T) {
 			if len(ir.builds) != 1 || ir.builds[0].Alarm != tc.wantAlarm {
 				t.Fatalf("builds = %+v, want an alarm of %v", ir.builds, tc.wantAlarm)
 			}
-			named := ir.has("INSTALL_GT_IMAGE_ALARM='" + tc.value + "' is not a whole number of seconds above zero")
+			named := ir.has("INSTALL_GT_IMAGE_ALARM='" + tc.value + "' is not a usable number of seconds")
 			if named != tc.wantNamed {
 				t.Errorf("named the value = %v, want %v:\n%s", named, tc.wantNamed, ir.output())
 			}
@@ -320,6 +324,10 @@ func TestImageStepDaemonEnv(t *testing.T) {
 		wantWhy string
 		wantEnv []string
 		notEnv  []string
+		// wantFailed says the config could not be read, so the fail-closed
+		// step before the swap ends the install rather than build local-only
+		// (gt-tpg0p.12).
+		wantFailed bool
 	}{
 		{
 			name:    "config.json gives both",
@@ -333,23 +341,26 @@ func TestImageStepDaemonEnv(t *testing.T) {
 			notEnv:  []string{"POLECAT_IMAGE_REGISTRY="},
 		},
 		{
-			name:    "a config.json that cannot be read",
-			body:    `{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":"localhost:5001"}}}`,
-			readErr: errors.New("permission denied"),
-			wantWhy: "TOWN/settings/config.json could not be read",
-			notEnv:  []string{"POLECAT_IMAGE_REGISTRY="},
+			name:       "a config.json that cannot be read",
+			body:       `{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":"localhost:5001"}}}`,
+			readErr:    errors.New("permission denied"),
+			wantWhy:    "TOWN/settings/config.json could not be read",
+			notEnv:     []string{"POLECAT_IMAGE_REGISTRY="},
+			wantFailed: true,
 		},
 		{
-			name:    "a malformed config.json",
-			body:    `{"daemon":`,
-			wantWhy: "TOWN/settings/config.json is not readable JSON",
-			notEnv:  []string{"POLECAT_IMAGE_REGISTRY="},
+			name:       "a malformed config.json",
+			body:       `{"daemon":`,
+			wantWhy:    "TOWN/settings/config.json is not readable JSON",
+			notEnv:     []string{"POLECAT_IMAGE_REGISTRY="},
+			wantFailed: true,
 		},
 		{
-			name:    "a daemon that is not an object",
-			body:    `{"daemon":[]}`,
-			wantWhy: "TOWN/settings/config.json is not readable JSON",
-			notEnv:  []string{"POLECAT_IMAGE_REGISTRY="},
+			name:       "a daemon that is not an object",
+			body:       `{"daemon":[]}`,
+			wantWhy:    "TOWN/settings/config.json is not readable JSON",
+			notEnv:     []string{"POLECAT_IMAGE_REGISTRY="},
+			wantFailed: true,
 		},
 		{
 			name:    "no daemon.env object at all",
@@ -358,10 +369,11 @@ func TestImageStepDaemonEnv(t *testing.T) {
 			notEnv:  []string{"POLECAT_IMAGE_REGISTRY="},
 		},
 		{
-			name:    "a daemon.env that is not an object",
-			body:    `{"daemon":{"env":"oops"}}`,
-			wantWhy: "daemon.env in TOWN/settings/config.json is a string, not an object",
-			notEnv:  []string{"POLECAT_IMAGE_REGISTRY="},
+			name:       "a daemon.env that is not an object",
+			body:       `{"daemon":{"env":"oops"}}`,
+			wantWhy:    "daemon.env in TOWN/settings/config.json is a string, not an object",
+			notEnv:     []string{"POLECAT_IMAGE_REGISTRY="},
+			wantFailed: true,
 		},
 		{
 			name:    "a key the config lacks",
@@ -371,10 +383,11 @@ func TestImageStepDaemonEnv(t *testing.T) {
 			notEnv:  []string{"POLECAT_IMAGE_REGISTRY="},
 		},
 		{
-			name:    "a value that is not a string",
-			body:    `{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":7001}}}`,
-			wantWhy: "POLECAT_IMAGE_REGISTRY in daemon.env of TOWN/settings/config.json is not a string",
-			notEnv:  []string{"POLECAT_IMAGE_REGISTRY="},
+			name:       "a value that is not a string",
+			body:       `{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":7001}}}`,
+			wantWhy:    "POLECAT_IMAGE_REGISTRY in daemon.env of TOWN/settings/config.json is not a string",
+			notEnv:     []string{"POLECAT_IMAGE_REGISTRY="},
+			wantFailed: true,
 		},
 		{
 			name:    "an empty value",
@@ -400,6 +413,28 @@ func TestImageStepDaemonEnv(t *testing.T) {
 					return os.ReadFile(path)
 				}
 			}
+			why := strings.ReplaceAll(tc.wantWhy, "TOWN", town)
+			if tc.wantFailed {
+				// A config that cannot be read leaves the registry unknown, so
+				// the fail-closed step ends the install instead of building an
+				// image no one publishes (gt-tpg0p.12).
+				if code := ir.step(t); code != ExitFailed {
+					t.Fatalf("ImageStep() = %d, want %d:\n%s", code, ExitFailed, ir.output())
+				}
+				if len(ir.builds) != 0 {
+					t.Errorf("builds = %+v, want none", ir.builds)
+				}
+				if !ir.has("the town's image registry could not be read (" + why + ")") {
+					t.Errorf("output lacks the unreadable reason %q:\n%s", why, ir.output())
+				}
+				if !ir.has("the sandbox image for " + ir.Run.C.Expected + " cannot be published") {
+					t.Errorf("output does not say the image cannot be published:\n%s", ir.output())
+				}
+				if got := ir.fingerprint(); got != "install-gt:build-failed" {
+					t.Errorf("escalation fingerprint = %q, want install-gt:build-failed", got)
+				}
+				return
+			}
 			if code := ir.step(t); code != ExitOK {
 				t.Fatalf("ImageStep() = %d, want %d:\n%s", code, ExitOK, ir.output())
 			}
@@ -420,7 +455,6 @@ func TestImageStepDaemonEnv(t *testing.T) {
 				}
 			}
 			if tc.wantWhy != "" {
-				why := strings.ReplaceAll(tc.wantWhy, "TOWN", town)
 				if !ir.has("polecat image: build is local only and not published: " + why) {
 					t.Errorf("output lacks the reason %q:\n%s", why, ir.output())
 				}
@@ -633,6 +667,36 @@ func TestImageAfterWithoutAProgramOrBuildOutputEscalates(t *testing.T) {
 	}
 }
 
+// A rebuild after the swap cannot fail the install, so an unreadable registry
+// is a log line and the build still runs, local-only: the binary is already in
+// place and the registry keeps the old image until a later install reads the
+// settings (gt-tpg0p.12).
+func TestImageAfterWithAnUnreadableRegistryLogsAndCarriesOn(t *testing.T) {
+	t.Parallel()
+	ir := newImageRun(t)
+	town := ir.town(t)
+	ir.config(t, `{"daemon":`)
+
+	ir.resolved("c1111111")
+	ir.ImageAfter()
+
+	if len(ir.builds) != 1 || !ir.builds[0].Detached {
+		t.Fatalf("builds = %+v, want one detached rebuild", ir.builds)
+	}
+	want := "polecat image: the town's image registry could not be read (" +
+		filepath.Join(town, "settings", "config.json") + " is not readable JSON), " +
+		"so the rebuild is local only and the registry keeps the old image"
+	if !ir.has(want) {
+		t.Errorf("output lacks %q:\n%s", want, ir.output())
+	}
+	if len(ir.escalation()) != 0 {
+		t.Errorf("escalation = %q, want none for an install that already stands", ir.escalation())
+	}
+	if containsLine(ir.builds[0].Env, imageFailClosedEnv+"=1") {
+		t.Errorf("env = %q, want a detached build not told to fail closed", ir.builds[0].Env)
+	}
+}
+
 // Finalize is where the detached rebuild is asked for: after the marker and the
 // receipt, before the run states its result, and only when the install did not
 // build the image first.
@@ -704,6 +768,51 @@ func TestRunImageBuildCannotOpenTheLog(t *testing.T) {
 
 	if err == nil || code != 1 {
 		t.Errorf("runImageBuild() = %d, %v; want 1 and the open error", code, err)
+	}
+}
+
+// A build before the swap runs in this process under the supervisor, with the
+// log as its streams and the settings the step gave it; the supervisor is the
+// seam, so the case starts no build (gt-tpg0p.12).
+func TestRunImageBuildRunsUnderTheSupervisor(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	log := filepath.Join(t.TempDir(), "build.log")
+	var got imagebuild.Config
+	tr.Run.ImageSupervisor = func(cfg imagebuild.Config) int {
+		got = cfg
+		fmt.Fprint(cfg.Stdout, "building\n")
+		fmt.Fprint(cfg.Stderr, "warning\n")
+		return 7
+	}
+
+	code, err := tr.Run.runImageBuild(ImageBuild{
+		Program: "/rig/polecat-image",
+		Env:     []string{"POLECAT_IMAGE_GT=/rig/gt"},
+		Alarm:   90 * time.Second,
+		Lock:    "/town/lock",
+		Log:     log,
+	})
+
+	if err != nil || code != 7 {
+		t.Fatalf("runImageBuild() = %d, %v; want the supervisor's 7", code, err)
+	}
+	if got.Alarm != 90*time.Second || got.Lock != "/town/lock" ||
+		!reflect.DeepEqual(got.Command, []string{"/rig/polecat-image"}) {
+		t.Errorf("config = %+v, want the build's program, alarm and lock", got)
+	}
+	if got.GT != "" || got.Fingerprint != "" {
+		t.Errorf("escalation = %q/%q, want none for a build whose caller is still there", got.GT, got.Fingerprint)
+	}
+	if !containsLine(got.Env, "POLECAT_IMAGE_GT=/rig/gt") {
+		t.Errorf("env = %q, want the build settings", got.Env)
+	}
+	body, readErr := os.ReadFile(log)
+	if readErr != nil {
+		t.Fatalf("read the build log: %v", readErr)
+	}
+	if want := "building\nwarning\n"; string(body) != want {
+		t.Errorf("log = %q, want the build's streams %q", body, want)
 	}
 }
 

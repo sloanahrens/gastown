@@ -66,19 +66,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 // temporary tree. The deferred OnExit is the script's EXIT trap: whatever
 // happens, the last line states a result and the status is 0-3.
 func runWith(args []string, stdout, stderr io.Writer, env environment) (code int) {
+	cfg, err := installer.Parse(args)
 	// A detached image build's worker is not an install: it names no result
 	// line, takes no exit contract and changes nothing in the town beyond the
-	// build it was started for (gt-tpg0p.12). It is routed on the first argument
-	// alone, before Parse, because it is not one of the installer's arguments
-	// and Parse would refuse it.
-	if len(args) > 0 && args[0] == installer.ImageWorkerFlag {
+	// build it was started for (gt-tpg0p.12). Parse, which owns the
+	// interpreter's argument language, decided that on the first argument.
+	if cfg.Worker {
 		worker := env.imageWorker
 		if worker == nil {
 			worker = installer.ImageWorker
 		}
-		return worker(args[1:], stderr)
+		return worker(cfg.WorkerArgs, stderr)
 	}
-	cfg, err := installer.Parse(args)
 	c := &installer.Contract{
 		Stdout:   stdout,
 		Stderr:   stderr,

@@ -3,6 +3,7 @@ package installer
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,9 +18,11 @@ import (
 
 const (
 	// ImageWorkerFlag is the first argument of a detached build's worker
-	// process. It is not a documented install argument: the installer starts
-	// the worker for --no-image-first so the build can outlive the install
-	// without a shell to detach from (gt-tpg0p.12).
+	// process. It is not a documented install argument: installer.Parse routes
+	// it, on the first argument alone and before any install flag is read, to
+	// the worker's own parser. The installer starts the worker for
+	// --no-image-first so the build can outlive the install without a shell to
+	// detach from (gt-tpg0p.12).
 	ImageWorkerFlag = "--image-build-worker"
 
 	// imageProgramRel is the polecat-image program under the rig checkout: the
@@ -30,6 +33,11 @@ const (
 	// imageDefaultAlarm is how long a build may run when
 	// INSTALL_GT_IMAGE_ALARM says nothing usable.
 	imageDefaultAlarm = 1200
+
+	// imageMaxAlarm is the largest whole number of seconds a time.Duration
+	// holds: a bigger value would overflow to a negative alarm and leave the
+	// build with no bound at all.
+	imageMaxAlarm = int(int64(math.MaxInt64) / int64(time.Second))
 
 	// imageBuildFailed is the escalation a detached build reports under. It has
 	// its own fingerprint because an install that already swapped the binary
@@ -109,14 +117,30 @@ func (r *Run) imageStep(detached bool) Exit {
 	if detached {
 		order, consequence = "after", "the binary was already swapped"
 	}
-	registry, why := r.imageDaemonEnv("POLECAT_IMAGE_REGISTRY")
+	registry := r.imageDaemonEnv("POLECAT_IMAGE_REGISTRY")
 	// A registry the daemon already exported is inherited, so the build
 	// publishes even though the config named none (gt-ijudv): only a build with
 	// no registry at all is local-only.
-	if registry == "" && r.getenv("POLECAT_IMAGE_REGISTRY") == "" {
-		r.C.Log("polecat image: build is local only and not published: " + why)
+	if registry.Value == "" && r.getenv("POLECAT_IMAGE_REGISTRY") == "" {
+		// A config that could not be read is not a town that configured no
+		// registry: the build would go local-only and the image the town needs
+		// would never be published. The step before the swap is fail-closed,
+		// so it stops the install rather than pass an image the registry does
+		// not hold (gt-tpg0p.12).
+		if registry.Unreadable && !detached {
+			r.C.Log("polecat image: the town's image registry could not be read (" + registry.Why +
+				"), so the image cannot be published")
+			return r.imageUnpublished("the sandbox image for " + r.C.Expected +
+				" cannot be published: the town's image registry could not be read (" + registry.Why + ")")
+		}
+		if registry.Unreadable {
+			r.C.Log("polecat image: the town's image registry could not be read (" + registry.Why +
+				"), so the rebuild is local only and the registry keeps the old image")
+		} else {
+			r.C.Log("polecat image: build is local only and not published: " + registry.Why)
+		}
 	}
-	crane, _ := r.imageDaemonEnv("POLECAT_IMAGE_CRANE")
+	crane := r.imageDaemonEnv("POLECAT_IMAGE_CRANE").Value
 	program := r.imageProgram()
 	if program == "" || !r.Files.isFile(program) {
 		at := program
@@ -142,7 +166,7 @@ func (r *Run) imageStep(detached bool) Exit {
 	r.C.Log("polecat image: building " + r.C.Expected + " " + order + " the binary swap (log " + logPath + ")")
 	b := ImageBuild{
 		Program:  program,
-		Env:      r.imageEnv(registry, crane, bin, !detached),
+		Env:      r.imageEnv(registry.Value, crane, bin, !detached),
 		Alarm:    time.Duration(alarm) * time.Second,
 		Lock:     r.imageLock(),
 		Log:      logPath,
@@ -161,7 +185,11 @@ func (r *Run) imageStep(detached bool) Exit {
 				" could not be started; stale-image slings are refused until it is rebuilt")
 			return ExitOK
 		}
-		r.C.Log("polecat image: rebuild for " + r.C.Expected + " started in the background (log " + logPath + ")")
+		// Only the start is known here: the worker runs on its own, so this
+		// line names where a failure surfaces for a reader of the install's
+		// output (gt-tpg0p.12).
+		r.C.Log("polecat image: rebuild for " + r.C.Expected + " started in the background (log " +
+			logPath + "); a failure is reported as " + imageBuildFailed)
 		return ExitOK
 	}
 	if err == nil && code == 0 {
@@ -195,13 +223,19 @@ func (r *Run) imageNotBuilt(detached bool, why string) Exit {
 // imageFail is fail_install for the image: the old binary is still in place,
 // so there is nothing to roll back, and the daemon was not told to restart.
 func (r *Run) imageFail() Exit {
+	return r.imageUnpublished("the sandbox image for " + r.C.Expected + " was not built and published")
+}
+
+// imageUnpublished fails an install that would leave the town without an image
+// it can be served from, before the swap: fail_install's build-failed, with the
+// old binary in place and the daemon not told to restart (gt-tpg0p.12).
+func (r *Run) imageUnpublished(what string) Exit {
 	prev := r.C.Prev
 	if prev == "" {
 		prev = "the previous build"
 	}
 	return r.FailInstall("build-failed",
-		"the sandbox image for "+r.C.Expected+" was not built and published; "+r.Paths.GT()+
-			" was left at "+prev+" and the daemon was not told to restart",
+		what+"; "+r.Paths.GT()+" was left at "+prev+" and the daemon was not told to restart",
 		"medium", "install-gt:build-failed", "failed")
 }
 
@@ -275,17 +309,18 @@ func (r *Run) imageLock() string {
 }
 
 // imageAlarm is INSTALL_GT_IMAGE_ALARM when it is a whole number of seconds
-// above zero, else the default, with the value named: an alarm of 0 or a
-// non-number would leave the build with no bound at all.
+// above zero that a time.Duration holds, else the default, with the value
+// named: an alarm of 0, a non-number or a value too large for a duration would
+// leave the build with no bound at all.
 func (r *Run) imageAlarm() int {
 	raw := r.getenv("INSTALL_GT_IMAGE_ALARM")
 	if raw == "" {
 		return imageDefaultAlarm
 	}
 	alarm, err := strconv.Atoi(raw)
-	if err != nil || !wholeSeconds.MatchString(raw) || alarm <= 0 {
+	if err != nil || !wholeSeconds.MatchString(raw) || alarm <= 0 || alarm > imageMaxAlarm {
 		r.C.Log("polecat image: INSTALL_GT_IMAGE_ALARM='" + raw +
-			"' is not a whole number of seconds above zero, so the build gets " +
+			"' is not a usable number of seconds, so the build gets " +
 			strconv.Itoa(imageDefaultAlarm))
 		return imageDefaultAlarm
 	}
@@ -318,54 +353,68 @@ func (r *Run) imageEnv(registry, crane, bin string, failClosed bool) []string {
 	return env
 }
 
+// daemonEnv is one daemon.env setting the town gives: its value, why it gives
+// none, and whether the town could be read at all.
+type daemonEnv struct {
+	Value string
+	Why   string
+	// Unreadable says the town could not be read, so an empty Value means "not
+	// known" rather than "not configured". The two must not be confused: a
+	// town that configured no registry is deliberately local-only, while one
+	// whose settings cannot be read may need a registry this run cannot name
+	// (gt-tpg0p.12).
+	Unreadable bool
+}
+
 // imageDaemonEnv is the script's image_daemon_env: the value the town's
 // settings/config.json gives daemon.env[key], the one source the daemon gives
-// its plugin runs (gt-jmd9n), or "" and the reason it has none. Nothing here is
-// fatal: a build with no registry runs local-only, as it always has.
-func (r *Run) imageDaemonEnv(key string) (value, why string) {
+// its plugin runs (gt-jmd9n), or the reason it gives none. Nothing here is
+// fatal on its own: a build with no registry runs local-only, as it always
+// has, and the caller decides what an unreadable config means.
+func (r *Run) imageDaemonEnv(key string) daemonEnv {
 	if r.Paths.TownRoot == "" {
-		return "", "no town root"
+		return daemonEnv{Why: "no town root"}
 	}
 	cfg := filepath.Join(r.Paths.TownRoot, "settings", "config.json")
 	data, err := r.Files.readFile(cfg)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", cfg + " is missing"
+			return daemonEnv{Why: cfg + " is missing"}
 		}
-		return "", cfg + " could not be read"
+		return daemonEnv{Why: cfg + " could not be read", Unreadable: true}
 	}
 	var doc struct {
 		Daemon json.RawMessage `json:"daemon"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return "", cfg + " is not readable JSON"
+		return daemonEnv{Why: cfg + " is not readable JSON", Unreadable: true}
 	}
 	var daemon map[string]json.RawMessage
 	if len(doc.Daemon) > 0 && string(doc.Daemon) != "null" {
 		if err := json.Unmarshal(doc.Daemon, &daemon); err != nil {
-			return "", cfg + " is not readable JSON"
+			return daemonEnv{Why: cfg + " is not readable JSON", Unreadable: true}
 		}
 	}
 	block, ok := daemon["env"]
 	if !ok || string(block) == "null" {
-		return "", cfg + " has no daemon.env"
+		return daemonEnv{Why: cfg + " has no daemon.env"}
 	}
 	entries := map[string]json.RawMessage{}
 	if err := json.Unmarshal(block, &entries); err != nil {
-		return "", "daemon.env in " + cfg + " is a " + jsonKind(block) + ", not an object"
+		return daemonEnv{Why: "daemon.env in " + cfg + " is a " + jsonKind(block) + ", not an object", Unreadable: true}
 	}
 	entry, ok := entries[key]
 	if !ok {
-		return "", "no " + key + " in daemon.env of " + cfg
+		return daemonEnv{Why: "no " + key + " in daemon.env of " + cfg}
 	}
 	var entryValue string
 	if err := json.Unmarshal(entry, &entryValue); err != nil {
-		return "", key + " in daemon.env of " + cfg + " is not a string"
+		return daemonEnv{Why: key + " in daemon.env of " + cfg + " is not a string", Unreadable: true}
 	}
 	if entryValue == "" {
-		return "", "no " + key + " in daemon.env of " + cfg
+		return daemonEnv{Why: "no " + key + " in daemon.env of " + cfg}
 	}
-	return entryValue, ""
+	return daemonEnv{Value: entryValue}
 }
 
 // jsonKind names a JSON value the way jq's type does, for the message that says
@@ -410,7 +459,7 @@ func (r *Run) runImageBuild(b ImageBuild) (int, error) {
 		return 1, err
 	}
 	defer func() { _ = logFile.Close() }()
-	return imagebuild.Run(imagebuild.Config{
+	return r.imageSupervisor()(imagebuild.Config{
 		Alarm:       b.Alarm,
 		Lock:        b.Lock,
 		GT:          b.GT,
@@ -420,6 +469,16 @@ func (r *Run) runImageBuild(b ImageBuild) (int, error) {
 		Stdout:      logFile,
 		Stderr:      logFile,
 	}), nil
+}
+
+// imageSupervisor is the seam a test records a supervised build through, or the
+// real imagebuild.Run: the build before the swap runs in this process, under
+// the alarm and process group the supervisor gives it.
+func (r *Run) imageSupervisor() func(imagebuild.Config) int {
+	if r.ImageSupervisor != nil {
+		return r.ImageSupervisor
+	}
+	return imagebuild.Run
 }
 
 // spawnImageWorker starts the detached build as this program under
