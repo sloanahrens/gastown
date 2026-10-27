@@ -33,3 +33,17 @@ slice and never touches a git tree, so no rotation slice is recorded. The run
 also writes `classified.jsonl` and empty `slice.txt`, `slice-rows.txt`,
 `reviewed-lines.txt` and `docs.txt` into `--out`; only the outputs the test reads
 are kept.
+
+Regenerate in two steps: the command above, then the cleanup of the run's other
+outputs, which are untracked files in the fixture directory until deleted.
+
+```sh
+rm -f internal/deepreview/testdata/parity/classified.jsonl \
+      internal/deepreview/testdata/parity/slice.txt \
+      internal/deepreview/testdata/parity/slice-rows.txt \
+      internal/deepreview/testdata/parity/reviewed-lines.txt \
+      internal/deepreview/testdata/parity/docs.txt
+```
+
+`--out` stays on the fixture directory: `expected.txt` records the run's `out=`
+line, so a temporary directory would change the recording.
