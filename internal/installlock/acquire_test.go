@@ -7,6 +7,61 @@ import (
 	"time"
 )
 
+// acquireClock is the clock these tests arm: Sleep advances it, so waiting out
+// the lock costs no wall time, and onSleep runs after each Sleep so a test can
+// let the other holder go mid-wait.
+type acquireClock struct {
+	now     time.Time
+	slept   []time.Duration
+	onSleep func(n int)
+}
+
+func newAcquireClock() *acquireClock { return &acquireClock{now: time.Unix(0, 0)} }
+
+func (c *acquireClock) Now() time.Time { return c.now }
+
+func (c *acquireClock) Sleep(d time.Duration) {
+	c.slept = append(c.slept, d)
+	c.now = c.now.Add(d)
+	if c.onSleep != nil {
+		c.onSleep(len(c.slept))
+	}
+}
+
+func (c *acquireClock) waited() time.Duration {
+	var sum time.Duration
+	for _, d := range c.slept {
+		sum += d
+	}
+	return sum
+}
+
+// holdAcquireLock takes the lock through Acquire, as a second install would
+// find it held, and returns its release.
+func holdAcquireLock(t *testing.T, path string) func() {
+	t.Helper()
+	release, err := Acquire(path, time.Second)
+	if err != nil {
+		t.Fatalf("hold %s: %v", path, err)
+	}
+	return release
+}
+
+// acquireFree reports whether a second caller can take the lock on path right
+// now: a zero wait takes it when it is free and reports ErrBusy when it is not.
+func acquireFree(t *testing.T, path string) bool {
+	t.Helper()
+	release, err := acquire(path, 0, time.Now, time.Sleep)
+	if errors.Is(err, ErrBusy) {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("probe %s: %v", path, err)
+	}
+	release()
+	return true
+}
+
 // Acquire holds the lock until its release, the way the Go installer holds it
 // from the swap to the end of the run.
 func TestAcquireHoldsUntilTheRelease(t *testing.T) {
@@ -17,11 +72,11 @@ func TestAcquireHoldsUntilTheRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
-	if lockIsFree(t, lock) {
+	if acquireFree(t, lock) {
 		t.Error("the lock was free while Acquire held it")
 	}
 	release()
-	if !lockIsFree(t, lock) {
+	if !acquireFree(t, lock) {
 		t.Error("the lock was still held after the release")
 	}
 }
@@ -31,10 +86,10 @@ func TestAcquireHoldsUntilTheRelease(t *testing.T) {
 func TestAcquireReportsBusyWhenTheWaitRunsOut(t *testing.T) {
 	t.Parallel()
 	lock := filepath.Join(t.TempDir(), "install-gt.lock")
-	release := holdLock(t, lock)
+	release := holdAcquireLock(t, lock)
 	defer release()
 
-	clock := newFakeClock()
+	clock := newAcquireClock()
 	got, err := acquire(lock, 2*time.Second, clock.Now, clock.Sleep)
 
 	if !errors.Is(err, ErrBusy) {
@@ -43,8 +98,8 @@ func TestAcquireReportsBusyWhenTheWaitRunsOut(t *testing.T) {
 	if got != nil {
 		t.Error("a release was returned for a lock that was never taken")
 	}
-	if clock.total() != 2*time.Second {
-		t.Errorf("waited %s over %v, want exactly the 2s wait", clock.total(), clock.slept)
+	if clock.waited() != 2*time.Second {
+		t.Errorf("waited %s over %v, want exactly the 2s wait", clock.waited(), clock.slept)
 	}
 	for _, d := range clock.slept {
 		if d > retryInterval {
@@ -57,9 +112,9 @@ func TestAcquireReportsBusyWhenTheWaitRunsOut(t *testing.T) {
 func TestAcquireTakesTheLockWhenItFreesDuringTheWait(t *testing.T) {
 	t.Parallel()
 	lock := filepath.Join(t.TempDir(), "install-gt.lock")
-	release := holdLock(t, lock)
+	release := holdAcquireLock(t, lock)
 
-	clock := newFakeClock()
+	clock := newAcquireClock()
 	clock.onSleep = func(n int) {
 		if n == 2 {
 			release() // the other install finishes during the second pause
@@ -73,7 +128,7 @@ func TestAcquireTakesTheLockWhenItFreesDuringTheWait(t *testing.T) {
 	if len(clock.slept) != 2 {
 		t.Errorf("slept %v, want two pauses and then the lock", clock.slept)
 	}
-	if lockIsFree(t, lock) {
+	if acquireFree(t, lock) {
 		t.Error("Acquire returned without holding the lock")
 	}
 	got()
