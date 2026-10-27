@@ -25,6 +25,26 @@ func (c *Client) Update(ctx context.Context, id string, patch api.UpdatePatch, g
 	return c.do(ctx, http.MethodPatch, "/v1/issues/"+url.PathEscape(id), api.UpdateRequest{Patch: patch, Guard: guard}, nil, false)
 }
 
+// Claim takes the issue for the client's actor in one step. Another actor
+// holding it is an error satisfying errors.Is(err, api.ErrGuardFailed), so a
+// caller that lost the race learns it without a read.
+func (c *Client) Claim(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/issues/"+url.PathEscape(id)+"/claim", nil, nil, false)
+}
+
+// Release returns the client's actor's issue to open with no assignee. Not
+// holding it is an error satisfying errors.Is(err, api.ErrGuardFailed).
+func (c *Client) Release(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/issues/"+url.PathEscape(id)+"/release", nil, nil, false)
+}
+
+// Transfer hands the client's actor's issue to assignee, at status (the status
+// the issue has when empty). Not holding it is an error satisfying
+// errors.Is(err, api.ErrGuardFailed).
+func (c *Client) Transfer(ctx context.Context, id, status, assignee string) error {
+	return c.do(ctx, http.MethodPost, "/v1/issues/"+url.PathEscape(id)+"/transfer", api.TransferRequest{Status: status, Assignee: assignee}, nil, false)
+}
+
 // Close closes all of ids with reason, or none; force closes past open
 // children and live blockers.
 func (c *Client) Close(ctx context.Context, ids []string, reason string, force bool) error {

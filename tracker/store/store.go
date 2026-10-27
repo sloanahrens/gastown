@@ -34,6 +34,18 @@ type Store interface {
 	// UpdateIssue applies patch to the issue while g holds; a guard that does
 	// not hold returns api.ErrGuardFailed and writes nothing.
 	UpdateIssue(ctx context.Context, id string, patch api.UpdatePatch, g api.Guard) error
+	// Claim moves the issue to in_progress and assigns it to the actor on the
+	// context, so only one of two actors racing for it wins; the other gets
+	// api.ErrGuardFailed and nothing is written. The holder re-claiming it is a
+	// no-op, not a loss.
+	Claim(ctx context.Context, id string) error
+	// Release returns the issue to open with no assignee, but only while the
+	// actor on the context holds it; otherwise api.ErrGuardFailed, no write.
+	Release(ctx context.Context, id string) error
+	// Transfer assigns the issue to assignee at status (the current status
+	// when empty), but only while the actor on the context holds it; otherwise
+	// api.ErrGuardFailed, no write.
+	Transfer(ctx context.Context, id, status, assignee string) error
 	// CloseIssues closes all of ids with reason, or none: one transaction.
 	// force closes past open children and live blockers.
 	CloseIssues(ctx context.Context, ids []string, reason string, force bool) error

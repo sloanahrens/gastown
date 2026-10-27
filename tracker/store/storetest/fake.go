@@ -111,6 +111,13 @@ func (*Fake) Assigned(context.Context, api.AssignedRequest) (api.AssignedPage, e
 func (*Fake) UpdateIssue(context.Context, string, api.UpdatePatch, api.Guard) error {
 	return unimplemented("UpdateIssue")
 }
+func (*Fake) Claim(context.Context, string) error { return unimplemented("Claim") }
+func (*Fake) Release(context.Context, string) error {
+	return unimplemented("Release")
+}
+func (*Fake) Transfer(context.Context, string, string, string) error {
+	return unimplemented("Transfer")
+}
 func (*Fake) CloseIssues(context.Context, []string, string, bool) error {
 	return unimplemented("CloseIssues")
 }

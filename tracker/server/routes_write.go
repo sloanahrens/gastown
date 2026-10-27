@@ -7,8 +7,9 @@ import (
 )
 
 // registerWriteRoutes registers the write routes: POST /v1/issues,
-// PATCH /v1/issues/{id}, POST /v1/issues:close, POST /v1/issues:delete and
-// POST /v1/graphs (a set of issues and their links, all or none).
+// PATCH /v1/issues/{id}, POST /v1/issues:close, POST /v1/issues:delete,
+// POST /v1/graphs (a set of issues and their links, all or none), and the
+// assignment verbs POST /v1/issues/{id}/claim, /release and /transfer.
 // Every write is attributed to the actor of the request's token; an actor
 // named in a body is ignored.
 func (s *Server) registerWriteRoutes(mux *http.ServeMux) {
@@ -17,6 +18,44 @@ func (s *Server) registerWriteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/issues:close", s.closeIssues)
 	mux.HandleFunc("POST /v1/issues:delete", s.deleteIssues)
 	mux.HandleFunc("POST /v1/graphs", s.createGraph)
+	mux.HandleFunc("POST /v1/issues/{id}/claim", s.claimIssue)
+	mux.HandleFunc("POST /v1/issues/{id}/release", s.releaseIssue)
+	mux.HandleFunc("POST /v1/issues/{id}/transfer", s.transferIssue)
+}
+
+// claimIssue takes the issue for the token's actor; the request has no body,
+// because the holder is always the caller.
+func (s *Server) claimIssue(w http.ResponseWriter, r *http.Request) {
+	if err := s.cfg.Store.Claim(r.Context(), r.PathValue("id")); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// releaseIssue returns the issue the token's actor holds to open, unassigned.
+func (s *Server) releaseIssue(w http.ResponseWriter, r *http.Request) {
+	if err := s.cfg.Store.Release(r.Context(), r.PathValue("id")); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// transferIssue hands the issue the token's actor holds to another actor. The
+// call is refused unless the caller holds it, so a body names only the new
+// holder.
+func (s *Server) transferIssue(w http.ResponseWriter, r *http.Request) {
+	var req api.TransferRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if err := s.cfg.Store.Transfer(r.Context(), r.PathValue("id"), req.Status, req.Assignee); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) createGraph(w http.ResponseWriter, r *http.Request) {

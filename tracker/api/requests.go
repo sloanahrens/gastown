@@ -19,6 +19,14 @@ type UpdateRequest struct {
 	Guard Guard       `json:"guard"`
 }
 
+// TransferRequest hands the caller's issue to another actor. Status is the
+// status the issue moves to, and an empty one keeps the status it has.
+// Assignee is required: leaving an issue unheld is a release, not a transfer.
+type TransferRequest struct {
+	Assignee string `json:"assignee"`
+	Status   string `json:"status,omitempty"`
+}
+
 // CloseRequest closes several issues together.
 type CloseRequest struct {
 	IDs    []string `json:"ids"`

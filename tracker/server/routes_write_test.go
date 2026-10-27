@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,10 +20,13 @@ import (
 // on the nil embedded interface, which a test shows as a failure.
 type writeStub struct {
 	store.Store
-	create func(ctx context.Context, p api.CreateParams) (api.Issue, error)
-	update func(ctx context.Context, id string, patch api.UpdatePatch, g api.Guard) error
-	close  func(ctx context.Context, ids []string, reason string, force bool) error
-	del    func(ctx context.Context, ids []string) error
+	create   func(ctx context.Context, p api.CreateParams) (api.Issue, error)
+	update   func(ctx context.Context, id string, patch api.UpdatePatch, g api.Guard) error
+	claim    func(ctx context.Context, id string) error
+	release  func(ctx context.Context, id string) error
+	transfer func(ctx context.Context, id, status, assignee string) error
+	close    func(ctx context.Context, ids []string, reason string, force bool) error
+	del      func(ctx context.Context, ids []string) error
 }
 
 func (s writeStub) CreateIssue(ctx context.Context, p api.CreateParams) (api.Issue, error) {
@@ -31,6 +35,14 @@ func (s writeStub) CreateIssue(ctx context.Context, p api.CreateParams) (api.Iss
 
 func (s writeStub) UpdateIssue(ctx context.Context, id string, p api.UpdatePatch, g api.Guard) error {
 	return s.update(ctx, id, p, g)
+}
+
+func (s writeStub) Claim(ctx context.Context, id string) error { return s.claim(ctx, id) }
+
+func (s writeStub) Release(ctx context.Context, id string) error { return s.release(ctx, id) }
+
+func (s writeStub) Transfer(ctx context.Context, id, status, assignee string) error {
+	return s.transfer(ctx, id, status, assignee)
 }
 
 func (s writeStub) CloseIssues(ctx context.Context, ids []string, reason string, force bool) error {
@@ -78,10 +90,13 @@ const tokenActor = "town/crew/dipper"
 
 func okStub() writeStub {
 	return writeStub{
-		create: func(context.Context, api.CreateParams) (api.Issue, error) { return api.Issue{ID: "gt-new"}, nil },
-		update: func(context.Context, string, api.UpdatePatch, api.Guard) error { return nil },
-		close:  func(context.Context, []string, string, bool) error { return nil },
-		del:    func(context.Context, []string) error { return nil },
+		create:   func(context.Context, api.CreateParams) (api.Issue, error) { return api.Issue{ID: "gt-new"}, nil },
+		update:   func(context.Context, string, api.UpdatePatch, api.Guard) error { return nil },
+		claim:    func(context.Context, string) error { return nil },
+		release:  func(context.Context, string) error { return nil },
+		transfer: func(context.Context, string, string, string) error { return nil },
+		close:    func(context.Context, []string, string, bool) error { return nil },
+		del:      func(context.Context, []string) error { return nil },
 	}
 }
 
@@ -163,6 +178,43 @@ func TestUpdateUsesTheTokensActorTheIDAndTheGuardAnswers204(t *testing.T) {
 	}
 }
 
+func TestAssignRoutesUseTheTokenActorAndAnswer204(t *testing.T) {
+	t.Parallel()
+	type call struct{ verb, id, status, assignee, actor string }
+	var got []call
+	st := okStub()
+	st.claim = func(ctx context.Context, id string) error {
+		got = append(got, call{"claim", id, "", "", api.ActorFrom(ctx)})
+		return nil
+	}
+	st.release = func(ctx context.Context, id string) error {
+		got = append(got, call{"release", id, "", "", api.ActorFrom(ctx)})
+		return nil
+	}
+	st.transfer = func(ctx context.Context, id, status, assignee string) error {
+		got = append(got, call{"transfer", id, status, assignee, api.ActorFrom(ctx)})
+		return nil
+	}
+	ts := writeServer(t, st)
+	for _, r := range []struct{ path, body string }{
+		{"/v1/issues/gt-a/claim", ""},
+		{"/v1/issues/gt-a/release", ""},
+		{"/v1/issues/gt-a/transfer", `{"status":"hooked","assignee":"bob"}`},
+	} {
+		if code, body := writeCall(t, "POST", ts.URL+r.path, r.body); code != http.StatusNoContent || body != "" {
+			t.Errorf("POST %s = %d %q, want 204 and no body", r.path, code, body)
+		}
+	}
+	want := []call{
+		{"claim", "gt-a", "", "", tokenActor},
+		{"release", "gt-a", "", "", tokenActor},
+		{"transfer", "gt-a", "hooked", "bob", tokenActor},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("store calls = %+v, want %+v", got, want)
+	}
+}
+
 func TestCloseAndDeletePassTheirArgumentsAndAnswer204(t *testing.T) {
 	t.Parallel()
 	var closeIDs, delIDs []string
@@ -202,15 +254,20 @@ func TestWriteRoutesMapStoreErrorsToStatusAndKind(t *testing.T) {
 	} {
 		fail := func() error { return tc.err }
 		st := writeStub{
-			create: func(context.Context, api.CreateParams) (api.Issue, error) { return api.Issue{}, fail() },
-			update: func(context.Context, string, api.UpdatePatch, api.Guard) error { return fail() },
-			close:  func(context.Context, []string, string, bool) error { return fail() },
-			del:    func(context.Context, []string) error { return fail() },
+			create:   func(context.Context, api.CreateParams) (api.Issue, error) { return api.Issue{}, fail() },
+			update:   func(context.Context, string, api.UpdatePatch, api.Guard) error { return fail() },
+			claim:    func(context.Context, string) error { return fail() },
+			release:  func(context.Context, string) error { return fail() },
+			transfer: func(context.Context, string, string, string) error { return fail() },
+			close:    func(context.Context, []string, string, bool) error { return fail() },
+			del:      func(context.Context, []string) error { return fail() },
 		}
 		ts := writeServer(t, st)
 		for _, r := range []struct{ method, path, body string }{
 			{"POST", "/v1/issues", `{"title":"t"}`}, {"PATCH", "/v1/issues/gt-a", `{"patch":{},"guard":{}}`},
 			{"POST", "/v1/issues:close", `{"ids":["gt-a"]}`}, {"POST", "/v1/issues:delete", `{"ids":["gt-a"]}`},
+			{"POST", "/v1/issues/gt-a/claim", ""}, {"POST", "/v1/issues/gt-a/release", ""},
+			{"POST", "/v1/issues/gt-a/transfer", `{"assignee":"bob"}`},
 		} {
 			code, body := writeCall(t, r.method, ts.URL+r.path, r.body)
 			if e := decodeErr(t, body); code != tc.status || e.Kind != tc.kind {
@@ -228,6 +285,7 @@ func TestWriteRoutesRefuseEmptyAndUnknownFieldBodies(t *testing.T) {
 	ts := writeServer(t, writeStub{})
 	for _, r := range []struct{ method, path string }{
 		{"POST", "/v1/issues"}, {"PATCH", "/v1/issues/gt-a"}, {"POST", "/v1/issues:close"}, {"POST", "/v1/issues:delete"},
+		{"POST", "/v1/issues/gt-a/transfer"},
 	} {
 		for name, body := range map[string]string{"empty": "", "unknown field": `{"surprise":1}`, "not json": `{`, "trailing data": `{}{}`} {
 			code, resp := writeCall(t, r.method, ts.URL+r.path, body)
@@ -244,6 +302,8 @@ func TestEveryWriteRouteNeedsAToken(t *testing.T) {
 	for _, r := range []struct{ method, path, body string }{
 		{"POST", "/v1/issues", `{"title":"t"}`}, {"PATCH", "/v1/issues/gt-a", `{"patch":{},"guard":{}}`},
 		{"POST", "/v1/issues:close", `{"ids":["gt-a"]}`}, {"POST", "/v1/issues:delete", `{"ids":["gt-a"]}`},
+		{"POST", "/v1/issues/gt-a/claim", ""}, {"POST", "/v1/issues/gt-a/release", ""},
+		{"POST", "/v1/issues/gt-a/transfer", `{"assignee":"bob"}`},
 	} {
 		req, _ := http.NewRequest(r.method, ts.URL+r.path, strings.NewReader(r.body))
 		req.Header.Set(api.SchemaHeader, "3")

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -39,9 +40,12 @@ func TestWriteMethodsSendTheRightRequestsAndHandle201And204(t *testing.T) {
 	}
 	title := "n"
 	for name, err := range map[string]error{
-		"Update": c.Update(ctx, "gt-a/b c", api.UpdatePatch{Title: &title}, api.Guard{}),
-		"Close":  c.Close(ctx, []string{"gt-a", "gt-b"}, "done", true),
-		"Delete": c.Delete(ctx, []string{"gt-a"}),
+		"Update":   c.Update(ctx, "gt-a/b c", api.UpdatePatch{Title: &title}, api.Guard{}),
+		"Claim":    c.Claim(ctx, "gt-a/b c"),
+		"Release":  c.Release(ctx, "gt-a/b c"),
+		"Transfer": c.Transfer(ctx, "gt-a/b c", "hooked", "bob"),
+		"Close":    c.Close(ctx, []string{"gt-a", "gt-b"}, "done", true),
+		"Delete":   c.Delete(ctx, []string{"gt-a"}),
 	} {
 		if err != nil {
 			t.Errorf("%s on 204 = %v, want nil", name, err)
@@ -49,8 +53,8 @@ func TestWriteMethodsSendTheRightRequestsAndHandle201And204(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(seen) != 4 {
-		t.Fatalf("saw %d requests, want 4: %+v", len(seen), seen)
+	if len(seen) != 7 {
+		t.Fatalf("saw %d requests, want 7: %+v", len(seen), seen)
 	}
 	// method, path and the decoded body of each request, compared field by field.
 	type want struct {
@@ -60,11 +64,20 @@ func TestWriteMethodsSendTheRightRequestsAndHandle201And204(t *testing.T) {
 	for i, w := range []want{
 		{"POST", "/v1/issues", map[string]any{"title": "t", "rig": "gt"}},
 		{"PATCH", "/v1/issues/gt-a%2Fb%20c", map[string]any{"patch": map[string]any{"title": "n"}, "guard": map[string]any{}}},
+		{"POST", "/v1/issues/gt-a%2Fb%20c/claim", nil},
+		{"POST", "/v1/issues/gt-a%2Fb%20c/release", nil},
+		{"POST", "/v1/issues/gt-a%2Fb%20c/transfer", map[string]any{"status": "hooked", "assignee": "bob"}},
 		{"POST", "/v1/issues:close", map[string]any{"ids": []any{"gt-a", "gt-b"}, "reason": "done", "force": true}},
 		{"POST", "/v1/issues:delete", map[string]any{"ids": []any{"gt-a"}}},
 	} {
 		if seen[i].method != w.method || seen[i].path != w.path {
 			t.Errorf("request %d = %s %s, want %s %s", i, seen[i].method, seen[i].path, w.method, w.path)
+		}
+		if w.body == nil {
+			if strings.TrimSpace(seen[i].body) != "" {
+				t.Errorf("request %d body = %q, want none: the holder is the token's actor", i, seen[i].body)
+			}
+			continue
 		}
 		var got map[string]any
 		if err := json.Unmarshal([]byte(seen[i].body), &got); err != nil {
@@ -110,17 +123,20 @@ func TestAWriteThatGets503IsAttemptedExactlyOnce(t *testing.T) {
 	ctx := t.Context()
 	title := "x"
 	for name, err := range map[string]error{
-		"Create": func() error { _, err := c.Create(ctx, api.CreateParams{Title: "t"}); return err }(),
-		"Update": c.Update(ctx, "gt-a", api.UpdatePatch{Title: &title}, api.Guard{}),
-		"Close":  c.Close(ctx, []string{"gt-a"}, "", false),
-		"Delete": c.Delete(ctx, []string{"gt-a"}),
+		"Create":   func() error { _, err := c.Create(ctx, api.CreateParams{Title: "t"}); return err }(),
+		"Update":   c.Update(ctx, "gt-a", api.UpdatePatch{Title: &title}, api.Guard{}),
+		"Claim":    c.Claim(ctx, "gt-a"),
+		"Release":  c.Release(ctx, "gt-a"),
+		"Transfer": c.Transfer(ctx, "gt-a", "open", "bob"),
+		"Close":    c.Close(ctx, []string{"gt-a"}, "", false),
+		"Delete":   c.Delete(ctx, []string{"gt-a"}),
 	} {
 		if !errors.Is(err, api.ErrUnavailable) {
 			t.Errorf("%s = %v, want api.ErrUnavailable", name, err)
 		}
 	}
-	if n := attempts.Load(); n != 4 {
-		t.Errorf("server saw %d attempts for 4 writes, want exactly 4 (a write is never retried)", n)
+	if n := attempts.Load(); n != 7 {
+		t.Errorf("server saw %d attempts for 7 writes, want exactly 7 (a write is never retried)", n)
 	}
 	if len(fs.waits) != 0 {
 		t.Errorf("client waited %v between attempts; a write has no retries to wait for", fs.waits)
