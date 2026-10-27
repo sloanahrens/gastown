@@ -68,7 +68,9 @@ func TestDirectiveEdit_RegisteredRigStillWorks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registered rig: %v", err)
 	}
-	want := filepath.Join(townRoot, "myrig", "directives", "polecat.md")
+	// An edit writes the new path of the rig's layer: the rig's canonical checkout
+	// (gt-80rnu).
+	want := filepath.Join(townRoot, "myrig", "mayor", "rig", ".gastown", "directives", "polecat.md")
 	if len(opened) != 1 || opened[0] != want {
 		t.Errorf("editor opened %v, want [%s]", opened, want)
 	}

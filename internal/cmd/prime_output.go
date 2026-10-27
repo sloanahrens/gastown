@@ -114,10 +114,10 @@ func outputRoleDirectivesWith(ctx RoleContext, w io.Writer, explainEnabled, capp
 	townRoot := ctx.TownRoot
 	rigName := ctx.Rig
 
-	townPath := filepath.Join(townRoot, "directives", role+".md")
+	townPath := config.DirectiveEditPath(role, townRoot, rigName, true)
 	rigPath := ""
 	if rigName != "" {
-		rigPath = filepath.Join(townRoot, rigName, "directives", role+".md")
+		rigPath = config.DirectiveEditPath(role, townRoot, rigName, false)
 	}
 
 	explainf := func(format string, args ...any) {
@@ -157,11 +157,10 @@ func outputRoleDirectivesWith(ctx RoleContext, w io.Writer, explainEnabled, capp
 	// does, so a blank town file never earns the Town label
 	// (TestOutputRoleDirectivesWhitespaceOnlyTownFileIsNotTown).
 	sources := config.RoleDirectiveSources(role, townRoot, rigName)
-	townDir := filepath.Join(townRoot, "directives") + string(filepath.Separator)
 	hasTown := false
 	hasRig := false
 	for _, src := range sources {
-		if strings.HasPrefix(src, townDir) {
+		if config.IsTownDirective(src, townRoot) {
 			hasTown = true
 		} else {
 			hasRig = true
