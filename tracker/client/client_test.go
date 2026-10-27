@@ -28,12 +28,18 @@ func (f *fakeSleep) sleep(_ context.Context, d time.Duration) error {
 	return nil
 }
 
+// newClient builds the client under test against a server of its own, on a
+// transport of its own with keep-alives off: httptest's Server.Close closes
+// http.DefaultTransport's idle connections, so on the shared transport a
+// parallel test's cleanup takes the connection a write is using, and a write
+// gets no retry (gt-ez3ju).
 func newClient(t *testing.T, h http.Handler, mod func(*Config)) (*Client, *fakeSleep) {
 	t.Helper()
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
 	fs := &fakeSleep{}
-	cfg := Config{BaseURL: ts.URL, Token: "trk_secret-token-value", Sleep: fs.sleep}
+	cfg := Config{BaseURL: ts.URL, Token: "trk_secret-token-value", Sleep: fs.sleep,
+		HTTP: &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}}
 	if mod != nil {
 		mod(&cfg)
 	}
@@ -42,6 +48,24 @@ func newClient(t *testing.T, h http.Handler, mod func(*Config)) (*Client, *fakeS
 		t.Fatal(err)
 	}
 	return c, fs
+}
+
+// The gate's order: a write, a sibling test's cleanup (its server's Close), a
+// write. Both writes must land (gt-ez3ju).
+func TestAWriteLandsAfterASiblingServersClose(t *testing.T) {
+	t.Parallel()
+	c, _ := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}), nil)
+	ctx := t.Context()
+	if err := c.Close(ctx, []string{"gt-a"}, "done", false); err != nil {
+		t.Fatalf("first write = %v", err)
+	}
+	sibling := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	sibling.Close() // what the sibling test's t.Cleanup(ts.Close) does
+	if err := c.Close(ctx, []string{"gt-b"}, "done", false); err != nil {
+		t.Fatalf("write after a sibling server closed = %v", err)
+	}
 }
 
 func writeErr(w http.ResponseWriter, status int, e *api.Error) {
