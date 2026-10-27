@@ -464,6 +464,9 @@ tier-check:
 # unit test executes fails here rather than as an om finding at landing. That
 # run passes -coverprofile, which go test cannot cache, so the changed
 # packages' tests rerun even when nothing else about them changed.
+#
+# A commit that changes a go.mod or go.sum file must explain it in a
+# "Rationale:" line (internal/presubmit/cmd/gomodrationale, gt-b9j3o.6).
 # PRESUBMIT_BASE is the ref the branch is compared against.
 PRESUBMIT_BASE ?= origin/main
 presubmit: LINT_RUNNER_FLAGS := --allow-serial-runners
@@ -492,6 +495,8 @@ presubmit: lint
 			go run ./internal/presubmit/cmd/errbranch -base $(PRESUBMIT_BASE) -cover "$$cover" || { echo "presubmit: FAILED at the error-branch check" >&2; exit 1; }; \
 		fi; \
 	fi; \
+	echo "presubmit: go.mod rationale check (go run ./internal/presubmit/cmd/gomodrationale)" >&2; \
+	go run ./internal/presubmit/cmd/gomodrationale -base $(PRESUBMIT_BASE) || { echo "presubmit: FAILED at the go.mod rationale check (the message above names the commit and the cause)" >&2; exit 1; }; \
 	gtdir=$$(mktemp -d) || { echo "presubmit: FAILED making room for the machine-stdout check" >&2; exit 1; }; \
 	$(MAKE) --no-print-directory build BUILD_DIR="$$gtdir" >/dev/null || { rm -rf "$$gtdir"; echo "presubmit: FAILED building gt for the machine-stdout check" >&2; exit 1; }; \
 	echo "presubmit: machine-readable stdout check (go run ./cmd/machinecheck)" >&2; \
