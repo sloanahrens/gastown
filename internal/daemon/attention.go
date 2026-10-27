@@ -218,6 +218,9 @@ type attentionSources struct {
 	slots       func() (slot.Report, error)
 	pidAlive    func(pid int) bool
 	bdLatency   func(ctx context.Context) (time.Duration, error)
+	// escalationBead reads the work bead an escalation record names in its
+	// related_bead field: the owner the item names comes from it.
+	escalationBead func(ctx context.Context, id string) (*beads.Issue, error)
 
 	// refusals is gt done's refusal ledger; refusalBead reads one refused
 	// bead in its own rig.
@@ -594,6 +597,15 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	s.escalations = func(ctx context.Context) ([]*beads.Issue, error) {
 		return listOpenEscalations(ctx, d.escalationBeads())
 	}
+	// The escalation records live in the town database; the bead one names as
+	// its related_bead belongs to the rig its prefix routes to.
+	s.escalationBead = func(_ context.Context, id string) (*beads.Issue, error) {
+		rig := beads.GetRigNameForPrefix(d.config.TownRoot, beads.ExtractPrefix(id))
+		if rig == "" {
+			return nil, nil
+		}
+		return d.rigWorkBeads(rig).Show(id)
+	}
 	s.rework = func(ctx context.Context, rig string) ([]*beads.Issue, error) {
 		var out []*beads.Issue
 		// No status filter: a candidate is anything IsActionable, so a bead
@@ -902,15 +914,40 @@ func (s *attentionSources) collectEscalations(ctx context.Context) ([]attention.
 		if summary == "" {
 			summary = "escalation " + is.ID
 		}
+		owner, waiting := s.escalationOwner(ctx, is)
 		out = append(out, attention.Item{
-			Key:      "esc:" + is.ID,
-			Kind:     attention.KindEscalation,
-			Severity: attention.SeverityHigh,
-			Bead:     is.ID,
-			Summary:  summary,
+			Key:       "esc:" + is.ID,
+			Kind:      attention.KindEscalation,
+			Severity:  attention.SeverityHigh,
+			Bead:      is.ID,
+			Owner:     owner,
+			WaitingOn: waiting,
+			Summary:   summary,
 		})
 	}
 	return out, nil
+}
+
+// escalationOwner names the owner of the bead an escalation record relates to,
+// and what the escalation waits on: that bead's assignee. No related bead, no
+// assignee, or a failed read of the bead leaves both empty, and the escalation
+// is still raised (gt-sxmqs).
+func (s *attentionSources) escalationOwner(ctx context.Context, esc *beads.Issue) (owner, waiting string) {
+	related := strings.TrimSpace(beads.ParseEscalationFields(esc.Description).RelatedBead)
+	if related == "" || s.escalationBead == nil {
+		return "", ""
+	}
+	is, err := s.escalationBead(ctx, related)
+	if err != nil || is == nil {
+		// The escalation is the alarm; naming its bead's owner is what is lost
+		// when that read fails, so the item is raised without the owner line.
+		return "", ""
+	}
+	owner = strings.TrimSpace(is.Assignee)
+	if owner == "" {
+		return "", ""
+	}
+	return owner, "escalated, owned by " + owner
 }
 
 // collectRejectedTwice raises one item per actionable rework bead whose notes
