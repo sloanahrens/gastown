@@ -237,6 +237,11 @@ escalations() { grep "^escalate " "$1/gt.log" 2>/dev/null | grep -v -- "escalate
 
 # wait_for FILE: wait until FILE exists, checked every 0.1 s for 5 s.
 wait_for() { local i; for i in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
+# wait_for_line FILE: wait until FILE holds a line of text, checked every 0.1 s
+# for 5 s. A plugin's >> redirect creates FILE before it writes the line, so a
+# case that waits for the path alone can read the redirect's empty file
+# (gt-mztvx).
+wait_for_line() { local i; for i in $(seq 1 50); do grep -q . "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
 # reported T -> the commit the installed gt stub reports
 reported() { "$1/bin/gt" stale --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["binary_commit"])'; }
 
@@ -1535,6 +1540,11 @@ closed_case() {
   T=$(make_world); mkdir -p "$T/plugin"
   cat > "$T/plugin/run.sh" <<'STUB'
 #!/usr/bin/env bash
+# Create the file, hold it empty, then write: this is the window a loaded host
+# leaves between the >> redirect's open and its write, and the case must not
+# read the empty file through it (gt-mztvx).
+: >> "$T_WORLD/closed.txt"
+sleep 0.3
 printf '%s\n' "${POLECAT_IMAGE_FAIL_CLOSED:-unset}" >> "$T_WORLD/closed.txt"
 STUB
   chmod +x "$T/plugin/run.sh"
@@ -1542,8 +1552,9 @@ STUB
   rc=$( unset POLECAT_IMAGE_FAIL_CLOSED
         IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" "$@" )
   # --no-image-first starts the plugin detached, so its line lands after the
-  # install returned; waiting keeps the case from reading the file too early.
-  wait_for "$T/closed.txt" || true
+  # install returned; waiting for the line, not for the path, keeps the case
+  # from reading the file empty (gt-mztvx).
+  wait_for_line "$T/closed.txt" || true
   if [ "$rc" = "0" ] && [ "$(cat "$T/closed.txt" 2>/dev/null)" = "$WANT_CLOSED" ]; then
     pass "image: $name"
   else
