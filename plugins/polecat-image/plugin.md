@@ -1,6 +1,6 @@
 +++
 name = "polecat-image"
-description = "Rebuild gastown-polecat:dev at the installed gt's commit after each gt install, so sandbox slings are not refused for image drift; publish it to POLECAT_IMAGE_REGISTRY when set; then trim the image tags, build cache and per-rig cache volumes that run grows"
+description = "Rebuild gastown-polecat:dev at the installed gt's commit after each gt install, so sandbox slings are not refused for image drift; publish it to the configured registry; then trim the image tags, build cache and per-rig cache volumes that run grows"
 version = 1
 
 [gate]
@@ -60,9 +60,9 @@ detached, escalating a failure under `install-gt:image-build-failed`.
    commit goes into the image and why (gt-7b7a5).
 5. Reads the installed commit again; if a newer install landed during the
    build it builds again, at most 3 rounds.
-6. With `POLECAT_IMAGE_REGISTRY` set, publishes what it just built there, and
-   retries a publish that did not complete for an image that is already current
-   ("Publishing to a registry").
+6. With a registry resolved ("Publishing to a registry"), publishes what it just
+   built there, and retries a publish that did not complete for an image that is
+   already current.
 
 The build's worktree is a detached one on the rig repo's shared `.repo.git`. No
 cleanup path treats it as a stray: the reaper and `heldByOtherWorktree` only
@@ -73,10 +73,12 @@ none), and the local-branch prune reads the list only to protect branches.
 ## Publishing to a registry
 
 A Kubernetes seat pulls the image from a registry, not from the Mac's Docker
-daemon (`docs/design/k8s-sandboxes.md`). With `POLECAT_IMAGE_REGISTRY` set to a
-`host:port` such as `localhost:5001` the plugin publishes each image it builds,
-and does nothing of the kind when it is unset. How a publish is done, tagged and
-retried is in `run.sh` beside the publish functions.
+daemon (`docs/design/k8s-sandboxes.md`). `POLECAT_IMAGE_REGISTRY` in the
+environment (a `host:port` such as `localhost:5001`) wins; unset, the plugin
+reads it and `POLECAT_IMAGE_CRANE` from daemon.env in the town's
+`settings/config.json`, no other key, since a hand install's shell leaves both
+unset (gt-du3fi). Naming neither publishes nothing; an unreadable config fails
+the run.
 
 - **Name change.** `POLECAT_IMAGE_REGISTRY` once named the gateway's
   sandbox-records directory; that is `POLECAT_IMAGE_SANDBOX_RECORDS` now. A
@@ -87,7 +89,7 @@ retried is in `run.sh` beside the publish functions.
   tags the image locally with the registry reference, which is what the sandbox
   backend's drift check inspects. The image is saved and pushed once; its other
   tags are made on the registry with `crane tag`, which copies no layer.
-- **Failure never breaks the plugin.** A missing `crane` or a failed list, tag,
+- **A failed publish never breaks the plugin.** A missing `crane` or a failed list, tag,
   save or push is logged with its reason and the run exits 0, unless
   `POLECAT_IMAGE_FAIL_CLOSED=1` (below); nothing is removed. A push that did not
   complete is retried by the next run even when the image is already current.

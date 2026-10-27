@@ -361,3 +361,68 @@ func TestMainFailsWhenTheInstallKeepsMoving(t *testing.T) {
 		t.Errorf("make was called %d times, want %d builds", got, 3)
 	}
 }
+
+// TestMainPublishesThroughTheTownConfigsRegistryAndCrane is the hand install's
+// publish: the environment names neither, so the run takes both from the town's
+// settings/config.json, and a key it did not name never reaches its log
+// (gt-du3fi).
+func TestMainPublishesThroughTheTownConfigsRegistryAndCrane(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownImageConfig(t, town, `{"daemon":{"env":{
+		"POLECAT_IMAGE_REGISTRY":"registry.example:5000",
+		"POLECAT_IMAGE_CRANE":"/config/bin/crane",
+		"ANTHROPIC_API_KEY":"sk-town-sentinel"}}}`)
+	cfg, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": town}))
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() failed: %v", err)
+	}
+	tr := newTestRun(t)
+	tr.Cfg.Registry, tr.Cfg.Crane = cfg.Registry, cfg.Crane
+	reply := newRunReply("abc1234")
+	reply.label = "abc1234"
+	tr.reply = reply.answer(t, labelFormat(tr))
+	t.Cleanup(tr.Cleanup)
+	if err := tr.Main(); err != nil {
+		t.Fatalf("Main() failed: %v", err)
+	}
+	tr.wantLogged(t, "registry: pushed registry.example:5000/gastown-polecat:dev")
+	pushed := false
+	for _, c := range tr.callsTo("/config/bin/crane") {
+		if hasArg(c.args, "push") && c.args[len(c.args)-1] == "registry.example:5000/gastown-polecat:dev" {
+			pushed = true
+		}
+	}
+	if !pushed {
+		t.Errorf("the town's crane did not push: %v", callLines(tr, "/config/bin/crane"))
+	}
+	if strings.Contains(tr.output(), "sk-town-sentinel") {
+		t.Errorf("the run logged a daemon.env key it did not name: %s", tr.output())
+	}
+}
+
+// TestMainPublishesNothingWhenNothingNamesARegistry is the other side: the
+// environment and the town both name no registry, so the run neither publishes
+// nor reports a fault (gt-du3fi).
+func TestMainPublishesNothingWhenNothingNamesARegistry(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownImageConfig(t, town, `{"daemon":{"env":{"POLECAT_IMAGE_CRANE":"/config/bin/crane"}}}`)
+	cfg, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": town}))
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() failed: %v", err)
+	}
+	tr := newTestRun(t)
+	tr.Cfg.Registry = cfg.Registry
+	reply := newRunReply("abc1234")
+	reply.label = "abc1234"
+	tr.reply = reply.answer(t, labelFormat(tr))
+	t.Cleanup(tr.Cleanup)
+	if err := tr.Main(); err != nil {
+		t.Fatalf("Main() failed: %v", err)
+	}
+	tr.wantLogged(t, "current at abc1234")
+	if anyCallNamed(tr.callsTo("crane"), "push") || anyCallNamed(tr.callsTo("docker"), "save") {
+		t.Errorf("a run with no registry published: %v %v", callLines(tr, "docker"), callLines(tr, "crane"))
+	}
+}
