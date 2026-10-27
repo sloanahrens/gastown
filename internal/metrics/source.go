@@ -51,6 +51,12 @@ type Env struct {
 	// Tail reads at most maxBytes from the end of path, for a log too large to
 	// read whole.
 	Tail func(path string, maxBytes int64) ([]byte, error)
+	// Wait blocks for d, the gap a source needs between two readings of a
+	// counter so their difference is a rate. A test advances a fake clock here
+	// instead of sleeping, so a source that samples has no timer of its own. A
+	// source that samples treats nil as an error, because a window it cannot
+	// take is a rate it must not invent.
+	Wait func(d time.Duration)
 }
 
 // now is the time the snapshot is taken: Env.Now when the caller set one, the

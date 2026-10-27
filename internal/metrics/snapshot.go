@@ -45,6 +45,7 @@ func OSEnv(town string) Env {
 		ModTime:  modTime,
 		ReadDir:  listDir,
 		Tail:     tailFile,
+		Wait:     time.Sleep,
 	}
 }
 

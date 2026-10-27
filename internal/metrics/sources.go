@@ -7,6 +7,7 @@ func Sources() []Source {
 	return []Source{
 		queueSource{},
 		newHostSource(),
+		hostCPUSource{},
 		moneySource{},
 		reviewSource{},
 		attentionSource{},

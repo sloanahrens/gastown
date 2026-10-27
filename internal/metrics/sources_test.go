@@ -12,9 +12,9 @@ import (
 
 // The registry test lists names only: it never calls Collect, so it runs no
 // command and reads no file whatever the sources do.
-func TestSourcesRegistersTheEightGroups(t *testing.T) {
+func TestSourcesRegistersEveryGroup(t *testing.T) {
 	t.Parallel()
-	want := []string{"attention", "config", "host", "money", "placement", "queue", "resources", "review"}
+	want := []string{"attention", "config", "host", "host_cpu", "money", "placement", "queue", "resources", "review"}
 	var got []string
 	for _, src := range Sources() {
 		got = append(got, src.Group())
