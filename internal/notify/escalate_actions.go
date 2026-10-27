@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -19,12 +20,16 @@ type externalSender func(cfg *config.EscalationConfig, beadID, severity, descrip
 
 // externalSenders are the outside channels an escalation route can name.
 // Tests replace them so no unit test reaches an SMTP server or a webhook.
+// A nil field means the real one.
 type externalSenders struct {
 	email externalSender
 	slack externalSender
 	sms   externalSender
 	// command runs a notify command for an exec:<name> action.
 	command commandRunner
+	// newRouter builds the router the mail channel delivers through; nil
+	// builds mail.NewRouter for the call's own town root and prefixes.
+	newRouter func() *mail.Router
 }
 
 func defaultSenders() externalSenders {
