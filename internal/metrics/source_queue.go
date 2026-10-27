@@ -133,20 +133,28 @@ func queueBeadColumns() []queueBeadColumn {
 				})
 			},
 		},
-		{
-			// List adds no status filter of its own, so the label and bd's
-			// default list scope are the whole query, as they were for the
-			// pre-seam `bd list`; Limit 0 asks for the whole board rather than
-			// bd's default page, which is what the pre-seam --limit 0 did.
-			column: "waiting_to_land",
-			read: func(s BeadStore) ([]*beads.Issue, error) {
-				return s.List(beads.ListOptions{Label: "gt:ready-to-land", Limit: 0})
-			},
-		},
+		queueLandingColumn(),
 		{
 			column:        "blocked",
 			read:          func(s BeadStore) ([]*beads.Issue, error) { return s.Blocked() },
 			skipEphemeral: true,
+		},
+	}
+}
+
+// queueLandingColumn is the store read behind waiting_to_land, the beads
+// submitted and waiting to land. The burst row counts the same board
+// (BurstRow).
+//
+// List adds no status filter of its own, so the label and bd's default list
+// scope are the whole query, as they were for the pre-seam `bd list`; Limit 0
+// asks for the whole board rather than bd's default page, which is what the
+// pre-seam --limit 0 did.
+func queueLandingColumn() queueBeadColumn {
+	return queueBeadColumn{
+		column: "waiting_to_land",
+		read: func(s BeadStore) ([]*beads.Issue, error) {
+			return s.List(beads.ListOptions{Label: "gt:ready-to-land", Limit: 0})
 		},
 	}
 }
@@ -223,6 +231,17 @@ func queueRigNames(rc *config.RigsConfig) []string {
 // time, and sums the beads. Any rig that fails leaves the column nil: a
 // partial sum would read as a queue that shrank.
 func queueSumBeads(ctx context.Context, env Env, rigs []string, col queueBeadColumn) any {
+	n, ok := queueSumCount(ctx, env, rigs, col)
+	if !ok {
+		return nil
+	}
+	return n
+}
+
+// queueSumCount is queueSumBeads's reading as a number and a flag: ok is false
+// when any rig failed, so a caller that needs the count cannot mistake a
+// failed read for an empty queue.
+func queueSumCount(ctx context.Context, env Env, rigs []string, col queueBeadColumn) (int, bool) {
 	type result struct {
 		n   int
 		err error
@@ -243,11 +262,11 @@ func queueSumBeads(ctx context.Context, env Env, rigs []string, col queueBeadCol
 	sum := 0
 	for _, r := range results {
 		if r.err != nil {
-			return nil
+			return 0, false
 		}
 		sum += r.n
 	}
-	return sum
+	return sum, true
 }
 
 // queueCount runs one column's read in one rig's store under its own deadline
