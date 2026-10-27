@@ -2,6 +2,7 @@
 package deps
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -41,9 +42,13 @@ func CheckBeads() (BeadsStatus, string) {
 }
 
 // beadsStatusFromVersion classifies the store's answer: a report with a semver
-// is bd, and anything else is a bd whose version could not be read.
+// is bd, a bd that was not there to run is BeadsNotFound, and anything else is
+// a bd whose version could not be read.
 func beadsStatusFromVersion(info beads.VersionInfo, err error) (BeadsStatus, string) {
 	if err != nil {
+		if errors.Is(err, beads.ErrNotInstalled) {
+			return BeadsNotFound, ""
+		}
 		return BeadsUnknown, ""
 	}
 	version := beadsSemverRE.FindString(info.Version)

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beadsql"
 )
@@ -102,6 +104,107 @@ func TestSchemaLevelClassifiesAStoreThatDidNotAnswer(t *testing.T) {
 				t.Errorf("error %q lacks %q", err, tc.wantSubstring)
 			}
 		})
+	}
+}
+
+// TestSchemaLevelEndsWithTheCallersBudget is the handshake's budget on a bd
+// call (gt-3lvv0): a read still waiting on the database when the store's
+// context ends is killed, the kill is classified as the store not answering,
+// and the error names the budget that ended it rather than the seam's.
+func TestSchemaLevelEndsWithTheCallersBudget(t *testing.T) {
+	t.Parallel()
+	const budget = 20 * time.Millisecond
+	readCtx := make(chan context.Context, 1)
+	run := func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
+		if len(c.args) == 2 && c.args[0] == "--allow-stale" {
+			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
+		}
+		readCtx <- ctx
+		// A read that outlives the caller's budget is the failure under test,
+		// so the runner caps its own wait: a regression costs seconds, not the
+		// seam's minute.
+		select {
+		case <-ctx.Done():
+		case <-time.After(2 * time.Second):
+			return nil, nil, errors.New("the read outlived the caller's budget")
+		}
+		return nil, nil, errors.New("signal: killed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	b := newBeads(beadsFields{workDir: t.TempDir(), isolated: true, noRoute: true, exec: run, callCtx: ctx, budget: time.Minute})
+
+	start := time.Now()
+	_, err := b.SchemaLevel()
+	if err == nil {
+		t.Fatal("SchemaLevel: want an error")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("the read took %s, want it ended by the callers %s budget", elapsed, budget)
+	}
+	if !errors.Is(err, ErrStoreUnavailable) {
+		t.Errorf("a deadline-killed read must wrap ErrStoreUnavailable: %v", err)
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error %q does not name the deadline that ended the read", err)
+	}
+	select {
+	case callCtx := <-readCtx:
+		deadline, ok := callCtx.Deadline()
+		if !ok {
+			t.Fatal("the bd read ran with no deadline")
+		}
+		if until := time.Until(deadline); until > 2*budget {
+			t.Errorf("the read's deadline is %s away, want it parented on the callers %s budget", until, budget)
+		}
+	default:
+		t.Fatal("the bd read never reached the seam")
+	}
+}
+
+// TestSchemaLevelClassifiesTheSeamBudgetKill: with no caller context, the
+// seam's own subprocess budget ends a read waiting on the database, and that
+// kill is the store not answering too.
+func TestSchemaLevelClassifiesTheSeamBudgetKill(t *testing.T) {
+	t.Parallel()
+	run := func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
+		if len(c.args) == 2 && c.args[0] == "--allow-stale" {
+			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
+		}
+		<-ctx.Done()
+		return nil, nil, errors.New("signal: killed")
+	}
+	b := newBeads(beadsFields{workDir: t.TempDir(), isolated: true, noRoute: true, exec: run, budget: 20 * time.Millisecond})
+	_, err := b.SchemaLevel()
+	if err == nil {
+		t.Fatal("SchemaLevel: want an error")
+	}
+	if !errors.Is(err, ErrStoreUnavailable) {
+		t.Errorf("a deadline-killed read must wrap ErrStoreUnavailable: %v", err)
+	}
+	if !strings.Contains(err.Error(), "timed out after 20ms") {
+		t.Errorf("error %q does not name the budget that ended the read", err)
+	}
+}
+
+// TestPlainVersionNamesAMissingBd: a plain wrapper's failed exec is the seam's
+// ErrNotInstalled, as the policy path's is, so a caller can tell bd not being
+// installed from bd failing to answer.
+func TestPlainVersionNamesAMissingBd(t *testing.T) {
+	t.Parallel()
+	missing := func(context.Context, []string) ([]byte, []byte, error) {
+		return nil, nil, &exec.Error{Name: "bd", Err: exec.ErrNotFound}
+	}
+	b := NewPlain(t.TempDir(), nil, WithRunner(missing))
+	_, err := b.Version()
+	if err == nil {
+		t.Fatal("Version with no bd: want an error")
+	}
+	if !errors.Is(err, ErrNotInstalled) {
+		t.Errorf("a missing bd must wrap ErrNotInstalled: %v", err)
+	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Errorf("a missing bd is not an unavailable answer: %v", err)
 	}
 }
 

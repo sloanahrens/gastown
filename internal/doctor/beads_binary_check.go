@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -48,10 +49,6 @@ func (c *BeadsBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 	if lookPath == nil {
 		lookPath = exec.LookPath
 	}
-	store := c.store
-	if store == nil {
-		store = beads.New(ctx.TownRoot)
-	}
 	path, _ := lookPath("bd")
 
 	timeout := c.handshakeTimeout
@@ -60,6 +57,17 @@ func (c *BeadsBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	hctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
+	store := c.store
+	if store == nil {
+		// The town's own database, with the bd target variables stripped from
+		// the inherited environment: a stale BEADS_DIR or BEADS_DOLT_* must
+		// not steer the diagnostic to another database. The store carries the
+		// handshake's context, so this check's budget bounds the bd calls.
+		store = beads.New(ctx.TownRoot,
+			beads.WithEnv(beads.StripBDTargetEnv(os.Environ())),
+			beads.WithCallContext(hctx))
+	}
 	hs, err := deps.CheckBDHandshake(hctx, path, store)
 	if err == nil {
 		return &CheckResult{

@@ -77,8 +77,10 @@ func TestCommandTokensResolve(t *testing.T) {
 	// mol-gastown-boot.formula.toml and rewrote the templates and formulas that
 	// addressed the role: templates fell from 338 to 279 and formulas from 216
 	// to 210. The templates floor drops by the same 59 invocations. The
-	// version handshake's move onto the seam (gt-p85pw.13) deleted deps' bd
-	// runner, taking go to 16.
+	// version handshake's move onto the seam (gt-p85pw.13) replaced deps' raw
+	// `bd version` argv with a typed store.Version() call, which the scanner
+	// does not read: no file that called bd was renamed or dropped, so go
+	// falls by that one invocation to 16.
 	floors := map[string]int{"formulas": 160, "templates": 230, "plugins": 1, "go": 16, "scripts": 22, "agent": 10}
 	counts := map[string]int{}
 	for _, r := range refs {

@@ -100,7 +100,16 @@ func runBDHandshake(ctx context.Context, townRoot string) (*deps.BDHandshake, er
 		return nil, fmt.Errorf("%w: not in a Gas Town workspace, so the town database's schema level cannot be read", deps.ErrBDHandshake)
 	}
 	path, _ := exec.LookPath("bd")
-	return deps.CheckBDHandshake(ctx, path, beads.New(townRoot))
+	// The store reads the town's database with the bd target variables
+	// stripped from the inherited environment, as the handshake's own runner
+	// did: a stale BEADS_DIR or BEADS_DOLT_* in the caller's shell must not
+	// steer a startup gate to another database. The seam pins BEADS_DIR to
+	// townRoot's own database on top. It carries the handshake's context too,
+	// so the handshake budget bounds the bd calls and not only the retry wait.
+	store := beads.New(townRoot,
+		beads.WithEnv(beads.StripBDTargetEnv(os.Environ())),
+		beads.WithCallContext(ctx))
+	return deps.CheckBDHandshake(ctx, path, store)
 }
 
 // requiresBDHandshake reports whether cmd is a town-running command.

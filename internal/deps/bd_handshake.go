@@ -40,6 +40,11 @@ const BDInstallHint = "install the beads fork's bd with `make safe-install` from
 
 // Store is the part of a store the startup handshake reads: what the bd behind
 // it says about itself, and the migration level of the database it serves.
+//
+// Build the store with the handshake's context (beads.WithCallContext), so the
+// handshake's budget bounds the bd calls and not only the retry wait; a read
+// the budget ended while the store was silent is an error wrapping
+// beads.ErrStoreUnavailable.
 type Store interface {
 	Version() (beads.VersionInfo, error)
 	SchemaLevel() (int, error)

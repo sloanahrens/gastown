@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -120,8 +121,10 @@ func TestCheckBDHandshake_Refusals(t *testing.T) {
 			wantParts: []string{"bd version --json: exit status 2"},
 		},
 		{
+			// The seam wraps the sentinel; the handshake must key on the
+			// chain, not on the bare value.
 			name:      "bd missing",
-			store:     &fakeStore{verErr: beads.ErrNotInstalled},
+			store:     &fakeStore{verErr: fmt.Errorf("%w: exec: \"bd\": executable file not found in $PATH", beads.ErrNotInstalled)},
 			wantParts: []string{"not found on PATH"},
 		},
 	} {
@@ -193,6 +196,145 @@ func TestCheckBDHandshake_WaitsOutAColdStore(t *testing.T) {
 	}
 	if s.reads != 4 {
 		t.Errorf("schema reads = %d, want 4: three store_unavailable failures, then the pass", s.reads)
+	}
+}
+
+// forkReportJSON is a fork build's `bd version --json` report, so a store over
+// an injected runner parses what bd would print.
+const forkReportJSON = `{"build":"da4983e","build_id":"da4983e","commit":"da4983e","contract_version":1,"db_schema_version":66,"version":"1.2.2"}`
+
+// exitStatus is a bd failure carrying bd's typed exit status, as
+// *exec.ExitError does.
+type exitStatus int
+
+func (e exitStatus) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+
+func (e exitStatus) ExitCode() int { return int(e) }
+
+// storeAnswer is a bd the store runs through beads.WithRunner. It answers the
+// --allow-stale probe as a bd that lacks the flag, the version read with the
+// fork report, and any other call with sqlOut, sqlStderr and sqlErr.
+func storeAnswer(sqlOut string, sqlStderr string, sqlErr error) func(context.Context, []string) ([]byte, []byte, error) {
+	return func(_ context.Context, args []string) ([]byte, []byte, error) {
+		switch {
+		case len(args) == 2 && args[0] == "--allow-stale":
+			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
+		case args[0] == "version":
+			return []byte(forkReportJSON), nil, nil
+		case args[0] == "sql":
+			return []byte(sqlOut), []byte(sqlStderr), sqlErr
+		}
+		return nil, nil, fmt.Errorf("unexpected bd call %v", args)
+	}
+}
+
+// TestCheckBDHandshake_JudgesWhatTheSeamProduces drives the handshake over a
+// real store (beads.New over beads.WithRunner), so the seam parses bd's
+// answers and classifies its failures and the handshake decides on those: a
+// missing bd, a store that did not answer, a bd ahead of its database, a
+// version read that failed, and a read the handshake's own budget ended are
+// judged from bd's reports, not from a fake returning a sentinel.
+func TestCheckBDHandshake_JudgesWhatTheSeamProduces(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		answer   func(context.Context, []string) ([]byte, []byte, error)
+		budget   time.Duration // 0 is the case's default
+		want     []string
+		wantDolt bool
+	}{
+		{
+			name: "bd missing",
+			answer: func(context.Context, []string) ([]byte, []byte, error) {
+				return nil, nil, &exec.Error{Name: "bd", Err: exec.ErrNotFound}
+			},
+			want: []string{"bd not found on PATH"},
+		},
+		{
+			name:     "store unavailable",
+			answer:   storeAnswer("", "store unavailable", exitStatus(25)),
+			want:     []string{"Dolt is not reachable", "gt dolt start", "store unavailable"},
+			wantDolt: true,
+		},
+		{
+			name:   "database ahead of bd",
+			answer: storeAnswer("", "schema skew", exitStatus(26)),
+			want:   []string{"database schema is ahead of this bd", "make safe-install"},
+		},
+		{
+			name:   "version read fails",
+			answer: storeAnswer("", "bd: boom", exitStatus(2)),
+			want:   []string{"boom", "make safe-install"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			budget := tc.budget
+			if budget == 0 {
+				// A store that stays unavailable is retried until the
+				// budget ends, so every case carries one.
+				budget = 50 * time.Millisecond
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), budget)
+			defer cancel()
+			// The store carries the handshake's context, as the production
+			// stores do, so its budget bounds the bd calls themselves.
+			store := beads.New(t.TempDir(), beads.WithRunner(tc.answer), beads.WithCallContext(ctx))
+			_, err := checkBDHandshake(ctx, "/usr/local/bin/bd", store, storeRetryNow)
+			if err == nil {
+				t.Fatal("want refusal, got nil")
+			}
+			if !errors.Is(err, ErrBDHandshake) {
+				t.Errorf("refusal does not wrap ErrBDHandshake: %v", err)
+			}
+			if got := errors.Is(err, ErrDoltUnreachable); got != tc.wantDolt {
+				t.Errorf("errors.Is(err, ErrDoltUnreachable) = %v, want %v: %v", got, tc.wantDolt, err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal lacks %q:\n%s", want, err)
+				}
+			}
+		})
+	}
+}
+
+// TestCheckBDHandshake_TheReadsCarryTheHandshakeBudget: the store built with
+// the handshake's context runs its bd calls under that deadline, so the
+// handshake budget bounds the calls themselves and not only the retry wait
+// (gt-3lvv0).
+func TestCheckBDHandshake_TheReadsCarryTheHandshakeBudget(t *testing.T) {
+	t.Parallel()
+	const budget = 5 * time.Second
+	deadlines := make(chan time.Time, 2)
+	answer := func(ctx context.Context, args []string) ([]byte, []byte, error) {
+		switch {
+		case len(args) == 2 && args[0] == "--allow-stale":
+			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
+		case args[0] == "version":
+			return []byte(forkReportJSON), nil, nil
+		}
+		if deadline, ok := ctx.Deadline(); ok {
+			select {
+			case deadlines <- deadline:
+			default:
+			}
+		}
+		return nil, []byte("boom"), exitStatus(2)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	store := beads.New(t.TempDir(), beads.WithRunner(answer), beads.WithCallContext(ctx))
+	if _, err := checkBDHandshake(ctx, "/usr/local/bin/bd", store, storeRetryNow); err == nil {
+		t.Fatal("want refusal, got nil")
+	}
+	select {
+	case deadline := <-deadlines:
+		if until := time.Until(deadline); until > 2*budget {
+			t.Errorf("the bd read's deadline is %s away, want it under the handshakes %s budget", until, budget)
+		}
+	default:
+		t.Fatal("the bd read ran without the handshake context's deadline")
 	}
 }
 

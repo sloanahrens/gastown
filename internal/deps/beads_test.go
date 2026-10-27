@@ -43,6 +43,9 @@ func TestBeadsStatusFromVersion(t *testing.T) {
 		wantVersion string
 	}{
 		{"read error", beads.VersionInfo{}, errors.New("exit status 1"), BeadsUnknown, ""},
+		// The seam wraps ErrNotInstalled around a failed exec; the status
+		// must key on the chain, or a missing bd reads as a broken one.
+		{"bd not installed", beads.VersionInfo{}, fmt.Errorf("%w: exec: \"bd\": executable file not found in $PATH", beads.ErrNotInstalled), BeadsNotFound, ""},
 		{"unparseable", beads.VersionInfo{Version: "not-semver"}, nil, BeadsUnknown, ""},
 		{"no version", beads.VersionInfo{}, nil, BeadsUnknown, ""},
 		// No semver floor: an old number is not evidence of anything. The
