@@ -34,6 +34,28 @@ var ErrDoltUnreachable = errors.New("Dolt is not reachable")
 // migration level while the store is unavailable (gt-2gctr).
 const bdStoreRetryWait = 5 * time.Second
 
+// handshakeClock is the handshake's source of the budget that ends it and of
+// the pause between its retries. Production runs on the caller's context
+// (ctxClock); a test injects a clock it ends itself, so a case that runs out of
+// budget never depends on how fast the machine answered (gt-3hcp9).
+type handshakeClock interface {
+	// Done closes when the budget ends; nil is a budget with no end.
+	Done() <-chan struct{}
+	// Err is why Done closed, and nil while it is open.
+	Err() error
+	// After returns a channel that receives once d has passed. A channel that
+	// never receives is a wait the budget ended first.
+	After(d time.Duration) <-chan time.Time
+}
+
+// ctxClock is the caller's context read as the handshake's clock: the budget is
+// its deadline or cancellation, and a retry pause is a timer.
+type ctxClock struct{ ctx context.Context }
+
+func (c ctxClock) Done() <-chan struct{}                  { return c.ctx.Done() }
+func (c ctxClock) Err() error                             { return c.ctx.Err() }
+func (c ctxClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+
 // BDInstallHint is the only supported way to install bd. gastown never
 // installs bd itself: the fork's safe-install checks it is building main and
 // never moves the schema backwards.
@@ -96,16 +118,22 @@ func CheckBDHandshake(ctx context.Context, bdPath string, store Store) (*BDHands
 // checkBDHandshake is CheckBDHandshake with the wait between store-unavailable
 // retries passed in, so a test drives the retry without spending it.
 func checkBDHandshake(ctx context.Context, bdPath string, store Store, storeRetryWait time.Duration) (*BDHandshake, error) {
+	return checkBDHandshakeClock(bdPath, store, storeRetryWait, ctxClock{ctx})
+}
+
+// checkBDHandshakeClock is the handshake with the clock it reads its budget
+// from passed in: the budget end and the retry pause both come from clk.
+func checkBDHandshakeClock(bdPath string, store Store, storeRetryWait time.Duration, clk handshakeClock) (*BDHandshake, error) {
 	hs := &BDHandshake{Path: bdPath}
 	info, err := store.Version()
 	if err != nil {
 		if errors.Is(err, beads.ErrNotInstalled) {
 			return nil, refuseBD(hs, false, "bd not found on PATH")
 		}
-		// A version read the caller's budget ended did not fail: bd never
-		// answered, so the operator gets the budget, not the install hint.
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, refuseHandshakeBudget(hs, "the handshake budget ended before bd reported its version", ctxErr)
+		// A version read the budget ended did not fail: bd never answered, so
+		// the operator gets the budget, not the install hint.
+		if clkErr := clk.Err(); clkErr != nil {
+			return nil, refuseHandshakeBudget(hs, "the handshake budget ended before bd reported its version", clkErr)
 		}
 		return nil, refuseBD(hs, false, err.Error())
 	}
@@ -127,7 +155,7 @@ func checkBDHandshake(ctx context.Context, bdPath string, store Store, storeRetr
 		return nil, refuseBD(hs, false, strings.Join(problems, "; "))
 	}
 
-	level, err := readSchemaLevelWaiting(ctx, store, storeRetryWait)
+	level, err := readSchemaLevelWaiting(store, storeRetryWait, clk)
 	if err != nil {
 		if errors.Is(err, beads.ErrStoreUnavailable) {
 			return nil, refuseDoltUnreachable(hs, err)
@@ -151,31 +179,28 @@ func checkBDHandshake(ctx context.Context, bdPath string, store Store, storeRetr
 //
 // A cold boot can start the daemon before Dolt accepts connections, and this
 // read is the one that fails, with bd's store_unavailable exit (gt-2gctr), so
-// that exit is what the wait keys on. It is bounded by the caller's budget, and
-// every other failure — a schema skew, a bd that will not run — returns at
+// that exit is what the wait keys on. It is bounded by the handshake's budget,
+// and every other failure — a schema skew, a bd that will not run — returns at
 // once.
-func readSchemaLevelWaiting(ctx context.Context, store Store, retryWait time.Duration) (int, error) {
+func readSchemaLevelWaiting(store Store, retryWait time.Duration, clk handshakeClock) (int, error) {
 	for {
 		level, err := store.SchemaLevel()
 		if err == nil || !errors.Is(err, beads.ErrStoreUnavailable) {
 			return level, err
 		}
-		if !waitForStoreRetry(ctx, retryWait) {
+		if !waitForStoreRetry(clk, retryWait) {
 			return 0, err
 		}
 	}
 }
 
-// waitForStoreRetry waits one retry interval and reports whether the caller
-// may try again: false means ctx ended first, which is the whole budget the
-// caller gave the handshake.
-func waitForStoreRetry(ctx context.Context, wait time.Duration) bool {
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
+// waitForStoreRetry waits one retry interval and reports whether the caller may
+// try again: false means the clock's budget ended first.
+func waitForStoreRetry(clk handshakeClock, wait time.Duration) bool {
 	select {
-	case <-ctx.Done():
+	case <-clk.Done():
 		return false
-	case <-timer.C:
+	case <-clk.After(wait):
 		return true
 	}
 }
