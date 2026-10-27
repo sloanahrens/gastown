@@ -93,6 +93,11 @@ func TestRedMainFilesARevertOfTheOnlyLandingSinceGreen(t *testing.T) {
 	if err != nil || work.Branch != wantBranch || work.Head != revertSHA || work.Target != "main" {
 		t.Fatalf("landing request %+v (%v)", work, err)
 	}
+	// The landing worker refuses a submission that records no submitter, so the
+	// revert names the daemon as the one that submitted it (gt-4xvel).
+	if work.Worker != RevertWorker {
+		t.Fatalf("revert worker = %q, want %q: a revert with no submitter is refused and never lands", work.Worker, RevertWorker)
+	}
 	if culprit, landed, ok := ParseRevertNote(rv[0].Notes); !ok || culprit != "gt-cul" || landed != redSHA {
 		t.Fatalf("revert note %q", rv[0].Notes)
 	}
