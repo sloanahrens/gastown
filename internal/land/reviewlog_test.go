@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -188,6 +189,79 @@ func TestCompactKeepsEveryLineItDoesNotDrop(t *testing.T) {
 	if want := countOnly + "\n" + string(waiting) + "\n"; string(raw) != want {
 		t.Errorf("compacted log =\n%s\nwant\n%s", raw, want)
 	}
+}
+
+// TestQueueReadAndWriteFailures: a review log the feed cannot open, read or
+// write is a named failure rather than a queue that looks empty, so the feed
+// can say what it could not do (gt-3arxj).
+func TestQueueReadAndWriteFailures(t *testing.T) {
+	t.Parallel()
+	t.Run("a queue record that cannot be encoded", func(t *testing.T) {
+		t.Parallel()
+		f := reviewsFileIn(t)
+		q := queueLine("gt-nan", "gastown", queuedFinding)
+		q.Score = math.NaN()
+		if err := f.AppendQueue(q); err == nil || !strings.Contains(err.Error(), "encoding review record") {
+			t.Fatalf("AppendQueue with a NaN score = %v, want an encoding error", err)
+		}
+	})
+	t.Run("a log that is a directory", func(t *testing.T) {
+		t.Parallel()
+		f := &ReviewsFile{Path: t.TempDir()}
+		if _, err := f.Queued(); err == nil || !strings.Contains(err.Error(), "reading reviews file") {
+			t.Errorf("Queued on a directory = %v, want a read error", err)
+		}
+		if _, err := f.Since(time.Time{}); err == nil || !strings.Contains(err.Error(), "reading reviews file") {
+			t.Errorf("Since on a directory = %v, want a read error", err)
+		}
+		if _, err := f.Compact(func(QueuedFollowup) bool { return true }); err == nil || !strings.Contains(err.Error(), "reading reviews file") {
+			t.Errorf("Compact on a directory = %v, want a read error", err)
+		}
+	})
+	t.Run("a landings dir that is a file", func(t *testing.T) {
+		t.Parallel()
+		dir := filepath.Join(t.TempDir(), "landings")
+		if err := os.WriteFile(dir, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f := &ReviewsFile{Path: filepath.Join(dir, ReviewsFileName)}
+		if _, err := f.Compact(func(QueuedFollowup) bool { return true }); err == nil {
+			t.Fatal("Compact accepted a landings path that is a file")
+		}
+	})
+	t.Run("a log that is a symlink", func(t *testing.T) {
+		t.Parallel()
+		dir := filepath.Join(t.TempDir(), "landings")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "elsewhere.jsonl")
+		if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(dir, ReviewsFileName)); err != nil {
+			t.Fatal(err)
+		}
+		f := &ReviewsFile{Path: filepath.Join(dir, ReviewsFileName)}
+		if _, err := f.Compact(func(QueuedFollowup) bool { return true }); err == nil || !strings.Contains(err.Error(), "opening reviews file") {
+			t.Fatalf("Compact through a symlink = %v, want a refusal to open it", err)
+		}
+	})
+	t.Run("a log the compaction cannot replace", func(t *testing.T) {
+		t.Parallel()
+		f := reviewsFileIn(t)
+		if err := f.AppendQueue(queueLine("gt-wait", "gastown", queuedFinding)); err != nil {
+			t.Fatal(err)
+		}
+		f.replace = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+		if _, err := f.Compact(func(QueuedFollowup) bool { return true }); err == nil || !strings.Contains(err.Error(), "replacing reviews file") {
+			t.Fatalf("Compact with a failed replace = %v, want the failure named", err)
+		}
+		queued, err := f.Queued()
+		if err != nil || len(queued) != 1 {
+			t.Errorf("queue = %+v, %v; want the line kept after a failed replace", queued, err)
+		}
+	})
 }
 
 // TestCompactLeavesTheLogAloneWithNothingConsumed: a feed with no consumed

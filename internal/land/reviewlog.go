@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -193,6 +194,11 @@ func (r ReviewRecord) IsRejection() bool {
 // reads it, because the daemon's own log is not a source it may parse.
 type ReviewsFile struct {
 	Path string
+
+	// replace writes a compacted log over Path; nil means config.ReplaceFile,
+	// which writes beside the log and renames it into place. It is a seam: the
+	// compaction's failure path is a filesystem error a test cannot provoke.
+	replace func(path string, data []byte, mode os.FileMode) error
 }
 
 // TownReviewsFile is <town>/.runtime/landings/reviews.jsonl.
@@ -418,30 +424,17 @@ func (f *ReviewsFile) Compact(consumed func(QueuedFollowup) bool) (int, error) {
 	if dropped == 0 {
 		return 0, nil
 	}
-	tmp := f.Path + ".compact"
-	tf, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC|oNoFollow, 0o600)
-	if err != nil {
-		return 0, fmt.Errorf("creating %s: %w", tmp, err)
-	}
+	var buf bytes.Buffer
 	for _, line := range kept {
-		if _, err := tf.Write(append(line, '\n')); err != nil {
-			_ = tf.Close()
-			_ = os.Remove(tmp)
-			return 0, fmt.Errorf("writing %s: %w", tmp, err)
-		}
+		buf.Write(line)
+		buf.WriteByte('\n')
 	}
-	if err := tf.Sync(); err != nil {
-		_ = tf.Close()
-		_ = os.Remove(tmp)
-		return 0, fmt.Errorf("syncing %s: %w", tmp, err)
+	replace := f.replace
+	if replace == nil {
+		replace = config.ReplaceFile
 	}
-	if err := tf.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return 0, fmt.Errorf("closing %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, f.Path); err != nil {
-		_ = os.Remove(tmp)
-		return 0, fmt.Errorf("replacing reviews file %s: %w", f.Path, err)
+	if err := replace(f.Path, buf.Bytes(), 0o600); err != nil {
+		return 0, fmt.Errorf("replacing reviews file: %w", err)
 	}
 	return dropped, nil
 }
