@@ -13,6 +13,7 @@ digest = true
 
 [execution]
 type = "script"
+binary = "bin/app-promote"
 timeout = "5m"
 +++
 
@@ -21,8 +22,8 @@ timeout = "5m"
 GitHub follows prod (dv-jokk, gt-vdhwk): this plugin advances each app rig's
 GitHub `main` to the commit of the newest release the integration tier proved on
 prod. The rigs and their Forgejo repositories are in `rigs.conf` beside this
-file. This file is the one definition of the gate; `README.md`, `rigs.conf` and
-`run.sh` point here.
+file. This file is the one definition of the gate; `README.md`, `rigs.conf`,
+`main.go` and `run.sh` point here.
 
 Before running it by hand, installing it, or reading a failure it raised, read
 `README.md` beside this file.

@@ -478,9 +478,9 @@ func (s *failingStore) Load() (landworker.MainState, error) {
 func (s *failingStore) Save(landworker.MainState) error { return s.saveErr }
 
 // A red-main state failure is a promotion failure, exit 2: exit 1 reads as
-// "not promotable" to plugins/app-promote/run.sh, which logs it and skips
-// without paging, so a push that landed with last_promoted unrecorded went
-// unseen (gt-0x25g).
+// "not promotable" to the app-promote plugin (plugins/app-promote/main.go),
+// which logs it and skips without paging, so a push that landed with
+// last_promoted unrecorded went unseen (gt-0x25g).
 func TestPromoteReportsAStateSaveFailureAsFailed(t *testing.T) {
 	t.Parallel()
 	fx := newPromoteFixture(t)

@@ -116,6 +116,8 @@ build:
 	@# install that skips this leaves the runtime copy with no entry point.
 	@mkdir -p plugins/tool-updater/bin
 	go build -ldflags "$(LDFLAGS)" -o plugins/tool-updater/bin/tool-updater ./plugins/tool-updater
+	@mkdir -p plugins/app-promote/bin
+	go build -ldflags "$(LDFLAGS)" -o plugins/app-promote/bin/app-promote ./plugins/app-promote
 
 # golangci-lint must be built with a Go >= go.mod's version and understand .golangci.yml version 2;
 # a stale ~/go/bin/golangci-lint fails every run with "can't load config" (2026-09-17). `make lint-tools`
