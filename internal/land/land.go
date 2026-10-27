@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/steveyegge/gastown/internal/authorkind"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -986,7 +987,7 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, comments []beads.Comment,
 	}
 	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: attempt,
 		Score: v.Score, Verdict: v.Verdict, Rejected: rejected, Agent: w.Agent, Findings: len(v.Findings), Bar: bar, At: l.now().UTC(),
-		Branch: w.Branch, AuthorKind: AuthorKind(w.Branch), PromptSHA: promptStampSHA(comments, w)}
+		Branch: w.Branch, AuthorKind: authorkind.Kind(w.Branch), PromptSHA: promptStampSHA(comments, w)}
 	if err := l.Reviews.Append(rec); err != nil {
 		l.logf("%s: could not append to the reviews log (%v); the landing is unaffected", w.BeadID, err)
 		l.commentReviewLogFailure(w, rec, err)

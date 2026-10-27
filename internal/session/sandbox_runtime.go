@@ -19,6 +19,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/promptstamp"
 )
 
 // runtimeArchiveName is the staged archive holding the polecat's Claude
@@ -257,29 +258,18 @@ func logSystemPrompt(w io.Writer, polecat string, data []byte) {
 	fmt.Fprintf(w, "system prompt %s: %d bytes sha256 %s\n", polecat, len(data), hex.EncodeToString(sum[:]))
 }
 
-// promptStampHashLen is how much of the prompt's sha256 the stamp names.
-const promptStampHashLen = 12
-
-// promptStamp is the comment text a spawn stamps on its work bead: the stored
-// prompt's sha256 (first 12 hex digits) and its size in bytes (gt-2lu00).
-func promptStamp(hash string, size int) string {
-	if len(hash) > promptStampHashLen {
-		hash = hash[:promptStampHashLen]
-	}
-	return fmt.Sprintf("prompt %s (%d bytes)", hash, size)
-}
-
 // stampPromptOnWorkBead posts one comment on the bead the polecat was slung,
 // naming the prompt stored for it, so a landing's rejection is joined to the
-// prompt version its author had (gt-2lu00). A spawn without a work bead, or
-// with no commenter, posts nothing; a comment failure is logged and never
-// fails the spawn.
+// prompt version its author had (gt-2lu00). The comment's text and author are
+// promptstamp's rule, the same one the landing worker reads the record back
+// with (gt-b9j3o.16). A spawn without a work bead, or with no commenter, posts
+// nothing; a comment failure is logged and never fails the spawn.
 func stampPromptOnWorkBead(spec SpawnSpec, stored string, size int, log io.Writer, comments promptCommentStore) {
 	if spec.WorkBeadID == "" || comments == nil {
 		return
 	}
-	author := spec.Rig + "/polecats/" + spec.Polecat
-	if err := comments.AddCommentAs(spec.WorkBeadID, author, promptStamp(stored, size)); err != nil {
+	author := promptstamp.Author(spec.Rig, spec.Polecat)
+	if err := comments.AddCommentAs(spec.WorkBeadID, author, promptstamp.Format(stored, size)); err != nil {
 		fmt.Fprintf(log, "system prompt comment %s: %v\n", spec.WorkBeadID, err)
 	}
 }

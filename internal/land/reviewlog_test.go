@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/authorkind"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/promptstamp"
 )
 
 // The reviews log is the file the dashboard's rework table reads: one line per
@@ -121,9 +123,9 @@ func TestLandLogsEachOMVerdict(t *testing.T) {
 	at := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	want := []ReviewRecord{
 		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 1, Score: 0.3, Verdict: VerdictRequestChanges, Findings: 1, Bar: 0.8, At: at,
-			Branch: f.work.Branch, AuthorKind: AuthorKindPolecat},
+			Branch: f.work.Branch, AuthorKind: authorkind.Polecat},
 		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 2, Score: 0.92, Verdict: VerdictApprove, Findings: 1, Bar: 0.8, At: at,
-			Branch: f.work.Branch, AuthorKind: AuthorKindPolecat},
+			Branch: f.work.Branch, AuthorKind: authorkind.Polecat},
 	}
 	if len(recs) != len(want) || recs[0] != want[0] || recs[1] != want[1] {
 		t.Fatalf("review log = %+v, want %+v", recs, want)
@@ -338,10 +340,10 @@ func (f *landFixture) cutBranch(branch string) {
 func TestLandRecordsTheAuthorsBranchAndKind(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ name, branch, wantKind string }{
-		{"a polecat's branch", "polecat/opal/gt-abc+x1", AuthorKindPolecat},
-		{"a crew member's branch", "crew/merlin/gt-abc", AuthorKindCrew},
-		{"the overseer's own branch", "crew/overseer/gt-abc", AuthorKindOverseer},
-		{"a branch the town does not name by prefix", "merlin/gt-abc", AuthorKindUnknown},
+		{"a polecat's branch", "polecat/opal/gt-abc+x1", authorkind.Polecat},
+		{"a crew member's branch", "crew/merlin/gt-abc", authorkind.Crew},
+		{"the overseer's own branch", "crew/overseer/gt-abc", authorkind.Overseer},
+		{"a branch the town does not name by prefix", "merlin/gt-abc", authorkind.Unknown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -376,20 +378,31 @@ func TestLandRecordsTheAuthorsBranchAndKind(t *testing.T) {
 
 // The prompt the author seat ran is on the review's line when the spawn
 // stamped it on the work bead, and left out entirely when it did not: an empty
-// prompt_sha would read as a prompt nobody stored (gt-b9j3o.16).
+// prompt_sha would read as a prompt nobody stored (gt-b9j3o.16). The stamps
+// are built with the spawn's own rule (promptstamp) and posted in the order a
+// bead's store keeps them, oldest first, so the last one a rework respawn
+// posted is the one the record names.
 func TestLandRecordsThePromptStampWhenTheBeadCarriesOne(t *testing.T) {
 	t.Parallel()
-	const stampAuthor = "gastown/polecats/opal"
-	for _, tc := range []struct{ name, author, comment, want string }{
-		{"the author seat's stamp", stampAuthor, "prompt 0123456789ab (4096 bytes)", "0123456789ab"},
-		{"no stamp on the bead", "", "", ""},
-		{"a stamp another seat wrote", "gastown/polecats/corpus", "prompt ffffffffffff (4096 bytes)", ""},
+	const stored = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	stamp := promptstamp.Format(stored, 4096)
+	seat := promptstamp.Author("gastown", "opal")
+	for _, tc := range []struct {
+		name, author string
+		comments     []string
+		want         string
+	}{
+		{"the author seat's stamp", seat, []string{stamp}, stored[:promptstamp.HashLen]},
+		{"the newest stamp, after a rework respawn stamped again", seat,
+			[]string{stamp, promptstamp.Format("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 4200)}, "ffffffffffff"},
+		{"no stamp on the bead", "", nil, ""},
+		{"a stamp another seat wrote", promptstamp.Author("gastown", "corpus"), []string{stamp}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := barFixture(t, "0.8")
-			if tc.comment != "" {
-				if err := f.bd.AddCommentAs(f.work.BeadID, tc.author, tc.comment); err != nil {
+			for _, comment := range tc.comments {
+				if err := f.bd.AddCommentAs(f.work.BeadID, tc.author, comment); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -415,6 +428,40 @@ func TestLandRecordsThePromptStampWhenTheBeadCarriesOne(t *testing.T) {
 				t.Errorf("the log line carries prompt_sha = %v, want %v:\n%s", has, tc.want != "", raw)
 			}
 		})
+	}
+}
+
+// A bead whose comments cannot be read is reviewed without the prompt stamp:
+// the record carries no prompt_sha rather than failing the landing, and the
+// log names the read that failed so the empty field is not read as a bead with
+// no stamp (gt-b9j3o.16).
+func TestLandRecordsNoPromptWhenTheBeadsCommentsCannotBeRead(t *testing.T) {
+	t.Parallel()
+	f := barFixture(t, "0.8")
+	if err := f.bd.AddCommentAs(f.work.BeadID, promptstamp.Author("gastown", "opal"),
+		promptstamp.Format("0123456789abcdef", 4096)); err != nil {
+		t.Fatal(err)
+	}
+	reviews := reviewsFileIn(t)
+	var logged strings.Builder
+	l := f.lander()
+	l.Reviews = reviews
+	l.Out = &logged
+	l.Beads = &failingBeads{Fake: f.bd, failComments: true}
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	recs, err := reviews.Since(time.Time{})
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("review log = %+v, %v; want the one verdict", recs, err)
+	}
+	if recs[0].PromptSHA != "" {
+		t.Errorf("record carries prompt_sha %q, want none when the comments could not be read", recs[0].PromptSHA)
+	}
+	// The work-item read's own line, not the accepted-risk read's, which fails
+	// on the same bead: dropping either would hide which half lost its input.
+	if s := logged.String(); !strings.Contains(s, "om reads the brief without them, and the review record carries no prompt") {
+		t.Errorf("the landing log does not name the failed work-item read:\n%s", s)
 	}
 }
 

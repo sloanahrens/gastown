@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/promptstamp"
 	"github.com/steveyegge/gastown/internal/sandbox"
 )
 
@@ -548,7 +549,7 @@ func TestBuildRuntimeArchiveStampsTheStoredPromptOnTheWorkBead(t *testing.T) {
 	if _, err := os.Stat(stored); err != nil {
 		t.Fatalf("the comment would name a prompt the store does not hold: %v", err)
 	}
-	want := "prompt " + hex.EncodeToString(sum[:])[:promptStampHashLen] + " (" + strconv.Itoa(len(prompt)) + " bytes)"
+	want := promptstamp.Format(hex.EncodeToString(sum[:]), len(prompt))
 	if len(comments.calls) != 1 {
 		t.Fatalf("comments = %v, want exactly one", comments.calls)
 	}

@@ -5,19 +5,19 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
-	"strings"
 
+	"github.com/steveyegge/gastown/internal/authorkind"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
 // The author kinds an om review is attributed to: who wrote the branch the
-// review judged. Unknown is a real answer, so a branch this town does not name
-// by prefix is never guessed into a seat kind.
+// review judged, as the landing worker writes them on the review record
+// (authorkind, gt-b9j3o.16).
 const (
-	AuthorKindPolecat  = "polecat"
-	AuthorKindCrew     = "crew"
-	AuthorKindOverseer = "overseer"
-	AuthorKindUnknown  = "unknown"
+	AuthorKindPolecat  = authorkind.Polecat
+	AuthorKindCrew     = authorkind.Crew
+	AuthorKindOverseer = authorkind.Overseer
+	AuthorKindUnknown  = authorkind.Unknown
 )
 
 // branchLineRE matches a Branch line the bead itself carries. It is anchored,
@@ -40,18 +40,7 @@ func BranchLine(notes string) string {
 // polecat/<seat>/... or crew/<seat>/..., and "" for a branch of any other
 // shape.
 func AuthorSeat(branch string) string {
-	for _, prefix := range []string{"polecat/", "crew/"} {
-		rest, ok := strings.CutPrefix(branch, prefix)
-		if !ok {
-			continue
-		}
-		seat, _, ok := strings.Cut(rest, "/")
-		if !ok || seat == "" {
-			return ""
-		}
-		return seat
-	}
-	return ""
+	return authorkind.Seat(branch)
 }
 
 // AuthorKind returns the kind of seat that wrote branch: a polecat's branch is
@@ -59,22 +48,10 @@ func AuthorSeat(branch string) string {
 // seat is the overseer's. A branch whose prefix this town does not use, or that
 // names no seat, is unknown.
 //
-// The branch is the whole input because it is written once, when the seat
-// starts the work, so a review keeps the kind it was judged under. A bead's
-// assignee is reassigned by dispatch, rework and takeover, so reading it would
-// reclassify past reviews whenever the bead changed hands.
+// It is the landing worker's rule (authorkind.Kind) rather than a second copy:
+// a review's logged kind and a review attributed from notes must agree.
 func AuthorKind(branch string) string {
-	seat := AuthorSeat(branch)
-	if seat == "" {
-		return AuthorKindUnknown
-	}
-	if strings.HasPrefix(branch, "polecat/") {
-		return AuthorKindPolecat
-	}
-	if seat == "overseer" {
-		return AuthorKindOverseer
-	}
-	return AuthorKindCrew
+	return authorkind.Kind(branch)
 }
 
 // AttributedRecord is one review record with the author kind the review
