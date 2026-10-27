@@ -2082,6 +2082,13 @@ const MaxReworkAttempts = 3
 // an interrupted one. The requeue comment names the attempt it undid: when it
 // names this block, the block is history and this rejection is the next attempt
 // (gt-en9gs).
+//
+// The attempt alone does not always settle it: a refusal past the ceiling is
+// clamped to MaxReworkAttempts (gt-ern0y), the number a re-queue of the capped
+// rejection also names, so a block a pass writes after the re-queue carries the
+// same number as the one the re-queue undid. The comment's block count tells
+// them apart — a block added since puts the notes above the count it names
+// (gt-kwe1l).
 func (l *Lander) rejectionAlreadyRecorded(issue *beads.Issue, w Work, rej *Rejection) (bool, error) {
 	if w.Head == "" || !beads.HasLabel(issue, LabelReadyToLand) ||
 		beads.HasLabel(issue, LabelRework) || beads.HasLabel(issue, LabelNeedsHuman) {
@@ -2095,8 +2102,12 @@ func (l *Lander) rejectionAlreadyRecorded(issue *beads.Issue, w Work, rej *Rejec
 	if err != nil {
 		return false, fmt.Errorf("reading %s's comments: %w", w.BeadID, err)
 	}
-	if attempt, ok := RequeuedAttempt(comments); ok && attempt == last.Attempt {
-		return false, nil
+	if q, ok := NewestRequeue(comments); ok && q.Attempt == last.Attempt {
+		// The re-queue undid this block and nothing followed it; a comment that
+		// names no count leaves the attempt to decide (gt-kwe1l).
+		if q.Blocks == 0 || RejectionBlocks(issue.Notes) <= q.Blocks {
+			return false, nil
+		}
 	}
 	return true, nil
 }

@@ -1068,7 +1068,8 @@ func (f *landFixture) requeue(attempt int) {
 		f.t.Fatalf("requeue: %v", err)
 	}
 	if err := f.bd.AddCommentAs(f.work.BeadID, "operator",
-		FormatRequeueComment("operator", f.work.Branch, f.work.Head, attempt, "runner fault, not the diff")); err != nil {
+		FormatRequeueComment("operator", f.work.Branch, f.work.Head, attempt,
+			RejectionBlocks(f.bead().Notes), "runner fault, not the diff")); err != nil {
 		f.t.Fatalf("requeue comment: %v", err)
 	}
 }
@@ -1186,6 +1187,51 @@ func TestLandInterruptedPassAfterRequeueIsFinishedNotRepeated(t *testing.T) {
 		last, ok := ParseRejectionNote(notes)
 		if !ok || last.Attempt != 2 || !strings.Contains(notes, "TestSecond") {
 			t.Fatalf("round %d: unfinished block = attempt %d, %v; want attempt 2 carrying the new tail", round, last.Attempt, ok)
+		}
+	}
+}
+
+// TestLandInterruptedPassAfterRequeuedCappedRejectionIsFinished is gt-kwe1l: a
+// refusal past the ceiling records its attempt clamped to MaxReworkAttempts
+// (gt-ern0y), the number a re-queue of the capped rejection also names, so the
+// attempt alone reads the block a pass writes after that re-queue as the one
+// the re-queue undid. The re-queue names the block count it left as well, and
+// the count is what tells the two apart.
+func TestLandInterruptedPassAfterRequeuedCappedRejectionIsFinished(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	// Three review refusals of this head: the bead is at the ceiling, and the
+	// re-queue below puts the capped attempt back in the queue.
+	for attempt := 1; attempt <= MaxReworkAttempts; attempt++ {
+		block := FormatRejectionNote(RejectionNote{
+			Attempt: attempt, Kind: string(RejectReview), Reason: "earlier refusal",
+			Branch: f.work.Branch, Target: f.work.Target, MR: f.work.BeadID, Head: f.work.Head,
+		})
+		if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AppendNotes: block}); err != nil {
+			t.Fatalf("seeding rejection %d: %v", attempt, err)
+		}
+	}
+	f.requeue(MaxReworkAttempts)
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
+	}
+
+	l := f.lander()
+	l.Beads = &failingBeads{Fake: f.bd, failUpdate: true}
+	for round := 1; round <= 2; round++ {
+		_, err := l.Land(context.Background(), f.work)
+		var rej *Rejection
+		if !errors.As(err, &rej) || rej.RecordErr == nil || !strings.Contains(rej.RecordErr.Error(), "reopening the bead") {
+			t.Fatalf("round %d: Land = %T %v, want a rejection whose reopen failed", round, err, err)
+		}
+		notes := f.bead().Notes
+		if got := CountRejections(notes); got != MaxReworkAttempts+1 {
+			t.Fatalf("round %d: %d review rejection(s), want the round after the re-queue recorded once (%d):\n%s",
+				round, got, MaxReworkAttempts+1, notes)
+		}
+		if got := RejectionBlocks(notes); got != MaxReworkAttempts+1 {
+			t.Fatalf("round %d: %d rejection block(s), want %d — the interrupted block completed, not repeated:\n%s",
+				round, got, MaxReworkAttempts+1, notes)
 		}
 	}
 }

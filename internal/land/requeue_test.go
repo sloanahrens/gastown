@@ -64,20 +64,21 @@ func TestHeadsEqual(t *testing.T) {
 	}
 }
 
-func TestRequeuedAttemptReadsTheNewestRequeue(t *testing.T) {
+func TestNewestRequeueReadsTheNewestRequeue(t *testing.T) {
 	t.Parallel()
 	head := "1111111111111111111111111111111111111111"
 	comments := []beads.Comment{
-		{Text: FormatRequeueComment("sloan", "polecat/a/gt-x", head, 1, "runner fault")},
+		{Text: FormatRequeueComment("sloan", "polecat/a/gt-x", head, 1, 1, "runner fault")},
 		{Text: "commit: abc — the fix"},
-		{Text: FormatRequeueComment("sloan", "polecat/a/gt-x", head, 2, "runner fault again")},
+		{Text: FormatRequeueComment("sloan", "polecat/a/gt-x", head, 2, 3, "runner fault again")},
 	}
-	if got, ok := RequeuedAttempt(comments); !ok || got != 2 {
-		t.Fatalf("RequeuedAttempt = %d, %v; want the newest requeue's 2", got, ok)
+	got, ok := NewestRequeue(comments)
+	if !ok || got.Attempt != 2 || got.Blocks != 3 {
+		t.Fatalf("NewestRequeue = %+v, %v; want the newest requeue's attempt 2 of 3 blocks", got, ok)
 	}
 }
 
-func TestRequeuedAttemptWithoutARequeue(t *testing.T) {
+func TestNewestRequeueWithoutARequeue(t *testing.T) {
 	t.Parallel()
 	for name, comments := range map[string][]beads.Comment{
 		"no comments":      nil,
@@ -85,8 +86,19 @@ func TestRequeuedAttemptWithoutARequeue(t *testing.T) {
 		"marker quoted":    {{Text: "the REQUEUED: comment means it went back in the queue"}},
 		"no attempt line":  {{Text: "REQUEUED: sloan re-queued this rejected landing unchanged\nBranch: b\nHead: abc\nReason: x"}},
 	} {
-		if got, ok := RequeuedAttempt(comments); ok {
-			t.Errorf("%s: RequeuedAttempt = %d, true; want ok=false", name, got)
+		if got, ok := NewestRequeue(comments); ok {
+			t.Errorf("%s: NewestRequeue = %+v, true; want ok=false", name, got)
 		}
+	}
+}
+
+// TestNewestRequeueWithoutABlockCount is gt-kwe1l's fallback: a comment written
+// before the Blocks: line existed still names its attempt, with no count.
+func TestNewestRequeueWithoutABlockCount(t *testing.T) {
+	t.Parallel()
+	comments := []beads.Comment{{Text: "REQUEUED: sloan re-queued this rejected landing unchanged\nBranch: b\nHead: abc\nAttempt: 3\nReason: x"}}
+	got, ok := NewestRequeue(comments)
+	if !ok || got.Attempt != 3 || got.Blocks != 0 {
+		t.Fatalf("NewestRequeue = %+v, %v; want attempt 3 and no block count", got, ok)
 	}
 }

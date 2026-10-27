@@ -118,8 +118,8 @@ func TestRequeueRejectedLandingRecordsTheAttempt(t *testing.T) {
 	if len(comments) != 1 || !strings.Contains(comments[0].Text, "Attempt: 3") {
 		t.Fatalf("requeue comment = %+v, want it to name attempt 3", comments)
 	}
-	if attempt, ok := land.RequeuedAttempt(comments); !ok || attempt != 3 {
-		t.Errorf("RequeuedAttempt = %d, %v; want 3", attempt, ok)
+	if q, ok := land.NewestRequeue(comments); !ok || q.Attempt != 3 || q.Blocks != 1 {
+		t.Errorf("NewestRequeue = %+v, %v; want attempt 3 of the bead's one rejection block", q, ok)
 	}
 }
 
