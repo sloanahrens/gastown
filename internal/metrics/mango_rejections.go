@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -161,10 +160,7 @@ func RejectionRates(records []land.ReviewRecord, notes map[string]string) (byPat
 		if rec.At.IsZero() {
 			return nil, nil, fmt.Errorf("review of %s carries no instant", rec.BeadID)
 		}
-		week, err := rejectionWeek(rec.At)
-		if err != nil {
-			return nil, nil, fmt.Errorf("review of %s: %w", rec.BeadID, err)
-		}
+		week := weekOf(rec.At)
 		seat := rec.Agent
 		if seat == "" {
 			seat = land.OmStatsUnnamed
@@ -190,12 +186,6 @@ func RejectionRates(records []land.ReviewRecord, notes map[string]string) (byPat
 	byPattern = rejectionGroups(patternVerdicts, patternRejections)
 	bySeat = rejectionGroups(seatVerdicts, seatRejections)
 	return byPattern, bySeat, nil
-}
-
-// rejectionWeek is the Monday that starts t's week, in the form the weekly
-// table writes (WeekOf).
-func rejectionWeek(t time.Time) (string, error) {
-	return WeekOf(t.Format(time.RFC3339Nano))
 }
 
 // rejectionGroups builds the table rows from one entry per (week, name), the
@@ -261,8 +251,9 @@ func MangoRejectionsSection(ctx context.Context, env Env) (string, error) {
 }
 
 // parseReviewRecords reads the log's lines into records. A line that is not a
-// record, names no bead or no verdict, or carries no instant is skipped and
-// counted, so the section can say how many lines it could not attribute.
+// record, names no bead or no verdict is skipped and counted, so the section
+// can say how many lines it could not attribute; a record with no instant is
+// kept, so a log that lost one fails the section rather than a week.
 func parseReviewRecords(data []byte) ([]land.ReviewRecord, int) {
 	var records []land.ReviewRecord
 	skipped := 0
@@ -272,7 +263,7 @@ func parseReviewRecords(data []byte) ([]land.ReviewRecord, int) {
 			continue
 		}
 		var rec land.ReviewRecord
-		if json.Unmarshal([]byte(line), &rec) != nil || rec.BeadID == "" || rec.Verdict == "" || rec.At.IsZero() {
+		if json.Unmarshal([]byte(line), &rec) != nil || rec.BeadID == "" || rec.Verdict == "" {
 			skipped++
 			continue
 		}

@@ -336,6 +336,19 @@ func TestMangoRejectionsSectionRefusesARigThatEscapesTheTown(t *testing.T) {
 	}
 }
 
+func TestMangoRejectionsSectionFailsOnARecordWithNoInstant(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownFile(t, land.TownReviewsFile(town).Path,
+		`{"bead":"gt-b","verdict":"approve","agent":"opus"}`+"\n")
+	_, err := MangoRejectionsSection(context.Background(), Env{
+		Town: town, ReadFile: os.ReadFile, Run: func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil },
+	})
+	if err == nil || !strings.Contains(err.Error(), "no instant") {
+		t.Fatalf("err = %v, want a refusal naming the record with no instant", err)
+	}
+}
+
 func TestMangoRejectionsSectionFailsWhenBdFails(t *testing.T) {
 	t.Parallel()
 	town := rejectionTown(t, rejectionRecord("gt-a", 1, "opus"))
