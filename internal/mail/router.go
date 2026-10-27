@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -400,6 +401,21 @@ type agentBead struct {
 	Labels   []string `json:"labels"`
 }
 
+// agentBeadFromIssue converts a seam record into the agent bead shape the
+// router's group filters read. WispType stays empty: bd list spells an issue's
+// type issue_type, which is what Type carries.
+func agentBeadFromIssue(issue *beads.Issue) *agentBead {
+	return &agentBead{
+		ID:          issue.ID,
+		Title:       issue.Title,
+		Description: issue.Description,
+		Status:      issue.Status,
+		CreatedBy:   issue.CreatedBy,
+		Type:        issue.Type,
+		Labels:      issue.Labels,
+	}
+}
+
 // agentBeadToAddress converts an agent bead to a mail address, or "" when the
 // bead names a retired role: a surviving hq-mayor bead must not make @town
 // resolve to an address that no longer exists and fail the whole broadcast
@@ -781,17 +797,11 @@ func (r *Router) queryAgents(descContains string) ([]*agentBead, error) {
 // queryAgentsInDir queries agent beads in a specific beads directory with optional description filtering.
 // Queries both the issues and wisps tables, merging results.
 func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, error) {
-	args := []string{"list", "--label=gt:agent", "--json", "--flat", "--limit=0"}
-
-	if descContains != "" {
-		args = append(args, "--desc-contains="+descContains)
-	}
-
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-
-	// Query issues table (backward compat during migration)
-	stdout, issuesErr := runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
+	// Query issues table (backward compat during migration). List has no
+	// description filter, so matchesDescContains below applies the same
+	// case-insensitive substring rule.
+	issueBeads, issuesErr := bdStore(r.bd, filepath.Dir(beadsDir), beadsDir).
+		List(beads.ListOptions{Label: "gt:agent"})
 
 	// Also query the wisps table for migrated agent beads.
 	wispCtx, wispCancel := bdReadCtx()
@@ -823,18 +833,19 @@ func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, 
 	}
 
 	// Then issues (backward compat, skip duplicates)
-	if len(stdout) > 0 {
-		var issueAgents []*agentBead
-		if err := json.Unmarshal(stdout, &issueAgents); err != nil {
-			queryErrors = append(queryErrors, fmt.Sprintf("parse agent list: %v", err))
-		}
-		for _, agent := range issueAgents {
-			if !seenIDs[agent.ID] {
-				agents = append(agents, agent)
-			}
-		}
-	} else if issuesErr != nil {
+	if issuesErr != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("list agents: %v", issuesErr))
+	} else {
+		for _, issue := range issueBeads {
+			if issue == nil || seenIDs[issue.ID] {
+				continue
+			}
+			agent := agentBeadFromIssue(issue)
+			if !matchesDescContains(agent, descContains) {
+				continue
+			}
+			agents = append(agents, agent)
+		}
 	}
 
 	// A failed query is reported only when nothing was found at all: one
@@ -901,21 +912,9 @@ func (r *Router) wispAgentBeads(beadsDir string, out []byte) ([]*agentBead, erro
 		return agents, nil
 	}
 
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	showArgs := append([]string{"show"}, needFull...)
-	showArgs = append(showArgs, "--json")
-	showOut, showErr := runBdCommand(ctx, r.bd, showArgs, filepath.Dir(beadsDir), beadsDir)
+	byID, showErr := bdStore(r.bd, filepath.Dir(beadsDir), beadsDir).ShowMultiple(needFull)
 	if showErr != nil {
 		return confirmedAgents(agents, unconfirmed), fmt.Errorf("read wisp agents in %s: %w", beadsDir, showErr)
-	}
-	var full []*agentBead
-	if err := json.Unmarshal(showOut, &full); err != nil {
-		return confirmedAgents(agents, unconfirmed), fmt.Errorf("parse wisp agents in %s: %w", beadsDir, err)
-	}
-	byID := make(map[string]*agentBead, len(full))
-	for _, bead := range full {
-		byID[bead.ID] = bead
 	}
 	for _, agent := range agents {
 		bead, ok := byID[agent.ID]
@@ -1763,30 +1762,25 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 		return err
 	}
 
-	// Query existing messages in this announce channel
-	// Use bd list with labels filter to find messages with gt:message and announce:<name> labels
-	args := []string{"list",
-		"--labels=gt:message,announce:" + announceName,
-		"--json",
-		"--limit=0", // Get all
-		"--sort=created",
-		"--asc", // Oldest first
-	}
-
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	stdout, err := runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
+	// Query existing messages in this announce channel: the messages carrying
+	// both gt:message and announce:<name>.
+	messages, err := bdStore(r.bd, filepath.Dir(beadsDir), beadsDir).List(beads.ListOptions{
+		Labels: []string{"gt:message", "announce:" + announceName},
+	})
 	if err != nil {
 		return fmt.Errorf("querying announce messages: %w", err)
 	}
-
-	// Parse message list
-	var messages []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(stdout, &messages); err != nil {
-		return fmt.Errorf("parsing announce messages: %w", err)
-	}
+	// Oldest first: the prune closes the front of the list, and List returns
+	// its records unordered. A record whose created time does not parse orders
+	// by its raw value instead of jumping the queue.
+	sort.SliceStable(messages, func(i, j int) bool {
+		ti, iok := parseWispTimestamp(messages[i].CreatedAt)
+		tj, jok := parseWispTimestamp(messages[j].CreatedAt)
+		if iok && jok {
+			return ti.Before(tj)
+		}
+		return messages[i].CreatedAt < messages[j].CreatedAt
+	})
 
 	// Calculate how many to delete (we're about to add 1 more)
 	// If we have N messages and retainCount is R, we need to keep at most R-1 after pruning

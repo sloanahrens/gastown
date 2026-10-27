@@ -366,36 +366,28 @@ func TestResolveBeadsDir(t *testing.T) {
 // This also regression-tests two wiring defects found in an earlier attempt
 // (gt-978i bounce notes): (1) callers pass GGT addresses like
 // "gastown/crew/max", but messages are stored under the AddressToIdentity-
-// normalized identity ("gastown/max") — querying the raw address matches
-// nothing in a real DB. The fake bd below only returns rows for a query that
-// names the normalized identity, so a regression to querying the raw address
-// makes the fixture invisible and the count assertions fail. (2) a message
-// carrying the "read" label must not count as unread, exactly like the
-// per-identity path's bm.Status == "closed" || bm.HasLabel("read") check —
-// the fixture includes an already-read issue and an already-read wisp for
-// the same address specifically to catch a regression that drops that
-// filter.
+// normalized identity ("gastown/max") — an identity list of raw addresses
+// matches no stored message, so the count assertions fail. The identity set
+// the matching runs on is the normalized one. (2) a message carrying the
+// "read" label must not count as unread, exactly like the per-identity path's
+// bm.Status == "closed" || bm.HasLabel("read") check — the fixture includes an
+// already-read issue and an already-read wisp for the same address
+// specifically to catch a regression that drops that filter.
 func TestRouterBatchMailSummaries(t *testing.T) {
 	t.Parallel()
 	// The fixture identity "gastown/max" is what "gastown/crew/max" must
 	// normalize to (AddressToIdentity strips the "crew/" role segment). The
-	// fake only emits the gastown/max-owned rows when the query's identity
-	// list actually names the normalized, quoted identity 'gastown/max' —
-	// simulating a real DB where a message is never assigned to the raw,
-	// un-normalized address, so a query for the raw address returns nothing.
+	// read covers every open gt:message record; the identity matching runs in
+	// Go against the normalized set, so a message assigned or cc'd to nobody
+	// the caller asked about (issue-other-rig) must drop out.
 	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
-		if c.Args[0] != "sql" {
-			return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+		switch c.Args[0] {
+		case "list":
+			return `[{"id":"issue-direct-open","title":"Direct open","status":"open","assignee":"gastown/max","labels":["gt:message"]},{"id":"issue-already-read","title":"Already read","status":"open","assignee":"gastown/max","labels":["gt:message","read"]},{"id":"issue-cc-both","title":"CC to max and witness","status":"open","assignee":"someone/else","labels":["gt:message","cc:gastown/max","cc:gastown/witness"]},{"id":"issue-other-rig","title":"Someone else","status":"open","assignee":"rig/other","labels":["gt:message"]}]`, "", 0
+		case "query":
+			return `[{"id":"wisp-direct","title":"Wisp direct","status":"open","assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","labels":["gt:message"]},{"id":"wisp-already-read","title":"Wisp already read","status":"open","assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","labels":["gt:message","read"]}]`, "", 0
 		}
-		query := c.Args[2]
-		named := strings.Contains(query, "'gastown/max'")
-		switch {
-		case strings.Contains(query, "FROM issues") && named:
-			return `[{"id":"issue-direct-open","title":"Direct open","status":"open","assignee":"gastown/max","cc_labels_csv":null,"is_read":0},{"id":"issue-already-read","title":"Already read","status":"open","assignee":"gastown/max","cc_labels_csv":null,"is_read":1},{"id":"issue-cc-both","title":"CC to max and witness","status":"open","assignee":"someone/else","cc_labels_csv":"cc:gastown/max,cc:gastown/witness","is_read":0}]`, "", 0
-		case strings.Contains(query, "FROM wisps") && named:
-			return `[{"id":"wisp-direct","title":"Wisp direct","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0},{"id":"wisp-already-read","title":"Wisp already read","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message,read","assignee_match":1,"cc_match":0}]`, "", 0
-		}
-		return "[]\n", "", 0
+		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
 	}}
 
 	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
@@ -429,7 +421,47 @@ func TestRouterBatchMailSummaries(t *testing.T) {
 	}
 
 	if calls := bd.argvs(); len(calls) != 2 {
-		t.Fatalf("bd sql calls = %d, want 2 (one issues, one wisps) regardless of address count; calls:\n%s", len(calls), strings.Join(calls, "\n"))
+		t.Fatalf("bd calls = %d, want 2 (one issues list, one wisp query) regardless of address count; calls:\n%s", len(calls), strings.Join(calls, "\n"))
+	}
+}
+
+// TestPruneAnnounceClosesOldestFirst: retention keeps the newest messages of an
+// announce channel, so the prune closes the front of the list — oldest first —
+// even though List returns its records unordered (gt-p85pw.16).
+func TestPruneAnnounceClosesOldestFirst(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", beadsDir, err)
+	}
+	writeTypesSentinel(t, beadsDir)
+
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		switch c.Args[0] {
+		case "list":
+			return `[{"id":"msg-newest","title":"Newest","status":"open","created_at":"2026-06-12T12:00:03Z","labels":["gt:message","announce:ops"]},{"id":"msg-oldest","title":"Oldest","status":"open","created_at":"2026-06-12T12:00:01Z","labels":["gt:message","announce:ops"]},{"id":"msg-middle","title":"Middle","status":"open","created_at":"2026-06-12T12:00:02Z","labels":["gt:message","announce:ops"]}]`, "", 0
+		case "close":
+			return "", "", 0
+		}
+		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+	}}
+	r := NewRouterWithTownRoot(t.TempDir(), townRoot, testPrefixRegistry())
+	r.bd = bd.run
+
+	// Three messages, room for two: the oldest one goes, and only it.
+	if err := r.pruneAnnounce("ops", 3); err != nil {
+		t.Fatalf("pruneAnnounce: %v", err)
+	}
+
+	var closed []string
+	for _, c := range bd.recorded() {
+		if c.Args[0] == "close" {
+			closed = append(closed, c.Args[1])
+		}
+	}
+	if len(closed) != 1 || closed[0] != "msg-oldest" {
+		t.Fatalf("closed = %q, want [msg-oldest]; calls:\n%s", closed, strings.Join(bd.argvs(), "\n"))
 	}
 }
 
@@ -1085,7 +1117,7 @@ func TestTownGroupSendWithNoTownLevelAgents(t *testing.T) {
 func TestTownGroupSendSkipsRetiredMayorBead(t *testing.T) {
 	t.Parallel()
 	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
-		if strings.HasPrefix(strings.Join(c.Args, " "), "list --label=gt:agent") {
+		if argv := strings.Join(c.Args, " "); strings.HasPrefix(argv, "list ") && strings.Contains(argv, "--label=gt:agent") {
 			return `[
 				{"id":"hq-mayor","title":"Mayor","description":"Mayor\n\nrole_type: mayor\nrig: null","status":"open","issue_type":"agent","labels":["gt:agent"]},
 				{"id":"hq-deacon","title":"Deacon","description":"Deacon\n\nrole_type: deacon\nrig: null","status":"open","issue_type":"agent","labels":["gt:agent"]}
@@ -1135,7 +1167,7 @@ func wispAgentScript(wisps, issues, shown string, wispCode int) *bdScript {
 				return "", "Error: wisps table unavailable\n", wispCode
 			}
 			return wisps, "", 0
-		case strings.HasPrefix(argv, "list --label=gt:agent"):
+		case strings.HasPrefix(argv, "list ") && strings.Contains(argv, "--label=gt:agent"):
 			return issues, "", 0
 		case strings.HasPrefix(argv, "show "):
 			return shown, "", 0
@@ -2689,7 +2721,7 @@ type mutedTown struct {
 func TestResolveAgentsByRoleExactRigMatch(t *testing.T) {
 	t.Parallel()
 	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
-		if strings.HasPrefix(strings.Join(c.Args, " "), "list --label=gt:agent") {
+		if argv := strings.Join(c.Args, " "); strings.HasPrefix(argv, "list ") && strings.Contains(argv, "--label=gt:agent") {
 			return `[
 				{"id":"gt-foo-crew-alice","description":"crew alice\n\nrole_type: crew\nrig: foo","status":"open","issue_type":"agent","labels":["gt:agent"]},
 				{"id":"gt-foo-crew-carol","description":"crew carol\n\nrole_type: crew","status":"open","issue_type":"agent","labels":["gt:agent"]},

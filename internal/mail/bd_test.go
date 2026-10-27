@@ -1,7 +1,6 @@
 package mail
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -177,57 +176,27 @@ func TestBdError_ImplementsErrorInterface(t *testing.T) {
 	_ = err.Error() // Should compile and not panic
 }
 
-func TestParseBeadsListOutput(t *testing.T) {
+func TestBeadsMessagesFromIssues(t *testing.T) {
 	t.Parallel()
 	created := time.Date(2026, 6, 12, 12, 0, 0, 0, time.UTC)
-	valid, err := json.Marshal([]BeadsMessage{{
-		ID:        "msg-1",
-		Title:     "Hello",
-		Status:    "open",
-		Priority:  2,
-		CreatedAt: created,
-		Labels:    []string{"gt:message", "from:mayor/"},
-	}})
-	if err != nil {
-		t.Fatalf("marshal valid message: %v", err)
-	}
 
-	tests := []struct {
-		name    string
-		input   []byte
-		wantLen int
-		wantErr bool
-	}{
-		{name: "empty", input: nil},
-		{name: "plain no issues", input: []byte("No issues found.\n")},
-		{name: "null", input: []byte("null\n")},
-		{name: "empty array", input: []byte("[]\n")},
-		{name: "valid array", input: valid, wantLen: 1},
-		{name: "non json", input: []byte("warning: no rows")},
-		{name: "malformed json", input: []byte("[{bad json]"), wantErr: true},
-	}
+	got := beadsMessagesFromIssues([]*beads.Issue{
+		{
+			ID:        "msg-1",
+			Title:     "Hello",
+			Status:    "open",
+			Priority:  2,
+			CreatedAt: created.Format(time.RFC3339),
+			Labels:    []string{"gt:message", "from:mayor/"},
+		},
+		nil,
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseBeadsListOutput(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseBeadsListOutput() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if len(got) != tt.wantLen {
-				t.Fatalf("parseBeadsListOutput() returned %d messages, want %d", len(got), tt.wantLen)
-			}
-		})
-	}
-
-	got, err := parseBeadsListOutput(valid)
-	if err != nil {
-		t.Fatalf("parse valid output: %v", err)
-	}
 	if len(got) != 1 {
-		t.Fatalf("parse valid output returned %d messages, want 1", len(got))
+		t.Fatalf("beadsMessagesFromIssues() returned %d messages, want 1", len(got))
 	}
 	if got[0].ID != "msg-1" || got[0].Title != "Hello" || got[0].Status != "open" || got[0].Priority != 2 {
-		t.Fatalf("parse valid output returned unexpected message: %#v", got[0])
+		t.Fatalf("beadsMessagesFromIssues() returned unexpected message: %#v", got[0])
 	}
 	if !got[0].CreatedAt.Equal(created) {
 		t.Fatalf("CreatedAt = %v, want %v", got[0].CreatedAt, created)
