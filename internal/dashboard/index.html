@@ -2473,9 +2473,15 @@ function renderForgejo(s) {
 function costSpend(box, d, r, h) {
   // No spend command is configured at all — no reader, so no status either —
   // which is not the same as one that failed or has not answered yet (gt-q6h8e).
-  if (!d) { box.append(el("div", "empty", r ? "unavailable — the spend read failed" : "no spend report")); return []; }
+  if (!d) {
+    box.append(el("div", "empty", r ? "unavailable — the spend read failed" : "no spend report"));
+    // The Claude dollars are not the spend report's, so they draw alone when it
+    // is missing rather than vanishing with the DeepSeek figures (gt-iazpv).
+    costClaudeRow(box, h);
+    return [];
+  }
   const live = d.live || {};
-  const kv = el("div", "kv");
+  const kv = el("div", "kv costheadline");
   const add = (v, k, cls) => { const x = el("div"); x.append(el("b", cls || "", v), el("span", "", k)); kv.append(x); };
   add(money(d.balance), "DeepSeek balance", live.available === false ? "badc" : "");
   // Spent is the sum of the sampled drops from ledger_since; only a report with
@@ -2490,14 +2496,14 @@ function costSpend(box, d, r, h) {
   add(rw == null ? "–" : rw.toFixed(1) + "d", "DeepSeek runway", rw != null && rw < 3 ? "badc" : rw != null && rw < 7 ? "warnc" : "");
   costClaudeHeadline(kv, h);
   box.append(kv);
-  // Cash and credit under the balance, how long the credit alone covers the 24h
-  // rate on the same line: granted credit is not money paid in, and the two are
-  // read together or not at all. Both fields are needed; a report without them
-  // gets no line.
+  // Cash and credit under the balance, both DeepSeek's, how long the credit
+  // alone covers the 24h rate on the same line: granted credit is not money paid
+  // in, and the two are read together or not at all. Both fields are needed; a
+  // report without them gets no line.
   if (d.cash != null && d.credit != null) {
     const cr = d.credit_runway_days_at_24h_pace;
     const left = d.credit > 0 && cr != null ? "credit lasts ~" + cr.toFixed(1) + "d, then cash" : null;
-    box.append(el("div", "title", money(d.cash) + " cash + " + money(d.credit) + " credit" + (left ? " · " + left : "")));
+    box.append(el("div", "title", "DeepSeek " + money(d.cash) + " cash + " + money(d.credit) + " credit" + (left ? " · " + left : "")));
   }
   // One dim line of the recent days instead of a table, to keep the panel short:
   // today and yesterday beside the mean of the complete days behind them, which
@@ -2544,6 +2550,16 @@ function costSpend(box, d, r, h) {
   if (live.ok === false) box.append(el("div", "badc", "live balance unreachable; showing the ledger"));
   if (d.watcher_pid == null || d.watcher_pid === "") box.append(el("div", "badc", "spend watcher is not running"));
   return [d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null];
+}
+
+// costClaudeRow draws the Claude headline as a row of its own, for a panel with
+// no DeepSeek figures to put it beside; a server that sent no headline draws
+// nothing.
+function costClaudeRow(box, h) {
+  if (!h) return;
+  const kv = el("div", "kv costheadline");
+  costClaudeHeadline(kv, h);
+  box.append(kv);
 }
 
 // costClaudeHeadline draws the Claude plan-equivalent dollars into kv, the
@@ -4097,8 +4113,10 @@ function renderCost(s) {
   if (!d && !u) {
     // The usage scan has not answered yet, which is reading, not missing; the
     // budget line still draws, since an alert needs no spend report, and the
-    // plan line with it, since its own reader owes the panel nothing.
+    // Claude headline and plan line with it, since their own readers owe the
+    // panel nothing.
     spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + "; usage still reading…"));
+    costClaudeRow(spendBox, s.cost_charts && s.cost_charts.headline);
     costClaudePlan(box, s.claude_plan);
     costJev(box, s.jev_spend, readOf(s, "jev_spend"));
     costGCP(box, s.cloud);

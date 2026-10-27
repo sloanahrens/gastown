@@ -17,7 +17,7 @@ func TestSpendPanelShowsCashVersusCreditAndTheCreditEvents(t *testing.T) {
 	body := pageFunc(t, "costSpend")
 	for _, want := range []string{
 		// credit > 0: cash and credit under the balance, and the runway.
-		`money(d.cash) + " cash + " + money(d.credit) + " credit"`,
+		`"DeepSeek " + money(d.cash) + " cash + " + money(d.credit) + " credit"`,
 		`d.credit > 0 && cr != null`,
 		`d.credit_runway_days_at_24h_pace`,
 		`"credit lasts ~" + cr.toFixed(1) + "d, then cash"`,

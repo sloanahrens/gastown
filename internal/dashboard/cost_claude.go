@@ -63,9 +63,11 @@ type CostHeadline struct {
 const costHeadlineHours = 24
 
 // costHourlyWindow is the last 24 hours' buckets ending at now's hour: the
-// window the headline's hourly rate is read over.
+// window the headline's hourly rate is read over. The buckets are cut on the
+// clock now carries, so an hourly rate lines up with the hours the reader sees
+// (gt-iazpv).
 func costHourlyWindow(now time.Time) []costBucket {
-	last := now.In(time.Local).Truncate(time.Hour)
+	last := costHourStart(now)
 	first := last.Add(-time.Duration(costHeadlineHours-1) * time.Hour)
 	buckets := make([]costBucket, costHeadlineHours)
 	for i := range buckets {
@@ -74,6 +76,13 @@ func costHourlyWindow(now time.Time) []costBucket {
 		buckets[i] = costBucket{Label: hr, Name: hr, Start: start}
 	}
 	return buckets
+}
+
+// costHourStart is the start of t's own hour on the clock t carries. Truncate
+// counts from the epoch, so in a zone whose offset is not a whole hour it would
+// start half an hour into the hour.
+func costHourStart(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, t.Location())
 }
 
 // claudeHeadline prices the series into the headline's two figures: today's

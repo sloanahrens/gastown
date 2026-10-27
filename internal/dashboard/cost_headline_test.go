@@ -100,6 +100,26 @@ func TestBuildCostChartsHeadlineRatesTheHoursItRead(t *testing.T) {
 	}
 }
 
+// The hourly window is cut on the clock the reader keeps. Truncate counts from
+// the epoch, so in a zone whose offset is not a whole hour it would start half
+// an hour into the hour and label 14:30 as 14:00 (gt-iazpv).
+func TestCostHourlyWindowAlignsToTheReadersClock(t *testing.T) {
+	t.Parallel()
+
+	zone := time.FixedZone("half past five", 5*3600+30*60)
+	now := time.Date(2026, 10, 27, 14, 20, 0, 0, zone)
+	buckets := costHourlyWindow(now)
+	if len(buckets) != costHeadlineHours {
+		t.Fatalf("the window has %d buckets, want %d", len(buckets), costHeadlineHours)
+	}
+	if want := time.Date(2026, 10, 27, 14, 0, 0, 0, zone); !buckets[len(buckets)-1].Start.Equal(want) {
+		t.Errorf("the window ends at %v, want the reader's %v", buckets[len(buckets)-1].Start, want)
+	}
+	if want := time.Date(2026, 10, 26, 15, 0, 0, 0, zone); !buckets[0].Start.Equal(want) {
+		t.Errorf("the window starts at %v, want %v", buckets[0].Start, want)
+	}
+}
+
 // A day the series has no sample for draws no today figure, so the page can
 // write a dash rather than the zero of a day nobody measured (gt-iazpv).
 func TestBuildCostChartsHeadlineLeavesAnUnreadTodayUnset(t *testing.T) {

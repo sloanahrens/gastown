@@ -7,30 +7,82 @@ import (
 	"time"
 )
 
-// headlineTile is one tile of the Cost panel's headline row as drawn: the value,
-// the key under it, and the value's class.
+// headlineTile is one tile of the Cost panel's headline row as drawn: the value
+// and the key under it.
 type headlineTile struct {
 	Value string `json:"value"`
 	Key   string `json:"key"`
-	Class string `json:"class"`
 }
 
 // headlineTiles reads back the headline row of the Cost panel renderCost draws
-// from s.
+// from s. The row is found by the class it wears, not by a path through the
+// tree, so a part drawn above it does not move it.
 func headlineTiles(t *testing.T, s map[string]any) []headlineTile {
 	t.Helper()
 
 	dom := newPageDOM(t)
 	dom.call(t, "renderCost", jsonValue(t, s))
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children[0].children[0].children.map(c => ({value: c.children[0].textContent, key: c.children[1].textContent, class: c.children[0].className})))`)
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		let row = null;
+		(function walk(n) {
+			if (row || !n) return;
+			if (String(n.className || "").split(" ").includes("costheadline")) { row = n; return; }
+			for (const c of (n.children || [])) walk(c);
+		})(__byId["cost"]);
+		if (!row) return null;
+		return row.children.map(c => ({value: c.children[0].textContent, key: c.children[1].textContent}));
+	})())`)
 	if err != nil {
 		t.Fatalf("reading the Cost headline: %v", err)
+	}
+	if v.String() == "null" {
+		t.Fatal("the Cost panel drew no headline row")
 	}
 	var tiles []headlineTile
 	if err := json.Unmarshal([]byte(v.String()), &tiles); err != nil {
 		t.Fatalf("reading the Cost headline: %v", err)
 	}
 	return tiles
+}
+
+// tileByKey is the tile whose key contains want, failing when the row drew
+// none: a row that lost the figure reads as a failure, not as an empty string.
+func tileByKey(t *testing.T, tiles []headlineTile, want string) headlineTile {
+	t.Helper()
+
+	for _, tile := range tiles {
+		if strings.Contains(tile.Key, want) {
+			return tile
+		}
+	}
+	t.Fatalf("the headline has no tile labelled %q: %+v", want, tiles)
+	return headlineTile{}
+}
+
+// costLeafTexts is every leaf string the Cost panel drew, so a test reads a
+// line by what it says rather than by where it sits in the tree.
+func costLeafTexts(t *testing.T, s map[string]any) []string {
+	t.Helper()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", jsonValue(t, s))
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const out = [];
+		(function walk(n) {
+			const kids = (n && n.children) || [];
+			if (!kids.length) { if (String(n.textContent || "") !== "") out.push(String(n.textContent)); return; }
+			for (const c of kids) walk(c);
+		})(__byId["cost"]);
+		return out;
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	var texts []string
+	if err := json.Unmarshal([]byte(v.String()), &texts); err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	return texts
 }
 
 // headlineSpend is a spend report carrying every figure the headline row draws.
@@ -69,19 +121,31 @@ func TestCostHeadlineLabelsEveryDeepSeekFigureAndAddsClaude(t *testing.T) {
 		t.Fatalf("the headline drew %d tiles: %+v, want five DeepSeek figures and one Claude", len(tiles), tiles)
 	}
 
-	deep := tiles[:len(tiles)-1]
-	want := []string{"balance", "spent", "last 1h", "last 24h", "runway"}
-	for i, tile := range deep {
-		if !strings.HasPrefix(tile.Key, "DeepSeek ") || !strings.Contains(tile.Key, want[i]) {
-			t.Errorf("DeepSeek tile %d is labelled %q, want it to name DeepSeek and %q", i, tile.Key, want[i])
+	// Every DeepSeek figure names DeepSeek on its own tile, and each keeps the
+	// report's value.
+	for _, figure := range []string{"balance", "spent", "last 1h", "last 24h", "runway"} {
+		tile := tileByKey(t, tiles, figure)
+		if !strings.HasPrefix(tile.Key, "DeepSeek ") {
+			t.Errorf("the %s tile is labelled %q, want it to name DeepSeek", figure, tile.Key)
 		}
 	}
-	// The figures are the report's own, still, under the new key.
-	if deep[0].Value != "$77.49" || deep[3].Value != "$0.30/h" {
-		t.Errorf("the headline shows %q balance and %q last 24h, want the report's $77.49 and $0.30/h", deep[0].Value, deep[3].Value)
+	deep := 0
+	for _, tile := range tiles {
+		if strings.HasPrefix(tile.Key, "DeepSeek ") {
+			deep++
+		}
+	}
+	if deep != 5 {
+		t.Errorf("the headline drew %d DeepSeek tiles, want five", deep)
+	}
+	if got := tileByKey(t, tiles, "balance").Value; got != "$77.49" {
+		t.Errorf("the headline balance = %q, want the report's $77.49", got)
+	}
+	if got := tileByKey(t, tiles, "last 24h").Value; got != "$0.30/h" {
+		t.Errorf("the headline last 24h = %q, want the report's $0.30/h", got)
 	}
 
-	claude := tiles[len(tiles)-1]
+	claude := tileByKey(t, tiles, claudePlanSeriesName)
 	if !strings.Contains(claude.Key, claudePlanSeriesName) {
 		t.Errorf("the Claude tile is labelled %q, want the legend's %q", claude.Key, claudePlanSeriesName)
 	}
@@ -107,20 +171,26 @@ func TestCostHeadlineCountsTheHoursItRead(t *testing.T) {
 		"spend":       headlineSpend(t),
 		"cost_charts": charts,
 	})
-	claude := tiles[len(tiles)-1]
+	claude := tileByKey(t, tiles, claudePlanSeriesName)
 	if !strings.Contains(claude.Key, "18 of 24 hours read") {
 		t.Errorf("the Claude tile of a window the series read 18 hours of is labelled %q", claude.Key)
 	}
 }
 
-// The page's fallback name for a headline the server has not sent is the
-// legend's own, off the constant: a change to one that left the other behind
-// would name the tile a series the charts no longer carry.
-func TestCostHeadlineFallbackNameTracksTheLegend(t *testing.T) {
+// A server that sent no Claude headline leaves the page's own name for the row,
+// the legend's: a change to one that left the other behind would name the tile
+// a series the charts no longer carry, and the row still says why it has no
+// figure rather than drawing a zero (gt-iazpv).
+func TestCostHeadlineNamesItselfWithTheLegendWhenTheServerSendsNone(t *testing.T) {
 	t.Parallel()
 
-	if want := `|| "` + claudePlanSeriesName + `"`; !strings.Contains(string(indexHTML), want) {
-		t.Errorf("the page does not fall back to %q", claudePlanSeriesName)
+	tiles := headlineTiles(t, map[string]any{
+		"spend":       headlineSpend(t),
+		"cost_charts": map[string]any{},
+	})
+	claude := tileByKey(t, tiles, claudePlanSeriesName)
+	if claude.Value != "not available" {
+		t.Errorf("the tile of a headline the server did not send = %q, want it to say it is not available", claude.Value)
 	}
 }
 
@@ -137,12 +207,61 @@ func TestCostHeadlineSaysWhyTheClaudeSeriesIsMissing(t *testing.T) {
 		"spend":       headlineSpend(t),
 		"cost_charts": charts,
 	})
-	claude := tiles[len(tiles)-1]
+	claude := tileByKey(t, tiles, charts.Headline.Why)
 	if !strings.Contains(claude.Key, charts.Headline.Why) {
 		t.Errorf("the Claude tile is labelled %q, want it to say %q", claude.Key, charts.Headline.Why)
 	}
 	if strings.Contains(claude.Value, "$") || strings.Contains(claude.Key, "$") {
 		t.Errorf("a Claude series it could not build drew a dollar figure: %q over %q", claude.Value, claude.Key)
+	}
+}
+
+// The cash and credit the balance splits into are DeepSeek's too, so the line
+// under the balance says whose they are like the tiles above it (gt-iazpv).
+func TestCostHeadlineCashAndCreditAreDeepSeek(t *testing.T) {
+	t.Parallel()
+
+	texts := costLeafTexts(t, map[string]any{"spend": map[string]any{
+		"balance": 15.0, "live": map[string]any{"ok": true},
+		"cash": 10.0, "credit": 5.0, "credit_runway_days_at_24h_pace": 2.0,
+	}})
+	want := "DeepSeek $10.00 cash + $5.00 credit · credit lasts ~2.0d, then cash"
+	for _, text := range texts {
+		if text == want {
+			return
+		}
+	}
+	t.Errorf("the cash and credit line is not among %q, want %q", texts, want)
+}
+
+// The Claude row is not the spend report's: it draws without one, so a reader
+// is not left without the plan's spend when DeepSeek's report is missing
+// (gt-iazpv).
+func TestCostHeadlineDrawsClaudeWithoutASpendReport(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 10, 24, 12, 0, 0, 0, time.Local)
+	charts := BuildCostCharts(claudeSeriesNow, nil, nil, 0, claudeSeriesPlan, claudeHeadlineSamples(start))
+	if charts.Headline == nil || charts.Headline.Today == nil {
+		t.Fatalf("the fixture built no headline to draw: %+v", charts.Headline)
+	}
+	today := money(*charts.Headline.Today) + " today"
+
+	// Usage answered, so the panel draws its parts; and nothing else read, so
+	// it takes its one-line empty state. Neither has a spend report.
+	cases := map[string]map[string]any{
+		"usage answered":    {"usage": map[string]any{}, "cost_charts": charts},
+		"nothing else read": {"cost_charts": charts},
+	}
+	for name, s := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tiles := headlineTiles(t, s)
+			claude := tileByKey(t, tiles, claudePlanSeriesName)
+			if !strings.Contains(claude.Value, today) {
+				t.Errorf("the Claude tile without a spend report = %q, want it to carry %q", claude.Value, today)
+			}
+		})
 	}
 }
 

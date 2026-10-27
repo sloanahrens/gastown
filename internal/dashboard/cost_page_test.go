@@ -291,7 +291,7 @@ func TestCostPanelKeepsEveryDeepSeekField(t *testing.T) {
 		`"DeepSeek last 1h"`,
 		`"DeepSeek last 24h"`,
 		`"DeepSeek runway"`,
-		`money(d.cash) + " cash + " + money(d.credit) + " credit"`,
+		`"DeepSeek " + money(d.cash) + " cash + " + money(d.credit) + " credit"`,
 		`"credit lasts ~" + cr.toFixed(1) + "d, then cash"`,
 		`Object.entries(d.per_day || {})`,
 		`d.credits.slice().reverse()`,
@@ -352,7 +352,7 @@ func TestCostPanelPutsCashCreditAndTheRunwayOnOneLine(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("the spend part drew %d dim lines: %+v, want the split alone", len(lines), lines)
 	}
-	want := "$5.20 cash + $17.98 credit · credit lasts ~1.1d, then cash"
+	want := "DeepSeek $5.20 cash + $17.98 credit · credit lasts ~1.1d, then cash"
 	if lines[0].Text != want {
 		t.Errorf("the line under the balance = %q, want %q", lines[0].Text, want)
 	}
@@ -360,7 +360,7 @@ func TestCostPanelPutsCashCreditAndTheRunwayOnOneLine(t *testing.T) {
 	// Credit spent down to nothing: the split stays and the runway goes, since
 	// there is no credit left to run out.
 	lines = dimLines(t, spendReport(5.2, 0, 0))
-	if len(lines) != 1 || lines[0].Text != "$5.20 cash + $0.00 credit" {
+	if len(lines) != 1 || lines[0].Text != "DeepSeek $5.20 cash + $0.00 credit" {
 		t.Errorf("a report with no credit = %+v, want the split with no runway", lines)
 	}
 
