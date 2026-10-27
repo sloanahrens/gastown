@@ -1075,6 +1075,11 @@ func TestNewRigLandingWorker_WiresTheForgejoLanding(t *testing.T) {
 	if gate.Remote != "forgejo" {
 		t.Fatalf("gate.Remote = %q; want forgejo, the remote carrying the configured URL", gate.Remote)
 	}
+	// A rejected gate keeps its whole job log under the town's runtime, so the
+	// worker resolves the directory from the town root it holds (gt-wwqx8).
+	if want := land.GateLogDir(townRoot, rigName); gate.GateLogDir != want {
+		t.Fatalf("gate.GateLogDir = %q; want %q", gate.GateLogDir, want)
+	}
 	merger, ok := lander.Merger.(*land.ForgejoMerger)
 	if !ok || merger == nil {
 		t.Fatalf("Merger = %T; want the rig's Forgejo PR merger", lander.Merger)

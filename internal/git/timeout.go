@@ -48,3 +48,14 @@ func (g *Git) WithEnv(env []string) *Git {
 	c.env = append(append([]string(nil), g.env...), env...)
 	return &c
 }
+
+// WithoutEnv returns a copy of g whose every call runs with keys taken out of
+// the process environment, the receiver left as it was. It is for a call that
+// must not inherit a variable pointing it at another repository: an inherited
+// GIT_DIR makes every command act on the wrong one (rpkg #769), and exporting
+// the key empty does not clear it (see callEnv).
+func (g *Git) WithoutEnv(keys ...string) *Git {
+	c := *g
+	c.unset = append(append([]string(nil), g.unset...), keys...)
+	return &c
+}

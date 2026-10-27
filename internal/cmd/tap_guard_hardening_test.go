@@ -44,11 +44,11 @@ func TestParkedPromptEscalationRetriesAfterFailure(t *testing.T) {
 	marker := promptEscalationMarker(hook, promptShape(hook), tmp)
 
 	failing, failedCalls := fakeParkedPromptEscalator(false)
-	if got := escalateParkedPromptOnce(hook, tmp, failing); !strings.Contains(got, "Recording the escalation failed") {
+	if got, _ := escalateParkedPromptOnce(hook, tmp, failing); !strings.Contains(got, "Recording the escalation failed") {
 		t.Fatalf("first attempt = %q, want the failure message", got)
 	}
 	// Right away the failure is remembered, so a retry loop does not hammer Dolt.
-	if got := escalateParkedPromptOnce(hook, tmp, failing); strings.Contains(got, "Recording the escalation failed") || len(*failedCalls) != 1 {
+	if got, _ := escalateParkedPromptOnce(hook, tmp, failing); strings.Contains(got, "Recording the escalation failed") || len(*failedCalls) != 1 {
 		t.Fatalf("immediate retry reached the escalator again (calls=%d, got %q)", len(*failedCalls), got)
 	}
 	// After the window the failed escalation is attempted again, and success sticks.
@@ -57,10 +57,10 @@ func TestParkedPromptEscalationRetriesAfterFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	working, workingCalls := fakeParkedPromptEscalator(true)
-	if got := escalateParkedPromptOnce(hook, tmp, working); !strings.Contains(got, "recorded as a bead") || len(*workingCalls) != 1 {
+	if got, _ := escalateParkedPromptOnce(hook, tmp, working); !strings.Contains(got, "recorded as a bead") || len(*workingCalls) != 1 {
 		t.Fatalf("retry after the window = %q (calls=%d), want a recorded escalation", got, len(*workingCalls))
 	}
-	if got := escalateParkedPromptOnce(hook, tmp, working); !strings.Contains(got, "already reported") || len(*workingCalls) != 1 {
+	if got, _ := escalateParkedPromptOnce(hook, tmp, working); !strings.Contains(got, "already reported") || len(*workingCalls) != 1 {
 		t.Fatalf("after success a repeat must be suppressed, got %q (calls=%d)", got, len(*workingCalls))
 	}
 }

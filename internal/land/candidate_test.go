@@ -62,6 +62,9 @@ type fakeForgejo struct {
 	// fullLog answers a fetch wider than the tail cap; empty means the server
 	// returns log whatever the cap.
 	fullLog string
+	// fullLogErr fails only that wider fetch, so a test drives the second read
+	// failing while the tail the gate already holds stands (gt-wwqx8).
+	fullLogErr error
 	// limits is the maxBytes of every log fetch, in order: what the gate asked
 	// the server for.
 	limits []int64
@@ -111,8 +114,13 @@ func (f *fakeForgejo) JobLogsTail(_ context.Context, _, _ string, _ int64, maxBy
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.limits = append(f.limits, maxBytes)
-	if maxBytes > candidateTailBytes && f.fullLog != "" {
-		return f.fullLog, f.logErr
+	if maxBytes > candidateTailBytes {
+		if f.fullLogErr != nil {
+			return "", f.fullLogErr
+		}
+		if f.fullLog != "" {
+			return f.fullLog, f.logErr
+		}
 	}
 	return f.log, f.logErr
 }

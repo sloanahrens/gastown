@@ -36,8 +36,8 @@ type Receipt struct {
 
 // RejectionNote is one MERGE REJECTION block. The first part (header,
 // Branch, Target, MR, findings, receipt) is the refinery's format, moved here
-// unchanged so every reader keeps working (gt-s4f6). Head, Conflicting and
-// GateTail are Land's additions and are written only when set.
+// unchanged so every reader keeps working (gt-s4f6). Head, Conflicting,
+// GateTail and GateLog are Land's additions and are written only when set.
 type RejectionNote struct {
 	Attempt  int
 	Kind     string // failure class; empty means unclassified (gt-1jig)
@@ -54,6 +54,9 @@ type RejectionNote struct {
 	Head        string
 	Conflicting []string
 	GateTail    string
+	// GateLog is where the rejected gate's whole job log is kept, for reading
+	// the failure past the excerpt's cut (gt-wwqx8). Empty when none was kept.
+	GateLog string
 }
 
 // FormatRejectionNote renders n. Every agent-supplied field is collapsed onto
@@ -90,6 +93,9 @@ func FormatRejectionNote(n RejectionNote) string {
 			files[i] = NoteField(f)
 		}
 		note += "\nConflicting: " + strings.Join(files, ", ")
+	}
+	if logPath := NoteField(n.GateLog); logPath != "" {
+		note += "\nGate log: " + logPath
 	}
 	if tail := strings.TrimRight(n.GateTail, "\n"); tail != "" {
 		note += "\nGate tail:"
@@ -286,12 +292,47 @@ func ParseRejectionNote(notes string) (RejectionNote, bool) {
 				}
 			}
 			seen[key] = true
+		case "gate log":
+			n.GateLog, seen[key] = value, true
 		}
 	}
 	if len(tail) > 0 {
 		n.GateTail = strings.Join(tail, "\n")
 	}
 	return n, true
+}
+
+// RejectionForAttempt returns the MERGE REJECTION block that opened attempt in
+// notes: the review block carrying that attempt, or a gate or policy block of
+// the same count where no review block carries it (gt-l3zak).
+//
+// ParseRejectionNote reads the last block of the text it is given, so each
+// block is cut out up to the next header before it is parsed. The rework pass
+// and the scorecard both label a recorded round by it, so it lives beside the
+// format it reads rather than once per reader (gt-pfru5).
+func RejectionForAttempt(notes string, attempt int) (RejectionNote, bool) {
+	starts := rejectionBlockRE.FindAllStringIndex(notes, -1)
+	var review, other RejectionNote
+	haveReview, haveOther := false, false
+	for i, s := range starts {
+		end := len(notes)
+		if i+1 < len(starts) {
+			end = starts[i+1][0]
+		}
+		rej, parsed := ParseRejectionNote(notes[s[0]:end])
+		if !parsed || rej.Attempt != attempt {
+			continue
+		}
+		if rej.Kind == "" || rej.Kind == string(RejectReview) {
+			review, haveReview = rej, true
+		} else {
+			other, haveOther = rej, true
+		}
+	}
+	if haveReview {
+		return review, true
+	}
+	return other, haveOther
 }
 
 // priorReviewFindings is the previous round's findings for the next review over

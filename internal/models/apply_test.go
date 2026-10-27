@@ -168,6 +168,37 @@ func TestWrittenFailRestoresTheRestAndNamesEveryStuckFile(t *testing.T) {
 	}
 }
 
+// Two writes to one path are put back last written first, so the earliest
+// backup — the file as it was before the switch — is the one the path is left
+// holding after the rollback (gt-gep5e).
+func TestWrittenFailPutsOnePathBackToItsEarliestBackup(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(path, []byte("changed twice"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	earliest := filepath.Join(dir, "earliest.bak")
+	if err := os.WriteFile(earliest, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	later := filepath.Join(dir, "later.bak")
+	if err := os.WriteFile(later, []byte("after the first write"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	written := Written{
+		{Path: path, Backup: earliest},
+		{Path: path, Backup: later},
+	}
+
+	if err := written.Fail(errors.New("the write failed")); err == nil {
+		t.Fatal("Fail = nil, want the rollback reported")
+	}
+	if data, _ := os.ReadFile(path); string(data) != "original" {
+		t.Errorf("the path holds %q after the rollback, want %q: Fail must restore the last-written entry first", data, "original")
+	}
+}
+
 // The stamp becomes part of the backup's name, so one that is not a file name
 // element is refused before anything is written (gt-mgixx).
 func TestApplyRolesRefusesAStampThatIsNotOneFileNameElement(t *testing.T) {

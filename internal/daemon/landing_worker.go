@@ -526,7 +526,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			rigName, filepath.Join(rigPath, "settings", "config.json")))
 		return nil, fmt.Errorf("rig %s has no merge_queue.forgejo block: Forgejo is the only landing path, so the landing worker for this rig is not running until the block is added", rigName)
 	}
-	candidate, merger, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, cfg)
+	candidate, merger, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, land.GateLogDir(townRoot, rigName), cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -747,8 +747,11 @@ const forgejoVerifyWindow = 20
 // remote is the rig's configured landing remote (gt-fn9e6.9): the candidate
 // has to reach the Forgejo instance whose CI gates it, so an assumed origin
 // would push it to GitHub and the gate would wait on a verdict that never
-// comes (design, "`gt done` pushes to Forgejo").
-func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoConfig, repo string, landings *land.LandingsFile, cfg *LandingWorkerConfig) (*land.CandidateGate, *land.ForgejoMerger, error) {
+// comes (design, "`gt done` pushes to Forgejo"). gateLogDir is where the rig's
+// rejected gate job logs are kept, and the caller resolves it from the town
+// root it already holds: a gate that read the town root itself would keep no
+// log wherever that field is unset.
+func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoConfig, repo string, landings *land.LandingsFile, gateLogDir string, cfg *LandingWorkerConfig) (*land.CandidateGate, *land.ForgejoMerger, error) {
 	owner, repoName, err := land.RepoFromRemoteURL(fj.RemoteURL)
 	if err != nil {
 		return nil, nil, err
@@ -780,12 +783,13 @@ func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoCon
 	}
 	out := landingLogWriter{logf: d.logger.Printf}
 	gate := &land.CandidateGate{
-		Client:   client,
-		Owner:    owner,
-		RepoName: repoName,
-		Workflow: fj.GateWorkflowName(),
-		Remote:   remote,
-		Out:      out,
+		Client:     client,
+		Owner:      owner,
+		RepoName:   repoName,
+		Workflow:   fj.GateWorkflowName(),
+		Remote:     remote,
+		Out:        out,
+		GateLogDir: gateLogDir,
 	}
 	d.verifyForgejoGate(rigName, gate, repo, fj.GateWorkflowName(), landings)
 	merger := &land.ForgejoMerger{Client: client, Owner: owner, RepoName: repoName, BotLogin: botLogin, Out: out}
