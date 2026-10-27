@@ -153,10 +153,8 @@ func sendNotifications(req EscalationRequest, issueID string, cfg *config.Escala
 	owner := attention.EscalationOwner(agentID)
 
 	// A route with no mail target sends no message, so it needs no router:
-	// the router resolves recipients through the town's tmux, and building one
-	// for a bead/log/exec route made an escalation that never mailed anyone
-	// depend on a tmux server (gt-yav3: a test binary that builds one inherits
-	// a live socket and is refused).
+	// the router resolves recipients through the town's tmux, and an
+	// escalation that never mailed anyone must not depend on one (gt-yav3).
 	newRouter := senders.newRouter
 	if newRouter == nil {
 		newRouter = func() *mail.Router { return mail.NewRouter(townRoot, req.Prefixes) }
