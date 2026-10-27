@@ -86,8 +86,9 @@ type hostProbe struct {
 }
 
 // probes are the group's columns, in the order they run. They run one after
-// another, so Collect costs at most five timeouts (25 s), under the group's own
-// deadline (SourceTimeout).
+// another, so Collect costs at most one timeout per probe, which stays under
+// the group's own deadline (SourceTimeout) as
+// TestSourceHostProbesFitTheGroupDeadline holds it to.
 func (s hostSource) probes() []hostProbe {
 	return []hostProbe{
 		{
@@ -156,20 +157,25 @@ func (p hostProbe) read(ctx context.Context, env Env, timeout time.Duration) (an
 }
 
 // parseLoadAvg1 reads the one-minute load average off sysctl's vm.loadavg,
-// which prints "{ 1.23 4.56 7.89 }". All three fields are required, so a
-// truncated or reordered answer is a missing reading rather than a wrong one.
-// macOS counts runnable threads into this number, so it is read beside the idle
-// share rather than as a saturation (internal/hoststat).
+// which prints "{ 1.23 4.56 7.89 }". The first of three numeric fields is the
+// one-minute figure; a shorter or non-numeric line is not vm.loadavg's answer,
+// so it is a missing reading rather than a wrong one. macOS counts runnable
+// threads into this number, so it is read beside the idle share rather than as
+// a saturation (internal/hoststat).
 func parseLoadAvg1(out string) (any, error) {
 	fields := strings.Fields(strings.Trim(strings.TrimSpace(out), "{}"))
 	if len(fields) < 3 {
 		return nil, fmt.Errorf("vm.loadavg printed %d load fields, want 3", len(fields))
 	}
-	load, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
-		return nil, fmt.Errorf("vm.loadavg one-minute load %q: %w", fields[0], err)
+	loads := make([]float64, 3)
+	for i := range loads {
+		load, err := strconv.ParseFloat(fields[i], 64)
+		if err != nil {
+			return nil, fmt.Errorf("vm.loadavg load field %d %q: %w", i+1, fields[i], err)
+		}
+		loads[i] = load
 	}
-	return load, nil
+	return loads[0], nil
 }
 
 // parseCPUIdlePct reads the idle share off top's last CPU line. A two-sample

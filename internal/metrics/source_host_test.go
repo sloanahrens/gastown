@@ -129,6 +129,7 @@ func TestSourceHostParsers(t *testing.T) {
 		{"sysctl output without braces", parseLoadAvg1, " 13.77 12.84 11.49 \n", 13.77, false},
 		{"sysctl with one field", parseLoadAvg1, "{ 13.77 }\n", nil, true},
 		{"sysctl with a field that is not a number", parseLoadAvg1, "{ one 12.84 11.49 }\n", nil, true},
+		{"sysctl with a later field that is not a number", parseLoadAvg1, "{ 13.77 12.84 nope }\n", nil, true},
 		{"sysctl printing nothing", parseLoadAvg1, "", nil, true},
 		{"top reads the last sample", parseCPUIdlePct, hostTopFixture, 86.99, false},
 		{"top without a CPU line", parseCPUIdlePct, "Processes: 641 total\n", nil, true},
@@ -319,6 +320,18 @@ func TestSourceHostAHungCommandIsCutAtItsOwnDeadline(t *testing.T) {
 	}
 	if got["load1"] == nil || got["cpu_idle_pct"] == nil || got["bd_latency_ms"] == nil || got["docker_disk_pct"] == nil {
 		t.Errorf("the hung command cost more than its own column: %v", got)
+	}
+}
+
+// The probes run one after another, each under hostCommandTimeout, so the
+// group's worst case is one timeout per probe. It must fit the deadline the
+// snapshot gives the group, or the last column is always a timeout and never a
+// reading.
+func TestSourceHostProbesFitTheGroupDeadline(t *testing.T) {
+	t.Parallel()
+	probes := newHostSource().probes()
+	if worst := time.Duration(len(probes)) * hostCommandTimeout; worst >= SourceTimeout {
+		t.Errorf("%d probes at %s each cost %s, want under the group's %s", len(probes), hostCommandTimeout, worst, SourceTimeout)
 	}
 }
 

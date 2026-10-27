@@ -28,12 +28,28 @@ import (
 // leaves the column nil rather than 0, as the queue source's log columns do: a
 // log that could not be read is not an hour with no sweep in it.
 //
-// The read is byte-bounded (daemonLogHourBytes), so an hour in which the daemon
-// wrote more than the bound starts partway through: the tail's oldest stamp
-// then falls after the cutoff, and what it holds is the tail's sweep time, not
-// the hour's. That too leaves the column nil, because a sum over part of the
-// hour reads as a quiet hour.
-type sweepSource struct{}
+// The sum is only the hour's when the read shows where the hour starts: the
+// oldest stamp in what was read must not be after the cutoff. Two reads fail
+// that, and both leave the column nil. A byte-bounded read (daemonLogHourBytes)
+// can stop partway through the hour when the daemon wrote more than the bound.
+// And the log itself can begin partway through the hour — lumberjack rotated
+// it, or the daemon restarted — which a short read cannot tell from an hour
+// the daemon logged nothing in until then. What a read like that holds is part
+// of the hour, and nothing in it says how much the missing part had, so a
+// number would be read as a quiet hour.
+type sweepSource struct {
+	// tailBytes is how much of the log the read covers; zero means
+	// daemonLogHourBytes. Tests set it small so a fixture needs no megabytes.
+	tailBytes int64
+}
+
+// tailBound is the byte bound the source asks Env.Tail for.
+func (s sweepSource) tailBound() int64 {
+	if s.tailBytes > 0 {
+		return s.tailBytes
+	}
+	return daemonLogHourBytes
+}
 
 // sweepFinishedRe matches a stage's finished line after its "tier_sweep: "
 // prefix is trimmed. The rig and tier names are free text, so the pattern is
@@ -42,9 +58,9 @@ var sweepFinishedRe = regexp.MustCompile(`^.+?: .+? finished \(exit -?\d+\) in (
 
 func (sweepSource) Group() string { return "sweep" }
 
-func (sweepSource) Collect(_ context.Context, env Env) (map[string]any, error) {
+func (s sweepSource) Collect(_ context.Context, env Env) (map[string]any, error) {
 	cols := map[string]any{"sweep_minutes_1h": nil}
-	data, err := env.Tail(daemonLogPath(env.Town), daemonLogHourBytes)
+	data, err := env.Tail(daemonLogPath(env.Town), s.tailBound())
 	if err != nil {
 		return cols, nil
 	}
@@ -73,12 +89,13 @@ func (sweepSource) Collect(_ context.Context, env Env) (map[string]any, error) {
 		}
 		swept += d
 	}
-	// The read filled its bound, so it may have stopped after the hour began.
-	// The oldest stamp says where the tail starts: unless it reaches the
-	// cutoff, the hour is not covered and the sum is short by however much the
-	// cut-off part held. Nothing in the tail can tell how much that is, so the
-	// column is nil rather than a number that would be read as the hour's.
-	if int64(len(data)) >= daemonLogHourBytes && (oldest.IsZero() || oldest.After(cutoff)) {
+	// The oldest stamp in the read is where the read begins. A read that
+	// begins after the cutoff — a byte bound that cut it off, or a log that
+	// starts there after a rotation or a restart — holds part of the hour,
+	// and a read with no stamp at all shows nothing. Neither can be told from
+	// well inside the hour to be the hour's sum, so the column is nil rather
+	// than a number that would read as a quiet hour.
+	if oldest.IsZero() || oldest.After(cutoff) {
 		return cols, nil
 	}
 	cols["sweep_minutes_1h"] = swept.Minutes()

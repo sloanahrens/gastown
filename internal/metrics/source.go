@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/daemonlog"
@@ -69,6 +70,41 @@ func (e Env) now() time.Time {
 		return e.Now()
 	}
 	return time.Now()
+}
+
+// sharedTail answers Tail with each path and bound read once for the snapshot,
+// so two groups that window the same log (the queue's tick columns and the
+// sweep's minutes both read an hour of the daemon log) copy its bytes once
+// rather than once each. Sources run at the same time, so a source that asks
+// while a read is under way waits for it instead of starting a second; the
+// bytes are returned read-only, as Tail's are.
+func (e Env) sharedTail() Env {
+	if e.Tail == nil {
+		return e
+	}
+	type key struct {
+		path string
+		max  int64
+	}
+	type read struct {
+		data []byte
+		err  error
+	}
+	tail := e.Tail
+	var mu sync.Mutex
+	reads := make(map[key]read)
+	e.Tail = func(path string, maxBytes int64) ([]byte, error) {
+		k := key{path: path, max: maxBytes}
+		mu.Lock()
+		defer mu.Unlock()
+		if r, ok := reads[k]; ok {
+			return r.data, r.err
+		}
+		data, err := tail(path, maxBytes)
+		reads[k] = read{data: data, err: err}
+		return data, err
+	}
+	return e
 }
 
 // DirEntry is one entry of a directory listing: the name and whether it is a

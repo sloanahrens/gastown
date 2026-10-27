@@ -12,8 +12,10 @@ import (
 // other groups still fill. A group name two sources claim keeps the first
 // source's columns and is an errors entry for the second, because one key
 // holds one source's answer. The sources run at once, so a hung one costs
-// perSource once rather than once per source.
+// perSource once rather than once per source, and a log two groups read is
+// read once for the whole record (sharedTail).
 func Collect(ctx context.Context, env Env, sources []Source, perSource time.Duration) Record {
+	env = env.sharedTail()
 	rec := Record{
 		V:      Version,
 		TS:     env.now().UTC().Format(time.RFC3339),

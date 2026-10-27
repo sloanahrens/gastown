@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -282,6 +285,68 @@ func TestCollectFailingPlacementSourceLeavesNullPlacement(t *testing.T) {
 	}
 	if len(rec.Errors) != 1 || rec.Errors[0].Group != PlacementGroup {
 		t.Errorf("Errors = %v, want the one placement entry", rec.Errors)
+	}
+}
+
+// Two sources that window the same log read it once for the record: the queue
+// and sweep groups both read an hour of the daemon log, and the second read
+// would copy the same bytes again. A source that asks for a different window
+// still gets its own read, so a cache hit never narrows what a source asked
+// for.
+func TestCollectSharesOneTailReadPerPathAndBound(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		bounds []int64
+		want   []string
+	}{
+		{
+			name:   "the same window is read once",
+			bounds: []int64{2048, 2048, 2048},
+			want:   []string{"/town/daemon/daemon.log@2048"},
+		},
+		{
+			name:   "a different window is read again",
+			bounds: []int64{2048, 1024},
+			want:   []string{"/town/daemon/daemon.log@2048", "/town/daemon/daemon.log@1024"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			var asked []string
+			env := Env{Tail: func(path string, maxBytes int64) ([]byte, error) {
+				mu.Lock()
+				asked = append(asked, fmt.Sprintf("%s@%d", path, maxBytes))
+				mu.Unlock()
+				return []byte("daemon: patrol tick complete\n"), nil
+			}}
+			sources := make([]Source, len(tc.bounds))
+			for i, bound := range tc.bounds {
+				sources[i] = sourceFunc{group: fmt.Sprintf("g%d", i), fn: func(_ context.Context, env Env) (map[string]any, error) {
+					if _, err := env.Tail("/town/daemon/daemon.log", bound); err != nil {
+						return nil, err
+					}
+					return map[string]any{"ok": true}, nil
+				}}
+			}
+			rec := Collect(context.Background(), env, sources, noDeadline)
+			if len(rec.Errors) != 0 {
+				t.Fatalf("Errors = %v, want none", rec.Errors)
+			}
+			mu.Lock()
+			got := append([]string(nil), asked...)
+			mu.Unlock()
+			// The sources run at once, so the order the reads were asked in is
+			// not the contract; how many, and for what, is.
+			sort.Strings(got)
+			want := append([]string(nil), tc.want...)
+			sort.Strings(want)
+			if strings.Join(got, " ") != strings.Join(want, " ") {
+				t.Errorf("Tail reads = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
