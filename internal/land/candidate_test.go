@@ -59,12 +59,6 @@ type fakeForgejo struct {
 	runsErr  error
 	jobs     []forgejo.ActionRunJob
 	log      string
-	// fullLog answers a fetch wider than the tail cap; empty means the server
-	// returns log whatever the cap.
-	fullLog string
-	// fullLogErr fails only that wider fetch, so a test drives the second read
-	// failing while the tail the gate already holds stands (gt-wwqx8).
-	fullLogErr error
 	// limits is the maxBytes of every log fetch, in order: what the gate asked
 	// the server for.
 	limits []int64
@@ -110,19 +104,18 @@ func (f *fakeForgejo) ListRunJobs(context.Context, string, string, int64) ([]for
 	return f.jobs, nil
 }
 
+// JobLogsTail is the server's read of a job log's last maxBytes bytes.
 func (f *fakeForgejo) JobLogsTail(_ context.Context, _, _ string, _ int64, maxBytes int64) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.limits = append(f.limits, maxBytes)
-	if maxBytes > candidateTailBytes {
-		if f.fullLogErr != nil {
-			return "", f.fullLogErr
-		}
-		if f.fullLog != "" {
-			return f.fullLog, f.logErr
-		}
+	if f.logErr != nil {
+		return "", f.logErr
 	}
-	return f.log, f.logErr
+	if int64(len(f.log)) <= maxBytes {
+		return f.log, nil
+	}
+	return f.log[int64(len(f.log))-maxBytes:], nil
 }
 
 func (f *fakeForgejo) DeleteBranch(_ context.Context, _, _, branch string) error {
@@ -369,8 +362,8 @@ func TestCandidateGateRedCarriesTheJobLogTail(t *testing.T) {
 	if !strings.Contains(res.Tail, "--- FAIL: TestThing") {
 		t.Fatalf("tail %q; want the failing job's log", res.Tail)
 	}
-	if len(client.limits) != 1 || client.limits[0] != candidateTailBytes {
-		t.Fatalf("log fetches %v; a tail that names the failure needs no second fetch", client.limits)
+	if !slices.Equal(client.limits, []int64{candidateFullLogBytes}) {
+		t.Fatalf("log fetches %v; want the one read at the full-log cap", client.limits)
 	}
 }
 
@@ -438,26 +431,41 @@ func TestCandidateGateDiscardLogsAFailedDelete(t *testing.T) {
 	}
 }
 
-// TestCandidateGateFetchesTheWholeLogWhenTheTailHidesTheFailure: the failure
-// goes in the note even when it sits far enough from the end that the byte cap
+// TestCandidateGateNoteNamesAFailurePastTheTailCap: the failure goes in the
+// note even when it sits far enough from the end that the excerpt's tail cap
 // cuts it out. go test prints its packages in order, so a 16 KiB tail is
 // passing packages and the note would name no failure at all (gt-fn9e6.25).
-func TestCandidateGateFetchesTheWholeLogWhenTheTailHidesTheFailure(t *testing.T) {
+func TestCandidateGateNoteNamesAFailurePastTheTailCap(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
-		fullLog string
+		log     string
 		want    string
+		notWant string
 	}{
 		{
-			name:    "the whole log names the failure",
-			fullLog: gateJobLog("⭐ Run Main actions/checkout@v4", "--- FAIL: TestRunSync_KillsDescendants (0.03s)", "FAIL\tgithub.com/x/hooks\t0.4s", "ok  \tgithub.com/x/zzz\t0.1s"),
-			want:    "TestRunSync_KillsDescendants",
+			name: "the log names the failure above the tail",
+			log:  gateLogPastTheTailCap(redGateLog()),
+			want: "TestThing",
 		},
 		{
-			name:    "a whole log that names none leaves the tail standing",
-			fullLog: gateJobLog("⭐ Run Main actions/checkout@v4", "ok  \tgithub.com/x/zzz\t0.1s"),
-			want:    "ok  \tgithub.com/x/zzz\t0.1s",
+			// The verdict rested on the failure in the tail, so that is the one
+			// the note carries: an earlier one would send the polecat to a
+			// failure this red already answered.
+			name: "the tail's failure is the note's, not an earlier one",
+			log: gateJobLog(
+				"⭐ Run Main actions/checkout@v4", "--- FAIL: TestEarly (0.01s)", "FAIL\tgithub.com/x/a\t0.1s") +
+				strings.Repeat(gateJobLog("ok  \tgithub.com/x/filler\t0.1s"), candidateTailBytes/40+1) +
+				gateJobLog("--- FAIL: TestLate (0.02s)", "FAIL\tgithub.com/x/z\t0.1s"),
+			want:    "TestLate",
+			notWant: "TestEarly",
+		},
+		{
+			name: "a log that names none leaves its last lines standing",
+			log: gateLogPastTheTailCap(gateJobLog(
+				"⭐ Run Main actions/checkout@v4", "ok  \tgithub.com/x/zzz\t0.1s")) +
+				gateJobLog("the last line the note falls back to"),
+			want: "the last line the note falls back to",
 		},
 	}
 	for _, tt := range tests {
@@ -469,8 +477,7 @@ func TestCandidateGateFetchesTheWholeLogWhenTheTailHidesTheFailure(t *testing.T)
 				statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
 				runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
 				jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
-				log:      gateJobLog("⭐ Run Main actions/checkout@v4", "ok  \tgithub.com/x/zzz\t0.1s"),
-				fullLog:  tt.fullLog,
+				log:      tt.log,
 			}
 			res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
 			if res.State != CandidateFailed {
@@ -479,8 +486,47 @@ func TestCandidateGateFetchesTheWholeLogWhenTheTailHidesTheFailure(t *testing.T)
 			if !strings.Contains(res.Tail, tt.want) {
 				t.Fatalf("tail %q; want it to carry %q", res.Tail, tt.want)
 			}
-			if len(client.limits) != 2 || client.limits[0] != candidateTailBytes || client.limits[1] != candidateFullLogBytes {
-				t.Fatalf("log fetches %v; want the capped tail then the whole log", client.limits)
+			if tt.notWant != "" && strings.Contains(res.Tail, tt.notWant) {
+				t.Fatalf("tail %q; want none of %q", res.Tail, tt.notWant)
+			}
+			if !slices.Equal(client.limits, []int64{candidateFullLogBytes}) {
+				t.Fatalf("log fetches %v; want the one read at the full-log cap", client.limits)
+			}
+		})
+	}
+}
+
+// TestCandidateGateCappedLogCannotSayTheRunnerNeverStarted: the step marker is
+// at the log's head, so only a read that reached the log's start may report the
+// runner-never-started signature. A read cut at candidateFullLogBytes is a
+// verdict on the work (gt-fn9e6.30, gt-zua7o).
+func TestCandidateGateCappedLogCannotSayTheRunnerNeverStarted(t *testing.T) {
+	t.Parallel()
+	// A job log past the full cap with no step marker: the gate cannot see its
+	// head, so it cannot say the runner never started a step.
+	filler := strings.Repeat(gateJobLog("ok  \tgithub.com/x/filler\t0.1s"), candidateFullLogBytes/40+1)
+	tests := []struct {
+		name string
+		log  string
+		want CandidateState
+	}{
+		{name: "a whole log with no step marker is infrastructure", log: gateJobLog("make gate", "--- FAIL: TestThing (0.01s)"), want: CandidateSilent},
+		{name: "a log cut at the cap is a verdict on the work", log: filler + gateJobLog("--- FAIL: TestThing (0.01s)"), want: CandidateFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+			client := &fakeForgejo{
+				statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
+				runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
+				jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
+				log:      tt.log,
+			}
+			res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+			if res.State != tt.want {
+				t.Fatalf("state = %v (err %v); want %v", res.State, res.Err, tt.want)
 			}
 		})
 	}
@@ -686,27 +732,19 @@ func passingGatePackages() []string {
 	return lines
 }
 
-// TestCandidateGateWidensPastACutRuleBlock: the byte cap can cut a unit-tier
-// report below its header, so the tail holds the report's guidance text and
-// its closing rule line and no word of what failed. A rule line names no
-// failure by itself, so the gate widens once and the note carries the report's
-// own line (gt-hqw8m).
-func TestCandidateGateWidensPastACutRuleBlock(t *testing.T) {
+// TestCandidateGateNoteNamesAReportCutBelowItsHeader: the excerpt's tail cap can
+// cut a unit-tier report below its header, so the tail holds the report's
+// guidance text and its closing rule line and no word of what failed. A rule
+// line names no failure by itself, so the note is read from the whole log and
+// carries the report's own line (gt-hqw8m).
+func TestCandidateGateNoteNamesAReportCutBelowItsHeader(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
 	rule := strings.Repeat("=", 72)
-	var tail strings.Builder
-	for tail.Len() < candidateTailBytes {
-		tail.WriteString(gateJobLog("ok  \tgithub.com/x/filler\t0.1s"))
-	}
-	tail.WriteString(gateJobLog(
-		"context, close its channel) and wait for it. \"created by\" names the",
-		"function that started it (docs/testing.md, \"The rules\").",
-		rule,
-	))
-	full := gateJobLog(append([]string{
-		runMainMarker + " actions/checkout@v4",
+	var log strings.Builder
+	log.WriteString(gateJobLog(
+		runMainMarker+" actions/checkout@v4",
 		"ok  \tgithub.com/x/aaa\t0.1s",
 		"",
 		rule,
@@ -716,18 +754,22 @@ func TestCandidateGateWidensPastACutRuleBlock(t *testing.T) {
 		"example.com/pkg.(*cache).enqueue(0xc0000b4000)",
 		"\t/src/pkg/cache.go:41 +0x2c",
 		"",
-		"A goroutine a test starts, or starts through the code under test, must",
-		"have returned by the time the test ends: stop it in t.Cleanup (cancel its",
+	))
+	// The header goes further from the end than the excerpt's tail cap reaches,
+	// so only the whole log names it.
+	for log.Len() < candidateTailBytes {
+		log.WriteString(gateJobLog("ok  \tgithub.com/x/filler\t0.1s"))
+	}
+	log.WriteString(gateJobLog(
 		"context, close its channel) and wait for it. \"created by\" names the",
 		"function that started it (docs/testing.md, \"The rules\").",
 		rule,
-	}, passingGatePackages()...)...)
+	))
 	client := &fakeForgejo{
 		statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
 		runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
 		jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
-		log:      tail.String(),
-		fullLog:  full,
+		log:      log.String(),
 	}
 	res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
 	if res.State != CandidateFailed {
@@ -736,8 +778,8 @@ func TestCandidateGateWidensPastACutRuleBlock(t *testing.T) {
 	if want := "GOROUTINE LEAK: 1 goroutine(s) outlived the unit tests"; !strings.Contains(res.Tail, want) {
 		t.Fatalf("tail %q; want it to carry %q", res.Tail, want)
 	}
-	if !slices.Equal(client.limits, []int64{candidateTailBytes, candidateFullLogBytes}) {
-		t.Fatalf("log fetches %v; want the cut tail then the whole log", client.limits)
+	if !slices.Equal(client.limits, []int64{candidateFullLogBytes}) {
+		t.Fatalf("log fetches %v; want the one read at the full-log cap", client.limits)
 	}
 }
 

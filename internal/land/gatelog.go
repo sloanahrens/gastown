@@ -5,16 +5,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
 	// GateLogRetention is how long a rejected gate's kept job log survives: a
-	// file older than this is deleted when the next log is written.
+	// log whose name dates it more than this before the new one's clock is
+	// deleted when the next log is written.
 	GateLogRetention = 14 * 24 * time.Hour
 	// gateLogExt is the suffix of a kept log. The prune touches nothing else.
 	gateLogExt = ".log"
+	// gateLogNanoFloor is the smallest stamp a kept log's name can carry in
+	// nanoseconds. A unix time in seconds stays below it for tens of thousands
+	// of years, a unix time in nanoseconds passed it in 1970, so one comparison
+	// tells the two resolutions apart (gt-zua7o).
+	gateLogNanoFloor = int64(1_000_000_000_000)
 )
 
 // GateLogDir is the directory a rig's kept gate logs live in:
@@ -76,9 +83,14 @@ func (fs gateLogFS) rm(path string) error {
 }
 
 // keepGateLog writes log to dir as <short-sha>-<unix-time>.log, deletes the
-// logs whose mtime is more than GateLogRetention before now, and returns the
-// path written. now is the wall clock the file name and the retention share:
-// a test with a fixed clock dates the files it stages in that same clock.
+// logs whose name dates them more than GateLogRetention before now, and returns
+// the path written. now is the one clock the file name and the retention share,
+// so the prune reads the time the name carries and never a filesystem mtime
+// (gt-zua7o).
+//
+// Two rejections of the same commit in the same second name one file: the
+// later log replaces the earlier, which is that same commit's gate job log. A
+// different commit carries a different short sha.
 //
 // A write that fails returns no path: the caller's rejection stands and has no
 // log to name. A prune that fails after the write returns the path with the
@@ -87,10 +99,7 @@ func keepGateLog(fs gateLogFS, dir, sha, log string, now time.Time) (string, err
 	if err := fs.mkdir(dir, 0o700); err != nil {
 		return "", fmt.Errorf("creating the gate log directory %s: %w", dir, err)
 	}
-	// The unix time in nanoseconds: it is the unix time the bead names, at a
-	// resolution where two rejections in one second cannot overwrite each
-	// other's log (gt-wwqx8).
-	name := fmt.Sprintf("%s-%d%s", shortSHA(sha), now.UnixNano(), gateLogExt)
+	name := fmt.Sprintf("%s-%d%s", shortSHA(sha), now.Unix(), gateLogExt)
 	path := filepath.Join(dir, name)
 	// The log is private: CI output can carry what a failing step printed,
 	// environment lines included.
@@ -103,9 +112,12 @@ func keepGateLog(fs gateLogFS, dir, sha, log string, now time.Time) (string, err
 	return path, nil
 }
 
-// pruneGateLogs deletes the kept logs in dir that are older than
-// GateLogRetention. A file it cannot read or remove is reported and the rest
-// are still tried, so one stuck file never blocks the cleanup of the others.
+// pruneGateLogs deletes the kept logs in dir that are more than
+// GateLogRetention before now, by the time their name carries: the clock that
+// named the log is the clock that dates it, never a filesystem mtime from
+// another one (gt-zua7o). A name that dates nothing is a file the gate did not
+// write and is left alone. A file it cannot remove is reported and the rest are
+// still tried, so one stuck file never blocks the cleanup of the others.
 func pruneGateLogs(fs gateLogFS, dir string, now time.Time) error {
 	entries, err := fs.list(dir)
 	if err != nil {
@@ -116,12 +128,8 @@ func pruneGateLogs(fs gateLogFS, dir string, now time.Time) error {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), gateLogExt) {
 			continue
 		}
-		info, err := entry.Info()
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		if now.Sub(info.ModTime()) <= GateLogRetention {
+		at, ok := gateLogTime(entry.Name())
+		if !ok || now.Sub(at) <= GateLogRetention {
 			continue
 		}
 		if err := fs.rm(filepath.Join(dir, entry.Name())); err != nil {
@@ -129,4 +137,26 @@ func pruneGateLogs(fs gateLogFS, dir string, now time.Time) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// gateLogTime is when a kept log's name says it was written: the unix time
+// keepGateLog puts after the short sha, in nanoseconds for the logs kept before
+// gt-zua7o. It reports false for a name that carries none.
+func gateLogTime(name string) (time.Time, bool) {
+	stamp := strings.TrimSuffix(name, gateLogExt)
+	dash := strings.LastIndexByte(stamp, '-')
+	if dash < 0 {
+		return time.Time{}, false
+	}
+	v, err := strconv.ParseInt(stamp[dash+1:], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	// A legacy name read as seconds would date its log to the year 58 million,
+	// so the prune would keep it forever. Reading both resolutions is what
+	// retires those files (gt-zua7o).
+	if v >= gateLogNanoFloor {
+		return time.Unix(0, v), true
+	}
+	return time.Unix(v, 0), true
 }
