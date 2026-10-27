@@ -937,10 +937,24 @@ func (s *attentionSources) escalationOwner(ctx context.Context, esc *beads.Issue
 	if related == "" || s.escalationBead == nil {
 		return "", ""
 	}
+	// related_bead is author-written text and it is handed to bd as an
+	// argument, so a value not shaped like a bead ID is refused here rather
+	// than sent to bd show: a leading '-' would read as a flag and a sentence
+	// would read as a bead that does not exist (gt-sbaqz).
+	if !beads.IsBeadIDToken(related) {
+		s.d.logger.Printf("attention: escalation %s: related_bead %q is not a bead ID, not read", esc.ID, related)
+		return "", ""
+	}
 	is, err := s.escalationBead(ctx, related)
-	if err != nil || is == nil {
+	if err != nil {
 		// The escalation is the alarm; naming its bead's owner is what is lost
 		// when that read fails, so the item is raised without the owner line.
+		// The failure is logged rather than dropped: a routing or store fault
+		// that leaves every escalation ownerless must be visible (gt-sbaqz).
+		s.d.logger.Printf("attention: escalation %s: reading related bead %s: %v", esc.ID, related, err)
+		return "", ""
+	}
+	if is == nil {
 		return "", ""
 	}
 	owner = strings.TrimSpace(is.Assignee)

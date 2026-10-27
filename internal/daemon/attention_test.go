@@ -291,6 +291,87 @@ func TestAttentionCollector_EscalationKeptWhenRelatedBeadReadFails(t *testing.T)
 	if items[0].Owner != "" || items[0].WaitingOn != "" {
 		t.Errorf("item owner %q waiting %q, want neither", items[0].Owner, items[0].WaitingOn)
 	}
+	// The lost read is said out loud: an ownerless escalation must not hide a
+	// store or routing fault (gt-sbaqz).
+	if got, want := f.logs.String(), "attention: escalation hq-9: reading related bead gt-abc: bd show: connection refused\n"; got != want {
+		t.Errorf("log = %q, want %q", got, want)
+	}
+}
+
+// related_bead is author-written text that ends up as a bd argument, so a value
+// not shaped like a bead ID is refused before the read: a leading '-' would
+// parse as a bd flag, and a sentence would look like a bead that is missing.
+func TestAttentionCollector_EscalationRefusesANonBeadRelatedValue(t *testing.T) {
+	t.Parallel()
+	cases := []string{"--help", "-x", "gt abc", "gt-abc --status=closed", "notes: gt-abc"}
+	for _, related := range cases {
+		t.Run(related, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC))
+			f.src.escalations = func(context.Context) ([]*beads.Issue, error) {
+				return []*beads.Issue{{
+					ID: "hq-9", Title: "gt-abc: gate red",
+					Description: "severity: high\nrelated_bead: " + related + "\n",
+				}}, nil
+			}
+			var read []string
+			f.src.escalationBead = func(_ context.Context, id string) (*beads.Issue, error) {
+				read = append(read, id)
+				return &beads.Issue{ID: id, Assignee: "dipper"}, nil
+			}
+
+			items := f.collect(t, f.src.collectEscalations)
+			if len(read) != 0 {
+				t.Errorf("read %v, want no read of a value that is not a bead ID", read)
+			}
+			if len(items) != 1 || items[0].Key != "esc:hq-9" {
+				t.Fatalf("items = %+v, want the escalation raised", items)
+			}
+			if items[0].Owner != "" || items[0].WaitingOn != "" {
+				t.Errorf("item owner %q waiting %q, want neither", items[0].Owner, items[0].WaitingOn)
+			}
+			if !strings.Contains(f.logs.String(), "is not a bead ID, not read") {
+				t.Errorf("log = %q, want the refused value named", f.logs.String())
+			}
+		})
+	}
+}
+
+// The production escalationBead closure routes the read by the related bead's
+// prefix: the bead lives in its rig's database, not the town's, and a prefix no
+// route names opens no read at all.
+func TestAttentionSources_EscalationBeadReadsTheBeadsOwnRig(t *testing.T) {
+	t.Parallel()
+	townRoot, rigBeads := routedTown(t)
+	bd := newWorkBD(t)
+	bd.onlyIn = rigBeads
+	bd.seed("gt-abc", "open", time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC))
+	d := &Daemon{
+		config:        &Config{TownRoot: townRoot},
+		logger:        log.New(io.Discard, "", 0),
+		openWorkBeads: bd.open,
+		execCmd:       bd.run,
+	}
+	src := d.attentionSources(time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC))
+
+	is, err := src.escalationBead(context.Background(), "gt-abc")
+	if err != nil {
+		t.Fatalf("escalationBead(gt-abc): %v", err)
+	}
+	if is == nil || is.ID != "gt-abc" {
+		t.Fatalf("escalationBead(gt-abc) = %+v, want the bead from the gt- rig's database", is)
+	}
+	if got, want := bd.calls(t), "show gt-abc"; got != want {
+		t.Errorf("reads = %q, want %q", got, want)
+	}
+
+	opened := len(bd.envs)
+	if is, err := src.escalationBead(context.Background(), "zzz-abc"); err != nil || is != nil {
+		t.Errorf("escalationBead(zzz-abc) = %+v, %v; want no bead and no error", is, err)
+	}
+	if len(bd.envs) != opened {
+		t.Errorf("opened %d reads, want none for a prefix no route names", len(bd.envs)-opened)
+	}
 }
 
 // reworkNotes builds a bead's notes with n MERGE REJECTION blocks.

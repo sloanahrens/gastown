@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -251,14 +253,17 @@ func TestShadowRunBoundsTheSliceAndMovesTheCursor(t *testing.T) {
 	}
 }
 
-// TestShadowRunMovesNoCursorOnAQuietDay pins the quiet run's note: nothing was
-// reviewed, so no cursor line is written and the next run asks for its window
-// again rather than resuming from a pinned start.
+// TestShadowRunMovesNoCursorOnAQuietDay pins the quiet run's note and its log
+// line: nothing was reviewed, so no cursor line is written and the next run
+// asks for its window again rather than resuming from a pinned start. The log
+// says the cursor did not move, the way the note does (gt-80jmz).
 func TestShadowRunMovesNoCursorOnAQuietDay(t *testing.T) {
 	t.Parallel()
 	f := &fakeScheduledRunner{createID: "gt-shadow1", now: shadowNow}
 	e := shadowEntry()
 	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, f)
+	logs := &bytes.Buffer{}
+	d.logger = log.New(logs, "", 0)
 	f.beads = []scheduledBead{{ID: "gt-prev", Status: "closed", CreatedAt: shadowNow.Add(-2 * 7 * 24 * time.Hour), Notes: shadowCursor}}
 	// A ledger whose only record keeps no risk path: nothing to review.
 	writeShadowLedger(t, d.config.TownRoot, e.Rig,
@@ -276,6 +281,9 @@ func TestShadowRunMovesNoCursorOnAQuietDay(t *testing.T) {
 	}
 	if want, got := "reviewed_until_new=2026-10-26T02:00:00Z", noteLine(note, "reviewed_until_new="); got != want {
 		t.Errorf("%s, want the window start %q", got, want)
+	}
+	if got, want := logs.String(), "scheduled_slings: "+e.Name+": shadow run gt-shadow1 reviewed no landings and moved no cursor; nothing was slung\n"; got != want {
+		t.Errorf("log = %q, want %q", got, want)
 	}
 }
 

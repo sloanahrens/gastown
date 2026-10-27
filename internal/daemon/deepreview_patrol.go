@@ -320,6 +320,13 @@ func (d *Daemon) runShadowDeepReview(ctx context.Context, r scheduledSlingRunner
 		// one wait but not the plan.
 		return fmt.Errorf("deep-review shadow run bead %s recorded its plan and could not be closed: %w", id, err)
 	}
+	if len(s.Lines) == 0 {
+		// A run that reviewed nothing writes no cursor line (see
+		// shadowPlanNote), so the next run reads the same window. The log
+		// must not claim the move the note did not make (gt-80jmz).
+		d.logger.Printf("scheduled_slings: %s: shadow run %s reviewed no landings and moved no cursor; nothing was slung", e.Name, id)
+		return nil
+	}
 	d.logger.Printf("scheduled_slings: %s: shadow run %s reviewed %d landing(s) with %d left for the next run, and moved the cursor to %s; nothing was slung", e.Name, id, len(s.Lines), s.Skipped, s.Until)
 	return nil
 }
