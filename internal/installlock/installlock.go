@@ -20,10 +20,11 @@
 //
 // Acquire takes the same lock for a caller that keeps running: the Go installer
 // holds it from the binary swap to the end of the run (gt-tpg0p.13). Its lock
-// file is close-on-exec, so no command the caller starts inherits it; the lock
-// is the caller's alone, and its release drops the lock for any process that
-// still holds the open file description, such as a child forked in the instant
-// before its exec (gt-ubj9e).
+// file is close-on-exec, so no command the caller starts inherits it and no
+// descendant is meant to hold the lock. A process can still hold the open file
+// description by accident, a child forked in the instant before its exec, and
+// the release drops the lock for it as well, so the lock ends with the release
+// and never later (gt-ubj9e).
 package installlock
 
 import (
