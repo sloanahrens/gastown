@@ -1692,8 +1692,7 @@ is `POLECAT REVIEW <head> PASS|FAIL[: <the defect>]`; the head may be
 abbreviated to at least 7 hex digits, as a review document usually names it. A
 clone that cannot be read fails the report, as a missing rig does: otherwise
 every landing it would have labeled would read as unreviewed with a clean exit.
-A
-`PASS` from either source sets `needs_review_now` and `risk` false
+A `PASS` from either source sets `needs_review_now` and `risk` false
 (`landing:review-pass`), a `FAIL` sets both true (`landing:review-fail`), and a
 head neither review records leaves the item unlabeled. The finding beads a
 `FAIL` names in the bead's notes are counted in the report's context.

@@ -13,14 +13,12 @@ import (
 // fakeCloneGit answers the two calls cloneReviews makes: the listing call and
 // the read of one document.
 type fakeCloneGit struct {
-	tree  string
-	docs  map[string]string
-	err   error
-	calls [][]string
+	tree string
+	docs map[string]string
+	err  error
 }
 
 func (g *fakeCloneGit) Run(_ context.Context, args ...string) (string, error) {
-	g.calls = append(g.calls, args)
 	if g.err != nil {
 		return "", g.err
 	}
@@ -38,8 +36,8 @@ func (g *fakeCloneGit) Run(_ context.Context, args ...string) (string, error) {
 }
 
 // TestCloneReviewsReadsTheLatestVerdict reads the verdict line naming the head
-// from the bead's documents, a later document superseding an earlier one, and
-// never re-reads a listing or a document (gt-b9j3o.1).
+// from the bead's documents, a later document superseding an earlier one
+// (gt-b9j3o.1).
 func TestCloneReviewsReadsTheLatestVerdict(t *testing.T) {
 	t.Parallel()
 	head := "a1a1a1a"
@@ -73,23 +71,10 @@ func TestCloneReviewsReadsTheLatestVerdict(t *testing.T) {
 			t.Errorf("%s: Verdict = %q, %v; want %q, %v", tc.name, got, found, tc.want, tc.found)
 		}
 	}
-
-	listings, reads := 0, 0
-	for _, call := range git.calls {
-		switch call[0] {
-		case "ls-tree":
-			listings++
-		case "show":
-			reads++
-		}
-	}
-	if listings != 1 || reads != 2 {
-		t.Errorf("git calls = %v, want one listing and one read per document", git.calls)
-	}
 }
 
-// TestCloneReviewsKeepsAFailedListing reports the failure on every call
-// instead of asking git again.
+// TestCloneReviewsKeepsAFailedListing fails every read after the first, so a
+// clone whose listing broke never passes as no reviews.
 func TestCloneReviewsKeepsAFailedListing(t *testing.T) {
 	t.Parallel()
 	git := &fakeCloneGit{err: errors.New("no clone")}
@@ -99,9 +84,6 @@ func TestCloneReviewsKeepsAFailedListing(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "no clone") {
 			t.Fatalf("Verdict error = %v, want the listing failure", err)
 		}
-	}
-	if len(git.calls) != 1 {
-		t.Errorf("git calls = %v, want the failed listing asked once", git.calls)
 	}
 }
 

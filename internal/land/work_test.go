@@ -233,6 +233,13 @@ func TestPolecatReviewVerdict(t *testing.T) {
 	if _, ok := PolecatReviewVerdict(PolecatReviewMarker+" "+head+" PASS", ""); ok {
 		t.Error("an empty head must not be answered")
 	}
+	// A head under seven digits names too many commits to match a review line,
+	// which itself may abbreviate only to seven.
+	for _, abbrev := range []string{head[:3], head[:6]} {
+		if _, ok := PolecatReviewVerdict(PolecatReviewMarker+" "+head+" PASS", abbrev); ok {
+			t.Errorf("a head abbreviated to %q matched the review, want no match under seven digits", abbrev)
+		}
+	}
 }
 
 // OverseerReviewFindings reads the finding beads off the latest review line

@@ -47,12 +47,20 @@ const (
 
 func init() {
 	Register(LandingBattery, func(townRoot string) Adapter {
-		return &landingAdapter{
-			log:     landing.LogPath(townRoot),
-			notes:   &townNotes{town: townRoot, stores: map[string]*beads.Beads{}},
-			reviews: &cloneReviews{git: &townClone{town: townRoot}},
-		}
+		return newLandingAdapter(townRoot, &townNotes{town: townRoot, stores: map[string]*beads.Beads{}})
 	})
+}
+
+// newLandingAdapter builds the landing adapter for the town at townRoot, with
+// notes as its bead reader: the town's own store in the battery, a fake in a
+// test. Its review documents always come from the town's bare clone, so the
+// source a build reads is the one a test drives.
+func newLandingAdapter(townRoot string, notes landingNotes) *landingAdapter {
+	return &landingAdapter{
+		log:     landing.LogPath(townRoot),
+		notes:   notes,
+		reviews: &cloneReviews{git: &townClone{town: townRoot}},
+	}
 }
 
 // landingNotes reads one bead's notes from its rig's beads store.
@@ -135,8 +143,9 @@ func (t *townNotes) store(rig string) (*beads.Beads, error) {
 type landingAdapter struct {
 	log   string
 	notes landingNotes
-	// reviews reads the polecat review documents. A nil source leaves an item
-	// without an overseer verdict unlabeled.
+	// reviews reads the polecat review documents. A nil source fails the
+	// report: an item without an overseer verdict would otherwise read as
+	// unreviewed with a clean exit.
 	reviews reviewDocs
 
 	// findings gathers the finding beads Label sees, for Context.
@@ -312,11 +321,11 @@ func (a *landingAdapter) reviewVerdict(ctx context.Context, notes, bead, head st
 }
 
 // polecatVerdict returns the verdict the bead's polecat review documents record
-// for head, in the review lines' words (PASS or FAIL). No review source leaves
-// the item without one.
+// for head, in the review lines' words (PASS or FAIL). No review source is an
+// error, not an unlabeled item: it would pass as unreviewed with a clean exit.
 func (a *landingAdapter) polecatVerdict(ctx context.Context, bead, head string) (string, bool, error) {
 	if a.reviews == nil {
-		return "", false, nil
+		return "", false, fmt.Errorf("reading %s's polecat review: no review source", bead)
 	}
 	verdict, ok, err := a.reviews.Verdict(ctx, bead, head)
 	if err != nil {

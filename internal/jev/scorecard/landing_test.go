@@ -237,6 +237,35 @@ func TestLandingLabelFailsWhenTheNotesCannotBeRead(t *testing.T) {
 	}
 }
 
+// TestLandingLabelFailsWithNoReviewSource fails a landing that has no overseer
+// verdict and no review source to ask, rather than reading it as unreviewed
+// with a clean exit (gt-b9j3o.1).
+func TestLandingLabelFailsWithNoReviewSource(t *testing.T) {
+	t.Parallel()
+	a := &landingAdapter{notes: &fakeLandingNotes{byBead: map[string]string{"gt-a": ""}}}
+	_, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
+	if err == nil || !strings.Contains(err.Error(), "no review source") {
+		t.Fatalf("Label error = %v, want the missing review source", err)
+	}
+}
+
+// TestLandingReviewsReadFromTheTownClone drives the review source the battery
+// builds: a landing with no overseer verdict is read from the review documents
+// in the town's clone, so a clone that cannot be opened fails the report and
+// names the town it was opened for (gt-b9j3o.1).
+func TestLandingReviewsReadFromTheTownClone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	a := newLandingAdapter(town, &fakeLandingNotes{byBead: map[string]string{"gt-a": ""}})
+	_, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
+	if err == nil {
+		t.Fatal("Label succeeded, want the unopenable clone to fail it")
+	}
+	if want := filepath.Join(town, "mayor", "rigs.json"); !strings.Contains(err.Error(), want) {
+		t.Fatalf("Label error = %v, want it to name the town's clone source %s", err, want)
+	}
+}
+
 // TestLandingLabelLeavesAMissingBeadUnlabeled drives the real notes store over
 // a rig that has a beads directory, with bd stubbed on PATH to answer not
 // found, so the bead's absence comes through the store rather than a fake.
@@ -462,7 +491,11 @@ func TestLandingScorecardPrintsPerQuestionBlocks(t *testing.T) {
 	if err := os.WriteFile(logPath, []byte(strings.Join(landingLog, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a := &landingAdapter{log: logPath, notes: &fakeLandingNotes{byBead: landingNotesByBead}}
+	a := &landingAdapter{
+		log:     logPath,
+		notes:   &fakeLandingNotes{byBead: landingNotesByBead},
+		reviews: &fakeReviewDocs{},
+	}
 
 	rep, err := Build(context.Background(), a, time.Time{})
 	if err != nil {

@@ -348,8 +348,16 @@ func PolecatReviewVerdict(doc, head string) (string, bool) {
 	return verdict, found
 }
 
+// minHeadAbbrev is the shortest abbreviation namesHead matches: the seven hex
+// digits git's own abbreviation starts at. A shorter one names many commits,
+// so it cannot show that a review read the head.
+const minHeadAbbrev = 7
+
 // namesHead reports whether sha and head name the same commit, either whole or
-// as the shorter one's prefix.
+// as the other's prefix of at least seven digits.
 func namesHead(sha, head string) bool {
+	if len(sha) < minHeadAbbrev || len(head) < minHeadAbbrev {
+		return false
+	}
 	return strings.HasPrefix(head, sha) || strings.HasPrefix(sha, head)
 }
