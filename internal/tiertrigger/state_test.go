@@ -40,13 +40,25 @@ func (f *fakeFiles) WriteFile(path string, data []byte) error {
 	return nil
 }
 
+// The fixture commits are object ids: a record holds one, and Changed refuses
+// anything else before it reaches git.
+const (
+	commit1    = "1111111111111111111111111111111111111111"
+	commit2    = "2222222222222222222222222222222222222222"
+	commit0    = "0000000000000000000000000000000000000000"
+	commitGone = "abcabcabcabcabcabcabcabcabcabcabcabcabca"
+)
+
 // fakeGit is the repository the due decision reads: changes and errs are keyed
 // by the commit a package recorded, so a test sees which base was asked for
-// and can fail one package's diff alone.
+// and can fail one package's diff alone. dirty and worktreeErr are the
+// checkout's uncommitted changes and their read failure.
 type fakeGit struct {
-	changes map[string][]string
-	errs    map[string]error
-	asked   []string
+	changes     map[string][]string
+	errs        map[string]error
+	asked       []string
+	dirty       []string
+	worktreeErr error
 }
 
 func (g *fakeGit) DiffNameOnly(base, _ string) ([]string, error) {
@@ -55,6 +67,13 @@ func (g *fakeGit) DiffNameOnly(base, _ string) ([]string, error) {
 		return nil, err
 	}
 	return g.changes[base], nil
+}
+
+func (g *fakeGit) Worktree() ([]string, error) {
+	if g.worktreeErr != nil {
+		return nil, g.worktreeErr
+	}
+	return g.dirty, nil
 }
 
 // rec is a record from a run this morning at 04:00, after the daily window
@@ -173,6 +192,48 @@ func TestStatePath(t *testing.T) {
 	}
 }
 
+// TestRunPath pins the run's start state path, spelled out rather than rebuilt
+// from the helper it exercises.
+func TestRunPath(t *testing.T) {
+	t.Parallel()
+	want := "/town/.runtime/tiertrigger/integration-docker.run.json"
+	if got := RunPath("/town", "integration-docker"); got != want {
+		t.Errorf("RunPath(/town, integration-docker) = %q; want %q", got, want)
+	}
+}
+
+func TestRunRoundTrip(t *testing.T) {
+	t.Parallel()
+	files := &fakeFiles{}
+	in := Run{Commit: commit1, Dirty: []string{"internal/beads/a.go"}}
+	if err := SaveRun(files, "/run.json", in); err != nil {
+		t.Fatalf("SaveRun(): %v", err)
+	}
+	got, err := LoadRun(files, "/run.json")
+	if err != nil {
+		t.Fatalf("LoadRun(): %v", err)
+	}
+	if got.Commit != in.Commit || strings.Join(got.Dirty, ",") != strings.Join(in.Dirty, ",") {
+		t.Errorf("LoadRun() = %+v; want %+v", got, in)
+	}
+
+	if _, err := LoadRun(&fakeFiles{}, "/missing.json"); !errors.Is(err, ErrNoRun) {
+		t.Errorf("LoadRun(missing) = %v; want ErrNoRun", err)
+	}
+	for name, files := range map[string]*fakeFiles{
+		"unparseable": {files: map[string][]byte{"/r.json": []byte("{")}},
+		"no commit":   {files: map[string][]byte{"/r.json": []byte("{}")}},
+		"unreadable":  {readErr: fs.ErrPermission},
+	} {
+		if _, err := LoadRun(files, "/r.json"); err == nil {
+			t.Errorf("LoadRun(%s) returned nil", name)
+		}
+	}
+	if err := SaveRun(&fakeFiles{writeErr: fs.ErrPermission}, "/x", in); err == nil {
+		t.Error("SaveRun() over an unwritable file returned nil")
+	}
+}
+
 // TestStoreOSFiles covers what the fake filesystem cannot: Save creates the
 // runtime directory, replaces the file without leaving its temp file behind,
 // and Load reads a missing file through the real os.ReadFile as an empty
@@ -226,24 +287,78 @@ func TestStoreOSFiles(t *testing.T) {
 func TestStateChanged(t *testing.T) {
 	t.Parallel()
 	st := State{}
-	st.Ran("internal/beads", "c1", at(t, 2026, 10, 25, 4, 0, 0))
-	g := &fakeGit{changes: map[string][]string{"c1": {"internal/beads/schema.go"}}}
-	got, err := st.Changed(g, "internal/beads")
-	if err != nil {
-		t.Fatalf("Changed(): %v", err)
+	st.Ran("internal/beads", commit1, at(t, 2026, 10, 25, 4, 0, 0))
+	tests := []struct {
+		name    string
+		git     *fakeGit
+		want    []string
+		wantErr string
+	}{
+		{
+			name: "the commits since the recorded run",
+			git:  &fakeGit{changes: map[string][]string{commit1: {"internal/beads/schema.go"}}},
+			want: []string{"internal/beads/schema.go"},
+		},
+		{
+			name: "an uncommitted change is code the tests build too",
+			git: &fakeGit{
+				changes: map[string][]string{commit1: {"internal/beads/schema.go"}},
+				dirty:   []string{"internal/cmd/root.go"},
+			},
+			want: []string{"internal/beads/schema.go", "internal/cmd/root.go"},
+		},
+		{
+			name:    "a diff that fails is an error",
+			git:     &fakeGit{errs: map[string]error{commit1: errors.New("bad object")}},
+			wantErr: "bad object",
+		},
+		{
+			name:    "a working tree that cannot be read is an error, not a clean tree",
+			git:     &fakeGit{worktreeErr: errors.New("index.lock exists")},
+			wantErr: "index.lock exists",
+		},
 	}
-	if len(got) != 1 || got[0] != "internal/beads/schema.go" {
-		t.Errorf("Changed() = %q; want the change since c1", got)
-	}
-	if len(g.asked) != 1 || g.asked[0] != "c1" {
-		t.Errorf("asked git for %q; want the recorded commit c1", g.asked)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := st.Changed(tc.git, "internal/beads")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Changed() = %q, %v; want error naming %q", got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Changed(): %v", err)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("Changed() = %q; want %q", got, tc.want)
+			}
+			if len(tc.git.asked) != 1 || tc.git.asked[0] != commit1 {
+				t.Errorf("asked git for %q; want the recorded commit %s", tc.git.asked, commit1)
+			}
+		})
 	}
 
-	if _, err := st.Changed(g, "internal/testutil"); !errors.Is(err, ErrNoRecord) {
+	if _, err := st.Changed(&fakeGit{}, "internal/testutil"); !errors.Is(err, ErrNoRecord) {
 		t.Errorf("Changed(no record) = %v; want ErrNoRecord", err)
 	}
-	if _, err := st.Changed(&fakeGit{errs: map[string]error{"c1": errors.New("bad object")}}, "internal/beads"); err == nil {
-		t.Error("Changed() over a failing git returned nil")
+}
+
+// TestChangedRefusesANonObjectID pins the state file as input: a record whose
+// commit is a flag or a revision expression is never handed to git, whose
+// argument list it would change.
+func TestChangedRefusesANonObjectID(t *testing.T) {
+	t.Parallel()
+	for _, commit := range []string{"--upload-pack=evil", "-n", "HEAD~1", "main", "c1", strings.Repeat("g", 40)} {
+		st := State{"internal/beads": Record{Commit: commit, At: at(t, 2026, 10, 25, 4, 0, 0)}}
+		g := &fakeGit{changes: map[string][]string{commit: {"internal/beads/x.go"}}}
+		if _, err := st.Changed(g, "internal/beads"); err == nil {
+			t.Errorf("Changed() over the recorded commit %q returned no error", commit)
+		}
+		if len(g.asked) != 0 {
+			t.Errorf("asked git for %q; a commit that is not an object id must not reach git", g.asked)
+		}
 	}
 }
 
@@ -255,7 +370,7 @@ func TestDue(t *testing.T) {
 	}
 	beads := Package{Name: "internal/beads", Triggers: []string{"internal/beads"}}
 	testutil := Package{Name: "internal/testutil", Triggers: []string{"internal/testutil", "go.mod"}}
-	yesterday := Record{Commit: "c0", At: at(t, 2026, 10, 24, 4, 0, 0)}
+	yesterday := Record{Commit: commit0, At: at(t, 2026, 10, 24, 4, 0, 0)}
 
 	tests := []struct {
 		name      string
@@ -281,27 +396,43 @@ func TestDue(t *testing.T) {
 		},
 		{
 			name:      "a change on a trigger path since the recorded commit runs it",
-			state:     State{"internal/beads": rec(t, "c1")},
+			state:     State{"internal/beads": rec(t, commit1)},
 			pkgs:      []Package{beads},
-			git:       &fakeGit{changes: map[string][]string{"c1": {"internal/beads/store/schema.go"}}},
+			git:       &fakeGit{changes: map[string][]string{commit1: {"internal/beads/store/schema.go"}}},
 			want:      []string{"internal/beads"},
-			wantAsked: []string{"c1"},
+			wantAsked: []string{commit1},
 		},
 		{
 			name:      "a change elsewhere since the recorded commit does not run it",
-			state:     State{"internal/beads": rec(t, "c1")},
+			state:     State{"internal/beads": rec(t, commit1)},
 			pkgs:      []Package{beads},
-			git:       &fakeGit{changes: map[string][]string{"c1": {"internal/cmd/root.go"}}},
+			git:       &fakeGit{changes: map[string][]string{commit1: {"internal/cmd/root.go"}}},
 			want:      nil,
-			wantAsked: []string{"c1"},
+			wantAsked: []string{commit1},
 		},
 		{
 			name:      "a change with nothing since the recorded commit does not run it",
-			state:     State{"internal/beads": rec(t, "c1")},
+			state:     State{"internal/beads": rec(t, commit1)},
 			pkgs:      []Package{beads},
-			git:       &fakeGit{changes: map[string][]string{"c1": nil}},
+			git:       &fakeGit{changes: map[string][]string{commit1: nil}},
 			want:      nil,
-			wantAsked: []string{"c1"},
+			wantAsked: []string{commit1},
+		},
+		{
+			name:      "an uncommitted change on a trigger path runs it with nothing committed",
+			state:     State{"internal/beads": rec(t, commit1)},
+			pkgs:      []Package{beads},
+			git:       &fakeGit{changes: map[string][]string{commit1: nil}, dirty: []string{"internal/beads/schema.go"}},
+			want:      []string{"internal/beads"},
+			wantAsked: []string{commit1},
+		},
+		{
+			name:      "a working tree that cannot be read runs that package",
+			state:     State{"internal/beads": rec(t, commit1)},
+			pkgs:      []Package{beads},
+			git:       &fakeGit{changes: map[string][]string{commit1: nil}, worktreeErr: errors.New("index.lock exists")},
+			want:      []string{"internal/beads"},
+			wantAsked: []string{commit1},
 		},
 		{
 			name:  "the daily window since the recorded run runs it without reading git",
@@ -312,47 +443,47 @@ func TestDue(t *testing.T) {
 		},
 		{
 			name:      "a run after the daily window does not run it again that day",
-			state:     State{"internal/beads": rec(t, "c1")},
+			state:     State{"internal/beads": rec(t, commit1)},
 			pkgs:      []Package{beads},
-			git:       &fakeGit{changes: map[string][]string{"c1": nil}},
+			git:       &fakeGit{changes: map[string][]string{commit1: nil}},
 			want:      nil,
-			wantAsked: []string{"c1"},
+			wantAsked: []string{commit1},
 		},
 		{
 			name: "each package reads the change since its own recorded commit",
 			state: State{
-				"internal/beads":    rec(t, "c1"),
-				"internal/testutil": rec(t, "c2"),
+				"internal/beads":    rec(t, commit1),
+				"internal/testutil": rec(t, commit2),
 			},
 			pkgs: []Package{beads, testutil},
 			git: &fakeGit{changes: map[string][]string{
-				"c1": {"internal/beads/schema.go"},
-				"c2": {"internal/cmd/root.go"},
+				commit1: {"internal/beads/schema.go"},
+				commit2: {"internal/cmd/root.go"},
 			}},
 			want:      []string{"internal/beads"},
-			wantAsked: []string{"c1", "c2"},
+			wantAsked: []string{commit1, commit2},
 		},
 		{
 			name:      "a record whose commit cannot be read runs that package",
-			state:     State{"internal/beads": rec(t, "c1")},
+			state:     State{"internal/beads": rec(t, commit1)},
 			pkgs:      []Package{beads},
-			git:       &fakeGit{errs: map[string]error{"c1": errors.New("bad object c1")}},
+			git:       &fakeGit{errs: map[string]error{commit1: errors.New("bad object c1")}},
 			want:      []string{"internal/beads"},
-			wantAsked: []string{"c1"},
+			wantAsked: []string{commit1},
 		},
 		{
 			name: "one unreadable record leaves the rest of the sweep going",
 			state: State{
-				"internal/beads":    rec(t, "c1"),
-				"internal/testutil": rec(t, "c2"),
+				"internal/beads":    rec(t, commit1),
+				"internal/testutil": rec(t, commit2),
 			},
 			pkgs: []Package{beads, testutil},
 			git: &fakeGit{
-				errs:    map[string]error{"c1": errors.New("bad object c1")},
-				changes: map[string][]string{"c2": {"internal/cmd/root.go"}},
+				errs:    map[string]error{commit1: errors.New("bad object c1")},
+				changes: map[string][]string{commit2: {"internal/cmd/root.go"}},
 			},
 			want:      []string{"internal/beads"},
-			wantAsked: []string{"c1", "c2"},
+			wantAsked: []string{commit1, commit2},
 		},
 	}
 	for _, tc := range tests {
@@ -378,8 +509,8 @@ func TestDueReportsEachUnreadableRecord(t *testing.T) {
 		t.Fatalf("DailyZoneLocation: %v", err)
 	}
 	beads := Package{Name: "internal/beads", Triggers: []string{"internal/beads"}}
-	state := State{"internal/beads": Record{Commit: "gone", At: at(t, 2026, 10, 25, 4, 0, 0)}}
-	git := &fakeGit{errs: map[string]error{"gone": errors.New("unknown revision")}}
+	state := State{"internal/beads": Record{Commit: commitGone, At: at(t, 2026, 10, 25, 4, 0, 0)}}
+	git := &fakeGit{errs: map[string]error{commitGone: errors.New("unknown revision")}}
 	due, unreadable := Due(state, []Package{beads}, git, at(t, 2026, 10, 25, 5, 0, 0), loc)
 	if strings.Join(due, ",") != "internal/beads" {
 		t.Errorf("Due() = %q; want the unreadable package to run", due)

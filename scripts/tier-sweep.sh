@@ -52,21 +52,6 @@ skip_for() {
 	done
 }
 
-# trigger MODE ... is the sweep's whole share of the container trigger: the Go
-# command decides which docker.txt packages are due and records a passing run.
-# A failure is named here, in the sweep's own output, and leaves every container
-# package to run (gt-e69b2).
-trigger() {
-	[ "${TIER_SWEEP_TRIGGER:-1}" != 0 ] || return 0
-	go run ./internal/tiertrigger/cmd/tiertrigger "$@" && return 0
-	case "${1:-}" in
-	skips) echo "tier-sweep: TIER_SWEEP_TRIGGER: skips failed; every container package runs" >&2 ;;
-	record) echo "tier-sweep: TIER_SWEEP_TRIGGER: record failed; the next sweep runs the packages again" >&2 ;;
-	*) echo "tier-sweep: TIER_SWEEP_TRIGGER: ${1:-} failed" >&2 ;;
-	esac
-	return 0
-}
-
 red=0
 # fmt_duration SECONDS renders a whole-second duration the way the daemon logs
 # render theirs (time.Duration.String() after Round(time.Second)): 45s, 2m14s,
@@ -188,7 +173,10 @@ for tier in "${tiers[@]}"; do
 		# TIER_SWEEP_TESTED is the commit this run tests: the record stamps it,
 		# and only while HEAD still is it (gt-e69b2).
 		export TIER_SWEEP_TESTED="$(git rev-parse HEAD 2>/dev/null || true)"
-		export TIER_SWEEP_SKIP="$TIER_SWEEP_SKIP $(trigger skips integration-docker)"
+		# The container trigger: the Go command decides which docker.txt packages
+		# are due. It reads TIER_SWEEP_TRIGGER, names its own failures on stderr
+		# and exits non-zero, which leaves every container package to run (gt-e69b2).
+		export TIER_SWEEP_SKIP="$TIER_SWEEP_SKIP $(go run ./internal/tiertrigger/cmd/tiertrigger skips integration-docker)"
 		# A module's list leaves out every directory inside one of its nested
 		# modules: git ls-files sees those files, but the toolchain reports
 		# "main module ... does not contain package" for them. Each nested
@@ -206,7 +194,7 @@ for tier in "${tiers[@]}"; do
 		read -r p2 f2 s2 n2 < <(go_tier integration-docker . gt slot run -- env GT_TEST_DOCKER=1 :: :: ${docker[@]+"${docker[@]}"})
 		# Only a passing untagged run earns the record; a red one leaves the
 		# state alone, so the next sweep runs those packages again (gt-e69b2).
-		[ "$f2" -eq 0 ] && trigger record integration-docker
+		[ "$f2" -eq 0 ] && go run ./internal/tiertrigger/cmd/tiertrigger record integration-docker
 		p=$((p1 + p2)) f=$((f1 + f2)) s=$((s1 + s2))
 		# The modules' names come before the untagged ones: "untagged:"
 		# labels the group that follows it, so a nested name appended later

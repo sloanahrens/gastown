@@ -7,11 +7,12 @@
 // scripts/tier-sweep.sh calls it twice around the docker.txt run: skips feeds
 // TIER_SWEEP_SKIP with the packages that do not need to run, and record stamps
 // the commit after a passing run. Both read the sweep's own environment:
-// GT_TOWN_ROOT for the state file, TIER_SWEEP_TESTED for the commit the run
-// began at, TIER_SWEEP_SKIP for the packages that did not run. A decision or
-// record that fails writes no answer, names the failure on stderr and exits 1;
-// the sweep turns that into its own line and runs every container package, so a
-// broken trigger costs one full run instead of skipping one.
+// GT_TOWN_ROOT for the state files, TIER_SWEEP_TESTED for the commit the run
+// began at, TIER_SWEEP_SKIP for the packages that did not run, and
+// TIER_SWEEP_TRIGGER=0 to turn the trigger off entirely. A decision or record
+// that fails writes no answer, names the failure in the sweep's own words on
+// stderr and exits 1; the sweep runs every container package when skips fails,
+// so a broken trigger costs one full run instead of skipping one.
 package main
 
 import (
@@ -48,18 +49,51 @@ type env struct {
 	// it, and only while HEAD is still it.
 	tested string
 	// skip is the sweep's TIER_SWEEP_SKIP list: the packages it holds did not
-	// run, so a record leaves their state alone.
+	// run their full tests, so a record leaves their state alone.
 	skip string
+	// off is TIER_SWEEP_TRIGGER=0: the sweep wants every container package to
+	// run, as it did before the trigger.
+	off bool
 	// deps lists the repo directories a package imports, transitively.
 	deps func(pkg string) ([]string, error)
 }
 
 // repo is the repository the command reads: HEAD, the change since a recorded
-// commit, and the checkout's status.
+// commit, the worktree the tests build, and the checkout's status.
 type repo interface {
+	tiertrigger.Git
 	Rev(ref string) (string, error)
-	DiffNameOnly(base, head string) ([]string, error)
 	Status() (*git.GitStatus, error)
+}
+
+// gitRepo is the real repository, with the worktree paths the due decision
+// reads taken from the checkout's status.
+type gitRepo struct{ *git.Git }
+
+func (g gitRepo) Worktree() ([]string, error) {
+	status, err := g.Git.Status()
+	if err != nil {
+		return nil, err
+	}
+	return worktreePaths(status), nil
+}
+
+// worktreePaths is every path a checkout has uncommitted changes in. Untracked
+// files count: a new test file is code go test compiles, so its package has to
+// run.
+func worktreePaths(status *git.GitStatus) []string {
+	return append(trackedDirty(status), status.Untracked...)
+}
+
+// trackedDirty is the paths a checkout's tracked files differ from HEAD in.
+// Untracked files are left out: they are in no commit, and the sweep's own
+// build leaves one at the repo root.
+func trackedDirty(status *git.GitStatus) []string {
+	paths := append([]string{}, status.Modified...)
+	paths = append(paths, status.Added...)
+	paths = append(paths, status.Deleted...)
+	paths = append(paths, status.Unmerged...)
+	return paths
 }
 
 func main() {
@@ -72,11 +106,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return runWith(args, env{
 		town:     os.Getenv("GT_TOWN_ROOT"),
 		now:      time.Now(),
-		repo:     git.NewGit("."),
+		repo:     gitRepo{git.NewGit(".")},
 		files:    tiertrigger.OSFiles{},
 		docker:   dockerList,
 		tested:   os.Getenv("TIER_SWEEP_TESTED"),
 		skip:     os.Getenv("TIER_SWEEP_SKIP"),
+		off:      os.Getenv("TIER_SWEEP_TRIGGER") == "0",
 		deps:     goDeps,
 		loadZone: tiertrigger.DailyZoneLocation,
 	}, stdout, stderr)
@@ -104,6 +139,18 @@ func listDeps(run func(args ...string) ([]byte, error), getwd func() (string, er
 	if err != nil {
 		return nil, err
 	}
+	// A checkout reached through a symlink has two spellings for one tree: the
+	// working directory can be the link while the go tool names the target (a
+	// Mac's /tmp is /private/tmp). Resolving the root, and comparing each
+	// directory with both spellings, keeps every repo import from reading as
+	// the module cache — which would silently shrink the trigger set to the
+	// package's own directory (om, gt-e69b2).
+	if root, err = filepath.Abs(root); err != nil {
+		return nil, fmt.Errorf("resolve the repo root: %w", err)
+	}
+	if root, err = filepath.EvalSymlinks(root); err != nil {
+		return nil, fmt.Errorf("resolve the repo root: %w", err)
+	}
 	var dirs []string
 	seen := map[string]bool{}
 	for _, tags := range []string{"", "integration"} {
@@ -119,17 +166,11 @@ func listDeps(run func(args ...string) ([]byte, error), getwd func() (string, er
 			if dir == "" {
 				continue
 			}
-			rel, err := filepath.Rel(root, dir)
+			rel, ok, err := repoRel(root, dir)
 			if err != nil {
-				// An answer this root cannot be compared with leaves the package's
-				// imports unknown, and unknown runs the package.
-				return nil, fmt.Errorf("locate %s under %s: %w", dir, root, err)
+				return nil, err
 			}
-			if outside(rel) {
-				continue
-			}
-			rel = filepath.ToSlash(rel)
-			if seen[rel] {
+			if !ok || seen[rel] {
 				continue
 			}
 			seen[rel] = true
@@ -137,6 +178,28 @@ func listDeps(run func(args ...string) ([]byte, error), getwd func() (string, er
 		}
 	}
 	return dirs, nil
+}
+
+// repoRel places dir under root, returning it slash-spelled and relative. ok is
+// false for a directory that is genuinely outside the repository, such as the
+// module cache. A directory the root cannot be compared with at all is an
+// error: unknown runs the package, a silent drop would not (om, gt-e69b2).
+func repoRel(root, dir string) (string, bool, error) {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return "", false, fmt.Errorf("locate %s under %s: %w", dir, root, err)
+	}
+	if !outside(rel) {
+		return filepath.ToSlash(rel), true, nil
+	}
+	// The go tool may spell the same tree with the link resolved; a directory
+	// it cannot resolve is not one this checkout holds.
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		if rel, err := filepath.Rel(root, resolved); err == nil && !outside(rel) {
+			return filepath.ToSlash(rel), true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // outside reports whether a root-relative path names something above the root,
@@ -153,31 +216,88 @@ func runWith(args []string, e env, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tiertrigger: usage: tiertrigger skips|record <tier>")
 		return 2
 	}
+	tier := args[1]
+	if !validTier(tier) {
+		fmt.Fprintf(stderr, "tiertrigger: %q is not a tier name\n", tier)
+		return 2
+	}
+	// TIER_SWEEP_TRIGGER=0 asks for the sweep every container package used to
+	// get: both commands answer nothing and succeed.
+	if e.off {
+		return 0
+	}
 	switch args[0] {
 	case "skips":
-		return e.skips(args[1], stdout, stderr)
+		return e.skips(tier, stdout, stderr)
 	case "record":
-		return e.record(args[1], stderr)
+		return e.record(tier, stderr)
 	default:
 		fmt.Fprintf(stderr, "tiertrigger: unknown command %q (want skips or record)\n", args[0])
 		return 2
 	}
 }
 
+// validTier reports whether tier is a plain name: the run's start state is
+// saved under it, so a name that could climb out of that directory, or reach
+// git's or the shell's argument list, is refused.
+func validTier(tier string) bool {
+	if tier == "" || tier[0] == '-' || tier[0] == '.' {
+		return false
+	}
+	for _, r := range tier {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+// warn writes the sweep's own line for a trigger failure, where the rest of the
+// sweep prints: the operator reads what broke, and what the sweep does instead.
+func warn(w io.Writer, mode, tier string, err error, instead string) {
+	fmt.Fprintf(w, "tier-sweep: TIER_SWEEP_TRIGGER: %s %s failed (%v); %s\n", mode, tier, err, instead)
+}
+
 // skips writes the TIER_SWEEP_SKIP entries for the packages that are not due,
-// space-separated. When the decision fails it writes nothing instead, names the
-// failure, and exits 1: the sweep says so in its own line and runs every
-// container package, so a broken trigger never skips a test.
+// space-separated. It saves how the run begins first, so a record can tell a
+// checkout that was already dirty from one the run dirtied. When either step
+// fails it writes nothing instead, names the failure in the sweep's own words,
+// and exits 1: the sweep runs every container package, so a broken trigger
+// never skips a test.
 func (e env) skips(tier string, stdout, stderr io.Writer) int {
+	if err := e.begin(tier); err != nil {
+		warn(stderr, "skips", tier, err, "every container package runs")
+		return 1
+	}
 	entries, err := e.notDue(tier, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "tiertrigger: skips %s: %v: every container package runs\n", tier, err)
+		warn(stderr, "skips", tier, err, "every container package runs")
 		return 1
 	}
 	if len(entries) > 0 {
 		fmt.Fprintln(stdout, strings.Join(entries, " "))
 	}
 	return 0
+}
+
+// begin saves how the run starts: HEAD, and the tracked files that already
+// differ from it.
+func (e env) begin(tier string) error {
+	if e.town == "" {
+		return errors.New("GT_TOWN_ROOT is unset")
+	}
+	head, err := e.repo.Rev("HEAD")
+	if err != nil {
+		return fmt.Errorf("read HEAD: %w", err)
+	}
+	status, err := e.repo.Status()
+	if err != nil {
+		return fmt.Errorf("read the checkout: %w", err)
+	}
+	return tiertrigger.SaveRun(e.files, tiertrigger.RunPath(e.town, tier), tiertrigger.Run{
+		Commit: head,
+		Dirty:  trackedDirty(status),
+	})
 }
 
 // notDue returns the tier's skip entries for the packages the trigger rule
@@ -221,11 +341,11 @@ func (e env) notDue(tier string, stderr io.Writer) ([]string, error) {
 }
 
 // record stamps the tier's packages with the commit a passing run tested. When
-// it cannot be sure what ran it writes nothing, names the failure, and exits 1:
-// the sweep says so, and the next sweep runs those packages again.
+// it cannot be sure what ran it writes nothing, names the failure in the
+// sweep's own words, and exits 1: the next sweep runs those packages again.
 func (e env) record(tier string, stderr io.Writer) int {
 	if err := e.recordRun(tier); err != nil {
-		fmt.Fprintf(stderr, "tiertrigger: record %s: %v: the next sweep runs them again\n", tier, err)
+		warn(stderr, "record", tier, err, "the next sweep runs the packages again")
 		return 1
 	}
 	return 0
@@ -248,27 +368,30 @@ func (e env) recordRun(tier string) error {
 	// The run tested the commit it began at. A commit that landed during the run
 	// is not what was tested, so nothing is recorded for it.
 	if e.tested == "" {
-		return errors.New("no tested commit (TIER_SWEEP_TESTED is unset): nothing recorded")
+		return errors.New("no tested commit (TIER_SWEEP_TESTED is unset)")
 	}
 	if head != e.tested {
-		return fmt.Errorf("HEAD is %s, not the commit the run began at (%s): nothing recorded", head, e.tested)
+		return fmt.Errorf("HEAD is %s, not the commit the run began at (%s)", head, e.tested)
 	}
-	status, err := e.repo.Status()
+	// The run began where skips found the checkout. A tree that already
+	// differed from HEAD then was not what HEAD holds, so the run tested
+	// something else; files the run itself dirtied say nothing about that.
+	run, err := tiertrigger.LoadRun(e.files, tiertrigger.RunPath(e.town, tier))
 	if err != nil {
-		return fmt.Errorf("read the checkout: %w", err)
+		return err
 	}
-	// Untracked files are in no commit, and the sweep's own build leaves one at
-	// the repo root, so only a tracked difference means the run tested
-	// something other than HEAD.
-	if len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Unmerged) > 0 {
-		return fmt.Errorf("the checkout's tracked files differ from %s", head)
+	if run.Commit != head {
+		return fmt.Errorf("the sweep decided at %s, not at %s", run.Commit, head)
+	}
+	if len(run.Dirty) > 0 {
+		return fmt.Errorf("the checkout already differed from %s in %s when the run began", head, strings.Join(run.Dirty, " "))
 	}
 	store := e.store()
 	state, err := store.Load()
 	if err != nil {
 		return err
 	}
-	skipped := wholeSkips(tier, strings.Fields(e.skip))
+	skipped := skippedPackages(tier, strings.Fields(e.skip))
 	recorded := false
 	for _, pkg := range pkgs {
 		if skipped[pkg.Name] {
@@ -321,14 +444,22 @@ func (e env) packages() ([]tiertrigger.Package, error) {
 	return pkgs, nil
 }
 
-// wholeSkips is the set of packages an exact <tier>:<pkg> entry skips whole;
-// such a package did not run, so its record stays where it was. A
-// <tier>:<pkg>:<regexp> entry still runs the package, so it is recorded.
-func wholeSkips(tier string, entries []string) map[string]bool {
+// skippedPackages is the set of packages a skip entry keeps from running all of
+// their tests: <tier>:<pkg> skips the package whole, and <tier>:<pkg>:<regexp>
+// skips the tests the regexp names. Neither package passed its whole test set
+// in this run, so neither is recorded as tested at HEAD; a record that claimed
+// otherwise would let the next sweep skip tests that never ran.
+func skippedPackages(tier string, entries []string) map[string]bool {
 	out := map[string]bool{}
 	for _, entry := range entries {
 		pkg, ok := strings.CutPrefix(entry, tier+":")
-		if !ok || pkg == "" || strings.Contains(pkg, ":") {
+		if !ok {
+			continue
+		}
+		if i := strings.IndexByte(pkg, ':'); i >= 0 {
+			pkg = pkg[:i]
+		}
+		if pkg == "" {
 			continue
 		}
 		out[pkg] = true

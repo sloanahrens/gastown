@@ -22,6 +22,57 @@ func StatePath(townRoot string) string {
 	return filepath.Join(constants.TownRuntimePath(townRoot), "tiertrigger", StateFileName)
 }
 
+// ErrNoRun reports a run whose start state was never saved.
+var ErrNoRun = errors.New("no record of how the run began")
+
+// Run is the checkout as it stood when the sweep asked which packages to run:
+// the commit the run began at, and the tracked files that already differed
+// from it. A record reads it to tell a tree that was dirty before the run (so
+// the run tested something other than the commit) from files the run itself
+// dirtied, which say nothing about what it tested (om, gt-e69b2).
+type Run struct {
+	Commit string   `json:"commit"`
+	Dirty  []string `json:"dirty,omitempty"`
+}
+
+// RunPath is <town>/.runtime/tiertrigger/<tier>.run.json, the run's start state.
+// tier is a plain name — commands reject anything else before it reaches here.
+func RunPath(townRoot, tier string) string {
+	return filepath.Join(constants.TownRuntimePath(townRoot), "tiertrigger", tier+".run.json")
+}
+
+// SaveRun writes r to path through f.
+func SaveRun(f Files, path string, r Run) error {
+	data, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := f.WriteFile(path, append(data, '\n')); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// LoadRun reads the run at path. A missing file is ErrNoRun: a run nobody
+// recorded the start of cannot be stamped as tested.
+func LoadRun(f Files, path string) (Run, error) {
+	data, err := f.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Run{}, fmt.Errorf("%s: %w", path, ErrNoRun)
+	}
+	if err != nil {
+		return Run{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	var r Run
+	if err := json.Unmarshal(data, &r); err != nil {
+		return Run{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if r.Commit == "" {
+		return Run{}, fmt.Errorf("parse %s: no commit", path)
+	}
+	return r, nil
+}
+
 // Record is one package's last passing container run: the commit its tests ran
 // at, and when.
 type Record struct {
@@ -40,22 +91,55 @@ func (st State) Ran(pkg, commit string, when time.Time) {
 	st[pkg] = Record{Commit: commit, At: when}
 }
 
-// Changed returns the paths that changed since pkg's recorded run.
+// Changed returns the paths that changed since pkg's recorded run: the commits
+// since it, and the checkout's uncommitted changes, which the container tests
+// build exactly as they build HEAD, so a change nobody has committed there is
+// still code they read.
+//
+// A recorded commit that is not an object id is an error rather than a git
+// argument: the state file is input, and a record holding a flag or a revision
+// expression must not reach git's command line (om, gt-e69b2).
 func (st State) Changed(g Git, pkg string) ([]string, error) {
 	rec, ok := st[pkg]
 	if !ok {
 		return nil, fmt.Errorf("%s: %w", pkg, ErrNoRecord)
 	}
+	if !objectID(rec.Commit) {
+		return nil, fmt.Errorf("%s: recorded commit %q is not an object id", pkg, rec.Commit)
+	}
 	paths, err := g.DiffNameOnly(rec.Commit, "HEAD")
 	if err != nil {
 		return nil, fmt.Errorf("%s since %s: %w", pkg, rec.Commit, err)
 	}
-	return paths, nil
+	dirty, err := g.Worktree()
+	if err != nil {
+		return nil, fmt.Errorf("%s: read the working tree: %w", pkg, err)
+	}
+	return append(paths, dirty...), nil
+}
+
+// objectID reports whether c spells a git object id: hex, 40 characters for a
+// SHA-1 repository or 64 for a SHA-256 one.
+func objectID(c string) bool {
+	switch len(c) {
+	case 40, 64:
+	default:
+		return false
+	}
+	for _, r := range c {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Git is the repository the due decision reads.
 type Git interface {
 	DiffNameOnly(base, head string) ([]string, error)
+	// Worktree lists the repo-relative paths with uncommitted changes, tracked
+	// or not.
+	Worktree() ([]string, error)
 }
 
 // Package is a container-backed package and the paths whose change runs it.

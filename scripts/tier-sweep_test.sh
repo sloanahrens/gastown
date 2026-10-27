@@ -143,9 +143,11 @@ new_integration_repo() {
 #!/usr/bin/env bash
 # `go run .../tiertrigger` is the container trigger: it logs its argv, answers
 # skips with STUB_TRIGGER_SKIPS, and fails a mode when STUB_TRIGGER_RC
-# (skips) or STUB_TRIGGER_RECORD_RC (record) says so.
+# (skips) or STUB_TRIGGER_RECORD_RC (record) says so. TIER_SWEEP_TRIGGER=0 is
+# the real command's own switch, so the stub answers nothing and succeeds.
 if [ "$1" = run ]; then
   echo "run|$*" >>"$STUB_LOG"
+  [ "${TIER_SWEEP_TRIGGER:-1}" = 0 ] && exit 0
   rc=0
   [ "${3:-}" = skips ] && rc=${STUB_TRIGGER_RC:-0}
   [ "${3:-}" = record ] && rc=${STUB_TRIGGER_RECORD_RC:-0}
@@ -376,18 +378,21 @@ else
 fi
 rm -rf "$R"
 
-# --- A trigger that cannot run warns and the sweep runs every package ---
+# --- A trigger that cannot run leaves every package running, not red ---
 #
-# The failure costs a full container run, never a skipped one, and the sweep's
-# own line says so where the rest of its progress is printed (gt-e69b2.3).
+# The failure costs a full container run, never a skipped one. The command
+# names its own failure on stderr and exits 1; the sweep swallows neither, and
+# adds no skip entry, so the package still runs and the tier is GREEN
+# (gt-e69b2).
 R=$(new_integration_repo "" "" "" "internal/docker")
 : >"$R/stub.log"
 out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" TIER_SWEEP_TRIGGER=1 STUB_TRIGGER_RC=1 bash scripts/tier-sweep.sh integration 2>&1); rc=$?
 line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
 if [ "$rc" = 0 ] \
-  && grep -q 'tier-sweep: TIER_SWEEP_TRIGGER: skips failed; every container package runs' <<<"$out" \
+  && grep -q 'stub: the trigger could not run' <<<"$out" \
+  && grep -Eq '\|\./internal/docker$' "$R/stub.log" \
   && grep -Eq '^tier-sweep: integration GREEN passed=2 failed=0 skipped=0 \(logs ' <<<"$line"; then
-  pass "trigger failure: warns in the sweep's own words and runs every package ($line)"
+  pass "trigger failure: its own words reach the sweep, and every package runs ($line)"
 else
   fail "trigger failure: rc=$rc line=$line ran=$(tr '\n' ';' <"$R/stub.log") out=$out"
 fi
@@ -403,11 +408,29 @@ R=$(new_integration_repo "" "" "" "internal/docker")
 out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" TIER_SWEEP_TRIGGER=1 STUB_TRIGGER_RECORD_RC=1 bash scripts/tier-sweep.sh integration 2>&1); rc=$?
 line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
 if [ "$rc" = 0 ] \
-  && grep -q 'tier-sweep: TIER_SWEEP_TRIGGER: record failed; the next sweep runs the packages again' <<<"$out" \
+  && grep -q 'stub: the trigger could not run' <<<"$out" \
   && grep -Eq '^tier-sweep: integration GREEN passed=2 failed=0 skipped=0 \(logs ' <<<"$line"; then
   pass "trigger record failure: named, and the sweep stays green ($line)"
 else
   fail "trigger record failure: rc=$rc line=$line out=$out"
+fi
+rm -rf "$R"
+
+# --- The trigger is off entirely with TIER_SWEEP_TRIGGER=0 ---
+#
+# The switch is the command's, not the sweep's: the sweep still asks, the
+# command answers nothing, and no skip entry appears (gt-e69b2).
+R=$(new_integration_repo "" "" "" "internal/docker")
+: >"$R/stub.log"
+out=$(cd "$R" && PATH="$R/stub:$PATH" STUB_LOG="$R/stub.log" TIER_SWEEP_TRIGGER=0 \
+  STUB_TRIGGER_SKIPS="integration-docker:./internal/docker" bash scripts/tier-sweep.sh integration 2>&1); rc=$?
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" = 0 ] \
+  && grep -Eq '\|\./internal/docker$' "$R/stub.log" \
+  && grep -Eq '^tier-sweep: integration GREEN passed=2 failed=0 skipped=0 \(logs ' <<<"$line"; then
+  pass "trigger off: the command answers nothing and the package runs ($line)"
+else
+  fail "trigger off: rc=$rc line=$line ran=$(tr '\n' ';' <"$R/stub.log") out=$out"
 fi
 rm -rf "$R"
 
