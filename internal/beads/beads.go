@@ -1699,8 +1699,15 @@ func (b *Beads) subprocessTimeout(args []string) time.Duration {
 // turned a 60s timeout into an unexplained bd warning (gt-824d). Callers that
 // run bd through their own exec wiring, rather than through this package's run
 // paths, wrap their error with it so a timeout names itself.
+//
+// A process that exited with a status answered, whatever the caller's deadline
+// did meanwhile: its error is kept, so bd's own answer (a schema-ahead exit,
+// say) reaches the classifier instead of being restamped as a deadline kill
+// because the deadline had passed by the time the answer was read (gt-p0ha3).
+// Only a call the deadline ended — killed by it, or never started — carries
+// the timeout, which is the "signal: killed" gt-824d is about.
 func SubprocessFailureError(ctx context.Context, timeout time.Duration, err error) error {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) && exitCodeOf(err) < 0 {
 		return fmt.Errorf("timed out after %s: %w", timeout, context.DeadlineExceeded)
 	}
 	return err
