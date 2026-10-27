@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -40,8 +42,9 @@ var tapGuardPermissionRequestCmd = &cobra.Command{
 
 Registered for the roles that run with nobody at the pane (polecat, dog), this
 guard denies the request and returns, as the model-facing message, the reason
-and a formulation that will not ask again. Interactive roles carry no such
-hook, so their prompts stay with the person.
+and a formulation that will not ask again. When it raises an escalation, it
+also comments the worktree steer on the polecat's active bead. Interactive
+roles carry no such hook, so their prompts stay with the person.
 
 Exit status is always 0: this event is answered through the decision object on
 stdout, and exit 2 is not honored for it.`,
@@ -77,13 +80,14 @@ type permissionRequestOutput struct {
 }
 
 func runTapGuardPermissionRequest(cmd *cobra.Command, args []string) error {
-	return tapGuardPermissionRequest(os.Stdin, os.Stdout, realGuardProcess(), defaultParkedPromptEscalator)
+	return tapGuardPermissionRequest(os.Stdin, os.Stdout, realGuardProcess(), defaultParkedPromptEscalator, defaultParkedPromptSteer)
 }
 
 // tapGuardPermissionRequest is the permission-request guard: it reads the
 // hook payload from stdin and the session from proc, escalates through
-// escalate, and writes its decision to stdout.
-func tapGuardPermissionRequest(stdin io.Reader, stdout io.Writer, proc guardProcess, escalate parkedPromptEscalator) error {
+// escalate, steers the worker through steer, and writes its decision to
+// stdout.
+func tapGuardPermissionRequest(stdin io.Reader, stdout io.Writer, proc guardProcess, escalate parkedPromptEscalator, steer parkedPromptSteerFunc) error {
 	input, err := io.ReadAll(stdin)
 	if err != nil || len(input) == 0 {
 		// Nothing to judge. The harness's own prompt flow proceeds, which is
@@ -98,7 +102,10 @@ func tapGuardPermissionRequest(stdin io.Reader, stdout io.Writer, proc guardProc
 		return nil
 	}
 
-	escalation := escalateParkedPromptOnce(hook, proc.tempDir(), escalate)
+	escalation, escalated := escalateParkedPromptOnce(hook, proc.tempDir(), escalate)
+	if escalated {
+		commentParkedPromptSteer(promptSeat(hook.Cwd, proc.getenv), promptSteerText(promptShape(hook)), steer)
+	}
 	writePermissionRequestDenial(stdout, hook, escalation)
 	return nil
 }
@@ -266,14 +273,16 @@ func writePermissionRequestDenial(stdout io.Writer, hook permissionRequestInput,
 }
 
 // escalateParkedPromptOnce files an escalation bead that a prompt parked this
-// session, and returns the sentence the denial carries about it. The marker is
-// written before the escalation is attempted, so a retry loop cannot write a
-// Dolt commit per attempt. Each failure path returns its own sentence rather
-// than "" so a silent bookkeeping or delivery failure is never
-// indistinguishable from a deny that carries no escalation note at all
-// (gt-8stz review, finding 4ce05cf3cf09). The marker lives in tempDir;
-// escalate files the bead.
-func escalateParkedPromptOnce(hook permissionRequestInput, tempDir string, escalate parkedPromptEscalator) string {
+// session, and returns the sentence the denial carries about it plus whether a
+// new escalation was raised. The marker is written before the escalation is
+// attempted, so a retry loop cannot write a Dolt commit per attempt, and the
+// boolean is false on every path that the marker suppressed or that failed —
+// the caller leaves its steer only on a call a person will not read. Each
+// failure path returns its own sentence rather than "" so a silent bookkeeping
+// or delivery failure is never indistinguishable from a deny that carries no
+// escalation note at all (gt-8stz review, finding 4ce05cf3cf09). The marker
+// lives in tempDir; escalate files the bead.
+func escalateParkedPromptOnce(hook permissionRequestInput, tempDir string, escalate parkedPromptEscalator) (string, bool) {
 	shape := promptShape(hook)
 	marker := promptEscalationMarker(hook, shape, tempDir)
 	if info, err := os.Stat(marker); err == nil {
@@ -281,19 +290,120 @@ func escalateParkedPromptOnce(hook permissionRequestInput, tempDir string, escal
 		// parkedPromptRetryAfter, so one Dolt hiccup does not silence the
 		// shape for the rest of the session (gt-pb77k). A success is final.
 		if !markerRecordsFailure(marker) || time.Since(info.ModTime()) < parkedPromptRetryAfter {
-			return " This call was already reported once this session."
+			return " This call was already reported once this session.", false
 		}
 	}
 	if err := os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
-		return " Escalation bookkeeping failed, so a retry of this call may report it again."
+		return " Escalation bookkeeping failed, so a retry of this call may report it again.", false
 	}
 	subject := fmt.Sprintf("Parked prompt denied: %s", shape)
 	body := promptEscalationBody(hook, shape)
 	if !escalate(subject, body) {
 		_ = os.WriteFile(marker, []byte(parkedPromptFailedMarker+"\n"), 0o600)
-		return " Recording the escalation failed; run gt escalate if this call is required."
+		return " Recording the escalation failed; run gt escalate if this call is required.", false
 	}
-	return " The escalation was recorded as a bead."
+	return " The escalation was recorded as a bead.", true
+}
+
+// parkedPromptSteer is the rule the comment leaves on the active bead, the
+// steer the gt-3n4e0 comment carried: the denied call reached outside the
+// worktree, and a denied prompt means no person is at the pane to say so.
+const parkedPromptSteer = "The denied call was made outside the worktree; rerun the check inside the worktree, keep trace or log files under ~/gt, never /tmp, /private/tmp or HOME."
+
+// promptSteerText labels the steer with the shape that raised the prompt, so a
+// worker reading an old bead can tell which denied call it answers.
+func promptSteerText(shape string) string {
+	return fmt.Sprintf("Parked prompt denied (%s). %s", shape, parkedPromptSteer)
+}
+
+// parkedPromptSteerFunc leaves the steer on the bead active for seat.
+type parkedPromptSteerFunc func(seat, text string) error
+
+// parkedPromptSteerTimeout bounds the steer comment, the same reason the
+// escalation is bounded: a slow store must not hold the denial past the hook's
+// budget.
+const parkedPromptSteerTimeout = 5 * time.Second
+
+// commentParkedPromptSteer leaves the steer on the session's active bead when
+// one is known. The error is dropped: the denial is already the model's
+// signal, and a bead write must not change it (gt-cg96w).
+func commentParkedPromptSteer(seat, text string, steer parkedPromptSteerFunc) {
+	commentParkedPromptSteerWithin(seat, text, steer, parkedPromptSteerTimeout)
+}
+
+// commentParkedPromptSteerWithin is commentParkedPromptSteer with its deadline
+// injected, so a test can drive the timeout without waiting the full bound.
+func commentParkedPromptSteerWithin(seat, text string, steer parkedPromptSteerFunc, timeout time.Duration) {
+	if seat == "" || steer == nil {
+		return
+	}
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		_ = steer(seat, text)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(timeout):
+	}
+}
+
+// promptSeat names the polecat seat ("rig/polecats/name") the denied session
+// runs as, or "" when neither the environment nor the payload cwd names one.
+// A role that is not a polecat returns "" rather than falling back to the cwd:
+// a crew member working inside a polecat worktree is not that polecat.
+func promptSeat(cwd string, getenv func(string) string) string {
+	if role := strings.TrimSpace(getenv("GT_ROLE")); role != "" && role != constants.RolePolecat {
+		if strings.Contains(role, "/polecats/") {
+			return role
+		}
+		return ""
+	}
+	return seatFromPolecatPath(cwd)
+}
+
+// seatFromPolecatPath reads the seat out of a worktree path
+// (<town>/<rig>/polecats/<name>/<repo>), the shape every polecat cwd carries.
+func seatFromPolecatPath(cwd string) string {
+	parts := strings.Split(filepath.ToSlash(cwd), "/")
+	for i := 1; i+1 < len(parts); i++ {
+		if parts[i] == "polecats" {
+			return parts[i-1] + "/polecats/" + parts[i+1]
+		}
+	}
+	return ""
+}
+
+// defaultParkedPromptSteer comments the steer on the seat's active bead. A
+// seat with no active bead leaves the comment unwritten; an error is reported
+// for the caller to drop.
+func defaultParkedPromptSteer(seat, text string) error {
+	return steerParkedPromptInTown(seat, text, workspace.FindFromCwdOrError)
+}
+
+// steerParkedPromptInTown is defaultParkedPromptSteer with its town lookup
+// injected, so a test can drive the unreadable-town path.
+func steerParkedPromptInTown(seat, text string, findTown func() (string, error)) error {
+	townRoot, err := findTown()
+	if err != nil {
+		return err
+	}
+	rig, _, _ := strings.Cut(seat, "/")
+	bd := beads.NewWithBeadsDir(filepath.Join(townRoot, rig), "")
+	return steerParkedPromptBead(seat, text,
+		func(seat string) string { return done.FindHookedBeadForAgent(bd, seat) },
+		bd.AddComment)
+}
+
+// steerParkedPromptBead is defaultParkedPromptSteer with its store reads
+// injected, so tests can drive the no-bead and failing-comment paths without a
+// town store.
+func steerParkedPromptBead(seat, text string, active func(seat string) string, comment func(id, text string) error) error {
+	id := active(seat)
+	if id == "" {
+		return nil
+	}
+	return comment(id, text)
 }
 
 // parkedPromptFailedMarker is the marker content that records a failed

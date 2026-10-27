@@ -8,9 +8,9 @@ Every agent runs the Claude Code CLI, so every session gets the same
 `settings.json` lifecycle hooks (`<role>/.claude/settings.json`), whatever
 backend the agent points the CLI at.
 
-Gas Town writes `.claude/settings.json` into its own parent directories and
-passes it to Claude Code via `--settings`, so customer repos stay clean. One
-base config plus per-role/per-rig overrides is the single source of truth.
+Gas Town writes `.claude/settings.json` into its own parent directories, so
+customer repos stay clean. One base config plus per-role/per-rig overrides is
+the single source of truth.
 
 ## Architecture
 
@@ -45,12 +45,14 @@ Town-level target:
 The `polecats` override adds the polecat-paths guard (`gt tap guard
 polecat-paths`, gt-hmaf) on the `Bash|Monitor` and
 `Edit|Write|MultiEdit|NotebookEdit` matchers: a cross-worktree edit corrupts a
-branch its owner cannot see. File-writing tools are limited to the polecat's
-own worktree (plus temp dirs and the session scratchpad), and shell writes —
-interpreters, `curl -o`, redirections, `cd` and `git -C` targets — are blocked
-when they name a town path outside it, its polecat directory, or its rig's
-`.repo.git`. `$HOME/.local/bin`, the `gt`/`bd` install directory shared by all
-agents, is denied to every write (gt-tnts5). Reads stay allowed anywhere; an
+branch its owner cannot see. File-writing tools are checked against the
+polecat's own worktree, and shell writes — interpreters, `curl -o`,
+redirections, `cd` and `git -C` targets — are blocked when they name a town
+path outside it, its polecat directory, or its rig's `.repo.git`. Work stays
+under `~/gt`: scratch files, trace logs and test data go in the worktree,
+never `/tmp`, `/private/tmp`, `HOME` or a session scratchpad (gt-3n4e0).
+`$HOME/.local/bin`, the `gt`/`bd` install directory shared by all agents, is
+denied to every write (gt-tnts5). Reads stay allowed anywhere; an
 unresolvable target is blocked, as is a write target reached through a variable
 the command line itself assigns or sets from `command -v` — including one
 reached inside an interpreter's `-c` payload. A command keeps that rule
@@ -89,8 +91,6 @@ a separate priority tier that merges additively with project settings.
 
 ## Commands
 
-Each takes `--help` for its flags.
-
 | Command | Does |
 |---|---|
 | `gt hooks sync` | Regenerate every managed settings file from base + overrides, keeping non-hooks fields |
@@ -105,8 +105,7 @@ Each takes `--help` for its flags.
 
 No registry file ships with the repo: `~/gt/hooks/registry.toml` is an optional
 town-local catalog. A settings file's hooks come from `DefaultBase()` for every
-role plus `DefaultOverrides()` (`internal/hooks/config.go`), each with the
-town's own overrides layered on top:
+role plus `DefaultOverrides()` (`internal/hooks/config.go`):
 
 | Hook | Event | Roles |
 |---|---|---|

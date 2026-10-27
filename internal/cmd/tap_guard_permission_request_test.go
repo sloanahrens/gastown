@@ -1,10 +1,14 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // bashPermissionPayload is the hook payload shape Claude Code sends for a Bash
@@ -217,7 +221,10 @@ func TestPermissionRequestEscalatesOncePerShape(t *testing.T) {
 	escalator, sent := fakeParkedPromptEscalator(true)
 	hook := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
 
-	first := escalateParkedPromptOnce(hook, tmp, escalator)
+	first, escalated := escalateParkedPromptOnce(hook, tmp, escalator)
+	if !escalated {
+		t.Fatalf("first call did not report an escalation: %q", first)
+	}
 	if strings.Contains(first, "already reported") {
 		t.Fatalf("first call reported itself as a repeat: %q", first)
 	}
@@ -227,8 +234,12 @@ func TestPermissionRequestEscalatesOncePerShape(t *testing.T) {
 	if len(*sent) != 1 {
 		t.Fatalf("fake escalator received %d calls, want 1: %v", len(*sent), *sent)
 	}
-	if second := escalateParkedPromptOnce(hook, tmp, escalator); !strings.Contains(second, "already reported") {
+	second, escalated := escalateParkedPromptOnce(hook, tmp, escalator)
+	if !strings.Contains(second, "already reported") {
 		t.Errorf("second call did not reuse the marker: %q", second)
+	}
+	if escalated {
+		t.Errorf("repeat call reported an escalation; the steer would be written twice")
 	}
 	if len(*sent) != 1 {
 		t.Errorf("repeat call reached the escalator again: %v", *sent)
@@ -236,7 +247,7 @@ func TestPermissionRequestEscalatesOncePerShape(t *testing.T) {
 	// A different shape in the same session is a different incident.
 	other := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
 	other.ToolInput.Command = `rm -rf /tmp/x/*`
-	if got := escalateParkedPromptOnce(other, tmp, escalator); strings.Contains(got, "already reported") {
+	if got, _ := escalateParkedPromptOnce(other, tmp, escalator); strings.Contains(got, "already reported") {
 		t.Errorf("second shape was suppressed by the first shape's marker: %q", got)
 	}
 	if len(*sent) != 2 {
@@ -252,9 +263,12 @@ func TestPermissionRequestEscalationFailureMessage(t *testing.T) {
 	escalator, _ := fakeParkedPromptEscalator(false)
 	hook := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
 
-	got := escalateParkedPromptOnce(hook, t.TempDir(), escalator)
+	got, escalated := escalateParkedPromptOnce(hook, t.TempDir(), escalator)
 	if !strings.Contains(got, "Recording the escalation failed") {
 		t.Errorf("escalation failure did not surface a distinct message: %q", got)
+	}
+	if escalated {
+		t.Errorf("a failed escalation reported itself as raised")
 	}
 }
 
@@ -331,5 +345,173 @@ func TestPermissionRequestTreatsMonitorAsShell(t *testing.T) {
 	}
 	if got := promptShape(hook); got != "bash cd-compound-write" {
 		t.Errorf("promptShape = %q, want bash cd-compound-write", got)
+	}
+}
+
+// fakeParkedPromptSteer records each steer and answers err, so a test can
+// verify the guard reaches (or does not reach) the bead comment without a
+// town store.
+func fakeParkedPromptSteer(err error) (parkedPromptSteerFunc, *[]string) {
+	var sent []string
+	return func(seat, text string) error {
+		sent = append(sent, seat+"\n"+text)
+		return err
+	}, &sent
+}
+
+// permissionRequestProc is an autonomous polecat session whose markers live in
+// a test temp dir.
+func permissionRequestProc(t *testing.T) guardProcess {
+	t.Helper()
+	return fakeGuardProcess(map[string]string{
+		"GT_ROLE":    "gastown/polecats/obsidian",
+		"GT_POLECAT": "obsidian",
+		"TMPDIR":     t.TempDir(),
+	}, "/home/u/gt/gastown/polecats/obsidian/gastown")
+}
+
+// TestPermissionRequestSteersTheActiveBeadOncePerShape pins the bead's rule:
+// a parked-prompt denial leaves the worktree steer on the session's active
+// bead (named with the denied shape), and the existing escalation marker keeps
+// it to one comment per shape (gt-cg96w).
+func TestPermissionRequestSteersTheActiveBeadOncePerShape(t *testing.T) {
+	t.Parallel()
+	proc := permissionRequestProc(t)
+	escalator, _ := fakeParkedPromptEscalator(true)
+	steer, steered := fakeParkedPromptSteer(nil)
+
+	payload := bashPermissionPayload("cd /tmp/x && rm -rf *")
+	for i := 0; i < 2; i++ {
+		if err := tapGuardPermissionRequest(strings.NewReader(payload), io.Discard, proc, escalator, steer); err != nil {
+			t.Fatalf("event %d: %v", i, err)
+		}
+	}
+	if len(*steered) != 1 {
+		t.Fatalf("steer written %d times for one shape, want 1: %v", len(*steered), *steered)
+	}
+	if !strings.Contains((*steered)[0], "gastown/polecats/obsidian") {
+		t.Errorf("steer is not addressed to the session's seat: %q", (*steered)[0])
+	}
+	for _, want := range []string{"bash cd-compound-write", "outside the worktree", "under ~/gt", "never /tmp"} {
+		if !strings.Contains((*steered)[0], want) {
+			t.Errorf("steer missing %q: %q", want, (*steered)[0])
+		}
+	}
+
+	// A different shape is a different incident and earns its own comment.
+	other := bashPermissionPayload(`rm -rf /tmp/x/*`)
+	if err := tapGuardPermissionRequest(strings.NewReader(other), io.Discard, proc, escalator, steer); err != nil {
+		t.Fatalf("second shape: %v", err)
+	}
+	if len(*steered) != 2 {
+		t.Fatalf("second shape did not get its own steer: %v", *steered)
+	}
+	if !strings.Contains((*steered)[1], "bash rm-glob") {
+		t.Errorf("second steer does not name its shape: %q", (*steered)[1])
+	}
+}
+
+// TestPermissionRequestSteerSkippedWithoutAnActiveBead pins the store half: a
+// seat with no active bead leaves the comment unwritten and reports no error.
+func TestPermissionRequestSteerSkippedWithoutAnActiveBead(t *testing.T) {
+	t.Parallel()
+	var commented []string
+	comment := func(id, text string) error {
+		commented = append(commented, id)
+		return nil
+	}
+
+	if err := steerParkedPromptBead("gastown/polecats/obsidian", "steer", func(string) string { return "" }, comment); err != nil {
+		t.Fatalf("no active bead: %v", err)
+	}
+	if len(commented) != 0 {
+		t.Fatalf("commented on %v with no active bead", commented)
+	}
+
+	if err := steerParkedPromptBead("gastown/polecats/obsidian", "steer", func(string) string { return "gt-abc" }, comment); err != nil {
+		t.Fatalf("active bead: %v", err)
+	}
+	if len(commented) != 1 || commented[0] != "gt-abc" {
+		t.Fatalf("commented on %v, want [gt-abc]", commented)
+	}
+}
+
+// TestPermissionRequestSteerFailureIsNonFatal pins the other half of the rule:
+// a bead write that fails changes neither the deny nor the escalation.
+func TestPermissionRequestSteerFailureIsNonFatal(t *testing.T) {
+	t.Parallel()
+	proc := permissionRequestProc(t)
+	escalator, sent := fakeParkedPromptEscalator(true)
+	steer, steered := fakeParkedPromptSteer(errors.New("bd comment failed"))
+
+	var out bytes.Buffer
+	payload := bashPermissionPayload("cd /tmp/x && rm -rf *")
+	if err := tapGuardPermissionRequest(strings.NewReader(payload), &out, proc, escalator, steer); err != nil {
+		t.Fatalf("a failed steer changed the guard result: %v", err)
+	}
+	if len(*steered) != 1 {
+		t.Fatalf("steer was not attempted: %v", *steered)
+	}
+	if len(*sent) != 1 {
+		t.Fatalf("failed steer changed the escalation: %v", *sent)
+	}
+	if !strings.Contains(out.String(), `"behavior":"deny"`) {
+		t.Errorf("failed steer changed the denial: %q", out.String())
+	}
+}
+
+// TestPermissionRequestSteerIsBounded pins the hook-budget rule: a store that
+// never answers must not hold the denial open.
+func TestPermissionRequestSteerIsBounded(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	defer close(release)
+	blocked := func(string, string) error {
+		<-release
+		return nil
+	}
+
+	began := time.Now()
+	commentParkedPromptSteerWithin("gastown/polecats/obsidian", "steer", blocked, 20*time.Millisecond)
+	if elapsed := time.Since(began); elapsed > 2*time.Second {
+		t.Fatalf("a blocked steer held the caller for %v", elapsed)
+	}
+}
+
+// TestPermissionRequestSteerReportsAnUnreadableTown pins the last failure
+// path: a town lookup that fails surfaces as an error for the caller to drop.
+func TestPermissionRequestSteerReportsAnUnreadableTown(t *testing.T) {
+	t.Parallel()
+	townFailure := errors.New("no town root")
+	err := steerParkedPromptInTown("gastown/polecats/obsidian", "steer",
+		func() (string, error) { return "", townFailure })
+	if !errors.Is(err, townFailure) {
+		t.Fatalf("steer in an unreadable town = %v, want %v", err, townFailure)
+	}
+}
+
+// TestPromptSeat pins how the seat is named: the role when it is a polecat,
+// the worktree path otherwise, and nothing for a session that is not a polecat.
+func TestPromptSeat(t *testing.T) {
+	t.Parallel()
+	worktree := "/home/u/gt/gastown/polecats/obsidian/gastown"
+	tests := []struct {
+		name string
+		env  map[string]string
+		cwd  string
+		want string
+	}{
+		{"role names the seat", map[string]string{"GT_ROLE": "gastown/polecats/obsidian"}, worktree, "gastown/polecats/obsidian"},
+		{"bare polecat role falls back to cwd", map[string]string{"GT_ROLE": "polecat"}, worktree, "gastown/polecats/obsidian"},
+		{"no role reads the cwd", nil, worktree, "gastown/polecats/obsidian"},
+		{"crew role is not a polecat seat", map[string]string{"GT_ROLE": "gastown/crew/sloan"}, worktree, ""},
+		{"cwd outside the polecats tree names no seat", nil, "/home/u/gt/gastown/crew", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := promptSeat(tt.cwd, envGetter(tt.env)); got != tt.want {
+				t.Errorf("promptSeat(%q) = %q, want %q", tt.cwd, got, tt.want)
+			}
+		})
 	}
 }
