@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -465,6 +467,40 @@ func TestGate(t *testing.T) {
 			},
 			code: 0,
 			want: []string{"no successful deploy.yml run on a v* tag", "[plugin-result skipped]"},
+		},
+		{
+			name: "a run whose commit sha is not a commit id is not a release",
+			setup: func(h *harness) {
+				h.state(rigName, "")
+				h.setRuns(1, `{"id":9,"workflow_id":"deploy.yml","status":"success","prettyref":"v0.2.0","commit_sha":"../../admin","created":"2026-10-09T03:14:42Z"}`)
+			},
+			code: 0,
+			want: []string{"no successful deploy.yml run on a v* tag", "[plugin-result skipped]"},
+			// Neither the tag read nor a compare may address a path of the
+			// value's own making.
+			avoid: []string{"/tags/v0.2.0", "/compare/"},
+		},
+		{
+			name: "a run id that is not a number does not address a run",
+			setup: func(h *harness) {
+				h.state(rigName, "")
+				h.setRuns(1, `{"id":"../admin","workflow_id":"deploy.yml","status":"success","prettyref":"v0.2.0","commit_sha":"`+green+`","created":"2026-10-09T03:14:42Z"}`)
+			},
+			code:  0,
+			want:  []string{"no successful deploy.yml run on a v* tag", "[plugin-result skipped]"},
+			avoid: []string{"/actions/runs/"},
+		},
+		{
+			name: "a last_promoted that is not a commit id fails the run",
+			setup: func(h *harness) {
+				h.write(h.in("town", ".runtime", "red-main", rigName+".json"), `{"last_promoted":"../../admin"}`)
+			},
+			code: 1,
+			want: []string{
+				"app-promote: rig fractals: cannot read the red-main record",
+				"last_promoted is not a commit id",
+			},
+			avoid: []string{"/compare/"},
 		},
 		{
 			name: "50 newer branch runs on page 1 do not hide the release on page 2",
@@ -1282,7 +1318,8 @@ func TestRecordLastPromoted(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{"a record", `{"last_green":"a","last_promoted":"b"}`, "b", true},
+		{"a record", `{"last_green":"a","last_promoted":"` + green + `"}`, green, true},
+		{"an abbreviated sha", `{"last_promoted":"aaaa111"}`, "aaaa111", true},
 		{"no last_promoted", `{"last_green":"a"}`, "", true},
 		{"null last_promoted", `{"last_promoted":null}`, "", true},
 		{"empty last_promoted", `{"last_promoted":""}`, "", true},
@@ -1290,6 +1327,8 @@ func TestRecordLastPromoted(t *testing.T) {
 		{"not json", "nope", "", false},
 		{"empty", "", "", false},
 		{"a number", `{"last_promoted":5}`, "", false},
+		{"a path", `{"last_promoted":"../../admin"}`, "", false},
+		{"a branch name", `{"last_promoted":"main"}`, "", false},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -1314,4 +1353,156 @@ func TestLastPromotedWithoutARecord(t *testing.T) {
 	if got, err := lastPromoted(t.TempDir(), rigName); err != nil || got != "" {
 		t.Errorf("lastPromoted with no record = %q, %v; want empty and no error", got, err)
 	}
+}
+
+// TestPluginDirectory holds the executable's directory reading to the layouts a
+// run starts from: the binary inside the plugin's bin/, the path plugin.md's
+// [execution] block names, and a binary built anywhere else, which keeps its own
+// directory. Exactly one bin/ component is the plugin's.
+func TestPluginDirectory(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		exe  string
+		err  error
+		want string
+	}{
+		{"the binary in the plugin's bin", "/town/plugins/app-promote/bin/app-promote", nil, "/town/plugins/app-promote"},
+		{"a binary built outside the plugin", "/tmp/build/app-promote", nil, "/tmp/build"},
+		{"a bin inside a bin", "/a/bin/bin/app-promote", nil, "/a/bin"},
+		{"no executable path", "", errors.New("executable path unavailable"), "."},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := pluginDirectory(tc.exe, tc.err); got != tc.want {
+				t.Errorf("pluginDirectory(%q, %v) = %q, want %q", tc.exe, tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRealEnv holds main's wiring to the seams a run reads: a daemon run reaches
+// Forgejo and gt promote through them, so a dropped one has to fail here rather
+// than as a nil call in a live run.
+func TestRealEnv(t *testing.T) {
+	t.Parallel()
+	e := realEnv()
+	if e.getenv == nil || e.do == nil || e.promote == nil {
+		t.Errorf("realEnv seams = getenv %v, do %v, promote %v; want each one wired",
+			e.getenv == nil, e.do == nil, e.promote == nil)
+	}
+	if e.out == nil || e.errOut == nil {
+		t.Error("realEnv names no output stream; a run's lines would go nowhere")
+	}
+	if e.pluginDir == "" {
+		t.Error("realEnv names no plugin directory; the rig list would be looked up in the working directory")
+	}
+}
+
+// TestNewHTTPClient holds the client main wires to the two rules a read
+// depends on: it is bounded, and a redirect is answered rather than followed,
+// as the curl this replaced did without -L.
+func TestNewHTTPClient(t *testing.T) {
+	t.Parallel()
+	c := newHTTPClient()
+	if c.Timeout != readTimeout || c.Timeout <= 0 {
+		t.Errorf("client timeout = %v, want %v", c.Timeout, readTimeout)
+	}
+
+	hops := 0
+	c.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		hops++
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Location": []string{"http://elsewhere.invalid/api/v1/repos"}},
+			Body:       io.NopCloser(strings.NewReader("")),
+		}, nil
+	})
+	req, err := http.NewRequest(http.MethodGet, apiRoot+"/repos/"+repo+"/actions/runs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("client.Do = %v; want the 302 answered to the caller", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	if hops != 1 {
+		t.Errorf("the client made %d requests, want 1: it followed the redirect", hops)
+	}
+}
+
+// roundTripFunc is the transport a case drives in place of the network.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestPromoteArgv holds the command the exec seam runs to the rig and sha the
+// gate chose: an argv that dropped the sha would promote the wrong commit.
+func TestPromoteArgv(t *testing.T) {
+	t.Parallel()
+	got := promoteArgv(rigName, green)
+	want := []string{"promote", "--rig", rigName, "--sha", green}
+	if !slices.Equal(got, want) {
+		t.Errorf("promoteArgv = %q, want %q", got, want)
+	}
+}
+
+// TestPromoteResult holds the reading execPromote gives gt promote's output: a
+// clean exit names what it wrote, and a program that never started is exit 127
+// with its error as the output, the reading a shell gives it.
+func TestPromoteResult(t *testing.T) {
+	t.Parallel()
+	if out, code := promoteResult([]byte("promoted\n"), nil); out != "promoted\n" || code != 0 {
+		t.Errorf("promoteResult(written, no error) = %q, %d; want %q, 0", out, code, "promoted\n")
+	}
+	out, code := promoteResult(nil, exec.ErrNotFound)
+	if code != 127 {
+		t.Errorf("promoteResult(a program that cannot start) = %d, want 127", code)
+	}
+	if want := exec.ErrNotFound.Error(); out != want {
+		t.Errorf("promoteResult(a program that cannot start) = %q, want %q", out, want)
+	}
+}
+
+// TestRunShForwarding holds run.sh, the shim beside this program, to its one
+// job: exec the binary plugin.md's [execution] block declares, forwarding every
+// argument unchanged. The daemon execs that binary directly, so the shim serves
+// a hand run; with run_test.sh gone this is what keeps the two files naming one
+// program. The shim is four lines of shell, and the unit tier starts no
+// subprocess, so the assertion is over the text it runs.
+func TestRunShForwarding(t *testing.T) {
+	t.Parallel()
+	script, err := os.ReadFile("run.sh")
+	if err != nil {
+		t.Fatalf("reading run.sh: %v", err)
+	}
+	manifest, err := os.ReadFile("plugin.md")
+	if err != nil {
+		t.Fatalf("reading plugin.md: %v", err)
+	}
+	binary := declaredBinary(string(manifest))
+	if binary == "" {
+		t.Fatal("plugin.md's [execution] block declares no binary, so no shim can name it")
+	}
+	if want := `exec "$(dirname "$0")/` + binary + `" "$@"`; !strings.Contains(string(script), want) {
+		t.Errorf("run.sh does not hold %q; it holds:\n%s", want, script)
+	}
+}
+
+// binaryLine matches the binary plugin.md's [execution] block names.
+var binaryLine = regexp.MustCompile(`(?m)^[ \t]*binary[ \t]*=[ \t]*"([^"]*)"`)
+
+// declaredBinary is the binary plugin.md's [execution] block names, or "" when
+// the block names none.
+func declaredBinary(manifest string) string {
+	if m := binaryLine.FindStringSubmatch(manifest); m != nil {
+		return m[1]
+	}
+	return ""
 }

@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -66,6 +67,11 @@ const (
 	// excerptBytes is how much of a failure's reply reaches the cause line.
 	excerptBytes = 300
 
+	// readTimeout bounds one read of the Actions API. The daemon kills a run at
+	// plugin.md's timeout, so an unbounded read would hold that slot to the
+	// deadline and name no cause when it got there.
+	readTimeout = 30 * time.Second
+
 	// shortSHA is how much of a commit the run log names.
 	shortSHA = 8
 )
@@ -78,6 +84,15 @@ var releaseTag = regexp.MustCompile("^" + regexp.QuoteMeta(tagPrefix) + "[A-Za-z
 // tokenLine matches a FORGEJO_TOKEN assignment, with or without export and with
 // leading whitespace, and captures the rest of the line.
 var tokenLine = regexp.MustCompile(`^[ \t\v\f\r]*(?:export[ \t\v\f\r]*)?FORGEJO_TOKEN=(.*)$`)
+
+// shaShape matches a commit id as Forgejo and the red-main record write one:
+// hexadecimal, abbreviated to full. A sha read from either reaches a URL path
+// and gt promote's argv, so anything else is refused before it does.
+var shaShape = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+
+// runIDShape matches a run id as the API sends one: decimal digits, which is
+// all that may reach the jobs read's URL path.
+var runIDShape = regexp.MustCompile(`^[0-9]+$`)
 
 // env is everything a run reads from outside itself: the town, the viewer token,
 // the Forgejo API and `gt promote`, so a test drives every branch without a
@@ -92,14 +107,32 @@ type env struct {
 }
 
 func main() {
-	os.Exit(run(env{
-		pluginDir: pluginDirectory(),
+	os.Exit(run(realEnv()))
+}
+
+// realEnv is everything a run from the daemon or by hand reads: the plugin
+// directory this executable sits in, the process's streams and environment, a
+// bounded HTTP client, and `gt promote`.
+func realEnv() env {
+	return env{
+		pluginDir: pluginDirectory(os.Executable()),
 		out:       os.Stdout,
 		errOut:    os.Stderr,
 		getenv:    os.Getenv,
-		do:        http.DefaultClient.Do,
+		do:        newHTTPClient().Do,
 		promote:   execPromote,
-	}))
+	}
+}
+
+// newHTTPClient is the client a real run reads with. Every read is bounded by
+// readTimeout, and a redirect is answered rather than followed: the curl this
+// replaced ran without -L, and a 3xx is a status the gate does not accept, so a
+// redirected read fails the run instead of reaching another host (gt-9x89a).
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:       readTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 // run applies the gate to every rig and returns the process exit code.
@@ -448,12 +481,15 @@ func lastSegment(id string) string {
 
 // releaseCandidates returns the runs of a page that could be a release, newest
 // first by the created stamp rather than the order the API sent them (the
-// dashboard sorts the same way, internal/dashboard/deploys.go).
+// dashboard sorts the same way, internal/dashboard/deploys.go). A run whose
+// commit sha is not a sha, or whose id is not a number, is no candidate: those
+// two values would otherwise address a path of their own making.
 func releaseCandidates(runs []workflowRun) []workflowRun {
 	var out []workflowRun
 	for _, r := range runs {
 		if r.workflowID != deployWorkflow || !releaseTag.MatchString(r.prettyRef) ||
-			r.status != "success" || r.commitSHA == "" || r.id == "" || r.id == "0" {
+			r.status != "success" || !shaShape.MatchString(r.commitSHA) ||
+			!runIDShape.MatchString(r.id) || r.id == "0" {
 			continue
 		}
 		out = append(out, r)
@@ -625,12 +661,15 @@ func lastPromoted(townRoot, rig string) (string, error) {
 	}
 	last, err := recordLastPromoted(data)
 	if err != nil {
-		return "", fmt.Errorf("rig %s: cannot read the red-main record %s", rig, state)
+		return "", fmt.Errorf("rig %s: cannot read the red-main record %s: %w", rig, state, err)
 	}
 	return last, nil
 }
 
-// recordLastPromoted reads last_promoted out of a red-main record.
+// recordLastPromoted reads last_promoted out of a red-main record. A value that
+// is not a commit id is unreadable: it becomes a compare base's URL path, and
+// promoting on a base nobody wrote would advance GitHub without the ordering
+// the record exists to prove.
 func recordLastPromoted(data []byte) (string, error) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
@@ -642,8 +681,11 @@ func recordLastPromoted(data []byte) (string, error) {
 	if err := json.Unmarshal(trimmed, &record); err != nil {
 		return "", err
 	}
-	if record.LastPromoted == nil {
+	if record.LastPromoted == nil || *record.LastPromoted == "" {
 		return "", nil
+	}
+	if !shaShape.MatchString(*record.LastPromoted) {
+		return "", errors.New("last_promoted is not a commit id")
 	}
 	return *record.LastPromoted, nil
 }
@@ -711,11 +753,12 @@ func bodyExcerpt(body []byte) string {
 	return strings.ReplaceAll(string(body), "\n", " ")
 }
 
-// pluginDirectory is the directory holding plugin.md and rigs.conf. The binary
-// lives in bin/ inside it, the path plugin.md's [execution] block names, and a
-// hand run starts from any directory, so the path comes from the executable.
-func pluginDirectory() string {
-	exe, err := os.Executable()
+// pluginDirectory is the directory holding plugin.md and rigs.conf, given the
+// path this process was started from: the binary lives in bin/ inside it, the
+// path plugin.md's [execution] block names, and a hand run starts from any
+// directory, so the path comes from the executable. An executable path that
+// cannot be read names no directory, and the working one is the best answer.
+func pluginDirectory(exe string, err error) string {
 	if err != nil {
 		return "."
 	}
@@ -726,14 +769,24 @@ func pluginDirectory() string {
 	return dir
 }
 
+// promoteArgv is the argv execPromote runs for the rig and sha the gate chose.
+func promoteArgv(rig, sha string) []string {
+	return []string{"promote", "--rig", rig, "--sha", sha}
+}
+
 // execPromote runs `gt promote` in the town root and answers with what it
-// wrote — both streams in the order it wrote them — and its exit code. A program
-// that cannot start is exit 127 with its error as the output, the reading a
-// shell gives it.
+// wrote — both streams in the order it wrote them — and its exit code.
 func execPromote(dir, rig, sha string) (string, int) {
-	cmd := exec.Command("gt", "promote", "--rig", rig, "--sha", sha) //nolint:gosec // G204: the arguments are the rig list's and the release's own
+	cmd := exec.Command("gt", promoteArgv(rig, sha)...) //nolint:gosec // G204: the arguments are the rig list's and the release's own
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
+	return promoteResult(out, err)
+}
+
+// promoteResult reads what gt promote wrote and the error from starting it as
+// the run's output and exit code. A program that cannot start is exit 127 with
+// its error as the output, the reading a shell gives it.
+func promoteResult(out []byte, err error) (string, int) {
 	if err == nil {
 		return string(out), 0
 	}
