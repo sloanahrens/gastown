@@ -3,6 +3,8 @@ package metrics
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -177,31 +179,19 @@ func TestRealEnvReadsTheTown(t *testing.T) {
 	if !reflect.DeepEqual(real.Extract.BeadDirs, wantDirs) {
 		t.Errorf("BeadDirs = %q, want %q", real.Extract.BeadDirs, wantDirs)
 	}
-	if _, err := os.Stat(filepath.Join(town, ".runtime", "metrics", "cache")); err != nil {
-		t.Errorf("the cache directory was not made: %v", err)
-	}
 
-	// The cached diff is answered from the cache file: no git show for it.
-	before := len(runner.calls)
+	// The cached diff is answered from the cache file, so reading it runs
+	// nothing: a command here means the cache was not used.
+	runner.answer = func(string, []string) ([]byte, error) {
+		t.Error("a cached commit's stat ran a command")
+		return nil, errors.New("unexpected command")
+	}
 	stat, err := real.Extract.Diffs.Stats(context.Background(), "gastown", "abc1234")
 	if err != nil {
 		t.Fatalf("Stats from the cache: %v", err)
 	}
-	if len(runner.calls) != before {
-		t.Errorf("Stats ran %d commands for a cached commit", len(runner.calls)-before)
-	}
 	if want := (DiffStat{LinesAdded: 3, LinesDeleted: 1, FilesTouched: 2, FileEntropy: 1.5, PackageEntropy: 1}); !sameStat(stat, want) {
 		t.Errorf("cached stat = %+v, want %+v", stat, want)
-	}
-
-	// One log per rig, then two commands for gastown's two commits.
-	if got, want := len(runner.calls), len(Rigs)+2; got != want {
-		t.Errorf("ran %d commands, want %d", got, want)
-	}
-	wantLog := []string{"nice", "-n", "15", "git", "--git-dir", rigRepo(town, "gastown"), "log",
-		"--reverse", "--format=%cI %H", "origin/main", "--", ".om.json"}
-	if got := runner.calls[0].argv; !reflect.DeepEqual(got, wantLog) {
-		t.Errorf("first command = %q, want %q", got, wantLog)
 	}
 }
 
@@ -227,14 +217,31 @@ func TestRealEnvLivesWithNoSourceFiles(t *testing.T) {
 func TestRealEnvRunsBdAtLowPriority(t *testing.T) {
 	t.Parallel()
 	real, _, _, runner := realWired(t, "smoke")
-	runner.calls = nil
+	var bids []realCall
+	// The ported _run is every command at low priority from the directory the
+	// caller named, so bd answers here only when both hold: the check is the
+	// runner's, and a call that misses either is bd's failure, not a retry.
+	runner.answer = func(dir string, argv []string) ([]byte, error) {
+		bids = append(bids, realCall{dir: dir, argv: argv})
+		if dir != "/beads/dir" {
+			return nil, fmt.Errorf("bd ran in %q, not the directory named", dir)
+		}
+		if len(argv) < 3 || argv[0] != "nice" || argv[1] != "-n" || argv[2] != "15" {
+			return nil, errors.New("bd ran without nice -n 15")
+		}
+		for i := 0; i+1 < len(argv); i++ {
+			if argv[i] == "bd" && argv[i+1] == "list" {
+				return []byte("[]"), nil
+			}
+		}
+		return nil, errors.New("bd ran without the caller's subcommand")
+	}
 	out, ok := real.Extract.RunBd("/beads/dir", []string{"list", "--all", "--json"})
 	if !ok || string(out) != "[]" {
-		t.Fatalf("RunBd = %q, %v; want the runner's answer", out, ok)
+		t.Fatalf("RunBd = %q, %v; want the runner's answer; bids = %+v", out, ok, bids)
 	}
-	want := realCall{dir: "/beads/dir", argv: []string{"nice", "-n", "15", "bd", "list", "--all", "--json"}}
-	if !reflect.DeepEqual(runner.calls, []realCall{want}) {
-		t.Errorf("bd calls = %+v, want %+v", runner.calls, want)
+	if len(bids) != 1 {
+		t.Errorf("RunBd made %d commands, want one", len(bids))
 	}
 
 	runner.answer = func(string, []string) ([]byte, error) { return nil, errors.New("bd failed") }
@@ -292,18 +299,24 @@ func TestRealEnvStopsWhenTheHomeCannotBeFound(t *testing.T) {
 	}
 }
 
-func TestRealEnvStopsOnATownItCannotWriteItsCacheInto(t *testing.T) {
+func TestRealEnvDoesNotWriteTheTown(t *testing.T) {
 	t.Parallel()
-	town := filepath.Join(t.TempDir(), "town")
-	if err := os.WriteFile(town, nil, 0o644); err != nil {
-		t.Fatalf("make %s: %v", town, err)
-	}
+	town := t.TempDir()
 	runner := &realRunner{answer: func(string, []string) ([]byte, error) { return nil, nil }}
-	_, err := RealEnv(context.Background(), RealEnvOptions{
+	if _, err := RealEnv(context.Background(), RealEnvOptions{
 		Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: t.TempDir(), Run: runner.run,
-	})
-	if err == nil || !strings.Contains(err.Error(), "real env") {
-		t.Errorf("RealEnv error = %v, want the cache directory refused under a file's path", err)
+	}); err != nil {
+		t.Fatalf("RealEnv: %v", err)
+	}
+	// The wiring reads the town; the extract's writes and the caches' are its
+	// callers', so wiring a town leaves it exactly as it was. This is what lets
+	// the hourly smoke run over the live town.
+	entries, err := os.ReadDir(town)
+	if err != nil {
+		t.Fatalf("list %s: %v", town, err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("wiring the town made %d entries in it: %v", len(entries), entries)
 	}
 }
 
@@ -351,6 +364,170 @@ func TestRealEnvListsNothingWhereAFileSits(t *testing.T) {
 	if len(real.Extract.UsageFiles) != 0 || len(real.Extract.OverrunStates) != 0 {
 		t.Errorf("a source path holding a file listed %d usage files and %d overrun states",
 			len(real.Extract.UsageFiles), len(real.Extract.OverrunStates))
+	}
+}
+
+// seamFiles is a RealFiles over a town that exists only in these maps: files by
+// path, and the entries each directory lists. A path in neither map reads as
+// absent, except a file's own path, which lists no entries as a file does.
+type seamFiles struct {
+	files map[string]string
+	dirs  map[string][]DirEntry
+	errs  map[string]error
+}
+
+// seam is the file seam the wiring takes.
+func (f seamFiles) seam() RealFiles {
+	return RealFiles{
+		ReadFile: func(path string) ([]byte, error) {
+			if err, ok := f.errs[path]; ok {
+				return nil, err
+			}
+			data, ok := f.files[path]
+			if !ok {
+				return nil, fs.ErrNotExist
+			}
+			return []byte(data), nil
+		},
+		ReadDir: func(dir string) ([]DirEntry, error) {
+			if err, ok := f.errs[dir]; ok {
+				return nil, err
+			}
+			if entries, ok := f.dirs[dir]; ok {
+				return entries, nil
+			}
+			if _, isFile := f.files[dir]; isFile {
+				return nil, nil
+			}
+			return nil, fs.ErrNotExist
+		},
+	}
+}
+
+// seamWired builds the wiring over files with one rig's ledger added, so every
+// case has a town to read and a case that reads the host's filesystem instead
+// finds nothing.
+func seamWired(t *testing.T, files seamFiles) (RealTown, error) {
+	t.Helper()
+	if files.files == nil {
+		files.files = map[string]string{}
+	}
+	if files.dirs == nil {
+		files.dirs = map[string][]DirEntry{}
+	}
+	files.files[filepath.Join(townOfSeam, ".runtime", "landings", "gastown.jsonl")] = `{"bead":"gt-a"}` + "\n"
+	runner := &realRunner{answer: realGit(townOfSeam)}
+	return RealEnv(context.Background(), RealEnvOptions{
+		Today: "smoke", Town: townOfSeam, DocsDir: "/docs", Home: "/home", Files: files.seam(), Run: runner.run,
+	})
+}
+
+// townOfSeam is the town of the file-seam cases: a path no host has.
+const townOfSeam = "/seam-town"
+
+func TestRealEnvReadsThroughItsFileSeam(t *testing.T) {
+	t.Parallel()
+	files := seamFiles{
+		files: map[string]string{
+			filepath.Join(townOfSeam, ".runtime", "landings", "reviews.jsonl"):          `{"bead":"gt-a"}` + "\n",
+			filepath.Join(townOfSeam, ".runtime", "usage", "beads", "gt-a.work.json"):   `{"models":{"m":{"calls":2}}}`,
+			filepath.Join(townOfSeam, ".runtime", "overrun-guard", "gt-a.json"):         `{"stop_began_at":"2026-10-01T00:00:00Z"}`,
+			filepath.Join(townOfSeam, ".runtime", "metrics", "cache", handoffCacheName): `{"gt-a":120}`,
+		},
+		dirs: map[string][]DirEntry{
+			filepath.Join(townOfSeam, ".runtime", "usage", "beads"): {{Name: "gt-a.work.json"}},
+			filepath.Join(townOfSeam, ".runtime", "overrun-guard"):  {{Name: "gt-a.json"}},
+		},
+	}
+	real, err := seamWired(t, files)
+	if err != nil {
+		t.Fatalf("RealEnv: %v", err)
+	}
+	if got, want := real.Extract.LedgerLines["gastown"], []string{`{"bead":"gt-a"}`}; !reflect.DeepEqual(got, want) {
+		t.Errorf("gastown ledger = %q, want the seam's %q", got, want)
+	}
+	if len(real.Extract.UsageFiles) != 1 || len(real.Extract.OverrunStates) != 1 {
+		t.Errorf("read %d usage files and %d overrun states through the seam, want one of each",
+			len(real.Extract.UsageFiles), len(real.Extract.OverrunStates))
+	}
+	if real.Extract.HandoffCache["gt-a"] != 120 {
+		t.Errorf("HandoffCache = %v, want the seam's gt-a", real.Extract.HandoffCache)
+	}
+}
+
+func TestRealEnvSkipsSourceFilesItCannotUse(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name           string
+		usage, overrun string
+	}{
+		{"malformed", `{"models":`, `{"stop_began_at":`},
+		{"wrong shape", `{"models":"not an object"}`, `{"stop_began_at":[1]}`},
+		{"empty object", `{}`, `{}`},
+		{"null", `null`, `null`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			usagePath := filepath.Join(townOfSeam, ".runtime", "usage", "beads", "gt-a.work.json")
+			overrunPath := filepath.Join(townOfSeam, ".runtime", "overrun-guard", "gt-a.json")
+			files := seamFiles{
+				files: map[string]string{usagePath: tc.usage, overrunPath: tc.overrun},
+				dirs: map[string][]DirEntry{
+					filepath.Dir(usagePath):   {{Name: "gt-a.work.json"}},
+					filepath.Dir(overrunPath): {{Name: "gt-a.json"}},
+				},
+			}
+			real, err := seamWired(t, files)
+			if err != nil {
+				t.Fatalf("RealEnv: %v", err)
+			}
+			// The ported real_env leaves such a file out rather than reading it
+			// as an empty record: the footer counts what it read, and a file it
+			// could not use is not a bead.
+			if len(real.Extract.UsageFiles) != 0 {
+				t.Errorf("UsageFiles = %v, want the %s file left out", real.Extract.UsageFiles, tc.name)
+			}
+			if len(real.Extract.OverrunStates) != 0 {
+				t.Errorf("OverrunStates = %v, want the %s file left out", real.Extract.OverrunStates, tc.name)
+			}
+		})
+	}
+}
+
+func TestRealEnvReadsAMissingCacheAsEmpty(t *testing.T) {
+	t.Parallel()
+	real, err := seamWired(t, seamFiles{})
+	if err != nil {
+		t.Fatalf("RealEnv: %v", err)
+	}
+	if real.Extract.HandoffCache == nil || len(real.Extract.HandoffCache) != 0 {
+		t.Errorf("HandoffCache = %v, want an empty map for a town with no cache yet", real.Extract.HandoffCache)
+	}
+	if cache := real.Extract.Diffs.(*GitDiffSource).Cache; len(cache) != 0 {
+		t.Errorf("diff cache = %v, want empty for a town with no cache yet", cache)
+	}
+}
+
+func TestRealEnvRefusesACacheItCannotDecode(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, cache string }{
+		{"handoff", handoffCacheName},
+		{"diffstats", diffstatsCacheName},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(townOfSeam, ".runtime", "metrics", "cache", tc.cache)
+			files := seamFiles{files: map[string]string{path: `{"gt-a":`}}
+			_, err := seamWired(t, files)
+			// A cache that is there and cannot be decoded is corruption, not a
+			// first run: read as empty it would silently cost every commit's
+			// git show again on every later run.
+			if err == nil || !strings.Contains(err.Error(), tc.cache) {
+				t.Errorf("RealEnv error = %v, want %s named", err, tc.cache)
+			}
+		})
 	}
 }
 
@@ -434,16 +611,16 @@ func TestSaveCachesWritesBothCaches(t *testing.T) {
 		t.Fatalf("SaveCaches: %v", err)
 	}
 	cacheDir := filepath.Join(town, ".runtime", "metrics", "cache")
-	handoff, ok := readJSONFile[map[string]int](filepath.Join(cacheDir, handoffCacheName))
-	if !ok || !reflect.DeepEqual(handoff, map[string]int{"gt-a": 55}) {
-		t.Errorf("%s = %v, %v; want the bead's bytes", handoffCacheName, handoff, ok)
+	handoff, err := readCache[map[string]int](hostFiles(), filepath.Join(cacheDir, handoffCacheName))
+	if err != nil || !reflect.DeepEqual(handoff, map[string]int{"gt-a": 55}) {
+		t.Errorf("%s = %v, %v; want the bead's bytes", handoffCacheName, handoff, err)
 	}
-	docs, ok := readJSONFile[map[string]diffStatDoc](filepath.Join(cacheDir, diffstatsCacheName))
+	docs, err := readCache[map[string]diffStatDoc](hostFiles(), filepath.Join(cacheDir, diffstatsCacheName))
 	want := map[string]diffStatDoc{"gastown:abc1234": {
 		LinesAdded: 9, LinesDeleted: 1, FilesTouched: 2, FileEntropy: 2.5, PackageEntropy: 1,
 	}}
-	if !ok || !reflect.DeepEqual(docs, want) {
-		t.Errorf("%s = %v, %v; want %v", diffstatsCacheName, docs, ok, want)
+	if err != nil || !reflect.DeepEqual(docs, want) {
+		t.Errorf("%s = %v, %v; want %v", diffstatsCacheName, docs, err, want)
 	}
 }
 

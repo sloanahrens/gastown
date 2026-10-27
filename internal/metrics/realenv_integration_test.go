@@ -8,15 +8,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // TestIntegrationRealEnv is the ported scripts/integ_town_metrics_smoke.py: the
-// extract runs read-only over the real town, and every ledger line it read is
-// accounted for as a row or as a logged drop. It belongs to the integration
-// tier, which the hourly sweep runs and the gate does not, and it skips where
-// no town is present.
+// extract runs over the real town's ledgers, and every ledger line it read is
+// accounted for as a row or as a logged drop. It reads the live town and writes
+// nothing into it — the extract's files and both caches go to temporary
+// directories — so a sweep never changes the town it measures. It belongs to
+// the integration tier, which the hourly sweep runs and the gate does not, and
+// it skips where the sweep names no town.
 //
 // Cost: one git show per landing the diff cache does not hold, one bd list per
 // bead directory, and at most 150 capped bd show calls. Every command carries a
@@ -24,7 +24,6 @@ import (
 func TestIntegrationRealEnv(t *testing.T) {
 	ctx := context.Background()
 	real, err := RealEnv(ctx, RealEnvOptions{
-		// "smoke" writes under <town>/.runtime/metrics/smoke, never into docs/.
 		Today: "smoke",
 		Town:  smokeTown(t),
 		Run:   OSRunnerDir(DefaultAllowEnv),
@@ -32,12 +31,15 @@ func TestIntegrationRealEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RealEnv: %v", err)
 	}
+	// The wiring only reads the town; the extract's output and the caches the
+	// smoke saves go to temporary directories.
+	real.Extract.OutDir = t.TempDir()
 	// Extract refuses a ledger line that vanished without a logged drop.
 	result, err := Extract(ctx, real.Extract)
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	if err := SaveCaches(real.Extract, real.Town); err != nil {
+	if err := SaveCaches(real.Extract, t.TempDir()); err != nil {
 		t.Fatalf("SaveCaches: %v", err)
 	}
 	file, err := os.Open(filepath.Join(real.Extract.OutDir, landingsName))
@@ -66,20 +68,18 @@ func TestIntegrationRealEnv(t *testing.T) {
 	}
 }
 
-// smokeTown is the town the smoke reads: TOWN_METRICS_TOWN when the sweep names
-// one, else the live town the hermetic harness recorded. The harness's HOME is
-// a sandbox, so the home-level bead directory it lists is the sandbox's, not
-// the operator's; the ledgers, usage files and repos all come from the town.
+// smokeTown is the town the smoke reads: the one TOWN_METRICS_TOWN names, which
+// the sweep sets. The hermetic harness's forbidden town is deliberately not a
+// fallback: that variable names the town a test must not touch, so reading it
+// here would be the one thing the harness forbids.
 func smokeTown(t *testing.T) string {
 	t.Helper()
-	for _, town := range []string{os.Getenv(envTown), workspace.ForbiddenTownRoot()} {
-		if town == "" {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(town, ".runtime", "landings")); err == nil {
-			return town
-		}
+	town := os.Getenv(envTown)
+	if town == "" {
+		t.Skip("the smoke needs a live town: set " + envTown + " to one with .runtime/landings")
 	}
-	t.Skip("the smoke needs a live town: set " + envTown + " to one with .runtime/landings")
-	return ""
+	if _, err := os.Stat(filepath.Join(town, ".runtime", "landings")); err != nil {
+		t.Skipf("%s names no live town: %v", envTown, err)
+	}
+	return town
 }
