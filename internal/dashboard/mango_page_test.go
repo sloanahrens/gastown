@@ -697,29 +697,35 @@ type mangoLabelBox struct {
 	Hi    float64
 }
 
-// mangoLabelFontEm is the advance of the page's monospace font as a fraction of
-// the font size (0.6em for Menlo, SF Mono and Consolas). A label's drawn width
-// is its rune count times this, measured here so a page that under-measures its
-// labels is caught by the text they actually cover rather than by its own
-// arithmetic.
-const mangoLabelFontEm = 0.6
+// mangoMonospaceEm is the advance of the widest face in the page's monospace
+// stack, as a fraction of the font size: Menlo's glyphs are 1233/2048 em
+// (0.602), SF Mono's 0.6 and Consolas's 0.55. It is the font's own figure and
+// not the page's, which allots 5.6px a character at font-size 9; a test that
+// measured with the page's figure could not see an estimate that under-measures
+// the drawn text (gt-ke4jw).
+const mangoMonospaceEm = 0.602
 
-// mangoLabelBoxes reads the event labels back as the boxes their text covers at
-// the font-size the page draws them at.
+// mangoLabelBoxes reads the event labels back as the boxes their text covers:
+// each label's own font size, as the page drew it, times its rune count at the
+// widest advance the stack names.
 func mangoLabelBoxes(t *testing.T, dom *pageDOM) []mangoLabelBox {
 	t.Helper()
 
 	xs := mangoAttrs(t, dom, "mgtwhat", "x")
 	ys := mangoAttrs(t, dom, "mgtwhat", "y")
 	anchors := mangoAttrs(t, dom, "mgtwhat", "text-anchor")
+	sizes := mangoAttrs(t, dom, "mgtwhat", "font-size")
 	texts := mangoTexts(t, dom, "mgtwhat")
-	if len(xs) != len(ys) || len(xs) != len(anchors) || len(xs) != len(texts) {
-		t.Fatalf("the event labels read %d x, %d y, %d anchors and %d texts, want one of each", len(xs), len(ys), len(anchors), len(texts))
+	if len(xs) != len(ys) || len(xs) != len(anchors) || len(xs) != len(sizes) || len(xs) != len(texts) {
+		t.Fatalf("the event labels read %d x, %d y, %d anchors, %d font sizes and %d texts, want one of each", len(xs), len(ys), len(anchors), len(sizes), len(texts))
 	}
 	boxes := make([]mangoLabelBox, 0, len(texts))
 	for i := range texts {
+		if sizes[i] == "" {
+			t.Fatalf("the label %q is drawn with no font size, so the box its text covers cannot be measured", texts[i])
+		}
 		x, y := mustFloat(t, xs[i]), mustFloat(t, ys[i])
-		w := float64(len([]rune(texts[i]))) * mangoLabelFontEm * 9
+		w := float64(len([]rune(texts[i]))) * mangoMonospaceEm * mustFloat(t, sizes[i])
 		b := mangoLabelBox{Text: texts[i], Y: y, Lo: x, Hi: x + w}
 		if anchors[i] == "end" {
 			b.Lo, b.Hi = x-w, x
@@ -727,6 +733,23 @@ func mangoLabelBoxes(t *testing.T, dom *pageDOM) []mangoLabelBox {
 		boxes = append(boxes, b)
 	}
 	return boxes
+}
+
+// mangoChartWidth reads the width the chart clips at from the viewBox the page
+// draws it with, so the bounds check holds a label to the box drawn rather than
+// to a width copied out of the layout (gt-ke4jw).
+func mangoChartWidth(t *testing.T, dom *pageDOM) float64 {
+	t.Helper()
+
+	views := mangoAttrs(t, dom, "mgchart", "viewBox")
+	if len(views) != 1 {
+		t.Fatalf("the trend draws %d charts, want one", len(views))
+	}
+	fields := strings.Fields(views[0])
+	if len(fields) != 4 {
+		t.Fatalf("the chart's viewBox reads %q, want four numbers", views[0])
+	}
+	return mustFloat(t, fields[2])
 }
 
 // Event labels never cover each other's text and never leave the chart's box,
@@ -746,8 +769,9 @@ func TestMangoTrendEventLabelsKeepTheirTextApartAndInsideTheChart(t *testing.T) 
 		mangoPageWeek("2026-10-12", 34, 0.125),
 		mangoPageWeek("2026-10-19", 29, 0.31),
 	}
-	// The events the dashboard drew on top of each other on 2026-10-26, and one
-	// on each side of them, where a label runs into the chart's edge.
+	// Three events a few days apart, the cluster the dashboard drew on top of
+	// each other, and one before and one after them, where a label runs into
+	// the chart's edge.
 	state["events"] = []map[string]any{
 		mangoPageEvent("2026-09-28", "the first week of the span has a change of its own to name"),
 		mangoPageEvent("2026-10-02", "from gate threshold 0.75 on gastown the queue waited a day"),
@@ -762,7 +786,7 @@ func TestMangoTrendEventLabelsKeepTheirTextApartAndInsideTheChart(t *testing.T) 
 	if len(boxes) != 6 {
 		t.Fatalf("the trend draws %d event labels, want one per event (6)", len(boxes))
 	}
-	const chartW = 700.0
+	chartW := mangoChartWidth(t, dom)
 	for _, b := range boxes {
 		if b.Lo < 0 || b.Hi > chartW {
 			t.Errorf("the label %q covers x %.0f..%.0f, want it inside the chart's 0..%.0f", b.Text, b.Lo, b.Hi, chartW)
