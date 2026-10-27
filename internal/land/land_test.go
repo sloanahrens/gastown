@@ -2229,17 +2229,55 @@ func TestLandRejectionLeavesABeadThatChangedHands(t *testing.T) {
 	}
 }
 
-// failingBeads fails AppendNotes, Update, or Show after the first call.
+// TestLandRepeatRejectionUnreadableCommentsIsNotGuessed: telling an interrupted
+// block from a requeued one reads the bead's comments, and a read that fails is
+// reported on RecordErr rather than read as either answer — the block the bead
+// carries is left exactly as it was.
+func TestLandRepeatRejectionUnreadableCommentsIsNotGuessed(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	// The shape a pass that wrote its block and died leaves: the block names
+	// this head and kind, and the bead still looks pre-rejection.
+	block := FormatRejectionNote(RejectionNote{
+		Attempt: 1, Kind: string(RejectGate), Reason: "earlier refusal",
+		Branch: f.work.Branch, Target: f.work.Target, MR: f.work.BeadID, Head: f.work.Head,
+	})
+	if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AppendNotes: block}); err != nil {
+		t.Fatalf("seeding the notes: %v", err)
+	}
+	f.gate.fn = func(string) GateResult { return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 1}}} }
+	l := f.lander()
+	l.Beads = &failingBeads{Fake: f.bd, failComments: true}
+	_, err := l.Land(context.Background(), f.work)
+	var rej *Rejection
+	if !errors.As(err, &rej) || rej.RecordErr == nil || !strings.Contains(rej.RecordErr.Error(), "comments") {
+		t.Fatalf("Land = %T %v, want a rejection whose comment read failed", err, err)
+	}
+	if got := RejectionBlocks(f.bead().Notes); got != 1 {
+		t.Errorf("%d rejection block(s), want the seeded one only", got)
+	}
+}
+
+// failingBeads fails AppendNotes, Update, Comments, or Show after the first
+// call.
 type failingBeads struct {
 	*beadsfake.Fake
-	failNotes  bool
-	failUpdate bool
-	shows      int
-	failShow   bool
+	failNotes    bool
+	failUpdate   bool
+	failComments bool
+	shows        int
+	failShow     bool
 	// failShowNow fails the first Show too, for a caller whose only read it
 	// is: the post-landing queue runs after every other read of the bead
 	// (gt-qtj72).
 	failShowNow bool
+}
+
+func (b *failingBeads) Comments(id string) ([]beads.Comment, error) {
+	if b.failComments {
+		return nil, errors.New("dolt: connection refused")
+	}
+	return b.Fake.Comments(id)
 }
 
 func (b *failingBeads) AppendNotes(id, note string) error {
