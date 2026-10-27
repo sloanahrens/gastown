@@ -1665,3 +1665,18 @@ func TestStop_UnreadableBeadBeforeTheRunEndHoldsTheHandBack(t *testing.T) {
 		t.Errorf("log lacks the unreadable-bead step failure:\n%s", buf.String())
 	}
 }
+
+// The production re-check reports a bead it cannot read, so the stop writes no
+// run end on a guess. A bd that cannot run is that read's failure.
+func TestStillOursSeamReportsAnUnreadableBead(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	d.bdPath = filepath.Join(t.TempDir(), "no-such-bd")
+	seams := d.overrunStopSeams(overrunSeams{})
+	if seams.stillOurs == nil {
+		t.Fatal("overrunStopSeams left stillOurs nil: nothing checks whose bead it is")
+	}
+	if _, err := seams.stillOurs(stopSeat); err == nil {
+		t.Fatal("stillOurs read a bead with no bd to run as one it could read")
+	}
+}

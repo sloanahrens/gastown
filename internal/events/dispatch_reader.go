@@ -71,12 +71,7 @@ func (r *DispatchReader) Starts() (map[string]time.Time, error) {
 		// than fold new bytes into a map built from a file that is gone.
 		clock, offset = NewDispatchClock(), 0
 	}
-	if offset > 0 {
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			return nil, fmt.Errorf("reading %s: %w", r.path, err)
-		}
-	}
-	data, err := io.ReadAll(f)
+	data, err := io.ReadAll(io.NewSectionReader(f, offset, fi.Size()-offset))
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", r.path, err)
 	}

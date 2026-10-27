@@ -2,6 +2,7 @@ package events
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -60,6 +61,15 @@ func TestDispatchReaderReadsOnlyTheAppendedLines(t *testing.T) {
 	}
 	if r.offset <= int64(len(logLine(TypeSling, t9, "gt-a")+"\n"+logLine(TypeSling, t10, "gt-b")+"\n")) {
 		t.Errorf("offset = %d, want it to have advanced past both reads", r.offset)
+	}
+
+	// A poll that finds nothing appended answers from what the reader holds.
+	quiet, err := r.Starts()
+	if err != nil {
+		t.Fatalf("Starts with nothing appended: %v", err)
+	}
+	if !quiet["gt-a"].Equal(got["gt-a"]) || !quiet["gt-b"].Equal(got["gt-b"]) {
+		t.Errorf("quiet poll = %v, want the previous reading %v", quiet, got)
 	}
 }
 
@@ -185,5 +195,42 @@ func TestDispatchReaderMatchesAWholeLogRead(t *testing.T) {
 		if g, ok := got[bead]; !ok || !g.Equal(at) {
 			t.Errorf("%s = %v (%t), want %v", bead, g, ok, at)
 		}
+	}
+}
+
+// A town whose log path cannot be read is an error, whichever of the reads
+// fails: the dashboard shows the Age as unavailable rather than dating every
+// seat from a default.
+func TestDispatchReaderReportsATownItCannotStat(t *testing.T) {
+	t.Parallel()
+	// A regular file where the town root belongs: the log's own path cannot be
+	// stat'ed under it.
+	town := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(town, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewDispatchReader(town).Starts(); err == nil {
+		t.Fatal("Starts read a log it could not stat as an empty one")
+	}
+}
+
+// A log that is there but cannot be opened is an error too, not a town that
+// dispatched nothing: a socket at the path stats fine and opens not at all.
+func TestDispatchReaderReportsALogItCannotOpen(t *testing.T) {
+	t.Parallel()
+	// A short path: a unix socket's name is capped at about 100 bytes.
+	town, err := os.MkdirTemp("", "ev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(town) })
+	l, err := net.Listen("unix", filepath.Join(town, EventsFile))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	if _, err := NewDispatchReader(town).Starts(); err == nil {
+		t.Fatal("Starts read a log it could not open as an empty one")
 	}
 }
