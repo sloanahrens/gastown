@@ -2,6 +2,8 @@ package polecatimage
 
 import (
 	"bytes"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,11 +20,12 @@ func envMap(vars map[string]string) func(string) string {
 // nothing: HOME's gt, and the paths under it.
 func TestConfigFromEnvDefaults(t *testing.T) {
 	t.Parallel()
-	cfg, err := ConfigFromEnv(envMap(map[string]string{"HOME": "/home/op"}))
+	home := t.TempDir()
+	cfg, err := ConfigFromEnv(envMap(map[string]string{"HOME": home}))
 	if err != nil {
 		t.Fatalf("ConfigFromEnv() failed: %v", err)
 	}
-	town := "/home/op/gt"
+	town := filepath.Join(home, "gt")
 	for _, tc := range []struct {
 		got, want, name string
 	}{
@@ -55,9 +58,10 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 // overridden through.
 func TestConfigFromEnvOverrides(t *testing.T) {
 	t.Parallel()
+	town := t.TempDir()
 	cfg, err := ConfigFromEnv(envMap(map[string]string{
 		"HOME":                        "/home/op",
-		"POLECAT_IMAGE_TOWN_ROOT":     "/town",
+		"POLECAT_IMAGE_TOWN_ROOT":     town,
 		"POLECAT_IMAGE_NAME":          "example:dev",
 		"POLECAT_IMAGE_REGISTRY":      "localhost:5001",
 		"POLECAT_IMAGE_FAIL_CLOSED":   "1",
@@ -73,7 +77,7 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	for _, tc := range []struct {
 		got, want, name string
 	}{
-		{cfg.LockDir, filepath.Join("/town", ".runtime", "polecat-image.lock"), "lock"},
+		{cfg.LockDir, filepath.Join(town, ".runtime", "polecat-image.lock"), "lock"},
 		{cfg.Image, "example:dev", "image"},
 		{cfg.Registry, "localhost:5001", "registry"},
 		{cfg.Keep, "7", "keep"},
@@ -118,12 +122,172 @@ func TestConfigFromEnvRefusesAnUnreadableStaleLock(t *testing.T) {
 // instead of failing the build and publish path (gt-tpg0p.7).
 func TestConfigFromEnvCarriesAnUnreadableKeepThrough(t *testing.T) {
 	t.Parallel()
-	cfg, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": "/town", "POLECAT_IMAGE_KEEP": "three"}))
+	cfg, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": t.TempDir(), "POLECAT_IMAGE_KEEP": "three"}))
 	if err != nil {
 		t.Fatalf("ConfigFromEnv() failed: %v", err)
 	}
 	if cfg.Keep != "three" {
 		t.Errorf("the keep count is %q, want the text the operator wrote", cfg.Keep)
+	}
+}
+
+// writeTownImageConfig writes the town's settings/config.json.
+func writeTownImageConfig(t *testing.T, town, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(town, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "settings", "config.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestConfigFromEnvPrefersTheEnvironmentToTheTownConfig pins the first source:
+// what the daemon or the installer exported wins over the town's config, so an
+// operator can point one run elsewhere (gt-du3fi).
+func TestConfigFromEnvPrefersTheEnvironmentToTheTownConfig(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownImageConfig(t, town, `{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":"config.example:5000","POLECAT_IMAGE_CRANE":"/config/bin/crane"}}}`)
+	cfg, err := ConfigFromEnv(envMap(map[string]string{
+		"POLECAT_IMAGE_TOWN_ROOT": town,
+		"POLECAT_IMAGE_REGISTRY":  "env.example:6000",
+		"POLECAT_IMAGE_CRANE":     "/env/bin/crane",
+	}))
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() failed: %v", err)
+	}
+	if cfg.Registry != "env.example:6000" {
+		t.Errorf("the registry is %q, want the exported one", cfg.Registry)
+	}
+	if cfg.Crane != "/env/bin/crane" {
+		t.Errorf("the crane is %q, want the exported one", cfg.Crane)
+	}
+	if cfg.RegistryWhy != "" {
+		t.Errorf("a resolved registry reported %q as a fault", cfg.RegistryWhy)
+	}
+}
+
+// TestConfigFromEnvResolvesEachImageSettingAlone pins the two keys apart: one
+// exported leaves the other to the town's config.
+func TestConfigFromEnvResolvesEachImageSettingAlone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownImageConfig(t, town, `{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":"config.example:5000","POLECAT_IMAGE_CRANE":"/config/bin/crane"}}}`)
+	for _, tc := range []struct {
+		name     string
+		env      map[string]string
+		registry string
+		crane    string
+	}{
+		{"neither exported", map[string]string{}, "config.example:5000", "/config/bin/crane"},
+		{"registry exported", map[string]string{"POLECAT_IMAGE_REGISTRY": "env.example:6000"}, "env.example:6000", "/config/bin/crane"},
+		{"crane exported", map[string]string{"POLECAT_IMAGE_CRANE": "/env/bin/crane"}, "config.example:5000", "/env/bin/crane"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := map[string]string{"POLECAT_IMAGE_TOWN_ROOT": town}
+			for k, v := range tc.env {
+				env[k] = v
+			}
+			cfg, err := ConfigFromEnv(envMap(env))
+			if err != nil {
+				t.Fatalf("ConfigFromEnv() failed: %v", err)
+			}
+			if cfg.Registry != tc.registry {
+				t.Errorf("the registry is %q, want %q", cfg.Registry, tc.registry)
+			}
+			if cfg.Crane != tc.crane {
+				t.Errorf("the crane is %q, want %q", cfg.Crane, tc.crane)
+			}
+		})
+	}
+}
+
+// TestConfigFromEnvReadsTheTownConfigWhenTheEnvironmentNamesNeither is a hand
+// install's path: a shell exports neither key, so both come from the town's
+// settings/config.json, and no other key of it reaches the run (gt-du3fi).
+func TestConfigFromEnvReadsTheTownConfigWhenTheEnvironmentNamesNeither(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownImageConfig(t, town, `{"daemon":{"env":{
+		"POLECAT_IMAGE_REGISTRY":"config.example:5000",
+		"POLECAT_IMAGE_CRANE":"/config/bin/crane",
+		"ANTHROPIC_API_KEY":"sk-town-sentinel",
+		"GT_SEAT_REFILL_MAX_PRIORITY":"50"}}}`)
+	cfg, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": town}))
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() failed: %v", err)
+	}
+	if cfg.Registry != "config.example:5000" {
+		t.Errorf("the registry is %q, want the town's", cfg.Registry)
+	}
+	if cfg.Crane != "/config/bin/crane" {
+		t.Errorf("the crane is %q, want the town's", cfg.Crane)
+	}
+	// The rest of daemon.env is the town's secrets: a run reads the two image
+	// keys and carries none of the others.
+	if got := fmt.Sprintf("%+v", cfg); strings.Contains(got, "sk-town-sentinel") || strings.Contains(got, "GT_SEAT_REFILL_MAX_PRIORITY") {
+		t.Errorf("the run's configuration carries a daemon.env key it did not name: %s", got)
+	}
+}
+
+// TestConfigFromEnvResolvesNoRegistryWhenNothingNamesOne pins the third source:
+// no registry exported and none configured publishes nothing, which is not a
+// fault to report (gt-du3fi).
+func TestConfigFromEnvResolvesNoRegistryWhenNothingNamesOne(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, body string }{
+		{"no config file", ""},
+		{"no daemon.env", `{"daemon":{}}`},
+		{"no registry in daemon.env", `{"daemon":{"env":{"POLECAT_IMAGE_CRANE":"/config/bin/crane"}}}`},
+		{"an empty registry", `{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":""}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if tc.body != "" {
+				writeTownImageConfig(t, town, tc.body)
+			}
+			cfg, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": town}))
+			if err != nil {
+				t.Fatalf("ConfigFromEnv() failed: %v", err)
+			}
+			if cfg.Registry != "" {
+				t.Errorf("the registry is %q, want none", cfg.Registry)
+			}
+			if cfg.RegistryWhy != "" {
+				t.Errorf("a town that configured no registry reported %q as a fault", cfg.RegistryWhy)
+			}
+		})
+	}
+}
+
+// TestConfigFromEnvReportsATownConfigItCannotRead keeps an unreadable config
+// from passing as a town that asked for no publish: the run carries the reason
+// and logs it.
+func TestConfigFromEnvReportsATownConfigItCannotRead(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, body, want string }{
+		{"not JSON", `{not json`, "is not readable JSON"},
+		{"daemon.env is not an object", `{"daemon":{"env":["config.example:5000"]}}`, "daemon.env in "},
+		{"the registry is not a string", `{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":7001}}}`, "POLECAT_IMAGE_REGISTRY in daemon.env of "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeTownImageConfig(t, town, tc.body)
+			cfg, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": town}))
+			if err != nil {
+				t.Fatalf("ConfigFromEnv() failed: %v", err)
+			}
+			if cfg.Registry != "" {
+				t.Errorf("the registry is %q, want none from a config it cannot read", cfg.Registry)
+			}
+			if !strings.Contains(cfg.RegistryWhy, tc.want) {
+				t.Errorf("the reason is %q, want it to name %q", cfg.RegistryWhy, tc.want)
+			}
+		})
 	}
 }
 

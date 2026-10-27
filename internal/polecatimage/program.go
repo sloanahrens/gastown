@@ -42,6 +42,11 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 	if err != nil || minutes <= 0 {
 		return Config{}, fmt.Errorf("POLECAT_IMAGE_STALE_MINUTES=%s is not a whole number of minutes", stale)
 	}
+	registry, registryWhy := imageSetting(get, town, "POLECAT_IMAGE_REGISTRY")
+	crane, _ := imageSetting(get, town, "POLECAT_IMAGE_CRANE")
+	if crane == "" {
+		crane = "crane"
+	}
 	return Config{
 		GT:             envOr(get, "POLECAT_IMAGE_GT", "gt"),
 		Docker:         envOr(get, "POLECAT_IMAGE_DOCKER", "docker"),
@@ -49,7 +54,7 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 		Make:           envOr(get, "POLECAT_IMAGE_MAKE", "make"),
 		Pgrep:          envOr(get, "POLECAT_IMAGE_PGREP", "pgrep"),
 		Openshell:      envOr(get, "POLECAT_IMAGE_OPENSHELL", "openshell"),
-		Crane:          envOr(get, "POLECAT_IMAGE_CRANE", "crane"),
+		Crane:          crane,
 		RigRepo:        envOr(get, "POLECAT_IMAGE_RIG_REPO", filepath.Join(town, "gastown", ".repo.git")),
 		BuildRoot:      envOr(get, "POLECAT_IMAGE_BUILD_ROOT", filepath.Join(town, "gastown", ".polecat-image-build")),
 		BDSrc:          envOr(get, "POLECAT_IMAGE_BD_SRC", filepath.Join(town, "beads", "mayor", "rig")),
@@ -58,7 +63,8 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 		SandboxRecords: envOr(get, "POLECAT_IMAGE_SANDBOX_RECORDS", filepath.Join(town, ".runtime", "sandboxes")),
 		Image:          envOr(get, "POLECAT_IMAGE_NAME", "gastown-polecat:dev"),
 		Label:          "org.gastown.gt-commit",
-		Registry:       get("POLECAT_IMAGE_REGISTRY"),
+		Registry:       registry,
+		RegistryWhy:    registryWhy,
 		Published:      envOr(get, "POLECAT_IMAGE_PUBLISHED", filepath.Join(town, ".runtime", "polecat-image.published")),
 		// Only 1 turns it on, so a stray POLECAT_IMAGE_FAIL_CLOSED=0 cannot fail
 		// a run (gt-efupr).
@@ -81,6 +87,18 @@ func townRoot(get func(string) string) (string, error) {
 		return "", fmt.Errorf("cannot find the town root: POLECAT_IMAGE_TOWN_ROOT and HOME are both unset")
 	}
 	return filepath.Join(home, "gt"), nil
+}
+
+// imageSetting is one of the two settings a town keeps for its image runs:
+// get's value, which the daemon and the installer export, else the town's
+// settings/config.json daemon.env, which a hand install's shell does not carry.
+// why is the config's reason and "" whenever get named a value or the town
+// configured none (gt-du3fi).
+func imageSetting(get func(string) string, townRoot, key string) (value, why string) {
+	if v := get(key); v != "" {
+		return v, ""
+	}
+	return townImageSetting(townRoot, key)
 }
 
 // envOr is the variable's value, or def when it is unset. Every path and program

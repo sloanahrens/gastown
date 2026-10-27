@@ -38,6 +38,12 @@ type Config struct {
 	Image, Label string
 	// Registry is the host:port image pushes go to; empty publishes nothing.
 	Registry string
+	// RegistryWhy says why a run whose environment names no registry found
+	// none in the town's settings/config.json: empty when Registry is resolved,
+	// or when the town configured none. A config that exists and cannot be read
+	// is what it carries, so a run that publishes nothing says why rather than
+	// passing as a town that asked for no publish.
+	RegistryWhy string
 	// Published records the "<image id> <registry>" a complete push left, so
 	// the next run retries one that did not finish.
 	Published string

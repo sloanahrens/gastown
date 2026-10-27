@@ -7,6 +7,9 @@ const maxRounds = 3
 // Main keeps the image at the installed gt's commit, publishing each build when
 // a registry is named, and answers the failure it cannot carry past.
 func (r *Run) Main() error {
+	if r.Cfg.RegistryWhy != "" {
+		r.Logf("registry: %s; the image is not published", r.Cfg.RegistryWhy)
+	}
 	installed := r.InstalledCommit()
 	if installed == "" {
 		return r.failf("cannot read the installed gt's commit from '%s version'", r.Cfg.GT)
