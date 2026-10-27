@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -172,6 +173,21 @@ type ReviewInput struct {
 	// is the landing's first review, or the round before it refused on
 	// something other than findings.
 	PriorFindings []Finding
+	// BriefText is the work-item file (BeadBrief), which om reads through
+	// --bead-file when it accepts the flag (gt-3l5qy). Empty means the flag is
+	// omitted.
+	BriefText string
+	// PolicyText is the fixed town-policy block (policy.PolicyBlock), which om
+	// reads through --policy-file when it accepts the flag (gt-3l5qy). Empty
+	// means the flag is omitted.
+	PolicyText string
+	// Round is the landing attempt this review belongs to (reviewAttempt), passed
+	// as --round when the installed om accepts it. Zero means no round.
+	Round int
+	// RoundsText is the rounds ledger as the JSON array om reads through
+	// --rounds-file when it accepts the flag (gt-3l5qy). Empty means the flag is
+	// omitted: no history, or a ledger that could not be read.
+	RoundsText string
 	// Logf receives the reviewer's warning lines; nil drops them.
 	Logf func(format string, args ...any)
 }
@@ -346,22 +362,42 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	// om that cannot describe its own flags must not spend the review's
 	// (gt-yl7n4). One probe answers both, so a bead carrying both texts pays for
 	// one help read.
+	// The brief, policy and rounds flags (gt-3l5qy) ride the same one probe.
+	newFlags := in.BriefText != "" || in.PolicyText != "" || in.RoundsText != "" || in.Round > 0
 	criteriaPath, contextPath := "", ""
-	if in.CriteriaText != "" || in.AcceptedRisksText != "" {
-		help, probed := r.omReviewHelp(ctx, in, path, run)
-		if in.CriteriaText != "" {
-			criteriaPath = r.optionalFile(in, probed, help, "--criteria-file",
-				"the acceptance criteria file", r.criteriaFile)
-		}
-		if in.AcceptedRisksText != "" {
-			contextPath = r.optionalFile(in, probed, help, "--context-file",
-				"the accepted risks file", r.acceptedRisksFile)
-		}
+	briefPath, policyPath, roundsPath := "", "", ""
+	help, probed := "", false
+	if in.CriteriaText != "" || in.AcceptedRisksText != "" || newFlags {
+		help, probed = r.omReviewHelp(ctx, in, path, run)
 	}
-	// Both files are temp files on every path out of the attempt, not only a
+	if in.CriteriaText != "" {
+		criteriaPath = r.optionalFile(in, probed, help, "--criteria-file",
+			"the acceptance criteria file", r.criteriaFile)
+	}
+	if in.AcceptedRisksText != "" {
+		contextPath = r.optionalFile(in, probed, help, "--context-file",
+			"the accepted risks file", r.acceptedRisksFile)
+	}
+	if in.BriefText != "" {
+		briefPath = r.optionalFile(in, probed, help, "--bead-file",
+			"the work-item file", r.briefFile)
+	}
+	if in.PolicyText != "" {
+		policyPath = r.optionalFile(in, probed, help, "--policy-file",
+			"the policy file", r.policyFile)
+	}
+	if in.RoundsText != "" {
+		roundsPath = r.optionalFile(in, probed, help, "--rounds-file",
+			"the rounds file", r.roundsFile)
+	}
+	roundFlag := in.Round > 0 && probed && omHelpListsFlag(help, "--round")
+	if in.Round > 0 && probed && !roundFlag {
+		r.warnf(in, "om does not take --round; review runs without the round number")
+	}
+	// Every file is a temp file on every path out of the attempt, not only a
 	// successful one.
 	defer func() {
-		for _, p := range []string{criteriaPath, contextPath} {
+		for _, p := range []string{criteriaPath, contextPath, briefPath, policyPath, roundsPath} {
 			if p != "" {
 				_ = os.Remove(p)
 			}
@@ -413,6 +449,18 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	// (gt-cz07b).
 	if priorPath != "" {
 		argv = append(argv, "--prior-findings", priorPath)
+	}
+	if briefPath != "" {
+		argv = append(argv, "--bead-file", briefPath)
+	}
+	if policyPath != "" {
+		argv = append(argv, "--policy-file", policyPath)
+	}
+	if roundsPath != "" {
+		argv = append(argv, "--rounds-file", roundsPath)
+	}
+	if roundFlag {
+		argv = append(argv, "--round", strconv.Itoa(in.Round))
 	}
 	code, runErr := run(rctx, dir, omUnsetEnv, argv, w)
 	if runErr != nil && errors.Is(rctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
@@ -615,7 +663,11 @@ func parseOMVersion(out string) string {
 // review, so the failure costs one warning line and the flag.
 func (r OMReviewer) optionalFile(in ReviewInput, probed bool, help, flag, what string,
 	write func(ReviewInput) (string, error)) string {
-	if !probed || !omHelpListsFlag(help, flag) {
+	if !probed {
+		return ""
+	}
+	if !omHelpListsFlag(help, flag) {
+		r.warnf(in, "om does not take %s; review runs without %s", flag, what)
 		return ""
 	}
 	p, err := write(in)
@@ -647,6 +699,22 @@ func (r OMReviewer) acceptedRisksFile(in ReviewInput) (string, error) {
 // OutDir, beside the verdict file, and returns its path. The caller removes it
 // after the run; a text that cannot be written is not a reason to skip the
 // review.
+// briefFile writes the work-item file to a 0600 temp file in OutDir and returns
+// its path; the caller removes it after the run (gt-3l5qy).
+func (r OMReviewer) briefFile(in ReviewInput) (string, error) {
+	return writeTemp(r.OutDir, "om-brief-*.txt", []byte(in.BriefText))
+}
+
+// policyFile writes the town-policy block to a temp file in OutDir (gt-3l5qy).
+func (r OMReviewer) policyFile(in ReviewInput) (string, error) {
+	return writeTemp(r.OutDir, "om-policy-*.txt", []byte(in.PolicyText))
+}
+
+// roundsFile writes the rounds ledger to a temp file in OutDir (gt-3l5qy).
+func (r OMReviewer) roundsFile(in ReviewInput) (string, error) {
+	return writeTemp(r.OutDir, "om-rounds-*.json", []byte(in.RoundsText))
+}
+
 func (r OMReviewer) writeCriteria(in ReviewInput) (string, error) {
 	return writeTemp(r.OutDir, "om-criteria-*.txt", []byte(in.CriteriaText))
 }

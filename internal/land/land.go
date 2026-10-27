@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/land/policy"
 )
 
 // Beads is the part of beads.Client Land writes the work bead through
@@ -994,6 +995,35 @@ func (l *Lander) firstRoundsWarning(bead string) bool {
 	return true
 }
 
+// reviewBrief is the work-item file om reads for the bead: its goal, constraints,
+// scope and gate plus its decision comments (gt-0sztd). Comments that cannot be
+// read leave the brief without them; the review still judges the diff.
+func (l *Lander) reviewBrief(issue *beads.Issue) string {
+	comments, err := l.Beads.Comments(issue.ID)
+	if err != nil {
+		l.logf("%s: could not read the bead's comments for the work-item file (%v); om reads the brief without them", issue.ID, err)
+	}
+	return BeadBrief(issue.Description, comments)
+}
+
+// roundsText is the bead's rounds ledger as om reads it, or "" when there is no
+// ledger to hand over. An unreadable ledger is named once for the bead and the
+// review runs without rounds (gt-yphcl, gt-3l5qy).
+func (l *Lander) roundsText(bead string) string {
+	if l.RoundsDir == "" {
+		return ""
+	}
+	ledger := RoundsLedger{OutDir: l.RoundsDir, Bead: bead, Now: l.now}
+	data, err := ledger.Render(DefaultRoundsCap)
+	if err != nil {
+		if !errors.Is(err, ErrRoundsCorrupt) || l.firstRoundsWarning(bead) {
+			l.logf("%s: could not read the rounds ledger (%v); om reviews without rounds", bead, err)
+		}
+		return ""
+	}
+	return string(data)
+}
+
 func (l *Lander) now() time.Time {
 	if l.Now != nil {
 		return l.Now()
@@ -1370,7 +1400,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		accepted, used := l.acceptedRisks(w.BeadID)
 		in := ReviewInput{Dir: dir, Base: base, Head: merged, BeadID: w.BeadID,
 			CriteriaText: CriteriaText(issue), PriorFindings: priorReviewFindings(issue.Notes),
-			AcceptedRisksText: accepted}
+			AcceptedRisksText: accepted,
+			BriefText:         l.reviewBrief(issue), PolicyText: policy.PolicyBlock(),
+			Round: reviewAttempt(issue.Notes), RoundsText: l.roundsText(w.BeadID)}
 		verdict, reviewErr = l.review(omCtx, in)
 		// One flaky om run must not cost an escalation and a hand review
 		// (gt-q241r): an execution error on an ordinary tree is retried once,

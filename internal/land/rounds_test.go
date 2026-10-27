@@ -450,8 +450,10 @@ func TestLandSurvivesACorruptRoundsLedger(t *testing.T) {
 	}
 	_, err := l.Land(context.Background(), f.work)
 	f.assertRejected(t, err, RejectReview, LabelRework)
-	if !strings.Contains(out.String(), "could not record the round in the rounds ledger") {
-		t.Errorf("the failed ledger write is not in the landing log:\n%s", out.String())
+	// The unreadable ledger is named once for the bead, when the review reads it
+	// (roundsText), and the review runs without rounds.
+	if n := strings.Count(out.String(), "could not read the rounds ledger"); n != 1 {
+		t.Errorf("the unreadable ledger is named %d time(s) in the landing log, want once:\n%s", n, out.String())
 	}
 }
 
