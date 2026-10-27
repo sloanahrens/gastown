@@ -625,6 +625,41 @@ func TestListEscalationsRoutedAsksForEveryRow(t *testing.T) {
 	}
 }
 
+// TestListEscalationsAcrossRigsUncapsBdPage drives the routed read through the
+// runner seam. bd list pages at 50 without --limit=0, so the counts behind
+// `gt escalate list`, `gt status` and the dashboard stop there (gt-mm38p); the
+// stub-binary test above records the same flag, and this one holds the property
+// runnable without a subprocess — dropping --limit=0 from the list call fails
+// here.
+func TestListEscalationsAcrossRigsUncapsBdPage(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(func(args []string) reply {
+		if len(args) > 0 && args[0] == "list" {
+			return reply{stdout: "[]"}
+		}
+		return reply{}
+	})
+	b := newRecordedBeads(t.TempDir(), r)
+
+	if _, err := ListEscalationsAcrossRigs(b); err != nil {
+		t.Fatalf("ListEscalationsAcrossRigs: %v", err)
+	}
+
+	var listArgs []string
+	for _, call := range r.calls() {
+		if len(call.args) > 0 && call.args[0] == "list" {
+			listArgs = call.args
+			break
+		}
+	}
+	if listArgs == nil {
+		t.Fatalf("no routed bd list call among %q", r.argvs())
+	}
+	if !slices.Contains(listArgs, "--limit=0") {
+		t.Errorf("routed bd list argv = %q, want --limit=0 so bd does not page at 50", listArgs)
+	}
+}
+
 // TestListEscalationsStaysPinnedToCurrentDatabase pins the scope decision made
 // for gt-wbxb: only the display path routes across rigs. ListEscalations feeds
 // ListStaleEscalations (which reescalates and sends mail) and shares its query

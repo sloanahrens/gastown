@@ -642,7 +642,8 @@ func listEscalationsAcrossRigs(c Client, status string) ([]*Issue, error) {
 //
 // --limit=0 because bd list pages at 50 by default (as buildListArgs does), and
 // the counts behind `gt escalate list`, `gt status` and the dashboard silently
-// capped there (gt-mm38p).
+// capped there (gt-mm38p). TestListEscalationsAcrossRigsUncapsBdPage keeps the
+// flag in the call.
 func listEscalationsRouted(b *Beads, status string) ([]*Issue, error) {
 	out, err := b.runWithRouting("list", "--label=gt:escalation", "--status="+status, "--include-infra", "--limit=0", "--json")
 	if err != nil {
