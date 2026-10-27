@@ -1,5 +1,10 @@
 package api
 
+import (
+	"strings"
+	"unicode"
+)
+
 // Request and response bodies of the /v1 routes. A route with no body type
 // here uses ListFilter, ReadyFilter, CreateParams, Issue or IssuePage directly.
 
@@ -17,6 +22,52 @@ type ShowManyResponse struct {
 type UpdateRequest struct {
 	Patch UpdatePatch `json:"patch"`
 	Guard Guard       `json:"guard"`
+}
+
+// TransferRequest hands the caller's issue to another actor. Status is the
+// status the issue moves to, and an empty one keeps the status it has.
+// Assignee is required: leaving an issue unheld is a release, not a transfer.
+// Closing is not a transfer, whatever status it names; CloseRequest does that.
+type TransferRequest struct {
+	Assignee string `json:"assignee"`
+	Status   string `json:"status,omitempty"`
+}
+
+// MaxAssigneeLen bounds the assignee a transfer names: a seat address is
+// short, so a longer string is a caller's mistake rather than a seat.
+const MaxAssigneeLen = 128
+
+// Validate refuses a transfer that names no usable assignee or asks for a
+// close; an empty status is valid and keeps the issue's own.
+func (r TransferRequest) Validate() error {
+	if err := ValidateTransferAssignee(r.Assignee); err != nil {
+		return err
+	}
+	return ValidateTransferStatus(r.Status)
+}
+
+// ValidateTransferAssignee refuses an assignee a transfer may not name: blank,
+// padded or holding whitespace (so not one address), or over MaxAssigneeLen.
+// The error for a blank one names the verb the caller probably meant.
+func ValidateTransferAssignee(assignee string) error {
+	switch {
+	case strings.TrimSpace(assignee) == "":
+		return Invalid("transfer needs the assignee taking the issue; release leaves it unheld")
+	case len(assignee) > MaxAssigneeLen:
+		return Invalid("assignee is %d bytes, at most %d", len(assignee), MaxAssigneeLen)
+	case strings.ContainsFunc(assignee, unicode.IsSpace):
+		return Invalid("assignee %q holds whitespace; a seat address has none", assignee)
+	}
+	return nil
+}
+
+// ValidateTransferStatus refuses the status a transfer may not set: the close
+// verb owns closing, with the fences that keep a blocked issue open.
+func ValidateTransferStatus(status string) error {
+	if status == "closed" {
+		return Invalid("transfer cannot close an issue; close it with the close verb")
+	}
+	return nil
 }
 
 // CloseRequest closes several issues together.
