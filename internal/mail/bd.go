@@ -2,6 +2,7 @@ package mail
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -59,7 +60,20 @@ func bdCloseStore(run bdAnswer, workDir, beadsDir, actor string) beads.Client {
 	return newBdStore(run, workDir, beadsDir, false, actor)
 }
 
-func newBdStore(run bdAnswer, workDir, beadsDir string, readOnly bool, actor string) *beads.Beads {
+// bdThreadStore is bdStore for a thread read: BD_IDENTITY names the mailbox
+// the thread is read as, which the raw message-thread command passed too
+// (gt-p85pw.18).
+func bdThreadStore(run bdAnswer, workDir, beadsDir, identity string) beads.Client {
+	if identity == "" {
+		return bdStore(run, workDir, beadsDir)
+	}
+	return newBdStore(run, workDir, beadsDir, true, "", "BD_IDENTITY="+identity)
+}
+
+// newBdStore builds the store for one bd call: the stale-PID pre-flight runs
+// here, so a caller that makes several calls builds one store per call rather
+// than reusing one across them.
+func newBdStore(run bdAnswer, workDir, beadsDir string, readOnly bool, actor string, extraEnv ...string) *beads.Beads {
 	// Remove stale dolt-server.pid before bd runs. A stale PID file causes
 	// bd to connect to port 3307 which may be occupied by a different Dolt server
 	// serving different databases, resulting in hangs until the deadline kills it.
@@ -69,6 +83,7 @@ func newBdStore(run bdAnswer, workDir, beadsDir string, readOnly bool, actor str
 	if actor != "" {
 		env = withActorEnv(env, actor)
 	}
+	env = withEnvOverrides(env, extraEnv...)
 	var opts []beads.Option
 	if run != nil {
 		opts = append(opts, beads.WithDirRunner(
@@ -89,6 +104,21 @@ func newBdStore(run bdAnswer, workDir, beadsDir string, readOnly bool, actor str
 func withActorEnv(env []string, actor string) []string {
 	env = beads.StripEnvKey(beads.StripEnvKey(env, "BD_ACTOR"), "BEADS_ACTOR")
 	return append(env, "BEADS_ACTOR="+actor, "BD_ACTOR="+actor)
+}
+
+// withEnvOverrides sets kv ("KEY=VALUE") in env, replacing every inherited
+// entry for the same key: which of two entries for one key a child reads is
+// not something this code can rely on.
+func withEnvOverrides(env []string, kv ...string) []string {
+	for _, entry := range kv {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		env = beads.StripEnvKey(env, key)
+		env = append(env, entry)
+	}
+	return env
 }
 
 func bdSubprocessEnv(baseEnv []string, beadsDir string, readOnly bool) []string {

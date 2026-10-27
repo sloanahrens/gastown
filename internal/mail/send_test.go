@@ -151,6 +151,33 @@ func TestSendMessageFansOutOneCopyPerRecipient(t *testing.T) {
 	}
 }
 
+// TestSendRefusesFlagLikeSubject: the seam's Create refuses a title that
+// starts with "-" (gt-e0kx5: a subject a shell parsed as a flag must not become
+// a bead). Mail's raw create used to store one behind its "--", so this pins
+// the behaviour the seam now gives: the send fails with the guard's error and
+// nothing is created.
+func TestSendRefusesFlagLikeSubject(t *testing.T) {
+	t.Parallel()
+	bd := sendBd("")
+	r := sendRouter(t, bd, "barnaby/crew/troy")
+	r.resolve = func(string) ([]Recipient, error) {
+		return []Recipient{{Address: "barnaby/crew/troy", Type: RecipientAgent}}, nil
+	}
+
+	_, err := r.SendMessage(SendRequest{
+		From: "convoy/hq-cv-3", To: "barnaby/crew/troy", Subject: "--help", Body: "All closed.",
+		Priority: PriorityNormal, Type: TypeNotification, SuppressNotify: true,
+	})
+	// The fan-out reports a failed send as text ("all sends failed: <addr>:
+	// <error>"), so the guard's own words are what a caller sees.
+	if err == nil || !strings.Contains(err.Error(), beads.ErrFlagTitle.Error()) {
+		t.Fatalf("SendMessage(--help) = %v, want the seam's ErrFlagTitle in it", err)
+	}
+	if got := createdTo(bd); len(got) != 0 {
+		t.Errorf("a refused subject was created anyway: %v", got)
+	}
+}
+
 // TestSendMessageRejectedAddressDoesNotFallBackToLegacyRouting: an address the
 // resolver rejects is definitively bad, so nothing is delivered — the fallback
 // would have written it to a dead inbox (gt#2038).

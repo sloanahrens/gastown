@@ -805,9 +805,9 @@ func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, 
 	var agents []*agentBead
 	var queryErrors []string
 
-	// Parses the wisps first (primary source after migration), which bd prints
-	// without a description; the description the group filters need comes from
-	// a follow-up read.
+	// The wisps are read first (the primary source after migration). bd prints
+	// them without a description, which wispAgentBeads fills in from the full
+	// record before the description filter runs.
 	if wispErr != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("list wisps: %v", wispErr))
 	} else {
@@ -1674,10 +1674,10 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 
 	// Delete oldest messages, as the ambient actor: retention is the router's
 	// housekeeping, not a recipient reading its inbox.
-	store := bdWriteStore(r.bd, filepath.Dir(beadsDir), beadsDir)
 	for i := 0; i < toDelete && i < len(messages); i++ {
-		// Best-effort deletion - don't fail if one close fails
-		_ = store.CloseWithReason("retention pruning", messages[i].ID)
+		// Best-effort deletion - don't fail if one close fails. One store per
+		// close: it carries the per-call pre-flight.
+		_ = bdWriteStore(r.bd, filepath.Dir(beadsDir), beadsDir).CloseWithReason("retention pruning", messages[i].ID)
 	}
 
 	return nil

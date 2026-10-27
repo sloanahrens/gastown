@@ -409,6 +409,13 @@ func TestListByThreadReadsTheThreadLabelEverywhere(t *testing.T) {
 	if !thread[0].Read {
 		t.Errorf("closed message msg-001 read as unread; a closed mail bead is a read one")
 	}
+	// Both reads name the mailbox as their reader, as the raw message-thread
+	// command did: the thread is read as this mailbox, not as the ambient user.
+	for _, call := range bd.recorded() {
+		if got, _ := envValue(call, "BD_IDENTITY"); got != m.Identity() {
+			t.Errorf("%s: BD_IDENTITY = %q, want %q", strings.Join(call.Args, " "), got, m.Identity())
+		}
+	}
 }
 
 // TestListByThreadReportsAFailedWispRead: a wisp table that cannot answer is
@@ -416,7 +423,7 @@ func TestListByThreadReadsTheThreadLabelEverywhere(t *testing.T) {
 func TestListByThreadReportsAFailedWispRead(t *testing.T) {
 	t.Parallel()
 	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
-		if c.Args[0] == "list" {
+		if len(c.Args) > 0 && c.Args[0] == "list" {
 			return "[]", "", 0
 		}
 		return "", "Error 1146 (42S02): Table 'beads.wisps' doesn't exist\n", 1
@@ -426,6 +433,41 @@ func TestListByThreadReportsAFailedWispRead(t *testing.T) {
 
 	if _, err := m.ListByThread("thread-A"); err == nil {
 		t.Fatal("ListByThread answered nil error for a failed wisp read; a partial thread would read as the whole one")
+	}
+}
+
+// TestMailCleansAStalePIDBeforeEveryCall: bd's stale dolt-server.pid is
+// removed before each bd call, not once per mailbox query. A pid file an
+// earlier call left behind — what a crashed server leaves — must be gone
+// before the next identity is read, because bd would otherwise connect to the
+// server it names.
+func TestMailCleansAStalePIDBeforeEveryCall(t *testing.T) {
+	t.Parallel()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	pidDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(pidDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidPath := filepath.Join(pidDir, "dolt-server.pid")
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		// The first read leaves a pid file behind, as a server that died
+		// mid-query would; the next call must not see it.
+		if _, err := os.Stat(pidPath); err == nil {
+			return "", "the stale pid file survived into the next bd call", 1
+		}
+		if err := os.WriteFile(pidPath, []byte("0\n"), 0o644); err != nil {
+			return "", err.Error(), 1
+		}
+		return "[]", "", 0
+	}}
+	m := NewMailboxWithBeadsDir("gastown/max", t.TempDir(), beadsDir)
+	m.bd = bd.run
+
+	if _, err := m.queryIssueMessagesByAssignee(beadsDir, []string{"gastown/max", "gastown/other"}); err != nil {
+		t.Fatalf("queryIssueMessagesByAssignee: %v", err)
+	}
+	if calls := len(bd.recorded()); calls != 2 {
+		t.Fatalf("bd calls = %d, want 2", calls)
 	}
 }
 

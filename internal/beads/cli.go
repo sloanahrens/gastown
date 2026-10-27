@@ -145,7 +145,7 @@ func (b *Beads) MigrateRepoID() error {
 }
 
 // MolWispList returns the wisps bd mol wisp list reports, with their ID,
-// title, status, priority and timestamps. bd 1.x wraps them in an object
+// title, status, type, priority and timestamps. bd 1.x wraps them in an object
 // ({"count":..,"wisps":[...]}); a bare array, as older bd printed, is read
 // too.
 func (b *Beads) MolWispList() ([]*Issue, error) {
@@ -156,27 +156,42 @@ func (b *Beads) MolWispList() ([]*Issue, error) {
 	return parseMolWispList(out)
 }
 
+// wispRecord is one entry of bd mol wisp list: an issue whose type bd prints
+// under "type" rather than the "issue_type" its list command uses.
+type wispRecord struct {
+	Issue
+	Type string `json:"type"`
+}
+
 func parseMolWispList(out []byte) ([]*Issue, error) {
 	out = bytes.TrimSpace(out)
 	if len(out) == 0 {
 		return nil, nil
 	}
-	var wisps []*Issue
+	var records []wispRecord
 	if out[0] == '[' {
-		if err := json.Unmarshal(out, &wisps); err != nil {
+		if err := json.Unmarshal(out, &records); err != nil {
 			return nil, fmt.Errorf("parsing bd mol wisp list: %w", err)
 		}
 	} else {
 		var wrapper struct {
-			Wisps []*Issue `json:"wisps"`
+			Wisps []wispRecord `json:"wisps"`
 		}
 		if err := json.Unmarshal(out, &wrapper); err != nil {
 			return nil, fmt.Errorf("parsing bd mol wisp list: %w", err)
 		}
-		wisps = wrapper.Wisps
+		records = wrapper.Wisps
 	}
-	for _, w := range wisps {
-		w.Ephemeral = true
+	wisps := make([]*Issue, 0, len(records))
+	for i := range records {
+		record := &records[i]
+		record.Ephemeral = true
+		// The two spellings name one field; issue_type wins when bd prints
+		// both.
+		if record.Issue.Type == "" {
+			record.Issue.Type = record.Type
+		}
+		wisps = append(wisps, &record.Issue)
 	}
 	return wisps, nil
 }

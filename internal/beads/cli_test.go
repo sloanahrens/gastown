@@ -188,12 +188,18 @@ func TestMolWispListReadsBdObject(t *testing.T) {
     }
   ]
 }`
-	for name, out := range map[string]string{
-		"object":  bd122,
-		"array":   `[{"id":"gt-wisp-u7r","status":"open","updated_at":"2026-09-29T00:33:04Z"}]`,
-		"no wisp": `{"count":0,"schema_version":1,"wisps":[]}`,
+	for name, tt := range map[string]struct {
+		out      string
+		wantType string
+	}{
+		"object": {bd122, "task"},
+		"array":  {`[{"id":"gt-wisp-u7r","status":"open","updated_at":"2026-09-29T00:33:04Z"}]`, ""},
+		// A wisp printed under both spellings keeps issue_type, the one bd
+		// list uses and the field Issue.Type documents.
+		"both spellings": {`{"wisps":[{"id":"gt-wisp-u7r","status":"open","updated_at":"2026-09-29T00:33:04Z","type":"task","issue_type":"feature"}]}`, "feature"},
+		"no wisp":        {`{"count":0,"schema_version":1,"wisps":[]}`, ""},
 	} {
-		r := newRecorder(func([]string) reply { return reply{stdout: out} })
+		r := newRecorder(func([]string) reply { return reply{stdout: tt.out} })
 		got, err := newPlainRecorded(t, r).MolWispList()
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -206,6 +212,11 @@ func TestMolWispListReadsBdObject(t *testing.T) {
 		}
 		if len(got) != 1 || got[0].ID != "gt-wisp-u7r" || got[0].Status != "open" || got[0].UpdatedAt != "2026-09-29T00:33:04Z" || !got[0].Ephemeral {
 			t.Errorf("%s: MolWispList = %+v", name, got)
+		}
+		// bd prints a wisp's type under "type", not list's "issue_type"; a
+		// caller reading Issue.Type must see it either way.
+		if got[0].Type != tt.wantType {
+			t.Errorf("%s: Type = %q, want %q", name, got[0].Type, tt.wantType)
 		}
 		if argv := r.argvs(); len(argv) != 1 || argv[0] != "mol wisp list --json" {
 			t.Errorf("%s: argv = %q", name, argv)

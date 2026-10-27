@@ -239,10 +239,10 @@ func isMissingWispTable(err error) bool {
 }
 
 func (m *Mailbox) queryIssueMessagesByAssignee(beadsDir string, identities []string) ([]BeadsMessage, error) {
-	store := bdStore(m.bd, m.workDir, beadsDir)
 	var messages []BeadsMessage
 	for _, id := range identities {
-		issues, err := store.List(beads.ListOptions{
+		// One store per identity: the store carries the per-call pre-flight.
+		issues, err := bdStore(m.bd, m.workDir, beadsDir).List(beads.ListOptions{
 			Label:    "gt:message",
 			Assignee: id,
 		})
@@ -258,11 +258,11 @@ func (m *Mailbox) queryIssueMessagesByAssignee(beadsDir string, identities []str
 // identity does not stop the others; the first failure is returned beside the
 // partial result.
 func (m *Mailbox) queryIssueMessagesByCC(beadsDir string, identities []string) ([]BeadsMessage, error) {
-	store := bdStore(m.bd, m.workDir, beadsDir)
 	var messages []BeadsMessage
 	var firstErr error
 	for _, id := range identities {
-		issues, err := store.List(beads.ListOptions{
+		// One store per identity: the store carries the per-call pre-flight.
+		issues, err := bdStore(m.bd, m.workDir, beadsDir).List(beads.ListOptions{
 			Labels: []string{"gt:message", "cc:" + id},
 		})
 		if err == nil {
@@ -1373,16 +1373,17 @@ func (m *Mailbox) ListByThread(threadID string) ([]*Message, error) {
 // listByThreadBeads reads a thread the way mail writes it: every message
 // carries a thread:<id> label, and a message stored as a wisp lives in the
 // wisps table. Both reads ask for every status, so a closed (read) message
-// stays in the conversation.
+// stays in the conversation, and both are made as this mailbox's identity.
 func (m *Mailbox) listByThreadBeads(threadID string) ([]*Message, error) {
-	store := bdStore(m.bd, m.workDir, m.beadsDir)
 	label := "thread:" + threadID
 
-	issues, err := store.List(beads.ListOptions{Label: label, Status: "all"})
+	issues, err := bdThreadStore(m.bd, m.workDir, m.beadsDir, m.identity).
+		List(beads.ListOptions{Label: label, Status: "all"})
 	if err != nil {
 		return nil, err
 	}
-	wisps, err := store.List(beads.ListOptions{Label: label, Status: "all", Ephemeral: true})
+	wisps, err := bdThreadStore(m.bd, m.workDir, m.beadsDir, m.identity).
+		List(beads.ListOptions{Label: label, Status: "all", Ephemeral: true})
 	if err != nil {
 		return nil, err
 	}

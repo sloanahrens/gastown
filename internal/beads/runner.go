@@ -190,7 +190,14 @@ func (e *CLIError) Unwrap() []error {
 
 // runPlain runs one bd call for a plain wrapper.
 func (b *Beads) runPlain(stdin []byte, args []string) ([]byte, error) {
-	stdout, _, err := b.runPlainOut(stdin, args)
+	stdout, stderr, err := b.runPlainOut(stdin, args)
+	if err != nil && bdRejectedFlat(string(stderr)) {
+		// run injects --flat into every "list --json", and a bd older than
+		// v0.59 refuses it; retry once without the flag, as runBdOnce does for
+		// the policy path.
+		retried, _, retryErr := b.runPlainOut(stdin, stripFlatFlag(args))
+		return retried, retryErr
+	}
 	return stdout, err
 }
 

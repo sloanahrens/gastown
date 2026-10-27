@@ -43,8 +43,11 @@ func TestIntegrationStoresUseCentralEnvPolicy(t *testing.T) {
 	if _, err := bdStore(nil, workDir, beadsDir).List(beads.ListOptions{Label: "gt:message"}); err != nil {
 		t.Fatalf("read through the store: %v", err)
 	}
+	// The assertions are on what mail owns — the verb, the filter it asked for
+	// and the policy environment — not on the exact argv the seam builds for
+	// that verb: the seam may add flags (--flat, --limit) without mail changing.
 	readLog := readStubLog(t, logPath)
-	for _, want := range []string{"args:[list][--json][--label=gt:message][--limit=0][--flat]", "BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BEADS_NO_AUTO_IMPORT=1", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
+	for _, want := range []string{"args:[list]", "[--json]", "[--label=gt:message]", "BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BEADS_NO_AUTO_IMPORT=1", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
 		if !strings.Contains(readLog, want) {
 			t.Fatalf("read command log missing %q:\n%s", want, readLog)
 		}
@@ -57,7 +60,7 @@ func TestIntegrationStoresUseCentralEnvPolicy(t *testing.T) {
 		t.Fatalf("write through the store: %v", err)
 	}
 	writeLog := readStubLog(t, logPath)
-	for _, want := range []string{"args:[update][hq-msg][--add-label=read]", "\nBD_READONLY=\n", "BD_DOLT_AUTO_COMMIT=on", "BEADS_NO_AUTO_IMPORT=1", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
+	for _, want := range []string{"args:[update]", "[hq-msg]", "\nBD_READONLY=\n", "BD_DOLT_AUTO_COMMIT=on", "BEADS_NO_AUTO_IMPORT=1", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
 		if !strings.Contains(writeLog, want) {
 			t.Fatalf("write command log missing %q:\n%s", want, writeLog)
 		}

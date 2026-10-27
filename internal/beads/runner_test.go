@@ -330,6 +330,45 @@ func TestPlainErrorKeepsOutput(t *testing.T) {
 	}
 }
 
+// TestPlainRetriesWithoutFlatWhenBdRejectsIt: a plain call runs the same argv
+// run() built, so a List carries the --flat that bd older than v0.59 refuses.
+// The plain path retries once without it, as the policy path does, and a
+// failure that is not the flag is one call (gt-p85pw.18).
+func TestPlainRetriesWithoutFlatWhenBdRejectsIt(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(func(args []string) reply {
+		for _, a := range args {
+			if a == "--flat" {
+				return reply{stderr: "Error: unknown flag: --flat\n", err: exitError{1}}
+			}
+		}
+		return reply{stdout: `[{"id":"gt-1"}]`}
+	})
+	b := NewPlain(t.TempDir(), nil)
+	b.exec = r.exec
+	issues, err := b.List(ListOptions{})
+	if err != nil {
+		t.Fatalf("List = %v, want the retry without --flat to answer", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "gt-1" {
+		t.Fatalf("List = %+v", issues)
+	}
+	argvs := r.argvs()
+	if len(argvs) != 2 || !strings.Contains(argvs[0], "--flat") || strings.Contains(argvs[1], "--flat") {
+		t.Errorf("calls = %q, want a --flat attempt then a retry without it", argvs)
+	}
+
+	// A failure that is not the flag is the answer, not something to retry.
+	denied := newRecorder(func([]string) reply {
+		return reply{stderr: "Error: no database\n", err: exitError{1}}
+	})
+	d := NewPlain(t.TempDir(), nil)
+	d.exec = denied.exec
+	if _, err := d.List(ListOptions{}); err == nil || len(denied.calls()) != 1 {
+		t.Errorf("a refused List = %v after %d calls, want one failing call", err, len(denied.calls()))
+	}
+}
+
 // TestReleaseDoesNotForceTheHoldersClaim pins that Release sends no --force
 // (gt-v8ujv): it clears the store's own claim, and bd's fence is left to
 // refuse another actor's live one. Recovering a dead worker's claim is
