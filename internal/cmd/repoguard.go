@@ -19,16 +19,20 @@ import (
 // repoguardAllowlist is the allowlist file gt repoguard reads at the repo root.
 const repoguardAllowlist = ".repoguard-allowlist"
 
-var (
-	repoguardBase string
-	repoguardInit bool
-)
+var repoguardCmd = newRepoGuardCommand(runRepoGuardCommand)
 
-var repoguardCmd = &cobra.Command{
-	Use:     "repoguard",
-	GroupID: GroupDiag,
-	Short:   "Refuse new shell, Perl and Ruby scripts outside a shrinking allowlist",
-	Long: `Hold the repository of the current directory to .repoguard-allowlist.
+func init() {
+	rootCmd.AddCommand(repoguardCmd)
+}
+
+// newRepoGuardCommand builds the command around its body, so a test can drive
+// the flags and the RunE wiring without a repository.
+func newRepoGuardCommand(run func(*cobra.Command, []string) error) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "repoguard",
+		GroupID: GroupDiag,
+		Short:   "Refuse new shell, Perl and Ruby scripts outside a shrinking allowlist",
+		Long: `Hold the repository of the current directory to .repoguard-allowlist.
 
 Every tracked .sh, .bash, .zsh, .pl or .rb file needs a line in
 .repoguard-allowlist at the repository root: the repo-relative path, a tab,
@@ -48,32 +52,31 @@ repos with no Go module of their own to carry one (gt-7zfre).
 Exit codes:
   0 - clean
   1 - one or more violations, each printed by name`,
-	SilenceUsage: true,
-	Args:         cobra.NoArgs,
-	// Through a variable so a test can drive the registered node without a
-	// repository (repoGuardCommandRun).
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return repoGuardCommandRun(cmd, args)
-	},
-}
-
-// repoGuardCommandRun is the command body the registered node calls.
-var repoGuardCommandRun = runRepoGuardCommand
-
-func init() {
-	rootCmd.AddCommand(repoguardCmd)
-	repoguardCmd.Flags().StringVar(&repoguardBase, "base", "origin/main", "revision whose allowlist must not grow")
-	repoguardCmd.Flags().BoolVar(&repoguardInit, "init", false, "skip the growth check when the base revision has no allowlist, so a repo can create its first list")
+		SilenceUsage: true,
+		Args:         cobra.NoArgs,
+		RunE:         run,
+	}
+	cmd.Flags().String("base", "origin/main", "revision whose allowlist must not grow")
+	cmd.Flags().Bool("init", false, "skip the growth check when the base revision has no allowlist, so a repo can create its first list")
+	return cmd
 }
 
 // runRepoGuardCommand wires the real seams: git for the tree and the base
 // revision, the working tree for the allowlist.
 func runRepoGuardCommand(cmd *cobra.Command, _ []string) error {
+	base, err := cmd.Flags().GetString("base")
+	if err != nil {
+		return err
+	}
+	initFlag, err := cmd.Flags().GetBool("init")
+	if err != nil {
+		return err
+	}
 	root, err := repoGuardRoot()
 	if err != nil {
 		return err
 	}
-	readBase, notice, err := repoGuardBaseReader(root, repoguardBase, repoguardInit)
+	readBase, notice, err := repoGuardBaseReader(root, base, initFlag)
 	if err != nil {
 		return err
 	}

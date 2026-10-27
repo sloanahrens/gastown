@@ -93,42 +93,40 @@ func TestRunRepoGuardInitNotice(t *testing.T) {
 	}
 }
 
-// TestRepoGuardRegisteredCommandPath drives the registered node itself: flags
-// parsed through it reach the body, and the body's error is what the run
-// returns, so deleting the RunE wiring turns this red.
-func TestRepoGuardRegisteredCommandPath(t *testing.T) {
-	c := lookupCommand(rootCmd, []string{"repoguard"})
-	if c == nil || c.RunE == nil {
-		t.Fatal("gt repoguard is not a registered runnable command")
-	}
-	prevRun := repoGuardCommandRun
-	prevBase, prevInit := repoguardBase, repoguardInit
-	t.Cleanup(func() {
-		repoGuardCommandRun = prevRun
-		repoguardBase, repoguardInit = prevBase, prevInit
-		c.SetOut(nil)
-		c.SetErr(nil)
-	})
-
+// TestRepoGuardCommandPath drives the command the registered node is built
+// from: --base and --init parse into its flags, the body reads them, and the
+// body's error is what the run returns, so deleting the RunE wiring turns this
+// red.
+func TestRepoGuardCommandPath(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
-	c.SetOut(&out)
-	c.SetErr(&out)
 	wantErr := errors.New("repoguard: 1 violation, listed above")
-	repoGuardCommandRun = func(cmd *cobra.Command, args []string) error {
+	var gotBase string
+	var gotInit bool
+	c := newRepoGuardCommand(func(cmd *cobra.Command, args []string) error {
 		if len(args) != 0 {
 			t.Errorf("body got args %q, want none", args)
 		}
+		var err error
+		if gotBase, err = cmd.Flags().GetString("base"); err != nil {
+			t.Fatalf("reading --base = %v", err)
+		}
+		if gotInit, err = cmd.Flags().GetBool("init"); err != nil {
+			t.Fatalf("reading --init = %v", err)
+		}
 		fmt.Fprintln(cmd.OutOrStdout(), "scripts/new.sh: not in .repoguard-allowlist")
 		return wantErr
-	}
+	})
+	c.SetOut(&out)
+	c.SetErr(&out)
 	if err := c.ParseFlags([]string{"--base", "upstream/main", "--init"}); err != nil {
-		t.Fatalf("parsing --base and --init through the registered node = %v", err)
-	}
-	if repoguardBase != "upstream/main" || !repoguardInit {
-		t.Fatalf("flags parsed to base=%q init=%v, want the values passed", repoguardBase, repoguardInit)
+		t.Fatalf("parsing --base and --init = %v", err)
 	}
 	if err := c.RunE(c, nil); !errors.Is(err, wantErr) {
 		t.Fatalf("RunE = %v, want the body's %v", err, wantErr)
+	}
+	if gotBase != "upstream/main" || !gotInit {
+		t.Fatalf("body read base=%q init=%v, want the values passed", gotBase, gotInit)
 	}
 	if !strings.Contains(out.String(), "scripts/new.sh") {
 		t.Errorf("output = %q, want the body's finding", out.String())
