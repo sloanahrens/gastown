@@ -19,10 +19,10 @@ const BackupNameAttempts = 100
 
 // The copies kept beside a config file after each backup: the newest
 // backupRetentionCount, and every copy younger than backupRetentionAge. A copy
-// is written on every config change and the changes are frequent, so nothing
-// pruning them left one town with 205 settings/config.json.bak-* files by
-// 2026-10-26 (Sloan, 2026-10-26). A week covers an operator back from a
-// holiday; thirty copies cover a busy afternoon of model switches.
+// is written on every config change and the changes are frequent, so a
+// directory with nothing pruning it grows without limit (gt-9tx8h). A week
+// covers an operator back from a holiday; the count covers a busy afternoon of
+// model switches.
 const (
 	backupRetentionCount = 30
 	backupRetentionAge   = 7 * 24 * time.Hour
@@ -36,10 +36,13 @@ type backupWrite func(dst string, data []byte, mode os.FileMode) error
 // backupRun is what one backup runs with: the clock the retention window reads,
 // the copy writer, and the pruner. BackupFile passes the real ones; a test
 // passes a fixed clock, a writer that writes short, or a pruner that fails.
+// logf reports a prune failure, which never fails the write; BackupFile leaves
+// it nil for log.Printf, and a test collects what is reported.
 type backupRun struct {
 	now   func() time.Time
 	write backupWrite
 	prune func(path, keep string, now time.Time) error
+	logf  func(format string, args ...any)
 }
 
 // BackupFile copies path to a sibling named <path>.bak-<stamp> before a write
@@ -88,7 +91,11 @@ func backupFile(path, stamp string, run backupRun) (string, error) {
 			return "", fmt.Errorf("backing up %s: %w", path, sizeErr)
 		}
 		if pruneErr := run.prune(path, dst, run.now()); pruneErr != nil {
-			log.Printf("backing up %s: pruning old copies: %v", path, pruneErr)
+			report := run.logf
+			if report == nil {
+				report = log.Printf
+			}
+			report("backing up %s: pruning old copies: %v", path, pruneErr)
 		}
 		return dst, nil
 	}

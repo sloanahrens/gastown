@@ -198,13 +198,14 @@ func TestBackupFilePrunesOldCopies(t *testing.T) {
 			}
 
 			// Every case sets the written copy's mtime itself, so the result never
-			// depends on what the host's clock reads.
+			// depends on what the host's clock reads. The callback holds no test's
+			// t: a failure to set the mtime comes back as the backup's error.
 			write := func(dst string, data []byte, mode os.FileMode) error {
 				if err := writeBackupCopy(dst, data, mode); err != nil {
 					return err
 				}
-				setMtime(t, dst, retentionNow.Add(-c.newAge))
-				return nil
+				when := retentionNow.Add(-c.newAge)
+				return os.Chtimes(dst, when, when)
 			}
 			got, err := backupFile(path, "20261027T120000Z", backupRun{
 				now:   func() time.Time { return retentionNow },
@@ -304,7 +305,7 @@ func TestBackupFileFailsOnAShortCopy(t *testing.T) {
 }
 
 // A directory that cannot be pruned still gets its backup: the prune's error is
-// logged and the copy is kept (gt-9tx8h).
+// reported and the copy is kept (gt-9tx8h).
 func TestBackupFileKeepsTheBackupWhenThePruneFails(t *testing.T) {
 	t.Parallel()
 
@@ -315,17 +316,30 @@ func TestBackupFileKeepsTheBackupWhenThePruneFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	failing := func(string, string, time.Time) error { return errors.New("the directory cannot be read") }
+	var reported []string
 
 	got, err := backupFile(path, "20261027T120000Z", backupRun{
 		now:   func() time.Time { return retentionNow },
 		write: writeBackupCopy,
 		prune: failing,
+		logf: func(format string, args ...any) {
+			reported = append(reported, fmt.Sprintf(format, args...))
+		},
 	})
 	if err != nil {
 		t.Fatalf("BackupFile with a failing prune = %v, want the backup kept", err)
 	}
 	if content, readErr := os.ReadFile(got); readErr != nil || string(content) != body {
 		t.Errorf("the copy = %q, %v; want the file's content", content, readErr)
+	}
+	if len(reported) != 1 {
+		t.Fatalf("the prune failure was reported %d times, want once: %q", len(reported), reported)
+	}
+	if !strings.Contains(reported[0], "the directory cannot be read") {
+		t.Errorf("the report = %q, want it to name the prune's error", reported[0])
+	}
+	if !strings.Contains(reported[0], path) {
+		t.Errorf("the report = %q, want it to name the file", reported[0])
 	}
 }
 
