@@ -124,6 +124,11 @@ func TestRunnerRefusesAnHourItCannotPlace(t *testing.T) {
 			resolve: func() (string, error) { return "/town", nil },
 		},
 		{
+			name:    "a trailing slash names the same town",
+			resolve: func() (string, error) { return "/town", nil },
+			fromEnv: "/town/",
+		},
+		{
 			name:     "the directory and GT_TOWN_ROOT name different towns",
 			resolve:  func() (string, error) { return "/town", nil },
 			fromEnv:  "/elsewhere",

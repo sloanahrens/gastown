@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -70,7 +71,17 @@ func resolveTown(resolve func() (string, error), getenv func(string) string) (st
 	if err != nil {
 		return "", err
 	}
-	if fromEnv := getenv("GT_TOWN_ROOT"); fromEnv != "" && fromEnv != town {
+	fromEnv := getenv("GT_TOWN_ROOT")
+	if fromEnv == "" {
+		return town, nil
+	}
+	// A hand run may name the town relative to the plugin directory, so the
+	// two are compared as paths rather than as strings.
+	envTown, err := filepath.Abs(fromEnv)
+	if err != nil {
+		return "", fmt.Errorf("resolving GT_TOWN_ROOT %q: %w", fromEnv, err)
+	}
+	if envTown != filepath.Clean(town) {
 		return "", fmt.Errorf("the plugin directory is in town %q but GT_TOWN_ROOT names %q", town, fromEnv)
 	}
 	return town, nil
