@@ -2,7 +2,6 @@ package events
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -198,38 +197,15 @@ func TestDispatchReaderMatchesAWholeLogRead(t *testing.T) {
 	}
 }
 
-// A town whose log path cannot be read is an error, whichever of the reads
-// fails: the dashboard shows the Age as unavailable rather than dating every
-// seat from a default.
-func TestDispatchReaderReportsATownItCannotStat(t *testing.T) {
+// A log the reader cannot open is an error, not a town that dispatched nothing:
+// the dashboard shows the Age as unavailable rather than dating every seat from
+// a default. A regular file where the town root belongs is the case.
+func TestDispatchReaderReportsALogItCannotOpen(t *testing.T) {
 	t.Parallel()
-	// A regular file where the town root belongs: the log's own path cannot be
-	// stat'ed under it.
 	town := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(town, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewDispatchReader(town).Starts(); err == nil {
-		t.Fatal("Starts read a log it could not stat as an empty one")
-	}
-}
-
-// A log that is there but cannot be opened is an error too, not a town that
-// dispatched nothing: a socket at the path stats fine and opens not at all.
-func TestDispatchReaderReportsALogItCannotOpen(t *testing.T) {
-	t.Parallel()
-	// A short path: a unix socket's name is capped at about 100 bytes.
-	town, err := os.MkdirTemp("", "ev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(town) })
-	l, err := net.Listen("unix", filepath.Join(town, EventsFile))
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer func() { _ = l.Close() }()
-
 	if _, err := NewDispatchReader(town).Starts(); err == nil {
 		t.Fatal("Starts read a log it could not open as an empty one")
 	}

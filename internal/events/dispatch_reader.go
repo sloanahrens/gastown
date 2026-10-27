@@ -45,7 +45,16 @@ func (r *DispatchReader) Starts() (map[string]time.Time, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	fi, err := os.Stat(r.path)
+	// One open supplies both the stamp and the bytes: a log that cannot be read
+	// is one failure, whichever of the two calls reports it.
+	f, err := os.Open(r.path) //nolint:gosec // G304: path is the town's own runtime file
+	var fi os.FileInfo
+	if err == nil {
+		fi, err = f.Stat()
+		if err != nil {
+			_ = f.Close() //nolint:errcheck // no stamp, so no read to make
+		}
+	}
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No log: no dispatch to date, and a log that appears later is read
@@ -55,15 +64,11 @@ func (r *DispatchReader) Starts() (map[string]time.Time, error) {
 		}
 		return nil, fmt.Errorf("reading %s: %w", r.path, err)
 	}
+	defer f.Close() //nolint:errcheck // read-only
+
 	if r.clock != nil && r.file != nil && os.SameFile(fi, r.file) && fi.Size() == r.offset {
 		return r.clock.Starts(), nil // nothing appended since the last read
 	}
-
-	f, err := os.Open(r.path) //nolint:gosec // G304: path is the town's own runtime file
-	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", r.path, err)
-	}
-	defer f.Close() //nolint:errcheck // read-only
 
 	clock, offset := r.clock, r.offset
 	if clock == nil || r.file == nil || !os.SameFile(fi, r.file) || fi.Size() < offset {
