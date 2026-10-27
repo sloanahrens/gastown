@@ -21,6 +21,13 @@ const (
 // failed. The call's answer is unknown; it is never evidence of absence.
 var ErrUnavailable = errors.New("bd could not answer")
 
+// ErrStoreUnavailable marks a bd read that failed because the database behind
+// bd did not answer: bd's store_unavailable exit, or a read its deadline ended
+// while the store was still silent. bd is not the problem, and asking again
+// once the store is up may succeed, so a caller waiting out a cold boot keys
+// on this rather than on bd's text (gt-2gctr).
+var ErrStoreUnavailable = errors.New("the database behind bd did not answer")
+
 // bdSaidNotFound reports whether a failed bd call is bd saying the id does
 // not exist, as opposed to bd being unable to answer. Only machine mode
 // answers that: exit status not_found (20), or an envelope of kind

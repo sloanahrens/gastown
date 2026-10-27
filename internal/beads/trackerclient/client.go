@@ -72,6 +72,12 @@ func (c *Client) Comments(id string) ([]beads.Comment, error) {
 // token's actor, which beadsfake.RunActorContract pins.
 var ErrActorOption = errors.New("trackerclient: CreateOptions.Actor is not supported: the tracker records the creator as the token's actor")
 
+// ErrUnsupported is an admin verb the tracker does not serve: it holds issues,
+// not a bd build or a Dolt migration level, so Version and SchemaLevel have no
+// answer to give. The refusing method names itself and sends no request, so a
+// caller cannot read a refusal as an answer.
+var ErrUnsupported = errors.New("trackerclient: the tracker does not serve this verb")
+
 // Create creates an issue and returns it. Every CreateOptions field is carried
 // except Actor, which is refused with ErrActorOption.
 func (c *Client) Create(opts beads.CreateOptions) (*beads.Issue, error) {

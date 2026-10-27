@@ -1,12 +1,13 @@
 package bdbuild
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 const (
@@ -14,17 +15,17 @@ const (
 	fullCommit = "3b90ab0c0ffee0000000000000000000000000aa"
 )
 
-// fakeBD answers `bd version --json` with out and err, and records the args.
+// fakeBD answers the store's version report with info and err, and counts the
+// reads.
 type fakeBD struct {
-	out    string
-	stderr string
-	err    error
-	args   [][]string
+	info  beads.VersionInfo
+	err   error
+	reads int
 }
 
-func (f *fakeBD) run(_ context.Context, _ []string, args ...string) ([]byte, []byte, error) {
-	f.args = append(f.args, args)
-	return []byte(f.out), []byte(f.stderr), f.err
+func (f *fakeBD) Version() (beads.VersionInfo, error) {
+	f.reads++
+	return f.info, f.err
 }
 
 // gitCall is one git invocation a test's fake recorded, the -C directory first.
@@ -97,31 +98,31 @@ func (f *fakeGo) run(dir string, env []string, args ...string) ([]byte, error) {
 
 func TestCommitTakesTheInstalledBDsCommit(t *testing.T) {
 	t.Parallel()
-	bd := &fakeBD{out: `{"version":"1.2.2","build_id":"da4983e","commit":"` + hostCommit + `"}`}
-	got, err := Commit(context.Background(), "", bd.run)
+	bd := &fakeBD{info: beads.VersionInfo{Version: "1.2.2", BuildID: "da4983e", Commit: hostCommit}}
+	got, err := Commit("", bd)
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if got != hostCommit {
 		t.Errorf("Commit = %q, want the installed bd's commit %q", got, hostCommit)
 	}
-	if len(bd.args) != 1 || strings.Join(bd.args[0], " ") != "version --json" {
-		t.Errorf("Commit ran %v, want one `bd version --json`", bd.args)
+	if bd.reads != 1 {
+		t.Errorf("Commit read the version report %d times, want 1", bd.reads)
 	}
 }
 
 func TestCommitTakesAnOverrideWithoutAskingBD(t *testing.T) {
 	t.Parallel()
-	bd := &fakeBD{out: `{"version":"1.2.2","commit":"` + hostCommit + `"}`}
-	got, err := Commit(context.Background(), " "+fullCommit+"\n", bd.run)
+	bd := &fakeBD{info: beads.VersionInfo{Version: "1.2.2", Commit: hostCommit}}
+	got, err := Commit(" "+fullCommit+"\n", bd)
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if got != fullCommit {
 		t.Errorf("Commit = %q, want the override %q", got, fullCommit)
 	}
-	if len(bd.args) != 0 {
-		t.Errorf("Commit ran bd %v for an override; the override is the answer", bd.args)
+	if bd.reads != 0 {
+		t.Errorf("Commit read the version report %d times for an override; the override is the answer", bd.reads)
 	}
 }
 
@@ -129,7 +130,7 @@ func TestCommitRefusesAnOverrideThatIsNotACommit(t *testing.T) {
 	t.Parallel()
 	for _, override := range []string{"main", "f05e82", "zzzzzzz", "HEAD"} {
 		bd := &fakeBD{}
-		_, err := Commit(context.Background(), override, bd.run)
+		_, err := Commit(override, bd)
 		if err == nil {
 			t.Errorf("Commit accepted %q as a commit", override)
 			continue
@@ -142,38 +143,34 @@ func TestCommitRefusesAnOverrideThatIsNotACommit(t *testing.T) {
 
 func TestCommitRefusesAHostBDThatReportsNoCommit(t *testing.T) {
 	t.Parallel()
-	for _, out := range []string{
-		`{"version":"1.2.2","build":"dev"}`,
-		`{"version":"1.2.2","build_id":"da4983e","commit":""}`,
-		`{"version":"1.2.2","commit":"v1.2.2"}`,
+	for _, info := range []beads.VersionInfo{
+		{Version: "1.2.2", Build: "dev"},
+		{Version: "1.2.2", BuildID: "da4983e"},
+		{Version: "1.2.2", Commit: "v1.2.2"},
 	} {
-		bd := &fakeBD{out: out}
-		_, err := Commit(context.Background(), "", bd.run)
+		bd := &fakeBD{info: info}
+		_, err := Commit("", bd)
 		if err == nil {
-			t.Errorf("Commit accepted %s", out)
+			t.Errorf("Commit accepted %+v", info)
 			continue
 		}
 		if !strings.Contains(err.Error(), "commit") || !strings.Contains(err.Error(), "name the commit") {
-			t.Errorf("Commit(%s): error does not say how to name the commit: %v", out, err)
+			t.Errorf("Commit(%+v): error does not say how to name the commit: %v", info, err)
 		}
 	}
 }
 
 func TestCommitRefusesAVersionItCannotRead(t *testing.T) {
 	t.Parallel()
-	bd := &fakeBD{err: errors.New("exit status 1"), stderr: "boom\n"}
-	_, err := Commit(context.Background(), "", bd.run)
+	bd := &fakeBD{err: errors.New("bd version --json: boom")}
+	_, err := Commit("", bd)
 	if err == nil {
 		t.Fatal("Commit accepted a bd that failed")
 	}
-	for _, want := range []string{"bd version --json failed", "boom"} {
+	for _, want := range []string{"cannot read the installed bd's commit", "boom"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("Commit: error lacks %q: %v", want, err)
 		}
-	}
-	notJSON := &fakeBD{out: "not json"}
-	if _, err := Commit(context.Background(), "", notJSON.run); err == nil || !strings.Contains(err.Error(), "not JSON") {
-		t.Errorf("Commit of non-JSON output: got %v, want a parse error", err)
 	}
 }
 

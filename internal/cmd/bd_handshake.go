@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/bdgate"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/townconfig"
 )
@@ -99,7 +100,7 @@ func runBDHandshake(ctx context.Context, townRoot string) (*deps.BDHandshake, er
 		return nil, fmt.Errorf("%w: not in a Gas Town workspace, so the town database's schema level cannot be read", deps.ErrBDHandshake)
 	}
 	path, _ := exec.LookPath("bd")
-	return deps.CheckBDHandshake(ctx, path, deps.NewBDProcessRunner(townRoot))
+	return deps.CheckBDHandshake(ctx, path, beads.New(townRoot))
 }
 
 // requiresBDHandshake reports whether cmd is a town-running command.

@@ -37,6 +37,37 @@ type adminScope struct {
 	*scope
 }
 
+// RunVersionContract checks the version pair (Version and SchemaLevel) every
+// store that serves a bd must share: the report names a fork build, and the
+// database sits at the level that build migrates to — the invariant the
+// startup handshake refuses a town over.
+//
+// It is separate from RunAdminContract because a store with no bd behind it
+// refuses these verbs rather than answering a zero value a caller could read
+// as an answer (see trackerclient.ErrUnsupported), so such a store does not
+// run this suite. A new store runs it unless it can say why not.
+func RunVersionContract(t *testing.T, newImpl func(t *testing.T) AdminClient) {
+	t.Helper()
+	t.Run("version", func(t *testing.T) {
+		t.Parallel()
+		c := newImpl(t)
+		info, err := c.Version()
+		if err != nil {
+			t.Fatalf("Version: %v", err)
+		}
+		if info.Version == "" || info.BuildID == "" || info.ContractVersion == 0 {
+			t.Errorf("Version = %+v; want a fork build's report naming version, build_id and contract_version", info)
+		}
+		level, err := c.SchemaLevel()
+		if err != nil {
+			t.Fatalf("SchemaLevel: %v", err)
+		}
+		if level <= 0 || level != info.DBSchemaVersion {
+			t.Errorf("SchemaLevel = %d, Version.DBSchemaVersion = %d; want the database at the level bd migrates to", level, info.DBSchemaVersion)
+		}
+	})
+}
+
 var adminCases = []struct {
 	name string
 	run  func(t *testing.T, s *adminScope)

@@ -7,10 +7,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/deps"
 )
 
-// bdHandshakeTimeout bounds the two bd calls the check makes.
+// bdHandshakeTimeout bounds the handshake's retries while the store is not
+// answering.
 const bdHandshakeTimeout = 30 * time.Second
 
 // BeadsBinaryCheck reports the bd startup handshake: the bd on PATH must be a
@@ -19,8 +21,8 @@ const bdHandshakeTimeout = 30 * time.Second
 // installs bd.
 type BeadsBinaryCheck struct {
 	BaseCheck
-	// run answers bd calls; nil runs the bd on PATH in the town root.
-	run deps.BDRunner
+	// store answers the handshake's two reads; nil is the town root's store.
+	store deps.Store
 	// lookPath finds bd for the report; nil is exec.LookPath.
 	lookPath func(string) (string, error)
 	// handshakeTimeout budgets the handshake; 0 is bdHandshakeTimeout. A test
@@ -46,9 +48,9 @@ func (c *BeadsBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 	if lookPath == nil {
 		lookPath = exec.LookPath
 	}
-	run := c.run
-	if run == nil {
-		run = deps.NewBDProcessRunner(ctx.TownRoot)
+	store := c.store
+	if store == nil {
+		store = beads.New(ctx.TownRoot)
 	}
 	path, _ := lookPath("bd")
 
@@ -58,7 +60,7 @@ func (c *BeadsBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	hctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	hs, err := deps.CheckBDHandshake(hctx, path, run)
+	hs, err := deps.CheckBDHandshake(hctx, path, store)
 	if err == nil {
 		return &CheckResult{
 			Name:    c.Name(),

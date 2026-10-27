@@ -131,13 +131,21 @@ type Client interface {
 var _ Client = (*Beads)(nil)
 
 // Admin is the maintenance surface beadsfake models: config keys, the
-// key-value store, counts, stats, the wisp list, gc's dry-run candidates and
-// the events journal. beadsfake.RunAdminContract pins the fake to *Beads on
-// it. (SQLCSV and InitDatabase are on *Beads too, but a fake can only script
-// or record them.)
+// key-value store, counts, stats, the wisp list, gc's dry-run candidates, the
+// events journal, and the version handshake's two reads. beadsfake.RunAdminContract
+// pins the fake to *Beads on the shared cases, and RunVersionContract on the
+// version pair. (SQLCSV and InitDatabase are on *Beads too, but a fake can
+// only script or record them.)
 type Admin interface {
 	ConfigGet(key string) (string, error)
 	ConfigSet(key, value string) error
+	// Version reports what the bd serving this store says about itself. It
+	// reads no database.
+	Version() (VersionInfo, error)
+	// SchemaLevel reports the migration level of the database this store
+	// serves, or an error wrapping ErrStoreUnavailable when it did not
+	// answer.
+	SchemaLevel() (int, error)
 	// KVList returns the key-value store, values rendered as text.
 	KVList() (map[string]string, error)
 	// KVGet returns key's value, or an error wrapping ErrNotFound.

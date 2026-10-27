@@ -80,6 +80,28 @@ func (f *Fake) KVGet(key string) (string, error) {
 	return v, nil
 }
 
+// Version returns the bd report the fake was built with: a fork build at the
+// schema level beadsql declares.
+func (f *Fake) Version() (beads.VersionInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failure("version"); err != nil {
+		return beads.VersionInfo{}, err
+	}
+	return *f.version, nil
+}
+
+// SchemaLevel returns the migration level the fake's database is at, which is
+// the level its bd report names unless a test scripts otherwise.
+func (f *Fake) SchemaLevel() (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failure("schema level"); err != nil {
+		return 0, err
+	}
+	return f.schemaLevel, nil
+}
+
 // CountIssues counts the issues, closed ones included and wisps not.
 func (f *Fake) CountIssues() (int, error) {
 	f.mu.Lock()
@@ -255,9 +277,9 @@ func (f *Fake) SQLCSV(query beadsql.Query) ([][]string, error) { return f.runSQL
 // FailWith makes the maintenance command named by op fail with err until
 // cleared with a nil err. op is the bd subcommand as the fake names it:
 // "config get <key>", "config set <key>", "kv list", "kv get <key>", "stats",
-// "mol wisp list", "mol wisp gc" (the dry run), "export", "init" or "show"
-// (every Show call, for a store whose answer is unknown rather than
-// not-found).
+// "mol wisp list", "mol wisp gc" (the dry run), "export", "init", "version",
+// "schema level" or "show" (every Show call, for a store whose answer is
+// unknown rather than not-found).
 func (f *Fake) FailWith(op string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

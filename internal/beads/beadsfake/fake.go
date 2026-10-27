@@ -20,6 +20,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -64,12 +65,14 @@ type Fake struct {
 	formulas []fakeFormula
 
 	// The maintenance surface (admin.go).
-	config   map[string]string
-	kv       map[string]string
-	sql      func(query string) ([][]string, error)
-	sqlLog   []string
-	inits    []beads.InitOptions
-	failures map[string]error
+	config      map[string]string
+	kv          map[string]string
+	sql         func(query string) ([][]string, error)
+	sqlLog      []string
+	inits       []beads.InitOptions
+	failures    map[string]error
+	version     *beads.VersionInfo
+	schemaLevel int
 
 	// journal is the events journal (bd events tail): one record per
 	// create, update, close and comment, as bd journals them in a store whose
@@ -104,6 +107,14 @@ func New(opts ...Option) *Fake {
 		clock:  own,
 		own:    own,
 		issues: map[string]*record{},
+		// The store reports the fork build and schema level a town runs on
+		// unless a test says otherwise: the handshake's contract case asserts
+		// they agree.
+		version: &beads.VersionInfo{
+			Version: "1.2.2", Build: "fake", BuildID: "fake", Commit: "fake",
+			ContractVersion: 1, DBSchemaVersion: beadsql.SchemaVersion,
+		},
+		schemaLevel: beadsql.SchemaVersion,
 	}
 	for _, o := range opts {
 		o(f)
