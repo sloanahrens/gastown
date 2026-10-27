@@ -168,7 +168,10 @@ func (f *burstFake) table(tables []string) ([]byte, error) {
 
 // The cadence is 15 seconds while either reading says the host is pressed and a
 // minute otherwise, with the thresholds' own edges on the slow side: "under 15
-// percent" and "over 50 ms" are the pressures the bead names.
+// percent" and "over 50 ms" are the pressures the bead names. A reading that
+// could not be taken is not pressure of its own and is not calm either: it
+// decides nothing while the other reading answers, and only a host with neither
+// reading takes the fast cadence.
 func TestBurstInterval(t *testing.T) {
 	t.Parallel()
 	pct := func(v float64) *float64 { return &v }
@@ -184,9 +187,10 @@ func TestBurstInterval(t *testing.T) {
 		{name: "an exec tax over 50", idle: pct(97), tax: pct(50.1), want: BurstFastInterval},
 		{name: "an exec tax of exactly 50 is not over it", idle: pct(97), tax: pct(50), want: BurstSlowInterval},
 		{name: "the reference burst", idle: pct(0), tax: pct(243), want: BurstFastInterval},
-		{name: "an idle share that could not be read", idle: nil, tax: pct(9), want: BurstFastInterval},
+		{name: "an unread idle share beside a measured calm tax", idle: nil, tax: pct(9), want: BurstSlowInterval},
+		{name: "an unread idle share beside a measured tax over 50", idle: nil, tax: pct(60), want: BurstFastInterval},
 		{name: "no tax the daemon has measured", idle: pct(97), tax: nil, want: BurstSlowInterval},
-		{name: "neither reading", idle: nil, tax: nil, want: BurstFastInterval},
+		{name: "neither reading, so the host is unknown rather than calm", idle: nil, tax: nil, want: BurstFastInterval},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -251,7 +255,9 @@ func TestBurstRowNamesTheLoad(t *testing.T) {
 		t.Errorf("running = %+v, want %+v", row.Running, wantRunning)
 	}
 	// The sample runs the host reads the snapshot's own groups run, and asks
-	// the landing board's store for the rig it is registered under.
+	// the landing board's store for the rig it is registered under. The order
+	// the independent reads run in is not the row's behavior, so compare the
+	// commands as a multiset.
 	wantReads := []string{
 		strings.Join(hostIdleProbe.argv, " "),
 		strings.Join(hostCPUNameArgv, " "),
@@ -259,8 +265,11 @@ func TestBurstRowNamesTheLoad(t *testing.T) {
 		strings.Join(hostCPUNameArgv, " "),
 		strings.Join(hostCPUArgsArgv, " "),
 	}
-	if !reflect.DeepEqual(fake.ran, wantReads) {
-		t.Errorf("the sample ran %q, want %q", fake.ran, wantReads)
+	got, want := append([]string{}, fake.ran...), append([]string{}, wantReads...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the sample ran %q, want %q", got, want)
 	}
 	if wantDir := "/town/gastown"; !reflect.DeepEqual(fake.storeDirs, []string{wantDir}) {
 		t.Errorf("the sample opened stores %q, want one for %q", fake.storeDirs, wantDir)
@@ -284,7 +293,7 @@ func TestBurstRowLeavesAFailedReadingNull(t *testing.T) {
 					t.Errorf("idle_pct = %v, want null", row.IdlePct)
 				}
 				if row.IntervalS != BurstFastInterval.Seconds() {
-					t.Errorf("interval_s = %v, want the fast cadence: an unread idle share is not a calm host", row.IntervalS)
+					t.Errorf("interval_s = %v, want the fast cadence: the measured tax is 243 ms", row.IntervalS)
 				}
 				if row.ExecTaxMS == nil || row.LandingQueue == nil {
 					t.Errorf("a failed top took the other readings with it: %+v", row)
@@ -545,6 +554,104 @@ func TestBurstTopConsumers(t *testing.T) {
 			}
 			if len(got) > tc.n {
 				t.Errorf("burstTopConsumers returned %d consumers, more than the %d asked for", len(got), tc.n)
+			}
+		})
+	}
+}
+
+// A window the host_cpu group only partly read cannot rank as an idle host: a
+// process that exited between its two samples, or an id it saw reused, is in no
+// column, so a rank of nobody means nobody known rather than nobody burning. A
+// window the group read whole still ranks an idle host as none.
+func TestBurstConsumersOnAPartlyReadTable(t *testing.T) {
+	t.Parallel()
+	const (
+		idleNames = "  100   0:05.00 /usr/sbin/launchd\n"
+		idleArgs  = "  100 /usr/sbin/launchd\n"
+	)
+	tests := []struct {
+		name  string
+		names []string
+		args  []string
+		want  []BurstConsumer
+	}{
+		{
+			name: "a busy process that exited before the second sample",
+			names: []string{
+				"  100   0:05.00 /usr/sbin/launchd\n  400  12:34.50 /opt/homebrew/bin/dolt\n",
+				idleNames,
+			},
+			args: []string{
+				"  100 /usr/sbin/launchd\n  400 /opt/homebrew/bin/dolt sql-server\n",
+				idleArgs,
+			},
+			want: nil,
+		},
+		{
+			name:  "an id whose cumulative time fell was reused",
+			names: []string{"  100   0:05.00 /usr/sbin/launchd\n", "  100   0:01.00 /usr/sbin/launchd\n"},
+			args:  []string{idleArgs, idleArgs},
+			want:  nil,
+		},
+		{
+			name:  "an idle host the group read whole ranks none and says so",
+			names: []string{idleNames, idleNames},
+			args:  []string{idleArgs, idleArgs},
+			want:  []BurstConsumer{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := burstFakeEnv()
+			fake.names, fake.args = tc.names, tc.args
+			row, err := SampleBurst(context.Background(), fake.env("/town"))
+			if err != nil {
+				t.Fatalf("SampleBurst: %v", err)
+			}
+			if !reflect.DeepEqual(row.TopConsumers, tc.want) {
+				t.Errorf("top_consumers = %+v, want %+v", row.TopConsumers, tc.want)
+			}
+		})
+	}
+}
+
+// The host_cpu group's own account of its gaps decides whether a rank of nobody
+// is an idle host: a window it says it read partly, or one whose counters the
+// row cannot read, is a gap rather than a quiet host.
+func TestBurstHostCPUTablePartial(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cols map[string]any
+		want bool
+	}{
+		{
+			name: "a window the group read whole",
+			cols: map[string]any{"unmeasured_pids": 0, "regressed_pids": 0},
+			want: false,
+		},
+		{
+			name: "a process that exited between the samples",
+			cols: map[string]any{"unmeasured_pids": 1, "regressed_pids": 0},
+			want: true,
+		},
+		{
+			name: "an id that was reused",
+			cols: map[string]any{"unmeasured_pids": 0, "regressed_pids": 2},
+			want: true,
+		},
+		{
+			name: "gaps the row cannot count",
+			cols: map[string]any{"unmeasured_pids": nil, "regressed_pids": 0},
+			want: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := burstHostCPUTablePartial(tc.cols); got != tc.want {
+				t.Errorf("burstHostCPUTablePartial(%v) = %v, want %v", tc.cols, got, tc.want)
 			}
 		})
 	}

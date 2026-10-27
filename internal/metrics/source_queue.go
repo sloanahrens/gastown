@@ -231,6 +231,17 @@ func queueRigNames(rc *config.RigsConfig) []string {
 // time, and sums the beads. Any rig that fails leaves the column nil: a
 // partial sum would read as a queue that shrank.
 func queueSumBeads(ctx context.Context, env Env, rigs []string, col queueBeadColumn) any {
+	n, ok := queueSumCount(ctx, env, rigs, col)
+	if !ok {
+		return nil
+	}
+	return n
+}
+
+// queueSumCount is queueSumBeads's reading as a number and a flag: ok is false
+// when any rig failed, so a caller that needs the count cannot mistake a
+// failed read for an empty queue.
+func queueSumCount(ctx context.Context, env Env, rigs []string, col queueBeadColumn) (int, bool) {
 	type result struct {
 		n   int
 		err error
@@ -251,11 +262,11 @@ func queueSumBeads(ctx context.Context, env Env, rigs []string, col queueBeadCol
 	sum := 0
 	for _, r := range results {
 		if r.err != nil {
-			return nil
+			return 0, false
 		}
 		sum += r.n
 	}
-	return sum
+	return sum, true
 }
 
 // queueCount runs one column's read in one rig's store under its own deadline

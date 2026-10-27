@@ -79,7 +79,7 @@ func (hostCPUSource) Collect(ctx context.Context, env Env) (map[string]any, erro
 		cols[consumer.column+"_cores"] = consumer.read(deltas, claimed)
 	}
 	ranked := hostCPURankOthers(deltas, claimed)
-	for i := 1; i <= 3; i++ {
+	for i := 1; i <= hostCPUOtherN; i++ {
 		var name, cores any
 		if i <= len(ranked) {
 			name, cores = ranked[i-1].name, ranked[i-1].cores
@@ -97,6 +97,10 @@ func (hostCPUSource) Collect(ctx context.Context, env Env) (map[string]any, erro
 // window top reads, long enough that a hundredth of a second of CPU time means
 // something and short enough to cost the snapshot a second of its deadline.
 const hostCPUWindow = time.Second
+
+// hostCPUOtherN is how many busiest other process names the group ranks: the
+// other_N_name and other_N_cores columns run from 1 to this count.
+const hostCPUOtherN = 3
 
 // hostCPUNameArgv reads every process's cumulative CPU time and its program
 // path. time is user plus system CPU since the process started, the counter
@@ -241,8 +245,8 @@ func hostCPURankOthers(deltas []hostCPUDelta, claimed []bool) []hostCPURanked {
 		}
 		return ranked[i].name < ranked[j].name
 	})
-	if len(ranked) > 3 {
-		ranked = ranked[:3]
+	if len(ranked) > hostCPUOtherN {
+		ranked = ranked[:hostCPUOtherN]
 	}
 	return ranked
 }

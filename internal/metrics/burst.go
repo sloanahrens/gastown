@@ -35,13 +35,18 @@ const (
 // while the host is pressed and BurstSlowInterval otherwise.
 //
 // The host is pressed when the idle share is under BurstIdlePct or the exec tax
-// is over BurstExecTaxMS. An idle share that could not be read counts as
-// pressure: top is the reading a loaded host loses first, and the burst a slow
-// cadence skips is the one this sampler exists to keep. An exec tax the daemon
-// has not measured is not pressure of its own: a town that has never measured
-// has nothing to say about the host's load, and the row's null column says so.
+// is over BurstExecTaxMS. A reading that could not be taken is not a reading of
+// a calm host, so it decides nothing by itself: an unread idle share beside a
+// measured tax over the limit is pressure, and beside a measured tax under it
+// is not. Only when neither reading exists is the host unknown rather than
+// calm, and an unknown host takes the fast cadence: top is the reading a loaded
+// host loses first, and the burst a slow cadence skips is the one this sampler
+// exists to keep.
 func BurstInterval(idlePct, execTaxMS *float64) time.Duration {
-	if idlePct == nil || *idlePct < BurstIdlePct {
+	if idlePct == nil && execTaxMS == nil {
+		return BurstFastInterval
+	}
+	if idlePct != nil && *idlePct < BurstIdlePct {
 		return BurstFastInterval
 	}
 	if execTaxMS != nil && *execTaxMS > BurstExecTaxMS {
@@ -84,7 +89,7 @@ type BurstRow struct {
 	ExecTaxAgeS *float64 `json:"exec_tax_age_s"`
 	// TopConsumers are the consumers that burned the most cores, empty when the
 	// sample was taken and nothing burned any, and nil when it could not be
-	// taken.
+	// taken, or when a window it only partly measured ranked nobody.
 	TopConsumers []BurstConsumer `json:"top_consumers"`
 	// Polecats is the live session count the newest dispatcher roster names,
 	// nil when the log holds no roster recent enough to answer for now.
@@ -235,8 +240,9 @@ func burstExecTax(env Env, now time.Time) (tax, age *float64) {
 const burstTopN = 3
 
 // burstConsumers samples the host's consumers with the snapshot's host_cpu
-// source and ranks them. ok is false when the sample could not be taken, which
-// is a gap in the row rather than a host with nothing running.
+// source and ranks them. ok is false when the sample could not be taken, or
+// when it was taken over a window the group only partly measured and ranked
+// nobody: either is a gap in the row rather than a host with nothing running.
 func burstConsumers(ctx context.Context, env Env) ([]BurstConsumer, bool) {
 	if env.Run == nil || env.Wait == nil {
 		return nil, false
@@ -245,21 +251,42 @@ func burstConsumers(ctx context.Context, env Env) ([]BurstConsumer, bool) {
 	if err != nil {
 		return nil, false
 	}
-	return burstTopConsumers(cols, burstTopN), true
+	consumers := burstTopConsumers(cols, burstTopN)
+	if len(consumers) == 0 && burstHostCPUTablePartial(cols) {
+		return nil, false
+	}
+	return consumers, true
+}
+
+// burstHostCPUTablePartial reports whether the host_cpu group says its window
+// was only partly read: unmeasured_pids are processes that exited between its
+// two samples, whose burn after the first read is in no column, and
+// regressed_pids are ids whose cumulative time fell, so a reused id makes the
+// pair no reading at all. Neither leaves an entry among the columns a rank
+// reads, so a rank of nobody over such a window is not an idle host.
+func burstHostCPUTablePartial(cols map[string]any) bool {
+	unmeasured, okUnmeasured := cols["unmeasured_pids"].(int)
+	regressed, okRegressed := cols["regressed_pids"].(int)
+	if !okUnmeasured || !okRegressed {
+		// The group's own account of its gaps could not be read, so the window
+		// is not known to be whole.
+		return true
+	}
+	return unmeasured > 0 || regressed > 0
 }
 
 // burstTopConsumers ranks a host_cpu group's columns into the busiest
-// consumers: the named ones the group records, then the three names it ranked.
+// consumers: the named ones the group records, then the other names it ranked.
 // A consumer with no reading or at zero cores is left out, so an idle host
 // ranks none and a scanner that could not be read is not named at 0.
 func burstTopConsumers(cols map[string]any, n int) []BurstConsumer {
-	out := make([]BurstConsumer, 0, len(hostCPUConsumers)+3)
+	out := make([]BurstConsumer, 0, len(hostCPUConsumers)+hostCPUOtherN)
 	for _, consumer := range hostCPUConsumers {
 		if cores, ok := cols[consumer.column+"_cores"].(float64); ok && cores > 0 {
 			out = append(out, BurstConsumer{Name: consumer.column, Cores: cores})
 		}
 	}
-	for i := 1; i <= 3; i++ {
+	for i := 1; i <= hostCPUOtherN; i++ {
 		name, _ := cols[fmt.Sprintf("other_%d_name", i)].(string)
 		cores, ok := cols[fmt.Sprintf("other_%d_cores", i)].(float64)
 		if name == "" || !ok || cores <= 0 {
@@ -286,8 +313,9 @@ func burstTopConsumers(cols map[string]any, n int) []BurstConsumer {
 const burstLogTailBytes = 1024 * 1024
 
 // burstRunMaxAge is how long a run may have been going and still count as the
-// one in progress: a run that started longer ago and wrote nothing since lost
-// its lines to a daemon restart, so its start line is not evidence of a run.
+// one in progress: a start line older than this is not evidence of a run now,
+// because its end line may have scrolled out of the tail the row reads, and a
+// start line alone says nothing about whether the run is still going.
 const burstRunMaxAge = 30 * time.Minute
 
 // burstRosterMaxAge bounds the roster the polecat count comes from: an older
@@ -477,7 +505,7 @@ func burstLandingQueue(ctx context.Context, env Env) *int {
 	}
 	ctx, cancel := context.WithTimeout(ctx, burstLandingTimeout)
 	defer cancel()
-	n, ok := queueSumBeads(ctx, env, rigs, queueLandingColumn()).(int)
+	n, ok := queueSumCount(ctx, env, rigs, queueLandingColumn())
 	if !ok {
 		return nil
 	}
