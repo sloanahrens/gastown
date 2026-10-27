@@ -245,14 +245,11 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	// system-prompt file for the NEXT spawn; the runtime passes it back via
 	// --append-system-prompt-file and sets GT_SYSTEM_PROMPT_FILE, and then
 	// this output omits it. Until that file exists the text is printed here.
-	staticText, fromTemplate, err := staticRoleText(ctx)
+	// gt prime never writes this file: the host renders the final bytes once at
+	// spawn and the runtime uploads them verbatim (gt-uvwi6, gt-uhzl7).
+	staticText, _, err := staticRoleText(ctx)
 	if err != nil {
 		return err
-	}
-	if !primeDryRun && fromTemplate {
-		if err := refreshSystemPromptFile(os.Getenv, systemPromptPathFor(ctx), staticText); err != nil {
-			fmt.Fprintf(os.Stderr, "gt prime: could not refresh system prompt file: %v\n", err)
-		}
 	}
 	includeStatic := !staticDelivered
 

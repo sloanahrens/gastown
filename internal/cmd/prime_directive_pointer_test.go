@@ -38,11 +38,11 @@ func writeDirectiveFile(t *testing.T, path, text string) {
 
 // TestHookPointerWhenThePromptFileHoldsTheDirectives checks that with the
 // system-prompt file in use and carrying the directives, the hook prints exactly
-// one pointer line, with the character count and a 12-character sha256 prefix of
-// the section, and no directive text.
+// one pointer line, with the size and a 12-character sha256 prefix of the file's
+// own bytes, and no directive text (gt-uhzl7).
 func TestHookPointerWhenThePromptFileHoldsTheDirectives(t *testing.T) {
 	t.Parallel()
-	ctx, text := pointerTown(t)
+	ctx, _ := pointerTown(t)
 	path := config.SystemPromptFilePath("polecat", ctx.TownRoot, filepath.Join(ctx.TownRoot, "myrig"), "nux")
 	if err := renderSystemPromptFileForSpawn("polecat", ctx.TownRoot, filepath.Join(ctx.TownRoot, "myrig"), "nux", path, config.SystemPromptTarget{}); err != nil {
 		t.Fatalf("render: %v", err)
@@ -52,9 +52,12 @@ func TestHookPointerWhenThePromptFileHoldsTheDirectives(t *testing.T) {
 	outputRoleDirectivesWith(ctx, &buf, false, true, path)
 	out := buf.String()
 
-	section := "\n## Directive: town _common\n\n" + text
-	sum := sha256.Sum256([]byte(section))
-	want := "Directives: in your system prompt (" + strconv.Itoa(len(section)) + " chars, sha256 " + hex.EncodeToString(sum[:])[:12] + ")"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	want := "Directives: in your system prompt (" + strconv.Itoa(len(data)) + " bytes, sha256 " + hex.EncodeToString(sum[:])[:12] + ")"
 	if !strings.Contains(out, want+"\n") {
 		t.Fatalf("hook output lacks the pointer line %q:\n%s", want, out)
 	}
@@ -119,41 +122,57 @@ func TestPlainPrimeKeepsTheFullTextWithAPromptFile(t *testing.T) {
 	}
 }
 
+// TestDirectivePointerTracksTheFileBytes checks that the pointer is the hash of
+// the file as it stands: rewriting the file changes the pointer to the new bytes
+// (gt-uhzl7).
+func TestDirectivePointerTracksTheFileBytes(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "system-prompt.md")
+	pointerFor := func(body string) string {
+		t.Helper()
+		writeDirectiveFile(t, file, body)
+		return directivePointer(file)
+	}
+	first := pointerFor("\n## Directive: town _common\n\nKeep it short.\n")
+	second := pointerFor("\n## Directive: town _common\n\nKeep it longer than before.\n")
+	if first == "" || second == "" {
+		t.Fatalf("pointers %q and %q, want both set", first, second)
+	}
+	if first == second {
+		t.Errorf("the pointer did not change with the file: %q", first)
+	}
+	data := []byte("\n## Directive: town _common\n\nKeep it longer than before.\n")
+	sum := sha256.Sum256(data)
+	want := "Directives: in your system prompt (" + strconv.Itoa(len(data)) + " bytes, sha256 " + hex.EncodeToString(sum[:])[:12] + ")"
+	if second != want {
+		t.Errorf("pointer = %q, want %q", second, want)
+	}
+}
+
 // TestDirectivePointerRefusesEveryBrokenInput drives each early return of
-// directivePointer: an empty path, a missing file, a directory, and a directive
-// source that cannot be read. Each must answer "" so the hook prints the capped
-// text, never a pointer to directives it could not render.
+// directivePointer: an empty path, a missing file, a directory, and a file with
+// no directive section. Each must answer "" so the hook prints the capped text,
+// never a pointer to a file that does not carry the directives (gt-uhzl7).
 func TestDirectivePointerRefusesEveryBrokenInput(t *testing.T) {
 	t.Parallel()
-	ctx, _ := pointerTown(t)
-	dirPrompt := filepath.Join(ctx.TownRoot, "prompt-dir")
+	town := t.TempDir()
+	dirPrompt := filepath.Join(town, "prompt-dir")
 	if err := os.MkdirAll(dirPrompt, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Make the town directive unreadable: a directory where its file should be.
-	unreadable := filepath.Join(ctx.TownRoot, "directives", "_common.md")
-	if err := os.Remove(unreadable); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(unreadable, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	noSection := filepath.Join(town, "prompt-plain.md")
+	writeDirectiveFile(t, noSection, "no directives here\n")
 	cases := []struct {
 		name, path string
 	}{
 		{"empty path", ""},
-		{"missing file", filepath.Join(ctx.TownRoot, "no-such-prompt.md")},
+		{"missing file", filepath.Join(town, "no-such-prompt.md")},
 		{"a directory", dirPrompt},
+		{"a file without the directive section", noSection},
 	}
 	for _, tc := range cases {
-		if got := directivePointer(ctx, tc.path); got != "" {
+		if got := directivePointer(tc.path); got != "" {
 			t.Errorf("%s: directivePointer = %q, want no pointer", tc.name, got)
 		}
-	}
-	// An unreadable directive: a prompt file exists, but the source cannot be read.
-	file := filepath.Join(ctx.TownRoot, "prompt-ok.md")
-	writeDirectiveFile(t, file, "anything\n")
-	if got := directivePointer(ctx, file); got != "" {
-		t.Errorf("unreadable directive: directivePointer = %q, want no pointer", got)
 	}
 }
