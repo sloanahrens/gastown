@@ -591,6 +591,110 @@ func TestFailureExcerptCarriesEveryShapeOfRed(t *testing.T) {
 	}
 }
 
+// TestFailureExcerptNamesAUnitTierRuleReport: a package that fails only on a
+// unit-tier rule prints no failing test, only the report between its rule
+// lines, so the report has to reach the note from wherever it sits in the log
+// (gt-sz2rp).
+func TestFailureExcerptNamesAUnitTierRuleReport(t *testing.T) {
+	t.Parallel()
+	rule := strings.Repeat("=", 72)
+	tests := []struct {
+		name string
+		log  string
+		want []string
+	}{
+		{
+			name: "a subprocess tripwire report names the tools the test started",
+			log: gateJobLog(append([]string{
+				"ok  \tgithub.com/x/aaa\t0.1s",
+				"",
+				rule,
+				"SUBPROCESS TRIPWIRE: the unit tier started an external tool 2 time(s)",
+				"  - /tmp/a\ttmux -L x kill-server",
+				"  - /tmp/b\tps -p 1 -o args=",
+				"Each start was refused, and the refusal fails the run even when the code",
+				"under test tolerated the error. Answer the tool through a seam or canned",
+				"output, or move the test to the integration tier (docs/testing.md, \"The rules\").",
+				rule,
+			}, passingGatePackages()...)...),
+			want: []string{
+				"SUBPROCESS TRIPWIRE: the unit tier started an external tool 2 time(s)",
+				"  - /tmp/a\ttmux -L x kill-server",
+				"  - /tmp/b\tps -p 1 -o args=",
+			},
+		},
+		{
+			name: "a goroutine leak report names the goroutine that outlived the tests",
+			log: gateJobLog(append([]string{
+				"ok  \tgithub.com/x/aaa\t0.1s",
+				"",
+				rule,
+				"GOROUTINE LEAK: 1 goroutine(s) outlived the unit tests",
+				"",
+				"goroutine 12 [chan receive]:",
+				"example.com/pkg.(*cache).enqueue(0xc0000b4000)",
+				"\t/src/pkg/cache.go:41 +0x2c",
+				"",
+				"A goroutine a test starts, or starts through the code under test, must",
+				"have returned by the time the test ends: stop it in t.Cleanup (cancel its",
+				"context, close its channel) and wait for it. \"created by\" names the",
+				"function that started it (docs/testing.md, \"The rules\").",
+				rule,
+			}, passingGatePackages()...)...),
+			want: []string{
+				"GOROUTINE LEAK: 1 goroutine(s) outlived the unit tests",
+				"goroutine 12 [chan receive]:",
+				"example.com/pkg.(*cache).enqueue(0xc0000b4000)",
+			},
+		},
+		{
+			// The byte-capped tail can start below the header, leaving the
+			// rule line as the block's only marker.
+			name: "a report whose header the cap cut still surfaces its rule block",
+			log: gateJobLog(append([]string{
+				"ok  \tgithub.com/x/aaa\t0.1s",
+				"",
+				"have returned by the time the test ends: stop it in t.Cleanup (cancel its",
+				"context, close its channel) and wait for it. \"created by\" names the",
+				"function that started it (docs/testing.md, \"The rules\").",
+				rule,
+			}, passingGatePackages()...)...),
+			want: []string{
+				"context, close its channel) and wait for it.",
+				rule,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := failureExcerpt(tt.log, gateTailLines)
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("excerpt does not carry %q:\n%s", want, got)
+				}
+			}
+			if strings.Contains(got, "2026-10-04T") {
+				t.Errorf("excerpt keeps the Forgejo timestamps:\n%s", got)
+			}
+			if n := strings.Count(got, "\n"); n > gateTailLines {
+				t.Errorf("excerpt is %d lines, over the %d-line budget:\n%s", n, gateTailLines, got)
+			}
+		})
+	}
+}
+
+// passingGatePackages is more passing package lines than the excerpt budget
+// holds: a log whose report sits above them cannot reach the note by the
+// no-marker tail fallback.
+func passingGatePackages() []string {
+	lines := make([]string, 0, 2*gateTailLines)
+	for i := range 2 * gateTailLines {
+		lines = append(lines, fmt.Sprintf("ok  \tgithub.com/x/later%03d\t0.1s", i))
+	}
+	return lines
+}
+
 // TestFailureExcerptWithoutAMarkerIsTheTail: a log that names no failure --
 // the gate dying before it printed one -- still yields the last lines, and
 // that fallback is bounded too.
