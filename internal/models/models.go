@@ -24,13 +24,39 @@ func TablePath(townRoot string) string { return filepath.Join(townRoot, "setting
 // backend, rather than a role_agents entry.
 const OMReview = "om-review"
 
-// Roles are the roles a table may name, in gt model show's order: every key
-// role_agents resolves, then the reviewer.
-var Roles = []string{OMReview, "crew", "witness", "refinery", "deacon", "mayor", "dog"}
+// DeepReview is the scheduled deep review's role. It runs on the pool seat its
+// scheduled sling draws, so no role_agents key carries it (gt-2ih67).
+const DeepReview = "deep-review"
 
-// ErrPolecatRole refuses a polecat entry: a polecat's agent is its seat in
-// polecat_pool.seats (gt-mukgk).
-var ErrPolecatRole = errors.New("polecat is not a table role: its agent is its seat in polecat_pool.seats (gt-mukgk)")
+// Polecat is the retired per-role polecat seat name; a polecat's agent is its
+// seat in polecat_pool.seats (gt-mukgk).
+const Polecat = "polecat"
+
+// Roles are the roles a table may name, in gt model show's order: the reviewer,
+// every role role_agents carries, then the roles it carries none for.
+var Roles = []string{OMReview, "crew", "witness", "refinery", "deacon", "mayor", "dog", DeepReview, Polecat}
+
+// TableOnly is a role a table may name that role_agents has no key for.
+type TableOnly struct {
+	// Live is what gt model show prints in LIVE where no role_agents key names
+	// the role.
+	Live string
+	// Why is why no role_agents key carries the role, for a refusal and for a
+	// stale key gt model show reports.
+	Why string
+}
+
+// TableOnlyOf reports role's table-only description, false for a role
+// role_agents carries.
+func TableOnlyOf(role string) (TableOnly, bool) {
+	switch role {
+	case DeepReview:
+		return TableOnly{Live: "(table-only)", Why: "deep review runs on the pool seat its scheduled sling draws"}, true
+	case Polecat:
+		return TableOnly{Live: "(retired)", Why: "polecat is retired: its agent is its seat in polecat_pool.seats (gt-mukgk)"}, true
+	}
+	return TableOnly{}, false
+}
 
 // ErrDefaultRole refuses default as a role: the default profile is a key of its
 // own, set with gt model set-default.
@@ -238,10 +264,7 @@ func (t *Table) ValidateDefault() error {
 // ValidateRole refuses a role name the table may not write, and a profile that
 // cannot give the role what it needs.
 func (t *Table) ValidateRole(role string) error {
-	switch role {
-	case "polecat":
-		return ErrPolecatRole
-	case "default":
+	if role == "default" {
 		return ErrDefaultRole
 	}
 	if !RoleKnown(role) {

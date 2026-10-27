@@ -49,7 +49,11 @@ the backend's model for om-review, which runs on the reviewer's own config.
 The DRIFT column names the table's value where the live setting differs, and the
 command exits 4 then, so a check can run it without parsing the table:
 
-  gt model show || echo the town is not running its table`,
+  gt model show || echo the town is not running its table
+
+A role no role_agents key carries — deep review, and the retired polecat — has
+no live value to match: LIVE names which kind of row it is, and a key left for
+one is drift.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		townRoot, err := workspace.FindFromCwdOrError()
@@ -76,7 +80,9 @@ in one step, then read the live setting back.
 For a role the live setting is role_agents.<role>; for om-review it is the om
 config's backend, whose model is swapped in place so the operator's command
 keeps its path and flags. Every other key of both files is left as it was, so a
-switch for one role cannot change another role's model or a polecat's seat.
+switch for one role cannot change another role's model or a polecat's seat. A
+role no role_agents key carries — deep review, and the retired polecat — is
+refused as the target, because nothing would run it.
 
   gt model set-role om-review haiku
   gt model set-role crew sonnet
@@ -124,8 +130,9 @@ om-review.
 
 The whole table is validated before anything is written, so an unknown role, a
 missing profile or a profile with no preset leaves every file as it was. A
-role_agents key the table does not name is left alone. The table is printed
-after the write with the live values read back.`,
+role_agents key the table does not name is left alone, and a role no key carries
+— deep review, and the retired polecat — is skipped and named in the output. The
+table is printed after the write with the live values read back.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		townRoot, err := workspace.FindFromCwdOrError()
@@ -317,6 +324,17 @@ func (v modelView) roleRow(role, live string) modelRow {
 		row.preset, row.drift = "", "(no preset in profile)"
 	default:
 		row.preset = p.Preset
+		if only, tableOnly := models.TableOnlyOf(role); tableOnly {
+			// No write carries such a role to role_agents, so a key there is a
+			// leftover the role does not run: drift, not a value to match
+			// (gt-2ih67).
+			if live == "" {
+				row.live = only.Live
+			} else {
+				row.drift = "(stale-key)"
+			}
+			return row
+		}
 		if live != p.Preset {
 			row.drift = p.Preset
 		}
@@ -451,6 +469,9 @@ func runModelSetRole(w io.Writer, env modelEnv, role, profileName string) error 
 	p := env.paths
 	if strings.TrimSpace(role) != role || role == "" {
 		return fmt.Errorf("role %q: want a role name as gt model show prints it", role)
+	}
+	if only, tableOnly := models.TableOnlyOf(role); tableOnly {
+		return fmt.Errorf("role %s has no role_agents setting to switch: %s", role, only.Why)
 	}
 	table, err := models.Load(p.table, modelBuiltinProfiles())
 	if err != nil {
@@ -707,6 +728,8 @@ func runModelApply(w io.Writer, env modelEnv) error {
 	sort.Strings(roles)
 	presets := map[string]string{}
 	var backend []string
+	applied := 0
+	var skipped []string
 	for _, role := range roles {
 		profileName := table.Roles[role]
 		profile, _ := table.ProfileOf(profileName)
@@ -718,12 +741,20 @@ func runModelApply(w io.Writer, env modelEnv) error {
 			if backend, err = reviewerBackend(profileName, profile, live.Backend); err != nil {
 				return err
 			}
+			applied++
+			continue
+		}
+		// A table-only row has no role_agents setting to write, and the retired
+		// polecat key would refuse the settings file it landed in (gt-2ih67).
+		if _, tableOnly := models.TableOnlyOf(role); tableOnly {
+			skipped = append(skipped, role)
 			continue
 		}
 		if err := modelPresetKnown(env, profile.Preset); err != nil {
 			return fmt.Errorf("role %s: %w", role, err)
 		}
 		presets[role] = profile.Preset
+		applied++
 	}
 	defaultPreset := ""
 	if table.Default != "" {
@@ -771,7 +802,10 @@ func runModelApply(w io.Writer, env modelEnv) error {
 	if d := v.drifted(); len(d) > 0 {
 		return writes.fail(fmt.Errorf("read back after the write: %s does not match the table", strings.Join(d, ", ")))
 	}
-	fmt.Fprintf(w, "applied: %d roles from %s, and every live setting reads back as the table\n", len(roles), p.label(p.table))
+	if len(skipped) > 0 {
+		fmt.Fprintf(w, "skipped: %s have no role_agents setting of their own\n", strings.Join(skipped, ", "))
+	}
+	fmt.Fprintf(w, "applied: %d roles from %s, and every live setting reads back as the table\n", applied, p.label(p.table))
 	return nil
 }
 

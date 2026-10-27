@@ -61,6 +61,34 @@ func TestApplyRolesWritesTheTablesRolesAndKeepsTheRest(t *testing.T) {
 	}
 }
 
+// A table-only role gets no role_agents key: deep review has none to write, and a
+// retired polecat key would refuse the settings file it landed in (gt-2ih67).
+func TestModelApplyRolesSkipsTableOnlyRoles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	settings := filepath.Join(dir, "settings", "config.json")
+	writeModelFile(t, settings, applySettingsFixture)
+	table := applyTable(t, `{"roles":{"crew":"haiku","deep-review":"opus","polecat":"sonnet"}}`)
+
+	if _, err := ApplyRoles(settings, "stamp", table); err != nil {
+		t.Fatalf("ApplyRoles: %v", err)
+	}
+	var doc map[string]any
+	data, _ := os.ReadFile(settings)
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	roles, _ := doc["role_agents"].(map[string]any)
+	if roles["crew"] != "claude-haiku" {
+		t.Errorf("role_agents.crew = %v, want claude-haiku", roles["crew"])
+	}
+	for _, role := range []string{DeepReview, Polecat} {
+		if _, ok := roles[role]; ok {
+			t.Errorf("apply wrote role_agents.%s, and the role has no live setting", role)
+		}
+	}
+}
+
 func TestApplyRolesRefusesAnUnvalidatedTableWritingNothing(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
