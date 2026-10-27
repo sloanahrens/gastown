@@ -76,6 +76,7 @@ type watch struct {
 	*ciTestWatch
 	beads  *fakeFailingBeads
 	alerts []alert
+	logs   []string
 	now    time.Time
 }
 
@@ -90,6 +91,7 @@ func newWatch(t *testing.T) *watch {
 		Ledger:   filepath.Join(t.TempDir(), "ci-failures.jsonl"),
 		Beads:    w.beads,
 		Escalate: w.escalate,
+		Logf:     func(format string, args ...any) { w.logs = append(w.logs, fmt.Sprintf(format, args...)) },
 		Now:      func() time.Time { return w.now },
 	}
 	return w
@@ -139,6 +141,187 @@ func TestCITestWatchEscalatesATestFailingOnTwoBeads(t *testing.T) {
 	}
 	if len(w.beads.created[0].Labels) != 1 || w.beads.created[0].Labels[0] != LabelFlakyTest {
 		t.Errorf("bead labels = %v, want [%s]", w.beads.created[0].Labels, LabelFlakyTest)
+	}
+}
+
+// A test that passes on main failed for these beads because their diffs broke
+// what it guards, so the repair is in the diff and a P1 for the test would send
+// a worker to the wrong file (gt-42ulv).
+func TestCITestWatchDoesNotFileATestThatPassesOnMain(t *testing.T) {
+	t.Parallel()
+	w := newWatch(t)
+	w.ciTestWatch.MainStatus = func(_, _ string) mainVerdict { return mainGreen }
+	w.fail("gt-one", test("github.com/x/a", "TestAlpha"))
+	w.fail("gt-two", test("github.com/x/a", "TestAlpha"))
+	if len(w.alerts) != 0 {
+		t.Errorf("alerts = %v, want none: the test passes on main", w.alerts)
+	}
+	if len(w.beads.created) != 0 {
+		t.Errorf("created = %v, want no repair bead", w.beads.created)
+	}
+	// The cause battery reads every failure, so the ledger keeps both.
+	recs := readLedger(t, w.ciTestWatch.Ledger)
+	if len(recs) != 2 || recs[0].Bead != "gt-one" || recs[1].Bead != "gt-two" ||
+		recs[0].Package != "github.com/x/a" || recs[1].Test != "TestAlpha" {
+		t.Errorf("ledger = %+v, want both failures still recorded against the package and test", recs)
+	}
+	var logged bool
+	for _, line := range w.logs {
+		if strings.Contains(line, "not filed: passes on main") {
+			logged = true
+		}
+	}
+	if !logged {
+		t.Errorf("logs = %v, want the line saying it passes on main", w.logs)
+	}
+}
+
+// A main that is red for the package is the case the rule exists for: a test
+// failing on beads that did not touch it stays filed as a repair.
+func TestCITestWatchFilesWhenMainIsRedForThePackage(t *testing.T) {
+	t.Parallel()
+	w := newWatch(t)
+	w.ciTestWatch.MainStatus = func(rig, pkg string) mainVerdict {
+		if rig != "gastown" || pkg != "github.com/x/a" {
+			t.Errorf("MainStatus(%q, %q), want the rig and the failing package", rig, pkg)
+		}
+		return mainRed
+	}
+	w.fail("gt-one", test("github.com/x/a", "TestAlpha"))
+	w.fail("gt-two", test("github.com/x/a", "TestAlpha"))
+	if len(w.alerts) != 1 || len(w.beads.created) != 1 {
+		t.Fatalf("alerts = %v, created = %v, want the one escalation and repair bead as before", w.alerts, w.beads.created)
+	}
+	for _, line := range w.logs {
+		if strings.Contains(line, "not filed") {
+			t.Errorf("logs = %v, want no not-filed line for a package main is red for", w.logs)
+		}
+	}
+	recs := readLedger(t, w.ciTestWatch.Ledger)
+	if len(recs) != 2 || recs[0].Bead != "gt-one" || recs[1].Bead != "gt-two" {
+		t.Errorf("ledger = %+v, want both failures recorded as well", recs)
+	}
+}
+
+// An unknown main files, as the watch always has: a repair bead a worker reads
+// costs one look, while a suppressed real failure leaves main red (gt-42ulv).
+// The explicit unknown verdict and the unwired seam are the same case.
+func TestCITestWatchFilesWhenTheMainStatusIsUnknown(t *testing.T) {
+	t.Parallel()
+	seams := map[string]func(rig, pkg string) mainVerdict{
+		"unwired seam":    nil,
+		"unknown verdict": func(_, _ string) mainVerdict { return mainUnknown },
+	}
+	for name, seam := range seams {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			w := newWatch(t)
+			w.ciTestWatch.MainStatus = seam
+			w.fail("gt-one", test("github.com/x/a", "TestAlpha"))
+			w.fail("gt-two", test("github.com/x/a", "TestAlpha"))
+			if len(w.alerts) != 1 || len(w.beads.created) != 1 {
+				t.Fatalf("alerts = %v, created = %v, want the repair filed on an unknown main", w.alerts, w.beads.created)
+			}
+			for _, line := range w.logs {
+				if strings.Contains(line, "passes on main") {
+					t.Errorf("logs = %v, want no passes-on-main line: main was not read as green", w.logs)
+				}
+			}
+		})
+	}
+}
+
+func TestMainVerdictOf(t *testing.T) {
+	t.Parallel()
+	const pkg = "github.com/x/a"
+	const stamp = "2026-10-26T12:00:00Z "
+	for _, tc := range []struct {
+		name, status string
+		want         mainVerdict
+	}{
+		{"red names the package", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/a [gt-flaky]", mainRed},
+		{"red names it among others", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/b [gt-one], github.com/x/a [gt-two]", mainRed},
+		{"red names another package", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/b [gt-flaky]", mainGreen},
+		{"red names a package it is a prefix of", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/ab [gt-flaky]", mainGreen},
+		{"flaky tail names the package", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/b [gt-flaky]; flaky (passed on rerun): github.com/x/a", mainGreen},
+		{"green", stamp + "main GREEN at 1a2b3c4d (landed by gt-one)", mainGreen},
+		{"green after a rerun", stamp + "main GREEN at 1a2b3c4d after rerun (landed by gt-one)", mainGreen},
+		{"red names no package", stamp + "main RED at 1a2b3c4d (landed by gt-one): (no Go package named) [gt-flaky]", mainGreen},
+		{"red with the newline the writer appends", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/a [gt-flaky]\n", mainRed},
+		{"newest line is red after a green verdict", stamp + "main GREEN at 1a2b3c4d (landed by gt-one)\n" + stamp + "main RED at 5e6f7a8b (landed by gt-two): github.com/x/a [gt-flaky]", mainRed},
+		{"newest line is green after a red verdict", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/a [gt-flaky]\n" + stamp + "main GREEN at 5e6f7a8b (landed by gt-two)", mainGreen},
+		{"revert tail after the red list", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/a [gt-flaky]; reverting gt-cul as gt-rev", mainRed},
+		{"reverted red list names another package", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/b [gt-flaky]; reverting gt-cul as gt-rev", mainGreen},
+		{"red with no list", stamp + "main RED at 1a2b3c4d (landed by gt-one)", mainUnknown},
+		{"red with an empty list", stamp + "main RED at 1a2b3c4d (landed by gt-one): ", mainUnknown},
+		{"red with a list that names no bracketed bead", stamp + "main RED at 1a2b3c4d (landed by gt-one): github.com/x/a", mainUnknown},
+		{"text naming neither verdict", stamp + "main UNKNOWN", mainUnknown},
+		{"empty", "", mainUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mainVerdictOf(tc.status, pkg); got != tc.want {
+				t.Errorf("mainVerdictOf(%q, %q) = %v, want %v", tc.status, pkg, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMainStatusFromStatusReadsTheRigsStatusLine(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	if err := writeRedMainStatus(town, "gastown", "main RED at 1a2b3c4d (landed by gt-one): github.com/x/a [gt-flaky]", now); err != nil {
+		t.Fatalf("writing the status line: %v", err)
+	}
+	if err := writeRedMainStatus(town, "otherrig", "main GREEN at 1a2b3c4d (landed by gt-two)", now); err != nil {
+		t.Fatalf("writing the status line: %v", err)
+	}
+	status := mainStatusFromStatus(town)
+	for _, tc := range []struct {
+		rig, pkg string
+		want     mainVerdict
+	}{
+		{"gastown", "github.com/x/a", mainRed},
+		{"gastown", "github.com/x/b", mainGreen},
+		{"otherrig", "github.com/x/a", mainGreen},
+		{"norig", "github.com/x/a", mainUnknown},
+	} {
+		if got := status(tc.rig, tc.pkg); got != tc.want {
+			t.Errorf("mainStatusFromStatus(%q, %q) = %v, want %v", tc.rig, tc.pkg, got, tc.want)
+		}
+	}
+}
+
+// A status that cannot be read is an unknown main, and an unknown main files:
+// suppressing the repair on it would hide a live failure (gt-42ulv).
+func TestMainStatusFromStatusLeavesAnUnreadableStatusUnknown(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory at the status path fails ReadFile with EISDIR, which is not
+	// the missing-file case.
+	if err := os.MkdirAll(RedMainStatusPath(town, "gastown"), 0o755); err != nil {
+		t.Fatalf("making the status path a directory: %v", err)
+	}
+	if got := mainStatusFromStatus(town)("gastown", "github.com/x/a"); got != mainUnknown {
+		t.Errorf("mainStatusFromStatus = %v for an unreadable status, want %v: an unknown main files", got, mainUnknown)
+	}
+}
+
+// The rig's status is the watch's whole input, so a rig with no status yet
+// still files rather than reading as a green main (gt-42ulv).
+func TestCITestWatchFilesWhenTheRigHasNoStatusLine(t *testing.T) {
+	t.Parallel()
+	w := newWatch(t)
+	w.ciTestWatch.MainStatus = mainStatusFromStatus(t.TempDir())
+	w.fail("gt-one", test("github.com/x/a", "TestAlpha"))
+	w.fail("gt-two", test("github.com/x/a", "TestAlpha"))
+	if len(w.alerts) != 1 || len(w.beads.created) != 1 {
+		t.Fatalf("alerts = %v, created = %v, want the repair filed: a missing status is an unknown main", w.alerts, w.beads.created)
+	}
+	// The cause battery reads every failure, so the ledger keeps both.
+	if recs := readLedger(t, w.ciTestWatch.Ledger); len(recs) != 2 {
+		t.Errorf("ledger = %+v, want both failures recorded", recs)
 	}
 }
 

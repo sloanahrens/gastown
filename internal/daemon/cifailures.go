@@ -50,11 +50,27 @@ type failingTestBeads interface {
 	AddComment(id, text string) error
 }
 
+// mainVerdict is what a red-main status says about one package on main. Only
+// mainGreen suppresses a repair: an unknown main files, because a suppressed
+// real failure leaves main red (gt-42ulv).
+type mainVerdict int
+
+const (
+	// mainUnknown is a status that is missing, unreadable, or names no verdict
+	// this watch can read.
+	mainUnknown mainVerdict = iota
+	// mainGreen is a status that does not list the package under RED.
+	mainGreen
+	// mainRed is a status that lists the package under RED.
+	mainRed
+)
+
 // ciTestWatch records every CI-gate failure a rig's landing worker sees and,
-// when one package's test has failed on two different beads inside a day,
-// raises one escalation keyed on that test and files one repair bead for it
-// (gt-xvw20). It reruns nothing: a red gate is a verdict, and a test that
-// fails on beads that did not touch it is a test to fix or remove.
+// when one package's test has failed on two different beads inside a day and
+// main is not green for it, raises one escalation keyed on that test and files
+// one repair bead for it (gt-xvw20, gt-42ulv). It reruns nothing: a red gate is
+// a verdict, and a test that fails on beads that did not touch it is a test to
+// fix or remove.
 type ciTestWatch struct {
 	// Rig is the rig whose landing worker reports, and the scope a repeat is
 	// counted in: another rig's package is a different test.
@@ -73,6 +89,16 @@ type ciTestWatch struct {
 	// which is the landing's: a rejection must not wait on a retrying alert.
 	// nil runs them inline, which is what a test wants.
 	Async func(call func())
+	// MainStatus reports what the rig's latest main status says about the
+	// package, so a test failing for two beads that passes on main is not filed
+	// as one to repair (gt-42ulv). nil is an unread main status, which files.
+	MainStatus func(rig, pkg string) mainVerdict
+}
+
+// ciWindowText is ciFailureWindow as the escalation, the bead and the log name
+// it: one wording for one span.
+func ciWindowText() string {
+	return fmt.Sprintf("%.0f hours", ciFailureWindow.Hours())
 }
 
 func (w *ciTestWatch) logf(format string, args ...any) {
@@ -96,9 +122,99 @@ func (w *ciTestWatch) run(call func()) {
 	w.Async(call)
 }
 
+// verdict reports what main says about pkg. An unwired seam reads as an unknown
+// main; only a green main suppresses a repair, and everything else files.
+func (w *ciTestWatch) verdict(pkg string) mainVerdict {
+	if w.MainStatus == nil {
+		return mainUnknown
+	}
+	return w.MainStatus(w.Rig, pkg)
+}
+
+// mainStatusFromStatus is the MainStatus seam over the red-main status the
+// landing worker writes after every post-land verdict. The file is read per
+// repeat rather than captured, so a main that went red or green since the watch
+// was built is seen. A status that is missing or unreadable is an unknown main,
+// not a green one, and an unknown main files (gt-42ulv).
+func mainStatusFromStatus(townRoot string) func(rig, pkg string) mainVerdict {
+	return func(rig, pkg string) mainVerdict {
+		data, err := os.ReadFile(RedMainStatusPath(townRoot, rig)) //nolint:gosec // G304: town runtime path
+		if err != nil {
+			// A missing status is a rig with no verdict; an unreadable one is a
+			// verdict nobody saw. Reading either as green would suppress the
+			// repair for a live failure.
+			return mainUnknown
+		}
+		return mainVerdictOf(string(data), pkg)
+	}
+}
+
+// mainVerdictOf is what a red-main status says about pkg. The status holds the
+// latest verdict as one stamped line, "<stamp> main GREEN at <sha> (<by>)" or
+// "<stamp> main RED at <sha> (<by>): <pkg> [<bead>], ..."; a file holding
+// several verdicts is read at its last, so an older one cannot shadow the
+// newest. A RED line that does not name pkg leaves pkg passing on main, and a
+// GREEN line says so outright; any other text is a status this watch cannot
+// read, which is an unknown main (gt-42ulv).
+func mainVerdictOf(status, pkg string) mainVerdict {
+	lines := strings.Split(strings.TrimSpace(status), "\n")
+	line := strings.TrimSpace(lines[len(lines)-1])
+	if strings.Contains(line, " main GREEN at ") {
+		return mainGreen
+	}
+	i := strings.Index(line, " main RED at ")
+	if i < 0 {
+		return mainUnknown
+	}
+	rest := line[i+len(" main RED at "):]
+	colon := strings.Index(rest, ": ")
+	if colon < 0 {
+		return mainUnknown
+	}
+	list := rest[colon+2:]
+	if !redListReadable(list) {
+		return mainUnknown
+	}
+	if redListNamesPackage(list, pkg) {
+		return mainRed
+	}
+	return mainGreen
+}
+
+// redListReadable reports whether a RED list has at least one "<pkg> [<bead>]"
+// entry. A RED line whose list cannot be read is not a verdict that pkg passes:
+// it is an unknown main, the same as a line the watch cannot read at all.
+func redListReadable(list string) bool {
+	if semi := strings.Index(list, ";"); semi >= 0 {
+		list = list[:semi]
+	}
+	for _, entry := range strings.Split(list, ", ") {
+		if _, _, ok := strings.Cut(strings.TrimSpace(entry), " ["); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// redListNamesPackage reports whether a RED list, "<pkg> [<bead>], ...", names
+// pkg. The "; flaky (passed on rerun):" and "; reverting ..." tails follow the
+// list, so the list ends at the first semicolon. A whole field matches: a
+// package whose name is a prefix of another is not that other package.
+func redListNamesPackage(list, pkg string) bool {
+	if semi := strings.Index(list, ";"); semi >= 0 {
+		list = list[:semi]
+	}
+	for _, entry := range strings.Split(list, ", ") {
+		if field, _, ok := strings.Cut(strings.TrimSpace(entry), " ["); ok && field == pkg {
+			return true
+		}
+	}
+	return false
+}
+
 // Record logs f and reports every test in it that has now failed on a second
-// bead. A tail that named no test is recorded as unparsed and reported to
-// nobody.
+// bead while main is not green for it. A tail that named no test is recorded as
+// unparsed and reported to nobody.
 func (w *ciTestWatch) Record(f land.CIFailure) {
 	now := w.now()
 	recs, err := recordCIFailure(w.Ledger, w.Rig, f, now)
@@ -108,6 +224,14 @@ func (w *ciTestWatch) Record(f land.CIFailure) {
 	for _, t := range distinctTests(f) {
 		beads := w.beadsFor(recs, t, now)
 		if len(beads) < 2 {
+			continue
+		}
+		// A test that passes on main fails for these beads because their diffs
+		// break what it guards, so the repair is in the diff: a P1 for the test
+		// sends a worker to the wrong file (gt-42ulv).
+		if w.verdict(t.Package) == mainGreen {
+			w.logf("landing_worker: %s: %s %s failed on %d beads within %s: not filed: passes on main",
+				w.Rig, t.Package, t.Test, len(beads), ciWindowText())
 			continue
 		}
 		w.run(func() { w.report(t, beads) })
@@ -162,7 +286,7 @@ func failingTestTitle(rig, pkg, test string) string {
 // report raises the one escalation for t and files the one repair bead, or
 // comments on the bead already filed for the test, whatever status it is in.
 func (w *ciTestWatch) report(t land.TestFailure, beadIDs []string) {
-	window := fmt.Sprintf("%.0f hours", ciFailureWindow.Hours())
+	window := ciWindowText()
 	msg := fmt.Sprintf("%s %s has failed on %d beads on rig %s within %s: %s. Nothing is retried, so this test is to be fixed or removed (gt-xvw20).",
 		t.Package, t.Test, len(beadIDs), w.Rig, window, strings.Join(beadIDs, ", "))
 	if w.Escalate != nil {
