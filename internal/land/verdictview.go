@@ -8,8 +8,10 @@ import (
 	"io/fs"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -23,6 +25,9 @@ const (
 	// cut at a rune boundary and says how many bytes were left out, so one
 	// runaway detail cannot flood the terminal. The stored file keeps it whole.
 	verdictDetailMax = 4 << 10
+	// verdictLineMax caps a one-line field (summary, title, path, reason) as
+	// printed, so a long om string cannot stand in for the bounded detail.
+	verdictLineMax = 1 << 10
 	// verdictFindingsMax caps how many findings print for one verdict; the count
 	// of the rest follows.
 	verdictFindingsMax = 50
@@ -55,12 +60,24 @@ type StoredVerdict struct {
 // back to the bead's notes; every other error stops the read. A bead that has
 // stored verdicts is not that case, so a head none of them matches is
 // ErrNoVerdictForHead.
+//
+// With head set, only the files whose names can hold that head are read, so a
+// corrupt file for another head does not block this one. The newest read has no
+// such filter and fails on any corrupt file, since the newest is unknown then.
 func ReadStoredVerdict(store fs.FS, rig, bead, head string) (StoredVerdict, error) {
 	if !validComponent(rig) {
 		return StoredVerdict{}, fmt.Errorf("invalid rig %q", rig)
 	}
 	if !validComponent(bead) {
 		return StoredVerdict{}, fmt.Errorf("invalid bead %q", bead)
+	}
+	var prefix string
+	if head != "" {
+		p, err := verdictHeadPrefix(head)
+		if err != nil {
+			return StoredVerdict{}, err
+		}
+		prefix = p
 	}
 	dir := path.Join(rig, bead)
 	entries, err := fs.ReadDir(store, dir)
@@ -70,30 +87,32 @@ func ReadStoredVerdict(store fs.FS, rig, bead, head string) (StoredVerdict, erro
 	if err != nil {
 		return StoredVerdict{}, fmt.Errorf("reading the verdict store for %s: %w", bead, err)
 	}
-	var all []StoredVerdict
+	var names []string
 	for _, e := range entries {
-		if e.IsDir() || !isVerdictFile(e.Name()) {
+		if !e.IsDir() && isVerdictFile(e.Name()) {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) == 0 {
+		return StoredVerdict{}, ErrNoStoredVerdict
+	}
+	var all []StoredVerdict
+	for _, name := range names {
+		if prefix != "" && !fileMayHoldHead(name, prefix) {
 			continue
 		}
-		raw, err := fs.ReadFile(store, path.Join(dir, e.Name()))
+		raw, err := fs.ReadFile(store, path.Join(dir, name))
 		if err != nil {
-			return StoredVerdict{}, fmt.Errorf("reading %s: %w", e.Name(), err)
+			return StoredVerdict{}, fmt.Errorf("reading %s: %w", name, err)
 		}
 		v, err := decodeStoredVerdict(raw)
 		if err != nil {
-			return StoredVerdict{}, fmt.Errorf("%s: %w", e.Name(), err)
+			return StoredVerdict{}, fmt.Errorf("%s: %w", name, err)
 		}
 		all = append(all, v)
 	}
-	if len(all) == 0 {
-		return StoredVerdict{}, ErrNoStoredVerdict
-	}
 	if head == "" {
 		return newestVerdict(all), nil
-	}
-	prefix, err := verdictHeadPrefix(head)
-	if err != nil {
-		return StoredVerdict{}, err
 	}
 	heads := make([]string, len(all))
 	for i, v := range all {
@@ -139,6 +158,14 @@ func verdictHeadPrefix(head string) (string, error) {
 		return "", fmt.Errorf("%q is not a sha prefix of at least %d hex digits", head, verdictHeadPrefixMin)
 	}
 	return p, nil
+}
+
+// fileMayHoldHead reports whether the verdict file name can hold a head that
+// prefix names. The file name carries the head's first headPrefixLen digits, so
+// the two must agree on the shorter of the two.
+func fileMayHoldHead(name, prefix string) bool {
+	stem := strings.TrimSuffix(name, ".json")
+	return strings.HasPrefix(stem, prefix) || strings.HasPrefix(prefix, stem)
 }
 
 // matchHead is the index of the first entry of heads whose head prefix names.
@@ -224,12 +251,12 @@ func rejectionBlocks(notes string) []RejectionNote {
 func RenderStoredVerdict(w io.Writer, bead string, sv StoredVerdict) error {
 	r := sv.Record
 	var b strings.Builder
-	fmt.Fprintf(&b, "Verdict for %s @ %s (%s)\n", bead, r.Head, r.Rig)
-	fmt.Fprintf(&b, "  verdict: %s, score %.4f\n", sv.Verdict.Verdict, sv.Verdict.Score)
-	fmt.Fprintf(&b, "  judged:  %s by om %s\n", r.At.UTC().Format(time.RFC3339), orNone(r.OMVersion))
-	fmt.Fprintf(&b, "  flags:   %s\n", orNone(strings.Join(r.Flags, " ")))
+	fmt.Fprintf(&b, "Verdict for %s @ %s (%s)\n", bead, oneLine(r.Head), oneLine(r.Rig))
+	fmt.Fprintf(&b, "  verdict: %s, score %.4f\n", oneLine(sv.Verdict.Verdict), sv.Verdict.Score)
+	fmt.Fprintf(&b, "  judged:  %s by om %s\n", r.At.UTC().Format(time.RFC3339), orNone(oneLine(r.OMVersion)))
+	fmt.Fprintf(&b, "  flags:   %s\n", orNone(oneLine(strings.Join(r.Flags, " "))))
 	if sv.Verdict.Summary != "" {
-		fmt.Fprintf(&b, "  summary: %s\n", sv.Verdict.Summary)
+		fmt.Fprintf(&b, "  summary: %s\n", oneLine(sv.Verdict.Summary))
 	}
 	writeFindings(&b, sv.Verdict.Findings)
 	_, err := io.WriteString(w, b.String())
@@ -246,14 +273,14 @@ func RenderRejectionNotes(w io.Writer, bead string, blocks []RejectionNote) erro
 	for _, n := range blocks {
 		header := fmt.Sprintf("\n%s (attempt %d)", MergeRejectionNoteMarker, n.Attempt)
 		if n.Kind != "" {
-			header += " " + n.Kind
+			header += " " + oneLine(n.Kind)
 		}
 		if n.Reason != "" {
-			header += ": " + n.Reason
+			header += ": " + oneLine(n.Reason)
 		}
 		b.WriteString(header + "\n")
 		if n.Head != "" {
-			fmt.Fprintf(&b, "  Head:    %s\n", n.Head)
+			fmt.Fprintf(&b, "  Head:    %s\n", oneLine(n.Head))
 		}
 		if n.Receipt != nil {
 			fmt.Fprintf(&b, "  Score:   %.4f\n", n.Receipt.Score)
@@ -278,39 +305,77 @@ func writeFindings(b *strings.Builder, findings []Finding) {
 
 // writeFinding writes one finding's line, then its detail indented beneath it.
 func writeFinding(b *strings.Builder, f Finding) {
-	fmt.Fprintf(b, "    %s  %s  %s — %s\n", orNone(f.ID), orNone(f.Severity), findingLocation(f), orNone(f.Title))
+	fmt.Fprintf(b, "    %s  %s  %s — %s\n", orNone(oneLine(f.ID)), orNone(oneLine(f.Severity)), findingLocation(f), orNone(oneLine(f.Title)))
 	if f.Detail == "" {
 		return
 	}
+	// The detail keeps its own lines, so each is made terminal-safe on its own.
 	for _, line := range strings.Split(capDetail(f.Detail), "\n") {
-		fmt.Fprintf(b, "        %s\n", line)
+		fmt.Fprintf(b, "        %s\n", terminalText(line))
 	}
 }
 
 // findingLocation is the path, and the line when om named one.
 func findingLocation(f Finding) string {
 	if f.Line > 0 {
-		return fmt.Sprintf("%s:%d", orNone(f.Path), f.Line)
+		return fmt.Sprintf("%s:%d", orNone(oneLine(f.Path)), f.Line)
 	}
-	return orNone(f.Path)
+	return orNone(oneLine(f.Path))
 }
 
 // capDetail cuts a detail that runs past verdictDetailMax at a rune boundary,
 // and names how many bytes it left out. A detail within the cap is returned as
 // it is.
 func capDetail(detail string) string {
-	if len(detail) <= verdictDetailMax {
+	kept, dropped := cutAt(detail, verdictDetailMax)
+	if dropped == 0 {
 		return detail
 	}
-	cut := verdictDetailMax
-	for cut > 0 && !utf8.RuneStart(detail[cut]) {
+	return fmt.Sprintf("%s\n[detail truncated: %d bytes not shown]", kept, dropped)
+}
+
+// oneLine is a one-line field as printed: capped at verdictLineMax, then made
+// terminal-safe. A cut line names how many bytes it left out.
+func oneLine(s string) string {
+	kept, dropped := cutAt(s, verdictLineMax)
+	if dropped > 0 {
+		kept += fmt.Sprintf(" [truncated: %d bytes not shown]", dropped)
+	}
+	return terminalText(kept)
+}
+
+// cutAt keeps the first limit bytes of s, backing up to a rune boundary, and
+// reports how many bytes it left out. A string within the limit comes back whole.
+func cutAt(s string, limit int) (string, int) {
+	if len(s) <= limit {
+		return s, 0
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return fmt.Sprintf("%s\n[detail truncated: %d bytes not shown]", detail[:cut], len(detail)-cut)
+	return s[:cut], len(s) - cut
+}
+
+// terminalText writes s with every rune that is not printable as its Go escape,
+// so text om wrote cannot move the cursor, rewrite a line or hide a finding with
+// an escape sequence. Newlines escape too, so a one-line field stays one line.
+func terminalText(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsPrint(r) {
+			b.WriteRune(r)
+			continue
+		}
+		// QuoteRune wraps the escape in single quotes; the escape is what is between.
+		q := strconv.QuoteRune(r)
+		b.WriteString(q[1 : len(q)-1])
+	}
+	return b.String()
 }
 
 // orNone is s, or "(none)" when s is empty, so a missing field reads as absent
-// rather than as a blank that runs into the next label.
+// rather than as a blank that runs into the next label. s is already printable.
 func orNone(s string) string {
 	if s == "" {
 		return "(none)"

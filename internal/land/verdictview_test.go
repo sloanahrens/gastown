@@ -1,99 +1,68 @@
-package land
+package land_test
 
 import (
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
-	"path"
 	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
 	"unicode/utf8"
+
+	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/land/landtest"
 )
 
-// The verdict view reads the store the landing worker writes (gt-lh0sc).
+// The verdict view reads the store the landing worker writes (gt-lh0sc). These
+// tests drive the exported read and render calls over the shared landtest store.
 
-// viewHead is a full sha built from prefix: the fixtures name heads by their
-// leading digits and pad the rest, so two heads can share a short prefix.
-func viewHead(prefix string) string {
-	return prefix + strings.Repeat("0", 40-len(prefix))
-}
-
-var (
-	viewHeadA = viewHead("ab12ab12ab12")
-	// viewHeadB shares the first seven digits of viewHeadA but not its first
-	// twelve, so a seven-digit prefix matches both while each keeps its file.
-	viewHeadB = viewHead("ab12ab1f")
-	viewHeadC = viewHead("cd34cd34cd34")
-)
-
-// viewStore is an in-memory store holding recs under the names the store writes.
-func viewStore(t *testing.T, recs ...VerdictRecord) fstest.MapFS {
-	t.Helper()
-	m := fstest.MapFS{}
-	for _, r := range recs {
-		data, err := json.Marshal(r)
-		if err != nil {
-			t.Fatal(err)
-		}
-		m[path.Join(r.Rig, r.Bead, headPrefix(r.Head)+".json")] = &fstest.MapFile{Data: data}
-	}
-	return m
-}
-
-// viewRecord is one stored review of bead at head, judged at at, with om's
-// verdict JSON as given.
-func viewRecord(bead, head string, at time.Time, omJSON string) VerdictRecord {
-	return VerdictRecord{Bead: bead, Rig: "gastown", Head: head, At: at,
-		OMVersion: "v9.9.9", Flags: []string{"-C", "--base"}, Verdict: json.RawMessage(omJSON)}
-}
-
-var (
-	viewT0    = time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
-	viewOldOM = `{"verdict":"request_changes","score":0.42,"summary":"old round","findings":[]}`
-	viewNewOM = `{"verdict":"approve","score":0.91,"summary":"new round","findings":[` +
-		`{"id":"F1","severity":"minor","path":"a.go","line":3,"title":"nit","detail":"explain the nit"}]}`
+// verdictDetailCap and verdictLineCap are the caps the view prints under, as
+// the operator's documentation states them: 4 KiB a detail, 1 KiB a one-line field.
+const (
+	verdictDetailCap = 4 << 10
+	verdictLineCap   = 1 << 10
+	verdictFindings  = 50
 )
 
 func TestReadStoredVerdictPicksTheNewestWhenNoHeadIsGiven(t *testing.T) {
 	t.Parallel()
-	store := viewStore(t,
-		viewRecord("gt-abc", viewHeadA, viewT0, viewOldOM),
-		viewRecord("gt-abc", viewHeadC, viewT0.Add(time.Hour), viewNewOM))
-	sv, err := ReadStoredVerdict(store, "gastown", "gt-abc", "")
+	store := landtest.Store(t,
+		landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.OldOM),
+		landtest.Record("gt-abc", landtest.HeadC, landtest.T0.Add(time.Hour), landtest.NewOM))
+	sv, err := land.ReadStoredVerdict(store, "gastown", "gt-abc", "")
 	if err != nil {
 		t.Fatalf("ReadStoredVerdict = %v; want the stored verdict", err)
 	}
-	if sv.Record.Head != viewHeadC {
-		t.Errorf("head = %s, want the newest review's %s", sv.Record.Head, viewHeadC)
+	if sv.Record.Head != landtest.HeadC {
+		t.Errorf("head = %s, want the newest review's %s", sv.Record.Head, landtest.HeadC)
 	}
-	if sv.Verdict.Verdict != VerdictApprove || len(sv.Verdict.Findings) != 1 {
+	if sv.Verdict.Verdict != land.VerdictApprove || len(sv.Verdict.Findings) != 1 {
 		t.Errorf("verdict = %+v, want the newest om verdict with its finding", sv.Verdict)
 	}
 }
 
 func TestReadStoredVerdictSelectsTheHeadByPrefix(t *testing.T) {
 	t.Parallel()
-	store := viewStore(t,
-		viewRecord("gt-abc", viewHeadA, viewT0, viewOldOM),
-		viewRecord("gt-abc", viewHeadC, viewT0.Add(time.Hour), viewNewOM))
+	store := landtest.Store(t,
+		landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.OldOM),
+		landtest.Record("gt-abc", landtest.HeadC, landtest.T0.Add(time.Hour), landtest.NewOM))
 	for name, head := range map[string]string{
-		"a full sha":        viewHeadA,
-		"a seven digit":     viewHeadA[:7],
-		"upper case":        strings.ToUpper(viewHeadA[:12]),
-		"surrounding space": " " + viewHeadA[:10] + " ",
+		"a full sha":        landtest.HeadA,
+		"a seven digit":     landtest.HeadA[:7],
+		"upper case":        strings.ToUpper(landtest.HeadA[:12]),
+		"surrounding space": " " + landtest.HeadA[:10] + " ",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			sv, err := ReadStoredVerdict(store, "gastown", "gt-abc", head)
+			sv, err := land.ReadStoredVerdict(store, "gastown", "gt-abc", head)
 			if err != nil {
 				t.Fatalf("ReadStoredVerdict(%q) = %v", head, err)
 			}
-			if sv.Record.Head != viewHeadA {
-				t.Errorf("head = %s, want %s even though a newer review exists", sv.Record.Head, viewHeadA)
+			if sv.Record.Head != landtest.HeadA {
+				t.Errorf("head = %s, want %s even though a newer review exists", sv.Record.Head, landtest.HeadA)
 			}
 		})
 	}
@@ -101,25 +70,25 @@ func TestReadStoredVerdictSelectsTheHeadByPrefix(t *testing.T) {
 
 func TestReadStoredVerdictHeadPrefixErrors(t *testing.T) {
 	t.Parallel()
-	store := viewStore(t,
-		viewRecord("gt-abc", viewHeadA, viewT0, viewOldOM),
-		viewRecord("gt-abc", viewHeadB, viewT0.Add(time.Hour), viewNewOM))
+	store := landtest.Store(t,
+		landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.OldOM),
+		landtest.Record("gt-abc", landtest.HeadB, landtest.T0.Add(time.Hour), landtest.NewOM))
 	for name, tc := range map[string]struct {
 		head string
 		want error // nil means any error that is not a sentinel
 	}{
-		"ambiguous": {head: viewHeadA[:7], want: ErrAmbiguousHead},
-		"missing":   {head: "9999999", want: ErrNoVerdictForHead},
+		"ambiguous": {head: landtest.HeadA[:7], want: land.ErrAmbiguousHead},
+		"missing":   {head: "9999999", want: land.ErrNoVerdictForHead},
 		"too short": {head: "ab12"},
 		"not hex":   {head: "zzzzzzzz"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			_, err := ReadStoredVerdict(store, "gastown", "gt-abc", tc.head)
+			_, err := land.ReadStoredVerdict(store, "gastown", "gt-abc", tc.head)
 			if err == nil {
 				t.Fatalf("ReadStoredVerdict(%q) returned no error; want one", tc.head)
 			}
-			if errors.Is(err, ErrNoStoredVerdict) {
+			if errors.Is(err, land.ErrNoStoredVerdict) {
 				t.Errorf("a bead with stored verdicts reported none; the notes fallback must not run")
 			}
 			if tc.want != nil && !errors.Is(err, tc.want) {
@@ -131,16 +100,16 @@ func TestReadStoredVerdictHeadPrefixErrors(t *testing.T) {
 
 func TestReadStoredVerdictWithNoStoredVerdictReportsNotFound(t *testing.T) {
 	t.Parallel()
-	store := viewStore(t, viewRecord("gt-other", viewHeadA, viewT0, viewOldOM))
-	_, err := ReadStoredVerdict(store, "gastown", "gt-abc", "")
-	if !errors.Is(err, ErrNoStoredVerdict) {
+	store := landtest.Store(t, landtest.Record("gt-other", landtest.HeadA, landtest.T0, landtest.OldOM))
+	_, err := land.ReadStoredVerdict(store, "gastown", "gt-abc", "")
+	if !errors.Is(err, land.ErrNoStoredVerdict) {
 		t.Fatalf("ReadStoredVerdict = %v; want ErrNoStoredVerdict", err)
 	}
 }
 
 func TestReadStoredVerdictRefusesNamesOutsideTheStore(t *testing.T) {
 	t.Parallel()
-	store := viewStore(t, viewRecord("gt-abc", viewHeadA, viewT0, viewOldOM))
+	store := landtest.Store(t, landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.OldOM))
 	for name, tc := range map[string]struct{ rig, bead string }{
 		"bead climbs out": {"gastown", "../gt-abc"},
 		"rig climbs out":  {"../gastown", "gt-abc"},
@@ -148,7 +117,7 @@ func TestReadStoredVerdictRefusesNamesOutsideTheStore(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := ReadStoredVerdict(store, tc.rig, tc.bead, ""); err == nil {
+			if _, err := land.ReadStoredVerdict(store, tc.rig, tc.bead, ""); err == nil {
 				t.Errorf("ReadStoredVerdict(%q, %q) returned no error; want the name refused", tc.rig, tc.bead)
 			}
 		})
@@ -160,16 +129,49 @@ func TestReadStoredVerdictFailsClosedOnAFileThatIsNotARecord(t *testing.T) {
 	store := fstest.MapFS{
 		"gastown/gt-abc/ab12ab12ab12.json": &fstest.MapFile{Data: []byte("not json")},
 	}
-	if _, err := ReadStoredVerdict(store, "gastown", "gt-abc", ""); err == nil {
+	if _, err := land.ReadStoredVerdict(store, "gastown", "gt-abc", ""); err == nil {
 		t.Fatal("ReadStoredVerdict returned no error for a file that is not a record; want the store refused")
+	}
+}
+
+// TestReadStoredVerdictWithHeadReadsOnlyItsOwnFile: a corrupt file for another
+// head does not block the read of a good head, but the newest read still fails
+// closed on it, since the newest cannot be known past a file it cannot read.
+func TestReadStoredVerdictWithHeadReadsOnlyItsOwnFile(t *testing.T) {
+	t.Parallel()
+	store := landtest.Store(t, landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.OldOM))
+	store["gastown/gt-abc/"+landtest.HeadC[:12]+".json"] = &fstest.MapFile{Data: []byte("not a record")}
+
+	sv, err := land.ReadStoredVerdict(store, "gastown", "gt-abc", landtest.HeadA[:12])
+	if err != nil {
+		t.Fatalf("ReadStoredVerdict with --head %s = %v; the corrupt file for %s must not block it", landtest.HeadA[:12], err, landtest.HeadC[:12])
+	}
+	if sv.Record.Head != landtest.HeadA {
+		t.Errorf("head = %s, want %s", sv.Record.Head, landtest.HeadA)
+	}
+	if _, err := land.ReadStoredVerdict(store, "gastown", "gt-abc", ""); err == nil {
+		t.Error("the newest read returned no error past a corrupt file; want the store refused")
+	}
+}
+
+// TestReadStoredVerdictWithHeadFailsOnItsOwnCorruptFile: the file that names the
+// head asked for is read, so its corruption stops the read.
+func TestReadStoredVerdictWithHeadFailsOnItsOwnCorruptFile(t *testing.T) {
+	t.Parallel()
+	store := fstest.MapFS{
+		"gastown/gt-abc/" + landtest.HeadA[:12] + ".json": &fstest.MapFile{Data: []byte("not a record")},
+	}
+	_, err := land.ReadStoredVerdict(store, "gastown", "gt-abc", landtest.HeadA[:12])
+	if err == nil || errors.Is(err, land.ErrNoStoredVerdict) || errors.Is(err, land.ErrNoVerdictForHead) {
+		t.Fatalf("err = %v; want the corrupt file for the head refused", err)
 	}
 }
 
 func TestReadStoredVerdictKeepsTheFileBytes(t *testing.T) {
 	t.Parallel()
-	store := viewStore(t, viewRecord("gt-abc", viewHeadA, viewT0, viewNewOM))
-	want := store["gastown/gt-abc/"+viewHeadA[:12]+".json"].Data
-	sv, err := ReadStoredVerdict(store, "gastown", "gt-abc", "")
+	store := landtest.Store(t, landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.NewOM))
+	want := store["gastown/gt-abc/"+landtest.HeadA[:12]+".json"].Data
+	sv, err := land.ReadStoredVerdict(store, "gastown", "gt-abc", "")
 	if err != nil {
 		t.Fatalf("ReadStoredVerdict = %v", err)
 	}
@@ -180,14 +182,14 @@ func TestReadStoredVerdictKeepsTheFileBytes(t *testing.T) {
 
 func TestNotesRejectionsReadsEveryBlockAndSelectsByHead(t *testing.T) {
 	t.Parallel()
-	notes := FormatRejectionNote(RejectionNote{Attempt: 1, Kind: "review", Reason: "om asked for changes",
-		Branch: "polecat/a/gt-abc", Target: "main", MR: "gt-abc", Head: viewHeadA,
-		Findings: []Finding{{ID: "F1", Severity: "major", Path: "a.go", Line: 7, Title: "first"}}}) +
-		"\n" + FormatRejectionNote(RejectionNote{Attempt: 2, Kind: "gate", Reason: "red",
-		Branch: "polecat/a/gt-abc", Target: "main", MR: "gt-abc", Head: viewHeadC,
-		Findings: []Finding{{ID: "F2", Severity: "minor", Path: "b.go", Line: 9, Title: "second"}}})
+	notes := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: "review", Reason: "om asked for changes",
+		Branch: "polecat/a/gt-abc", Target: "main", MR: "gt-abc", Head: landtest.HeadA,
+		Findings: []land.Finding{{ID: "F1", Severity: "major", Path: "a.go", Line: 7, Title: "first"}}}) +
+		"\n" + land.FormatRejectionNote(land.RejectionNote{Attempt: 2, Kind: "gate", Reason: "red",
+		Branch: "polecat/a/gt-abc", Target: "main", MR: "gt-abc", Head: landtest.HeadC,
+		Findings: []land.Finding{{ID: "F2", Severity: "minor", Path: "b.go", Line: 9, Title: "second"}}})
 
-	all, err := NotesRejections(notes, "")
+	all, err := land.NotesRejections(notes, "")
 	if err != nil || len(all) != 2 {
 		t.Fatalf("NotesRejections(all) = %d blocks, err %v; want 2", len(all), err)
 	}
@@ -195,22 +197,22 @@ func TestNotesRejectionsReadsEveryBlockAndSelectsByHead(t *testing.T) {
 		t.Errorf("attempts = %d, %d; want the blocks in written order", all[0].Attempt, all[1].Attempt)
 	}
 
-	one, err := NotesRejections(notes, viewHeadC[:7])
-	if err != nil || len(one) != 1 || one[0].Head != viewHeadC {
-		t.Fatalf("NotesRejections(%s) = %+v, err %v; want only the block for %s", viewHeadC[:7], one, err, viewHeadC)
+	one, err := land.NotesRejections(notes, landtest.HeadC[:7])
+	if err != nil || len(one) != 1 || one[0].Head != landtest.HeadC {
+		t.Fatalf("NotesRejections(%s) = %+v, err %v; want only the block for %s", landtest.HeadC[:7], one, err, landtest.HeadC)
 	}
 
-	if _, err := NotesRejections(notes, "9999999"); !errors.Is(err, ErrNoVerdictForHead) {
+	if _, err := land.NotesRejections(notes, "9999999"); !errors.Is(err, land.ErrNoVerdictForHead) {
 		t.Errorf("NotesRejections(missing) err = %v, want ErrNoVerdictForHead", err)
 	}
-	if _, err := NotesRejections(notes, "ab"); err == nil {
+	if _, err := land.NotesRejections(notes, "ab"); err == nil {
 		t.Error("NotesRejections accepted a head prefix too short to name a head")
 	}
 }
 
 func TestNotesRejectionsOfNotesWithNoBlock(t *testing.T) {
 	t.Parallel()
-	blocks, err := NotesRejections("Findings: look at the helper.\n", "")
+	blocks, err := land.NotesRejections("Findings: look at the helper.\n", "")
 	if err != nil || len(blocks) != 0 {
 		t.Fatalf("NotesRejections = %d blocks, err %v; want none", len(blocks), err)
 	}
@@ -222,11 +224,22 @@ func longDetail(n int) string {
 	return "a" + strings.Repeat("é", (n-1)/2)
 }
 
+// decodeView reads rec back through the store, so a render test sees the same
+// StoredVerdict a stored file yields.
+func decodeView(t *testing.T, rec land.VerdictRecord) land.StoredVerdict {
+	t.Helper()
+	sv, err := land.ReadStoredVerdict(landtest.Store(t, rec), rec.Rig, rec.Bead, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sv
+}
+
 func TestRenderStoredVerdictShowsTheFindingsAndTheirDetail(t *testing.T) {
 	t.Parallel()
-	sv := mustDecode(t, viewRecord("gt-abc", viewHeadA, viewT0, viewNewOM))
+	sv := decodeView(t, landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.NewOM))
 	var out bytes.Buffer
-	if err := RenderStoredVerdict(&out, "gt-abc", sv); err != nil {
+	if err := land.RenderStoredVerdict(&out, "gt-abc", sv); err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()
@@ -246,13 +259,13 @@ func TestRenderStoredVerdictShowsTheFindingsAndTheirDetail(t *testing.T) {
 func TestRenderStoredVerdictCapsTheFindingCount(t *testing.T) {
 	t.Parallel()
 	var findings []string
-	for i := 1; i <= verdictFindingsMax+5; i++ {
+	for i := 1; i <= verdictFindings+5; i++ {
 		findings = append(findings, `{"id":"F`+strconv.Itoa(i)+`","severity":"minor","path":"a.go","title":"t"}`)
 	}
 	omJSON := `{"verdict":"request_changes","score":0.2,"findings":[` + strings.Join(findings, ",") + `]}`
-	sv := mustDecode(t, viewRecord("gt-abc", viewHeadA, viewT0, omJSON))
+	sv := decodeView(t, landtest.Record("gt-abc", landtest.HeadA, landtest.T0, omJSON))
 	var out bytes.Buffer
-	if err := RenderStoredVerdict(&out, "gt-abc", sv); err != nil {
+	if err := land.RenderStoredVerdict(&out, "gt-abc", sv); err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()
@@ -273,19 +286,19 @@ func TestRenderStoredVerdictCapsEachDetail(t *testing.T) {
 		detailLen int
 		wantCut   bool
 	}{
-		"within the cap": {detailLen: verdictDetailMax, wantCut: false},
-		"past the cap":   {detailLen: verdictDetailMax + 1000, wantCut: true},
+		"within the cap": {detailLen: verdictDetailCap, wantCut: false},
+		"past the cap":   {detailLen: verdictDetailCap + 1000, wantCut: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			detail := longDetail(tc.detailLen)
-			omJSON, err := json.Marshal(Verdict{Verdict: VerdictRequestChanges, Findings: []Finding{{ID: "F1", Severity: "major", Path: "a.go", Line: 1, Title: "big", Detail: detail}}})
+			omJSON, err := json.Marshal(land.Verdict{Verdict: land.VerdictRequestChanges, Findings: []land.Finding{{ID: "F1", Severity: "major", Path: "a.go", Line: 1, Title: "big", Detail: detail}}})
 			if err != nil {
 				t.Fatal(err)
 			}
-			sv := mustDecode(t, viewRecord("gt-abc", viewHeadA, viewT0, string(omJSON)))
+			sv := decodeView(t, landtest.Record("gt-abc", landtest.HeadA, landtest.T0, string(omJSON)))
 			var out bytes.Buffer
-			if err := RenderStoredVerdict(&out, "gt-abc", sv); err != nil {
+			if err := land.RenderStoredVerdict(&out, "gt-abc", sv); err != nil {
 				t.Fatal(err)
 			}
 			got := out.String()
@@ -307,19 +320,88 @@ func TestRenderStoredVerdictCapsEachDetail(t *testing.T) {
 			if strings.Contains(got, detail) {
 				t.Errorf("the whole detail printed past the cap")
 			}
-			if n := len(got); n > verdictDetailMax+512 {
-				t.Errorf("output is %d bytes; the cap should bound it near %d", n, verdictDetailMax)
+			if n := len(got); n > verdictDetailCap+512 {
+				t.Errorf("output is %d bytes; the cap should bound it near %d", n, verdictDetailCap)
 			}
 		})
 	}
 }
 
+// TestRenderStoredVerdictCapsOneLineFields: a summary or title om wrote past the
+// one-line cap is cut and says so, so one long line cannot flood the terminal.
+func TestRenderStoredVerdictCapsOneLineFields(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", 5000)
+	omJSON, err := json.Marshal(land.Verdict{Verdict: land.VerdictRequestChanges, Summary: long,
+		Findings: []land.Finding{{ID: "F1", Severity: "major", Path: "a.go", Line: 1, Title: long}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sv := decodeView(t, landtest.Record("gt-abc", landtest.HeadA, landtest.T0, string(omJSON)))
+	var out bytes.Buffer
+	if err := land.RenderStoredVerdict(&out, "gt-abc", sv); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if !strings.Contains(line, "xxxx") {
+			continue
+		}
+		if len(line) > verdictLineCap+128 {
+			t.Errorf("a one-line field printed %d bytes; the cap should hold it near %d", len(line), verdictLineCap)
+		}
+		if !strings.Contains(line, "[truncated: ") {
+			t.Errorf("a cut one-line field lacks the truncation marker: %q", line)
+		}
+	}
+}
+
+// TestRenderOutputIsTerminalSafe: om wrote the text, so an escape sequence in a
+// summary, title, path or detail prints as its escape and not as the byte that
+// would move the cursor or clear the screen. A detail keeps its line breaks.
+func TestRenderOutputIsTerminalSafe(t *testing.T) {
+	t.Parallel()
+	omJSON, err := json.Marshal(land.Verdict{Verdict: "approve\x1b[2J", Score: 0.9, Summary: "cleared\x1b[2J",
+		Findings: []land.Finding{{ID: "F1\rX", Severity: "minor", Path: "a\x1b]0;t\x07.go", Line: 1,
+			Title: "tit\x1b[31mle", Detail: "line one\x1b[31m\nline two"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sv := decodeView(t, landtest.Record("gt-abc", landtest.HeadA, landtest.T0, string(omJSON)))
+	var out bytes.Buffer
+	if err := land.RenderStoredVerdict(&out, "gt-abc", sv); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if strings.ContainsRune(got, '\x1b') || strings.ContainsRune(got, '\a') || strings.ContainsRune(got, '\r') {
+		t.Errorf("output carries a raw control character:\n%q", got)
+	}
+	for _, want := range []string{`summary: cleared\x1b[2J`, `tit\x1b[31mle`, "\n        line two\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output lacks %q:\n%s", want, got)
+		}
+	}
+
+	notes := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: "gate\x1b[2J", Reason: "red\x1b[2J",
+		Branch: "b", Target: "main", MR: "gt-abc", Head: landtest.HeadA})
+	blocks, err := land.NotesRejections(notes, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromNotes bytes.Buffer
+	if err := land.RenderRejectionNotes(&fromNotes, "gt-abc", blocks); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsRune(fromNotes.String(), '\x1b') {
+		t.Errorf("notes output carries a raw escape:\n%q", fromNotes.String())
+	}
+}
+
 func TestRenderRejectionNotesSaysTheDetailIsNotStored(t *testing.T) {
 	t.Parallel()
-	blocks := []RejectionNote{{Attempt: 1, Kind: "review", Reason: "om asked for changes", Head: viewHeadA,
-		Findings: []Finding{{ID: "F1", Severity: "major", Path: "a.go", Line: 7, Title: "first"}}}}
+	blocks := []land.RejectionNote{{Attempt: 1, Kind: "review", Reason: "om asked for changes", Head: landtest.HeadA,
+		Findings: []land.Finding{{ID: "F1", Severity: "major", Path: "a.go", Line: 7, Title: "first"}}}}
 	var out bytes.Buffer
-	if err := RenderRejectionNotes(&out, "gt-abc", blocks); err != nil {
+	if err := land.RenderRejectionNotes(&out, "gt-abc", blocks); err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()
@@ -354,18 +436,18 @@ func (unreadableFileFS) ReadFile(string) ([]byte, error) {
 // fallback stands in for, so a corrupt store cannot pass as a bead with none.
 func TestReadStoredVerdictFailsClosed(t *testing.T) {
 	t.Parallel()
-	good := viewRecord("gt-abc", viewHeadA, viewT0, viewOldOM)
-	notAnObject := VerdictRecord{Bead: "gt-abc", Rig: "gastown", Head: viewHeadA, At: viewT0,
+	good := landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.OldOM)
+	notAnObject := land.VerdictRecord{Bead: "gt-abc", Rig: "gastown", Head: landtest.HeadA, At: landtest.T0,
 		Verdict: json.RawMessage(`"not an object"`)}
 	for name, store := range map[string]fs.FS{
-		"a directory that cannot be listed":   unreadableDirFS{viewStore(t, good)},
-		"a file that cannot be read":          unreadableFileFS{viewStore(t, good)},
-		"an om verdict that is not an object": viewStore(t, notAnObject),
+		"a directory that cannot be listed":   unreadableDirFS{landtest.Store(t, good)},
+		"a file that cannot be read":          unreadableFileFS{landtest.Store(t, good)},
+		"an om verdict that is not an object": landtest.Store(t, notAnObject),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			_, err := ReadStoredVerdict(store, "gastown", "gt-abc", "")
-			if err == nil || errors.Is(err, ErrNoStoredVerdict) {
+			_, err := land.ReadStoredVerdict(store, "gastown", "gt-abc", "")
+			if err == nil || errors.Is(err, land.ErrNoStoredVerdict) {
 				t.Errorf("err = %v; want a failure that is not ErrNoStoredVerdict", err)
 			}
 		})
@@ -377,22 +459,7 @@ func TestReadStoredVerdictFailsClosed(t *testing.T) {
 func TestReadStoredVerdictWithOnlyOtherFilesHasNoVerdict(t *testing.T) {
 	t.Parallel()
 	store := fstest.MapFS{"gastown/gt-abc/README": &fstest.MapFile{Data: []byte("not a verdict")}}
-	if _, err := ReadStoredVerdict(store, "gastown", "gt-abc", ""); !errors.Is(err, ErrNoStoredVerdict) {
+	if _, err := land.ReadStoredVerdict(store, "gastown", "gt-abc", ""); !errors.Is(err, land.ErrNoStoredVerdict) {
 		t.Errorf("err = %v, want ErrNoStoredVerdict", err)
 	}
-}
-
-// mustDecode runs a record through the store's own decoder, so a render test
-// reads the same StoredVerdict a stored file yields.
-func mustDecode(t *testing.T, rec VerdictRecord) StoredVerdict {
-	t.Helper()
-	data, err := json.Marshal(rec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sv, err := decodeStoredVerdict(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return sv
 }

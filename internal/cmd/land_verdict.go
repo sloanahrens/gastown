@@ -25,21 +25,19 @@ var landVerdictCmd = &cobra.Command{
 	Short: "Print the stored om verdict a landing was decided on",
 	Long: `Print the om verdict for a work bead, without re-running om.
 
-Reads the newest verdict the landing worker stored for the bead under
-<town>/.runtime/landings/verdicts/<rig>/<bead>/: om's verdict, score and
-summary, then every finding with its severity, path, line, title and detail.
-The first 50 findings print, and each detail is cut at 4 KiB; the stored file
-keeps them whole.
+Reads the newest verdict the landing worker stored for the bead: om's verdict,
+score and summary, then every finding with its severity, path, line, title and
+detail. The first 50 findings print, each detail is cut at 4 KiB and each
+summary, title or path at 1 KiB; the stored file keeps them whole.
 
 --head <sha> selects one reviewed head by a prefix of at least 7 hex digits.
-It fails when the prefix matches no head, or more than one.
+It fails when the prefix matches more than one head.
 
 --json prints the stored file unchanged.
 
-A bead with no stored verdict (a landing from before the store, or one whose
-store write failed) falls back to the findings in its MERGE REJECTION notes.
-Those keep no detail, and the output says so. --json has no such fallback: a
-bead with no stored verdict is an error.
+When the store holds no verdict for the bead, or none for the --head given,
+the findings in the bead's MERGE REJECTION notes are printed instead. Those
+keep no detail, and the output says so. --json has no such fallback.
 
 The command only reads. It writes nothing and calls no om.
 
@@ -58,18 +56,28 @@ func init() {
 }
 
 func runLandVerdict(cmd *cobra.Command, args []string) error {
-	return landVerdictFromCwd(cmd.OutOrStdout(), os.Getwd, strings.TrimSpace(args[0]), landVerdictHead, landVerdictJSON)
+	return landVerdictFromCwd(cmd.OutOrStdout(), os.Getwd, realVerdictTown, strings.TrimSpace(args[0]), landVerdictHead, landVerdictJSON)
 }
+
+// verdictTown is how gt land verdict finds the town and names the rig that owns
+// a bead. The command uses the real lookups; a test passes fakes, so the town
+// on the host is never read.
+type verdictTown struct {
+	find   func(startDir string) (string, error)
+	rigFor func(townRoot, beadID string) string
+}
+
+var realVerdictTown = verdictTown{find: workspace.FindOrError, rigFor: resolveRigForBead}
 
 // landVerdictFromCwd finds the town from the working directory getwd returns,
 // then prints the verdict for beadID. The command passes os.Getwd; a test passes
 // a fake that fails.
-func landVerdictFromCwd(out io.Writer, getwd func() (string, error), beadID, head string, asJSON bool) error {
+func landVerdictFromCwd(out io.Writer, getwd func() (string, error), town verdictTown, beadID, head string, asJSON bool) error {
 	cwd, err := getwd()
 	if err != nil {
 		return fmt.Errorf("resolving the working directory: %w", err)
 	}
-	src, err := resolveVerdictSource(cwd, beadID)
+	src, err := resolveVerdictSource(town, cwd, beadID)
 	if err != nil {
 		return err
 	}
@@ -86,12 +94,12 @@ type verdictSource struct {
 
 // resolveVerdictSource finds the town that holds startDir and the source of
 // beadID's verdict within it.
-func resolveVerdictSource(startDir, beadID string) (verdictSource, error) {
-	townRoot, err := workspace.FindOrError(startDir)
+func resolveVerdictSource(town verdictTown, startDir, beadID string) (verdictSource, error) {
+	townRoot, err := town.find(startDir)
 	if err != nil {
 		return verdictSource{}, fmt.Errorf("resolving the town: %w", err)
 	}
-	rigName := resolveRigForBead(townRoot, beadID)
+	rigName := town.rigFor(townRoot, beadID)
 	if rigName == "" {
 		return verdictSource{}, fmt.Errorf("cannot resolve the rig that owns %s: its ID prefix maps to no rig", beadID)
 	}
@@ -106,7 +114,8 @@ type landVerdictBeads interface {
 }
 
 // landVerdict prints bead's verdict from store, falling back to its notes when
-// the store holds none. It only reads: store is an io/fs.FS and bd has no write.
+// the store holds none for the bead or for the head asked for. It only reads:
+// store is an io/fs.FS and bd has no write.
 func landVerdict(out io.Writer, store fs.FS, bd landVerdictBeads, rig, bead, head string, asJSON bool) error {
 	sv, err := land.ReadStoredVerdict(store, rig, bead, head)
 	if err == nil {
@@ -116,11 +125,12 @@ func landVerdict(out io.Writer, store fs.FS, bd landVerdictBeads, rig, bead, hea
 		}
 		return land.RenderStoredVerdict(out, bead, sv)
 	}
-	if !errors.Is(err, land.ErrNoStoredVerdict) {
+	noStored := errors.Is(err, land.ErrNoStoredVerdict) || errors.Is(err, land.ErrNoVerdictForHead)
+	if !noStored {
 		return fmt.Errorf("reading the stored verdict for %s: %w", bead, err)
 	}
 	if asJSON {
-		return fmt.Errorf("no stored verdict for %s: --json prints a stored verdict, and the bead's notes have none to print", bead)
+		return fmt.Errorf("--json prints a stored verdict, and %s has none to print: %w", bead, err)
 	}
 	issue, err := bd.Show(bead)
 	if err != nil {

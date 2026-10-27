@@ -2,11 +2,7 @@ package cmd
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
-	"os"
-	"path"
-	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -17,47 +13,13 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/land/landtest"
 )
 
 // The verdict command reads what the landing worker stored, and falls back to
 // the bead's notes (gt-lh0sc). These tests drive landVerdict over an in-memory
-// store and a beadsfake, so no town, om or host state is read.
-
-// The heads are full 40-digit shas. B shares seven digits with A and differs
-// after them, so a seven-digit prefix names both and a twelve-digit one names A.
-const (
-	verdictTestHeadA = "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
-	verdictTestHeadB = "ab12ab1f" + "00000000000000000000000000000000"
-	verdictTestHeadC = "cd34cd34cd34" + "0000000000000000000000000000"
-)
-
-var verdictTestT0 = time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
-
-// verdictTestStore is an in-memory verdict store holding one stored verdict per
-// record, named as the landing worker names its files.
-func verdictTestStore(t *testing.T, recs ...land.VerdictRecord) fstest.MapFS {
-	t.Helper()
-	m := fstest.MapFS{}
-	for _, r := range recs {
-		data, err := json.Marshal(r)
-		if err != nil {
-			t.Fatal(err)
-		}
-		m[path.Join(r.Rig, r.Bead, r.Head[:12]+".json")] = &fstest.MapFile{Data: data}
-	}
-	return m
-}
-
-// verdictTestRecord is one stored review of gt-abc at head, with om's verdict.
-func verdictTestRecord(head string, at time.Time, omJSON string) land.VerdictRecord {
-	return land.VerdictRecord{Bead: "gt-abc", Rig: "gastown", Head: head, At: at,
-		OMVersion: "v9.9.9", Flags: []string{"-C", "--base"}, Verdict: json.RawMessage(omJSON)}
-}
-
-const verdictTestOldOM = `{"verdict":"request_changes","score":0.42,"summary":"old round","findings":[]}`
-
-const verdictTestNewOM = `{"verdict":"approve","score":0.91,"summary":"new round","findings":[` +
-	`{"id":"F1","severity":"minor","path":"a.go","line":3,"title":"the nit","detail":"explain the nit"}]}`
+// store and a beadsfake, and the town lookup through fakes, so no town, om or
+// host state is read.
 
 // verdictTestBeads is a beadsfake holding gt-abc with the given notes.
 func verdictTestBeads(notes string) *beadsfake.Fake {
@@ -66,17 +28,23 @@ func verdictTestBeads(notes string) *beadsfake.Fake {
 	return bd
 }
 
+// verdictTestRejection is a MERGE REJECTION note for gt-abc at head.
+func verdictTestRejection(attempt int, head string, findings ...land.Finding) string {
+	return land.FormatRejectionNote(land.RejectionNote{Attempt: attempt, Kind: "gate", Reason: "red",
+		Branch: "b", Target: "main", MR: "gt-abc", Head: head, Findings: findings})
+}
+
 func TestLandVerdictPrintsTheNewestStoredVerdict(t *testing.T) {
 	t.Parallel()
-	store := verdictTestStore(t,
-		verdictTestRecord(verdictTestHeadA, verdictTestT0, verdictTestOldOM),
-		verdictTestRecord(verdictTestHeadC, verdictTestT0.Add(time.Hour), verdictTestNewOM))
+	store := landtest.Store(t,
+		landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.OldOM),
+		landtest.Record("gt-abc", landtest.HeadC, landtest.T0.Add(time.Hour), landtest.NewOM))
 	var out bytes.Buffer
 	if err := landVerdict(&out, store, verdictTestBeads(""), "gastown", "gt-abc", "", false); err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()
-	for _, want := range []string{"Verdict for gt-abc @ " + verdictTestHeadC, "approve, score 0.9100", "the nit", "explain the nit", "a.go:3"} {
+	for _, want := range []string{"Verdict for gt-abc @ " + landtest.HeadC, "approve, score 0.9100", "nit", "explain the nit", "a.go:3"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output lacks %q:\n%s", want, got)
 		}
@@ -88,29 +56,29 @@ func TestLandVerdictPrintsTheNewestStoredVerdict(t *testing.T) {
 
 func TestLandVerdictHeadSelectsOneHead(t *testing.T) {
 	t.Parallel()
-	store := verdictTestStore(t,
-		verdictTestRecord(verdictTestHeadA, verdictTestT0, verdictTestOldOM),
-		verdictTestRecord(verdictTestHeadB, verdictTestT0.Add(time.Hour), verdictTestNewOM))
+	store := landtest.Store(t,
+		landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.OldOM),
+		landtest.Record("gt-abc", landtest.HeadB, landtest.T0.Add(time.Hour), landtest.NewOM))
 	t.Run("unique prefix prints that head", func(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
-		if err := landVerdict(&out, store, verdictTestBeads(""), "gastown", "gt-abc", verdictTestHeadA[:12], false); err != nil {
+		if err := landVerdict(&out, store, verdictTestBeads(""), "gastown", "gt-abc", landtest.HeadA[:12], false); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(out.String(), "old round") || strings.Contains(out.String(), "new round") {
-			t.Errorf("--head %s printed the wrong verdict:\n%s", verdictTestHeadA[:12], out.String())
+			t.Errorf("--head %s printed the wrong verdict:\n%s", landtest.HeadA[:12], out.String())
 		}
 	})
 	t.Run("ambiguous prefix is refused", func(t *testing.T) {
 		t.Parallel()
-		err := landVerdict(&bytes.Buffer{}, store, verdictTestBeads(""), "gastown", "gt-abc", verdictTestHeadA[:7], false)
+		err := landVerdict(&bytes.Buffer{}, store, verdictTestBeads(""), "gastown", "gt-abc", landtest.HeadA[:7], false)
 		if !errors.Is(err, land.ErrAmbiguousHead) {
 			t.Errorf("err = %v, want ErrAmbiguousHead", err)
 		}
 	})
 	t.Run("missing prefix is refused", func(t *testing.T) {
 		t.Parallel()
-		err := landVerdict(&bytes.Buffer{}, store, verdictTestBeads(""), "gastown", "gt-abc", verdictTestHeadC[:7], false)
+		err := landVerdict(&bytes.Buffer{}, store, verdictTestBeads(""), "gastown", "gt-abc", landtest.HeadC[:7], false)
 		if !errors.Is(err, land.ErrNoVerdictForHead) {
 			t.Errorf("err = %v, want ErrNoVerdictForHead", err)
 		}
@@ -119,9 +87,7 @@ func TestLandVerdictHeadSelectsOneHead(t *testing.T) {
 
 func TestLandVerdictFallsBackToTheRejectionNotes(t *testing.T) {
 	t.Parallel()
-	notes := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: "review", Reason: "om asked for changes",
-		Branch: "polecat/a/gt-abc", Target: "main", MR: "gt-abc", Head: verdictTestHeadA,
-		Findings: []land.Finding{{ID: "F1", Severity: "major", Path: "a.go", Line: 7, Title: "the noted finding"}}})
+	notes := verdictTestRejection(1, landtest.HeadA, land.Finding{ID: "F1", Severity: "major", Path: "a.go", Line: 7, Title: "the noted finding"})
 	var out bytes.Buffer
 	if err := landVerdict(&out, fstest.MapFS{}, verdictTestBeads(notes), "gastown", "gt-abc", "", false); err != nil {
 		t.Fatal(err)
@@ -134,13 +100,32 @@ func TestLandVerdictFallsBackToTheRejectionNotes(t *testing.T) {
 	}
 }
 
+// TestLandVerdictFallsBackForAHeadTheStoreLacks: the store holds a verdict for
+// one head, and the notes hold a rejection of another. Asking for the other head
+// reads its notes, as a head with no store write would need.
+func TestLandVerdictFallsBackForAHeadTheStoreLacks(t *testing.T) {
+	t.Parallel()
+	store := landtest.Store(t, landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.NewOM))
+	notes := verdictTestRejection(1, landtest.HeadC, land.Finding{ID: "F1", Severity: "major", Path: "c.go", Line: 2, Title: "the head C finding"})
+
+	var out bytes.Buffer
+	if err := landVerdict(&out, store, verdictTestBeads(notes), "gastown", "gt-abc", landtest.HeadC[:12], false); err != nil {
+		t.Fatalf("a head only the notes name was refused: %v", err)
+	}
+	if !strings.Contains(out.String(), "the head C finding") {
+		t.Errorf("the notes for %s did not print:\n%s", landtest.HeadC, out.String())
+	}
+
+	err := landVerdict(&bytes.Buffer{}, store, verdictTestBeads(notes), "gastown", "gt-abc", "9999999", false)
+	if !errors.Is(err, land.ErrNoVerdictForHead) {
+		t.Errorf("a head neither source names: err = %v, want ErrNoVerdictForHead", err)
+	}
+}
+
 func TestLandVerdictFallbackHonoursHead(t *testing.T) {
 	t.Parallel()
-	notes := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: "gate", Reason: "red",
-		Branch: "b", Target: "main", MR: "gt-abc", Head: verdictTestHeadA}) +
-		"\n" + land.FormatRejectionNote(land.RejectionNote{Attempt: 2, Kind: "gate", Reason: "still red",
-		Branch: "b", Target: "main", MR: "gt-abc", Head: verdictTestHeadC})
-	err := landVerdict(&bytes.Buffer{}, fstest.MapFS{}, verdictTestBeads(notes), "gastown", "gt-abc", verdictTestHeadA[:12], false)
+	notes := verdictTestRejection(1, landtest.HeadA) + "\n" + verdictTestRejection(2, landtest.HeadC)
+	err := landVerdict(&bytes.Buffer{}, fstest.MapFS{}, verdictTestBeads(notes), "gastown", "gt-abc", landtest.HeadA[:12], false)
 	if err != nil {
 		t.Fatalf("a head the notes name was refused: %v", err)
 	}
@@ -154,11 +139,9 @@ func TestLandVerdictFallbackHonoursHead(t *testing.T) {
 // it cannot read is not an empty store, so the notes must not stand in for it.
 func TestLandVerdictDoesNotFallBackOnAnUnreadableStore(t *testing.T) {
 	t.Parallel()
-	notes := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: "gate", Reason: "red",
-		Branch: "b", Target: "main", MR: "gt-abc", Head: verdictTestHeadA,
-		Findings: []land.Finding{{ID: "F1", Severity: "major", Path: "a.go", Line: 7, Title: "a noted finding"}}})
+	notes := verdictTestRejection(1, landtest.HeadA, land.Finding{ID: "F1", Severity: "major", Path: "a.go", Line: 7, Title: "a noted finding"})
 	store := fstest.MapFS{
-		"gastown/gt-abc/" + verdictTestHeadA[:12] + ".json": &fstest.MapFile{Data: []byte("not a record")},
+		"gastown/gt-abc/" + landtest.HeadA[:12] + ".json": &fstest.MapFile{Data: []byte("not a record")},
 	}
 	var out bytes.Buffer
 	err := landVerdict(&out, store, verdictTestBeads(notes), "gastown", "gt-abc", "", false)
@@ -180,8 +163,8 @@ func TestLandVerdictRefusesWhenNeitherSourceHasAVerdict(t *testing.T) {
 
 func TestLandVerdictJSONPrintsTheStoredFileUnchanged(t *testing.T) {
 	t.Parallel()
-	store := verdictTestStore(t, verdictTestRecord(verdictTestHeadA, verdictTestT0, verdictTestNewOM))
-	want := store["gastown/gt-abc/"+verdictTestHeadA[:12]+".json"].Data
+	store := landtest.Store(t, landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.NewOM))
+	want := store["gastown/gt-abc/"+landtest.HeadA[:12]+".json"].Data
 	var out bytes.Buffer
 	if err := landVerdict(&out, store, verdictTestBeads(""), "gastown", "gt-abc", "", true); err != nil {
 		t.Fatal(err)
@@ -193,8 +176,7 @@ func TestLandVerdictJSONPrintsTheStoredFileUnchanged(t *testing.T) {
 
 func TestLandVerdictJSONRefusesTheNotesFallback(t *testing.T) {
 	t.Parallel()
-	notes := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: "gate", Reason: "red",
-		Branch: "b", Target: "main", MR: "gt-abc", Head: verdictTestHeadA})
+	notes := verdictTestRejection(1, landtest.HeadA)
 	var out bytes.Buffer
 	err := landVerdict(&out, fstest.MapFS{}, verdictTestBeads(notes), "gastown", "gt-abc", "", true)
 	if err == nil || !strings.Contains(err.Error(), "--json") {
@@ -238,12 +220,19 @@ func TestLandVerdictReportsABeadItCannotRead(t *testing.T) {
 	}
 }
 
+// failingTown is a town lookup that finds no town, so a command run outside
+// one stops before it reads anything.
+var failingTown = verdictTown{
+	find:   func(string) (string, error) { return "", errors.New("no town above here") },
+	rigFor: func(string, string) string { return "gastown" },
+}
+
 // TestLandVerdictFromCwdRefusesWhenItCannotNameTheDirectory: a working
 // directory the process cannot resolve stops the command before any read.
 func TestLandVerdictFromCwdRefusesWhenItCannotNameTheDirectory(t *testing.T) {
 	t.Parallel()
 	getwd := func() (string, error) { return "", errors.New("the directory was removed") }
-	err := landVerdictFromCwd(&bytes.Buffer{}, getwd, "gt-abc", "", false)
+	err := landVerdictFromCwd(&bytes.Buffer{}, getwd, failingTown, "gt-abc", "", false)
 	if err == nil || !strings.Contains(err.Error(), "working directory") {
 		t.Errorf("err = %v, want a refusal naming the working directory", err)
 	}
@@ -253,9 +242,8 @@ func TestLandVerdictFromCwdRefusesWhenItCannotNameTheDirectory(t *testing.T) {
 // with no town above it, stops at the town before it reads anything.
 func TestLandVerdictFromCwdRefusesOutsideATown(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	getwd := func() (string, error) { return dir, nil }
-	err := landVerdictFromCwd(&bytes.Buffer{}, getwd, "gt-abc", "", false)
+	getwd := func() (string, error) { return "/nowhere/gastown", nil }
+	err := landVerdictFromCwd(&bytes.Buffer{}, getwd, failingTown, "gt-abc", "", false)
 	if err == nil || !strings.Contains(err.Error(), "resolving the town") {
 		t.Errorf("err = %v, want a refusal to resolve the town", err)
 	}
@@ -265,7 +253,7 @@ func TestLandVerdictFromCwdRefusesOutsideATown(t *testing.T) {
 // it has no verdict store to read.
 func TestResolveVerdictSourceRefusesOutsideATown(t *testing.T) {
 	t.Parallel()
-	_, err := resolveVerdictSource(t.TempDir(), "gt-abc")
+	_, err := resolveVerdictSource(failingTown, "/nowhere/gastown", "gt-abc")
 	if err == nil || !strings.Contains(err.Error(), "resolving the town") {
 		t.Errorf("err = %v, want a refusal to resolve the town", err)
 	}
@@ -275,14 +263,11 @@ func TestResolveVerdictSourceRefusesOutsideATown(t *testing.T) {
 // rig for the bead's prefix has no rig to read the verdict under.
 func TestResolveVerdictSourceRefusesABeadWithNoRig(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
-		t.Fatal(err)
+	town := verdictTown{
+		find:   func(string) (string, error) { return "/town", nil },
+		rigFor: func(string, string) string { return "" },
 	}
-	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := resolveVerdictSource(town, "gt-abc")
+	_, err := resolveVerdictSource(town, "/town", "gt-abc")
 	if err == nil || !strings.Contains(err.Error(), "cannot resolve the rig") {
 		t.Errorf("err = %v, want a refusal to resolve the rig", err)
 	}
@@ -293,14 +278,13 @@ func TestResolveVerdictSourceRefusesABeadWithNoRig(t *testing.T) {
 // the same afterwards.
 func TestLandVerdictWritesNothing(t *testing.T) {
 	t.Parallel()
-	notes := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: "gate", Reason: "red",
-		Branch: "b", Target: "main", MR: "gt-abc", Head: verdictTestHeadA})
+	notes := verdictTestRejection(1, landtest.HeadA)
 	for name, tc := range map[string]struct {
 		store  fstest.MapFS
 		asJSON bool
 	}{
-		"stored verdict":         {store: verdictTestStore(t, verdictTestRecord(verdictTestHeadA, verdictTestT0, verdictTestNewOM))},
-		"stored verdict as JSON": {store: verdictTestStore(t, verdictTestRecord(verdictTestHeadA, verdictTestT0, verdictTestNewOM)), asJSON: true},
+		"stored verdict":         {store: landtest.Store(t, landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.NewOM))},
+		"stored verdict as JSON": {store: landtest.Store(t, landtest.Record("gt-abc", landtest.HeadA, landtest.T0, landtest.NewOM)), asJSON: true},
 		"notes fallback":         {store: fstest.MapFS{}},
 	} {
 		t.Run(name, func(t *testing.T) {
