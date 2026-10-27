@@ -28,6 +28,7 @@ func testEnv(t *testing.T) (environment, string) {
 		getenv: func(key string) string { return values[key] },
 		getwd:  func() (string, error) { return root, nil },
 		home:   func() (string, error) { return root, nil },
+		exe:    func() (string, error) { return filepath.Join(root, "gt-installer"), nil },
 	}
 	return env, root
 }
@@ -113,9 +114,8 @@ func TestRunWithoutABuildCheckout(t *testing.T) {
 	}
 }
 
-// --dry-run changes nothing but the receipt the exit contract always leaves,
-// and until the gateway step lands (gt-tpg0p.9) it ends in the guard: the
-// checkout exists but is never read.
+// --dry-run plans the gateway and changes nothing, not even a receipt: it
+// states its own result and exits 0 (gt-tpg0p.9).
 func TestRunDryRunTouchesNothing(t *testing.T) {
 	t.Parallel()
 	env, root := testEnv(t)
@@ -127,27 +127,54 @@ func TestRunDryRunTouchesNothing(t *testing.T) {
 
 	code := runWith([]string{"--dry-run"}, &out, &errOut, env)
 
-	if code != 1 {
-		t.Errorf("run(--dry-run) = %d, want 1", code)
+	if code != 0 {
+		t.Errorf("run(--dry-run) = %d, want 0", code)
 	}
-	if want := "install-gt: RESULT failed origin/main - unexpected\n"; out.String() != want {
+	want := "[install-gt] gateway: skipped, no " +
+		filepath.Join(root, ".config", "openshell", "gateway.toml") + "\n" +
+		"install-gt: RESULT dry-run origin/main - -\n"
+	if out.String() != want {
 		t.Errorf("stdout = %q, want %q", out.String(), want)
 	}
-	after := snapshot(t, root)
-	receipts := filepath.Join("daemon", "install-receipts.jsonl")
-	content, ok := after[receipts]
-	if !ok {
-		t.Fatalf("no receipt at %s", receipts)
+	if errOut.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing", errOut.String())
 	}
-	// The receipt writer creates the daemon directory the way the script's
-	// mkdir -p does; that directory and the receipt are the whole change.
-	delete(after, receipts)
-	delete(after, "daemon")
-	if !reflect.DeepEqual(after, before) {
+	if after := snapshot(t, root); !reflect.DeepEqual(after, before) {
 		t.Errorf("the tree changed:\nbefore %v\nafter  %v", before, after)
 	}
-	if !strings.Contains(content, `"reason": "unexpected"`) {
-		t.Errorf("receipts = %q, want the guard's unexpected receipt", content)
+}
+
+// A program that cannot name its own directory has no gateway template to fall
+// back on: the step warns about the checkout's missing template and the run
+// still reports its dry-run (gt-tpg0p.9).
+func TestRunDryRunWithoutAProgramDirectory(t *testing.T) {
+	t.Parallel()
+	env, root := testEnv(t)
+	env.exe = func() (string, error) { return "", fs.ErrNotExist }
+	toml := filepath.Join(root, ".config", "openshell", "gateway.toml")
+	if err := os.MkdirAll(filepath.Dir(toml), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(toml, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshot(t, root)
+	var out, errOut strings.Builder
+
+	code := runWith([]string{"--dry-run"}, &out, &errOut, env)
+
+	if code != 0 {
+		t.Errorf("run(--dry-run) = %d, want 0", code)
+	}
+	if want := "install-gt: RESULT dry-run origin/main - -\n"; out.String() != want {
+		t.Errorf("stdout = %q, want %q", out.String(), want)
+	}
+	tmpl := filepath.Join(root, "rig", "scripts", "launchd", "com.gastown.openshell-gateway.plist.tmpl")
+	if want := "[install-gt] WARNING: gateway: no template at " + tmpl + "\n"; errOut.String() != want {
+		t.Errorf("stderr = %q, want %q", errOut.String(), want)
+	}
+	if after := snapshot(t, root); !reflect.DeepEqual(after, before) {
+		t.Errorf("the tree changed:\nbefore %v\nafter  %v", before, after)
 	}
 }
 

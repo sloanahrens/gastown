@@ -15,6 +15,17 @@ type Paths struct {
 	DaemonDir string
 	// RigDir is the checkout a run fast-forwards to the target and builds in.
 	RigDir string
+	// Home is the installing user's home (INSTALL_GT_GATEWAY_HOME, else the
+	// real one): the gateway renders __HOME__ with it and keeps its config, log
+	// and default LaunchAgents directories under it.
+	Home string
+	// LaunchdDir is INSTALL_GT_LAUNCHD_DIR when set; empty means Home's
+	// Library/LaunchAgents.
+	LaunchdDir string
+	// SelfDir is the running program's own directory, the script's $SCRIPT_DIR
+	// and the gateway template's fallback. Empty means the program cannot name
+	// it, and then there is no fallback (gt-tpg0p.9).
+	SelfDir string
 }
 
 // GT is the installed binary a run replaces.
@@ -33,9 +44,10 @@ var errNoTown = errors.New("install-gt: no town found (set GT_TOWN_ROOT); on a m
 
 // ResolvePaths reads the directories the script reads from the environment:
 // INSTALL_GT_BIN_DIR, else INSTALL_DIR (the Makefile's name for it), else
-// home/.local/bin; and the daemon and build checkout from their own variables,
-// else from the town root. start is the directory the town root is searched
-// above when GT_TOWN_ROOT is empty.
+// home/.local/bin; the daemon and build checkout from their own variables, else
+// from the town root; and the gateway's home and LaunchAgents directory from
+// their own, else the installing user's. start is the directory the town root
+// is searched above when GT_TOWN_ROOT is empty.
 func ResolvePaths(getenv func(string) string, home, start string) (Paths, error) {
 	return resolvePaths(getenv, home, start, isTownRoot)
 }
@@ -55,7 +67,16 @@ func resolvePaths(getenv func(string) string, home, start string, isTown func(st
 	if townRoot == "" {
 		townRoot = townRootAbove(start, isTown)
 	}
-	p := Paths{BinDir: binDir, DaemonDir: getenv("INSTALL_GT_DAEMON_DIR"), RigDir: getenv("INSTALL_GT_RIG_DIR")}
+	p := Paths{
+		BinDir:     binDir,
+		DaemonDir:  getenv("INSTALL_GT_DAEMON_DIR"),
+		RigDir:     getenv("INSTALL_GT_RIG_DIR"),
+		Home:       getenv("INSTALL_GT_GATEWAY_HOME"),
+		LaunchdDir: getenv("INSTALL_GT_LAUNCHD_DIR"),
+	}
+	if p.Home == "" {
+		p.Home = home
+	}
 	if p.DaemonDir == "" {
 		if townRoot == "" {
 			return Paths{}, errNoTown

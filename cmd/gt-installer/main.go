@@ -6,17 +6,19 @@
 //	             [--slot-role ROLE] [--slot-timeout SECONDS] [--dry-run]
 //	             [--no-image-first]
 //
-// The install sections land one bead at a time: target resolution, the no-op
-// path and the refusals are here (gt-tpg0p.10). Until the build section lands
-// (gt-tpg0p.11), a run that gets that far ends in the exit guard as
-// failed/unexpected with status 1, so a caller wired to this program early
-// fails loudly rather than believing an install happened.
+// The install sections land one bead at a time: the OpenShell gateway step
+// (gt-tpg0p.9), then target resolution, the no-op path and the refusals
+// (gt-tpg0p.10). Until the build section lands (gt-tpg0p.11), a run that gets
+// that far ends in the exit guard as failed/unexpected with status 1, so a
+// caller wired to this program early fails loudly rather than believing an
+// install happened.
 package main
 
 import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/installer"
@@ -32,17 +34,18 @@ func main() {
 }
 
 // environment is what a run reads from the process: its variables, its working
-// directory and its home. A test supplies its own, so it never rewrites the
-// test process's environment.
+// directory, its home and its own executable. A test supplies its own, so it
+// never rewrites the test process's environment.
 type environment struct {
 	getenv func(string) string
 	getwd  func() (string, error)
 	home   func() (string, error)
+	exe    func() (string, error)
 }
 
 // run is runWith against the process's own environment.
 func run(args []string, stdout, stderr io.Writer) int {
-	return runWith(args, stdout, stderr, environment{os.Getenv, os.Getwd, os.UserHomeDir})
+	return runWith(args, stdout, stderr, environment{os.Getenv, os.Getwd, os.UserHomeDir, os.Executable})
 }
 
 // runWith is run against env, so a test can point every directory at a
@@ -77,17 +80,23 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 		fmt.Fprintln(stderr, err)
 		return int(installer.ExitFailed)
 	}
+	// The gateway template falls back to the directory beside this program (the
+	// script's $SCRIPT_DIR). A program that cannot name its own leaves the
+	// fallback unset rather than guessing: the step then has only the checkout's
+	// template and warns when that is missing too (gt-tpg0p.9).
+	if exe, err := env.exe(); err == nil {
+		paths.SelfDir = filepath.Dir(exe)
+	}
 	c.Receipts = paths.Receipts()
 	c.GT = paths.GT()
 
-	// --dry-run prints the gateway plan and changes nothing; that step lands in
-	// gt-tpg0p.9, so until then the guard ends the run before the checkout is
-	// read.
-	if cfg.DryRun {
-		return int(installer.ExitFailed)
-	}
-
 	r := installer.NewRun(cfg, c, paths)
+	// --dry-run prints the gateway plan and changes nothing, before the checkout
+	// is read.
+	if cfg.DryRun {
+		r.GatewayStep(installer.GatewayDryRun)
+		return int(c.Finish(installer.Result{Event: "dry-run", Commit: cfg.SHA}, installer.ExitOK))
+	}
 	if code, ended := r.ResolveTarget(); ended {
 		return int(code)
 	}

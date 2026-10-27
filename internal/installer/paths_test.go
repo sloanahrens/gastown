@@ -21,22 +21,31 @@ func TestResolvePaths(t *testing.T) {
 		{
 			name: "each directory from its own variable needs no town",
 			env:  map[string]string{"INSTALL_GT_BIN_DIR": "/bin", "INSTALL_GT_DAEMON_DIR": "/daemon", "INSTALL_GT_RIG_DIR": "/rig"},
-			want: Paths{BinDir: "/bin", DaemonDir: "/daemon", RigDir: "/rig"},
+			want: Paths{BinDir: "/bin", DaemonDir: "/daemon", RigDir: "/rig", Home: "/home/u"},
 		},
 		{
 			name: "INSTALL_DIR is the install directory's next name",
 			env:  map[string]string{"INSTALL_DIR": "/install", "INSTALL_GT_DAEMON_DIR": "/daemon", "INSTALL_GT_RIG_DIR": "/rig"},
-			want: Paths{BinDir: "/install", DaemonDir: "/daemon", RigDir: "/rig"},
+			want: Paths{BinDir: "/install", DaemonDir: "/daemon", RigDir: "/rig", Home: "/home/u"},
 		},
 		{
 			name: "home/.local/bin is the last name",
 			env:  map[string]string{"INSTALL_GT_DAEMON_DIR": "/daemon", "INSTALL_GT_RIG_DIR": "/rig"},
-			want: Paths{BinDir: "/home/u/.local/bin", DaemonDir: "/daemon", RigDir: "/rig"},
+			want: Paths{BinDir: "/home/u/.local/bin", DaemonDir: "/daemon", RigDir: "/rig", Home: "/home/u"},
 		},
 		{
 			name: "the town root supplies the daemon and the checkout",
 			env:  map[string]string{"GT_TOWN_ROOT": "/town"},
-			want: Paths{BinDir: "/home/u/.local/bin", DaemonDir: "/town/daemon", RigDir: "/town/gastown/mayor/rig"},
+			want: Paths{BinDir: "/home/u/.local/bin", DaemonDir: "/town/daemon", RigDir: "/town/gastown/mayor/rig", Home: "/home/u"},
+		},
+		{
+			name: "the gateway's own home and LaunchAgents directory win",
+			env: map[string]string{
+				"GT_TOWN_ROOT": "/town", "INSTALL_GT_GATEWAY_HOME": "/gw",
+				"INSTALL_GT_LAUNCHD_DIR": "/agents",
+			},
+			want: Paths{BinDir: "/home/u/.local/bin", DaemonDir: "/town/daemon",
+				RigDir: "/town/gastown/mayor/rig", Home: "/gw", LaunchdDir: "/agents"},
 		},
 		{
 			name:    "no town and no directory variables is an error",
@@ -93,6 +102,7 @@ func TestResolvePathsFindsTheOutermostTown(t *testing.T) {
 		BinDir:    "/home/u/.local/bin",
 		DaemonDir: filepath.Join(town, "daemon"),
 		RigDir:    filepath.Join(town, "gastown", "mayor", "rig"),
+		Home:      "/home/u",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ResolvePaths() = %+v, want %+v", got, want)

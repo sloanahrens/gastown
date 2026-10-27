@@ -30,6 +30,7 @@ func newTestRun(t *testing.T) *testRun {
 		BinDir:    filepath.Join(root, "bin"),
 		DaemonDir: filepath.Join(root, "daemon"),
 		RigDir:    filepath.Join(root, "rig"),
+		Home:      filepath.Join(root, "home"),
 	}
 	for _, dir := range []string{paths.BinDir, paths.DaemonDir, paths.RigDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {

@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"fmt"
 	"io"
 	"os/exec"
 	"time"
@@ -51,19 +52,29 @@ type Exec func(name string, args ...string) ([]byte, error)
 // one WARNING line, never a failed install: the run's outcome does not depend
 // on the town hearing about it.
 func (c *Contract) Escalate(severity, fingerprint, message string) {
-	run := c.Exec
-	if run == nil {
-		run = func(name string, args ...string) ([]byte, error) {
-			return exec.Command(name, args...).CombinedOutput()
-		}
-	}
 	// gt's own words about a refused escalation go nowhere, as the script
 	// discards them: the WARNING line is the notice.
-	_, err := run(c.GT, "escalate", "install-gt: "+message, "-s", severity,
+	_, err := c.exec(c.GT, "escalate", "install-gt: "+message, "-s", severity,
 		"--source", "script:install-gt", "--fingerprint", fingerprint)
 	if err != nil {
 		c.Log("WARNING: escalation " + fingerprint + " did not reach the town")
 	}
+}
+
+// exec runs one external command and returns its combined output, through the
+// seam when one is set and for real when none is.
+func (c *Contract) exec(name string, args ...string) ([]byte, error) {
+	if c.Exec != nil {
+		return c.Exec(name, args...)
+	}
+	return exec.Command(name, args...).CombinedOutput()
+}
+
+// Warn writes one [install-gt] WARNING line to stderr, where the script's
+// explicit >&2 lines go; it never changes the run's status, so a caller uses it
+// only for a failure the run outlives.
+func (c *Contract) Warn(message string) {
+	fmt.Fprintln(c.stderr(), "[install-gt] WARNING: "+message)
 }
 
 // OnExit is the script's EXIT trap: it returns code when the run named a

@@ -20,8 +20,10 @@ type Files struct {
 	Remove    func(path string) error
 	ReadFile  func(path string) ([]byte, error)
 	WriteFile func(path string, data []byte, perm os.FileMode) error
-	IsFile    func(path string) bool
-	Exists    func(path string) bool
+	// MkdirAll creates path and its parents, the script's mkdir -p.
+	MkdirAll func(path string) error
+	IsFile   func(path string) bool
+	Exists   func(path string) bool
 	// ClearImmutable and SetImmutable bracket a rename over the installed
 	// binary, which an install can leave OS-immutable; both are best effort
 	// because a platform without the flag has nothing to do (gt-vya0s).
@@ -62,6 +64,13 @@ func (f Files) writeFile(path string, data []byte, perm os.FileMode) error {
 		return f.WriteFile(path, data, perm)
 	}
 	return os.WriteFile(path, data, perm)
+}
+
+func (f Files) mkdirAll(path string) error {
+	if f.MkdirAll != nil {
+		return f.MkdirAll(path)
+	}
+	return os.MkdirAll(path, 0o755)
 }
 
 func (f Files) isFile(path string) bool {
