@@ -67,13 +67,22 @@ func validateStatus(ctx context.Context, tx pgx.Tx, status string) error {
 	return nil
 }
 
+// validatePatch refuses a patch the store cannot apply, whatever the issue;
+// callers check it before writing anything.
+func validatePatch(patch api.UpdatePatch) error {
+	if patch.Title != nil && strings.TrimSpace(*patch.Title) == "" {
+		return api.Invalid("title cannot be empty")
+	}
+	return nil
+}
+
 // UpdateIssue applies patch to one issue in a transaction while g holds. The
 // guards compare the assignee and status under the row lock, so two callers
 // racing to claim an issue cannot both win. Without a guard, overwriting
 // another actor's live in_progress claim is refused unless patch.Force.
 func (p *Postgres) UpdateIssue(ctx context.Context, id string, patch api.UpdatePatch, g api.Guard) error {
-	if patch.Title != nil && strings.TrimSpace(*patch.Title) == "" {
-		return api.Invalid("title cannot be empty")
+	if err := validatePatch(patch); err != nil {
+		return err
 	}
 	if patch.Actor == "" {
 		patch.Actor = api.ActorFrom(ctx)
