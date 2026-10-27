@@ -220,6 +220,10 @@ type harness struct {
 
 const branch = "polecat/opal/gt-abc+x1"
 
+// humanActor is the town's overseer identity the harness hands the worker:
+// the name a submission this worker refuses carries.
+const humanActor = "Sloan Ahrens"
+
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{
@@ -230,7 +234,7 @@ func newHarness(t *testing.T) *harness {
 		now:    time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC),
 	}
 	h.w = &Worker{
-		Rig: "gastown", Beads: h.bd, Remote: h.remote, Lander: h.lander, Landings: h.files,
+		Rig: "gastown", HumanActor: humanActor, Beads: h.bd, Remote: h.remote, Lander: h.lander, Landings: h.files,
 		ClearIntent: func(w land.Work) error { h.cleared = append(h.cleared, w.BeadID+"@"+w.Worker); return nil },
 		Now:         func() time.Time { return h.now },
 		Logf:        t.Logf,
@@ -1173,6 +1177,11 @@ func TestPassCrewLandingAsksNoSeatForAnAgent(t *testing.T) {
 	w := land.Work{Branch: branch, Head: noteHead, Target: "main"}
 	h.bd.Seed(beads.Issue{ID: "gt-crew", Title: "work", Status: "hooked", Type: "task", Assignee: "gastown/crew/sloan",
 		Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(w)})
+	// A crew session's gt done records the submission as a comment under the
+	// identity the session runs as; the note it writes names no worker.
+	if err := h.bd.AddCommentAs("gt-crew", "gastown/crew/sloan", "Submitted for landing: "+branch+" @ "+noteHead+" onto main"); err != nil {
+		t.Fatal(err)
+	}
 	h.w.AgentBeadID = func(polecat string) string {
 		t.Errorf("asked for the agent of a crew landing's worker %q", polecat)
 		return ""

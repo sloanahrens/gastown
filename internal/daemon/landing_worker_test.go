@@ -1039,6 +1039,7 @@ func TestNewRigLandingWorker_WiresTheForgejoLanding(t *testing.T) {
 	townRoot := t.TempDir()
 	const rigName = "testrig"
 	forgejoRigConfig(t, townRoot, rigName)
+	writeOverseerIdentity(t, townRoot, overseerTestName)
 
 	tokenDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
@@ -1109,6 +1110,7 @@ func TestNewRigLandingWorker_AgentBeadIDNamesTheSeatsAgent(t *testing.T) {
 	townRoot := t.TempDir()
 	const rigName = "testrig"
 	forgejoRigConfig(t, townRoot, rigName)
+	writeOverseerIdentity(t, townRoot, overseerTestName)
 	// The rig routes under its own prefix, so the id the worker builds has to
 	// follow the route rather than a compiled-in default.
 	townBeads := filepath.Join(townRoot, ".beads")
@@ -1406,6 +1408,7 @@ func forgejoLandingWorker(t *testing.T, rigName string, clk clockwork.Clock, rec
 	t.Helper()
 	townRoot := t.TempDir()
 	forgejoRigConfig(t, townRoot, rigName)
+	writeOverseerIdentity(t, townRoot, overseerTestName)
 	tokenDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
 		t.Fatalf("write token file: %v", err)
@@ -1557,6 +1560,7 @@ func TestNewRigLandingWorker_WiresTheBirdRejectionPath(t *testing.T) {
 	townRoot := t.TempDir()
 	const rigName = "testrig"
 	forgejoRigConfig(t, townRoot, rigName)
+	writeOverseerIdentity(t, townRoot, overseerTestName)
 
 	tokenDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {

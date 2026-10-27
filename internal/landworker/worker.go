@@ -141,6 +141,13 @@ type Worker struct {
 	// PostLand, when set, runs the rig's post-landing command after each
 	// new landing (never after a record repair).
 	PostLand PostLandTrigger
+	// HumanActor is the human's recorded identity, the town's overseer name,
+	// which the daemon reads from the town config. A submission whose actor is
+	// this identity is refused: the human must not be the name the dashboard
+	// and the review data read as the submitter (gt-2ge3z). A worker with no
+	// identity refuses every submission rather than landing one it could not
+	// check.
+	HumanActor string
 	// RefreshAuthorSeat, when set, is called after a landing, right after the
 	// bead's origin branches are reaped, once per polecat that authored one
 	// (the landing request's worker included when no branch names it): a
@@ -537,6 +544,22 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 		}
 	}
 
+	// Who the bead records submitting the work, checked before anything
+	// lands: a submission under the human's own identity would read as the
+	// human's work, and one naming no submitter would pass the check by
+	// default (gt-2ge3z). A record whose comments cannot be read is unknown
+	// too, and an unknown actor never lands.
+	actor, err := w.submissionActor(issue, work)
+	if err != nil {
+		w.infraFailure(issue.ID, "reading the submission record", err, rep)
+		return
+	}
+	if key, msg := w.actorRefusal(issue.ID, actor); msg != "" {
+		w.waitForHuman(issue.ID, key, msg)
+		rep.Skipped++
+		return
+	}
+
 	tip, err := w.Remote.BranchTip(work.Branch)
 	if err != nil {
 		w.infraFailure(issue.ID, "reading the branch tip", err, rep)
@@ -602,6 +625,42 @@ func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool) {
 		return land.Work{BeadID: issue.ID, Rig: w.Rig, Branch: m[1], Head: m[2], Target: target, Worker: polecatFromAssignee(issue.Assignee)}, true
 	}
 	return land.Work{}, false
+}
+
+// submissionActor is the identity work is recorded as submitted by: the author
+// of the newest "Submitted for landing" comment naming work's branch and head,
+// else the READY TO LAND block's Worker line. A crew session's gt done writes
+// the comment under whatever identity the session runs as; a polecat's writes
+// no comment and names itself on the Worker line.
+func (w *Worker) submissionActor(issue *beads.Issue, work land.Work) (string, error) {
+	comments, err := w.Beads.Comments(issue.ID)
+	if err != nil {
+		return "", fmt.Errorf("reading comments: %w", err)
+	}
+	for i := len(comments) - 1; i >= 0; i-- {
+		m := submittedRE.FindStringSubmatch(comments[i].Text)
+		if m == nil || m[1] != work.Branch || !strings.HasPrefix(work.Head, m[2]) {
+			continue
+		}
+		return strings.TrimSpace(comments[i].Author), nil
+	}
+	return strings.TrimSpace(work.Worker), nil
+}
+
+// actorRefusal is the annotation key and the reason the worker must not land a
+// submission recorded by actor; both are empty for one it may land. The bead
+// keeps its label: the submission is still the worker's to land once an agent
+// re-records it.
+func (w *Worker) actorRefusal(id, actor string) (key, msg string) {
+	switch {
+	case w.HumanActor == "":
+		return "no-human-identity", fmt.Sprintf("Landing worker: %s is ready to land, but this landing worker has no human identity configured, so it cannot tell a human's submission from an agent's. Leaving %s for a human.", id, land.LabelReadyToLand)
+	case actor == "":
+		return "no-actor", fmt.Sprintf("Landing worker: %s is ready to land but records no submitter, so the worker cannot tell whether a human or an agent submitted it. An agent must submit it (for example the overseer, from its crew session). Leaving %s for a human.", id, land.LabelReadyToLand)
+	case land.IsHumanActor(actor, w.HumanActor):
+		return "human-actor:" + actor, fmt.Sprintf("Landing worker: %s was submitted for landing by %q, the human's own identity, not an agent. An agent must submit it (for example the overseer, from its crew session). Leaving %s for a human.", id, actor, land.LabelReadyToLand)
+	}
+	return "", ""
 }
 
 // seatAgent is the agent a landing's polecat seat ran on: the agent line its

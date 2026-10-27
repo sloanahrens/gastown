@@ -200,7 +200,7 @@ func TestIntegrationLandingWorkerLandsFromTheRigBareRepo(t *testing.T) {
 		Merger: &pushMerger{t: t, repo: bare, remote: "origin"}, Reviewer: approve{},
 		Beads: bd, Landings: landings, RangeChecks: []land.RangeCheck{land.AttributionCheck}}
 	var cleared []string
-	w := &landworker.Worker{Rig: "gastown", Beads: bd, Remote: gitRemote{g: git.NewGit(bare), remote: "origin"}, Lander: lander, Landings: landings,
+	w := &landworker.Worker{Rig: "gastown", HumanActor: overseerTestName, Beads: bd, Remote: gitRemote{g: git.NewGit(bare), remote: "origin"}, Lander: lander, Landings: landings,
 		LandTimeout: time.Minute, Logf: t.Logf, ClearIntent: func(w land.Work) error { cleared = append(cleared, w.Worker); return nil }}
 
 	rep := w.Pass(context.Background())
@@ -371,7 +371,7 @@ func TestIntegrationRedMainRevertsTheCulpritThroughLand(t *testing.T) {
 			return landworker.PostLandResult{ExitCode: 1, Tail: "--- FAIL: TestB"}
 		},
 		Status: func(line string) { status = append(status, line) }}
-	w := &landworker.Worker{Rig: "gastown", Beads: bd, Remote: gitRemote{g: git.NewGit(bare), remote: "origin"}, Lander: lander,
+	w := &landworker.Worker{Rig: "gastown", HumanActor: overseerTestName, Beads: bd, Remote: gitRemote{g: git.NewGit(bare), remote: "origin"}, Lander: lander,
 		Landings: landings, Reverts: redMain, LandTimeout: time.Minute, Logf: t.Logf}
 
 	redMain.Green(context.Background(), "make test-slow", landworker.PostLand{BeadID: "gt-prev", Commit: green}, landworker.PostLandResult{})
@@ -425,6 +425,7 @@ func TestIntegrationNewRigLandingWorkerUsesTheConfiguredLandingRemote(t *testing
 	townRoot := t.TempDir()
 	const rigName = "testrig"
 	rigPath := forgejoRigConfig(t, townRoot, rigName)
+	writeOverseerIdentity(t, townRoot, overseerTestName)
 	bare := filepath.Join(rigPath, ".repo.git")
 	lwGit(t, townRoot, "init", "-q", "--bare", "-b", "main", bare)
 	lwGit(t, bare, "remote", "add", "origin", "https://github.com/acme/gastown.git")
