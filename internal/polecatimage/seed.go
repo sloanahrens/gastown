@@ -109,10 +109,10 @@ func (p *SeedPass) Seed() error {
 	// The builds run as the cache user, so everything they write first must be its own: the two
 	// directories this pass just made as root, and the checkouts the clone init container made as
 	// root. go build may write a main package's binary beside its sources, so the checkouts need it.
-	if err := p.asRoot("chown", owner, buildCache, moduleCache); err != nil {
+	if err := p.asRoot("chown", "-h", owner, buildCache, moduleCache); err != nil {
 		return err
 	}
-	if err := p.asRoot("chown", "-R", owner, p.Source); err != nil {
+	if err := p.asRoot("chown", "-R", "-h", owner, p.Source); err != nil {
 		return err
 	}
 
@@ -136,7 +136,7 @@ func (p *SeedPass) Seed() error {
 
 	// A sandbox and the trim Job run as the cache user, so the whole claim is handed over before
 	// the marker says it is ready.
-	if err := p.asRoot("chown", "-R", owner, p.Root); err != nil {
+	if err := p.asRoot("chown", "-R", "-h", owner, p.Root); err != nil {
 		return err
 	}
 	if err := p.asRoot("chmod", "-R", "a+rwX", p.Root); err != nil {

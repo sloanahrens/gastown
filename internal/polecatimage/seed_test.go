@@ -105,8 +105,8 @@ func TestSeedPassRunsThePlanAsTheCacheUserThenHandsOverAndMarks(t *testing.T) {
 		"mkdir: /cache",
 		"mkdir: /cache/gocache",
 		"mkdir: /cache/gomodcache",
-		"run: chown 10001:10001 /cache/gocache /cache/gomodcache [uid -1 in ]",
-		"run: chown -R 10001:10001 /seed [uid -1 in ]",
+		"run: chown -h 10001:10001 /cache/gocache /cache/gomodcache [uid -1 in ]",
+		"run: chown -R -h 10001:10001 /seed [uid -1 in ]",
 	}
 	for _, rig := range []string{"gastown", "devops"} {
 		for _, step := range []string{"go mod download", "go build ./...", "go vet ./...", "go test -count=1 -run ^$ ./..."} {
@@ -114,7 +114,7 @@ func TestSeedPassRunsThePlanAsTheCacheUserThenHandsOverAndMarks(t *testing.T) {
 		}
 	}
 	want = append(want,
-		"run: chown -R 10001:10001 /cache [uid -1 in ]",
+		"run: chown -R -h 10001:10001 /cache [uid -1 in ]",
 		"run: chmod -R a+rwX /cache [uid -1 in ]",
 		"write: /cache/.seed-pins",
 	)
@@ -243,12 +243,12 @@ func TestSeedPassFailsClosedOnTheClaimItCannotReach(t *testing.T) {
 		{
 			name: "the cache directories it cannot hand over",
 			setup: func(h *seedHarness) {
-				h.reply = failOn("chown 10001:10001 /cache/gocache /cache/gomodcache")
+				h.reply = failOn("chown -h 10001:10001 /cache/gocache /cache/gomodcache")
 			},
-			want: "chown 10001:10001",
+			want: "chown -h 10001:10001",
 		},
-		{name: "the checkouts it cannot hand over", setup: func(h *seedHarness) { h.reply = failOn("chown -R 10001:10001 /seed") }, want: "chown -R 10001:10001 /seed"},
-		{name: "the claim it cannot hand over", setup: func(h *seedHarness) { h.reply = failOn("chown -R 10001:10001 /cache") }, want: "chown -R 10001:10001 /cache"},
+		{name: "the checkouts it cannot hand over", setup: func(h *seedHarness) { h.reply = failOn("chown -R -h 10001:10001 /seed") }, want: "chown -R -h 10001:10001 /seed"},
+		{name: "the claim it cannot hand over", setup: func(h *seedHarness) { h.reply = failOn("chown -R -h 10001:10001 /cache") }, want: "chown -R -h 10001:10001 /cache"},
 		{name: "the claim it cannot chmod", setup: func(h *seedHarness) { h.reply = failOn("chmod -R a+rwX /cache") }, want: "chmod -R a+rwX"},
 		{name: "the marker it cannot write", setup: func(h *seedHarness) { h.writeErr = fs.ErrPermission }, want: "writing the seed marker"},
 	}

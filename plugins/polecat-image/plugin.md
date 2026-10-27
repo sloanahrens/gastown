@@ -78,14 +78,15 @@ daemon (`docs/design/k8s-sandboxes.md`). With `POLECAT_IMAGE_REGISTRY` set to a
 and does nothing of the kind when it is unset. How a publish is done, tagged and
 retried is in `run.sh` beside the publish functions.
 
-- **Name change.** A `POLECAT_IMAGE_REGISTRY` that is a path is refused with a
-  log line naming `POLECAT_IMAGE_SANDBOX_RECORDS`, which now names a variable
-  of its own.
+- **Name change.** `POLECAT_IMAGE_REGISTRY` once named the gateway's
+  sandbox-records directory; that is `POLECAT_IMAGE_SANDBOX_RECORDS` now. A
+  `POLECAT_IMAGE_REGISTRY` that is a path is refused with a log line naming the
+  new variable.
 - **Why `crane`.** Docker Desktop's list of insecure registries belongs to the
   overseer, so the plugin pushes with `crane` from a `docker save` tarball and
   tags the image locally with the registry reference, which is what the sandbox
-  backend's drift check inspects. The image is pushed once; its other tags are
-  made with `crane tag`, which copies no layer.
+  backend's drift check inspects. The image is saved and pushed once; its other
+  tags are made on the registry with `crane tag`, which copies no layer.
 - **Failure never breaks the plugin.** A missing `crane` or a failed list, tag,
   save or push is logged with its reason and the run exits 0, unless
   `POLECAT_IMAGE_FAIL_CLOSED=1` (below); nothing is removed. A push that did not
@@ -95,7 +96,8 @@ retried is in `run.sh` beside the publish functions.
   failure above, and every deferral (docker down, a sling running, the lock
   held). `install-gt.sh` sets it for the build that runs before the binary
   swap, so an install cannot swap a binary whose image is not in place
-  (gt-efupr). Unset, as the daemon's own runs leave it, every path above exits 0.
+  (gt-efupr). Unset, as the daemon's own runs leave it, every path above keeps
+  its exit 0.
 
 ## Old images
 
@@ -109,8 +111,9 @@ removal keeps the tag and logs docker's own reason, `kept ... (rmi failed:
 <reason>)`, so a container using the image and a real error read differently.
 With a registry set, the tag's `<registry>/…:<sha>` alias is untagged first (it
 would keep the image on disk); an alias docker refuses to untag keeps the tag.
-A `POLECAT_IMAGE_KEEP` that is not a whole number, or a tag listing docker
-cannot answer, keeps every tag and logs why; the rest of the run carries on.
+The build cache is not touched. A `POLECAT_IMAGE_KEEP` that is not a whole
+number, or a tag listing docker cannot answer, keeps every tag and logs why; the
+rest of the run carries on.
 
 ## Build cache
 
@@ -158,6 +161,15 @@ commit afterwards, an installed gt whose commit cannot be read. A deferral is no
 failure: it exits 0 and prints why, so a plugin whose receipts show `deferred:`
 run after run is stuck behind that reason (Docker stopped, a sling that never
 ends) and the image stays stale, with the sandbox sling's refusal as the net.
+
+Run it directly; before building or syncing this plugin, read "Script entry
+point" in `plugins/README.md`:
+
+```bash
+~/gt/plugins/polecat-image/bin/polecat-image
+```
+
+Tests: `go test ./internal/polecatimage/`.
 
 ## The shared cache claim's seed Job
 

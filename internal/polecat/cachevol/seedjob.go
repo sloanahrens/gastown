@@ -69,8 +69,8 @@ type ObjectMeta struct {
 
 // JobSpec is the subset of a Job's spec the seed sets.
 type JobSpec struct {
-	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
-	Template     PodTemplate
+	BackoffLimit *int32      `json:"backoffLimit,omitempty"`
+	Template     PodTemplate `json:"template"`
 }
 
 // PodTemplate is the Job's pod template.
