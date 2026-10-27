@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemonlog"
@@ -22,20 +22,14 @@ import (
 // The queue group: how much work the town holds, and what the spec dispatcher
 // did with it in the last hour.
 //
-// Each bead column is one bd read per registered rig, summed. The rigs come
+// Each bead column is one store read per registered rig, summed. The rigs come
 // from mayor/rigs.json, or from the registry section of mayor/town.json on the
-// two-file layout (internal/config/layout.go); the flags are the ones
-// internal/cmd/spec.go's specReadyOptions (through
-// beads.Client.ReadyFiltered) and internal/beads' listIssues send, checked
-// against `bd ready --help` and `bd list --help`:
+// two-file layout (internal/config/layout.go). Each read goes through a store
+// opened for the rig's own directory, which is the scoping `bd -C <town>/<rig>`
+// gave, and the filters each column asks for are queueBeadColumns' own.
 //
-//	ready            bd -C <town>/<rig> ready --json --limit 0
-//	dispatchable     bd -C <town>/<rig> ready --json --unassigned
-//	                   --exclude-label <constants.NonDispatchableBeadLabels,
-//	                                    specdispatch.ReadyQueryLabels()>
-//	                   --exclude-type <specdispatch.NonWorkBeadTypes()> --limit 0
-//	waiting_to_land  bd -C <town>/<rig> list --json --label gt:ready-to-land --limit 0
-//	blocked          bd -C <town>/<rig> blocked --json
+// A read that fails, or a ready page bd reports as cut, nils its column; the
+// store's own argv and failure classification are the seam's business.
 //
 // blocked counts the beads waiting on an open dependency, as bd blocked lists
 // them, and skips the ephemeral rows (the work molecules' wisp steps, which are
@@ -73,7 +67,7 @@ import (
 // everyone but the towns that do.
 type queueSource struct{}
 
-// queueBdTimeout is one bd read's deadline. A column reads its rigs
+// queueBdTimeout is one store read's deadline. A column reads its rigs
 // queueRigParallel at a time, so nine rigs cost at most three deadlines (15 s)
 // for a column, and the group's own deadline (SourceTimeout) caps the whole
 // group regardless. A bd hung on a dead Dolt server costs its column rather
@@ -81,7 +75,7 @@ type queueSource struct{}
 const queueBdTimeout = 5 * time.Second
 
 // queueRigParallel is how many rigs one column reads at once. The four columns
-// run side by side, so at most four times this many bd processes are alive.
+// run side by side, so at most four times this many store reads are alive.
 const queueRigParallel = 3
 
 // queueLogMaxLines is how many of the log's last lines the parse keeps.
@@ -106,10 +100,11 @@ var queueTookRe = regexp.MustCompile(`^tick took (\S+) \(`)
 // "agent live/cap", followed by any parenthesised reason.
 var queueSeatRe = regexp.MustCompile(`^([^\s]+) (\d+)/(\d+)`)
 
-// queueBeadColumn is one bead count and the bd read in one rig that fills it.
+// queueBeadColumn is one bead count and the store read in one rig that fills
+// it.
 type queueBeadColumn struct {
 	column string
-	args   []string
+	read   func(BeadStore) ([]*beads.Issue, error)
 	// skipEphemeral leaves out the rows bd marks ephemeral (infrastructure
 	// wisps, not work).
 	skipEphemeral bool
@@ -123,24 +118,34 @@ func queueBeadColumns() []queueBeadColumn {
 	return []queueBeadColumn{
 		{
 			column: "ready",
-			args:   []string{"ready", "--json", "--limit", "0"},
-		},
-		{
-			column: "dispatchable",
-			args: []string{
-				"ready", "--json", "--unassigned",
-				"--exclude-label", strings.Join(labels, ","),
-				"--exclude-type", strings.Join(specdispatch.NonWorkBeadTypes(), ","),
-				"--limit", "0",
+			read: func(s BeadStore) ([]*beads.Issue, error) {
+				return s.ReadyFiltered(beads.ReadyOptions{Limit: 0})
 			},
 		},
 		{
+			column: "dispatchable",
+			read: func(s BeadStore) ([]*beads.Issue, error) {
+				return s.ReadyFiltered(beads.ReadyOptions{
+					Unassigned:    true,
+					ExcludeLabels: labels,
+					ExcludeTypes:  specdispatch.NonWorkBeadTypes(),
+					Limit:         0,
+				})
+			},
+		},
+		{
+			// List adds no status filter of its own, so the label and bd's
+			// default list scope are the whole query, as they were for the
+			// pre-seam `bd list`; Limit 0 asks for the whole board rather than
+			// bd's default page, which is what the pre-seam --limit 0 did.
 			column: "waiting_to_land",
-			args:   []string{"list", "--json", "--label", "gt:ready-to-land", "--limit", "0"},
+			read: func(s BeadStore) ([]*beads.Issue, error) {
+				return s.List(beads.ListOptions{Label: "gt:ready-to-land", Limit: 0})
+			},
 		},
 		{
 			column:        "blocked",
-			args:          []string{"blocked", "--json"},
+			read:          func(s BeadStore) ([]*beads.Issue, error) { return s.Blocked() },
 			skipEphemeral: true,
 		},
 	}
@@ -153,13 +158,16 @@ func (queueSource) Collect(ctx context.Context, env Env) (map[string]any, error)
 	if err != nil {
 		return nil, err
 	}
+	if env.Beads == nil {
+		return nil, fmt.Errorf("queue: the environment has no bead store")
+	}
 	cols := make(map[string]any, 8)
 	queueAddLogColumns(env, cols)
 	columns := queueBeadColumns()
 	done := make(chan queueColumnResult, len(columns))
 	for _, c := range columns {
 		go func(c queueBeadColumn) {
-			done <- queueColumnResult{column: c.column, value: queueSumBeads(ctx, env, rigs, c.args, c.skipEphemeral)}
+			done <- queueColumnResult{column: c.column, value: queueSumBeads(ctx, env, rigs, c)}
 		}(c)
 	}
 	for range columns {
@@ -212,9 +220,9 @@ func queueRigNames(rc *config.RigsConfig) []string {
 }
 
 // queueSumBeads runs one column's read in every rig, queueRigParallel at a
-// time, and sums the rows. Any rig that fails leaves the column nil: a partial
-// sum would read as a queue that shrank.
-func queueSumBeads(ctx context.Context, env Env, rigs []string, args []string, skipEphemeral bool) any {
+// time, and sums the beads. Any rig that fails leaves the column nil: a
+// partial sum would read as a queue that shrank.
+func queueSumBeads(ctx context.Context, env Env, rigs []string, col queueBeadColumn) any {
 	type result struct {
 		n   int
 		err error
@@ -227,7 +235,7 @@ func queueSumBeads(ctx context.Context, env Env, rigs []string, args []string, s
 		wg.Add(1)
 		go func(i int, rig string) {
 			defer func() { <-sem; wg.Done() }()
-			n, err := queueCount(ctx, env, filepath.Join(env.Town, rig), args, skipEphemeral)
+			n, err := queueCount(ctx, env, filepath.Join(env.Town, rig), col)
 			results[i] = result{n: n, err: err}
 		}(i, rig)
 	}
@@ -242,70 +250,26 @@ func queueSumBeads(ctx context.Context, env Env, rigs []string, args []string, s
 	return sum
 }
 
-// queueCount runs one bd read in one rig's store under its own deadline and
-// returns how many rows it printed.
-func queueCount(ctx context.Context, env Env, rigPath string, args []string, skipEphemeral bool) (int, error) {
+// queueCount runs one column's read in one rig's store under its own deadline
+// and returns how many beads it answered, leaving out the ephemeral ones when
+// the column asks.
+func queueCount(ctx context.Context, env Env, rigPath string, col queueBeadColumn) (int, error) {
 	callCtx, cancel := context.WithTimeout(ctx, queueBdTimeout)
 	defer cancel()
-	argv := append([]string{"bd", "-C", rigPath}, args...)
-	out, err := env.Run(callCtx, argv)
+	store := env.Beads(callCtx, rigPath)
+	if store == nil {
+		return 0, fmt.Errorf("queue: no bead store for %s", rigPath)
+	}
+	issues, err := col.read(store)
 	if err != nil {
 		return 0, err
 	}
-	return queueCountIssues(out, skipEphemeral)
-}
-
-// queueCountIssues counts the rows of a bd --json answer, leaving out the rows
-// bd marks ephemeral when skipEphemeral is set. bd prints a bare array; the
-// envelope shapes are accepted too so a bd that grows one does not nil the
-// column.
-func queueCountIssues(out []byte, skipEphemeral bool) (int, error) {
-	trimmed := bytes.TrimSpace(out)
-	if len(trimmed) == 0 || string(trimmed) == "null" {
-		return 0, nil
-	}
-	if trimmed[0] == '[' {
-		var rows []json.RawMessage
-		if err := json.Unmarshal(trimmed, &rows); err != nil {
-			return 0, fmt.Errorf("parsing bd rows: %w", err)
-		}
-		return queueCountRows(rows, skipEphemeral)
-	}
-	var envelope struct {
-		Issues     []json.RawMessage `json:"issues"`
-		Data       []json.RawMessage `json:"data"`
-		Pagination *struct {
-			Truncated bool `json:"truncated"`
-		} `json:"pagination"`
-	}
-	if err := json.Unmarshal(trimmed, &envelope); err != nil {
-		return 0, fmt.Errorf("parsing the bd envelope: %w", err)
-	}
-	if envelope.Pagination != nil && envelope.Pagination.Truncated {
-		return 0, fmt.Errorf("bd returned a truncated page")
-	}
-	if envelope.Issues != nil {
-		return queueCountRows(envelope.Issues, skipEphemeral)
-	}
-	return queueCountRows(envelope.Data, skipEphemeral)
-}
-
-// queueCountRows counts the rows, or only the non-ephemeral ones.
-func queueCountRows(rows []json.RawMessage, skipEphemeral bool) (int, error) {
-	if !skipEphemeral {
-		return len(rows), nil
-	}
 	n := 0
-	for _, raw := range rows {
-		var row struct {
-			Ephemeral bool `json:"ephemeral"`
+	for _, issue := range issues {
+		if col.skipEphemeral && issue.Ephemeral {
+			continue
 		}
-		if err := json.Unmarshal(raw, &row); err != nil {
-			return 0, fmt.Errorf("parsing a bd row: %w", err)
-		}
-		if !row.Ephemeral {
-			n++
-		}
+		n++
 	}
 	return n, nil
 }

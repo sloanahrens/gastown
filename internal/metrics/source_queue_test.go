@@ -9,10 +9,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// queueTestTown is the town root every queue test reads under, so the argv a
-// fake bd sees and the paths the source reads are both fixed.
+// queueTestTown is the town root every queue test reads under, so the
+// directories the fake store is opened for and the paths the source reads are
+// both fixed.
 const queueTestTown = "/town"
 
 // queueTestLog is the daemon log a queue test serves through Env.Tail.
@@ -22,8 +25,8 @@ type queueTestLog struct {
 	max  int64
 }
 
-// queueTestEnv is an Env whose registry, runner and daemon log a test owns.
-func queueTestEnv(t *testing.T, files map[string]string, run Runner, log *queueTestLog) Env {
+// queueTestEnv is an Env whose registry, bead store and daemon log a test owns.
+func queueTestEnv(t *testing.T, files map[string]string, stores *queueStores, log *queueTestLog) Env {
 	t.Helper()
 	env := envAt(fixedNow())
 	env.Town = queueTestTown
@@ -33,7 +36,7 @@ func queueTestEnv(t *testing.T, files map[string]string, run Runner, log *queueT
 		}
 		return nil, fs.ErrNotExist
 	}
-	env.Run = run
+	env.Beads = stores.open
 	env.Tail = func(path string, maxBytes int64) ([]byte, error) {
 		if log == nil {
 			return nil, fs.ErrNotExist
@@ -58,57 +61,74 @@ func queueTestRigs(names ...string) map[string]string {
 	return map[string]string{filepath.Join(queueTestTown, "mayor", "rigs.json"): b.String()}
 }
 
-// queueBdFake answers one rig's bead reads from a table of row counts and
-// failures keyed "<rig>/<column>", and records what it was asked.
-type queueBdFake struct {
-	rows map[string]int
-	fail map[string]bool
-	raw  map[string]string // an answer printed as it is, keyed like rows
+// queueStores is the fake bead store the queue tests read: one rig's reads
+// answered from a table of issue counts, ephemeral counts and failures keyed
+// "<rig>/<column>", with every read recorded.
+type queueStores struct {
+	rows map[string]int  // the issues the read answers
+	wisp map[string]int  // how many of those issues are ephemeral
+	fail map[string]bool // a read that fails the way a dead store does
 
 	mu              sync.Mutex
 	calls           []string
+	dirs            []string
 	deadlineMissing bool
 }
 
-func (f *queueBdFake) run(ctx context.Context, argv []string) ([]byte, error) {
+// open hands out one rig's store and records the directory and deadline it was
+// asked for.
+func (q *queueStores) open(ctx context.Context, dir string) BeadStore {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	if _, ok := ctx.Deadline(); !ok {
-		f.mu.Lock()
-		f.deadlineMissing = true
-		f.mu.Unlock()
+		q.deadlineMissing = true
 	}
-	f.mu.Lock()
-	f.calls = append(f.calls, strings.Join(argv, " "))
-	f.mu.Unlock()
-	if len(argv) < 4 || argv[0] != "bd" || argv[1] != "-C" {
-		return nil, fmt.Errorf("unexpected argv %v", argv)
-	}
-	key := filepath.Base(argv[2]) + "/" + queueBdKind(argv)
-	if f.fail[key] {
-		return nil, fmt.Errorf("bd %s: no Dolt server", key)
-	}
-	if answer, ok := f.raw[key]; ok {
-		return []byte(answer), nil
-	}
-	rows := make([]string, f.rows[key])
-	for i := range rows {
-		rows[i] = fmt.Sprintf(`{"id":"row-%d"}`, i)
-	}
-	return []byte("[" + strings.Join(rows, ",") + "]"), nil
+	q.dirs = append(q.dirs, dir)
+	return &queueStore{owner: q, rig: filepath.Base(dir)}
 }
 
-// queueBdKind names the column a bd argv fills, the way the source's own
-// flags distinguish them.
-func queueBdKind(argv []string) string {
-	joined := strings.Join(argv, " ")
-	switch {
-	case strings.Contains(joined, "--unassigned"):
-		return "dispatchable"
-	case strings.Contains(joined, "--label gt:ready-to-land"):
-		return "waiting_to_land"
-	case len(argv) > 3 && argv[3] == "blocked":
-		return "blocked"
+// queueStore serves one rig, naming the column by the seam call the source
+// made, the way its bd flags used to.
+type queueStore struct {
+	owner *queueStores
+	rig   string
+}
+
+func (s *queueStore) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	if opts.Label != "gt:ready-to-land" || opts.Limit != 0 {
+		return nil, fmt.Errorf("unexpected List options %+v", opts)
 	}
-	return "ready"
+	return s.serve("waiting_to_land")
+}
+
+func (s *queueStore) ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error) {
+	if opts.Limit != 0 {
+		return nil, fmt.Errorf("unexpected ready limit %d; the board is read whole", opts.Limit)
+	}
+	if opts.Unassigned {
+		return s.serve("dispatchable")
+	}
+	return s.serve("ready")
+}
+
+func (s *queueStore) Blocked() ([]*beads.Issue, error) { return s.serve("blocked") }
+
+// serve answers one column's read in this rig.
+func (s *queueStore) serve(column string) ([]*beads.Issue, error) {
+	key := s.rig + "/" + column
+	o := s.owner
+	o.mu.Lock()
+	o.calls = append(o.calls, key)
+	failed, n, wisps := o.fail[key], o.rows[key], o.wisp[key]
+	o.mu.Unlock()
+	if failed {
+		return nil, fmt.Errorf("bd %s: no Dolt server", key)
+	}
+	issues := make([]*beads.Issue, n)
+	for i := range issues {
+		issues[i] = &beads.Issue{ID: fmt.Sprintf("%s-%d", column, i), Ephemeral: i < wisps}
+	}
+	return issues, nil
 }
 
 // queueWantColumns checks each wanted column's value and that the named
@@ -148,11 +168,11 @@ func queueWantColumns(t *testing.T, cols map[string]any, want map[string]any, ab
 
 func TestSourceQueueSumsBeadCountsOverRigs(t *testing.T) {
 	t.Parallel()
-	fake := &queueBdFake{rows: map[string]int{
+	fake := &queueStores{rows: map[string]int{
 		"alpha/ready": 3, "alpha/dispatchable": 2, "alpha/waiting_to_land": 1, "alpha/blocked": 4,
 		"beta/ready": 5, "beta/dispatchable": 0, "beta/waiting_to_land": 1, "beta/blocked": 2,
 	}}
-	env := queueTestEnv(t, queueTestRigs("alpha", "beta"), fake.run, nil)
+	env := queueTestEnv(t, queueTestRigs("alpha", "beta"), fake, nil)
 	cols, err := queueSource{}.Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -161,23 +181,31 @@ func TestSourceQueueSumsBeadCountsOverRigs(t *testing.T) {
 		"ready": 8, "dispatchable": 2, "waiting_to_land": 2, "blocked": 6,
 	})
 	if fake.deadlineMissing {
-		t.Error("a bd read ran without a deadline; every call takes queueBdTimeout")
+		t.Error("a bead read ran without a deadline; every call takes queueBdTimeout")
 	}
 	if want := 2 * len(queueBeadColumns()); len(fake.calls) != want {
-		t.Errorf("bd calls = %d, want one per rig per column (%d):\n%s", len(fake.calls), want, strings.Join(fake.calls, "\n"))
+		t.Errorf("bead reads = %d, want one per rig per column (%d):\n%s", len(fake.calls), want, strings.Join(fake.calls, "\n"))
+	}
+	// The rig's own directory is the scope: the seam's store for that path is
+	// what `bd -C <town>/<rig>` did.
+	wantDirs := map[string]bool{"/town/alpha": true, "/town/beta": true}
+	for _, dir := range fake.dirs {
+		if !wantDirs[dir] {
+			t.Errorf("a read opened %q, want one of %v", dir, wantDirs)
+		}
 	}
 }
 
 func TestSourceQueueFailingReadNilsOnlyItsColumn(t *testing.T) {
 	t.Parallel()
-	fake := &queueBdFake{
+	fake := &queueStores{
 		rows: map[string]int{
 			"alpha/ready": 3, "alpha/dispatchable": 2, "alpha/waiting_to_land": 1, "alpha/blocked": 4,
 			"beta/ready": 5, "beta/dispatchable": 1, "beta/waiting_to_land": 1, "beta/blocked": 2,
 		},
 		fail: map[string]bool{"beta/ready": true},
 	}
-	env := queueTestEnv(t, queueTestRigs("alpha", "beta"), fake.run, &queueTestLog{data: []byte(queueTickFixture)})
+	env := queueTestEnv(t, queueTestRigs("alpha", "beta"), fake, &queueTestLog{data: []byte(queueTickFixture)})
 	cols, err := queueSource{}.Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -282,9 +310,9 @@ func TestSourceQueueParsesDaemonLogColumns(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fake := &queueBdFake{rows: map[string]int{}}
+			fake := &queueStores{}
 			log := &queueTestLog{data: []byte(tc.log)}
-			env := queueTestEnv(t, queueTestRigs("alpha"), fake.run, log)
+			env := queueTestEnv(t, queueTestRigs("alpha"), fake, log)
 			cols, err := queueSource{}.Collect(context.Background(), env)
 			if err != nil {
 				t.Fatalf("Collect: %v", err)
@@ -299,8 +327,8 @@ func TestSourceQueueParsesDaemonLogColumns(t *testing.T) {
 
 func TestSourceQueueUnreadableLogLeavesLogColumnsNil(t *testing.T) {
 	t.Parallel()
-	fake := &queueBdFake{rows: map[string]int{"alpha/ready": 4, "alpha/blocked": 1}}
-	env := queueTestEnv(t, queueTestRigs("alpha"), fake.run, nil)
+	fake := &queueStores{rows: map[string]int{"alpha/ready": 4, "alpha/blocked": 1}}
+	env := queueTestEnv(t, queueTestRigs("alpha"), fake, nil)
 	cols, err := queueSource{}.Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -322,8 +350,8 @@ func TestSourceQueueReadsOnlyTheLastLines(t *testing.T) {
 	// cut does not.
 	lines[4] = tick
 	lines[5] = tick
-	fake := &queueBdFake{rows: map[string]int{}}
-	env := queueTestEnv(t, queueTestRigs("alpha"), fake.run, &queueTestLog{data: []byte(strings.Join(lines, "\n"))})
+	fake := &queueStores{}
+	env := queueTestEnv(t, queueTestRigs("alpha"), fake, &queueTestLog{data: []byte(strings.Join(lines, "\n"))})
 	cols, err := queueSource{}.Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -336,8 +364,8 @@ func TestSourceQueueReadsTheTwoFileRegistry(t *testing.T) {
 	files := map[string]string{
 		filepath.Join(queueTestTown, "mayor", "town.json"): `{"type":"town","version":1,"registry":{"version":1,"rigs":{"alpha":{}}}}`,
 	}
-	fake := &queueBdFake{rows: map[string]int{"alpha/ready": 2}}
-	env := queueTestEnv(t, files, fake.run, nil)
+	fake := &queueStores{rows: map[string]int{"alpha/ready": 2}}
+	env := queueTestEnv(t, files, fake, nil)
 	cols, err := queueSource{}.Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -347,8 +375,8 @@ func TestSourceQueueReadsTheTwoFileRegistry(t *testing.T) {
 
 func TestSourceQueueUnreadableRegistryIsAnError(t *testing.T) {
 	t.Parallel()
-	fake := &queueBdFake{rows: map[string]int{}}
-	env := queueTestEnv(t, map[string]string{}, fake.run, nil)
+	fake := &queueStores{}
+	env := queueTestEnv(t, map[string]string{}, fake, nil)
 	if _, err := (queueSource{}).Collect(context.Background(), env); err == nil {
 		t.Fatal("Collect succeeded with no rig registry; want an error")
 	}
@@ -366,8 +394,8 @@ func TestSourceQueueDropsAFirstLineCutByTheByteBound(t *testing.T) {
 	if len(data) != queueLogTailBytes {
 		t.Fatalf("test data is %d bytes, want the bound %d", len(data), queueLogTailBytes)
 	}
-	fake := &queueBdFake{rows: map[string]int{}}
-	env := queueTestEnv(t, queueTestRigs("alpha"), fake.run, &queueTestLog{data: data})
+	fake := &queueStores{}
+	env := queueTestEnv(t, queueTestRigs("alpha"), fake, &queueTestLog{data: data})
 	cols, err := queueSource{}.Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -378,36 +406,41 @@ func TestSourceQueueDropsAFirstLineCutByTheByteBound(t *testing.T) {
 	})
 }
 
-func TestSourceQueueUnreadableBdAnswersNilOnlyTheirColumn(t *testing.T) {
+// The answers the seam's parsers refuse (a cut ready page, a half-written
+// page, prose where JSON was asked for) are pinned through the real store in
+// TestSourceQueueRefusesAnswersItsParserCannotRead: a fake store can only
+// return an error, and an error is the part of that path the source owns.
+
+// An Env with no bead store is a wiring error, not an empty town.
+func TestSourceQueueRefusesAnEnvWithNoStore(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name string
-		raw  string
-	}{
-		{name: "a truncated page", raw: `{"issues":[{"id":"a"}],"pagination":{"truncated":true}}`},
-		{name: "an envelope that is not JSON", raw: `{"issues":`},
-		{name: "an answer that is not JSON at all", raw: `bd: connection refused`},
-		{name: "an array cut short", raw: `[{"id":"a"},`},
+	env := queueTestEnv(t, queueTestRigs("alpha"), &queueStores{}, nil)
+	env.Beads = nil
+	if cols, err := (queueSource{}).Collect(context.Background(), env); err == nil || cols != nil {
+		t.Fatalf("Collect = %v, %v with no bead store; want a null group and an error", cols, err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			fake := &queueBdFake{rows: map[string]int{"alpha/blocked": 2}, raw: map[string]string{"alpha/ready": tc.raw}}
-			env := queueTestEnv(t, queueTestRigs("alpha"), fake.run, nil)
-			cols, err := queueSource{}.Collect(context.Background(), env)
-			if err != nil {
-				t.Fatalf("Collect: %v", err)
-			}
-			queueWantColumns(t, cols, map[string]any{"ready": nil, "blocked": 2})
-		})
+}
+
+// A factory that hands back no store is a failed read of that column, not a
+// panic that takes the snapshot down with it.
+func TestSourceQueueNilStoreNilsTheColumns(t *testing.T) {
+	t.Parallel()
+	env := queueTestEnv(t, queueTestRigs("alpha"), &queueStores{}, nil)
+	env.Beads = func(context.Context, string) BeadStore { return nil }
+	cols, err := queueSource{}.Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
 	}
+	queueWantColumns(t, cols, map[string]any{
+		"ready": nil, "dispatchable": nil, "waiting_to_land": nil, "blocked": nil,
+	})
 }
 
 func TestSourceQueueMalformedRigRegistryIsAnError(t *testing.T) {
 	t.Parallel()
 	files := map[string]string{filepath.Join(queueTestTown, "mayor", "rigs.json"): `{"rigs":`}
-	fake := &queueBdFake{rows: map[string]int{}}
-	env := queueTestEnv(t, files, fake.run, nil)
+	fake := &queueStores{}
+	env := queueTestEnv(t, files, fake, nil)
 	if _, err := (queueSource{}).Collect(context.Background(), env); err == nil {
 		t.Fatal("Collect succeeded with a malformed rig registry; want an error")
 	}
@@ -420,10 +453,11 @@ func TestSourceQueueMalformedRigRegistryIsAnError(t *testing.T) {
 // wisp steps that are blocked by design (gt-5jve7).
 func TestSourceQueueBlockedCountsDependencyBlockedBeadsNotWisps(t *testing.T) {
 	t.Parallel()
-	answer := `[{"id":"gt-a","ephemeral":false},{"id":"gt-wisp-b","ephemeral":true},` +
-		`{"id":"gt-c"},{"id":"gt-wisp-d","ephemeral":true},{"id":"gt-e","ephemeral":false}]`
-	fake := &queueBdFake{rows: map[string]int{}, raw: map[string]string{"alpha/blocked": answer, "beta/blocked": `[{"id":"gt-wisp-x","ephemeral":true}]`}}
-	env := queueTestEnv(t, queueTestRigs("alpha", "beta"), fake.run, nil)
+	fake := &queueStores{
+		rows: map[string]int{"alpha/blocked": 5, "beta/blocked": 1},
+		wisp: map[string]int{"alpha/blocked": 2, "beta/blocked": 1},
+	}
+	env := queueTestEnv(t, queueTestRigs("alpha", "beta"), fake, nil)
 	cols, err := queueSource{}.Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -431,22 +465,19 @@ func TestSourceQueueBlockedCountsDependencyBlockedBeadsNotWisps(t *testing.T) {
 	queueWantColumns(t, cols, map[string]any{"blocked": 3})
 	asked := 0
 	for _, call := range fake.calls {
-		if call == "bd -C /town/alpha blocked --json" || call == "bd -C /town/beta blocked --json" {
+		if call == "alpha/blocked" || call == "beta/blocked" {
 			asked++
-		}
-		if strings.Contains(call, "--status blocked") {
-			t.Errorf("the source still reads the blocked status: %q", call)
 		}
 	}
 	if asked != 2 {
-		t.Errorf("bd blocked --json was run %d times over two rigs, want 2: %v", asked, fake.calls)
+		t.Errorf("Blocked was read %d times over two rigs, want 2: %v", asked, fake.calls)
 	}
 }
 
 func TestSourceQueueBlockedFailureNilsOnlyTheBlockedColumn(t *testing.T) {
 	t.Parallel()
-	fake := &queueBdFake{rows: map[string]int{"alpha/ready": 4}, fail: map[string]bool{"alpha/blocked": true}}
-	env := queueTestEnv(t, queueTestRigs("alpha"), fake.run, nil)
+	fake := &queueStores{rows: map[string]int{"alpha/ready": 4}, fail: map[string]bool{"alpha/blocked": true}}
+	env := queueTestEnv(t, queueTestRigs("alpha"), fake, nil)
 	cols, err := queueSource{}.Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)

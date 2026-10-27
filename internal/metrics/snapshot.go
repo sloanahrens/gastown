@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev/battery"
 )
 
@@ -33,13 +34,17 @@ func RunSnapshot(ctx context.Context, env Env, sources []Source, perSource time.
 }
 
 // OSEnv is the Env of a real snapshot of town: child commands under
-// OSRunner(DefaultAllowEnv), the wall clock and the filesystem.
+// OSRunner(DefaultAllowEnv), the issue store for any directory asked for, the
+// wall clock and the filesystem.
 func OSEnv(town string) Env {
 	return Env{
-		Town:     town,
-		Run:      OSRunner(DefaultAllowEnv),
-		RunEnv:   OSRunnerEnv(DefaultAllowEnv),
-		RunDir:   OSRunnerDir(DefaultAllowEnv),
+		Town:   town,
+		Run:    OSRunner(DefaultAllowEnv),
+		RunEnv: OSRunnerEnv(DefaultAllowEnv),
+		RunDir: OSRunnerDir(DefaultAllowEnv),
+		Beads: func(ctx context.Context, dir string) BeadStore {
+			return beads.New(dir, beads.WithCallContext(ctx))
+		},
 		Now:      time.Now,
 		ReadFile: os.ReadFile,
 		ModTime:  modTime,

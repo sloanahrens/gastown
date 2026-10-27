@@ -8,6 +8,8 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // The registry test lists names only: it never calls Collect, so it runs no
@@ -52,8 +54,11 @@ func emptyTownEnv(t *testing.T) Env {
 	miss := func(string) ([]byte, error) { return nil, fs.ErrNotExist }
 	noCommand := errors.New("no command in the registry test")
 	return Env{
-		Town:     t.TempDir(),
-		Run:      func(context.Context, []string) ([]byte, error) { return nil, noCommand },
+		Town: t.TempDir(),
+		Run:  func(context.Context, []string) ([]byte, error) { return nil, noCommand },
+		Beads: func(context.Context, string) BeadStore {
+			return failingStore{err: noCommand}
+		},
 		RunEnv:   func(context.Context, []string, []string) ([]byte, error) { return nil, noCommand },
 		Now:      func() time.Time { return time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC) },
 		ReadFile: miss,
@@ -62,3 +67,13 @@ func emptyTownEnv(t *testing.T) Env {
 		Tail:     func(string, int64) ([]byte, error) { return nil, fs.ErrNotExist },
 	}
 }
+
+// failingStore is the empty town's bead store: every read fails the way a town
+// whose database is not up does.
+type failingStore struct{ err error }
+
+func (s failingStore) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, s.err }
+func (s failingStore) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) {
+	return nil, s.err
+}
+func (s failingStore) Blocked() ([]*beads.Issue, error) { return nil, s.err }

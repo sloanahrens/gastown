@@ -1099,12 +1099,25 @@ func WithCallContext(ctx context.Context) Option {
 // real bd. A caller outside this package injects one to drive the parsers and
 // the failure classifiers against bd's answers without a bd.
 func WithRunner(run func(ctx context.Context, args []string) (stdout, stderr []byte, err error)) Option {
+	if run == nil {
+		return func(*beadsFields) {}
+	}
+	return WithDirRunner(func(ctx context.Context, _ string, args []string) ([]byte, []byte, error) {
+		return run(ctx, args)
+	})
+}
+
+// WithDirRunner is WithRunner that also receives the directory bd would run in:
+// the call's own working directory, the one bd's process would be started with.
+// A test that asserts the scope of a bd call reads it here, not from the store
+// factory's argument, which is only what the store was asked to open.
+func WithDirRunner(run func(ctx context.Context, dir string, args []string) (stdout, stderr []byte, err error)) Option {
 	return func(f *beadsFields) {
 		if run == nil {
 			return
 		}
 		f.exec = func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
-			return run(ctx, c.args)
+			return run(ctx, c.dir, c.args)
 		}
 	}
 }

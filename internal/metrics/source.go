@@ -6,8 +6,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/daemonlog"
 )
+
+// BeadStore is the issue-store surface the metrics sources read: the board,
+// the ready queue and the blocked list. It is deliberately narrower than
+// beads.Client, and *beads.Beads satisfies it, so a source reaches bd through
+// the seam's argv, routing and failure classification instead of exec'ing it.
+type BeadStore interface {
+	List(opts beads.ListOptions) ([]*beads.Issue, error)
+	ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error)
+	Blocked() ([]*beads.Issue, error)
+}
+
+var _ BeadStore = (*beads.Beads)(nil)
+
+// BeadStores opens the store that reads dir's database. The real one is built
+// with beads.WithCallContext, so the deadline a source puts on one read bounds
+// the bd subprocess too.
+type BeadStores func(ctx context.Context, dir string) BeadStore
 
 // Runner runs argv and returns its stdout. A source that shells out takes its
 // runner from Env, so a test answers without a process.
@@ -39,6 +57,10 @@ type Env struct {
 	// town from its working directory takes it, so the snapshot's own working
 	// directory never decides which town is read.
 	RunDir RunnerDir
+	// Beads opens the issue store for a directory, for the sources that read
+	// the board. A source that needs it treats nil as a wiring error and
+	// reports it rather than counting an empty board.
+	Beads BeadStores
 	// Now is the time the snapshot is taken; Collect writes it as the record's
 	// ts. nil means the wall clock.
 	Now func() time.Time
