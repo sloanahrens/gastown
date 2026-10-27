@@ -276,6 +276,33 @@ func TestReport_StaleIndex(t *testing.T) {
 	}
 }
 
+// TestReport_StaleIndexWithOutdated: a failed refresh finishing a report that
+// does find an outdated tool keeps both facts, in the summary and the receipt.
+func TestReport_StaleIndexWithOutdated(t *testing.T) {
+	t.Parallel()
+	const title = "tool-updater: outdated=1 (report-only) [formula index stale: brew update failed]"
+	f := &fake{replies: map[string]reply{
+		"brew update":             {out: "Error: Not a git repository\n", err: errors.New("exit 128")},
+		"brew outdated --json=v2": {out: outdatedBeads},
+		"gt plugin record-run --plugin tool-updater --result success --title " + title: {},
+	}}
+	code, got := report(t, f)
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	checkOutput(t, got,
+		[]string{
+			"[tool-updater] WARNING: brew update failed; the Homebrew formula index may be stale\n",
+			"[tool-updater]   beads: update available (installed: 1.2.2, available: 1.3.1)\n",
+			"[tool-updater] === Done === " + title + "\n",
+		},
+		[]string{"all tools current"})
+	want := "gt plugin record-run --plugin tool-updater --result success --title " + title
+	if len(f.calls) != 3 || f.calls[2].String() != want {
+		t.Errorf("commands = %q, want the receipt %q last", f.commands(), want)
+	}
+}
+
 // TestReport_UpdateTail: only the end of `brew update` reaches the log, since
 // that is what explains a failure.
 func TestReport_UpdateTail(t *testing.T) {

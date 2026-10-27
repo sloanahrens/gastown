@@ -28,8 +28,9 @@ Run it directly:
 ~/gt/plugins/tool-updater/bin/tool-updater
 ```
 
-`make build` writes the binary into this directory, and `gt plugin sync` copies
-the directory into the town; `run.sh` beside it execs the same binary.
+Before building or syncing this plugin, read "Script entry point" in
+`plugins/README.md`; it states why a plugin that names a binary must build it
+before a sync.
 
 ## Upgrades are manual
 

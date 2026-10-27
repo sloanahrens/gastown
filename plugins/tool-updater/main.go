@@ -156,6 +156,11 @@ func (f formula) versions() (installed, available string) {
 // A probe whose answer is not a list of entries is an error, never an empty
 // report: the all-clear is the one verdict an unreadable probe must not earn
 // (gt-th5it).
+//
+// One entry that is not an object fails the whole parse, where run.sh's
+// per-tool lookup called a method on it and read the resulting error as that
+// tool being up to date. Calling a tool current on an entry nothing could read
+// is the false all-clear this function refuses (gt-tpg0p.3).
 func parseOutdated(probe string) ([]formula, error) {
 	var report struct {
 		Formulae json.RawMessage `json:"formulae"`
