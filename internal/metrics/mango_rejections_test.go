@@ -719,7 +719,7 @@ func TestMangoSectionFailsWhenTheRejectionLogFails(t *testing.T) {
 		}
 		return os.ReadFile(path)
 	}
-	_, err := MangoSection(context.Background(), Env{Town: "/town", ReadFile: readFile, Run: mango},
+	_, err := MangoSection(context.Background(), Env{Town: "/town", ReadFile: readFile, ReadDir: listDir, Run: mango},
 		dir, "/opt/mango", MangoSectionOptions{MinPositives: 1})
 	if err == nil || !strings.Contains(err.Error(), "reviews.jsonl") {
 		t.Fatalf("err = %v, want a refusal naming the review log", err)

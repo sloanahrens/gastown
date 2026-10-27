@@ -507,6 +507,69 @@ func TestMangoSectionCarriesTheFirstPassTable(t *testing.T) {
 	}
 }
 
+// TestMangoSectionNeedsItsSeams drives each seam the digest's tables read
+// through, so a host missing one is told which rather than given a table
+// built from nothing.
+func TestMangoSectionNeedsItsSeams(t *testing.T) {
+	t.Parallel()
+	town := firstPassTown(t, nil)
+	run := func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil }
+	cases := []struct {
+		name string
+		env  Env
+		want string
+	}{
+		{"no town", Env{ReadFile: os.ReadFile, ReadDir: listDir, Run: run}, "Env.Town is unset"},
+		{"no reader", Env{Town: town, ReadDir: listDir, Run: run}, "Env.ReadFile is unset"},
+		{"no directory listing", Env{Town: town, ReadFile: os.ReadFile, Run: run}, "Env.ReadDir is unset"},
+		{"no runner", Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir}, "Env.Run is unset"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := MangoSection(context.Background(), c.env, t.TempDir(), "/opt/mango", MangoSectionOptions{})
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want %q", err, c.want)
+			}
+		})
+	}
+}
+
+// TestMangoSectionReportsARejectionTableFailure holds the digest to failing on
+// a refusal table whose bd read broke, rather than appending the tables it
+// could build.
+func TestMangoSectionReportsARejectionTableFailure(t *testing.T) {
+	t.Parallel()
+	dir := mangoSectionTown(t, mangoSectionRows())
+	mango, _ := mangoSectionRun(t, mangoSectionResult)
+	town := rejectionTown(t, rejectionRecord("gt-a", 1, "opus"))
+	run := rejectionDigestRunner(t, func(context.Context, []string) ([]byte, error) {
+		return nil, errors.New("dolt is down")
+	}, mango)
+	_, err := MangoSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: run},
+		dir, "/opt/mango", MangoSectionOptions{MinPositives: 1})
+	if err == nil || !strings.Contains(err.Error(), "bd show") {
+		t.Fatalf("err = %v, want a refusal naming the bd read", err)
+	}
+}
+
+// TestMangoSectionReportsAFirstPassReadFailure holds the digest to failing on
+// a landings directory it cannot read.
+func TestMangoSectionReportsAFirstPassReadFailure(t *testing.T) {
+	t.Parallel()
+	dir := mangoSectionTown(t, mangoSectionRows())
+	mango, _ := mangoSectionRun(t, mangoSectionResult)
+	town := firstPassTown(t, nil)
+	_, err := MangoSection(context.Background(), Env{
+		Town: town, ReadFile: os.ReadFile, Run: mango,
+		ReadDir: func(string) ([]DirEntry, error) { return nil, errors.New("permission denied") },
+	}, dir, "/opt/mango", MangoSectionOptions{MinPositives: 1})
+	if err == nil || !strings.Contains(err.Error(), "landings directory") {
+		t.Fatalf("err = %v, want a refusal naming the landings directory", err)
+	}
+}
+
 // TestMangoSectionReadsTheReviewLogOnce holds the digest to one read of the
 // review log: the first-pass table reads the same lines the refusal tables do.
 func TestMangoSectionReadsTheReviewLogOnce(t *testing.T) {

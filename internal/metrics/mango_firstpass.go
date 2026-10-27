@@ -133,13 +133,10 @@ func CountFirstPass(merged []MergedBead, reviews []FirstPassReview) FirstPassTab
 // which the section names so a table built from the lines around them says how
 // much of the log it could not read. A missing landings directory is a town
 // that has landed nothing yet, not a broken read.
+//
+// The caller checks Env.ReadDir and Env.ReadFile, as both section entry points
+// do.
 func mergedBeads(env Env, since time.Time) (merged []MergedBead, skipped int, err error) {
-	if env.ReadDir == nil {
-		return nil, 0, errors.New("first-pass section: Env.ReadDir is unset")
-	}
-	if env.ReadFile == nil {
-		return nil, 0, errors.New("first-pass section: Env.ReadFile is unset")
-	}
 	dir := filepath.Join(constants.TownRuntimePath(env.Town), "landings")
 	entries, err := env.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {

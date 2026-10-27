@@ -341,7 +341,7 @@ func TestMangoSectionReportsASummaryWriteFailure(t *testing.T) {
 	// privileged test user.
 	mangoWriteFile(t, filepath.Join(dir, "mango-summary.json", "occupied"), "")
 	run, _ := mangoSectionRun(t, mangoSectionResult)
-	text, err := MangoSection(context.Background(), Env{Town: t.TempDir(), ReadFile: os.ReadFile, Run: run}, dir,
+	text, err := MangoSection(context.Background(), Env{Town: t.TempDir(), ReadFile: os.ReadFile, ReadDir: listDir, Run: run}, dir,
 		"/opt/mango", MangoSectionOptions{MinPositives: 30})
 	if err == nil {
 		t.Fatalf("MangoSection = %q, want the summary write failure", text)

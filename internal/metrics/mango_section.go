@@ -159,6 +159,8 @@ func MangoSection(ctx context.Context, env Env, outDir, binary string, o MangoSe
 		return "", errors.New("mango section: Env.Town is unset")
 	case env.ReadFile == nil:
 		return "", errors.New("mango section: Env.ReadFile is unset")
+	case env.ReadDir == nil:
+		return "", errors.New("mango section: Env.ReadDir is unset")
 	case env.Run == nil:
 		return "", errors.New("mango section: Env.Run is unset")
 	}
