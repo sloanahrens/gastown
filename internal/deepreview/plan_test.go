@@ -2,24 +2,26 @@ package deepreview
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
 
-// testLedger is the fixture scripts/deep-review_test.sh plans from: two risky
-// landings, one without a risk path, and a torn last line.
-const testLedger = `{"bead":"gt-1","head":"h1","landed_commit":"c1","landed_at":"2026-10-10T01:00:00.5Z","risk_paths":["internal/daemon/x.go"]}
-{"bead":"gt-2","head":"h2","landed_commit":"c2","landed_at":"2026-10-10T02:00:00Z"}
-{"bead":"gt-3","head":"h3","landed_commit":"c3","landed_at":"2026-10-10T03:00:00.123456Z","risk_paths":["internal/land/y.go"]}
-{torn
-`
+// planDir is where the fixtures below live: the very files
+// scripts/deep-review_test.sh plans from, so the rows here and the shell's rows
+// plan the same bytes rather than two copies that can drift apart.
+const planDir = "testdata/plan"
 
-// instants is the shell test's tie-breaking fixture: a fraction after a whole
-// second, and a +02:00 offset that is really 04:30Z.
-const instants = `{"bead":"gt-a","head":"ha","landed_commit":"ca","landed_at":"2026-10-10T05:00:00.542005Z","risk_paths":["x"]}
-{"bead":"gt-b","head":"hb","landed_commit":"cb","landed_at":"2026-10-10T05:00:00.9Z","risk_paths":["x"]}
-{"bead":"gt-c","head":"hc","landed_commit":"cc","landed_at":"2026-10-10T06:30:00+02:00","risk_paths":["x"]}
-`
+// planFixture reads one shared plan fixture, failing with its path so a moved
+// fixture names itself rather than reading as a plan mismatch.
+func planFixture(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(planDir + "/" + name)
+	if err != nil {
+		t.Fatalf("read plan fixture: %v", err)
+	}
+	return string(data)
+}
 
 // beadsOf names the plan's landings in order, the way the shell test reads
 // landings.jsonl.
@@ -33,6 +35,11 @@ func beadsOf(p Plan) string {
 
 func TestBuildPlan(t *testing.T) {
 	t.Parallel()
+	// ledger.jsonl holds two risky landings, one without a risk path, and a torn
+	// last line; instants.jsonl is the tie-breaking fixture, a fraction after a
+	// whole second and a +02:00 offset that is really 04:30Z.
+	testLedger := planFixture(t, "ledger.jsonl")
+	instants := planFixture(t, "instants.jsonl")
 	now := utc(2026, 10, 10, 10, 0, 0, 0)
 	for _, tc := range []struct {
 		name        string
