@@ -471,3 +471,26 @@ func TestBuildRuntimeArchiveRefusesARenderThatWritesNoFileNamingTheFile(t *testi
 		t.Errorf("error does not name the prompt file: %v", err)
 	}
 }
+
+// A file where the sandbox render directory must go stops the render before it starts: the build refuses,
+// names the prompt file and keeps the cause (gt-uvwi6).
+func TestBuildRuntimeArchiveRefusesWhenTheRenderDirectoryCannotBeMade(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	claudeDir := filepath.Join(town, openshellTestRig, "polecats", ".claude")
+	if err := os.WriteFile(filepath.Join(claudeDir, "sandbox"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rendered := false
+	render := func(_, _, _, _, _ string, _ config.SystemPromptTarget) error { rendered = true; return nil }
+	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, render)
+	if err == nil {
+		t.Fatal("buildRuntimeArchiveLogging with no render directory = nil error")
+	}
+	if rendered {
+		t.Error("the prompt was rendered although its directory could not be made")
+	}
+	if !strings.Contains(err.Error(), "system-prompt-"+openshellTestPolecat+".md") {
+		t.Errorf("error does not name the prompt file: %v", err)
+	}
+}
