@@ -46,12 +46,11 @@ func RealExecute(dir, name string, args ...string) (stdout, stderr []byte, code 
 
 // statusOf is the status bash gives a command that never ran: a command that
 // did run has its own, 126 is "found but could not be executed" and 127 is "not
-// found". The permission check is errors.Is rather than os.IsPermission because
-// a path that exists and is not executable fails the way exec reports it, and
-// os.IsPermission does not look inside exec's error, so that path would have
-// read as not found (gt-tpg0p.11). A bare name is 127 either way: bash searches
-// PATH past a file it cannot execute and finds nothing, which is what Go's
-// lookup reports too.
+// found". errors.Is rather than os.IsPermission, because exec can report a
+// permission denial inside its own error, which os.IsPermission does not look
+// inside and would read as not found (gt-tpg0p.11). A bare name is 127 either
+// way: the PATH search skips a file it cannot execute and finds nothing, which
+// is bash's answer for the same case.
 func statusOf(err error) int {
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {

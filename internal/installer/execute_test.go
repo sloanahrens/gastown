@@ -58,11 +58,10 @@ func TestRealExecuteReportsTheStatusBashWould(t *testing.T) {
 	}
 }
 
-// TestStatusOfReadsAPermissionErrorInsideExecsError pins the mapping of the
-// shape exec uses for a command it found and could not execute: the permission
-// error arrives inside an *exec.Error, and the status is still 126, "found but
-// could not be executed". os.IsPermission does not look inside that error, so
-// with it this would read as 127, "not found" (gt-tpg0p.11).
+// TestStatusOfReadsAPermissionErrorInsideExecsError pins the mapping of a
+// permission denial exec reports inside its own error: the status is still 126,
+// "found but could not be executed". os.IsPermission does not look inside that
+// error, so with it this would read as 127, "not found" (gt-tpg0p.11).
 func TestStatusOfReadsAPermissionErrorInsideExecsError(t *testing.T) {
 	cases := []struct {
 		name string
