@@ -166,18 +166,17 @@ func TestSendNotificationsReportsNoWithheldPushWithoutAPushAction(t *testing.T) 
 	}
 }
 
-// A route with no mail action must not build the mail router at all: the
-// router resolves recipients through the town's tmux, so building one made a
-// delivery-free escalation depend on a tmux server, and a test binary that
-// inherited a live GT_TMUX_SOCKET (every live seat exports one) is refused by
-// tmux.NewTmux (gt-yav3).
+// Pins the no-router rule whose why is in sendNotifications: the injected
+// factory is the only builder the call has, so a route that mails nobody must
+// leave it uncalled, and reverting the rule turns this test red (gt-yav3).
 func TestSendNotificationsWithoutAMailTargetBuildsNoRouter(t *testing.T) {
 	t.Parallel()
 	built := false
-	senders := externalSenders{newRouter: func() *mail.Router {
+	senders := failingSenders(t)
+	senders.newRouter = func() *mail.Router {
 		built = true
 		return &mail.Router{}
-	}}
+	}
 	cfg := &config.EscalationConfig{
 		Routes: map[string][]string{"low": {"bead", "log"}},
 	}
