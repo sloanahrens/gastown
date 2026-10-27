@@ -38,9 +38,9 @@ listed path is no longer tracked, when a line has no reason, and when an entry
 is not in the base allowlist.
 
 --base names the revision to compare against (default origin/main). When that
-revision has no allowlist yet, --init skips the growth check for this run, so a
-repo can commit its first list; a base allowlist that exists is always
-compared.
+revision has no allowlist yet, --init skips the growth check for this run and
+says so on stderr, so a repo can commit its first list; a base allowlist that
+exists is always compared.
 
 The guard is the portable form of gastown's tree-wide shell-script test, for
 repos with no Go module of their own to carry one (gt-7zfre).
@@ -50,8 +50,15 @@ Exit codes:
   1 - one or more violations, each printed by name`,
 	SilenceUsage: true,
 	Args:         cobra.NoArgs,
-	RunE:         runRepoGuardCommand,
+	// Through a variable so a test can drive the registered node without a
+	// repository (repoGuardCommandRun).
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return repoGuardCommandRun(cmd, args)
+	},
 }
+
+// repoGuardCommandRun is the command body the registered node calls.
+var repoGuardCommandRun = runRepoGuardCommand
 
 func init() {
 	rootCmd.AddCommand(repoguardCmd)
@@ -66,14 +73,15 @@ func runRepoGuardCommand(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	readBase, err := repoGuardBaseReader(root, repoguardBase, repoguardInit)
+	readBase, notice, err := repoGuardBaseReader(root, repoguardBase, repoguardInit)
 	if err != nil {
 		return err
 	}
-	return runRepoGuard(cmd.OutOrStdout(), repoGuardInputs{
+	return runRepoGuard(cmd.OutOrStdout(), cmd.ErrOrStderr(), repoGuardInputs{
 		listFiles:         repoGuardListFiles(root),
 		readAllowlist:     repoGuardReadAllowlist(filepath.Join(root, repoguardAllowlist)),
 		readBaseAllowlist: readBase,
+		notice:            notice,
 	})
 }
 
@@ -83,11 +91,17 @@ type repoGuardInputs struct {
 	listFiles         func() ([]string, error)
 	readAllowlist     repoguard.Reader
 	readBaseAllowlist repoguard.Reader
+	// notice is printed to warn before any finding, so a run that skipped the
+	// growth check does not look like one that passed it.
+	notice string
 }
 
-// runRepoGuard prints one violation per line and fails when there is any, so
-// a gate can decide on the exit status alone.
-func runRepoGuard(out io.Writer, in repoGuardInputs) error {
+// runRepoGuard prints one violation per line to out and fails when there is
+// any, so a gate can decide on the exit status alone.
+func runRepoGuard(out, warn io.Writer, in repoGuardInputs) error {
+	if in.notice != "" {
+		fmt.Fprintln(warn, in.notice)
+	}
 	findings, err := repoguard.CheckScripts(in.listFiles, in.readAllowlist, in.readBaseAllowlist)
 	if err != nil {
 		return err
@@ -166,33 +180,58 @@ func repoGuardReadAllowlist(path string) repoguard.Reader {
 			return nil, err
 		}
 		defer f.Close()
-		return repoguard.ParseAllowlist(f)
+		return repoguard.ParseRepoAllowlist(f)
 	}
 }
 
-// repoGuardBaseReader resolves base now and returns a reader of its allowlist.
-// A missing allowlist at base is an error unless init asks for this one run to
-// read it as empty: then the reader is nil, and CheckScripts skips the growth
-// check so a repo can commit its first list.
-func repoGuardBaseReader(root, base string, init bool) (repoguard.Reader, error) {
-	if _, err := repoGuardGit(root, "rev-parse", "--verify", "--quiet", base+"^{commit}"); err != nil {
-		return nil, fmt.Errorf("repoguard: base revision %s does not resolve: %w", base, err)
+// repoGuardBaseReader resolves base now and returns a reader of its allowlist,
+// nil when the base holds none. The notice says so, since a run that skips the
+// growth check must not look like one that passed it.
+func repoGuardBaseReader(root, base string, init bool) (repoguard.Reader, string, error) {
+	if err := repoGuardCheckBase(base); err != nil {
+		return nil, "", err
+	}
+	if _, err := repoGuardGit(root, "rev-parse", "--verify", "--quiet", "--end-of-options", base+"^{commit}"); err != nil {
+		return nil, "", fmt.Errorf("repoguard: base revision %s does not resolve: %w", base, err)
 	}
 	tree, err := repoGuardGit(root, "ls-tree", "-z", "--name-only", base, "--", repoguardAllowlist)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	if len(tree) == 0 {
-		if init {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("repoguard: no %s at %s; pass --init to create the first allowlist", repoguardAllowlist, base)
+	compare, notice, err := repoGuardBasePlan(len(tree) > 0, init, base)
+	if err != nil || !compare {
+		return nil, notice, err
 	}
 	return func() ([]repoguard.Entry, error) {
 		out, err := repoGuardGit(root, "show", base+":"+repoguardAllowlist)
 		if err != nil {
 			return nil, err
 		}
-		return repoguard.ParseAllowlist(bytes.NewReader(out))
-	}, nil
+		return repoguard.ParseRepoAllowlist(bytes.NewReader(out))
+	}, "", nil
+}
+
+// repoGuardCheckBase refuses a --base git would parse as an option, since the
+// value reaches rev-parse, ls-tree and show before any end-of-options marker.
+func repoGuardCheckBase(base string) error {
+	if base == "" {
+		return errors.New("repoguard: --base is empty; name the revision whose allowlist must not grow")
+	}
+	if strings.HasPrefix(base, "-") {
+		return fmt.Errorf("repoguard: --base %q starts with '-', which git would read as an option", base)
+	}
+	return nil
+}
+
+// repoGuardBasePlan decides what a run compares against: the base allowlist,
+// no growth check with the notice that says why (--init only), or the error
+// telling the author to pass --init.
+func repoGuardBasePlan(baseHasAllowlist, init bool, base string) (compare bool, notice string, err error) {
+	if baseHasAllowlist {
+		return true, "", nil
+	}
+	if init {
+		return false, fmt.Sprintf("repoguard: no %s at %s: --init skips the growth check for this run", repoguardAllowlist, base), nil
+	}
+	return false, "", fmt.Errorf("repoguard: no %s at %s; pass --init to create the first allowlist", repoguardAllowlist, base)
 }

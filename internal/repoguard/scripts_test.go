@@ -11,10 +11,10 @@ import (
 // reuses the production string passes when the message loses the rule or the
 // offending path.
 const (
-	unlistedAlarm = "not in .repoguard-allowlist; write it in Go, or list it with a reason if it must stay a script"
-	noReasonAlarm = ".repoguard-allowlist entry has no reason; each line is path<TAB>reason"
-	staleAlarm    = ".repoguard-allowlist entry names no tracked file; delete the line so the list only shrinks"
-	grownAlarm    = ".repoguard-allowlist entry is not in the base allowlist; the list only shrinks"
+	unlistedAlarm     = "not in .repoguard-allowlist; write it in Go, or list it with a reason if it must stay a script"
+	repoNoReasonAlarm = ".repoguard-allowlist entry has no reason; each line is path<TAB>reason"
+	staleAlarm        = ".repoguard-allowlist entry names no tracked file; delete the line so the list only shrinks"
+	grownAlarm        = ".repoguard-allowlist entry is not in the base allowlist; the list only shrinks"
 )
 
 // TestCheckScriptsFixtures drives every branch of the guard through injected
@@ -58,7 +58,23 @@ func TestCheckScriptsFixtures(t *testing.T) {
 			tracked:   []string{"scripts/a.sh"},
 			allowlist: []Entry{{Path: "scripts/a.sh"}},
 			base:      []Entry{{Path: "scripts/a.sh", Reason: "fleet script"}},
-			want:      []string{"scripts/a.sh: " + noReasonAlarm},
+			want:      []string{"scripts/a.sh: " + repoNoReasonAlarm},
+		},
+		{
+			// A later copy with a reason must not excuse the finished-looking
+			// line that has none.
+			name:      "reasonless duplicate before a reasoned copy",
+			tracked:   []string{"scripts/a.sh"},
+			allowlist: []Entry{{Path: "scripts/a.sh"}, {Path: "scripts/a.sh", Reason: "fleet script"}},
+			base:      []Entry{{Path: "scripts/a.sh", Reason: "fleet script"}},
+			want:      []string{"scripts/a.sh: " + repoNoReasonAlarm},
+		},
+		{
+			name:      "reasonless duplicate after a reasoned copy",
+			tracked:   []string{"scripts/a.sh"},
+			allowlist: []Entry{{Path: "scripts/a.sh", Reason: "fleet script"}, {Path: "scripts/a.sh"}},
+			base:      []Entry{{Path: "scripts/a.sh", Reason: "fleet script"}},
+			want:      []string{"scripts/a.sh: " + repoNoReasonAlarm},
 		},
 		{
 			name:      "stale entry",
@@ -88,7 +104,7 @@ func TestCheckScriptsFixtures(t *testing.T) {
 			allowlist: []Entry{{Path: "scripts/a.sh"}, {Path: "scripts/old.pl", Reason: "was needed"}},
 			base:      []Entry{{Path: "scripts/a.sh", Reason: "fleet script"}},
 			want: []string{
-				"scripts/a.sh: " + noReasonAlarm,
+				"scripts/a.sh: " + repoNoReasonAlarm,
 				"scripts/old.pl: " + grownAlarm,
 				"scripts/old.pl: " + staleAlarm,
 				"scripts/unlisted.rb: " + unlistedAlarm,
@@ -148,10 +164,10 @@ func TestCheckScriptsReaderErrors(t *testing.T) {
 	}
 }
 
-// TestParseAllowlist pins the format: # comments and blank lines are not
+// TestParseRepoAllowlist pins the format: # comments and blank lines are not
 // entries, a tab separates path from reason, and a line without a tab is an
 // entry with no reason rather than a parse failure.
-func TestParseAllowlist(t *testing.T) {
+func TestParseRepoAllowlist(t *testing.T) {
 	t.Parallel()
 	body := strings.Join([]string{
 		"# scripts that cannot be Go",
@@ -161,7 +177,7 @@ func TestParseAllowlist(t *testing.T) {
 		"scripts/c.sh",
 		"scripts/d.sh\t",
 	}, "\n")
-	got, err := ParseAllowlist(strings.NewReader(body))
+	got, err := ParseRepoAllowlist(strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +188,7 @@ func TestParseAllowlist(t *testing.T) {
 		{Path: "scripts/d.sh"},
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("ParseAllowlist = %q, want %q", got, want)
+		t.Errorf("ParseRepoAllowlist = %q, want %q", got, want)
 	}
 }
 

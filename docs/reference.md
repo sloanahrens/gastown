@@ -822,10 +822,9 @@ reports.
 
 ### Repository Guards
 
-`gt repoguard` holds the repository of the current directory to a
-`.repoguard-allowlist` at its root that only shrinks: a tracked `.sh`, `.bash`,
-`.zsh`, `.pl` or `.rb` file needs an entry with the reason it cannot be Go.
-`gt repoguard --help` carries the line format, the flags and the exit codes.
+`gt repoguard` holds the current directory's repository to a shrinking
+`.repoguard-allowlist` at its root; `gt repoguard --help` carries the line
+format, the flags and the exit codes.
 
 It exists for repos with no Go module to carry a test of their own, so the rule
 that a script is debt travels with the binary (gt-7zfre); a rig opts in by
