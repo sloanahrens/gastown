@@ -97,10 +97,10 @@ func (r *Run) Sign() {
 	}
 	password := strings.TrimRight(string(data), "\n")
 	// The password reaches this one call, in its argv, for as long as the
-	// unlock takes. It is never logged, never echoed and never handed to
-	// codesign. security(1) offers no quieter form: with no -p it prompts on
-	// the controlling terminal, which a daemon-run install does not have, so a
-	// password on stdin does not unlock the keychain at all.
+	// unlock takes; it is never logged, never echoed and never handed to
+	// codesign. security(1) offers no quieter form an unattended install can
+	// use: with no -p it prompts on the controlling terminal, which the install
+	// has none of. The argv window is tracked as gt-4ucnp.
 	if _, _, code := r.Cmd.run("", "security", "unlock-keychain", "-p", password, r.Signing.Keychain()); code != 0 {
 		r.C.Log("WARNING: installing ad-hoc: cannot unlock " + r.Signing.Keychain())
 		return

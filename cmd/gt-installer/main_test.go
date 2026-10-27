@@ -118,7 +118,8 @@ func (f *fakeRun) newRun(cfg installer.Config, c *installer.Contract, paths inst
 
 // respond answers the commands the flow runs: a make install-local puts the
 // binary in place, as the real one does, and the stale read answers the commit
-// that binary was built from. Everything else succeeds with nothing to say.
+// that binary was built from. A command none of the steps makes fails, so a
+// step that starts running something new is a failed run rather than a pass.
 func (f *fakeRun) respond(name string, args []string) ([]byte, []byte, int) {
 	switch {
 	case name == "make" && len(args) > 0 && args[len(args)-1] == "install-local":
@@ -127,10 +128,14 @@ func (f *fakeRun) respond(name string, args []string) ([]byte, []byte, int) {
 		}
 		f.installed = true
 		return nil, nil, 0
-	case name == f.bin && len(args) == 2 && args[0] == "stale" && args[1] == "--json":
+	case name == "make", name == "security", name == "codesign":
+		return nil, nil, 0
+	case name == f.bin && len(args) > 0 && args[0] == "stale":
 		return []byte(`{"binary_commit": "` + fullSHA + `"}`), nil, 0
+	case name == f.bin:
+		return nil, nil, 0
 	}
-	return nil, nil, 0
+	return []byte("unexpected command " + name + "\n"), nil, 1
 }
 
 // resolved is the fake checkout's answer for a ref.
