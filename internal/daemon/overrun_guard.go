@@ -18,8 +18,10 @@ import (
 	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
-// The overrun_guard patrol watches how long each polecat seat has held its
-// bead. It nudges the seat once when the bead runs long, asking for a split
+// The overrun_guard patrol watches how long each polecat seat's bead has been
+// in progress, counted from the bead's dispatch rather than from the sling
+// that reached the seat holding it, so a bead handed between seats keeps one
+// clock. It nudges the seat once when the bead runs long, asking for a split
 // proposal in the bead notes, and past the stop threshold it stops the
 // session and hands the bead back. This file is the patrol's config, ticker
 // entry, dry-run and nudge; the stop is overrunStop (overrun_guard_stop.go).
@@ -81,10 +83,11 @@ type overrunSeat struct {
 	// and 20 minute rule. Past it the session is stopped and the bead is not
 	// handed back (overrunScheduledStop).
 	Scheduled bool
-	// SlingAt dates the sling that gave the seat this bead, when known. The
-	// stop carries it so it can tell a head the seat produced during the run
-	// from one it merely resumed: a rework bead is slung onto a branch already
-	// on origin, and an idle seat there would otherwise read as finished work
+	// SlingAt dates the bead's dispatch clock, when known: the earliest sling
+	// of the bead this run, not necessarily one to this seat. The stop carries
+	// it so it can tell a head the seat produced during the run from one it
+	// merely resumed: a rework bead is slung onto a branch already on origin,
+	// and an idle seat there would otherwise read as finished work
 	// (overrunFinishedOnOrigin).
 	SlingAt time.Time
 	// ReworkSHA is set only on the seat handed to handBack, when the stopped
@@ -100,7 +103,7 @@ type overrunSeams struct {
 	now func() time.Time
 	// workingSeats lists the seats that are alive and hold a bead.
 	workingSeats func() ([]overrunSeat, error)
-	// slungAt dates the bead's sling to the seat, false when it is unknown.
+	// slungAt dates the bead's dispatch, false when it is unknown.
 	slungAt func(bead, rig, polecat string) (time.Time, bool)
 	// nudge delivers msg to the seat's session.
 	nudge func(seat overrunSeat, msg string) error
@@ -134,15 +137,33 @@ type overrunSeams struct {
 
 	// The stop's side effects, called in this order by overrunStop:
 	// pause writes the seat's pause marker, stopSession ends its session,
-	// checkpoint commits its worktree, handBack returns its bead to the pool
-	// after elapsed, with note added to its comment (empty unless the stop gave
-	// up on the checkpoint). clearPause removes the marker again when the session
-	// would not stop.
+	// checkpoint commits its worktree, endRun records the run the stop ended,
+	// handBack returns its bead to the pool after elapsed, with note added to
+	// its comment (empty unless the stop gave up on the checkpoint). clearPause
+	// removes the marker again when the session would not stop.
 	pause       func(seat overrunSeat) error
 	clearPause  func(seat overrunSeat) error
 	stopSession func(seat overrunSeat) error
 	checkpoint  func(seat overrunSeat) error
-	handBack    func(seat overrunSeat, elapsed time.Duration, note string) error
+	// stillOurs reports whether the bead is still hooked to the stopped seat:
+	// the stop reads again just before it ends the run, because a bead closed,
+	// or re-slung to another polecat, since the seat list was read is that
+	// holder's, and recording an end for it would end the new holder's run
+	// (gt-tzbtf). An error fails the step, so nothing is written on an
+	// unreadable bead. nil means the stop cannot tell and records the end; the
+	// hand-back's own check still refuses a bead that is not the seat's.
+	stillOurs func(seat overrunSeat) (bool, error)
+	// endRun records on the bead that the stop ended its run
+	// (events.TypeOverrunStop), at the time the run ended, so the dispatch
+	// after the hand-back is a new run the guard polices afresh. Without it a
+	// handed-back bead keeps its old clock and the one-stop-per-run rule leaves
+	// it unpoliced until a done event that a hand-back never writes. The time
+	// is the one saved with the stop, not the tick's, so a record repeated by a
+	// retried stop carries the same end and cannot move the boundary past the
+	// dispatch it ends. An error fails the step: the bead is handed back only
+	// after the run's end is recorded. nil means nothing is recorded.
+	endRun   func(seat overrunSeat, at time.Time) error
+	handBack func(seat overrunSeat, elapsed time.Duration, note string) error
 
 	// push puts the seat's kept branch on origin, after the checkpoint and
 	// before handBack, so the comment never names a branch that exists only
@@ -299,11 +320,11 @@ func (d *Daemon) triggerOverrunGuard() {
 
 // runOverrunGuard judges every working seat once. A seat that is submitted,
 // parked or undated is left alone. At the nudge threshold the seat is nudged
-// once per sling, remembered in the bead's state file; past the stop
+// once per run of the bead, remembered in the bead's state file; past the stop
 // threshold the stop seam runs. A seat on a scheduled sling is never nudged and
 // is judged by scheduled_stop_after alone (zero leaves it alone). The clock it
-// judges is the seat's own time: the time it spends inside its gate, or waiting
-// on an escalation it raised, is subtracted, and a state that cannot be read
+// judges is the bead's dispatch (slungAt), less the time the seat spends inside
+// its gate, or waiting on an escalation it raised; a state that cannot be read
 // counts all of its time (overrun_guard_gate.go, overrun_guard_escalation.go).
 // In dry-run mode nothing is sent, stopped or written, and the log says what
 // would have happened.
@@ -370,8 +391,10 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		}
 		state.Bead = seat.Bead
 
-		// A nudge sent before this sling belongs to an earlier run of the
-		// bead (a rework re-sling starts a new clock).
+		// A nudge sent before this clock belongs to an earlier run of the bead
+		// (a run that ended, after which the bead was dispatched again). The
+		// nudge is the bead's, not the seat's: a bead handed to a second seat
+		// keeps the clock, and the nudge already went out for it.
 		nudged := !state.NudgedAt.IsZero() && !state.NudgedAt.Before(slung)
 
 		// Gate time does not count (overrun_guard_gate.go). A state that cannot
@@ -473,9 +496,14 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			}
 			d.logger.Printf("overrun_guard: nudged %s on %s after %s", who, seat.Bead, elapsed.Round(time.Second))
 		case overrunStop:
-			// The stop ran for this sling already: the bead is back in the
-			// pool (and if it was slung to this seat again, the sling is
-			// newer than StoppedAt and falls through to a fresh clock).
+			// The stop ran for this run of the bead already and the bead is
+			// back in the pool, labeled for a split or as rework. The stop
+			// itself ends the run — it records events.TypeOverrunStop before
+			// the hand-back — so the dispatch after it is a fresh run that the
+			// guard polices again. This check catches only a sling dated inside
+			// the stopped run (one written before the stop, or a run end whose
+			// record was lost), which must not be stopped a second time on the
+			// same clock.
 			if !state.StoppedAt.IsZero() && !state.StoppedAt.Before(slung) {
 				continue
 			}
@@ -631,10 +659,14 @@ type overrunSlungReader struct {
 	evs    []events.Event
 }
 
-// slungAt is the time of the latest sling event that sent bead to
-// <rig>/polecats/<polecat>. With no such event it falls back to the seat's
-// agent bead update time, which can only read short, so the fallback errs
-// toward not stopping anyone.
+// slungAt is the time the bead was dispatched, false when it is unknown. The
+// clock belongs to the bead, not to the seat holding it: it is the earliest
+// sling event for the bead that its last run-end event does not end
+// (events.DispatchStart), so a bead handed from one seat to another keeps the
+// dispatch it first went out on, and a bead whose work was finished, closed or
+// whose seat the guard stopped starts over. With no such event it falls back to the
+// seat's agent bead update time, which can only read short, so the fallback
+// errs toward not stopping anyone.
 func (r *overrunSlungReader) slungAt(bead, rig, polecatName string) (time.Time, bool) {
 	if !r.loaded {
 		r.loaded = true
@@ -644,28 +676,8 @@ func (r *overrunSlungReader) slungAt(bead, rig, polecatName string) (time.Time, 
 		}
 		r.evs = evs
 	}
-	target := rig + "/polecats/" + polecatName
-	var latest time.Time
-	for _, ev := range r.evs {
-		if ev.Type != events.TypeSling {
-			continue
-		}
-		if b, _ := ev.Payload["bead"].(string); b != bead {
-			continue
-		}
-		if t, _ := ev.Payload["target"].(string); t != target {
-			continue
-		}
-		ts, err := time.Parse(time.RFC3339, ev.Timestamp)
-		if err != nil {
-			continue
-		}
-		if ts.After(latest) {
-			latest = ts
-		}
-	}
-	if !latest.IsZero() {
-		return latest, true
+	if start, ok := events.DispatchStart(r.evs, bead); ok {
+		return start, true
 	}
 
 	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(r.d.config.TownRoot, rig), rig, polecatName)

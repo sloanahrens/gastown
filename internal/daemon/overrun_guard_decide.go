@@ -219,11 +219,17 @@ type overrunState struct {
 
 	// StopBeganAt is when the pause marker went down, SessionStoppedAt when
 	// the session was confirmed gone, CheckpointedAt when the worktree
-	// checkpoint step finished. StoppedAt is set last, once the bead is handed
-	// back; with it set the stop does not run again for this sling.
+	// checkpoint step finished. RunEndedAt is when the run's end was recorded
+	// on the bead (events.TypeOverrunStop), stamped so a stop retried on later
+	// ticks — a failing hand-back — writes the record once rather than a later
+	// end every tick, which could creep past the dispatch it ends. StoppedAt is
+	// set last, once the bead is handed back; with it set the stop does not run
+	// again inside the run the stop ended. A dispatch after that run is a new
+	// run, judged on its own clock.
 	StopBeganAt      time.Time `json:"stop_began_at,omitzero"`
 	SessionStoppedAt time.Time `json:"session_stopped_at,omitzero"`
 	CheckpointedAt   time.Time `json:"checkpointed_at,omitzero"`
+	RunEndedAt       time.Time `json:"run_ended_at,omitzero"`
 	// PushedAt is when the kept branch reached origin; the hand-back waits for it.
 	PushedAt time.Time `json:"pushed_at,omitzero"`
 

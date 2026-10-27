@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/question"
 	townreport "github.com/steveyegge/gastown/internal/report"
 )
@@ -868,5 +869,37 @@ func TestTriggerOverseerReport(t *testing.T) {
 	}
 	if _, err := os.Stat(slotFile); err != nil {
 		t.Fatalf("the enabled patrol wrote no report: %v", err)
+	}
+}
+
+// The report's seat rows are dated from the bead's dispatch clock, the one the
+// overrun guard judges: a bead that moved to a second seat is dated from its
+// first sling, not from the sling that reached the seat holding it, and a seat
+// holding no bead has no row (gt-tzbtf).
+func TestOverseerSeatWorkDatesTheBeadsDispatch(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
+	line := func(ts, typ, bead, target string) string {
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"x","payload":{"bead":%q,"target":%q}}`, ts, typ, bead, target)
+	}
+	body := strings.Join([]string{
+		line("2026-10-27T09:00:00Z", events.TypeSling, "gt-a", "gastown/polecats/capable"),
+		line("2026-10-27T09:40:00Z", events.TypeSling, "gt-a", "gastown/polecats/rictus"),
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(d.config.TownRoot, events.EventsFile), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seats := []overrunSeat{
+		{Rig: "gastown", Polecat: "rictus", Bead: "gt-a"},
+		{Rig: "gastown", Polecat: "capable", Bead: ""}, // holds no bead: no row
+	}
+	got := overseerSeatWork(seats, (&overrunSlungReader{d: d}).slungAt)
+
+	if len(got) != 1 {
+		t.Fatalf("seat rows = %+v, want the one seat holding a bead", got)
+	}
+	if want := overseerAt("2026-10-27T09:00:00Z"); !got[0].Since.Equal(want) {
+		t.Errorf("row since = %v, want the bead's first dispatch %v, not the sling to rictus", got[0].Since, want)
 	}
 }

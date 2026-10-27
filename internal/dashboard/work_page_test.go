@@ -1131,8 +1131,8 @@ func TestTheQueuedRowAgesTheWaitTheLandingsPanelShows(t *testing.T) {
 	if cells[0].Text != "3m" || when.Text != "waiting 3m" {
 		t.Errorf("the Work row reads %q and the Landings row %q, want the same 3m wait", cells[0].Text, when.Text)
 	}
-	if !strings.Contains(cells[0].Title, "in queued for 3m") || !strings.Contains(cells[0].Title, "on the hook for 15m") {
-		t.Errorf("the age cell's title reads %q, want the state's clock and the hook time", cells[0].Title)
+	if !strings.Contains(cells[0].Title, "in queued for 3m") || !strings.Contains(cells[0].Title, "dispatched 15m ago") {
+		t.Errorf("the age cell's title reads %q, want the state's clock and the dispatch time", cells[0].Title)
 	}
 }
 

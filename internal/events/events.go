@@ -59,6 +59,24 @@ const (
 	// one (gt-i057g).
 	TypeHandoffNoPersist = "handoff_nopersist"
 
+	// TypeOverrunStop records the overrun guard ending a bead's run: it
+	// stopped the seat and handed the bead back, so the next dispatch of that
+	// bead is a new run with its own clock (DispatchStart). It is not
+	// TypeDone, which means the seat itself submitted, landed or closed the
+	// work: a stop is the guard's act, and gt log reads the two differently.
+	// Its payload may carry "at", the time the run ended when that is not the
+	// time the record was written (a stop retried on later ticks), so a
+	// repeated record does not move the boundary.
+	TypeOverrunStop = "overrun_stop"
+
+	// TypeBeadClosed records a work bead closed through gt bead close. It ends
+	// the bead's run as a done event does, so a bead closed by hand and
+	// dispatched again later starts its clock over instead of being dated from
+	// the dispatch of the run that was closed (DispatchStart). A landed bead
+	// needs no such record: the landing follows the seat's own gt done, whose
+	// TypeDone ends the run first.
+	TypeBeadClosed = "bead_closed"
+
 	// Session lifecycle events
 	TypeSessionStart = "session_start"
 	TypeSessionEnd   = "session_end"

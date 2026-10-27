@@ -177,6 +177,24 @@ dispatcher accepts it. A run still open and unhooked after the entry's `interval
 (at least 6 hours) counts as a failed tick, so the third in a row escalates
 instead of the entry skipping the open run forever.
 
+The overrun guard times a bead, not a seat. Its clock is the bead's first
+dispatch since the bead's last run end — the seat's `gt done`, the guard's own
+stop, or a hand close through `gt bead close` — so a bead handed from one seat to
+another keeps the dispatch it first went out on and cannot restart its clock by
+moving, and a bead whose work was finished, closed or stopped starts over when it
+is dispatched again. A landing needs no end of its own: it follows the seat's own
+`gt done`, whose event ends the run first. The dashboard's polecat Age is this
+same clock, labelled as the bead's dispatch time (gt-tzbtf).
+
+An overrun stop records that run end on the bead (`overrun_stop`, stamped with
+the session stop's time) before it hands the bead back, so a dispatch after a
+stop is a new run judged on its own 12 and 20 minute rule. The record is written
+once: a stop retried on later ticks — while a hand-back keeps failing — reuses
+the saved end instead of writing a later one each time, which would creep past
+the dispatch it ends. It is written only while the bead is still the stopped
+seat's, so a bead closed or handed to another polecat in the meantime keeps that
+holder's clock.
+
 The overrun guard (`daemon.patrols.overrun_guard`) does not apply its 12 and 20
 minute rule to a seat on a `scheduled:` bead, because a deep review runs long by
 design, but it does not leave one unbounded. `scheduled_stop_after` (a duration

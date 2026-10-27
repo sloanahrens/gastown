@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 	"github.com/steveyegge/gastown/internal/land"
@@ -398,6 +399,10 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// which a rejection reassigns (gt-gclus).
 	submitters := newDashSubmitters(townRoot, dashboardLogf(out))
 	seatCache := newDashSeatCache()
+	// The dispatch clock the Age column reads and the overrun guard judges, one
+	// reader for the panel's whole life so each poll reads only the log's
+	// appended lines (gt-tzbtf).
+	dispatches := events.NewDispatchReader(townRoot)
 	// Who holds a bead, read once per row: the Landings pane's live rows and
 	// the om panel's running reviews both name a landing's polecat, and they
 	// ask the same reader for it.
@@ -435,7 +440,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	attentionScoreReader := attention.NewScoreReader(attention.AnswersPath(townRoot))
 	return dashboard.NewHub(dashboard.Config{
 		Feed:           feed,
-		Summary:        func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
+		Summary:        func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache, dispatches) },
 		Health:         func() dashboard.Health { return dashboardHealth(townRoot) },
 		Machine:        dashboard.SampleMachine,
 		Cloud:          func() *dashboard.Cloud { return cloud.Read(time.Now()) },
@@ -587,7 +592,7 @@ func dashboardHealthCauses(rep *townhealth.Report) []dashboard.HealthCause {
 // and the age of the oldest bead waiting to land. A reader that fails leaves
 // its fields out and flags the failure, so the hub keeps the previous reading
 // rather than showing the empty one (gt-q6h8e).
-func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings, seatCache *dashSeatCache) dashboard.Summary {
+func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings, seatCache *dashSeatCache, dispatches *events.DispatchReader) dashboard.Summary {
 	var s dashboard.Summary
 	ready := map[string]bool{}
 	if n, oldest, ids, err := dashboardReadyToLand(townRoot); err == nil {
@@ -604,7 +609,7 @@ func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings,
 	for n := range sessions {
 		names = append(names, n)
 	}
-	if seats, err := dashSeats(townRoot, names, sessionsKnown, seatCache, newPoolSessionLister()); err == nil {
+	if seats, err := dashSeats(townRoot, names, sessionsKnown, seatCache, dispatches, newPoolSessionLister()); err == nil {
 		s.Polecats = buildDashPolecats(dashPolecatInputs{
 			Now: time.Now(), Seats: seats, Ready: ready, Sessions: sessions, SessionsKnown: sessionsKnown, Records: recs.get(),
 		})

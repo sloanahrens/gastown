@@ -38,22 +38,31 @@ func Read(townRoot string) ([]Event, error) {
 	// enough for a long nudge. 1MiB is the ceiling the daemon's prune shares.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+		if event, ok := decodeEventLine(scanner.Text()); ok {
+			events = append(events, event)
 		}
-		var event Event
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue
-		}
-		if event.Type == "" {
-			continue
-		}
-		events = append(events, event)
 	}
 	if err := scanner.Err(); err != nil {
 		// Events already read are still returned: a partial view beats none.
 		return events, fmt.Errorf("reading events file: %w", err)
 	}
 	return events, nil
+}
+
+// decodeEventLine reads one log line as an event, false for a blank line or
+// one that is not an event. A line over the scanner's ceiling is reported by
+// the scanner, not skipped here.
+func decodeEventLine(line string) (Event, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return Event{}, false
+	}
+	var event Event
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		return Event{}, false
+	}
+	if event.Type == "" {
+		return Event{}, false
+	}
+	return event, true
 }
