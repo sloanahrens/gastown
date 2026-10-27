@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,26 +55,25 @@ func TestDirectiveNewPathWinsOverLegacy(t *testing.T) {
 
 // A name present only at a legacy path is read, and the warning naming that path
 // is logged once per file per process, however many times it is read (gt-oz73l).
-// The warning is captured through legacyDirectiveWarn, a package variable, so
-// this test runs alone.
+// The warning goes to the standard log, which this test captures; the log output
+// is process-wide, so the test is not parallel.
 //
-//testpolicy:allow parallel — swaps the package variable legacyDirectiveWarn, which parallel tests in this package read through warnLegacyDirective
+//testpolicy:allow parallel — captures the process-wide standard log output that the warning is written to
 func TestDirectiveLegacyReadWarnsOncePerFile(t *testing.T) {
 	town := t.TempDir()
 	legacy := filepath.Join(town, "directives", "polecat.md")
 	writeDirective(t, legacy, "legacy only")
-	var lines []string
-	saved := legacyDirectiveWarn
-	legacyDirectiveWarn = func(line string) { lines = append(lines, line) }
-	defer func() { legacyDirectiveWarn = saved }()
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
 	for i := 0; i < 3; i++ {
 		got := directiveTexts(t, "polecat", town, "alpha")
 		if len(got) != 1 || got[0] != "legacy only" {
 			t.Fatalf("pass %d: directives = %q, want the legacy file read", i, got)
 		}
 	}
-	if len(lines) != 1 || !strings.Contains(lines[0], legacy) {
-		t.Errorf("warnings = %q, want one line naming %s", lines, legacy)
+	if lines := strings.Count(buf.String(), legacy); lines != 1 {
+		t.Errorf("warnings name %s %d time(s), want once:\n%s", legacy, lines, buf.String())
 	}
 }
 
@@ -130,5 +131,19 @@ func TestDirectiveRigReadsOnlyItsOwnLayer(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("directives = %q, want none for alpha", got)
+	}
+}
+
+// A content file's leading "## Changelog" block is the editors' record, not
+// directive text: it stays out of the text ReadRoleDirectives returns, and the
+// rules after it come through (gt-80rnu).
+func TestDirectiveChangelogBlockIsLeftOut(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeDirective(t, filepath.Join(CentralDirectiveDir(town), "polecat.md"),
+		"## Changelog\n- 2026-10-26 edit\n- 2026-10-25 first cut\n\n## Rules\nreal text\n")
+	got := directiveTexts(t, "polecat", town, "alpha")
+	if len(got) != 1 || got[0] != "## Rules\nreal text\n" {
+		t.Errorf("directive text = %q, want the rules without the changelog block", got)
 	}
 }

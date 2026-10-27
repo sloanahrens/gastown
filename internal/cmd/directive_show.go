@@ -49,9 +49,10 @@ func runDirectiveShow(cmd *cobra.Command, args []string) error {
 	sources := config.RoleDirectiveSources(role, townRoot, rigName)
 	if len(sources) == 0 {
 		fmt.Printf("No directive found for role %q\n", role)
-		fmt.Printf("  Checked: %s\n", filepath.Join(townRoot, "directives", role+".md"))
-		if rigName != "" {
-			fmt.Printf("  Checked: %s\n", filepath.Join(townRoot, rigName, "directives", role+".md"))
+		for _, p := range config.DirectivePaths(role, townRoot, rigName) {
+			if filepath.Base(p) == role+".md" {
+				fmt.Printf("  Checked: %s\n", p)
+			}
 		}
 		fmt.Printf("  Also consulted: the %s.md files at both levels\n", config.SharedDirectiveName)
 		fmt.Println("\nUse 'gt directive edit' to create one.")

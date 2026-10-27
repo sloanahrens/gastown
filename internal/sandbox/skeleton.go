@@ -555,7 +555,7 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	}
 	add(rigSettings, out)
 
-	for _, rel := range []string{"directives", s.Rig + "/directives"} {
+	for _, rel := range config.DirectiveTreeRels(s.Rig) {
 		if err := town.addTree(&entries, rel); err != nil {
 			return nil, err
 		}

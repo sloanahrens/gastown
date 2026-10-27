@@ -44,7 +44,7 @@ func LoadRoleDirective(role, townRoot, rigName string) string {
 	parts := make([]string, 0, len(sources))
 	for _, path := range sources {
 		text, _ := readDirectiveFile(path)
-		parts = append(parts, strings.TrimSpace(text))
+		parts = append(parts, strings.TrimSpace(stripChangelog(text)))
 	}
 	return strings.Join(parts, "\n")
 }
@@ -91,7 +91,7 @@ func ReadRoleDirectives(role, townRoot, rigName string) ([]RoleDirective, error)
 			Scope: directiveScope(path, townRoot),
 			Name:  strings.TrimSuffix(filepath.Base(path), ".md"),
 			Path:  path,
-			Text:  text,
+			Text:  stripChangelog(text),
 		})
 	}
 	return out, nil
@@ -112,6 +112,25 @@ func directiveScope(path, townRoot string) string {
 		return parts[0]
 	}
 	return "town"
+}
+
+// stripChangelog removes a leading "## Changelog" block: the editors' record at
+// the top of a content file, which is not directive text and so stays out of
+// every polecat's prompt. The block runs from that heading to the next "## "
+// heading, or to the end of the file. A file that does not open with the block
+// is returned unchanged.
+func stripChangelog(text string) string {
+	trimmed := strings.TrimLeft(text, " \t\r\n")
+	if !strings.HasPrefix(trimmed, "## Changelog") {
+		return text
+	}
+	lines := strings.SplitAfter(trimmed, "\n")
+	for i := 1; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], "## ") || strings.HasPrefix(lines[i], "##\t") || lines[i] == "##\n" {
+			return strings.Join(lines[i:], "")
+		}
+	}
+	return ""
 }
 
 // readDirectiveFile is the one reader of a directive file: the system-prompt
@@ -149,6 +168,48 @@ func directivePaths(role, townRoot, rigName string) []string {
 		}
 	}
 	return paths
+}
+
+// DirectivePaths returns the directive files that render for role, broadest
+// first, as the reader resolves each layer: the new path when that file exists,
+// the legacy path otherwise. Callers that name the files a prompt draws from use
+// it, so none of them builds a path of its own (gt-80rnu).
+func DirectivePaths(role, townRoot, rigName string) []string {
+	return directivePaths(role, townRoot, rigName)
+}
+
+// DirectiveEditPath is the file gt directive edit writes for a layer: the new
+// path of the central layer (townLevel, or no rig) or of the rig's own layer.
+// An edit of the central layer is a change to the gastown repo's checkout, which
+// lands through the pipeline (gt-80rnu).
+func DirectiveEditPath(role, townRoot, rigName string, townLevel bool) string {
+	if townLevel || rigName == "" {
+		return filepath.Join(CentralDirectiveDir(townRoot), role+".md")
+	}
+	return filepath.Join(RigDirectiveDir(townRoot, rigName), role+".md")
+}
+
+// IsTownDirective reports whether path is a file of the town-level layer, the
+// central one or the legacy town directory (gt-80rnu).
+func IsTownDirective(path, townRoot string) bool {
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(path, CentralDirectiveDir(townRoot)+sep) ||
+		strings.HasPrefix(path, filepath.Join(townRoot, "directives")+sep)
+}
+
+// DirectiveTreeRels lists, relative to the town root, the directive trees a
+// sandbox copies for rig: the central and rig layers, and the legacy directories
+// the reader still falls back to until they are removed (gt-80rnu).
+func DirectiveTreeRels(rig string) []string {
+	rels := []string{
+		filepath.ToSlash(filepath.Join("gastown", "mayor", "rig", "directives")),
+		filepath.ToSlash(filepath.Join(rig, "mayor", "rig", ".gastown", "directives")),
+		"directives",
+	}
+	if rig != "" {
+		rels = append(rels, rig+"/directives")
+	}
+	return rels
 }
 
 // CentralDirectiveDir is the central directive layer: the gastown repo's
@@ -190,17 +251,13 @@ func directiveFileExists(path string) bool {
 // legacyDirectiveWarned is each legacy path already named this process.
 var legacyDirectiveWarned sync.Map
 
-// legacyDirectiveWarn is where a legacy directive path is named. A test swaps it
-// to capture the line.
-var legacyDirectiveWarn = func(line string) { log.Print(line) }
-
 // warnLegacyDirective names a legacy directive file once per process, so a
 // prompt rendered on every spawn does not repeat the line.
 func warnLegacyDirective(path string) {
 	if _, done := legacyDirectiveWarned.LoadOrStore(path, true); done {
 		return
 	}
-	legacyDirectiveWarn(fmt.Sprintf("directive %s is at a legacy path; move it under the gastown repo's directives (gt-oz73l)", path))
+	log.Printf("directive %s is at a legacy path; move it under the gastown repo's directives (gt-oz73l)", path)
 }
 
 // DirectiveFile is one <name>.md file under a directives/ directory.
@@ -226,7 +283,7 @@ func (f DirectiveFile) Unused() bool {
 func ScanDirectiveFiles(townRoot, rigName string) ([]DirectiveFile, error) {
 	var files []DirectiveFile
 
-	townFiles, err := readDirectiveDir(filepath.Join(townRoot, "directives"), "town")
+	townFiles, err := scanDirectiveLayer(CentralDirectiveDir(townRoot), filepath.Join(townRoot, "directives"), "town")
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +294,7 @@ func ScanDirectiveFiles(townRoot, rigName string) ([]DirectiveFile, error) {
 		return nil, err
 	}
 	for _, rig := range rigs {
-		rigFiles, err := readDirectiveDir(filepath.Join(townRoot, rig, "directives"), rig)
+		rigFiles, err := scanDirectiveLayer(RigDirectiveDir(townRoot, rig), filepath.Join(townRoot, rig, "directives"), rig)
 		if err != nil {
 			return nil, err
 		}
@@ -245,6 +302,31 @@ func ScanDirectiveFiles(townRoot, rigName string) ([]DirectiveFile, error) {
 	}
 
 	return files, nil
+}
+
+// scanDirectiveLayer lists one layer the way the reader resolves it: the files in
+// the new directory, and the legacy files whose name the new directory does not
+// have (gt-80rnu).
+func scanDirectiveLayer(newDir, legacyDir, scope string) ([]DirectiveFile, error) {
+	newFiles, err := readDirectiveDir(newDir, scope)
+	if err != nil {
+		return nil, err
+	}
+	legacyFiles, err := readDirectiveDir(legacyDir, scope)
+	if err != nil {
+		return nil, err
+	}
+	have := make(map[string]bool, len(newFiles))
+	for _, f := range newFiles {
+		have[f.Role] = true
+	}
+	out := newFiles
+	for _, f := range legacyFiles {
+		if !have[f.Role] {
+			out = append(out, f)
+		}
+	}
+	return out, nil
 }
 
 // IsTownLevelDir reports whether a top-level town directory is town state
