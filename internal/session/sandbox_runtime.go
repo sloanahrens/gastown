@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/promptstamp"
 )
@@ -48,28 +47,26 @@ type runtimeFile struct {
 	mode int64
 }
 
-// buildRuntimeArchive returns a gzipped tar that extracts under /sandbox to
-// gt/<rig>/polecats/.claude/{settings.json,system-prompt-<polecat>.md}, the
-// files `claude --settings … --append-system-prompt-file …` reads, and
-// .claude.json, which tells Claude Code that onboarding is done and the
-// worktree is trusted (a fresh sandbox otherwise stops at the theme picker).
-// The settings are rendered for the sandbox; the system prompt has the host
-// town root rewritten. A missing settings.json is an error, since the agent
-// command names it; a missing system prompt is skipped. A rig or polecat name
-// that is not one path segment is an error too.
-func buildRuntimeArchive(spec SpawnSpec, gitEmail string) ([]byte, error) {
-	return buildRuntimeArchiveLogging(spec, gitEmail, os.Stderr, config.SystemPromptRenderer, beads.New(spec.TownRoot))
-}
-
 // promptCommentStore is the bd surface a spawn's prompt stamp writes through;
 // *beads.Beads is the production store, a test passes a fake.
 type promptCommentStore interface {
 	AddCommentAs(id, author, comment string) error
 }
 
-// buildRuntimeArchiveLogging is buildRuntimeArchive with the spawn log and the
-// bead commenter given, so a test can capture the uploaded prompt's hash line
-// and the stamp it posts (gt-uoo5j, gt-2lu00). A nil commenter posts nothing.
+// buildRuntimeArchiveLogging returns a gzipped tar that extracts under /sandbox
+// to gt/<rig>/polecats/.claude/{settings.json,system-prompt-<polecat>.md}, the
+// files `claude --settings … --append-system-prompt-file …` reads, and
+// .claude.json, which tells Claude Code that onboarding is done and the
+// worktree is trusted (a fresh sandbox otherwise stops at the theme picker).
+// The settings are rendered for the sandbox; the system prompt has the host
+// town root rewritten. The agent command names settings.json and the system
+// prompt, so a missing one is an error. A rig or polecat name that is not one
+// path segment is an error too.
+//
+// The spawn log, the renderer and the comment store are seams: the production
+// caller passes its own, and a test captures the uploaded prompt's hash line
+// and the stamp the spawn posts (gt-uoo5j, gt-2lu00). A nil commenter posts
+// nothing.
 func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Writer, render config.SystemPromptRender, comments promptCommentStore) ([]byte, error) {
 	if err := requireRuntimeSegment("rig", spec.Rig); err != nil {
 		return nil, err
