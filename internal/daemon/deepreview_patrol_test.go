@@ -256,6 +256,47 @@ func TestShadowRunReportsACloseItCouldNotMake(t *testing.T) {
 	}
 }
 
+// TestShadowRunReportsARenderItCouldNotMake drives the encoder's failure: a
+// landing that cannot be rendered is an error before any bead exists, never a
+// note with a line missing from it.
+func TestShadowRunReportsARenderItCouldNotMake(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-shadow1", now: shadowNow}
+	e := shadowEntry()
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, f)
+	d.seams.shadowEncodeJSON = func(any) ([]byte, error) { return nil, errors.New("encoder refused") }
+	writeShadowLedger(t, d.config.TownRoot, e.Rig, shadowLedger)
+
+	err := d.runScheduledSlingEntry(context.Background(), e, shadowNow)
+	if err == nil {
+		t.Fatal("the run reported success, want the render error")
+	}
+	if !strings.Contains(err.Error(), "encoder refused") {
+		t.Errorf("error = %v, want it to carry the encoder's error", err)
+	}
+	if len(f.created) != 0 || len(f.notes) != 0 {
+		t.Errorf("a refused plan must create nothing: created %v notes %v", f.created, f.notes)
+	}
+}
+
+// TestShadowRunReportsACreateItCouldNotMake checks that a bead the patrol
+// cannot create stops the run: no note is written to an id that does not exist
+// and nothing is slung.
+func TestShadowRunReportsACreateItCouldNotMake(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-shadow1", now: shadowNow, createErr: errors.New("dolt down")}
+	e := shadowEntry()
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, f)
+	writeShadowLedger(t, d.config.TownRoot, e.Rig, shadowLedger)
+
+	if err := d.runScheduledSlingEntry(context.Background(), e, shadowNow); err == nil {
+		t.Fatal("the run reported success, want the create error")
+	}
+	if len(f.notes) != 0 || len(f.closedIDs) != 0 || len(f.slungIDs) != 0 {
+		t.Errorf("a failed create must stop the run: notes %v closed %v slung %v", f.notes, f.closedIDs, f.slungIDs)
+	}
+}
+
 // TestShadowPlanNoteRendersTheShellPlanShape pins the note to the shape
 // scripts/deep-review.sh plan prints: the seven key lines, then one landings
 // line per reviewed landing.
@@ -290,7 +331,7 @@ func TestShadowPlanNoteRendersTheShellPlanShape(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			note, err := shadowPlanNote(shadowModeLandings, tc.plan)
+			note, err := shadowPlanNote(shadowModeLandings, tc.plan, json.Marshal)
 			if err != nil {
 				t.Fatalf("render: %v", err)
 			}

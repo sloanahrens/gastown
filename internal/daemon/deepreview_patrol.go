@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -100,8 +99,9 @@ func shadowNotes(runs []scheduledBead) string {
 
 // shadowPlanNote renders a plan the way scripts/deep-review.sh plan prints it:
 // one key=value line per field, then one JSON object per reviewed landing in
-// the landings.jsonl shape.
-func shadowPlanNote(mode string, p deepreview.Plan) (string, error) {
+// the landings.jsonl shape. encode is the JSON encoder, injected so that its
+// failure branch is reachable from a test.
+func shadowPlanNote(mode string, p deepreview.Plan, encode func(any) ([]byte, error)) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "mode=%s\n", mode)
 	fmt.Fprintf(&b, "quiet=%t\n", p.Quiet)
@@ -111,7 +111,7 @@ func shadowPlanNote(mode string, p deepreview.Plan) (string, error) {
 	fmt.Fprintf(&b, "reviewed_until_old=%s\n", p.Since)
 	fmt.Fprintf(&b, "reviewed_until_new=%s\n", p.ReviewedUntil)
 	for _, rec := range p.Landings {
-		line, err := json.Marshal(rec)
+		line, err := encode(rec)
 		if err != nil {
 			return "", fmt.Errorf("rendering landing %s: %w", rec.Bead, err)
 		}
@@ -165,7 +165,7 @@ func (d *Daemon) runShadowDeepReview(ctx context.Context, r scheduledSlingRunner
 	if err != nil {
 		return err
 	}
-	note, err := shadowPlanNote(mode, plan)
+	note, err := shadowPlanNote(mode, plan, d.seams.encodeShadowLanding)
 	if err != nil {
 		return err
 	}
