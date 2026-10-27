@@ -38,8 +38,11 @@ func bdJSON(run BdRun, dir string, args []string) []byte {
 }
 
 // BeadRow is one bead from the bd listing. Its notes and description are read
-// at load to find rejection kinds and are not kept. A null closed_at is a nil
-// ClosedAt, which keeps an open bead apart from a closed one.
+// at load to find rejection kinds and are not kept; Branch keeps the last
+// Branch line of the notes, and Assignee the seat the bead was given to, so a
+// review can be attributed to the seat that wrote the branch it judged. A null
+// closed_at is a nil ClosedAt, which keeps an open bead apart from a closed
+// one.
 type BeadRow struct {
 	ID              string
 	Rig             string
@@ -53,6 +56,8 @@ type BeadRow struct {
 	Dir             string
 	Shaped          bool
 	RejectionKinds  []string
+	Branch          string
+	Assignee        string
 }
 
 // bdListBead is one entry of `bd list --json`. A JSON null decodes to the zero
@@ -69,6 +74,7 @@ type bdListBead struct {
 	AcceptanceCriteria string   `json:"acceptance_criteria"`
 	Notes              string   `json:"notes"`
 	Description        string   `json:"description"`
+	Assignee           string   `json:"assignee"`
 }
 
 // LoadBeads runs one `bd list` per directory and returns each bead once, from
@@ -112,6 +118,8 @@ func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
 				Dir:             d,
 				Shaped:          b.AcceptanceCriteria != "", // a shaped bead carries acceptance criteria
 				RejectionKinds:  kinds,
+				Branch:          BranchLine(b.Notes),
+				Assignee:        b.Assignee,
 			})
 		}
 	}

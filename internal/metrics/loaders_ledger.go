@@ -88,7 +88,16 @@ type Review struct {
 	Score   float64
 	Verdict string
 	At      string
+	// Author is the seat that wrote the branch the review judged, and
+	// AuthorKind its kind; AttributeReviews fills both, and they are empty
+	// until it does.
+	Author     string
+	AuthorKind string
 }
+
+// Round is the landing attempt this review judged, the attempt the review log
+// carries, so the round is pinned to the log rather than recomputed.
+func (r Review) Round() int { return r.Attempt }
 
 // reviewFields is a review row mid-parse: a pointer per required field tells an
 // absent field from a zero value, which the Python's KeyError tells apart.
