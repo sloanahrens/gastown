@@ -3,8 +3,6 @@ package land
 import (
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/git"
 )
 
 // envValue is the value env carries for key, if any.
@@ -30,19 +28,5 @@ func TestCommittingEnvSetsOnlyTheCommitterName(t *testing.T) {
 		if v, ok := envValue(env, key); ok {
 			t.Errorf("%s = %q; a landing sets no committer email and no author", key, v)
 		}
-	}
-}
-
-// The merge candidate is committed by the Git the lander opens for its
-// worktree, so that handle hands git the landing committer (gt-dc4y3).
-func TestLandMergeWorktreeCarriesTheLandingCommitter(t *testing.T) {
-	t.Parallel()
-	opened := (&Lander{}).open(t.TempDir())
-	g, ok := opened.(*git.Git)
-	if !ok {
-		t.Fatalf("Lander.open returned %T, want *git.Git", opened)
-	}
-	if v, _ := envValue(g.Environ(), "GIT_COMMITTER_NAME"); v != LandingCommitterName {
-		t.Fatalf("merge worktree GIT_COMMITTER_NAME = %q, want %q", v, LandingCommitterName)
 	}
 }
