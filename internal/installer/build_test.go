@@ -97,6 +97,46 @@ func TestBuild(t *testing.T) {
 			receipt: "slot-busy",
 		},
 		{
+			// The phrase inside a longer line is something else saying it
+			// waited, not the slot being held.
+			name:       "the phrase inside another line is not the slot",
+			slotRole:   "gastown/rebuild-gt",
+			executable: true,
+			respond: func(string, string, []string) ([]byte, []byte, int) {
+				return []byte("gt: still waiting for " + slotLine), nil, 0
+			},
+			ended: true,
+			exit:  ExitBusy,
+			cmds:  [][]string{slotArgv},
+			lines: []string{
+				"[install-gt] Building c2222222 in RIG (source: manual)",
+				"gt: still waiting for Container-gate slot acquired (role=gastown/rebuild-gt, waited 0s, slot 0/2).",
+				"[install-gt] Did not get the container-gate slot within 600s.",
+				"install-gt: RESULT refused c2222222 c1111111 slot-busy",
+			},
+			receipt: "slot-busy",
+		},
+		{
+			// The line must end where slot's own line ends: a build that keeps
+			// writing on the same line has not handed over a whole one.
+			name:       "a line that runs on past the slot line is not the slot",
+			slotRole:   "gastown/rebuild-gt",
+			executable: true,
+			respond: func(string, string, []string) ([]byte, []byte, int) {
+				return []byte(strings.TrimSuffix(slotLine, "\n") + " and then compile output\n"), nil, 0
+			},
+			ended: true,
+			exit:  ExitBusy,
+			cmds:  [][]string{slotArgv},
+			lines: []string{
+				"[install-gt] Building c2222222 in RIG (source: manual)",
+				"Container-gate slot acquired (role=gastown/rebuild-gt, waited 0s, slot 0/2). and then compile output",
+				"[install-gt] Did not get the container-gate slot within 600s.",
+				"install-gt: RESULT refused c2222222 c1111111 slot-busy",
+			},
+			receipt: "slot-busy",
+		},
+		{
 			name:       "a gt that could not run is a failure, not a busy slot",
 			slotRole:   "gastown/rebuild-gt",
 			executable: true,

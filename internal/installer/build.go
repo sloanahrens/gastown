@@ -2,15 +2,32 @@ package installer
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
 
-// slotAcquired is the line `gt slot run` prints the moment it holds the gate
-// slot (internal/slot's acquiredFormat, gt-kox0). Without it the build never
-// started, whatever the command's status says, so the slot step reads the line
-// rather than the status alone.
-const slotAcquired = "Container-gate slot acquired"
+// slotAcquiredLine is the whole line `gt slot run` prints the moment it holds
+// the gate slot (internal/slot's acquiredFormat, gt-kox0). Without it the build
+// never started, whatever the command's status says, so the slot step reads the
+// line rather than the status alone. The whole line is matched because the
+// phrase alone also appears in output that is not the slot: an error naming the
+// line it waited for, or a make rule echoing the text it was given, would
+// otherwise read as a slot the build never held (gt-tpg0p.11).
+var slotAcquiredLine = regexp.MustCompile(`^Container-gate slot acquired \(role=.+, waited .+, slot \d+/\d+\)\.$`)
+
+// slotAcquired reports whether either stream carries the slot line as a line of
+// its own.
+func slotAcquired(stdout, stderr []byte) bool {
+	for _, stream := range [][]byte{stdout, stderr} {
+		for _, line := range strings.Split(string(stream), "\n") {
+			if slotAcquiredLine.MatchString(line) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // Build is the script's "Build and install" section up to the swap: `make
 // build` in the checkout, through the container-gate slot when the caller named
@@ -54,7 +71,7 @@ func (r *Run) buildInSlot() (stdout, stderr []byte, status int, ended bool, code
 		"--role", r.Cfg.SlotRole, "--timeout", r.Cfg.SlotTimeout+"s",
 		"--", "make", "SKIP_UPDATE_CHECK=1", "build")
 	r.echo(stdout, stderr)
-	if strings.Contains(string(stdout)+string(stderr), slotAcquired) {
+	if slotAcquired(stdout, stderr) {
 		return stdout, stderr, status, false, ExitOK
 	}
 	// Exit 126/127 is a gt that could not run at all, which never asked for the

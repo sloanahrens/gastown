@@ -41,16 +41,20 @@ func signsCopy(dir, name string, args []string) ([]byte, []byte, int) {
 // removes or breaks the part it is about.
 type signWorld struct {
 	*testRun
-	bin      string
-	keychain string
-	cleared  []string
-	set      []string
+	bin       string
+	installed string
+	keychain  string
+	cleared   []string
+	set       []string
 }
 
 func newSignWorld(t *testing.T) *signWorld {
 	t.Helper()
 	tr := newTestRun(t)
-	w := &signWorld{testRun: tr, bin: tr.Paths.GT(), keychain: tr.Signing.Keychain()}
+	// installed stays at the binary the case started with while bin follows a
+	// case that moves the install directory, so a failure can be checked against
+	// the file the step was handed (gt-tpg0p.11).
+	w := &signWorld{testRun: tr, bin: tr.Paths.GT(), installed: tr.Paths.GT(), keychain: tr.Signing.Keychain()}
 	putFile(t, w.bin, "old binary", 0o755)
 	if err := os.MkdirAll(tr.Signing.Dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -79,12 +83,14 @@ func TestSign(t *testing.T) {
 		want         string
 		wantCmds     int
 		wantSigned   bool
+		wantNoBinary bool
 		codesignName string
 	}{
 		{
-			name:  "nothing installed is not signed",
-			setup: func(w *signWorld) { _ = os.Remove(w.bin) },
-			want:  "[install-gt] WARNING: not signing: nothing installed at BIN",
+			name:         "nothing installed is not signed",
+			setup:        func(w *signWorld) { _ = os.Remove(w.bin) },
+			want:         "[install-gt] WARNING: not signing: nothing installed at BIN",
+			wantNoBinary: true,
 		},
 		{
 			name: "no signing material directory installs ad-hoc",
@@ -224,6 +230,12 @@ func TestSign(t *testing.T) {
 			if len(w.cmds) != tc.wantCmds {
 				t.Fatalf("commands = %q, want %d", w.cmds, tc.wantCmds)
 			}
+			// Every way of not signing leaves the binary it was handed exactly
+			// as it was: the step is best effort, never a change it cannot
+			// finish (gt-tpg0p.11).
+			if !tc.wantSigned {
+				w.checkUntouched(t, tc.wantNoBinary)
+			}
 			if tc.wantCmds == 0 {
 				return
 			}
@@ -291,6 +303,29 @@ func (w *signWorld) checkCodesign(t *testing.T, name string) {
 	signed := got[8]
 	if dir, base := filepath.Dir(signed), filepath.Base(signed); dir != filepath.Dir(w.bin) || !strings.HasPrefix(base, ".gt.signed.") {
 		t.Errorf("signed path = %q, want a .gt.signed.* copy beside %q", signed, w.bin)
+	}
+}
+
+// checkUntouched asserts the installed binary is the file the case started
+// with — same bytes, still executable — or, for a case that removed it, that
+// nothing is there.
+func (w *signWorld) checkUntouched(t *testing.T, removed bool) {
+	t.Helper()
+	info, err := os.Stat(w.installed)
+	if removed {
+		if !os.IsNotExist(err) {
+			t.Errorf("installed binary %s still exists (%v), want none", w.installed, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("installed binary: %v", err)
+	}
+	if got := read(t, w.installed); got != "old binary" {
+		t.Errorf("installed binary = %q, want the untouched %q", got, "old binary")
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Errorf("installed binary mode = %v, want it left executable", info.Mode().Perm())
 	}
 }
 
