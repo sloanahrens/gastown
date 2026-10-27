@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -42,8 +41,19 @@ var attentionCmd = &cobra.Command{
 	GroupID: GroupDiag,
 	Short:   "Show the attention queue the daemon maintains, and acknowledge its items",
 	Long: `Show the queue of conditions that need a human or overseer judgment, as
-the daemon last wrote it, oldest first. Ack an item to hide it until its
-condition clears.
+the daemon last wrote it, ranked by Jev's needs_human answer. Ack an item to
+hide it until its condition clears.
+
+The NEEDS column is the probability that a person has to look at or decide the
+item, read from <town>/.runtime/jev/attention.jsonl. The highest score leads;
+items at one score keep arrival order, and an item Jev has not answered sorts
+last. The score orders the queue and clears nothing, so every item stays
+listed; docs/reference.md says why the score is not read as a clear.
+
+A "-" is an item no answer names yet, and a log that has never been written is
+no answers. A log that exists but cannot be read is different: the table then
+says so in a header, and the NEEDS cells read "?" rather than claiming Jev
+never answered the item.
 
 The queue is four files under <town>/.runtime/attention/:
 
@@ -84,7 +94,7 @@ DURATION first replays the events from that long ago. It follows the file
 across its rotation and exits 0 on SIGINT or SIGTERM.
 
 Examples:
-  gt attention                 # the queue, oldest first
+  gt attention                 # the queue, highest needs_human score first
   gt attention --all           # include acked items
   gt attention --json          # state.json
   gt attention ack esc:hq-123 --disposition needed-human  # ack, saying why
@@ -130,10 +140,19 @@ func init() {
 type attentionView struct {
 	State attention.State
 	Acks  attention.Acks
-	Stale bool
+	// Scores is Jev's needs_human answer per item life. An item with no entry
+	// has no answer and is listed last rather than dropped.
+	Scores attention.Scores
+	// ScoresErr is set when the answers log exists and could not be read. The
+	// queue is the daemon's file and still prints; the table names the failed
+	// read rather than drawing its items as unanswered (gt-b9j3o.2).
+	ScoresErr error
+	Stale     bool
 }
 
-// buildAttention reads the queue for a town at now.
+// buildAttention reads the queue for a town at now, with the answers its Jev
+// log holds. A missing log leaves every item unscored; an unreadable one is
+// recorded in ScoresErr, so the table can say the scores could not be read.
 func buildAttention(townRoot string, now time.Time) (attentionView, error) {
 	state, err := attention.ReadState(townRoot)
 	if err != nil {
@@ -143,10 +162,13 @@ func buildAttention(townRoot string, now time.Time) (attentionView, error) {
 	if err != nil {
 		return attentionView{}, err
 	}
+	scores, scoresErr := attention.NewScoreReader(attention.AnswersPath(townRoot)).Scores()
 	return attentionView{
-		State: state,
-		Acks:  acks,
-		Stale: attention.Stale(state, now, attention.StaleAfter),
+		State:     state,
+		Acks:      acks,
+		Scores:    scores,
+		ScoresErr: scoresErr,
+		Stale:     attention.Stale(state, now, attention.StaleAfter),
 	}, nil
 }
 
@@ -235,7 +257,8 @@ func ackAttention(townRoot, key string, now time.Time, d attention.Disposition) 
 }
 
 // renderAttention prints the table: a STALE header when the state is old, then
-// one row per unacked item (all items with --all), oldest first.
+// one row per unacked item (all items with --all), highest needs_human score
+// first.
 func renderAttention(w io.Writer, v attentionView, all bool, now time.Time) {
 	if v.Stale {
 		fmt.Fprintf(w, "STALE: the daemon has not written attention state since %s (%s ago)\n",
@@ -245,23 +268,30 @@ func renderAttention(w io.Writer, v attentionView, all bool, now time.Time) {
 		fmt.Fprintln(w, "No attention state yet: the daemon has not written one.")
 		return
 	}
+	if v.ScoresErr != nil {
+		// The queue is the daemon's file and prints anyway; what failed is the
+		// answers behind the NEEDS column, which then reads "?" instead of "-"
+		// (gt-b9j3o.2).
+		fmt.Fprintf(w, "NEEDS unavailable: the Jev answers log could not be read: %v\n", v.ScoresErr)
+	}
 	rows := attentionRows(v, all)
 	if len(rows) == 0 {
 		fmt.Fprintln(w, "No attention items.")
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "KIND\tKEY\tBEAD/SHA\tAGE\tSUMMARY")
+	fmt.Fprintln(tw, "KIND\tKEY\tNEEDS\tBEAD/SHA\tAGE\tSUMMARY")
 	for _, it := range rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			it.Kind, it.Key, beadOrSHA(it), townhealth.Short(now.Sub(it.FirstSeen)), it.Summary)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			it.Kind, it.Key, needsHumanCell(v, it), beadOrSHA(it),
+			townhealth.Short(now.Sub(it.FirstSeen)), it.Summary)
 	}
 	_ = tw.Flush()
 }
 
-// attentionRows returns the items to show, oldest first, hiding acked ones
-// unless all is set. An item is acked if state.json marks it or acks.json
-// names its key, so an ack shows before the daemon's next tick.
+// attentionRows returns the items to show, highest needs_human score first,
+// hiding acked ones unless all is set. An item is acked if state.json marks it
+// or acks.json names its key, so an ack shows before the daemon's next tick.
 func attentionRows(v attentionView, all bool) []attention.Item {
 	rows := make([]attention.Item, 0, len(v.State.Items))
 	for _, it := range v.State.Items {
@@ -270,13 +300,21 @@ func attentionRows(v attentionView, all bool) []attention.Item {
 		}
 		rows = append(rows, it)
 	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		if !rows[i].FirstSeen.Equal(rows[j].FirstSeen) {
-			return rows[i].FirstSeen.Before(rows[j].FirstSeen)
+	return attention.OrderByNeedsHuman(rows, v.Scores)
+}
+
+// needsHumanCell is the NEEDS column: the item's answer to two decimals, a dash
+// for an item Jev has not answered yet, and a question mark when the answers
+// log could not be read, where a dash would claim the item went unanswered.
+func needsHumanCell(v attentionView, it attention.Item) string {
+	score, ok := v.Scores[attention.LifeKey(it.Key, it.FirstSeen)]
+	if !ok {
+		if v.ScoresErr != nil {
+			return "?"
 		}
-		return rows[i].Key < rows[j].Key
-	})
-	return rows
+		return "-"
+	}
+	return fmt.Sprintf("%.2f", score)
 }
 
 // beadOrSHA is the BEAD/SHA column: the bead when the item names one, else

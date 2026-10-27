@@ -766,8 +766,20 @@ func (h *Hub) pollEscalation() {
 // past. publishLocked calls it, so every published list is drawn from the
 // readers as they stand at that instant.
 func (h *Hub) attentionLocked() {
+	scores, err := h.needsHuman()
 	h.state.Attention = buildAttention(h.state.Escalations, h.state.Questions, h.alerts.Standing(),
-		AttentionQueue{Items: h.queueItems, Failed: h.queueFailed}, h.cfg.Now())
+		AttentionQueue{Items: h.queueItems, Failed: h.queueFailed}, ScoresRead{Scores: scores, Err: err}, h.cfg.Now())
+}
+
+// needsHuman reads Jev's needs_human answers, with no reader leaving every item
+// unscored: the panel then shows the queue by its alert levels as before. An
+// error says the answers log exists but could not be read, which the panel
+// names among the failed reads rather than drawing every row as unanswered.
+func (h *Hub) needsHuman() (attention.Scores, error) {
+	if h.cfg.NeedsHuman == nil {
+		return nil, nil
+	}
+	return h.cfg.NeedsHuman()
 }
 
 func (h *Hub) pollDispatch() {

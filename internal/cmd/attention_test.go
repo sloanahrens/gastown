@@ -50,7 +50,200 @@ func attentionSet(t *testing.T, now time.Time) (town string, state attention.Sta
 	return town, state
 }
 
-func TestAttentionTableOldestFirstHidesAcked(t *testing.T) {
+// The queue is ranked by Jev's needs_human answer, highest first, with the
+// answer drawn beside each item. A low score sinks the item without hiding it,
+// and an item no answer names sorts last rather than leaving the table.
+func TestAttentionTableOrdersByNeedsHumanScore(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	town, _ := attentionSet(t, now)
+	writeAttentionScores(t, town, now)
+
+	view, err := buildAttention(town, now)
+	if err != nil {
+		t.Fatalf("buildAttention: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := attentionReport(&buf, true, false, view, now); err != nil {
+		t.Fatalf("attentionReport: %v", err)
+	}
+	out := buf.String()
+
+	// red-main scores 0.90, esc:hq-3 0.40, and stall:gastown/opal 0.20.
+	want := []string{"red-main:gastown", "esc:hq-3", "stall:gastown/opal"}
+	at := -1
+	for _, key := range want {
+		i := strings.Index(out, key)
+		if i < 0 {
+			t.Fatalf("the table dropped %q:\n%s", key, out)
+		}
+		if i < at {
+			t.Fatalf("%q is out of the score order:\n%s", key, out)
+		}
+		at = i
+	}
+	for _, score := range []string{"0.90", "0.40", "0.20"} {
+		if !strings.Contains(out, score) {
+			t.Errorf("the NEEDS column has no %s:\n%s", score, out)
+		}
+	}
+}
+
+// writeAttentionScores writes answers for the three items attentionSet raises:
+// red-main 0.90, esc:hq-3 0.40 and stall:gastown/opal 0.20, each keyed by the
+// item's first_seen the way the Jev pass writes it.
+func writeAttentionScores(t *testing.T, town string, now time.Time) {
+	t.Helper()
+
+	dir := filepath.Join(town, ".runtime", "jev")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := []attentionAnswer{
+		{Key: "red-main:gastown", FirstSeen: now.Add(-30 * time.Minute), NeedsHuman: 0.90},
+		{Key: "esc:hq-3", FirstSeen: now.Add(-10 * time.Minute), NeedsHuman: 0.40},
+		{Key: "stall:gastown/opal", FirstSeen: now.Add(-5 * time.Minute), NeedsHuman: 0.20},
+	}
+	f, err := os.OpenFile(attention.AnswersPath(town), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	for _, l := range lines {
+		raw, err := json.Marshal(l.line())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write(append(raw, '\n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// attentionAnswer is one answers-log line as the battery writes it, for the
+// fixtures: a written log's shape is the battery's, and the queue reads only the
+// key, the first_seen and the needs_human answer from it.
+type attentionAnswer struct {
+	Key        string
+	FirstSeen  time.Time
+	NeedsHuman float64
+}
+
+func (a attentionAnswer) line() map[string]any {
+	return map[string]any{
+		"ts":         a.FirstSeen.Add(time.Minute),
+		"key":        a.Key,
+		"first_seen": a.FirstSeen,
+		"answers":    map[string]any{"needs_human": a.NeedsHuman},
+	}
+}
+
+// An item Jev has not answered yet is last but still listed: the score orders
+// the queue and clears nothing from it.
+func TestAttentionTableKeepsAnItemWithNoAnswer(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	town, _ := attentionSet(t, now)
+	// Score only the oldest item; esc:hq-3 keeps no answer.
+	dir := filepath.Join(town, ".runtime", "jev")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(attentionAnswer{Key: "red-main:gastown",
+		FirstSeen: now.Add(-30 * time.Minute), NeedsHuman: 0.10}.line())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(attention.AnswersPath(town), append(raw, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	view, err := buildAttention(town, now)
+	if err != nil {
+		t.Fatalf("buildAttention: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := attentionReport(&buf, false, false, view, now); err != nil {
+		t.Fatalf("attentionReport: %v", err)
+	}
+	out := buf.String()
+	for _, key := range []string{"red-main:gastown", "esc:hq-3"} {
+		if !strings.Contains(out, key) {
+			t.Errorf("the table dropped %q, which has no answer:\n%s", key, out)
+		}
+	}
+	if red, esc := strings.Index(out, "red-main:gastown"), strings.Index(out, "esc:hq-3"); red > esc {
+		t.Errorf("the answered item is below the unanswered one:\n%s", out)
+	}
+	// The NEEDS column is the third field: a value for the answered item and a
+	// dash for the one Jev has not reached.
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		switch fields[1] {
+		case "red-main:gastown":
+			if fields[2] != "0.10" {
+				t.Errorf("the answered item reads NEEDS %q, want 0.10 in:\n%s", fields[2], line)
+			}
+		case "esc:hq-3":
+			if fields[2] != "-" {
+				t.Errorf("the unanswered item reads NEEDS %q, want a dash in:\n%s", fields[2], line)
+			}
+		}
+	}
+}
+
+// A log the queue cannot read is named, and its items read "?" rather than "-":
+// an unreadable answers log is not a queue Jev answered nothing about, and the
+// table must not draw it as one (gt-b9j3o.2).
+func TestAttentionTableNamesAnAnswersLogItCannotRead(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	town, _ := attentionSet(t, now)
+
+	// The log exists and is not a file, so it stats, opens, and cannot be read.
+	if err := os.MkdirAll(attention.AnswersPath(town), 0o755); err != nil { //nolint:gosec // G301: a test's own temp town
+		t.Fatal(err)
+	}
+
+	view, err := buildAttention(town, now)
+	if err != nil {
+		t.Fatalf("buildAttention: %v", err)
+	}
+	if view.ScoresErr == nil {
+		t.Fatalf("an unreadable answers log reported no error, scores %v", view.Scores)
+	}
+	var buf bytes.Buffer
+	if err := attentionReport(&buf, false, false, view, now); err != nil {
+		t.Fatalf("attentionReport: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "NEEDS unavailable") {
+		t.Errorf("the table did not name the answers log it could not read:\n%s", out)
+	}
+	// Every item still stands, and none of them claims Jev answered it.
+	for _, key := range []string{"red-main:gastown", "esc:hq-3"} {
+		found := false
+		for _, line := range strings.Split(out, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 3 || fields[1] != key {
+				continue
+			}
+			found = true
+			if fields[2] != "?" {
+				t.Errorf("the item %q reads NEEDS %q, want a question mark in:\n%s", key, fields[2], line)
+			}
+		}
+		if !found {
+			t.Errorf("the table dropped %q whose scores could not be read:\n%s", key, out)
+		}
+	}
+}
+
+func TestAttentionTableHidesAckedAndKeepsArrivalWithoutAnswers(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	town, _ := attentionSet(t, now)

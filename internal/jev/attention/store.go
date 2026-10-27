@@ -70,9 +70,11 @@ type Urgency struct {
 	Confidence float64 `json:"confidence"`
 }
 
-// LogPath is the attention log, one JSON line per item.
+// LogPath is the attention log, one JSON line per item. The shared readers take
+// their scores from the same path (attention.AnswersPath), so the one definition
+// lives there (gt-b9j3o.2).
 func LogPath(townRoot string) string {
-	return filepath.Join(townRoot, constants.DirRuntime, "jev", "attention.jsonl")
+	return attention.AnswersPath(townRoot)
 }
 
 // CursorPath is the file that remembers the last item a pass asked about.

@@ -68,10 +68,10 @@ type attentionAdapter struct {
 func (a *attentionAdapter) Battery() string { return AttentionBattery }
 func (a *attentionAdapter) LogPath() string { return jevattention.LogPath(a.town) }
 
-// attentionID names one logged item: its key and the first_seen that tells
-// its life apart from a recurrence of the same key.
+// attentionID names one logged item the way the queue's scores key it, so a
+// label and an answer cannot name different lives of the same key.
 func attentionID(l jevattention.Line) string {
-	return l.Key + "@" + l.FirstSeen.UTC().Format(time.RFC3339Nano)
+	return attention.LifeKey(l.Key, l.FirstSeen)
 }
 
 // Parse reads one battery line. A line whose call failed has no answers, and
