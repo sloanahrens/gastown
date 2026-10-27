@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,6 +35,126 @@ func TestIntegrationNoNewShellScripts(t *testing.T) {
 	for _, f := range findings {
 		t.Error(f)
 	}
+}
+
+// TestIntegrationAllowlistRejectsRealTree is the end-to-end control for the
+// clean run above: the same real listing and the same checked-in allowlist
+// text, with one line mutated at a time. A guard that passed the clean tree
+// but never failed a broken line would prove nothing, so each shape a bad line
+// takes must fail the guard here, over the tree itself (gt-tpg0p.15).
+func TestIntegrationAllowlistRejectsRealTree(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	text, err := os.ReadFile(filepath.Join(root, "internal", "repoguard", "shell-scripts.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracked, err := trackedShellScripts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tracked) == 0 {
+		t.Fatal("the tree lists no .sh files, so the control has nothing to mutate")
+	}
+	target := tracked[0]
+	list := func() ([]string, error) { return tracked, nil }
+
+	clean, err := ParseAllowlist(bytes.NewReader(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings, err := CheckShellScripts(list, clean); err != nil {
+		t.Fatal(err)
+	} else if len(findings) > 0 {
+		t.Fatalf("the checked-in allowlist does not hold the tree: %q", findings)
+	}
+
+	tests := []struct {
+		name  string
+		path  string
+		line  string
+		alarm string
+	}{
+		{
+			name:  "a line that lost its reason",
+			path:  target,
+			line:  target + "\t",
+			alarm: allowlistNoReasonAlarm,
+		},
+		{
+			name:  "a line deleted for a tracked script",
+			path:  target,
+			line:  "",
+			alarm: newScriptAlarm,
+		},
+		{
+			name:  "a platform reason on a path it does not name",
+			path:  "docker-entrypoint.sh",
+			line:  "docker-entrypoint.sh\tplatform: git hook",
+			alarm: fmt.Sprintf(badFitsAlarm, "platform: git hook"),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			allowed, err := ParseAllowlist(bytes.NewReader(replaceLine(t, text, tc.path, tc.line)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings, err := CheckShellScripts(list, allowed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !namesLine(findings, tc.path, tc.alarm) {
+				t.Errorf("findings = %q, want one naming %s with %q", findings, tc.path, tc.alarm)
+			}
+		})
+	}
+
+	// A line whose script git does not track is stale, and the stale check is
+	// the other direction of the comparison the guard makes.
+	extra := append(append([]byte(nil), text...), []byte("scripts/guard-control-gone.sh\tport: gt-tpg0p\n")...)
+	allowed, err := ParseAllowlist(bytes.NewReader(extra))
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, err := CheckShellScripts(list, allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !namesLine(findings, "scripts/guard-control-gone.sh", removedScriptAlarm) {
+		t.Errorf("findings = %q, want the stale line for scripts/guard-control-gone.sh", findings)
+	}
+}
+
+// replaceLine returns the allowlist text with the line naming path rewritten to
+// line, or removed when line is empty. A control that mutated nothing would
+// pass as a guard, so a missing line is fatal.
+func replaceLine(t *testing.T, text []byte, path, line string) []byte {
+	t.Helper()
+	lines := strings.Split(string(text), "\n")
+	for i, have := range lines {
+		if !strings.HasPrefix(have, path+"\t") {
+			continue
+		}
+		if line == "" {
+			return []byte(strings.Join(append(lines[:i], lines[i+1:]...), "\n"))
+		}
+		lines[i] = line
+		return []byte(strings.Join(lines, "\n"))
+	}
+	t.Fatalf("no allowlist line names %s", path)
+	return nil
+}
+
+// namesLine reports whether findings holds one that names path and holds alarm.
+func namesLine(findings []string, path, alarm string) bool {
+	for _, f := range findings {
+		if strings.Contains(f, path) && strings.Contains(f, alarm) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestIntegrationTrackedShellScriptsFailsOutsideGit: a listing that cannot see

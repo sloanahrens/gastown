@@ -435,12 +435,17 @@ var treeWideGuards = []treeWideGuard{
 		// the script's allowlist line must go in the same change.
 		//
 		// The plugin shim guard reads the same .sh paths through Glob and
-		// ReadFile, so its checkout test is integration-tier too; the shim
-		// allowlist is an input the branch can change on its own.
+		// ReadFile, so its checkout test is integration-tier too.
+		//
+		// Both allowlists are inputs a branch can change on its own: a line
+		// that lost its reason, or a line added for a script that is gone,
+		// would otherwise run no guard until the landing gate (gt-tpg0p.15).
 		pkg:   "internal/repoguard",
 		tests: []string{"TestIntegrationNoNewShellScripts", "TestIntegrationPluginRunShTree"},
 		judges: func(rel string) bool {
-			return strings.HasSuffix(rel, ".sh") || rel == "internal/repoguard/plugin-run-sh.txt"
+			return strings.HasSuffix(rel, ".sh") ||
+				rel == "internal/repoguard/plugin-run-sh.txt" ||
+				rel == "internal/repoguard/shell-scripts.txt"
 		},
 		removal: true,
 	},
