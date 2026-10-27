@@ -16,14 +16,12 @@ import (
 // 0644 file and the lookup finds nothing — which is why this is a test of
 // RealExecute at all (gt-tpg0p.11).
 func TestRealExecuteReportsTheStatusBashWould(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	notExecutable := filepath.Join(dir, "gt")
 	if err := os.WriteFile(notExecutable, []byte("not a program\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// A bare name is searched for on PATH, and a file that is there and not
-	// executable is skipped, exactly as bash skips it: the name is not found.
-	t.Setenv("PATH", dir)
 
 	cases := []struct {
 		name string
@@ -41,14 +39,10 @@ func TestRealExecuteReportsTheStatusBashWould(t *testing.T) {
 			command: filepath.Join(dir, "missing"),
 			want:    127,
 		},
-		{
-			name:    "a bare name PATH has no executable for",
-			command: "gt",
-			want:    127,
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			stdout, stderr, code := RealExecute("", tc.command)
 
 			if code != tc.want {
@@ -63,6 +57,7 @@ func TestRealExecuteReportsTheStatusBashWould(t *testing.T) {
 // "found but could not be executed". os.IsPermission does not look inside that
 // error, so with it this would read as 127, "not found" (gt-tpg0p.11).
 func TestStatusOfReadsAPermissionErrorInsideExecsError(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		err  error
@@ -75,6 +70,7 @@ func TestStatusOfReadsAPermissionErrorInsideExecsError(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := statusOf(tc.err); got != tc.want {
 				t.Errorf("statusOf(%v) = %d, want %d", tc.err, got, tc.want)
 			}

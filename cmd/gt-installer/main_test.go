@@ -123,7 +123,7 @@ func (f *fakeRun) newRun(cfg installer.Config, c *installer.Contract, paths inst
 func (f *fakeRun) respond(name string, args []string) ([]byte, []byte, int) {
 	switch {
 	case name == "make" && len(args) > 0 && args[len(args)-1] == "install-local":
-		if err := os.WriteFile(f.bin, []byte("installed binary"), 0o755); err != nil {
+		if err := os.WriteFile(f.bin, []byte("installed binary"), 0o644); err != nil {
 			return []byte(err.Error()), nil, 1
 		}
 		f.installed = true
@@ -317,7 +317,7 @@ func TestRunInstallsEndToEnd(t *testing.T) {
 	}{
 		keychain:                                {"keychain", 0o600},
 		filepath.Join(signDir, "keychain.pass"): {"test-password\n", 0o600},
-		filepath.Join(binDir, "gt"):             {"old binary", 0o755},
+		filepath.Join(binDir, "gt"):             {"old binary", 0o644},
 	}
 	for path, file := range files {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
