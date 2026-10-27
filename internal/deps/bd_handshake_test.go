@@ -489,9 +489,9 @@ func TestCheckBDHandshake_VersionReadKilledByTheBudget(t *testing.T) {
 		_, err = checkBDHandshakeClock("/usr/local/bin/bd", store, storeRetryNow, clock)
 	}()
 	// The budget ends while the version read is still waiting on it.
-	waitBounded(t, reading)
+	waitFor(reading)
 	clock.end()
-	waitBounded(t, finished)
+	waitFor(finished)
 	if err == nil {
 		t.Fatal("want refusal, got nil")
 	}
@@ -662,16 +662,12 @@ func TestBdCommandTreeSnapshotMatchesContract(t *testing.T) {
 	}
 }
 
-// waitBounded waits for ch to close. The fakes make every close deterministic,
-// so the bound only ends a test that would otherwise hang: it fails the test
-// rather than racing a clock (gt-3hcp9 review round 2).
-func waitBounded(t *testing.T, ch <-chan struct{}) {
-	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the test hung: a channel it waits on never closed")
-	}
+// waitFor waits for ch to close. The fakes close every channel deterministically,
+// and a test that never closes one is ended by the gate's per-package -timeout
+// (Makefile gate-test: the hang detector for the unit tier), not by a timer
+// here: the no-sleep rule forbids time.After and the other timers in a unit test.
+func waitFor(ch <-chan struct{}) {
+	<-ch
 }
 
 // A real, already-expired deadline reaches the store through its call context.
