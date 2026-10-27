@@ -167,7 +167,10 @@ done
 [ -n "\$out" ] || { echo "stub go: no -o" >&2; exit 2; }
 case "\$pkg" in
   *image-supervisor) cp "$SUPERVISOR_HELPER" "\$out" ;;
-  *) cp "$LOCK_HELPER" "\$out" ;;
+  # lock_wait_recorder: the install-lock position gets the recorder instead, so
+  # a case can read the wait the script computes without ever holding the lock
+  # (gt-d8aul).
+  *) if [ -e "\$T_WORLD/lock_wait_recorder" ]; then cp "$WAIT_RECORDER" "\$out"; else cp "$LOCK_HELPER" "\$out"; fi ;;
 esac
 chmod +x "\$out"
 GO
@@ -193,10 +196,13 @@ image_plugin() {
 
 run_install() {
   local t="$1" rc=0; shift
-  ( unset BD_ACTOR GT_ROLE
+  ( unset BD_ACTOR GT_ROLE INSTALL_GT_LOCK_WAIT
     if [ -n "${CALLER_ACTOR:-}" ]; then export BD_ACTOR="$CALLER_ACTOR"; fi
+    # NO_LOCK_WAIT=1 leaves INSTALL_GT_LOCK_WAIT out of the environment, so the
+    # script's own default is what the lock helper is handed (gt-d8aul).
+    [ -n "${NO_LOCK_WAIT:-}" ] || export INSTALL_GT_LOCK_WAIT="${LOCK_WAIT:-5}"
     export T_WORLD="$t" INSTALL_GT_BIN_DIR="$t/bin" INSTALL_GT_DAEMON_DIR="$t/daemon" \
-      INSTALL_GT_RIG_DIR="$t/rig" INSTALL_GT_LOCK_WAIT="${LOCK_WAIT:-5}" \
+      INSTALL_GT_RIG_DIR="$t/rig" \
       INSTALL_GT_SIGN_DIR="$t/signing" INSTALL_GT_GATEWAY_HOME="$t/home" \
       INSTALL_GT_IMAGE_RUN="$(image_plugin "$t")" INSTALL_GT_IMAGE_LOG="$t/image.log" \
       INSTALL_GT_IMAGE_LOCK="$t/image.lock" \
@@ -251,6 +257,21 @@ reported() { "$1/bin/gt" stale --json | python3 -c 'import json,sys; print(json.
 LOCK_HELPER_DIR=$(mktemp -d)
 LOCK_HELPER="$LOCK_HELPER_DIR/install-lock"
 SUPERVISOR_HELPER="$LOCK_HELPER_DIR/image-supervisor"
+# What a world marked with lock_wait_recorder gets in the install-lock position:
+# it writes the --wait the install hands it to $T_WORLD/lock-waits.log and exits
+# 75 (busy) at once, so a case measures the computed wait without spending it
+# (gt-d8aul).
+WAIT_RECORDER="$LOCK_HELPER_DIR/install-lock-wait-recorder"
+cat > "$WAIT_RECORDER" <<'REC'
+#!/usr/bin/env bash
+prev=""
+for a in "$@"; do
+  [ "$prev" != "--wait" ] || printf '%s\n' "$a" >> "$T_WORLD/lock-waits.log"
+  prev="$a"
+done
+exit 75
+REC
+chmod +x "$WAIT_RECORDER"
 
 # The template is a whole temp world, and a case that trips set -e exits before
 # the signing section claims the EXIT trap, so this trap has to exist from here
@@ -1660,6 +1681,23 @@ rc=$( export GT_TOWN_ROOT="$T"
   && grep -qF "ERROR: the image was not built and published at the installed commit, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)" "$T/run.out" \
   && pass "image: a deferral under the switch fails the install closed, with the old binary in place" \
   || fail "image: fail-closed deferral: rc=$rc reported=$(reported "$T") want=$(cat "$T/c1") marker=$([ -e "$T/daemon/restart-pending.json" ] && echo yes || echo no) make=[$(sed 's/ .*//' "$T/make.log" 2>/dev/null | tr '\n' ' ')] out=$(tail -4 "$T/run.out")"
+
+# --- Case 64: with INSTALL_GT_LOCK_WAIT unset, the wait handed to the lock
+# helper is the image alarm plus a minute, and the 1200 floor stands for an
+# alarm that is not a whole number of seconds above zero (gt-d8aul). The helper
+# is the recorder, which reports the lock busy at once, so no case waits. Each
+# row below turns one mutation of the default red: the 300 it was before, the
+# +60 dropped, the floor changed, a zero alarm accepted, the regex dropped. ---
+for pair in "unset 1260" "300 360" "0 1260" "soon 1260"; do
+  alarm=${pair% *}; want=${pair#* }
+  T=$(make_world); : > "$T/lock_wait_recorder"
+  rc=$( unset INSTALL_GT_IMAGE_ALARM
+        [ "$alarm" = unset ] || export INSTALL_GT_IMAGE_ALARM="$alarm"
+        NO_LOCK_WAIT=1 run_install "$T" --sha "$(cat "$T/c2")" --source manual )
+  [ "$rc" = "3" ] && [ "$(cat "$T/lock-waits.log" 2>/dev/null)" = "$want" ] \
+    && pass "lock wait: alarm '$alarm' hands the helper --wait $want" \
+    || fail "lock wait: alarm '$alarm': rc=$rc wait='$(cat "$T/lock-waits.log" 2>/dev/null)' want='$want' $(tail -2 "$T/run.out")"
+done
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
