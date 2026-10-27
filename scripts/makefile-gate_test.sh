@@ -366,15 +366,22 @@ else
 fi
 
 # The node prune (gt-e14j6) is its own target, called by polecat-image after the
-# build. The gate runs it against a fake docker: the old image is removed, and a
-# node that cannot list its images keeps everything and the failure is named.
-if pn=$(dry polecat-image BD_SRC=/somewhere/else) \
+# build only when POLE_NODE_PRUNE=1: a build leaves the sandbox nodes alone
+# unless asked (gt-06ni7). The gate then runs the target against a fake docker:
+# the old image is removed, and a node that cannot list its images keeps
+# everything and the failure is named.
+if pn=$(dry polecat-image BD_SRC=/somewhere/else) && ! grep -q -F 'polecat-node-prune' <<<"$pn"; then
+  pass "polecat-image does not call polecat-node-prune by default (gt-06ni7)"
+else
+  fail "polecat-image does not call polecat-node-prune by default (gt-06ni7)" "$pn"
+fi
+if pn=$(dry polecat-image BD_SRC=/somewhere/else POLE_NODE_PRUNE=1) \
   && bline=$(grep -n 'docker build' <<<"$pn" | head -1 | cut -d: -f1) \
   && nline=$(grep -n 'polecat-node-prune' <<<"$pn" | head -1 | cut -d: -f1) \
   && [[ -n "$bline" && -n "$nline" && "$nline" -gt "$bline" ]]; then
-  pass "polecat-image calls polecat-node-prune after docker build"
+  pass "polecat-image calls polecat-node-prune after docker build with POLE_NODE_PRUNE=1"
 else
-  fail "polecat-image calls polecat-node-prune after docker build" "$pn"
+  fail "polecat-image calls polecat-node-prune after docker build with POLE_NODE_PRUNE=1" "$pn"
 fi
 prunebin="$SEEDTMP/prunebin"
 mkdir -p "$prunebin"
@@ -479,8 +486,9 @@ rm -rf "$pdir" "$ptown"
 # recipe against stub go and docker: the stub helper prints a known sha, and
 # docker's recorded arguments show it in the label. The same run drives the
 # helper failing and printing nothing, each of which must stop the recipe before
-# docker runs. The stub go logs every invocation, so the run's node prune is
-# checked too, and each refusal is checked to have stopped before it.
+# docker runs. The stub go logs every invocation, so the node prune is checked
+# too: absent from a default build (gt-06ni7), present with POLE_NODE_PRUNE=1,
+# and stopped before by each refusal.
 lrepo="$(mktemp -d)"
 lbin="$(mktemp -d)"
 cp "$ROOT/Makefile" "$lrepo/"
@@ -520,25 +528,45 @@ git -C "$lrepo" -c user.name=test -c user.email=test@example.invalid commit -q -
 limg=(make -C "$lrepo" --no-print-directory polecat-image BD_SRC=/somewhere/else
   POLE_TOWN="$lrepo/town" POLE_SEED_DIR="$lrepo/seed" POLE_RIG_GO_MODS="$lrepo/go.mod")
 stubcommit=3b90ab0c0ffee0000000000000000000000000aa
+# A run leaves the binaries it built in the scratch tree, and the recipe refuses
+# a tree with untracked files, so each case starts from the committed tree.
+lclean() { rm -rf "$lrepo/deploy/polecat/bin" "$lrepo/deploy/polecat/seed"; }
 lrc=0
 lout=$(PATH="$lbin:$PATH" STUB_BD_COMMIT="$stubcommit" DOCKER_ARGS_LOG="$lbin/docker.args" GO_ARGS_LOG="$lbin/go.args" "${limg[@]}" 2>&1) || lrc=$?
 if [[ "$lrc" == 0 ]] \
-  && grep -q -F -- "--label org.gastown.bd-commit=$stubcommit" "$lbin/docker.args" 2>/dev/null \
-  && grep -q -F 'run ./cmd/nodeprune' "$lbin/go.args" 2>/dev/null; then
+  && grep -q -F -- "--label org.gastown.bd-commit=$stubcommit" "$lbin/docker.args" 2>/dev/null; then
   pass "polecat-image labels the image with the commit the bd build helper printed"
 else
   fail "polecat-image labels the image with the commit the bd build helper printed (rc=$lrc)" "$lout / $(cat "$lbin/docker.args" 2>/dev/null) / $(cat "$lbin/go.args" 2>/dev/null)"
 fi
-# A failed helper and an empty commit each stop the recipe before docker, so no
-# image is built carrying a label for a commit that was not compiled, and before
-# the node prune. A run leaves the binaries it built in the scratch tree, and the
-# recipe refuses a tree with untracked files, so each case starts from the
-# committed tree.
-lclean() { rm -rf "$lrepo/deploy/polecat/bin" "$lrepo/deploy/polecat/seed"; }
+# The node prune is opt-in: a default build changes the image registry and
+# leaves the cluster alone, and POLE_NODE_PRUNE=1 still prunes after it (gt-06ni7).
 lclean
 rm -f "$lbin/docker.args" "$lbin/go.args"
 lrc=0
-lout=$(PATH="$lbin:$PATH" STUB_BD_EXIT=1 DOCKER_ARGS_LOG="$lbin/docker.args" GO_ARGS_LOG="$lbin/go.args" "${limg[@]}" 2>&1) || lrc=$?
+lout=$(PATH="$lbin:$PATH" STUB_BD_COMMIT="$stubcommit" DOCKER_ARGS_LOG="$lbin/docker.args" GO_ARGS_LOG="$lbin/go.args" "${limg[@]}" 2>&1) || lrc=$?
+if [[ "$lrc" == 0 ]] && [[ -e "$lbin/docker.args" ]] \
+  && ! grep -q -F 'run ./cmd/nodeprune' "$lbin/go.args" 2>/dev/null; then
+  pass "a default polecat-image leaves the sandbox nodes alone (gt-06ni7)"
+else
+  fail "a default polecat-image leaves the sandbox nodes alone (gt-06ni7)" "$lout / $(cat "$lbin/go.args" 2>/dev/null)"
+fi
+lclean
+rm -f "$lbin/docker.args" "$lbin/go.args"
+lrc=0
+lout=$(PATH="$lbin:$PATH" STUB_BD_COMMIT="$stubcommit" DOCKER_ARGS_LOG="$lbin/docker.args" GO_ARGS_LOG="$lbin/go.args" "${limg[@]}" POLE_NODE_PRUNE=1 2>&1) || lrc=$?
+if [[ "$lrc" == 0 ]] && grep -q -F 'run ./cmd/nodeprune' "$lbin/go.args" 2>/dev/null; then
+  pass "polecat-image prunes the sandbox nodes after the build with POLE_NODE_PRUNE=1 (gt-06ni7)"
+else
+  fail "polecat-image prunes the sandbox nodes after the build with POLE_NODE_PRUNE=1 (gt-06ni7)" "$lout / $(cat "$lbin/go.args" 2>/dev/null)"
+fi
+# A failed helper and an empty commit each stop the recipe before docker, so no
+# image is built carrying a label for a commit that was not compiled, and before
+# the node prune the run asked for.
+lclean
+rm -f "$lbin/docker.args" "$lbin/go.args"
+lrc=0
+lout=$(PATH="$lbin:$PATH" STUB_BD_EXIT=1 DOCKER_ARGS_LOG="$lbin/docker.args" GO_ARGS_LOG="$lbin/go.args" "${limg[@]}" POLE_NODE_PRUNE=1 2>&1) || lrc=$?
 if [[ "$lrc" != 0 ]] && grep -q -F 'the bd build failed' <<<"$lout" && [[ ! -e "$lbin/docker.args" ]] \
   && ! grep -q -F 'run ./cmd/nodeprune' "$lbin/go.args" 2>/dev/null; then
   pass "polecat-image stops before docker when the bd build fails"
@@ -548,7 +576,7 @@ fi
 lclean
 rm -f "$lbin/docker.args" "$lbin/go.args"
 lrc=0
-lout=$(PATH="$lbin:$PATH" STUB_BD_COMMIT= DOCKER_ARGS_LOG="$lbin/docker.args" GO_ARGS_LOG="$lbin/go.args" "${limg[@]}" 2>&1) || lrc=$?
+lout=$(PATH="$lbin:$PATH" STUB_BD_COMMIT= DOCKER_ARGS_LOG="$lbin/docker.args" GO_ARGS_LOG="$lbin/go.args" "${limg[@]}" POLE_NODE_PRUNE=1 2>&1) || lrc=$?
 if [[ "$lrc" != 0 ]] && grep -q -F 'printed no commit' <<<"$lout" && [[ ! -e "$lbin/docker.args" ]] \
   && ! grep -q -F 'run ./cmd/nodeprune' "$lbin/go.args" 2>/dev/null; then
   pass "polecat-image refuses an empty bd commit before docker builds the image"
