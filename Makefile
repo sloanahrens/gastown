@@ -218,10 +218,20 @@ polecat-seed-pins:
 		echo "$$rig $$sha" >> "$$tmp"; \
 	done; mv "$$tmp" $(POLE_SEED_PINS); cat $(POLE_SEED_PINS)
 
-# RIGS is the space-separated rig names whose cache volume a sandbox mounts:
-# make polecat-caches RIGS="gastown om". A second run changes nothing.
+# The shared cache's seed Job (gt-s9r1s): the claim every kubernetes sandbox
+# mounts, the image its containers run, and the Forgejo host they clone from.
+# An empty POLE_FORGEJO_HOST keeps each rig's configured host. A host:port here
+# is the address the cluster reaches Forgejo at.
+POLE_CACHE_CLAIM ?= gt-cache
+POLE_CACHE_NAMESPACE ?=
+POLE_CACHE_IMAGE ?= $(POLE_IMAGE):dev
+POLE_FORGEJO_HOST ?=
+
+# RIGS narrows the seed to the named pins: make polecat-caches RIGS="gastown
+# om". Empty seeds every pin in POLE_SEED_PINS. The Job's marker skips the
+# steps a rerun with the same pins would repeat.
 polecat-caches:
-	scripts/polecat-caches.sh $(RIGS)
+	@go run ./cmd/polecatcaches -pins $(POLE_SEED_PINS) -town $(POLE_TOWN) -image $(POLE_CACHE_IMAGE) -claim $(POLE_CACHE_CLAIM) -namespace "$(POLE_CACHE_NAMESPACE)" -forgejo-host "$(POLE_FORGEJO_HOST)" $(RIGS)
 
 # Profiles are imported and the two providers created from the key files under
 # ~/.config/gt; a provider that already exists is left alone, so a rerun is a no-op.

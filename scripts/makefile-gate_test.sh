@@ -228,10 +228,15 @@ if bdlabel=$(dry polecat-image BD_SRC=/somewhere/else BD_COMMIT=3b90ab0) \
 else
   fail "polecat-image labels the image with the bd commit the helper built" "$bdlabel"
 fi
-if cout=$(dry polecat-caches RIGS="gastown om") && grep -q -F 'scripts/polecat-caches.sh gastown om' <<<"$cout"; then
-  pass "make -n polecat-caches passes RIGS to the script"
+if cout=$(dry polecat-caches RIGS="gastown om") \
+  && grep -q -F 'go run ./cmd/polecatcaches' <<<"$cout" \
+  && grep -q -F -- '-pins deploy/polecat/seed-pins' <<<"$cout" \
+  && grep -q -F -- '-claim gt-cache' <<<"$cout" \
+  && grep -q -F 'gastown om' <<<"$cout" \
+  && ! grep -q -F 'polecat-caches.sh' <<<"$cout"; then
+  pass "make -n polecat-caches runs the Go command with the pins, the claim and RIGS"
 else
-  fail "make -n polecat-caches passes RIGS to the script" "$cout"
+  fail "make -n polecat-caches runs the Go command with the pins, the claim and RIGS" "$cout"
 fi
 if oout=$(dry openshell-providers) && grep -q -F 'scripts/openshell-providers.sh' <<<"$oout"; then
   pass "make -n openshell-providers runs the providers script"
@@ -938,19 +943,10 @@ else
   fail "test-integration refuses an empty docker.txt instead of testing nothing (rc=$rc)" "$(cat "$TMP/err")"
 fi
 
-# The two polecat sandbox scripts, driven against docker and openshell stubs.
-# The providers script reads key files, so it is pointed at a throwaway
-# GT_CONFIG_DIR: no real key file is read and no secret is printed.
+# The polecat sandbox's providers script, driven against an openshell stub.
+# It reads key files, so it is pointed at a throwaway GT_CONFIG_DIR: no real
+# key file is read and no secret is printed.
 echo "polecat sandbox scripts, driven with stubs"
-cat >"$TMP/bin/docker" <<'STUB'
-#!/usr/bin/env bash
-echo "docker $*" >>"$STUB_LOG"
-if [[ "$1 $2" == "volume inspect" ]]; then
-  [[ -n "${STUB_VOLUME_EXISTS:-}" && "$3" == "${STUB_VOLUME_EXISTS}" ]] && exit 0
-  exit 1
-fi
-exit 0
-STUB
 cat >"$TMP/bin/openshell" <<'STUB'
 #!/usr/bin/env bash
 echo "openshell $*" >>"$STUB_LOG"
@@ -966,7 +962,7 @@ case "$1 $2" in
 esac
 exit 0
 STUB
-chmod +x "$TMP/bin/docker" "$TMP/bin/openshell"
+chmod +x "$TMP/bin/openshell"
 
 # The stub gt for the openshell-providers cases below, so none of them runs the
 # real gt that happens to be installed on the host: an installed gt older than
@@ -1040,33 +1036,12 @@ if [[ "$truncated" != 0 && "$missing_render" != 0 ]] && [[ "$(grep -c -F 'stub g
 else
   fail "the stub gt refuses a flag with no value and --from-export without --render (truncated=$truncated missing_render=$missing_render)" "$(cat "$TMP/stub-err")"
 fi
-caches="$ROOT/scripts/polecat-caches.sh"
-
-: >"$TMP/calls"
-rc=0
-env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" bash "$caches" gastown om >"$TMP/out" 2>"$TMP/err" || rc=$?
-if [[ "$rc" == 0 ]] && grep -q -x 'docker volume create --label openshell.ai/sandbox-attachable=true --label openshell.ai/sandbox-attachable-workspace=default gt-cache-gastown' "$TMP/calls" && grep -q -x 'docker volume create --label openshell.ai/sandbox-attachable=true --label openshell.ai/sandbox-attachable-workspace=default gt-cache-om' "$TMP/calls"; then
-  pass "polecat-caches creates a labelled gt-cache-<rig> volume per rig"
+# The Docker volume script is gone with the Docker cache path (gt-s9r1s). The
+# Go command that replaced it is pinned above and in its unit tests.
+if [[ ! -e "$ROOT/scripts/polecat-caches.sh" ]]; then
+  pass "the Docker volume script scripts/polecat-caches.sh is gone"
 else
-  fail "polecat-caches creates a labelled gt-cache-<rig> volume per rig (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
-fi
-
-: >"$TMP/calls"
-rc=0
-env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" STUB_VOLUME_EXISTS=gt-cache-gastown bash "$caches" gastown om >"$TMP/out" 2>"$TMP/err" || rc=$?
-if [[ "$rc" == 0 ]] && ! grep -q -F 'create' <<<"$(grep -F 'gt-cache-gastown' "$TMP/calls")" && grep -q -F 'gt-cache-om' "$TMP/calls"; then
-  pass "polecat-caches leaves an existing volume alone and still creates the missing one"
-else
-  fail "polecat-caches leaves an existing volume alone and still creates the missing one (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
-fi
-
-: >"$TMP/calls"
-rc=0
-env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" bash "$caches" >"$TMP/out" 2>"$TMP/err" || rc=$?
-if [[ "$rc" == 2 ]] && ! grep -q -F 'volume create' "$TMP/calls" && grep -q -F 'usage:' "$TMP/err"; then
-  pass "polecat-caches refuses to run with no rigs, before touching docker"
-else
-  fail "polecat-caches refuses to run with no rigs, before touching docker (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+  fail "the Docker volume script scripts/polecat-caches.sh is gone" "$ROOT/scripts/polecat-caches.sh still exists"
 fi
 
 providers="$ROOT/scripts/openshell-providers.sh"
