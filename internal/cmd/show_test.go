@@ -1,6 +1,41 @@
 package cmd
 
-import "testing"
+import (
+	"errors"
+	"slices"
+	"strings"
+	"testing"
+)
+
+// TestRunShowWithPrintsBdTextAndReturnsItsError drives gt show's command body:
+// bd's text reaches the writer and bd's failure is the command's error, so a
+// failed read cannot become a silent exit 0 (gt-p85pw.10, gt-5bv77).
+func TestRunShowWithPrintsBdTextAndReturnsItsError(t *testing.T) {
+	t.Parallel()
+	bdErr := errors.New("bd show gt-x: exit status 1: no issue found")
+
+	var out strings.Builder
+	var gotID string
+	var gotArgs []string
+	show := func(id string, args []string) (string, error) {
+		gotID, gotArgs = id, args
+		return "◇ gt-x · title\n", bdErr
+	}
+
+	err := runShowWith(&out, []string{"--json", "gt-x"}, show)
+	if !errors.Is(err, bdErr) {
+		t.Errorf("runShowWith err = %v, want bd's error", err)
+	}
+	if want := "◇ gt-x · title\n"; out.String() != want {
+		t.Errorf("out = %q, want %q", out.String(), want)
+	}
+	if gotID != "gt-x" {
+		t.Errorf("show id = %q, want the positional ID", gotID)
+	}
+	if !slices.Equal(gotArgs, []string{"--json", "gt-x"}) {
+		t.Errorf("show args = %v, want the caller's argv", gotArgs)
+	}
+}
 
 func TestExtractBeadIDFromArgs(t *testing.T) {
 	t.Parallel()

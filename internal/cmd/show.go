@@ -49,11 +49,17 @@ func runShow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve working directory: %w", err)
 	}
+	return runShowWith(os.Stdout, args, beads.New(cwd).ShowText)
+}
+
+// runShowWith is runShow's body over the writer and the show read, so a test
+// drives the call site where bd's failure becomes the command's exit code.
+func runShowWith(out io.Writer, args []string, show func(string, []string) (string, error)) error {
 	// Decision (gt-p85pw.10): bd now runs with its stdout piped to gt, not on
 	// the operator's terminal, so it prints without a tty. Its stderr is in the
 	// returned error, not shown directly.
-	text, err := beads.New(cwd).ShowText(extractBeadIDFromArgs(args), args)
-	return writeShowText(os.Stdout, text, err)
+	text, err := show(extractBeadIDFromArgs(args), args)
+	return writeShowText(out, text, err)
 }
 
 // writeShowText prints bd show's text to out, then returns bd's error, so the

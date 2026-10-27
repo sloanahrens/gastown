@@ -28,3 +28,25 @@ func TestWriteShowTextPrintsTheTextAndReturnsTheError(t *testing.T) {
 		t.Errorf("failure with no text: wrote %q, err %v; want nothing and bd's error", out.String(), err)
 	}
 }
+
+// A writer that refuses the text makes writeShowText return the write error,
+// not bd's: a closed stdout is reported instead of being lost (gt-p85pw.10,
+// gt-g25ql).
+func TestWriteShowTextReturnsTheWriteError(t *testing.T) {
+	t.Parallel()
+	writeErr := errors.New("write |1: broken pipe")
+	bdErr := errors.New("bd show gt-x: exit status 1: no issue found")
+
+	got := writeShowText(refusingWriter{err: writeErr}, "partial text\n", bdErr)
+	if !errors.Is(got, writeErr) {
+		t.Errorf("err = %v, want the writer's error", got)
+	}
+	if errors.Is(got, bdErr) {
+		t.Errorf("err = %v, want the write error, not bd's", got)
+	}
+}
+
+// refusingWriter refuses every write with err.
+type refusingWriter struct{ err error }
+
+func (w refusingWriter) Write([]byte) (int, error) { return 0, w.err }
