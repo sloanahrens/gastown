@@ -124,6 +124,33 @@ func TestWithBackoffRowsNamesTheSubmitter(t *testing.T) {
 	}
 }
 
+// A row that already names its submitter keeps it: the lookup fills the By of a
+// row that carries none and never replaces one the row has (gt-gclus).
+func TestWithBackoffRowsKeepsASubmitterTheRowCarries(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	backoff := []dashboard.LandingRow{
+		{At: now, Bead: "gt-known", Rig: "gastown", Outcome: "backoff", Polecat: "heron"},
+		{At: now, Bead: "gt-looked-up", Rig: "gastown", Outcome: "backoff"},
+	}
+	who := landingNameLookup([]land.SubmissionRecord{
+		{Rig: "gastown", Bead: "gt-known", Branch: "polecat/agate/gt-known+1", SeenAt: now.Add(-time.Hour)},
+		{Rig: "gastown", Bead: "gt-looked-up", Branch: "polecat/agate/gt-looked-up+1", SeenAt: now.Add(-time.Hour)},
+	})
+
+	got := withBackoffRows(nil, backoff, nil, who)
+	byBead := map[string]string{}
+	for _, r := range got {
+		byBead[r.Bead] = r.Polecat
+	}
+	if byBead["gt-known"] != "heron" {
+		t.Errorf("gt-known By = %q, want heron, the name the row already carries", byBead["gt-known"])
+	}
+	if byBead["gt-looked-up"] != "agate" {
+		t.Errorf("gt-looked-up By = %q, want agate from the submission log", byBead["gt-looked-up"])
+	}
+}
+
 // The pane reads every rig's snapshot, and a rig with nothing failing adds no
 // row (gt-fn9e6.44).
 func TestDashBackoffReadsEveryRigsSnapshot(t *testing.T) {

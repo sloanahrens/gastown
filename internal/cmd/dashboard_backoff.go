@@ -96,7 +96,12 @@ func withBackoffRows(rows, backoff []dashboard.LandingRow, title, who func(rig, 
 		if title != nil {
 			row.Title = title(row.Rig, row.Bead)
 		}
-		row.Polecat = landingName(who, row.Rig, row.Bead)
+		// The lookup fills the By of a row that names no one; a row that
+		// already carries a name keeps it, since that name came from a closer
+		// record than the submission log (gt-gclus).
+		if row.Polecat == "" {
+			row.Polecat = landingName(who, row.Rig, row.Bead)
+		}
 		out = append(out, row)
 	}
 	return append(out, rows...)

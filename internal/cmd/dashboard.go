@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -239,7 +240,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, jevScorecardArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay, dashboardMangoDir)
+	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, jevScorecardArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay, dashboardMangoDir, cmd.OutOrStdout())
 	if err != nil {
 		return err
 	}
@@ -340,7 +341,7 @@ func dashboardClaudePlanPath(townRoot string) string {
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
 // when the server stops.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv, jevScorecardArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string) (*dashboard.Hub, func(), error) {
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv, jevScorecardArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, out io.Writer) (*dashboard.Hub, func(), error) {
 	beadReads := openTailBeads(townRoot)
 	rigOfBead := landingRig(townRoot)
 	// The deploy block reads the same repos through the same viewer client as
@@ -387,7 +388,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// Who submitted a landing, for the rows whose own record names no branch:
 	// read from the landing worker's submission record, never from the bead,
 	// which a rejection reassigns (gt-gclus).
-	submitters := newDashSubmitters(townRoot)
+	submitters := newDashSubmitters(townRoot, dashboardLogf(out))
 	seatCache := newDashSeatCache()
 	// Who holds a bead, read once per row: the Landings pane's live rows and
 	// the om panel's running reviews both name a landing's polecat, and they

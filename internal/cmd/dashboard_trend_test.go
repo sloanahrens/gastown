@@ -562,7 +562,7 @@ func TestDashSubmittersReadsTheSubmissionLog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	who := newDashSubmitters(town).get()
+	who := newDashSubmitters(town, nil).get()
 	for bead, want := range map[string]string{
 		"gt-rejected": "heron",
 		"gt-other":    "mica",
@@ -590,7 +590,7 @@ func TestDashSubmittersRereadsWhenTheLogGrows(t *testing.T) {
 	if err := os.WriteFile(subPath, []byte(first), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s := newDashSubmitters(town)
+	s := newDashSubmitters(town, nil)
 	if got := s.get()("gastown", "gt-rework"); got != "agate" {
 		t.Fatalf("By = %q after the first submission, want agate", got)
 	}
@@ -604,6 +604,94 @@ func TestDashSubmittersRereadsWhenTheLogGrows(t *testing.T) {
 	}
 	if got := s.get()("gastown", "gt-rework"); got != "mica" {
 		t.Errorf("By = %q after the resubmission, want mica: the lookup must re-read a log that grew", got)
+	}
+}
+
+// writeUnreadableSubmissionLog puts a submission log at path whose one line is
+// past the reader's line buffer, so reading it fails without the file going
+// missing or locked: a read error a later poll can find cured on the same
+// stamp.
+func writeUnreadableSubmissionLog(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	broken := strings.Repeat("x", 2<<20) + "\n"
+	if err := os.WriteFile(path, []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return broken
+}
+
+// A submission log that cannot be read is reported, not dropped, and names no
+// one: the rows it would have named draw the dash (gt-gclus).
+func TestDashSubmittersReportsAnUnreadableLog(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	subPath := land.SubmissionsSeenPath(town)
+	writeUnreadableSubmissionLog(t, subPath)
+
+	var lines []string
+	who := newDashSubmitters(town, func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}).get()
+	if got := who("gastown", "gt-rework"); got != "" {
+		t.Errorf("By = %q with an unreadable log, want a dash", got)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("reported %d line(s) %q, want one saying the read failed", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], subPath) {
+		t.Errorf("reported %q, want the log's path %s named", lines[0], subPath)
+	}
+}
+
+// A read that failed is not remembered: the next poll reads the log again even
+// though the file did not move, so a log that becomes readable on the same
+// stamp is picked up instead of drawing the dash until something writes it
+// (gt-gclus).
+func TestDashSubmittersRetriesAFailedRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	subPath := land.SubmissionsSeenPath(town)
+	broken := writeUnreadableSubmissionLog(t, subPath)
+	// Pin the stamp: the readable log below has the broken one's size, inode
+	// and mtime, so only a read that was never cached can see the name.
+	pinned := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(subPath, pinned, pinned); err != nil {
+		t.Fatal(err)
+	}
+	before, err := stampFile(subPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := newDashSubmitters(town, nil)
+	if got := s.get()("gastown", "gt-rework"); got != "" {
+		t.Fatalf("By = %q with an unreadable log, want a dash", got)
+	}
+
+	good := `{"seen_at":"2026-10-26T19:00:00Z","bead":"gt-rework","rig":"gastown","branch":"polecat/agate/gt-rework+1","head":"1111aaaa"}`
+	// The readable log is the record on one line and blank lines after it: the
+	// reader skips a blank line, so the size matches the broken log's while
+	// every line is short enough to read.
+	cured := good + "\n" + strings.Repeat("\n", len(broken)-len(good)-1)
+	if err := os.WriteFile(subPath, []byte(cured), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(subPath, pinned, pinned); err != nil {
+		t.Fatal(err)
+	}
+	after, err := stampFile(subPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("stamp moved from %+v to %+v; the readable log must keep the stamp", before, after)
+	}
+
+	if got := s.get()("gastown", "gt-rework"); got != "agate" {
+		t.Errorf("By = %q once the log is readable, want agate: a failed read must not be cached", got)
 	}
 }
 

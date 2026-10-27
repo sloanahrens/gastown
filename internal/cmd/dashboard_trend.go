@@ -164,6 +164,10 @@ const submissionNameRows = 500
 // draws the dash rather than a model name.
 type dashSubmitters struct {
 	townRoot string
+	// logf reports a read that failed. The operator has no other sight of it:
+	// a failed read is not a row, and the page it feeds is the only place the
+	// rows appear (gt-gclus).
+	logf func(format string, args ...any)
 
 	mu    sync.Mutex
 	stamp fileStamp
@@ -171,26 +175,35 @@ type dashSubmitters struct {
 	names func(rig, bead string) string
 }
 
-func newDashSubmitters(townRoot string) *dashSubmitters {
-	return &dashSubmitters{townRoot: townRoot}
+func newDashSubmitters(townRoot string, logf func(format string, args ...any)) *dashSubmitters {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	return &dashSubmitters{townRoot: townRoot, logf: logf}
 }
+
+func noSubmitters(string, string) string { return "" }
 
 // get returns the name lookup, re-reading the log only when it moved. A log
 // that cannot be read names no one: the rows it would have named draw the
 // page's dash, which says "not known" rather than naming whoever holds the
-// bead now, and the next poll tries the read again.
+// bead now. The failure is reported and is not remembered — the read marks the
+// log read only when it succeeded — so the next poll reads the log again
+// rather than serving the empty answer until the file moves.
 func (s *dashSubmitters) get() func(rig, bead string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	subPath := land.SubmissionsSeenPath(s.townRoot)
 	st, _ := stampFile(subPath)
-	if !s.read || st != s.stamp {
-		subs, err := land.ReadRecentSubmissionRecords(subPath, submissionNameRows)
-		if err != nil {
-			subs = nil
-		}
-		s.names, s.stamp, s.read = landingNameLookup(subs), st, true
+	if s.read && st == s.stamp {
+		return s.names
 	}
+	subs, err := land.ReadRecentSubmissionRecords(subPath, submissionNameRows)
+	if err != nil {
+		s.logf("the submission log %s could not be read, so the Landings rows it names draw a dash: %v", subPath, err)
+		return noSubmitters
+	}
+	s.names, s.stamp, s.read = landingNameLookup(subs), st, true
 	return s.names
 }
 
