@@ -478,7 +478,8 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		}
 		d.logger.Printf("landing_worker: %s: om review on (%s)", rigName, omPath)
 		reviewer = land.OMReviewer{Path: omPath, OutDir: omDir,
-			Timeout: landingWorkerDuration(cfg.OMTimeoutStr, land.DefaultOMTimeout)}
+			Timeout:  landingWorkerDuration(cfg.OMTimeoutStr, land.DefaultOMTimeout),
+			Verdicts: land.TownVerdicts(townRoot, rigName)}
 	} else {
 		d.logger.Printf("landing_worker: %s: om review OFF (patrols.landing_worker.review=false); landings record om_verdict skipped", rigName)
 	}

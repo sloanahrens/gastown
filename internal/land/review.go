@@ -190,6 +190,10 @@ type ReviewInput struct {
 	RoundsText string
 	// Logf receives the reviewer's warning lines; nil drops them.
 	Logf func(format string, args ...any)
+
+	// omVer is the om ReviewBead read before the run, for the verdict store's
+	// record (gt-uxqb9).
+	omVer string
 }
 
 // BeadReviewer is a Reviewer that can be told which work bead the diff belongs
@@ -269,6 +273,10 @@ type OMReviewer struct {
 	Out io.Writer
 	// Timeout bounds each attempt; 0 means DefaultOMTimeout.
 	Timeout time.Duration
+	// Verdicts, when set, keeps the raw JSON of every verdict the review
+	// reaches, where the summary and finding details the bead notes drop
+	// survive a landing (gt-uxqb9). Nil means off.
+	Verdicts *VerdictStore
 
 	run runFunc // nil means realRun
 	// criteriaWriter writes the acceptance text and returns its path; nil
@@ -319,6 +327,7 @@ func (r OMReviewer) ReviewBead(ctx context.Context, in ReviewInput) (Verdict, er
 	// that renames a new om over the path mid-review would otherwise have the
 	// verdict name a binary that did not reach it (gt-f3da3).
 	version := r.omVersion(ctx, in)
+	in.omVer = version
 	v, err := r.reviewOnce(ctx, in)
 	v.Version = version
 	if err != nil {
@@ -487,6 +496,9 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	if v.Verdict != want {
 		return Verdict{}, fmt.Errorf("om review exited %d but its verdict file says %q", code, v.Verdict)
 	}
+	// om's JSON is kept before the threshold below rewrites the verdict: the
+	// store records what om said, whatever the landing decides on it.
+	r.storeVerdict(in, data, argv)
 	// The rig's own threshold decides too: an approve scored below it is a
 	// request for changes, whatever om's exit code said.
 	threshold, err := OMThreshold(dir)
@@ -780,6 +792,33 @@ func omHelpListsFlag(help, flag string) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '_'
 	}
 	return slices.ContainsFunc(strings.FieldsFunc(help, notFlagRune), func(f string) bool { return f == flag })
+}
+
+// storeVerdict keeps om's raw JSON for this review, when one is configured and
+// the review names its work bead. The store is a record for a later reader,
+// never a precondition of the landing: a write that fails is a warning line and
+// the verdict stands (gt-uxqb9).
+func (r OMReviewer) storeVerdict(in ReviewInput, raw []byte, argv []string) {
+	if r.Verdicts == nil || in.BeadID == "" {
+		return
+	}
+	rec := VerdictRecord{Bead: in.BeadID, Head: in.Head, OMVersion: in.omVer,
+		Flags: flagNames(argv), Verdict: raw}
+	if err := r.Verdicts.Write(rec, in.Logf); err != nil {
+		r.warnf(in, "could not store the verdict (%v); the review stands", err)
+	}
+}
+
+// flagNames is the flags argv carries, in order: what the store records so a
+// reader knows what om was given.
+func flagNames(argv []string) []string {
+	var flags []string
+	for _, a := range argv {
+		if strings.HasPrefix(a, "-") {
+			flags = append(flags, a)
+		}
+	}
+	return flags
 }
 
 // warnf writes one reviewer warning to the landing log Land supplied, falling
