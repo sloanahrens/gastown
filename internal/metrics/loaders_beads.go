@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -124,6 +125,29 @@ func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
 		}
 	}
 	return rows
+}
+
+// ShownBeads parses `bd show --json` output into one row per bead, keeping
+// what attribution reads: the bead's id, the last Branch line of its notes and
+// its assignee. ok is false when out is not the JSON array bd show prints, so
+// a read that failed is never mistaken for a bead that names no branch.
+func ShownBeads(out []byte) ([]BeadRow, bool) {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, false
+	}
+	var shown []bdListBead
+	if err := json.Unmarshal(trimmed, &shown); err != nil {
+		return nil, false
+	}
+	rows := make([]BeadRow, 0, len(shown))
+	for _, b := range shown {
+		if b.ID == "" {
+			continue
+		}
+		rows = append(rows, BeadRow{ID: b.ID, Branch: BranchLine(b.Notes), Assignee: b.Assignee})
+	}
+	return rows, true
 }
 
 // HandoffBytes returns the bytes of notes plus comments for each bead. Beads

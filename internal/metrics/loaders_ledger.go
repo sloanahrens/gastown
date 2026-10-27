@@ -81,6 +81,8 @@ func LoadLedger(sources map[string][]string, dropped *Dropped) []LedgerRow {
 }
 
 // Review is one line of reviews.jsonl: the om verdict that judged a tree.
+// Attempt is the landing attempt the row carries, so a reader's round is that
+// field and never a recount of the bead's reviews.
 type Review struct {
 	Bead    string
 	Rig     string
@@ -94,10 +96,6 @@ type Review struct {
 	Author     string
 	AuthorKind string
 }
-
-// Round is the landing attempt this review judged, the attempt the review log
-// carries, so the round is pinned to the log rather than recomputed.
-func (r Review) Round() int { return r.Attempt }
 
 // reviewFields is a review row mid-parse: a pointer per required field tells an
 // absent field from a zero value, which the Python's KeyError tells apart.

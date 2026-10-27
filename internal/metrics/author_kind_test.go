@@ -5,27 +5,30 @@ import "testing"
 func TestAuthorKindTable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		branch    string
-		assignees []string
-		want      string
+		name     string
+		branch   string
+		assignee string
+		want     string
 	}{
-		{"a polecat branch", "polecat/corpus/gt-1+mv1", nil, AuthorKindPolecat},
-		{"a crew branch", "crew/sloan/gt-1", nil, AuthorKindCrew},
-		{"a crew branch the overseer took", "crew/merlin/gt-1", []string{"town/crew/overseer"}, AuthorKindOverseer},
-		{"the bare overseer an older bead carries", "crew/merlin/gt-1", []string{"overseer"}, AuthorKindOverseer},
-		{"a seat named overseer under another role is not the overseer", "crew/merlin/gt-1", []string{"gastown/polecats/overseer"}, AuthorKindCrew},
-		{"one overseer in the history is enough", "crew/merlin/gt-1", []string{"gastown/crew/merlin", "town/crew/overseer"}, AuthorKindOverseer},
-		{"a polecat branch stays a polecat's whoever holds the bead", "polecat/opal/gt-1+mv1", []string{"town/crew/overseer"}, AuthorKindPolecat},
-		{"a branch prefix the town does not use", "sloan/post-land-shell-scope", nil, AuthorKindUnknown},
-		{"no branch", "", nil, AuthorKindUnknown},
-		{"no branch, even with an overseer on the bead", "", []string{"town/crew/overseer"}, AuthorKindUnknown},
+		{"a polecat branch", "polecat/corpus/gt-1+mv1", "", AuthorKindPolecat},
+		{"a polecat branch stays a polecat's whoever holds the bead", "polecat/opal/gt-1+mv1", "town/crew/overseer", AuthorKindPolecat},
+		{"a crew branch", "crew/sloan/gt-1", "gastown/crew/sloan", AuthorKindCrew},
+		{"a crew branch the overseer took over", "crew/merlin/gt-1", "town/crew/overseer", AuthorKindOverseer},
+		{"the bare overseer an older bead carries", "crew/merlin/gt-1", "overseer", AuthorKindOverseer},
+		{"the overseer's own crew branch", "crew/overseer/gt-1", "", AuthorKindOverseer},
+		{"a seat named overseer under another role is not the overseer", "crew/merlin/gt-1", "gastown/polecats/overseer", AuthorKindCrew},
+		{"a branch prefix the town does not use", "sloan/post-land-shell-scope", "", AuthorKindUnknown},
+		{"a branch prefix the town does not use, even with an overseer on the bead", "sloan/post-land-shell-scope", "town/crew/overseer", AuthorKindUnknown},
+		{"no branch", "", "", AuthorKindUnknown},
+		{"no branch, even with an overseer on the bead", "", "town/crew/overseer", AuthorKindUnknown},
+		{"a branch that names no seat", "polecat/corpus", "", AuthorKindUnknown},
+		{"a crew branch that names no seat", "crew/sloan", "", AuthorKindUnknown},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := AuthorKind(tc.branch, tc.assignees...); got != tc.want {
-				t.Errorf("AuthorKind(%q, %v) = %q, want %q", tc.branch, tc.assignees, got, tc.want)
+			if got := AuthorKind(tc.branch, tc.assignee); got != tc.want {
+				t.Errorf("AuthorKind(%q, %q) = %q, want %q", tc.branch, tc.assignee, got, tc.want)
 			}
 		})
 	}
@@ -52,6 +55,32 @@ func TestAuthorSeatTable(t *testing.T) {
 				t.Errorf("AuthorSeat(%q) = %q, want %q", tc.branch, got, tc.want)
 			}
 		})
+	}
+}
+
+// The two functions read one branch, so a branch a seat can be read from is
+// never an unknown author, and a branch with no seat is never a seat kind: a
+// crew/overseer branch is the overseer's work from either function.
+func TestAuthorKindNamesASeatExactlyWhenAuthorSeatDoes(t *testing.T) {
+	t.Parallel()
+	branches := []string{
+		"polecat/corpus/gt-1+mv1",
+		"crew/sloan/gt-1",
+		"crew/overseer/gt-1",
+		"polecat/corpus",
+		"crew/sloan",
+		"sloan/post-land-shell-scope",
+		"",
+	}
+	for _, branch := range branches {
+		seat := AuthorSeat(branch)
+		kind := AuthorKind(branch, "")
+		if (seat == "") != (kind == AuthorKindUnknown) {
+			t.Errorf("branch %q: seat %q, kind %q; want no seat exactly when the kind is unknown", branch, seat, kind)
+		}
+		if seat == "overseer" && kind != AuthorKindOverseer {
+			t.Errorf("branch %q: seat %q, kind %q; want the overseer's kind", branch, seat, kind)
+		}
 	}
 }
 
@@ -89,13 +118,15 @@ func TestBranchLineTable(t *testing.T) {
 }
 
 // authorKindBdFixture holds one bead per attribution case: a polecat branch, a
-// crew branch, a bead with no Branch line, a bead whose Branch line is only in
-// its description, and the fields bd sends.
+// crew branch, a crew branch the overseer took over, a bead with no Branch
+// line, a bead whose Branch line is only in its description, and the fields bd
+// sends.
 const authorKindBdFixture = `[
  {"id": "gt-1", "notes": "READY TO LAND\nBranch: polecat/opal/gt-1+mv1\nHead: abc\n", "assignee": "gastown/polecats/opal"},
  {"id": "gt-2", "notes": "READY TO LAND\nBranch: crew/merlin/gt-2\nHead: abc\n", "assignee": "gastown/crew/merlin"},
  {"id": "gt-3", "notes": "READY TO LAND\nHead: abc\n", "assignee": "gastown/polecats/robin"},
- {"id": "gt-4", "description": "Branch: polecat/emerald/gt-4+mv1", "assignee": "gastown/polecats/emerald"}
+ {"id": "gt-4", "description": "Branch: polecat/emerald/gt-4+mv1", "assignee": "gastown/polecats/emerald"},
+ {"id": "gt-5", "notes": "READY TO LAND\nBranch: crew/merlin/gt-5\nHead: abc\n", "assignee": "town/crew/overseer"}
 ]`
 
 var authorKindReviewLines = []string{
@@ -103,6 +134,7 @@ var authorKindReviewLines = []string{
 	`{"bead": "gt-2", "rig": "gastown", "attempt": 1, "score": 0.9, "verdict": "approve", "at": "2026-10-26T22:05:00Z"}`,
 	`{"bead": "gt-3", "rig": "gastown", "attempt": 1, "score": 0.4, "verdict": "request_changes", "at": "2026-10-26T22:10:00Z"}`,
 	`{"bead": "gt-4", "rig": "gastown", "attempt": 1, "score": 0.9, "verdict": "approve", "at": "2026-10-26T22:12:00Z"}`,
+	`{"bead": "gt-5", "rig": "gastown", "attempt": 1, "score": 0.9, "verdict": "approve", "at": "2026-10-26T22:13:00Z"}`,
 	`{"bead": "gt-9", "rig": "gastown", "attempt": 2, "score": 0.9, "verdict": "approve", "at": "2026-10-26T22:15:00Z"}`,
 }
 
@@ -113,8 +145,8 @@ func TestAttributeReviewsJoinsEachReviewToItsBeadsBranch(t *testing.T) {
 	t.Parallel()
 	var calls []bdCall
 	beads := LoadBeads(fakeBd(authorKindBdFixture, true, &calls), []string{"/g"}, &Dropped{})
-	if len(beads) != 4 {
-		t.Fatalf("beads = %d, want 4", len(beads))
+	if len(beads) != 5 {
+		t.Fatalf("beads = %d, want 5", len(beads))
 	}
 	if beads[0].Branch != "polecat/opal/gt-1+mv1" || beads[0].Assignee != "gastown/polecats/opal" {
 		t.Errorf("gt-1 branch, assignee = %q, %q; want the listing's", beads[0].Branch, beads[0].Assignee)
@@ -123,8 +155,8 @@ func TestAttributeReviewsJoinsEachReviewToItsBeadsBranch(t *testing.T) {
 		t.Errorf("gt-4 branch = %q, want none: a Branch line in the description is not the bead's", beads[3].Branch)
 	}
 	reviews := LoadReviews(authorKindReviewLines, &Dropped{})
-	if len(reviews) != 5 {
-		t.Fatalf("reviews = %d, want 5", len(reviews))
+	if len(reviews) != 6 {
+		t.Fatalf("reviews = %d, want 6", len(reviews))
 	}
 	got := AttributeReviews(reviews, beads)
 	want := []struct {
@@ -133,17 +165,18 @@ func TestAttributeReviewsJoinsEachReviewToItsBeadsBranch(t *testing.T) {
 	}{
 		{"opal", AuthorKindPolecat, 1},
 		{"merlin", AuthorKindCrew, 1},
-		{"", AuthorKindUnknown, 1}, // no Branch line on the bead
-		{"", AuthorKindUnknown, 1}, // a Branch line only in the description names nothing
-		{"", AuthorKindUnknown, 2}, // a bead the listing does not hold
+		{"", AuthorKindUnknown, 1},        // no Branch line on the bead
+		{"", AuthorKindUnknown, 1},        // a Branch line only in the description names nothing
+		{"merlin", AuthorKindOverseer, 1}, // a crew branch the overseer took over
+		{"", AuthorKindUnknown, 2},        // a bead the listing does not hold
 	}
 	if len(got) != len(want) {
 		t.Fatalf("attributed reviews = %d, want %d", len(got), len(want))
 	}
 	for i, w := range want {
-		if got[i].Author != w.author || got[i].AuthorKind != w.kind || got[i].Round() != w.round {
-			t.Errorf("review %d (%s) = author %q kind %q round %d; want %q, %q, %d",
-				i, got[i].Bead, got[i].Author, got[i].AuthorKind, got[i].Round(), w.author, w.kind, w.round)
+		if got[i].Author != w.author || got[i].AuthorKind != w.kind || got[i].Attempt != w.round {
+			t.Errorf("review %d (%s) = author %q kind %q attempt %d; want %q, %q, %d",
+				i, got[i].Bead, got[i].Author, got[i].AuthorKind, got[i].Attempt, w.author, w.kind, w.round)
 		}
 	}
 	if reviews[0].AuthorKind != "" {
@@ -151,7 +184,9 @@ func TestAttributeReviewsJoinsEachReviewToItsBeadsBranch(t *testing.T) {
 	}
 }
 
-func TestReviewRoundIsTheAttemptTheReviewLogCarries(t *testing.T) {
+// The round a review is counted under is the attempt its log line carries, not
+// a recount of how many reviews the bead has.
+func TestReviewAttemptIsTheAttemptTheReviewLogCarries(t *testing.T) {
 	t.Parallel()
 	reviews := LoadReviews([]string{
 		`{"bead": "gt-1", "rig": "gastown", "attempt": 3, "score": 0.9, "verdict": "approve", "at": "2026-10-26T22:00:00Z"}`,
@@ -159,8 +194,8 @@ func TestReviewRoundIsTheAttemptTheReviewLogCarries(t *testing.T) {
 	if len(reviews) != 1 {
 		t.Fatalf("reviews = %d, want 1", len(reviews))
 	}
-	if reviews[0].Attempt != 3 || reviews[0].Round() != 3 {
-		t.Errorf("attempt, round = %d, %d; want both the log's 3", reviews[0].Attempt, reviews[0].Round())
+	if reviews[0].Attempt != 3 {
+		t.Errorf("attempt = %d, want the log's 3", reviews[0].Attempt)
 	}
 }
 

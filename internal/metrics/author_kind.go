@@ -49,24 +49,24 @@ func AuthorSeat(branch string) string {
 	return ""
 }
 
-// AuthorKind returns the kind of seat that wrote branch: polecat or crew from
-// the branch prefix, overseer for a crew branch whose bead the overseer took,
-// and unknown for a branch prefix this town does not use. assignees is the
-// bead's assignee history, any entry of which marks the work as the overseer's.
-func AuthorKind(branch string, assignees ...string) string {
-	switch {
-	case strings.HasPrefix(branch, "polecat/"):
-		return AuthorKindPolecat
-	case strings.HasPrefix(branch, "crew/"):
-		for _, assignee := range assignees {
-			if isOverseerSeat(assignee) {
-				return AuthorKindOverseer
-			}
-		}
-		return AuthorKindCrew
-	default:
+// AuthorKind returns the kind of seat that wrote branch. A polecat branch is a
+// polecat's, whoever holds its bead. A crew branch is the crew's, unless its
+// own seat is the overseer or the bead is assigned to the overseer: a bead the
+// overseer took over is the overseer's work on that branch. assignee is the
+// bead's assignee as bd reports it, "" when the bead has none. A branch whose
+// prefix this town does not use, or that names no seat, is unknown.
+func AuthorKind(branch, assignee string) string {
+	seat := AuthorSeat(branch)
+	if seat == "" {
 		return AuthorKindUnknown
 	}
+	if strings.HasPrefix(branch, "polecat/") {
+		return AuthorKindPolecat
+	}
+	if seat == "overseer" || isOverseerSeat(assignee) {
+		return AuthorKindOverseer
+	}
+	return AuthorKindCrew
 }
 
 // isOverseerSeat reports whether assignee names the overseer: the crew seat
@@ -82,9 +82,10 @@ func isOverseerSeat(assignee string) bool {
 
 // AttributeReviews returns the reviews with Author and AuthorKind filled from
 // the bead each review names: the seat and kind of the branch on that bead's
-// Branch line. A review whose bead is missing, or names no branch, is
-// attributed to an unknown author; a missing branch is never read as a
-// polecat's. The reviews passed in are not modified.
+// last Branch line, and the bead's assignee when the kind needs it. A review
+// whose bead is missing, or names no branch, is attributed to an unknown
+// author; a missing branch is never read as a polecat's. The reviews passed in
+// are not modified.
 func AttributeReviews(reviews []Review, beads []BeadRow) []Review {
 	byID := make(map[string]BeadRow, len(beads))
 	for _, bead := range beads {
