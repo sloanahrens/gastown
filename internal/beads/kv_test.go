@@ -143,12 +143,19 @@ func TestParseKVListJSONKeepsNonStringValuesOnlyUnderMemoryKeys(t *testing.T) {
 	}
 }
 
-// A key bd would read as a flag never reaches argv (gt-p85pw.9).
+// A key bd would read as a flag never reaches argv (gt-p85pw.9). The recorder
+// is what pins the guard: without it the fallthrough bd call errors by itself,
+// so only "no kv get argv" tells a refused key from a mishandled one.
 func TestKVGetRefusesAFlagLikeKey(t *testing.T) {
 	t.Parallel()
+	rec := newRecorder(nil)
+	b := newRecordedBeads(t.TempDir(), rec)
 	for _, key := range []string{"", "--force", "-x"} {
-		if _, err := (&Beads{}).KVGet(key); err == nil {
+		if _, err := b.KVGet(key); err == nil {
 			t.Errorf("KVGet(%q) returned no error", key)
+		}
+		if got := rec.argvs(); len(got) != 0 {
+			t.Fatalf("KVGet(%q) issued bd argv %q, want none", key, got)
 		}
 	}
 }
