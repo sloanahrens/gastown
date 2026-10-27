@@ -10,6 +10,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 // lockWait bounds how long an append waits for a span log's lock: first for the
@@ -48,16 +50,24 @@ type logLock struct {
 
 // lockLog takes the append lock at path, waiting at most lockWait.
 func lockLog(path string) (*logLock, error) {
-	return lockLogWithin(path, lockWait)
+	return lockLogAt(path, lockWait, clockwork.NewRealClock())
 }
 
-// lockLogWithin takes the append lock at path: the in-process lock, then an
+// lockLogWithin takes the append lock at path, waiting at most wait.
+func lockLogWithin(path string, wait time.Duration) (*logLock, error) {
+	return lockLogAt(path, wait, clockwork.NewRealClock())
+}
+
+// lockLogAt takes the append lock at path: the in-process lock, then an
 // exclusive POSIX record lock on the lock file, which waits for another process
 // to release it. The two waits share one deadline, wait from the call. A record
 // lock is not inherited across fork, so a child process cannot hold the lock
 // after the release.
-func lockLogWithin(path string, wait time.Duration) (*logLock, error) {
-	deadline := time.Now().Add(wait)
+//
+// The waits are measured on clk, so a test passes a fake clock and reaches the
+// limit without waiting it out (gt-pzxcc).
+func lockLogAt(path string, wait time.Duration, clk clockwork.Clock) (*logLock, error) {
+	deadline := clk.Now().Add(wait)
 
 	logMutexesMu.Lock()
 	m := logMutexes[path]
@@ -73,11 +83,11 @@ func lockLogWithin(path string, wait time.Duration) (*logLock, error) {
 		return nil, err
 	}
 
-	timer := time.NewTimer(time.Until(deadline))
+	timer := clk.NewTimer(clk.Until(deadline))
 	defer timer.Stop()
 	select {
 	case m.held <- struct{}{}:
-	case <-timer.C:
+	case <-timer.Chan():
 		return giveUp(fmt.Errorf("waiting for span log %s: gave up after %s, another goroutine holds its lock", path, wait))
 	}
 
@@ -105,12 +115,12 @@ func lockLogWithin(path string, wait time.Duration) (*logLock, error) {
 			release()
 			return giveUp(fmt.Errorf("locking span log %s: %w", path, err))
 		}
-		if !time.Now().Before(deadline) {
+		if !clk.Now().Before(deadline) {
 			f.Close()
 			release()
 			return giveUp(fmt.Errorf("locking span log %s: gave up after %s, another process holds it", path, wait))
 		}
-		time.Sleep(lockPoll)
+		clk.Sleep(lockPoll)
 	}
 	return &logLock{key: path, m: m, f: f}, nil
 }
