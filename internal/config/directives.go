@@ -28,11 +28,16 @@ func IsKnownRole(name string) bool {
 }
 
 // LoadRoleDirective loads role directive content from the directive file layout.
-// Resolution order:
-//  1. Town-level shared: <townRoot>/directives/_common.md
-//  2. Rig-level shared:  <townRoot>/<rigName>/directives/_common.md
-//  3. Town-level role:   <townRoot>/directives/<role>.md
-//  4. Rig-level role:    <townRoot>/<rigName>/directives/<role>.md
+// Each name resolves in two layers: the central layer, read for every rig, and
+// then the rig's own layer. In resolution order:
+//  1. Central shared: <townRoot>/gastown/mayor/rig/directives/_common.md
+//  2. Rig shared:     <townRoot>/<rigName>/mayor/rig/.gastown/directives/_common.md
+//  3. Central role:   <townRoot>/gastown/mayor/rig/directives/<role>.md
+//  4. Rig role:       <townRoot>/<rigName>/mayor/rig/.gastown/directives/<role>.md
+//
+// A layer takes its own file when that file exists. Otherwise the pre-gt-oz73l
+// path (<townRoot>/directives or <townRoot>/<rigName>/directives) is read when
+// a file of that name is there, and the warning names it once per process.
 //
 // Every existing file is concatenated in that order, newline-separated, so
 // shared policy is read first and the most specific file has the last word.
