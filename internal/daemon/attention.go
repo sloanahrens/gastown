@@ -599,10 +599,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	}
 	// The escalation records live in the town database; the bead one names as
 	// its related_bead belongs to the rig its prefix routes to.
-	s.escalationBead = func(ctx context.Context, id string) (*beads.Issue, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
+	s.escalationBead = func(_ context.Context, id string) (*beads.Issue, error) {
 		rig := beads.GetRigNameForPrefix(d.config.TownRoot, beads.ExtractPrefix(id))
 		if rig == "" {
 			return nil, nil
