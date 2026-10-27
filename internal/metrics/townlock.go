@@ -16,6 +16,9 @@ var ErrLockHeld = errors.New("town-metrics lock is held by another run")
 // fileID names a lock file by its device and inode, so two paths to one file (a
 // hard link, a symlink) are one lock.
 type fileID struct {
+	// syscall.Stat_t's device field is int32 on darwin and uint64 on linux, so
+	// int64 takes both. A device number above MaxInt64 wraps, and one device
+	// always wraps the same way, which is all an identity needs.
 	dev int64
 	ino uint64
 }
@@ -84,6 +87,8 @@ func AcquireTownLock(path string) (*TownLock, error) {
 		f.Close()
 		return nil, fmt.Errorf("lock %s: %w", path, err)
 	}
+	// The entry goes in only once the kernel holds the lock, so a failed
+	// acquire leaves nothing here for a later one to trip over.
 	lock := &TownLock{id: id, f: f}
 	townLocks[id] = lock
 	return lock, nil
@@ -133,7 +138,5 @@ func sysFileID(fi os.FileInfo) (fileID, error) {
 	if !ok {
 		return fileID{}, fmt.Errorf("no device and inode for %s", fi.Name())
 	}
-	// Dev is int32 on darwin and uint64 on linux; int64 is a real conversion on both,
-	// so the conversion is not redundant on either platform.
 	return fileID{dev: int64(st.Dev), ino: st.Ino}, nil
 }
