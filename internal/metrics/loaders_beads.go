@@ -40,10 +40,9 @@ func bdJSON(run BdRun, dir string, args []string) []byte {
 
 // BeadRow is one bead from the bd listing. Its notes and description are read
 // at load to find rejection kinds and are not kept; Branch keeps the last
-// Branch line of the notes, and Assignee the seat the bead was given to, so a
-// review can be attributed to the seat that wrote the branch it judged. A null
-// closed_at is a nil ClosedAt, which keeps an open bead apart from a closed
-// one.
+// Branch line of the notes, so a review can be attributed to the seat that
+// wrote the branch it judged. A null closed_at is a nil ClosedAt, which keeps
+// an open bead apart from a closed one.
 type BeadRow struct {
 	ID              string
 	Rig             string
@@ -58,7 +57,6 @@ type BeadRow struct {
 	Shaped          bool
 	RejectionKinds  []string
 	Branch          string
-	Assignee        string
 }
 
 // bdListBead is one entry of `bd list --json`. A JSON null decodes to the zero
@@ -75,7 +73,6 @@ type bdListBead struct {
 	AcceptanceCriteria string   `json:"acceptance_criteria"`
 	Notes              string   `json:"notes"`
 	Description        string   `json:"description"`
-	Assignee           string   `json:"assignee"`
 }
 
 // LoadBeads runs one `bd list` per directory and returns each bead once, from
@@ -120,7 +117,6 @@ func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
 				Shaped:          b.AcceptanceCriteria != "", // a shaped bead carries acceptance criteria
 				RejectionKinds:  kinds,
 				Branch:          BranchLine(b.Notes),
-				Assignee:        b.Assignee,
 			})
 		}
 	}
@@ -128,9 +124,9 @@ func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
 }
 
 // ShownBeads parses `bd show --json` output into one row per bead, keeping
-// what attribution reads: the bead's id, the last Branch line of its notes and
-// its assignee. ok is false when out is not the JSON array bd show prints, so
-// a read that failed is never mistaken for a bead that names no branch.
+// what attribution reads: the bead's id and the last Branch line of its notes.
+// ok is false when out is not the JSON array bd show prints, so a read that
+// failed is never mistaken for a bead that names no branch.
 func ShownBeads(out []byte) ([]BeadRow, bool) {
 	trimmed := bytes.TrimSpace(out)
 	if len(trimmed) == 0 || trimmed[0] != '[' {
@@ -145,7 +141,7 @@ func ShownBeads(out []byte) ([]BeadRow, bool) {
 		if b.ID == "" {
 			continue
 		}
-		rows = append(rows, BeadRow{ID: b.ID, Branch: BranchLine(b.Notes), Assignee: b.Assignee})
+		rows = append(rows, BeadRow{ID: b.ID, Branch: BranchLine(b.Notes)})
 	}
 	return rows, true
 }

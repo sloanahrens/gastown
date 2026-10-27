@@ -245,7 +245,7 @@ func TestHandoffBytesCacheSkipsCalls(t *testing.T) {
 	}
 }
 
-func TestShownBeadsKeepsTheBranchAndAssigneeAttributionReads(t *testing.T) {
+func TestShownBeadsKeepsTheBranchAttributionReads(t *testing.T) {
 	t.Parallel()
 	shown := `[
  {"id": "gt-1", "notes": "READY TO LAND\nBranch: crew/merlin/gt-1\nHead: abc\n", "assignee": "town/crew/overseer"},
@@ -257,7 +257,7 @@ func TestShownBeadsKeepsTheBranchAndAssigneeAttributionReads(t *testing.T) {
 		t.Fatalf("ShownBeads = %v, want the array bd show prints", ok)
 	}
 	want := []BeadRow{
-		{ID: "gt-1", Branch: "crew/merlin/gt-1", Assignee: "town/crew/overseer"},
+		{ID: "gt-1", Branch: "crew/merlin/gt-1"},
 		{ID: "gt-2"},
 	}
 	if !reflect.DeepEqual(rows, want) {

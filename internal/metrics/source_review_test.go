@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,15 @@ import (
 
 // reviewTestTown is the town root every review test reads under.
 const reviewTestTown = "/town"
+
+// reviewKindColumnNames are the four author-kind columns a collection
+// publishes beside the counts.
+var reviewKindColumnNames = []string{
+	"om_polecat_reviews_1h",
+	"om_crew_reviews_1h",
+	"om_overseer_reviews_1h",
+	"om_unknown_reviews_1h",
+}
 
 // reviewTestEnv serves the review log the test names: one file's content, no
 // file at all, or the error a read gets instead.
@@ -82,12 +92,12 @@ func (f *reviewBdFake) run(ctx context.Context, argv []string) ([]byte, error) {
 }
 
 // reviewBeadJSON is one bead in the shape `bd show --json` prints it.
-func reviewBeadJSON(id, branch, assignee string) string {
+func reviewBeadJSON(id, branch string) string {
 	notes := `"READY TO LAND\nHead: abc\n"`
 	if branch != "" {
 		notes = fmt.Sprintf("%q", "READY TO LAND\nBranch: "+branch+"\nHead: abc\n")
 	}
-	return fmt.Sprintf(`{"id":%q,"notes":%s,"assignee":%q}`, id, notes, assignee)
+	return fmt.Sprintf(`{"id":%q,"notes":%s}`, id, notes)
 }
 
 func TestSourceReviewCountsTheLastHour(t *testing.T) {
@@ -105,10 +115,10 @@ func TestSourceReviewCountsTheLastHour(t *testing.T) {
 		`{"bead":"gt-nv","at":"2026-10-24T12:30:00Z"}` + "\n" // no verdict
 
 	bdfake := &reviewBdFake{beads: map[string]string{
-		"gt-a1": reviewBeadJSON("gt-a1", "polecat/opal/gt-a1+mv1", "gastown/polecats/opal"),
-		"gt-a2": reviewBeadJSON("gt-a2", "crew/merlin/gt-a2", "gastown/crew/merlin"),
-		"gt-a3": reviewBeadJSON("gt-a3", "crew/merlin/gt-a3", "town/crew/overseer"),
-		"gt-a4": reviewBeadJSON("gt-a4", "", "gastown/polecats/robin"),
+		"gt-a1": reviewBeadJSON("gt-a1", "polecat/opal/gt-a1+mv1"),
+		"gt-a2": reviewBeadJSON("gt-a2", "crew/merlin/gt-a2"),
+		"gt-a3": reviewBeadJSON("gt-a3", "crew/overseer/gt-a3"),
+		"gt-a4": reviewBeadJSON("gt-a4", ""),
 	}}
 	env := reviewTestEnv(t, content, false, nil)
 	env.Run = bdfake.run
@@ -152,7 +162,7 @@ func TestSourceReviewAFailedBeadReadLeavesTheKindsNull(t *testing.T) {
 		reviewLine("gt-a2", land.VerdictApprove, 1, 8.5, false, now.Add(-20*time.Minute)) + "\n"
 	env := reviewTestEnv(t, content, false, nil)
 	env.Run = (&reviewBdFake{
-		beads: map[string]string{"gt-a1": reviewBeadJSON("gt-a1", "polecat/opal/gt-a1", "gastown/polecats/opal")},
+		beads: map[string]string{"gt-a1": reviewBeadJSON("gt-a1", "polecat/opal/gt-a1")},
 		fail:  map[string]bool{"gt-a2": true},
 	}).run
 	cols, err := reviewSource{}.Collect(context.Background(), env)
@@ -162,7 +172,7 @@ func TestSourceReviewAFailedBeadReadLeavesTheKindsNull(t *testing.T) {
 	if cols["om_reviews_1h"] != 2 {
 		t.Errorf("om_reviews_1h = %v, want the 2 reviews it could count", cols["om_reviews_1h"])
 	}
-	for _, column := range []string{"om_polecat_reviews_1h", "om_crew_reviews_1h", "om_overseer_reviews_1h", "om_unknown_reviews_1h"} {
+	for _, column := range reviewKindColumnNames {
 		if value, ok := cols[column]; !ok || value != nil {
 			t.Errorf("%s = %v, want null: a review it could not attribute is not an unknown author's", column, value)
 		}
@@ -180,8 +190,8 @@ func TestSourceReviewReadsEachBeadOnce(t *testing.T) {
 		fmt.Sprintf(`{"bead":"gt-a2","attempt":1,"score":8,"verdict":"approve","at":%q}`,
 			now.Add(-10*time.Minute).UTC().Format(time.RFC3339)) + "\n"
 	bdfake := &reviewBdFake{beads: map[string]string{
-		"gt-a1": reviewBeadJSON("gt-a1", "polecat/opal/gt-a1+mv1", "gastown/polecats/opal"),
-		"gt-a2": reviewBeadJSON("gt-a2", "polecat/opal/gt-a2+mv1", "gastown/polecats/opal"),
+		"gt-a1": reviewBeadJSON("gt-a1", "polecat/opal/gt-a1+mv1"),
+		"gt-a2": reviewBeadJSON("gt-a2", "polecat/opal/gt-a2+mv1"),
 	}}
 	env := reviewTestEnv(t, content, false, nil)
 	env.Run = bdfake.run
@@ -204,6 +214,120 @@ func TestSourceReviewReadsEachBeadOnce(t *testing.T) {
 	}
 }
 
+// A crew branch whose bead the overseer holds is still the crew branch's: the
+// kind is read from the branch, written once, and not from the assignee, which
+// dispatch and takeover change after the review.
+func TestSourceReviewReadsTheKindFromTheBranchNotTheAssignee(t *testing.T) {
+	t.Parallel()
+	now := fixedNow()
+	content := reviewLine("gt-a1", land.VerdictApprove, 1, 8, false, now.Add(-30*time.Minute)) + "\n"
+	bdfake := &reviewBdFake{beads: map[string]string{
+		"gt-a1": `{"id":"gt-a1","notes":"READY TO LAND\nBranch: crew/merlin/gt-a1\nHead: abc\n","assignee":"town/crew/overseer"}`,
+	}}
+	env := reviewTestEnv(t, content, false, nil)
+	env.Run = bdfake.run
+	cols, err := reviewSource{}.Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if cols["om_crew_reviews_1h"] != 1 || cols["om_overseer_reviews_1h"] != 0 {
+		t.Errorf("crew, overseer = %v, %v; want the crew branch's kind, not the bead's assignee",
+			cols["om_crew_reviews_1h"], cols["om_overseer_reviews_1h"])
+	}
+}
+
+// A rig that is not one path element under the town is not a directory this
+// source runs bd in: the hour's kinds are null and no bd starts.
+func TestSourceReviewARigOutsideTheTownLeavesTheKindsNull(t *testing.T) {
+	t.Parallel()
+	now := fixedNow()
+	for _, rig := range []string{".", "..", "../gastown", "gastown/../..", "/etc", `..\..\etc`} {
+		t.Run(rig, func(t *testing.T) {
+			t.Parallel()
+			content := fmt.Sprintf(`{"bead":"gt-a1","rig":%q,"attempt":1,"score":8,"verdict":"approve","at":%q}`,
+				rig, now.Add(-30*time.Minute).UTC().Format(time.RFC3339)) + "\n"
+			bdfake := &reviewBdFake{beads: map[string]string{
+				"gt-a1": reviewBeadJSON("gt-a1", "polecat/opal/gt-a1+mv1"),
+			}}
+			env := reviewTestEnv(t, content, false, nil)
+			env.Run = bdfake.run
+			cols, err := reviewSource{}.Collect(context.Background(), env)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			if cols["om_reviews_1h"] != 1 {
+				t.Errorf("om_reviews_1h = %v, want the review it could count", cols["om_reviews_1h"])
+			}
+			for _, column := range reviewKindColumnNames {
+				if value, ok := cols[column]; !ok || value != nil {
+					t.Errorf("%s = %v, want null: a rig that escapes the town names no directory to read", column, value)
+				}
+			}
+			if len(bdfake.calls) != 0 {
+				t.Errorf("bd reads = %v, want none", bdfake.calls)
+			}
+		})
+	}
+}
+
+// The reads are sequential, so they are bounded: an hour that names more
+// distinct beads than reviewBeadReadCap is not attributed at all, and none of
+// it is read.
+func TestSourceReviewStopsAtTheBeadReadCap(t *testing.T) {
+	t.Parallel()
+	now := fixedNow()
+	beads := map[string]string{}
+	for i := 0; i <= reviewBeadReadCap; i++ {
+		id := fmt.Sprintf("gt-c%d", i)
+		beads[id] = reviewBeadJSON(id, "polecat/opal/"+id+"+mv1")
+	}
+	lines := func(n int) string {
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, `{"bead":"gt-c%d","rig":"gastown","attempt":1,"score":8,"verdict":"approve","at":%q}`+"\n",
+				i, now.Add(-30*time.Minute).UTC().Format(time.RFC3339))
+		}
+		return b.String()
+	}
+	t.Run("at the cap", func(t *testing.T) {
+		t.Parallel()
+		bdfake := &reviewBdFake{beads: beads}
+		env := reviewTestEnv(t, lines(reviewBeadReadCap), false, nil)
+		env.Run = bdfake.run
+		cols, err := reviewSource{}.Collect(context.Background(), env)
+		if err != nil {
+			t.Fatalf("Collect: %v", err)
+		}
+		if cols["om_polecat_reviews_1h"] != reviewBeadReadCap {
+			t.Errorf("om_polecat_reviews_1h = %v, want all %d attributed", cols["om_polecat_reviews_1h"], reviewBeadReadCap)
+		}
+		if len(bdfake.calls) != reviewBeadReadCap {
+			t.Errorf("bd reads = %d, want one per bead at the cap", len(bdfake.calls))
+		}
+	})
+	t.Run("over the cap", func(t *testing.T) {
+		t.Parallel()
+		bdfake := &reviewBdFake{beads: beads}
+		env := reviewTestEnv(t, lines(reviewBeadReadCap+1), false, nil)
+		env.Run = bdfake.run
+		cols, err := reviewSource{}.Collect(context.Background(), env)
+		if err != nil {
+			t.Fatalf("Collect: %v", err)
+		}
+		if cols["om_reviews_1h"] != reviewBeadReadCap+1 {
+			t.Errorf("om_reviews_1h = %v, want the %d reviews it could count", cols["om_reviews_1h"], reviewBeadReadCap+1)
+		}
+		for _, column := range reviewKindColumnNames {
+			if value, ok := cols[column]; !ok || value != nil {
+				t.Errorf("%s = %v, want null: more beads than the source will read", column, value)
+			}
+		}
+		if len(bdfake.calls) != 0 {
+			t.Errorf("bd reads = %d, want none over the cap", len(bdfake.calls))
+		}
+	})
+}
+
 // A snapshot with no runner cannot attribute, so its kind columns are null: a
 // review whose branch was never read is not a review by an unknown author.
 func TestSourceReviewWithoutARunnerLeavesTheKindsNull(t *testing.T) {
@@ -217,7 +341,7 @@ func TestSourceReviewWithoutARunnerLeavesTheKindsNull(t *testing.T) {
 	if cols["om_reviews_1h"] != 1 {
 		t.Errorf("om_reviews_1h = %v, want the review it could count", cols["om_reviews_1h"])
 	}
-	for _, column := range []string{"om_polecat_reviews_1h", "om_crew_reviews_1h", "om_overseer_reviews_1h", "om_unknown_reviews_1h"} {
+	for _, column := range reviewKindColumnNames {
 		if value, ok := cols[column]; !ok || value != nil {
 			t.Errorf("%s = %v, want null without a runner", column, value)
 		}
@@ -263,7 +387,7 @@ func TestSourceReviewSkipsEveryLineItCannotUse(t *testing.T) {
 	}
 	// No review is every kind at zero, not an attribution nobody could make:
 	// there is no bead to read and no runner is needed.
-	for _, column := range []string{"om_polecat_reviews_1h", "om_crew_reviews_1h", "om_overseer_reviews_1h", "om_unknown_reviews_1h"} {
+	for _, column := range reviewKindColumnNames {
 		if value, ok := cols[column]; !ok || value != 0 {
 			t.Errorf("%s = %v, want 0: an hour with no reviews", column, value)
 		}
