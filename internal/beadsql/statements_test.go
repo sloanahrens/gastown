@@ -11,7 +11,6 @@ import (
 // ReadOnly once its arguments are inlined, and reads a bd table.
 func TestDeclaredQueriesAreReadOnlyBdReads(t *testing.T) {
 	t.Parallel()
-	ids := []string{"mayor/", `rig/o\'malley`}
 	for name, q := range map[string]Query{
 		"SchemaLevel":             SchemaLevel(),
 		"IssueCount":              IssueCount(),
@@ -25,8 +24,6 @@ func TestDeclaredQueriesAreReadOnlyBdReads(t *testing.T) {
 		"PreloadedBeads":          PreloadedBeads([]string{"gt:agent"}, []string{"open", "hooked"}),
 		"PreloadedBeadsStatuses":  PreloadedBeads(nil, []string{"in_progress"}),
 		"PreloadedBeadsWispsOnly": PreloadedBeads(nil, nil),
-		"MailWisps":               MailWisps(ids),
-		"MailIssues":              MailIssues(ids),
 		"MoleculesAttachedTo":     MoleculesAttachedTo("gt-a_b"),
 		"JournalHead":             JournalHead(),
 		"JournalTail":             JournalTail(6, 2),
@@ -89,16 +86,6 @@ func TestQuoteEscapesSQLLiterals(t *testing.T) {
 	} {
 		if got := quoteList(tt.values, ","); got != tt.want {
 			t.Errorf("quoteList(%q) = %s, want %s", tt.values, got, tt.want)
-		}
-	}
-}
-
-func TestMailQueriesMatchEveryIdentityAndItsCC(t *testing.T) {
-	t.Parallel()
-	s := MailWisps([]string{"mayor/", "mayor", `rig/o\'malley`}).String()
-	for _, want := range []string{`'mayor/'`, `'mayor'`, `'cc:mayor/'`, `'cc:mayor'`, `'rig/o\\''malley'`, `'cc:rig/o\\''malley'`} {
-		if !strings.Contains(s, want) {
-			t.Errorf("MailWisps lacks %s:\n%s", want, s)
 		}
 	}
 }

@@ -402,47 +402,6 @@ func issueScopeClauses(alias string, labels, statuses []string) []string {
 	return clauses
 }
 
-// MailWisps reads the open or hooked gt:message wisps assigned to, or
-// cc'ing, any of identities, with their labels and which of the two matched.
-func MailWisps(identities []string) Query {
-	ids, ccs := mailLists(identities)
-	return declared("SELECT w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at, " +
-		"GROUP_CONCAT(DISTINCT al.label) as labels_csv, " +
-		"MAX(CASE WHEN w.assignee IN (" + ids + ") THEN 1 ELSE 0 END) as assignee_match, " +
-		"MAX(CASE WHEN cc.label IS NOT NULL THEN 1 ELSE 0 END) as cc_match " +
-		"FROM wisps w " +
-		"JOIN wisp_labels msg_label ON w.id = msg_label.issue_id AND msg_label.label = 'gt:message' " +
-		"JOIN wisp_labels al ON w.id = al.issue_id " +
-		"LEFT JOIN wisp_labels cc ON w.id = cc.issue_id AND cc.label IN (" + ccs + ") " +
-		"WHERE w.status IN ('open', 'hooked') AND (w.assignee IN (" + ids + ") OR cc.label IS NOT NULL) " +
-		"GROUP BY w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at")
-}
-
-// MailIssues reads the open or hooked gt:message issues assigned to, or
-// cc'ing, any of identities, with the matching cc labels and whether the
-// message carries the read label.
-func MailIssues(identities []string) Query {
-	ids, ccs := mailLists(identities)
-	return declared("SELECT i.id, i.title, i.status, i.assignee, " +
-		"GROUP_CONCAT(DISTINCT cc.label) AS cc_labels_csv, " +
-		"MAX(CASE WHEN rd.label IS NOT NULL THEN 1 ELSE 0 END) AS is_read " +
-		"FROM issues i " +
-		"JOIN labels msg_label ON i.id = msg_label.issue_id AND msg_label.label = 'gt:message' " +
-		"LEFT JOIN labels cc ON i.id = cc.issue_id AND cc.label IN (" + ccs + ") " +
-		"LEFT JOIN labels rd ON i.id = rd.issue_id AND rd.label = 'read' " +
-		"WHERE i.status IN ('open', 'hooked') AND (i.assignee IN (" + ids + ") OR cc.label IS NOT NULL) " +
-		"GROUP BY i.id, i.title, i.status, i.assignee")
-}
-
-// mailLists are identities and their cc: labels as SQL literal lists.
-func mailLists(identities []string) (ids, ccs string) {
-	cc := make([]string, len(identities))
-	for i, id := range identities {
-		cc[i] = "cc:" + id
-	}
-	return quoteList(identities, ","), quoteList(cc, ",")
-}
-
 // JournalHead reads the events journal's sequence counter: the highest seq
 // ever assigned, which stays the journal's head even after a prune deleted
 // every row. It is what tells a stuck cursor from a caught-up one, and a
