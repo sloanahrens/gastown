@@ -44,6 +44,10 @@ const hostDFFixture = `Filesystem     1024-blocks      Used Available Capacity  
 overlay          100000000  59000000  41000000      59%  /
 `
 
+// hostLoadFixture is what macOS's `sysctl -n vm.loadavg` prints: the three
+// load averages inside braces.
+const hostLoadFixture = "{ 13.77 12.84 11.49 }\n"
+
 // hostBDFixture is what bd prints; the probe measures the call rather than
 // reading the output, so its shape is all the test needs.
 const hostBDFixture = `Found 1 issue:
@@ -65,10 +69,11 @@ type hostFake struct {
 func hostFixtureEnv(startAt time.Time) *hostFake {
 	return &hostFake{
 		output: map[string]string{
-			"/usr/bin/top": hostTopFixture,
-			"bd":           hostBDFixture,
-			"lsof":         hostLsofFixture,
-			"docker":       hostDFFixture,
+			"/usr/bin/top":     hostTopFixture,
+			"/usr/sbin/sysctl": hostLoadFixture,
+			"bd":               hostBDFixture,
+			"lsof":             hostLsofFixture,
+			"docker":           hostDFFixture,
 		},
 		fail: map[string]error{},
 		took: map[string]time.Duration{"bd": 37 * time.Millisecond},
@@ -90,7 +95,7 @@ func (f *hostFake) env() Env {
 	}
 }
 
-func TestSourceHostCollectsTheFourColumns(t *testing.T) {
+func TestSourceHostCollectsTheFiveColumns(t *testing.T) {
 	t.Parallel()
 	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
 
@@ -99,6 +104,7 @@ func TestSourceHostCollectsTheFourColumns(t *testing.T) {
 		t.Fatalf("Collect: %v", err)
 	}
 	want := map[string]any{
+		"load1":               13.77,
 		"cpu_idle_pct":        86.99,
 		"bd_latency_ms":       float64(37),
 		"dolt_conns":          2,
@@ -119,6 +125,12 @@ func TestSourceHostParsers(t *testing.T) {
 		want    any
 		wantErr bool
 	}{
+		{"sysctl reads the one-minute load", parseLoadAvg1, hostLoadFixture, 13.77, false},
+		{"sysctl output without braces", parseLoadAvg1, " 13.77 12.84 11.49 \n", 13.77, false},
+		{"sysctl with one field", parseLoadAvg1, "{ 13.77 }\n", nil, true},
+		{"sysctl with a field that is not a number", parseLoadAvg1, "{ one 12.84 11.49 }\n", nil, true},
+		{"sysctl with a later field that is not a number", parseLoadAvg1, "{ 13.77 12.84 nope }\n", nil, true},
+		{"sysctl printing nothing", parseLoadAvg1, "", nil, true},
 		{"top reads the last sample", parseCPUIdlePct, hostTopFixture, 86.99, false},
 		{"top without a CPU line", parseCPUIdlePct, "Processes: 641 total\n", nil, true},
 		{"top CPU line without idle", parseCPUIdlePct, "CPU usage: 10.42% user, 5.29% sys\n", nil, true},
@@ -229,7 +241,7 @@ func TestSourceHostEachProbeRunsUnderItsOwnDeadline(t *testing.T) {
 	if got["dolt_conns"] != nil || got["host_probe_failures"] != 1 {
 		t.Errorf("dolt_conns = %v, host_probe_failures = %v, want nil and 1 for a command that missed its deadline", got["dolt_conns"], got["host_probe_failures"])
 	}
-	if got["cpu_idle_pct"] == nil || got["bd_latency_ms"] == nil || got["docker_disk_pct"] == nil {
+	if got["load1"] == nil || got["cpu_idle_pct"] == nil || got["bd_latency_ms"] == nil || got["docker_disk_pct"] == nil {
 		t.Errorf("Collect nulled a column whose command answered: %v", got)
 	}
 }
@@ -242,6 +254,7 @@ func TestSourceHostUnreadableOutputNilsOnlyItsColumnAndCountsIt(t *testing.T) {
 	tests := []struct {
 		name, command, output, column string
 	}{
+		{name: "sysctl with a truncated load line", command: "/usr/sbin/sysctl", output: "{ 13.77 }\n", column: "load1"},
 		{name: "top with no CPU line", command: "/usr/bin/top", output: "Processes: 641 total\n", column: "cpu_idle_pct"},
 		{name: "lsof with a line that is no connection", command: "lsof", output: hostLsofHeader + "dolt 41022 sloan 45u IPv4 0x1 0t0 TCP *:3307 (LISTEN)\n", column: "dolt_conns"},
 		{name: "lsof that printed nothing at all", command: "lsof", output: "", column: "dolt_conns"},
@@ -305,8 +318,20 @@ func TestSourceHostAHungCommandIsCutAtItsOwnDeadline(t *testing.T) {
 	if got["dolt_conns"] != nil || got["host_probe_failures"] != 1 {
 		t.Errorf("dolt_conns = %v, host_probe_failures = %v, want nil and 1", got["dolt_conns"], got["host_probe_failures"])
 	}
-	if got["cpu_idle_pct"] == nil || got["bd_latency_ms"] == nil || got["docker_disk_pct"] == nil {
+	if got["load1"] == nil || got["cpu_idle_pct"] == nil || got["bd_latency_ms"] == nil || got["docker_disk_pct"] == nil {
 		t.Errorf("the hung command cost more than its own column: %v", got)
+	}
+}
+
+// The probes run one after another, each under hostCommandTimeout, so the
+// group's worst case is one timeout per probe. It must fit the deadline the
+// snapshot gives the group, or the last column is always a timeout and never a
+// reading.
+func TestSourceHostProbesFitTheGroupDeadline(t *testing.T) {
+	t.Parallel()
+	probes := newHostSource().probes()
+	if worst := time.Duration(len(probes)) * hostCommandTimeout; worst >= SourceTimeout {
+		t.Errorf("%d probes at %s each cost %s, want under the group's %s", len(probes), hostCommandTimeout, worst, SourceTimeout)
 	}
 }
 
