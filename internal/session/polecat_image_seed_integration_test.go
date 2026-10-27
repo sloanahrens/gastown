@@ -32,6 +32,13 @@ func seedInstruction(t *testing.T) string {
 
 func runSeed(t *testing.T, files map[string]string) (out string, err error, cache, mod string) {
 	t.Helper()
+	return runSeedScript(t, seedInstruction(t), files)
+}
+
+// runSeedScript runs one seed RUN command against files: the Dockerfile's, or a
+// test's copy of it with a step added.
+func runSeedScript(t *testing.T, script string, files map[string]string) (out string, err error, cache, mod string) {
+	t.Helper()
 	root := t.TempDir()
 	seed := filepath.Join(root, "seed")
 	for name, body := range files {
@@ -44,11 +51,10 @@ func runSeed(t *testing.T, files map[string]string) (out string, err error, cach
 		}
 	}
 	cache, mod = filepath.Join(root, "gocache"), filepath.Join(root, "gomod")
-	// /seed is the bind mount; /tmp/seed.log is the RUN's own log file.
-	script := strings.ReplaceAll(seedInstruction(t), "find /seed ", "find "+seed+" ")
-	cmd := exec.Command("sh", "-c", script)
-	// The image is linux/arm64, so its linux steps build for that target whatever
-	// host runs this test; the darwin step sets its own GOOS.
+	// /seed is the bind mount; /tmp/seed.log is the RUN's own log file. The
+	// image is linux/arm64, so its steps build for that target whatever host runs
+	// this test; a darwin step sets its own GOOS.
+	cmd := exec.Command("sh", "-c", strings.ReplaceAll(script, "find /seed ", "find "+seed+" "))
 	cmd.Env = append(os.Environ(), "GOCACHE="+cache, "GOMODCACHE="+mod, "GOFLAGS=", "GOTOOLCHAIN=local", "GOOS=linux", "GOARCH=arm64")
 	b, err := cmd.CombinedOutput()
 	return string(b), err, cache, mod
@@ -130,8 +136,33 @@ func TestIntegrationSeedRunDoesNotBuildForDarwin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed RUN failed on a darwin-only broken file: %v\n%s", err, out)
 	}
+	// A darwin step's failure is tolerated (the case clause exits only on the
+	// linux build and download), so the exit code cannot reveal one. The log can:
+	// this file fails any darwin build and the echo names the step.
 	if strings.Contains(out, "GOOS=darwin") {
 		t.Errorf("the seed RUN still runs a darwin step:\n%s", out)
+	}
+}
+
+// TestIntegrationSeedRunNamesADarwinStep is the control for the check above: with
+// a darwin step put back, the RUN still exits 0 and only the log names the step.
+// So the check has to read the log, and the seeded file has to fail a darwin
+// build for the log to have anything to name. The step spells its target with
+// env: the loop expands $step into words, so a bare GOOS=darwin would run as a
+// command name instead of an assignment.
+func TestIntegrationSeedRunNamesADarwinStep(t *testing.T) {
+	t.Parallel()
+	script := strings.Replace(seedInstruction(t), `"go mod download" "go build ./..."`, `"go mod download" "env GOOS=darwin GOARCH=arm64 go build ./..." "go build ./..."`, 1)
+	out, err, _, _ := runSeedScript(t, script, map[string]string{
+		"go.mod":           seedGoMod,
+		"main.go":          "package main\n\nfunc main() { println(\"hi\") }\n",
+		"broken_darwin.go": "//go:build darwin\n\npackage main\n\nvar _ = undefinedCall\n",
+	})
+	if err != nil {
+		t.Fatalf("the tolerated darwin step failed the image, so the exit code would reveal it: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "GOOS=darwin") {
+		t.Errorf("the seed RUN ran a darwin step and its log did not name it:\n%s", out)
 	}
 }
 
