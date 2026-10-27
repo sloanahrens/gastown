@@ -292,9 +292,10 @@ func runDoneStateUpdateWithRecorder(t *testing.T, rec *doneRecorder, exitType st
 func TestDoneStateEnvZeroValueIsTheRealProcess(t *testing.T) {
 	t.Parallel()
 	var e doneStateEnv
-	//testpolicy:allow no-host-env — the zero value's seam is the value under test: it must read the process environment with os.Getenv itself
-	if got, want := reflect.ValueOf(e.lookup()).Pointer(), reflect.ValueOf(os.Getenv).Pointer(); got != want {
-		t.Error("zero doneStateEnv does not read the environment through os.Getenv")
+	// The seam must read the process environment itself, not a stub: PATH is
+	// what the process holds, and the zero value must answer with it.
+	if got, want := e.lookup()("PATH"), os.Getenv("PATH"); got != want {
+		t.Errorf("zero doneStateEnv lookup(PATH) = %q, want the process's %q", got, want)
 	}
 	if got, want := reflect.ValueOf(e.head()).Pointer(), reflect.ValueOf(done.CurrentReviewEvidenceHeadIn).Pointer(); got != want {
 		t.Error("zero doneStateEnv does not resolve HEAD through done.CurrentReviewEvidenceHeadIn")

@@ -1,9 +1,6 @@
 package ui
 
-import (
-	"os"
-	"testing"
-)
+import "testing"
 
 // fakeEnv is a process with environment kv and a stdout that is (tty) or is
 // not a terminal.
@@ -210,17 +207,17 @@ func TestContentHeight(t *testing.T) {
 	}
 }
 
-// The exported predicates are the process-environment versions.
+// The exported predicates are the process-environment versions: each must
+// answer what processEnv computes, never a test's fake.
 func TestExportedPredicatesReadProcessEnv(t *testing.T) {
 	t.Parallel()
-	e := uiEnv{lookup: os.LookupEnv, stdoutTTY: IsTerminal}
-	if ShouldUseColor() != e.shouldUseColor() {
+	if ShouldUseColor() != processEnv.shouldUseColor() {
 		t.Error("ShouldUseColor() disagrees with the process environment")
 	}
-	if ShouldUseEmoji() != e.shouldUseEmoji() {
+	if ShouldUseEmoji() != processEnv.shouldUseEmoji() {
 		t.Error("ShouldUseEmoji() disagrees with the process environment")
 	}
-	if IsAgentMode() != e.isAgentMode() {
+	if IsAgentMode() != processEnv.isAgentMode() {
 		t.Error("IsAgentMode() disagrees with the process environment")
 	}
 }

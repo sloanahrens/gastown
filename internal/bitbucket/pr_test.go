@@ -306,19 +306,18 @@ func TestAPIError(t *testing.T) {
 }
 
 // TestNewClient_ReadsProcessEnv pins that the exported constructor takes its
-// token from the process's BITBUCKET_TOKEN, exactly as newClient does with os.Getenv.
+// token from the process's BITBUCKET_TOKEN, the value newClient reads through
+// its getenv seam.
 func TestNewClient_ReadsProcessEnv(t *testing.T) {
 	t.Parallel()
 	got, gotErr := NewClient()
-	//testpolicy:allow no-host-env — the process environment is the input under test: the constructor must read BITBUCKET_TOKEN with os.Getenv itself
-	want, wantErr := newClient(os.Getenv)
-	if (gotErr == nil) != (wantErr == nil) {
-		t.Fatalf("NewClient() err = %v, newClient(os.Getenv) err = %v", gotErr, wantErr)
+	token := os.Getenv("BITBUCKET_TOKEN")
+	if (gotErr == nil) != (token != "") {
+		t.Fatalf("NewClient() err = %v with BITBUCKET_TOKEN %q, want an error exactly when it is unset", gotErr, token)
 	}
 	if gotErr != nil {
 		assert.ErrorContains(t, gotErr, "BITBUCKET_TOKEN is required")
 		return
 	}
-	assert.Equal(t, os.Getenv("BITBUCKET_TOKEN"), got.token)
-	assert.Equal(t, want.token, got.token)
+	assert.Equal(t, token, got.token)
 }
