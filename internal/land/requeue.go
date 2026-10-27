@@ -15,41 +15,61 @@ import (
 // nothing new to submit.
 
 // RequeueCommentMarker opens the comment gt land requeue records on a bead it
-// puts back in the queue. Its Attempt: line names the rejection it re-queues,
-// which is what tells a requeued block from one an interrupted pass left, both
-// of which leave the bead ready with the refusal label gone (gt-en9gs).
+// puts back in the queue. Its Attempt: and Blocks: lines are what tell a
+// requeued block from one an interrupted pass left, both of which leave the
+// bead ready with the refusal label gone (gt-en9gs, gt-kwe1l).
 const RequeueCommentMarker = "REQUEUED:"
 
 // FormatRequeueComment renders gt land requeue's comment: who re-queued the
-// landing, on what head, and the attempt number of the rejection it undoes.
-func FormatRequeueComment(actor, branch, head string, attempt int, reason string) string {
-	return fmt.Sprintf("%s %s re-queued this rejected landing unchanged\nBranch: %s\nHead: %s\nAttempt: %d\nReason: %s",
-		RequeueCommentMarker, actor, branch, head, attempt, reason)
+// landing, on what head, the rejection attempt it undoes, and how many rejection
+// blocks the bead held at that moment.
+func FormatRequeueComment(actor, branch, head string, attempt, blocks int, reason string) string {
+	return fmt.Sprintf("%s %s re-queued this rejected landing unchanged\nBranch: %s\nHead: %s\nAttempt: %d\nBlocks: %d\nReason: %s",
+		RequeueCommentMarker, actor, branch, head, attempt, blocks, reason)
 }
 
-// RequeuedAttempt is the attempt number of the newest REQUEUED comment on a
-// bead, the rejection that comment undid. ok is false when no comment records a
-// re-queue, or the newest one names no attempt (written before the line
-// existed).
-func RequeuedAttempt(comments []beads.Comment) (int, bool) {
+// Requeued names what the newest REQUEUED comment on a bead undid.
+type Requeued struct {
+	// Attempt is the rejection attempt the comment undid.
+	Attempt int
+	// Blocks is how many MERGE REJECTION blocks the notes held when the comment
+	// was written; the last of them is the one the re-queue undid. Zero means
+	// the comment carries no Blocks: line.
+	Blocks int
+}
+
+// NewestRequeue reads the newest REQUEUED comment on a bead; ok is false when
+// there is none, or it names no attempt (written before the Attempt: line).
+func NewestRequeue(comments []beads.Comment) (Requeued, bool) {
 	for i := len(comments) - 1; i >= 0; i-- {
 		text := comments[i].Text
 		if !strings.HasPrefix(strings.TrimSpace(text), RequeueCommentMarker) {
 			continue
 		}
+		var q Requeued
+		named := false
 		for _, line := range strings.Split(text, "\n") {
-			value, found := strings.CutPrefix(strings.TrimSpace(line), "Attempt:")
-			if !found {
+			line = strings.TrimSpace(line)
+			if value, found := strings.CutPrefix(line, "Attempt:"); found {
+				n, err := strconv.Atoi(strings.TrimSpace(value))
+				if err != nil {
+					return Requeued{}, false
+				}
+				q.Attempt, named = n, true
 				continue
 			}
-			if n, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
-				return n, true
+			if value, found := strings.CutPrefix(line, "Blocks:"); found {
+				if n, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+					q.Blocks = n
+				}
 			}
-			return 0, false
 		}
-		return 0, false
+		if !named {
+			return Requeued{}, false
+		}
+		return q, true
 	}
-	return 0, false
+	return Requeued{}, false
 }
 
 // RejectedHead is the head a work bead's live rejection names: the tip the
