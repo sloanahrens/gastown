@@ -244,3 +244,32 @@ func TestHandoffBytesCacheSkipsCalls(t *testing.T) {
 		t.Errorf("bd calls = %d, want none for a cached bead", len(calls))
 	}
 }
+
+func TestShownBeadsKeepsTheBranchAttributionReads(t *testing.T) {
+	t.Parallel()
+	shown := `[
+ {"id": "gt-1", "notes": "READY TO LAND\nBranch: crew/merlin/gt-1\nHead: abc\n", "assignee": "town/crew/overseer"},
+ {"id": "gt-2", "notes": "READY TO LAND\nHead: abc\n", "assignee": ""},
+ {"id": "", "notes": "Branch: polecat/opal/gt-3\n"}
+]`
+	rows, ok := ShownBeads([]byte(shown))
+	if !ok {
+		t.Fatalf("ShownBeads = %v, want the array bd show prints", ok)
+	}
+	want := []BeadRow{
+		{ID: "gt-1", Branch: "crew/merlin/gt-1"},
+		{ID: "gt-2"},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Errorf("rows = %#v, want %#v (an entry with no id names no bead)", rows, want)
+	}
+}
+
+func TestShownBeadsRefusesAnAnswerThatIsNotTheArray(t *testing.T) {
+	t.Parallel()
+	for _, out := range []string{"", "null", `{"id":"gt-1"}`, "not json", `["gt-1"]`} {
+		if rows, ok := ShownBeads([]byte(out)); ok {
+			t.Errorf("ShownBeads(%q) = %#v, true; want a refused read, not a bead with no branch", out, rows)
+		}
+	}
+}

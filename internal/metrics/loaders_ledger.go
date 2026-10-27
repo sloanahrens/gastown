@@ -81,6 +81,8 @@ func LoadLedger(sources map[string][]string, dropped *Dropped) []LedgerRow {
 }
 
 // Review is one line of reviews.jsonl: the om verdict that judged a tree.
+// Attempt is the landing attempt the row carries, so a reader's round is that
+// field and never a recount of the bead's reviews.
 type Review struct {
 	Bead    string
 	Rig     string
@@ -88,6 +90,11 @@ type Review struct {
 	Score   float64
 	Verdict string
 	At      string
+	// Author is the seat that wrote the branch the review judged, and
+	// AuthorKind its kind; AttributeReviews fills both, and they are empty
+	// until it does.
+	Author     string
+	AuthorKind string
 }
 
 // reviewFields is a review row mid-parse: a pointer per required field tells an

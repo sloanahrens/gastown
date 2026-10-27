@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -38,8 +39,10 @@ func bdJSON(run BdRun, dir string, args []string) []byte {
 }
 
 // BeadRow is one bead from the bd listing. Its notes and description are read
-// at load to find rejection kinds and are not kept. A null closed_at is a nil
-// ClosedAt, which keeps an open bead apart from a closed one.
+// at load to find rejection kinds and are not kept; Branch keeps the last
+// Branch line of the notes, so a review can be attributed to the seat that
+// wrote the branch it judged. A null closed_at is a nil ClosedAt, which keeps
+// an open bead apart from a closed one.
 type BeadRow struct {
 	ID              string
 	Rig             string
@@ -53,6 +56,7 @@ type BeadRow struct {
 	Dir             string
 	Shaped          bool
 	RejectionKinds  []string
+	Branch          string
 }
 
 // bdListBead is one entry of `bd list --json`. A JSON null decodes to the zero
@@ -112,10 +116,34 @@ func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
 				Dir:             d,
 				Shaped:          b.AcceptanceCriteria != "", // a shaped bead carries acceptance criteria
 				RejectionKinds:  kinds,
+				Branch:          BranchLine(b.Notes),
 			})
 		}
 	}
 	return rows
+}
+
+// ShownBeads parses `bd show --json` output into one row per bead, keeping
+// what attribution reads: the bead's id and the last Branch line of its notes.
+// ok is false when out is not the JSON array bd show prints, so a read that
+// failed is never mistaken for a bead that names no branch.
+func ShownBeads(out []byte) ([]BeadRow, bool) {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, false
+	}
+	var shown []bdListBead
+	if err := json.Unmarshal(trimmed, &shown); err != nil {
+		return nil, false
+	}
+	rows := make([]BeadRow, 0, len(shown))
+	for _, b := range shown {
+		if b.ID == "" {
+			continue
+		}
+		rows = append(rows, BeadRow{ID: b.ID, Branch: BranchLine(b.Notes)})
+	}
+	return rows, true
 }
 
 // HandoffBytes returns the bytes of notes plus comments for each bead. Beads
