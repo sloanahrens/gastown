@@ -235,6 +235,7 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 		requested   bool   // that signal stop was requested through gt: StopDaemon left the stop marker
 		gtDownStop  bool   // gt down stopped the daemon while the helper waited: the marker and the signal record a real stop leaves
 		noPid       bool   // launchctl print reports the job loaded with no pid
+		printBroken bool   // launchctl print cannot run at all (exit 127)
 		estop       bool   // the town E-stop went up while the helper waited
 		wantBootout bool
 		wantBoots   int
@@ -255,6 +256,7 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 		{name: "an E-stop raised while the helper waited is left alone", estop: true, wantLogLine: "E-stop active"},
 		{name: "a job that stays loaded after bootout is given up on", stuckLoaded: true, wantBootout: true, wantLogLine: "gave up: gui/501/com.example.fake still loaded", wantGiveUp: true},
 		{name: "a bootstrap that never succeeds is given up on", bootstrapOK: "never", wantBootout: true, wantBoots: 60, wantLogLine: "gave up: bootstrap of /fake/com.example.fake.plist failed 60 times", wantGiveUp: true},
+		{name: "a launchctl print that cannot run leaves the job alone", printBroken: true, wantLogLine: "launchctl print could not run"},
 		{name: "gt down stop with the job loaded and no pid", noPid: true, gtDownStop: true, wantLogLine: "a daemon stop was requested through gt"},
 	}
 	for _, tc := range cases {
@@ -267,6 +269,7 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 			writeFakeTool(t, bin, "launchctl", `echo "$*" >> "$HEAL_CALLS"
 case "$1" in
 print)
+	if [ -n "$HEAL_PRINT_BROKEN" ]; then exit 127; fi
 	if [ -e "$HEAL_BOOTED" ] && [ -z "$HEAL_STUCK" ]; then echo 'Could not find service' >&2; exit 113; fi
 	if [ -n "$HEAL_PID_ONCE" ]; then
 		n=$(cat "$HEAL_PRINTS" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$HEAL_PRINTS"
@@ -302,6 +305,10 @@ exit 0
 			noPid := ""
 			if tc.noPid {
 				noPid = "1"
+			}
+			broken := ""
+			if tc.printBroken {
+				broken = "1"
 			}
 			if tc.stopMarker {
 				if err := writeStopRequested(d.config.TownRoot, 4242, time.Now()); err != nil {
@@ -340,6 +347,7 @@ exit 0
 				"HEAL_CALLS=" + calls,
 				"HEAL_TRIES=" + tries,
 				"HEAL_PID=" + tc.pid,
+				"HEAL_PRINT_BROKEN=" + broken,
 				"HEAL_PID_ONCE=" + tc.pidOnce,
 				"HEAL_PRINTS=" + filepath.Join(bin, "prints.txt"),
 				"HEAL_LOCK_HOLDER=" + tc.lockHolder,
@@ -366,9 +374,13 @@ exit 0
 			if gotSys := strings.Contains(string(sysText), "gave up:"); gotSys != tc.wantGiveUp {
 				t.Fatalf("system log carries a give-up = %v, want %v:\n%s", gotSys, tc.wantGiveUp, sysText)
 			}
+			healLog, err := os.ReadFile(filepath.Join(d.config.TownRoot, "daemon", upgradeHealLogName))
+			if err != nil {
+				t.Fatalf("heal decisions not written to %s: %v", upgradeHealLogName, err)
+			}
 			gotBootout := strings.Contains(string(callLog), "bootout")
 			if gotBootout != tc.wantBootout {
-				t.Fatalf("bootout ran = %v, want %v; launchctl calls:\n%s", gotBootout, tc.wantBootout, callLog)
+				t.Fatalf("bootout ran = %v, want %v; launchctl calls:\n%s\nheal log:\n%s", gotBootout, tc.wantBootout, callLog, healLog)
 			}
 			if got := strings.Count(string(callLog), "bootstrap gui/501 /fake/com.example.fake.plist"); got != tc.wantBoots {
 				t.Fatalf("bootstrap attempts = %d, want %d; launchctl calls:\n%s", got, tc.wantBoots, callLog)
@@ -386,10 +398,6 @@ exit 0
 				}
 			}
 
-			healLog, err := os.ReadFile(filepath.Join(d.config.TownRoot, "daemon", upgradeHealLogName))
-			if err != nil {
-				t.Fatalf("heal decisions not written to %s: %v", upgradeHealLogName, err)
-			}
 			if !strings.Contains(string(healLog), tc.wantLogLine) {
 				t.Fatalf("heal log missing %q:\n%s", tc.wantLogLine, healLog)
 			}
@@ -502,8 +510,14 @@ func TestUpgradeRestartHealWedgedLaunchctlIsBounded(t *testing.T) {
 // writeFakeTool writes an executable /bin/sh stand-in for name into dir.
 func writeFakeTool(t *testing.T, dir, name, body string) {
 	t.Helper()
+	// A fork that runs while this write descriptor is open hands the child a copy
+	// of it, and the kernel then refuses to exec the fake as text file busy. The
+	// fork lock is held across the write and the close (gt-e96f7, dv-bums).
 	//testpolicy:allow no-exec-files — the test is the process boundary: the helper script finds these fakes first on PATH
-	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+	syscall.ForkLock.Lock()
+	err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755)
+	syscall.ForkLock.Unlock()
+	if err != nil {
 		t.Fatal(err)
 	}
 }
