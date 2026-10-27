@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,22 @@ func (f *fakeLandingNotes) Notes(rig, bead string) (string, error) {
 	return notes, nil
 }
 
+// fakeReviewDocs returns scripted polecat verdicts per bead and head.
+type fakeReviewDocs struct {
+	byBead map[string]map[string]string
+	err    error
+	reads  []string
+}
+
+func (f *fakeReviewDocs) Verdict(_ context.Context, bead, head string) (string, bool, error) {
+	f.reads = append(f.reads, bead+"/"+head)
+	if f.err != nil {
+		return "", false, f.err
+	}
+	verdict, ok := f.byBead[bead][head]
+	return verdict, ok, nil
+}
+
 func landingItem(bead, head string) Item {
 	return Item{
 		ID:   bead,
@@ -47,33 +64,42 @@ func landingItem(bead, head string) Item {
 	}
 }
 
-func TestLandingLabelReadsTheOverseerVerdict(t *testing.T) {
+// TestLandingLabelReadsTheReviewVerdicts labels one landing from each source
+// the scorecard reads: the overseer's note on the bead and the polecat's
+// review document, the overseer's verdict winning when both name the head
+// (gt-b9j3o.1).
+func TestLandingLabelReadsTheReviewVerdicts(t *testing.T) {
 	t.Parallel()
 	head := "a1a1a1a"
 	other := "b2b2b2b"
 	cases := []struct {
 		name     string
 		notes    string
+		docs     map[string]string
 		labeled  bool
 		failed   bool
+		source   string
 		findings []string
 	}{
 		{
 			name:    "a PASS for the logged head labels both questions false",
 			notes:   land.OverseerReviewMarker + " " + head + " PASS",
 			labeled: true,
+			source:  landingSourceOverseer,
 		},
 		{
 			name:    "a FAIL labels both true",
 			notes:   land.OverseerReviewMarker + " " + head + " FAIL",
 			labeled: true,
 			failed:  true,
+			source:  landingSourceOverseer,
 		},
 		{
 			name:     "a FAIL's finding beads are kept for the context",
 			notes:    land.OverseerReviewMarker + " " + head + " FAIL findings=gt-f1,gt-f2",
 			labeled:  true,
 			failed:   true,
+			source:   landingSourceOverseer,
 			findings: []string{"gt-f1", "gt-f2"},
 		},
 		{
@@ -100,13 +126,47 @@ func TestLandingLabelReadsTheOverseerVerdict(t *testing.T) {
 			name:    "a PASS after a FAIL supersedes it",
 			notes:   land.OverseerReviewMarker + " " + head + " FAIL findings=gt-f1\n" + land.OverseerReviewMarker + " " + head + " PASS",
 			labeled: true,
+			source:  landingSourceOverseer,
+		},
+		{
+			name:    "a polecat PASS labels both questions false",
+			docs:    map[string]string{head: land.OverseerReviewPass},
+			labeled: true,
+			source:  landingSourcePolecat,
+		},
+		{
+			name:    "a polecat FAIL labels both true",
+			docs:    map[string]string{head: land.OverseerReviewFail},
+			labeled: true,
+			failed:  true,
+			source:  landingSourcePolecat,
+		},
+		{
+			name:    "the overseer's verdict wins over the polecat's document",
+			notes:   land.OverseerReviewMarker + " " + head + " PASS",
+			docs:    map[string]string{head: land.OverseerReviewFail},
+			labeled: true,
+			source:  landingSourceOverseer,
+		},
+		{
+			name:    "a WAIVED note falls through to the polecat's document",
+			notes:   land.OverseerReviewMarker + " " + head + " WAIVED: docs only",
+			docs:    map[string]string{head: land.OverseerReviewPass},
+			labeled: true,
+			source:  landingSourcePolecat,
+		},
+		{
+			name:    "a polecat review of another head is unlabeled",
+			docs:    map[string]string{other: land.OverseerReviewPass},
+			labeled: false,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			notes := &fakeLandingNotes{byBead: map[string]string{"gt-a": tc.notes}}
-			a := &landingAdapter{notes: notes}
+			docs := &fakeReviewDocs{byBead: map[string]map[string]string{"gt-a": tc.docs}}
+			a := &landingAdapter{notes: notes, reviews: docs}
 			lab, err := a.Label(context.Background(), landingItem("gt-a", head))
 			if err != nil {
 				t.Fatal(err)
@@ -115,8 +175,8 @@ func TestLandingLabelReadsTheOverseerVerdict(t *testing.T) {
 				t.Fatalf("labeled = %v, want %v (labels %v)", lab.Labeled, tc.labeled, lab.Labels)
 			}
 			if !tc.labeled {
-				if lab.Labels != nil || lab.Rule != "" {
-					t.Errorf("unlabeled item returned labels %v rule %q, want none", lab.Labels, lab.Rule)
+				if lab.Labels != nil || lab.Rule != "" || lab.Source != "" {
+					t.Errorf("unlabeled item returned labels %v rule %q source %q, want none", lab.Labels, lab.Rule, lab.Source)
 				}
 				if got := a.Context(); got != nil {
 					t.Errorf("unlabeled item reported context %q, want none", got)
@@ -137,6 +197,9 @@ func TestLandingLabelReadsTheOverseerVerdict(t *testing.T) {
 			if lab.Rule != wantRule {
 				t.Errorf("rule = %q, want %q", lab.Rule, wantRule)
 			}
+			if lab.Source != tc.source {
+				t.Errorf("source = %q, want %q", lab.Source, tc.source)
+			}
 			got := a.Context()
 			if len(tc.findings) == 0 {
 				if got != nil {
@@ -153,12 +216,53 @@ func TestLandingLabelReadsTheOverseerVerdict(t *testing.T) {
 	}
 }
 
+func TestLandingLabelFailsWhenTheReviewDocsCannotBeRead(t *testing.T) {
+	t.Parallel()
+	a := &landingAdapter{
+		notes:   &fakeLandingNotes{byBead: map[string]string{"gt-a": ""}},
+		reviews: &fakeReviewDocs{err: errors.New("clone unavailable")},
+	}
+	_, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
+	if err == nil || !strings.Contains(err.Error(), "clone unavailable") {
+		t.Fatalf("Label error = %v, want the review document failure", err)
+	}
+}
+
 func TestLandingLabelFailsWhenTheNotesCannotBeRead(t *testing.T) {
 	t.Parallel()
 	a := &landingAdapter{notes: &fakeLandingNotes{err: errors.New("bead store unavailable")}}
 	_, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
 	if err == nil || !strings.Contains(err.Error(), "bead store unavailable") {
 		t.Fatalf("Label error = %v, want the store failure", err)
+	}
+}
+
+// TestLandingLabelFailsWithNoReviewSource fails a landing that has no overseer
+// verdict and no review source to ask, rather than reading it as unreviewed
+// with a clean exit (gt-b9j3o.1).
+func TestLandingLabelFailsWithNoReviewSource(t *testing.T) {
+	t.Parallel()
+	a := &landingAdapter{notes: &fakeLandingNotes{byBead: map[string]string{"gt-a": ""}}}
+	_, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
+	if err == nil || !strings.Contains(err.Error(), "no review source") {
+		t.Fatalf("Label error = %v, want the missing review source", err)
+	}
+}
+
+// TestLandingReviewsReadFromTheTownClone drives the review source the battery
+// builds: a landing with no overseer verdict is read from the review documents
+// in the town's clone, so a clone that cannot be opened fails the report and
+// names the town it was opened for (gt-b9j3o.1).
+func TestLandingReviewsReadFromTheTownClone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	a := newLandingAdapter(town, &fakeLandingNotes{byBead: map[string]string{"gt-a": ""}})
+	_, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
+	if err == nil {
+		t.Fatal("Label succeeded, want the unopenable clone to fail it")
+	}
+	if want := filepath.Join(town, "mayor", "rigs.json"); !strings.Contains(err.Error(), want) {
+		t.Fatalf("Label error = %v, want it to name the town's clone source %s", err, want)
 	}
 }
 
@@ -235,6 +339,61 @@ func TestLandingContextClearsTheTallyForTheNextBuild(t *testing.T) {
 	}
 	if got := a.Context(); got != nil {
 		t.Errorf("second context = %q, want the tally cleared", got)
+	}
+}
+
+// TestLandingScorecardReportsLabelSourcesApart counts each question's labeled
+// lines by the source of their label, so a polecat's review and the overseer's
+// are never read as one (gt-b9j3o.1).
+func TestLandingScorecardReportsLabelSourcesApart(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	logPath := landing.LogPath(town)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		`{"ts":"2026-10-19T09:00:00Z","bead":"gt-a","head":"a1a1a1a","answers":{"risk":{"score":1}},"question_version":1}`,
+		`{"ts":"2026-10-19T10:00:00Z","bead":"gt-b","head":"b2b2b2b","answers":{"risk":{"score":3}},"question_version":1}`,
+	}
+	if err := os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &landingAdapter{
+		log:     logPath,
+		notes:   &fakeLandingNotes{byBead: map[string]string{"gt-a": land.OverseerReviewMarker + " a1a1a1a PASS", "gt-b": ""}},
+		reviews: &fakeReviewDocs{byBead: map[string]map[string]string{"gt-b": {"b2b2b2b": land.OverseerReviewFail}}},
+	}
+	rep, err := Build(context.Background(), a, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var risk *QuestionReport
+	for i := range rep.Questions {
+		if rep.Questions[i].ID == landing.QRisk {
+			risk = &rep.Questions[i]
+		}
+	}
+	if risk == nil {
+		t.Fatalf("questions = %+v, want the risk question", rep.Questions)
+	}
+	want := []SourceCount{
+		{Source: landingSourceOverseer, Labeled: 1},
+		{Source: landingSourcePolecat, Labeled: 1, Positives: 1},
+	}
+	if !slices.Equal(risk.Sources, want) {
+		t.Errorf("sources = %+v, want %+v", risk.Sources, want)
+	}
+	if rep.Lines[1].Source != landingSourcePolecat {
+		t.Errorf("line source = %q, want %q", rep.Lines[1].Source, landingSourcePolecat)
+	}
+
+	var out strings.Builder
+	if err := WriteText(&out, rep); err != nil {
+		t.Fatal(err)
+	}
+	if wantLine := "  labels by source: overseer 1 label, 0 positives; polecat 1 label, 1 positive\n"; !strings.Contains(out.String(), wantLine) {
+		t.Errorf("text report lacks %q:\n%s", wantLine, out.String())
 	}
 }
 
@@ -332,7 +491,11 @@ func TestLandingScorecardPrintsPerQuestionBlocks(t *testing.T) {
 	if err := os.WriteFile(logPath, []byte(strings.Join(landingLog, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a := &landingAdapter{log: logPath, notes: &fakeLandingNotes{byBead: landingNotesByBead}}
+	a := &landingAdapter{
+		log:     logPath,
+		notes:   &fakeLandingNotes{byBead: landingNotesByBead},
+		reviews: &fakeReviewDocs{},
+	}
 
 	rep, err := Build(context.Background(), a, time.Time{})
 	if err != nil {

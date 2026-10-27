@@ -36,16 +36,17 @@ type Report struct {
 }
 
 // LineReport is one parsed item's labeling: whether a rule labeled it, which
-// rule, and the labels it set.
+// rule, where the label came from, and the labels it set.
 type LineReport struct {
 	ID      string          `json:"id"`
 	Labeled bool            `json:"labeled"`
 	Rule    string          `json:"rule,omitempty"`
+	Source  string          `json:"source,omitempty"`
 	Labels  map[string]bool `json:"labels,omitempty"`
 }
 
 func lineReport(it Item, lab Labeling) LineReport {
-	lr := LineReport{ID: it.ID, Labeled: lab.Labeled, Rule: lab.Rule}
+	lr := LineReport{ID: it.ID, Labeled: lab.Labeled, Rule: lab.Rule, Source: lab.Source}
 	if lab.Labeled {
 		lr.Labels = make(map[string]bool, len(lab.Labels))
 		for id, v := range lab.Labels {
@@ -83,13 +84,25 @@ type QuestionReport struct {
 	// Context counts the Item.Context values on the question's logged lines.
 	// It is printed beside the question and never scored.
 	Context []ContextCount `json:"context,omitempty"`
-	Verdict string         `json:"verdict"`
+	// Sources counts the question's labeled lines by the source of their
+	// label, in source order, so a review from one source is never read as
+	// another's. It is printed only when set.
+	Sources []SourceCount `json:"sources,omitempty"`
+	Verdict string        `json:"verdict"`
 }
 
 // ContextCount is how many of a question's logged lines carry one context value.
 type ContextCount struct {
 	Value string `json:"value"`
 	Lines int    `json:"lines"`
+}
+
+// SourceCount is how many of a question's labeled lines came from one source,
+// and how many of those carried a true label.
+type SourceCount struct {
+	Source    string `json:"source"`
+	Labeled   int    `json:"labeled"`
+	Positives int    `json:"positives"`
 }
 
 // Bin is one calibration band: the labeled lines whose value falls in [Lo, Hi).
@@ -125,6 +138,9 @@ func WriteText(w io.Writer, rep Report) error {
 			q.Logged, q.Labeled, q.Positives, q.Negatives, pct(q.BaseRate))
 		if q.Unmatched > 0 {
 			ew.printf("  labeled with no usable answer, not scored: %d\n", q.Unmatched)
+		}
+		if len(q.Sources) > 0 {
+			ew.printf("  labels by source: %s\n", sourceText(q.Sources))
 		}
 		switch q.Kind {
 		case KindNoul:
@@ -173,6 +189,23 @@ func contextText(counts []ContextCount) string {
 		parts = append(parts, fmt.Sprintf("%s %d %s", c.Value, c.Lines, unit))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// sourceText lists the label sources as "overseer 2 labels, 1 positive;
+// polecat 3 labels, 2 positives".
+func sourceText(counts []SourceCount) string {
+	parts := make([]string, 0, len(counts))
+	for _, c := range counts {
+		labels, positives := "labels", "positives"
+		if c.Labeled == 1 {
+			labels = "label"
+		}
+		if c.Positives == 1 {
+			positives = "positive"
+		}
+		parts = append(parts, fmt.Sprintf("%s %d %s, %d %s", c.Source, c.Labeled, labels, c.Positives, positives))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func pct(v *float64) string {

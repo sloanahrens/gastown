@@ -200,6 +200,48 @@ func TestOverseerReviewVerdict(t *testing.T) {
 	}
 }
 
+// PolecatReviewVerdict names the verdict of the latest verdict line a review
+// document carries for the head, and passes over a document that reviewed
+// another commit (gt-b9j3o.1).
+func TestPolecatReviewVerdict(t *testing.T) {
+	t.Parallel()
+	head := "0123456789abcdef0123456789abcdef01234567"
+	other := "fedcba9876543210fedcba9876543210fedcba98"
+	for _, tc := range []struct {
+		name string
+		doc  string
+		want string
+		ok   bool
+	}{
+		{"PASS", "review\n" + PolecatReviewMarker + " " + head + " PASS\n", "PASS", true},
+		{"FAIL with its defect", "review\n" + PolecatReviewMarker + " " + head + " FAIL: internal/x.go:12 ignores the error\n", "FAIL", true},
+		{"an abbreviated head names it", PolecatReviewMarker + " " + head[:13] + " PASS", "PASS", true},
+		{"a seven-digit abbreviation names it", PolecatReviewMarker + " " + head[:7] + " FAIL: defect", "FAIL", true},
+		{"an abbreviation of another head does not", PolecatReviewMarker + " " + other[:13] + " PASS", "", false},
+		{"FAIL after PASS", PolecatReviewMarker + " " + head + " PASS\n" + PolecatReviewMarker + " " + head + " FAIL: defect", "FAIL", true},
+		{"PASS after FAIL", PolecatReviewMarker + " " + head + " FAIL: defect\n" + PolecatReviewMarker + " " + head + " PASS", "PASS", true},
+		{"only another head", PolecatReviewMarker + " " + other + " PASS", "", false},
+		{"a marker inside prose is not a verdict line", "the note says " + PolecatReviewMarker + " " + head + " PASS", "", false},
+		{"PASSED is not PASS", PolecatReviewMarker + " " + head + " PASSED", "", false},
+		{"no verdict line", "review of the change, nothing decided", "", false},
+	} {
+		got, ok := PolecatReviewVerdict(tc.doc, head)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("%s: PolecatReviewVerdict = %q, %v; want %q, %v", tc.name, got, ok, tc.want, tc.ok)
+		}
+	}
+	if _, ok := PolecatReviewVerdict(PolecatReviewMarker+" "+head+" PASS", ""); ok {
+		t.Error("an empty head must not be answered")
+	}
+	// A head under seven digits names too many commits to match a review line,
+	// which itself may abbreviate only to seven.
+	for _, abbrev := range []string{head[:3], head[:6]} {
+		if _, ok := PolecatReviewVerdict(PolecatReviewMarker+" "+head+" PASS", abbrev); ok {
+			t.Errorf("a head abbreviated to %q matched the review, want no match under seven digits", abbrev)
+		}
+	}
+}
+
 // OverseerReviewFindings reads the finding beads off the latest review line
 // naming exactly head: what a FAIL's " findings=" suffix carries. A FAIL
 // written before the suffix existed, and a line that names no findings, both

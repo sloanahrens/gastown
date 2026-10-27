@@ -50,6 +50,13 @@ const (
 	// head sha>" that binds the overseer's review to one head.
 	OverseerReviewedMarker = "OVERSEER REVIEWED"
 
+	// PolecatReviewMarker opens the verdict line a polecat's review document
+	// ends with: "POLECAT REVIEW <full head sha> PASS" or "POLECAT REVIEW
+	// <full head sha> FAIL: <the defect>". Unlike the overseer's line it is
+	// written in docs/reviews, not in the bead's notes, and it records a
+	// second look at a head that already landed.
+	PolecatReviewMarker = "POLECAT REVIEW"
+
 	// ReadyNoteMarker opens the notes block gt done writes to say what to land.
 	ReadyNoteMarker = "READY TO LAND"
 )
@@ -316,4 +323,41 @@ func OverseerReviewFindings(notes, head string) []string {
 		}
 	}
 	return out
+}
+
+// polecatReviewLine matches a review document's verdict line: the head it
+// reviewed and PASS or FAIL. A FAIL's defects follow a colon as prose, so they
+// are never parsed; the trailing \b keeps "PASSED" from reading as PASS.
+var polecatReviewLine = regexp.MustCompile(`^POLECAT REVIEW ([0-9a-f]{7,64}) (PASS|FAIL)\b`)
+
+// PolecatReviewVerdict returns the verdict (PASS or FAIL) of the latest verdict
+// line in doc that names head, and whether there is one. The line may name the
+// head by an abbreviation of at least 7 hex digits, as a review document
+// commonly does. A document naming only another head reviewed a different
+// commit, so it says nothing about head.
+func PolecatReviewVerdict(doc, head string) (string, bool) {
+	if head == "" {
+		return "", false
+	}
+	verdict, found := "", false
+	for _, line := range strings.Split(doc, "\n") {
+		if m := polecatReviewLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil && namesHead(m[1], head) {
+			verdict, found = m[2], true
+		}
+	}
+	return verdict, found
+}
+
+// minHeadAbbrev is the shortest abbreviation namesHead matches: the seven hex
+// digits git's own abbreviation starts at. A shorter one names many commits,
+// so it cannot show that a review read the head.
+const minHeadAbbrev = 7
+
+// namesHead reports whether sha and head name the same commit, either whole or
+// as the other's prefix of at least seven digits.
+func namesHead(sha, head string) bool {
+	if len(sha) < minHeadAbbrev || len(head) < minHeadAbbrev {
+		return false
+	}
+	return strings.HasPrefix(head, sha) || strings.HasPrefix(sha, head)
 }

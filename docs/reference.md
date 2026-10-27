@@ -1628,7 +1628,8 @@ root. The adapter implements:
   one item. The scorecard reads such a line through it in place of `Parse`; a
   drift line answers each doc section it names.
 - `Label(ctx, item) (Labeling, error)`: the item's labels, whether it is labeled
-  at all, and the rule that set them. An unlabeled item counts as logged but not
+  at all, the rule that set them, and their source when an adapter draws labels
+  from more than one. An unlabeled item counts as logged but not
   labeled. A label on an item with no usable answer to the question counts as
   `unmatched` and is not scored. An error that cannot be read fails the whole
   report, so a broken label source cannot pass as "no labels yet".
@@ -1654,7 +1655,7 @@ The verdict for each question:
 
 The best F1 is taken over every distinct value as a cut, predicting yes at or
 above it; a tie keeps the higher cut. `--json` names the rule that labeled each
-line in its `lines` array.
+line in its `lines` array, and the label's source where it has one.
 
 Every battery is registered with `Register` in `internal/jev/scorecard/`. The
 test-only `fixture` battery reads `.runtime/jev/fixture.jsonl` with labels from
@@ -1679,13 +1680,22 @@ An item still standing with no disposition is unlabeled, as is one whose life
 the queue files no longer hold. A bead read that fails for any reason other
 than not-found fails the report.
 
-The `landing` battery reads `.runtime/jev/landing.jsonl`. Its labels come from
-each logged bead's notes: the latest `OVERSEER REVIEW <head> PASS|FAIL` line for
-the logged head, read with the parser the risk-path attention item uses. A
-`PASS` sets `needs_review_now` and `risk` false (`landing:review-pass`), a
-`FAIL` sets both true (`landing:review-fail`), and a `WAIVED` or `AUDITED` line,
-or none, leaves the item unlabeled. The finding beads a `FAIL` names are counted
-in the report's context.
+The `landing` battery reads `.runtime/jev/landing.jsonl`. A landing's label
+comes from a review of its logged head, and every label records its source,
+`overseer` or `polecat`; the report counts each question's labels by source. The
+overseer's note on the bead wins: the latest `OVERSEER REVIEW <head> PASS|FAIL`
+line for the logged head, read with the parser the risk-path attention item
+uses. When the notes hold no such verdict — none, or a `WAIVED` or `AUDITED`
+line — the label comes from the bead's polecat review document,
+`docs/reviews/<date>-<bead>.md` on the bare clone's `main`, whose verdict line
+is `POLECAT REVIEW <head> PASS|FAIL[: <the defect>]`; the head may be
+abbreviated to at least 7 hex digits, as a review document usually names it. A
+clone that cannot be read fails the report, as a missing rig does: otherwise
+every landing it would have labeled would read as unreviewed with a clean exit.
+A `PASS` from either source sets `needs_review_now` and `risk` false
+(`landing:review-pass`), a `FAIL` sets both true (`landing:review-fail`), and a
+head neither review records leaves the item unlabeled. The finding beads a
+`FAIL` names in the bead's notes are counted in the report's context.
 
 The `submission` battery reads `.runtime/jev/submission.jsonl`, the submission
 battery's log. Each line is joined to the om review that judged it: the first

@@ -69,6 +69,7 @@ func Build(ctx context.Context, a Adapter, since time.Time) (Report, error) {
 	}
 
 	labels := make([]map[QuestionID]bool, len(items))
+	sources := make([]string, len(items))
 	rep.Lines = make([]LineReport, 0, len(items))
 	for i, it := range items {
 		lab, err := a.Label(ctx, it)
@@ -77,6 +78,7 @@ func Build(ctx context.Context, a Adapter, since time.Time) (Report, error) {
 		}
 		if lab.Labeled {
 			labels[i] = lab.Labels
+			sources[i] = lab.Source
 			rep.Labeled++
 		}
 		rep.Lines = append(rep.Lines, lineReport(it, lab))
@@ -93,7 +95,7 @@ func Build(ctx context.Context, a Adapter, since time.Time) (Report, error) {
 	}
 	slices.Sort(ids)
 	for _, id := range ids {
-		rep.Questions = append(rep.Questions, scoreQuestion(id, kinds[id], items, labels))
+		rep.Questions = append(rep.Questions, scoreQuestion(id, kinds[id], items, labels, sources))
 	}
 	return rep, nil
 }
@@ -205,10 +207,11 @@ func usable(ans Answer, kind string) (value float64, chosen, ok bool) {
 	return 0, false, false
 }
 
-func scoreQuestion(id QuestionID, kind string, items []Item, labels []map[QuestionID]bool) QuestionReport {
+func scoreQuestion(id QuestionID, kind string, items []Item, labels []map[QuestionID]bool, sources []string) QuestionReport {
 	qr := QuestionReport{ID: string(id), Kind: kind}
 	var samples []sample
 	contextLines := map[string]int{}
+	sourceCounts := map[string]SourceCount{}
 	for i, it := range items {
 		label, labeled := labels[i][id]
 		ans, answered := it.Answers[id]
@@ -235,7 +238,17 @@ func scoreQuestion(id QuestionID, kind string, items []Item, labels []map[Questi
 		} else {
 			qr.Negatives++
 		}
+		if src := sources[i]; src != "" {
+			c := sourceCounts[src]
+			c.Source = src
+			c.Labeled++
+			if label {
+				c.Positives++
+			}
+			sourceCounts[src] = c
+		}
 	}
+	qr.Sources = sourceCountList(sourceCounts)
 
 	var base, best float64
 	if qr.Labeled > 0 {
@@ -258,6 +271,20 @@ func scoreQuestion(id QuestionID, kind string, items []Item, labels []map[Questi
 	qr.Verdict = verdict(qr.Labeled, best, base)
 	qr.Context = contextCounts(contextLines)
 	return qr
+}
+
+// sourceCountList lists the label sources in source order, or nil when no
+// labeled line named one.
+func sourceCountList(counts map[string]SourceCount) []SourceCount {
+	if len(counts) == 0 {
+		return nil
+	}
+	out := make([]SourceCount, 0, len(counts))
+	for _, c := range counts {
+		out = append(out, c)
+	}
+	slices.SortFunc(out, func(a, b SourceCount) int { return cmp.Compare(a.Source, b.Source) })
+	return out
 }
 
 // contextCounts lists the context values in value order, or nil when no line
