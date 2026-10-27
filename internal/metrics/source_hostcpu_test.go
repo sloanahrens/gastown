@@ -326,6 +326,92 @@ func TestHostCPUAPidReusedBetweenSamplesIsNoReading(t *testing.T) {
 	}
 }
 
+// A process id whose program changed between the samples was reused even when
+// the new process has already burned more CPU than the old one: the id falling
+// is one way to see it, and a changed program is the other, so neither pair is
+// a reading.
+func TestHostCPUAPidReusedByAnotherProgramIsNoReading(t *testing.T) {
+	t.Parallel()
+	fake := hostCPUFakeEnv(
+		hostCPUSample{
+			names: "  400  12:00.00 /opt/homebrew/bin/dolt\n",
+			args:  "  400 /opt/homebrew/bin/dolt sql-server\n",
+		},
+		hostCPUSample{
+			names: "  400  12:30.00 /opt/homebrew/bin/gt\n",
+			args:  "  400 /opt/homebrew/bin/gt status --json\n",
+		},
+	)
+
+	got, err := hostCPUSource{}.Collect(context.Background(), fake.env())
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	assertHostCPUColumns(t, got, map[string]any{
+		"polecat_vm_cores": nil,
+		"docker_vm_cores":  nil,
+		"dolt_cores":       nil,
+		"scanner_cores":    nil,
+		"gt_cores":         nil,
+		"other_1_name":     nil,
+		"other_1_cores":    nil,
+		"other_2_name":     nil,
+		"other_2_cores":    nil,
+		"other_3_name":     nil,
+		"other_3_cores":    nil,
+		"window_s":         1.0,
+		"unmeasured_pids":  0,
+		"regressed_pids":   1,
+	})
+}
+
+// A deadline that leaves less than the window fails the group before it waits:
+// the wait cannot be interrupted, so sleeping through the deadline would spend
+// a second process-table read on a record the snapshot has already discarded.
+func TestHostCPUAWindowTheDeadlineCannotHoldFailsTheGroup(t *testing.T) {
+	t.Parallel()
+	fake := hostCPUFakeEnv(hostCPUSampleOne, hostCPUSampleTwo)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	got, err := hostCPUSource{}.Collect(ctx, fake.env())
+	if err == nil {
+		t.Fatalf("Collect = %v, want an error", got)
+	}
+	if got != nil {
+		t.Errorf("Collect returned %v beside its error, want no columns", got)
+	}
+	if len(fake.ran) != 0 {
+		t.Errorf("the source ran %q, want no read toward a window it cannot finish", fake.ran)
+	}
+}
+
+// A context that ends during the wait fails the group before the second
+// sample, because the sample would go into a record that is already discarded.
+func TestHostCPUAContextEndingInTheWaitFailsTheGroup(t *testing.T) {
+	t.Parallel()
+	fake := hostCPUFakeEnv(hostCPUSampleOne, hostCPUSampleTwo)
+	ctx, cancel := context.WithCancel(context.Background())
+	env := fake.env()
+	wait := env.Wait
+	env.Wait = func(d time.Duration) {
+		wait(d)
+		cancel()
+	}
+
+	got, err := hostCPUSource{}.Collect(ctx, env)
+	if err == nil {
+		t.Fatalf("Collect = %v, want an error", got)
+	}
+	if got != nil {
+		t.Errorf("Collect returned %v beside its error, want no columns", got)
+	}
+	want := []string{strings.Join(hostCPUNameArgv, " "), strings.Join(hostCPUArgsArgv, " ")}
+	if !reflect.DeepEqual(fake.ran, want) {
+		t.Errorf("the source ran %q, want the first sample only (%q)", fake.ran, want)
+	}
+}
+
 // A read that fails or prints a table the parser cannot use nulls the whole
 // group with an error: a group of nils would read as a host with nothing
 // running.
@@ -395,19 +481,21 @@ func TestHostCPUWithNoWaitSeamFailsTheGroup(t *testing.T) {
 }
 
 // Every host source reads cumulative CPU time, never ps's pcpu, which is a
-// decayed average. The check pins the CPU group's reads and walks the host
-// group's probes, so a command added to either is covered here.
+// decayed average. The check walks the commands the CPU group's Collect ran and
+// the host group's probes, so a read added to either is covered here.
 func TestHostCPUSourcesReadNoCPUPercent(t *testing.T) {
 	t.Parallel()
-	want := [][]string{
-		{"ps", "-axo", "pid=,time=,comm="},
-		{"ps", "-axo", "pid=,args="},
+	fake := hostCPUFakeEnv(hostCPUSampleOne, hostCPUSampleTwo)
+	if _, err := (hostCPUSource{}).Collect(context.Background(), fake.env()); err != nil {
+		t.Fatalf("Collect: %v", err)
 	}
-	got := [][]string{hostCPUNameArgv, hostCPUArgsArgv}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("the CPU group's reads = %q, want %q", got, want)
+	if len(fake.ran) == 0 {
+		t.Fatal("the CPU group ran no read, so nothing was checked")
 	}
-	argvs := append([][]string{}, got...)
+	var argvs [][]string
+	for _, command := range fake.ran {
+		argvs = append(argvs, strings.Fields(command))
+	}
 	for _, probe := range newHostSource().probes() {
 		argvs = append(argvs, probe.argv)
 	}

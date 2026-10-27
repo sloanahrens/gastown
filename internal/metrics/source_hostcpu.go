@@ -27,8 +27,9 @@ import (
 //	window_s          the interval the two samples were taken over
 //	unmeasured_pids   processes that exited between the samples: what they
 //	                  burned after the first read is in no reading
-//	regressed_pids    process ids whose cumulative CPU time fell between the
-//	                  samples, so the id was reused: their pair is in no reading
+//	regressed_pids    process ids whose two samples cannot be paired, because
+//	                  the cumulative time fell or the program changed: the id
+//	                  was reused, so their pair is in no reading
 //
 // Cores are the difference of each process's cumulative CPU time between two
 // samples divided by the interval between them. ps's pcpu is never read: it is
@@ -55,12 +56,21 @@ func (hostCPUSource) Collect(ctx context.Context, env Env) (map[string]any, erro
 	if env.Wait == nil {
 		return nil, errors.New("no wait seam, so the sampling window cannot be taken")
 	}
+	if err := hostCPUWindowFits(ctx, hostCPUWindow); err != nil {
+		return nil, err
+	}
 	start := env.now()
 	first, err := readHostCPUTable(ctx, env)
 	if err != nil {
 		return nil, fmt.Errorf("first sample: %w", err)
 	}
 	env.Wait(hostCPUWindow)
+	// The wait seam is a plain sleep, so the context can end inside it: the
+	// second sample would then read a table for a record the snapshot has
+	// already discarded.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("waiting out the sampling window: %w", err)
+	}
 	end := env.now()
 	second, err := readHostCPUTable(ctx, env)
 	if err != nil {
@@ -97,6 +107,19 @@ func (hostCPUSource) Collect(ctx context.Context, env Env) (map[string]any, erro
 // window top reads, long enough that a hundredth of a second of CPU time means
 // something and short enough to cost the snapshot a second of its deadline.
 const hostCPUWindow = time.Second
+
+// hostCPUWindowFits refuses a window the group's deadline cannot hold, so a
+// snapshot that is nearly out of time reads nothing. The wait seam sleeps for
+// the whole window and cannot be interrupted: a wait that started with less
+// time left would sleep past the deadline and spend a second process-table read
+// on a record the snapshot has already discarded.
+func hostCPUWindowFits(ctx context.Context, window time.Duration) error {
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) >= window {
+		return nil
+	}
+	return fmt.Errorf("the %s sampling window does not fit before the group's deadline", window)
+}
 
 // hostCPUOtherN is how many busiest other process names the group ranks: the
 // other_N_name and other_N_cores columns run from 1 to this count.
@@ -168,6 +191,9 @@ func (c hostCPUConsumer) read(deltas []hostCPUDelta, claimed []bool) any {
 
 // hostCPUProc is one process in one sample.
 type hostCPUProc struct {
+	// path is the program the process runs, which tells a reused id from the
+	// process that held it in the other sample.
+	path    string
 	name    string
 	command string
 	// seconds is the process's cumulative CPU time since it started.
@@ -187,14 +213,21 @@ type hostCPUDelta struct {
 // started inside the window, so its whole cumulative time was burned in it; a
 // process only in the first exited, and what it burned after that read is
 // unknown, so it is counted in unmeasured and contributes nothing. A
-// difference below zero means the id was reused, so neither process's total is
-// a reading of this window's other one; the pair is counted in regressed. The
+// difference below zero, or a program that differs between the samples, means
+// the id was reused: the two totals belong to two processes, so neither is a
+// reading of this window's other one and the pair is counted in regressed. The
 // deltas come back sorted by id, so a consumer's sum does not depend on map
 // order.
 func hostCPUDeltas(first, second map[int]hostCPUProc, window float64) (deltas []hostCPUDelta, unmeasured, regressed int) {
 	for pid, after := range second {
 		burnt := after.seconds
 		if before, ok := first[pid]; ok {
+			if before.path != after.path {
+				// The id names another program in the second sample, so the new
+				// process's total is not the old one's plus a window's burn.
+				regressed++
+				continue
+			}
 			burnt = after.seconds - before.seconds
 			if burnt < 0 {
 				regressed++
@@ -312,7 +345,7 @@ func parseHostCPUNameProcs(out string) (map[int]hostCPUProc, error) {
 		if path == "" {
 			return nil, fmt.Errorf("process %d names no program", pid)
 		}
-		procs[pid] = hostCPUProc{name: hostCPUName(path), command: path, seconds: seconds}
+		procs[pid] = hostCPUProc{path: path, name: hostCPUName(path), command: path, seconds: seconds}
 	}
 	if len(procs) == 0 {
 		return nil, errors.New("the process table named no process")
