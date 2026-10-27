@@ -60,7 +60,7 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	cfg, err := ConfigFromEnv(envMap(map[string]string{
-		"HOME":                        "/home/op",
+		"HOME":                        t.TempDir(),
 		"POLECAT_IMAGE_TOWN_ROOT":     town,
 		"POLECAT_IMAGE_NAME":          "example:dev",
 		"POLECAT_IMAGE_REGISTRY":      "localhost:5001",
@@ -111,7 +111,7 @@ func TestConfigFromEnvNeedsATownRoot(t *testing.T) {
 // cannot carry on without: it drives the lock takeover.
 func TestConfigFromEnvRefusesAnUnreadableStaleLock(t *testing.T) {
 	t.Parallel()
-	_, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": "/town", "POLECAT_IMAGE_STALE_MINUTES": "twenty"}))
+	_, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": t.TempDir(), "POLECAT_IMAGE_STALE_MINUTES": "twenty"}))
 	if err == nil || !strings.Contains(err.Error(), "POLECAT_IMAGE_STALE_MINUTES=twenty is not a whole number of minutes") {
 		t.Fatalf("ConfigFromEnv() = %v, want the unreadable stale lock", err)
 	}
@@ -163,9 +163,6 @@ func TestConfigFromEnvPrefersTheEnvironmentToTheTownConfig(t *testing.T) {
 	if cfg.Crane != "/env/bin/crane" {
 		t.Errorf("the crane is %q, want the exported one", cfg.Crane)
 	}
-	if cfg.RegistryWhy != "" {
-		t.Errorf("a resolved registry reported %q as a fault", cfg.RegistryWhy)
-	}
 }
 
 // TestConfigFromEnvResolvesEachImageSettingAlone pins the two keys apart: one
@@ -207,6 +204,10 @@ func TestConfigFromEnvResolvesEachImageSettingAlone(t *testing.T) {
 // TestConfigFromEnvReadsTheTownConfigWhenTheEnvironmentNamesNeither is a hand
 // install's path: a shell exports neither key, so both come from the town's
 // settings/config.json, and no other key of it reaches the run (gt-du3fi).
+//
+// The other keys are deliberately not strings: a run that decoded daemon.env
+// whole would fail on the number and the object, so the registry resolving
+// while they sit in the same map is what shows only the named entry is decoded.
 func TestConfigFromEnvReadsTheTownConfigWhenTheEnvironmentNamesNeither(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -214,7 +215,8 @@ func TestConfigFromEnvReadsTheTownConfigWhenTheEnvironmentNamesNeither(t *testin
 		"POLECAT_IMAGE_REGISTRY":"config.example:5000",
 		"POLECAT_IMAGE_CRANE":"/config/bin/crane",
 		"ANTHROPIC_API_KEY":"sk-town-sentinel",
-		"GT_SEAT_REFILL_MAX_PRIORITY":"50"}}}`)
+		"GT_SEAT_REFILL_MAX_PRIORITY":50,
+		"ANOTHER_SECRET":{"token":"sk-nested-sentinel"}}}}`)
 	cfg, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": town}))
 	if err != nil {
 		t.Fatalf("ConfigFromEnv() failed: %v", err)
@@ -227,7 +229,7 @@ func TestConfigFromEnvReadsTheTownConfigWhenTheEnvironmentNamesNeither(t *testin
 	}
 	// The rest of daemon.env is the town's secrets: a run reads the two image
 	// keys and carries none of the others.
-	if got := fmt.Sprintf("%+v", cfg); strings.Contains(got, "sk-town-sentinel") || strings.Contains(got, "GT_SEAT_REFILL_MAX_PRIORITY") {
+	if got := fmt.Sprintf("%+v", cfg); strings.Contains(got, "sk-town-sentinel") || strings.Contains(got, "sk-nested-sentinel") {
 		t.Errorf("the run's configuration carries a daemon.env key it did not name: %s", got)
 	}
 }
@@ -256,38 +258,82 @@ func TestConfigFromEnvResolvesNoRegistryWhenNothingNamesOne(t *testing.T) {
 			if cfg.Registry != "" {
 				t.Errorf("the registry is %q, want none", cfg.Registry)
 			}
-			if cfg.RegistryWhy != "" {
-				t.Errorf("a town that configured no registry reported %q as a fault", cfg.RegistryWhy)
+		})
+	}
+}
+
+// TestConfigFromEnvRefusesATownConfigItCannotRead keeps an unreadable config
+// from passing as a town that asked for no publish: the run fails before it
+// builds anything, and the error names what could not be read (gt-du3fi).
+func TestConfigFromEnvRefusesATownConfigItCannotRead(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, body, want string }{
+		{"not JSON", `{not json`, "is not readable JSON"},
+		{"daemon is not an object", `{"daemon":"nope"}`, "is not readable JSON"},
+		{"daemon.env is not an object", `{"daemon":{"env":["config.example:5000"]}}`, "daemon.env in "},
+		{"the registry is not a string", `{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":7001}}}`, "POLECAT_IMAGE_REGISTRY in daemon.env of "},
+		{"the file cannot be read", "", "could not be read"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if tc.body == "" {
+				// A directory where the file belongs: the read fails with
+				// something other than "there is no config here".
+				if err := os.MkdirAll(filepath.Join(town, "settings", "config.json"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeTownImageConfig(t, town, tc.body)
+			}
+			_, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": town}))
+			if err == nil {
+				t.Fatal("ConfigFromEnv() accepted a town config it cannot read")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the error is %q, want it to name %q", err, tc.want)
 			}
 		})
 	}
 }
 
-// TestConfigFromEnvReportsATownConfigItCannotRead keeps an unreadable config
-// from passing as a town that asked for no publish: the run carries the reason
-// and logs it.
-func TestConfigFromEnvReportsATownConfigItCannotRead(t *testing.T) {
+// TestConfigFromEnvRefusesAnUnreadableConfigTheCraneNeeds is the crane's half:
+// an exported registry leaves the crane to the town, and a config the run
+// cannot read is the failure rather than a silent fall back to PATH's crane
+// (gt-du3fi).
+func TestConfigFromEnvRefusesAnUnreadableConfigTheCraneNeeds(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct{ name, body, want string }{
-		{"not JSON", `{not json`, "is not readable JSON"},
-		{"daemon.env is not an object", `{"daemon":{"env":["config.example:5000"]}}`, "daemon.env in "},
-		{"the registry is not a string", `{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":7001}}}`, "POLECAT_IMAGE_REGISTRY in daemon.env of "},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			town := t.TempDir()
-			writeTownImageConfig(t, town, tc.body)
-			cfg, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": town}))
-			if err != nil {
-				t.Fatalf("ConfigFromEnv() failed: %v", err)
-			}
-			if cfg.Registry != "" {
-				t.Errorf("the registry is %q, want none from a config it cannot read", cfg.Registry)
-			}
-			if !strings.Contains(cfg.RegistryWhy, tc.want) {
-				t.Errorf("the reason is %q, want it to name %q", cfg.RegistryWhy, tc.want)
-			}
-		})
+	town := t.TempDir()
+	writeTownImageConfig(t, town, `{not json`)
+	_, err := ConfigFromEnv(envMap(map[string]string{
+		"POLECAT_IMAGE_TOWN_ROOT": town,
+		"POLECAT_IMAGE_REGISTRY":  "env.example:6000",
+	}))
+	if err == nil {
+		t.Fatal("ConfigFromEnv() fell back to a crane it did not resolve")
+	}
+	if !strings.Contains(err.Error(), "is not readable JSON") {
+		t.Errorf("the error is %q, want the unreadable config", err)
+	}
+}
+
+// TestConfigFromEnvNeverReadsAConfigBothKeysOverride pins the other side: a run
+// the daemon or the installer exported both image settings for needs no config,
+// so a broken one does not fail it (gt-du3fi).
+func TestConfigFromEnvNeverReadsAConfigBothKeysOverride(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownImageConfig(t, town, `{not json`)
+	cfg, err := ConfigFromEnv(envMap(map[string]string{
+		"POLECAT_IMAGE_TOWN_ROOT": town,
+		"POLECAT_IMAGE_REGISTRY":  "env.example:6000",
+		"POLECAT_IMAGE_CRANE":     "/env/bin/crane",
+	}))
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() read a config both keys override: %v", err)
+	}
+	if cfg.Registry != "env.example:6000" || cfg.Crane != "/env/bin/crane" {
+		t.Errorf("the run resolved %q and %q, want the exported values", cfg.Registry, cfg.Crane)
 	}
 }
 
@@ -376,6 +422,23 @@ func TestRunMainLogsAConfigFailureItCannotRead(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "ERROR: cannot find the town root") {
 		t.Errorf("runMain() logged %q, want the missing town root", out.String())
+	}
+}
+
+// TestRunMainFailsWhenTheTownConfigCannotBeRead is the call site's half of the
+// fail-closed rule: a run whose town config exists and cannot be read exits 1
+// with the reason, rather than building and publishing nothing as a clean run
+// (gt-du3fi).
+func TestRunMainFailsWhenTheTownConfigCannotBeRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownImageConfig(t, town, `{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":7001}}}`)
+	var out bytes.Buffer
+	if code := runMain(&out, envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": town})); code != 1 {
+		t.Errorf("runMain() = %d, want 1", code)
+	}
+	if !strings.Contains(out.String(), "ERROR: ") || !strings.Contains(out.String(), "POLECAT_IMAGE_REGISTRY in daemon.env of ") {
+		t.Errorf("runMain() logged %q, want the unreadable town config", out.String())
 	}
 }
 

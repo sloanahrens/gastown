@@ -76,9 +76,9 @@ A Kubernetes seat pulls the image from a registry, not from the Mac's Docker
 daemon (`docs/design/k8s-sandboxes.md`). `POLECAT_IMAGE_REGISTRY` in the
 environment (a `host:port` such as `localhost:5001`) wins; unset, the plugin
 reads it and `POLECAT_IMAGE_CRANE` from daemon.env in the town's
-`settings/config.json`, no other key there, since a hand install's shell leaves
-both unset (gt-du3fi). Naming neither publishes nothing; an unreadable config is
-logged as why.
+`settings/config.json`, no other key, since a hand install's shell leaves both
+unset (gt-du3fi). Naming neither publishes nothing; an unreadable config fails
+the run.
 
 - **Name change.** `POLECAT_IMAGE_REGISTRY` once named the gateway's
   sandbox-records directory; that is `POLECAT_IMAGE_SANDBOX_RECORDS` now. A
@@ -89,7 +89,7 @@ logged as why.
   tags the image locally with the registry reference, which is what the sandbox
   backend's drift check inspects. The image is saved and pushed once; its other
   tags are made on the registry with `crane tag`, which copies no layer.
-- **Failure never breaks the plugin.** A missing `crane` or a failed list, tag,
+- **A failed publish never breaks the plugin.** A missing `crane` or a failed list, tag,
   save or push is logged with its reason and the run exits 0, unless
   `POLECAT_IMAGE_FAIL_CLOSED=1` (below); nothing is removed. A push that did not
   complete is retried by the next run even when the image is already current.
@@ -110,7 +110,7 @@ beyond the newest 3 (`POLECAT_IMAGE_KEEP`) with a plain `docker rmi
 <repo>:<sha>`. It never touches `:dev`, the image `:dev` names or a tag that is
 not a hex commit, never passes `-f`, and never prunes anything else. A failed
 removal keeps the tag and logs docker's own reason, `kept ... (rmi failed:
-<reason>)`, so a busy image reads differently from a real error.
+<reason>)`, so a container using the image and a real error read differently.
 With a registry set, the tag's `<registry>/…:<sha>` alias is untagged first (it
 would keep the image on disk); an alias docker refuses to untag keeps the tag.
 The build cache is not touched. A `POLECAT_IMAGE_KEEP` that is not a whole

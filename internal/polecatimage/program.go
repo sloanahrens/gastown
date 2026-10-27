@@ -26,9 +26,10 @@ func (r *Run) Program() error {
 }
 
 // ConfigFromEnv reads a run's configuration through get, the environment the
-// script read, and reports the one variable it cannot carry on without: an
+// script read, and reports the variables it cannot carry on without: an
 // unreadable POLECAT_IMAGE_STALE_MINUTES, which drives the lock takeover in the
-// run path.
+// run path, and a town settings/config.json that exists and cannot be read,
+// which leaves a registry it cannot resolve (gt-du3fi).
 //
 // The prune-only knobs are read as written and judged by the step that uses
 // them, so a typo there stops that trim alone (gt-tpg0p.7).
@@ -42,8 +43,14 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 	if err != nil || minutes <= 0 {
 		return Config{}, fmt.Errorf("POLECAT_IMAGE_STALE_MINUTES=%s is not a whole number of minutes", stale)
 	}
-	registry, registryWhy := imageSetting(get, town, "POLECAT_IMAGE_REGISTRY")
-	crane, _ := imageSetting(get, town, "POLECAT_IMAGE_CRANE")
+	registry, err := imageSetting(get, town, "POLECAT_IMAGE_REGISTRY")
+	if err != nil {
+		return Config{}, err
+	}
+	crane, err := imageSetting(get, town, "POLECAT_IMAGE_CRANE")
+	if err != nil {
+		return Config{}, err
+	}
 	if crane == "" {
 		crane = "crane"
 	}
@@ -64,7 +71,6 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 		Image:          envOr(get, "POLECAT_IMAGE_NAME", "gastown-polecat:dev"),
 		Label:          "org.gastown.gt-commit",
 		Registry:       registry,
-		RegistryWhy:    registryWhy,
 		Published:      envOr(get, "POLECAT_IMAGE_PUBLISHED", filepath.Join(town, ".runtime", "polecat-image.published")),
 		// Only 1 turns it on, so a stray POLECAT_IMAGE_FAIL_CLOSED=0 cannot fail
 		// a run (gt-efupr).
@@ -92,11 +98,11 @@ func townRoot(get func(string) string) (string, error) {
 // imageSetting is one of the two settings a town keeps for its image runs:
 // get's value, which the daemon and the installer export, else the town's
 // settings/config.json daemon.env, which a hand install's shell does not carry.
-// why is the config's reason and "" whenever get named a value or the town
-// configured none (gt-du3fi).
-func imageSetting(get func(string) string, townRoot, key string) (value, why string) {
+// An exported value wins, so a town whose config cannot be read fails no run
+// that named both keys itself (gt-du3fi).
+func imageSetting(get func(string) string, townRoot, key string) (string, error) {
 	if v := get(key); v != "" {
-		return v, ""
+		return v, nil
 	}
 	return townImageSetting(townRoot, key)
 }

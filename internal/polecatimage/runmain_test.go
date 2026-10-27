@@ -413,7 +413,7 @@ func TestMainPublishesNothingWhenNothingNamesARegistry(t *testing.T) {
 		t.Fatalf("ConfigFromEnv() failed: %v", err)
 	}
 	tr := newTestRun(t)
-	tr.Cfg.Registry, tr.Cfg.RegistryWhy = cfg.Registry, cfg.RegistryWhy
+	tr.Cfg.Registry = cfg.Registry
 	reply := newRunReply("abc1234")
 	reply.label = "abc1234"
 	tr.reply = reply.answer(t, labelFormat(tr))
@@ -424,29 +424,5 @@ func TestMainPublishesNothingWhenNothingNamesARegistry(t *testing.T) {
 	tr.wantLogged(t, "current at abc1234")
 	if anyCallNamed(tr.callsTo("crane"), "push") || anyCallNamed(tr.callsTo("docker"), "save") {
 		t.Errorf("a run with no registry published: %v %v", callLines(tr, "docker"), callLines(tr, "crane"))
-	}
-	if strings.Contains(tr.output(), "is not published") {
-		t.Errorf("a town that configured no registry was reported as a fault: %s", tr.output())
-	}
-}
-
-// TestMainReportsATownConfigItCannotRead pins the run's answer to a config that
-// does not parse: the reason is logged, the image is not published, and the
-// run does not pass as a town that asked for no publish (gt-du3fi).
-func TestMainReportsATownConfigItCannotRead(t *testing.T) {
-	t.Parallel()
-	tr := newTestRun(t)
-	tr.Cfg.Registry = ""
-	tr.Cfg.RegistryWhy = "/town/settings/config.json is not readable JSON"
-	reply := newRunReply("abc1234")
-	reply.label = "abc1234"
-	tr.reply = reply.answer(t, labelFormat(tr))
-	t.Cleanup(tr.Cleanup)
-	if err := tr.Main(); err != nil {
-		t.Fatalf("Main() failed: %v", err)
-	}
-	tr.wantLogged(t, "registry: /town/settings/config.json is not readable JSON; the image is not published")
-	if anyCallNamed(tr.callsTo("crane"), "push") {
-		t.Errorf("a run with no readable registry published: %v", callLines(tr, "crane"))
 	}
 }
