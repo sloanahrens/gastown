@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // The fixtures are the shapes the commands print on the operator's Mac, with
@@ -48,20 +50,17 @@ overlay          100000000  59000000  41000000      59%  /
 // load averages inside braces.
 const hostLoadFixture = "{ 13.77 12.84 11.49 }\n"
 
-// hostBDFixture is what bd prints; the probe measures the call rather than
-// reading the output, so its shape is all the test needs.
-const hostBDFixture = `Found 1 issue:
-○ gt-xxxxxxx P2 <title>
-`
-
 // hostFake answers the probes with canned output. Its clock moves only when a
 // command runs, by that command's took duration, so a latency reading is the
-// difference the probe takes between the two Now calls around its Run.
+// difference the probe takes between the two Now calls around its Run. The
+// bead read takes "bd"'s time and fails when "bd" fails.
 type hostFake struct {
 	output map[string]string
 	fail   map[string]error
 	took   map[string]time.Duration
 	now    time.Time
+	// dirs records each directory a bead store was opened for.
+	dirs []string
 }
 
 // hostFixtureEnv answers every probe with its captured output. bd takes 37 ms
@@ -71,7 +70,6 @@ func hostFixtureEnv(startAt time.Time) *hostFake {
 		output: map[string]string{
 			"/usr/bin/top":     hostTopFixture,
 			"/usr/sbin/sysctl": hostLoadFixture,
-			"bd":               hostBDFixture,
 			"lsof":             hostLsofFixture,
 			"docker":           hostDFFixture,
 		},
@@ -91,9 +89,28 @@ func (f *hostFake) env() Env {
 			}
 			return []byte(f.output[argv[0]]), nil
 		},
+		Beads: func(_ context.Context, dir string) BeadStore {
+			f.dirs = append(f.dirs, dir)
+			return hostStore{f}
+		},
 		Now: func() time.Time { return f.now },
 	}
 }
+
+// hostStore is the fixture's bead store: its one List read is the host
+// probe's, and it takes bd's time on the fake clock.
+type hostStore struct{ f *hostFake }
+
+func (s hostStore) List(beads.ListOptions) ([]*beads.Issue, error) {
+	s.f.now = s.f.now.Add(s.f.took["bd"])
+	if err := s.f.fail["bd"]; err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func (s hostStore) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) { return nil, nil }
+func (s hostStore) Blocked() ([]*beads.Issue, error)                         { return nil, nil }
 
 func TestSourceHostCollectsTheFiveColumns(t *testing.T) {
 	t.Parallel()
@@ -161,21 +178,67 @@ func TestSourceHostParsers(t *testing.T) {
 	}
 }
 
-// An empty bd answer is no reading: the call returned, but nothing answered.
-func TestSourceHostEmptyLatencyAnswerLeavesItsColumnNil(t *testing.T) {
+// The bead read is a list of one issue in the town's own store: an empty board
+// is a store that answered, so its time is still a reading.
+func TestSourceHostEmptyBoardIsAReading(t *testing.T) {
 	t.Parallel()
 	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
-	fake.output["bd"] = ""
+
+	got, err := newHostSource().Collect(context.Background(), fake.env())
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got["bd_latency_ms"] != 37.0 {
+		t.Errorf("bd_latency_ms = %v, want 37 for a read that answered", got["bd_latency_ms"])
+	}
+	if len(fake.dirs) != 1 || fake.dirs[0] != "/town" {
+		t.Errorf("the bead read opened stores for %v, want the town root alone", fake.dirs)
+	}
+}
+
+// A bead read the store could not answer is a gap, not a fast latency.
+func TestSourceHostFailedStoreReadLeavesItsColumnNil(t *testing.T) {
+	t.Parallel()
+	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
+	fake.fail["bd"] = errors.New("no Dolt server")
 
 	got, err := newHostSource().Collect(context.Background(), fake.env())
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
 	if got["bd_latency_ms"] != nil {
-		t.Errorf("bd_latency_ms = %v, want nil when bd printed nothing", got["bd_latency_ms"])
+		t.Errorf("bd_latency_ms = %v, want nil when the store did not answer", got["bd_latency_ms"])
 	}
 	if got["host_probe_failures"] != 1 {
-		t.Errorf("host_probe_failures = %v, want 1 for the empty answer", got["host_probe_failures"])
+		t.Errorf("host_probe_failures = %v, want 1 for the failed read", got["host_probe_failures"])
+	}
+}
+
+// An Env with no bead store is a wiring error, and the group says so rather
+// than report a host with no bd.
+func TestSourceHostRefusesAnEnvWithNoStore(t *testing.T) {
+	t.Parallel()
+	env := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)).env()
+	env.Beads = nil
+	if cols, err := (hostSource{}).Collect(context.Background(), env); err == nil || cols != nil {
+		t.Fatalf("Collect = %v, %v with no bead store; want a null group and an error", cols, err)
+	}
+}
+
+// A factory that hands back no store leaves the bd column a counted gap
+// rather than panicking the snapshot.
+func TestSourceHostNilStoreLeavesItsColumnNil(t *testing.T) {
+	t.Parallel()
+	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
+	env := fake.env()
+	env.Beads = func(context.Context, string) BeadStore { return nil }
+
+	got, err := newHostSource().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got["bd_latency_ms"] != nil || got["host_probe_failures"] != 1 {
+		t.Errorf("bd_latency_ms = %v, host_probe_failures = %v, want nil and 1", got["bd_latency_ms"], got["host_probe_failures"])
 	}
 }
 
@@ -187,7 +250,11 @@ func TestSourceHostFailedCommandLeavesOnlyThatColumnNil(t *testing.T) {
 		t.Run(probe.column, func(t *testing.T) {
 			t.Parallel()
 			fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
-			fake.fail[probe.argv[0]] = errors.New("command failed")
+			if probe.store {
+				fake.fail["bd"] = errors.New("command failed")
+			} else {
+				fake.fail[probe.argv[0]] = errors.New("command failed")
+			}
 
 			got, err := newHostSource().Collect(context.Background(), fake.env())
 			if err != nil {
@@ -209,29 +276,38 @@ func TestSourceHostFailedCommandLeavesOnlyThatColumnNil(t *testing.T) {
 }
 
 // Every probe runs under its own hostCommandTimeout, counted from when it
-// starts, so a wedged command costs its column and no more. The check reads the
-// deadline the probe passed to Run; no test waits out the five seconds.
+// starts, so a wedged read costs its column and no more. The check reads the
+// deadline the probe passed to Run or to the store it opened; no test waits out
+// the five seconds.
 func TestSourceHostEachProbeRunsUnderItsOwnDeadline(t *testing.T) {
 	t.Parallel()
 	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
 	env := fake.env()
 	answer := env.Run
+	openStore := env.Beads
 	before := time.Now()
-	env.Run = func(ctx context.Context, argv []string) ([]byte, error) {
+	checkDeadline := func(name string, ctx context.Context) {
 		deadline, ok := ctx.Deadline()
 		switch {
 		case !ok:
-			t.Errorf("%s ran with no deadline", argv[0])
+			t.Errorf("%s ran with no deadline", name)
 		case deadline.Before(before.Add(hostCommandTimeout)):
-			t.Errorf("%s deadline %v is sooner than hostCommandTimeout after the snapshot began", argv[0], deadline)
+			t.Errorf("%s deadline %v is sooner than hostCommandTimeout after the snapshot began", name, deadline)
 		case deadline.After(time.Now().Add(hostCommandTimeout)):
-			t.Errorf("%s deadline %v is later than hostCommandTimeout from now", argv[0], deadline)
+			t.Errorf("%s deadline %v is later than hostCommandTimeout from now", name, deadline)
 		}
+	}
+	env.Run = func(ctx context.Context, argv []string) ([]byte, error) {
+		checkDeadline(argv[0], ctx)
 		if argv[0] == "lsof" {
 			// The command that missed its deadline: the probe must read it as nil.
 			return nil, context.DeadlineExceeded
 		}
 		return answer(ctx, argv)
+	}
+	env.Beads = func(ctx context.Context, dir string) BeadStore {
+		checkDeadline("the bead read", ctx)
+		return openStore(ctx, dir)
 	}
 
 	got, err := newHostSource().Collect(context.Background(), env)
@@ -341,7 +417,7 @@ func TestSourceHostDockerArgvNamesTheContext(t *testing.T) {
 	t.Parallel()
 	checked := 0
 	for _, probe := range newHostSource().probes() {
-		if probe.argv[0] != "docker" {
+		if len(probe.argv) == 0 || probe.argv[0] != "docker" {
 			continue
 		}
 		checked++
@@ -361,7 +437,9 @@ func TestSourceHostProbesUseTheConfiguredPortAndContainer(t *testing.T) {
 	host := hostSource{doltPort: "4321", dockerContainer: "runner-test"}
 	argv := map[string][]string{}
 	for _, probe := range host.probes() {
-		argv[probe.argv[0]] = probe.argv
+		if len(probe.argv) > 0 {
+			argv[probe.argv[0]] = probe.argv
+		}
 	}
 	if got := strings.Join(argv["lsof"], " "); !strings.Contains(got, "-iTCP:4321") {
 		t.Errorf("lsof argv = %q, want it to watch port 4321", got)

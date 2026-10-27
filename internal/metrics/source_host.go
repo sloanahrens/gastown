@@ -7,22 +7,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // hostCommandTimeout bounds each host probe separately, so a wedged top,
-// sysctl, bd, lsof or docker costs its own column and leaves the others
+// sysctl, bead read, lsof or docker costs its own column and leaves the others
 // filled.
 const hostCommandTimeout = 5 * time.Second
 
 // hostSource is the host group: the machine the snapshot runs on, read with
-// the macOS commands the operator uses by hand. A probe that cannot give a
-// reading leaves its column nil rather than inventing a number, and the
-// failure is counted in host_probe_failures so a column that is nil because
-// its command failed, hung, printed nothing or printed something the parser
-// could not read is a number in the record and not a silent absence. The
-// other columns are untouched: one broken command costs one reading, never the
-// group.
+// the macOS commands the operator uses by hand, plus one timed bead read for
+// what bd costs it. A probe that cannot give a reading leaves its column nil
+// rather than inventing a number, and the failure is counted in
+// host_probe_failures so a column that is nil because its command failed, hung,
+// printed nothing or printed something the parser could not read is a number in
+// the record and not a silent absence. The other columns are untouched: one
+// broken command costs one reading, never the group.
 type hostSource struct {
 	// timeout bounds each probe; zero means hostCommandTimeout. Tests set it
 	// short to exercise the deadline itself.
@@ -50,9 +51,13 @@ func newHostSource() hostSource {
 
 func (hostSource) Group() string { return "host" }
 
-// Collect fills the host group. It returns no error: every probe that cannot
-// give a reading is a nil column counted in host_probe_failures.
+// Collect fills the host group. A probe that cannot give a reading is a nil
+// column counted in host_probe_failures; only an Env with no bead store, which
+// is a wiring error rather than a host that could not answer, is an error.
 func (s hostSource) Collect(ctx context.Context, env Env) (map[string]any, error) {
+	if env.Beads == nil {
+		return nil, fmt.Errorf("host: the environment has no bead store")
+	}
 	probes := s.probes()
 	cols := make(map[string]any, len(probes)+1)
 	failures := 0
@@ -76,13 +81,13 @@ func (s hostSource) probeTimeout() time.Duration {
 }
 
 // hostProbe is one host column: the command that reads it and the parser that
-// turns its stdout into the value. latency marks a probe whose value is the
-// time its command took rather than anything it printed.
+// turns its stdout into the value. store marks the probe whose read is the
+// issue store rather than a command: its value is the time the read took.
 type hostProbe struct {
-	column  string
-	argv    []string
-	latency bool
-	parse   func(string) (any, error)
+	column string
+	argv   []string
+	store  bool
+	parse  func(string) (any, error)
 }
 
 // probes are the group's columns, in the order they run. They run one after
@@ -106,9 +111,11 @@ func (s hostSource) probes() []hostProbe {
 			parse:  parseCPUIdlePct,
 		},
 		{
-			column:  "bd_latency_ms",
-			argv:    []string{"bd", "list", "--limit", "1"},
-			latency: true,
+			// One bd list in the town's store, timed: the seam's machine read
+			// of one issue is the cheapest call the town itself makes, so its
+			// time is what a bead read costs right now.
+			column: "bd_latency_ms",
+			store:  true,
 		},
 		{
 			column: "dolt_conns",
@@ -126,21 +133,25 @@ func (s hostSource) probes() []hostProbe {
 	}
 }
 
-// read runs the probe's command under timeout and returns its column's value
-// and whether it is a reading. A command that fails, misses its deadline, or
-// prints nothing where an answer is the point, and output the parser cannot
-// read, are all (nil, false): the host could not answer, or its format changed,
-// and either way the column is a gap that Collect counts.
+// read runs the probe's read under timeout and returns its column's value and
+// whether it is a reading. A command that fails, misses its deadline, or prints
+// nothing where an answer is the point, and output the parser cannot read, are
+// all (nil, false) — and so is a store read that fails, since the seam only
+// returns one that bd answered with JSON. Either way the column is a gap that
+// Collect counts.
 func (p hostProbe) read(ctx context.Context, env Env, timeout time.Duration) (any, bool) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if p.latency {
-		// The start is read before the command runs, so the difference is the
-		// command's own time. An empty answer is a gap: a bd that printed nothing
-		// did not answer, and its fast return is not a latency.
+	if p.store {
+		// The start is read before the read runs, so the difference is the
+		// read's own time. An empty board is an answer, so only a failed read
+		// is a gap; its fast return is not a latency.
+		store := env.Beads(ctx, env.Town)
+		if store == nil {
+			return nil, false
+		}
 		start := env.Now()
-		out, err := env.Run(ctx, p.argv)
-		if err != nil || strings.TrimSpace(string(out)) == "" {
+		if _, err := store.List(beads.ListOptions{Limit: 1}); err != nil {
 			return nil, false
 		}
 		return float64(env.Now().Sub(start)) / float64(time.Millisecond), true

@@ -92,12 +92,12 @@ func TestSplitByDateOrdersByLandedAtAndLeavesTheInputAlone(t *testing.T) {
 	}
 	train, holdout := SplitByDate(rows, 2.0/3.0)
 	if len(train) != 2 || train[0]["bead"] != "early" || train[1]["bead"] != "middle" {
-		t.Fatalf("train = %v, want early then middle", beads(train))
+		t.Fatalf("train = %v, want early then middle", beadIDs(train))
 	}
 	if len(holdout) != 1 || holdout[0]["bead"] != "late" {
-		t.Errorf("holdout = %v, want late", beads(holdout))
+		t.Errorf("holdout = %v, want late", beadIDs(holdout))
 	}
-	if got := beads(rows); strings.Join(got, ",") != "late,early,middle" {
+	if got := beadIDs(rows); strings.Join(got, ",") != "late,early,middle" {
 		t.Errorf("input order = %v, want the caller's order unchanged", got)
 	}
 }
@@ -110,15 +110,15 @@ func TestSplitByDateKeepsInputOrderForEqualDates(t *testing.T) {
 		{"bead": "third", "landed_at": "2026-10-01T00:00:00Z"},
 	}
 	train, holdout := SplitByDate(rows, 1.0/3.0)
-	if got := strings.Join(beads(train), ","); got != "first" {
+	if got := strings.Join(beadIDs(train), ","); got != "first" {
 		t.Errorf("train = %s, want first", got)
 	}
-	if got := strings.Join(beads(holdout), ","); got != "second,third" {
+	if got := strings.Join(beadIDs(holdout), ","); got != "second,third" {
 		t.Errorf("holdout = %s, want second,third", got)
 	}
 }
 
-func beads(rows []Row) []string {
+func beadIDs(rows []Row) []string {
 	out := make([]string, len(rows))
 	for i, r := range rows {
 		out[i] = r["bead"]
