@@ -513,8 +513,10 @@ func TestPushToRegistryReportsAScratchDirectoryItCannotMake(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "the image is not published to ") || !strings.Contains(err.Error(), ", so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)") {
-				t.Errorf("PushToRegistry() = %v, want the run's failure under the switch", err)
+			// The failure's wording is PublishUnfinished's, pinned by
+			// TestPublishUnfinishedNamesTheState; here the branch must fail.
+			if err == nil {
+				t.Error("PushToRegistry() = nil, want the run's failure under the switch")
 			}
 		})
 	}
