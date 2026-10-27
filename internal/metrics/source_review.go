@@ -105,8 +105,10 @@ func (reviewSource) Collect(ctx context.Context, env Env) (map[string]any, error
 		}
 		var rec land.ReviewRecord
 		// A line with no bead or no verdict names no review; it is the torn
-		// tail of an append, or a line this source cannot attribute.
-		if json.Unmarshal(line, &rec) != nil || rec.BeadID == "" || rec.Verdict == "" {
+		// tail of an append, or a line this source cannot attribute. A
+		// follow-up queue line has no verdict on purpose: it is the landing
+		// worker's feed bookkeeping rather than a review (gt-3arxj).
+		if json.Unmarshal(line, &rec) != nil || rec.BeadID == "" || rec.Verdict == "" || rec.Queue != nil {
 			continue
 		}
 		if rec.At.Before(cutoff) || rec.At.After(now) {

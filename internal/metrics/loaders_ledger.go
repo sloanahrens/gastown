@@ -31,6 +31,16 @@ func jsonRows(lines []string, source string, dropped *Dropped) []json.RawMessage
 	return rows
 }
 
+// isFollowupQueueLine reports whether raw is a follow-up queue line: the line
+// the landing worker's feed writes for findings the backpressure bound held
+// back. It carries no verdict, and no verdict reader counts it (gt-3arxj).
+func isFollowupQueueLine(raw []byte) bool {
+	var line struct {
+		Queue json.RawMessage `json:"followup_queue"`
+	}
+	return json.Unmarshal(raw, &line) == nil && len(line.Queue) > 0
+}
+
 // LedgerRow is one line of a rig's ledger.jsonl: the seven fields the Python
 // loader keeps, with Rig filled from the source rig when the line names none.
 type LedgerRow struct {
@@ -110,11 +120,12 @@ type reviewFields struct {
 
 // LoadReviews parses the review log's lines into rows. A line that is not JSON,
 // or that lacks a field a review needs, is recorded in dropped: a bad row is
-// never read as a zero-score review.
+// never read as a zero-score review. A follow-up queue line is not a verdict at
+// all but the feed's own bookkeeping, and is skipped uncounted (gt-3arxj).
 func LoadReviews(lines []string, dropped *Dropped) []Review {
 	var rows []Review
 	for _, raw := range jsonRows(lines, "reviews", dropped) {
-		if raw == nil {
+		if raw == nil || isFollowupQueueLine(raw) {
 			continue
 		}
 		var line reviewFields

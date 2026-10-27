@@ -2,6 +2,7 @@ package land
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -82,11 +83,11 @@ func TestReviewsFileSurvivesATornLine(t *testing.T) {
 	}
 }
 
-// TestReviewsFileQueuedFailsOnAnOverlongLine: a line past the reader's bound is
-// a failed read rather than a queue that happens to lack it, since the feed
-// files from what it reads and a half-read queue would lose the rest silently
-// (gt-3arxj).
-func TestReviewsFileQueuedFailsOnAnOverlongLine(t *testing.T) {
+// TestReviewsFileQueuedSkipsAnOverlongLine: a line past the reader's bound is
+// skipped, not a failed read. A read that failed would fail the same way on
+// every later read, so one bad line would stop the queue for its rig for good;
+// the lines around it are still the queue (gt-3arxj).
+func TestReviewsFileQueuedSkipsAnOverlongLine(t *testing.T) {
 	t.Parallel()
 	f := reviewsFileIn(t)
 	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
@@ -96,8 +97,122 @@ func TestReviewsFileQueuedFailsOnAnOverlongLine(t *testing.T) {
 	if err := os.WriteFile(f.Path, []byte(line+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.Queued(); err == nil || !strings.Contains(err.Error(), "reading reviews file") {
-		t.Fatalf("Queued on an overlong line = %v, want a read error", err)
+	if err := f.AppendQueue(queueLine("gt-after", "gastown", queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := f.Queued()
+	if err != nil {
+		t.Fatalf("Queued on an overlong line = %v, want the line skipped", err)
+	}
+	if len(queued) != 1 || queued[0].Bead != "gt-after" {
+		t.Fatalf("Queued = %+v, want the line after the overlong one", queued)
+	}
+}
+
+// TestAppendQueueKeepsEveryLineReadable: a landing's held findings are split
+// across as many queue lines as the reader's bound needs, each claim bounded,
+// so the feed can always read back what it queued (gt-3arxj).
+func TestAppendQueueKeepsEveryLineReadable(t *testing.T) {
+	t.Parallel()
+	f := reviewsFileIn(t)
+	var findings []ReviewFindingText
+	for i := 0; i < 3*maxQueueLineFindings; i++ {
+		findings = append(findings, ReviewFindingText{File: "a.go", Title: "name it", Claim: strings.Repeat("c", 3*maxRecordedClaimBytes)})
+	}
+	if err := f.AppendQueue(queueLine("gt-many", "gastown", findings...)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("the queue was written as %d line(s), want the findings split", len(lines))
+	}
+	for i, line := range lines {
+		if len(line) > maxReviewLineBytes {
+			t.Errorf("line %d is %d bytes, past the reader's %d-byte bound", i, len(line), maxReviewLineBytes)
+		}
+	}
+	queued, err := f.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := 0
+	for _, q := range queued {
+		for _, ft := range q.Findings {
+			got++
+			if len(ft.Claim) > maxRecordedClaimBytes+len(truncatedClaim) {
+				t.Errorf("a claim is %d bytes, past the recorded bound", len(ft.Claim))
+			}
+		}
+	}
+	if got != len(findings) {
+		t.Errorf("read back %d findings, want all %d", got, len(findings))
+	}
+}
+
+// TestCompactKeepsEveryLineItDoesNotDrop: compaction drops the queue lines the
+// feed is done with and copies every other line byte for byte, so a verdict
+// written before this change — a count-only record — reads as it did after the
+// log is compacted (gt-3arxj).
+func TestCompactKeepsEveryLineItDoesNotDrop(t *testing.T) {
+	t.Parallel()
+	f := reviewsFileIn(t)
+	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	countOnly := `{"bead":"gt-old","rig":"gastown","attempt":1,"score":0.8,"verdict":"approve","findings":4,"bar":0.7,"at":"2026-10-01T00:00:00Z"}`
+	done, err := json.Marshal(ReviewRecord{BeadID: "gt-done", Rig: "gastown", At: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+		Queue: &FollowupQueue{Landed: queuedLanded, Score: 0.7, Findings: []ReviewFindingText{{Title: "done"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := json.Marshal(ReviewRecord{BeadID: "gt-wait", Rig: "gastown", At: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+		Queue: &FollowupQueue{Landed: queuedLanded, Score: 0.7, Findings: []ReviewFindingText{{Title: "wait"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.Path, []byte(countOnly+"\n"+string(done)+"\n"+string(waiting)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dropped, err := f.Compact(func(q QueuedFollowup) bool { return q.Bead == "gt-done" })
+	if err != nil || dropped != 1 {
+		t.Fatalf("Compact = %d dropped, %v; want the one consumed line", dropped, err)
+	}
+	raw, err := os.ReadFile(f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := countOnly + "\n" + string(waiting) + "\n"; string(raw) != want {
+		t.Errorf("compacted log =\n%s\nwant\n%s", raw, want)
+	}
+}
+
+// TestCompactLeavesTheLogAloneWithNothingConsumed: a feed with no consumed
+// queue line writes nothing, so a log with a line too long to compact is still
+// a log nothing rewrote (gt-3arxj).
+func TestCompactLeavesTheLogAloneWithNothingConsumed(t *testing.T) {
+	t.Parallel()
+	f := reviewsFileIn(t)
+	if err := f.AppendQueue(queueLine("gt-wait", "gastown", queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropped, err := f.Compact(func(QueuedFollowup) bool { return false })
+	if err != nil || dropped != 0 {
+		t.Fatalf("Compact = %d dropped, %v; want nothing dropped", dropped, err)
+	}
+	after, err := os.ReadFile(f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("an unconsumed queue line was rewritten:\n%s", after)
 	}
 }
 

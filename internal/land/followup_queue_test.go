@@ -1,6 +1,7 @@
 package land
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -106,6 +107,59 @@ func TestFollowupFeedFilesQueuedFindingsOnceTheBoundHasRoom(t *testing.T) {
 	}
 }
 
+// TestFollowupFeedDropsAConsumedQueueLine: once the feed has filed a queued
+// landing's findings, the line that held them is dropped from the log, so a
+// town does not rescan every queue line it ever wrote (gt-3arxj).
+func TestFollowupFeedDropsAConsumedQueueLine(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.9, nil)
+	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	f.bd.Seed(beads.Issue{ID: "gt-held", Title: "an earlier landing", Status: "closed", Type: "bug"})
+	f.fake.existing = openFollowupBeads(1)
+	log := f.run()
+	if len(f.fake.created) != 1 {
+		t.Fatalf("filed %d beads from the queue, want one:\n%s", len(f.fake.created), log)
+	}
+	if !strings.Contains(log, "dropped 1 consumed queue line") {
+		t.Errorf("log = %q, want the dropped line named", log)
+	}
+	queued, err := f.reviews.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 0 {
+		t.Errorf("queue = %+v, want the drained line gone", queued)
+	}
+}
+
+// TestFollowupFeedKeepsAQueueLineItCouldNotFile: a line is consumed only when
+// every finding on it is covered, so a bead that could not be filed leaves its
+// line in the log for the next landing with room rather than dropping the
+// finding with the line (gt-3arxj).
+func TestFollowupFeedKeepsAQueueLineItCouldNotFile(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.9, nil)
+	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	f.bd.Seed(beads.Issue{ID: "gt-held", Title: "an earlier landing", Status: "closed", Type: "bug"})
+	f.fake.existing = openFollowupBeads(1)
+	f.fake.createErr = errors.New("bead store is down")
+	log := f.run()
+	if !strings.Contains(log, "could not file the follow-up bead") {
+		t.Errorf("log = %q, want the failed file named", log)
+	}
+	queued, err := f.reviews.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 || queued[0].Bead != "gt-held" {
+		t.Errorf("queue = %+v, want the unfiled line kept", queued)
+	}
+}
+
 // TestFollowupFeedLeavesAQueuedFindingItsBeadAlreadyCovers: the queue is filed
 // by fingerprint against every follow-up, open or closed, so a finding that was
 // filed and has since been fixed is neither filed again nor commented on — the
@@ -132,6 +186,14 @@ func TestFollowupFeedLeavesAQueuedFindingItsBeadAlreadyCovers(t *testing.T) {
 	}
 	if len(comments) != 0 {
 		t.Errorf("comments = %v, want none on a closed bead the queue repeats", commentTexts(comments))
+	}
+	// The line had nothing left to file, so the feed is done with it.
+	queued, err := f.reviews.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 0 {
+		t.Errorf("queue = %+v, want the covered line dropped", queued)
 	}
 }
 
