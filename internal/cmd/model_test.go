@@ -235,6 +235,54 @@ func TestModelShowReportsAReviewerProfileWithNoModel(t *testing.T) {
 	}
 }
 
+// A table-only role has no live value to match, so its row is what the table
+// labels it, and a town whose only rows are such rows still passes the check
+// (gt-2ih67).
+func TestModelShowPrintsTableOnlyRolesWithNoDrift(t *testing.T) {
+	t.Parallel()
+
+	town := modelTown(t)
+	modelPutTable(t, town, `{"roles":{"deep-review":"opus","polecat":"sonnet"}}`)
+	om := modelOMConfig(t, `{"backend":["/x/claude","-p","--model","sonnet"]}`)
+
+	var out bytes.Buffer
+	if err := runModelShow(&out, modelEnvFor(town, om)); err != nil {
+		t.Fatalf("show = %v, want no drift from a table-only row:\n%s", err, out.String())
+	}
+	if row := modelRowFields(t, out.String(), "deep-review"); !reflect.DeepEqual(row, []string{"deep-review", "opus", "claude", "(table-only)", "-"}) {
+		t.Errorf("deep-review row = %v, want the table's profile and the table-only live", row)
+	}
+	if row := modelRowFields(t, out.String(), "polecat"); !reflect.DeepEqual(row, []string{"polecat", "sonnet", "claude-sonnet", "(retired)", "-"}) {
+		t.Errorf("polecat row = %v, want the retired live", row)
+	}
+}
+
+// A role_agents key left behind for a table-only role is a setting nothing reads,
+// so show reports it as drift rather than hiding the value behind the row
+// (gt-2ih67).
+func TestModelShowReportsAStaleTableOnlyRoleKeyAsDrift(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	modelWrite(t, modelSettingsPath(town), `{
+  "type": "town-settings",
+  "version": 1,
+  "default_agent": "claude-sonnet",
+  "role_agents": {"deep-review": "claude-opus"}
+}`)
+	modelPutTable(t, town, `{"roles":{"deep-review":"haiku"}}`)
+	om := modelOMConfig(t, `{"backend":["/x/claude","-p","--model","sonnet"]}`)
+
+	var out bytes.Buffer
+	err := runModelShow(&out, modelEnvFor(town, om))
+	if exitCodeForError(err) != 4 {
+		t.Errorf("show with a stale table-only key = %d, want 4:\n%s", exitCodeForError(err), out.String())
+	}
+	if row := modelRowFields(t, out.String(), "deep-review"); !reflect.DeepEqual(row, []string{"deep-review", "haiku", "claude-haiku", "claude-opus", "(stale-key)"}) {
+		t.Errorf("deep-review row = %v, want the live value shown as a stale key", row)
+	}
+}
+
 // One command switches the reviewer: the table, then the om backend with its
 // model swapped, then the read-back (gt-jaagc).
 func TestModelSetRoleSwitchesTheReviewerInOneStep(t *testing.T) {
@@ -336,7 +384,39 @@ func TestModelSetRoleChangesOnlyThatRole(t *testing.T) {
 	}
 }
 
-// The roles a table may not carry are refused before either file is written.
+// A table that names the roles role_agents carries no key for still lets a
+// switch for another role through: before this, validating the whole table
+// refused the one row the switch never touched (gt-2ih67).
+func TestModelSetRoleSwitchesTheReviewerOnATableWithTableOnlyRoles(t *testing.T) {
+	t.Parallel()
+
+	town := modelTown(t)
+	modelPutTable(t, town, `{
+  "version": 1,
+  "roles": {"deep-review": "opus", "polecat": "sonnet", "om-review": "haiku"}
+}`)
+	om := modelOMConfig(t, `{"backend":["/x/claude","-p","--model","haiku"]}`)
+
+	var out bytes.Buffer
+	if err := runModelSetRole(&out, modelEnvFor(town, om), "om-review", "opus"); err != nil {
+		t.Fatalf("set-role om-review on a table with deep-review and polecat = %v, want it to switch:\n%s", err, out.String())
+	}
+	roles, _ := modelDecode(t, modelTablePath(town))["roles"].(map[string]any)
+	if roles["om-review"] != "opus" {
+		t.Errorf("roles.om-review = %v, want the new profile", roles["om-review"])
+	}
+	for role, want := range map[string]string{"deep-review": "opus", "polecat": "sonnet"} {
+		if roles[role] != want {
+			t.Errorf("set-role changed another row: roles.%s = %v, want %s", role, roles[role], want)
+		}
+	}
+	backend, _ := modelDecode(t, om)["backend"].([]any)
+	if !reflect.DeepEqual(backend, []any{"/x/claude", "-p", "--model", "opus"}) {
+		t.Errorf("om backend = %v, want the profile's model swapped in", backend)
+	}
+}
+
+// The roles a switch cannot set are refused before either file is written.
 func TestModelSetRoleRefusesRolesItMayNotCarry(t *testing.T) {
 	t.Parallel()
 
@@ -346,7 +426,8 @@ func TestModelSetRoleRefusesRolesItMayNotCarry(t *testing.T) {
 		profile string
 		want    string
 	}{
-		{"polecat", "polecat", "haiku", "polecat is not a table role"},
+		{"the retired polecat", "polecat", "haiku", "role polecat has no role_agents setting to switch"},
+		{"the table-only deep review", "deep-review", "haiku", "role deep-review has no role_agents setting to switch"},
 		{"default", "default", "haiku", "default is not a role"},
 		{"an unknown role", "harbormaster", "haiku", `role "harbormaster"`},
 		{"an unknown profile", "crew", "nosuch", `profile "nosuch"`},
@@ -521,6 +602,37 @@ func TestModelApplyWritesEveryRoleAndTheReviewer(t *testing.T) {
 	}
 	if row := modelRowFields(t, out.String(), "crew"); row[3] != "claude-haiku" || row[4] != "-" {
 		t.Errorf("crew row after apply = %v, want the live value and no drift", row)
+	}
+}
+
+// apply writes no role_agents key for a table-only role: deep review has none to
+// write, and a retired polecat key refuses the settings file it lands in
+// (gt-2ih67).
+func TestModelApplySkipsTableOnlyRoles(t *testing.T) {
+	t.Parallel()
+
+	town := modelTown(t)
+	modelPutTable(t, town, `{"roles":{"crew":"haiku","om-review":"sonnet","deep-review":"opus","polecat":"sonnet"}}`)
+	om := modelOMConfig(t, `{"backend":["/x/claude","-p","--model","haiku"]}`)
+
+	var out bytes.Buffer
+	if err := runModelApply(&out, modelEnvFor(town, om)); err != nil {
+		t.Fatalf("apply: %v\n%s", err, out.String())
+	}
+	roles, _ := modelDecode(t, modelSettingsPath(town))["role_agents"].(map[string]any)
+	if roles["crew"] != "claude-haiku" {
+		t.Errorf("role_agents.crew = %v, want the table's preset", roles["crew"])
+	}
+	for _, role := range []string{"deep-review", "polecat"} {
+		if _, ok := roles[role]; ok {
+			t.Errorf("apply wrote role_agents.%s, and the table names no live setting for it", role)
+		}
+	}
+	if !strings.Contains(out.String(), "skipped: deep-review, polecat") {
+		t.Errorf("apply does not name the rows it skipped:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "applied: 2 roles") {
+		t.Errorf("apply counts a skipped row as applied:\n%s", out.String())
 	}
 }
 

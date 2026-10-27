@@ -191,9 +191,9 @@ func quote(s string) string {
 	return `"` + s + `"`
 }
 
-// Every refusal a write depends on: a polecat entry, a default read as a role,
-// an unknown role, a profile that is not there, and a profile without what its
-// role needs (gt-jaagc, gt-mukgk).
+// Every refusal a write depends on: a default read as a role, an unknown role, a
+// profile that is not there, and a profile without what its role needs
+// (gt-jaagc, gt-mukgk).
 func TestValidateRefusesRolesAWriteMayNotCarry(t *testing.T) {
 	t.Parallel()
 
@@ -204,7 +204,6 @@ func TestValidateRefusesRolesAWriteMayNotCarry(t *testing.T) {
 		want  string
 		err   error
 	}{
-		{name: "polecat", roles: `"polecat":"haiku"`, want: "polecat is not a table role", err: ErrPolecatRole},
 		{name: "default as a role", roles: `"default":"haiku"`, err: ErrDefaultRole},
 		{name: "an unknown role", roles: `"harbormaster":"haiku"`, want: `role "harbormaster"`},
 		{name: "a missing profile", roles: `"crew":"nosuch"`, want: `no such profile`},
@@ -236,6 +235,45 @@ func TestValidateAcceptsEveryRoleItMayCarry(t *testing.T) {
 		``, "opus")
 	if err := table.Validate(); err != nil {
 		t.Errorf("Validate = %v, want a valid table", err)
+	}
+}
+
+// A table may name the roles role_agents carries no key for — deep review and
+// the retired polecat — so a switch for another role is not blocked by a row it
+// never touches (gt-2ih67).
+func TestModelTableAcceptsTableOnlyRoles(t *testing.T) {
+	t.Parallel()
+
+	table := tableWithRoles(t, `"deep-review":"opus","polecat":"sonnet","crew":"haiku"`, ``, "")
+	if err := table.Validate(); err != nil {
+		t.Errorf("Validate = %v, want deep-review and polecat accepted", err)
+	}
+}
+
+// A table-only role's profile still names a preset, as every other role's does,
+// so a row nothing can run is refused before a write (gt-2ih67).
+func TestModelTableRefusesATableOnlyRoleWithoutAPreset(t *testing.T) {
+	t.Parallel()
+
+	table := tableWithRoles(t, `"deep-review":"bodiless"`, `"bodiless":{}`, "")
+	if err := table.Validate(); err == nil || !strings.Contains(err.Error(), "names no preset") {
+		t.Errorf("Validate = %v, want the no-preset refusal for a table-only role", err)
+	}
+}
+
+// An unknown role is refused with every role a table may carry, so the operator
+// reads the list from the refusal rather than from the source (gt-2ih67).
+func TestModelTableRefusesAnUnknownRoleWithTheFullList(t *testing.T) {
+	t.Parallel()
+
+	table := tableWithRoles(t, `"harbormaster":"haiku"`, ``, "")
+	err := table.Validate()
+	if err == nil {
+		t.Fatal("Validate = nil, want an unknown-role refusal")
+	}
+	want := `role "harbormaster": want one of ` + strings.Join(Roles, ", ")
+	if err.Error() != want {
+		t.Errorf("Validate = %q, want %q", err, want)
 	}
 }
 
