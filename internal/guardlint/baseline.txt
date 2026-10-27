@@ -53,6 +53,8 @@ internal/git/git.go:*Git.RemoteTrackingBranchExists
 internal/lock/flock_unix.go:FlockTryAcquire
 # deliberate os.IsNotExist narrowing: a missing target/ is a no-op; every other stat failure is returned
 internal/polecat/target_clean.go:cleanTargetDir
+# deliberate ErrFlockHeld narrowing: another run holding the lock is the checked answer "not taken", which BuildLock reports as the script's already-running line; every other flock error is returned
+internal/polecatimage/lock.go:*Run.TakeLock
 # deliberate os.IsNotExist narrowing: an absent file is (false, nil); a present but unreadable one is an error
 internal/templates/supervisor_state.go:SupervisorFileIsFor
 # deliberate narrowing: a refused connection or missing file is the proof the socket is stale; every other dial error is returned
