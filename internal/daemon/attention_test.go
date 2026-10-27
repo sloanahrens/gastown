@@ -77,8 +77,9 @@ func newAttentionFixture(t *testing.T, now time.Time) *attentionFixture {
 		riskLandings:  func(string, time.Time) ([]land.LandingRecord, error) { return nil, nil },
 		riskIssue:     func(context.Context, string, string) (*beads.Issue, error) { return &beads.Issue{}, nil },
 
-		host:        healthyHost(),
-		reworkNotes: map[string]reworkNote{},
+		host:           healthyHost(),
+		reworkNotes:    map[string]reworkNote{},
+		escalationBead: func(context.Context, string) (*beads.Issue, error) { return nil, nil },
 	}
 	return &attentionFixture{d: d, logs: logs, now: now, src: src}
 }
@@ -194,6 +195,101 @@ func TestAttentionCollector_Escalation(t *testing.T) {
 	f.src.escalations = func(context.Context) ([]*beads.Issue, error) { return nil, nil }
 	if items := f.collect(t, f.src.collectEscalations); len(items) != 0 {
 		t.Errorf("items = %+v, want none with no open escalation", items)
+	}
+}
+
+// An escalation whose record names a related bead names that bead's assignee,
+// so an item about owned work reads as waiting on its owner.
+func TestAttentionCollector_EscalationNamesRelatedBeadOwner(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.escalations = func(context.Context) ([]*beads.Issue, error) {
+		return []*beads.Issue{{
+			ID: "hq-9", Title: "gt-abc: gate red",
+			Description: "severity: high\nrelated_bead: gt-abc\n",
+		}}, nil
+	}
+	var read string
+	f.src.escalationBead = func(_ context.Context, id string) (*beads.Issue, error) {
+		read = id
+		return &beads.Issue{ID: id, Assignee: " dipper "}, nil
+	}
+
+	items := f.collect(t, f.src.collectEscalations)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want the one escalation", items)
+	}
+	got := items[0]
+	if read != "gt-abc" {
+		t.Errorf("read %q, want the record's related_bead", read)
+	}
+	if got.Owner != "dipper" || got.WaitingOn != "escalated, owned by dipper" {
+		t.Errorf("item owner %q waiting %q, want dipper and escalated, owned by dipper", got.Owner, got.WaitingOn)
+	}
+	if got.Key != "esc:hq-9" || got.Kind != attention.KindEscalation ||
+		got.Severity != attention.SeverityHigh || got.Summary != "gt-abc: gate red" {
+		t.Errorf("item = %+v, want key, kind, severity and summary unchanged", got)
+	}
+}
+
+// An escalation with no related bead, or whose bead nobody owns, names no owner
+// and no waiting-on line, so it reads as needing a person.
+func TestAttentionCollector_EscalationWithoutOwnedBead(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		description string
+		bead        *beads.Issue
+	}{
+		{name: "no related bead", description: "severity: high\n"},
+		{name: "related bead unowned", description: "severity: high\nrelated_bead: gt-abc\n", bead: &beads.Issue{ID: "gt-abc"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC))
+			f.src.escalations = func(context.Context) ([]*beads.Issue, error) {
+				return []*beads.Issue{{ID: "hq-9", Title: "dolt is wedged", Description: tc.description}}, nil
+			}
+			f.src.escalationBead = func(context.Context, string) (*beads.Issue, error) { return tc.bead, nil }
+
+			items := f.collect(t, f.src.collectEscalations)
+			if len(items) != 1 {
+				t.Fatalf("items = %+v, want the one escalation", items)
+			}
+			got := items[0]
+			if got.Owner != "" || got.WaitingOn != "" {
+				t.Errorf("item owner %q waiting %q, want neither", got.Owner, got.WaitingOn)
+			}
+			if class := attention.Classify(got); class != attention.ClassAct {
+				t.Errorf("classifies as %s, want act", class)
+			}
+		})
+	}
+}
+
+// The owner line is the extra; the escalation itself is the alarm, so a failed
+// read of its bead still raises the item.
+func TestAttentionCollector_EscalationKeptWhenRelatedBeadReadFails(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC))
+	f.src.escalations = func(context.Context) ([]*beads.Issue, error) {
+		return []*beads.Issue{{
+			ID: "hq-9", Title: "gt-abc: gate red",
+			Description: "severity: high\nrelated_bead: gt-abc\n",
+		}}, nil
+	}
+	f.src.escalationBead = func(context.Context, string) (*beads.Issue, error) {
+		return nil, errors.New("bd show: connection refused")
+	}
+
+	items := f.collect(t, f.src.collectEscalations)
+	if len(items) != 1 || items[0].Key != "esc:hq-9" {
+		t.Fatalf("items = %+v, want the escalation raised despite the failed bead read", items)
+	}
+	if items[0].Owner != "" || items[0].WaitingOn != "" {
+		t.Errorf("item owner %q waiting %q, want neither", items[0].Owner, items[0].WaitingOn)
 	}
 }
 
