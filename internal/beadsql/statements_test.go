@@ -90,7 +90,6 @@ func TestQuoteEscapesSQLLiterals(t *testing.T) {
 	}
 }
 
-
 // The external-target match escapes _ with ! so it stays literal under LIKE.
 func TestExternalTargetsMatchLiterally(t *testing.T) {
 	t.Parallel()
