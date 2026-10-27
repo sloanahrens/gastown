@@ -293,3 +293,109 @@ func TestTownLockSecondReleaseDoesNotForgetANewerHolder(t *testing.T) {
 		t.Errorf("acquire while the second holder is live: err = %v, want ErrLockHeld", err)
 	}
 }
+
+// A refused acquire leaves nothing of itself in this process: an in-process
+// entry left behind would refuse every later acquire of the file until the
+// process exits, with no record lock behind it.
+//
+//testpolicy:allow parallel — it runs a holder child and then re-acquires here, and its subject is the process-wide lock table; alone, no sibling test's fork is in flight across that re-acquire
+func TestTownLockAFailedAcquireLeavesNoInProcessEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "town-metrics.lock")
+	stop := startTownLockHolder(t, path)
+	if _, err := AcquireTownLock(path); !errors.Is(err, ErrLockHeld) {
+		stop()
+		t.Fatalf("acquire while another process holds it: err = %v, want ErrLockHeld", err)
+	}
+	stop()
+	if !lockFreeInAnotherProcess(t, path) {
+		t.Fatal("the lock is not free after the holder exited")
+	}
+	lock, err := AcquireTownLock(path)
+	if err != nil {
+		t.Fatalf("acquire after the holder exited: %v, want the lock (a refused acquire left an in-process entry)", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+}
+
+// unreadablePath is a path the file system reports on with a failure other than
+// absence: a component longer than NAME_MAX fails the stat with ENAMETOOLONG.
+// The parent directory exists, so anything that creates directories first
+// still succeeds and the identity read is what fails.
+func unreadablePath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), strings.Repeat("l", 300))
+}
+
+// A path whose identity cannot be read is an error, not a file that is not
+// there: an absent file skips the in-process check, so reading a failed stat
+// that way could open a file this process already holds under another name and
+// drop its record lock.
+func TestStatFileIDErrorsOnAPathItCannotRead(t *testing.T) {
+	t.Parallel()
+	id, ok, err := statFileID(unreadablePath(t))
+	if err == nil {
+		t.Fatalf("statFileID read an unreadable path: id = %+v, ok = %v, want an error", id, ok)
+	}
+	if ok {
+		t.Errorf("statFileID reported an identity for a path it could not read: %+v", id)
+	}
+}
+
+// The acquire reports the identity failure rather than swallowing it.
+func TestAcquireTownLockRefusesAPathItCannotStat(t *testing.T) {
+	t.Parallel()
+	path := unreadablePath(t)
+	lock, err := AcquireTownLock(path)
+	if err == nil {
+		lock.Release()
+		t.Fatal("acquire at a path that cannot be stat'ed succeeded")
+	}
+	if errors.Is(err, ErrLockHeld) {
+		t.Errorf("an unreadable path was reported as a held lock: %v", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error does not name the path %s: %v", path, err)
+	}
+}
+
+// A descriptor that cannot be read has no identity to report.
+func TestOpenFileIDErrorsOnAClosedFile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "town-metrics.lock")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create the lock file: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := openFileID(f); err == nil {
+		t.Fatal("openFileID read the identity of a closed file")
+	}
+}
+
+// fileInfoWithoutStat is a FileInfo the file system did not produce: Sys is nil,
+// which is the shape a platform whose stat structure this build cannot name
+// reports. No real file takes the branch, so the fake is the only way to drive
+// it.
+type fileInfoWithoutStat struct{ name string }
+
+func (f fileInfoWithoutStat) Name() string       { return f.name }
+func (f fileInfoWithoutStat) Size() int64        { return 0 }
+func (f fileInfoWithoutStat) Mode() os.FileMode  { return 0 }
+func (f fileInfoWithoutStat) ModTime() time.Time { return time.Time{} }
+func (f fileInfoWithoutStat) IsDir() bool        { return false }
+func (f fileInfoWithoutStat) Sys() any           { return nil }
+
+func TestSysFileIDRefusesAFileInfoWithNoStat(t *testing.T) {
+	t.Parallel()
+	id, err := sysFileID(fileInfoWithoutStat{name: "no-stat"})
+	if err == nil {
+		t.Fatalf("sysFileID accepted a FileInfo with no device and inode: id = %+v", id)
+	}
+	if !strings.Contains(err.Error(), "no-stat") {
+		t.Errorf("error does not name the file: %v", err)
+	}
+}
