@@ -261,6 +261,31 @@ func TestGuardSelects(t *testing.T) {
 	}
 }
 
+// TestShellScriptAllowlistChangeRunsTheAllowlistControl: the clean-tree guard
+// passes an allowlist edit only if the branch broke nothing, so the control
+// that mutates the allowlist and expects the guard red is what a broken line
+// trips. A branch that edits shell-scripts.txt has to run it (gt-kpn39).
+func TestShellScriptAllowlistChangeRunsTheAllowlistControl(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	got, err := GuardSelects("M\x00internal/repoguard/shell-scripts.txt\x00", hasGo)
+	if err != nil {
+		t.Fatalf("GuardSelects: %v", err)
+	}
+	for _, s := range got {
+		if s.Package != "internal/repoguard" {
+			continue
+		}
+		for _, name := range s.Tests {
+			if name == "TestIntegrationAllowlistRejectsRealTree" {
+				return
+			}
+		}
+		t.Fatalf("%s tests = %v; want the allowlist control among them", s.Package, s.Tests)
+	}
+	t.Fatalf("GuardSelects = %v; want internal/repoguard among them", got)
+}
+
 // TestEveryGuardIsSampled keeps the two lists in step: a guard package the
 // sampler does not name has a predicate no test exercises.
 func TestEveryGuardIsSampled(t *testing.T) {

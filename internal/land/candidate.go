@@ -718,12 +718,13 @@ var (
 	makeErrorRE   = regexp.MustCompile(`^make(\[\d+\])?: \*\*\*.*Error \d+`)
 )
 
-// The unit-tier rule reports (internal/testutil/unittier) and the rule line
-// they print above and below themselves. A package that breaks a tier rule
-// prints no failing test, only the report, so without these markers a rule-only
-// red showed none of its reason in the note (gt-sz2rp).
+// The tier-rule reports internal/testutil/unittier and internal/testutil's
+// TestMain helpers print, and the rule line they put above and below
+// themselves. A package that breaks a tier rule prints no failing test, only
+// the report, so without these markers a rule-only red showed none of its
+// reason in the note (gt-sz2rp, gt-mypuq).
 var (
-	ruleReportRE = regexp.MustCompile(`^(SUBPROCESS TRIPWIRE|GOROUTINE LEAK): `)
+	ruleReportRE = regexp.MustCompile(`^(SUBPROCESS TRIPWIRE|GOROUTINE LEAK|HERMETIC TRIPWIRE|DOLT CATALOG GUARD): `)
 	ruleLineRE   = regexp.MustCompile(`^={72}$`)
 )
 
@@ -735,10 +736,16 @@ const buildFailedMarker = "[build failed]"
 // keeps without one: enough to see what the gate was doing when it stopped.
 const failureContextLines = 2
 
+// isFailureMarker reports whether line is a failure's own first line. A rule
+// line is not one by itself: it carries no word of what failed, and the report
+// header that does carries the rule line through failureSpan. Reading a bare
+// rule line as a failure would stop jobLog widening a tail cut inside a report,
+// leaving the note with the report's guidance text and none of its reason
+// (gt-hqw8m).
 func isFailureMarker(line string) bool {
 	return failedTestRE.MatchString(line) || failLineRE.MatchString(line) ||
 		panicLineRE.MatchString(line) || makeErrorRE.MatchString(line) ||
-		ruleReportRE.MatchString(line) || ruleLineRE.MatchString(line) ||
+		ruleReportRE.MatchString(line) ||
 		strings.Contains(line, buildFailedMarker)
 }
 
