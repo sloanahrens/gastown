@@ -67,9 +67,9 @@ func (ws Written) Fail(cause error) error {
 }
 
 // backupFile copies path to path.<stamp>.bak when path exists, and returns the
-// The backup is kept after a successful apply on purpose: it is the operator's copy
-// of the settings as they were before the switch, and the rollback reads it.
-// backup's path, or "" when there was no file to back up.
+// backup's path, or "" when there was no file to back up. The backup is kept
+// after a successful apply on purpose: it is the operator's copy of the settings
+// as they were before the switch, and the rollback reads it.
 func backupFile(path, stamp string) (string, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: the settings file this command writes
 	if errors.Is(err, fs.ErrNotExist) {
