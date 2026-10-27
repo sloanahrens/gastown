@@ -313,18 +313,19 @@ func TestOnItFallsBackToTheSeatsHookTime(t *testing.T) {
 	}
 }
 
-// A dispatch line is the bead's own dispatch, and the seat's hook record is the
-// older one of the two: the line wins.
-func TestDispatchLineBeatsTheSeatsHookTime(t *testing.T) {
+// The seat's dispatch time is the bead's own clock — the first dispatch across
+// seats, which the overrun guard judges — so a feed line for a later sling of
+// the same bead does not shorten the age (gt-tzbtf).
+func TestTheSeatsDispatchTimeDatesTheAgeOverALaterFeedLine(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 11, 18, 0, 0, 0, time.UTC)
-	dispatched, hooked := now.Add(-10*time.Minute), now.Add(-90*time.Minute)
+	first, reslung := now.Add(-90*time.Minute), now.Add(-10*time.Minute)
 	h := NewHub(Config{
 		Feed: func() []Entry {
-			return []Entry{{At: dispatched, Rig: "gastown", Kind: "daemon", Text: "gt-abc slung to agate (gastown)"}}
+			return []Entry{{At: reslung, Rig: "gastown", Kind: "daemon", Text: "gt-abc slung to agate (gastown)"}}
 		},
 		Summary: func() Summary {
-			return Summary{Polecats: []Polecat{{Rig: "gastown", Name: "agate", Bead: "gt-abc", State: StateWorking, Hooked: &hooked}}}
+			return Summary{Polecats: []Polecat{{Rig: "gastown", Name: "agate", Bead: "gt-abc", State: StateWorking, Hooked: &first}}}
 		},
 		Now: func() time.Time { return now },
 	})
@@ -332,8 +333,36 @@ func TestDispatchLineBeatsTheSeatsHookTime(t *testing.T) {
 	h.pollFeed()
 
 	p := h.State().Polecats[0]
-	if p.Slung == nil || !p.Slung.Equal(dispatched) || p.ElapsedSec != 600 {
-		t.Errorf("polecat = %+v (want the dispatch line's time, 600s ago)", p)
+	if p.Slung == nil || !p.Slung.Equal(first) || p.ElapsedSec != 5400 {
+		t.Errorf("polecat = %+v (want the bead's first dispatch, 5400s ago)", p)
+	}
+}
+
+// A seat with no dispatch time of its own is dated by the feed's dispatch
+// line, and by the earliest line in the ring: a bead re-slung inside the feed's
+// window is aged from the first sling, not the latest.
+func TestTheEarliestDispatchLineDatesASeatWithNoDispatchTime(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 11, 18, 0, 0, 0, time.UTC)
+	first, reslung := now.Add(-90*time.Minute), now.Add(-10*time.Minute)
+	h := NewHub(Config{
+		Feed: func() []Entry {
+			return []Entry{
+				{At: first, Rig: "gastown", Kind: "daemon", Text: "gt-abc slung to agate (gastown)"},
+				{At: reslung, Rig: "gastown", Kind: "daemon", Text: "gt-abc slung to nux (gastown)"},
+			}
+		},
+		Summary: func() Summary {
+			return Summary{Polecats: []Polecat{{Rig: "gastown", Name: "nux", Bead: "gt-abc", State: StateWorking}}}
+		},
+		Now: func() time.Time { return now },
+	})
+	h.pollSummary()
+	h.pollFeed()
+
+	p := h.State().Polecats[0]
+	if p.Slung == nil || !p.Slung.Equal(first) || p.ElapsedSec != 5400 {
+		t.Errorf("polecat = %+v (want the first dispatch line, 5400s ago)", p)
 	}
 }
 

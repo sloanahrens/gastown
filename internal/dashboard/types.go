@@ -96,9 +96,10 @@ type Polecat struct {
 	Priority *int     `json:"priority,omitempty"`
 	Labels   []string `json:"labels,omitempty"`
 
-	// Slung is when the bead went onto this polecat's hook — the feed's
-	// dispatch line, else Hooked — and ElapsedSec is that time read against
-	// the hub's clock. The hub fills both.
+	// Slung is when the seat's bead was dispatched — Hooked, else the feed's
+	// dispatch line — and ElapsedSec is that time read against the hub's
+	// clock. It is the overrun guard's clock for the bead, so the Age column
+	// and the guard agree (gt-tzbtf). The hub fills both.
 	Slung      *time.Time `json:"slung,omitempty"`
 	ElapsedSec int64      `json:"elapsed_sec,omitempty"`
 	// StateSince is when the seat entered the state State names, for the one
@@ -106,11 +107,12 @@ type Polecat struct {
 	// queued at its last write, which is the wait the Landings panel ages
 	// (gt-iv7jf). Empty for every other state, whose clock is Slung.
 	StateSince *time.Time `json:"state_since,omitempty"`
-	// Hooked is the seat's own record of putting the bead on its hook: the
-	// agent bead's last write, which gt sling makes. The pane's On it falls
-	// back to it for a bead the feed has no dispatch line for (gt-jwmxo). A
-	// later write on that bead — a submit, a patrol clearing the hook — dates
-	// the seat rather than the hook, so the reading can only be too short.
+	// Hooked is when the seat's bead was dispatched: the bead's first sling
+	// since its last done event, the overrun guard's clock for the bead. A
+	// bead the events log does not dispatch falls back to the agent bead's
+	// last write, which gt sling makes; a later write on that bead — a submit,
+	// a patrol clearing the hook — dates the seat rather than the dispatch, so
+	// the fallback can only read too short (gt-jwmxo, gt-tzbtf).
 	Hooked     *time.Time `json:"hooked,omitempty"`
 	HasSession bool       `json:"has_session"`
 	LastActive *time.Time `json:"last_active,omitempty"`

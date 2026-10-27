@@ -974,13 +974,16 @@ func (h *Hub) polecatsLocked(now time.Time) []Polecat {
 		if p.Bead == "" {
 			continue
 		}
-		// A dispatch line dates the bead exactly, so it wins. The feed holds
-		// only its own window, though: a polecat dispatched before it opened
-		// has no line, and its On it would stay blank however long it worked.
-		// The seat's own record of the hook stands in — see Polecat.Hooked.
+		// The seat's dispatch time is the bead's own clock, read from the
+		// town's dispatch record, and it is the same clock the overrun guard
+		// judges — see Polecat.Hooked. The feed's dispatch line stands in only
+		// for a seat that has none: the feed holds only its own window, so a
+		// bead dispatched before it opened has no line.
 		at := p.Hooked
-		if logged, ok := h.slung[p.Bead]; ok {
-			at = &logged
+		if at == nil {
+			if logged, ok := h.slung[p.Bead]; ok {
+				at = &logged
+			}
 		}
 		if at != nil {
 			when := *at
@@ -1054,7 +1057,11 @@ func (h *Hub) pollFeed() {
 		e := entries[i]
 		h.ring = append(h.ring, e)
 		if id, ok := dispatchBead(e.Text); ok {
-			h.slung[id] = e.At
+			// The earliest dispatch in the ring dates the bead: a bead re-slung
+			// to another seat keeps the clock it first went out on (gt-tzbtf).
+			if at, seen := h.slung[id]; !seen || e.At.Before(at) {
+				h.slung[id] = e.At
+			}
 			changed = true
 		}
 		if m := gateStartRe.FindStringSubmatch(e.Text); m != nil {

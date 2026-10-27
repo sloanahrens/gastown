@@ -563,6 +563,83 @@ func TestRunOverrunGuard_ReslingStartsNewClock(t *testing.T) {
 	}
 }
 
+// The guard judges the bead's clock, not the seat's: a bead re-slung to a
+// second seat is nudged or stopped on the dispatch it first went out on, even
+// though that seat has held it only a few minutes. A done event ends that run,
+// so a bead dispatched again after it is judged from the new dispatch
+// (gt-tzbtf).
+func TestRunOverrunGuard_JudgesTheBeadsDispatchClock(t *testing.T) {
+	t.Parallel()
+	line := func(ts, typ, bead, target string) string {
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"x","payload":{"bead":%q,"target":%q}}`, ts, typ, bead, target)
+	}
+	for _, tt := range []struct {
+		name   string
+		events []string
+		now    time.Time
+		nudges []string
+		stops  []string
+	}{
+		{
+			// The bead was slung to capable at 12:00 and re-slung to rictus at
+			// 12:10; at 12:13 rictus is 3 minutes into its own sling but the
+			// bead has run 13 minutes, so the nudge is due.
+			name: "a second seat keeps the bead's clock",
+			events: []string{
+				line("2026-10-13T12:00:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/capable"),
+				line("2026-10-13T12:10:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/rictus"),
+			},
+			now:    time.Date(2026, 10, 13, 12, 13, 0, 0, time.UTC),
+			nudges: []string{"gastown/rictus"},
+		},
+		{
+			// Same bounce at the stop threshold: the guard stops the seat
+			// holding the bead, on the bead's clock.
+			name: "the stop runs on the bead's clock",
+			events: []string{
+				line("2026-10-13T12:00:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/capable"),
+				line("2026-10-13T12:10:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/rictus"),
+			},
+			now:   time.Date(2026, 10, 13, 12, 21, 0, 0, time.UTC),
+			stops: []string{"gastown/rictus"},
+		},
+		{
+			// The bead was submitted at 12:05, so the run that began at 12:00 is
+			// over: the dispatch at 12:50 is three minutes old at 12:53 and the
+			// guard acts on nothing.
+			name: "a dispatch after a done event starts over",
+			events: []string{
+				line("2026-10-13T12:00:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/capable"),
+				line("2026-10-13T12:05:00Z", events.TypeDone, "gt-aaa11", "gastown/polecats/capable"),
+				line("2026-10-13T12:50:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/rictus"),
+			},
+			now: time.Date(2026, 10, 13, 12, 53, 0, 0, time.UTC),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			body := strings.Join(tt.events, "\n") + "\n"
+			if err := os.WriteFile(filepath.Join(d.config.TownRoot, events.EventsFile), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f := newOverrunFake(0, overrunSeat{Rig: "gastown", Polecat: "rictus", Bead: "gt-aaa11"})
+			f.now = tt.now
+			seams := f.seams()
+			seams.slungAt = (&overrunSlungReader{d: d}).slungAt
+
+			d.runOverrunGuard(seams)
+
+			if !slices.Equal(f.nudges, tt.nudges) {
+				t.Errorf("nudges = %v, want %v", f.nudges, tt.nudges)
+			}
+			if !slices.Equal(f.stops, tt.stops) {
+				t.Errorf("stops = %v, want %v", f.stops, tt.stops)
+			}
+		})
+	}
+}
+
 func TestRunOverrunGuard_UndatedSeatIsLeftAlone(t *testing.T) {
 	t.Parallel()
 	d, _ := newOverrunDaemon(t, false)
@@ -589,31 +666,55 @@ func TestRunOverrunGuard_DisabledDoesNothing(t *testing.T) {
 	}
 }
 
-func TestOverrunSlungReader_LatestSlingToSeat(t *testing.T) {
+// The guard's clock is the bead's, not the seat's: a bead re-slung to a second
+// seat is still dated from its first dispatch, and a done event ends that run,
+// so a bead dispatched again after it starts over (gt-tzbtf).
+func TestOverrunSlungReader_DatesTheBeadsFirstDispatch(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	line := func(ts, bead, target string) string {
+	line := func(ts, typ, bead, target string) string {
 		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"x","payload":{"bead":%q,"target":%q},"visibility":"both"}`,
-			ts, events.TypeSling, bead, target)
+			ts, typ, bead, target)
 	}
 	body := strings.Join([]string{
-		line("2026-10-13T11:00:00Z", "gt-aaa11", "gastown/polecats/capable"),
-		line("2026-10-13T12:00:00Z", "gt-aaa11", "gastown/polecats/capable"),
-		line("2026-10-13T12:30:00Z", "gt-aaa11", "gastown/polecats/rictus"),  // another seat
-		line("2026-10-13T12:40:00Z", "gt-bbb22", "gastown/polecats/capable"), // another bead
-		`{"ts":"2026-10-13T11:30:00Z","source":"gt","type":"done","actor":"x","payload":{"bead":"gt-aaa11","target":"gastown/polecats/capable"}}`,
+		`{"ts":"2026-10-13T09:00:00Z","source":"gt","type":"done","actor":"x","payload":{"bead":"gt-aaa11"}}`,
+		line("2026-10-13T10:00:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/capable"),
+		line("2026-10-13T12:00:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/capable"),
+		line("2026-10-13T12:30:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/rictus"),  // another seat
+		line("2026-10-13T12:40:00Z", events.TypeSling, "gt-bbb22", "gastown/polecats/capable"), // another bead
 	}, "\n") + "\n"
 	if err := os.WriteFile(filepath.Join(town, events.EventsFile), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
-	r := &overrunSlungReader{d: d}
 
-	got, ok := r.slungAt("gt-aaa11", "gastown", "capable")
+	// The other seat asks for the same bead's clock as the seat that was slung.
+	for _, seat := range []string{"capable", "rictus"} {
+		r := &overrunSlungReader{d: d}
+		got, ok := r.slungAt("gt-aaa11", "gastown", seat)
+		if !ok {
+			t.Fatalf("%s: slungAt: not found", seat)
+		}
+		if want := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC); !got.Equal(want) {
+			t.Errorf("%s: slungAt = %v, want the bead's first dispatch %v", seat, got, want)
+		}
+	}
+
+	// A dispatch after the run's done event starts the clock over.
+	body = strings.Join([]string{
+		line("2026-10-13T10:00:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/capable"),
+		line("2026-10-13T11:00:00Z", events.TypeDone, "gt-aaa11", "gastown/polecats/capable"),
+		line("2026-10-13T12:00:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/rictus"),
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(town, events.EventsFile), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := &overrunSlungReader{d: d}
+	got, ok := r.slungAt("gt-aaa11", "gastown", "rictus")
 	if !ok {
 		t.Fatal("slungAt: not found")
 	}
 	if want := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC); !got.Equal(want) {
-		t.Errorf("slungAt = %v, want %v", got, want)
+		t.Errorf("slungAt = %v, want the dispatch after the done event, %v", got, want)
 	}
 }

@@ -332,8 +332,8 @@ func (d *Daemon) overseerReportProdSeams() *overseerReportSeams {
 	}
 }
 
-// overseerReportSeats lists the working seats and dates each from the sling
-// event that gave it its bead.
+// overseerReportSeats lists the working seats and dates each from its bead's
+// dispatch clock, the one the overrun guard judges.
 func (d *Daemon) overseerReportSeats() ([]townreport.SeatWork, error) {
 	seats, err := d.overrunWorkingSeats()
 	if err != nil {

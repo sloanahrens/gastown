@@ -606,11 +606,12 @@ func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
 
 // overrunFinishedOnOrigin is the finishedOnOrigin seam: the commit the seat's
 // kept branch holds in its worktree when origin holds that same commit for the
-// branch and the seat committed it after the sling began, "" otherwise. The
-// sling check is what keeps a rework bead, slung onto the branch the landing
-// worker rejected, from reading as finished work: the seat resumed a head that
-// predates its run, so it has done nothing since, and the stop is an overrun
-// (needs-split, with its attention item) rather than rework.
+// branch and the seat committed it after the bead's dispatch clock began, ""
+// otherwise. That check is what keeps a rework bead, slung onto the branch the
+// landing worker rejected, from reading as finished work: the rejected landing
+// submitted the bead, so the rework dispatch is a new run's clock, and the head
+// the seat resumed predates it — the seat has done nothing since, and the stop
+// is an overrun (needs-split, with its attention item) rather than rework.
 //
 // The check reads the head's committer time, not its author time: the author
 // date can be set freely at commit time, while the committer date belongs to

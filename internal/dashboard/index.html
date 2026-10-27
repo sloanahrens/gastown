@@ -907,7 +907,7 @@ function workHead() {
   const tr = el("div", "workrow whead");
   [["Polecat", "the polecat, with its rig and last-24-hour landings on hover"], ["Agent", "the agent the seat's session was started with"],
    ["Bead", "the bead on the seat's hook, with its title"], ["State", "the state the town's inventory reads the seat into"],
-   ["Age", "how long the bead has waited: a queued bead since its submit, any other since it went on the hook; the hover repeats the hook time and adds how long its session has been silent"]].forEach(([h, tip]) => { const c = el("span", "", h); c.title = tip; tr.append(c); });
+   ["Age", "how long the bead has waited: a queued bead since its submit, any other since the bead was dispatched; the hover repeats the dispatch time and adds how long its session has been silent"]].forEach(([h, tip]) => { const c = el("span", "", h); c.title = tip; tr.append(c); });
   return tr;
 }
 
@@ -922,22 +922,23 @@ const SPAWN_LONG = 5 * 60;
 // paintAges writes the two readings a seat's clock moves: the state badge's
 // tooltip carries how long its session has been silent, the age cell how long
 // the row has been in the state it shows — a queued bead since its submit (the
-// clock the Landings panel ages the same bead by), any other since the hook.
-// The hook time stays in the cell's tooltip, so the row still says how long
-// the seat has held the bead (gt-iv7jf).
+// clock the Landings panel ages the same bead by), any other since the bead was
+// dispatched. The dispatch time stays in the cell's tooltip, so the row still
+// says how long the bead has been in progress, across every seat that worked it
+// (gt-iv7jf, gt-tzbtf).
 function paintAges(r, now) {
   const p = r.p;
-  const hook = p.slung ? (now - new Date(p.slung).getTime()) / 1000 : null;
-  const since = p.state_since ? (now - new Date(p.state_since).getTime()) / 1000 : hook;
+  const dispatchedSec = p.slung ? (now - new Date(p.slung).getTime()) / 1000 : null;
+  const since = p.state_since ? (now - new Date(p.state_since).getTime()) / 1000 : dispatchedSec;
   const quiet = p.has_session && p.last_active ? (now - new Date(p.last_active).getTime()) / 1000 : null;
   const silent = quiet != null ? " · its session last printed " + fmtDur(quiet) + " ago" : "";
   const stuck = p.state === "spawning" && since > SPAWN_LONG ? "still spawning after " + fmtDur(since) : "";
-  const hooked = hook == null ? "" : " · on the hook for " + fmtDur(hook);
+  const dispatched = dispatchedSec == null ? "" : " · dispatched " + fmtDur(dispatchedSec) + " ago";
   const stateTip = "in " + p.state + (since == null ? "" : " for " + fmtDur(since));
   r.badge.title = (STATE_HELP[p.state] || "") + (p.reason && p.bead ? " — " + p.reason : "") + silent;
   r.age.className = "wnum" + (p.bead && (stuck || since > 5400 || (quiet != null && quiet >= 600)) ? " warnc" : "");
   r.age.textContent = p.bead ? (since == null ? "–" : fmtDur(since)) : "";
-  r.age.title = p.bead ? (stuck || stateTip) + hooked + silent : "";
+  r.age.title = p.bead ? (stuck || stateTip) + dispatched + silent : "";
 }
 
 // seatShortNames is the one table of the sandbox seats' short names, read by

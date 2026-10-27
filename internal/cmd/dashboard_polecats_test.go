@@ -1,12 +1,16 @@
 package cmd
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dashboard"
+	gtevents "github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
@@ -323,6 +327,67 @@ func TestBuildDashPolecatsSandboxSeatLiveness(t *testing.T) {
 				t.Error("a session the host tmux cannot clock must carry no last-active time")
 			}
 		})
+	}
+}
+
+// dashDispatchStarts is the Age column's clock: the bead's first dispatch
+// across seats, which the overrun guard judges too, so the two readings cannot
+// disagree (gt-tzbtf). An unreadable event log is an error, not a town where
+// no bead was ever dispatched.
+func TestDashDispatchStartsReadsTheBeadsFirstDispatch(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	line := func(ts, typ, bead, target string) string {
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"x","payload":{"bead":%q,"target":%q}}`, ts, typ, bead, target)
+	}
+	body := strings.Join([]string{
+		line("2026-10-27T09:00:00Z", "sling", "gt-a", "gastown/polecats/capable"),
+		line("2026-10-27T09:30:00Z", "sling", "gt-a", "gastown/polecats/rictus"),
+		line("2026-10-27T10:00:00Z", "done", "gt-a", "gastown/polecats/rictus"),
+		line("2026-10-27T10:30:00Z", "sling", "gt-a", "gastown/polecats/nux"),
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(town, gtevents.EventsFile), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dashDispatchStarts(town)
+	if err != nil {
+		t.Fatalf("dashDispatchStarts: %v", err)
+	}
+	if want := time.Date(2026, 10, 27, 10, 30, 0, 0, time.UTC); !got["gt-a"].Equal(want) {
+		t.Errorf("gt-a dispatch = %v, want the dispatch after its done event, %v", got["gt-a"], want)
+	}
+}
+
+func TestDashDispatchStartsReportsAnUnreadableLog(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory where the log belongs: the read fails, and a town whose
+	// dispatches cannot be read must not date every bead from now.
+	if err := os.Mkdir(filepath.Join(town, gtevents.EventsFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dashDispatchStarts(town); err == nil {
+		t.Fatal("dashDispatchStarts read an unreadable log as an empty one")
+	}
+}
+
+// dashSeats fails closed on an unreadable dispatch record: the polecat panel
+// reads as unavailable (the hub keeps its last good list) rather than dating
+// every seat from a fallback the guard does not use (gt-tzbtf).
+func TestDashSeatsReportsAnUnreadableDispatchRecord(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte(`{"version":1,"rigs":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(town, gtevents.EventsFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dashSeats(town, nil, false, newDashSeatCache(), fakeSessionLister{}); err == nil {
+		t.Fatal("dashSeats read an unreadable dispatch record as a town with no dispatches")
 	}
 }
 
