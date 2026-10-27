@@ -15,9 +15,10 @@ import (
 )
 
 // The verdict store keeps om's answer whole, because a landing's bead notes
-// keep only each finding's id, severity, path and title and reviews.jsonl keeps
-// a count: the summary and the detail under each finding are what an overseer
-// asking "why" would otherwise pay a second om run for (gt-uxqb9).
+// keep only each finding's id, severity, path and title, and reviews.jsonl
+// keeps a count and each finding's text but neither om's summary nor the rest
+// of its answer: that is what an overseer asking "why" would otherwise pay a
+// second om run for (gt-uxqb9).
 //
 // A record carries om's JSON as received, written 0600 under the private
 // landings tree (ensureLandingsDir), so the only readers are the account that

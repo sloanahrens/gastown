@@ -33,11 +33,11 @@ func TestLoadRoleDirective(t *testing.T) {
 		if err := os.MkdirAll(rigDir, 0755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(rigDir, "witness.md"), []byte("rig directive"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(rigDir, "crew.md"), []byte("rig directive"), 0644); err != nil {
 			t.Fatal(err)
 		}
 
-		got := LoadRoleDirective("witness", townRoot, "myrig")
+		got := LoadRoleDirective("crew", townRoot, "myrig")
 		if got != "rig directive" {
 			t.Errorf("got %q, want %q", got, "rig directive")
 		}
@@ -182,6 +182,45 @@ func TestLoadRoleDirectiveShared(t *testing.T) {
 			t.Errorf("got %q, want %q", got, "town shared")
 		}
 	})
+}
+
+// TestLoadRoleDirectiveSkipsNamesForNoKnownRole pins the contract the design
+// doc and gt directive list state: only a name a role has renders, so a typo
+// or a retired role loads the shared files and nothing else (gt-r3jbi).
+func TestLoadRoleDirectiveSkipsNamesForNoKnownRole(t *testing.T) {
+	t.Parallel()
+
+	write := func(t *testing.T, path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, role := range []string{"refiner", "witness", "unknown"} {
+		t.Run(role, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			write(t, filepath.Join(townRoot, "directives", SharedDirectiveName+".md"), "host rules")
+			write(t, filepath.Join(townRoot, "directives", role+".md"), "misnamed central policy")
+			write(t, filepath.Join(townRoot, "myrig", "directives", role+".md"), "misnamed rig policy")
+
+			if got := LoadRoleDirective(role, townRoot, "myrig"); got != "host rules" {
+				t.Errorf("LoadRoleDirective(%q) = %q, want only the shared file", role, got)
+			}
+			// The system prompt reads through the strict reader instead.
+			dirs, err := ReadRoleDirectives(role, townRoot, "myrig")
+			if err != nil {
+				t.Fatalf("ReadRoleDirectives: %v", err)
+			}
+			if len(dirs) != 1 || dirs[0].Name != SharedDirectiveName {
+				t.Errorf("ReadRoleDirectives(%q) = %+v, want only the shared file", role, dirs)
+			}
+		})
+	}
 }
 
 func TestIsKnownRole(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
@@ -255,6 +256,17 @@ func (d *Daemon) overrunCloseRunBead(seat overrunSeat, reason string) error {
 		seat.Bead, seat.Rig+"/polecats/"+seat.Polecat, reason)
 	if skipped != "" {
 		d.logger.Printf("overrun_guard: %s/%s: %s; not closing it", seat.Rig, seat.Polecat, skipped)
+	}
+	if err == nil && skipped == "" {
+		// The close ends the bead's run on the clock the guard and the
+		// dashboard read, as gt bead close does, so a run bead dispatched again
+		// after it starts over (gt-tzbtf). Best-effort: the stop's own steps
+		// must not be held by the log.
+		if lerr := events.LogAuditTo(d.config.TownRoot, events.TypeBeadClosed, overrunActor,
+			map[string]interface{}{"bead": seat.Bead}); lerr != nil {
+			d.logger.Printf("overrun_guard: WARNING: %s/%s: close of %s not recorded on the town log: %v",
+				seat.Rig, seat.Polecat, seat.Bead, lerr)
+		}
 	}
 	return err
 }

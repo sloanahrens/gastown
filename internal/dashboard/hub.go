@@ -23,8 +23,7 @@ type Hub struct {
 	ring     []Entry
 	seq      int64
 	subs     map[*Sub]struct{}
-	slung    map[string]time.Time // bead -> when a dispatch line named it
-	gating   map[string]bool      // beads the landing worker is gating right now
+	gating   map[string]bool // beads the landing worker is gating right now
 	polecats []Polecat
 	jevGood  map[string]time.Time // battery -> when its line last read good
 
@@ -69,7 +68,6 @@ func NewHub(cfg Config) *Hub {
 	return &Hub{
 		cfg:     cfg,
 		subs:    map[*Sub]struct{}{},
-		slung:   map[string]time.Time{},
 		gating:  map[string]bool{},
 		jevGood: map[string]time.Time{},
 		wake:    make(chan struct{}),
@@ -974,14 +972,16 @@ func (h *Hub) polecatsLocked(now time.Time) []Polecat {
 		if p.Bead == "" {
 			continue
 		}
-		// A dispatch line dates the bead exactly, so it wins. The feed holds
-		// only its own window, though: a polecat dispatched before it opened
-		// has no line, and its On it would stay blank however long it worked.
-		// The seat's own record of the hook stands in — see Polecat.Hooked.
+		// The seat's dispatch time is the bead's own clock, read from the
+		// town's dispatch record, and it is the same clock the overrun guard
+		// judges — see Polecat.Hooked. The feed's dispatch lines are not used
+		// for it: the feed is a rolling window with no record of the bead's
+		// done events, so its earliest line can belong to an earlier run and
+		// would date the Age from a start the guard never uses (gt-tzbtf).
+		// Every dispatch writes that record, the scheduled slings included: a
+		// scheduled dispatch runs the same sling, which logs the sling event
+		// beside its scheduler_dispatch line.
 		at := p.Hooked
-		if logged, ok := h.slung[p.Bead]; ok {
-			at = &logged
-		}
 		if at != nil {
 			when := *at
 			p.Slung = &when
@@ -1005,29 +1005,11 @@ func (h *Hub) polecatsLocked(now time.Time) []Polecat {
 }
 
 var (
-	slungRe = regexp.MustCompile(`([A-Za-z0-9][\w.-]*):? slung to `)
-	// The scheduled slings patrol logs its dispatch in its own shape —
-	// "scheduled_slings: <name>: created <bead>, slinging <formula> to <rig>"
-	// — which slungRe does not read (gt-jwmxo).
-	scheduledSlingRe = regexp.MustCompile(`scheduled_slings: \S+: created ([A-Za-z0-9][\w.-]*), slinging `)
 	// A bead is gated from the worker's "merged ... gating" line until it lands,
 	// is rejected, or reports its stage times.
 	gateStartRe = regexp.MustCompile(`\[land\] (\S+): merged .*gating`)
 	gateEndRe   = regexp.MustCompile(`\[land\] (\S+): (?:stages: |landed |rejected )`)
 )
-
-// dispatchBead reads the bead a feed line reports dispatching, false for a line
-// that dispatched nothing. slungRe keeps the pattern and the matches it had;
-// the scheduled slings patrol's line is the one other shape (gt-jwmxo).
-func dispatchBead(text string) (string, bool) {
-	if m := slungRe.FindStringSubmatch(text); m != nil {
-		return m[1], true
-	}
-	if m := scheduledSlingRe.FindStringSubmatch(text); m != nil {
-		return m[1], true
-	}
-	return "", false
-}
 
 // feedBurstMax is the most entries pollFeed sends as frames of their own; it
 // leaves room in a page's 64-frame buffer for the state and alert frames that
@@ -1053,10 +1035,6 @@ func (h *Hub) pollFeed() {
 		entries[i].Seq = h.seq
 		e := entries[i]
 		h.ring = append(h.ring, e)
-		if id, ok := dispatchBead(e.Text); ok {
-			h.slung[id] = e.At
-			changed = true
-		}
 		if m := gateStartRe.FindStringSubmatch(e.Text); m != nil {
 			h.gating[m[1]] = true
 			changed = true

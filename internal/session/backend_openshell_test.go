@@ -116,6 +116,11 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 		docker: func(context.Context, ...string) ([]byte, []byte, error) {
 			return nil, []byte("docker is not configured for this test"), errors.New("no docker")
 		},
+		// No git either: a comparison these tests do not set up reads as drift,
+		// which is what a mismatched image is expected to be.
+		git: func(string, ...string) ([]byte, error) {
+			return nil, errors.New("git is not configured for this test")
+		},
 		gitEmail:     func() string { return openshellTestGitEmail },
 		renderPrompt: openshellPromptRender,
 		installedGT:  func() string { return openshellTestGTCommit },
@@ -407,7 +412,7 @@ func TestCheckImageGT(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := checkImageGT("gastown-polecat:dev", gtLabelSource, tt.imageCommit, tt.installed)
+			err := checkImageGT("gastown-polecat:dev", gtLabelSource, tt.imageCommit, tt.installed, nil)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("checkImageGT = %v, want accepted", err)
@@ -421,6 +426,127 @@ func TestCheckImageGT(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("err = %v, want it to name %q", err, want)
 				}
+			}
+		})
+	}
+}
+
+// An image behind the installed gt by commits that change no path `make build`
+// reads is not drift: the sandbox runs the same gt, so the check accepts it and
+// a manual install at a docs-only HEAD does not force a rebuild (gt-v18z6).
+func TestCheckImageGTAcceptsADocsOnlyGap(t *testing.T) {
+	t.Parallel()
+	const image, installed = openshellTestDriftedGT, openshellTestGTCommit
+	tests := []struct {
+		name      string
+		paths     []string
+		queryErr  error
+		wantDrift bool
+	}{
+		{name: "documentation, test sources and testdata between are accepted",
+			paths: []string{"docs/sandbox.md", "README.md", "internal/session/backend_openshell_test.go", "internal/session/testdata/fixture.json"}},
+		{name: "a Go file between is drift",
+			paths: []string{"docs/a.md", "internal/session/backend_openshell.go"}, wantDrift: true},
+		{name: "the Dockerfile is drift", paths: []string{"Dockerfile"}, wantDrift: true},
+		{name: "a deploy file is drift", paths: []string{"deploy/polecat/policy.yaml"}, wantDrift: true},
+		{name: "a plugin file is drift", paths: []string{"plugins/polecat-image/run.sh"}, wantDrift: true},
+		{name: "markdown the binary embeds is drift",
+			paths: []string{"internal/templates/polecat-CLAUDE.md"}, wantDrift: true},
+		{name: "a comparison git cannot make is drift", queryErr: errors.New("exit status 1"), wantDrift: true},
+		{name: "a comparison that lists nothing is drift", wantDrift: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var gotImage, gotInstalled string
+			diff := func(imageCommit, installedCommit string) ([]string, error) {
+				gotImage, gotInstalled = imageCommit, installedCommit
+				return tt.paths, tt.queryErr
+			}
+			err := checkImageGT("gastown-polecat:dev", gtLabelSource, image, installed, diff)
+			if gotImage != image || gotInstalled != installed {
+				t.Fatalf("compared (%q, %q), want (%q, %q): the seam compares the image's commit against the installed one", gotImage, gotInstalled, image, installed)
+			}
+			if tt.wantDrift {
+				if !errors.Is(err, ErrImageDrift) {
+					t.Fatalf("checkImageGT = %v, want drift", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("checkImageGT = %v, want the docs-only gap accepted", err)
+			}
+		})
+	}
+}
+
+func TestImagePathsBetween(t *testing.T) {
+	t.Parallel()
+	const from, to, root = "aaaaaaaa1111", "bbbbbbbb2222", "/town/gastown"
+	tests := []struct {
+		name        string
+		notAncestor bool
+		diffOut     string
+		diffErr     error
+		want        []string
+		wantCalls   []string
+		wantErr     bool
+	}{
+		{
+			name:    "an ancestor lists the paths whose content differs",
+			diffOut: "docs/a.md\n\ninternal/session/x_test.go\n",
+			want:    []string{"docs/a.md", "internal/session/x_test.go"},
+			wantCalls: []string{
+				root + " merge-base --is-ancestor " + from + " " + to,
+				root + " diff --name-only --no-renames " + from + " " + to,
+			},
+		},
+		{
+			name:        "a commit off the installed line is refused without a diff",
+			notAncestor: true,
+			wantCalls:   []string{root + " merge-base --is-ancestor " + from + " " + to},
+			wantErr:     true,
+		},
+		{
+			name:    "an unreadable diff is an error, not an empty change",
+			diffErr: errors.New("exit status 128"),
+			wantCalls: []string{
+				root + " merge-base --is-ancestor " + from + " " + to,
+				root + " diff --name-only --no-renames " + from + " " + to,
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []string
+			run := func(dir string, args ...string) ([]byte, error) {
+				calls = append(calls, dir+" "+strings.Join(args, " "))
+				switch args[0] {
+				case "merge-base":
+					if tt.notAncestor {
+						return nil, errors.New("exit status 1")
+					}
+					return nil, nil
+				case "diff":
+					if tt.diffErr != nil {
+						return nil, tt.diffErr
+					}
+					return []byte(tt.diffOut), nil
+				}
+				t.Fatalf("unexpected git %q", args)
+				return nil, nil
+			}
+			got, err := imagePathsBetween(run, root, from, to)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("imagePathsBetween = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("paths = %q, want %q", got, tt.want)
+			}
+			if !reflect.DeepEqual(calls, tt.wantCalls) {
+				t.Errorf("git calls = %q, want %q", calls, tt.wantCalls)
 			}
 		})
 	}
@@ -548,6 +674,61 @@ func TestOpenShellPrepareRefusesADriftedSandboxImage(t *testing.T) {
 	}
 	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
 		t.Fatal("a refused sandbox left a record behind")
+	}
+}
+
+// Both image checks accept an image whose gt is only non-build commits behind
+// the installed one: Prepare's host label check and the sandbox's own gt
+// version check read the same seam, so a docs-only install spawns without a
+// rebuild (gt-v18z6).
+func TestOpenShellPrepareAcceptsAnImageOnlyDocsBehind(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{
+		"get":  openshellReadyReply,
+		"exec": "gt version 1.2.1 (dev: main@" + openshellTestDriftedGT + ")\n",
+	})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	b.imageGT = func(context.Context, string) (string, error) { return openshellTestDriftedGT, nil }
+	b.git = func(string, ...string) ([]byte, error) { return []byte("docs/sandbox.md\nREADME.md\n"), nil }
+
+	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+		t.Fatalf("Prepare: %v, want the docs-only gap accepted", err)
+	}
+}
+
+// The in-sandbox check reads the sandbox's own gt, not the host label, so it
+// takes the ancestry rule too: an image the gateway runs that is only docs
+// behind the installed gt is not rolled back (gt-v18z6).
+func TestOpenShellCheckSandboxGTAcceptsAnImageOnlyDocsBehind(t *testing.T) {
+	t.Parallel()
+	town, _ := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{
+		"exec": "gt version 1.2.1 (dev: main@" + openshellTestDriftedGT + ")\n",
+	})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	b.git = func(string, ...string) ([]byte, error) { return []byte("docs/sandbox.md\n"), nil }
+
+	if err := b.checkSandboxGT(context.Background(), openshellTestSession); err != nil {
+		t.Fatalf("checkSandboxGT = %v, want the docs-only gap accepted", err)
+	}
+}
+
+// The comparison runs in the town's gt source checkout. When that checkout
+// cannot be located the commits cannot be compared, and the image is refused
+// rather than accepted on no evidence (gt-v18z6).
+func TestOpenShellCheckSandboxGTRefusesWhenTheSourceCheckoutIsUnknown(t *testing.T) {
+	t.Parallel()
+	town, _ := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{
+		"exec": "gt version 1.2.1 (dev: main@" + openshellTestDriftedGT + ")\n",
+	})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	b.policyRoot = func(string) (string, error) { return "", errors.New("no gt source checkout") }
+
+	err := b.checkSandboxGT(context.Background(), openshellTestSession)
+	if !errors.Is(err, ErrImageDrift) {
+		t.Fatalf("checkSandboxGT = %v, want drift when the comparison cannot be made", err)
 	}
 }
 
@@ -1298,17 +1479,17 @@ func TestOpenShellMainScriptHolderIsNotThePolecatSession(t *testing.T) {
 // commit is a plain refusal, not drift, so the dispatcher labels the bead instead.
 func TestCheckImageGTClassifiesDrift(t *testing.T) {
 	t.Parallel()
-	err := checkImageGT("gastown-polecat:dev", gtLabelSource, "aaaaaaa1111", "bbbbbbb2222")
+	err := checkImageGT("gastown-polecat:dev", gtLabelSource, "aaaaaaa1111", "bbbbbbb2222", nil)
 	if !errors.Is(err, ErrImageDrift) {
 		t.Fatalf("a differing commit = %v, want ErrImageDrift", err)
 	}
 	if want := "sandbox image gastown-polecat:dev carries gt commit aaaaaaa1111, but the installed gt is commit bbbbbbb2222; rebuild the image with make polecat-image"; err.Error() != want {
 		t.Errorf("message = %q, want %q", err.Error(), want)
 	}
-	if err := checkImageGT("gastown-polecat:dev", gtLabelSource, "", "bbbbbbb2222"); errors.Is(err, ErrImageDrift) {
+	if err := checkImageGT("gastown-polecat:dev", gtLabelSource, "", "bbbbbbb2222", nil); errors.Is(err, ErrImageDrift) {
 		t.Errorf("a missing image commit = %v, must not be ErrImageDrift", err)
 	}
-	if err := checkImageGT("gastown-polecat:dev", gtLabelSource, "bbbbbbb2222", "bbbbbbb2222"); err != nil {
+	if err := checkImageGT("gastown-polecat:dev", gtLabelSource, "bbbbbbb2222", "bbbbbbb2222", nil); err != nil {
 		t.Errorf("a matching commit = %v, want nil", err)
 	}
 }

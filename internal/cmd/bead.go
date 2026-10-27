@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -324,6 +325,11 @@ type beadVerbs struct {
 	// the bead's landing record (the reader gt bead review shares with the
 	// attention queue's risk-path item).
 	reviewHead func(id, sha string) (string, error)
+	// recordClosed logs the run end (events.TypeBeadClosed) of each bead a close
+	// closed, so a bead closed by hand and dispatched again later starts its
+	// clock over instead of being dated from the dispatch of the run that was
+	// closed (events.DispatchStart). nil records nothing.
+	recordClosed func(ids []string)
 }
 
 // newBeadVerbs builds the verbs for this session: a client on the current
@@ -349,6 +355,24 @@ func newBeadVerbs(cmd *cobra.Command) *beadVerbs {
 			}
 			return landedOverseerHead(townRoot, id, sha)
 		},
+		recordClosed: func(ids []string) { logClosedBeads(beads.FindTownRoot(cwd), actor, ids) },
+	}
+}
+
+// logClosedBeads records the run end of each bead a close closed. An event that
+// cannot be written is a warning, not a failed close: the close the caller
+// asked for already happened, and the next dispatch of the bead falls back to
+// the agent bead's time (which can only read short) like a bead the log never
+// dispatched.
+func logClosedBeads(townRoot, actor string, ids []string) {
+	if townRoot == "" {
+		return
+	}
+	for _, id := range ids {
+		if err := events.LogAuditTo(townRoot, events.TypeBeadClosed, actor,
+			map[string]interface{}{"bead": id}); err != nil {
+			style.PrintWarning("could not record the close of %s on the town log: %v", id, err)
+		}
 	}
 }
 
@@ -542,7 +566,13 @@ func (v *beadVerbs) close(reason string, ids ...string) error {
 	// and nothing after it ends the molecule: gt done's close block needs a
 	// COMPLETED or ESCALATED exit, and a landed bead's molecule is the landing's
 	// (gt-x1d8s).
-	v.endMoleculesOf(beads.ClosedIDs(ids, err))
+	closed := beads.ClosedIDs(ids, err)
+	v.endMoleculesOf(closed)
+	// The close also ends the bead's run on the town's clock, so the dispatch
+	// that follows a reopen is policed from its own start (gt-tzbtf).
+	if v.recordClosed != nil {
+		v.recordClosed(closed)
+	}
 	if err != nil {
 		return err
 	}

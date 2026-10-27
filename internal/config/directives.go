@@ -28,15 +28,22 @@ func IsKnownRole(name string) bool {
 }
 
 // LoadRoleDirective loads role directive content from the directive file layout.
-// Resolution order:
-//  1. Town-level shared: <townRoot>/directives/_common.md
-//  2. Rig-level shared:  <townRoot>/<rigName>/directives/_common.md
-//  3. Town-level role:   <townRoot>/directives/<role>.md
-//  4. Rig-level role:    <townRoot>/<rigName>/directives/<role>.md
+// Each name resolves in two layers: the central layer, read for every rig, and
+// then the rig's own layer. In resolution order:
+//  1. Central shared: <townRoot>/gastown/mayor/rig/directives/_common.md
+//  2. Rig shared:     <townRoot>/<rigName>/mayor/rig/.gastown/directives/_common.md
+//  3. Central role:   <townRoot>/gastown/mayor/rig/directives/<role>.md
+//  4. Rig role:       <townRoot>/<rigName>/mayor/rig/.gastown/directives/<role>.md
+//
+// A layer takes its own file when that file exists. Otherwise the pre-gt-oz73l
+// path (<townRoot>/directives or <townRoot>/<rigName>/directives) is read when
+// a file of that name is there, and the warning names it once per process.
 //
 // Every existing file is concatenated in that order, newline-separated, so
 // shared policy is read first and the most specific file has the last word.
-// Returns empty string if no directive files exist.
+// The role's files are read only for a known role (IsKnownRole), so a name no
+// role has renders nothing (gt-r3jbi). Returns empty string if no directive
+// files exist.
 //
 // Invalid or unreadable paths are treated as absent (no error).
 func LoadRoleDirective(role, townRoot, rigName string) string {
@@ -152,12 +159,14 @@ func readDirectiveFile(path string) (string, error) {
 
 // directivePaths returns the directive files that render for role, broadest
 // first: for each name (_common, then the role), the central layer and then the
-// rig layer. A layer's file is the new path when that file exists, and otherwise
+// rig layer. The role's file is read only for a known role, so a name no role
+// has reaches no agent, which is what gt directive list and gt doctor report
+// (gt-r3jbi). A layer's file is the new path when that file exists, and otherwise
 // the legacy path when that exists, which is warned about once per process
 // (gt-oz73l). Asking for the shared file yields it once rather than twice.
 func directivePaths(role, townRoot, rigName string) []string {
 	names := []string{SharedDirectiveName}
-	if role != SharedDirectiveName {
+	if role != SharedDirectiveName && IsKnownRole(role) {
 		names = append(names, role)
 	}
 	var paths []string

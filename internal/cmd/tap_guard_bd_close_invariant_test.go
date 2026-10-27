@@ -343,8 +343,10 @@ func TestRunTapGuardBdCloseInvariant_UnrelatedCommandAllowed(t *testing.T) {
 func TestRealGuardProcessIsTheProcess(t *testing.T) {
 	t.Parallel()
 	p := realGuardProcess()
-	if reflect.ValueOf(p.getenv).Pointer() != reflect.ValueOf(os.Getenv).Pointer() {
-		t.Error("realGuardProcess does not read the environment through os.Getenv")
+	// The guard's own seam must read the process environment itself, not a
+	// stub: PATH is what the process holds, and it must answer with it.
+	if got, want := p.getenv("PATH"), os.Getenv("PATH"); got != want {
+		t.Errorf("realGuardProcess getenv(PATH) = %q, want the process's %q", got, want)
 	}
 	if reflect.ValueOf(p.getwd).Pointer() != reflect.ValueOf(os.Getwd).Pointer() {
 		t.Error("realGuardProcess does not read the working directory through os.Getwd")

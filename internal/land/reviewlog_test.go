@@ -2,10 +2,13 @@ package land
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -38,10 +41,10 @@ func TestReviewsFileAppendAndSince(t *testing.T) {
 		}
 	}
 	recs, err := f.Since(day)
-	if err != nil || len(recs) != 1 || recs[0] != cur {
+	if err != nil || len(recs) != 1 || !reflect.DeepEqual(recs[0], cur) {
 		t.Fatalf("Since(%v) = %+v, %v; want only %+v", day, recs, err, cur)
 	}
-	if all, _ := f.Since(day.Add(-24 * time.Hour)); len(all) != 2 || all[0] != old {
+	if all, _ := f.Since(day.Add(-24 * time.Hour)); len(all) != 2 || !reflect.DeepEqual(all[0], old) {
 		t.Errorf("Since(a day earlier) = %+v, want both records in file order", all)
 	}
 	raw, err := os.ReadFile(f.Path)
@@ -81,6 +84,212 @@ func TestReviewsFileSurvivesATornLine(t *testing.T) {
 	}
 }
 
+// TestReviewsFileQueuedSkipsAnOverlongLine: a line past the reader's bound is
+// skipped, not a failed read. A read that failed would fail the same way on
+// every later read, so one bad line would stop the queue for its rig for good;
+// the lines around it are still the queue (gt-3arxj).
+func TestReviewsFileQueuedSkipsAnOverlongLine(t *testing.T) {
+	t.Parallel()
+	f := reviewsFileIn(t)
+	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"bead":"gt-q","followup_queue":{"findings":[{"claim":"` + strings.Repeat("x", 2<<20) + `"}]}}`
+	if err := os.WriteFile(f.Path, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.AppendQueue(queueLine("gt-after", "gastown", queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := f.Queued()
+	if err != nil {
+		t.Fatalf("Queued on an overlong line = %v, want the line skipped", err)
+	}
+	if len(queued) != 1 || queued[0].Bead != "gt-after" {
+		t.Fatalf("Queued = %+v, want the line after the overlong one", queued)
+	}
+}
+
+// TestAppendQueueKeepsEveryLineReadable: a landing's held findings are split
+// across as many queue lines as the reader's bound needs, each claim bounded,
+// so the feed can always read back what it queued (gt-3arxj).
+func TestAppendQueueKeepsEveryLineReadable(t *testing.T) {
+	t.Parallel()
+	f := reviewsFileIn(t)
+	var findings []ReviewFindingText
+	for i := 0; i < 3*maxQueueLineFindings; i++ {
+		findings = append(findings, ReviewFindingText{File: "a.go", Title: "name it", Claim: strings.Repeat("c", 3*maxRecordedClaimBytes)})
+	}
+	if err := f.AppendQueue(queueLine("gt-many", "gastown", findings...)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("the queue was written as %d line(s), want the findings split", len(lines))
+	}
+	for i, line := range lines {
+		if len(line) > maxReviewLineBytes {
+			t.Errorf("line %d is %d bytes, past the reader's %d-byte bound", i, len(line), maxReviewLineBytes)
+		}
+	}
+	queued, err := f.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := 0
+	for _, q := range queued {
+		for _, ft := range q.Findings {
+			got++
+			if len(ft.Claim) > maxRecordedClaimBytes+len(truncatedClaim) {
+				t.Errorf("a claim is %d bytes, past the recorded bound", len(ft.Claim))
+			}
+		}
+	}
+	if got != len(findings) {
+		t.Errorf("read back %d findings, want all %d", got, len(findings))
+	}
+}
+
+// TestCompactKeepsEveryLineItDoesNotDrop: compaction drops the queue lines the
+// feed is done with and copies every other line byte for byte, so a verdict
+// written before this change — a count-only record — reads as it did after the
+// log is compacted (gt-3arxj).
+func TestCompactKeepsEveryLineItDoesNotDrop(t *testing.T) {
+	t.Parallel()
+	f := reviewsFileIn(t)
+	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	countOnly := `{"bead":"gt-old","rig":"gastown","attempt":1,"score":0.8,"verdict":"approve","findings":4,"bar":0.7,"at":"2026-10-01T00:00:00Z"}`
+	done, err := json.Marshal(ReviewRecord{BeadID: "gt-done", Rig: "gastown", At: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+		Queue: &FollowupQueue{Landed: queuedLanded, Score: 0.7, Findings: []ReviewFindingText{{Title: "done"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := json.Marshal(ReviewRecord{BeadID: "gt-wait", Rig: "gastown", At: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+		Queue: &FollowupQueue{Landed: queuedLanded, Score: 0.7, Findings: []ReviewFindingText{{Title: "wait"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.Path, []byte(countOnly+"\n"+string(done)+"\n"+string(waiting)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dropped, err := f.Compact(func(q QueuedFollowup) bool { return q.Bead == "gt-done" })
+	if err != nil || dropped != 1 {
+		t.Fatalf("Compact = %d dropped, %v; want the one consumed line", dropped, err)
+	}
+	raw, err := os.ReadFile(f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := countOnly + "\n" + string(waiting) + "\n"; string(raw) != want {
+		t.Errorf("compacted log =\n%s\nwant\n%s", raw, want)
+	}
+}
+
+// TestQueueReadAndWriteFailures: a review log the feed cannot open, read or
+// write is a named failure rather than a queue that looks empty, so the feed
+// can say what it could not do (gt-3arxj).
+func TestQueueReadAndWriteFailures(t *testing.T) {
+	t.Parallel()
+	t.Run("a queue record that cannot be encoded", func(t *testing.T) {
+		t.Parallel()
+		f := reviewsFileIn(t)
+		q := queueLine("gt-nan", "gastown", queuedFinding)
+		q.Score = math.NaN()
+		if err := f.AppendQueue(q); err == nil || !strings.Contains(err.Error(), "encoding review record") {
+			t.Fatalf("AppendQueue with a NaN score = %v, want an encoding error", err)
+		}
+	})
+	t.Run("a log that is a directory", func(t *testing.T) {
+		t.Parallel()
+		f := &ReviewsFile{Path: t.TempDir()}
+		if _, err := f.Queued(); err == nil || !strings.Contains(err.Error(), "reading reviews file") {
+			t.Errorf("Queued on a directory = %v, want a read error", err)
+		}
+		if _, err := f.Since(time.Time{}); err == nil || !strings.Contains(err.Error(), "reading reviews file") {
+			t.Errorf("Since on a directory = %v, want a read error", err)
+		}
+		if _, err := f.Compact(func(QueuedFollowup) bool { return true }); err == nil || !strings.Contains(err.Error(), "reading reviews file") {
+			t.Errorf("Compact on a directory = %v, want a read error", err)
+		}
+	})
+	t.Run("a landings dir that is a file", func(t *testing.T) {
+		t.Parallel()
+		dir := filepath.Join(t.TempDir(), "landings")
+		if err := os.WriteFile(dir, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f := &ReviewsFile{Path: filepath.Join(dir, ReviewsFileName)}
+		if _, err := f.Compact(func(QueuedFollowup) bool { return true }); err == nil {
+			t.Fatal("Compact accepted a landings path that is a file")
+		}
+	})
+	t.Run("a log that is a symlink", func(t *testing.T) {
+		t.Parallel()
+		dir := filepath.Join(t.TempDir(), "landings")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "elsewhere.jsonl")
+		if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(dir, ReviewsFileName)); err != nil {
+			t.Fatal(err)
+		}
+		f := &ReviewsFile{Path: filepath.Join(dir, ReviewsFileName)}
+		if _, err := f.Compact(func(QueuedFollowup) bool { return true }); err == nil || !strings.Contains(err.Error(), "opening reviews file") {
+			t.Fatalf("Compact through a symlink = %v, want a refusal to open it", err)
+		}
+	})
+	t.Run("a log the compaction cannot replace", func(t *testing.T) {
+		t.Parallel()
+		f := reviewsFileIn(t)
+		if err := f.AppendQueue(queueLine("gt-wait", "gastown", queuedFinding)); err != nil {
+			t.Fatal(err)
+		}
+		f.replace = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+		if _, err := f.Compact(func(QueuedFollowup) bool { return true }); err == nil || !strings.Contains(err.Error(), "replacing reviews file") {
+			t.Fatalf("Compact with a failed replace = %v, want the failure named", err)
+		}
+		queued, err := f.Queued()
+		if err != nil || len(queued) != 1 {
+			t.Errorf("queue = %+v, %v; want the line kept after a failed replace", queued, err)
+		}
+	})
+}
+
+// TestCompactLeavesTheLogAloneWithNothingConsumed: a feed with no consumed
+// queue line writes nothing, so a log with a line too long to compact is still
+// a log nothing rewrote (gt-3arxj).
+func TestCompactLeavesTheLogAloneWithNothingConsumed(t *testing.T) {
+	t.Parallel()
+	f := reviewsFileIn(t)
+	if err := f.AppendQueue(queueLine("gt-wait", "gastown", queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropped, err := f.Compact(func(QueuedFollowup) bool { return false })
+	if err != nil || dropped != 0 {
+		t.Fatalf("Compact = %d dropped, %v; want nothing dropped", dropped, err)
+	}
+	after, err := os.ReadFile(f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("an unconsumed queue line was rewritten:\n%s", after)
+	}
+}
+
 // A rig named reviews would share a file with the log, so no landings file is
 // made for it.
 func TestRigLandingsFileRefusesTheReviewsLogName(t *testing.T) {
@@ -110,7 +319,7 @@ func TestLandLogsEachOMVerdict(t *testing.T) {
 
 	f.requeue(1)
 	f.review.fn = func(string) (Verdict, error) {
-		return Verdict{Verdict: VerdictApprove, Score: 0.92, Findings: []Finding{{ID: "f-2", Severity: "minor", Path: "b.txt", Line: 1, Title: "name"}}}, nil
+		return Verdict{Verdict: VerdictApprove, Score: 0.92, Findings: []Finding{{ID: "f-2", Severity: "minor", Path: "b.txt", Line: 1, Title: "name", Detail: "the error names nothing"}}}, nil
 	}
 	if _, err := l.Land(context.Background(), f.work); err != nil {
 		t.Fatalf("second Land: %v", err)
@@ -123,11 +332,13 @@ func TestLandLogsEachOMVerdict(t *testing.T) {
 	at := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	want := []ReviewRecord{
 		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 1, Score: 0.3, Verdict: VerdictRequestChanges, Findings: 1, Bar: 0.8, At: at,
-			Branch: f.work.Branch, AuthorKind: authorkind.Polecat},
+			Branch: f.work.Branch, AuthorKind: authorkind.Polecat,
+			FindingText: []ReviewFindingText{{ID: "f-1", Severity: "major", File: "b.txt", Line: 1, Title: "wrong"}}},
 		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 2, Score: 0.92, Verdict: VerdictApprove, Findings: 1, Bar: 0.8, At: at,
-			Branch: f.work.Branch, AuthorKind: authorkind.Polecat},
+			Branch: f.work.Branch, AuthorKind: authorkind.Polecat,
+			FindingText: []ReviewFindingText{{ID: "f-2", Severity: "minor", File: "b.txt", Line: 1, Title: "name", Claim: "the error names nothing"}}},
 	}
-	if len(recs) != len(want) || recs[0] != want[0] || recs[1] != want[1] {
+	if len(recs) != len(want) || !reflect.DeepEqual(recs, want) {
 		t.Fatalf("review log = %+v, want %+v", recs, want)
 	}
 }

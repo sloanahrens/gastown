@@ -575,3 +575,114 @@ func highFd(t *testing.T, fd, floor int, cloexec bool) int {
 	}
 	return n
 }
+
+// alarmLine reports whether a byte arrived on fd before the stream ended: a line
+// fires the alarm, and end of file, like an error, ends the reader instead of
+// spinning on a zero-byte read (dae70fc4, gt-86xpn).
+//
+// It sits in this untagged file because runAsSupervisor in
+// process_integration_test.go, built only under the integration tag, calls it;
+// the unit test below drives alarmLineFrom, which bounds the reads.
+func alarmLine(fd int) bool { return alarmLineFrom(fd, unix.Read) }
+
+// alarmLineFrom is alarmLine over a read function, so a test can bound the
+// reader without a clock: a stream that has already ended cannot tell a reader
+// that stopped from one that asked again, so the test's read fails that ask.
+func alarmLineFrom(fd int, read readFunc) bool {
+	buf := make([]byte, 1)
+	for {
+		n, err := read(fd, buf)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		return n > 0
+	}
+}
+
+// readFunc is the read alarmLineFrom makes: unix.Read, or a test's stand-in.
+type readFunc func(fd int, p []byte) (int, error)
+
+// TestAlarmLine pins the reader the supervisor's alarm stub runs: a written line
+// fires the alarm, and the end of the stream ends the reader without firing it,
+// whether that end is a pipe's end of file or a zero-byte read with no error, as
+// /dev/null gives (dae70fc4). A reader that did not stop would spin, so every
+// case bounds it with a read that fails the test on a second call: a unit test
+// may not use a clock to stop a spin.
+func TestAlarmLine(t *testing.T) {
+	t.Parallel()
+	t.Run("a written line fires the alarm", func(t *testing.T) {
+		t.Parallel()
+		p := newAlarmPipe(t)
+		if _, err := unix.Write(p.w, []byte("fire\n")); err != nil {
+			t.Fatal(err)
+		}
+		// The write end stays open, so a reader that kept going after the line
+		// would block; the bound turns that second read into a failure.
+		if !alarmLineFrom(p.r, atMostOnce(t, unix.Read)) {
+			t.Error("alarmLineFrom() = false, want true: a line on the pipe fires the alarm")
+		}
+	})
+	t.Run("end of file ends the reader without firing", func(t *testing.T) {
+		t.Parallel()
+		p := newAlarmPipe(t)
+		p.closeWrite(t)
+		if alarmLineFrom(p.r, atMostOnce(t, unix.Read)) {
+			t.Error("alarmLineFrom() = true, want false: end of file is not a line")
+		}
+	})
+	t.Run("a zero-byte read with no error ends the reader too", func(t *testing.T) {
+		t.Parallel()
+		// /dev/null, which the supervisor hands the build as stdin, answers
+		// every read with zero bytes and no error; the reader must stop there.
+		read := atMostOnce(t, func(int, []byte) (int, error) { return 0, nil })
+		if alarmLineFrom(-1, read) {
+			t.Error("alarmLineFrom() = true, want false: a zero-byte read is not a line")
+		}
+	})
+}
+
+// atMostOnce fails the test when read is called a second time: the stream has
+// already ended, and a unit test cannot use a clock to stop a reader that asks
+// again.
+func atMostOnce(t *testing.T, read readFunc) readFunc {
+	t.Helper()
+	calls := 0
+	return func(fd int, p []byte) (int, error) {
+		calls++
+		if calls > 1 {
+			t.Fatalf("the reader asked %d times, want one look at the end of the stream", calls)
+		}
+		return read(fd, p)
+	}
+}
+
+// alarmPipe is a pipe whose open ends the test's cleanup closes. A test that
+// closes an end itself marks it closed first, so cleanup never closes a
+// descriptor number a parallel test may own by then.
+type alarmPipe struct{ r, w int }
+
+func newAlarmPipe(t *testing.T) *alarmPipe {
+	t.Helper()
+	var fds [2]int
+	if err := unix.Pipe(fds[:]); err != nil {
+		t.Fatal(err)
+	}
+	p := &alarmPipe{r: fds[0], w: fds[1]}
+	t.Cleanup(func() {
+		for _, fd := range []int{p.r, p.w} {
+			if fd >= 0 {
+				_ = unix.Close(fd)
+			}
+		}
+	})
+	return p
+}
+
+// closeWrite closes the write end and marks it closed for the cleanup.
+func (p *alarmPipe) closeWrite(t *testing.T) {
+	t.Helper()
+	if err := unix.Close(p.w); err != nil {
+		t.Fatal(err)
+	}
+	p.w = -1
+}

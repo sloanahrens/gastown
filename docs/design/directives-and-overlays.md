@@ -61,12 +61,14 @@ most specific last — central `_common`, rig `_common`, central `<role>`, rig
 policy on conflicting instructions, and within each pair the rig file overrides
 the central file.
 
-**A file named for no role is never loaded.** `config.LoadRoleDirective` reads
-`<name>.md` only for a name in `config.AllRoles()` or `_common`, so a typo such
-as `refiner.md` is dead from the moment it is written. `gt directive list`
-flags it `UNUSED (no such role)` and `gt doctor`'s `unused-directives` check
-warns with the path. Neither one deletes: a misnamed file may be a keeper the
-operator meant to rename.
+**A file named for no role is never loaded.** The reader itself gates on the
+name: `config.LoadRoleDirective` reads `<name>.md` only for a name in
+`config.AllRoles()` or `_common`, so a typo such as `refiner.md` is dead from
+the moment it is written, and a stray role string that names nothing — `unknown`,
+or a retired `witness` — gets `_common.md` alone. `gt directive list` flags such
+a file `UNUSED (no such role)` and `gt doctor`'s `unused-directives` check warns
+with the path. Neither one deletes: a misnamed file may be a keeper the operator
+meant to rename.
 
 **Implementation:**
 - Loader: `internal/config/directives.go` → `LoadRoleDirective(role, townRoot, rigName) string`
