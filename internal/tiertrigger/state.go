@@ -181,10 +181,13 @@ func Due(st State, pkgs []Package, g Git, now time.Time, loc *time.Location) (du
 	return due, unreadable
 }
 
-// Files is the file interface the state file is read and written through.
+// Files is the file interface the state files are read, written and removed
+// through.
 type Files interface {
 	ReadFile(path string) ([]byte, error)
 	WriteFile(path string, data []byte) error
+	// RemoveFile deletes path. A file that is already gone is not an error.
+	RemoveFile(path string) error
 }
 
 // Store is the state file at Path, read and written through Files.
@@ -246,4 +249,12 @@ func (OSFiles) WriteFile(path string, data []byte) error {
 		return err
 	}
 	return atomicfile.WriteFile(path, data, 0o644)
+}
+
+// RemoveFile deletes path, treating an already absent file as done.
+func (OSFiles) RemoveFile(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }

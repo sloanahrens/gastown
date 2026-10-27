@@ -266,6 +266,9 @@ func warn(w io.Writer, mode, tier string, err error, instead string) {
 // never skips a test.
 func (e env) skips(tier string, stdout, stderr io.Writer) int {
 	if err := e.begin(tier); err != nil {
+		// No start state for this run, so drop an earlier one: a stale record
+		// of a clean checkout must not vouch for a run whose start nobody saw.
+		e.discardRun(tier, stderr)
 		warn(stderr, "skips", tier, err, "every container package runs")
 		return 1
 	}
@@ -278,6 +281,18 @@ func (e env) skips(tier string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, strings.Join(entries, " "))
 	}
 	return 0
+}
+
+// discardRun drops the tier's run start state. A failure to remove it is named:
+// record would otherwise read a stale start state and stamp a run it does not
+// describe.
+func (e env) discardRun(tier string, stderr io.Writer) {
+	if e.town == "" {
+		return
+	}
+	if err := e.files.RemoveFile(tiertrigger.RunPath(e.town, tier)); err != nil {
+		fmt.Fprintf(stderr, "tiertrigger: drop the previous run state: %v\n", err)
+	}
 }
 
 // begin saves how the run starts: HEAD, and the tracked files that already

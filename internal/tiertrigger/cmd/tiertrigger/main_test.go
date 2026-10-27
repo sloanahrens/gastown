@@ -208,8 +208,17 @@ func (w *world) seedState(records map[string]tiertrigger.Record) {
 // mapFiles is the file seam over a map, so a case seeds the docker list and
 // the state file without a filesystem.
 type mapFiles struct {
-	files    map[string][]byte
-	writeErr error
+	files     map[string][]byte
+	writeErr  error
+	removeErr error
+}
+
+func (f *mapFiles) RemoveFile(path string) error {
+	if f.removeErr != nil {
+		return f.removeErr
+	}
+	delete(f.files, path)
+	return nil
 }
 
 func (f *mapFiles) ReadFile(path string) ([]byte, error) {
@@ -751,6 +760,47 @@ func TestWorktreePaths(t *testing.T) {
 	}
 	if got := trackedDirty(status); slices.Contains(got, "internal/beads/e_test.go") {
 		t.Errorf("trackedDirty() = %q; want no untracked file, which the sweep's own build leaves at the root", got)
+	}
+}
+
+// TestSkipsDropsAStaleRunWhenItCannotBegin pins the fail-closed rule: a sweep
+// that cannot record how its run begins leaves no earlier start state behind,
+// so record cannot stamp a run whose start nobody saw.
+func TestSkipsDropsAStaleRunWhenItCannotBegin(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.seedRun(w.head(), nil)
+	w.watch.statusErr = errors.New("index.lock exists")
+	if _, stderr, code := runSkips(t, w.e); code != 1 {
+		t.Fatalf("skips exited %d; want 1 (%s)", code, stderr)
+	}
+	if _, ok := w.files.files[w.runPath()]; ok {
+		t.Error("a stale run state survived a skips that could not begin")
+	}
+	var errb bytes.Buffer
+	if code := w.e.record("integration-docker", &errb); code != 1 {
+		t.Errorf("record after a skips that could not begin exited %d; want 1", code)
+	}
+	if !strings.Contains(errb.String(), "no record of how the run began") {
+		t.Errorf("record warned %q; want it to say the start of the run is unknown", errb.String())
+	}
+}
+
+// TestSkipsNamesAStaleRunItCannotDrop pins the other side: a removal that fails
+// is said out loud, because record may then read a start state this sweep did
+// not write.
+func TestSkipsNamesAStaleRunItCannotDrop(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.seedRun(w.head(), nil)
+	w.watch.statusErr = errors.New("index.lock exists")
+	w.files.removeErr = fs.ErrPermission
+	_, stderr, code := runSkips(t, w.e)
+	if code != 1 {
+		t.Errorf("skips exited %d; want 1", code)
+	}
+	if !strings.Contains(stderr, "drop the previous run state") {
+		t.Errorf("skips warned %q; want it to name the run state it could not drop", stderr)
 	}
 }
 

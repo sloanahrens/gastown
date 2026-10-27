@@ -13,9 +13,18 @@ import (
 // fakeFiles is the state store's file interface over a map, so a load tests
 // what the file holds without a filesystem.
 type fakeFiles struct {
-	files    map[string][]byte
-	readErr  error
-	writeErr error
+	files     map[string][]byte
+	readErr   error
+	writeErr  error
+	removeErr error
+}
+
+func (f *fakeFiles) RemoveFile(path string) error {
+	if f.removeErr != nil {
+		return f.removeErr
+	}
+	delete(f.files, path)
+	return nil
 }
 
 func (f *fakeFiles) ReadFile(path string) ([]byte, error) {
@@ -199,6 +208,25 @@ func TestRunPath(t *testing.T) {
 	want := "/town/.runtime/tiertrigger/integration-docker.run.json"
 	if got := RunPath("/town", "integration-docker"); got != want {
 		t.Errorf("RunPath(/town, integration-docker) = %q; want %q", got, want)
+	}
+}
+
+// TestOSFilesRemoveFile pins the removal's rule: the file goes, and a file that
+// is already gone is not a failure.
+func TestOSFilesRemoveFile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "run.json")
+	if err := (OSFiles{}).WriteFile(path, []byte("{}")); err != nil {
+		t.Fatalf("WriteFile(): %v", err)
+	}
+	if err := (OSFiles{}).RemoveFile(path); err != nil {
+		t.Fatalf("RemoveFile(): %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the file is still there after RemoveFile: %v", err)
+	}
+	if err := (OSFiles{}).RemoveFile(path); err != nil {
+		t.Errorf("RemoveFile() of a file that is gone = %v; want nil", err)
 	}
 }
 
