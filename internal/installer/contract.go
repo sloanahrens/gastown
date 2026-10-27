@@ -1,11 +1,21 @@
 package installer
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
 	"time"
 )
+
+// escalateDeadline is how long one escalation may take: a town that does not
+// answer must not hold the install open (gt-314j0). 60 s matches the daemon's
+// own escalation budget, which allows the child to acquire a slot under load.
+const escalateDeadline = 60 * time.Second
+
+// escalateGrace is how long a killed escalation's output pipes get to close: a
+// grandchild that inherited them can otherwise keep the wait alive (gt-314j0).
+const escalateGrace = time.Second
 
 // Contract is the exit contract of one run: the result line it names, the
 // receipt it leaves, and the escalation it raises. The zero value writes to
@@ -39,6 +49,10 @@ type Contract struct {
 	// Now is the clock receipts use; nil means time.Now.
 	Now func() time.Time
 
+	// escalateDeadline bounds this contract's escalations; zero means
+	// escalateDeadline.
+	escalateDeadline time.Duration
+
 	reported bool
 }
 
@@ -54,11 +68,49 @@ type Exec func(name string, args ...string) ([]byte, error)
 func (c *Contract) Escalate(severity, fingerprint, message string) {
 	// gt's own words about a refused escalation go nowhere, as the script
 	// discards them: the WARNING line is the notice.
-	_, err := c.exec(c.GT, "escalate", "install-gt: "+message, "-s", severity,
+	_, err := c.escalate("escalate", "install-gt: "+message, "-s", severity,
 		"--source", "script:install-gt", "--fingerprint", fingerprint)
 	if err != nil {
 		c.Log("WARNING: escalation " + fingerprint + " did not reach the town")
 	}
+}
+
+// escalate runs gt with args and returns its output, or fails once the
+// deadline passes. The wait is abandoned at the deadline rather than trusting
+// the child to exit: the same deadline kills gt, and the grace closes the
+// output pipe a grandchild could otherwise hold (gt-314j0).
+func (c *Contract) escalate(args ...string) ([]byte, error) {
+	deadline := c.escalateTimeout()
+	done := make(chan struct{})
+	var out []byte
+	var err error
+	go func() {
+		defer close(done)
+		if c.Exec != nil {
+			out, err = c.Exec(c.GT, args...)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), deadline)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, c.GT, args...)
+		cmd.WaitDelay = escalateGrace
+		out, err = cmd.CombinedOutput()
+	}()
+
+	select {
+	case <-done:
+		return out, err
+	case <-time.After(deadline):
+		return nil, context.DeadlineExceeded
+	}
+}
+
+// escalateTimeout is the deadline this contract gives one escalation.
+func (c *Contract) escalateTimeout() time.Duration {
+	if c.escalateDeadline > 0 {
+		return c.escalateDeadline
+	}
+	return escalateDeadline
 }
 
 // exec runs one external command and returns its combined output, through the
