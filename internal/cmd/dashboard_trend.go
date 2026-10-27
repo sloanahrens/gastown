@@ -173,6 +173,16 @@ type dashSubmitters struct {
 	stamp fileStamp
 	read  bool
 	names func(rig, bead string) string
+	// failed is the read failure already reported, so a log that stays
+	// unreadable reports once rather than on every poll (gt-72xqp).
+	failed readFailure
+}
+
+// readFailure identifies one failed read: the stamp the log had and the error
+// it gave. A poll that sees the same one again has nothing new to report.
+type readFailure struct {
+	stamp fileStamp
+	err   string
 }
 
 func newDashSubmitters(townRoot string, logf func(format string, args ...any)) *dashSubmitters {
@@ -182,14 +192,19 @@ func newDashSubmitters(townRoot string, logf func(format string, args ...any)) *
 	return &dashSubmitters{townRoot: townRoot, logf: logf}
 }
 
-func noSubmitters(string, string) string { return "" }
+// unreadableSubmitters is the lookup while the submission log cannot be read:
+// it names "?", the page's mark for a source that could not be read, so a row
+// does not claim its submitter is unknown when the answer was merely not
+// readable (gt-72xqp).
+func unreadableSubmitters(string, string) string { return "?" }
 
 // get returns the name lookup, re-reading the log only when it moved. A log
-// that cannot be read names no one: the rows it would have named draw the
-// page's dash, which says "not known" rather than naming whoever holds the
-// bead now. The failure is reported and is not remembered — the read marks the
-// log read only when it succeeded — so the next poll reads the log again
-// rather than serving the empty answer until the file moves.
+// that cannot be read names "?" rather than no one: the dash says the
+// submitter is unknown, which an unreadable log does not. The failure is
+// reported once for the failure it is — the same unreadable log again has
+// nothing new to say — and is not remembered as a read: the log is marked read
+// only when the read succeeded, so the next poll tries again rather than
+// serving the empty answer until the file moves (gt-72xqp).
 func (s *dashSubmitters) get() func(rig, bead string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -200,9 +215,13 @@ func (s *dashSubmitters) get() func(rig, bead string) string {
 	}
 	subs, err := land.ReadRecentSubmissionRecords(subPath, submissionNameRows)
 	if err != nil {
-		s.logf("the submission log %s could not be read, so the Landings rows it names draw a dash: %v", subPath, err)
-		return noSubmitters
+		if f := (readFailure{stamp: st, err: err.Error()}); f != s.failed {
+			s.failed = f
+			s.logf("the submission log %s could not be read, so the Landings rows it names read \"?\": %v", subPath, err)
+		}
+		return unreadableSubmitters
 	}
+	s.failed = readFailure{}
 	s.names, s.stamp, s.read = landingNameLookup(subs), st, true
 	return s.names
 }

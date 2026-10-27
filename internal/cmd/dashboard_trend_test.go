@@ -476,12 +476,19 @@ func TestAReassignedBeadsRejectedRowStillNamesItsSubmitter(t *testing.T) {
 	subs := []land.SubmissionRecord{
 		{Rig: "gastown", Bead: "gt-reassigned", Branch: "polecat/agate/gt-reassigned+1", SeenAt: now.Add(-2 * time.Hour)},
 	}
-	// The bead is reassigned and resubmitted by mica: the running row is the
-	// holder the seat cache names, and the rejection is the earlier attempt.
+	// agate submits, the rejection reassigns the bead to mica: production reads
+	// the holder as polecatOfAssignee over the bead's assignee, so the running
+	// row names mica while the rejected row keeps naming agate.
+	assignee := "gastown/polecats/agate"
+	polecatFor := func(rig, bead string) string { return polecatOfAssignee(assignee) }
+	if got := polecatFor("gastown", "gt-reassigned"); got != "agate" {
+		t.Fatalf("holder before the reassignment = %q, want agate", got)
+	}
+	assignee = "gastown/polecats/mica"
 	live := runningRows(
 		[]omMerge{{At: now.Add(-10 * time.Minute), Bead: "gt-reassigned"}},
 		func(string) string { return "gastown" },
-		func(string, string) string { return "mica" },
+		polecatFor,
 	)
 	rejs := []omRejection{{At: now.Add(-time.Hour), Bead: "gt-reassigned", Kind: "review"}}
 
@@ -623,8 +630,9 @@ func writeUnreadableSubmissionLog(t *testing.T, path string) string {
 	return broken
 }
 
-// A submission log that cannot be read is reported, not dropped, and names no
-// one: the rows it would have named draw the dash (gt-gclus).
+// A submission log that cannot be read is reported, not dropped, and names
+// "?": a dash would claim the submitter is unknown, and an unreadable log does
+// not know that (gt-gclus, gt-72xqp).
 func TestDashSubmittersReportsAnUnreadableLog(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -635,8 +643,8 @@ func TestDashSubmittersReportsAnUnreadableLog(t *testing.T) {
 	who := newDashSubmitters(town, func(format string, args ...any) {
 		lines = append(lines, fmt.Sprintf(format, args...))
 	}).get()
-	if got := who("gastown", "gt-rework"); got != "" {
-		t.Errorf("By = %q with an unreadable log, want a dash", got)
+	if got := who("gastown", "gt-rework"); got != "?" {
+		t.Errorf("By = %q with an unreadable log, want \"?\"", got)
 	}
 	if len(lines) != 1 {
 		t.Fatalf("reported %d line(s) %q, want one saying the read failed", len(lines), lines)
@@ -646,29 +654,84 @@ func TestDashSubmittersReportsAnUnreadableLog(t *testing.T) {
 	}
 }
 
+// A log that stays unreadable is reported once, not on every poll: the page
+// asks for the lookup on each publish, and the same failure again says nothing
+// new. A failure that moved, a log that becomes readable, and a failure after
+// a good read are all news (gt-72xqp).
+func TestDashSubmittersReportsAPersistentFailureOnce(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	subPath := land.SubmissionsSeenPath(town)
+	writeUnreadableSubmissionLog(t, subPath)
+
+	var lines []string
+	s := newDashSubmitters(town, func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	for i := 0; i < 3; i++ {
+		if got := s.get()("gastown", "gt-rework"); got != "?" {
+			t.Fatalf("poll %d By = %q with an unreadable log, want \"?\"", i, got)
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("reported %d line(s) %q over three polls of one unreadable log, want one", len(lines), lines)
+	}
+
+	// The log grew and is still unreadable: a failure at a new stamp is news.
+	if err := os.WriteFile(subPath, []byte(strings.Repeat("y", 3<<20)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.get()("gastown", "gt-rework"); got != "?" {
+		t.Fatalf("By = %q with the moved log still unreadable, want \"?\"", got)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("reported %d line(s) %q, want a second for the failure at the new stamp", len(lines), lines)
+	}
+
+	good := `{"seen_at":"2026-10-26T19:00:00Z","bead":"gt-rework","rig":"gastown","branch":"polecat/agate/gt-rework+1","head":"1111aaaa"}`
+	if err := os.WriteFile(subPath, []byte(good+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.get()("gastown", "gt-rework"); got != "agate" {
+		t.Fatalf("By = %q once the log is readable, want agate", got)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("reported %d line(s) %q, want none for a read that succeeded", len(lines), lines)
+	}
+
+	// Broken again after a good read: that failure is reported too, never
+	// swallowed as the one before it.
+	if err := os.WriteFile(subPath, []byte(strings.Repeat("z", 2<<20)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.get()("gastown", "gt-rework"); got != "?" {
+		t.Fatalf("By = %q with the log unreadable again, want \"?\"", got)
+	}
+	if len(lines) != 3 {
+		t.Fatalf("reported %d line(s) %q, want the failure after a good read reported again", len(lines), lines)
+	}
+}
+
 // A read that failed is not remembered: the next poll reads the log again even
 // though the file did not move, so a log that becomes readable on the same
-// stamp is picked up instead of drawing the dash until something writes it
+// stamp is picked up instead of reading "?" until something writes it
 // (gt-gclus).
 func TestDashSubmittersRetriesAFailedRead(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	subPath := land.SubmissionsSeenPath(town)
 	broken := writeUnreadableSubmissionLog(t, subPath)
-	// Pin the stamp: the readable log below has the broken one's size, inode
-	// and mtime, so only a read that was never cached can see the name.
+	// Pin the mtime, and cure the log in place below with the broken one's
+	// size: its stamp then does not move, so only a read that was never cached
+	// can name the submitter.
 	pinned := time.Unix(1_700_000_000, 0)
 	if err := os.Chtimes(subPath, pinned, pinned); err != nil {
 		t.Fatal(err)
 	}
-	before, err := stampFile(subPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	s := newDashSubmitters(town, nil)
-	if got := s.get()("gastown", "gt-rework"); got != "" {
-		t.Fatalf("By = %q with an unreadable log, want a dash", got)
+	if got := s.get()("gastown", "gt-rework"); got != "?" {
+		t.Fatalf("By = %q with an unreadable log, want \"?\"", got)
 	}
 
 	good := `{"seen_at":"2026-10-26T19:00:00Z","bead":"gt-rework","rig":"gastown","branch":"polecat/agate/gt-rework+1","head":"1111aaaa"}`
@@ -681,13 +744,6 @@ func TestDashSubmittersRetriesAFailedRead(t *testing.T) {
 	}
 	if err := os.Chtimes(subPath, pinned, pinned); err != nil {
 		t.Fatal(err)
-	}
-	after, err := stampFile(subPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after != before {
-		t.Fatalf("stamp moved from %+v to %+v; the readable log must keep the stamp", before, after)
 	}
 
 	if got := s.get()("gastown", "gt-rework"); got != "agate" {
