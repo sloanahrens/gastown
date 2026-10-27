@@ -94,30 +94,36 @@ func baseArgs(extra ...string) []string {
 	return append([]string{"-town", "/town", "-image", "gastown-polecat:dev"}, extra...)
 }
 
+// appliedJob decodes the document the command handed to kubectl apply.
+func appliedJob(t *testing.T, f *fake) cachevol.SeedJob {
+	t.Helper()
+	if len(f.calls) != 2 || strings.Join(f.calls[1].args, " ") != "apply -f -" {
+		t.Fatalf("kubectl calls = %+v, want a delete then the manifest on apply's stdin", f.calls)
+	}
+	var job cachevol.SeedJob
+	if err := json.Unmarshal([]byte(f.calls[1].stdin), &job); err != nil {
+		t.Fatalf("the manifest kubectl applied is not a Job document: %v", err)
+	}
+	return job
+}
+
 // TestRunAppliesTheSeedJobManifest pins what reaches kubectl: the delete that
-// lets changed pins reseed, then the apply whose manifest carries the claim,
-// the image, the root pass and the pins' clone URLs.
+// lets changed pins reseed, then the apply of a root Job that fills the claim
+// with the named image.
 func TestRunAppliesTheSeedJobManifest(t *testing.T) {
 	f := newFake()
-	f.remotes["gastown"] = "http://host.docker.internal:3000/sloan/gastown.git"
 	code, stdout, stderr := run(t, f, baseArgs()...)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
 	}
 	if len(f.calls) != 2 {
-		t.Fatalf("kubectl calls = %d, want delete then apply", len(f.calls))
+		t.Fatalf("kubectl calls = %d, want a delete then an apply", len(f.calls))
 	}
 	if got := strings.Join(f.calls[0].args, " "); got != "delete job gt-cache-seed --ignore-not-found" {
 		t.Errorf("first kubectl call = %q, want the Job delete", got)
 	}
-	if got := strings.Join(f.calls[1].args, " "); got != "apply -f -" {
-		t.Errorf("second kubectl call = %q, want the manifest on stdin", got)
-	}
 
-	var job cachevol.SeedJob
-	if err := json.Unmarshal([]byte(f.calls[1].stdin), &job); err != nil {
-		t.Fatalf("the manifest kubectl applied is not a Job document: %v", err)
-	}
+	job := appliedJob(t, f)
 	if job.APIVersion != "batch/v1" || job.Kind != "Job" || job.Metadata.Name != cachevol.DefaultSeedJobName {
 		t.Errorf("manifest = %s %s %q, want batch/v1 Job %s", job.APIVersion, job.Kind, job.Metadata.Name, cachevol.DefaultSeedJobName)
 	}
@@ -136,12 +142,23 @@ func TestRunAppliesTheSeedJobManifest(t *testing.T) {
 	if len(job.Spec.Template.Spec.Containers) != 1 || job.Spec.Template.Spec.Containers[0].Image != "gastown-polecat:dev" {
 		t.Errorf("the seed container = %+v, want the polecat image given on -image", job.Spec.Template.Spec.Containers)
 	}
+	if !strings.Contains(stdout, "applied Job gt-cache-seed filling gt-cache from 2 pin(s): gastown devops") {
+		t.Errorf("stdout = %q, want the applied Job, claim and rigs reported", stdout)
+	}
+}
 
-	pins := seedPins(t, job)
+// TestRunBuildsAPinForEachPinnedRig pins the pins the Job clones: one per row
+// of the pins file, in its order, at its commit and Forgejo URL.
+func TestRunBuildsAPinForEachPinnedRig(t *testing.T) {
+	f := newFake()
+	if code, _, stderr := run(t, f, baseArgs()...); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
 	want := []cachevol.Pin{
 		{Rig: "gastown", Commit: gastownCommit, URL: "http://host.docker.internal:3000/sloan/gastown.git"},
 		{Rig: "devops", Commit: devopsCommit, URL: "http://host.docker.internal:3000/sloan/devops.git"},
 	}
+	pins := seedPins(t, appliedJob(t, f))
 	if len(pins) != len(want) {
 		t.Fatalf("the Job seeds %d pins, want both rows of the pins file: %+v", len(pins), pins)
 	}
@@ -150,24 +167,16 @@ func TestRunAppliesTheSeedJobManifest(t *testing.T) {
 			t.Errorf("pin %d = %+v, want %+v", i, pins[i], p)
 		}
 	}
-	if !strings.Contains(stdout, "applied Job gt-cache-seed filling gt-cache from 2 pin(s): gastown devops") {
-		t.Errorf("stdout = %q, want the applied Job, claim and rigs reported", stdout)
-	}
 }
 
 // TestRunSeedsOnlyTheRigsNamedOnTheCommandLine keeps `make polecat-caches
 // RIGS=devops` seeding one rig, the way the target it replaces took rigs.
 func TestRunSeedsOnlyTheRigsNamedOnTheCommandLine(t *testing.T) {
 	f := newFake()
-	code, _, stderr := run(t, f, baseArgs("devops")...)
-	if code != 0 {
+	if code, _, stderr := run(t, f, baseArgs("devops")...); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
 	}
-	var job cachevol.SeedJob
-	if err := json.Unmarshal([]byte(f.calls[1].stdin), &job); err != nil {
-		t.Fatalf("the applied document is not a Job: %v", err)
-	}
-	pins := seedPins(t, job)
+	pins := seedPins(t, appliedJob(t, f))
 	if len(pins) != 1 || pins[0].Rig != "devops" {
 		t.Errorf("the Job seeds %+v, want devops alone", pins)
 	}
@@ -177,15 +186,10 @@ func TestRunSeedsOnlyTheRigsNamedOnTheCommandLine(t *testing.T) {
 // from the cluster, which is what -forgejo-host exists for.
 func TestRunSwapsTheCloneHost(t *testing.T) {
 	f := newFake()
-	code, _, stderr := run(t, f, baseArgs("-forgejo-host", "forgejo.openshell:3000")...)
-	if code != 0 {
+	if code, _, stderr := run(t, f, baseArgs("-forgejo-host", "forgejo.openshell:3000")...); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
 	}
-	var job cachevol.SeedJob
-	if err := json.Unmarshal([]byte(f.calls[1].stdin), &job); err != nil {
-		t.Fatalf("the applied document is not a Job: %v", err)
-	}
-	for _, p := range seedPins(t, job) {
+	for _, p := range seedPins(t, appliedJob(t, f)) {
 		if !strings.HasPrefix(p.URL, "http://forgejo.openshell:3000/sloan/") {
 			t.Errorf("pin %s clones from %q, want the -forgejo-host authority", p.Rig, p.URL)
 		}
@@ -196,18 +200,13 @@ func TestRunSwapsTheCloneHost(t *testing.T) {
 // delete that precedes it in one namespace.
 func TestRunPassesTheNamespaceToTheDeleteAndTheManifest(t *testing.T) {
 	f := newFake()
-	code, _, stderr := run(t, f, baseArgs("-namespace", "openshell")...)
-	if code != 0 {
+	if code, _, stderr := run(t, f, baseArgs("-namespace", "openshell")...); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
 	}
 	if got := strings.Join(f.calls[0].args, " "); !strings.Contains(got, "--namespace openshell") {
 		t.Errorf("delete call = %q, want the namespace", got)
 	}
-	var job cachevol.SeedJob
-	if err := json.Unmarshal([]byte(f.calls[1].stdin), &job); err != nil {
-		t.Fatalf("the applied document is not a Job: %v", err)
-	}
-	if job.Metadata.Namespace != "openshell" {
+	if job := appliedJob(t, f); job.Metadata.Namespace != "openshell" {
 		t.Errorf("manifest namespace = %q, want openshell", job.Metadata.Namespace)
 	}
 }

@@ -112,21 +112,11 @@ func runWith(args []string, out, errw io.Writer, d deps) int {
 	if *namespace != "" {
 		del = append(del, "--namespace", *namespace)
 	}
-	for _, call := range []struct {
-		stdin io.Reader
-		args  []string
-	}{
-		{nil, del},
-		{bytes.NewReader(job.JSON()), []string{"apply", "-f", "-"}},
-	} {
-		text, err := d.kubectl(call.stdin, call.args...)
-		if err != nil {
-			fmt.Fprintf(errw, "polecatcaches: %v\n", err)
-			return 1
-		}
-		if s := strings.TrimSpace(string(text)); s != "" {
-			fmt.Fprintln(out, s)
-		}
+	if code := kubectl(d, out, errw, nil, del); code != 0 {
+		return code
+	}
+	if code := kubectl(d, out, errw, bytes.NewReader(job.JSON()), []string{"apply", "-f", "-"}); code != 0 {
+		return code
 	}
 
 	rigs := make([]string, len(pins))
@@ -135,6 +125,20 @@ func runWith(args []string, out, errw io.Writer, d deps) int {
 	}
 	fmt.Fprintf(out, "polecatcaches: applied Job %s filling %s from %d pin(s): %s\n",
 		job.Metadata.Name, *claim, len(pins), strings.Join(rigs, " "))
+	return 0
+}
+
+// kubectl runs one kubectl call and passes its output through, returning the
+// command's exit code when the call fails.
+func kubectl(d deps, out, errw io.Writer, stdin io.Reader, args []string) int {
+	text, err := d.kubectl(stdin, args...)
+	if err != nil {
+		fmt.Fprintf(errw, "polecatcaches: %v\n", err)
+		return 1
+	}
+	if s := strings.TrimSpace(string(text)); s != "" {
+		fmt.Fprintln(out, s)
+	}
 	return 0
 }
 
