@@ -559,8 +559,9 @@ func TestFailClosedAndDefer(t *testing.T) {
 			t.Errorf("FailClosed() = %v, want x (POLECAT_IMAGE_FAIL_CLOSED=1)", err)
 		}
 		tr.wantLogged(t, "ERROR: x (POLECAT_IMAGE_FAIL_CLOSED=1)")
-		if err := tr.Defer("deferred: because"); err == nil {
-			t.Error("Defer() = nil, want the run's failure under the switch")
+		want := "the image was not built and published at the installed commit, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)"
+		if err := tr.Defer("deferred: because"); err == nil || err.Error() != want {
+			t.Errorf("Defer() = %v, want %q", err, want)
 		}
 		tr.wantLogged(t, "deferred: because")
 	})

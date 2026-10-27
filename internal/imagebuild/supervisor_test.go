@@ -580,8 +580,9 @@ func highFd(t *testing.T, fd, floor int, cloexec bool) int {
 // fires the alarm, and end of file, like an error, ends the reader instead of
 // spinning on a zero-byte read (dae70fc4, gt-86xpn).
 //
-// It sits in this untagged file because two test binaries read it: the unit test
-// below, and runAsSupervisor in process_integration_test.go.
+// It sits in this untagged file because runAsSupervisor in
+// process_integration_test.go, built only under the integration tag, calls it;
+// the unit test below drives alarmLineFrom, which bounds the reads.
 func alarmLine(fd int) bool { return alarmLineFrom(fd, unix.Read) }
 
 // alarmLineFrom is alarmLine over a read function, so a test can bound the
@@ -615,8 +616,10 @@ func TestAlarmLine(t *testing.T) {
 		if _, err := unix.Write(p.w, []byte("fire\n")); err != nil {
 			t.Fatal(err)
 		}
-		if !alarmLine(p.r) {
-			t.Error("alarmLine() = false, want true: a line on the pipe fires the alarm")
+		// The write end stays open, so a reader that kept going after the line
+		// would block; the bound turns that second read into a failure.
+		if !alarmLineFrom(p.r, atMostOnce(t, unix.Read)) {
+			t.Error("alarmLineFrom() = false, want true: a line on the pipe fires the alarm")
 		}
 	})
 	t.Run("end of file ends the reader without firing", func(t *testing.T) {

@@ -158,12 +158,12 @@ entry it would have read; Go reads a miss and rebuilds it, so the window is
 accepted rather than locked.
 
 Every failure exits non-zero with the tail of the failing command: a commit the
-rig repo does not know, a failed build, an image that still carries another
-commit afterwards, an installed gt whose commit cannot be read. A deferral exits 0
-and prints why, so a plugin whose receipts show `deferred:` run after run is
-stuck behind that reason and the image stays stale, with the sandbox sling's
-refusal as the net. Under `POLECAT_IMAGE_FAIL_CLOSED=1` it exits non-zero;
-"Publishing to a registry" states that contract.
+rig repo does not know, a failed build, an image still carrying another commit,
+an installed gt whose commit cannot be read. A deferral exits 0 and prints why,
+unless `POLECAT_IMAGE_FAIL_CLOSED=1` makes it exit non-zero; read "Publishing to
+a registry" before setting that variable. A plugin whose receipts show
+`deferred:` run after run is stuck behind that reason and the image stays stale,
+with the sandbox sling's refusal as the net.
 
 Run it directly; before building or syncing this plugin, read "Script entry
 point" in `plugins/README.md`:

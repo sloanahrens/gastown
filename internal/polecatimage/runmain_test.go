@@ -223,8 +223,10 @@ func TestMainDefersWhenASlingStartsBetweenRounds(t *testing.T) {
 				t.Errorf("make was called %d times, want one build: the sling stopped the round after it", got)
 			}
 			if failClosed {
-				if err == nil || !strings.Contains(err.Error(), "the image was not built and published at the installed commit, so this run fails (POLECAT_IMAGE_FAIL_CLOSED=1)") {
-					t.Errorf("Main() = %v, want the run's failure under the switch", err)
+				// The wording is Defer's, pinned by TestFailClosedAndDefer;
+				// here the branch under the switch must fail, not carry on.
+				if err == nil {
+					t.Error("Main() = nil, want the run's failure under the switch")
 				}
 				return
 			}
