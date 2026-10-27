@@ -222,10 +222,12 @@ type overrunState struct {
 	// checkpoint step finished. RunEndedAt is when the run's end was recorded
 	// on the bead (events.TypeOverrunStop), stamped so a stop retried on later
 	// ticks — a failing hand-back — writes the record once rather than a later
-	// end every tick, which could creep past the dispatch it ends. StoppedAt is
-	// set last, once the bead is handed back; with it set the stop does not run
-	// again inside the run the stop ended. A dispatch after that run is a new
-	// run, judged on its own clock.
+	// end every tick, which could creep past the dispatch it ends. It is the
+	// boundary the dispatch clock and the stopped-run skip share
+	// (stoppedInsideRun). StoppedAt is set last, once the bead is handed back:
+	// it marks the stop finished, and a stop that recorded no end — one
+	// abandoned when the seat was taken back, or a scheduled run — leaves it as
+	// the only record of the sling it stopped.
 	StopBeganAt      time.Time `json:"stop_began_at,omitzero"`
 	SessionStoppedAt time.Time `json:"session_stopped_at,omitzero"`
 	CheckpointedAt   time.Time `json:"checkpointed_at,omitzero"`
@@ -335,6 +337,22 @@ func writeOverrunState(townRoot string, s overrunState) error {
 		return fmt.Errorf("replace overrun state: %w", err)
 	}
 	return nil
+}
+
+// stoppedInsideRun reports whether slung dates a dispatch of the run this
+// bead's stop already ended, which the guard must not stop a second time on the
+// same clock. The boundary is RunEndedAt, the end the stop recorded on the bead
+// and the one the dispatch clock reads: a dispatch strictly before it belongs to
+// the ended run, one dated at or after it is the new run's and is policed. The
+// stop writes StoppedAt after the hand-back, so a re-sling landing in between is
+// the new run's too (gt-lfszo). A stop that recorded no end — a scheduled run,
+// whose close is its end, or one abandoned when the seat was taken back — leaves
+// StoppedAt as the only record that its sling was stopped.
+func (s overrunState) stoppedInsideRun(slung time.Time) bool {
+	if !s.RunEndedAt.IsZero() {
+		return slung.Before(s.RunEndedAt)
+	}
+	return !s.StoppedAt.IsZero() && !s.StoppedAt.Before(slung)
 }
 
 // pendingOverrunStops lists the beads whose stop began but did not finish: the

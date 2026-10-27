@@ -103,10 +103,11 @@ const (
 //
 // Progress is saved after each step, so a step that fails is logged and
 // retried from the failed step on the next tick, never from the top and never
-// skipping ahead. StoppedAt is written last; with it set the stop does not run
-// again for this sling. It deletes a local branch only after origin is read
-// back holding that exact commit, never removes a worktree and never nukes a
-// seat.
+// skipping ahead. StoppedAt is written last, and the run the stop ended is not
+// stopped again: the guard's skip reads that run's recorded end
+// (overrunState.stoppedInsideRun). It deletes a local branch only after origin
+// is read back holding that exact commit, never removes a worktree and never
+// nukes a seat.
 func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, elapsed time.Duration) {
 	who := seat.Rig + "/" + seat.Polecat
 	now := s.now()

@@ -499,12 +499,11 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			// The stop ran for this run of the bead already and the bead is
 			// back in the pool, labeled for a split or as rework. The stop
 			// itself ends the run — it records events.TypeOverrunStop before
-			// the hand-back — so the dispatch after it is a fresh run that the
-			// guard polices again. This check catches only a sling dated inside
-			// the stopped run (one written before the stop, or a run end whose
-			// record was lost), which must not be stopped a second time on the
-			// same clock.
-			if !state.StoppedAt.IsZero() && !state.StoppedAt.Before(slung) {
+			// the hand-back — and the dispatch clock reads that same record, so
+			// a dispatch after the recorded end is a fresh run the guard
+			// polices, even one written before the stop finished
+			// (overrunState.stoppedInsideRun, gt-lfszo).
+			if state.stoppedInsideRun(slung) {
 				continue
 			}
 			if dry {
