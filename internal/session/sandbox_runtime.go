@@ -55,12 +55,12 @@ type runtimeFile struct {
 // command names it; a missing system prompt is skipped. A rig or polecat name
 // that is not one path segment is an error too.
 func buildRuntimeArchive(spec SpawnSpec, gitEmail string) ([]byte, error) {
-	return buildRuntimeArchiveLogging(spec, gitEmail, os.Stderr)
+	return buildRuntimeArchiveLogging(spec, gitEmail, os.Stderr, config.SystemPromptRenderer)
 }
 
 // buildRuntimeArchiveLogging is buildRuntimeArchive with the spawn log given, so a
 // test can capture the uploaded prompt's hash line from the real build (gt-uoo5j).
-func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Writer) ([]byte, error) {
+func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Writer, render config.SystemPromptRender) ([]byte, error) {
 	if err := requireRuntimeSegment("rig", spec.Rig); err != nil {
 		return nil, err
 	}
@@ -96,14 +96,29 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 		{".gitconfig", []byte(sandboxGitConfig(spec.Polecat, gitEmail)), 0o644},
 	}
 
-	// A polecat without its system prompt file would start with none of its
-	// policy, so a missing file fails the build and names the file (gt-uoo5j).
+	// The host renders the sandbox's final prompt bytes once, into a sandbox/ directory of its own, and
+	// the upload copies that file verbatim. The town root and the sandbox note are fixed at render time,
+	// so the logged hash, the stored hash and the in-pod hash are the same (gt-uvwi6). A polecat without
+	// its system prompt would start with none of its policy, so a missing file fails the build and names
+	// the file (gt-uoo5j).
 	promptName := "system-prompt-" + spec.Polecat + ".md"
-	prompt, err := os.ReadFile(filepath.Join(dir, promptName))
+	if render == nil {
+		return nil, fmt.Errorf("polecat system prompt %s: no system prompt renderer is installed", promptName)
+	}
+	renderDir := filepath.Join(dir, "sandbox")
+	if err := os.MkdirAll(renderDir, 0o755); err != nil {
+		return nil, fmt.Errorf("polecat system prompt %s: %w", promptName, err)
+	}
+	renderPath := filepath.Join(renderDir, promptName)
+	target := config.SystemPromptTarget{Sandbox: true, SandboxTownRoot: sandboxTownRoot, Note: sandboxPromptNote}
+	rigPath := filepath.Join(spec.TownRoot, spec.Rig)
+	if err := render("polecat", spec.TownRoot, rigPath, spec.Polecat, renderPath, target); err != nil {
+		return nil, fmt.Errorf("polecat system prompt %s: %w", promptName, err)
+	}
+	promptBytes, err := os.ReadFile(renderPath)
 	if err != nil {
 		return nil, fmt.Errorf("polecat system prompt %s: %w", promptName, err)
 	}
-	promptBytes := []byte(RewriteTownRoot(string(prompt), spec.TownRoot, sandboxTownRoot) + sandboxPromptNote)
 	files = append(files, runtimeFile{path.Join(claudeDir, promptName), promptBytes, 0o644})
 	logSystemPrompt(promptLog, spec.Polecat, promptBytes)
 

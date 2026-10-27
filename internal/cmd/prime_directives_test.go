@@ -37,7 +37,7 @@ func TestSpawnRenderCarriesEveryDirectiveWhole(t *testing.T) {
 		stageDirectiveFile(t, path, text)
 	}
 	path := config.SystemPromptFilePath("polecat", town, rigPath, "nux")
-	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", path); err != nil {
+	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", path, config.SystemPromptTarget{}); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	got, err := os.ReadFile(path)
@@ -83,7 +83,7 @@ func TestSpawnRenderWithoutDirectivesIsTheTemplateOnly(t *testing.T) {
 	t.Parallel()
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	path := config.SystemPromptFilePath("polecat", town, rigPath, "nux")
-	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", path); err != nil {
+	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", path, config.SystemPromptTarget{}); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	got, err := os.ReadFile(path)
@@ -105,7 +105,7 @@ func TestUnreadableDirectiveFailsTheRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := config.SystemPromptFilePath("polecat", town, rigPath, "nux")
-	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", path); err == nil {
+	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", path, config.SystemPromptTarget{}); err == nil {
 		t.Fatalf("render succeeded with an unreadable directive source")
 	}
 	if _, err := os.Stat(path); err == nil {
@@ -124,7 +124,7 @@ func TestWhitespaceDirectiveIsAbsent(t *testing.T) {
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	stageDirectiveFile(t, filepath.Join(town, "directives", "_common.md"), " \n\t\n")
 	path := config.SystemPromptFilePath("polecat", town, rigPath, "nux")
-	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", path); err != nil {
+	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", path, config.SystemPromptTarget{}); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	got, _ := os.ReadFile(path)
@@ -141,7 +141,7 @@ func TestSpawnAndPrimeWriteIdenticalBytesWithDirectives(t *testing.T) {
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	stageDirectiveFile(t, filepath.Join(town, "myrig", "directives", "polecat.md"), "## Rig polecat\n\nKeep it short.\n")
 	path := config.SystemPromptFilePath("polecat", town, rigPath, "nux")
-	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", path); err != nil {
+	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", path, config.SystemPromptTarget{}); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	got, _ := os.ReadFile(path)

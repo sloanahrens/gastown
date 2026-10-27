@@ -374,7 +374,7 @@ func containsArgPair(args []string, flag, value string) bool {
 }
 
 // rendererReg is a registry whose host renders system prompts with fn.
-func rendererReg(fn func(role, townRoot, rigPath, agentName, path string) error) *AgentRegistry {
+func rendererReg(fn SystemPromptRender) *AgentRegistry {
 	h := fakeHost(nil)
 	h.renderSystemPrompt = fn
 	return agentRegistryFor(h, "", "")
@@ -396,7 +396,7 @@ func TestWithRoleSystemPromptFlag_RendersMissingFileFirst(t *testing.T) {
 	want := SystemPromptFilePath("polecat", town, rig, "nux")
 
 	var calls []string
-	reg := rendererReg(func(role, townRoot, rigPath, agentName, path string) error {
+	reg := rendererReg(func(role, townRoot, rigPath, agentName, path string, _ SystemPromptTarget) error {
 		calls = append(calls, role+"|"+townRoot+"|"+rigPath+"|"+agentName+"|"+path)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
@@ -434,7 +434,7 @@ func TestWithRoleSystemPromptFlag_RendererFailureLeavesConfigUnchanged(t *testin
 	rig := filepath.Join(town, "myrig")
 
 	t.Run("error", func(t *testing.T) {
-		reg := rendererReg(func(_, _, _, _, _ string) error { return os.ErrPermission })
+		reg := rendererReg(func(_, _, _, _, _ string, _ SystemPromptTarget) error { return os.ErrPermission })
 		got := withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude", Args: []string{"-x"}}, "polecat", town, rig, "nux")
 		if _, ok := hasSystemPromptFlag(got); ok {
 			t.Fatalf("a failing renderer must not add the flag: %v", got.Args)
@@ -444,7 +444,7 @@ func TestWithRoleSystemPromptFlag_RendererFailureLeavesConfigUnchanged(t *testin
 		}
 	})
 	t.Run("wrote nothing", func(t *testing.T) {
-		reg := rendererReg(func(_, _, _, _, _ string) error { return nil })
+		reg := rendererReg(func(_, _, _, _, _ string, _ SystemPromptTarget) error { return nil })
 		got := withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
 		if _, ok := hasSystemPromptFlag(got); ok {
 			t.Fatalf("a renderer that produced no file must not add the flag: %v", got.Args)
@@ -456,7 +456,7 @@ func TestWithRoleSystemPromptFlag_RendererNotCalledWithoutAFile(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	calls := 0
-	reg := rendererReg(func(_, _, _, _, _ string) error { calls++; return nil })
+	reg := rendererReg(func(_, _, _, _, _ string, _ SystemPromptTarget) error { calls++; return nil })
 
 	// The retired dog role has no file.
 	withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "dog", town, "", "")
@@ -483,7 +483,7 @@ func TestWithRoleSystemPromptFlag_ReplacesAStaleFile(t *testing.T) {
 	if err := os.WriteFile(want, []byte("stale directives from an earlier day\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	reg := rendererReg(func(role, townRoot, rigPath, agentName, path string) error {
+	reg := rendererReg(func(role, townRoot, rigPath, agentName, path string, _ SystemPromptTarget) error {
 		return os.WriteFile(path, []byte("current twelve rules\n"), 0o644)
 	})
 
@@ -520,7 +520,7 @@ func TestWithRoleSystemPromptFlag_UnchangedRenderKeepsTheFile(t *testing.T) {
 	if err := os.Chtimes(want, old, old); err != nil {
 		t.Fatal(err)
 	}
-	reg := rendererReg(func(role, townRoot, rigPath, agentName, path string) error {
+	reg := rendererReg(func(role, townRoot, rigPath, agentName, path string, _ SystemPromptTarget) error {
 		if cur, err := os.ReadFile(path); err == nil && string(cur) == text {
 			return nil
 		}
@@ -557,7 +557,7 @@ func TestWithRoleSystemPromptFlag_WarnsWhenARenderFailsOverAStaleFile(t *testing
 	}
 	var warn bytes.Buffer
 	h := fakeHost(nil)
-	h.renderSystemPrompt = func(role, townRoot, rigPath, agentName, path string) error {
+	h.renderSystemPrompt = func(role, townRoot, rigPath, agentName, path string, _ SystemPromptTarget) error {
 		return errors.New("template missing")
 	}
 	h.warn = &warn

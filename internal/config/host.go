@@ -19,7 +19,7 @@ type host struct {
 	// renderSystemPrompt renders a role's system prompt file; nil means
 	// SystemPromptRenderer, read at call time because internal/cmd installs
 	// it at init.
-	renderSystemPrompt func(role, townRoot, rigPath, agentName, path string) error
+	renderSystemPrompt SystemPromptRender
 	// warn receives the spawn's degrade warnings; nil means os.Stderr. Tests set
 	// it, since a package-level stderr swap is not allowed.
 	warn io.Writer
@@ -35,7 +35,7 @@ func (h host) warnWriter() io.Writer {
 
 // systemPromptRenderer returns h's renderer, or SystemPromptRenderer (which
 // may be nil) when h has none of its own.
-func (h host) systemPromptRenderer() func(role, townRoot, rigPath, agentName, path string) error {
+func (h host) systemPromptRenderer() SystemPromptRender {
 	if h.renderSystemPrompt != nil {
 		return h.renderSystemPrompt
 	}

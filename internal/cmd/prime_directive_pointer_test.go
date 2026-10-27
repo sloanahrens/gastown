@@ -44,7 +44,7 @@ func TestHookPointerWhenThePromptFileHoldsTheDirectives(t *testing.T) {
 	t.Parallel()
 	ctx, text := pointerTown(t)
 	path := config.SystemPromptFilePath("polecat", ctx.TownRoot, filepath.Join(ctx.TownRoot, "myrig"), "nux")
-	if err := renderSystemPromptFileForSpawn("polecat", ctx.TownRoot, filepath.Join(ctx.TownRoot, "myrig"), "nux", path); err != nil {
+	if err := renderSystemPromptFileForSpawn("polecat", ctx.TownRoot, filepath.Join(ctx.TownRoot, "myrig"), "nux", path, config.SystemPromptTarget{}); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 
@@ -108,7 +108,7 @@ func TestPlainPrimeKeepsTheFullTextWithAPromptFile(t *testing.T) {
 	t.Parallel()
 	ctx, text := pointerTown(t)
 	path := config.SystemPromptFilePath("polecat", ctx.TownRoot, filepath.Join(ctx.TownRoot, "myrig"), "nux")
-	if err := renderSystemPromptFileForSpawn("polecat", ctx.TownRoot, filepath.Join(ctx.TownRoot, "myrig"), "nux", path); err != nil {
+	if err := renderSystemPromptFileForSpawn("polecat", ctx.TownRoot, filepath.Join(ctx.TownRoot, "myrig"), "nux", path, config.SystemPromptTarget{}); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	var buf bytes.Buffer

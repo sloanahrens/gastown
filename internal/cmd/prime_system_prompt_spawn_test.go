@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // A town with one rig and one polecat laid out the way polecat.Manager creates
@@ -27,7 +28,7 @@ func TestRenderSystemPromptFileForSpawn_PolecatMatchesInSessionPrime(t *testing.
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	path := config.SystemPromptFilePath("polecat", town, rigPath, "nux")
 
-	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", path); err != nil {
+	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", path, config.SystemPromptTarget{}); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	got, err := os.ReadFile(path)
@@ -81,7 +82,7 @@ func TestRenderSystemPromptFileForSpawn_AllRolesMatchInSessionPrime(t *testing.T
 		if path == "" {
 			t.Fatalf("%s: no system prompt path", tc.role)
 		}
-		if err := renderSystemPromptFileForSpawn(tc.role, town, rigPath, tc.agent, path); err != nil {
+		if err := renderSystemPromptFileForSpawn(tc.role, town, rigPath, tc.agent, path, config.SystemPromptTarget{}); err != nil {
 			t.Fatalf("%s: render: %v", tc.role, err)
 		}
 		got, err := os.ReadFile(path)
@@ -148,7 +149,7 @@ func TestSpawnRoleContext_RejectsRolesWithoutAFile(t *testing.T) {
 			t.Errorf("%+v: expected an error", tc)
 		}
 	}
-	if err := renderSystemPromptFileForSpawn("polecat", town, "", "", ""); !errors.Is(err, errNoSystemPromptForRole) {
+	if err := renderSystemPromptFileForSpawn("polecat", town, "", "", "", config.SystemPromptTarget{}); !errors.Is(err, errNoSystemPromptForRole) {
 		t.Fatalf("empty path must report no system prompt for the role, got %v", err)
 	}
 }
@@ -189,5 +190,38 @@ func TestResolveRoleAgentConfig_FirstPolecatSpawnCarriesSystemPromptFlag(t *test
 	}
 	if info, err := os.Stat(path); err != nil || info.Size() == 0 {
 		t.Fatalf("file must have been rendered at resolve time: %v", err)
+	}
+}
+
+// A sandbox target writes the bytes the sandbox reads: the host town root rewritten to the sandbox's and
+// the sandbox note after the text. A host target writes the text as gt prime renders it (gt-uvwi6).
+func TestRenderSystemPromptFileForSpawn_SandboxTargetIsTheSandboxBytes(t *testing.T) {
+	t.Parallel()
+	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
+	host := config.SystemPromptFilePath("polecat", town, rigPath, "nux")
+	sandbox := filepath.Join(filepath.Dir(host), "sandbox", filepath.Base(host))
+	const sandboxRoot = "/sandbox/town"
+	const note = "\n## Sandbox\n"
+
+	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", host, config.SystemPromptTarget{}); err != nil {
+		t.Fatalf("host render: %v", err)
+	}
+	hostText, err := os.ReadFile(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := renderSystemPromptFileForSpawn("polecat", town, rigPath, "nux", sandbox, config.SystemPromptTarget{Sandbox: true, SandboxTownRoot: sandboxRoot, Note: note}); err != nil {
+		t.Fatalf("sandbox render: %v", err)
+	}
+	got, err := os.ReadFile(sandbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := session.RewriteTownRoot(string(hostText), town, sandboxRoot) + note
+	if string(got) != want {
+		t.Fatalf("sandbox render is not the host text with the town root rewritten and the note appended:\n%.400s", got)
+	}
+	if strings.Contains(string(got), town) {
+		t.Errorf("sandbox render still names the host town root %s", town)
 	}
 }

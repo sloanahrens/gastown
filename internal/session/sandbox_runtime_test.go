@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/sandbox"
 )
 
@@ -55,7 +56,7 @@ func untarRuntime(t *testing.T, data []byte) map[string]runtimeEntry {
 func TestBuildRuntimeArchiveAppendsTheSandboxNoteToThePrompt(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	data, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail)
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender)
 	if err != nil {
 		t.Fatalf("buildRuntimeArchive: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestBuildRuntimeArchiveAppendsTheSandboxNoteToThePrompt(t *testing.T) {
 func TestBuildRuntimeArchiveHoldsTheRenderedSettingsAndPrompt(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	data, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail)
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender)
 	if err != nil {
 		t.Fatalf("buildRuntimeArchive: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestBuildRuntimeArchiveFailsWithoutAPromptNamingTheFile(t *testing.T) {
 	if err := os.Remove(filepath.Join(claudeDir, promptName)); err != nil {
 		t.Fatal(err)
 	}
-	_, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail)
+	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender)
 	if err == nil {
 		t.Fatal("buildRuntimeArchive without a system prompt = nil error; the polecat would start with none of its policy")
 	}
@@ -123,7 +124,7 @@ func TestBuildRuntimeArchiveLogsTheHashOfTheUploadedPrompt(t *testing.T) {
 	// The real build, with its spawn log captured: the line it writes must be
 	// the hash of the entry it put in the archive, read back from the archive.
 	var logged bytes.Buffer
-	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, &logged)
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, &logged, openshellPromptRender)
 	if err != nil {
 		t.Fatalf("buildRuntimeArchive: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestBuildRuntimeArchiveFailsWithoutSettings(t *testing.T) {
 	if err := os.Remove(filepath.Join(claudeDir, "settings.json")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail); err == nil {
+	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender); err == nil {
 		t.Fatal("buildRuntimeArchive without settings.json = nil error; the agent command names that file")
 	}
 }
@@ -163,7 +164,7 @@ func TestBuildRuntimeArchiveReportsAnUnreadablePrompt(t *testing.T) {
 	if err := os.Mkdir(prompt, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail); err == nil {
+	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender); err == nil {
 		t.Fatal("buildRuntimeArchive with a directory for the system prompt = nil error")
 	}
 }
@@ -174,7 +175,7 @@ func TestBuildRuntimeArchiveReportsSettingsThatDoNotRender(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	writeOpenshellFile(t, filepath.Join(town, openshellTestRig, "polecats", ".claude", "settings.json"), "{not json")
-	if _, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail); err == nil {
+	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender); err == nil {
 		t.Fatal("buildRuntimeArchive with invalid settings JSON = nil error")
 	}
 }
@@ -201,7 +202,7 @@ func TestBuildRuntimeArchiveRefusesTraversalInRigOrPolecat(t *testing.T) {
 			town, work := openshellTown(t)
 			spec := openshellSpawn(town, work)
 			spec.Rig, spec.Polecat = tc.rig, tc.polecat
-			_, err := buildRuntimeArchive(spec, openshellTestGitEmail)
+			_, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender)
 			if err == nil || !strings.Contains(err.Error(), "not a single path segment") {
 				t.Fatalf("buildRuntimeArchive with rig=%q polecat=%q: err=%v, want a path-segment refusal", tc.rig, tc.polecat, err)
 			}
@@ -234,7 +235,7 @@ func TestBuildRuntimeArchiveSeedsClaudeJSONForTheSandboxWorktree(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	spec := openshellSpawn(town, work)
-	data, err := buildRuntimeArchive(spec, openshellTestGitEmail)
+	data, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender)
 	if err != nil {
 		t.Fatalf("buildRuntimeArchive: %v", err)
 	}
@@ -279,7 +280,7 @@ func TestBuildRuntimeArchiveSeedsClaudeJSONForTheSandboxWorktree(t *testing.T) {
 func TestBuildRuntimeArchiveGivesGitACredentialHelperAndNoSecret(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	data, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail)
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender)
 	if err != nil {
 		t.Fatalf("buildRuntimeArchive: %v", err)
 	}
@@ -383,5 +384,46 @@ func TestGitEmailFromTrimsTheAnswerAndTreatsAFailureAsUnset(t *testing.T) {
 	}
 	if got := gitEmailFrom(func(string, ...string) ([]byte, error) { return nil, errors.New("exit status 1") }); got != "" {
 		t.Errorf("gitEmailFrom after a git failure = %q, want empty (unset)", got)
+	}
+}
+
+// openshellPromptRender is the renderer the archive tests pass in. It writes the host's prompt file
+// to path the way the real renderer does: the host text for a host target, and for a sandbox target
+// the host town root rewritten and the sandbox note appended (gt-uvwi6). The host file is the one
+// beside the sandbox/ directory path sits in.
+func openshellPromptRender(_, townRoot, _, _, path string, target config.SystemPromptTarget) error {
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(filepath.Dir(path)), filepath.Base(path)))
+	if err != nil {
+		return err
+	}
+	text := string(raw)
+	if target.Sandbox {
+		text = RewriteTownRoot(text, townRoot, target.SandboxTownRoot) + target.Note
+	}
+	return os.WriteFile(path, []byte(text), 0o644)
+}
+
+// The tar entry, the file the host rendered and the logged hash are the same bytes: the upload copies
+// the render verbatim, so nothing between the render and the archive can change the prompt (gt-uvwi6).
+func TestBuildRuntimeArchiveUploadsTheRenderedPromptVerbatim(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	var logged bytes.Buffer
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, &logged, openshellPromptRender)
+	if err != nil {
+		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
+	}
+	rendered, err := os.ReadFile(filepath.Join(town, openshellTestRig, "polecats", ".claude", "sandbox", "system-prompt-"+openshellTestPolecat+".md"))
+	if err != nil {
+		t.Fatalf("rendered sandbox prompt not on disk: %v", err)
+	}
+	uploaded := untarRuntime(t, data)["gt/"+openshellTestRig+"/polecats/.claude/system-prompt-"+openshellTestPolecat+".md"].body
+	if uploaded != string(rendered) {
+		t.Fatalf("tar entry is not the rendered file byte for byte:\n%.400s", uploaded)
+	}
+	sum := sha256.Sum256(rendered)
+	line := "system prompt " + openshellTestPolecat + ": " + strconv.Itoa(len(rendered)) + " bytes sha256 " + hex.EncodeToString(sum[:]) + "\n"
+	if logged.String() != line {
+		t.Errorf("logged hash = %q, want the hash of the rendered file %q", logged.String(), line)
 	}
 }

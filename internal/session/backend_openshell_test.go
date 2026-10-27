@@ -116,9 +116,10 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 		docker: func(context.Context, ...string) ([]byte, []byte, error) {
 			return nil, []byte("docker is not configured for this test"), errors.New("no docker")
 		},
-		gitEmail:    func() string { return openshellTestGitEmail },
-		installedGT: func() string { return openshellTestGTCommit },
-		policyRoot:  func(townRoot string) (string, error) { return openshellTestPolicyRoot(townRoot), nil },
+		gitEmail:     func() string { return openshellTestGitEmail },
+		renderPrompt: openshellPromptRender,
+		installedGT:  func() string { return openshellTestGTCommit },
+		policyRoot:   func(townRoot string) (string, error) { return openshellTestPolicyRoot(townRoot), nil },
 	}
 	return b, pushes
 }
