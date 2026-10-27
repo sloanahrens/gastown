@@ -44,23 +44,30 @@ func TestReadLandingsReadsTheExtractHeader(t *testing.T) {
 	}
 }
 
+// pythonStringList reads a Python module's NAME = [...] or NAME = {...} literal
+// as a list of strings, the other half of the contract the Go tables mirror.
+func pythonStringList(t *testing.T, file, name string) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "scripts", "town_metrics", file))
+	if err != nil {
+		t.Fatalf("read the Python extract's %s: %v", file, err)
+	}
+	literal := regexp.MustCompile(`(?s)` + regexp.QuoteMeta(name) + `\s*=\s*[\[{](.*?)[\]}]`).FindSubmatch(data)
+	if literal == nil {
+		t.Fatalf("%s has no %s = [...] literal", file, name)
+	}
+	var values []string
+	for _, quoted := range regexp.MustCompile(`"([^"]*)"`).FindAllSubmatch(literal[1], -1) {
+		values = append(values, string(quoted[1]))
+	}
+	return values
+}
+
 // pythonLandingColumns reads LANDING_COLUMNS out of the Python extract, the
 // other half of the contract landingColumns mirrors.
 func pythonLandingColumns(t *testing.T) []string {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("..", "..", "scripts", "town_metrics", "tables.py"))
-	if err != nil {
-		t.Fatalf("read the Python extract's tables.py: %v", err)
-	}
-	list := regexp.MustCompile(`(?s)LANDING_COLUMNS\s*=\s*\[(.*?)\]`).FindSubmatch(data)
-	if list == nil {
-		t.Fatal("tables.py has no LANDING_COLUMNS = [...] literal")
-	}
-	var columns []string
-	for _, quoted := range regexp.MustCompile(`"([^"]*)"`).FindAllSubmatch(list[1], -1) {
-		columns = append(columns, string(quoted[1]))
-	}
-	return columns
+	return pythonStringList(t, "tables.py", "LANDING_COLUMNS")
 }
 
 func TestLandingColumnsMatchThePythonExtract(t *testing.T) {

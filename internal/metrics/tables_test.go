@@ -147,6 +147,23 @@ func TestExplainOnlyContainsOnlyPostHocColumns(t *testing.T) {
 	}
 }
 
+// TestExplainOnlyColumnsMatchThePythonExtract checks the sidecar's keys are the
+// Python extract's EXPLAIN_ONLY set: the mango stage drops exactly those
+// columns from its predictors.
+func TestExplainOnlyColumnsMatchThePythonExtract(t *testing.T) {
+	t.Parallel()
+	want := pythonStringList(t, "tables.py", "EXPLAIN_ONLY")
+	if len(want) == 0 {
+		t.Fatal("read no columns out of tables.py")
+	}
+	slices.Sort(want)
+	got := slices.Clone(explainOnlyColumns)
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("explainOnlyColumns = %v, want the extract's %v", explainOnlyColumns, want)
+	}
+}
+
 func TestWriteLandingSidecarListsExplainOnly(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer

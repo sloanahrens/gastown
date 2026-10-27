@@ -358,19 +358,24 @@ func (env ExtractEnv) makeOutDir() error {
 	return os.MkdirAll(env.OutDir, 0o755)
 }
 
-// openOutput opens one of the extract's output files by name.
-func (env ExtractEnv) openOutput(name string) (io.WriteCloser, error) {
+// writeOutput writes one output file, naming the file on a failed open, write
+// or close, so a partial file is never read as a finished one. The host's
+// directory gets the file only once it is whole (writeAtomic); an injected
+// Create owns its own file.
+func (env ExtractEnv) writeOutput(name string, write func(io.Writer) error) error {
 	if env.Create != nil {
-		return env.Create(name)
+		return writeThrough(env.Create, name, write)
 	}
-	return os.Create(filepath.Join(env.OutDir, name))
+	if err := writeAtomic(env.OutDir, name, write); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	return nil
 }
 
-// writeOutput writes one output file through the env's opener, naming the file
-// on a failed open, write or close, so a partial file is never read as a
-// finished one.
-func (env ExtractEnv) writeOutput(name string, write func(io.Writer) error) error {
-	f, err := env.openOutput(name)
+// writeThrough writes one output file through opener, naming the file on a
+// failed open, write or close.
+func writeThrough(open func(string) (io.WriteCloser, error), name string, write func(io.Writer) error) error {
+	f, err := open(name)
 	if err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
@@ -382,6 +387,40 @@ func (env ExtractEnv) writeOutput(name string, write func(io.Writer) error) erro
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	return nil
+}
+
+// writeAtomic writes dir/name through a temporary file in dir and renames it
+// into place only once every byte is written and closed. A failure partway
+// therefore leaves nothing under name and no temporary file beside it, and the
+// file an earlier run left is untouched rather than truncated.
+//
+// The temporary file keeps the 0600 mode CreateTemp opens it with: the town's
+// own user writes these files and is the one that reads them.
+func writeAtomic(dir, name string, write func(io.Writer) error) error {
+	f, err := os.CreateTemp(dir, "."+name+".tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	// The remove is a no-op once the rename has taken the name away.
+	defer func() { _ = os.Remove(tmp) }()
+	if err := writeAndClose(f, write); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// writeAndClose writes one output file and closes it, so the caller renames a
+// file whose every byte reached it.
+func writeAndClose(f *os.File, write func(io.Writer) error) error {
+	if err := write(f); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // nonblankLines counts the lines a source really carries: a blank line is no

@@ -9,7 +9,9 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -195,6 +197,19 @@ func extractLanding(t *testing.T, rows []Row, bead string) Row {
 	}
 	t.Fatalf("no %s landing in %v", bead, rows)
 	return nil
+}
+
+// TestBeadColumnsMatchThePythonExtract checks beads.csv's header is the Python
+// extract's BEAD_COLUMNS, in its order.
+func TestBeadColumnsMatchThePythonExtract(t *testing.T) {
+	t.Parallel()
+	want := pythonStringList(t, "cli.py", "BEAD_COLUMNS")
+	if len(want) == 0 {
+		t.Fatal("read no columns out of cli.py")
+	}
+	if !slices.Equal(beadColumns, want) {
+		t.Errorf("beadColumns = %v, want the extract's %v", beadColumns, want)
+	}
 }
 
 // TestExtractWritesTheFourFilesWithOneRowPerLedgerLine checks the four tables
@@ -680,6 +695,104 @@ func (f failingWriteCloser) Write(p []byte) (int, error) {
 }
 
 func (f failingWriteCloser) Close() error { return f.closeErr }
+
+// dirNames lists the names in an output directory, in ReadDir's order.
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
+// TestWriteAtomicLeavesNoPartialFile checks a write that fails partway is the
+// caller's error and leaves nothing behind: no file under the output's name and
+// no temporary file beside it. The write's own bytes reach only the temporary
+// file, which the failure removes.
+func TestWriteAtomicLeavesNoPartialFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeErr := errors.New("disk full")
+	err := writeAtomic(dir, landingsName, func(w io.Writer) error {
+		if _, err := io.WriteString(w, "bead,rig\r\n"); err != nil {
+			return err
+		}
+		return writeErr
+	})
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("writeAtomic error = %v, want the write's error", err)
+	}
+	if names := dirNames(t, dir); len(names) != 0 {
+		t.Errorf("output directory holds %v after a failed write, want nothing", names)
+	}
+}
+
+// TestWriteAtomicReportsADirectoryItCannotWriteIn checks an output directory
+// the temporary file cannot be made in is the caller's error, not a silent
+// success.
+func TestWriteAtomicReportsADirectoryItCannotWriteIn(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "missing")
+	err := writeAtomic(dir, landingsName, func(io.Writer) error { return nil })
+	if err == nil {
+		t.Fatalf("writeAtomic succeeded with no directory at %s", dir)
+	}
+}
+
+// TestWriteAtomicKeepsTheWholeFileOnly checks a write that succeeds leaves the
+// file under its name carrying every byte, and no temporary file.
+func TestWriteAtomicKeepsTheWholeFileOnly(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := writeAtomic(dir, landingsName, func(w io.Writer) error {
+		_, err := io.WriteString(w, "bead,rig\r\ngt-a,gastown\r\n")
+		return err
+	}); err != nil {
+		t.Fatalf("writeAtomic: %v", err)
+	}
+	if names := dirNames(t, dir); !slices.Equal(names, []string{landingsName}) {
+		t.Errorf("output directory holds %v, want only %s", names, landingsName)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, landingsName))
+	if err != nil {
+		t.Fatalf("read %s: %v", landingsName, err)
+	}
+	if got, want := string(data), "bead,rig\r\ngt-a,gastown\r\n"; got != want {
+		t.Errorf("%s = %q, want %q", landingsName, got, want)
+	}
+}
+
+// TestExtractLeavesNoArtifactsWhenAnOutputCannotBeRenamedIntoPlace checks a
+// write that cannot reach its file is the extract's error, named by that file,
+// and that the output directory keeps no temporary file from it.
+func TestExtractLeavesNoArtifactsWhenAnOutputCannotBeRenamedIntoPlace(t *testing.T) {
+	t.Parallel()
+	env, _ := extractCase(t)
+	outDir := t.TempDir()
+	env.OutDir, env.Create, env.MkdirAll = outDir, nil, nil
+	// A directory where weekly.csv belongs fails the rename after the bytes are
+	// written, which is the write this test needs to see fail.
+	if err := os.Mkdir(filepath.Join(outDir, weeklyName), 0o755); err != nil {
+		t.Fatalf("make a directory where %s belongs: %v", weeklyName, err)
+	}
+	_, err := Extract(context.Background(), env)
+	if err == nil {
+		t.Fatalf("Extract succeeded, want the blocked %s to be an error", weeklyName)
+	}
+	if !strings.Contains(err.Error(), weeklyName) {
+		t.Errorf("error = %q, want it to name %q", err, weeklyName)
+	}
+	for _, name := range dirNames(t, outDir) {
+		if strings.HasPrefix(name, ".") {
+			t.Errorf("output directory holds temporary file %q after a failed write", name)
+		}
+	}
+}
 
 // failingDiffs is a diff source whose read fails for a reason other than the
 // diff being absent, which the extract reports rather than counting the landing
