@@ -958,3 +958,33 @@ func TestBuildRecentLandingsCarriesThePolecatTime(t *testing.T) {
 		t.Errorf("crew row carries a polecat time: %+v", r)
 	}
 }
+
+// A running landing whose bead is held by a crew member names the submitter,
+// not the route: the By cell read the rig's name for gt-3hcp9 while it was
+// landing (the bug this pins).
+func TestLivePolecatNameNamesTheSubmitterWhenNoPolecatHoldsTheBead(t *testing.T) {
+	t.Parallel()
+	holder := func(rig, bead string) string { return "" }
+	submitter := func(rig, bead string) string { return "overseer" }
+	got := livePolecatName(holder, submitter)("gastown", "gt-3hcp9")
+	if got != "overseer" {
+		t.Errorf("By = %q, want the submitter overseer", got)
+	}
+}
+
+func TestLivePolecatNamePrefersThePolecatHoldingTheBead(t *testing.T) {
+	t.Parallel()
+	holder := func(rig, bead string) string { return "bullet" }
+	submitter := func(rig, bead string) string { return "overseer" }
+	if got := livePolecatName(holder, submitter)("gastown", "gt-dv04y"); got != "bullet" {
+		t.Errorf("By = %q, want the polecat bullet", got)
+	}
+}
+
+func TestLivePolecatNameIsEmptyWhenNoOneNamesTheBead(t *testing.T) {
+	t.Parallel()
+	none := func(rig, bead string) string { return "" }
+	if got := livePolecatName(none, none)("gastown", "gt-x"); got != "" {
+		t.Errorf("By = %q, want empty", got)
+	}
+}
