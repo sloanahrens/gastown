@@ -88,7 +88,8 @@ func backupFile(path, stamp string) (string, error) {
 // ApplyRoles writes the table's roles and default into the settings file at path:
 // role_agents for each role's preset, and default_agent for the default profile's
 // preset. The reviewer is not a role_agents entry, so it is left to the reviewer's
-// own config. The table is validated first, and nothing is written when it does
+// own config, and a table-only role is skipped because role_agents has no key for
+// it (gt-2ih67). The table is validated first, and nothing is written when it does
 // not validate (gt-jaagc).
 //
 // It returns the settings file it wrote, so a caller that writes more can put
@@ -104,6 +105,11 @@ func ApplyRoles(path, stamp string, t *Table) (Written, error) {
 	presets := map[string]string{}
 	for role, name := range t.Roles {
 		if role == OMReview {
+			continue
+		}
+		// A table-only row has no role_agents setting to write, and a retired
+		// one would refuse the file it landed in (gt-2ih67).
+		if _, only := TableOnlyOf(role); only {
 			continue
 		}
 		p, _ := t.ProfileOf(name)
