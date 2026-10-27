@@ -118,9 +118,8 @@ func TestIntegrationSeedRunToleratesAVetOnlyFailure(t *testing.T) {
 	}
 }
 
-// The image carries no darwin build: a package that only builds for darwin must
-// neither fail the image nor be built by the seed (dv-0qre moved the macOS-only
-// check to the host tier, so the seed no longer runs a darwin step).
+// Before adding a darwin step to the seed, read why it has none: the seed
+// comment in deploy/polecat/Dockerfile (dv-0qre).
 func TestIntegrationSeedRunDoesNotBuildForDarwin(t *testing.T) {
 	t.Parallel()
 	out, err, _, _ := runSeed(t, map[string]string{
