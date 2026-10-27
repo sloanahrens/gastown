@@ -21,7 +21,7 @@ func headlineTiles(t *testing.T, s map[string]any) []headlineTile {
 	t.Helper()
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderCost", s)
+	dom.call(t, "renderCost", jsonValue(t, s))
 	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children[0].children[0].children.map(c => ({value: c.children[0].textContent, key: c.children[1].textContent, class: c.children[0].className})))`)
 	if err != nil {
 		t.Fatalf("reading the Cost headline: %v", err)
@@ -63,7 +63,7 @@ func TestCostHeadlineLabelsEveryDeepSeekFigureAndAddsClaude(t *testing.T) {
 	}
 	tiles := headlineTiles(t, map[string]any{
 		"spend":       headlineSpend(t),
-		"cost_charts": jsonValue(t, charts),
+		"cost_charts": charts,
 	})
 	if len(tiles) != 6 {
 		t.Fatalf("the headline drew %d tiles: %+v, want five DeepSeek figures and one Claude", len(tiles), tiles)
@@ -75,6 +75,10 @@ func TestCostHeadlineLabelsEveryDeepSeekFigureAndAddsClaude(t *testing.T) {
 		if !strings.HasPrefix(tile.Key, "DeepSeek ") || !strings.Contains(tile.Key, want[i]) {
 			t.Errorf("DeepSeek tile %d is labelled %q, want it to name DeepSeek and %q", i, tile.Key, want[i])
 		}
+	}
+	// The figures are the report's own, still, under the new key.
+	if deep[0].Value != "$77.49" || deep[3].Value != "$0.30/h" {
+		t.Errorf("the headline shows %q balance and %q last 24h, want the report's $77.49 and $0.30/h", deep[0].Value, deep[3].Value)
 	}
 
 	claude := tiles[len(tiles)-1]
@@ -99,7 +103,7 @@ func TestCostHeadlineSaysWhyTheClaudeSeriesIsMissing(t *testing.T) {
 	}
 	tiles := headlineTiles(t, map[string]any{
 		"spend":       headlineSpend(t),
-		"cost_charts": jsonValue(t, charts),
+		"cost_charts": charts,
 	})
 	claude := tiles[len(tiles)-1]
 	if !strings.Contains(claude.Key, charts.Headline.Why) {
@@ -125,7 +129,7 @@ func TestCostPanelCaptionNamesItsEstimateAndItsBeads(t *testing.T) {
 			map[string]any{"bead": "gt-1"}, map[string]any{"bead": "gt-2"},
 		},
 	}
-	_, note := drawCost(t, map[string]any{"spend": headlineSpend(t), "usage": usage})
+	_, note := drawCost(t, jsonValue(t, map[string]any{"spend": headlineSpend(t), "usage": usage}))
 	for _, want := range []string{"DeepSeek est. $0.42", "2 beads over 20m"} {
 		if !strings.Contains(note.Text, want) {
 			t.Errorf("the caption = %q, want %q among it", note.Text, want)
@@ -137,7 +141,7 @@ func TestCostPanelCaptionNamesItsEstimateAndItsBeads(t *testing.T) {
 
 	// One slow bead is a bead, not a beads.
 	usage["over20"] = []any{map[string]any{"bead": "gt-1"}}
-	_, note = drawCost(t, map[string]any{"spend": headlineSpend(t), "usage": usage})
+	_, note = drawCost(t, jsonValue(t, map[string]any{"spend": headlineSpend(t), "usage": usage}))
 	if !strings.Contains(note.Text, "1 bead over 20m") {
 		t.Errorf("the caption with one slow bead = %q", note.Text)
 	}
