@@ -66,8 +66,11 @@ func (s Signing) PasswordFile() string { return filepath.Join(s.Dir, "keychain.p
 // line at a time, so a word carrying a newline would become a second command
 // rather than part of the first.
 //
-// security -i's parser is undocumented: an ordinary word passes as it is and
-// only a word that needs quoting is wrapped and escaped.
+// security -i's parser is undocumented, so the quoting is what it was observed
+// to accept (gt-4ucnp, checked by hand on macOS against a throwaway keychain: a
+// word holding a space, a quote and a backslash unlocks, and a wrong password
+// fails with status 51): an ordinary word passes as it is and only a word that
+// needs quoting is wrapped and escaped.
 func unlockLine(password, keychain string) (string, bool) {
 	if strings.ContainsAny(password, "\r\n") || strings.ContainsAny(keychain, "\r\n") {
 		return "", false
@@ -75,9 +78,10 @@ func unlockLine(password, keychain string) (string, bool) {
 	return "unlock-keychain -p " + quoteLine(password) + " " + quoteLine(keychain) + "\n", true
 }
 
-// quoteLine quotes one word of the line security -i reads. A word of ordinary
-// characters passes as it is; one holding a space or a quote is wrapped in
-// double quotes with its backslashes and double quotes escaped.
+// quoteLine quotes one word of the line security -i reads. A word that is
+// non-empty and holds none of a space, a tab, a double quote, an apostrophe or
+// a backslash passes as it is; any other word, the empty one included, is
+// wrapped in double quotes with its backslashes and double quotes escaped.
 func quoteLine(word string) string {
 	if word != "" && !strings.ContainsAny(word, " \t\n\"'\\") {
 		return word
