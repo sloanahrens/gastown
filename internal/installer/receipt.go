@@ -2,7 +2,6 @@ package installer
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,7 +26,7 @@ func (c *Contract) Receipt(event, commit, prev, reason string) {
 		start:    c.Start,
 	}
 	if err := appendReceipt(c.Receipts, rec.line()); err != nil {
-		fmt.Fprintf(c.stderr(), "[install-gt] WARNING: could not append a receipt to %s\n", c.Receipts)
+		c.Warn("could not append a receipt to " + c.Receipts)
 	}
 }
 
