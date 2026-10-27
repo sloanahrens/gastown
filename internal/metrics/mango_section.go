@@ -127,7 +127,9 @@ type MangoSectionOptions struct {
 
 // MangoSection renders the digest's "Mango findings" text: the weekly table's
 // profile and, per target, the split's counts, the search's counters and the
-// boxes measured on the holdout.
+// boxes measured on the holdout. It ends with the rejection tables
+// MangoRejectionsSection renders, so the digest carries the refusal rate beside
+// the findings it explains.
 //
 // It reads outDir's landings.csv and landings.sidecar.json, runs mango over
 // outDir's weekly.csv and each run target's split through env.Run, writes the
@@ -210,7 +212,11 @@ func MangoSection(ctx context.Context, env Env, outDir, binary string, o MangoSe
 	if err := writeMangoSummary(filepath.Join(outDir, "mango-summary.json"), summary); err != nil {
 		return "", err
 	}
-	return strings.Join(parts, "\n\n"), nil
+	rejections, err := MangoRejectionsSection(ctx, env)
+	if err != nil {
+		return "", fmt.Errorf("mango section: %w", err)
+	}
+	return strings.Join(parts, "\n\n") + "\n\n" + rejections, nil
 }
 
 // mangoProfile is the weekly table's profile: mango's output in a code block,

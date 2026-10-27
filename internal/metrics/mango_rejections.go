@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,9 +33,11 @@ const RejectionPatternUnclassified = "unclassified"
 const RejectionPatternNoNote = "no note"
 
 // rejectionPattern is one rule of the om checklist as the section measures it.
-// The checklist is the polecat directive's "What om rejects" list, and each
-// pattern is the phrase om's finding for that rule carries, so a rule is
-// counted by the wording that names it.
+// The checklist is the polecat directive's "What om rejects" list; a pattern's
+// phrases are fragments of the finding titles om writes when that rule is what
+// it refuses, never a bullet of the checklist itself, so the rule is counted by
+// the wording a rejection actually carries. A rule the directive rewords is
+// re-read from the findings it files, not translated from the new bullet.
 type rejectionPattern struct {
 	// Name is the row label the section prints.
 	Name string
@@ -48,26 +51,26 @@ type rejectionPattern struct {
 // checklist's, so a note that names two rules counts as the earlier one and a
 // week's pattern rows add up to its rejections.
 //
+// Every phrase is demonstrated by an om finding title in rejectionFixtures,
+// which TestEveryRejectionPhraseIsInAFindingTitle holds, so the table cannot
+// drift into matching the checklist's own prose.
+//
 // The kind word a note's header opens with (conflict, gate, review) is a
 // different axis: ClassifyRejection reads that one, and this table reads why
 // om refused, from the finding's wording.
 var rejectionPatterns = []rejectionPattern{
-	{Name: "fail_open", Phrases: []string{"fail-open", "fail open"}},
-	{Name: "criterion_untested", Phrases: []string{"has no test", "no test for the criterion"}},
-	{Name: "refusal_untested", Phrases: []string{
-		"refusal branch", "failing branch", "branch has no assertion", "branches lack tests",
-	}},
+	{Name: "fail_open", Phrases: []string{"fail-open"}},
+	{Name: "criterion_untested", Phrases: []string{"has no test"}},
+	{Name: "refusal_untested", Phrases: []string{"failing branch", "branch has no assertion"}},
 	{Name: "forged_authority", Phrases: []string{"prefix alone", "can forge", "authority is granted by"}},
-	{Name: "self_review", Phrases: []string{"self-rebut", "rebut its own", "review its own"}},
-	{Name: "unshown_verification", Phrases: []string{"no shown output", "without the run's output", "verification claim"}},
-	{Name: "hermeticity", Phrases: []string{"not hermetic", "hermetic", "$shell", "$home", "live town tree"}},
-	{Name: "script", Phrases: []string{"shell script", "python script", "new script", "new .sh"}},
-	{Name: "out_of_scope", Phrases: []string{
-		"outside the stated scope", "unexplained transitive dependency", "out of scope",
-	}},
-	{Name: "call_site_untested", Phrases: []string{"helper directly", "call site", "logging call deleted"}},
-	{Name: "helper_fail_open", Phrases: []string{"does not apply", "helper error", "fail closed"}},
-	{Name: "secrets_in_errors", Phrases: []string{"captured output", "captured command output", "secret in the error"}},
+	{Name: "self_review", Phrases: []string{"self-rebut", "rebut its own"}},
+	{Name: "unshown_verification", Phrases: []string{"no shown output", "verification claim"}},
+	{Name: "hermeticity", Phrases: []string{"not hermetic", "$shell", "live town tree"}},
+	{Name: "script", Phrases: []string{"shell script", "python script", "new script"}},
+	{Name: "out_of_scope", Phrases: []string{"outside the stated scope", "unexplained transitive dependency"}},
+	{Name: "call_site_untested", Phrases: []string{"helper directly", "call site"}},
+	{Name: "helper_fail_open", Phrases: []string{"does not apply", "fail closed"}},
+	{Name: "secrets_in_errors", Phrases: []string{"captured output", "captured command output"}},
 }
 
 // classifyRejectionPattern names the pattern note matches: the first rule in
@@ -313,8 +316,15 @@ func loadRejectionNotes(ctx context.Context, env Env, dirs []string) (map[string
 		if err != nil {
 			return nil, fmt.Errorf("bd list in %s: %w", dir, err)
 		}
+		// A JSON null decodes into a nil slice without an error, which would
+		// report the store's refusals as note-less rather than say the listing
+		// broke; only an array is a bead list.
+		trimmed := bytes.TrimSpace(out)
+		if len(trimmed) == 0 || trimmed[0] != '[' {
+			return nil, fmt.Errorf("bd list in %s: the output is not a bead list", dir)
+		}
 		var rows []bdListBead
-		if err := json.Unmarshal(out, &rows); err != nil {
+		if err := json.Unmarshal(trimmed, &rows); err != nil {
 			return nil, fmt.Errorf("bd list in %s: the output is not a bead list", dir)
 		}
 		for _, row := range rows {
@@ -368,10 +378,19 @@ func rejectionTable(header []string, groups []RejectionWeekGroup) string {
 	}
 	for _, g := range groups {
 		lines = append(lines, "| "+strings.Join([]string{
-			g.Week, g.Name, strconv.Itoa(g.Rejections), strconv.Itoa(g.Verdicts), rejectionPercent(g.Rate),
+			rejectionCell(g.Week), rejectionCell(g.Name),
+			strconv.Itoa(g.Rejections), strconv.Itoa(g.Verdicts), rejectionPercent(g.Rate),
 		}, " | ")+" |")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// rejectionCell is one table cell with the characters that would end it
+// escaped: a pipe splits a cell and a line break ends the row. A seat name
+// comes from the review log, so it can hold either; the counts and the rate
+// are written here.
+func rejectionCell(cell string) string {
+	return strings.NewReplacer(`\`, `\\`, "|", `\|`, "\r", " ", "\n", " ").Replace(cell)
 }
 
 // rejectionPercent is a rate as the table writes it.

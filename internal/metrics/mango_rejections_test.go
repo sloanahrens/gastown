@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,9 +30,10 @@ func rejectionNote(attempt int, finding string) string {
 		"- id:abc sev:major internal/x/y.go:4 — %s", attempt, finding)
 }
 
-// rejectionFixtures is one om finding per pattern, worded as om words it. The
-// cases go through RejectionRates, so a rule the section stops applying fails
-// here rather than only in the classification helper.
+// rejectionFixtures is one or more om findings per pattern, worded as om words
+// them. The cases go through RejectionRates, so a rule the section stops
+// applying fails here rather than only in the classification helper, and every
+// phrase of the pattern table is demonstrated by one of these titles.
 var rejectionFixtures = []struct {
 	finding string
 	want    string
@@ -43,11 +45,18 @@ var rejectionFixtures = []struct {
 	{"author under review can self-rebut its own findings", "self_review"},
 	{"verification claim has no shown output", "unshown_verification"},
 	{"test depends on the host's $SHELL, so it is not hermetic", "hermeticity"},
+	{"a test reads the live town tree instead of a temp dir", "hermeticity"},
 	{"new parsing and state logic added to a shell script", "script"},
+	{"a new python script parses the config", "script"},
+	{"the parsing moved into a new script instead of Go", "script"},
 	{"change touches files outside the stated scope", "out_of_scope"},
+	{"a go.mod bump with an unexplained transitive dependency", "out_of_scope"},
 	{"a test that calls the helper directly", "call_site_untested"},
+	{"the test calls the helper, so deleting the call site leaves it green", "call_site_untested"},
 	{"an error branch treated as a file that does not apply", "helper_fail_open"},
+	{"a matcher error read as excluded, so the check does not fail closed", "helper_fail_open"},
 	{"an error that echoes captured command output", "secrets_in_errors"},
+	{"the error puts the captured output in its message", "secrets_in_errors"},
 }
 
 // rejectionRecord is one verdict on gt-a at rejectionAt.
@@ -76,6 +85,43 @@ func TestEveryRejectionPatternHasAFixture(t *testing.T) {
 	}
 }
 
+// TestEveryRejectionPhraseIsInAFindingTitle holds the table to om's wording: a
+// phrase the fixtures' finding titles do not carry is a phrase copied from the
+// checklist, which would classify the directive's prose rather than a refusal.
+func TestEveryRejectionPhraseIsInAFindingTitle(t *testing.T) {
+	t.Parallel()
+	findings := make([]string, 0, len(rejectionFixtures))
+	for _, c := range rejectionFixtures {
+		findings = append(findings, strings.ToLower(c.finding))
+	}
+	for _, pattern := range rejectionPatterns {
+		for _, phrase := range pattern.Phrases {
+			if phrase != strings.ToLower(phrase) {
+				t.Errorf("pattern %q phrase %q is not lowercase, so it can never match", pattern.Name, phrase)
+			}
+			shown := false
+			for _, finding := range findings {
+				if strings.Contains(finding, phrase) {
+					shown = true
+					break
+				}
+			}
+			if !shown {
+				t.Errorf("pattern %q phrase %q names no om finding title: quote the wording om files, not the checklist", pattern.Name, phrase)
+			}
+		}
+	}
+}
+
+// sameRejectionGroup reports whether got is want, comparing the rate within a
+// tolerance: a rate is a computed fraction, and only two equal counts give an
+// exactly equal float.
+func sameRejectionGroup(got, want RejectionWeekGroup) bool {
+	return got.Week == want.Week && got.Name == want.Name &&
+		got.Verdicts == want.Verdicts && got.Rejections == want.Rejections &&
+		math.Abs(got.Rate-want.Rate) < 1e-9
+}
+
 func TestRejectionFixtureClassifiesThroughTheRates(t *testing.T) {
 	t.Parallel()
 	for _, c := range rejectionFixtures {
@@ -88,7 +134,7 @@ func TestRejectionFixtureClassifiesThroughTheRates(t *testing.T) {
 				t.Fatalf("RejectionRates: %v", err)
 			}
 			want := RejectionWeekGroup{Week: rejectionWeekOf, Name: c.want, Verdicts: 1, Rejections: 1, Rate: 1}
-			if len(byPattern) != 1 || byPattern[0] != want {
+			if len(byPattern) != 1 || !sameRejectionGroup(byPattern[0], want) {
 				t.Fatalf("byPattern = %+v, want [%+v]", byPattern, want)
 			}
 		})
@@ -138,7 +184,7 @@ func TestRejectionJoinReadsTheBlockForItsAttempt(t *testing.T) {
 		t.Fatalf("byPattern = %+v, want %+v", byPattern, want)
 	}
 	for i := range want {
-		if byPattern[i] != want[i] {
+		if !sameRejectionGroup(byPattern[i], want[i]) {
 			t.Errorf("byPattern[%d] = %+v, want %+v", i, byPattern[i], want[i])
 		}
 	}
@@ -187,14 +233,14 @@ func TestRejectionRatesGroupByWeekAndSeat(t *testing.T) {
 		t.Fatalf("bySeat = %+v, want %+v", bySeat, wantSeat)
 	}
 	for i := range wantSeat {
-		if bySeat[i] != wantSeat[i] {
+		if !sameRejectionGroup(bySeat[i], wantSeat[i]) {
 			t.Errorf("bySeat[%d] = %+v, want %+v", i, bySeat[i], wantSeat[i])
 		}
 	}
 	wantPattern := []RejectionWeekGroup{
 		{Week: rejectionWeekOf, Name: "fail_open", Verdicts: 3, Rejections: 1, Rate: 1.0 / 3},
 	}
-	if len(byPattern) != 1 || byPattern[0] != wantPattern[0] {
+	if len(byPattern) != 1 || !sameRejectionGroup(byPattern[0], wantPattern[0]) {
 		t.Errorf("byPattern = %+v, want %+v", byPattern, wantPattern)
 	}
 }
@@ -363,13 +409,41 @@ func TestMangoRejectionsSectionFailsWhenBdFails(t *testing.T) {
 
 func TestMangoRejectionsSectionFailsOnOutputThatIsNotABeadList(t *testing.T) {
 	t.Parallel()
-	town := rejectionTown(t, rejectionRecord("gt-a", 1, "opus"))
-	_, err := MangoRejectionsSection(context.Background(), Env{
-		Town: town, ReadFile: os.ReadFile,
-		Run: func(context.Context, []string) ([]byte, error) { return []byte("not json"), nil },
+	for _, out := range []string{"not json", "null", "  "} {
+		out := out
+		t.Run(fmt.Sprintf("%q", out), func(t *testing.T) {
+			t.Parallel()
+			town := rejectionTown(t, rejectionRecord("gt-a", 1, "opus"))
+			_, err := MangoRejectionsSection(context.Background(), Env{
+				Town: town, ReadFile: os.ReadFile,
+				Run: func(context.Context, []string) ([]byte, error) { return []byte(out), nil },
+			})
+			if err == nil || !strings.Contains(err.Error(), "not a bead list") {
+				t.Fatalf("err = %v, want a refusal naming the unreadable listing", err)
+			}
+		})
+	}
+}
+
+// TestMangoRejectionsSectionEscapesSeatNames drives a seat name holding a cell
+// separator and a line break, which a review log can carry: an unescaped pipe
+// would split the row and a line break would end it.
+func TestMangoRejectionsSectionEscapesSeatNames(t *testing.T) {
+	t.Parallel()
+	seat := "opus|sonnet\nand-more"
+	town := rejectionTown(t, land.ReviewRecord{
+		BeadID: "gt-b", Verdict: land.VerdictApprove, Agent: seat, At: rejectionAt,
 	})
-	if err == nil || !strings.Contains(err.Error(), "not a bead list") {
-		t.Fatalf("err = %v, want a refusal naming the unreadable listing", err)
+	text, err := MangoRejectionsSection(context.Background(), Env{
+		Town: town, ReadFile: os.ReadFile,
+		Run: func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil },
+	})
+	if err != nil {
+		t.Fatalf("MangoRejectionsSection: %v", err)
+	}
+	want := "| " + rejectionWeekOf + ` | opus\|sonnet and-more | 0 | 1 | 0.0% |`
+	if !strings.Contains(text, want) {
+		t.Errorf("text = %q, want the seat's row to hold %q", text, want)
 	}
 }
 
@@ -406,5 +480,68 @@ func TestMangoRejectionsSectionNeedsItsSeams(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, c.want)
 			}
 		})
+	}
+}
+
+// rejectionDigestRunner answers bd from the rejection notes and every other
+// command from the fake mango, so one section can drive both readers.
+func rejectionDigestRunner(t *testing.T, bd, mango Runner) Runner {
+	t.Helper()
+	return func(ctx context.Context, argv []string) ([]byte, error) {
+		if len(argv) > 0 && argv[0] == "bd" {
+			return bd(ctx, argv)
+		}
+		return mango(ctx, argv)
+	}
+}
+
+// TestMangoSectionCarriesTheRejectionTables is the digest's side of the join:
+// the findings section MangoSection renders ends with the refusal rate, so a
+// rate is readable without a second command.
+func TestMangoSectionCarriesTheRejectionTables(t *testing.T) {
+	t.Parallel()
+	dir := mangoSectionTown(t, mangoSectionRows())
+	mango, _ := mangoSectionRun(t, mangoSectionResult)
+	town := rejectionTown(t, rejectionRecord("gt-a", 1, "opus"),
+		land.ReviewRecord{BeadID: "gt-b", Rig: "gastown", Verdict: land.VerdictApprove, Agent: "sonnet", At: rejectionAt})
+	var asked []string
+	run := rejectionDigestRunner(t,
+		rejectionBd(t, map[string]string{"gt-a": rejectionNote(1, "failing branch has no assertion")}, &asked), mango)
+	text, err := MangoSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, Run: run},
+		dir, "/opt/mango", MangoSectionOptions{MinPositives: 1})
+	if err != nil {
+		t.Fatalf("MangoSection: %v", err)
+	}
+	for _, want := range []string{
+		"### Rejections by pattern",
+		"### Rejections by agent seat",
+		"| " + rejectionWeekOf + " | refusal_untested | 1 | 2 | 50.0% |",
+		"| " + rejectionWeekOf + " | opus | 1 | 1 | 100.0% |",
+		"| " + rejectionWeekOf + " | sonnet | 0 | 1 | 0.0% |",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text = %q, want it to hold %q", text, want)
+		}
+	}
+}
+
+// TestMangoSectionFailsWhenTheRejectionLogFails holds the digest side to the
+// same rule as the section: an unreadable review log is an error, never a
+// findings block with the tables quietly missing.
+func TestMangoSectionFailsWhenTheRejectionLogFails(t *testing.T) {
+	t.Parallel()
+	dir := mangoSectionTown(t, mangoSectionRows())
+	mango, _ := mangoSectionRun(t, mangoSectionResult)
+	reviewLog := land.TownReviewsFile("/town").Path
+	readFile := func(path string) ([]byte, error) {
+		if path == reviewLog {
+			return nil, errors.New("permission denied")
+		}
+		return os.ReadFile(path)
+	}
+	_, err := MangoSection(context.Background(), Env{Town: "/town", ReadFile: readFile, Run: mango},
+		dir, "/opt/mango", MangoSectionOptions{MinPositives: 1})
+	if err == nil || !strings.Contains(err.Error(), "reviews.jsonl") {
+		t.Fatalf("err = %v, want a refusal naming the review log", err)
 	}
 }

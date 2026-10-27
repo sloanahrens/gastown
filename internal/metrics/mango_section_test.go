@@ -142,10 +142,11 @@ func mangoFlagValue(argv []string, flag string) string {
 }
 
 // mangoSection runs the section over dir with a fake mango and returns its
-// text.
+// text. The town is a fresh temp dir, so the rejection tables it appends find
+// no review log; the cases that read refusals pass their own town.
 func mangoSection(t *testing.T, dir string, run Runner, minPositives int) string {
 	t.Helper()
-	text, err := MangoSection(context.Background(), Env{ReadFile: os.ReadFile, Run: run}, dir,
+	text, err := MangoSection(context.Background(), Env{Town: t.TempDir(), ReadFile: os.ReadFile, Run: run}, dir,
 		"/opt/mango", MangoSectionOptions{MinPositives: minPositives})
 	if err != nil {
 		t.Fatalf("MangoSection: %v", err)
