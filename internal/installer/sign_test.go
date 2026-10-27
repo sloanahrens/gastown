@@ -25,7 +25,12 @@ func signsCopy(dir, name string, args []string) ([]byte, []byte, int) {
 	if name == "security" {
 		return nil, nil, 0
 	}
-	if err := os.WriteFile(args[len(args)-1], []byte(signedBinary), 0o755); err != nil {
+	path := args[len(args)-1]
+	info, err := os.Stat(path)
+	if err != nil {
+		return []byte(err.Error()), nil, 1
+	}
+	if err := os.WriteFile(path, []byte(signedBinary), info.Mode().Perm()); err != nil {
 		return []byte(err.Error()), nil, 1
 	}
 	return nil, nil, 0
