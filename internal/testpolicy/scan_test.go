@@ -26,8 +26,10 @@ func TestScanDirFixtures(t *testing.T) {
 		"global_swap":           {RuleNoGlobalSwap},
 		"host_env_reads":        {RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv}, // Getenv HOME, LookupEnv SHELL, UserHomeDir, UserConfigDir, UserCacheDir, and HOME through a constant
 		"host_env_declared":     nil,
-		"host_env_other":        nil,                            // PATH, and PATH through a constant, are not the developer's environment
-		"host_env_unjudged":     {RuleNoHostEnv, RuleNoHostEnv}, // a call and a variable name the scan cannot read
+		"host_env_other":        nil,                                                                         // PATH, and PATH through a constant, are not the developer's environment
+		"host_env_unjudged":     {RuleNoHostEnv, RuleNoHostEnv},                                              // a call and a variable name the scan cannot read
+		"host_env_value":        {RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv, RuleNoHostEnv}, // Getenv, LookupEnv, UserHomeDir, UserConfigDir, UserCacheDir passed to a seam
+		"host_env_seam":         nil,                                                                         // a fake getenv seam is the test's own answer
 		"global_shadow":         nil,
 		"global_blank":          nil,
 		"parallel_missing":      {RuleParallel},

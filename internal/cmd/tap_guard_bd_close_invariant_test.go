@@ -343,6 +343,7 @@ func TestRunTapGuardBdCloseInvariant_UnrelatedCommandAllowed(t *testing.T) {
 func TestRealGuardProcessIsTheProcess(t *testing.T) {
 	t.Parallel()
 	p := realGuardProcess()
+	//testpolicy:allow no-host-env — the guard's own seam is the value under test: it must be os.Getenv itself
 	if reflect.ValueOf(p.getenv).Pointer() != reflect.ValueOf(os.Getenv).Pointer() {
 		t.Error("realGuardProcess does not read the environment through os.Getenv")
 	}

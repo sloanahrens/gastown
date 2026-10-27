@@ -310,6 +310,7 @@ func TestAPIError(t *testing.T) {
 func TestNewClient_ReadsProcessEnv(t *testing.T) {
 	t.Parallel()
 	got, gotErr := NewClient()
+	//testpolicy:allow no-host-env — the process environment is the input under test: the constructor must read BITBUCKET_TOKEN with os.Getenv itself
 	want, wantErr := newClient(os.Getenv)
 	if (gotErr == nil) != (wantErr == nil) {
 		t.Fatalf("NewClient() err = %v, newClient(os.Getenv) err = %v", gotErr, wantErr)

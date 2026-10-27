@@ -469,6 +469,53 @@ func TestRunTiming_Verdicts(t *testing.T) {
 	}
 }
 
+// TestRunTiming_RefusesNewlinePackage pins the refusal where the run makes it:
+// a package word holding a newline cannot be typed into the pane, so the run
+// stops with the measurement's failure code rather than typing a truncated
+// line and then waiting out the whole bound for a pane that never reports.
+func TestRunTiming_RefusesNewlinePackage(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	var stdout, stderr strings.Builder
+	got := runWith(context.Background(), f.host(), []string{"a\nb"}, &stdout, &stderr)
+	if got != 2 {
+		t.Errorf("exit code = %d, want 2 (stderr %q)", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "the pane cannot type a word holding a newline") {
+		t.Errorf("stderr = %q, want the pane's refusal", stderr.String())
+	}
+	for _, c := range f.commands {
+		if containsArg(c.args, "send-keys") {
+			t.Errorf("commands = %q, want nothing typed into the pane after the refusal", f.names())
+		}
+	}
+	if waits := countSleeps(f.sleeps, resultInterval); waits != 0 {
+		t.Errorf("result polls = %d, want none: the run refused before the pane had anything to report", waits)
+	}
+}
+
+// TestRunTiming_WaitBound pins the wall a silent pane is given: a poll every
+// interval but the last, and a refusal that states the same 30 minutes. Move
+// the constant or the message and this fails, so the two cannot disagree.
+func TestRunTiming_WaitBound(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	write(t, f.work, probeFile, "80")
+	var stdout, stderr strings.Builder
+	if got := runWith(context.Background(), f.host(), nil, &stdout, &stderr); got != 2 {
+		t.Fatalf("exit code = %d, want 2 (stderr %q)", got, stderr.String())
+	}
+	if waits := countSleeps(f.sleeps, resultInterval); waits != resultChecks-1 {
+		t.Errorf("result polls = %d, want %d: one per interval but the last", waits, resultChecks-1)
+	}
+	if want := 30 * time.Minute; resultChecks*resultInterval != want {
+		t.Errorf("resultChecks*resultInterval = %v, want the %v the message states", resultChecks*resultInterval, want)
+	}
+	if !strings.Contains(stderr.String(), "no result after 30 min") {
+		t.Errorf("stderr = %q, want the refusal to state its 30 min bound", stderr.String())
+	}
+}
+
 func TestRunTiming_NotDarwin(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)

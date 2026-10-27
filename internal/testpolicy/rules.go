@@ -69,6 +69,7 @@ func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool, co
 		case *ast.CallExpr:
 			markReadOnlyLits(n, imp, readOnly)
 			checkTestCall(n, imp, consts, add)
+			checkEnvValueArgs(n, imp, add)
 		case *ast.CompositeLit:
 			// A net.Dialer or net.ListenConfig is only built to dial or listen,
 			// whether as a literal, a zero-value var, or new(...).
@@ -228,6 +229,40 @@ func checkTestCall(c *ast.CallExpr, imp map[string]string, consts map[string]str
 		// config and the live town tree (~/gt) live. A test injects the value
 		// or declares the read.
 		add(c, RuleNoHostEnv, full+" resolves the developer's home directory; inject the value or declare the read")
+	}
+}
+
+// checkEnvValueArgs reports an os host-environment reader handed to a call as
+// a value. A seam given os.Getenv reads the developer's environment exactly as
+// a call to it does, so the value is judged the same way the call is.
+func checkEnvValueArgs(c *ast.CallExpr, imp map[string]string, add func(ast.Node, string, string)) {
+	for _, arg := range c.Args {
+		sel, ok := unparen(arg).(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		x, ok := sel.X.(*ast.Ident)
+		if !ok || x.Obj != nil || imp[x.Name] != "os" {
+			continue
+		}
+		full := "os." + sel.Sel.Name
+		switch sel.Sel.Name {
+		case "Getenv", "LookupEnv":
+			add(arg, RuleNoHostEnv, full+" is passed as a value, so a seam handed it reads the developer's environment; inject the value or declare the read")
+		case "UserHomeDir", "UserConfigDir", "UserCacheDir":
+			add(arg, RuleNoHostEnv, full+" is passed as a value, so a seam handed it resolves the developer's home directory; inject the value or declare the read")
+		}
+	}
+}
+
+// unparen strips the parentheses around e, which carry no meaning here.
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
 	}
 }
 
