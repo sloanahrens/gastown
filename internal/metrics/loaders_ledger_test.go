@@ -184,6 +184,16 @@ func TestLoadReviewsTable(t *testing.T) {
 			lines:   []string{`{"bead": "gt-3", "attempt": 1, "score": 0.5, "verdict": "approve"}`},
 			dropped: []string{"missing field"},
 		},
+		{
+			// The feed's own bookkeeping line carries no verdict and is not a
+			// row the reader lost (gt-3arxj).
+			name: "a follow-up queue line is skipped uncounted",
+			lines: []string{
+				`{"bead": "gt-4", "attempt": 1, "score": 0.7, "verdict": "approve", "at": "2026-10-07T00:00:00Z"}`,
+				`{"bead": "gt-4", "rig": "gastown", "at": "2026-10-07T00:00:01Z", "followup_queue": {"findings": [{"file": "a.go", "title": "name it"}]}}`,
+			},
+			want: []Review{{Bead: "gt-4", Attempt: 1, Score: 0.7, Verdict: "approve", At: "2026-10-07T00:00:00Z"}},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

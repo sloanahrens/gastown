@@ -74,7 +74,8 @@ type FollowupBeads interface {
 }
 
 // fileFollowups files the follow-up beads this landing earns, or comments on
-// the bead an earlier landing already filed for one of its findings (gt-s01pn).
+// the bead an earlier landing already filed for one of its findings, and files
+// what an earlier landing's backpressure bound held back (gt-s01pn, gt-3arxj).
 //
 // It runs once the landing is recorded and every failure is logged and dropped:
 // the record is written, and nothing here may change the result or hold the
@@ -97,12 +98,14 @@ func (l *Lander) fileFollowups(dir string, w Work, res Result) {
 	if err != nil {
 		l.logf("%s: could not read the .om.json threshold the follow-up feed floors on (%v); reading it as 0", w.BeadID, err)
 	}
-	if res.Verdict.Score < threshold {
-		return
+	var findings []FollowupCandidate
+	if res.Verdict.Score >= threshold {
+		findings = followupCandidates(followupFindings(res.Verdict.Findings))
 	}
-	findings := followupCandidates(followupFindings(res.Verdict.Findings))
-	if len(findings) == 0 {
-		return // nothing but info: worth knowing, not worth a bead
+	// The feed runs for a landing with nothing of its own to file too, because
+	// that landing is the room a held landing was waiting for (gt-3arxj).
+	if len(findings) == 0 && l.Reviews == nil {
+		return
 	}
 	// The feed runs on its own goroutine so its timeout can abandon it, and it
 	// hands its log lines back rather than writing them, so a feed that
@@ -125,33 +128,50 @@ func (l *Lander) fileFollowups(dir string, w Work, res Result) {
 // lines it wants logged and never returns an error — every failure is a line
 // the caller logs and the landing does not see.
 func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) []string {
+	// The queue is read first, so a landing with nothing of its own to file and
+	// no queue behind it costs one read of the review log and nothing else
+	// (gt-3arxj).
+	var lines []string
+	queued, err := l.queuedForRig(w.Rig)
+	if err != nil {
+		lines = append(lines, fmt.Sprintf("could not read the %s queue the reviews log keeps (%v); filing nothing from it for this landing", FollowUpLabel, err))
+	}
+	if len(findings) == 0 && len(queued) == 0 {
+		return lines
+	}
 	issue, err := l.Beads.Show(w.BeadID)
 	if err != nil {
 		// Only a read work bead can rule out that this landing is itself a
 		// follow-up, and a follow-up of a follow-up is how the feed would never
 		// drain: every fix generates its own new minors.
-		return []string{fmt.Sprintf("could not read the work bead to see whether it is a %s bead itself (%v); filing nothing for this landing", FollowUpLabel, err)}
+		return append(lines, fmt.Sprintf("could not read the work bead to see whether it is a %s bead itself (%v); filing nothing for this landing", FollowUpLabel, err))
 	}
 	if beads.HasLabel(issue, FollowUpLabel) {
-		return []string{fmt.Sprintf("the bead is a %s follow-up itself, and a follow-up of a follow-up never drains the feed; filing nothing", FollowUpLabel)}
+		return append(lines, fmt.Sprintf("the bead is a %s follow-up itself, and a follow-up of a follow-up never drains the feed; filing nothing", FollowUpLabel))
 	}
 	existing, err := l.Followups.ListFollowups(FollowUpLabel)
 	if err != nil {
 		// Filing with no view of what exists would file a paraphrase of an
 		// existing bead for every finding of every landing, so a failed read
 		// files nothing.
-		return []string{fmt.Sprintf("could not list the %s beads (%v); filing nothing for this landing", FollowUpLabel, err)}
+		return append(lines, fmt.Sprintf("could not list the %s beads (%v); filing nothing for this landing", FollowUpLabel, err))
+	}
+	// What an earlier landing's bound held back is older work than this
+	// landing's findings, so it goes out first, while the bound leaves it room
+	// (gt-3arxj).
+	var consumed int
+	lines, existing, consumed = l.drainQueue(queued, existing, lines)
+	if consumed > 0 {
+		lines = append(lines, l.compactQueue(w.Rig, existing)...)
 	}
 	// The beads an earlier attempt at this landing filed. They are this
 	// landing's own work, so a retry says nothing to them — the "seen again"
 	// comment is for a finding another landing raised (gt-4ty22).
 	own := followupIDsForCommit(existing, res.LandedCommit)
-	open := openFollowups(existing)
 	// The backpressure bound is not checked here. A finding that repeats an
 	// existing bead earns its "seen again" comment however many beads are open,
 	// so only the fresh findings meet the bound, in fileFollowupBeads, which
 	// holds back what it cannot file (gt-qaelo).
-	var lines []string
 	var fresh []FollowupCandidate
 	for _, c := range findings {
 		switch d := Decide(c, existing, 0); d.Action {
@@ -171,47 +191,189 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) 
 	if len(fresh) == 0 {
 		return lines
 	}
-	return append(lines, l.fileFollowupBeads(w, res, fresh, open)...)
+	_, held, filed := l.fileFollowupBeads(w, res, fresh, existing)
+	lines = append(lines, filed...)
+	return append(lines, l.queueHeld(w, res, held)...)
+}
+
+// queuedForRig is the queue lines this rig's landings left, oldest first.
+func (l *Lander) queuedForRig(rig string) ([]QueuedFollowup, error) {
+	if l.Reviews == nil {
+		return nil, nil
+	}
+	queued, err := l.Reviews.Queued()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]QueuedFollowup, 0, len(queued))
+	for _, q := range queued {
+		if q.Rig == rig {
+			out = append(out, q)
+		}
+	}
+	return out, nil
+}
+
+// drainQueue files the findings earlier landings' backpressure bound held back,
+// oldest line first, while the bound leaves room. A line whose findings a bead
+// already carries — filed by an earlier drain or by the landing that raised
+// them, and whether that bead is open or closed — is left alone: the queue line
+// is the feed's own bookkeeping, so there is nothing to comment and nothing to
+// file again (gt-3arxj). A line the bound holds back again stays where it is
+// rather than being queued twice. It returns the lines it wants logged, the
+// beads the drain filed so the caller de-duplicates against them too, and how
+// many queue lines are now consumed: every finding on them is covered, so the
+// compaction may drop them (gt-3arxj).
+func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup, lines []string) ([]string, []ExistingFollowup, int) {
+	bound := l.followupBackpressure()
+	consumed := 0
+	for _, q := range queued {
+		if openFollowups(existing) >= bound {
+			// A landing with no room files nothing from the queue, and the queue
+			// waits for the count to fall.
+			return lines, existing, consumed
+		}
+		fresh := queuedCandidates(q, existing)
+		if len(fresh) == 0 {
+			consumed++
+			continue
+		}
+		w := Work{BeadID: q.Bead, Rig: q.Rig}
+		res := Result{LandedCommit: q.Landed, Verdict: Verdict{Verdict: VerdictApprove, Score: q.Score}}
+		filed, held, more := l.fileFollowupBeads(w, res, fresh, existing)
+		lines = append(lines, more...)
+		existing = append(existing, filed...)
+		if len(held) > 0 {
+			lines = append(lines, fmt.Sprintf("the bound held %s of the queue on %s back again; the queue line stays for a landing with room", findingsPhrase(len(held)), q.Bead))
+		}
+		// A line is consumed only once every finding on it is covered: a bead
+		// that could not be filed leaves its line waiting, whatever the feed
+		// logged about it (gt-3arxj).
+		if len(queuedCandidates(q, existing)) == 0 {
+			consumed++
+		}
+	}
+	return lines, existing, consumed
+}
+
+// compactQueue drops the queue lines the feed is done with from the review log,
+// so a town's log does not carry every queue line it ever wrote and every
+// landing does not rescan them (gt-3arxj). A line still waiting, and every
+// verdict, is left exactly as it was. A log that cannot be compacted is a feed
+// line and nothing more: the findings it names are already covered, so the
+// queue still drains, just slower.
+//
+// The log is the town's and existing is this rig's beads, so only this rig's
+// lines can be judged covered: another rig's line whose findings read like one
+// of this rig's beads is still waiting to be filed in its own rig, and
+// dropping it would lose the finding (gt-3arxj).
+func (l *Lander) compactQueue(rig string, existing []ExistingFollowup) []string {
+	if l.Reviews == nil {
+		return nil
+	}
+	dropped, err := l.Reviews.Compact(func(q QueuedFollowup) bool {
+		return q.Rig == rig && len(queuedCandidates(q, existing)) == 0
+	})
+	if err != nil {
+		return []string{fmt.Sprintf("could not compact the %s of its consumed queue lines (%v)", ReviewsFileName, err)}
+	}
+	if dropped == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("dropped %d consumed queue line(s) from the %s", dropped, ReviewsFileName)}
 }
 
 // fileFollowupBeads files the beads the fresh findings of one landing earn —
 // one for the landing, or one per package — and leaves one comment on the work
-// bead naming them. open is the om-followup count the de-duplication read
-// found, so the backpressure bound is applied to every bead the landing files
-// rather than once to the landing: a landing that splits into three beads
-// stops at the bound instead of carrying the queue past it (gt-4ty22). It
-// returns the lines it wants logged.
-func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate, open int) []string {
+// bead naming them. existing is the de-duplication read, so the backpressure
+// bound is applied to every bead the landing files rather than once to the
+// landing: a landing that splits into three beads stops at the bound instead of
+// carrying the queue past it (gt-4ty22). It returns the beads it filed, the
+// findings the bound held back, and the lines it wants logged.
+func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate, existing []ExistingFollowup) (filed []ExistingFollowup, held []FollowupCandidate, lines []string) {
 	groups := followupGroups(fresh)
 	bound := l.followupBackpressure()
-	var lines []string
+	open := openFollowups(existing)
 	var ids []string
 	for i, g := range groups {
 		if open+len(ids) >= bound {
-			held := 0
 			for _, rest := range groups[i:] {
-				held += len(rest.Findings)
+				held = append(held, rest.Findings...)
 			}
-			lines = append(lines, l.holdBack(open+len(ids), bound, held))
+			lines = append(lines, l.holdBack(open+len(ids), bound, len(held)))
 			break
 		}
-		id, err := l.Followups.CreateFollowup(followupSpec(w, res, g))
+		spec := followupSpec(w, res, g)
+		id, err := l.Followups.CreateFollowup(spec)
 		if err != nil {
 			lines = append(lines, fmt.Sprintf("could not file the follow-up bead for %s (%v)", findingsPhrase(len(g.Findings)), err))
 			continue
 		}
 		ids = append(ids, id)
+		filed = append(filed, ExistingFollowup{ID: id, Title: spec.Title, Description: spec.Body, Status: "open", Labels: spec.Labels})
 		lines = append(lines, fmt.Sprintf("filed %s for %s of the landing at %.2f", id, findingsPhrase(len(g.Findings)), res.Verdict.Score))
 	}
 	if len(ids) == 0 {
-		return lines
+		return filed, held, lines
 	}
 	// The work bead is where a reader of the landing finds what its minors
 	// became, so the filed beads are named there and nowhere else (gt-4ty22).
 	if err := l.Beads.AddComment(w.BeadID, followupFiledComment(ids, res)); err != nil {
 		lines = append(lines, fmt.Sprintf("could not comment the filed follow-up onto %s (%v)", w.BeadID, err))
 	}
-	return lines
+	return filed, held, lines
+}
+
+// queueHeld records the findings the bound held back in the reviews log, so the
+// landing's own record keeps them whole and a later landing with room files
+// them (gt-3arxj). A log that cannot be written is named in the feed's lines:
+// the findings are as lost as they were before, and the landing is unaffected.
+func (l *Lander) queueHeld(w Work, res Result, held []FollowupCandidate) []string {
+	if len(held) == 0 {
+		return nil
+	}
+	if l.Reviews == nil {
+		return []string{fmt.Sprintf("no reviews log to queue the %s the bound held back", findingsPhrase(len(held)))}
+	}
+	q := QueuedFollowup{Bead: w.BeadID, Rig: w.Rig, At: l.now().UTC(),
+		Landed: res.LandedCommit, Score: res.Verdict.Score, Findings: heldFindingTexts(held)}
+	if err := l.Reviews.AppendQueue(q); err != nil {
+		return []string{fmt.Sprintf("could not queue the %s the bound held back (%v)", findingsPhrase(len(held)), err)}
+	}
+	return []string{fmt.Sprintf("queued the %s the bound held back in the %s, to file when the open count falls", findingsPhrase(len(held)), ReviewsFileName)}
+}
+
+// queuedCandidates is a queue line's findings as the feed files them: the
+// minors om raised that no bead already carries (gt-3arxj).
+func queuedCandidates(q QueuedFollowup, existing []ExistingFollowup) []FollowupCandidate {
+	var fresh []FollowupCandidate
+	for _, c := range followupCandidates(followupFindings(queuedFindings(q.Findings))) {
+		if Decide(c, existing, 0).Action == DedupeComment {
+			continue
+		}
+		fresh = append(fresh, c)
+	}
+	return fresh
+}
+
+// heldFindingTexts is the findings the bound held back, as the queue line keeps
+// them.
+func heldFindingTexts(held []FollowupCandidate) []ReviewFindingText {
+	out := make([]ReviewFindingText, 0, len(held))
+	for _, c := range held {
+		out = append(out, ReviewFindingText{ID: c.ID, Severity: c.Severity, File: c.Path, Line: c.Line, Title: c.Title, Claim: boundedClaim(c.Claim)})
+	}
+	return out
+}
+
+// queuedFindings reads a queue line's findings back as om's own shape, so a
+// held finding is filed by the same code that files a fresh one (gt-3arxj).
+func queuedFindings(texts []ReviewFindingText) []Finding {
+	out := make([]Finding, 0, len(texts))
+	for _, t := range texts {
+		out = append(out, Finding{ID: t.ID, Severity: t.Severity, Path: t.File, Line: t.Line, Title: t.Title, Detail: t.Claim})
+	}
+	return out
 }
 
 // holdBack is what the feed says and does when the backpressure bound keeps
@@ -311,8 +473,8 @@ func followupCandidates(findings []Finding) []FollowupCandidate {
 	out := make([]FollowupCandidate, 0, len(findings))
 	for _, f := range findings {
 		out = append(out, FollowupCandidate{
-			Path: f.Path, Title: f.Title, Severity: f.Severity, Line: f.Line,
-			Detail: findingLine(f),
+			ID: f.ID, Path: f.Path, Title: f.Title, Severity: f.Severity, Line: f.Line,
+			Detail: findingLine(f), Claim: f.Detail,
 		})
 	}
 	return out

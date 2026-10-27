@@ -967,7 +967,9 @@ func (l *Lander) rescoreBorderline(ctx context.Context, v Verdict, in ReviewInpu
 // (gt-k10bq). rejected is whether the landing refuses the work on this verdict,
 // which an approval can earn from its findings alone (gt-vu18r). The record
 // carries the author's branch and seat kind, and the prompt its bead's stamp
-// names, so a per-kind view needs no other file (gt-b9j3o.16). A failed
+// names, so a per-kind view needs no other file (gt-b9j3o.16), and each finding
+// whole, so a follow-up bead filed later is written from the record rather than
+// from a verdict nobody kept (gt-3arxj). A failed
 // append never holds a landing, but the line it loses is a hole in the rework
 // table, so it is also written on the work bead, where the table's reader can
 // find it.
@@ -990,7 +992,8 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, comments []beads.Comment,
 	}
 	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: attempt,
 		Score: v.Score, Verdict: v.Verdict, Rejected: rejected, Agent: w.Agent, Findings: len(v.Findings), Bar: bar, At: l.now().UTC(),
-		Branch: w.Branch, AuthorKind: authorkind.Kind(w.Branch), PromptSHA: promptStampSHA(comments, w)}
+		Branch: w.Branch, AuthorKind: authorkind.Kind(w.Branch), PromptSHA: promptStampSHA(comments, w),
+		FindingText: reviewFindingTexts(v.Findings)}
 	if err := l.Reviews.Append(rec); err != nil {
 		l.logf("%s: could not append to the reviews log (%v); the landing is unaffected", w.BeadID, err)
 		l.commentReviewLogFailure(w, rec, err)

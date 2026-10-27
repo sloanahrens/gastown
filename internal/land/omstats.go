@@ -351,7 +351,10 @@ func parseOmStatsReviewRecord(raw []byte) (omStatsReviewRecord, bool) {
 		Score    *float64 `json:"score"`
 		Findings *int     `json:"findings"`
 	}
-	if err := json.Unmarshal(raw, &line); err != nil || line.At.IsZero() {
+	// A queue line carries an instant and no verdict: it is the follow-up feed's
+	// bookkeeping, and counting it as a review would put an approval the report
+	// never saw into its counts (gt-3arxj).
+	if err := json.Unmarshal(raw, &line); err != nil || line.At.IsZero() || line.Queue != nil {
 		return omStatsReviewRecord{}, false
 	}
 	out := omStatsReviewRecord{
@@ -368,8 +371,18 @@ func parseOmStatsReviewRecord(raw []byte) (omStatsReviewRecord, bool) {
 	return out, true
 }
 
+// isFollowupQueueLine reports whether raw is a follow-up queue line.
+func isFollowupQueueLine(raw []byte) bool {
+	var line struct {
+		Queue json.RawMessage `json:"followup_queue"`
+	}
+	return json.Unmarshal(raw, &line) == nil && len(line.Queue) > 0
+}
+
 // readOmStatsRecords reads the review-record lines of r. A line that does not
-// decode as a ReviewRecord, or carries no instant, is skipped and counted.
+// decode as a ReviewRecord, or carries no instant, is skipped and counted; a
+// follow-up queue line is skipped uncounted, since it is the feed's bookkeeping
+// rather than a line the report could not use (gt-3arxj).
 func readOmStatsRecords(r io.Reader) ([]omStatsReviewRecord, int, error) {
 	var recs []omStatsReviewRecord
 	skipped := 0
@@ -380,7 +393,9 @@ func readOmStatsRecords(r io.Reader) ([]omStatsReviewRecord, int, error) {
 		}
 		rec, ok := parseOmStatsReviewRecord(raw)
 		if !ok {
-			skipped++
+			if !isFollowupQueueLine(raw) {
+				skipped++
+			}
 			return
 		}
 		recs = append(recs, rec)

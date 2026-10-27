@@ -322,8 +322,9 @@ func mangoRejectionsSection(ctx context.Context, env Env, records []land.ReviewR
 
 // parseReviewRecords reads the log's lines into records. A line that is not a
 // record, names no bead or no verdict is skipped and counted, so the section
-// can say how many lines it could not attribute; a record with no instant is
-// kept, so a log that lost one fails the section rather than a week.
+// can say how many lines it could not attribute; a follow-up queue line names
+// no verdict on purpose and is skipped uncounted (gt-3arxj); a record with no
+// instant is kept, so a log that lost one fails the section rather than a week.
 func parseReviewRecords(data []byte) ([]land.ReviewRecord, int) {
 	var records []land.ReviewRecord
 	skipped := 0
@@ -333,7 +334,16 @@ func parseReviewRecords(data []byte) ([]land.ReviewRecord, int) {
 			continue
 		}
 		var rec land.ReviewRecord
-		if json.Unmarshal([]byte(line), &rec) != nil || rec.BeadID == "" || rec.Verdict == "" {
+		if json.Unmarshal([]byte(line), &rec) != nil || rec.BeadID == "" {
+			skipped++
+			continue
+		}
+		// A follow-up queue line is the feed's bookkeeping rather than a
+		// verdict, and it is one this reader knows to skip (gt-3arxj).
+		if rec.Queue != nil {
+			continue
+		}
+		if rec.Verdict == "" {
 			skipped++
 			continue
 		}
