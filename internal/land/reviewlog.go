@@ -25,8 +25,11 @@ const ReviewsFileName = "reviews.jsonl"
 type ReviewRecord struct {
 	BeadID string `json:"bead"`
 	Rig    string `json:"rig"`
-	// Attempt is the rework attempt the verdict belongs to: the rejections the
-	// bead already carries, plus one.
+	// Attempt is the rework attempt the verdict belongs to: the review
+	// rejections the bead already carries, plus one. A verdict the landing
+	// refuses stops at MaxReworkAttempts with the block it writes, so a reader
+	// matching a refusal to its MERGE REJECTION block by number finds it
+	// (gt-k10bq).
 	Attempt int     `json:"attempt"`
 	Score   float64 `json:"score"`
 	Verdict string  `json:"verdict"`

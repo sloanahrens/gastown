@@ -957,11 +957,14 @@ func (l *Lander) rescoreBorderline(ctx context.Context, v Verdict, in ReviewInpu
 
 // logReview appends the verdict to the reviews log when it is an om decision,
 // approve or request_changes. The attempt is the one a rejection would be
-// recorded as, so a bead's lines count up with its MERGE REJECTION blocks.
-// rejected is whether the landing refuses the work on this verdict, which an
-// approval can earn from its findings alone (gt-vu18r). A failed append never
-// holds a landing, but the line it loses is a hole in the rework table, so it
-// is also written on the work bead, where the table's reader can find it.
+// recorded as, so a bead's lines count up with its MERGE REJECTION blocks: for
+// a verdict the landing refuses, that is the block's own attempt, ceiling and
+// all, so the rework pass can match the line to the block it judges by number
+// (gt-k10bq). rejected is whether the landing refuses the work on this verdict,
+// which an approval can earn from its findings alone (gt-vu18r). A failed
+// append never holds a landing, but the line it loses is a hole in the rework
+// table, so it is also written on the work bead, where the table's reader can
+// find it.
 func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict, rejected bool) {
 	if l.Reviews == nil || (v.Verdict != VerdictApprove && v.Verdict != VerdictRequestChanges) {
 		return
@@ -971,7 +974,15 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict, re
 	if err != nil {
 		l.logf("%s: could not read the review bar for the reviews log (%v); it is logged as 0", w.BeadID, err)
 	}
-	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: reviewAttempt(issue.Notes),
+	attempt := reviewAttempt(issue.Notes)
+	// A refused round's block stops counting at MaxReworkAttempts (gt-ern0y), so
+	// the line names that same attempt: the rework pass matches a record to its
+	// block by number and skips a record with no block (gt-k10bq). An approval
+	// writes no block, so its line is its own round.
+	if v.Verdict == VerdictRequestChanges || rejected {
+		attempt = min(attempt, MaxReworkAttempts)
+	}
+	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: attempt,
 		Score: v.Score, Verdict: v.Verdict, Rejected: rejected, Agent: w.Agent, Findings: len(v.Findings), Bar: bar, At: l.now().UTC()}
 	if err := l.Reviews.Append(rec); err != nil {
 		l.logf("%s: could not append to the reviews log (%v); the landing is unaffected", w.BeadID, err)
@@ -980,8 +991,10 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict, re
 }
 
 // logRounds records this round's findings in the landing's rounds ledger, the
-// history gt-3l5qy hands om through --rounds-file. The round is the attempt
-// the reviews log records, taken from the same read, and a ledger write never
+// history gt-3l5qy hands om through --rounds-file. The round is counted from
+// the same read as the reviews log's attempt but stops at no ceiling: an
+// over-ceiling round is still a round, and clamping it would overwrite the
+// ledger's record of the round it clamped to (gt-k10bq). A ledger write never
 // holds a landing: the record is the landing's history, not its precondition
 // (gt-yphcl).
 func (l *Lander) logRounds(issue *beads.Issue, w Work, v Verdict) {

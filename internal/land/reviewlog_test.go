@@ -2,11 +2,15 @@ package land
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // The reviews log is the file the dashboard's rework table reads: one line per
@@ -212,6 +216,80 @@ func TestLogReviewRecordsFindingsRejection(t *testing.T) {
 	}
 	if recs[1].Rejected || recs[1].Attempt != 2 {
 		t.Errorf("landed approval logged as %+v, want attempt 2 and not Rejected", recs[1])
+	}
+}
+
+// seedReviewRejections appends n review rejection blocks of earlier heads to
+// the fixture's bead, so the landing that follows is round n+1: past the
+// ceiling once n reaches MaxReworkAttempts. The heads differ from the work's,
+// so the blocks are history and not an unfinished pass (gt-zqqcr).
+func seedReviewRejections(t *testing.T, f *landFixture, n int) {
+	t.Helper()
+	for attempt := 1; attempt <= n; attempt++ {
+		block := FormatRejectionNote(RejectionNote{
+			Attempt: attempt, Kind: string(RejectReview), Reason: "earlier refusal",
+			Branch: f.work.Branch, Target: f.work.Target, MR: f.work.BeadID,
+			Head: fmt.Sprintf("earlier%d", attempt),
+		})
+		if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AppendNotes: block}); err != nil {
+			t.Fatalf("seeding rejection %d: %v", attempt, err)
+		}
+	}
+}
+
+// TestLogReviewAttemptMatchesTheBlockAtTheCeiling is gt-k10bq: a refused round
+// above MaxReworkAttempts is recorded under the attempt its MERGE REJECTION
+// block carries. The block's header stops at the ceiling (gt-ern0y), so a line
+// that kept counting named an attempt no block has, and the rework pass — which
+// matches a refusal to its block by number (internal/jev/rework) — read the
+// refusal as unreadable and skipped it. Both shapes of refusal count: om's own
+// request_changes and an approval its findings turn away.
+func TestLogReviewAttemptMatchesTheBlockAtTheCeiling(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		verdict Verdict
+	}{
+		{"request_changes", Verdict{Verdict: VerdictRequestChanges, Score: 0.4}},
+		{"an approval its findings bounce", Verdict{Verdict: VerdictApprove, Score: 0.93,
+			Findings: []Finding{{ID: "f-1", Severity: "major", Path: "b.txt", Line: 1, Title: "not atomic"}}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := barFixture(t, "0.8")
+			seedReviewRejections(t, f, MaxReworkAttempts)
+			reviews := reviewsFileIn(t)
+			l := f.lander()
+			l.Reviews = reviews
+			verdict := tc.verdict
+			f.review.fn = func(string) (Verdict, error) { return verdict, nil }
+
+			_, err := l.Land(context.Background(), f.work)
+			var rej *Rejection
+			if !errors.As(err, &rej) || rej.Kind != RejectReview || rej.RecordErr != nil {
+				t.Fatalf("Land = %T %v, want a recorded review rejection", err, err)
+			}
+			if !beads.HasLabel(f.bead(), LabelNeedsHuman) {
+				t.Errorf("bead labels = %v, want the capped round to go to a human", f.bead().Labels)
+			}
+			block, ok := ParseRejectionNote(f.bead().Notes)
+			if !ok || block.Attempt != MaxReworkAttempts {
+				t.Fatalf("the round's block reads attempt %d (%v), want the ceiling %d:\n%s",
+					block.Attempt, ok, MaxReworkAttempts, f.bead().Notes)
+			}
+			recs, err := reviews.Since(time.Time{})
+			if err != nil || len(recs) != 1 {
+				t.Fatalf("review log = %+v, %v; want the one verdict this landing reached", recs, err)
+			}
+			if recs[0].Attempt != block.Attempt {
+				t.Errorf("reviews log names attempt %d for a block that says %d, so a reader cannot match the refusal to its block",
+					recs[0].Attempt, block.Attempt)
+			}
+			if !recs[0].IsRejection() {
+				t.Errorf("the line records %+v, want a refusal", recs[0])
+			}
+		})
 	}
 }
 
