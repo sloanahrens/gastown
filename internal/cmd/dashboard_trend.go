@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // The trend panel is the last 24 hours: landings and rejections by local hour,
@@ -145,6 +146,96 @@ const recentLandingRows = 2000
 // no title, which keeps a day of landings from costing a read per row (gt-1kttu).
 const recentTitleRows = 10
 
+// submissionNameRows bounds the first-sight records one page read keeps: the
+// newest few hundred submissions. The log is trimmed by the submission battery
+// (internal/jev/submission) to a window of its own, so this bound only bites
+// after a burst of submissions, and the rows past it draw a dash rather than
+// costing a read each.
+const submissionNameRows = 500
+
+// dashSubmitters answers who submitted a bead's landing, for the Landings rows
+// whose own record carries no branch: a rejected landing, and one the worker is
+// retrying. The name comes from the first-sight submission log's branch
+// (gt-l7ciu), and never from the bead, because a rejection reassigns the bead
+// or resets it to open, so its current holder is not who submitted it
+// (gt-gclus). It does not come from the om review log either: that record's
+// agent field is the model the seat ran on ("claude-haiku"), not the polecat or
+// crew member the By column says built the landing, so a row with no branch
+// draws the dash rather than a model name.
+type dashSubmitters struct {
+	townRoot string
+	// logf reports a read that failed. The operator has no other sight of it:
+	// a failed read is not a row, and the page it feeds is the only place the
+	// rows appear (gt-gclus).
+	logf func(format string, args ...any)
+
+	mu    sync.Mutex
+	stamp fileStamp
+	read  bool
+	names func(rig, bead string) string
+}
+
+func newDashSubmitters(townRoot string, logf func(format string, args ...any)) *dashSubmitters {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	return &dashSubmitters{townRoot: townRoot, logf: logf}
+}
+
+func noSubmitters(string, string) string { return "" }
+
+// get returns the name lookup, re-reading the log only when it moved. A log
+// that cannot be read names no one: the rows it would have named draw the
+// page's dash, which says "not known" rather than naming whoever holds the
+// bead now. The failure is reported and is not remembered — the read marks the
+// log read only when it succeeded — so the next poll reads the log again
+// rather than serving the empty answer until the file moves.
+func (s *dashSubmitters) get() func(rig, bead string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	subPath := land.SubmissionsSeenPath(s.townRoot)
+	st, _ := stampFile(subPath)
+	if s.read && st == s.stamp {
+		return s.names
+	}
+	subs, err := land.ReadRecentSubmissionRecords(subPath, submissionNameRows)
+	if err != nil {
+		s.logf("the submission log %s could not be read, so the Landings rows it names draw a dash: %v", subPath, err)
+		return noSubmitters
+	}
+	s.names, s.stamp, s.read = landingNameLookup(subs), st, true
+	return s.names
+}
+
+// landingNameLookup builds the lookup the Landings rows ask: the polecat or
+// crew member the bead's newest submission names in its branch
+// ("polecat/<name>/..." or "crew/<name>/..."), else "" — the page draws that as
+// a dash. A resubmission supersedes an earlier branch, so the name is the one
+// on the last submitted branch.
+func landingNameLookup(subs []land.SubmissionRecord) func(rig, bead string) string {
+	type beadKey struct{ rig, bead string }
+	branches := make(map[beadKey]string, len(subs))
+	for _, s := range subs {
+		// The log is oldest first, so the last record of a bead is its newest
+		// submission: a resubmission's branch replaces the branch it replaced.
+		if s.Branch != "" {
+			branches[beadKey{s.Rig, s.Bead}] = s.Branch
+		}
+	}
+	return func(rig, bead string) string {
+		return polecatOfBranch(branches[beadKey{rig, bead}])
+	}
+}
+
+// landingName asks a lookup who submitted a landing. A nil lookup names no one,
+// which the page draws as a dash.
+func landingName(who func(rig, bead string) string, rig, bead string) string {
+	if who == nil {
+		return ""
+	}
+	return who(rig, bead)
+}
+
 // buildRecentLandings joins the last 24 hours of landings and rejections with
 // the stage lines that say what each cost, newest first, keeping the newest
 // limit rows: limit is the table's row bound, and the caller always passes one
@@ -155,8 +246,11 @@ const recentTitleRows = 10
 // landing's ship reading off the deploy tracker, by its rig because what ships
 // a landing depends on the rig; a rejection never carries one. The polecat
 // time a landing's record carries — the spans-log reading the worker writes
-// (gt-yxl22) — comes with it, for the pane's Polecat column (gt-90wi1).
-func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, limit int) []dashboard.LandingRow {
+// (gt-yxl22) — comes with it, for the pane's Polecat column (gt-90wi1). who
+// names who submitted a row whose record carries no branch: a rejection keeps
+// its branch on the bead's rejection note, which a row does not read, so the
+// name comes from the first-sight submission log instead (gt-gclus).
+func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, who func(rig, bead string) string, limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow
 	rigOf := map[string]string{} // a rejection line names no rig; a landing of the same bead does
@@ -209,7 +303,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		if rig == "" {
 			rig = "gastown" // the only rig with a landing worker running
 		}
-		row := dashboard.LandingRow{At: rj.At, Bead: rj.Bead, Rig: rig, Outcome: "rejected", Kind: rj.Kind, Score: rj.Score, Detail: truncateRunes(rj.Detail, 160)}
+		row := dashboard.LandingRow{At: rj.At, Bead: rj.Bead, Rig: rig, Polecat: landingName(who, rig, rj.Bead), Outcome: "rejected", Kind: rj.Kind, Score: rj.Score, Detail: truncateRunes(rj.Detail, 160)}
 		timing(&row, omStageFor(stages, rj.Bead, rj.At))
 		rows = append(rows, row)
 	}

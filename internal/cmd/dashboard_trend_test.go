@@ -252,7 +252,7 @@ func TestBuildRecentLandingsJoinsStagesAndOrdersNewestFirst(t *testing.T) {
 	rejs := []omRejection{{At: now.Add(-20 * time.Minute), Bead: "gt-new", Kind: "review", Detail: "om requested changes (score 0.55, 5 finding(s))", Score: &score}}
 
 	var asked []string
-	rows := buildRecentLandings(now, recs, stages, rejs, nil, nil, func(rig, id string) string { asked = append(asked, rig+"/"+id); return "title of " + id }, 30)
+	rows := buildRecentLandings(now, recs, stages, rejs, nil, nil, func(rig, id string) string { asked = append(asked, rig+"/"+id); return "title of " + id }, nil, 30)
 
 	if len(rows) != 4 {
 		t.Fatalf("%d rows, want 4 (the 30-hour-old landing is outside the day): %+v", len(rows), rows)
@@ -291,7 +291,7 @@ func TestBuildRecentLandingsKeepsEveryRowAndAsksTitlesOnlyForTheFirstTen(t *test
 		recs = append(recs, omRecord{Record: landings.Record{Bead: fmt.Sprintf("gt-%d", i), Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Duration(i) * time.Minute)}})
 	}
 	asked := 0
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, func(rig, id string) string { asked++; return "" }, recentLandingRows)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, func(rig, id string) string { asked++; return "" }, nil, recentLandingRows)
 	if len(rows) != 50 {
 		t.Fatalf("rows = %d, want every landing in the window (50): the pane scrolls them, nothing is cut at ten", len(rows))
 	}
@@ -331,7 +331,7 @@ func TestBuildRecentLandingsFillsShipTime(t *testing.T) {
 	}
 	rejs := []omRejection{{At: at("2026-10-03T17:15:00Z"), Bead: "gt-rejected", Kind: "review"}}
 
-	rows := buildRecentLandings(now, recs, nil, rejs, nil, track.shipStatus, func(string, string) string { return "" }, 30)
+	rows := buildRecentLandings(now, recs, nil, rejs, nil, track.shipStatus, func(string, string) string { return "" }, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead+":"+r.Outcome] = r
@@ -386,7 +386,7 @@ func TestBuildRecentLandingsShipCellPerRig(t *testing.T) {
 		{Record: landings.Record{Bead: "dv-nothing", Rig: "devops", OMVerdict: "approve", LandedAt: at("2026-10-03T17:02:00Z")}},
 	}
 
-	rows := buildRecentLandings(now, recs, nil, nil, nil, track.shipStatus, func(string, string) string { return "" }, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, track.shipStatus, func(string, string) string { return "" }, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -415,6 +415,283 @@ func TestPolecatOfBranch(t *testing.T) {
 		if got := polecatOfBranch(in); got != want {
 			t.Errorf("polecatOfBranch(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A rejected landing's By column names the polecat or crew member that
+// submitted it: the one on its last submitted branch, "polecat/<name>/..." or
+// "crew/<name>/...". A bead whose submission names no branch, and one with no
+// submission at all, draws the dash — never a model name, which is not a
+// submitter (gt-gclus).
+func TestBuildRecentLandingsNamesARejectedRowFromItsBranch(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 26, 20, 30, 0, 0, time.UTC)
+	subs := []land.SubmissionRecord{
+		// gt-resubmitted was submitted twice: the newest branch is the name.
+		{Rig: "gastown", Bead: "gt-resubmitted", Branch: "polecat/mica/gt-resubmitted+old", SeenAt: now.Add(-3 * time.Hour)},
+		{Rig: "gastown", Bead: "gt-resubmitted", Branch: "polecat/agate/gt-resubmitted+new", SeenAt: now.Add(-time.Hour)},
+		{Rig: "gastown", Bead: "gt-crew", Branch: "crew/heron/gt-js6di-merge", SeenAt: now.Add(-2 * time.Hour)},
+		{Rig: "gastown", Bead: "gt-nobranch", Branch: "", SeenAt: now.Add(-2 * time.Hour)},
+	}
+	rejs := []omRejection{
+		{At: now.Add(-50 * time.Minute), Bead: "gt-resubmitted", Kind: "review"},
+		{At: now.Add(-50 * time.Minute), Bead: "gt-crew", Kind: "conflict"},
+		{At: now.Add(-50 * time.Minute), Bead: "gt-nobranch", Kind: "review"},
+		{At: now.Add(-50 * time.Minute), Bead: "gt-unknown", Kind: "review"},
+	}
+
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNameLookup(subs), 30)
+	byBead := map[string]dashboard.LandingRow{}
+	for _, r := range rows {
+		byBead[r.Bead] = r
+	}
+	for bead, want := range map[string]string{
+		"gt-resubmitted": "agate",
+		"gt-crew":        "heron",
+		"gt-nobranch":    "",
+		"gt-unknown":     "",
+	} {
+		if got := byBead[bead].Polecat; got != want {
+			t.Errorf("%s By = %q, want %q", bead, got, want)
+		}
+	}
+
+	// A caller with no lookup names no one: the rejection is still a row, and
+	// nothing is read to fill its By in.
+	for _, r := range buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, nil, 30) {
+		if r.Polecat != "" {
+			t.Errorf("%s By = %q with no lookup, want a dash", r.Bead, r.Polecat)
+		}
+	}
+}
+
+// A rejection reassigns the bead, so by the time the row is drawn the bead's
+// holder is a different polecat: the running row the caller built names the new
+// holder (mica), and the rejected row still names the agent on the last
+// submitted branch (agate). Reading the bead instead would name the wrong one
+// (gt-gclus).
+func TestAReassignedBeadsRejectedRowStillNamesItsSubmitter(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 26, 20, 30, 0, 0, time.UTC)
+	subs := []land.SubmissionRecord{
+		{Rig: "gastown", Bead: "gt-reassigned", Branch: "polecat/agate/gt-reassigned+1", SeenAt: now.Add(-2 * time.Hour)},
+	}
+	// The bead is reassigned and resubmitted by mica: the running row is the
+	// holder the seat cache names, and the rejection is the earlier attempt.
+	live := runningRows(
+		[]omMerge{{At: now.Add(-10 * time.Minute), Bead: "gt-reassigned"}},
+		func(string) string { return "gastown" },
+		func(string, string) string { return "mica" },
+	)
+	rejs := []omRejection{{At: now.Add(-time.Hour), Bead: "gt-reassigned", Kind: "review"}}
+
+	rows := buildRecentLandings(now, nil, nil, rejs, live, nil, nil, landingNameLookup(subs), 30)
+	var rejected, running *dashboard.LandingRow
+	for i := range rows {
+		switch rows[i].Outcome {
+		case "rejected":
+			rejected = &rows[i]
+		case "running":
+			running = &rows[i]
+		}
+	}
+	if running == nil || running.Polecat != "mica" {
+		t.Fatalf("running row = %+v, want the bead's new holder mica", running)
+	}
+	if rejected == nil || rejected.Polecat != "agate" {
+		t.Fatalf("rejected row = %+v, want the submitter on the last submitted branch, agate", rejected)
+	}
+}
+
+// A landed row's By is unchanged: it keeps the polecat or crew member its own
+// landing record's branch names, and takes no name from the submission log,
+// which may name an earlier submission of the bead. A landed record with no
+// branch stays a dash (gt-gclus).
+func TestBuildRecentLandingsLeavesALandedRowsByAlone(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 26, 20, 30, 0, 0, time.UTC)
+	subs := []land.SubmissionRecord{
+		{Rig: "gastown", Bead: "gt-landed", Branch: "polecat/agate/gt-landed+1", SeenAt: now.Add(-2 * time.Hour)},
+	}
+	recs := []omRecord{
+		{Record: landings.Record{Bead: "gt-landed", Rig: "gastown", Branch: "crew/heron/gt-landed", OMVerdict: "approve", LandedAt: now.Add(-time.Hour)}},
+		{Record: landings.Record{Bead: "gt-nobranch", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Hour)}},
+	}
+
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNameLookup(subs), 30)
+	byBead := map[string]dashboard.LandingRow{}
+	for _, r := range rows {
+		byBead[r.Bead] = r
+	}
+	if got := byBead["gt-landed"].Polecat; got != "heron" {
+		t.Errorf("landed row By = %q, want heron from its own record's branch", got)
+	}
+	if got := byBead["gt-nobranch"].Polecat; got != "" {
+		t.Errorf("landed row with no branch By = %q, want a dash", got)
+	}
+}
+
+// The names the dashboard shows come from the first-sight submission log, at
+// the path the landing worker writes it to. The beads are never read, so no
+// reassignment can change what a row says. The om review log is not a source:
+// its agent field is the model the seat ran on, which the By column must not
+// show as the submitter (gt-gclus).
+func TestDashSubmittersReadsTheSubmissionLog(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+
+	subPath := land.SubmissionsSeenPath(town)
+	if err := os.MkdirAll(filepath.Dir(subPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	subs := `{"seen_at":"2026-10-26T19:00:00Z","bead":"gt-rejected","rig":"gastown","branch":"crew/heron/gt-rejected","head":"1111aaaa"}
+{"seen_at":"2026-10-26T19:30:00Z","bead":"gt-other","rig":"gastown","branch":"polecat/mica/gt-other+1","head":"2222bbbb"}
+`
+	if err := os.WriteFile(subPath, []byte(subs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A review record names the model gt-agent's seat ran on. It is not a
+	// submitter, so the lookup names no one for that bead.
+	revFile := land.TownReviewsFile(town)
+	if err := os.MkdirAll(filepath.Dir(revFile.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	revs := `{"bead":"gt-agent","rig":"gastown","attempt":1,"score":0.4,"verdict":"request_changes","agent":"claude-haiku","findings":2,"bar":0.8,"at":"2026-10-26T19:30:00Z"}
+`
+	if err := os.WriteFile(revFile.Path, []byte(revs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	who := newDashSubmitters(town, nil).get()
+	for bead, want := range map[string]string{
+		"gt-rejected": "heron",
+		"gt-other":    "mica",
+		"gt-agent":    "",
+		"gt-nobody":   "",
+	} {
+		if got := who("gastown", bead); got != want {
+			t.Errorf("%s By = %q, want %q", bead, got, want)
+		}
+	}
+}
+
+// The lookup follows the log: once a bead is resubmitted the row names the
+// newest submitter, so a cached lookup that ignored the file's growth would
+// keep showing the old name (gt-gclus).
+func TestDashSubmittersRereadsWhenTheLogGrows(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	subPath := land.SubmissionsSeenPath(town)
+	if err := os.MkdirAll(filepath.Dir(subPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	first := `{"seen_at":"2026-10-26T19:00:00Z","bead":"gt-rework","rig":"gastown","branch":"polecat/agate/gt-rework+1","head":"1111aaaa"}
+`
+	if err := os.WriteFile(subPath, []byte(first), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := newDashSubmitters(town, nil)
+	if got := s.get()("gastown", "gt-rework"); got != "agate" {
+		t.Fatalf("By = %q after the first submission, want agate", got)
+	}
+
+	// The bead comes back from rework and mica resubmits it: the last submitted
+	// branch is now mica's.
+	second := first + `{"seen_at":"2026-10-26T20:00:00Z","bead":"gt-rework","rig":"gastown","branch":"polecat/mica/gt-rework+2","head":"3333cccc"}
+`
+	if err := os.WriteFile(subPath, []byte(second), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.get()("gastown", "gt-rework"); got != "mica" {
+		t.Errorf("By = %q after the resubmission, want mica: the lookup must re-read a log that grew", got)
+	}
+}
+
+// writeUnreadableSubmissionLog puts a submission log at path whose one line is
+// past the reader's line buffer, so reading it fails without the file going
+// missing or locked: a read error a later poll can find cured on the same
+// stamp.
+func writeUnreadableSubmissionLog(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	broken := strings.Repeat("x", 2<<20) + "\n"
+	if err := os.WriteFile(path, []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return broken
+}
+
+// A submission log that cannot be read is reported, not dropped, and names no
+// one: the rows it would have named draw the dash (gt-gclus).
+func TestDashSubmittersReportsAnUnreadableLog(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	subPath := land.SubmissionsSeenPath(town)
+	writeUnreadableSubmissionLog(t, subPath)
+
+	var lines []string
+	who := newDashSubmitters(town, func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}).get()
+	if got := who("gastown", "gt-rework"); got != "" {
+		t.Errorf("By = %q with an unreadable log, want a dash", got)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("reported %d line(s) %q, want one saying the read failed", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], subPath) {
+		t.Errorf("reported %q, want the log's path %s named", lines[0], subPath)
+	}
+}
+
+// A read that failed is not remembered: the next poll reads the log again even
+// though the file did not move, so a log that becomes readable on the same
+// stamp is picked up instead of drawing the dash until something writes it
+// (gt-gclus).
+func TestDashSubmittersRetriesAFailedRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	subPath := land.SubmissionsSeenPath(town)
+	broken := writeUnreadableSubmissionLog(t, subPath)
+	// Pin the stamp: the readable log below has the broken one's size, inode
+	// and mtime, so only a read that was never cached can see the name.
+	pinned := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(subPath, pinned, pinned); err != nil {
+		t.Fatal(err)
+	}
+	before, err := stampFile(subPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := newDashSubmitters(town, nil)
+	if got := s.get()("gastown", "gt-rework"); got != "" {
+		t.Fatalf("By = %q with an unreadable log, want a dash", got)
+	}
+
+	good := `{"seen_at":"2026-10-26T19:00:00Z","bead":"gt-rework","rig":"gastown","branch":"polecat/agate/gt-rework+1","head":"1111aaaa"}`
+	// The readable log is the record on one line and blank lines after it: the
+	// reader skips a blank line, so the size matches the broken log's while
+	// every line is short enough to read.
+	cured := good + "\n" + strings.Repeat("\n", len(broken)-len(good)-1)
+	if err := os.WriteFile(subPath, []byte(cured), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(subPath, pinned, pinned); err != nil {
+		t.Fatal(err)
+	}
+	after, err := stampFile(subPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("stamp moved from %+v to %+v; the readable log must keep the stamp", before, after)
+	}
+
+	if got := s.get()("gastown", "gt-rework"); got != "agate" {
+		t.Errorf("By = %q once the log is readable, want agate: a failed read must not be cached", got)
 	}
 }
 
@@ -492,7 +769,7 @@ func TestBuildRecentLandingsPutsRunningRowsOnTopUncapped(t *testing.T) {
 		recs = append(recs, omTestRec(fmt.Sprintf("gt-%d", i), "approve", 0.9, "daemon", now.Add(-time.Duration(i+1)*time.Minute)))
 	}
 	live := []dashboard.LandingRow{{At: now.Add(-time.Minute), Bead: "gt-live", Rig: "gastown", Outcome: "running"}}
-	rows := buildRecentLandings(now, recs, nil, nil, live, nil, nil, capRows)
+	rows := buildRecentLandings(now, recs, nil, nil, live, nil, nil, nil, capRows)
 
 	if len(rows) != capRows+1 {
 		t.Fatalf("rows = %d, want %d: the live row is not one of the capped finished rows", len(rows), capRows+1)
@@ -525,7 +802,7 @@ func TestBuildRecentLandingsBoundsTheTableAtTheProductionCap(t *testing.T) {
 	for i := range recentLandingRows + over {
 		recs = append(recs, omTestRec(fmt.Sprintf("gt-%d", i), "approve", 0.9, "daemon", now.Add(-time.Duration(i)*time.Second)))
 	}
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, recentLandingRows)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, nil, recentLandingRows)
 	if len(rows) != recentLandingRows {
 		t.Fatalf("rows = %d, want %d: the table keeps its bound", len(rows), recentLandingRows)
 	}
@@ -660,7 +937,7 @@ func TestBuildRecentLandingsCarriesThePolecatTime(t *testing.T) {
 		}},
 	}
 
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r

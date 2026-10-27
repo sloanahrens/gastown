@@ -84,8 +84,10 @@ func backoffRows(rig string, snap landings.BackoffState) []dashboard.LandingRow 
 // withBackoffRows puts the landings that are failing in backoff above the
 // day's rows, like the ones running now: a landing that is not clearing is
 // not one of the day's results either. It names each bead's title the way the
-// rows it joins are named.
-func withBackoffRows(rows, backoff []dashboard.LandingRow, title func(rig, bead string) string) []dashboard.LandingRow {
+// rows it joins are named, and its submitter the way a rejected row's is: a
+// failing landing is one the worker keeps retrying, and the branch it was
+// submitted on is on the submission record, not on the bead (gt-gclus).
+func withBackoffRows(rows, backoff []dashboard.LandingRow, title, who func(rig, bead string) string) []dashboard.LandingRow {
 	if len(backoff) == 0 {
 		return rows
 	}
@@ -93,6 +95,12 @@ func withBackoffRows(rows, backoff []dashboard.LandingRow, title func(rig, bead 
 	for _, row := range backoff {
 		if title != nil {
 			row.Title = title(row.Rig, row.Bead)
+		}
+		// The lookup fills the By of a row that names no one; a row that
+		// already carries a name keeps it, since that name came from a closer
+		// record than the submission log (gt-gclus).
+		if row.Polecat == "" {
+			row.Polecat = landingName(who, row.Rig, row.Bead)
 		}
 		out = append(out, row)
 	}
