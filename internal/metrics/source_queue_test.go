@@ -2,7 +2,6 @@ package metrics
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"math"
@@ -66,10 +65,9 @@ func queueTestRigs(names ...string) map[string]string {
 // answered from a table of issue counts, ephemeral counts and failures keyed
 // "<rig>/<column>", with every read recorded.
 type queueStores struct {
-	rows map[string]int   // the issues the read answers
-	wisp map[string]int   // how many of those issues are ephemeral
-	fail map[string]bool  // a read that fails the way a dead store does
-	errs map[string]error // a read that fails with a scripted error
+	rows map[string]int  // the issues the read answers
+	wisp map[string]int  // how many of those issues are ephemeral
+	fail map[string]bool // a read that fails the way a dead store does
 
 	mu              sync.Mutex
 	calls           []string
@@ -121,11 +119,8 @@ func (s *queueStore) serve(column string) ([]*beads.Issue, error) {
 	o := s.owner
 	o.mu.Lock()
 	o.calls = append(o.calls, key)
-	failed, scripted, n, wisps := o.fail[key], o.errs[key], o.rows[key], o.wisp[key]
+	failed, n, wisps := o.fail[key], o.rows[key], o.wisp[key]
 	o.mu.Unlock()
-	if scripted != nil {
-		return nil, scripted
-	}
 	if failed {
 		return nil, fmt.Errorf("bd %s: no Dolt server", key)
 	}
@@ -411,37 +406,10 @@ func TestSourceQueueDropsAFirstLineCutByTheByteBound(t *testing.T) {
 	})
 }
 
-// A read the store could not turn into an answer nils only its column. The
-// seam parses bd now, so the shapes it refuses reach the source as errors: a
-// page bd reported as cut, an answer that is not JSON, and prose where the
-// JSON was asked for. Each must leave the other columns alone rather than
-// sum a shortened board as the whole queue.
-func TestSourceQueueUnreadableAnswersNilOnlyTheirColumn(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		err  error
-	}{
-		{name: "a truncated page", err: &beads.ErrReadyTruncated{Found: 100, Cap: 100, TrueCount: 250}},
-		{name: "an answer that is not JSON", err: fmt.Errorf("parsing bd list output: %w", errors.New("unexpected end of JSON input"))},
-		{name: "prose instead of JSON", err: fmt.Errorf("bd list: connection refused")},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			fake := &queueStores{
-				rows: map[string]int{"alpha/blocked": 2},
-				errs: map[string]error{"alpha/ready": tc.err},
-			}
-			env := queueTestEnv(t, queueTestRigs("alpha"), fake, nil)
-			cols, err := queueSource{}.Collect(context.Background(), env)
-			if err != nil {
-				t.Fatalf("Collect: %v", err)
-			}
-			queueWantColumns(t, cols, map[string]any{"ready": nil, "blocked": 2})
-		})
-	}
-}
+// The answers the seam's parsers refuse (a cut ready page, a half-written
+// page, prose where JSON was asked for) are pinned through the real store in
+// TestSourceQueueRefusesAnswersItsParserCannotRead: a fake store can only
+// return an error, and an error is the part of that path the source owns.
 
 // An Env with no bead store is a wiring error, not an empty town.
 func TestSourceQueueRefusesAnEnvWithNoStore(t *testing.T) {

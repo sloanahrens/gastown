@@ -200,8 +200,48 @@ func TestSourceHostEmptyBoardIsAReading(t *testing.T) {
 	if got["bd_latency_ms"] != 37.0 {
 		t.Errorf("bd_latency_ms = %v, want 37 for a read that answered", got["bd_latency_ms"])
 	}
-	if len(fake.dirs) != 1 || fake.dirs[0] != "/town" {
-		t.Errorf("the bead read opened stores for %v, want the town root alone", fake.dirs)
+	if len(fake.dirs) != 2 || fake.dirs[0] != "/town" || fake.dirs[1] != "/town" {
+		t.Errorf("the bead reads opened stores for %v, want the town root for the warm-up and again for the timed read", fake.dirs)
+	}
+}
+
+// The warm-up and the timed read get a deadline each: the warm-up's store is
+// opened with a context that has finished before the timed read's store is
+// opened, and the timed read's deadline is later than the warm-up's, so a
+// warm-up that spends its whole budget cannot shorten what the timed read is
+// allowed.
+func TestSourceHostWarmUpEndsBeforeTheTimedReadStarts(t *testing.T) {
+	t.Parallel()
+	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
+	env := fake.env()
+	openStore := env.Beads
+	var opened []context.Context
+	env.Beads = func(ctx context.Context, dir string) BeadStore {
+		opened = append(opened, ctx)
+		return openStore(ctx, dir)
+	}
+
+	if _, err := (hostSource{}).Collect(context.Background(), env); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(opened) != 2 {
+		t.Fatalf("the bead column opened %d store(s), want one for the warm-up and one for the timed read", len(opened))
+	}
+	select {
+	case <-opened[0].Done():
+	default:
+		t.Error("the warm-up's store was still live when the timed read opened")
+	}
+	warm, ok := opened[0].Deadline()
+	if !ok {
+		t.Fatal("the warm-up ran with no deadline")
+	}
+	timed, ok := opened[1].Deadline()
+	if !ok {
+		t.Fatal("the timed read ran with no deadline")
+	}
+	if !timed.After(warm) {
+		t.Errorf("the timed read's deadline %v is not after the warm-up's %v: the two share one window", timed, warm)
 	}
 }
 

@@ -24,22 +24,9 @@ import (
 //
 // Each bead column is one store read per registered rig, summed. The rigs come
 // from mayor/rigs.json, or from the registry section of mayor/town.json on the
-// two-file layout (internal/config/layout.go); the read runs through the seam's
-// store for the rig's directory, which is the scoping `bd -C <town>/<rig>`
-// gives, and the calls are the ones the seam builds:
-//
-//	ready            ReadyFiltered(ReadyOptions{Limit: 0})
-//	                   bd ready --json --limit 0
-//	dispatchable     ReadyFiltered(ReadyOptions{Unassigned: true,
-//	                   ExcludeLabels: constants.NonDispatchableBeadLabels +
-//	                     specdispatch.ReadyQueryLabels(),
-//	                   ExcludeTypes: specdispatch.NonWorkBeadTypes(), Limit: 0})
-//	                   bd ready --json --unassigned --exclude-label ...
-//	                     --exclude-type ... --limit 0
-//	waiting_to_land  List(ListOptions{Label: "gt:ready-to-land", Limit: 0})
-//	                   bd list --json --label=gt:ready-to-land --limit=0
-//	blocked          Blocked()
-//	                   bd blocked --json
+// two-file layout (internal/config/layout.go). Each read goes through a store
+// opened for the rig's own directory, which is the scoping `bd -C <town>/<rig>`
+// gave, and the filters each column asks for are queueBeadColumns' own.
 //
 // A read that fails, or a ready page bd reports as cut, nils its column; the
 // store's own argv and failure classification are the seam's business.
@@ -147,6 +134,10 @@ func queueBeadColumns() []queueBeadColumn {
 			},
 		},
 		{
+			// List adds no status filter of its own, so the label and bd's
+			// default list scope are the whole query, as they were for the
+			// pre-seam `bd list`; Limit 0 asks for the whole board rather than
+			// bd's default page, which is what the pre-seam --limit 0 did.
 			column: "waiting_to_land",
 			read: func(s BeadStore) ([]*beads.Issue, error) {
 				return s.List(beads.ListOptions{Label: "gt:ready-to-land", Limit: 0})

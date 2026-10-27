@@ -111,9 +111,8 @@ func (s hostSource) probes() []hostProbe {
 			parse:  parseCPUIdlePct,
 		},
 		{
-			// One bd list in the town's store, timed: the seam's machine read
-			// of one issue is the cheapest call the town itself makes, so its
-			// time is what a bead read costs right now.
+			// One bd list in the town's store, read twice: the first read is
+			// an untimed warm-up of the seam, the second is the timed one.
 			column: "bd_latency_ms",
 			store:  true,
 		},
@@ -140,31 +139,11 @@ func (s hostSource) probes() []hostProbe {
 // returns one that bd answered with JSON. Either way the column is a gap that
 // Collect counts.
 func (p hostProbe) read(ctx context.Context, env Env, timeout time.Duration) (any, bool) {
+	if p.store {
+		return p.readStore(ctx, env, timeout)
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if p.store {
-		// Warm the seam before the clock starts. Its first call pays setup a
-		// later call does not — the --allow-stale capability probe and the
-		// town's config reads — so timing it would report first use rather
-		// than what a bead read costs now. The seam's container retry never
-		// applies to a town snapshot, so the timed call is one bd invocation.
-		//
-		// The start is read before the timed read runs, so the difference is
-		// that read's own time. An empty board is an answer, so only a failed
-		// read is a gap; its fast return is not a latency.
-		store := env.Beads(ctx, env.Town)
-		if store == nil {
-			return nil, false
-		}
-		if _, err := store.List(beads.ListOptions{Limit: 1}); err != nil {
-			return nil, false
-		}
-		start := env.Now()
-		if _, err := store.List(beads.ListOptions{Limit: 1}); err != nil {
-			return nil, false
-		}
-		return float64(env.Now().Sub(start)) / float64(time.Millisecond), true
-	}
 	out, err := env.Run(ctx, p.argv)
 	if err != nil {
 		return nil, false
@@ -174,6 +153,62 @@ func (p hostProbe) read(ctx context.Context, env Env, timeout time.Duration) (an
 		return nil, false
 	}
 	return value, true
+}
+
+// readStore times one list of one issue in the town's store: the seam's
+// cheapest read of the board, so its time is what a bead read costs right now.
+//
+// The warm-up and the timed read get a deadline each and a store each, so a
+// slow warm-up cannot spend the timed read's budget or leave it holding a
+// finished context.
+//
+// The timed read is one bd invocation. The seam retries only a failure against
+// its ephemeral test Dolt container (bd_container_retry.go, scoped to
+// NewIsolatedWithPort), and a store built with beads.New is not that, so a
+// connection-shaped failure ends the read rather than starting another:
+// bd_latency_ms cannot hide a retry inside its window.
+//
+// The store is opened for the town root the snapshot names rather than the
+// process's working directory the pre-seam `bd list --limit 1` ran in. The
+// town-metrics plugin starts the snapshot in the town root, so this names the
+// store that read reached; a snapshot started anywhere else now reads the town
+// instead of whatever directory it happened to start in.
+//
+// The start is read before the timed read runs, so the difference is that
+// read's own time. An empty board is an answer, so only a failed read is a
+// gap; its fast return is not a latency.
+func (hostProbe) readStore(ctx context.Context, env Env, timeout time.Duration) (any, bool) {
+	if !warmStore(ctx, env, timeout) {
+		return nil, false
+	}
+	readCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	store := env.Beads(readCtx, env.Town)
+	if store == nil {
+		return nil, false
+	}
+	start := env.Now()
+	if _, err := store.List(beads.ListOptions{Limit: 1}); err != nil {
+		return nil, false
+	}
+	return float64(env.Now().Sub(start)) / float64(time.Millisecond), true
+}
+
+// warmStore spends the seam's first-use setup before the clock starts. Its
+// first call pays what a later one does not — the --allow-stale capability
+// probe and the town's config reads — so timing it would report first use
+// rather than what a bead read costs now. It costs one invocation per
+// snapshot, and a read it cannot answer is a gap in bd_latency_ms exactly as a
+// failed timed read is.
+func warmStore(ctx context.Context, env Env, timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	store := env.Beads(ctx, env.Town)
+	if store == nil {
+		return false
+	}
+	_, err := store.List(beads.ListOptions{Limit: 1})
+	return err == nil
 }
 
 // parseLoadAvg1 reads the one-minute load average off sysctl's vm.loadavg,

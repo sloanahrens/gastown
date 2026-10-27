@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -36,6 +37,15 @@ type bdRecorder struct {
 // internal/beads pins, so that pair is the scope `bd -C <dir>` used to carry.
 func (r *bdRecorder) env(t *testing.T) Env {
 	t.Helper()
+	return seamEnv(t, r.answer)
+}
+
+// seamEnv is an Env whose bead store is the real seam over run: the source
+// under test reads through beads.New, with its parsers, its argv and its
+// failure classification, and run stands in for the bd process. dir is the
+// directory the source opened the store for.
+func seamEnv(t *testing.T, run func(dir string, args []string) ([]byte, []byte, error)) Env {
+	t.Helper()
 	env := envAt(fixedNow())
 	env.Town = queueTestTown
 	env.ReadFile = func(path string) ([]byte, error) {
@@ -47,10 +57,22 @@ func (r *bdRecorder) env(t *testing.T) Env {
 	env.Tail = func(string, int64) ([]byte, error) { return nil, fs.ErrNotExist }
 	env.Beads = func(ctx context.Context, dir string) BeadStore {
 		return beads.New(dir, beads.WithCallContext(ctx), beads.WithRunner(func(_ context.Context, args []string) ([]byte, []byte, error) {
-			return r.answer(dir, args)
+			return run(dir, args)
 		}))
 	}
 	return env
+}
+
+// bdVerb is the command word of a recorded bd argv, skipping the --allow-stale
+// the seam prepends.
+func bdVerb(args []string) string {
+	if len(args) > 0 && args[0] == "--allow-stale" {
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
 }
 
 // answer is bd's side of the recorder: the allow-stale probe claims the
@@ -62,11 +84,7 @@ func (r *bdRecorder) answer(dir string, args []string) ([]byte, []byte, error) {
 	if len(args) > 0 && args[len(args)-1] == "version" {
 		return []byte("bd version 1.2.2\n"), nil, nil
 	}
-	verb := args[0]
-	if verb == "--allow-stale" && len(args) > 1 {
-		verb = args[1]
-	}
-	switch verb {
+	switch bdVerb(args) {
 	case "ready":
 		return []byte(`{"data":[],"pagination":{"truncated":false,"returned":0}}`), nil, nil
 	case "list", "blocked":
@@ -75,10 +93,10 @@ func (r *bdRecorder) answer(dir string, args []string) ([]byte, []byte, error) {
 	return nil, nil, fmt.Errorf("unexpected bd argv %v", args)
 }
 
-// reads is the recorded reads without the seam's own allow-stale probe, with
-// the seam's additions removed by preSeamArgs. A counted read carries the
-// directory the store was opened for, so the pair is the call the source made:
-// `bd -C <dir> <args>`, scoping included.
+// reads is every recorded read as bd received it — the full argv, nothing
+// stripped — paired with the directory the store was opened for, so the pair
+// is the call the source made: `bd -C <dir> <args>`, scoping included. The
+// seam's own `--allow-stale version` probes are left out.
 func (r *bdRecorder) reads() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -87,13 +105,14 @@ func (r *bdRecorder) reads() []string {
 		if len(call.args) > 0 && call.args[len(call.args)-1] == "version" {
 			continue
 		}
-		out = append(out, call.dir+" | "+strings.Join(preSeamArgs(call.args), " "))
+		out = append(out, call.dir+" | "+strings.Join(call.args, " "))
 	}
 	sort.Strings(out)
 	return out
 }
 
-// rawReads is every recorded call as bd received it, for a failure message.
+// rawReads is every recorded call, the version probes included, for a failure
+// message.
 func (r *bdRecorder) rawReads() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -105,32 +124,24 @@ func (r *bdRecorder) rawReads() []string {
 	return out
 }
 
-// preSeamArgs is argv with the seam's own additions removed: the flags the
-// seam injects (`--allow-stale`, `--flat`) and the equals sign it uses for
-// flag values. The sources built the remaining argv themselves before they
-// read through the seam, so a test can hold the seam's call to that argv.
-func preSeamArgs(args []string) []string {
-	out := make([]string, 0, len(args))
-	for _, arg := range args {
-		switch arg {
-		case "--allow-stale", "--flat":
-			continue
-		}
-		if strings.HasPrefix(arg, "--") {
-			if flag, value, ok := strings.Cut(arg, "="); ok {
-				out = append(out, flag, value)
-				continue
-			}
-		}
-		out = append(out, arg)
-	}
-	return out
-}
-
-// The queue group reads every rig through the seam and sends bd the argv it
-// built itself before: the verb, the filters, their values and their order are
-// unchanged, and the rig scoping rides the store opened for the rig's own
-// directory, which is what `bd -C <town>/<rig>` did.
+// The queue group reads every rig through the seam, and the argv below is the
+// whole of what bd receives: the verb, the filters, their values and their
+// order are the ones the source built itself before the seam, and the rig
+// scoping rides the directory the store was opened for, which is what
+// `bd -C <town>/<rig>` did. Any change to any argument — a different limit, a
+// dropped filter, a new flag the seam starts injecting — turns this red.
+//
+// The differences from the pre-seam argv are exactly the seam's own, and they
+// are pinned here rather than normalised away:
+//
+//	--allow-stale   prepended when the installed bd takes the flag
+//	--flat          appended to a list --json, which bd needs to print JSON
+//	--limit=0       the list's limit as the seam spells a flag value; ready
+//	                passes --limit 0 as two arguments
+//
+// The one argument that is not a difference is the one that is absent: the
+// seam adds no status filter to the list, so bd list's default scope is the
+// query it was before.
 func TestSourceQueueReadsReachBdScopedToTheirRig(t *testing.T) {
 	t.Parallel()
 	rec := &bdRecorder{}
@@ -140,10 +151,10 @@ func TestSourceQueueReadsReachBdScopedToTheirRig(t *testing.T) {
 
 	labels := append(append([]string(nil), constants.NonDispatchableBeadLabels...), specdispatch.ReadyQueryLabels()...)
 	argv := map[string]string{
-		"ready":           "ready --json --limit 0",
-		"dispatchable":    "ready --json --unassigned --exclude-label " + strings.Join(labels, ",") + " --exclude-type " + strings.Join(specdispatch.NonWorkBeadTypes(), ",") + " --limit 0",
-		"waiting_to_land": "list --json --label gt:ready-to-land --limit 0",
-		"blocked":         "blocked --json",
+		"ready":           "--allow-stale ready --json --limit 0",
+		"dispatchable":    "--allow-stale ready --json --unassigned --exclude-label " + strings.Join(labels, ",") + " --exclude-type " + strings.Join(specdispatch.NonWorkBeadTypes(), ",") + " --limit 0",
+		"waiting_to_land": "--allow-stale list --json --label=gt:ready-to-land --limit=0 --flat",
+		"blocked":         "--allow-stale blocked --json",
 	}
 	var want []string
 	for _, rig := range []string{"alpha", "beta"} {
@@ -159,8 +170,10 @@ func TestSourceQueueReadsReachBdScopedToTheirRig(t *testing.T) {
 
 // The host group's bd_latency_ms is one list of one issue in the town's own
 // store, read twice: the first read warms the seam so the timed second is a
-// steady-state read. The seam asks for JSON because that is how it knows bd
-// answered, so the argv is the old `list --limit 1` plus `--json`.
+// steady-state read. Both reads are the pre-seam `list --limit 1` with the
+// seam's own arguments, pinned whole: --allow-stale prepended, --flat appended
+// because that is how bd prints a list as JSON, and the limit spelled as the
+// seam's flag value.
 func TestSourceHostTimesASteadyStateListInTheTownStore(t *testing.T) {
 	t.Parallel()
 	rec := &bdRecorder{}
@@ -173,13 +186,128 @@ func TestSourceHostTimesASteadyStateListInTheTownStore(t *testing.T) {
 		t.Fatalf("Collect: %v", err)
 	}
 	want := []string{
-		queueTestTown + " | list --json --limit 1",
-		queueTestTown + " | list --json --limit 1",
+		queueTestTown + " | --allow-stale list --json --limit=1 --flat",
+		queueTestTown + " | --allow-stale list --json --limit=1 --flat",
 	}
 	if reads := rec.reads(); strings.Join(reads, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("bd reads:\n%s\nwant:\n%s\nraw:\n%s", strings.Join(reads, "\n"), strings.Join(want, "\n"), strings.Join(rec.rawReads(), "\n"))
 	}
 	if got["bd_latency_ms"] == nil {
 		t.Errorf("bd_latency_ms = nil; a read the store answered must be a reading")
+	}
+}
+
+// The seam parses bd's answer now, so a shape its parser refuses reaches the
+// queue read as an error and nils only that column: a ready page bd reported
+// as cut is not a short board, and a half-written page or prose where JSON was
+// asked for is not an empty one. The answers go through the real store over a
+// fake bd, so the parsers in the test are the ones production runs.
+func TestSourceQueueRefusesAnswersItsParserCannotRead(t *testing.T) {
+	t.Parallel()
+	readyEmpty := `{"data":[],"pagination":{"returned":0,"truncated":false}}`
+	blockedTwo := `[{"id":"gt-a","title":"a","status":"open"},{"id":"gt-b","title":"b","status":"open"}]`
+	tests := []struct {
+		name   string
+		verb   string
+		answer string
+		want   map[string]any
+	}{
+		{
+			name:   "a ready page bd reported as cut",
+			verb:   "ready",
+			answer: `{"data":[],"pagination":{"returned":100,"total":250,"truncated":true}}`,
+			want:   map[string]any{"ready": nil, "dispatchable": nil, "waiting_to_land": 0, "blocked": 4},
+		},
+		{
+			name:   "a ready answer that is not JSON",
+			verb:   "ready",
+			answer: `[{"id":`,
+			want:   map[string]any{"ready": nil, "dispatchable": nil, "waiting_to_land": 0, "blocked": 4},
+		},
+		{
+			name:   "prose where the ready page was asked for",
+			verb:   "ready",
+			answer: "error: connection refused\n",
+			want:   map[string]any{"ready": nil, "dispatchable": nil, "waiting_to_land": 0, "blocked": 4},
+		},
+		{
+			name:   "a list answer that is not JSON",
+			verb:   "list",
+			answer: `[{"id":`,
+			want:   map[string]any{"ready": 0, "dispatchable": 0, "waiting_to_land": nil, "blocked": 4},
+		},
+		{
+			name:   "prose where the blocked list was asked for",
+			verb:   "blocked",
+			answer: "error: no Dolt server\n",
+			want:   map[string]any{"ready": 0, "dispatchable": 0, "waiting_to_land": 0, "blocked": nil},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := seamEnv(t, func(_ string, args []string) ([]byte, []byte, error) {
+				if len(args) > 0 && args[len(args)-1] == "version" {
+					return []byte("bd version 1.2.2\n"), nil, nil
+				}
+				verb := bdVerb(args)
+				if verb == tc.verb {
+					return []byte(tc.answer), nil, nil
+				}
+				switch verb {
+				case "ready":
+					return []byte(readyEmpty), nil, nil
+				case "list":
+					return []byte("[]"), nil, nil
+				case "blocked":
+					return []byte(blockedTwo), nil, nil
+				}
+				return nil, nil, fmt.Errorf("unexpected bd argv %v", args)
+			})
+			cols, err := (queueSource{}).Collect(context.Background(), env)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			// Two rigs, two beads each for the answers that parse, so only the
+			// column whose command answered an unreadable shape is a gap.
+			queueWantColumns(t, cols, tc.want)
+		})
+	}
+}
+
+// The timed read bd_latency_ms measures is one bd invocation: the seam retries
+// only a failure against its ephemeral test Dolt container, and a town store
+// built with beads.New is not that, so a connection-shaped failure ends the
+// timed read rather than starting another. The column is a gap and it cost one
+// invocation, so a retry can never be inside the number the column reports.
+func TestSourceHostTimedReadIsOneBdInvocation(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	lists := 0
+	env := seamEnv(t, func(_ string, args []string) ([]byte, []byte, error) {
+		if len(args) > 0 && args[len(args)-1] == "version" {
+			return []byte("bd version 1.2.2\n"), nil, nil
+		}
+		mu.Lock()
+		lists++
+		read := lists
+		mu.Unlock()
+		if read == 1 {
+			return []byte("[]"), nil, nil
+		}
+		return nil, []byte("Error: failed to open database: invalid connection"), errors.New("exit status 1")
+	})
+	// The other probes answer, so host_probe_failures counts the bead read alone.
+	env.Run = hostFixtureEnv(fixedNow()).env().Run
+
+	got, err := newHostSource().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got["bd_latency_ms"] != nil || got["host_probe_failures"] != 1 {
+		t.Errorf("bd_latency_ms = %v, host_probe_failures = %v, want nil and 1 for a failed timed read", got["bd_latency_ms"], got["host_probe_failures"])
+	}
+	if lists != 2 {
+		t.Errorf("bd ran %d list(s) for the warm-up and the failed timed read, want 2: a town store has no test-container retry class", lists)
 	}
 }
