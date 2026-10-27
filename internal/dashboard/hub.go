@@ -839,7 +839,7 @@ func (h *Hub) pollSpend() {
 // report, the day's hours, the Claude plan and the samples its dollars come
 // from. The caller holds h.mu.
 func (h *Hub) rebuildCostChartsLocked() {
-	charts := BuildCostCharts(time.Now(), SpendPerDay(h.state.Spend), h.state.SpendHours, h.state.SpendSkipped, h.state.ClaudePlan, h.state.PlanSamples)
+	charts := BuildCostCharts(h.cfg.Now(), SpendPerDay(h.state.Spend), h.state.SpendHours, h.state.SpendSkipped, h.state.ClaudePlan, h.state.PlanSamples)
 	h.state.CostCharts = &charts
 }
 

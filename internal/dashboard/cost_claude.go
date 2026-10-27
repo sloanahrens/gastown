@@ -42,14 +42,16 @@ type costBucket struct {
 // claudeCostSeries folds the samples into plan-equivalent dollars on the
 // chart's buckets, or says why it has no series to draw.
 //
-// A step between two consecutive samples that fall in the same bucket is what
-// that bucket spent (see claudeStepDollars). A step that leaves the bucket is
-// not priced at all: the readings on either side of it straddle a stretch the
-// series did not sample, and charging the whole rise to the bucket that ended
-// the stretch would bill the missing time to the hour that happened to close it.
-// A bucket the series has no sample for is a gap, hatched by the page, because
-// "no reading" and "no spend" are different facts. A series with no sample in
-// the window draws nothing at all.
+// A step between two consecutive samples is what the bucket of the later sample
+// spent (see claudeStepDollars), whether the earlier sample is in the same
+// bucket or the one just before it: with samples that dense the step is the
+// series' own reading and crossing an hour or day boundary loses nothing. A step
+// over a bucket the series has no sample in is not priced at all: the readings
+// on either side of it straddle a stretch the series did not read, and charging
+// the whole rise to the bucket that ended the stretch would bill the missing
+// time to the hour that happened to close it. A bucket the series has no sample
+// for is a gap, hatched by the page, because "no reading" and "no spend" are
+// different facts. A series with no sample in the window draws nothing at all.
 func claudeCostSeries(buckets []costBucket, lastEnd time.Time, samples PlanSamples, weeklyUSD float64) (*CostClaudeSeries, string) {
 	switch {
 	case !samples.Read:
@@ -79,9 +81,9 @@ func claudeCostSeries(buckets []costBucket, lastEnd time.Time, samples PlanSampl
 		if b >= 0 {
 			seen[b] = true
 			inWindow = true
-			// The step is priced only inside one bucket: a step out of a bucket
-			// spans time the series did not read.
-			if i > 0 && prevBucket == b {
+			// The step is priced when no empty bucket lies between its two
+			// samples: skipping one spans time the series did not read.
+			if i > 0 && prevBucket >= 0 && b-prevBucket <= 1 {
 				dollars[b] += claudeStepDollars(ordered[i-1], s, weeklyUSD)
 			}
 		}

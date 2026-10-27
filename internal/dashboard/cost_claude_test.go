@@ -211,6 +211,30 @@ func TestBuildCostChartsLeavesARiseAcrossASampleGapUnpriced(t *testing.T) {
 	}
 }
 
+// Samples a few minutes apart that straddle an hour boundary are consecutive
+// readings, not a gap: the rise belongs to the hour of the later sample, so one
+// step an hour is not lost from the chart (gt-yxx98).
+func TestBuildCostChartsPricesARiseAcrossAnHourBoundary(t *testing.T) {
+	t.Parallel()
+
+	at := func(h, m int) time.Time { return time.Date(2026, 10, 25, h, m, 0, 0, time.Local) }
+	samples := claudeSeries(
+		claudeSampleAt(at(10, 55), 10),
+		claudeSampleAt(at(11, 5), 12), // two points across 11:00: $0.92, the 11:00 hour's
+		claudeSampleAt(at(11, 15), 13),
+	)
+	c := BuildCostCharts(claudeSeriesNow, nil, claudeSeriesHours(), 0, claudeSeriesPlan, samples).Hourly
+	if c == nil || c.Claude == nil {
+		t.Fatalf("no Claude series on the hourly chart: %+v", c)
+	}
+	if bar := claudeBar(t, c.Claude, "10:00"); bar.Gap || bar.Value != 0 {
+		t.Errorf("10:00 = %+v, want a zero bar: its only sample has no step inside the hour", bar)
+	}
+	if bar := claudeBar(t, c.Claude, "11:00"); bar.Gap || math.Abs(bar.Value-1.38) > 1e-9 {
+		t.Errorf("11:00 = %+v, want 1.38 (three points of $46.05, one crossing the boundary)", bar)
+	}
+}
+
 // A day the series has no sample for is a gap, so the page hatches it instead of
 // drawing a bar of no spend (gt-yxx98).
 func TestBuildCostChartsHatchesTheDaysWithNoClaudeSample(t *testing.T) {
