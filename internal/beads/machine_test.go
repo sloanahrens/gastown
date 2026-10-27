@@ -378,9 +378,11 @@ func TestCommandConstructorsPutBdInMachineMode(t *testing.T) {
 // the shared decoder. Every caller reads that refusal: LegacyPayload and the
 // show recovery treat it as not an envelope and keep the raw output, kvPayload
 // returns the error, and ready and events return it (gt-ij4fl review round 3).
+// The object has no error key, so it decodes cleanly once the no-data guard is
+// gone: only that guard refuses it (gt-j0ueg).
 func TestContractWithoutDataIsRefusedByEveryCaller(t *testing.T) {
 	t.Parallel()
-	out := []byte(`{"schema_version":1,"contract_version":1,"error":"not found"}`)
+	out := []byte(`{"schema_version":1,"contract_version":1}`)
 	if _, ok, err := decodeMachineEnvelope(out, "bd show"); err == nil || ok {
 		t.Fatalf("decodeMachineEnvelope = ok %v, err %v; want ok false and a no-data error", ok, err)
 	}
