@@ -87,6 +87,11 @@ func batchOpInTx(ctx context.Context, tx pgx.Tx, op api.BatchOperation, actor st
 		return api.BatchOperationResult{IDs: []string{op.Update.ID}}, nil
 	case api.BatchOpClose:
 		ids := uniqueStrings(op.Close.IDs)
+		if len(ids) == 0 {
+			// a close that names no issue has nothing to do: refuse it rather than
+			// commit a silent success that hides the caller's bug
+			return api.BatchOperationResult{}, fmt.Errorf("store: batch: a close names no issue")
+		}
 		if err := closeAllInTx(ctx, tx, ids, op.Close.Reason, op.Close.Force, actor); err != nil {
 			return api.BatchOperationResult{}, err
 		}
@@ -166,6 +171,8 @@ func batchLockIDs(ops []api.BatchOperation) []string {
 	var ids []string
 	for _, op := range ops {
 		switch {
+		case op.Op == api.BatchOpCreate && op.Create != nil && op.Create.Parent != "":
+			ids = append(ids, op.Create.Parent)
 		case op.Op == api.BatchOpUpdate && op.Update != nil:
 			ids = append(ids, op.Update.ID)
 		case op.Op == api.BatchOpComment && op.Comment != nil:
