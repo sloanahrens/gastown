@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -99,16 +100,21 @@ func omStatsTree(t *testing.T, dir string) map[string]string {
 	return tree
 }
 
-// landOmStatsFakeFS is the in-memory filesystem the write test hands the
-// command. It exposes Open and nothing else, so the command has no way to
-// write; opened records every path the command reached.
+// landOmStatsFakeFS is the in-memory filesystem the tests hand the command. It
+// exposes Open and nothing else, so the command has no way to write; opened
+// records every path the command reached, and errs names the paths whose open
+// fails for a reason other than a missing file.
 type landOmStatsFakeFS struct {
 	files  map[string]string
+	errs   map[string]error
 	opened []string
 }
 
 func (f *landOmStatsFakeFS) Open(name string) (io.ReadCloser, error) {
 	f.opened = append(f.opened, name)
+	if err, ok := f.errs[name]; ok {
+		return nil, err
+	}
 	data, ok := f.files[name]
 	if !ok {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
@@ -342,6 +348,64 @@ func TestLandOmStatsNamedSourceMustExist(t *testing.T) {
 		if out.Len() != 0 {
 			t.Errorf("%s: printed a report after the error:\n%s", tc.name, out.String())
 		}
+	}
+}
+
+// TestLandOmStatsFailsWhenTheTownCannotBeResolved: with a source left to the
+// town default, a resolver failure is the report's error, named with its cause,
+// and nothing is printed — not an empty report (gt-r05qz).
+func TestLandOmStatsFailsWhenTheTownCannotBeResolved(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("no town above the working directory")
+	findTown := func() (string, error) { return "", boom }
+
+	var out bytes.Buffer
+	err := landOmStatsReportFrom(&landOmStatsFakeFS{files: map[string]string{}}, findTown, &out, "", "", "", false)
+	if err == nil {
+		t.Fatalf("a failed town resolution read as a report:\n%s", out.String())
+	}
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "resolving the town:") {
+		t.Errorf("error %q does not carry the resolution failure %q", err, boom)
+	}
+	if out.Len() != 0 {
+		t.Errorf("printed a report after the error:\n%s", out.String())
+	}
+}
+
+// TestLandOmStatsSurfacesAnOpenError: a source whose open fails for a reason
+// other than being missing is the report's error, named with its path and its
+// cause, not an empty report (gt-r05qz).
+func TestLandOmStatsSurfacesAnOpenError(t *testing.T) {
+	t.Parallel()
+	records, log := omStatsFixtureLines(t)
+	const recordsPath, logPath = "/town/reviews.jsonl", "/town/daemon.log"
+	permission := func(path string) error {
+		return &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+	}
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		errs  map[string]error
+		want  string
+	}{
+		{"records", map[string]string{logPath: log}, map[string]error{recordsPath: permission(recordsPath)}, recordsPath},
+		{"log", map[string]string{recordsPath: records}, map[string]error{logPath: permission(logPath)}, logPath},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			err := landOmStatsReportFrom(&landOmStatsFakeFS{files: tc.files, errs: tc.errs}, omStatsNoTown(t),
+				&out, "", recordsPath, logPath, false)
+			if err == nil {
+				t.Fatalf("an open that failed with %v read as a report:\n%s", fs.ErrPermission, out.String())
+			}
+			if !errors.Is(err, fs.ErrPermission) || !strings.Contains(err.Error(), "opening "+tc.want) {
+				t.Errorf("error %q does not carry the open failure of %q", err, tc.want)
+			}
+			if out.Len() != 0 {
+				t.Errorf("printed a report after the error:\n%s", out.String())
+			}
+		})
 	}
 }
 
