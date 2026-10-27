@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -400,6 +401,21 @@ type agentBead struct {
 	Labels   []string `json:"labels"`
 }
 
+// agentBeadFromIssue converts a seam record into the agent bead shape the
+// router's group filters read. WispType stays empty: bd list spells an issue's
+// type issue_type, which is what Type carries.
+func agentBeadFromIssue(issue *beads.Issue) *agentBead {
+	return &agentBead{
+		ID:          issue.ID,
+		Title:       issue.Title,
+		Description: issue.Description,
+		Status:      issue.Status,
+		CreatedBy:   issue.CreatedBy,
+		Type:        issue.Type,
+		Labels:      issue.Labels,
+	}
+}
+
 // agentBeadToAddress converts an agent bead to a mail address, or "" when the
 // bead names a retired role: a surviving hq-mayor bead must not make @town
 // resolve to an address that no longer exists and fail the whole broadcast
@@ -781,19 +797,15 @@ func (r *Router) queryAgents(descContains string) ([]*agentBead, error) {
 // queryAgentsInDir queries agent beads in a specific beads directory with optional description filtering.
 // Queries both the issues and wisps tables, merging results.
 func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, error) {
-	args := []string{"list", "--label=gt:agent", "--json", "--flat", "--limit=0"}
+	// Query issues table (backward compat during migration). List has no
+	// description filter, so matchesDescContains below applies the same
+	// case-insensitive substring rule.
+	issueBeads, issuesErr := bdStore(r.bd, filepath.Dir(beadsDir), beadsDir).
+		List(beads.ListOptions{Label: "gt:agent"})
 
-	if descContains != "" {
-		args = append(args, "--desc-contains="+descContains)
-	}
-
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-
-	// Query issues table (backward compat during migration)
-	stdout, issuesErr := runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
-
-	// Also query the wisps table for migrated agent beads.
+	// Also query the wisps table for migrated agent beads. `mol wisp list` is a
+	// mol verb, not a List filter, so it stays on the runner until B10c
+	// (gt-p85pw.18) converts the mol calls.
 	wispCtx, wispCancel := bdReadCtx()
 	defer wispCancel()
 	wispOut, wispErr := runBdCommand(wispCtx, r.bd, []string{"mol", "wisp", "list", "--json"}, filepath.Dir(beadsDir), beadsDir)
@@ -823,18 +835,19 @@ func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, 
 	}
 
 	// Then issues (backward compat, skip duplicates)
-	if len(stdout) > 0 {
-		var issueAgents []*agentBead
-		if err := json.Unmarshal(stdout, &issueAgents); err != nil {
-			queryErrors = append(queryErrors, fmt.Sprintf("parse agent list: %v", err))
-		}
-		for _, agent := range issueAgents {
-			if !seenIDs[agent.ID] {
-				agents = append(agents, agent)
-			}
-		}
-	} else if issuesErr != nil {
+	if issuesErr != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("list agents: %v", issuesErr))
+	} else {
+		for _, issue := range issueBeads {
+			if issue == nil || seenIDs[issue.ID] {
+				continue
+			}
+			agent := agentBeadFromIssue(issue)
+			if !matchesDescContains(agent, descContains) {
+				continue
+			}
+			agents = append(agents, agent)
+		}
 	}
 
 	// A failed query is reported only when nothing was found at all: one
@@ -901,25 +914,13 @@ func (r *Router) wispAgentBeads(beadsDir string, out []byte) ([]*agentBead, erro
 		return agents, nil
 	}
 
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	showArgs := append([]string{"show"}, needFull...)
-	showArgs = append(showArgs, "--json")
-	showOut, showErr := runBdCommand(ctx, r.bd, showArgs, filepath.Dir(beadsDir), beadsDir)
+	byID, showErr := bdStore(r.bd, filepath.Dir(beadsDir), beadsDir).ShowMultiple(needFull)
 	if showErr != nil {
 		return confirmedAgents(agents, unconfirmed), fmt.Errorf("read wisp agents in %s: %w", beadsDir, showErr)
 	}
-	var full []*agentBead
-	if err := json.Unmarshal(showOut, &full); err != nil {
-		return confirmedAgents(agents, unconfirmed), fmt.Errorf("parse wisp agents in %s: %w", beadsDir, err)
-	}
-	byID := make(map[string]*agentBead, len(full))
-	for _, bead := range full {
-		byID[bead.ID] = bead
-	}
 	for _, agent := range agents {
 		bead, ok := byID[agent.ID]
-		if !ok {
+		if !ok || bead == nil {
 			continue
 		}
 		if bead.Description != "" {
@@ -1763,30 +1764,27 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 		return err
 	}
 
-	// Query existing messages in this announce channel
-	// Use bd list with labels filter to find messages with gt:message and announce:<name> labels
-	args := []string{"list",
-		"--labels=gt:message,announce:" + announceName,
-		"--json",
-		"--limit=0", // Get all
-		"--sort=created",
-		"--asc", // Oldest first
-	}
-
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	stdout, err := runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
+	// Query existing messages in this announce channel: the messages carrying
+	// both gt:message and announce:<name>.
+	messages, err := bdStore(r.bd, filepath.Dir(beadsDir), beadsDir).List(beads.ListOptions{
+		Labels: []string{"gt:message", "announce:" + announceName},
+	})
 	if err != nil {
 		return fmt.Errorf("querying announce messages: %w", err)
 	}
-
-	// Parse message list
-	var messages []struct {
-		ID string `json:"id"`
+	// Oldest first: the prune closes the front of the list, and List returns
+	// its records unordered. A sparse store may place a nil record in the
+	// slice; it carries no message to close and no order to read.
+	live := messages[:0]
+	for _, message := range messages {
+		if message != nil {
+			live = append(live, message)
+		}
 	}
-	if err := json.Unmarshal(stdout, &messages); err != nil {
-		return fmt.Errorf("parsing announce messages: %w", err)
-	}
+	messages = live
+	sort.SliceStable(messages, func(i, j int) bool {
+		return announceOrderKeyOf(messages[i]).before(announceOrderKeyOf(messages[j]))
+	})
 
 	// Calculate how many to delete (we're about to add 1 more)
 	// If we have N messages and retainCount is R, we need to keep at most R-1 after pruning
@@ -1806,6 +1804,35 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 	}
 
 	return nil
+}
+
+// announceOrderKey is the sort key pruneAnnounce orders an announce channel's
+// messages by: the created time when it parses, with the raw value breaking
+// ties. A record whose time does not parse is not evidence of being old, so
+// every dated record sorts before every undated one and the undated sort by
+// raw value among themselves — the prune closes what it can date, and keeps
+// the rest. Taking a key first keeps the comparison a total order; branching
+// inside the comparator — times for one pair, raw strings for another — is not
+// transitive, which leaves the order to the sort's internals.
+type announceOrderKey struct {
+	dated   bool
+	created time.Time
+	raw     string
+}
+
+func announceOrderKeyOf(issue *beads.Issue) announceOrderKey {
+	created, dated := parseWispTimestamp(issue.CreatedAt)
+	return announceOrderKey{dated: dated, created: created, raw: issue.CreatedAt}
+}
+
+func (k announceOrderKey) before(other announceOrderKey) bool {
+	if k.dated != other.dated {
+		return k.dated
+	}
+	if !k.created.Equal(other.created) {
+		return k.created.Before(other.created)
+	}
+	return k.raw < other.raw
 }
 
 // isSelfMail returns true if sender and recipient are the same identity.

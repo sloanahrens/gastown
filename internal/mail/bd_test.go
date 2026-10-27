@@ -1,8 +1,8 @@
 package mail
 
 import (
-	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,63 +177,112 @@ func TestBdError_ImplementsErrorInterface(t *testing.T) {
 	_ = err.Error() // Should compile and not panic
 }
 
-func TestParseBeadsListOutput(t *testing.T) {
+func TestBeadsMessagesFromIssues(t *testing.T) {
 	t.Parallel()
 	created := time.Date(2026, 6, 12, 12, 0, 0, 0, time.UTC)
-	valid, err := json.Marshal([]BeadsMessage{{
-		ID:        "msg-1",
-		Title:     "Hello",
-		Status:    "open",
-		Priority:  2,
-		CreatedAt: created,
-		Labels:    []string{"gt:message", "from:mayor/"},
-	}})
-	if err != nil {
-		t.Fatalf("marshal valid message: %v", err)
-	}
 
-	tests := []struct {
-		name    string
-		input   []byte
-		wantLen int
-		wantErr bool
-	}{
-		{name: "empty", input: nil},
-		{name: "plain no issues", input: []byte("No issues found.\n")},
-		{name: "null", input: []byte("null\n")},
-		{name: "empty array", input: []byte("[]\n")},
-		{name: "valid array", input: valid, wantLen: 1},
-		{name: "non json", input: []byte("warning: no rows")},
-		{name: "malformed json", input: []byte("[{bad json]"), wantErr: true},
-	}
+	got := beadsMessagesFromIssues([]*beads.Issue{
+		{
+			ID:        "msg-1",
+			Title:     "Hello",
+			Status:    "open",
+			Priority:  2,
+			CreatedAt: created.Format(time.RFC3339),
+			Labels:    []string{"gt:message", "from:mayor/"},
+		},
+		nil,
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseBeadsListOutput(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseBeadsListOutput() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if len(got) != tt.wantLen {
-				t.Fatalf("parseBeadsListOutput() returned %d messages, want %d", len(got), tt.wantLen)
-			}
-		})
-	}
-
-	got, err := parseBeadsListOutput(valid)
-	if err != nil {
-		t.Fatalf("parse valid output: %v", err)
-	}
 	if len(got) != 1 {
-		t.Fatalf("parse valid output returned %d messages, want 1", len(got))
+		t.Fatalf("beadsMessagesFromIssues() returned %d messages, want 1", len(got))
 	}
 	if got[0].ID != "msg-1" || got[0].Title != "Hello" || got[0].Status != "open" || got[0].Priority != 2 {
-		t.Fatalf("parse valid output returned unexpected message: %#v", got[0])
+		t.Fatalf("beadsMessagesFromIssues() returned unexpected message: %#v", got[0])
 	}
 	if !got[0].CreatedAt.Equal(created) {
 		t.Fatalf("CreatedAt = %v, want %v", got[0].CreatedAt, created)
 	}
 	if len(got[0].Labels) != 2 || got[0].Labels[0] != "gt:message" || got[0].Labels[1] != "from:mayor/" {
 		t.Fatalf("Labels = %#v, want gt:message/from:mayor/", got[0].Labels)
+	}
+}
+
+// TestIsMessageNotFoundErr: only bd's own absence answer becomes
+// ErrMessageNotFound. Text that merely mentions something missing, an id other
+// than the one asked for, and an error that did not come from bd are all read
+// failures, not missing messages.
+func TestIsMessageNotFoundErr(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		id   string
+		want bool
+	}{
+		{name: "typed absence", err: beads.ErrNotFound, id: "gt-msg", want: true},
+		{name: "text absence", err: &beads.CLIError{Stderr: []byte("Error: no issue found\n")}, id: "gt-msg", want: true},
+		{name: "names the id", err: &beads.CLIError{Stderr: []byte("Error: issue gt-msg not found\n")}, id: "gt-msg", want: true},
+		{name: "names another id", err: &beads.CLIError{Stderr: []byte("Error: issue gt-other not found\n")}, id: "gt-msg"},
+		{name: "unrelated not found", err: &beads.CLIError{Stderr: []byte("Error: config file not found\n")}, id: "gt-msg"},
+		{name: "store failure", err: &beads.CLIError{Stderr: []byte("connection refused\n")}, id: "gt-msg"},
+		{name: "not from bd", err: fmt.Errorf("issue gt-msg not found"), id: "gt-msg"},
+		{name: "wrapped bd answer", err: fmt.Errorf("read: %w", &beads.CLIError{Stderr: []byte("Error: no issue found\n")}), id: "gt-msg", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isMessageNotFoundErr(tt.err, tt.id); got != tt.want {
+				t.Fatalf("isMessageNotFoundErr(%v, %q) = %v, want %v", tt.err, tt.id, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBdStoreListReadsOnlyJSON: the parser that read bd's list output is the
+// seam's now, and what mail owes is the behavior it had — an answer is a JSON
+// array, and anything else is a failed read rather than an empty one. The
+// "No issues found." text bd prints without --flat used to read as an empty
+// mailbox; it now names the failure, since a mailbox that cannot be read is
+// not a mailbox with no mail.
+func TestBdStoreListReadsOnlyJSON(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		stdout  string
+		wantLen int
+		wantErr bool
+	}{
+		{name: "empty output", stdout: "", wantErr: true},
+		{name: "human text", stdout: "No issues found.\n", wantErr: true},
+		{name: "null", stdout: "null\n", wantErr: true},
+		{name: "malformed", stdout: "[{bad json]", wantErr: true},
+		{name: "empty array", stdout: "[]\n"},
+		{
+			name:    "records",
+			stdout:  `[{"id":"msg-1","title":"Hello","status":"open","labels":["gt:message"]}]`,
+			wantLen: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+				if argv := strings.Join(c.Args, " "); argv != "list --json --label=gt:message --limit=0 --flat" {
+					return "", "unexpected bd args: " + argv, 1
+				}
+				return tt.stdout, "", 0
+			}}
+
+			issues, err := bdStore(bd.run, t.TempDir(), t.TempDir()).List(beads.ListOptions{Label: "gt:message"})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("List error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if len(issues) != tt.wantLen {
+				t.Fatalf("List returned %d issues, want %d", len(issues), tt.wantLen)
+			}
+		})
 	}
 }
 

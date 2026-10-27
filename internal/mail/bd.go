@@ -138,6 +138,24 @@ func firstArg(args []string) string {
 	return ""
 }
 
+// bdStore returns the beads client mail reads through for one beads directory:
+// a plain wrapper over mail's own runner (the real bd in a detached process
+// group, or the one a test injects), the read-only environment, the stale-PID
+// pre-flight, and the read deadline. Verbs the seam cannot express stay on
+// runBdCommand.
+func bdStore(run bdRunner, workDir, beadsDir string) beads.Client {
+	if run == nil {
+		run = runBdProcess
+	}
+	env := bdSubprocessEnv(beads.WithMachineEnvIn(workDir, nil), beadsDir, true, nil)
+	store := beads.NewPlain(workDir, env, beads.WithDirRunner(
+		func(ctx context.Context, dir string, args []string) ([]byte, []byte, error) {
+			beads.CleanStaleDoltServerPID(beadsDir)
+			return run(ctx, bdCall{Dir: dir, Env: env, Args: args})
+		}))
+	return store.WithProcessGroup().WithTimeout(bdReadTimeout)
+}
+
 func bdSubprocessEnv(baseEnv []string, beadsDir string, readOnly bool, extraEnv []string) []string {
 	base := append(append([]string{}, baseEnv...), extraEnv...)
 	mode := beads.MutationRouting

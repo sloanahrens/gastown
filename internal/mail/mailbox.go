@@ -2,7 +2,6 @@ package mail
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/runtime"
 )
 
@@ -241,26 +239,17 @@ func isMissingWispTable(err error) bool {
 }
 
 func (m *Mailbox) queryIssueMessagesByAssignee(beadsDir string, identities []string) ([]BeadsMessage, error) {
+	store := bdStore(m.bd, m.workDir, beadsDir)
 	var messages []BeadsMessage
 	for _, id := range identities {
-		args := []string{"list",
-			"--label", "gt:message",
-			"--assignee", id,
-			"--json",
-			"--limit", "0",
-		}
-
-		ctx, cancel := bdReadCtx()
-		stdout, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
-		cancel()
+		issues, err := store.List(beads.ListOptions{
+			Label:    "gt:message",
+			Assignee: id,
+		})
 		if err != nil {
 			return nil, err
 		}
-		msgs, err := parseBeadsListOutput(stdout)
-		if err != nil {
-			return nil, err
-		}
-		messages = append(messages, msgs...)
+		messages = append(messages, beadsMessagesFromIssues(issues)...)
 	}
 	return messages, nil
 }
@@ -269,25 +258,16 @@ func (m *Mailbox) queryIssueMessagesByAssignee(beadsDir string, identities []str
 // identity does not stop the others; the first failure is returned beside the
 // partial result.
 func (m *Mailbox) queryIssueMessagesByCC(beadsDir string, identities []string) ([]BeadsMessage, error) {
+	store := bdStore(m.bd, m.workDir, beadsDir)
 	var messages []BeadsMessage
 	var firstErr error
 	for _, id := range identities {
-		args := []string{"list",
-			"--label", "gt:message",
-			"--label", "cc:" + id,
-			"--json",
-			"--limit", "0",
-		}
-
-		ctx, cancel := bdReadCtx()
-		stdout, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
-		cancel()
+		issues, err := store.List(beads.ListOptions{
+			Labels: []string{"gt:message", "cc:" + id},
+		})
 		if err == nil {
-			var msgs []BeadsMessage
-			if msgs, err = parseBeadsListOutput(stdout); err == nil {
-				messages = append(messages, msgs...)
-				continue
-			}
+			messages = append(messages, beadsMessagesFromIssues(issues)...)
+			continue
 		}
 		if firstErr == nil {
 			firstErr = err
@@ -305,20 +285,35 @@ func (m *Mailbox) warnf(format string, args ...any) {
 	_, _ = fmt.Fprintf(w, format, args...)
 }
 
-func parseBeadsListOutput(stdout []byte) ([]BeadsMessage, error) {
-	trimmed := bytes.TrimSpace(stdout)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("No issues found.")) {
-		return nil, nil
+// beadsMessageFromIssue converts a seam record into the message mail reads.
+func beadsMessageFromIssue(issue *beads.Issue) BeadsMessage {
+	bm := BeadsMessage{
+		ID:          issue.ID,
+		Title:       issue.Title,
+		Description: issue.Description,
+		Status:      issue.Status,
+		Priority:    issue.Priority,
+		Assignee:    issue.Assignee,
+		Labels:      issue.Labels,
+		Wisp:        issue.Ephemeral,
 	}
-	if !isJSON(trimmed) {
-		return nil, nil
+	if t, ok := parseWispTimestamp(issue.CreatedAt); ok {
+		bm.CreatedAt = t
 	}
+	return bm
+}
 
-	var msgs []BeadsMessage
-	if err := json.Unmarshal(trimmed, &msgs); err != nil {
-		return nil, err
+// beadsMessagesFromIssues converts a seam read into messages, skipping a nil
+// record a sparse store may return in place.
+func beadsMessagesFromIssues(issues []*beads.Issue) []BeadsMessage {
+	messages := make([]BeadsMessage, 0, len(issues))
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		messages = append(messages, beadsMessageFromIssue(issue))
 	}
-	return msgs, nil
+	return messages
 }
 
 func appendBeadsMessages(messages []*Message, seen map[string]bool, msgs []BeadsMessage, includeHooked bool) []*Message {
@@ -358,78 +353,72 @@ type wispQueryMessage struct {
 	ccMatch       bool
 }
 
-// queryWispMessages queries ephemeral messages once across all identity variants.
+// queryWispMessages queries ephemeral messages across the identity variants.
 // Protocol/lifecycle messages are stored as wisps by shouldBeWisp(), but bd list
 // only queries the issues table.
 func (m *Mailbox) queryWispMessages(beadsDir string, identities []string) ([]wispQueryMessage, error) {
+	return queryWispMessages(bdStore(m.bd, m.workDir, beadsDir), identities)
+}
+
+// queryWispMessages reads the open and hooked gt:message wisps assigned to, or
+// cc'ing, any of identities. The status set is pushed to the query; the
+// identity set stays in Go, because no List filter answers "assigned to one of
+// these identities or carrying one of their cc: labels", and this read is
+// shared with BatchMailSummaries, whose two-call contract holds whatever the
+// address count (gt-978i). What comes back is therefore every live gt:message
+// wisp, not every wisp, and each record carries the flags its own fields
+// decide (gt-p85pw.16).
+func queryWispMessages(store beads.Client, identities []string) ([]wispQueryMessage, error) {
 	if len(identities) == 0 {
 		return nil, nil
 	}
-
-	return m.runWispSQL(beadsDir, beadsql.MailWisps(identities))
-}
-
-// wispSQLRow represents a row from the wisps SQL query with aggregated labels.
-type wispSQLRow struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
-	Priority    int    `json:"priority"`
-	Assignee    string `json:"assignee"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
-	LabelsCSV   string `json:"labels_csv"`
-	AssigneeHit int    `json:"assignee_match"`
-	CCHit       int    `json:"cc_match"`
-}
-
-// runWispSQL executes a bd sql --json query and converts results to wisp query messages.
-func (m *Mailbox) runWispSQL(beadsDir string, query beadsql.Query) ([]wispQueryMessage, error) {
-	args, err := query.BdArgs("--json")
-	if err != nil {
-		return nil, err
+	assigned := make(map[string]bool, len(identities))
+	watched := make(map[string]bool, len(identities))
+	for _, id := range identities {
+		assigned[id] = true
+		watched["cc:"+id] = true
 	}
-	ctx, cancel := bdReadCtx()
-	stdout, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
-	cancel()
+
+	issues, err := store.List(beads.ListOptions{
+		Ephemeral: true,
+		Label:     "gt:message",
+		Status:    wispMessageStatuses,
+	})
 	if err != nil {
 		return nil, err // Wisps table may not exist yet.
 	}
-	if !isJSON(stdout) {
-		return nil, nil
-	}
 
-	var rows []wispSQLRow
-	if err := json.Unmarshal(stdout, &rows); err != nil {
-		return nil, err
-	}
-
-	msgs := make([]wispQueryMessage, 0, len(rows))
-	for _, row := range rows {
-		bm := BeadsMessage{
-			ID:          row.ID,
-			Title:       row.Title,
-			Description: row.Description,
-			Status:      row.Status,
-			Priority:    row.Priority,
-			Assignee:    row.Assignee,
-			Wisp:        true,
+	var out []wispQueryMessage
+	for _, issue := range issues {
+		if issue == nil {
+			continue
 		}
-		if t, ok := parseWispTimestamp(row.CreatedAt); ok {
-			bm.CreatedAt = t
+		ccMatch := false
+		for _, label := range issue.Labels {
+			if watched[label] {
+				ccMatch = true
+				break
+			}
 		}
-		if row.LabelsCSV != "" {
-			bm.Labels = strings.Split(row.LabelsCSV, ",")
+		assigneeMatch := assigned[issue.Assignee]
+		if !assigneeMatch && !ccMatch {
+			continue
 		}
-		msgs = append(msgs, wispQueryMessage{
+		bm := beadsMessageFromIssue(issue)
+		// A wisp read is ephemeral whatever the record's own flag says.
+		bm.Wisp = true
+		out = append(out, wispQueryMessage{
 			message:       bm,
-			assigneeMatch: row.AssigneeHit != 0,
-			ccMatch:       row.CCHit != 0,
+			assigneeMatch: assigneeMatch,
+			ccMatch:       ccMatch,
 		})
 	}
-	return msgs, nil
+	return out, nil
 }
+
+// wispMessageStatuses are the statuses mail reads as live mail: open, or
+// hooked (auto-assigned handoff mail).
+const wispMessageStatuses = "open,hooked"
 
 func parseWispTimestamp(value string) (time.Time, bool) {
 	for _, layout := range []string{
@@ -469,35 +458,63 @@ type issueBatchRow struct {
 	IsRead      int    `json:"is_read"`
 }
 
-// queryIssueMessagesBatch fetches all open/hooked gt:message issues assigned
-// to, or CC'ing, any of the given identities in a single bd sql call — O(1)
-// regardless of len(identities), unlike queryIssueMessagesByAssignee/
-// queryIssueMessagesByCC which issue one bd list call per identity. Used by
-// Router.BatchMailSummaries (see gt-978i).
+// queryIssueMessagesBatch fetches the open/hooked gt:message issues assigned
+// to, or CC'ing, any of the given identities, one row per message. It reads
+// the open and hooked gt:message issues in a single List call (the comma status
+// set bd list accepts) and matches the identity set in Go: List cannot ask for
+// "assignee in this set", and one read keeps the call count off the address
+// list the dashboard asks about (gt-978i). Used by Router.BatchMailSummaries.
 func queryIssueMessagesBatch(run bdRunner, workDir, beadsDir string, identities []string) ([]issueBatchRow, error) {
 	if len(identities) == 0 {
 		return nil, nil
 	}
 
-	args, err := beadsql.MailIssues(identities).BdArgs("--json")
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	stdout, err := runBdCommand(ctx, run, args, workDir, beadsDir)
-	if err != nil {
-		return nil, err
-	}
-	if !isJSON(stdout) {
-		return nil, nil
+	assigned := make(map[string]bool, len(identities))
+	ccLabels := make(map[string]bool, len(identities))
+	for _, id := range identities {
+		assigned[id] = true
+		ccLabels["cc:"+id] = true
 	}
 
-	var rows []issueBatchRow
-	if err := json.Unmarshal(stdout, &rows); err != nil {
+	issues, err := bdStore(run, workDir, beadsDir).List(beads.ListOptions{
+		Status: "open,hooked",
+		Label:  "gt:message",
+	})
+	if err != nil {
 		return nil, err
 	}
+
+	rows := make([]issueBatchRow, 0, len(issues))
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		var ccs []string
+		for _, label := range issue.Labels {
+			if ccLabels[label] {
+				ccs = append(ccs, label)
+			}
+		}
+		if !assigned[issue.Assignee] && len(ccs) == 0 {
+			continue
+		}
+		rows = append(rows, issueBatchRow{
+			ID:          issue.ID,
+			Title:       issue.Title,
+			Status:      issue.Status,
+			Assignee:    issue.Assignee,
+			CCLabelsCSV: strings.Join(ccs, ","),
+			IsRead:      boolToInt(beads.HasLabel(issue, "read")),
+		})
+	}
 	return rows, nil
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (m *Mailbox) listLegacy() ([]*Message, error) {
@@ -583,32 +600,42 @@ func (m *Mailbox) getBeads(id string) (*Message, error) {
 
 // getFromDir retrieves a message from a beads directory.
 func (m *Mailbox) getFromDir(id, beadsDir string) (*Message, error) {
-	args := []string{"show", id, "--json"}
-
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	stdout, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
+	issue, err := bdStore(m.bd, m.workDir, beadsDir).Show(id)
 	if err != nil {
-		if bdErr, ok := err.(*bdError); ok && (bdErr.ContainsError("not found") || bdErr.ContainsError("no issue found") || bdErr.ContainsError("no issue found")) {
+		if isMessageNotFoundErr(err, id) {
 			return nil, ErrMessageNotFound
 		}
 		return nil, err
 	}
-
-	// bd show --json returns an array
-	if !isJSON(stdout) {
-		return nil, ErrMessageNotFound
-	}
-	var bms []BeadsMessage
-	if err := json.Unmarshal(stdout, &bms); err != nil {
-		return nil, err
-	}
-	if len(bms) == 0 {
+	if issue == nil {
 		return nil, ErrMessageNotFound
 	}
 
 	// Wisp status comes from beads issue.wisp field via ToMessage()
-	return bms[0].ToMessage(), nil
+	bm := beadsMessageFromIssue(issue)
+	return bm.ToMessage(), nil
+}
+
+// isMessageNotFoundErr reports a read bd answered with "no such issue", which
+// mail reports as ErrMessageNotFound: the seam's typed absence, or the text an
+// older bd prints when it fails with no envelope to classify. A failure that
+// merely mentions something not being found is not that answer — an older bd
+// says "no issue found", or names the id it could not find — and neither is
+// any error that did not come from bd at all: mail says the read failed rather
+// than that the message does not exist.
+func isMessageNotFoundErr(err error, id string) bool {
+	if errors.Is(err, beads.ErrNotFound) {
+		return true
+	}
+	var cliErr *beads.CLIError
+	if !errors.As(err, &cliErr) {
+		return false
+	}
+	text := strings.ToLower(string(cliErr.Stderr))
+	if strings.Contains(text, "no issue found") {
+		return true
+	}
+	return id != "" && strings.Contains(text, "not found") && strings.Contains(text, strings.ToLower(id))
 }
 
 func (m *Mailbox) getLegacy(id string) (*Message, error) {
