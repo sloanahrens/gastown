@@ -1084,9 +1084,10 @@ func WithActor(actor string) Option {
 // WithCallContext parents every bd call's deadline on ctx, so a caller with
 // its own budget (the startup handshake, a doctor check) spends that budget
 // instead of the seam's subprocess budget. A nil ctx keeps the subprocess
-// budget alone. A call ctx ended while bd waited on the database is
-// classified the way a subprocess deadline kill is
-// (beads.ErrStoreUnavailable).
+// budget alone. A call the budget kills is an ErrUnavailable failure that
+// carries context.DeadlineExceeded, as a subprocess deadline kill is; only a
+// read that consults the database classifies the kill as the store not
+// answering (SchemaLevel, ErrStoreUnavailable).
 func WithCallContext(ctx context.Context) Option {
 	return func(f *beadsFields) { f.callCtx = ctx }
 }

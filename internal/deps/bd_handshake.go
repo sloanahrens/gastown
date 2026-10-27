@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,12 +43,27 @@ const BDInstallHint = "install the beads fork's bd with `make safe-install` from
 // it says about itself, and the migration level of the database it serves.
 //
 // Build the store with the handshake's context (beads.WithCallContext), so the
-// handshake's budget bounds the bd calls and not only the retry wait; a read
-// the budget ended while the store was silent is an error wrapping
-// beads.ErrStoreUnavailable.
+// handshake's budget bounds the bd calls and not only the retry wait.
+// SchemaLevel reports a read the budget ended while the store was silent as an
+// error wrapping beads.ErrStoreUnavailable; any other read the budget ends is
+// an error carrying context.DeadlineExceeded.
 type Store interface {
 	Version() (beads.VersionInfo, error)
 	SchemaLevel() (int, error)
+}
+
+// NewHandshakeStore returns the store CheckBDHandshake reads for the town at
+// townRoot: the town's own database, with the BEADS target variables stripped
+// from the inherited environment, so a stale BEADS_DIR or BEADS_DOLT_* in the
+// caller's shell cannot steer a startup gate to another database, and with
+// ctx parenting every bd call. opts are appended for a test that swaps the bd
+// those calls run through (beads.WithRunner); production passes none.
+func NewHandshakeStore(ctx context.Context, townRoot string, opts ...beads.Option) Store {
+	all := append([]beads.Option{
+		beads.WithEnv(beads.StripBDTargetEnv(os.Environ())),
+		beads.WithCallContext(ctx),
+	}, opts...)
+	return beads.New(townRoot, all...)
 }
 
 // BDHandshake is a bd that passed: its version report and the migration
@@ -85,6 +101,11 @@ func checkBDHandshake(ctx context.Context, bdPath string, store Store, storeRetr
 	if err != nil {
 		if errors.Is(err, beads.ErrNotInstalled) {
 			return nil, refuseBD(hs, false, "bd not found on PATH")
+		}
+		// A version read the caller's budget ended did not fail: bd never
+		// answered, so the operator gets the budget, not the install hint.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, refuseHandshakeBudget(hs, "the handshake budget ended before bd reported its version", ctxErr)
 		}
 		return nil, refuseBD(hs, false, err.Error())
 	}
@@ -170,6 +191,18 @@ func refuseDoltUnreachable(hs *BDHandshake, cause error) error {
 	}
 	return fmt.Errorf("%w: %w: %w\n  found:    bd at %s passed its version check, so the bd on PATH is not the problem\n  fix:      check Dolt with `gt dolt status`, then start it with `gt dolt start`",
 		ErrBDHandshake, ErrDoltUnreachable, cause, bdPath)
+}
+
+// refuseHandshakeBudget is the refusal when the caller's budget ended before
+// bd answered. bd is not known to be wrong, so the message names the budget and
+// the thing to check instead of sending the operator to reinstall it.
+func refuseHandshakeBudget(hs *BDHandshake, what string, cause error) error {
+	bdPath := hs.Path
+	if bdPath == "" {
+		bdPath = "bd"
+	}
+	return fmt.Errorf("%w: %s (%v)\n  found:    bd at %s did not answer\n  fix:      check that bd runs, or raise the check's timeout",
+		ErrBDHandshake, what, cause, bdPath)
 }
 
 func refuseBD(hs *BDHandshake, dbRead bool, reason string) error {

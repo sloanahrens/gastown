@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -262,9 +264,20 @@ func TestCheckBDHandshake_JudgesWhatTheSeamProduces(t *testing.T) {
 			want:   []string{"database schema is ahead of this bd", "make safe-install"},
 		},
 		{
-			name:   "version read fails",
-			answer: storeAnswer("", "bd: boom", exitStatus(2)),
-			want:   []string{"boom", "make safe-install"},
+			// The version read itself fails, so no database read follows.
+			name: "version read fails",
+			answer: func(_ context.Context, args []string) ([]byte, []byte, error) {
+				if len(args) == 2 && args[0] == "--allow-stale" {
+					return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
+				}
+				return nil, []byte("bd: boom"), exitStatus(2)
+			},
+			want: []string{"bd: boom", "make safe-install"},
+		},
+		{
+			name:   "database read fails",
+			answer: storeAnswer("", "bd sql: boom", exitStatus(2)),
+			want:   []string{"bd sql: boom", "make safe-install"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -307,34 +320,117 @@ func TestCheckBDHandshake_TheReadsCarryTheHandshakeBudget(t *testing.T) {
 	t.Parallel()
 	const budget = 5 * time.Second
 	deadlines := make(chan time.Time, 2)
-	answer := func(ctx context.Context, args []string) ([]byte, []byte, error) {
-		switch {
-		case len(args) == 2 && args[0] == "--allow-stale":
-			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
-		case args[0] == "version":
-			return []byte(forkReportJSON), nil, nil
-		}
+	record := func(ctx context.Context) {
 		if deadline, ok := ctx.Deadline(); ok {
 			select {
 			case deadlines <- deadline:
 			default:
 			}
 		}
+	}
+	answer := func(ctx context.Context, args []string) ([]byte, []byte, error) {
+		switch {
+		case len(args) == 2 && args[0] == "--allow-stale":
+			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
+		case args[0] == "version":
+			record(ctx)
+			return []byte(forkReportJSON), nil, nil
+		}
+		record(ctx)
 		return nil, []byte("boom"), exitStatus(2)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	store := beads.New(t.TempDir(), beads.WithRunner(answer), beads.WithCallContext(ctx))
+	store := NewHandshakeStore(ctx, t.TempDir(), beads.WithRunner(answer))
 	if _, err := checkBDHandshake(ctx, "/usr/local/bin/bd", store, storeRetryNow); err == nil {
 		t.Fatal("want refusal, got nil")
 	}
-	select {
-	case deadline := <-deadlines:
-		if until := time.Until(deadline); until > 2*budget {
-			t.Errorf("the bd read's deadline is %s away, want it under the handshakes %s budget", until, budget)
+	for _, read := range []string{"version", "database"} {
+		select {
+		case deadline := <-deadlines:
+			if until := time.Until(deadline); until > 2*budget {
+				t.Errorf("the %s read's deadline is %s away, want it under the handshakes %s budget", read, until, budget)
+			}
+		default:
+			t.Fatalf("the %s read ran without the handshake context's deadline", read)
 		}
-	default:
-		t.Fatal("the bd read ran without the handshake context's deadline")
+	}
+}
+
+// TestNewHandshakeStoreReadsATownLayout: the store the startup gate and the
+// doctor check build answers the handshake from a town root, asking bd for the
+// version report and the database level in that order. Only the bd process is
+// swapped, so the construction those two production callers share is what the
+// case drives.
+func TestNewHandshakeStoreReadsATownLayout(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
+		// The seam probes --allow-stale before each read; the reads are what
+		// this case is about.
+		if len(args) > 1 && args[0] == "--allow-stale" {
+			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
+		}
+		calls = append(calls, strings.Join(args, " "))
+		switch args[0] {
+		case "version":
+			return []byte(forkReportJSON), nil, nil
+		case "sql":
+			return []byte(`[{"version": 66}]`), nil, nil
+		}
+		return nil, []byte("boom"), exitStatus(2)
+	}
+	store := NewHandshakeStore(context.Background(), townRoot, beads.WithRunner(answer))
+	hs, err := CheckBDHandshake(context.Background(), "/usr/local/bin/bd", store)
+	if err != nil {
+		t.Fatalf("CheckBDHandshake over the handshake store: %v", err)
+	}
+	if hs.DBSchema != 66 {
+		t.Errorf("DBSchema = %d, want 66", hs.DBSchema)
+	}
+	if len(calls) != 2 || !strings.HasPrefix(calls[0], "version --json") || !strings.HasPrefix(calls[1], "sql --json") {
+		t.Errorf("bd calls = %q, want one version read then one sql read", calls)
+	}
+}
+
+// TestCheckBDHandshake_VersionReadKilledByTheBudget: a version read the
+// caller's budget ended is the budget expiring, not a bd the operator should
+// reinstall, so the refusal names neither the install hint nor Dolt.
+func TestCheckBDHandshake_VersionReadKilledByTheBudget(t *testing.T) {
+	t.Parallel()
+	answer := func(ctx context.Context, args []string) ([]byte, []byte, error) {
+		if len(args) == 2 && args[0] == "--allow-stale" {
+			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
+		}
+		<-ctx.Done()
+		return nil, nil, fmt.Errorf("the version read did not finish: %w", ctx.Err())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	store := NewHandshakeStore(ctx, t.TempDir(), beads.WithRunner(answer))
+	_, err := checkBDHandshake(ctx, "/usr/local/bin/bd", store, storeRetryNow)
+	if err == nil {
+		t.Fatal("want refusal, got nil")
+	}
+	if !errors.Is(err, ErrBDHandshake) {
+		t.Errorf("refusal does not wrap ErrBDHandshake: %v", err)
+	}
+	if errors.Is(err, ErrDoltUnreachable) {
+		t.Errorf("a version read consults no database, so Dolt is not what failed: %v", err)
+	}
+	for _, want := range []string{"handshake budget ended before bd reported its version", "did not answer"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal lacks %q:\n%s", want, err)
+		}
+	}
+	for _, unwanted := range []string{"make safe-install", "required:"} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("refusal must not blame the installed bd with %q:\n%s", unwanted, err)
+		}
 	}
 }
 

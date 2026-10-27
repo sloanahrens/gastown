@@ -3,12 +3,10 @@ package doctor
 import (
 	"context"
 	"errors"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/deps"
 )
 
@@ -61,12 +59,9 @@ func (c *BeadsBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 	store := c.store
 	if store == nil {
 		// The town's own database, with the bd target variables stripped from
-		// the inherited environment: a stale BEADS_DIR or BEADS_DOLT_* must
-		// not steer the diagnostic to another database. The store carries the
-		// handshake's context, so this check's budget bounds the bd calls.
-		store = beads.New(ctx.TownRoot,
-			beads.WithEnv(beads.StripBDTargetEnv(os.Environ())),
-			beads.WithCallContext(hctx))
+		// the inherited environment, and this check's budget as the parent of
+		// its bd calls (deps.NewHandshakeStore).
+		store = deps.NewHandshakeStore(hctx, ctx.TownRoot)
 	}
 	hs, err := deps.CheckBDHandshake(hctx, path, store)
 	if err == nil {
