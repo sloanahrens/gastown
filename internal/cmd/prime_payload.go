@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // primeStepBodyMaxChars caps the one step body the checklist renders in full.
@@ -261,6 +262,21 @@ func staticRoleTextWarn(errOut io.Writer, ctx RoleContext) (text string, fromTem
 
 // systemPromptPathFor returns the system-prompt file for the priming agent, or
 // "" for roles that do not use one.
+// refreshSystemPromptFile writes the role's static text to its system-prompt
+// file. In an OpenShell sandbox the runtime has already uploaded that file with
+// the sandbox note appended, and a rewrite here would drop the note and change
+// the hash that was logged, so an existing file is left byte-for-byte (gt-a94xe).
+// Outside a sandbox the file is rewritten when it differs, as before.
+func refreshSystemPromptFile(getenv func(string) string, path, text string) error {
+	if getenv("GT_SESSION_BACKEND") == session.BackendOpenShell {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+	}
+	_, err := writeSystemPromptFile(path, text)
+	return err
+}
+
 func systemPromptPathFor(ctx RoleContext) string {
 	rigPath := ""
 	if ctx.Rig != "" && ctx.TownRoot != "" {

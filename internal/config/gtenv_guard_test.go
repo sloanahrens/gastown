@@ -49,6 +49,10 @@ var gtEnvInvocation = map[string]bool{
 	"GT_SESSION_START_CALLER": true, "GT_SESSION_START_REASON": true,
 	"GT_DONE_FROM_HANDOFF": true, "GT_ISSUE": true, "GT_STALE_WARNED": true,
 	"GT_PROCESS_NAMES": true,
+	// The role's system-prompt file is set on the one claude process a spawn
+	// launches (withRoleSystemPromptFlag), and prime reads it back in that
+	// process to tell whether the static text was delivered (gt-a94xe).
+	EnvSystemPromptFile: true,
 	// The spawner sets the backend for the one session it launches: a sandbox
 	// seat runs inside the sandbox, so its gt done reads the marker from the
 	// environment it was started with (gt-g0u8g).
