@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/buildpaths"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/liveness"
@@ -135,6 +136,8 @@ type openshellBackend struct {
 	imageGT func(ctx context.Context, image string) (string, error)
 	// docker runs the docker CLI for the profile's cache volume. Tests set it.
 	docker dockerRun
+	// git compares the image's gt commit with the installed one. Tests set it.
+	git gitRun
 	// policyRoot is the town's gt source checkout, the repo a sandbox profile's
 	// policy path is relative to. A polecat's worktree is the wrong base: only
 	// the gt repo carries deploy/polecat/policy.yaml, and a sandbox seat serves
@@ -165,6 +168,7 @@ func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
 		push:        pushToForgejo,
 		imageGT:     dockerImageGT,
 		docker:      runDocker,
+		git:         runGit,
 		gitEmail:    hostGitEmail,
 		installedGT: version.BuildCommit,
 		policyRoot:  version.GetRepoRootForTown,
@@ -208,20 +212,96 @@ func imageGTFrom(ctx context.Context, run dockerRun, image string) (string, erro
 	return strings.TrimSpace(string(out)), nil
 }
 
+// gitRun runs the git CLI in dir and returns its stdout. Tests supply their
+// own, so no unit test runs git (internal/testpolicy keeps this package
+// git-free).
+type gitRun func(dir string, args ...string) ([]byte, error)
+
+// runGit is the real git runner for the town's gt source checkout.
+func runGit(dir string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	return cmd.Output()
+}
+
+// gtImageDiff reports the paths changed between an image's gt commit and the
+// installed gt's. An error means the two could not be compared, which the
+// caller reads as drift.
+type gtImageDiff func(imageCommit, installed string) ([]string, error)
+
+// imagePathsBetween lists the paths whose content differs between from and to,
+// through run. A pair that is not in an ancestor relationship is an error: a
+// commit off the installed line is not the installed gt missing a few commits,
+// so it is rebuilt like any drifted one. --no-renames puts both sides of a
+// rename in the list, so a source file renamed to a documentation path still
+// reads as a build change.
+func imagePathsBetween(run gitRun, root, from, to string) ([]string, error) {
+	if _, err := run(root, "merge-base", "--is-ancestor", from, to); err != nil {
+		return nil, fmt.Errorf("gt commit %s is not an ancestor of %s: %w", from, to, err)
+	}
+	out, err := run(root, "diff", "--name-only", "--no-renames", from, to)
+	if err != nil {
+		return nil, fmt.Errorf("listing the paths changed between %s and %s: %w", from, to, err)
+	}
+	var paths []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
+}
+
+// imageDiff answers the ancestry rule from the town's gt source checkout, the
+// repository the image's gt commit was built from.
+func (b *openshellBackend) imageDiff(imageCommit, installed string) ([]string, error) {
+	root, err := b.policyRoot(b.townRoot)
+	if err != nil {
+		return nil, err
+	}
+	return imagePathsBetween(b.git, root, imageCommit, installed)
+}
+
+// ancestryWithoutBuildChange reports whether the installed gt could be the
+// image's gt plus commits that change no path `make build` reads
+// (buildpaths.AffectsBuild), so the sandbox runs the same gt in every way it
+// can observe. Anything git cannot judge — no seam, a failed comparison, an
+// empty listing for two commits that differ — reports false, and the caller
+// refuses the image.
+func ancestryWithoutBuildChange(diff gtImageDiff, imageCommit, installed string) bool {
+	if diff == nil {
+		return false
+	}
+	paths, err := diff(imageCommit, installed)
+	if err != nil || len(paths) == 0 {
+		return false
+	}
+	for _, p := range paths {
+		if buildpaths.AffectsBuild(p) {
+			return false
+		}
+	}
+	return true
+}
+
 // checkImageGT refuses a sandbox image whose gt is not the installed gt's
 // commit, so a drifted image fails rather than becoming a settings warning
-// inside a sandbox (gt-pmxo9). source says where imageCommit was read, so a
-// missing commit names the place to fix.
-func checkImageGT(image, source, imageCommit, installed string) error {
+// inside a sandbox (gt-pmxo9). An image only non-build commits behind is not
+// drift: a manual install at a docs-only HEAD leaves the image's gt the same
+// binary, and refusing it would force a full rebuild (gt-v18z6). source says
+// where imageCommit was read, so a missing commit names the place to fix.
+func checkImageGT(image, source, imageCommit, installed string, diff gtImageDiff) error {
 	switch {
 	case installed == "":
 		return fmt.Errorf("sandbox image %s: the installed gt records no build commit, so its gt cannot be checked; rebuild gt with make build", image)
 	case imageCommit == "":
 		return fmt.Errorf("sandbox image %s %s, so its gt cannot be checked; rebuild it with make polecat-image", image, source)
-	case !version.SameCommit(imageCommit, installed):
-		return &imageDriftError{msg: fmt.Sprintf("sandbox image %s carries gt commit %s, but the installed gt is commit %s; rebuild the image with make polecat-image", image, imageCommit, installed)}
+	case version.SameCommit(imageCommit, installed):
+		return nil
+	case ancestryWithoutBuildChange(diff, imageCommit, installed):
+		return nil
 	}
-	return nil
+	return &imageDriftError{msg: fmt.Sprintf("sandbox image %s carries gt commit %s, but the installed gt is commit %s; rebuild the image with make polecat-image", image, imageCommit, installed)}
 }
 
 // ErrImageDrift identifies a sandbox image whose gt is not the installed gt's
@@ -377,7 +457,7 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}
-	if err := checkImageGT(b.profile.Image, gtLabelSource, imageCommit, b.installedGT()); err != nil {
+	if err := checkImageGT(b.profile.Image, gtLabelSource, imageCommit, b.installedGT(), b.imageDiff); err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}
 
@@ -560,7 +640,7 @@ func (b *openshellBackend) checkSandboxGT(ctx context.Context, name string) erro
 	if err != nil {
 		return fmt.Errorf("reading the gt version in sandbox %s: %w", name, err)
 	}
-	return checkImageGT(b.profile.Image, sandboxVersionSource, parseGTVersionCommit(string(out)), b.installedGT())
+	return checkImageGT(b.profile.Image, sandboxVersionSource, parseGTVersionCommit(string(out)), b.installedGT(), b.imageDiff)
 }
 
 // rollback deletes the sandbox after a failed populate and removes its
