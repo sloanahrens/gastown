@@ -32,7 +32,8 @@ var (
 	// shimBody is the shape the guard accepts: a header comment, a blank line,
 	// and one exec of the binary plugin.md declares.
 	shimBody = runSh("# Why, and how it is gated: plugin.md beside this script.\n\nexec \"$(dirname \"$0\")/" + declaredBinaryID + "\" \"$@\"\n")
-	// logicBody is plugins/town-metrics/run.sh before its porting bead lands.
+	// logicBody is a script that keeps its logic: more than one command, so the
+	// shim cap refuses it.
 	logicBody = runSh("set -euo pipefail\ncd \"${GT_TOWN_ROOT:-${GT_ROOT:-$HOME/gt}}\"\nexec gt metrics run\n")
 )
 

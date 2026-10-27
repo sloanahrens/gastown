@@ -1,4 +1,3 @@
 # Plugin run.sh files still waiting on their porting bead (gt-tpg0p.2).
 # One repo-relative path and its one-line reason per line, tab-separated.
 # The list only shrinks: the porting change deletes its line.
-plugins/town-metrics/run.sh	still cd's before exec'ing gt metrics run; gt-98pgy drops it once a plugin can name its binary (gt-tpg0p.1)

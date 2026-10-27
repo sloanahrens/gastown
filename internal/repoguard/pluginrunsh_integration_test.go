@@ -14,7 +14,7 @@ import (
 // It reads the checkout, so it lives in the integration tier: the unit tier
 // runs TestPluginRunShTree over a tree staged in t.TempDir instead, and
 // docs/testing.md keeps the two apart. The integration tier is where the
-// checkout's own four scripts are held, so the allowlist cannot drift from the
+// checkout's own three scripts are held, so the allowlist cannot drift from the
 // tree without this test failing (gt-tpg0p.2).
 func TestIntegrationPluginRunShTree(t *testing.T) {
 	t.Parallel()
