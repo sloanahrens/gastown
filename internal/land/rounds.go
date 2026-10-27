@@ -170,6 +170,40 @@ type renderedFinding struct {
 	Outcome Outcome `json:"outcome"`
 }
 
+// omRound and omFinding are the rounds-file shape om reads: {round, head,
+// findings: [{id, text, outcome}]}. om refuses a field it does not know, so
+// Render emits exactly these and nothing else: the file a finding names goes in
+// front of its text, and the open count stays in the Go value (gt-3l5qy: om
+// returned "unknown field file" and every review of a second round failed).
+type omRound struct {
+	Round    int         `json:"round"`
+	Head     string      `json:"head"`
+	Findings []omFinding `json:"findings"`
+}
+
+type omFinding struct {
+	ID      string  `json:"id"`
+	Text    string  `json:"text"`
+	Outcome Outcome `json:"outcome"`
+}
+
+// omRounds converts rendered rounds to the shape om reads.
+func omRounds(rounds []renderedRound) []omRound {
+	out := make([]omRound, 0, len(rounds))
+	for _, r := range rounds {
+		o := omRound{Round: r.Round, Head: r.Head, Findings: make([]omFinding, 0, len(r.Findings))}
+		for _, f := range r.Findings {
+			text := f.Text
+			if f.File != "" {
+				text = f.File + ": " + f.Text
+			}
+			o.Findings = append(o.Findings, omFinding{ID: f.ID, Text: text, Outcome: f.Outcome})
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
 // Append records one round of findings for head, the work branch head the
 // round was submitted at, stamped with the injected clock. A round already in
 // the ledger is replaced, keeping the outcome every finding it does not
@@ -250,7 +284,7 @@ func (l *RoundsLedger) Render(maxBytes int) ([]byte, error) {
 	}
 	rounds := doc.Rounds
 	for n := len(rounds); n > 0; n-- {
-		data, err := json.Marshal(renderRounds(rounds[len(rounds)-n:]))
+		data, err := json.Marshal(omRounds(renderRounds(rounds[len(rounds)-n:])))
 		if err != nil {
 			return nil, fmt.Errorf("rounds ledger: rendering: %w", err)
 		}

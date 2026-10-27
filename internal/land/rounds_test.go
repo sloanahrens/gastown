@@ -25,15 +25,28 @@ func ledgerIn(t *testing.T, bead string) *RoundsLedger {
 // rendered is Render's output as the test reads it: the schema gt-3l5qy hands
 // om through --rounds-file.
 type rendered []struct {
-	Round      int    `json:"round"`
-	Head       string `json:"head"`
-	OpenAtLand int    `json:"open_at_land"`
-	Findings   []struct {
+	Round    int    `json:"round"`
+	Head     string `json:"head"`
+	Findings []struct {
 		ID      string `json:"id"`
-		File    string `json:"file"`
 		Text    string `json:"text"`
 		Outcome string `json:"outcome"`
 	} `json:"findings"`
+}
+
+// openCounts is how many findings of each round are still open, read from the
+// ledger rather than from the file om reads: om's file carries no such count.
+func openCounts(t *testing.T, l *RoundsLedger) []int {
+	t.Helper()
+	doc, err := l.load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	var out []int
+	for _, r := range renderRounds(doc.Rounds) {
+		out = append(out, r.OpenAtLand)
+	}
+	return out
 }
 
 func renderedOf(t *testing.T, l *RoundsLedger, maxBytes int) rendered {
@@ -42,9 +55,13 @@ func renderedOf(t *testing.T, l *RoundsLedger, maxBytes int) rendered {
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
+	// om refuses a field it does not know (--rounds-file: json: unknown field),
+	// so the test decodes the file strictly, as om does.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
 	var out rendered
-	if err := json.Unmarshal(data, &out); err != nil {
-		t.Fatalf("Render wrote %q, not a JSON array of rounds (%v)", data, err)
+	if err := dec.Decode(&out); err != nil {
+		t.Fatalf("Render wrote %q, not the rounds om reads (%v)", data, err)
 	}
 	return out
 }
@@ -73,15 +90,15 @@ func TestRoundsLedgerRoundTrip(t *testing.T) {
 	if r.Round != 1 || r.Head != "head1" {
 		t.Errorf("round = %d at head %q, want 1 at head1", r.Round, r.Head)
 	}
-	if r.OpenAtLand != 1 {
-		t.Errorf("open_at_land = %d, want 1 (F1 is fixed)", r.OpenAtLand)
+	if got := openCounts(t, l); len(got) != 1 || got[0] != 1 {
+		t.Errorf("open counts = %v, want [1] (F1 is fixed)", got)
 	}
 	if len(r.Findings) != 2 {
 		t.Fatalf("round carries %d finding(s), want 2", len(r.Findings))
 	}
 	first, second := r.Findings[0], r.Findings[1]
-	if first.ID != "F1" || first.File != "internal/land/a.go" || first.Text != "not atomic" || first.Outcome != string(OutcomeFixed) {
-		t.Errorf("first finding = %+v, want F1 in internal/land/a.go, text %q, fixed", first, "not atomic")
+	if first.ID != "F1" || first.Text != "internal/land/a.go: not atomic" || first.Outcome != string(OutcomeFixed) {
+		t.Errorf("first finding = %+v, want F1 with the file in front of the text, fixed", first)
 	}
 	if second.ID != "F2" || second.Outcome != string(OutcomeOpen) {
 		t.Errorf("second finding = %+v, want F2 open", second)
@@ -110,7 +127,7 @@ func TestRoundsLedgerRecordsARoundWithoutFindings(t *testing.T) {
 		t.Fatalf("Append: %v", err)
 	}
 	rounds := renderedOf(t, l, 0)
-	if len(rounds) != 1 || rounds[0].Round != 2 || len(rounds[0].Findings) != 0 || rounds[0].OpenAtLand != 0 {
+	if len(rounds) != 1 || rounds[0].Round != 2 || len(rounds[0].Findings) != 0 {
 		t.Errorf("Render = %+v, want round 2 with no findings and nothing open", rounds)
 	}
 	data, err := l.Render(0)
@@ -142,8 +159,8 @@ func TestRoundsLedgerSettleReachesEveryRoundAndReportsAnUnknownFinding(t *testin
 		if got := r.Findings[0].Outcome; got != string(OutcomeAccepted) {
 			t.Errorf("round %d records %q, want accepted in every round", r.Round, got)
 		}
-		if r.OpenAtLand != 0 {
-			t.Errorf("round %d reports %d open, want 0", r.Round, r.OpenAtLand)
+		if got := openCounts(t, l)[0]; got != 0 {
+			t.Errorf("round %d reports %d open, want 0", r.Round, got)
 		}
 	}
 	if err := l.Settle(FindingKey{ID: "F9"}, OutcomeFixed); err == nil {
@@ -181,7 +198,7 @@ func TestRoundsLedgerSettleByName(t *testing.T) {
 	}
 	for _, f := range renderedOf(t, l, 0)[0].Findings {
 		if f.Outcome != string(OutcomeFixed) {
-			t.Errorf("settling a bare id left %s at %q, want fixed in every file", f.File, f.Outcome)
+			t.Errorf("settling a bare id left %q at %q, want fixed in every file", f.Text, f.Outcome)
 		}
 	}
 }
@@ -424,8 +441,8 @@ func TestLandRoundsLedgerRoundIsTheReviewsLogAttempt(t *testing.T) {
 		if rounds[i].Head != f.work.Head {
 			t.Errorf("round %d records head %q, want the submitted head %q", rounds[i].Round, rounds[i].Head, f.work.Head)
 		}
-		if rounds[i].OpenAtLand != 1 {
-			t.Errorf("round %d reports open_at_land %d, want its one unsettled finding", rounds[i].Round, rounds[i].OpenAtLand)
+		if got := openCounts(t, &ledger)[i]; got != 1 {
+			t.Errorf("round %d reports %d open, want its one unsettled finding", rounds[i].Round, got)
 		}
 	}
 }
