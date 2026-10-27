@@ -1741,58 +1741,80 @@ func TestOverlapGuardLetsTheClusterPastAPeerInStartupBackoff(t *testing.T) {
 // question the peer-hold answer lapsed as soon as a rest ended: the head was
 // next again, so the guard refused its cluster while the live work that held
 // the head could run for hours — a refusal outliving the rest it replaced
-// (gt-36qvt).
-func TestOverlapGuardLetsTheClusterPastAPeerLiveWorkHolds(t *testing.T) {
+// (gt-36qvt). An urgent head is the exception: a P0 or P1 head skips the
+// overlap hold, so it is the next move and the tail waits behind it (gt-iydx1).
+func TestOverlapGuardAnswersAPeerLiveWorkHoldsByPriority(t *testing.T) {
 	t.Parallel()
-	townRoot := duplicateTown(t)
-	db := beadsfake.New()
 	// The head names two tests, one of which the live seat holds. The tail
 	// names only the other, so it is no duplicate of the live work — only of
-	// the head the live work keeps off the board.
-	db.Seed(
-		// P2: a P0 or P1 head skips the overlap hold, so the dispatcher would
-		// sling it and the tail waits for it rather than passing (gt-iydx1).
-		beads.Issue{ID: "gt-head", Type: "task", Title: "host rehearsal: the red tier sweep fails",
-			Status: "open", Priority: 2, CreatedAt: "2026-10-25T18:40:00Z",
-			Description: "TestHostRehearsal and TestPeerOnly fail."},
-		beads.Issue{ID: "gt-peerwork", Type: "task", Title: "the peer-only sweep",
-			Status: "in_progress", Priority: 1, Assignee: "gastown/polecats/capable",
-			CreatedAt: "2026-10-25T18:30:00Z", Description: "TestPeerOnly fails."},
-		beads.Issue{ID: "gt-tail", Type: "task", Title: "rework: the sweep again",
-			Status: "open", Priority: 2, CreatedAt: "2026-10-25T19:00:00Z",
-			Description: "TestHostRehearsal fails."},
-	)
-	knobs := specHoldKnobs{
-		MaxPriority: 3, ShapeGate: specdispatch.ShapeGateOff, Warn: io.Discard,
-		Backoff: func(string) string { return "" },
-	}
-	pools := newDuplicatePools(
-		func(beadsDir string) ([]duplicateCandidate, error) {
-			return fetchDuplicatePoolFrom(db, func(dir string, err error) {
-				t.Errorf("enrichment of %s failed: %v", dir, err)
-			}, beadsDir)
-		},
-		func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
-			return specPeerHeldFrom(db, knobs, peer, pool)
-		},
-	)
-	tail, err := db.Show("gt-tail")
-	if err != nil {
-		t.Fatalf("read gt-tail: %v", err)
-	}
-	candidate, matches, err := pools.check(townRoot, "gt-tail", beadInfoOf(tail))
-	if err != nil {
-		t.Fatalf("check gt-tail: %v", err)
-	}
-	if len(matches) != 1 || matches[0].Bead.ID != "gt-head" {
-		t.Fatalf("matches = %+v, want the head alone", matches)
-	}
-	held := matches[0].Bead.Held
-	if !strings.Contains(held, "gt-peerwork") {
-		t.Fatalf("Held = %q, want the live seat's bead named: the head is skipped, not next", held)
-	}
-	if d := decideSlingDuplicates(*candidate, matches); d.Blocked {
-		t.Fatalf("the guard refused the cluster behind a head live work holds (%s): %s", held, d.Message)
+	// the head the live work keeps off the board. At P2 the live seat holds the
+	// head and the cluster passes; at P1 the head takes its seat despite the
+	// overlap, so the guard refuses the tail behind it.
+	for _, tc := range []struct {
+		name         string
+		headPriority int
+		wantBlocked  bool
+	}{
+		{"P1 head takes its seat despite the hold", 1, true},
+		{"P2 head is held, so the cluster passes", 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := duplicateTown(t)
+			db := beadsfake.New()
+			db.Seed(
+				beads.Issue{ID: "gt-head", Type: "task", Title: "host rehearsal: the red tier sweep fails",
+					Status: "open", Priority: tc.headPriority, CreatedAt: "2026-10-25T18:40:00Z",
+					Description: "TestHostRehearsal and TestPeerOnly fail."},
+				beads.Issue{ID: "gt-peerwork", Type: "task", Title: "the peer-only sweep",
+					Status: "in_progress", Priority: 1, Assignee: "gastown/polecats/capable",
+					CreatedAt: "2026-10-25T18:30:00Z", Description: "TestPeerOnly fails."},
+				beads.Issue{ID: "gt-tail", Type: "task", Title: "rework: the sweep again",
+					Status: "open", Priority: 2, CreatedAt: "2026-10-25T19:00:00Z",
+					Description: "TestHostRehearsal fails."},
+			)
+			knobs := specHoldKnobs{
+				MaxPriority: 3, ShapeGate: specdispatch.ShapeGateOff, Warn: io.Discard,
+				Backoff: func(string) string { return "" },
+			}
+			pools := newDuplicatePools(
+				func(beadsDir string) ([]duplicateCandidate, error) {
+					return fetchDuplicatePoolFrom(db, func(dir string, err error) {
+						t.Errorf("enrichment of %s failed: %v", dir, err)
+					}, beadsDir)
+				},
+				func(_, _ string, peer duplicateCandidate, pool []duplicateCandidate) string {
+					return specPeerHeldFrom(db, knobs, peer, pool)
+				},
+			)
+			tail, err := db.Show("gt-tail")
+			if err != nil {
+				t.Fatalf("read gt-tail: %v", err)
+			}
+			candidate, matches, err := pools.check(townRoot, "gt-tail", beadInfoOf(tail))
+			if err != nil {
+				t.Fatalf("check gt-tail: %v", err)
+			}
+			if len(matches) != 1 || matches[0].Bead.ID != "gt-head" {
+				t.Fatalf("matches = %+v, want the head alone", matches)
+			}
+			held := matches[0].Bead.Held
+			if tc.wantBlocked {
+				if held != "" {
+					t.Fatalf("Held = %q, want no hold: a P%d head takes its seat and is next", held, tc.headPriority)
+				}
+				if d := decideSlingDuplicates(*candidate, matches); !d.Blocked {
+					t.Fatalf("the guard let the tail past a P%d head the dispatcher would sling", tc.headPriority)
+				}
+				return
+			}
+			if !strings.Contains(held, "gt-peerwork") {
+				t.Fatalf("Held = %q, want the live seat's bead named: the head is skipped, not next", held)
+			}
+			if d := decideSlingDuplicates(*candidate, matches); d.Blocked {
+				t.Fatalf("the guard refused the cluster behind a head live work holds (%s): %s", held, d.Message)
+			}
+		})
 	}
 }
 

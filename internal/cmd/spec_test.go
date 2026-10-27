@@ -738,7 +738,7 @@ func TestSpecDispatchBypassesTheOverlapHoldForUrgentWork(t *testing.T) {
 			if got := strings.Join(f.slung, " "); got != "gt-urgent" {
 				t.Fatalf("slung %q, want the urgent bead dispatched despite the overlap", got)
 			}
-			want := fmt.Sprintf("gt-urgent: overlap hold bypassed for P%d (would be held by gt-t61ft held by %s)", tc.priority, seat)
+			want := fmt.Sprintf("gt-urgent: overlap hold bypassed for P%d (gt-t61ft held by %s)", tc.priority, seat)
 			if len(r.Bypassed) != 1 || r.Bypassed[0].Line != want {
 				t.Fatalf("bypassed = %+v, want %q", r.Bypassed, want)
 			}
@@ -806,7 +806,7 @@ func TestSpecDispatchDryRunReportsTheOverlapBypass(t *testing.T) {
 	printSpecDispatchReport(cmd, r)
 	for _, want := range []string{
 		"1 overlap hold bypassed",
-		"gt-urgent: overlap hold bypassed for P0 (would be held by gt-t61ft held by " + seat + ")",
+		"gt-urgent: overlap hold bypassed for P0 (gt-t61ft held by " + seat + ")",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("dry-run output %q does not carry %q", out.String(), want)
