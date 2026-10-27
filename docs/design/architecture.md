@@ -96,7 +96,7 @@ worker ([ADR 0004](../adr/0004-daemon-lands-work.md)).
 ├── settings/                   Town-level settings
 │   ├── config.json             Town settings (agents, themes, daemon patrols)
 │   └── escalation.json         Escalation routes and contacts
-├── directives/                 Town-level role directives (operator policy)
+├── gastown/mayor/rig/directives/  Central role directives, read for every rig
 │   └── <role>.md               Markdown injected at prime time
 ├── formula-overlays/           Town-level formula overlays
 │   └── <formula>.toml          TOML step overrides (replace/append/skip)
@@ -104,12 +104,11 @@ worker ([ADR 0004](../adr/0004-daemon-lands-work.md)).
 │   └── messaging.json          Mail lists, queues, channels
 └── <rig>/                      Project container (NOT a git clone)
     ├── config.json             Rig identity and beads prefix
-    ├── directives/             Rig-level role directives (overrides town)
-    │   └── <role>.md
     ├── formula-overlays/       Rig-level formula overlays (full precedence)
     │   └── <formula>.toml
     ├── mayor/rig/              Canonical clone (beads live here, NOT an agent)
-    │   └── .beads/             Rig-level beads (redirected to Dolt)
+    │   ├── .beads/             Rig-level beads (redirected to Dolt)
+    │   └── .gastown/directives/  Rig-level role directives (override the central layer)
     ├── crew/                   Crew parent
     │   └── <name>/             Human workspaces (full clones)
     └── polecats/               Polecats parent
@@ -319,15 +318,30 @@ before context files and handoff content. Operator policy that overrides formula
 instructions where they conflict.
 
 ```
-~/gt/directives/_common.md             # Town-level, every role
-~/gt/directives/<role>.md              # Town-level (all rigs)
-~/gt/<rig>/directives/_common.md       # Rig-level, every role in that rig
-~/gt/<rig>/directives/<role>.md        # Rig-level
+<town>/gastown/mayor/rig/directives/_common.md     # Central, every role, every rig
+<town>/gastown/mayor/rig/directives/<role>.md      # Central, one role, every rig
+<town>/<rig>/mayor/rig/.gastown/directives/_common.md   # That rig, every role
+<town>/<rig>/mayor/rig/.gastown/directives/<role>.md    # That rig, one role
 ```
 
+`<town>` is the town root (`~/gt` on a default install). The central layer is
+the gastown repo's own checkout, so a directive there is tracked with the code
+and lands through the landing pipeline; a rig's layer belongs to that rig's
+checkout and reaches that rig alone. Before gt-oz73l the layers sat at
+`<town>/directives/` and `<town>/<rig>/directives/`; a file left at either
+legacy path is still read when the layer's own path holds no file of that name,
+and the reader logs the legacy path once per process.
+
 Every file that exists concatenates, broadest first, so the most specific
-appears last and wins conflicts. A file named for no role loads for no one:
+appears last and wins conflicts: central `_common`, rig `_common`, central
+`<role>`, rig `<role>`. A file named for no role loads for no one:
 `gt directive list` marks it `UNUSED (no such role)` and `gt doctor` warns.
+
+`gt prime` renders the files for the role it primes: at an agent's spawn they
+land in its system prompt file, which is how a polecat or crew session receives
+them. A session with an empty `GT_ROLE`, or one run from the town root, resolves
+to the unknown role, which owns no file: only `_common.md` reaches it.
+
 Implemented in `internal/config/directives.go` (`LoadRoleDirective`,
 `ScanDirectiveFiles`), integrated via `outputRoleDirectives()` in
 `internal/cmd/prime_output.go`.
