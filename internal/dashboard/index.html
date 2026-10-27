@@ -254,6 +254,10 @@ button.arow-head{background:none;border:0;cursor:pointer}
 button.arow-head:hover{background:#19212b}
 .arow .caret{color:var(--dim);width:10px;display:inline-block}
 .arow .by{color:var(--dim)}
+.agroup{margin-top:6px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+.agroup:first-child{margin-top:0}
+.arow .heldby{color:var(--dim)}
+.arow .waiting{color:var(--blue)}
 .arow .badc{display:block}
 .arow .qcmd,.arow .qrec{margin-top:3px}
 .own-sloan{color:var(--amber);border-color:var(--amber)}
@@ -630,12 +634,16 @@ function renderStrip(s) {
     // A reader that capped rows out of the list never read their owner, so the
     // human's count is a floor: the strip draws "N+" rather than a number that
     // leaves the capped rows out in silence, and "?" rather than a zero that
-    // passes a count nobody made off as none (gt-bi6w0).
+    // passes a count nobody made off as none (gt-bi6w0). Both figures count
+    // only the rows that need a person: a row in the pipeline is work already
+    // in flight and clears without the human, so counting it here is what
+    // buried the ones that did need them (gt-tv5v2).
     const mine = at.mine || 0, capped = at.more || 0, unknown = capped > 0 && mine === 0;
+    const needs = (at.rows || []).filter(needsYou).length;
     fact(box, unknown ? "?" : String(mine) + (capped ? "+" : ""), "needs you", {cls: a.needs_you || "",
       tip: (unknown
         ? "the readers capped " + capped + " rows out of the list and none of the rows they read is the human's, so how many are is not known"
-        : mine + " of the " + (at.rows || []).length + " rows waiting on a decision " + (mine === 1 ? "is" : "are") + " the human's" +
+        : mine + " of the " + needs + " rows needing a person " + (mine === 1 ? "is" : "are") + " the human's" +
           (capped ? " · " + capped + " more the readers capped out, whose owner they did not read" : "")) +
         " · the Attention panel below has the rows"});
   }
@@ -2862,18 +2870,21 @@ function renderAttention(s) {
   const rows = at ? (at.rows || []) : [];
   const shown = rows.filter(ownerShown);
 
-  // The note counts the rows the panel is showing and, past four hours, how
-  // long the oldest question among them has waited — the question is the row
-  // type that stops the town until it is answered. The rows the readers capped
-  // out are counted beside the shown ones only while the filter is showing the
-  // whole list, which is who the cap belongs to (gt-bi6w0).
+  // The note counts the two groups the panel is showing — the rows that need a
+  // person and the rows waiting on work already in flight — and, past four
+  // hours, how long the oldest question among them has waited: the question is
+  // the row type that stops the town until it is answered. The rows the readers
+  // capped out are counted beside the shown ones only while the filter is
+  // showing the whole list, which is who the cap belongs to (gt-bi6w0,
+  // gt-tv5v2).
   const asks = shown.filter(r => r.kind === "question").map(r => r.age_sec).filter(a => a != null);
   const oldest = asks.length ? Math.max(...asks) : null;
   const stale = oldest != null && oldest > QUESTION_OLDEST_SEC;
   const capped = shown.length === rows.length ? (at && at.more) || 0 : 0;
+  const needs = shown.filter(needsYou).length, pipeline = shown.length - needs;
   note.className = stale ? "r warnc" : "r";
   note.textContent = shown.length
-    ? shown.length + (capped ? " of " + (shown.length + capped) : "") + " waiting" + (stale ? " · oldest question " + fmtDur(oldest) : "")
+    ? needs + " need you · " + pipeline + " in the pipeline" + (capped ? " · " + shown.length + " of " + (shown.length + capped) : "") + (stale ? " · oldest question " + fmtDur(oldest) : "")
     : "";
   renderOwnerChips(rows);
   drawAttention();
@@ -2906,8 +2917,22 @@ function drawAttention() {
     if (!failed.length && !pending.length) box.append(el("div", "empty", shownOwners.size ? "nothing needs you" : "every owner chip is off"));
     return;
   }
-  for (const r of shown) box.append(attentionRow(r));
+  // The two groups are the panel's own order, each under its heading: what
+  // needs a person first, then what is only waiting on work already in flight
+  // (attention.Classify, gt-tv5v2). An empty group draws no heading.
+  for (const g of [{name: "Needs you", rows: shown.filter(needsYou)},
+                   {name: "In the pipeline", rows: shown.filter(r => !needsYou(r))}]) {
+    if (!g.rows.length) continue;
+    box.append(el("div", "agroup", g.name));
+    for (const r of g.rows) box.append(attentionRow(r));
+  }
 }
+
+// needsYou reports whether a row needs a person to move: everything but the
+// rows the reader classified as pipeline. A row with no class is one this page
+// does not know, and an unknown condition is seen rather than filed away
+// (attention.Classify).
+function needsYou(r) { return r.class !== "pipeline"; }
 
 // ownerShown reports whether the owner chips are showing a row. A row whose
 // owner the page has no chip for is shown rather than hidden: a rule a newer
@@ -2968,6 +2993,12 @@ function attentionRow(r) {
     // name, not the page's to guess at.
     head.append(el("span", "alvl " + (r.level || "info"), r.level || "info"));
     head.append(el("span", "tag rule", r.rule || ""));
+    // A pipeline row says who holds the condition and what it is waiting on,
+    // both on its header line: a reader can tell work in flight from work that
+    // needs them without opening the row (gt-tv5v2). "held by" rather than
+    // "owner", which the row's own owner tag already says and says differently.
+    if (r.held_by) head.append(el("span", "heldby", "held by " + r.held_by));
+    if (r.waiting_on) head.append(el("span", "waiting", "waiting on " + r.waiting_on));
   } else {
     head.append(el("span", "bead", r.id || ""));
   }

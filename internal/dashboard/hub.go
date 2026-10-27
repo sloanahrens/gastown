@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/attention"
 )
 
 const (
@@ -36,6 +38,11 @@ type Hub struct {
 	// snapshot it compares the next one against.
 	alerts *Alerter
 	prev   State
+	// queueItems is the attention queue's items as the last poll read them,
+	// which classify the panel's rows when it next publishes, and queueFailed
+	// whether that read could be made at all (gt-tv5v2).
+	queueItems  []attention.Item
+	queueFailed bool
 
 	// wake releases every parked worker when a page connects after an idle
 	// spell, so the first page does not wait out a whole interval for fresh
@@ -411,8 +418,15 @@ func (h *Hub) addAlertLocked(al Alert) {
 // alert for the same condition gives way to, leaves the recent list.
 func (h *Hub) pollAttention() {
 	evs, acks := h.cfg.Attention()
+	var queue []attention.Item
+	var queueFailed bool
+	if h.cfg.AttentionItems != nil {
+		items, err := h.cfg.AttentionItems()
+		queue, queueFailed = items, err != nil
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.queueItems, h.queueFailed = queue, queueFailed
 	raised, removed := h.alerts.ObserveAttention(evs, acks)
 	if len(removed) > 0 {
 		gone := make(map[string]bool, len(removed))
@@ -749,7 +763,8 @@ func (h *Hub) pollEscalation() {
 // past. publishLocked calls it, so every published list is drawn from the
 // readers as they stand at that instant.
 func (h *Hub) attentionLocked() {
-	h.state.Attention = buildAttention(h.state.Escalations, h.state.Questions, h.alerts.Standing(), h.cfg.Now())
+	h.state.Attention = buildAttention(h.state.Escalations, h.state.Questions, h.alerts.Standing(),
+		AttentionQueue{Items: h.queueItems, Failed: h.queueFailed}, h.cfg.Now())
 }
 
 func (h *Hub) pollDispatch() {

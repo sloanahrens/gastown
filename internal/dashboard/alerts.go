@@ -579,6 +579,20 @@ func NewAttentionFollower(townRoot string) *AttentionFollower {
 	return &AttentionFollower{townRoot: townRoot}
 }
 
+// Items returns the queue's items as the daemon's state.json holds them: the
+// class, owner and waiting-on each row of the panel carries (gt-tv5v2). A state
+// that is missing is no items and no error, the same as the queue itself reads
+// it; a state that is there and cannot be read returns the error, so the panel
+// names the read among the ones behind the list that failed rather than passing
+// a queue nobody could classify off as empty (gt-tv5v2).
+func (f *AttentionFollower) Items() ([]attention.Item, error) {
+	state, err := attention.ReadState(f.townRoot)
+	if err != nil {
+		return nil, err
+	}
+	return state.Items, nil
+}
+
 // Read returns the new transitions and the acks as they stand. A missing or
 // unreadable events file yields no transitions and is tried again on the next
 // read; unreadable acks read as none, so an alert is shown rather than hidden.
