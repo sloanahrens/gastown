@@ -611,10 +611,15 @@ func failureLines(lines []string) []int {
 }
 
 // failureSpan is the line range one failure marker carries. A "--- FAIL" block
-// runs to the next block boundary, so the test's own output comes with it; any
-// other marker takes failureContextLines either side of itself.
+// runs to the next block boundary, so the test's own output comes with it; a
+// unit-tier rule report runs to its closing rule line, so the entries it names
+// come with it; any other marker takes failureContextLines either side of
+// itself.
 func failureSpan(lines []string, at int) (int, int) {
 	lo := max(at-failureContextLines, 0)
+	if ruleReportRE.MatchString(lines[at]) {
+		return lo, ruleReportEnd(lines, at)
+	}
 	if !failedTestRE.MatchString(lines[at]) {
 		return lo, min(at+failureContextLines, len(lines)-1)
 	}
@@ -623,6 +628,17 @@ func failureSpan(lines []string, at int) (int, int) {
 		hi++
 	}
 	return lo, hi
+}
+
+// ruleReportEnd is the line a rule report ends on: the rule line that closes
+// it, or the log's last line when the log was cut before the report closed.
+func ruleReportEnd(lines []string, at int) int {
+	for i := at + 1; i < len(lines); i++ {
+		if ruleLineRE.MatchString(lines[i]) {
+			return i
+		}
+	}
+	return len(lines) - 1
 }
 
 // startsLogBlock reports whether line begins a fresh go test or make block,
@@ -662,13 +678,22 @@ func lastRunStart(idx []int) int {
 
 // The markers that say a gate log went red: a "--- FAIL" per test and a "FAIL"
 // per package (go test, or "[build failed]" on the package line when the build
-// never ran), a bare "panic:" (a panicking test prints no "--- FAIL" line), and
-// make's closing "*** ... Error N".
+// never ran), a bare "panic:" (a panicking test prints no "--- FAIL" line),
+// make's closing "*** ... Error N", and a unit-tier rule report.
 var (
 	failLineRE    = regexp.MustCompile(`^FAIL\b`)
 	packageDoneRE = regexp.MustCompile(`^(ok|PASS|SKIP)\b`)
 	panicLineRE   = regexp.MustCompile(`^panic: `)
 	makeErrorRE   = regexp.MustCompile(`^make(\[\d+\])?: \*\*\*.*Error \d+`)
+)
+
+// The unit-tier rule reports (internal/testutil/unittier) and the rule line
+// they print above and below themselves. A package that breaks a tier rule
+// prints no failing test, only the report, so without these markers a rule-only
+// red showed none of its reason in the note (gt-sz2rp).
+var (
+	ruleReportRE = regexp.MustCompile(`^(SUBPROCESS TRIPWIRE|GOROUTINE LEAK): `)
+	ruleLineRE   = regexp.MustCompile(`^={72}$`)
 )
 
 // buildFailedMarker is what go test writes on the package line of a package
@@ -682,6 +707,7 @@ const failureContextLines = 2
 func isFailureMarker(line string) bool {
 	return failedTestRE.MatchString(line) || failLineRE.MatchString(line) ||
 		panicLineRE.MatchString(line) || makeErrorRE.MatchString(line) ||
+		ruleReportRE.MatchString(line) || ruleLineRE.MatchString(line) ||
 		strings.Contains(line, buildFailedMarker)
 }
 
