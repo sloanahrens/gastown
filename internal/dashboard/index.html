@@ -189,9 +189,15 @@ button.jvfold:hover{color:var(--text)}
 .mgtable td{vertical-align:top;padding:6px 10px 6px 0;border-top:1px solid var(--line)}
 .mgtable tbody tr:first-child td{border-top:0}
 .mgbig{font-size:20px;font-weight:700;line-height:1.2;white-space:nowrap}
+/* The rate cell stacks the rate with its baseline, lift and group count, so its
+   four line boxes are most of a row's height. The three secondary lines take
+   the chips' 11px, since at 12px the longest baseline breaks to three lines,
+   and a 1.2 line box, since the page's 1.45 leading would stand the cell at
+   133px — past the 120px a row may take (gt-g4vif). */
+.mgrates{line-height:1.2}
 .mgof{font-size:12px;font-weight:400;color:var(--dim)}
-.mgvs,.mggroup{color:var(--dim);font-size:12px}
-.mglift{color:var(--green);font-size:12px;font-weight:700}
+.mgvs,.mggroup{color:var(--dim);font-size:11px}
+.mglift{color:var(--green);font-size:11px;font-weight:700}
 .jvstale .mglift{color:var(--dim)}
 .jvchip.jvthin{border-style:dashed}
 .mgbar{position:relative;width:120px;max-width:100%;height:16px;margin-top:3px}
@@ -218,14 +224,18 @@ button.jvfold:hover{color:var(--text)}
    its own column instead of widening the row and squeezing the best box to a
    sliver. The box carries the panel's longest prose — a condition runs to 240
    characters — so it takes the widest column, and every prose cell breaks
-   anywhere so no word crosses the panel's right edge (gt-6q7zj). */
+   anywhere so no word crosses the panel's right edge (gt-6q7zj). The rate
+   takes a share as wide as the evidence's, enough for "vs 24.3% across all
+   recent landings" to read in two lines, and the interval takes the narrowest
+   share — it draws a bar and no text, and that bar is capped at its column's
+   width rather than holding the column open at 120px (gt-g4vif). */
 .mgtable{table-layout:fixed;width:100%}
-.mgtable .mgc-target{width:15%}
-.mgtable .mgc-verdict{width:15%}
-.mgtable .mgc-rate{width:12%}
-.mgtable .mgc-interval{width:15%}
-.mgtable .mgc-evidence{width:20%}
-.mgtable .mgc-box{width:23%}
+.mgtable .mgc-target{width:12%}
+.mgtable .mgc-verdict{width:12%}
+.mgtable .mgc-rate{width:23%}
+.mgtable .mgc-interval{width:6%}
+.mgtable .mgc-evidence{width:23%}
+.mgtable .mgc-box{width:24%}
 .mgtable td:last-child{padding-right:0}
 .mgtable td.jvname,.mgtable .jvchip,.mgtable .mgbox,.mgtable .mgvs,.mgtable .mglift,.mgtable .mggroup,.mgtable .mgcondtext,.mgtable .mgcondshare,.mgtable .mgcondtag,.mgtable td.badc,.mgtable td.empty{overflow-wrap:anywhere}
 .mgtable td.jvname,.mgtable .jvchip,.mgtable .mgcondtext,.mgtable .mgcondshare,.mgtable .mgcondtag,.mgtable .mgbig{white-space:normal}
