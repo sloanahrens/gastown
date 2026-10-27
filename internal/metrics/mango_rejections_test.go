@@ -409,7 +409,9 @@ func TestMangoRejectionsSectionFailsWhenBdFails(t *testing.T) {
 
 func TestMangoRejectionsSectionFailsOnOutputThatIsNotABeadList(t *testing.T) {
 	t.Parallel()
-	for _, out := range []string{"not json", "null", "  "} {
+	// "[" is an array that does not parse, so it reaches the decoder's own
+	// error rather than the array check in front of it.
+	for _, out := range []string{"not json", "null", "  ", "["} {
 		out := out
 		t.Run(fmt.Sprintf("%q", out), func(t *testing.T) {
 			t.Parallel()
