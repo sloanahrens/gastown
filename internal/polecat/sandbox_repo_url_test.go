@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -161,6 +163,13 @@ func launchOnSandbox(t *testing.T, remote string) (*recordingSandboxBackend, err
 // launchOnSandboxAt is launchOnSandbox with the backend's Forgejo host named.
 func launchOnSandboxAt(t *testing.T, remote, forgejoHost string) (*recordingSandboxBackend, error) {
 	t.Helper()
+	return launchOnSandboxWith(t, remote, forgejoHost, SessionStartOptions{}, nil)
+}
+
+// launchOnSandboxWith is launchOnSandboxAt with extra options on the start and,
+// when db is given, the issue validation reading through it.
+func launchOnSandboxWith(t *testing.T, remote, forgejoHost string, extra SessionStartOptions, db beads.Client) (*recordingSandboxBackend, error) {
+	t.Helper()
 	town := t.TempDir()
 	rigPath := filepath.Join(town, "gastown")
 	settings := filepath.Join(rigPath, "settings")
@@ -173,13 +182,15 @@ func launchOnSandboxAt(t *testing.T, remote, forgejoHost string) (*recordingSand
 	}
 	workDir, _, w := setupSessionBranchTestRepo(t)
 	m := &SessionManager{tmux: newFakeSessionTmux(), rig: &rig.Rig{Name: "gastown", Path: rigPath}, gits: w.opener()}
+	if db != nil {
+		m.beadsAt = func(string) beads.Client { return db }
+	}
 	b := &recordingSandboxBackend{forgejo: forgejoHost, stopErr: errors.New("stop after prepare")}
-	err := m.launch("Toast", m.SessionName("Toast"), SessionStartOptions{
-		WorkDir:          workDir,
-		Backend:          b,
-		RuntimeConfigDir: t.TempDir(),
-	})
-	return b, err
+	opts := extra
+	opts.WorkDir = workDir
+	opts.Backend = b
+	opts.RuntimeConfigDir = t.TempDir()
+	return b, m.launch("Toast", m.SessionName("Toast"), opts)
 }
 
 // The sandbox backend's Prepare needs a clone URL; the session start must
@@ -214,6 +225,27 @@ func TestLaunchClonesFromTheBackendsForgejoHost(t *testing.T) {
 	}
 	if want := "http://forgejo.internal:3000/sloan/gastown.git"; b.got.RepoURL != want {
 		t.Errorf("SpawnSpec.RepoURL = %q, want %q", b.got.RepoURL, want)
+	}
+}
+
+// The bead the polecat was slung reaches the sandbox backend, which stamps the
+// stored prompt's hash on it (gt-2lu00).
+func TestLaunchGivesSandboxPrepareTheWorkBead(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	issue, err := db.Create(beads.CreateOptions{Title: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, lerr := launchOnSandboxWith(t, "http://forgejo:3000/sloan/gastown.git", "host.docker.internal", SessionStartOptions{Issue: issue.ID}, db)
+	if lerr == nil || !strings.Contains(lerr.Error(), "stop after prepare") {
+		t.Fatalf("launch = %v, want the backend's stop error", lerr)
+	}
+	if b.got == nil {
+		t.Fatal("Prepare was never called")
+	}
+	if b.got.WorkBeadID != issue.ID {
+		t.Errorf("SpawnSpec.WorkBeadID = %q, want the slung bead %q", b.got.WorkBeadID, issue.ID)
 	}
 }
 

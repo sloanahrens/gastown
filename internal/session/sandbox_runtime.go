@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -56,12 +57,19 @@ type runtimeFile struct {
 // command names it; a missing system prompt is skipped. A rig or polecat name
 // that is not one path segment is an error too.
 func buildRuntimeArchive(spec SpawnSpec, gitEmail string) ([]byte, error) {
-	return buildRuntimeArchiveLogging(spec, gitEmail, os.Stderr, config.SystemPromptRenderer)
+	return buildRuntimeArchiveLogging(spec, gitEmail, os.Stderr, config.SystemPromptRenderer, beads.New(spec.TownRoot))
 }
 
-// buildRuntimeArchiveLogging is buildRuntimeArchive with the spawn log given, so a
-// test can capture the uploaded prompt's hash line from the real build (gt-uoo5j).
-func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Writer, render config.SystemPromptRender) ([]byte, error) {
+// promptCommentStore is the bd surface a spawn's prompt stamp writes through;
+// *beads.Beads is the production store, a test passes a fake.
+type promptCommentStore interface {
+	AddCommentAs(id, author, comment string) error
+}
+
+// buildRuntimeArchiveLogging is buildRuntimeArchive with the spawn log and the
+// bead commenter given, so a test can capture the uploaded prompt's hash line
+// and the stamp it posts (gt-uoo5j, gt-2lu00). A nil commenter posts nothing.
+func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Writer, render config.SystemPromptRender, comments promptCommentStore) ([]byte, error) {
 	if err := requireRuntimeSegment("rig", spec.Rig); err != nil {
 		return nil, err
 	}
@@ -124,10 +132,14 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 	logSystemPrompt(promptLog, spec.Polecat, promptBytes)
 	// The bytes are kept by hash so a rejection can be joined to the prompt its
 	// author had (gt-js6di). A store failure is logged and never fails the spawn.
-	if stored, _, storeErr := storePolecatPrompt(spec.TownRoot, promptBytes); storeErr != nil {
+	stored, _, storeErr := storePolecatPrompt(spec.TownRoot, promptBytes)
+	if storeErr != nil {
 		fmt.Fprintf(promptLog, "system prompt store %s: %v\n", spec.Polecat, storeErr)
-	} else if pruneErr := prunePolecatPrompts(spec.TownRoot, time.Now(), stored); pruneErr != nil {
-		fmt.Fprintf(promptLog, "system prompt store prune %s: %v\n", spec.Polecat, pruneErr)
+	} else {
+		if pruneErr := prunePolecatPrompts(spec.TownRoot, time.Now(), stored); pruneErr != nil {
+			fmt.Fprintf(promptLog, "system prompt store prune %s: %v\n", spec.Polecat, pruneErr)
+		}
+		stampPromptOnWorkBead(spec, stored, len(promptBytes), promptLog, comments)
 	}
 
 	var buf bytes.Buffer
@@ -243,4 +255,31 @@ ends your session.
 func logSystemPrompt(w io.Writer, polecat string, data []byte) {
 	sum := sha256.Sum256(data)
 	fmt.Fprintf(w, "system prompt %s: %d bytes sha256 %s\n", polecat, len(data), hex.EncodeToString(sum[:]))
+}
+
+// promptStampHashLen is how much of the prompt's sha256 the stamp names.
+const promptStampHashLen = 12
+
+// promptStamp is the comment text a spawn stamps on its work bead: the stored
+// prompt's sha256 (first 12 hex digits) and its size in bytes (gt-2lu00).
+func promptStamp(hash string, size int) string {
+	if len(hash) > promptStampHashLen {
+		hash = hash[:promptStampHashLen]
+	}
+	return fmt.Sprintf("prompt %s (%d bytes)", hash, size)
+}
+
+// stampPromptOnWorkBead posts one comment on the bead the polecat was slung,
+// naming the prompt stored for it, so a landing's rejection is joined to the
+// prompt version its author had (gt-2lu00). A spawn without a work bead, or
+// with no commenter, posts nothing; a comment failure is logged and never
+// fails the spawn.
+func stampPromptOnWorkBead(spec SpawnSpec, stored string, size int, log io.Writer, comments promptCommentStore) {
+	if spec.WorkBeadID == "" || comments == nil {
+		return
+	}
+	author := spec.Rig + "/polecats/" + spec.Polecat
+	if err := comments.AddCommentAs(spec.WorkBeadID, author, promptStamp(stored, size)); err != nil {
+		fmt.Fprintf(log, "system prompt comment %s: %v\n", spec.WorkBeadID, err)
+	}
 }

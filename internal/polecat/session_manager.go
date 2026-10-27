@@ -753,6 +753,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 			Branch:      polecatGitBranch,
 			RepoURL:     repoURL,
 			HostWorkDir: workDir,
+			WorkBeadID:  opts.Issue,
 			Env:         envVars,
 			Trace:       opts.Trace,
 		})

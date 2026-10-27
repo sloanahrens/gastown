@@ -59,7 +59,11 @@ type SpawnSpec struct {
 	Branch      string // the polecat branch, created on the host before Prepare
 	RepoURL     string // the sandbox-side clone URL (Forgejo through the profile's Forgejo host)
 	HostWorkDir string // the host worktree; the tmux backend's WorkDir
-	Profile     Profile
+	// WorkBeadID is the bead the polecat was slung, "" when it was not slung
+	// one. The spawn stamps it with the stored prompt's hash, joining a
+	// landing's rejection to the prompt version its author had (gt-2lu00).
+	WorkBeadID string
+	Profile    Profile
 	// Env is the startup environment the backend must set on the sandbox
 	// (the GT_* identity, the Dolt endpoint, the agent preset's non-secret
 	// vars). The tmux backend ignores it: StartSession sets the same vars.

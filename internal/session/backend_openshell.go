@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/liveness"
@@ -145,7 +146,10 @@ type openshellBackend struct {
 	// renderPrompt renders the sandbox's system prompt bytes on the host; nil means the installed
 	// renderer, read at the spawn (gt-uvwi6).
 	renderPrompt config.SystemPromptRender
-	installedGT  func() string
+	// comments posts the spawn's prompt stamp on the work bead (gt-2lu00).
+	// Tests set it.
+	comments    promptCommentStore
+	installedGT func() string
 	// phaseWatch is how long this session's gateway phase has been a terminal
 	// failure. Nil is the process's watch (sandboxPhases); tests set one.
 	phaseWatch *sandboxPhaseWatch
@@ -164,6 +168,7 @@ func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
 		gitEmail:    hostGitEmail,
 		installedGT: version.BuildCommit,
 		policyRoot:  version.GetRepoRootForTown,
+		comments:    beads.New(townRoot),
 	}, nil
 }
 
@@ -388,7 +393,7 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	// Also before anything is pushed or created: the agent command names these
 	// files, so a polecat whose settings are missing or cannot be rendered for
 	// the sandbox must stop here.
-	runtime, err := buildRuntimeArchiveLogging(spec, b.gitEmail(), os.Stderr, b.promptRenderer())
+	runtime, err := buildRuntimeArchiveLogging(spec, b.gitEmail(), os.Stderr, b.promptRenderer(), b.comments)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}
