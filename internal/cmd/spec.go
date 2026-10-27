@@ -1234,7 +1234,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
 			continue
 		} else if bypass != "" {
-			report.Bypassed = append(report.Bypassed, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: overlap hold bypassed for P%d (would be held by %s)", id, full.Priority, bypass)})
+			report.Bypassed = append(report.Bypassed, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: overlap hold bypassed for P%d (%s)", id, full.Priority, bypass)})
 		}
 
 		// A bead whose children are open is a container, not a unit of work:
