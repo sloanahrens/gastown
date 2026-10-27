@@ -961,11 +961,13 @@ func (l *Lander) rescoreBorderline(ctx context.Context, v Verdict, in ReviewInpu
 // a verdict the landing refuses, that is the block's own attempt, ceiling and
 // all, so the rework pass can match the line to the block it judges by number
 // (gt-k10bq). rejected is whether the landing refuses the work on this verdict,
-// which an approval can earn from its findings alone (gt-vu18r). A failed
+// which an approval can earn from its findings alone (gt-vu18r). The record
+// carries the author's branch and seat kind, and the prompt its bead's stamp
+// names, so a per-kind view needs no other file (gt-b9j3o.16). A failed
 // append never holds a landing, but the line it loses is a hole in the rework
 // table, so it is also written on the work bead, where the table's reader can
 // find it.
-func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict, rejected bool) {
+func (l *Lander) logReview(issue *beads.Issue, w Work, comments []beads.Comment, dir string, v Verdict, rejected bool) {
 	if l.Reviews == nil || (v.Verdict != VerdictApprove && v.Verdict != VerdictRequestChanges) {
 		return
 	}
@@ -983,7 +985,8 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict, re
 		attempt = min(attempt, MaxReworkAttempts)
 	}
 	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: attempt,
-		Score: v.Score, Verdict: v.Verdict, Rejected: rejected, Agent: w.Agent, Findings: len(v.Findings), Bar: bar, At: l.now().UTC()}
+		Score: v.Score, Verdict: v.Verdict, Rejected: rejected, Agent: w.Agent, Findings: len(v.Findings), Bar: bar, At: l.now().UTC(),
+		Branch: w.Branch, AuthorKind: AuthorKind(w.Branch), PromptSHA: promptStampSHA(comments, w)}
 	if err := l.Reviews.Append(rec); err != nil {
 		l.logf("%s: could not append to the reviews log (%v); the landing is unaffected", w.BeadID, err)
 		l.commentReviewLogFailure(w, rec, err)
@@ -1026,15 +1029,16 @@ func (l *Lander) firstRoundsWarning(bead string) bool {
 	return true
 }
 
-// reviewBrief is the work-item file om reads for the bead: its goal, constraints,
-// scope and gate plus its decision comments (gt-0sztd). Comments that cannot be
-// read leave the brief without them; the review still judges the diff.
-func (l *Lander) reviewBrief(issue *beads.Issue) string {
+// beadComments reads the bead's comments once for the review: the work-item
+// file om reads (gt-0sztd) and the prompt stamp the review record carries
+// (gt-b9j3o.16). Comments that cannot be read leave both without them; the
+// review still judges the diff.
+func (l *Lander) beadComments(issue *beads.Issue) []beads.Comment {
 	comments, err := l.Beads.Comments(issue.ID)
 	if err != nil {
-		l.logf("%s: could not read the bead's comments for the work-item file (%v); om reads the brief without them", issue.ID, err)
+		l.logf("%s: could not read the bead's comments for the work-item file (%v); om reads the brief without them, and the review record carries no prompt", issue.ID, err)
 	}
-	return BeadBrief(issue.Description, comments)
+	return comments
 }
 
 // roundsText is the bead's rounds ledger as om reads it, or "" when there is no
@@ -1414,6 +1418,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	var (
 		verdict   Verdict
 		reviewErr error
+		comments  []beads.Comment
 	)
 	// reviewStart opens the window the review leaves on the work bead: it
 	// covers the overseer check and the om attempt alike, so a waiver is
@@ -1429,10 +1434,11 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		l.stage(w, StageOM)
 		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
 		accepted, used := l.acceptedRisks(w.BeadID)
+		comments = l.beadComments(issue)
 		in := ReviewInput{Dir: dir, Base: base, Head: merged, BeadID: w.BeadID,
 			CriteriaText: CriteriaText(issue), PriorFindings: priorReviewFindings(issue.Notes),
 			AcceptedRisksText: accepted,
-			BriefText:         l.reviewBrief(issue), PolicyText: policy.PolicyBlock(),
+			BriefText:         BeadBrief(issue.Description, comments), PolicyText: policy.PolicyBlock(),
 			Round: reviewAttempt(issue.Notes), RoundsText: l.roundsText(w.BeadID)}
 		verdict, reviewErr = l.review(omCtx, in)
 		// One flaky om run must not cost an escalation and a hand review
@@ -1476,7 +1482,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// findings decide the approval's fate before the line is written, so an
 	// approval they bounce is logged as the rejection it is (gt-vu18r).
 	findingsRej := findingsRejection(verdict)
-	l.logReview(issue, w, dir, verdict, findingsRej != nil)
+	l.logReview(issue, w, comments, dir, verdict, findingsRej != nil)
 	l.logRounds(issue, w, verdict)
 	l.commentVerdict(w, verdict, reviewStart, time.Now())
 	if verdict.Verdict == VerdictRequestChanges {
