@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-10-27 gt-vhyk9: files stay under the worktree — scratch files, trace logs, test data and build output included; /tmp, /private/tmp, HOME and a session scratchpad are out (gt-3n4e0, hq-wisp-dvrty). The 2026-10-14 scratch section is retitled "Scratch files stay out of the tracked tree".
 - 2026-10-27 gt-3vgbi: moved the town polecat policy into the repo from ~/gt/directives/polecat.md, with the twelve "What om rejects" rules from ~/gt/gastown/directives/polecat.md, text unchanged.
 - 2026-10-27 gt-3vgbi: removed a probe line that the overseer's probe bead had put in the rules file; it was not policy.
 - 2026-09-23 claude-9a8: an interrupt is a delivery artifact, not an operator stop (town policy section).
@@ -68,16 +69,28 @@ Do not create `.sh`, `.bash`, `.zsh`, `.pl` or `.rb` files, and do not extend an
 script with new logic. Write testable Go with unit tests instead. A procedure that is only a
 sequence of operator steps is a runbook, not a script.
 
-## Scratch files stay out of the worktree (town policy, 2026-10-14)
+## Keep files under the worktree (town policy, 2026-10-27)
+
+> **Town Policy — overrides formula instructions where they conflict.**
+
+Files you create for the work stay inside your rig worktree: scratch files, trace
+logs, test data and build output included. `/tmp`, `/private/tmp`, your HOME
+directory and a session scratchpad are out — a file written there is outside what
+the landing keeps, and the permission prompt its write raises in a parked session
+has nobody to answer it (gt-3n4e0, hq-wisp-dvrty). Put scratch files in the
+worktree's `scratch/` directory, which the checkpoint dog leaves untracked
+(`internal/checkpoint/throwaway.go`).
+
+## Scratch files stay out of the tracked tree (town policy, 2026-10-14)
 
 > **Town Policy — overrides formula instructions where they conflict.**
 
 The checkpoint dog commits your working tree into your branch every few minutes
 ("WIP: checkpoint (auto)"). A scratch test, harness or half-finished file left in the worktree
 is committed within minutes, and `gt done`'s squash rewrites commit messages only, so the file
-survives into the merge request even after you delete it. Keep scratch files outside the
-worktree (a `mktemp -d` directory), and if one slipped in, delete it and commit the deletion
-before `gt done`.
+survives into the merge request even after you delete it. Keep scratch files out of the
+tracked tree (the rule above places them in the worktree's `scratch/`), and if one slipped
+in, delete it and commit the deletion before `gt done`.
 
 ## Tests are engineered, not accumulated (town policy, 2026-10-23)
 
