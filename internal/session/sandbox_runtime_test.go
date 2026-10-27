@@ -427,3 +427,32 @@ func TestBuildRuntimeArchiveUploadsTheRenderedPromptVerbatim(t *testing.T) {
 		t.Errorf("logged hash = %q, want the hash of the rendered file %q", logged.String(), line)
 	}
 }
+
+// With no renderer installed the prompt cannot be rendered, so the build refuses and names the file:
+// the polecat would otherwise start with none of its policy (gt-uvwi6, gt-uoo5j).
+func TestBuildRuntimeArchiveRefusesWithoutAPromptRendererNamingTheFile(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, nil)
+	if err == nil {
+		t.Fatal("buildRuntimeArchiveLogging with no renderer = nil error; the polecat would start with none of its policy")
+	}
+	if !strings.Contains(err.Error(), "system-prompt-"+openshellTestPolecat+".md") {
+		t.Errorf("error does not name the prompt file: %v", err)
+	}
+}
+
+// A render that fails refuses the build, names the prompt file and keeps the cause (gt-uvwi6).
+func TestBuildRuntimeArchiveFailsWhenThePromptWillNotRenderNamingTheFile(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	cause := errors.New("template unavailable")
+	fail := func(_, _, _, _, _ string, _ config.SystemPromptTarget) error { return cause }
+	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, fail)
+	if !errors.Is(err, cause) {
+		t.Fatalf("error = %v, want the render failure wrapped", err)
+	}
+	if !strings.Contains(err.Error(), "system-prompt-"+openshellTestPolecat+".md") {
+		t.Errorf("error does not name the prompt file: %v", err)
+	}
+}
