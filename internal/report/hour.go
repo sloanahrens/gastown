@@ -1,7 +1,6 @@
 package report
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -60,35 +59,34 @@ var reportSectionOrder = []string{
 }
 
 // BeadStore is the read-only beads surface gt report uses for one store:
-// the plain client queries, plus the one filtered query beads.ListOptions
-// cannot express — the beads whose notes gained a MERGE REJECTION block since
-// a time. gt report never calls a write method.
+// the plain client queries, plus the rejection window — the beads whose notes
+// gained a MERGE REJECTION block since a time. gt report never calls a write
+// method.
 type BeadStore interface {
 	beads.Client
 	RejectedSince(since time.Time) ([]*beads.Issue, error)
 }
 
 // bdReportStore is the production BeadStore: a beads client pinned to one
-// store's beads directory, plus bd's note-filtered list.
+// store's beads directory, plus the rejection window built from its List.
 type bdReportStore struct {
 	*beads.Beads
 }
 
-// RejectedSince asks bd for the issues carrying a MERGE REJECTION note that
-// were updated at or after since. bd filters on the note text, so the reply
-// is only the beads a rejection touched; --updated-after is the window, and
-// --status=all reaches the ones already closed after their rejection.
+// RejectedSince asks the store for the issues carrying a MERGE REJECTION note
+// that were updated at or after since. The note filter runs in the store, so
+// the reply is only the beads a rejection touched; UpdatedAfter is the
+// window, and Status "all" reaches the ones already closed after their
+// rejection.
 func (s bdReportStore) RejectedSince(since time.Time) ([]*beads.Issue, error) {
-	out, err := s.Beads.Run("list",
-		"--notes-contains", land.MergeRejectionNoteMarker,
-		"--updated-after", since.UTC().Format(time.RFC3339),
-		"--status=all", "--json", "-n", "0")
+	issues, err := s.List(beads.ListOptions{
+		Status:        "all",
+		NotesContains: land.MergeRejectionNoteMarker,
+		UpdatedAfter:  since,
+		Priority:      beads.PriorityAny,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("bd list --notes-contains: %w", err)
-	}
-	var issues []*beads.Issue
-	if err := json.Unmarshal(jsonArrayFrom(out), &issues); err != nil {
-		return nil, fmt.Errorf("parsing the rejection list: %w", err)
+		return nil, fmt.Errorf("listing the beads a rejection touched: %w", err)
 	}
 	return issues, nil
 }
@@ -1181,13 +1179,4 @@ func shortHash(hash string) string {
 		return hash[:8]
 	}
 	return hash
-}
-
-// jsonArrayFrom drops the non-JSON prefix (warnings, notices) a bd subprocess
-// may print before its payload, returning data unchanged when it holds no '['.
-func jsonArrayFrom(data []byte) []byte {
-	if idx := bytes.IndexByte(data, '['); idx >= 0 {
-		return data[idx:]
-	}
-	return data
 }

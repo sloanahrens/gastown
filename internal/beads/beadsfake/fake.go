@@ -257,6 +257,20 @@ func createdAtOrAfter(is *beads.Issue, t time.Time) bool {
 	return err == nil && !at.Before(t.Truncate(time.Second))
 }
 
+// updatedAtOrAfter reports whether is was updated at or after t. An issue
+// whose updated_at cannot be read is not shown to fall inside the window, so
+// it is left out, as bd leaves out an issue it cannot date.
+func updatedAtOrAfter(is *beads.Issue, t time.Time) bool {
+	at, err := time.Parse(time.RFC3339, is.UpdatedAt)
+	return err == nil && !at.Before(t.Truncate(time.Second))
+}
+
+// notesContain reports whether notes holds sub, case-insensitively, as bd's
+// --notes-contains does.
+func notesContain(notes, sub string) bool {
+	return strings.Contains(strings.ToLower(notes), strings.ToLower(sub))
+}
+
 // hasLabels reports whether is carries every one of labels.
 func hasLabels(is *beads.Issue, labels []string) bool {
 	for _, l := range labels {
@@ -279,9 +293,10 @@ func hasLabel(is *beads.Issue, label string) bool {
 // List returns the issues matching opts, newest first. Ephemeral selects the
 // wisps instead of the issues. Status "" leaves out closed issues and "all"
 // keeps them; Type is read as the label "gt:<Type>"; Labels must all be
-// present; PriorityAny (the zero value) means any. Rig is ignored: a Fake is
-// one database. IncludeInfra changes nothing: no fake issue has an
-// infrastructure type.
+// present; PriorityAny (the zero value) means any. NotesContains matches a
+// note substring case-insensitively; UpdatedAfter keeps issues updated at or
+// after it. Rig is ignored: a Fake is one database. IncludeInfra changes
+// nothing: no fake issue has an infrastructure type.
 func (f *Fake) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -304,7 +319,9 @@ func (f *Fake) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 			opts.IssueType != "" && is.Type != opts.IssueType,
 			len(opts.IDs) > 0 && !slices.Contains(opts.IDs, is.ID),
 			!opts.ClosedAfter.IsZero() && !closedAtOrAfter(is, opts.ClosedAfter),
-			!opts.CreatedAfter.IsZero() && !createdAtOrAfter(is, opts.CreatedAfter):
+			!opts.CreatedAfter.IsZero() && !createdAtOrAfter(is, opts.CreatedAfter),
+			opts.NotesContains != "" && !notesContain(is.Notes, opts.NotesContains),
+			!opts.UpdatedAfter.IsZero() && !updatedAtOrAfter(is, opts.UpdatedAfter):
 			continue
 		}
 		out = append(out, is)

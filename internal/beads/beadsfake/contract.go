@@ -643,6 +643,29 @@ func contractListFilters(t *testing.T, s *scope) {
 	got, err = s.List(beads.ListOptions{Priority: beads.PriorityP4, CreatedAfter: createdAt.Add(time.Hour)})
 	s.want(t, "List{CreatedAfter:after create}", got, err)
 
+	// NotesContains keeps only the issues whose notes hold the text, matched
+	// case-insensitively as bd's --notes-contains does.
+	noted := s.mustCreate(t, beads.CreateOptions{Title: "noted", Priority: -1})
+	mustDo(t, "append notes", s.AppendNotes(noted.ID, "MERGE REJECTION (build): red"))
+	s.mustCreate(t, beads.CreateOptions{Title: "no notes", Priority: -1})
+	got, err = s.List(beads.ListOptions{NotesContains: "merge rejection", Priority: -1})
+	s.want(t, "List{NotesContains}", got, err, noted.ID)
+	got, err = s.List(beads.ListOptions{NotesContains: "no note holds this text", Priority: -1})
+	s.want(t, "List{NotesContains:absent}", got, err)
+
+	// UpdatedAfter keeps only what was updated at or after the bound. The
+	// append that wrote the note is the update, and (as for ClosedAfter and
+	// CreatedAfter) the bounds sit an hour either side of it rather than on
+	// the second itself.
+	notedAt, err := time.Parse(time.RFC3339, s.mustShow(t, noted.ID).UpdatedAt)
+	if err != nil {
+		t.Fatalf("updated_at of %s: %v", noted.ID, err)
+	}
+	got, err = s.List(beads.ListOptions{NotesContains: "MERGE REJECTION", UpdatedAfter: notedAt.Add(-time.Hour), Priority: -1})
+	s.want(t, "List{UpdatedAfter:before update}", got, err, noted.ID)
+	got, err = s.List(beads.ListOptions{NotesContains: "MERGE REJECTION", UpdatedAfter: notedAt.Add(time.Hour), Priority: -1})
+	s.want(t, "List{UpdatedAfter:after update}", got, err)
+
 	// IDs keeps only the named issues, whatever their status, and leaves out
 	// an id the store does not hold.
 	got, err = s.List(beads.ListOptions{Status: "all", IDs: []string{b.ID, cl.ID, "gt-nosuchid"}})
