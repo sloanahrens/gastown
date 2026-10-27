@@ -89,12 +89,12 @@ type dashSeat struct {
 	// HookedAt is when Issue was dispatched: the same clock the overrun guard
 	// judges (events.DispatchStart), so the Age column and the guard's nudge
 	// and stop thresholds cannot disagree (gt-tzbtf). It is the bead's first
-	// dispatch since its last run-end event (the seat's gt done, or the guard's
-	// stop), not the sling that reached this seat, so a bead handed between
-	// seats keeps one age. A bead the events log does not dispatch falls back
-	// to the agent bead's last write, which gt sling makes as it hooks the bead
-	// and which can only read short; zero when the agent bead is missing or
-	// undated (gt-jwmxo).
+	// dispatch since its last run-end event (the seat's gt done, a hand close,
+	// or the guard's stop), not the sling that reached this seat, so a bead
+	// handed between seats keeps one age. A bead the events log does not
+	// dispatch falls back to the agent bead's last write, which gt sling makes
+	// as it hooks the bead and which can only read short; zero when the agent
+	// bead is missing or undated (gt-jwmxo).
 	HookedAt time.Time
 	// Sandbox is the seat's liveness where the host tmux cannot see it: a
 	// sandboxed seat's session lives inside its sandbox (gt-43k7c).
@@ -401,17 +401,17 @@ func (c *dashSeatCache) put(id, key string, item polecatInventoryItem) {
 // by the caller, plus the sandbox registry's, which the host tmux cannot see
 // (gt-43k7c). A rig whose beads cannot be read is an error, not a rig of
 // idle polecats: a store that is down must not read as a quiet town.
-func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache *dashSeatCache, lister sessionLister) ([]dashSeat, error) {
+func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache *dashSeatCache, dispatches *events.DispatchReader, lister sessionLister) ([]dashSeat, error) {
 	rigs, err := knownRigNames(townRoot)
 	if err != nil {
 		return nil, err
 	}
-	// The dispatch clock the overrun guard judges, read once for the whole
-	// town: an unreadable events log is an error, not a town where no bead was
-	// ever dispatched, so the seats read as unavailable rather than as young.
-	// It is read before the session and sandbox probes, so a town whose clock
-	// cannot be read costs no live read.
-	dispatched, err := dashDispatchStarts(townRoot)
+	// The dispatch clock the overrun guard judges, kept by the panel's reader
+	// across polls: an unreadable events log is an error, not a town where no
+	// bead was ever dispatched, so the seats read as unavailable rather than as
+	// young. It is read before the session and sandbox probes, so a town whose
+	// clock cannot be read costs no live read.
+	dispatched, err := dispatches.Starts()
 	if err != nil {
 		return nil, err
 	}
@@ -545,21 +545,6 @@ func dashSeatSessions(host polecatSessionSet, reg *session.PrefixRegistry, sandb
 		}
 	}
 	return sessions
-}
-
-// dashDispatchStarts reads the town's event log once and returns each bead's
-// dispatch clock (events.DispatchStarts): the earliest sling of the bead since
-// its last run-end event (gt done, or the overrun guard's stop), so a bead
-// handed from seat to seat keeps the age it started with. It is the clock the
-// overrun guard judges (gt-tzbtf). An unreadable log is an error: a town whose
-// dispatches cannot be read must not read as one where every bead was
-// dispatched a moment ago.
-func dashDispatchStarts(townRoot string) (map[string]time.Time, error) {
-	evs, err := events.Read(townRoot)
-	if err != nil {
-		return nil, fmt.Errorf("read the town's dispatch record: %w", err)
-	}
-	return events.DispatchStarts(evs), nil
 }
 
 // dashSandboxSeatAgents names the agents whose seats run in a sandbox, from the

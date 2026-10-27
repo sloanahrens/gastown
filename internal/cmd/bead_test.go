@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -559,5 +560,57 @@ func TestBeadClosePartialEndsOnlyClosedMolecules(t *testing.T) {
 	}
 	if got := mustShowBead(t, fake, "gt-wisp-c"); got.Status != "open" {
 		t.Errorf("gt-wisp-c = %s, want open: its bead's read failed, so nothing ended it", got.Status)
+	}
+}
+
+// Closing a bead ends its run on the town's clock: a bead closed by hand and
+// dispatched again later must start over, not be dated from the dispatch of the
+// run that was closed (gt-tzbtf). Only the beads the close actually closed are
+// recorded.
+func TestBeadCloseRecordsTheRunEnd(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	v, fake, _ := testBeadVerbs("gastown/polecats/opal")
+	var recorded []string
+	v.recordClosed = func(ids []string) { recorded = append(recorded, ids...); logClosedBeads(town, v.actor, ids) }
+	a := mustCreateBead(t, fake, beads.CreateOptions{Title: "a"})
+	b := mustCreateBead(t, fake, beads.CreateOptions{Title: "b"})
+	// A close the invariant refuses writes nothing, so it ends no run either.
+	v.closeRefusal = func(id, _ string) string {
+		if id == b.ID {
+			return "branch carries 2 unmerged commits"
+		}
+		return ""
+	}
+	if err := v.close("done", a.ID, b.ID); err == nil {
+		t.Fatal("close past the invariant succeeded")
+	}
+	if len(recorded) != 0 {
+		t.Errorf("refused close recorded run ends %v, want none", recorded)
+	}
+
+	v.closeRefusal = func(string, string) string { return "" }
+	if err := v.close("done", a.ID, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{a.ID, b.ID}; !reflect.DeepEqual(recorded, want) {
+		t.Errorf("recorded run ends %v, want %v", recorded, want)
+	}
+
+	// The record the close wrote is the one the dispatch clock reads.
+	evs, err := events.Read(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var written []string
+	for _, ev := range evs {
+		if ev.Type != events.TypeBeadClosed {
+			continue
+		}
+		bead, _ := ev.Payload["bead"].(string)
+		written = append(written, bead)
+	}
+	if want := []string{a.ID, b.ID}; !reflect.DeepEqual(written, want) {
+		t.Fatalf("bead_closed events = %v, want %v", written, want)
 	}
 }

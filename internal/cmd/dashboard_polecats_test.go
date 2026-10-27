@@ -330,11 +330,11 @@ func TestBuildDashPolecatsSandboxSeatLiveness(t *testing.T) {
 	}
 }
 
-// dashDispatchStarts is the Age column's clock: the bead's first dispatch
-// across seats, which the overrun guard judges too, so the two readings cannot
-// disagree (gt-tzbtf). An unreadable event log is an error, not a town where
-// no bead was ever dispatched.
-func TestDashDispatchStartsReadsTheBeadsFirstDispatch(t *testing.T) {
+// The Age column's clock is the bead's first dispatch across seats, which the
+// overrun guard judges too, so the two readings cannot disagree (gt-tzbtf). An
+// unreadable event log is an error, not a town where no bead was ever
+// dispatched.
+func TestDashDispatchesReadTheBeadsFirstDispatch(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	line := func(ts, typ, bead, target string) string {
@@ -349,16 +349,16 @@ func TestDashDispatchStartsReadsTheBeadsFirstDispatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(town, gtevents.EventsFile), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, err := dashDispatchStarts(town)
+	got, err := gtevents.NewDispatchReader(town).Starts()
 	if err != nil {
-		t.Fatalf("dashDispatchStarts: %v", err)
+		t.Fatalf("dispatch reader: %v", err)
 	}
 	if want := time.Date(2026, 10, 27, 10, 30, 0, 0, time.UTC); !got["gt-a"].Equal(want) {
 		t.Errorf("gt-a dispatch = %v, want the dispatch after its done event, %v", got["gt-a"], want)
 	}
 }
 
-func TestDashDispatchStartsReportsAnUnreadableLog(t *testing.T) {
+func TestDashDispatchesReportAnUnreadableLog(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	// A directory where the log belongs: the read fails, and a town whose
@@ -366,8 +366,8 @@ func TestDashDispatchStartsReportsAnUnreadableLog(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(town, gtevents.EventsFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dashDispatchStarts(town); err == nil {
-		t.Fatal("dashDispatchStarts read an unreadable log as an empty one")
+	if _, err := gtevents.NewDispatchReader(town).Starts(); err == nil {
+		t.Fatal("the dispatch reader read an unreadable log as an empty one")
 	}
 }
 
@@ -386,7 +386,7 @@ func TestDashSeatsReportsAnUnreadableDispatchRecord(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(town, gtevents.EventsFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dashSeats(town, nil, false, newDashSeatCache(), fakeSessionLister{}); err == nil {
+	if _, err := dashSeats(town, nil, false, newDashSeatCache(), gtevents.NewDispatchReader(town), fakeSessionLister{}); err == nil {
 		t.Fatal("dashSeats read an unreadable dispatch record as a town with no dispatches")
 	}
 }

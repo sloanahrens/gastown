@@ -145,14 +145,24 @@ type overrunSeams struct {
 	clearPause  func(seat overrunSeat) error
 	stopSession func(seat overrunSeat) error
 	checkpoint  func(seat overrunSeat) error
+	// stillOurs reports whether the bead is still hooked to the stopped seat:
+	// the stop reads again just before it ends the run, because a bead closed,
+	// or re-slung to another polecat, since the seat list was read is that
+	// holder's, and recording an end for it would end the new holder's run
+	// (gt-tzbtf). An error fails the step, so nothing is written on an
+	// unreadable bead. nil means the stop cannot tell and records the end; the
+	// hand-back's own check still refuses a bead that is not the seat's.
+	stillOurs func(seat overrunSeat) (bool, error)
 	// endRun records on the bead that the stop ended its run
-	// (events.TypeOverrunStop), so the dispatch after the hand-back is a new
-	// run the guard polices afresh. Without it a handed-back bead keeps its old
-	// clock and the one-stop-per-run rule leaves it unpoliced until a done
-	// event that a hand-back never writes. An error fails the step: the bead is
-	// handed back only after the run's end is recorded. nil means nothing is
-	// recorded.
-	endRun   func(seat overrunSeat) error
+	// (events.TypeOverrunStop), at the time the run ended, so the dispatch
+	// after the hand-back is a new run the guard polices afresh. Without it a
+	// handed-back bead keeps its old clock and the one-stop-per-run rule leaves
+	// it unpoliced until a done event that a hand-back never writes. The time
+	// is the one saved with the stop, not the tick's, so a record repeated by a
+	// retried stop carries the same end and cannot move the boundary past the
+	// dispatch it ends. An error fails the step: the bead is handed back only
+	// after the run's end is recorded. nil means nothing is recorded.
+	endRun   func(seat overrunSeat, at time.Time) error
 	handBack func(seat overrunSeat, elapsed time.Duration, note string) error
 
 	// push puts the seat's kept branch on origin, after the checkpoint and
@@ -653,8 +663,8 @@ type overrunSlungReader struct {
 // clock belongs to the bead, not to the seat holding it: it is the earliest
 // sling event for the bead that its last run-end event does not end
 // (events.DispatchStart), so a bead handed from one seat to another keeps the
-// dispatch it first went out on, and a bead whose work was finished or whose
-// seat the guard stopped starts over. With no such event it falls back to the
+// dispatch it first went out on, and a bead whose work was finished, closed or
+// whose seat the guard stopped starts over. With no such event it falls back to the
 // seat's agent bead update time, which can only read short, so the fallback
 // errs toward not stopping anyone.
 func (r *overrunSlungReader) slungAt(bead, rig, polecatName string) (time.Time, bool) {

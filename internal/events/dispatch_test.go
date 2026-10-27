@@ -96,6 +96,30 @@ func TestDispatchStartCountsTheBeadsFirstDispatch(t *testing.T) {
 			want: t10,
 		},
 		{
+			// A bead closed by hand ends its run as a done event does, so a
+			// bead reopened and dispatched later is judged from the new sling.
+			name: "a hand-closed bead ends its run",
+			evs: []Event{
+				dispatchEv(TypeSling, t9, "gt-a"),
+				dispatchEv(TypeBeadClosed, t10, "gt-a"),
+				dispatchEv(TypeSling, t11, "gt-a"),
+			},
+			want: t11,
+		},
+		{
+			// The run end a record carries dates it, not when the record was
+			// written: a stop whose hand-back is retried keeps writing its end,
+			// and a later write must not creep past a dispatch that started a
+			// new run in between.
+			name: "a run end's recorded time dates it, not the record's write time",
+			evs: []Event{
+				dispatchEv(TypeSling, t9, "gt-a"),
+				{Timestamp: t12, Type: TypeOverrunStop, Payload: map[string]interface{}{"bead": "gt-a", "at": t10}},
+				dispatchEv(TypeSling, t11, "gt-a"),
+			},
+			want: t11,
+		},
+		{
 			name: "another bead's events do not date this one",
 			evs: []Event{
 				dispatchEv(TypeSling, t9, "gt-b"),
@@ -158,5 +182,52 @@ func TestDispatchStartsMatchesDispatchStartForEveryBead(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Errorf("DispatchStarts dated %d beads, want 2: %v", len(got), got)
+	}
+}
+
+// The clock a reader keeps current from the lines appended since its last read
+// must answer what a whole-log read answers: the dashboard's Age column and the
+// overrun guard read the same map (gt-tzbtf). Every chunk boundary is tried,
+// including ones that split a bead's events.
+func TestDispatchClockMatchesAWholeLogReadInAnyChunking(t *testing.T) {
+	t.Parallel()
+	evs := []Event{
+		dispatchEv(TypeSling, t9, "gt-a"),
+		dispatchEv(TypeSling, t10, "gt-b"),
+		dispatchEv(TypeDone, t10, "gt-a"),
+		dispatchEv(TypeSling, t11, "gt-a"),
+		dispatchEv(TypeOverrunStop, t11, "gt-b"),
+		dispatchEv(TypeSling, t12, "gt-b"),
+		dispatchEv(TypeSling, t11, "gt-c"),
+		dispatchEv(TypeBeadClosed, t12, "gt-c"),
+		dispatchEv(TypeSling, t12, "gt-c"),
+	}
+	want := DispatchStarts(evs)
+	for cut := 0; cut <= len(evs); cut++ {
+		c := NewDispatchClock()
+		c.Add(evs[:cut])
+		c.Add(evs[cut:])
+		got := c.Starts()
+		if len(got) != len(want) {
+			t.Fatalf("cut %d: clock dated %d beads, want %d: %v", cut, len(got), len(want), got)
+		}
+		for bead, at := range want {
+			if g, ok := got[bead]; !ok || !g.Equal(at) {
+				t.Errorf("cut %d: %s = %v (%t), want %v", cut, bead, g, ok, at)
+			}
+		}
+	}
+}
+
+// Starts hands back a copy: a caller that keeps the map across polls must not
+// see a later Add change it under the dashboard.
+func TestDispatchClockStartsIsACopy(t *testing.T) {
+	t.Parallel()
+	c := NewDispatchClock()
+	c.Add([]Event{dispatchEv(TypeSling, t9, "gt-a")})
+	got := c.Starts()
+	delete(got, "gt-a")
+	if _, ok := c.Start("gt-a"); !ok {
+		t.Fatal("deleting a bead from the returned map emptied the clock")
 	}
 }

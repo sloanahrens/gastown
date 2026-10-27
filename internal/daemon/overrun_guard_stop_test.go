@@ -181,9 +181,9 @@ func TestStop_EndsTheRunBeforeTheHandBack(t *testing.T) {
 	seams := f.seams()
 	var order []string
 	endRun, handBack := seams.endRun, seams.handBack
-	seams.endRun = func(seat overrunSeat) error {
+	seams.endRun = func(seat overrunSeat, at time.Time) error {
 		order = append(order, "end-run")
-		return endRun(seat)
+		return endRun(seat, at)
 	}
 	seams.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
 		order = append(order, "hand-back")
@@ -235,7 +235,9 @@ func TestStop_FailedRunEndHoldsTheHandBack(t *testing.T) {
 // The stop's own endRun closure is what writes the record, so it is checked
 // against the town's dispatch clock: the dispatch after the stop is the bead's
 // clock, not the sling the stopped seat ran on, so the handed-back bead is
-// policed afresh on its next run (gt-tzbtf).
+// policed afresh on its next run (gt-tzbtf). The record is stamped with the end
+// the stop saved, not with when the record is written, so the same stop retried
+// on a later tick cannot move the boundary past the new dispatch.
 func TestEndRunSeamDatesTheDispatchAfterTheStopAfresh(t *testing.T) {
 	t.Parallel()
 	d, _ := newOverrunDaemon(t, false)
@@ -253,12 +255,17 @@ func TestEndRunSeamDatesTheDispatchAfterTheStopAfresh(t *testing.T) {
 	if seams.endRun == nil {
 		t.Fatal("overrunStopSeams left endRun nil: nothing would end the run")
 	}
-	if err := seams.endRun(stopSeat); err != nil {
+	stopped := first.Add(20 * time.Minute)
+	if err := seams.endRun(stopSeat, stopped); err != nil {
 		t.Fatalf("endRun: %v", err)
+	}
+	// A retried stop writes the record again, later, for the same end.
+	if err := seams.endRun(stopSeat, stopped); err != nil {
+		t.Fatalf("endRun again: %v", err)
 	}
 	// A dispatch after the stop, which the stop's own record must make the new
 	// run's clock.
-	resling := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	resling := stopped.Add(time.Minute)
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatal(err)
@@ -1575,5 +1582,86 @@ func TestOverrunFinishedOnOrigin_NeedsTheSameCommitOnBoth(t *testing.T) {
 	g.commitTime = slung.Add(time.Minute)
 	if got := d.overrunFinishedOnOrigin(stopSeat); got != "" {
 		t.Errorf("sling time unknown: got %q, want none", got)
+	}
+}
+
+// A stop retried on later ticks records the run's end once, stamped with the
+// session stop's time: a hand-back that keeps failing runs step 5 every tick,
+// and a later end written each time would creep past the dispatch it ended,
+// leaving the bead dated from the agent bead's write, which reads short
+// (gt-tzbtf).
+func TestStop_RecordsTheRunEndOnceAcrossHandBackRetries(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.failOn = map[string]error{"hand-back": errors.New("bd is down")}
+
+	for range 3 {
+		d.runOverrunGuard(f.seams())
+	}
+	if len(f.handedBack) != 0 {
+		t.Fatalf("handed back %v although the hand-back failed", f.handedBack)
+	}
+	if len(f.endRuns) != 1 {
+		t.Fatalf("run ends = %d across three retried ticks, want 1", len(f.endRuns))
+	}
+	if want := f.now; !f.endRunAts[0].Equal(want) {
+		t.Errorf("run end stamped %v, want the session stop's time, %v", f.endRunAts[0], want)
+	}
+
+	f.failOn = nil
+	d.runOverrunGuard(f.seams())
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-backs = %d, want the successful tick to hand the bead back", len(f.handedBack))
+	}
+	if len(f.endRuns) != 1 {
+		t.Errorf("run ends = %d after the hand-back succeeded, want still 1", len(f.endRuns))
+	}
+}
+
+// A bead that is no longer the stopped seat's — closed, or re-slung to another
+// polecat — is not given a run end: the record would end that holder's run and
+// date its clock by the old one (gt-tzbtf).
+func TestStop_DoesNotEndTheRunOfABeadAnotherHolderHas(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.notOurs = true
+
+	d.runOverrunGuard(f.seams())
+
+	if len(f.endRuns) != 0 {
+		t.Errorf("run ends = %v, want none for a bead another polecat holds", f.endRuns)
+	}
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-backs = %d, want the stop to release the seat", len(f.handedBack))
+	}
+	if !strings.Contains(buf.String(), "no longer this seat's") {
+		t.Errorf("log lacks the skipped record:\n%s", buf.String())
+	}
+}
+
+// A bead that cannot be read before the run's end fails the step: nothing is
+// written on a guess, and the next tick reads it again.
+func TestStop_UnreadableBeadBeforeTheRunEndHoldsTheHandBack(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.stillOursErr = errors.New("bd timed out")
+
+	d.runOverrunGuard(f.seams())
+
+	if len(f.endRuns) != 0 || len(f.handedBack) != 0 {
+		t.Errorf("run ends %v, hand-backs %v; want nothing written on an unreadable bead", f.endRuns, f.handedBack)
+	}
+	st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.StoppedAt.IsZero() {
+		t.Error("stop marked finished although the bead could not be read")
+	}
+	if !strings.Contains(buf.String(), "cannot read the bead before ending its run") {
+		t.Errorf("log lacks the unreadable-bead step failure:\n%s", buf.String())
 	}
 }

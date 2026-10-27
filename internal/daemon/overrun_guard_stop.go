@@ -43,10 +43,15 @@ const (
 //  5. end the bead's run (events.TypeOverrunStop) and hand the bead back
 //     (status open, assignee cleared, needs-split) so the roster no longer
 //     counts the seat; a bead found closed or re-slung to another polecat is
-//     left alone. The run's end is recorded first, while the bead is still
-//     hooked here, so the dispatch after the hand-back is a new run the guard
-//     polices afresh; a failed record fails the step and the hand-back waits
-//     for it. When the kept branch's head was already
+//     left alone. The bead is read once more here, and the run's end is
+//     recorded only while it is still this seat's, so the record cannot end a
+//     run another polecat has since taken. The end is stamped with the session
+//     stop's time and saved, so a stop retried on later ticks (a hand-back that
+//     keeps failing) records it once, at the same time, instead of writing a
+//     later end every tick that could creep past the dispatch it ends; the
+//     dispatch after the hand-back is then a new run the guard polices afresh,
+//     and a failed record fails the step, so the hand-back waits for it. When
+//     the kept branch's head was already
 //     origin's head for it before step 4's push, the checkpoint committed
 //     nothing (so the worktree was clean: a commit would have moved the head),
 //     and the seat committed that head after the sling began (a seat resumed
@@ -329,11 +334,41 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			"%s stays paused until an operator pushes it and runs gt agent resume.",
 			branch, d.overrunWorktreePath(seat), st.PushFailure, who))
 	}
-	if s.endRun != nil {
-		if err := s.endRun(handed); err != nil {
-			d.logger.Printf("overrun_guard: stop %s on %s: the run's end could not be recorded, so the bead is not handed back yet: %v",
-				who, st.Bead, err)
-			return
+	// The run's end is recorded once per stop, and only while the bead is still
+	// the stopped seat's. Both matter on a retry: a hand-back that keeps failing
+	// runs this step every tick, and a record written under a later time each
+	// time would creep past the dispatch it ends, leaving the bead dated from
+	// the agent bead's write (which reads short). The time is the session stop's,
+	// saved with the stop, so a repeated record carries the same end; and a bead
+	// that closed or moved to another seat in between belongs to that holder, so
+	// ending its run would date the new holder's clock by the old run.
+	if s.endRun != nil && st.RunEndedAt.IsZero() {
+		ours := true
+		if s.stillOurs != nil {
+			var err error
+			ours, err = s.stillOurs(handed)
+			if err != nil {
+				d.logger.Printf("overrun_guard: stop %s on %s: cannot read the bead before ending its run: %v",
+					who, st.Bead, err)
+				return
+			}
+		}
+		if ours {
+			at := st.SessionStoppedAt
+			if at.IsZero() {
+				at = now
+			}
+			if err := s.endRun(handed, at); err != nil {
+				d.logger.Printf("overrun_guard: stop %s on %s: the run's end could not be recorded, so the bead is not handed back yet: %v",
+					who, st.Bead, err)
+				return
+			}
+			st.RunEndedAt = at
+			if !save() {
+				return
+			}
+		} else {
+			d.logger.Printf("overrun_guard: stop %s on %s: the bead is no longer this seat's; not ending its run", who, st.Bead)
 		}
 	}
 	if err := s.handBack(handed, elapsed, strings.Join(notes, " ")); err != nil {
@@ -513,12 +548,32 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 			EndOpen(seat.Bead, seat.Rig+"/"+seat.Polecat, spans.ReasonOverrun, at)
 		return err
 	}
-	s.endRun = func(seat overrunSeat) error {
+	s.stillOurs = func(seat overrunSeat) (bool, error) {
+		// The same read the hand-back makes before it writes, so the run's end
+		// and the hand-back agree on whose bead it is: a closed bead, or one
+		// another polecat holds now, is that holder's (gt-tzbtf).
+		ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)
+		defer cancel()
+		store := beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot),
+			beads.WithBin(d.bdPathOrDefault())).WithTimeout(overrunHandBackTimeout)
+		status, assignee, err := polecat.NewBeadWriter(store, overrunActor).State(ctx, seat.Bead)
+		if err != nil {
+			return false, fmt.Errorf("read bead %s: %w", seat.Bead, err)
+		}
+		if status == "closed" || status == "tombstone" {
+			return false, nil
+		}
+		// An empty assignee is the half-released bead this stop already began
+		// handing back, and it is finished like one the seat still holds.
+		return assignee == "" || assignee == seat.Polecat, nil
+	}
+	s.endRun = func(seat overrunSeat, at time.Time) error {
 		// The town's event log is the clock both the guard and the dashboard
 		// read (events.DispatchStart), so the run's end is recorded there and
-		// nowhere else (gt-tzbtf).
+		// nowhere else (gt-tzbtf). "at" is the run's end as the stop saved it,
+		// so a record written by a retry dates the boundary the same way.
 		return events.LogFeedTo(d.config.TownRoot, events.TypeOverrunStop, overrunActor,
-			map[string]interface{}{"bead": seat.Bead})
+			map[string]interface{}{"bead": seat.Bead, "at": at.UTC().Format(time.RFC3339)})
 	}
 	s.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)

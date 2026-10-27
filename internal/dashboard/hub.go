@@ -978,6 +978,9 @@ func (h *Hub) polecatsLocked(now time.Time) []Polecat {
 		// for it: the feed is a rolling window with no record of the bead's
 		// done events, so its earliest line can belong to an earlier run and
 		// would date the Age from a start the guard never uses (gt-tzbtf).
+		// Every dispatch writes that record, the scheduled slings included: a
+		// scheduled dispatch runs the same sling, which logs the sling event
+		// beside its scheduler_dispatch line.
 		at := p.Hooked
 		if at != nil {
 			when := *at

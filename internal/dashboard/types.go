@@ -110,8 +110,9 @@ type Polecat struct {
 	// (gt-iv7jf). Empty for every other state, whose clock is Slung.
 	StateSince *time.Time `json:"state_since,omitempty"`
 	// Hooked is when the seat's bead was dispatched: the bead's first sling
-	// since its last run-end event (gt done, or the overrun guard's stop), the
-	// overrun guard's clock for the bead. A bead the events log does not
+	// since its last run-end event (gt done, a hand close through gt bead
+	// close, or the overrun guard's stop), the overrun guard's clock for the
+	// bead. A bead the events log does not
 	// dispatch falls back to the agent bead's last write, which gt sling makes;
 	// a later write on that bead — a submit, a patrol clearing the hook — dates
 	// the seat rather than the dispatch, so the fallback can only read too
