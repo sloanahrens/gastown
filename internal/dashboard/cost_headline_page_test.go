@@ -92,6 +92,38 @@ func TestCostHeadlineLabelsEveryDeepSeekFigureAndAddsClaude(t *testing.T) {
 	}
 }
 
+// A rate read over fewer hours than its window says how many it read, so a
+// reader weighing it knows how much of the window the series covered (gt-iazpv).
+func TestCostHeadlineCountsTheHoursItRead(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 10, 24, 12, 0, 0, 0, time.Local)
+	var skip []time.Time
+	for h := 3; h < 9; h++ {
+		skip = append(skip, time.Date(2026, 10, 25, h, 0, 0, 0, time.Local))
+	}
+	charts := BuildCostCharts(claudeSeriesNow, nil, nil, 0, claudeSeriesPlan, claudeHeadlineSamples(start, skip...))
+	tiles := headlineTiles(t, map[string]any{
+		"spend":       headlineSpend(t),
+		"cost_charts": charts,
+	})
+	claude := tiles[len(tiles)-1]
+	if !strings.Contains(claude.Key, "18 of 24 hours read") {
+		t.Errorf("the Claude tile of a window the series read 18 hours of is labelled %q", claude.Key)
+	}
+}
+
+// The page's fallback name for a headline the server has not sent is the
+// legend's own, off the constant: a change to one that left the other behind
+// would name the tile a series the charts no longer carry.
+func TestCostHeadlineFallbackNameTracksTheLegend(t *testing.T) {
+	t.Parallel()
+
+	if want := `|| "` + claudePlanSeriesName + `"`; !strings.Contains(string(indexHTML), want) {
+		t.Errorf("the page does not fall back to %q", claudePlanSeriesName)
+	}
+}
+
 // A Claude series the server could not build says why on the headline's tile,
 // so the row never draws the $0.00 of a plan nobody used (gt-iazpv).
 func TestCostHeadlineSaysWhyTheClaudeSeriesIsMissing(t *testing.T) {

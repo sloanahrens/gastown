@@ -49,20 +49,25 @@ type CostHeadline struct {
 	// the page draws a dash rather than a zero nobody spent.
 	Today      *float64 `json:"today,omitempty"`
 	PerHour24h *float64 `json:"per_hour_24h,omitempty"`
-	// HoursRead is how many of the last 24 hours the series had a sample for:
-	// PerHour24h is the rate over those hours.
-	HoursRead int `json:"hours_read,omitempty"`
+	// WindowHours is the window PerHour24h is read over and HoursRead how many
+	// of its hours had a sample: PerHour24h is the rate over those hours, and a
+	// reader weighs it by their count.
+	WindowHours int `json:"window_hours"`
+	HoursRead   int `json:"hours_read,omitempty"`
 	// Why is why no figure is drawn: the samples could not be read, none was
 	// written, or none falls in the window.
 	Why string `json:"why,omitempty"`
 }
 
+// costHeadlineHours is the window the headline's hourly rate is read over.
+const costHeadlineHours = 24
+
 // costHourlyWindow is the last 24 hours' buckets ending at now's hour: the
 // window the headline's hourly rate is read over.
 func costHourlyWindow(now time.Time) []costBucket {
 	last := now.In(time.Local).Truncate(time.Hour)
-	first := last.Add(-time.Duration(spendHours-1) * time.Hour)
-	buckets := make([]costBucket, spendHours)
+	first := last.Add(-time.Duration(costHeadlineHours-1) * time.Hour)
+	buckets := make([]costBucket, costHeadlineHours)
 	for i := range buckets {
 		start := first.Add(time.Duration(i) * time.Hour)
 		hr := start.Format("15") + ":00"
@@ -77,7 +82,7 @@ func costHourlyWindow(now time.Time) []costBucket {
 // rate over the hours it read and counts them, since a rate over a window the
 // series did not read would read as spend that never happened (gt-iazpv).
 func claudeHeadline(now time.Time, samples PlanSamples, weeklyUSD float64) *CostHeadline {
-	h := &CostHeadline{Name: claudePlanSeriesName}
+	h := &CostHeadline{Name: claudePlanSeriesName, WindowHours: costHeadlineHours}
 	days := costDailyBuckets(now)
 	if daily, _ := claudeCostSeries(days, days[len(days)-1].Start.AddDate(0, 0, 1), samples, weeklyUSD); daily != nil {
 		if last := daily.Bars[len(daily.Bars)-1]; !last.Gap {

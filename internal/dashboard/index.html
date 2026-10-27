@@ -2563,7 +2563,8 @@ function costClaudeHeadline(kv, h) {
     h.today != null ? "~" + money(h.today) + " today" : "– today",
     h.per_hour_24h != null ? "~" + money(h.per_hour_24h) + "/h last 24h" : "– last 24h",
   ];
-  tile.append(el("b", "", parts.join(" · ")), el("span", "", name + (h.hours_read > 0 && h.hours_read < 24 ? " · " + h.hours_read + " of 24 hours read" : "")));
+  const read = h.hours_read > 0 && h.hours_read < h.window_hours ? " · " + h.hours_read + " of " + h.window_hours + " hours read" : "";
+  tile.append(el("b", "", parts.join(" · ")), el("span", "", name + read));
   kv.append(tile);
 }
 
