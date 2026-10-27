@@ -1,7 +1,7 @@
-// Package polecatimage is the Go port of the build, lock and cleanup part of
-// plugins/polecat-image/run.sh (gt-tpg0p.5). Each method is one function of the
-// script and keeps its messages; the publish and prune ports (gt-tpg0p.6,
-// gt-tpg0p.7) finish the program that script becomes a shim of.
+// Package polecatimage is the Go port of the build, lock, publish and cleanup
+// part of plugins/polecat-image/run.sh (gt-tpg0p.5, gt-tpg0p.6). Each method is
+// one function of the script and keeps its messages; the prune port
+// (gt-tpg0p.7) finishes the program that script becomes a shim of.
 package polecatimage
 
 import (
@@ -35,6 +35,16 @@ type Config struct {
 	// Image is the tag a build updates, and Label is the label inside it that
 	// records the gt commit.
 	Image, Label string
+	// Registry is the host:port image pushes go to; empty publishes nothing.
+	Registry string
+	// Published records the "<image id> <registry>" a complete push left, so
+	// the next run retries one that did not finish.
+	Published string
+	// Crane tags and pushes the image's later tags on the registry.
+	Crane string
+	// FailClosed makes a run that leaves the image unbuilt or unpublished fail
+	// instead of deferring (POLECAT_IMAGE_FAIL_CLOSED=1).
+	FailClosed bool
 	// PID is the pid a claim records and Cleanup compares; 0 means this
 	// process's.
 	PID int
@@ -47,9 +57,12 @@ type Run struct {
 	// Worktree is the detached worktree the current build made; Cleanup removes
 	// it. Empty when there is none.
 	Worktree string
-	// TarDir is the publish step's scratch directory, which Cleanup removes;
-	// the publish port (gt-tpg0p.6) sets it.
+	// TarDir is the publish step's scratch directory, which PushToRegistry sets
+	// and Cleanup removes.
 	TarDir string
+	// FirstPushed is the reference the registry accepted first, which is what
+	// tells a later failure it left the image only partly published.
+	FirstPushed string
 	// HaveLock records that this run took the lock, so Cleanup may release it.
 	HaveLock bool
 
@@ -69,6 +82,8 @@ type Run struct {
 	// unlock holds the flock a run that took the lock keeps until Cleanup;
 	// nil while the run does not hold the lock.
 	unlock func()
+	// look finds a program on PATH; nil means exec.LookPath.
+	look func(name string) (string, error)
 }
 
 // command is one program invocation: its working directory, program and
@@ -143,6 +158,13 @@ func (r *Run) pidWriter() func(string, []byte) error {
 		return r.writePID
 	}
 	return func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) }
+}
+
+func (r *Run) looker() func(string) (string, error) {
+	if r.look != nil {
+		return r.look
+	}
+	return exec.LookPath
 }
 
 func (r *Run) pid() int {
