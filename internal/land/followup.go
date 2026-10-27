@@ -162,7 +162,7 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) 
 	var consumed int
 	lines, existing, consumed = l.drainQueue(queued, existing, lines)
 	if consumed > 0 {
-		lines = append(lines, l.compactQueue(existing)...)
+		lines = append(lines, l.compactQueue(w.Rig, existing)...)
 	}
 	// The beads an earlier attempt at this landing filed. They are this
 	// landing's own work, so a retry says nothing to them — the "seen again"
@@ -262,12 +262,17 @@ func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup
 // verdict, is left exactly as it was. A log that cannot be compacted is a feed
 // line and nothing more: the findings it names are already covered, so the
 // queue still drains, just slower.
-func (l *Lander) compactQueue(existing []ExistingFollowup) []string {
+//
+// The log is the town's and existing is this rig's beads, so only this rig's
+// lines can be judged covered: another rig's line whose findings read like one
+// of this rig's beads is still waiting to be filed in its own rig, and
+// dropping it would lose the finding (gt-3arxj).
+func (l *Lander) compactQueue(rig string, existing []ExistingFollowup) []string {
 	if l.Reviews == nil {
 		return nil
 	}
 	dropped, err := l.Reviews.Compact(func(q QueuedFollowup) bool {
-		return len(queuedCandidates(q, existing)) == 0
+		return q.Rig == rig && len(queuedCandidates(q, existing)) == 0
 	})
 	if err != nil {
 		return []string{fmt.Sprintf("could not compact the %s of its consumed queue lines (%v)", ReviewsFileName, err)}

@@ -211,6 +211,34 @@ func TestFollowupFeedLeavesAnotherRigsQueueAlone(t *testing.T) {
 	}
 }
 
+// TestFollowupFeedCompactionKeepsAnotherRigsLine: the log is
+// the town's, so compacting after this rig drained its own line must not drop
+// another rig's line whose findings read like a bead this rig just filed: that
+// rig has not filed it, and the finding would be lost (gt-3arxj).
+func TestFollowupFeedCompactionKeepsAnotherRigsLine(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.9, nil)
+	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reviews.AppendQueue(queueLine("lo-held", "longeye", queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	f.bd.Seed(beads.Issue{ID: "gt-held", Title: "an earlier landing", Status: "closed", Type: "bug"})
+	f.fake.existing = openFollowupBeads(1)
+	log := f.run()
+	if !strings.Contains(log, "dropped 1 consumed queue line") {
+		t.Fatalf("log = %q, want this rig's drained line dropped", log)
+	}
+	queued, err := f.reviews.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 || queued[0].Rig != "longeye" || queued[0].Bead != "lo-held" {
+		t.Errorf("queue = %+v, want only the other rig's line left", queued)
+	}
+}
+
 // TestFollowupFeedKeepsAQueueLineUntilTheBoundHasRoom: a queue line the bound
 // cannot file stays where it is. The feed appends no second line for it, so the
 // queue cannot grow by a landing that filed nothing (gt-3arxj).
