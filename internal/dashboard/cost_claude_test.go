@@ -35,9 +35,10 @@ var claudeSeriesPlan = &ClaudePlan{PlanUSDMonth: ClaudePlanDefaultUSD}
 // expected figure below is a percentage of.
 const claudeSeriesWeekUSD = 46.05
 
-// claudeSeriesResetsAt is the fixture week's reset instant, later than every
-// sample the fixtures write. Readings that name the same instant are one run of
-// the limit, so the steps between them are spend and never a renewal.
+// claudeSeriesResetsAt is the fixture week's reset instant, later than the
+// samples the fixtures write. The cost estimate prices the percentage alone, so
+// the instant is written because the status line writes it, not because it
+// changes a figure.
 var claudeSeriesResetsAt = time.Date(2026, 10, 29, 12, 0, 0, 0, time.Local)
 
 // claudeSampleAt is one status line reading of the fixture week at a local
@@ -46,8 +47,8 @@ func claudeSampleAt(at time.Time, sevenDay float64) ClaudePlanSample {
 	return claudeSampleIn(claudeSeriesResetsAt, at, sevenDay)
 }
 
-// claudeSampleIn is a reading of the week that resets at resetsAt: a later
-// reading naming another instant is the limit renewing between the two.
+// claudeSampleIn is a reading of the week that resets at resetsAt: fixtures use
+// it to write the renewal the status line writes, so a step across one is tested.
 func claudeSampleIn(resetsAt, at time.Time, sevenDay float64) ClaudePlanSample {
 	return ClaudePlanSample{T: at.Unix(), SevenDay: sevenDay, SevenDayResetsAt: resetsAt.Unix()}
 }
@@ -116,11 +117,11 @@ func TestBuildCostChartsPutsClaudeDollarsOnTheHourlyBuckets(t *testing.T) {
 	}
 }
 
-// A step is priced by the week its later reading belongs to, which the reading's
-// own reset instant names: inside one week only a rise is spend, while a step
-// that crossed a renewal is worth everything the new reading has spent since the
-// limit rolled over (gt-yxx98).
-func TestBuildCostChartsPricesAStepByItsWeek(t *testing.T) {
+// A step is worth its rise in the seven-day percentage and nothing else: the
+// drop across a week's renewal is the limit starting over, not money coming
+// back, so it contributes 0 and the buckets either side of it keep only the
+// rises they measured (gt-yxx98).
+func TestBuildCostChartsChargesRisesAndNeverARenewal(t *testing.T) {
 	t.Parallel()
 
 	week, next := claudeSeriesResetsAt, claudeSeriesResetsAt.AddDate(0, 0, 7)
@@ -131,26 +132,25 @@ func TestBuildCostChartsPricesAStepByItsWeek(t *testing.T) {
 		want    float64
 	}{
 		{
-			// 20 points of $46.05: ten before the renewal, the five the new week
-			// had spent when the first reading of it arrived, and five more by
-			// the last. The drop from 90 to 5 is the limit starting over, never
+			// Twelve points before the renewal and twelve after: 24 points of
+			// $46.05. The drop from 92 to 7 is the limit starting over, never
 			// money returned, so it costs the day nothing.
-			name: "a renewal between two readings charges the new week's spend and not the drop",
+			name: "a renewal between two readings charges the rise either side and not the drop",
 			samples: claudeSeries(
 				claudeSampleIn(week, at(10), 80),
-				claudeSampleIn(week, at(12), 90),
-				claudeSampleIn(next, at(14), 5),
-				claudeSampleIn(next, at(16), 10),
+				claudeSampleIn(week, at(12), 92),
+				claudeSampleIn(next, at(14), 7),
+				claudeSampleIn(next, at(16), 19),
 			),
-			want: 9.21,
+			want: 11.05,
 		},
 		{
-			// The new week rose past the old week's figure before the next
-			// sample: it spent all 70 of its points, not the 10-point difference
-			// a fall is mistaken for.
-			name:    "a renewal past the old week's figure charges the new week's whole spend",
-			samples: claudeSeries(claudeSampleIn(week, at(10), 60), claudeSampleIn(next, at(12), 70)),
-			want:    32.24,
+			// A new week is not billed for the old week's spending: the step
+			// that crossed the renewal is the twelve points it rose, never the
+			// whole of the new reading.
+			name:    "a rise across a renewal is its rise and no more",
+			samples: claudeSeries(claudeSampleIn(week, at(10), 60), claudeSampleIn(next, at(12), 72)),
+			want:    5.53,
 		},
 		{
 			// A fall inside one week is the API's own correction, not a renewal.
@@ -159,9 +159,9 @@ func TestBuildCostChartsPricesAStepByItsWeek(t *testing.T) {
 			want:    0,
 		},
 		{
-			// With no reset instant a renewal cannot be told from a fall, so the
-			// reading is read as the fall it might be.
-			name:    "a fall with no reset instant is not a renewal",
+			// A fall with no reset instant is read the same way: money does not
+			// come back, so the step is no spend.
+			name:    "a fall with no reset instant is not spend",
 			samples: claudeSeries(ClaudePlanSample{T: at(10).Unix(), SevenDay: 60}, ClaudePlanSample{T: at(12).Unix(), SevenDay: 50}),
 			want:    0,
 		},
@@ -178,6 +178,36 @@ func TestBuildCostChartsPricesAStepByItsWeek(t *testing.T) {
 				t.Errorf("10-24 = %v, want %v", bar.Value, tc.want)
 			}
 		})
+	}
+}
+
+// A rise that spans a bucket with no sample in it is priced nowhere: the
+// readings either side straddle time the series did not read, so charging the
+// whole rise to the bucket that closed the gap would bill the missing hours to
+// the one hour that happened to follow them (gt-yxx98).
+func TestBuildCostChartsLeavesARiseAcrossASampleGapUnpriced(t *testing.T) {
+	t.Parallel()
+
+	at := func(h int) time.Time { return time.Date(2026, 10, 25, h, 0, 0, 0, time.Local) }
+	samples := claudeSeries(
+		claudeSampleAt(at(10), 10),
+		claudeSampleAt(at(10).Add(10*time.Minute), 11), // one point inside the hour: $0.46
+		claudeSampleAt(at(12), 21),                     // two hours on: the rise is not priced
+	)
+	c := BuildCostCharts(claudeSeriesNow, nil, claudeSeriesHours(), 0, claudeSeriesPlan, samples).Hourly
+	if c == nil || c.Claude == nil {
+		t.Fatalf("no Claude series on the hourly chart: %+v", c)
+	}
+	if bar := claudeBar(t, c.Claude, "10:00"); bar.Gap || math.Abs(bar.Value-0.46) > 1e-9 {
+		t.Errorf("10:00 = %+v, want 0.46 (one point of $46.05)", bar)
+	}
+	// The hour the series did not read is a gap, and the hour that ended the
+	// gap is a zero bar: it sampled, and the rise across the gap is not its.
+	if bar := claudeBar(t, c.Claude, "11:00"); !bar.Gap {
+		t.Errorf("11:00 = %+v, want a gap", bar)
+	}
+	if bar := claudeBar(t, c.Claude, "12:00"); bar.Gap || bar.Value != 0 {
+		t.Errorf("12:00 = %+v, want a zero bar: the rise across the gap is not priced", bar)
 	}
 }
 

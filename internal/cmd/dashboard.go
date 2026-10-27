@@ -118,8 +118,9 @@ days as it is polled; the weekly history is what outlives it.
 The same samples draw a Claude series in the Cost panel's daily and hourly
 charts, in the same buckets as the DeepSeek bars: each rise in the weekly
 percentage is worth its share of the week at that price, the drop across a
-weekly reset is not spend, and a bucket with no sample is hatched rather than
-drawn as zero. The series is labeled a plan-equivalent estimate.
+weekly reset is not spend, a bucket with no sample is hatched rather than drawn
+as zero, and a rise that spans such a bucket is priced nowhere. The series is
+labeled a plan-equivalent estimate.
 
 The Forgejo panel reads the viewer role's token file
 (~/.config/gt/forgejo-viewer.env) and lists the recent activity of every rig

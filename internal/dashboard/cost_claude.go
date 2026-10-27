@@ -42,12 +42,14 @@ type costBucket struct {
 // claudeCostSeries folds the samples into plan-equivalent dollars on the
 // chart's buckets, or says why it has no series to draw.
 //
-// Each step between two consecutive samples is worth what the step spent (see
-// claudeStepDollars), counted in the bucket its later sample falls in: the rule
-// the hourly spend chart counts a balance fall by. A bucket the series has no
-// sample for is a gap, hatched by the page, because "no reading" and "no spend"
-// are different facts. A series with no sample in the window draws nothing at
-// all.
+// A step between two consecutive samples that fall in the same bucket is what
+// that bucket spent (see claudeStepDollars). A step that leaves the bucket is
+// not priced at all: the readings on either side of it straddle a stretch the
+// series did not sample, and charging the whole rise to the bucket that ended
+// the stretch would bill the missing time to the hour that happened to close it.
+// A bucket the series has no sample for is a gap, hatched by the page, because
+// "no reading" and "no spend" are different facts. A series with no sample in
+// the window draws nothing at all.
 func claudeCostSeries(buckets []costBucket, lastEnd time.Time, samples PlanSamples, weeklyUSD float64) (*CostClaudeSeries, string) {
 	switch {
 	case !samples.Read:
@@ -71,17 +73,19 @@ func claudeCostSeries(buckets []costBucket, lastEnd time.Time, samples PlanSampl
 	dollars := make([]float64, len(buckets))
 	seen := make([]bool, len(buckets))
 	inWindow := false
+	prevBucket := -1
 	for i, s := range ordered {
 		b := bucketOf(starts, lastEnd, time.Unix(s.T, 0).In(time.Local))
-		if b < 0 {
-			continue
+		if b >= 0 {
+			seen[b] = true
+			inWindow = true
+			// The step is priced only inside one bucket: a step out of a bucket
+			// spans time the series did not read.
+			if i > 0 && prevBucket == b {
+				dollars[b] += claudeStepDollars(ordered[i-1], s, weeklyUSD)
+			}
 		}
-		seen[b] = true
-		inWindow = true
-		if i == 0 {
-			continue
-		}
-		dollars[b] += claudeStepDollars(ordered[i-1], s, weeklyUSD)
+		prevBucket = b
 	}
 	if !inWindow {
 		return nil, "no sample falls in this window"
@@ -98,26 +102,18 @@ func claudeCostSeries(buckets []costBucket, lastEnd time.Time, samples PlanSampl
 	return series, ""
 }
 
-// claudeStepDollars is what the step between two readings spent, in dollars.
+// claudeStepDollars is what the step between two readings spent, in dollars: the
+// rise in the seven-day percentage of the limit, and nothing more.
 //
-// seven_day_resets_at names the run of the limit a reading belongs to, so a step
-// whose reset instant moved is a week that renewed between the two readings. The
-// drop across a renewal is the limit starting over, not money coming back, and
-// the later reading's percentage is all of it spent since then: the step is
-// worth that whole percentage. Charging only the difference would bill a new
-// week the ten points it rose past the old one for the seventy it had already
-// spent. Within one week — or with an instant missing, where a renewal cannot be
-// told from a fall — only a rise is spend; a fall or a flat step is the API's
-// own correction or a quiet ten minutes, and neither is dollars.
+// A percentage that falls is a week renewing or the API correcting itself, and
+// neither is money coming back: the drop contributes 0, never a negative figure,
+// and the new week's spending is counted from its own readings from there on. A
+// rise is spend, and the instant the week resets carries no dollars of its own.
 func claudeStepDollars(prev, s ClaudePlanSample, weeklyUSD float64) float64 {
-	switch {
-	case prev.SevenDayResetsAt > 0 && s.SevenDayResetsAt > 0 &&
-		!claudePlanSameWindow(prev.SevenDayResetsAt, s.SevenDayResetsAt):
-		return s.SevenDay / claudePlanLimitPct * weeklyUSD
-	case s.SevenDay > prev.SevenDay:
-		return (s.SevenDay - prev.SevenDay) / claudePlanLimitPct * weeklyUSD
+	if s.SevenDay <= prev.SevenDay {
+		return 0
 	}
-	return 0
+	return (s.SevenDay - prev.SevenDay) / claudePlanLimitPct * weeklyUSD
 }
 
 // claudeWeekUSD is what a week of the plan's limit is worth in dollars: the
