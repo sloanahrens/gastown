@@ -1,8 +1,9 @@
 // Package storetest holds the in-memory store.Store for the unit tier. It
 // implements the methods its Fake-flagged contract cases cover (create and
-// get, and the claim, release and transfer guards) and nothing more: every
-// other method returns store.ErrUnimplemented, so a unit test that reaches
-// past them fails loudly rather than reading a store that only looks modeled.
+// get, the claim, release and transfer guards, and the plain close those
+// guards refuse) and nothing more: every other method returns
+// store.ErrUnimplemented, so a unit test that reaches past them fails loudly
+// rather than reading a store that only looks modeled.
 package storetest
 
 import (
@@ -113,9 +114,10 @@ func (*Fake) UpdateIssue(context.Context, string, api.UpdatePatch, api.Guard) er
 }
 
 // assignVerb runs one assignment verb on issue id: it refuses a request with
-// no actor and a missing issue before change sees the row, so change only
-// decides the holder guard and the write.
-func (f *Fake) assignVerb(ctx context.Context, id, verb string, change func(*api.Issue, string) error) error {
+// no actor, a missing issue and a closed issue before change sees the row, so
+// change only decides the holder guard and the write. verb names the verb as
+// the no-actor error says it; done names it as the closed refusal says it.
+func (f *Fake) assignVerb(ctx context.Context, id, verb, done string, change func(*api.Issue, string) error) error {
 	actor := api.ActorFrom(ctx)
 	if actor == "" {
 		return api.Invalid("%s needs an actor; the request carries no identity", verb)
@@ -126,6 +128,9 @@ func (f *Fake) assignVerb(ctx context.Context, id, verb string, change func(*api
 	if !ok {
 		return api.NotFound(id)
 	}
+	if is.Status == "closed" {
+		return api.GuardFailed(fmt.Sprintf("%s is closed, so it cannot be %s", id, done))
+	}
 	if err := change(&is, actor); err != nil {
 		return err
 	}
@@ -135,7 +140,7 @@ func (f *Fake) assignVerb(ctx context.Context, id, verb string, change func(*api
 
 // Claim moves the issue to in_progress for the actor on the context.
 func (f *Fake) Claim(ctx context.Context, id string) error {
-	return f.assignVerb(ctx, id, "claim", func(is *api.Issue, actor string) error {
+	return f.assignVerb(ctx, id, "claim", "claimed", func(is *api.Issue, actor string) error {
 		if is.Assignee != "" && is.Assignee != actor {
 			return api.GuardFailed(fmt.Sprintf("%s is held by another actor", id))
 		}
@@ -149,7 +154,7 @@ func (f *Fake) Claim(ctx context.Context, id string) error {
 
 // Release returns the holder's issue to open and unassigned.
 func (f *Fake) Release(ctx context.Context, id string) error {
-	return f.assignVerb(ctx, id, "release", func(is *api.Issue, actor string) error {
+	return f.assignVerb(ctx, id, "release", "released", func(is *api.Issue, actor string) error {
 		if is.Assignee != actor {
 			return api.GuardFailed(fmt.Sprintf("%s is assigned to another actor", id))
 		}
@@ -161,10 +166,13 @@ func (f *Fake) Release(ctx context.Context, id string) error {
 // Transfer hands the holder's issue to assignee at status (the current status
 // when empty).
 func (f *Fake) Transfer(ctx context.Context, id, status, assignee string) error {
-	if assignee == "" {
-		return api.Invalid("transfer needs the assignee taking the issue; release leaves it unheld")
+	if err := api.ValidateTransferAssignee(assignee); err != nil {
+		return err
 	}
-	return f.assignVerb(ctx, id, "transfer", func(is *api.Issue, actor string) error {
+	if err := api.ValidateTransferStatus(status); err != nil {
+		return err
+	}
+	return f.assignVerb(ctx, id, "transfer", "transferred", func(is *api.Issue, actor string) error {
 		if is.Assignee != actor {
 			return api.GuardFailed(fmt.Sprintf("%s is assigned to another actor", id))
 		}
@@ -178,8 +186,29 @@ func (f *Fake) Transfer(ctx context.Context, id, status, assignee string) error 
 		return nil
 	})
 }
-func (*Fake) CloseIssues(context.Context, []string, string, bool) error {
-	return unimplemented("CloseIssues")
+
+// CloseIssues closes the issues of ids, or none when one is missing. It models
+// only what the assignment guards read: status, close reason and times.
+// Children and blockers are not modeled, so no close is ever refused.
+func (f *Fake) CloseIssues(_ context.Context, ids []string, reason string, _ bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, id := range ids {
+		if _, ok := f.issues[id]; !ok {
+			return api.NotFound(id)
+		}
+	}
+	now := f.now()
+	for _, id := range ids {
+		is := f.issues[id]
+		if is.Status == "closed" {
+			continue
+		}
+		closedAt := now
+		is.Status, is.CloseReason, is.ClosedAt, is.UpdatedAt = "closed", reason, &closedAt, now
+		f.issues[id] = is
+	}
+	return nil
 }
 func (*Fake) DeleteIssues(context.Context, []string) error { return unimplemented("DeleteIssues") }
 func (*Fake) AddComment(context.Context, string, string, string) error {

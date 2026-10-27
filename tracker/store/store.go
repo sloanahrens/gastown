@@ -45,7 +45,9 @@ type Store interface {
 	Release(ctx context.Context, id string) error
 	// Transfer assigns the issue to assignee at status (the current status
 	// when empty), but only while the actor on the context holds it and it is
-	// not closed; otherwise api.ErrGuardFailed, no write.
+	// not closed; otherwise api.ErrGuardFailed, no write. A transfer that
+	// changes nothing writes nothing, and a status of closed is refused:
+	// closing belongs to CloseIssues and its fences.
 	Transfer(ctx context.Context, id, status, assignee string) error
 	// CloseIssues closes all of ids with reason, or none: one transaction.
 	// force closes past open children and live blockers.

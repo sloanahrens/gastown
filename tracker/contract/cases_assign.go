@@ -3,9 +3,11 @@ package contract
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/tracker/api"
 	"github.com/steveyegge/gastown/tracker/store"
@@ -17,6 +19,27 @@ func init() {
 	register(Case{Name: "two racing claims have exactly one winner and the loser writes nothing", Run: claimRace})
 	register(Case{Name: "the assignment verbs refuse without an actor and a lost claim does not name the holder", Fake: true, Run: assignIdentityAndHold})
 	register(Case{Name: "claim, release and transfer refuse a closed issue and leave it closed", Run: assignClosed})
+	register(Case{Name: "the assignment verbs refuse a closed issue, so a refused verb cannot reopen it", Fake: true, Run: assignClosedRefusal})
+}
+
+// claimRaceBound is how long one round of two racing claims may take before the
+// test fails: a store that deadlocks must not hang the suite.
+const claimRaceBound = 30 * time.Second
+
+// waitBounded fails the test when wg has not finished within bound: the timer
+// bounds a stuck round, while a healthy one returns as the claims finish.
+func waitBounded(t *testing.T, wg *sync.WaitGroup, bound time.Duration, what string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(bound):
+		t.Fatalf("%s did not finish within %s", what, bound)
+	}
 }
 
 // as is the context of a request made by actor.
@@ -156,7 +179,7 @@ func claimRace(t *testing.T, s store.Store) {
 			}(i, who)
 		}
 		close(start)
-		wg.Wait()
+		waitBounded(t, &wg, claimRaceBound, fmt.Sprintf("round %d of two racing claims", round))
 
 		winner, losers := "", 0
 		for i, err := range errs {
@@ -199,8 +222,17 @@ func assignIdentityAndHold(t *testing.T, s store.Store) {
 			t.Errorf("%s with no actor = %v, want api.ErrInvalid", name, err)
 		}
 	}
-	if err := s.Transfer(as("alice"), is.ID, "open", ""); !errors.Is(err, api.ErrInvalid) {
-		t.Errorf("transfer to no one = %v, want api.ErrInvalid", err)
+	// A transfer names one usable seat address and a status that is not a close;
+	// anything else is refused before the row is read.
+	for name, err := range map[string]error{
+		"transfer to no one":          s.Transfer(as("alice"), is.ID, "open", ""),
+		"transfer to a padded name":   s.Transfer(as("alice"), is.ID, "open", " bob"),
+		"transfer to two names":       s.Transfer(as("alice"), is.ID, "open", "bob carol"),
+		"transfer to a closed status": s.Transfer(as("alice"), is.ID, "closed", "bob"),
+	} {
+		if !errors.Is(err, api.ErrInvalid) {
+			t.Errorf("%s = %v, want api.ErrInvalid", name, err)
+		}
 	}
 	for name, err := range map[string]error{
 		"claim":    s.Claim(as("bob"), is.ID),
@@ -254,6 +286,29 @@ func assignIdentityAndHold(t *testing.T, s store.Store) {
 	}
 	if got := mustGet(t, s, is.ID); !got.UpdatedAt.Equal(started.UpdatedAt) {
 		t.Errorf("a transfer that changed nothing moved UpdatedAt from %v to %v", started.UpdatedAt, got.UpdatedAt)
+	}
+}
+
+// assignClosedRefusal is the fake-able part of the closed refusal: every verb
+// refuses a closed issue and leaves it closed. It reads no events, so the
+// in-memory fake can run it.
+func assignClosedRefusal(t *testing.T, s store.Store) {
+	held := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "closed and held", Assignee: "alice"})
+	if err := s.CloseIssues(as("alice"), []string{held.ID}, "done", false); err != nil {
+		t.Fatalf("close = %v, want nil", err)
+	}
+	closed := mustGet(t, s, held.ID)
+	for name, err := range map[string]error{
+		"claim":    s.Claim(as("alice"), held.ID),
+		"release":  s.Release(as("alice"), held.ID),
+		"transfer": s.Transfer(as("alice"), held.ID, "open", "bob"),
+	} {
+		if !errors.Is(err, api.ErrGuardFailed) {
+			t.Errorf("%s of a closed issue = %v, want api.ErrGuardFailed", name, err)
+		}
+	}
+	if got := mustGet(t, s, held.ID); got.Status != "closed" || got.Assignee != closed.Assignee || !got.UpdatedAt.Equal(closed.UpdatedAt) {
+		t.Errorf("a refused verb reopened or moved a closed issue: %+v", got)
 	}
 }
 

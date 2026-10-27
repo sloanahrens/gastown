@@ -44,10 +44,15 @@ func (s *Server) releaseIssue(w http.ResponseWriter, r *http.Request) {
 
 // transferIssue hands the issue the token's actor holds to another actor. The
 // call is refused unless the caller holds it, so a body names only the new
-// holder.
+// holder; the body is checked here, so a malformed assignee or a close in
+// disguise is a 400 before the store sees it.
 func (s *Server) transferIssue(w http.ResponseWriter, r *http.Request) {
 	var req api.TransferRequest
 	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if err := req.Validate(); err != nil {
 		writeError(w, err, s.cfg.Log)
 		return
 	}

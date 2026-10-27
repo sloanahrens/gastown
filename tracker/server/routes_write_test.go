@@ -215,6 +215,35 @@ func TestAssignRoutesUseTheTokenActorAndAnswer204(t *testing.T) {
 	}
 }
 
+// Unit tier: a transfer body is checked before the store, so a malformed seat
+// address or a close in disguise is a 400 and never a write.
+func TestTransferRefusesAMalformedBodyBeforeTheStore(t *testing.T) {
+	t.Parallel()
+	called := false
+	st := okStub()
+	st.transfer = func(context.Context, string, string, string) error {
+		called = true
+		return nil
+	}
+	ts := writeServer(t, st)
+	bodies := map[string]string{
+		"no assignee":         `{"status":"open"}`,
+		"a padded assignee":   `{"assignee":" bob"}`,
+		"two assignees":       `{"assignee":"bob carol"}`,
+		"a close in disguise": `{"assignee":"bob","status":"closed"}`,
+	}
+	bodies["an oversized assignee"] = `{"assignee":"` + strings.Repeat("a", api.MaxAssigneeLen+1) + `"}`
+	for name, body := range bodies {
+		code, resp := writeCall(t, "POST", ts.URL+"/v1/issues/gt-a/transfer", body)
+		if e := decodeErr(t, resp); code != http.StatusBadRequest || e.Kind != api.KindInvalid {
+			t.Errorf("%s = %d %q, want 400 invalid", name, code, resp)
+		}
+	}
+	if called {
+		t.Errorf("the store was called with a malformed transfer body")
+	}
+}
+
 func TestCloseAndDeletePassTheirArgumentsAndAnswer204(t *testing.T) {
 	t.Parallel()
 	var closeIDs, delIDs []string

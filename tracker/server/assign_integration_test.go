@@ -8,12 +8,33 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/tracker/api"
 	"github.com/steveyegge/gastown/tracker/client"
 	"github.com/steveyegge/gastown/tracker/store"
 	"github.com/steveyegge/gastown/tracker/store/pgtest"
 )
+
+// claimRaceBound bounds one round of racing claims, so a deadlocked server
+// fails the test instead of hanging it.
+const claimRaceBound = 30 * time.Second
+
+// waitClaims waits for the claim goroutines, failing the test if they are not
+// done within claimRaceBound.
+func waitClaims(t *testing.T, wg *sync.WaitGroup) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(claimRaceBound):
+		t.Fatalf("the racing claims did not finish within %s", claimRaceBound)
+	}
+}
 
 // assignClients returns one client per actor, over a real server and a
 // migrated Postgres clone, so each call crosses the wire as a seat's would.
@@ -48,8 +69,7 @@ func assignClients(t *testing.T, actors ...string) map[string]*client.Client {
 func TestTwoClientsCannotBothClaimOneIssue(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	// Both seats draw on one barrier, so the two claims reach the server as
-	// close to together as the transport allows; no sleep orders them.
+	// Both seats wait on one barrier and start together; no sleep orders them.
 	c := assignClients(t, "seat-a", "seat-b")
 	is, err := c["seat-a"].Create(ctx, api.CreateParams{Rig: "gt", Title: "contested"})
 	if err != nil {
@@ -69,7 +89,7 @@ func TestTwoClientsCannotBothClaimOneIssue(t *testing.T) {
 		}(i, actor)
 	}
 	close(start)
-	wg.Wait()
+	waitClaims(t, &wg)
 
 	winner, losers := "", 0
 	for i, err := range errs {

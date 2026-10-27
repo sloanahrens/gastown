@@ -51,6 +51,9 @@ func (p *Postgres) Claim(ctx context.Context, id string) error {
 		if cur.assignee != "" && cur.assignee != actor {
 			return api.GuardFailed(fmt.Sprintf("%s is held by another actor", id))
 		}
+		if cur.assignee == actor && cur.status == inProgress {
+			return nil // the row already says this, so the re-claim writes nothing
+		}
 		return updateInTx(ctx, tx, id, api.UpdatePatch{Status: &inProgress, Assignee: &actor, Actor: actor}, api.Guard{})
 	})
 }
@@ -76,8 +79,11 @@ func (p *Postgres) Transfer(ctx context.Context, id, status, assignee string) er
 	if err != nil {
 		return err
 	}
-	if assignee == "" {
-		return api.Invalid("transfer needs the assignee taking the issue; release leaves it unheld")
+	if err := api.ValidateTransferAssignee(assignee); err != nil {
+		return err
+	}
+	if err := api.ValidateTransferStatus(status); err != nil {
+		return err
 	}
 	return p.inTx(ctx, func(tx pgx.Tx) error {
 		cur, err := requireHolder(ctx, tx, id, actor, "transferred")
@@ -86,6 +92,9 @@ func (p *Postgres) Transfer(ctx context.Context, id, status, assignee string) er
 		}
 		if status == "" {
 			status = cur.status
+		}
+		if status == cur.status && assignee == cur.assignee {
+			return nil // the row already says this, so the no-op transfer writes nothing
 		}
 		return updateInTx(ctx, tx, id, api.UpdatePatch{Status: &status, Assignee: &assignee, Actor: actor}, api.Guard{})
 	})
