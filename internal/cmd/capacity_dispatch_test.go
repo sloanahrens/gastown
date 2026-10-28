@@ -44,6 +44,35 @@ func TestSchedulerSlingParamsCarriesRawReviewOnlyContext(t *testing.T) {
 	}
 }
 
+// TestSchedulerSlingParamsCarriesTheBlockersOverride: the operator's
+// --ignore-blockers must survive the queue. A queued bead is dispatched by the
+// engine, which refuses a blocked bead unless the flag reaches it, so an
+// override dropped here would turn the operator's sling into a failed
+// dispatch later (gt-e3hl2).
+func TestSchedulerSlingParamsCarriesTheBlockersOverride(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p, err := schedulerSlingParams(capacity.PendingBead{
+		ID:         "gt-context",
+		WorkBeadID: "gt-blocked",
+		TargetRig:  "hq",
+		Context: &capacity.SlingContextFields{
+			WorkBeadID:     "gt-blocked",
+			TargetRig:      "hq",
+			IgnoreBlockers: true,
+		},
+	}, townRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.IgnoreBlockers {
+		t.Errorf("params lost --ignore-blockers: %+v", p)
+	}
+}
+
 // TestSchedulerSlingParamsRefusesUnresolvableRig: a target rig with no beads
 // database is an error, never a sling into the town database.
 func TestSchedulerSlingParamsRefusesUnresolvableRig(t *testing.T) {

@@ -46,6 +46,8 @@ type slingHarness struct {
 	// pendingMarkerPath is the install-pending marker the run reads: a test
 	// writes a marker there, or leaves it absent (gt-2rp64).
 	pendingMarkerPath string
+	overrideErr       error                 // what writing the --ignore-blockers comment fails with
+	contexts          []beads.CreateOptions // the sling context beads a deferred sling wrote
 }
 
 const slingTestTown = "/town"
@@ -247,6 +249,10 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("store fields %s", id)
 			return nil
 		},
+		recordBlockerOverride: func(_, id, actor string, blockers []string) error {
+			h.record("blocker override %s by %s: %s", id, actor, strings.Join(blockers, ", "))
+			return h.overrideErr
+		},
 		// The hook write carries the attachment fields when it is given them,
 		// so they are logged as part of "hook" and not as a "store fields" write.
 		hook: func(id, agent, _, _ string, fields *beadFieldUpdates) error {
@@ -397,6 +403,9 @@ func (f fakeSlingContexts) List(beads.ListOptions) ([]*beads.Issue, error) {
 }
 
 func (f fakeSlingContexts) Create(opts beads.CreateOptions) (*beads.Issue, error) {
+	f.h.mu.Lock()
+	f.h.contexts = append(f.h.contexts, opts)
+	f.h.mu.Unlock()
 	f.h.record("create context %s", opts.Title)
 	return &beads.Issue{ID: "gt-ctx-new"}, nil
 }

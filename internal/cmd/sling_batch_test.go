@@ -180,6 +180,7 @@ func newBatchSlingFake(t *testing.T) *batchSlingFake {
 	f.b = batchSling{
 		out:               io.Discard,
 		verifyBead:        func(string) error { return nil },
+		beadInfo:          func(string) (*beadInfo, error) { return &beadInfo{Status: "open"}, nil },
 		verifyInTargetRig: func(string, string, string) error { return nil },
 		crossRigGuard:     func(string, string, string) error { return nil },
 		resolveFormula:    func(string, bool, string, string) string { return "" },

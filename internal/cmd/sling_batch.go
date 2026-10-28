@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"io"
@@ -19,20 +20,21 @@ import (
 
 // batchSlingOptions are the gt sling flags a batch sling reads.
 type batchSlingOptions struct {
-	formula       string
-	hookRawBead   bool
-	dryRun        bool
-	force         bool
-	maxConcurrent int
-	ralph         bool
-	argsText      string
-	vars          []string
-	baseBranch    string
-	account       string
-	agent         string
-	noMerge       bool
-	reviewOnly    bool
-	noBoot        bool
+	formula        string
+	hookRawBead    bool
+	dryRun         bool
+	force          bool
+	ignoreBlockers bool
+	maxConcurrent  int
+	ralph          bool
+	argsText       string
+	vars           []string
+	baseBranch     string
+	account        string
+	agent          string
+	noMerge        bool
+	reviewOnly     bool
+	noBoot         bool
 }
 
 // batchSlingOptionsFrom is the part of a sling's options a batch reads.
@@ -40,20 +42,21 @@ type batchSlingOptions struct {
 // resolved, not the raw flags.
 func batchSlingOptionsFrom(o slingOptions) batchSlingOptions {
 	return batchSlingOptions{
-		formula:       o.formula,
-		hookRawBead:   o.hookRawBead,
-		dryRun:        o.dryRun,
-		force:         o.force,
-		maxConcurrent: o.maxConcurrent,
-		ralph:         o.ralph,
-		argsText:      o.argsText,
-		vars:          append([]string(nil), o.vars...),
-		baseBranch:    o.baseBranch,
-		account:       o.account,
-		agent:         o.agent,
-		noMerge:       o.noMerge,
-		reviewOnly:    o.reviewOnly,
-		noBoot:        o.noBoot,
+		formula:        o.formula,
+		hookRawBead:    o.hookRawBead,
+		dryRun:         o.dryRun,
+		force:          o.force,
+		ignoreBlockers: o.ignoreBlockers,
+		maxConcurrent:  o.maxConcurrent,
+		ralph:          o.ralph,
+		argsText:       o.argsText,
+		vars:           append([]string(nil), o.vars...),
+		baseBranch:     o.baseBranch,
+		account:        o.account,
+		agent:          o.agent,
+		noMerge:        o.noMerge,
+		reviewOnly:     o.reviewOnly,
+		noBoot:         o.noBoot,
 	}
 }
 
@@ -64,6 +67,7 @@ type batchSling struct {
 	opts              batchSlingOptions
 	out               io.Writer
 	verifyBead        func(beadID string) error
+	beadInfo          func(beadID string) (*beadInfo, error)
 	verifyInTargetRig func(beadID, targetRig, townRoot string) error
 	crossRigGuard     func(beadID, targetAgent, townRoot string) error
 	resolveFormula    func(explicit string, hookRawBead bool, townRoot, rigName string) string
@@ -79,6 +83,7 @@ func realBatchSling(opts slingOptions) batchSling {
 		opts:              batchSlingOptionsFrom(opts),
 		out:               os.Stdout,
 		verifyBead:        verifyBeadExists,
+		beadInfo:          getBeadInfo,
 		verifyInTargetRig: verifyBeadExistsInTargetRigDatabase,
 		crossRigGuard:     checkCrossRigGuard,
 		resolveFormula:    resolveFormula,
@@ -137,6 +142,15 @@ func (b batchSling) run(beadIDs []string, rigName string, townBeadsDir string) e
 				fmt.Fprintf(b.out, "  Would spawn polecat and apply %s to: %s\n", formulaName, beadID)
 			} else {
 				fmt.Fprintf(b.out, "  Would spawn polecat and hook raw: %s\n", beadID)
+			}
+			// The real dispatch refuses a blocked bead before it spawns, so a
+			// preview that promised a polecat would be wrong (gt-e3hl2).
+			switch blockers, err := b.blockers(beadID); {
+			case err != nil:
+				fmt.Fprintf(b.out, "    %s could not check %s for blockers: %v\n", style.Warning.Render("⚠"), beadID, err)
+			case len(blockers) > 0:
+				fmt.Fprintf(b.out, "    %s the dispatch would refuse this bead:\n      - %s\n",
+					style.Dim.Render("○"), strings.Join(blockers, "\n      - "))
 			}
 		}
 		return nil
@@ -211,6 +225,7 @@ func (b batchSling) run(beadIDs []string, rigName string, townBeadsDir string) e
 			NoMerge:          b.opts.noMerge,
 			ReviewOnly:       b.opts.reviewOnly,
 			Force:            b.opts.force,
+			IgnoreBlockers:   b.opts.ignoreBlockers,
 			HookRawBead:      b.opts.hookRawBead,
 			NoBoot:           b.opts.noBoot,
 			Mode:             slingMode,
@@ -275,6 +290,22 @@ func (b batchSling) run(beadIDs []string, rigName string, townBeadsDir string) e
 	}
 
 	return nil
+}
+
+// blockers is the admission answer for one bead in a dry-run preview: the
+// reasons the real dispatch would refuse it, an empty list when it would go
+// ahead, or an error when the bead could not be read — an unread bead is not
+// a clean one. --ignore-blockers is the override the real dispatch honors, so
+// a preview under it reports nothing.
+func (b batchSling) blockers(beadID string) ([]string, error) {
+	if b.opts.ignoreBlockers {
+		return nil, nil
+	}
+	info, err := b.beadInfo(beadID)
+	if err != nil {
+		return nil, err
+	}
+	return sling.Admit(info.Dependencies), nil
 }
 
 // guardCrossRig refuses a batch whose beads belong to another rig than

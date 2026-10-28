@@ -63,6 +63,14 @@ Content Duplicate Guard:
   of it is held. A shared file alone warns and proceeds. --force overrides.
   gt sling gt-abc greenplace --force                # Sling despite the overlap
 
+Blocked Work:
+  A bead with an unresolved blocker (one bd's ready board leaves off) is
+  refused before anything is spawned, naming each open blocker and its status.
+  --force does not override: the automated dispatchers pass it for the guards
+  they need. Use --ignore-blockers, which dispatches and leaves a bead comment
+  naming the actor and the blockers it went over.
+  gt sling gt-abc greenplace --ignore-blockers      # Sling despite the blockers
+
 Natural Language Args:
   gt sling gt-abc --args "patch release"
   gt sling mol-polecat-code-review --args "focus on security"
@@ -118,21 +126,22 @@ var (
 	slingHookRawBead bool     // --hook-raw-bead: hook raw bead without default formula (expert mode)
 
 	// Flags migrated for polecat spawning (used by sling for work assignment)
-	slingCreate        bool   // --create: create polecat if it doesn't exist
-	slingForce         bool   // --force: force spawn even if polecat has unread mail
-	slingAccount       string // --account: Claude Code account handle to use
-	slingAgent         string // --agent: override runtime agent for this sling/spawn
-	slingNoMerge       bool   // --no-merge: skip merge queue on completion (for upstream PRs/human review)
-	slingNoBoot        bool   // --no-boot: skip wakeRigAgents (avoid witness/refinery boot and lock contention)
-	slingMaxConcurrent int    // --max-concurrent: throttle spawn rate in batch mode (spawns N, pauses, spawns N more)
-	slingBaseBranch    string // --base-branch: override base branch for polecat worktree
-	slingResumeBranch  string // --branch: resume an existing branch instead of creating a fresh one
-	slingResumePR      int    // --pr: resume the head branch of an existing PR (resolves via gh)
-	slingRalph         bool   // --ralph: enable Ralph Wiggum loop mode for multi-step workflows
-	slingFormula       string // --formula: override formula for dispatch (default: mol-polecat-work)
-	slingCrew          string // --crew: target a crew member in the specified rig
-	slingReviewOnly    bool   // --review-only: mark work as review-only (no merge/commit/push)
-	slingActor         string // --actor: override recorded actor (for system/daemon-originated slings)
+	slingCreate         bool   // --create: create polecat if it doesn't exist
+	slingForce          bool   // --force: force spawn even if polecat has unread mail
+	slingIgnoreBlockers bool   // --ignore-blockers: dispatch over unresolved blockers, on the record
+	slingAccount        string // --account: Claude Code account handle to use
+	slingAgent          string // --agent: override runtime agent for this sling/spawn
+	slingNoMerge        bool   // --no-merge: skip merge queue on completion (for upstream PRs/human review)
+	slingNoBoot         bool   // --no-boot: skip wakeRigAgents (avoid witness/refinery boot and lock contention)
+	slingMaxConcurrent  int    // --max-concurrent: throttle spawn rate in batch mode (spawns N, pauses, spawns N more)
+	slingBaseBranch     string // --base-branch: override base branch for polecat worktree
+	slingResumeBranch   string // --branch: resume an existing branch instead of creating a fresh one
+	slingResumePR       int    // --pr: resume the head branch of an existing PR (resolves via gh)
+	slingRalph          bool   // --ralph: enable Ralph Wiggum loop mode for multi-step workflows
+	slingFormula        string // --formula: override formula for dispatch (default: mol-polecat-work)
+	slingCrew           string // --crew: target a crew member in the specified rig
+	slingReviewOnly     bool   // --review-only: mark work as review-only (no merge/commit/push)
+	slingActor          string // --actor: override recorded actor (for system/daemon-originated slings)
 )
 
 func init() {
@@ -147,6 +156,7 @@ func init() {
 	// Flags for polecat spawning (when target is a rig)
 	slingCmd.Flags().BoolVar(&slingCreate, "create", false, "Create polecat if it doesn't exist")
 	slingCmd.Flags().BoolVar(&slingForce, "force", false, "Force spawn even if polecat has unread mail")
+	slingCmd.Flags().BoolVar(&slingIgnoreBlockers, "ignore-blockers", false, "Dispatch a bead whose dependencies are still open, and record who did it in a bead comment")
 	slingCmd.Flags().StringVar(&slingAccount, "account", "", "Claude Code account handle to use")
 	slingCmd.Flags().StringVar(&slingAgent, "agent", "", "Override agent for this sling (e.g., claude, claude-haiku, or custom alias). A polecat_pool seat is honored or the sling is refused; the pool never swaps in the other seat")
 	slingCmd.Flags().BoolVar(&slingHookRawBead, "hook-raw-bead", false, "Hook raw bead without default formula (expert mode)")
@@ -380,19 +390,20 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			}
 			beadID := r.opts.on
 			return r.scheduleBead(beadID, rigName, ScheduleOptions{
-				Formula:      formulaName,
-				Args:         r.opts.argsText,
-				Vars:         r.opts.vars,
-				BaseBranch:   r.opts.baseBranch,
-				ResumeBranch: r.opts.resumeBranch,
-				DryRun:       r.opts.dryRun,
-				Force:        r.opts.force,
-				NoMerge:      r.opts.noMerge,
-				ReviewOnly:   r.opts.reviewOnly,
-				Account:      r.opts.account,
-				Agent:        r.opts.agent,
-				HookRawBead:  r.opts.hookRawBead,
-				Ralph:        r.opts.ralph,
+				Formula:        formulaName,
+				Args:           r.opts.argsText,
+				Vars:           r.opts.vars,
+				BaseBranch:     r.opts.baseBranch,
+				ResumeBranch:   r.opts.resumeBranch,
+				DryRun:         r.opts.dryRun,
+				Force:          r.opts.force,
+				NoMerge:        r.opts.noMerge,
+				ReviewOnly:     r.opts.reviewOnly,
+				Account:        r.opts.account,
+				Agent:          r.opts.agent,
+				HookRawBead:    r.opts.hookRawBead,
+				Ralph:          r.opts.ralph,
+				IgnoreBlockers: r.opts.ignoreBlockers,
 			})
 		}
 	}
@@ -431,6 +442,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			Agent:        r.opts.agent,
 			HookRawBead:  r.opts.hookRawBead,
 			Ralph:        r.opts.ralph,
+
+			IgnoreBlockers: r.opts.ignoreBlockers,
 		})
 	}
 
@@ -460,19 +473,20 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			beadID := args[0]
 			formula := r.resolveFormula(r.opts.formula, r.opts.hookRawBead, townRoot, rigName)
 			return r.scheduleBead(beadID, rigName, ScheduleOptions{
-				Formula:      formula,
-				Args:         r.opts.argsText,
-				Vars:         r.opts.vars,
-				BaseBranch:   r.opts.baseBranch,
-				ResumeBranch: r.opts.resumeBranch,
-				DryRun:       r.opts.dryRun,
-				Force:        r.opts.force,
-				NoMerge:      r.opts.noMerge,
-				ReviewOnly:   r.opts.reviewOnly,
-				Account:      r.opts.account,
-				Agent:        r.opts.agent,
-				HookRawBead:  r.opts.hookRawBead,
-				Ralph:        r.opts.ralph,
+				Formula:        formula,
+				Args:           r.opts.argsText,
+				Vars:           r.opts.vars,
+				BaseBranch:     r.opts.baseBranch,
+				ResumeBranch:   r.opts.resumeBranch,
+				DryRun:         r.opts.dryRun,
+				Force:          r.opts.force,
+				NoMerge:        r.opts.noMerge,
+				ReviewOnly:     r.opts.reviewOnly,
+				Account:        r.opts.account,
+				Agent:          r.opts.agent,
+				HookRawBead:    r.opts.hookRawBead,
+				Ralph:          r.opts.ralph,
+				IgnoreBlockers: r.opts.ignoreBlockers,
 			})
 		}
 		// Non-rig target in deferred mode — reject to prevent bypassing capacity control
@@ -747,6 +761,34 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			_, _ = fmt.Fprint(r.out, decision.Message)
 		case decision.Message != "":
 			_, _ = fmt.Fprint(r.out, decision.Message)
+		}
+	}
+
+	// Blocked-work admission (gt-e3hl2): a bead whose blocking edges are still
+	// open is one bd's ready board never offered, so a dispatch of it spends a
+	// seat on work something else must finish first. The check sits beside the
+	// duplicate guard and ahead of resolveTarget — this path's first side
+	// effect, since a rig target spawns a polecat, which pushes a branch,
+	// checks the image and creates a sandbox — and --force does not open it:
+	// the automated redispatch paths pass --force for the guards they need. A
+	// dry run reports the refusal without taking it, and --ignore-blockers
+	// dispatches and leaves the comment naming the actor and the blockers.
+	blockers := sling.Admit(info.Dependencies)
+	if len(blockers) > 0 {
+		refusal := fmt.Sprintf("%s %s is blocked by unresolved dependencies:\n  - %s\nClose the blockers first, or pass --ignore-blockers to dispatch it anyway",
+			dispatch.SlingRefusalMarker, beadID, strings.Join(blockers, "\n  - "))
+		switch {
+		case r.opts.ignoreBlockers:
+			if !r.opts.dryRun {
+				if err := r.recordBlockerOverride(townRoot, beadID, r.actor(), blockers); err != nil {
+					return err
+				}
+			}
+		case r.opts.dryRun:
+			fmt.Fprintf(r.out, "%s Dry run: this sling would be refused.\n", style.Dim.Render("○"))
+			fmt.Fprintln(r.out, refusal)
+		default:
+			return errors.New(refusal)
 		}
 	}
 
@@ -1233,18 +1275,19 @@ func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string) e
 		FormulaName: formulaName,
 		RigName:     rigName,
 
-		Args:         r.opts.argsText,
-		Vars:         append([]string(nil), r.opts.vars...),
-		BaseBranch:   r.opts.baseBranch,
-		ResumeBranch: r.opts.resumeBranch,
-		Account:      r.opts.account,
-		Agent:        r.opts.agent,
-		NoMerge:      r.opts.noMerge,
-		Force:        r.opts.force,
-		HookRawBead:  r.opts.hookRawBead,
-		NoBoot:       r.opts.noBoot,
-		Mode:         mode,
-		ReviewOnly:   r.opts.reviewOnly,
+		Args:           r.opts.argsText,
+		Vars:           append([]string(nil), r.opts.vars...),
+		BaseBranch:     r.opts.baseBranch,
+		ResumeBranch:   r.opts.resumeBranch,
+		Account:        r.opts.account,
+		Agent:          r.opts.agent,
+		NoMerge:        r.opts.noMerge,
+		Force:          r.opts.force,
+		IgnoreBlockers: r.opts.ignoreBlockers,
+		HookRawBead:    r.opts.hookRawBead,
+		NoBoot:         r.opts.noBoot,
+		Mode:           mode,
+		ReviewOnly:     r.opts.reviewOnly,
 
 		// One bead at a prompt: a formula that will not instantiate is this
 		// sling's failure and takes its spawn down with it, where the batch path

@@ -70,6 +70,11 @@ type ScheduleOptions struct {
 	Agent        string   // Agent override (e.g., "claude-haiku")
 	HookRawBead  bool     // Hook raw bead without default formula
 	Ralph        bool     // Ralph Wiggum loop mode
+	// IgnoreBlockers carries the sling's --ignore-blockers to the queued
+	// dispatch, which runs sling.Admit when the bead is finally slung: without
+	// it the override would be lost in the queue and the dispatch refused
+	// (gt-e3hl2).
+	IgnoreBlockers bool
 }
 
 // slingContextStore is the slice of a rig's beads a scheduled bead's sling
@@ -198,6 +203,7 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 		fields.Agent = opts.Agent
 	}
 	fields.HookRawBead = opts.HookRawBead
+	fields.IgnoreBlockers = opts.IgnoreBlockers
 	if opts.Ralph {
 		fields.Mode = "ralph"
 	}

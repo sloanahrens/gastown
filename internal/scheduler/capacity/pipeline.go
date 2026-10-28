@@ -32,6 +32,7 @@ type SlingContextFields struct {
 	Account          string `json:"account,omitempty"`
 	Agent            string `json:"agent,omitempty"`
 	HookRawBead      bool   `json:"hook_raw_bead,omitempty"`
+	IgnoreBlockers   bool   `json:"ignore_blockers,omitempty"`
 	Mode             string `json:"mode,omitempty"`
 	DispatchFailures int    `json:"dispatch_failures,omitempty"`
 	LastFailure      string `json:"last_failure,omitempty"`
@@ -224,23 +225,28 @@ type DispatchParams struct {
 	NoMerge      bool
 	ReviewOnly   bool
 	HookRawBead  bool
+	// IgnoreBlockers is the operator's override, carried through the queue so
+	// a deferred sling dispatches what the sling that queued it would have
+	// (gt-e3hl2).
+	IgnoreBlockers bool
 }
 
 // ReconstructFromContext builds DispatchParams from sling context fields.
 func ReconstructFromContext(ctx *SlingContextFields) DispatchParams {
 	p := DispatchParams{
-		BeadID:       ctx.WorkBeadID,
-		RigName:      ctx.TargetRig,
-		FormulaName:  ctx.Formula,
-		Args:         ctx.Args,
-		BaseBranch:   ctx.BaseBranch,
-		ResumeBranch: ctx.ResumeBranch,
-		Account:      ctx.Account,
-		Agent:        ctx.Agent,
-		Mode:         ctx.Mode,
-		NoMerge:      ctx.NoMerge,
-		ReviewOnly:   ctx.ReviewOnly,
-		HookRawBead:  ctx.HookRawBead,
+		BeadID:         ctx.WorkBeadID,
+		RigName:        ctx.TargetRig,
+		FormulaName:    ctx.Formula,
+		Args:           ctx.Args,
+		BaseBranch:     ctx.BaseBranch,
+		ResumeBranch:   ctx.ResumeBranch,
+		Account:        ctx.Account,
+		Agent:          ctx.Agent,
+		Mode:           ctx.Mode,
+		NoMerge:        ctx.NoMerge,
+		ReviewOnly:     ctx.ReviewOnly,
+		HookRawBead:    ctx.HookRawBead,
+		IgnoreBlockers: ctx.IgnoreBlockers,
 	}
 	if ctx.Vars != "" {
 		p.Vars = splitVars(ctx.Vars)

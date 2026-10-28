@@ -20,55 +20,57 @@ import (
 // the cobra flag globals once, so a run never reads or writes a package
 // global and a test states its flags as a literal.
 type slingOptions struct {
-	subject       string
-	message       string
-	dryRun        bool
-	on            string   // --on: the bead a formula is applied to
-	vars          []string // --var
-	argsText      string   // --args
-	stdin         bool
-	hookRawBead   bool
-	create        bool
-	force         bool
-	account       string
-	agent         string
-	noMerge       bool
-	noBoot        bool
-	baseBranch    string
-	resumeBranch  string
-	resumePR      int
-	maxConcurrent int
-	ralph         bool
-	formula       string
-	crew          string
-	reviewOnly    bool
+	subject        string
+	message        string
+	dryRun         bool
+	on             string   // --on: the bead a formula is applied to
+	vars           []string // --var
+	argsText       string   // --args
+	stdin          bool
+	hookRawBead    bool
+	create         bool
+	force          bool
+	ignoreBlockers bool // --ignore-blockers
+	account        string
+	agent          string
+	noMerge        bool
+	noBoot         bool
+	baseBranch     string
+	resumeBranch   string
+	resumePR       int
+	maxConcurrent  int
+	ralph          bool
+	formula        string
+	crew           string
+	reviewOnly     bool
 }
 
 // slingOptionsFromFlags is the options the cobra flags hold.
 func slingOptionsFromFlags() slingOptions {
 	return slingOptions{
-		subject:       slingSubject,
-		message:       slingMessage,
-		dryRun:        slingDryRun,
-		on:            slingOnTarget,
-		vars:          append([]string(nil), slingVars...),
-		argsText:      slingArgs,
-		stdin:         slingStdin,
-		hookRawBead:   slingHookRawBead,
-		create:        slingCreate,
-		force:         slingForce,
-		account:       slingAccount,
-		agent:         slingAgent,
-		noMerge:       slingNoMerge,
-		noBoot:        slingNoBoot,
-		baseBranch:    slingBaseBranch,
-		resumeBranch:  slingResumeBranch,
-		resumePR:      slingResumePR,
-		maxConcurrent: slingMaxConcurrent,
-		ralph:         slingRalph,
-		formula:       slingFormula,
-		crew:          slingCrew,
-		reviewOnly:    slingReviewOnly,
+		subject:        slingSubject,
+		message:        slingMessage,
+		dryRun:         slingDryRun,
+		on:             slingOnTarget,
+		vars:           append([]string(nil), slingVars...),
+		argsText:       slingArgs,
+		stdin:          slingStdin,
+		hookRawBead:    slingHookRawBead,
+		create:         slingCreate,
+		force:          slingForce,
+		ignoreBlockers: slingIgnoreBlockers,
+		account:        slingAccount,
+		agent:          slingAgent,
+		noMerge:        slingNoMerge,
+		noBoot:         slingNoBoot,
+		baseBranch:     slingBaseBranch,
+		resumeBranch:   slingResumeBranch,
+		resumePR:       slingResumePR,
+		maxConcurrent:  slingMaxConcurrent,
+		ralph:          slingRalph,
+		formula:        slingFormula,
+		crew:           slingCrew,
+		reviewOnly:     slingReviewOnly,
 	}
 }
 
@@ -165,12 +167,15 @@ type slingDeps struct {
 	actor              func() string
 	hookDir            func(townRoot, beadID, workDir string) string
 	storeFields        func(townRoot, beadID string, updates beadFieldUpdates) error
-	hook               func(beadID, targetAgent, hookDir, townRoot string, fields *beadFieldUpdates) error
-	clearOrphanLabels  func(townRoot, beadID, workDir string)
-	updateAgentHook    func(agentID, beadID, workDir, townBeadsDir string)
-	updateAgentMode    func(agentID, mode, workDir, townBeadsDir string)
-	logFeed            func(eventType, actor string, payload map[string]interface{}) error
-	enqueueNudge       func(townRoot, session string, n nudge.QueuedNudge) error
+	// recordBlockerOverride appends the --ignore-blockers comment to the bead:
+	// the actor and the blockers the dispatch went over (gt-e3hl2).
+	recordBlockerOverride func(townRoot, beadID, actor string, blockers []string) error
+	hook                  func(beadID, targetAgent, hookDir, townRoot string, fields *beadFieldUpdates) error
+	clearOrphanLabels     func(townRoot, beadID, workDir string)
+	updateAgentHook       func(agentID, beadID, workDir, townBeadsDir string)
+	updateAgentMode       func(agentID, mode, workDir, townBeadsDir string)
+	logFeed               func(eventType, actor string, payload map[string]interface{}) error
+	enqueueNudge          func(townRoot, session string, n nudge.QueuedNudge) error
 
 	// A standalone formula sling's wisp.
 	findHookedFormula func(workDir, targetAgent, formulaName string) (*beads.Issue, error)
@@ -261,21 +266,22 @@ func realSlingDeps() *slingDeps {
 		unhook:             unhookFromPreviousOwner,
 		recordReassignment: recordReassignment,
 
-		collectMolecules:   collectExistingMoleculesForBead,
-		burnMolecules:      burnExistingMolecules,
-		rigCommandVars:     loadRigCommandVars,
-		priorAttempt:       lookupPriorAttempt,
-		cook:               CookFormula,
-		instantiateFormula: InstantiateFormulaOnBead,
-		actor:              resolveSlingActor,
-		hookDir:            beads.ResolveHookDir,
-		storeFields:        storeFieldsInBeadFromTownRoot,
-		hook:               hookBeadWithRetryWithTownRoot,
-		clearOrphanLabels:  clearOrphanEpisodeLabels,
-		updateAgentHook:    updateAgentHookBead,
-		updateAgentMode:    updateAgentMode,
-		logFeed:            events.LogFeed,
-		enqueueNudge:       nudge.Enqueue,
+		collectMolecules:      collectExistingMoleculesForBead,
+		burnMolecules:         burnExistingMolecules,
+		rigCommandVars:        loadRigCommandVars,
+		priorAttempt:          lookupPriorAttempt,
+		cook:                  CookFormula,
+		instantiateFormula:    InstantiateFormulaOnBead,
+		actor:                 resolveSlingActor,
+		hookDir:               beads.ResolveHookDir,
+		storeFields:           storeFieldsInBeadFromTownRoot,
+		recordBlockerOverride: recordBlockerOverride,
+		hook:                  hookBeadWithRetryWithTownRoot,
+		clearOrphanLabels:     clearOrphanEpisodeLabels,
+		updateAgentHook:       updateAgentHookBead,
+		updateAgentMode:       updateAgentMode,
+		logFeed:               events.LogFeed,
+		enqueueNudge:          nudge.Enqueue,
 
 		findHookedFormula: findHookedFormulaSingletonFn,
 		cookFormula:       CookFormula,

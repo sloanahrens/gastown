@@ -210,6 +210,28 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		}
 	}
 
+	// Blocked-work admission (gt-e3hl2): a bead whose blocking edges are still
+	// open is one bd's ready board never offered, so dispatching it spends a
+	// seat on work something else has to finish first. The check sits beside
+	// the duplicate guard and ahead of every side effect a dispatch has — the
+	// target's rig check above is a read, and the spawn below is not — and
+	// --force does not open it, because the automated redispatch paths pass
+	// --force for the guards they need (gt-1326mw, gt-21pl0). The override is
+	// --ignore-blockers, which dispatches and leaves the comment naming the
+	// actor and the blockers it went over.
+	blockers := Admit(info.Dependencies)
+	if len(blockers) > 0 {
+		if !opts.IgnoreBlockers {
+			result.ErrMsg = "blocked"
+			return result, fmt.Errorf("%s %s is blocked by unresolved dependencies:\n  - %s\nClose the blockers first, or pass --ignore-blockers to dispatch it anyway",
+				dispatch.SlingRefusalMarker, opts.BeadID, strings.Join(blockers, "\n  - "))
+		}
+		if err := d.RecordBlockerOverride(townRoot, opts.BeadID, d.Actor(opts), blockers); err != nil {
+			result.ErrMsg = err.Error()
+			return result, err
+		}
+	}
+
 	// Clear the outgoing polecat's state when force-stealing a bead from it.
 	// The clear is kept for the failure path below: a spawn that does not happen
 	// leaves the old holder's state as it was (gt-u0zq0).

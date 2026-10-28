@@ -1245,6 +1245,34 @@ func (s slingStores) recordReassignment(branches func(townRoot, beadID string) [
 	fmt.Fprintf(w, "  %s Recorded reassignment of %s: %s -> %s\n", style.Dim.Render("○"), beadID, from, to)
 }
 
+// recordBlockerOverride appends the comment an --ignore-blockers dispatch
+// leaves on its bead: who dispatched work over which blockers. Unlike the
+// reassignment record, a failure to write it is not best effort — the record
+// is the condition on which the override is allowed, so a dispatch that
+// cannot leave it does not proceed (gt-e3hl2).
+func recordBlockerOverride(townRoot, beadID, actor string, blockers []string) error {
+	return slingStores{}.recordBlockerOverride(townRoot, beadID, actor, blockers)
+}
+
+// recordBlockerOverride is recordBlockerOverride in s's stores, for the bead
+// named by beadID: the comment is written to the database that owns the bead,
+// the same way recordReassignment writes to it.
+func (s slingStores) recordBlockerOverride(townRoot, beadID, actor string, blockers []string) error {
+	if beadID == "" || len(blockers) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(actor) == "" {
+		actor = "an unnamed dispatcher"
+	}
+	comment := fmt.Sprintf("--ignore-blockers: %s dispatched this bead over unresolved blockers: %s",
+		actor, strings.Join(blockers, ", "))
+	b := s.routedFrom(beads.ResolveHookDir(townRoot, beadID, ""))
+	if err := b.AddCommentAs(beadID, actor, comment); err != nil {
+		return fmt.Errorf("recording the --ignore-blockers override on %s: %w", beadID, err)
+	}
+	return nil
+}
+
 // reassignRequester names the actor behind a reassignment for the durable
 // record: the slinging polecat when one is doing the sling, else the operator.
 func reassignRequester() string {

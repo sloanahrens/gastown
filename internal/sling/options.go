@@ -23,6 +23,11 @@ import (
 // Actor names the recorded dispatcher when the caller has no live agent role of
 // its own (the daemon records "daemon/spec-dispatch"); empty leaves the choice
 // to the caller's Actor dep.
+//
+// IgnoreBlockers is the only way past the admission check, and Force is not:
+// the automated redispatch paths pass --force for the other guards they need,
+// so a guard --force opened would be one none of them is actually held by
+// (gt-e3hl2).
 type Options struct {
 	// What to sling
 	BeadID      string // Base bead
@@ -30,19 +35,20 @@ type Options struct {
 	RigName     string // Target rig (always a rig for this engine)
 
 	// Flag passthrough
-	Args         string   // --args
-	Vars         []string // --var (key=value pairs)
-	BaseBranch   string   // --base-branch
-	ResumeBranch string   // --branch / --pr (resume existing PR branch, gh#3602)
-	Account      string   // --account
-	Agent        string   // --agent
-	NoMerge      bool     // --no-merge
-	Force        bool     // --force
-	HookRawBead  bool     // --hook-raw-bead
-	NoBoot       bool     // --no-boot
-	Mode         string   // --ralph: "" (normal) or "ralph"
-	ReviewOnly   bool     // --review-only: review and report back only, no merge/commit/push
-	Actor        string   // --actor: recorded dispatcher override
+	Args           string   // --args
+	Vars           []string // --var (key=value pairs)
+	BaseBranch     string   // --base-branch
+	ResumeBranch   string   // --branch / --pr (resume existing PR branch, gh#3602)
+	Account        string   // --account
+	Agent          string   // --agent
+	NoMerge        bool     // --no-merge
+	Force          bool     // --force
+	IgnoreBlockers bool     // --ignore-blockers: dispatch over unresolved blockers and record who did
+	HookRawBead    bool     // --hook-raw-bead
+	NoBoot         bool     // --no-boot
+	Mode           string   // --ralph: "" (normal) or "ralph"
+	ReviewOnly     bool     // --review-only: review and report back only, no merge/commit/push
+	Actor          string   // --actor: recorded dispatcher override
 
 	// Execution behavior (set by caller, not a flag)
 	SkipCook         bool   // Batch optimization: formula already cooked
