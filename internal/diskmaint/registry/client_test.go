@@ -21,6 +21,12 @@ func (h roundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+// failingTransport fails every request with err, the way an unreachable
+// registry does.
+type failingTransport struct{ err error }
+
+func (t failingTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, t.err }
+
 // newTestClient returns a Client whose requests handler answers in process.
 func newTestClient(handler http.HandlerFunc) *Client {
 	return &Client{Base: "http://registry.test", HTTP: &http.Client{Transport: roundTrip(handler)}}
@@ -160,6 +166,41 @@ func TestDeleteManifestRejectsBadRepo(t *testing.T) {
 	}
 	if n := requests.Load(); n != 0 {
 		t.Errorf("server saw %d requests, want 0", n)
+	}
+}
+
+func TestCatalogRejectsUnbuildableRequest(t *testing.T) {
+	t.Parallel()
+	handler, requests := countingHandler(func(w http.ResponseWriter, r *http.Request) {})
+	c := &Client{Base: "http://registry.test/\nbad", HTTP: &http.Client{Transport: roundTrip(handler)}}
+
+	if _, err := c.Catalog(context.Background()); err == nil {
+		t.Fatal("Catalog with a base that cannot form a URL returned no error")
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("transport saw %d requests, want 0", n)
+	}
+}
+
+func TestCatalogTransportErrorIsReturned(t *testing.T) {
+	t.Parallel()
+	refused := errors.New("connection refused")
+	c := &Client{Base: "http://registry.test", HTTP: &http.Client{Transport: failingTransport{err: refused}}}
+
+	_, err := c.Catalog(context.Background())
+	if !errors.Is(err, refused) {
+		t.Fatalf("Catalog error = %v, want the transport error", err)
+	}
+}
+
+func TestCatalogMalformedBodyIsError(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	})
+
+	if _, err := c.Catalog(context.Background()); err == nil {
+		t.Fatal("Catalog with a malformed body returned no error")
 	}
 }
 
