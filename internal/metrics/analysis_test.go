@@ -77,13 +77,13 @@ type recordedCall struct {
 	env  []string
 }
 
-// analysisTown lays out a fake town: a day's extract output under a date the
-// clock disagrees with, a snapshot log, and a peak row. It returns the town and
-// the extract's output directory.
 // analysisDay is the day directory analysisTown writes the extract's landings
 // into, and the day the fake extract reports.
 const analysisDay = "2026-10-01"
 
+// analysisTown lays out a fake town: a day's extract output under a date the
+// clock disagrees with, a snapshot log, and a peak row. It returns the town and
+// the extract's output directory.
 func analysisTown(t *testing.T) (town, dayDir string) {
 	t.Helper()
 	town = t.TempDir()
@@ -427,8 +427,7 @@ func TestAnalysisNeverStartsPython(t *testing.T) {
 func emptyRun(context.Context, string, []string) ([]byte, error) { return nil, nil }
 
 // failingGitRun refuses every git command, which is the first source RealEnv
-// reads, so the in-process extract stops before it writes anything. run puts
-// nice in front of argv, so the command is found by its name, not argv[0].
+// reads, so the in-process extract stops before it writes anything.
 func failingGitRun(_ context.Context, _ string, argv []string) ([]byte, error) {
 	if hasArg(argv, "git") {
 		return nil, errors.New("git: no repository")
@@ -436,38 +435,77 @@ func failingGitRun(_ context.Context, _ string, argv []string) ([]byte, error) {
 	return nil, nil
 }
 
-// TestInProcessExtractRunsEachStep is the default extract over a town with
-// nothing in it: it writes the day's landings under the runtime, saves the
-// caches, and reports the day directory it wrote.
-func TestInProcessExtractRunsEachStep(t *testing.T) {
+// dirRunCall is one command the in-process extract ran, in its directory.
+type dirRunCall struct {
+	dir  string
+	argv []string
+}
+
+// recordingDirRun answers every command with no output and records it, so a
+// test reads what the default extract ran.
+func recordingDirRun(calls *[]dirRunCall) RunnerDir {
+	return func(_ context.Context, dir string, argv []string) ([]byte, error) {
+		*calls = append(*calls, dirRunCall{dir: dir, argv: argv})
+		return nil, nil
+	}
+}
+
+// TestAnalyseRunsTheExtractInProcess is the default extract, driven through
+// RunAnalysis with no Extract seam: the run writes the day's landings itself,
+// saves the caches, publishes the panel, and runs every git and bd command
+// through Env.RunDir rather than starting python3.
+func TestAnalyseRunsTheExtractInProcess(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	dayDir, err := inProcessExtract(analyseNow, emptyRun)(context.Background(), town, filepath.Join(town, "docs"))
+	opts := analysisOptions(town)
+	opts.Extract = nil
+	// The in-process extract joins its home-level bead listing to Home; a
+	// temporary one keeps this run off the host's.
+	opts.Home = t.TempDir()
+	var ran []dirRunCall
+	env, _ := analysisEnv(t, town, "", nil)
+	env.RunDir = recordingDirRun(&ran)
+
+	res, err := RunAnalysis(context.Background(), env, opts)
 	if err != nil {
-		t.Fatalf("inProcessExtract: %v", err)
+		t.Fatalf("RunAnalysis: %v", err)
 	}
-	want := filepath.Join(town, ".runtime", "metrics", analyseNow.Local().Format("2006-01-02"))
-	if dayDir != want {
-		t.Errorf("day directory = %q, want %q", dayDir, want)
+	if !res.Ran {
+		t.Fatal("RunAnalysis was not due on a town with no stamp")
 	}
-	if _, err := os.Stat(filepath.Join(dayDir, landingsName)); err != nil {
-		t.Errorf("the extract wrote no %s: %v", landingsName, err)
+	if len(ran) == 0 {
+		t.Fatal("the in-process extract ran no command through Env.RunDir")
+	}
+	for _, call := range ran {
+		if call.argv[0] == "python3" || strings.Contains(strings.Join(call.argv, " "), "town-metrics") {
+			t.Errorf("the extract started %v in %q, want no python3 and no town-metrics script", call.argv, call.dir)
+		}
+	}
+	dayDir := filepath.Join(town, ".runtime", "metrics", analyseNow.Local().Format("2006-01-02"))
+	for _, name := range []string{landingsName, sidecarName} {
+		if _, err := os.Stat(filepath.Join(dayDir, name)); err != nil {
+			t.Errorf("the extract wrote no %s: %v", name, err)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(town, ".runtime", "metrics", "cache", diffstatsCacheName)); err != nil {
 		t.Errorf("the caches were not saved: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(res.Dir, panelName)); err != nil {
+		t.Errorf("panel.json was not published: %v", err)
+	}
 }
 
-// TestInProcessExtractFailureStopsTheStep gives each step of the in-process
-// extract a failure of its own, and requires the run to fail with no day
-// directory reported.
-func TestInProcessExtractFailureStopsTheStep(t *testing.T) {
+// TestAnalyseInProcessExtractFailureStopsTheStep gives each step of the default
+// extract a failure, driven through RunAnalysis, and requires the run to fail
+// with no panel and no stamp published.
+func TestAnalyseInProcessExtractFailureStopsTheStep(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name  string
-		run   RunnerDir
-		setup func(t *testing.T, town string)
-		want  string
+		name    string
+		run     RunnerDir
+		setup   func(t *testing.T, town string)
+		want    string // the step's own name in the error
+		wantDay bool   // the error also names the day directory
 	}{
 		{
 			name: "the sources cannot be read",
@@ -482,7 +520,7 @@ func TestInProcessExtractFailureStopsTheStep(t *testing.T) {
 				day := analyseNow.Local().Format("2006-01-02")
 				writeTownFile(t, filepath.Join(town, ".runtime", "metrics", day), "not a directory")
 			},
-			want: "extract",
+			wantDay: true,
 		},
 		{
 			name: "the caches cannot be saved",
@@ -508,17 +546,54 @@ func TestInProcessExtractFailureStopsTheStep(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(t, town)
 			}
-			dayDir, err := inProcessExtract(analyseNow, tc.run)(context.Background(), town, filepath.Join(town, "docs"))
+			opts := analysisOptions(town)
+			opts.Extract = nil
+			// A temporary home keeps the in-process extract off the host's.
+			opts.Home = t.TempDir()
+			env, _ := analysisEnv(t, town, "", nil)
+			env.RunDir = tc.run
+
+			_, err := RunAnalysis(context.Background(), env, opts)
 			if err == nil {
-				t.Fatalf("inProcessExtract ran with %s and reported %q", tc.name, dayDir)
+				t.Fatalf("RunAnalysis ran with %s", tc.name)
 			}
-			if !strings.Contains(err.Error(), tc.want) {
+			if tc.want != "" && !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error = %q, want it to name %q", err, tc.want)
 			}
-			if dayDir != "" {
-				t.Errorf("day directory = %q on a failed extract, want none", dayDir)
+			if tc.wantDay {
+				day := filepath.Join(town, ".runtime", "metrics", analyseNow.Local().Format("2006-01-02"))
+				if !strings.Contains(err.Error(), day) {
+					t.Errorf("error = %q, want it to name the day directory %q", err, day)
+				}
+			}
+			for _, name := range []string{panelName, stampName} {
+				if _, err := os.Stat(filepath.Join(town, ".runtime", "metrics", analysisDirName, name)); !os.IsNotExist(err) {
+					t.Errorf("%s was published by a run whose extract failed: %v", name, err)
+				}
 			}
 		})
+	}
+}
+
+// TestAnalyseInProcessExtractNeedsRunDir pins the seam the default extract
+// depends on: with no Extract seam and no Env.RunDir, the run stops rather than
+// running the extract's git and bd commands somewhere else.
+func TestAnalyseInProcessExtractNeedsRunDir(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	opts := analysisOptions(town)
+	opts.Extract = nil
+	env, calls := analysisEnv(t, town, dayDir, nil)
+
+	_, err := RunAnalysis(context.Background(), env, opts)
+	if err == nil {
+		t.Fatal("RunAnalysis ran the in-process extract with no Env.RunDir")
+	}
+	if !strings.Contains(err.Error(), "RunDir") {
+		t.Errorf("error = %q, want it to name the missing seam", err)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("the run gave %d commands a runner rather than stopping: %v", len(*calls), *calls)
 	}
 }
 

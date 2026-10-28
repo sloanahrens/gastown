@@ -76,8 +76,12 @@ type AnalysisOptions struct {
 	// Repo is accepted and ignored: the extract runs in process, so no checkout
 	// is needed to find it.
 	Repo string
+	// Home is the home directory the in-process extract joins its defaults and
+	// its home-level bead listing to; empty is the process's own.
+	Home string
 	// Extract runs the extract over town, writing its docs into docsDir, and
-	// returns the day directory it wrote. Nil is the in-process extract.
+	// returns the day directory it wrote. Nil is the in-process extract, whose
+	// git and bd commands run through Env.RunDir.
 	Extract func(ctx context.Context, town, docsDir string) (string, error)
 	// MangoGitDir is the bare repository whose origin/main is built.
 	MangoGitDir string
@@ -160,8 +164,9 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 		return res, errors.New("analysis: Env.ReadFile is unset")
 	}
 	now := env.Now().UTC()
-	if o.Extract == nil {
-		o.Extract = inProcessExtract(now, OSRunnerDir(DefaultAllowEnv))
+	inProcess := o.Extract == nil
+	if inProcess {
+		o.Extract = inProcessExtract(now, o.Home, env.RunDir)
 	}
 	stamp, err := readStamp(env, filepath.Join(dir, stampName))
 	if err != nil {
@@ -177,6 +182,8 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 		return res, errors.New("analysis: Env.Run is unset")
 	case env.RunEnv == nil:
 		return res, errors.New("analysis: Env.RunEnv is unset, so mango's git and go commands cannot run")
+	case inProcess && env.RunDir == nil:
+		return res, errors.New("analysis: Env.RunDir is unset, so the in-process extract cannot run its git and bd commands")
 	}
 
 	if err := ensureMango(ctx, env, o); err != nil {
@@ -266,13 +273,16 @@ func readStamp(env Env, path string) (time.Time, error) {
 // docs directory it is given, the extract written under the town's runtime for
 // the local day, and the caches saved so the next run reads each bead and
 // commit once. It returns the day directory the extract wrote. run is the
-// runner every git and bd command goes through.
-func inProcessExtract(now time.Time, run RunnerDir) func(ctx context.Context, town, docsDir string) (string, error) {
+// runner every git and bd command goes through; home is the directory the
+// extract's defaults and its home-level bead listing join to, empty for the
+// process's own.
+func inProcessExtract(now time.Time, home string, run RunnerDir) func(ctx context.Context, town, docsDir string) (string, error) {
 	return func(ctx context.Context, town, docsDir string) (string, error) {
 		real, err := RealEnv(ctx, RealEnvOptions{
 			Today:   now.Local().Format("2006-01-02"),
 			Town:    town,
 			DocsDir: docsDir,
+			Home:    home,
 			Run:     run,
 		})
 		if err != nil {
