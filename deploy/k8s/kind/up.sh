@@ -87,7 +87,10 @@ restore_context "$original_context"
 if ! vmdocker inspect "$REGISTRY_NAME" >/dev/null 2>&1; then
   port_in_use "$REGISTRY_PORT" && die "127.0.0.1:$REGISTRY_PORT already has a listener; set GT_K8S_REGISTRY_PORT"
   say "starting local registry on 127.0.0.1:$REGISTRY_PORT"
-  vmdocker run -d --restart=always -p "127.0.0.1:$REGISTRY_PORT:5000" --name "$REGISTRY_NAME" registry:2 >/dev/null
+  # The named volume keeps pushed images across a recreate of a registry created here; an existing
+  # container is left alone with whatever volume it has. The delete flag lets the pruner remove
+  # manifests, and the registry listens on the loopback address only.
+  vmdocker run -d --restart=always -p "127.0.0.1:$REGISTRY_PORT:5000" -v gt-registry-data:/var/lib/registry -e REGISTRY_STORAGE_DELETE_ENABLED=true --name "$REGISTRY_NAME" registry:2 >/dev/null
 fi
 
 if vmkind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then

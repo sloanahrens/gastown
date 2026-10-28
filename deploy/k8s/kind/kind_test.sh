@@ -303,7 +303,7 @@ scenario up
 run "$UP" --
 check "up exits 0" test "$RC" -eq 0
 check "colima profile is started with its resources" contains "colima start gt-sbx --activate=false --cpu 12 --memory 24 --disk 60 --vm-type vz --runtime docker" "$CALLS_LOG"
-check "the registry is started on a loopback port" contains "run -d --restart=always -p 127.0.0.1:5001:5000 --name gt-registry registry:2" "$CALLS_LOG"
+check "the registry is started on a loopback port" contains "run -d --restart=always -p 127.0.0.1:5001:5000 -v gt-registry-data:/var/lib/registry -e REGISTRY_STORAGE_DELETE_ENABLED=true --name gt-registry registry:2" "$CALLS_LOG"
 check "the registry exists before the cluster" before "docker run -d" "kind create cluster"
 kind_cfg="$(cat "$S/state/kind-config.yaml")"
 check "the kind config maps the gateway nodePort to the Mac loopback port" contains "hostPort: 28443" "$kind_cfg"
