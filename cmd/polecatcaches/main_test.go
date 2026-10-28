@@ -137,8 +137,20 @@ func TestRunAppliesTheSeedJobManifest(t *testing.T) {
 	if job.APIVersion != "batch/v1" || job.Kind != "Job" || job.Metadata.Name != cachevol.DefaultSeedJobName {
 		t.Errorf("manifest = %s %s %q, want batch/v1 Job %s", job.APIVersion, job.Kind, job.Metadata.Name, cachevol.DefaultSeedJobName)
 	}
-	if job.Spec.Template.Spec.SecurityContext == nil || *job.Spec.Template.Spec.SecurityContext.RunAsUser != 0 {
-		t.Errorf("the Job's pod is not the root pass: %+v", job.Spec.Template.Spec.SecurityContext)
+	// The pod runs the seed pass as root so it can hand the claim to
+	// SeedUserID. -1 is a field the manifest leaves unset, so a nil security
+	// context or a nil field is reported instead of dereferenced.
+	user, group := int64(-1), int64(-1)
+	if sc := job.Spec.Template.Spec.SecurityContext; sc != nil {
+		if sc.RunAsUser != nil {
+			user = *sc.RunAsUser
+		}
+		if sc.RunAsGroup != nil {
+			group = *sc.RunAsGroup
+		}
+	}
+	if user != 0 || group != 0 {
+		t.Errorf("the Job's pod runs as user=%d group=%d, want root: the seed hands the claim to SeedUserID", user, group)
 	}
 	var claim string
 	for _, v := range job.Spec.Template.Spec.Volumes {
@@ -401,14 +413,22 @@ func TestCloneURL(t *testing.T) {
 	}
 }
 
-// TestRunCommandReportsAMissingKubectl drives the wrapper's failure path: a
-// binary that cannot be started is named in the error, and no process runs
-// because the path names no directory.
-func TestRunCommandReportsAMissingKubectl(t *testing.T) {
-	t.Parallel()
-	_, err := runCommand("no-such-dir/kubectl", nil, "apply", "-f", "-")
-	if err == nil || !strings.Contains(err.Error(), "no-such-dir/kubectl apply -f -") {
-		t.Fatalf("runCommand on a missing binary = %v, want the command named", err)
+// TestProdDepsRunsKubectl drives the wrapper the command really uses: prodDeps
+// hands its kubectl call to execKubectl, so a stub in that position, or an
+// execKubectl that never reaches kubectl, fails here. PATH names an empty
+// directory, so the lookup fails and no process starts — nothing this test does
+// reaches a cluster.
+//
+//testpolicy:allow parallel — PATH is process-wide, so no other test may run while this one holds it
+func TestProdDepsRunsKubectl(t *testing.T) {
+	//testpolicy:allow no-env — the wrapper resolves kubectl on PATH, and a PATH with no kubectl is what keeps this test off the cluster
+	t.Setenv("PATH", t.TempDir())
+	_, err := prodDeps().kubectl(nil, "apply", "-f", "-")
+	if err == nil {
+		t.Fatal("prodDeps().kubectl with no kubectl on PATH = nil error, want the wrapper's failure")
+	}
+	if !strings.Contains(err.Error(), "kubectl apply -f -") {
+		t.Errorf("prodDeps().kubectl error = %v, want the command named", err)
 	}
 }
 

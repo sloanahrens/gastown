@@ -59,7 +59,7 @@ func execKubectl(stdin io.Reader, args ...string) ([]byte, error) {
 // terminal, and reports its stdout. A failure names the command and never
 // carries its output, which can hold a secret.
 func runCommand(name string, stdin io.Reader, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...) //nolint:gosec // G204: kubectl in production; the verb and flag words are fixed and the Job name is a validated DNS-1123 label, so no shell and no user text
+	cmd := exec.Command(name, args...) //nolint:gosec // G204: the verb and flag words are fixed, and the only values are the Job name and namespace, both DNS-1123 labels cachevol.BuildSeedJob validates, so no shell sees either
 	cmd.Stdin = stdin
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
