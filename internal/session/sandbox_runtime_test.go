@@ -580,6 +580,8 @@ func TestBuildRuntimeArchiveStampsNothingWithoutAWorkBead(t *testing.T) {
 // which is what lets a caller that does not stamp a bead pass nil (gt-2lu00).
 // The stamp is skipped before it reaches the store: without that guard the nil
 // store is called and the build panics, so this test reds when the skip goes.
+// The log is compared whole so the silence is a log with no comment line in it,
+// not an empty buffer that would satisfy a search for any line (gt-n7wny).
 func TestBuildRuntimeArchiveStampsNothingWithoutACommenter(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
@@ -590,8 +592,11 @@ func TestBuildRuntimeArchiveStampsNothingWithoutACommenter(t *testing.T) {
 	if err != nil || len(data) == 0 {
 		t.Fatalf("buildRuntimeArchiveLogging with no commenter: %v", err)
 	}
-	if strings.Contains(logged.String(), "system prompt comment "+spec.WorkBeadID) {
-		t.Errorf("the spawn reported a comment it has no store to post:\n%s", logged.String())
+	uploaded := untarRuntime(t, data)["gt/"+spec.Rig+"/polecats/.claude/system-prompt-"+spec.Polecat+".md"].body
+	sum := sha256.Sum256([]byte(uploaded))
+	want := "system prompt " + spec.Polecat + ": " + strconv.Itoa(len(uploaded)) + " bytes sha256 " + hex.EncodeToString(sum[:]) + "\n"
+	if logged.String() != want {
+		t.Errorf("spawn log = %q, want the prompt line alone, %q", logged.String(), want)
 	}
 }
 
