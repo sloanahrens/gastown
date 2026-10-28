@@ -37,10 +37,11 @@ func installPendingRefusal(m *installpending.Marker, err error) error {
 }
 
 // refuseWhileInstallPending is gt sling's refusal for this run, or nil when no
-// install is pending.
+// install is pending. A run with no reader wired refuses too: it cannot see an
+// install, so it must not start a session beside one (gt-2rp64).
 func (r *slingRun) refuseWhileInstallPending(townRoot string) error {
 	if r.pendingInstall == nil {
-		return nil
+		return installPendingRefusal(nil, fmt.Errorf("the pending-install reader is not wired"))
 	}
 	return installPendingRefusal(r.pendingInstall(townRoot, time.Now()))
 }
@@ -53,7 +54,7 @@ func (e specDispatchEnv) installPendingStop() (hold, errLine string) {
 	if e.PendingInstall == nil {
 		return "", ""
 	}
-	m, err := e.PendingInstall()
+	m, err := e.PendingInstall(e.Now())
 	if err != nil {
 		return "", "install-pending marker unreadable, not dispatching: " + err.Error()
 	}

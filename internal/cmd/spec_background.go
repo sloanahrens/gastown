@@ -244,8 +244,8 @@ func runSpecSling(cmd *cobra.Command, _ []string) error {
 		},
 		Sleep: time.Sleep,
 		Now:   time.Now,
-		PendingInstall: func() (*installpending.Marker, error) {
-			return installpending.StoreFor(townRoot).Pending(time.Now())
+		PendingInstall: func(now time.Time) (*installpending.Marker, error) {
+			return installpending.StoreFor(townRoot).Pending(now)
 		},
 	}
 	if held := specSlingHold(townRoot, job.Rig); held != nil {
