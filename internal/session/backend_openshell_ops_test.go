@@ -392,6 +392,23 @@ func TestOpenShellOpsPushWorkOfALegacyRecordFindsItsCloneAndBranch(t *testing.T)
 	}
 }
 
+func TestOpenShellOpsPushWorkOfALegacyRecordWithoutItsCloneRefusesWithoutPushing(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{
+		Err:    map[string]error{"exec": errors.New("exit status 128")},
+		Stderr: map[string]string{"exec": "fatal: not a git repository"},
+	}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+	rec := SandboxRecord{Session: openshellTestSession, Rig: openshellTestRig, Polecat: openshellTestPolecat}
+
+	if err := b.pushWork(rec); err == nil {
+		t.Fatal("pushWork of a legacy record with no clone = nil, want an error so the sandbox is kept")
+	}
+	if calls := fake.Calls(); len(calls) != 1 {
+		t.Fatalf("openshell calls = %v, want the branch read only: nothing is pushed without a branch", calls)
+	}
+}
+
 func TestOpenShellOpsPushWorkRefusesABranchThatIsNotAName(t *testing.T) {
 	t.Parallel()
 	for _, branch := range []string{"--receive-pack=sh", "-f", "HEAD:refs/heads/main", "a:b", "polecat/x..y"} {
