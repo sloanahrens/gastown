@@ -243,10 +243,10 @@ func Run(ctx context.Context, opts Options, deps Deps) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
+	// The hold is narrated in daemon mode too: the daemon log is the only place
+	// a queue that does not move says why.
 	if hold != "" {
-		if !opts.Daemon {
-			r.printf("%s Scheduler dispatch held: %s\n", style.Dim.Render("⏸"), hold)
-		}
+		r.printf("%s Scheduler dispatch held: %s\n", style.Dim.Render("⏸"), hold)
 		return Report{Reason: ReasonInstallPending}, nil
 	}
 
@@ -321,54 +321,7 @@ func Run(ctx context.Context, opts Options, deps Deps) (Report, error) {
 	successfulRigs := make(map[string]bool)
 	// Track polecat names from dispatch results, keyed by context bead ID.
 	polecatNames := make(map[string]string)
-	cycle := &capacity.DispatchCycle{
-		Validate: func(b capacity.PendingBead) error {
-			return r.validateForDispatch(opts.TownRoot, b, true)
-		},
-		Execute: func(b capacity.PendingBead) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			return r.dispatchReady(ctx, opts.TownRoot, b, polecatNames, successfulRigs)
-		},
-		OnSuccess: func(b capacity.PendingBead) error {
-			// OnSuccess may be retried — only do the close here, no side effects.
-			// Route to the correct rig's beads dir (GH#3468).
-			return beads.CloseSlingContext(beadsForPendingContext(opts.TownRoot, b), b.ID, "dispatched")
-		},
-		OnFailure: func(b capacity.PendingBead, err error) {
-			var onSuccessErr *capacity.ErrOnSuccessFailed
-			if errors.As(err, &onSuccessErr) {
-				// Polecat launched but context close failed — not a true dispatch failure.
-				// Log a distinct warning so operators can distinguish from "polecat never launched".
-				r.eprintf("%s Dispatch of %s succeeded but context close failed: %v\n",
-					style.Warning.Render("⚠"), b.WorkBeadID, err)
-				// Last-resort close attempt to prevent double-dispatch on next cycle.
-				// OnSuccess already retried 2x; this is a final attempt before circuit-breaking.
-				ctxBeads := beadsForPendingContext(opts.TownRoot, b)
-				if closeErr := beads.CloseSlingContext(ctxBeads, b.ID, "dispatch-close-failed"); closeErr != nil {
-					r.eprintf("%s CRITICAL: last-resort close of %s failed — risk of double-dispatch for %s: %v\n",
-						style.Warning.Render("⚠"), b.ID, b.WorkBeadID, closeErr)
-				} else {
-					// Last-resort close succeeded — context is now closed.
-					// Log a feed event so the degradation is visible.
-					_ = events.LogFeed(events.TypeSchedulerCloseRetry, r.actor,
-						events.SchedulerDispatchPayload(b.WorkBeadID, b.TargetRig, polecatNames[b.ID]))
-					// Skip recordDispatchFailure to avoid writing to a closed context.
-					return
-				}
-			} else if deferral, deferred := asDeferral(err); deferred {
-				r.eprintf("%s %s while dispatching %s; leaving context queued: %v\n",
-					style.Dim.Render("○"), deferral.Why, b.WorkBeadID, err)
-				return
-			} else {
-				_ = events.LogFeed(events.TypeSchedulerDispatchFailed, r.actor,
-					events.SchedulerDispatchFailedPayload(b.WorkBeadID, b.TargetRig, err.Error()))
-			}
-			r.recordFailure(beadsForPendingContext(opts.TownRoot, b), b, err)
-		},
-		SpawnDelay: dispatchPlan.SpawnDelay,
-	}
+	cycle := r.dispatchCycle(ctx, opts.TownRoot, dispatchPlan.SpawnDelay, polecatNames, successfulRigs)
 
 	cycleReport, err := cycle.RunPlan(dispatchPlan.Plan)
 	if err != nil {
@@ -426,8 +379,12 @@ func asDeferral(err error) (*Deferral, bool) {
 // it. The plan was made once, but an install can start while the cycle runs it
 // (the slings and the delay between them), so the marker is read again here:
 // the context stays queued as a deferral, never a failure the circuit breaker
-// would close it on (gt-2rp64, gt-c0nvv).
+// would close it on (gt-2rp64, gt-c0nvv). A run whose context has ended slings
+// nothing.
 func (r *runner) dispatchReady(ctx context.Context, townRoot string, b capacity.PendingBead, polecatNames map[string]string, successfulRigs map[string]bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if deferral := r.installPendingDeferral(townRoot); deferral != nil {
 		return deferral
 	}
@@ -445,6 +402,57 @@ func (r *runner) dispatchReady(ctx context.Context, townRoot string, b capacity.
 	_ = events.LogFeed(events.TypeSchedulerDispatch, r.actor,
 		events.SchedulerDispatchPayload(b.WorkBeadID, b.TargetRig, polecatNames[b.ID]))
 	return nil
+}
+
+// dispatchCycle is the capacity.DispatchCycle one run executes its plan with:
+// the validate, sling, close and failure wiring. It is one method so a test
+// drives the deferral and failure branches the run itself takes.
+func (r *runner) dispatchCycle(ctx context.Context, townRoot string, spawnDelay time.Duration, polecatNames map[string]string, successfulRigs map[string]bool) *capacity.DispatchCycle {
+	return &capacity.DispatchCycle{
+		Validate: func(b capacity.PendingBead) error {
+			return r.validateForDispatch(townRoot, b, true)
+		},
+		Execute: func(b capacity.PendingBead) error {
+			return r.dispatchReady(ctx, townRoot, b, polecatNames, successfulRigs)
+		},
+		OnSuccess: func(b capacity.PendingBead) error {
+			// OnSuccess may be retried — only do the close here, no side effects.
+			// Route to the correct rig's beads dir (GH#3468).
+			return beads.CloseSlingContext(beadsForPendingContext(townRoot, b), b.ID, "dispatched")
+		},
+		OnFailure: func(b capacity.PendingBead, err error) {
+			var onSuccessErr *capacity.ErrOnSuccessFailed
+			if errors.As(err, &onSuccessErr) {
+				// Polecat launched but context close failed — not a true dispatch failure.
+				// Log a distinct warning so operators can distinguish from "polecat never launched".
+				r.eprintf("%s Dispatch of %s succeeded but context close failed: %v\n",
+					style.Warning.Render("⚠"), b.WorkBeadID, err)
+				// Last-resort close attempt to prevent double-dispatch on next cycle.
+				// OnSuccess already retried 2x; this is a final attempt before circuit-breaking.
+				ctxBeads := beadsForPendingContext(townRoot, b)
+				if closeErr := beads.CloseSlingContext(ctxBeads, b.ID, "dispatch-close-failed"); closeErr != nil {
+					r.eprintf("%s CRITICAL: last-resort close of %s failed — risk of double-dispatch for %s: %v\n",
+						style.Warning.Render("⚠"), b.ID, b.WorkBeadID, closeErr)
+				} else {
+					// Last-resort close succeeded — context is now closed.
+					// Log a feed event so the degradation is visible.
+					_ = events.LogFeed(events.TypeSchedulerCloseRetry, r.actor,
+						events.SchedulerDispatchPayload(b.WorkBeadID, b.TargetRig, polecatNames[b.ID]))
+					// Skip recordDispatchFailure to avoid writing to a closed context.
+					return
+				}
+			} else if deferral, deferred := asDeferral(err); deferred {
+				r.eprintf("%s %s while dispatching %s; leaving context queued: %v\n",
+					style.Dim.Render("○"), deferral.Why, b.WorkBeadID, err)
+				return
+			} else {
+				_ = events.LogFeed(events.TypeSchedulerDispatchFailed, r.actor,
+					events.SchedulerDispatchFailedPayload(b.WorkBeadID, b.TargetRig, err.Error()))
+			}
+			r.recordFailure(beadsForPendingContext(townRoot, b), b, err)
+		},
+		SpawnDelay: spawnDelay,
+	}
 }
 
 // installPendingHold is the pending-install hold on one run: the sentence
