@@ -339,3 +339,64 @@ func TestDirFor_HonoursTheDaemonDirOverride(t *testing.T) {
 		t.Errorf("dir with INSTALL_GT_DAEMON_DIR set = %q, want %q", got, want)
 	}
 }
+
+// TestStoreFor_IsTheMarkerFileInsideTheDaemonDir pins the store the daemon
+// builds: its path is the marker FILE in the daemon runtime dir, not the dir
+// itself. StoreFor once handed the directory to StoreIn, so every Write renamed
+// its temp file onto the existing daemon directory and failed (gt-y2ygl).
+func TestStoreFor_IsTheMarkerFileInsideTheDaemonDir(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	noOverride := func(string) string { return "" }
+
+	s := storeFor(townRoot, noOverride)
+	want := filepath.Join(townRoot, "daemon", FileName)
+	if s.Path() != want {
+		t.Fatalf("store path = %q, want %q", s.Path(), want)
+	}
+
+	// The daemon directory exists in a real town; a Write through this store
+	// must land as a file there and read back as an install in flight.
+	if err := os.MkdirAll(filepath.Dir(s.Path()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := s.Write(now, os.Getpid()); err != nil {
+		t.Fatalf("Write through the daemon's store: %v", err)
+	}
+	m, err := s.Pending(now)
+	if err != nil || m == nil {
+		t.Fatalf("Pending after Write = %v, %v; want a live marker", m, err)
+	}
+}
+
+// TestStoreFor_HonoursTheDaemonDirOverride keeps the override pointing at the
+// marker file inside the override directory, not at the directory.
+func TestStoreFor_HonoursTheDaemonDirOverride(t *testing.T) {
+	t.Parallel()
+	override := t.TempDir()
+	getenv := func(key string) string {
+		if key == "INSTALL_GT_DAEMON_DIR" {
+			return override
+		}
+		return ""
+	}
+	if got, want := storeFor(t.TempDir(), getenv).Path(), filepath.Join(override, FileName); got != want {
+		t.Fatalf("store path with the override = %q, want %q", got, want)
+	}
+}
+
+// TestStoreFor_Production pins the function the daemon calls, whatever
+// INSTALL_GT_DAEMON_DIR holds in the environment running the test: the store
+// is the marker FILE inside Dir(townRoot), never the directory (gt-y2ygl).
+func TestStoreFor_Production(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	path := StoreFor(townRoot).Path()
+	if got := filepath.Base(path); got != FileName {
+		t.Errorf("StoreFor path %q ends in %q, want the marker file %q", path, got, FileName)
+	}
+	if got, want := filepath.Dir(path), Dir(townRoot); got != want {
+		t.Errorf("StoreFor path %q is in %q, want the daemon runtime dir %q", path, got, want)
+	}
+}
