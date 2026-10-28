@@ -77,3 +77,7 @@ func (s failingStore) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) 
 	return nil, s.err
 }
 func (s failingStore) Blocked() ([]*beads.Issue, error) { return nil, s.err }
+
+func (s failingStore) ShowMultiple([]string) (map[string]*beads.Issue, error) {
+	return nil, s.err
+}

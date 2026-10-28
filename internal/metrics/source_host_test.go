@@ -121,6 +121,8 @@ func (s hostStore) List(beads.ListOptions) ([]*beads.Issue, error) {
 func (s hostStore) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) { return nil, nil }
 func (s hostStore) Blocked() ([]*beads.Issue, error)                         { return nil, nil }
 
+func (s hostStore) ShowMultiple([]string) (map[string]*beads.Issue, error) { return nil, nil }
+
 func TestSourceHostCollectsTheFiveColumns(t *testing.T) {
 	t.Parallel()
 	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
