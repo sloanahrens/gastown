@@ -7,6 +7,11 @@
 // hooks, sessions) through Deps. An in-process caller such as the daemon calls
 // Run with the same Options, so a dispatch that used to exec `gt sling` is a
 // typed call a compiler checks.
+//
+// Admit is the admission step: it names the blockers that keep a bead off bd's
+// ready board. The resolution rule stays in internal/beads, where
+// UnresolvedBlockerIDs counts a deferred blocker as unresolved, so a bead
+// waiting on a deferred blocker is refused (gt-o70a9).
 package sling
 
 import (
