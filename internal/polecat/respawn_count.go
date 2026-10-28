@@ -393,7 +393,8 @@ func GiveBackBeadRespawn(workDir, beadID string, mark RespawnMark) error {
 }
 
 // ResetBeadRespawnCount resets the respawn counter for beadID to zero.
-// Used by `gt sling respawn-reset` to allow re-dispatch after investigation.
+// Used by `gt sling respawn-reset` to allow re-dispatch after investigation,
+// and by a deliberate sling when it creates its polecat (gt-jogkx).
 //
 // It is the one path that moves a corrupt legacy witness/ file aside and goes
 // on: every other caller refuses on it, which blocks every bead until the file

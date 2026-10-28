@@ -53,8 +53,9 @@ type fakeSlingDeps struct {
 	// Admission, for the blocked-work tests: the spawns a dispatch made, the
 	// --ignore-blockers comments it wrote, and the two interleaved.
 	spawns            int
-	overrides         []string // "<actor> over <blocker>, <blocker>"
-	overrideErr       error    // what writing the override comment fails with
+	spawnOptions      []SpawnOptions // what each spawn was asked for
+	overrides         []string       // "<actor> over <blocker>, <blocker>"
+	overrideErr       error          // what writing the override comment fails with
 	admissionSequence []string
 }
 
@@ -75,8 +76,9 @@ func (f *fakeSlingDeps) deps() *Deps {
 		BeadInfoInTown: info,
 		Actor:          func(Options) string { return "daemon/spec-dispatch" },
 		Requester:      func() string { return "daemon/spec-dispatch" },
-		SpawnPolecat: func(string, SpawnOptions) (*Spawn, error) {
+		SpawnPolecat: func(_ string, opts SpawnOptions) (*Spawn, error) {
 			f.spawns++
+			f.spawnOptions = append(f.spawnOptions, opts)
 			f.admissionSequence = append(f.admissionSequence, "spawn")
 			return &Spawn{RigName: "gastown", PolecatName: "onyx"}, nil
 		},

@@ -186,7 +186,17 @@ dispatches to prevent spawn storms. After investigating the root cause,
 use this command to allow re-dispatch.
 
 Only a bead whose polecat died before submitting counts toward the limit: a
-sling that follows a landing rejection clears the counter by itself (gt-tatcn).`,
+sling that follows a landing rejection clears the counter by itself (gt-tatcn).
+
+A hand sling passes the limit and clears the counter once it launches a
+polecat. A hand sling is one run from a crew member's session (the overseer
+included), or by a process with no role identity whose output is an
+interactive terminal — the operator's own shell. Every other sling spends the
+budget: the daemon and everything it starts, the scheduler, epic and capacity
+dispatches, and a sling from a polecat's session. A process with no identity
+and no terminal counts as automated. The --actor a caller records on the bead
+does not decide this. --force gets past the limit without touching the
+counter, and this command clears it (gt-jogkx).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSlingRespawnReset,
 }
@@ -797,19 +807,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// polecat, or the caller itself (gt-hk555 moved the rig targets to the
 	// engine above). These the engine does not cover, so the dispatch is
 	// inline from here.
-	resolved, err := r.resolveTarget(target, ResolveTargetOptions{
-		DryRun:       r.opts.dryRun,
-		Force:        force,
-		Create:       r.opts.create,
-		Account:      r.opts.account,
-		Agent:        r.opts.agent,
-		NoBoot:       r.opts.noBoot,
-		HookBead:     beadID,
-		BeadID:       beadID,
-		TownRoot:     townRoot,
-		BaseBranch:   r.opts.baseBranch,
-		ResumeBranch: r.opts.resumeBranch,
-	})
+	resolved, err := r.resolveTarget(target, r.resolveTargetOptions(beadID, townRoot, force))
 	if err != nil {
 		return err
 	}
@@ -1271,7 +1269,44 @@ func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string) e
 	if r.opts.ralph {
 		mode = "ralph"
 	}
-	_, err := r.executeSling(SlingParams{
+	_, err := r.executeSling(r.rigTargetParams(rigName, beadID, formulaName, townRoot, mode))
+	if err != nil {
+		return err
+	}
+	if !r.opts.noBoot {
+		r.wakeRig(rigName)
+	}
+	return nil
+}
+
+// resolveTargetOptions is what `gt sling` asks target resolution for: this
+// run's flags, the bead, and whether the sling is a hand dispatch — a
+// deliberate one clears the spawned bead's respawn count where an automated one
+// is held to it (slingDeliberate, gt-jogkx). force is the run's copy, which
+// the dead-holder check above may have raised.
+func (r *slingRun) resolveTargetOptions(beadID, townRoot string, force bool) ResolveTargetOptions {
+	return ResolveTargetOptions{
+		DryRun:       r.opts.dryRun,
+		Force:        force,
+		Create:       r.opts.create,
+		Account:      r.opts.account,
+		Agent:        r.opts.agent,
+		NoBoot:       r.opts.noBoot,
+		HookBead:     beadID,
+		BeadID:       beadID,
+		TownRoot:     townRoot,
+		BaseBranch:   r.opts.baseBranch,
+		ResumeBranch: r.opts.resumeBranch,
+		Deliberate:   handDispatch(r.identity, r.daemon, r.stdoutIsTTY),
+	}
+}
+
+// rigTargetParams is the engine request `gt sling <bead> <rig>` makes: this
+// run's flags, the actor the dispatch is recorded under, and whether the sling
+// is a hand dispatch — a deliberate one clears the bead's respawn count where
+// an automated one is held to it (slingDeliberate, gt-jogkx).
+func (r *slingRun) rigTargetParams(rigName, beadID, formulaName, townRoot, mode string) SlingParams {
+	return SlingParams{
 		BeadID:      beadID,
 		FormulaName: formulaName,
 		RigName:     rigName,
@@ -1297,14 +1332,8 @@ func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string) e
 		FormulaFailFatal: true,
 		CallerContext:    r.requester(),
 		TownRoot:         townRoot,
-	})
-	if err != nil {
-		return err
+		Deliberate:       handDispatch(r.identity, r.daemon, r.stdoutIsTTY),
 	}
-	if !r.opts.noBoot {
-		r.wakeRig(rigName)
-	}
-	return nil
 }
 
 // rigTargetHeld answers a bead that is already assigned, before the engine is

@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/sling"
+	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -165,8 +166,17 @@ type slingDeps struct {
 	cook               func(formulaName, workDir, townRoot string) error
 	instantiateFormula func(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, extraVars []string) (*FormulaOnBeadResult, error)
 	actor              func() string
-	hookDir            func(townRoot, beadID, workDir string) string
-	storeFields        func(townRoot, beadID string, updates beadFieldUpdates) error
+	// daemon marks a process the daemon started, whose sling is automated
+	// whatever actor it names (see slingDaemonProcess).
+	daemon daemonMarker
+	// identity is the identity this process carries in its environment and
+	// stdoutIsTTY whether its output is a terminal; with daemon they classify
+	// the sling for the respawn budget (see slingDeliberate). A nil func is the
+	// zero fact: no identity, not a terminal.
+	identity    func() string
+	stdoutIsTTY func() bool
+	hookDir     func(townRoot, beadID, workDir string) string
+	storeFields func(townRoot, beadID string, updates beadFieldUpdates) error
 	// recordBlockerOverride appends the --ignore-blockers comment to the bead:
 	// the actor and the blockers the dispatch went over (gt-e3hl2).
 	recordBlockerOverride func(townRoot, beadID, actor string, blockers []string) error
@@ -273,6 +283,9 @@ func realSlingDeps() *slingDeps {
 		cook:                  CookFormula,
 		instantiateFormula:    InstantiateFormulaOnBead,
 		actor:                 resolveSlingActor,
+		daemon:                slingDaemonProcess,
+		identity:              slingProcessIdentity,
+		stdoutIsTTY:           ui.IsTerminal,
 		hookDir:               beads.ResolveHookDir,
 		storeFields:           storeFieldsInBeadFromTownRoot,
 		recordBlockerOverride: slingStores{}.recordBlockerOverride,

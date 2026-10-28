@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/ui"
 	"io"
 	"os"
 	"path/filepath"
@@ -75,6 +76,14 @@ type batchSling struct {
 	execute           func(params SlingParams) (*SlingResult, error)
 	wakeRig           func(rigName string)
 	sleep             func(time.Duration)
+	// identity, daemon and stdoutIsTTY are the process facts each dispatch of
+	// this batch is classified by, so a hand batch clears the bead's respawn
+	// count where an automated one spends it (slingDeliberate). Nil is the zero
+	// fact, which classifies as automated: a batch wrapper that wired none
+	// spends the respawn budget.
+	identity    func() string
+	daemon      daemonMarker
+	stdoutIsTTY func() bool
 }
 
 // realBatchSling is a batch sling with opts and the running gt's collaborators.
@@ -91,6 +100,39 @@ func realBatchSling(opts slingOptions) batchSling {
 		execute:           executeSling,
 		wakeRig:           wakeRigAgents,
 		sleep:             time.Sleep,
+		identity:          slingProcessIdentity,
+		daemon:            slingDaemonProcess,
+		stdoutIsTTY:       ui.IsTerminal,
+	}
+}
+
+// params is the engine request one bead of this batch makes, with the
+// classification the respawn budget reads: a hand batch clears the bead's
+// count, an automated one is held to it (gt-jogkx).
+func (b batchSling) params(beadID, rigName, townRoot, townBeadsDir, formulaName, slingMode string, formulaCooked bool) SlingParams {
+	deliberate := handDispatch(b.identity, b.daemon, b.stdoutIsTTY)
+	return SlingParams{
+		BeadID:           beadID,
+		FormulaName:      formulaName,
+		RigName:          rigName,
+		Args:             b.opts.argsText,
+		Vars:             b.opts.vars,
+		BaseBranch:       b.opts.baseBranch,
+		Account:          b.opts.account,
+		Agent:            b.opts.agent,
+		NoMerge:          b.opts.noMerge,
+		ReviewOnly:       b.opts.reviewOnly,
+		Force:            b.opts.force,
+		IgnoreBlockers:   b.opts.ignoreBlockers,
+		HookRawBead:      b.opts.hookRawBead,
+		NoBoot:           b.opts.noBoot,
+		Mode:             slingMode,
+		SkipCook:         formulaCooked,
+		Deliberate:       deliberate,
+		FormulaFailFatal: false, // Batch: warn + hook raw on formula failure
+		CallerContext:    "batch-sling",
+		TownRoot:         townRoot,
+		BeadsDir:         townBeadsDir,
 	}
 }
 
@@ -213,28 +255,7 @@ func (b batchSling) run(beadIDs []string, rigName string, townBeadsDir string) e
 
 		fmt.Fprintf(b.out, "\n[%d/%d] Slinging %s...\n", i+1, len(beadIDs), beadID)
 
-		params := SlingParams{
-			BeadID:           beadID,
-			FormulaName:      formulaName,
-			RigName:          rigName,
-			Args:             b.opts.argsText,
-			Vars:             b.opts.vars,
-			BaseBranch:       b.opts.baseBranch,
-			Account:          b.opts.account,
-			Agent:            b.opts.agent,
-			NoMerge:          b.opts.noMerge,
-			ReviewOnly:       b.opts.reviewOnly,
-			Force:            b.opts.force,
-			IgnoreBlockers:   b.opts.ignoreBlockers,
-			HookRawBead:      b.opts.hookRawBead,
-			NoBoot:           b.opts.noBoot,
-			Mode:             slingMode,
-			SkipCook:         formulaCooked,
-			FormulaFailFatal: false, // Batch: warn + hook raw on formula failure
-			CallerContext:    "batch-sling",
-			TownRoot:         townRoot,
-			BeadsDir:         townBeadsDir,
-		}
+		params := b.params(beadID, rigName, townRoot, townBeadsDir, formulaName, slingMode, formulaCooked)
 
 		result, err := b.execute(params)
 		if err != nil {
