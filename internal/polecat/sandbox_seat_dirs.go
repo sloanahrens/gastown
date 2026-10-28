@@ -28,6 +28,12 @@ var ErrSandboxSeatLockBusy = errors.New("polecat directory lock is busy")
 // (gt-sefzt). A lock that is not free in time returns ErrSandboxSeatLockBusy
 // and runs nothing.
 func WithSandboxSeatLock(rigPath, name string, fn func() error) error {
+	return withSandboxSeatLockTimeout(rigPath, name, SandboxSeatLockTimeout, fn)
+}
+
+// withSandboxSeatLockTimeout is WithSandboxSeatLock over a wait the caller
+// chooses, so a test can prove the busy answer without waiting out the bound.
+func withSandboxSeatLockTimeout(rigPath, name string, timeout time.Duration, fn func() error) error {
 	if !filepath.IsAbs(rigPath) {
 		return fmt.Errorf("sandbox seat lock: rig path %q is not absolute", rigPath)
 	}
@@ -38,7 +44,7 @@ func WithSandboxSeatLock(rigPath, name string, fn func() error) error {
 	if err := os.MkdirAll(lockDir, 0o755); err != nil {
 		return fmt.Errorf("creating lock dir: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), SandboxSeatLockTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	fl := flock.New(filepath.Join(lockDir, "polecat-"+name+".lock"))
 	locked, err := fl.TryLockContext(ctx, 50*time.Millisecond)
@@ -109,6 +115,12 @@ type SandboxSeatWorktreeRemover func(rigPath, clonePath string) error
 // which then leaves the entry to the prune below. A rig with no repository at
 // all has no entry to detach and nothing is reported for it.
 func RemoveSandboxSeatHostDirs(rigPath, rigName, name string, remover SandboxSeatWorktreeRemover) error {
+	return removeSandboxSeatHostDirs(gitOpener{}, rigPath, rigName, name, remover)
+}
+
+// removeSandboxSeatHostDirs is RemoveSandboxSeatHostDirs with git opened by
+// gits, so a test drives the prune's failure through a fake world.
+func removeSandboxSeatHostDirs(gits gitOpener, rigPath, rigName, name string, remover SandboxSeatWorktreeRemover) error {
 	if !filepath.IsAbs(rigPath) {
 		return fmt.Errorf("sandbox seat directories: rig path %q is not absolute", rigPath)
 	}
@@ -120,7 +132,7 @@ func RemoveSandboxSeatHostDirs(rigPath, rigName, name string, remover SandboxSea
 	}
 	dirs := SandboxSeatHostDirsFor(rigPath, rigName, name)
 	if remover == nil {
-		remover = detachRigWorktree
+		remover = func(rigPath, clonePath string) error { return detachRigWorktree(gits, rigPath, clonePath) }
 	}
 	var errs []error
 	if _, err := os.Stat(dirs.ClonePath); err == nil {
@@ -141,7 +153,7 @@ func RemoveSandboxSeatHostDirs(rigPath, rigName, name string, remover SandboxSea
 	if err := os.Remove(dirs.PromptFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		errs = append(errs, fmt.Errorf("removing %s: %w", dirs.PromptFile, err))
 	}
-	if err := pruneRigWorktrees(rigPath); err != nil {
+	if err := pruneRigWorktrees(gits, rigPath); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
@@ -149,23 +161,23 @@ func RemoveSandboxSeatHostDirs(rigPath, rigName, name string, remover SandboxSea
 
 // detachRigWorktree removes clonePath from the rig repository's worktree list.
 // A rig with no repository has no entry, so there is nothing to do.
-func detachRigWorktree(rigPath, clonePath string) error {
+func detachRigWorktree(gits gitOpener, rigPath, clonePath string) error {
 	root := rigGitRepo(rigPath)
 	if root == "" {
 		return nil
 	}
-	return openRigRepo(gitOpener{}, root).WorktreeRemove(clonePath, true)
+	return openRigRepo(gits, root).WorktreeRemove(clonePath, true)
 }
 
 // pruneRigWorktrees forgets the rig repository's worktree entries whose
 // directories are gone, the cleanup a plain directory delete needs. A rig with
 // no repository has nothing to prune.
-func pruneRigWorktrees(rigPath string) error {
+func pruneRigWorktrees(gits gitOpener, rigPath string) error {
 	root := rigGitRepo(rigPath)
 	if root == "" {
 		return nil
 	}
-	if err := openRigRepo(gitOpener{}, root).WorktreePrune(); err != nil {
+	if err := openRigRepo(gits, root).WorktreePrune(); err != nil {
 		return fmt.Errorf("pruning the worktrees of %s: %w", root, err)
 	}
 	return nil

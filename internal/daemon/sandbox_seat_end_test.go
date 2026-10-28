@@ -267,6 +267,24 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 	}
 }
 
+// An agent bead that cannot be read is not "no bead": the seat is kept and
+// nothing is measured or removed.
+func TestEndFinishedSandboxSeatKeepsASeatWithAnUnreadableAgentBead(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.agentDB.FailWith("show", errors.New("bd: database is locked"))
+	dirs := f.seatDirs()
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}) {
+		t.Error("a seat whose agent bead cannot be read was ended")
+	}
+	if !dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat directory was removed")
+	}
+	if len(f.gwAsked) != 0 {
+		t.Errorf("gateway asked %v; want nothing asked", f.gwAsked)
+	}
+}
+
 // A polecat with no agent bead is not a seat this town tracks: nothing is read
 // from the gateway and nothing is removed.
 func TestEndFinishedSandboxSeatWithoutAnAgentBead(t *testing.T) {

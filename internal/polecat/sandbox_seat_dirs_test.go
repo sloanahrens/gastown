@@ -4,7 +4,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofrs/flock"
 )
@@ -244,4 +246,85 @@ func TestRemoveSandboxSeatHostDirsWithoutARigRepository(t *testing.T) {
 	if exists(t, dirs.PromptFile) {
 		t.Errorf("%s still exists", dirs.PromptFile)
 	}
+}
+
+// A prune that fails is reported, and the seat's paths are still deleted: the
+// repository's worktree entry is the only thing left, and its owner is git.
+func TestRemoveSandboxSeatHostDirsReportsAFailedPrune(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	// A repository-shaped directory the fake world does not know, so its
+	// worktree prune answers "not a git repository".
+	if err := os.MkdirAll(filepath.Join(rigPath, ".repo.git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dirs := SandboxSeatHostDirsFor(rigPath, "rig", "agate")
+	writeSeatFile(t, filepath.Join(dirs.ClonePath, "CLAUDE.md"), "seat\n")
+
+	err := removeSandboxSeatHostDirs(newWorld().opener(), rigPath, "rig", "agate", func(_, _ string) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "pruning the worktrees") {
+		t.Fatalf("err = %v, want the failed prune", err)
+	}
+	if exists(t, dirs.PolecatDir) {
+		t.Errorf("%s still exists after a failed prune", dirs.PolecatDir)
+	}
+}
+
+// A lock directory that cannot be made or opened, and a lock another process
+// holds, are answers the seat's end must get as errors rather than as a run
+// with no lock.
+func TestWithSandboxSeatLockReportsLockFailures(t *testing.T) {
+	t.Parallel()
+	held := func(t *testing.T) (string, func()) {
+		t.Helper()
+		rigPath := t.TempDir()
+		lockDir := filepath.Join(rigPath, ".runtime", "locks")
+		if err := os.MkdirAll(lockDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		fl := flock.New(filepath.Join(lockDir, "polecat-agate.lock"))
+		if err := fl.Lock(); err != nil {
+			t.Fatal(err)
+		}
+		return rigPath, func() { _ = fl.Unlock() }
+	}
+	t.Run("a busy lock", func(t *testing.T) {
+		t.Parallel()
+		rigPath, release := held(t)
+		defer release()
+		err := withSandboxSeatLockTimeout(rigPath, "agate", 20*time.Millisecond, func() error {
+			t.Error("the callback ran without the lock")
+			return nil
+		})
+		if !errors.Is(err, ErrSandboxSeatLockBusy) {
+			t.Fatalf("err = %v, want ErrSandboxSeatLockBusy", err)
+		}
+	})
+	t.Run("a lock path that cannot be opened", func(t *testing.T) {
+		t.Parallel()
+		rigPath := t.TempDir()
+		lockPath := filepath.Join(rigPath, ".runtime", "locks", "polecat-agate.lock")
+		if err := os.MkdirAll(lockPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := WithSandboxSeatLock(rigPath, "agate", func() error {
+			t.Error("the callback ran without the lock")
+			return nil
+		})
+		if err == nil || errors.Is(err, ErrSandboxSeatLockBusy) {
+			t.Fatalf("err = %v, want the lock-open failure", err)
+		}
+	})
+	t.Run("a lock directory that cannot be made", func(t *testing.T) {
+		t.Parallel()
+		rigPath := t.TempDir()
+		writeSeatFile(t, filepath.Join(rigPath, ".runtime"), "not a directory\n")
+		err := WithSandboxSeatLock(rigPath, "agate", func() error {
+			t.Error("the callback ran without the lock")
+			return nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "creating lock dir") {
+			t.Fatalf("err = %v, want the lock-dir failure", err)
+		}
+	})
 }
