@@ -54,7 +54,7 @@ func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Resu
 	body := func(ctx context.Context) error {
 		ran = true
 		errs, stopped = t.deleteAll(ctx, plan.Actions, &result)
-		t.collect(ctx, &result)
+		t.gc(ctx, &result)
 		return nil
 	}
 
@@ -79,26 +79,10 @@ func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Resu
 	return result, err
 }
 
-// collect reclaims the space the run's deletes freed. It runs only when a
-// delete succeeded — a collect with nothing to reclaim is work for nothing —
-// and never while a push writes to the registry.
-func (t *Target) collect(ctx context.Context, result *diskmaint.Result) {
-	if len(result.Done) == 0 || t.pushInFlight() {
-		return
-	}
-	t.gc(ctx, result)
-}
-
-// gc reclaims the registry's own space for the deletes result records, setting
-// Result.Collected when it runs. It is a no-op until the collect command is
-// wired, so collect reaches it only from the guard above.
+// gc reclaims the registry's own space after the deletes result records,
+// setting Result.Collected when it runs. It is a no-op until the collect
+// command is wired; whether a run has anything to reclaim is its own question.
 func (t *Target) gc(_ context.Context, _ *diskmaint.Result) {}
-
-// pushInFlight reports whether a push is writing to the registry. A nil reader
-// is a target nobody wired a push check into, which cannot report a push.
-func (t *Target) pushInFlight() bool {
-	return t.cfg.PushInFlight != nil && t.cfg.PushInFlight()
-}
 
 // locked runs fn through Config.Lock, or directly when the caller already holds
 // the lock.
@@ -116,34 +100,39 @@ func (t *Target) locked(ctx context.Context, fn func(context.Context) error) err
 func (t *Target) deleteAll(ctx context.Context, actions []diskmaint.Action, result *diskmaint.Result) (errs []string, stopped error) {
 	for i, action := range actions {
 		repo, digest, err := actionRef(action)
-		if err == nil {
-			err = t.client.DeleteManifest(ctx, repo, digest)
-		}
-		if err == nil {
-			result.Done = append(result.Done, action)
-			result.BytesFreed += action.Bytes
+		if err != nil {
+			// A ref that fails validation is plan text nobody checked, so the
+			// record names the action's position rather than quoting it.
+			result.Failed = append(result.Failed, diskmaint.Failure{Action: action, Err: err.Error()})
+			errs = append(errs, fmt.Sprintf("action %d: %v", i+1, err))
 			continue
 		}
-		result.Failed = append(result.Failed, diskmaint.Failure{Action: action, Err: err.Error()})
-		errs = append(errs, "delete "+action.Ref+": "+err.Error())
-		if errors.Is(err, ErrDeletesDisabled) {
-			errs = append(errs, fmt.Sprintf("deletes disabled: %d of %d actions not attempted", len(actions)-i-1, len(actions)))
-			return errs, fmt.Errorf("delete %s: %w", action.Ref, ErrDeletesDisabled)
+		if err := t.client.DeleteManifest(ctx, repo, digest); err != nil {
+			result.Failed = append(result.Failed, diskmaint.Failure{Action: action, Err: err.Error()})
+			errs = append(errs, "delete "+action.Ref+": "+err.Error())
+			if errors.Is(err, ErrDeletesDisabled) {
+				errs = append(errs, fmt.Sprintf("deletes disabled: %d of %d actions not attempted", len(actions)-i-1, len(actions)))
+				return errs, fmt.Errorf("delete %s: %w", action.Ref, ErrDeletesDisabled)
+			}
+			continue
 		}
+		result.Done = append(result.Done, action)
+		result.BytesFreed += action.Bytes
 	}
 	return errs, nil
 }
 
 // actionRef splits an action's "repo@sha256:..." ref and validates both halves
 // before either reaches a URL path, so a name the registry should never hear
-// fails here and sends no request.
+// fails here and sends no request. The refusal does not quote the ref: it is
+// plan text no validator has passed.
 func actionRef(action diskmaint.Action) (repo, digest string, err error) {
 	if action.Kind != actionDelete {
 		return "", "", fmt.Errorf("action kind %q is not %s", action.Kind, actionDelete)
 	}
 	repo, digest, ok := strings.Cut(action.Ref, "@")
 	if !ok || !ValidRepo(repo) || !ValidDigest(digest) {
-		return "", "", fmt.Errorf("ref %q: %w", action.Ref, ErrBadName)
+		return "", "", fmt.Errorf("ref is not repo@sha256:<64 hex>: %w", ErrBadName)
 	}
 	return repo, digest, nil
 }

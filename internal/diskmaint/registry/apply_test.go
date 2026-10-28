@@ -362,19 +362,17 @@ func TestApplyRejectsAnActionRefWithABadName(t *testing.T) {
 			if len(result.Failed) != 1 || result.Failed[0].Action.Ref != tc.ref {
 				t.Fatalf("failed = %+v, want the bad ref", result.Failed)
 			}
-			failure := result.Failed[0].Err
-			if !mentions([]string{failure}, "failed validation") {
-				t.Fatalf("failure = %q, want a validation error", failure)
-			}
-			// The split validation names the whole ref, so a ref the client
-			// itself refused is distinguishable from one this target rejected
-			// before building a request.
-			if tc.ref != "" && !mentions([]string{failure}, tc.ref) {
-				t.Fatalf("failure = %q, want it to name the whole rejected ref %q", failure, tc.ref)
+			// A ref that failed validation is plan text nobody checked, so
+			// neither the failure nor the ledger quotes it.
+			if tc.ref != "" && mentions([]string{result.Failed[0].Err}, tc.ref) {
+				t.Fatalf("failure = %q, want no unvalidated ref echoed", result.Failed[0].Err)
 			}
 			entry := readLedger(t, path)[0]
-			if len(entry.Errors) == 0 || (tc.ref != "" && !mentions(entry.Errors, tc.ref)) {
-				t.Fatalf("ledger errors = %v, want the bad ref recorded", entry.Errors)
+			if len(entry.Errors) != 1 {
+				t.Fatalf("ledger errors = %v, want one line for the rejected action", entry.Errors)
+			}
+			if tc.ref != "" && mentions(entry.Errors, tc.ref) {
+				t.Fatalf("ledger errors = %v, want no unvalidated ref echoed", entry.Errors)
 			}
 		})
 	}
