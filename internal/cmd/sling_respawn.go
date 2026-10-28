@@ -72,7 +72,7 @@ func slingDaemonProcess() bool { return os.Getenv("BD_ACTOR") == "daemon" }
 // the overseer included — and never from the daemon's own process, whatever
 // the actor says. Every other dispatcher is automated and spends the bead's
 // respawn budget: a polecat or an automation role is what GT_ROLE holds, the
-// daemon names itself in --actor, and an actor this rule does not recognise
+// daemon names itself in --actor, and an actor this rule does not recognize
 // counts as automated too, so a dispatcher added later is held to the limit
 // until it is classified here on purpose (gt-jogkx).
 func slingDeliberate(actor string, underDaemon bool) bool {

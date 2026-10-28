@@ -70,7 +70,7 @@ type Options struct {
 	// Deliberate marks a dispatch a person chose on the bead by hand — the
 	// operator at a terminal, or a crew member — as against the automated
 	// redispatch the per-bead respawn budget exists to stop. Only the cobra
-	// layer sets it, and only for a dispatcher its classifier recognises
+	// layer sets it, and only for a dispatcher its classifier recognizes
 	// (slingDeliberate in internal/cmd); every in-process dispatcher (spec,
 	// capacity queue, epic) leaves it false, so a dispatcher added later spends
 	// the budget until it is classified on purpose (gt-jogkx).
