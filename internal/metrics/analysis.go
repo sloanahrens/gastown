@@ -73,9 +73,6 @@ func NeedRebuild(built, head string) bool {
 // AnalysisOptions is what the daily analysis reaches outside its Env: the
 // extract, the mango repository, and where its binary goes.
 type AnalysisOptions struct {
-	// Repo is accepted and ignored: the extract runs in process, so no checkout
-	// is needed to find it.
-	Repo string
 	// Home is the home directory the in-process extract joins its defaults and
 	// its home-level bead listing to; empty is the process's own.
 	Home string
