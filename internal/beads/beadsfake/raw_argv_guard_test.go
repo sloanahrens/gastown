@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // rawBdConstructors are the internal/beads functions that hand a caller bd
@@ -106,27 +107,17 @@ func parseRawBdBaseline(text string) (map[rawBdKey]int, error) {
 	return out, sc.Err()
 }
 
-// TestNoNewRawBdSites is the ratchet half of the one-interface rule
-// (gt-7iwy0.4.1): outside internal/beads, code reaches bd through
-// beads.Client and the other typed methods, not argv. The sites still
-// waiting to move are counted per file and kind in raw-bd-baseline.txt,
-// which may only shrink.
-//
-// Fix a failure by calling a typed method (adding one to Client, the fake and
-// the contract when none fits), never by raising a count.
-func TestNoNewRawBdSites(t *testing.T) {
-	t.Parallel()
-	root := filepath.Join("..", "..", "..")
-	r, err := os.OpenRoot(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = r.Close() }()
-	fsys := r.FS()
+// rawBdFileFloor is the fewest Go files a walk of the repo may read before its
+// counts mean anything: a walk that reads almost nothing passes every count.
+const rawBdFileFloor = 1000
 
+// scanRawBdTree counts the raw bd sites in every Go file under fsys, and how
+// many Go files it read. It skips internal/beads, the one package allowed to
+// hand out bd argv, and the trees that hold no hand-written Go.
+func scanRawBdTree(fsys fs.FS) (map[rawBdKey]int, int, error) {
 	counts := map[rawBdKey]int{}
 	files := 0
-	err = fs.WalkDir(fsys, ".", func(rel string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(fsys, ".", func(rel string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -147,21 +138,22 @@ func TestNoNewRawBdSites(t *testing.T) {
 		files++
 		return scanRawBd(rel, src, counts)
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A walk that reads almost nothing passes every count.
-	if files < 1000 {
-		t.Fatalf("scanned %d Go files (floor 1000); the walk has stopped reading the repo", files)
-	}
+	return counts, files, err
+}
 
-	src, err := os.ReadFile("raw-bd-baseline.txt")
+// rawBdProblems reports every way the raw bd sites under fsys break the
+// one-interface rule against baseline: a count that grew, a baseline entry
+// that no longer matches its site, and a walk that read fewer than floor Go
+// files or could not finish. An empty result passes. A walk error is itself a
+// problem, never a silent pass.
+func rawBdProblems(fsys fs.FS, baseline map[rawBdKey]int, floor int) []string {
+	counts, files, err := scanRawBdTree(fsys)
 	if err != nil {
-		t.Fatal(err)
+		return []string{fmt.Sprintf("walk stopped before the counts were complete: %v", err)}
 	}
-	baseline, err := parseRawBdBaseline(string(src))
-	if err != nil {
-		t.Fatal(err)
+	var problems []string
+	if files < floor {
+		problems = append(problems, fmt.Sprintf("scanned %d Go files (floor %d); the walk has stopped reading the repo", files, floor))
 	}
 	keys := map[rawBdKey]bool{}
 	for k := range counts {
@@ -184,13 +176,158 @@ func TestNoNewRawBdSites(t *testing.T) {
 		got, want := counts[k], baseline[k]
 		switch {
 		case got > want:
-			t.Errorf("%s: %d raw bd %s site(s), baseline %d; call a typed beads method instead", k.File, got, k.Kind, want)
+			problems = append(problems, fmt.Sprintf("%s: %d raw bd %s site(s), baseline %d; call a typed beads method instead", k.File, got, k.Kind, want))
 		case got < want && got == 0:
-			t.Errorf("raw-bd-baseline.txt: %s %s: baseline %d, found none; remove the entry", k.File, k.Kind, want)
+			problems = append(problems, fmt.Sprintf("raw-bd-baseline.txt: %s %s: baseline %d, found none; remove the entry", k.File, k.Kind, want))
 		case got < want:
-			t.Errorf("raw-bd-baseline.txt: %s %s: baseline %d, found %d; lower it to %d", k.File, k.Kind, want, got, got)
+			problems = append(problems, fmt.Sprintf("raw-bd-baseline.txt: %s %s: baseline %d, found %d; lower it to %d", k.File, k.Kind, want, got, got))
 		}
 	}
+	return problems
+}
+
+// TestNoNewRawBdSites is the ratchet half of the one-interface rule
+// (gt-7iwy0.4.1): outside internal/beads, code reaches bd through
+// beads.Client and the other typed methods, not argv. The sites still
+// waiting to move are counted per file and kind in raw-bd-baseline.txt,
+// which may only shrink.
+//
+// Fix a failure by calling a typed method (adding one to Client, the fake and
+// the contract when none fits), never by raising a count.
+func TestNoNewRawBdSites(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("raw-bd-baseline.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := parseRawBdBaseline(string(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join("..", "..", "..")
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+
+	for _, problem := range rawBdProblems(r.FS(), baseline, rawBdFileFloor) {
+		t.Error(problem)
+	}
+}
+
+// TestRawBdPolicy drives the rule behind TestNoNewRawBdSites over in-memory
+// trees, so every way it refuses has a case here: a site in any Go file
+// outside internal/beads (test files included), a count that grew, a baseline
+// entry that no longer matches, a walk too small to trust, and a walk that
+// fails.
+func TestRawBdPolicy(t *testing.T) {
+	t.Parallel()
+
+	clean := "package p\n\nfunc f() {}\n"
+	site := "package p\n\nfunc f() {\n\texec.Command(\"bd\", \"list\")\n}\n"
+	twoSites := "package p\n\nfunc f() {\n\texec.Command(\"bd\", \"list\")\n\texec.Command(\"bd\", \"show\", \"x\")\n}\n"
+
+	cases := []struct {
+		name     string
+		fsys     fs.FS
+		baseline map[rawBdKey]int
+		floor    int
+		want     []string
+	}{
+		{
+			name:  "a clean tree passes",
+			fsys:  tree("internal/cmd/clean.go", clean),
+			floor: 1,
+		},
+		{
+			name:  "the seam package may hand out bd argv",
+			fsys:  tree("internal/beads/seam.go", site, "internal/cmd/clean.go", clean),
+			floor: 1,
+		},
+		{
+			name:  "testdata and vendor are not scanned",
+			fsys:  tree("internal/cmd/clean.go", clean, "internal/cmd/testdata/x.go", site, "vendor/dep/x.go", site),
+			floor: 1,
+		},
+		{
+			name:  "a file outside the seam that execs bd fails",
+			fsys:  tree("internal/cmd/run.go", site),
+			floor: 1,
+			want:  []string{"internal/cmd/run.go: 1 raw bd argv site(s), baseline 0; call a typed beads method instead"},
+		},
+		{
+			name:     "a count above its baseline fails",
+			fsys:     tree("internal/cmd/two.go", twoSites),
+			baseline: map[rawBdKey]int{{"internal/cmd/two.go", "argv"}: 1},
+			floor:    1,
+			want:     []string{"internal/cmd/two.go: 2 raw bd argv site(s), baseline 1"},
+		},
+		{
+			name:     "a count below its baseline fails",
+			fsys:     tree("internal/cmd/one.go", site),
+			baseline: map[rawBdKey]int{{"internal/cmd/one.go", "argv"}: 2},
+			floor:    1,
+			want:     []string{"internal/cmd/one.go argv: baseline 2, found 1; lower it to 1"},
+		},
+		{
+			name:     "a baseline entry with no site left fails",
+			fsys:     tree("internal/cmd/clean.go", clean),
+			baseline: map[rawBdKey]int{{"internal/cmd/gone.go", "argv"}: 1},
+			floor:    1,
+			want:     []string{"internal/cmd/gone.go argv: baseline 1, found none; remove the entry"},
+		},
+		{
+			name:  "a walk that reads too few files fails",
+			fsys:  tree("internal/cmd/clean.go", clean),
+			floor: 2,
+			want:  []string{"scanned 1 Go files (floor 2); the walk has stopped reading the repo"},
+		},
+		{
+			name:  "a walk error is a problem, not a pass",
+			fsys:  walkFailFS{FS: tree("internal/cmd/clean.go", clean, "internal/cmd/run.go", site), path: "internal/cmd"},
+			floor: 0,
+			want:  []string{"walk stopped before the counts were complete:"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rawBdProblems(tc.fsys, tc.baseline, tc.floor)
+			if len(got) != len(tc.want) {
+				t.Fatalf("problems = %q, want %d matching %q", got, len(tc.want), tc.want)
+			}
+			for i, w := range tc.want {
+				if !strings.Contains(got[i], w) {
+					t.Errorf("problem %d = %q, want it to contain %q", i, got[i], w)
+				}
+			}
+		})
+	}
+}
+
+// tree builds an in-memory tree from alternating path and content arguments.
+func tree(paths ...string) fs.FS {
+	m := fstest.MapFS{}
+	for i := 0; i < len(paths); i += 2 {
+		m[paths[i]] = &fstest.MapFile{Data: []byte(paths[i+1])}
+	}
+	return m
+}
+
+// walkFailFS hands fs.WalkDir a tree whose one directory cannot be opened,
+// standing in for a read the walk cannot finish. It hides ReadDirFS so the
+// walk falls back to Open, which is where the failure lands.
+type walkFailFS struct {
+	fs.FS
+	path string
+}
+
+func (f walkFailFS) Open(name string) (fs.File, error) {
+	if name == f.path {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrPermission}
+	}
+	return f.FS.Open(name)
 }
 
 func TestScanRawBd(t *testing.T) {
