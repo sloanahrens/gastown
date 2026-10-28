@@ -508,52 +508,38 @@ func TestUpgradeRestartHealWedgedLaunchctlIsBounded(t *testing.T) {
 }
 
 // TestUpgradeRestartHealFakeToolWriteHoldsTheForkLock checks writeFakeTool
-// writes and closes the fake under the fork lock: a fork that runs while the
-// write descriptor is open hands the child a copy of it, and the kernel then
-// refuses to exec the fake as text file busy (gt-e96f7). The runtime takes the
-// lock's read side across a fork, so the test holds that side and asserts the
-// helper neither finishes nor creates the file while it is held, then lets go
-// and finds the fake written (gt-wio5g).
+// holds the fork lock for writing across the fake's write: a fork that runs
+// while the descriptor is open hands the child a copy of it, and the kernel
+// then refuses to exec the fake as text file busy (gt-e96f7). The runtime takes
+// that same write side for the fork itself and the read side around the file
+// creation a fork must not race, so the write side excludes both (gt-wio5g).
 //
-// The fork is simulated by holding the read side rather than started: the unit
-// tier refuses an external tool, and a started child is not needed to show the
-// helper waits for one.
+//testpolicy:allow parallel — TryLock reads a fork in flight as held, so only a serial test can tell the helper's own lock from another's
 func TestUpgradeRestartHealFakeToolWriteHoldsTheForkLock(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "gate")
-
-	locked := true
-	defer func() {
-		if locked {
-			syscall.ForkLock.RUnlock()
+	held := false
+	writeFakeToolWith(t, dir, "gate", "exit 0", func(name string, data []byte, perm os.FileMode) error {
+		// Read at the write, where the descriptor is open: that is the instant
+		// a fork would hand a copy of it to the child.
+		if syscall.ForkLock.TryLock() {
+			// Nothing held the lock, so it proves nothing; hand it back for the
+			// helper's own Unlock.
+			syscall.ForkLock.Unlock()
+		} else {
+			held = true
 		}
-	}()
-	syscall.ForkLock.RLock()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		writeFakeTool(t, dir, "gate", "exit 0")
-	}()
-	select {
-	case <-done:
-		syscall.ForkLock.RUnlock()
-		locked = false
-		t.Fatal("writeFakeTool finished while a fork held the read side: the fake is not written under the lock")
-	case <-time.After(250 * time.Millisecond): //testpolicy:allow no-sleep — proving the write waits needs a window: the read side is held and cannot release itself
+		return os.WriteFile(name, data, perm)
+	})
+	if !held {
+		t.Error("writeFakeTool wrote the fake without holding syscall.ForkLock: a fork could hand the child the open descriptor")
 	}
-	if _, err := os.Stat(fake); !errors.Is(err, os.ErrNotExist) {
-		syscall.ForkLock.RUnlock()
-		locked = false
-		t.Fatalf("the fake exists while a fork holds the read side (stat err %v): the write runs outside the lock", err)
+	// The helper's Unlock ran: a lock it left held would wedge every fork after
+	// it.
+	if !syscall.ForkLock.TryLock() {
+		t.Fatal("writeFakeTool returned with syscall.ForkLock still held")
 	}
-	syscall.ForkLock.RUnlock()
-	locked = false
-	select {
-	case <-done:
-	case <-time.After(time.Minute): //testpolicy:allow no-sleep — a hang guard only: the write must resume once the read side is released
-		t.Fatal("writeFakeTool did not finish after the fork lock was released")
-	}
+	syscall.ForkLock.Unlock()
 	info, err := os.Stat(fake)
 	if err != nil {
 		t.Fatalf("the fake was not written: %v", err)
@@ -566,12 +552,19 @@ func TestUpgradeRestartHealFakeToolWriteHoldsTheForkLock(t *testing.T) {
 // writeFakeTool writes an executable /bin/sh stand-in for name into dir.
 func writeFakeTool(t *testing.T, dir, name, body string) {
 	t.Helper()
+	writeFakeToolWith(t, dir, name, body, os.WriteFile)
+}
+
+// writeFakeToolWith is writeFakeTool with the write injected, so a test can
+// read the fork lock from inside it.
+func writeFakeToolWith(t *testing.T, dir, name, body string, write func(string, []byte, os.FileMode) error) {
+	t.Helper()
 	// A fork that runs while this write descriptor is open hands the child a copy
 	// of it, and the kernel then refuses to exec the fake as text file busy. The
 	// fork lock is held across the write and the close (gt-e96f7, dv-bums).
 	syscall.ForkLock.Lock()
 	//testpolicy:allow no-exec-files — the test is the process boundary: the helper script finds these fakes first on PATH
-	err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755)
+	err := write(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755)
 	syscall.ForkLock.Unlock()
 	if err != nil {
 		t.Fatal(err)

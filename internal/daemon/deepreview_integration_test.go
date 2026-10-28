@@ -96,21 +96,26 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 	// must re-encode the one the copy holds, which is what tells a copy read
 	// from a line invented along the way.
 	copyRows := map[string]deepReviewRow{}
-	var copyOrder []deepReviewRow
+	copyLine := map[string]string{}
 	for _, line := range deepReviewLines(copyBytes) {
 		var row deepReviewRow
 		if err := json.Unmarshal([]byte(line), &row); err != nil {
 			t.Fatalf("the ledger copy's line is not a landing record: %v: %q", err, line)
 		}
 		copyRows[row.Bead] = row
-		copyOrder = append(copyOrder, row)
+		copyLine[row.Bead] = line
 	}
 
-	// The runs the job must produce, from the copy itself: its risky records in
-	// ledger order, grouped by the instant they landed and taken
-	// deepReviewSliceFiles rows a run, each run starting where the previous
-	// one's cursor landed (gt-4ur7s).
-	want, wantReviewed := deepReviewRunsOfCopy(copyOrder, deepReviewSliceFiles, deepReviewCopyNow)
+	// The runs the job must produce, from the plan the job builds over the copy
+	// and the cut boundLandings makes on it, so neither the risky filter nor the
+	// grouping rule is typed here a second time (gt-4ur7s, gt-t2drw). Each run
+	// starts where the previous one's cursor landed.
+	plan, err := deepreview.BuildPlan("", copyBytes, deepReviewCopyNow)
+	if err != nil {
+		t.Fatalf("the copy plans the way the job plans it: %v", err)
+	}
+	want, wantReviewed := deepReviewRunsOfCopy(t, plan.Landings, plan.Since, deepReviewSliceFiles, deepreview.DefaultSliceBytes,
+		func(rec deepreview.Record) string { return copyLine[rec.Bead] })
 	if len(want) < 2 {
 		t.Fatalf("the copy yields %d run(s) at %d rows a run; the test needs two so the cursor crosses a run-bead note",
 			len(want), deepReviewSliceFiles)
@@ -315,41 +320,35 @@ func deepReviewCheckCopyShape(t *testing.T, copyBytes []byte) {
 	}
 }
 
-// deepReviewRunsOfCopy derives the runs the job must produce from the copy:
-// its risky records in ledger order, grouped by the instant they landed, taken
-// while they fit sliceFiles rows. A group that would cross the bound is left
-// whole for the next run and the head group is taken even past it, which is
-// boundLandings' cut. The copy is far inside the default byte bound, so the
-// row bound is the only cut. Each run starts where the previous one's cursor
-// landed, and the first at the default window before now.
-func deepReviewRunsOfCopy(rows []deepReviewRow, sliceFiles int, now time.Time) (want []deepReviewRunWant, reviewed []string) {
-	since := now.UTC().Truncate(time.Second).Add(-deepreview.DefaultWindow).Format(time.RFC3339)
-	var risky []deepReviewRow
-	for _, row := range rows {
-		if len(row.RiskPaths) > 0 {
-			risky = append(risky, row)
+// deepReviewRunsOfCopy derives the runs the job must produce from the plan's
+// risky landings: each run takes what boundLandings takes of what the previous
+// run left, so the grouping and the bounds stay in the job's code rather than
+// being typed here a second time (gt-t2drw). lineOf is the copy's own line for
+// a record, so the byte bound weighs the bytes the note carries.
+func deepReviewRunsOfCopy(t *testing.T, landings []deepreview.Record, since deepreview.Timestamp, maxRows, maxBytes int, lineOf func(deepreview.Record) string) (want []deepReviewRunWant, reviewed []string) {
+	t.Helper()
+	for taken := 0; taken < len(landings); {
+		lines, err := boundLandings(landings[taken:], maxRows, maxBytes, func(rec deepreview.Record) (string, error) {
+			return lineOf(rec), nil
+		})
+		if err != nil {
+			t.Fatalf("bounding the landings from %d: %v", taken, err)
 		}
-	}
-	for taken := 0; taken < len(risky); {
-		runRows := 0
-		for i := taken; i < len(risky); {
-			end := i + 1
-			for end < len(risky) && risky[end].LandedAt == risky[i].LandedAt {
-				end++
-			}
-			if runRows > 0 && runRows+end-i > sliceFiles {
-				break
-			}
-			runRows += end - i
-			i = end
+		if len(lines) == 0 {
+			t.Fatalf("the bound took no landing from %d of %d: that run would never move the cursor", taken, len(landings))
 		}
-		for _, row := range risky[taken : taken+runRows] {
-			reviewed = append(reviewed, row.Bead)
+		until := landings[taken+len(lines)-1].LandedAt
+		for _, rec := range landings[taken : taken+len(lines)] {
+			reviewed = append(reviewed, rec.Bead)
 		}
-		until := risky[taken+runRows-1].LandedAt
-		want = append(want, deepReviewRunWant{rows: runRows, skipped: len(risky) - taken - runRows, since: since, until: until})
+		want = append(want, deepReviewRunWant{
+			rows:    len(lines),
+			skipped: len(landings) - taken - len(lines),
+			since:   since.String(),
+			until:   until.String(),
+		})
 		since = until
-		taken += runRows
+		taken += len(lines)
 	}
 	return want, reviewed
 }
