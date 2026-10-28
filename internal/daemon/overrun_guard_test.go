@@ -433,6 +433,62 @@ func TestRunOverrunGuard_StopAtThreshold(t *testing.T) {
 	}
 }
 
+// The skip that keeps a stopped run from being stopped twice is dated by the
+// run end the stop recorded on the bead — the time the dispatch clock reads —
+// not by StoppedAt, which the stop writes after the hand-back. A re-sling that
+// lands between the two is the new run's and is policed (gt-lfszo).
+func TestRunOverrunGuard_StoppedRunSkipIsDatedByTheRecordedRunEnd(t *testing.T) {
+	t.Parallel()
+	runEnd := overrunSlung.Add(10 * time.Minute)
+	stoppedAt := runEnd.Add(5 * time.Minute)
+	for _, tt := range []struct {
+		name      string
+		slung     time.Time
+		wantStops int
+	}{
+		{"a dispatch before the recorded end is the ended run's", runEnd.Add(-time.Minute), 0},
+		{"a dispatch at the recorded end is the new run's", runEnd, 1},
+		{"a dispatch after the end but before StoppedAt is the new run's", runEnd.Add(2 * time.Minute), 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			st := overrunState{Bead: "gt-aaa11", RunEndedAt: runEnd, StoppedAt: stoppedAt}
+			if err := writeOverrunState(d.config.TownRoot, st); err != nil {
+				t.Fatal(err)
+			}
+			f := newOverrunFake(0, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11"})
+			f.now = runEnd.Add(25 * time.Minute)
+			f.slung["gt-aaa11"] = tt.slung
+
+			d.runOverrunGuard(f.seams())
+
+			if len(f.stops) != tt.wantStops {
+				t.Errorf("stops = %v, want %d", f.stops, tt.wantStops)
+			}
+		})
+	}
+}
+
+// A stop that recorded no run end — abandoned when the seat was taken back, or
+// a scheduled run whose close is its end — keeps its sling from a second stop:
+// StoppedAt is then the only record of it (gt-lfszo).
+func TestRunOverrunGuard_StoppedRunWithoutARecordedEndKeepsItsSling(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	st := overrunState{Bead: "gt-aaa11", StoppedAt: overrunSlung.Add(time.Minute)}
+	if err := writeOverrunState(d.config.TownRoot, st); err != nil {
+		t.Fatal(err)
+	}
+	f := newOverrunFake(22*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11"})
+
+	d.runOverrunGuard(f.seams())
+
+	if len(f.stops) != 0 || len(f.calls) != 0 {
+		t.Errorf("stopped a run that recorded no end again: stops %v, calls %v", f.stops, f.calls)
+	}
+}
+
 func TestRunOverrunGuard_FailedNudgeRetriesAfterBackoff(t *testing.T) {
 	t.Parallel()
 	d, buf := newOverrunDaemon(t, false)

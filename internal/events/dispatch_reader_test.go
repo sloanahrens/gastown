@@ -58,9 +58,6 @@ func TestDispatchReaderReadsOnlyTheAppendedLines(t *testing.T) {
 	if at := got["gt-b"]; !at.Equal(mustTime(t, t10)) {
 		t.Errorf("gt-b = %v, want %v", at, t10)
 	}
-	if r.offset <= int64(len(logLine(TypeSling, t9, "gt-a")+"\n"+logLine(TypeSling, t10, "gt-b")+"\n")) {
-		t.Errorf("offset = %d, want it to have advanced past both reads", r.offset)
-	}
 
 	// A poll that finds nothing appended answers from what the reader holds.
 	quiet, err := r.Starts()
@@ -69,6 +66,47 @@ func TestDispatchReaderReadsOnlyTheAppendedLines(t *testing.T) {
 	}
 	if !quiet["gt-a"].Equal(got["gt-a"]) || !quiet["gt-b"].Equal(got["gt-b"]) {
 		t.Errorf("quiet poll = %v, want the previous reading %v", quiet, got)
+	}
+}
+
+// A second read folds in the lines the log gained and does not parse the bytes
+// it already read: rewriting those bytes in place stays unseen, so the reward
+// for reading incrementally is real (gt-lfszo).
+func TestDispatchReaderDoesNotReadTheBytesItAlreadyFoldedIn(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	first := logLine(TypeSling, t9, "gt-a") + "\n"
+	appendLog(t, town, first+logLine(TypeSling, t10, "gt-b")+"\n")
+
+	r := NewDispatchReader(town)
+	if _, err := r.Starts(); err != nil {
+		t.Fatalf("Starts: %v", err)
+	}
+
+	// The same file, rewritten in place with the same number of bytes: the
+	// dispatched bead becomes gt-c. A reader that parsed the log again would
+	// date gt-c and lose gt-a.
+	rewritten := logLine(TypeSling, t9, "gt-c") + "\n"
+	if len(rewritten) != len(first) {
+		t.Fatalf("fixture: rewritten line is %d bytes, want the %d of the first", len(rewritten), len(first))
+	}
+	if err := os.WriteFile(filepath.Join(town, EventsFile), []byte(rewritten+logLine(TypeSling, t10, "gt-b")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	appendLog(t, town, logLine(TypeSling, t11, "gt-d")+"\n")
+
+	got, err := r.Starts()
+	if err != nil {
+		t.Fatalf("Starts after the append: %v", err)
+	}
+	if at, ok := got["gt-c"]; ok {
+		t.Errorf("gt-c = %v, want the rewritten bytes left unread", at)
+	}
+	if at := got["gt-a"]; !at.Equal(mustTime(t, t9)) {
+		t.Errorf("gt-a = %v, want the dispatch folded in on the first read, %v", at, t9)
+	}
+	if at := got["gt-d"]; !at.Equal(mustTime(t, t11)) {
+		t.Errorf("gt-d = %v, want the appended line's dispatch, %v", at, t11)
 	}
 }
 
