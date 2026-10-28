@@ -8,11 +8,14 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -383,42 +386,119 @@ func rejectionTown(t *testing.T, lines ...land.ReviewRecord) string {
 	return town
 }
 
-// rejectionBd is a bd that answers a bd show with the notes of the beads it
-// was asked for, recording the store directories it was asked in. A bead it
-// has no note for is a fixture bug, so the case fails rather than answering a
-// listing that would hide it.
-func rejectionBd(t *testing.T, notes map[string]string, asked *[]string) Runner {
-	t.Helper()
-	return func(_ context.Context, argv []string) ([]byte, error) {
-		if len(argv) < 4 || argv[0] != "bd" || argv[1] != "-C" || argv[3] != "show" {
-			t.Fatalf("argv = %v, want a bd show in -C", argv)
-		}
-		*asked = append(*asked, argv[2])
-		var rows []bdListBead
-		for _, arg := range argv[4:] {
-			id, ok := strings.CutPrefix(arg, "--id=")
-			if !ok {
-				continue
-			}
-			body, known := notes[id]
-			if !known {
-				t.Fatalf("bd show asked for %q, which the case has no note for", id)
-			}
-			rows = append(rows, bdListBead{ID: id, Notes: body})
-		}
-		return json.Marshal(rows)
+// rejectionStoreFake is the bead store the rejection section reads in these
+// tests: the notes each directory's store holds, the error a directory's read
+// gets instead, and a record of every read, so a test sees which store the
+// section opened and which ids it asked for.
+type rejectionStoreFake struct {
+	notes map[string]map[string]string // dir -> bead id -> the notes its store holds
+	fail  map[string]error             // dir -> the error that store's read gets
+	// shown, for a directory in it, is the answer its store gives exactly: the
+	// issues it holds for the ids asked, a nil or id-less issue included, which
+	// is an answer a store does not give for a bead.
+	shown map[string]map[string]*beads.Issue
+
+	mu    sync.Mutex
+	reads []rejectionStoreRead
+}
+
+// rejectionStoreRead is one read of one directory's store: the directory, and
+// the ids it was asked, in the order it was asked.
+type rejectionStoreRead struct {
+	dir string
+	ids []string
+}
+
+// seam is the store seam the section reads through: one store per directory,
+// answering what the fake holds for it.
+func (f *rejectionStoreFake) seam() BeadStores {
+	return func(_ context.Context, dir string) BeadStore {
+		return &rejectionFakeStore{f: f, dir: dir}
 	}
+}
+
+// readDirs lists the directories whose store the section opened, read order
+// included.
+func (f *rejectionStoreFake) readDirs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	dirs := make([]string, 0, len(f.reads))
+	for _, read := range f.reads {
+		dirs = append(dirs, read.dir)
+	}
+	return dirs
+}
+
+// askedIDs lists the ids the store in dir was asked, read order included.
+func (f *rejectionStoreFake) askedIDs(dir string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var ids []string
+	for _, read := range f.reads {
+		if read.dir == dir {
+			ids = append(ids, read.ids...)
+		}
+	}
+	return ids
+}
+
+// rejectionFakeStore is one directory's store as the section opened it.
+type rejectionFakeStore struct {
+	f   *rejectionStoreFake
+	dir string
+}
+
+func (s *rejectionFakeStore) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("the rejection test read the board")
+}
+
+func (s *rejectionFakeStore) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("the rejection test read the ready queue")
+}
+
+func (s *rejectionFakeStore) Blocked() ([]*beads.Issue, error) {
+	return nil, errors.New("the rejection test read the blocked list")
+}
+
+func (s *rejectionFakeStore) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	f := s.f
+	f.mu.Lock()
+	f.reads = append(f.reads, rejectionStoreRead{dir: s.dir, ids: append([]string(nil), ids...)})
+	f.mu.Unlock()
+	if err := f.fail[s.dir]; err != nil {
+		return nil, err
+	}
+	if exact, ok := f.shown[s.dir]; ok {
+		out := make(map[string]*beads.Issue, len(ids))
+		for _, id := range ids {
+			if issue, ok := exact[id]; ok {
+				out[id] = issue
+			}
+		}
+		return out, nil
+	}
+	out := make(map[string]*beads.Issue, len(ids))
+	for _, id := range ids {
+		notes, ok := f.notes[s.dir][id]
+		if !ok {
+			continue // a bead the store does not hold is left out, not refused
+		}
+		out[id] = &beads.Issue{ID: id, Notes: notes}
+	}
+	return out, nil
 }
 
 func TestMangoRejectionsSectionRendersBothTables(t *testing.T) {
 	t.Parallel()
 	town := rejectionTown(t, rejectionRecord("gt-a", 1, "opus"),
 		land.ReviewRecord{BeadID: "gt-b", Rig: "gastown", Verdict: land.VerdictApprove, Agent: "sonnet", At: rejectionAt})
-	var asked []string
+	store := &rejectionStoreFake{notes: map[string]map[string]string{
+		filepath.Join(town, "gastown"): {"gt-a": rejectionNote(1, "unreadable status suppresses escalation (fail-open gate)")},
+	}}
 	env := Env{
 		Town:     town,
 		ReadFile: os.ReadFile,
-		Run:      rejectionBd(t, map[string]string{"gt-a": rejectionNote(1, "unreadable status suppresses escalation (fail-open gate)")}, &asked),
+		Beads:    store.seam(),
 	}
 	text, err := MangoRejectionsSection(context.Background(), env)
 	if err != nil {
@@ -437,8 +517,8 @@ func TestMangoRejectionsSectionRendersBothTables(t *testing.T) {
 			t.Errorf("text = %q, want it to hold %q", text, want)
 		}
 	}
-	if len(asked) != 1 || asked[0] != filepath.Join(town, "gastown") {
-		t.Errorf("bd run in %v, want the gastown store alone", asked)
+	if dirs := store.readDirs(); len(dirs) != 1 || dirs[0] != filepath.Join(town, "gastown") {
+		t.Errorf("store read in %v, want the gastown store alone", dirs)
 	}
 }
 
@@ -449,7 +529,7 @@ func TestMangoRejectionsSectionFailsOnAMissingLog(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	_, err := MangoRejectionsSection(context.Background(), Env{
-		Town: town, ReadFile: os.ReadFile, Run: func(context.Context, []string) ([]byte, error) { return nil, nil },
+		Town: town, ReadFile: os.ReadFile, Beads: (&rejectionStoreFake{}).seam(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "reviews.jsonl") {
 		t.Fatalf("err = %v, want a refusal naming the missing review log", err)
@@ -464,20 +544,12 @@ func TestMangoRejectionsSectionReadsEachStoresOwnNotes(t *testing.T) {
 	other := rejectionRecord("gt-a", 1, "opus")
 	other.Rig = "beads"
 	town := rejectionTown(t, rejectionRecord("gt-a", 1, "opus"), other)
-	var asked []string
 	// The fixture answers by store, so the same id reaches two different notes.
-	run := func(_ context.Context, argv []string) ([]byte, error) {
-		if len(argv) < 4 || argv[0] != "bd" || argv[1] != "-C" || argv[3] != "show" {
-			t.Fatalf("argv = %v, want a bd show in -C", argv)
-		}
-		asked = append(asked, argv[2])
-		note := "the change reads fine, only a style note"
-		if argv[2] == filepath.Join(town, "gastown") {
-			note = "unreadable status suppresses escalation (fail-open gate)"
-		}
-		return json.Marshal([]bdListBead{{ID: "gt-a", Notes: rejectionNote(1, note)}})
-	}
-	text, err := MangoRejectionsSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, Run: run})
+	store := &rejectionStoreFake{notes: map[string]map[string]string{
+		filepath.Join(town, "beads"):   {"gt-a": rejectionNote(1, "the change reads fine, only a style note")},
+		filepath.Join(town, "gastown"): {"gt-a": rejectionNote(1, "unreadable status suppresses escalation (fail-open gate)")},
+	}}
+	text, err := MangoRejectionsSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, Beads: store.seam()})
 	if err != nil {
 		t.Fatalf("MangoRejectionsSection: %v", err)
 	}
@@ -489,24 +561,27 @@ func TestMangoRejectionsSectionReadsEachStoresOwnNotes(t *testing.T) {
 			t.Errorf("text = %q, want it to hold %q", text, want)
 		}
 	}
-	wantAsked := []string{filepath.Join(town, "beads"), filepath.Join(town, "gastown")}
-	if len(asked) != 2 || asked[0] != wantAsked[0] || asked[1] != wantAsked[1] {
-		t.Errorf("bd run in %v, want %v", asked, wantAsked)
+	wantRead := []string{filepath.Join(town, "beads"), filepath.Join(town, "gastown")}
+	if dirs := store.readDirs(); len(dirs) != 2 || dirs[0] != wantRead[0] || dirs[1] != wantRead[1] {
+		t.Errorf("store read in %v, want %v", dirs, wantRead)
 	}
 }
 
 // TestMangoRejectionsSectionFailsWhenBdOmitsABead is the join's refusal branch:
 // a store that does not return a bead the log names is a broken read, not a
-// refusal carrying no note.
+// refusal carrying no note. The error names the store's directory, so a broken
+// read is locatable in a town with several rigs.
 func TestMangoRejectionsSectionFailsWhenBdOmitsABead(t *testing.T) {
 	t.Parallel()
 	town := rejectionTown(t, rejectionRecord("gt-a", 1, "opus"))
 	_, err := MangoRejectionsSection(context.Background(), Env{
-		Town: town, ReadFile: os.ReadFile,
-		Run: func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil },
+		Town: town, ReadFile: os.ReadFile, Beads: (&rejectionStoreFake{}).seam(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "gt-a") {
 		t.Fatalf("err = %v, want a refusal naming the bead the store did not return", err)
+	}
+	if want := filepath.Join(town, "gastown"); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("err = %v, want a refusal naming the store's directory %q", err, want)
 	}
 }
 
@@ -518,7 +593,7 @@ func TestMangoRejectionsSectionSkipsUnreadableLines(t *testing.T) {
 		`{"bead":"gt-b","verdict":"approve","at":"2026-10-21T12:00:00Z"}` + "\n"
 	writeTownFile(t, land.TownReviewsFile(town).Path, log)
 	text, err := MangoRejectionsSection(context.Background(), Env{
-		Town: town, ReadFile: os.ReadFile, Run: func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil },
+		Town: town, ReadFile: os.ReadFile, Beads: (&rejectionStoreFake{}).seam(),
 	})
 	if err != nil {
 		t.Fatalf("MangoRejectionsSection: %v", err)
@@ -533,7 +608,7 @@ func TestMangoRejectionsSectionCountsUnreadableLinesWithoutRecords(t *testing.T)
 	town := t.TempDir()
 	writeTownFile(t, land.TownReviewsFile(town).Path, "not a record\n")
 	text, err := MangoRejectionsSection(context.Background(), Env{
-		Town: town, ReadFile: os.ReadFile, Run: func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil },
+		Town: town, ReadFile: os.ReadFile, Beads: (&rejectionStoreFake{}).seam(),
 	})
 	if err != nil {
 		t.Fatalf("MangoRejectionsSection: %v", err)
@@ -552,7 +627,7 @@ func TestMangoRejectionsSectionRefusesARigThatEscapesTheTown(t *testing.T) {
 	town := rejectionTown(t, rec)
 	_, err := MangoRejectionsSection(context.Background(), Env{
 		Town: town, ReadFile: os.ReadFile,
-		Run: func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil },
+		Beads: (&rejectionStoreFake{}).seam(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "not one path element") {
 		t.Fatalf("err = %v, want a refusal naming the rig that escapes the town", err)
@@ -565,7 +640,7 @@ func TestMangoRejectionsSectionFailsOnARecordWithNoInstant(t *testing.T) {
 	writeTownFile(t, land.TownReviewsFile(town).Path,
 		`{"bead":"gt-b","verdict":"approve","agent":"opus"}`+"\n")
 	_, err := MangoRejectionsSection(context.Background(), Env{
-		Town: town, ReadFile: os.ReadFile, Run: func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil },
+		Town: town, ReadFile: os.ReadFile, Beads: (&rejectionStoreFake{}).seam(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "no instant") {
 		t.Fatalf("err = %v, want a refusal naming the record with no instant", err)
@@ -575,30 +650,51 @@ func TestMangoRejectionsSectionFailsOnARecordWithNoInstant(t *testing.T) {
 func TestMangoRejectionsSectionFailsWhenBdFails(t *testing.T) {
 	t.Parallel()
 	town := rejectionTown(t, rejectionRecord("gt-a", 1, "opus"))
+	dir := filepath.Join(town, "gastown")
+	store := &rejectionStoreFake{fail: map[string]error{dir: errors.New("dolt unreachable")}}
 	_, err := MangoRejectionsSection(context.Background(), Env{
-		Town: town, ReadFile: os.ReadFile,
-		Run: func(context.Context, []string) ([]byte, error) { return nil, errors.New("dolt unreachable") },
+		Town: town, ReadFile: os.ReadFile, Beads: store.seam(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "bd show in") {
 		t.Fatalf("err = %v, want a refusal naming the store", err)
 	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Fatalf("err = %v, want a refusal naming the store's directory %q", err, dir)
+	}
+	// The read's own failure is carried, so a broken store reads as broken
+	// rather than as the bead being gone.
+	if !strings.Contains(err.Error(), "dolt unreachable") {
+		t.Fatalf("err = %v, want the store's read failure carried", err)
+	}
 }
 
-func TestMangoRejectionsSectionFailsOnOutputThatIsNotABeadList(t *testing.T) {
+// TestMangoRejectionsSectionFailsOnAnAnswerThatIsNotABead: a store answering a
+// refused bead with something that is not a bead — no issue at all, or an issue
+// carrying no id — fails the section rather than reading as a note-less
+// refusal. It is the store seam's side of the case the pre-seam reader held
+// when bd printed something that was not a bead list.
+func TestMangoRejectionsSectionFailsOnAnAnswerThatIsNotABead(t *testing.T) {
 	t.Parallel()
-	// "[" is an array that does not parse, so it reaches the decoder's own
-	// error rather than the array check in front of it.
-	for _, out := range []string{"not json", "null", "  ", "["} {
-		out := out
-		t.Run(fmt.Sprintf("%q", out), func(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		issue *beads.Issue
+	}{
+		{"no issue", nil},
+		{"an issue with no id", &beads.Issue{}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			town := rejectionTown(t, rejectionRecord("gt-a", 1, "opus"))
+			dir := filepath.Join(town, "gastown")
+			store := &rejectionStoreFake{shown: map[string]map[string]*beads.Issue{
+				dir: {"gt-a": tc.issue},
+			}}
 			_, err := MangoRejectionsSection(context.Background(), Env{
-				Town: town, ReadFile: os.ReadFile,
-				Run: func(context.Context, []string) ([]byte, error) { return []byte(out), nil },
+				Town: town, ReadFile: os.ReadFile, Beads: store.seam(),
 			})
-			if err == nil || !strings.Contains(err.Error(), "not a bead list") {
-				t.Fatalf("err = %v, want a refusal naming the unreadable listing", err)
+			if err == nil || !strings.Contains(err.Error(), "gt-a") {
+				t.Fatalf("err = %v, want a refusal naming the bead the store did not answer", err)
 			}
 		})
 	}
@@ -615,7 +711,7 @@ func TestMangoRejectionsSectionEscapesSeatNames(t *testing.T) {
 	})
 	text, err := MangoRejectionsSection(context.Background(), Env{
 		Town: town, ReadFile: os.ReadFile,
-		Run: func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil },
+		Beads: (&rejectionStoreFake{}).seam(),
 	})
 	if err != nil {
 		t.Fatalf("MangoRejectionsSection: %v", err)
@@ -640,7 +736,7 @@ func TestMangoRejectionsSectionSkipsAQueueLine(t *testing.T) {
 	)
 	text, err := MangoRejectionsSection(context.Background(), Env{
 		Town: town, ReadFile: os.ReadFile,
-		Run: func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil },
+		Beads: (&rejectionStoreFake{}).seam(),
 	})
 	if err != nil {
 		t.Fatalf("MangoRejectionsSection: %v", err)
@@ -657,7 +753,7 @@ func TestMangoRejectionsSectionFailsOnAnUnreadableLog(t *testing.T) {
 		ReadFile: func(string) ([]byte, error) {
 			return nil, errors.New("permission denied")
 		},
-		Run: func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil },
+		Beads: (&rejectionStoreFake{}).seam(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "reviews.jsonl") {
 		t.Fatalf("err = %v, want a refusal naming the log", err)
@@ -671,9 +767,9 @@ func TestMangoRejectionsSectionNeedsItsSeams(t *testing.T) {
 		env  Env
 		want string
 	}{
-		{"no town", Env{ReadFile: os.ReadFile, Run: func(context.Context, []string) ([]byte, error) { return nil, nil }}, "Env.Town is unset"},
-		{"no reader", Env{Town: t.TempDir(), Run: func(context.Context, []string) ([]byte, error) { return nil, nil }}, "Env.ReadFile is unset"},
-		{"no runner", Env{Town: t.TempDir(), ReadFile: os.ReadFile}, "Env.Run is unset"},
+		{"no town", Env{ReadFile: os.ReadFile, Beads: (&rejectionStoreFake{}).seam()}, "Env.Town is unset"},
+		{"no reader", Env{Town: t.TempDir(), Beads: (&rejectionStoreFake{}).seam()}, "Env.ReadFile is unset"},
+		{"no store", Env{Town: t.TempDir(), ReadFile: os.ReadFile}, "Env.Beads is unset"},
 	}
 	for _, c := range cases {
 		c := c
@@ -687,8 +783,128 @@ func TestMangoRejectionsSectionNeedsItsSeams(t *testing.T) {
 	}
 }
 
-// rejectionDigestRunner answers bd from the rejection notes and every other
-// command from the fake mango, so one section can drive both readers.
+// TestMangoRejectionsSectionRefusesABeadIDThatIsNotOne drives a refusal whose
+// bead id the store must never be asked for: the id comes from the review log,
+// and a store reads its ids as arguments, so a dash-leading one would reach bd
+// as a flag. The refusal names the id and the store is never opened.
+func TestMangoRejectionsSectionRefusesABeadIDThatIsNotOne(t *testing.T) {
+	t.Parallel()
+	for _, id := range []string{"--help", "-x"} {
+		id := id
+		t.Run(id, func(t *testing.T) {
+			t.Parallel()
+			store := &rejectionStoreFake{}
+			town := rejectionTown(t, rejectionRecord(id, 1, "opus"))
+			_, err := MangoRejectionsSection(context.Background(), Env{
+				Town: town, ReadFile: os.ReadFile, Beads: store.seam(),
+			})
+			if err == nil || !strings.Contains(err.Error(), id) || !strings.Contains(err.Error(), "is not a bead id") {
+				t.Fatalf("err = %v, want a refusal naming %q as an id that is not a bead id", err, id)
+			}
+			if len(store.readDirs()) != 0 {
+				t.Errorf("the store was opened in %v, want no read for a bead id that is not one", store.readDirs())
+			}
+		})
+	}
+}
+
+// TestRejectionStoresRefusesAnEmptyBeadID holds the store builder to the empty
+// id, which the section's log reader drops before it reaches here: no answer a
+// store could give for it would be a bead, so a caller that builds the record
+// itself gets the same refusal.
+func TestRejectionStoresRefusesAnEmptyBeadID(t *testing.T) {
+	t.Parallel()
+	_, err := rejectionStores("/town", []land.ReviewRecord{rejectionRecord("", 1, "opus")})
+	if err == nil || !strings.Contains(err.Error(), "is not a bead id") {
+		t.Fatalf("err = %v, want a refusal naming the empty bead id", err)
+	}
+}
+
+// TestMangoRejectionsSectionAsksEachStoreForItsRefusedBeads holds the read to
+// the beads the log refused, per rig directory: the store in a rig's directory
+// is asked for exactly the beads that rig's refusals name — the ids the
+// pre-seam reader passed as --id= flags — and a refusal that names no rig
+// reaches the town's own store. An approved bead is never asked for, and the ids
+// arrive sorted, so the read does not depend on the log's order.
+func TestMangoRejectionsSectionAsksEachStoreForItsRefusedBeads(t *testing.T) {
+	t.Parallel()
+	town := rejectionTown(t,
+		rejectionRecord("gt-c", 1, "opus"),
+		land.ReviewRecord{BeadID: "gt-approved", Rig: "gastown", Verdict: land.VerdictApprove, Agent: "opus", At: rejectionAt},
+		rejectionRecord("gt-a", 1, "opus"),
+		land.ReviewRecord{BeadID: "gt-z", Verdict: land.VerdictRequestChanges, Agent: "opus", Attempt: 1, At: rejectionAt},
+	)
+	gastownDir := filepath.Join(town, "gastown")
+	store := &rejectionStoreFake{notes: map[string]map[string]string{
+		gastownDir: {"gt-a": rejectionNote(1, "failing branch has no assertion"), "gt-c": rejectionNote(1, "call site")},
+		town:       {"gt-z": rejectionNote(1, "no shown output")},
+	}}
+	if _, err := MangoRejectionsSection(context.Background(), Env{
+		Town: town, ReadFile: os.ReadFile, Beads: store.seam(),
+	}); err != nil {
+		t.Fatalf("MangoRejectionsSection: %v", err)
+	}
+	want := map[string][]string{
+		gastownDir: {"gt-a", "gt-c"},
+		town:       {"gt-z"},
+	}
+	for dir, ids := range want {
+		if got := store.askedIDs(dir); !reflect.DeepEqual(got, ids) {
+			t.Errorf("the store in %s was asked for %v, want %v", dir, got, ids)
+		}
+	}
+}
+
+// The store's read of the refused beads, recorded through the real seam over a
+// fake bd: the seam runs `bd --allow-stale show --json <id>...` with its working
+// directory set to the rig's own directory, where the pre-seam reader ran
+// `bd -C <dir> show --json --id=<bead>...`. The argv therefore differs three
+// ways: the seam adds --allow-stale, -C <dir> becomes the directory the store is
+// opened in, and the --id= flags become the ids themselves, which isBeadID has
+// already refused a dash-leading id from. A read may now be as stale as the
+// store last synced, the one behaviour change gt-vu312's overseer accepted for
+// the review group's read; a rejection note is written before the review record
+// that carries it, so the stale window is the same one.
+func TestLoadRejectionNotesRunsTheStoreSeamsArgv(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	gastownDir := filepath.Join(town, "gastown")
+	var reads [][]string
+	var storeDirs []string
+	answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
+		// The seam's probe that bd takes --allow-stale, keyed the way
+		// internal/beads' own tests key it.
+		if len(args) >= 2 && args[0] == "--allow-stale" && args[1] == "version" {
+			return []byte("bd version 1.2.2\n"), nil, nil
+		}
+		reads = append(reads, append([]string(nil), args...))
+		return []byte(`[{"id":"gt-a","notes":"MERGE REJECTION (attempt 1): review\n"}]`), nil, nil
+	}
+	env := Env{Town: town, Beads: func(ctx context.Context, dir string) BeadStore {
+		storeDirs = append(storeDirs, dir)
+		return beads.New(dir, beads.WithCallContext(ctx), beads.WithRunner(answer))
+	}}
+	stores := []rejectionStore{{Rig: "gastown", Dir: gastownDir, Beads: []string{"gt-a"}}}
+	notes, err := loadRejectionNotes(context.Background(), env, stores)
+	if err != nil {
+		t.Fatalf("loadRejectionNotes: %v", err)
+	}
+	want := []string{"--allow-stale", "show", "--json", "gt-a"}
+	if len(reads) != 1 || !reflect.DeepEqual(reads[0], want) {
+		t.Fatalf("the store ran %v, want one %v", reads, want)
+	}
+	if len(storeDirs) != 1 || storeDirs[0] != gastownDir {
+		t.Errorf("the store was opened in %v, want %q: -C <dir> is the store's own directory now", storeDirs, gastownDir)
+	}
+	if got := notes[RejectionNoteKey{Rig: "gastown", Bead: "gt-a"}]; got == "" {
+		t.Errorf("notes = %v, want the refused bead's notes read through the seam", notes)
+	}
+}
+
+// rejectionDigestRunner answers bd from the first-pass reader's fixture and
+// every other command from the fake mango, so one section can drive both
+// readers. The refusal tables read their notes through the store seam, so this
+// runner carries no bd show of theirs.
 func rejectionDigestRunner(t *testing.T, bd, mango Runner) Runner {
 	t.Helper()
 	return func(ctx context.Context, argv []string) ([]byte, error) {
@@ -708,10 +924,10 @@ func TestMangoSectionCarriesTheRejectionTables(t *testing.T) {
 	mango, _ := mangoSectionRun(t, mangoSectionResult)
 	town := rejectionTown(t, rejectionRecord("gt-a", 1, "opus"),
 		land.ReviewRecord{BeadID: "gt-b", Rig: "gastown", Verdict: land.VerdictApprove, Agent: "sonnet", At: rejectionAt})
-	var asked []string
-	run := rejectionDigestRunner(t,
-		rejectionBd(t, map[string]string{"gt-a": rejectionNote(1, "failing branch has no assertion")}, &asked), mango)
-	text, err := MangoSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: run},
+	store := &rejectionStoreFake{notes: map[string]map[string]string{
+		filepath.Join(town, "gastown"): {"gt-a": rejectionNote(1, "failing branch has no assertion")},
+	}}
+	text, err := MangoSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: mango, Beads: store.seam()},
 		dir, "/opt/mango", MangoSectionOptions{MinPositives: 1})
 	if err != nil {
 		t.Fatalf("MangoSection: %v", err)
