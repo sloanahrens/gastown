@@ -54,7 +54,13 @@ type Store struct{ path string }
 
 // StoreFor resolves the marker under the process environment, honoring the same
 // INSTALL_GT_DAEMON_DIR override the install lock and scripts/install-gt.sh do.
-func StoreFor(townRoot string) Store { return StoreIn(Dir(townRoot)) }
+func StoreFor(townRoot string) Store { return storeFor(townRoot, os.Getenv) }
+
+// storeFor is StoreFor with the environment passed in, so a test hands itself a
+// temp directory instead of reading INSTALL_GT_DAEMON_DIR (gt-y2ygl).
+func storeFor(townRoot string, getenv func(string) string) Store {
+	return StoreIn(filepath.Join(dirFor(townRoot, getenv), FileName))
+}
 
 // StoreIn is the marker at exactly path.
 func StoreIn(path string) Store { return Store{path: path} }
