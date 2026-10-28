@@ -210,6 +210,31 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		}
 	}
 
+	// Blocked-work admission (gt-e3hl2): a bead whose blocking edges are still
+	// open is one bd's ready board never offered, so dispatching it spends a
+	// seat on work something else has to finish first. The check sits beside
+	// the duplicate guard and ahead of every side effect a dispatch has — the
+	// target's rig check above is a read, and the spawn below is not — and
+	// --force does not open it, because the automated redispatch paths pass
+	// --force for the guards they need (gt-1326mw, gt-21pl0). The override is
+	// --ignore-blockers, which dispatches and leaves the comment naming the
+	// actor and the blockers it went over.
+	//
+	// There is no dry-run branch here because the engine never dry-runs: a gt
+	// sling dry run reports the refusal itself and does not reach the engine
+	// (internal/cmd/sling.go), and a queued dispatch is a real one.
+	blockers := Admit(info.Dependencies)
+	if len(blockers) > 0 {
+		if !opts.IgnoreBlockers {
+			result.ErrMsg = "blocked"
+			return result, errors.New(Refusal(opts.BeadID, blockers))
+		}
+		if err := d.RecordBlockerOverride(townRoot, opts.BeadID, overrideActor(d, opts), blockers); err != nil {
+			result.ErrMsg = err.Error()
+			return result, err
+		}
+	}
+
 	// Clear the outgoing polecat's state when force-stealing a bead from it.
 	// The clear is kept for the failure path below: a spawn that does not happen
 	// leaves the old holder's state as it was (gt-u0zq0).
@@ -558,6 +583,17 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 
 	result.Success = true
 	return result, nil
+}
+
+// overrideActor is who an --ignore-blockers comment names: the operator who
+// passed the flag when the dispatch carries one — a queued sling does, because
+// the daemon that runs the queue is not the operator — else the caller's Actor
+// dep (gt-e3hl2).
+func overrideActor(d *Deps, opts Options) string {
+	if actor := strings.TrimSpace(opts.BlockerOverrideActor); actor != "" {
+		return actor
+	}
+	return d.Actor(opts)
 }
 
 // canceled reports a caller's cancellation as an error a dispatch can return.

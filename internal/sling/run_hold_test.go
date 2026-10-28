@@ -49,6 +49,13 @@ type fakeSlingDeps struct {
 	order      []string
 	spanStarts []string
 	spanErr    error
+
+	// Admission, for the blocked-work tests: the spawns a dispatch made, the
+	// --ignore-blockers comments it wrote, and the two interleaved.
+	spawns            int
+	overrides         []string // "<actor> over <blocker>, <blocker>"
+	overrideErr       error    // what writing the override comment fails with
+	admissionSequence []string
 }
 
 func (f *fakeSlingDeps) deps() *Deps {
@@ -69,6 +76,8 @@ func (f *fakeSlingDeps) deps() *Deps {
 		Actor:          func(Options) string { return "daemon/spec-dispatch" },
 		Requester:      func() string { return "daemon/spec-dispatch" },
 		SpawnPolecat: func(string, SpawnOptions) (*Spawn, error) {
+			f.spawns++
+			f.admissionSequence = append(f.admissionSequence, "spawn")
 			return &Spawn{RigName: "gastown", PolecatName: "onyx"}, nil
 		},
 		LockAssignee:       func(string, string) (func(), error) { return func() {}, nil },
@@ -84,6 +93,11 @@ func (f *fakeSlingDeps) deps() *Deps {
 		UpdateAgentHook:    func(string, string, string, string) {},
 		UpdateAgentMode:    func(string, string, string, string) {},
 		StoreFields:        func(string, string, FieldUpdates) error { return nil },
+		RecordBlockerOverride: func(_, _, actor string, blockers []string) error {
+			f.overrides = append(f.overrides, actor+" over "+strings.Join(blockers, ", "))
+			f.admissionSequence = append(f.admissionSequence, "override")
+			return f.overrideErr
+		},
 		StartSession: func(*Spawn) (string, error) {
 			f.started++
 			f.order = append(f.order, "session")

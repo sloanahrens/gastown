@@ -81,12 +81,18 @@ type Deps struct {
 	// Hook hooks beadID to targetAgent. A non-nil fields is written in the same
 	// bd update as the hook, so the hook and the attachment fields cost one
 	// Dolt commit; nil writes the hook alone.
-	Hook              func(beadID, targetAgent, hookDir, townRoot string, fields *FieldUpdates) error
-	StoreFields       func(townRoot, beadID string, updates FieldUpdates) error
-	ClearOrphanLabels func(townRoot, beadID, workDir string)
-	UpdateAgentHook   func(agentID, beadID, workDir, townBeadsDir string)
-	UpdateAgentMode   func(agentID, mode, workDir, townBeadsDir string)
-	LogFeed           func(eventType, actor string, payload map[string]interface{}) error
+	Hook        func(beadID, targetAgent, hookDir, townRoot string, fields *FieldUpdates) error
+	StoreFields func(townRoot, beadID string, updates FieldUpdates) error
+	// RecordBlockerOverride appends the comment an --ignore-blockers dispatch
+	// leaves on its bead: the actor and the blockers it dispatched over. The
+	// comment is what the override is for, so a write that fails fails the
+	// dispatch rather than dispatching work over blockers unrecorded
+	// (gt-e3hl2).
+	RecordBlockerOverride func(townRoot, beadID, actor string, blockers []string) error
+	ClearOrphanLabels     func(townRoot, beadID, workDir string)
+	UpdateAgentHook       func(agentID, beadID, workDir, townBeadsDir string)
+	UpdateAgentMode       func(agentID, mode, workDir, townBeadsDir string)
+	LogFeed               func(eventType, actor string, payload map[string]interface{}) error
 
 	// Undoing a partial dispatch.
 	RollbackArtifacts func(spawn *Spawn, townRoot, beadID, hookWorkDir string)
