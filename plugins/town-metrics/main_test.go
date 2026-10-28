@@ -3,20 +3,42 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// okTown is the town seam of a test about the exec: it resolves a town the
-// environment agrees with, so the run gets past placement.
-func okTown() (string, error) {
-	return resolveTown(
-		func() (string, error) { return "/town", nil },
-		func(string) string { return "/town" },
-		func(path string) (string, error) { return path, nil },
-	)
+// fixtureTown lays out the directories production has: a town holding the
+// mayor/town.json marker, and the plugin directory this program runs in. It
+// returns the town root, not the plugin directory.
+func fixtureTown(t *testing.T) string {
+	t.Helper()
+	town := t.TempDir()
+	writeDir(t, filepath.Join(town, "mayor"))
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("writing the town marker: %v", err)
+	}
+	writeDir(t, filepath.Join(town, "plugins", "town-metrics"))
+	return town
+}
+
+func writeDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", dir, err)
+	}
+}
+
+// inTown resolves the town from a route to it the way production does: the
+// plugin directory under that route, walked by workspace.Find.
+func inTown(route string) func() (string, error) {
+	return func() (string, error) {
+		return workspace.Find(filepath.Join(route, "plugins", "town-metrics"))
+	}
 }
 
 // TestRunnerRunsTheHourAsGtMetricsRun holds the entry point to what the daemon
@@ -25,7 +47,9 @@ func okTown() (string, error) {
 func TestRunnerRunsTheHourAsGtMetricsRun(t *testing.T) {
 	t.Parallel()
 
-	env := []string{"GT_TOWN_ROOT=/town", "GT_PLUGIN_NAME=town-metrics"}
+	town := fixtureTown(t)
+	townRoot := inTown(town)
+	env := []string{"GT_TOWN_ROOT=" + town, "GT_PLUGIN_NAME=town-metrics"}
 
 	t.Run("the hour runs as gt metrics run", func(t *testing.T) {
 		t.Parallel()
@@ -42,7 +66,7 @@ func TestRunnerRunsTheHourAsGtMetricsRun(t *testing.T) {
 				gotPath, gotArgv, gotEnv = path, argv, e
 				return nil
 			},
-			townRoot: okTown,
+			townRoot: townRoot,
 		}
 		var stderr bytes.Buffer
 		if code := r.run(env, &stderr); code != 0 {
@@ -73,7 +97,7 @@ func TestRunnerRunsTheHourAsGtMetricsRun(t *testing.T) {
 				execCalled = true
 				return nil
 			},
-			townRoot: okTown,
+			townRoot: townRoot,
 		}
 		var stderr bytes.Buffer
 		if code := r.run(env, &stderr); code != 1 {
@@ -94,7 +118,7 @@ func TestRunnerRunsTheHourAsGtMetricsRun(t *testing.T) {
 			exec: func(string, []string, []string) error {
 				return errors.New("permission denied")
 			},
-			townRoot: okTown,
+			townRoot: townRoot,
 		}
 		var stderr bytes.Buffer
 		if code := r.run(env, &stderr); code != 1 {
@@ -108,10 +132,21 @@ func TestRunnerRunsTheHourAsGtMetricsRun(t *testing.T) {
 }
 
 // TestRunnerRefusesAnHourItCannotPlace pins the placement the hour's record
-// depends on: the plugin's directory and GT_TOWN_ROOT name one town, or the run
-// fails before gt resolves a town this program never checked (gt-bfrzq).
+// depends on: the town the plugin directory resolves to and GT_TOWN_ROOT name
+// one town, or the run fails before gt resolves a town this program never
+// checked (gt-bfrzq). The resolver is the production one, walked over a town
+// that exists on disk, so a route the test accepts is a route the program
+// accepts (gt-uzi83).
 func TestRunnerRefusesAnHourItCannotPlace(t *testing.T) {
 	t.Parallel()
+
+	town := fixtureTown(t)
+	elsewhere := fixtureTown(t)
+	link := filepath.Join(t.TempDir(), "town-by-another-route")
+	if err := os.Symlink(town, link); err != nil {
+		t.Fatalf("linking the town: %v", err)
+	}
+
 	tests := []struct {
 		name     string
 		resolve  func() (string, error)
@@ -121,25 +156,42 @@ func TestRunnerRefusesAnHourItCannotPlace(t *testing.T) {
 		wantMsg  string
 	}{
 		{
-			name:    "the directory and GT_TOWN_ROOT name one town",
-			resolve: func() (string, error) { return "/town", nil },
-			fromEnv: "/town",
+			name:    "the plugin directory and GT_TOWN_ROOT name one town",
+			resolve: inTown(town),
+			fromEnv: town,
 		},
 		{
 			name:    "a hand run inside the town names no GT_TOWN_ROOT",
-			resolve: func() (string, error) { return "/town", nil },
+			resolve: inTown(town),
 		},
 		{
 			name:    "a trailing slash names the same town",
-			resolve: func() (string, error) { return "/town", nil },
-			fromEnv: "/town/",
+			resolve: inTown(town),
+			fromEnv: town + string(filepath.Separator),
 		},
 		{
-			name:     "the directory and GT_TOWN_ROOT name different towns",
-			resolve:  func() (string, error) { return "/town", nil },
-			fromEnv:  "/elsewhere",
+			name:    "GT_TOWN_ROOT reaches the town through a symlink",
+			resolve: inTown(town),
+			fromEnv: link,
+		},
+		{
+			name:    "the plugin directory reaches the town through a symlink",
+			resolve: inTown(link),
+			fromEnv: town,
+		},
+		{
+			name:     "two towns are refused",
+			resolve:  inTown(town),
+			fromEnv:  elsewhere,
 			wantCode: 1,
-			wantMsg:  `"/elsewhere"`,
+			wantMsg:  elsewhere,
+		},
+		{
+			name:     "a GT_TOWN_ROOT that names no directory is refused",
+			resolve:  inTown(town),
+			fromEnv:  filepath.Join(t.TempDir(), "no-such-town"),
+			wantCode: 1,
+			wantMsg:  "no-such-town",
 		},
 		{
 			name: "neither names a town",
@@ -151,7 +203,7 @@ func TestRunnerRefusesAnHourItCannotPlace(t *testing.T) {
 		},
 		{
 			name:     "GT_TOWN_ROOT cannot be made absolute",
-			resolve:  func() (string, error) { return "/town", nil },
+			resolve:  inTown(town),
 			fromEnv:  ".",
 			absErr:   errors.New("getting current directory"),
 			wantCode: 1,
