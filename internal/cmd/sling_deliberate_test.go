@@ -177,6 +177,26 @@ func TestSlingAutomatedSpendsTheBudgetAndRefusesAtIt(t *testing.T) {
 	}
 }
 
+// TestPrepareSlingRefusesAtTheRespawnBudget: the spawn path itself refuses a
+// bead at its automated budget, before a rig is opened or a polecat allocated,
+// so the limit holds however the dispatch reached the spawn (gt-jogkx).
+func TestPrepareSlingRefusesAtTheRespawnBudget(t *testing.T) {
+	// Not parallel: it installs the gate's bead store.
+	townRoot, _ := rigTown(t)
+	spendRespawnBudget(t, townRoot, deliberateBead)
+	prev := slingRespawnStores
+	slingRespawnStores = func() slingStores { return fakeSlingStores(beadsfake.New()) }
+	t.Cleanup(func() { slingRespawnStores = prev })
+
+	_, err := prepareSlingPolecat(townRoot, "gastown", SlingSpawnOptions{HookBead: deliberateBead})
+	if err == nil {
+		t.Fatal("the spawn path took a bead at its respawn budget")
+	}
+	if !strings.Contains(err.Error(), "respawn limit reached") {
+		t.Errorf("refusal %q does not name the limit", err)
+	}
+}
+
 // TestSlingForcePassesWithoutTouchingTheCount: --force is the documented
 // override, and it neither spends an increment nor clears the count — a forced
 // sling leaves the bead exactly as it found it (gt-jogkx).

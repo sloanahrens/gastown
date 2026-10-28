@@ -87,6 +87,11 @@ func slingDeliberate(actor string, underDaemon bool) bool {
 	}
 }
 
+// slingRespawnStores is where the respawn gate reads a bead's submission from.
+// It is a variable because the spawn path carries no store of its own; a test
+// points it at a fake so the gate runs without bd.
+var slingRespawnStores = func() slingStores { return slingStores{} }
+
 // admitSlingRespawn decides whether a sling may pass the per-bead respawn
 // limit. It returns nil when the sling may proceed and the refusal to report
 // when the bead has spent its budget.

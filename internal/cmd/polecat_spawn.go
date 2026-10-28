@@ -940,6 +940,17 @@ func openSlingRig(townRoot, rigName string) (*rig.Rig, *tmux.Tmux, *polecat.Mana
 }
 
 func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+	// Per-bead respawn circuit breaker (clown show #22): track how many times
+	// this bead has been slung, and block after N automated attempts to stop
+	// witness→deacon→sling feedback loops. The answer is about the bead rather
+	// than the rig, so it is read before the rig is opened and a refusal has
+	// nothing to undo; the spawn is charged by recordSlingRespawn once a seat
+	// exists, because counting a sling that never reached a polecat spent the
+	// bead's budget on a process someone killed (gt-4lbz).
+	if err := admitSlingRespawn(slingRespawnStores(), townRoot, rigName, opts); err != nil {
+		return nil, err
+	}
+
 	r, t, polecatMgr, err := openSlingRig(townRoot, rigName)
 	if err != nil {
 		return nil, err
@@ -976,19 +987,6 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		defer admission.Release()
 	}
 	opts.step("admission")
-
-	// Per-bead respawn circuit breaker (clown show #22):
-	// Track how many times this bead has been slung. Block after N attempts
-	// to prevent witness→deacon→sling feedback loops.
-	//
-	// The gate runs here, before anything is allocated; the spawn is charged by
-	// recordSlingRespawn once a seat exists. Counting a sling that never
-	// reached a polecat spent the bead's budget on a process someone killed:
-	// two daemon re-feeds the operator shot down mid-sling took gt-0vh to its
-	// respawn limit with only one polecat ever attached (gt-4lbz).
-	if err := admitSlingRespawn(slingStores{}, townRoot, rigName, opts); err != nil {
-		return nil, err
-	}
 
 	// A count that cannot be recorded is reported, not rolled back: the polecat
 	// is already attached, and admitSlingRespawn has already decided this sling
