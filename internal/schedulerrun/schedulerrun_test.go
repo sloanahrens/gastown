@@ -3,6 +3,7 @@ package schedulerrun
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -246,6 +247,28 @@ func TestInstallPendingHold_HoldsOnlyWhileAnInstallIsPending(t *testing.T) {
 				t.Errorf("hold = %q, deferral = %q, want both to name the install by %q", hold, deferral, want)
 			}
 		})
+	}
+}
+
+// A sling that fails for its own reason reaches the cycle as that failure, not
+// as a pending-install deferral: only a marker that stands keeps the context
+// queued (gt-c0nvv).
+func TestDispatchReady_ReturnsTheSlingFailure(t *testing.T) {
+	t.Parallel()
+	r := &runner{deps: Deps{
+		PendingInstall: func(string) (*installpending.Marker, error) { return nil, nil },
+		Sling: func(context.Context, string, capacity.PendingBead) (SlingOutcome, error) {
+			return SlingOutcome{}, errors.New("spawn failed")
+		},
+	}}
+
+	err := r.dispatchReady(t.Context(), t.TempDir(), capacity.PendingBead{ID: "ctx-1", WorkBeadID: "gt-a"},
+		map[string]string{}, map[string]bool{})
+	if err == nil || err.Error() != "spawn failed" {
+		t.Fatalf("dispatchReady = %v, want the sling's own failure", err)
+	}
+	if _, deferred := asDeferral(err); deferred {
+		t.Error("the sling failure was reported as a deferral, which hides it from the circuit breaker")
 	}
 }
 
