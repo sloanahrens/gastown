@@ -3448,9 +3448,9 @@ func (b *Beads) Show(id string) (*Issue, error) {
 	}
 
 	// bd show --json returns an array with one element
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd show output: %w", err)
+	issues, err := parseShowIssues(out)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(issues) == 0 {
@@ -3458,6 +3458,27 @@ func (b *Beads) Show(id string) (*Issue, error) {
 	}
 
 	return issues[0], nil
+}
+
+// parseShowIssues reads the issue array bd show --json prints and fails on any
+// other answer: unmarshalling a bare null into a slice leaves it empty with no
+// error, so a show that never answered read as a bead the store does not hold
+// (gt-avfip). bd's not-found answer never reaches here; that call fails first.
+func parseShowIssues(out []byte) ([]*Issue, error) {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, errors.New("parsing bd show output: answer is not an issue array")
+	}
+	var issues []*Issue
+	if err := json.Unmarshal(trimmed, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd show output: %w", err)
+	}
+	for i, issue := range issues {
+		if issue == nil {
+			return nil, fmt.Errorf("parsing bd show output: element %d is null, not an issue", i)
+		}
+	}
+	return issues, nil
 }
 
 // ShowText returns bd show's text for one issue, with args passed through
@@ -3680,9 +3701,9 @@ func (b *Beads) showMultipleLocal(ids []string) (map[string]*Issue, error) {
 		out = found
 	}
 
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd show output: %w", err)
+	issues, err := parseShowIssues(out)
+	if err != nil {
+		return nil, err
 	}
 
 	result := make(map[string]*Issue, len(issues))
