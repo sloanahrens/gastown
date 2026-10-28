@@ -31,6 +31,7 @@ import (
 var (
 	sessionIssue       string
 	sessionForce       bool
+	sessionPark        bool
 	sessionRequestedBy string
 	sessionLines       int
 	sessionMessage     string
@@ -84,8 +85,11 @@ Use --force to skip graceful shutdown.
 
 The stop is recorded as a deliberate one, so the witness zombie detector
 and the stuck-agent dog leave the polecat alone instead of restarting it
-and reporting a crash the operator asked for. The polecat stays stopped
-until gt session start (or gt agent resume) clears the record.`,
+and reporting a crash the operator asked for. A host seat stays stopped
+until gt session start (or gt agent resume) clears the record.
+
+A sandbox seat's stop also deletes its sandbox, and the seat is free for
+the next sling unless --park is given: parking is opt-in there.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSessionStop,
 }
@@ -175,6 +179,8 @@ func init() {
 
 	// Stop flags
 	sessionStopCmd.Flags().BoolVarP(&sessionForce, "force", "f", false, "Force immediate shutdown")
+	sessionStopCmd.Flags().BoolVar(&sessionPark, "park", false,
+		"Park the seat as well as stopping it (a sandbox seat parks only with this flag)")
 
 	// List flags
 	sessionListCmd.Flags().StringVar(&sessionRigFilter, "rig", "", "Filter by rig name")
@@ -371,28 +377,28 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 	// Record the stop before killing the session: a patrol reading between
 	// the two would see a session-dead polecat with no record that the stop
 	// was deliberate, and restart it (gt-fojqs).
-	markerWritten := false
+	var recorded stopRecord
 	if polecatMgr.HasPolecat(polecatName) {
-		wrote, werr := writeDeliberateStopMarker(townRoot, rigName, polecatName)
-		if werr != nil {
-			style.PrintWarning("could not record the stop for %s/%s: %v (the daemon's supervised restart may bring it back)", rigName, polecatName, werr)
-		}
-		markerWritten = wrote
+		recorded = recordDeliberateStop(townRoot, rigName, polecatName, polecatMgr.SessionName(polecatName), sessionPark)
 	}
 
 	if err := polecatMgr.Stop(polecatName, sessionForce); err != nil {
 		// Nothing was stopped, so nothing is parked: withdraw a marker this
 		// run wrote rather than leave the polecat looking deliberately stopped.
-		if markerWritten {
+		if recorded.Written {
 			clearParkedSession(townRoot, rigName, polecatName)
 		}
 		return fmt.Errorf("stopping session: %w", err)
 	}
 
 	fmt.Printf("%s Session stopped.\n", style.Bold.Render("✓"))
-	if markerWritten {
+	switch {
+	case recorded.Written:
 		fmt.Printf("  Recorded as a deliberate stop — the daemon's supervised restart will leave it down.\n")
 		fmt.Printf("  Resume with: %s\n", style.Dim.Render("gt session start "+rigName+"/"+polecatName))
+	case recorded.Sandbox && !recorded.Parked:
+		fmt.Printf("  Sandbox seat stopped and not parked: the next sling can reuse it. Add %s to park it.\n",
+			style.Dim.Render("--park"))
 	}
 
 	// Log kill event
@@ -426,6 +432,52 @@ func polecatSessionParked(townRoot, rigName, polecatName string) bool {
 	}
 	paused, _, _ := agentpause.PauseGate(townRoot, rigName, constants.RolePolecat, polecatName)
 	return paused
+}
+
+// stopRecord is what recording an operator's gt session stop left on the seat.
+type stopRecord struct {
+	// Written is true when this stop wrote the park marker.
+	Written bool
+	// Parked is true when the seat carries a park marker after the stop, from
+	// this stop or from an earlier gt agent pause.
+	Parked bool
+	// Sandbox is true when the seat's session lives in a sandbox.
+	Sandbox bool
+}
+
+// recordDeliberateStop records an operator's stop so the patrol leaves the seat
+// alone (gt-fojqs). A sandbox seat parks only when park is set: its sandbox is
+// deleted on every stop and the seat is there to be slung again, so a park
+// would only keep a reusable seat out of the pool (gt-itmpq). A host seat
+// parks on every stop.
+//
+// A registry that cannot be read is not read as "host seat": the seat is
+// parked and the warning names the failed read, because a restart of a seat
+// the operator stopped is the incident and a park is the recoverable side.
+func recordDeliberateStop(townRoot, rigName, polecatName, sessionID string, park bool) stopRecord {
+	sandboxed, err := session.IsSandboxed(townRoot, sessionID)
+	if err != nil {
+		style.PrintWarning("could not tell whether %s runs in a sandbox: %v; recording the stop as a park", sessionID, err)
+	}
+	parks := stopParksSeat(sandboxed, err != nil, park)
+	rec := stopRecord{Parked: parks, Sandbox: err == nil && sandboxed}
+	if !parks {
+		return rec
+	}
+	wrote, werr := writeDeliberateStopMarker(townRoot, rigName, polecatName)
+	if werr != nil {
+		style.PrintWarning("could not record the stop for %s/%s: %v (the daemon's supervised restart may bring it back)", rigName, polecatName, werr)
+	}
+	rec.Written = wrote
+	rec.Parked = wrote || rec.Parked
+	return rec
+}
+
+// stopParksSeat reports whether a stop parks the seat: --park asks for it, a
+// host seat parks on every stop as it always has, and a registry read that
+// failed parks too, because a park is the recoverable side of the mistake.
+func stopParksSeat(sandboxed, readFailed, park bool) bool {
+	return park || readFailed || !sandboxed
 }
 
 // writeDeliberateStopMarker records an operator-initiated stop as a pause
