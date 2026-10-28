@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -577,6 +578,49 @@ func TestListingBodyAtTheLimitIsRead(t *testing.T) {
 	}
 	if len(repos) != 1 || len(repos[0]) != size {
 		t.Errorf("Catalog read %d names, want one of %d bytes", len(repos), size)
+	}
+}
+
+func TestCatalogReturnsABodyThatFailsMidRead(t *testing.T) {
+	t.Parallel()
+	c := &Client{Base: "http://registry.test", HTTP: &http.Client{Transport: bodyTransport{body: brokenBody{}}}}
+
+	_, err := c.Catalog(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("Catalog error = %v, want the read failure", err)
+	}
+}
+
+func TestDeleteManifestRejectsUnbuildableRequest(t *testing.T) {
+	t.Parallel()
+	handler, requests := countingHandler(func(w http.ResponseWriter, r *http.Request) {})
+	c := &Client{Base: "http://registry.test/\nbad", HTTP: &http.Client{Transport: roundTrip(handler)}}
+
+	err := c.DeleteManifest(context.Background(), "gastown-polecat", testDigest())
+	if err == nil {
+		t.Fatal("DeleteManifest with a base that cannot form a URL returned no error")
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("transport saw %d requests, want 0", n)
+	}
+}
+
+func TestDoReturnsTheRequestItCannotBuild(t *testing.T) {
+	t.Parallel()
+	u, err := url.Parse("http://registry.test/v2/_catalog")
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+	handler, requests := countingHandler(func(w http.ResponseWriter, r *http.Request) {})
+	c := &Client{Base: "http://registry.test", HTTP: &http.Client{Transport: roundTrip(handler)}}
+
+	// A caller's method is the one thing this client cannot validate, so the
+	// request builder's refusal is passed back as it comes.
+	if _, err := c.do(context.Background(), "GET WITH A SPACE", u, nil); err == nil {
+		t.Fatal("do with a method that cannot form a request returned no error")
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("transport saw %d requests, want 0", n)
 	}
 }
 
