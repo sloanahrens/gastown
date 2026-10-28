@@ -29,6 +29,11 @@ type SandboxRecord struct {
 	Profile   string    `json:"profile"`
 	Image     string    `json:"image"`
 	CreatedAt time.Time `json:"created_at"`
+	// Branch and WorkDir locate the clone inside the sandbox, so a stop can
+	// push its commits before the sandbox is deleted (gt-hwpfq). Empty on a
+	// record written before that push existed.
+	Branch  string `json:"branch,omitempty"`
+	WorkDir string `json:"work_dir,omitempty"`
 }
 
 // SandboxRegistryDir is where the records live.

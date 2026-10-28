@@ -83,6 +83,10 @@ type SessionManager struct {
 	// cleanup an abandoned launch runs, so a test never shells out to the
 	// sandbox CLI; nil means the linked one.
 	sandboxDeleter func(townRoot string, rec session.SandboxRecord) error
+	// sandboxPusher stands in for the linked openshell pusher a stop runs
+	// before it deletes a sandbox, so a test never shells out to the sandbox
+	// CLI; nil means the linked one.
+	sandboxPusher func(townRoot string, rec session.SandboxRecord) error
 	// sandboxExists asks a gateway whether it has a sandbox of that name when
 	// nil: a seam for the unit tier, which has no gateway.
 	sandboxExists func(gateway, name string) (bool, error)
@@ -1020,9 +1024,14 @@ func (m *SessionManager) clock() clockwork.Clock {
 	return clockwork.NewRealClock()
 }
 
-// removeSandbox deletes the sandbox a stopped sandboxed session ran in, and its
-// registry record. A host session has no record and nothing happens. Left
-// behind, the sandbox stays Ready and the seat keeps looking occupied.
+// removeSandbox pushes the work a stopped sandboxed session committed, then
+// deletes the sandbox it ran in and its registry record. A host session has no
+// record and nothing happens. Left behind, the sandbox stays Ready and the seat
+// keeps looking occupied.
+//
+// The push comes first because the sandbox's clone is the only copy of commits
+// the seat never pushed (gt-hwpfq). A push that is refused keeps the sandbox and
+// its record, so those commits survive for the operator to recover.
 //
 // A registry that cannot be read is not a host session: it fails with
 // ErrSandboxNotRemoved and names the lookup, apart from a deletion failure.
@@ -1031,17 +1040,40 @@ func (m *SessionManager) removeSandbox(sessionID string) error {
 		return nil
 	}
 	townRoot := filepath.Dir(m.rig.Path)
-	sandboxed, err := session.IsSandboxed(townRoot, sessionID)
+	rec, sandboxed, err := session.ReadSandboxRecord(townRoot, sessionID)
 	if err != nil {
 		return fmt.Errorf("%w: cannot tell whether %s ran in a sandbox: %w", ErrSandboxNotRemoved, sessionID, err)
 	}
 	if !sandboxed {
 		return nil
 	}
+	// A sandbox already gone has no commits left to lose, so it is not a refused
+	// push; the delete below finds nothing to remove either.
+	if err := sandboxPusherOrLinked(m.sandboxPusher, session.SandboxPusher)(townRoot, rec); err != nil && !errors.Is(err, session.ErrNothingToPush) {
+		return fmt.Errorf("%w: keeping its sandbox so its commits survive, their push was refused: %w", ErrSandboxNotRemoved, err)
+	}
 	if err := session.CleanupSandboxWith(sandboxDeleterOrLinked(m.sandboxDeleter), townRoot, sessionID); err != nil {
 		return fmt.Errorf("%w: removing its sandbox: %w", ErrSandboxNotRemoved, err)
 	}
 	return nil
+}
+
+// errNoSandboxPusher is the refusal a stop gets when no pusher is linked.
+var errNoSandboxPusher = errors.New("no sandbox pusher is linked into this binary")
+
+// sandboxPusherOrLinked is the pusher a stop runs: the one a test injected, else
+// the linked openshell pusher. With neither, the push is refused, so the sandbox
+// is kept rather than deleted with its commits.
+func sandboxPusherOrLinked(pusher, linked func(townRoot string, rec session.SandboxRecord) error) func(townRoot string, rec session.SandboxRecord) error {
+	if pusher != nil {
+		return pusher
+	}
+	if linked != nil {
+		return linked
+	}
+	return func(string, session.SandboxRecord) error {
+		return errNoSandboxPusher
+	}
 }
 
 // IsRunning checks if a polecat session is active and healthy.

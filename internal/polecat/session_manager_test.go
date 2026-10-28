@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +257,99 @@ func TestStopKillsThroughTheStopHook(t *testing.T) {
 	}
 }
 
+// A stop's pusher is the injected one, else the linked one. With neither, the
+// push is refused, so the sandbox is kept and its commits survive (gt-hwpfq).
+func TestSandboxPusherOrLinkedRefusesWhenNothingPushes(t *testing.T) {
+	t.Parallel()
+	errInjected := errors.New("injected")
+	errLinked := errors.New("linked")
+	fails := func(err error) func(string, session.SandboxRecord) error {
+		return func(string, session.SandboxRecord) error { return err }
+	}
+	tests := []struct {
+		name   string
+		pusher func(string, session.SandboxRecord) error
+		linked func(string, session.SandboxRecord) error
+		want   error
+	}{
+		{name: "an_injected_pusher_wins", pusher: fails(errInjected), linked: fails(errLinked), want: errInjected},
+		{name: "the_linked_pusher_runs_when_none_is_injected", linked: fails(errLinked), want: errLinked},
+		{name: "with_neither_the_push_is_refused", want: errNoSandboxPusher},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := sandboxPusherOrLinked(tt.pusher, tt.linked)("", session.SandboxRecord{})
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("pusher = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
+// A stop pushes a sandboxed seat's commits to origin before it deletes the
+// sandbox, since the sandbox's clone is the only copy of what the seat never
+// pushed (gt-hwpfq). A refused push keeps the sandbox and its record, and the
+// stop still ends the session.
+func TestStopPushesTheSandboxWorkBeforeDeletingIt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		pushErr    error
+		wantCalls  []string
+		wantRecord bool
+		wantErr    string
+	}{
+		{name: "push_succeeds_then_the_sandbox_is_deleted", wantCalls: []string{"push polecat/Toast/gt-x", "delete"}},
+		{name: "a_gone_sandbox_has_nothing_to_push_so_the_stop_goes_on", pushErr: session.ErrNothingToPush, wantCalls: []string{"push polecat/Toast/gt-x", "delete"}},
+		{name: "refused_push_keeps_the_sandbox", pushErr: errors.New("rejected by origin"), wantCalls: []string{"push polecat/Toast/gt-x"}, wantRecord: true, wantErr: "their push was refused: rejected by origin"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			tm := newFakeSessionTmux()
+			m := &SessionManager{tmux: tm, rig: &rig.Rig{Name: "test-rig", Path: filepath.Join(town, "test-rig"), Polecats: []string{"Toast"}}, gits: newWorld().opener()}
+			sess := m.SessionName("Toast")
+			if err := tm.NewSession(sess, ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := session.WriteSandboxRecord(town, session.SandboxRecord{Session: sess, Rig: "test-rig", Polecat: "Toast", Branch: "polecat/Toast/gt-x", WorkDir: "/sandbox/gt/test-rig/polecats/Toast/test-rig"}); err != nil {
+				t.Fatal(err)
+			}
+			var calls []string
+			m.sandboxPusher = func(_ string, rec session.SandboxRecord) error {
+				calls = append(calls, "push "+rec.Branch)
+				return tt.pushErr
+			}
+			m.sandboxDeleter = func(_ string, rec session.SandboxRecord) error {
+				calls = append(calls, "delete")
+				return nil
+			}
+
+			err := m.Stop("Toast", true)
+
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Stop = %v, want nil", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !errors.Is(err, ErrSandboxNotRemoved) {
+				t.Fatalf("Stop = %v, want ErrSandboxNotRemoved containing %q", err, tt.wantErr)
+			}
+			if !reflect.DeepEqual(calls, tt.wantCalls) {
+				t.Errorf("sandbox calls = %v, want %v", calls, tt.wantCalls)
+			}
+			if ok, _ := tm.HasSession(sess); ok {
+				t.Error("the session survived the stop")
+			}
+			_, statErr := os.Stat(filepath.Join(session.SandboxRegistryDir(town), sess+".json"))
+			if kept := statErr == nil; kept != tt.wantRecord {
+				t.Errorf("registry record kept = %v, want %v", kept, tt.wantRecord)
+			}
+		})
+	}
+}
+
 // Stopping a sandboxed polecat's session also deletes its sandbox and registry
 // record (gt session stop, the overrun guard and gt down all stop through
 // Stop), whether the kill goes through tmux or the stop hook; a host session,
@@ -316,6 +410,7 @@ func TestStopRemovesTheSandboxOfASandboxedSession(t *testing.T) {
 				deleted = append(deleted, rec.Session)
 				return tt.deleteErr
 			}
+			m.sandboxPusher = func(string, session.SandboxRecord) error { return nil }
 
 			err := m.Stop("Toast", true)
 
