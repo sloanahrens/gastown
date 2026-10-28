@@ -89,7 +89,7 @@ type CommentRequest struct {
 	// actor. A body author overrides it: the override is the add-as contract
 	// that land's review records and done's completion notes rely on, so it
 	// stays, and limiting it to an operator-class token is the follow-up
-	// (gt-gpn1n).
+	// (gt-qr8pe).
 	Author string `json:"author,omitempty"`
 }
 
