@@ -208,15 +208,19 @@ rc=$(run_install "$T")
 [ "$rc" = "0" ] && pass "lock: released after the first run" || fail "lock: third run exit $rc"
 
 # --- Case 8: signing. Material present -> the build is signed before the swap ---
+# The fake keychain password every case below writes. It is long and distinctive
+# so the leak check in this case can match only a real leak: a two-letter
+# password matched the random mktemp names in the output (gt-j4b9v).
+KC_CANARY='keychain-canary-9f3c1d7e'
 T=$(make_world)
 mkdir -p "$T/signing"
 printf 'kc\n' > "$T/signing/gastown-signing.keychain-db"
-printf 'pw' > "$T/signing/keychain.pass"
+printf '%s' "$KC_CANARY" > "$T/signing/keychain.pass"
 rc=$(run_install "$T")
 [ "$rc" = "0" ] && pass "signing: exit 0" || fail "signing: exit $rc: $(cat "$T/run.out")"
 grep -q "codesign --force --keychain $T/signing/gastown-signing.keychain-db -s gastown-dev-unattended -i com.gastown.om" "$T/sign.log" && pass "signing: codesign ran with the town identity" || fail "signing: sign.log $(cat "$T/sign.log" 2>/dev/null)"
 grep -q "# signed" "$T/bin/om" && pass "signing: the signed build is what was swapped in" || fail "signing: installed om is not the signed one"
-grep -q "pw" "$T/run.out" && fail "signing: the keychain password leaked into the output" || pass "signing: password not in the output"
+grep -qF -- "$KC_CANARY" "$T/run.out" && fail "signing: the keychain password leaked into the output" || pass "signing: password not in the output"
 
 # --- Case 9: signing falls back to ad-hoc with one WARNING and still installs ---
 T=$(make_world)
@@ -227,7 +231,7 @@ rc=$(run_install "$T")
 T=$(make_world)
 mkdir -p "$T/signing"
 printf 'kc\n' > "$T/signing/gastown-signing.keychain-db"
-printf 'pw' > "$T/signing/keychain.pass"
+printf '%s' "$KC_CANARY" > "$T/signing/keychain.pass"
 : > "$T/codesign_fails"
 rc=$(run_install "$T")
 [ "$rc" = "0" ] && [ "$(reported "$T")" = "om version $(cat "$T/c2")" ] && grep -q "WARNING: installing ad-hoc: codesign failed: no identity found" "$T/run.out" \
@@ -236,7 +240,7 @@ rc=$(run_install "$T")
 T=$(make_world)
 mkdir -p "$T/signing"
 printf 'kc\n' > "$T/signing/gastown-signing.keychain-db"
-printf 'pw' > "$T/signing/keychain.pass"
+printf '%s' "$KC_CANARY" > "$T/signing/keychain.pass"
 : > "$T/unlock_fails"
 rc=$(run_install "$T")
 [ "$rc" = "0" ] && grep -q "WARNING: installing ad-hoc: cannot unlock" "$T/run.out" \
