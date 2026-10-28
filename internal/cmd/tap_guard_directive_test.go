@@ -111,6 +111,32 @@ func TestDirectiveBeadTextExamplesRun(t *testing.T) {
 	}
 }
 
+// The bead-text rule must name every gt bead verb that takes text. A rule that
+// names only some leaves a polecat to guess about the rest, and the guard refuses
+// the others the same way (gt-9j9vu).
+func TestDirectiveBeadTextRuleNamesEveryTextVerb(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join(directivesDir, "polecat.md"))
+	if err != nil {
+		t.Fatalf("reading the polecat directive: %v", err)
+	}
+	text := string(data)
+	section := "Bead text is one single-quoted argument"
+	at := strings.Index(text, section)
+	if at < 0 {
+		t.Fatalf("polecat directive has no %q section", section)
+	}
+	body := text[at:]
+	if end := strings.Index(body[len(section):], "\n## "); end >= 0 {
+		body = body[:len(section)+end]
+	}
+	for _, verb := range []string{"create", "update", "claim", "note", "comment", "close"} {
+		if !strings.Contains(body, "`"+verb+"`") {
+			t.Errorf("the bead-text rule does not name `gt bead %s`", verb)
+		}
+	}
+}
+
 // The scanner must report the recipe gt-9j9vu replaced and leave the one that
 // replaced it alone, or a directives tree it cannot read would look as clean as
 // a correct one.

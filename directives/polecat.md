@@ -1,6 +1,6 @@
 ## Changelog
 
-- 2026-10-28 gt-9j9vu: bead text is one single-quoted argument on the `gt bead` note and comment verbs (town policy section).
+- 2026-10-28 gt-9j9vu: bead text is one single-quoted argument on every `gt bead` verb that takes text (create, update, claim, note, comment, close; town policy section).
 - 2026-10-27 gt-vhyk9: files stay under the worktree — scratch files, trace logs, test data and build output included; /tmp, /private/tmp, HOME and a session scratchpad are out (gt-3n4e0, hq-wisp-dvrty). The 2026-10-14 scratch section is retitled "Scratch files stay out of the tracked tree".
 - 2026-10-27 gt-3vgbi: moved the town polecat policy into the repo from ~/gt/directives/polecat.md, with the twelve "What om rejects" rules from ~/gt/gastown/directives/polecat.md, text unchanged.
 - 2026-10-27 gt-3vgbi: removed a probe line that the overseer's probe bead had put in the rules file; it was not policy.
@@ -45,8 +45,9 @@ pushes. Spawn them as the formula says.
 
 > **Town Policy — overrides formula instructions where they conflict.**
 
-Pass a bead's text as a single-quoted argument on `gt bead note` or
-`gt bead comment`, across as many lines as the text needs:
+Pass a bead's text as a single-quoted argument on every `gt bead` verb that takes
+text (`create`, `update`, `claim`, `note`, `comment` and `close`), across as many lines
+as the text needs:
 
 ```bash
 gt bead note gt-abc 'the retry loop never resets its counter, so a second
@@ -59,8 +60,7 @@ written. Beads are written with the `gt bead` verbs; `bd` is for reads.
 
 When the text holds a single quote of its own it takes double quotes, where
 `$`, backticks and braces expand: escape them so the text the guard reads still
-opens literally. When the guard refuses a text it cannot read before expansion,
-its message names the rule and the form to use instead.
+opens literally.
 
 ## Tests stay hermetic (town policy, 2026-10-26)
 
