@@ -327,6 +327,35 @@ func TestPlanPassesThroughAResumeNameThatIsNotOurs(t *testing.T) {
 	passedThrough(t, d)
 }
 
+// TestPlanPassthroughDropsOnlyItsOwnBeadFlag pins what a passthrough hands
+// claude: the caller's arguments as written, minus --bead, which is gt's flag
+// and not one claude has (gt-qipl5).
+func TestPlanPassthroughDropsOnlyItsOwnBeadFlag(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"a spaced --bead and its value", []string{"--bead", "gt-1", "-p", "fix it"}, []string{"-p", "fix it"}},
+		{"an inline --bead", []string{"--bead=gt-1", "-p", "fix it"}, []string{"-p", "fix it"}},
+		{"another flag keeps the form it was written in", []string{"--name=robin", "--bead=gt-1", "-p"}, []string{"--name=robin", "-p"}},
+		{"an inline --resume keeps the value claude reads", []string{"--resume=robin", "-p"}, []string{"--resume=robin", "-p"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, err := Plan(tc.args, nil, tty, newFakeLookup())
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			passedThrough(t, d)
+			if !slices.Equal(d.Passthrough, tc.want) {
+				t.Errorf("passthrough = %q, want %q", d.Passthrough, tc.want)
+			}
+		})
+	}
+}
+
 func TestPlanRefusesABadBead(t *testing.T) {
 	t.Parallel()
 	for _, args := range [][]string{

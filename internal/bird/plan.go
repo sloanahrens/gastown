@@ -35,12 +35,16 @@ type Terminal struct {
 	Stdout bool
 }
 
-// Decision is what Plan chose: a Launch to run claude under, or the zero
-// Decision to run claude exactly as the caller wrote it.
+// Decision is what Plan chose: a Launch to run claude under, or a Passthrough
+// to run claude as the caller wrote it.
 type Decision struct {
 	// Launch is the invocation Plan chose, or nil when claude runs as the
 	// caller wrote it.
 	Launch *Launch
+	// Passthrough is what claude runs with when Launch is nil: the caller's own
+	// arguments without --bead, which is gt's flag and not one claude has
+	// (gt-qipl5). Everything else reaches claude as the caller wrote it.
+	Passthrough []string
 	// Stderr is a line for the caller to print before claude runs, without a
 	// trailing newline; it is empty when there is nothing to say.
 	Stderr string
@@ -56,12 +60,19 @@ type Launch struct {
 	// Env is the caller's environment with any earlier identity dropped and
 	// this name's identity set.
 	Env []string
+	// Bead is the bead --bead named, empty when the caller named none; it is
+	// the bead the name is bound to and labeled with once the launch is real.
+	Bead string
 }
+
+// agentNameVar is the variable a launch sets to the bird name, and the one a
+// running session reads its own name from.
+const agentNameVar = "CLAUDE_AGENT_NAME"
 
 // callerIdentity are the variables that say the claude being started is
 // already a bird: any one of them set means its caller chose the identity, and
 // a second name would replace it.
-var callerIdentity = []string{"GT_ROLE", "BD_ACTOR", "BEADS_ACTOR", "CLAUDE_AGENT_NAME"}
+var callerIdentity = []string{"GT_ROLE", "BD_ACTOR", "BEADS_ACTOR", agentNameVar}
 
 // selfFlags are the arguments that ask claude for something other than a
 // session: a printed answer, help, a version, or a continued conversation.
@@ -74,7 +85,7 @@ var identityVars = []struct {
 	key   string
 	value func(name string) string
 }{
-	{"CLAUDE_AGENT_NAME", func(name string) string { return name }},
+	{agentNameVar, func(name string) string { return name }},
 	{"BEADS_ACTOR", func(name string) string { return "town/crew/" + name }},
 	{"BD_ACTOR", func(name string) string { return "town/crew/" + name }},
 	{"GIT_AUTHOR_NAME", func(name string) string { return name }},
@@ -94,22 +105,23 @@ const poolExhausted = "gt bird: every name in the pool is taken; claude runs wit
 
 // Plan decides from the caller's arguments, environment and terminals whether
 // claude runs under a bird name and which, returning the Launch that runs it or
-// the zero Decision that leaves claude as the caller wrote it.
+// the Passthrough that leaves claude as the caller wrote it.
 func Plan(args, env []string, term Terminal, lookup Lookup) (Decision, error) {
+	p := parseArgs(args)
+	pass := Decision{Passthrough: p.passthrough}
 	if alreadyNamed(env) {
-		return Decision{}, nil
+		return pass, nil
 	}
 	if !term.Stdin || !term.Stdout {
-		return Decision{}, nil
+		return pass, nil
 	}
-	p := parseArgs(args)
 	if p.self {
-		return Decision{}, nil
+		return pass, nil
 	}
 	// A first word with no whitespace names one of claude's own subcommands,
 	// so claude is asked for that and not for a session to run in.
 	if len(p.words) > 0 && !isPrompt(p.words[0]) {
-		return Decision{}, nil
+		return pass, nil
 	}
 	if p.beadSet && !beadShape.MatchString(p.bead) {
 		return Decision{}, &UsageError{
@@ -127,12 +139,13 @@ func Plan(args, env []string, term Terminal, lookup Lookup) (Decision, error) {
 // decide returns the decision for arguments whose streams and flags leave claude
 // to run under a name.
 func decide(p parsed, env []string, lookup Lookup) (Decision, error) {
+	pass := Decision{Passthrough: p.passthrough}
 	switch {
 	case p.nameSet:
 		if !ValidName(p.name) {
 			// The name the caller typed is claude's to refuse; replacing it
 			// with one of ours would hide the mistake.
-			return Decision{}, nil
+			return pass, nil
 		}
 		return decisionFor(p.name, p, env), nil
 	case p.resumeSet:
@@ -143,7 +156,7 @@ func decide(p parsed, env []string, lookup Lookup) (Decision, error) {
 		if !ours {
 			// A session that is not ours resumes under its own name and its
 			// own identity, so claude runs as the caller wrote it.
-			return Decision{}, nil
+			return pass, nil
 		}
 		return decisionFor(p.resume, p, env), nil
 	case p.beadSet:
@@ -160,7 +173,7 @@ func decide(p parsed, env []string, lookup Lookup) (Decision, error) {
 		return Decision{}, err
 	}
 	if !free {
-		return Decision{Stderr: poolExhausted}, nil
+		return Decision{Passthrough: p.passthrough, Stderr: poolExhausted}, nil
 	}
 	return decisionFor(name, p, env), nil
 }
@@ -168,7 +181,7 @@ func decide(p parsed, env []string, lookup Lookup) (Decision, error) {
 // decisionFor is the launch under name, with the caller's own arguments minus
 // the flags Plan consumed and the identity this name brings.
 func decisionFor(name string, p parsed, env []string) Decision {
-	return Decision{Launch: &Launch{Name: name, Argv: argvFor(name, p.argv), Env: launchEnv(env, name)}}
+	return Decision{Launch: &Launch{Name: name, Argv: argvFor(name, p.argv), Env: launchEnv(env, name), Bead: p.bead}}
 }
 
 // argvFor puts --name first, since claude reads the session name off its own
@@ -237,6 +250,19 @@ func envHas(env []string, key string) bool {
 	return slices.ContainsFunc(env, func(kv string) bool { return strings.HasPrefix(kv, prefix) })
 }
 
+// envGet is the last value env gives key, as a process reads its own
+// environment.
+func envGet(env []string, key string) string {
+	prefix := key + "="
+	value := ""
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			value = kv[len(prefix):]
+		}
+	}
+	return value
+}
+
 // isPrompt reports whether word is a prompt rather than one of claude's
 // subcommands, which hold no whitespace.
 func isPrompt(word string) bool {
@@ -255,8 +281,11 @@ type parsed struct {
 	self bool
 	// words holds every argument that is neither a flag nor a flag's value.
 	words []string
-	// argv holds what claude receives.
-	argv []string
+	// argv holds what claude receives under a name, and passthrough what it
+	// receives when it runs as the caller wrote it: only --bead, gt's own
+	// flag, leaves both (gt-qipl5).
+	argv        []string
+	passthrough []string
 }
 
 // parseArgs classifies the arguments once, so a value consumed by --name,
@@ -266,19 +295,21 @@ func parseArgs(args []string) parsed {
 	var p parsed
 	for i := 0; i < len(args); i++ {
 		if flag, value, used, ok := ownFlag(args[i:]); ok {
+			// kept is the flag as the caller wrote it, --resume=x or --resume x
+			// alike, for the argv that hands it back to claude.
+			kept := slices.Clone(args[i : i+used])
 			switch flag {
 			case "--name":
 				p.name, p.nameSet = value, true
 			case "--bead":
 				p.bead, p.beadSet = value, true
+				kept = nil
 			case "--resume":
 				p.resume, p.resumeSet = value, true
 				// claude reads --resume itself, so it keeps it and its value.
-				p.argv = append(p.argv, flag)
-				if used == 2 {
-					p.argv = append(p.argv, value)
-				}
+				p.argv = append(p.argv, kept...)
 			}
+			p.passthrough = append(p.passthrough, kept...)
 			i += used - 1
 			continue
 		}
@@ -287,10 +318,12 @@ func parseArgs(args []string) parsed {
 				p.self = true
 			}
 			p.argv = append(p.argv, args[i])
+			p.passthrough = append(p.passthrough, args[i])
 			continue
 		}
 		p.words = append(p.words, args[i])
 		p.argv = append(p.argv, args[i])
+		p.passthrough = append(p.passthrough, args[i])
 	}
 	return p
 }

@@ -1,6 +1,8 @@
 // Package bird names the sessions that run claude: a pool of bird names, one
 // locked state file recording which names are bound to beads and which
 // processes hold them, and Pick, which hands out a name no one else holds.
+// Runner is what the gt bird commands drive: it claims the name Plan chose,
+// records the bead the session runs, and replaces itself with claude.
 //
 // The state file is the single source of truth for a name in use. It is read
 // and written only under an flock on a sibling lock file, and written only by

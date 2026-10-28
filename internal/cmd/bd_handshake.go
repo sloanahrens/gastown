@@ -57,6 +57,7 @@ var bdHandshakeNotTownRunning = map[string]string{
 	"gt spec sling":       "runs one sling a gt spec dispatch tick planned, which the tick made itself with no gate; only the daemon runs it, and the daemon passed the gate at start",
 	"gt dolt start":       "starts the Dolt server, which recovery needs when bd is broken",
 	"gt dolt restart":     "restarts the Dolt server, which recovery needs when bd is broken",
+	"gt bird start":       "starts claude, not a town session, and must run when bd is missing or outdated (gt-qipl5)",
 }
 
 // bdHandshakeTimeout bounds the whole handshake: the version and schema reads,

@@ -182,12 +182,30 @@ func (s *State) HoldReason(name string, now time.Time, ttl time.Duration) SkipRe
 	return ""
 }
 
+// HeldLive returns the names a process holds at now — a recorded agent, or a
+// reservation still inside ttl — which is what a launch is refused a name on. A
+// binding is not one of these: it records that a name ran a bead, and the
+// session that resumes that bead runs under the same name (gt-qipl5).
+func (s *State) HeldLive(now time.Time, ttl time.Duration) map[string]bool {
+	taken := s.reserved(now, ttl)
+	for _, a := range s.Agents {
+		taken[a.Name] = true
+	}
+	return taken
+}
+
 // heldByState is the part of the taken set no process table decides.
 func (s *State) heldByState(now time.Time, ttl time.Duration) map[string]bool {
-	taken := make(map[string]bool, len(s.Bindings)+len(s.Agents)+len(s.Reservations))
+	taken := s.reserved(now, ttl)
 	for _, b := range s.Bindings {
 		taken[b.Name] = true
 	}
+	return taken
+}
+
+// reserved returns the names of the reservations still inside ttl at now.
+func (s *State) reserved(now time.Time, ttl time.Duration) map[string]bool {
+	taken := make(map[string]bool, len(s.Reservations))
 	for _, res := range s.Reservations {
 		if !res.Expired(now, ttl) {
 			taken[res.Name] = true
