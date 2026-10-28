@@ -168,6 +168,26 @@ func TestPickHandsOutANameAgainOnceItsReservationExpires(t *testing.T) {
 	}
 }
 
+func TestTakenRefusesABadPolecatGlob(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	reg.PolecatGlob = "["
+	if _, err := reg.Taken(); err == nil {
+		t.Fatal("Taken accepted a polecat glob that cannot match")
+	}
+}
+
+func TestRegistryTakenReportsALivenessItCannotRead(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	unreadable := errors.New("no process table")
+	reg.ProcStart = func(int) (string, bool, error) { return "", false, unreadable }
+	seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok", Started: at(0)})
+	if _, err := reg.Taken(); !errors.Is(err, unreadable) {
+		t.Fatalf("Taken = %v, want the read error rather than a name handed out on a guess", err)
+	}
+}
+
 func TestPickRefusesABadPolecatGlob(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren")

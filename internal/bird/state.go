@@ -130,19 +130,21 @@ func (s *State) PruneDead(isLive func(Agent) (bool, error)) (int, error) {
 	return dropped, nil
 }
 
+// Held returns every name the state holds at now with every recorded agent
+// counted, which is what Pick reads once PruneDead has dropped the dead ones.
+func (s *State) Held(now time.Time, ttl time.Duration) map[string]bool {
+	taken := s.heldByState(now, ttl)
+	for _, a := range s.Agents {
+		taken[a.Name] = true
+	}
+	return taken
+}
+
 // Taken returns every name the state holds at now — bound, reserved for less
 // than ttl, or held by an agent isLive accepts — and fails rather than guess
 // when a liveness cannot be read, since a name it cannot judge may be in use.
 func (s *State) Taken(now time.Time, ttl time.Duration, isLive func(Agent) (bool, error)) (map[string]bool, error) {
-	taken := make(map[string]bool, len(s.Bindings)+len(s.Agents)+len(s.Reservations))
-	for _, b := range s.Bindings {
-		taken[b.Name] = true
-	}
-	for _, res := range s.Reservations {
-		if !res.Expired(now, ttl) {
-			taken[res.Name] = true
-		}
-	}
+	taken := s.heldByState(now, ttl)
 	for _, a := range s.Agents {
 		live, err := isLive(a)
 		if err != nil {
@@ -153,4 +155,18 @@ func (s *State) Taken(now time.Time, ttl time.Duration, isLive func(Agent) (bool
 		}
 	}
 	return taken, nil
+}
+
+// heldByState is the part of the taken set no process table decides.
+func (s *State) heldByState(now time.Time, ttl time.Duration) map[string]bool {
+	taken := make(map[string]bool, len(s.Bindings)+len(s.Agents)+len(s.Reservations))
+	for _, b := range s.Bindings {
+		taken[b.Name] = true
+	}
+	for _, res := range s.Reservations {
+		if !res.Expired(now, ttl) {
+			taken[res.Name] = true
+		}
+	}
+	return taken
 }

@@ -277,10 +277,7 @@ func (r *Registry) Pick() (string, bool, error) {
 			return false, err
 		}
 		dropped += st.PruneReservations(now, ttl)
-		taken, err := st.Taken(now, ttl, r.Live)
-		if err != nil {
-			return false, err
-		}
+		taken := st.Held(now, ttl)
 		polecats, err := r.PolecatNames()
 		if err != nil {
 			return false, err
