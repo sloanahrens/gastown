@@ -94,6 +94,47 @@ func TestPending_MarkerOlderThanTheCeilingIsNotPending(t *testing.T) {
 	}
 }
 
+// TestPending_AMarkerFarAheadOfTheClockIsNotPending pins the malformed-future
+// rule: a marker dated past the reader's clock by more than FutureSkew is not
+// evidence of an install, so it cannot stand until the clock catches up and
+// for Ceiling after that (gt-vc34c).
+func TestPending_AMarkerFarAheadOfTheClockIsNotPending(t *testing.T) {
+	t.Parallel()
+	now := testNow()
+	s := testStore(t)
+	if err := s.Write(now.Add(FutureSkew+time.Minute), os.Getpid()); err != nil {
+		t.Fatalf("writing the marker: %v", err)
+	}
+
+	m, err := s.Pending(now)
+	if err != nil {
+		t.Fatalf("reading the marker: %v", err)
+	}
+	if m != nil {
+		t.Fatalf("a marker dated past the clock reads as pending: %+v", m)
+	}
+}
+
+// TestPending_AMarkerJustAheadOfTheClockStillStands pins the other side of the
+// FutureSkew rule: a reader that captured its clock just before the writer
+// wrote must not read the fresh marker as malformed (gt-vc34c).
+func TestPending_AMarkerJustAheadOfTheClockStillStands(t *testing.T) {
+	t.Parallel()
+	now := testNow()
+	s := testStore(t)
+	if err := s.Write(now.Add(FutureSkew/2), os.Getpid()); err != nil {
+		t.Fatalf("writing the marker: %v", err)
+	}
+
+	m, err := s.Pending(now)
+	if err != nil {
+		t.Fatalf("reading the marker: %v", err)
+	}
+	if m == nil {
+		t.Fatal("a marker written half a FutureSkew ahead of the reading does not stand")
+	}
+}
+
 // TestPending_AReusedPIDIsNotTheWriter pins the identity rule: the marker names
 // a process, not a number, so a marker carrying a start token no current holder
 // of that pid was started with is a dead writer whose pid went to someone else.

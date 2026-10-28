@@ -2,9 +2,9 @@
 // <daemon dir>/install-pending.json (gt-vc34c).
 //
 // The rebuilding job writes it when it concludes a binary-affecting install is
-// due and clears it when that cycle reaches a verdict, so a reader outside the
-// job — the sling path first — can stay out of an install's way. Pending states
-// what makes a marker stand; the file is plain JSON so a shell can read it.
+// due and clears it when that cycle reaches a verdict, so a caller outside the
+// job can stay out of an install's way. Pending states what makes a marker
+// stand; the file is plain JSON so a shell can read it.
 package installpending
 
 import (
@@ -29,6 +29,12 @@ const FileName = "install-pending.json"
 // enough that a writer which stopped refreshing cannot hold the town out of
 // slings for long (gt-vc34c).
 const Ceiling = 45 * time.Minute
+
+// FutureSkew is how far ahead of a reader's clock a marker may be dated and
+// still read as in flight: writer and reader share the host clock, so a marker
+// further ahead than this is malformed and would otherwise never age out
+// (gt-vc34c).
+const FutureSkew = time.Minute
 
 // Marker is the marker's content: when a cycle concluded the install was due,
 // and the process that concluded it. Start is the writer's start token when the
@@ -108,6 +114,12 @@ func (s Store) Pending(now time.Time) (*Marker, error) {
 	}
 	if m.At.IsZero() || m.PID <= 0 {
 		return nil, fmt.Errorf("parsing %s: the marker names no time or no writer pid", s.path)
+	}
+	// A marker dated past the reader's own clock by more than FutureSkew is
+	// malformed, not in flight: aged from a time that was never now, it would
+	// stand until the clock caught up and then for Ceiling after that.
+	if m.At.After(now.Add(FutureSkew)) {
+		return nil, nil
 	}
 	// Age is read before the writer: a marker no cycle has refreshed is spent
 	// whatever its pid now names, and a pid handed to an unrelated process must

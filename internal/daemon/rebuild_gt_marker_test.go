@@ -270,6 +270,96 @@ func TestRebuildGT_RefreshesTheMarkerAcrossTheGateWait(t *testing.T) {
 	}
 }
 
+// TestRebuildGT_EscalatesAMarkerItCannotClear pins that a marker which cannot
+// be removed reaches an operator: it keeps telling every later reader that an
+// install is in flight after this one finished, and a log line alone leaves
+// that reader waiting on debris nobody is looking for (gt-vc34c).
+func TestRebuildGT_EscalatesAMarkerItCannotClear(t *testing.T) {
+	t.Parallel()
+	d, rec := rebuildGTTown(t)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "branch"):
+			return cliReply{stdout: "main\n"}
+		case gitSub(c, "rev-parse"):
+			return cliReply{stdout: "abc1234567890\n"}
+		case c.name == "bash":
+			// The marker stood before install-gt ran; replace it with debris
+			// that Clear cannot remove.
+			replacePendingMarkerWithADirectory(t, d)
+			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
+		}
+		return cliReply{}
+	})
+
+	if settled := d.runRebuildGT(); !settled {
+		t.Fatal("the cycle reached its verdict")
+	}
+	if open := rec.OpenEscalations(alertKeyRebuildGTMarkerClear); len(open) != 1 {
+		t.Fatalf("open escalations = %+v, want one under %s", open, alertKeyRebuildGTMarkerClear)
+	}
+}
+
+// TestRebuildGT_ClearsTheMarkerClearAlertOnceTheMarkerIsGone pins the close of
+// that alarm: the escalation holds while the marker cannot be removed, and a
+// cycle whose clear succeeds takes it down, so a repaired town keeps no
+// standing alarm (gt-vc34c).
+func TestRebuildGT_ClearsTheMarkerClearAlertOnceTheMarkerIsGone(t *testing.T) {
+	t.Parallel()
+	d, rec := rebuildGTTown(t)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	cycles := 0
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "branch"):
+			return cliReply{stdout: "main\n"}
+		case gitSub(c, "rev-parse"):
+			return cliReply{stdout: "abc1234567890\n"}
+		case c.name == "bash":
+			if cycles == 0 {
+				replacePendingMarkerWithADirectory(t, d)
+			}
+			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
+		}
+		return cliReply{}
+	})
+	run := func() {
+		if settled := d.runRebuildGT(); !settled {
+			t.Fatal("the cycle reached its verdict")
+		}
+		cycles++
+	}
+
+	run()
+	if open := rec.OpenEscalations(alertKeyRebuildGTMarkerClear); len(open) != 1 {
+		t.Fatalf("the failed clear left %d escalations open, want one", len(open))
+	}
+
+	if err := os.RemoveAll(d.rebuildGTPendingStore().Path()); err != nil {
+		t.Fatal(err)
+	}
+	run()
+
+	if open := rec.OpenEscalations(alertKeyRebuildGTMarkerClear); len(open) != 0 {
+		t.Fatalf("the marker was cleared and the escalation still stands: %+v", open)
+	}
+}
+
+// replacePendingMarkerWithADirectory turns the standing marker into a
+// non-empty directory, which Clear cannot remove, so the clear's failure branch
+// runs with a marker that was successfully written.
+func replacePendingMarkerWithADirectory(t *testing.T, d *Daemon) {
+	t.Helper()
+	path := d.rebuildGTPendingStore().Path()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	blockPendingMarkerPath(t, d)
+}
+
 // blockPendingMarkerPath puts a non-empty directory where the marker belongs, so
 // the write cannot rename over it and the clear cannot remove it.
 func blockPendingMarkerPath(t *testing.T, d *Daemon) {

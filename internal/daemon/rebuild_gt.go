@@ -112,6 +112,7 @@ const (
 	alertKeyRebuildGTInstallFail  = "rebuild-gt:install-failed"
 	alertKeyRebuildGTNoInstaller  = "rebuild-gt:no-installer"
 	alertKeyRebuildGTMarkerWrite  = "rebuild-gt:marker-write"
+	alertKeyRebuildGTMarkerClear  = "rebuild-gt:marker-clear"
 
 	// alertKeyRebuildGTUnverified is retired (nothing raises it) and kept in
 	// the clear list because an escalation opened before it was retired has no
@@ -513,6 +514,11 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 	// The install is due and safe: record it before the wait below, which can
 	// hold for minutes of gate polling or a starved reserve, so a reader that
 	// would start work beside the install can see it coming (gt-vc34c).
+	//
+	// A cycle that defers keeps the marker, and the next heartbeat refreshes
+	// it, so a gate that stays busy holds the marker up past Ceiling: the
+	// starvation escalation at rebuildGTStarveAfter is what bounds that
+	// standing, because it is the alarm for a due binary that never installs.
 	d.rebuildGTMarkPending(now)
 
 	// Yield to a running gate: `make build` competes for CPU with a suite
@@ -1026,11 +1032,19 @@ func (d *Daemon) rebuildGTMarkPending(now time.Time) {
 }
 
 // rebuildGTClearPending drops the pending-install marker: the cycle reached a
-// verdict, so no install is in flight for a reader to avoid (gt-vc34c).
+// verdict, so no install is in flight for a reader to avoid (gt-vc34c). A
+// marker that cannot be removed is escalated rather than logged alone: it keeps
+// telling every later reader an install is in flight long after this one
+// finished, and only an operator can take the debris away.
 func (d *Daemon) rebuildGTClearPending() {
-	if err := d.rebuildGTPendingStore().Clear(); err != nil {
+	store := d.rebuildGTPendingStore()
+	if err := store.Clear(); err != nil {
 		d.logger.Printf("rebuild_gt: WARNING: cannot clear the pending install marker (%v)", err)
+		_ = d.rebuildGTAlert(alertKeyRebuildGTMarkerClear,
+			fmt.Sprintf("rebuild_gt: cannot remove %s, so a reader keeps seeing an install in flight", store.Path()))
+		return
 	}
+	d.clearAlerts("the pending-install marker is cleared", alertKeyRebuildGTMarkerClear)
 }
 
 // rebuildGTGate reads the container-gate picture: which gate-class roles hold

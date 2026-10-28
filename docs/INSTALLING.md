@@ -480,7 +480,11 @@ a bead labeled `gt:install-now` skips the wait. While an install is in flight
 the job leaves `daemon/install-pending.json` in the town — the cycle's time and
 the daemon's pid — and removes it when the cycle reaches a verdict, so anything
 that can read the town can tell one is running; a marker older than 45 minutes,
-or one whose daemon is gone, is not. Do not copy binaries by hand, run `go install`, or
+one dated ahead of the reader's clock, or one whose daemon is gone, is not. A
+marker the job can neither write nor remove escalates under
+`rebuild-gt:marker-write` or `rebuild-gt:marker-clear`, since a reader that
+cannot see an install, or one that cannot stop seeing a finished one, is a
+condition an operator has to repair. Do not copy binaries by hand, run `go install`, or
 use `make install-local` in a town: none of them restarts the daemon or rolls
 back.
 
