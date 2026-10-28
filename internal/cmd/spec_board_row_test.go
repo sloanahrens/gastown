@@ -37,16 +37,26 @@ func TestSpecFromBoardRowCarriesTheSpec(t *testing.T) {
 	}
 }
 
-// A row that omits the design (bd leaves an empty one off) is filled from one
-// ShowMultiple per rig; a row that carries one is not read at all, and a
-// candidate whose design cannot be read is dropped with its error (gt-bqj8q).
-func TestSpecBoardDesignsReadsOncePerRig(t *testing.T) {
+// A ready-board row carries neither the design nor the blocking edges the tick
+// decides on, so one ShowMultiple per rig fills both, over every candidate of
+// the rig (gt-bqj8q, gt-ndad8). A design the row does carry is kept as it is,
+// and the edges are always the read's: a row that says nothing about
+// dependencies is not a row that says there are none.
+func TestSpecBoardDetailsReadsEveryCandidateOncePerRig(t *testing.T) {
 	t.Parallel()
 	alphaDB := beadsfake.New()
 	alphaDB.Seed(
 		beads.Issue{ID: "gt-a1", Design: "alpha design"},
 		beads.Issue{ID: "gt-a2", Design: "not taken: the row carries it"},
+		beads.Issue{ID: "gt-dep1", Status: "open"},
+		beads.Issue{ID: "gt-dep2", Status: "deferred"},
 	)
+	if err := alphaDB.AddDependency("gt-a1", "gt-dep1"); err != nil {
+		t.Fatalf("seed gt-a1's blocker: %v", err)
+	}
+	if err := alphaDB.AddDependency("gt-a2", "gt-dep2"); err != nil {
+		t.Fatalf("seed gt-a2's blocker: %v", err)
+	}
 	betaDB := beadsfake.New()
 	betaDB.Seed(beads.Issue{ID: "gt-b1"})
 	stores := map[string]*countingStore{
@@ -62,7 +72,7 @@ func TestSpecBoardDesignsReadsOncePerRig(t *testing.T) {
 		{Spec: specdispatch.Spec{ID: "gt-b2"}, Rig: "beta"},
 	}}
 	reads := newSpecTickReads()
-	got := specBoardDesigns(reads, storeFor, read)
+	got := specBoardDetails(reads, storeFor, read)
 
 	ids := make([]string, 0, len(got.Candidates))
 	for _, c := range got.Candidates {
@@ -77,10 +87,17 @@ func TestSpecBoardDesignsReadsOncePerRig(t *testing.T) {
 	if d := got.Candidates[1].Spec.Design; d != "row design" {
 		t.Errorf("gt-a2 design = %q, want the row's", d)
 	}
+	if want := []beads.IssueDep{{ID: "gt-dep1", Status: "open", DependencyType: "blocks"}}; !reflect.DeepEqual(got.Candidates[0].Blockers, want) {
+		t.Errorf("gt-a1 blockers = %+v, want the rig's %+v", got.Candidates[0].Blockers, want)
+	}
+	// The candidate whose row carried a design is still read for its edges.
+	if b := got.Candidates[1].Blockers; len(b) != 1 || b[0].ID != "gt-dep2" || b[0].Status != "deferred" {
+		t.Errorf("gt-a2 blockers = %+v, want the deferral the read answered", b)
+	}
 	if len(got.Errors) != 1 || !strings.Contains(got.Errors[0], "gt-b2") {
 		t.Errorf("errors = %v, want gt-b2 named once", got.Errors)
 	}
-	if want := [][]string{{"gt-a1"}}; !reflect.DeepEqual(stores["alpha"].multis, want) {
+	if want := [][]string{{"gt-a1", "gt-a2"}}; !reflect.DeepEqual(stores["alpha"].multis, want) {
 		t.Errorf("alpha batches = %v, want %v", stores["alpha"].multis, want)
 	}
 	if want := [][]string{{"gt-b1", "gt-b2"}}; !reflect.DeepEqual(stores["beta"].multis, want) {
@@ -96,10 +113,10 @@ func TestSpecBoardDesignsReadsOncePerRig(t *testing.T) {
 	}
 }
 
-// A failed batched read drops the candidates it was meant to fill, naming the
-// read's own error, and leaves the candidates whose row carries a design alone.
-// The dropped bead waits for the next tick (gt-bqj8q).
-func TestSpecBoardDesignsDropsCandidatesWhenTheBatchFails(t *testing.T) {
+// A failed batched read drops every candidate of that rig, naming the read's
+// own error: with the edges unread, no bead of the batch can be told from a
+// blocked one, so each waits for the next tick (gt-bqj8q, gt-ndad8).
+func TestSpecBoardDetailsDropsCandidatesWhenTheBatchFails(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
 	db.Seed(beads.Issue{ID: "gt-c1", Design: "c1 design"})
@@ -112,17 +129,14 @@ func TestSpecBoardDesignsDropsCandidatesWhenTheBatchFails(t *testing.T) {
 		{Spec: specdispatch.Spec{ID: "gt-c2", Design: "row design"}, Rig: "alpha"},
 	}}
 	reads := newSpecTickReads()
-	got := specBoardDesigns(reads, storeFor, read)
+	got := specBoardDetails(reads, storeFor, read)
 
-	ids := make([]string, 0, len(got.Candidates))
-	for _, c := range got.Candidates {
-		ids = append(ids, c.Spec.ID)
+	if len(got.Candidates) != 0 {
+		t.Errorf("candidates = %v, want the whole batch dropped", got.Candidates)
 	}
-	if want := []string{"gt-c2"}; !reflect.DeepEqual(ids, want) {
-		t.Errorf("candidates = %v, want %v", ids, want)
-	}
-	if len(got.Errors) != 1 || got.Errors[0] != "gt-c1: cannot read design: bd show: boom" {
-		t.Errorf("errors = %v, want gt-c1 dropped with the batch's error", got.Errors)
+	if len(got.Errors) != 2 || got.Errors[0] != "gt-c1: cannot read design and blockers: bd show: boom" ||
+		got.Errors[1] != "gt-c2: cannot read design and blockers: bd show: boom" {
+		t.Errorf("errors = %v, want each dropped candidate with the batch's error", got.Errors)
 	}
 	if reads.Calls() != 1 {
 		t.Errorf("tick cost counts %d calls, want the one batch", reads.Calls())

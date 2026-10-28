@@ -355,6 +355,11 @@ var notDispatchableReasons = []string{
 	specdispatch.SkipNoSeat,
 	specdispatch.SkipRigHold,
 	specdispatch.SkipPerTickLimit,
+	// A bead an unresolved blocker holds waits on that blocker's resolution,
+	// which a free seat does not change; reading it as the dispatcher's standoff
+	// would raise the rule over every bead a deferred blocker is holding
+	// (gt-ndad8).
+	specdispatch.SkipBlocked,
 }
 
 func dispatchableSkip(reason string) bool {

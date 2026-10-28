@@ -543,6 +543,7 @@ func TestDispatchableWaitingIgnoresReasonsSpecDispatchWrites(t *testing.T) {
 		"no seat":                    specdispatch.SkipNoSeat + " claude-sonnet 2/2",
 		"rig hold":                   specdispatch.SkipRigHold + " paused",
 		"per-tick limit":             specdispatch.SkipPerTickLimit + " 2 reached",
+		"unresolved blocker":         specdispatch.SkipBlocked + "gt-aaaaa (deferred)",
 		"not started":                specSlingNotStartedReason + "one is already running for it",
 	} {
 		if dispatchableSkip(reason) {

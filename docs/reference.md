@@ -1129,15 +1129,16 @@ The rule acts on nothing else: it restarts, kills and unhooks no session.
 5 ticks each had a free seat in the roster, at least one dispatchable bead
 waiting and nothing dispatched. A bead counts as waiting when its skip reason is
 not one a free seat leaves unchanged: unshaped, not eligible (crew-only,
-needs-human), container, unknown formula, no seat of its class, rig hold and the
-per-tick limit do not count; a content-overlap hold on a P2 or lower bead (P0
-and P1 skip that hold, gt-iydx1) or an already-hooked hold, a stale board read
-and a failed sling do. The summary names the three commonest skip
-reasons with their bead counts, so a standoff over one overlap reads as one
-line. The rule clears on a dispatch, when no dispatchable bead remains, under an
-operator hold or when the newest tick is over 10 minutes old. The thresholds are
-`attentionDispatchIdleTicks`, `attentionDispatchIdleFresh` and
-`attentionDispatchIdleReasons` in `internal/daemon/attention_dispatch_idle.go`.
+needs-human), container, unknown formula, no seat of its class, rig hold, an
+unresolved blocker and the per-tick limit do not count; a content-overlap hold
+on a P2 or lower bead (P0 and P1 skip that hold, gt-iydx1) or an already-hooked
+hold, a stale board read and a failed sling do. The summary names the three
+commonest skip reasons with their bead counts, so a standoff over one overlap
+reads as one line. The rule clears on a dispatch, when no dispatchable bead
+remains, under an operator hold or when the newest tick is over 10 minutes old.
+The thresholds are `attentionDispatchIdleTicks`, `attentionDispatchIdleFresh`
+and `attentionDispatchIdleReasons` in
+`internal/daemon/attention_dispatch_idle.go`.
 
 ### Review Backlog Rule
 

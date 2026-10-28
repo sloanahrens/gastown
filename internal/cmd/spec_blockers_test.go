@@ -9,6 +9,63 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
+// TestSpecDispatchSkipsACandidateItsBlockersRefuse is gt-ndad8: the ready board
+// is not the admission check. bd's ready query reads a deferred blocker as
+// resolved, so a bead the board lists can still be blocked, and the tick asks
+// sling.Admit before it spends a read or a seat on the candidate. The refusal
+// is a skip, not a failure: the bead stays ready and the next tick asks again
+// once the blocker closes.
+func TestSpecDispatchSkipsACandidateItsBlockersRefuse(t *testing.T) {
+	t.Parallel()
+	dep := func(id, status, kind string) beads.IssueDep {
+		return beads.IssueDep{ID: id, Status: status, DependencyType: kind}
+	}
+	cases := []struct {
+		name string
+		deps []beads.IssueDep
+		skip string // the reason the skip line names; "" dispatches
+	}{
+		{name: "no dependencies"},
+		{name: "open blocker", deps: []beads.IssueDep{dep("gt-frtad", "open", "blocks")}, skip: "blocked by gt-frtad (open)"},
+		{name: "deferred blocker", deps: []beads.IssueDep{dep("gt-frtad", "deferred", "blocks")}, skip: "blocked by gt-frtad (deferred)"},
+		{name: "in progress blocker", deps: []beads.IssueDep{dep("gt-frtad", "in_progress", "blocks")}, skip: "blocked by gt-frtad (in_progress)"},
+		{name: "closed blocker"},
+		{name: "open edge that does not block", deps: []beads.IssueDep{dep("gt-frtad", "open", "related")}},
+		{
+			name: "one of two open",
+			deps: []beads.IssueDep{dep("gt-done1", "closed", "blocks"), dep("gt-frtad", "deferred", "blocks")},
+			skip: "blocked by gt-frtad (deferred)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeSpecTown(cleanSpec("gt-ndad8", 2, "2026-09-29T10:00:00Z"))
+			f.blockers["gt-ndad8"] = tc.deps
+			r := runSpecDispatchCycle(f.env())
+
+			if tc.skip == "" {
+				if len(f.slung) != 1 || len(r.Dispatched) != 1 {
+					t.Fatalf("slung %v with %d dispatched, want the unblocked bead dispatched", f.slung, len(r.Dispatched))
+				}
+				if len(r.Skipped) != 0 {
+					t.Errorf("skipped = %+v, want none", r.Skipped)
+				}
+				return
+			}
+			if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+				t.Fatalf("slung %v, want the blocked bead left ready", f.slung)
+			}
+			if len(r.Skipped) != 1 || r.Skipped[0].Bead != "gt-ndad8" {
+				t.Fatalf("skipped = %+v, want the candidate's one skip entry", r.Skipped)
+			}
+			if want := "gt-ndad8: " + tc.skip; r.Skipped[0].Line != want {
+				t.Errorf("skip line = %q, want %q", r.Skipped[0].Line, want)
+			}
+		})
+	}
+}
+
 // TestSpecSlingRefusesABeadBlockedAfterTheBoardRead is gt-ewrtm: the ready
 // board is read at the start of a tick that can run for minutes, so a blocker
 // added after it is only visible in the bead the sling reads.
