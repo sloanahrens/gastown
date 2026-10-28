@@ -261,9 +261,9 @@ func burstConsumers(ctx context.Context, env Env) ([]BurstConsumer, bool) {
 // burstHostCPUTablePartial reports whether the host_cpu group says its window
 // was only partly read: unmeasured_pids are processes that exited between its
 // two samples, whose burn after the first read is in no column, and
-// regressed_pids are ids whose cumulative time fell, so a reused id makes the
-// pair no reading at all. Neither leaves an entry among the columns a rank
-// reads, so a rank of nobody over such a window is not an idle host.
+// regressed_pids are ids whose two samples are not one process, whose first
+// process is in no column. A rank of nobody over such a window is not an idle
+// host.
 func burstHostCPUTablePartial(cols map[string]any) bool {
 	unmeasured, okUnmeasured := cols["unmeasured_pids"].(int)
 	regressed, okRegressed := cols["regressed_pids"].(int)

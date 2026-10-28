@@ -12,9 +12,11 @@ import (
 )
 
 // The fixtures are ps output in the shapes the operator's Mac prints, with the
-// process ids and paths replaced. Every cumulative time is a binary fraction,
-// so the two samples' differences are exact and a cores column compares
-// without a tolerance.
+// process ids, start instants and paths replaced. Every cumulative time is a
+// binary fraction, so the two samples' differences are exact and a cores
+// column compares without a tolerance. A process both samples hold keeps one
+// start instant; a process only the second sample holds begins inside the
+// window.
 
 // hostCPUSample is one sample's two tables: the names and cumulative CPU
 // times, and the command lines the two VMs are told apart by.
@@ -23,14 +25,14 @@ type hostCPUSample struct {
 }
 
 var hostCPUSampleOne = hostCPUSample{
-	names: `  100   0:05.00 /System/Library/CoreServices/WindowServer
-  200   0:00.00 /Applications/Docker.app/Contents/MacOS/com.docker.virtualization
-  300   1:02:03.40 /System/Library/Frameworks/Virtualization.framework/Virtualization.VirtualMachine
-  400  12:34.50 /opt/homebrew/bin/dolt
-  500   0:00.10 /opt/homebrew/bin/gt
-  600   0:00.50 /Library/Bitdefender/BDLDaemon
-  700   0:10.00 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
-  701   0:20.00 /Applications/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper
+	names: `  100   0:05.00 Sat Oct 24 09:00:00 2026 /System/Library/CoreServices/WindowServer
+  200   0:00.00 Sat Oct 24 09:00:00 2026 /Applications/Docker.app/Contents/MacOS/com.docker.virtualization
+  300   1:02:03.40 Sat Oct 24 09:00:00 2026 /System/Library/Frameworks/Virtualization.framework/Virtualization.VirtualMachine
+  400  12:34.50 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/dolt
+  500   0:00.10 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/gt
+  600   0:00.50 Sat Oct 24 09:00:00 2026 /Library/Bitdefender/BDLDaemon
+  700   0:10.00 Sat Oct 24 09:00:00 2026 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+  701   0:20.00 Sat Oct 24 09:00:00 2026 /Applications/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper
 `,
 	args: `  200 /Applications/Docker.app/Contents/MacOS/com.docker.virtualization --vmm virtualization
   300 /System/Library/Frameworks/Virtualization.framework/Virtualization.VirtualMachine --disk /Users/sloan/.colima/gt-sbx/_lima/colima/diffdisk
@@ -42,14 +44,14 @@ var hostCPUSampleOne = hostCPUSample{
 }
 
 var hostCPUSampleTwo = hostCPUSample{
-	names: `  100   0:05.25 /System/Library/CoreServices/WindowServer
-  200   0:00.50 /Applications/Docker.app/Contents/MacOS/com.docker.virtualization
-  300   1:02:03.40 /System/Library/Frameworks/Virtualization.framework/Virtualization.VirtualMachine
-  400  12:36.00 /opt/homebrew/bin/dolt
-  501   0:00.25 /opt/homebrew/bin/gt
-  700   0:10.50 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
-  701   0:20.25 /Applications/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper
-  702   0:00.25 /Applications/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper
+	names: `  100   0:05.25 Sat Oct 24 09:00:00 2026 /System/Library/CoreServices/WindowServer
+  200   0:00.50 Sat Oct 24 09:00:00 2026 /Applications/Docker.app/Contents/MacOS/com.docker.virtualization
+  300   1:02:03.40 Sat Oct 24 09:00:00 2026 /System/Library/Frameworks/Virtualization.framework/Virtualization.VirtualMachine
+  400  12:36.00 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/dolt
+  501   0:00.25 Mon Oct 26 17:07:00 2026 /opt/homebrew/bin/gt
+  700   0:10.50 Sat Oct 24 09:00:00 2026 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+  701   0:20.25 Sat Oct 24 09:00:00 2026 /Applications/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper
+  702   0:00.25 Mon Oct 26 17:07:00 2026 /Applications/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper
 `,
 	args: `  200 /Applications/Docker.app/Contents/MacOS/com.docker.virtualization --vmm virtualization
   300 /System/Library/Frameworks/Virtualization.framework/Virtualization.VirtualMachine --disk /Users/sloan/.colima/gt-sbx/_lima/colima/diffdisk
@@ -207,11 +209,11 @@ func TestHostCPUAConsumerWithNoReadingIsNilNotZero(t *testing.T) {
 	t.Parallel()
 	fake := hostCPUFakeEnv(
 		hostCPUSample{
-			names: "  400  12:34.50 /opt/homebrew/bin/dolt\n  600   0:00.50 /Library/Bitdefender/BDLDaemon\n",
+			names: "  400  12:34.50 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/dolt\n  600   0:00.50 Sat Oct 24 09:00:00 2026 /Library/Bitdefender/BDLDaemon\n",
 			args:  "  400 /opt/homebrew/bin/dolt sql-server\n",
 		},
 		hostCPUSample{
-			names: "  400  12:34.50 /opt/homebrew/bin/dolt\n",
+			names: "  400  12:34.50 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/dolt\n",
 			args:  "  400 /opt/homebrew/bin/dolt sql-server\n",
 		},
 	)
@@ -243,7 +245,7 @@ func TestHostCPUAConsumerWithNoReadingIsNilNotZero(t *testing.T) {
 func TestHostCPUAnIdleHostRanksNoOne(t *testing.T) {
 	t.Parallel()
 	sample := hostCPUSample{
-		names: "  800   0:07.00 /usr/sbin/notifyd\n",
+		names: "  800   0:07.00 Sat Oct 24 09:00:00 2026 /usr/sbin/notifyd\n",
 		args:  "  800 /usr/sbin/notifyd\n",
 	}
 	fake := hostCPUFakeEnv(sample, sample)
@@ -276,11 +278,11 @@ func TestHostCPUDividesByTheMeasuredWindow(t *testing.T) {
 	t.Parallel()
 	fake := hostCPUFakeEnv(
 		hostCPUSample{
-			names: "  400  12:34.50 /opt/homebrew/bin/dolt\n",
+			names: "  400  12:34.50 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/dolt\n",
 			args:  "  400 /opt/homebrew/bin/dolt sql-server\n",
 		},
 		hostCPUSample{
-			names: "  400  12:36.00 /opt/homebrew/bin/dolt\n",
+			names: "  400  12:36.00 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/dolt\n",
 			args:  "  400 /opt/homebrew/bin/dolt sql-server\n",
 		},
 	)
@@ -298,18 +300,18 @@ func TestHostCPUDividesByTheMeasuredWindow(t *testing.T) {
 	}
 }
 
-// A cumulative time that fell between samples is a reused process id: neither
-// process's total is a reading of this window's other one, so the pair is
+// A cumulative time that fell under one start instant belongs to no live
+// process: a process's own counter does not go backwards, so the pair is
 // counted and the consumer reads nil.
-func TestHostCPUAPidReusedBetweenSamplesIsNoReading(t *testing.T) {
+func TestHostCPUAPidWhoseCumulativeTimeFellIsNoReading(t *testing.T) {
 	t.Parallel()
 	fake := hostCPUFakeEnv(
 		hostCPUSample{
-			names: "  400  12:00.00 /opt/homebrew/bin/dolt\n",
+			names: "  400  12:00.00 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/dolt\n",
 			args:  "  400 /opt/homebrew/bin/dolt sql-server\n",
 		},
 		hostCPUSample{
-			names: "  400   0:00.05 /opt/homebrew/bin/dolt\n",
+			names: "  400   0:00.05 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/dolt\n",
 			args:  "  400 /opt/homebrew/bin/dolt sql-server\n",
 		},
 	)
@@ -319,26 +321,26 @@ func TestHostCPUAPidReusedBetweenSamplesIsNoReading(t *testing.T) {
 		t.Fatalf("Collect: %v", err)
 	}
 	if got["dolt_cores"] != nil {
-		t.Errorf("dolt_cores = %v, want nil for a reused process id", got["dolt_cores"])
+		t.Errorf("dolt_cores = %v, want nil for a cumulative time that fell", got["dolt_cores"])
 	}
 	if got["regressed_pids"] != 1 {
 		t.Errorf("regressed_pids = %v, want 1", got["regressed_pids"])
 	}
 }
 
-// A process id whose program changed between the samples was reused even when
-// the new process has already burned more CPU than the old one: the id falling
-// is one way to see it, and a changed program is the other, so neither pair is
-// a reading.
-func TestHostCPUAPidReusedByAnotherProgramIsNoReading(t *testing.T) {
+// A pid that execs another program keeps its start instant and its cumulative
+// counters, so the pair is one process's two totals: the program path changing
+// discards nothing, and the difference is the window's burn of the program now
+// running under that id.
+func TestHostCPUASameProcessRunningAnotherProgramKeepsItsPair(t *testing.T) {
 	t.Parallel()
 	fake := hostCPUFakeEnv(
 		hostCPUSample{
-			names: "  400  12:00.00 /opt/homebrew/bin/dolt\n",
+			names: "  400  12:00.00 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/dolt\n",
 			args:  "  400 /opt/homebrew/bin/dolt sql-server\n",
 		},
 		hostCPUSample{
-			names: "  400  12:30.00 /opt/homebrew/bin/gt\n",
+			names: "  400  12:01.50 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/gt\n",
 			args:  "  400 /opt/homebrew/bin/gt status --json\n",
 		},
 	)
@@ -352,7 +354,45 @@ func TestHostCPUAPidReusedByAnotherProgramIsNoReading(t *testing.T) {
 		"docker_vm_cores":  nil,
 		"dolt_cores":       nil,
 		"scanner_cores":    nil,
-		"gt_cores":         nil,
+		"gt_cores":         1.5,
+		"other_1_name":     nil,
+		"other_1_cores":    nil,
+		"other_2_name":     nil,
+		"other_2_cores":    nil,
+		"other_3_name":     nil,
+		"other_3_cores":    nil,
+		"window_s":         1.0,
+		"unmeasured_pids":  0,
+		"regressed_pids":   0,
+	})
+}
+
+// A pid whose start instant differs between the samples names another process
+// in the second one, whatever program either ran: the pair is counted, and the
+// new process's whole total is the burn, because it began inside the window.
+func TestHostCPUAPidReusedByAnotherProcessReadsItsNewProcess(t *testing.T) {
+	t.Parallel()
+	fake := hostCPUFakeEnv(
+		hostCPUSample{
+			names: "  400  12:00.00 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/dolt\n",
+			args:  "  400 /opt/homebrew/bin/dolt sql-server\n",
+		},
+		hostCPUSample{
+			names: "  400   0:00.75 Mon Oct 26 17:07:00 2026 /opt/homebrew/bin/gt\n",
+			args:  "  400 /opt/homebrew/bin/gt status --json\n",
+		},
+	)
+
+	got, err := hostCPUSource{}.Collect(context.Background(), fake.env())
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	assertHostCPUColumns(t, got, map[string]any{
+		"polecat_vm_cores": nil,
+		"docker_vm_cores":  nil,
+		"dolt_cores":       nil,
+		"scanner_cores":    nil,
+		"gt_cores":         0.75,
 		"other_1_name":     nil,
 		"other_1_cores":    nil,
 		"other_2_name":     nil,
@@ -430,7 +470,9 @@ func TestHostCPUAnUnreadableProcessTableFailsTheGroup(t *testing.T) {
 		{name: "a name line's CPU time is not one", first: hostCPUSample{names: "  400  12x:34.50 /opt/homebrew/bin/dolt\n", args: hostCPUSampleOne.args}},
 		{name: "the name table is not a table", first: hostCPUSample{names: "PID TIME COMM\n", args: hostCPUSampleOne.args}},
 		{name: "the name table is empty", first: hostCPUSample{names: "\n", args: hostCPUSampleOne.args}},
-		{name: "a name line names no program", first: hostCPUSample{names: "  400  12:34.50\n", args: hostCPUSampleOne.args}},
+		{name: "a name line names no start instant", first: hostCPUSample{names: "  400  12:34.50 /opt/homebrew/bin/dolt\n", args: hostCPUSampleOne.args}},
+		{name: "a name line's start instant is cut short", first: hostCPUSample{names: "  400  12:34.50 Sat Oct 24 2026\n", args: hostCPUSampleOne.args}},
+		{name: "a name line names no program", first: hostCPUSample{names: "  400  12:34.50 Sat Oct 24 09:00:00 2026\n", args: hostCPUSampleOne.args}},
 		{name: "the command-line table is not a table", first: hostCPUSample{names: hostCPUSampleOne.names, args: "PID ARGS\n"}},
 		{name: "the command-line table is empty", first: hostCPUSample{names: hostCPUSampleOne.names, args: "\n"}},
 		{name: "the samples share a timestamp", first: hostCPUSampleOne, noWait: true},
