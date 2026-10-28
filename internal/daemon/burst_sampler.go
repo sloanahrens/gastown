@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"regexp"
 	"sync/atomic"
 	"time"
 
@@ -21,6 +22,26 @@ import (
 // reach, such as a bd child that ignores its context, costs the bound and not
 // the daemon's shutdown.
 const burstSamplerJoinTimeout = 5 * time.Second
+
+// burstFailureCeiling is the longest gap between two samples while every
+// sample fails: seven consecutive failures take the fast cadence to it, and
+// the sampler then retries every ten minutes. The number is a choice, not a
+// derivation. A host that cannot be read yields no row at any cadence, so the
+// ceiling bounds what the retries cost rather than what the log holds. What it
+// costs is the delay before a recovered host is sampled again, and ten minutes
+// is well inside the hourly snapshot's hour.
+const burstFailureCeiling = 10 * time.Minute
+
+// The parts of an error's text that differ between two occurrences of the same
+// failure, masked so the log's dedup sees one class (burstFailureClass): a
+// timestamp, a bare clock time, and a process id. Deliberately not every
+// digit: an exit code or a count names which failure occurred, and masking it
+// would fold two different failures into one line.
+var (
+	burstFailureStamp = regexp.MustCompile(`\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?`)
+	burstFailureClock = regexp.MustCompile(`\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b`)
+	burstFailurePID   = regexp.MustCompile(`(?i)\bpid[=: ]?\s*\d+\b`)
+)
 
 // burstSamplerSeams replaces the sampler's sample, its wait and its Env in
 // tests; the zero value is production.
@@ -116,31 +137,71 @@ func (s *burstSampler) start(ctx context.Context) (stop func()) {
 	}
 }
 
-// run samples, waits the row's cadence, and samples again until ctx ends.
+// run samples, waits the next sample's gap, and samples again until ctx ends.
+// A run of consecutive failed samples backs the gap off (burstFailureWait);
+// one good sample ends the run and returns the gap to the row's own cadence.
 func (s *burstSampler) run(ctx context.Context) {
 	defer close(s.done)
+	failures := 0
 	lastFailure := ""
 	for {
 		row, _, err := s.seams.run(ctx, s.seams.env(s.town))
+		var next time.Duration
 		if err != nil {
+			failures++
 			s.reportFailure(err, &lastFailure)
+			next = burstFailureWait(failures)
 		} else {
+			failures = 0
 			lastFailure = ""
+			next = burstRowWait(row)
 		}
-		s.seams.wait(ctx, burstRowWait(row))
+		s.seams.wait(ctx, next)
 		if ctx.Err() != nil {
 			return
 		}
 	}
 }
 
-// reportFailure logs a failed sample once per distinct failure. A host the
-// sampler cannot read retries every 15 s, and the same line every tick for
-// hours buries the log's next real line; a good sample forgets the failure, so
-// one that returns after a recovery is logged again.
+// burstFailureWait is the gap after the consecutive-th failed sample in a run:
+// the fast cadence doubled once per further failure, held at
+// burstFailureCeiling. A failed sample leaves no row to take a cadence from,
+// and a host the sampler could not read is worth a fast look the first time;
+// but a host that fails every time pays the sample's process-table and bd
+// reads for nothing, so the retries thin out until one sample succeeds.
+func burstFailureWait(consecutive int) time.Duration {
+	wait := metrics.BurstFastInterval
+	for i := 1; i < consecutive; i++ {
+		if wait >= burstFailureCeiling {
+			break
+		}
+		wait *= 2
+	}
+	if wait > burstFailureCeiling {
+		return burstFailureCeiling
+	}
+	return wait
+}
+
+// burstFailureClass is the identity a failed sample logs under: the error's
+// text with the parts that vary between two occurrences masked, so a message
+// that names a pid or a timestamp is one class rather than a new failure on
+// every tick. An exit code or a count stays, because it says which failure
+// occurred.
+func burstFailureClass(err error) string {
+	class := burstFailureStamp.ReplaceAllString(err.Error(), "<stamp>")
+	class = burstFailureClock.ReplaceAllString(class, "<clock>")
+	return burstFailurePID.ReplaceAllString(class, "<pid>")
+}
+
+// reportFailure logs a failed sample once per class of failure (see
+// burstFailureClass). A host the sampler cannot read retries on a timer, and
+// the same failure every tick for hours buries the log's next real line; a
+// good sample forgets the class, so a failure that returns after a recovery is
+// logged again.
 func (s *burstSampler) reportFailure(err error, last *string) {
-	if msg := err.Error(); msg != *last {
-		*last = msg
+	if class := burstFailureClass(err); class != *last {
+		*last = class
 		s.logf("burst_sampler: %v", err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -87,7 +88,10 @@ func readBurstRows(t *testing.T, town string) []metrics.BurstRow {
 // production start, loop and wait, with a real metrics.RunBurst over a fake
 // host, append two rows exactly one cadence apart while the host is pressed.
 // The second sample's time comes from the daemon's clock, so a cadence the
-// code did not take would move the row and fail the assertion.
+// code did not take would move the row and fail the assertion. The sample
+// count is asserted exactly: the test drives one cadence, so a third sample
+// means the loop is not waiting it, and a short count means a sample it should
+// have taken is missing.
 func TestBurstSamplerAppendsRowsOneCadenceApart(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -100,9 +104,6 @@ func TestBurstSamplerAppendsRowsOneCadenceApart(t *testing.T) {
 		env: burstTestEnv(clk),
 		run: func(ctx context.Context, env metrics.Env) (metrics.BurstRow, string, error) {
 			samples++
-			if samples > 2 {
-				return metrics.BurstRow{}, metrics.BurstPath(env.Town), errors.New("the sampler ran a third sample")
-			}
 			row, path, err := metrics.RunBurst(ctx, env)
 			if samples == 2 {
 				close(second)
@@ -114,6 +115,9 @@ func TestBurstSamplerAppendsRowsOneCadenceApart(t *testing.T) {
 	driveClock(t, clk, metrics.BurstFastInterval, second)
 	stop()
 
+	if samples != 2 {
+		t.Fatalf("the sampler took %d samples, want 2: the test drives one cadence, so a short count is a sample the loop skipped and a long one is a sample it took without waiting", samples)
+	}
 	rows := readBurstRows(t, town)
 	if len(rows) != 2 {
 		t.Fatalf("the burst log holds %d rows, want 2", len(rows))
@@ -134,8 +138,8 @@ func TestBurstSamplerAppendsRowsOneCadenceApart(t *testing.T) {
 
 // TestBurstSamplerFailedSampleKeepsSamplingAtTheFastCadence pins what a failed
 // sample leaves: nothing written, one log line, and the fast wait — the failed
-// sample leaves a zero row, and a host whose top failed is one to look at again
-// soon. The next sample waits its own row's cadence.
+// sample leaves a zero row, and the first failure in a run is a host to look at
+// again soon. The next sample waits its own row's cadence.
 func TestBurstSamplerFailedSampleKeepsSamplingAtTheFastCadence(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -177,10 +181,113 @@ func TestBurstSamplerFailedSampleKeepsSamplingAtTheFastCadence(t *testing.T) {
 	}
 }
 
+// TestBurstSamplerBacksOffOnPersistentFailure is the bead's backoff acceptance
+// test: the production loop and the production wait on the daemon's clock,
+// with the samples scripted. Seven failures in a row double the wait from the
+// fast cadence up to the ceiling, one good sample returns the row's own
+// cadence, and a failure after it starts the fast cadence again. The clock
+// advances one fast cadence at a time and only once the sampler is parked, so
+// no advance moves a deadline the code has not set.
+func TestBurstSamplerBacksOffOnPersistentFailure(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	clk := newFixedClock()
+	d := burstTestDaemon(t, town, clk, io.Discard)
+
+	fail := errors.New("no reading of the host could be taken")
+	// Seven failures, a good sample, a failure, a good sample: a nil is a
+	// sample that read the host.
+	script := []error{fail, fail, fail, fail, fail, fail, fail, nil, fail, nil}
+	samples := 0
+	var waits []time.Duration
+	scriptWaited := make(chan struct{})
+
+	d.burstSeams = burstSamplerSeams{
+		env: func(string) metrics.Env { return metrics.Env{} },
+		run: func(context.Context, metrics.Env) (metrics.BurstRow, string, error) {
+			row := metrics.BurstRow{IntervalS: metrics.BurstSlowInterval.Seconds()}
+			if samples == len(script) {
+				return row, metrics.BurstPath(town), errors.New("the sampler ran a sample the script does not cover")
+			}
+			err := script[samples]
+			samples++
+			return row, metrics.BurstPath(town), err
+		},
+	}
+	// The recording wrapper runs the production wait, so the fake clock drives
+	// the loop and the test reads the gap the code chose. The loop is one
+	// goroutine, so the waits it records need no lock.
+	s := d.burstSampler()
+	clockWait := s.seams.wait
+	s.seams.wait = func(ctx context.Context, gap time.Duration) {
+		waits = append(waits, gap)
+		if len(waits) == len(script) {
+			close(scriptWaited)
+		}
+		clockWait(ctx, gap)
+	}
+
+	stop := d.startBurstSamplerIfEnabled()
+	driveClock(t, clk, metrics.BurstFastInterval, scriptWaited)
+	stop()
+
+	want := []time.Duration{
+		metrics.BurstFastInterval,      // failure 1
+		2 * metrics.BurstFastInterval,  // failure 2
+		4 * metrics.BurstFastInterval,  // failure 3
+		8 * metrics.BurstFastInterval,  // failure 4
+		16 * metrics.BurstFastInterval, // failure 5
+		32 * metrics.BurstFastInterval, // failure 6
+		burstFailureCeiling,            // failure 7, capped
+		metrics.BurstSlowInterval,      // the good sample's own cadence
+		metrics.BurstFastInterval,      // the failure after it starts over
+		metrics.BurstSlowInterval,      // the second good sample
+	}
+	if len(waits) != len(want) {
+		t.Fatalf("the sampler waited %d times, want %d: %v", len(waits), len(want), waits)
+	}
+	for i := range want {
+		if waits[i] != want[i] {
+			t.Errorf("wait %d = %v, want %v: the whole run is %v", i+1, waits[i], want[i], waits)
+		}
+	}
+}
+
+// TestBurstFailureWait pins the backoff's shape as a table: the fast cadence on
+// the first failure, doubling to the ceiling, and no overflow from a run long
+// enough to leave it behind.
+func TestBurstFailureWait(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		consecutive int
+		want        time.Duration
+	}{
+		{name: "no failure yet takes the fast cadence", consecutive: 0, want: metrics.BurstFastInterval},
+		{name: "the first failure takes the fast cadence", consecutive: 1, want: metrics.BurstFastInterval},
+		{name: "the second failure doubles it", consecutive: 2, want: 2 * metrics.BurstFastInterval},
+		{name: "the third failure doubles again", consecutive: 3, want: 4 * metrics.BurstFastInterval},
+		{name: "the sixth failure is still under the ceiling", consecutive: 6, want: 32 * metrics.BurstFastInterval},
+		{name: "the seventh failure reaches the ceiling", consecutive: 7, want: burstFailureCeiling},
+		{name: "a failure past the ceiling stays at it", consecutive: 8, want: burstFailureCeiling},
+		{name: "a very long run does not overflow", consecutive: 1000, want: burstFailureCeiling},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := burstFailureWait(tt.consecutive); got != tt.want {
+				t.Errorf("burstFailureWait(%d) = %v, want %v", tt.consecutive, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestBurstSamplerLogsARepeatedFailureOnce pins the failure log's dedup: a host
-// the sampler cannot read retries every 15 s, so the same line is one line
-// however many ticks it repeats, and a failure that returns after a recovery is
-// logged again.
+// the sampler cannot read retries on a timer, so the same failure is one line
+// however many ticks it repeats — including a message that varies by a pid or
+// a timestamp — and a failure that returns after a recovery is logged again.
+// Two failures that differ in an exit code or a count are different failures
+// and each log.
 func TestBurstSamplerLogsARepeatedFailureOnce(t *testing.T) {
 	t.Parallel()
 	fail := errors.New("no reading of the host could be taken")
@@ -194,6 +301,10 @@ func TestBurstSamplerLogsARepeatedFailureOnce(t *testing.T) {
 		{name: "a failure after a recovery is logged again", script: []error{fail, fail, nil, fail}, want: 2},
 		{name: "distinct failures each log", script: []error{fail, other}, want: 2},
 		{name: "a good run logs nothing", script: []error{nil, nil}, want: 0},
+		{name: "failures that differ only in a pid are one line", script: []error{pidFailure(4821), pidFailure(993)}, want: 1},
+		{name: "failures that differ only in a timestamp are one line", script: []error{stampFailure(testEpoch), stampFailure(testEpoch.Add(time.Minute))}, want: 1},
+		{name: "failures that differ in an exit code each log", script: []error{exitFailure(1), exitFailure(2)}, want: 2},
+		{name: "failures that differ in a count each log", script: []error{countFailure(3), countFailure(4)}, want: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -235,19 +346,53 @@ func TestBurstSamplerLogsARepeatedFailureOnce(t *testing.T) {
 	}
 }
 
+// pidFailure is one failure reported against different processes: a message
+// that names the pid differs on every tick, and the dedup still counts it as
+// one failure.
+func pidFailure(pid int) error {
+	return fmt.Errorf("reading the process table at pid %d: the read failed", pid)
+}
+
+// stampFailure is one failure reported at different times.
+func stampFailure(at time.Time) error {
+	return fmt.Errorf("no reading of the host at %s could be taken", at.UTC().Format(time.RFC3339))
+}
+
+// exitFailure is a command failure whose exit code is what failed, so two codes
+// are two failures rather than one class.
+func exitFailure(code int) error {
+	return fmt.Errorf("reading the host: top exited with status %d", code)
+}
+
+// countFailure is a failure that names how many rows it could not read, which
+// is part of what failed rather than a value that varies per tick.
+func countFailure(rows int) error {
+	return fmt.Errorf("reading the landing queue: %d rows could not be read", rows)
+}
+
 // TestBurstSamplerOffWithTheMetricsSampler pins the gate: a town that switched
-// its metrics sampler off takes no sample at all, and a town that never
-// mentioned the switch samples.
+// its metrics sampler off takes no sample over a window of the row's cadences,
+// and a town that never mentioned the switch samples once per cadence across
+// that window.
 func TestBurstSamplerOffWithTheMetricsSampler(t *testing.T) {
 	t.Parallel()
 	off := &DaemonPatrolConfig{Patrols: &PatrolsConfig{ResourceSampler: &PatrolConfig{Enabled: false}}}
+	// halfCadence is the step the window advances by, and window its length:
+	// two and a half cadences, which ends between two samples so the count is
+	// not a race with the stop. windowWaits is how many of the clock's waiters
+	// the driver waits for before each advance: the sentinel, and the
+	// sampler's loop when the switch is on.
+	const halfCadence = metrics.BurstSlowInterval / 2
+	const window = 5 * halfCadence
+	const windowSamples = 3 // the start, then one per cadence across the window
 	tests := []struct {
-		name    string
-		patrols *DaemonPatrolConfig
-		want    bool
+		name        string
+		patrols     *DaemonPatrolConfig
+		windowWaits int
+		want        int32
 	}{
-		{name: "an explicit enabled=false samples nothing", patrols: off, want: false},
-		{name: "the absent switch samples", patrols: nil, want: true},
+		{name: "an explicit enabled=false samples nothing", patrols: off, windowWaits: 1, want: 0},
+		{name: "the absent switch samples each cadence", patrols: nil, windowWaits: 2, want: windowSamples},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -258,25 +403,34 @@ func TestBurstSamplerOffWithTheMetricsSampler(t *testing.T) {
 			d.patrolConfig = tt.patrols
 
 			var calls atomic.Int32
-			sampled := make(chan struct{}, 1)
 			d.burstSeams = burstSamplerSeams{
 				env: func(string) metrics.Env { return metrics.Env{} },
 				run: func(context.Context, metrics.Env) (metrics.BurstRow, string, error) {
-					if calls.Add(1) == 1 {
-						sampled <- struct{}{}
-					}
+					calls.Add(1)
 					return metrics.BurstRow{IntervalS: metrics.BurstSlowInterval.Seconds()}, metrics.BurstPath(town), nil
 				},
 			}
 			stop := d.startBurstSamplerIfEnabled()
-			if tt.want {
-				waitForSignal(t, sampled, "a town that never switched its metrics sampler off took no sample")
+
+			// A sentinel parks on the daemon's clock, so the window has a
+			// waiter even when the gate started no loop, and each advance waits
+			// until the clock's waiters are parked: a loop let through by
+			// mistake has sampled by then, so the window catches it rather
+			// than checking one instant.
+			go func() { <-clk.After(window) }()
+			for clk.Now().Before(testEpoch.Add(window)) {
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				err := clk.BlockUntilContext(ctx, tt.windowWaits)
+				cancel()
+				if err != nil {
+					stop()
+					t.Fatalf("the clock's waiters never parked for the window: %v", err)
+				}
+				clk.Advance(halfCadence)
 			}
 			stop()
-			// stop joins the loop it started, so a sample the gate let through
-			// has run by the time it returns.
-			if got := calls.Load() > 0; got != tt.want {
-				t.Errorf("the sampler sampled = %v, want %v", got, tt.want)
+			if got := calls.Load(); got != tt.want {
+				t.Errorf("the sampler took %d samples over the window, want %d", got, tt.want)
 			}
 		})
 	}
