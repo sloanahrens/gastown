@@ -1,7 +1,9 @@
 package polecatimage
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +12,29 @@ import (
 
 	"github.com/steveyegge/gastown/internal/lock"
 )
+
+// ErrLockHeld reports that another run holds the plugin lock: a caller that
+// wanted it for its own work defers rather than waiting for a build to finish.
+var ErrLockHeld = errors.New("polecat-image lock is held")
+
+// WithLock runs fn while holding the plugin lock — the one every build and push
+// holds — and releases it when fn returns, also when fn fails.
+//
+// A lock another run holds returns ErrLockHeld without running fn, and one a
+// dead run left behind is taken over as a plugin run takes it. An error reports
+// a lock that could not be read or made, never ErrLockHeld.
+func WithLock(ctx context.Context, cfg Config, fn func(context.Context) error) error {
+	r := &Run{Cfg: cfg}
+	took, err := r.TakeLock()
+	if err != nil {
+		return fmt.Errorf("take the plugin lock %s: %w", cfg.LockDir, err)
+	}
+	if !took {
+		return ErrLockHeld
+	}
+	defer r.Cleanup()
+	return fn(ctx)
+}
 
 // StaleLock reports whether the directory at dir has gone unmodified for longer
 // than StaleAfter, so it belongs to a run that died.

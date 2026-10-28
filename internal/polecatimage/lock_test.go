@@ -1,6 +1,8 @@
 package polecatimage
 
 import (
+	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -397,5 +399,129 @@ func TestTakeLockReportsARenameItCannotMake(t *testing.T) {
 	t.Cleanup(next.Cleanup)
 	if ok, err := next.TakeLock(); !ok || err != nil {
 		t.Fatalf("TakeLock() by the next run = %v, %v; want the lock a refused run released", ok, err)
+	}
+}
+
+// TestWithLockRunsFnWhileHoldingTheLock is the caller's contract: inside fn the
+// plugin lock is this caller's, and a second caller cannot take it.
+func TestWithLockRunsFnWhileHoldingTheLock(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	ran := false
+	err := WithLock(context.Background(), tr.Cfg, func(context.Context) error {
+		ran = true
+		if got := lockPID(t, tr.Cfg.LockDir); got != "4242" {
+			t.Errorf("lock records pid %q while fn runs, want 4242", got)
+		}
+		if inner := WithLock(context.Background(), tr.Cfg, func(context.Context) error {
+			t.Error("the second caller ran fn while the first holds the lock")
+			return nil
+		}); !errors.Is(inner, ErrLockHeld) {
+			t.Errorf("a second WithLock inside fn = %v, want ErrLockHeld", inner)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WithLock() error = %v, want none", err)
+	}
+	if !ran {
+		t.Error("fn did not run")
+	}
+}
+
+// TestWithLockReleasesAfterFn checks the lock is gone after the call, whether
+// fn succeeded or failed, and that the next caller takes it.
+func TestWithLockReleasesAfterFn(t *testing.T) {
+	t.Parallel()
+	fnErr := errors.New("the fn failed")
+	cases := []struct {
+		name string
+		ret  error
+	}{
+		{"fn returns nil", nil},
+		{"fn returns an error", fnErr},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTestRun(t)
+			err := WithLock(context.Background(), tr.Cfg, func(context.Context) error { return tc.ret })
+			if !errors.Is(err, tc.ret) {
+				t.Fatalf("WithLock() = %v, want fn's %v", err, tc.ret)
+			}
+			if exists(tr.Cfg.LockDir) {
+				t.Error("the lock directory is still there after WithLock returned")
+			}
+			ran := false
+			if err := WithLock(context.Background(), tr.Cfg, func(context.Context) error {
+				ran = true
+				return nil
+			}); err != nil || !ran {
+				t.Errorf("a second WithLock = %v, ran %v; want the lock the first released", err, ran)
+			}
+		})
+	}
+}
+
+func TestWithLockPassesFnsErrorThrough(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	want := errors.New("the caller's failure")
+	if err := WithLock(context.Background(), tr.Cfg, func(context.Context) error { return want }); !errors.Is(err, want) {
+		t.Fatalf("WithLock() = %v, want fn's error", err)
+	}
+}
+
+func TestWithLockReturnsErrLockHeldWhenAnotherRunHoldsIt(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	makeLock(t, tr.Cfg.LockDir, "9999", time.Now())
+	ran := false
+	err := WithLock(context.Background(), tr.Cfg, func(context.Context) error { ran = true; return nil })
+	if !errors.Is(err, ErrLockHeld) {
+		t.Fatalf("WithLock() = %v, want ErrLockHeld", err)
+	}
+	if ran {
+		t.Error("fn ran while another run holds the lock")
+	}
+	if got := lockPID(t, tr.Cfg.LockDir); got != "9999" {
+		t.Errorf("the held lock records pid %q, want the other run's untouched 9999", got)
+	}
+}
+
+// TestWithLockReportsALockItCannotMake keeps a lock this caller cannot make
+// apart from one another run holds: it fails instead of reporting ErrLockHeld.
+func TestWithLockReportsALockItCannotMake(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	blocked := filepath.Join(tr.root, "blocked")
+	if err := os.WriteFile(blocked, []byte("a file where a directory belongs"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr.Cfg.LockDir = filepath.Join(blocked, "polecat-image.lock")
+	ran := false
+	err := WithLock(context.Background(), tr.Cfg, func(context.Context) error { ran = true; return nil })
+	if err == nil || errors.Is(err, ErrLockHeld) {
+		t.Fatalf("WithLock() = %v, want the lock's own error", err)
+	}
+	if ran {
+		t.Error("fn ran although the lock could not be made")
+	}
+}
+
+func TestWithLockTakesOverAStaleLock(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	makeLock(t, tr.Cfg.LockDir, "9999", time.Now().Add(-tr.Cfg.StaleAfter-time.Second))
+	ran := false
+	err := WithLock(context.Background(), tr.Cfg, func(context.Context) error {
+		ran = true
+		if got := lockPID(t, tr.Cfg.LockDir); got != "4242" {
+			t.Errorf("lock records pid %q after the takeover, want 4242", got)
+		}
+		return nil
+	})
+	if err != nil || !ran {
+		t.Fatalf("WithLock() = %v, ran %v; want the stale lock taken over", err, ran)
 	}
 }
