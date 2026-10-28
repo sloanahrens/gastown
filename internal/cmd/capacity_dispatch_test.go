@@ -60,9 +60,10 @@ func TestSchedulerSlingParamsCarriesTheBlockersOverride(t *testing.T) {
 		WorkBeadID: "gt-blocked",
 		TargetRig:  "hq",
 		Context: &capacity.SlingContextFields{
-			WorkBeadID:     "gt-blocked",
-			TargetRig:      "hq",
-			IgnoreBlockers: true,
+			WorkBeadID:           "gt-blocked",
+			TargetRig:            "hq",
+			IgnoreBlockers:       true,
+			BlockerOverrideActor: "gastown/crew/sloan",
 		},
 	}, townRoot)
 	if err != nil {
@@ -70,6 +71,11 @@ func TestSchedulerSlingParamsCarriesTheBlockersOverride(t *testing.T) {
 	}
 	if !p.IgnoreBlockers {
 		t.Errorf("params lost --ignore-blockers: %+v", p)
+	}
+	// The engine records the comment under this actor; dropping it here would
+	// attribute the operator's override to the daemon that ran the queue.
+	if p.BlockerOverrideActor != "gastown/crew/sloan" {
+		t.Errorf("params lost the override's actor: %+v", p)
 	}
 }
 

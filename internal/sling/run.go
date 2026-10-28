@@ -219,13 +219,17 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	// --force for the guards they need (gt-1326mw, gt-21pl0). The override is
 	// --ignore-blockers, which dispatches and leaves the comment naming the
 	// actor and the blockers it went over.
+	//
+	// There is no dry-run branch here because the engine never dry-runs: a gt
+	// sling dry run reports the refusal itself and does not reach the engine
+	// (internal/cmd/sling.go), and a queued dispatch is a real one.
 	blockers := Admit(info.Dependencies)
 	if len(blockers) > 0 {
 		if !opts.IgnoreBlockers {
 			result.ErrMsg = "blocked"
 			return result, errors.New(Refusal(opts.BeadID, blockers))
 		}
-		if err := d.RecordBlockerOverride(townRoot, opts.BeadID, d.Actor(opts), blockers); err != nil {
+		if err := d.RecordBlockerOverride(townRoot, opts.BeadID, overrideActor(d, opts), blockers); err != nil {
 			result.ErrMsg = err.Error()
 			return result, err
 		}
@@ -579,6 +583,17 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 
 	result.Success = true
 	return result, nil
+}
+
+// overrideActor is who an --ignore-blockers comment names: the operator who
+// passed the flag when the dispatch carries one — a queued sling does, because
+// the daemon that runs the queue is not the operator — else the caller's Actor
+// dep (gt-e3hl2).
+func overrideActor(d *Deps, opts Options) string {
+	if actor := strings.TrimSpace(opts.BlockerOverrideActor); actor != "" {
+		return actor
+	}
+	return d.Actor(opts)
 }
 
 // canceled reports a caller's cancellation as an error a dispatch can return.

@@ -429,20 +429,19 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			formulaName = ""
 		}
 		return r.scheduleBead(r.opts.on, rigName, ScheduleOptions{
-			Formula:      formulaName,
-			Args:         r.opts.argsText,
-			Vars:         r.opts.vars,
-			BaseBranch:   r.opts.baseBranch,
-			ResumeBranch: r.opts.resumeBranch,
-			DryRun:       r.opts.dryRun,
-			Force:        r.opts.force,
-			NoMerge:      r.opts.noMerge,
-			ReviewOnly:   r.opts.reviewOnly,
-			Account:      r.opts.account,
-			Agent:        r.opts.agent,
-			HookRawBead:  r.opts.hookRawBead,
-			Ralph:        r.opts.ralph,
-
+			Formula:        formulaName,
+			Args:           r.opts.argsText,
+			Vars:           r.opts.vars,
+			BaseBranch:     r.opts.baseBranch,
+			ResumeBranch:   r.opts.resumeBranch,
+			DryRun:         r.opts.dryRun,
+			Force:          r.opts.force,
+			NoMerge:        r.opts.noMerge,
+			ReviewOnly:     r.opts.reviewOnly,
+			Account:        r.opts.account,
+			Agent:          r.opts.agent,
+			HookRawBead:    r.opts.hookRawBead,
+			Ralph:          r.opts.ralph,
 			IgnoreBlockers: r.opts.ignoreBlockers,
 		})
 	}
@@ -777,16 +776,19 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	if len(blockers) > 0 {
 		refusal := sling.Refusal(beadID, blockers)
 		switch {
-		case r.opts.ignoreBlockers:
-			if !r.opts.dryRun {
-				if err := r.recordBlockerOverride(townRoot, beadID, r.actor(), blockers); err != nil {
-					return err
-				}
-			}
-		case r.opts.dryRun:
+		case r.opts.dryRun && !r.opts.ignoreBlockers:
+			// A dry run reports the refusal and stops there: everything below is
+			// the dispatch this refusal is the answer to.
 			fmt.Fprintf(r.out, "%s Dry run: this sling would be refused.\n", style.Dim.Render("○"))
 			fmt.Fprintln(r.out, refusal)
-		default:
+			return nil
+		case r.opts.ignoreBlockers && !r.opts.dryRun:
+			// The comment is the record the override is granted on, and a dry
+			// run grants nothing, so it writes none.
+			if err := r.recordBlockerOverride(townRoot, beadID, r.actor(), blockers); err != nil {
+				return err
+			}
+		case !r.opts.ignoreBlockers:
 			return errors.New(refusal)
 		}
 	}
@@ -1274,19 +1276,20 @@ func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string) e
 		FormulaName: formulaName,
 		RigName:     rigName,
 
-		Args:           r.opts.argsText,
-		Vars:           append([]string(nil), r.opts.vars...),
-		BaseBranch:     r.opts.baseBranch,
-		ResumeBranch:   r.opts.resumeBranch,
-		Account:        r.opts.account,
-		Agent:          r.opts.agent,
-		NoMerge:        r.opts.noMerge,
-		Force:          r.opts.force,
-		IgnoreBlockers: r.opts.ignoreBlockers,
-		HookRawBead:    r.opts.hookRawBead,
-		NoBoot:         r.opts.noBoot,
-		Mode:           mode,
-		ReviewOnly:     r.opts.reviewOnly,
+		Args:                 r.opts.argsText,
+		Vars:                 append([]string(nil), r.opts.vars...),
+		BaseBranch:           r.opts.baseBranch,
+		ResumeBranch:         r.opts.resumeBranch,
+		Account:              r.opts.account,
+		Agent:                r.opts.agent,
+		NoMerge:              r.opts.noMerge,
+		Force:                r.opts.force,
+		IgnoreBlockers:       r.opts.ignoreBlockers,
+		BlockerOverrideActor: r.actor(),
+		HookRawBead:          r.opts.hookRawBead,
+		NoBoot:               r.opts.noBoot,
+		Mode:                 mode,
+		ReviewOnly:           r.opts.reviewOnly,
 
 		// One bead at a prompt: a formula that will not instantiate is this
 		// sling's failure and takes its spawn down with it, where the batch path

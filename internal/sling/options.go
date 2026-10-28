@@ -49,6 +49,11 @@ type Options struct {
 	Mode           string   // --ralph: "" (normal) or "ralph"
 	ReviewOnly     bool     // --review-only: review and report back only, no merge/commit/push
 	Actor          string   // --actor: recorded dispatcher override
+	// BlockerOverrideActor is who the --ignore-blockers comment names. A queued
+	// sling is dispatched by the daemon, which is not the operator who passed
+	// the flag, so the actor is carried from the sling that queued the bead to
+	// the dispatch that runs it (gt-e3hl2). Empty leaves it to the Actor dep.
+	BlockerOverrideActor string
 
 	// Execution behavior (set by caller, not a flag)
 	SkipCook         bool   // Batch optimization: formula already cooked

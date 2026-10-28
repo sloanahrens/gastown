@@ -219,6 +219,11 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 	}
 	fields.HookRawBead = opts.HookRawBead
 	fields.IgnoreBlockers = opts.IgnoreBlockers
+	if opts.IgnoreBlockers {
+		// The queue dispatches as the daemon, so the operator who took the
+		// override is recorded here, where they are known (gt-e3hl2).
+		fields.BlockerOverrideActor = d.actor()
+	}
 	if opts.Ralph {
 		fields.Mode = "ralph"
 	}
@@ -259,19 +264,20 @@ func runBatchScheduleWith(o slingOptions, beadIDs []string, rigName, townRoot st
 	for _, beadID := range beadIDs {
 		formula := resolveFormula(o.formula, o.hookRawBead, townRoot, rigName)
 		err := scheduleBead(beadID, rigName, ScheduleOptions{
-			Formula:      formula,
-			Args:         o.argsText,
-			Vars:         o.vars,
-			BaseBranch:   o.baseBranch,
-			ResumeBranch: o.resumeBranch,
-			DryRun:       false,
-			Force:        o.force,
-			NoMerge:      o.noMerge,
-			ReviewOnly:   o.reviewOnly,
-			Account:      o.account,
-			Agent:        o.agent,
-			HookRawBead:  o.hookRawBead,
-			Ralph:        o.ralph,
+			Formula:        formula,
+			Args:           o.argsText,
+			Vars:           o.vars,
+			BaseBranch:     o.baseBranch,
+			ResumeBranch:   o.resumeBranch,
+			DryRun:         false,
+			Force:          o.force,
+			NoMerge:        o.noMerge,
+			ReviewOnly:     o.reviewOnly,
+			Account:        o.account,
+			Agent:          o.agent,
+			HookRawBead:    o.hookRawBead,
+			Ralph:          o.ralph,
+			IgnoreBlockers: o.ignoreBlockers,
 		})
 		if err != nil {
 			fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), beadID, err)

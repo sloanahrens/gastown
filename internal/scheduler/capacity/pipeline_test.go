@@ -172,19 +172,20 @@ func TestNoRetryPolicy(t *testing.T) {
 func TestReconstructFromContext(t *testing.T) {
 	t.Parallel()
 	ctx := &SlingContextFields{
-		WorkBeadID:     "bead-123",
-		TargetRig:      "prod-rig",
-		Formula:        "mol-polecat-work",
-		Args:           "do stuff",
-		Vars:           "x=1\ny=2",
-		BaseBranch:     "main",
-		Account:        "acme",
-		Agent:          "codex",
-		Mode:           "ralph",
-		NoMerge:        true,
-		ReviewOnly:     true,
-		HookRawBead:    true,
-		IgnoreBlockers: true,
+		WorkBeadID:           "bead-123",
+		TargetRig:            "prod-rig",
+		Formula:              "mol-polecat-work",
+		Args:                 "do stuff",
+		Vars:                 "x=1\ny=2",
+		BaseBranch:           "main",
+		Account:              "acme",
+		Agent:                "codex",
+		Mode:                 "ralph",
+		NoMerge:              true,
+		ReviewOnly:           true,
+		HookRawBead:          true,
+		IgnoreBlockers:       true,
+		BlockerOverrideActor: "gastown/crew/sloan",
 	}
 
 	params := ReconstructFromContext(ctx)
@@ -227,6 +228,9 @@ func TestReconstructFromContext(t *testing.T) {
 	}
 	if !params.IgnoreBlockers {
 		t.Error("IgnoreBlockers: expected true")
+	}
+	if params.BlockerOverrideActor != "gastown/crew/sloan" {
+		t.Errorf("BlockerOverrideActor: got %q, want %q", params.BlockerOverrideActor, "gastown/crew/sloan")
 	}
 }
 

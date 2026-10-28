@@ -2,14 +2,17 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/sling"
 )
 
 // blockedEdge is one dependency edge as a show reports it.
@@ -183,6 +186,7 @@ func TestSlingDryRunReportsABlockedRefusal(t *testing.T) {
 	h.wantNo("spawn")
 	h.wantNo("hook")
 	h.wantNo("blocker override")
+	h.wantNo("resolve target")
 }
 
 // TestSlingDryRunOfARigTargetReportsABlockedRefusal is the rig-target dry run:
@@ -308,6 +312,12 @@ func TestScheduleBeadCarriesTheBlockersOverride(t *testing.T) {
 	if !fields.IgnoreBlockers {
 		t.Errorf("sling context lost --ignore-blockers: %+v", fields)
 	}
+	// The queue dispatches as the daemon, so the context carries the operator
+	// who took the override, or the comment the dispatch leaves would name the
+	// wrong actor (gt-e3hl2).
+	if fields.BlockerOverrideActor != "gastown/crew/sloan" {
+		t.Errorf("sling context BlockerOverrideActor = %q, want the slinging actor", fields.BlockerOverrideActor)
+	}
 }
 
 // TestScheduleBeadRefusesABlockedBeadBeforeTheContext: the deferred path
@@ -355,4 +365,42 @@ func TestSlingDispatchesABeadWhoseBlockersClosed(t *testing.T) {
 	}
 	h.wantCalls("spawn", "spawn gastown")
 	h.wantNo("blocker override")
+}
+
+// TestAdmissionSeesTheDependencyStatusBdShowPrints: the guards decide from
+// info.Dependencies, which is bd show --json's dependency list decoded into
+// beads.Issue and copied by beadInfoOf. The decode is where the relation and
+// the target's status could go missing, and an edge that loses its status
+// reads as non-blocking, so the payload bd prints is the test's input
+// (gt-e3hl2).
+func TestAdmissionSeesTheDependencyStatusBdShowPrints(t *testing.T) {
+	t.Parallel()
+	// bd show --json: an issue array. Both dependency shapes bd prints are
+	// here — "dependency_type", and the "type" IssueDep also accepts — plus a
+	// closed blocker and a non-blocking edge, which must not be refused.
+	const showOutput = `[{
+		"id": "gt-work",
+		"title": "blocked work",
+		"status": "open",
+		"issue_type": "task",
+		"dependencies": [
+			{"id": "gt-block", "status": "open", "dependency_type": "blocks"},
+			{"id": "gt-legacy", "status": "in_progress", "type": "blocks"},
+			{"id": "gt-done", "status": "closed", "dependency_type": "blocks"},
+			{"id": "gt-track", "status": "open", "dependency_type": "tracks"}
+		]
+	}]`
+
+	var issues []*beads.Issue
+	if err := json.Unmarshal([]byte(showOutput), &issues); err != nil {
+		t.Fatalf("decoding bd show output: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("decoded %d issues, want 1", len(issues))
+	}
+
+	reasons := sling.Admit(beadInfoOf(issues[0]).Dependencies)
+	if want := []string{"gt-block (open)", "gt-legacy (in_progress)"}; !slices.Equal(reasons, want) {
+		t.Errorf("Admit = %v, want %v: the status and relation bd prints must survive the decode", reasons, want)
+	}
 }

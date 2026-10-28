@@ -127,6 +127,26 @@ func TestRunIgnoreBlockersDispatchesAndRecordsTheOverride(t *testing.T) {
 	}
 }
 
+// TestRunIgnoreBlockersRecordsTheOperatorNotTheQueue: a queued sling is
+// dispatched by the daemon, so the Actor dep names the daemon. The person who
+// passed --ignore-blockers is the one the comment must name, and the operator
+// arrives in its own field for exactly that reason (gt-e3hl2).
+func TestRunIgnoreBlockersRecordsTheOperatorNotTheQueue(t *testing.T) {
+	t.Parallel()
+	f := &fakeSlingDeps{reads: []holdTestRead{{bead: blockedBead(blocks("gt-block", "open"))}}}
+	opts := holdTestOptions()
+	opts.IgnoreBlockers = true
+	opts.BlockerOverrideActor = "gastown/crew/overseer"
+
+	if _, err := Run(context.Background(), f.deps(), opts); err != nil {
+		t.Fatalf("--ignore-blockers did not dispatch the bead: %v", err)
+	}
+	want := []string{"gastown/crew/overseer over gt-block (open)"}
+	if !slices.Equal(f.overrides, want) {
+		t.Errorf("overrides = %v, want %v: the comment names the operator, not the daemon that ran the queue", f.overrides, want)
+	}
+}
+
 // TestRunIgnoreBlockersRefusesWhenTheOverrideCannotBeRecorded: the comment is
 // the condition the override is granted on, so a dispatch that could not leave
 // one is refused rather than slung over blockers unrecorded.

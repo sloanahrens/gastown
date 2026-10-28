@@ -18,24 +18,29 @@ type PendingBead struct {
 // SlingContextFields holds scheduling parameters stored on a sling context bead.
 // JSON-serialized as the context bead's description.
 type SlingContextFields struct {
-	Version          int    `json:"version"`
-	WorkBeadID       string `json:"work_bead_id"`
-	TargetRig        string `json:"target_rig"`
-	Formula          string `json:"formula,omitempty"`
-	Args             string `json:"args,omitempty"`
-	Vars             string `json:"vars,omitempty"`
-	EnqueuedAt       string `json:"enqueued_at"`
-	BaseBranch       string `json:"base_branch,omitempty"`
-	ResumeBranch     string `json:"resume_branch,omitempty"`
-	NoMerge          bool   `json:"no_merge,omitempty"`
-	ReviewOnly       bool   `json:"review_only,omitempty"`
-	Account          string `json:"account,omitempty"`
-	Agent            string `json:"agent,omitempty"`
-	HookRawBead      bool   `json:"hook_raw_bead,omitempty"`
-	IgnoreBlockers   bool   `json:"ignore_blockers,omitempty"`
-	Mode             string `json:"mode,omitempty"`
-	DispatchFailures int    `json:"dispatch_failures,omitempty"`
-	LastFailure      string `json:"last_failure,omitempty"`
+	Version        int    `json:"version"`
+	WorkBeadID     string `json:"work_bead_id"`
+	TargetRig      string `json:"target_rig"`
+	Formula        string `json:"formula,omitempty"`
+	Args           string `json:"args,omitempty"`
+	Vars           string `json:"vars,omitempty"`
+	EnqueuedAt     string `json:"enqueued_at"`
+	BaseBranch     string `json:"base_branch,omitempty"`
+	ResumeBranch   string `json:"resume_branch,omitempty"`
+	NoMerge        bool   `json:"no_merge,omitempty"`
+	ReviewOnly     bool   `json:"review_only,omitempty"`
+	Account        string `json:"account,omitempty"`
+	Agent          string `json:"agent,omitempty"`
+	HookRawBead    bool   `json:"hook_raw_bead,omitempty"`
+	IgnoreBlockers bool   `json:"ignore_blockers,omitempty"`
+	// BlockerOverrideActor is the operator who slung the bead with
+	// --ignore-blockers. The queue dispatches as the daemon, so without this the
+	// comment the dispatch leaves would name the daemon instead of the person
+	// who took the risk (gt-e3hl2).
+	BlockerOverrideActor string `json:"blocker_override_actor,omitempty"`
+	Mode                 string `json:"mode,omitempty"`
+	DispatchFailures     int    `json:"dispatch_failures,omitempty"`
+	LastFailure          string `json:"last_failure,omitempty"`
 }
 
 // LabelSlingContext is the label used to identify sling context beads.
@@ -229,6 +234,8 @@ type DispatchParams struct {
 	// a deferred sling dispatches what the sling that queued it would have
 	// (gt-e3hl2).
 	IgnoreBlockers bool
+	// BlockerOverrideActor is who that override's comment names (gt-e3hl2).
+	BlockerOverrideActor string
 }
 
 // ReconstructFromContext builds DispatchParams from sling context fields.
@@ -247,6 +254,8 @@ func ReconstructFromContext(ctx *SlingContextFields) DispatchParams {
 		ReviewOnly:     ctx.ReviewOnly,
 		HookRawBead:    ctx.HookRawBead,
 		IgnoreBlockers: ctx.IgnoreBlockers,
+
+		BlockerOverrideActor: ctx.BlockerOverrideActor,
 	}
 	if ctx.Vars != "" {
 		p.Vars = splitVars(ctx.Vars)
