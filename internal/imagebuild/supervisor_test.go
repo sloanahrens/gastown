@@ -3,6 +3,8 @@ package imagebuild
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -200,6 +202,9 @@ func newRig(b *fakeBuild, g *fakeGroup, alarm bool) *rig {
 		readFile:     r.fs.read,
 		removeAll:    r.fs.remove,
 		command:      r.esc.run,
+		tempDir:      func() string { return "/tmp" },
+		lstat:        func(string) (fs.FileInfo, error) { return fakeDir{}, nil },
+		evalSymlinks: func(p string) (string, error) { return p, nil },
 		termGrace:    time.Second,
 		killGrace:    5 * time.Second,
 		pollInterval: 50 * time.Millisecond,
@@ -503,6 +508,196 @@ func TestAlarmWithNoLockConfiguredRemovesNothing(t *testing.T) {
 
 	if len(r.fs.removed) != 0 {
 		t.Errorf("removed %v with no lock configured", r.fs.removed)
+	}
+}
+
+// The installer hands the supervisor the directory it made for this binary, and
+// the supervisor removes it however the build ends (gt-p5pjs). The directory is
+// real and the check is on disk, so a removal that never happens fails here.
+func TestOwnedDirectoryIsRemovedHoweverTheBuildEnds(t *testing.T) {
+	t.Parallel()
+	cases := map[string]func(t *testing.T) *rig{
+		"success":      func(t *testing.T) *rig { return newRig(finishing(t, 0, 0), nil, false) },
+		"failure":      func(t *testing.T) *rig { return newRig(finishing(t, 3, 0), nil, false) },
+		"cannot start": func(t *testing.T) *rig { return newRig(nil, nil, false) },
+		"alarm stop": func(t *testing.T) *rig {
+			g := newGroup(syscall.SIGTERM)
+			return newRig(newBuild(t, g), g, true)
+		},
+	}
+	for name, rigFor := range cases {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			owned := filepath.Join(base, ownedPrefix+"helper")
+			if err := os.Mkdir(owned, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(owned, "image-supervisor"), []byte("binary"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			r := rigFor(t)
+			r.sys.removeAll = os.RemoveAll
+			r.sys.lstat = os.Lstat
+			r.sys.evalSymlinks = filepath.EvalSymlinks
+			r.sys.tempDir = func() string { return base }
+
+			r.sys.run(r.config(func(c *Config) { c.Lock = ""; c.Owned = owned }))
+
+			if _, err := os.Stat(owned); !os.IsNotExist(err) {
+				t.Errorf("the owned directory is still there after the build (stat: %v)", err)
+			}
+		})
+	}
+}
+
+// Without an owned directory the supervisor removes nothing, as before the flag.
+func TestWithoutAnOwnedDirectoryNothingIsRemoved(t *testing.T) {
+	t.Parallel()
+	r := newRig(finishing(t, 0, 0), nil, false)
+
+	r.sys.run(r.config(func(c *Config) { c.Lock = "" }))
+
+	if len(r.fs.removed) != 0 {
+		t.Errorf("removed %v with no owned directory configured", r.fs.removed)
+	}
+}
+
+// A directory that cannot be removed is left behind, so the log names it.
+func TestOwnedDirectoryThatCannotBeRemovedIsSaid(t *testing.T) {
+	t.Parallel()
+	r := newRig(finishing(t, 0, 0), nil, false)
+	r.sys.removeAll = func(string) error { return errors.New("busy") }
+
+	r.sys.run(r.config(func(c *Config) { c.Lock = ""; c.Owned = "/tmp/install-gt-image.helper" }))
+
+	if !strings.Contains(r.stderr.String(), "could not remove /tmp/install-gt-image.helper: busy") {
+		t.Errorf("log %q does not name the directory that was left behind", r.stderr.String())
+	}
+}
+
+// The owned directory is removed with RemoveAll, so only the directory the
+// installer makes may be named: a mistyped --owned is refused before the build
+// starts, and nothing is removed.
+func TestOwnedDirectoryThatIsNotTheInstallersIsRefused(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"relative":             "install-gt-image.abc123",
+		"another name":         "/tmp/helper",
+		"name without a tail":  "/tmp/install-gt-image.",
+		"another temp dir":     "/tmp/install-gt-lock.abc123",
+		"not in the temp dir":  "/etc/install-gt-image.abc123",
+		"nested deeper":        "/tmp/install-gt-image.abc123/helper",
+		"the temp dir itself":  "/tmp",
+		"the parent traversal": "/tmp/install-gt-image.abc123/../other",
+	}
+	for name, owned := range cases {
+		t.Run(name, func(t *testing.T) {
+			b := finishing(t, 0, 0)
+			r := newRig(b, nil, false)
+			removed := false
+			r.sys.removeAll = func(string) error { removed = true; return nil }
+
+			got := r.sys.run(r.config(func(c *Config) { c.Lock = ""; c.Owned = owned }))
+
+			if got != ExitRefused {
+				t.Errorf("status %d for --owned %q, want %d", got, owned, ExitRefused)
+			}
+			if b.started {
+				t.Errorf("--owned %q started the build, want it refused first", owned)
+			}
+			if removed {
+				t.Errorf("--owned %q removed something, want nothing removed", owned)
+			}
+			if !strings.Contains(r.stderr.String(), owned) {
+				t.Errorf("log %q does not name the refused directory %q", r.stderr.String(), owned)
+			}
+		})
+	}
+}
+
+// fakeDir is what the rig's lstat answers for every path: a plain directory.
+type fakeDir struct{ fs.FileInfo }
+
+func (fakeDir) Name() string      { return "dir" }
+func (fakeDir) IsDir() bool       { return true }
+func (fakeDir) Mode() fs.FileMode { return fs.ModeDir | 0o700 }
+
+// The owned directory is removed with removeAll, so what the path IS decides
+// whether it may go: a regular file, a symbolic link (whose target must stay),
+// a missing path and a real directory in another real directory are all
+// refused, with the real filesystem answering (gt-p5pjs).
+func TestOwnedPathThatIsNotARealInstallerDirectoryIsRefused(t *testing.T) {
+	t.Parallel()
+	cases := map[string]func(t *testing.T, temp string) (owned string, mustStay string){
+		"a regular file with the installer's name": func(t *testing.T, temp string) (string, string) {
+			p := filepath.Join(temp, ownedPrefix+"file")
+			if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return p, p
+		},
+		"a symbolic link with the installer's name": func(t *testing.T, temp string) (string, string) {
+			target := t.TempDir()
+			keep := filepath.Join(target, "keep")
+			if err := os.WriteFile(keep, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(temp, ownedPrefix+"link")
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			return link, keep
+		},
+		"a path that does not exist": func(t *testing.T, temp string) (string, string) {
+			return filepath.Join(temp, ownedPrefix+"gone"), ""
+		},
+		"a real directory in another real directory": func(t *testing.T, temp string) (string, string) {
+			other := t.TempDir()
+			p := filepath.Join(other, ownedPrefix+"elsewhere")
+			if err := os.Mkdir(p, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return p, p
+		},
+	}
+	for name, build := range cases {
+		t.Run(name, func(t *testing.T) {
+			temp := t.TempDir()
+			owned, mustStay := build(t, temp)
+			b := finishing(t, 0, 0)
+			r := newRig(b, nil, false)
+			r.sys.removeAll = os.RemoveAll
+			r.sys.lstat = os.Lstat
+			r.sys.evalSymlinks = filepath.EvalSymlinks
+			r.sys.tempDir = func() string { return temp }
+
+			got := r.sys.run(r.config(func(c *Config) { c.Lock = ""; c.Owned = owned }))
+
+			if got != ExitRefused {
+				t.Errorf("status %d for --owned %q, want %d", got, owned, ExitRefused)
+			}
+			if b.started {
+				t.Errorf("--owned %q started the build, want it refused first", owned)
+			}
+			if mustStay != "" {
+				if _, err := os.Lstat(mustStay); err != nil {
+					t.Errorf("%q was removed (%v), want it left alone", mustStay, err)
+				}
+			}
+		})
+	}
+}
+
+// ownedPrefix is the name scripts/install-gt.sh gives the helper directory; the
+// two are one fact written twice, so this keeps them from drifting (gt-p5pjs).
+func TestOwnedPrefixMatchesTheInstallersTemplate(t *testing.T) {
+	t.Parallel()
+	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "install-gt.sh"))
+	if err != nil {
+		t.Fatalf("reading the installer: %v", err)
+	}
+	if want := ownedPrefix + "XXXXXX"; !strings.Contains(string(script), want) {
+		t.Errorf("scripts/install-gt.sh has no mktemp template %q, so --owned would refuse the directory it makes", want)
 	}
 }
 

@@ -173,6 +173,11 @@ case "\$pkg" in
   *) if [ -e "\$T_WORLD/lock_wait_recorder" ]; then cp "$WAIT_RECORDER" "\$out"; else cp "$LOCK_HELPER" "\$out"; fi ;;
 esac
 chmod +x "\$out"
+# no_exec_supervisor: the supervisor arrives without the execute bit, so a
+# detached launch's exec fails before any supervisor runs (gt-p5pjs).
+case "\$pkg" in
+  *image-supervisor) [ ! -e "\$T_WORLD/no_exec_supervisor" ] || chmod -x "\$out" ;;
+esac
 GO
   chmod +x "$t/stubs/go"
   mkdir -p "$t/home"
@@ -248,6 +253,13 @@ wait_for() { local i; for i in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.
 # case that waits for the path alone can read the redirect's empty file
 # (gt-mztvx).
 wait_for_line() { local i; for i in $(seq 1 50); do grep -q . "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+# helper_dirs DIR: how many install-gt-image.* directories DIR holds. The
+# installer makes one per image build, and the supervisor removes it when the
+# build ends, so a case reads the ordering off the directory (gt-p5pjs).
+helper_dirs() { local n=0 d; for d in "$1"/install-gt-image.*; do [ -d "$d" ] && n=$((n+1)); done; printf '%s' "$n"; }
+# wait_for_helper_dirs DIR COUNT: wait until DIR holds COUNT of them, checked
+# every 0.1 s for 5 s.
+wait_for_helper_dirs() { local i; for i in $(seq 1 50); do [ "$(helper_dirs "$1")" = "$2" ] && return 0; sleep 0.1; done; return 1; }
 # reported T -> the commit the installed gt stub reports
 reported() { "$1/bin/gt" stale --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["binary_commit"])'; }
 
@@ -1158,6 +1170,13 @@ image_stub() {
 printf '%s | %s\n' "\$("\$POLECAT_IMAGE_GT" version | head -1)" "\$("$t/bin/gt" version | head -1)" >> "$t/image-calls.log"
 echo "\$\$" > "$t/image-run.pid"
 echo "run.sh" >> "\$T_WORLD/make.log"
+# IMAGE_STUB_HOLD: a path the build waits for before it finishes, so a case can
+# see a build still running without spending a fixed sleep. Bounded at 10 s, so
+# a release the case never writes cannot wedge the suite.
+if [ -n "\${IMAGE_STUB_HOLD:-}" ]; then
+  held=0
+  while [ ! -e "\$IMAGE_STUB_HOLD" ] && [ "\$held" -lt 100 ]; do sleep 0.1; held=\$((held+1)); done
+fi
 sleep \${IMAGE_STUB_SLEEP:-0}
 if [ -n "\${IMAGE_STUB_REASON:-}" ]; then echo "ERROR: \$IMAGE_STUB_REASON" >&2; exit 1; fi
 echo "run.sh-done" >> "\$T_WORLD/make.log"
@@ -1451,6 +1470,44 @@ rc2=$( LOCK_WAIT=1 run_install "$T" --sha "$(cat "$T/c2")" )
   || fail "no-image-first: a second install was refused the lock (rc=$rc2) while the image build ran"
 # End the detached build: it would otherwise outlive the case by its sleep.
 kill "$(cat "$T/image-run.pid" 2>/dev/null)" 2>/dev/null || true
+
+# --- Case 50b: the install leaves its helper directory to the detached build,
+# which removes it when the build ends (gt-p5pjs). Before this fix the install's
+# EXIT trap removed HELPER_DIR while the build was starting, and under load that
+# rm could land between the runner's fork and its exec, leaving the build with no
+# supervisor. The build holds until this case releases it, so the directory
+# still being there after the install returns is the ordering, not an elapsed
+# time, and its removal afterwards is the supervisor's own. ---
+T=$(make_world); image_stub "$T"
+install_stub "$T" "$(cat "$T/c1")"
+mkdir -p "$T/tmp"
+rc=$( TMPDIR="$T/tmp" IMAGE_STUB_HOLD="$T/release-image-build" IMAGE_RUN="$T/plugin/run.sh" \
+      run_install "$T" --sha "$(cat "$T/c2")" --no-image-first )
+wait_for "$T/image-calls.log" || true
+[ "$rc" = "0" ] && [ "$(helper_dirs "$T/tmp")" = "1" ] \
+  && grep -q "^gt version $(cat "$T/c2")" "$T/image-calls.log" \
+  && pass "no-image-first: the install leaves its helper directory to the detached build" \
+  || fail "no-image-first helper dir: rc=$rc dirs=$(helper_dirs "$T/tmp") calls=$(cat "$T/image-calls.log" 2>/dev/null) out=$(tail -3 "$T/run.out")"
+: > "$T/release-image-build"
+wait_for_helper_dirs "$T/tmp" 0 || true
+[ "$(helper_dirs "$T/tmp")" = "0" ] && ! grep -q "No such file or directory" "$T/image.log" \
+  && pass "no-image-first: the supervisor removes the helper directory when the build ends" \
+  || fail "no-image-first helper dir removal: dirs=$(helper_dirs "$T/tmp") log=$(tail -3 "$T/image.log" 2>/dev/null)"
+
+# --- Case 50c: a detached launch whose exec fails leaves no helper directory
+# behind (gt-p5pjs). The world's go stub writes the supervisor without its
+# execute bit, so the exec fails before any supervisor runs, and the install
+# still reports installed. ---
+T=$(make_world); image_stub "$T"; touch "$T/no_exec_supervisor"
+install_stub "$T" "$(cat "$T/c1")"
+mkdir -p "$T/tmp"
+rc=$( TMPDIR="$T/tmp" IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --no-image-first )
+wait_for_helper_dirs "$T/tmp" 0 || true
+[ "$rc" = "0" ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] \
+  && [ "$(helper_dirs "$T/tmp")" = "0" ] && [ ! -e "$T/image-calls.log" ] \
+  && grep -q "cannot run the image supervisor" "$T/image.log" \
+  && pass "no-image-first: a launch that cannot exec the supervisor leaves no helper directory" \
+  || fail "no-image-first failed exec: rc=$rc dirs=$(helper_dirs "$T/tmp") calls=$(cat "$T/image-calls.log" 2>/dev/null) log=$(tail -3 "$T/image.log" 2>/dev/null)"
 
 # --- Case 51: under --no-image-first a build that fails after the swap is not
 # the install's failure: the new binary and its restart marker stand, the

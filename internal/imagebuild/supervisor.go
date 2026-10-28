@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +32,15 @@ const ExitAlarm = 124
 
 // ExitStart is the status Run returns when the build could not be started.
 const ExitStart = 127
+
+// ExitRefused is the status Run returns when Config.Owned names a directory the
+// supervisor may not remove. It is the status cmd/image-supervisor gives the
+// flags it refuses, since the directory arrives as a flag.
+const ExitRefused = 2
+
+// ownedPrefix is the name scripts/install-gt.sh gives the temp directory it
+// makes for this binary: mktemp -d "$TMPDIR/install-gt-image.XXXXXX".
+const ownedPrefix = "install-gt-image."
 
 const (
 	// termGrace is how long the group has to leave after TERM before KILL.
@@ -51,6 +61,14 @@ type Config struct {
 	// that was stopped, so another install's lock is left alone. Empty means the
 	// build takes none.
 	Lock string
+	// Owned is the helper directory the installer made for this supervisor, and
+	// the one this binary was started from. It is removed when the build ends,
+	// on every path the supervisor returns from (success, failure, a build that
+	// cannot start, the alarm), so the installer need not wait to remove it. A
+	// supervisor killed by a signal cannot remove it, as no killed process
+	// removes its temp files. The path must be the installer's own (see
+	// ownedProblem); anything else is refused. Empty means none.
+	Owned string
 	// GT is the gt binary that raises and clears the escalation. Empty means no
 	// escalation, whatever Fingerprint says.
 	GT string
@@ -128,6 +146,11 @@ type system struct {
 	readFile  func(string) ([]byte, error)
 	removeAll func(string) error
 	command   func(name string, args ...string) error
+	tempDir   func() string
+	// lstat and evalSymlinks look at the owned directory: what the path is, and
+	// where its parent really is.
+	lstat        func(string) (fs.FileInfo, error)
+	evalSymlinks func(string) (string, error)
 
 	termGrace, killGrace, pollInterval time.Duration
 }
@@ -145,6 +168,9 @@ func realSystem() system {
 		command: func(name string, args ...string) error {
 			return exec.Command(name, args...).Run()
 		},
+		tempDir:      os.TempDir,
+		lstat:        os.Lstat,
+		evalSymlinks: filepath.EvalSymlinks,
 		termGrace:    termGrace,
 		killGrace:    killGrace,
 		pollInterval: pollInterval,
@@ -157,6 +183,12 @@ type waited struct {
 }
 
 func (s system) run(cfg Config) int {
+	// The owned directory is removed with removeAll, so it must be the one the
+	// installer made: a mistyped --owned must not remove another directory.
+	if problem := s.ownedProblem(cfg.Owned); problem != "" {
+		fmt.Fprintf(cfg.Stderr, "polecat image: refusing --owned %s: %s; the build was not started\n", cfg.Owned, problem)
+		return ExitRefused
+	}
 	b, err := s.start(cfg)
 	if err != nil {
 		fmt.Fprintf(cfg.Stderr, "polecat image: cannot start the build: %v\n", err)
@@ -229,11 +261,68 @@ func (s system) removeLock(lock string, pid int) {
 	_ = s.removeAll(lock)
 }
 
-// finish reports the build to the town when a fingerprint is set, then returns
-// code: a build that did not finish escalates (tried twice), and one that did
-// clears the escalation. If neither try reaches the town the build log, which
-// is where this process writes, is the last record.
+// ownedProblem says why an owned directory must not be removed, or "" when it
+// may be. It is the installer's own directory when it carries the name the
+// installer makes, is a real directory (not a symbolic link, not a file), and
+// sits directly in the system temp directory once both are resolved. The
+// directory is removed with removeAll, so a mistyped --owned must not name
+// anything else.
+func (s system) ownedProblem(path string) string {
+	if path == "" {
+		return ""
+	}
+	clean := filepath.Clean(path)
+	base := filepath.Base(clean)
+	switch {
+	case !filepath.IsAbs(clean):
+		return "not an absolute path"
+	case !strings.HasPrefix(base, ownedPrefix) || base == ownedPrefix:
+		return "not named " + ownedPrefix + "XXXXXX as the installer makes it"
+	}
+	info, err := s.lstat(clean)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "it does not exist"
+	case err != nil:
+		return "it cannot be examined: " + err.Error()
+	case info.Mode()&fs.ModeSymlink != 0:
+		return "it is a symbolic link"
+	case !info.IsDir():
+		return "it is not a directory"
+	}
+	parent, err := s.evalSymlinks(filepath.Dir(clean))
+	if err != nil {
+		return "its parent cannot be resolved: " + err.Error()
+	}
+	temp, err := s.evalSymlinks(s.tempDir())
+	if err != nil {
+		return "the temp directory cannot be resolved: " + err.Error()
+	}
+	if parent != temp {
+		return "its parent " + parent + " is not the temp directory " + temp
+	}
+	return ""
+}
+
+// removeOwned removes the directory the installer handed over. The supervisor's
+// own binary is already loaded, so removing it does not stop the supervisor. A
+// directory that cannot be removed is said in the log, since it is left behind.
+func (s system) removeOwned(cfg Config) {
+	if cfg.Owned == "" {
+		return
+	}
+	if err := s.removeAll(cfg.Owned); err != nil {
+		fmt.Fprintf(cfg.Stderr, "polecat image: could not remove %s: %v\n", cfg.Owned, err)
+	}
+}
+
+// finish removes the directory the build owns, then reports the build to the
+// town when a fingerprint is set, and returns code: a build that did not finish
+// escalates (tried twice), and one that did clears the escalation. If neither
+// try reaches the town the build log, which is where this process writes, is the
+// last record.
 func (s system) finish(cfg Config, code int) int {
+	s.removeOwned(cfg)
 	if cfg.Fingerprint == "" || cfg.GT == "" {
 		return code
 	}
