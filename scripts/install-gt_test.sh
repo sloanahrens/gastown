@@ -149,7 +149,8 @@ LCTL
   # go stub: install-gt.sh builds cmd/install-lock and cmd/image-supervisor from
   # its own checkout (-o names the output, the last argument the package). Hand
   # it the binary the suite built once, instead of a compile per case (gt-1jgci,
-  # gt-k6v12). fail_go_supervisor fails only the supervisor's build.
+  # gt-k6v12). fail_go_supervisor fails only the supervisor's build, and the
+  # supervisor_standin marker gives a case the stand-in described below.
   cat > "$t/stubs/go" <<GO
 #!/usr/bin/env bash
 echo "go \$*" >> "\$T_WORLD/go.log"
@@ -166,7 +167,7 @@ for a in "\$@"; do
 done
 [ -n "\$out" ] || { echo "stub go: no -o" >&2; exit 2; }
 case "\$pkg" in
-  *image-supervisor) cp "$SUPERVISOR_HELPER" "\$out" ;;
+  *image-supervisor) if [ -e "\$T_WORLD/supervisor_standin" ]; then cp "$SUPERVISOR_STANDIN" "\$out"; else cp "$SUPERVISOR_HELPER" "\$out"; fi ;;
   # lock_wait_recorder: the install-lock position gets the recorder instead, so
   # a case can read the argv the script hands the helper without ever holding
   # the lock (gt-d8aul).
@@ -283,6 +284,25 @@ trap cleanup_world_template EXIT
   || { echo "FAIL: cannot build cmd/install-lock for the lock cases"; exit 1; }
 (cd "$SCRIPT_DIR/.." && CGO_ENABLED=0 go build -buildvcs=false -o "$SUPERVISOR_HELPER" ./cmd/image-supervisor) \
   || { echo "FAIL: cannot build cmd/image-supervisor for the image cases"; exit 1; }
+# The stand-in supervisor a world marked `supervisor_standin` gets instead: it
+# writes its pid, holds the start handshake a detached build makes off for
+# SUPERVISOR_STALL seconds (the inherited descriptors stay open, which is what
+# the install waits on), says whether the helper directory it was exec'd from
+# survived that long, and then runs the real supervisor (gt-p5pjs). A pid file
+# is written before the stall so every case can end it.
+SUPERVISOR_STANDIN="$LOCK_HELPER_DIR/image-supervisor-standin"
+sed "s|__REAL__|$SUPERVISOR_HELPER|" > "$SUPERVISOR_STANDIN" <<'STANDIN'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$T_WORLD/supervisor.pid"
+sleep "${SUPERVISOR_STALL:-0}"
+if [ ! -d "$(dirname "$0")" ]; then
+  echo "standin: the install removed the helper directory before the supervisor started" >&2
+  exit 1
+fi
+echo "started" >> "$T_WORLD/supervisor.log"
+exec "__REAL__" "$@"
+STANDIN
+chmod +x "$SUPERVISOR_STANDIN"
 # The image cases exec the real plugin, whose run.sh is an exec shim of
 # plugins/polecat-image/bin/polecat-image — a binary only `make build` writes,
 # and the stub worlds run no make build. Built once here, as the helpers above
@@ -1451,6 +1471,43 @@ rc2=$( LOCK_WAIT=1 run_install "$T" --sha "$(cat "$T/c2")" )
   || fail "no-image-first: a second install was refused the lock (rc=$rc2) while the image build ran"
 # End the detached build: it would otherwise outlive the case by its sleep.
 kill "$(cat "$T/image-run.pid" 2>/dev/null)" 2>/dev/null || true
+
+# --- Case 50b: the install keeps the helper directory a detached build execs
+# its supervisor from until that exec has happened (gt-p5pjs). A stand-in
+# supervisor holds the start handshake off for three seconds and fails if the
+# directory is gone by then — which is what a run that removed first would leave
+# behind, since its own work after the launch is far shorter than three
+# seconds. The directory is still removed at the end, so the wait does not trade
+# the race for a leak. ---
+T=$(make_world); image_stub "$T"
+: > "$T/supervisor_standin"
+install_stub "$T" "$(cat "$T/c1")"
+mkdir -p "$T/tmpdir"
+rc=$( TMPDIR="$T/tmpdir" SUPERVISOR_STALL=3 IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --no-image-first )
+wait_for "$T/image-calls.log" || true
+[ "$rc" = "0" ] && grep -qx "started" "$T/supervisor.log" 2>/dev/null \
+  && grep -q "^gt version $(cat "$T/c2")" "$T/image-calls.log" 2>/dev/null \
+  && ! grep -q "No such file or directory" "$T/image.log" 2>/dev/null \
+  && [ -z "$(ls -A "$T/tmpdir")" ] \
+  && pass "no-image-first: the helper directory outlives the detached build's exec, and is still removed" \
+  || fail "no-image-first start handoff: rc=$rc started=$(cat "$T/supervisor.log" 2>/dev/null) calls=$(cat "$T/image-calls.log" 2>/dev/null) left=$(ls -A "$T/tmpdir" 2>/dev/null | tr '\n' ' ') log=$(tail -3 "$T/image.log" 2>/dev/null)"
+kill "$(cat "$T/supervisor.pid" 2>/dev/null)" 2>/dev/null || true
+
+# --- Case 50c: a runner that never reaches its supervisor cannot hold the
+# install. Past INSTALL_GT_IMAGE_START_WAIT the install stops waiting, says so,
+# and removes the helper directory as it always did (gt-p5pjs). ---
+T=$(make_world); image_stub "$T"
+: > "$T/supervisor_standin"
+install_stub "$T" "$(cat "$T/c1")"
+start=$(date +%s)
+rc=$( SUPERVISOR_STALL=10 INSTALL_GT_IMAGE_START_WAIT=1 IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat "$T/c2")" --no-image-first )
+elapsed=$(( $(date +%s) - start ))
+[ "$rc" = "0" ] && [ "$elapsed" -lt 10 ] \
+  && grep -q "did not reach its supervisor within 1s" "$T/run.out" \
+  && [ "$(tail -1 "$T/run.out" | cut -d' ' -f2-3)" = "RESULT installed" ] \
+  && pass "no-image-first: a runner that never reaches its supervisor is waited for no longer than the bound" \
+  || fail "no-image-first start bound: rc=$rc elapsed=${elapsed}s out=$(tail -3 "$T/run.out")"
+kill "$(cat "$T/supervisor.pid" 2>/dev/null)" 2>/dev/null || true
 
 # --- Case 51: under --no-image-first a build that fails after the swap is not
 # the install's failure: the new binary and its restart marker stand, the
