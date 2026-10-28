@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/metrics"
-	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -39,16 +38,15 @@ place.`,
 	},
 }
 
-// runMetricsAnalyse runs the daily analysis against the town's own checkout and
-// prints its receipt. It is the only place the command wires the real
-// environment; tests call runMetricsAnalyseWith.
+// runMetricsAnalyse runs the daily analysis against town and prints its
+// receipt. It is the only place the command wires the real environment; tests
+// call runMetricsAnalyseWith.
+//
+// Nothing here needs the gt source checkout: the extract runs in process inside
+// the town (gt-fsoh3), so a town whose gastown/ holds no cmd/gt/main.go still
+// analyses.
 func runMetricsAnalyse(ctx context.Context, out io.Writer, town string) error {
-	repo, err := version.GetRepoRootForTown(town)
-	if err != nil {
-		return fmt.Errorf("analyse: %w", err)
-	}
 	return runMetricsAnalyseWith(ctx, out, metrics.OSEnv(town), metrics.AnalysisOptions{
-		Repo:        repo,
 		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
 		MangoBin:    filepath.Join(town, ".runtime", "metrics", "bin", "mango"),
 	})
