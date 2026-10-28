@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/lock"
 )
@@ -17,14 +19,25 @@ import (
 // wanted it for its own work defers rather than waiting for a build to finish.
 var ErrLockHeld = errors.New("polecat-image lock is held")
 
+// WithLockOptions carries the two seams a caller outside a plugin run answers:
+// where the run's log lines go, and the clock that measures a lock's age. Its
+// zero value gives a plugin run's own defaults.
+type WithLockOptions struct {
+	// Out receives the run's log lines, such as a stale lock's takeover; nil
+	// sends them to os.Stdout, as a plugin run does.
+	Out io.Writer
+	// Now is the clock a lock's age is measured by; nil means time.Now.
+	Now func() time.Time
+}
+
 // WithLock runs fn while holding the plugin lock — the one every build and push
 // holds — and releases it when fn returns, also when fn fails.
 //
 // A lock another run holds returns ErrLockHeld without running fn, and one a
-// dead run left behind is taken over as a plugin run takes it. An error reports
-// a lock that could not be read or made, never ErrLockHeld.
-func WithLock(ctx context.Context, cfg Config, fn func(context.Context) error) error {
-	r := &Run{Cfg: cfg}
+// dead run left behind is taken over as a plugin run takes it. Any other error
+// is fn's own, or the lock's when it could not be read or made.
+func WithLock(ctx context.Context, cfg Config, opts WithLockOptions, fn func(context.Context) error) error {
+	r := &Run{Cfg: cfg, out: opts.Out, now: opts.Now}
 	took, err := r.TakeLock()
 	if err != nil {
 		return fmt.Errorf("take the plugin lock %s: %w", cfg.LockDir, err)
