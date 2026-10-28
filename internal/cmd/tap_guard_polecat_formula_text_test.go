@@ -25,17 +25,20 @@ type polecatFormulaCommand struct {
 // since a text spanning lines is refused on the line that opens it.
 func polecatFormulaRefusedAt(cmd polecatFormulaCommand) int {
 	for i, line := range strings.Split(cmd.text, "\n") {
-		if polecatFormulaRefusal(line) != "" {
+		if polecatFormulaJudge(line).refuses() {
 			return cmd.at + i
 		}
 	}
 	return polecatFormulaBeadWriteLine(strings.Split(cmd.text, "\n"), cmd.at)
 }
 
-// polecatFormulaViolation is one command the guard refuses.
+// polecatFormulaViolation is one command the guard refuses, carrying the
+// guard's whole verdict so a failing scan prints the same guidance a polecat's
+// refused command would show.
 type polecatFormulaViolation struct {
-	at     int
-	reason string
+	at          int
+	reason      string
+	alternative string
 }
 
 // polecatFormulaBeadWrite matches the words of a bead text write the guard
@@ -43,11 +46,17 @@ type polecatFormulaViolation struct {
 // the line its fence opened.
 var polecatFormulaBeadWrite = regexp.MustCompile(`\b(?:bead (?:comment|note)|bd (?:comments?\b|note\b))`)
 
+// polecatFormulaProseWrite matches the whole command a prose line names, from
+// the tool word on, so a bead write in the middle of a sentence is judged the
+// way an agent copying it would run it.
+var polecatFormulaProseWrite = regexp.MustCompile(`\b(?:gt\s+bead\s+(?:comment|note)|bd\s+(?:comments?\b|note\b))`)
+
 // polecatFormulaCommands returns every command one formula carries: each fenced
 // block read whole, as the shell reads its lines together; and outside the
-// fences, each markdown code span plus each line whose first word names gt or
-// bd, since a command an agent copies out of prose lives in one or the other.
-// A fence left open runs to the end of the file, as a renderer reads it.
+// fences, each markdown code span, each line whose first word names gt or bd,
+// and each bead write named mid-sentence, since those are the places a command
+// an agent copies out of prose lives. A fence left open runs to the end of the
+// file, as a renderer reads it.
 func polecatFormulaCommands(content string) []polecatFormulaCommand {
 	var out []polecatFormulaCommand
 	var block []string
@@ -92,16 +101,47 @@ func polecatFormulaBeadWriteLine(block []string, blockAt int) int {
 	return blockAt
 }
 
-// polecatFormulaProseCommands returns the commands one prose line carries.
+// polecatFormulaProseCommands returns the commands one prose line carries: each
+// code span, a line that starts with gt or bd, and a bead write named partway
+// through a sentence with no backticks around it.
 func polecatFormulaProseCommands(line string, at int) []polecatFormulaCommand {
 	var out []polecatFormulaCommand
 	for _, span := range polecatFormulaCodeSpans(line) {
 		out = append(out, polecatFormulaCommand{at: at, text: span})
 	}
-	if words := strings.Fields(line); len(words) > 0 && (words[0] == "gt" || words[0] == "bd") {
-		out = append(out, polecatFormulaCommand{at: at, text: line})
+	prose := polecatFormulaProseText(line)
+	if words := strings.Fields(prose); len(words) > 0 && (words[0] == "gt" || words[0] == "bd") {
+		out = append(out, polecatFormulaCommand{at: at, text: prose})
+	} else if loc := polecatFormulaProseWrite.FindStringIndex(prose); loc != nil {
+		out = append(out, polecatFormulaCommand{at: at, text: prose[loc[0]:]})
 	}
 	return out
+}
+
+// polecatFormulaProseText blanks the text of each code span, keeping the line's
+// length and offsets, so a bead write inside backticks is judged once, as the
+// span.
+func polecatFormulaProseText(line string) string {
+	var b strings.Builder
+	rest := line
+	for {
+		open := strings.IndexByte(rest, '`')
+		if open < 0 {
+			b.WriteString(rest)
+			return b.String()
+		}
+		tail := rest[open+1:]
+		end := strings.IndexByte(tail, '`')
+		if end < 0 {
+			// An unmatched backtick leaves the rest of the line as prose.
+			b.WriteString(rest)
+			return b.String()
+		}
+		b.WriteString(rest[:open+1])
+		b.WriteString(strings.Repeat(" ", end))
+		b.WriteByte('`')
+		rest = tail[end+1:]
+	}
 }
 
 // polecatFormulaCodeSpans returns the text inside each backtick-quoted span of a
@@ -115,12 +155,12 @@ func polecatFormulaCodeSpans(line string) []string {
 			return spans
 		}
 		rest := line[open+1:]
-		close := strings.IndexByte(rest, '`')
-		if close < 0 {
+		end := strings.IndexByte(rest, '`')
+		if end < 0 {
 			return spans
 		}
-		spans = append(spans, rest[:close])
-		line = rest[close+1:]
+		spans = append(spans, rest[:end])
+		line = rest[end+1:]
 	}
 }
 
@@ -129,19 +169,36 @@ func polecatFormulaCodeSpans(line string) []string {
 func polecatFormulaViolations(content string) []polecatFormulaViolation {
 	var out []polecatFormulaViolation
 	for _, cmd := range polecatFormulaCommands(content) {
-		if reason := polecatFormulaRefusal(cmd.text); reason != "" {
-			out = append(out, polecatFormulaViolation{at: polecatFormulaRefusedAt(cmd), reason: reason})
+		if verdict := polecatFormulaJudge(cmd.text); verdict.refuses() {
+			out = append(out, polecatFormulaViolation{
+				at:          polecatFormulaRefusedAt(cmd),
+				reason:      verdict.reason,
+				alternative: verdict.alternative,
+			})
 		}
 	}
 	return out
 }
 
-// polecatFormulaRefusal returns the guard's reason for refusing a command run in
-// a polecat's session, "" when it accepts it. The tokens are built the way the
-// guard builds them: heredoc bodies are data, so they come off first.
-func polecatFormulaRefusal(command string) string {
-	reason, _ := matchesPolecatAttribution(shellTokenize(stripHeredocBodies(command)), true, nil)
-	return reason
+// polecatFormulaVerdict is the guard's whole answer for one command: the reason
+// it refuses the command and the alternative text it prints beneath that reason.
+// Both travel together so neither is dropped on the way to a failure message.
+type polecatFormulaVerdict struct {
+	reason      string
+	alternative string
+}
+
+// refuses reports whether the guard refused the command. An empty reason is the
+// guard's own acceptance: matchesPolecatAttribution has no third, unjudged
+// answer, so nothing reads as accepted because the scan could not judge it.
+func (v polecatFormulaVerdict) refuses() bool { return v.reason != "" }
+
+// polecatFormulaJudge returns the guard's verdict for a command run in a
+// polecat's session. The tokens are built the way the guard builds them: heredoc
+// bodies are data, so they come off first.
+func polecatFormulaJudge(command string) polecatFormulaVerdict {
+	reason, alternative := matchesPolecatAttribution(shellTokenize(stripHeredocBodies(command)), true, nil)
+	return polecatFormulaVerdict{reason: reason, alternative: alternative}
 }
 
 // TestPolecatFormulaScanJudgesEachShape pins both verdicts of the scan on
@@ -170,7 +227,7 @@ func TestPolecatFormulaScanJudgesEachShape(t *testing.T) {
 			formula: "description = \"\"\"\n```bash\n" +
 				"gt bead comment {{issue}} \"$(cat <<'EOF'\ndoc-audit run\nEOF\n)\"\n" +
 				"```\n\"\"\"\n",
-			want: []polecatFormulaViolation{{at: 3, reason: polecatUnresolvedTextReason}},
+			want: []polecatFormulaViolation{{at: 3, reason: polecatUnresolvedTextReason, alternative: polecatUnresolvedTextAlt}},
 		},
 		{
 			// The shape deep-review-run step 7 had.
@@ -179,19 +236,26 @@ func TestPolecatFormulaScanJudgesEachShape(t *testing.T) {
 				"gt bead note {{issue}} \"finding: x gt-1\"\n" +
 				"gt bead comment {{issue}} \"$(cat $D/digest.md)\"\n" +
 				"```\n\"\"\"\n",
-			want: []polecatFormulaViolation{{at: 4, reason: polecatUnresolvedTextReason}},
+			want: []polecatFormulaViolation{{at: 4, reason: polecatUnresolvedTextReason, alternative: polecatUnresolvedTextAlt}},
 		},
 		{
 			// The gap a fence-only scan leaves: the step named in a code span.
 			name:    "refused command in a prose code span",
 			formula: "description = \"\"\"\nThen run `gt bead note {{issue}} \"$(cat $D/notes.txt)\"` and stop.\n\"\"\"\n",
-			want:    []polecatFormulaViolation{{at: 2, reason: polecatUnresolvedTextReason}},
+			want:    []polecatFormulaViolation{{at: 2, reason: polecatUnresolvedTextReason, alternative: polecatUnresolvedTextAlt}},
 		},
 		{
 			// A command outside the fences with no backticks around it.
 			name:    "refused command on a bare prose line",
 			formula: "description = \"\"\"\ngt bead note {{issue}} \"$(cat $D/notes.txt)\"\n\"\"\"\n",
-			want:    []polecatFormulaViolation{{at: 2, reason: polecatUnresolvedTextReason}},
+			want:    []polecatFormulaViolation{{at: 2, reason: polecatUnresolvedTextReason, alternative: polecatUnresolvedTextAlt}},
+		},
+		{
+			// A step named partway through a sentence, with no backticks and
+			// no line start to mark it.
+			name:    "refused command mid-sentence in prose",
+			formula: "description = \"\"\"\nThen record it with gt bead note {{issue}} \"$(cat $D/notes.txt)\" and stop.\n\"\"\"\n",
+			want:    []polecatFormulaViolation{{at: 2, reason: polecatUnresolvedTextReason, alternative: polecatUnresolvedTextAlt}},
 		},
 		{
 			// An expansion later in the text cannot build the marker, so the
@@ -258,8 +322,9 @@ func TestEmbeddedFormulasPostBeadTextTheGuardAccepts(t *testing.T) {
 			t.Fatalf("rel %s: %v", path, err)
 		}
 		for _, cmd := range cmds {
-			if reason := polecatFormulaRefusal(cmd.text); reason != "" {
-				t.Errorf("%s:%d: the guard refuses this bead text (%s)", filepath.ToSlash(rel), polecatFormulaRefusedAt(cmd), reason)
+			if verdict := polecatFormulaJudge(cmd.text); verdict.refuses() {
+				t.Errorf("%s:%d: the guard refuses this bead text (%s); a polecat would be told: %s",
+					filepath.ToSlash(rel), polecatFormulaRefusedAt(cmd), verdict.reason, verdict.alternative)
 			}
 		}
 	}

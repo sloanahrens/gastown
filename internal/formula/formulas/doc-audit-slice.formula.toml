@@ -37,8 +37,7 @@ it defines in front of you. They are the checklist.
 names the rule ids applied: `docs: R3 R5 on docs/reference.md ({{issue}})`.
 
 **5. Post the run comment on your bead. This is the audit's output.** Before
-editing this block, read the bead-text rule in directives/polecat.md: the comment
-is one single-quoted argument, so the tap guard reads the text as written.
+editing this block, follow the bead-text rule in directives/polecat.md.
 ```bash
 gt bead comment {{issue}} 'doc-audit run
 files: <one per line, with the rule ids applied or clean>

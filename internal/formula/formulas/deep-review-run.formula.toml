@@ -135,7 +135,7 @@ With `{{dry_run}}` `true`, file nothing: every confirmed finding is `queued`.
 
 **7. Record the findings, before any cursor.** A `finding:` line per finding a
 bead covers (a batch covers each finding), a `queued:` line per P1 or P2 finding
-past the cap, a `queued:` line per unverified finding (below), and a `reviewed:`
+past the cap, a `queued:` line per unverified finding, and a `reviewed:`
 note per line of
 `$D/reviewed-lines.txt` (already `reviewed: <date> <path>`) and per doc in
 `$D/docs.txt` (`reviewed: <date> <doc>`):
@@ -143,7 +143,7 @@ note per line of
 gt bead note {{issue}} "finding: <fingerprint> <bead id | digest-only>"
 gt bead note {{issue}} "queued: <fingerprint> <P1|P2|P3> <file:line> <claim>"
 gt bead note {{issue}} "<one line of reviewed-lines.txt>"
-gt bead comment {{issue}} 'digest
+cat > /tmp/deep-review-{{issue}}/digest.md <<'EOF'
 landings reviewed: <bead> <commit>
 unparsed=<n>
 slice files, docs read: <one per line>
@@ -152,10 +152,13 @@ filed: 1. <fingerprint> <bead id> <file:line> <claim>
 would file: 1. <fingerprint> <file:line> <claim>
 queued: 1. <fingerprint> <P1|P2|P3> <file:line> <claim>
 refuted=<n> of <total>
-unverified=<n>'
+unverified=<n>
+EOF
+gt bead comment {{issue}} "digest
+$(cat /tmp/deep-review-{{issue}}/digest.md)"
 ```
-A finding past the cap, and every dry-run one, takes a `queued:` line,
-which a later run's step 3 picks up until one names it. A P3 finding takes its `p3:`
+A finding past the cap, and every dry-run one, takes a `queued:` line
+that a later run's step 3 picks up until one names it. A P3 finding takes its `p3:`
 line from step 6 and a `finding:` line once a batch covers it. An older
 run's `digest-only` line makes the fingerprint `seen`.
 
