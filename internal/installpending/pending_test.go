@@ -385,3 +385,18 @@ func TestStoreFor_HonoursTheDaemonDirOverride(t *testing.T) {
 		t.Fatalf("store path with the override = %q, want %q", got, want)
 	}
 }
+
+// TestStoreFor_Production pins the function the daemon calls, whatever
+// INSTALL_GT_DAEMON_DIR holds in the environment running the test: the store
+// is the marker FILE inside Dir(townRoot), never the directory (gt-y2ygl).
+func TestStoreFor_Production(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	path := StoreFor(townRoot).Path()
+	if got := filepath.Base(path); got != FileName {
+		t.Errorf("StoreFor path %q ends in %q, want the marker file %q", path, got, FileName)
+	}
+	if got, want := filepath.Dir(path), Dir(townRoot); got != want {
+		t.Errorf("StoreFor path %q is in %q, want the daemon runtime dir %q", path, got, want)
+	}
+}
