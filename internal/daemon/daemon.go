@@ -206,6 +206,11 @@ type Daemon struct {
 	// opens a *git.Git. Tests hand it a gitfake world.
 	openGitFn func(dir string) daemonGit
 
+	// endSandboxSeat is the step that ends a finished sandbox seat (see
+	// sandboxSeatEnder); nil builds one over the daemon's own seams. Tests
+	// record the seats it was asked to end.
+	endSandboxSeat func(rig, name string, landing sandboxSeatLanding) bool
+
 	// buildCommitFn replaces the daemon's own build commit (see buildCommit)
 	// in tests; nil reads the version package's.
 	buildCommitFn func() string

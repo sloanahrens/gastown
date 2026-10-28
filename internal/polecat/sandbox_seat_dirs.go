@@ -1,0 +1,172 @@
+package polecat
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"time"
+
+	"github.com/gofrs/flock"
+)
+
+// SandboxSeatLockTimeout bounds the wait for a polecat's directory lock, so a
+// wedged holder costs one bounded step rather than a stuck goroutine.
+const SandboxSeatLockTimeout = 30 * time.Second
+
+// ErrSandboxSeatLockBusy is the answer to a seat lock that was not free in
+// time: nothing was read and nothing was removed.
+var ErrSandboxSeatLockBusy = errors.New("polecat directory lock is busy")
+
+// WithSandboxSeatLock runs fn while holding the lock every writer of a polecat's
+// directory takes before it touches it: Manager.Add builds the worktree under
+// it, Manager.Remove deletes it under it, and the reuse paths run under it too.
+// A caller that decides from a seat's facts and then deletes must hold it
+// across both, or a sling can build the very directory the caller removes
+// (gt-sefzt). A lock that is not free in time returns ErrSandboxSeatLockBusy
+// and runs nothing.
+func WithSandboxSeatLock(rigPath, name string, fn func() error) error {
+	if !filepath.IsAbs(rigPath) {
+		return fmt.Errorf("sandbox seat lock: rig path %q is not absolute", rigPath)
+	}
+	if err := requireSandboxSeatSegment("polecat", name); err != nil {
+		return err
+	}
+	lockDir := filepath.Join(rigPath, ".runtime", "locks")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		return fmt.Errorf("creating lock dir: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), SandboxSeatLockTimeout)
+	defer cancel()
+	fl := flock.New(filepath.Join(lockDir, "polecat-"+name+".lock"))
+	locked, err := fl.TryLockContext(ctx, 50*time.Millisecond)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("acquiring the polecat lock for %s: %w", name, err)
+	}
+	if !locked {
+		return fmt.Errorf("%w: %s", ErrSandboxSeatLockBusy, name)
+	}
+	defer func() { _ = fl.Unlock() }()
+	return fn()
+}
+
+// A sandbox seat's work lives in its sandbox: its commits are made and pushed
+// from inside the sandbox, and the host worktree a sling made before the
+// sandbox started never receives them. Once the sandbox is gone and the work
+// has landed, nothing on the host reads that copy again, so the daemon removes
+// it (gt-sefzt). A tmux seat keeps its worktree: that copy is the seat's own.
+
+// sandboxSeatSegmentRe matches a rig or polecat name that is safe as one path
+// component: never empty, hidden, ".", "..", or carrying a separator. Both
+// names are joined into the directories this file deletes, so both are checked
+// before anything is removed.
+var sandboxSeatSegmentRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+func requireSandboxSeatSegment(what, name string) error {
+	if !sandboxSeatSegmentRe.MatchString(name) {
+		return fmt.Errorf("sandbox seat directories: %s %q is not a single path segment", what, name)
+	}
+	return nil
+}
+
+// SandboxSeatHostDirs is the host-side state a sandbox seat leaves behind: its
+// polecat directory, the clone inside it, and the system prompt the host
+// rendered for its sandbox.
+type SandboxSeatHostDirs struct {
+	// PolecatDir is <rig>/polecats/<name>, the polecat's home directory.
+	PolecatDir string
+	// ClonePath is <rig>/polecats/<name>/<rig>, the git worktree a sling made.
+	ClonePath string
+	// PromptFile is <rig>/polecats/.claude/sandbox/system-prompt-<name>.md,
+	// the prompt buildRuntimeArchiveLogging rendered for the sandbox. It sits
+	// in the shared polecats/.claude directory, so only the file goes.
+	PromptFile string
+}
+
+// SandboxSeatHostDirsFor names the host paths of the sandbox seat rig/name.
+func SandboxSeatHostDirsFor(rigPath, rigName, name string) SandboxSeatHostDirs {
+	polecatDir := filepath.Join(rigPath, "polecats", name)
+	return SandboxSeatHostDirs{
+		PolecatDir: polecatDir,
+		ClonePath:  filepath.Join(polecatDir, rigName),
+		PromptFile: filepath.Join(rigPath, "polecats", ".claude", "sandbox", "system-prompt-"+name+".md"),
+	}
+}
+
+// SandboxSeatWorktreeRemover detaches a seat's clone from the rig repository.
+// A nil remover detaches through the rig's own git; a test passes one that
+// starts no process.
+type SandboxSeatWorktreeRemover func(rigPath, clonePath string) error
+
+// RemoveSandboxSeatHostDirs removes the host directories a sandbox seat left
+// and reports every step that could not be finished. It is idempotent: a seat
+// whose directories are already gone is not an error.
+//
+// The remover detaches the clone from the rig repository first, so the
+// worktree entry goes with it; a remover that fails does not stop the removal,
+// which then leaves the entry to the prune below. A rig with no repository at
+// all has no entry to detach and nothing is reported for it.
+func RemoveSandboxSeatHostDirs(rigPath, rigName, name string, remover SandboxSeatWorktreeRemover) error {
+	if !filepath.IsAbs(rigPath) {
+		return fmt.Errorf("sandbox seat directories: rig path %q is not absolute", rigPath)
+	}
+	if err := requireSandboxSeatSegment("rig", rigName); err != nil {
+		return err
+	}
+	if err := requireSandboxSeatSegment("polecat", name); err != nil {
+		return err
+	}
+	dirs := SandboxSeatHostDirsFor(rigPath, rigName, name)
+	if remover == nil {
+		remover = detachRigWorktree
+	}
+	var errs []error
+	if _, err := os.Stat(dirs.ClonePath); err == nil {
+		if err := remover(rigPath, dirs.ClonePath); err != nil {
+			errs = append(errs, fmt.Errorf("detaching worktree %s: %w", dirs.ClonePath, err))
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("checking %s: %w", dirs.ClonePath, err))
+	}
+	// The clone goes even after a failed detach: it is the stale copy, and the
+	// prune below forgets an entry whose worktree is gone.
+	if err := os.RemoveAll(dirs.ClonePath); err != nil {
+		errs = append(errs, fmt.Errorf("removing %s: %w", dirs.ClonePath, err))
+	}
+	if err := os.RemoveAll(dirs.PolecatDir); err != nil {
+		errs = append(errs, fmt.Errorf("removing %s: %w", dirs.PolecatDir, err))
+	}
+	if err := os.Remove(dirs.PromptFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("removing %s: %w", dirs.PromptFile, err))
+	}
+	if err := pruneRigWorktrees(rigPath); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// detachRigWorktree removes clonePath from the rig repository's worktree list.
+// A rig with no repository has no entry, so there is nothing to do.
+func detachRigWorktree(rigPath, clonePath string) error {
+	root := rigGitRepo(rigPath)
+	if root == "" {
+		return nil
+	}
+	return openRigRepo(gitOpener{}, root).WorktreeRemove(clonePath, true)
+}
+
+// pruneRigWorktrees forgets the rig repository's worktree entries whose
+// directories are gone, the cleanup a plain directory delete needs. A rig with
+// no repository has nothing to prune.
+func pruneRigWorktrees(rigPath string) error {
+	root := rigGitRepo(rigPath)
+	if root == "" {
+		return nil
+	}
+	if err := openRigRepo(gitOpener{}, root).WorktreePrune(); err != nil {
+		return fmt.Errorf("pruning the worktrees of %s: %w", root, err)
+	}
+	return nil
+}

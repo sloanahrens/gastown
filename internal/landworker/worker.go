@@ -132,6 +132,11 @@ type Worker struct {
 	// ClearIntent returns the author polecat's seat from submitted to stop
 	// once the worker has finished with its bead. nil skips it.
 	ClearIntent func(w land.Work) error
+	// AfterLanded runs once a pass has put w's bead on the target: after a
+	// new landing, never after a repaired record, a rejection or a failure.
+	// The daemon removes a sandbox seat's host directories here (gt-sefzt).
+	// nil skips it.
+	AfterLanded func(w land.Work)
 	// AgentBeadID names the agent bead a polecat's seat wrote its agent on,
 	// which the worker reads to record the agent each landing ran on
 	// (gt-mukgk.6). The prefix is the town's, so the caller supplies the id;
@@ -1103,6 +1108,11 @@ func (w *Worker) afterLanding(ctx context.Context, work land.Work, res land.Resu
 	}
 	if w.Reverts != nil {
 		w.Reverts.RevertLanded(ctx, work, res)
+	}
+	// Last, so the seat's end never delays or reorders the landing's own
+	// bookkeeping.
+	if w.AfterLanded != nil {
+		w.AfterLanded(work)
 	}
 }
 

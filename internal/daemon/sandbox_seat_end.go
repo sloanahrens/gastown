@@ -1,0 +1,256 @@
+package daemon
+
+import (
+	"path/filepath"
+	"strings"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/supervisor"
+)
+
+// A sandbox seat is single-use. Its work lives in the sandbox: the sling's host
+// worktree is a snapshot the seat's commits never reach, and once the sandbox
+// is gone and the work has landed nothing on the host will read that copy
+// again. The step below removes it, so finished seats stop leaving a polecat
+// directory apiece behind (gt-sefzt). A tmux seat keeps its worktree and is
+// never touched here.
+
+// sandboxSeatLanding is the landing that finished a sandbox seat: the bead, the
+// branch its work was on, and whether the rig's landing record proves that
+// work landed. A landing the record does not prove is unlanded work, which
+// keeps the seat.
+type sandboxSeatLanding struct {
+	BeadID string
+	Branch string
+	Landed bool
+}
+
+// sandboxSeatEnd is what the daemon measured about a seat before deciding
+// whether its host directories may go. Every field is a fact; keepReason is the
+// one place the facts become the decision.
+type sandboxSeatEnd struct {
+	// SandboxSeat is whether the seat's agent is an openshell seat in the
+	// town's settings.
+	SandboxSeat bool
+	// SandboxGone is the gateway's answer that it has no sandbox of the
+	// seat's name.
+	SandboxGone bool
+	// Landed is the landing record's proof that the seat's work is on the
+	// target.
+	Landed bool
+	// Retired is whether the seat's intent record says stop and carries no
+	// operator hold: nothing wants the seat again until work is dispatched to
+	// it, and the operator did not park or freeze it.
+	Retired bool
+	// HookBead is the work the agent bead still hooks, empty after gt done.
+	HookBead string
+	// Branch is the branch the agent bead records for the seat, and
+	// LandedBranch the branch its work was landed from.
+	Branch       string
+	LandedBranch string
+	// CleanupStatus is the git state gt done recorded on the agent bead.
+	CleanupStatus polecat.CleanupStatus
+	// PushFailed is the push failure gt done recorded.
+	PushFailed bool
+}
+
+// keepReason names why the seat's host directories must stay, or "" when they
+// may be removed. Every reason is a fact someone else measured; the first one
+// this file can answer decides. A missing fact keeps the seat: the removal
+// destroys the only host copy of whatever the seat did, so it waits for an
+// answer it can trust (gt-sefzt).
+func (e sandboxSeatEnd) keepReason() string {
+	switch {
+	case !e.SandboxSeat:
+		return "not a sandbox seat: a tmux seat keeps its worktree"
+	case !e.SandboxGone:
+		return "the gateway has not confirmed the sandbox gone"
+	case !e.Landed:
+		return "no landing record proves its work landed (unlanded)"
+	case !e.CleanupStatus.IsSafe():
+		return "cleanup_status=" + orMissing(e.CleanupStatus) + ": unpushed or unrecorded work keeps the seat"
+	case e.PushFailed:
+		return "push_failed=true: the seat's branch never reached origin"
+	case strings.TrimSpace(e.HookBead) != "":
+		return "hook_bead=" + e.HookBead + " is still set"
+	case e.Branch != "" && e.LandedBranch != "" && e.Branch != e.LandedBranch:
+		return "the seat works " + e.Branch + ", not the landed " + e.LandedBranch
+	case !e.Retired:
+		return "the seat's record does not say stop: something still wants it"
+	}
+	return ""
+}
+
+// orMissing names a cleanup status nothing recorded, so a keep reason never
+// ends after the colon with an empty value.
+func orMissing(status polecat.CleanupStatus) string {
+	if strings.TrimSpace(string(status)) == "" {
+		return "<missing>"
+	}
+	return string(status)
+}
+
+// endFinishedSandboxSeat removes the host directories the sandbox seat rig/name
+// left once its landing is recorded and every guard in sandboxSeatEnd agrees
+// nothing of its work is at risk. It reports whether the directories were
+// removed; a kept seat and a failed removal are both logged with their reason.
+//
+// The gateway question is asked before the seat's lock, and the facts a sling
+// changes — the agent bead's hook, branch and cleanup status, and the intent
+// record — are read again under it, immediately before the removal: a sling
+// that starts while the seat is ending writes those, and one that has written
+// them keeps the seat. The step is idempotent, so a seat whose directories are
+// already gone costs one stat and nothing else.
+func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandboxSeatLanding) bool {
+	log := func(format string, args ...any) {
+		h.d.logger.Printf("sandbox seat end %s/%s: "+format, append([]any{rig, name}, args...)...)
+	}
+	fields, err := h.seatAgentFields(rig, name)
+	if err != nil {
+		log("kept: cannot read its agent bead: %v", err)
+		return false
+	}
+	if fields == nil {
+		return false // no agent bead: not a seat this town tracks
+	}
+	seat, ok, err := h.openshellSeatFor(fields.Agent)
+	if err != nil {
+		log("kept: %v", err)
+		return false
+	}
+	if !ok {
+		return false // a tmux seat keeps today's behavior, silently
+	}
+	exists, err := h.sandboxStillExists(seat.gateway, h.sessionName(rig, name))
+	if err != nil {
+		log("kept: cannot ask gateway %q whether the sandbox is gone: %v", seat.gateway, err)
+		return false
+	}
+	rigPath := filepath.Join(h.town(), rig)
+	var (
+		kept    string
+		removed bool
+	)
+	err = polecat.WithSandboxSeatLock(rigPath, name, func() error {
+		fields, err := h.seatAgentFields(rig, name)
+		if err != nil {
+			kept = "cannot read its agent bead: " + err.Error()
+			return nil
+		}
+		if fields == nil {
+			kept = "its agent bead is gone"
+			return nil
+		}
+		rec, err := intent.Read(h.town(), supervisor.IntentSeat(h.seat(rig, name)))
+		if err != nil {
+			kept = "cannot read its intent record: " + err.Error()
+			return nil
+		}
+		end := sandboxSeatEnd{
+			SandboxSeat:   true,
+			SandboxGone:   !exists,
+			Landed:        landing.Landed,
+			Retired:       !rec.Held() && rec.EffectiveDesired() == intent.DesiredStop,
+			HookBead:      fields.HookBead,
+			Branch:        strings.TrimSpace(fields.Branch),
+			LandedBranch:  strings.TrimSpace(landing.Branch),
+			CleanupStatus: polecat.CleanupStatus(fields.CleanupStatus),
+			PushFailed:    fields.PushFailed,
+		}
+		if why := end.keepReason(); why != "" {
+			kept = why
+			return nil
+		}
+		if err := h.removeSeatDirs(rigPath, rig, name); err != nil {
+			kept = "removing its host directories: " + err.Error()
+			return nil
+		}
+		removed = true
+		return nil
+	})
+	switch {
+	case err != nil:
+		log("kept: %v", err)
+		return false
+	case kept != "":
+		log("kept: %s", kept)
+		return false
+	case removed:
+		log("removed its host directories: the seat is finished (landed %s)", landing.BeadID)
+	}
+	return removed
+}
+
+// seatAgentFields reads the polecat's agent bead. A bead that does not exist is
+// nil with no error; a read that failed is an error, never "no bead".
+func (h *patrolScanHost) seatAgentFields(rig, name string) (*beads.AgentFields, error) {
+	id := beads.AgentBeadIDFor(constants.RolePolecat, rig, name, h.town())
+	if id == "" {
+		return nil, nil
+	}
+	_, fields, err := beads.GetAgentBead(h.recoveryBeads(), id)
+	if err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
+// removeSeatDirs removes the host directories of one sandbox seat, through the
+// implementation the host was given: nil is polecat.RemoveSandboxSeatHostDirs,
+// and a test injects one that starts no git.
+func (h *patrolScanHost) removeSeatDirs(rigPath, rig, name string) error {
+	if h.removeSandboxSeatDirs != nil {
+		return h.removeSandboxSeatDirs(rigPath, rig, name)
+	}
+	return polecat.RemoveSandboxSeatHostDirs(rigPath, rig, name, nil)
+}
+
+// startSandboxSeatEnd is the landing worker's after-landing hook: it runs the
+// seat's end off the landing's goroutine, since the gateway question it asks is
+// bounded but slow, and a failed cleanup must never take the landing loop down.
+func (d *Daemon) startSandboxSeatEnd(rigName string, landings *land.LandingsFile, w land.Work) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				d.logger.Printf("landing_worker: %s: sandbox seat end panicked: %v", rigName, r)
+			}
+		}()
+		d.runSandboxSeatEnd(rigName, landings, w)
+	}()
+}
+
+// runSandboxSeatEnd reads the landing record that proves w landed and hands the
+// seat to the end step. A record that cannot be read is an unlanded answer: the
+// seat is kept, because the record is the only proof its work survived.
+func (d *Daemon) runSandboxSeatEnd(rigName string, landings *land.LandingsFile, w land.Work) {
+	name := strings.TrimSpace(w.Worker)
+	if name == "" {
+		return // a crew landing has no seat
+	}
+	if landings == nil {
+		d.logger.Printf("sandbox seat end %s/%s: kept: no landing record to read", rigName, name)
+		return
+	}
+	_, landed, err := landings.Find(w.BeadID, w.Head)
+	if err != nil {
+		d.logger.Printf("sandbox seat end %s/%s: kept: cannot read the landing record: %v", rigName, name, err)
+		return
+	}
+	d.sandboxSeatEnder()(rigName, name, sandboxSeatLanding{
+		BeadID: w.BeadID, Branch: w.Branch, Landed: landed,
+	})
+}
+
+// sandboxSeatEnder is the step that ends one sandbox seat: patrolScanHost's
+// endFinishedSandboxSeat when the daemon was not given one.
+func (d *Daemon) sandboxSeatEnder() func(rig, name string, landing sandboxSeatLanding) bool {
+	if d.endSandboxSeat != nil {
+		return d.endSandboxSeat
+	}
+	h := &patrolScanHost{d: d, sandboxExists: d.sandboxExists}
+	return h.endFinishedSandboxSeat
+}
