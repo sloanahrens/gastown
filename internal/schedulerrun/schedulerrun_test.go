@@ -272,6 +272,75 @@ func TestDispatchReady_ReturnsTheSlingFailure(t *testing.T) {
 	}
 }
 
+// gt-c0nvv: a sling that meets an install mid-cycle leaves its context queued
+// through the cycle a run executes: the deferral is named as the install hold,
+// the context is not counted toward the circuit breaker, and nothing is slung
+// under the install.
+func TestDispatchCycle_InstallDeferralLeavesContextQueued(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	store := installpending.StoreIn(filepath.Join(t.TempDir(), installpending.FileName))
+	if err := store.Write(now.Add(-time.Minute), os.Getpid()); err != nil {
+		t.Fatalf("writing the install-pending marker: %v", err)
+	}
+	slung := 0
+	var errOut strings.Builder
+	r := &runner{opts: Options{Out: io.Discard, ErrOut: &errOut}, deps: Deps{
+		PendingInstall: func(string) (*installpending.Marker, error) { return store.Pending(now) },
+		Sling: func(context.Context, string, capacity.PendingBead) (SlingOutcome, error) {
+			slung++
+			return SlingOutcome{}, nil
+		},
+	}}
+	cycle := r.dispatchCycle(t.Context(), t.TempDir(), 0, map[string]string{}, map[string]bool{})
+
+	if _, err := cycle.RunPlan(capacity.DispatchPlan{
+		ToDispatch: []capacity.PendingBead{{ID: "ctx-1", WorkBeadID: "gt-a"}},
+	}); err != nil {
+		t.Fatalf("RunPlan: %v", err)
+	}
+	if slung != 0 {
+		t.Errorf("the sling ran %d time(s) under a pending install", slung)
+	}
+	if want := "leaving context queued"; !strings.Contains(errOut.String(), want) {
+		t.Errorf("stderr = %q, want the deferred context to be left queued (%q)", errOut.String(), want)
+	}
+	if !strings.Contains(errOut.String(), "an install of gt is pending") {
+		t.Errorf("stderr = %q, want the deferral to name the install", errOut.String())
+	}
+}
+
+// gt-c0nvv: the daemon heartbeat holds for an install like an operator run
+// does, and its log is the only place a queue that does not move says why, so
+// the hold is narrated there too.
+func TestRun_DaemonNarratesAnInstallHold(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	store := installpending.StoreIn(filepath.Join(t.TempDir(), installpending.FileName))
+	if err := store.Write(now.Add(-time.Minute), os.Getpid()); err != nil {
+		t.Fatalf("writing the install-pending marker: %v", err)
+	}
+	var out strings.Builder
+	report, err := Run(t.Context(), Options{
+		TownRoot: t.TempDir(),
+		Actor:    "test",
+		Daemon:   true,
+		Out:      &out,
+		ErrOut:   io.Discard,
+	}, Deps{
+		PendingInstall: func(string) (*installpending.Marker, error) { return store.Pending(now) },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Reason != ReasonInstallPending {
+		t.Fatalf("report = %+v, want the install hold", report)
+	}
+	if want := "Scheduler dispatch held: an install of gt is pending"; !strings.Contains(out.String(), want) {
+		t.Errorf("daemon output = %q, want the install hold narrated (%q)", out.String(), want)
+	}
+}
+
 func TestDropRigHeldBeads_RigEstopRemovesOnlyThatRig(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
