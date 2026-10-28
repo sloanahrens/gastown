@@ -1,7 +1,6 @@
 package testutil
 
 import (
-	"os"
 	"slices"
 	"testing"
 )
@@ -55,48 +54,14 @@ func TestCleanGTEnv_ExtraEnv(t *testing.T) {
 	}
 }
 
-// The bd helpers put bd in machine mode: their Cmd unwraps the envelope, so a
-// caller parsing bd's stdout reads the --json payload. The gt helpers run no
-// bd and inherit the process environment untouched.
-func TestNewBDCommand_InheritsEnv(t *testing.T) {
+// The isolated gt command carries CleanGTEnv of the process environment.
+func TestNewIsolatedGTCommand_SetEnv(t *testing.T) {
 	t.Parallel()
-	cmd := NewBDCommand("version")
-	if !slices.Contains(cmd.Env, "BD_MACHINE=1") {
-		t.Error("NewBDCommand must put bd in machine mode")
+	cmd := NewIsolatedGTCommand("version")
+	if want := CleanGTEnv(); !slices.Equal(cmd.Env, want) {
+		t.Errorf("Env = %q, want %q", cmd.Env, want)
 	}
-	if len(cmd.Env) < len(os.Environ()) {
-		t.Error("NewBDCommand dropped the inherited process environment")
-	}
-	if !slices.Equal(cmd.Args, []string{"bd", "version"}) {
+	if !slices.Equal(cmd.Args, []string{"gt", "version"}) {
 		t.Errorf("Args = %q", cmd.Args)
 	}
 }
-
-// The isolated commands carry CleanGTEnv of the process environment; the bd
-// one adds machine mode on top.
-func TestNewIsolatedCommands_SetEnv(t *testing.T) {
-	t.Parallel()
-	for name, cmd := range map[string]interface {
-		env() []string
-		args() []string
-	}{
-		"bd": isolated{NewIsolatedBDCommand("version").Env, NewIsolatedBDCommand("version").Args},
-		"gt": isolated{NewIsolatedGTCommand("version").Env, NewIsolatedGTCommand("version").Args},
-	} {
-		want := CleanGTEnv()
-		if name == "bd" {
-			want = append(slices.Clone(want), "BD_MACHINE=1")
-		}
-		if !slices.Equal(cmd.env(), want) {
-			t.Errorf("%s: Env = %q, want %q", name, cmd.env(), want)
-		}
-		if !slices.Equal(cmd.args(), []string{name, "version"}) {
-			t.Errorf("%s: Args = %q", name, cmd.args())
-		}
-	}
-}
-
-type isolated struct{ e, a []string }
-
-func (i isolated) env() []string  { return i.e }
-func (i isolated) args() []string { return i.a }

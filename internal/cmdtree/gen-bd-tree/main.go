@@ -37,13 +37,12 @@ func run(bd, source string) error {
 		return err
 	}
 	defer os.RemoveAll(dir)
-	runBd := func(args ...string) ([]byte, error) {
-		cmd := beads.CommandWithPath(bd, dir, append(os.Environ(), "BD_DISABLE_METRICS=1"), args...)
-		cmd.Stderr = os.Stderr
-		return cmd.Output()
-	}
+	// NewPlain with WithBin is the call the explicit argv made: the named
+	// binary, the empty directory, the caller's environment. A failure returns
+	// a CLIError whose text is bd's stderr, so main still prints bd's own words.
+	bdStore := beads.NewPlain(dir, append(os.Environ(), "BD_DISABLE_METRICS=1"), beads.WithBin(bd))
 
-	raw, err := runBd("capabilities", "--json")
+	raw, err := bdStore.Run("capabilities", "--json")
 	if err != nil {
 		return fmt.Errorf("bd capabilities --json: %w", err)
 	}
@@ -52,7 +51,7 @@ func run(bd, source string) error {
 		return err
 	}
 	help := func(path string) (string, error) {
-		out, err := runBd(append(strings.Fields(path), "--help")...)
+		out, err := bdStore.Run(append(strings.Fields(path), "--help")...)
 		return string(out), err
 	}
 	if err := bdsnapshot.MarkSubcommandOnly(&snap, help); err != nil {

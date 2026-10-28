@@ -15,7 +15,6 @@ package cmd
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -468,17 +467,9 @@ func TestIntegrationSchedulerCreatesNoConvoy(t *testing.T) {
 	}
 
 	// Verify: no convoy was created for the sling (HQ beads DB holds none).
-	listArgs := beads.MaybePrependAllowStale([]string{"list", "--label=gt:convoy", "--json"})
-	cmd := beads.CommandWithEnv(hqPath, nil, listArgs...)
-	out, err := cmd.Output()
+	convoys, err := beads.NewPlain(hqPath, nil).List(beads.ListOptions{Label: "gt:convoy"})
 	if err != nil {
 		t.Fatalf("bd list convoys failed: %v", err)
-	}
-	var convoys []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(out, &convoys); err != nil {
-		t.Fatalf("parse convoy list: %v", err)
 	}
 	if len(convoys) != 0 {
 		t.Errorf("scheduling created %d convoy(s), want none: %+v", len(convoys), convoys)
@@ -557,11 +548,8 @@ func TestIntegrationSchedulerBlockedStatusReporting(t *testing.T) {
 
 	// Close the blocker and verify the already-queued work becomes ready without
 	// creating a new sling context.
-	closeCmd := exec.Command("bd", "close", blockerID)
-	closeCmd.Dir = rigPath
-	closeCmd.Env = env
-	if out, err := closeCmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd close blocker %s failed: %v\n%s", blockerID, err, out)
+	if err := beads.NewPlain(rigPath, env).Close(blockerID); err != nil {
+		t.Fatalf("bd close blocker %s failed: %v\n%s", blockerID, err, bdErrOutput(err))
 	}
 
 	listed = getSchedulerList(t, gtBinary, hqPath, env)
@@ -712,11 +700,8 @@ func TestIntegrationSchedulerClosedSourceContextCleansUpFailClosed(t *testing.T)
 	slingToScheduler(t, gtBinary, hqPath, env, readyID, "testrig")
 	slingToScheduler(t, gtBinary, hqPath, env, beadID, "testrig")
 
-	closeCmd := exec.Command("bd", "close", beadID)
-	closeCmd.Dir = rigPath
-	closeCmd.Env = env
-	if out, err := closeCmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd close %s failed: %v\n%s", beadID, err, out)
+	if err := beads.NewPlain(rigPath, env).Close(beadID); err != nil {
+		t.Fatalf("bd close %s failed: %v\n%s", beadID, err, bdErrOutput(err))
 	}
 
 	status := getSchedulerStatus(t, gtBinary, hqPath, env)
@@ -734,11 +719,8 @@ func TestIntegrationSchedulerClosedSourceContextCleansUpFailClosed(t *testing.T)
 		t.Fatalf("dry-run should report exactly one ready bead with closed source queued, got:\n%s", out)
 	}
 
-	closeReadyCmd := exec.Command("bd", "close", readyID)
-	closeReadyCmd.Dir = rigPath
-	closeReadyCmd.Env = env
-	if out, err := closeReadyCmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd close ready source %s failed: %v\n%s", readyID, err, out)
+	if err := beads.NewPlain(rigPath, env).Close(readyID); err != nil {
+		t.Fatalf("bd close ready source %s failed: %v\n%s", readyID, err, bdErrOutput(err))
 	}
 
 	runGTCmdOutput(t, gtBinary, hqPath, env, "scheduler", "run")
@@ -771,17 +753,9 @@ func checkSchedulerSlingDryRun(t *testing.T, hqPath, rigPath, gtBinary string, e
 	}
 
 	// Verify: no convoy created (HQ beads DB should have no convoy issues)
-	listArgs := beads.MaybePrependAllowStale([]string{"list", "--label=gt:convoy", "--json"})
-	cmd := beads.CommandWithEnv(hqPath, nil, listArgs...)
-	out, err := cmd.Output()
+	convoys, err := beads.NewPlain(hqPath, nil).List(beads.ListOptions{Label: "gt:convoy"})
 	if err != nil {
 		t.Fatalf("bd list convoys failed: %v", err)
-	}
-	var convoys []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(out, &convoys); err != nil {
-		t.Fatalf("parse convoy list: %v", err)
 	}
 	if len(convoys) != 0 {
 		t.Errorf("dry-run should NOT create convoys, found %d", len(convoys))
@@ -1373,10 +1347,9 @@ func TestIntegrationSchedulerInvalidJSONContextCleanup(t *testing.T) {
 	})
 
 	// Corrupt the context bead description with invalid JSON.
-	corruptCmd := exec.Command("bd", "update", ctxID, "--description=not valid json {{{")
-	corruptCmd.Dir = hqPath
-	if out, err := corruptCmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd update to corrupt description failed: %v\n%s", err, out)
+	badDescription := "not valid json {{{"
+	if err := beads.NewPlain(hqPath, nil).Update(ctxID, beads.UpdateOptions{Description: &badDescription}); err != nil {
+		t.Fatalf("bd update to corrupt description failed: %v\n%s", err, bdErrOutput(err))
 	}
 
 	// Run scheduler dispatch (non-dry-run triggers cleanup before dispatch).
@@ -1658,10 +1631,8 @@ func checkScheduleBeadRefusesClosed(t *testing.T, hqPath, rigPath, gtBinary stri
 	beadID := createTestBead(t, rigPath, "Closed bead refused by scheduleBead")
 
 	// Close the bead before attempting to schedule.
-	closeCmd := exec.Command("bd", "close", beadID)
-	closeCmd.Dir = rigPath
-	if out, err := closeCmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd close %s failed: %v\n%s", beadID, err, out)
+	if err := beads.NewPlain(rigPath, nil).Close(beadID); err != nil {
+		t.Fatalf("bd close %s failed: %v\n%s", beadID, err, bdErrOutput(err))
 	}
 
 	// Attempt to sling (deferred mode → scheduleBead) — should fail with
@@ -1710,10 +1681,8 @@ func checkScheduleBeadClosedForceDoesNotBypass(t *testing.T, hqPath, rigPath, gt
 
 	beadID := createTestBead(t, rigPath, "Closed bead --force does not bypass")
 
-	closeCmd := exec.Command("bd", "close", beadID)
-	closeCmd.Dir = rigPath
-	if out, err := closeCmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd close %s failed: %v\n%s", beadID, err, out)
+	if err := beads.NewPlain(rigPath, nil).Close(beadID); err != nil {
+		t.Fatalf("bd close %s failed: %v\n%s", beadID, err, bdErrOutput(err))
 	}
 
 	out, err := runGTCmdMayFail(t, gtBinary, hqPath, env,

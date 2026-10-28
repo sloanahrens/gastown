@@ -6,7 +6,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -156,27 +155,19 @@ func initBeadsDBWithPrefix(t *testing.T, dir, prefix string) {
 func createTestIssue(t *testing.T, dir, title string) *beads.Issue {
 	t.Helper()
 
-	args := []string{"create", "--json", "--title", title, "--type", "task",
-		"--description", "Integration test issue"}
-	// CommandWithEnv puts bd in machine mode and unwraps the envelope, so the
-	// unmarshal below reads the --json payload rather than the envelope.
-	cmd := beads.CommandWithEnv(dir, nil, args...)
-	output, err := cmd.Output()
+	issue, err := beads.NewPlain(dir, nil).Create(beads.CreateOptions{
+		Title:       title,
+		Labels:      []string{"gt:task"},
+		Description: "Integration test issue",
+		Priority:    -1,
+	})
 	if err != nil {
-		combinedCmd := exec.Command("bd", args...)
-		combinedCmd.Dir = dir
-		combinedOutput, _ := combinedCmd.CombinedOutput()
-		t.Fatalf("create issue in %s: %v\n%s", dir, err, combinedOutput)
-	}
-
-	var issue beads.Issue
-	if err := json.Unmarshal(output, &issue); err != nil {
-		t.Fatalf("parse create output in %s: %v", dir, err)
+		t.Fatalf("create issue in %s: %v\n%s", dir, err, bdErrOutput(err))
 	}
 	if issue.ID == "" {
 		t.Fatalf("create issue in %s returned empty ID", dir)
 	}
-	return &issue
+	return issue
 }
 
 func hasIssueID(issues []*beads.Issue, id string) bool {

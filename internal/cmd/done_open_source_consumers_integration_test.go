@@ -3,7 +3,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -100,16 +99,11 @@ func TestIntegrationRunDoneLeavesSourceBeadOpenAndReadableByItsConsumers(t *test
 // beadsDir and decodes the answer.
 func showSourceBead(t *testing.T, beadsDir string) *beads.Issue {
 	t.Helper()
-	cmd := beads.CommandWithEnv("", append(os.Environ(), "BEADS_DIR="+beadsDir), "show", "bd-source", "--json")
-	out, err := cmd.Output()
+	issue, err := beads.NewPlain("", append(os.Environ(), "BEADS_DIR="+beadsDir)).Show("bd-source")
 	if err != nil {
 		t.Fatalf("bd show bd-source: %v", err)
 	}
-	var issues []*beads.Issue
-	if err := json.Unmarshal(out, &issues); err != nil || len(issues) != 1 {
-		t.Fatalf("decoding bd show bd-source (%v): %s", err, out)
-	}
-	return issues[0]
+	return issue
 }
 
 // bdLogCalls splits the bd recorder's log into one entry per call. The log is
