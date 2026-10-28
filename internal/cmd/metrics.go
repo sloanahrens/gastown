@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/metrics"
 )
 
 var (
@@ -23,7 +25,36 @@ func init() {
 	metricsCmd.Flags().IntVar(&metricsSince, "since", 0, "Only show data from last N days")
 	metricsCmd.Flags().BoolVar(&metricsDead, "dead", false, "Show commands defined but never invoked")
 
+	for _, sub := range townMetricsCommands {
+		metricsCmd.AddCommand(newTownMetricsCmd(sub.name, sub.short, metrics.Run))
+	}
 	rootCmd.AddCommand(metricsCmd)
+}
+
+// townMetricsCommands are the one-shot steps gt metrics runs: each is one call
+// into the command layer in internal/metrics.
+var townMetricsCommands = []struct{ name, short string }{
+	{metrics.CommandExtract, "Write today's landings, weekly and bead tables into the town's runtime"},
+	{metrics.CommandMango, "Write the mango findings section beside today's tables"},
+	{metrics.CommandBacktest, "Backtest the weekly metrics against the regime events"},
+	{metrics.CommandReport, "Write the dated town metrics digest into the docs directory"},
+	{metrics.CommandAll, "Run extract, mango, backtest and report in order"},
+}
+
+// newTownMetricsCmd is one town-metrics step as a subcommand; the step itself is
+// run, so the command carries no behavior of its own.
+func newTownMetricsCmd(name, short string, run func(context.Context, string, metrics.Commands) error) *cobra.Command {
+	return &cobra.Command{
+		Use:   name,
+		Short: short,
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return run(cmd.Context(), name, metrics.Commands{
+				Today: time.Now().Format(time.DateOnly),
+				Out:   cmd.OutOrStdout(),
+			})
+		},
+	}
 }
 
 var metricsCmd = &cobra.Command{
