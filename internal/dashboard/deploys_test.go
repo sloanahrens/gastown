@@ -836,8 +836,38 @@ func TestDeployReaderCountsTheHealthWindowAndNoMore(t *testing.T) {
 	assert.Len(t, stub.jobsAsked, healthRunWindow, "one jobs call per run of the window: the run past it is never asked for")
 }
 
-// A repo that neither deploys nor has health runs shows nothing extra: the block
-// names an app only once it deploys, and the read costs that repo one list.
+// A repo with no health run is drawn by whether it deploys: an app that does is
+// named with one row per environment saying it has no check yet (gt-b50vn).
+func TestDeployReaderNamesADeployedAppWithNoScheduledChecks(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/beads"},
+		runs:  map[string][]forgejo.ActionRun{"sloan/beads": {testDeployRun(4, "v0.2.0", "success", 20)}},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	require.Len(t, d.Runs, 1)
+	require.Len(t, d.Health, 2)
+	assert.Equal(t, []string{"beads/staging-integration", "beads/prod-smoke"}, healthRowsOf(d.Health))
+	// No check ran, so the rows are neither a pass nor a failure: the strip stays
+	// quiet and nothing is counted.
+	for _, row := range d.Health {
+		assert.True(t, row.NoChecks, "the row says the app has no check yet")
+		assert.Empty(t, row.Status, "there is no run to read a result from")
+		assert.Equal(t, 0, row.Runs, "nothing ran, so nothing is counted as passed")
+		assert.Equal(t, 0, row.Passed)
+		assert.False(t, row.Unread)
+	}
+	assert.Empty(t, d.HealthFailed)
+	assert.Empty(t, d.HealthUnread)
+	assert.Nil(t, d.HealthMark)
+	assert.Equal(t, []string{"sloan/beads"}, stub.healthAsked, "the repo was asked, and answered with no health run")
+	assert.Equal(t, []int64{4}, stub.jobsAsked, "the deploy run's jobs, and no health run's")
+}
+
+// A repo that neither deploys nor has health runs shows nothing extra: the
+// NoChecks rows name an app the block knows because it deployed.
 func TestDeployReaderWithNoDeployOrHealthRunsShowsNothingExtra(t *testing.T) {
 	t.Parallel()
 
@@ -851,34 +881,6 @@ func TestDeployReaderWithNoDeployOrHealthRunsShowsNothingExtra(t *testing.T) {
 	assert.Empty(t, d.HealthFailed)
 	assert.Equal(t, []string{"sloan/gastown"}, stub.healthAsked, "the repo was asked, and answered with no health run")
 	assert.Empty(t, stub.jobsAsked)
-}
-
-// An app that deploys and has no scheduled check yet is named in the block, one
-// row per environment, and each row says it has no check rather than a result.
-// No check ran, so the rows are neither a pass nor a failure: the strip stays
-// quiet and nothing is counted.
-func TestDeployReaderNamesADeployedAppWithNoScheduledChecks(t *testing.T) {
-	t.Parallel()
-
-	stub := &deployStub{
-		repos: []string{"sloan/beads"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/beads": {testDeployRun(4, "v0.2.0", "success", 20)}},
-	}
-	d := newDeployTestReader(stub, nil).Read()
-
-	require.Len(t, d.Runs, 1)
-	require.Len(t, d.Health, 2)
-	assert.Equal(t, []string{"beads/staging-integration", "beads/prod-smoke"}, healthRowsOf(d.Health))
-	for _, row := range d.Health {
-		assert.True(t, row.NoChecks, "the row says the app has no check yet")
-		assert.Empty(t, row.Status, "there is no run to read a result from")
-		assert.Equal(t, 0, row.Runs, "nothing ran, so nothing is counted as passed")
-		assert.Equal(t, 0, row.Passed)
-		assert.False(t, row.Unread)
-	}
-	assert.Empty(t, d.HealthFailed)
-	assert.Empty(t, d.HealthUnread)
-	assert.Nil(t, d.HealthMark)
 }
 
 // The strip's marker is the newest run's word, so it clears on its own: the next

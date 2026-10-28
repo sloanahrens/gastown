@@ -207,9 +207,9 @@ type DeployHealthRow struct {
 	// Unread marks a row whose newest run's jobs the block could not read. The
 	// page says so rather than drawing the run under it as the newest.
 	Unread bool `json:"unread,omitempty"`
-	// NoChecks marks a row of an app that deploys and has no scheduled check
-	// yet: there is no run to read, so Status, At and the counts are empty, and
-	// the page says the app has no check rather than drawing a result.
+	// NoChecks marks a row of an app that deploys and has no scheduled run yet:
+	// there is no result to draw, and nothing ran, so the row is neither a pass
+	// nor a failure.
 	NoChecks bool `json:"no_checks,omitempty"`
 }
 
@@ -247,9 +247,8 @@ func healthMark(failed, unread []string) *HealthMark {
 // which the block's note carries.
 type Deploys struct {
 	Runs []DeployRun `json:"runs"`
-	// Health is the scheduled checks of every repo that has them: one row per
-	// app and environment. A repo that has deploy runs and no health.yml runs
-	// yet gets its rows marked NoChecks; a repo with neither shows nothing extra.
+	// Health is the scheduled checks, one row per app and environment, and is
+	// empty until a repo deploys or has health.yml runs.
 	Health []DeployHealthRow `json:"health,omitempty"`
 	// HealthFailed names the repos whose newest scheduled check failed — the
 	// strip's red marker. HealthUnread names the repos whose newest check the
@@ -421,8 +420,6 @@ func (r *DeployReader) Read() *Deploys {
 	// rather than left to read as a town with no checks.
 	health := []DeployHealthRow{}
 	var healthFailed, healthUnread, healthMissing []string
-	// The repos that deploy: one with a deploy run and no check yet is named by
-	// noChecksRows, where a repo with neither is not an app the block knows.
 	deployed := make(map[string]bool, len(runs))
 	for _, dr := range runs {
 		deployed[dr.repo] = true
@@ -636,10 +633,8 @@ func (r *DeployReader) healthRows(ctx context.Context, name, owner, repo string,
 	return foldHealth(name, window)
 }
 
-// noChecksRows is an app that deploys and has no health run yet: one row per
-// environment the block draws, each carrying NoChecks and nothing else. It is a
-// row of its own rather than nothing so the page can say the app has no check,
-// and it is neither a pass nor a failure, since no check ran.
+// noChecksRows is the rows of a deployed app with no health run yet: one per
+// environment the block draws, marked NoChecks and carrying nothing else.
 func noChecksRows(name string) []DeployHealthRow {
 	rows := make([]DeployHealthRow, 0, len(healthEnvs))
 	for _, env := range healthEnvs {
