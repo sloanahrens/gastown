@@ -3,10 +3,11 @@
 //
 // The Valid predicates decide whether a name may sit in a URL path or a
 // command. The client applies them to the names its caller passes, returning
-// ErrBadName and sending nothing, and checks a name the registry returns where
-// that name is used: a listing entry when a request names it, a digest when it
-// is read from a response. A name read from the sandbox records is checked as
-// the record is parsed.
+// ErrBadName and sending nothing. A name a listing returns is not checked
+// there: it comes back as read, and the code that uses one checks it first — a
+// repo or ref before it names a request, a listing entry as the plan is built,
+// a digest read from a response as that response is parsed. A name read from
+// the sandbox records is checked as the record is parsed.
 package registry
 
 import (
