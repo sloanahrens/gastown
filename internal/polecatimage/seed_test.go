@@ -317,7 +317,7 @@ func TestCloneSeedRefusesWhatItCannotClone(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if err := CloneSeed(tc.dest, tc.pins, h.run, func(string, ...any) {}); err == nil {
+			if err := CloneSeed(tc.dest, "/cache", tc.pins, h, h.run, func(string, ...any) {}); err == nil {
 				t.Fatal("CloneSeed() = nil, want the pin refused")
 			}
 			if len(h.events) != 0 {
@@ -363,7 +363,7 @@ func TestCloneSeedChecksEachPinOutAtItsCommit(t *testing.T) {
 	h := newSeedHarness(t)
 	dest := t.TempDir()
 	var log []string
-	if err := CloneSeed(dest, twoPins(), h.run, func(format string, args ...any) {
+	if err := CloneSeed(dest, "/cache", twoPins(), h, h.run, func(format string, args ...any) {
 		log = append(log, fmt.Sprintf(format, args...))
 	}); err != nil {
 		t.Fatalf("CloneSeed: %v", err)
@@ -379,6 +379,84 @@ func TestCloneSeedChecksEachPinOutAtItsCommit(t *testing.T) {
 	}
 }
 
+// TestCloneSeedSkipsTheCloneWhenTheMarkerHoldsThePins: the marker the seed pass writes is what
+// makes a rerun free, so an init container that finds it clones nothing and creates nothing
+// (gt-posdj).
+func TestCloneSeedSkipsTheCloneWhenTheMarkerHoldsThePins(t *testing.T) {
+	t.Parallel()
+	h := newSeedHarness(t)
+	h.files["/cache/.seed-pins"] = []byte(cachevol.SeedMarker(twoPins()))
+	dest := filepath.Join(t.TempDir(), "seed")
+	var log []string
+	if err := CloneSeed(dest, "/cache", twoPins(), h, h.run, func(format string, args ...any) {
+		log = append(log, fmt.Sprintf(format, args...))
+	}); err != nil {
+		t.Fatalf("CloneSeed: %v", err)
+	}
+	for _, e := range h.events {
+		if strings.HasPrefix(e, "run: ") || strings.HasPrefix(e, "mkdir: ") {
+			t.Errorf("a seeded claim still ran %q", e)
+		}
+	}
+	if _, err := os.Stat(dest); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a seeded claim created %s: %v", dest, err)
+	}
+	if len(log) != 1 || !strings.Contains(log[0], "nothing to clone") {
+		t.Errorf("log = %v, want the one line saying nothing was cloned", log)
+	}
+}
+
+// TestCloneSeedClonesWhenTheMarkerHoldsOtherPins: a changed commit is a different seed, so the
+// marker alone does not excuse the clone.
+func TestCloneSeedClonesWhenTheMarkerHoldsOtherPins(t *testing.T) {
+	t.Parallel()
+	h := newSeedHarness(t)
+	other := twoPins()
+	other[1].Commit = seedOtherSH
+	h.files["/cache/.seed-pins"] = []byte(cachevol.SeedMarker(other))
+	if err := CloneSeed(t.TempDir(), "/cache", twoPins(), h, h.run, func(string, ...any) {}); err != nil {
+		t.Fatalf("CloneSeed: %v", err)
+	}
+	var clones int
+	for _, e := range h.events {
+		if strings.HasPrefix(e, "run: git clone ") {
+			clones++
+		}
+	}
+	if clones != len(twoPins()) {
+		t.Errorf("a claim seeded from other pins cloned %d of %d rigs: %v", clones, len(twoPins()), h.events)
+	}
+}
+
+// TestCloneSeedRefusesAMarkerItCannotRead: an unreadable marker is not a "not seeded": the Job has
+// to fail rather than clone over a claim whose state it could not see.
+func TestCloneSeedRefusesAMarkerItCannotRead(t *testing.T) {
+	t.Parallel()
+	h := newSeedHarness(t)
+	h.readErr = &fs.PathError{Op: "open", Path: "/cache/.seed-pins", Err: fs.ErrPermission}
+	err := CloneSeed(t.TempDir(), "/cache", twoPins(), h, h.run, func(string, ...any) {})
+	if err == nil || !strings.Contains(err.Error(), "reading the seed marker") {
+		t.Fatalf("CloneSeed() = %v, want the unreadable marker reported", err)
+	}
+	if len(h.events) != 0 {
+		t.Errorf("an unreadable marker still ran %v", h.events)
+	}
+}
+
+// TestCloneSeedRefusesNoClaim: with no claim there is no marker to read, so the clone cannot tell
+// whether it is needed and fails rather than assuming it is.
+func TestCloneSeedRefusesNoClaim(t *testing.T) {
+	t.Parallel()
+	h := newSeedHarness(t)
+	err := CloneSeed(t.TempDir(), "", twoPins(), h, h.run, func(string, ...any) {})
+	if err == nil || !strings.Contains(err.Error(), "no claim") {
+		t.Fatalf("CloneSeed() = %v, want the missing claim refused", err)
+	}
+	if len(h.events) != 0 {
+		t.Errorf("a clone with no claim still ran %v", h.events)
+	}
+}
+
 // TestCloneSeedFailureNamesTheRigAndScrubsTheURL: git quotes the URL it fetched, and the Job's log
 // must carry the pin's rig and commit, not a URL that could hold a credential.
 func TestCloneSeedFailureNamesTheRigAndScrubsTheURL(t *testing.T) {
@@ -388,7 +466,7 @@ func TestCloneSeedFailureNamesTheRigAndScrubsTheURL(t *testing.T) {
 	h.reply = func(SeedCmd) (string, error) {
 		return "fatal: could not read from '" + url + "'\n", errors.New("exit status 128")
 	}
-	err := CloneSeed(t.TempDir(), twoPins()[:1], h.run, func(string, ...any) {})
+	err := CloneSeed(t.TempDir(), "/cache", twoPins()[:1], h, h.run, func(string, ...any) {})
 	if err == nil {
 		t.Fatal("CloneSeed() = nil, want the failed clone")
 	}

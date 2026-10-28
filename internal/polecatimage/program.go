@@ -194,20 +194,22 @@ func trimCacheMain(args []string, stdout, stderr io.Writer) int {
 }
 
 // seedCloneMain runs the seed Job's init container: it checks each pin out under
-// --dest from the pin's clone URL. Exit 3 with a reason on stderr means a pin
-// could not be cloned, and the Job stops before the seed container touches the
-// claim.
+// --dest from the pin's clone URL, unless the claim at --root already holds
+// these pins. Exit 3 with a reason on stderr means a pin could not be cloned or
+// the marker could not be read, and the Job stops before the seed container
+// touches the claim.
 func seedCloneMain(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("seed-clone", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	pinsText := flags.String("pins", "", "the seed pins, as the seed Job renders them")
 	dest := flags.String("dest", defaultSeedSource, "the directory each pinned rig is checked out under")
+	root := flags.String("root", defaultSeedRoot, "the shared cache claim, whose marker says whether the pins are already checked out")
 	if err := flags.Parse(args); err != nil {
 		return 3
 	}
 	pins, err := decodePins(*pinsText)
 	if err == nil {
-		err = CloneSeed(*dest, pins, execSeedRun, outLogf(stdout))
+		err = CloneSeed(*dest, *root, pins, OSFiles{}, execSeedRun, outLogf(stdout))
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "seed-clone: %v\n", err)
