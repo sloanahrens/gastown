@@ -13,8 +13,8 @@
 ## Global constraints
 
 - Go only for new logic; no new shell scripts. The Dockerfile, compose file and plist are config or templates.
-- Tests follow `docs/testing.md` and four rules held inline here: pure functions with fakes; no sleeps (a fake clock drives every wait); no Docker or cluster in the gate; every refusal row has a test that goes red when the guard is removed. Process calls go through an injected argv seam (the `daemonControl.run` pattern).
-- Images: every image reference in a rendered compose file or the Dockerfile comes from one table, `internal/templates/images.go`. The `dind` image is pinned by digest; every other image is pinned to the exact version tag the live stack runs and none uses `latest` or another floating tag. Digest-pinning the rest is a later bead owed by the overseer. A test asserts every image in rendered output is in the table and none is `latest`.
+- Tests follow `docs/testing.md`. This plan adds one rule: every refusal row has a test that goes red when the guard is removed. Process calls go through an injected argv seam (the `daemonControl.run` pattern).
+- Images: every image reference in a rendered compose file or the Dockerfile comes from one table, `internal/templates/images.go`, and each entry is classified `digest`, `tag` or `local`. The `dind` image is `digest`. Every `tag` entry is an exact release or version tag (never `latest`, never untagged): the Dolt and Forgejo family at the version the live stack runs, and `ubuntu:24.04`, the exact release tag the polecat image uses for its base. The daemon image is `local` (`gt-daemon:<rev>`, built by the deployer). Digest-pinning the `tag` entries is a later bead owed by the overseer. A test asserts every image in rendered output is in the table and that each entry's class matches this rule.
 - Paths: no document or test names a personal home path or a person's crew directory; the town root, the scratch town root and the compose project directory are fields or runbook variables.
 - Fail closed everywhere the guard reads state: a missing `state.json` is not permission to start when any other sign of a prior daemon exists (see A7).
 - A Docker error reading supervisor or owner state is "unknown", never "not running". A stale or missing probe file is an error, never healthy.
@@ -96,7 +96,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 
 ### A1: the `daemon.supervisor` setting and the container-mode env constant
 **Depends on:** none. **Files:** modify `internal/config/daemon_config.go`; test in the same package.
-**Goal:** add `Supervisor string \`json:"supervisor,omitempty"\`` to the struct that holds `Patrols`, `func (c *DaemonConfig) SupervisorKind() (string, error)` returning `launchd`, `systemd`, `container` or `""` and an error for any other value, `const ContainerModeEnv = "GT_DAEMON_SUPERVISOR"` with value `container` documented as what compose sets, and `const DaemonContainerName = "gt-town-daemon-1"`, the one container name the compose file, the `docker inspect` target and the owner id all use.
+**Goal:** add `Supervisor string \`json:"supervisor,omitempty"\`` to the struct that holds `Patrols`, `func (c *DaemonConfig) SupervisorKind() (string, error)` returning `launchd`, `systemd`, `container` or `""` and an error for any other value, `const ContainerModeEnv = "GT_DAEMON_SUPERVISOR"` with value `container` documented as what compose sets, and the optional settings `ContainerName` and `ComposeProject` on the same struct, with `func (c *DaemonConfig) ContainerName() string` and `func (c *DaemonConfig) ComposeProject() string` returning the setting or the defaults `const DefaultContainerName = "gt-town-daemon-1"` and `const DefaultComposeProject = "gt-town"`. The name and project are per town, never global, so a scratch town sets its own and can never share the live daemon's.
 **Constraints:** an empty setting keeps today's detection; no behaviour changes elsewhere.
 **Out of scope:** reading the setting anywhere.
 **Gate:** none.
@@ -106,25 +106,26 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 - [ ] an unknown value returns an error naming the accepted values
 - [ ] a config with no `supervisor` key returns `""` and no error
 - [ ] the removal of the unknown-value check makes a test fail
+- [ ] `ContainerName()` and `ComposeProject()` return the defaults when unset and the configured values when set
 
 ### A2: container kind detection and argv
 **Depends on:** A1. **Files:** modify `internal/cmd/daemon_supervisor.go` (`supervisorFilePath`, `detectDaemonSupervisor`); test `internal/cmd/daemon_supervisor_test.go`.
-**Interfaces:** consumes `DaemonConfig.SupervisorKind`; produces a `daemonSupervisor{name: "container", start, stop, bootstrap, load}` whose argv are `docker --context desktop-linux compose -p gt-town -f <file> up -d daemon`, `... stop daemon`, `... up -d` and the human `load` string.
+**Interfaces:** consumes `DaemonConfig.SupervisorKind`; produces a `daemonSupervisor{name: "container", start, stop, bootstrap, load}` whose argv are `docker --context desktop-linux compose -p <DaemonConfig.ComposeProject()> -f <file> up -d daemon`, `... stop daemon`, `... up -d` and the human `load` string.
 **Goal:** when the town setting is `container`, `detectDaemonSupervisor` returns that supervisor and never a launchd or systemd one; the compose file path is `<townRoot>/daemon/container/compose.yml`.
 **Constraints:** argv go through `daemonControl.run`; the `--context` value is a field, default `desktop-linux`. A missing compose file is an error, not "no supervisor".
 **Out of scope:** the compose content (A3), state reading (A4).
 **Gate:** none.
 **Size:** one worker, one landing.
 **Acceptance:**
-- [ ] with `supervisor=container` the three argv are exactly as listed, each carrying `--context desktop-linux`
+- [ ] with `supervisor=container` the three argv are exactly as listed, each carrying `--context desktop-linux`, with the project from the town's config (default `gt-town`)
 - [ ] with `supervisor=container` and no compose file, detection returns an error
 - [ ] with `supervisor` unset on darwin the launchd supervisor is still returned (existing tests unchanged)
 - [ ] removing the `--context` flag from one argv makes a test fail
 
 ### A3: the compose template renderer
 **Depends on:** A1. **Files:** create `internal/templates/daemon_compose.go`, `internal/templates/testdata/daemon-compose.golden.yml`; test in `internal/templates`.
-**Interfaces:** produces `type ComposeSpec struct { Project, Image, TownRoot string; StopGrace time.Duration; DoltHost string }`, `func RenderDaemonCompose(s ComposeSpec) ([]byte, error)`, and the images table `internal/templates/images.go` with `const DoltVersion = "2.3.2"` and `const DaemonBaseImage = "ubuntu:24.04"` (the base image `deploy/polecat/Dockerfile` uses); later tasks add their own entries to the same file.
-**Goal:** render the daemon service: image, `restart: unless-stopped`, `stop_grace_period`, the bind mount of `TownRoot` at the same path, `container_name: ` set to `config.DaemonContainerName`, `GT_DAEMON_SUPERVISOR=container` (`config.ContainerModeEnv`), a pass-through `GT_DAEMON_TAKEOVER: ${GT_DAEMON_TAKEOVER:-}` (empty unless an operator sets it for one start), `DOCKER_HOST=tcp://sweep-dind:2375`, no published ports, no `docker.sock`.
+**Interfaces:** produces `type ComposeSpec struct { Project, ContainerName, Image, TownRoot string; StopGrace time.Duration; DoltHost string }`, `func RenderDaemonCompose(s ComposeSpec) ([]byte, error)`, and the images table `internal/templates/images.go` with `const DoltVersion = "2.3.2"` and `const DaemonBaseImage = "ubuntu:24.04"` (the base image `deploy/polecat/Dockerfile` uses); later tasks add their own entries to the same file.
+**Goal:** render the daemon service: image, `restart: unless-stopped`, `stop_grace_period`, the bind mount of `TownRoot` at the same path, `container_name: ` set to `ComposeSpec.ContainerName`, `GT_DAEMON_CONTAINER_NAME` set to the same value (the daemon's owner id), `GT_DAEMON_SUPERVISOR=container` (`config.ContainerModeEnv`), a pass-through `GT_DAEMON_TAKEOVER: ${GT_DAEMON_TAKEOVER:-}` (empty unless an operator sets it for one start), `DOCKER_HOST=tcp://sweep-dind:2375`, no published ports, no `docker.sock`.
 **Constraints:** golden file; `StopGrace` less than `daemon.ShutdownBudget` is an error. The sweep-dind service is C2's, not here.
 **Out of scope:** `sweep-dind`, the scratch variant, validation with `docker compose config`.
 **Gate:** none.
@@ -134,13 +135,13 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 - [ ] a `StopGrace` below `daemon.ShutdownBudget` returns an error, and a test fails if that check is removed
 - [ ] a test asserts the output contains no `docker.sock` and no `ports:` key
 - [ ] a test asserts the town root appears as both source and target of the bind mount
-- [ ] a test asserts `container_name` equals `config.DaemonContainerName` and the takeover pass-through is present and empty by default
+- [ ] a test asserts `container_name` and `GT_DAEMON_CONTAINER_NAME` both equal `ComposeSpec.ContainerName`, and the takeover pass-through is present and empty by default
 - [ ] a test asserts every image reference in the rendered output is in `images.go` and none is `latest` (the daemon image is the local tag `gt-daemon:<rev>` and is allowed by name)
 
 ### A4: container state reader and status line
 **Depends on:** A2. **Files:** modify `internal/templates/supervisor_state.go`, `internal/cmd/daemon_supervisor.go`; tests alongside.
 **Interfaces:** consumes `templates.SupervisorReader func(kind string) SupervisorState`; produces `ContainerJobState(run func(argv []string) ([]byte, error)) templates.SupervisorReader` and the status line `Supervised: container <name> running <image>`.
-**Goal:** read container state with `docker --context desktop-linux inspect -f '{{.State.Status}} {{.Config.Image}}' <config.DaemonContainerName>` through the injected runner and map it to `SupervisorState`. A container that does not exist (`docker` reports `No such object`) is known and not running, so a recreate that removed the old instance never leaves an unprovable owner; any other runner error maps to unknown.
+**Goal:** read container state with `docker --context desktop-linux inspect -f '{{.State.Status}} {{.Config.Image}}' <DaemonConfig.ContainerName()>` through the injected runner and map it to `SupervisorState`. A container that does not exist (`docker` reports `No such object`) is known and not running, so a recreate that removed the old instance never leaves an unprovable owner; any other runner error maps to unknown.
 **Constraints:** unknown is never reported as not running; `SupervisorJobMissing` and `SupervisorRespawn` keep their meaning for launchd and systemd.
 **Out of scope:** starting or stopping.
 **Gate:** none.
@@ -149,20 +150,20 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 - [ ] `running`, `exited` and `restarting` map to their states with the image name
 - [ ] a runner error other than `No such object` maps to unknown, and a test fails if unknown is mapped to not running
 - [ ] `No such object` maps to known and not running, and a test fails if it maps to unknown
-- [ ] the inspect argv names `config.DaemonContainerName`, the same constant the compose file and the owner id use
+- [ ] the inspect argv names the town's configured container name, the same value the compose file and the owner id use (a scratch town's config inspects the scratch name, never the live one)
 - [ ] `SupervisorStatusLine` renders `Supervised: container gt-town-daemon-1 running <image>` for the running case
 - [ ] the launchd and systemd tests are unchanged and pass
 
 ### A5: the owner `Run` always writes, and container mode
 **Depends on:** A1. **Files:** modify `internal/daemon/daemon.go` (around lines 1252-1259), `internal/daemon/types.go` (`State`); test `internal/daemon/daemon_test.go`.
 **Interfaces:** produces `State.Owner *Owner \`json:"owner,omitempty"\`` with `type Owner struct{ Kind, ID string }`, `func DetectSelf(env func(string) string, hostname string) Owner` and `func containerMode() bool` reading `config.ContainerModeEnv`.
-**Goal:** `Run` writes an owner into every `SaveState`, whatever started it, so state written by a launchd daemon is never ownerless. `DetectSelf` returns, in this order: `Owner{Kind: "container", ID: config.DaemonContainerName}` when `ContainerModeEnv` is `container`; `Owner{Kind: "launchd", ID: <value of XPC_SERVICE_NAME>}` when that variable is set (launchd sets it to the job label); `Owner{Kind: "systemd", ID: <value of INVOCATION_ID>}` when that is set; otherwise `Owner{Kind: "manual", ID: "<hostname>:<pid>"}`. In container mode `Run` also does not write the pid file.
+**Goal:** `Run` writes an owner into every `SaveState`, whatever started it, so state written by a launchd daemon is never ownerless. `DetectSelf` returns, in this order: `Owner{Kind: "container", ID: <value of GT_DAEMON_CONTAINER_NAME>}` when `ContainerModeEnv` is `container` (an empty name in container mode is an error, so the id is never guessed); `Owner{Kind: "launchd", ID: <value of XPC_SERVICE_NAME>}` when that variable is set (launchd sets it to the job label); `Owner{Kind: "systemd", ID: <value of INVOCATION_ID>}` when that is set; otherwise `Owner{Kind: "manual", ID: "<hostname>:<pid>"}`. In container mode `Run` also does not write the pid file.
 **Constraints:** the lock and heartbeat behave as today; every environment read is behind the `env` seam so tests set it. State written by an older binary has no owner; readers treat it as the legacy case (A7).
 **Out of scope:** any reader of the pid file (A6a, A6b), the guard (A7, A8a).
 **Gate:** none.
 **Size:** one worker, one landing.
 **Acceptance:**
-- [ ] `DetectSelf` returns the four owner kinds for four environment fixtures, with the container id equal to `config.DaemonContainerName`
+- [ ] `DetectSelf` returns the four owner kinds for four environment fixtures, with the container id equal to the `GT_DAEMON_CONTAINER_NAME` fixture, and an error for container mode with that variable empty
 - [ ] after `Run` starts under a launchd environment fixture, `state.json` carries `owner.kind == "launchd"` and the label as id
 - [ ] with container mode on, no pid file exists after `Run` starts (fake clock, temp town root) and `owner.kind == "container"`
 - [ ] with container mode off, the pid file is written as before
@@ -233,7 +234,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 ### A8b: the CLI start paths and `--takeover`
 **Depends on:** A8a, A2, A4, R1. **Files:** modify the start paths R1 lists (`internal/cmd/daemon.go`, `spawnDaemonProcess`, `gt up`'s copy, `enable-supervisor`); tests alongside.
 **Goal:** each CLI start path calls the same guard function A8a uses (through the exported wrapper) before it spawns or kickstarts anything, so a refusal reaches the operator before a process is launched; `gt daemon start --takeover` sets `GT_DAEMON_TAKEOVER=1` for that one start (for the container kind it is passed to the `docker compose` process so the compose pass-through carries it in; for launchd it is refused with a message to boot the job out first).
-**Constraints:** the same function is called from every path, no copy; the guard result is identical to what `Run` would decide.
+**Constraints:** the same function is called from every path, no copy; the guard result is identical to what `Run` would decide. A supervisor error (the job state cannot be read, the compose file is missing, the supervisor command fails) refuses the start; no path falls back to a direct spawn of `gt daemon run` when a supervisor is configured.
 **Out of scope:** the cutover command (A9).
 **Gate:** owed live by the overseer at L1: `gt daemon start` against the scratch town while another owner is fresh is refused.
 **Size:** one worker, one landing.
@@ -242,6 +243,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 - [ ] a missing `state.json` with a leftover `daemon.lock` refuses, and with neither file proceeds, in each path's test
 - [ ] a present but unparsable `state.json` refuses in each path's test
 - [ ] `--takeover` for the container kind sets `GT_DAEMON_TAKEOVER=1` in the recorded compose environment when the owner is not running and refuses when it is running or unknown
+- [ ] a supervisor error in each path's test refuses and records no direct spawn argv, and a test fails if the fallback is added
 - [ ] removing the guard call from one path makes that path's test fail
 
 ### A9a: the quiet-gate check
@@ -263,8 +265,8 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 **Goal:** `gt daemon cutover --to container` runs these steps, each with a stated budget and a stated ending when the budget runs out (all waits on the injected clock):
 1. `WaitQuiet` (A9a), budget 30 minutes; on timeout it exits non-zero naming the first blocker and has changed nothing.
 2. `WaitQuiet` again immediately before the next step, same rule.
-3. Boot out the launchd job, then wait for the old daemon to stop: `state.json` shows `running == false` or the heartbeat stops moving, budget `daemon.ShutdownBudget + 30 seconds`; on timeout it does not start the container, prints that the launchd job is unloaded but the old daemon is still writing, and prints the exact `launchctl bootstrap` command to restore it.
-4. Start the container through the supervisor and wait for `state.json` to show `owner == {container, config.DaemonContainerName}` with `running == true`, budget 2 minutes; on timeout it prints that the container started but never took the town and gives the rollback command (`gt daemon cutover --to launchd`) and the `docker logs` command; it does not roll back by itself.
+3. Boot out the launchd job, then wait for proof that the old daemon stopped: `state.json` shows `running == false` and the launchd job reader reports the job not loaded, both known; a heartbeat that merely stopped moving is not proof, because a hung daemon also stops writing. Budget `daemon.ShutdownBudget + 30 seconds`; on timeout it does not start the container, prints that the launchd job is unloaded but the old daemon is not proven stopped, and prints the exact `launchctl bootstrap` command to restore it.
+4. Start the container through the supervisor and wait for `state.json` to show `owner == {container, <the town's configured container name>}` and `running == true`, budget 2 minutes; on timeout it prints that the container started but never took the town and gives the rollback command (`gt daemon cutover --to launchd`) and the `docker logs` command; it does not roll back by itself.
 5. Wait for a second heartbeat from the container, budget `HeartbeatInterval + 1 minute` (6 minutes); on timeout it reports unhealthy with the same rollback command and changes nothing further.
 `--to launchd` does the reverse in the same shape (quiet, stop the container, wait for a clean stop, bootstrap and kickstart the launchd job, wait for its owner and a second heartbeat), with the same budgets and endings. The launchd owner it expects is the one A5's `DetectSelf` writes (kind `launchd`, id the job label), and each step goes through the guard; a clean stop by the old owner is what lets the new owner start (A7 rule 4), so no takeover flag is needed on the normal path.
 **Constraints:** every external call is the injected argv seam; no sleeps, a fake clock drives every wait; the five budgets are named constants in one place.
@@ -274,7 +276,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 **Acceptance:**
 - [ ] the success path to container issues bootout, then the container start, in that order (fake runner records argv)
 - [ ] a not-quiet result at step 1 or step 2 leaves the recorded argv empty, and each of the five waits has a test that runs the fake clock to its budget and asserts the stated ending and message
-- [ ] the step 3 timeout never issues the container start
+- [ ] the step 3 timeout never issues the container start, and a stopped heartbeat with the job still loaded or unknown does not pass step 3 (a test fails if a stopped heartbeat alone is accepted)
 - [ ] the step 4 and step 5 timeouts print the rollback command and issue no further argv
 - [ ] `--to launchd` issues the container stop, then the launchd bootstrap and kickstart in order, after a quiet check
 
@@ -298,14 +300,14 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 ### B2: the probe file schema and atomic writer
 **Depends on:** none. **Files:** create `internal/hostprobe/probes.go`, `internal/hostprobe/probes_test.go`.
 **Interfaces:** produces `type Probes struct { V int; At time.Time; MemFreePct Field[float64]; Disk Field[Disk]; Containers Field[[]string]; CPUIdlePct Field[float64]; TopConsumers Field[[]Consumer]; ExecTaxMS Field[float64] }`, `type Field[T any] struct { Value T; Err string }`, `func Write(path string, p Probes) error` (temp file and rename), `func Read(path string, now time.Time, maxAge time.Duration) (Probes, error)`.
-**Goal:** one JSON schema version 1; `Read` returns an error for a missing file, a bad version or `now - At > maxAge`.
+**Goal:** one JSON schema version 1; `Read` returns an error for a missing file, a bad version, `now - At > maxAge`, or `At` more than 5 seconds after `now` (a future timestamp from a bad clock must not read as fresh).
 **Constraints:** the write is atomic (temp in the same directory, rename); fields carry their own error.
 **Out of scope:** collecting values (B3), the daemon reader (B5).
 **Gate:** none.
 **Size:** one worker, one landing.
 **Acceptance:**
 - [ ] a round trip through `Write` and `Read` returns an equal value
-- [ ] `Read` errors for a missing file, a bad `v` and an `At` older than `maxAge`, and a test fails if the age check is removed
+- [ ] `Read` errors for a missing file, a bad `v`, an `At` older than `maxAge` and an `At` more than 5 seconds in the future, and a test fails if either age check is removed
 - [ ] a field with a non-empty `Err` survives the round trip
 - [ ] the writer leaves no partial file when the rename fails (fake filesystem seam)
 
@@ -453,32 +455,39 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 
 ### D5: `gt daemon container-entrypoint`
 **Depends on:** A5, D4. **Files:** create `internal/cmd/daemon_container_entrypoint.go`; test alongside.
-**Goal:** the container's entrypoint subcommand: refuse to run unless `config.ContainerModeEnv` is `container`; set the git identity from `GIT_USER` and `GIT_EMAIL` (as `docker-entrypoint.sh` does today), run `gt install <townRoot> --git` only when `mayor/town.json` is absent (scratch towns), then exec `gt daemon run`.
-**Constraints:** every command through the injected argv seam; no shell; a live town root (existing `mayor/town.json`) is never reinstalled or `--force`d.
-**Out of scope:** the Dockerfile's `ENTRYPOINT` line beyond naming this subcommand.
+**Interfaces:** consumes `config.ContainerModeEnv`; adds `const ScratchTownEnv = "GT_SCRATCH_TOWN"` and the marker file name `.gt-scratch-town`; produces `func isMountPoint(mountinfo string, path string) bool` over the text of `/proc/self/mountinfo`.
+**Goal:** the container's entrypoint subcommand: refuse to run unless `config.ContainerModeEnv` is `container`; set the git identity from `GIT_USER` and `GIT_EMAIL`; then decide how to start:
+- `mayor/town.json` present: exec `gt daemon run` (never install, never `--force`);
+- `mayor/town.json` absent and `GT_SCRATCH_TOWN` not `1` (the live project never sets it): refuse with a message that the town root has no `mayor/town.json`, so the bind mount is missing or the path is wrong, and run nothing;
+- `mayor/town.json` absent, `GT_SCRATCH_TOWN=1`: install only when all three hold, the town root is a mount point (proved from the mountinfo text), the marker file `.gt-scratch-town` exists in it (created by the runbook, so it is visible from the host and proves this is the scratch directory), and the directory holds nothing else; then run `gt install <townRoot> --git` once and exec `gt daemon run`; otherwise refuse and run nothing.
+**Constraints:** every command through the injected argv seam and the mountinfo text through an injected reader; no shell; a missing or wrong bind mount can never be turned into a fresh town.
+**Out of scope:** the Dockerfile's `ENTRYPOINT` line beyond naming this subcommand; the scratch compose setting `GT_SCRATCH_TOWN` (E1).
 **Gate:** none.
 **Size:** one worker, one landing.
 **Acceptance:**
 - [ ] outside container mode the subcommand returns an error and runs nothing
-- [ ] with an existing `mayor/town.json` no `gt install` argv is recorded
-- [ ] with no `mayor/town.json` exactly one `gt install <root> --git` is recorded, before the daemon exec
-- [ ] the final recorded step is the exec of `gt daemon run`
+- [ ] with `mayor/town.json` present no `gt install` argv is recorded and the final step is the exec of `gt daemon run`
+- [ ] with `mayor/town.json` absent and `GT_SCRATCH_TOWN` unset it refuses and records no argv, and a test fails if the refusal is removed
+- [ ] with `GT_SCRATCH_TOWN=1` each of the three conditions missing in turn (not a mount point, no marker, other files present) refuses and records no install argv
+- [ ] with all three conditions and an absent `mayor/town.json` exactly one `gt install <root> --git` is recorded, before the daemon exec
+- [ ] `isMountPoint` returns true for a path that is a mount target in a mountinfo fixture and false for its parent directory
 
 ---
 
 ## Scratch town and the ladder
 
 ### E1: the scratch compose project
-**Depends on:** A3, C2. **Files:** modify `internal/templates/daemon_compose.go` (a `Scratch bool` and `ScratchDoltImage string` on `ComposeSpec`), a scratch golden; test alongside.
-**Goal:** with `Scratch` set the rendered project is `gt-scratch`, adds a `dolt` service (image `dolthub/dolt-sql-server` at the tag `DoltVersion`, added to `images.go` as `DoltServerImage`; its own volume, internal network only) and bind-mounts the scratch town root (a field, never the live town root; the runbook names a directory under the operator's crew area).
-**Constraints:** a scratch spec whose `TownRoot` equals the live town root is an error.
+**Depends on:** A3, C2, D5. **Files:** modify `internal/templates/daemon_compose.go` (a `Scratch bool` and `ScratchDoltImage string` on `ComposeSpec`), a scratch golden; test alongside.
+**Goal:** with `Scratch` set the rendered project uses the scratch identity and nothing of the live one: project `gt-scratch`, container name `gt-scratch-daemon-1`, its own volume and network names, `GT_SCRATCH_TOWN=1` (for D5), a `dolt` service (image `dolthub/dolt-sql-server` at the tag `DoltVersion`, added to `images.go` as `DoltServerImage`; its own volume, internal network only), and a bind mount of the scratch town root (a field, never the live town root; the runbook names a directory under the operator's crew area and creates the `.gt-scratch-town` marker in it). The scratch town's own settings set `daemon.container_name` and `daemon.compose_project` to the scratch values (A1), so a `gt` pointed at the scratch town inspects and starts only the scratch container.
+**Constraints:** a scratch spec whose `TownRoot` equals the live town root is an error; a scratch spec whose `ContainerName` or `Project` equals `DefaultContainerName` or `DefaultComposeProject` is an error; the scratch render never contains a string that appears in the live render (container name, project, volume, network, socket or town root).
 **Out of scope:** creating the scratch town; Forgejo (E3).
-**Gate:** owed live by the overseer at L1: bring the project up and see the watchdog green for 30 minutes.
+**Gate:** owed live by the overseer at L1: bring the project up and see the watchdog green for 30 minutes, with the live daemon's container and `state.json` untouched.
 **Size:** one worker, one landing.
 **Acceptance:**
 - [ ] the scratch render equals its golden file
-- [ ] a scratch spec with the live town root as `TownRoot` returns an error, and a test fails if that check is removed
-- [ ] the scratch project name and volumes differ from the live project's (test)
+- [ ] a scratch spec with the live town root, the live container name or the live project returns an error, and a test fails if any of the three checks is removed
+- [ ] a test renders the live and the scratch specs and asserts no container name, project, volume or network string of the live render appears in the scratch render
+- [ ] the scratch render sets `GT_SCRATCH_TOWN=1` and the live render does not
 - [ ] the scratch `dolt` service has no published ports
 - [ ] a test asserts the scratch Dolt image tag is `DoltVersion`, the constant D2 uses
 
