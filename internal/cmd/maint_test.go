@@ -32,6 +32,7 @@ type fakeMaintTarget struct {
 
 	policies []diskmaint.Policy
 	applied  []diskmaint.Plan
+	contexts []context.Context
 }
 
 func (f *fakeMaintTarget) Name() string { return f.name }
@@ -40,12 +41,14 @@ func (f *fakeMaintTarget) Measure(context.Context) (diskmaint.Measurement, error
 	return diskmaint.Measurement{}, nil
 }
 
-func (f *fakeMaintTarget) Plan(_ context.Context, p diskmaint.Policy) (diskmaint.Plan, error) {
+func (f *fakeMaintTarget) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, error) {
+	f.contexts = append(f.contexts, ctx)
 	f.policies = append(f.policies, p)
 	return f.plan, f.planErr
 }
 
-func (f *fakeMaintTarget) Apply(_ context.Context, plan diskmaint.Plan) (diskmaint.Result, error) {
+func (f *fakeMaintTarget) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Result, error) {
+	f.contexts = append(f.contexts, ctx)
 	f.applied = append(f.applied, plan)
 	return f.result, f.applyErr
 }
@@ -368,6 +371,13 @@ func TestMaintApplyDefersWhenThePluginLockIsHeld(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("withLock() on a free lock = %v, want none", err)
 	}
+
+	// Once the lock is released the gate must say a push may be writing again:
+	// a flag left set would answer "no push" for every later call, including
+	// ones where a push has started since.
+	if !gate.pushInFlight() {
+		t.Error("pushInFlight() = false after the lock was released, want true")
+	}
 }
 
 func TestMaintInstalledCommitComesFromGTVersion(t *testing.T) {
@@ -465,7 +475,7 @@ func TestMaintTargetsBuildTheRegistryFromTheTownConfig(t *testing.T) {
 	}
 	runner := &fakeMaintRunner{}
 
-	targets, err := maintTargets(context.Background(), town, cfg, 5, runner.run, t.TempDir(), io.Discard)
+	targets, err := maintTargets(context.Background(), town, cfg, 5, maintModePlan, runner.run, t.TempDir(), io.Discard)
 	if err != nil {
 		t.Fatalf("maintTargets() error = %v", err)
 	}
@@ -482,7 +492,7 @@ func TestMaintTargetsBuildTheRegistryFromTheTownConfig(t *testing.T) {
 
 func TestMaintTargetsWithoutARegistryAreNone(t *testing.T) {
 	t.Parallel()
-	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
 	if err != nil {
 		t.Fatalf("maintTargets() error = %v, want none", err)
 	}
@@ -495,23 +505,24 @@ func TestMaintTargetsRefuseARegistryThatIsNotHostPort(t *testing.T) {
 	t.Parallel()
 	for _, value := range []string{"/town/.runtime/sandboxes", "http://localhost:5001"} {
 		cfg := polecatimage.Config{Registry: value}
-		_, err := maintTargets(context.Background(), t.TempDir(), cfg, 5, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+		_, err := maintTargets(context.Background(), t.TempDir(), cfg, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "host:port") {
 			t.Errorf("maintTargets(registry %q) error = %v, want the host:port refusal", value, err)
 		}
 	}
 }
 
-func TestMaintTargetsReportAnUnwritableLedgerDirectory(t *testing.T) {
+func TestMaintApplyRefusesAnUnwritableLedgerDirectory(t *testing.T) {
 	t.Parallel()
 	// A regular file where the town should be is a runtime directory that
-	// cannot exist, the way a town on a read-only or full disk fails.
+	// cannot exist, the way a town on a read-only or full disk fails. An apply
+	// must refuse before it deletes anything it cannot record.
 	town := filepath.Join(t.TempDir(), "town")
 	if err := os.WriteFile(town, []byte("not a directory"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := polecatimage.Config{Registry: "localhost:5001"}
-	_, err := maintTargets(context.Background(), town, cfg, 5, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+	_, err := maintTargets(context.Background(), town, cfg, 5, maintModeApply, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "ledger directory") {
 		t.Fatalf("maintTargets() error = %v, want the ledger directory refusal", err)
 	}
@@ -548,7 +559,7 @@ func TestMaintRunReportsAFailedTownLookup(t *testing.T) {
 	cmd.SetContext(context.Background())
 	cmd.SetOut(io.Discard)
 
-	err := maintRunIn(cmd, func() (string, error) { return "", townErr }, func(string) string { return "" }, maintModePlan, nil)
+	err := maintRunIn(cmd, func() (string, error) { return "", townErr }, maintProductionDeps, func(string) string { return "" }, maintModePlan, nil)
 	if !errors.Is(err, townErr) {
 		t.Fatalf("maintRunIn() error = %v, want the lookup failure", err)
 	}
@@ -570,7 +581,7 @@ func TestMaintProductionDepsRefuseUnreadableInputs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			get := func(key string) string { return tc.env[key] }
-			_, err := maintProductionDeps(context.Background(), io.Discard, t.TempDir(), get)
+			_, err := maintProductionDeps(context.Background(), io.Discard, t.TempDir(), get, maintModePlan)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("maintProductionDeps() error = %v, want one naming %q", err, tc.wantErr)
 			}
@@ -601,9 +612,85 @@ func TestMaintRunReportsAFailedTargetBuild(t *testing.T) {
 		return ""
 	}
 
-	err := maintRunIn(cmd, func() (string, error) { return town, nil }, get, maintModePlan, nil)
+	err := maintRunIn(cmd, func() (string, error) { return town, nil }, maintProductionDeps, get, maintModePlan, nil)
 	if err == nil || !strings.Contains(err.Error(), "config.json could not be read") {
 		t.Fatalf("maintRunIn() error = %v, want the unreadable town settings", err)
+	}
+}
+
+// maintCtxKey marks the value the context tests put in a command's context, so
+// a target can report which context it was handed.
+type maintCtxKey struct{}
+
+func TestMaintRunInPassesTheCommandContext(t *testing.T) {
+	t.Parallel()
+	const marker = "the command's own context"
+	fake := &fakeMaintTarget{
+		name:   "registry",
+		plan:   maintTestPlan(),
+		result: diskmaint.Result{Target: "registry"},
+	}
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.WithValue(context.Background(), maintCtxKey{}, marker))
+	cmd.SetOut(io.Discard)
+	buildDeps := func(context.Context, io.Writer, string, func(string) string, string) (maintDeps, error) {
+		return maintDepsFor(fake), nil
+	}
+
+	if err := maintRunIn(cmd, func() (string, error) { return t.TempDir(), nil }, buildDeps, func(string) string { return "" }, maintModeApply, nil); err != nil {
+		t.Fatalf("maintRunIn(apply) error = %v, want none", err)
+	}
+	if len(fake.contexts) != 2 {
+		t.Fatalf("the target was called %d times, want plan and apply", len(fake.contexts))
+	}
+	for i, ctx := range fake.contexts {
+		if got, _ := ctx.Value(maintCtxKey{}).(string); got != marker {
+			t.Errorf("call %d got a context without the command's value (got %q): an interrupt would not reach the target", i, got)
+		}
+	}
+}
+
+func TestMaintPlanCreatesNoLedgerDirectory(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	get := func(key string) string {
+		switch key {
+		case "POLECAT_IMAGE_REGISTRY":
+			return "localhost:5001"
+		case "HOME":
+			return t.TempDir()
+		}
+		return ""
+	}
+
+	if _, err := maintProductionDeps(context.Background(), io.Discard, town, get, maintModePlan); err != nil {
+		t.Fatalf("maintProductionDeps(plan) error = %v, want none", err)
+	}
+	runtime := filepath.Join(town, ".runtime")
+	if _, err := os.Stat(runtime); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a plan left %s behind (stat error %v): plan is a dry run and must write nothing", runtime, err)
+	}
+}
+
+func TestMaintApplyCreatesTheLedgerDirectory(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	get := func(key string) string {
+		switch key {
+		case "POLECAT_IMAGE_REGISTRY":
+			return "localhost:5001"
+		case "HOME":
+			return t.TempDir()
+		}
+		return ""
+	}
+
+	if _, err := maintProductionDeps(context.Background(), io.Discard, town, get, maintModeApply); err != nil {
+		t.Fatalf("maintProductionDeps(apply) error = %v, want none", err)
+	}
+	info, err := os.Stat(filepath.Join(town, ".runtime", "diskmaint"))
+	if err != nil || !info.IsDir() {
+		t.Fatalf("apply left no ledger directory (stat error %v): a delete it could not record must not run", err)
 	}
 }
 
@@ -640,7 +727,7 @@ func TestMaintExecFailureCarriesTheLastStderrLine(t *testing.T) {
 func TestMaintTargetsRefuseWithoutAHome(t *testing.T) {
 	t.Parallel()
 	cfg := polecatimage.Config{Registry: "localhost:5001"}
-	_, err := maintTargets(context.Background(), t.TempDir(), cfg, 5, (&fakeMaintRunner{}).run, "", io.Discard)
+	_, err := maintTargets(context.Background(), t.TempDir(), cfg, 5, maintModePlan, (&fakeMaintRunner{}).run, "", io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "HOME is unset") {
 		t.Fatalf("maintTargets() error = %v, want the missing HOME", err)
 	}

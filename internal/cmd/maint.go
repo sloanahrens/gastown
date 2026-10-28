@@ -46,9 +46,7 @@ const (
 	maintRegistryContainer = "gt-registry"
 )
 
-// gt maint runs the disk-maintenance targets in this process. A refusal and a
-// held lock are states of the town rather than bad arguments, so both leaves
-// silence the usage block: it would print after the reason and bury it.
+// maintCmd runs the disk-maintenance targets in this process.
 var maintCmd = &cobra.Command{
 	Use:     "maint",
 	GroupID: GroupConfig,
@@ -66,6 +64,9 @@ read its inputs refuses instead of guessing, and both leaves exit non-zero then.
 	RunE: requireSubcommand,
 }
 
+// A refusal and a held lock are states of the town rather than bad arguments,
+// so this leaf silences the usage block: it would print after the reason and
+// bury it.
 var maintPlanCmd = &cobra.Command{
 	Use:          "plan [target]",
 	Short:        "Print the maintenance plan without changing anything (dry run)",
@@ -76,6 +77,8 @@ var maintPlanCmd = &cobra.Command{
 	},
 }
 
+// A deferral and a refused plan are states of the town rather than bad
+// arguments, so this leaf silences the usage block for the same reason as plan.
 var maintApplyCmd = &cobra.Command{
 	Use:          "apply [target]",
 	Short:        "Apply the maintenance plan",
@@ -100,11 +103,19 @@ type maintDeps struct {
 	Keep    int
 }
 
-// runMaint plans each chosen target and, in apply mode, applies the plan it
-// just printed. A target that cannot plan or apply does not stop the others,
-// and every failure is returned joined, so one broken target cannot make a
-// maintenance run read as clean.
+// runMaint is runMaintContext for a caller with no command to take a context
+// from.
 func runMaint(out io.Writer, deps maintDeps, mode, target string) error {
+	return runMaintContext(context.Background(), out, deps, mode, target)
+}
+
+// runMaintContext plans each chosen target and, in apply mode, applies the plan
+// it just printed. Every target call takes ctx, so an interrupted command stops
+// the reads and deletes still queued rather than finishing the run anyway. A
+// target that cannot plan or apply does not stop the others, and every failure
+// is returned joined, so one broken target cannot make a maintenance run read
+// as clean.
+func runMaintContext(ctx context.Context, out io.Writer, deps maintDeps, mode, target string) error {
 	if mode != maintModePlan && mode != maintModeApply {
 		return fmt.Errorf("unknown mode %q: use %s or %s", mode, maintModePlan, maintModeApply)
 	}
@@ -129,7 +140,6 @@ func runMaint(out io.Writer, deps maintDeps, mode, target string) error {
 	if deps.Now != nil {
 		now = deps.Now
 	}
-	ctx := context.Background()
 	var errs []error
 	for _, name := range names {
 		t := targets[name]
@@ -220,19 +230,25 @@ func maintPrintResult(out io.Writer, result diskmaint.Result) {
 	}
 }
 
+// maintDepsBuilder builds a run's deps from the town and the environment; a
+// test injects one so it can drive maintRunIn's whole path without a town.
+type maintDepsBuilder func(ctx context.Context, out io.Writer, town string, get func(string) string, mode string) (maintDeps, error)
+
 // maintRun is the command's entry point.
 func maintRun(cmd *cobra.Command, mode string, args []string) error {
-	return maintRunIn(cmd, workspace.FindFromCwdOrError, os.Getenv, mode, args)
+	return maintRunIn(cmd, workspace.FindFromCwdOrError, maintProductionDeps, os.Getenv, mode, args)
 }
 
-// maintRunIn is maintRun with the town lookup and the environment injected, so
-// a test drives both refusals without depending on where the suite runs.
-func maintRunIn(cmd *cobra.Command, findTown func() (string, error), get func(string) string, mode string, args []string) error {
+// maintRunIn is maintRun with the town lookup, the deps builder and the
+// environment injected, so a test drives every startup refusal without
+// depending on where the suite runs and without a registry or a town.
+func maintRunIn(cmd *cobra.Command, findTown func() (string, error), buildDeps maintDepsBuilder, get func(string) string, mode string, args []string) error {
 	town, err := findTown()
 	if err != nil {
 		return err
 	}
-	deps, err := maintProductionDeps(cmd.Context(), cmd.OutOrStdout(), town, get)
+	ctx := cmd.Context()
+	deps, err := buildDeps(ctx, cmd.OutOrStdout(), town, get, mode)
 	if err != nil {
 		return err
 	}
@@ -240,13 +256,14 @@ func maintRunIn(cmd *cobra.Command, findTown func() (string, error), get func(st
 	if len(args) == 1 {
 		target = args[0]
 	}
-	return runMaint(cmd.OutOrStdout(), deps, mode, target)
+	return runMaintContext(ctx, cmd.OutOrStdout(), deps, mode, target)
 }
 
 // maintProductionDeps builds the deps a real run uses: the targets come from
 // the town's own settings, through the same reader the polecat-image plugin
-// uses, so gt maint and the plugin agree on the registry and the lock.
-func maintProductionDeps(ctx context.Context, out io.Writer, town string, get func(string) string) (maintDeps, error) {
+// uses, so gt maint and the plugin agree on the registry and the lock. Only an
+// apply may create the ledger, so a plan leaves the disk as it found it.
+func maintProductionDeps(ctx context.Context, out io.Writer, town string, get func(string) string, mode string) (maintDeps, error) {
 	cfg, err := polecatimage.ConfigFromEnv(func(key string) string {
 		if key == "POLECAT_IMAGE_TOWN_ROOT" {
 			return town
@@ -260,7 +277,7 @@ func maintProductionDeps(ctx context.Context, out io.Writer, town string, get fu
 	if err != nil {
 		return maintDeps{}, err
 	}
-	targets, err := maintTargets(ctx, town, cfg, keep, maintExecRun, get("HOME"), out)
+	targets, err := maintTargets(ctx, town, cfg, keep, mode, maintExecRun, get("HOME"), out)
 	if err != nil {
 		return maintDeps{}, err
 	}
@@ -290,7 +307,12 @@ func maintKeep(get func(string) string) (int, error) {
 // registry publishes nothing, so it has no registry to prune and gets no
 // target; the first target that cannot be built fails the run rather than
 // leaving a half-built set.
-func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, keep int, run diskmaint.Runner, home string, out io.Writer) (map[string]diskmaint.Target, error) {
+//
+// The ledger directory is made in apply mode alone: a plan is a dry run, so it
+// must not leave a directory behind that was not there before. An apply whose
+// directory cannot be made fails here, before it deletes anything it could not
+// record.
+func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, keep int, mode string, run diskmaint.Runner, home string, out io.Writer) (map[string]diskmaint.Target, error) {
 	targets := map[string]diskmaint.Target{}
 	if cfg.Registry == "" {
 		return targets, nil
@@ -304,8 +326,10 @@ func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, kee
 		return nil, errors.New("cannot locate the colima docker socket: HOME is unset")
 	}
 	ledgerDir := filepath.Join(town, ".runtime", "diskmaint")
-	if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating the maintenance ledger directory: %w", err)
+	if mode == maintModeApply {
+		if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
+			return nil, fmt.Errorf("creating the maintenance ledger directory: %w", err)
+		}
 	}
 	gate := &maintPushGate{cfg: cfg, out: out, now: time.Now}
 	targets[maintTargetRegistry] = registry.NewTarget(registry.Config{
@@ -427,11 +451,16 @@ func (g *maintPushGate) pushInFlight() bool { return !g.held.Load() }
 
 // withLock runs fn under the plugin lock, reporting a held lock as the
 // registry's deferral so the apply leaves the registry alone and says why.
+//
+// held tracks the lock itself, so it falls as soon as WithLock has released it:
+// a flag left set after the release would answer "no push is writing" for every
+// call the run makes afterwards, including ones where a push has since started.
 func (g *maintPushGate) withLock(ctx context.Context, fn func(context.Context) error) error {
 	err := polecatimage.WithLock(ctx, g.cfg, polecatimage.WithLockOptions{Out: g.out, Now: g.now}, func(ctx context.Context) error {
 		g.held.Store(true)
 		return fn(ctx)
 	})
+	g.held.Store(false)
 	if errors.Is(err, polecatimage.ErrLockHeld) {
 		return fmt.Errorf("%w: %w", registry.ErrDeferred, err)
 	}
