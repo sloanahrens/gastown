@@ -77,6 +77,7 @@ func mainRef(digest string) string {
 }
 
 func TestPlanDeletesOldCandidatesBeyondKeep(t *testing.T) {
+	t.Parallel()
 	var tags []TagInfo
 	for i := 1; i <= 8; i++ {
 		tags = append(tags, mkTag(candidateTag(i), dg(digestLabel(i)), int64(i)))
@@ -111,6 +112,7 @@ func TestPlanDeletesOldCandidatesBeyondKeep(t *testing.T) {
 }
 
 func TestPlanKeepsTagSharingDevDigest(t *testing.T) {
+	t.Parallel()
 	shared := dg("defaced")
 	in := input([]TagInfo{
 		mkTag(TagDev, shared, 1),
@@ -132,6 +134,7 @@ func TestPlanKeepsTagSharingDevDigest(t *testing.T) {
 }
 
 func TestPlanKeepsInstalledCommitTag(t *testing.T) {
+	t.Parallel()
 	in := input([]TagInfo{
 		mkTag("c000001", dg("dead0001"), 1),
 		mkTag("c000002", dg("dead0002"), 2),
@@ -153,6 +156,7 @@ func TestPlanKeepsInstalledCommitTag(t *testing.T) {
 }
 
 func TestPlanKeepsInUseDigest(t *testing.T) {
+	t.Parallel()
 	in := input([]TagInfo{
 		mkTag("c000001", dg("dead0001"), 1),
 		mkTag("c000002", dg("dead0002"), 2),
@@ -172,6 +176,7 @@ func TestPlanKeepsInUseDigest(t *testing.T) {
 }
 
 func TestPlanNeverTouchesNonHexTags(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"latest", "build-3", "v1.2.3", "C000001", "c00001", "c000000000001"} {
 		t.Run(name, func(t *testing.T) {
 			in := input([]TagInfo{
@@ -193,6 +198,7 @@ func TestPlanNeverTouchesNonHexTags(t *testing.T) {
 }
 
 func TestPlanTwoTagsOneDigestCountOnce(t *testing.T) {
+	t.Parallel()
 	shared := dg("dead0001")
 	in := input([]TagInfo{
 		mkTag("c000001", shared, 1),
@@ -211,6 +217,7 @@ func TestPlanTwoTagsOneDigestCountOnce(t *testing.T) {
 }
 
 func TestPlanKeepZeroStillKeepsDevAndInstalled(t *testing.T) {
+	t.Parallel()
 	in := input([]TagInfo{
 		mkTag("c000001", dg("dead0001"), 1),
 		mkTag("c000002", dg("dead0002"), 2),
@@ -234,6 +241,7 @@ func TestPlanKeepZeroStillKeepsDevAndInstalled(t *testing.T) {
 }
 
 func TestPlanRefusesOnAnyReadError(t *testing.T) {
+	t.Parallel()
 	in := input([]TagInfo{mkTag(TagDev, dg("defaced"), 1)})
 	in.Errs = []string{"tags gastown-polecat: connection refused"}
 
@@ -246,6 +254,7 @@ func TestPlanRefusesOnAnyReadError(t *testing.T) {
 }
 
 func TestPlanRefusesWithoutInstalledCommit(t *testing.T) {
+	t.Parallel()
 	in := input([]TagInfo{mkTag(TagDev, dg("defaced"), 1)})
 	in.InstalledCommit = ""
 
@@ -253,10 +262,12 @@ func TestPlanRefusesWithoutInstalledCommit(t *testing.T) {
 }
 
 func TestPlanRefusesOnEmptyMainRepo(t *testing.T) {
+	t.Parallel()
 	assertRefused(t, BuildPlan(input(nil)))
 }
 
 func TestPlanRefusesWhenDevTagAbsent(t *testing.T) {
+	t.Parallel()
 	in := input([]TagInfo{mkTag("c000001", dg("dead0001"), 1)})
 
 	assertRefused(t, BuildPlan(in))
