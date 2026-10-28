@@ -10,9 +10,7 @@
 # binary swap, and a build that does not finish fails the install with the old
 # binary still in place (gt-xzo8a). --no-image-first keeps the old order for an
 # urgent daemon fix: the binary is swapped without waiting, and the image is
-# rebuilt afterwards, detached and best effort (gt-vhn89). The install waits
-# only for that build to reach its supervisor, never for the build itself
-# (gt-p5pjs).
+# rebuilt afterwards, detached and best effort (gt-vhn89).
 #
 #   install-gt.sh [--sha REF] [--source manual|rebuild-gt|post-land]
 #                 [--slot-role ROLE] [--slot-timeout SECONDS] [--dry-run]
@@ -187,15 +185,6 @@ IMAGE_BIN="${INSTALL_GT_IMAGE_BINARY:-$RIG_DIR/gt}"
 IMAGE_LOG="${INSTALL_GT_IMAGE_LOG:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-image-install.log}}"
 IMAGE_LOCK="${INSTALL_GT_IMAGE_LOCK:-${TOWN_ROOT:+$TOWN_ROOT/.runtime/polecat-image.lock}}"
 IMAGE_ALARM="${INSTALL_GT_IMAGE_ALARM:-1200}"
-# How long a --no-image-first install may wait for its detached build to reach
-# its supervisor before the install goes on and removes the helper directory
-# that build execs from (polecat_image_step). INSTALL_GT_IMAGE_START_WAIT, when
-# set, is used as given.
-START_WAIT="${INSTALL_GT_IMAGE_START_WAIT:-30}"
-if ! [[ "$START_WAIT" =~ ^[1-9][0-9]*$ ]]; then
-  log "INSTALL_GT_IMAGE_START_WAIT='$START_WAIT' is not a whole number of seconds above zero, so 30 is used"
-  START_WAIT=30
-fi
 # The image build holds the install lock for up to the alarm bound (gt-xzo8a,
 # hq-ltx66), so a queued install waits for the whole build: the default wait is
 # the bound plus a minute. INSTALL_GT_LOCK_WAIT, when set, is used as given.
@@ -251,8 +240,6 @@ image_daemon_env() {
 # lock and the fingerprint is stated once, in internal/imagebuild. Call this in a
 # subshell, and let it exec: the supervisor closes every fd it inherits, the
 # install lock among them, and a bash left waiting on it would keep that fd open.
-# That same close is how a detached launch learns the exec happened and the
-# helper directory the binary lives in may go (polecat_image_step).
 #
 # It exports the registry and crane it was given and points run.sh at this
 # install's town root, the binary whose commit the image is built at, and its
@@ -331,43 +318,10 @@ polecat_image_step() {
   mkdir -p "$(dirname "$logfile")" 2>/dev/null || true
   log "polecat image: building $commit $order the binary swap (log $logfile)"
   if [ "$when" = "after" ]; then
-    # Detached, as before gt-xzo8a: the install never waits on the build, and
-    # image_build's fd closes keep the install lock out of it.
-    #
-    # What it does wait for is the exec. The supervisor is a file in HELPER_DIR,
-    # and this install removes HELPER_DIR on its way out (on_exit); a runner
-    # still on its way to that exec when the removal lands finds the path gone,
-    # and the build dies with "image-supervisor: No such file or directory" and
-    # never starts, decided by nothing but the host's load (gt-p5pjs). So the
-    # runner inherits a fifo this install holds open, and the supervisor closes
-    # every descriptor it inherits as it starts (imagebuild.Detach): EOF here
-    # means the exec has happened, after which the file it exec'd is no longer
-    # needed. Past START_WAIT the install stops waiting and removes HELPER_DIR
-    # as it always did, so a runner that never starts cannot hold an install.
-    local handoff="$HELPER_DIR/.exec-start" confirmed=0
-    if mkfifo "$handoff" 2>/dev/null && exec 8<>"$handoff" && exec 7<"$handoff"; then
-      confirmed=1
-    else
-      log "polecat image: cannot watch for the background rebuild's start, so the build may outrun the helper directory's removal"
-    fi
-    ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" install-gt:image-build-failed ) \
-      </dev/null >>"$logfile" 2>&1 &
-    exec 8>&- 2>/dev/null || true   # the runner's inherited copy is the writer left
-    if [ "$confirmed" = "1" ]; then
-      # Neither open above can block: 7 reads and 8 was still a writer. EOF comes
-      # when the runner's own copies close, which its exec does.
-      local deadline=$(( $(date +%s) + START_WAIT )) read_rc=0
-      while :; do
-        IFS= read -r -t 5 _ <&7 || read_rc=$?
-        [ "$read_rc" -gt 128 ] || break   # EOF: the supervisor has started
-        if [ "$(date +%s)" -ge "$deadline" ]; then
-          log "polecat image: the background rebuild did not reach its supervisor within ${START_WAIT}s; removing the helper directory anyway"
-          break
-        fi
-        read_rc=0
-      done
-      exec 7<&- 2>/dev/null || true
-    fi
+    # Detached, as before gt-xzo8a: the subshell exits at once, so the install
+    # never waits on the build, and image_build's fd closes keep the install
+    # lock out of it.
+    ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" install-gt:image-build-failed </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null
     log "polecat image: rebuild for $commit started in the background (log $logfile)"
     return 0
   fi
