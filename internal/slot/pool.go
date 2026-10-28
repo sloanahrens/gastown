@@ -81,9 +81,10 @@ const DefaultMaxGateYield = config.DefaultContainerGateMaxGateYield
 
 // DefaultMaxInstallYield is Pool.MaxInstallYield's default: the 30 minutes at
 // which the install job escalates a binary that stays due. The job's
-// rebuildGTStarveAfter (internal/daemon) is defined as this constant rather
-// than a matching literal, so the two cannot disagree about how long an
-// install may hold the town's post-landing work (gt-pa4tg).
+// rebuildGTStarveAfter (internal/daemon) is defined as this constant, so the
+// default and the alarm move together. The daemon does not read
+// Pool.MaxInstallYield, so an override of that field is not reflected in the
+// alarm (gt-pa4tg).
 const DefaultMaxInstallYield = 30 * time.Minute
 
 // DefaultPool is the pre-pool behavior: one slot, nothing reserved. Acquire

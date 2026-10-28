@@ -64,11 +64,11 @@ const (
 	// as designed (gate holds measured 2m-20m20s on 2026-09-22); past it, the
 	// block is the thing to report.
 	//
-	// It is the pool's install cap, not a second 30 minutes: a post-landing
-	// acquisition yields to an install in flight for at most
-	// slot.DefaultMaxInstallYield, so the wait that cap bounds ends where this
-	// job raises the alarm for the install that never came. Naming the same
-	// constant keeps the two from drifting apart (gt-pa4tg).
+	// It is the pool's default install cap, not a second 30 minutes: a
+	// post-landing acquisition yields to an install in flight for at most
+	// slot.DefaultMaxInstallYield, and this job raises the alarm at that same
+	// duration. The link covers the default only: this job does not read a
+	// Pool.MaxInstallYield override (gt-pa4tg).
 	rebuildGTStarveAfter = slot.DefaultMaxInstallYield
 
 	// rebuildGTReserveWait bounds the wait for a gate to release its slot,
