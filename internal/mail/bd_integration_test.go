@@ -67,6 +67,48 @@ func TestIntegrationStoresUseCentralEnvPolicy(t *testing.T) {
 	}
 }
 
+// TestIntegrationCloseStoreNamesActorForBDSubprocess carries the gt-ovem close
+// fix across the real subprocess boundary: the close store names the mailbox's
+// identity in the variables bd resolves its --actor flag default from, and the
+// bd process it starts receives them over an ambient actor that names someone
+// else. The in-process fake shows only that the seam was handed the
+// environment; this is the check that the environment reaches bd.
+func TestIntegrationCloseStoreNamesActorForBDSubprocess(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	writeMailBDStub(t, binDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_STUB_LOG", logPath)
+	// An ambient identity that disagrees with the mailbox's: only the close
+	// store's own environment may decide the actor bd sees.
+	t.Setenv("BEADS_ACTOR", "ambient/actor")
+	t.Setenv("BD_ACTOR", "ambient/actor")
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	workDir := filepath.Dir(beadsDir)
+
+	if err := bdCloseStore(nil, workDir, beadsDir, "gastown/crew/max").Close("gt-wisp-xv525"); err != nil {
+		t.Fatalf("close through the store: %v", err)
+	}
+	log := readStubLog(t, logPath)
+	for _, want := range []string{
+		"args:[close]", "[gt-wisp-xv525]",
+		"\nBEADS_ACTOR=gastown/crew/max\n",
+		"\nBD_ACTOR=gastown/crew/max\n",
+		"BD_DOLT_AUTO_COMMIT=on",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("close command log missing %q:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "ambient/actor") {
+		t.Fatalf("bd saw the ambient actor, not the mailbox identity:\n%s", log)
+	}
+}
+
 func writeMailBDStub(t *testing.T, binDir string) {
 	t.Helper()
 	script := `#!/usr/bin/env sh
@@ -80,6 +122,8 @@ func writeMailBDStub(t *testing.T, binDir string) {
 	printf 'BD_DOLT_AUTO_COMMIT=%s\n' "${BD_DOLT_AUTO_COMMIT-}"
 	printf 'BEADS_NO_AUTO_IMPORT=%s\n' "${BEADS_NO_AUTO_IMPORT-}"
 	printf 'BD_IDENTITY=%s\n' "${BD_IDENTITY-}"
+	printf 'BEADS_ACTOR=%s\n' "${BEADS_ACTOR-}"
+	printf 'BD_ACTOR=%s\n' "${BD_ACTOR-}"
 	printf 'BEADS_DIR=%s\n' "${BEADS_DIR-}"
 	printf 'BEADS_DOLT_SERVER_DATABASE=%s\n' "${BEADS_DOLT_SERVER_DATABASE-}"
 } >> "$BD_STUB_LOG"
