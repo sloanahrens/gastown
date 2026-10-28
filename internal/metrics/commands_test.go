@@ -32,7 +32,7 @@ func commandExtract(t *testing.T, outDir string) ExtractEnv {
 			extractLedgerLine(t, "gt-b", "gastown", "overseer-manual", "2026-10-14T00:00:00Z"),
 		}},
 		// No review lines: the fixture's rejection history comes from the
-		// bead's notes, as the ported case's does.
+		// bead's notes.
 		ReviewLines: []string{},
 		Diffs:       commandDiffs(),
 		RunBd:       extractBd(&[]bdCall{}),
@@ -131,9 +131,8 @@ func requireFile(t *testing.T, path string) {
 	}
 }
 
-// TestMetricsMainUsage is the ported TestMain of test_town_metrics_cli.py: an
-// argv that is not one command prints the usage line and returns 2, and the
-// town is not read.
+// TestMetricsMainUsage holds Main's answer to an argv that is not one command:
+// the usage line, rc 2, and no town read.
 func TestMetricsMainUsage(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -187,6 +186,28 @@ func TestMetricsRunRefusesAnUnknownCommand(t *testing.T) {
 	}
 	if wired {
 		t.Error("the town was wired for a name that is not a subcommand")
+	}
+}
+
+// TestMetricsWireReadsTheTownTheWiringBuilt holds the steps after the extract to
+// the town the wiring returned, even when the caller's Env names another, so a
+// caller that supplies only file seams still reads the town the extract read.
+func TestMetricsWireReadsTheTownTheWiringBuilt(t *testing.T) {
+	t.Parallel()
+	readFile := func(string) ([]byte, error) { return nil, errors.New("not read") }
+	c := Commands{
+		Wire: func(context.Context) (RealTown, error) { return RealTown{Town: "/wired"}, nil },
+		Env:  Env{Town: "/stale", ReadFile: readFile},
+	}
+	real, env, err := c.wire(context.Background())
+	if err != nil {
+		t.Fatalf("wire: %v", err)
+	}
+	if real.Town != "/wired" || env.Town != "/wired" {
+		t.Errorf("towns = %q, %q, want the wired %q", real.Town, env.Town, "/wired")
+	}
+	if env.ReadFile == nil {
+		t.Error("wire dropped the caller's file seam")
 	}
 }
 
@@ -284,9 +305,6 @@ func TestMetricsMango(t *testing.T) {
 	writeTownFile(t, land.TownReviewsFile(town.real.Town).Path, firstPassLine(t, firstPassVerdict("gt-a", 1, land.VerdictApprove)))
 	writeTownFile(t, commandLandingLog(t, town.real.Town), firstPassLine(t, firstPassLanded("gt-a", firstPassAt)))
 	mango, _ := mangoSectionRun(t, mangoSectionResult)
-	// The env names another town: the steps read the one the wiring read, so
-	// the review log above is the one the section finds.
-	town.env.Town = t.TempDir()
 	cmds := town.commands()
 	cmds.Mango = func(string) string { return "/opt/mango" }
 	cmds.Env.Run = rejectionDigestRunner(t, firstPassBd(t, map[string]string{"gt-a": "polecat/alfa/gt-a"}, nil), mango)
@@ -331,8 +349,8 @@ func TestMetricsMangoWithoutABinary(t *testing.T) {
 	}
 }
 
-// TestMetricsAll drives all: the four steps run in the ported order over one
-// wiring, and the digest it writes embeds both sections.
+// TestMetricsAll drives all: the four steps run in order over one wiring, and
+// the digest it writes embeds both sections.
 func TestMetricsAll(t *testing.T) {
 	t.Parallel()
 	town := newCommandTown(t)
@@ -422,8 +440,8 @@ func TestMetricsExtractNamesTheStepThatFailed(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want it to hold %q", err, tc.want)
 			}
-			if code != 0 {
-				t.Errorf("code = %d, want 0 with the error returned", code)
+			if code != 1 {
+				t.Errorf("code = %d, want 1 with the error returned", code)
 			}
 			if buf.Len() != 0 {
 				t.Errorf("receipts = %q, want none from a run that failed", buf.String())
@@ -469,47 +487,52 @@ func TestFindMango(t *testing.T) {
 	t.Parallel()
 	const town = "/town"
 	built := filepath.Join(town, ".runtime", "metrics", "bin", "mango")
-	unasked := func(seam string) func(string) bool {
-		return func(string) bool { t.Fatalf("%s was asked after a step had already answered", seam); return false }
-	}
-	unaskedPath := func(string) (string, error) {
-		t.Fatalf("LookPath was asked after a step had already answered")
-		return "", nil
-	}
 	cases := []struct {
 		name   string
-		lookup MangoLookup
+		lookup func(t *testing.T) MangoLookup
 		want   string
 	}{
 		{
 			"MANGO_BIN is taken as given",
-			MangoLookup{Getenv: func(string) string { return "/opt/mango" }, Exists: unasked("Exists"), LookPath: unaskedPath},
+			func(t *testing.T) MangoLookup {
+				return MangoLookup{
+					Getenv:   func(string) string { return "/opt/mango" },
+					Exists:   unaskedExists(t),
+					LookPath: unaskedLookPath(t),
+				}
+			},
 			"/opt/mango",
 		},
 		{
 			"the town's built binary is next",
-			MangoLookup{
-				Getenv:   func(string) string { return "" },
-				Exists:   func(path string) bool { return path == built },
-				LookPath: unaskedPath,
+			func(t *testing.T) MangoLookup {
+				return MangoLookup{
+					Getenv:   func(string) string { return "" },
+					Exists:   func(path string) bool { return path == built },
+					LookPath: unaskedLookPath(t),
+				}
 			},
 			built,
 		},
 		{
 			"PATH is last",
-			MangoLookup{
-				Getenv:   func(string) string { return "" },
-				Exists:   func(string) bool { return false },
-				LookPath: func(name string) (string, error) { return "/usr/local/bin/" + name, nil },
+			func(*testing.T) MangoLookup {
+				return MangoLookup{
+					Getenv:   func(string) string { return "" },
+					Exists:   func(string) bool { return false },
+					LookPath: func(name string) (string, error) { return "/usr/local/bin/" + name, nil },
+				}
 			},
 			"/usr/local/bin/mango",
 		},
 		{
 			"no binary at all",
-			MangoLookup{
-				Getenv:   func(string) string { return "" },
-				Exists:   func(string) bool { return false },
-				LookPath: func(string) (string, error) { return "", errors.New("not found") },
+			func(*testing.T) MangoLookup {
+				return MangoLookup{
+					Getenv:   func(string) string { return "" },
+					Exists:   func(string) bool { return false },
+					LookPath: func(string) (string, error) { return "", errors.New("not found") },
+				}
 			},
 			"",
 		},
@@ -517,16 +540,34 @@ func TestFindMango(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := FindMango(town, tc.lookup); got != tc.want {
+			if got := FindMango(town, tc.lookup(t)); got != tc.want {
 				t.Errorf("FindMango = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
+// unaskedExists is an Exists seam that fails the case it is called in.
+func unaskedExists(t *testing.T) func(string) bool {
+	t.Helper()
+	return func(string) bool {
+		t.Fatal("Exists was asked after a step had already answered")
+		return false
+	}
+}
+
+// unaskedLookPath is a LookPath seam that fails the case it is called in.
+func unaskedLookPath(t *testing.T) func(string) (string, error) {
+	t.Helper()
+	return func(string) (string, error) {
+		t.Fatal("LookPath was asked after a step had already answered")
+		return "", nil
+	}
+}
+
 // TestBacktestRowsCarryTheWeeksFiguresAndCounts holds the typed weekly rows to
 // the backtest's rows: a figure and a count the week has are carried, a figure
-// it lacks is absent (the Python's None), and the labels are not values.
+// it lacks is absent, and the labels are not values.
 func TestBacktestRowsCarryTheWeeksFiguresAndCounts(t *testing.T) {
 	t.Parallel()
 	size := 12.5
@@ -566,9 +607,12 @@ func TestMetricsReportsAFailedReceipt(t *testing.T) {
 	town := newCommandTown(t)
 	cmds := town.commands()
 	cmds.Out = failingWriter{}
-	_, err := Main(context.Background(), []string{CommandExtract}, cmds)
+	code, err := Main(context.Background(), []string{CommandExtract}, cmds)
 	if err == nil || !strings.Contains(err.Error(), "closed pipe") {
 		t.Fatalf("err = %v, want the failed receipt's error", err)
+	}
+	if code != 1 {
+		t.Errorf("code = %d, want 1 with the error returned", code)
 	}
 }
 
@@ -587,9 +631,9 @@ func TestMetricsSectionWriteNamesTheFileItCannotWrite(t *testing.T) {
 }
 
 // TestWriteBacktestTreatsAMissingOrCorruptSummaryAsNoTargets holds the backtest
-// to the Python's _load_json default: a summary that is absent or half-written
-// names no target, so the box column stays unanswered rather than reading a
-// file's partial contents as a failed replication.
+// to reading a summary that is absent or half-written as naming no target, so
+// the box column stays unanswered rather than reading a file's partial contents
+// as a failed replication.
 func TestWriteBacktestTreatsAMissingOrCorruptSummaryAsNoTargets(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

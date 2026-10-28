@@ -12,13 +12,11 @@ import (
 	"strings"
 )
 
-// The command layer of the town metrics script, ported from the top of
-// scripts/town_metrics/cli.py: main, the four steps it runs (extract, mango,
-// backtest, report) and all, which runs them in that order. One invocation
-// wires the town once and every step reads that wiring, so a run of all costs
-// one town read, as the Python's main did.
+// The command layer: Main, the four steps it runs (extract, mango, backtest,
+// report) and all, which runs them in that order. One invocation wires the town
+// once and every step reads that wiring, so a run of all costs one town read.
 
-// The subcommands main accepts, named as the usage line names them.
+// The subcommands Main accepts, named as the usage line names them.
 const (
 	CommandExtract  = "extract"
 	CommandMango    = "mango"
@@ -27,12 +25,11 @@ const (
 	CommandAll      = "all"
 )
 
-// usageText is main's answer to an argv that names no command. It is kept
-// verbatim from the Python so the command that replaces scripts/town-metrics
-// answers an operator the same way.
+// usageText is Main's answer to an argv that names no command, kept verbatim so
+// an operator's answer does not change with this layer.
 const usageText = "usage: town-metrics extract|mango|backtest|report|all   (run under `nice`, on demand only)"
 
-// mangoBinEnv names the mango binary find_mango takes as given.
+// mangoBinEnv names the mango binary lookup takes as given.
 const mangoBinEnv = "MANGO_BIN"
 
 // mangoSummaryName is the per-target counts the mango section leaves beside
@@ -78,19 +75,22 @@ func (c Commands) withDefaults() Commands {
 	return c
 }
 
-// Main is cli.main: it runs argv's one subcommand and returns 2 for an argv
-// that names no command, 0 otherwise, with a failed command returned as an
-// error naming the step. The usage line goes to Out, so a test reads the same
-// answer an operator sees.
+// Main is the whole command layer: it runs argv's one subcommand and returns 2
+// for an argv that names no command, 1 for a step that failed, 0 otherwise,
+// with the failure returned as an error naming the step. The usage line goes to
+// Out, so a test reads the same answer an operator sees.
 func Main(ctx context.Context, argv []string, c Commands) (int, error) {
 	c = c.withDefaults()
 	if len(argv) != 1 || !isCommand(argv[0]) {
 		return 2, c.receipt("%s", usageText)
 	}
-	return 0, Run(ctx, argv[0], c)
+	if err := Run(ctx, argv[0], c); err != nil {
+		return 1, err
+	}
+	return 0, nil
 }
 
-// Run executes one named subcommand. It is the whole command layer main
+// Run executes one named subcommand. It is the whole command layer Main
 // dispatches to, and the seam a cobra subcommand calls with its own name.
 func Run(ctx context.Context, command string, c Commands) error {
 	c = c.withDefaults()
@@ -206,7 +206,7 @@ func (c Commands) receipt(format string, args ...any) error {
 	return err
 }
 
-// WriteReport is cli's report command: the digest rebuilt from the extract
+// WriteReport is the report command: the digest rebuilt from the extract
 // LoadResult reads back, returned as the path written.
 func WriteReport(env Env, real RealTown) (string, error) {
 	result, err := LoadResult(env, real.Extract.OutDir)
@@ -222,9 +222,9 @@ func WriteReport(env Env, real RealTown) (string, error) {
 	})
 }
 
-// WriteMangoSection is cli.write_mango_section: the mango findings section
-// rendered into outDir and returned. An empty binary is a host without mango,
-// which the section says and still writes.
+// WriteMangoSection is the mango command: the findings section rendered into
+// outDir and returned. An empty binary is a host without mango, which the
+// section says and still writes.
 func WriteMangoSection(ctx context.Context, env Env, outDir, binary string, o MangoSectionOptions) (string, error) {
 	text, err := MangoSection(ctx, env, outDir, binary, o)
 	if err != nil {
@@ -236,9 +236,8 @@ func WriteMangoSection(ctx context.Context, env Env, outDir, binary string, o Ma
 	return text, nil
 }
 
-// WriteBacktest is cli.write_backtest: the weekly metrics backtested against
-// docsDir's regime events and Sloan's answers, written into outDir and
-// returned.
+// WriteBacktest is the backtest command: the weekly metrics backtested against
+// docsDir's regime events and Sloan's answers, written into outDir and returned.
 func WriteBacktest(env Env, outDir, docsDir string) (string, error) {
 	if env.ReadFile == nil {
 		return "", errors.New("write backtest: Env.ReadFile is unset")
@@ -271,8 +270,8 @@ func writeText(dir, name, text string) error {
 }
 
 // backtestRows is []WeeklyMetrics as the backtest reads it: every weekly column
-// except the labels, a figure or count the week has a value for, and nothing
-// for one it does not, which is the Python's None.
+// except the labels, a figure or count the week has a value for, and nothing for
+// one it does not.
 func backtestRows(weekly []WeeklyMetrics) []WeeklyRow {
 	out := make([]WeeklyRow, 0, len(weekly))
 	for _, m := range weekly {
@@ -297,9 +296,9 @@ func backtestRows(weekly []WeeklyMetrics) []WeeklyRow {
 	return out
 }
 
-// readMangoSummary reads mango-summary.json, and names no target when the file
-// is missing or does not parse: the Python's _load_json default, so a backtest
-// still runs after a mango step that wrote nothing.
+// readMangoSummary reads mango-summary.json and names no target when the file is
+// missing or does not parse, so a backtest still runs after a mango step that
+// wrote nothing.
 func readMangoSummary(env Env, path string) map[string]MangoSummary {
 	summary := map[string]MangoSummary{}
 	data, err := env.ReadFile(path)
@@ -326,29 +325,39 @@ type MangoLookup struct {
 	LookPath func(string) (string, error)
 }
 
-// FindMango is cli.find_mango: MANGO_BIN, else the binary built into the
-// town's runtime, else mango on PATH, and "" when there is none.
-func FindMango(town string, lookup MangoLookup) string {
-	getenv := lookup.Getenv
-	if getenv == nil {
-		getenv = os.Getenv
+// OSMangoLookup is MangoLookup over the process's environment and PATH.
+func OSMangoLookup() MangoLookup {
+	return MangoLookup{Getenv: os.Getenv, Exists: hostExists, LookPath: exec.LookPath}
+}
+
+// withDefaults fills each seam the lookup left unset with the host's, so a
+// caller that supplies only what it controls still resolves against the host.
+func (l MangoLookup) withDefaults() MangoLookup {
+	host := OSMangoLookup()
+	if l.Getenv == nil {
+		l.Getenv = host.Getenv
 	}
-	if bin := getenv(mangoBinEnv); bin != "" {
+	if l.Exists == nil {
+		l.Exists = host.Exists
+	}
+	if l.LookPath == nil {
+		l.LookPath = host.LookPath
+	}
+	return l
+}
+
+// FindMango resolves the mango binary: MANGO_BIN, else the binary built into
+// the town's runtime, else mango on PATH, and "" when there is none.
+func FindMango(town string, lookup MangoLookup) string {
+	lookup = lookup.withDefaults()
+	if bin := lookup.Getenv(mangoBinEnv); bin != "" {
 		return bin
 	}
 	built := filepath.Join(town, ".runtime", "metrics", "bin", "mango")
-	exists := lookup.Exists
-	if exists == nil {
-		exists = hostExists
-	}
-	if exists(built) {
+	if lookup.Exists(built) {
 		return built
 	}
-	lookPath := lookup.LookPath
-	if lookPath == nil {
-		lookPath = exec.LookPath
-	}
-	path, err := lookPath("mango")
+	path, err := lookup.LookPath("mango")
 	if err != nil {
 		return ""
 	}
