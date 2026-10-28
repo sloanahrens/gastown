@@ -2538,14 +2538,25 @@ func heldByOtherWorktree(g gitRepo, branch string, exempt ...string) error {
 }
 
 // branchHeldError is the ErrBranchHeld refusal that names the worktree holding
-// the branch, so a caller can look at that holder before giving up (gt-l9td).
+// the branch, so a caller can look at that holder before giving up (gt-l9td),
+// and the command that takes the branch off it, so the caller can act on the
+// refusal instead of guessing (gt-g3dgx).
 type branchHeldError struct {
 	branch string
 	holder string
 }
 
 func (e *branchHeldError) Error() string {
-	return fmt.Sprintf("%s: %s is already checked out at %s", ErrBranchHeld, e.branch, e.holder)
+	return fmt.Sprintf("%s: %s is already checked out at %s\nrelease it with: %s",
+		ErrBranchHeld, e.branch, e.holder, releaseBranchCommand(e.holder))
+}
+
+// releaseBranchCommand is the command that detaches the worktree at holder,
+// freeing the branch it checked out. A detach keeps the files, the index and
+// the commits that worktree holds; it refuses rather than overwrite local
+// changes, so the command cannot destroy the holder's work.
+func releaseBranchCommand(holder string) string {
+	return "git -C " + config.ShellQuote(holder) + " checkout --detach"
 }
 
 func (e *branchHeldError) Unwrap() error { return ErrBranchHeld }

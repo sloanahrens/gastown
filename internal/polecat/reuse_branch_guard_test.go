@@ -203,6 +203,30 @@ func TestHeldByOtherWorktree_FailsClosedOnUnreadableList(t *testing.T) {
 	}
 }
 
+// TestHeldByOtherWorktree_MessageNamesHolderAndReleaseCommand pins the two
+// facts a caller needs to act on the refusal instead of reporting it: the
+// worktree that holds the branch, and the command that frees it (gt-g3dgx).
+func TestHeldByOtherWorktree_MessageNamesHolderAndReleaseCommand(t *testing.T) {
+	t.Parallel()
+	_, mayorRig, _, added, w := canonicalWithPolecats(t, false, "alpha")
+	holder := added["alpha"].ClonePath
+
+	branch := "polecat/other/gt-x+aaa"
+	w.SetRef(t, mayorRig, "refs/heads/"+branch, w.rev(t, mayorRig, "origin/main"))
+	w.switchTo(t, holder, branch)
+
+	err := heldByOtherWorktree(w.repo(mayorRig), branch)
+	if err == nil {
+		t.Fatal("a branch checked out in alpha's worktree was reported free")
+	}
+	if named := holderFromRefusal(t, err.Error()); !sameWorktreePath(named, holder) {
+		t.Errorf("refusal names holder %q, want the worktree holding the branch %q", named, holder)
+	}
+	if want := "git -C " + holder + " checkout --detach"; !strings.Contains(err.Error(), want) {
+		t.Errorf("refusal does not name the release command %q: %v", want, err)
+	}
+}
+
 // TestReuseIdlePolecat_IgnoresPrunableHolder covers a registration whose
 // directory is gone: git still lists the branch for it, but there is no HEAD
 // there to conflict with, and refusing would strand the resume until someone
