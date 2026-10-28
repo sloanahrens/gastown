@@ -254,3 +254,73 @@ func TestDispatchStartIgnoresASlingDatedBeforeTheRunEnd(t *testing.T) {
 		t.Errorf("start = %v, %v, want %s: a sling dated at the end is the new run's dispatch", got, ok, t11)
 	}
 }
+
+// A run ended outside the log — a submission for landing, whose done event can
+// be lost — starts its successor at the first sling dated at or after that end,
+// so a rework slung after a landing rejection is dated from its re-sling. A
+// bead whose only sling is before the end is dated from the end itself until
+// the re-sling is logged, and a bead the log never dispatched has no clock from
+// this call at all (gt-chd44).
+func TestDispatchClockStartSinceAnEndOutsideTheLog(t *testing.T) {
+	t.Parallel()
+	evs := []Event{
+		dispatchEv(TypeSling, t9, "gt-a"),
+		dispatchEv(TypeSling, t11, "gt-a"),
+		dispatchEv(TypeSling, t11, "gt-b"),
+	}
+	for _, tt := range []struct {
+		name string
+		bead string
+		end  string
+		want string
+		ok   bool
+	}{
+		{name: "a rework is dated from the first sling since the end", bead: "gt-a", end: "2026-10-27T10:30:00Z", want: t11, ok: true},
+		{name: "a sling at the end is the new run's", bead: "gt-a", end: t11, want: t11, ok: true},
+		{name: "an end after every sling dates the bead from the end", bead: "gt-a", end: "2026-10-27T13:00:00Z", want: "2026-10-27T13:00:00Z", ok: true},
+		{name: "an end before the first sling leaves the clock alone", bead: "gt-a", end: "2026-10-27T08:00:00Z", want: t9, ok: true},
+		{name: "no end is the log's clock", bead: "gt-a", want: t9, ok: true},
+		{name: "a bead the log never dispatched has no clock", bead: "gt-none", end: t12, ok: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clock := NewDispatchClock()
+			clock.Add(evs)
+			var end time.Time
+			if tt.end != "" {
+				end = mustTime(t, tt.end)
+			}
+			got, ok := clock.StartSince(tt.bead, end)
+			if ok != tt.ok {
+				t.Fatalf("found = %t, want %t (start %v)", ok, tt.ok, got)
+			}
+			if tt.ok && !got.Equal(mustTime(t, tt.want)) {
+				t.Errorf("start = %v, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// An end recorded outside the log is a boundary the clock keeps: folding the
+// same slings in again, or a sling dated before the end arriving later, does
+// not resurrect the dispatch it ended. A reader that rebuilds its clock from a
+// replaced log depends on this.
+func TestDispatchClockEndRunKeepsTheBoundary(t *testing.T) {
+	t.Parallel()
+	clock := NewDispatchClock()
+	clock.Add([]Event{dispatchEv(TypeSling, t9, "gt-a")})
+	clock.EndRun("gt-a", mustTime(t, t10))
+	if _, ok := clock.Start("gt-a"); ok {
+		t.Fatalf("the dispatch before the end is still the clock after EndRun")
+	}
+
+	clock.Add([]Event{dispatchEv(TypeSling, t9, "gt-a"), dispatchEv(TypeSling, t11, "gt-a")})
+	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, t11)) {
+		t.Errorf("start = %v, %v, want %s: the sling before the end came back", got, ok, t11)
+	}
+
+	clock.EndRun("gt-a", mustTime(t, t9))
+	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, t11)) {
+		t.Errorf("start = %v, %v, want %s: an older end moved the boundary back", got, ok, t11)
+	}
+}

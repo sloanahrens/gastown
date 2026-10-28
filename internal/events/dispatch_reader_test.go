@@ -177,6 +177,61 @@ func TestDispatchReaderStartsOverOnAReplacedLog(t *testing.T) {
 	}
 }
 
+// A run end the log does not hold — a bead's submission for landing — is a
+// boundary the reader keeps even when the log is replaced and its clock rebuilt
+// from the new file: the rework stays dated from its re-sling, which is the
+// reading the guard judges by (gt-chd44).
+func TestDispatchReaderKeepsAnEndRecordedOutsideTheLog(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	appendLog(t, town, logLine(TypeSling, t9, "gt-a")+"\n")
+	r := NewDispatchReader(town)
+	if _, err := r.Starts(); err != nil {
+		t.Fatalf("Starts: %v", err)
+	}
+
+	// The bead was submitted at t10 and re-slung at t11, with no done event for
+	// the submission: the re-sling is the clock. The poll reads the log first,
+	// as the dashboard's does, so the re-sling is in the clock the end applies
+	// to.
+	appendLog(t, town, logLine(TypeSling, t11, "gt-a")+"\n")
+	if _, err := r.Starts(); err != nil {
+		t.Fatalf("Starts: %v", err)
+	}
+	got, ok := r.StartSince("gt-a", mustTime(t, t10))
+	if !ok || !got.Equal(mustTime(t, t11)) {
+		t.Fatalf("StartSince = %v (%t), want the re-sling %s", got, ok, t11)
+	}
+
+	// The log is replaced, so the clock is rebuilt with the same re-sling and
+	// none of the history around it but the end the reader holds.
+	replacement := filepath.Join(town, EventsFile+".prune.tmp")
+	if err := os.WriteFile(replacement, []byte(logLine(TypeSling, t11, "gt-a")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, filepath.Join(town, EventsFile)); err != nil {
+		t.Fatal(err)
+	}
+	clock, err := r.Starts()
+	if err != nil {
+		t.Fatalf("Starts after the replace: %v", err)
+	}
+	if at := clock["gt-a"]; !at.Equal(mustTime(t, t11)) {
+		t.Errorf("gt-a = %v, want the re-sling %v after the rebuilt clock", at, t11)
+	}
+
+	// And a stale re-read of the old sling, folded in by another append, does
+	// not put the ended dispatch back.
+	appendLog(t, town, logLine(TypeSling, t9, "gt-a")+"\n")
+	clock, err = r.Starts()
+	if err != nil {
+		t.Fatalf("Starts after the append: %v", err)
+	}
+	if at := clock["gt-a"]; !at.Equal(mustTime(t, t11)) {
+		t.Errorf("gt-a = %v, want %v: the dispatch the submission ended came back", at, t11)
+	}
+}
+
 // A town with no log has dispatched nothing; a log that cannot be read is an
 // error, so the dashboard marks the reading unavailable instead of drawing
 // every seat as young.
