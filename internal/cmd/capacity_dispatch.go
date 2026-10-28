@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/schedulerrun"
 	"github.com/steveyegge/gastown/internal/style"
@@ -29,6 +31,12 @@ func schedulerDeps() schedulerrun.Deps {
 		Seats:           schedulerSeats,
 		Escalate:        fireCrossRigEscalation,
 		BeadInTargetRig: verifyBeadExistsInTargetRigDatabase,
+		// The marker is resolved here, where the environment is owned, as gt
+		// sling and the spec dispatcher resolve it; a test injects its own
+		// reader instead of whatever INSTALL_GT_DAEMON_DIR names (gt-2rp64).
+		PendingInstall: func(townRoot string) (*installpending.Marker, error) {
+			return installpending.StoreFor(townRoot).Pending(time.Now())
+		},
 	}
 }
 

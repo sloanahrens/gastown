@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -80,6 +81,11 @@ type Deps struct {
 	// rig's database, the guard a dry run uses to preview a dispatch the sling
 	// would refuse. Optional; nil skips the probe.
 	BeadInTargetRig func(beadID, targetRig, townRoot string) error
+	// PendingInstall reads the pending-install marker in force for townRoot:
+	// nil when none stands, an error when it cannot be read. A gt install
+	// replaces the binary a new polecat session would run, so a run holds
+	// while one stands (gt-2rp64). Optional; nil reads no marker.
+	PendingInstall func(townRoot string) (*installpending.Marker, error)
 }
 
 // SlingOutcome is what one successful dispatch reports back.
@@ -132,6 +138,10 @@ type Report struct {
 	// Rigs are the target rigs that took a dispatch this run, each once.
 	Rigs []string
 }
+
+// ReasonInstallPending is the run reason when a pending install holds every
+// dispatch: nothing was planned, and the queued contexts stay open.
+const ReasonInstallPending = "install-pending"
 
 // runner is one Run's options and collaborators.
 type runner struct {
@@ -222,6 +232,24 @@ func Run(ctx context.Context, opts Options, deps Deps) (Report, error) {
 		r.actor = "scheduler"
 	}
 
+	// A gt install in flight replaces the binary a new polecat session would
+	// run, so the cycle holds here, before it plans anything and before a dry
+	// run previews a dispatch it would not make, as gt sling and the spec
+	// dispatcher do (gt-2rp64). Queued contexts stay open and dispatch after it
+	// lands; a marker that has aged out or none holds nothing. A marker that
+	// cannot be read holds too: a run that must not race an install never reads
+	// broken state as no install.
+	hold, err := r.installPendingHold(opts.TownRoot)
+	if err != nil {
+		return Report{}, err
+	}
+	if hold != "" {
+		if !opts.Daemon {
+			r.printf("%s Scheduler dispatch held: %s\n", style.Dim.Render("⏸"), hold)
+		}
+		return Report{Reason: ReasonInstallPending}, nil
+	}
+
 	if opts.DryRun {
 		dispatchPlan, err := r.buildPlan(opts.TownRoot, opts.BatchOverride, false)
 		if err != nil {
@@ -301,20 +329,7 @@ func Run(ctx context.Context, opts Options, deps Deps) (Report, error) {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			result, err := r.deps.Sling(ctx, opts.TownRoot, b)
-			if err != nil {
-				return err
-			}
-			// Track side effects here (Execute runs exactly once, never retried).
-			if result.PolecatName != "" {
-				polecatNames[b.ID] = result.PolecatName
-			}
-			if b.TargetRig != "" {
-				successfulRigs[b.TargetRig] = true
-			}
-			_ = events.LogFeed(events.TypeSchedulerDispatch, r.actor,
-				events.SchedulerDispatchPayload(b.WorkBeadID, b.TargetRig, polecatNames[b.ID]))
-			return nil
+			return r.dispatchReady(ctx, opts.TownRoot, b, polecatNames, successfulRigs)
 		},
 		OnSuccess: func(b capacity.PendingBead) error {
 			// OnSuccess may be retried — only do the close here, no side effects.
@@ -405,6 +420,62 @@ func asDeferral(err error) (*Deferral, bool) {
 		return deferral, true
 	}
 	return nil, false
+}
+
+// dispatchReady slings one planned bead and records what the run reports about
+// it. The plan was made once, but an install can start while the cycle runs it
+// (the slings and the delay between them), so the marker is read again here:
+// the context stays queued as a deferral, never a failure the circuit breaker
+// would close it on (gt-2rp64, gt-c0nvv).
+func (r *runner) dispatchReady(ctx context.Context, townRoot string, b capacity.PendingBead, polecatNames map[string]string, successfulRigs map[string]bool) error {
+	if deferral := r.installPendingDeferral(townRoot); deferral != nil {
+		return deferral
+	}
+	result, err := r.deps.Sling(ctx, townRoot, b)
+	if err != nil {
+		return err
+	}
+	// Track side effects here (Execute runs exactly once, never retried).
+	if result.PolecatName != "" {
+		polecatNames[b.ID] = result.PolecatName
+	}
+	if b.TargetRig != "" {
+		successfulRigs[b.TargetRig] = true
+	}
+	_ = events.LogFeed(events.TypeSchedulerDispatch, r.actor,
+		events.SchedulerDispatchPayload(b.WorkBeadID, b.TargetRig, polecatNames[b.ID]))
+	return nil
+}
+
+// installPendingHold is the pending-install hold on one run: the sentence
+// naming the install in force, empty when none stands, or an error for a marker
+// that cannot be read.
+func (r *runner) installPendingHold(townRoot string) (string, error) {
+	if r.deps.PendingInstall == nil {
+		return "", nil
+	}
+	m, err := r.deps.PendingInstall(townRoot)
+	if err != nil {
+		return "", fmt.Errorf("reading the pending-install marker: %w", err)
+	}
+	if m == nil {
+		return "", nil
+	}
+	return m.Note(), nil
+}
+
+// installPendingDeferral is the hold one planned sling meets when an install
+// started after the plan: a Deferral, so the context stays queued instead of
+// closing as circuit-broken, or nil when no marker stands.
+func (r *runner) installPendingDeferral(townRoot string) *Deferral {
+	hold, err := r.installPendingHold(townRoot)
+	if err != nil {
+		return &Deferral{Why: "Install pending", Err: err}
+	}
+	if hold == "" {
+		return nil
+	}
+	return &Deferral{Why: "Install pending", Err: errors.New(hold)}
 }
 
 // buildPlan assembles one dispatch plan: load scheduler state and settings,

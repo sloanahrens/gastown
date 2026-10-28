@@ -46,6 +46,15 @@ type Marker struct {
 	Start string    `json:"start,omitempty"`
 }
 
+// Note names the pending install in operator terms: when the cycle recorded it,
+// by which daemon, and what lifts it. Every dispatcher that holds work under a
+// marker prints this one sentence, so an operator greps a single phrase to find
+// all of them (gt-2rp64).
+func (m *Marker) Note() string {
+	return fmt.Sprintf("an install of gt is pending (recorded %s by daemon pid %d); no new sling starts until it lands or its marker clears",
+		m.At.UTC().Format(time.RFC3339), m.PID)
+}
+
 // Store is one town's marker file. Resolve it where the environment is read —
 // the daemon, or a command that owns its own env — and pass it down, so a test
 // hands itself a temp file instead of whatever INSTALL_GT_DAEMON_DIR names in

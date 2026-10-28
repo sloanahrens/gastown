@@ -9,17 +9,13 @@ import (
 )
 
 // A gt install replaces the binary a fresh sling's session would run, so no
-// sling starts while one is pending: `gt sling` refuses every hand sling, and
-// the spec dispatcher refuses its tick and each sling a planned job would make
-// (gt-2rp64). installpending.Store.Pending answers whether an install is in
-// flight, so a stale marker or a dead writer never holds a sling.
-
-// installPendingNote names the install a new sling may not start under, and
-// what lifts it.
-func installPendingNote(m *installpending.Marker) string {
-	return fmt.Sprintf("an install of gt is pending (recorded %s by daemon pid %d); no new sling starts until it lands or its marker clears",
-		m.At.UTC().Format(time.RFC3339), m.PID)
-}
+// sling starts while one is pending: `gt sling` refuses every hand sling, the
+// spec dispatcher refuses its tick and each sling a planned job would make, and
+// the queue dispatch cycle holds before it plans (gt-2rp64, gt-c0nvv).
+// installpending.Store.Pending answers whether an install is in flight, so a
+// stale marker or a dead writer never holds a sling. The sentence naming the
+// install is installpending.Marker.Note, so every dispatcher says it the same
+// way.
 
 // installPendingRefusal is the error a gt sling returns while m stands. It
 // leads with dispatch.SlingRefusalMarker, so an automatic dispatcher defers the
@@ -33,7 +29,7 @@ func installPendingRefusal(m *installpending.Marker, err error) error {
 	if m == nil {
 		return nil
 	}
-	return fmt.Errorf("%s %s", dispatch.SlingRefusalMarker, installPendingNote(m))
+	return fmt.Errorf("%s %s", dispatch.SlingRefusalMarker, m.Note())
 }
 
 // refuseWhileInstallPending is gt sling's refusal for this run, or nil when no
@@ -61,5 +57,5 @@ func (e specDispatchEnv) installPendingStop() (hold, errLine string) {
 	if m == nil {
 		return "", ""
 	}
-	return installPendingNote(m), ""
+	return m.Note(), ""
 }

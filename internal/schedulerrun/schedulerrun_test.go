@@ -1,16 +1,21 @@
 package schedulerrun
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
@@ -81,6 +86,189 @@ func TestRun_OperatorHold_DispatchesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(townRoot, ".runtime", "scheduler-dispatch.lock")); err == nil {
 		t.Error("the dispatch lock was taken during a hold: the gate must come first")
+	}
+}
+
+// gt-c0nvv: a queue dispatch cycle holds while a gt install is pending, as gt
+// sling and the spec dispatcher do (gt-2rp64), and holds before it plans — no
+// seat read, no lock, nothing dispatched or failed — so no polecat is spawned
+// from a binary an install is replacing.
+func TestRun_HoldsWhileAnInstallIsPending(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	cases := []struct {
+		name   string
+		at     time.Time
+		broken bool
+	}{
+		{name: "live marker", at: now.Add(-time.Minute)},
+		{name: "unreadable marker", broken: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			store := installpending.StoreIn(filepath.Join(t.TempDir(), installpending.FileName))
+			if !tc.at.IsZero() {
+				if err := store.Write(tc.at, os.Getpid()); err != nil {
+					t.Fatalf("writing the install-pending marker: %v", err)
+				}
+			}
+			if tc.broken {
+				if err := os.WriteFile(store.Path(), []byte("{not a marker"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			seatsRead := 0
+			report, err := Run(t.Context(), Options{
+				TownRoot:      townRoot,
+				Actor:         "test",
+				BatchOverride: 1,
+				Out:           io.Discard,
+				ErrOut:        io.Discard,
+			}, Deps{
+				PendingInstall: func(string) (*installpending.Marker, error) { return store.Pending(now) },
+				Seats: func(string, bool) (Seats, error) {
+					seatsRead++
+					return Seats{}, nil
+				},
+			})
+
+			if tc.broken {
+				if err == nil || !strings.Contains(err.Error(), "pending-install marker") {
+					t.Fatalf("Run = (%+v, %v), want the unreadable marker reported", report, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				if report.Reason != ReasonInstallPending || report.Dispatched != 0 || report.Failed != 0 {
+					t.Fatalf("report = %+v, want a queued hold that dispatched and failed nothing", report)
+				}
+			}
+			if seatsRead != 0 {
+				t.Errorf("the run read seats %d time(s): the hold must come before the plan", seatsRead)
+			}
+			if _, statErr := os.Stat(filepath.Join(townRoot, ".runtime", "scheduler-dispatch.lock")); statErr == nil {
+				t.Error("the dispatch lock was taken under the hold: the hold must come first")
+			}
+		})
+	}
+}
+
+// The hold both the run's gate and each planned sling read (the second one as a
+// Deferral, so a context that reached its sling stays queued instead of closing
+// as circuit-broken): a live marker names the install, and a marker that has
+// aged out or none holds nothing (gt-c0nvv).
+func TestInstallPendingHold_HoldsOnlyWhileAnInstallIsPending(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	cases := []struct {
+		name   string
+		at     time.Time
+		broken bool
+		want   bool
+	}{
+		{name: "live marker", at: now.Add(-time.Minute), want: true},
+		{name: "stale marker", at: now.Add(-installpending.Ceiling)},
+		{name: "no marker"},
+		{name: "unreadable marker", broken: true, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			store := installpending.StoreIn(filepath.Join(t.TempDir(), installpending.FileName))
+			if !tc.at.IsZero() {
+				if err := store.Write(tc.at, os.Getpid()); err != nil {
+					t.Fatalf("writing the install-pending marker: %v", err)
+				}
+			}
+			if tc.broken {
+				if err := os.WriteFile(store.Path(), []byte("{not a marker"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			slung := 0
+			r := &runner{deps: Deps{
+				PendingInstall: func(string) (*installpending.Marker, error) { return store.Pending(now) },
+				Sling: func(context.Context, string, capacity.PendingBead) (SlingOutcome, error) {
+					slung++
+					return SlingOutcome{PolecatName: "furiosa"}, nil
+				},
+			}}
+
+			hold, err := r.installPendingHold(townRoot)
+			deferral := r.installPendingDeferral(townRoot)
+			if !tc.want {
+				if err != nil || hold != "" || deferral != nil {
+					t.Fatalf("hold = (%q, %v), deferral = %v, want the sling left to run", hold, err, deferral)
+				}
+				// The one planned sling runs: the marker that does not stand
+				// holds nothing on the dispatch path either.
+				b := capacity.PendingBead{ID: "ctx-1", WorkBeadID: "gt-a", TargetRig: "gastown"}
+				polecatNames, successfulRigs := map[string]string{}, map[string]bool{}
+				if err := r.dispatchReady(t.Context(), townRoot, b, polecatNames, successfulRigs); err != nil {
+					t.Fatalf("dispatchReady: %v", err)
+				}
+				if slung != 1 || polecatNames[b.ID] != "furiosa" || !successfulRigs[b.TargetRig] {
+					t.Fatalf("slung %d, names %v, rigs %v, want the bead dispatched and recorded", slung, polecatNames, successfulRigs)
+				}
+				return
+			}
+			if deferral == nil {
+				t.Fatalf("hold = (%q, %v), want a deferral holding the sling", hold, err)
+			}
+			if _, deferred := asDeferral(deferral); !deferred {
+				t.Fatal("the hold is not a schedulerrun deferral: the context would count a failure")
+			}
+			if deferral.Why != "Install pending" {
+				t.Errorf("Why = %q, want %q", deferral.Why, "Install pending")
+			}
+			// The planned sling is held as the same deferral, so the context
+			// stays queued and nothing is spawned under the install.
+			b := capacity.PendingBead{ID: "ctx-1", WorkBeadID: "gt-a", TargetRig: "gastown"}
+			slingErr := r.dispatchReady(t.Context(), townRoot, b, map[string]string{}, map[string]bool{})
+			if _, deferred := asDeferral(slingErr); !deferred {
+				t.Errorf("dispatchReady = %v, want the sling held as a deferral", slingErr)
+			}
+			if slung != 0 {
+				t.Errorf("the sling ran %d time(s) under a pending install", slung)
+			}
+			if tc.broken {
+				if err == nil || !strings.Contains(deferral.Error(), "pending-install marker") {
+					t.Errorf("hold = (%q, %v), deferral = %q, want the unreadable marker named", hold, err, deferral)
+				}
+				return
+			}
+			if want := fmt.Sprintf("daemon pid %d", os.Getpid()); !strings.Contains(hold, "an install of gt is pending") ||
+				!strings.Contains(hold, want) || deferral.Error() != hold {
+				t.Errorf("hold = %q, deferral = %q, want both to name the install by %q", hold, deferral, want)
+			}
+		})
+	}
+}
+
+// A sling that fails for its own reason reaches the cycle as that failure, not
+// as a pending-install deferral: only a marker that stands keeps the context
+// queued (gt-c0nvv).
+func TestDispatchReady_ReturnsTheSlingFailure(t *testing.T) {
+	t.Parallel()
+	r := &runner{deps: Deps{
+		PendingInstall: func(string) (*installpending.Marker, error) { return nil, nil },
+		Sling: func(context.Context, string, capacity.PendingBead) (SlingOutcome, error) {
+			return SlingOutcome{}, errors.New("spawn failed")
+		},
+	}}
+
+	err := r.dispatchReady(t.Context(), t.TempDir(), capacity.PendingBead{ID: "ctx-1", WorkBeadID: "gt-a"},
+		map[string]string{}, map[string]bool{})
+	if err == nil || err.Error() != "spawn failed" {
+		t.Fatalf("dispatchReady = %v, want the sling's own failure", err)
+	}
+	if _, deferred := asDeferral(err); deferred {
+		t.Error("the sling failure was reported as a deferral, which hides it from the circuit breaker")
 	}
 }
 
