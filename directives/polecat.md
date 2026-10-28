@@ -1,11 +1,11 @@
 ## Changelog
 
+- 2026-10-28 gt-9j9vu: bead text is one single-quoted argument on every `gt bead` verb that takes text (create, update, claim, note, comment, close; town policy section).
 - 2026-10-27 gt-vhyk9: files stay under the worktree — scratch files, trace logs, test data and build output included; /tmp, /private/tmp, HOME and a session scratchpad are out (gt-3n4e0, hq-wisp-dvrty). The 2026-10-14 scratch section is retitled "Scratch files stay out of the tracked tree".
 - 2026-10-27 gt-3vgbi: moved the town polecat policy into the repo from ~/gt/directives/polecat.md, with the twelve "What om rejects" rules from ~/gt/gastown/directives/polecat.md, text unchanged.
 - 2026-10-27 gt-3vgbi: removed a probe line that the overseer's probe bead had put in the rules file; it was not policy.
 - 2026-09-23 claude-9a8: an interrupt is a delivery artifact, not an operator stop (town policy section).
 - 2026-10-12 gt-3vgbi: no subagents, except the scheduled deep-review slices (town policy section, dated 2026-10-12).
-- 2026-10-14 gt-3vgbi: text for bd and gt goes through a quoted heredoc (town policy section, dated 2026-10-14).
 - 2026-10-14 gt-3vgbi: scratch files stay out of the worktree (town policy section, dated 2026-10-14).
 - 2026-10-23 gt-3vgbi: tests are engineered, not accumulated (town policy section, dated 2026-10-23; full standard in ~/.claude/docs/standards/test-engineering.md).
 - 2026-10-26 gt-3vgbi: tests stay hermetic, and no new shell scripts (town policy sections, dated 2026-10-26).
@@ -41,16 +41,26 @@ Exception, and only this one: a bead labelled `scheduled:deep-review-slice` or
 reviewer and verifier subagents (at most the formula's caps), and it never edits, commits or
 pushes. Spawn them as the formula says.
 
-## Text for bd and gt goes through a quoted heredoc (town policy, 2026-10-14)
+## Bead text is one single-quoted argument (town policy, 2026-10-28)
 
 > **Town Policy — overrides formula instructions where they conflict.**
 
-The shell runs backticks and `$(...)` inside double quotes, so inline text for
-`gt bead create`, `gt bead comment`, `gt bead update` or `gt bead note` that names code in
-backticks executes it. Beads are written with the `gt bead` verbs (create, note, update,
-claim, comment, close, and so on); `bd` is for reads. Write the text to a file with a quoted
-heredoc (`<<'EOF'`) and pass it as `"$(cat file)"`; never put code or backticks inline in
-double quotes.
+Pass a bead's text as a single-quoted argument on every `gt bead` verb that takes
+text (`create`, `update`, `claim`, `note`, `comment` and `close`), across as many lines
+as the text needs:
+
+```bash
+gt bead note gt-abc 'the retry loop never resets its counter, so a second
+attempt spends the budget the first one started with'
+```
+
+The shell runs nothing inside single quotes, so a note about code keeps its
+backticks and `$(...)` intact, and the tap guard reads the text exactly as
+written. Beads are written with the `gt bead` verbs; `bd` is for reads.
+
+When the text holds a single quote of its own it takes double quotes, where
+`$`, backticks and braces expand: escape them so the text the guard reads still
+opens literally.
 
 ## Tests stay hermetic (town policy, 2026-10-26)
 
