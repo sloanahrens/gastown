@@ -83,8 +83,24 @@ func resolveTown(resolve func() (string, error), getenv func(string) string, abs
 	if err != nil {
 		return "", fmt.Errorf("resolving GT_TOWN_ROOT %q: %w", fromEnv, err)
 	}
-	if envTown != filepath.Clean(town) {
+	if !sameTown(envTown, town) {
 		return "", fmt.Errorf("the plugin directory is in town %q but GT_TOWN_ROOT names %q", town, fromEnv)
 	}
 	return town, nil
+}
+
+// sameTown reports whether two absolute paths name one directory with symlinks
+// followed, since the daemon and a hand run reach the same town by different
+// routes whenever either route is a link. A path that cannot be resolved names
+// no town, so the pair is refused rather than passed as placed.
+func sameTown(a, b string) bool {
+	resolvedA, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		return false
+	}
+	resolvedB, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		return false
+	}
+	return resolvedA == resolvedB
 }
