@@ -181,7 +181,10 @@ func TestSchemaLevelKeepsBdsAnswerAfterTheCallersBudgetEnded(t *testing.T) {
 	}{
 		{"schema skew answered", exitError{26}, false, "the database schema is ahead of this bd"},
 		{"other status answered", exitError{2}, false, "could not read the database migration level"},
-		{"killed at the deadline", errors.New("signal: killed"), true, "timed out after 1m0s"},
+		// The deadline killed bd: its process error is the *exec.ExitError a
+		// signaled process leaves, an exit status with no code (exit -1), not
+		// a bare error carrying no exit status at all (gt-824d).
+		{"killed at the deadline", &exec.ExitError{}, true, "timed out after 1m0s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
