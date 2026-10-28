@@ -3,8 +3,11 @@ package registry
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -226,5 +229,194 @@ func TestClientErrorsOnOtherStatuses(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "boom") {
 		t.Errorf("error echoes the response body: %v", err)
+	}
+}
+
+func TestCatalogFollowsPagination(t *testing.T) {
+	t.Parallel()
+	var uris []string
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		uris = append(uris, r.URL.RequestURI())
+		switch r.URL.Query().Get("last") {
+		case "":
+			w.Header().Set("Link", `</v2/_catalog?n=100&last=gastown-polecat>; rel="next"`)
+			_, _ = w.Write([]byte(`{"repositories":["gastown-polecat"]}`))
+		case "gastown-polecat":
+			w.Header().Set("Link", `</v2/_catalog?n=100&last=seedtest/polecat>; rel="next"`)
+			_, _ = w.Write([]byte(`{"repositories":["seedtest/polecat"]}`))
+		default:
+			_, _ = w.Write([]byte(`{"repositories":["zoo"]}`))
+		}
+	})
+
+	repos, err := c.Catalog(context.Background())
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	if want := []string{"gastown-polecat", "seedtest/polecat", "zoo"}; !slices.Equal(repos, want) {
+		t.Errorf("Catalog = %v, want %v", repos, want)
+	}
+	want := []string{
+		"/v2/_catalog?n=100",
+		"/v2/_catalog?n=100&last=gastown-polecat",
+		"/v2/_catalog?n=100&last=seedtest/polecat",
+	}
+	if !slices.Equal(uris, want) {
+		t.Errorf("registry read %v, want %v", uris, want)
+	}
+}
+
+func TestTagsFollowPagination(t *testing.T) {
+	t.Parallel()
+	var uris []string
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		uris = append(uris, r.URL.RequestURI())
+		if r.URL.Query().Get("last") == "" {
+			w.Header().Set("Link", `</v2/gastown-polecat/tags/list?n=100&last=dev>; rel="next"`)
+			_, _ = w.Write([]byte(`{"name":"gastown-polecat","tags":["dev"]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"name":"gastown-polecat","tags":["2d5a48dcb"]}`))
+	})
+
+	tags, err := c.Tags(context.Background(), "gastown-polecat")
+	if err != nil {
+		t.Fatalf("Tags: %v", err)
+	}
+	if want := []string{"dev", "2d5a48dcb"}; !slices.Equal(tags, want) {
+		t.Errorf("Tags = %v, want %v", tags, want)
+	}
+	if len(uris) != 2 || !strings.HasPrefix(uris[0], "/v2/gastown-polecat/tags/list?n=") {
+		t.Errorf("registry read %v, want two tag pages", uris)
+	}
+}
+
+func TestCatalogFollowsAbsoluteLinkOnOwnOrigin(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("last") == "" {
+			w.Header().Set("Link", `<http://registry.test/v2/_catalog?n=100&last=a>; rel="next"`)
+			_, _ = w.Write([]byte(`{"repositories":["a"]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"repositories":["b"]}`))
+	})
+
+	repos, err := c.Catalog(context.Background())
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	if want := []string{"a", "b"}; !slices.Equal(repos, want) {
+		t.Errorf("Catalog = %v, want %v", repos, want)
+	}
+}
+
+func TestCatalogRefusesUnusableNextLink(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, link string
+	}{
+		{"another origin", `<http://elsewhere.test/v2/_catalog?n=100&last=evil>; rel="next"`},
+		{"not a path", `<v2/_catalog?n=100>; rel="next"`},
+		{"unparseable", `<http:// registry.test/v2/_catalog>; rel="next"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// The page the bad link points at ends the listing cleanly, so a
+			// client that follows it returns no error instead of being caught
+			// by the loop guards.
+			handler, requests := countingHandler(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("last") == "evil" {
+					_, _ = w.Write([]byte(`{"repositories":["evil"]}`))
+					return
+				}
+				w.Header().Set("Link", tc.link)
+				_, _ = w.Write([]byte(`{"repositories":["a"]}`))
+			})
+
+			if _, err := newTestClient(handler).Catalog(context.Background()); err == nil {
+				t.Fatalf("Catalog with a %s link returned no error", tc.name)
+			}
+			if n := requests.Load(); n != 1 {
+				t.Errorf("registry saw %d requests, want 1", n)
+			}
+		})
+	}
+}
+
+func TestCatalogRefusesRepeatedNextLink(t *testing.T) {
+	t.Parallel()
+	handler, requests := countingHandler(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", `</v2/_catalog?n=100>; rel="next"`)
+		_, _ = w.Write([]byte(`{"repositories":["a"]}`))
+	})
+
+	if _, err := newTestClient(handler).Catalog(context.Background()); err == nil {
+		t.Fatal("Catalog whose Link header names its own page returned no error")
+	}
+	if n := requests.Load(); n != 1 {
+		t.Errorf("registry read %d pages, want 1", n)
+	}
+}
+
+func TestCatalogStopsAfterMaxPages(t *testing.T) {
+	t.Parallel()
+	var pages atomic.Int32
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		n := pages.Add(1)
+		w.Header().Set("Link", fmt.Sprintf(`</v2/_catalog?n=100&last=repo-%d>; rel="next"`, n))
+		_, _ = w.Write([]byte(`{"repositories":["repo"]}`))
+	})
+
+	if _, err := c.Catalog(context.Background()); err == nil {
+		t.Fatal("Catalog read past the page bound without an error")
+	}
+	if got := pages.Load(); got != maxPages {
+		t.Errorf("registry saw %d requests, want %d", got, maxPages)
+	}
+}
+
+func TestCatalogIgnoresNonNextLinks(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", `</v2/_catalog?n=100>; rel="prev"`)
+		_, _ = w.Write([]byte(`{"repositories":["a"]}`))
+	})
+
+	repos, err := c.Catalog(context.Background())
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	if want := []string{"a"}; !slices.Equal(repos, want) {
+		t.Errorf("Catalog = %v, want %v", repos, want)
+	}
+}
+
+func TestListingBodyOverLimitIsError(t *testing.T) {
+	t.Parallel()
+	oversized := func(field string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, `{"`+field+`":["`)
+			_, _ = io.WriteString(w, strings.Repeat("a", maxBodyBytes))
+			_, _ = io.WriteString(w, `"]}`)
+		}
+	}
+	ctx := context.Background()
+
+	if _, err := newTestClient(oversized("repositories")).Catalog(ctx); err == nil {
+		t.Error("Catalog decoded a body past the size bound")
+	}
+	if _, err := newTestClient(oversized("tags")).Tags(ctx, "gastown-polecat"); err == nil {
+		t.Error("Tags decoded a body past the size bound")
+	}
+}
+
+func TestClientWithoutHTTPBoundsEachRequest(t *testing.T) {
+	t.Parallel()
+	c := &Client{Base: "http://registry.test"}
+
+	if got := c.httpClient().Timeout; got != requestTimeout {
+		t.Errorf("default client timeout = %v, want %v", got, requestTimeout)
 	}
 }
