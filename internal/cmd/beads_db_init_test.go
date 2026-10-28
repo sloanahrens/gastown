@@ -10,7 +10,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,16 +21,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
-
-// extractJSON finds the first JSON object in output that may contain non-JSON warnings.
-// bd --json -q can still emit warnings to stdout before the JSON payload.
-func extractJSON(output []byte) []byte {
-	idx := strings.Index(string(output), "{")
-	if idx < 0 {
-		return output
-	}
-	return output[idx:]
-}
 
 // createTrackedBeadsRepoWithIssues creates a git repo with .beads/ tracked that contains existing issues.
 // This simulates a clone of a repo that has tracked beads with issues exported to issues.jsonl.
@@ -90,21 +79,21 @@ func createTrackedBeadsRepoWithIssues(t *testing.T, path, prefix string, numIssu
 	if output, err := beads.RunTestContainerInit(t.Context(), path, bdInitArgs, env); err != nil {
 		t.Fatalf("bd init failed: %v\nOutput: %s", err, output)
 	}
-	var cmd *exec.Cmd
-
-	// Create issues
+	// Create issues. A plain wrapper runs bd the way an explicit argv did:
+	// path as the working directory, env exactly as given, priority left to bd.
+	bdStore := beads.NewPlain(path, env)
 	for i := 1; i <= numIssues; i++ {
-		cmd = exec.Command("bd", "-q", "create",
-			"--type", "task", "--title", fmt.Sprintf("Test issue %d", i))
-		cmd.Dir = path
-		cmd.Env = env
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("bd create issue %d failed: %v\nOutput: %s", i, err, output)
+		if _, err := bdStore.Create(beads.CreateOptions{
+			Title:    fmt.Sprintf("Test issue %d", i),
+			Labels:   []string{"gt:task"},
+			Priority: -1,
+		}); err != nil {
+			t.Fatalf("bd create issue %d failed: %v\nOutput: %s", i, err, bdErrOutput(err))
 		}
 	}
 
 	// Ensure .beads is committed (bd init may auto-commit in newer versions).
-	cmd = exec.Command("git", "add", ".beads")
+	cmd := exec.Command("git", "add", ".beads")
 	cmd.Dir = path
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git add .beads: %v\n%s", err, out)
@@ -175,24 +164,17 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 
 		// NOW TRY TO USE bd - this is the key test for the bug
 		// Without the fix, the database doesn't exist and bd operations fail.
-		// CommandWithEnv puts bd in machine mode and unwraps the envelope, so
-		// the parse below reads the created issue, not the envelope.
-		bdCmd := beads.CommandWithEnv(rigDir, env, "--json", "-q", "create",
-			"--type", "task", "--title", "test-from-rig")
-		output, err := bdCmd.CombinedOutput()
+		created, err := beads.NewPlain(rigDir, env).Create(beads.CreateOptions{
+			Title:    "test-from-rig",
+			Labels:   []string{"gt:task"},
+			Priority: -1,
+		})
 		if err != nil {
-			t.Fatalf("bd create failed (bug!): %v\nOutput: %s\n\nThis is the bug: database doesn't exist after clone because bd init was never run", err, output)
+			t.Fatalf("bd create failed (bug!): %v\nOutput: %s\n\nThis is the bug: database doesn't exist after clone because bd init was never run", err, bdErrOutput(err))
 		}
 
-		var result struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(extractJSON(output), &result); err != nil {
-			t.Fatalf("parse output: %v", err)
-		}
-
-		if !strings.HasPrefix(result.ID, "existing-prefix-") {
-			t.Errorf("expected existing-prefix- prefix, got %s", result.ID)
+		if !strings.HasPrefix(created.ID, "existing-prefix-") {
+			t.Errorf("expected existing-prefix- prefix, got %s", created.ID)
 		}
 	})
 
@@ -225,22 +207,17 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		}
 
 		// Verify bd operations work with the configured prefix
-		bdCmd := beads.CommandWithEnv(rigDir, env, "--json", "-q", "create",
-			"--type", "task", "--title", "test-from-empty-repo")
-		output, err := bdCmd.CombinedOutput()
+		created, err := beads.NewPlain(rigDir, env).Create(beads.CreateOptions{
+			Title:    "test-from-empty-repo",
+			Labels:   []string{"gt:task"},
+			Priority: -1,
+		})
 		if err != nil {
-			t.Fatalf("bd create failed: %v\nOutput: %s", err, output)
+			t.Fatalf("bd create failed: %v\nOutput: %s", err, bdErrOutput(err))
 		}
 
-		var result struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(extractJSON(output), &result); err != nil {
-			t.Fatalf("parse output: %v", err)
-		}
-
-		if !strings.HasPrefix(result.ID, "empty-prefix-") {
-			t.Errorf("expected empty-prefix- prefix, got %s", result.ID)
+		if !strings.HasPrefix(created.ID, "empty-prefix-") {
+			t.Errorf("expected empty-prefix- prefix, got %s", created.ID)
 		}
 	})
 
@@ -300,26 +277,21 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		}
 
 		// Verify bd operations work - the key test is that the database was initialized
-		bdCmd := beads.CommandWithEnv(rigDir, env, "--json", "-q", "create",
-			"--type", "task", "--title", "test-derived-prefix")
-		output, err = bdCmd.CombinedOutput()
+		created, err := beads.NewPlain(rigDir, env).Create(beads.CreateOptions{
+			Title:    "test-derived-prefix",
+			Labels:   []string{"gt:task"},
+			Priority: -1,
+		})
 		if err != nil {
-			t.Fatalf("bd create failed (database not initialized?): %v\nOutput: %s", err, output)
-		}
-
-		var result struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(extractJSON(output), &result); err != nil {
-			t.Fatalf("parse output: %v", err)
+			t.Fatalf("bd create failed (database not initialized?): %v\nOutput: %s", err, bdErrOutput(err))
 		}
 
 		// The ID should have SOME prefix (derived from "testrig")
 		// We don't care exactly what it is, just that bd works
-		if result.ID == "" {
+		if created.ID == "" {
 			t.Error("expected non-empty issue ID")
 		}
-		t.Logf("Created issue with derived prefix: %s", result.ID)
+		t.Logf("Created issue with derived prefix: %s", created.ID)
 	})
 
 	t.Run("MissingMetadataTriggersReInit", func(t *testing.T) {

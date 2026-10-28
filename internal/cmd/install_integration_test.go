@@ -155,28 +155,21 @@ func TestInstallBeadsHasCorrectPrefix(t *testing.T) {
 	}
 	// Optional online smoke check: verify prefix via bd CLI when Dolt is reachable.
 	// Core assertions already validate prefix from tracked config.yaml above.
-	bdCmd := exec.Command("bd", "config", "get", "issue_prefix")
-	bdCmd.Dir = hqPath
-	bdCmd.Env = append(env, "BEADS_DIR="+beadsDir)
-	prefixOutput, err := bdCmd.Output() // stdout only
+	prefix, err := beads.NewPlain(hqPath, append(env, "BEADS_DIR="+beadsDir)).ConfigGet("issue_prefix")
 	if err != nil {
 		// In CI/e2e, transient Dolt connection races can make this online check flaky.
 		// Keep test deterministic by relying on config.yaml assertions when bd is offline.
-		debugCmd := exec.Command("bd", "config", "get", "issue_prefix")
-		debugCmd.Dir = hqPath
-		debugCmd.Env = append(env, "BEADS_DIR="+beadsDir)
-		combinedOut, _ := debugCmd.CombinedOutput()
-		out := string(combinedOut)
+		// bdErrOutput is bd's stdout then stderr (CLIError.Output), the combined
+		// output the raw command reported, so the marker matches whichever
+		// stream bd wrote it to.
+		out := bdErrOutput(err)
 		if strings.Contains(out, "Dolt server still unreachable") || strings.Contains(out, "connect: connection refused") {
 			t.Logf("bd online prefix check skipped due transient Dolt unreachability: %s", strings.TrimSpace(out))
 		} else {
-			t.Fatalf("bd config get issue_prefix failed: %v\nOutput: %s", err, combinedOut)
+			t.Fatalf("bd config get issue_prefix failed: %v\nOutput: %s", err, out)
 		}
-	} else {
-		prefix := strings.TrimSpace(string(prefixOutput))
-		if prefix != "hq" {
-			t.Errorf("beads issue_prefix = %q, want %q", prefix, "hq")
-		}
+	} else if prefix != "hq" {
+		t.Errorf("beads issue_prefix = %q, want %q", prefix, "hq")
 	}
 }
 
@@ -527,33 +520,6 @@ func assertDoltConfigPort(t *testing.T, hqPath, wantPort string) {
 	}
 	if cfg.Listener.Port != want {
 		t.Fatalf("Dolt config port = %d, want isolated port %d\n%s", cfg.Listener.Port, want, data)
-	}
-}
-
-func assertSlotValue(t *testing.T, townRoot, issueID, slot, want string) {
-	t.Helper()
-	cmd := beads.CommandWithEnv(townRoot, nil, "--json", "slot", "show", issueID)
-	output, err := cmd.Output()
-	if err != nil {
-		debugCmd := exec.Command("bd", "--json", "slot", "show", issueID)
-		debugCmd.Dir = townRoot
-		combined, _ := debugCmd.CombinedOutput()
-		t.Fatalf("bd slot show %s failed: %v\nOutput: %s", issueID, err, combined)
-	}
-
-	var parsed struct {
-		Slots map[string]*string `json:"slots"`
-	}
-	if err := json.Unmarshal(output, &parsed); err != nil {
-		t.Fatalf("parsing slot show output failed: %v\nOutput: %s", err, output)
-	}
-
-	var got string
-	if value, ok := parsed.Slots[slot]; ok && value != nil {
-		got = *value
-	}
-	if got != want {
-		t.Fatalf("slot %s for %s = %q, want %q", slot, issueID, got, want)
 	}
 }
 

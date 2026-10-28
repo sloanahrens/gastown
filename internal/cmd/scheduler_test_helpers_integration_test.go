@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -94,93 +95,50 @@ func getSchedulerList(t *testing.T, gtBinary, dir string, env []string) []map[st
 
 // --- Bead helpers ---
 
-// createTestBead creates a bead with the given title using bd create and returns
-// the auto-generated bead ID.
+// createTestBead creates a bead with the given title and returns the
+// auto-generated bead ID.
 func createTestBead(t *testing.T, dir, title string) string {
 	t.Helper()
-	args := []string{"create", "--title=" + title, "--type=task",
-		"--description=Integration test bead", "--json"}
-	// CommandWithEnv puts bd in machine mode and unwraps the envelope, so the
-	// unmarshal below reads the --json payload rather than the envelope.
-	cmd := beads.CommandWithEnv(dir, nil, args...)
-	out, err := cmd.Output()
+	issue, err := beads.NewPlain(dir, nil).Create(beads.CreateOptions{
+		Title:       title,
+		Labels:      []string{"gt:task"},
+		Description: "Integration test bead",
+		Priority:    -1,
+	})
 	if err != nil {
-		// Capture stderr for diagnostics
-		cmd2 := exec.Command("bd", args...)
-		cmd2.Dir = dir
-		combined, _ := cmd2.CombinedOutput()
-		t.Fatalf("bd create failed: %v\n%s", err, combined)
-	}
-	var issue struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(out, &issue); err != nil {
-		t.Fatalf("parse bd create output: %v\nraw: %s", err, out)
+		t.Fatalf("bd create failed: %v\n%s", err, bdErrOutput(err))
 	}
 	if issue.ID == "" {
-		t.Fatalf("bd create returned empty ID\nraw: %s", out)
+		t.Fatalf("bd create returned empty ID")
 	}
 	return issue.ID
 }
 
 // beadHasLabel checks whether a bead has the specified label.
-// Runs bd show --json from dir and inspects the labels array.
 func beadHasLabel(t *testing.T, beadID, label, dir string) bool {
 	t.Helper()
-	args := beads.MaybePrependAllowStale([]string{"show", beadID, "--json"})
-	cmd := beads.CommandWithEnv(dir, nil, args...)
-	out, err := cmd.Output()
+	issue, err := beads.NewPlain(dir, nil).Show(beadID)
 	if err != nil {
 		t.Fatalf("bd show %s failed: %v", beadID, err)
 	}
-	var issues []struct {
-		Labels []string `json:"labels"`
-	}
-	if err := json.Unmarshal(out, &issues); err != nil {
-		t.Fatalf("parse bd show %s: %v", beadID, err)
-	}
-	if len(issues) == 0 {
-		t.Fatalf("bd show %s returned no results", beadID)
-	}
-	for _, l := range issues[0].Labels {
-		if l == label {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(issue.Labels, label)
 }
 
-// getBeadDescription returns the description of a bead via bd show --json.
+// getBeadDescription returns the description of a bead.
 func getBeadDescription(t *testing.T, beadID, dir string) string {
 	t.Helper()
-	args := beads.MaybePrependAllowStale([]string{"show", beadID, "--json"})
-	cmd := beads.CommandWithEnv(dir, nil, args...)
-	out, err := cmd.Output()
+	issue, err := beads.NewPlain(dir, nil).Show(beadID)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			t.Fatalf("bd show %s failed: %v\nstderr: %s", beadID, err, exitErr.Stderr)
-		}
-		t.Fatalf("bd show %s failed: %v", beadID, err)
+		t.Fatalf("bd show %s failed: %v\n%s", beadID, err, bdErrOutput(err))
 	}
-	var issues []struct {
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(out, &issues); err != nil {
-		t.Fatalf("parse bd show %s: %v", beadID, err)
-	}
-	if len(issues) == 0 {
-		t.Fatalf("bd show %s returned no results", beadID)
-	}
-	return issues[0].Description
+	return issue.Description
 }
 
 // addBeadDependency adds a blocking dependency: blocker blocks blocked.
 func addBeadDependency(t *testing.T, blocked, blocker, dir string) {
 	t.Helper()
-	cmd := exec.Command("bd", "dep", "add", blocked, blocker)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd dep add %s %s failed: %v\n%s", blocked, blocker, err, out)
+	if err := beads.NewPlain(dir, nil).AddDependency(blocked, blocker); err != nil {
+		t.Fatalf("bd dep add %s %s failed: %v\n%s", blocked, blocker, err, bdErrOutput(err))
 	}
 }
 
@@ -189,10 +147,8 @@ func addBeadDependency(t *testing.T, blocked, blocker, dir string) {
 // can be in a different DB if routes.jsonl is present in dir's .beads/.
 func addBeadDependencyOfType(t *testing.T, from, to, depType, dir string) {
 	t.Helper()
-	cmd := exec.Command("bd", "dep", "add", from, to, "--type="+depType)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd dep add %s %s --type=%s failed: %v\n%s", from, to, depType, err, out)
+	if err := beads.NewPlain(dir, nil).AddTypedDependency(from, to, depType); err != nil {
+		t.Fatalf("bd dep add %s %s --type=%s failed: %v\n%s", from, to, depType, err, bdErrOutput(err))
 	}
 }
 
@@ -205,6 +161,9 @@ func addBeadDependencyOfType(t *testing.T, from, to, depType, dir string) {
 // writes for cross-database targets, in the epic's own database, which is the
 // shape the epic reader resolves (rawDepSQLArgs in convoy.go:
 // COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)).
+//
+// The write is a bare INSERT, so no typed method covers it; bd sql is the one
+// verb whose rows are not JSON, and the seam's Run passes it through as is.
 func addCrossRigEpicChild(t *testing.T, epicID, childID, dir string) {
 	t.Helper()
 	prefix := strings.TrimSuffix(beads.ExtractPrefix(childID), "-")
@@ -212,35 +171,28 @@ func addCrossRigEpicChild(t *testing.T, epicID, childID, dir string) {
 		"INSERT INTO dependencies (id, issue_id, type, created_by, depends_on_external) "+
 			"VALUES (UUID(), '%s', 'parent-child', 'integration-test', 'external:%s:%s')",
 		epicID, prefix, childID)
-	cmd := exec.Command("bd", "sql", query)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("linking cross-rig child %s to epic %s failed: %v\n%s", childID, epicID, err, out)
+	if _, err := beads.NewPlain(dir, nil).Run("sql", query); err != nil {
+		t.Fatalf("linking cross-rig child %s to epic %s failed: %v\n%s", childID, epicID, err, bdErrOutput(err))
 	}
 }
 
 // createTestBeadOfType creates a bead with the given title and issue type (e.g.,
-// "epic", "convoy", "task") and returns the auto-generated bead ID.
+// "epic", "convoy", "task") and returns the auto-generated bead ID. Create
+// carries the type as its gt:<type> label: detectSchedulerIDType
+// (sling_schedule.go) reads an epic by that label as well as by its issue_type.
 func createTestBeadOfType(t *testing.T, dir, title, issueType string) string {
 	t.Helper()
-	args := []string{"create", "--title=" + title, "--type=" + issueType,
-		"--description=Integration test bead", "--json"}
-	cmd := beads.CommandWithEnv(dir, nil, args...)
-	out, err := cmd.Output()
+	issue, err := beads.NewPlain(dir, nil).Create(beads.CreateOptions{
+		Title:       title,
+		Labels:      []string{"gt:" + issueType},
+		Description: "Integration test bead",
+		Priority:    -1,
+	})
 	if err != nil {
-		cmd2 := exec.Command("bd", args...)
-		cmd2.Dir = dir
-		combined, _ := cmd2.CombinedOutput()
-		t.Fatalf("bd create --type=%s failed: %v\n%s", issueType, err, combined)
-	}
-	var issue struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(out, &issue); err != nil {
-		t.Fatalf("parse bd create output: %v\nraw: %s", err, out)
+		t.Fatalf("bd create --type=%s failed: %v\n%s", issueType, err, bdErrOutput(err))
 	}
 	if issue.ID == "" {
-		t.Fatalf("bd create returned empty ID\nraw: %s", out)
+		t.Fatalf("bd create returned empty ID")
 	}
 	return issue.ID
 }
