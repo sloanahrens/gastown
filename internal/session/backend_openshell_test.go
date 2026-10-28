@@ -542,6 +542,9 @@ func TestImagePathsBetween(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("imagePathsBetween = %v, wantErr %v", err, tt.wantErr)
 			}
+			if tt.notAncestor != errors.Is(err, errNotAncestor) {
+				t.Fatalf("err = %v, want errNotAncestor=%v: an ancestry refusal is drift git judged, every other failure is not", err, tt.notAncestor)
+			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("paths = %q, want %q", got, tt.want)
 			}
@@ -549,6 +552,135 @@ func TestImagePathsBetween(t *testing.T) {
 				t.Errorf("git calls = %q, want %q", calls, tt.wantCalls)
 			}
 		})
+	}
+}
+
+// The image's commit is written by the image, in a docker label and in its
+// `gt version` output, so a value git would read as an option is refused
+// before git's argv (gt-aq1d1).
+func TestImagePathsBetweenRefusesValuesThatAreNotCommitIDs(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, from, to, wantErr string }{
+		{
+			name:    "an image label that reads as an option",
+			from:    "--output=/tmp/hijacked",
+			to:      openshellTestGTCommit,
+			wantErr: `the image's gt commit "--output=/tmp/hijacked"`,
+		},
+		{
+			name:    "a revision expression from the sandbox's gt",
+			from:    openshellTestDriftedGT,
+			to:      "HEAD^{tree}",
+			wantErr: `the installed gt's commit "HEAD^{tree}"`,
+		},
+		{
+			name:    "an abbreviation below the comparison's minimum",
+			from:    "abc12",
+			to:      openshellTestGTCommit,
+			wantErr: "the image's gt commit",
+		},
+		{
+			name:    "an id longer than a commit id",
+			from:    openshellTestGTCommit + "00",
+			to:      openshellTestGTCommit,
+			wantErr: "the image's gt commit",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ran := false
+			run := func(string, ...string) ([]byte, error) {
+				ran = true
+				return nil, nil
+			}
+			_, err := imagePathsBetween(run, "/town/gastown", tt.from, tt.to)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("imagePathsBetween = %v, want a refusal naming %q", err, tt.wantErr)
+			}
+			if ran {
+				t.Fatal("git ran with a value that is not a commit id")
+			}
+		})
+	}
+}
+
+// The comparison runs git in the town's gt source checkout, and a session
+// started inside a worktree or a hook carries GIT_DIR and its siblings, which
+// would point git at that repository instead (gt-aq1d1).
+func TestGitCommandDropsTheCallersRepositoryEnvironment(t *testing.T) {
+	t.Parallel()
+	repoVars := []string{
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_NAMESPACE", "GIT_PREFIX",
+	}
+	environ := []string{"GT_SESSION_TEST_KEPT=kept", "PATH=/usr/bin"}
+	for _, name := range repoVars {
+		environ = append(environ, name+"=/elsewhere/"+name)
+	}
+
+	cmd := gitCommand(environ, "/town/gastown", "diff", "--name-only", "a", "b")
+
+	if want := []string{"git", "diff", "--name-only", "a", "b"}; !slices.Equal(cmd.Args, want) {
+		t.Fatalf("args = %q, want %q", cmd.Args, want)
+	}
+	if cmd.Dir != "/town/gastown" {
+		t.Fatalf("dir = %q, want the comparison's checkout", cmd.Dir)
+	}
+	kept := false
+	for _, entry := range cmd.Env {
+		name, value, _ := strings.Cut(entry, "=")
+		if slices.Contains(repoVars, name) {
+			t.Errorf("env carries %s=%s, which points git at another repository", name, value)
+		}
+		if name == "GT_SESSION_TEST_KEPT" {
+			kept = value == "kept"
+		}
+	}
+	if !kept {
+		t.Fatalf("env dropped GT_SESSION_TEST_KEPT, want the caller's other variables passed through")
+	}
+}
+
+// A comparison git could not make is refused with its own reason: the gt
+// source checkout is the operator's fix, so a rebuild instruction would send
+// them to the wrong place (gt-aq1d1).
+func TestCheckImageGTNamesAComparisonGitCouldNotMake(t *testing.T) {
+	t.Parallel()
+	const image, installed = openshellTestDriftedGT, openshellTestGTCommit
+	diff := func(string, string) ([]string, error) {
+		return nil, errors.New("no gt source checkout")
+	}
+
+	err := checkImageGT("gastown-polecat:dev", gtLabelSource, image, installed, diff)
+	if !errors.Is(err, ErrImageDrift) {
+		t.Fatalf("checkImageGT = %v, want drift: the image is refused either way", err)
+	}
+	if !strings.Contains(err.Error(), "no gt source checkout") {
+		t.Fatalf("err = %v, want the comparison's own reason named", err)
+	}
+	if strings.Contains(err.Error(), "rebuild the image") {
+		t.Fatalf("err = %v, want no rebuild instruction: git never judged the image", err)
+	}
+}
+
+// Commits off one line of history are drift git judged, so the refusal keeps
+// the rebuild instruction (gt-aq1d1).
+func TestCheckImageGTKeepsTheRebuildForCommitsOffOneLine(t *testing.T) {
+	t.Parallel()
+	const image, installed = openshellTestDriftedGT, openshellTestGTCommit
+	notAncestor := func(imageCommit, installedCommit string) ([]string, error) {
+		run := func(string, ...string) ([]byte, error) { return nil, errors.New("exit status 1") }
+		return imagePathsBetween(run, "/town/gastown", imageCommit, installedCommit)
+	}
+
+	err := checkImageGT("gastown-polecat:dev", gtLabelSource, image, installed, notAncestor)
+	if !errors.Is(err, ErrImageDrift) {
+		t.Fatalf("checkImageGT = %v, want drift", err)
+	}
+	if !strings.Contains(err.Error(), "rebuild the image with make polecat-image") {
+		t.Fatalf("err = %v, want the rebuild instruction for an image git judged drifted", err)
 	}
 }
 
@@ -729,6 +861,12 @@ func TestOpenShellCheckSandboxGTRefusesWhenTheSourceCheckoutIsUnknown(t *testing
 	err := b.checkSandboxGT(context.Background(), openshellTestSession)
 	if !errors.Is(err, ErrImageDrift) {
 		t.Fatalf("checkSandboxGT = %v, want drift when the comparison cannot be made", err)
+	}
+	if !strings.Contains(err.Error(), "no gt source checkout") {
+		t.Fatalf("err = %v, want the missing checkout named: it is what the operator fixes", err)
+	}
+	if strings.Contains(err.Error(), "rebuild the image") {
+		t.Fatalf("err = %v, want no rebuild instruction: no image was compared", err)
 	}
 }
 
