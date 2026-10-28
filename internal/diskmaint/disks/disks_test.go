@@ -156,6 +156,14 @@ func TestEvaluateUnreadableDiskRaisesItsOwnAlert(t *testing.T) {
 	}
 }
 
+func TestEvaluateDoesNotRaiseUnreadableTwice(t *testing.T) {
+	t.Parallel()
+	active := activeKeys("diskmaint:colima:unreadable")
+	if alerts := Evaluate([]Reading{{Name: "colima", Err: errors.New("ssh: i/o timeout")}}, active); len(alerts) != 0 {
+		t.Fatalf("Evaluate with the unreadable alert active = %+v, want no alert", alerts)
+	}
+}
+
 func TestEvaluateUnreadableAlertClearsWhenReadAgain(t *testing.T) {
 	t.Parallel()
 	a := oneAlert(t, Evaluate([]Reading{{Name: "colima", UsedPct: 50}}, activeKeys("diskmaint:colima:unreadable")))
@@ -189,7 +197,11 @@ func TestKeepForTightensOverEighty(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if got := KeepFor(tc.readings, tc.base); got != tc.want {
+			got, err := KeepFor(tc.readings, tc.base).Count()
+			if err != nil {
+				t.Fatalf("KeepFor(%+v, %d) = error %v, want %d", tc.readings, tc.base, err, tc.want)
+			}
+			if got != tc.want {
 				t.Fatalf("KeepFor(%+v, %d) = %d, want %d", tc.readings, tc.base, got, tc.want)
 			}
 		})
@@ -208,20 +220,77 @@ func TestKeepForKeepsBaseBelowEighty(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if got := KeepFor(tc.readings, tc.base); got != tc.base {
+			got, err := KeepFor(tc.readings, tc.base).Count()
+			if err != nil {
+				t.Fatalf("KeepFor(%+v, %d) = error %v, want the base %d", tc.readings, tc.base, err, tc.base)
+			}
+			if got != tc.base {
 				t.Fatalf("KeepFor(%+v, %d) = %d, want the base %d", tc.readings, tc.base, got, tc.base)
 			}
 		})
 	}
 }
 
-func TestKeepForUnreadableDiskKeepsBase(t *testing.T) {
+func TestKeepForRefusesUnreadableDisk(t *testing.T) {
 	t.Parallel()
+	cause := errors.New("ssh: i/o timeout")
 	readings := []Reading{
 		{Name: "mac", UsedPct: 20},
+		{Name: "colima", Err: cause},
+	}
+	got, err := KeepFor(readings, 5).Count()
+	if err == nil {
+		t.Fatalf("KeepFor with an unreadable disk = %d, nil; want a refusal", got)
+	}
+	if !strings.Contains(err.Error(), "colima") {
+		t.Fatalf("refusal %q does not name the unreadable disk", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("refusal %q does not wrap the read error %v", err, cause)
+	}
+}
+
+func TestKeepForRefusalNamesEveryUnreadableDisk(t *testing.T) {
+	t.Parallel()
+	readings := []Reading{
+		{Name: "mac", Err: errors.New("df: not found")},
 		{Name: "colima", Err: errors.New("ssh: i/o timeout")},
 	}
-	if got := KeepFor(readings, 5); got != 5 {
-		t.Fatalf("KeepFor with an unreadable disk = %d, want the base 5", got)
+	got, err := KeepFor(readings, 5).Count()
+	if err == nil {
+		t.Fatalf("KeepFor with two unreadable disks = %d, nil; want a refusal", got)
+	}
+	for _, name := range []string{"mac", "colima"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Fatalf("refusal %q does not name the unreadable disk %s", err, name)
+		}
+	}
+}
+
+func TestKeepForRefusesWhateverTheOtherDisksSay(t *testing.T) {
+	t.Parallel()
+	unreadable := Reading{Name: "colima", Err: errors.New("ssh: i/o timeout")}
+	full := Reading{Name: "mac", UsedPct: 95}
+	for name, readings := range map[string][]Reading{
+		"unreadable disk before a full one": {unreadable, full},
+		"unreadable disk after a full one":  {full, unreadable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, err := KeepFor(readings, 5).Count()
+			if err == nil {
+				t.Fatalf("KeepFor(%+v) = %d, nil; want a refusal", readings, got)
+			}
+		})
+	}
+}
+
+// The zero Keep is the value a caller holds when nothing computed one. It must
+// not read as "keep none" (gt-dl4nv.3).
+func TestZeroKeepIsARefusalNotACount(t *testing.T) {
+	t.Parallel()
+	var k Keep
+	if got, err := k.Count(); err == nil {
+		t.Fatalf("the zero Keep = %d, nil; want an error", got)
 	}
 }
