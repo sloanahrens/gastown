@@ -775,8 +775,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// dispatches and leaves the comment naming the actor and the blockers.
 	blockers := sling.Admit(info.Dependencies)
 	if len(blockers) > 0 {
-		refusal := fmt.Sprintf("%s %s is blocked by unresolved dependencies:\n  - %s\nClose the blockers first, or pass --ignore-blockers to dispatch it anyway",
-			dispatch.SlingRefusalMarker, beadID, strings.Join(blockers, "\n  - "))
+		refusal := sling.Refusal(beadID, blockers)
 		switch {
 		case r.opts.ignoreBlockers:
 			if !r.opts.dryRun {

@@ -310,6 +310,39 @@ func TestScheduleBeadCarriesTheBlockersOverride(t *testing.T) {
 	}
 }
 
+// TestScheduleBeadRefusesABlockedBeadBeforeTheContext: the deferred path
+// writes a sling context the queue later dispatches, so a blocked bead is
+// refused before that write. A dry run reports the refusal and writes nothing.
+func TestScheduleBeadRefusesABlockedBeadBeforeTheContext(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		dryRun bool
+	}{
+		{name: "sling", dryRun: false},
+		{name: "dry run", dryRun: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.addBead(slingBead, blockedBeadInfo(blockedEdge("gt-block", "open", "blocks")))
+
+			err := h.run.scheduleSlingBead(slingBead, "gastown", ScheduleOptions{DryRun: tc.dryRun})
+			if tc.dryRun {
+				if err != nil {
+					t.Fatalf("dry run refused with an error: %v", err)
+				}
+			} else {
+				wantSlingErr(t, err, "gt-block (open)")
+			}
+			if len(h.contexts) != 0 {
+				t.Fatalf("a refused bead wrote %d sling context(s), want none", len(h.contexts))
+			}
+		})
+	}
+}
+
 // TestSlingDispatchesABeadWhoseBlockersClosed: the guard refuses unresolved
 // edges, not the presence of a dependency list.
 func TestSlingDispatchesABeadWhoseBlockersClosed(t *testing.T) {

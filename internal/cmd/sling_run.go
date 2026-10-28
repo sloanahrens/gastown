@@ -275,7 +275,7 @@ func realSlingDeps() *slingDeps {
 		actor:                 resolveSlingActor,
 		hookDir:               beads.ResolveHookDir,
 		storeFields:           storeFieldsInBeadFromTownRoot,
-		recordBlockerOverride: recordBlockerOverride,
+		recordBlockerOverride: slingStores{}.recordBlockerOverride,
 		hook:                  hookBeadWithRetryWithTownRoot,
 		clearOrphanLabels:     clearOrphanEpisodeLabels,
 		updateAgentHook:       updateAgentHookBead,

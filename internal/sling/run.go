@@ -223,8 +223,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	if len(blockers) > 0 {
 		if !opts.IgnoreBlockers {
 			result.ErrMsg = "blocked"
-			return result, fmt.Errorf("%s %s is blocked by unresolved dependencies:\n  - %s\nClose the blockers first, or pass --ignore-blockers to dispatch it anyway",
-				dispatch.SlingRefusalMarker, opts.BeadID, strings.Join(blockers, "\n  - "))
+			return result, errors.New(Refusal(opts.BeadID, blockers))
 		}
 		if err := d.RecordBlockerOverride(townRoot, opts.BeadID, d.Actor(opts), blockers); err != nil {
 			result.ErrMsg = err.Error()

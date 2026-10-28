@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -150,6 +152,19 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 
 	if (info.Status == "pinned" || info.Status == "hooked" || info.Status == "in_progress") && !opts.Force {
 		return fmt.Errorf("bead %s is already %s to %s\nUse --force to override", beadID, info.Status, info.Assignee)
+	}
+
+	// Blocked-work admission (gt-e3hl2): the queue dispatches this bead later,
+	// and the dispatch would refuse it then, so refuse it here, before the
+	// sling context is written. --ignore-blockers passes through the context,
+	// and the queued dispatch records the override when it runs.
+	if blockers := sling.Admit(info.Dependencies); len(blockers) > 0 && !opts.IgnoreBlockers {
+		if !opts.DryRun {
+			return errors.New(sling.Refusal(beadID, blockers))
+		}
+		fmt.Fprintf(d.out, "%s Dry run: this sling would be refused.\n", style.Dim.Render("○"))
+		fmt.Fprintln(d.out, sling.Refusal(beadID, blockers))
+		return nil
 	}
 
 	if opts.Formula != "" {
