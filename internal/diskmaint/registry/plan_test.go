@@ -133,6 +133,32 @@ func TestPlanKeepsTagSharingDevDigest(t *testing.T) {
 	}
 }
 
+func TestPlanKeepsDigestSharedWithNamedTag(t *testing.T) {
+	t.Parallel()
+	shared := dg("dead0001")
+	in := input([]TagInfo{
+		mkTag("latest", shared, 1),
+		mkTag("c000001", shared, 2),
+		mkTag("c000002", dg("dead0002"), 3),
+		mkTag("c000003", dg("dead0003"), 4),
+		mkTag(TagDev, dg("defaced"), 5),
+	})
+	in.Keep = 1
+
+	p := BuildPlan(in)
+
+	want := []string{mainRef(dg("dead0002"))}
+	if got := actionRefs(p); !slices.Equal(got, want) {
+		t.Fatalf("actions = %v, want only the unshared old digest %v: latest points at the other one", got, want)
+	}
+	if rule := keptRule(p, RepoMain+":c000001"); rule != "shares a kept digest" {
+		t.Fatalf("c000001 kept by %q, want shares a kept digest", rule)
+	}
+	if rule := keptRule(p, RepoMain+":latest"); rule != "named tag" {
+		t.Fatalf("latest kept by %q, want named tag", rule)
+	}
+}
+
 func TestPlanKeepsInstalledCommitTag(t *testing.T) {
 	t.Parallel()
 	in := input([]TagInfo{

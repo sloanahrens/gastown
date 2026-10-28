@@ -19,6 +19,8 @@ const (
 )
 
 // StrayRepos are the repositories outside RepoMain a run may delete whole.
+// BuildPlan plans RepoMain alone; the stray-repo rule that reads this list is
+// not part of it yet.
 var StrayRepos = []string{"gastown-polecat-measure", "seedtest/polecat"}
 
 // planTarget is the Target name a plan carries.
@@ -47,13 +49,16 @@ type PlanInput struct {
 	Keep            int
 	InstalledCommit string          // full sha from gt version; matched by tag prefix
 	InUseDigests    map[string]bool // digests running pods use (tags already resolved to digests)
-	InUseRepos      map[string]bool // repos named by sandbox records
+	InUseRepos      map[string]bool // repos named by sandbox records; the stray-repo step reads it
 	Errs            []string        // any failed read; non-empty means refuse
 }
 
-// BuildPlan decides which manifests of RepoMain to delete: it keeps the dev
-// tag, the installed commit's tag, every in-use digest and the newest Keep
-// candidates, and it refuses an input it cannot read.
+// BuildPlan decides which manifests of RepoMain to delete. Retention is by
+// digest, because deleting a digest drops every tag that points at it: it keeps
+// every named tag (any tag not shaped like a commit hash) and so every digest
+// one points at, plus the dev tag, the installed commit's tag, every in-use
+// digest and the newest Keep candidates. A candidate that shares a kept digest
+// survives with it. An input it cannot read refuses the plan.
 func BuildPlan(in PlanInput) diskmaint.Plan {
 	plan := diskmaint.Plan{Target: planTarget}
 	if why := refuseReason(in); why != "" {
@@ -67,7 +72,10 @@ func BuildPlan(in PlanInput) diskmaint.Plan {
 	keepDigests := map[string]bool{}
 	newestKept := map[string]bool{}
 	for _, ti := range tags {
-		if ti.Tag == TagDev || strings.HasPrefix(in.InstalledCommit, ti.Tag) {
+		// A named tag (dev among them) is never a candidate, and deleting the
+		// digest it points at would delete the tag too: keep that digest for
+		// every tag sharing it, candidate or not.
+		if !isCandidateTag(ti.Tag) || strings.HasPrefix(in.InstalledCommit, ti.Tag) {
 			keepDigests[ti.Digest] = true
 		}
 	}
