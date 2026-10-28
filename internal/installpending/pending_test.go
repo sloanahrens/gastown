@@ -345,6 +345,7 @@ func TestDirFor_HonoursTheDaemonDirOverride(t *testing.T) {
 // itself. StoreFor once handed the directory to StoreIn, so every Write renamed
 // its temp file onto the existing daemon directory and failed (gt-y2ygl).
 func TestStoreFor_IsTheMarkerFileInsideTheDaemonDir(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	noOverride := func(string) string { return "" }
 
@@ -372,6 +373,7 @@ func TestStoreFor_IsTheMarkerFileInsideTheDaemonDir(t *testing.T) {
 // TestStoreFor_HonoursTheDaemonDirOverride keeps the override pointing at the
 // marker file inside the override directory, not at the directory.
 func TestStoreFor_HonoursTheDaemonDirOverride(t *testing.T) {
+	t.Parallel()
 	override := t.TempDir()
 	getenv := func(key string) string {
 		if key == "INSTALL_GT_DAEMON_DIR" {
