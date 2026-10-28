@@ -1,6 +1,8 @@
 package polecatimage
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -455,6 +457,86 @@ func TestCloneSeedRefusesNoClaim(t *testing.T) {
 	if len(h.events) != 0 {
 		t.Errorf("a clone with no claim still ran %v", h.events)
 	}
+}
+
+// TestSeedMarkerRoundTripsThroughTheClaimFiles: the seed container writes the marker through the
+// real filesystem, and the init container reads it back the same way, so a rerun with the same pins
+// clones nothing (gt-posdj). Only the children are fake: no git or go runs.
+func TestSeedMarkerRoundTripsThroughTheClaimFiles(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	noChild := func(SeedCmd) (string, error) { return "", nil }
+	pass := &SeedPass{
+		Root:   root,
+		Source: t.TempDir(),
+		Pins:   twoPins(),
+		Files:  OSFiles{},
+		Run:    noChild,
+		Logf:   func(string, ...any) {},
+	}
+	if err := pass.Seed(); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	var clones int
+	clone := func(c SeedCmd) (string, error) {
+		clones++
+		return "", nil
+	}
+	dest := filepath.Join(t.TempDir(), "seed")
+	if err := CloneSeed(dest, root, twoPins(), OSFiles{}, clone, func(string, ...any) {}); err != nil {
+		t.Fatalf("CloneSeed: %v", err)
+	}
+	if clones != 0 {
+		t.Errorf("a claim the seed pass wrote cloned %d times, want none", clones)
+	}
+	if _, err := os.Stat(dest); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a claim the seed pass wrote created %s: %v", dest, err)
+	}
+}
+
+// TestSeedCloneMainReadsTheClaimItIsGiven: the init container's --root is the claim whose marker
+// decides the clone, so the production flags reach the marker on the real filesystem. A marker that
+// holds the pins exits 0 without cloning; one that cannot be read stops the Job with exit 3.
+func TestSeedCloneMainReadsTheClaimItIsGiven(t *testing.T) {
+	t.Parallel()
+	pins, err := json.Marshal(twoPins())
+	if err != nil {
+		t.Fatalf("marshal pins: %v", err)
+	}
+	t.Run("a marker that holds the pins skips the clone", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, cachevol.SeedMarkerName), []byte(cachevol.SeedMarker(twoPins())), 0o644); err != nil {
+			t.Fatalf("writing the marker: %v", err)
+		}
+		dest := filepath.Join(t.TempDir(), "seed")
+		var stdout, stderr bytes.Buffer
+		if code := seedCloneMain([]string{"--pins", string(pins), "--dest", dest, "--root", root}, &stdout, &stderr); code != 0 {
+			t.Fatalf("seedCloneMain() = %d, want 0: %s", code, stderr.String())
+		}
+		if _, err := os.Stat(dest); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("a seeded claim created %s: %v", dest, err)
+		}
+	})
+	t.Run("a marker it cannot read fails the job", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		// A directory where the marker file belongs: reading it fails on the real filesystem.
+		if err := os.Mkdir(filepath.Join(root, cachevol.SeedMarkerName), 0o755); err != nil {
+			t.Fatalf("making the unreadable marker: %v", err)
+		}
+		dest := filepath.Join(t.TempDir(), "seed")
+		var stdout, stderr bytes.Buffer
+		if code := seedCloneMain([]string{"--pins", string(pins), "--dest", dest, "--root", root}, &stdout, &stderr); code != 3 {
+			t.Fatalf("seedCloneMain() = %d, want 3", code)
+		}
+		if !strings.Contains(stderr.String(), "reading the seed marker") {
+			t.Errorf("stderr = %q, want the unreadable marker named", stderr.String())
+		}
+		if _, err := os.Stat(dest); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("an unreadable marker still created %s: %v", dest, err)
+		}
+	})
 }
 
 // TestCloneSeedFailureNamesTheRigAndScrubsTheURL: git quotes the URL it fetched, and the Job's log
