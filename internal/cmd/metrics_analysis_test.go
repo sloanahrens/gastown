@@ -156,12 +156,38 @@ func TestMetricsAnalysePrintsTheReceiptOfWhatItDid(t *testing.T) {
 	})
 }
 
+// A town with no gt source checkout still analyses. The extract runs in
+// process (gt-fsoh3), so the command no longer needs gastown/cmd/gt/main.go; it
+// used to look one up with version.GetRepoRootForTown and fail before the
+// analysis on a town that had none.
+func TestRunMetricsAnalyseNeedsNoSourceCheckout(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir() // no gastown/, so no cmd/gt/main.go below it
+	latest := filepath.Join(town, ".runtime", "metrics", "latest")
+	if err := os.MkdirAll(latest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A stamp an hour old: the run is not due, so the analysis answers without
+	// running a command. The wall clock is what the command's own environment
+	// reads; here it only has to be under a day from the stamp.
+	stamp := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if err := os.WriteFile(filepath.Join(latest, "stamp"), []byte(stamp+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runMetricsAnalyse(context.Background(), &out, town); err != nil {
+		t.Fatalf("runMetricsAnalyse on a town with no gt source checkout: %v", err)
+	}
+	if got := out.String(); !strings.HasPrefix(got, "analyse: not due") {
+		t.Fatalf("receipt = %q, want the not-due line", got)
+	}
+}
+
 // analysisPaths is the analysis's places for town. The extract is answered by
 // the day directory the fixtures write, so no run reads the host.
 func analysisPaths(town string) metrics.AnalysisOptions {
 	day := filepath.Join(town, ".runtime", "metrics", "2026-10-01")
 	return metrics.AnalysisOptions{
-		Repo:        filepath.Join(town, "gastown"),
 		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
 		MangoBin:    filepath.Join(town, ".runtime", "metrics", "bin", "mango"),
 		Extract:     func(context.Context, string, string) (string, error) { return day, nil },

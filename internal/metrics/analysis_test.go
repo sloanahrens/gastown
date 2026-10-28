@@ -174,8 +174,7 @@ func writeTownFile(t *testing.T, path, body string) {
 }
 
 // analysisOptions is the analysis's paths for town, with the extract answered
-// by the day directory analysisTown wrote. Repo is left empty, as the daily run
-// leaves it now that the extract runs in process.
+// by the day directory analysisTown wrote.
 func analysisOptions(town string) AnalysisOptions {
 	return AnalysisOptions{
 		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
