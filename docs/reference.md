@@ -256,13 +256,14 @@ takes the token as `<rig>/tier-sweep`; run the flake sweep as
 `gt slot run --role <rig>/flake-sweep -- bash scripts/flake-sweep.sh [ITER] [CONC]`.
 
 **A post-landing suite yields to an install in flight (gt-t135z).** The post-landing
-suite — `<rig>/post-land`, the red-main detector a landing runs once merged — takes no
-gate slot while `rebuild_gt` has an install pending (the `daemon/install-pending.json`
-marker it writes when an install is due). It waits for the marker to clear, or for the
-install's build (`gastown/rebuild-gt`) to take a slot, for at most 30 minutes, then
-competes as usual. The landing gate (`<rig>/landing`) is not in this class, so a merge
-never waits on an install, and every other role is unaffected. The wait reports as
-`install_pending` in `gt slot status`, naming the pid that reported the install.
+suite — `<rig>/post-land`, the red-main detector a landing runs once merged — is the one
+role class that keeps out of the gate slot while an install is pending. Before changing
+what that yield does, read the install protocol in [INSTALLING.md](INSTALLING.md): it
+says when a marker stands, how long the yield may last and which roles it never holds
+back. The wait ends early once the install's build (`gastown/rebuild-gt`) holds a slot,
+its reservation being in place by then. `gt slot status` lists the wait among its recent
+acquisitions as `install_pending`, with the pid that wrote the marker (`install_pid` in
+`--json`).
 
 Run `gt done` **once**, then leave it alone: the gate takes minutes. If it exits non-zero it
 names what failed (exit codes 10-16, `gt done --help`) and the session stays up; fix what it
