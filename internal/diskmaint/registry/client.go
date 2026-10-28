@@ -96,7 +96,7 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("%s %s: %w", method, path, ErrNotFound)
