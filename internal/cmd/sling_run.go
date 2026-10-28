@@ -5,10 +5,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -88,6 +90,12 @@ type slingDeps struct {
 	releaseSeat func(*SpawnedPolecatInfo)
 	findTown    func() (string, error)
 	townOrEnv   func() (string, error)
+	// pendingInstall is the pending-install marker in force at now, or nil when
+	// no install is pending: the reader is installpending.Store.Pending, and a
+	// sling refuses on a marker that stands and proceeds without one
+	// (gt-2rp64). A test supplies its own reader, so none reads the live
+	// INSTALL_GT_DAEMON_DIR.
+	pendingInstall func(townRoot string, now time.Time) (*installpending.Marker, error)
 
 	// Routing and dispatch paths runSling hands a request to.
 	resolvePRBranch        func(prNumber int) (string, error)
@@ -202,6 +210,9 @@ func realSlingDeps() *slingDeps {
 		releaseSeat:   func(s *SpawnedPolecatInfo) { s.releaseSeatClaim() },
 		findTown:      workspace.FindFromCwd,
 		townOrEnv:     workspace.FindFromCwdOrError,
+		pendingInstall: func(townRoot string, now time.Time) (*installpending.Marker, error) {
+			return installpending.StoreFor(townRoot).Pending(now)
+		},
 
 		resolvePRBranch:        resolvePRBranch,
 		workflowTargetOverride: applyWorkflowStepTargetOverride,

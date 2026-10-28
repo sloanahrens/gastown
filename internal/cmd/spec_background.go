@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -172,6 +173,15 @@ func (j specSlingJob) pending() specPendingSling {
 // the label and notes a failure owes are the foreground ones.
 func runSpecSlingJob(env specDispatchEnv, job specSlingJob) specDispatchReport {
 	report := specDispatchReport{}
+	// An install that started after the tick planned this job stops it, as the
+	// holds specSlingHold reads do (gt-2rp64).
+	if hold, errLine := env.installPendingStop(); hold != "" || errLine != "" {
+		report.Hold = hold
+		if errLine != "" {
+			report.Errors = append(report.Errors, errLine)
+		}
+		return report
+	}
 	o := specSlingOne(env, job.pending())
 	specApplyOutcome(env, &report, o)
 	report.SlingsRun = 1
@@ -234,6 +244,9 @@ func runSpecSling(cmd *cobra.Command, _ []string) error {
 		},
 		Sleep: time.Sleep,
 		Now:   time.Now,
+		PendingInstall: func() (*installpending.Marker, error) {
+			return installpending.StoreFor(townRoot).Pending(time.Now())
+		},
 	}
 	if held := specSlingHold(townRoot, job.Rig); held != nil {
 		return printSpecSlingReport(cmd, *held)

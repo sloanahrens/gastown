@@ -287,6 +287,13 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	townRoot := r.townRoot
 	townBeadsDir := filepath.Join(townRoot, ".beads")
 
+	// A gt install in flight replaces the binary a new sling's session would
+	// run, so no sling starts under it (gt-2rp64). Every route below is a new
+	// dispatch, and so does a dry run, whose preview would say it would sling.
+	if refusal := r.refuseWhileInstallPending(townRoot); refusal != nil {
+		return refusal
+	}
+
 	// Normalize target arguments: trim trailing slashes from target to handle tab-completion
 	// artifacts like "gt sling sl-123 slingshot/" → "gt sling sl-123 slingshot"
 	// This makes sling more forgiving without breaking existing functionality.

@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/models"
 	"github.com/steveyegge/gastown/internal/patrolscan"
@@ -932,6 +933,10 @@ type specRoster struct {
 // in tests.
 type specDispatchEnv struct {
 	Hold func() string
+	// PendingInstall is the pending-install marker in force now, nil when no
+	// install is pending: a gt install is in flight and no new sling starts
+	// (installpending, gt-2rp64). Nil reads no marker.
+	PendingInstall func() (*installpending.Marker, error)
 	// StartupBackoff reports why an automatic sling of beadID must wait: its
 	// last sling failed at session start and the resting window has not
 	// elapsed (dispatch.StartupBackoff). Nil consults no record, which is what
@@ -1034,6 +1039,15 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	report := specDispatchReport{Template: env.Template.Source}
 	if hold := env.Hold(); hold != "" {
 		report.Hold = hold
+		return report
+	}
+	// A gt install in flight stops every new sling, this tick's slings
+	// included, before the tick spends a read on them (gt-2rp64).
+	if hold, errLine := env.installPendingStop(); hold != "" || errLine != "" {
+		report.Hold = hold
+		if errLine != "" {
+			report.Errors = append(report.Errors, errLine)
+		}
 		return report
 	}
 	rosterAt := env.Now()
@@ -2030,8 +2044,12 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		reads.call()
 		return beads.New(resolveBeadDirFromTownRoot(townRoot, id))
 	})
+	// The install job writes its marker under the same daemon dir this reader
+	// resolves, so the tick and the job agree on the file (gt-vc34c).
+	pendingInstall := installpending.StoreFor(townRoot)
 	env := specDispatchEnv{
 		Hold:           func() string { return dispatch.OperatorHold(townRoot) },
+		PendingInstall: func() (*installpending.Marker, error) { return pendingInstall.Pending(time.Now()) },
 		StartupBackoff: func(id string) string { return dispatch.StartupBackoff(townRoot, id) },
 		Candidates: func() specBoardRead {
 			read := specCandidates(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {

@@ -5,11 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/nudge"
 )
 
@@ -39,6 +43,9 @@ type slingHarness struct {
 	hookedFormulas map[string]*beads.Issue // agent -> formula wisp hooked to it
 	batchOpts      slingOptions            // what the last batch path was handed
 	estops         map[string]bool         // e-stopped rigs; "" is the town sentinel
+	// pendingMarkerPath is the install-pending marker the run reads: a test
+	// writes a marker there, or leaves it absent (gt-2rp64).
+	pendingMarkerPath string
 }
 
 const slingTestTown = "/town"
@@ -46,18 +53,19 @@ const slingTestTown = "/town"
 func newSlingHarness(t *testing.T) *slingHarness {
 	t.Helper()
 	h := &slingHarness{
-		t:              t,
-		out:            &bytes.Buffer{},
-		beads:          map[string]*beadInfo{},
-		env:            map[string]string{},
-		rigs:           map[string]bool{"gastown": true},
-		formulas:       map[string]bool{},
-		dead:           map[string]bool{},
-		molecules:      map[string][]string{},
-		stored:         map[string][]beadFieldUpdates{},
-		crew:           map[string]bool{},
-		estops:         map[string]bool{},
-		hookedFormulas: map[string]*beads.Issue{},
+		t:                 t,
+		out:               &bytes.Buffer{},
+		beads:             map[string]*beadInfo{},
+		env:               map[string]string{},
+		rigs:              map[string]bool{"gastown": true},
+		formulas:          map[string]bool{},
+		dead:              map[string]bool{},
+		molecules:         map[string][]string{},
+		stored:            map[string][]beadFieldUpdates{},
+		crew:              map[string]bool{},
+		estops:            map[string]bool{},
+		hookedFormulas:    map[string]*beads.Issue{},
+		pendingMarkerPath: filepath.Join(t.TempDir(), installpending.FileName),
 	}
 	d := &slingDeps{
 		getenv: func(k string) string { h.mu.Lock(); defer h.mu.Unlock(); return h.env[k] },
@@ -71,6 +79,9 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		releaseSeat: func(*SpawnedPolecatInfo) { h.record("release seat") },
 		findTown:    func() (string, error) { return slingTestTown, nil },
 		townOrEnv:   func() (string, error) { return slingTestTown, nil },
+		pendingInstall: func(_ string, now time.Time) (*installpending.Marker, error) {
+			return installpending.StoreIn(h.pendingMarkerPath).Pending(now)
+		},
 
 		resolvePRBranch:        func(pr int) (string, error) { return "", fmt.Errorf("unexpected PR lookup %d", pr) },
 		workflowTargetOverride: func(args []string) ([]string, error) { return args, nil },
@@ -407,6 +418,24 @@ func (h *slingHarness) newSpawn(rig string) *SpawnedPolecatInfo {
 // sling runs gt sling with args.
 func (h *slingHarness) sling(args ...string) error {
 	return h.run.run(context.Background(), nil, args)
+}
+
+// setPendingInstall writes the install-pending marker the run reads, recorded
+// by this test process at at: a live marker at the current clock, a stale one
+// past installpending.Ceiling.
+func (h *slingHarness) setPendingInstall(at time.Time) {
+	h.t.Helper()
+	if err := installpending.StoreIn(h.pendingMarkerPath).Write(at, os.Getpid()); err != nil {
+		h.t.Fatalf("writing the install-pending marker: %v", err)
+	}
+}
+
+// breakPendingInstall writes a marker the reader cannot parse.
+func (h *slingHarness) breakPendingInstall() {
+	h.t.Helper()
+	if err := os.WriteFile(h.pendingMarkerPath, []byte("{not a marker"), 0o644); err != nil {
+		h.t.Fatalf("writing a broken install-pending marker: %v", err)
+	}
 }
 
 // addBead puts a bead in the world.
