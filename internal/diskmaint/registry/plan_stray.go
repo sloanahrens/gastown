@@ -56,7 +56,9 @@ func planStrayRepos(in PlanInput, keepDigests map[string]bool) ([]diskmaint.Acti
 		tags := in.Repos[repo]
 		if in.InUseRepos[repo] {
 			for _, ti := range tags {
-				kept = append(kept, diskmaint.Kept{Ref: refOf(ti), Rule: ruleSandboxRecord})
+				// The ref names the repo the plan validated, not ti.Repo: that
+				// field may be empty, and a ref with no repo names nothing.
+				kept = append(kept, diskmaint.Kept{Ref: repo + ":" + ti.Tag, Rule: ruleSandboxRecord})
 			}
 			continue
 		}
