@@ -14,6 +14,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/installpending"
 )
 
 // WaitReason is why an Acquire waited instead of being handed a free slot.
@@ -50,6 +51,12 @@ const (
 	// full-suite start cedes until it releases rather than piling a second
 	// whole-tree run onto the host. Holder names the run it waits behind.
 	WaitReasonFullSuiteHeld WaitReason = "full_suite_held"
+
+	// WaitReasonInstallPending: a binary install is in flight (the
+	// pending-install marker stands, gt-t135z), so this post-landing suite
+	// keeps out of the gate slot until the install takes one. InstallPID is
+	// the marker's writer, and InstallErr names an unreadable marker.
+	WaitReasonInstallPending WaitReason = "install_pending"
 )
 
 // waitWatch accumulates what kept one Acquire call from granting, so the
@@ -80,6 +87,10 @@ type waitWatch struct {
 	// fullSuiteHolder is the first live full-suite holder observed while
 	// ceding to the cap, the evidence for WaitReasonFullSuiteHeld.
 	fullSuiteHolder *Owner
+	// installPID and installErr are the first pending-install marker observed
+	// and the first unreadable one, the evidence for WaitReasonInstallPending.
+	installPID int
+	installErr string
 }
 
 func newWaitWatch(clock clockwork.Clock) *waitWatch {
@@ -131,6 +142,18 @@ func (w *waitWatch) noteFullSuiteHolder(owner *Owner) {
 	}
 }
 
+func (w *waitWatch) noteInstall(m *installpending.Marker) {
+	if w.installPID == 0 && m.PID > 0 {
+		w.installPID = m.PID
+	}
+}
+
+func (w *waitWatch) noteInstallErr(err error) {
+	if w.installErr == "" && err != nil {
+		w.installErr = err.Error()
+	}
+}
+
 func (w *waitWatch) noteContainers(names []string) {
 	if len(w.containers) == 0 {
 		w.containers = names
@@ -153,6 +176,8 @@ type waitInfo struct {
 	Holder     *Owner
 	Containers []string
 	DockerErr  string
+	InstallPID int
+	InstallErr string
 }
 
 // info snapshots the watch against the timeout the caller asked for.
@@ -163,6 +188,8 @@ func (w *waitWatch) info(timeout time.Duration, timedOut bool) waitInfo {
 		TimedOut:   timedOut,
 		Containers: w.containers,
 		DockerErr:  w.dockerErr,
+		InstallPID: w.installPID,
+		InstallErr: w.installErr,
 	}
 	w.attribute(&info, w.reason())
 	return info
@@ -222,6 +249,15 @@ func (i waitInfo) describe() string {
 			return fmt.Sprintf("full-suite cap: %s pid %d is already running a whole-tree suite (slot %d)", i.Holder.Role, i.Holder.PID, i.Holder.Slot)
 		}
 		return "full-suite cap: another whole-tree suite is already running"
+	case WaitReasonInstallPending:
+		switch {
+		case i.InstallErr != "":
+			return "install pending: the pending-install marker cannot be read (" + i.InstallErr + "), so an install is taken to be in flight"
+		case i.InstallPID > 0:
+			return fmt.Sprintf("install pending: a binary install reported by pid %d is in flight; post-landing suites yield until it takes a gate slot", i.InstallPID)
+		default:
+			return "install pending: a binary install is in flight; post-landing suites yield until it takes a gate slot"
+		}
 	default:
 		return ""
 	}
@@ -276,12 +312,16 @@ type HistoryEntry struct {
 	// the full-suite run ceded to, for WaitReasonFullSuiteHeld;
 	// Containers the unwrapped suite, for
 	// WaitReasonUnwrappedContainers; DockerError the failed probe, for
-	// WaitReasonDaemonUnreachable. The overseer's gt-dc81 amendment requires the
-	// reason to be legible here, not just its enum name.
-	HolderRole  string   `json:"holder_role,omitempty"`
-	HolderPID   int      `json:"holder_pid,omitempty"`
-	Containers  []string `json:"containers,omitempty"`
-	DockerError string   `json:"docker_error,omitempty"`
+	// WaitReasonDaemonUnreachable; InstallPID the marker's writer (and
+	// InstallError the failed read), for WaitReasonInstallPending. The
+	// overseer's gt-dc81 amendment requires the reason to be legible here, not
+	// just its enum name.
+	HolderRole   string   `json:"holder_role,omitempty"`
+	HolderPID    int      `json:"holder_pid,omitempty"`
+	Containers   []string `json:"containers,omitempty"`
+	DockerError  string   `json:"docker_error,omitempty"`
+	InstallPID   int      `json:"install_pid,omitempty"`
+	InstallError string   `json:"install_error,omitempty"`
 }
 
 // History returns the wait outcomes recorded in the ring file, oldest first.
@@ -370,18 +410,20 @@ func recordWaitResult(townRoot, role string, slot int, pid int, ts time.Time, in
 		return err
 	}
 	entries = append(entries, HistoryEntry{
-		TS:          ts.UTC().Format(time.RFC3339),
-		Role:        role,
-		Slot:        slot,
-		PID:         pid,
-		WaitedS:     info.Waited.Seconds(),
-		TimeoutS:    info.Timeout.Seconds(),
-		TimedOut:    info.TimedOut,
-		Reason:      info.Reason,
-		HolderRole:  holderRole(info),
-		HolderPID:   holderPID(info),
-		Containers:  info.Containers,
-		DockerError: info.DockerErr,
+		TS:           ts.UTC().Format(time.RFC3339),
+		Role:         role,
+		Slot:         slot,
+		PID:          pid,
+		WaitedS:      info.Waited.Seconds(),
+		TimeoutS:     info.Timeout.Seconds(),
+		TimedOut:     info.TimedOut,
+		Reason:       info.Reason,
+		HolderRole:   holderRole(info),
+		HolderPID:    holderPID(info),
+		Containers:   info.Containers,
+		DockerError:  info.DockerErr,
+		InstallPID:   info.InstallPID,
+		InstallError: info.InstallErr,
 	})
 	return writeHistory(townRoot, entries)
 }
@@ -507,6 +549,12 @@ func emitWaitEvent(w io.Writer, townRoot, role string, slot int, info waitInfo) 
 	}
 	if info.DockerErr != "" {
 		payload["docker_error"] = info.DockerErr
+	}
+	if info.InstallPID > 0 {
+		payload["install_pid"] = info.InstallPID
+	}
+	if info.InstallErr != "" {
+		payload["install_error"] = info.InstallErr
 	}
 	if err := events.LogTo(townRoot, events.TypeSlotWait, events.ActorGt, payload, events.VisibilityBoth); err != nil {
 		fmt.Fprintf(w, "gt slot: recording slot_wait event: %v\n", err)

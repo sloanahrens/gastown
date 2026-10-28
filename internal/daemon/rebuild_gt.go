@@ -124,9 +124,12 @@ const (
 // carries, the same string the plugin used.
 const rebuildGTSource = "rebuild-gt"
 
-// rebuildGTSlotRole is the role the install takes a container-gate slot under
-// when it has waited one out.
-const rebuildGTSlotRole = "gastown/rebuild-gt"
+// rebuildGTInstallRecord is the last-run key recording the last install that
+// built and swapped a binary, which is what the install window is measured
+// from. The patrol's own last-run record is written on every settled verdict,
+// so a cycle that found nothing due, was refused, failed, or installed a noop
+// anchored a window over a build that never happened (gt-t135z).
+const rebuildGTInstallRecord = "rebuild_gt_install"
 
 // rebuildGTBlock is the job's one piece of memory: when the current "due and
 // not installed" episode opened, and whether its escalation has gone out.
@@ -198,6 +201,28 @@ func rebuildGTMinInterval(config *DaemonPatrolConfig) time.Duration {
 	return config.Patrols.RebuildGT.MinIntervalOrDefault(defaultRebuildGTMinInterval)
 }
 
+// rebuildGTRecordInstall records an install that built and swapped a binary, in
+// the same last-run file and under the same lock as the patrol's own record.
+// It is the only writer of the install window's anchor: a refusal, a failure, a
+// noop and a deferral all leave it where it was (gt-t135z).
+func (d *Daemon) rebuildGTRecordInstall(at time.Time) {
+	if err := savePatrolLastRun(d.config.TownRoot, rebuildGTInstallRecord, at); err != nil {
+		d.logger.Printf("rebuild_gt: WARNING: cannot persist the install time (%v)", err)
+	}
+}
+
+// rebuildGTInstallAge returns how long ago the last accomplished install was,
+// and false when none was recorded or the record cannot be read. Nothing holds
+// a request back on state it could not read: the request exists to get a binary
+// installed (gt-t135z).
+func (d *Daemon) rebuildGTInstallAge(now time.Time) (time.Duration, bool) {
+	at, found, err := loadPatrolLastRun(d.config.TownRoot, rebuildGTInstallRecord)
+	if err != nil || !found {
+		return 0, false
+	}
+	return now.Sub(at), true
+}
+
 // triggerRebuildGT runs one rebuild_gt cycle on its own goroutine when the
 // job is due: an install builds the whole binary and can wait minutes for a
 // container-gate slot, so inline it would stall the heartbeat.
@@ -207,10 +232,6 @@ func (d *Daemon) triggerRebuildGT() {
 	}
 	now := d.clk().Now()
 	armed, installNow := d.rebuildGTPendingRequest()
-	// One read of the last-run record serves both decisions below: whether the
-	// patrol's interval is due, and whether a request is inside the install
-	// window. A second read could see a different record and hold a request on
-	// state the due decision never saw.
 	lastRun, found, loadErr := loadPatrolLastRun(d.config.TownRoot, "rebuild_gt")
 	dec := patrolDueFromLastRun(lastRun, found, loadErr, "", now, rebuildGTInterval(d.patrolConfig))
 	// A request armed by a landing pass makes the job due on its own: an
@@ -223,17 +244,19 @@ func (d *Daemon) triggerRebuildGT() {
 	// and one build per burst is the point (gt-aiby1). A gt:install-now
 	// landing bypasses it, and the interval-due path is unchanged.
 	//
-	// The window runs from the last accomplished cycle, which
-	// savePatrolLastRun records. A record that cannot be read makes the due
-	// decision run the job (silent skipping is the failure gt-ima2 fixed), so
-	// !dec.due means the record was read: this check can never hold a request
-	// on state it did not see. A request held inside the window stays armed
-	// and logs once per wait.
+	// The window runs from the last install that built and swapped a binary
+	// (rebuildGTInstallAge), not from the patrol's last settled verdict: that
+	// record is written for a cycle that found nothing due, was refused,
+	// failed, or installed a noop, so it anchored the window over a build that
+	// never happened (gt-t135z). An absent or unreadable install record holds
+	// nothing back, the safe direction for a request whose purpose is to get a
+	// binary installed. A request held inside the window stays armed and logs
+	// once per wait.
 	if armed && !installNow && !dec.due {
 		window := rebuildGTMinInterval(d.patrolConfig)
-		if now.Sub(lastRun) < window {
+		if age, installed := d.rebuildGTInstallAge(now); installed && age < window {
 			if d.rebuildGTWindowLogged.CompareAndSwap(false, true) {
-				d.logger.Printf("rebuild_gt: install requested %s after the last install; waiting for the %s window", now.Sub(lastRun).Round(time.Second), window)
+				d.logger.Printf("rebuild_gt: install requested %s after the last install; waiting for the %s window", age.Round(time.Second), window)
 			}
 			return
 		}
@@ -724,7 +747,7 @@ func (d *Daemon) rebuildGTInstall(ctx context.Context, cycle *dogCycle, repoRoot
 
 	args := []string{installer, "--sha", head, "--source", rebuildGTSource}
 	if reserveTimeout > 0 {
-		args = append(args, "--slot-role", rebuildGTSlotRole, "--slot-timeout", strconv.Itoa(reserveTimeout))
+		args = append(args, "--slot-role", slot.InstallRole, "--slot-timeout", strconv.Itoa(reserveTimeout))
 	}
 
 	out := &rebuildGTInstallLog{}
@@ -780,6 +803,9 @@ func (d *Daemon) rebuildGTInstall(ctx context.Context, cycle *dogCycle, repoRoot
 		if to == "" {
 			to = shortSHA(head)
 		}
+		// This is the one outcome that built and swapped a binary, so it is the
+		// one that starts the install window (gt-t135z).
+		d.rebuildGTRecordInstall(d.clk().Now())
 		subjects := d.rebuildGTSubjects(repoRoot, from, to)
 		cycle.closeStep("install")
 		d.logger.Printf("rebuild_gt: in force %s -> %s; the daemon restarts at its idle point\n%s", from, to, subjects)
@@ -1060,26 +1086,45 @@ func (d *Daemon) rebuildGTGate() (busy string, reservable bool) {
 		d.logger.Printf("rebuild_gt: slot status unreadable (%v); treating the town as quiet", err)
 		return "", false
 	}
-	var holders []string
+	// Every held pool slot is named as its seat, not just gate roles: the
+	// readings below reach the MEDIUM starvation escalation, and naming who
+	// holds the slots is what makes that alarm actionable (gt-t135z). A
+	// marker's row is not a pool slot, so it is skipped.
+	var gateSeats, heldSeats []string
 	for _, s := range rep.Slots {
-		if s.Held && s.Owner != nil && slot.IsGateRole(s.Owner.Role) {
-			holders = append(holders, s.Owner.Role)
+		if !s.Held || s.Marker {
+			continue
+		}
+		heldSeats = append(heldSeats, slotSeat(s))
+		if s.Owner != nil && slot.IsGateRole(s.Owner.Role) {
+			gateSeats = append(gateSeats, slotSeat(s))
 		}
 	}
 	saturated := rep.AllHeld()
 	switch {
-	case len(holders) > 0:
-		busy = "a gate suite holds a slot (" + strings.Join(holders, ", ") + ")"
+	case len(gateSeats) > 0:
+		busy = "a gate suite holds a slot (" + strings.Join(gateSeats, ", ") + ")"
 	case len(rep.UnwrappedContainers) > 0:
 		busy = "container(s) are running outside the gate: " + strings.Join(rep.UnwrappedContainers, ", ")
 	case saturated:
-		busy = "every container-gate slot is held"
+		busy = "every container-gate slot is held (" + strings.Join(heldSeats, ", ") + ")"
 	default:
 		// A docker reading that could not be taken is not a reason to wait: a
 		// VM that is down runs no suite to compete with.
 		return "", false
 	}
-	return busy, len(holders) > 0 || saturated
+	return busy, len(gateSeats) > 0 || saturated
+}
+
+// slotSeat renders one held slot's holder as the escalations name it: the role,
+// the pid and the slot, e.g. "gastown/landing pid 123 (slot 0)". A held slot
+// with no readable owner file names the slot alone, because the flock is the
+// truth and the owner file is decoration.
+func slotSeat(s slot.SlotState) string {
+	if s.Owner == nil || s.Owner.PID <= 0 {
+		return fmt.Sprintf("unowned (slot %d)", s.Index)
+	}
+	return fmt.Sprintf("%s pid %d (slot %d)", s.Owner.Role, s.Owner.PID, s.Index)
 }
 
 // rebuildGTWaitForGate blocks until no gate-class role holds a slot, or the

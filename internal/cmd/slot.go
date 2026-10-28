@@ -427,6 +427,14 @@ func slotHistoryReason(e slot.HistoryEntry) string {
 			return fmt.Sprintf("full_suite_held: %s (pid %d)", e.HolderRole, e.HolderPID)
 		}
 		return string(slot.WaitReasonFullSuiteHeld)
+	case slot.WaitReasonInstallPending:
+		switch {
+		case e.InstallError != "":
+			return "install_pending: marker unreadable (" + e.InstallError + ")"
+		case e.InstallPID > 0:
+			return fmt.Sprintf("install_pending: pid %d reported the install", e.InstallPID)
+		}
+		return string(slot.WaitReasonInstallPending)
 	default:
 		return ""
 	}

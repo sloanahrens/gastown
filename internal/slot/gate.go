@@ -13,6 +13,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 
+	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/procid"
 )
 
@@ -286,6 +287,10 @@ type Gate struct {
 	pid int
 
 	owner ownerProbe
+
+	// installPending reads the pending-install marker for a town, nil when no
+	// install stands (see pendingInstall). A nil field resolves through env.
+	installPending func(townRoot string) (*installpending.Marker, error)
 
 	// probeOut carries the gate's `docker ps` and telemetry diagnostics, and
 	// debrisOut its verdicts on containers it walks past or removes.

@@ -255,6 +255,15 @@ otherwise — and a gate started while a whole-tree run holds a slot proceeds at
 takes the token as `<rig>/tier-sweep`; run the flake sweep as
 `gt slot run --role <rig>/flake-sweep -- bash scripts/flake-sweep.sh [ITER] [CONC]`.
 
+**A post-landing suite yields to an install in flight (gt-t135z).** The post-landing
+suite — `<rig>/post-land`, the red-main detector a landing runs once merged — takes no
+gate slot while `rebuild_gt` has an install pending (the `daemon/install-pending.json`
+marker it writes when an install is due). It waits for the marker to clear, or for the
+install's build (`gastown/rebuild-gt`) to take a slot, for at most 30 minutes, then
+competes as usual. The landing gate (`<rig>/landing`) is not in this class, so a merge
+never waits on an install, and every other role is unaffected. The wait reports as
+`install_pending` in `gt slot status`, naming the pid that reported the install.
+
 Run `gt done` **once**, then leave it alone: the gate takes minutes. If it exits non-zero it
 names what failed (exit codes 10-16, `gt done --help`) and the session stays up; fix what it
 names and run `gt done` once more. A failure you believe your change did not cause goes in a
