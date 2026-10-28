@@ -75,7 +75,8 @@ func TestDirectiveBeadTextExamplesRun(t *testing.T) {
 		}
 		for _, ex := range examples {
 			if ex.reason != "" {
-				t.Errorf("%s:%d: the tap guard refuses this example: %s", ex.file, ex.line, ex.reason)
+				t.Errorf("%s:%d: the tap guard refuses this example: %s; a ```bash fence is a recipe a polecat runs, so show a refused form as inline code",
+					ex.file, ex.line, ex.reason)
 			}
 		}
 		judged += len(examples)
