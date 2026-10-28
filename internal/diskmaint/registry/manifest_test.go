@@ -195,22 +195,32 @@ func TestGetManifestBoundsTheResponseBody(t *testing.T) {
 	t.Parallel()
 	manifestDigest, configDigest := digestOf('a'), digestOf('c')
 	cases := []struct {
-		name    string
-		size    int
-		wantErr bool
+		name     string
+		document string
+		size     int
+		wantErr  bool
 	}{
-		{"a body at the limit is read", maxDocumentBytes, false},
-		{"a body one byte over the limit is refused", maxDocumentBytes + 1, true},
+		{"a manifest at the limit is read", "manifest", maxDocumentBytes, false},
+		{"a manifest one byte over the limit is refused", "manifest", maxDocumentBytes + 1, true},
+		{"a config blob at the limit is read", "config", maxDocumentBytes, false},
+		{"a config blob one byte over the limit is refused", "config", maxDocumentBytes + 1, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			manifestBody := imageBody(configDigest, 1)
+			configBody := blobBody("2026-10-27T10:00:00Z")
+			if tc.document == "manifest" {
+				manifestBody = paddedBody(t, manifestBody, tc.size)
+			} else {
+				configBody = paddedBody(t, configBody, tc.size)
+			}
 			c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/v2/gastown-polecat/manifests/dev":
-					served(w, manifestDigest, paddedBody(t, imageBody(configDigest, 1), tc.size))
+					served(w, manifestDigest, manifestBody)
 				case "/v2/gastown-polecat/blobs/" + configDigest:
-					_, _ = w.Write([]byte(blobBody("2026-10-27T10:00:00Z")))
+					_, _ = w.Write([]byte(configBody))
 				default:
 					http.NotFound(w, r)
 				}
