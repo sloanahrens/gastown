@@ -86,8 +86,11 @@ type fakeSpecTown struct {
 	// children read failure, for the container rule.
 	children map[string][]specdispatch.Child
 	// blockers is each bead's blocking edges as the board's detail read returns
-	// them, for the admission check (gt-ndad8). An id absent here is a bead
-	// whose read answered no dependencies.
+	// them, for the admission check (gt-ndad8). The fake hands them to the tick
+	// whole, so specBoardDetails, which fills them in production, is outside its
+	// path: TestSpecDispatchAdmitsOnTheEdgesTheBoardDetailsReadFilled covers that
+	// wiring (gt-acn51). An id absent here is a bead whose read answered no
+	// dependencies.
 	blockers map[string][]beads.IssueDep
 	// showOverride is the full read the tick sees when it differs from the
 	// board snapshot: the board lagged a note the read carries (gt-kr5xv).

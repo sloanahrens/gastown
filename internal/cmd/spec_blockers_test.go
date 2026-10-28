@@ -7,7 +7,90 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
+
+// A held rig's bead is skipped by its hold even when its edges also refuse it:
+// the hold, not the blocker, is what stops the rig's beads, and a blocker line
+// would hide it (gt-acn51, gt-vty1v).
+func TestSpecDispatchNamesTheRigHoldBeforeABlockersRefusal(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-acn51", 2, "2026-09-29T10:00:00Z"))
+	f.rigHold["gastown"] = "rig ESTOP"
+	f.blockers["gt-acn51"] = []beads.IssueDep{{ID: "gt-frtad", Status: "deferred", DependencyType: "blocks"}}
+
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 0 {
+		t.Fatalf("slung %v under a rig hold", f.slung)
+	}
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipRigHold) ||
+		strings.Contains(r.Skipped[0].Line, "blocked by") {
+		t.Fatalf("skipped = %+v, want the hold named and no blocker line", r.Skipped)
+	}
+}
+
+// The admission wiring runs end to end (gt-acn51): the ready board carries no
+// dependency rows, so the edges the tick refuses on are the ones
+// specBoardDetails read from the rig's store, and the skip line is the tick's
+// own. A tick handed Blockers directly, as the fake does, says nothing about
+// that wiring.
+func TestSpecDispatchAdmitsOnTheEdgesTheBoardDetailsReadFilled(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// blocker is the blocking bead's status; "" seeds no dependency, so the
+		// store answers a bead with no edges.
+		blocker string
+		skip    string // the tick's skip line; "" dispatches
+	}{
+		{name: "deferred blocker", blocker: "deferred", skip: "gt-acn51: blocked by gt-frtad (deferred)"},
+		{name: "in progress blocker", blocker: "in_progress", skip: "gt-acn51: blocked by gt-frtad (in_progress)"},
+		{name: "closed blocker", blocker: "closed"},
+		{name: "no dependency"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := beadsfake.New()
+			db.Seed(beads.Issue{ID: "gt-acn51"})
+			if tc.blocker != "" {
+				db.Seed(beads.Issue{ID: "gt-frtad", Status: tc.blocker})
+				if err := db.AddDependency("gt-acn51", "gt-frtad"); err != nil {
+					t.Fatalf("seed the blocker: %v", err)
+				}
+			}
+			store := newCountingStore(db)
+			f := newFakeSpecTown(cleanSpec("gt-acn51", 2, "2026-09-29T10:00:00Z"))
+			env := f.env()
+			board := env.Candidates
+			env.Candidates = func() specBoardRead {
+				return specBoardDetails(newSpecTickReads(), func(string) beads.Client { return store }, board())
+			}
+
+			r := runSpecDispatchCycle(env)
+
+			if len(store.multis) != 1 {
+				t.Errorf("board detail reads = %v, want the one batch that answered the edges", store.multis)
+			}
+			if tc.skip == "" {
+				if len(r.Dispatched) != 1 || r.Dispatched[0].Bead != "gt-acn51" {
+					t.Fatalf("dispatched = %+v, want the bead the read answered unblocked", r.Dispatched)
+				}
+				if len(r.Skipped) != 0 {
+					t.Errorf("skipped = %+v, want none", r.Skipped)
+				}
+				return
+			}
+			if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+				t.Fatalf("slung %v, want the blocked bead left ready", f.slung)
+			}
+			if len(r.Skipped) != 1 || r.Skipped[0].Line != tc.skip {
+				t.Fatalf("skipped = %+v, want %q", r.Skipped, tc.skip)
+			}
+		})
+	}
+}
 
 // TestSpecDispatchSkipsACandidateItsBlockersRefuse is gt-ndad8: the ready board
 // is not the admission check. bd's ready query reads a deferred blocker as
