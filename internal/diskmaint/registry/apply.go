@@ -80,8 +80,8 @@ func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Resu
 }
 
 // gc reclaims the registry's own space after the deletes result records,
-// setting Result.Collected when it runs. It is a no-op until the collect
-// command is wired; whether a run has anything to reclaim is its own question.
+// setting Result.Collected when it runs. It reclaims nothing today, so
+// Result.Collected stays unset.
 func (t *Target) gc(_ context.Context, _ *diskmaint.Result) {}
 
 // locked runs fn through Config.Lock, or directly when the caller already holds

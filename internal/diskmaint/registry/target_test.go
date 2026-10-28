@@ -469,6 +469,68 @@ func TestPlanRefusesWhenTheMainRepoListingFails(t *testing.T) {
 	}
 }
 
+func TestMeasureCountsAManifestOnceWhenTagsShareIt(t *testing.T) {
+	t.Parallel()
+	shared := dg("a1")
+	reg := newFakeRegistry(map[string][]TagInfo{RepoMain: {
+		fakeTag(RepoMain, TagDev, shared, planTime(0), 100),
+		fakeTag(RepoMain, "c000001", shared, planTime(1), 100),
+		fakeTag(RepoMain, "c000002", dg("a2"), planTime(2), 200),
+	}})
+
+	m, err := NewTarget(testConfig(t, reg)).Measure(context.Background())
+	if err != nil {
+		t.Fatalf("Measure: %v", err)
+	}
+	if want := int64(300); m.Used != want {
+		t.Errorf("Used = %d, want %d: two tags naming one manifest hold it once", m.Used, want)
+	}
+	if !strings.Contains(m.Detail, "3 tags") {
+		t.Errorf("Detail = %q, want it to count all 3 tags", m.Detail)
+	}
+}
+
+func TestPlanRefusesWhenASmallRegistrysSafetyReadsFail(t *testing.T) {
+	t.Parallel()
+	// Two tags are under the Keep+1 window for keep 2, so this run fetches no
+	// manifest; the installed and in-use reads still run and still refuse.
+	small := map[string][]TagInfo{RepoMain: {
+		fakeTag(RepoMain, TagDev, dg("d0"), planTime(0), 100),
+		fakeTag(RepoMain, "c000001", dg("a1"), planTime(1), 200),
+	}}
+	cases := []struct {
+		name string
+		set  func(*Config)
+		want string
+	}{
+		{"installed unreadable", func(cfg *Config) {
+			cfg.Installed = func() (string, error) { return "", errors.New("gt version reported nothing") }
+		}, "installed"},
+		{"installed reader missing", func(cfg *Config) { cfg.Installed = nil }, "installed"},
+		{"in-use unreadable", func(cfg *Config) {
+			cfg.Run = func(context.Context, []string, string, ...string) ([]byte, error) {
+				return nil, errors.New("kubectl: no such cluster")
+			}
+		}, "kubectl"},
+		{"in-use runner missing", func(cfg *Config) { cfg.Run = nil }, "runner"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := testConfig(t, newFakeRegistry(small))
+			tc.set(&cfg)
+			plan, err := NewTarget(cfg).Plan(context.Background(), diskmaint.Policy{Keep: 2})
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			assertRefused(t, plan)
+			if !strings.Contains(plan.Refused, tc.want) {
+				t.Fatalf("Refused = %q, want it to name %q", plan.Refused, tc.want)
+			}
+		})
+	}
+}
+
 func TestMeasureFailsWhenAReadFails(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -541,11 +603,13 @@ func TestPlanKeepFallsBackToTheConfig(t *testing.T) {
 		name    string
 		cfgKeep int
 		policy  diskmaint.Policy
+		want    []string
 	}{
-		{"policy keep wins", 0, diskmaint.Policy{Keep: 2}},
-		{"config keep fills in", 2, diskmaint.Policy{}},
+		{"policy keep wins over an unset config", 0, diskmaint.Policy{Keep: 2}, []string{mainRef(dg("a1"))}},
+		{"policy keep wins over a different config", 1, diskmaint.Policy{Keep: 2}, []string{mainRef(dg("a1"))}},
+		{"config keep fills in", 2, diskmaint.Policy{}, []string{mainRef(dg("a1"))}},
+		{"both unset keep nothing", 0, diskmaint.Policy{}, []string{mainRef(dg("a1")), mainRef(dg("a2")), mainRef(dg("a3"))}},
 	}
-	want := []string{mainRef(dg("a1"))}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -555,8 +619,8 @@ func TestPlanKeepFallsBackToTheConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Plan: %v", err)
 			}
-			if got := actionRefs(plan); !slices.Equal(got, want) {
-				t.Fatalf("actions = %v, want %v for keep 2", got, want)
+			if got := actionRefs(plan); !slices.Equal(got, tc.want) {
+				t.Fatalf("actions = %v, want %v", got, tc.want)
 			}
 		})
 	}
