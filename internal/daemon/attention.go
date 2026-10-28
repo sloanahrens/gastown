@@ -179,6 +179,9 @@ type attentionCache struct {
 	// riskSkipped is the work beads the risk-path collector skipped last tick
 	// because their read failed, so a bead still failing is not logged again.
 	riskSkipped map[string]bool
+	// escalationLogs is the condition each escalation was last logged for, so
+	// an unchanged refusal or failed read is said once, not every tick.
+	escalationLogs map[string]string
 }
 
 // reworkNote is one rework bead's cached rejection count, keyed by the
@@ -282,6 +285,10 @@ type attentionSources struct {
 	// riskSkipped is the work beads collectRiskPaths skipped on the last tick
 	// because their read failed, carried across ticks by the daemon.
 	riskSkipped map[string]bool
+	// escalationLogs is the condition each escalation was last logged for,
+	// carried across ticks by the daemon. collectEscalations replaces it with
+	// the conditions it saw on this pass.
+	escalationLogs map[string]string
 
 	// reworkNotes is the rejection-count cache, carried across ticks by the
 	// daemon.
@@ -360,6 +367,7 @@ func (d *Daemon) writeAttentionWith(budget time.Duration, sources func(now time.
 	src.repeatedAt = cache.repeatedAt
 	src.backlogSamples = cache.backlogSamples
 	src.riskSkipped = cache.riskSkipped
+	src.escalationLogs = cache.escalationLogs
 	tips, err := readDirectPushTips(d.config.TownRoot)
 	if err != nil {
 		d.logger.Printf("attention: reading %s: %v", tipsFileName, err)
@@ -388,7 +396,7 @@ func (d *Daemon) writeAttentionWith(budget time.Duration, sources func(now time.
 		d.logger.Printf("attention: auditing resolved risk-path FAILs: %v", err)
 	}
 	state := d.attentionTick(ctx, src, prev, acks, now)
-	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, repeatedAt: src.repeatedAt, backlogSamples: src.backlogSamples, riskSkipped: src.riskSkipped}
+	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, repeatedAt: src.repeatedAt, backlogSamples: src.backlogSamples, riskSkipped: src.riskSkipped, escalationLogs: src.escalationLogs}
 	if len(src.tips.Rigs) == 0 {
 		return
 	}
@@ -906,6 +914,11 @@ func (s *attentionSources) collectEscalations(ctx context.Context) ([]attention.
 		return nil, err
 	}
 	out := make([]attention.Item, 0, len(issues))
+	// The condition each listed escalation is logged for on this pass. It
+	// replaces the previous pass's map even when every line is suppressed: an
+	// escalation that stops holding, or whose text is fixed, drops its entry,
+	// so its next refusal or failed read is said again (gt-l7wyt).
+	logged := make(map[string]string, len(issues))
 	for _, is := range issues {
 		if is == nil {
 			continue
@@ -914,7 +927,7 @@ func (s *attentionSources) collectEscalations(ctx context.Context) ([]attention.
 		if summary == "" {
 			summary = "escalation " + is.ID
 		}
-		owner, waiting := s.escalationOwner(ctx, is)
+		owner, waiting := s.escalationOwner(ctx, is, logged)
 		out = append(out, attention.Item{
 			Key:       "esc:" + is.ID,
 			Kind:      attention.KindEscalation,
@@ -925,6 +938,7 @@ func (s *attentionSources) collectEscalations(ctx context.Context) ([]attention.
 			Summary:   summary,
 		})
 	}
+	s.escalationLogs = logged
 	return out, nil
 }
 
@@ -932,7 +946,10 @@ func (s *attentionSources) collectEscalations(ctx context.Context) ([]attention.
 // and what the escalation waits on: that bead's assignee. No related bead, no
 // assignee, or a failed read of the bead leaves both empty, and the escalation
 // is still raised (gt-sxmqs).
-func (s *attentionSources) escalationOwner(ctx context.Context, esc *beads.Issue) (owner, waiting string) {
+//
+// logged is this pass's record of what each escalation was logged for, so a
+// refusal or failed read that has not changed is said once (gt-l7wyt).
+func (s *attentionSources) escalationOwner(ctx context.Context, esc *beads.Issue, logged map[string]string) (owner, waiting string) {
 	related := strings.TrimSpace(beads.ParseEscalationFields(esc.Description).RelatedBead)
 	if related == "" || s.escalationBead == nil {
 		return "", ""
@@ -942,7 +959,8 @@ func (s *attentionSources) escalationOwner(ctx context.Context, esc *beads.Issue
 	// than sent to bd show: a leading '-' would read as a flag and a sentence
 	// would read as a bead that does not exist (gt-sbaqz).
 	if !beads.IsBeadIDToken(related) {
-		s.d.logger.Printf("attention: escalation %s: related_bead %q is not a bead ID, not read", esc.ID, related)
+		s.logEscalationOnce(logged, esc.ID, "refused\x00"+related,
+			"attention: escalation %s: related_bead %q is not a bead ID, not read", esc.ID, related)
 		return "", ""
 	}
 	is, err := s.escalationBead(ctx, related)
@@ -951,7 +969,10 @@ func (s *attentionSources) escalationOwner(ctx context.Context, esc *beads.Issue
 		// when that read fails, so the item is raised without the owner line.
 		// The failure is logged rather than dropped: a routing or store fault
 		// that leaves every escalation ownerless must be visible (gt-sbaqz).
-		s.d.logger.Printf("attention: escalation %s: reading related bead %s: %v", esc.ID, related, err)
+		// A fault that holds is said when it starts; the item stays raised on
+		// every pass, so what repeats is the alarm, not this line (gt-l7wyt).
+		s.logEscalationOnce(logged, esc.ID, "read\x00"+related,
+			"attention: escalation %s: reading related bead %s: %v", esc.ID, related, err)
 		return "", ""
 	}
 	if is == nil {
@@ -962,6 +983,19 @@ func (s *attentionSources) escalationOwner(ctx context.Context, esc *beads.Issue
 		return "", ""
 	}
 	return owner, "escalated, owned by " + owner
+}
+
+// logEscalationOnce says one escalation's log-worthy condition unless the last
+// pass said the same condition for it. The condition is the refusal or the
+// failed read, keyed on the related value, so a changed value is said again
+// while a fault that holds is not. It is recorded on this pass either way, so
+// the next pass compares against what holds now (gt-l7wyt).
+func (s *attentionSources) logEscalationOnce(logged map[string]string, escID, condition, format string, args ...any) {
+	logged[escID] = condition
+	if s.escalationLogs[escID] == condition {
+		return
+	}
+	s.d.logger.Printf(format, args...)
 }
 
 // collectRejectedTwice raises one item per actionable rework bead whose notes

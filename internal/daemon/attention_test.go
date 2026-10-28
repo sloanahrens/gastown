@@ -337,6 +337,87 @@ func TestAttentionCollector_EscalationRefusesANonBeadRelatedValue(t *testing.T) 
 	}
 }
 
+// writeAttentionTicks drives n attention ticks through the production entry
+// point, which is what carries the between-tick cache (gt-l7wyt).
+func (f *attentionFixture) writeAttentionTicks(t *testing.T, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		f.d.writeAttentionWith(2*time.Second, func(time.Time) *attentionSources { return f.src })
+	}
+}
+
+// A refused related value holds on every pass, and the line describing it is
+// said once: a tick that changed nothing already says so with its queue, and a
+// line per pass buries the transition lines beside it (gt-l7wyt).
+func TestWriteAttentionEscalationRefusalIsSaidOnce(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	related := "--help"
+	f.src.escalations = func(context.Context) ([]*beads.Issue, error) {
+		return []*beads.Issue{{
+			ID: "hq-9", Title: "gt-abc: gate red",
+			Description: "severity: high\nrelated_bead: " + related + "\n",
+		}}, nil
+	}
+
+	f.writeAttentionTicks(t, 2)
+	if got := strings.Count(f.logs.String(), "related_bead \"--help\" is not a bead ID"); got != 1 {
+		t.Errorf("refusal logged %d times, want once: log = %q", got, f.logs.String())
+	}
+
+	// The escalation's text changes to another refused value: that is news.
+	related = "-x"
+	f.writeAttentionTicks(t, 1)
+	if got := strings.Count(f.logs.String(), "related_bead \"-x\" is not a bead ID"); got != 1 {
+		t.Errorf("a newly refused value logged %d times, want once: log = %q", got, f.logs.String())
+	}
+
+	// The alarm itself still repeats: only its line is said once.
+	st, err := attention.ReadState(f.d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	itemByKey(t, st, "esc:hq-9")
+}
+
+// A failed read of an escalation's related bead is said when it starts, and
+// said again after the read recovers and fails anew (gt-l7wyt).
+func TestWriteAttentionEscalationFailedReadIsSaidOnce(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.escalations = func(context.Context) ([]*beads.Issue, error) {
+		return []*beads.Issue{{
+			ID: "hq-9", Title: "gt-abc: gate red",
+			Description: "severity: high\nrelated_bead: gt-abc\n",
+		}}, nil
+	}
+	failing := true
+	f.src.escalationBead = func(context.Context, string) (*beads.Issue, error) {
+		if failing {
+			return nil, errors.New("bd show: connection refused")
+		}
+		return &beads.Issue{ID: "gt-abc", Assignee: "dipper"}, nil
+	}
+	const line = "reading related bead gt-abc: bd show: connection refused"
+
+	f.writeAttentionTicks(t, 2)
+	if got := strings.Count(f.logs.String(), line); got != 1 {
+		t.Errorf("failed read logged %d times, want once: log = %q", got, f.logs.String())
+	}
+
+	// The read answers, then fails again: the second run of failures is a new
+	// fault for the operator to see.
+	failing = false
+	f.writeAttentionTicks(t, 1)
+	failing = true
+	f.writeAttentionTicks(t, 1)
+	if got := strings.Count(f.logs.String(), line); got != 2 {
+		t.Errorf("failed read after recovering logged %d times in all, want twice: log = %q", got, f.logs.String())
+	}
+}
+
 // The production escalationBead closure routes the read by the related bead's
 // prefix: the bead lives in its rig's database, not the town's, and a prefix no
 // route names opens no read at all.
