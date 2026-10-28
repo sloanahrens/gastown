@@ -14,6 +14,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/buildpaths"
+	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/version"
@@ -110,6 +111,8 @@ const (
 	alertKeyRebuildGTStarved      = "rebuild-gt:starved"
 	alertKeyRebuildGTInstallFail  = "rebuild-gt:install-failed"
 	alertKeyRebuildGTNoInstaller  = "rebuild-gt:no-installer"
+	alertKeyRebuildGTMarkerWrite  = "rebuild-gt:marker-write"
+	alertKeyRebuildGTMarkerClear  = "rebuild-gt:marker-clear"
 
 	// alertKeyRebuildGTUnverified is retired (nothing raises it) and kept in
 	// the clear list because an escalation opened before it was retired has no
@@ -378,10 +381,19 @@ func (d *Daemon) runRebuildGT() bool {
 		// there cannot be stale.
 		cycle.skipStep("repo", "no gt source checkout under the town")
 		d.logger.Printf("rebuild_gt: no gt source checkout under %s; nothing to rebuild", d.config.TownRoot)
+		d.rebuildGTClearPending()
 		return true
 	}
 
-	return d.rebuildGTCycle(ctx, cycle, repoRoot, now)
+	settled := d.rebuildGTCycle(ctx, cycle, repoRoot, now)
+	if settled {
+		// A verdict leaves no install in flight: the marker is spent whether
+		// the cycle installed, refused or found nothing due, and a deferral is
+		// the only outcome that keeps it standing for the next heartbeat
+		// (gt-vc34c).
+		d.rebuildGTClearPending()
+	}
+	return settled
 }
 
 // rebuildGTCycle is the script's flow, in its order.
@@ -499,6 +511,16 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 		return true
 	}
 
+	// The install is due and safe: record it before the wait below, which can
+	// hold for minutes of gate polling or a starved reserve, so a reader that
+	// would start work beside the install can see it coming (gt-vc34c).
+	//
+	// A cycle that defers keeps the marker, and the next heartbeat refreshes
+	// it, so a gate that stays busy holds the marker up past Ceiling: the
+	// starvation escalation at rebuildGTStarveAfter is what bounds that
+	// standing, because it is the alarm for a due binary that never installs.
+	d.rebuildGTMarkPending(now)
+
 	// Yield to a running gate: `make build` competes for CPU with a suite
 	// whose tests are load-sensitive, and the install itself takes a slot when
 	// it has waited one out (gt-htx3, gt-kox0).
@@ -506,6 +528,7 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 	// reserveTimeout is seconds the install may wait for the slot once it runs.
 	// Zero means it does not take one at all.
 	reserveTimeout := 0
+	waited := false
 	if busy, reservable := d.rebuildGTGate(); busy != "" {
 		age, _ := d.rebuildGTBlock.openFor(now)
 		switch {
@@ -526,10 +549,18 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 			if reserveTimeout < int(rebuildGTMinReserve.Seconds()) {
 				reserveTimeout = int(rebuildGTMinReserve.Seconds())
 			}
+			waited = true
 		default:
 			d.rebuildGTNoteBlocked(cycle, true, "not quiet: "+busy)
 			return false
 		}
+	}
+
+	// The wait above is unbounded time inside one cycle: Ceiling is aged against
+	// the marker's own time, so a cycle that has waited must move it or readers
+	// stop seeing an install in flight while it still runs (gt-vc34c).
+	if waited {
+		d.rebuildGTMarkPending(d.clk().Now())
 	}
 
 	d.logger.Printf("rebuild_gt: installing %s (%s commits behind) through scripts/install-gt.sh", repoRoot, behind)
@@ -974,6 +1005,46 @@ func (d *Daemon) rebuildGTReachedForce(cycle *dogCycle, reason string) {
 	d.clearAlerts("the binary is in force",
 		alertKeyRebuildGTStarved, alertKeyRebuildGTDrift, alertKeyRebuildGTDriftUnknown,
 		alertKeyRebuildGTUnverified, alertKeyRebuildGTNoInstaller, alertKeyRebuildGTInstallFail)
+}
+
+// rebuildGTPendingStore is this town's pending-install marker.
+func (d *Daemon) rebuildGTPendingStore() installpending.Store {
+	if d.rebuildGTPendingFn != nil {
+		return d.rebuildGTPendingFn()
+	}
+	return installpending.StoreFor(d.config.TownRoot)
+}
+
+// rebuildGTMarkPending records that a binary-affecting install is due, for
+// readers outside this job. A marker that cannot be written costs those
+// readers their warning, not the install: the cycle carries on, and the failure
+// is escalated rather than logged alone, because a reader with no marker reads
+// exactly what a town with no install reads (gt-vc34c).
+func (d *Daemon) rebuildGTMarkPending(now time.Time) {
+	store := d.rebuildGTPendingStore()
+	if err := store.Write(now, os.Getpid()); err != nil {
+		d.logger.Printf("rebuild_gt: WARNING: cannot record the pending install (%v)", err)
+		_ = d.rebuildGTAlert(alertKeyRebuildGTMarkerWrite,
+			fmt.Sprintf("rebuild_gt: cannot write %s, so a reader cannot see an install in flight", store.Path()))
+		return
+	}
+	d.clearAlerts("the pending-install marker is written", alertKeyRebuildGTMarkerWrite)
+}
+
+// rebuildGTClearPending drops the pending-install marker: the cycle reached a
+// verdict, so no install is in flight for a reader to avoid (gt-vc34c). A
+// marker that cannot be removed is escalated rather than logged alone: it keeps
+// telling every later reader an install is in flight long after this one
+// finished, and only an operator can take the debris away.
+func (d *Daemon) rebuildGTClearPending() {
+	store := d.rebuildGTPendingStore()
+	if err := store.Clear(); err != nil {
+		d.logger.Printf("rebuild_gt: WARNING: cannot clear the pending install marker (%v)", err)
+		_ = d.rebuildGTAlert(alertKeyRebuildGTMarkerClear,
+			fmt.Sprintf("rebuild_gt: cannot remove %s, so a reader keeps seeing an install in flight", store.Path()))
+		return
+	}
+	d.clearAlerts("the pending-install marker is cleared", alertKeyRebuildGTMarkerClear)
 }
 
 // rebuildGTGate reads the container-gate picture: which gate-class roles hold

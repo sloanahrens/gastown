@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/version"
 )
@@ -28,6 +29,12 @@ func rebuildGTTown(t *testing.T) (*Daemon, *notifyfake.Recorder) {
 	// path, so the installer is inert text: a shebang here would make the file
 	// look like an executable, which the test policy forbids (no-exec-files).
 	writeFile(t, filepath.Join(repoRoot, "scripts", "install-gt.sh"), "stub: the fake CLI answers this call\n")
+	// The pending-install marker stays in the town's own temp dir: resolving it
+	// from the environment would let a test reach whatever INSTALL_GT_DAEMON_DIR
+	// names on the operator's machine (gt-vc34c).
+	d.rebuildGTPendingFn = func() installpending.Store {
+		return installpending.StoreIn(filepath.Join(d.config.TownRoot, "daemon", installpending.FileName))
+	}
 	return d, rec
 }
 

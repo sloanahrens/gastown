@@ -31,6 +31,7 @@ import (
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/intent"
 	jevattention "github.com/steveyegge/gastown/internal/jev/attention"
 	jevconflict "github.com/steveyegge/gastown/internal/jev/conflict"
@@ -280,6 +281,11 @@ type Daemon struct {
 	// slot package, which shells out to docker. Tests answer both.
 	rebuildGTStaleFn func(repoRoot string) *version.StaleBinaryInfo
 	rebuildGTGateFn  func() (busy string, reservable bool)
+	// rebuildGTPendingFn answers where the pending-install marker lives; nil is
+	// installpending.StoreFor(townRoot), which honors INSTALL_GT_DAEMON_DIR the
+	// way scripts/install-gt.sh does. Tests point it at their own temp file, so
+	// no test can reach the operator's marker through that variable (gt-vc34c).
+	rebuildGTPendingFn func() installpending.Store
 
 	// omVersionFn reads the installed om's version sha and omHeadFn reads the
 	// om rig's origin/main tip, the two readings the om-skew check compares
