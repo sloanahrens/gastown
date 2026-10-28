@@ -210,8 +210,8 @@ polecat-seed-stage:
 		-build-rig "$(POLE_SEED_BUILD_RIG)" \
 		-build-commit "$(POLE_COMMIT)"
 
-# polecat-node-prune removes old polecat images from the sandbox nodes after a
-# build (gt-e14j6). Not fatal to the image: a node that cannot be read keeps its
+# polecat-node-prune removes old polecat images from the sandbox nodes
+# (gt-e14j6). Not fatal to the caller: a node that cannot be read keeps its
 # images, and the failure is named here.
 polecat-node-prune:
 	@go run ./cmd/nodeprune -keep "$${POLECAT_IMAGE_KEEP:-3}" || echo "polecat-image: node prune failed; the old images stay on the sandbox nodes" >&2
