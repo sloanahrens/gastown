@@ -11,22 +11,36 @@ import (
 // directivesDir is the repo's town directives, relative to this package.
 const directivesDir = "../../directives"
 
+// beadTextJudge judges one command the way the tap guard does when a polecat
+// runs it, returning the reason a rule refuses the command for and the
+// alternative the hook prints beneath it. Both empty is an acceptance.
+type beadTextJudge func(command string) (reason, alternative string)
+
+// judgeAsPolecat is the judge a directive's example meets: the production hook
+// entry point, in a polecat session, so the fence is read by every rule the
+// real invocation meets and not just the bead-text one.
+func judgeAsPolecat(command string) (reason, alternative string) {
+	return evaluateDangerousCommand(command, 0, attributionPolecat)
+}
+
 // beadTextExample is one ```bash fence of a directive, as the tap guard judged
-// it: the line its opening fence sits on and the reason the polecat bead-text
-// rule gives for refusing it, "" for a fence a polecat can run.
+// it: the line its opening fence sits on and the verdict the polecat rule gave,
+// both parts of it, so the refusal is reported with the alternative that states
+// the fix.
 type beadTextExample struct {
-	file   string
-	line   int
-	reason string
+	file        string
+	line        int
+	reason      string
+	alternative string
 }
 
 // directiveBeadTextExamples runs each ```bash fence of one directive's markdown
-// through the bead-text rule. The fence is read the way the hook hands the
-// command over — heredoc bodies stripped, then tokenized, then matched — so it
-// fares here exactly as it would when a polecat runs it (gt-9j9vu). An
-// unterminated fence is an error, not an empty example list: a fence this
-// scanner fails to close is one it never judged.
-func directiveBeadTextExamples(file, markdown string) ([]beadTextExample, error) {
+// through judge, the way the hook reads the command a polecat runs (gt-9j9vu).
+// An unterminated fence is an error, not an empty example list: a fence this
+// scanner fails to close is one it never judged. A verdict with only one of its
+// two parts is an error for the same reason — the pair is the verdict, so half
+// of one cannot be read as an acceptance.
+func directiveBeadTextExamples(judge beadTextJudge, file, markdown string) ([]beadTextExample, error) {
 	var examples []beadTextExample
 	var body []string
 	open := 0
@@ -35,9 +49,12 @@ func directiveBeadTextExamples(file, markdown string) ([]beadTextExample, error)
 		case open == 0 && strings.TrimSpace(line) == "```bash":
 			open, body = i+1, body[:0]
 		case open != 0 && strings.TrimSpace(line) == "```":
-			reason, _ := matchesPolecatAttribution(
-				shellTokenize(stripHeredocBodies(strings.Join(body, "\n"))), true, nil)
-			examples = append(examples, beadTextExample{file: file, line: open, reason: reason})
+			reason, alternative := judge(strings.Join(body, "\n"))
+			if (reason == "") != (alternative == "") {
+				return examples, fmt.Errorf("%s:%d: the guard gave reason %q with alternative %q: a half verdict is not an acceptance, so this fence was never judged",
+					file, open, reason, alternative)
+			}
+			examples = append(examples, beadTextExample{file: file, line: open, reason: reason, alternative: alternative})
 			open = 0
 		case open != 0:
 			body = append(body, line)
@@ -68,15 +85,15 @@ func TestDirectiveBeadTextExamplesRun(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reading %s: %v", path, err)
 		}
-		examples, err := directiveBeadTextExamples(path, string(data))
+		examples, err := directiveBeadTextExamples(judgeAsPolecat, path, string(data))
 		if err != nil {
 			t.Error(err)
 			continue
 		}
 		for _, ex := range examples {
 			if ex.reason != "" {
-				t.Errorf("%s:%d: the tap guard refuses this example: %s; a ```bash fence is a recipe a polecat runs, so show a refused form as inline code",
-					ex.file, ex.line, ex.reason)
+				t.Errorf("%s:%d: the tap guard refuses this example: %s — %s; a ```bash fence is a recipe a polecat runs, so show a refused form as inline code",
+					ex.file, ex.line, ex.reason, ex.alternative)
 			}
 		}
 		judged += len(examples)
@@ -99,27 +116,39 @@ func TestDirectiveBeadTextExampleScan(t *testing.T) {
 		"EOF\n" +
 		`gt bead note gt-abc "$(cat note.txt)"` + "\n" +
 		"```\n"
-	examples, err := directiveBeadTextExamples("old.md", oldRecipe)
+	examples, err := directiveBeadTextExamples(judgeAsPolecat, "old.md", oldRecipe)
 	if err != nil {
 		t.Fatalf("scanning the old recipe: %v", err)
 	}
-	if len(examples) != 1 || examples[0].reason != polecatUnresolvedTextReason {
-		t.Fatalf("old recipe: got %+v, want one example refused as %q", examples, polecatUnresolvedTextReason)
+	if len(examples) != 1 || examples[0].reason != polecatUnresolvedTextReason || examples[0].alternative == "" {
+		t.Fatalf("old recipe: got %+v, want one example refused as %q with its alternative", examples, polecatUnresolvedTextReason)
 	}
 
 	const newRecipe = "```bash\n" +
 		"gt bead note gt-abc 'line one\n" +
 		"line two'\n" +
 		"```\n"
-	examples, err = directiveBeadTextExamples("new.md", newRecipe)
+	examples, err = directiveBeadTextExamples(judgeAsPolecat, "new.md", newRecipe)
 	if err != nil {
 		t.Fatalf("scanning the new recipe: %v", err)
 	}
-	if len(examples) != 1 || examples[0].reason != "" {
+	if len(examples) != 1 || examples[0].reason != "" || examples[0].alternative != "" {
 		t.Fatalf("new recipe: got %+v, want one example the guard accepts", examples)
 	}
 
-	if _, err := directiveBeadTextExamples("open.md", "```bash\ngt bead note gt-abc 'x'\n"); err == nil {
+	if _, err := directiveBeadTextExamples(judgeAsPolecat, "open.md", "```bash\ngt bead note gt-abc 'x'\n"); err == nil {
 		t.Error("an unclosed fence was not reported, so it was never judged")
+	}
+
+	// A verdict with one part missing is unreadable, so the example must not
+	// count as accepted: the alternative alone and the reason alone are both
+	// half a verdict.
+	acceptsWithAlternative := func(string) (string, string) { return "", polecatCommentInputAlt }
+	if _, err := directiveBeadTextExamples(acceptsWithAlternative, "half.md", newRecipe); err == nil {
+		t.Error("an alternative with no reason was read as acceptance, so an unjudged example passed")
+	}
+	refusesWithNoAlternative := func(string) (string, string) { return polecatCommentInputReason, "" }
+	if _, err := directiveBeadTextExamples(refusesWithNoAlternative, "half.md", newRecipe); err == nil {
+		t.Error("a reason with no alternative was read without complaint; the verdict pair is incomplete")
 	}
 }

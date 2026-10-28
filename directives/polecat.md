@@ -1,12 +1,12 @@
 ## Changelog
 
-- 2026-10-28 gt-9j9vu: the bead-text rule is one a polecat can run — the text as a single-quoted argument on the `gt bead` verb — replacing the quoted-heredoc recipe, whose `"$(cat file)"` the tap guard refuses; the 2026-10-14 section is retitled.
+- 2026-10-28 gt-9j9vu: replaces the 2026-10-14 bead-text section, whose quoted-heredoc recipe the tap guard refuses at `"$(cat file)"`, with the rule a polecat can run — the text as one single-quoted argument on the `gt bead` verb.
 - 2026-10-27 gt-vhyk9: files stay under the worktree — scratch files, trace logs, test data and build output included; /tmp, /private/tmp, HOME and a session scratchpad are out (gt-3n4e0, hq-wisp-dvrty). The 2026-10-14 scratch section is retitled "Scratch files stay out of the tracked tree".
 - 2026-10-27 gt-3vgbi: moved the town polecat policy into the repo from ~/gt/directives/polecat.md, with the twelve "What om rejects" rules from ~/gt/gastown/directives/polecat.md, text unchanged.
 - 2026-10-27 gt-3vgbi: removed a probe line that the overseer's probe bead had put in the rules file; it was not policy.
 - 2026-09-23 claude-9a8: an interrupt is a delivery artifact, not an operator stop (town policy section).
 - 2026-10-12 gt-3vgbi: no subagents, except the scheduled deep-review slices (town policy section, dated 2026-10-12).
-- 2026-10-14 gt-3vgbi: text for bd and gt goes through a quoted heredoc (town policy section, dated 2026-10-14).
+- 2026-10-14 gt-3vgbi: text for bd and gt goes through a quoted heredoc (town policy section, dated 2026-10-14; superseded 2026-10-28 by gt-9j9vu).
 - 2026-10-14 gt-3vgbi: scratch files stay out of the worktree (town policy section, dated 2026-10-14).
 - 2026-10-23 gt-3vgbi: tests are engineered, not accumulated (town policy section, dated 2026-10-23; full standard in ~/.claude/docs/standards/test-engineering.md).
 - 2026-10-26 gt-3vgbi: tests stay hermetic, and no new shell scripts (town policy sections, dated 2026-10-26).
