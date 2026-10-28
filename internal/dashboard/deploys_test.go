@@ -881,6 +881,37 @@ func TestDeployReaderNamesADeployedAppWithNoScheduledChecks(t *testing.T) {
 	assert.Nil(t, d.HealthMark)
 }
 
+// The strip's marker is the newest run's word, so it clears on its own: the next
+// refresh that reads a passing newest run draws no marker, and the failed run is
+// history the rows keep, not the newest. The same reader reads both refreshes,
+// so the held state of the failed run is in play too.
+func TestDeployReaderClearsTheMarkOnTheNextGreenRun(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(1, "failure", 5)}},
+		jobs:  map[int64][]forgejo.ActionRunJob{1: healthJobs("success", "success", "failure")},
+	}
+	r := newDeployTestReader(stub, nil)
+
+	red := r.Read()
+	require.Equal(t, []string{"sloan/fractals-nextjs"}, red.HealthFailed)
+	require.NotNil(t, red.HealthMark)
+
+	stub.runs["sloan/fractals-nextjs"] = []forgejo.ActionRun{testHealthRun(2, "success", 30), testHealthRun(1, "failure", 5)}
+	stub.jobs[2] = healthJobs("success", "success", "success")
+
+	green := r.Read()
+	assert.Empty(t, green.HealthFailed, "the newest run passed, so the strip stops naming the app")
+	assert.Nil(t, green.HealthMark, "and the pill clears with it")
+	require.Len(t, green.Health, 2)
+	prod := green.Health[1]
+	assert.Equal(t, healthSuccess, prod.Status, "prod's own job passed on the newest run")
+	assert.Equal(t, 1, prod.Passed, "the failed run is still in the window's count, below the green")
+	assert.Equal(t, 2, prod.Runs)
+}
+
 // "No check yet" is a claim only a listing the block read can make. A deployed
 // app whose checks could not be listed, or whose checks name no environment the
 // block knows, has checks it could not read: it draws no no-checks rows, and
