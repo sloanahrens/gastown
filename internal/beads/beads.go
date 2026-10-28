@@ -3719,6 +3719,18 @@ func (b *Beads) showMultipleLocal(ids []string) (map[string]*Issue, error) {
 		return make(map[string]*Issue), nil
 	}
 
+	// This is the builder that turns ids into positional arguments, and not
+	// every path to it goes through ShowMultiple: verifyBatchClosed re-reads a
+	// closed batch here, so the refusal belongs at the builder rather than only
+	// at the public wrapper (gt-ecfaa, gt-lw0mh). ShowMultiple keeps its own
+	// check before routing so a malformed id refuses the whole call before any
+	// store is reached.
+	for _, id := range ids {
+		if err := refuseFlagShapedID(id); err != nil {
+			return nil, err
+		}
+	}
+
 	// bd show supports multiple IDs
 	args := append([]string{"show", "--json"}, ids...)
 	out, err := b.run(args...)
