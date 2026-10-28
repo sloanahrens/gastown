@@ -28,9 +28,9 @@ type Binding struct {
 	Time time.Time `json:"time"`
 }
 
-// Reservation is a name Pick handed out that nothing has bound yet. It keeps a
-// second Pick from choosing the same name, and expires so a launcher that dies
-// between Pick and Bind does not hold a name for good.
+// Reservation is a name Pick handed out that nothing has bound yet, held until
+// it ages past the registry's TTL, so a launcher that dies between Pick and
+// Bind does not hold a name for good.
 type Reservation struct {
 	Name string    `json:"name"`
 	Time time.Time `json:"time"`
@@ -66,9 +66,8 @@ func (s *State) Bound(bead string) (string, bool) {
 	return s.Bindings[best].Name, true
 }
 
-// Bind records name bound to bead, adding nothing when that pair is already
-// bound, and reports whether it added the binding. The name's reservation, if
-// Pick made one, is dropped: the name is bound, so nothing needs holding it.
+// Bind records name bound to bead, dropping the reservation Pick may have made
+// for it, and reports whether it added a pair that was not bound already.
 func (s *State) Bind(name, bead string, at time.Time) bool {
 	s.DropReservation(name)
 	for _, b := range s.Bindings {
@@ -112,10 +111,9 @@ func (s *State) PruneReservations(now time.Time, ttl time.Duration) int {
 	return dropped
 }
 
-// PruneDead drops every agent isLive rejects and reports how many it dropped.
-// It stops at the first agent whose liveness cannot be read and leaves the
-// state as it was: an unreadable process is not a dead one, and a sweep must
-// not forget a bird because the process table would not answer.
+// PruneDead drops every agent isLive rejects and reports how many it dropped,
+// leaving the state as it was when any liveness cannot be read, since an
+// unreadable process is not a dead one.
 func (s *State) PruneDead(isLive func(Agent) (bool, error)) (int, error) {
 	kept := make([]Agent, 0, len(s.Agents))
 	for _, a := range s.Agents {
@@ -132,9 +130,9 @@ func (s *State) PruneDead(isLive func(Agent) (bool, error)) (int, error) {
 	return dropped, nil
 }
 
-// Taken returns every name the state holds at now: every bound name, every
-// reservation younger than ttl, and every agent isLive accepts. An error from
-// isLive stops the walk, since a name it cannot judge may well be in use.
+// Taken returns every name the state holds at now — bound, reserved for less
+// than ttl, or held by an agent isLive accepts — and fails rather than guess
+// when a liveness cannot be read, since a name it cannot judge may be in use.
 func (s *State) Taken(now time.Time, ttl time.Duration, isLive func(Agent) (bool, error)) (map[string]bool, error) {
 	taken := make(map[string]bool, len(s.Bindings)+len(s.Agents)+len(s.Reservations))
 	for _, b := range s.Bindings {

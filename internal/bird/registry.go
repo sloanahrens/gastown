@@ -31,16 +31,13 @@ const (
 	defaultReservationTTL = 5 * time.Minute
 )
 
-// ErrInvalidName is what Bind refuses a name with: a name has to reach a
-// session name, a git identity and a bead label unchanged, so it may only use
-// the characters ValidName accepts.
+// ErrInvalidName is what Bind refuses a name with, since a name has to reach a
+// session name, a git identity and a bead label unchanged.
 var ErrInvalidName = errors.New("a bird name must match " + nameShape.String())
 
 // Registry is one state file, the pool Pick draws from and the polecat
-// directories whose names count as taken.
-//
-// Every read and write holds an flock on LockPath, released by the kernel when
-// the process exits, so a holder that dies leaves no stale lock to break.
+// directories whose names count as taken, read and written only under an flock
+// on a sibling lock file.
 type Registry struct {
 	// Path is the state file.
 	Path string
@@ -70,8 +67,7 @@ type Registry struct {
 	Write func(path string, v any) error
 }
 
-// New returns the Registry of the town rooted at townRoot, with its state file
-// under .runtime/agents and every rig's polecat directories counting as taken.
+// New returns the Registry of the town rooted at townRoot.
 func New(townRoot string) *Registry {
 	return &Registry{
 		Path:        filepath.Join(townRoot, ".runtime", "agents", "state.json"),
@@ -80,9 +76,8 @@ func New(townRoot string) *Registry {
 }
 
 // PolecatGlob is the glob matching every rig's polecat directories under
-// townRoot. The root is escaped, so a town under a directory whose name holds
-// a glob metacharacter still matches the polecats inside it rather than a
-// pattern of its own.
+// townRoot, escaped so a root whose name holds a glob metacharacter still
+// matches the directories inside it rather than a pattern of its own.
 func PolecatGlob(townRoot string) string {
 	return filepath.Join(quoteGlob(townRoot), "*", "polecats", "*")
 }
@@ -105,8 +100,8 @@ func quoteGlob(s string) string {
 	return b.String()
 }
 
-// Live reports whether a names a process that is still running. An error means
-// the process table could not be read: the caller must not read it as death.
+// Live reports whether a names a process that is still running, failing rather
+// than answering false when the process table cannot be read.
 func (r *Registry) Live(a Agent) (bool, error) {
 	if a.PID <= 0 || a.Start == "" {
 		return false, nil
@@ -133,9 +128,9 @@ func (r *Registry) Load() (*State, error) {
 }
 
 // Update runs fn on the state under the registry lock and writes the result
-// atomically. fn returning an error writes nothing, and fn must not call
-// another Registry method: it already holds the lock, and a second acquisition
-// would wait on itself.
+// atomically, writing nothing when fn fails; fn must not call another Registry
+// method, since it already holds the lock and a second acquisition would wait
+// on itself.
 func (r *Registry) Update(fn func(*State) error) error {
 	return r.mutate(func(st *State) (bool, error) {
 		return true, fn(st)
@@ -168,9 +163,8 @@ func (r *Registry) mutate(fn func(*State) (bool, error)) error {
 	})
 }
 
-// List prunes dead agents from the state and returns the live ones by name. A
-// liveness it cannot read fails the list rather than pruning the agent, and a
-// list that prunes nothing does not rewrite the file.
+// List prunes dead agents from the state and returns the live ones by name,
+// failing rather than pruning when a liveness cannot be read.
 func (r *Registry) List() ([]Agent, error) {
 	var live []Agent
 	err := r.mutate(func(st *State) (bool, error) {
@@ -189,8 +183,8 @@ func (r *Registry) List() ([]Agent, error) {
 }
 
 // Bind records that name ran bead, adding nothing when the pair is already
-// bound, and reports whether it added the binding. A name no session could use
-// is refused, since a binding keeps that name taken for good.
+// bound, and reports whether it added it, refusing a name no session could use
+// since a binding keeps that name taken for good.
 func (r *Registry) Bind(name, bead string) (bool, error) {
 	if !ValidName(name) {
 		return false, fmt.Errorf("binding %q: %w", name, ErrInvalidName)
@@ -269,10 +263,9 @@ func (r *Registry) PolecatNames() ([]string, error) {
 }
 
 // Pick returns a random free name from the pool and reserves it under the
-// lock, so two launches never receive the same name before either binds it.
-// ok is false when every name is taken. The reservation is dropped when Bind
-// records the name, or when it ages past ReservationTTL: a launcher that dies
-// between Pick and Bind leaves no name held for good.
+// lock, so two launches never receive the same name before either binds it; ok
+// is false when every name is taken, and a reservation nothing binds expires
+// after ReservationTTL.
 func (r *Registry) Pick() (string, bool, error) {
 	var picked string
 	var free bool

@@ -11,9 +11,15 @@ import (
 // probeProcess reports whether the kernel still has a process for pid. It is
 // the second half of startToken, asked only when the token could not be read:
 // the answer tells a process that is gone from a table this process may not
-// read. An error means the kernel would not say, which is not death.
+// read.
 func probeProcess(pid int) (bool, error) {
-	err := syscall.Kill(pid, 0)
+	return probeAnswer(syscall.Kill(pid, 0))
+}
+
+// probeAnswer reads a signal-0 probe. Only "no such process" is death: an
+// answer the kernel gives for another reason leaves the process unjudged, and
+// a caller must not prune a bird on that.
+func probeAnswer(err error) (bool, error) {
 	switch {
 	case err == nil:
 		return true, nil
@@ -23,6 +29,6 @@ func probeProcess(pid int) (bool, error) {
 		// It exists under a uid we are not: alive, and its token stays unread.
 		return true, nil
 	default:
-		return false, fmt.Errorf("probing process %d: %w", pid, err)
+		return false, fmt.Errorf("probing process liveness: %w", err)
 	}
 }
