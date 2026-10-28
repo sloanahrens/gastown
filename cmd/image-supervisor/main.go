@@ -7,11 +7,11 @@
 // build never holds the install lock past the install), runs COMMAND in a
 // process group of its own, and on the alarm stops the whole group and removes
 // the lock DIR once the group is gone. The owned DIR, which the installer made
-// for this binary, is removed when the build ends however it ends. It exits
-// with the build's status, 128+signal if a signal ended it, or 124 when the
-// alarm did. With a
-// fingerprint it also raises an escalation for a build that did not finish and
-// clears it for one that did.
+// for this binary and started it from, is removed when the build ends on every
+// path the supervisor returns from; a supervisor killed by a signal cannot
+// remove it. It exits with the build's status, 128+signal if a signal ended it,
+// or 124 when the alarm did. With a fingerprint it also raises an escalation
+// for a build that did not finish and clears it for one that did.
 package main
 
 import (
@@ -34,7 +34,7 @@ func run(args []string, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	alarm := fs.Int("alarm", 0, "seconds the build may run before it is stopped")
 	lock := fs.String("lock", "", "lock directory the build takes; removed after a stop that it names")
-	owned := fs.String("owned", "", "directory the installer made for this binary; removed when the build ends")
+	owned := fs.String("owned", "", "the installer's helper directory (install-gt-image.XXXXXX in the temp directory); removed when the build ends")
 	gt := fs.String("gt", "", "gt binary that raises and clears the escalation")
 	fingerprint := fs.String("fingerprint", "", "escalation fingerprint for a build that does not finish")
 	if err := fs.Parse(args); err != nil {

@@ -75,8 +75,9 @@ IMAGE_OWNED=""
 result_line() { RESULT_EMITTED=1; igt_result "$@"; }
 on_exit() {
   local ec=$?
-  # A detached image build is started from HELPER_DIR and removes it itself
-  # (--owned), so this exit leaves it alone (gt-p5pjs).
+  # A detached image build is started from HELPER_DIR and removes it when the
+  # build ends (--owned). Removing it here raced the build's exec from that
+  # directory, and under load the rm could land first (gt-p5pjs).
   [ -z "$HELPER_DIR" ] || [ -n "$IMAGE_OWNED" ] || rm -rf "$HELPER_DIR"
   [ "$RESULT_EMITTED" = "1" ] && exit "$ec"
   if [ -n "${DAEMON_DIR:-}" ]; then
@@ -256,6 +257,15 @@ image_build() {
   export POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$bin" POLECAT_IMAGE_LOCK="$lock"
   if [ -n "$image_registry" ]; then export POLECAT_IMAGE_REGISTRY="$image_registry"; fi
   if [ -n "$image_crane" ]; then export POLECAT_IMAGE_CRANE="$image_crane"; fi
+  # A launch that cannot exec never reaches a supervisor to remove the directory
+  # it owns, so this shell removes it, as the trap above says (gt-p5pjs). A
+  # check rather than a cleanup after the exec, because an exec that fails in
+  # the detached background subshell ends that shell at once.
+  if [ ! -f "$IMAGE_SUPERVISOR" ] || [ ! -x "$IMAGE_SUPERVISOR" ]; then
+    [ -z "$IMAGE_OWNED" ] || rm -rf "$IMAGE_OWNED"
+    log "polecat image: cannot start the image supervisor at $IMAGE_SUPERVISOR: no executable file there"
+    return 126
+  fi
   exec "$IMAGE_SUPERVISOR" --alarm "$secs" --lock "$lock" ${report[@]+"${report[@]}"} --owned "$IMAGE_OWNED" -- bash "$run"
 }
 
@@ -325,10 +335,9 @@ polecat_image_step() {
     # Detached, as before gt-xzo8a: the subshell exits at once, so the install
     # never waits on the build, and image_build's fd closes keep the install
     # lock out of it.
-    # The build's supervisor removes HELPER_DIR when its build ends (--owned),
-    # so this install's exit must not: removing it here raced the supervisor's
-    # exec from HELPER_DIR and could lose (gt-p5pjs). A launch that dies before
-    # the exec leaves the directory behind, the one case no supervisor can clean.
+    # The trap above leaves HELPER_DIR to the supervisor (--owned). A launch
+    # that cannot exec the supervisor never reaches one, so image_build removes
+    # the directory itself (gt-p5pjs).
     IMAGE_OWNED="$HELPER_DIR"
     ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" install-gt:image-build-failed </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null
     log "polecat image: rebuild for $commit started in the background (log $logfile)"

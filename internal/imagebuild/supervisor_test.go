@@ -201,6 +201,7 @@ func newRig(b *fakeBuild, g *fakeGroup, alarm bool) *rig {
 		readFile:     r.fs.read,
 		removeAll:    r.fs.remove,
 		command:      r.esc.run,
+		tempDir:      func() string { return "/tmp" },
 		termGrace:    time.Second,
 		killGrace:    5 * time.Second,
 		pollInterval: 50 * time.Millisecond,
@@ -523,7 +524,8 @@ func TestOwnedDirectoryIsRemovedHoweverTheBuildEnds(t *testing.T) {
 	}
 	for name, rigFor := range cases {
 		t.Run(name, func(t *testing.T) {
-			owned := filepath.Join(t.TempDir(), "helper")
+			base := t.TempDir()
+			owned := filepath.Join(base, ownedPrefix+"helper")
 			if err := os.Mkdir(owned, 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -532,6 +534,7 @@ func TestOwnedDirectoryIsRemovedHoweverTheBuildEnds(t *testing.T) {
 			}
 			r := rigFor(t)
 			r.sys.removeAll = os.RemoveAll
+			r.sys.tempDir = func() string { return base }
 
 			r.sys.run(r.config(func(c *Config) { c.Lock = ""; c.Owned = owned }))
 
@@ -560,10 +563,50 @@ func TestOwnedDirectoryThatCannotBeRemovedIsSaid(t *testing.T) {
 	r := newRig(finishing(t, 0, 0), nil, false)
 	r.sys.removeAll = func(string) error { return errors.New("busy") }
 
-	r.sys.run(r.config(func(c *Config) { c.Lock = ""; c.Owned = "/helper" }))
+	r.sys.run(r.config(func(c *Config) { c.Lock = ""; c.Owned = "/tmp/install-gt-image.helper" }))
 
-	if !strings.Contains(r.stderr.String(), "could not remove /helper: busy") {
+	if !strings.Contains(r.stderr.String(), "could not remove /tmp/install-gt-image.helper: busy") {
 		t.Errorf("log %q does not name the directory that was left behind", r.stderr.String())
+	}
+}
+
+// The owned directory is removed with RemoveAll, so only the directory the
+// installer makes may be named: a mistyped --owned is refused before the build
+// starts, and nothing is removed.
+func TestOwnedDirectoryThatIsNotTheInstallersIsRefused(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"relative":             "install-gt-image.abc123",
+		"another name":         "/tmp/helper",
+		"name without a tail":  "/tmp/install-gt-image.",
+		"another temp dir":     "/tmp/install-gt-lock.abc123",
+		"not in the temp dir":  "/etc/install-gt-image.abc123",
+		"nested deeper":        "/tmp/install-gt-image.abc123/helper",
+		"the temp dir itself":  "/tmp",
+		"the parent traversal": "/tmp/install-gt-image.abc123/../other",
+	}
+	for name, owned := range cases {
+		t.Run(name, func(t *testing.T) {
+			b := finishing(t, 0, 0)
+			r := newRig(b, nil, false)
+			removed := false
+			r.sys.removeAll = func(string) error { removed = true; return nil }
+
+			got := r.sys.run(r.config(func(c *Config) { c.Lock = ""; c.Owned = owned }))
+
+			if got != ExitRefused {
+				t.Errorf("status %d for --owned %q, want %d", got, owned, ExitRefused)
+			}
+			if b.started {
+				t.Errorf("--owned %q started the build, want it refused first", owned)
+			}
+			if removed {
+				t.Errorf("--owned %q removed something, want nothing removed", owned)
+			}
+			if !strings.Contains(r.stderr.String(), owned) {
+				t.Errorf("log %q does not name the refused directory %q", r.stderr.String(), owned)
+			}
+		})
 	}
 }
 

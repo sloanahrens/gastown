@@ -15,14 +15,16 @@ func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 func TestUsageErrorsExitTwo(t *testing.T) {
 	t.Parallel()
 	cases := map[string][]string{
-		"no arguments":           {},
-		"no alarm":               {"--", "bash", "run.sh"},
-		"zero alarm":             {"--alarm", "0", "--", "bash", "run.sh"},
-		"negative alarm":         {"--alarm", "-3", "--", "bash", "run.sh"},
-		"no command":             {"--alarm", "5"},
-		"fingerprint without gt": {"--alarm", "5", "--fingerprint", "fp", "--", "bash", "run.sh"},
-		"gt without fingerprint": {"--alarm", "5", "--gt", "/bin/gt", "--", "bash", "run.sh"},
-		"unknown flag":           {"--alarm", "5", "--nope", "--", "bash", "run.sh"},
+		"no arguments":                  {},
+		"no alarm":                      {"--", "bash", "run.sh"},
+		"zero alarm":                    {"--alarm", "0", "--", "bash", "run.sh"},
+		"negative alarm":                {"--alarm", "-3", "--", "bash", "run.sh"},
+		"no command":                    {"--alarm", "5"},
+		"fingerprint without gt":        {"--alarm", "5", "--fingerprint", "fp", "--", "bash", "run.sh"},
+		"gt without fingerprint":        {"--alarm", "5", "--gt", "/bin/gt", "--", "bash", "run.sh"},
+		"unknown flag":                  {"--alarm", "5", "--nope", "--", "bash", "run.sh"},
+		"owned outside the temp dir":    {"--alarm", "5", "--owned", "/etc", "--", "bash", "run.sh"},
+		"owned not the installers name": {"--alarm", "5", "--owned", "/tmp/helper", "--", "bash", "run.sh"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {

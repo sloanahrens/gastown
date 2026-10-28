@@ -32,6 +32,15 @@ const ExitAlarm = 124
 // ExitStart is the status Run returns when the build could not be started.
 const ExitStart = 127
 
+// ExitRefused is the status Run returns when Config.Owned names a directory the
+// supervisor may not remove. It is the status cmd/image-supervisor gives the
+// flags it refuses, since the directory arrives as a flag.
+const ExitRefused = 2
+
+// ownedPrefix is the name scripts/install-gt.sh gives the temp directory it
+// makes for this binary: mktemp -d "$TMPDIR/install-gt-image.XXXXXX".
+const ownedPrefix = "install-gt-image."
+
 const (
 	// termGrace is how long the group has to leave after TERM before KILL.
 	termGrace = 1 * time.Second
@@ -51,10 +60,13 @@ type Config struct {
 	// that was stopped, so another install's lock is left alone. Empty means the
 	// build takes none.
 	Lock string
-	// Owned is a directory the installer made for this supervisor, and the one
-	// this binary was started from. It is removed when the build ends, success or
-	// failure, however the supervisor ends, so the installer need not wait to
-	// remove it. Empty means none.
+	// Owned is the helper directory the installer made for this supervisor, and
+	// the one this binary was started from. It is removed when the build ends,
+	// on every path the supervisor returns from (success, failure, a build that
+	// cannot start, the alarm), so the installer need not wait to remove it. A
+	// supervisor killed by a signal cannot remove it, as no killed process
+	// removes its temp files. The path must be the installer's own (see
+	// ownedProblem); anything else is refused. Empty means none.
 	Owned string
 	// GT is the gt binary that raises and clears the escalation. Empty means no
 	// escalation, whatever Fingerprint says.
@@ -133,6 +145,7 @@ type system struct {
 	readFile  func(string) ([]byte, error)
 	removeAll func(string) error
 	command   func(name string, args ...string) error
+	tempDir   func() string
 
 	termGrace, killGrace, pollInterval time.Duration
 }
@@ -150,6 +163,7 @@ func realSystem() system {
 		command: func(name string, args ...string) error {
 			return exec.Command(name, args...).Run()
 		},
+		tempDir:      os.TempDir,
 		termGrace:    termGrace,
 		killGrace:    killGrace,
 		pollInterval: pollInterval,
@@ -162,6 +176,12 @@ type waited struct {
 }
 
 func (s system) run(cfg Config) int {
+	// The owned directory is removed with removeAll, so it must be the one the
+	// installer made: a mistyped --owned must not remove another directory.
+	if problem := ownedProblem(cfg.Owned, s.tempDir()); problem != "" {
+		fmt.Fprintf(cfg.Stderr, "polecat image: refusing --owned %s: %s; the build was not started\n", cfg.Owned, problem)
+		return ExitRefused
+	}
 	b, err := s.start(cfg)
 	if err != nil {
 		fmt.Fprintf(cfg.Stderr, "polecat image: cannot start the build: %v\n", err)
@@ -232,6 +252,27 @@ func (s system) removeLock(lock string, pid int) {
 		return
 	}
 	_ = s.removeAll(lock)
+}
+
+// ownedProblem says why an owned directory must not be removed, or "" when it
+// may be: the installer's directory sits directly in the system temp directory
+// and carries the name the installer makes. The two together are the
+// installer's mark, so a mistyped flag cannot name a directory of someone else's.
+func ownedProblem(path, tempRoot string) string {
+	if path == "" {
+		return ""
+	}
+	clean := filepath.Clean(path)
+	base := filepath.Base(clean)
+	switch {
+	case !filepath.IsAbs(clean):
+		return "not an absolute path"
+	case filepath.Dir(clean) != filepath.Clean(tempRoot):
+		return "not directly in the installer's temp directory " + filepath.Clean(tempRoot)
+	case !strings.HasPrefix(base, ownedPrefix) || base == ownedPrefix:
+		return "not named " + ownedPrefix + "XXXXXX as the installer makes it"
+	}
+	return ""
 }
 
 // removeOwned removes the directory the installer handed over. The supervisor's
