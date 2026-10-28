@@ -18,9 +18,8 @@ const (
 	TagDev = "dev"
 )
 
-// StrayRepos are the repositories outside RepoMain a run may delete whole.
-// BuildPlan plans RepoMain alone; the stray-repo rule that reads this list is
-// not part of it yet.
+// StrayRepos are the repositories outside RepoMain a run may delete whole,
+// when no sandbox record names them.
 var StrayRepos = []string{"gastown-polecat-measure", "seedtest/polecat"}
 
 // planTarget is the Target name a plan carries.
@@ -53,14 +52,19 @@ type PlanInput struct {
 	Errs            []string        // any failed read; non-empty means refuse
 }
 
-// BuildPlan decides which manifests of RepoMain to delete. Retention is by
-// digest, because deleting a digest drops every tag that points at it: it keeps
-// every named tag (any tag not shaped like a commit hash) and so every digest
-// one points at, plus the dev tag, the installed commit's tag, every in-use
-// digest and the newest Keep candidates. A candidate that shares a kept digest
-// survives with it. An input it cannot read refuses the plan.
+// BuildPlan decides which manifests of RepoMain and the stray repos to delete.
+// Retention is by digest, because deleting a digest drops every tag that points
+// at it: it keeps every named tag (any tag not shaped like a commit hash) and so
+// every digest one points at, plus the dev tag, the installed commit's tag,
+// every in-use digest and the newest Keep candidates. A candidate that shares a
+// kept digest survives with it. An input it cannot read, or a name it cannot
+// validate, refuses the plan.
 func BuildPlan(in PlanInput) diskmaint.Plan {
 	plan := diskmaint.Plan{Target: planTarget}
+	if why := nameRefusal(in); why != "" {
+		plan.Refused = why
+		return plan
+	}
 	if why := refuseReason(in); why != "" {
 		plan.Refused = why
 		return plan
@@ -103,7 +107,9 @@ func BuildPlan(in PlanInput) diskmaint.Plan {
 		}
 	}
 
-	plan.Actions = deleteActions(candidates, keepDigests, in.Keep)
+	strayActions, strayKept := planStrayRepos(in, keepDigests)
+	plan.Actions = append(deleteActions(candidates, keepDigests, in.Keep), strayActions...)
+	plan.Kept = append(plan.Kept, strayKept...)
 	sort.Slice(plan.Kept, func(i, j int) bool { return plan.Kept[i].Ref < plan.Kept[j].Ref })
 	return plan
 }
