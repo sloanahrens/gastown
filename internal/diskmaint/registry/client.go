@@ -19,7 +19,7 @@ const (
 	pageSize = 100
 	// maxPages bounds one listing. A listing past it is an error rather than a
 	// short read: a Link header that points back cannot loop the client, and a
-	// catalogue the client stops reading early must not pass as whole.
+	// catalog the client stops reading early must not pass as whole.
 	maxPages = 1000
 	// maxBodyBytes bounds the response body the client decodes, so a registry
 	// cannot make it allocate without limit.
