@@ -65,6 +65,27 @@ func TestShowMultipleRefusesAFlagShapedID(t *testing.T) {
 	}
 }
 
+// TestVerifyBatchClosedRefusesAFlagShapedID: the batch close re-read reaches
+// bd's show through showMultipleLocal without passing ShowMultiple, so the
+// builder refuses the id itself; the wrapper's check never sees this call
+// (gt-lw0mh).
+func TestVerifyBatchClosedRefusesAFlagShapedID(t *testing.T) {
+	t.Parallel()
+	for _, id := range flagShapedIDs {
+		t.Run(id, func(t *testing.T) {
+			t.Parallel()
+			r := newRecorder(nil)
+			err := newRecordedBeads(t.TempDir(), r).verifyBatchClosed([]string{"gt-a", id})
+			if !errors.Is(err, errFlagShapedID) {
+				t.Fatalf("verifyBatchClosed(gt-a, %q) = %v, want errFlagShapedID", id, err)
+			}
+			if calls := r.argvs(); len(calls) != 0 {
+				t.Errorf("verifyBatchClosed(gt-a, %q) ran bd: %v", id, calls)
+			}
+		})
+	}
+}
+
 // TestShowReadsAnIDThatIsNotFlagShaped: the refusal covers a leading dash only,
 // so an ordinary id still reaches bd and comes back as its issue (gt-ecfaa).
 func TestShowReadsAnIDThatIsNotFlagShaped(t *testing.T) {
