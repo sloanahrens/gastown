@@ -3483,7 +3483,8 @@ func (b *Beads) Show(id string) (*Issue, error) {
 // parseShowIssues reads the issue array bd show --json prints and fails on any
 // other answer: unmarshalling a bare null into a slice leaves it empty with no
 // error, so a show that never answered read as a bead the store does not hold
-// (gt-avfip). bd's not-found answer never reaches here; that call fails first.
+// (gt-avfip). bd's error envelope fails the array check too, so absence here
+// never rests on bd's exit status (gt-d7b60).
 func parseShowIssues(out []byte) ([]*Issue, error) {
 	trimmed := bytes.TrimSpace(out)
 	if len(trimmed) == 0 || trimmed[0] != '[' {

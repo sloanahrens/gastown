@@ -25,7 +25,8 @@ const notFoundEnvelope = `{
 
 // showAnswersThatAreNotAnIssueArray are answers a show has no business reading
 // as its result: the payload bd unwrapped a broken answer to, not the array
-// bd prints for a show.
+// bd prints for a show, and bd's error envelope when it arrives on a call that
+// did not fail (gt-d7b60).
 var showAnswersThatAreNotAnIssueArray = []struct {
 	name   string
 	stdout string
@@ -33,6 +34,7 @@ var showAnswersThatAreNotAnIssueArray = []struct {
 	{"null", "null\n"},
 	{"object", `{"id":"gt-a","title":"a"}`},
 	{"prose", "Issue gt-a not found\n"},
+	{"not-found envelope", notFoundEnvelope},
 	{"truncated array", `[{"id":"gt-a"`},
 	{"null element", `[null]`},
 }
