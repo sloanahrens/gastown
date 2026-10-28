@@ -369,7 +369,7 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 	}
 	// An operator stop: the supervisor's Stop, logged, not refused by an
 	// e-stop or a park (gt-4k3fj.4.1).
-	polecatMgr := supervisedPolecatSessions(tmux.NewTmux(), r, "session stop", operatorActor("gt session stop"))
+	polecatMgr := newStopSessions(r)
 
 	townRoot, _ := workspace.FindFromCwd()
 
@@ -388,9 +388,13 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := polecatMgr.Stop(polecatName, sessionForce); err != nil {
-		// Nothing was stopped, so nothing is parked: withdraw a marker this
-		// run wrote rather than leave the polecat looking deliberately stopped.
-		if recorded.Written {
+		// A stop that wraps polecat.ErrSandboxNotRemoved ended the session and
+		// left only its sandbox behind, so the marker this run wrote stays:
+		// withdrawing it hands the seat back to the patrol, which restarts a
+		// polecat the operator stopped (gt-nbo3y). Any other error means
+		// nothing was stopped, so a marker this run wrote is withdrawn rather
+		// than leave the polecat looking deliberately stopped.
+		if !errors.Is(err, polecat.ErrSandboxNotRemoved) && recorded.Written {
 			clearParkedSession(townRoot, rigName, polecatName)
 		}
 		return fmt.Errorf("stopping session: %w", err)
@@ -417,6 +421,21 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// stopSeatManager is the part of a rig's polecat session manager that gt
+// session stop drives. Naming the three calls lets a test hand the stop a
+// manager whose Stop fails, so the stop's own handling of a failed stop runs
+// without tmux or a sandbox (gt-nbo3y).
+type stopSeatManager interface {
+	HasPolecat(polecat string) bool
+	SessionName(polecat string) string
+	Stop(polecat string, force bool) error
+}
+
+// newStopSessions builds the session manager gt session stop drives.
+var newStopSessions = func(r *rig.Rig) stopSeatManager {
+	return supervisedPolecatSessions(tmux.NewTmux(), r, "session stop", operatorActor("gt session stop"))
 }
 
 // deliberateSessionStopReason is the pause-marker reason gt session stop

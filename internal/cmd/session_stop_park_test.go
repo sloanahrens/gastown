@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,6 +223,103 @@ func TestUnreadableRegistryParksTheSeat(t *testing.T) {
 
 	if !polecatSessionParked(townRoot, rigName, polecatName) {
 		t.Fatal("an unreadable registry left the seat unmarked; the patrol would restart a stopped polecat")
+	}
+}
+
+// fixedStopSessions is the session manager gt session stop drives in these
+// tests: the seat exists, it answers to the recorded session, and its Stop
+// fails with stopErr so the stop's own handling of a failed stop runs.
+func fixedStopSessions(sessionID string, stopErr error) func(*rig.Rig) stopSeatManager {
+	return func(*rig.Rig) stopSeatManager {
+		return fixedStopSeat{sessionID: sessionID, stopErr: stopErr}
+	}
+}
+
+type fixedStopSeat struct {
+	sessionID string
+	stopErr   error
+}
+
+func (s fixedStopSeat) HasPolecat(string) bool    { return true }
+func (s fixedStopSeat) SessionName(string) string { return s.sessionID }
+func (s fixedStopSeat) Stop(string, bool) error   { return s.stopErr }
+
+// TestSandboxStopErrorKeepsThePark drives gt session stop itself: a stop that
+// ended the session but left its sandbox behind returns
+// polecat.ErrSandboxNotRemoved, and the marker this run wrote stays, because
+// the seat really is stopped and the patrol must leave it down (gt-nbo3y). A
+// stop error that stopped nothing still withdraws the marker, or a polecat
+// that was never stopped would read as deliberately stopped.
+//
+//testpolicy:allow parallel — runSessionStop reads the --park flag variable, the working directory and its session manager seam, all process-wide
+func TestSandboxStopErrorKeepsThePark(t *testing.T) {
+	tests := []struct {
+		name string
+		// park is --park: the stop writes its own marker before it runs.
+		park bool
+		// prePaused is an earlier gt agent pause, a marker this run did not write.
+		prePaused  bool
+		stopErr    error
+		wantParked bool
+	}{
+		{
+			name:       "sandbox left behind keeps the park",
+			park:       true,
+			stopErr:    fmt.Errorf("removing its sandbox: %w", polecat.ErrSandboxNotRemoved),
+			wantParked: true,
+		},
+		{
+			name:       "stop that stopped nothing withdraws the park",
+			park:       true,
+			stopErr:    errors.New("killing session: no such session"),
+			wantParked: false,
+		},
+		{
+			name:       "an earlier park survives a failed stop this run did not park",
+			prePaused:  true,
+			stopErr:    errors.New("killing session: no such session"),
+			wantParked: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rigName, polecatName := "gastown", "garnet"
+			townRoot := setupSessionSeatTown(t, polecatName)
+
+			// The seat as gt session stop sees it: a sandbox seat whose marker,
+			// if any, was written before the stop ran.
+			sessionID := recordSandboxSeat(t, townRoot, rigName, polecatName)
+			if tt.prePaused {
+				if err := agentpause.Pause(townRoot, rigName, "polecat", polecatName, "operator park", "test", ""); err != nil {
+					t.Fatalf("agentpause.Pause: %v", err)
+				}
+			}
+
+			//testpolicy:allow no-chdir — the town gt session stop resolves is the working directory it runs in
+			t.Chdir(townRoot)
+			park, sessions := sessionPark, newStopSessions
+			t.Cleanup(func() {
+				//testpolicy:allow no-global-swap — restores the --park flag and the session manager swapped below
+				sessionPark, newStopSessions = park, sessions
+			})
+			//testpolicy:allow no-global-swap — runSessionStop reads the --park flag variable; it is not an argument
+			sessionPark = tt.park
+			//testpolicy:allow no-global-swap — runSessionStop builds its session manager from this seam; it is not an argument
+			newStopSessions = fixedStopSessions(sessionID, tt.stopErr)
+
+			err := runSessionStop(nil, []string{rigName + "/" + polecatName})
+			if err == nil {
+				t.Fatal("gt session stop over a failed stop = nil, want the stop's error")
+			}
+			if leftBehind := errors.Is(err, polecat.ErrSandboxNotRemoved); leftBehind != errors.Is(tt.stopErr, polecat.ErrSandboxNotRemoved) {
+				t.Fatalf("gt session stop error = %v, want it to carry ErrSandboxNotRemoved = %v",
+					err, errors.Is(tt.stopErr, polecat.ErrSandboxNotRemoved))
+			}
+
+			if parked := polecatSessionParked(townRoot, rigName, polecatName); parked != tt.wantParked {
+				t.Fatalf("parked after the failed stop = %v, want %v", parked, tt.wantParked)
+			}
+		})
 	}
 }
 
