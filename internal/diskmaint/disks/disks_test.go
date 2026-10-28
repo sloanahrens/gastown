@@ -248,8 +248,8 @@ func TestKeepForRefusesUnreadableDisk(t *testing.T) {
 	if !errors.Is(err, cause) {
 		t.Fatalf("refusal %q does not wrap the read error %v", err, cause)
 	}
-	if got != 0 {
-		t.Fatalf("KeepFor with an unreadable disk = %d, want 0 with the refusal, not a plausible keep", got)
+	if got != 5 {
+		t.Fatalf("KeepFor with an unreadable disk = %d, want the base 5 with the refusal, not a judged count", got)
 	}
 }
 
@@ -262,6 +262,9 @@ func TestKeepForRefusalNamesEveryUnreadableDisk(t *testing.T) {
 	got, err := KeepFor(readings, 5)
 	if err == nil {
 		t.Fatalf("KeepFor with two unreadable disks = %d, nil; want a refusal", got)
+	}
+	if got != 5 {
+		t.Fatalf("KeepFor with two unreadable disks = %d, want the base 5 with the refusal", got)
 	}
 	for _, name := range []string{"mac", "colima"} {
 		if !strings.Contains(err.Error(), name) {
@@ -284,8 +287,8 @@ func TestKeepForRefusesWhateverTheOtherDisksSay(t *testing.T) {
 			if err == nil {
 				t.Fatalf("KeepFor(%+v) = %d, nil; want a refusal", readings, got)
 			}
-			if got != 0 {
-				t.Fatalf("KeepFor(%+v) = %d, want 0 with the refusal, not the tightened count", readings, got)
+			if got != 5 {
+				t.Fatalf("KeepFor(%+v) = %d, want the base 5 with the refusal, not the tightened count", readings, got)
 			}
 		})
 	}
