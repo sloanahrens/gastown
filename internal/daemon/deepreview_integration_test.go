@@ -62,12 +62,11 @@ type deepReviewRunWant struct {
 // bounded runs that carry their cursor from one run bead's notes to the next.
 //
 // The copy is testdata/deepreview/gastown-ledger.jsonl: the newest thirteen
-// records of gastown's ledger (see the README beside it). The test reads that
-// file and writes its bytes into the town's landings path, so the job reads a
-// copy; the live file is never opened. Every line is held to the shape the
-// landing worker's own encoder writes, and the records chain base to
-// landed_commit, so the copy is a copy and not a reconstruction beside the
-// ledger (gt-hd53j).
+// records of gastown's ledger. The test reads that file and writes its bytes
+// into the town's landings path, so the job reads a copy; the live file is
+// never opened. Before changing the copy or the check that holds it to the
+// ledger's shape, read the rules it must satisfy: they are stated once, in
+// testdata/deepreview/README.md beside it (gt-hd53j).
 //
 // Both rows take the acceptance reading: every risky landing in the copy is
 // reviewed exactly once, in plan order, the cursor moves to the newest one,
@@ -281,10 +280,9 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 
 // deepReviewCheckCopyShape holds the copy to the shape the landing worker
 // writes, so it is a copy of the real ledger and not a reconstruction beside
-// it (gt-hd53j): every line re-encodes byte for byte as the production record,
-// the records chain base to landed_commit as the ledger's landings do, each
-// names this rig, and landed_at rises in ledger order. A line edited by hand
-// stops being a copy here.
+// it (gt-hd53j). Before changing what it accepts or rejects, read the rules it
+// enforces: they are stated once, in testdata/deepreview/README.md beside the
+// copy.
 func deepReviewCheckCopyShape(t *testing.T, copyBytes []byte) {
 	t.Helper()
 	var prev land.LandingRecord
