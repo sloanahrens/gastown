@@ -385,13 +385,13 @@ func TestProgramTrimsAfterADeferral(t *testing.T) {
 	tr.Cfg.Registry = ""
 	reply := newRunReply("abc1234")
 	reply.label = "9999999"
-	reply.list = result{stdout: "NAME CREATED\ngt-corpus 2026-10-23\n"}
+	reply.pgrep = result{exit: 0}
 	tr.reply = programAnswer(t, tr, reply)
 	t.Cleanup(tr.Cleanup)
 	if err := tr.Program(); err != nil {
 		t.Fatalf("Program() failed: %v", err)
 	}
-	tr.wantLogged(t, "deferred: sandbox gt-corpus has no registry record yet")
+	tr.wantLogged(t, "deferred: sandbox sling in progress")
 	tr.wantCall(t, "docker", "builder", "prune", "--keep-storage", "8GB", "-f")
 }
 

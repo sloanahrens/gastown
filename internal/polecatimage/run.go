@@ -19,8 +19,8 @@ import (
 // program's wiring fills it, from the environment for the values the script
 // reads that way.
 type Config struct {
-	// GT, Docker, Git, Make and Openshell are the programs a run calls.
-	GT, Docker, Git, Make, Openshell string
+	// GT, Docker, Git, Make, Pgrep and Openshell are the programs a run calls.
+	GT, Docker, Git, Make, Pgrep, Openshell string
 	// RigRepo is the bare repository a build makes its worktree from, BuildRoot
 	// holds the worktrees it makes there, and BDSrc is the beads checkout the
 	// image's bd is built from.

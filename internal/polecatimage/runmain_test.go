@@ -15,6 +15,7 @@ type runReply struct {
 	label    string   // the label the image carries before a build
 	info     result   // docker info
 	build    result   // make polecat-image
+	pgrep    result   // pgrep for a running sling
 	list     result   // openshell sandbox list
 	fail     map[string]result
 
@@ -23,10 +24,12 @@ type runReply struct {
 	built    string // the commit the last build left in the label
 }
 
-// newRunReply is a run whose docker is up and no sandbox is listed.
+// newRunReply is a run whose docker is up, no sling is running and no sandbox is
+// listed.
 func newRunReply(installs ...string) *runReply {
 	return &runReply{
 		installs: installs,
+		pgrep:    result{exit: 1},
 		list:     result{stdout: "No sandboxes found.\n"},
 	}
 }
@@ -80,6 +83,8 @@ func (rr *runReply) answer(t *testing.T, label string) func(command) result {
 		case c.name == "make":
 			rr.built = rr.resolved
 			return rr.build
+		case c.name == "pgrep":
+			return rr.pgrep
 		case c.name == "openshell":
 			return rr.list
 		}
@@ -163,27 +168,26 @@ func TestMainDefersWhenDockerIsUnavailable(t *testing.T) {
 	}
 }
 
-func TestMainDefersWhenASandboxAppearsBeforeTheLock(t *testing.T) {
+func TestMainDefersWhenASlingIsRunning(t *testing.T) {
 	t.Parallel()
 	tr := newTestRun(t)
 	reply := newRunReply("abc1234")
 	reply.label = "9999999"
-	reply.list = result{stdout: "NAME CREATED\ngt-corpus 2026-10-23\n"}
+	reply.pgrep = result{exit: 0}
 	tr.reply = reply.answer(t, labelFormat(tr))
 	if err := tr.Main(); err != nil {
 		t.Fatalf("Main() failed: %v", err)
 	}
-	tr.wantLogged(t, "deferred: sandbox gt-corpus has no registry record yet")
+	tr.wantLogged(t, "deferred: sandbox sling in progress")
 	if got := len(tr.callsTo("make")); got != 0 {
 		t.Errorf("make was called %d times, want none", got)
 	}
 }
 
-// TestMainDefersWhenASandboxAppearsBetweenRounds drives the check each build
-// round makes: a sandbox created while the run holds the lock stops the next
-// build, and under POLECAT_IMAGE_FAIL_CLOSED=1 it is the run's failure
-// (gt-i893i).
-func TestMainDefersWhenASandboxAppearsBetweenRounds(t *testing.T) {
+// TestMainDefersWhenASlingStartsBetweenRounds drives the check each build round
+// makes: a sling that started after the run took the lock stops the next build,
+// and under POLECAT_IMAGE_FAIL_CLOSED=1 it is the run's failure (gt-i893i).
+func TestMainDefersWhenASlingStartsBetweenRounds(t *testing.T) {
 	t.Parallel()
 	for _, failClosed := range []bool{false, true} {
 		name := "best effort"
@@ -195,17 +199,17 @@ func TestMainDefersWhenASandboxAppearsBetweenRounds(t *testing.T) {
 			tr := newTestRun(t)
 			tr.Cfg.FailClosed = failClosed
 			// A reinstall between the first build and the round after it, which
-			// is where the run lists the sandboxes again.
+			// is where the run asks again whether a sling is running.
 			reply := newRunReply("aaaaaaa", "aaaaaaa", "bbbbbbb")
 			reply.label = "9999999"
 			base := reply.answer(t, labelFormat(tr))
-			// No sandbox is listed until the run's first build is done, so the
+			// No sling runs until the run's first build is done, so the
 			// pre-lock check and the first round see none, and the round after
-			// the build sees one appear.
+			// the build sees one start.
 			built := false
 			tr.reply = func(c command) result {
-				if c.name == "openshell" && built {
-					return result{stdout: "NAME CREATED\ngt-corpus 2026-10-23\n"}
+				if c.name == "pgrep" && built {
+					return result{exit: 0}
 				}
 				if c.name == "make" {
 					built = true
@@ -214,9 +218,9 @@ func TestMainDefersWhenASandboxAppearsBetweenRounds(t *testing.T) {
 			}
 			t.Cleanup(tr.Cleanup)
 			err := tr.Main()
-			tr.wantLogged(t, "deferred: sandbox gt-corpus has no registry record yet")
+			tr.wantLogged(t, "deferred: sandbox sling in progress")
 			if got := len(tr.callsTo("make")); got != 1 {
-				t.Errorf("make was called %d times, want one build: the sandbox stopped the round after it", got)
+				t.Errorf("make was called %d times, want one build: the sling stopped the round after it", got)
 			}
 			if failClosed {
 				// The wording is Defer's, pinned by TestFailClosedAndDefer;
