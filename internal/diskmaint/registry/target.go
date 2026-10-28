@@ -57,6 +57,10 @@ func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
 	}
 	var tags int
 	var bytes int64
+	// One manifest answers to every tag that points at it, so the bytes are
+	// summed once per repo and digest: counting them per tag would overstate
+	// what the registry holds.
+	seen := map[string]bool{}
 	for _, repo := range reposToRead(repos) {
 		names, err := t.client.Tags(ctx, repo)
 		if err != nil {
@@ -68,6 +72,11 @@ func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
 				return diskmaint.Measurement{}, fmt.Errorf("measure: manifest %s:%s: %w", repo, tag, err)
 			}
 			tags++
+			key := repo + "@" + m.Digest
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
 			bytes += m.Bytes
 		}
 	}
@@ -110,44 +119,64 @@ func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, 
 		return refusedPlan(in.Errs), nil
 	}
 
+	// The installed commit and the in-use set are read before the size check:
+	// they say which deletes are unsafe, so a run that skipped them could
+	// report a clean plan without having checked.
+	in.Errs = append(in.Errs, t.readInstalled(&in)...)
+	in.Errs = append(in.Errs, t.readInUse(ctx, &in)...)
+
 	// Fetching every manifest is more than the plugin's 10-minute cooldown can
 	// pay, so a registry with nothing to delete is read by its tag listings
-	// alone.
+	// alone. The reads above still ran, and a failure among them still refuses.
 	if !needsManifests(in.Repos, keep) {
+		if len(in.Errs) > 0 {
+			return refusedPlan(in.Errs), nil
+		}
 		if why := anchorRefusal(in.Repos[RepoMain]); why != "" {
 			return diskmaint.Plan{Target: planTarget, Refused: why}, nil
 		}
 		return diskmaint.Plan{Target: planTarget}, nil
 	}
+
 	for _, repo := range read {
 		tags, errs := t.manifestTags(ctx, repo, in.Repos[repo])
 		in.Repos[repo] = tags
 		in.Errs = append(in.Errs, errs...)
 	}
-
-	if t.cfg.Installed == nil {
-		in.Errs = append(in.Errs, "installed: no reader configured")
-	} else if commit, err := t.cfg.Installed(); err != nil {
-		in.Errs = append(in.Errs, "installed: "+err.Error())
-	} else {
-		in.InstalledCommit = commit
-	}
-
-	if t.cfg.Run == nil {
-		in.Errs = append(in.Errs, "in use: no runner configured")
-	} else if inUse, err := ReadInUse(ctx, t.cfg.Run, t.cfg.Kubeconfig, t.cfg.RecordsDir); err != nil {
-		in.Errs = append(in.Errs, err.Error())
-	} else {
-		for digest := range inUse.Digests {
-			in.InUseDigests[digest] = true
-		}
-		for repo := range inUse.Repos {
-			in.InUseRepos[repo] = true
-		}
-		in.Errs = append(in.Errs, t.resolveTags(ctx, inUse.Tags, in.InUseDigests)...)
-	}
-
 	return BuildPlan(in), nil
+}
+
+// readInstalled records the installed commit in in, returning why it could not
+// be read when the reader is missing or fails.
+func (t *Target) readInstalled(in *PlanInput) []string {
+	if t.cfg.Installed == nil {
+		return []string{"installed: no reader configured"}
+	}
+	commit, err := t.cfg.Installed()
+	if err != nil {
+		return []string{"installed: " + err.Error()}
+	}
+	in.InstalledCommit = commit
+	return nil
+}
+
+// readInUse records the digests running pods use and the repos their records
+// name, returning every read that failed.
+func (t *Target) readInUse(ctx context.Context, in *PlanInput) []string {
+	if t.cfg.Run == nil {
+		return []string{"in use: no runner configured"}
+	}
+	inUse, err := ReadInUse(ctx, t.cfg.Run, t.cfg.Kubeconfig, t.cfg.RecordsDir)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	for digest := range inUse.Digests {
+		in.InUseDigests[digest] = true
+	}
+	for repo := range inUse.Repos {
+		in.InUseRepos[repo] = true
+	}
+	return t.resolveTags(ctx, inUse.Tags, in.InUseDigests)
 }
 
 // refusedPlan is the plan a run returns when a read failed: no actions, and the
