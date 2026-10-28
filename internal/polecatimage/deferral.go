@@ -8,8 +8,7 @@ import (
 
 // DeferReason is why a rebuild must wait, "" when it may run: the gateway lists
 // a sandbox whose registry record does not exist yet, so a retag could land
-// between a Prepare's image check and its create. A running gt sling no longer
-// defers, because Prepare names the image by digest (gt-16oj9).
+// while that sandbox is still being prepared.
 //
 // A probe that cannot answer is a deferral too, so "no sandboxes" and "the
 // probe failed" never read alike.

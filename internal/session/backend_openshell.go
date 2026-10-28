@@ -134,9 +134,9 @@ type openshellBackend struct {
 	// imageGT reads the gt commit an image was built from, and installedGT is
 	// the commit of the gt running Prepare. Tests set both.
 	imageGT func(ctx context.Context, image string) (string, error)
-	// imageDigest resolves the profile's image reference to the digest the
-	// label check and the create both name (gt-16oj9). Tests set it.
-	imageDigest func(ctx context.Context, image string) (string, error)
+	// imageRef resolves the profile's image to the reference the label check
+	// and the create both name (gt-16oj9). Tests set it.
+	imageRef func(ctx context.Context, image string) (string, error)
 	// docker runs the docker CLI for the profile's cache volume. Tests set it.
 	docker dockerRun
 	// git compares the image's gt commit with the installed one. Tests set it.
@@ -170,7 +170,7 @@ func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
 		render:      sandbox.RenderSkeleton,
 		push:        pushToForgejo,
 		imageGT:     dockerImageGT,
-		imageDigest: dockerImageDigest,
+		imageRef:    hostImageRef(driverPullsImage(p.Driver)),
 		docker:      runDocker,
 		git:         runGit,
 		gitEmail:    hostGitEmail,
@@ -216,9 +216,13 @@ func imageGTFrom(ctx context.Context, run dockerRun, image string) (string, erro
 	return strings.TrimSpace(string(out)), nil
 }
 
-// imageIDFormat prints the image's id: the digest docker gives the content a
-// reference resolves to now.
+// imageIDFormat prints the image's id: the content digest docker holds for a
+// reference.
 const imageIDFormat = `{{.Id}}`
+
+// imageRepoDigestsFormat prints the repository digests docker holds for an
+// image: the name@sha256:... references its registry published.
+const imageRepoDigestsFormat = `{{json .RepoDigests}}`
 
 // imageIDPattern is a digest an image id can be: sha256 and 64 lowercase hex
 // digits.
@@ -227,32 +231,107 @@ var imageIDPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // digestRefPattern matches a reference that already names its digest.
 var digestRefPattern = regexp.MustCompile(`^[^@]+@sha256:[0-9a-f]{64}$`)
 
-// dockerImageDigest resolves image through the host's docker.
-func dockerImageDigest(ctx context.Context, image string) (string, error) {
-	return imageDigestFrom(ctx, runDocker, image)
+// driverPullsImage reports whether the gateway runs the image by pulling its
+// reference from a registry rather than from the host's Docker daemon. An unset
+// driver is the docker one (SandboxProfile.WithDefaults).
+func driverPullsImage(driver string) bool { return driver == DriverKubernetes }
+
+// hostImageRef is the imageRef a real backend resolves through: imageRefFor
+// through the host's docker.
+func hostImageRef(pull bool) func(ctx context.Context, image string) (string, error) {
+	return func(ctx context.Context, image string) (string, error) {
+		return imageRefFor(ctx, runDocker, image, pull)
+	}
 }
 
-// imageDigestFrom resolves image to the digest of the image that reference names
-// now, through run. Prepare names that digest to both the label check and the
-// create, so a rebuild that retags the profile's image between them cannot put
-// an image nothing checked under the sandbox (gt-16oj9).
+// imageRefFor resolves image to the reference Prepare names to both the label
+// check and the create, so a rebuild that retags the profile's image between
+// them cannot put an image nothing checked under the sandbox (gt-16oj9).
 //
-// A reference already pinned by digest is returned as it is, because a gateway
-// that pulls from a registry resolves that form and not a local id. A reply
-// that is not a digest is an error, never a reference the create could use.
-func imageDigestFrom(ctx context.Context, run dockerRun, image string) (string, error) {
+// It asks docker about image first on every path, so a reference the host does
+// not have fails here rather than after the push, and a reference that already
+// names its digest is still checked that way before it is returned.
+//
+// A gateway that runs the image from the host's Docker daemon (the docker
+// driver) resolves a local image id, so the seat names that id: the content,
+// not the tag a rebuild moves. A gateway that pulls the image from a registry
+// (the kubernetes driver) cannot pull a local id, so the seat names the image's
+// repository digest when docker knows one — an image the host pulled — and
+// otherwise the reference the profile names, which the pod pulls as it stands.
+// A retag under that reference is caught after the create, when the sandbox's
+// own gt is compared with the installed one (checkSandboxGT).
+func imageRefFor(ctx context.Context, run dockerRun, image string, pull bool) (string, error) {
+	id, err := imageIDFrom(ctx, run, image)
+	if err != nil {
+		return "", err
+	}
 	if digestRefPattern.MatchString(image) {
 		return image, nil
 	}
+	if !pull {
+		return id, nil
+	}
+	digests, err := imageRepoDigestsFrom(ctx, run, image)
+	if err != nil {
+		return "", err
+	}
+	if ref := repoDigestFor(image, digests); ref != "" {
+		return ref, nil
+	}
+	return image, nil
+}
+
+// imageIDFrom reads the content digest docker holds for image, refusing a reply
+// that is not one.
+func imageIDFrom(ctx context.Context, run dockerRun, image string) (string, error) {
 	out, stderr, err := run(ctx, "image", "inspect", "--format", imageIDFormat, image)
 	if err != nil {
 		return "", fmt.Errorf("docker image inspect %s: %w: %s", image, err, strings.TrimSpace(string(stderr)))
 	}
-	digest := strings.TrimSpace(string(out))
-	if !imageIDPattern.MatchString(digest) {
-		return "", fmt.Errorf("docker image inspect %s printed %q, not an image digest", image, digest)
+	id := strings.TrimSpace(string(out))
+	if !imageIDPattern.MatchString(id) {
+		return "", fmt.Errorf("docker image inspect %s printed %q, not an image digest", image, id)
 	}
-	return digest, nil
+	return id, nil
+}
+
+// imageRepoDigestsFrom reads the repository digests docker holds for image. An
+// image with none reads as none: docker records one only for an image it pulled
+// or pushed, so a locally built image reads as none.
+func imageRepoDigestsFrom(ctx context.Context, run dockerRun, image string) ([]string, error) {
+	out, stderr, err := run(ctx, "image", "inspect", "--format", imageRepoDigestsFormat, image)
+	if err != nil {
+		return nil, fmt.Errorf("docker image inspect %s: %w: %s", image, err, strings.TrimSpace(string(stderr)))
+	}
+	var digests []string
+	if err := json.Unmarshal(bytes.TrimSpace(out), &digests); err != nil {
+		return nil, fmt.Errorf("docker image inspect %s printed %q, not a list of repository digests", image, strings.TrimSpace(string(out)))
+	}
+	return digests, nil
+}
+
+// repoDigestFor returns the repository digest digests holds for image's own
+// repository, "" when it holds none.
+func repoDigestFor(image string, digests []string) string {
+	repo := imageRepo(image)
+	for _, d := range digests {
+		if r, _, ok := strings.Cut(d, "@"); ok && r == repo {
+			return d
+		}
+	}
+	return ""
+}
+
+// imageRepo is image without its tag or digest: the name a repository digest
+// carries. A colon before the last slash is the registry's port, not a tag.
+func imageRepo(image string) string {
+	if r, _, ok := strings.Cut(image, "@"); ok {
+		return r
+	}
+	if i := strings.LastIndex(image, ":"); i > strings.LastIndex(image, "/") {
+		return image[:i]
+	}
+	return image
 }
 
 // gitRun runs the git CLI in dir and returns its stdout. Tests supply their
@@ -564,14 +643,14 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	}
 	// Resolved once, so the label check and the create name the same image even
 	// if a rebuild retags the profile's reference between them (gt-16oj9).
-	image, err := b.imageDigest(ctx, b.profile.Image)
+	image, err := b.imageRef(ctx, b.profile.Image)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}
 	create.Image = image
 	// The image's gt must be the installed gt's commit. Checked before the push
 	// and the create, so a drifted image leaves nothing behind (gt-pmxo9). This
-	// reads the host docker's image for that digest; the sandbox's own gt is
+	// reads the host docker's image for that reference; the sandbox's own gt is
 	// checked again once it is Ready, because the gateway may run a different
 	// image for that reference (gt-zdilt).
 	imageCommit, err := b.imageGT(ctx, image)

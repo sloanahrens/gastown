@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -112,9 +113,9 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 			return nil
 		},
 		imageGT: func(context.Context, string) (string, error) { return openshellTestGTCommit, nil },
-		// The profile's image resolves to one digest for the label check and the
-		// create; the pin's own tests set their own fake.
-		imageDigest: func(context.Context, string) (string, error) { return openshellTestImageDigest, nil },
+		// The profile's image resolves to one reference for the label check and
+		// the create; the pin's own tests set their own fake.
+		imageRef: func(context.Context, string) (string, error) { return openshellTestImageDigest, nil },
 		// No docker in these tests. A profile with a cache volume sets its own runner.
 		docker: func(context.Context, ...string) ([]byte, []byte, error) {
 			return nil, []byte("docker is not configured for this test"), errors.New("no docker")
@@ -247,11 +248,13 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 }
 
 // fakeImageRegistry is the host docker's image store for the pin's tests: the
-// digest each reference resolves to, the gt label each image carries, and the
-// references the label was read for.
+// digest each reference resolves to, the repository digests docker holds for
+// it, the gt label each image carries, and the references the label was read
+// for.
 type fakeImageRegistry struct {
-	tags   map[string]string // reference -> digest
-	labels map[string]string // digest -> gt commit label
+	tags    map[string]string   // reference -> digest
+	digests map[string][]string // reference -> repository digests docker holds
+	labels  map[string]string   // digest -> gt commit label
 	// retag runs once, after the first label read: the rebuild that moves the
 	// tag between a Prepare's check and its create.
 	retag     func()
@@ -266,13 +269,23 @@ func (r *fakeImageRegistry) run(_ context.Context, args ...string) ([]byte, []by
 	digest, ok := r.tags[ref]
 	switch {
 	case ok:
+	case digestRefPattern.MatchString(ref):
+		_, d, _ := strings.Cut(ref, "@")
+		digest = d
 	case imageIDPattern.MatchString(ref):
 		digest = ref
 	default:
 		return nil, []byte("no such image: " + ref), errors.New("exit status 1")
 	}
-	if format == imageIDFormat {
+	switch format {
+	case imageIDFormat:
 		return []byte(digest + "\n"), nil, nil
+	case imageRepoDigestsFormat:
+		out, err := json.Marshal(r.digests[ref])
+		if err != nil {
+			return nil, nil, err
+		}
+		return out, nil, nil
 	}
 	r.labelRefs = append(r.labelRefs, ref)
 	label := r.labels[digest]
@@ -303,7 +316,9 @@ func TestOpenShellPreparePinsTheImageDigestItChecked(t *testing.T) {
 	}
 	reg.retag = func() { reg.tags[openshellTestProfile.Image] = rebuilt }
 	b.docker = reg.run
-	b.imageDigest = func(ctx context.Context, image string) (string, error) { return imageDigestFrom(ctx, reg.run, image) }
+	b.imageRef = func(ctx context.Context, image string) (string, error) {
+		return imageRefFor(ctx, reg.run, image, false)
+	}
 	b.imageGT = func(ctx context.Context, image string) (string, error) { return imageGTFrom(ctx, reg.run, image) }
 
 	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
@@ -315,6 +330,66 @@ func TestOpenShellPreparePinsTheImageDigestItChecked(t *testing.T) {
 	if want := []string{checked}; !reflect.DeepEqual(reg.labelRefs, want) {
 		t.Fatalf("the gt label was read for %q, want %q: the check must read the digest", reg.labelRefs, want)
 	}
+	if from := createFrom(t, fake); from != checked {
+		t.Fatalf("the create used --from %q, want the checked digest %q", from, checked)
+	}
+}
+
+// TestOpenShellPrepareNamesAPulledImageByAResolvableReference is the kubernetes
+// half of the pin: a pod pulls its image from a registry, so a local image id
+// cannot name it. The create names the repository digest docker holds for the
+// image, which a pod can pull and a rebuild cannot move; an image the host
+// never pulled has none, so the create names the profile's reference, which the
+// pod pulls as it stands (gt-16oj9).
+func TestOpenShellPrepareNamesAPulledImageByAResolvableReference(t *testing.T) {
+	t.Parallel()
+	const image = "localhost:5001/gastown-polecat:dev"
+	local := "sha256:" + strings.Repeat("1", 64)
+	published := "localhost:5001/gastown-polecat@" + openshellTestImageDigest
+	tests := []struct {
+		name    string
+		digests []string
+		want    string
+	}{
+		{name: "docker knows the repository digest", digests: []string{published}, want: published},
+		{name: "docker holds none, so the profile's reference", want: image},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town, work := openshellTown(t)
+			fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+			profile := openshellTestProfile
+			profile.Image = image
+			profile.Driver = config.SandboxDriverKubernetes
+			b, _ := openshellTestBackend(town, profile, fake)
+			reg := &fakeImageRegistry{
+				tags:    map[string]string{image: local},
+				digests: map[string][]string{image: tt.digests},
+				labels: map[string]string{
+					local:                    openshellTestGTCommit,
+					openshellTestImageDigest: openshellTestGTCommit,
+				},
+			}
+			b.docker = reg.run
+			b.imageRef = func(ctx context.Context, image string) (string, error) {
+				return imageRefFor(ctx, reg.run, image, true)
+			}
+			b.imageGT = func(ctx context.Context, image string) (string, error) { return imageGTFrom(ctx, reg.run, image) }
+
+			if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			if got := createFrom(t, fake); got != tt.want {
+				t.Errorf("the create used --from %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// createFrom is the image reference the recorded sandbox create named.
+func createFrom(t *testing.T, fake *sandbox.Fake) string {
+	t.Helper()
 	var from string
 	for _, call := range fake.Calls() {
 		if !slices.Contains(call, "create") {
@@ -324,9 +399,7 @@ func TestOpenShellPreparePinsTheImageDigestItChecked(t *testing.T) {
 			from = call[i+1]
 		}
 	}
-	if from != checked {
-		t.Fatalf("the create used --from %q, want the checked digest %q", from, checked)
-	}
+	return from
 }
 
 // TestOpenShellPrepareRefusesAnUnresolvableImage pins the failure branch of the
@@ -337,7 +410,7 @@ func TestOpenShellPrepareRefusesAnUnresolvableImage(t *testing.T) {
 	town, work := openshellTown(t)
 	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
 	b, pushes := openshellTestBackend(town, openshellTestProfile, fake)
-	b.imageDigest = func(context.Context, string) (string, error) {
+	b.imageRef = func(context.Context, string) (string, error) {
 		return "", errors.New("no such image: gastown-polecat:dev")
 	}
 	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err == nil ||
@@ -512,76 +585,132 @@ const (
 	openshellTestImageDigest = "sha256:3f7a1c5e9b2d4a6f8c0e1b3d5a7f9c2e4b6d8a0f1c3e5b7d9a2f4c6e8b0d1a3f"
 )
 
-// TestImageDigestFrom covers the resolution Prepare pins with: a tag becomes
-// the digest the local docker holds for it now, and a reply that is not a
-// digest is refused rather than passed to the create.
-func TestImageDigestFrom(t *testing.T) {
+// TestImageRefFor covers the reference Prepare pins: a docker driver names the
+// local content id, a registry-pulling driver names a reference a pod can pull,
+// a pinned reference is still checked against the local daemon, and a reply
+// docker cannot read is refused rather than passed to the create.
+func TestImageRefFor(t *testing.T) {
 	t.Parallel()
 	pinned := "localhost:5001/gastown-polecat@" + openshellTestImageDigest
 	tests := []struct {
-		name       string
-		image      string
-		stdout     string
-		stderr     string
-		fail       bool
-		want       string
-		wantErr    string
-		wantNoCall bool
+		name        string
+		image       string
+		pull        bool
+		stdout      string
+		repoDigests string // the {{json .RepoDigests}} reply; "" reads as []
+		stderr      string
+		fail        bool
+		want        string
+		wantErr     string
+		wantQueries []string // the inspect formats docker answered, in order
 	}{
 		{
-			name:   "a tag resolves to the image's digest",
-			image:  "gastown-polecat:dev",
-			stdout: openshellTestImageDigest + "\n",
-			want:   openshellTestImageDigest,
+			name:        "a docker driver names the local content id",
+			image:       "gastown-polecat:dev",
+			stdout:      openshellTestImageDigest + "\n",
+			want:        openshellTestImageDigest,
+			wantQueries: []string{imageIDFormat},
 		},
 		{
-			name:       "a digest reference is already pinned",
-			image:      pinned,
-			wantNoCall: true,
-			want:       pinned,
+			name:        "a pinned reference is returned, checked locally",
+			image:       pinned,
+			stdout:      openshellTestImageDigest + "\n",
+			want:        pinned,
+			wantQueries: []string{imageIDFormat},
 		},
 		{
-			name:    "a reply that is not a digest is refused",
-			image:   "gastown-polecat:dev",
-			stdout:  "Error: No such image\n",
-			wantErr: "not an image digest",
+			name:        "a pulled image is named by its repository digest",
+			image:       "localhost:5001/gastown-polecat:dev",
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			repoDigests: `["` + pinned + `"]`,
+			want:        pinned,
+			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
 		},
 		{
-			name:    "a failed inspect names the image and docker's reason",
-			image:   "gastown-polecat:dev",
-			stderr:  "Cannot connect to the Docker daemon\n",
-			fail:    true,
-			wantErr: "docker image inspect gastown-polecat:dev|Cannot connect to the Docker daemon",
+			name:        "a repository digest of another repository is not the image",
+			image:       "localhost:5001/gastown-polecat:dev",
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			repoDigests: `["elsewhere/gastown-polecat@` + openshellTestImageDigest + `"]`,
+			want:        "localhost:5001/gastown-polecat:dev",
+			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
+		},
+		{
+			name:        "an image docker never pulled keeps the profile's reference",
+			image:       "localhost:5001/gastown-polecat:dev",
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			want:        "localhost:5001/gastown-polecat:dev",
+			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
+		},
+		{
+			name:        "a pinned reference is not resolved again",
+			image:       pinned,
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			want:        pinned,
+			wantQueries: []string{imageIDFormat},
+		},
+		{
+			name:        "a reply that is not a digest is refused",
+			image:       "gastown-polecat:dev",
+			stdout:      "Error: No such image\n",
+			wantErr:     "not an image digest",
+			wantQueries: []string{imageIDFormat},
+		},
+		{
+			name:        "a repository digest reply that is not a list is refused",
+			image:       "localhost:5001/gastown-polecat:dev",
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			repoDigests: "not json",
+			wantErr:     "not a list of repository digests",
+			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
+		},
+		{
+			name:        "a failed inspect names the image and docker's reason",
+			image:       "gastown-polecat:dev",
+			stderr:      "Cannot connect to the Docker daemon\n",
+			fail:        true,
+			wantErr:     "docker image inspect gastown-polecat:dev|Cannot connect to the Docker daemon",
+			wantQueries: []string{imageIDFormat},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			var called bool
-			run := func(context.Context, ...string) ([]byte, []byte, error) {
-				called = true
+			var queries []string
+			run := func(_ context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) != 5 || args[2] != "--format" {
+					t.Fatalf("docker call = %v, want image inspect --format", args)
+				}
+				queries = append(queries, args[3])
 				if tt.fail {
 					return nil, []byte(tt.stderr), errors.New("exit status 1")
 				}
+				if args[3] == imageRepoDigestsFormat {
+					if tt.repoDigests == "" {
+						return []byte("[]"), nil, nil
+					}
+					return []byte(tt.repoDigests), nil, nil
+				}
 				return []byte(tt.stdout), nil, nil
 			}
-			got, err := imageDigestFrom(context.Background(), run, tt.image)
-			if called != !tt.wantNoCall {
-				t.Fatalf("docker called = %v, want %v", called, !tt.wantNoCall)
-			}
+			got, err := imageRefFor(context.Background(), run, tt.image, tt.pull)
 			if tt.wantErr != "" {
 				for _, want := range strings.Split(tt.wantErr, "|") {
 					if err == nil || !strings.Contains(err.Error(), want) {
-						t.Fatalf("imageDigestFrom = %v, want it to name %q", err, want)
+						t.Fatalf("imageRefFor = %v, want it to name %q", err, want)
 					}
 				}
-				return
+			} else if err != nil {
+				t.Fatalf("imageRefFor: %v", err)
+			} else if got != tt.want {
+				t.Errorf("imageRefFor = %q, want %q", got, tt.want)
 			}
-			if err != nil {
-				t.Fatalf("imageDigestFrom: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("imageDigestFrom = %q, want %q", got, tt.want)
+			if !reflect.DeepEqual(queries, tt.wantQueries) {
+				t.Errorf("docker queries = %v, want %v", queries, tt.wantQueries)
 			}
 		})
 	}
