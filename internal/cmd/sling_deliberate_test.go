@@ -181,14 +181,12 @@ func TestSlingAutomatedSpendsTheBudgetAndRefusesAtIt(t *testing.T) {
 // bead at its automated budget, before a rig is opened or a polecat allocated,
 // so the limit holds however the dispatch reached the spawn (gt-jogkx).
 func TestPrepareSlingRefusesAtTheRespawnBudget(t *testing.T) {
-	// Not parallel: it installs the gate's bead store.
+	t.Parallel()
 	townRoot, _ := rigTown(t)
 	spendRespawnBudget(t, townRoot, deliberateBead)
-	prev := slingRespawnStores
-	slingRespawnStores = func() slingStores { return fakeSlingStores(beadsfake.New()) }
-	t.Cleanup(func() { slingRespawnStores = prev })
 
-	_, err := prepareSlingPolecat(townRoot, "gastown", SlingSpawnOptions{HookBead: deliberateBead})
+	_, err := prepareSlingPolecat(townRoot, "gastown", SlingSpawnOptions{HookBead: deliberateBead},
+		fakeSlingStores(beadsfake.New()))
 	if err == nil {
 		t.Fatal("the spawn path took a bead at its respawn budget")
 	}

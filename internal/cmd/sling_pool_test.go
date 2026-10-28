@@ -1129,7 +1129,7 @@ func TestSlingSeatSpawnReleasesTheClaimOfASpawnThatFailed(t *testing.T) {
 				return router.route(requested, true)
 			},
 			releaseSeat: router.seats.store.release,
-			prepare: func(_, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+			prepare: func(_, rigName string, opts SlingSpawnOptions, _ slingStores) (*SpawnedPolecatInfo, error) {
 				if prepareErr != nil {
 					return nil, prepareErr
 				}
@@ -1258,7 +1258,7 @@ func TestSpawnHandsItsSeatClaimToTheSpawnRecord(t *testing.T) {
 		backpressure: func(string, string, SlingSpawnOptions) error { return nil },
 		resolvePool:  func(_, requested string) (string, string, error) { return router.route(requested, true) },
 		releaseSeat:  router.seats.store.release,
-		prepare: func(_, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		prepare: func(_, rigName string, opts SlingSpawnOptions, _ slingStores) (*SpawnedPolecatInfo, error) {
 			return &SpawnedPolecatInfo{RigName: rigName, agent: opts.Agent}, nil
 		},
 		seatClaims: router.seats.store,
@@ -2493,7 +2493,7 @@ func TestSlingSeatSpawnHonorsTheBeadAgentLabel(t *testing.T) {
 			},
 			resolvePool: func(_, requested string) (string, string, error) { return router.route(requested, true) },
 			releaseSeat: router.seats.store.release,
-			prepare: func(_, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+			prepare: func(_, rigName string, opts SlingSpawnOptions, _ slingStores) (*SpawnedPolecatInfo, error) {
 				return &SpawnedPolecatInfo{RigName: rigName, agent: opts.Agent}, nil
 			},
 			seatClaims: router.seats.store,
@@ -2871,7 +2871,7 @@ func TestSlingSeatSpawnRefusesABeadWhoseLabelCannotBeHonored(t *testing.T) {
 					return "claude-sonnet", "", nil
 				},
 				releaseSeat: func() {},
-				prepare: func(string, string, SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+				prepare: func(string, string, SlingSpawnOptions, slingStores) (*SpawnedPolecatInfo, error) {
 					prepared = true
 					return &SpawnedPolecatInfo{}, nil
 				},

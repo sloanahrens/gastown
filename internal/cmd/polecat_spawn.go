@@ -817,7 +817,9 @@ type slingSeatSpawn struct {
 	// seat is closed now. Nil reads no label.
 	pinnedAgent func(townRoot, beadID string) (string, error)
 	releaseSeat func()
-	prepare     func(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error)
+	// prepare is handed the bead stores the respawn gate reads a bead's
+	// submission from, so a test can drive the gate without a database.
+	prepare func(townRoot, rigName string, opts SlingSpawnOptions, stores slingStores) (*SpawnedPolecatInfo, error)
 	// seatClaims is the store this spawn's pool decision claims in and
 	// releaseSeat drops from. It is handed to the spawn record on success, so
 	// StartSession and the rollback drop the same claim this spawn made.
@@ -903,7 +905,7 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 	// poolSeatClaimTTL (30m) because the process holding it is still alive
 	// (gt-t8q5). The spawn succeeds only by returning the polecat whose
 	// session the caller will start, so success is the hand-over.
-	info, err := s.prepare(townRoot, rigName, opts)
+	info, err := s.prepare(townRoot, rigName, opts, slingStores{})
 	if err != nil {
 		s.releaseSeat()
 		return nil, err
@@ -939,7 +941,7 @@ func openSlingRig(townRoot, rigName string) (*rig.Rig, *tmux.Tmux, *polecat.Mana
 	return r, t, supervisedPolecatManager(r, polecatGit, t, operatorActor("gt sling")), nil
 }
 
-func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, stores slingStores) (*SpawnedPolecatInfo, error) {
 	// Per-bead respawn circuit breaker (clown show #22): track how many times
 	// this bead has been slung, and block after N automated attempts to stop
 	// witness→deacon→sling feedback loops. The answer is about the bead rather
@@ -947,7 +949,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	// nothing to undo; the spawn is charged by recordSlingRespawn once a seat
 	// exists, because counting a sling that never reached a polecat spent the
 	// bead's budget on a process someone killed (gt-4lbz).
-	if err := admitSlingRespawn(slingRespawnStores(), townRoot, rigName, opts); err != nil {
+	if err := admitSlingRespawn(stores, townRoot, rigName, opts); err != nil {
 		return nil, err
 	}
 
