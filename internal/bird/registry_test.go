@@ -3,7 +3,6 @@ package bird
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -681,47 +680,88 @@ func TestStateRoundTripsAnAwkwardCwd(t *testing.T) {
 	}
 }
 
-func TestConcurrentWritersKeepEveryEntry(t *testing.T) {
+// TestAWriterWaitingOnTheLockKeepsEveryEntry is the lock hand-off without
+// goroutines or real waiting: writer B finds the lock held, its Sleep seam
+// releases it (the holder finishing), and B must then write on top of what is
+// there, not over it (gt-ed525).
+func TestAWriterWaitingOnTheLockKeepsEveryEntry(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren", "robin")
-	// The lock deadline is measured on the registry's clock, and testRegistry's
-	// clock moves on every wait its Sleep seam scripts. Writers sharing that one
-	// clock advance each other's deadline, so a writer that is only waiting
-	// reads as having waited out the whole timeout. This test hands the flock
-	// between real goroutines, so it takes the real clock and the real wait.
-	reg.Now = nil
-	reg.Sleep = nil
-	names := []string{"wren", "robin"}
-	errs := make([]error, len(names))
-	var wg sync.WaitGroup
-	for i, name := range names {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, errs[i] = reg.Bind(name, fmt.Sprintf("gt-%d", i))
-		}()
+	if _, err := reg.Bind("robin", "gt-1"); err != nil {
+		t.Fatalf("first writer: %v", err)
 	}
-	wg.Wait()
-	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("writer %d: %v", i, err)
+	held := flock.New(reg.Path + ".lock")
+	if err := held.Lock(); err != nil {
+		t.Fatalf("taking the lock for the test: %v", err)
+	}
+	waits := 0
+	clockSleep := reg.Sleep
+	reg.Sleep = func(d time.Duration) {
+		waits++
+		if err := held.Unlock(); err != nil {
+			t.Errorf("releasing the lock: %v", err)
 		}
+		clockSleep(d)
+	}
+	if _, err := reg.Bind("wren", "gt-2"); err != nil {
+		t.Fatalf("second writer: %v", err)
+	}
+	if waits == 0 {
+		t.Fatalf("the second writer never waited: the test did not hold the lock against it")
 	}
 	st, err := reg.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(st.Bindings) != len(names) {
-		t.Fatalf("bindings = %+v, want one from each writer", st.Bindings)
-	}
 	bound := make(map[string]bool, len(st.Bindings))
 	for _, b := range st.Bindings {
 		bound[b.Name] = true
 	}
-	for _, name := range names {
+	for _, name := range []string{"wren", "robin"} {
 		if !bound[name] {
 			t.Errorf("bindings = %+v, want the entry for %s not lost", st.Bindings, name)
 		}
+	}
+}
+
+// TestAFileInTheTownRootIsNoPolecatRig keeps the fail-closed read from failing
+// in a real town: the root holds plain files beside the rig directories, and a
+// file has no polecats under it (ENOTDIR), which is a miss and not an error
+// (gt-ed525).
+func TestAFileInTheTownRootIsNoPolecatRig(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	if err := os.WriteFile(filepath.Join(reg.PolecatRoot, "CLAUDE.md"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("writing the file: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(reg.PolecatRoot, "norigpolecats"), 0o755); err != nil {
+		t.Fatalf("building a rig with no polecats: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(reg.PolecatRoot, "rig", "polecats", "furiosa"), 0o755); err != nil {
+		t.Fatalf("building the rig: %v", err)
+	}
+	taken, err := reg.Taken()
+	if err != nil {
+		t.Fatalf("Taken with a plain file and a rig without polecats in the root: %v", err)
+	}
+	if !taken["furiosa"] {
+		t.Errorf("Taken = %v, want the polecat furiosa", taken)
+	}
+}
+
+// TestAStatErrorOtherThanMissingIsReported pins the fail-closed read: a literal
+// component whose stat fails for any reason but "not there" (a directory above
+// it that cannot be searched) is an error, never a taken set without the
+// polecat directories under it (gt-ed525).
+func TestAStatErrorOtherThanMissingIsReported(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "rig", "polecats", "furiosa"), 0o755); err != nil {
+		t.Fatalf("building the fixture: %v", err)
+	}
+	denied := func(string) (fs.FileInfo, error) { return nil, fs.ErrPermission }
+	if got, err := expandGlobStat(root, filepath.Join("*", "polecats", "*"), denied); err == nil {
+		t.Errorf("expandGlobStat = %v with no error, want the stat failure reported", got)
 	}
 }
 

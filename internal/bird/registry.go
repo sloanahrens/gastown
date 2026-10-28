@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -191,7 +192,11 @@ func (r *Registry) Bind(name, bead string) (bool, error) {
 		// reservation Pick made for the name, which is a change of its own.
 		return added || len(st.Reservations) != reserved, nil
 	})
-	return added, err
+	if err != nil {
+		// A write that failed bound nothing, whatever the in-memory state said.
+		return false, err
+	}
+	return added, nil
 }
 
 // Record writes a as the agent holding its name, replacing the record of that
@@ -288,6 +293,12 @@ func (r *Registry) PolecatNames() ([]string, error) {
 // whose own name holds one (say "gt [x] *?") would match the wrong directories
 // or none.
 func expandGlob(root, pattern string) ([]string, error) {
+	return expandGlobStat(root, pattern, os.Stat)
+}
+
+// expandGlobStat is expandGlob with the stat of a literal component passed in,
+// so a test can answer it with an error no fixture directory produces.
+func expandGlobStat(root, pattern string, stat func(string) (fs.FileInfo, error)) ([]string, error) {
 	parts := strings.Split(pattern, string(filepath.Separator))
 	for _, part := range parts {
 		if !hasWildcard(part) {
@@ -305,11 +316,22 @@ func expandGlob(root, pattern string) ([]string, error) {
 		for _, dir := range matches {
 			if !hasWildcard(part) {
 				// A literal component matches the name it is, and only while
-				// that is there: an I/O error means no match, as in
-				// filepath.Glob.
+				// that is there. Only "not there" means no match: any other
+				// error (a directory above it that cannot be searched) hides
+				// directories the taken set must hold, so it is the caller's
+				// error, never a quiet miss.
+				//
+				// A regular file where a directory should be (a file in the town
+				// root matches the leading "*") answers ENOTDIR: it has no
+				// polecats under it, which is no match too.
 				path := filepath.Join(dir, part)
-				if _, err := os.Stat(path); err == nil {
+				_, err := stat(path)
+				switch {
+				case err == nil:
 					next = append(next, path)
+				case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
+				default:
+					return nil, fmt.Errorf("checking %q: %w", path, err)
 				}
 				continue
 			}
