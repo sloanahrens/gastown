@@ -10,5 +10,7 @@
 // Liveness is the pid plus the kernel's start token for it (see
 // internal/procid): a pid the kernel has since handed to a stranger is not the
 // agent that recorded it, and a process table that will not answer is an error
-// rather than a death, so nothing is pruned on a guess.
+// rather than a death, so nothing is pruned on a guess. A record with no token
+// to compare against, or a live process whose token the kernel will not give,
+// stays live while the process is there.
 package bird

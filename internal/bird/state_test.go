@@ -10,10 +10,6 @@ func at(minute int) time.Time {
 	return time.Date(2026, 10, 28, 12, minute, 0, 0, time.UTC)
 }
 
-// nobodyIsLive is a liveness read that answers for a machine with no
-// processes at all.
-func nobodyIsLive(Agent) (bool, error) { return false, nil }
-
 func TestBindStoresOneBindingPerNameAndBead(t *testing.T) {
 	t.Parallel()
 	var st State

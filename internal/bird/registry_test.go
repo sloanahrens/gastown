@@ -15,25 +15,40 @@ import (
 	"github.com/gofrs/flock"
 )
 
-// testRegistry returns a Registry over a fresh directory, with a fixed clock,
-// a Rand that picks the first free name and no live processes.
+// testRegistry returns a Registry over a fresh directory, with a scripted
+// clock, a Rand that picks the first free name and no live processes. Sleep
+// advances the clock instead of waiting, so a lock the test holds is waited
+// out just as fast with no real time passing.
 func testRegistry(t *testing.T, names ...string) *Registry {
 	t.Helper()
 	dir := t.TempDir()
+	var mu sync.Mutex
+	now := at(0)
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
 	reg := &Registry{
 		Path:        filepath.Join(dir, ".runtime", "agents", "state.json"),
 		Pool:        names,
-		PolecatGlob: filepath.Join(dir, "*", "polecats", "*"),
-		Now:         func() time.Time { return at(0) },
-		Rand:        func(int) int { return 0 },
-		ProcStart:   starts(nil),
+		PolecatRoot: dir,
+		PolecatGlob: filepath.Join("*", "polecats", "*"),
+		Now:         clock,
+		Sleep: func(d time.Duration) {
+			mu.Lock()
+			defer mu.Unlock()
+			now = now.Add(d)
+		},
+		Rand:      func(int) int { return 0 },
+		ProcStart: starts(nil),
 	}
 	return reg
 }
 
 // townDir is the town root testRegistry built its paths under.
 func townDir(reg *Registry) string {
-	return filepath.Dir(filepath.Dir(filepath.Dir(reg.Path)))
+	return reg.PolecatRoot
 }
 
 // starts returns a process-info function answering from procs; a pid absent
@@ -102,6 +117,18 @@ func TestPickSkipsPolecatDirectories(t *testing.T) {
 	}
 	if !ok || name != "wren" {
 		t.Errorf("Pick = %q, %v, want a name no polecat directory holds", name, ok)
+	}
+}
+
+func TestPickDrawsFromTheEmbeddedPoolByDefault(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t)
+	name, ok, err := reg.Pick()
+	if err != nil || !ok {
+		t.Fatalf("Pick = %q, %v, %v, want a name from the embedded pool", name, ok, err)
+	}
+	if want := Pool()[0]; name != want {
+		t.Errorf("Pick = %q, want the first embedded name %q", name, want)
 	}
 }
 
@@ -177,6 +204,35 @@ func TestTakenRefusesABadPolecatGlob(t *testing.T) {
 	}
 }
 
+func TestTakenHoldsAPolecatDirectoryName(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "lark")
+	seated := filepath.Join(townDir(reg), "gastown", "polecats", "lark")
+	if err := os.MkdirAll(seated, 0o755); err != nil {
+		t.Fatalf("creating a polecat directory: %v", err)
+	}
+	taken, err := reg.Taken()
+	if err != nil {
+		t.Fatalf("Taken: %v", err)
+	}
+	if !taken["lark"] {
+		t.Errorf("taken = %v, want the polecat directory's name held", taken)
+	}
+}
+
+func TestPolecatNamesCountsNothingWithNoGlob(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	reg.PolecatGlob = ""
+	names, err := reg.PolecatNames()
+	if err != nil {
+		t.Fatalf("PolecatNames: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("PolecatNames = %v, want none for a registry with no glob", names)
+	}
+}
+
 func TestRegistryTakenReportsALivenessItCannotRead(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren")
@@ -208,7 +264,7 @@ func TestPickReportsALivenessItCannotRead(t *testing.T) {
 	}
 }
 
-func TestNewEscapesTheTownRootInItsGlob(t *testing.T) {
+func TestNewReadsTheTownRootLiterally(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "gt [x] *?")
 	seated := filepath.Join(root, "gastown", "polecats", "wren")
@@ -228,6 +284,47 @@ func TestNewEscapesTheTownRootInItsGlob(t *testing.T) {
 	}
 }
 
+func TestPolecatNamesSkipsARootThatIsNotThere(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	reg.PolecatRoot = filepath.Join(t.TempDir(), "missing")
+	names, err := reg.PolecatNames()
+	if err != nil {
+		t.Fatalf("PolecatNames: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("PolecatNames = %v, want none under a root that does not exist", names)
+	}
+}
+
+func TestPolecatNamesSkipsARigWithNoPolecatDirectory(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	if err := os.MkdirAll(filepath.Join(townDir(reg), "emptyrig"), 0o755); err != nil {
+		t.Fatalf("creating a rig directory: %v", err)
+	}
+	names, err := reg.PolecatNames()
+	if err != nil {
+		t.Fatalf("PolecatNames: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("PolecatNames = %v, want none for a rig with no polecat directory", names)
+	}
+}
+
+func TestPolecatNamesReportsARootItCannotRead(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	notADir := filepath.Join(t.TempDir(), "regular-file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("writing a regular file in place of the town root: %v", err)
+	}
+	reg.PolecatRoot = notADir
+	if _, err := reg.PolecatNames(); err == nil {
+		t.Fatal("PolecatNames accepted a town root that is a regular file")
+	}
+}
+
 func TestBoundReadsThroughTheRegistry(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren", "robin")
@@ -244,6 +341,109 @@ func TestBoundReadsThroughTheRegistry(t *testing.T) {
 	}
 	if !ok || name != "robin" {
 		t.Errorf("Bound(gt-a) = %q, %v, want the newest name robin", name, ok)
+	}
+}
+
+func TestBindLeavesTheStateFileAloneForAPairItAlreadyHas(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	if _, err := reg.Bind("wren", "gt-a"); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	writes := 0
+	reg.Write = func(string, any) error {
+		writes++
+		return nil
+	}
+	added, err := reg.Bind("wren", "gt-a")
+	if err != nil {
+		t.Fatalf("second Bind: %v", err)
+	}
+	if added {
+		t.Error("second Bind reported a pair it already had as added")
+	}
+	if writes != 0 {
+		t.Errorf("a repeat Bind wrote the state file %d time(s), want none: nothing changed", writes)
+	}
+}
+
+func TestRecordWritesTheAgentOfItsName(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	if err := reg.Record(Agent{Name: "wren", PID: 10, Start: "tok"}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	reg.Now = func() time.Time { return at(5) }
+	if err := reg.Record(Agent{Name: "wren", PID: 11, Start: "tok2", Bead: "gt-a", Cwd: "/town"}); err != nil {
+		t.Fatalf("second Record: %v", err)
+	}
+	st, err := reg.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(st.Agents) != 1 {
+		t.Fatalf("agents = %+v, want the one record of the name", st.Agents)
+	}
+	got := st.Agents[0]
+	if got.PID != 11 || got.Start != "tok2" || got.Bead != "gt-a" || got.Cwd != "/town" {
+		t.Errorf("agent = %+v, want the newer record to replace the one for the same name", got)
+	}
+	if !got.Started.Equal(at(5)) {
+		t.Errorf("started = %v, want the clock's stamp at(5)", got.Started)
+	}
+}
+
+func TestRecordDropsTheReservationForItsName(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	name, ok, err := reg.Pick()
+	if err != nil || !ok {
+		t.Fatalf("Pick = %q, %v, %v, want a name", name, ok, err)
+	}
+	if err := reg.Record(Agent{Name: name, PID: 10, Start: "tok"}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	st, err := reg.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(st.Reservations) != 0 {
+		t.Errorf("reservations = %+v, want none for a name a process now holds", st.Reservations)
+	}
+	if len(st.Agents) != 1 || st.Agents[0].Name != name {
+		t.Errorf("agents = %+v, want the record for %s", st.Agents, name)
+	}
+}
+
+func TestRecordRefusesAnAgentThatCannotHoldAName(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		agent Agent
+		want  error
+	}{
+		{"a name no session could use", Agent{Name: "not a name", PID: 10}, ErrInvalidName},
+		{"a record with no pid", Agent{Name: "wren"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := testRegistry(t, "wren")
+			err := reg.Record(tc.agent)
+			if err == nil {
+				t.Fatalf("Record(%+v) = nil, want the record refused", tc.agent)
+			}
+			if tc.want != nil && !errors.Is(err, tc.want) {
+				t.Errorf("Record(%+v) = %v, want %v", tc.agent, err, tc.want)
+			}
+			st, err := reg.Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(st.Agents) != 0 {
+				t.Errorf("agents = %+v, want nothing written for a refused record", st.Agents)
+			}
+		})
 	}
 }
 
@@ -355,6 +555,21 @@ func TestListKeepsALiveAgent(t *testing.T) {
 	}
 }
 
+func TestListReturnsTheLiveAgentsByName(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	reg.ProcStart = starts(map[int]string{10: "tok", 11: "tok"})
+	seedAgent(t, reg, Agent{Name: "wren", PID: 10, Start: "tok", Started: at(0)})
+	seedAgent(t, reg, Agent{Name: "heron", PID: 11, Start: "tok", Started: at(0)})
+	live, err := reg.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(live) != 2 || live[0].Name != "heron" || live[1].Name != "wren" {
+		t.Errorf("List = %+v, want heron and wren in name order", live)
+	}
+}
+
 func TestListKeepsAnAgentWhoseLivenessItCannotRead(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren")
@@ -370,6 +585,60 @@ func TestListKeepsAnAgentWhoseLivenessItCannotRead(t *testing.T) {
 	}
 	if len(st.Agents) != 1 {
 		t.Errorf("agents on disk = %+v, want the agent kept: an unreadable process is not a dead one", st.Agents)
+	}
+}
+
+func TestListKeepsAnAgentWithNoStartTokenWhileItsPIDLives(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	reg.ProcStart = starts(map[int]string{10: "tok"})
+	seedAgent(t, reg, Agent{Name: "wren", PID: 10, Started: at(0)})
+	live, err := reg.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(live) != 1 || live[0].Name != "wren" {
+		t.Errorf("List = %+v, want the agent with no token kept while its pid is there", live)
+	}
+}
+
+func TestListPrunesAnAgentWithNoPID(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	seedAgent(t, reg, Agent{Name: "wren", Started: at(0)})
+	live, err := reg.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(live) != 0 {
+		t.Errorf("List = %+v, want a record with no pid pruned", live)
+	}
+}
+
+func TestListPrunesAnAgentWithNoStartTokenWhosePIDIsGone(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	seedAgent(t, reg, Agent{Name: "wren", PID: 10, Started: at(0)})
+	live, err := reg.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(live) != 0 {
+		t.Errorf("List = %+v, want the agent with no token pruned when its pid names no process", live)
+	}
+}
+
+func TestTakenReadsAnAliveProcessWhoseTokenItCannotHave(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	reg.ProcStart = func(int) (string, bool, error) { return "", true, nil }
+	seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok", Started: at(0)})
+	taken, err := reg.Taken()
+	if err != nil {
+		t.Fatalf("Taken: %v, want no error for a token the kernel will not give", err)
+	}
+	if !taken["robin"] {
+		t.Errorf("taken = %v, want a process that is there to hold its name", taken)
 	}
 }
 
@@ -605,11 +874,11 @@ func TestStartTokenAnswersFromTheTwoKernelCalls(t *testing.T) {
 			probe: func(int) (bool, error) { return false, nil },
 		},
 		{
-			name:    "alive but no token",
-			pid:     10,
-			token:   func(int) (string, bool) { return "", false },
-			probe:   func(int) (bool, error) { return true, nil },
-			wantErr: true,
+			name:   "alive but no token",
+			pid:    10,
+			token:  func(int) (string, bool) { return "", false },
+			probe:  func(int) (bool, error) { return true, nil },
+			wantOK: true,
 		},
 		{
 			name:    "the probe itself failed",

@@ -79,6 +79,18 @@ func (s *State) Bind(name, bead string, at time.Time) bool {
 	return true
 }
 
+// SetAgent records a as the agent of its name, replacing the earlier record
+// for that name, since one name is one process.
+func (s *State) SetAgent(a Agent) {
+	for i, old := range s.Agents {
+		if old.Name == a.Name {
+			s.Agents[i] = a
+			return
+		}
+	}
+	s.Agents = append(s.Agents, a)
+}
+
 // Reserve records that Pick handed out name at now, replacing any reservation
 // the name already had.
 func (s *State) Reserve(name string, now time.Time) {
