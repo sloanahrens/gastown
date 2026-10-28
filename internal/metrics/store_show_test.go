@@ -16,9 +16,7 @@ const showTestFound = `[{"id":"gt-found","title":"found"}]`
 
 // showTestPartial is bd's machine-mode answer to a show of one id it holds and
 // one it does not: the held issue in data, the missing id under the envelope's
-// error (kind partial, exit 22, the failed id not_found). The next bead's
-// loaders read the missing id as a bead that is gone rather than as a read
-// that broke, and this is the bd answer that makes that true.
+// error (kind partial, exit 22, the failed id not_found).
 const showTestPartial = `{
   "schema_version": 1,
   "contract_version": 1,
@@ -62,6 +60,13 @@ type showTestExit int
 func (e showTestExit) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
 func (e showTestExit) ExitCode() int { return int(e) }
 
+// showTestVersionProbe reports whether args is the seam's --allow-stale
+// capability probe, which a fake bd answers the way bd does rather than as a
+// show.
+func showTestVersionProbe(args []string) bool {
+	return len(args) == 2 && args[0] == "--allow-stale" && args[1] == "version"
+}
+
 // showArgsIDs returns the bead ids a recorded show argv names: bd's verb, its
 // flags (the seam's --allow-stale among them) and the probe's version word are
 // not ids.
@@ -93,7 +98,7 @@ func TestShowBeadsLeavesAMissingBeadOut(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
-		if len(args) > 0 && args[len(args)-1] == "version" {
+		if showTestVersionProbe(args) {
 			return []byte("bd version 1.2.2\n"), nil, nil
 		}
 		for _, id := range showArgsIDs(args) {
@@ -126,7 +131,7 @@ func TestShowBeadsAWhollyMissingIdIsNone(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
-		if len(args) > 0 && args[len(args)-1] == "version" {
+		if showTestVersionProbe(args) {
 			return []byte("bd version 1.2.2\n"), nil, nil
 		}
 		ids := showArgsIDs(args)
@@ -153,7 +158,7 @@ func TestShowBeadsAWhollyMissingChunkIsNone(t *testing.T) {
 	const held = "gt-b070"
 	reads := 0
 	answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
-		if len(args) > 0 && args[len(args)-1] == "version" {
+		if showTestVersionProbe(args) {
 			return []byte("bd version 1.2.2\n"), nil, nil
 		}
 		reads++
@@ -192,7 +197,7 @@ func TestShowBeadsFailedReadIsAnError(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
-		if len(args) > 0 && args[len(args)-1] == "version" {
+		if showTestVersionProbe(args) {
 			return []byte("bd version 1.2.2\n"), nil, nil
 		}
 		return nil, []byte("Error: failed to open database: invalid connection\n"), showTestExit(1)
