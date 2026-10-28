@@ -251,13 +251,12 @@ image_daemon_env() {
 # that asked for it.
 image_build() {
   local secs="$1" lock="$2" bin="$3" run="$4" fingerprint="${5:-}"
-  local report=() owned=()
+  local report=()
   if [ -n "$fingerprint" ]; then report=(--gt "$GT" --fingerprint "$fingerprint"); fi
-  if [ -n "$IMAGE_OWNED" ]; then owned=(--owned "$IMAGE_OWNED"); fi
   export POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$bin" POLECAT_IMAGE_LOCK="$lock"
   if [ -n "$image_registry" ]; then export POLECAT_IMAGE_REGISTRY="$image_registry"; fi
   if [ -n "$image_crane" ]; then export POLECAT_IMAGE_CRANE="$image_crane"; fi
-  exec "$IMAGE_SUPERVISOR" --alarm "$secs" --lock "$lock" ${report[@]+"${report[@]}"} ${owned[@]+"${owned[@]}"} -- bash "$run"
+  exec "$IMAGE_SUPERVISOR" --alarm "$secs" --lock "$lock" ${report[@]+"${report[@]}"} --owned "$IMAGE_OWNED" -- bash "$run"
 }
 
 # image_supervisor_prepare — build cmd/image-supervisor from this checkout into a
