@@ -168,8 +168,8 @@ done
 case "\$pkg" in
   *image-supervisor) cp "$SUPERVISOR_HELPER" "\$out" ;;
   # lock_wait_recorder: the install-lock position gets the recorder instead, so
-  # a case can read the wait the script computes without ever holding the lock
-  # (gt-d8aul).
+  # a case can read the argv the script hands the helper without ever holding
+  # the lock (gt-d8aul).
   *) if [ -e "\$T_WORLD/lock_wait_recorder" ]; then cp "$WAIT_RECORDER" "\$out"; else cp "$LOCK_HELPER" "\$out"; fi ;;
 esac
 chmod +x "\$out"
@@ -258,17 +258,14 @@ LOCK_HELPER_DIR=$(mktemp -d)
 LOCK_HELPER="$LOCK_HELPER_DIR/install-lock"
 SUPERVISOR_HELPER="$LOCK_HELPER_DIR/image-supervisor"
 # What a world marked with lock_wait_recorder gets in the install-lock position:
-# it writes the --wait the install hands it to $T_WORLD/lock-waits.log and exits
-# 75 (busy) at once, so a case measures the computed wait without spending it
-# (gt-d8aul).
+# it logs the argv the install hands it to $T_WORLD/lock-waits.log and exits 75,
+# install-lock's lock-wait timeout, at once -- so a case reads the wait the
+# install computed without spending it (gt-d8aul). It parses nothing: the
+# assertion in the case picks the --wait out of the logged line.
 WAIT_RECORDER="$LOCK_HELPER_DIR/install-lock-wait-recorder"
 cat > "$WAIT_RECORDER" <<'REC'
 #!/usr/bin/env bash
-prev=""
-for a in "$@"; do
-  [ "$prev" != "--wait" ] || printf '%s\n' "$a" >> "$T_WORLD/lock-waits.log"
-  prev="$a"
-done
+echo "$*" >> "$T_WORLD/lock-waits.log"
 exit 75
 REC
 chmod +x "$WAIT_RECORDER"
@@ -1685,18 +1682,21 @@ rc=$( export GT_TOWN_ROOT="$T"
 # --- Case 64: with INSTALL_GT_LOCK_WAIT unset, the wait handed to the lock
 # helper is the image alarm plus a minute, and the 1200 floor stands for an
 # alarm that is not a whole number of seconds above zero (gt-d8aul). The helper
-# is the recorder, which reports the lock busy at once, so no case waits. Each
-# row below turns one mutation of the default red: the 300 it was before, the
-# +60 dropped, the floor changed, a zero alarm accepted, the regex dropped. ---
+# is the recorder, which logs the argv it is handed and exits 75 at once. 75 is
+# install-lock's lock-wait timeout, which install-gt.sh maps to its busy exit 3
+# (the exit-code list in its header) -- the rc each row asserts, so no case
+# waits. Each row below turns one mutation of the default red: the 300 it was
+# before, the +60 dropped, the floor changed, a zero alarm accepted, the regex
+# dropped. ---
 for pair in "unset 1260" "300 360" "0 1260" "soon 1260"; do
   alarm=${pair% *}; want=${pair#* }
   T=$(make_world); : > "$T/lock_wait_recorder"
   rc=$( unset INSTALL_GT_IMAGE_ALARM
         [ "$alarm" = unset ] || export INSTALL_GT_IMAGE_ALARM="$alarm"
         NO_LOCK_WAIT=1 run_install "$T" --sha "$(cat "$T/c2")" --source manual )
-  [ "$rc" = "3" ] && [ "$(cat "$T/lock-waits.log" 2>/dev/null)" = "$want" ] \
+  [ "$rc" = "3" ] && grep -q -e "--wait $want " "$T/lock-waits.log" 2>/dev/null \
     && pass "lock wait: alarm '$alarm' hands the helper --wait $want" \
-    || fail "lock wait: alarm '$alarm': rc=$rc wait='$(cat "$T/lock-waits.log" 2>/dev/null)' want='$want' $(tail -2 "$T/run.out")"
+    || fail "lock wait: alarm '$alarm': rc=$rc (want 3, the busy exit install-gt.sh maps the helper's 75 to) args='$(cat "$T/lock-waits.log" 2>/dev/null)' want '--wait $want' $(tail -2 "$T/run.out")"
 done
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
