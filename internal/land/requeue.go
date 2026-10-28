@@ -32,9 +32,8 @@ func FormatRequeueComment(actor, branch, head string, attempt, blocks int, reaso
 type Requeued struct {
 	// Attempt is the rejection attempt the comment undid.
 	Attempt int
-	// Blocks is how many MERGE REJECTION blocks the notes held when the comment
-	// was written; the last of them is the one the re-queue undid. Zero means
-	// the comment names no count.
+	// Blocks is how many rejection blocks the bead carried when the re-queue was
+	// written, 0 when the comment names no count.
 	Blocks int
 }
 
