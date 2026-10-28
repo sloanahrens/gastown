@@ -183,7 +183,7 @@ func TestPolecatFormulaScanJudgesEachShape(t *testing.T) {
 		},
 		{
 			// The gap a fence-only scan leaves: the step named in a code span.
-			name: "refused command in a prose code span",
+			name:    "refused command in a prose code span",
 			formula: "description = \"\"\"\nThen run `gt bead note {{issue}} \"$(cat $D/notes.txt)\"` and stop.\n\"\"\"\n",
 			want:    []polecatFormulaViolation{{at: 2, reason: polecatUnresolvedTextReason}},
 		},
