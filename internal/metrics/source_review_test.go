@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -57,48 +59,140 @@ func reviewLine(bead, verdict string, attempt int, score float64, rejected bool,
 		bead, attempt, score, verdict, rejected, at.UTC().Format(time.RFC3339))
 }
 
-// reviewBdFake answers `bd show --json` from a table of beads and records the
-// argv it was asked, so a test can see which rig each bead was read in.
-type reviewBdFake struct {
-	beads map[string]string // bead id -> the JSON object bd show prints for it
-	fail  map[string]bool
+// reviewStoreFake is the bead store the review group reads in these tests: the
+// notes it holds for a bead, the error a bead's read gets, a bead whose read
+// waits for its deadline to pass, and a record of every read, so a test sees
+// which directory's store each bead was read from and under what deadline.
+type reviewStoreFake struct {
+	notes    map[string]string // bead id -> the notes its store holds
+	assignee map[string]string // bead id -> the assignee its store answers
+	fail     map[string]error  // bead id -> the error its read gets
+	slow     string            // a bead whose read waits for its deadline
 
 	mu              sync.Mutex
-	calls           [][]string
+	reads           []reviewStoreRead
 	deadlineMissing bool
 }
 
-func (f *reviewBdFake) run(ctx context.Context, argv []string) ([]byte, error) {
-	if _, ok := ctx.Deadline(); !ok {
-		f.mu.Lock()
-		f.deadlineMissing = true
-		f.mu.Unlock()
-	}
-	f.mu.Lock()
-	f.calls = append(f.calls, argv)
-	f.mu.Unlock()
-	if len(argv) != 7 || argv[0] != "bd" || argv[1] != "-C" || argv[3] != "show" || argv[4] != "--json" || argv[5] != "--" {
-		return nil, fmt.Errorf("unexpected argv %v", argv)
-	}
-	bead := argv[6]
-	if f.fail[bead] {
-		return nil, fmt.Errorf("bd show %s: no Dolt server", bead)
-	}
-	entry, ok := f.beads[bead]
-	if !ok {
-		return []byte("[]"), nil // a bead bd no longer holds
-	}
-	return []byte("[" + entry + "]"), nil
+// reviewStoreRead is one read of the store: the directory it was opened for,
+// the ids it was asked, when it started, and the deadline it was given.
+type reviewStoreRead struct {
+	dir         string
+	ids         []string
+	at          time.Time
+	deadline    time.Time
+	hasDeadline bool
 }
 
-// reviewBeadJSON is one bead in the shape `bd show --json` prints it.
-func reviewBeadJSON(id, branch string) string {
-	notes := `"READY TO LAND\nHead: abc\n"`
-	if branch != "" {
-		notes = fmt.Sprintf("%q", "READY TO LAND\nBranch: "+branch+"\nHead: abc\n")
+// seam is the store seam the review group reads through, one store per
+// directory the review names.
+func (f *reviewStoreFake) seam() BeadStores {
+	return func(ctx context.Context, dir string) BeadStore {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			f.mu.Lock()
+			f.deadlineMissing = true
+			f.mu.Unlock()
+		}
+		return &reviewFakeStore{f: f, dir: dir, ctx: ctx, deadline: deadline, hasDeadline: ok}
 	}
-	return fmt.Sprintf(`{"id":%q,"notes":%s}`, id, notes)
 }
+
+// readIDs lists every id the store was asked, read order included.
+func (f *reviewStoreFake) readIDs() []string {
+	var ids []string
+	for _, read := range f.reads {
+		ids = append(ids, read.ids...)
+	}
+	return ids
+}
+
+// reviewFakeStore is one directory's store as the source opened it: the
+// directory, and the context the source gave the factory, which is the
+// deadline a real store's read runs under.
+type reviewFakeStore struct {
+	f           *reviewStoreFake
+	dir         string
+	ctx         context.Context
+	deadline    time.Time
+	hasDeadline bool
+}
+
+func (s *reviewFakeStore) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("the review test read the board")
+}
+
+func (s *reviewFakeStore) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("the review test read the ready queue")
+}
+
+func (s *reviewFakeStore) Blocked() ([]*beads.Issue, error) {
+	return nil, errors.New("the review test read the blocked list")
+}
+
+func (s *reviewFakeStore) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	f := s.f
+	f.mu.Lock()
+	f.reads = append(f.reads, reviewStoreRead{
+		dir:         s.dir,
+		ids:         append([]string(nil), ids...),
+		at:          time.Now(),
+		deadline:    s.deadline,
+		hasDeadline: s.hasDeadline,
+	})
+	f.mu.Unlock()
+	// A read whose deadline has gone fails, as bd's call under it does.
+	if err := s.ctx.Err(); err != nil {
+		return nil, err
+	}
+	out := make(map[string]*beads.Issue, len(ids))
+	for _, id := range ids {
+		if id == f.slow {
+			// A store whose read hangs: only the deadline the source gave it
+			// ends the read, so a test that passes no deadline must not hang.
+			if !s.hasDeadline {
+				return nil, errors.New("a slow read was given no deadline to end it")
+			}
+			<-s.ctx.Done()
+			return nil, s.ctx.Err()
+		}
+		if err := f.fail[id]; err != nil {
+			return nil, err
+		}
+		notes, ok := f.notes[id]
+		if !ok {
+			continue // a bead the store no longer holds is left out, not refused
+		}
+		out[id] = &beads.Issue{ID: id, Notes: notes, Assignee: f.assignee[id]}
+	}
+	return out, nil
+}
+
+// reviewBeadNotes is the notes a reviewed bead carries: the Branch line the
+// attribution reads, or none.
+func reviewBeadNotes(branch string) string {
+	if branch == "" {
+		return "READY TO LAND\nHead: abc\n"
+	}
+	return "READY TO LAND\nBranch: " + branch + "\nHead: abc\n"
+}
+
+// reviewNotFoundEnvelope is bd's machine-mode answer to a show that resolved no
+// id: data null, exit 20, the missing id under error.ids (the shape captured
+// from bd on this host; internal/beads' own tests carry the two-id copy).
+const reviewNotFoundEnvelope = `{
+  "schema_version": 1,
+  "contract_version": 1,
+  "data": null,
+  "pagination": null,
+  "error": {
+    "kind": "not_found",
+    "message": "1 of 1 ids failed",
+    "ids": [
+      {"id": "gt-gone", "kind": "not_found", "message": "no issue found matching \"gt-gone\""}
+    ]
+  }
+}`
 
 func TestSourceReviewCountsTheLastHour(t *testing.T) {
 	t.Parallel()
@@ -114,14 +208,14 @@ func TestSourceReviewCountsTheLastHour(t *testing.T) {
 		`{"verdict":"approve","at":"2026-10-24T12:30:00Z"}` + "\n" + // no bead
 		`{"bead":"gt-nv","at":"2026-10-24T12:30:00Z"}` + "\n" // no verdict
 
-	bdfake := &reviewBdFake{beads: map[string]string{
-		"gt-a1": reviewBeadJSON("gt-a1", "polecat/opal/gt-a1+mv1"),
-		"gt-a2": reviewBeadJSON("gt-a2", "crew/merlin/gt-a2"),
-		"gt-a3": reviewBeadJSON("gt-a3", "crew/overseer/gt-a3"),
-		"gt-a4": reviewBeadJSON("gt-a4", ""),
+	store := &reviewStoreFake{notes: map[string]string{
+		"gt-a1": reviewBeadNotes("polecat/opal/gt-a1+mv1"),
+		"gt-a2": reviewBeadNotes("crew/merlin/gt-a2"),
+		"gt-a3": reviewBeadNotes("crew/overseer/gt-a3"),
+		"gt-a4": reviewBeadNotes(""),
 	}}
 	env := reviewTestEnv(t, content, false, nil)
-	env.Run = bdfake.run
+	env.Beads = store.seam()
 	cols, err := reviewSource{}.Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -139,43 +233,61 @@ func TestSourceReviewCountsTheLastHour(t *testing.T) {
 	if !reflect.DeepEqual(cols, want) {
 		t.Fatalf("review = %#v, want %#v", cols, want)
 	}
-	if bdfake.deadlineMissing {
-		t.Error("a bd read ran without a deadline")
+	if store.deadlineMissing {
+		t.Error("a store read ran without a deadline")
 	}
-	// Each review bead is read once, in its review's rig, with the id after --.
-	for _, call := range bdfake.calls {
-		if call[2] != filepath.Join(reviewTestTown, "gastown") {
-			t.Errorf("bd read in %q, want the review's rig", call[2])
+	// Each review bead is read once, from its review's rig, one id per read.
+	if len(store.reads) != 4 {
+		t.Fatalf("store reads = %d, want one per reviewed bead", len(store.reads))
+	}
+	for _, read := range store.reads {
+		if read.dir != filepath.Join(reviewTestTown, "gastown") {
+			t.Errorf("read %v from %q, want the review's rig", read.ids, read.dir)
 		}
-	}
-	if len(bdfake.calls) != 4 {
-		t.Errorf("bd reads = %d, want one per reviewed bead", len(bdfake.calls))
+		if len(read.ids) != 1 {
+			t.Errorf("read %v, want one bead per read", read.ids)
+		}
 	}
 }
 
 // A bead read that fails leaves the kind columns null, because the hour's
-// reviews were not attributed; the counts the source can still make stand.
+// reviews were not attributed; the counts the source can still make stand. A
+// read the store answered with the deadline it was given is a failed read too,
+// so one slow bead costs the kinds rather than hanging the group.
 func TestSourceReviewAFailedBeadReadLeavesTheKindsNull(t *testing.T) {
 	t.Parallel()
 	now := fixedNow()
 	content := reviewLine("gt-a1", land.VerdictApprove, 1, 8.5, false, now.Add(-30*time.Minute)) + "\n" +
 		reviewLine("gt-a2", land.VerdictApprove, 1, 8.5, false, now.Add(-20*time.Minute)) + "\n"
-	env := reviewTestEnv(t, content, false, nil)
-	env.Run = (&reviewBdFake{
-		beads: map[string]string{"gt-a1": reviewBeadJSON("gt-a1", "polecat/opal/gt-a1")},
-		fail:  map[string]bool{"gt-a2": true},
-	}).run
-	cols, err := reviewSource{}.Collect(context.Background(), env)
-	if err != nil {
-		t.Fatalf("Collect: %v", err)
+	tests := []struct {
+		name string
+		fail error
+	}{
+		{name: "the store refuses the read", fail: errors.New("the store has no Dolt server")},
+		{name: "the read ran out of its deadline", fail: context.DeadlineExceeded},
 	}
-	if cols["om_reviews_1h"] != 2 {
-		t.Errorf("om_reviews_1h = %v, want the 2 reviews it could count", cols["om_reviews_1h"])
-	}
-	for _, column := range reviewKindColumnNames {
-		if value, ok := cols[column]; !ok || value != nil {
-			t.Errorf("%s = %v, want null: a review it could not attribute is not an unknown author's", column, value)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := &reviewStoreFake{
+				notes: map[string]string{"gt-a1": reviewBeadNotes("polecat/opal/gt-a1")},
+				fail:  map[string]error{"gt-a2": tc.fail},
+			}
+			env := reviewTestEnv(t, content, false, nil)
+			env.Beads = store.seam()
+			cols, err := reviewSource{}.Collect(context.Background(), env)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			if cols["om_reviews_1h"] != 2 {
+				t.Errorf("om_reviews_1h = %v, want the 2 reviews it could count", cols["om_reviews_1h"])
+			}
+			for _, column := range reviewKindColumnNames {
+				if value, ok := cols[column]; !ok || value != nil {
+					t.Errorf("%s = %v, want null: a review it could not attribute is not an unknown author's", column, value)
+				}
+			}
+		})
 	}
 }
 
@@ -189,12 +301,12 @@ func TestSourceReviewReadsEachBeadOnce(t *testing.T) {
 			now.Add(-20*time.Minute).UTC().Format(time.RFC3339)) + "\n" +
 		fmt.Sprintf(`{"bead":"gt-a2","attempt":1,"score":8,"verdict":"approve","at":%q}`,
 			now.Add(-10*time.Minute).UTC().Format(time.RFC3339)) + "\n"
-	bdfake := &reviewBdFake{beads: map[string]string{
-		"gt-a1": reviewBeadJSON("gt-a1", "polecat/opal/gt-a1+mv1"),
-		"gt-a2": reviewBeadJSON("gt-a2", "polecat/opal/gt-a2+mv1"),
+	store := &reviewStoreFake{notes: map[string]string{
+		"gt-a1": reviewBeadNotes("polecat/opal/gt-a1+mv1"),
+		"gt-a2": reviewBeadNotes("polecat/opal/gt-a2+mv1"),
 	}}
 	env := reviewTestEnv(t, content, false, nil)
-	env.Run = bdfake.run
+	env.Beads = store.seam()
 	cols, err := reviewSource{}.Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -202,15 +314,15 @@ func TestSourceReviewReadsEachBeadOnce(t *testing.T) {
 	if cols["om_polecat_reviews_1h"] != 3 {
 		t.Errorf("om_polecat_reviews_1h = %v, want all three reviews", cols["om_polecat_reviews_1h"])
 	}
-	if len(bdfake.calls) != 2 {
-		t.Fatalf("bd reads = %v, want one per bead, not one per review", bdfake.calls)
+	if len(store.reads) != 2 {
+		t.Fatalf("store reads = %v, want one per bead, not one per review", store.reads)
 	}
-	dirs := map[string]string{bdfake.calls[0][6]: bdfake.calls[0][2], bdfake.calls[1][6]: bdfake.calls[1][2]}
+	dirs := map[string]string{store.reads[0].ids[0]: store.reads[0].dir, store.reads[1].ids[0]: store.reads[1].dir}
 	if dirs["gt-a1"] != filepath.Join(reviewTestTown, "gastown") {
-		t.Errorf("gt-a1 read in %q, want its review's rig", dirs["gt-a1"])
+		t.Errorf("gt-a1 read from %q, want its review's rig", dirs["gt-a1"])
 	}
 	if dirs["gt-a2"] != reviewTestTown {
-		t.Errorf("gt-a2 read in %q, want the town root for a review that names no rig", dirs["gt-a2"])
+		t.Errorf("gt-a2 read from %q, want the town root for a review that names no rig", dirs["gt-a2"])
 	}
 }
 
@@ -221,11 +333,12 @@ func TestSourceReviewReadsTheKindFromTheBranchNotTheAssignee(t *testing.T) {
 	t.Parallel()
 	now := fixedNow()
 	content := reviewLine("gt-a1", land.VerdictApprove, 1, 8, false, now.Add(-30*time.Minute)) + "\n"
-	bdfake := &reviewBdFake{beads: map[string]string{
-		"gt-a1": `{"id":"gt-a1","notes":"READY TO LAND\nBranch: crew/merlin/gt-a1\nHead: abc\n","assignee":"town/crew/overseer"}`,
-	}}
+	store := &reviewStoreFake{
+		notes:    map[string]string{"gt-a1": reviewBeadNotes("crew/merlin/gt-a1")},
+		assignee: map[string]string{"gt-a1": "town/crew/overseer"},
+	}
 	env := reviewTestEnv(t, content, false, nil)
-	env.Run = bdfake.run
+	env.Beads = store.seam()
 	cols, err := reviewSource{}.Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -246,11 +359,11 @@ func TestSourceReviewARigOutsideTheTownLeavesTheKindsNull(t *testing.T) {
 			t.Parallel()
 			content := fmt.Sprintf(`{"bead":"gt-a1","rig":%q,"attempt":1,"score":8,"verdict":"approve","at":%q}`,
 				rig, now.Add(-30*time.Minute).UTC().Format(time.RFC3339)) + "\n"
-			bdfake := &reviewBdFake{beads: map[string]string{
-				"gt-a1": reviewBeadJSON("gt-a1", "polecat/opal/gt-a1+mv1"),
+			store := &reviewStoreFake{notes: map[string]string{
+				"gt-a1": reviewBeadNotes("polecat/opal/gt-a1+mv1"),
 			}}
 			env := reviewTestEnv(t, content, false, nil)
-			env.Run = bdfake.run
+			env.Beads = store.seam()
 			cols, err := reviewSource{}.Collect(context.Background(), env)
 			if err != nil {
 				t.Fatalf("Collect: %v", err)
@@ -263,8 +376,8 @@ func TestSourceReviewARigOutsideTheTownLeavesTheKindsNull(t *testing.T) {
 					t.Errorf("%s = %v, want null: a rig that escapes the town names no directory to read", column, value)
 				}
 			}
-			if len(bdfake.calls) != 0 {
-				t.Errorf("bd reads = %v, want none", bdfake.calls)
+			if len(store.reads) != 0 {
+				t.Errorf("store reads = %v, want none", store.reads)
 			}
 		})
 	}
@@ -276,10 +389,10 @@ func TestSourceReviewARigOutsideTheTownLeavesTheKindsNull(t *testing.T) {
 func TestSourceReviewStopsAtTheBeadReadCap(t *testing.T) {
 	t.Parallel()
 	now := fixedNow()
-	beads := map[string]string{}
+	notes := map[string]string{}
 	for i := 0; i <= reviewBeadReadCap; i++ {
 		id := fmt.Sprintf("gt-c%d", i)
-		beads[id] = reviewBeadJSON(id, "polecat/opal/"+id+"+mv1")
+		notes[id] = reviewBeadNotes("polecat/opal/" + id + "+mv1")
 	}
 	lines := func(n int) string {
 		var b strings.Builder
@@ -291,9 +404,9 @@ func TestSourceReviewStopsAtTheBeadReadCap(t *testing.T) {
 	}
 	t.Run("at the cap", func(t *testing.T) {
 		t.Parallel()
-		bdfake := &reviewBdFake{beads: beads}
+		store := &reviewStoreFake{notes: notes}
 		env := reviewTestEnv(t, lines(reviewBeadReadCap), false, nil)
-		env.Run = bdfake.run
+		env.Beads = store.seam()
 		cols, err := reviewSource{}.Collect(context.Background(), env)
 		if err != nil {
 			t.Fatalf("Collect: %v", err)
@@ -301,15 +414,15 @@ func TestSourceReviewStopsAtTheBeadReadCap(t *testing.T) {
 		if cols["om_polecat_reviews_1h"] != reviewBeadReadCap {
 			t.Errorf("om_polecat_reviews_1h = %v, want all %d attributed", cols["om_polecat_reviews_1h"], reviewBeadReadCap)
 		}
-		if len(bdfake.calls) != reviewBeadReadCap {
-			t.Errorf("bd reads = %d, want one per bead at the cap", len(bdfake.calls))
+		if len(store.reads) != reviewBeadReadCap {
+			t.Errorf("store reads = %d, want one per bead at the cap", len(store.reads))
 		}
 	})
 	t.Run("over the cap", func(t *testing.T) {
 		t.Parallel()
-		bdfake := &reviewBdFake{beads: beads}
+		store := &reviewStoreFake{notes: notes}
 		env := reviewTestEnv(t, lines(reviewBeadReadCap+1), false, nil)
-		env.Run = bdfake.run
+		env.Beads = store.seam()
 		cols, err := reviewSource{}.Collect(context.Background(), env)
 		if err != nil {
 			t.Fatalf("Collect: %v", err)
@@ -322,16 +435,18 @@ func TestSourceReviewStopsAtTheBeadReadCap(t *testing.T) {
 				t.Errorf("%s = %v, want null: more beads than the source will read", column, value)
 			}
 		}
-		if len(bdfake.calls) != 0 {
-			t.Errorf("bd reads = %d, want none over the cap", len(bdfake.calls))
+		if len(store.reads) != 0 {
+			t.Errorf("store reads = %d, want none over the cap", len(store.reads))
 		}
 	})
 }
 
-// The per-call deadline and the cap bound one factor each; the budget bounds all
-// the reads together. Every read runs under the one deadline the budget sets, not
-// a fresh per-call one, so the reads cannot outlast it however many there are.
-// The test reads the deadline each call was given, so it waits for nothing.
+// The per-read deadline and the cap bound one factor each; the budget bounds all
+// the reads together. A budget tighter than one read is what every read runs
+// under, so the reads cannot outlast it however many there are; a budget wider
+// than one read leaves each read its own reviewBdTimeout deadline, so a store
+// slow on one bead cannot hold the reads that follow. The test reads the
+// deadline each read was given, so it waits for nothing.
 func TestReviewBeadsGivesEveryReadTheSameBudgetDeadline(t *testing.T) {
 	t.Parallel()
 	reviews := []Review{
@@ -339,49 +454,339 @@ func TestReviewBeadsGivesEveryReadTheSameBudgetDeadline(t *testing.T) {
 		{Bead: "gt-b2", Rig: "gastown"},
 		{Bead: "gt-b3", Rig: "gastown"},
 	}
-	const budget = time.Second // well inside reviewBdTimeout, so only the budget can set it
-	var deadlines []time.Time
-	env := Env{Town: t.TempDir(), Run: func(ctx context.Context, argv []string) ([]byte, error) {
-		deadline, ok := ctx.Deadline()
-		if !ok {
-			t.Errorf("a read ran without a deadline")
+	read := func(t *testing.T, budget time.Duration) []reviewStoreRead {
+		t.Helper()
+		store := &reviewStoreFake{notes: map[string]string{
+			"gt-b1": reviewBeadNotes("polecat/opal/x+mv1"),
+			"gt-b2": reviewBeadNotes("polecat/opal/x+mv1"),
+			"gt-b3": reviewBeadNotes("polecat/opal/x+mv1"),
+		}}
+		env := Env{Town: t.TempDir(), Beads: store.seam()}
+		rows, ok := reviewBeads(context.Background(), env, reviews, budget)
+		if !ok || len(rows) != len(reviews) || len(store.reads) != len(reviews) {
+			t.Fatalf("reviewBeads = %d rows, %v, %d reads, want all %d read", len(rows), ok, len(store.reads), len(reviews))
 		}
-		deadlines = append(deadlines, deadline)
-		return []byte("[" + reviewBeadJSON(argv[len(argv)-1], "polecat/opal/x+mv1") + "]"), nil
-	}}
-	started := time.Now()
-	rows, ok := reviewBeads(context.Background(), env, reviews, budget)
-	if !ok || len(rows) != len(reviews) || len(deadlines) != len(reviews) {
-		t.Fatalf("reviewBeads = %d rows, %v, %d reads, want all %d read", len(rows), ok, len(deadlines), len(reviews))
-	}
-	// The budget starts a moment after started; the per-call deadline would be
-	// reviewBdTimeout out, far past this slack.
-	if limit := started.Add(budget + reviewBdTimeout/2); deadlines[0].After(limit) {
-		t.Errorf("first read's deadline is %v past the budget's end: it got the per-call deadline instead", deadlines[0].Sub(limit))
-	}
-	for i, deadline := range deadlines[1:] {
-		if !deadline.Equal(deadlines[0]) {
-			t.Errorf("read %d's deadline differs from the first's by %v, want one shared deadline", i+2, deadline.Sub(deadlines[0]))
+		if store.deadlineMissing {
+			t.Error("a read ran without a deadline")
 		}
+		return store.reads
 	}
+	t.Run("a budget tighter than one read bounds every read", func(t *testing.T) {
+		t.Parallel()
+		const budget = time.Second // well inside reviewBdTimeout, so only the budget can set it
+		reads := read(t, budget)
+		for _, got := range reads {
+			// The budget's deadline is fixed before any read starts, so what is
+			// left of it when a read starts is at most the budget and still
+			// ahead of it; a per-read deadline would leave nearly all of
+			// reviewBdTimeout.
+			if left := got.deadline.Sub(got.at); left <= 0 || left > budget {
+				t.Errorf("read %v's deadline is %v from its start, want what the budget (%v) leaves", got.ids, left, budget)
+			}
+		}
+		for i, got := range reads[1:] {
+			if !got.deadline.Equal(reads[0].deadline) {
+				t.Errorf("read %d's deadline differs from the first's by %v, want one shared deadline", i+2, got.deadline.Sub(reads[0].deadline))
+			}
+		}
+	})
+	t.Run("a budget wider than one read gives each read its own", func(t *testing.T) {
+		t.Parallel()
+		reads := read(t, time.Hour)
+		for _, got := range reads {
+			// The deadline is fixed before the read runs, so it is at most
+			// reviewBdTimeout after the read's start, and still ahead of it.
+			if left := got.deadline.Sub(got.at); left <= 0 || left > reviewBdTimeout {
+				t.Errorf("read %v's deadline is %v from its start, want a deadline of its own no later than reviewBdTimeout (%v)", got.ids, left, reviewBdTimeout)
+			}
+		}
+		// A deadline shared by the directory's reads would leave every read the
+		// first one's deadline; each read here is anchored at its own start.
+		for i, got := range reads[1:] {
+			if !got.deadline.After(reads[0].deadline) {
+				t.Errorf("read %d's deadline is not after the first's: the reads share one deadline", i+2)
+			}
+		}
+	})
 }
 
 // A budget already spent fails the attribution at its first read, so the kind
-// columns are null like any other failed read.
+// columns are null like any other failed read. A read that hangs is ended by
+// the deadline it was given: what a hung read costs is bounded by the budget
+// for the whole collection, not by a deadline of the source's per-read length.
 func TestReviewBeadsFailsWhenTheBudgetIsSpent(t *testing.T) {
 	t.Parallel()
-	env := Env{Town: t.TempDir(), Run: func(ctx context.Context, argv []string) ([]byte, error) {
-		return nil, ctx.Err()
-	}}
-	rows, ok := reviewBeads(context.Background(), env, []Review{{Bead: "gt-b1", Rig: "gastown"}}, -time.Second)
-	if ok || rows != nil {
-		t.Errorf("reviewBeads under a spent budget = %v, %v, want a failed attribution", rows, ok)
+	t.Run("spent before the first read", func(t *testing.T) {
+		t.Parallel()
+		store := &reviewStoreFake{notes: map[string]string{"gt-b1": reviewBeadNotes("polecat/opal/x+mv1")}}
+		env := Env{Town: t.TempDir(), Beads: store.seam()}
+		rows, ok := reviewBeads(context.Background(), env, []Review{{Bead: "gt-b1", Rig: "gastown"}}, -time.Second)
+		if ok || rows != nil {
+			t.Errorf("reviewBeads under a spent budget = %v, %v, want a failed attribution", rows, ok)
+		}
+	})
+	t.Run("spent while a read hangs", func(t *testing.T) {
+		t.Parallel()
+		const budget = 20 * time.Millisecond
+		store := &reviewStoreFake{slow: "gt-b1", notes: map[string]string{"gt-b1": reviewBeadNotes("polecat/opal/x+mv1")}}
+		env := Env{Town: t.TempDir(), Beads: store.seam()}
+		started := time.Now()
+		rows, ok := reviewBeads(context.Background(), env, []Review{{Bead: "gt-b1", Rig: "gastown"}}, budget)
+		if ok || rows != nil {
+			t.Errorf("reviewBeads with a hung read = %v, %v, want a failed attribution", rows, ok)
+		}
+		// A hung read that waited for its own reviewBdTimeout instead of the
+		// budget would take at least reviewBdTimeout to answer, so the
+		// constant is the bound: no tolerance, and three orders of magnitude
+		// of headroom over the budget it should end at.
+		if took := time.Since(started); took >= reviewBdTimeout {
+			t.Errorf("the hung read took %v, want it ended at the budget (%v), not at reviewBdTimeout (%v)", took, budget, reviewBdTimeout)
+		}
+	})
+}
+
+// A store hung on a bead's read is ended by the deadline the read was given
+// rather than by the store, so a collection still answers: the kind columns go
+// null, and the counts the source can still make stand. The deadline here is
+// test-sized, well inside reviewBdTimeout, since a test that waited out the
+// per-bead deadline itself would take five seconds to learn the same thing.
+func TestSourceReviewAHungReadEndsAtItsDeadline(t *testing.T) {
+	t.Parallel()
+	now := fixedNow()
+	content := reviewLine("gt-a1", land.VerdictApprove, 2, 8, false, now.Add(-30*time.Minute)) + "\n"
+	store := &reviewStoreFake{
+		slow:  "gt-a1",
+		notes: map[string]string{"gt-a1": reviewBeadNotes("polecat/opal/gt-a1+mv1")},
+	}
+	env := reviewTestEnv(t, content, false, nil)
+	env.Beads = store.seam()
+	const snapshot = 20 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), snapshot)
+	defer cancel()
+	started := time.Now()
+	cols, err := reviewSource{}.Collect(ctx, env)
+	took := time.Since(started)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if cols["om_reviews_1h"] != 1 || cols["om_second_attempts_1h"] != 1 {
+		t.Errorf("review = %v, want the review it could still count", cols)
+	}
+	for _, column := range reviewKindColumnNames {
+		if value, ok := cols[column]; !ok || value != nil {
+			t.Errorf("%s = %v, want null: a read that ran out of its deadline is not an unknown author's", column, value)
+		}
+	}
+	// A read that waited for its own reviewBdTimeout instead of the deadline it
+	// was given would take seconds.
+	if took > reviewBdTimeout {
+		t.Errorf("Collect took %v, want the read ended near its deadline (%v), not at reviewBdTimeout (%v)",
+			took, snapshot, reviewBdTimeout)
+	}
+	if len(store.reads) != 1 {
+		t.Errorf("store reads = %v, want the one hung read", store.reads)
+	}
+	if store.deadlineMissing {
+		t.Error("the hung read ran without a deadline, so only its store could have ended it")
 	}
 }
 
-// A snapshot with no runner cannot attribute, so its kind columns are null: a
-// review whose branch was never read is not a review by an unknown author.
-func TestSourceReviewWithoutARunnerLeavesTheKindsNull(t *testing.T) {
+// reviewBeads answers its rows in id order, so what it attributes does not
+// depend on the order the review log names its beads.
+func TestReviewBeadsAnswersRowsInIDOrder(t *testing.T) {
+	t.Parallel()
+	reviews := []Review{
+		{Bead: "gt-z1", Rig: "gastown"},
+		{Bead: "gt-a1", Rig: "gastown"},
+		{Bead: "gt-m1", Rig: "gastown"},
+	}
+	store := &reviewStoreFake{notes: map[string]string{
+		"gt-z1": reviewBeadNotes("polecat/opal/gt-z1+mv1"),
+		"gt-a1": reviewBeadNotes("polecat/opal/gt-a1+mv1"),
+		"gt-m1": reviewBeadNotes("polecat/opal/gt-m1+mv1"),
+	}}
+	env := Env{Town: t.TempDir(), Beads: store.seam()}
+	rows, ok := reviewBeads(context.Background(), env, reviews, reviewBdBudget)
+	if !ok {
+		t.Fatalf("reviewBeads failed, want every bead read")
+	}
+	got := make([]string, len(rows))
+	for i, row := range rows {
+		got[i] = row.ID
+	}
+	if want := []string{"gt-a1", "gt-m1", "gt-z1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("rows = %v, want %v", got, want)
+	}
+}
+
+// A bead the store does not hold is the unknown author's rather than a failed
+// read, and an id that starts with a dash is never asked of the store: bd would
+// read it as a flag, so it is no bead id at all.
+func TestSourceReviewAMissingBeadAndADashIDAreUnknownAuthors(t *testing.T) {
+	t.Parallel()
+	now := fixedNow()
+	content := reviewLine("gt-a1", land.VerdictApprove, 1, 8, false, now.Add(-30*time.Minute)) + "\n" +
+		reviewLine("gt-gone", land.VerdictApprove, 1, 8, false, now.Add(-20*time.Minute)) + "\n" +
+		reviewLine("-dash", land.VerdictApprove, 1, 8, false, now.Add(-10*time.Minute)) + "\n"
+	store := &reviewStoreFake{notes: map[string]string{
+		"gt-a1": reviewBeadNotes("polecat/opal/gt-a1+mv1"),
+	}}
+	env := reviewTestEnv(t, content, false, nil)
+	env.Beads = store.seam()
+	cols, err := reviewSource{}.Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	want := map[string]any{
+		"om_reviews_1h":          3,
+		"om_rejections_1h":       0,
+		"om_mean_score_1h":       8.0,
+		"om_second_attempts_1h":  0,
+		"om_polecat_reviews_1h":  1,
+		"om_crew_reviews_1h":     0,
+		"om_overseer_reviews_1h": 0,
+		"om_unknown_reviews_1h":  2,
+	}
+	if !reflect.DeepEqual(cols, want) {
+		t.Fatalf("review = %#v, want %#v", cols, want)
+	}
+	for _, id := range store.readIDs() {
+		if id == "-dash" {
+			t.Errorf("the store was asked for %q, which bd would read as a flag", id)
+		}
+	}
+	if got := len(store.readIDs()); got != 2 {
+		t.Errorf("store reads = %d, want the 2 beads the store could be asked for", got)
+	}
+}
+
+// A reviewed bead the store no longer holds is the unknown author's, not a
+// failed read: the real seam over a fake bd answers bd's not-found envelope
+// (data null, exit 20) for that bead, which the store reads as none found and
+// the source as an author it cannot name. The four kind columns are therefore
+// filled rather than null, and the counts stand (gt-vu312, gt-55ypc).
+func TestSourceReviewAMissingBeadThroughTheRealSeamIsAnUnknownAuthor(t *testing.T) {
+	t.Parallel()
+	now := fixedNow()
+	content := reviewLine("gt-a1", land.VerdictApprove, 1, 8, false, now.Add(-30*time.Minute)) + "\n" +
+		reviewLine("gt-gone", land.VerdictApprove, 1, 8, false, now.Add(-20*time.Minute)) + "\n"
+	var asked []string
+	answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
+		// The seam's probe that bd takes --allow-stale, keyed the way
+		// internal/beads' own tests key it.
+		if len(args) == 2 && args[0] == "--allow-stale" && args[1] == "version" {
+			return []byte("bd version 1.2.2\n"), nil, nil
+		}
+		if len(args) == 4 && args[0] == "--allow-stale" && args[1] == "show" && args[2] == "--json" {
+			asked = append(asked, args[3])
+			switch args[3] {
+			case "gt-a1":
+				return []byte(`[{"id":"gt-a1","notes":"READY TO LAND\nBranch: polecat/opal/gt-a1\nHead: abc\n"}]`), nil, nil
+			case "gt-gone":
+				return []byte(reviewNotFoundEnvelope), []byte("Issue gt-gone not found\n"), errors.New("exit status 20")
+			}
+		}
+		t.Errorf("the store ran %v, want a show of one reviewed bead", args)
+		return nil, nil, errors.New("unexpected store call")
+	}
+	town := t.TempDir()
+	env := Env{Now: func() time.Time { return now }, Town: town}
+	env.Tail = func(string, int64) ([]byte, error) { return []byte(content), nil }
+	env.Beads = func(ctx context.Context, dir string) BeadStore {
+		return beads.New(dir, beads.WithCallContext(ctx), beads.WithRunner(answer))
+	}
+	cols, err := reviewSource{}.Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	want := map[string]any{
+		"om_reviews_1h":          2,
+		"om_rejections_1h":       0,
+		"om_mean_score_1h":       8.0,
+		"om_second_attempts_1h":  0,
+		"om_polecat_reviews_1h":  1,
+		"om_crew_reviews_1h":     0,
+		"om_overseer_reviews_1h": 0,
+		"om_unknown_reviews_1h":  1,
+	}
+	if !reflect.DeepEqual(cols, want) {
+		t.Fatalf("review = %#v, want %#v", cols, want)
+	}
+	// The unknown author is the answer to a read the store did make, not a bead
+	// the source never asked about.
+	if want := []string{"gt-a1", "gt-gone"}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("the store was asked for %v, want %v", asked, want)
+	}
+}
+
+// The store's read of one reviewed bead, recorded through the real seam over a
+// fake bd: the seam runs `bd --allow-stale show --json <id>` with its working
+// directory set to the directory the store was opened in, where the pre-seam
+// reader ran `bd -C <dir> show --json -- <id>`. The argv therefore differs three
+// ways: the seam adds --allow-stale, -C <dir> becomes the directory the store is
+// opened in, and the `--` is gone because isBeadID refuses a dash id before the
+// store is asked. A read may now be as stale as the store last synced, which the
+// hourly counts tolerate; the overseer accepted that as this bead's one
+// behaviour change (gt-vu312).
+func TestReviewBeadsRunsTheStoreSeamsArgv(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		rig     string
+		wantDir func(town string) string
+	}{
+		{
+			name:    "a rig's review reads the store in the rig's directory",
+			rig:     "gastown",
+			wantDir: func(town string) string { return filepath.Join(town, "gastown") },
+		},
+		{
+			name:    "a review with no rig reads the town's store",
+			rig:     "",
+			wantDir: func(town string) string { return town },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var storeDirs []string
+			var reads [][]string
+			answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
+				// The seam's probe that bd takes --allow-stale, keyed the way
+				// internal/beads' own tests key it.
+				if len(args) >= 2 && args[0] == "--allow-stale" && args[1] == "version" {
+					return []byte("bd version 1.2.2\n"), nil, nil
+				}
+				reads = append(reads, append([]string(nil), args...))
+				return []byte(`[{"id":"gt-s1","notes":"READY TO LAND\nBranch: crew/merlin/gt-s1\nHead: abc\n"}]`), nil, nil
+			}
+			town := t.TempDir()
+			env := Env{Town: town, Beads: func(ctx context.Context, storeDir string) BeadStore {
+				storeDirs = append(storeDirs, storeDir)
+				return beads.New(storeDir, beads.WithCallContext(ctx), beads.WithRunner(answer))
+			}}
+			rows, ok := reviewBeads(context.Background(), env, []Review{{Bead: "gt-s1", Rig: tc.rig}}, reviewBdBudget)
+			if !ok {
+				t.Fatalf("reviewBeads failed, want the bead read through the seam")
+			}
+			want := []string{"--allow-stale", "show", "--json", "gt-s1"}
+			if len(reads) != 1 || !reflect.DeepEqual(reads[0], want) {
+				t.Fatalf("the store ran %v, want one %v", reads, want)
+			}
+			if wantDir := tc.wantDir(town); len(storeDirs) != 1 || storeDirs[0] != wantDir {
+				t.Errorf("the store was opened in %v, want %q: -C <dir> is the store's own directory now",
+					storeDirs, wantDir)
+			}
+			if len(rows) != 1 || rows[0].Branch != "crew/merlin/gt-s1" {
+				t.Errorf("rows = %+v, want the bead's branch read through the seam", rows)
+			}
+		})
+	}
+}
+
+// A snapshot with no store seam cannot attribute, so its kind columns are null:
+// a review whose branch was never read is not a review by an unknown author.
+func TestSourceReviewWithoutAStoreLeavesTheKindsNull(t *testing.T) {
 	t.Parallel()
 	now := fixedNow()
 	content := reviewLine("gt-a1", land.VerdictApprove, 1, 8.5, false, now.Add(-30*time.Minute)) + "\n"
@@ -394,16 +799,16 @@ func TestSourceReviewWithoutARunnerLeavesTheKindsNull(t *testing.T) {
 	}
 	for _, column := range reviewKindColumnNames {
 		if value, ok := cols[column]; !ok || value != nil {
-			t.Errorf("%s = %v, want null without a runner", column, value)
+			t.Errorf("%s = %v, want null without a store", column, value)
 		}
 	}
 }
 
 func TestSourceReviewMissingLogIsAnHourWithNoReviews(t *testing.T) {
 	t.Parallel()
-	bdfake := &reviewBdFake{}
+	store := &reviewStoreFake{}
 	env := reviewTestEnv(t, "", true, nil)
-	env.Run = bdfake.run
+	env.Beads = store.seam()
 	cols, err := reviewSource{}.Collect(context.Background(), env)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
@@ -421,8 +826,8 @@ func TestSourceReviewMissingLogIsAnHourWithNoReviews(t *testing.T) {
 	if !reflect.DeepEqual(cols, want) {
 		t.Fatalf("review = %#v, want %#v (no review is not a score of zero)", cols, want)
 	}
-	if len(bdfake.calls) != 0 {
-		t.Errorf("bd reads = %v, want none: an hour of no reviews has no bead to read", bdfake.calls)
+	if len(store.reads) != 0 {
+		t.Errorf("store reads = %v, want none: an hour of no reviews has no bead to read", store.reads)
 	}
 }
 
@@ -437,7 +842,7 @@ func TestSourceReviewSkipsEveryLineItCannotUse(t *testing.T) {
 		t.Fatalf("review = %v; want no reviews and no mean from lines it cannot attribute", cols)
 	}
 	// No review is every kind at zero, not an attribution nobody could make:
-	// there is no bead to read and no runner is needed.
+	// there is no bead to read and no store is needed.
 	for _, column := range reviewKindColumnNames {
 		if value, ok := cols[column]; !ok || value != 0 {
 			t.Errorf("%s = %v, want 0: an hour with no reviews", column, value)
