@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/procid"
 )
@@ -64,12 +65,25 @@ type Pool struct {
 	// against it: the gate is the merge path's critical section and holds
 	// priority (see Pool.ReservedForGate).
 	MaxFullSuites int
+	// MaxInstallYield bounds how long one post-landing acquisition yields to
+	// an install in flight (IsPostLandRole), so a marker no cycle clears
+	// cannot park the red-main detector forever; after it the caller competes
+	// for a slot as before. The default is where the install job's own
+	// starvation escalation fires, so a marker still standing then is that
+	// job's alarm to raise. Values <= 0 mean DefaultMaxInstallYield.
+	MaxInstallYield time.Duration
 }
 
 // DefaultMaxGateYield is Pool.MaxGateYield's default: longer than a slow gate
 // (24 min measured beside two crew suites, gt-22hdp.29), short enough that a
 // wedged one costs the town one wait rather than the day.
 const DefaultMaxGateYield = config.DefaultContainerGateMaxGateYield
+
+// DefaultMaxInstallYield is Pool.MaxInstallYield's default: the 30 minutes at
+// which the install job escalates a binary that stays due (rebuildGTStarveAfter
+// in internal/daemon), so the two never disagree about how long an install may
+// hold the town's post-landing work.
+const DefaultMaxInstallYield = 30 * time.Minute
 
 // DefaultPool is the pre-pool behavior: one slot, nothing reserved. Acquire
 // and Status use it.
@@ -85,6 +99,9 @@ func (p Pool) normalized() Pool {
 	}
 	if p.MaxGateYield <= 0 {
 		p.MaxGateYield = DefaultMaxGateYield
+	}
+	if p.MaxInstallYield <= 0 {
+		p.MaxInstallYield = DefaultMaxInstallYield
 	}
 	if p.Slots == 1 {
 		p.ReservedForGate = 0
@@ -107,6 +124,26 @@ var gateRoleSuffixes = []string{"/landing", "/post-land"}
 func IsGateRole(role string) bool {
 	return hasRoleSuffix(role, gateRoleSuffixes)
 }
+
+// postLandRoleSuffixes identify the post-landing suite: the red-main detector
+// the landing worker runs once a merge has landed. It is the one class that
+// yields to an install in flight (Pool.MaxInstallYield); the landing gate
+// ("<rig>/landing") is deliberately not in it, so a merge is never held back
+// (gt-t135z).
+var postLandRoleSuffixes = []string{"/post-land"}
+
+// IsPostLandRole reports whether role is a post-landing suite, which yields the
+// gate slot to a binary install that is in flight.
+func IsPostLandRole(role string) bool {
+	return hasRoleSuffix(role, postLandRoleSuffixes)
+}
+
+// InstallRole is what install-gt.sh's --slot-role names the install's own build
+// under (the daemon passes it when the build takes a gate slot). A post-landing
+// suite stops yielding to a marker once this role holds a slot: the install's
+// reservation is in place and a long build behind it is no reason to park the
+// red-main detector (gt-t135z).
+const InstallRole = "gastown/rebuild-gt"
 
 // fullSuiteRoleSuffixes identify the full-suite class: roles whose work is a
 // whole-tree test run. The daemon's tier sweep ("<rig>/tier-sweep") and the
@@ -512,8 +549,16 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 	// underFullSuiteHold): capping it would stall that hold on itself.
 	fullSuiteApplies := pool.MaxFullSuites > 0 && IsFullSuiteRole(role) && !g.underFullSuiteHold(townRoot)
 
-	var yielded time.Duration
-	yieldCapLogged := false
+	// Yielding to an install in flight (gt-t135z) applies to a post-landing
+	// suite only, and not to work nested under a post-landing hold of its own:
+	// that hold is the red-main detector already running, and parking its
+	// children on the install would stall the run the install is waiting to be
+	// checked by. A merge gate is not in this class, so a landing never yields.
+	installApplies := IsPostLandRole(role) && !g.underPostLandHold(townRoot)
+	logInstallUnreadableOnce := unreadableInstallLogger(g.probeOut)
+
+	var yielded, installYielded time.Duration
+	yieldCapLogged, installCapLogged := false, false
 
 	for {
 		passStart := g.clock.Now()
@@ -532,12 +577,17 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 				passReason = WaitReasonFullSuiteHeld
 			}
 		}
+		if passReason == "" && installApplies && installYielded < pool.MaxInstallYield {
+			if g.installInFlight(townRoot, pool, watch, logInstallUnreadableOnce) {
+				passReason = WaitReasonInstallPending
+			}
+		}
 		for _, i := range candidates {
-			// The two reasons set before the loop are decisions not to compete
+			// The reasons set before the loop are decisions not to compete
 			// for a slot this pass at all. Reasons a pass sets while walking
 			// the candidates (a held token, an unwrapped suite) are not, so
 			// the walk keeps going to the next candidate.
-			if passReason == WaitReasonGateRunning || passReason == WaitReasonFullSuiteHeld {
+			if passReason == WaitReasonGateRunning || passReason == WaitReasonFullSuiteHeld || passReason == WaitReasonInstallPending {
 				break
 			}
 			unlock, ok, err := lock.FlockTryAcquire(SlotLockPath(townRoot, i))
@@ -647,6 +697,14 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 					role, yielded.Round(time.Second), pool.MaxGateYield.Round(time.Second))
 			}
 		}
+		if passReason == WaitReasonInstallPending {
+			installYielded += passTime
+			if installYielded >= pool.MaxInstallYield && !installCapLogged {
+				installCapLogged = true
+				fmt.Fprintf(g.probeOut, "gt slot: %s yielded %s to an install in flight, reaching the yield cap %s; competing for a slot now\n",
+					role, installYielded.Round(time.Second), pool.MaxInstallYield.Round(time.Second))
+			}
+		}
 	}
 }
 
@@ -691,6 +749,76 @@ func (g *Gate) underHoldOfClass(townRoot string, match func(string) bool) bool {
 		return false
 	}
 	return g.holdsSlot(townRoot, m)
+}
+
+// underPostLandHold is underGateHold for the post-landing class: this process
+// runs inside the red-main detector's own hold, so it does not yield to an
+// install in flight on that hold's behalf (gt-t135z).
+func (g *Gate) underPostLandHold(townRoot string) bool {
+	return g.underHoldOfClass(townRoot, IsPostLandRole)
+}
+
+// pendingInstall returns the pending-install marker in force, or nil when no
+// install stands. The default resolves the town's marker through this gate's
+// own environment, so a caller that replaced the environment (a test) cannot
+// be steered by INSTALL_GT_DAEMON_DIR on the host; installPending replaces the
+// read outright.
+func (g *Gate) pendingInstall(townRoot string) (*installpending.Marker, error) {
+	if g.installPending != nil {
+		return g.installPending(townRoot)
+	}
+	return installpending.StoreForEnv(townRoot, g.env.Getenv).Pending(g.clock.Now())
+}
+
+// installInFlight reports whether a post-landing acquisition keeps out of the
+// gate slot this pass: a pending-install marker stands and the install's build
+// has not taken a slot yet (gt-t135z). An unreadable marker counts as an
+// install in flight — a reader that cannot tell must not start a suite beside
+// one — and is reported once per wait by logUnreadable.
+func (g *Gate) installInFlight(townRoot string, pool Pool, watch *waitWatch, logUnreadable func(error)) bool {
+	m, err := g.pendingInstall(townRoot)
+	switch {
+	case err != nil:
+		logUnreadable(err)
+		watch.noteInstallErr(err)
+	case m == nil:
+		return false
+	default:
+		watch.noteInstall(m)
+	}
+	return !g.installRoleHoldsSlot(townRoot, pool)
+}
+
+// installRoleHoldsSlot reports whether the install's build role holds any slot
+// of pool: the install's reservation is in place, so post-landing work waits no
+// longer on a build that may run long (gt-t135z).
+//
+// It reads the owner files and checks the owner's pid, exactly as runningGate
+// does, and for the same reason: a probe takes the lock for an instant. A
+// claimant still in its docker probe counts — its flock is already held.
+func (g *Gate) installRoleHoldsSlot(townRoot string, pool Pool) bool {
+	for _, i := range knownSlotIndices(townRoot, pool) {
+		owner := readSlotOwner(townRoot, i)
+		if owner == nil || owner.Role != InstallRole || owner.PID <= 0 || g.ownerGone(owner) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// unreadableInstallLogger returns a func that reports the first unreadable
+// pending-install marker of one Acquire call, then stays quiet: the wait polls,
+// and a message per poll would bury the wait line (gt-t135z).
+func unreadableInstallLogger(w io.Writer) func(error) {
+	logged := false
+	return func(err error) {
+		if logged {
+			return
+		}
+		logged = true
+		fmt.Fprintf(w, "gt slot: install-pending marker unreadable (%v); treating an install as in flight and waiting for it\n", err)
+	}
 }
 
 // holdsSlot reports whether the slot m names is still held by the pid m

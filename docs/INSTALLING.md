@@ -474,8 +474,10 @@ or already current, 1 failed and rolled back, 2 refused (mayor/rig dirty,
 diverged or not forward), 3 busy (retry). The daemon's `rebuild_gt` job calls
 the same script as a backstop, whenever the installed binary falls behind main
 and the town is quiet. A landing's install request waits until 30 minutes
-after the last install (set `daemon.patrols.rebuild_gt.min_interval`, a Go
-duration, to change it) so a burst of landings costs one build and restart;
+after the last install that swapped a binary — a cycle that found nothing to
+install, refused, failed or installed a noop does not start that window (set
+`daemon.patrols.rebuild_gt.min_interval`, a Go duration, to change it) — so a
+burst of landings costs one build and restart;
 a bead labeled `gt:install-now` skips the wait. While an install is in flight
 the job leaves `daemon/install-pending.json` in the town — the cycle's time and
 the daemon's pid — and removes it when the cycle reaches a verdict, so anything
@@ -487,8 +489,10 @@ cannot see an install, or one that cannot stop seeing a finished one, is a
 condition an operator has to repair. While a marker stands, `gt sling`, the
 spec dispatcher and queue dispatch (`gt scheduler run` and the daemon's
 dispatch tick) refuse new slings, naming the install they wait on, and running
-sessions are left alone; a sling starts again once the marker is gone. Do not
-copy binaries by hand, run `go install`, or
+sessions are left alone; a sling starts again once the marker is gone. A
+post-landing suite (`<rig>/post-land`) also waits for the install's gate slot
+while the marker stands, for at most 30 minutes, and the landing gate itself
+never waits. Do not copy binaries by hand, run `go install`, or
 use `make install-local` in a town: none of them restarts the daemon or rolls
 back.
 

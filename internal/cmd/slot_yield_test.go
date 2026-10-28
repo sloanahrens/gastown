@@ -89,3 +89,21 @@ func TestSlotHistoryReason_FullSuiteHeld(t *testing.T) {
 		t.Fatalf("slotHistoryReason without a holder = %q", got)
 	}
 }
+
+// TestSlotHistoryReason_InstallPending: a history entry for a post-landing wait
+// spent behind an install names the marker's writer, or the failed read
+// (gt-t135z).
+func TestSlotHistoryReason_InstallPending(t *testing.T) {
+	t.Parallel()
+	e := slot.HistoryEntry{Reason: slot.WaitReasonInstallPending, InstallPID: 4242}
+	if got := slotHistoryReason(e); got != "install_pending: pid 4242 reported the install" {
+		t.Fatalf("slotHistoryReason = %q", got)
+	}
+	broken := slot.HistoryEntry{Reason: slot.WaitReasonInstallPending, InstallError: "parsing install-pending.json: unexpected end of JSON input"}
+	if got := slotHistoryReason(broken); !strings.Contains(got, "install_pending: marker unreadable") {
+		t.Fatalf("slotHistoryReason for an unreadable marker = %q", got)
+	}
+	if got := slotHistoryReason(slot.HistoryEntry{Reason: slot.WaitReasonInstallPending}); got != "install_pending" {
+		t.Fatalf("slotHistoryReason without evidence = %q", got)
+	}
+}

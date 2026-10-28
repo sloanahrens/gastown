@@ -65,6 +65,12 @@ type Store struct{ path string }
 // INSTALL_GT_DAEMON_DIR override the install lock and scripts/install-gt.sh do.
 func StoreFor(townRoot string) Store { return storeFor(townRoot, os.Getenv) }
 
+// StoreForEnv is StoreFor over the caller's own environment, for a reader that
+// carries an injectable one (the container gate's).
+func StoreForEnv(townRoot string, getenv func(string) string) Store {
+	return storeFor(townRoot, getenv)
+}
+
 // storeFor is StoreFor with the environment passed in, so a test hands itself a
 // temp directory instead of reading INSTALL_GT_DAEMON_DIR (gt-y2ygl).
 func storeFor(townRoot string, getenv func(string) string) Store {

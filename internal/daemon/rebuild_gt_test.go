@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/version"
 )
 
@@ -215,7 +216,7 @@ func TestRebuildGTCycle_WaitsOutAGatePastTheStarveCliff(t *testing.T) {
 		t.Fatalf("install calls = %v, want one", installs)
 	}
 	got := strings.Join(installs[0], " ")
-	if !strings.Contains(got, "--slot-role "+rebuildGTSlotRole) {
+	if !strings.Contains(got, "--slot-role "+slot.InstallRole) {
 		t.Errorf("install argv %q does not reserve the gate slot", got)
 	}
 	idx := slices.Index(installs[0], "--slot-timeout")
@@ -726,25 +727,16 @@ func rebuildGTWindowTown(t *testing.T) (*Daemon, *fakeCLI) {
 	d.clock = newFixedClock()
 	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
 	d.rebuildGTGateFn = func() (string, bool) { return "", false }
-	cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
-		switch {
-		case gitSub(c, "branch"):
-			return cliReply{stdout: "main\n"}
-		case gitSub(c, "rev-parse"):
-			return cliReply{stdout: "abc1234567890\n"}
-		case gitSub(c, "log"):
-			return cliReply{stdout: "abc1234 the commit that was inert\n"}
-		case c.name == "bash":
-			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
-		}
-		return cliReply{}
+	cli := rebuildGTWindowCli(t, d, func(cliCall) cliReply {
+		return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
 	})
 	return d, cli
 }
 
-// TestRebuildGTMinIntervalEdge pins the window's edge: a request one second
-// inside the window waits, and one exactly at it installs — the window is a
-// duration to be reached, not an exclusive bound on the last install.
+// TestRebuildGTMinIntervalEdge pins the window's edge, measured from the
+// recorded install: a request one second inside the window waits, and one
+// exactly at it installs — the window is a duration to be reached, not an
+// exclusive bound on the last install (gt-t135z).
 func TestRebuildGTMinIntervalEdge(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -760,7 +752,12 @@ func TestRebuildGTMinIntervalEdge(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			d, cli := rebuildGTWindowTown(t)
-			if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now().Add(-tc.age)); err != nil {
+			// A settled cycle a minute ago: the patrol is not due, so the
+			// install window is what decides the request below.
+			if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now().Add(-time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			if err := savePatrolLastRun(d.config.TownRoot, rebuildGTInstallRecord, d.clk().Now().Add(-tc.age)); err != nil {
 				t.Fatal(err)
 			}
 			d.requestRebuildGTInstall()
@@ -778,11 +775,13 @@ func TestRebuildGTMinIntervalEdge(t *testing.T) {
 	}
 }
 
-// TestRebuildGTUnreadableLastRunInstalls pins the window's failed-read
-// branch: a last-run record that cannot be read makes the job due (the
+// TestRebuildGTUnreadableLastRunInstalls pins the failed-read branch of the
+// due decision: a last-run record that cannot be read makes the job due (the
 // interval path's documented choice over silent skipping), so the requested
 // install runs rather than being held on state nothing could compare. The
-// unreadable state is reported, once.
+// unreadable state is reported, once. The install window shares the file, so
+// this is also its unreadable branch: a record nothing could read holds no
+// request back.
 func TestRebuildGTUnreadableLastRunInstalls(t *testing.T) {
 	t.Parallel()
 	d, cli := rebuildGTWindowTown(t)
@@ -851,8 +850,12 @@ func TestRebuildGTInstallNowTravelsWithItsRequest(t *testing.T) {
 func TestRebuildGTDeferredInstallNowKeepsItsBypass(t *testing.T) {
 	t.Parallel()
 	d, cli := rebuildGTWindowTown(t)
-	// An install five minutes ago: a plain request would be held.
+	// A settled cycle and an install five minutes ago: a plain request would be
+	// held.
 	if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now().Add(-5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := savePatrolLastRun(d.config.TownRoot, rebuildGTInstallRecord, d.clk().Now().Add(-5*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	d.rebuildGTGateFn = func() (string, bool) { return "a gate suite holds a slot (gastown/landing)", true }
