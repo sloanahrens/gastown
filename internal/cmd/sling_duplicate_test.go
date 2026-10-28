@@ -1570,7 +1570,7 @@ func TestSpecPeerHeldFrom(t *testing.T) {
 		{"a type the dispatcher never takes", beadsfake.New(),
 			peer(func(p *duplicateCandidate) { p.IssueType = "chore" }), knobs, "type chore"},
 		{"an open blocking dependency is not on the ready board", beadsfake.New(),
-			peer(func(p *duplicateCandidate) { p.Ready.OpenBlockers = []string{"gt-x"} }), knobs, "blocked by gt-x"},
+			peer(func(p *duplicateCandidate) { p.Ready.OpenBlockers = []string{"gt-x"} }), knobs, "peer blocked by gt-x"},
 		// The tick skips a bead whose formula declaration it cannot read, so the
 		// bead is never slung with it (gt-j5cr2). Read as slingable, such a head
 		// refused every lower-ranked bead sharing its test while it stayed
@@ -1581,7 +1581,7 @@ func TestSpecPeerHeldFrom(t *testing.T) {
 			}), knobs, "conflicting formula labels: mol-a, mol-b"},
 		{"a peer with many open blockers names the first few", beadsfake.New(),
 			peer(func(p *duplicateCandidate) { p.Ready.OpenBlockers = []string{"gt-a", "gt-b", "gt-c", "gt-d"} }), knobs,
-			"blocked by gt-a, gt-b, gt-c (+1 more)"},
+			"peer blocked by gt-a, gt-b, gt-c (+1 more)"},
 		{"a bead resting after a failed start is not the dispatcher's next move", beadsfake.New(),
 			peer(nil), resting, "startup backoff: last sling failed at session start 2m ago"},
 		{"a container waits for its open child", childDB(beads.Issue{ID: "gt-child", Status: "open"}), peer(nil), knobs,
@@ -1597,6 +1597,25 @@ func TestSpecPeerHeldFrom(t *testing.T) {
 				t.Errorf("specPeerHeldFrom = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// The peer-hold answer and the tick's skip line are read by different rules —
+// the guard weighs the first as a verdict, the dispatch.idle rule matches the
+// second by prefix — so giving them one prefix let a peer's answer count as a
+// candidate's skip (gt-mz7v7).
+func TestPeerHoldAnswerDoesNotWearTheCandidatesSkipPrefix(t *testing.T) {
+	t.Parallel()
+	knobs := specHoldKnobs{MaxPriority: 2, ShapeGate: specdispatch.ShapeGateOff, Warn: io.Discard}
+	peer := duplicateCandidate{ID: "gt-peer", Status: "open", IssueType: "task", Priority: 1,
+		Ready: sling.Readiness{Description: specTestDescription, Acceptance: specTestAcceptance,
+			OpenBlockers: []string{"gt-x"}}}
+	got := specPeerHeldFrom(beadsfake.New(), knobs, peer, nil)
+	if !strings.HasPrefix(got, specdispatch.SkipPeerBlocked) {
+		t.Errorf("peer hold = %q, want it to start %q", got, specdispatch.SkipPeerBlocked)
+	}
+	if strings.HasPrefix(got, specdispatch.SkipBlocked) {
+		t.Errorf("peer hold = %q still wears the candidate's skip prefix %q", got, specdispatch.SkipBlocked)
 	}
 }
 

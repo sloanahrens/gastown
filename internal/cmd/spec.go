@@ -684,22 +684,37 @@ func warnSpecHoldUnread(w io.Writer, what string, err error) {
 		style.Dim.Render("Warning:"), what, err)
 }
 
-// maxNamedBlockers bounds the blockers specPeerBlocked names, so one widely
+// maxNamedBlockers bounds the blockers a blocked reason names, so one widely
 // blocked bead does not turn a hold line into a wall.
 const maxNamedBlockers = 3
 
-// specPeerBlocked names at most maxNamedBlockers of the blockers in open as a
-// refusal line, and "" when there are none.
+// specBlocked names why the tick may not sling a candidate: sling.Admit's
+// reasons, which name the status each blocker was read with, under the prefix
+// its skip line carries (gt-ndad8).
+func specBlocked(blockers []string) string {
+	return specNamedBlockers(specdispatch.SkipBlocked, blockers)
+}
+
+// specPeerBlocked names the blocking dependencies that keep a peer off the
+// ready board, and "" when it has none open: the dispatcher's draw is that
+// board, so a peer the query leaves out is never slung however eligible it is,
+// and ranking it ahead of a candidate refuses the rest of its cluster until the
+// dependency closes (gt-mknmb).
 func specPeerBlocked(open []string) string {
-	if len(open) == 0 {
+	return specNamedBlockers(specdispatch.SkipPeerBlocked, open)
+}
+
+// specNamedBlockers joins at most maxNamedBlockers ids under prefix.
+func specNamedBlockers(prefix string, named []string) string {
+	if len(named) == 0 {
 		return ""
 	}
-	named, more := open, 0
+	more := 0
 	if len(named) > maxNamedBlockers {
 		more = len(named) - maxNamedBlockers
 		named = named[:maxNamedBlockers]
 	}
-	reason := specdispatch.SkipBlocked + strings.Join(named, ", ")
+	reason := prefix + strings.Join(named, ", ")
 	if more > 0 {
 		reason += fmt.Sprintf(" (+%d more)", more)
 	}
@@ -1156,7 +1171,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// candidate whose edges could not be read never reached it. A refusal is
 		// a skip, not a failure: the bead stays ready and the next tick asks
 		// again once the blocker closes.
-		if why := specPeerBlocked(sling.Admit(c.Blockers)); why != "" {
+		if why := specBlocked(sling.Admit(c.Blockers)); why != "" {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, why)})
 			continue
 		}
@@ -2671,7 +2686,7 @@ func refuseOpenBlockers(read func(townRoot, beadID string) (*beadInfo, error)) f
 		if started.Swap(true) || err != nil || info == nil {
 			return info, err
 		}
-		if why := specPeerBlocked(beads.UnresolvedBlockerIDs(info.Dependencies)); why != "" {
+		if why := specBlocked(beads.UnresolvedBlockerIDs(info.Dependencies)); why != "" {
 			return nil, fmt.Errorf("%s %s is %s", dispatch.SlingRefusalMarker, beadID, why)
 		}
 		return info, nil
