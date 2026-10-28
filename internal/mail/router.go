@@ -1,8 +1,6 @@
 package mail
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -49,9 +47,9 @@ type Router struct {
 	// prefixes maps rigs to the session prefixes notifications address;
 	// nil gives every rig session.DefaultPrefix.
 	prefixes *session.PrefixRegistry
-	// bd runs bd for the router and the mailboxes it opens; nil is the bd
-	// on PATH.
-	bd bdRunner
+	// bd answers bd calls for the router and the mailboxes it opens; nil is
+	// the bd on PATH, which the stores run themselves.
+	bd bdAnswer
 	// town answers the router's reads of the town's channel and agent
 	// beads; nil is bd in the town root.
 	town townBeads
@@ -387,23 +385,18 @@ func parseGroupAddress(address string) *ParsedGroup {
 
 // agentBead represents an agent bead as returned by bd list --label=gt:agent.
 type agentBead struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
-	CreatedBy   string `json:"created_by"`
-	Type        string `json:"issue_type"`
-	// WispType is the issue type `bd mol wisp list --json` prints under
-	// "type"; bd list spells the same field "issue_type". Agent beads are
-	// created --type=task, so this identifies nothing on its own, but a bd
-	// that reports an agent there must not be ignored.
-	WispType string   `json:"type"`
-	Labels   []string `json:"labels"`
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Status      string   `json:"status"`
+	CreatedBy   string   `json:"created_by"`
+	Type        string   `json:"issue_type"`
+	Labels      []string `json:"labels"`
 }
 
 // agentBeadFromIssue converts a seam record into the agent bead shape the
-// router's group filters read. WispType stays empty: bd list spells an issue's
-// type issue_type, which is what Type carries.
+// router's group filters read. bd spells an issue's type issue_type, which is
+// what Type carries.
 func agentBeadFromIssue(issue *beads.Issue) *agentBead {
 	return &agentBead{
 		ID:          issue.ID,
@@ -804,24 +797,21 @@ func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, 
 		List(beads.ListOptions{Label: "gt:agent"})
 
 	// Also query the wisps table for migrated agent beads. `mol wisp list` is a
-	// mol verb, not a List filter, so it stays on the runner until B10c
-	// (gt-p85pw.18) converts the mol calls.
-	wispCtx, wispCancel := bdReadCtx()
-	defer wispCancel()
-	wispOut, wispErr := runBdCommand(wispCtx, r.bd, []string{"mol", "wisp", "list", "--json"}, filepath.Dir(beadsDir), beadsDir)
+	// mol verb, not a List filter, so it reads through Admin.
+	wisps, wispErr := bdAdminStore(r.bd, filepath.Dir(beadsDir), beadsDir).MolWispList()
 
 	// Merge results: collect agent beads from both sources
 	seenIDs := make(map[string]bool)
 	var agents []*agentBead
 	var queryErrors []string
 
-	// Parse wisps first (primary source after migration). bd prints them in
-	// a wrapper object, and without a description; the description the
-	// group filters need comes from a follow-up read.
+	// The wisps are read first (the primary source after migration). bd prints
+	// them without a description, which wispAgentBeads fills in from the full
+	// record before the description filter runs.
 	if wispErr != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("list wisps: %v", wispErr))
 	} else {
-		wispAgents, err := r.wispAgentBeads(beadsDir, wispOut)
+		wispAgents, err := r.wispAgentBeads(beadsDir, wisps)
 		if err != nil {
 			queryErrors = append(queryErrors, err.Error())
 		}
@@ -867,12 +857,10 @@ func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, 
 	return active, nil
 }
 
-// wispAgentBeads returns the agent beads among the wisps `bd mol wisp list
-// --json` reported, with the fields the group filters need.
+// wispAgentBeads returns the agent beads among the wisps `bd mol wisp list`
+// reported, with the fields the group filters need.
 //
-// bd wraps the wisps in an object (older bd printed a bare array) and omits
-// each wisp's description, so unmarshalling the output into a slice always
-// failed and no wisp-backed agent was ever resolved (gt-c2sxh). The labels
+// bd omits each wisp's description — and, on 1.2.2, its labels too. The labels
 // bd prints when a wisp has them identify most agents; a wisp without them
 // falls back to the agent ID naming convention, as beads itself does for the
 // same omits-metadata output. Their full record — description, label and
@@ -883,12 +871,7 @@ func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, 
 // agent's, not an agent, and is dropped. A show failure is reported and
 // leaves only the wisps their own record confirmed, so the caller can tell
 // "no such agent" from "could not ask" without sending to a guess.
-func (r *Router) wispAgentBeads(beadsDir string, out []byte) ([]*agentBead, error) {
-	wisps, err := parseWispList(out)
-	if err != nil {
-		return nil, err
-	}
-
+func (r *Router) wispAgentBeads(beadsDir string, wisps []*beads.Issue) ([]*agentBead, error) {
 	var agents []*agentBead
 	var needFull []string
 	unconfirmed := make(map[string]bool)
@@ -896,18 +879,19 @@ func (r *Router) wispAgentBeads(beadsDir string, out []byte) ([]*agentBead, erro
 		if wisp == nil || wisp.ID == "" {
 			continue
 		}
-		confirmed := isAgentBeadEntry(wisp)
-		if !confirmed && !isAgentBeadIDByShape(wisp.ID) {
+		agent := agentBeadFromIssue(wisp)
+		confirmed := isAgentBeadEntry(agent)
+		if !confirmed && !isAgentBeadIDByShape(agent.ID) {
 			continue
 		}
-		agents = append(agents, wisp)
+		agents = append(agents, agent)
 		if !confirmed {
-			unconfirmed[wisp.ID] = true
+			unconfirmed[agent.ID] = true
 		}
 		// An unconfirmed wisp needs the full record even when it carries a
 		// description: shape alone is not evidence of an agent.
-		if !confirmed || wisp.Description == "" {
-			needFull = append(needFull, wisp.ID)
+		if !confirmed || agent.Description == "" {
+			needFull = append(needFull, agent.ID)
 		}
 	}
 	if len(needFull) == 0 {
@@ -950,29 +934,6 @@ func confirmedAgents(agents []*agentBead, unconfirmed map[string]bool) []*agentB
 	return confirmed
 }
 
-// parseWispList decodes `bd mol wisp list --json`: an object of
-// {"count":N,"wisps":[...]} since bd 1.x, a bare array in older versions.
-func parseWispList(out []byte) ([]*agentBead, error) {
-	out = bytes.TrimSpace(out)
-	if len(out) == 0 {
-		return nil, nil
-	}
-	if out[0] == '[' {
-		var wisps []*agentBead
-		if err := json.Unmarshal(out, &wisps); err != nil {
-			return nil, fmt.Errorf("parsing bd mol wisp list: %w", err)
-		}
-		return wisps, nil
-	}
-	var wrapper struct {
-		Wisps []*agentBead `json:"wisps"`
-	}
-	if err := json.Unmarshal(out, &wrapper); err != nil {
-		return nil, fmt.Errorf("parsing bd mol wisp list: %w", err)
-	}
-	return wrapper.Wisps, nil
-}
-
 // matchesDescContains applies bd list's --desc-contains filter to a bead
 // whose description came from the wisp list's batched bd show. bd's own
 // filter is a case-insensitive substring match.
@@ -1003,7 +964,7 @@ func isAgentBeadIDByShape(id string) bool {
 
 // isAgentBeadEntry checks if an agentBead entry is an actual agent bead.
 func isAgentBeadEntry(a *agentBead) bool {
-	if a.Type == "agent" || a.WispType == "agent" {
+	if a.Type == "agent" {
 		return true
 	}
 	for _, l := range a.Labels {
@@ -1360,48 +1321,22 @@ func (r *Router) sendToSingle(msg *Message) error {
 	// Build labels for type, from/thread/reply-to/cc
 	labels := r.buildLabels(msg)
 
-	// Build command: bd create --assignee=<recipient> -d <body> --labels=gt:message,... -- <subject>
-	// Flags go first, then -- to end flag parsing, then the positional subject.
-	// This prevents subjects like "--help" from being parsed as flags (see web/api.go).
-	// Let bd auto-generate the ID with the correct database prefix.
-	args := []string{"create",
-		"--assignee", toIdentity,
-		"-d", msg.Body,
-	}
-
-	// Add priority flag
-	beadsPriority := PriorityToBeads(msg.Priority)
-	args = append(args, "--priority", fmt.Sprintf("%d", beadsPriority))
-
-	// Add labels
-	if len(labels) > 0 {
-		args = append(args, "--labels", strings.Join(labels, ","))
-	}
-
-	// Add actor for attribution (sender identity)
-	args = append(args, "--actor", msg.From)
-
-	// Do NOT pass --id to bd create. The msg.ID (msg-xxx prefix) is for
-	// in-memory tracking only. bd auto-generates IDs with the correct
-	// database prefix (e.g., hq-wisp-xxx). Passing --id causes prefix
-	// mismatch errors when the msg- prefix does not match the database.
-
-	// Add --ephemeral flag for ephemeral messages (wisps, not synced to git)
-	if r.shouldBeWisp(msg) {
-		args = append(args, "--ephemeral")
-	}
-
-	// End flag parsing with --, then add subject as positional argument.
-	// This prevents subjects like "--help" or "--json" from being parsed as flags.
-	args = append(args, "--", msg.Subject)
-
+	// The msg.ID (msg-xxx prefix) is for in-memory tracking only, so no ID is
+	// asked for: bd mints one with the database's own prefix (e.g.
+	// hq-wisp-xxx), which a msg- prefix would fail to match.
 	beadsDir := r.resolveBeadsDir()
 	if err := r.ensureCustomTypes(beadsDir); err != nil {
 		return err
 	}
-	ctx, cancel := bdWriteCtx()
-	defer cancel()
-	_, err := runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
+	_, err := bdWriteStore(r.bd, filepath.Dir(beadsDir), beadsDir).Create(beads.CreateOptions{
+		Title:       msg.Subject,
+		Description: msg.Body,
+		Assignee:    toIdentity,
+		Priority:    PriorityToBeads(msg.Priority),
+		Labels:      labels,
+		Actor:       msg.From,
+		Ephemeral:   r.shouldBeWisp(msg),
+	})
 	if err != nil {
 		return fmt.Errorf("sending message: %w", err)
 	}
@@ -1513,41 +1448,22 @@ func (r *Router) sendToQueue(msg *Message) error {
 		labels = append(labels, "cc:"+ccIdentity)
 	}
 
-	// Build command: bd create --assignee=queue:<name> -d <body> ... -- <subject>
-	// Flags go first, then -- to end flag parsing, then the positional subject.
-	// This prevents subjects like "--help" from being parsed as flags.
-	// Use queue:<name> as assignee so inbox queries can filter by queue
-	args := []string{"create",
-		"--assignee", msg.To, // queue:name
-		"-d", msg.Body,
-	}
-
-	// Add priority flag
-	beadsPriority := PriorityToBeads(msg.Priority)
-	args = append(args, "--priority", fmt.Sprintf("%d", beadsPriority))
-
-	// Add labels (includes queue name for filtering)
-	if len(labels) > 0 {
-		args = append(args, "--labels", strings.Join(labels, ","))
-	}
-
-	// Add actor for attribution (sender identity)
-	args = append(args, "--actor", msg.From)
-
-	// Queue messages are never ephemeral - they need to persist until claimed
-	// (deliberately not checking shouldBeWisp)
-
-	// End flag parsing, then subject as positional argument
-	args = append(args, "--", msg.Subject)
-
-	// Queue messages go to town-level beads (shared location)
+	// Queue messages go to town-level beads (shared location). msg.To is the
+	// queue:<name> address itself, so inbox queries can filter by queue.
 	beadsDir := r.resolveBeadsDir()
 	if err := r.ensureCustomTypes(beadsDir); err != nil {
 		return err
 	}
-	ctx, cancel := bdWriteCtx()
-	defer cancel()
-	_, err = runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
+	// Queue messages are never ephemeral - they need to persist until claimed
+	// (deliberately not asking shouldBeWisp).
+	_, err = bdWriteStore(r.bd, filepath.Dir(beadsDir), beadsDir).Create(beads.CreateOptions{
+		Title:       msg.Subject,
+		Description: msg.Body,
+		Assignee:    msg.To,
+		Priority:    PriorityToBeads(msg.Priority),
+		Labels:      labels,
+		Actor:       msg.From,
+	})
 	if err != nil {
 		return fmt.Errorf("sending to queue %s: %w", queueName, err)
 	}
@@ -1597,41 +1513,22 @@ func (r *Router) sendToAnnounce(msg *Message) error {
 		labels = append(labels, "cc:"+ccIdentity)
 	}
 
-	// Build command: bd create --assignee=announce:<name> -d <body> ... -- <subject>
-	// Flags go first, then -- to end flag parsing, then the positional subject.
-	// This prevents subjects like "--help" from being parsed as flags.
-	// Use announce:<name> as assignee so queries can filter by channel
-	args := []string{"create",
-		"--assignee", msg.To, // announce:name
-		"-d", msg.Body,
-	}
-
-	// Add priority flag
-	beadsPriority := PriorityToBeads(msg.Priority)
-	args = append(args, "--priority", fmt.Sprintf("%d", beadsPriority))
-
-	// Add labels (includes announce name for filtering)
-	if len(labels) > 0 {
-		args = append(args, "--labels", strings.Join(labels, ","))
-	}
-
-	// Add actor for attribution (sender identity)
-	args = append(args, "--actor", msg.From)
-
-	// Announce messages are never ephemeral - they need to persist for readers
-	// (deliberately not checking shouldBeWisp)
-
-	// End flag parsing, then subject as positional argument
-	args = append(args, "--", msg.Subject)
-
-	// Announce messages go to town-level beads (shared location)
+	// Announce messages go to town-level beads (shared location). msg.To is
+	// the announce:<name> address itself, so queries can filter by channel.
 	beadsDir := r.resolveBeadsDir()
 	if err := r.ensureCustomTypes(beadsDir); err != nil {
 		return err
 	}
-	ctx, cancel := bdWriteCtx()
-	defer cancel()
-	_, err = runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
+	// Announce messages are never ephemeral - they need to persist for readers
+	// (deliberately not asking shouldBeWisp).
+	_, err = bdWriteStore(r.bd, filepath.Dir(beadsDir), beadsDir).Create(beads.CreateOptions{
+		Title:       msg.Subject,
+		Description: msg.Body,
+		Assignee:    msg.To,
+		Priority:    PriorityToBeads(msg.Priority),
+		Labels:      labels,
+		Actor:       msg.From,
+	})
 	if err != nil {
 		return fmt.Errorf("sending to announce %s: %w", announceName, err)
 	}
@@ -1683,41 +1580,22 @@ func (r *Router) sendToChannel(msg *Message) error {
 		labels = append(labels, "cc:"+ccIdentity)
 	}
 
-	// Build command: bd create --assignee=channel:<name> -d <body> ... -- <subject>
-	// Flags go first, then -- to end flag parsing, then the positional subject.
-	// This prevents subjects like "--help" from being parsed as flags.
-	// Use channel:<name> as assignee so queries can filter by channel
-	args := []string{"create",
-		"--assignee", msg.To, // channel:name
-		"-d", msg.Body,
-	}
-
-	// Add priority flag
-	beadsPriority := PriorityToBeads(msg.Priority)
-	args = append(args, "--priority", fmt.Sprintf("%d", beadsPriority))
-
-	// Add labels (includes channel name for filtering)
-	if len(labels) > 0 {
-		args = append(args, "--labels", strings.Join(labels, ","))
-	}
-
-	// Add actor for attribution (sender identity)
-	args = append(args, "--actor", msg.From)
-
-	// Channel messages are never ephemeral - they persist according to retention policy
-	// (deliberately not checking shouldBeWisp)
-
-	// End flag parsing, then subject as positional argument
-	args = append(args, "--", msg.Subject)
-
-	// Channel messages go to town-level beads (shared location)
+	// Channel messages go to town-level beads (shared location). msg.To is the
+	// channel:<name> address itself, so queries can filter by channel.
 	beadsDir := r.resolveBeadsDir()
 	if err := r.ensureCustomTypes(beadsDir); err != nil {
 		return err
 	}
-	ctx, cancel := bdWriteCtx()
-	defer cancel()
-	_, err = runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
+	// Channel messages are never ephemeral - they persist according to the
+	// retention policy (deliberately not asking shouldBeWisp).
+	_, err = bdWriteStore(r.bd, filepath.Dir(beadsDir), beadsDir).Create(beads.CreateOptions{
+		Title:       msg.Subject,
+		Description: msg.Body,
+		Assignee:    msg.To,
+		Priority:    PriorityToBeads(msg.Priority),
+		Labels:      labels,
+		Actor:       msg.From,
+	})
 	if err != nil {
 		return fmt.Errorf("sending to channel %s: %w", channelName, err)
 	}
@@ -1796,10 +1674,10 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 
 	// Delete oldest messages, as the ambient actor: retention is the router's
 	// housekeeping, not a recipient reading its inbox.
-	store := bdWriteStore(r.bd, filepath.Dir(beadsDir), beadsDir)
 	for i := 0; i < toDelete && i < len(messages); i++ {
-		// Best-effort deletion - don't fail if one close fails
-		_ = store.CloseWithReason("retention pruning", messages[i].ID)
+		// Best-effort deletion - don't fail if one close fails. One store per
+		// close: it carries the per-call pre-flight.
+		_ = bdWriteStore(r.bd, filepath.Dir(beadsDir), beadsDir).CloseWithReason("retention pruning", messages[i].ID)
 	}
 
 	return nil

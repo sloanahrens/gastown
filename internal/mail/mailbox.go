@@ -39,8 +39,9 @@ type Mailbox struct {
 	path     string // for legacy JSONL mode (crew workers)
 	legacy   bool   // true = use JSONL files, false = use beads
 
-	// bd runs bd for the beads-mode methods; nil is the bd on PATH.
-	bd bdRunner
+	// bd answers bd calls for the beads-mode methods; nil is the bd on PATH,
+	// which the stores run themselves.
+	bd bdAnswer
 
 	// warn receives non-fatal read warnings; nil is os.Stderr.
 	warn io.Writer
@@ -238,10 +239,10 @@ func isMissingWispTable(err error) bool {
 }
 
 func (m *Mailbox) queryIssueMessagesByAssignee(beadsDir string, identities []string) ([]BeadsMessage, error) {
-	store := bdStore(m.bd, m.workDir, beadsDir)
 	var messages []BeadsMessage
 	for _, id := range identities {
-		issues, err := store.List(beads.ListOptions{
+		// One store per identity: the store carries the per-call pre-flight.
+		issues, err := bdStore(m.bd, m.workDir, beadsDir).List(beads.ListOptions{
 			Label:    "gt:message",
 			Assignee: id,
 		})
@@ -257,11 +258,11 @@ func (m *Mailbox) queryIssueMessagesByAssignee(beadsDir string, identities []str
 // identity does not stop the others; the first failure is returned beside the
 // partial result.
 func (m *Mailbox) queryIssueMessagesByCC(beadsDir string, identities []string) ([]BeadsMessage, error) {
-	store := bdStore(m.bd, m.workDir, beadsDir)
 	var messages []BeadsMessage
 	var firstErr error
 	for _, id := range identities {
-		issues, err := store.List(beads.ListOptions{
+		// One store per identity: the store carries the per-call pre-flight.
+		issues, err := bdStore(m.bd, m.workDir, beadsDir).List(beads.ListOptions{
 			Labels: []string{"gt:message", "cc:" + id},
 		})
 		if err == nil {
@@ -463,7 +464,7 @@ type issueBatchRow struct {
 // set bd list accepts) and matches the identity set in Go: List cannot ask for
 // "assignee in this set", and one read keeps the call count off the address
 // list the dashboard asks about (gt-978i). Used by Router.BatchMailSummaries.
-func queryIssueMessagesBatch(run bdRunner, workDir, beadsDir string, identities []string) ([]issueBatchRow, error) {
+func queryIssueMessagesBatch(run bdAnswer, workDir, beadsDir string, identities []string) ([]issueBatchRow, error) {
 	if len(identities) == 0 {
 		return nil, nil
 	}
@@ -1369,26 +1370,26 @@ func (m *Mailbox) ListByThread(threadID string) ([]*Message, error) {
 	return m.listByThreadBeads(threadID)
 }
 
+// listByThreadBeads reads a thread the way mail writes it: every message
+// carries a thread:<id> label, and a message stored as a wisp lives in the
+// wisps table. Both reads ask for every status, so a closed (read) message
+// stays in the conversation, and both are made as this mailbox's identity.
 func (m *Mailbox) listByThreadBeads(threadID string) ([]*Message, error) {
-	args := []string{"message", "thread", threadID, "--json"}
+	label := "thread:" + threadID
 
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	stdout, err := runBdCommand(ctx, m.bd, args, m.workDir, m.beadsDir, "BD_IDENTITY="+m.identity)
+	issues, err := bdThreadStore(m.bd, m.workDir, m.beadsDir, m.identity).
+		List(beads.ListOptions{Label: label, Status: "all"})
+	if err != nil {
+		return nil, err
+	}
+	wisps, err := bdThreadStore(m.bd, m.workDir, m.beadsDir, m.identity).
+		List(beads.ListOptions{Label: label, Status: "all", Ephemeral: true})
 	if err != nil {
 		return nil, err
 	}
 
-	if !isJSON(stdout) {
-		return nil, nil
-	}
-	var beadsMsgs []BeadsMessage
-	if err := json.Unmarshal(stdout, &beadsMsgs); err != nil {
-		return nil, err
-	}
-
 	var messages []*Message
-	for _, bm := range beadsMsgs {
+	for _, bm := range beadsMessagesFromIssues(append(issues, wisps...)) {
 		messages = append(messages, bm.ToMessage())
 	}
 
@@ -1419,21 +1420,4 @@ func (m *Mailbox) listByThreadLegacy(threadID string) ([]*Message, error) {
 	})
 
 	return thread, nil
-}
-
-// isJSON returns true if the byte slice looks like JSON (starts with [ or {).
-// bd list --json may return plain text like "No issues found." instead of JSON
-// when there are no results.
-func isJSON(b []byte) bool {
-	for _, c := range b {
-		switch c {
-		case ' ', '\t', '\n', '\r':
-			continue
-		case '[', '{':
-			return true
-		default:
-			return false
-		}
-	}
-	return false
 }

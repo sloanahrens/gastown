@@ -1,7 +1,6 @@
 package mail
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,171 +10,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
-
-func TestBdError_Error(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		err  *bdError
-		want string
-	}{
-		{
-			name: "stderr present",
-			err: &bdError{
-				Err:    errors.New("some error"),
-				Stderr: "stderr output",
-			},
-			want: "stderr output",
-		},
-		{
-			name: "no stderr, has error",
-			err: &bdError{
-				Err:    errors.New("some error"),
-				Stderr: "",
-			},
-			want: "some error",
-		},
-		{
-			name: "no stderr, no error",
-			err: &bdError{
-				Err:    nil,
-				Stderr: "",
-			},
-			want: "unknown bd error",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.err.Error()
-			if got != tt.want {
-				t.Errorf("bdError.Error() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestBdError_Unwrap(t *testing.T) {
-	t.Parallel()
-	originalErr := errors.New("original error")
-	bdErr := &bdError{
-		Err:    originalErr,
-		Stderr: "stderr output",
-	}
-
-	unwrapped := bdErr.Unwrap()
-	if unwrapped != originalErr {
-		t.Errorf("bdError.Unwrap() = %v, want %v", unwrapped, originalErr)
-	}
-}
-
-func TestBdError_UnwrapNil(t *testing.T) {
-	t.Parallel()
-	bdErr := &bdError{
-		Err:    nil,
-		Stderr: "",
-	}
-
-	unwrapped := bdErr.Unwrap()
-	if unwrapped != nil {
-		t.Errorf("bdError.Unwrap() with nil Err should return nil, got %v", unwrapped)
-	}
-}
-
-func TestBdError_ContainsError(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		err      *bdError
-		substr   string
-		contains bool
-	}{
-		{
-			name: "substring present",
-			err: &bdError{
-				Stderr: "error: bead not found",
-			},
-			substr:   "bead not found",
-			contains: true,
-		},
-		{
-			name: "substring not present",
-			err: &bdError{
-				Stderr: "error: bead not found",
-			},
-			substr:   "permission denied",
-			contains: false,
-		},
-		{
-			name: "empty stderr",
-			err: &bdError{
-				Stderr: "",
-			},
-			substr:   "anything",
-			contains: false,
-		},
-		{
-			name: "case sensitive",
-			err: &bdError{
-				Stderr: "Error: Bead Not Found",
-			},
-			substr:   "bead not found",
-			contains: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.err.ContainsError(tt.substr)
-			if got != tt.contains {
-				t.Errorf("bdError.ContainsError(%q) = %v, want %v", tt.substr, got, tt.contains)
-			}
-		})
-	}
-}
-
-func TestBdError_ContainsErrorPartialMatch(t *testing.T) {
-	t.Parallel()
-	err := &bdError{
-		Stderr: "fatal: invalid bead ID format: expected prefix-#id",
-	}
-
-	// Test partial matches
-	if !err.ContainsError("invalid bead ID") {
-		t.Error("Should contain partial substring")
-	}
-	if !err.ContainsError("fatal:") {
-		t.Error("Should contain prefix")
-	}
-	if !err.ContainsError("expected prefix") {
-		t.Error("Should contain suffix")
-	}
-}
-
-func TestBdError_ContainsErrorSpecialChars(t *testing.T) {
-	t.Parallel()
-	err := &bdError{
-		Stderr: "error: bead 'gt-123' not found (exit 1)",
-	}
-
-	if !err.ContainsError("'gt-123'") {
-		t.Error("Should handle quotes in substring")
-	}
-	if !err.ContainsError("(exit 1)") {
-		t.Error("Should handle parentheses in substring")
-	}
-}
-
-func TestBdError_ImplementsErrorInterface(t *testing.T) {
-	t.Parallel()
-	// Verify bdError implements error interface
-	var err error = &bdError{
-		Err:    errors.New("test"),
-		Stderr: "test stderr",
-	}
-
-	_ = err.Error() // Should compile and not panic
-}
 
 func TestBeadsMessagesFromIssues(t *testing.T) {
 	t.Parallel()
@@ -286,39 +120,9 @@ func TestBdStoreListReadsOnlyJSON(t *testing.T) {
 	}
 }
 
-func TestBdError_WithAllFields(t *testing.T) {
-	t.Parallel()
-	originalErr := errors.New("original error")
-	bdErr := &bdError{
-		Err:    originalErr,
-		Stderr: "command failed: bead not found",
-	}
-
-	// Test Error() returns stderr
-	got := bdErr.Error()
-	want := "command failed: bead not found"
-	if got != want {
-		t.Errorf("bdError.Error() = %q, want %q", got, want)
-	}
-
-	// Test Unwrap() returns original error
-	unwrapped := bdErr.Unwrap()
-	if unwrapped != originalErr {
-		t.Errorf("bdError.Unwrap() = %v, want %v", unwrapped, originalErr)
-	}
-
-	// Test ContainsError works
-	if !bdErr.ContainsError("bead not found") {
-		t.Error("ContainsError should find substring in stderr")
-	}
-	if bdErr.ContainsError("not present") {
-		t.Error("ContainsError should return false for non-existent substring")
-	}
-}
-
 func TestBdSubprocessEnv_SuppressesAutoImport(t *testing.T) {
 	t.Parallel()
-	got := bdSubprocessEnv([]string{"PATH=/usr/bin"}, "/tmp/.beads", true, nil)
+	got := bdSubprocessEnv([]string{"PATH=/usr/bin"}, "/tmp/.beads", true)
 
 	if !envContains(got, "BEADS_NO_AUTO_IMPORT=1") {
 		t.Fatalf("expected BEADS_NO_AUTO_IMPORT=1 in env, got %v", got)
@@ -331,9 +135,9 @@ func TestBdSubprocessEnv_SuppressesAutoImport(t *testing.T) {
 	}
 }
 
-func TestBdSubprocessEnv_ExtraEnvCannotOverrideCanonicalPolicy(t *testing.T) {
+func TestBdSubprocessEnv_BaseEnvCannotOverrideCanonicalPolicy(t *testing.T) {
 	t.Parallel()
-	got := bdSubprocessEnv(nil, "/tmp/.beads", true, []string{"BEADS_NO_AUTO_IMPORT=0"})
+	got := bdSubprocessEnv([]string{"BEADS_NO_AUTO_IMPORT=0"}, "/tmp/.beads", true)
 
 	value, ok := envLastValue(got, "BEADS_NO_AUTO_IMPORT")
 	if !ok {
@@ -351,7 +155,7 @@ func TestBdSubprocessEnv_DoesNotMutateBaseEnv(t *testing.T) {
 	backing := base[:cap(base)]
 	backing[1] = "SENTINEL=keep"
 
-	_ = bdSubprocessEnv(base, "/tmp/.beads", true, nil)
+	_ = bdSubprocessEnv(base, "/tmp/.beads", true)
 
 	if len(base) != 1 {
 		t.Fatalf("baseEnv length changed to %d", len(base))
@@ -377,7 +181,7 @@ func TestBdSubprocessEnv_FiltersStaleBdTargetEnv(t *testing.T) {
 		"BEADS_DIR=/wrong",
 		"BEADS_DB=/wrong.db",
 		"BEADS_DOLT_SERVER_DATABASE=wrong",
-	}, beadsDir, true, nil)
+	}, beadsDir, true)
 
 	if envContains(got, "BEADS_DIR=/wrong") || envContains(got, "BEADS_DB=/wrong.db") || envContains(got, "BEADS_DOLT_SERVER_DATABASE=wrong") {
 		t.Fatalf("stale bd target env was not filtered: %v", got)
@@ -397,7 +201,7 @@ func TestBdSubprocessEnv_FiltersStaleBdTargetEnv(t *testing.T) {
 
 func TestBdSubprocessEnv_WriteCommandsAreNotReadonly(t *testing.T) {
 	t.Parallel()
-	got := bdSubprocessEnv([]string{"PATH=/usr/bin", "BD_READONLY=true"}, "/tmp/.beads", false, []string{"BD_READONLY=true"})
+	got := bdSubprocessEnv([]string{"PATH=/usr/bin", "BD_READONLY=true"}, "/tmp/.beads", false)
 	if value, ok := envLastValue(got, "BD_READONLY"); ok {
 		t.Fatalf("write command env should not inherit or set BD_READONLY, got %q in %v", value, got)
 	}
@@ -410,7 +214,7 @@ func TestBdSubprocessEnv_WriteCommandsAreNotReadonly(t *testing.T) {
 
 func TestBdSubprocessEnv_ReadonlyCannotBeOverridden(t *testing.T) {
 	t.Parallel()
-	got := bdSubprocessEnv([]string{"PATH=/usr/bin", "BD_READONLY=false"}, "/tmp/.beads", true, []string{"BD_READONLY=false"})
+	got := bdSubprocessEnv([]string{"PATH=/usr/bin", "BD_READONLY=false"}, "/tmp/.beads", true)
 	if value, ok := envLastValue(got, "BD_READONLY"); !ok || value != "true" {
 		t.Fatalf("read command env should force BD_READONLY=true, got %q present=%v in %v", value, ok, got)
 	}
@@ -442,13 +246,18 @@ func TestArgsAreReadOnlyForMailCommands(t *testing.T) {
 	}
 }
 
-// TestRunBdCommandUsesCentralEnvPolicy: runBdCommand hands bd the --flat
-// list flag and the central env policy for reads and writes, over whatever
-// the caller asked for (TestIntegrationRunBdCommandUsesCentralEnvPolicy runs
-// the real subprocess against an ambient environment that disagrees).
-func TestRunBdCommandUsesCentralEnvPolicy(t *testing.T) {
+// TestBdStoresHandBdTheCentralEnvPolicy: each store type hands bd the
+// environment its access mode promises, over whatever the process carries, and
+// the directory bd runs in. The stores no longer build their own argv, so what
+// is pinned here is the environment and cwd bd receives.
+func TestBdStoresHandBdTheCentralEnvPolicy(t *testing.T) {
 	t.Parallel()
-	bd := &bdScript{answer: func(bdCall) (string, string, int) { return "[]\n", "", 0 }}
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		if strings.HasPrefix(strings.Join(c.Args, " "), "update ") {
+			return "", "", 0
+		}
+		return "[]\n", "", 0
+	}}
 
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -459,30 +268,30 @@ func TestRunBdCommandUsesCentralEnvPolicy(t *testing.T) {
 	}
 	workDir := filepath.Dir(beadsDir)
 
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	if _, err := runBdCommand(ctx, bd.run, []string{"list", "--json"}, workDir, beadsDir, "BD_IDENTITY=gastown/chrome", "BD_READONLY=false", "BD_DOLT_AUTO_COMMIT=on"); err != nil {
-		t.Fatalf("run read bd command: %v", err)
+	if _, err := bdStore(bd.run, workDir, beadsDir).List(beads.ListOptions{Label: "gt:message"}); err != nil {
+		t.Fatalf("read through the store: %v", err)
 	}
-	if _, err := runBdCommand(ctx, bd.run, []string{"label", "add", "hq-msg", "read"}, workDir, beadsDir, "BD_IDENTITY=gastown/chrome", "BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off"); err != nil {
-		t.Fatalf("run write bd command: %v", err)
+	if err := bdWriteStore(bd.run, workDir, beadsDir).Update("hq-msg", beads.UpdateOptions{AddLabels: []string{"read"}}); err != nil {
+		t.Fatalf("write through the store: %v", err)
 	}
 	calls := bd.recorded()
 	if len(calls) != 2 {
 		t.Fatalf("bd calls = %q, want 2", bd.argvs())
 	}
 	read, write := calls[0], calls[1]
-	if got := strings.Join(read.Args, " "); got != "list --json --flat" || read.Dir != workDir {
-		t.Fatalf("read call = %q in %s, want list --json --flat in %s", got, read.Dir, workDir)
+	for _, call := range calls {
+		if call.Dir != workDir {
+			t.Errorf("bd ran in %q, want %q", call.Dir, workDir)
+		}
 	}
 	// BD_MACHINE and PWD are what beads.WithMachineEnvIn contributes to the
 	// environment bd sees; the rest is bdSubprocessEnv's routing policy.
-	for _, want := range []string{"BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BEADS_NO_AUTO_IMPORT=1", "BD_IDENTITY=gastown/chrome", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb", "BD_MACHINE=1", "PWD=" + workDir} {
+	for _, want := range []string{"BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BEADS_NO_AUTO_IMPORT=1", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb", "BD_MACHINE=1", "PWD=" + workDir} {
 		if v, _ := envLastValue(read.Env, strings.SplitN(want, "=", 2)[0]); strings.SplitN(want, "=", 2)[0]+"="+v != want {
 			t.Errorf("read env %s = %q, want %q", strings.SplitN(want, "=", 2)[0], v, want)
 		}
 	}
-	for _, want := range []string{"BD_DOLT_AUTO_COMMIT=on", "BEADS_NO_AUTO_IMPORT=1", "BD_IDENTITY=gastown/chrome", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb", "BD_MACHINE=1", "PWD=" + workDir} {
+	for _, want := range []string{"BD_DOLT_AUTO_COMMIT=on", "BEADS_NO_AUTO_IMPORT=1", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb", "BD_MACHINE=1", "PWD=" + workDir} {
 		if v, _ := envLastValue(write.Env, strings.SplitN(want, "=", 2)[0]); strings.SplitN(want, "=", 2)[0]+"="+v != want {
 			t.Errorf("write env %s = %q, want %q", strings.SplitN(want, "=", 2)[0], v, want)
 		}
@@ -490,45 +299,6 @@ func TestRunBdCommandUsesCentralEnvPolicy(t *testing.T) {
 	if v, ok := envLastValue(write.Env, "BD_READONLY"); ok && v != "" {
 		t.Errorf("write env BD_READONLY = %q, want unset or empty", v)
 	}
-}
-
-// A bd too old for --flat is asked again without it, and a failure carries
-// bd's stderr.
-func TestRunBdCommandRetriesWithoutFlatAndMapsErrors(t *testing.T) {
-	t.Parallel()
-	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
-		for _, a := range c.Args {
-			if a == "--flat" {
-				return "", "Error: unknown flag: --flat", 1
-			}
-		}
-		if c.Args[0] == "show" {
-			return "", "Error: no issue found matching \"gt-x\"\n", 1
-		}
-		return "[]\n", "", 0
-	}}
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	out, err := runBdCommand(ctx, bd.run, []string{"list", "--json"}, t.TempDir(), "")
-	if err != nil || string(out) != "[]\n" {
-		t.Fatalf("list = %q, %v; want the retry's answer", out, err)
-	}
-	if got := bd.argvs(); len(got) != 2 || got[0] != "list --json --flat" || got[1] != "list --json" {
-		t.Fatalf("calls = %q, want the --flat call then the retry without it", got)
-	}
-	_, err = runBdCommand(ctx, bd.run, []string{"show", "gt-x"}, t.TempDir(), "")
-	var bdErr *bdError
-	if !errors.As(err, &bdErr) || !bdErr.ContainsError("no issue found") || exitCodeOf(err) != 1 {
-		t.Fatalf("show error = %#v, want a *bdError with bd's stderr and exit status 1", err)
-	}
-}
-
-func exitCodeOf(err error) int {
-	var coded interface{ ExitCode() int }
-	if errors.As(err, &coded) {
-		return coded.ExitCode()
-	}
-	return -1
 }
 
 func TestBdSubprocessEnv_AllowsRoutingWhenBeadsDirEmpty(t *testing.T) {
@@ -543,7 +313,7 @@ func TestBdSubprocessEnv_AllowsRoutingWhenBeadsDirEmpty(t *testing.T) {
 		"BEADS_DOLT_SERVER_HOST=wrong-host",
 		"BEADS_DOLT_SERVER_PORT=9999",
 		"BEADS_DOLT_PORT=9999",
-	}, "", true, nil)
+	}, "", true)
 
 	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BEADS_DOLT_SERVER_DATABASE"} {
 		if value, ok := envLastValue(got, key); ok {
@@ -561,11 +331,9 @@ func TestBdSubprocessEnv_AllowsRoutingWhenBeadsDirEmpty(t *testing.T) {
 }
 
 // TestBdSubprocessEnvPinnedReadAndWritePolicy is a pure, subprocess-free unit
-// test of the exact env-policy decision TestRunBdCommandUsesCentralEnvPolicy
-// exercises end-to-end. That integration test is a much better check that the
-// policy is actually wired into the real subprocess, but it ties pass/fail to
-// a spawn timeout, so it can flake under host contention (gt-911, same family
-// as gt-0nk). This test proves the policy itself deterministically.
+// test of the env-policy decision TestBdStoresHandBdTheCentralEnvPolicy
+// exercises through the stores. This one proves the policy itself
+// deterministically, whatever the host.
 func TestBdSubprocessEnvPinnedReadAndWritePolicy(t *testing.T) {
 	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
@@ -576,15 +344,15 @@ func TestBdSubprocessEnvPinnedReadAndWritePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	readEnv := bdSubprocessEnv(nil, beadsDir, true, []string{"BD_IDENTITY=gastown/chrome", "BD_READONLY=false", "BD_DOLT_AUTO_COMMIT=on"})
-	for _, want := range []string{"BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BEADS_NO_AUTO_IMPORT=1", "BD_IDENTITY=gastown/chrome", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
+	readEnv := bdSubprocessEnv([]string{"BD_READONLY=false", "BD_DOLT_AUTO_COMMIT=on"}, beadsDir, true)
+	for _, want := range []string{"BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BEADS_NO_AUTO_IMPORT=1", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
 		if !envContains(readEnv, want) {
 			t.Fatalf("read env missing %q:\n%v", want, readEnv)
 		}
 	}
 
-	writeEnv := bdSubprocessEnv(nil, beadsDir, false, []string{"BD_IDENTITY=gastown/chrome", "BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off"})
-	for _, want := range []string{"BD_DOLT_AUTO_COMMIT=on", "BEADS_NO_AUTO_IMPORT=1", "BD_IDENTITY=gastown/chrome", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
+	writeEnv := bdSubprocessEnv([]string{"BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off"}, beadsDir, false)
+	for _, want := range []string{"BD_DOLT_AUTO_COMMIT=on", "BEADS_NO_AUTO_IMPORT=1", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
 		if !envContains(writeEnv, want) {
 			t.Fatalf("write env missing %q:\n%v", want, writeEnv)
 		}

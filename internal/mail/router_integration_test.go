@@ -6,10 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -20,9 +18,11 @@ import (
 // Against a real bd on the test Dolt container.
 
 func TestIntegrationValidateRecipient(t *testing.T) {
-	// Skip if bd CLI is not available or not functional (e.g., missing DLLs on Windows CI)
-	if out, err := exec.Command("bd", "version").CombinedOutput(); err != nil {
-		t.Skipf("bd CLI not functional, skipping test: %v (%s)", err, strings.TrimSpace(string(out)))
+	// Skip if bd CLI is not available or not functional (e.g., missing DLLs on
+	// Windows CI). The probe is the seam's own version read, so no call in this
+	// package builds a bd argv.
+	if _, err := beads.NewPlain("", nil).Version(); err != nil {
+		t.Skipf("bd CLI not functional, skipping test: %v", err)
 	}
 
 	// Start an ephemeral Dolt container to prevent bd init from creating
@@ -56,8 +56,8 @@ func TestIntegrationValidateRecipient(t *testing.T) {
 		t.Fatalf("bd init: %v", err)
 	}
 
-	// Point BEADS_DB at the isolated SQLite file so the Router's
-	// runBdCommand (which inherits process env) uses it too.
+	// Point BEADS_DB at the isolated SQLite file so the Router's stores
+	// (which inherit process env) use it too.
 	beadsDB := filepath.Join(beadsDir, "beads.db")
 	t.Setenv("BEADS_DB", beadsDB)
 

@@ -14,6 +14,4 @@ internal/cmd/prime.go argv 1
 internal/cmd/scheduler_integration_test.go argv 8
 internal/cmd/scheduler_test_helpers_integration_test.go argv 9
 internal/cmdtree/gen-bd-tree/main.go argv 1
-internal/mail/bd.go argv 1
-internal/mail/router_integration_test.go argv 1
 internal/testutil/cmd.go argv 2

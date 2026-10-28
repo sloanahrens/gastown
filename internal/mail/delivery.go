@@ -84,8 +84,8 @@ func AcknowledgeDeliveryBead(workDir, beadsDir, beadID, recipientIdentity string
 	return acknowledgeDeliveryBead(nil, workDir, beadsDir, beadID, recipientIdentity)
 }
 
-// acknowledgeDeliveryBead is AcknowledgeDeliveryBead with bd run by run.
-func acknowledgeDeliveryBead(run bdRunner, workDir, beadsDir, beadID, recipientIdentity string) error {
+// acknowledgeDeliveryBead is AcknowledgeDeliveryBead with bd answered by run.
+func acknowledgeDeliveryBead(run bdAnswer, workDir, beadsDir, beadID, recipientIdentity string) error {
 	beadsDir = routedBeadsDirForID(beadsDir, beadID)
 	existingLabels, readErr := readBeadLabelsShared(run, workDir, beadsDir, beadID)
 	if readErr != nil {
@@ -130,7 +130,7 @@ func deliveryPendingRemovalNeeded(labels []string) bool {
 	return hasPending && hasAcked
 }
 
-func removeDeliveryPendingLabel(run bdRunner, workDir, beadsDir, beadID string) error {
+func removeDeliveryPendingLabel(run bdAnswer, workDir, beadsDir, beadID string) error {
 	// A pending label that is already gone is the state this write asks for,
 	// so bd refusing to remove a label that is not there is success.
 	err := bdWriteStore(run, workDir, beadsDir).Update(beadID, beads.UpdateOptions{RemoveLabels: []string{DeliveryLabelPending}})
@@ -178,7 +178,7 @@ func routedBeadsDirForID(currentBeadsDir, beadID string) string {
 
 // readBeadLabelsShared reads the labels for a bead, returning an error on failure
 // instead of silently swallowing it.
-func readBeadLabelsShared(run bdRunner, workDir, beadsDir, id string) ([]string, error) {
+func readBeadLabelsShared(run bdAnswer, workDir, beadsDir, id string) ([]string, error) {
 	issue, err := bdStore(run, workDir, beadsDir).Show(id)
 	if err != nil {
 		if isMessageNotFoundErr(err, id) {

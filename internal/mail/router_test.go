@@ -556,7 +556,7 @@ func TestSendFromCrewWorkspace_AvoidsEphemeralPrefixMismatch(t *testing.T) {
 			if ephemeral && strings.HasPrefix(id, "msg-") {
 				return "", "prefix mismatch: database uses 'hq-' (allowed: hq,hq-cv) but ID '" + id + "' doesn't match any allowed prefix", 1
 			}
-			return "hq-testmail-1\n", "", 0
+			return `{"id":"hq-testmail-1"}`, "", 0
 		}
 		return "", "unsupported bd args: " + strings.Join(args, " "), 1
 	}}
@@ -639,7 +639,7 @@ func TestSendToSingle_BackfillsEmptyThreadID(t *testing.T) {
 			if ephemeral && strings.HasPrefix(id, "msg-") {
 				return "", "prefix mismatch: database uses 'hq-' (allowed: hq,hq-cv) but ID '" + id + "' doesn't match any allowed prefix", 1
 			}
-			return "hq-testmail-1\n", "", 0
+			return `{"id":"hq-testmail-1"}`, "", 0
 		}
 		return "", "unsupported bd args: " + strings.Join(args, " "), 1
 	}}
@@ -1262,6 +1262,31 @@ func TestQueryAgentsInDirWispWrapperWithoutMetadata(t *testing.T) {
 	}
 	if !strings.Contains(got[0].Description, "rig: gastown") {
 		t.Errorf("description = %q, want the batched bd show to fill it in", got[0].Description)
+	}
+}
+
+// TestQueryAgentsInDirWispTypeConfirmsAnAgent: bd prints a wisp's type under
+// "type", and a wisp that says it is an agent is one even when its ID follows
+// no agent naming convention and it carries no labels. Dropping the type left
+// only the ID-shape guess, which such a wisp fails, so it resolved as no agent
+// at all (gt-p85pw.18).
+func TestQueryAgentsInDirWispTypeConfirmsAnAgent(t *testing.T) {
+	t.Parallel()
+	bd := wispAgentScript(
+		`{"count":1,"wisps":[{"id":"gt-nux","status":"open","type":"agent","description":"polecat nux"}]}`,
+		`[]`,
+		`[]`,
+		0,
+	)
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	got, err := r.queryAgentsInDir(t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("queryAgentsInDir: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gt-nux" {
+		t.Fatalf("queryAgentsInDir() = %+v, want the agent the wisp type confirms", got)
 	}
 }
 
