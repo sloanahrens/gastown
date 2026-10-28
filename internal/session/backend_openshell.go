@@ -841,12 +841,12 @@ func cacheVolumeName(volume, rig string) string {
 var cacheVolumePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
 // ensureCacheVolume creates volume when docker does not have it, labeled the
-// way the gateway attaches it, so a new rig needs no onboarding step. An
-// existing volume is left alone. Only docker's "no such volume" answer to the
-// inspect means the volume is absent; any other inspect failure, such as a
-// daemon that is down, is ErrCacheVolume with no create attempted. A name
-// docker would not accept, or a nil run, is a plain error: retrying the work
-// cannot fix either. A volume that cannot be made is ErrCacheVolume.
+// way the gateway attaches it. An existing volume is left alone. Only docker's
+// "no such volume" answer to the inspect means the volume is absent; any other
+// inspect failure, such as a daemon that is down, is ErrCacheVolume with no
+// create attempted. A name docker would not accept, or a nil run, is a plain
+// error: retrying the work cannot fix either. A volume that cannot be made is
+// ErrCacheVolume.
 func ensureCacheVolume(ctx context.Context, run dockerRun, volume string) error {
 	if run == nil {
 		return errors.New("sandbox cache volume: no docker runner configured")
