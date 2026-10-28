@@ -120,6 +120,11 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 		{"comment text from a file flag equals form", `bd comments add gt-x --file=notes.txt`, polecatCommentInputReason},
 		{"comment text from stdin", `bd comment gt-x --stdin`, polecatCommentInputReason},
 		{"note text from stdin in a pipe", `echo fine | bd note gt-x --stdin`, polecatCommentInputReason},
+		// The heredoc recipe the directive used to give (gt-9j9vu): the guard
+		// cannot read the file the substitution carries, so it refuses the text
+		// whatever the file holds.
+		{"note text read from a file by substitution", `gt bead note gt-x "$(cat note.txt)"`, polecatUnresolvedTextReason},
+		{"comment text read from a file by substitution", `bd comments add gt-x "$(cat note.txt)"`, polecatUnresolvedTextReason},
 
 		{"global value flag before the verb", `bd --db /p/x.db comments add gt-x --author Sloan hi`, polecatAttributionReason},
 		{"format flag before the verb", `bd --format json comments add gt-x "ACCEPTED-RISK: fine"`, polecatAcceptedRiskReason},
@@ -145,6 +150,9 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 
 		{"ordinary comment", `bd comments add gt-x "found the cause in tap_guard.go"`, ""},
 		{"ordinary note", `gt bead note gt-x "Findings: the retry never resets"`, ""},
+		// The rule the directive gives (gt-9j9vu): one single-quoted argument,
+		// across as many lines as the text needs.
+		{"multi-line literal note", "gt bead note gt-x 'line one\nline two'", ""},
 		{"ordinary append-notes", `bd update gt-x --append-notes "progress"`, ""},
 		{"ordinary create notes", `bd create "a title" --notes "context"`, ""},
 		{"dash a as comment text", `bd comments add gt-x -- "-a is the author flag"`, ""},

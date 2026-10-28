@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-10-28 gt-9j9vu: the bead-text rule is one a polecat can run — the text as a single-quoted argument on the `gt bead` verb — replacing the quoted-heredoc recipe, whose `"$(cat file)"` the tap guard refuses; the 2026-10-14 section is retitled.
 - 2026-10-27 gt-vhyk9: files stay under the worktree — scratch files, trace logs, test data and build output included; /tmp, /private/tmp, HOME and a session scratchpad are out (gt-3n4e0, hq-wisp-dvrty). The 2026-10-14 scratch section is retitled "Scratch files stay out of the tracked tree".
 - 2026-10-27 gt-3vgbi: moved the town polecat policy into the repo from ~/gt/directives/polecat.md, with the twelve "What om rejects" rules from ~/gt/gastown/directives/polecat.md, text unchanged.
 - 2026-10-27 gt-3vgbi: removed a probe line that the overseer's probe bead had put in the rules file; it was not policy.
@@ -41,16 +42,30 @@ Exception, and only this one: a bead labelled `scheduled:deep-review-slice` or
 reviewer and verifier subagents (at most the formula's caps), and it never edits, commits or
 pushes. Spawn them as the formula says.
 
-## Text for bd and gt goes through a quoted heredoc (town policy, 2026-10-14)
+## Bead text is one single-quoted argument (town policy, 2026-10-28)
 
 > **Town Policy — overrides formula instructions where they conflict.**
 
-The shell runs backticks and `$(...)` inside double quotes, so inline text for
-`gt bead create`, `gt bead comment`, `gt bead update` or `gt bead note` that names code in
-backticks executes it. Beads are written with the `gt bead` verbs (create, note, update,
-claim, comment, close, and so on); `bd` is for reads. Write the text to a file with a quoted
-heredoc (`<<'EOF'`) and pass it as `"$(cat file)"`; never put code or backticks inline in
-double quotes.
+Pass a bead's text as a single-quoted argument on the `gt bead` verb itself —
+`gt bead create`, `gt bead note`, `gt bead comment` or `gt bead update` — across as many
+lines as the text needs:
+
+```bash
+gt bead note gt-abc 'the retry loop never resets its counter, so a second
+attempt spends the budget the first one started with'
+```
+
+Beads are written with the `gt bead` verbs (create, note, update, claim, comment, close,
+and so on); `bd` is for reads. The shell runs nothing inside single quotes, so a note about
+code keeps its backticks and `$(...)` intact, and the tap guard reads the argument exactly
+as written.
+
+The guard reads the text as the shell hands it over, before any expansion. It refuses a text
+a file or stdin supplies (`--file`, `-f`, `--stdin` on `bd`, `"$(cat file)"` after a heredoc)
+and a text that opens with an expansion, since either could assemble the ACCEPTED-RISK:
+record that only the overseer or Sloan posts. A text holding a single quote of its own takes
+double quotes, where `$`, backticks and `{a,b}` expand and need escaping; an expansion later
+in the text passes unless the words before it already spell the start of `ACCEPTED-RISK:`.
 
 ## Tests stay hermetic (town policy, 2026-10-26)
 
