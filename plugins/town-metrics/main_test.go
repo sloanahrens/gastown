@@ -3,10 +3,21 @@ package main
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
+
+// okTown is the town seam of a test about the exec: it resolves a town the
+// environment agrees with, so the run gets past placement.
+func okTown() (string, error) {
+	return resolveTown(
+		func() (string, error) { return "/town", nil },
+		func(string) string { return "/town" },
+		func(path string) (string, error) { return path, nil },
+	)
+}
 
 // TestRunnerRunsTheHourAsGtMetricsRun holds the entry point to what the daemon
 // records: the program it execs, the argv and environment the exec carries, and
@@ -31,6 +42,7 @@ func TestRunnerRunsTheHourAsGtMetricsRun(t *testing.T) {
 				gotPath, gotArgv, gotEnv = path, argv, e
 				return nil
 			},
+			townRoot: okTown,
 		}
 		var stderr bytes.Buffer
 		if code := r.run(env, &stderr); code != 0 {
@@ -61,6 +73,7 @@ func TestRunnerRunsTheHourAsGtMetricsRun(t *testing.T) {
 				execCalled = true
 				return nil
 			},
+			townRoot: okTown,
 		}
 		var stderr bytes.Buffer
 		if code := r.run(env, &stderr); code != 1 {
@@ -81,6 +94,7 @@ func TestRunnerRunsTheHourAsGtMetricsRun(t *testing.T) {
 			exec: func(string, []string, []string) error {
 				return errors.New("permission denied")
 			},
+			townRoot: okTown,
 		}
 		var stderr bytes.Buffer
 		if code := r.run(env, &stderr); code != 1 {
@@ -91,4 +105,95 @@ func TestRunnerRunsTheHourAsGtMetricsRun(t *testing.T) {
 			t.Errorf("stderr = %q, want a line naming the program and the error", got)
 		}
 	})
+}
+
+// TestRunnerRefusesAnHourItCannotPlace pins the placement the hour's record
+// depends on: the plugin's directory and GT_TOWN_ROOT name one town, or the run
+// fails before gt resolves a town this program never checked (gt-bfrzq).
+func TestRunnerRefusesAnHourItCannotPlace(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		resolve  func() (string, error)
+		fromEnv  string
+		absErr   error
+		wantCode int
+		wantMsg  string
+	}{
+		{
+			name:    "the directory and GT_TOWN_ROOT name one town",
+			resolve: func() (string, error) { return "/town", nil },
+			fromEnv: "/town",
+		},
+		{
+			name:    "a hand run inside the town names no GT_TOWN_ROOT",
+			resolve: func() (string, error) { return "/town", nil },
+		},
+		{
+			name:    "a trailing slash names the same town",
+			resolve: func() (string, error) { return "/town", nil },
+			fromEnv: "/town/",
+		},
+		{
+			name:     "the directory and GT_TOWN_ROOT name different towns",
+			resolve:  func() (string, error) { return "/town", nil },
+			fromEnv:  "/elsewhere",
+			wantCode: 1,
+			wantMsg:  `"/elsewhere"`,
+		},
+		{
+			name: "neither names a town",
+			resolve: func() (string, error) {
+				return "", errors.New("not in a Gas Town workspace")
+			},
+			wantCode: 1,
+			wantMsg:  "not in a Gas Town workspace",
+		},
+		{
+			name:     "GT_TOWN_ROOT cannot be made absolute",
+			resolve:  func() (string, error) { return "/town", nil },
+			fromEnv:  ".",
+			absErr:   errors.New("getting current directory"),
+			wantCode: 1,
+			wantMsg:  "getting current directory",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			execCalled := false
+			r := runner{
+				lookPath: func(string) (string, error) { return "/usr/local/bin/gt", nil },
+				exec: func(string, []string, []string) error {
+					execCalled = true
+					return nil
+				},
+				townRoot: func() (string, error) {
+					abs := filepath.Abs
+					if tc.absErr != nil {
+						abs = func(string) (string, error) { return "", tc.absErr }
+					}
+					return resolveTown(tc.resolve, func(key string) string {
+						if key != "GT_TOWN_ROOT" {
+							t.Errorf("getenv(%q), want GT_TOWN_ROOT", key)
+						}
+						return tc.fromEnv
+					}, abs)
+				},
+			}
+			var stderr bytes.Buffer
+			if code := r.run(nil, &stderr); code != tc.wantCode {
+				t.Fatalf("run() = %d, want %d; stderr: %s", code, tc.wantCode, stderr.String())
+			}
+			if wantExec := tc.wantCode == 0; execCalled != wantExec {
+				t.Errorf("exec ran = %v, want %v", execCalled, wantExec)
+			}
+			if tc.wantMsg != "" && !strings.Contains(stderr.String(), tc.wantMsg) {
+				t.Errorf("stderr = %q, want it to name %q", stderr.String(), tc.wantMsg)
+			}
+			if tc.wantCode == 0 && stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want nothing written on a run that started", stderr.String())
+			}
+		})
+	}
 }

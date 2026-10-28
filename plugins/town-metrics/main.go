@@ -1,14 +1,13 @@
-// Command town-metrics runs one town-metrics hour: the single-flight lock, the
-// snapshot and the analysis when it is due. The hour is `gt metrics run`, so
-// this program hands its process to that command instead of carrying a second
-// copy of the work (gt-hg64t, gt-98pgy). plugin.md beside it is the schedule and
-// the contract.
+// Command town-metrics is the plugin's entry point, built into the program
+// plugin.md's [execution] block names; plugin.md beside it is the schedule and
+// the contract. The hour has one implementation, `gt metrics run`, so this
+// program hands its process to that command rather than carrying a second copy
+// of the work (gt-hg64t).
 //
-// The daemon execs a plugin's binary with no shell and no arguments, from the
-// plugin directory, with GT_TOWN_ROOT set (gt-tpg0p.1); `gt metrics run`
-// resolves the town from either, which is what the shell wrapper's `cd` did.
-// make build writes bin/town-metrics and gt plugin sync copies it to the town,
-// so a sync ahead of a build ships a plugin whose entry point is missing.
+// The runner starts a plugin's binary in the plugin's own directory inside the
+// town with GT_TOWN_ROOT set (gt-tpg0p.1). The hour's record lands in the town
+// that directory resolves to, so this program names that town before the
+// handoff and refuses a run where the two disagree.
 package main
 
 import (
@@ -16,25 +15,41 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
+
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 func main() {
-	os.Exit(runner{lookPath: exec.LookPath, exec: syscall.Exec}.run(os.Environ(), os.Stderr))
+	os.Exit(runner{
+		lookPath: exec.LookPath,
+		exec:     syscall.Exec,
+		townRoot: func() (string, error) {
+			return resolveTown(workspace.FindFromCwdOrError, os.Getenv, filepath.Abs)
+		},
+	}.run(os.Environ(), os.Stderr))
 }
 
 // runner carries the seams a unit test replaces: lookPath answers without a
-// PATH, and exec records the call instead of ending the test process.
+// PATH, exec records the call instead of ending the test process, and townRoot
+// names the town the hour writes to.
 type runner struct {
 	lookPath func(string) (string, error)
 	exec     func(path string, argv, env []string) error
+	townRoot func() (string, error)
 }
 
 // run replaces this process with `gt metrics run`, forwarding env, and returns
 // the process status only when the exec could not start. A gt that is not on
 // PATH fails the hour rather than skipping it, because a skipped run reads as a
-// clean hour that appended nothing.
+// clean hour that appended nothing, and an hour placed in no town is the same
+// silent record.
 func (r runner) run(env []string, stderr io.Writer) int {
+	if _, err := r.townRoot(); err != nil {
+		fmt.Fprintf(stderr, "town-metrics: cannot name the town: %v\n", err)
+		return 1
+	}
 	path, err := r.lookPath("gt")
 	if err != nil {
 		fmt.Fprintf(stderr, "town-metrics: cannot find gt: %v\n", err)
@@ -46,4 +61,30 @@ func (r runner) run(env []string, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// resolveTown names the town the hour writes to: the one this process resolves,
+// which is the one `gt metrics run` resolves from the same directory and
+// environment. The runner's contract names that town twice, as the plugin's
+// directory and as GT_TOWN_ROOT, so a pair that disagrees fails here rather
+// than let the record land in a town the runner never promised. abs makes a
+// hand run's relative GT_TOWN_ROOT absolute, since a cwd that cannot be read
+// leaves the two paths no way to be compared.
+func resolveTown(resolve func() (string, error), getenv func(string) string, abs func(string) (string, error)) (string, error) {
+	town, err := resolve()
+	if err != nil {
+		return "", err
+	}
+	fromEnv := getenv("GT_TOWN_ROOT")
+	if fromEnv == "" {
+		return town, nil
+	}
+	envTown, err := abs(fromEnv)
+	if err != nil {
+		return "", fmt.Errorf("resolving GT_TOWN_ROOT %q: %w", fromEnv, err)
+	}
+	if envTown != filepath.Clean(town) {
+		return "", fmt.Errorf("the plugin directory is in town %q but GT_TOWN_ROOT names %q", town, fromEnv)
+	}
+	return town, nil
 }
