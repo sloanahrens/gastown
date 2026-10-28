@@ -643,6 +643,82 @@ func reworkDepthCells(t *testing.T, section string) []string {
 	return nil
 }
 
+// TestWriteMangoSectionReportsASectionItCannotWrite drives the write the mango
+// command makes after the section renders: a section that cannot be written is
+// an error naming the file, not a receipt for a file nobody wrote.
+func TestWriteMangoSectionReportsASectionItCannotWrite(t *testing.T) {
+	t.Parallel()
+	outDir := t.TempDir()
+	// A non-empty directory under the section's name: the atomic write's
+	// rename cannot replace it, whatever the directory's mode.
+	if err := os.MkdirAll(filepath.Join(outDir, reportMangoName, "kept"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// No binary means the section needs no file of the extract's to render, so
+	// the write is the step that fails.
+	_, err := WriteMangoSection(context.Background(), Env{}, outDir, "", MangoSectionOptions{})
+	if err == nil || !strings.Contains(err.Error(), reportMangoName+": ") {
+		t.Fatalf("err = %v, want it to open with %s's name", err, reportMangoName)
+	}
+}
+
+// TestWriteBacktestReportsEachFailure drives the backtest command's three ways
+// of stopping: a seam it was not given, a weekly row it cannot date, and a
+// section it cannot write.
+func TestWriteBacktestReportsEachFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		env  Env
+		// prepare writes the case's output directory; it is given the extract
+		// the fixture wrote.
+		prepare func(t *testing.T, town *commandTown)
+		want    string
+	}{
+		{
+			"no file seam",
+			Env{},
+			nil,
+			"write backtest: Env.ReadFile is unset",
+		},
+		{
+			"a weekly row it cannot date",
+			Env{ReadFile: os.ReadFile},
+			func(t *testing.T, town *commandTown) {
+				writeTownFile(t, filepath.Join(town.outDir(), weeklyName), "week,rig,thin,dominant_model,size_median\n"+
+					"2026-10-19,ALL,False,,12.5\nnot-a-date,ALL,False,,13\n")
+			},
+			"not-a-date",
+		},
+		{
+			"a section it cannot write",
+			Env{ReadFile: os.ReadFile},
+			func(t *testing.T, town *commandTown) {
+				if err := os.MkdirAll(filepath.Join(town.outDir(), reportBacktestName, "kept"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			reportBacktestName + ": ",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := newCommandTown(t)
+			if _, err := town.run(t, CommandExtract); err != nil {
+				t.Fatalf("extract: %v", err)
+			}
+			if tc.prepare != nil {
+				tc.prepare(t, town)
+			}
+			_, err := WriteBacktest(tc.env, town.outDir(), town.real.DocsDir)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to hold %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // firstPassLine is rec as one log line, which is what the review and landing
 // logs carry.
 func firstPassLine(t *testing.T, rec any) string {
