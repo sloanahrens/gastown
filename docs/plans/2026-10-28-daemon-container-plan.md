@@ -492,7 +492,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 - [ ] a test asserts the scratch Dolt image tag is `DoltVersion`, the constant D2 uses
 
 ### E2: the L1 runbook
-**Depends on:** E1, D5, B5, A8, R4. **Files:** create `docs/daemon-container.md` (section L1).
+**Depends on:** E1, D5, B5, A8a, A8b, R4. **Files:** create `docs/daemon-container.md` (section L1).
 **Goal:** the overseer's checklist for L1: build the image, render and start the scratch project, the exact commands with explicit Docker contexts, what green looks like (watchdog green 30 minutes, probe file fresh, `daemon status` shows the container, a hand-started second daemon refused), and teardown.
 **Constraints:** the document carries the header lines `docs-lint` requires and passes it; it names no live-town command that touches the running daemon.
 **Out of scope:** running it.
