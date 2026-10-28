@@ -294,6 +294,12 @@ func TestDeploysBlockDrawsTheScheduledHealthRows(t *testing.T) {
 		t.Errorf(".hhead rule is %q: the header is no longer dim, so it reads as a row", rule)
 	}
 
+	// An app with no scheduled check yet is drawn as saying so, not as a result,
+	// and the result is the word the page draws for every other row too.
+	if result := pageFunc(t, "healthResult"); !strings.Contains(result, `if (h.no_checks) return "no scheduled checks yet";`) {
+		t.Error("healthResult does not say an app with no scheduled check has none yet")
+	}
+
 	// The row is the app and the environment it is about, the newest result and
 	// how long ago it ran, the last green and the pass count. It links the
 	// newest run the way a deploy row links its run, and shows the app's whole
