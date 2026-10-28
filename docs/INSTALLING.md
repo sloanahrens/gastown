@@ -484,8 +484,9 @@ one dated ahead of the reader's clock, or one whose daemon is gone, is not. A
 marker the job can neither write nor remove escalates under
 `rebuild-gt:marker-write` or `rebuild-gt:marker-clear`, since a reader that
 cannot see an install, or one that cannot stop seeing a finished one, is a
-condition an operator has to repair. While a marker stands, `gt sling` and the
-spec dispatcher refuse new slings, naming the install they wait on, and running
+condition an operator has to repair. While a marker stands, `gt sling`, the
+spec dispatcher and queue dispatch (`gt scheduler run` and the daemon's
+dispatch tick) refuse new slings, naming the install they wait on, and running
 sessions are left alone; a sling starts again once the marker is gone. Do not
 copy binaries by hand, run `go install`, or
 use `make install-local` in a town: none of them restarts the daemon or rolls
