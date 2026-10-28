@@ -38,12 +38,16 @@ func (t failingTransport) RoundTrip(*http.Request) (*http.Response, error) { ret
 type stalledTransport struct{ limit time.Duration }
 
 func (t stalledTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	limit, cancel := context.WithTimeout(r.Context(), t.limit)
+	defer cancel()
 	select {
 	case <-r.Context().Done():
-		return nil, r.Context().Err()
-	case <-time.After(t.limit):
-		return nil, errors.New("the request was never cancelled")
+	case <-limit.Done():
 	}
+	if err := r.Context().Err(); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("the request was never cancelled")
 }
 
 // newTestClient returns a Client whose requests handler answers in process.
