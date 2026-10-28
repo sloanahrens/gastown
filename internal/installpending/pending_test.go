@@ -1,15 +1,38 @@
 package installpending
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/procid"
 )
 
 // testNow is the instant the marker tests judge from: fixed, so an age in a
 // case is exact rather than a reading of the wall clock.
 func testNow() time.Time { return time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC) }
+
+// testStore is a marker in a temp dir of the test's own. The tests hold the
+// path, so none of them reaches the operator's marker through
+// INSTALL_GT_DAEMON_DIR (gt-vc34c).
+func testStore(t *testing.T) Store {
+	t.Helper()
+	return StoreIn(filepath.Join(t.TempDir(), FileName))
+}
+
+// writeMarker puts body at the store's path, for the cases that need a marker
+// no Write would produce.
+func writeMarker(t *testing.T, s Store, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(s.Path()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.Path(), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // TestPending_LiveMarkerStands is the marker's live case, and the one the
 // other rules are read against: a marker this process wrote minutes ago is an
@@ -17,13 +40,13 @@ func testNow() time.Time { return time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 func TestPending_LiveMarkerStands(t *testing.T) {
 	t.Parallel()
 	now := testNow()
-	town := t.TempDir()
+	s := testStore(t)
 	written := now.Add(-5 * time.Minute)
-	if err := Write(town, written, os.Getpid()); err != nil {
+	if err := s.Write(written, os.Getpid()); err != nil {
 		t.Fatalf("writing the marker: %v", err)
 	}
 
-	m, err := Pending(town, now)
+	m, err := s.Pending(now)
 	if err != nil {
 		t.Fatalf("reading the marker: %v", err)
 	}
@@ -42,7 +65,7 @@ func TestPending_LiveMarkerStands(t *testing.T) {
 // are read as exceptions to a live marker rather than as the only way to nil.
 func TestPending_NoMarkerIsNotPending(t *testing.T) {
 	t.Parallel()
-	m, err := Pending(t.TempDir(), testNow())
+	m, err := testStore(t).Pending(testNow())
 	if err != nil {
 		t.Fatalf("reading a marker that was never written: %v", err)
 	}
@@ -57,17 +80,55 @@ func TestPending_MarkerOlderThanTheCeilingIsNotPending(t *testing.T) {
 	t.Parallel()
 	for _, age := range []time.Duration{Ceiling, Ceiling + time.Hour} {
 		now := testNow()
-		town := t.TempDir()
-		if err := Write(town, now.Add(-age), os.Getpid()); err != nil {
+		s := testStore(t)
+		if err := s.Write(now.Add(-age), os.Getpid()); err != nil {
 			t.Fatalf("writing the marker: %v", err)
 		}
-		m, err := Pending(town, now)
+		m, err := s.Pending(now)
 		if err != nil {
 			t.Fatalf("age %s: reading the marker: %v", age, err)
 		}
 		if m != nil {
 			t.Errorf("a marker %s old (ceiling %s) still reads as pending: %+v", age, Ceiling, m)
 		}
+	}
+}
+
+// TestPending_AReusedPIDIsNotTheWriter pins the identity rule: the marker names
+// a process, not a number, so a marker carrying a start token no current holder
+// of that pid was started with is a dead writer whose pid went to someone else.
+func TestPending_AReusedPIDIsNotTheWriter(t *testing.T) {
+	t.Parallel()
+	s := testStore(t)
+	now := testNow()
+	writeMarker(t, s, fmt.Sprintf(`{"at":%q,"pid":%d,"start":"started-before-this-process"}`,
+		now.Add(-time.Minute).Format(time.RFC3339), os.Getpid()))
+
+	m, err := s.Pending(now)
+	if err != nil {
+		t.Fatalf("reading the marker: %v", err)
+	}
+	if m != nil {
+		t.Fatalf("a marker from a reused pid reads as pending: %+v", m)
+	}
+}
+
+// TestPending_AMarkerWithoutAStartTokenFallsBackToThePID pins the fallback a
+// platform with no start token leaves us: the pid probe decides, and Ceiling
+// bounds it. A live writer must still read as pending, or a town that cannot
+// take start tokens never waits out an install.
+func TestPending_AMarkerWithoutAStartTokenFallsBackToThePID(t *testing.T) {
+	t.Parallel()
+	s := testStore(t)
+	now := testNow()
+	writeMarker(t, s, fmt.Sprintf(`{"at":%q,"pid":%d}`, now.Add(-time.Minute).Format(time.RFC3339), os.Getpid()))
+
+	m, err := s.Pending(now)
+	if err != nil {
+		t.Fatalf("reading the marker: %v", err)
+	}
+	if m == nil {
+		t.Fatal("a marker from this live process, with no start token, does not stand")
 	}
 }
 
@@ -87,15 +148,10 @@ func TestPending_BrokenMarkerIsAnError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			town := t.TempDir()
-			if err := os.MkdirAll(Dir(town), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(Path(town), []byte(tc.body), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			s := testStore(t)
+			writeMarker(t, s, tc.body)
 
-			m, err := Pending(town, testNow())
+			m, err := s.Pending(testNow())
 			if err == nil {
 				t.Fatalf("a %s marker parsed as pending=%+v, want an error", tc.name, m)
 			}
@@ -111,12 +167,12 @@ func TestPending_BrokenMarkerIsAnError(t *testing.T) {
 // could not judge, and judging it as none would clear the way for a sling.
 func TestPending_UnreadableMarkerIsAnError(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	if err := os.MkdirAll(Path(town), 0o755); err != nil {
+	s := testStore(t)
+	if err := os.MkdirAll(s.Path(), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if m, err := Pending(town, testNow()); err == nil {
+	if m, err := s.Pending(testNow()); err == nil {
 		t.Fatalf("a directory where the marker belongs read as pending=%+v, want an error", m)
 	}
 }
@@ -127,15 +183,15 @@ func TestPending_UnreadableMarkerIsAnError(t *testing.T) {
 func TestWrite_ReplacesAnEarlierMarker(t *testing.T) {
 	t.Parallel()
 	now := testNow()
-	town := t.TempDir()
-	if err := Write(town, now.Add(-20*time.Minute), os.Getpid()); err != nil {
+	s := testStore(t)
+	if err := s.Write(now.Add(-20*time.Minute), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
-	if err := Write(town, now.Add(-time.Minute), os.Getpid()); err != nil {
+	if err := s.Write(now.Add(-time.Minute), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 
-	m, err := Pending(town, now)
+	m, err := s.Pending(now)
 	if err != nil {
 		t.Fatalf("reading the marker: %v", err)
 	}
@@ -147,15 +203,37 @@ func TestWrite_ReplacesAnEarlierMarker(t *testing.T) {
 	}
 }
 
+// TestWrite_RecordsTheWritersStartToken pins that a write takes the writer's
+// start token when the platform has one: the pid alone is not an identity, and
+// the reader's identity rule has nothing to compare without it.
+func TestWrite_RecordsTheWritersStartToken(t *testing.T) {
+	t.Parallel()
+	s := testStore(t)
+	if err := s.Write(testNow(), os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.Pending(testNow())
+	if err != nil {
+		t.Fatalf("reading the marker: %v", err)
+	}
+	if m == nil {
+		t.Fatal("the marker this process just wrote does not stand")
+	}
+	want, _ := procid.StartToken(os.Getpid())
+	if m.Start != want {
+		t.Errorf("marker start = %q, want the writer's %q", m.Start, want)
+	}
+}
+
 // TestWrite_RefusesNoWriterPID pins that a marker names the process a reader
 // probes; one without a pid could never be read as spent by that rule.
 func TestWrite_RefusesNoWriterPID(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	if err := Write(town, testNow(), 0); err == nil {
+	s := testStore(t)
+	if err := s.Write(testNow(), 0); err == nil {
 		t.Fatal("a marker with no writer pid was written")
 	}
-	if _, err := os.Stat(Path(town)); !os.IsNotExist(err) {
+	if _, err := os.Stat(s.Path()); !os.IsNotExist(err) {
 		t.Errorf("a refused write left a file behind: %v", err)
 	}
 }
@@ -164,21 +242,21 @@ func TestWrite_RefusesNoWriterPID(t *testing.T) {
 // standing marker stops standing, and a town with none is not an error.
 func TestClear_RemovesTheMarkerAndToleratesNone(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	if err := Clear(town); err != nil {
+	s := testStore(t)
+	if err := s.Clear(); err != nil {
 		t.Fatalf("clearing a marker that was never written: %v", err)
 	}
-	if err := Write(town, testNow(), os.Getpid()); err != nil {
+	if err := s.Write(testNow(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := Clear(town); err != nil {
+	if err := s.Clear(); err != nil {
 		t.Fatalf("clearing the marker: %v", err)
 	}
-	if _, err := os.Stat(Path(town)); !os.IsNotExist(err) {
+	if _, err := os.Stat(s.Path()); !os.IsNotExist(err) {
 		t.Errorf("the marker file survived Clear: %v", err)
 	}
-	if m, err := Pending(town, testNow()); err != nil || m != nil {
+	if m, err := s.Pending(testNow()); err != nil || m != nil {
 		t.Errorf("after Clear the marker reads pending=%+v, err=%v; want none", m, err)
 	}
 }
@@ -188,23 +266,23 @@ func TestClear_RemovesTheMarkerAndToleratesNone(t *testing.T) {
 // next reader trusts.
 func TestClear_ReportsADirectoryItCannotRemove(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	if err := os.MkdirAll(Path(town), 0o755); err != nil {
+	s := testStore(t)
+	if err := os.MkdirAll(s.Path(), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(Path(town), "child"), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(s.Path(), "child"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := Clear(town); err == nil {
+	if err := s.Clear(); err == nil {
 		t.Fatal("clearing a non-empty directory at the marker path reported success")
 	}
 }
 
-// TestDir_HonoursTheDaemonDirOverride pins that the marker follows the same
-// directory the install lock and scripts/install-gt.sh write to, or the writer
-// and the reader disagree about which file is the marker.
-func TestDir_HonoursTheDaemonDirOverride(t *testing.T) {
+// TestDirFor_HonoursTheDaemonDirOverride pins that the marker follows the
+// same directory the install lock and scripts/install-gt.sh write to, or the
+// writer and the reader disagree about which file is the marker.
+func TestDirFor_HonoursTheDaemonDirOverride(t *testing.T) {
 	t.Parallel()
 	town := "/town"
 	if got, want := dirFor(town, func(string) string { return "" }), filepath.Join(town, "daemon"); got != want {

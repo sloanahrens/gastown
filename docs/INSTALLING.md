@@ -476,7 +476,11 @@ the same script as a backstop, whenever the installed binary falls behind main
 and the town is quiet. A landing's install request waits until 30 minutes
 after the last install (set `daemon.patrols.rebuild_gt.min_interval`, a Go
 duration, to change it) so a burst of landings costs one build and restart;
-a bead labeled `gt:install-now` skips the wait. Do not copy binaries by hand, run `go install`, or
+a bead labeled `gt:install-now` skips the wait. While an install is in flight
+the job leaves `daemon/install-pending.json` in the town — the cycle's time and
+the daemon's pid — and removes it when the cycle reaches a verdict, so anything
+that can read the town can tell one is running; a marker older than 45 minutes,
+or one whose daemon is gone, is not. Do not copy binaries by hand, run `go install`, or
 use `make install-local` in a town: none of them restarts the daemon or rolls
 back.
 

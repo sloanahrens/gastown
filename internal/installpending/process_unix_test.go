@@ -14,12 +14,12 @@ const pidAboveAnyProcess = 1 << 30
 func TestPending_DeadWriterIsNotPending(t *testing.T) {
 	t.Parallel()
 	now := testNow()
-	town := t.TempDir()
-	if err := Write(town, now, pidAboveAnyProcess); err != nil {
+	s := testStore(t)
+	if err := s.Write(now, pidAboveAnyProcess); err != nil {
 		t.Fatalf("writing the marker: %v", err)
 	}
 
-	m, err := Pending(town, now)
+	m, err := s.Pending(now)
 	if err != nil {
 		t.Fatalf("reading the marker: %v", err)
 	}

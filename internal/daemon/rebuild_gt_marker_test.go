@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/version"
 )
@@ -13,7 +15,7 @@ import (
 // when none does.
 func pendingMarker(t *testing.T, d *Daemon) *installpending.Marker {
 	t.Helper()
-	m, err := installpending.Pending(d.config.TownRoot, d.clk().Now())
+	m, err := d.rebuildGTPendingStore().Pending(d.clk().Now())
 	if err != nil {
 		t.Fatalf("reading the pending-install marker: %v", err)
 	}
@@ -144,19 +146,139 @@ func TestRebuildGT_UnwritableMarkerDoesNotStopTheInstall(t *testing.T) {
 		}
 		return cliReply{}
 	})
-	// A non-empty directory where the marker belongs: the write cannot rename
-	// over it and the clear cannot remove it.
-	if err := os.MkdirAll(installpending.Path(d.config.TownRoot), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(installpending.Path(d.config.TownRoot), "child"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	blockPendingMarkerPath(t, d)
 
 	if settled := d.runRebuildGT(); !settled {
 		t.Fatal("an install beside an unusable marker path reached its verdict")
 	}
 	if installs := installCalls(cli); len(installs) != 1 {
 		t.Fatalf("installs = %v, want the one the marker path must not block", installs)
+	}
+}
+
+// TestRebuildGT_EscalatesAMarkerItCannotWrite pins the other half of the same
+// failure: a reader that finds no marker reads a town with no install coming,
+// so the failure has to reach an operator rather than a log line alone
+// (gt-vc34c).
+func TestRebuildGT_EscalatesAMarkerItCannotWrite(t *testing.T) {
+	t.Parallel()
+	d, rec := rebuildGTTown(t)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "branch"):
+			return cliReply{stdout: "main\n"}
+		case gitSub(c, "rev-parse"):
+			return cliReply{stdout: "abc1234567890\n"}
+		case c.name == "bash":
+			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
+		}
+		return cliReply{}
+	})
+	blockPendingMarkerPath(t, d)
+
+	d.runRebuildGT()
+
+	if open := rec.OpenEscalations(alertKeyRebuildGTMarkerWrite); len(open) != 1 {
+		t.Fatalf("open escalations = %+v, want one under %s", open, alertKeyRebuildGTMarkerWrite)
+	}
+}
+
+// TestRebuildGT_ClearsTheMarkerWriteAlertOnceTheMarkerIsWritten pins the close:
+// the escalation holds while the marker cannot be written, and a cycle that
+// writes one takes it down, so a repaired town is not left with the alarm.
+func TestRebuildGT_ClearsTheMarkerWriteAlertOnceTheMarkerIsWritten(t *testing.T) {
+	t.Parallel()
+	d, rec := rebuildGTTown(t)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "branch"):
+			return cliReply{stdout: "main\n"}
+		case gitSub(c, "rev-parse"):
+			return cliReply{stdout: "abc1234567890\n"}
+		case c.name == "bash":
+			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
+		}
+		return cliReply{}
+	})
+	blockPendingMarkerPath(t, d)
+	d.runRebuildGT()
+	if open := rec.OpenEscalations(alertKeyRebuildGTMarkerWrite); len(open) != 1 {
+		t.Fatalf("the blocked cycle left %d escalations open, want one", len(open))
+	}
+
+	if err := os.RemoveAll(d.rebuildGTPendingStore().Path()); err != nil {
+		t.Fatal(err)
+	}
+	if settled := d.runRebuildGT(); !settled {
+		t.Fatal("the second cycle reached its verdict")
+	}
+
+	if open := rec.OpenEscalations(alertKeyRebuildGTMarkerWrite); len(open) != 0 {
+		t.Fatalf("the marker was written and the escalation still stands: %+v", open)
+	}
+}
+
+// TestRebuildGT_RefreshesTheMarkerAcrossTheGateWait pins that the marker moves
+// with the cycle's own clock: the reserve wait can hold for minutes, and a
+// marker left at the pre-wait time ages out from under an install that is still
+// running (gt-vc34c).
+func TestRebuildGT_RefreshesTheMarkerAcrossTheGateWait(t *testing.T) {
+	t.Parallel()
+	d, _ := rebuildGTTown(t)
+	clk := clockwork.NewFakeClockAt(testEpoch)
+	d.clock = clk
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	// Busy for the decision, then free once the wait has begun — and the clock
+	// moves inside that read, so the wait is a real interval rather than a
+	// instant the test cannot tell from the pre-wait write.
+	gates := 0
+	d.rebuildGTGateFn = func() (string, bool) {
+		gates++
+		if gates == 1 {
+			return "a gate suite holds a slot (gastown/gate)", true
+		}
+		clk.Advance(rebuildGTReserveWait / 2)
+		return "", false
+	}
+	var during *installpending.Marker
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "branch"):
+			return cliReply{stdout: "main\n"}
+		case gitSub(c, "rev-parse"):
+			return cliReply{stdout: "abc1234567890\n"}
+		case c.name == "bash":
+			during = pendingMarker(t, d)
+			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
+		}
+		return cliReply{}
+	})
+	d.rebuildGTBlock.open(testEpoch.Add(-31 * time.Minute))
+
+	if settled := d.runRebuildGT(); !settled {
+		t.Fatal("a completed install holds the interval")
+	}
+	if during == nil {
+		t.Fatal("no marker stood while install-gt ran")
+	}
+	if !during.At.After(testEpoch) {
+		t.Fatalf("marker at = %s, want the refresh after the wait moved it past %s", during.At, testEpoch)
+	}
+}
+
+// blockPendingMarkerPath puts a non-empty directory where the marker belongs, so
+// the write cannot rename over it and the clear cannot remove it.
+func blockPendingMarkerPath(t *testing.T, d *Daemon) {
+	t.Helper()
+	path := d.rebuildGTPendingStore().Path()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "child"), nil, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
