@@ -271,16 +271,20 @@ func (l *Lander) compactQueue(rig string, existing []ExistingFollowup) []string 
 	if l.Reviews == nil {
 		return nil
 	}
-	dropped, err := l.Reviews.Compact(func(q QueuedFollowup) bool {
+	res, err := l.Reviews.Compact(func(q QueuedFollowup) bool {
 		return q.Rig == rig && len(queuedCandidates(q, existing)) == 0
 	})
 	if err != nil {
 		return []string{fmt.Sprintf("could not compact the %s of its consumed queue lines (%v)", ReviewsFileName, err)}
 	}
-	if dropped == 0 {
-		return nil
+	var lines []string
+	if res.Unread > 0 {
+		lines = append(lines, fmt.Sprintf("skipped %d line(s) too long to examine in the %s; compaction kept them as they were", res.Unread, ReviewsFileName))
 	}
-	return []string{fmt.Sprintf("dropped %d consumed queue line(s) from the %s", dropped, ReviewsFileName)}
+	if res.Dropped > 0 {
+		lines = append(lines, fmt.Sprintf("dropped %d consumed queue line(s) from the %s", res.Dropped, ReviewsFileName))
+	}
+	return lines
 }
 
 // fileFollowupBeads files the beads the fresh findings of one landing earn —

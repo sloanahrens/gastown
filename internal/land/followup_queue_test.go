@@ -1,6 +1,7 @@
 package land
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -298,6 +299,150 @@ func TestFollowupFeedSurvivesAnUnwritableQueue(t *testing.T) {
 			t.Errorf("log = %q, want the missing log named", log)
 		}
 	})
+}
+
+// TestFollowupFeedDrainsAQueueLineInParts: the bound can leave room for some of
+// a queue line's findings and not the rest. The line then stays with the
+// findings no bead covers yet — the compaction a consumed line beside it
+// triggers must not take it — and a later landing with room files them, so the
+// line is consumed only once nothing on it is left to file (gt-3arxj).
+func TestFollowupFeedDrainsAQueueLineInParts(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.9, nil)
+	first := ReviewFindingText{ID: "f-1", Severity: "minor", File: "internal/land/note.go", Line: 12,
+		Title: "name the error", Claim: queuedClaim}
+	second := ReviewFindingText{ID: "f-2", Severity: "minor", File: "internal/metrics/panel.go", Line: 40,
+		Title: "count the row", Claim: "the row is skipped"}
+	// A line the bound can file whole, so the compaction runs in the same pass.
+	if err := f.reviews.AppendQueue(queueLine("gt-drained", f.work.Rig, ReviewFindingText{
+		ID: "f-3", Severity: "minor", File: "internal/land/note.go", Line: 30,
+		Title: "swap the nil check", Claim: "the map is never nil"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, first, second)); err != nil {
+		t.Fatal(err)
+	}
+	f.bd.Seed(
+		beads.Issue{ID: "gt-drained", Title: "an earlier landing", Status: "closed", Type: "bug"},
+		beads.Issue{ID: "gt-held", Title: "an earlier landing", Status: "closed", Type: "bug"},
+	)
+	// Two slots under the bound: one bead for the whole line, and one of the
+	// two-package line's beads, which leaves its other finding unfiled.
+	f.fake.existing = openFollowupBeads(DefaultFollowupBackpressure - 2)
+	log := f.run()
+	if len(f.fake.created) != 2 {
+		t.Fatalf("filed %d beads from the queue, want one per line:\n%s", len(f.fake.created), log)
+	}
+	queued, err := f.reviews.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 || queued[0].Bead != "gt-held" {
+		t.Fatalf("queue = %+v, want only the partly filed line left", queued)
+	}
+	// The next landing has room: the open count fell under the bound.
+	for i := range f.fake.existing {
+		f.fake.existing[i].Status = "closed"
+	}
+	log = f.run()
+	if len(f.fake.created) != 3 {
+		t.Fatalf("filed %d beads over both landings, want the second finding filed too:\n%s", len(f.fake.created), log)
+	}
+	if got := f.fake.created[2].Title; !strings.Contains(got, "count the row") {
+		t.Errorf("the last bead is %q, want the finding the first landing left", got)
+	}
+	queued, err = f.reviews.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 0 {
+		t.Errorf("queue = %+v, want the line dropped once both findings were filed", queued)
+	}
+}
+
+// TestFollowupFeedKeepsAnOverlongLineAndStillCompacts: a line past the
+// compaction's bound may be a verdict, and the log only ever appends verdicts,
+// so compaction keeps it as it was and says once that it skipped it — while the
+// consumed queue line beside it is still dropped (gt-3arxj).
+func TestFollowupFeedKeepsAnOverlongLineAndStillCompacts(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.9, nil)
+	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	// A small bound, so the case does not cost a 16 MiB line: the queue line
+	// fits under it and the verdict below does not.
+	f.reviews.lineLimit = 1024
+	big, err := json.Marshal(ReviewRecord{BeadID: "gt-big", Rig: f.work.Rig, Verdict: VerdictApprove,
+		Score: 0.9, At: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+		FindingText: []ReviewFindingText{{File: "note.go", Line: 12, Title: "name the error", Claim: strings.Repeat("c", 2048)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fh, err := os.OpenFile(f.reviews.Path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fh.Write(append(big, '\n')); err != nil {
+		_ = fh.Close()
+		t.Fatal(err)
+	}
+	if err := fh.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.bd.Seed(beads.Issue{ID: "gt-held", Title: "an earlier landing", Status: "closed", Type: "bug"})
+	log := f.run()
+	if !strings.Contains(log, "dropped 1 consumed queue line") {
+		t.Fatalf("log = %q, want the consumed queue line dropped", log)
+	}
+	if got := strings.Count(log, "too long to examine"); got != 1 {
+		t.Errorf("log names the skipped line %d times, want one:\n%s", got, log)
+	}
+	raw, err := os.ReadFile(f.reviews.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), string(big)) {
+		t.Errorf("the overlong verdict line is gone from the compacted log:\n%s", raw)
+	}
+	if queued, err := f.reviews.Queued(); err != nil || len(queued) != 0 {
+		t.Errorf("queue = %+v, %v; want the drained line gone", queued, err)
+	}
+}
+
+// TestCompactKeepsAQueueMarkedLineItCannotDecode: a line that marks itself a
+// queue line but does not decode as one is kept, never dropped — compaction
+// removes a line only when it can see the findings on it are covered, and what
+// it cannot read it must not lose (gt-3arxj).
+func TestCompactKeepsAQueueMarkedLineItCannotDecode(t *testing.T) {
+	t.Parallel()
+	f := reviewsFileIn(t)
+	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	odd := `{"bead":"gt-odd","attempt":"not a number","at":"2026-10-20T12:00:00Z","followup_queue":{"findings":[]}}`
+	done, err := json.Marshal(ReviewRecord{BeadID: "gt-done", Rig: "gastown", At: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+		Queue: &FollowupQueue{Landed: queuedLanded, Score: 0.7, Findings: []ReviewFindingText{{Title: "done"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.Path, []byte(odd+"\n"+string(done)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.Compact(func(QueuedFollowup) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != (CompactResult{Dropped: 1}) {
+		t.Fatalf("Compact = %+v, want only the decodable line dropped", res)
+	}
+	raw, err := os.ReadFile(f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != odd+"\n" {
+		t.Errorf("compacted log =\n%s\nwant the undecodable line kept as it was", raw)
+	}
 }
 
 // TestReviewRecordWithoutFindingTextStillParses: a count-only line, written
