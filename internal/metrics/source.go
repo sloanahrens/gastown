@@ -49,16 +49,10 @@ func isBeadID(id string) bool {
 	return id != "" && !strings.HasPrefix(id, "-")
 }
 
-// showBeads reads the beads the store in dir holds among ids, keyed by id, one
-// read per storeShowChunk ids so a long list is several reads rather than one
-// command line. An id that is not a bead id is left out rather than read, since
-// a log cannot name a bead whose id bd would read as a flag; a list with no bead
-// id in it opens no store. A bead the store no longer holds is absent, not an
-// error: that is the store's answer. A chunk that holds none of its ids is
-// answered with a not-found error, which is the same answer for a whole chunk,
-// so it contributes no bead of its own and the next chunk still reads. A
-// missing seam, a seam that names no store and a failed read are errors, so a
-// caller never reads a read that broke as a bead that is gone.
+// showBeads reads the beads the store in dir holds among ids, keyed by id, in
+// chunks of storeShowChunk: a non-bead id is not read, a bead the store does
+// not hold is absent rather than an error (a chunk that holds none of its ids
+// included), and a missing seam or a failed read is an error.
 func showBeads(ctx context.Context, env Env, dir string, ids []string) (map[string]*beads.Issue, error) {
 	if env.Beads == nil {
 		return nil, fmt.Errorf("no bead store seam for %s", dir)
