@@ -248,6 +248,12 @@ func (r *Registry) Owns(name string) (bool, error) {
 	return false, nil
 }
 
+// Names returns the pool Pick chooses from, which is also the pool Plan picks a
+// free name out of.
+func (r *Registry) Names() []string {
+	return slices.Clone(r.pool())
+}
+
 // Taken returns every name in use: bound names, reserved names, names of live
 // agents, and the polecat directory names the glob matches.
 func (r *Registry) Taken() (map[string]bool, error) {
