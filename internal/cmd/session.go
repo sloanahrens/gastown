@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -89,7 +90,11 @@ and reporting a crash the operator asked for. A host seat stays stopped
 until gt session start (or gt agent resume) clears the record.
 
 A sandbox seat's stop also deletes its sandbox, and the seat is free for
-the next sling unless --park is given: parking is opt-in there.`,
+the next sling unless --park is given: parking is opt-in there. If the
+sandbox registry cannot be read, the seat cannot be shown to be a sandbox
+seat, so the stop parks it and warns: a restart of a seat the operator
+stopped is worse than a park, which gt session start or gt agent resume
+lifts.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSessionStop,
 }
@@ -379,7 +384,7 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 	// was deliberate, and restart it (gt-fojqs).
 	var recorded stopRecord
 	if polecatMgr.HasPolecat(polecatName) {
-		recorded = recordDeliberateStop(townRoot, rigName, polecatName, polecatMgr.SessionName(polecatName), sessionPark)
+		recorded = recordDeliberateStop(townRoot, rigName, polecatName, polecatMgr.SessionName(polecatName), sessionPark, os.Stderr)
 	}
 
 	if err := polecatMgr.Stop(polecatName, sessionForce); err != nil {
@@ -439,7 +444,8 @@ type stopRecord struct {
 	// Written is true when this stop wrote the park marker.
 	Written bool
 	// Parked is true when the seat carries a park marker after the stop, from
-	// this stop or from an earlier gt agent pause.
+	// this stop or from an earlier gt agent pause. A marker this stop failed
+	// to write leaves it false: the seat is not parked.
 	Parked bool
 	// Sandbox is true when the seat's session lives in a sandbox.
 	Sandbox bool
@@ -454,22 +460,31 @@ type stopRecord struct {
 // A registry that cannot be read is not read as "host seat": the seat is
 // parked and the warning names the failed read, because a restart of a seat
 // the operator stopped is the incident and a park is the recoverable side.
-func recordDeliberateStop(townRoot, rigName, polecatName, sessionID string, park bool) stopRecord {
+// Warnings go to warn, which gt session stop points at stderr, so a test can
+// read them.
+func recordDeliberateStop(townRoot, rigName, polecatName, sessionID string, park bool, warn io.Writer) stopRecord {
 	sandboxed, err := session.IsSandboxed(townRoot, sessionID)
 	if err != nil {
-		style.PrintWarning("could not tell whether %s runs in a sandbox: %v; recording the stop as a park", sessionID, err)
+		style.FprintWarning(warn, "could not tell whether %s runs in a sandbox: %v; recording the stop as a park", sessionID, err)
 	}
 	parks := stopParksSeat(sandboxed, err != nil, park)
-	rec := stopRecord{Parked: parks, Sandbox: err == nil && sandboxed}
+	rec := stopRecord{Sandbox: err == nil && sandboxed}
 	if !parks {
+		// The sandbox seat is left alone, but an earlier park (gt agent
+		// pause) still sits on it; calling the seat unparked would tell the
+		// operator the next sling can reuse it while the reuse gate refuses.
+		rec.Parked = polecatSessionParked(townRoot, rigName, polecatName)
 		return rec
 	}
 	wrote, werr := writeDeliberateStopMarker(townRoot, rigName, polecatName)
 	if werr != nil {
-		style.PrintWarning("could not record the stop for %s/%s: %v (the daemon's supervised restart may bring it back)", rigName, polecatName, werr)
+		style.FprintWarning(warn, "could not record the stop for %s/%s: %v (the daemon's supervised restart may bring it back)", rigName, polecatName, werr)
 	}
 	rec.Written = wrote
-	rec.Parked = wrote || rec.Parked
+	// A marker already on the seat parks it too (an earlier gt agent pause
+	// keeps its own reason); a failed write leaves no marker, so Parked stays
+	// false and the warning above is the only record that the seat is exposed.
+	rec.Parked = wrote || werr == nil
 	return rec
 }
 
