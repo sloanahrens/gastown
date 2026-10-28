@@ -599,7 +599,8 @@ func TestImageRefFor(t *testing.T) {
 		stdout      string
 		repoDigests string // the {{json .RepoDigests}} reply; "" reads as []
 		stderr      string
-		fail        bool
+		fail        bool   // docker fails on every inspect
+		failQuery   string // docker fails on this inspect format only
 		want        string
 		wantErr     string
 		wantQueries []string // the inspect formats docker answered, in order
@@ -676,6 +677,16 @@ func TestImageRefFor(t *testing.T) {
 			wantErr:     "docker image inspect gastown-polecat:dev|Cannot connect to the Docker daemon",
 			wantQueries: []string{imageIDFormat},
 		},
+		{
+			name:        "a failed repository digest inspect names the image and docker's reason",
+			image:       "localhost:5001/gastown-polecat:dev",
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			stderr:      "Cannot connect to the Docker daemon\n",
+			failQuery:   imageRepoDigestsFormat,
+			wantErr:     "docker image inspect localhost:5001/gastown-polecat:dev|Cannot connect to the Docker daemon",
+			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -686,7 +697,7 @@ func TestImageRefFor(t *testing.T) {
 					t.Fatalf("docker call = %v, want image inspect --format", args)
 				}
 				queries = append(queries, args[3])
-				if tt.fail {
+				if tt.fail || args[3] == tt.failQuery {
 					return nil, []byte(tt.stderr), errors.New("exit status 1")
 				}
 				if args[3] == imageRepoDigestsFormat {
