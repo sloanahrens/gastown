@@ -51,6 +51,11 @@ type Config struct {
 	// that was stopped, so another install's lock is left alone. Empty means the
 	// build takes none.
 	Lock string
+	// Owned is a directory the installer made for this supervisor, and the one
+	// this binary was started from. It is removed when the build ends, success or
+	// failure, however the supervisor ends, so the installer need not wait to
+	// remove it. Empty means none.
+	Owned string
 	// GT is the gt binary that raises and clears the escalation. Empty means no
 	// escalation, whatever Fingerprint says.
 	GT string
@@ -229,11 +234,25 @@ func (s system) removeLock(lock string, pid int) {
 	_ = s.removeAll(lock)
 }
 
-// finish reports the build to the town when a fingerprint is set, then returns
-// code: a build that did not finish escalates (tried twice), and one that did
-// clears the escalation. If neither try reaches the town the build log, which
-// is where this process writes, is the last record.
+// removeOwned removes the directory the installer handed over. The supervisor's
+// own binary is already loaded, so removing it does not stop the supervisor. A
+// directory that cannot be removed is said in the log, since it is left behind.
+func (s system) removeOwned(cfg Config) {
+	if cfg.Owned == "" {
+		return
+	}
+	if err := s.removeAll(cfg.Owned); err != nil {
+		fmt.Fprintf(cfg.Stderr, "polecat image: could not remove %s: %v\n", cfg.Owned, err)
+	}
+}
+
+// finish removes the directory the build owns, then reports the build to the
+// town when a fingerprint is set, and returns code: a build that did not finish
+// escalates (tried twice), and one that did clears the escalation. If neither
+// try reaches the town the build log, which is where this process writes, is the
+// last record.
 func (s system) finish(cfg Config, code int) int {
+	s.removeOwned(cfg)
 	if cfg.Fingerprint == "" || cfg.GT == "" {
 		return code
 	}

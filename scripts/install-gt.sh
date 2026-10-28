@@ -71,10 +71,13 @@ SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
 # this early) and only attempts a receipt when DAEMON_DIR is already known.
 RESULT_EMITTED=0
 HELPER_DIR=""
+IMAGE_OWNED=""
 result_line() { RESULT_EMITTED=1; igt_result "$@"; }
 on_exit() {
   local ec=$?
-  [ -z "$HELPER_DIR" ] || rm -rf "$HELPER_DIR"
+  # A detached image build is started from HELPER_DIR and removes it itself
+  # (--owned), so this exit leaves it alone (gt-p5pjs).
+  [ -z "$HELPER_DIR" ] || [ -n "$IMAGE_OWNED" ] || rm -rf "$HELPER_DIR"
   [ "$RESULT_EMITTED" = "1" ] && exit "$ec"
   if [ -n "${DAEMON_DIR:-}" ]; then
     igt_receipt failed "${EXPECTED:-${FULL_SHA:-${SHA:-}}}" "${PREV:-}" unexpected "${MERGED_AT:-}" "${START:-}" || true
@@ -248,16 +251,18 @@ image_daemon_env() {
 # that asked for it.
 image_build() {
   local secs="$1" lock="$2" bin="$3" run="$4" fingerprint="${5:-}"
-  local report=()
+  local report=() owned=()
   if [ -n "$fingerprint" ]; then report=(--gt "$GT" --fingerprint "$fingerprint"); fi
+  if [ -n "$IMAGE_OWNED" ]; then owned=(--owned "$IMAGE_OWNED"); fi
   export POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$bin" POLECAT_IMAGE_LOCK="$lock"
   if [ -n "$image_registry" ]; then export POLECAT_IMAGE_REGISTRY="$image_registry"; fi
   if [ -n "$image_crane" ]; then export POLECAT_IMAGE_CRANE="$image_crane"; fi
-  exec "$IMAGE_SUPERVISOR" --alarm "$secs" --lock "$lock" ${report[@]+"${report[@]}"} -- bash "$run"
+  exec "$IMAGE_SUPERVISOR" --alarm "$secs" --lock "$lock" ${report[@]+"${report[@]}"} ${owned[@]+"${owned[@]}"} -- bash "$run"
 }
 
 # image_supervisor_prepare — build cmd/image-supervisor from this checkout into a
-# temp dir (HELPER_DIR, removed on exit) and set IMAGE_SUPERVISOR to it, or set
+# temp dir (HELPER_DIR, removed on exit unless a detached build owns it) and set
+# IMAGE_SUPERVISOR to it, or set
 # IMAGE_SUPERVISOR_WHY to why it could not be. Like the install lock, it comes
 # from the checkout because an install can run before any gt exists, and the Go
 # toolchain is already required: 'make build' needs it. There is no shell
@@ -321,6 +326,11 @@ polecat_image_step() {
     # Detached, as before gt-xzo8a: the subshell exits at once, so the install
     # never waits on the build, and image_build's fd closes keep the install
     # lock out of it.
+    # The build's supervisor removes HELPER_DIR when its build ends (--owned),
+    # so this install's exit must not: removing it here raced the supervisor's
+    # exec from HELPER_DIR and could lose (gt-p5pjs). A launch that dies before
+    # the exec leaves the directory behind, the one case no supervisor can clean.
+    IMAGE_OWNED="$HELPER_DIR"
     ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" install-gt:image-build-failed </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null
     log "polecat image: rebuild for $commit started in the background (log $logfile)"
     return 0

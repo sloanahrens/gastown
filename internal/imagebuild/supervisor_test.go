@@ -3,6 +3,7 @@ package imagebuild
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -503,6 +504,66 @@ func TestAlarmWithNoLockConfiguredRemovesNothing(t *testing.T) {
 
 	if len(r.fs.removed) != 0 {
 		t.Errorf("removed %v with no lock configured", r.fs.removed)
+	}
+}
+
+// The installer hands the supervisor the directory it made for this binary, and
+// the supervisor removes it however the build ends (gt-p5pjs). The directory is
+// real and the check is on disk, so a removal that never happens fails here.
+func TestOwnedDirectoryIsRemovedHoweverTheBuildEnds(t *testing.T) {
+	t.Parallel()
+	cases := map[string]func(t *testing.T) *rig{
+		"success":      func(t *testing.T) *rig { return newRig(finishing(t, 0, 0), nil, false) },
+		"failure":      func(t *testing.T) *rig { return newRig(finishing(t, 3, 0), nil, false) },
+		"cannot start": func(t *testing.T) *rig { return newRig(nil, nil, false) },
+		"alarm stop": func(t *testing.T) *rig {
+			g := newGroup(syscall.SIGTERM)
+			return newRig(newBuild(t, g), g, true)
+		},
+	}
+	for name, rigFor := range cases {
+		t.Run(name, func(t *testing.T) {
+			owned := filepath.Join(t.TempDir(), "helper")
+			if err := os.Mkdir(owned, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(owned, "image-supervisor"), []byte("binary"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			r := rigFor(t)
+			r.sys.removeAll = os.RemoveAll
+
+			r.sys.run(r.config(func(c *Config) { c.Lock = ""; c.Owned = owned }))
+
+			if _, err := os.Stat(owned); !os.IsNotExist(err) {
+				t.Errorf("the owned directory is still there after the build (stat: %v)", err)
+			}
+		})
+	}
+}
+
+// Without an owned directory the supervisor removes nothing, as before the flag.
+func TestWithoutAnOwnedDirectoryNothingIsRemoved(t *testing.T) {
+	t.Parallel()
+	r := newRig(finishing(t, 0, 0), nil, false)
+
+	r.sys.run(r.config(func(c *Config) { c.Lock = "" }))
+
+	if len(r.fs.removed) != 0 {
+		t.Errorf("removed %v with no owned directory configured", r.fs.removed)
+	}
+}
+
+// A directory that cannot be removed is left behind, so the log names it.
+func TestOwnedDirectoryThatCannotBeRemovedIsSaid(t *testing.T) {
+	t.Parallel()
+	r := newRig(finishing(t, 0, 0), nil, false)
+	r.sys.removeAll = func(string) error { return errors.New("busy") }
+
+	r.sys.run(r.config(func(c *Config) { c.Lock = ""; c.Owned = "/helper" }))
+
+	if !strings.Contains(r.stderr.String(), "could not remove /helper: busy") {
+		t.Errorf("log %q does not name the directory that was left behind", r.stderr.String())
 	}
 }
 

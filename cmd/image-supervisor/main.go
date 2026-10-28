@@ -1,13 +1,15 @@
 // Command image-supervisor runs the sandbox image build for
 // scripts/install-gt.sh under an alarm (gt-k6v12).
 //
-//	image-supervisor --alarm SECONDS [--lock DIR] [--gt PATH --fingerprint FP] -- COMMAND [ARG...]
+//	image-supervisor --alarm SECONDS [--lock DIR] [--owned DIR] [--gt PATH --fingerprint FP] -- COMMAND [ARG...]
 //
 // It detaches (a session of its own, no inherited descriptors, so a detached
 // build never holds the install lock past the install), runs COMMAND in a
 // process group of its own, and on the alarm stops the whole group and removes
-// the lock DIR once the group is gone. It exits with the build's status,
-// 128+signal if a signal ended it, or 124 when the alarm did. With a
+// the lock DIR once the group is gone. The owned DIR, which the installer made
+// for this binary, is removed when the build ends however it ends. It exits
+// with the build's status, 128+signal if a signal ended it, or 124 when the
+// alarm did. With a
 // fingerprint it also raises an escalation for a build that did not finish and
 // clears it for one that did.
 package main
@@ -32,18 +34,20 @@ func run(args []string, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	alarm := fs.Int("alarm", 0, "seconds the build may run before it is stopped")
 	lock := fs.String("lock", "", "lock directory the build takes; removed after a stop that it names")
+	owned := fs.String("owned", "", "directory the installer made for this binary; removed when the build ends")
 	gt := fs.String("gt", "", "gt binary that raises and clears the escalation")
 	fingerprint := fs.String("fingerprint", "", "escalation fingerprint for a build that does not finish")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *alarm <= 0 || fs.NArg() == 0 || (*fingerprint != "") != (*gt != "") {
-		fmt.Fprintln(stderr, "usage: image-supervisor --alarm SECONDS [--lock DIR] [--gt PATH --fingerprint FP] -- COMMAND [ARG...]")
+		fmt.Fprintln(stderr, "usage: image-supervisor --alarm SECONDS [--lock DIR] [--owned DIR] [--gt PATH --fingerprint FP] -- COMMAND [ARG...]")
 		return 2
 	}
 	return imagebuild.Run(imagebuild.Config{
 		Alarm:       time.Duration(*alarm) * time.Second,
 		Lock:        *lock,
+		Owned:       *owned,
 		GT:          *gt,
 		Fingerprint: *fingerprint,
 		Command:     fs.Args(),
