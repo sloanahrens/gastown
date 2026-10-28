@@ -334,38 +334,46 @@ polecat_image_step() {
     # Detached, as before gt-xzo8a: the install never waits on the build, and
     # image_build's fd closes keep the install lock out of it.
     #
-    # What it does wait for is the exec. The supervisor is a file in HELPER_DIR,
-    # and this install removes HELPER_DIR on its way out (on_exit); a runner
-    # still on its way to that exec when the removal lands finds the path gone,
-    # and the build dies with "image-supervisor: No such file or directory" and
-    # never starts, decided by nothing but the host's load (gt-p5pjs). So the
-    # runner inherits a fifo this install holds open, and the supervisor closes
-    # every descriptor it inherits as it starts (imagebuild.Detach): EOF here
-    # means the exec has happened, after which the file it exec'd is no longer
-    # needed. Past START_WAIT the install stops waiting and removes HELPER_DIR
-    # as it always did, so a runner that never starts cannot hold an install.
-    local handoff="$HELPER_DIR/.exec-start" confirmed=0
+    # What it does wait for is the runner's fork and exec, because the supervisor
+    # that runner execs is a file in HELPER_DIR and this install removes
+    # HELPER_DIR on its way out (on_exit). A runner still on its way to that exec
+    # when the removal lands finds the path gone, and the build dies with
+    # "image-supervisor: No such file or directory" and never starts, decided by
+    # nothing but the host's load (gt-p5pjs). So the runner inherits a fifo this
+    # install holds open, and EOF on it means the runner has let go of the
+    # directory: either the supervisor exec'd and closed the descriptors it
+    # inherited -- the first thing cmd/image-supervisor does, before it starts
+    # any build -- or the runner ended without it. Both leave no exec to come,
+    # which is all the removal needs. A build that runs for its whole alarm
+    # still returns here at once, so this is not a wait on the build.
+    #
+    # Past START_WAIT the install stops waiting and removes HELPER_DIR as it
+    # always did, so a runner that never gets there cannot hold an install.
+    local handoff="$HELPER_DIR/.exec-start" watching=0
     if mkfifo "$handoff" 2>/dev/null && exec 8<>"$handoff" && exec 7<"$handoff"; then
-      confirmed=1
+      watching=1
     else
       log "polecat image: cannot watch for the background rebuild's start, so the build may outrun the helper directory's removal"
     fi
     ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" install-gt:image-build-failed ) \
       </dev/null >>"$logfile" 2>&1 &
     exec 8>&- 2>/dev/null || true   # the runner's inherited copy is the writer left
-    if [ "$confirmed" = "1" ]; then
-      # Neither open above can block: 7 reads and 8 was still a writer. EOF comes
-      # when the runner's own copies close, which its exec does.
-      local deadline=$(( $(date +%s) + START_WAIT )) read_rc=0
+    if [ "$watching" = "1" ]; then
+      # Neither open above blocks: 7 is a read end and 8, still a writer, kept
+      # it from blocking. Each read waits at most the whole seconds the bound
+      # has left, so the bound is overshot by under a second at most.
+      local deadline=$(( $(date +%s) + START_WAIT )) left slice read_rc let_go=0
       while :; do
-        IFS= read -r -t 5 _ <&7 || read_rc=$?
-        [ "$read_rc" -gt 128 ] || break   # EOF: the supervisor has started
-        if [ "$(date +%s)" -ge "$deadline" ]; then
-          log "polecat image: the background rebuild did not reach its supervisor within ${START_WAIT}s; removing the helper directory anyway"
-          break
-        fi
+        left=$(( deadline - $(date +%s) ))
+        [ "$left" -gt 0 ] || break
+        slice=$left; [ "$slice" -le 5 ] || slice=5
         read_rc=0
+        IFS= read -r -t "$slice" _ <&7 || read_rc=$?
+        [ "$read_rc" -gt 128 ] || { let_go=1; break; }   # EOF: nothing will exec that path now
       done
+      if [ "$let_go" = "0" ]; then
+        log "polecat image: the background rebuild did not reach its supervisor within ${START_WAIT}s; removing the helper directory anyway"
+      fi
       exec 7<&- 2>/dev/null || true
     fi
     log "polecat image: rebuild for $commit started in the background (log $logfile)"
