@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -22,8 +23,9 @@ type BeadStore interface {
 	ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error)
 	Blocked() ([]*beads.Issue, error)
 	// ShowMultiple returns the beads the store holds among ids, keyed by id. An
-	// id it does not hold is left out rather than refused, including the ids bd
-	// answers as not found: a bead that is gone is an answer.
+	// id it does not hold is left out rather than refused: a bead that is gone
+	// is an answer. A read that holds none of its ids answers beads.ErrNotFound
+	// instead, and showBeads reads that as none found too.
 	ShowMultiple(ids []string) (map[string]*beads.Issue, error)
 }
 
@@ -52,9 +54,11 @@ func isBeadID(id string) bool {
 // command line. An id that is not a bead id is left out rather than read, since
 // a log cannot name a bead whose id bd would read as a flag; a list with no bead
 // id in it opens no store. A bead the store no longer holds is absent, not an
-// error: that is the store's answer. A missing seam, a seam that names no store
-// and a failed read are errors, so a caller never reads a read that broke as a
-// bead that is gone.
+// error: that is the store's answer. A chunk that holds none of its ids is
+// answered with a not-found error, which is the same answer for a whole chunk,
+// so it contributes no bead of its own and the next chunk still reads. A
+// missing seam, a seam that names no store and a failed read are errors, so a
+// caller never reads a read that broke as a bead that is gone.
 func showBeads(ctx context.Context, env Env, dir string, ids []string) (map[string]*beads.Issue, error) {
 	if env.Beads == nil {
 		return nil, fmt.Errorf("no bead store seam for %s", dir)
@@ -76,9 +80,13 @@ func showBeads(ctx context.Context, env Env, dir string, ids []string) (map[stri
 	for start := 0; start < len(safe); start += storeShowChunk {
 		chunk := safe[start:min(start+storeShowChunk, len(safe))]
 		shown, err := store.ShowMultiple(chunk)
-		if err != nil {
+		if err != nil && !errors.Is(err, beads.ErrNotFound) {
 			return nil, err
 		}
+		// A not-found read is the store saying it holds none of the chunk's ids:
+		// none found, not a broken read, so the next chunk still reads. The merge
+		// keeps whatever such a read did answer, and any other error returned
+		// above, so a read that broke is never read as beads that are gone.
 		for id, issue := range shown {
 			found[id] = issue
 		}

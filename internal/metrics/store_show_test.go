@@ -33,6 +33,28 @@ const showTestPartial = `{
   }
 }`
 
+// showTestNoneFor is bd's machine-mode answer to a show that resolved none of
+// its ids: data null, exit 20, the ids under the envelope's error (kind
+// not_found). It is the shape internal/beads' notFoundEnvelope captures from
+// bd, and it is what a bead-at-a-time read meets once its one bead is gone.
+func showTestNoneFor(ids []string) string {
+	entries := make([]string, 0, len(ids))
+	for _, id := range ids {
+		entries = append(entries, fmt.Sprintf(`{"id":%q,"kind":"not_found","message":"no issue found matching %q"}`, id, id))
+	}
+	return fmt.Sprintf(`{
+  "schema_version": 1,
+  "contract_version": 1,
+  "data": null,
+  "pagination": null,
+  "error": {
+    "kind": "not_found",
+    "message": "%d of %d ids failed",
+    "ids": [%s]
+  }
+}`, len(ids), len(ids), strings.Join(entries, ","))
+}
+
 // showTestExit is a bd failure carrying bd's typed exit status, as
 // *exec.ExitError does.
 type showTestExit int
@@ -92,6 +114,74 @@ func TestShowBeadsLeavesAMissingBeadOut(t *testing.T) {
 	}
 	if issue, ok := got["gt-missing"]; ok {
 		t.Errorf("showBeads = %v, want the missing bead left out", issue)
+	}
+}
+
+// TestShowBeadsAWhollyMissingIdIsNone: a read whose every id the store does not
+// hold is none found, not a broken read. bd answers such a show with its
+// not-found envelope and exit 20, and the seam turns that into
+// beads.ErrNotFound; a reader that asks about one bead at a time must read it as
+// a bead that is gone, as every reader did before the seam (gt-55ypc).
+func TestShowBeadsAWhollyMissingIdIsNone(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
+		if len(args) > 0 && args[len(args)-1] == "version" {
+			return []byte("bd version 1.2.2\n"), nil, nil
+		}
+		ids := showArgsIDs(args)
+		return []byte(showTestNoneFor(ids)), nil, showTestExit(20)
+	}
+
+	got, err := showBeads(context.Background(), Env{Beads: showTestStore(answer)}, dir,
+		[]string{"gt-missing"})
+	if err != nil {
+		t.Fatalf("showBeads = %v, want no error: an id the store does not hold is none found", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("showBeads = %v, want no bead for a wholly missing id", got)
+	}
+}
+
+// TestShowBeadsAWhollyMissingChunkIsNone: a chunk the store holds none of does
+// not end the read. 130 ids are three chunks of 64, 64 and 2; the first and the
+// last are wholly missing and the middle one holds a bead, so the answer is that
+// one bead and no error (gt-55ypc).
+func TestShowBeadsAWhollyMissingChunkIsNone(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	const held = "gt-b070"
+	reads := 0
+	answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
+		if len(args) > 0 && args[len(args)-1] == "version" {
+			return []byte("bd version 1.2.2\n"), nil, nil
+		}
+		reads++
+		ids := showArgsIDs(args)
+		for _, id := range ids {
+			if id == held {
+				return []byte(fmt.Sprintf(`[{"id":%q,"title":"held"}]`, held)), nil, nil
+			}
+		}
+		return []byte(showTestNoneFor(ids)), nil, showTestExit(20)
+	}
+	ids := make([]string, 0, 130)
+	for i := 0; i < 130; i++ {
+		ids = append(ids, fmt.Sprintf("gt-b%03d", i))
+	}
+
+	got, err := showBeads(context.Background(), Env{Beads: showTestStore(answer)}, dir, ids)
+	if err != nil {
+		t.Fatalf("showBeads = %v, want no error: a chunk of ids the store does not hold is none found", err)
+	}
+	if got[held] == nil {
+		t.Errorf("showBeads = %v, want the bead the middle chunk holds", got)
+	}
+	if len(got) != 1 {
+		t.Errorf("showBeads answered %d bead(s), want only %q", len(got), held)
+	}
+	if reads != 3 {
+		t.Errorf("the store read %d chunk(s), want 3: a not-found chunk must not end the read", reads)
 	}
 }
 
