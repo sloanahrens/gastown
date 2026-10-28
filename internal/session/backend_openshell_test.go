@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -112,6 +113,9 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 			return nil
 		},
 		imageGT: func(context.Context, string) (string, error) { return openshellTestGTCommit, nil },
+		// The profile's image resolves to one reference for the label check and
+		// the create; the pin's own tests set their own fake.
+		imageRef: func(context.Context, string, bool) (string, error) { return openshellTestImageDigest, nil },
 		// No docker in these tests. A profile with a cache volume sets its own runner.
 		docker: func(context.Context, ...string) ([]byte, []byte, error) {
 			return nil, []byte("docker is not configured for this test"), errors.New("no docker")
@@ -187,7 +191,7 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 	create := []string{
 		"openshell", "sandbox", "create",
 		"--name", openshellTestSession,
-		"--from", "gastown-polecat:dev",
+		"--from", openshellTestImageDigest,
 		"--policy", filepath.Join(openshellTestPolicyRoot(town), "deploy/polecat/policy.yaml"),
 		"--provider", "deepseek", "--provider", "forgejo-polecat",
 		"--cpu", "4", "--memory", "8Gi",
@@ -240,6 +244,189 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 	}
 	if rec.Profile != "polecat-default" || rec.Image != "gastown-polecat:dev" || rec.Rig != openshellTestRig || rec.Polecat != openshellTestPolecat {
 		t.Fatalf("record = %+v", rec)
+	}
+}
+
+// fakeImageRegistry is the host docker's image store for the pin's tests: the
+// digest each reference resolves to, the repository digests docker holds for
+// it, the gt label each image carries, and the references the label was read
+// for.
+type fakeImageRegistry struct {
+	tags    map[string]string   // reference -> digest
+	digests map[string][]string // reference -> repository digests docker holds
+	labels  map[string]string   // digest -> gt commit label
+	// retag runs once, after the first label read: the rebuild that moves the
+	// tag between a Prepare's check and its create.
+	retag     func()
+	labelRefs []string
+}
+
+func (r *fakeImageRegistry) run(_ context.Context, args ...string) ([]byte, []byte, error) {
+	if len(args) != 5 || args[0] != "image" || args[1] != "inspect" || args[2] != "--format" {
+		return nil, []byte("unexpected docker call"), errors.New("unexpected docker call")
+	}
+	format, ref := args[3], args[4]
+	digest, ok := r.tags[ref]
+	switch {
+	case ok:
+	case digestRefPattern.MatchString(ref):
+		_, d, _ := strings.Cut(ref, "@")
+		digest = d
+	case imageIDPattern.MatchString(ref):
+		digest = ref
+	default:
+		return nil, []byte("no such image: " + ref), errors.New("exit status 1")
+	}
+	switch format {
+	case imageIDFormat:
+		return []byte(digest + "\n"), nil, nil
+	case imageRepoDigestsFormat:
+		out, err := json.Marshal(r.digests[ref])
+		if err != nil {
+			return nil, nil, err
+		}
+		return out, nil, nil
+	}
+	r.labelRefs = append(r.labelRefs, ref)
+	label := r.labels[digest]
+	if r.retag != nil {
+		retag := r.retag
+		r.retag = nil
+		retag()
+	}
+	return []byte(label + "\n"), nil, nil
+}
+
+// TestOpenShellPreparePinsTheImageDigestItChecked is gt-16oj9's case: the image
+// is retagged between the label check and the create, and the sandbox is still
+// created from the digest the check read.
+func TestOpenShellPreparePinsTheImageDigestItChecked(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+
+	// The image the check approves carries the installed gt's commit; the one
+	// the rebuild retags to carries another.
+	checked := "sha256:" + strings.Repeat("1", 64)
+	rebuilt := "sha256:" + strings.Repeat("2", 64)
+	reg := &fakeImageRegistry{
+		tags:   map[string]string{openshellTestProfile.Image: checked},
+		labels: map[string]string{checked: openshellTestGTCommit, rebuilt: openshellTestDriftedGT},
+	}
+	reg.retag = func() { reg.tags[openshellTestProfile.Image] = rebuilt }
+	b.docker = reg.run
+	b.imageRef = func(ctx context.Context, image string, pull bool) (string, error) {
+		return imageRefFor(ctx, reg.run, image, pull)
+	}
+	b.imageGT = func(ctx context.Context, image string) (string, error) { return imageGTFrom(ctx, reg.run, image) }
+
+	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if reg.tags[openshellTestProfile.Image] != rebuilt {
+		t.Fatal("the tag did not move; the test did not exercise a retag between the check and the create")
+	}
+	if want := []string{checked}; !reflect.DeepEqual(reg.labelRefs, want) {
+		t.Fatalf("the gt label was read for %q, want %q: the check must read the digest", reg.labelRefs, want)
+	}
+	if from := createFrom(t, fake); from != checked {
+		t.Fatalf("the create used --from %q, want the checked digest %q", from, checked)
+	}
+}
+
+// TestOpenShellPrepareNamesAPulledImageByAResolvableReference is the kubernetes
+// half of the pin: a pod pulls its image from a registry, so a local image id
+// cannot name it. The create names the repository digest docker holds for the
+// image, which a pod can pull and a rebuild cannot move; an image the host
+// never pulled has none, so the create names the profile's reference, which the
+// pod pulls as it stands (gt-16oj9).
+func TestOpenShellPrepareNamesAPulledImageByAResolvableReference(t *testing.T) {
+	t.Parallel()
+	const image = "localhost:5001/gastown-polecat:dev"
+	local := "sha256:" + strings.Repeat("1", 64)
+	published := "localhost:5001/gastown-polecat@" + openshellTestImageDigest
+	tests := []struct {
+		name    string
+		digests []string
+		want    string
+	}{
+		{name: "docker knows the repository digest", digests: []string{published}, want: published},
+		{name: "docker holds none, so the profile's reference", want: image},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town, work := openshellTown(t)
+			fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+			profile := openshellTestProfile
+			profile.Image = image
+			profile.Driver = config.SandboxDriverKubernetes
+			b, _ := openshellTestBackend(town, profile, fake)
+			reg := &fakeImageRegistry{
+				tags:    map[string]string{image: local},
+				digests: map[string][]string{image: tt.digests},
+				labels: map[string]string{
+					local:                    openshellTestGTCommit,
+					openshellTestImageDigest: openshellTestGTCommit,
+				},
+			}
+			b.docker = reg.run
+			// The pull flag is Prepare's decision from the profile's driver; this
+			// profile is a kubernetes one, so it must arrive true.
+			b.imageRef = func(ctx context.Context, image string, pull bool) (string, error) {
+				if !pull {
+					t.Error("Prepare resolved a kubernetes profile's image for the host's docker, want a reference a pod can pull")
+				}
+				return imageRefFor(ctx, reg.run, image, pull)
+			}
+			b.imageGT = func(ctx context.Context, image string) (string, error) { return imageGTFrom(ctx, reg.run, image) }
+
+			if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			if got := createFrom(t, fake); got != tt.want {
+				t.Errorf("the create used --from %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// createFrom is the image reference the recorded sandbox create named.
+func createFrom(t *testing.T, fake *sandbox.Fake) string {
+	t.Helper()
+	var from string
+	for _, call := range fake.Calls() {
+		if !slices.Contains(call, "create") {
+			continue
+		}
+		if i := slices.Index(call, "--from"); i >= 0 && i+1 < len(call) {
+			from = call[i+1]
+		}
+	}
+	return from
+}
+
+// TestOpenShellPrepareRefusesAnUnresolvableImage pins the failure branch of the
+// pin: an image that will not resolve to a digest stops Prepare before the push
+// and the create, so nothing is left behind.
+func TestOpenShellPrepareRefusesAnUnresolvableImage(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, pushes := openshellTestBackend(town, openshellTestProfile, fake)
+	b.imageRef = func(context.Context, string, bool) (string, error) {
+		return "", errors.New("no such image: gastown-polecat:dev")
+	}
+	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err == nil ||
+		!strings.Contains(err.Error(), "no such image") {
+		t.Fatalf("Prepare = %v, want the resolution's failure named", err)
+	}
+	if len(*pushes) != 0 {
+		t.Errorf("pushes = %+v, want none: the branch must not reach Forgejo", *pushes)
+	}
+	if calls := fake.Calls(); len(calls) != 0 {
+		t.Errorf("openshell calls = %v, want none: a sandbox was created for an image that never resolved", calls)
 	}
 }
 
@@ -397,7 +584,166 @@ const (
 	// openshellTestVersionReply is what the sandbox's `gt version` prints for
 	// an image built from openshellTestGTCommit.
 	openshellTestVersionReply = "gt version 1.2.1 (dev: main@" + openshellTestGTCommit + ")\n"
+
+	// openshellTestImageDigest is what the profile's image resolves to: the
+	// digest the label check and the create both name.
+	openshellTestImageDigest = "sha256:3f7a1c5e9b2d4a6f8c0e1b3d5a7f9c2e4b6d8a0f1c3e5b7d9a2f4c6e8b0d1a3f"
 )
+
+// TestImageRefFor covers the reference Prepare pins: a docker driver names the
+// local content id, a registry-pulling driver names a reference a pod can pull,
+// a pinned reference is still checked against the local daemon, and a reply
+// docker cannot read is refused rather than passed to the create.
+func TestImageRefFor(t *testing.T) {
+	t.Parallel()
+	pinned := "localhost:5001/gastown-polecat@" + openshellTestImageDigest
+	tests := []struct {
+		name        string
+		image       string
+		pull        bool
+		stdout      string
+		repoDigests string // the {{json .RepoDigests}} reply; "" reads as []
+		stderr      string
+		fail        bool   // docker fails on every inspect
+		failQuery   string // docker fails on this inspect format only
+		want        string
+		wantErr     string
+		wantQueries []string // the inspect formats docker answered, in order
+	}{
+		{
+			name:        "a docker driver names the local content id",
+			image:       "gastown-polecat:dev",
+			stdout:      openshellTestImageDigest + "\n",
+			want:        openshellTestImageDigest,
+			wantQueries: []string{imageIDFormat},
+		},
+		{
+			name:        "a pinned reference is returned, checked locally",
+			image:       pinned,
+			stdout:      openshellTestImageDigest + "\n",
+			want:        pinned,
+			wantQueries: []string{imageIDFormat},
+		},
+		{
+			name:        "a pulled image is named by its repository digest",
+			image:       "localhost:5001/gastown-polecat:dev",
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			repoDigests: `["` + pinned + `"]`,
+			want:        pinned,
+			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
+		},
+		{
+			name:        "a repository digest of another repository is not the image",
+			image:       "localhost:5001/gastown-polecat:dev",
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			repoDigests: `["elsewhere/gastown-polecat@` + openshellTestImageDigest + `"]`,
+			want:        "localhost:5001/gastown-polecat:dev",
+			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
+		},
+		{
+			// The pin's accepted gap: docker holds no repository digest for an
+			// image built here and published with crane, so the pod reads the
+			// profile's tag at pull time. checkSandboxGT covers it after the
+			// create.
+			name:        "an image docker never pulled keeps the profile's reference",
+			image:       "localhost:5001/gastown-polecat:dev",
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			want:        "localhost:5001/gastown-polecat:dev",
+			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
+		},
+		{
+			name:        "a pinned reference is not resolved again",
+			image:       pinned,
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			want:        pinned,
+			wantQueries: []string{imageIDFormat},
+		},
+		{
+			name:        "a reply that is not a digest is refused",
+			image:       "gastown-polecat:dev",
+			stdout:      "Error: No such image\n",
+			wantErr:     "not an image digest",
+			wantQueries: []string{imageIDFormat},
+		},
+		{
+			name:        "a repository digest reply that is not a list is refused",
+			image:       "localhost:5001/gastown-polecat:dev",
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			repoDigests: "not json",
+			wantErr:     "not a list of repository digests",
+			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
+		},
+		{
+			name:        "a listed reference that names no digest is refused",
+			image:       "localhost:5001/gastown-polecat:dev",
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			repoDigests: `["localhost:5001/gastown-polecat:dev"]`,
+			wantErr:     `localhost:5001/gastown-polecat:dev|not a repository digest`,
+			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
+		},
+		{
+			name:        "a failed inspect names the image and docker's reason",
+			image:       "gastown-polecat:dev",
+			stderr:      "Cannot connect to the Docker daemon\n",
+			fail:        true,
+			wantErr:     "docker image inspect gastown-polecat:dev|Cannot connect to the Docker daemon",
+			wantQueries: []string{imageIDFormat},
+		},
+		{
+			name:        "a failed repository digest inspect names the image and docker's reason",
+			image:       "localhost:5001/gastown-polecat:dev",
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			stderr:      "Cannot connect to the Docker daemon\n",
+			failQuery:   imageRepoDigestsFormat,
+			wantErr:     "docker image inspect localhost:5001/gastown-polecat:dev|Cannot connect to the Docker daemon",
+			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var queries []string
+			run := func(_ context.Context, args ...string) ([]byte, []byte, error) {
+				if len(args) != 5 || args[2] != "--format" {
+					t.Fatalf("docker call = %v, want image inspect --format", args)
+				}
+				queries = append(queries, args[3])
+				if tt.fail || args[3] == tt.failQuery {
+					return nil, []byte(tt.stderr), errors.New("exit status 1")
+				}
+				if args[3] == imageRepoDigestsFormat {
+					if tt.repoDigests == "" {
+						return []byte("[]"), nil, nil
+					}
+					return []byte(tt.repoDigests), nil, nil
+				}
+				return []byte(tt.stdout), nil, nil
+			}
+			got, err := imageRefFor(context.Background(), run, tt.image, tt.pull)
+			if tt.wantErr != "" {
+				for _, want := range strings.Split(tt.wantErr, "|") {
+					if err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("imageRefFor = %v, want it to name %q", err, want)
+					}
+				}
+			} else if err != nil {
+				t.Fatalf("imageRefFor: %v", err)
+			} else if got != tt.want {
+				t.Errorf("imageRefFor = %q, want %q", got, tt.want)
+			}
+			if !reflect.DeepEqual(queries, tt.wantQueries) {
+				t.Errorf("docker queries = %v, want %v", queries, tt.wantQueries)
+			}
+		})
+	}
+}
 
 func TestCheckImageGT(t *testing.T) {
 	t.Parallel()
@@ -806,6 +1152,54 @@ func TestOpenShellPrepareRefusesADriftedSandboxImage(t *testing.T) {
 	}
 	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
 		t.Fatal("a refused sandbox left a record behind")
+	}
+}
+
+// TestOpenShellPrepareRefusesAPulledSandboxThatDiffersFromTheCheckedImage
+// drives the pin's accepted gap end to end. Docker holds no repository digest
+// for the image, so the create names the profile's reference and the pod reads
+// that tag at pull time; a rebuild that republished the tag in between leaves
+// the pod running another image. The sandbox's own gt is what refuses it, and
+// the sandbox is deleted (gt-zdilt), so the gap costs a refused spawn rather
+// than an unverified sandbox (gt-16oj9).
+func TestOpenShellPrepareRefusesAPulledSandboxThatDiffersFromTheCheckedImage(t *testing.T) {
+	t.Parallel()
+	const image = "localhost:5001/gastown-polecat:dev"
+	local := "sha256:" + strings.Repeat("1", 64)
+	town, work := openshellTown(t)
+	fake := &sandbox.Fake{Reply: map[string]string{
+		"get":  openshellReadyReply,
+		"exec": "gt version 1.2.1 (dev: main@" + openshellTestDriftedGT + ")\n",
+	}}
+	profile := openshellTestProfile
+	profile.Image = image
+	profile.Driver = config.SandboxDriverKubernetes
+	b, _ := openshellTestBackend(town, profile, fake)
+	// Built here and published with crane: the host's docker holds the tag and
+	// the label, and no repository digest.
+	reg := &fakeImageRegistry{
+		tags:   map[string]string{image: local},
+		labels: map[string]string{local: openshellTestGTCommit},
+	}
+	b.docker = reg.run
+	b.imageRef = func(ctx context.Context, img string, pull bool) (string, error) {
+		return imageRefFor(ctx, reg.run, img, pull)
+	}
+	b.imageGT = func(ctx context.Context, img string) (string, error) { return imageGTFrom(ctx, reg.run, img) }
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), openshellTestDriftedGT) || !strings.Contains(err.Error(), openshellTestGTCommit) {
+		t.Fatalf("Prepare = %v, want the sandbox's own commit and the installed commit named", err)
+	}
+	// The create named the tag, which is the gap this test records.
+	if got := createFrom(t, fake); got != image {
+		t.Fatalf("the create used --from %q, want the profile's reference %q", got, image)
+	}
+	calls := fake.Calls()
+	last := calls[len(calls)-1]
+	want := []string{"openshell", "sandbox", "delete", openshellTestSession}
+	if !reflect.DeepEqual(last, want) {
+		t.Fatalf("last call = %q, want %q (rollback)", last, want)
 	}
 }
 
