@@ -33,6 +33,7 @@ var showAnswersThatAreNotAnIssueArray = []struct {
 	{"null", "null\n"},
 	{"object", `{"id":"gt-a","title":"a"}`},
 	{"prose", "Issue gt-a not found\n"},
+	{"truncated array", `[{"id":"gt-a"`},
 	{"null element", `[null]`},
 }
 
