@@ -370,7 +370,11 @@ fi
 # unless asked (gt-06ni7). The gate then runs the target against a fake docker:
 # the old image is removed, and a node that cannot list its images keeps
 # everything and the failure is named.
-if pn=$(dry polecat-image BD_SRC=/somewhere/else) && ! grep -q -F 'polecat-node-prune' <<<"$pn"; then
+#
+# The default-off case asks the recipe for its default, so it clears the flag and
+# any inherited MAKEFLAGS first: a caller that exported POLE_NODE_PRUNE=1 still
+# reads the unset default, not its own opt-in (gt-pkl4q).
+if pn=$(unset POLE_NODE_PRUNE; MAKEFLAGS=; dry polecat-image BD_SRC=/somewhere/else) && ! grep -q -F 'polecat-node-prune' <<<"$pn"; then
   pass "polecat-image does not call polecat-node-prune by default (gt-06ni7)"
 else
   fail "polecat-image does not call polecat-node-prune by default (gt-06ni7)" "$pn"
@@ -541,10 +545,12 @@ else
 fi
 # The node prune is opt-in: a default build changes the image registry and
 # leaves the cluster alone, and POLE_NODE_PRUNE=1 still prunes after it (gt-06ni7).
+# The default run clears the flag and MAKEFLAGS, as the dry case does, so an
+# opted-in caller's shell cannot turn this case into its own opt-in (gt-pkl4q).
 lclean
 rm -f "$lbin/docker.args" "$lbin/go.args"
 lrc=0
-lout=$(PATH="$lbin:$PATH" STUB_BD_COMMIT="$stubcommit" DOCKER_ARGS_LOG="$lbin/docker.args" GO_ARGS_LOG="$lbin/go.args" "${limg[@]}" 2>&1) || lrc=$?
+lout=$(unset POLE_NODE_PRUNE; MAKEFLAGS=; PATH="$lbin:$PATH" STUB_BD_COMMIT="$stubcommit" DOCKER_ARGS_LOG="$lbin/docker.args" GO_ARGS_LOG="$lbin/go.args" "${limg[@]}" 2>&1) || lrc=$?
 if [[ "$lrc" == 0 ]] && [[ -e "$lbin/docker.args" ]] \
   && ! grep -q -F 'run ./cmd/nodeprune' "$lbin/go.args" 2>/dev/null; then
   pass "a default polecat-image leaves the sandbox nodes alone (gt-06ni7)"
