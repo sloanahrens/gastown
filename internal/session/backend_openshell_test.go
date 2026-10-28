@@ -329,6 +329,29 @@ func TestOpenShellPreparePinsTheImageDigestItChecked(t *testing.T) {
 	}
 }
 
+// TestOpenShellPrepareRefusesAnUnresolvableImage pins the failure branch of the
+// pin: an image that will not resolve to a digest stops Prepare before the push
+// and the create, so nothing is left behind.
+func TestOpenShellPrepareRefusesAnUnresolvableImage(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, pushes := openshellTestBackend(town, openshellTestProfile, fake)
+	b.imageDigest = func(context.Context, string) (string, error) {
+		return "", errors.New("no such image: gastown-polecat:dev")
+	}
+	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err == nil ||
+		!strings.Contains(err.Error(), "no such image") {
+		t.Fatalf("Prepare = %v, want the resolution's failure named", err)
+	}
+	if len(*pushes) != 0 {
+		t.Errorf("pushes = %+v, want none: the branch must not reach Forgejo", *pushes)
+	}
+	if calls := fake.Calls(); len(calls) != 0 {
+		t.Errorf("openshell calls = %v, want none: a sandbox was created for an image that never resolved", calls)
+	}
+}
+
 // The backend's commenter is the store a spawn's prompt stamp writes through:
 // Prepare stamps the work bead the spec names (gt-2lu00).
 func TestOpenShellPrepareStampsThePromptOnTheWorkBead(t *testing.T) {
