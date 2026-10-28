@@ -935,8 +935,9 @@ type specDispatchEnv struct {
 	Hold func() string
 	// PendingInstall is the pending-install marker in force now, nil when no
 	// install is pending: a gt install is in flight and no new sling starts
-	// (installpending, gt-2rp64). Nil reads no marker.
-	PendingInstall func() (*installpending.Marker, error)
+	// (installpending, gt-2rp64). It is read at the tick's clock, so a test's
+	// Now judges the marker. Nil reads no marker.
+	PendingInstall func(now time.Time) (*installpending.Marker, error)
 	// StartupBackoff reports why an automatic sling of beadID must wait: its
 	// last sling failed at session start and the resting window has not
 	// elapsed (dispatch.StartupBackoff). Nil consults no record, which is what
@@ -2049,7 +2050,7 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	pendingInstall := installpending.StoreFor(townRoot)
 	env := specDispatchEnv{
 		Hold:           func() string { return dispatch.OperatorHold(townRoot) },
-		PendingInstall: func() (*installpending.Marker, error) { return pendingInstall.Pending(time.Now()) },
+		PendingInstall: func(now time.Time) (*installpending.Marker, error) { return pendingInstall.Pending(now) },
 		StartupBackoff: func(id string) string { return dispatch.StartupBackoff(townRoot, id) },
 		Candidates: func() specBoardRead {
 			read := specCandidates(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
