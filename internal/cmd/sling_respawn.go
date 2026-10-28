@@ -2,13 +2,16 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/role"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -49,6 +52,106 @@ func latestSubmissionTime(issue *beads.Issue, comments []beads.Comment) time.Tim
 		}
 	}
 	return time.Time{}
+}
+
+// daemonMarker answers whether this process is the daemon or one it started.
+// It is a field, not an environment read at the call, so a test states the
+// answer instead of the machine's; nil is not the daemon.
+type daemonMarker func() bool
+
+func (m daemonMarker) active() bool { return m != nil && m() }
+
+// slingDaemonProcess is the real daemonMarker: the daemon publishes
+// BD_ACTOR=daemon to everything it spawns and strips the agent identity it
+// inherited, so a sling from one of its children has no live role of its own
+// (daemonGTEnv, GH#3006).
+func slingDaemonProcess() bool { return os.Getenv("BD_ACTOR") == "daemon" }
+
+// slingDeliberate reports whether a sling by actor is a hand dispatch: the
+// operator at a terminal, where no agent role is detected, or a crew member —
+// the overseer included — and never from the daemon's own process, whatever
+// the actor says. Every other dispatcher is automated and spends the bead's
+// respawn budget: a polecat or an automation role is what GT_ROLE holds, the
+// daemon names itself in --actor, and an actor this rule does not recognise
+// counts as automated too, so a dispatcher added later is held to the limit
+// until it is classified here on purpose (gt-jogkx).
+func slingDeliberate(actor string, underDaemon bool) bool {
+	if underDaemon {
+		return false
+	}
+	switch r, _, _ := role.Parse(actor); r {
+	case role.Crew, role.Unknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// admitSlingRespawn decides whether a sling may pass the per-bead respawn
+// limit. It returns nil when the sling may proceed and the refusal to report
+// when the bead has spent its budget.
+//
+// A deliberate sling is admitted whatever the count says: the operator or crew
+// member reworking the bead has made the decision the limit guards, and the
+// count is cleared once a seat exists (recordSlingRespawn), so an unreadable
+// state file does not stand between them and the work. An automated sling is
+// held to the limit — the rounds behind a submission for landing are cleared
+// first (gt-tatcn), and then the refusal stands — and --force overrides it
+// without spending or clearing anything (gt-jogkx). stores is where the bead's
+// submission is read from; the spawn path passes the real one.
+func admitSlingRespawn(stores slingStores, townRoot, rigName string, opts SlingSpawnOptions) error {
+	if opts.HookBead == "" || opts.Force || opts.Deliberate {
+		return nil
+	}
+	// A sling that follows a round which submitted is a round of work, not a
+	// failed start, so the rounds behind that submission are cleared before
+	// the limit reads them. The discount runs before the read because the limit
+	// is about deaths in the round this sling starts, and the counts it drops
+	// are the rounds behind the submission, which are not deaths by that rule.
+	// A sling that then fails to launch records no spawn of its own, so it
+	// costs the bead nothing it would be blocked on.
+	clearRespawnForSubmittedRound(stores, townRoot, opts.HookBead)
+	if !polecat.ShouldBlockRespawn(townRoot, opts.HookBead) {
+		return nil
+	}
+	maxRespawns := config.LoadOperationalConfig(townRoot).GetRecoveryConfig().MaxBeadRespawnsV()
+	return fmt.Errorf("respawn limit reached for %s (%d attempts). "+
+		"This bead keeps failing — investigate before re-dispatching.\n"+
+		"Override: gt sling %s %s --force\n"+
+		"Reset:    gt sling respawn-reset %s",
+		opts.HookBead, maxRespawns,
+		opts.HookBead, rigName, opts.HookBead)
+}
+
+// recordSlingRespawn records one spawn of the sling's bead against its respawn
+// budget and returns the mark of the increment.
+//
+// A deliberate sling is not a respawn: it clears the bead's count instead of
+// spending it, and does so here rather than at the gate, so a sling that never
+// reaches a polecat leaves the count it found. An automated sling spends the
+// budget. --force does neither: the override gets past the limit without
+// touching the count (gt-jogkx).
+//
+// A count that cannot be written is reported and the spawn keeps its seat: the
+// polecat is already attached, and the count it leaves behind is the safe
+// direction — a deliberate sling leaves the bead as it found it, and an
+// automated one stays at its limit rather than silently re-arming (gt-u3hc1).
+func recordSlingRespawn(townRoot string, opts SlingSpawnOptions) polecat.RespawnMark {
+	if opts.HookBead == "" || opts.Force {
+		return polecat.RespawnMark{}
+	}
+	if opts.Deliberate {
+		if err := polecat.ResetBeadRespawnCount(townRoot, opts.HookBead); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: clearing the respawn count of %s: %v\n", opts.HookBead, err)
+		}
+		return polecat.RespawnMark{}
+	}
+	mark, err := polecat.RecordBeadRespawnMark(townRoot, opts.HookBead)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: recording respawn of %s: %v\n", opts.HookBead, err)
+		return polecat.RespawnMark{}
+	}
+	return mark
 }
 
 // clearRespawnForSubmittedRound clears beadID's respawn count when this sling

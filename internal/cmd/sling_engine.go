@@ -115,6 +115,7 @@ func (d *slingDeps) engineSpawnPolecat(rigName string, opts sling.SpawnOptions) 
 		ResumeBranch: opts.ResumeBranch,
 		Name:         opts.Name,
 		Steps:        opts.Steps,
+		Deliberate:   opts.Deliberate,
 	})
 	if err != nil {
 		return nil, err

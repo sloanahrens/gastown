@@ -311,6 +311,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		Agent:        opts.Agent,
 		BaseBranch:   opts.BaseBranch,
 		ResumeBranch: opts.ResumeBranch,
+		Deliberate:   opts.Deliberate,
 		// Create is always true for rig targets: Run only handles rig-targeted
 		// dispatch, where a fresh polecat must be spawned. The single-sling CLI
 		// path handles --create for non-rig targets via target resolution.

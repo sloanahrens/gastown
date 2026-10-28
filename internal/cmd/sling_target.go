@@ -109,6 +109,9 @@ type ResolveTargetOptions struct {
 	BaseBranch           string // Override base branch for polecat worktree
 	ResumeBranch         string // Existing branch to resume (e.g. PR head); mutually exclusive with BaseBranch
 	SkipPolecatAdmission bool   // Caller already holds a capacity reservation
+	// Deliberate is the hand-sling bit the spawn's respawn charge reads; see
+	// slingDeliberate.
+	Deliberate bool
 }
 
 // ResolvedTarget holds the results of target resolution.
@@ -119,6 +122,25 @@ type ResolvedTarget struct {
 	HookSetAtomically bool
 	NewPolecatInfo    *SpawnedPolecatInfo
 	IsSelfSling       bool
+}
+
+// polecatSpawnOptions is the spawn a resolved rig or named-polecat target asks
+// for; name is empty when the pool chooses. Both branches build their options
+// here so a field added to one cannot be missed by the other.
+func polecatSpawnOptions(name string, opts ResolveTargetOptions) SlingSpawnOptions {
+	return SlingSpawnOptions{
+		Name:          name,
+		TownRoot:      opts.TownRoot,
+		Force:         opts.Force,
+		Account:       opts.Account,
+		Create:        opts.Create,
+		HookBead:      opts.HookBead,
+		Agent:         opts.Agent,
+		BaseBranch:    opts.BaseBranch,
+		ResumeBranch:  opts.ResumeBranch,
+		SkipAdmission: opts.SkipPolecatAdmission,
+		Deliberate:    opts.Deliberate,
+	}
 }
 
 // resolveTarget resolves a target specification with the running gt's
@@ -197,18 +219,7 @@ func (d *slingDeps) resolveSlingTarget(target string, opts ResolveTargetOptions)
 			return result, nil
 		}
 		fmt.Fprintf(d.out, "Target is rig '%s', spawning fresh polecat...\n", rigName)
-		spawnOpts := SlingSpawnOptions{
-			TownRoot:      opts.TownRoot,
-			Force:         opts.Force,
-			Account:       opts.Account,
-			Create:        opts.Create,
-			HookBead:      opts.HookBead,
-			Agent:         opts.Agent,
-			BaseBranch:    opts.BaseBranch,
-			ResumeBranch:  opts.ResumeBranch,
-			SkipAdmission: opts.SkipPolecatAdmission,
-		}
-		spawnInfo, err := d.spawnPolecat(rigName, spawnOpts)
+		spawnInfo, err := d.spawnPolecat(rigName, polecatSpawnOptions("", opts))
 		if err != nil {
 			return nil, fmt.Errorf("spawning polecat: %w", err)
 		}
@@ -277,19 +288,7 @@ func (d *slingDeps) resolveSlingTarget(target string, opts ResolveTargetOptions)
 				return result, nil
 			}
 			fmt.Fprintf(d.out, "Target polecat %s/%s has no active session; using that polecat (reuse, or create with --create)...\n", rigName, polecatName)
-			spawnOpts := SlingSpawnOptions{
-				Name:          polecatName,
-				TownRoot:      opts.TownRoot,
-				Force:         opts.Force,
-				Account:       opts.Account,
-				Create:        opts.Create,
-				HookBead:      opts.HookBead,
-				Agent:         opts.Agent,
-				BaseBranch:    opts.BaseBranch,
-				ResumeBranch:  opts.ResumeBranch,
-				SkipAdmission: opts.SkipPolecatAdmission,
-			}
-			spawnInfo, spawnErr := d.spawnPolecat(rigName, spawnOpts)
+			spawnInfo, spawnErr := d.spawnPolecat(rigName, polecatSpawnOptions(polecatName, opts))
 			if spawnErr != nil {
 				// The named refusal already names the polecat.
 				return nil, fmt.Errorf("spawning polecat: %w", spawnErr)

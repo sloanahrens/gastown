@@ -67,6 +67,15 @@ type Options struct {
 	// own; the cobra command leaves it to this process's timer.
 	Steps func(name string)
 
+	// Deliberate marks a dispatch a person chose on the bead by hand — the
+	// operator at a terminal, or a crew member — as against the automated
+	// redispatch the per-bead respawn budget exists to stop. Only the cobra
+	// layer sets it, and only for a dispatcher its classifier recognises
+	// (slingDeliberate in internal/cmd); every in-process dispatcher (spec,
+	// capacity queue, epic) leaves it false, so a dispatcher added later spends
+	// the budget until it is classified on purpose (gt-jogkx).
+	Deliberate bool
+
 	// SkipDuplicateCheck disables the pre-dispatch content duplicate check
 	// (gt-mcq). No production dispatcher sets it: spec, epic and capacity-queue
 	// dispatch are each a bead's first dispatch and run the check (gt-skk7,
@@ -123,6 +132,10 @@ type SpawnOptions struct {
 	BaseBranch   string // Override base branch for the polecat's worktree
 	ResumeBranch string // Resume an existing branch instead of creating a fresh one
 	Name         string // The exact polecat a named dispatch targets; empty lets the pool choose
+
+	// Deliberate carries Options.Deliberate to the spawn, where the bead's
+	// respawn count is charged.
+	Deliberate bool
 
 	// Steps times the spawn's stages; nil leaves the choice to the caller's
 	// process-wide timer.

@@ -165,8 +165,11 @@ type slingDeps struct {
 	cook               func(formulaName, workDir, townRoot string) error
 	instantiateFormula func(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, extraVars []string) (*FormulaOnBeadResult, error)
 	actor              func() string
-	hookDir            func(townRoot, beadID, workDir string) string
-	storeFields        func(townRoot, beadID string, updates beadFieldUpdates) error
+	// daemon marks a process the daemon started, whose sling is automated
+	// whatever actor it names (see slingDaemonProcess).
+	daemon      daemonMarker
+	hookDir     func(townRoot, beadID, workDir string) string
+	storeFields func(townRoot, beadID string, updates beadFieldUpdates) error
 	// recordBlockerOverride appends the --ignore-blockers comment to the bead:
 	// the actor and the blockers the dispatch went over (gt-e3hl2).
 	recordBlockerOverride func(townRoot, beadID, actor string, blockers []string) error
@@ -273,6 +276,7 @@ func realSlingDeps() *slingDeps {
 		cook:                  CookFormula,
 		instantiateFormula:    InstantiateFormulaOnBead,
 		actor:                 resolveSlingActor,
+		daemon:                slingDaemonProcess,
 		hookDir:               beads.ResolveHookDir,
 		storeFields:           storeFieldsInBeadFromTownRoot,
 		recordBlockerOverride: slingStores{}.recordBlockerOverride,

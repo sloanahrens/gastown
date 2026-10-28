@@ -163,6 +163,10 @@ type SlingSpawnOptions struct {
 	// process's timer; the daemon passes its own so the lines reach its log
 	// tagged with what it was feeding.
 	Steps func(name string)
+	// Deliberate marks a hand sling, which passes the per-bead respawn limit
+	// and clears the count once a seat exists; an automated sling is held to
+	// the limit and spends it. The classifier is slingDeliberate.
+	Deliberate bool
 }
 
 // step records the end of one spawn stage on the timer this spawn was handed,
@@ -977,44 +981,20 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	// Track how many times this bead has been slung. Block after N attempts
 	// to prevent witness→deacon→sling feedback loops.
 	//
-	// The check runs here, before anything is allocated, but the count is
-	// recorded by recordRespawn at each success below. Counting a sling that
-	// never reached a polecat spent the bead's budget on a process someone
-	// killed: two daemon re-feeds the operator shot down mid-sling took gt-0vh
-	// to its respawn limit with only one polecat ever attached (gt-4lbz).
-	//
-	// A count that cannot be recorded is reported, not rolled back: the polecat
-	// is already attached, and ShouldBlockRespawn has already refused the sling
-	// if the state file or its lock is unreadable (gt-u3hc1).
-	recordRespawn := func() polecat.RespawnMark {
-		if opts.HookBead == "" || opts.Force {
-			return polecat.RespawnMark{}
-		}
-		mark, err := polecat.RecordBeadRespawnMark(townRoot, opts.HookBead)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: recording respawn of %s: %v\n", opts.HookBead, err)
-			return polecat.RespawnMark{}
-		}
-		return mark
+	// The gate runs here, before anything is allocated; the spawn is charged by
+	// recordSlingRespawn once a seat exists. Counting a sling that never
+	// reached a polecat spent the bead's budget on a process someone killed:
+	// two daemon re-feeds the operator shot down mid-sling took gt-0vh to its
+	// respawn limit with only one polecat ever attached (gt-4lbz).
+	if err := admitSlingRespawn(slingStores{}, townRoot, rigName, opts); err != nil {
+		return nil, err
 	}
-	if opts.HookBead != "" && !opts.Force {
-		// A sling that follows a round which submitted is a round of work, not a
-		// failed start, so the rounds behind that submission are cleared before
-		// the limit reads them (gt-tatcn). The discount runs before the read
-		// because the limit is about deaths in the round this sling starts, and
-		// the counts it drops are the rounds behind the submission, which are
-		// not deaths by that rule. A sling that then fails to launch records no
-		// spawn of its own, so it costs the bead nothing it would be blocked on.
-		clearRespawnForSubmittedRound(slingStores{}, townRoot, opts.HookBead)
-		if polecat.ShouldBlockRespawn(townRoot, opts.HookBead) {
-			maxRespawns := config.LoadOperationalConfig(townRoot).GetRecoveryConfig().MaxBeadRespawnsV()
-			return nil, fmt.Errorf("respawn limit reached for %s (%d attempts). "+
-				"This bead keeps failing — investigate before re-dispatching.\n"+
-				"Override: gt sling %s %s --force\n"+
-				"Reset:    gt sling respawn-reset %s",
-				opts.HookBead, maxRespawns,
-				opts.HookBead, rigName, opts.HookBead)
-		}
+
+	// A count that cannot be recorded is reported, not rolled back: the polecat
+	// is already attached, and admitSlingRespawn has already decided this sling
+	// may proceed (gt-u3hc1).
+	recordRespawn := func() polecat.RespawnMark {
+		return recordSlingRespawn(townRoot, opts)
 	}
 
 	// Persistent polecat model (gt-4ac): reuse an idle polecat's sandbox before
