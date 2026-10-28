@@ -55,9 +55,9 @@ func newSeatEndFake(t *testing.T) *seatEndFake {
 	town := t.TempDir()
 	writeTownFile(t, town, "settings/config.json", endSettings)
 	f := &seatEndFake{
-		t:         t,
-		town:      town,
-		agentDB:   beadsfake.New(),
+		t:       t,
+		town:    town,
+		agentDB: beadsfake.New(),
 		seatFields: beads.AgentFields{
 			RoleType: "polecat", Rig: endRig, Agent: endSandboxIn,
 			Branch: endBranch, CleanupStatus: string(polecat.CleanupClean),
@@ -173,23 +173,23 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 			wantRemoved: true, wantAsked: true,
 		},
 		{
-			name: "unlanded work keeps it",
+			name:    "unlanded work keeps it",
 			landing: sandboxSeatLanding{BeadID: endBead, Branch: endBranch}, desired: intent.DesiredStop,
 			wantAsked: true,
 		},
 		{
-			name: "a branch that never reached origin keeps it",
-			fields: func(f *beads.AgentFields) { f.CleanupStatus = string(polecat.CleanupUnpushed) },
+			name:    "a branch that never reached origin keeps it",
+			fields:  func(f *beads.AgentFields) { f.CleanupStatus = string(polecat.CleanupUnpushed) },
 			landing: finished, desired: intent.DesiredStop, wantAsked: true,
 		},
 		{
-			name: "a missing cleanup status keeps it",
-			fields: func(f *beads.AgentFields) { f.CleanupStatus = "" },
+			name:    "a missing cleanup status keeps it",
+			fields:  func(f *beads.AgentFields) { f.CleanupStatus = "" },
 			landing: finished, desired: intent.DesiredStop, wantAsked: true,
 		},
 		{
-			name: "a recorded push failure keeps it",
-			fields: func(f *beads.AgentFields) { f.PushFailed = true },
+			name:    "a recorded push failure keeps it",
+			fields:  func(f *beads.AgentFields) { f.PushFailed = true },
 			landing: finished, desired: intent.DesiredStop, wantAsked: true,
 		},
 		{
@@ -201,30 +201,30 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 			landing: finished, desired: intent.DesiredStop, wantAsked: true,
 		},
 		{
-			name: "a hook still set keeps it",
-			fields: func(f *beads.AgentFields) { f.HookBead = endBead },
+			name:    "a hook still set keeps it",
+			fields:  func(f *beads.AgentFields) { f.HookBead = endBead },
 			landing: finished, desired: intent.DesiredStop, wantAsked: true,
 		},
 		{
-			name: "another branch keeps it",
-			fields: func(f *beads.AgentFields) { f.Branch = "polecat/agate/gt-other+x1" },
+			name:    "another branch keeps it",
+			fields:  func(f *beads.AgentFields) { f.Branch = "polecat/agate/gt-other+x1" },
 			landing: finished, desired: intent.DesiredStop, wantAsked: true,
 		},
 		{
-			name: "a seat something still wants keeps it",
+			name:    "a seat something still wants keeps it",
 			landing: finished, desired: intent.DesiredRun, wantAsked: true,
 		},
 		{
-			name: "a parked seat keeps it",
+			name:    "a parked seat keeps it",
 			landing: finished, parked: true, wantAsked: true,
 		},
 		{
-			name: "a tmux seat keeps its worktree",
-			fields: func(f *beads.AgentFields) { f.Agent = endHostAgent },
+			name:    "a tmux seat keeps its worktree",
+			fields:  func(f *beads.AgentFields) { f.Agent = endHostAgent },
 			landing: finished, desired: intent.DesiredStop,
 		},
 		{
-			name: "a failed removal keeps it",
+			name:    "a failed removal keeps it",
 			landing: finished, desired: intent.DesiredStop, removeErr: errors.New("disk is read-only"),
 			wantAsked: true,
 		},
