@@ -212,6 +212,40 @@ rc=$(run_install "$T")
 # so the leak check in this case can match only a real leak: a two-letter
 # password matched the random mktemp names in the output (gt-j4b9v).
 KC_CANARY='keychain-canary-9f3c1d7e'
+
+# leak_check FILE CANARY -> clean, leak or unreadable. Only grep's definite "not
+# found" reads as clean: an unreadable FILE makes grep exit 2, and a check that
+# could not run must not pass as one that found nothing (gt-ocfe7). grep's own
+# complaint is dropped; the verdict line names the FILE instead.
+leak_check() {
+  local rc=0
+  grep -qF -- "$2" "$1" 2>/dev/null || rc=$?
+  case "$rc" in
+    0) echo leak ;;
+    1) echo clean ;;
+    *) echo unreadable ;;
+  esac
+}
+
+# check_no_leak LABEL FILE CANARY — the suite's line for one leak check.
+check_no_leak() {
+  case "$(leak_check "$2" "$3")" in
+    clean) pass "$1: password not in the output" ;;
+    leak) fail "$1: the keychain password leaked into the output" ;;
+    *) fail "$1: the leak check could not read $2" ;;
+  esac
+}
+
+# leak_case FILE -> the check's own line and failure count, taken in a subshell
+# so a failure it should report is observed here instead of failing the suite.
+leak_case() {
+  (
+    FAILURES=0
+    check_no_leak self "$1" "$KC_CANARY" > "$T/leakcase.out"
+    printf '%s | failures=%s' "$(cat "$T/leakcase.out")" "$FAILURES"
+  )
+}
+
 T=$(make_world)
 mkdir -p "$T/signing"
 printf 'kc\n' > "$T/signing/gastown-signing.keychain-db"
@@ -220,7 +254,21 @@ rc=$(run_install "$T")
 [ "$rc" = "0" ] && pass "signing: exit 0" || fail "signing: exit $rc: $(cat "$T/run.out")"
 grep -q "codesign --force --keychain $T/signing/gastown-signing.keychain-db -s gastown-dev-unattended -i com.gastown.om" "$T/sign.log" && pass "signing: codesign ran with the town identity" || fail "signing: sign.log $(cat "$T/sign.log" 2>/dev/null)"
 grep -q "# signed" "$T/bin/om" && pass "signing: the signed build is what was swapped in" || fail "signing: installed om is not the signed one"
-grep -qF -- "$KC_CANARY" "$T/run.out" && fail "signing: the keychain password leaked into the output" || pass "signing: password not in the output"
+check_no_leak signing "$T/run.out" "$KC_CANARY"
+
+# --- Case 8b: the leak check itself, driven on each kind of log: one holding
+# the password, a clean one, and one it cannot read. The last is the grep error
+# the check used to read as a pass, and the first is the failing branch no
+# installer run can reach on a working machine (gt-ocfe7).
+T=$(make_world)
+printf 'trace: password is %s\n' "$KC_CANARY" > "$T/leaked.out"
+printf 'om version deadbeef\n' > "$T/clean.out"
+[ "$(leak_case "$T/leaked.out")" = "FAIL: self: the keychain password leaked into the output | failures=1" ] \
+  && pass "leak check: a log holding the password is a failure" || fail "leak check: a leak read as $(leak_case "$T/leaked.out")"
+[ "$(leak_case "$T/clean.out")" = "PASS: self: password not in the output | failures=0" ] \
+  && pass "leak check: a clean log passes" || fail "leak check: a clean log read as $(leak_case "$T/clean.out")"
+[ "$(leak_case "$T/no-such.out")" = "FAIL: self: the leak check could not read $T/no-such.out | failures=1" ] \
+  && pass "leak check: a log it cannot read is a failure, not a pass" || fail "leak check: an unreadable log read as $(leak_case "$T/no-such.out")"
 
 # --- Case 9: signing falls back to ad-hoc with one WARNING and still installs ---
 T=$(make_world)
