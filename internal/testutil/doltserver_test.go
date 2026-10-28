@@ -50,7 +50,8 @@ func probeFailure(t *testing.T) error {
 // published: a port-not-mapped failure that also wraps the deadline.
 func unmappedPortDeadlineErr(t *testing.T) error {
 	t.Helper()
-	err := awaitDoltReady(context.Background(),
+	var sleeps []time.Duration
+	err := awaitDoltReadySleeping(context.Background(),
 		func(_ context.Context, containerPort string) (string, error) {
 			return "", fmt.Errorf("getting mapped port: port %q not found: %w", containerPort, context.DeadlineExceeded)
 		},
@@ -58,9 +59,18 @@ func unmappedPortDeadlineErr(t *testing.T) error {
 			t.Fatalf("probe ran for a container whose port was never published")
 			return nil
 		},
+		func(d time.Duration) { sleeps = append(sleeps, d) },
 	)
 	if err == nil {
 		t.Fatalf("awaitDoltReady returned no error for an unpublished port")
+	}
+	if len(sleeps) != mappedPortPolls-1 {
+		t.Fatalf("sleeps = %v, want %d", sleeps, mappedPortPolls-1)
+	}
+	for i, d := range sleeps {
+		if d != mappedPortPollInterval {
+			t.Fatalf("sleep %d = %s, want %s", i, d, mappedPortPollInterval)
+		}
 	}
 	return err
 }
@@ -128,6 +138,35 @@ func TestWaitForMappedPortGivesUpAtBudget(t *testing.T) {
 	}
 	if lookups != mappedPortPolls || sleeps != mappedPortPolls-1 {
 		t.Fatalf("lookups = %d, sleeps = %d, want %d and %d", lookups, sleeps, mappedPortPolls, mappedPortPolls-1)
+	}
+}
+
+// The readiness step the retry tests build their failure through sleeps on an
+// injected sleep, and this pins that seam: a port that never appears walks the
+// whole poll budget at the production interval without real time passing.
+func TestAwaitDoltReadyWalksThePollBudgetWithoutRealSleeping(t *testing.T) {
+	t.Parallel()
+	var sleeps []time.Duration
+	err := awaitDoltReadySleeping(context.Background(),
+		func(_ context.Context, containerPort string) (string, error) {
+			return "", fmt.Errorf("getting mapped port: port %q not found: %w", containerPort, context.DeadlineExceeded)
+		},
+		func(context.Context, string) error {
+			t.Fatalf("probe ran for a container whose port was never published")
+			return nil
+		},
+		func(d time.Duration) { sleeps = append(sleeps, d) },
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the lookup's deadline error", err)
+	}
+	if len(sleeps) != mappedPortPolls-1 {
+		t.Fatalf("sleeps = %d, want %d", len(sleeps), mappedPortPolls-1)
+	}
+	for i, d := range sleeps {
+		if d != mappedPortPollInterval {
+			t.Fatalf("sleep %d = %s, want %s", i, d, mappedPortPollInterval)
+		}
 	}
 }
 
