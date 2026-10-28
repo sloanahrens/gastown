@@ -471,11 +471,31 @@ func TestPlanRefusesWhenTheMainRepoListingFails(t *testing.T) {
 
 func TestMeasureFailsWhenAReadFails(t *testing.T) {
 	t.Parallel()
-	reg := newFakeRegistry(threeCandidates())
-	reg.status["/v2/gastown-polecat/manifests/c000002"] = http.StatusInternalServerError
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"catalog", "/v2/_catalog"},
+		{"tags", "/v2/gastown-polecat/tags/list"},
+		{"manifest", "/v2/gastown-polecat/manifests/c000002"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := newFakeRegistry(threeCandidates())
+			reg.status[tc.path] = http.StatusInternalServerError
+			if _, err := NewTarget(testConfig(t, reg)).Measure(context.Background()); err == nil {
+				t.Fatalf("Measure returned no error for the %s read it could not make", tc.name)
+			}
+		})
+	}
+}
 
-	if _, err := NewTarget(testConfig(t, reg)).Measure(context.Background()); err == nil {
-		t.Fatal("Measure returned no error for a manifest it could not read")
+func TestApplyIsNotImplementedYet(t *testing.T) {
+	t.Parallel()
+	target := NewTarget(testConfig(t, newFakeRegistry(threeCandidates())))
+	if _, err := target.Apply(context.Background(), diskmaint.Plan{Target: "registry"}); err == nil {
+		t.Fatal("Apply returned no error; Task 6 has not landed yet")
 	}
 }
 
