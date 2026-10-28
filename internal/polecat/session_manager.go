@@ -1047,7 +1047,9 @@ func (m *SessionManager) removeSandbox(sessionID string) error {
 	if !sandboxed {
 		return nil
 	}
-	if err := sandboxPusherOrLinked(m.sandboxPusher, session.SandboxPusher)(townRoot, rec); err != nil {
+	// A sandbox already gone has no commits left to lose, so it is not a refused
+	// push; the delete below finds nothing to remove either.
+	if err := sandboxPusherOrLinked(m.sandboxPusher, session.SandboxPusher)(townRoot, rec); err != nil && !errors.Is(err, session.ErrNothingToPush) {
 		return fmt.Errorf("%w: keeping its sandbox so its commits survive, their push was refused: %w", ErrSandboxNotRemoved, err)
 	}
 	if err := session.CleanupSandboxWith(sandboxDeleterOrLinked(m.sandboxDeleter), townRoot, sessionID); err != nil {
@@ -1055,6 +1057,9 @@ func (m *SessionManager) removeSandbox(sessionID string) error {
 	}
 	return nil
 }
+
+// errNoSandboxPusher is the refusal a stop gets when no pusher is linked.
+var errNoSandboxPusher = errors.New("no sandbox pusher is linked into this binary")
 
 // sandboxPusherOrLinked is the pusher a stop runs: the one a test injected, else
 // the linked openshell pusher. With neither, the push is refused, so the sandbox
@@ -1067,7 +1072,7 @@ func sandboxPusherOrLinked(pusher, linked func(townRoot string, rec session.Sand
 		return linked
 	}
 	return func(string, session.SandboxRecord) error {
-		return errors.New("no sandbox pusher is linked into this binary")
+		return errNoSandboxPusher
 	}
 }
 

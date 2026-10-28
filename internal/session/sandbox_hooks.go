@@ -1,10 +1,15 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/steveyegge/gastown/internal/liveness"
 )
+
+// ErrNothingToPush is what a SandboxPusher returns when the sandbox is already
+// gone: no commits remain to push, which is not the same as a push that ran.
+var ErrNothingToPush = errors.New("sandbox already gone: nothing to push")
 
 // The openshell implementation sets these two hooks when it is linked in.
 // They are package variables rather than an injected object because the

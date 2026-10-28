@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -35,20 +36,72 @@ func pushSandboxRecord(townRoot string, rec SandboxRecord) error {
 const sandboxPushTimeout = 2 * time.Minute
 
 // pushWork pushes rec's clone branch from inside its sandbox, where the clone
-// and its Forgejo credential helper live. A sandbox that is already gone has
-// nothing left to push. A record without a branch or work dir predates the
-// push, so its clone cannot be found and the caller must keep the sandbox.
+// and its Forgejo credential helper live. A sandbox that is already gone returns
+// ErrNothingToPush. A record written before WorkDir and Branch were recorded
+// still locates its clone by the path a polecat worktree takes, and reads the
+// branch from that clone, so its sandbox can be stopped (gt-hwpfq).
 func (b *openshellBackend) pushWork(rec SandboxRecord) error {
-	if rec.Branch == "" || rec.WorkDir == "" {
-		return fmt.Errorf("sandbox %s: its record names no clone, so its commits cannot be pushed", rec.Session)
+	dir, err := cloneDir(rec)
+	if err != nil {
+		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxPushTimeout)
 	defer cancel()
-	_, _, err := b.cli.Exec(ctx, rec.Session, nil, []string{"git", "-C", rec.WorkDir, "push", "origin", rec.Branch}, nil)
-	if err != nil && !isSandboxNotFound(err) {
-		return fmt.Errorf("pushing %s from sandbox %s: %w", rec.Branch, rec.Session, err)
+	branch := rec.Branch
+	if branch == "" {
+		out, err := b.cloneGit(ctx, rec, dir, "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			return err
+		}
+		branch = strings.TrimSpace(string(out))
+	}
+	if !validCloneBranch(branch) {
+		return fmt.Errorf("sandbox %s: clone branch %q is not a branch name, so nothing is pushed", rec.Session, branch)
+	}
+	if _, err := b.cloneGit(ctx, rec, dir, "push", "origin", branch); err != nil {
+		return fmt.Errorf("pushing %s: %w", branch, err)
 	}
 	return nil
+}
+
+// cloneGit runs git in the clone at dir inside rec's sandbox. A sandbox that is
+// already gone maps to ErrNothingToPush; any other failure names the git verb.
+func (b *openshellBackend) cloneGit(ctx context.Context, rec SandboxRecord, dir string, args ...string) ([]byte, error) {
+	argv := append([]string{"git", "-C", dir}, args...)
+	out, _, err := b.cli.Exec(ctx, rec.Session, nil, argv, nil)
+	if isSandboxNotFound(err) {
+		return nil, ErrNothingToPush
+	}
+	if err != nil {
+		return nil, fmt.Errorf("git %s in sandbox %s: %w", args[0], rec.Session, err)
+	}
+	return out, nil
+}
+
+// cloneDir is the clone rec's sandbox holds: the work dir the record names, else
+// the path a polecat worktree takes under the sandbox's town root.
+func cloneDir(rec SandboxRecord) (string, error) {
+	if rec.WorkDir != "" {
+		return rec.WorkDir, nil
+	}
+	if !plainPathName(rec.Rig) || !plainPathName(rec.Polecat) {
+		return "", fmt.Errorf("sandbox %s: its record names no clone, so its commits cannot be pushed", rec.Session)
+	}
+	return path.Join(sandboxTownRoot, rec.Rig, "polecats", rec.Polecat, rec.Rig), nil
+}
+
+// plainPathName is a rig or polecat name that cannot step out of its directory.
+func plainPathName(name string) bool {
+	return name != "" && name != "." && name != ".." && !strings.Contains(name, "/")
+}
+
+// cloneBranch is a name git can push that cannot be read as an option or a
+// refspec: it starts with a letter or digit and holds only name characters.
+var cloneBranch = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/+-]*$`)
+
+// validCloneBranch reports whether name is safe to pass to git push as a branch.
+func validCloneBranch(name string) bool {
+	return cloneBranch.MatchString(name) && !strings.Contains(name, "..")
 }
 
 // sampleSandboxRecord is SandboxLiveness: the record's seat assessed where its

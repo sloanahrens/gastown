@@ -353,7 +353,7 @@ func TestOpenShellOpsPushWorkPushesTheCloneBranchFromInsideTheSandbox(t *testing
 	}
 }
 
-func TestOpenShellOpsPushWorkOfAGoneSandboxIsNil(t *testing.T) {
+func TestOpenShellOpsPushWorkOfAGoneSandboxIsNothingToPush(t *testing.T) {
 	t.Parallel()
 	fake := &sandbox.Fake{
 		Err:    map[string]error{"exec": errors.New("exit status 1")},
@@ -361,8 +361,52 @@ func TestOpenShellOpsPushWorkOfAGoneSandboxIsNil(t *testing.T) {
 	}
 	b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
 
-	if err := b.pushWork(pushRec("polecat/cheedo/gt-hwpfq+abc")); err != nil {
-		t.Fatalf("pushWork of a gone sandbox = %v, want nil: nothing is left to push", err)
+	if err := b.pushWork(pushRec("polecat/cheedo/gt-hwpfq+abc")); !errors.Is(err, ErrNothingToPush) {
+		t.Fatalf("pushWork of a gone sandbox = %v, want ErrNothingToPush: a push that ran is not this answer", err)
+	}
+}
+
+func TestOpenShellOpsPushWorkOfALegacyRecordFindsItsCloneAndBranch(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{Reply: map[string]string{"exec": "polecat/cheedo/gt-hwpfq+abc\n"}}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+	// A record written before WorkDir and Branch existed names only its rig and polecat.
+	rec := SandboxRecord{Session: openshellTestSession, Rig: openshellTestRig, Polecat: openshellTestPolecat}
+	dir := "/sandbox/gt/" + openshellTestRig + "/polecats/" + openshellTestPolecat + "/" + openshellTestRig
+
+	if err := b.pushWork(rec); err != nil {
+		t.Fatalf("pushWork of a legacy record: %v", err)
+	}
+	calls := fake.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("openshell calls = %v, want the branch read then the push", calls)
+	}
+	wants := [][]string{
+		{"--", "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD"},
+		{"--", "git", "-C", dir, "push", "origin", "polecat/cheedo/gt-hwpfq+abc"},
+	}
+	for i, want := range wants {
+		if got := calls[i][len(calls[i])-len(want):]; !reflect.DeepEqual(got, want) {
+			t.Errorf("exec %d argv ends %v, want %v", i, got, want)
+		}
+	}
+}
+
+func TestOpenShellOpsPushWorkRefusesABranchThatIsNotAName(t *testing.T) {
+	t.Parallel()
+	for _, branch := range []string{"--receive-pack=sh", "-f", "HEAD:refs/heads/main", "a:b", "polecat/x..y"} {
+		t.Run(branch, func(t *testing.T) {
+			t.Parallel()
+			fake := &sandbox.Fake{}
+			b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+
+			if err := b.pushWork(pushRec(branch)); err == nil {
+				t.Fatalf("pushWork of branch %q = nil, want an error: git would read it as an option or refspec", branch)
+			}
+			if calls := fake.Calls(); len(calls) != 0 {
+				t.Fatalf("openshell calls = %v, want none for branch %q", calls, branch)
+			}
+		})
 	}
 }
 
@@ -385,7 +429,7 @@ func TestOpenShellOpsPushWorkWithoutACloneRefusesWithoutCalling(t *testing.T) {
 	fake := &sandbox.Fake{}
 	b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
 
-	// A record written before the push existed names no clone to push from.
+	// A record that names no rig or polecat has no clone to find.
 	if err := b.pushWork(SandboxRecord{Session: openshellTestSession}); err == nil {
 		t.Fatal("pushWork of a record with no clone = nil, want an error so the sandbox is kept")
 	}

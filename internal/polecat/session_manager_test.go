@@ -261,24 +261,27 @@ func TestStopKillsThroughTheStopHook(t *testing.T) {
 // push is refused, so the sandbox is kept and its commits survive (gt-hwpfq).
 func TestSandboxPusherOrLinkedRefusesWhenNothingPushes(t *testing.T) {
 	t.Parallel()
-	injected := func(string, session.SandboxRecord) error { return errors.New("injected") }
-	linked := func(string, session.SandboxRecord) error { return errors.New("linked") }
+	errInjected := errors.New("injected")
+	errLinked := errors.New("linked")
+	fails := func(err error) func(string, session.SandboxRecord) error {
+		return func(string, session.SandboxRecord) error { return err }
+	}
 	tests := []struct {
-		name    string
-		pusher  func(string, session.SandboxRecord) error
-		linked  func(string, session.SandboxRecord) error
-		wantErr string
+		name   string
+		pusher func(string, session.SandboxRecord) error
+		linked func(string, session.SandboxRecord) error
+		want   error
 	}{
-		{name: "an_injected_pusher_wins", pusher: injected, linked: linked, wantErr: "injected"},
-		{name: "the_linked_pusher_runs_when_none_is_injected", linked: linked, wantErr: "linked"},
-		{name: "with_neither_the_push_is_refused", wantErr: "no sandbox pusher is linked into this binary"},
+		{name: "an_injected_pusher_wins", pusher: fails(errInjected), linked: fails(errLinked), want: errInjected},
+		{name: "the_linked_pusher_runs_when_none_is_injected", linked: fails(errLinked), want: errLinked},
+		{name: "with_neither_the_push_is_refused", want: errNoSandboxPusher},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			err := sandboxPusherOrLinked(tt.pusher, tt.linked)("", session.SandboxRecord{})
-			if err == nil || err.Error() != tt.wantErr {
-				t.Fatalf("pusher = %v, want error %q", err, tt.wantErr)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("pusher = %v, want %v", err, tt.want)
 			}
 		})
 	}
@@ -298,6 +301,7 @@ func TestStopPushesTheSandboxWorkBeforeDeletingIt(t *testing.T) {
 		wantErr    string
 	}{
 		{name: "push_succeeds_then_the_sandbox_is_deleted", wantCalls: []string{"push polecat/Toast/gt-x", "delete"}},
+		{name: "a_gone_sandbox_has_nothing_to_push_so_the_stop_goes_on", pushErr: session.ErrNothingToPush, wantCalls: []string{"push polecat/Toast/gt-x", "delete"}},
 		{name: "refused_push_keeps_the_sandbox", pushErr: errors.New("rejected by origin"), wantCalls: []string{"push polecat/Toast/gt-x"}, wantRecord: true, wantErr: "their push was refused: rejected by origin"},
 	}
 	for _, tt := range tests {
