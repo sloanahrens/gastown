@@ -684,6 +684,13 @@ func TestStateRoundTripsAnAwkwardCwd(t *testing.T) {
 func TestConcurrentWritersKeepEveryEntry(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren", "robin")
+	// The lock deadline is measured on the registry's clock, and testRegistry's
+	// clock moves on every wait its Sleep seam scripts. Writers sharing that one
+	// clock advance each other's deadline, so a writer that is only waiting
+	// reads as having waited out the whole timeout. This test hands the flock
+	// between real goroutines, so it takes the real clock and the real wait.
+	reg.Now = nil
+	reg.Sleep = nil
 	names := []string{"wren", "robin"}
 	errs := make([]error, len(names))
 	var wg sync.WaitGroup
