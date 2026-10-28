@@ -197,7 +197,7 @@ func TestKeepForTightensOverEighty(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			got, err := KeepFor(tc.readings, tc.base)
+			got, err := KeepFor(tc.readings, tc.base).Count()
 			if err != nil {
 				t.Fatalf("KeepFor(%+v, %d) = error %v, want %d", tc.readings, tc.base, err, tc.want)
 			}
@@ -220,7 +220,7 @@ func TestKeepForKeepsBaseBelowEighty(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			got, err := KeepFor(tc.readings, tc.base)
+			got, err := KeepFor(tc.readings, tc.base).Count()
 			if err != nil {
 				t.Fatalf("KeepFor(%+v, %d) = error %v, want the base %d", tc.readings, tc.base, err, tc.base)
 			}
@@ -238,7 +238,7 @@ func TestKeepForRefusesUnreadableDisk(t *testing.T) {
 		{Name: "mac", UsedPct: 20},
 		{Name: "colima", Err: cause},
 	}
-	got, err := KeepFor(readings, 5)
+	got, err := KeepFor(readings, 5).Count()
 	if err == nil {
 		t.Fatalf("KeepFor with an unreadable disk = %d, nil; want a refusal", got)
 	}
@@ -248,9 +248,6 @@ func TestKeepForRefusesUnreadableDisk(t *testing.T) {
 	if !errors.Is(err, cause) {
 		t.Fatalf("refusal %q does not wrap the read error %v", err, cause)
 	}
-	if got != 5 {
-		t.Fatalf("KeepFor with an unreadable disk = %d, want the base 5 with the refusal, not a judged count", got)
-	}
 }
 
 func TestKeepForRefusalNamesEveryUnreadableDisk(t *testing.T) {
@@ -259,12 +256,9 @@ func TestKeepForRefusalNamesEveryUnreadableDisk(t *testing.T) {
 		{Name: "mac", Err: errors.New("df: not found")},
 		{Name: "colima", Err: errors.New("ssh: i/o timeout")},
 	}
-	got, err := KeepFor(readings, 5)
+	got, err := KeepFor(readings, 5).Count()
 	if err == nil {
 		t.Fatalf("KeepFor with two unreadable disks = %d, nil; want a refusal", got)
-	}
-	if got != 5 {
-		t.Fatalf("KeepFor with two unreadable disks = %d, want the base 5 with the refusal", got)
 	}
 	for _, name := range []string{"mac", "colima"} {
 		if !strings.Contains(err.Error(), name) {
@@ -283,13 +277,20 @@ func TestKeepForRefusesWhateverTheOtherDisksSay(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			got, err := KeepFor(readings, 5)
+			got, err := KeepFor(readings, 5).Count()
 			if err == nil {
 				t.Fatalf("KeepFor(%+v) = %d, nil; want a refusal", readings, got)
 			}
-			if got != 5 {
-				t.Fatalf("KeepFor(%+v) = %d, want the base 5 with the refusal, not the tightened count", readings, got)
-			}
 		})
+	}
+}
+
+// The zero Keep is the value a caller holds when nothing computed one. It must
+// not read as "keep none" (gt-dl4nv.3).
+func TestZeroKeepIsARefusalNotACount(t *testing.T) {
+	t.Parallel()
+	var k Keep
+	if got, err := k.Count(); err == nil {
+		t.Fatalf("the zero Keep = %d, nil; want an error", got)
 	}
 }

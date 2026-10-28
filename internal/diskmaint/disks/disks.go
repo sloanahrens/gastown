@@ -109,10 +109,31 @@ func Evaluate(readings []Reading, active map[string]bool) []Alert {
 	return alerts
 }
 
-// KeepFor returns the keep count: base tightened when a readable disk is at or
-// over RaiseAt, and base with an error naming every disk it could not read, a
-// count the caller refuses rather than applies (gt-dl4nv.3).
-func KeepFor(readings []Reading, base int) (int, error) {
+// Keep is the number of newest items a prune keeps, or the refusal to name one.
+// It is read through Count, which returns the refusal as an error, so a keep that
+// was refused cannot be applied as a number by a caller that drops the error
+// (gt-dl4nv.3).
+type Keep struct {
+	count   int
+	decided bool
+	refusal error
+}
+
+// Count returns the keep count, or the error naming every disk that could not be
+// read. The count is meaningless with an error: apply nothing.
+func (k Keep) Count() (int, error) {
+	switch {
+	case k.refusal != nil:
+		return 0, k.refusal
+	case !k.decided:
+		return 0, errors.New("keep was never decided: the zero Keep is not a count")
+	}
+	return k.count, nil
+}
+
+// KeepFor returns base tightened when a readable disk is at or over RaiseAt, or a
+// refusal when any disk could not be read, whatever the other disks say.
+func KeepFor(readings []Reading, base int) Keep {
 	var failures []error
 	for _, r := range readings {
 		if r.Err != nil {
@@ -120,14 +141,14 @@ func KeepFor(readings []Reading, base int) (int, error) {
 		}
 	}
 	if len(failures) > 0 {
-		return base, errors.Join(failures...)
+		return Keep{refusal: errors.Join(failures...)}
 	}
 	for _, r := range readings {
 		if r.UsedPct >= RaiseAt && base > tightenedKeep {
-			return tightenedKeep, nil
+			return Keep{count: tightenedKeep, decided: true}
 		}
 	}
-	return base, nil
+	return Keep{count: base, decided: true}
 }
 
 func usageAlertKey(name string) string { return "diskmaint:" + name }
