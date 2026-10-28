@@ -3,6 +3,7 @@ package registry
 import "testing"
 
 func TestValidRepo(t *testing.T) {
+	t.Parallel()
 	ok := []string{"gastown-polecat", "seedtest/polecat", "a/b/c", "repo.a_b-c"}
 	bad := []string{"", "../x", "a//b", "A", "a b", "a/", "/a", "a/../b", "a;rm", "a$(x)"}
 	for _, s := range ok {
@@ -18,6 +19,7 @@ func TestValidRepo(t *testing.T) {
 }
 
 func TestValidTag(t *testing.T) {
+	t.Parallel()
 	ok := []string{"dev", "2d5a48dcb", "build-3", repeatByte('a', 128)}
 	bad := []string{"", "-x", "a b", "a/b", repeatByte('a', 129)}
 	for _, s := range ok {
@@ -33,6 +35,7 @@ func TestValidTag(t *testing.T) {
 }
 
 func TestValidDigest(t *testing.T) {
+	t.Parallel()
 	ok := []string{
 		"sha256:" + repeatByte('a', 64),
 		"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -58,6 +61,7 @@ func TestValidDigest(t *testing.T) {
 }
 
 func TestValidContainer(t *testing.T) {
+	t.Parallel()
 	ok := []string{"gt-registry"}
 	bad := []string{"", "-x", "a b", "a;b"}
 	for _, s := range ok {

@@ -10,10 +10,36 @@ import (
 	"testing"
 )
 
+// roundTrip serves requests from handler in process: no listener, no network.
+type roundTrip http.HandlerFunc
+
+func (h roundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	http.HandlerFunc(h).ServeHTTP(rec, r)
+	resp := rec.Result()
+	resp.Request = r
+	return resp, nil
+}
+
+// newTestClient returns a Client whose requests handler answers in process.
+func newTestClient(handler http.HandlerFunc) *Client {
+	return &Client{Base: "http://registry.test", HTTP: &http.Client{Transport: roundTrip(handler)}}
+}
+
 func testDigest() string { return "sha256:" + repeatByte('a', 64) }
 
+// countingHandler answers with handler and counts every request that reaches it.
+func countingHandler(handler http.HandlerFunc) (http.HandlerFunc, *atomic.Int32) {
+	var requests atomic.Int32
+	return func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		handler(w, r)
+	}, &requests
+}
+
 func TestCatalogAndTags(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	t.Parallel()
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/_catalog":
 			_, _ = w.Write([]byte(`{"repositories":["gastown-polecat","seedtest/polecat"]}`))
@@ -24,9 +50,7 @@ func TestCatalogAndTags(t *testing.T) {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	defer srv.Close()
-	c := &Client{Base: srv.URL, HTTP: srv.Client()}
+	})
 	ctx := context.Background()
 
 	repos, err := c.Catalog(ctx)
@@ -55,13 +79,9 @@ func TestCatalogAndTags(t *testing.T) {
 }
 
 func TestTagsRejectsBadRepoBeforeRequest(t *testing.T) {
-	var requests atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		http.NotFound(w, r)
-	}))
-	defer srv.Close()
-	c := &Client{Base: srv.URL, HTTP: srv.Client()}
+	t.Parallel()
+	handler, requests := countingHandler(func(w http.ResponseWriter, r *http.Request) {})
+	c := newTestClient(handler)
 
 	_, err := c.Tags(context.Background(), "../x")
 	if !errors.Is(err, ErrBadName) {
@@ -73,13 +93,12 @@ func TestTagsRejectsBadRepoBeforeRequest(t *testing.T) {
 }
 
 func TestDeleteManifestAccepted(t *testing.T) {
+	t.Parallel()
 	var method, path string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
 		method, path = r.Method, r.URL.Path
 		w.WriteHeader(http.StatusAccepted)
-	}))
-	defer srv.Close()
-	c := &Client{Base: srv.URL, HTTP: srv.Client()}
+	})
 
 	if err := c.DeleteManifest(context.Background(), "gastown-polecat", testDigest()); err != nil {
 		t.Fatalf("DeleteManifest: %v", err)
@@ -93,11 +112,10 @@ func TestDeleteManifestAccepted(t *testing.T) {
 }
 
 func TestDeleteManifest405MeansDisabled(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	t.Parallel()
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
-	}))
-	defer srv.Close()
-	c := &Client{Base: srv.URL, HTTP: srv.Client()}
+	})
 
 	err := c.DeleteManifest(context.Background(), "gastown-polecat", testDigest())
 	if !errors.Is(err, ErrDeletesDisabled) {
@@ -106,11 +124,10 @@ func TestDeleteManifest405MeansDisabled(t *testing.T) {
 }
 
 func TestDeleteManifest404IsErrNotFound(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	t.Parallel()
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
-	}))
-	defer srv.Close()
-	c := &Client{Base: srv.URL, HTTP: srv.Client()}
+	})
 
 	err := c.DeleteManifest(context.Background(), "gastown-polecat", testDigest())
 	if !errors.Is(err, ErrNotFound) {
@@ -119,12 +136,9 @@ func TestDeleteManifest404IsErrNotFound(t *testing.T) {
 }
 
 func TestDeleteManifestRejectsBadDigest(t *testing.T) {
-	var requests atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-	}))
-	defer srv.Close()
-	c := &Client{Base: srv.URL, HTTP: srv.Client()}
+	t.Parallel()
+	handler, requests := countingHandler(func(w http.ResponseWriter, r *http.Request) {})
+	c := newTestClient(handler)
 
 	err := c.DeleteManifest(context.Background(), "gastown-polecat", "sha256:XYZ")
 	if !errors.Is(err, ErrBadName) {
@@ -136,12 +150,9 @@ func TestDeleteManifestRejectsBadDigest(t *testing.T) {
 }
 
 func TestDeleteManifestRejectsBadRepo(t *testing.T) {
-	var requests atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-	}))
-	defer srv.Close()
-	c := &Client{Base: srv.URL, HTTP: srv.Client()}
+	t.Parallel()
+	handler, requests := countingHandler(func(w http.ResponseWriter, r *http.Request) {})
+	c := newTestClient(handler)
 
 	err := c.DeleteManifest(context.Background(), "../x", testDigest())
 	if !errors.Is(err, ErrBadName) {
@@ -153,11 +164,10 @@ func TestDeleteManifestRejectsBadRepo(t *testing.T) {
 }
 
 func TestClientErrorsOnOtherStatuses(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	t.Parallel()
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	c := &Client{Base: srv.URL, HTTP: srv.Client()}
+	})
 	ctx := context.Background()
 
 	if _, err := c.Catalog(ctx); err == nil {
