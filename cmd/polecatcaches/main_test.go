@@ -28,14 +28,17 @@ const (
 var pinsFile = []byte("# <rig> <commit>\n" +
 	"gastown " + gastownCommit + "\ndevops " + devopsCommit + "\n")
 
-// fake is the command's outside world: a pins document, one remote per rig,
-// and every kubectl call it was handed, with the manifest on its stdin.
+// fake is the command's outside world: a pins document, one remote per rig, the
+// Job the cluster holds, and every kubectl call it was handed, with the
+// manifest on its stdin.
 type fake struct {
 	pins      []byte
 	readErr   error
 	remotes   map[string]string
 	remoteErr map[string]error
-	failCall  int // the 1-based kubectl call that fails; 0 fails none
+	live      []byte // the Job the cluster holds; empty means it holds none
+	liveErr   error  // the read of that Job fails
+	failVerb  string // the kubectl verb whose call fails; empty fails none
 	calls     []kubectlCall
 }
 
@@ -71,8 +74,17 @@ func (f *fake) deps() deps {
 				call.stdin = buf.String()
 			}
 			f.calls = append(f.calls, call)
-			if f.failCall == len(f.calls) {
+			if len(args) == 0 {
+				return nil, errors.New("kubectl called with no verb")
+			}
+			if f.failVerb == args[0] {
 				return nil, errors.New("kubectl failed")
+			}
+			if args[0] == "get" {
+				if f.liveErr != nil {
+					return nil, f.liveErr
+				}
+				return f.live, nil
 			}
 			return []byte("ok\n"), nil
 		},
@@ -103,22 +115,102 @@ func baseArgs(extra ...string) []string {
 	return append([]string{"-town", "/town", "-image", "gastown-polecat:dev"}, extra...)
 }
 
+// verbs is the kubectl verb of each call, in order: the run reads the live Job,
+// and only deletes and applies when the read does not leave it alone.
+func verbs(f *fake) string {
+	var vs []string
+	for _, c := range f.calls {
+		if len(c.args) > 0 {
+			vs = append(vs, c.args[0])
+		}
+	}
+	return strings.Join(vs, " ")
+}
+
 // appliedJob decodes the document the command handed to kubectl apply.
 func appliedJob(t *testing.T, f *fake) cachevol.SeedJob {
 	t.Helper()
-	if len(f.calls) != 2 || strings.Join(f.calls[1].args, " ") != "apply -f -" {
-		t.Fatalf("kubectl calls = %+v, want a delete then the manifest on apply's stdin", f.calls)
+	var manifest string
+	for _, c := range f.calls {
+		if strings.Join(c.args, " ") == "apply -f -" {
+			manifest = c.stdin
+		}
+	}
+	if manifest == "" {
+		t.Fatalf("no kubectl apply carried a manifest; calls = %s", verbs(f))
 	}
 	var job cachevol.SeedJob
-	if err := json.Unmarshal([]byte(f.calls[1].stdin), &job); err != nil {
+	if err := json.Unmarshal([]byte(manifest), &job); err != nil {
 		t.Fatalf("the manifest kubectl applied is not a Job document: %v", err)
 	}
 	return job
 }
 
-// TestRunAppliesTheSeedJobManifest pins what reaches kubectl: the delete that
-// lets changed pins reseed, then the apply of a root Job that fills the claim
-// with the named image.
+// clusterJob is the document a run applied as the cluster stores it: the API
+// server adds a status and defaults to the pod template, so the run's read must
+// still recognize the Job as the one its manifest describes.
+func clusterJob(t *testing.T, applied []byte, succeeded int) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(applied, &doc); err != nil {
+		t.Fatalf("the applied manifest is not a document: %v", err)
+	}
+	doc["status"] = map[string]any{"succeeded": succeeded}
+	tmpl := child(t, child(t, doc, "spec"), "template")
+	child(t, tmpl, "metadata")["creationTimestamp"] = nil
+	pod := child(t, tmpl, "spec")
+	pod["dnsPolicy"] = "ClusterFirst"
+	pod["schedulerName"] = "default-scheduler"
+	pod["serviceAccountName"] = "default"
+	pod["terminationGracePeriodSeconds"] = 30
+	for _, key := range []string{"initContainers", "containers"} {
+		containers, ok := pod[key].([]any)
+		if !ok {
+			t.Fatalf("the applied manifest's %s is not a list: %T", key, pod[key])
+		}
+		for _, c := range containers {
+			container, ok := c.(map[string]any)
+			if !ok {
+				t.Fatalf("an entry of the applied manifest's %s is not an object: %T", key, c)
+			}
+			container["imagePullPolicy"] = "IfNotPresent"
+			container["terminationMessagePath"] = "/dev/termination-log"
+			container["terminationMessagePolicy"] = "File"
+		}
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("the cluster-shaped document does not marshal: %v", err)
+	}
+	return out
+}
+
+// child is the object under key in m, failing the test when it is not one.
+func child(t *testing.T, m map[string]any, key string) map[string]any {
+	t.Helper()
+	c, ok := m[key].(map[string]any)
+	if !ok {
+		t.Fatalf("%q is not an object in the manifest: %T", key, m[key])
+	}
+	return c
+}
+
+// appliedDocument is the manifest of the last apply, as the cluster would have
+// taken it before adding its own fields.
+func appliedDocument(t *testing.T, f *fake) []byte {
+	t.Helper()
+	for i := len(f.calls) - 1; i >= 0; i-- {
+		if strings.Join(f.calls[i].args, " ") == "apply -f -" {
+			return []byte(f.calls[i].stdin)
+		}
+	}
+	t.Fatalf("no kubectl apply carried a manifest; calls = %s", verbs(f))
+	return nil
+}
+
+// TestRunAppliesTheSeedJobManifest pins what reaches kubectl into an empty
+// cluster: the read, then the apply of a root Job that fills the claim with the
+// named image. There is nothing to delete when no Job is there.
 func TestRunAppliesTheSeedJobManifest(t *testing.T) {
 	t.Parallel()
 	f := newFake()
@@ -126,19 +218,30 @@ func TestRunAppliesTheSeedJobManifest(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
 	}
-	if len(f.calls) != 2 {
-		t.Fatalf("kubectl calls = %d, want a delete then an apply", len(f.calls))
+	if got := verbs(f); got != "get apply" {
+		t.Fatalf("kubectl calls = %q, want the read then the apply", got)
 	}
-	if got := strings.Join(f.calls[0].args, " "); got != "delete job gt-cache-seed --ignore-not-found" {
-		t.Errorf("first kubectl call = %q, want the Job delete", got)
+	if got := strings.Join(f.calls[0].args, " "); got != "get job gt-cache-seed --ignore-not-found -o json" {
+		t.Errorf("first kubectl call = %q, want the live Job read", got)
 	}
 
 	job := appliedJob(t, f)
 	if job.APIVersion != "batch/v1" || job.Kind != "Job" || job.Metadata.Name != cachevol.DefaultSeedJobName {
 		t.Errorf("manifest = %s %s %q, want batch/v1 Job %s", job.APIVersion, job.Kind, job.Metadata.Name, cachevol.DefaultSeedJobName)
 	}
-	if job.Spec.Template.Spec.SecurityContext == nil || *job.Spec.Template.Spec.SecurityContext.RunAsUser != 0 {
-		t.Errorf("the Job's pod is not the root pass: %+v", job.Spec.Template.Spec.SecurityContext)
+	// -1 is a field the pod leaves unset, so a nil security context or a nil
+	// field reads as a failure instead of a dereference.
+	user, group := int64(-1), int64(-1)
+	if sc := job.Spec.Template.Spec.SecurityContext; sc != nil {
+		if sc.RunAsUser != nil {
+			user = *sc.RunAsUser
+		}
+		if sc.RunAsGroup != nil {
+			group = *sc.RunAsGroup
+		}
+	}
+	if user != 0 || group != 0 {
+		t.Errorf("the Job's pod runs as user=%d group=%d, want root: the seed hands the claim to SeedUserID", user, group)
 	}
 	var claim string
 	for _, v := range job.Spec.Template.Spec.Volumes {
@@ -209,19 +312,121 @@ func TestRunSwapsTheCloneHost(t *testing.T) {
 	}
 }
 
-// TestRunPassesTheNamespaceToTheDeleteAndTheManifest keeps the Job and the
-// delete that precedes it in one namespace.
-func TestRunPassesTheNamespaceToTheDeleteAndTheManifest(t *testing.T) {
+// TestRunPassesTheNamespaceToEveryCall keeps the read, the delete that replaces
+// a changed Job and the manifest in one namespace, so a run never looks at
+// another namespace's Job.
+func TestRunPassesTheNamespaceToEveryCall(t *testing.T) {
 	t.Parallel()
 	f := newFake()
+	// A Job seeded from one pin is one this run replaces: the template all the
+	// pins produce is a different template.
+	if code, _, stderr := run(t, f, baseArgs("-namespace", "openshell", "devops")...); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	f.live = clusterJob(t, appliedDocument(t, f), 1)
+	f.calls = nil
 	if code, _, stderr := run(t, f, baseArgs("-namespace", "openshell")...); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
 	}
-	if got := strings.Join(f.calls[0].args, " "); !strings.Contains(got, "--namespace openshell") {
-		t.Errorf("delete call = %q, want the namespace", got)
+	if got := verbs(f); got != "get delete apply" {
+		t.Fatalf("kubectl calls = %q, want the read, the delete and the apply", got)
+	}
+	for _, c := range f.calls[:2] {
+		if got := strings.Join(c.args, " "); !strings.Contains(got, "--namespace openshell") {
+			t.Errorf("kubectl call = %q, want the namespace", got)
+		}
 	}
 	if job := appliedJob(t, f); job.Metadata.Namespace != "openshell" {
 		t.Errorf("manifest namespace = %q, want openshell", job.Metadata.Namespace)
+	}
+}
+
+// TestRunLeavesASeededJobAlone keeps a run from restarting a Job that already
+// finished these pins: the cluster holds a Job the last run applied, so this
+// run reads it, finds the template and the pins unchanged and touches nothing.
+func TestRunLeavesASeededJobAlone(t *testing.T) {
+	t.Parallel()
+	f := newFake()
+	if code, _, stderr := run(t, f, baseArgs()...); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	f.live = clusterJob(t, appliedDocument(t, f), 1)
+	f.calls = nil
+
+	code, stdout, stderr := run(t, f, baseArgs()...)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	if got := verbs(f); got != "get" {
+		t.Errorf("kubectl calls = %q, want the read alone: a finished Job with the same pins is not replaced", got)
+	}
+	if !strings.Contains(stdout, "already holds the 2 pinned commit(s); nothing applied") {
+		t.Errorf("stdout = %q, want the run reporting it left the Job alone", stdout)
+	}
+}
+
+// TestRunReplacesASeedJobWhosePinsChanged replaces a Job built from other pins:
+// a finished Job is no reason to keep a template that would seed something else.
+func TestRunReplacesASeedJobWhosePinsChanged(t *testing.T) {
+	t.Parallel()
+	f := newFake()
+	if code, _, stderr := run(t, f, baseArgs("devops")...); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	f.live = clusterJob(t, appliedDocument(t, f), 1)
+	f.calls = nil
+
+	if code, _, stderr := run(t, f, baseArgs()...); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	if got := verbs(f); got != "get delete apply" {
+		t.Fatalf("kubectl calls = %q, want the read, the delete and the apply", got)
+	}
+	if got := strings.Join(f.calls[1].args, " "); got != "delete job gt-cache-seed --ignore-not-found" {
+		t.Errorf("delete call = %q, want the Job the changed pins replace", got)
+	}
+	if pins := seedPins(t, appliedJob(t, f)); len(pins) != 2 {
+		t.Errorf("the Job seeds %+v, want both pins", pins)
+	}
+}
+
+// TestRunReplacesASeedJobThatDidNotSucceed replaces a Job that never finished:
+// its template matches, but only a succeeded Job wrote the claim's marker, so
+// leaving it alone would leave the claim unseeded behind a failed Job.
+func TestRunReplacesASeedJobThatDidNotSucceed(t *testing.T) {
+	t.Parallel()
+	f := newFake()
+	if code, _, stderr := run(t, f, baseArgs()...); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	f.live = clusterJob(t, appliedDocument(t, f), 0)
+	f.calls = nil
+
+	if code, _, stderr := run(t, f, baseArgs()...); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	if got := verbs(f); got != "get delete apply" {
+		t.Errorf("kubectl calls = %q, want the read, the delete and the apply", got)
+	}
+}
+
+// TestRunForceReseedsAFinishedJob is the operator's reseed: -force replaces a
+// Job that holds these pins, which is how a claim emptied under a finished Job
+// is filled again.
+func TestRunForceReseedsAFinishedJob(t *testing.T) {
+	t.Parallel()
+	f := newFake()
+	if code, _, stderr := run(t, f, baseArgs()...); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	f.live = clusterJob(t, appliedDocument(t, f), 1)
+	f.calls = nil
+
+	if code, _, stderr := run(t, f, baseArgs("-force")...); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	if got := verbs(f); got != "get delete apply" {
+		t.Errorf("kubectl calls = %q, want the read, the delete and the apply", got)
 	}
 }
 
@@ -230,12 +435,12 @@ func TestRunPassesTheNamespaceToTheDeleteAndTheManifest(t *testing.T) {
 func TestRunReportsEveryRefusal(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		args     []string
-		mutate   func(*fake)
-		wantCode int
-		wantErr  string
-		wantCall int // kubectl calls the refusal allows
+		name      string
+		args      []string
+		mutate    func(*testing.T, *fake)
+		wantCode  int
+		wantErr   string
+		wantCalls string // the kubectl verbs the refusal allows, in order
 	}{
 		{
 			name:     "no town",
@@ -252,14 +457,14 @@ func TestRunReportsEveryRefusal(t *testing.T) {
 		{
 			name:     "unreadable pins file",
 			args:     baseArgs(),
-			mutate:   func(f *fake) { f.readErr = errors.New("permission denied") },
+			mutate:   func(_ *testing.T, f *fake) { f.readErr = errors.New("permission denied") },
 			wantCode: 1,
 			wantErr:  "cannot read deploy/polecat/seed-pins: permission denied",
 		},
 		{
 			name:     "pins file naming no rig",
 			args:     baseArgs(),
-			mutate:   func(f *fake) { f.pins = []byte("# only comments\n") },
+			mutate:   func(_ *testing.T, f *fake) { f.pins = []byte("# only comments\n") },
 			wantCode: 1,
 			wantErr:  "names no rig",
 		},
@@ -272,27 +477,50 @@ func TestRunReportsEveryRefusal(t *testing.T) {
 		{
 			name: "rig with no Forgejo remote",
 			args: baseArgs(),
-			mutate: func(f *fake) {
+			mutate: func(_ *testing.T, f *fake) {
 				f.remoteErr = map[string]error{"devops": errors.New("rig devops has no merge_queue.forgejo.remote_url")}
 			},
 			wantCode: 1,
 			wantErr:  "no merge_queue.forgejo.remote_url",
 		},
 		{
-			name:     "delete fails",
-			args:     baseArgs(),
-			mutate:   func(f *fake) { f.failCall = 1 },
-			wantCode: 1,
-			wantErr:  "kubectl failed",
-			wantCall: 1,
+			name:      "live Job unreadable",
+			args:      baseArgs(),
+			mutate:    func(_ *testing.T, f *fake) { f.liveErr = errors.New("kubectl failed") },
+			wantCode:  1,
+			wantErr:   "kubectl failed",
+			wantCalls: "get",
 		},
 		{
-			name:     "apply fails",
-			args:     baseArgs(),
-			mutate:   func(f *fake) { f.failCall = 2 },
-			wantCode: 1,
-			wantErr:  "kubectl failed",
-			wantCall: 2,
+			name:      "live Job is not a Job document",
+			args:      baseArgs(),
+			mutate:    func(_ *testing.T, f *fake) { f.live = []byte("not a job") },
+			wantCode:  1,
+			wantErr:   "not a Job document",
+			wantCalls: "get",
+		},
+		{
+			name: "delete of a changed Job fails",
+			args: baseArgs(),
+			mutate: func(t *testing.T, f *fake) {
+				if code, _, stderr := run(t, f, baseArgs("devops")...); code != 0 {
+					t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+				}
+				f.live = clusterJob(t, appliedDocument(t, f), 1)
+				f.calls = nil
+				f.failVerb = "delete"
+			},
+			wantCode:  1,
+			wantErr:   "kubectl failed",
+			wantCalls: "get delete",
+		},
+		{
+			name:      "apply fails",
+			args:      baseArgs(),
+			mutate:    func(_ *testing.T, f *fake) { f.failVerb = "apply" },
+			wantCode:  1,
+			wantErr:   "kubectl failed",
+			wantCalls: "get apply",
 		},
 		{
 			name:     "image the builder refuses",
@@ -306,7 +534,7 @@ func TestRunReportsEveryRefusal(t *testing.T) {
 			t.Parallel()
 			f := newFake()
 			if tt.mutate != nil {
-				tt.mutate(f)
+				tt.mutate(t, f)
 			}
 			code, _, stderr := run(t, f, tt.args...)
 			if code != tt.wantCode {
@@ -315,8 +543,8 @@ func TestRunReportsEveryRefusal(t *testing.T) {
 			if !strings.Contains(stderr, tt.wantErr) {
 				t.Errorf("stderr = %q, want it to name %q", stderr, tt.wantErr)
 			}
-			if len(f.calls) != tt.wantCall {
-				t.Errorf("kubectl calls = %d, want %d", len(f.calls), tt.wantCall)
+			if got := verbs(f); got != tt.wantCalls {
+				t.Errorf("kubectl calls = %q, want %q", got, tt.wantCalls)
 			}
 		})
 	}
@@ -401,14 +629,21 @@ func TestCloneURL(t *testing.T) {
 	}
 }
 
-// TestRunCommandReportsAMissingKubectl drives the wrapper's failure path: a
-// binary that cannot be started is named in the error, and no process runs
-// because the path names no directory.
-func TestRunCommandReportsAMissingKubectl(t *testing.T) {
-	t.Parallel()
-	_, err := runCommand("no-such-dir/kubectl", nil, "apply", "-f", "-")
-	if err == nil || !strings.Contains(err.Error(), "no-such-dir/kubectl apply -f -") {
-		t.Fatalf("runCommand on a missing binary = %v, want the command named", err)
+// TestProdDepsRunsKubectl drives the wrapper the command really uses: prodDeps
+// hands the kubectl call to execKubectl, so a stub in place of that wiring, or
+// an execKubectl that never reaches kubectl, fails here. PATH holds no kubectl,
+// so the lookup fails and no process starts.
+//
+//testpolicy:allow parallel — PATH is process-wide, so no other test may run while this one holds it
+func TestProdDepsRunsKubectl(t *testing.T) {
+	//testpolicy:allow no-env — the wrapper resolves kubectl on PATH, and a PATH with no kubectl is what keeps this test off the cluster
+	t.Setenv("PATH", t.TempDir())
+	_, err := prodDeps().kubectl(nil, "apply", "-f", "-")
+	if err == nil {
+		t.Fatal("prodDeps().kubectl with no kubectl on PATH = nil error, want the wrapper's failure")
+	}
+	if !strings.Contains(err.Error(), "kubectl apply -f -") {
+		t.Errorf("prodDeps().kubectl error = %v, want the command named", err)
 	}
 }
 

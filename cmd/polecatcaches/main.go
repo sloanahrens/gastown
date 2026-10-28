@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -59,7 +61,11 @@ func execKubectl(stdin io.Reader, args ...string) ([]byte, error) {
 // terminal, and reports its stdout. A failure names the command and never
 // carries its output, which can hold a secret.
 func runCommand(name string, stdin io.Reader, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...) //nolint:gosec // G204: kubectl in production; the verb and flag words are fixed and the Job name is a validated DNS-1123 label, so no shell and no user text
+	// G204: kubectl in production; the verb and flag words are fixed, and the
+	// only values are the Job name and the namespace, both DNS-1123 labels
+	// cachevol.BuildSeedJob validates before a call is built, so no shell sees
+	// any of it.
+	cmd := exec.Command(name, args...) //nolint:gosec // G204: fixed verb and flag words; the Job name and namespace are DNS-1123 labels the builder validates
 	cmd.Stdin = stdin
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
@@ -79,6 +85,7 @@ func runWith(args []string, out, errw io.Writer, d deps) int {
 	namespace := fs.String("namespace", "", "the Job's namespace; empty uses the kubectl context's namespace")
 	name := fs.String("name", "", "the Job's name; empty uses the builder's default")
 	forgejoHost := fs.String("forgejo-host", "", "the host[:port] the Job clones from; empty keeps each rig's configured host")
+	force := fs.Bool("force", false, "delete and re-apply the Job even when it already holds these pins, which reseeds the claim")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -111,16 +118,30 @@ func runWith(args []string, out, errw io.Writer, d deps) int {
 		return 1
 	}
 
-	// A Job's pod template is immutable, so re-applying one whose pins changed
-	// fails; deleting first is what lets a changed pin reseed. The pass is
-	// cheap when the pins did not change, because the Job's marker exits before
-	// running a step (internal/polecat/cachevol).
-	del := []string{"delete", "job", job.Metadata.Name, "--ignore-not-found"}
-	if *namespace != "" {
-		del = append(del, "--namespace", *namespace)
+	live, err := readSeedJob(d, job.Metadata.Name, *namespace)
+	if err != nil {
+		fmt.Fprintf(errw, "polecatcaches: %v\n", err)
+		return 1
 	}
-	if code := kubectl(d, out, errw, nil, del); code != 0 {
-		return code
+
+	// A Job's pod template is immutable, so a Job whose pins changed cannot be
+	// applied over: it is deleted first, and that delete is what lets the
+	// changed pin reseed. One that already holds this template and finished its
+	// pass is left alone, because deleting it would start a fresh pod to reseed
+	// a claim the marker says is current; -force reseeds that claim anyway.
+	if live != nil && !*force && live.seeded() && reflect.DeepEqual(live.Spec.Template, job.Spec.Template) {
+		fmt.Fprintf(out, "polecatcaches: Job %s already holds the %d pinned commit(s); nothing applied (-force reseeds)\n",
+			job.Metadata.Name, len(pins))
+		return 0
+	}
+	if live != nil {
+		del := []string{"delete", "job", job.Metadata.Name, "--ignore-not-found"}
+		if *namespace != "" {
+			del = append(del, "--namespace", *namespace)
+		}
+		if code := kubectl(d, out, errw, nil, del); code != 0 {
+			return code
+		}
 	}
 	if code := kubectl(d, out, errw, bytes.NewReader(job.JSON()), []string{"apply", "-f", "-"}); code != 0 {
 		return code
@@ -147,6 +168,48 @@ func kubectl(d deps, out, errw io.Writer, stdin io.Reader, args []string) int {
 		fmt.Fprintln(out, s)
 	}
 	return 0
+}
+
+// liveSeedJob is the cluster Job a run would replace: the pod template, which
+// says whether the pins changed, and the status, which says whether the Job
+// ever finished seeding them. Only these two are read, so the defaults the API
+// server fills into a stored template are not part of the comparison and a Job
+// the cluster created compares equal to the manifest a run would apply.
+type liveSeedJob struct {
+	Spec struct {
+		Template cachevol.PodTemplate `json:"template"`
+	} `json:"spec"`
+	Status struct {
+		Succeeded int32 `json:"succeeded,omitempty"`
+	} `json:"status"`
+}
+
+// seeded reports whether the Job's pass finished: the seed container writes the
+// claim's marker last, so a succeeded Job is one whose pins reached the claim.
+func (j *liveSeedJob) seeded() bool { return j.Status.Succeeded > 0 }
+
+// readSeedJob reads the Job the cluster holds under name. A Job it does not
+// have reads as nil, which leaves the run applying into an empty slot; any
+// other failure stops the run, since a delete over a template this run could
+// not read would reseed blind. The document is never quoted in an error, which
+// carries the Job's pins and clone URLs.
+func readSeedJob(d deps, name, namespace string) (*liveSeedJob, error) {
+	args := []string{"get", "job", name, "--ignore-not-found", "-o", "json"}
+	if namespace != "" {
+		args = append(args, "--namespace", namespace)
+	}
+	text, err := d.kubectl(nil, args...)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(string(text)) == "" {
+		return nil, nil
+	}
+	var job liveSeedJob
+	if err := json.Unmarshal(text, &job); err != nil {
+		return nil, fmt.Errorf("the Job %s the cluster holds is not a Job document: %w", name, err)
+	}
+	return &job, nil
 }
 
 // resolvePins reads the pins file, keeps the rigs named on the command line
