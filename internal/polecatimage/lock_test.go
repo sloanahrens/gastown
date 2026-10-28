@@ -402,18 +402,24 @@ func TestTakeLockReportsARenameItCannotMake(t *testing.T) {
 	}
 }
 
+// withLockSeams is what a test hands WithLock so its log lines land in the test
+// run, where output reads them, and a lock's age is measured by the test clock.
+func withLockSeams(tr *testRun) WithLockOptions {
+	return WithLockOptions{Out: &tr.logged, Now: func() time.Time { return tr.now }}
+}
+
 // TestWithLockRunsFnWhileHoldingTheLock is the caller's contract: inside fn the
 // plugin lock is this caller's, and a second caller cannot take it.
 func TestWithLockRunsFnWhileHoldingTheLock(t *testing.T) {
 	t.Parallel()
 	tr := newTestRun(t)
 	ran := false
-	err := WithLock(context.Background(), tr.Cfg, func(context.Context) error {
+	err := WithLock(context.Background(), tr.Cfg, withLockSeams(tr), func(context.Context) error {
 		ran = true
 		if got := lockPID(t, tr.Cfg.LockDir); got != "4242" {
 			t.Errorf("lock records pid %q while fn runs, want 4242", got)
 		}
-		if inner := WithLock(context.Background(), tr.Cfg, func(context.Context) error {
+		if inner := WithLock(context.Background(), tr.Cfg, withLockSeams(tr), func(context.Context) error {
 			t.Error("the second caller ran fn while the first holds the lock")
 			return nil
 		}); !errors.Is(inner, ErrLockHeld) {
@@ -445,7 +451,7 @@ func TestWithLockReleasesAfterFn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			tr := newTestRun(t)
-			err := WithLock(context.Background(), tr.Cfg, func(context.Context) error { return tc.ret })
+			err := WithLock(context.Background(), tr.Cfg, withLockSeams(tr), func(context.Context) error { return tc.ret })
 			if !errors.Is(err, tc.ret) {
 				t.Fatalf("WithLock() = %v, want fn's %v", err, tc.ret)
 			}
@@ -453,7 +459,7 @@ func TestWithLockReleasesAfterFn(t *testing.T) {
 				t.Error("the lock directory is still there after WithLock returned")
 			}
 			ran := false
-			if err := WithLock(context.Background(), tr.Cfg, func(context.Context) error {
+			if err := WithLock(context.Background(), tr.Cfg, withLockSeams(tr), func(context.Context) error {
 				ran = true
 				return nil
 			}); err != nil || !ran {
@@ -467,7 +473,7 @@ func TestWithLockPassesFnsErrorThrough(t *testing.T) {
 	t.Parallel()
 	tr := newTestRun(t)
 	want := errors.New("the caller's failure")
-	if err := WithLock(context.Background(), tr.Cfg, func(context.Context) error { return want }); !errors.Is(err, want) {
+	if err := WithLock(context.Background(), tr.Cfg, withLockSeams(tr), func(context.Context) error { return want }); !errors.Is(err, want) {
 		t.Fatalf("WithLock() = %v, want fn's error", err)
 	}
 }
@@ -475,9 +481,9 @@ func TestWithLockPassesFnsErrorThrough(t *testing.T) {
 func TestWithLockReturnsErrLockHeldWhenAnotherRunHoldsIt(t *testing.T) {
 	t.Parallel()
 	tr := newTestRun(t)
-	makeLock(t, tr.Cfg.LockDir, "9999", time.Now())
+	makeLock(t, tr.Cfg.LockDir, "9999", testNow)
 	ran := false
-	err := WithLock(context.Background(), tr.Cfg, func(context.Context) error { ran = true; return nil })
+	err := WithLock(context.Background(), tr.Cfg, withLockSeams(tr), func(context.Context) error { ran = true; return nil })
 	if !errors.Is(err, ErrLockHeld) {
 		t.Fatalf("WithLock() = %v, want ErrLockHeld", err)
 	}
@@ -500,7 +506,7 @@ func TestWithLockReportsALockItCannotMake(t *testing.T) {
 	}
 	tr.Cfg.LockDir = filepath.Join(blocked, "polecat-image.lock")
 	ran := false
-	err := WithLock(context.Background(), tr.Cfg, func(context.Context) error { ran = true; return nil })
+	err := WithLock(context.Background(), tr.Cfg, withLockSeams(tr), func(context.Context) error { ran = true; return nil })
 	if err == nil || errors.Is(err, ErrLockHeld) {
 		t.Fatalf("WithLock() = %v, want the lock's own error", err)
 	}
@@ -512,9 +518,9 @@ func TestWithLockReportsALockItCannotMake(t *testing.T) {
 func TestWithLockTakesOverAStaleLock(t *testing.T) {
 	t.Parallel()
 	tr := newTestRun(t)
-	makeLock(t, tr.Cfg.LockDir, "9999", time.Now().Add(-tr.Cfg.StaleAfter-time.Second))
+	makeLock(t, tr.Cfg.LockDir, "9999", testNow.Add(-tr.Cfg.StaleAfter-time.Second))
 	ran := false
-	err := WithLock(context.Background(), tr.Cfg, func(context.Context) error {
+	err := WithLock(context.Background(), tr.Cfg, withLockSeams(tr), func(context.Context) error {
 		ran = true
 		if got := lockPID(t, tr.Cfg.LockDir); got != "4242" {
 			t.Errorf("lock records pid %q after the takeover, want 4242", got)
@@ -524,4 +530,6 @@ func TestWithLockTakesOverAStaleLock(t *testing.T) {
 	if err != nil || !ran {
 		t.Fatalf("WithLock() = %v, ran %v; want the stale lock taken over", err, ran)
 	}
+	// The takeover line goes to the caller's writer, not the process's stdout.
+	tr.wantLogged(t, "taking over a stale lock ("+tr.Cfg.LockDir+")")
 }
