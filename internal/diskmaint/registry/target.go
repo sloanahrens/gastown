@@ -22,7 +22,9 @@ type Config struct {
 	Keep int
 	// Installed reads the full commit of the installed gt, from gt version.
 	Installed func() (string, error)
-	// PushInFlight reports whether a push holds the registry; Apply reads it.
+	// PushInFlight reports whether a push holds the registry; Apply reads it
+	// before collecting, and a nil reader refuses the collect rather than
+	// answering "no push".
 	PushInFlight func() bool
 	// Lock serializes an apply with pushes; nil means the caller holds it.
 	Lock func(ctx context.Context, fn func(context.Context) error) error

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -12,15 +13,18 @@ import (
 // digestN is a manifest digest from a repeated hex digit.
 func digestN(b byte) string { return "sha256:" + repeatByte(b, 64) }
 
-// fakeRunner answers every command with out and err, and records each argv.
+// fakeRunner answers every command with out and err, and records each argv and
+// the environment it was sent.
 type fakeRunner struct {
 	out   []byte
 	err   error
 	calls [][]string
+	envs  [][]string
 }
 
-func (f *fakeRunner) run(_ context.Context, _ []string, name string, args ...string) ([]byte, error) {
+func (f *fakeRunner) run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, append([]string{name}, args...))
+	f.envs = append(f.envs, slices.Clone(env))
 	return f.out, f.err
 }
 

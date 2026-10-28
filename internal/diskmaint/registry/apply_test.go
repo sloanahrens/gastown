@@ -72,13 +72,19 @@ func (l *stepLog) all() []string {
 	return slices.Clone(l.steps)
 }
 
-// applyConfig wires a target to reg with a ledger at ledgerPath.
+// applyConfig wires a target to reg with a ledger at ledgerPath. The collect
+// settings are valid and quiet, so an apply that deletes collects without
+// adding a line: the tests that care about collect build their own Config.
 func applyConfig(t *testing.T, reg *recordingRegistry, ledgerPath string) Config {
 	t.Helper()
 	return Config{
-		Base:   "http://registry.test",
-		HTTP:   &http.Client{Transport: roundTrip(reg.handler)},
-		Ledger: diskmaint.NewLedger(ledgerPath, 1<<20),
+		Base:         "http://registry.test",
+		HTTP:         &http.Client{Transport: roundTrip(reg.handler)},
+		Ledger:       diskmaint.NewLedger(ledgerPath, 1<<20),
+		DockerHost:   "unix:///run/colima/gt-sbx/docker.sock",
+		Container:    "gt-registry",
+		Run:          func(context.Context, []string, string, ...string) ([]byte, error) { return nil, nil },
+		PushInFlight: func() bool { return false },
 	}
 }
 
