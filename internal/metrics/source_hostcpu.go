@@ -27,9 +27,10 @@ import (
 //	window_s          the interval the two samples were taken over
 //	unmeasured_pids   processes that exited between the samples: what they
 //	                  burned after the first read is in no reading
-//	regressed_pids    process ids whose two samples cannot be paired, because
-//	                  the cumulative time fell or the program changed: the id
-//	                  was reused, so their pair is in no reading
+//	regressed_pids    process ids whose two samples are not one process,
+//	                  because the id was reused or its cumulative time fell:
+//	                  the pair is in no reading, though a reused id's new
+//	                  process is read as one that began inside the window
 //
 // Cores are the difference of each process's cumulative CPU time between two
 // samples divided by the interval between them. ps's pcpu is never read: it is
@@ -125,12 +126,15 @@ func hostCPUWindowFits(ctx context.Context, window time.Duration) error {
 // other_N_name and other_N_cores columns run from 1 to this count.
 const hostCPUOtherN = 3
 
-// hostCPUNameArgv reads every process's cumulative CPU time and its program
-// path. time is user plus system CPU since the process started, the counter
-// the cores are the rate of. comm is the last field because a path may hold
-// spaces ("Google Chrome Helper"), and everything after the CPU time is the
-// path.
-var hostCPUNameArgv = []string{"ps", "-axo", "pid=,time=,comm="}
+// hostCPUNameArgv reads every process's cumulative CPU time, the instant it
+// began, and its program path. time is user plus system CPU since the process
+// started, the counter the cores are the rate of. lstart is the process's own
+// identity: an exec runs another program under the same process, so the path
+// changes where the instant does not, and a pid reused between the samples
+// names a process that began at another instant. comm is the last field because
+// a path may hold spaces ("Google Chrome Helper"), and everything after the
+// start instant is the path.
+var hostCPUNameArgv = []string{"ps", "-axo", "pid=,time=,lstart=,comm="}
 
 // hostCPUArgsArgv reads every process's command line. The two VMs are both
 // Virtualization.VirtualMachine processes whose paths tell them apart by
@@ -191,9 +195,10 @@ func (c hostCPUConsumer) read(deltas []hostCPUDelta, claimed []bool) any {
 
 // hostCPUProc is one process in one sample.
 type hostCPUProc struct {
-	// path is the program the process runs, which tells a reused id from the
-	// process that held it in the other sample.
-	path    string
+	// started is the instant the process began, which is what tells a reused
+	// id from the process that held it in the other sample. The program path
+	// cannot: an exec keeps the process and runs another program under it.
+	started string
 	name    string
 	command string
 	// seconds is the process's cumulative CPU time since it started.
@@ -212,26 +217,35 @@ type hostCPUDelta struct {
 // cumulative-time difference into cores. A process only in the second sample
 // started inside the window, so its whole cumulative time was burned in it; a
 // process only in the first exited, and what it burned after that read is
-// unknown, so it is counted in unmeasured and contributes nothing. A
-// difference below zero, or a program that differs between the samples, means
-// the id was reused: the two totals belong to two processes, so neither is a
-// reading of this window's other one and the pair is counted in regressed. The
-// deltas come back sorted by id, so a consumer's sum does not depend on map
+// unknown, so it is counted in unmeasured and contributes nothing.
+//
+// A pid's two samples are one process when the start instant is the same, and
+// an exec under that process runs another program without changing it: the
+// pair is then the process's two totals and the difference is this window's
+// burn, whatever the program path says. When the instant differs the id was
+// reused, so the two totals belong to two processes and the pair is counted in
+// regressed; the second sample's process also began inside the window, so its
+// whole total is still the burn to read. A difference below zero under one
+// start instant is no live process's own counters, so that pair is counted in
+// regressed and contributes nothing.
+//
+// The deltas come back sorted by id, so a consumer's sum does not depend on map
 // order.
 func hostCPUDeltas(first, second map[int]hostCPUProc, window float64) (deltas []hostCPUDelta, unmeasured, regressed int) {
 	for pid, after := range second {
 		burnt := after.seconds
 		if before, ok := first[pid]; ok {
-			if before.path != after.path {
-				// The id names another program in the second sample, so the new
-				// process's total is not the old one's plus a window's burn.
+			switch {
+			case before.started != after.started:
+				// The id names another process in the second sample. It began
+				// inside the window, so its total is the burn, but the first
+				// process's tail is in no reading, so the pair is a gap.
+				regressed++
+			case after.seconds < before.seconds:
 				regressed++
 				continue
-			}
-			burnt = after.seconds - before.seconds
-			if burnt < 0 {
-				regressed++
-				continue
+			default:
+				burnt = after.seconds - before.seconds
 			}
 		}
 		deltas = append(deltas, hostCPUDelta{
@@ -321,10 +335,10 @@ func runHostCPUPS(ctx context.Context, env Env, argv []string) ([]byte, error) {
 	return env.Run(ctx, argv)
 }
 
-// parseHostCPUNameProcs reads pid=,time=,comm= output into one entry per
-// process. A line that does not start with a process id and a CPU time is an
-// error rather than a skipped line: a table read in another shape would drop
-// consumers silently and understate the host.
+// parseHostCPUNameProcs reads pid=,time=,lstart=,comm= output into one entry
+// per process. A line that does not start with a process id, a CPU time and a
+// start instant is an error rather than a skipped line: a table read in another
+// shape would drop consumers silently and understate the host.
 func parseHostCPUNameProcs(out string) (map[int]hostCPUProc, error) {
 	procs := make(map[int]hostCPUProc)
 	for _, line := range strings.Split(out, "\n") {
@@ -337,15 +351,19 @@ func parseHostCPUNameProcs(out string) (map[int]hostCPUProc, error) {
 		if err != nil {
 			return nil, fmt.Errorf("the process names name no process id: %q: %w", pidField, err)
 		}
-		timeField, path := cutHostCPUField(rest)
+		timeField, rest := cutHostCPUField(rest)
 		seconds, err := parseHostCPUTime(timeField)
 		if err != nil {
 			return nil, fmt.Errorf("process %d: %w", pid, err)
 		}
+		started, path := cutHostCPUStart(rest)
+		if started == "" {
+			return nil, fmt.Errorf("process %d names no start instant", pid)
+		}
 		if path == "" {
 			return nil, fmt.Errorf("process %d names no program", pid)
 		}
-		procs[pid] = hostCPUProc{path: path, name: hostCPUName(path), command: path, seconds: seconds}
+		procs[pid] = hostCPUProc{started: started, name: hostCPUName(path), command: path, seconds: seconds}
 	}
 	if len(procs) == 0 {
 		return nil, errors.New("the process table named no process")
@@ -376,6 +394,27 @@ func parseHostCPUArgs(out string) (map[int]string, error) {
 		return nil, errors.New("the command-line table named no process")
 	}
 	return lines, nil
+}
+
+// hostCPUStartFields is how many whitespace-separated fields the lstart column
+// prints: the weekday, month, day, clock and year, as in "Wed Oct 28 10:00:00
+// 2026". The program path follows them, so the split counts rather than looks
+// for a delimiter.
+const hostCPUStartFields = 5
+
+// cutHostCPUStart splits the start instant off the front of s and returns it
+// with the rest, which begins the program path.
+func cutHostCPUStart(s string) (string, string) {
+	fields := make([]string, 0, hostCPUStartFields)
+	for i := 0; i < hostCPUStartFields; i++ {
+		field, rest := cutHostCPUField(s)
+		if field == "" {
+			return "", ""
+		}
+		fields = append(fields, field)
+		s = rest
+	}
+	return strings.Join(fields, " "), s
 }
 
 // cutHostCPUField splits the first whitespace-separated field off s and trims

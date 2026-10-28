@@ -560,13 +560,14 @@ func TestBurstTopConsumers(t *testing.T) {
 }
 
 // A window the host_cpu group only partly read cannot rank as an idle host: a
-// process that exited between its two samples, or an id it saw reused, is in no
-// column, so a rank of nobody means nobody known rather than nobody burning. A
-// window the group read whole still ranks an idle host as none.
+// process that exited between its two samples, or the process a reused id
+// replaced, is in no column, so a rank of nobody means nobody known rather than
+// nobody burning. A window the group read whole still ranks an idle host as
+// none.
 func TestBurstConsumersOnAPartlyReadTable(t *testing.T) {
 	t.Parallel()
 	const (
-		idleNames = "  100   0:05.00 /usr/sbin/launchd\n"
+		idleNames = "  100   0:05.00 Sat Oct 24 09:00:00 2026 /usr/sbin/launchd\n"
 		idleArgs  = "  100 /usr/sbin/launchd\n"
 	)
 	tests := []struct {
@@ -578,7 +579,7 @@ func TestBurstConsumersOnAPartlyReadTable(t *testing.T) {
 		{
 			name: "a busy process that exited before the second sample",
 			names: []string{
-				"  100   0:05.00 /usr/sbin/launchd\n  400  12:34.50 /opt/homebrew/bin/dolt\n",
+				"  100   0:05.00 Sat Oct 24 09:00:00 2026 /usr/sbin/launchd\n  400  12:34.50 Sat Oct 24 09:00:00 2026 /opt/homebrew/bin/dolt\n",
 				idleNames,
 			},
 			args: []string{
@@ -588,8 +589,8 @@ func TestBurstConsumersOnAPartlyReadTable(t *testing.T) {
 			want: nil,
 		},
 		{
-			name:  "an id whose cumulative time fell was reused",
-			names: []string{"  100   0:05.00 /usr/sbin/launchd\n", "  100   0:01.00 /usr/sbin/launchd\n"},
+			name:  "an id whose cumulative time fell has no pair",
+			names: []string{"  100   0:05.00 Sat Oct 24 09:00:00 2026 /usr/sbin/launchd\n", "  100   0:01.00 Sat Oct 24 09:00:00 2026 /usr/sbin/launchd\n"},
 			args:  []string{idleArgs, idleArgs},
 			want:  nil,
 		},
