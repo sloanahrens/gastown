@@ -1409,8 +1409,15 @@ func TestLandRejectionAfterALegacyRequeueIsTheNextAttempt(t *testing.T) {
 	if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AppendNotes: block}); err != nil {
 		t.Fatalf("seeding the rejection: %v", err)
 	}
-	legacy := strings.Replace(FormatRequeueComment("operator", f.work.Branch, f.work.Head, 1, 0, "runner fault, not the diff"),
-		"\nBlocks: 0", "", 1)
+	// Spelled out, not derived from FormatRequeueComment: a fixture built by
+	// stripping the Blocks: line silently stops being legacy the day the writer
+	// renders it differently, and the test then passes on a current-format
+	// comment that never exercises the fallback (gt-hs0jd).
+	legacy := "REQUEUED: operator re-queued this rejected landing unchanged\n" +
+		"Branch: " + f.work.Branch + "\n" +
+		"Head: " + f.work.Head + "\n" +
+		"Attempt: 1\n" +
+		"Reason: runner fault, not the diff"
 	if err := f.bd.AddCommentAs(f.work.BeadID, "operator", legacy); err != nil {
 		t.Fatalf("legacy requeue comment: %v", err)
 	}
