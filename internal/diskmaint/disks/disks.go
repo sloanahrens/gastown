@@ -1,12 +1,14 @@
 // Package disks turns df output and disk readings into keyed alerts and the
 // registry keep count for one run.
 //
-// Both thresholds live here so the usage alert and the tightened keep turn at
-// the same reading: a disk the patrol alerts on is a disk it stops keeping
-// old images for (gt-dl4nv.3).
+// RaiseAt is the one reading both the usage alert and the tightened keep turn
+// on; ClearAt only clears the alert. Between the two, an alert already raised
+// stays raised while the keep is not tightened for that disk, so an alerted
+// disk is not always a disk that is kept short (gt-dl4nv.3).
 package disks
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -64,10 +66,11 @@ func ParseDF(out string) (float64, error) {
 }
 
 // Evaluate compares the readings with the active alert keys and returns the
-// alerts to apply: a disk at or over RaiseAt raises its usage alert, a disk
-// under ClearAt with that alert active clears it, and a disk that cannot be
-// read raises its own unreadable alert while leaving the usage alert it
-// raised earlier alone.
+// alerts to apply: a disk at or over RaiseAt raises its usage alert unless that
+// alert is already active, a disk under ClearAt with that alert active clears
+// it, and a disk that cannot be read raises its own unreadable alert unless
+// that alert is already active, while leaving the usage alert it raised
+// earlier alone. A disk that reads again clears an active unreadable alert.
 func Evaluate(readings []Reading, active map[string]bool) []Alert {
 	var alerts []Alert
 	for _, r := range readings {
@@ -108,16 +111,28 @@ func Evaluate(readings []Reading, active map[string]bool) []Alert {
 	return alerts
 }
 
-// KeepFor returns the registry keep count for this run: the tightened count
-// while a readable disk is at or over RaiseAt, and base otherwise. A disk that
-// cannot be read leaves the keep alone, because nothing was judged.
-func KeepFor(readings []Reading, base int) int {
+// KeepFor returns the registry keep count: the tightened count while a
+// readable disk is at or over RaiseAt, and base otherwise, or 0 with an error
+// naming every disk it could not read (gt-dl4nv.3).
+//
+// Signature change: KeepFor returns (int, error), not the plan's int. Nothing
+// calls it yet; the disk_maintenance patrol (Task 10b) is the first.
+func KeepFor(readings []Reading, base int) (int, error) {
+	var failures []error
 	for _, r := range readings {
-		if r.Err == nil && r.UsedPct >= RaiseAt && base > tightenedKeep {
-			return tightenedKeep
+		if r.Err != nil {
+			failures = append(failures, fmt.Errorf("disk %s cannot be read: %w", r.Name, r.Err))
 		}
 	}
-	return base
+	if len(failures) > 0 {
+		return 0, errors.Join(failures...)
+	}
+	for _, r := range readings {
+		if r.UsedPct >= RaiseAt && base > tightenedKeep {
+			return tightenedKeep, nil
+		}
+	}
+	return base, nil
 }
 
 func usageAlertKey(name string) string { return "diskmaint:" + name }
