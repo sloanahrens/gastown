@@ -57,7 +57,7 @@ func runMetricsHour(ctx context.Context, out io.Writer, town string) error {
 	}()
 
 	snapshotErr := runMetricsSnapshot(ctx, out, town)
-	analyseErr := runMetricsAnalyse(ctx, out, town)
+	analyseErr := runMetricsAnalyse(ctx, out, metrics.OSEnv(town), analysisOptions(town))
 	if snapshotErr != nil {
 		return snapshotErr
 	}
