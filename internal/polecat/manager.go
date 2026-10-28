@@ -233,6 +233,10 @@ type Manager struct {
 	// sandbox cleanup the kill path runs, so a test never shells out to the
 	// sandbox CLI; nil means the linked one.
 	sandboxDeleter func(townRoot string, rec session.SandboxRecord) error
+	// sandboxPusher stands in for the linked openshell pusher in the push the
+	// kill path makes before it deletes a sandbox, so a test never shells out
+	// to the sandbox CLI; nil means the linked one (gt-fxwtw).
+	sandboxPusher func(townRoot string, rec session.SandboxRecord) error
 	// sandboxSeat stands in for the sandbox probe the reuse gate asks about a
 	// sandbox seat's git state, so a test never asks a gateway; nil means the
 	// town's own seat map and gateway (gt-qq6rg).
@@ -270,11 +274,38 @@ func (m *Manager) killSession(name, reason string) error {
 	// already gone must still be deleted. A host session has no record and
 	// this is a no-op.
 	if m.townRoot != "" {
-		if cerr := session.CleanupSandboxWith(sandboxDeleterOrLinked(m.sandboxDeleter), m.townRoot, m.sessionName(name)); cerr != nil {
+		if cerr := m.removeKilledSandbox(m.sessionName(name)); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("polecat %s: %w", name, cerr))
 		}
 	}
 	return err
+}
+
+// removeKilledSandbox pushes the work a killed sandboxed session committed,
+// then deletes the sandbox it ran in and its registry record (gt-fxwtw). A
+// host session has no record and nothing happens.
+//
+// The push comes first because the sandbox's clone is the only copy of commits
+// the seat never pushed, the rule gt session stop already follows (gt-hwpfq). A
+// push that is refused, or a record that cannot be read, keeps the sandbox and
+// its record so those commits survive for the operator to recover.
+func (m *Manager) removeKilledSandbox(sessionID string) error {
+	rec, sandboxed, rerr := session.ReadSandboxRecord(m.townRoot, sessionID)
+	if rerr != nil {
+		return fmt.Errorf("cannot tell whether %s ran in a sandbox: %w", sessionID, rerr)
+	}
+	if sandboxed {
+		pusher := sandboxPusherOrLinked(m.sandboxPusher, session.SandboxPusher)
+		// A sandbox already gone has no commits left to lose, so it is not a
+		// refused push.
+		if perr := pusher(m.townRoot, rec); perr != nil && !errors.Is(perr, session.ErrNothingToPush) {
+			return fmt.Errorf("keeping its sandbox so its commits survive, their push was refused: %w", perr)
+		}
+	}
+	if cerr := session.CleanupSandboxWith(sandboxDeleterOrLinked(m.sandboxDeleter), m.townRoot, sessionID); cerr != nil {
+		return fmt.Errorf("removing its sandbox: %w", cerr)
+	}
+	return nil
 }
 
 // sandboxDeleterOrLinked is the deleter a cleanup runs: the one a test
