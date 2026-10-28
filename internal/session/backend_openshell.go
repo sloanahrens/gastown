@@ -217,11 +217,48 @@ func imageGTFrom(ctx context.Context, run dockerRun, image string) (string, erro
 // git-free).
 type gitRun func(dir string, args ...string) ([]byte, error)
 
-// runGit is the real git runner for the town's gt source checkout.
-func runGit(dir string, args ...string) ([]byte, error) {
+// gitRepoEnvVars name a repository other than the one a command runs in. A
+// session started inside a worktree or a hook carries them, and a comparison
+// that inherited them would read the caller's repository instead of the
+// town's gt source checkout (gt-aq1d1).
+var gitRepoEnvVars = map[string]bool{
+	"GIT_DIR":                          true,
+	"GIT_WORK_TREE":                    true,
+	"GIT_INDEX_FILE":                   true,
+	"GIT_COMMON_DIR":                   true,
+	"GIT_OBJECT_DIRECTORY":             true,
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
+	"GIT_NAMESPACE":                    true,
+	"GIT_PREFIX":                       true,
+}
+
+// gitEnv is environ without the variables that pick a repository. Everything
+// else passes through, so git keeps the caller's configuration.
+func gitEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if gitRepoEnvVars[name] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// gitCommand is the git command runGit runs: dir in environ, with the
+// repository-selecting variables removed. It stands apart from runGit so a
+// test can read the command it builds without running git.
+func gitCommand(environ []string, dir string, args ...string) *exec.Cmd {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	return cmd.Output()
+	cmd.Env = gitEnv(environ)
+	return cmd
+}
+
+// runGit is the real git runner for the town's gt source checkout.
+func runGit(dir string, args ...string) ([]byte, error) {
+	return gitCommand(os.Environ(), dir, args...).Output()
 }
 
 // gtImageDiff reports the paths changed between an image's gt commit and the
@@ -229,15 +266,34 @@ func runGit(dir string, args ...string) ([]byte, error) {
 // caller reads as drift.
 type gtImageDiff func(imageCommit, installed string) ([]string, error)
 
+// commitIDPattern is a commit id git can take as a revision: 40 hex digits, or
+// an abbreviation down to the 7 two ids need to be told apart
+// (version.SameCommit). The image's commit is written by the image, in a docker
+// label and in its `gt version` output, so a value git would read as an option
+// never reaches its argv (gt-aq1d1).
+var commitIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
+
+// errNotAncestor is imagePathsBetween's refusal for two commits that are not on
+// one line of history: git judged the image drifted, so the refusal still names
+// the rebuild. Any other failure means git could not run the comparison at all,
+// and the refusal reports that reason instead (gt-aq1d1).
+var errNotAncestor = errors.New("the image's gt commit is not an ancestor of the installed gt's commit")
+
 // imagePathsBetween lists the paths whose content differs between from and to,
-// through run. A pair that is not in an ancestor relationship is an error: a
-// commit off the installed line is not the installed gt missing a few commits,
-// so it is rebuilt like any drifted one. --no-renames puts both sides of a
-// rename in the list, so a source file renamed to a documentation path still
-// reads as a build change.
+// through run. A pair that is not in an ancestor relationship is an error
+// wrapping errNotAncestor: a commit off the installed line is not the installed
+// gt missing a few commits, so it is rebuilt like any drifted one. --no-renames
+// puts both sides of a rename in the list, so a source file renamed to a
+// documentation path still reads as a build change.
 func imagePathsBetween(run gitRun, root, from, to string) ([]string, error) {
+	if !commitIDPattern.MatchString(from) {
+		return nil, fmt.Errorf("the image's gt commit %q is not a commit id", from)
+	}
+	if !commitIDPattern.MatchString(to) {
+		return nil, fmt.Errorf("the installed gt's commit %q is not a commit id", to)
+	}
 	if _, err := run(root, "merge-base", "--is-ancestor", from, to); err != nil {
-		return nil, fmt.Errorf("gt commit %s is not an ancestor of %s: %w", from, to, err)
+		return nil, fmt.Errorf("%w: %s is not an ancestor of %s: %v", errNotAncestor, from, to, err)
 	}
 	out, err := run(root, "diff", "--name-only", "--no-renames", from, to)
 	if err != nil {
@@ -265,23 +321,28 @@ func (b *openshellBackend) imageDiff(imageCommit, installed string) ([]string, e
 // ancestryWithoutBuildChange reports whether the installed gt could be the
 // image's gt plus commits that change no path `make build` reads
 // (buildpaths.AffectsBuild), so the sandbox runs the same gt in every way it
-// can observe. Anything git cannot judge — no seam, a failed comparison, an
-// empty listing for two commits that differ — reports false, and the caller
-// refuses the image.
-func ancestryWithoutBuildChange(diff gtImageDiff, imageCommit, installed string) bool {
+// can observe. An empty listing for two commits that differ reports false with
+// no error, and the caller refuses the image as drift. A comparison git could
+// not make reports false with its reason, so the caller names that reason
+// instead of sending the operator to rebuild an image git never judged
+// (gt-aq1d1).
+func ancestryWithoutBuildChange(diff gtImageDiff, imageCommit, installed string) (bool, error) {
 	if diff == nil {
-		return false
+		return false, nil
 	}
 	paths, err := diff(imageCommit, installed)
-	if err != nil || len(paths) == 0 {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if len(paths) == 0 {
+		return false, nil
 	}
 	for _, p := range paths {
 		if buildpaths.AffectsBuild(p) {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 // checkImageGT refuses a sandbox image whose gt is not the installed gt's
@@ -289,7 +350,10 @@ func ancestryWithoutBuildChange(diff gtImageDiff, imageCommit, installed string)
 // inside a sandbox (gt-pmxo9). An image only non-build commits behind is not
 // drift: a manual install at a docs-only HEAD leaves the image's gt the same
 // binary, and refusing it would force a full rebuild (gt-v18z6). source says
-// where imageCommit was read, so a missing commit names the place to fix.
+// where imageCommit was read, so a missing commit names the place to fix. A
+// comparison git could not make is refused with its own reason, because the
+// rebuild instruction would misdirect an operator whose checkout is the fault
+// (gt-aq1d1).
 func checkImageGT(image, source, imageCommit, installed string, diff gtImageDiff) error {
 	switch {
 	case installed == "":
@@ -298,8 +362,15 @@ func checkImageGT(image, source, imageCommit, installed string, diff gtImageDiff
 		return fmt.Errorf("sandbox image %s %s, so its gt cannot be checked; rebuild it with make polecat-image", image, source)
 	case version.SameCommit(imageCommit, installed):
 		return nil
-	case ancestryWithoutBuildChange(diff, imageCommit, installed):
+	}
+	ok, err := ancestryWithoutBuildChange(diff, imageCommit, installed)
+	switch {
+	case ok:
 		return nil
+	case err != nil && !errors.Is(err, errNotAncestor):
+		// runGit keeps git's stderr out of its error, so the reason holds no
+		// command output.
+		return &imageDriftError{msg: fmt.Sprintf("sandbox image %s carries gt commit %s, but the installed gt is commit %s, and the two could not be compared: %v; check the town's gt source checkout, then spawn again", image, imageCommit, installed, err)}
 	}
 	return &imageDriftError{msg: fmt.Sprintf("sandbox image %s carries gt commit %s, but the installed gt is commit %s; rebuild the image with make polecat-image", image, imageCommit, installed)}
 }
