@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"time"
@@ -57,6 +58,14 @@ type Config struct {
 	// CacheCap bounds each per-rig cache volume, as written: a value that is not
 	// a size stops the cache trim alone (POLECAT_CACHE_CAP).
 	CacheCap string
+	// RegistryKeep is how many of the newest per-commit tags the registry
+	// retention leaves, carried as the operator wrote it: a value that is not a
+	// count stops that prune alone (POLECAT_IMAGE_REGISTRY_KEEP).
+	RegistryKeep string
+	// RegistryPrune is the registry retention mode, "off", "dry-run" or
+	// "apply"; any other value stops that prune alone and deletes nothing
+	// (POLECAT_IMAGE_REGISTRY_PRUNE).
+	RegistryPrune string
 	// PID is the pid a claim records and Cleanup compares; 0 means this
 	// process's.
 	PID int
@@ -96,6 +105,9 @@ type Run struct {
 	unlock func()
 	// look finds a program on PATH; nil means exec.LookPath.
 	look func(name string) (string, error)
+	// web answers the registry retention's HTTP calls; nil means
+	// http.DefaultClient.
+	web *http.Client
 }
 
 // command is one program invocation: its working directory, program and
@@ -177,6 +189,13 @@ func (r *Run) looker() func(string) (string, error) {
 		return r.look
 	}
 	return exec.LookPath
+}
+
+func (r *Run) webClient() *http.Client {
+	if r.web != nil {
+		return r.web
+	}
+	return http.DefaultClient
 }
 
 func (r *Run) pid() int {
