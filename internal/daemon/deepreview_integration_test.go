@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,8 +34,9 @@ const deepReviewCopyRig = "gastown"
 
 // deepReviewSliceFiles is the row bound the runs below set on the job: three
 // rows a run, so the copy's risky landings take three runs and the cursor has
-// to cross two run-bead notes to reach the end. It bounds the job, not the
-// expectations: the rows each run reviews are derived from the copy.
+// to cross two run-bead notes to reach the end. It bounds the job; the runs it
+// produces are checked against whole landed_at groups of the copy, not
+// computed from the bound here.
 const deepReviewSliceFiles = 3
 
 // deepReviewRow is the part of a reviewed landing's JSON line the assertions
@@ -47,14 +49,9 @@ type deepReviewRow struct {
 	RiskPaths    []string `json:"risk_paths"`
 }
 
-// deepReviewRunWant is one run's expected note header: the rows it takes from
-// the plan, the rows it leaves for the next run, and the window it moves.
-type deepReviewRunWant struct {
-	rows    int
-	skipped int
-	since   string
-	until   string
-}
+// deepReviewCopySince is the window the first run starts from: the default
+// window before the tick, which is the window a plan with no cursor answers.
+var deepReviewCopySince = deepReviewCopyNow.Add(-deepreview.DefaultWindow).Format(time.RFC3339)
 
 // TestIntegrationShadowRunReviewsACopyOfTheRealLedger runs the daemon's
 // deep-review job over a copy of the real landings ledger: on a temp town
@@ -72,9 +69,15 @@ type deepReviewRunWant struct {
 // reviewed exactly once, in plan order, the cursor moves to the newest one,
 // and the runs finish inside deepReviewRunCap. The second row is the ledger a
 // crash leaves behind: a torn last record, which the plan counts as unparsed
-// rather than refusing the run. The expectations — each run's rows, windows
-// and landings — are derived from the copy, so a fixture edit moves them
-// rather than being typed here twice (gt-4ur7s).
+// rather than refusing the run.
+//
+// The runs are driven by the job's own cursor and judged against the copy's
+// records, not against a partition computed from the job's planner: the risky
+// landings come from risk_paths in the copy, and each run's rows must be the
+// next whole landed_at groups in ledger order, with a group left for the next
+// run only when it does not fit the row bound. A mutant in the risky filter,
+// the grouping or the bound fails here instead of being restated by the
+// expectations (gt-4ur7s, gt-t2drw).
 //
 // The job's only write is the plan, in the notes of the bead each run creates:
 // the copy and the town's file are byte-identical afterwards, no other bead
@@ -92,38 +95,22 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 	}
 	deepReviewCheckCopyShape(t, copyBytes)
 
-	// The copy's own records, by bead and in ledger order: every reviewed line
-	// must re-encode the one the copy holds, which is what tells a copy read
-	// from a line invented along the way.
-	copyRows := map[string]deepReviewRow{}
-	copyLine := map[string]string{}
-	for _, line := range deepReviewLines(copyBytes) {
-		var row deepReviewRow
-		if err := json.Unmarshal([]byte(line), &row); err != nil {
-			t.Fatalf("the ledger copy's line is not a landing record: %v: %q", err, line)
-		}
-		copyRows[row.Bead] = row
-		copyLine[row.Bead] = line
-	}
-
-	// The runs the job must produce, from the plan the job builds over the copy
-	// and the cut boundLandings makes on it, so neither the risky filter nor the
-	// grouping rule is typed here a second time (gt-4ur7s, gt-t2drw). Each run
-	// starts where the previous one's cursor landed.
-	plan, err := deepreview.BuildPlan("", copyBytes, deepReviewCopyNow)
-	if err != nil {
-		t.Fatalf("the copy plans the way the job plans it: %v", err)
-	}
-	want, wantReviewed := deepReviewRunsOfCopy(t, plan.Landings, plan.Since, deepReviewSliceFiles, deepreview.DefaultSliceBytes,
-		func(rec deepreview.Record) string { return copyLine[rec.Bead] })
-	if len(want) < 2 {
-		t.Fatalf("the copy yields %d run(s) at %d rows a run; the test needs two so the cursor crosses a run-bead note",
-			len(want), deepReviewSliceFiles)
+	// The test needs two runs so the cursor crosses a run-bead note: more risky
+	// landings than one run's row bound, in groups the bound can cut between.
+	// It is checked on the copy, the ledger the rows below are built from.
+	_, copyRisky := deepReviewRecords(t, copyBytes)
+	if groups := deepReviewLandingGroups(copyRisky); len(copyRisky) <= deepReviewSliceFiles || groups < 2 {
+		t.Fatalf("the copy holds %d risky landings in %d landed_at group(s) at %d rows a run; the test needs two runs so the cursor crosses a run-bead note",
+			len(copyRisky), groups, deepReviewSliceFiles)
 	}
 	// A crash or a short write stops the writer mid-record, and the file ends
 	// without a newline: the plan reads that one line as unparsed.
 	torn := append(append([]byte{}, copyBytes...), []byte(`{"bead":"gt-torn`)...)
 
+	// The copy's landings are minutes apart, so it never asks the cut to hold a
+	// group together. The two grouped rows move two or four of its risky
+	// landings onto one instant, so a row-at-a-time cut would split a group and
+	// a cut that cannot take a group past the bound would take nothing.
 	tests := []struct {
 		name string
 		// ledger is the town's landings file.
@@ -131,8 +118,11 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 	}{
 		{name: "the copy", ledger: copyBytes},
 		{name: "a torn last record", ledger: torn},
+		{name: "a pair the bound cannot fit", ledger: deepReviewGrouped(t, copyBytes, 2, 4)},
+		{name: "a head group past the bound", ledger: deepReviewGrouped(t, copyBytes, 0, 4)},
 	}
 	start := time.Now()
+	runsRun := 0
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := &fakeScheduledRunner{now: deepReviewCopyNow}
@@ -142,14 +132,29 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 			d.config.TownRoot = t.TempDir()
 			writeShadowLedger(t, d.config.TownRoot, deepReviewCopyRig, string(tt.ledger))
 
+			// This ledger's own records by bead, and its risky ones in the order
+			// the plan must review them: both read from the bytes the job is
+			// given, so a reviewed line is judged against the ledger and not
+			// against the plan that produced it (gt-t2drw).
+			copyRows, risky := deepReviewRecords(t, tt.ledger)
+
 			// The ledger's own counts, as the plan takes them: a line that
 			// parses as a landing record is a record, and one that does not is
 			// unparsed. Both come from the bytes the test hands the job.
 			records, unparsed := deepReviewCounts(t, tt.ledger)
 
-			var reviewed, runIDs []string
-			for i, w := range want {
-				run := i + 1
+			// The runs are driven by the job's own cursor: each run's note is
+			// the next run's cursor, and the loop ends when the copy's risky
+			// landings have all been reviewed. A run that reviews none, or more
+			// than the plan left, ends it too: either is the cursor failing.
+			var runIDs []string
+			since := deepReviewCopySince
+			taken := 0
+			for run := 1; taken < len(risky); run++ {
+				if run > len(risky) {
+					t.Fatalf("after %d runs, %d of %d risky landings are still unreviewed: the cursor is not advancing",
+						run-1, len(risky)-taken, len(risky))
+				}
 				f.createID = fmt.Sprintf("gt-shadow%d", run)
 				runIDs = append(runIDs, f.createID)
 				if err := d.runShadowDeepReview(context.Background(), f, e, f.beads, "deep-review 2026-10-27", deepReviewCopyNow); err != nil {
@@ -160,40 +165,87 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 					t.Fatalf("run %d appended %d notes to %s, want 1", run, len(notes), f.createID)
 				}
 				note := notes[0]
-				head, rows := splitDeepReviewNote(t, note)
+				head, lines := splitDeepReviewNote(t, note)
+				landings, convErr := strconv.Atoi(head["landings="])
+				if convErr != nil {
+					t.Fatalf("run %d landings= %q is not a count: %v", run, head["landings="], convErr)
+				}
+				if landings == 0 {
+					t.Fatalf("run %d reviewed no landing with %d risky landings left: the cursor moved past them", run, len(risky)-taken)
+				}
+				if len(lines) != landings+1 || !strings.HasPrefix(lines[len(lines)-1], "cursor: ") {
+					t.Fatalf("run %d's note carries %d lines for landings=%d, want the rows and a cursor line", run, len(lines), landings)
+				}
+				if landings > len(risky)-taken {
+					t.Fatalf("run %d reviewed %d landings with %d left: it reviewed past the plan", run, landings, len(risky)-taken)
+				}
+
+				// The rows the copy says come next, by bead: the run took the
+				// risky landings in ledger order, none skipped and none that
+				// carry no risk path.
+				var runRows []deepReviewRow
+				for k, line := range lines[:landings] {
+					var row deepReviewRow
+					if err := json.Unmarshal([]byte(line), &row); err != nil {
+						t.Fatalf("run %d reviewed line is not a landing record: %v: %q", run, err, line)
+					}
+					if want := risky[taken+k]; row.Bead != want.Bead {
+						t.Fatalf("run %d reviewed %s at position %d, want %s: the plan's order or its risky filter changed",
+							run, row.Bead, k+1, want.Bead)
+					}
+					copied := copyRows[row.Bead]
+					if row.Head != copied.Head || row.LandedCommit != copied.LandedCommit ||
+						row.LandedAt != copied.LandedAt || strings.Join(row.RiskPaths, "\n") != strings.Join(copied.RiskPaths, "\n") {
+						t.Errorf("run %d's line for %s = %+v, want the copy's %+v", run, row.Bead, row, copied)
+					}
+					runRows = append(runRows, row)
+				}
+
+				// The cut is by landed_at group: the next run's window starts
+				// strictly after the cursor's instant, so a group split across
+				// runs would leave its tail unreviewed, and a whole group that
+				// fits the bound is taken rather than left.
+				next := taken + len(runRows)
+				last := runRows[len(runRows)-1]
+				singleGroup := runRows[0].LandedAt == last.LandedAt
+				for _, row := range runRows {
+					singleGroup = singleGroup && row.LandedAt == last.LandedAt
+				}
+				if len(runRows) > deepReviewSliceFiles && !singleGroup {
+					t.Errorf("run %d reviewed %d landings over the %d-row bound, and they are not one landed_at group: the cut split a group or ignored the bound",
+						run, len(runRows), deepReviewSliceFiles)
+				}
+				if next < len(risky) {
+					if risky[next].LandedAt == last.LandedAt {
+						t.Fatalf("run %d stopped inside the landed_at group at %s: the next run's window starts after it, so the rest would never be reviewed",
+							run, last.LandedAt)
+					}
+					if fits := len(runRows) + deepReviewGroupSize(risky, next); fits <= deepReviewSliceFiles {
+						t.Errorf("run %d reviewed %d landings and left a %d-landing group that fits the %d-row bound whole for the next run",
+							run, len(runRows), deepReviewGroupSize(risky, next), deepReviewSliceFiles)
+					}
+				}
+
 				for key, wantValue := range map[string]string{
 					"mode=":               "landings",
 					"quiet=":              "false",
-					"landings=":           strconv.Itoa(w.rows),
-					"skipped=":            strconv.Itoa(w.skipped),
+					"landings=":           strconv.Itoa(len(runRows)),
+					"skipped=":            strconv.Itoa(len(risky) - next),
 					"records=":            strconv.Itoa(records),
 					"unparsed=":           strconv.Itoa(unparsed),
-					"reviewed_until_old=": w.since,
-					"reviewed_until_new=": w.until,
+					"reviewed_until_old=": since,
+					"reviewed_until_new=": last.LandedAt,
 				} {
 					if got := head[key]; got != wantValue {
 						t.Errorf("run %d %s%q, want %q", run, key, got, wantValue)
 					}
 				}
-				if rows[len(rows)-1] != "cursor: "+w.until {
-					t.Errorf("run %d cursor line = %q, want %q", run, rows[len(rows)-1], "cursor: "+w.until)
+				if lines[len(lines)-1] != "cursor: "+last.LandedAt {
+					t.Errorf("run %d cursor line = %q, want %q", run, lines[len(lines)-1], "cursor: "+last.LandedAt)
 				}
-				for _, line := range rows[:len(rows)-1] {
-					var row deepReviewRow
-					if err := json.Unmarshal([]byte(line), &row); err != nil {
-						t.Fatalf("run %d reviewed line is not a landing record: %v: %q", run, err, line)
-					}
-					reviewed = append(reviewed, row.Bead)
-					copied, ok := copyRows[row.Bead]
-					if !ok {
-						t.Errorf("run %d reviewed %s, which the copy does not hold", run, row.Bead)
-						continue
-					}
-					if row.Head != copied.Head || row.LandedCommit != copied.LandedCommit ||
-						row.LandedAt != copied.LandedAt || strings.Join(row.RiskPaths, "\n") != strings.Join(copied.RiskPaths, "\n") {
-						t.Errorf("run %d's line for %s = %+v, want the copy's %+v", run, row.Bead, row, copied)
-					}
-				}
+				since = last.LandedAt
+				taken = next
+
 				// The note is the next run's cursor: the job reads it back from
 				// the run bead's notes, so the fake's bead must carry what was
 				// appended.
@@ -231,18 +283,16 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 				}
 			}
 
-			if strings.Join(reviewed, ",") != strings.Join(wantReviewed, ",") {
-				t.Errorf("reviewed landings = %v, want %v", reviewed, wantReviewed)
-			}
-			if len(f.created) != len(want) {
-				t.Errorf("created %d run beads, want one per run (%d): %v", len(f.created), len(want), f.created)
+			if len(f.created) != len(runIDs) {
+				t.Errorf("created %d run beads, want one per run (%d): %v", len(f.created), len(runIDs), f.created)
 			}
 			if len(f.slungIDs) != 0 || len(f.slung) != 0 {
 				t.Errorf("the shadow runs slung %v, want no sling", f.slungIDs)
 			}
-			if len(f.closedIDs) != len(want) {
+			if len(f.closedIDs) != len(runIDs) {
 				t.Errorf("closed %v, want every run bead closed", f.closedIDs)
 			}
+			runsRun += len(runIDs)
 			for i, why := range f.closedWhy {
 				if why != shadowCloseReason {
 					t.Errorf("run %d close reason = %q, want %q", i+1, why, shadowCloseReason)
@@ -266,7 +316,7 @@ func TestIntegrationShadowRunReviewsACopyOfTheRealLedger(t *testing.T) {
 		t.Fatalf("the runs took %v on the ledger copy, over the %v cap; the job, not the cap, has to change",
 			elapsed.Round(time.Millisecond), deepReviewRunCap)
 	} else {
-		t.Logf("%d runs x %d ledgers in %v (cap %v)", len(want), len(tests), elapsed.Round(time.Millisecond), deepReviewRunCap)
+		t.Logf("%d runs x %d ledgers in %v (cap %v)", runsRun, len(tests), elapsed.Round(time.Millisecond), deepReviewRunCap)
 	}
 
 	after, err := os.ReadFile(fixture)
@@ -320,37 +370,85 @@ func deepReviewCheckCopyShape(t *testing.T, copyBytes []byte) {
 	}
 }
 
-// deepReviewRunsOfCopy derives the runs the job must produce from the plan's
-// risky landings: each run takes what boundLandings takes of what the previous
-// run left, so the grouping and the bounds stay in the job's code rather than
-// being typed here a second time (gt-t2drw). lineOf is the copy's own line for
-// a record, so the byte bound weighs the bytes the note carries.
-func deepReviewRunsOfCopy(t *testing.T, landings []deepreview.Record, since deepreview.Timestamp, maxRows, maxBytes int, lineOf func(deepreview.Record) string) (want []deepReviewRunWant, reviewed []string) {
+// deepReviewRecords parses a ledger into a row per bead, skipping the lines
+// that do not parse (the torn row), and returns its risky rows oldest first,
+// ties in ledger order: the landings the plan must review. It reads the
+// ledger's own risk_paths, so a plan whose risky filter dropped or added a
+// landing is judged against the ledger and not against itself
+// (gt-4ur7s, gt-t2drw).
+func deepReviewRecords(t *testing.T, ledger []byte) (map[string]deepReviewRow, []deepReviewRow) {
 	t.Helper()
-	for taken := 0; taken < len(landings); {
-		lines, err := boundLandings(landings[taken:], maxRows, maxBytes, func(rec deepreview.Record) (string, error) {
-			return lineOf(rec), nil
-		})
-		if err != nil {
-			t.Fatalf("bounding the landings from %d: %v", taken, err)
+	byBead := map[string]deepReviewRow{}
+	var order []deepReviewRow
+	for _, line := range deepReviewLines(ledger) {
+		var row deepReviewRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			continue
 		}
-		if len(lines) == 0 {
-			t.Fatalf("the bound took no landing from %d of %d: that run would never move the cursor", taken, len(landings))
-		}
-		until := landings[taken+len(lines)-1].LandedAt
-		for _, rec := range landings[taken : taken+len(lines)] {
-			reviewed = append(reviewed, rec.Bead)
-		}
-		want = append(want, deepReviewRunWant{
-			rows:    len(lines),
-			skipped: len(landings) - taken - len(lines),
-			since:   since.String(),
-			until:   until.String(),
-		})
-		since = until
-		taken += len(lines)
+		byBead[row.Bead] = row
+		order = append(order, row)
 	}
-	return want, reviewed
+	sort.SliceStable(order, func(i, j int) bool {
+		return order[i].LandedAt < order[j].LandedAt
+	})
+	var risky []deepReviewRow
+	for _, row := range order {
+		if len(row.RiskPaths) > 0 {
+			risky = append(risky, row)
+		}
+	}
+	return byBead, risky
+}
+
+// deepReviewGrouped returns the copy's lines with the risky landings at
+// indexes [from, to) moved onto the first of their instants: one landed_at
+// group of to-from landings. The copy's own landings are a minute apart, so
+// without this no row asks the cut to hold a group together.
+func deepReviewGrouped(t *testing.T, copyBytes []byte, from, to int) []byte {
+	t.Helper()
+	lines := deepReviewLines(copyBytes)
+	var riskyIdx []int
+	for i, line := range lines {
+		var row deepReviewRow
+		if json.Unmarshal([]byte(line), &row) == nil && len(row.RiskPaths) > 0 {
+			riskyIdx = append(riskyIdx, i)
+		}
+	}
+	if len(riskyIdx) < to {
+		t.Fatalf("the copy holds %d risky landings, want at least %d", len(riskyIdx), to)
+	}
+	var first deepReviewRow
+	if err := json.Unmarshal([]byte(lines[riskyIdx[from]]), &first); err != nil {
+		t.Fatalf("the copy's risky line %d: %v", riskyIdx[from], err)
+	}
+	for _, i := range riskyIdx[from:to] {
+		var row deepReviewRow
+		if err := json.Unmarshal([]byte(lines[i]), &row); err != nil {
+			t.Fatalf("the copy's risky line %d: %v", i, err)
+		}
+		lines[i] = strings.Replace(lines[i], `"landed_at":"`+row.LandedAt+`"`, `"landed_at":"`+first.LandedAt+`"`, 1)
+	}
+	return []byte(strings.Join(lines, "\n") + "\n")
+}
+
+// deepReviewLandingGroups counts the landed_at groups in rows: the landings a
+// run takes whole, since the next run's window starts strictly after the
+// cursor's instant.
+func deepReviewLandingGroups(rows []deepReviewRow) int {
+	groups := 0
+	for i := 0; i < len(rows); i += deepReviewGroupSize(rows, i) {
+		groups++
+	}
+	return groups
+}
+
+// deepReviewGroupSize is how many rows from i landed at rows[i]'s instant.
+func deepReviewGroupSize(rows []deepReviewRow, i int) int {
+	end := i + 1
+	for end < len(rows) && rows[end].LandedAt == rows[i].LandedAt {
+		end++
+	}
+	return end - i
 }
 
 // deepReviewLines splits a landings file into its non-blank lines, blank lines

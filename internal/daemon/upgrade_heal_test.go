@@ -508,30 +508,27 @@ func TestUpgradeRestartHealWedgedLaunchctlIsBounded(t *testing.T) {
 }
 
 // TestUpgradeRestartHealFakeToolWriteHoldsTheForkLock checks writeFakeTool
-// holds the fork lock for writing across the fake's write: a fork that runs
+// holds the fork lock's write side across the fake's write: a fork that runs
 // while the descriptor is open hands the child a copy of it, and the kernel
-// then refuses to exec the fake as text file busy (gt-e96f7). The runtime takes
-// that same write side for the fork itself and the read side around the file
-// creation a fork must not race, so the write side excludes both (gt-wio5g).
-//
-//testpolicy:allow parallel — TryLock reads a fork in flight as held, so only a serial test can tell the helper's own lock from another's
-func TestUpgradeRestartHealFakeToolWriteHoldsTheForkLock(t *testing.T) {
+// then refuses to exec the fake as text file busy (gt-e96f7). The runtime
+// takes the write side for the fork itself and the read side around the file
+// creation a fork must not race, so only the write side excludes both
+// (gt-wio5g, gt-t2drw).
+func TestUpgradeRestartHealFakeToolWriteHoldsTheForkLock(t *testing.T) { //testpolicy:allow parallel — the probe reads the process-wide syscall.ForkLock, so a sibling test's fork or pipe would read as held
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "gate")
-	held := false
+	side := ""
 	writeFakeToolWith(t, dir, "gate", "exit 0", func(name string, data []byte, perm os.FileMode) error {
 		// Read at the write, where the descriptor is open: that is the instant
 		// a fork would hand a copy of it to the child.
-		if syscall.ForkLock.TryLock() {
-			// Nothing held the lock, so it proves nothing; hand it back for the
-			// helper's own Unlock.
-			syscall.ForkLock.Unlock()
-		} else {
-			held = true
-		}
+		side = forkLockSide()
 		return os.WriteFile(name, data, perm)
 	})
-	if !held {
+	switch side {
+	case "write":
+	case "read":
+		t.Error("writeFakeTool wrote the fake with the fork lock held for reading: a fork takes the write side, so a reader excludes no fork")
+	default:
 		t.Error("writeFakeTool wrote the fake without holding syscall.ForkLock: a fork could hand the child the open descriptor")
 	}
 	// The helper's Unlock ran: a lock it left held would wedge every fork after
@@ -547,6 +544,23 @@ func TestUpgradeRestartHealFakeToolWriteHoldsTheForkLock(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o755 {
 		t.Errorf("the fake's mode = %v, want 0755", got)
 	}
+}
+
+// forkLockSide names the side of syscall.ForkLock held right now: "write",
+// "read" or "none". TryLock alone cannot tell them apart, since it fails
+// under a reader too; a reader admits another reader, so TryRLock is what
+// separates the helper's write side from a read side that excludes no fork
+// (gt-t2drw).
+func forkLockSide() string {
+	if syscall.ForkLock.TryLock() {
+		syscall.ForkLock.Unlock()
+		return "none"
+	}
+	if syscall.ForkLock.TryRLock() {
+		syscall.ForkLock.RUnlock()
+		return "read"
+	}
+	return "write"
 }
 
 // writeFakeTool writes an executable /bin/sh stand-in for name into dir.
