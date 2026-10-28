@@ -159,9 +159,7 @@ func readDirectiveFile(path string) (string, error) {
 
 // directivePaths returns the directive files that render for role, broadest
 // first: for each name (_common, then the role), the central layer and then the
-// rig layer. The role's file is read only for a known role, so a name no role
-// has reaches no agent, which is what gt directive list and gt doctor report
-// (gt-r3jbi). A layer's file is the new path when that file exists, and otherwise
+// rig layer. A layer's file is the new path when that file exists, and otherwise
 // the legacy path when that exists, which is warned about once per process
 // (gt-oz73l). Asking for the shared file yields it once rather than twice.
 func directivePaths(role, townRoot, rigName string) []string {
