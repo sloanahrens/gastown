@@ -326,10 +326,10 @@ instructions where they conflict.
 `<town>` is the town root (`~/gt` on a default install). The central layer is
 the gastown repo's own checkout, so a directive there is tracked with the code
 and lands through the landing pipeline; a rig's layer belongs to that rig's
-checkout and reaches that rig alone. Before gt-oz73l the layers sat at
-`<town>/directives/` and `<town>/<rig>/directives/`; a file left at either
-legacy path is still read when the layer's own path holds no file of that name,
-and the reader logs the legacy path once per process.
+checkout and reaches that rig alone. A file left at a layer's legacy path
+(`<town>/directives/`, `<town>/<rig>/directives/`) is still read when the
+layer's own path holds no file of that name (gt-oz73l); the reader names each
+such file in the log once per process.
 
 Every file that exists concatenates, broadest first, so the most specific
 appears last and wins conflicts: central `_common`, rig `_common`, central
