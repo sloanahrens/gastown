@@ -152,6 +152,10 @@ func (s burstStore) Blocked() ([]*beads.Issue, error) {
 	return nil, errors.New("the burst row read the blocked board")
 }
 
+func (s burstStore) ShowMultiple([]string) (map[string]*beads.Issue, error) {
+	return nil, errors.New("the burst row read beads by id")
+}
+
 // table answers one process table read per sample.
 func (f *burstFake) table(tables []string) ([]byte, error) {
 	if f.psErr != nil {

@@ -113,6 +113,10 @@ func (s *queueStore) ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, err
 
 func (s *queueStore) Blocked() ([]*beads.Issue, error) { return s.serve("blocked") }
 
+func (s *queueStore) ShowMultiple([]string) (map[string]*beads.Issue, error) {
+	return nil, fmt.Errorf("the queue group read beads by id")
+}
+
 // serve answers one column's read in this rig.
 func (s *queueStore) serve(column string) ([]*beads.Issue, error) {
 	key := s.rig + "/" + column

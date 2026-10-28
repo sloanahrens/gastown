@@ -2,7 +2,9 @@ package metrics
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,13 +13,18 @@ import (
 )
 
 // BeadStore is the issue-store surface the metrics sources read: the board,
-// the ready queue and the blocked list. It is deliberately narrower than
-// beads.Client, and *beads.Beads satisfies it, so a source reaches bd through
-// the seam's argv, routing and failure classification instead of exec'ing it.
+// the ready queue, the blocked list, and a bead's notes by id. It is
+// deliberately narrower than beads.Client, and *beads.Beads satisfies it, so a
+// source reaches bd through the seam's argv, routing and failure classification
+// instead of exec'ing it.
 type BeadStore interface {
 	List(opts beads.ListOptions) ([]*beads.Issue, error)
 	ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error)
 	Blocked() ([]*beads.Issue, error)
+	// ShowMultiple returns the beads the store holds among ids, keyed by id. An
+	// id it does not hold is left out rather than refused, including the ids bd
+	// answers as not found: a bead that is gone is an answer.
+	ShowMultiple(ids []string) (map[string]*beads.Issue, error)
 }
 
 var _ BeadStore = (*beads.Beads)(nil)
@@ -26,6 +33,58 @@ var _ BeadStore = (*beads.Beads)(nil)
 // with beads.WithCallContext, so the deadline a source puts on one read bounds
 // the bd subprocess too.
 type BeadStores func(ctx context.Context, dir string) BeadStore
+
+// storeShowChunk is how many bead ids one store read asks for: a town with many
+// reviewed beads is several reads, not one command line of every id.
+const storeShowChunk = 64
+
+// isBeadID reports whether id can be a bead id: non-empty, and not beginning
+// with a dash. A store reads the ids it is given as arguments, and bd reads an
+// argument beginning with a dash as a flag, so an id a log names that looks
+// like one must never reach the read. Every bead id this town writes is a word
+// with a prefix (gt-a1, hq-wisp-x), so nothing a real bead carries is refused.
+func isBeadID(id string) bool {
+	return id != "" && !strings.HasPrefix(id, "-")
+}
+
+// showBeads reads the beads the store in dir holds among ids, keyed by id, one
+// read per storeShowChunk ids so a long list is several reads rather than one
+// command line. An id that is not a bead id is left out rather than read, since
+// a log cannot name a bead whose id bd would read as a flag; a list with no bead
+// id in it opens no store. A bead the store no longer holds is absent, not an
+// error: that is the store's answer. A missing seam, a seam that names no store
+// and a failed read are errors, so a caller never reads a read that broke as a
+// bead that is gone.
+func showBeads(ctx context.Context, env Env, dir string, ids []string) (map[string]*beads.Issue, error) {
+	if env.Beads == nil {
+		return nil, fmt.Errorf("no bead store seam for %s", dir)
+	}
+	safe := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if isBeadID(id) {
+			safe = append(safe, id)
+		}
+	}
+	found := make(map[string]*beads.Issue, len(safe))
+	if len(safe) == 0 {
+		return found, nil
+	}
+	store := env.Beads(ctx, dir)
+	if store == nil {
+		return nil, fmt.Errorf("no bead store for %s", dir)
+	}
+	for start := 0; start < len(safe); start += storeShowChunk {
+		chunk := safe[start:min(start+storeShowChunk, len(safe))]
+		shown, err := store.ShowMultiple(chunk)
+		if err != nil {
+			return nil, err
+		}
+		for id, issue := range shown {
+			found[id] = issue
+		}
+	}
+	return found, nil
+}
 
 // Runner runs argv and returns its stdout. A source that shells out takes its
 // runner from Env, so a test answers without a process.
