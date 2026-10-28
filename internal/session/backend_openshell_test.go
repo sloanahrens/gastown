@@ -115,7 +115,7 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 		imageGT: func(context.Context, string) (string, error) { return openshellTestGTCommit, nil },
 		// The profile's image resolves to one reference for the label check and
 		// the create; the pin's own tests set their own fake.
-		imageRef: func(context.Context, string) (string, error) { return openshellTestImageDigest, nil },
+		imageRef: func(context.Context, string, bool) (string, error) { return openshellTestImageDigest, nil },
 		// No docker in these tests. A profile with a cache volume sets its own runner.
 		docker: func(context.Context, ...string) ([]byte, []byte, error) {
 			return nil, []byte("docker is not configured for this test"), errors.New("no docker")
@@ -316,8 +316,8 @@ func TestOpenShellPreparePinsTheImageDigestItChecked(t *testing.T) {
 	}
 	reg.retag = func() { reg.tags[openshellTestProfile.Image] = rebuilt }
 	b.docker = reg.run
-	b.imageRef = func(ctx context.Context, image string) (string, error) {
-		return imageRefFor(ctx, reg.run, image, false)
+	b.imageRef = func(ctx context.Context, image string, pull bool) (string, error) {
+		return imageRefFor(ctx, reg.run, image, pull)
 	}
 	b.imageGT = func(ctx context.Context, image string) (string, error) { return imageGTFrom(ctx, reg.run, image) }
 
@@ -372,8 +372,13 @@ func TestOpenShellPrepareNamesAPulledImageByAResolvableReference(t *testing.T) {
 				},
 			}
 			b.docker = reg.run
-			b.imageRef = func(ctx context.Context, image string) (string, error) {
-				return imageRefFor(ctx, reg.run, image, true)
+			// The pull flag is Prepare's decision from the profile's driver; this
+			// profile is a kubernetes one, so it must arrive true.
+			b.imageRef = func(ctx context.Context, image string, pull bool) (string, error) {
+				if !pull {
+					t.Error("Prepare resolved a kubernetes profile's image for the host's docker, want a reference a pod can pull")
+				}
+				return imageRefFor(ctx, reg.run, image, pull)
 			}
 			b.imageGT = func(ctx context.Context, image string) (string, error) { return imageGTFrom(ctx, reg.run, image) }
 
@@ -410,7 +415,7 @@ func TestOpenShellPrepareRefusesAnUnresolvableImage(t *testing.T) {
 	town, work := openshellTown(t)
 	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
 	b, pushes := openshellTestBackend(town, openshellTestProfile, fake)
-	b.imageRef = func(context.Context, string) (string, error) {
+	b.imageRef = func(context.Context, string, bool) (string, error) {
 		return "", errors.New("no such image: gastown-polecat:dev")
 	}
 	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err == nil ||
@@ -638,6 +643,10 @@ func TestImageRefFor(t *testing.T) {
 			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
 		},
 		{
+			// The pin's accepted gap: docker holds no repository digest for an
+			// image built here and published with crane, so the pod reads the
+			// profile's tag at pull time. checkSandboxGT covers it after the
+			// create.
 			name:        "an image docker never pulled keeps the profile's reference",
 			image:       "localhost:5001/gastown-polecat:dev",
 			pull:        true,
@@ -667,6 +676,15 @@ func TestImageRefFor(t *testing.T) {
 			stdout:      openshellTestImageDigest + "\n",
 			repoDigests: "not json",
 			wantErr:     "not a list of repository digests",
+			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
+		},
+		{
+			name:        "a listed reference that names no digest is refused",
+			image:       "localhost:5001/gastown-polecat:dev",
+			pull:        true,
+			stdout:      openshellTestImageDigest + "\n",
+			repoDigests: `["localhost:5001/gastown-polecat:dev"]`,
+			wantErr:     `localhost:5001/gastown-polecat:dev|not a repository digest`,
 			wantQueries: []string{imageIDFormat, imageRepoDigestsFormat},
 		},
 		{
@@ -1134,6 +1152,54 @@ func TestOpenShellPrepareRefusesADriftedSandboxImage(t *testing.T) {
 	}
 	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
 		t.Fatal("a refused sandbox left a record behind")
+	}
+}
+
+// TestOpenShellPrepareRefusesAPulledSandboxThatDiffersFromTheCheckedImage
+// drives the pin's accepted gap end to end. Docker holds no repository digest
+// for the image, so the create names the profile's reference and the pod reads
+// that tag at pull time; a rebuild that republished the tag in between leaves
+// the pod running another image. The sandbox's own gt is what refuses it, and
+// the sandbox is deleted (gt-zdilt), so the gap costs a refused spawn rather
+// than an unverified sandbox (gt-16oj9).
+func TestOpenShellPrepareRefusesAPulledSandboxThatDiffersFromTheCheckedImage(t *testing.T) {
+	t.Parallel()
+	const image = "localhost:5001/gastown-polecat:dev"
+	local := "sha256:" + strings.Repeat("1", 64)
+	town, work := openshellTown(t)
+	fake := &sandbox.Fake{Reply: map[string]string{
+		"get":  openshellReadyReply,
+		"exec": "gt version 1.2.1 (dev: main@" + openshellTestDriftedGT + ")\n",
+	}}
+	profile := openshellTestProfile
+	profile.Image = image
+	profile.Driver = config.SandboxDriverKubernetes
+	b, _ := openshellTestBackend(town, profile, fake)
+	// Built here and published with crane: the host's docker holds the tag and
+	// the label, and no repository digest.
+	reg := &fakeImageRegistry{
+		tags:   map[string]string{image: local},
+		labels: map[string]string{local: openshellTestGTCommit},
+	}
+	b.docker = reg.run
+	b.imageRef = func(ctx context.Context, img string, pull bool) (string, error) {
+		return imageRefFor(ctx, reg.run, img, pull)
+	}
+	b.imageGT = func(ctx context.Context, img string) (string, error) { return imageGTFrom(ctx, reg.run, img) }
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), openshellTestDriftedGT) || !strings.Contains(err.Error(), openshellTestGTCommit) {
+		t.Fatalf("Prepare = %v, want the sandbox's own commit and the installed commit named", err)
+	}
+	// The create named the tag, which is the gap this test records.
+	if got := createFrom(t, fake); got != image {
+		t.Fatalf("the create used --from %q, want the profile's reference %q", got, image)
+	}
+	calls := fake.Calls()
+	last := calls[len(calls)-1]
+	want := []string{"openshell", "sandbox", "delete", openshellTestSession}
+	if !reflect.DeepEqual(last, want) {
+		t.Fatalf("last call = %q, want %q (rollback)", last, want)
 	}
 }
 

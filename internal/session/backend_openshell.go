@@ -134,9 +134,10 @@ type openshellBackend struct {
 	// imageGT reads the gt commit an image was built from, and installedGT is
 	// the commit of the gt running Prepare. Tests set both.
 	imageGT func(ctx context.Context, image string) (string, error)
-	// imageRef resolves the profile's image to the reference the label check
-	// and the create both name (gt-16oj9). Tests set it.
-	imageRef func(ctx context.Context, image string) (string, error)
+	// imageRef resolves image to the reference the label check and the create
+	// both name, for a gateway that pulls its images from a registry or one that
+	// runs them from the host's docker (gt-16oj9). Tests set it.
+	imageRef func(ctx context.Context, image string, pull bool) (string, error)
 	// docker runs the docker CLI for the profile's cache volume. Tests set it.
 	docker dockerRun
 	// git compares the image's gt commit with the installed one. Tests set it.
@@ -170,7 +171,7 @@ func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
 		render:      sandbox.RenderSkeleton,
 		push:        pushToForgejo,
 		imageGT:     dockerImageGT,
-		imageRef:    hostImageRef(driverPullsImage(p.Driver)),
+		imageRef:    dockerImageRef,
 		docker:      runDocker,
 		git:         runGit,
 		gitEmail:    hostGitEmail,
@@ -236,30 +237,29 @@ var digestRefPattern = regexp.MustCompile(`^[^@]+@sha256:[0-9a-f]{64}$`)
 // driver is the docker one (SandboxProfile.WithDefaults).
 func driverPullsImage(driver string) bool { return driver == DriverKubernetes }
 
-// hostImageRef is the imageRef a real backend resolves through: imageRefFor
-// through the host's docker.
-func hostImageRef(pull bool) func(ctx context.Context, image string) (string, error) {
-	return func(ctx context.Context, image string) (string, error) {
-		return imageRefFor(ctx, runDocker, image, pull)
-	}
+// dockerImageRef resolves an image through the host's docker: imageRefFor.
+func dockerImageRef(ctx context.Context, image string, pull bool) (string, error) {
+	return imageRefFor(ctx, runDocker, image, pull)
 }
 
 // imageRefFor resolves image to the reference Prepare names to both the label
 // check and the create, so a rebuild that retags the profile's image between
 // them cannot put an image nothing checked under the sandbox (gt-16oj9).
 //
-// It asks docker about image first on every path, so a reference the host does
-// not have fails here rather than after the push, and a reference that already
-// names its digest is still checked that way before it is returned.
+// Docker is asked about image on every path, so a reference the host does not
+// have fails here rather than after the push.
 //
-// A gateway that runs the image from the host's Docker daemon (the docker
-// driver) resolves a local image id, so the seat names that id: the content,
-// not the tag a rebuild moves. A gateway that pulls the image from a registry
-// (the kubernetes driver) cannot pull a local id, so the seat names the image's
-// repository digest when docker knows one — an image the host pulled — and
-// otherwise the reference the profile names, which the pod pulls as it stands.
-// A retag under that reference is caught after the create, when the sandbox's
-// own gt is compared with the installed one (checkSandboxGT).
+// A gateway running images from the host's daemon (pull false) is given the
+// local image id: the content, which a retag cannot move. A gateway that pulls
+// from a registry cannot use an id, so it is given the image's repository
+// digest, which a pod resolves to one manifest. Docker records that digest only
+// for an image it pulled or pushed; an image built here and published with
+// crane has none, so the profile's reference is named and the pod reads its tag
+// at pull time. Refusing instead would stop every spawn on a seat the plugin
+// publishes with crane, so the window is accepted: a rebuild that republishes
+// the tag before the pod starts leaves the pod on another image, which
+// checkSandboxGT refuses and deletes after the create (gt-zdilt), so the cost
+// is a refused spawn (gt-16oj9).
 func imageRefFor(ctx context.Context, run dockerRun, image string, pull bool) (string, error) {
 	id, err := imageIDFrom(ctx, run, image)
 	if err != nil {
@@ -297,7 +297,9 @@ func imageIDFrom(ctx context.Context, run dockerRun, image string) (string, erro
 
 // imageRepoDigestsFrom reads the repository digests docker holds for image. An
 // image with none reads as none: docker records one only for an image it pulled
-// or pushed, so a locally built image reads as none.
+// or pushed, so a locally built image reads as none. Every entry must be a
+// reference that names its digest: the create names one of them, so a reply
+// docker cannot offer one from is refused rather than passed on.
 func imageRepoDigestsFrom(ctx context.Context, run dockerRun, image string) ([]string, error) {
 	out, stderr, err := run(ctx, "image", "inspect", "--format", imageRepoDigestsFormat, image)
 	if err != nil {
@@ -306,6 +308,11 @@ func imageRepoDigestsFrom(ctx context.Context, run dockerRun, image string) ([]s
 	var digests []string
 	if err := json.Unmarshal(bytes.TrimSpace(out), &digests); err != nil {
 		return nil, fmt.Errorf("docker image inspect %s printed %q, not a list of repository digests", image, strings.TrimSpace(string(out)))
+	}
+	for _, d := range digests {
+		if !digestRefPattern.MatchString(d) {
+			return nil, fmt.Errorf("docker image inspect %s listed %q, which is not a repository digest", image, d)
+		}
 	}
 	return digests, nil
 }
@@ -643,7 +650,7 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	}
 	// Resolved once, so the label check and the create name the same image even
 	// if a rebuild retags the profile's reference between them (gt-16oj9).
-	image, err := b.imageRef(ctx, b.profile.Image)
+	image, err := b.imageRef(ctx, b.profile.Image, driverPullsImage(b.profile.Driver))
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}

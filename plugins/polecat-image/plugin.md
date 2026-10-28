@@ -94,9 +94,9 @@ the run.
   complete is retried by the next run even when the image is already current.
 - **Failing closed where it matters.** `POLECAT_IMAGE_FAIL_CLOSED=1` makes a
   run that leaves the image unbuilt or unpublished exit non-zero: every publish
-  failure above, and every deferral (docker down, a sling running, the lock
-  held). `install-gt.sh` sets it for the build that runs before the binary
-  swap, so an install cannot swap a binary whose image is not in place
+  failure above, and every deferral (docker down, the lock held).
+  `install-gt.sh` sets it for the build that runs before the binary swap, so an
+  install cannot swap a binary whose image is not in place
   (gt-efupr). Unset, as the daemon's own runs leave it, every path above keeps
   its exit 0.
 
