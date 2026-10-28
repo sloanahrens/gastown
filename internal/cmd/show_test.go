@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -34,6 +35,24 @@ func TestRunShowWithPrintsBdTextAndReturnsItsError(t *testing.T) {
 	}
 	if !slices.Equal(gotArgs, []string{"--json", "gt-x"}) {
 		t.Errorf("show args = %v, want the caller's argv", gotArgs)
+	}
+}
+
+// TestRunShowWithReadsThePositionalIDBeforeAFlag puts the bead ID first, with a
+// flag after it, so reading the last argv token would hand bd "--json".
+func TestRunShowWithReadsThePositionalIDBeforeAFlag(t *testing.T) {
+	t.Parallel()
+	var gotID string
+	show := func(id string, _ []string) (string, error) {
+		gotID = id
+		return "", nil
+	}
+
+	if err := runShowWith(io.Discard, []string{"gt-x", "--json"}, show); err != nil {
+		t.Fatalf("runShowWith err = %v, want nil", err)
+	}
+	if gotID != "gt-x" {
+		t.Errorf("show id = %q, want the positional ID", gotID)
 	}
 }
 
