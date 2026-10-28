@@ -207,6 +207,10 @@ type DeployHealthRow struct {
 	// Unread marks a row whose newest run's jobs the block could not read. The
 	// page says so rather than drawing the run under it as the newest.
 	Unread bool `json:"unread,omitempty"`
+	// NoChecks marks a row of an app that deploys and has no scheduled run yet:
+	// there is no result to draw, and nothing ran, so the row is neither a pass
+	// nor a failure.
+	NoChecks bool `json:"no_checks,omitempty"`
 }
 
 // HealthMark is the strip's health pill: State is "red" while any app's newest
@@ -243,9 +247,8 @@ func healthMark(failed, unread []string) *HealthMark {
 // which the block's note carries.
 type Deploys struct {
 	Runs []DeployRun `json:"runs"`
-	// Health is the scheduled checks of every repo that has them: one row per
-	// app and environment. It is empty until a repo has health.yml runs, so a
-	// repo without the workflow shows nothing extra.
+	// Health is the scheduled checks, one row per app and environment, and is
+	// empty until a repo deploys or has health.yml runs.
 	Health []DeployHealthRow `json:"health,omitempty"`
 	// HealthFailed names the repos whose newest scheduled check failed — the
 	// strip's red marker. HealthUnread names the repos whose newest check the
@@ -417,6 +420,10 @@ func (r *DeployReader) Read() *Deploys {
 	// rather than left to read as a town with no checks.
 	health := []DeployHealthRow{}
 	var healthFailed, healthUnread, healthMissing []string
+	deployed := make(map[string]bool, len(runs))
+	for _, dr := range runs {
+		deployed[dr.repo] = true
+	}
 	r.mu.Lock()
 	prevChecks := r.checks
 	r.mu.Unlock()
@@ -431,6 +438,9 @@ func (r *DeployReader) Read() *Deploys {
 		owner, repo, _ := strings.Cut(name, "/")
 		res := r.healthRows(hctx, name, owner, repo, prevChecks, checks)
 		health = append(health, res.rows...)
+		if len(res.rows) == 0 && !res.listFailed && !res.unknown && deployed[name] {
+			health = append(health, noChecksRows(name)...)
+		}
 		// A listing that failed is an unread check, which the strip says; only
 		// runs that name no known environment are missing.
 		switch {
@@ -621,6 +631,16 @@ func (r *DeployReader) healthRows(ctx context.Context, name, owner, repo string,
 		}
 	}
 	return foldHealth(name, window)
+}
+
+// noChecksRows is the rows of a deployed app with no health run yet: one per
+// environment the block draws, marked NoChecks and carrying nothing else.
+func noChecksRows(name string) []DeployHealthRow {
+	rows := make([]DeployHealthRow, 0, len(healthEnvs))
+	for _, env := range healthEnvs {
+		rows = append(rows, DeployHealthRow{Repo: name, App: healthApp(name), Env: env, NoChecks: true})
+	}
+	return rows
 }
 
 // healthRunEnded reports whether a scheduled run has finished: one waiting,

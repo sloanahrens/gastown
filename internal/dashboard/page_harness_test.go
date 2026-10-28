@@ -43,7 +43,10 @@ function __el(tag) {
   var e = {
     tagName: String(tag).toUpperCase(), children: [], _text: "",
     className: "", title: "", hidden: false, tabIndex: 0,
-    dataset: {}, style: {},
+    dataset: {},
+    // The Deploys block sets its ch-based column widths through style, so the
+    // stub keeps what the page writes there.
+    style: null,
     scrollTop: 0, scrollHeight: 0, clientHeight: 0,
     get childElementCount() { return this.children.length; },
     get firstChild() { return this.children.length ? this.children[0] : null; },
@@ -75,6 +78,10 @@ function __el(tag) {
     closest: function () { return null; },
     contains: function () { return false; },
     classList: null
+  };
+  e.style = {
+    _v: {},
+    setProperty: function (k, v) { this._v[k] = String(v); }
   };
   e.classList = {
     toggle: function (c, on) {
