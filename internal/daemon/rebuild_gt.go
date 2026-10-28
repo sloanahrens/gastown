@@ -113,6 +113,7 @@ const (
 	alertKeyRebuildGTNoInstaller  = "rebuild-gt:no-installer"
 	alertKeyRebuildGTMarkerWrite  = "rebuild-gt:marker-write"
 	alertKeyRebuildGTMarkerClear  = "rebuild-gt:marker-clear"
+	alertKeyRebuildGTInstallRec   = "rebuild-gt:install-record"
 
 	// alertKeyRebuildGTUnverified is retired (nothing raises it) and kept in
 	// the clear list because an escalation opened before it was retired has no
@@ -205,10 +206,17 @@ func rebuildGTMinInterval(config *DaemonPatrolConfig) time.Duration {
 // the same last-run file and under the same lock as the patrol's own record.
 // It is the only writer of the install window's anchor: a refusal, a failure, a
 // noop and a deferral all leave it where it was (gt-t135z).
+// A write that fails leaves the window unanchored, so every later request
+// builds and swaps the binary again; that reaches an operator rather than a log
+// line alone (gt-2bk8s).
 func (d *Daemon) rebuildGTRecordInstall(at time.Time) {
 	if err := savePatrolLastRun(d.config.TownRoot, rebuildGTInstallRecord, at); err != nil {
 		d.logger.Printf("rebuild_gt: WARNING: cannot persist the install time (%v)", err)
+		_ = d.rebuildGTAlert(alertKeyRebuildGTInstallRec,
+			fmt.Sprintf("rebuild_gt: cannot write %s, so the install window does not start and the next request builds the binary again", patrolLastRunPath(d.config.TownRoot)))
+		return
 	}
+	d.clearAlerts("the install time is recorded", alertKeyRebuildGTInstallRec)
 }
 
 // rebuildGTInstallAge returns how long ago the last accomplished install was,

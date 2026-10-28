@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -177,5 +179,75 @@ func TestRebuildGTAccomplishedInstallStartsTheWindow(t *testing.T) {
 	triggerInstallOnce(t, d)
 	if got := len(installCalls(cli)); got != 2 {
 		t.Fatalf("installs past the window = %d, want 2", got)
+	}
+}
+
+// blockPatrolLastRunPath puts a non-empty directory where the last-run file
+// belongs, so neither the read nor the rename over it can succeed.
+func blockPatrolLastRunPath(t *testing.T, d *Daemon) {
+	t.Helper()
+	path := patrolLastRunPath(d.config.TownRoot)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "child"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRebuildGT_EscalatesAnInstallRecordItCannotWrite pins that a lost window
+// anchor reaches an operator: nothing holds the next request without it, so
+// every later landing builds and swaps the binary again (gt-2bk8s).
+func TestRebuildGT_EscalatesAnInstallRecordItCannotWrite(t *testing.T) {
+	t.Parallel()
+	d, rec := rebuildGTTown(t)
+	d.clock = newFixedClock()
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	cli := rebuildGTWindowCli(t, d, func(cliCall) cliReply {
+		return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
+	})
+	blockPatrolLastRunPath(t, d)
+
+	triggerInstallOnce(t, d)
+	if got := len(installCalls(cli)); got != 1 {
+		t.Fatalf("installs = %d, want the one the unusable record must not block", got)
+	}
+	if open := rec.OpenEscalations(alertKeyRebuildGTInstallRec); len(open) != 1 {
+		t.Fatalf("open escalations = %+v, want one under %s", open, alertKeyRebuildGTInstallRec)
+	}
+}
+
+// TestRebuildGT_ClearsTheInstallRecordAlertOnceTheRecordIsWritten pins the
+// close: the escalation holds while the install cannot be recorded, and a cycle
+// that records one takes it down, so a repaired town keeps no standing alarm.
+func TestRebuildGT_ClearsTheInstallRecordAlertOnceTheRecordIsWritten(t *testing.T) {
+	t.Parallel()
+	d, rec := rebuildGTTown(t)
+	d.clock = newFixedClock()
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	cli := rebuildGTWindowCli(t, d, func(cliCall) cliReply {
+		return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
+	})
+	blockPatrolLastRunPath(t, d)
+
+	triggerInstallOnce(t, d)
+	if open := rec.OpenEscalations(alertKeyRebuildGTInstallRec); len(open) != 1 {
+		t.Fatalf("the blocked cycle left %d escalations open, want one", len(open))
+	}
+
+	if err := os.RemoveAll(patrolLastRunPath(d.config.TownRoot)); err != nil {
+		t.Fatal(err)
+	}
+	triggerInstallOnce(t, d)
+	if got := len(installCalls(cli)); got != 2 {
+		t.Fatalf("installs = %d, want the second one the unrecorded window leaves unheld", got)
+	}
+	if _, recorded := d.rebuildGTInstallAge(d.clk().Now()); !recorded {
+		t.Fatal("the second install was not recorded, so this test cannot catch the clear")
+	}
+	if open := rec.OpenEscalations(alertKeyRebuildGTInstallRec); len(open) != 0 {
+		t.Fatalf("the install was recorded and the escalation still stands: %+v", open)
 	}
 }
