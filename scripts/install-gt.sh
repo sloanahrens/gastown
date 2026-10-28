@@ -71,13 +71,15 @@ SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
 # this early) and only attempts a receipt when DAEMON_DIR is already known.
 RESULT_EMITTED=0
 HELPER_DIR=""
+# IMAGE_OWNED is HELPER_DIR once a detached image build has taken it over: the
+# build's supervisor runs from that directory and removes it when the build
+# ends (--owned), so the trap below must not, or the rm can land before the
+# supervisor has exec'd and the build never starts (gt-p5pjs). A launch whose
+# exec fails never reaches the supervisor, so image_build removes it itself.
 IMAGE_OWNED=""
 result_line() { RESULT_EMITTED=1; igt_result "$@"; }
 on_exit() {
   local ec=$?
-  # A detached image build is started from HELPER_DIR and removes it when the
-  # build ends (--owned). Removing it here raced the build's exec from that
-  # directory, and under load the rm could land first (gt-p5pjs).
   [ -z "$HELPER_DIR" ] || [ -n "$IMAGE_OWNED" ] || rm -rf "$HELPER_DIR"
   [ "$RESULT_EMITTED" = "1" ] && exit "$ec"
   if [ -n "${DAEMON_DIR:-}" ]; then
@@ -257,21 +259,18 @@ image_build() {
   export POLECAT_IMAGE_TOWN_ROOT="$TOWN_ROOT" POLECAT_IMAGE_GT="$bin" POLECAT_IMAGE_LOCK="$lock"
   if [ -n "$image_registry" ]; then export POLECAT_IMAGE_REGISTRY="$image_registry"; fi
   if [ -n "$image_crane" ]; then export POLECAT_IMAGE_CRANE="$image_crane"; fi
-  # A launch that cannot exec never reaches a supervisor to remove the directory
-  # it owns, so this shell removes it, as the trap above says (gt-p5pjs). A
-  # check rather than a cleanup after the exec, because an exec that fails in
-  # the detached background subshell ends that shell at once.
+  # A failed exec ends this subshell with no handler able to run, so a launch that
+  # cannot exec is refused here and removes the directory it owns (gt-p5pjs).
   if [ ! -f "$IMAGE_SUPERVISOR" ] || [ ! -x "$IMAGE_SUPERVISOR" ]; then
     [ -z "$IMAGE_OWNED" ] || rm -rf "$IMAGE_OWNED"
-    log "polecat image: cannot start the image supervisor at $IMAGE_SUPERVISOR: no executable file there"
+    log "polecat image: cannot run the image supervisor at $IMAGE_SUPERVISOR: no executable file there"
     return 126
   fi
   exec "$IMAGE_SUPERVISOR" --alarm "$secs" --lock "$lock" ${report[@]+"${report[@]}"} --owned "$IMAGE_OWNED" -- bash "$run"
 }
 
 # image_supervisor_prepare — build cmd/image-supervisor from this checkout into a
-# temp dir (HELPER_DIR, removed on exit unless a detached build owns it) and set
-# IMAGE_SUPERVISOR to it, or set
+# temp dir (HELPER_DIR) and set IMAGE_SUPERVISOR to it, or set
 # IMAGE_SUPERVISOR_WHY to why it could not be. Like the install lock, it comes
 # from the checkout because an install can run before any gt exists, and the Go
 # toolchain is already required: 'make build' needs it. There is no shell
@@ -335,9 +334,6 @@ polecat_image_step() {
     # Detached, as before gt-xzo8a: the subshell exits at once, so the install
     # never waits on the build, and image_build's fd closes keep the install
     # lock out of it.
-    # The trap above leaves HELPER_DIR to the supervisor (--owned). A launch
-    # that cannot exec the supervisor never reaches one, so image_build removes
-    # the directory itself (gt-p5pjs).
     IMAGE_OWNED="$HELPER_DIR"
     ( image_build "$alarm" "$IMAGE_LOCK" "$bin" "$run" install-gt:image-build-failed </dev/null >>"$logfile" 2>&1 & ) 2>/dev/null
     log "polecat image: rebuild for $commit started in the background (log $logfile)"

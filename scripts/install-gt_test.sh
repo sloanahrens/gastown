@@ -1505,7 +1505,7 @@ rc=$( TMPDIR="$T/tmp" IMAGE_RUN="$T/plugin/run.sh" run_install "$T" --sha "$(cat
 wait_for_helper_dirs "$T/tmp" 0 || true
 [ "$rc" = "0" ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] \
   && [ "$(helper_dirs "$T/tmp")" = "0" ] && [ ! -e "$T/image-calls.log" ] \
-  && grep -q "cannot start the image supervisor" "$T/image.log" \
+  && grep -q "cannot run the image supervisor" "$T/image.log" \
   && pass "no-image-first: a launch that cannot exec the supervisor leaves no helper directory" \
   || fail "no-image-first failed exec: rc=$rc dirs=$(helper_dirs "$T/tmp") calls=$(cat "$T/image-calls.log" 2>/dev/null) log=$(tail -3 "$T/image.log" 2>/dev/null)"
 

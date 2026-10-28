@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -146,6 +147,10 @@ type system struct {
 	removeAll func(string) error
 	command   func(name string, args ...string) error
 	tempDir   func() string
+	// lstat and evalSymlinks look at the owned directory: what the path is, and
+	// where its parent really is.
+	lstat        func(string) (fs.FileInfo, error)
+	evalSymlinks func(string) (string, error)
 
 	termGrace, killGrace, pollInterval time.Duration
 }
@@ -164,6 +169,8 @@ func realSystem() system {
 			return exec.Command(name, args...).Run()
 		},
 		tempDir:      os.TempDir,
+		lstat:        os.Lstat,
+		evalSymlinks: filepath.EvalSymlinks,
 		termGrace:    termGrace,
 		killGrace:    killGrace,
 		pollInterval: pollInterval,
@@ -178,7 +185,7 @@ type waited struct {
 func (s system) run(cfg Config) int {
 	// The owned directory is removed with removeAll, so it must be the one the
 	// installer made: a mistyped --owned must not remove another directory.
-	if problem := ownedProblem(cfg.Owned, s.tempDir()); problem != "" {
+	if problem := s.ownedProblem(cfg.Owned); problem != "" {
 		fmt.Fprintf(cfg.Stderr, "polecat image: refusing --owned %s: %s; the build was not started\n", cfg.Owned, problem)
 		return ExitRefused
 	}
@@ -255,10 +262,12 @@ func (s system) removeLock(lock string, pid int) {
 }
 
 // ownedProblem says why an owned directory must not be removed, or "" when it
-// may be: the installer's directory sits directly in the system temp directory
-// and carries the name the installer makes. The two together are the
-// installer's mark, so a mistyped flag cannot name a directory of someone else's.
-func ownedProblem(path, tempRoot string) string {
+// may be. It is the installer's own directory when it carries the name the
+// installer makes, is a real directory (not a symbolic link, not a file), and
+// sits directly in the system temp directory once both are resolved. The
+// directory is removed with removeAll, so a mistyped --owned must not name
+// anything else.
+func (s system) ownedProblem(path string) string {
 	if path == "" {
 		return ""
 	}
@@ -267,10 +276,30 @@ func ownedProblem(path, tempRoot string) string {
 	switch {
 	case !filepath.IsAbs(clean):
 		return "not an absolute path"
-	case filepath.Dir(clean) != filepath.Clean(tempRoot):
-		return "not directly in the installer's temp directory " + filepath.Clean(tempRoot)
 	case !strings.HasPrefix(base, ownedPrefix) || base == ownedPrefix:
 		return "not named " + ownedPrefix + "XXXXXX as the installer makes it"
+	}
+	info, err := s.lstat(clean)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "it does not exist"
+	case err != nil:
+		return "it cannot be examined: " + err.Error()
+	case info.Mode()&fs.ModeSymlink != 0:
+		return "it is a symbolic link"
+	case !info.IsDir():
+		return "it is not a directory"
+	}
+	parent, err := s.evalSymlinks(filepath.Dir(clean))
+	if err != nil {
+		return "its parent cannot be resolved: " + err.Error()
+	}
+	temp, err := s.evalSymlinks(s.tempDir())
+	if err != nil {
+		return "the temp directory cannot be resolved: " + err.Error()
+	}
+	if parent != temp {
+		return "its parent " + parent + " is not the temp directory " + temp
 	}
 	return ""
 }
