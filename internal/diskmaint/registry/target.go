@@ -2,7 +2,6 @@ package registry
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -31,7 +30,7 @@ type Config struct {
 	Run diskmaint.Runner
 	// HTTP is the client for the registry's API; nil uses a default.
 	HTTP *http.Client
-	// Ledger records every apply.
+	// Ledger records every apply; Apply refuses to run without one.
 	Ledger *diskmaint.Ledger
 }
 
@@ -149,12 +148,6 @@ func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, 
 	}
 
 	return BuildPlan(in), nil
-}
-
-// Apply deletes the manifests a plan names; Task 6 of
-// docs/plans/2026-10-28-disk-maintenance-plan.md fills it in.
-func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Result, error) {
-	return diskmaint.Result{}, errors.New("registry apply: not implemented")
 }
 
 // refusedPlan is the plan a run returns when a read failed: no actions, and the

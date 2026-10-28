@@ -491,14 +491,6 @@ func TestMeasureFailsWhenAReadFails(t *testing.T) {
 	}
 }
 
-func TestApplyIsNotImplementedYet(t *testing.T) {
-	t.Parallel()
-	target := NewTarget(testConfig(t, newFakeRegistry(threeCandidates())))
-	if _, err := target.Apply(context.Background(), diskmaint.Plan{Target: "registry"}); err == nil {
-		t.Fatal("Apply returned no error; Task 6 has not landed yet")
-	}
-}
-
 func TestPlanRefusesWhenTheInUseReadFails(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig(t, newFakeRegistry(threeCandidates()))
