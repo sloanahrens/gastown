@@ -13,7 +13,10 @@
 ## Global constraints
 
 - Go only for new logic; no new shell scripts. The Dockerfile, compose file and plist are config or templates.
-- Tests follow `~/.claude/docs/standards/test-engineering.md`: pure functions with fakes, no sleeps, no Docker or cluster in the gate, and every refusal row has a test that goes red when the guard is removed. Process calls go through an injected argv seam (the `daemonControl.run` pattern).
+- Tests follow `docs/testing.md` and four rules held inline here: pure functions with fakes; no sleeps (a fake clock drives every wait); no Docker or cluster in the gate; every refusal row has a test that goes red when the guard is removed. Process calls go through an injected argv seam (the `daemonControl.run` pattern).
+- Images: every image reference in a rendered compose file or the Dockerfile comes from one table, `internal/templates/images.go`. The `dind` image is pinned by digest; every other image is pinned to the exact version tag the live stack runs and none uses `latest` or another floating tag. Digest-pinning the rest is a later bead owed by the overseer. A test asserts every image in rendered output is in the table and none is `latest`.
+- Paths: no document or test names a personal home path or a person's crew directory; the town root, the scratch town root and the compose project directory are fields or runbook variables.
+- Fail closed everywhere the guard reads state: a missing `state.json` is not permission to start when any other sign of a prior daemon exists (see A7).
 - A Docker error reading supervisor or owner state is "unknown", never "not running". A stale or missing probe file is an error, never healthy.
 - The Docker CLI is always called with an explicit `--context` or `DOCKER_HOST`; nothing changes the global Docker or kubectl context.
 - The takeover window is 12 minutes (more than twice the 5-minute `HeartbeatInterval`); the compose `stop_grace_period` is at least `daemon.ShutdownBudget`.
@@ -27,7 +30,7 @@
 |---|---|
 | 0 | R1, R2, R3, R4, A1, B1, B2, C1, D1 |
 | 1 | A2, A3, A5, B3, B5, B6, D2, D4 |
-| 2 | A4, A6a, A6b, A7, B4, C2, D3, D5 |
+| 2 | A4, A6a, A6b, A7, A9a, B4, C2, D3, D5 |
 | 3 | A8, E1 |
 | 4 | A9, E2, E3 |
 | 5 | E4, E5 |
@@ -120,7 +123,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 
 ### A3: the compose template renderer
 **Depends on:** A1. **Files:** create `internal/templates/daemon_compose.go`, `internal/templates/testdata/daemon-compose.golden.yml`; test in `internal/templates`.
-**Interfaces:** produces `type ComposeSpec struct { Project, Image, TownRoot string; StopGrace time.Duration; DoltHost string }` and `func RenderDaemonCompose(s ComposeSpec) ([]byte, error)`.
+**Interfaces:** produces `type ComposeSpec struct { Project, Image, TownRoot string; StopGrace time.Duration; DoltHost string }`, `func RenderDaemonCompose(s ComposeSpec) ([]byte, error)`, and the images table `internal/templates/images.go` with `const DoltVersion = "2.3.2"` and `const DaemonBaseImage = "ubuntu:24.04"` (the base image `deploy/polecat/Dockerfile` uses); later tasks add their own entries to the same file.
 **Goal:** render the daemon service: image, `restart: unless-stopped`, `stop_grace_period`, the bind mount of `TownRoot` at the same path, `GT_DAEMON_SUPERVISOR=container` (`config.ContainerModeEnv`), `DOCKER_HOST=tcp://sweep-dind:2375`, no published ports, no `docker.sock`.
 **Constraints:** golden file; `StopGrace` less than `daemon.ShutdownBudget` is an error. The sweep-dind service is C2's, not here.
 **Out of scope:** `sweep-dind`, the scratch variant, validation with `docker compose config`.
@@ -131,6 +134,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 - [ ] a `StopGrace` below `daemon.ShutdownBudget` returns an error, and a test fails if that check is removed
 - [ ] a test asserts the output contains no `docker.sock` and no `ports:` key
 - [ ] a test asserts the town root appears as both source and target of the bind mount
+- [ ] a test asserts every image reference in the rendered output is in `images.go` and none is `latest` (the daemon image is the local tag `gt-daemon:<rev>` and is allowed by name)
 
 ### A4: container state reader and status line
 **Depends on:** A2. **Files:** modify `internal/templates/supervisor_state.go`, `internal/cmd/daemon_supervisor.go`; tests alongside.
@@ -188,43 +192,63 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 
 ### A7: `CheckTakeover`
 **Depends on:** A5. **Files:** create `internal/daemon/takeover.go`; test `internal/daemon/takeover_test.go`.
-**Interfaces:** produces `type OwnerProbe func(Owner) (running bool, known bool)`, `const TakeoverWindow = 12 * time.Minute`, `func CheckTakeover(st State, now time.Time, self Owner, takeover bool, probe OwnerProbe) error`.
-**Goal:** refuse when `now - st.LastHeartbeat < TakeoverWindow` and `st.Owner != self`; with `takeover` true allow only when `probe(st.Owner)` returns `running == false` and `known == true`; an unknown probe result refuses.
-**Constraints:** pure; no I/O; the error names the owner and the heartbeat age.
+**Interfaces:** produces `type OwnerProbe func(Owner) (running bool, known bool)`, `const TakeoverWindow = 12 * time.Minute`, `type TakeoverInput struct { State *State; PriorRun bool; Candidates []Owner; Now time.Time; Self Owner; Takeover bool; Probe OwnerProbe }` and `func CheckTakeover(in TakeoverInput) error`. `State == nil` means `state.json` is missing; `PriorRun` means another sign of a prior daemon exists (`daemon/daemon.lock` or `daemon/daemon.log`); `Candidates` are the owner kinds this town could have (launchd and container).
+**Goal:** the rules, in order:
+1. `State == nil` and `PriorRun == false`: allow (a town no daemon has ever run in).
+2. `State == nil` and `PriorRun == true`: refuse, naming the missing file and the leftover files; with `Takeover` allow only when `Probe` returns `known && !running` for every candidate.
+3. `State.Owner == Self`: allow.
+4. Heartbeat fresh (`Now - LastHeartbeat < TakeoverWindow`): refuse; with `Takeover` allow only when `Probe(State.Owner)` is `known && !running`.
+5. Heartbeat stale: allow only when `Probe(State.Owner)` is `known && !running`; a running or unknown owner refuses, because a stale heartbeat can be a stuck daemon and the lock is not visible across a container boundary.
+**Constraints:** pure; no I/O; every error names what it found (owner kind, heartbeat age in minutes, or the missing file).
 **Out of scope:** reading `state.json` or wiring it (A8).
 **Gate:** none.
 **Size:** one worker, one landing.
 **Acceptance:**
-- [ ] a table test covers: fresh heartbeat other owner (refuse), fresh heartbeat same owner (allow), stale heartbeat (allow), takeover with owner not running (allow), takeover with owner running (refuse), takeover with unknown (refuse)
-- [ ] the error text contains the owner kind and the age in minutes
-- [ ] removing the unknown-refuses branch makes a test fail
-- [ ] the function does no I/O (it takes only its arguments)
+- [ ] a table test covers rule 1 (allow), rule 2 without takeover (refuse), rule 2 with takeover and all candidates not running (allow), rule 2 with takeover and one candidate unknown (refuse), rule 2 with takeover and one candidate running (refuse)
+- [ ] a table test covers rules 3 to 5: same owner (allow), fresh other owner (refuse), fresh with takeover and owner not running (allow), stale with owner not running (allow), stale with owner running (refuse), stale with owner unknown (refuse)
+- [ ] removing rule 2's refusal, or rule 5's unknown-refuses branch, makes a test fail
+- [ ] the function does no I/O (it takes only its argument)
 
 ### A8: wire the guard into every start path and add `--takeover`
-**Depends on:** A7, A2, R1. **Files:** modify the start paths R1 lists (`internal/cmd/daemon.go`, `spawnDaemonProcess`, `gt up`'s copy, `enable-supervisor`); tests alongside.
-**Goal:** each start path loads `state.json`, calls `CheckTakeover` with a probe built from the supervisor state readers (A4 for containers, the launchd and systemd job state for the others), and refuses on its error; `gt daemon start --takeover` passes `takeover=true`.
-**Constraints:** a missing or unreadable `state.json` allows the start (fresh town) and unreadable-but-present refuses; the same function is called from every path, no copy.
+**Depends on:** A7, A2, A4, R1. **Files:** modify the start paths R1 lists (`internal/cmd/daemon.go`, `spawnDaemonProcess`, `gt up`'s copy, `enable-supervisor`); tests alongside.
+**Goal:** each start path reads `state.json` (nil when the file is absent), sets `PriorRun` from the existence of `daemon/daemon.lock` or `daemon/daemon.log`, builds `Candidates` (launchd and container) and a probe from the supervisor state readers (A4 for containers, the launchd and systemd job state for the others), calls `CheckTakeover`, and refuses on its error; `gt daemon start --takeover` passes `Takeover=true`.
+**Constraints:** a missing `state.json` follows A7's rules 1 and 2 (it never allows a start by itself when other daemon files exist); a present but unparsable `state.json` refuses without calling the guard; the same function is called from every path, no copy.
 **Out of scope:** the cutover command (A9).
 **Gate:** owed live by the overseer at L1: a hand-started second daemon is refused.
 **Size:** one worker, one landing.
 **Acceptance:**
 - [ ] each start path R1 names calls `CheckTakeover` (a test per path with a fresh-heartbeat fixture expects refusal)
-- [ ] `--takeover` with a not-running owner proceeds and with a running owner refuses
-- [ ] a missing `state.json` allows the start; a present but unparsable one refuses
+- [ ] a missing `state.json` with a leftover `daemon.lock` refuses, and with neither file starts, in each path's test
+- [ ] a present but unparsable `state.json` refuses in each path's test
+- [ ] `--takeover` with a not-running owner proceeds and with a running or unknown owner refuses
 - [ ] removing the call from one path makes that path's test fail
 
+### A9a: the quiet-gate check
+**Depends on:** A2. **Files:** create `internal/cmd/daemon_quiet.go`; test alongside.
+**Interfaces:** produces `type QuietProbes struct { DispatchHeld, SlingRunning, GateBusy func() (bool, error) }` and `func WaitQuiet(ctx context.Context, q QuietProbes, clock clockwork.Clock, budget, poll time.Duration) error`.
+**Goal:** quiet means the dispatch hold is on, no `gt sling` is running (the same `pgrep` check `internal/polecatimage` `DeferReason` uses), and the container-gate slot is not busy. `WaitQuiet` polls (default budget 30 minutes, poll 15 seconds, a fake clock in tests) and returns nil only when all three agree; it gives up with an error naming the first blocker. A probe that errors counts as not quiet. `DispatchHeld` reads the operator-owned hold file and never creates it.
+**Constraints:** no side effects on giving up; no sleeps in tests.
+**Out of scope:** the cutover itself (A9).
+**Gate:** none.
+**Size:** one worker, one landing.
+**Acceptance:**
+- [ ] a table test covers each probe returning true, false and an error, and only all-quiet returns nil
+- [ ] the wait ends by the fake clock at the budget with an error naming the first blocker
+- [ ] a probe error fails closed, and a test fails if that branch is removed
+- [ ] the function creates and removes no file (a recording filesystem seam sees no write)
+
 ### A9: `gt daemon cutover`
-**Depends on:** A2, A7, A8. **Files:** create `internal/cmd/daemon_cutover.go`; test alongside.
-**Goal:** `gt daemon cutover --to container` boots out the launchd job, waits (injected clock) for the heartbeat to stop moving, starts the container through the supervisor and checks that a fresh heartbeat with `owner.kind == "container"` appears; `--to launchd` does the reverse. Each step goes through `CheckTakeover` and stops with a clear message on the first failure, leaving the previous owner running when it fails before the old one is stopped.
+**Depends on:** A2, A7, A8, A9a. **Files:** create `internal/cmd/daemon_cutover.go`; test alongside.
+**Goal:** `gt daemon cutover --to container` calls `WaitQuiet` (A9a), calls it again immediately before the launchd bootout, boots out the launchd job, waits (injected clock) for the heartbeat to stop moving, starts the container through the supervisor and checks that a fresh heartbeat with `owner.kind == "container"` appears; `--to launchd` does the reverse and also waits for quiet first. Each step goes through `CheckTakeover` and stops with a clear message on the first failure, leaving the previous owner running when it fails before the old one is stopped. Not quiet stops the cutover with the old owner untouched.
 **Constraints:** every external call is the injected argv seam; no sleeps, a fake clock drives the waits.
 **Out of scope:** running it live (E5).
 **Gate:** owed live by the overseer at L3, in the operator's window.
 **Size:** one worker, one landing.
 **Acceptance:**
 - [ ] the success path to container issues bootout, then the container start, in that order (fake runner records argv)
-- [ ] a failure before bootout leaves launchd untouched
+- [ ] a not-quiet result before bootout leaves the recorded argv empty
 - [ ] a failure after bootout and before a fresh container heartbeat prints the rollback command
-- [ ] `--to launchd` issues the container stop, then the launchd bootstrap and kickstart in order
+- [ ] `--to launchd` issues the container stop, then the launchd bootstrap and kickstart in order, after a quiet check
 
 ---
 
@@ -329,8 +353,8 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 
 ### C2: the `sweep-dind` compose service
 **Depends on:** A3. **Files:** modify `internal/templates/daemon_compose.go`, the golden file; test alongside.
-**Goal:** the rendered compose file adds a `sweep-dind` service on the internal network: the same pinned image digest as the Forgejo engine (`data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1`), `privileged: true`, its own volume `sweep_dind_data`, `DOCKER_TLS_CERTDIR` empty, and `command: ["--tls=false"]`, with no published ports; the daemon service `depends_on` it.
-**Constraints:** the digest is a constant shared with no other file; the volume name is fixed.
+**Goal:** the rendered compose file adds a `sweep-dind` service on the internal network: the same pinned image digest as the Forgejo engine (`data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1`, added to `images.go` as `DindImage`), `privileged: true`, its own volume `sweep_dind_data`, `DOCKER_TLS_CERTDIR` empty, and `command: ["--tls=false"]`, with no published ports, on a network declared `internal: true` that only the daemon service joins; the daemon service `depends_on` it.
+**Constraints:** the digest lives only in `images.go`; the volume name is fixed. The engine accepts unauthenticated connections by design, so its only protection is that the network is internal and only the daemon joins it (design section 10).
 **Out of scope:** running it.
 **Gate:** none.
 **Size:** one worker, one landing.
@@ -339,6 +363,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 - [ ] a test asserts `sweep-dind` has no `ports:` and is the only service with `privileged: true`
 - [ ] a test asserts the daemon service's `DOCKER_HOST` names `sweep-dind`
 - [ ] a test asserts the image reference is pinned by digest
+- [ ] a test asserts the network the engine joins is `internal: true` and that no service other than the daemon and the engine joins it
 
 ---
 
@@ -361,15 +386,15 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 ### D2: the Dockerfile and the image build step
 **Depends on:** D1. **Files:** create `deploy/daemon/Dockerfile`; modify `internal/daemonimage/build.go`; test alongside.
 **Interfaces:** produces `func (b Builder) BuildImage(ctx context.Context, rev string, bins []string) (tag string, err error)`; the tag is `gt-daemon:<rev>`.
-**Goal:** the Dockerfile is `FROM debian:stable-slim`, installs only `git tmux ca-certificates` and the pinned `dolt` client, and `COPY`s the three binaries; `BuildImage` runs `docker --context desktop-linux build` with that file and returns the tag.
-**Constraints:** nothing is built inside the image; the Dockerfile is config, no shell logic beyond `RUN apt-get`; the `dolt` version is the one in `deploy/polecat/Dockerfile`.
+**Goal:** the Dockerfile is `FROM` the `DaemonBaseImage` constant (`ubuntu:24.04`, the polecat image's base), installs only `git tmux ca-certificates` and the Dolt client at `DoltVersion` (2.3.2, the running version), and `COPY`s the three binaries; `BuildImage` runs `docker --context desktop-linux build` with that file and returns the tag.
+**Constraints:** nothing is built inside the image; the Dockerfile is config, no shell logic beyond the package install; both the base image and the Dolt version come from `internal/templates/images.go`, not from literals in the Dockerfile text a test cannot see.
 **Out of scope:** replacing the running container (D3).
 **Gate:** owed live by the overseer at L1: the image builds.
 **Size:** one worker, one landing.
 **Acceptance:**
 - [ ] a test parses the Dockerfile and asserts it contains no `go build` or `make`
 - [ ] the recorded build argv carry `--context desktop-linux` and the tag `gt-daemon:<rev>`
-- [ ] the Dockerfile's `dolt` version equals the polecat Dockerfile's (a test compares them)
+- [ ] the Dockerfile's `FROM` equals `DaemonBaseImage` and its Dolt version equals `DoltVersion` (a test compares them)
 - [ ] a build error returns an empty tag
 
 ### D3: the replace-container step
@@ -417,7 +442,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 
 ### E1: the scratch compose project
 **Depends on:** A3, C2. **Files:** modify `internal/templates/daemon_compose.go` (a `Scratch bool` and `ScratchDoltImage string` on `ComposeSpec`), a scratch golden; test alongside.
-**Goal:** with `Scratch` set the rendered project is `gt-scratch`, adds a `dolt` service (image `dolthub/dolt-sql-server` at the tag equal to the running Dolt version, 2.3.2, held in one constant; its own volume, internal network only) and bind-mounts the scratch town root `~/gt/gastown/crew/seagull-daemon-scratch` (a field, never the live town root).
+**Goal:** with `Scratch` set the rendered project is `gt-scratch`, adds a `dolt` service (image `dolthub/dolt-sql-server` at the tag `DoltVersion`, added to `images.go` as `DoltServerImage`; its own volume, internal network only) and bind-mounts the scratch town root (a field, never the live town root; the runbook names a directory under the operator's crew area).
 **Constraints:** a scratch spec whose `TownRoot` equals the live town root is an error.
 **Out of scope:** creating the scratch town; Forgejo (E3).
 **Gate:** owed live by the overseer at L1: bring the project up and see the watchdog green for 30 minutes.
@@ -427,7 +452,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 - [ ] a scratch spec with the live town root as `TownRoot` returns an error, and a test fails if that check is removed
 - [ ] the scratch project name and volumes differ from the live project's (test)
 - [ ] the scratch `dolt` service has no published ports
-- [ ] a test asserts the scratch Dolt image tag equals the Dolt version constant the daemon image Dockerfile (D2) uses
+- [ ] a test asserts the scratch Dolt image tag is `DoltVersion`, the constant D2 uses
 
 ### E2: the L1 runbook
 **Depends on:** E1, D5, B5, A8, R4. **Files:** create `docs/daemon-container.md` (section L1).
@@ -444,7 +469,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 
 ### E3: the throwaway Forgejo and runner for L2
 **Depends on:** E1. **Files:** modify `internal/templates/daemon_compose.go` (a `ScratchForge bool`), a golden; test alongside.
-**Goal:** with `ScratchForge` set the scratch project also renders a Forgejo (`data.forgejo.org/forgejo/forgejo:16.0.5`), its Postgres (`postgres:17.11`), a runner (`data.forgejo.org/forgejo/runner:13.2.0`) and a dind for the runner (the same pinned digest as C2), the versions the live stack in `~/forgejo/compose.yml` runs, each with its own volumes and ports, on the scratch network, with no use of the live Forgejo's names or ports.
+**Goal:** with `ScratchForge` set the scratch project also renders a Forgejo (`data.forgejo.org/forgejo/forgejo:16.0.5`), its Postgres (`postgres:17.11`), a runner (`data.forgejo.org/forgejo/runner:13.2.0`) and a dind for the runner (`DindImage`), all added to `images.go` at the versions the operator's live Forgejo compose project runs, each with its own volumes and ports, on the scratch network, with no use of the live Forgejo's names or ports.
 **Constraints:** the host ports are a field and must differ from 3000 and 2222 (error otherwise); the runner registers only to the scratch Forgejo.
 **Out of scope:** running it, registering the runner (owed live).
 **Gate:** owed live by the overseer at L2.
@@ -468,13 +493,13 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 
 ### E5: the L3 window checklist
 **Depends on:** A9, E4. **Files:** modify `docs/daemon-container.md` (section L3).
-**Goal:** the operator's window checklist: preconditions (L1 and L2 recorded, the `om` credential decided, `dolt.container_host` set, dispatch held), the cutover command, the checks during the first 24 hours, and the rehearsed rollback (`gt daemon cutover --to launchd`).
+**Goal:** the operator's window checklist: preconditions (L1 and L2 recorded, the `om` credential decided, `dolt.container_host` set, the dispatch hold on (the operator creates it), the install-protocol pending-install marker not live, and the window after any pending install), the cutover command and its own wait for a quiet gate (A9a), the checks during the first 24 hours, and the rehearsed rollback (`gt daemon cutover --to launchd`).
 **Constraints:** passes `docs-lint`; it states that launchd's job stays installed (booted out, not removed) as the rollback.
 **Out of scope:** running it.
 **Gate:** owed live by the operator and overseer: the window itself.
 **Size:** one worker, one document.
 **Acceptance:**
-- [ ] the preconditions are a checklist naming each prior task or decision
+- [ ] the preconditions are a checklist naming each prior task or decision, including the hold, the pending-install marker and the quiet-gate wait
 - [ ] the rollback section gives the exact reverse command and what must be true before it
 - [ ] it states that the launchd job stays installed during the window
 - [ ] it passes `docs-lint`

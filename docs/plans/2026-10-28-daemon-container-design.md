@@ -1,6 +1,6 @@
 > Status: historical (2026-10). Merged in: gt-1e1sh. Not maintained.
 
-Approved by the operator 2026-10-28 (grilling rounds 1-3 and design sections 1-5, recorded in `~/.claude` bead claude-q3f notes). The live work is the beads filed from the plan, `2026-10-28-daemon-container-plan.md`. Author: seagull.
+Approved by the operator 2026-10-28 (grilling rounds 1-3 and design sections 1-5, recorded on bead gt-1e1sh and the operator's handoff bead). The live work is the beads filed from the plan, `2026-10-28-daemon-container-plan.md`. Author: seagull.
 
 # The gastown daemon in a container (interim, on this Mac)
 
@@ -22,7 +22,7 @@ This program runs the live daemon in a container on this Mac, in Docker Desktop'
 8. The tier sweep gets its own docker-in-docker engine; the runner-idle command, wait and poll are deleted.
 9. A Go host agent writes host health to a file the container daemon reads.
 10. The container is the daemon's identity, not a pid.
-11. The scratch town lives under `~/gt/gastown/crew/seagull-daemon-scratch` with its own Dolt; L2 adds a throwaway Forgejo and runner; L3 bind-mounts the live town root at the same path.
+11. The scratch town lives in its own directory (a field, never the live town root) with its own Dolt; L2 adds a throwaway Forgejo and runner; L3 bind-mounts the live town root at the same absolute path.
 
 ## 3. Facts the design rests on
 
@@ -56,9 +56,9 @@ The compose file's `stop_grace_period` must be at least the daemon's `ShutdownBu
 
 **Inside the container.** Compose sets an environment variable that puts `gt daemon run` in container mode: it writes no pid file, because a pid from another namespace means nothing on the Mac, and `state.json` gains an `owner` field (kind and container id). Every Mac-side reader that signals by pid (`StopDaemon`, `gt down`, the doctor checks) refuses when the supervisor kind is container, each with a test that fails if the refusal is removed. The plan's first audit lists every such call site.
 
-**Takeover guard.** Every daemon start (manual spawn, launchd kickstart, enable-supervisor) calls a pure function `CheckTakeover(state, now, ownerProbe)`. It refuses when `state.json`'s heartbeat is under 12 minutes old (more than twice the interval) and the caller is not the owner. `--takeover` overrides it only when the owner is shown not running: for a container owner `docker inspect` must report it not running, for a launchd owner the job must be unloaded. A Docker error reading the owner's state means unknown, never "not running", so the guard refuses.
+**Takeover guard.** Every daemon start (manual spawn, launchd kickstart, enable-supervisor) calls a pure function `CheckTakeover` over what it read: `state.json` (nil when missing), whether any other sign of a prior daemon exists (`daemon.lock` or `daemon.log`), the owner kinds this town could have, the clock and the caller. The rules, in order: a missing `state.json` with no other sign of a prior daemon allows the start (a town no daemon has run in); a missing `state.json` with a leftover lock or log refuses, because the container's lock is not visible across the mount and the file may simply have been deleted; the caller being the recorded owner allows; a heartbeat under 12 minutes old (more than twice the interval) refuses; and a stale heartbeat allows only when the owner is shown not running, because a stale heartbeat can be a stuck daemon. `--takeover` overrides a refusal only when the owner (or, with no `state.json`, every candidate owner) is shown not running: for a container owner `docker inspect` must report it not running, for a launchd owner the job must be unloaded. A Docker error reading an owner's state means unknown, never "not running", so the guard refuses. An unparsable `state.json` refuses before the guard runs.
 
-**Cutover (L3).** A command such as `gt daemon cutover --to container` boots out the launchd job so KeepAlive cannot respawn it, waits for the heartbeat to stop, starts the container and checks health. `--to launchd` is the rollback. Each step goes through the guard.
+**Cutover (L3).** A command such as `gt daemon cutover --to container` boots out the launchd job so KeepAlive cannot respawn it, waits for the heartbeat to stop, starts the container and checks health. `--to launchd` is the rollback. Each step goes through the guard. Before the bootout, and again immediately before it, the command waits for a quiet gate, the same hazard the install has: the dispatch hold is on (the operator creates it, the command only reads it), no `gt sling` is running, and the container-gate slot is not busy, with a bounded wait (30 minutes) that fails closed and leaves launchd untouched when the town never goes quiet. An error from any of the three checks counts as not quiet.
 
 ## 6. The host agent and the probe file
 
@@ -84,11 +84,12 @@ These are owed by the overseer or the operator and are not acceptance boxes, bec
 
 ## 9. Failure rules and tests
 
-A stale or missing probe file is an error. A Docker error while reading supervisor state is "unknown", never "not running". A missing compose file is an error. Tests are pure functions with fakes, no sleeps and no Docker in the gate, per `~/.claude/docs/standards/test-engineering.md`. Every refusal row has a test that goes red when the guard is removed. Compose rendering is validated with `docker compose config` in the integration tier only, with a `triggers.txt` row.
+A stale or missing probe file is an error. A Docker error while reading supervisor state is "unknown", never "not running". A missing compose file is an error. Tests are pure functions with fakes, no sleeps and no Docker in the gate, per `docs/testing.md`. Every refusal row has a test that goes red when the guard is removed. Compose rendering is validated with `docker compose config` in the integration tier only, with a `triggers.txt` row.
 
 ## 10. Risks and open items
 
 - A second daemon on the same town root is the worst failure. The heartbeat guard, the launchd boot-out in the cutover command and the L1 check cover it, and the first audit task checks the call sites that start a daemon.
+- `sweep-dind` is privileged and accepts unauthenticated connections: anyone who can reach its port can drive that engine and, being privileged, its host VM. Its only protection is the network: declared `internal: true`, no published ports, and only the daemon service joins it, each checked by a test. TLS would add certificate management for a single-host engine; revisit it if the engine ever leaves its compose project.
 - `om` cannot use the Mac keychain login in a container. Its credential is decided before L3 under `claude-q3f.7` and `claude-2or.3`.
 - Unverified: `host.docker.internal` reaching a loopback-bound Dolt; whether `internal/session` calls Docker on the daemon path (two references, likely the retired Docker-driver path); which `dolt` CLI calls need local data.
 - How `gt` commands on the Mac that nudge or peek a seat reach a container daemon is not a concern for sandbox seats (tmux runs inside the sandbox and the host client execs through `openshell`), and the audit confirms it.
