@@ -31,7 +31,7 @@
 | 0 | R1, R2, R3, R4, A1, B1, B2, C1, D1 |
 | 1 | A2, A3, A5, B3, B5, B6, D2, D4 |
 | 2 | A4, A6a, A6b, A7, A9a, B4, C2, D3, D5 |
-| 3 | A8, E1 |
+| 3 | A8a, A8b, E1 |
 | 4 | A9, E2, E3 |
 | 5 | E4, E5 |
 
@@ -96,7 +96,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 
 ### A1: the `daemon.supervisor` setting and the container-mode env constant
 **Depends on:** none. **Files:** modify `internal/config/daemon_config.go`; test in the same package.
-**Goal:** add `Supervisor string \`json:"supervisor,omitempty"\`` to the struct that holds `Patrols`, `func (c *DaemonConfig) SupervisorKind() (string, error)` returning `launchd`, `systemd`, `container` or `""` and an error for any other value, and `const ContainerModeEnv = "GT_DAEMON_SUPERVISOR"` with value `container` documented as what compose sets.
+**Goal:** add `Supervisor string \`json:"supervisor,omitempty"\`` to the struct that holds `Patrols`, `func (c *DaemonConfig) SupervisorKind() (string, error)` returning `launchd`, `systemd`, `container` or `""` and an error for any other value, `const ContainerModeEnv = "GT_DAEMON_SUPERVISOR"` with value `container` documented as what compose sets, and `const DaemonContainerName = "gt-town-daemon-1"`, the one container name the compose file, the `docker inspect` target and the owner id all use.
 **Constraints:** an empty setting keeps today's detection; no behaviour changes elsewhere.
 **Out of scope:** reading the setting anywhere.
 **Gate:** none.
@@ -124,7 +124,7 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 ### A3: the compose template renderer
 **Depends on:** A1. **Files:** create `internal/templates/daemon_compose.go`, `internal/templates/testdata/daemon-compose.golden.yml`; test in `internal/templates`.
 **Interfaces:** produces `type ComposeSpec struct { Project, Image, TownRoot string; StopGrace time.Duration; DoltHost string }`, `func RenderDaemonCompose(s ComposeSpec) ([]byte, error)`, and the images table `internal/templates/images.go` with `const DoltVersion = "2.3.2"` and `const DaemonBaseImage = "ubuntu:24.04"` (the base image `deploy/polecat/Dockerfile` uses); later tasks add their own entries to the same file.
-**Goal:** render the daemon service: image, `restart: unless-stopped`, `stop_grace_period`, the bind mount of `TownRoot` at the same path, `GT_DAEMON_SUPERVISOR=container` (`config.ContainerModeEnv`), `DOCKER_HOST=tcp://sweep-dind:2375`, no published ports, no `docker.sock`.
+**Goal:** render the daemon service: image, `restart: unless-stopped`, `stop_grace_period`, the bind mount of `TownRoot` at the same path, `container_name: ` set to `config.DaemonContainerName`, `GT_DAEMON_SUPERVISOR=container` (`config.ContainerModeEnv`), a pass-through `GT_DAEMON_TAKEOVER: ${GT_DAEMON_TAKEOVER:-}` (empty unless an operator sets it for one start), `DOCKER_HOST=tcp://sweep-dind:2375`, no published ports, no `docker.sock`.
 **Constraints:** golden file; `StopGrace` less than `daemon.ShutdownBudget` is an error. The sweep-dind service is C2's, not here.
 **Out of scope:** `sweep-dind`, the scratch variant, validation with `docker compose config`.
 **Gate:** none.
@@ -134,34 +134,38 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 - [ ] a `StopGrace` below `daemon.ShutdownBudget` returns an error, and a test fails if that check is removed
 - [ ] a test asserts the output contains no `docker.sock` and no `ports:` key
 - [ ] a test asserts the town root appears as both source and target of the bind mount
+- [ ] a test asserts `container_name` equals `config.DaemonContainerName` and the takeover pass-through is present and empty by default
 - [ ] a test asserts every image reference in the rendered output is in `images.go` and none is `latest` (the daemon image is the local tag `gt-daemon:<rev>` and is allowed by name)
 
 ### A4: container state reader and status line
 **Depends on:** A2. **Files:** modify `internal/templates/supervisor_state.go`, `internal/cmd/daemon_supervisor.go`; tests alongside.
 **Interfaces:** consumes `templates.SupervisorReader func(kind string) SupervisorState`; produces `ContainerJobState(run func(argv []string) ([]byte, error)) templates.SupervisorReader` and the status line `Supervised: container <name> running <image>`.
-**Goal:** read container state with `docker --context desktop-linux inspect -f '{{.State.Status}} {{.Config.Image}}' gt-town-daemon-1` through the injected runner and map it to `SupervisorState`; a runner error maps to an unknown state.
+**Goal:** read container state with `docker --context desktop-linux inspect -f '{{.State.Status}} {{.Config.Image}}' <config.DaemonContainerName>` through the injected runner and map it to `SupervisorState`. A container that does not exist (`docker` reports `No such object`) is known and not running, so a recreate that removed the old instance never leaves an unprovable owner; any other runner error maps to unknown.
 **Constraints:** unknown is never reported as not running; `SupervisorJobMissing` and `SupervisorRespawn` keep their meaning for launchd and systemd.
 **Out of scope:** starting or stopping.
 **Gate:** none.
 **Size:** one worker, one landing.
 **Acceptance:**
 - [ ] `running`, `exited` and `restarting` map to their states with the image name
-- [ ] a runner error maps to unknown, and a test fails if unknown is mapped to not running
+- [ ] a runner error other than `No such object` maps to unknown, and a test fails if unknown is mapped to not running
+- [ ] `No such object` maps to known and not running, and a test fails if it maps to unknown
+- [ ] the inspect argv names `config.DaemonContainerName`, the same constant the compose file and the owner id use
 - [ ] `SupervisorStatusLine` renders `Supervised: container gt-town-daemon-1 running <image>` for the running case
 - [ ] the launchd and systemd tests are unchanged and pass
 
-### A5: container mode of `gt daemon run`
+### A5: the owner `Run` always writes, and container mode
 **Depends on:** A1. **Files:** modify `internal/daemon/daemon.go` (around lines 1252-1259), `internal/daemon/types.go` (`State`); test `internal/daemon/daemon_test.go`.
-**Interfaces:** produces `State.Owner *Owner \`json:"owner,omitempty"\`` with `type Owner struct{ Kind, ID string }`, and `func containerMode() bool` reading `config.ContainerModeEnv`.
-**Goal:** in container mode `Run` does not write the pid file and writes `Owner{Kind: "container", ID: <hostname>}` into every `SaveState`; outside container mode nothing changes.
-**Constraints:** the lock and heartbeat behave as today; the env read is behind a seam so tests set it.
-**Out of scope:** any reader of the pid file (A6a, A6b).
+**Interfaces:** produces `State.Owner *Owner \`json:"owner,omitempty"\`` with `type Owner struct{ Kind, ID string }`, `func DetectSelf(env func(string) string, hostname string) Owner` and `func containerMode() bool` reading `config.ContainerModeEnv`.
+**Goal:** `Run` writes an owner into every `SaveState`, whatever started it, so state written by a launchd daemon is never ownerless. `DetectSelf` returns, in this order: `Owner{Kind: "container", ID: config.DaemonContainerName}` when `ContainerModeEnv` is `container`; `Owner{Kind: "launchd", ID: <value of XPC_SERVICE_NAME>}` when that variable is set (launchd sets it to the job label); `Owner{Kind: "systemd", ID: <value of INVOCATION_ID>}` when that is set; otherwise `Owner{Kind: "manual", ID: "<hostname>:<pid>"}`. In container mode `Run` also does not write the pid file.
+**Constraints:** the lock and heartbeat behave as today; every environment read is behind the `env` seam so tests set it. State written by an older binary has no owner; readers treat it as the legacy case (A7).
+**Out of scope:** any reader of the pid file (A6a, A6b), the guard (A7, A8a).
 **Gate:** none.
 **Size:** one worker, one landing.
 **Acceptance:**
-- [ ] with container mode on, no pid file exists after `Run` starts (fake clock, temp town root)
-- [ ] with container mode on, `state.json` carries `owner.kind == "container"`
-- [ ] with container mode off, the pid file is written and `owner` is absent, as before
+- [ ] `DetectSelf` returns the four owner kinds for four environment fixtures, with the container id equal to `config.DaemonContainerName`
+- [ ] after `Run` starts under a launchd environment fixture, `state.json` carries `owner.kind == "launchd"` and the label as id
+- [ ] with container mode on, no pid file exists after `Run` starts (fake clock, temp town root) and `owner.kind == "container"`
+- [ ] with container mode off, the pid file is written as before
 - [ ] a test fails if the pid-file write is restored in container mode
 
 ### A6a: `StopDaemon` and `IsRunning` refuse to signal in container mode
@@ -178,50 +182,67 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 - [ ] kinds `launchd` and `systemd` behave exactly as before in the existing tests
 
 ### A6b: `gt down` and the doctor checks refuse to signal in container mode
-**Depends on:** R1, A1. **Files:** modify `internal/cmd/down.go` (around line 982), `internal/doctor` daemon checks, `internal/daemon/pid_identity.go`; tests alongside.
-**Goal:** when the supervisor kind is `container`, `gt down` and the doctor daemon checks route through the supervisor and never signal or kill a pid from the town's pid file or an `lsof` result for the daemon.
-**Constraints:** the sites are R1's group A6b list; a test per site.
+**Depends on:** R1, A1. **Files:** modify `internal/cmd/down.go` (around line 982), the four doctor daemon checks `internal/doctor/daemon_check.go`, `daemon_job_check.go`, `daemon_liveness_check.go` and `daemon_respawn_check.go`, `internal/daemon/pid_identity.go`; tests alongside.
+**Goal:** when the supervisor kind is `container`, `gt down` and each of the four doctor checks route through the supervisor and `state.json` and never signal or kill a pid from the town's pid file or an `lsof` result for the daemon.
+**Constraints:** the sites are R1's group A6b list plus the four checks; a test per site, and for each doctor check a test of its failing branch.
 **Out of scope:** the `StopDaemon` and `IsRunning` sites (A6a).
 **Gate:** none.
 **Size:** one worker, one landing.
 **Acceptance:**
 - [ ] `gt down` with kind `container` calls the supervisor stop argv and sends no signal (fake signaller)
-- [ ] the doctor daemon checks with kind `container` report from `state.json` and the supervisor, with no pid read
+- [ ] each of the four doctor checks under kind `container` reports from `state.json` and the supervisor with no pid read (a fake that fails the test on any pid read)
+- [ ] each of the four doctor checks under kind `container` returns a failing result when the container is not running, when the heartbeat is stale, and when the supervisor state is unknown (one table row each; the check never reports OK in those rows)
 - [ ] each site R1 lists for this group has a test that goes red when its refusal is removed
 - [ ] existing tests for the other kinds pass unchanged
 
 ### A7: `CheckTakeover`
 **Depends on:** A5. **Files:** create `internal/daemon/takeover.go`; test `internal/daemon/takeover_test.go`.
-**Interfaces:** produces `type OwnerProbe func(Owner) (running bool, known bool)`, `const TakeoverWindow = 12 * time.Minute`, `type TakeoverInput struct { State *State; PriorRun bool; Candidates []Owner; Now time.Time; Self Owner; Takeover bool; Probe OwnerProbe }` and `func CheckTakeover(in TakeoverInput) error`. `State == nil` means `state.json` is missing; `PriorRun` means another sign of a prior daemon exists (`daemon/daemon.lock` or `daemon/daemon.log`); `Candidates` are the owner kinds this town could have (launchd and container).
+**Interfaces:** produces `type OwnerProbe func(Owner) (running bool, known bool)`, `const TakeoverWindow = 12 * time.Minute`, `type TakeoverInput struct { State *State; PriorRun bool; Candidates []Owner; Now time.Time; Self Owner; Takeover bool; Probe OwnerProbe }` and `func CheckTakeover(in TakeoverInput) error`. `State == nil` means `state.json` is missing; `PriorRun` means another sign of a prior daemon exists (`daemon/daemon.lock` or `daemon/daemon.log`); `Candidates` are the owner kinds this town could have (launchd and container). A state with no `Owner` (written by an older binary) is the legacy case and is handled like a missing file with prior-run evidence.
 **Goal:** the rules, in order:
 1. `State == nil` and `PriorRun == false`: allow (a town no daemon has ever run in).
-2. `State == nil` and `PriorRun == true`: refuse, naming the missing file and the leftover files; with `Takeover` allow only when `Probe` returns `known && !running` for every candidate.
-3. `State.Owner == Self`: allow.
-4. Heartbeat fresh (`Now - LastHeartbeat < TakeoverWindow`): refuse; with `Takeover` allow only when `Probe(State.Owner)` is `known && !running`.
-5. Heartbeat stale: allow only when `Probe(State.Owner)` is `known && !running`; a running or unknown owner refuses, because a stale heartbeat can be a stuck daemon and the lock is not visible across a container boundary.
-**Constraints:** pure; no I/O; every error names what it found (owner kind, heartbeat age in minutes, or the missing file).
-**Out of scope:** reading `state.json` or wiring it (A8).
+2. `State == nil` or `State.Owner == nil` (legacy), and `PriorRun == true`: refuse, naming what is missing; with `Takeover` allow only when `Probe` returns `known && !running` for every candidate.
+3. `State.Owner == Self`: allow (a restart by the same owner).
+4. `State.Running == false` (a clean stop was recorded) and `Probe(State.Owner)` is `known && !running`: allow, whatever the heartbeat age. This is the clean handoff the cutover relies on.
+5. Heartbeat fresh (`Now - LastHeartbeat < TakeoverWindow`): refuse; with `Takeover` allow only when `Probe(State.Owner)` is `known && !running`.
+6. Heartbeat stale: allow only when `Probe(State.Owner)` is `known && !running`; a running or unknown owner refuses, because a stale heartbeat can be a stuck daemon and the lock is not visible across a container boundary.
+**Constraints:** pure; no I/O; every error names what it found (owner kind and id, heartbeat age in minutes, or the missing file).
+**Out of scope:** reading `state.json` or wiring it (A8a, A8b).
 **Gate:** none.
 **Size:** one worker, one landing.
 **Acceptance:**
-- [ ] a table test covers rule 1 (allow), rule 2 without takeover (refuse), rule 2 with takeover and all candidates not running (allow), rule 2 with takeover and one candidate unknown (refuse), rule 2 with takeover and one candidate running (refuse)
-- [ ] a table test covers rules 3 to 5: same owner (allow), fresh other owner (refuse), fresh with takeover and owner not running (allow), stale with owner not running (allow), stale with owner running (refuse), stale with owner unknown (refuse)
-- [ ] removing rule 2's refusal, or rule 5's unknown-refuses branch, makes a test fail
+- [ ] a table test covers rule 1 (allow), rule 2 for a missing file and for a legacy owner (refuse), rule 2 with takeover and all candidates not running (allow), with one unknown (refuse), with one running (refuse)
+- [ ] a table test covers rule 3 (allow), rule 4 clean stop with owner not running (allow) and clean stop with owner running or unknown (refuse), rule 5 fresh (refuse) and fresh with takeover and owner not running (allow), rule 6 stale with owner not running (allow), running (refuse), unknown (refuse)
+- [ ] removing rule 2's refusal, rule 4's owner check or rule 6's unknown-refuses branch makes a test fail
 - [ ] the function does no I/O (it takes only its argument)
 
-### A8: wire the guard into every start path and add `--takeover`
-**Depends on:** A7, A2, A4, R1. **Files:** modify the start paths R1 lists (`internal/cmd/daemon.go`, `spawnDaemonProcess`, `gt up`'s copy, `enable-supervisor`); tests alongside.
-**Goal:** each start path reads `state.json` (nil when the file is absent), sets `PriorRun` from the existence of `daemon/daemon.lock` or `daemon/daemon.log`, builds `Candidates` (launchd and container) and a probe from the supervisor state readers (A4 for containers, the launchd and systemd job state for the others), calls `CheckTakeover`, and refuses on its error; `gt daemon start --takeover` passes `Takeover=true`.
-**Constraints:** a missing `state.json` follows A7's rules 1 and 2 (it never allows a start by itself when other daemon files exist); a present but unparsable `state.json` refuses without calling the guard; the same function is called from every path, no copy.
-**Out of scope:** the cutover command (A9).
-**Gate:** owed live by the overseer at L1: a hand-started second daemon is refused.
+### A8a: the guard on the daemon's own startup path
+**Depends on:** A7, A5. **Files:** modify `internal/daemon/daemon.go` (`Run`, before `acquireDaemonLock` at about line 1223 and before the pid and state writes), a new `internal/daemon/startup_guard.go`; tests alongside.
+**Interfaces:** produces `func guardStartup(townRoot string, self Owner, takeover bool, probe OwnerProbe, now time.Time) error` that reads `state.json`, sets `PriorRun` from `daemon/daemon.lock` and `daemon/daemon.log`, calls `CheckTakeover`, and treats a present but unparsable `state.json` as a refusal without calling it.
+**Goal:** `Run` calls `guardStartup` with `Self = DetectSelf(...)` first thing, so every way a daemon can start (launchd, systemd, the container's entrypoint, `gt daemon start`, a hand-run `gt daemon run`) goes through the guard in the process that is about to become the daemon, not only in the command that launched it. The takeover flag comes from the environment variable `GT_DAEMON_TAKEOVER` being `1` (which the compose file passes through, A3). The owner probe is built from the supervisor state readers: A4's reader for a container owner, the launchd and systemd job state for the others, a same-host process check for a manual owner.
+**Constraints:** the guard runs before any file the daemon would write; a refusal exits non-zero with the guard's message and writes nothing.
+**Out of scope:** the CLI start paths (A8b).
+**Gate:** owed live by the overseer at L1: a hand-run second daemon on the scratch town root is refused.
 **Size:** one worker, one landing.
 **Acceptance:**
-- [ ] each start path R1 names calls `CheckTakeover` (a test per path with a fresh-heartbeat fixture expects refusal)
-- [ ] a missing `state.json` with a leftover `daemon.lock` refuses, and with neither file starts, in each path's test
+- [ ] `Run` with a fresh heartbeat from a different owner returns the guard's error and writes no pid file, lock or state (fake clock, temp town root)
+- [ ] `Run` with no `state.json` and no other daemon file starts, and with a leftover `daemon.lock` and no `state.json` refuses
+- [ ] `Run` with an unparsable `state.json` refuses without calling `CheckTakeover`
+- [ ] `Run` after a clean stop by another owner that the probe shows not running starts
+- [ ] removing the `guardStartup` call from `Run` makes a test fail
+
+### A8b: the CLI start paths and `--takeover`
+**Depends on:** A8a, A2, A4, R1. **Files:** modify the start paths R1 lists (`internal/cmd/daemon.go`, `spawnDaemonProcess`, `gt up`'s copy, `enable-supervisor`); tests alongside.
+**Goal:** each CLI start path calls the same guard function A8a uses (through the exported wrapper) before it spawns or kickstarts anything, so a refusal reaches the operator before a process is launched; `gt daemon start --takeover` sets `GT_DAEMON_TAKEOVER=1` for that one start (for the container kind it is passed to the `docker compose` process so the compose pass-through carries it in; for launchd it is refused with a message to boot the job out first).
+**Constraints:** the same function is called from every path, no copy; the guard result is identical to what `Run` would decide.
+**Out of scope:** the cutover command (A9).
+**Gate:** owed live by the overseer at L1: `gt daemon start` against the scratch town while another owner is fresh is refused.
+**Size:** one worker, one landing.
+**Acceptance:**
+- [ ] each start path R1 names calls the guard (a test per path with a fresh-heartbeat fixture expects refusal and no spawn argv recorded)
+- [ ] a missing `state.json` with a leftover `daemon.lock` refuses, and with neither file proceeds, in each path's test
 - [ ] a present but unparsable `state.json` refuses in each path's test
-- [ ] `--takeover` with a not-running owner proceeds and with a running or unknown owner refuses
-- [ ] removing the call from one path makes that path's test fail
+- [ ] `--takeover` for the container kind sets `GT_DAEMON_TAKEOVER=1` in the recorded compose environment when the owner is not running and refuses when it is running or unknown
+- [ ] removing the guard call from one path makes that path's test fail
 
 ### A9a: the quiet-gate check
 **Depends on:** A2. **Files:** create `internal/cmd/daemon_quiet.go`; test alongside.
@@ -238,16 +259,23 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 - [ ] the function creates and removes no file (a recording filesystem seam sees no write)
 
 ### A9: `gt daemon cutover`
-**Depends on:** A2, A7, A8, A9a. **Files:** create `internal/cmd/daemon_cutover.go`; test alongside.
-**Goal:** `gt daemon cutover --to container` calls `WaitQuiet` (A9a), calls it again immediately before the launchd bootout, boots out the launchd job, waits (injected clock) for the heartbeat to stop moving, starts the container through the supervisor and checks that a fresh heartbeat with `owner.kind == "container"` appears; `--to launchd` does the reverse and also waits for quiet first. Each step goes through `CheckTakeover` and stops with a clear message on the first failure, leaving the previous owner running when it fails before the old one is stopped. Not quiet stops the cutover with the old owner untouched.
-**Constraints:** every external call is the injected argv seam; no sleeps, a fake clock drives the waits.
+**Depends on:** A2, A8a, A8b, A9a. **Files:** create `internal/cmd/daemon_cutover.go`; test alongside.
+**Goal:** `gt daemon cutover --to container` runs these steps, each with a stated budget and a stated ending when the budget runs out (all waits on the injected clock):
+1. `WaitQuiet` (A9a), budget 30 minutes; on timeout it exits non-zero naming the first blocker and has changed nothing.
+2. `WaitQuiet` again immediately before the next step, same rule.
+3. Boot out the launchd job, then wait for the old daemon to stop: `state.json` shows `running == false` or the heartbeat stops moving, budget `daemon.ShutdownBudget + 30 seconds`; on timeout it does not start the container, prints that the launchd job is unloaded but the old daemon is still writing, and prints the exact `launchctl bootstrap` command to restore it.
+4. Start the container through the supervisor and wait for `state.json` to show `owner == {container, config.DaemonContainerName}` with `running == true`, budget 2 minutes; on timeout it prints that the container started but never took the town and gives the rollback command (`gt daemon cutover --to launchd`) and the `docker logs` command; it does not roll back by itself.
+5. Wait for a second heartbeat from the container, budget `HeartbeatInterval + 1 minute` (6 minutes); on timeout it reports unhealthy with the same rollback command and changes nothing further.
+`--to launchd` does the reverse in the same shape (quiet, stop the container, wait for a clean stop, bootstrap and kickstart the launchd job, wait for its owner and a second heartbeat), with the same budgets and endings. The launchd owner it expects is the one A5's `DetectSelf` writes (kind `launchd`, id the job label), and each step goes through the guard; a clean stop by the old owner is what lets the new owner start (A7 rule 4), so no takeover flag is needed on the normal path.
+**Constraints:** every external call is the injected argv seam; no sleeps, a fake clock drives every wait; the five budgets are named constants in one place.
 **Out of scope:** running it live (E5).
 **Gate:** owed live by the overseer at L3, in the operator's window.
 **Size:** one worker, one landing.
 **Acceptance:**
 - [ ] the success path to container issues bootout, then the container start, in that order (fake runner records argv)
-- [ ] a not-quiet result before bootout leaves the recorded argv empty
-- [ ] a failure after bootout and before a fresh container heartbeat prints the rollback command
+- [ ] a not-quiet result at step 1 or step 2 leaves the recorded argv empty, and each of the five waits has a test that runs the fake clock to its budget and asserts the stated ending and message
+- [ ] the step 3 timeout never issues the container start
+- [ ] the step 4 and step 5 timeouts print the rollback command and issue no further argv
 - [ ] `--to launchd` issues the container stop, then the launchd bootstrap and kickstart in order, after a quiet check
 
 ---
@@ -493,13 +521,13 @@ R1's report may add call-site groups to A6; each added group is one more bead of
 
 ### E5: the L3 window checklist
 **Depends on:** A9, E4. **Files:** modify `docs/daemon-container.md` (section L3).
-**Goal:** the operator's window checklist: preconditions (L1 and L2 recorded, the `om` credential decided, `dolt.container_host` set, the dispatch hold on (the operator creates it), the install-protocol pending-install marker not live, and the window after any pending install), the cutover command and its own wait for a quiet gate (A9a), the checks during the first 24 hours, and the rehearsed rollback (`gt daemon cutover --to launchd`).
+**Goal:** the operator's window checklist: preconditions (the live launchd daemon runs a build that writes an owner into `state.json`, confirmed by reading the file, so the cutover is never refused for an ownerless state; L1 and L2 recorded, the `om` credential decided, `dolt.container_host` set, the dispatch hold on (the operator creates it), the install-protocol pending-install marker not live, and the window after any pending install), the cutover command and its own wait for a quiet gate (A9a), the checks during the first 24 hours, and the rehearsed rollback (`gt daemon cutover --to launchd`).
 **Constraints:** passes `docs-lint`; it states that launchd's job stays installed (booted out, not removed) as the rollback.
 **Out of scope:** running it.
 **Gate:** owed live by the operator and overseer: the window itself.
 **Size:** one worker, one document.
 **Acceptance:**
-- [ ] the preconditions are a checklist naming each prior task or decision, including the hold, the pending-install marker and the quiet-gate wait
+- [ ] the preconditions are a checklist naming each prior task or decision, including the hold, the pending-install marker, the quiet-gate wait and the owner present in the live `state.json`
 - [ ] the rollback section gives the exact reverse command and what must be true before it
 - [ ] it states that the launchd job stays installed during the window
 - [ ] it passes `docs-lint`
