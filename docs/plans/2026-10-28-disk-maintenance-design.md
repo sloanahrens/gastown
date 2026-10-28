@@ -1,4 +1,4 @@
-> Status: design approved by the operator (2026-10-28). Implementation plan: `2026-10-28-disk-maintenance-plan.md`. Tracked in gt-i7hxu.
+> Status: historical (2026-10). Merged in: gt-i7hxu (design and plan; the implementation beads are filed from the plan). Not maintained.
 
 # Town disk maintenance: a tested Go pruner, registry retention first
 
@@ -106,10 +106,14 @@ So the planner works on digests:
    (hex, 7 to 12 characters). Every other tag, `dev` included, is never a
    candidate.
 2. The keep set of digests is the union of: the digest `dev` points at; the
-   digest of the tag that is a prefix of the installed gt
-   commit (`gt version`); the digest of every image a running
-   sandbox pod uses (container `image` and `imageID`); and the digests of the
-   newest `KEEP` candidate tags by manifest creation time (default 5).
+   digest of the tag that is a prefix of the installed gt commit (`gt version`
+   is the one source for that commit); the digest of every image a running
+   sandbox pod uses, by `imageID` and also by the tag its container `image`
+   field names (an `imageID` can be a config digest or a bare image id, so the
+   tag is resolved through the registry too); and the digests of the newest
+   `KEEP` candidate tags by manifest creation time (default 5). If `dev` is
+   absent from `gastown-polecat`, the plan refuses: a registry without `dev` is
+   mid-rebuild or broken, and a prune would have nothing to anchor on.
 3. A manifest is deleted only when its digest is outside the keep set. Because
    the keep set is by digest, an old candidate tag that shares a digest with a
    kept tag (`dev`, say) is not deleted: deleting it would delete the kept tag
@@ -117,12 +121,23 @@ So the planner works on digests:
    tag that named it.
 4. The in-use set comes from `kubectl --kubeconfig ~/gt/.runtime/sbx-k8s/kubeconfig
    get pods -A -o json` plus the sandbox records under `~/gt/.runtime/sandboxes`.
-   If either cannot be read, the plan refuses.
+   If either cannot be read, **including a records directory that does not
+   exist**, the plan refuses: a town that runs sandboxes has that directory, so
+   its absence means something is wrong.
 5. Stray repos (`gastown-polecat-measure`, `seedtest/polecat`) are deleted whole,
    only when nothing in the in-use set or the sandbox records names them.
 6. Garbage collect runs only if at least one delete succeeded, and never when the
-   registry reports a push in progress. The delete and the collect happen under
-   the `polecat-image` lock, which is what serializes every push.
+   registry reports a push in progress. **Every apply, from the plugin, the
+   patrol or `gt maint`, runs inside `polecatimage.WithLock`**, the same lock that
+   serializes every push; if the lock is held (a build or push is running) the
+   apply defers and says so. A dry run needs no lock.
+7. Every name that comes from the registry or from the sandbox records is
+   validated before it reaches a URL path or a command: a repo matches
+   `^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$`, a tag
+   `^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`, a digest `^sha256:[0-9a-f]{64}$`, and the
+   container name `^[A-Za-z0-9][A-Za-z0-9_.-]*$`. A name that fails refuses the
+   plan. The garbage-collect command is fixed text plus the validated container
+   name.
 
 Recovery is a rebuild: any per-commit image can be rebuilt from its commit, so the
 newest-N window is a convenience, not the only copy.
@@ -142,8 +157,12 @@ A new daemon patrol, `daemon.patrols.disk_maintenance`:
   (`colima ssh -p gt-sbx -- df -P /mnt/lima-colima-gt-sbx`), and Docker Desktop's
   disk (`df` of the runner volume, as the docker-watch rule does). At 80% used it
   raises a keyed alert (`diskmaint:<disk>`) through the daemon's existing
-  `escalateAlert`, and clears it when the disk is back under 70%.
+  `escalateAlert`, and clears it when the disk is back under 70%. A disk it
+  cannot read raises its own alert (`diskmaint:<disk>:unreadable`) and clears
+  when a later read works: a disk we cannot measure is not a quiet disk.
 - Over 80% the registry `KEEP` tightens from 5 to 3 for that run.
+- In `apply` mode the patrol takes the same `polecatimage.WithLock` before it
+  applies, and defers when the lock is held.
 - `mode` is `dry_run` until the operator flips it to `apply`. The plugin hook has
   the same switch (`POLECAT_IMAGE_REGISTRY_PRUNE=off|dry-run|apply`, default
   `dry-run`).
