@@ -67,13 +67,10 @@ type Options struct {
 	// own; the cobra command leaves it to this process's timer.
 	Steps func(name string)
 
-	// Deliberate marks a dispatch a person chose on the bead by hand — the
-	// operator at a terminal, or a crew member — as against the automated
-	// redispatch the per-bead respawn budget exists to stop. Only the cobra
-	// layer sets it, and only for a dispatcher its classifier recognizes
-	// (slingDeliberate in internal/cmd); every in-process dispatcher (spec,
-	// capacity queue, epic) leaves it false, so a dispatcher added later spends
-	// the budget until it is classified on purpose (gt-jogkx).
+	// Deliberate marks a hand dispatch, which clears the bead's respawn count
+	// instead of spending it. Only the cobra layer sets it (slingDeliberate in
+	// internal/cmd); every in-process dispatcher (spec, capacity queue, epic)
+	// leaves it false and so spends the budget (gt-jogkx).
 	Deliberate bool
 
 	// SkipDuplicateCheck disables the pre-dispatch content duplicate check

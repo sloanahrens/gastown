@@ -994,7 +994,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 	// is already attached, and admitSlingRespawn has already decided this sling
 	// may proceed (gt-u3hc1).
 	recordRespawn := func() polecat.RespawnMark {
-		return recordSlingRespawn(townRoot, opts)
+		return recordSlingRespawn(os.Stderr, townRoot, opts)
 	}
 
 	// Persistent polecat model (gt-4ac): reuse an idle polecat's sandbox before

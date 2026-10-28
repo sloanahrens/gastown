@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/sling"
+	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -167,7 +168,13 @@ type slingDeps struct {
 	actor              func() string
 	// daemon marks a process the daemon started, whose sling is automated
 	// whatever actor it names (see slingDaemonProcess).
-	daemon      daemonMarker
+	daemon daemonMarker
+	// identity is the identity this process carries in its environment and
+	// stdoutIsTTY whether its output is a terminal; with daemon they classify
+	// the sling for the respawn budget (see slingDeliberate). A nil func is the
+	// zero fact: no identity, not a terminal.
+	identity    func() string
+	stdoutIsTTY func() bool
 	hookDir     func(townRoot, beadID, workDir string) string
 	storeFields func(townRoot, beadID string, updates beadFieldUpdates) error
 	// recordBlockerOverride appends the --ignore-blockers comment to the bead:
@@ -277,6 +284,8 @@ func realSlingDeps() *slingDeps {
 		instantiateFormula:    InstantiateFormulaOnBead,
 		actor:                 resolveSlingActor,
 		daemon:                slingDaemonProcess,
+		identity:              slingProcessIdentity,
+		stdoutIsTTY:           ui.IsTerminal,
 		hookDir:               beads.ResolveHookDir,
 		storeFields:           storeFieldsInBeadFromTownRoot,
 		recordBlockerOverride: slingStores{}.recordBlockerOverride,

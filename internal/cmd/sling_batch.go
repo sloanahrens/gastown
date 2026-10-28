@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/ui"
 	"io"
 	"os"
 	"path/filepath"
@@ -75,13 +76,14 @@ type batchSling struct {
 	execute           func(params SlingParams) (*SlingResult, error)
 	wakeRig           func(rigName string)
 	sleep             func(time.Duration)
-	// actor names the dispatcher of this batch and daemon whether this process
-	// is the daemon's, so each dispatch it makes is classified as a hand sling
-	// or an automated one (slingDeliberate). Nil classifies the batch as
-	// automated: the batch wrapper is the cobra command's, and a caller that
-	// wired no actor spends the respawn budget.
-	actor  func() string
-	daemon daemonMarker
+	// identity, daemon and stdoutIsTTY are the process facts each dispatch of
+	// this batch is classified by, so a hand batch clears the bead's respawn
+	// count where an automated one spends it (slingDeliberate). Nil is the zero
+	// fact, which classifies as automated: a batch wrapper that wired none
+	// spends the respawn budget.
+	identity    func() string
+	daemon      daemonMarker
+	stdoutIsTTY func() bool
 }
 
 // realBatchSling is a batch sling with opts and the running gt's collaborators.
@@ -98,20 +100,17 @@ func realBatchSling(opts slingOptions) batchSling {
 		execute:           executeSling,
 		wakeRig:           wakeRigAgents,
 		sleep:             time.Sleep,
-		actor:             resolveSlingActor,
+		identity:          slingProcessIdentity,
 		daemon:            slingDaemonProcess,
+		stdoutIsTTY:       ui.IsTerminal,
 	}
 }
 
 // params is the engine request one bead of this batch makes, with the
 // classification the respawn budget reads: a hand batch clears the bead's
-// count, an automated one is held to it (gt-jogkx). A batch built without an
-// actor classifies as automated, the safe direction.
+// count, an automated one is held to it (gt-jogkx).
 func (b batchSling) params(beadID, rigName, townRoot, townBeadsDir, formulaName, slingMode string, formulaCooked bool) SlingParams {
-	deliberate := false
-	if b.actor != nil {
-		deliberate = slingDeliberate(b.actor(), b.daemon.active())
-	}
+	deliberate := handDispatch(b.identity, b.daemon, b.stdoutIsTTY)
 	return SlingParams{
 		BeadID:           beadID,
 		FormulaName:      formulaName,

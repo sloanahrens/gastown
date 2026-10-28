@@ -188,11 +188,15 @@ use this command to allow re-dispatch.
 Only a bead whose polecat died before submitting counts toward the limit: a
 sling that follows a landing rejection clears the counter by itself (gt-tatcn).
 
-A sling run by an operator at a terminal or by a crew member is treated as a
-deliberate re-dispatch: it passes the limit and clears the counter once it
-launches a polecat. A sling from the daemon, the scheduler, or a polecat's
-session spends the budget, and --force gets past the limit without touching
-the counter (gt-jogkx).`,
+A hand sling passes the limit and clears the counter once it launches a
+polecat. A hand sling is one run from a crew member's session (the overseer
+included), or by a process with no role identity whose output is an
+interactive terminal — the operator's own shell. Every other sling spends the
+budget: the daemon and everything it starts, the scheduler, epic and capacity
+dispatches, and a sling from a polecat's session. A process with no identity
+and no terminal counts as automated. The --actor a caller records on the bead
+does not decide this. --force gets past the limit without touching the
+counter, and this command clears it (gt-jogkx).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSlingRespawnReset,
 }
@@ -1293,7 +1297,7 @@ func (r *slingRun) resolveTargetOptions(beadID, townRoot string, force bool) Res
 		TownRoot:     townRoot,
 		BaseBranch:   r.opts.baseBranch,
 		ResumeBranch: r.opts.resumeBranch,
-		Deliberate:   slingDeliberate(r.actor(), r.daemon.active()),
+		Deliberate:   handDispatch(r.identity, r.daemon, r.stdoutIsTTY),
 	}
 }
 
@@ -1328,7 +1332,7 @@ func (r *slingRun) rigTargetParams(rigName, beadID, formulaName, townRoot, mode 
 		FormulaFailFatal: true,
 		CallerContext:    r.requester(),
 		TownRoot:         townRoot,
-		Deliberate:       slingDeliberate(r.actor(), r.daemon.active()),
+		Deliberate:       handDispatch(r.identity, r.daemon, r.stdoutIsTTY),
 	}
 }
 

@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -58,42 +60,59 @@ func spendRespawnBudget(t *testing.T, townRoot, beadID string) {
 	}
 }
 
-// TestSlingDeliberate: which dispatchers count as a hand sling, and so clear a
-// bead's respawn count instead of spending it. Every actor the classifier does
-// not recognise is automated, so a dispatcher added later is held to the limit
-// until it is classified here on purpose, and no actor makes a process the
-// daemon started a hand dispatch (gt-jogkx).
+// TestSlingDeliberate: which processes count as a hand sling, and so clear a
+// bead's respawn count instead of spending it. The identity is the one the
+// process carries in its environment; an identity the rule does not recognise
+// is automated, so a dispatcher added later is held to the limit until it is
+// classified here on purpose, and no identity makes a process the daemon
+// started a hand dispatch (gt-jogkx).
 func TestSlingDeliberate(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name        string
-		actor       string
+		identity    string
 		underDaemon bool
+		stdoutIsTTY bool
 		want        bool
 	}{
-		{name: "the operator at a terminal", actor: "unknown", want: true},
-		{name: "a crew member", actor: "gastown/crew/seagull", want: true},
-		{name: "the overseer", actor: "town/crew/overseer", want: true},
-		{name: "a polecat", actor: "gastown/polecats/toast", want: false},
-		{name: "the daemon's spec dispatcher", actor: "daemon/spec-dispatch", want: false},
-		{name: "a scheduled dispatch", actor: "daemon/scheduled:nightly", want: false},
-		{name: "a bare automation role", actor: "deacon", want: false},
-		{name: "no actor at all", actor: "", want: false},
+		{name: "a crew member's session", identity: "gastown/crew/seagull", want: true},
+		{name: "the overseer", identity: "town/crew/overseer", want: true},
+		{name: "a bare crew identity", identity: "crew", want: true},
+		{name: "the operator at a terminal", stdoutIsTTY: true, want: true},
+		{name: "the operator with stdout redirected", stdoutIsTTY: false, want: false},
+		{name: "a polecat's session", identity: "gastown/polecats/toast", want: false},
+		{name: "the daemon's spec dispatcher", identity: "daemon/spec-dispatch", want: false},
+		{name: "a scheduled dispatch", identity: "daemon/scheduled:nightly", want: false},
+		{name: "a bare automation role", identity: "deacon", want: false},
 		{
-			// The daemon strips the identity it inherited, so a child it starts
-			// has no live role: a crew actor on the command line must not turn an
-			// automated redispatch into a hand sling (GH#3006, gt-jogkx).
-			name:        "the daemon's process, whatever actor it names",
-			actor:       "gastown/crew/seagull",
+			// role.Unknown is an identity this rule does not recognise, and an
+			// unrecognised dispatcher spends the budget (the previous revision
+			// read it as the operator's terminal; gt-jogkx rework).
+			name:     "an identity that parses as no known role",
+			identity: "unknown",
+			want:     false,
+		},
+		{
+			// The daemon strips the identity it inherited and publishes
+			// BD_ACTOR=daemon, so a child it starts is automated even when it
+			// carries a crew identity (GH#3006, gt-jogkx).
+			name:        "the daemon's process, whatever identity it carries",
+			identity:    "town/crew/overseer",
 			underDaemon: true,
+			want:        false,
+		},
+		{
+			name:        "the daemon's process at a terminal",
+			underDaemon: true,
+			stdoutIsTTY: true,
 			want:        false,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := slingDeliberate(tt.actor, tt.underDaemon); got != tt.want {
-				t.Errorf("slingDeliberate(%q, underDaemon=%v) = %v, want %v",
-					tt.actor, tt.underDaemon, got, tt.want)
+			if got := slingDeliberate(tt.identity, tt.underDaemon, tt.stdoutIsTTY); got != tt.want {
+				t.Errorf("slingDeliberate(%q, underDaemon=%v, stdoutIsTTY=%v) = %v, want %v",
+					tt.identity, tt.underDaemon, tt.stdoutIsTTY, got, tt.want)
 			}
 		})
 	}
@@ -112,7 +131,7 @@ func TestSlingDeliberatePassesTheBudgetAndLeavesTheCountAtZero(t *testing.T) {
 	if err := admitSlingRespawn(fakeSlingStores(beadsfake.New()), townRoot, "gastown", opts); err != nil {
 		t.Fatalf("a deliberate sling was refused at the budget: %v", err)
 	}
-	recordSlingRespawn(townRoot, opts)
+	recordSlingRespawn(io.Discard, townRoot, opts)
 
 	if got := respawnCount(t, townRoot, deliberateBead); got != 0 {
 		t.Errorf("respawn count after the deliberate sling = %d, want 0", got)
@@ -142,6 +161,33 @@ func TestSlingDeliberateAdmitsAnUnreadableCount(t *testing.T) {
 	}
 }
 
+// TestSlingDeliberateReportsAClearItCannotWrite: the clear runs after the
+// polecat exists, so it cannot refuse the spawn; a count it could not clear is
+// reported instead of passing as cleared. The live state file is the one
+// location the reset refuses to repair, so a corrupt file there drives the
+// failure (gt-jogkx rework).
+func TestSlingDeliberateReportsAClearItCannotWrite(t *testing.T) {
+	t.Parallel()
+	townRoot, _ := rigTown(t)
+	dir := filepath.Join(townRoot, constants.DirRuntime)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("creating %s: %v", dir, err)
+	}
+	path := filepath.Join(dir, "bead-respawn-counts.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+
+	var warn bytes.Buffer
+	mark := recordSlingRespawn(&warn, townRoot, SlingSpawnOptions{HookBead: deliberateBead, Deliberate: true})
+	if mark.Count != 0 {
+		t.Errorf("a clear with no increment to give back returned mark %+v", mark)
+	}
+	if !strings.Contains(warn.String(), "clearing the respawn count") {
+		t.Errorf("the failed clear was not reported; warning = %q", warn.String())
+	}
+}
+
 // TestSlingAutomatedSpendsTheBudgetAndRefusesAtIt: the automated redispatch
 // path the limit exists for still refuses at the budget, and each spawn below
 // it costs one increment (gt-jogkx).
@@ -153,13 +199,13 @@ func TestSlingAutomatedSpendsTheBudgetAndRefusesAtIt(t *testing.T) {
 	if err := admitSlingRespawn(fakeSlingStores(beadsfake.New()), townRoot, "gastown", opts); err != nil {
 		t.Fatalf("an automated sling below the budget was refused: %v", err)
 	}
-	recordSlingRespawn(townRoot, opts)
+	recordSlingRespawn(io.Discard, townRoot, opts)
 	if got := respawnCount(t, townRoot, deliberateBead); got != 1 {
 		t.Fatalf("respawn count after one automated spawn = %d, want 1", got)
 	}
 
 	for i := 1; i < config.DefaultRecoveryMaxBeadRespawns; i++ {
-		recordSlingRespawn(townRoot, opts)
+		recordSlingRespawn(io.Discard, townRoot, opts)
 	}
 	if got := respawnCount(t, townRoot, deliberateBead); got != config.DefaultRecoveryMaxBeadRespawns {
 		t.Fatalf("respawn count at the budget = %d, want %d", got, config.DefaultRecoveryMaxBeadRespawns)
@@ -207,7 +253,7 @@ func TestSlingForcePassesWithoutTouchingTheCount(t *testing.T) {
 	if err := admitSlingRespawn(fakeSlingStores(beadsfake.New()), townRoot, "gastown", opts); err != nil {
 		t.Fatalf("a forced sling was refused at the budget: %v", err)
 	}
-	recordSlingRespawn(townRoot, opts)
+	recordSlingRespawn(io.Discard, townRoot, opts)
 
 	if got := respawnCount(t, townRoot, deliberateBead); got != config.DefaultRecoveryMaxBeadRespawns {
 		t.Errorf("respawn count after a forced sling = %d, want %d", got, config.DefaultRecoveryMaxBeadRespawns)
@@ -229,45 +275,66 @@ func TestSlingRespawnResetClearsACount(t *testing.T) {
 	}
 }
 
-// slingRunForClassification is a run whose actor and daemon marker are fixed,
-// for the wiring tests below: every site that classifies a sling reads both
-// from the deps.
-func slingRunForClassification(actor string, daemon daemonMarker) *slingRun {
+// slingRunForClassification is a run whose recorded actor and classification
+// facts are fixed, for the wiring tests below: every site that classifies a
+// sling reads the facts from the deps, never the actor it records on the bead.
+func slingRunForClassification(actor string, identity func() string, daemon daemonMarker, stdoutIsTTY func() bool) *slingRun {
 	return &slingRun{
 		slingDeps: &slingDeps{
-			actor:     func() string { return actor },
-			daemon:    daemon,
-			requester: func() string { return "test" },
+			actor:       func() string { return actor },
+			identity:    identity,
+			daemon:      daemon,
+			stdoutIsTTY: stdoutIsTTY,
+			requester:   func() string { return "test" },
 		},
 	}
 }
 
 // TestSlingRigTargetParamsCarryDeliberate: `gt sling <bead> <rig>` builds the
-// engine request with the classification of the actor running it, which is what
-// the respawn gate reads inside the spawn (gt-jogkx).
+// engine request with the classification of the process running it, which is
+// what the respawn gate reads inside the spawn (gt-jogkx).
 func TestSlingRigTargetParamsCarryDeliberate(t *testing.T) {
 	t.Parallel()
+	crew := func() string { return "gastown/crew/seagull" }
+	polecat := func() string { return "gastown/polecats/toast" }
+	daemon := func() bool { return true }
+	terminal := func() bool { return true }
 	for _, tt := range []struct {
-		name   string
-		actor  string
-		daemon bool
-		want   bool
+		name        string
+		identity    func() string
+		daemon      daemonMarker
+		stdoutIsTTY func() bool
+		want        bool
 	}{
-		{name: "a crew sling", actor: "gastown/crew/seagull", want: true},
-		{name: "a daemon sling", actor: "daemon/spec-dispatch", want: false},
-		{name: "a crew actor in the daemon's process", actor: "gastown/crew/seagull", daemon: true, want: false},
+		{name: "a crew sling", identity: crew, want: true},
+		{name: "an operator at a terminal", stdoutIsTTY: terminal, want: true},
+		{name: "a polecat's sling", identity: polecat, want: false},
+		{name: "a daemon sling", identity: func() string { return "daemon/spec-dispatch" }, want: false},
+		{name: "a crew identity in the daemon's process", identity: crew, daemon: daemon, want: false},
+		{name: "an operator whose output is not a terminal", want: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			var marker daemonMarker
-			if tt.daemon {
-				marker = func() bool { return true }
-			}
-			params := slingRunForClassification(tt.actor, marker).rigTargetParams("gastown", deliberateBead, "", "/town", "")
+			params := slingRunForClassification("gastown/polecats/toast", tt.identity, tt.daemon, tt.stdoutIsTTY).
+				rigTargetParams("gastown", deliberateBead, "", "/town", "")
 			if params.Deliberate != tt.want {
 				t.Errorf("rig target Deliberate = %v, want %v", params.Deliberate, tt.want)
 			}
 		})
+	}
+}
+
+// TestSlingDeliberateIgnoresTheRecordedActor: the actor a sling records on the
+// bead is a string the caller writes, so it must not decide whether the budget
+// is cleared. The classification reads the identity the process carries in its
+// environment; here the recorded actor names a crew member while the process
+// carries none, and the sling is still automated (gt-jogkx rework).
+func TestSlingDeliberateIgnoresTheRecordedActor(t *testing.T) {
+	t.Parallel()
+	params := slingRunForClassification("town/crew/overseer", nil, nil, nil).
+		rigTargetParams("gastown", deliberateBead, "", "/town", "")
+	if params.Deliberate {
+		t.Error("a self-declared crew actor cleared the respawn budget")
 	}
 }
 
@@ -278,16 +345,16 @@ func TestSlingRigTargetParamsCarryDeliberate(t *testing.T) {
 func TestSlingResolveTargetOptionsCarryDeliberate(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
-		name  string
-		actor string
-		want  bool
+		name     string
+		identity func() string
+		want     bool
 	}{
-		{name: "a crew sling", actor: "town/crew/overseer", want: true},
-		{name: "a polecat's sling", actor: "gastown/polecats/toast", want: false},
+		{name: "a crew sling", identity: func() string { return "town/crew/overseer" }, want: true},
+		{name: "a polecat's sling", identity: func() string { return "gastown/polecats/toast" }, want: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			opts := slingRunForClassification(tt.actor, nil).resolveTargetOptions(deliberateBead, "/town", false)
+			opts := slingRunForClassification("", tt.identity, nil, nil).resolveTargetOptions(deliberateBead, "/town", false)
 			if opts.Deliberate != tt.want {
 				t.Errorf("resolve target Deliberate = %v, want %v", opts.Deliberate, tt.want)
 			}
@@ -299,24 +366,29 @@ func TestSlingResolveTargetOptionsCarryDeliberate(t *testing.T) {
 }
 
 // TestSlingBatchParamsCarryDeliberate: every bead of a batch is dispatched with
-// the batch's own classification, and a batch wired without an actor is
-// automated — the safe direction for the budget (gt-jogkx).
+// the batch's own classification of its process, and a batch wired with none of
+// the facts is automated — the safe direction for the budget (gt-jogkx).
 func TestSlingBatchParamsCarryDeliberate(t *testing.T) {
 	t.Parallel()
+	crew := func() string { return "gastown/crew/seagull" }
+	daemon := func() bool { return true }
+	terminal := func() bool { return true }
 	for _, tt := range []struct {
-		name   string
-		actor  func() string
-		daemon daemonMarker
-		want   bool
+		name        string
+		identity    func() string
+		daemon      daemonMarker
+		stdoutIsTTY func() bool
+		want        bool
 	}{
-		{name: "a crew batch", actor: func() string { return "gastown/crew/seagull" }, want: true},
-		{name: "a scheduled batch", actor: func() string { return "daemon/scheduled:nightly" }, want: false},
-		{name: "a crew batch in the daemon's process", actor: func() string { return "gastown/crew/seagull" }, daemon: func() bool { return true }, want: false},
-		{name: "a batch with no actor wired", actor: nil, want: false},
+		{name: "a crew batch", identity: crew, want: true},
+		{name: "an operator's batch at a terminal", stdoutIsTTY: terminal, want: true},
+		{name: "a scheduled batch", identity: func() string { return "daemon/scheduled:nightly" }, want: false},
+		{name: "a crew identity in the daemon's process", identity: crew, daemon: daemon, want: false},
+		{name: "a batch with no facts wired", want: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			b := batchSling{actor: tt.actor, daemon: tt.daemon}
+			b := batchSling{identity: tt.identity, daemon: tt.daemon, stdoutIsTTY: tt.stdoutIsTTY}
 			params := b.params(deliberateBead, "gastown", "/town", "/town/.beads", "", "", false)
 			if params.Deliberate != tt.want {
 				t.Errorf("batch Deliberate = %v, want %v", params.Deliberate, tt.want)
@@ -361,7 +433,7 @@ func TestSlingDeliberateClearWaitsForTheSeat(t *testing.T) {
 		t.Errorf("the gate alone changed the count to %d; the clear belongs to the spawn", got)
 	}
 
-	recordSlingRespawn(townRoot, opts)
+	recordSlingRespawn(io.Discard, townRoot, opts)
 	if got := respawnCount(t, townRoot, deliberateBead); got != 0 {
 		t.Errorf("respawn count after the spawn = %d, want 0", got)
 	}

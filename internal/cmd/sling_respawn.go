@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -67,24 +68,46 @@ func (m daemonMarker) active() bool { return m != nil && m() }
 // (daemonGTEnv, GH#3006).
 func slingDaemonProcess() bool { return os.Getenv("BD_ACTOR") == "daemon" }
 
-// slingDeliberate reports whether a sling by actor is a hand dispatch: the
-// operator at a terminal, where no agent role is detected, or a crew member —
-// the overseer included — and never from the daemon's own process, whatever
-// the actor says. Every other dispatcher is automated and spends the bead's
-// respawn budget: a polecat or an automation role is what GT_ROLE holds, the
-// daemon names itself in --actor, and an actor this rule does not recognize
-// counts as automated too, so a dispatcher added later is held to the limit
-// until it is classified here on purpose (gt-jogkx).
-func slingDeliberate(actor string, underDaemon bool) bool {
+// slingProcessIdentity is the identity this process carries in its
+// environment: GT_ROLE, or the BD_ACTOR the daemon publishes. It is empty for
+// a process with neither, which is how the operator's own shell looks.
+func slingProcessIdentity() string { return agentActor(os.Getenv) }
+
+// slingDeliberate reports whether a sling is a hand dispatch: a crew member's
+// session (the overseer included), or a person at an interactive terminal.
+// Everything else is automated and spends the bead's respawn budget.
+//
+// The decision reads the identity the process carries in its environment, not
+// the actor string the sling records on the bead: --actor is a label a caller
+// writes, so a dispatcher cannot clear the budget with one. A process with no
+// identity is the operator only when stdout is a terminal; with stdout
+// redirected it is unidentified, and unidentified counts as automated — the
+// direction a breaker defaults to. An identity that parses as any role but
+// crew (a polecat, daemon/..., a bare automation role, or one this code does
+// not know) is automated too, so a dispatcher added later spends the budget
+// until it is classified here on purpose. A process the daemon started is
+// automated whatever identity it names: the daemon strips the role it
+// inherited and publishes BD_ACTOR=daemon to everything it spawns (GH#3006).
+func slingDeliberate(identity string, underDaemon, stdoutIsTTY bool) bool {
 	if underDaemon {
 		return false
 	}
-	switch r, _, _ := role.Parse(actor); r {
-	case role.Crew, role.Unknown:
-		return true
-	default:
-		return false
+	if identity == "" {
+		return stdoutIsTTY
 	}
+	r, _, _ := role.Parse(identity)
+	return r == role.Crew
+}
+
+// handDispatch classifies a sling from the process facts its caller holds; a
+// nil func is the zero fact (no identity, not a terminal). daemon is a marker,
+// whose nil value is not the daemon. See slingDeliberate for the rule.
+func handDispatch(identity func() string, daemon daemonMarker, stdoutIsTTY func() bool) bool {
+	id := ""
+	if identity != nil {
+		id = identity()
+	}
+	return slingDeliberate(id, daemon.active(), stdoutIsTTY != nil && stdoutIsTTY())
 }
 
 // admitSlingRespawn decides whether a sling may pass the per-bead respawn
@@ -132,23 +155,23 @@ func admitSlingRespawn(stores slingStores, townRoot, rigName string, opts SlingS
 // budget. --force does neither: the override gets past the limit without
 // touching the count (gt-jogkx).
 //
-// A count that cannot be written is reported and the spawn keeps its seat: the
-// polecat is already attached, and the count it leaves behind is the safe
-// direction — a deliberate sling leaves the bead as it found it, and an
+// A count that cannot be written is reported (to warn) and the spawn keeps its
+// seat: the polecat is already attached, and the count it leaves behind is the
+// safe direction — a deliberate sling leaves the bead as it found it, and an
 // automated one stays at its limit rather than silently re-arming (gt-u3hc1).
-func recordSlingRespawn(townRoot string, opts SlingSpawnOptions) polecat.RespawnMark {
+func recordSlingRespawn(warn io.Writer, townRoot string, opts SlingSpawnOptions) polecat.RespawnMark {
 	if opts.HookBead == "" || opts.Force {
 		return polecat.RespawnMark{}
 	}
 	if opts.Deliberate {
 		if err := polecat.ResetBeadRespawnCount(townRoot, opts.HookBead); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: clearing the respawn count of %s: %v\n", opts.HookBead, err)
+			fmt.Fprintf(warn, "Warning: clearing the respawn count of %s: %v\n", opts.HookBead, err)
 		}
 		return polecat.RespawnMark{}
 	}
 	mark, err := polecat.RecordBeadRespawnMark(townRoot, opts.HookBead)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: recording respawn of %s: %v\n", opts.HookBead, err)
+		fmt.Fprintf(warn, "Warning: recording respawn of %s: %v\n", opts.HookBead, err)
 		return polecat.RespawnMark{}
 	}
 	return mark
