@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,15 +39,18 @@ import (
 //	om_overseer_reviews_1h verdicts on the overseer's work
 //	om_unknown_reviews_1h  verdicts this town cannot attribute
 //
-// The hour's beads are read with one `bd show` per bead, in the directory the
-// review names: its rig under the town, or the town root for a review that
-// names no rig, where bd routes the bead's prefix to its rig. Only the beads the
-// counted reviews name are looked up, at most reviewBeadReadCap of them. A read
-// that fails, a rig that is not one path element under the town, and an hour
-// naming more beads than the cap all leave the four columns null: a review the
-// source could not attribute is not a review by an unknown author, and the
-// counts above still stand. A bead bd no longer holds is an unknown author's,
-// which is an answer.
+// The hour's beads are read through the bead store seam, one store read per
+// bead, in the store of the directory the review names: its rig under the town,
+// or the town root for a review that names no rig, where bd routes the bead's
+// prefix to its rig. Only the beads the counted reviews name are looked up, at
+// most reviewBeadReadCap of them. Each read carries a deadline of its own
+// (reviewBdTimeout), so a store slow on one bead cannot hold the reads of the
+// next, and the reads together answer to reviewBdBudget. A read that fails, a
+// rig that is not one path element under the town, and an hour naming more beads
+// than the cap all leave the four columns null: a review the source could not
+// attribute is not a review by an unknown author, and the counts above still
+// stand. A bead the store no longer holds is an unknown author's, which is an
+// answer.
 //
 // A file that does not exist yet is an hour with no reviews, since the landing
 // worker creates it with its first verdict. A file that cannot be read makes
@@ -55,21 +59,21 @@ import (
 // group.
 type reviewSource struct{}
 
-// reviewBdTimeout is one `bd show` deadline. The reviews of an hour are few, and
-// one bd hung on a dead Dolt server costs the kind columns rather than the
-// group's counts.
+// reviewBdTimeout is one bead's store read deadline. The reviews of an hour are
+// few, and one read hung on a dead Dolt server costs the kind columns rather
+// than the group's counts.
 const reviewBdTimeout = 5 * time.Second
 
 // reviewBeadReadCap bounds the distinct beads one collection reads. The reads
-// are sequential bd calls, so an hour naming more beads than this is left
+// are sequential, so an hour naming more beads than this is left
 // unattributed rather than holding the snapshot open on a log's ids.
 const reviewBeadReadCap = 64
 
-// reviewBdBudget bounds all the reads of one collection together. The per-call
-// deadline and the cap each bound one factor of the total, so a slow bd on every
-// one of the capped reads could still hold the snapshot for their product; the
-// budget is what keeps the kind columns from costing the snapshot more than this.
-// When it runs out the kind columns are null, like any failed read.
+// reviewBdBudget bounds all the reads of one collection together. The per-read
+// deadline and the cap each bound one factor of the total, so a slow store on
+// every one of the capped reads could still hold the snapshot for their product;
+// the budget is what keeps the kind columns from costing the snapshot more than
+// this. When it runs out the kind columns are null, like any failed read.
 const reviewBdBudget = 30 * time.Second
 
 func (reviewSource) Group() string { return "review" }
@@ -159,7 +163,7 @@ func zeroAuthorKinds() map[string]int {
 
 // reviewKinds counts the hour's reviews by author kind. An hour with no
 // reviews is every kind at zero and reads no bead. A nil return is an
-// attribution that failed: a bead read that errored, no runner to read it, a
+// attribution that failed: a bead read that errored, no store to read it, a
 // rig outside the town, or an hour past reviewBeadReadCap.
 func reviewKinds(ctx context.Context, env Env, reviews []Review) map[string]int {
 	counts := zeroAuthorKinds()
@@ -176,15 +180,14 @@ func reviewKinds(ctx context.Context, env Env, reviews []Review) map[string]int 
 	return counts
 }
 
-// reviewBeads reads each reviewed bead once with `bd show`, so a review of a
-// bead bd no longer holds is left out and attributed to an unknown author.
-// ok is false when a read fails, a rig is not under the town, or the hour names
-// more beads than reviewBeadReadCap, or the reads together outlast budget, since
-// that bead's branch is unknown rather than absent.
+// reviewBeads reads each reviewed bead once through the store of the directory
+// its review names, so a review of a bead the store no longer holds is left out
+// and attributed to an unknown author. The rows come back in id order, so the
+// attribution does not depend on the review log's order. ok is false when a read
+// fails, a rig is not under the town, the hour names more beads than
+// reviewBeadReadCap, or the reads together outlast budget, since that bead's
+// branch is unknown rather than absent.
 func reviewBeads(ctx context.Context, env Env, reviews []Review, budget time.Duration) ([]BeadRow, bool) {
-	if env.Run == nil {
-		return nil, false
-	}
 	type read struct{ bead, dir string }
 	seen := make(map[string]bool, len(reviews))
 	reads := make([]read, 0, len(reviews))
@@ -204,26 +207,25 @@ func reviewBeads(ctx context.Context, env Env, reviews []Review, budget time.Dur
 	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	var rows []BeadRow
+	rows := make([]BeadRow, 0, len(reads))
 	for _, r := range reads {
-		out, err := reviewBdShow(ctx, env, r.dir, r.bead)
+		row, ok, err := reviewBeadRow(ctx, env, r.dir, r.bead)
 		if err != nil {
 			return nil, false
 		}
-		shown, ok := ShownBeads(out)
-		if !ok {
-			return nil, false
+		if ok {
+			rows = append(rows, row)
 		}
-		rows = append(rows, shown...)
 	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	return rows, true
 }
 
-// reviewDir returns the directory bd runs in for a review: the town root when
-// the review names no rig, where bd routes the bead's prefix to its rig, else
-// the rig's own directory under the town. ok is false for a rig that is not one
-// path element under the town, so a rig read from the log cannot name the
-// directory bd runs in.
+// reviewDir returns the directory whose store a review is read from: the town
+// root when the review names no rig, where bd routes the bead's prefix to its
+// rig, else the rig's own directory under the town. ok is false for a rig that
+// is not one path element under the town, so a rig read from the log cannot name
+// a directory under the town to open a store in.
 func reviewDir(town, rig string) (string, bool) {
 	if rig == "" {
 		return town, true
@@ -234,11 +236,23 @@ func reviewDir(town, rig string) (string, bool) {
 	return filepath.Join(town, rig), true
 }
 
-// reviewBdShow runs `bd show --json` on bead in dir, under its own deadline so
-// one slow bd costs its bead rather than the group.
-func reviewBdShow(ctx context.Context, env Env, dir, bead string) ([]byte, error) {
+// reviewBeadRow reads one bead through the store of dir under a deadline of its
+// own (reviewBdTimeout), so one slow read costs its bead rather than the reads
+// of every bead in the directory. ok is false for a bead the store does not
+// hold, which is the store's answer rather than a failed read.
+//
+// The store's argv carries --allow-stale, so a bead reads as stale as the store
+// last synced: the hourly counts tolerate that (gt-vu312).
+func reviewBeadRow(ctx context.Context, env Env, dir, bead string) (BeadRow, bool, error) {
 	callCtx, cancel := context.WithTimeout(ctx, reviewBdTimeout)
 	defer cancel()
-	// The flags precede "--" so the bead id is read as an argument, never a flag.
-	return env.Run(callCtx, []string{"bd", "-C", dir, "show", "--json", "--", bead})
+	found, err := showBeads(callCtx, env, dir, []string{bead})
+	if err != nil {
+		return BeadRow{}, false, err
+	}
+	issue, ok := found[bead]
+	if !ok || issue == nil || issue.ID == "" {
+		return BeadRow{}, false, nil
+	}
+	return BeadRow{ID: issue.ID, Branch: BranchLine(issue.Notes)}, true, nil
 }
