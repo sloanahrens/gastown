@@ -1,9 +1,11 @@
 package registry
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -26,6 +28,17 @@ const manifestAccept = mediaTypeOCIIndex + ", " + mediaTypeDockerList + ", " +
 // points an index at itself cannot loop the client.
 const maxIndexDepth = 4
 
+// maxIndexRequests bounds the requests one GetManifest spends walking an
+// index, so a registry that names a great many children cannot decide how many
+// requests the client sends. A real index names a handful of platforms for a
+// few dozen requests; 256 leaves room for a large one and still bounds the walk.
+const maxIndexRequests = 256
+
+// maxDocumentBytes bounds one JSON body the client decodes. Registry software
+// commonly caps a manifest at 4 MiB, so a body past that is refused rather than
+// read into memory.
+const maxDocumentBytes = 4 << 20
+
 // Manifest is what the client learns about one manifest: its digest, when it
 // was built and how many bytes its config and layers hold.
 type Manifest struct {
@@ -43,7 +56,8 @@ type manifestDoc struct {
 		Size   int64  `json:"size"`
 	} `json:"config"`
 	Layers []struct {
-		Size int64 `json:"size"`
+		Digest string `json:"digest"`
+		Size   int64  `json:"size"`
 	} `json:"layers"`
 	Manifests []struct {
 		Digest string `json:"digest"`
@@ -66,9 +80,9 @@ func (d manifestDoc) isIndex() bool {
 // digest comes from Docker-Content-Digest, its created time from the config
 // blob and its size from the config and layers. For an index the digest is the
 // index's own, the created time is the newest child's, and the size adds up the
-// config and layers of every child. A repo or ref that fails validation returns
-// ErrBadName and sends no request; a missing created time is an error, never a
-// zero time.
+// config and layers of every child, counting a blob that several children share
+// once. A repo or ref that fails validation returns ErrBadName and sends no
+// request; a missing created time is an error, never a zero time.
 func (c *Client) GetManifest(ctx context.Context, repo, ref string) (Manifest, error) {
 	if !ValidRepo(repo) {
 		return Manifest{}, fmt.Errorf("manifest %q: %w", repo, ErrBadName)
@@ -76,78 +90,132 @@ func (c *Client) GetManifest(ctx context.Context, repo, ref string) (Manifest, e
 	if !ValidTag(ref) && !ValidDigest(ref) {
 		return Manifest{}, fmt.Errorf("manifest %q: %w", ref, ErrBadName)
 	}
-	return c.getManifest(ctx, repo, ref, 0)
+	read, err := c.getManifest(ctx, repo, ref, 0, &manifestWalk{})
+	if err != nil {
+		return Manifest{}, err
+	}
+	return read.manifest, nil
+}
+
+// manifestRead is one manifest's answer: the Manifest the caller sees and the
+// blobs it holds, keyed by blob digest. An index merges its children's sets, so
+// a layer two children share adds its size once.
+type manifestRead struct {
+	manifest Manifest
+	blobs    map[string]int64
+}
+
+// manifestWalk is the state one GetManifest carries through an index's
+// children: how many requests it has spent, so the walk stops at a budget
+// instead of reading whatever number of children the registry names.
+type manifestWalk struct {
+	requests int
+}
+
+// spend charges one request to the walk and refuses past the budget.
+func (w *manifestWalk) spend() error {
+	w.requests++
+	if w.requests > maxIndexRequests {
+		return fmt.Errorf("the manifest walk spends more than %d requests", maxIndexRequests)
+	}
+	return nil
 }
 
 // getManifest is GetManifest with a nesting depth, so an index can resolve its
 // children through the same path.
-func (c *Client) getManifest(ctx context.Context, repo, ref string, depth int) (Manifest, error) {
+func (c *Client) getManifest(ctx context.Context, repo, ref string, depth int, walk *manifestWalk) (manifestRead, error) {
 	if depth > maxIndexDepth {
-		return Manifest{}, fmt.Errorf("manifest %q in %q: index nests deeper than %d", ref, repo, maxIndexDepth)
+		return manifestRead{}, fmt.Errorf("manifest %q in %q: index nests deeper than %d", ref, repo, maxIndexDepth)
 	}
 	path := "/v2/" + repo + "/manifests/" + ref
 	var doc manifestDoc
-	header, err := c.getJSON(ctx, path, manifestAccept, &doc)
+	header, err := c.getJSON(ctx, path, manifestAccept, &doc, walk)
 	if err != nil {
-		return Manifest{}, err
+		return manifestRead{}, err
 	}
 	digest := header.Get("Docker-Content-Digest")
 	if !ValidDigest(digest) {
-		return Manifest{}, fmt.Errorf("GET %s: the response carries no valid Docker-Content-Digest", path)
+		return manifestRead{}, fmt.Errorf("GET %s: the response carries no valid Docker-Content-Digest", path)
 	}
 	if doc.isIndex() {
-		return c.indexManifest(ctx, repo, digest, doc, depth)
+		return c.indexManifest(ctx, repo, digest, doc, depth, walk)
 	}
-	return c.imageManifest(ctx, repo, digest, doc)
+	return c.imageManifest(ctx, repo, digest, doc, walk)
 }
 
-// imageManifest reads the created time of doc's config blob and adds up the
-// sizes the manifest names.
-func (c *Client) imageManifest(ctx context.Context, repo, digest string, doc manifestDoc) (Manifest, error) {
+// imageManifest reads the created time of doc's config blob and collects the
+// blobs the manifest names.
+func (c *Client) imageManifest(ctx context.Context, repo, digest string, doc manifestDoc, walk *manifestWalk) (manifestRead, error) {
 	if !ValidDigest(doc.Config.Digest) {
-		return Manifest{}, fmt.Errorf("manifest %s: the config digest fails validation", digest)
+		return manifestRead{}, fmt.Errorf("manifest %s: the config digest fails validation", digest)
 	}
-	created, err := c.blobCreated(ctx, repo, doc.Config.Digest)
+	created, err := c.blobCreated(ctx, repo, doc.Config.Digest, walk)
 	if err != nil {
-		return Manifest{}, err
+		return manifestRead{}, err
 	}
-	size := doc.Config.Size
-	for _, layer := range doc.Layers {
-		size += layer.Size
+	blobs := map[string]int64{doc.Config.Digest: doc.Config.Size}
+	for i, layer := range doc.Layers {
+		blobs[layerKey(digest, layer.Digest, i)] = layer.Size
 	}
-	return Manifest{Digest: digest, Created: created, Bytes: size}, nil
+	return manifestRead{
+		manifest: Manifest{Digest: digest, Created: created, Bytes: totalBytes(blobs)},
+		blobs:    blobs,
+	}, nil
+}
+
+// layerKey is the key a layer adds to a manifest's blobs: its digest, which a
+// second child naming the same content shares. A layer without a valid digest
+// is keyed by its manifest and position, so it is still counted, once, and
+// never matched to an unrelated layer.
+func layerKey(manifestDigest, layerDigest string, position int) string {
+	if ValidDigest(layerDigest) {
+		return layerDigest
+	}
+	return fmt.Sprintf("#%s/layer-%d", manifestDigest, position)
+}
+
+// totalBytes adds up the sizes of a blob set.
+func totalBytes(blobs map[string]int64) int64 {
+	var total int64
+	for _, size := range blobs {
+		total += size
+	}
+	return total
 }
 
 // indexManifest reads every child of an index: the newest child's created time
-// dates the index, and the children's configs and layers add up to its size.
-func (c *Client) indexManifest(ctx context.Context, repo, digest string, doc manifestDoc, depth int) (Manifest, error) {
+// dates the index, and the children's blobs add up to its size.
+func (c *Client) indexManifest(ctx context.Context, repo, digest string, doc manifestDoc, depth int, walk *manifestWalk) (manifestRead, error) {
 	if len(doc.Manifests) == 0 {
-		return Manifest{}, fmt.Errorf("index %s: no child manifests", digest)
+		return manifestRead{}, fmt.Errorf("index %s: no child manifests", digest)
 	}
-	manifest := Manifest{Digest: digest}
+	read := manifestRead{manifest: Manifest{Digest: digest}, blobs: map[string]int64{}}
 	for _, child := range doc.Manifests {
 		if !ValidDigest(child.Digest) {
-			return Manifest{}, fmt.Errorf("index %s: a child digest fails validation", digest)
+			return manifestRead{}, fmt.Errorf("index %s: a child digest fails validation", digest)
 		}
-		childManifest, err := c.getManifest(ctx, repo, child.Digest, depth+1)
+		childRead, err := c.getManifest(ctx, repo, child.Digest, depth+1, walk)
 		if err != nil {
-			return Manifest{}, err
+			return manifestRead{}, err
 		}
-		if childManifest.Created.After(manifest.Created) {
-			manifest.Created = childManifest.Created
+		if childRead.manifest.Created.After(read.manifest.Created) {
+			read.manifest.Created = childRead.manifest.Created
 		}
-		manifest.Bytes += childManifest.Bytes
+		for blobDigest, size := range childRead.blobs {
+			read.blobs[blobDigest] = size
+		}
 	}
-	return manifest, nil
+	read.manifest.Bytes = totalBytes(read.blobs)
+	return read, nil
 }
 
 // blobCreated reads the created time from a config blob.
-func (c *Client) blobCreated(ctx context.Context, repo, digest string) (time.Time, error) {
+func (c *Client) blobCreated(ctx context.Context, repo, digest string, walk *manifestWalk) (time.Time, error) {
 	path := "/v2/" + repo + "/blobs/" + digest
 	var blob struct {
 		Created string `json:"created"`
 	}
-	if _, err := c.getJSON(ctx, path, "", &blob); err != nil {
+	if _, err := c.getJSON(ctx, path, "", &blob, walk); err != nil {
 		return time.Time{}, err
 	}
 	if blob.Created == "" {
@@ -160,9 +228,13 @@ func (c *Client) blobCreated(ctx context.Context, repo, digest string) (time.Tim
 	return created.UTC(), nil
 }
 
-// getJSON sends one GET carrying accept and decodes the body into out. It
-// returns the response headers so the caller can read Docker-Content-Digest.
-func (c *Client) getJSON(ctx context.Context, path, accept string, out any) (http.Header, error) {
+// getJSON sends one GET carrying accept and decodes the body into out, reading
+// at most maxDocumentBytes of it. It returns the response headers so the caller
+// can read Docker-Content-Digest.
+func (c *Client) getJSON(ctx context.Context, path, accept string, out any, walk *manifestWalk) (http.Header, error) {
+	if err := walk.spend(); err != nil {
+		return nil, fmt.Errorf("%s %s: %w", http.MethodGet, path, err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base()+path, nil)
 	if err != nil {
 		return nil, err
@@ -181,7 +253,14 @@ func (c *Client) getJSON(ctx context.Context, path, accept string, out any) (htt
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
 		return nil, &statusError{code: resp.StatusCode, method: http.MethodGet, path: path}
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDocumentBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%s %s: read: %w", http.MethodGet, path, err)
+	}
+	if len(body) > maxDocumentBytes {
+		return nil, fmt.Errorf("%s %s: the body is larger than %d bytes", http.MethodGet, path, maxDocumentBytes)
+	}
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(out); err != nil {
 		return nil, fmt.Errorf("%s %s: decode: %w", http.MethodGet, path, err)
 	}
 	return resp.Header, nil
