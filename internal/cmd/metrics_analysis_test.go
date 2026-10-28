@@ -60,7 +60,7 @@ func TestMetricsAnalysePrintsTheReceiptOfWhatItDid(t *testing.T) {
 			Now:      func() time.Time { return analyseNow },
 			ReadFile: os.ReadFile,
 			Run:      func(context.Context, []string) ([]byte, error) { return nil, errors.New("mango must not run") },
-			RunEnv:   analyseRunEnv(t, day),
+			RunEnv:   analyseRunEnv(t),
 		}
 		var out bytes.Buffer
 		if err := runMetricsAnalyseWith(context.Background(), &out, env, analysisPaths(town)); err != nil {
@@ -90,7 +90,7 @@ func TestMetricsAnalysePrintsTheReceiptOfWhatItDid(t *testing.T) {
 			Now:      func() time.Time { return analyseNow },
 			ReadFile: os.ReadFile,
 			Run:      func(context.Context, []string) ([]byte, error) { return nil, errors.New("mango must not run") },
-			RunEnv:   analyseRunEnv(t, day),
+			RunEnv:   analyseRunEnv(t),
 		}
 		var out bytes.Buffer
 		if err := runMetricsAnalyseWith(context.Background(), &out, env, analysisPaths(town)); err != nil {
@@ -123,7 +123,7 @@ func TestMetricsAnalysePrintsTheReceiptOfWhatItDid(t *testing.T) {
 			Now:      func() time.Time { return analyseNow },
 			ReadFile: os.ReadFile,
 			Run:      func(context.Context, []string) ([]byte, error) { return nil, errors.New("mango must not run") },
-			RunEnv:   analyseRunEnv(t, day),
+			RunEnv:   analyseRunEnv(t),
 		}
 		var out bytes.Buffer
 		if err := runMetricsAnalyseWith(context.Background(), &out, env, analysisPaths(town)); err != nil {
@@ -156,19 +156,21 @@ func TestMetricsAnalysePrintsTheReceiptOfWhatItDid(t *testing.T) {
 	})
 }
 
-// analysisPaths is the analysis's places for town.
+// analysisPaths is the analysis's places for town. The extract is answered by
+// the day directory the fixtures write, so no run reads the host.
 func analysisPaths(town string) metrics.AnalysisOptions {
+	day := filepath.Join(town, ".runtime", "metrics", "2026-10-01")
 	return metrics.AnalysisOptions{
 		Repo:        filepath.Join(town, "gastown"),
 		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
 		MangoBin:    filepath.Join(town, ".runtime", "metrics", "bin", "mango"),
+		Extract:     func(context.Context, string, string) (string, error) { return day, nil },
 	}
 }
 
 // analyseRunEnv answers the commands the analysis runs before it reads the
-// extract's landings: the mango head, its archive, the build, and the extract's
-// receipt naming day.
-func analyseRunEnv(t *testing.T, day string) metrics.RunnerEnv {
+// extract's landings: the mango head, its archive and the build.
+func analyseRunEnv(t *testing.T) metrics.RunnerEnv {
 	t.Helper()
 	var archive bytes.Buffer
 	tw := tar.NewWriter(&archive)
@@ -191,8 +193,6 @@ func analyseRunEnv(t *testing.T, day string) metrics.RunnerEnv {
 			return []byte("0123456789abcdef0123456789abcdef01234567\n"), nil
 		case "go":
 			return nil, nil
-		case "python3":
-			return []byte("extract: 0 landings, 0 weekly rows -> " + day + "\n"), nil
 		}
 		return nil, errors.New("unexpected command: " + strings.Join(argv, " "))
 	}

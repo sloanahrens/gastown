@@ -48,7 +48,6 @@ const (
 	mangoShaName    = "mango.sha"
 	landingsName    = "landings.csv"
 	sidecarName     = "landings.sidecar.json"
-	extractScript   = "scripts/town-metrics"
 )
 
 // Due reports whether the analysis is due: a zero stamp, a stamp at least every
@@ -72,11 +71,14 @@ func NeedRebuild(built, head string) bool {
 }
 
 // AnalysisOptions is what the daily analysis reaches outside its Env: the
-// checkout holding the extract script, the mango repository, and where its
-// binary goes.
+// extract, the mango repository, and where its binary goes.
 type AnalysisOptions struct {
-	// Repo holds scripts/town-metrics, the extract the analysis runs.
+	// Repo is accepted and ignored: the extract runs in process, so no checkout
+	// is needed to find it.
 	Repo string
+	// Extract runs the extract over town, writing its docs into docsDir, and
+	// returns the day directory it wrote. Nil is the in-process extract.
+	Extract func(ctx context.Context, town, docsDir string) (string, error)
 	// MangoGitDir is the bare repository whose origin/main is built.
 	MangoGitDir string
 	// MangoBin is the binary the mango stage runs; <MangoBin>.sha records the
@@ -148,8 +150,6 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	dir := filepath.Join(env.Town, ".runtime", "metrics", analysisDirName)
 	res := AnalysisResult{Dir: dir}
 	switch {
-	case o.Repo == "":
-		return res, errors.New("analysis: AnalysisOptions.Repo is unset, so the extract cannot be found")
 	case o.MangoGitDir == "":
 		return res, errors.New("analysis: AnalysisOptions.MangoGitDir is unset, so mango cannot be built")
 	case o.MangoBin == "":
@@ -160,6 +160,9 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 		return res, errors.New("analysis: Env.ReadFile is unset")
 	}
 	now := env.Now().UTC()
+	if o.Extract == nil {
+		o.Extract = inProcessExtract(now, OSRunnerDir(DefaultAllowEnv))
+	}
 	stamp, err := readStamp(env, filepath.Join(dir, stampName))
 	if err != nil {
 		return res, err
@@ -173,7 +176,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	case env.Run == nil:
 		return res, errors.New("analysis: Env.Run is unset")
 	case env.RunEnv == nil:
-		return res, errors.New("analysis: Env.RunEnv is unset, so the extract cannot be given the town to stay inside")
+		return res, errors.New("analysis: Env.RunEnv is unset, so mango's git and go commands cannot run")
 	}
 
 	if err := ensureMango(ctx, env, o); err != nil {
@@ -183,13 +186,9 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	if err := os.MkdirAll(docs, 0o755); err != nil {
 		return res, fmt.Errorf("analysis: %w", err)
 	}
-	out, err := runEnv(ctx, env, extractArgv(o), extractEnv(env.Town, docs))
+	dayDir, err := o.Extract(ctx, env.Town, docs)
 	if err != nil {
 		return res, fmt.Errorf("extract: %w", err)
-	}
-	dayDir, err := extractDir(out)
-	if err != nil {
-		return res, err
 	}
 	columns, rows, explainOnly, err := readExtract(env, dayDir)
 	if err != nil {
@@ -262,38 +261,40 @@ func readStamp(env Env, path string) (time.Time, error) {
 	return at, nil
 }
 
-// extractArgv is the extract's command: the checkout's own script, run by
-// python3 so no argv this package records starts with a path to a script.
-func extractArgv(o AnalysisOptions) []string {
-	return []string{"python3", filepath.Join(o.Repo, filepath.FromSlash(extractScript)), "extract"}
+// inProcessExtract is the daily extract run in this process, the three calls
+// the extract command makes: the town's sources read through RealEnv into the
+// docs directory it is given, the extract written under the town's runtime for
+// the local day, and the caches saved so the next run reads each bead and
+// commit once. It returns the day directory the extract wrote. run is the
+// runner every git and bd command goes through.
+func inProcessExtract(now time.Time, run RunnerDir) func(ctx context.Context, town, docsDir string) (string, error) {
+	return func(ctx context.Context, town, docsDir string) (string, error) {
+		real, err := RealEnv(ctx, RealEnvOptions{
+			Today:   now.Local().Format("2006-01-02"),
+			Town:    town,
+			DocsDir: docsDir,
+			Run:     run,
+		})
+		if err != nil {
+			return "", err
+		}
+		if _, err := Extract(ctx, real.Extract); err != nil {
+			return "", err
+		}
+		if err := SaveCaches(real.Extract, real.Town); err != nil {
+			return "", err
+		}
+		return real.Extract.OutDir, nil
+	}
 }
 
-// extractEnv is the environment the extract reads: the town it stays inside and
-// the directory its digest and regime events live in, which is the panel
-// directory's own docs, so a daily run writes nothing into a home directory.
-func extractEnv(town, docs string) []string {
-	return []string{"TOWN_METRICS_TOWN=" + town, "TOWN_METRICS_DOCS=" + docs}
-}
-
-// runEnv runs argv with extra environment. A RunEnv seam that is unset is an
-// error rather than a run without extra: the extract stays inside this town by
-// the environment it is given, so a child that ran without it would read
-// another town's runtime.
-func runEnv(ctx context.Context, env Env, argv, extra []string) ([]byte, error) {
+// runEnv runs argv through the RunEnv seam. A seam that is unset is an error
+// rather than a command that never ran.
+func runEnv(ctx context.Context, env Env, argv []string) ([]byte, error) {
 	if env.RunEnv == nil {
-		return nil, fmt.Errorf("analysis: Env.RunEnv is unset, so %s cannot be given %s", argv[0], envNames(extra))
+		return nil, fmt.Errorf("analysis: Env.RunEnv is unset, so %s cannot run", argv[0])
 	}
-	return env.RunEnv(ctx, argv, extra)
-}
-
-// envNames lists the names of env entries, for an error that names what a child
-// would have missed.
-func envNames(env []string) string {
-	names := make([]string, len(env))
-	for i, kv := range env {
-		names[i], _, _ = strings.Cut(kv, "=")
-	}
-	return strings.Join(names, ", ")
+	return env.RunEnv(ctx, argv, nil)
 }
 
 // extractDir is the directory the extract reports writing: its receipt line
@@ -415,7 +416,7 @@ func panelEvents(env Env, reportf func(format string, args ...any)) []PanelEvent
 // that made it, and records the new head in <MangoBin>.sha only after the build
 // succeeds, so a failed build leaves the old head to be retried.
 func ensureMango(ctx context.Context, env Env, o AnalysisOptions) error {
-	out, err := runEnv(ctx, env, []string{"git", "--git-dir", o.MangoGitDir, "rev-parse", "origin/main"}, nil)
+	out, err := runEnv(ctx, env, []string{"git", "--git-dir", o.MangoGitDir, "rev-parse", "origin/main"})
 	if err != nil {
 		return fmt.Errorf("mango head: %w", err)
 	}
@@ -437,7 +438,7 @@ func ensureMango(ctx context.Context, env Env, o AnalysisOptions) error {
 		// A sha with no binary behind it is not a build: rebuild from the head
 		// the sha records rather than leaving every mango call to fail.
 	}
-	archive, err := runEnv(ctx, env, []string{"git", "--git-dir", o.MangoGitDir, "archive", "--format=tar", "origin/main"}, nil)
+	archive, err := runEnv(ctx, env, []string{"git", "--git-dir", o.MangoGitDir, "archive", "--format=tar", "origin/main"})
 	if err != nil {
 		return fmt.Errorf("mango archive: %w", err)
 	}
@@ -453,7 +454,7 @@ func ensureMango(ctx context.Context, env Env, o AnalysisOptions) error {
 		return fmt.Errorf("mango build: %w", err)
 	}
 	moduleDir := filepath.Join(src, o.BuildModuleDir)
-	if _, err := runEnv(ctx, env, []string{"go", "build", "-C", moduleDir, "-o", o.MangoBin, o.BuildTarget}, nil); err != nil {
+	if _, err := runEnv(ctx, env, []string{"go", "build", "-C", moduleDir, "-o", o.MangoBin, o.BuildTarget}); err != nil {
 		return fmt.Errorf("mango build: %w", err)
 	}
 	return PublishAtomic(filepath.Dir(o.MangoBin), mangoShaName, []byte(head+"\n"))

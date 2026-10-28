@@ -80,12 +80,16 @@ type recordedCall struct {
 // analysisTown lays out a fake town: a day's extract output under a date the
 // clock disagrees with, a snapshot log, and a peak row. It returns the town and
 // the extract's output directory.
+// analysisDay is the day directory analysisTown writes the extract's landings
+// into, and the day the fake extract reports.
+const analysisDay = "2026-10-01"
+
 func analysisTown(t *testing.T) (town, dayDir string) {
 	t.Helper()
 	town = t.TempDir()
 	// The directory is named for a day the fake clock is not: the analysis must
-	// follow the extract's receipt rather than derive a date of its own.
-	dayDir = filepath.Join(town, ".runtime", "metrics", "2026-10-01")
+	// follow the day the extract reports rather than derive a date of its own.
+	dayDir = filepath.Join(town, ".runtime", "metrics", analysisDay)
 	if err := os.MkdirAll(dayDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -169,12 +173,26 @@ func writeTownFile(t *testing.T, path, body string) {
 	}
 }
 
-// analysisOptions is the analysis's paths for town.
+// analysisOptions is the analysis's paths for town, with the extract answered
+// by the day directory analysisTown wrote. Repo is left empty, as the daily run
+// leaves it now that the extract runs in process.
 func analysisOptions(town string) AnalysisOptions {
 	return AnalysisOptions{
-		Repo:        filepath.Join(town, "gastown"),
 		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
 		MangoBin:    filepath.Join(town, ".runtime", "metrics", "bin", "mango"),
+		Extract:     analysisExtract(filepath.Join(town, ".runtime", "metrics", analysisDay), new([]extractCall)),
+	}
+}
+
+// extractCall is the town and docs directory the analysis gave its extract.
+type extractCall struct{ town, docs string }
+
+// analysisExtract is the extract seam for a test: it records the town and docs
+// directory it was given and reports dayDir as the day it wrote.
+func analysisExtract(dayDir string, calls *[]extractCall) func(context.Context, string, string) (string, error) {
+	return func(_ context.Context, town, docs string) (string, error) {
+		*calls = append(*calls, extractCall{town: town, docs: docs})
+		return dayDir, nil
 	}
 }
 
@@ -201,8 +219,8 @@ func analysisEnv(t *testing.T, town, dayDir string, answer func(recordedCall) ([
 }
 
 // analysisAnswer is the fake host's answer: the mango head, a one-file archive,
-// a successful build, the extract's receipt naming dayDir, and mango's own
-// commands writing the canned result where explore asked.
+// a successful build, and mango's own commands writing the canned result where
+// explore asked.
 func analysisAnswer(t *testing.T, dayDir string) func(recordedCall) ([]byte, error) {
 	t.Helper()
 	archive := tarOf(t, map[string]string{
@@ -218,8 +236,6 @@ func analysisAnswer(t *testing.T, dayDir string) func(recordedCall) ([]byte, err
 			return []byte(analysisHead + "\n"), nil
 		case "go":
 			return nil, nil
-		case "python3":
-			return []byte(fmt.Sprintf("extract: %d landings, 1 weekly rows -> %s\n", analyseRows, dayDir)), nil
 		}
 		if len(c.argv) > 1 && c.argv[1] == "explore" {
 			dir := filepath.Dir(c.argv[2])
@@ -266,6 +282,8 @@ func TestAnalysePublishesThePanelOverTheRunners(t *testing.T) {
 	t.Parallel()
 	town, dayDir := analysisTown(t)
 	opts := analysisOptions(town)
+	var extracts []extractCall
+	opts.Extract = analysisExtract(dayDir, &extracts)
 	env, calls := analysisEnv(t, town, dayDir, nil)
 
 	res, err := RunAnalysis(context.Background(), env, opts)
@@ -345,28 +363,18 @@ func TestAnalysePublishesThePanelOverTheRunners(t *testing.T) {
 		t.Errorf("mango.sha = %q, want the built head %s", got, analysisHead)
 	}
 
-	// Every command is one the sandbox's exec allowlist names: a script path is
-	// never argv[0], so the run needs no interpreter it does not already name.
+	// Every command is one the sandbox's exec allowlist names: the run starts no
+	// interpreter, so no argv[0] is python3 or a script.
 	for _, call := range *calls {
 		switch call.argv[0] {
-		case "python3", "git", "go", opts.MangoBin:
+		case "git", "go", opts.MangoBin:
 		default:
-			t.Errorf("recorded argv %v starts with %q, which is neither python3, git, go nor the mango binary", call.argv, call.argv[0])
+			t.Errorf("recorded argv %v starts with %q, which is neither git, go nor the mango binary", call.argv, call.argv[0])
 		}
-	}
-	extract := callWith(*calls, "python3")
-	if extract == nil {
-		t.Fatalf("the analysis never ran the extract: %v", *calls)
-	}
-	wantExtract := []string{"python3", filepath.Join(opts.Repo, "scripts", "town-metrics"), "extract"}
-	if strings.Join(extract.argv, " ") != strings.Join(wantExtract, " ") {
-		t.Errorf("extract argv = %v, want %v", extract.argv, wantExtract)
 	}
 	docs := filepath.Join(dir, docsName)
-	for _, kv := range []string{"TOWN_METRICS_TOWN=" + town, "TOWN_METRICS_DOCS=" + docs} {
-		if !hasArg(extract.env, kv) {
-			t.Errorf("extract ran without %s in its environment (%v)", kv, extract.env)
-		}
+	if want := []extractCall{{town: town, docs: docs}}; !reflect.DeepEqual(extracts, want) {
+		t.Errorf("extract seam calls = %+v, want one call over the town and the panel docs %+v", extracts, want)
 	}
 	// A build is only recorded after it succeeded, so the archive comes first
 	// and the next run finds the head current.
@@ -380,6 +388,137 @@ func TestAnalysePublishesThePanelOverTheRunners(t *testing.T) {
 	}
 	if len(*calls) != before {
 		t.Errorf("the not-due run ran %d commands, want none", len(*calls)-before)
+	}
+}
+
+// TestAnalysisNeverStartsPython is the daily run with no checkout named: the
+// extract runs in process through its seam, so no command the analysis starts
+// is python3 or a town-metrics script, and the panel still publishes.
+func TestAnalysisNeverStartsPython(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	opts := analysisOptions(town)
+	var extracts []extractCall
+	opts.Extract = analysisExtract(dayDir, &extracts)
+	env, calls := analysisEnv(t, town, dayDir, nil)
+
+	res, err := RunAnalysis(context.Background(), env, opts)
+	if err != nil {
+		t.Fatalf("RunAnalysis: %v", err)
+	}
+	if !res.Ran {
+		t.Fatal("RunAnalysis was not due on a town with no stamp")
+	}
+	for _, call := range *calls {
+		if call.argv[0] == "python3" || strings.Contains(strings.Join(call.argv, " "), "town-metrics") {
+			t.Errorf("the analysis started %v, want no python3 and no town-metrics script", call.argv)
+		}
+	}
+	if len(extracts) != 1 {
+		t.Errorf("the extract seam ran %d times, want once", len(extracts))
+	}
+	if _, err := os.Stat(filepath.Join(town, ".runtime", "metrics", analysisDirName, panelName)); err != nil {
+		t.Errorf("panel.json was not published: %v", err)
+	}
+}
+
+// emptyRun answers every command with no output, so the town's sources read as
+// empty and the extract has nothing to report.
+func emptyRun(context.Context, string, []string) ([]byte, error) { return nil, nil }
+
+// failingGitRun refuses every git command, which is the first source RealEnv
+// reads, so the in-process extract stops before it writes anything. run puts
+// nice in front of argv, so the command is found by its name, not argv[0].
+func failingGitRun(_ context.Context, _ string, argv []string) ([]byte, error) {
+	if hasArg(argv, "git") {
+		return nil, errors.New("git: no repository")
+	}
+	return nil, nil
+}
+
+// TestInProcessExtractRunsEachStep is the default extract over a town with
+// nothing in it: it writes the day's landings under the runtime, saves the
+// caches, and reports the day directory it wrote.
+func TestInProcessExtractRunsEachStep(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	dayDir, err := inProcessExtract(analyseNow, emptyRun)(context.Background(), town, filepath.Join(town, "docs"))
+	if err != nil {
+		t.Fatalf("inProcessExtract: %v", err)
+	}
+	want := filepath.Join(town, ".runtime", "metrics", analyseNow.Local().Format("2006-01-02"))
+	if dayDir != want {
+		t.Errorf("day directory = %q, want %q", dayDir, want)
+	}
+	if _, err := os.Stat(filepath.Join(dayDir, landingsName)); err != nil {
+		t.Errorf("the extract wrote no %s: %v", landingsName, err)
+	}
+	if _, err := os.Stat(filepath.Join(town, ".runtime", "metrics", "cache", diffstatsCacheName)); err != nil {
+		t.Errorf("the caches were not saved: %v", err)
+	}
+}
+
+// TestInProcessExtractFailureStopsTheStep gives each step of the in-process
+// extract a failure of its own, and requires the run to fail with no day
+// directory reported.
+func TestInProcessExtractFailureStopsTheStep(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		run   RunnerDir
+		setup func(t *testing.T, town string)
+		want  string
+	}{
+		{
+			name: "the sources cannot be read",
+			run:  failingGitRun,
+			want: "real env",
+		},
+		{
+			name: "the day directory cannot be made",
+			run:  emptyRun,
+			setup: func(t *testing.T, town string) {
+				// A file where the day's directory goes: MkdirAll cannot make it.
+				day := analyseNow.Local().Format("2006-01-02")
+				writeTownFile(t, filepath.Join(town, ".runtime", "metrics", day), "not a directory")
+			},
+			want: "extract",
+		},
+		{
+			name: "the caches cannot be saved",
+			run:  emptyRun,
+			setup: func(t *testing.T, town string) {
+				// A dangling link where the cache directory goes: reads of it find
+				// nothing, and MkdirAll cannot make it.
+				metrics := filepath.Join(town, ".runtime", "metrics")
+				if err := os.MkdirAll(metrics, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(town, "missing"), filepath.Join(metrics, "cache")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "save caches",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if tc.setup != nil {
+				tc.setup(t, town)
+			}
+			dayDir, err := inProcessExtract(analyseNow, tc.run)(context.Background(), town, filepath.Join(town, "docs"))
+			if err == nil {
+				t.Fatalf("inProcessExtract ran with %s and reported %q", tc.name, dayDir)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to name %q", err, tc.want)
+			}
+			if dayDir != "" {
+				t.Errorf("day directory = %q on a failed extract, want none", dayDir)
+			}
+		})
 	}
 }
 
@@ -522,14 +661,15 @@ func indexOf(calls []recordedCall, arg string) int {
 func TestAnalyseFailedStepKeepsTheOldPanelAndStamp(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name   string
-		fail   string // the argv[0] or argv[1] the fake host refuses
-		detail string
+		name        string
+		fail        string // the argv[0] or argv[1] the fake host refuses
+		failExtract bool   // the extract seam refuses
+		detail      string
 	}{
-		{"a mango build that cannot find go", "go", "mango build"},
-		{"a mango build that fails", "build-fails", "mango build"},
-		{"an extract that fails", "python3", "extract"},
-		{"an archive that fails", "archive-fails", "mango archive"},
+		{"a mango build that cannot find go", "go", false, "mango build"},
+		{"a mango build that fails", "build-fails", false, "mango build"},
+		{"an extract that fails", "", true, "extract"},
+		{"an archive that fails", "archive-fails", false, "mango archive"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -552,7 +692,13 @@ func TestAnalyseFailedStepKeepsTheOldPanelAndStamp(t *testing.T) {
 				return answer(c)
 			})
 
-			_, err := RunAnalysis(context.Background(), env, analysisOptions(town))
+			opts := analysisOptions(town)
+			if tc.failExtract {
+				opts.Extract = func(context.Context, string, string) (string, error) {
+					return "", errors.New("no such extract")
+				}
+			}
+			_, err := RunAnalysis(context.Background(), env, opts)
 			if err == nil {
 				t.Fatal("RunAnalysis returned no error for a step that failed")
 			}
@@ -596,17 +742,16 @@ func TestAnalyseWithoutRunEnvIsAnError(t *testing.T) {
 	}
 }
 
-// TestRunEnvDropsNothingWhenTheSeamIsMissing is the same guard on the helper
-// itself, because a nil seam that returned the command's output would be a run
-// without the environment the caller asked for.
-func TestRunEnvDropsNothingWhenTheSeamIsMissing(t *testing.T) {
+// TestRunEnvNeedsItsSeam is the guard on the helper itself: a nil RunEnv is an
+// error that names the seam and the command, not a command that silently did
+// not run.
+func TestRunEnvNeedsItsSeam(t *testing.T) {
 	t.Parallel()
-	argv := []string{"python3", "/repo/scripts/town-metrics", "extract"}
-	_, err := runEnv(context.Background(), Env{}, argv, extractEnv("/town", "/town/.runtime/metrics/latest/docs"))
+	_, err := runEnv(context.Background(), Env{}, []string{"git", "rev-parse", "origin/main"})
 	if err == nil {
-		t.Fatal("runEnv ran a command with no environment seam")
+		t.Fatal("runEnv returned no error with no RunEnv seam")
 	}
-	for _, name := range []string{"RunEnv", "TOWN_METRICS_TOWN", "TOWN_METRICS_DOCS"} {
+	for _, name := range []string{"RunEnv", "git"} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error = %q, want it to name %s", err, name)
 		}
