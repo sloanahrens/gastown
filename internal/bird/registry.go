@@ -1,6 +1,7 @@
 package bird
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,23 @@ import (
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/procid"
 )
+
+const (
+	// defaultLockTimeout bounds a wait for the state lock, so a holder that
+	// never returns a write the caller can see failed instead of one that
+	// hangs.
+	defaultLockTimeout = 5 * time.Second
+	// lockRetry is how often a waiter tries the lock again while it waits.
+	lockRetry = 10 * time.Millisecond
+	// defaultReservationTTL is how long a name Pick handed out stays reserved
+	// when nothing binds it.
+	defaultReservationTTL = 5 * time.Minute
+)
+
+// ErrInvalidName is what Bind refuses a name with: a name has to reach a
+// session name, a git identity and a bead label unchanged, so it may only use
+// the characters ValidName accepts.
+var ErrInvalidName = errors.New("a bird name must match " + nameShape.String())
 
 // Registry is one state file, the pool Pick draws from and the polecat
 // directories whose names count as taken.
@@ -37,8 +55,16 @@ type Registry struct {
 	Now func() time.Time
 	// Rand returns a number in [0, n); nil means the math/rand/v2 source.
 	Rand func(n int) int
-	// ProcStart reads a pid's start token; nil means procid.StartToken.
-	ProcStart func(pid int) (string, bool)
+	// ProcStart reads a pid's start token, and says whether the process is
+	// still there; an error means the token could not be read, which is not
+	// the same as the process being gone. nil means read it from the kernel.
+	ProcStart func(pid int) (token string, live bool, err error)
+	// LockTimeout bounds a wait for the state lock; zero means
+	// defaultLockTimeout.
+	LockTimeout time.Duration
+	// ReservationTTL is how long a name Pick handed out stays reserved when
+	// nothing binds it; zero means defaultReservationTTL.
+	ReservationTTL time.Duration
 	// Write replaces the state file; nil means atomicfile.EnsureDirAndWriteJSON,
 	// which writes a temp file beside Path and renames it over it.
 	Write func(path string, v any) error
@@ -49,13 +75,47 @@ type Registry struct {
 func New(townRoot string) *Registry {
 	return &Registry{
 		Path:        filepath.Join(townRoot, ".runtime", "agents", "state.json"),
-		PolecatGlob: filepath.Join(townRoot, "*", "polecats", "*"),
+		PolecatGlob: PolecatGlob(townRoot),
 	}
 }
 
-// Live reports whether a names a process that is still running.
-func (r *Registry) Live(a Agent) bool {
-	return procid.ID{PID: a.PID, Start: a.Start}.Running(r.procStart())
+// PolecatGlob is the glob matching every rig's polecat directories under
+// townRoot. The root is escaped, so a town under a directory whose name holds
+// a glob metacharacter still matches the polecats inside it rather than a
+// pattern of its own.
+func PolecatGlob(townRoot string) string {
+	return filepath.Join(quoteGlob(townRoot), "*", "polecats", "*")
+}
+
+// quoteGlob escapes every character filepath.Match reads as a pattern, so s
+// matches itself and nothing else. Windows reads '\' as a path separator
+// rather than an escape, so there a root is left as it is.
+func quoteGlob(s string) string {
+	if os.PathSeparator == '\\' {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, c := range s {
+		if c == '*' || c == '?' || c == '[' || c == ']' || c == '\\' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
+
+// Live reports whether a names a process that is still running. An error means
+// the process table could not be read: the caller must not read it as death.
+func (r *Registry) Live(a Agent) (bool, error) {
+	if a.PID <= 0 || a.Start == "" {
+		return false, nil
+	}
+	token, ok, err := r.procStart()(a.PID)
+	if err != nil {
+		return false, fmt.Errorf("reading the liveness of %s: %w", a.Name, err)
+	}
+	return ok && token == a.Start, nil
 }
 
 // Load returns the state under the registry lock.
@@ -77,13 +137,25 @@ func (r *Registry) Load() (*State, error) {
 // another Registry method: it already holds the lock, and a second acquisition
 // would wait on itself.
 func (r *Registry) Update(fn func(*State) error) error {
+	return r.mutate(func(st *State) (bool, error) {
+		return true, fn(st)
+	})
+}
+
+// mutate is Update with the choice of writing left to fn: it writes only when
+// fn reports a change, so a sweep that pruned nothing leaves the file alone.
+func (r *Registry) mutate(fn func(*State) (bool, error)) error {
 	return r.withLock(func() error {
 		st, err := r.read()
 		if err != nil {
 			return err
 		}
-		if err := fn(st); err != nil {
+		changed, err := fn(st)
+		if err != nil {
 			return err
+		}
+		if !changed {
+			return nil
 		}
 		write := r.Write
 		if write == nil {
@@ -96,13 +168,18 @@ func (r *Registry) Update(fn func(*State) error) error {
 	})
 }
 
-// List prunes dead agents from the state and returns the live ones by name.
+// List prunes dead agents from the state and returns the live ones by name. A
+// liveness it cannot read fails the list rather than pruning the agent, and a
+// list that prunes nothing does not rewrite the file.
 func (r *Registry) List() ([]Agent, error) {
 	var live []Agent
-	err := r.Update(func(st *State) error {
-		st.PruneDead(r.Live)
+	err := r.mutate(func(st *State) (bool, error) {
+		dropped, err := st.PruneDead(r.Live)
+		if err != nil {
+			return false, err
+		}
 		live = slices.Clone(st.Agents)
-		return nil
+		return dropped > 0, nil
 	})
 	if err != nil {
 		return nil, err
@@ -112,8 +189,12 @@ func (r *Registry) List() ([]Agent, error) {
 }
 
 // Bind records that name ran bead, adding nothing when the pair is already
-// bound, and reports whether it added the binding.
+// bound, and reports whether it added the binding. A name no session could use
+// is refused, since a binding keeps that name taken for good.
 func (r *Registry) Bind(name, bead string) (bool, error) {
+	if !ValidName(name) {
+		return false, fmt.Errorf("binding %q: %w", name, ErrInvalidName)
+	}
 	var added bool
 	err := r.Update(func(st *State) error {
 		added = st.Bind(name, bead, r.now())
@@ -149,8 +230,8 @@ func (r *Registry) Owns(name string) (bool, error) {
 	return false, nil
 }
 
-// Taken returns every name in use: bound names, names of live agents, and the
-// polecat directory names the glob matches.
+// Taken returns every name in use: bound names, reserved names, names of live
+// agents, and the polecat directory names the glob matches.
 func (r *Registry) Taken() (map[string]bool, error) {
 	st, err := r.Load()
 	if err != nil {
@@ -160,7 +241,10 @@ func (r *Registry) Taken() (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	taken := st.Taken(r.Live)
+	taken, err := st.Taken(r.now(), r.ttl(), r.Live)
+	if err != nil {
+		return nil, err
+	}
 	for _, name := range polecats {
 		taken[name] = true
 	}
@@ -184,23 +268,50 @@ func (r *Registry) PolecatNames() ([]string, error) {
 	return names, nil
 }
 
-// Pick returns a random free name from the pool; ok is false when every name
-// is taken.
+// Pick returns a random free name from the pool and reserves it under the
+// lock, so two launches never receive the same name before either binds it.
+// ok is false when every name is taken. The reservation is dropped when Bind
+// records the name, or when it ages past ReservationTTL: a launcher that dies
+// between Pick and Bind leaves no name held for good.
 func (r *Registry) Pick() (string, bool, error) {
-	taken, err := r.Taken()
+	var picked string
+	var free bool
+	err := r.mutate(func(st *State) (bool, error) {
+		now := r.now()
+		ttl := r.ttl()
+		dropped, err := st.PruneDead(r.Live)
+		if err != nil {
+			return false, err
+		}
+		dropped += st.PruneReservations(now, ttl)
+		taken, err := st.Taken(now, ttl, r.Live)
+		if err != nil {
+			return false, err
+		}
+		polecats, err := r.PolecatNames()
+		if err != nil {
+			return false, err
+		}
+		for _, name := range polecats {
+			taken[name] = true
+		}
+		candidates := make([]string, 0, len(r.pool()))
+		for _, name := range r.pool() {
+			if ValidName(name) && !taken[name] {
+				candidates = append(candidates, name)
+			}
+		}
+		if len(candidates) == 0 {
+			return dropped > 0, nil
+		}
+		picked, free = candidates[r.index(len(candidates))], true
+		st.Reserve(picked, now)
+		return true, nil
+	})
 	if err != nil {
 		return "", false, err
 	}
-	var free []string
-	for _, name := range r.pool() {
-		if ValidName(name) && !taken[name] {
-			free = append(free, name)
-		}
-	}
-	if len(free) == 0 {
-		return "", false, nil
-	}
-	return free[r.index(len(free))], true, nil
+	return picked, free, nil
 }
 
 func (r *Registry) pool() []string {
@@ -217,6 +328,13 @@ func (r *Registry) now() time.Time {
 	return time.Now()
 }
 
+func (r *Registry) ttl() time.Duration {
+	if r.ReservationTTL > 0 {
+		return r.ReservationTTL
+	}
+	return defaultReservationTTL
+}
+
 func (r *Registry) index(n int) int {
 	if r.Rand != nil {
 		return r.Rand(n)
@@ -224,11 +342,11 @@ func (r *Registry) index(n int) int {
 	return rand.IntN(n)
 }
 
-func (r *Registry) procStart() func(int) (string, bool) {
+func (r *Registry) procStart() func(int) (string, bool, error) {
 	if r.ProcStart != nil {
 		return r.ProcStart
 	}
-	return procid.StartToken
+	return startToken
 }
 
 func (r *Registry) lockPath() string {
@@ -243,9 +361,15 @@ func (r *Registry) withLock(fn func() error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating the bird registry directory: %w", err)
 	}
+	timeout := r.LockTimeout
+	if timeout <= 0 {
+		timeout = defaultLockTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	fl := flock.New(path)
-	if err := fl.Lock(); err != nil {
-		return fmt.Errorf("locking the bird registry: %w", err)
+	if locked, err := fl.TryLockContext(ctx, lockRetry); !locked {
+		return fmt.Errorf("waiting up to %s for the bird registry lock: %w", timeout, err)
 	}
 	defer func() { _ = fl.Unlock() }()
 	return fn()
@@ -270,4 +394,30 @@ func (r *Registry) read() (*State, error) {
 		st.Bindings = []Binding{}
 	}
 	return &st, nil
+}
+
+// startToken reads pid's start token from the kernel. A token the kernel will
+// not give may mean the process is gone or that the table cannot be read, and
+// only the second is an error: the registry prunes on the first alone.
+func startToken(pid int) (string, bool, error) {
+	return tokenFrom(pid, procid.StartToken, probeProcess)
+}
+
+// tokenFrom is startToken with its two kernel calls handed in, so a test can
+// drive every answer without a process table.
+func tokenFrom(pid int, token func(int) (string, bool), probe func(int) (bool, error)) (string, bool, error) {
+	if pid <= 0 {
+		return "", false, nil
+	}
+	if tok, ok := token(pid); ok {
+		return tok, true, nil
+	}
+	alive, err := probe(pid)
+	if err != nil {
+		return "", false, err
+	}
+	if alive {
+		return "", false, fmt.Errorf("the kernel gave no start token for process %d", pid)
+	}
+	return "", false, nil
 }

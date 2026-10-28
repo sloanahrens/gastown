@@ -1,6 +1,9 @@
 package bird
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Agent is one running bird: the process that holds a name.
 type Agent struct {
@@ -25,11 +28,25 @@ type Binding struct {
 	Time time.Time `json:"time"`
 }
 
-// State is the registry file: the agents holding names and the names bound to
-// beads.
+// Reservation is a name Pick handed out that nothing has bound yet. It keeps a
+// second Pick from choosing the same name, and expires so a launcher that dies
+// between Pick and Bind does not hold a name for good.
+type Reservation struct {
+	Name string    `json:"name"`
+	Time time.Time `json:"time"`
+}
+
+// Expired reports whether the reservation was made longer than ttl before now.
+func (res Reservation) Expired(now time.Time, ttl time.Duration) bool {
+	return now.Sub(res.Time) > ttl
+}
+
+// State is the registry file: the agents holding names, the names bound to
+// beads, and the names Pick has handed out that nothing bound yet.
 type State struct {
-	Agents   []Agent   `json:"agents"`
-	Bindings []Binding `json:"bindings"`
+	Agents       []Agent       `json:"agents"`
+	Bindings     []Binding     `json:"bindings"`
+	Reservations []Reservation `json:"reservations,omitempty"`
 }
 
 // Bound returns the newest name bound to bead.
@@ -50,8 +67,10 @@ func (s *State) Bound(bead string) (string, bool) {
 }
 
 // Bind records name bound to bead, adding nothing when that pair is already
-// bound, and reports whether it added the binding.
+// bound, and reports whether it added the binding. The name's reservation, if
+// Pick made one, is dropped: the name is bound, so nothing needs holding it.
 func (s *State) Bind(name, bead string, at time.Time) bool {
+	s.DropReservation(name)
 	for _, b := range s.Bindings {
 		if b.Name == name && b.Bead == bead {
 			return false
@@ -61,30 +80,79 @@ func (s *State) Bind(name, bead string, at time.Time) bool {
 	return true
 }
 
+// Reserve records that Pick handed out name at now, replacing any reservation
+// the name already had.
+func (s *State) Reserve(name string, now time.Time) {
+	s.DropReservation(name)
+	s.Reservations = append(s.Reservations, Reservation{Name: name, Time: now})
+}
+
+// DropReservation removes every reservation for name, if any.
+func (s *State) DropReservation(name string) {
+	kept := s.Reservations[:0]
+	for _, res := range s.Reservations {
+		if res.Name != name {
+			kept = append(kept, res)
+		}
+	}
+	s.Reservations = kept
+}
+
+// PruneReservations drops every reservation older than ttl at now and reports
+// how many it dropped.
+func (s *State) PruneReservations(now time.Time, ttl time.Duration) int {
+	kept := make([]Reservation, 0, len(s.Reservations))
+	for _, res := range s.Reservations {
+		if !res.Expired(now, ttl) {
+			kept = append(kept, res)
+		}
+	}
+	dropped := len(s.Reservations) - len(kept)
+	s.Reservations = kept
+	return dropped
+}
+
 // PruneDead drops every agent isLive rejects and reports how many it dropped.
-func (s *State) PruneDead(isLive func(Agent) bool) int {
-	kept := s.Agents[:0]
+// It stops at the first agent whose liveness cannot be read and leaves the
+// state as it was: an unreadable process is not a dead one, and a sweep must
+// not forget a bird because the process table would not answer.
+func (s *State) PruneDead(isLive func(Agent) (bool, error)) (int, error) {
+	kept := make([]Agent, 0, len(s.Agents))
 	for _, a := range s.Agents {
-		if isLive(a) {
+		live, err := isLive(a)
+		if err != nil {
+			return 0, fmt.Errorf("pruning the agents: %w", err)
+		}
+		if live {
 			kept = append(kept, a)
 		}
 	}
 	dropped := len(s.Agents) - len(kept)
 	s.Agents = kept
-	return dropped
+	return dropped, nil
 }
 
-// Taken returns every name the state holds: every bound name and every agent
-// isLive accepts.
-func (s *State) Taken(isLive func(Agent) bool) map[string]bool {
-	taken := make(map[string]bool, len(s.Bindings)+len(s.Agents))
+// Taken returns every name the state holds at now: every bound name, every
+// reservation younger than ttl, and every agent isLive accepts. An error from
+// isLive stops the walk, since a name it cannot judge may well be in use.
+func (s *State) Taken(now time.Time, ttl time.Duration, isLive func(Agent) (bool, error)) (map[string]bool, error) {
+	taken := make(map[string]bool, len(s.Bindings)+len(s.Agents)+len(s.Reservations))
 	for _, b := range s.Bindings {
 		taken[b.Name] = true
 	}
+	for _, res := range s.Reservations {
+		if !res.Expired(now, ttl) {
+			taken[res.Name] = true
+		}
+	}
 	for _, a := range s.Agents {
-		if isLive(a) {
+		live, err := isLive(a)
+		if err != nil {
+			return nil, fmt.Errorf("collecting the taken names: %w", err)
+		}
+		if live {
 			taken[a.Name] = true
 		}
 	}
-	return taken
+	return taken, nil
 }
