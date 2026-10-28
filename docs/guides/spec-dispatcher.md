@@ -61,7 +61,13 @@ decides and reports without slinging, labeling or commenting.
    is written. The beads the `spec-dispatch-failed`, `crew-only` and
    `human-only` labels hold ride the board so the tick names them in its skip
    line. Order is priority, then created_at, then id.
-3. Each candidate is linted, and `polecat_pool.shape_gate` decides what the
+3. A candidate with an unresolved blocking dependency is skipped with the
+   reason `blocked by <blocker> (<status>)`, even when the ready board listed
+   it: bd's ready query reads a deferred blocker as resolved and the dispatcher
+   does not (gt-ndad8). The edges come from the tick's one batched read per rig,
+   so the check costs no per-candidate read, and a candidate whose edges could
+   not be read waits for the next tick rather than dispatching blind.
+4. Each candidate is linted, and `polecat_pool.shape_gate` decides what the
    verdict does:
    - `off` holds and labels nothing the lint refuses (the verdict is still read
      for the overrun-stop flag below);
@@ -77,9 +83,9 @@ decides and reports without slinging, labeling or commenting.
      a bead that needs planning is held exactly as under `warn` (gt-tod3q).
      Under either gate the tick spawns no planner (gt-4rizh), so a held bead
      waits for the operator.
-4. A spec that clears the shape gate takes the first free seat and is slung
+5. A spec that clears the shape gate takes the first free seat and is slung
    through the shared rig-dispatch path in-process, with no auto-convoy.
-5. A bead that takes a seat and matches the overrun-stop box is slung anyway
+6. A bead that takes a seat and matches the overrun-stop box is slung anyway
    and wears one comment saying so (see below).
 
 ## The overrun-stop flag

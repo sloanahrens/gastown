@@ -85,6 +85,10 @@ type fakeSpecTown struct {
 	// children is each bead's direct child set, and childErrs a per-bead
 	// children read failure, for the container rule.
 	children map[string][]specdispatch.Child
+	// blockers is each bead's blocking edges as the board's detail read returns
+	// them, for the admission check (gt-ndad8). An id absent here is a bead
+	// whose read answered no dependencies.
+	blockers map[string][]beads.IssueDep
 	// showOverride is the full read the tick sees when it differs from the
 	// board snapshot: the board lagged a note the read carries (gt-kr5xv).
 	// An id absent here falls back to specs, so the common case needs no entry.
@@ -171,7 +175,7 @@ func (f *fakeSpecTown) rigOfBead(id string) string {
 func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	f := &fakeSpecTown{specs: map[string]specdispatch.Spec{}, rigHold: map[string]string{}, revert: map[string]*specdispatch.Revert{},
 		slingErrs: map[string][]error{}, originBranches: map[string]bool{}, notes: map[string][]string{}, labels: map[string][]string{},
-		children: map[string][]specdispatch.Child{}, childErrs: map[string]error{}, showSeq: map[string][]specRead{},
+		children: map[string][]specdispatch.Child{}, childErrs: map[string]error{}, showSeq: map[string][]specRead{}, blockers: map[string][]beads.IssueDep{},
 		held: map[string][]specdispatch.HeldBead{}, heldErr: map[string]error{}, heldRigs: map[string]int{},
 		omThreshold: map[string]float64{}, omThresholdErr: map[string]error{}, omThresholdReads: map[string]int{}}
 	for _, s := range specs {
@@ -213,7 +217,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			sort.Slice(skipped, func(i, j int) bool { return skipped[i].Bead < skipped[j].Bead })
 			out := make([]specCandidate, 0, len(list))
 			for _, s := range list {
-				out = append(out, specCandidate{Spec: s, Rig: f.rigOfBead(s.ID)})
+				out = append(out, specCandidate{Spec: s, Rig: f.rigOfBead(s.ID), Blockers: f.blockers[s.ID]})
 			}
 			return specBoardRead{Candidates: out, LabeledFailed: labeled, Skipped: skipped}
 		},

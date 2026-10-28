@@ -23,4 +23,8 @@ const (
 	// SkipStartupBackoff starts the reason a bead stays unslung while its rest
 	// after a failed session start runs (dispatch.StartupBackoff).
 	SkipStartupBackoff = "startup backoff:"
+	// SkipBlocked starts the reason a candidate is left ready because a
+	// blocking dependency of it has not resolved (gt-ndad8). The blockers, each
+	// naming the status the read gave it, follow.
+	SkipBlocked = "blocked by "
 )

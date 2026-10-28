@@ -705,6 +705,22 @@ func TestSpecDispatchTickLineStatesDetailReads(t *testing.T) {
 	}
 }
 
+// A candidate the tick skips because a blocking dependency is unresolved
+// reaches the tick line the operator reads, naming the blocker and the status
+// the read gave it (gt-ndad8).
+func TestSpecDispatchTickLineNamesABlockedSkip(t *testing.T) {
+	t.Parallel()
+	out := `{"roster": "claude-sonnet 1/2", "candidates": 1, "dispatched": [], "refused": [], "planning": [],` +
+		`"skipped": [{"bead": "gt-ndad8", "line": "gt-ndad8: blocked by gt-frtad (deferred)"}], "failed": []}`
+	lines := (&Daemon{}).formatSpecDispatchReport(wireOut(out))
+	if len(lines) == 0 {
+		t.Fatal("a tick with one blocked candidate logged nothing")
+	}
+	if want := "skipped: gt-ndad8 (blocked by gt-frtad (deferred))"; !strings.Contains(lines[0], want) {
+		t.Errorf("tick line %q does not name %q", lines[0], want)
+	}
+}
+
 // The tick the daemon starts names the daemon to the cache it keeps between
 // ticks, so a restarted daemon starts it empty (gt-l0vlf).
 func TestSpecDispatchCommandNamesTheCacheOwner(t *testing.T) {

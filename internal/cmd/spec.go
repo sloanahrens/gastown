@@ -680,15 +680,19 @@ func warnSpecHoldUnread(w io.Writer, what string, err error) {
 		style.Dim.Render("Warning:"), what, err)
 }
 
-// maxNamedBlockers bounds the blocker ids specPeerBlocked names, so one widely
-// blocked peer does not turn a hold line into a wall.
+// maxNamedBlockers bounds the blockers specPeerBlocked names, so one widely
+// blocked bead does not turn a hold line into a wall.
 const maxNamedBlockers = 3
 
-// specPeerBlocked names the blocking dependencies that keep the peer off the
-// ready board, and "" when it has none open. The dispatcher's draw is that
-// board, so a peer the query leaves out is never slung however eligible it is:
-// ranking it ahead of a candidate refuses the rest of its cluster until the
-// dependency closes (gt-mknmb).
+// specPeerBlocked names unresolved blockers — an id each for a peer's held
+// edges, or sling.Admit's reasons, which name the status they read — and ""
+// when there are none.
+//
+// The peer form is the blocking dependencies that keep a peer off the ready
+// board: the dispatcher's draw is that board, so a peer the query leaves out is
+// never slung however eligible it is, and ranking it ahead of a candidate
+// refuses the rest of its cluster until the dependency closes (gt-mknmb). The
+// admission form is the refusal the tick's own skip line carries (gt-ndad8).
 func specPeerBlocked(open []string) string {
 	if len(open) == 0 {
 		return ""
@@ -698,7 +702,7 @@ func specPeerBlocked(open []string) string {
 		more = len(named) - maxNamedBlockers
 		named = named[:maxNamedBlockers]
 	}
-	reason := "blocked by " + strings.Join(named, ", ")
+	reason := specdispatch.SkipBlocked + strings.Join(named, ", ")
 	if more > 0 {
 		reason += fmt.Sprintf(" (+%d more)", more)
 	}
@@ -900,6 +904,13 @@ type specDispatchEntry struct {
 type specCandidate struct {
 	Spec specdispatch.Spec
 	Rig  string
+	// Blockers are the bead's blocking edges, from the board's detail read, for
+	// the admission check (sling.Admit). The ready board carries no dependency
+	// rows (gt-ndad8), so an empty slice is a bead the read answered as having
+	// none; a candidate whose edges could not be read is dropped before the
+	// tick sees it, because a bead with no list is not a bead with no blockers
+	// (specBoardDetails, gt-o70a9's rule for Admit's caller).
+	Blockers []beads.IssueDep
 	// Run is the formula, variables and actor the bead declares for its own
 	// sling; the zero value is a bead that declares none (gt-j5cr2). The tick
 	// fills it from the fresh read, before the seat is chosen.
@@ -1126,6 +1137,21 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		full := c.Spec
 		if ok, why := specdispatch.Eligible(full, env.MaxPriority); !ok {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s (%s)", id, specdispatch.SkipNotEligible, why)})
+			continue
+		}
+		// Blocked-work admission (gt-e3hl2, gt-ndad8): a bead one of whose
+		// blocking edges is still unresolved is work something else has to
+		// finish first, so a seat spent on it is a seat spent twice. The ready
+		// board is not that check — bd's ready query reads a deferred blocker as
+		// resolved, and this dispatcher does not, so a bead the board lists can
+		// still be blocked (gt-ndad8) — and the board is a snapshot of a tick
+		// that can run for minutes (gt-ewrtm). The edges are the board's detail
+		// read (specBoardDetails), so the loop spends no read here, and a
+		// candidate whose edges could not be read never reached it. A refusal is
+		// a skip, not a failure: the bead stays ready and the next tick asks
+		// again once the blocker closes.
+		if why := specPeerBlocked(sling.Admit(c.Blockers)); why != "" {
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, why)})
 			continue
 		}
 		// A held rig is skipped before any read or write of its beads, and
@@ -2057,7 +2083,7 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 				reads.call()
 				return specReadyBoard(rigPath)
 			})
-			read = specBoardDesigns(reads, func(rig string) beads.Client {
+			read = specBoardDetails(reads, func(rig string) beads.Client {
 				return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
 			}, read)
 			annotations.observe(read)
@@ -2412,20 +2438,21 @@ func specCandidatesWith(townRoot string, maxPriority int, board specBoard, rigSt
 	return read
 }
 
-// specBoardDesigns fills the design a board row may leave out. A row without
-// one is either a bead with no design or one the row dropped, and the rig's
-// own store answers which. The
-// candidates that need it are read with one ShowMultiple per rig, never one
-// show per candidate (gt-bqj8q). A candidate whose design cannot be read is
-// dropped with its error: the design is part of the spec the lint reads, so
-// the bead waits for the next tick rather than dispatching without it.
-func specBoardDesigns(reads *specTickReads, storeFor func(rig string) beads.Client, read specBoardRead) specBoardRead {
+// specBoardDetails fills the two things a board row cannot: the design the lint
+// reads, which a row may leave out, and the blocking edges the admission check
+// runs sling.Admit on, which a row never carries (gt-ndad8). The rig's own
+// store answers both, with one ShowMultiple per rig over every candidate —
+// never one show per candidate (gt-bqj8q). A design the row already carries is
+// kept as it is; the edges are always the read's, because a row that says
+// nothing about dependencies is not a row that says there are none.
+//
+// A candidate the read does not answer is dropped with its error: the edges are
+// unread, and a bead with no list is not a bead with no blockers (gt-o70a9). It
+// waits for the next tick rather than dispatching blind.
+func specBoardDetails(reads *specTickReads, storeFor func(rig string) beads.Client, read specBoardRead) specBoardRead {
 	var rigs []string
 	byRig := map[string][]int{}
 	for i, c := range read.Candidates {
-		if c.Spec.Design != "" {
-			continue
-		}
 		if _, seen := byRig[c.Rig]; !seen {
 			rigs = append(rigs, c.Rig)
 		}
@@ -2441,16 +2468,20 @@ func specBoardDesigns(reads *specTickReads, storeFor func(rig string) beads.Clie
 		issues, err := reads.client(storeFor(rig)).ShowMultiple(ids)
 		for _, i := range idx {
 			id := read.Candidates[i].Spec.ID
-			if issue := issues[id]; issue != nil {
-				read.Candidates[i].Spec.Design = issue.Design
+			issue := issues[id]
+			if issue == nil {
+				dropped[i] = true
+				reason := "not found"
+				if err != nil {
+					reason = firstErrLine(err)
+				}
+				read.Errors = append(read.Errors, fmt.Sprintf("%s: cannot read design and blockers: %s", id, reason))
 				continue
 			}
-			dropped[i] = true
-			reason := "not found"
-			if err != nil {
-				reason = firstErrLine(err)
+			if read.Candidates[i].Spec.Design == "" {
+				read.Candidates[i].Spec.Design = issue.Design
 			}
-			read.Errors = append(read.Errors, fmt.Sprintf("%s: cannot read design: %s", id, reason))
+			read.Candidates[i].Blockers = issue.Dependencies
 		}
 	}
 	if len(dropped) == 0 {
