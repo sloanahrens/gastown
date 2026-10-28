@@ -58,6 +58,31 @@ func TestReviewsFileAppendAndSince(t *testing.T) {
 	}
 }
 
+// TestIsQueueLine: the one decision on what a queue line is. A payload names
+// one, whether or not it carries findings; a null payload names none, which is
+// what every reader that decodes the record already assumed (gt-3arxj).
+func TestIsQueueLine(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"a queue line with findings", `{"bead":"gt-q","at":"2026-10-20T12:00:00Z","followup_queue":{"findings":[{"title":"name the error"}]}}`, true},
+		{"a queue line with an empty payload", `{"bead":"gt-q","followup_queue":{}}`, true},
+		{"a null payload", `{"bead":"gt-q","followup_queue":null}`, false},
+		{"a verdict", `{"bead":"gt-v","verdict":"approve","score":0.9,"at":"2026-10-20T12:00:00Z"}`, false},
+		{"a line that is not JSON", `{"bead":"gt-broken"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsQueueLine([]byte(tc.raw)); got != tc.want {
+				t.Errorf("IsQueueLine(%s) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 // A line left torn by a crash is repaired before the next record, and a line
 // that does not parse is skipped, so the records around it still read.
 func TestReviewsFileSurvivesATornLine(t *testing.T) {
@@ -178,9 +203,9 @@ func TestCompactKeepsEveryLineItDoesNotDrop(t *testing.T) {
 	if err := os.WriteFile(f.Path, []byte(countOnly+"\n"+string(done)+"\n"+string(waiting)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	dropped, err := f.Compact(func(q QueuedFollowup) bool { return q.Bead == "gt-done" })
-	if err != nil || dropped != 1 {
-		t.Fatalf("Compact = %d dropped, %v; want the one consumed line", dropped, err)
+	res, err := f.Compact(func(q QueuedFollowup) bool { return q.Bead == "gt-done" })
+	if err != nil || res != (CompactResult{Dropped: 1}) {
+		t.Fatalf("Compact = %+v, %v; want the one consumed line", res, err)
 	}
 	raw, err := os.ReadFile(f.Path)
 	if err != nil {
@@ -277,9 +302,9 @@ func TestCompactLeavesTheLogAloneWithNothingConsumed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dropped, err := f.Compact(func(QueuedFollowup) bool { return false })
-	if err != nil || dropped != 0 {
-		t.Fatalf("Compact = %d dropped, %v; want nothing dropped", dropped, err)
+	res, err := f.Compact(func(QueuedFollowup) bool { return false })
+	if err != nil || res != (CompactResult{}) {
+		t.Fatalf("Compact = %+v, %v; want nothing dropped", res, err)
 	}
 	after, err := os.ReadFile(f.Path)
 	if err != nil {

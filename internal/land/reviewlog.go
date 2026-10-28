@@ -40,9 +40,10 @@ const (
 	// however short its claims are (gt-3arxj).
 	maxQueueLineFindings = 64
 
-	// maxCompactLineBytes is the longest line compaction will copy. A line past
-	// it fails the compaction, which is fail-soft: the queue keeps working, it
-	// is just not compacted (gt-3arxj).
+	// maxCompactLineBytes is the longest line compaction examines. A longer line
+	// is copied through unexamined and counted in CompactResult.Unread: on a
+	// log this writer only appends verdicts to, dropping it could lose one
+	// (gt-3arxj).
 	maxCompactLineBytes = 16 << 20
 )
 
@@ -131,6 +132,26 @@ type ReviewFindingText struct {
 	Claim string `json:"claim,omitempty"`
 }
 
+// IsQueueLine reports whether raw is a follow-up queue line: a record whose
+// followup_queue carries a payload, which the feed's backpressure bound holds
+// findings in until a later landing has room (gt-3arxj). Every reader of the
+// log decides this here — the feed's own reads, the om-stats report, the
+// metrics loaders and the rejection join — so none can drift on what a queue
+// line is.
+//
+// A null payload names no queue line: it carries no findings, and the readers
+// that decode the record read it the same way. The loaders therefore report such
+// a line as one they could not use rather than skipping it uncounted, so a
+// hand-edited marker is never silently a review (gt-3arxj).
+func IsQueueLine(raw []byte) bool {
+	var line struct {
+		Queue *json.RawMessage `json:"followup_queue"`
+	}
+	// A JSON null unmarshals into a nil pointer, so the marker is the payload
+	// itself rather than the field's presence.
+	return json.Unmarshal(raw, &line) == nil && line.Queue != nil
+}
+
 // reviewFindingTexts is a verdict's findings as its record keeps them.
 func reviewFindingTexts(findings []Finding) []ReviewFindingText {
 	if len(findings) == 0 {
@@ -199,6 +220,11 @@ type ReviewsFile struct {
 	// which writes beside the log and renames it into place. It is a seam: the
 	// compaction's failure path is a filesystem error a test cannot provoke.
 	replace func(path string, data []byte, mode os.FileMode) error
+
+	// lineLimit overrides maxCompactLineBytes; a test sets a small bound here
+	// rather than write a 16 MiB line to drive the oversize path. Zero means
+	// maxCompactLineBytes.
+	lineLimit int
 }
 
 // TownReviewsFile is <town>/.runtime/landings/reviews.jsonl.
@@ -283,11 +309,11 @@ func (f *ReviewsFile) Queued() ([]QueuedFollowup, error) {
 	defer func() { _ = fh.Close() }()
 	var queued []QueuedFollowup
 	err = scanReviewLines(fh, func(raw []byte) {
-		if len(raw) == 0 {
+		if !IsQueueLine(raw) {
 			return
 		}
 		var rec ReviewRecord
-		if json.Unmarshal(raw, &rec) != nil || rec.Queue == nil {
+		if json.Unmarshal(raw, &rec) != nil {
 			return
 		}
 		queued = append(queued, QueuedFollowup{Bead: rec.BeadID, Rig: rec.Rig, At: rec.At,
@@ -355,11 +381,11 @@ func (f *ReviewsFile) Since(t time.Time) ([]ReviewRecord, error) {
 	defer func() { _ = fh.Close() }()
 	var recs []ReviewRecord
 	err = scanReviewLines(fh, func(raw []byte) {
-		if len(raw) == 0 {
+		if IsQueueLine(raw) {
 			return
 		}
 		var rec ReviewRecord
-		if json.Unmarshal(raw, &rec) != nil || rec.At.Before(t) || rec.Queue != nil {
+		if json.Unmarshal(raw, &rec) != nil || rec.At.Before(t) {
 			return
 		}
 		recs = append(recs, rec)
@@ -370,59 +396,81 @@ func (f *ReviewsFile) Since(t time.Time) ([]ReviewRecord, error) {
 	return recs, nil
 }
 
+// CompactResult is what one compaction did.
+type CompactResult struct {
+	// Dropped counts the consumed queue lines it left out of the new log.
+	Dropped int
+	// Unread counts the lines past the compaction's byte bound. They are copied
+	// through as they were: a line that long is not one this writer makes — a
+	// queue line is chunked well under it — so it may be a verdict, and the log
+	// only ever appends verdicts (gt-3arxj).
+	Unread int
+}
+
 // Compact rewrites the log without the queue lines the feed is done with:
 // consumed reports whether a queue line's findings are all covered, and such a
 // line is dropped. Every other line — a verdict, a queue line still waiting,
 // even a line no reader can parse — is copied byte for byte, so no record is
-// rewritten and a count-only record survives as it was (gt-3arxj). It returns
-// how many lines it dropped.
+// rewritten and a count-only record survives as it was. A line past
+// maxCompactLineBytes is copied unexamined and counted in Unread rather than
+// failing the compaction, so the lines around it still compact (gt-3arxj).
 //
 // The new file is written beside the log and renamed over it, so a reader sees
 // the log before or after the compaction and never a half-written one. Every
 // write to the log in this process holds reviewsMu, so no other rig's landing
 // worker can append into the file that is being replaced.
-func (f *ReviewsFile) Compact(consumed func(QueuedFollowup) bool) (int, error) {
+func (f *ReviewsFile) Compact(consumed func(QueuedFollowup) bool) (CompactResult, error) {
 	reviewsMu.Lock()
 	defer reviewsMu.Unlock()
 	dir := filepath.Dir(f.Path)
 	if err := ensureLandingsDir(dir); err != nil {
-		return 0, err
+		return CompactResult{}, err
 	}
 	fh, err := os.OpenFile(f.Path, os.O_RDONLY|oNoFollow, 0)
 	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
+		return CompactResult{}, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("opening reviews file: %w", err)
+		return CompactResult{}, fmt.Errorf("opening reviews file: %w", err)
 	}
+	limit := f.lineLimit
+	if limit <= 0 {
+		limit = maxCompactLineBytes
+	}
+	var res CompactResult
 	var kept [][]byte
-	dropped := 0
-	sc := bufio.NewScanner(fh)
-	sc.Buffer(make([]byte, 64*1024), maxCompactLineBytes)
-	for sc.Scan() {
-		raw := bytes.TrimSpace(sc.Bytes())
+	err = scanLogLines(fh, func(line []byte) {
+		raw := bytes.TrimSpace(line)
 		if len(raw) == 0 {
-			continue
+			return
+		}
+		if len(raw) > limit {
+			res.Unread++
+			kept = append(kept, raw)
+			return
+		}
+		if !IsQueueLine(raw) {
+			kept = append(kept, raw)
+			return
 		}
 		var rec ReviewRecord
-		if json.Unmarshal(raw, &rec) == nil && rec.Queue != nil && consumed(QueuedFollowup{
+		if json.Unmarshal(raw, &rec) != nil || rec.Queue == nil || !consumed(QueuedFollowup{
 			Bead: rec.BeadID, Rig: rec.Rig, At: rec.At,
 			Landed: rec.Queue.Landed, Score: rec.Queue.Score, Findings: rec.Queue.Findings,
 		}) {
-			dropped++
-			continue
+			kept = append(kept, raw)
+			return
 		}
-		kept = append(kept, append([]byte(nil), raw...))
+		res.Dropped++
+	})
+	if cerr := fh.Close(); err == nil {
+		err = cerr
 	}
-	serr := sc.Err()
-	if cerr := fh.Close(); serr == nil {
-		serr = cerr
+	if err != nil {
+		return CompactResult{}, fmt.Errorf("reading reviews file %s: %w", f.Path, err)
 	}
-	if serr != nil {
-		return 0, fmt.Errorf("reading reviews file %s: %w", f.Path, serr)
-	}
-	if dropped == 0 {
-		return 0, nil
+	if res.Dropped == 0 {
+		return res, nil
 	}
 	var buf bytes.Buffer
 	for _, line := range kept {
@@ -434,7 +482,27 @@ func (f *ReviewsFile) Compact(consumed func(QueuedFollowup) bool) (int, error) {
 		replace = config.ReplaceFile
 	}
 	if err := replace(f.Path, buf.Bytes(), 0o600); err != nil {
-		return 0, fmt.Errorf("replacing reviews file: %w", err)
+		return CompactResult{}, fmt.Errorf("replacing reviews file: %w", err)
 	}
-	return dropped, nil
+	return res, nil
+}
+
+// scanLogLines calls fn for each line of r without its line break. It reads
+// through a bufio.Reader, so no line has a length limit: one enormous line is
+// data for fn to judge, not a read error that kills the whole read. Only an I/O
+// error is returned.
+func scanLogLines(r io.Reader, fn func(line []byte)) error {
+	br := bufio.NewReader(r)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			fn(bytes.TrimRight(line, "\r\n"))
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }

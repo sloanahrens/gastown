@@ -339,8 +339,9 @@ func parseReviewRecords(data []byte) ([]land.ReviewRecord, int) {
 			continue
 		}
 		// A follow-up queue line is the feed's bookkeeping rather than a
-		// verdict, and it is one this reader knows to skip (gt-3arxj).
-		if rec.Queue != nil {
+		// verdict, and land.IsQueueLine is the one decision on what one is
+		// (gt-3arxj).
+		if land.IsQueueLine([]byte(line)) {
 			continue
 		}
 		if rec.Verdict == "" {
