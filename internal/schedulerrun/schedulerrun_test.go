@@ -272,6 +272,31 @@ func TestDispatchReady_ReturnsTheSlingFailure(t *testing.T) {
 	}
 }
 
+// A run whose context has ended slings nothing: the check comes before the
+// install read and the sling, and its refusal is the context's own error.
+func TestDispatchReady_CancelledRunSlingsNothing(t *testing.T) {
+	t.Parallel()
+	slung := 0
+	r := &runner{deps: Deps{
+		PendingInstall: func(string) (*installpending.Marker, error) { return nil, nil },
+		Sling: func(context.Context, string, capacity.PendingBead) (SlingOutcome, error) {
+			slung++
+			return SlingOutcome{}, nil
+		},
+	}}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := r.dispatchReady(ctx, t.TempDir(), capacity.PendingBead{ID: "ctx-1", WorkBeadID: "gt-a"},
+		map[string]string{}, map[string]bool{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("dispatchReady = %v, want the run's context error", err)
+	}
+	if slung != 0 {
+		t.Errorf("the sling ran %d time(s) after the run's context ended", slung)
+	}
+}
+
 // gt-c0nvv: a sling that meets an install mid-cycle leaves its context queued
 // through the cycle a run executes: the deferral is named as the install hold,
 // the context is not counted toward the circuit breaker, and nothing is slung

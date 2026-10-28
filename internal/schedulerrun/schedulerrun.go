@@ -379,8 +379,12 @@ func asDeferral(err error) (*Deferral, bool) {
 // it. The plan was made once, but an install can start while the cycle runs it
 // (the slings and the delay between them), so the marker is read again here:
 // the context stays queued as a deferral, never a failure the circuit breaker
-// would close it on (gt-2rp64, gt-c0nvv).
+// would close it on (gt-2rp64, gt-c0nvv). A run whose context has ended slings
+// nothing.
 func (r *runner) dispatchReady(ctx context.Context, townRoot string, b capacity.PendingBead, polecatNames map[string]string, successfulRigs map[string]bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if deferral := r.installPendingDeferral(townRoot); deferral != nil {
 		return deferral
 	}
@@ -409,9 +413,6 @@ func (r *runner) dispatchCycle(ctx context.Context, townRoot string, spawnDelay 
 			return r.validateForDispatch(townRoot, b, true)
 		},
 		Execute: func(b capacity.PendingBead) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
 			return r.dispatchReady(ctx, townRoot, b, polecatNames, successfulRigs)
 		},
 		OnSuccess: func(b capacity.PendingBead) error {
