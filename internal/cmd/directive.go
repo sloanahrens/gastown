@@ -7,10 +7,27 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// directiveLong is the `gt directive` help. The layer directories are built by
-// the config package with a placeholder town root and rig name, so the help
-// names what the reader resolves and 'gt directive list' prints rather than a
-// path the layout no longer uses (gt-oz73l).
+// The layer directories the help prints, with the placeholder town root and rig
+// name an operator reads, built by the config package so the help names what the
+// reader resolves rather than a path the layout no longer uses (gt-oz73l).
+var (
+	helpCentralDir = config.CentralDirectiveDir("<townRoot>")
+	helpRigDir     = config.RigDirectiveDir("<townRoot>", "<rig>")
+)
+
+// helpLegacyFallback is the help's legacy fallback paragraph. Each legacy
+// directory is named with the layer directory it stands in for, since the reader
+// falls back within the same layer and the central layer has no layer above it
+// (gt-v1ln5).
+var helpLegacyFallback = fmt.Sprintf(`Legacy fallback: a legacy file stands in for the new file of its own layer,
+and is read only where that new file does not exist.
+  <townRoot>/directives/<role>.md, the central layer's predecessor, stands
+    in for %s/<role>.md.
+  <townRoot>/<rig>/directives/<role>.md, the rig layer's predecessor, stands
+    in for %s/<role>.md.
+The reader logs a warning naming each legacy file it reads.`, helpCentralDir, helpRigDir)
+
+// directiveLong is the `gt directive` help.
 var directiveLong = fmt.Sprintf(`Manage operator-provided role directives.
 
 Directives are markdown files that customize agent behavior per role.
@@ -27,9 +44,7 @@ File layout (the absolute paths 'gt directive list' prints):
   Rig layer, that rig only: %s/<role>.md
   Every role:               _common.md in each layer in place of <role>.md
 
-Legacy fallback: <townRoot>/directives/<role>.md and
-<townRoot>/<rig>/directives/<role>.md. A legacy file is read only where the
-layer above has no file of that name, and the reader logs a warning naming it.
+%s
 
 Resolution: every file that exists is concatenated, broadest first, most
 specific last — central _common, rig _common, central <role>, rig <role> — so
@@ -44,8 +59,9 @@ Examples:
   gt directive edit crew                # Edit crew directive (rig-level)
   gt directive edit _common             # Edit policy that every role loads
   gt directive list                     # List all directive files`,
-	config.CentralDirectiveDir("<townRoot>"),
-	config.RigDirectiveDir("<townRoot>", "<rig>"),
+	helpCentralDir,
+	helpRigDir,
+	helpLegacyFallback,
 )
 
 var directiveCmd = &cobra.Command{
