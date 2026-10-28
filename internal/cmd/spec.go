@@ -591,6 +591,10 @@ func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, peer sling.Duplic
 	} else if why := knobs.Backoff(peer.ID); why != "" {
 		return why
 	}
+	// A peer's open blockers keep it off the ready board the dispatcher draws
+	// from, so the query never slings it however eligible it is, and ranking it
+	// ahead of a candidate refuses the rest of its cluster until the dependency
+	// closes (gt-mknmb).
 	if why := specPeerBlocked(peer.Ready.OpenBlockers); why != "" {
 		return why
 	}
@@ -684,15 +688,8 @@ func warnSpecHoldUnread(w io.Writer, what string, err error) {
 // blocked bead does not turn a hold line into a wall.
 const maxNamedBlockers = 3
 
-// specPeerBlocked names unresolved blockers — an id each for a peer's held
-// edges, or sling.Admit's reasons, which name the status they read — and ""
-// when there are none.
-//
-// The peer form is the blocking dependencies that keep a peer off the ready
-// board: the dispatcher's draw is that board, so a peer the query leaves out is
-// never slung however eligible it is, and ranking it ahead of a candidate
-// refuses the rest of its cluster until the dependency closes (gt-mknmb). The
-// admission form is the refusal the tick's own skip line carries (gt-ndad8).
+// specPeerBlocked names at most maxNamedBlockers of the blockers in open as a
+// refusal line, and "" when there are none.
 func specPeerBlocked(open []string) string {
 	if len(open) == 0 {
 		return ""
@@ -1139,6 +1136,15 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s (%s)", id, specdispatch.SkipNotEligible, why)})
 			continue
 		}
+		// A held rig is skipped before any read or write of its beads, and
+		// before the admission check and the per-tick limit below: the hold,
+		// not a blocker or the tick's seat count, is what stops these beads, so
+		// their skip line names the hold rather than a reason that would hide it
+		// (gt-vty1v).
+		if hold := env.RigHold(c.Rig); hold != "" {
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %s", id, specdispatch.SkipRigHold, hold)})
+			continue
+		}
 		// Blocked-work admission (gt-e3hl2, gt-ndad8): a bead one of whose
 		// blocking edges is still unresolved is work something else has to
 		// finish first, so a seat spent on it is a seat spent twice. The ready
@@ -1152,14 +1158,6 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// again once the blocker closes.
 		if why := specPeerBlocked(sling.Admit(c.Blockers)); why != "" {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, why)})
-			continue
-		}
-		// A held rig is skipped before any read or write of its beads, and
-		// before the per-tick limit below: the hold, not the tick's seat count,
-		// is what stops these beads, so their skip line names the hold rather
-		// than a limit that would hide it (gt-vty1v).
-		if hold := env.RigHold(c.Rig); hold != "" {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %s", id, specdispatch.SkipRigHold, hold)})
 			continue
 		}
 		// A bead may declare the formula that runs it. A declaration the tick
