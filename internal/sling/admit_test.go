@@ -12,6 +12,7 @@ import (
 // refuses a bead waiting on a deferred blocker — so they go red if the rule
 // they delegate to ever stops counting deferred as unresolved (gt-o70a9).
 func TestAdmit(t *testing.T) {
+	t.Parallel()
 	edge := func(id, status, depType string) beads.IssueDep {
 		return beads.IssueDep{ID: id, Status: status, DependencyType: depType}
 	}
