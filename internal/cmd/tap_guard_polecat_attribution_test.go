@@ -120,6 +120,23 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 		{"comment text from a file flag equals form", `bd comments add gt-x --file=notes.txt`, polecatCommentInputReason},
 		{"comment text from stdin", `bd comment gt-x --stdin`, polecatCommentInputReason},
 		{"note text from stdin in a pipe", `echo fine | bd note gt-x --stdin`, polecatCommentInputReason},
+		// The heredoc recipe the directive used to give (gt-9j9vu): the guard
+		// cannot read the file the substitution carries, so it refuses the text
+		// whatever the file holds.
+		{"note text read from a file by substitution", `gt bead note gt-x "$(cat note.txt)"`, polecatUnresolvedTextReason},
+		{"comment text read from a file by substitution", `bd comments add gt-x "$(cat note.txt)"`, polecatUnresolvedTextReason},
+		// The rest of the forms the bead-text directive names, on the gt bead
+		// verb it tells a polecat to use (gt-9j9vu): the heredoc recipe whole, a
+		// substitution as the text, and a marker prefix the expansion completes.
+		{"heredoc then substitution on gt bead note", "cat > note.txt <<'EOF'\nthe text\nEOF\ngt bead note gt-x \"$(cat note.txt)\"", polecatUnresolvedTextReason},
+		{"backtick substitution as gt bead note text", "gt bead note gt-x \"`echo ACCEPTED-RISK: ok`\"", polecatUnresolvedTextReason},
+		{"marker prefix then a variable on gt bead note", `gt bead note gt-x "ACCEPTED-RISK$X"`, polecatUnresolvedTextReason},
+		{"comment text read from a file by substitution on gt bead comment", `gt bead comment gt-x "$(cat note.txt)"`, polecatUnresolvedTextReason},
+		// The directive's own recommended form is no way past the marker:
+		// single quotes stop the shell expanding, not the guard reading the
+		// text, so a literal ACCEPTED-RISK: in it is refused as one (gt-9j9vu).
+		{"literal accepted-risk in the single-quoted note", `gt bead note gt-x 'ACCEPTED-RISK: the retry is fine'`, polecatAcceptedRiskReason},
+		{"literal accepted-risk in the single-quoted comment", `gt bead comment gt-x 'ACCEPTED-RISK: the retry is fine'`, polecatAcceptedRiskReason},
 
 		{"global value flag before the verb", `bd --db /p/x.db comments add gt-x --author Sloan hi`, polecatAttributionReason},
 		{"format flag before the verb", `bd --format json comments add gt-x "ACCEPTED-RISK: fine"`, polecatAcceptedRiskReason},
@@ -145,6 +162,16 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 
 		{"ordinary comment", `bd comments add gt-x "found the cause in tap_guard.go"`, ""},
 		{"ordinary note", `gt bead note gt-x "Findings: the retry never resets"`, ""},
+		// The rule the directive gives (gt-9j9vu): one single-quoted argument,
+		// across as many lines as the text needs.
+		{"multi-line literal note", "gt bead note gt-x 'line one\nline two'", ""},
+		// The forms the directive says pass: a note about code written in single
+		// quotes keeps its backticks and substitution, a text holding a single
+		// quote of its own takes double quotes with the expansion escaped, and
+		// an expansion later in the text is allowed (gt-9j9vu).
+		{"single-quoted note keeps its backticks", "gt bead note gt-x 'run $(git log) and `git status` to see'", ""},
+		{"single quote of its own in double quotes", `gt bead note gt-x "it's the \$HOME value"`, ""},
+		{"expansion later in a gt bead note", `gt bead note gt-x "see $HOME for the config"`, ""},
 		{"ordinary append-notes", `bd update gt-x --append-notes "progress"`, ""},
 		{"ordinary create notes", `bd create "a title" --notes "context"`, ""},
 		{"dash a as comment text", `bd comments add gt-x -- "-a is the author flag"`, ""},

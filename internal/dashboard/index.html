@@ -1976,8 +1976,8 @@ function renderDeploys(s) {
   ].filter(Boolean).join(" · ");
   const runs = d.runs || [], health = d.health || [];
   // A block with neither kind of row is still a town with no deploys: the
-  // scheduled rows are drawn only where a repo has health runs, so their
-  // absence is not something this note has to name.
+  // scheduled rows are drawn only where a repo deploys or has health runs, so
+  // their absence is not something this note has to name.
   if (!runs.length && !health.length) { box.append(el("div", err ? "badc" : "empty", err ? "no deploy runs: " + err : "no deploy runs yet")); return; }
   // The repo column is as wide as the longest name the block lists, plus one
   // character so the rounding of a name that fits does not ellipsize it, and
@@ -2034,7 +2034,10 @@ const HEALTH_RESULT = {success: "green", failure: "failed", skipped: "off on pur
 // passed.
 const HEALTH_RESULT_CLASS = {success: "good", failure: "badc"};
 
+// An app that deploys with no scheduled check yet has no run to read, so its
+// row says it has no check rather than a result (the reader's NoChecks).
 function healthResult(h) {
+  if (h.no_checks) return "no scheduled checks yet";
   const raw = h.status || "";
   return HEALTH_RESULT[raw] || raw || "–";
 }

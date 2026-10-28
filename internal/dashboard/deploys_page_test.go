@@ -1,12 +1,14 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"io"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/steveyegge/gastown/internal/forgejo"
 )
@@ -330,6 +332,63 @@ func TestDeploysBlockDrawsTheScheduledHealthRows(t *testing.T) {
 			t.Errorf("index.html has no %q", want)
 		}
 	}
+}
+
+// An app that deploys with no scheduled check yet is drawn saying so, not with a
+// result. This runs the reader over such an app beside one that passes, hands
+// the page the reading the server would send, and reads both rows back: the
+// no-check row's result is the page's own words in the column's dim, so it can
+// never read as a pass or a failure.
+func TestDeploysBlockDrawsAnAppWithNoScheduledCheckAsSayingSo(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/beads", "sloan/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{
+			"sloan/beads":           {testDeployRun(4, "v0.2.0", "success", 20)},
+			"sloan/fractals-nextjs": {testHealthRun(1, "success", 5)},
+		},
+		jobs: map[int64][]forgejo.ActionRunJob{1: healthJobs("success", "success", "success")},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+	require.Len(t, d.Health, 4, "beads' two no-check rows and fractals' two that ran")
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderDeploys", deployPageState(t, d))
+
+	// The block's children are the runs' header and row, the scheduled rows'
+	// header, then a row per app and environment in repo order; the result is the
+	// third cell of a row.
+	const beadsStaging, beadsProd, fractalsStaging = 3, 4, 5
+	for _, row := range []int{beadsStaging, beadsProd} {
+		result := dom.descend(t, "deploys", row, 2)
+		if result.Text != "no scheduled checks yet" {
+			t.Errorf("row %d draws its result as %q, want the app said to have no check yet", row, result.Text)
+		}
+		if result.Class != "hstate title" {
+			t.Errorf("row %d's result wears %q, want the column's dim: a check that has not run may not take a pass or a failure colour", row, result.Class)
+		}
+	}
+	if result := dom.descend(t, "deploys", fractalsStaging, 2); result.Text != "green" || result.Class != "hstate good" {
+		t.Errorf("the app that passed draws %q in %q, want the page's own word for a pass", result.Text, result.Class)
+	}
+}
+
+// deployPageState is the reading as the page receives it: the block marshalled
+// the way the server sends it, so a render test runs over the fields the reader
+// actually fills rather than a hand-written shape.
+func deployPageState(t *testing.T, d *Deploys) map[string]any {
+	t.Helper()
+
+	raw, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("marshalling the reader's reading: %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal([]byte(`{"deploys":`+string(raw)+`}`), &state); err != nil {
+		t.Fatalf("handing the page the reader's reading: %v", err)
+	}
+	return state
 }
 
 // A failed scheduled check is marked in the header, where a glance at the page
