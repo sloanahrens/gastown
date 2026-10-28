@@ -1,7 +1,13 @@
 // Package registry talks to the container registry's v2 HTTP API and decides
-// which manifests a maintenance run may delete. Every name taken from the
-// registry or from the sandbox records is validated before it reaches a URL
-// path or a command.
+// which manifests a maintenance run may delete.
+//
+// The Valid predicates decide whether a name may sit in a URL path or a
+// command. The client applies them to the names its caller passes, returning
+// ErrBadName and sending nothing. A name a listing returns is not checked
+// there: it comes back as read, and the code that uses one checks it first — a
+// repo or ref before it names a request, a listing entry as the plan is built,
+// a digest read from a response as that response is parsed. A name read from
+// the sandbox records is checked as the record is parsed.
 package registry
 
 import (
