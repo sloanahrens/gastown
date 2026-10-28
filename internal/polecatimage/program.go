@@ -59,7 +59,6 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 		Docker:         envOr(get, "POLECAT_IMAGE_DOCKER", "docker"),
 		Git:            envOr(get, "POLECAT_IMAGE_GIT", "git"),
 		Make:           envOr(get, "POLECAT_IMAGE_MAKE", "make"),
-		Pgrep:          envOr(get, "POLECAT_IMAGE_PGREP", "pgrep"),
 		Openshell:      envOr(get, "POLECAT_IMAGE_OPENSHELL", "openshell"),
 		Crane:          crane,
 		RigRepo:        envOr(get, "POLECAT_IMAGE_RIG_REPO", filepath.Join(town, "gastown", ".repo.git")),

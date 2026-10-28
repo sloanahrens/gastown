@@ -41,14 +41,14 @@ detached, escalating a failure under `install-gt:image-build-failed`.
    `gastown-polecat:dev` (`org.gastown.gt-commit`). Equal (a prefix of at least
    7 characters either way): prints `current` and stops.
 2. Defers (exit 0, a `deferred:` line, retried by the next cooldown) while Docker
-   Desktop is stopped, while a `gt sling` process is running, or while the
-   gateway lists a sandbox whose registry record under
-   `~/gt/.runtime/sandboxes` does not exist yet, so a retag cannot land between
-   a Prepare's image check and its create. A probe that cannot answer (`pgrep`
-   or `openshell sandbox list` exiting with an error) defers too, never reads as
-   "nothing running". The same check runs again before each build round.
-   `POLECAT_IMAGE_FAIL_CLOSED` makes a deferral fail; "Publishing to a registry"
-   has why.
+   Desktop is stopped, or while the gateway lists a sandbox whose registry
+   record under `~/gt/.runtime/sandboxes` does not exist yet, so a retag cannot
+   land between a Prepare's image check and its create. A probe that cannot
+   answer (`openshell sandbox list` exiting with an error) defers too, never
+   reads as "no sandboxes". The same check runs again before each build round.
+   A running `gt sling` no longer defers, because Prepare names the image by
+   digest (gt-16oj9). `POLECAT_IMAGE_FAIL_CLOSED` makes a deferral fail;
+   "Publishing to a registry" has why.
 3. Takes the lock `~/gt/.runtime/polecat-image.lock` (a lock older than 20
    minutes is taken over by renaming it aside, and only the run that wins the
    rename proceeds); a second run while it is held prints `already running` and

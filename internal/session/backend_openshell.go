@@ -134,6 +134,9 @@ type openshellBackend struct {
 	// imageGT reads the gt commit an image was built from, and installedGT is
 	// the commit of the gt running Prepare. Tests set both.
 	imageGT func(ctx context.Context, image string) (string, error)
+	// imageDigest resolves the profile's image reference to the digest the
+	// label check and the create both name (gt-16oj9). Tests set it.
+	imageDigest func(ctx context.Context, image string) (string, error)
 	// docker runs the docker CLI for the profile's cache volume. Tests set it.
 	docker dockerRun
 	// git compares the image's gt commit with the installed one. Tests set it.
@@ -167,6 +170,7 @@ func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
 		render:      sandbox.RenderSkeleton,
 		push:        pushToForgejo,
 		imageGT:     dockerImageGT,
+		imageDigest: dockerImageDigest,
 		docker:      runDocker,
 		git:         runGit,
 		gitEmail:    hostGitEmail,
@@ -210,6 +214,45 @@ func imageGTFrom(ctx context.Context, run dockerRun, image string) (string, erro
 		return "", fmt.Errorf("docker image inspect %s: %w: %s", image, err, strings.TrimSpace(string(stderr)))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// imageIDFormat prints the image's id: the digest docker gives the content a
+// reference resolves to now.
+const imageIDFormat = `{{.Id}}`
+
+// imageIDPattern is a digest an image id can be: sha256 and 64 lowercase hex
+// digits.
+var imageIDPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// digestRefPattern matches a reference that already names its digest.
+var digestRefPattern = regexp.MustCompile(`^[^@]+@sha256:[0-9a-f]{64}$`)
+
+// dockerImageDigest resolves image through the host's docker.
+func dockerImageDigest(ctx context.Context, image string) (string, error) {
+	return imageDigestFrom(ctx, runDocker, image)
+}
+
+// imageDigestFrom resolves image to the digest of the image that reference names
+// now, through run. Prepare names that digest to both the label check and the
+// create, so a rebuild that retags the profile's image between them cannot put
+// an image nothing checked under the sandbox (gt-16oj9).
+//
+// A reference already pinned by digest is returned as it is, because a gateway
+// that pulls from a registry resolves that form and not a local id. A reply
+// that is not a digest is an error, never a reference the create could use.
+func imageDigestFrom(ctx context.Context, run dockerRun, image string) (string, error) {
+	if digestRefPattern.MatchString(image) {
+		return image, nil
+	}
+	out, stderr, err := run(ctx, "image", "inspect", "--format", imageIDFormat, image)
+	if err != nil {
+		return "", fmt.Errorf("docker image inspect %s: %w: %s", image, err, strings.TrimSpace(string(stderr)))
+	}
+	digest := strings.TrimSpace(string(out))
+	if !imageIDPattern.MatchString(digest) {
+		return "", fmt.Errorf("docker image inspect %s printed %q, not an image digest", image, digest)
+	}
+	return digest, nil
 }
 
 // gitRun runs the git CLI in dir and returns its stdout. Tests supply their
@@ -519,12 +562,19 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	if err != nil {
 		return nil, err
 	}
+	// Resolved once, so the label check and the create name the same image even
+	// if a rebuild retags the profile's reference between them (gt-16oj9).
+	image, err := b.imageDigest(ctx, b.profile.Image)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
+	}
+	create.Image = image
 	// The image's gt must be the installed gt's commit. Checked before the push
 	// and the create, so a drifted image leaves nothing behind (gt-pmxo9). This
-	// reads the host docker's image for the reference; the sandbox's own gt is
+	// reads the host docker's image for that digest; the sandbox's own gt is
 	// checked again once it is Ready, because the gateway may run a different
 	// image for that reference (gt-zdilt).
-	imageCommit, err := b.imageGT(ctx, b.profile.Image)
+	imageCommit, err := b.imageGT(ctx, image)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}

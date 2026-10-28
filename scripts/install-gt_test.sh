@@ -1606,7 +1606,7 @@ WANT_CLOSED=unset closed_case "no-image-first keeps the best-effort publish" --n
 
 # --- Case 62: a build that finishes but cannot publish fails the install
 # closed (gt-efupr). The real run.sh runs under the install with stub docker,
-# crane, pgrep and openshell and the world's make; the crane stub refuses every
+# crane and openshell and the world's make; the crane stub refuses every
 # push. The install's own POLECAT_IMAGE_FAIL_CLOSED=1 is what turns that refused
 # push into its exit 1, so this case covers the switch end to end. ---
 T=$(make_world); install_stub "$T" "$(cat "$T/c1")"
@@ -1633,13 +1633,12 @@ case "${1:-}" in
 esac
 STUB
 printf '#!/usr/bin/env bash\necho "$*" >> "$T_WORLD/crane.log"\necho "UNAUTHORIZED: authentication required" >&2\nexit 1\n' > "$T/pstubs/crane"
-printf '#!/usr/bin/env bash\nexit 1\n' > "$T/pstubs/pgrep"
 printf '#!/usr/bin/env bash\necho "No sandboxes found."\n' > "$T/pstubs/openshell"
 chmod +x "$T/pstubs"/*
 printf '%s' '{"daemon":{"env":{"POLECAT_IMAGE_REGISTRY":"localhost:5001","POLECAT_IMAGE_CRANE":"'"$T"'/pstubs/crane"}}}' > "$T/settings/config.json"
 cat > "$T/plugin/run.sh" <<STUB
 #!/usr/bin/env bash
-export POLECAT_IMAGE_DOCKER="$T/pstubs/docker" POLECAT_IMAGE_PGREP="$T/pstubs/pgrep" \\
+export POLECAT_IMAGE_DOCKER="$T/pstubs/docker" \\
   POLECAT_IMAGE_OPENSHELL="$T/pstubs/openshell" POLECAT_IMAGE_RIG_REPO="$T/origin.git" \\
   POLECAT_IMAGE_BUILD_ROOT="$T/image-build"
 exec "$PLUGIN_BIN"

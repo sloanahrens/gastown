@@ -112,6 +112,9 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 			return nil
 		},
 		imageGT: func(context.Context, string) (string, error) { return openshellTestGTCommit, nil },
+		// The profile's image resolves to one digest for the label check and the
+		// create; the pin's own tests set their own fake.
+		imageDigest: func(context.Context, string) (string, error) { return openshellTestImageDigest, nil },
 		// No docker in these tests. A profile with a cache volume sets its own runner.
 		docker: func(context.Context, ...string) ([]byte, []byte, error) {
 			return nil, []byte("docker is not configured for this test"), errors.New("no docker")
@@ -187,7 +190,7 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 	create := []string{
 		"openshell", "sandbox", "create",
 		"--name", openshellTestSession,
-		"--from", "gastown-polecat:dev",
+		"--from", openshellTestImageDigest,
 		"--policy", filepath.Join(openshellTestPolicyRoot(town), "deploy/polecat/policy.yaml"),
 		"--provider", "deepseek", "--provider", "forgejo-polecat",
 		"--cpu", "4", "--memory", "8Gi",
@@ -240,6 +243,89 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 	}
 	if rec.Profile != "polecat-default" || rec.Image != "gastown-polecat:dev" || rec.Rig != openshellTestRig || rec.Polecat != openshellTestPolecat {
 		t.Fatalf("record = %+v", rec)
+	}
+}
+
+// fakeImageRegistry is the host docker's image store for the pin's tests: the
+// digest each reference resolves to, the gt label each image carries, and the
+// references the label was read for.
+type fakeImageRegistry struct {
+	tags   map[string]string // reference -> digest
+	labels map[string]string // digest -> gt commit label
+	// retag runs once, after the first label read: the rebuild that moves the
+	// tag between a Prepare's check and its create.
+	retag     func()
+	labelRefs []string
+}
+
+func (r *fakeImageRegistry) run(_ context.Context, args ...string) ([]byte, []byte, error) {
+	if len(args) != 5 || args[0] != "image" || args[1] != "inspect" || args[2] != "--format" {
+		return nil, []byte("unexpected docker call"), errors.New("unexpected docker call")
+	}
+	format, ref := args[3], args[4]
+	digest, ok := r.tags[ref]
+	switch {
+	case ok:
+	case imageIDPattern.MatchString(ref):
+		digest = ref
+	default:
+		return nil, []byte("no such image: " + ref), errors.New("exit status 1")
+	}
+	if format == imageIDFormat {
+		return []byte(digest + "\n"), nil, nil
+	}
+	r.labelRefs = append(r.labelRefs, ref)
+	label := r.labels[digest]
+	if r.retag != nil {
+		retag := r.retag
+		r.retag = nil
+		retag()
+	}
+	return []byte(label + "\n"), nil, nil
+}
+
+// TestOpenShellPreparePinsTheImageDigestItChecked is gt-16oj9's case: the image
+// is retagged between the label check and the create, and the sandbox is still
+// created from the digest the check read.
+func TestOpenShellPreparePinsTheImageDigestItChecked(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+
+	// The image the check approves carries the installed gt's commit; the one
+	// the rebuild retags to carries another.
+	checked := "sha256:" + strings.Repeat("1", 64)
+	rebuilt := "sha256:" + strings.Repeat("2", 64)
+	reg := &fakeImageRegistry{
+		tags:   map[string]string{openshellTestProfile.Image: checked},
+		labels: map[string]string{checked: openshellTestGTCommit, rebuilt: openshellTestDriftedGT},
+	}
+	reg.retag = func() { reg.tags[openshellTestProfile.Image] = rebuilt }
+	b.docker = reg.run
+	b.imageDigest = func(ctx context.Context, image string) (string, error) { return imageDigestFrom(ctx, reg.run, image) }
+	b.imageGT = func(ctx context.Context, image string) (string, error) { return imageGTFrom(ctx, reg.run, image) }
+
+	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if reg.tags[openshellTestProfile.Image] != rebuilt {
+		t.Fatal("the tag did not move; the test did not exercise a retag between the check and the create")
+	}
+	if want := []string{checked}; !reflect.DeepEqual(reg.labelRefs, want) {
+		t.Fatalf("the gt label was read for %q, want %q: the check must read the digest", reg.labelRefs, want)
+	}
+	var from string
+	for _, call := range fake.Calls() {
+		if !slices.Contains(call, "create") {
+			continue
+		}
+		if i := slices.Index(call, "--from"); i >= 0 && i+1 < len(call) {
+			from = call[i+1]
+		}
+	}
+	if from != checked {
+		t.Fatalf("the create used --from %q, want the checked digest %q", from, checked)
 	}
 }
 
@@ -397,7 +483,86 @@ const (
 	// openshellTestVersionReply is what the sandbox's `gt version` prints for
 	// an image built from openshellTestGTCommit.
 	openshellTestVersionReply = "gt version 1.2.1 (dev: main@" + openshellTestGTCommit + ")\n"
+
+	// openshellTestImageDigest is what the profile's image resolves to: the
+	// digest the label check and the create both name.
+	openshellTestImageDigest = "sha256:3f7a1c5e9b2d4a6f8c0e1b3d5a7f9c2e4b6d8a0f1c3e5b7d9a2f4c6e8b0d1a3f"
 )
+
+// TestImageDigestFrom covers the resolution Prepare pins with: a tag becomes
+// the digest the local docker holds for it now, and a reply that is not a
+// digest is refused rather than passed to the create.
+func TestImageDigestFrom(t *testing.T) {
+	t.Parallel()
+	pinned := "localhost:5001/gastown-polecat@" + openshellTestImageDigest
+	tests := []struct {
+		name       string
+		image      string
+		stdout     string
+		stderr     string
+		fail       bool
+		want       string
+		wantErr    string
+		wantNoCall bool
+	}{
+		{
+			name:   "a tag resolves to the image's digest",
+			image:  "gastown-polecat:dev",
+			stdout: openshellTestImageDigest + "\n",
+			want:   openshellTestImageDigest,
+		},
+		{
+			name:       "a digest reference is already pinned",
+			image:      pinned,
+			wantNoCall: true,
+			want:       pinned,
+		},
+		{
+			name:    "a reply that is not a digest is refused",
+			image:   "gastown-polecat:dev",
+			stdout:  "Error: No such image\n",
+			wantErr: "not an image digest",
+		},
+		{
+			name:    "a failed inspect names the image and docker's reason",
+			image:   "gastown-polecat:dev",
+			stderr:  "Cannot connect to the Docker daemon\n",
+			fail:    true,
+			wantErr: "docker image inspect gastown-polecat:dev|Cannot connect to the Docker daemon",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var called bool
+			run := func(context.Context, ...string) ([]byte, []byte, error) {
+				called = true
+				if tt.fail {
+					return nil, []byte(tt.stderr), errors.New("exit status 1")
+				}
+				return []byte(tt.stdout), nil, nil
+			}
+			got, err := imageDigestFrom(context.Background(), run, tt.image)
+			if called != !tt.wantNoCall {
+				t.Fatalf("docker called = %v, want %v", called, !tt.wantNoCall)
+			}
+			if tt.wantErr != "" {
+				for _, want := range strings.Split(tt.wantErr, "|") {
+					if err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("imageDigestFrom = %v, want it to name %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("imageDigestFrom: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("imageDigestFrom = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestCheckImageGT(t *testing.T) {
 	t.Parallel()

@@ -41,7 +41,6 @@ func newTestRun(t *testing.T) *testRun {
 			Docker:         "docker",
 			Git:            "git",
 			Make:           "make",
-			Pgrep:          "pgrep",
 			Openshell:      "openshell",
 			RigRepo:        filepath.Join(root, "rig.git"),
 			BuildRoot:      filepath.Join(root, "build"),

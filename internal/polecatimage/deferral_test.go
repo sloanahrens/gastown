@@ -10,9 +10,8 @@ func TestDeferReason(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
-		// sling is what pgrep answers; sandboxes what openshell prints unless
-		// openshellFail is set, in which case it exits 1.
-		sling         int
+		// sandboxes is what openshell prints unless openshellFail is set, in
+		// which case it exits 1.
 		sandboxes     string
 		openshellFail bool
 		// records are the sandbox names with a registry record under
@@ -22,97 +21,69 @@ func TestDeferReason(t *testing.T) {
 		want     string
 	}{
 		{
-			name:  "a sling is running",
-			sling: 0,
-			want:  "sandbox sling in progress",
-		},
-		{
-			name:  "an empty listing cannot be read",
-			sling: 1,
-			want:  "cannot read the sandbox listing (no NAME header)",
+			name: "an empty listing cannot be read",
+			want: "cannot read the sandbox listing (no NAME header)",
 		},
 		{
 			name:      "no sandboxes found",
-			sling:     1,
 			sandboxes: "No sandboxes found.\n",
 			want:      "",
 		},
 		{
 			name:      "no sandboxes found with padding",
-			sling:     1,
 			sandboxes: "  No sandboxes found.  \n",
 			want:      "",
 		},
 		{
 			name:      "a listing with no header cannot be read",
-			sling:     1,
 			sandboxes: "gt-corpus 2026-10-23\n",
 			want:      "cannot read the sandbox listing (no NAME header)",
 		},
 		{
 			name:      "a name that escapes the record directory cannot be read",
-			sling:     1,
 			sandboxes: "NAME CREATED\n../../etc/passwd 2026-10-23\n",
 			want:      "cannot read the sandbox listing (a sandbox name is not a plain file name)",
 		},
 		{
 			name:      "a dot-dot name cannot be read",
-			sling:     1,
 			sandboxes: "NAME CREATED\n.. 2026-10-23\n",
 			want:      "cannot read the sandbox listing (a sandbox name is not a plain file name)",
 		},
 		{
 			name:      "a recorded sandbox does not defer",
-			sling:     1,
 			sandboxes: "NAME   CREATED\n",
 			records:   []string{"gt-corpus"},
 			want:      "",
 		},
 		{
 			name:      "an unrecorded sandbox defers",
-			sling:     1,
 			sandboxes: "NAME   CREATED\ngt-corpus 2026-10-23\n",
 			want:      "sandbox gt-corpus has no registry record yet",
 		},
 		{
 			name:      "rows before the header are not sandboxes",
-			sling:     1,
 			sandboxes: "gt-corpus 2026-10-23\nNAME CREATED\n",
 			want:      "",
 		},
 		{
 			name:      "blank and indented rows are skipped",
-			sling:     1,
 			sandboxes: "NAME CREATED\n\n   \n\tgt-corpus 2026-10-23\n",
 			want:      "sandbox gt-corpus has no registry record yet",
 		},
 		{
 			name:      "the first unrecorded sandbox is named",
-			sling:     1,
 			sandboxes: "NAME CREATED\ngt-one 2026-10-23\ngt-two 2026-10-24\n",
 			records:   []string{"gt-one"},
 			want:      "sandbox gt-two has no registry record yet",
 		},
 		{
 			name:      "a directory named like a record is not one",
-			sling:     1,
 			sandboxes: "NAME CREATED\ngt-corpus 2026-10-23\n",
 			dirNames:  []string{"gt-corpus"},
 			want:      "sandbox gt-corpus has no registry record yet",
 		},
 		{
-			name:  "pgrep cannot answer",
-			sling: 2,
-			want:  "cannot check for a running gt sling (pgrep exited 2)",
-		},
-		{
-			name:  "pgrep is missing",
-			sling: 127,
-			want:  "cannot check for a running gt sling (pgrep exited 127)",
-		},
-		{
 			name:          "openshell cannot answer",
-			sling:         1,
 			openshellFail: true,
 			want:          "cannot list sandboxes (openshell exited 1)",
 		},
@@ -136,10 +107,7 @@ func TestDeferReason(t *testing.T) {
 				}
 			}
 			tr.reply = func(c command) result {
-				switch c.name {
-				case "pgrep":
-					return result{exit: tc.sling}
-				case "openshell":
+				if c.name == "openshell" {
 					if tc.openshellFail {
 						return result{exit: 1}
 					}
@@ -150,13 +118,6 @@ func TestDeferReason(t *testing.T) {
 			if got := tr.DeferReason(); got != tc.want {
 				t.Errorf("DeferReason() = %q, want %q", got, tc.want)
 			}
-			if tc.sling != 1 {
-				if _, ok := tr.argsOf("openshell"); ok {
-					t.Error("openshell was asked after pgrep could not say nothing was running")
-				}
-				return
-			}
-			tr.wantArgs(t, "pgrep", "-f", `^([^ ]*/)?gt sling `)
 			tr.wantArgs(t, "openshell", "sandbox", "list")
 		})
 	}
