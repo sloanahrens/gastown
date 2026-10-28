@@ -400,6 +400,15 @@ func (d *Daemon) refreshAuthorSeat(rigName, polecat string) error {
 // newRigLandingWorker wires the production collaborators for one rig.
 func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error) {
 	townRoot := d.config.TownRoot
+	// A rejected gate keeps its whole job log under the town runtime (gt-wwqx8),
+	// and GateLogDir resolves that directory from the town root and rig name. An
+	// empty resolution would leave every rejection with no log and nothing
+	// saying so, so the rig gets no worker until the town root names one
+	// (gt-a8fg9).
+	gateLogDir := land.GateLogDir(townRoot, rigName)
+	if gateLogDir == "" {
+		return nil, fmt.Errorf("rig %q: the gate log directory is empty because the town root %q is unset or the rig name is not one path element, so a rejected gate would keep no job log", rigName, townRoot)
+	}
 	rigPath := filepath.Join(townRoot, rigName)
 	repo := filepath.Join(rigPath, ".repo.git")
 	if _, err := os.Stat(repo); err != nil {
@@ -526,7 +535,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			rigName, filepath.Join(rigPath, "settings", "config.json")))
 		return nil, fmt.Errorf("rig %s has no merge_queue.forgejo block: Forgejo is the only landing path, so the landing worker for this rig is not running until the block is added", rigName)
 	}
-	candidate, merger, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, land.GateLogDir(townRoot, rigName), cfg)
+	candidate, merger, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, gateLogDir, cfg)
 	if err != nil {
 		return nil, err
 	}

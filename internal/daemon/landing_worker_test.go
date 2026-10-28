@@ -147,6 +147,23 @@ func TestNewRigLandingWorker_RefusesARigWhoseConfigDoesNotDecode(t *testing.T) {
 	}
 }
 
+// TestNewRigLandingWorker_RefusesAnEmptyGateLogDir is gt-a8fg9: a rig whose
+// gate log directory resolves empty would reject landings keeping no job log
+// and saying nothing about it, so it gets no worker and the error names the
+// cause.
+func TestNewRigLandingWorker_RefusesAnEmptyGateLogDir(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: discardLogger, config: &Config{}, notifier: notifyfake.New()}
+
+	_, err := d.newRigLandingWorker("testrig")
+	if err == nil {
+		t.Fatal("newRigLandingWorker() = nil error with no town root; want the rig refused rather than land keeping no gate log")
+	}
+	if !strings.Contains(err.Error(), "gate log") || !strings.Contains(err.Error(), "town root") {
+		t.Fatalf("error %q does not name the gate log and the empty town root it follows from", err)
+	}
+}
+
 func TestLandingWorkerConfigDefaults(t *testing.T) {
 	t.Parallel()
 	if IsPatrolEnabled(nil, "landing_worker") {
