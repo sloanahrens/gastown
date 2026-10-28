@@ -86,6 +86,46 @@ func TestPlanStrayRepoKeptWhenNamedBySandboxRecord(t *testing.T) {
 	}
 }
 
+// Spec compliance: a tag's Repo field is untrusted and may be empty, so the ref
+// a sandbox record keeps a repo by names the repo key the plan validated.
+func TestPlanSandboxKeptRefNamesTheValidatedRepo(t *testing.T) {
+	t.Parallel()
+	in := strayInput(map[string][]TagInfo{
+		straySeed: {
+			{Tag: "p1", Digest: dg("bbbb0001"), Created: time.Unix(1, 0).UTC()},
+		},
+	})
+	in.InUseRepos = map[string]bool{straySeed: true}
+
+	p := BuildPlan(in)
+
+	if rule := keptRule(p, straySeed+":p1"); rule != "named by a sandbox record" {
+		t.Fatalf("p1 kept by %q at %s:p1, want named by a sandbox record: %v", rule, straySeed, p.Kept)
+	}
+}
+
+func TestPlanStrayDigestInUseIsKept(t *testing.T) {
+	t.Parallel()
+	inUse := dg("bbbb0001")
+	in := strayInput(map[string][]TagInfo{
+		straySeed: {
+			strayTag(straySeed, "p1", inUse, 1),
+			strayTag(straySeed, "p2", dg("bbbb0002"), 2),
+		},
+	})
+	in.InUseDigests = map[string]bool{inUse: true}
+
+	p := BuildPlan(in)
+
+	want := []string{straySeed + "@" + dg("bbbb0002")}
+	if got := actionRefs(p); !slices.Equal(got, want) {
+		t.Fatalf("actions = %v, want only the digest no pod uses %v", got, want)
+	}
+	if rule := keptRule(p, straySeed+"@"+inUse); rule != "in use" {
+		t.Fatalf("stray digest %s kept by %q, want in use: %v", inUse, rule, p.Kept)
+	}
+}
+
 func TestPlanStrayRepoDigestSharedWithKeptTagIsKept(t *testing.T) {
 	t.Parallel()
 	shared := dg("dead0001")

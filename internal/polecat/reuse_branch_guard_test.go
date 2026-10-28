@@ -219,11 +219,16 @@ func TestHeldByOtherWorktree_MessageNamesHolderAndReleaseCommand(t *testing.T) {
 	if err == nil {
 		t.Fatal("a branch checked out in alpha's worktree was reported free")
 	}
-	if named := holderFromRefusal(t, err.Error()); !sameWorktreePath(named, holder) {
-		t.Errorf("refusal names holder %q, want the worktree holding the branch %q", named, holder)
+	// Both paths are read through a symlink, the logical path a caller may hold
+	// where git reports the physical one (macOS /var vs /private/var). The
+	// refusal must compare equal to that path however it spells it, so a raw
+	// string comparison against it would be wrong here (gt-s9oxo).
+	logical := symlinkedAlias(t, holder)
+	if named := holderFromRefusal(t, err.Error()); !sameWorktreePath(named, logical) {
+		t.Errorf("refusal names holder %q, want the worktree holding the branch %q", named, logical)
 	}
-	if want := "git -C " + holder + " checkout --detach"; !strings.Contains(err.Error(), want) {
-		t.Errorf("refusal does not name the release command %q: %v", want, err)
+	if released := releasePathFromRefusal(t, err.Error()); !sameWorktreePath(released, logical) {
+		t.Errorf("release command names worktree %q, want the worktree holding the branch %q", released, logical)
 	}
 }
 
@@ -292,4 +297,74 @@ func holderFromRefusal(t *testing.T, message string) string {
 		holder = holder[:nl]
 	}
 	return holder
+}
+
+// releasePathFromRefusal pulls the worktree path out of the release command a
+// refusal prints. The command quotes the path for a shell, so the quoted form
+// is unquoted here; the caller compares it the same symlink-tolerant way it
+// compares the holder name beside it.
+func releasePathFromRefusal(t *testing.T, message string) string {
+	t.Helper()
+
+	const prefix = "git -C "
+	const suffix = " checkout --detach"
+	idx := strings.Index(message, prefix)
+	if idx < 0 {
+		t.Fatalf("no release command in refusal: %s", message)
+	}
+	rest := message[idx+len(prefix):]
+	end := strings.Index(rest, suffix)
+	if end < 0 {
+		t.Fatalf("release command does not end in %q: %s", suffix, message)
+	}
+	return unquoteShellArg(rest[:end])
+}
+
+// unquoteShellArg reverses config.ShellQuote for one argument: a bare value, or
+// a single-quoted one whose embedded single quotes are backslash-escaped.
+func unquoteShellArg(arg string) string {
+	if len(arg) < 2 || arg[0] != '\'' || arg[len(arg)-1] != '\'' {
+		return arg
+	}
+	return strings.ReplaceAll(arg[1:len(arg)-1], `'\''`, `'`)
+}
+
+// TestReleasePathFromRefusal_UndoesTheShellQuoting pins that the extracted path
+// is the worktree path itself, bare or shell-quoted, so it can be compared like
+// the holder name next to it (gt-s9oxo).
+func TestReleasePathFromRefusal_UndoesTheShellQuoting(t *testing.T) {
+	t.Parallel()
+
+	const head = "branch-held: b is already checked out at HOLDER\nrelease it with: "
+	cases := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"bare path", "git -C /town/rig/polecats/alpha/rig checkout --detach", "/town/rig/polecats/alpha/rig"},
+		{"path with a space", "git -C '/town/my rig/polecats/alpha/rig' checkout --detach", "/town/my rig/polecats/alpha/rig"},
+		{"path with an embedded quote", `git -C '/town/o'\''brien/rig' checkout --detach`, `/town/o'brien/rig`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := releasePathFromRefusal(t, head+tc.command+"\n"); got != tc.want {
+				t.Errorf("releasePathFromRefusal(%q) = %q, want %q", tc.command, got, tc.want)
+			}
+		})
+	}
+}
+
+// symlinkedAlias returns a path to dir reached through a symlink, standing in
+// for the logical path a caller holds where the filesystem reports a physical
+// one (macOS /var vs /private/var).
+func symlinkedAlias(t *testing.T, dir string) string {
+	t.Helper()
+
+	link := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatalf("symlinking an alias for %s: %v", dir, err)
+	}
+	return link
 }

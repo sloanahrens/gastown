@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -21,6 +22,23 @@ func imageBody(configDigest string, configSize int64, layerSizes ...int64) strin
 	}
 	return fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
 		"config":{"digest":%q,"size":%d},"layers":[%s]}`, configDigest, configSize, strings.Join(layers, ","))
+}
+
+// layer is one layer an image body names: its digest and size.
+type layer struct {
+	Digest string
+	Size   int64
+}
+
+// imageBodyWithLayers renders an image manifest whose layers carry digests, so
+// a test can name one layer from two children.
+func imageBodyWithLayers(configDigest string, configSize int64, layers ...layer) string {
+	named := make([]string, len(layers))
+	for i, l := range layers {
+		named[i] = fmt.Sprintf(`{"digest":%q,"size":%d}`, l.Digest, l.Size)
+	}
+	return fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+		"config":{"digest":%q,"size":%d},"layers":[%s]}`, configDigest, configSize, strings.Join(named, ","))
 }
 
 // indexBody renders an index that names each child digest.
@@ -119,6 +137,144 @@ func TestGetManifestIndexTakesNewestChild(t *testing.T) {
 	}
 }
 
+func TestGetManifestIndexCountsASharedBlobOnce(t *testing.T) {
+	t.Parallel()
+	indexDigest := digestOf('d')
+	firstChild, secondChild := digestOf('1'), digestOf('2')
+	firstConfig, secondConfig := digestOf('3'), digestOf('4')
+	sharedLayer, ownLayer := digestOf('5'), digestOf('6')
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/gastown-polecat/manifests/" + indexDigest:
+			served(w, indexDigest, indexBody(firstChild, secondChild))
+		case "/v2/gastown-polecat/manifests/" + firstChild:
+			served(w, firstChild, imageBodyWithLayers(firstConfig, 100, layer{sharedLayer, 500}))
+		case "/v2/gastown-polecat/manifests/" + secondChild:
+			served(w, secondChild, imageBodyWithLayers(secondConfig, 200,
+				layer{sharedLayer, 500}, layer{ownLayer, 40}))
+		case "/v2/gastown-polecat/blobs/" + firstConfig:
+			_, _ = w.Write([]byte(blobBody("2026-10-20T09:00:00Z")))
+		case "/v2/gastown-polecat/blobs/" + secondConfig:
+			_, _ = w.Write([]byte(blobBody("2026-10-27T10:00:00Z")))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	m, err := c.GetManifest(context.Background(), "gastown-polecat", indexDigest)
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if want := int64(100 + 200 + 500 + 40); m.Bytes != want {
+		t.Errorf("Bytes = %d, want %d: the layer both children name counts once", m.Bytes, want)
+	}
+	if want := time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC); !m.Created.Equal(want) {
+		t.Errorf("Created = %v, want the newest child's %v", m.Created, want)
+	}
+}
+
+// paddedBody renders body with a padding member so the whole document is
+// exactly size bytes, letting a test sit a document on a byte limit.
+func paddedBody(t *testing.T, body string, size int) string {
+	t.Helper()
+	if !strings.HasSuffix(body, "}") {
+		t.Fatalf("body does not end with }: %q", body)
+	}
+	prefix := strings.TrimSuffix(body, "}")
+	const member = `,"padding":""}`
+	// The padding string takes whatever the fixed part leaves, and member already
+	// holds the closing quote and brace.
+	fixed := len(prefix) + len(member)
+	if size < fixed {
+		t.Fatalf("size %d is shorter than the document's fixed length %d", size, fixed)
+	}
+	return prefix + `,"padding":"` + strings.Repeat("a", size-fixed) + `"}`
+}
+
+func TestGetManifestBoundsTheResponseBody(t *testing.T) {
+	t.Parallel()
+	manifestDigest, configDigest := digestOf('a'), digestOf('c')
+	cases := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{"a body at the limit is read", maxDocumentBytes, false},
+		{"a body one byte over the limit is refused", maxDocumentBytes + 1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v2/gastown-polecat/manifests/dev":
+					served(w, manifestDigest, paddedBody(t, imageBody(configDigest, 1), tc.size))
+				case "/v2/gastown-polecat/blobs/" + configDigest:
+					_, _ = w.Write([]byte(blobBody("2026-10-27T10:00:00Z")))
+				default:
+					http.NotFound(w, r)
+				}
+			})
+
+			m, err := c.GetManifest(context.Background(), "gastown-polecat", "dev")
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("GetManifest with a %d-byte body: %v", tc.size, err)
+				}
+				if m.Bytes != 1 {
+					t.Errorf("Bytes = %d, want 1 from the config", m.Bytes)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("GetManifest read a %d-byte body: %+v, want a refusal", tc.size, m)
+			}
+			if want := fmt.Sprint(maxDocumentBytes); !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to name the %s-byte limit", err, want)
+			}
+		})
+	}
+}
+
+func TestGetManifestIndexWalkHasARequestBudget(t *testing.T) {
+	t.Parallel()
+	// Each child costs a manifest and a config blob request, so this index wants
+	// far more requests than the budget allows.
+	indexDigest := fmt.Sprintf("sha256:%064x", 0)
+	configDigest := digestOf('f')
+	children := make([]string, 2*maxIndexRequests)
+	for i := range children {
+		children[i] = fmt.Sprintf("sha256:%064x", i+1)
+	}
+	handler, requests := countingHandler(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v2/gastown-polecat/manifests/"):
+			ref := strings.TrimPrefix(r.URL.Path, "/v2/gastown-polecat/manifests/")
+			if ref == indexDigest {
+				served(w, indexDigest, indexBody(children...))
+				return
+			}
+			served(w, ref, imageBody(configDigest, 10))
+		case strings.HasPrefix(r.URL.Path, "/v2/gastown-polecat/blobs/"):
+			_, _ = w.Write([]byte(blobBody("2026-10-27T10:00:00Z")))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	c := newTestClient(handler)
+
+	m, err := c.GetManifest(context.Background(), "gastown-polecat", indexDigest)
+	if err == nil {
+		t.Fatalf("GetManifest returned %+v for an index of %d children, want a refusal", m, len(children))
+	}
+	if want := fmt.Sprint(maxIndexRequests); !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %v, want it to name the %s-request budget", err, want)
+	}
+	if n := requests.Load(); n > maxIndexRequests {
+		t.Errorf("server saw %d requests, want at most the budget of %d", n, maxIndexRequests)
+	}
+}
+
 func TestGetManifestSendsAcceptHeaders(t *testing.T) {
 	t.Parallel()
 	manifestDigest, configDigest := digestOf('a'), digestOf('c')
@@ -195,6 +351,34 @@ func TestGetManifestMissingCreatedIsError(t *testing.T) {
 	}
 	if !m.Created.IsZero() {
 		t.Errorf("Created = %v on error, want the zero time", m.Created)
+	}
+}
+
+// brokenBody is a response body whose Read fails, the way a connection that
+// dies mid-body does.
+type brokenBody struct{}
+
+func (brokenBody) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+func (brokenBody) Close() error             { return nil }
+
+// bodyTransport answers every request with body, so a test can fail a read that
+// no handler can.
+type bodyTransport struct{ body io.ReadCloser }
+
+func (t bodyTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: t.body}, nil
+}
+
+func TestGetManifestBodyReadFailureIsReturned(t *testing.T) {
+	t.Parallel()
+	c := &Client{Base: "http://registry.test", HTTP: &http.Client{Transport: bodyTransport{body: brokenBody{}}}}
+
+	_, err := c.GetManifest(context.Background(), "gastown-polecat", "dev")
+	if err == nil {
+		t.Fatal("GetManifest on a failing body returned no error, want the read error")
+	}
+	if !strings.Contains(err.Error(), "connection reset") {
+		t.Errorf("error = %v, want it to carry the read failure", err)
 	}
 }
 
