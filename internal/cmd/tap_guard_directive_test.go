@@ -34,21 +34,29 @@ type beadTextExample struct {
 	alternative string
 }
 
-// directiveBeadTextExamples runs each ```bash fence of one directive's markdown
+// fenceMark is the delimiter that opens and closes a fenced block in the
+// directives' markdown.
+const fenceMark = "```"
+
+// directiveBeadTextExamples runs every fenced block of one directive's markdown
 // through judge, the way the hook reads the command a polecat runs (gt-9j9vu).
-// An unterminated fence is an error, not an empty example list: a fence this
-// scanner fails to close is one it never judged. A verdict with only one of its
-// two parts is an error for the same reason — the pair is the verdict, so half
-// of one cannot be read as an acceptance.
+// A block is judged whatever label its opening fence carries: a polecat copies
+// the command from the block, not from the label, so a recipe written under
+// ```sh or no label at all is as much a command as one under ```bash, and a
+// scanner that reads only one label never judges the others. An unterminated
+// fence is an error, not an empty example list: a block this scanner fails to
+// close is one it never judged. A verdict with only one of its two parts is an
+// error for the same reason — the pair is the verdict, so half of one cannot be
+// read as an acceptance.
 func directiveBeadTextExamples(judge beadTextJudge, file, markdown string) ([]beadTextExample, error) {
 	var examples []beadTextExample
 	var body []string
 	open := 0
 	for i, line := range strings.Split(markdown, "\n") {
 		switch {
-		case open == 0 && strings.TrimSpace(line) == "```bash":
+		case open == 0 && strings.HasPrefix(strings.TrimSpace(line), fenceMark):
 			open, body = i+1, body[:0]
-		case open != 0 && strings.TrimSpace(line) == "```":
+		case open != 0 && strings.TrimSpace(line) == fenceMark:
 			reason, alternative := judge(strings.Join(body, "\n"))
 			if (reason == "") != (alternative == "") {
 				return examples, fmt.Errorf("%s:%d: the guard gave reason %q with alternative %q: a half verdict is not an acceptance, so this fence was never judged",
@@ -61,7 +69,7 @@ func directiveBeadTextExamples(judge beadTextJudge, file, markdown string) ([]be
 		}
 	}
 	if open != 0 {
-		return examples, fmt.Errorf("%s:%d: the ```bash fence is never closed", file, open)
+		return examples, fmt.Errorf("%s:%d: the %s fence is never closed", file, open, fenceMark)
 	}
 	return examples, nil
 }
@@ -99,7 +107,7 @@ func TestDirectiveBeadTextExamplesRun(t *testing.T) {
 		judged += len(examples)
 	}
 	if judged == 0 {
-		t.Fatalf("no ```bash example under %s: the scan judged nothing", directivesDir)
+		t.Fatalf("no fenced example under %s: the scan judged nothing", directivesDir)
 	}
 }
 
@@ -122,6 +130,25 @@ func TestDirectiveBeadTextExampleScan(t *testing.T) {
 	}
 	if len(examples) != 1 || examples[0].reason != polecatUnresolvedTextReason || examples[0].alternative == "" {
 		t.Fatalf("old recipe: got %+v, want one example refused as %q with its alternative", examples, polecatUnresolvedTextReason)
+	}
+
+	// The label does not make a block a command, and it does not take one out
+	// of judgment either: the old recipe under ```sh, ```console or no label at
+	// all must still be refused, or a directive could put its recipe in a fence
+	// the scanner never reads.
+	const oldBody = "cat > note.txt <<'EOF'\n" +
+		"the text\n" +
+		"EOF\n" +
+		`gt bead note gt-abc "$(cat note.txt)"` + "\n"
+	for _, label := range []string{"sh", "shell", "console", "zsh", ""} {
+		examples, err := directiveBeadTextExamples(judgeAsPolecat, "old.md", "```"+label+"\n"+oldBody+"```\n")
+		if err != nil {
+			t.Fatalf("scanning the old recipe under %q: %v", label, err)
+		}
+		if len(examples) != 1 || examples[0].reason != polecatUnresolvedTextReason {
+			t.Errorf("old recipe under %q: got %+v, want one example refused as %q; a fence the scanner does not label-match went unjudged",
+				label, examples, polecatUnresolvedTextReason)
+		}
 	}
 
 	const newRecipe = "```bash\n" +

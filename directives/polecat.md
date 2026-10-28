@@ -1,12 +1,11 @@
 ## Changelog
 
-- 2026-10-28 gt-9j9vu: replaces the 2026-10-14 bead-text section, whose quoted-heredoc recipe the tap guard refuses at `"$(cat file)"`, with the rule a polecat can run — the text as one single-quoted argument on the `gt bead` verb.
+- 2026-10-28 gt-9j9vu: bead text is one single-quoted argument on the `gt bead` note and comment verbs (town policy section).
 - 2026-10-27 gt-vhyk9: files stay under the worktree — scratch files, trace logs, test data and build output included; /tmp, /private/tmp, HOME and a session scratchpad are out (gt-3n4e0, hq-wisp-dvrty). The 2026-10-14 scratch section is retitled "Scratch files stay out of the tracked tree".
 - 2026-10-27 gt-3vgbi: moved the town polecat policy into the repo from ~/gt/directives/polecat.md, with the twelve "What om rejects" rules from ~/gt/gastown/directives/polecat.md, text unchanged.
 - 2026-10-27 gt-3vgbi: removed a probe line that the overseer's probe bead had put in the rules file; it was not policy.
 - 2026-09-23 claude-9a8: an interrupt is a delivery artifact, not an operator stop (town policy section).
 - 2026-10-12 gt-3vgbi: no subagents, except the scheduled deep-review slices (town policy section, dated 2026-10-12).
-- 2026-10-14 gt-3vgbi: text for bd and gt goes through a quoted heredoc (town policy section, dated 2026-10-14; superseded 2026-10-28 by gt-9j9vu).
 - 2026-10-14 gt-3vgbi: scratch files stay out of the worktree (town policy section, dated 2026-10-14).
 - 2026-10-23 gt-3vgbi: tests are engineered, not accumulated (town policy section, dated 2026-10-23; full standard in ~/.claude/docs/standards/test-engineering.md).
 - 2026-10-26 gt-3vgbi: tests stay hermetic, and no new shell scripts (town policy sections, dated 2026-10-26).
@@ -46,26 +45,22 @@ pushes. Spawn them as the formula says.
 
 > **Town Policy — overrides formula instructions where they conflict.**
 
-Pass a bead's text as a single-quoted argument on the `gt bead` verb itself —
-`gt bead create`, `gt bead note`, `gt bead comment` or `gt bead update` — across as many
-lines as the text needs:
+Pass a bead's text as a single-quoted argument on `gt bead note` or
+`gt bead comment`, across as many lines as the text needs:
 
 ```bash
 gt bead note gt-abc 'the retry loop never resets its counter, so a second
 attempt spends the budget the first one started with'
 ```
 
-Beads are written with the `gt bead` verbs (create, note, update, claim, comment, close,
-and so on); `bd` is for reads. The shell runs nothing inside single quotes, so a note about
-code keeps its backticks and `$(...)` intact, and the tap guard reads the argument exactly
-as written.
+The shell runs nothing inside single quotes, so a note about code keeps its
+backticks and `$(...)` intact, and the tap guard reads the text exactly as
+written. Beads are written with the `gt bead` verbs; `bd` is for reads.
 
-The guard reads the text as the shell hands it over, before any expansion. It refuses a text
-a file or stdin supplies (`--file`, `-f`, `--stdin` on `bd`, `"$(cat file)"` after a heredoc)
-and a text that opens with an expansion, since either could assemble the ACCEPTED-RISK:
-record that only the overseer or Sloan posts. A text holding a single quote of its own takes
-double quotes, where `$`, backticks and `{a,b}` expand and need escaping; an expansion later
-in the text passes unless the words before it already spell the start of `ACCEPTED-RISK:`.
+When the text holds a single quote of its own it takes double quotes, where
+`$`, backticks and braces expand: escape them so the text the guard reads still
+opens literally. When the guard refuses a text it cannot read before expansion,
+its message names the rule and the form to use instead.
 
 ## Tests stay hermetic (town policy, 2026-10-26)
 

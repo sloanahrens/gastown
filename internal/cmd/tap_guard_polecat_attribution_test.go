@@ -131,6 +131,12 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 		{"heredoc then substitution on gt bead note", "cat > note.txt <<'EOF'\nthe text\nEOF\ngt bead note gt-x \"$(cat note.txt)\"", polecatUnresolvedTextReason},
 		{"backtick substitution as gt bead note text", "gt bead note gt-x \"`echo ACCEPTED-RISK: ok`\"", polecatUnresolvedTextReason},
 		{"marker prefix then a variable on gt bead note", `gt bead note gt-x "ACCEPTED-RISK$X"`, polecatUnresolvedTextReason},
+		{"comment text read from a file by substitution on gt bead comment", `gt bead comment gt-x "$(cat note.txt)"`, polecatUnresolvedTextReason},
+		// The directive's own recommended form is no way past the marker:
+		// single quotes stop the shell expanding, not the guard reading the
+		// text, so a literal ACCEPTED-RISK: in it is refused as one (gt-9j9vu).
+		{"literal accepted-risk in the single-quoted note", `gt bead note gt-x 'ACCEPTED-RISK: the retry is fine'`, polecatAcceptedRiskReason},
+		{"literal accepted-risk in the single-quoted comment", `gt bead comment gt-x 'ACCEPTED-RISK: the retry is fine'`, polecatAcceptedRiskReason},
 
 		{"global value flag before the verb", `bd --db /p/x.db comments add gt-x --author Sloan hi`, polecatAttributionReason},
 		{"format flag before the verb", `bd --format json comments add gt-x "ACCEPTED-RISK: fine"`, polecatAcceptedRiskReason},
