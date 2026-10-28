@@ -3434,8 +3434,28 @@ func withoutMoleculeRoot(steps []*Issue, moleculeID string) []*Issue {
 	return kept
 }
 
+// errFlagShapedID refuses an issue id that begins with a dash. bd reads a
+// positional id that starts with "-" as a flag, so an id read from a log line
+// or a bead field would choose bd's behavior instead of naming a bead
+// (gt-ecfaa). The id itself is left out of the message: it comes from the same
+// untrusted source.
+var errFlagShapedID = errors.New("beads: issue id begins with a dash")
+
+// refuseFlagShapedID reports an id bd would read as a flag. Every real bead id
+// starts with a letter or a digit, so a caller that passes one is never
+// refused (gt-ecfaa).
+func refuseFlagShapedID(id string) error {
+	if strings.HasPrefix(id, "-") {
+		return errFlagShapedID
+	}
+	return nil
+}
+
 // Show returns detailed information about an issue.
 func (b *Beads) Show(id string) (*Issue, error) {
+	if err := refuseFlagShapedID(id); err != nil {
+		return nil, err
+	}
 	if !b.noRoute {
 		if target := b.forIssueID(id); target != b {
 			return target.Show(id)
@@ -3643,6 +3663,14 @@ func parseChildrenMapJSON(raw []byte) (map[string][]*Issue, error) {
 func (b *Beads) ShowMultiple(ids []string) (map[string]*Issue, error) {
 	if len(ids) == 0 {
 		return make(map[string]*Issue), nil
+	}
+
+	// Before routing: a malformed id must not reach a store, whichever store
+	// it would have routed to (gt-ecfaa).
+	for _, id := range ids {
+		if err := refuseFlagShapedID(id); err != nil {
+			return nil, err
+		}
 	}
 
 	if !b.noRoute {
