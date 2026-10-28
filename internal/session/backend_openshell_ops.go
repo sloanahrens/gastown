@@ -15,6 +15,7 @@ import (
 
 func init() {
 	SandboxDeleter = deleteSandboxRecord
+	SandboxPusher = pushSandboxRecord
 	SandboxLiveness = sampleSandboxRecord
 }
 
@@ -22,6 +23,32 @@ func init() {
 // deleted from the record alone so cleanup and the daemon need no Prepare.
 func deleteSandboxRecord(townRoot string, rec SandboxRecord) error {
 	return recordBackend(townRoot, rec).deleteSandbox(rec.Session)
+}
+
+// pushSandboxRecord is SandboxPusher: the record's clone branch pushed to origin
+// from inside its sandbox.
+func pushSandboxRecord(townRoot string, rec SandboxRecord) error {
+	return recordBackend(townRoot, rec).pushWork(rec)
+}
+
+// sandboxPushTimeout bounds the push a stop makes before it deletes a sandbox.
+const sandboxPushTimeout = 2 * time.Minute
+
+// pushWork pushes rec's clone branch from inside its sandbox, where the clone
+// and its Forgejo credential helper live. A sandbox that is already gone has
+// nothing left to push. A record without a branch or work dir predates the
+// push, so its clone cannot be found and the caller must keep the sandbox.
+func (b *openshellBackend) pushWork(rec SandboxRecord) error {
+	if rec.Branch == "" || rec.WorkDir == "" {
+		return fmt.Errorf("sandbox %s: its record names no clone, so its commits cannot be pushed", rec.Session)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sandboxPushTimeout)
+	defer cancel()
+	_, _, err := b.cli.Exec(ctx, rec.Session, nil, []string{"git", "-C", rec.WorkDir, "push", "origin", rec.Branch}, nil)
+	if err != nil && !isSandboxNotFound(err) {
+		return fmt.Errorf("pushing %s from sandbox %s: %w", rec.Branch, rec.Session, err)
+	}
+	return nil
 }
 
 // sampleSandboxRecord is SandboxLiveness: the record's seat assessed where its

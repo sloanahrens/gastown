@@ -312,14 +312,85 @@ func TestOpenShellOpsHooksAreWiredToTheRecordBackend(t *testing.T) {
 	t.Parallel()
 	// A nil check passes for a hook pointed at anything, so compare the
 	// installed function with the one this file documents the hook as.
-	if SandboxDeleter == nil || SandboxLiveness == nil {
-		t.Fatalf("hooks not installed: deleter nil=%v, liveness nil=%v", SandboxDeleter == nil, SandboxLiveness == nil)
+	if SandboxDeleter == nil || SandboxPusher == nil || SandboxLiveness == nil {
+		t.Fatalf("hooks not installed: deleter nil=%v, pusher nil=%v, liveness nil=%v", SandboxDeleter == nil, SandboxPusher == nil, SandboxLiveness == nil)
 	}
 	if got, want := reflect.ValueOf(SandboxDeleter).Pointer(), reflect.ValueOf(deleteSandboxRecord).Pointer(); got != want {
 		t.Errorf("SandboxDeleter = %#x, want deleteSandboxRecord %#x", got, want)
 	}
+	if got, want := reflect.ValueOf(SandboxPusher).Pointer(), reflect.ValueOf(pushSandboxRecord).Pointer(); got != want {
+		t.Errorf("SandboxPusher = %#x, want pushSandboxRecord %#x", got, want)
+	}
 	if got, want := reflect.ValueOf(SandboxLiveness).Pointer(), reflect.ValueOf(sampleSandboxRecord).Pointer(); got != want {
 		t.Errorf("SandboxLiveness = %#x, want sampleSandboxRecord %#x", got, want)
+	}
+}
+
+// pushRec is a record for a sandbox whose clone holds branch at workDir.
+func pushRec(branch string) SandboxRecord {
+	return SandboxRecord{
+		Session: openshellTestSession, Rig: openshellTestRig, Polecat: openshellTestPolecat,
+		Branch: branch, WorkDir: "/sandbox/gt/gastown/polecats/cheedo/gastown",
+	}
+}
+
+func TestOpenShellOpsPushWorkPushesTheCloneBranchFromInsideTheSandbox(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+	rec := pushRec("polecat/cheedo/gt-hwpfq+abc")
+
+	if err := b.pushWork(rec); err != nil {
+		t.Fatalf("pushWork: %v", err)
+	}
+	calls := fake.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("openshell calls = %v, want one exec", calls)
+	}
+	want := []string{"--", "git", "-C", rec.WorkDir, "push", "origin", rec.Branch}
+	if got := calls[0][len(calls[0])-len(want):]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("exec argv ends %v, want %v", got, want)
+	}
+}
+
+func TestOpenShellOpsPushWorkOfAGoneSandboxIsNil(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{
+		Err:    map[string]error{"exec": errors.New("exit status 1")},
+		Stderr: map[string]string{"exec": "Error: sandbox not found: " + openshellTestSession},
+	}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+
+	if err := b.pushWork(pushRec("polecat/cheedo/gt-hwpfq+abc")); err != nil {
+		t.Fatalf("pushWork of a gone sandbox = %v, want nil: nothing is left to push", err)
+	}
+}
+
+func TestOpenShellOpsPushWorkRefusedPushIsAnErrorNamingTheBranch(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{
+		Err:    map[string]error{"exec": errors.New("exit status 1")},
+		Stderr: map[string]string{"exec": "! [rejected] polecat/cheedo/gt-hwpfq+abc (non-fast-forward)"},
+	}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+
+	err := b.pushWork(pushRec("polecat/cheedo/gt-hwpfq+abc"))
+	if err == nil || !strings.Contains(err.Error(), "polecat/cheedo/gt-hwpfq+abc") {
+		t.Fatalf("pushWork of a refused push = %v, want an error naming the branch", err)
+	}
+}
+
+func TestOpenShellOpsPushWorkWithoutACloneRefusesWithoutCalling(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+
+	// A record written before the push existed names no clone to push from.
+	if err := b.pushWork(SandboxRecord{Session: openshellTestSession}); err == nil {
+		t.Fatal("pushWork of a record with no clone = nil, want an error so the sandbox is kept")
+	}
+	if calls := fake.Calls(); len(calls) != 0 {
+		t.Fatalf("openshell calls = %v, want none", calls)
 	}
 }
 

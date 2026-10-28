@@ -804,6 +804,8 @@ func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir
 			Profile:   b.profile.Name,
 			Image:     b.profile.Image,
 			CreatedAt: time.Now().UTC(),
+			Branch:    spec.Branch,
+			WorkDir:   workDir,
 		})
 	})
 }

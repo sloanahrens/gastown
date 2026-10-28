@@ -16,6 +16,10 @@ var (
 	// SandboxDeleter deletes the sandbox a record describes. Nil means the
 	// record is removed but the sandbox is left for the operator.
 	SandboxDeleter func(townRoot string, rec SandboxRecord) error
+	// SandboxPusher pushes the commits a sandbox's clone holds to origin, so a
+	// stop can delete the sandbox without losing them (gt-hwpfq). Nil means
+	// nothing can be pushed, and the caller keeps the sandbox.
+	SandboxPusher func(townRoot string, rec SandboxRecord) error
 	// SandboxLiveness assesses a sandboxed session where it lives (the
 	// transcript is inside the sandbox). Nil leaves a sandboxed session's
 	// verdict Unknown: the host probe's transcript read would not see it.
