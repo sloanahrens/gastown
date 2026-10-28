@@ -209,3 +209,141 @@ func TestGetManifest404IsErrNotFound(t *testing.T) {
 		t.Fatalf("GetManifest error = %v, want ErrNotFound", err)
 	}
 }
+
+// TestGetManifestErrorBranches drives every refusal path GetManifest can take,
+// so a failure is never read as a manifest with unknown values.
+func TestGetManifestErrorBranches(t *testing.T) {
+	t.Parallel()
+	imageDigest, configDigest := digestOf('a'), digestOf('c')
+	childDigest := digestOf('b')
+
+	serve := func(routes map[string]func(http.ResponseWriter, *http.Request)) *Client {
+		return newTestClient(func(w http.ResponseWriter, r *http.Request) {
+			if route, ok := routes[r.URL.Path]; ok {
+				route(w, r)
+				return
+			}
+			http.NotFound(w, r)
+		})
+	}
+	body := func(digest, text string) func(http.ResponseWriter, *http.Request) {
+		return func(w http.ResponseWriter, r *http.Request) { served(w, digest, text) }
+	}
+
+	cases := []struct {
+		name     string
+		client   *Client
+		ref      string
+		want     error  // sentinel the error must wrap
+		wantText string // text the error must carry
+	}{
+		{
+			name: "index nests past the depth bound",
+			client: serve(map[string]func(http.ResponseWriter, *http.Request){
+				// An index that names itself is the shortest loop a registry can make.
+				"/v2/gastown-polecat/manifests/" + childDigest: body(childDigest, indexBody(childDigest)),
+			}),
+			ref:      childDigest,
+			wantText: "nests deeper",
+		},
+		{
+			name: "response carries no digest header",
+			client: serve(map[string]func(http.ResponseWriter, *http.Request){
+				"/v2/gastown-polecat/manifests/dev": func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte(imageBody(configDigest, 1)))
+				},
+			}),
+			ref:      "dev",
+			wantText: "Docker-Content-Digest",
+		},
+		{
+			name: "config digest fails validation",
+			client: serve(map[string]func(http.ResponseWriter, *http.Request){
+				"/v2/gastown-polecat/manifests/dev": body(imageDigest, imageBody("sha256:not-a-digest", 1)),
+			}),
+			ref:      "dev",
+			wantText: "config digest fails validation",
+		},
+		{
+			name: "index has no children",
+			client: serve(map[string]func(http.ResponseWriter, *http.Request){
+				"/v2/gastown-polecat/manifests/dev": body(imageDigest, indexBody()),
+			}),
+			ref:      "dev",
+			wantText: "no child manifests",
+		},
+		{
+			name: "index child digest fails validation",
+			client: serve(map[string]func(http.ResponseWriter, *http.Request){
+				"/v2/gastown-polecat/manifests/dev": body(imageDigest, indexBody("sha256:not-a-digest")),
+			}),
+			ref:      "dev",
+			wantText: "child digest fails validation",
+		},
+		{
+			name: "index child is missing",
+			client: serve(map[string]func(http.ResponseWriter, *http.Request){
+				"/v2/gastown-polecat/manifests/dev": body(imageDigest, indexBody(childDigest)),
+			}),
+			ref:  "dev",
+			want: ErrNotFound,
+		},
+		{
+			name: "config blob is missing",
+			client: serve(map[string]func(http.ResponseWriter, *http.Request){
+				"/v2/gastown-polecat/manifests/dev": body(imageDigest, imageBody(configDigest, 1)),
+			}),
+			ref:  "dev",
+			want: ErrNotFound,
+		},
+		{
+			name: "created is not an RFC3339 time",
+			client: serve(map[string]func(http.ResponseWriter, *http.Request){
+				"/v2/gastown-polecat/manifests/dev": body(imageDigest, imageBody(configDigest, 1)),
+				"/v2/gastown-polecat/blobs/" + configDigest: func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte(blobBody("yesterday")))
+				},
+			}),
+			ref:      "dev",
+			wantText: "RFC3339",
+		},
+		{
+			name: "manifest body is not JSON",
+			client: serve(map[string]func(http.ResponseWriter, *http.Request){
+				"/v2/gastown-polecat/manifests/dev": body(imageDigest, "not json"),
+			}),
+			ref:      "dev",
+			wantText: "decode",
+		},
+		{
+			name:   "base cannot form a URL",
+			client: &Client{Base: "http://registry.test/\nbad", HTTP: &http.Client{Transport: roundTrip(func(http.ResponseWriter, *http.Request) {})}},
+			ref:    "dev",
+			// No handler runs: NewRequestWithContext refuses the URL.
+		},
+		{
+			name:     "transport error is returned",
+			client:   &Client{Base: "http://registry.test", HTTP: &http.Client{Transport: failingTransport{err: errors.New("connection refused")}}},
+			ref:      "dev",
+			wantText: "connection refused",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m, err := tc.client.GetManifest(context.Background(), "gastown-polecat", tc.ref)
+			if err == nil {
+				t.Fatalf("GetManifest returned %+v, want an error", m)
+			}
+			if !m.Created.IsZero() || m.Digest != "" {
+				t.Errorf("manifest = %+v on error, want the zero value", m)
+			}
+			if tc.want != nil && !errors.Is(err, tc.want) {
+				t.Errorf("error = %v, want it to wrap %v", err, tc.want)
+			}
+			if tc.wantText != "" && !strings.Contains(err.Error(), tc.wantText) {
+				t.Errorf("error = %v, want it to mention %q", err, tc.wantText)
+			}
+		})
+	}
+}
