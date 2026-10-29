@@ -7,6 +7,7 @@ package forgejoprov
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -54,13 +55,22 @@ type Options struct {
 	DryRun         bool     // --dry-run: read and report without writing
 }
 
+// The defaults a command line that names no value falls back to. The usage text
+// reads them from here, so the two cannot drift apart.
 const (
-	defaultAPIURL         = "http://127.0.0.1:3000/api/v1"
-	defaultBotPrefix      = "bot-"
-	defaultBotEmailDomain = "bots.invalid"
-	defaultTokenName      = "gt-provision"
-	defaultMainBranch     = "main"
-	defaultLandBranch     = "land/*"
+	// DefaultAPIURL is the API root when --api-url and $FORGEJO_API_URL name
+	// none.
+	DefaultAPIURL = "http://127.0.0.1:3000/api/v1"
+	// DefaultBotPrefix prefixes every bot login.
+	DefaultBotPrefix = "bot-"
+	// DefaultBotEmailDomain is the domain of a new bot's email.
+	DefaultBotEmailDomain = "bots.invalid"
+	// DefaultTokenName names each minted token.
+	DefaultTokenName = "gt-provision"
+	// DefaultMainBranch is the protected landing target.
+	DefaultMainBranch = "main"
+	// DefaultLandBranch is the candidate branch pattern kept unprotected.
+	DefaultLandBranch = "land/*"
 )
 
 // roleScopes is one row of the role table: the token scopes that role's bot is
@@ -94,12 +104,13 @@ func RoleScopes(role string) ([]string, bool) {
 	return nil, false
 }
 
-// defaultRoles is the roles a run provisions when --role names none.
-func defaultRoles() []string { return []string{"polecat", "landing", "registry"} }
+// DefaultRoles is the roles a run provisions when --role names none. Each call
+// builds its own slice, so a caller cannot move the default through it.
+func DefaultRoles() []string { return []string{"polecat", "landing", "registry"} }
 
-// defaultGateContexts is the commit-status pair the protection rules require
+// DefaultGateContexts is the commit-status pair the protection rules require
 // when --gate-context names none.
-func defaultGateContexts() []string { return []string{"ci / gate (push)", "om / review"} }
+func DefaultGateContexts() []string { return []string{"ci / gate (push)", "om / review"} }
 
 // valueFlags maps each flag that reads the next word to where the word goes,
 // so a flag can neither take a value nowhere nor take none. A flag absent here
@@ -128,15 +139,15 @@ func Parse(args []string, getenv func(string) string) (*Options, error) {
 		getenv = os.Getenv
 	}
 	o := &Options{
-		APIURL:         firstNonEmpty(getenv("FORGEJO_API_URL"), defaultAPIURL),
+		APIURL:         firstNonEmpty(getenv("FORGEJO_API_URL"), DefaultAPIURL),
 		WebURL:         getenv("FORGEJO_URL"),
 		AdminTokenFile: getenv("FORGEJO_ADMIN_ENV"),
 		ConfigDir:      defaultConfigDir(getenv),
-		BotPrefix:      defaultBotPrefix,
-		BotEmailDomain: defaultBotEmailDomain,
-		TokenName:      defaultTokenName,
-		MainBranch:     defaultMainBranch,
-		LandBranch:     defaultLandBranch,
+		BotPrefix:      DefaultBotPrefix,
+		BotEmailDomain: DefaultBotEmailDomain,
+		TokenName:      DefaultTokenName,
+		MainBranch:     DefaultMainBranch,
+		LandBranch:     DefaultLandBranch,
 	}
 	if err := o.parseFlags(args); err != nil {
 		return nil, err
@@ -181,10 +192,10 @@ func (o *Options) parseFlags(args []string) error {
 // GATE_CONTEXTS and LANDING_BOT assignments after its parse loop.
 func (o *Options) applyDefaults() {
 	if len(o.Roles) == 0 {
-		o.Roles = defaultRoles()
+		o.Roles = DefaultRoles()
 	}
 	if len(o.GateContexts) == 0 {
-		o.GateContexts = defaultGateContexts()
+		o.GateContexts = DefaultGateContexts()
 	}
 	// The landing bot is the one login the protection rules name, so it is the
 	// landing role's bot unless the operator names another account.
@@ -196,7 +207,7 @@ func (o *Options) applyDefaults() {
 // validate refuses the values the run cannot use, in the order the script
 // checked them, so the first bad flag named is the one an operator fixes.
 func (o *Options) validate() error {
-	if !strings.HasPrefix(o.APIURL, "http://") && !strings.HasPrefix(o.APIURL, "https://") {
+	if !validAPIURL(o.APIURL) {
 		return usagef("--api-url must be http:// or https:// (got '%s')", o.APIURL)
 	}
 	o.APIURL = strings.TrimSuffix(o.APIURL, "/")
@@ -208,7 +219,7 @@ func (o *Options) validate() error {
 			return err
 		}
 		if _, ok := RoleScopes(role); !ok {
-			return usagef("unknown role '%s' (known roles: %s)", role, knownRoles())
+			return usagef("unknown role '%s' (known roles: %s)", role, KnownRoles())
 		}
 	}
 	for _, name := range []struct{ flag, value string }{
@@ -236,15 +247,26 @@ func (o *Options) validate() error {
 	}
 	for _, repo := range o.Repos {
 		if !validRepo(repo) {
-			return usagef("--repo '%s' must be OWNER/NAME", repo)
+			return usagef("--repo '%s' must be OWNER/NAME, each part matching [A-Za-z0-9._-]+ and neither '.' nor '..'", repo)
 		}
 	}
 	return nil
 }
 
-// knownRoles names every role in the table, space-separated, for the message a
-// mistyped --role gets.
-func knownRoles() string {
+// validAPIURL reports whether value is the API root: the scheme exactly as the
+// script spelled it, and a host after it. A bare scheme would leave a root with
+// nothing to address, and every request would be built against nothing.
+func validAPIURL(value string) bool {
+	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
+		return false
+	}
+	u, err := url.Parse(value)
+	return err == nil && u.Host != ""
+}
+
+// KnownRoles names every role in the table, space-separated: the message a
+// mistyped --role gets, and the list the usage text shows.
+func KnownRoles() string {
 	table := roleTable()
 	names := make([]string, 0, len(table))
 	for _, r := range table {
@@ -267,19 +289,43 @@ func requirePlain(flag, value string) error {
 }
 
 // requireJSONSafe refuses a value that would need escaping inside the JSON this
-// tool writes, which escapes nothing: empty, a newline, a quote, a backslash.
+// tool writes, which escapes nothing. The shell could name only the newline it
+// hit; every control character breaks a JSON string the same way, so a tab or a
+// carriage return is refused too.
 func requireJSONSafe(flag, value string) error {
-	if value == "" || strings.ContainsAny(value, "\n\"\\") {
-		return usagef("%s '%s' may not be empty or hold a newline, quote or backslash", flag, value)
+	if !jsonSafe(value) {
+		return usagef("%s '%s' may not be empty or hold a control character, quote or backslash", flag, value)
 	}
 	return nil
 }
 
-// validRepo reports whether repo is OWNER/NAME: exactly one slash, with a
-// non-empty owner before it and a non-empty name after it.
+// jsonSafe reports whether value fits in a JSON string unescaped: non-empty,
+// with no control character, quote or backslash.
+func jsonSafe(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < ' ' || r == 0x7f || r == '"' || r == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+// validRepo reports whether repo is OWNER/NAME with both parts plain names.
+// The value is pasted into a URL path, so a part that walks (or carries a
+// character the path reads as a delimiter) is refused here rather than being
+// sent to the server.
 func validRepo(repo string) bool {
 	owner, name, found := strings.Cut(repo, "/")
-	return found && owner != "" && name != "" && !strings.Contains(name, "/")
+	return found && repoPart(owner) && repoPart(name)
+}
+
+// repoPart reports whether one side of the slash may name a repository: a plain
+// name, and not a path segment that walks to another directory.
+func repoPart(value string) bool {
+	return plainName.MatchString(value) && value != "." && value != ".."
 }
 
 // defaultConfigDir is where the role token files go: $XDG_CONFIG_HOME/gt, else
