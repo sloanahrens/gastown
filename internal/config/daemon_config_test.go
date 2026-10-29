@@ -493,3 +493,38 @@ func TestForgejoTokenDirDefault(t *testing.T) {
 		t.Errorf("forgejoTokenDir(home error) = %v, want the home error", err)
 	}
 }
+
+// TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn: the design's block
+// decodes as written, and a value the patrol cannot act on is an error when the
+// document is decoded rather than a default later. A mistyped mode must not
+// read as a dry run or as an apply.
+func TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
+	t.Parallel()
+
+	var cfg PatrolsConfig
+	design := `{"disk_maintenance": {"enabled": true, "interval": "daily", "window": "04:30", "mode": "apply"}}`
+	if err := json.Unmarshal([]byte(design), &cfg); err != nil {
+		t.Fatalf("the design's block does not decode: %v", err)
+	}
+	dm := cfg.DiskMaintenance
+	if dm == nil || !dm.Enabled || dm.Interval != "daily" || dm.Window != "04:30" || dm.Mode != "apply" {
+		t.Fatalf("decoded %+v, want the block as written", dm)
+	}
+
+	bad := map[string]string{
+		"not an object":    `{"disk_maintenance": "on"}`,
+		"unknown mode":     `{"disk_maintenance": {"mode": "applyy"}}`,
+		"unknown interval": `{"disk_maintenance": {"interval": "hourly"}}`,
+		"malformed window": `{"disk_maintenance": {"window": "4:30pm"}}`,
+		"unknown key":      `{"disk_maintenance": {"enable": true}}`,
+	}
+	for name, doc := range bad {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(doc), &p); err == nil {
+				t.Fatalf("%s decoded without an error: %+v", name, p.DiskMaintenance)
+			}
+		})
+	}
+}
