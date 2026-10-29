@@ -544,12 +544,18 @@ func TestDaemonPatrolConfig_SupervisorKind(t *testing.T) {
 		t.Errorf("supervisor kinds = %q, %q, %q", SupervisorLaunchd, SupervisorSystemd, SupervisorContainer)
 	}
 
-	for _, value := range []string{SupervisorLaunchd, SupervisorSystemd, SupervisorContainer, ""} {
+	for _, tt := range []struct{ name, value string }{
+		{"launchd", SupervisorLaunchd},
+		{"systemd", SupervisorSystemd},
+		{"container", SupervisorContainer},
+		{"unset", ""},
+	} {
+		value := tt.value
 		body := `{}`
 		if value != "" {
 			body = `{"supervisor":"` + value + `"}`
 		}
-		t.Run(value, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var cfg DaemonPatrolConfig
 			if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
@@ -644,5 +650,57 @@ func TestDaemonPatrolConfig_NilConfigKeepsDetectionAndDefaults(t *testing.T) {
 	}
 	if got := cfg.ComposeProject(); got != DefaultComposeProject {
 		t.Errorf("ComposeProject() = %q, want %q", got, DefaultComposeProject)
+	}
+}
+
+// A container_name and compose_project are set together or not at all, and each
+// must have the shape docker and compose accept: the container supervisor
+// builds argv from both, and a value that reads as a flag or a path would reach
+// it unchecked otherwise.
+func TestDaemonPatrolConfig_ValidateContainerNames(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{"both unset", `{}`, ""},
+		{"both set", `{"container_name":"gt-scratch-daemon-1","compose_project":"gt-scratch"}`, ""},
+		{"only the name", `{"container_name":"gt-scratch-daemon-1"}`, "set both or neither"},
+		{"only the project", `{"compose_project":"gt-scratch"}`, "set both or neither"},
+		{"name leads with a dash", `{"container_name":"-rm","compose_project":"gt-scratch"}`, `daemon.container_name "-rm"`},
+		{"name has a space", `{"container_name":"gt scratch","compose_project":"gt-scratch"}`, `daemon.container_name "gt scratch"`},
+		{"name has a slash", `{"container_name":"gt/scratch","compose_project":"gt-scratch"}`, `daemon.container_name "gt/scratch"`},
+		{"project is uppercase", `{"container_name":"gt-scratch-daemon-1","compose_project":"Gt-Scratch"}`, `daemon.compose_project "Gt-Scratch"`},
+		{"project has a dot", `{"container_name":"gt-scratch-daemon-1","compose_project":"gt.scratch"}`, `daemon.compose_project "gt.scratch"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(tt.body), &cfg); err != nil {
+				t.Fatalf("decode %s = %v", tt.body, err)
+			}
+			err := cfg.ValidateContainerNames()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateContainerNames() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidateContainerNames() = nil, want an error naming %s", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not name %s", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestDaemonPatrolConfig_ValidateContainerNamesNilConfig(t *testing.T) {
+	t.Parallel()
+	var cfg *DaemonPatrolConfig
+	if err := cfg.ValidateContainerNames(); err != nil {
+		t.Errorf("ValidateContainerNames() on nil = %v, want nil", err)
 	}
 }
