@@ -21,6 +21,11 @@ const HostSafetyPrompt = "HOST SAFETY (spec dispatcher): any test of install or 
 // the dispatcher never slings it (gt-k1g3e).
 const CrewOnlyLabel = "crew-only"
 
+// SplitLabel marks a bead whose scope a person or bird has cut into sibling
+// beads, so the parent's work lives on them and the dispatcher never slings it
+// (hq-et8bc).
+const SplitLabel = "split"
+
 // excludedLabels are the labels that keep a candidate out of the dispatcher's
 // queue. It is not the dispatcher's verdict: the verdict is Eligible's, on the
 // full bead, and it reads every routing decision through the shared hold rule
@@ -38,7 +43,13 @@ const CrewOnlyLabel = "crew-only"
 // are named here so ReadyQueryLabels filters them server-side and the dispatcher
 // never fetches them (gt-ft52x). The shared hold rule holds each one too, so
 // the verdict is the same whether the query or Eligible catches it.
-var excludedLabels = []string{"gt:ready-to-land", "needs-human", "needs-overseer", "needs-operator", DispatchFailedLabel, CrewOnlyLabel, dispatch.HumanOnlyLabel, dispatch.OverseerOnlyLabel, dispatch.OperatorOnlyLabel, dispatch.NeedsOverseerLabel, dispatch.NeedsOperatorLabel}
+//
+// SplitLabel is named for the verdict alone: nothing but this list holds the
+// label, because a split is not a decision about who may take the bead but a
+// record that its work has moved to the children. The ready query filters it
+// too, so the tick has no split bead to report and never names one in its skip
+// line (gt-q6zoo).
+var excludedLabels = []string{"gt:ready-to-land", "needs-human", "needs-overseer", "needs-operator", SplitLabel, DispatchFailedLabel, CrewOnlyLabel, dispatch.HumanOnlyLabel, dispatch.OverseerOnlyLabel, dispatch.OperatorOnlyLabel, dispatch.NeedsOverseerLabel, dispatch.NeedsOperatorLabel}
 
 // ExcludedLabels returns the labels that keep a bead from the dispatcher.
 func ExcludedLabels() []string { return append([]string(nil), excludedLabels...) }

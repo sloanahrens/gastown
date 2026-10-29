@@ -88,6 +88,10 @@ func TestEligible(t *testing.T) {
 		// case is the empty edit at the top of the table).
 		{func(s *Spec) { s.Notes = "this note explains the do-not-redispatch marker" }, true, ""},
 		{func(s *Spec) { s.Priority = 2 }, true, ""},
+		// A parent whose children are open is the container rule's skip, not
+		// the split rule's: the label is the split's own record, so a bead with
+		// children and no label is the candidate it was (hq-et8bc).
+		{func(s *Spec) { s.Children = []Child{{ID: "gt-slice", Status: "open"}} }, true, ""},
 		{func(s *Spec) { s.Priority = 3 }, false, "priority P3 outside the ceiling P2"},
 		{func(s *Spec) { s.Priority = -1 }, false, "priority P-1 outside the ceiling P2"},
 	}
@@ -153,8 +157,63 @@ func TestExcludedLabelsSplitIntoFilteredAndCarried(t *testing.T) {
 			t.Errorf("carried = %v, want %s: the tick has to name the refusal", carried, want)
 		}
 	}
+	if !hasLabel(ready, SplitLabel) {
+		t.Errorf("ready query = %v, want %s filtered server-side: a split bead is never the tick's to report", ready, SplitLabel)
+	}
 	if len(carried)+len(ready) != len(ExcludedLabels()) {
 		t.Errorf("carried %v + ready %v do not make up ExcludedLabels %v", carried, ready, ExcludedLabels())
+	}
+}
+
+// A split bead's work lives on the sibling beads it was cut into, so no seat
+// takes the parent: not while a child is open, and not after the last one
+// closes, since the label is the split's own record and outlasts them
+// (hq-et8bc).
+func TestSplitLabelKeepsTheDispatcherOff(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		edit func(*Spec)
+	}{
+		{"split label", func(s *Spec) { s.Labels = []string{SplitLabel} }},
+		{"split typed by hand", func(s *Spec) { s.Labels = []string{"Split"} }},
+		{"split parent whose children all closed", func(s *Spec) {
+			s.Labels = []string{SplitLabel}
+			s.Children = []Child{{ID: "gt-slice", Status: "closed"}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := goodSpec()
+			tc.edit(&s)
+			if ok, why := Eligible(s, 2); ok || why != "label "+SplitLabel {
+				t.Errorf("Eligible = %v %q, want a refusal naming %s", ok, why, SplitLabel)
+			}
+		})
+	}
+}
+
+// needs-split is the overrun guard's hand-back label, not a record that a bead
+// was split (polecat.NeedsSplitLabel): the shared hold rule keeps such a bead
+// out of every automatic path until a person cuts it smaller, so the verdict
+// here is the one it had before SplitLabel existed. Reading the split rule as a
+// substring would take the hand-back label over and refuse the bead by the
+// wrong line, leaving a person to hunt for a split that never happened
+// (hq-et8bc).
+func TestNeedsSplitLabelStaysDispatchable(t *testing.T) {
+	t.Parallel()
+	const needsSplit = "needs-split"
+	if hasLabel(ExcludedLabels(), needsSplit) {
+		t.Fatalf("ExcludedLabels names %s: the dispatcher's own list reads the hand-back label as a split", needsSplit)
+	}
+	s := goodSpec()
+	s.Labels = []string{needsSplit}
+	ok, why := Eligible(s, 2)
+	if ok {
+		t.Fatalf("Eligible = true: %s stopped holding the bead", needsSplit)
+	}
+	if want := "hold: label " + needsSplit; why != want {
+		t.Errorf("Eligible reason = %q, want %q: the shared hold decides this label, not the split rule", why, want)
 	}
 }
 
