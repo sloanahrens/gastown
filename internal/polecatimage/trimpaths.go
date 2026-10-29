@@ -21,8 +21,9 @@ type trimPathsFS struct {
 	names func(dir string) ([]string, error)
 	// read returns the contents of one file.
 	read func(name string) ([]byte, error)
-	// remove deletes one path.
-	remove func(name string) error
+	// remove deletes rel, a path below root that has no symlink in it, and refuses a path that
+	// has come to leave root since the guard resolved it.
+	remove func(root, rel string) error
 	// resolve follows every symlink in a path and returns the real name.
 	resolve func(name string) (string, error)
 }
@@ -43,9 +44,21 @@ func diskTrimPathsFS() trimPathsFS {
 			return names, nil
 		},
 		read:    os.ReadFile,
-		remove:  os.Remove,
+		remove:  removeInRoot,
 		resolve: filepath.EvalSymlinks,
 	}
+}
+
+// removeInRoot deletes rel through an os.Root opened on root, so the kernel-level walk refuses a
+// directory that was swapped for a symlink out of the claim after trimTarget resolved it: the guard
+// checks the path once, the removal enforces it at the moment of the unlink.
+func removeInRoot(root, rel string) error {
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	return r.Remove(rel)
 }
 
 // TrimPathsResult is what one trim-paths run did: how many of the listed files it removed, and how
@@ -92,7 +105,11 @@ func RemoveTrimPaths(root, listDir string, shards int, w trimPathsFS) (TrimPaths
 	failed, firstPath := 0, ""
 	var firstErr error
 	for _, target := range targets {
-		switch err := w.remove(target); {
+		rel, err := filepath.Rel(realRoot, target)
+		if err == nil {
+			err = w.remove(realRoot, rel)
+		}
+		switch {
 		case err == nil:
 			res.Removed++
 		case errors.Is(err, fs.ErrNotExist):

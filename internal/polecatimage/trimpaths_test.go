@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -52,7 +53,8 @@ func (f *fakeTrimFS) fs() trimPathsFS {
 			}
 			return []byte(data), nil
 		},
-		remove: func(name string) error {
+		remove: func(root, rel string) error {
+			name := filepath.Join(root, rel)
 			if err, ok := f.removeErr[name]; ok {
 				return err
 			}
@@ -412,5 +414,103 @@ func TestRemoveTrimPathsRefusesAShardCountOfNone(t *testing.T) {
 	}
 	if len(f.removed) != 0 || len(f.dirs) != 1 {
 		t.Errorf("removed %v, want nothing removed", f.removed)
+	}
+}
+
+// TestRemoveTrimPathsOnDiskRefusesADirectorySwappedForALinkOutOfTheClaim runs the helper on a real
+// directory tree and swaps the listed file's directory for a symlink to a directory outside the claim
+// after the guard has resolved it and before the removal runs: the removal, not the guard, must refuse
+// it, and the file outside the claim must survive (gt-cahkg).
+func TestRemoveTrimPathsOnDiskRefusesADirectorySwappedForALinkOutOfTheClaim(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	claim := filepath.Join(base, "claim")
+	outside := filepath.Join(base, "outside")
+	listDir := filepath.Join(base, "list")
+	for _, dir := range []string{filepath.Join(claim, "gocache", "ab"), outside, filepath.Join(listDir, "0")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kept := filepath.Join(claim, "gocache", "ab", "kept")
+	victim := filepath.Join(outside, "victim")
+	for _, f := range []string{kept, victim, filepath.Join(outside, "kept")} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, err := json.Marshal([]string{"gocache/ab/kept"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(listDir, "0", cachevol.TrimShardKey), list, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w := diskTrimPathsFS()
+	resolve := w.resolve
+	w.resolve = func(name string) (string, error) {
+		real, err := resolve(name)
+		if err == nil && strings.HasSuffix(name, filepath.Join("gocache", "ab")) {
+			// the sandbox's swap, after the guard has resolved and accepted the directory
+			if err := os.RemoveAll(name); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, name); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return real, err
+	}
+	_, err = RemoveTrimPaths(claim, listDir, 1, w)
+	if err == nil {
+		t.Fatal("RemoveTrimPaths removed through a directory swapped for a link out of the claim and reported success")
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "kept")); statErr != nil {
+		t.Errorf("the file outside the claim is gone after the swap: %v", statErr)
+	}
+	if _, statErr := os.Stat(victim); statErr != nil {
+		t.Errorf("the other file outside the claim is gone after the swap: %v", statErr)
+	}
+}
+
+// TestRemoveTrimPathsOnDiskRemovesAFileUnderTheClaim is the same helper on a real tree with no swap:
+// the listed file goes and its neighbour stays.
+func TestRemoveTrimPathsOnDiskRemovesAFileUnderTheClaim(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	claim := filepath.Join(base, "claim")
+	listDir := filepath.Join(base, "list")
+	for _, dir := range []string{filepath.Join(claim, "gocache", "ab"), filepath.Join(listDir, "0")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gone := filepath.Join(claim, "gocache", "ab", "gone")
+	stays := filepath.Join(claim, "gocache", "ab", "stays")
+	for _, f := range []string{gone, stays} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, err := json.Marshal([]string{"gocache/ab/gone", "gocache/ab/missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(listDir, "0", cachevol.TrimShardKey), list, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := RemoveTrimPaths(claim, listDir, 1, diskTrimPathsFS())
+	if err != nil {
+		t.Fatalf("RemoveTrimPaths: %v", err)
+	}
+	if res.Removed != 1 || res.Absent != 1 {
+		t.Errorf("result = %+v, want one removed and one absent", res)
+	}
+	if _, err := os.Stat(gone); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the listed file is still there: %v", err)
+	}
+	if _, err := os.Stat(stays); err != nil {
+		t.Errorf("the unlisted neighbour was removed: %v", err)
 	}
 }
