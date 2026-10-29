@@ -80,30 +80,19 @@ func (d Deployer) Deploy(ctx context.Context, sup Supervisor, composePath string
 
 // writeComposeFile replaces path with content in one rename, so a reader of the
 // file — the start command, a status check — sees either the old render or the
-// new one, never a partly written file. The temporary file is made in path's
-// own directory because a rename is atomic only within one filesystem, and it
-// is removed on any failure, leaving path as it was.
+// new one, never a partly written file. The temporary file is path with .tmp
+// appended: in the same directory, because a rename is atomic only within one
+// filesystem. A deploy is the only writer of a town's compose file, and one
+// that found a previous deploy's leftover temp file replaces it rather than
+// reads it.
+//
+// path is untouched until the rename, so both failures leave the old render in
+// place. A write that fails may leave a partial temporary file, which the next
+// deploy overwrites; a rename that fails removes it here, since it is the only
+// copy of the new render and nothing would ever read it.
 func writeComposeFile(path string, content []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	remove := func(err error) error {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if _, err := f.Write(content); err != nil {
-		return remove(err)
-	}
-	// CreateTemp makes the file 0600; the compose file is config the operator
-	// reads and docker runs, so it keeps the mode a town-root file has.
-	if err := f.Chmod(0o644); err != nil {
-		return remove(err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, content, 0o644); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {

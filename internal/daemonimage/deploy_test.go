@@ -246,24 +246,49 @@ func TestDeployStartFailureIsReturned(t *testing.T) {
 }
 
 // TestDeployWriteErrorLeavesTheOldComposeFileAndRunsNothing: a compose path the
-// rename cannot replace (a directory) fails the deploy without starting anything
-// and leaves no temporary render behind.
+// write cannot replace (a directory), or a temporary path that is one, fails the
+// deploy without starting anything and leaves no partial render behind.
 func TestDeployWriteErrorLeavesTheOldComposeFileAndRunsNothing(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "compose.yml")
-	if err := os.Mkdir(path, 0o755); err != nil {
-		t.Fatalf("making the compose path a directory: %v", err)
+	tests := []struct {
+		name string
+		// block makes the deploy's write fail: the path it writes the render to,
+		// or the path it renames over.
+		block func(t *testing.T, path string)
+	}{
+		{name: "the temporary path is a directory", block: func(t *testing.T, path string) {
+			if err := os.Mkdir(path+".tmp", 0o755); err != nil {
+				t.Fatalf("making the temporary path a directory: %v", err)
+			}
+		}},
+		{name: "the compose path is a directory", block: func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatalf("making the compose path a directory: %v", err)
+			}
+		}},
 	}
-	run := &deployRunner{composePath: path}
-	sup := &fakeSupervisor{argv: containerStartArgv(path)}
-	if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, deploySpec()); err == nil {
-		t.Fatal("Deploy reported success writing over a directory")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "compose.yml")
+			tt.block(t, path)
+			run := &deployRunner{composePath: path}
+			sup := &fakeSupervisor{argv: containerStartArgv(path)}
+			if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, deploySpec()); err == nil {
+				t.Fatal("Deploy reported success writing where it cannot")
+			}
+			if len(run.calls) != 0 {
+				t.Errorf("recorded %d commands, want none after a write error", len(run.calls))
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatalf("reading %s: %v", dir, err)
+			}
+			if len(entries) != 1 {
+				t.Errorf("%s holds %d entries after a failed write, want only the path the test blocked", dir, len(entries))
+			}
+		})
 	}
-	if len(run.calls) != 0 {
-		t.Errorf("recorded %d commands, want none after a write error", len(run.calls))
-	}
-	onlyFileIn(t, dir, "compose.yml")
 }
 
 // TestDeployRefusesAnIncompleteCall: a deploy with no runner or no supervisor
