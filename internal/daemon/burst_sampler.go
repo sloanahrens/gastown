@@ -147,9 +147,10 @@ func (d *Daemon) burstSampler() *burstSampler {
 	if s.seams.getenv == nil {
 		s.seams.getenv = os.Getenv
 	}
-	// In container mode top and ps read the Mac, which this process is not on,
-	// and the health file's exec tax is this daemon's own measurement inside
-	// the container, so the host agent's probe file carries all three.
+	// In container mode top and ps read this process's own process table, which
+	// is the container's and not the Mac's, and the health file's exec tax is
+	// measured in that same tree, so none of the three readings describes the
+	// host: the host agent's probe file carries them.
 	if s.seams.host == nil && s.seams.getenv(config.ContainerModeEnv) == config.SupervisorContainer {
 		path := hostprobe.Path(s.town)
 		s.seams.host = func(now time.Time) (metrics.BurstHostReading, error) {
@@ -244,7 +245,9 @@ func (s *burstSampler) sampleEnv() (metrics.Env, error) {
 // burstHostFromProbeFile reads the host agent's probe file as of now.
 // hostprobe.Read refuses a file that is missing, unreadable, from another
 // schema, older than burstProbeMaxAge or stamped in the future, so a stale file
-// is an error here and an old number is never carried into a row.
+// is an error here and no reading it holds is carried into a row. A file Read
+// accepts can still be up to burstProbeMaxAge old, so the reading names its age
+// (burstProbeReading) and the row keeps it in host_age_s.
 func burstHostFromProbeFile(path string, now time.Time) (metrics.BurstHostReading, error) {
 	p, err := hostprobe.Read(path, now, burstProbeMaxAge)
 	if err != nil {
@@ -260,6 +263,16 @@ func burstHostFromProbeFile(path string, now time.Time) (metrics.BurstHostReadin
 // host itself.
 func burstProbeReading(p hostprobe.Probes, now time.Time) metrics.BurstHostReading {
 	var r metrics.BurstHostReading
+	// One stamp covers every reading the file holds, so the age is the file's
+	// and not each field's: the idle share and the consumers are the host as
+	// the agent saw it this long before the sample, and the row says so.
+	age := now.Sub(p.At).Seconds()
+	if age < 0 {
+		// A stamp inside the drift Read tolerates: a current reading, not one
+		// newer than fresh.
+		age = 0
+	}
+	r.AgeS = &age
 	errs := map[string]string{}
 	if p.CPUIdlePct.Err != "" {
 		errs[burstProbeIdleKey] = p.CPUIdlePct.Err
@@ -283,19 +296,14 @@ func burstProbeReading(p hostprobe.Probes, now time.Time) metrics.BurstHostReadi
 	if p.ExecTaxMS.Err != "" {
 		errs[burstProbeTaxKey] = p.ExecTaxMS.Err
 	} else {
-		// The file's stamp is the exec tax measurement's stamp: the agent
-		// writes the tax it measured at At. Read refuses a file older than
+		// The tax was measured in the same pass the file is stamped for, so
+		// its age is the file's. Read refuses a file older than
 		// burstProbeMaxAge, so the tax is always current beside
 		// burstExecTaxStaleAfter.
 		tax := p.ExecTaxMS.Value
 		r.ExecTaxMS = &tax
-		age := now.Sub(p.At).Seconds()
-		if age < 0 {
-			// A stamp inside the drift Read tolerates: a current measurement,
-			// not one newer than fresh.
-			age = 0
-		}
-		r.ExecTaxAgeS = &age
+		taxAge := age
+		r.ExecTaxAgeS = &taxAge
 	}
 	if len(errs) > 0 {
 		r.Errors = errs

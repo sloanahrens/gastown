@@ -72,6 +72,13 @@ func BurstInterval(idlePct, execTaxMS *float64) time.Duration {
 // one-second window, one top, one daemon-log tail and one bd read per rig for
 // the landing queue: a price worth paying while the host is pressed, and what
 // BurstInterval's slow cadence keeps from being paid all day.
+//
+// A daemon in a container cannot take the host readings with top and ps, so in
+// container mode they come from the host agent's probe file instead: IdlePct,
+// TopConsumers and ExecTaxMS hold the file's readings, HostAgeS says how far
+// before TS the file was stamped, and a reading the file could not give is null
+// with its reason in HostErrors. Outside container mode those two fields are
+// absent and the three readings are taken from the host at TS.
 type BurstRow struct {
 	// V is the schema version, BurstVersion.
 	V int `json:"v"`
@@ -105,6 +112,13 @@ type BurstRow struct {
 	// absent outside container mode, where the host's own commands answer for
 	// a failed reading with the sampler's log line alone.
 	HostErrors map[string]string `json:"host_errors,omitempty"`
+	// HostAgeS is how many seconds before TS the host agent read the idle
+	// share and the consumers this row holds (BurstHostReading.AgeS): the two
+	// describe the host then, not at TS, and IntervalS is taken from the idle
+	// share at that age. It is absent outside container mode, where both
+	// readings are taken at TS, and on a row the file answered no reading for,
+	// which HostErrors explains.
+	HostAgeS *float64 `json:"host_age_s,omitempty"`
 }
 
 // BurstHostReading is a burst sample's host readings taken from outside this
@@ -120,6 +134,10 @@ type BurstHostReading struct {
 	// measurement was, both nil when the tax was not read.
 	ExecTaxMS   *float64
 	ExecTaxAgeS *float64
+	// AgeS is how many seconds before the sample the source read IdlePct and
+	// Consumers, and is written into the row's HostAgeS. nil when the source
+	// read them at the sample's own instant.
+	AgeS *float64
 	// Errors names why a reading is absent, keyed by the row field it would
 	// have filled, and is written into the row's HostErrors.
 	Errors map[string]string
@@ -190,6 +208,7 @@ func SampleBurst(ctx context.Context, env Env) (BurstRow, error) {
 		row.ExecTaxMS, row.ExecTaxAgeS = host.ExecTaxMS, host.ExecTaxAgeS
 		row.TopConsumers = burstRankedConsumers(host.Consumers, burstTopN)
 		row.HostErrors = host.Errors
+		row.HostAgeS = host.AgeS
 	} else {
 		row.IdlePct = burstIdle(ctx, env)
 		row.ExecTaxMS, row.ExecTaxAgeS = burstExecTax(env, now)
