@@ -35,6 +35,22 @@ func supervisorTown(t *testing.T, kind string) string {
 	return townRoot
 }
 
+// unknownSettingsTown makes a town whose daemon.json is doc, a document that
+// leaves the supervisor kind unknown, with a daemon holding the lock as pid.
+func unknownSettingsTown(t *testing.T, doc string) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "daemon.json"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	holdDaemonLock(t, townRoot, os.Getpid())
+	return townRoot
+}
+
 // holdDaemonLock leaves the state of a daemon whose flock this process can
 // see: daemon.lock held, and daemon.pid naming pid.
 func holdDaemonLock(t *testing.T, townRoot string, pid int) {
@@ -106,39 +122,33 @@ func TestStopDaemonContainerTownRefusesWithoutAVisibleLock(t *testing.T) {
 }
 
 // A setting that cannot be read, or names a kind this binary does not know,
-// leaves it unknown whether the daemon runs in a container. The unknown is not
-// permission to signal: the stop refuses and says which file it could not use.
-func TestStopDaemonUnknownSettingsNeverSignals(t *testing.T) {
+// does not make the town a container town, and the stop keeps the host path a
+// launchd or systemd town has. The pid gate is what still refuses a signal: the
+// lock's PID here is this test process, which is not the town's daemon, so the
+// stop fails closed and sends nothing.
+func TestStopDaemonUnknownSettingsKeepTheHostPathAndStillGateThePID(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name string
 		doc  string
-		want string
 	}{
-		{"unparseable", "{", "daemon.json"},
-		{"unknown kind", `{"supervisor": "s6"}`, "s6"},
+		{"unparseable", "{"},
+		{"unknown kind", `{"supervisor": "s6"}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			townRoot := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(townRoot, "mayor", "daemon.json"), []byte(tt.doc), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			holdDaemonLock(t, townRoot, os.Getpid())
+			townRoot := unknownSettingsTown(t, tt.doc)
 			sigs := &countedSignals{}
 
 			err := stopDaemonWith(townRoot, sigs.signals())
 			if err == nil {
-				t.Fatal("StopDaemon reported a stop without knowing whether the town runs in a container")
+				t.Fatal("StopDaemon reported a stop of a PID it cannot prove is this town's daemon")
 			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("error = %v, want it to carry %q", err, tt.want)
+			if !strings.Contains(err.Error(), "is this process") {
+				t.Errorf("error = %v, want the PID gate refusing this process", err)
 			}
 			if sigs.terms != 0 || sigs.kills != 0 {
-				t.Errorf("sent %d SIGTERM and %d SIGKILL without knowing the town's supervisor kind", sigs.terms, sigs.kills)
+				t.Errorf("sent %d SIGTERM and %d SIGKILL to an unproven PID", sigs.terms, sigs.kills)
 			}
 		})
 	}
@@ -179,7 +189,7 @@ func TestIsRunningContainerTownProbeErrorNeverFallsBackToThePIDFile(t *testing.T
 		return false, nil, errors.New("probe refused")
 	}
 
-	running, pid, err := isRunningWith(townRoot, probe)
+	running, pid, err := isRunningOn(townRoot, true, probe)
 	if err == nil {
 		t.Fatal("IsRunning reported an answer from a lock it could not probe")
 	}
@@ -189,38 +199,27 @@ func TestIsRunningContainerTownProbeErrorNeverFallsBackToThePIDFile(t *testing.T
 }
 
 // A setting that cannot be read, or names a kind this binary does not know,
-// leaves the supervisor kind unknown, and IsRunning reports the unknown rather
-// than answering from a pid file it cannot say the daemon owns.
-func TestIsRunningUnknownSettingsIsAnError(t *testing.T) {
+// leaves the town on the host path: IsRunning answers as it did before the
+// container rule existed, from the lock and the pid file.
+func TestIsRunningUnknownSettingsKeepsTheHostPath(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name string
 		doc  string
-		want string
 	}{
-		{"unparseable", "{", "daemon.json"},
-		{"unknown kind", `{"supervisor": "s6"}`, "s6"},
+		{"unparseable", "{"},
+		{"unknown kind", `{"supervisor": "s6"}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			townRoot := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(townRoot, "mayor", "daemon.json"), []byte(tt.doc), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			holdDaemonLock(t, townRoot, os.Getpid())
+			townRoot := unknownSettingsTown(t, tt.doc)
 
 			running, pid, err := IsRunning(townRoot)
-			if err == nil {
-				t.Fatalf("IsRunning = (%v, %d), want the unreadable setting reported", running, pid)
+			if err != nil {
+				t.Fatalf("IsRunning: %v, want the host path's answer", err)
 			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("error = %v, want it to carry %q", err, tt.want)
-			}
-			if running || pid != 0 {
-				t.Errorf("IsRunning = (%v, %d) beside the error, want no answer and no pid", running, pid)
+			if !running || pid != os.Getpid() {
+				t.Errorf("IsRunning = (%v, %d), want (%v, %d)", running, pid, true, os.Getpid())
 			}
 		})
 	}
