@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -712,5 +713,40 @@ func TestDaemonPatrolConfig_ValidateContainerNamesNilConfig(t *testing.T) {
 	var cfg *DaemonPatrolConfig
 	if err := cfg.ValidateContainerNames(); err != nil {
 		t.Errorf("ValidateContainerNames() on nil = %v, want nil", err)
+	}
+}
+
+// A town carries the container compose file only when it was set up as a
+// container town, and the answer reads no settings, so it holds when they
+// cannot be read. A compose file that cannot be statted for a reason other than
+// being absent counts as present: the answer fails toward the container.
+func TestMayBeContainerTown(t *testing.T) {
+	t.Parallel()
+	withCompose := t.TempDir()
+	composePath := ContainerComposeFile(withCompose)
+	if err := os.MkdirAll(filepath.Dir(composePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(composePath, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file where the town's daemon directory should be makes the
+	// stat fail with ENOTDIR, not ErrNotExist.
+	blocked := t.TempDir()
+	if err := os.WriteFile(filepath.Join(blocked, "daemon"), []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		town string
+		want bool
+	}{
+		{"compose file present", withCompose, true},
+		{"no compose file", t.TempDir(), false},
+		{"stat fails for another reason", blocked, true},
+	} {
+		if got := MayBeContainerTown(tc.town); got != tc.want {
+			t.Errorf("%s: MayBeContainerTown = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

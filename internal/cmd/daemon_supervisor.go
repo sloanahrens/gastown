@@ -343,7 +343,7 @@ func (c *daemonControl) hostSupervisorFile() (path, kind string) {
 // composeFilePath is where a container town's compose file lives: rendered
 // when the town is set up, read by the container supervisor's argv.
 func composeFilePath(townRoot string) string {
-	return filepath.Join(townRoot, "daemon", "container", "compose.yml")
+	return config.ContainerComposeFile(townRoot)
 }
 
 // detectDaemonSupervisor reports the supervisor provisioned FOR townRoot, or

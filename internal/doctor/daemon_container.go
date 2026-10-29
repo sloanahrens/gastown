@@ -18,9 +18,11 @@ import (
 // daemon's own daemon/state.json and the container supervisor's state, and
 // read no pid (gt-qpeei.20).
 
-// errContainerStateUnread is the container supervisor's state until the reader
-// that asks docker lands (templates.ContainerJobState, plan task A4). A check
-// reports it as unknown, which it never counts as healthy.
+// errContainerStateUnread is the container supervisor's state until a reader
+// that asks docker exists (templates.ContainerJobState has no production
+// caller yet), so a production reading is always unknown here. A check reports
+// it as unknown, which it never counts as healthy, and a test supplies the
+// reading through containerDaemonReading.
 var errContainerStateUnread = errors.New("the container supervisor's state is not read yet")
 
 // containerDaemonReading is a container town's two daemon reports: state.json,
@@ -77,9 +79,13 @@ type containerDaemonVerdict struct {
 func judgeContainerDaemon(name, townRoot string, read func(townRoot string) containerDaemonReading) containerDaemonVerdict {
 	kind, err := daemonSupervisorKind(townRoot)
 	if err != nil {
-		// The setting is what puts a town on this path, so a town whose
-		// settings will not read is judged here and is never handed the
-		// pid-reading path the other kinds take.
+		// The setting is what puts a town on this path, but the compose file a
+		// container town carries does not depend on it. A town that may be a
+		// container town is judged here and is never handed the pid-reading
+		// path; one with no compose file is a host town and keeps its own check.
+		if !config.MayBeContainerTown(townRoot) {
+			return containerDaemonVerdict{}
+		}
 		return containerDaemonVerdict{isContainer: true, result: &CheckResult{
 			Name:    name,
 			Status:  StatusWarning,

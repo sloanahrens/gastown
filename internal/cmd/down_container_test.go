@@ -128,6 +128,28 @@ func TestStopTownServices_UnreadableSettingsFallBackToThePidPath(t *testing.T) {
 	}
 }
 
+// The same unreadable settings in a town that carries the container compose
+// file stop nothing: its daemon.lock pid may be a container's, which names
+// nothing on this host, so the pid path stays off the table and the failure
+// says how to proceed.
+func TestStopTownServices_UnreadableSettingsWithComposeFileStopNothing(t *testing.T) {
+	t.Parallel()
+	town := downTestTown(t, "")
+	writeComposeFile(t, town)
+	ctl, calls := stubContainerTown(t, nil)
+	ctl.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
+		return nil, errors.New("settings are not valid JSON")
+	}
+
+	// containerDownServices fails the test on any pid read or signal.
+	if stopTownServices(town, containerDownServices(t, ctl), false) {
+		t.Error("stopTownServices = ok, want a refusal for a town that may be a container town")
+	}
+	if got := calls.last(); got != nil {
+		t.Errorf("ran %v, want no supervisor command for a town whose kind is unknown", got)
+	}
+}
+
 // A container town whose stop settings are incomplete stops nothing: acting on
 // the defaults would reach the live container (gt-ix1kz).
 func TestStopTownServices_ContainerTownUnsetSettingsStopNothing(t *testing.T) {

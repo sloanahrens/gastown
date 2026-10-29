@@ -154,11 +154,26 @@ func TestDaemonChecks_ContainerFailsWhenNotHealthy(t *testing.T) {
 	}
 }
 
+// writeContainerComposeFile gives the town the compose file only a container
+// town has, which is what keeps an unreadable setting on the container path.
+func writeContainerComposeFile(t *testing.T, townRoot string) {
+	t.Helper()
+	path := config.ContainerComposeFile(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // An unknown daemon.supervisor value is unknown, not a town the host detects
-// for: reading it as a host kind would hand a container town the pid path.
+// for: reading it as a host kind would hand a container town the pid path. The
+// town carries the compose file a container town has.
 func TestJudgeContainerDaemon_UnknownSupervisorSettingFailsClosed(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
+	writeContainerComposeFile(t, townRoot)
 	if err := daemon.SavePatrolConfig(townRoot, &config.DaemonPatrolConfig{Supervisor: "podman"}); err != nil {
 		t.Fatalf("SavePatrolConfig: %v", err)
 	}
@@ -205,12 +220,14 @@ func TestDaemonCheck_Fix_ContainerStartsNothingHere(t *testing.T) {
 	}
 }
 
-// A settings file that will not read is reported as unknown, not as a town
-// under the host's supervisor: the setting is what puts a town on the
-// container path, and an unreadable one must not choose the pid path.
+// A settings file that will not read, in a town that carries a container
+// compose file, is reported as unknown, not as a town under the host's
+// supervisor: an unreadable setting must not choose the pid path for a town
+// that may be a container town.
 func TestJudgeContainerDaemon_UnreadableSettingsIsUnknown(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
+	writeContainerComposeFile(t, townRoot)
 	path := config.TownSettingsPath(townRoot)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -225,6 +242,26 @@ func TestJudgeContainerDaemon_UnreadableSettingsIsUnknown(t *testing.T) {
 	}
 	if v.result.Status == StatusOK || !strings.Contains(v.result.Message, "unknown") {
 		t.Errorf("result = (%v, %q), want an unknown failure", v.result.Status, v.result.Message)
+	}
+}
+
+// A settings file that will not read, in a town with no container compose
+// file, is a host town with a damaged file: its checks keep the pid-reading
+// path they always had, and the verdict does not change for it.
+func TestJudgeContainerDaemon_UnreadableSettingsWithoutComposeIsAHostTown(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	path := config.TownSettingsPath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"daemon": {"type": "daemon-patrol-config", "version": 99}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	v := judgeContainerDaemon("daemon", townRoot, nil)
+	if v.isContainer || v.result != nil {
+		t.Fatalf("judgeContainerDaemon = %+v, want the zero verdict a host town gets", v)
 	}
 }
 
