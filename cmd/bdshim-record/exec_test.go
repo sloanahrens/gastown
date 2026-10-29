@@ -179,22 +179,22 @@ func TestCopyTargetKeepsTheFixtureLayoutForAnyRootSpelling(t *testing.T) {
 		path string
 		want string
 	}{
-		{"absolute root", "/f/fixture", "/f/fixture/.beads/config.yaml", "/copy/.beads/config.yaml"},
-		{"relative root", "fixture", "fixture/.beads/config.yaml", "/copy/.beads/config.yaml"},
-		{"dotted relative root", "./fixture", "fixture/.beads/config.yaml", "/copy/.beads/config.yaml"},
-		{"root with a trailing dot", "fixture/.", "fixture/.beads/config.yaml", "/copy/.beads/config.yaml"},
-		{"the current directory", ".", ".beads/config.yaml", "/copy/.beads/config.yaml"},
-		{"the root itself", ".", ".", "/copy"},
+		{"absolute root", "/f/fixture", "/f/fixture/.beads/config.yaml", ".beads/config.yaml"},
+		{"relative root", "fixture", "fixture/.beads/config.yaml", ".beads/config.yaml"},
+		{"dotted relative root", "./fixture", "fixture/.beads/config.yaml", ".beads/config.yaml"},
+		{"root with a trailing dot", "fixture/.", "fixture/.beads/config.yaml", ".beads/config.yaml"},
+		{"the current directory", ".", ".beads/config.yaml", ".beads/config.yaml"},
+		{"the root itself", ".", ".", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := copyTarget(tc.src, "/copy", tc.path)
+			got, err := copyTarget(tc.src, tc.path)
 			if err != nil {
-				t.Fatalf("copyTarget(%q, %q) = %v, want the entry's place in the copy", tc.src, tc.path, err)
+				t.Fatalf("copyTarget(%q, %q) = %v, want the entry's name in the copy", tc.src, tc.path, err)
 			}
 			if got := filepath.ToSlash(got); got != tc.want {
-				t.Errorf("copyTarget(%q, %q) = %s, want %s", tc.src, tc.path, got, tc.want)
+				t.Errorf("copyTarget(%q, %q) = %q, want %q", tc.src, tc.path, got, tc.want)
 			}
 		})
 	}
@@ -205,8 +205,8 @@ func TestCopyTargetKeepsTheFixtureLayoutForAnyRootSpelling(t *testing.T) {
 func TestCopyTargetRefusesAnEntryOutsideTheFixture(t *testing.T) {
 	t.Parallel()
 	for _, path := range []string{"elsewhere/a.txt", "/f/fixture/../a.txt"} {
-		if got, err := copyTarget("/f/fixture", "/copy", path); err == nil {
-			t.Errorf("copyTarget(%q) = %s, want a refusal", path, got)
+		if got, err := copyTarget("/f/fixture", path); err == nil {
+			t.Errorf("copyTarget(%q) = %q, want a refusal", path, got)
 		}
 	}
 }
@@ -309,20 +309,28 @@ func TestCopyFileRefusesWhatItCannotCopy(t *testing.T) {
 	t.Parallel()
 	src := filepath.Join(t.TempDir(), "a.txt")
 	mustWrite(t, src, "x\n")
-	existing := filepath.Join(t.TempDir(), "b.txt")
-	mustWrite(t, existing, "already here\n")
 	tests := []struct {
-		name     string
-		src, dst string
+		name    string
+		src     string
+		already string // a file the copy holds before the write, if any
 	}{
-		{"missing source", filepath.Join(t.TempDir(), "missing.txt"), filepath.Join(t.TempDir(), "b.txt")},
-		{"destination exists", src, existing},
-		{"source cannot be read", t.TempDir(), filepath.Join(t.TempDir(), "b.txt")},
+		{"missing source", filepath.Join(t.TempDir(), "missing.txt"), ""},
+		{"destination exists", src, "b.txt"},
+		{"source cannot be read", t.TempDir(), ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if err := copyFile(tc.src, tc.dst); err == nil {
+			dst := t.TempDir()
+			if tc.already != "" {
+				mustWrite(t, filepath.Join(dst, tc.already), "already here\n")
+			}
+			root, err := os.OpenRoot(dst)
+			if err != nil {
+				t.Fatalf("open the copy: %v", err)
+			}
+			defer root.Close() //nolint:errcheck // a test's read of the copy, not a write whose loss matters
+			if err := copyFile(root, tc.src, "b.txt"); err == nil {
 				t.Errorf("copyFile(%s) = nil error, want an error", tc.name)
 			}
 		})

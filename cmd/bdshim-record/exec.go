@@ -139,31 +139,41 @@ func scratchInsideFixture(fixture, scratch string) (bool, error) {
 }
 
 // copyTree copies the directories and regular files under src into dst, each at the place copyTarget
-// names. Any other kind of entry is refused: a symlink could point the copy back at the live town.
+// names. Writes go through an os.Root on dst, so no path in the copy reaches outside it. Any other
+// kind of entry is refused: a symlink could point the copy back at the live town.
 func copyTree(src, dst string) error {
+	root, err := os.OpenRoot(dst)
+	if err != nil {
+		return err
+	}
+	defer root.Close() //nolint:errcheck // the copy is written; a close failure leaves nothing to report that a write would not
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		target, err := copyTarget(src, dst, path)
+		name, err := copyTarget(src, path)
 		if err != nil {
 			return err
 		}
+		if name == "" {
+			return nil // the fixture's root is the copy's root
+		}
 		switch {
 		case d.IsDir():
-			return os.MkdirAll(target, 0o755)
+			return root.MkdirAll(name, 0o755)
 		case d.Type().IsRegular():
-			return copyFile(path, target)
+			return copyFile(root, path, name)
 		default:
 			return fmt.Errorf("fixture entry %s is neither a directory nor a regular file", path)
 		}
 	})
 }
 
-// copyTarget returns where an entry the walk reports at path lands under dst. The walk reports the
-// root as the operator wrote it, so the entry's name inside the fixture comes from filepath.Rel: a
-// fixture named "." or "./x" would otherwise keep part of its own name in the copy (gt-p85pw.87).
-func copyTarget(src, dst, path string) (string, error) {
+// copyTarget returns the name an entry the walk reports at path takes inside the copy. The walk
+// reports the root as the operator wrote it, so the name inside the fixture comes from
+// filepath.Rel: a fixture named "." or "./x" would otherwise keep part of its own name in the copy
+// (gt-p85pw.87). The fixture's root names the copy's root, which is the empty name.
+func copyTarget(src, path string) (string, error) {
 	rel, err := filepath.Rel(src, path)
 	if err != nil {
 		return "", err
@@ -172,19 +182,19 @@ func copyTarget(src, dst, path string) (string, error) {
 		return "", fmt.Errorf("fixture entry %s is outside the fixture %s", path, src)
 	}
 	if rel == "." {
-		return dst, nil
+		return "", nil
 	}
-	return filepath.Join(dst, rel), nil
+	return rel, nil
 }
 
-// copyFile copies one regular file to dst, which must not exist yet.
-func copyFile(src, dst string) error {
+// copyFile copies one regular file to name in the copy, which must not exist yet.
+func copyFile(root *os.Root, src, name string) error {
 	in, err := os.Open(src) //nolint:gosec // G304: src is inside the fixture the operator names
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: dst is inside the scratch copy this package made
+	out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
