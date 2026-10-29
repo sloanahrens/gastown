@@ -77,6 +77,41 @@ func TestBirdBindSaysWhenTheSessionHasNoName(t *testing.T) {
 	}
 }
 
+// TestBirdSpawnPrintsTheNameTheSurfaceAndTheBead drives spawn's leaf: the
+// runner opens no tab, and the answer names the session it would have opened.
+func TestBirdSpawnPrintsTheNameTheSurfaceAndTheBead(t *testing.T) {
+	t.Parallel()
+	r := birdRunnerForTest(t, "CMUX_SOCKET_PATH=/var/run/cmux.sock")
+	r.Cmux = func([]string) ([]byte, error) { return []byte(`{"surface_ref":"surface:7"}`), nil }
+	var out bytes.Buffer
+
+	if err := runBirdSpawn(r, bird.SpawnRequest{Name: "robin"}, &out); err != nil {
+		t.Fatalf("gt bird spawn: %v", err)
+	}
+	if got, want := strings.TrimSpace(out.String()), "spawned robin in surface:7, bead gt-robin"; got != want {
+		t.Errorf("gt bird spawn printed %q, want %q", got, want)
+	}
+}
+
+// TestBirdSpawnRequestReadsTheNameAndTheMission: the first word names the bird
+// and every word after it is the mission, which is what the tab is asked for.
+func TestBirdSpawnRequestReadsTheNameAndTheMission(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		args []string
+		want bird.SpawnRequest
+	}{
+		{args: nil, want: bird.SpawnRequest{}},
+		{args: []string{"robin"}, want: bird.SpawnRequest{Name: "robin"}},
+		{args: []string{"robin", "fix", "the", "flaky", "test"}, want: bird.SpawnRequest{Name: "robin", Mission: "fix the flaky test"}},
+	}
+	for _, tc := range cases {
+		if got := birdSpawnRequest(tc.args); got != tc.want {
+			t.Errorf("birdSpawnRequest(%q) = %+v, want %+v", tc.args, got, tc.want)
+		}
+	}
+}
+
 func TestBirdListPrintsTheLiveBirds(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer

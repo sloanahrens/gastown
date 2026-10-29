@@ -233,6 +233,35 @@ func TestPlanKeepsAnExplicitName(t *testing.T) {
 	}
 }
 
+// TestPlanMarksOnlyACallerChosenNamePinned: a name the caller named itself, or
+// resumed, may take over the reservation a spawn made for it; a name Plan draws
+// from the pool may not, since no spawn reserved it (gt-b58mk).
+func TestPlanMarksOnlyACallerChosenNamePinned(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "a name the caller gave", args: []string{"--name", "robin"}, want: true},
+		{name: "a bird of ours resumed", args: []string{"--resume", "lark"}, want: true},
+		{name: "a name drawn from the pool", args: []string{"fix it"}, want: false},
+		{name: "the name a bead is bound to", args: []string{"--bead", "gt-1", "fix it"}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, err := Plan(tc.args, nil, tty, bindFake("gt-1", "lark"))
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			if got := launched(t, d).Pinned; got != tc.want {
+				t.Errorf("Pinned = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPlanPassesThroughForANameThatIsNotAName(t *testing.T) {
 	t.Parallel()
 	d, err := Plan([]string{"--name", "not a name"}, nil, tty, newFakeLookup())

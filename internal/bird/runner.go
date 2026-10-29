@@ -37,6 +37,10 @@ type Runner struct {
 	// Exec replaces this process with path, as syscall.Exec does; nil means
 	// syscall.Exec.
 	Exec func(path string, argv, env []string) error
+	// Cmux runs one cmux command line and returns what it printed; nil runs the
+	// real cmux, so a test asserts a spawn's argv without opening a tab
+	// (gt-b58mk).
+	Cmux func(argv []string) ([]byte, error)
 	// LabelBead adds label to bead in the store directory that holds it; nil
 	// adds no label. Start runs it best effort, so a bd that cannot write the
 	// label is a warning rather than a session that does not start.
@@ -202,7 +206,8 @@ func (r *Runner) launch(args []string) (Decision, error) {
 // claim records this process as the agent holding the launch's name, with the
 // bead it runs and the directory it runs in. It fails rather than record a
 // process the kernel does not report as running, or one it gives no start token
-// for, since such a record names no process.
+// for, since such a record names no process. A launch whose name the caller
+// chose takes the name over from the reservation a spawn made for it.
 func (r *Runner) claim(l *Launch) (bool, error) {
 	pid := r.pid()
 	start, live, err := r.procStart()(pid)
@@ -212,7 +217,11 @@ func (r *Runner) claim(l *Launch) (bool, error) {
 	if !live || start == "" {
 		return false, fmt.Errorf("reading the start token of pid %d: the kernel gives none for a running process", pid)
 	}
-	return r.Registry.Claim(Agent{Name: l.Name, PID: pid, Start: start, Bead: l.Bead, Cwd: r.cwd()})
+	a := Agent{Name: l.Name, PID: pid, Start: start, Bead: l.Bead, Cwd: r.cwd()}
+	if l.Pinned {
+		return r.Registry.ClaimPinned(a)
+	}
+	return r.Registry.Claim(a)
 }
 
 // bindBead records that the launch's name ran the bead it named and labels the
@@ -348,6 +357,15 @@ func (r *Runner) exec(path string, argv, env []string) error {
 		return r.Exec(path, argv, env)
 	}
 	return execProcess(path, argv, env)
+}
+
+// cmux runs one cmux command line through the runner's seam, or the real cmux
+// when a test injected none.
+func (r *Runner) cmux(argv []string) ([]byte, error) {
+	if r.Cmux != nil {
+		return r.Cmux(argv)
+	}
+	return runCmux(argv)
 }
 
 func (r *Runner) stdout() io.Writer {

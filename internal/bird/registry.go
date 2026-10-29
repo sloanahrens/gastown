@@ -239,6 +239,19 @@ func (r *Registry) Record(a Agent) error {
 // A recorded agent whose process is gone is pruned first, since its name is
 // free. A zero Started is stamped from the registry's clock.
 func (r *Registry) Claim(a Agent) (bool, error) {
+	return r.claim(a, false)
+}
+
+// ClaimPinned records a as the agent holding its name for a launch whose caller
+// chose the name, taking it over from the reservation a spawn made for that
+// launch; a live process still refuses it (gt-b58mk).
+func (r *Registry) ClaimPinned(a Agent) (bool, error) {
+	return r.claim(a, true)
+}
+
+// claim is Claim and ClaimPinned with the reading of a reservation left to the
+// caller: pinned says a reservation on a is the promise of this very process.
+func (r *Registry) claim(a Agent, pinned bool) (bool, error) {
 	if !ValidName(a.Name) {
 		return false, fmt.Errorf("claiming %q: %w", a.Name, ErrInvalidName)
 	}
@@ -257,10 +270,18 @@ func (r *Registry) Claim(a Agent) (bool, error) {
 			return false, err
 		}
 		dropped += st.PruneReservations(now, ttl)
-		if st.HeldLive(now, ttl)[a.Name] {
+		held := st.HeldLive(now, ttl)
+		if pinned {
+			held = st.heldAgents()
+		}
+		if held[a.Name] {
 			// The prune is still a write worth keeping: it drops the dead
 			// session whose name the loser may have asked for.
 			return dropped > 0, nil
+		}
+		if pinned {
+			// The process the reservation promised holds the name now.
+			st.DropReservation(a.Name)
 		}
 		st.SetAgent(a)
 		claimed = true
@@ -515,6 +536,51 @@ func (r *Registry) Pick() (PickResult, error) {
 		return PickResult{}, err
 	}
 	return picked, nil
+}
+
+// ReserveName reserves a name the caller chose, as Pick reserves one it draws,
+// so two spawns never hand out the same name at once; held is why it could not
+// and empty when it did (gt-b58mk).
+func (r *Registry) ReserveName(name string) (held SkipReason, err error) {
+	if !ValidName(name) {
+		return SkipUnusable, fmt.Errorf("reserving %q: %w", name, ErrInvalidName)
+	}
+	err = r.mutate(func(st *State) (bool, error) {
+		now := r.now()
+		ttl := r.ttl()
+		dropped, err := st.PruneDead(r.Live)
+		if err != nil {
+			return false, err
+		}
+		dropped += st.PruneReservations(now, ttl)
+		polecats, err := r.PolecatNames()
+		if err != nil {
+			return false, err
+		}
+		seated := make(map[string]bool, len(polecats))
+		for _, seatedName := range polecats {
+			seated[seatedName] = true
+		}
+		if reason, taken := skipReason(st, name, now, ttl, seated); taken {
+			held = reason
+			return dropped > 0, nil
+		}
+		st.Reserve(name, now)
+		return true, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return held, nil
+}
+
+// ReleaseName drops name's reservation, for a spawn that reserved a name and
+// then opened no tab for it (gt-b58mk).
+func (r *Registry) ReleaseName(name string) error {
+	return r.Update(func(st *State) error {
+		st.DropReservation(name)
+		return nil
+	})
 }
 
 // skipReason says why Pick passes name over, and false when it may draw it. It
