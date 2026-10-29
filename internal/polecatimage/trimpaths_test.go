@@ -291,6 +291,55 @@ func TestRemoveTrimPathsFromClaimRefusesAListFileOutsideTheClaim(t *testing.T) {
 	}
 }
 
+// TestRemoveTrimPathsFromClaimRefusesAClaimOrListItCannotResolve pins the fail-closed resolves on the
+// claim route: a claim root, a list directory or a list file the run cannot resolve, or a list
+// directory that resolves outside the claim, is refused, and nothing is removed.
+func TestRemoveTrimPathsFromClaimRefusesAClaimOrListItCannotResolve(t *testing.T) {
+	t.Parallel()
+	listFile := filepath.Join("/cache", filepath.FromSlash(cachevol.TrimClaimListPath))
+	listDir := filepath.Dir(listFile)
+	tests := []struct {
+		name    string
+		breakFS func(*fakeTrimFS)
+	}{
+		{"the claim root cannot be resolved", func(f *fakeTrimFS) { f.resolveErr["/cache"] = errors.New("stale file handle") }},
+		{"the list directory is absent", func(f *fakeTrimFS) { f.resolveErr[listDir] = fs.ErrNotExist }},
+		{"the list directory cannot be resolved", func(f *fakeTrimFS) { f.resolveErr[listDir] = errors.New("i/o error") }},
+		{"the list directory leaves the claim", func(f *fakeTrimFS) { f.resolves[listDir] = "/outside" }},
+		{"the list file is absent", func(f *fakeTrimFS) { f.resolveErr[listFile] = fs.ErrNotExist }},
+		{"the list file cannot be resolved", func(f *fakeTrimFS) { f.resolveErr[listFile] = errors.New("i/o error") }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeTrimFS()
+			f.addClaimList("/cache", "gocache/ab/one")
+			tc.breakFS(f)
+			if _, err := RemoveTrimPathsFromClaim("/cache", cachevol.TrimClaimListPath, f.claimDigest("/cache"), f.fs()); err == nil {
+				t.Fatal("RemoveTrimPathsFromClaim trimmed from a claim or list it could not resolve")
+			}
+			if len(f.removed) != 0 {
+				t.Errorf("removed %v, want nothing removed", f.removed)
+			}
+		})
+	}
+}
+
+// TestRemoveTrimPathsFromClaimRefusesAListItCannotConsume pins that a list the run cannot consume is not
+// trimmed: the consuming removal comes before any path is removed, so its failure leaves the claim alone.
+func TestRemoveTrimPathsFromClaimRefusesAListItCannotConsume(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	list := f.addClaimList("/cache", "gocache/ab/one")
+	f.removeErr[filepath.Join("/cache", filepath.FromSlash(cachevol.TrimClaimListPath))] = errors.New("read-only file system")
+	if _, err := RemoveTrimPathsFromClaim("/cache", list, f.claimDigest("/cache"), f.fs()); err == nil {
+		t.Fatal("RemoveTrimPathsFromClaim trimmed a list it could not consume")
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed when the list cannot be consumed", f.removed)
+	}
+}
+
 // TestRemoveTrimPathsFromClaimRefusesAListFileThatIsALink pins the case a link inside the claim is the
 // trap: the list file names a file of the claim, and consuming the list must not remove that file.
 func TestRemoveTrimPathsFromClaimRefusesAListFileThatIsALink(t *testing.T) {

@@ -201,6 +201,21 @@ func TestTrimListWriteRefusesAClaimWhoseDirectoryLeavesIt(t *testing.T) {
 	}
 }
 
+// TestTrimListWriteRefusesAClaimThatIsNotThere pins the writer's open of the claim: a claim it cannot
+// open is refused with exit 3, and nothing is written.
+func TestTrimListWriteRefusesAClaimThatIsNotThere(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "no-claim")
+	var stdout, stderr bytes.Buffer
+	code := trimListWriteMain(strings.NewReader(`["gocache/ab/one"]`), []string{"--root", missing}, &stdout, &stderr)
+	if code != 3 {
+		t.Fatalf("trim-list-write exit = %d, want 3 for a claim it cannot open", code)
+	}
+	if !strings.Contains(stderr.String(), "opening the claim") {
+		t.Errorf("stderr = %q, want it to name the open", stderr.String())
+	}
+}
+
 // TestTrimListWriteDoesNotWriteThroughAStaleTemporary runs the writer's production call on a claim
 // that holds a symlink at the temporary's name, pointing at a file outside the claim. The writer must
 // replace the link rather than write through it, so the file it points at keeps its contents and the
