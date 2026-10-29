@@ -71,9 +71,12 @@ psql "$SCRATCH" -c "SELECT id, title, status FROM tracker.issues WHERE id = 'gt-
 The copy passes when the count is not zero, the list holds the issues you
 expect, and the by-id read returns the title and status the list showed.
 
-These are the three reads the package check makes through the store's
-contract: the count of durable issues, a page of the default list, and one
-issue by id (`tracker/internal/restorecheck/subset.go`). Run that check when
+The package check asks the same three questions through the store's contract:
+the count of durable issues, a page of the default list, and one issue by id
+(`tracker/internal/restorecheck/subset.go`). The SQL above is a hand-written
+equivalent for a person to read, not the check's own queries: its filters are
+the default list's as written here, and if the two ever disagree the package
+check is the authority. Run that check when
 you change the restore path or those reads; from the repository root:
 
 ```bash
