@@ -121,9 +121,9 @@ func TestStopDaemonContainerTownRefusesWithoutAVisibleLock(t *testing.T) {
 	}
 }
 
-// A setting that cannot be read, or names a kind this binary does not know,
-// does not make the town a container town, and the stop keeps the host path a
-// launchd or systemd town has. The pid gate is what still refuses a signal: the
+// A setting that cannot be read, or names a kind this binary does not know, in
+// a town with no container compose file does not make the town a container
+// town, and the stop keeps the host path a launchd or systemd town has. The pid gate is what still refuses a signal: the
 // lock's PID here is this test process, which is not the town's daemon, so the
 // stop fails closed and sends nothing.
 func TestStopDaemonUnknownSettingsKeepTheHostPathAndStillGateThePID(t *testing.T) {
@@ -149,6 +149,77 @@ func TestStopDaemonUnknownSettingsKeepTheHostPathAndStillGateThePID(t *testing.T
 			}
 			if sigs.terms != 0 || sigs.kills != 0 {
 				t.Errorf("sent %d SIGTERM and %d SIGKILL to an unproven PID", sigs.terms, sigs.kills)
+			}
+		})
+	}
+}
+
+// composeTown is unknownSettingsTown with the compose file a container town's
+// supervisor drives: the one thing about the town that does not depend on its
+// unreadable settings, so it is what keeps the town on the container path.
+func composeTown(t *testing.T, doc string) string {
+	t.Helper()
+	townRoot := unknownSettingsTown(t, doc)
+	path := agentconfig.ContainerComposeFile(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot
+}
+
+// A setting that cannot be read, or names a kind this binary does not know, in
+// a town that carries the container compose file may be a container town, and
+// is treated as one: the stop refuses with the container's refusal and sends no
+// signal, instead of taking the host path with a pid from another namespace.
+func TestStopDaemonUnknownSettingsWithComposeFileRefusesWithoutSignaling(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		doc  string
+	}{
+		{"unparseable", "{"},
+		{"unknown kind", `{"supervisor": "s6"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := composeTown(t, tt.doc)
+			sigs := &countedSignals{}
+
+			err := stopDaemonWith(townRoot, sigs.signals())
+			if !errors.Is(err, errContainerStopDaemon) {
+				t.Fatalf("StopDaemon = %v, want the container town's refusal", err)
+			}
+			if sigs.terms != 0 || sigs.kills != 0 {
+				t.Errorf("sent %d SIGTERM and %d SIGKILL for a town that may be a container town", sigs.terms, sigs.kills)
+			}
+		})
+	}
+}
+
+// The same unreadable setting with the compose file present answers from the
+// lock and names no pid: the container's answer, (true, 0).
+func TestIsRunningUnknownSettingsWithComposeFileNamesNoPID(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		doc  string
+	}{
+		{"unparseable", "{"},
+		{"unknown kind", `{"supervisor": "s6"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := composeTown(t, tt.doc)
+
+			running, pid, err := IsRunning(townRoot)
+			if err != nil {
+				t.Fatalf("IsRunning: %v", err)
+			}
+			if !running || pid != 0 {
+				t.Errorf("IsRunning = (%v, %d), want (true, 0): the lock answers and no pid is named", running, pid)
 			}
 		})
 	}
@@ -198,9 +269,10 @@ func TestIsRunningContainerTownProbeErrorNeverFallsBackToThePIDFile(t *testing.T
 	}
 }
 
-// A setting that cannot be read, or names a kind this binary does not know,
-// leaves the town on the host path: IsRunning answers as it did before the
-// container rule existed, from the lock and the pid file.
+// A setting that cannot be read, or names a kind this binary does not know, in
+// a town with no container compose file leaves the town on the host path:
+// IsRunning answers as it did before the container rule existed, from the lock
+// and the pid file.
 func TestIsRunningUnknownSettingsKeepsTheHostPath(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {

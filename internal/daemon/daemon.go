@@ -2815,29 +2815,32 @@ func settleFreeDaemonLock(pidFile string, release func() error) {
 	_ = release()
 }
 
-// containerTown reports whether townRoot's daemon runs in a container. Only a
-// readable daemon.supervisor naming container says so. A town that sets no
-// kind, and one whose settings cannot be read or name a kind this binary does
-// not know, is not known to be a container town, and takes the host path it
-// had before this check existed (gt-qpeei.19).
+// containerTown reports whether townRoot's daemon runs in a container. A
+// readable daemon.supervisor naming container says so, and one naming any other
+// kind says it does not. A town that sets no kind is not a container town and
+// takes the host path it had before this check existed (gt-qpeei.19).
 //
-// The unknown is not a license to signal a container's PID: what the kind
-// changes here is the meaning of a PID on this host, and the signal still runs
-// through verifyGTDaemonPID, which proves the process is this town's
-// `gt daemon run` on this host — never a daemon of the container's namespace.
-// Refusing every host town's stop because its daemon.json does not parse would
-// take the supervisor's stop away from towns that have no container, so this
-// reads the kind for the container rule alone; the cmd layer reads it to decide
-// the direct signal itself, and refuses that signal on an unreadable setting
-// (gt-qpeei.10).
+// A setting that cannot be read, or names a kind this binary does not know,
+// cannot say either way, and both answers fail somewhere: reading it as a host
+// kind lets a container town's stop signal a pid from another namespace, and
+// reading it as a container refuses every host town its stop over a settings
+// file the stop never needed. The compose file a container town's supervisor
+// drives does not depend on the settings, so it decides: a town with the file
+// may be a container town and is treated as one, and a town without it is a
+// host town and keeps the host path (config.MayBeContainerTown).
+//
+// Even then a host path is not a license to signal a container's PID: the
+// signal still runs through verifyGTDaemonPID, which proves the process is this
+// town's `gt daemon run` on this host. The cmd layer reads the kind to decide
+// the direct signal itself and refuses it on an unreadable setting (gt-qpeei.10).
 func containerTown(townRoot string) bool {
 	cfg, err := ReadPatrolConfig(townRoot)
 	if err != nil {
-		return false
+		return agentconfig.MayBeContainerTown(townRoot)
 	}
 	kind, err := cfg.SupervisorKind()
 	if err != nil {
-		return false
+		return agentconfig.MayBeContainerTown(townRoot)
 	}
 	return kind == agentconfig.SupervisorContainer
 }
