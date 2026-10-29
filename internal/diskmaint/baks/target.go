@@ -60,9 +60,6 @@ type Config struct {
 	// Now is the clock a policy without a time is read against; nil uses the
 	// system clock.
 	Now func() time.Time
-	// Policy is the run's limits. Its Apply flag is the dry-run gate: the zero
-	// value is a dry run, so a caller must opt in to a removal.
-	Policy diskmaint.Policy
 	// Ledger records each apply. Apply refuses to run without one.
 	Ledger *diskmaint.Ledger
 }
@@ -70,9 +67,14 @@ type Config struct {
 // Target discovers config and binary backups and plans their removal.
 type Target struct {
 	cfg Config
-	// remove deletes one file. NewTarget sets it to os.Remove; a test swaps in
-	// a fake to make a removal fail, which a real directory cannot do without
-	// depending on who runs the test.
+	// policy is the policy the last Plan ran with. Apply reads its Apply flag as
+	// the dry-run gate, so the gate follows the caller's run rather than a
+	// setting the target was built with. One caller plans and then applies, so
+	// the last plan is the one an apply belongs to.
+	policy diskmaint.Policy
+	// remove deletes one file. NewTarget sets it to unlinkFile, which refuses a
+	// directory; a test swaps in a fake to make a removal fail, which a real
+	// directory cannot do without depending on who runs the test.
 	remove func(path string) error
 }
 
@@ -81,7 +83,7 @@ func NewTarget(cfg Config) *Target {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Target{cfg: cfg, remove: os.Remove}
+	return &Target{cfg: cfg, remove: unlinkFile}
 }
 
 // Name is the target's name in plans and ledger entries.
@@ -175,8 +177,10 @@ func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
 // installed binaries' times and returns BuildPlan's decision for them. A
 // directory or file that cannot be read refuses the whole plan, because it
 // could hide a backup that must stay; a candidate lsof cannot answer for is
-// kept as if it were open. Plan changes nothing.
+// kept as if it were open. Plan changes no file, and records p as the policy
+// Apply gates on.
 func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, error) {
+	t.policy = p
 	plan := diskmaint.Plan{Target: planTarget}
 	if t.cfg.Run == nil {
 		plan.Refused = errNoRunner.Error()

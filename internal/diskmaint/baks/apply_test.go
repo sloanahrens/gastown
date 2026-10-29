@@ -21,14 +21,22 @@ func applyLedger(t *testing.T) *diskmaint.Ledger {
 }
 
 // applyTarget returns a target that reads cfgDir and binDir, records to l and
-// removes only when apply is true.
+// removes only when apply is true, as if it had planned with that policy.
 func applyTarget(cfgDir, binDir string, l *diskmaint.Ledger, apply bool) *Target {
-	return NewTarget(Config{
+	t := NewTarget(Config{
 		ConfigDirs: []string{cfgDir},
 		BinaryDirs: []string{binDir},
 		Ledger:     l,
-		Policy:     diskmaint.Policy{Apply: apply},
+		Run:        notOpen,
 	})
+	t.policy = diskmaint.Policy{Apply: apply, Now: testNow}
+	return t
+}
+
+// notOpen answers lsof's "nothing holds this file" for every path, so a test
+// about something else does not have to name each file it removes.
+func notOpen(context.Context, []string, string, ...string) ([]byte, error) {
+	return nil, exitErr(1)
 }
 
 // fileAction is a delete-file action for path, sized as its file is.
@@ -371,6 +379,252 @@ func TestApplyReportsAFileThatIsGone(t *testing.T) {
 		t.Errorf("Done = %v, want the file after the missing one removed", res.Done)
 	}
 	assertGone(t, kept)
+}
+
+// TestApplyRefusesADirectorySwappedForTheFile: a directory that replaces the
+// file between the check and the removal is refused and stays on disk, because
+// the removal unlinks and an unlink of a directory fails (om c029468a799e).
+func TestApplyRefusesADirectorySwappedForTheFile(t *testing.T) {
+	t.Parallel()
+	cfgDir, binDir := t.TempDir(), t.TempDir()
+	bak := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
+
+	target := applyTarget(cfgDir, binDir, applyLedger(t), true)
+	// The handle check runs between the Lstat and the removal, so it is where
+	// the swap is modelled: the regular file Lstat read is gone and an empty
+	// directory holds its name when the removal runs.
+	target.cfg.Run = func(context.Context, []string, string, ...string) ([]byte, error) {
+		if err := os.Remove(bak); err != nil {
+			return nil, err
+		}
+		if err := os.Mkdir(bak, 0o755); err != nil {
+			return nil, err
+		}
+		return nil, exitErr(1)
+	}
+	res, err := target.Apply(context.Background(), diskmaint.Plan{
+		Target:  planTarget,
+		Actions: []diskmaint.Action{fileAction(bak, 10)},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(res.Done) != 0 || len(res.Failed) != 1 {
+		t.Fatalf("Result = %+v, want the swapped directory refused", res)
+	}
+	info, err := os.Lstat(bak)
+	if err != nil || !info.IsDir() {
+		t.Errorf("%s = %v (Lstat err %v), want the directory still there", bak, info, err)
+	}
+}
+
+// TestApplyRefusesAFileAProcessHeldOpen: a file a process holds open when Apply
+// asks again is a Failure and stays, even though the plan saw it closed
+// (om 0275b7e840cc).
+func TestApplyRefusesAFileAProcessHeldOpen(t *testing.T) {
+	t.Parallel()
+	cfgDir, binDir := t.TempDir(), t.TempDir()
+	l := applyLedger(t)
+	bak := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
+	lsof := newFakeLsof(t)
+	lsof.open(bak, "4242")
+
+	target := applyTarget(cfgDir, binDir, l, true)
+	target.cfg.Run = lsof.run
+	res, err := target.Apply(context.Background(), diskmaint.Plan{
+		Target:  planTarget,
+		Actions: []diskmaint.Action{fileAction(bak, 10)},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	assertKept(t, bak)
+	if len(res.Done) != 0 || len(res.Failed) != 1 {
+		t.Fatalf("Result = %+v, want the open file refused", res)
+	}
+	if !strings.Contains(res.Failed[0].Err, "a process holds the file open") {
+		t.Errorf("failure = %q, want it to name the handle", res.Failed[0].Err)
+	}
+	entries := lastEntries(t, l, 2)
+	if len(entries) != 1 || len(entries[0].Errors) != 1 {
+		t.Errorf("ledger = %+v, want one line recording the refusal", entries)
+	}
+}
+
+// TestApplyKeepsAFileTheHandleCheckCannotAnswer: an lsof that cannot answer at
+// apply time keeps the file, because an unknown handle is not a closed one
+// (om 0275b7e840cc).
+func TestApplyKeepsAFileTheHandleCheckCannotAnswer(t *testing.T) {
+	t.Parallel()
+	cfgDir, binDir := t.TempDir(), t.TempDir()
+	bak := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
+	lsof := newFakeLsof(t)
+	lsof.failed(bak, 2)
+
+	target := applyTarget(cfgDir, binDir, applyLedger(t), true)
+	target.cfg.Run = lsof.run
+	res, err := target.Apply(context.Background(), diskmaint.Plan{
+		Target:  planTarget,
+		Actions: []diskmaint.Action{fileAction(bak, 10)},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	assertKept(t, bak)
+	if len(res.Done) != 0 || len(res.Failed) != 1 {
+		t.Fatalf("Result = %+v, want the file kept", res)
+	}
+	if !strings.Contains(res.Failed[0].Err, "the open check cannot answer") {
+		t.Errorf("failure = %q, want it to name the check that could not answer", res.Failed[0].Err)
+	}
+}
+
+// TestApplyNeedsAHandleCheck: a target with no lsof runner cannot re-check the
+// handles the plan judged, so it removes nothing and reports the missing check.
+func TestApplyNeedsAHandleCheck(t *testing.T) {
+	t.Parallel()
+	cfgDir, binDir := t.TempDir(), t.TempDir()
+	bak := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
+
+	target := applyTarget(cfgDir, binDir, applyLedger(t), true)
+	target.cfg.Run = nil
+	_, err := target.Apply(context.Background(), diskmaint.Plan{
+		Target:  planTarget,
+		Actions: []diskmaint.Action{fileAction(bak, 10)},
+	})
+	if !errors.Is(err, errNoRunner) {
+		t.Fatalf("Apply error = %v, want errNoRunner", err)
+	}
+	assertKept(t, bak)
+}
+
+// TestApplyStopsWhenTheHandleCheckIsCutShort: a context canceled while lsof is
+// asked stops the run and is its error, rather than reading as one more failed
+// file.
+func TestApplyStopsWhenTheHandleCheckIsCutShort(t *testing.T) {
+	t.Parallel()
+	cfgDir, binDir := t.TempDir(), t.TempDir()
+	bak := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lsof := newFakeLsof(t)
+	lsof.closed(bak)
+	lsof.cancel = cancel
+
+	target := applyTarget(cfgDir, binDir, applyLedger(t), true)
+	target.cfg.Run = lsof.run
+	res, err := target.Apply(ctx, diskmaint.Plan{
+		Target:  planTarget,
+		Actions: []diskmaint.Action{fileAction(bak, 10)},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Apply error = %v, want context.Canceled", err)
+	}
+	assertKept(t, bak)
+	if len(res.Done) != 0 {
+		t.Errorf("Done = %v, want nothing removed", res.Done)
+	}
+}
+
+// TestApplyGatesOnThePolicyThePlanWasBuiltWith: the dry-run gate follows the
+// policy the caller planned with. A plan built to apply is applied, so an apply
+// is not the dry run a target built without a policy would make it
+// (om d47f0185ddfe).
+func TestApplyGatesOnThePolicyThePlanWasBuiltWith(t *testing.T) {
+	t.Parallel()
+	cfgDir, binDir := t.TempDir(), t.TempDir()
+	l := applyLedger(t)
+	// Three copies of one binary: the newest two are kept, so the third is the
+	// one the plan removes.
+	writeBackup(t, binDir, "gt.bak-01", 1*time.Hour, 10)
+	writeBackup(t, binDir, "gt.bak-02", 2*time.Hour, 10)
+	bak := writeBackup(t, binDir, "gt.bak-03", 3*time.Hour, 10)
+	lsof := newFakeLsof(t)
+	for _, path := range []string{bak, filepath.Join(binDir, "gt.bak-01"), filepath.Join(binDir, "gt.bak-02")} {
+		lsof.closed(path)
+	}
+	target := NewTarget(Config{ConfigDirs: []string{cfgDir}, BinaryDirs: []string{binDir}, Ledger: l, Run: lsof.run})
+
+	plan, err := target.Plan(context.Background(), diskmaint.Policy{Apply: true, Now: testNow})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Ref != bak {
+		t.Fatalf("plan actions = %+v, want the old backup", plan.Actions)
+	}
+	if _, err := target.Apply(context.Background(), plan); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	assertGone(t, bak)
+}
+
+// TestApplyRefusesAPlanBuiltAsADryRun: a plan the caller built as a dry run is
+// still a dry run when applied, so no file is removed (om d47f0185ddfe).
+func TestApplyRefusesAPlanBuiltAsADryRun(t *testing.T) {
+	t.Parallel()
+	cfgDir, binDir := t.TempDir(), t.TempDir()
+	l := applyLedger(t)
+	writeBackup(t, binDir, "gt.bak-01", 1*time.Hour, 10)
+	writeBackup(t, binDir, "gt.bak-02", 2*time.Hour, 10)
+	bak := writeBackup(t, binDir, "gt.bak-03", 3*time.Hour, 10)
+	lsof := newFakeLsof(t)
+	for _, path := range []string{bak, filepath.Join(binDir, "gt.bak-01"), filepath.Join(binDir, "gt.bak-02")} {
+		lsof.closed(path)
+	}
+	target := NewTarget(Config{ConfigDirs: []string{cfgDir}, BinaryDirs: []string{binDir}, Ledger: l, Run: lsof.run})
+
+	plan, err := target.Plan(context.Background(), diskmaint.Policy{Now: testNow})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if _, err := target.Apply(context.Background(), plan); !errors.Is(err, errDryRun) {
+		t.Fatalf("Apply error = %v, want errDryRun", err)
+	}
+	assertKept(t, bak)
+}
+
+// TestApplyStampsTheRunWithTheInjectedClock: the ledger line carries the
+// target's clock, not the wall clock (om b495be3394fe).
+func TestApplyStampsTheRunWithTheInjectedClock(t *testing.T) {
+	t.Parallel()
+	cfgDir, binDir := t.TempDir(), t.TempDir()
+	l := applyLedger(t)
+	when := time.Date(2026, 3, 4, 5, 6, 7, 0, time.FixedZone("test", -3600))
+	target := applyTarget(cfgDir, binDir, l, true)
+	target.cfg.Now = func() time.Time { return when }
+
+	if _, err := target.Apply(context.Background(), diskmaint.Plan{Target: planTarget}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	entries := lastEntries(t, l, 2)
+	if len(entries) != 1 || !entries[0].TS.Equal(when.UTC()) {
+		t.Fatalf("ledger = %+v, want one line stamped %v", entries, when.UTC())
+	}
+}
+
+// TestApplyDoesNotQuoteTheRef: a failed removal is recorded with its cause and
+// the action's position, never the ref, which is plan text no check has passed
+// (om 1ea26114ef06).
+func TestApplyDoesNotQuoteTheRef(t *testing.T) {
+	t.Parallel()
+	cfgDir, binDir := t.TempDir(), t.TempDir()
+	l := applyLedger(t)
+	gone := filepath.Join(cfgDir, "gone.toml.bak-01")
+
+	res, err := applyTarget(cfgDir, binDir, l, true).Apply(context.Background(), diskmaint.Plan{
+		Target:  planTarget,
+		Actions: []diskmaint.Action{fileAction(gone, 0)},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(res.Failed) != 1 || strings.Contains(res.Failed[0].Err, gone) {
+		t.Fatalf("failure = %+v, want it to name the cause and not the ref", res.Failed)
+	}
+	entries := lastEntries(t, l, 2)
+	if len(entries) != 1 || len(entries[0].Errors) != 1 || strings.Contains(entries[0].Errors[0], gone) {
+		t.Fatalf("ledger = %+v, want the error to leave the ref out", entries)
+	}
 }
 
 // TestApplyReportsALedgerThatCannotBeWritten: a ledger under a regular file
