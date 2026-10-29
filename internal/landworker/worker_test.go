@@ -209,13 +209,14 @@ type failingCommentStore struct {
 func (s failingCommentStore) AddComment(string, string) error { return s.err }
 
 type harness struct {
-	w       *Worker
-	bd      *beadsfake.Fake
-	remote  *fakeRemote
-	lander  *fakeLander
-	files   *fakeLandings
-	cleared []string
-	now     time.Time
+	w         *Worker
+	bd        *beadsfake.Fake
+	remote    *fakeRemote
+	lander    *fakeLander
+	files     *fakeLandings
+	cleared   []string
+	afterLand []string
+	now       time.Time
 }
 
 const branch = "polecat/opal/gt-abc+x1"
@@ -236,6 +237,7 @@ func newHarness(t *testing.T) *harness {
 	h.w = &Worker{
 		Rig: "gastown", HumanActor: humanActor, Beads: h.bd, Remote: h.remote, Lander: h.lander, Landings: h.files,
 		ClearIntent: func(w land.Work) error { h.cleared = append(h.cleared, w.BeadID+"@"+w.Worker); return nil },
+		AfterLanded: func(w land.Work) { h.afterLand = append(h.afterLand, w.BeadID+"@"+w.Worker) },
 		Now:         func() time.Time { return h.now },
 		Logf:        t.Logf,
 	}
@@ -286,6 +288,62 @@ func TestPassLandsTheBranchTipNotThePinnedHead(t *testing.T) {
 	}
 	if len(h.cleared) != 1 || h.cleared[0] != "gt-abc@opal" {
 		t.Fatalf("intent cleared for %v; want gt-abc@opal", h.cleared)
+	}
+	if len(h.afterLand) != 1 || h.afterLand[0] != "gt-abc@opal" {
+		t.Fatalf("after-landing hooks %v; want gt-abc@opal once", h.afterLand)
+	}
+}
+
+// A rejection leaves the seat's work unlanded, so the after-landing hook — the
+// daemon's sandbox-seat cleanup — must not run for it (gt-sefzt).
+func TestPassRejectionSkipsTheAfterLandedHook(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{}, &land.Rejection{Kind: land.RejectGate, Reason: "gate failed on the merged tree", Rework: true}
+	}
+	if rep := h.w.Pass(context.Background()); rep.Rejected != 1 {
+		t.Fatalf("report %v; want one rejection", rep)
+	}
+	if len(h.afterLand) != 0 {
+		t.Fatalf("after-landing hooks %v; a rejection did not land anything", h.afterLand)
+	}
+}
+
+// A landing whose record is left unfinished has not yet proved itself, so the
+// after-landing hook waits. The repair pass that finishes the record runs it,
+// once (gt-sefzt).
+func TestPassRecordIncompleteRunsTheAfterLandedHookOnRepair(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.lander.fn = func(n int, w land.Work) (land.Result, error) {
+		if n == 1 {
+			res := land.Result{LandedCommit: "cccccccc"}
+			return res, &land.RecordError{Result: res, Err: errors.New("close failed")}
+		}
+		return land.Result{LandedCommit: "cccccccc"}, nil
+	}
+	if rep := h.w.Pass(context.Background()); rep.Landed != 1 {
+		t.Fatalf("first pass %v; want the landing counted", rep)
+	}
+	if len(h.afterLand) != 0 {
+		t.Fatalf("after-landing hook ran before the record was complete: %v", h.afterLand)
+	}
+	if err := h.bd.Update("gt-abc", beads.UpdateOptions{RemoveLabels: []string{land.LabelReadyToLand}}); err != nil {
+		t.Fatal(err)
+	}
+	h.remote.tips[branch] = "3333333333333333333333333333333333333333"
+	if rep := h.w.Pass(context.Background()); rep.Repaired != 1 {
+		t.Fatalf("second pass %v; want one repair", rep)
+	}
+	if len(h.afterLand) != 1 || h.afterLand[0] != "gt-abc@opal" {
+		t.Fatalf("after-landing hooks %v; want gt-abc@opal once, after the repair", h.afterLand)
+	}
+	h.w.Pass(context.Background())
+	if len(h.afterLand) != 1 {
+		t.Fatalf("after-landing hooks %v; a finished repair ran the hook again", h.afterLand)
 	}
 }
 

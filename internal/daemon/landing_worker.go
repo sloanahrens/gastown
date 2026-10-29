@@ -744,6 +744,12 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			_, err := intent.ClearLanded(townRoot, seat, w.BeadID, "landing worker", time.Now())
 			return err
 		},
+		// A sandbox seat is single-use: once its work has landed there is
+		// nothing on the host left to read, so the seat's host directories go
+		// (gt-sefzt). A kept seat is logged with its reason by the step.
+		AfterLanded: func(w land.Work) {
+			d.startSandboxSeatEnd(rigName, landings, w)
+		},
 		// The agent a landing ran on is the one its seat's agent bead names:
 		// the sling writes it there and the session's end leaves it, so the
 		// landing worker reads the seat's own record rather than a role

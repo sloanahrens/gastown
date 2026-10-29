@@ -80,6 +80,13 @@ func (h *patrolScanHost) openshellSeat(rig, name string) (openshellSeatInfo, boo
 	if err != nil {
 		return openshellSeatInfo{}, false, fmt.Errorf("reading the agent bead: %w", err)
 	}
+	return h.openshellSeatFor(agent)
+}
+
+// openshellSeatFor is openshellSeat over an agent name the caller already
+// read, so a caller holding the seat's agent bead asks the settings once. An
+// empty agent names no seat.
+func (h *patrolScanHost) openshellSeatFor(agent string) (openshellSeatInfo, bool, error) {
 	if agent == "" {
 		return openshellSeatInfo{}, false, nil
 	}
