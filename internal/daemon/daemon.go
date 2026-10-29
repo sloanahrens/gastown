@@ -254,6 +254,9 @@ type Daemon struct {
 	// off the loop goroutine, so the marker it writes is atomic and the loop
 	// only reads it.
 	hmSyncLastRun atomic.Int64
+	// hmSyncAlerts is that patrol's memory of whether hmsync:stale is open, and
+	// the alert functions a test replaces (see hm_sync_alert.go).
+	hmSyncAlerts hmSyncAlerts
 
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup

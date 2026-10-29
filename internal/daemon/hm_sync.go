@@ -167,6 +167,9 @@ func (d *Daemon) runHMSync() {
 func (d *Daemon) hmSyncPass(s hmSyncSeams, started time.Time) {
 	ctx, cancel := d.hmSyncContext()
 	defer cancel()
+	// The status is read however the sync ended: a failed sync is exactly when
+	// the sources are most likely stale (hm_sync_alert.go).
+	defer d.checkHMSyncHealth()
 
 	command := hmSyncCommand(d.patrolConfig)
 	_, err := s.run(ctx, command, "sync")
