@@ -25,6 +25,53 @@ type HeldBead struct {
 	Tests []string
 }
 
+// WorksSeat reports whether a bead with this assignee and these labels is work
+// on a seat the overlap hold protects: a polecat seat's bead that is not a
+// handoff note (gt-asvow). Before changing what holds, read step 5 of
+// docs/guides/spec-dispatcher.md: it states the rule and why a crew session's
+// bead and a handoff log are not work on a candidate's files.
+func WorksSeat(assignee string, labels []string) bool {
+	if !namesPolecatSeat(assignee) {
+		return false
+	}
+	for _, label := range labels {
+		if isHandoffLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+// namesPolecatSeat reports whether an assignee addresses a polecat seat: a
+// "polecats" path component followed by the seat's name, wherever the two sit
+// in the path (role.Actor writes "<rig>/polecats/<name>"). Components are read
+// rather than counted, so an assignee with an extra or missing segment is a
+// seat when it names one — a shape this rule misreads would let a second
+// filing of a seat's work dispatch. An assignee naming no such component — a
+// crew or operator session, a person, an empty assignee — addresses no seat.
+func namesPolecatSeat(assignee string) bool {
+	parts := strings.Split(strings.TrimSpace(assignee), "/")
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "polecats" && parts[i+1] != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// isHandoffLabel reports whether one label marks a bead as a handoff note. The
+// town spells it both ways: a crew session's bead wears "handoff", and the
+// runtime families carry "gt:handoff" (capacity.LabelHandoff in
+// internal/scheduler/capacity), so a rule that read one spelling would miss
+// half the logs (gt-asvow).
+func isHandoffLabel(label string) bool {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "handoff", "gt:handoff":
+		return true
+	}
+	return false
+}
+
 // maxNamedHeldSignals bounds the shared paths, and separately the shared
 // tests, that the hold line names, so a pair of beads describing an area
 // rather than a defect does not turn a skip line into a wall
