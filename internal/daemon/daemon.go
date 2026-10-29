@@ -2851,6 +2851,10 @@ func containerTown(townRoot string) bool {
 // namespace, where a pid means nothing here: the answer still comes from the
 // lock, but the PID is always 0 and the pid file is never consulted
 // (gt-qpeei.19).
+//
+// A running container town answers (true, 0): 0 is not a daemon PID here, and
+// as a signal target it names this process group, so a caller that gets it
+// must not signal it.
 func IsRunning(townRoot string) (bool, int, error) {
 	return isRunningOn(townRoot, containerTown(townRoot), probeDaemonLock)
 }
@@ -3005,7 +3009,7 @@ func (w *daemonStopWait) awaitExit(grace time.Duration) bool {
 // errContainerStopDaemon is StopDaemon's refusal for a container town. The
 // daemon it would signal runs in the container's namespace, where a pid names
 // nothing on this host, so the stop is the supervisor's and never a signal.
-var errContainerStopDaemon = errors.New("refusing to stop the daemon with a signal: daemon.supervisor is container, so the daemon runs under the container supervisor and no PID on this host is it; stop the container instead (gt daemon stop runs docker compose stop daemon)")
+var errContainerStopDaemon = errors.New("refusing to stop the daemon with a signal: daemon.supervisor is container, so the daemon runs under the container supervisor and no PID on this host is it; stop it through that supervisor instead")
 
 // daemonStopSignals is the pair of signals StopDaemon sends the daemon's
 // process. It is a field set so a test can supply a fake and prove a refusal
