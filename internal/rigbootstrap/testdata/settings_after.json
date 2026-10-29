@@ -1,0 +1,17 @@
+{
+  "owner": "Zoë Ramirez — platform",
+  "type": "rig-settings-legacy",
+  "limits": {
+    "enabled": true,
+    "max_depth": 3
+  },
+  "version": 2,
+  "role_agents": {
+    "mayor": "claude",
+    "polecat": "claude"
+  },
+  "notes": [
+    "keep",
+    "order"
+  ]
+}
