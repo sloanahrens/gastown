@@ -21,6 +21,19 @@ import (
 // seat (gt-me800).
 const HumanOnlyLabel = "human-only"
 
+// The overseer-first labels that replace human-only and needs-human. The
+// overseer vets or releases a bead wearing OverseerOnlyLabel before any
+// dispatcher reads it; OperatorOnlyLabel marks a bead only the operator can
+// resolve; NeedsOverseerLabel and NeedsOperatorLabel are the escalation
+// spellings that take the place of gt:needs-human. The readers hold these now,
+// beside the old names; the writers move to them in a later step.
+const (
+	OverseerOnlyLabel  = "overseer-only"
+	OperatorOnlyLabel  = "operator-only"
+	NeedsOverseerLabel = "gt:needs-overseer"
+	NeedsOperatorLabel = "gt:needs-operator"
+)
+
 // routingHoldLabels and humanHoldLabels are the two kinds of decision
 // dispatchHoldLabels records, kept apart because a reader that has already
 // routed the bead reads only the second one.
@@ -35,13 +48,14 @@ const HumanOnlyLabel = "human-only"
 // a stage timed out, a policy refusal, or land.MaxReworkAttempts rejections;
 // gt-hpca9, gt-28ibg), the hand-applied needs-split — a polecat stopped on the
 // bead for running past its time, and the bead is cut smaller before anyone
-// takes it again (polecat.HandBack) — and HumanOnlyLabel. No seat claims them,
-// so they hold wherever they are read.
+// takes it again (polecat.HandBack) — HumanOnlyLabel, and the overseer-first
+// labels that replace it and needs-human. No seat claims them, so they hold
+// wherever they are read.
 //
 // Both are matched case-insensitively, since a label is typed by hand.
 var (
 	routingHoldLabels = []string{"needs-pro"}
-	humanHoldLabels   = []string{"gt:needs-human", "needs-human", "needs-split", HumanOnlyLabel}
+	humanHoldLabels   = []string{"gt:needs-human", "needs-human", "needs-split", HumanOnlyLabel, NeedsOverseerLabel, NeedsOperatorLabel, OverseerOnlyLabel, OperatorOnlyLabel, "needs-overseer", "needs-operator"}
 	// dispatchHoldLabels is the two lists in the order the rule reports them.
 	// The operator reservation (OperatorReservation) is the third decision a
 	// label records, and the one that also reaches through the assignee; it is

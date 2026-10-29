@@ -219,3 +219,32 @@ func TestHasLabel(t *testing.T) {
 		})
 	}
 }
+
+// TestOverseerFirstLabelsHold pins the overseer-first labels to the hold rule
+// the old names follow: a bead wearing one is held by the dispatch read and by
+// the sling's read, with the reason naming the label as typed. The readers learn
+// these names before any writer moves to them (gt-ft52x).
+func TestOverseerFirstLabelsHold(t *testing.T) {
+	t.Parallel()
+	labels := []string{
+		OverseerOnlyLabel,
+		OperatorOnlyLabel,
+		NeedsOverseerLabel,
+		NeedsOperatorLabel,
+		"needs-overseer",
+		"needs-operator",
+		"Overseer-Only",
+	}
+	for _, label := range labels {
+		t.Run(label, func(t *testing.T) {
+			t.Parallel()
+			want := "label " + label
+			if got := DispatchHoldFields("open", []string{label}, "", "", ""); got != want {
+				t.Errorf("DispatchHoldFields with %q = %q, want %q", label, got, want)
+			}
+			if got := SlingHoldFields([]string{label}, "", "", ""); got != want {
+				t.Errorf("SlingHoldFields with %q = %q, want %q", label, got, want)
+			}
+		})
+	}
+}
