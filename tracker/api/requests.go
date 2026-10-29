@@ -47,8 +47,9 @@ func (r TransferRequest) Validate() error {
 }
 
 // ValidateTransferAssignee refuses an assignee a transfer may not name: blank,
-// padded or holding whitespace (so not one address), or over MaxAssigneeLen.
-// The error for a blank one names the verb the caller probably meant.
+// padded or holding whitespace (so not one address), over MaxAssigneeLen, or
+// holding a control character (so not one a log line can print). The error for
+// a blank one names the verb the caller probably meant.
 func ValidateTransferAssignee(assignee string) error {
 	switch {
 	case strings.TrimSpace(assignee) == "":
@@ -57,6 +58,8 @@ func ValidateTransferAssignee(assignee string) error {
 		return Invalid("assignee is %d bytes, at most %d", len(assignee), MaxAssigneeLen)
 	case strings.ContainsFunc(assignee, unicode.IsSpace):
 		return Invalid("assignee %q holds whitespace; a seat address has none", assignee)
+	case strings.ContainsFunc(assignee, unicode.IsControl):
+		return Invalid("assignee %q holds a control character; a seat address has none", assignee)
 	}
 	return nil
 }
