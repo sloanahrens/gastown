@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
 )
@@ -289,5 +290,93 @@ func TestCollectTimeoutIsARealBound(t *testing.T) {
 	argv, _ := wantCollect("gt-registry", "unix:///x")
 	if len(argv) < 5 || argv[3] != "timeout" || argv[4] != CollectTimeoutSeconds {
 		t.Errorf("the collect command %v does not run under the container's timeout", argv)
+	}
+}
+
+// TestCollectAbandonedAtTheCallersDeadline: a collect that never answers is
+// reported unanswered when the caller's deadline arrives, so the apply returns
+// and the plugin lock is released instead of being held for a docker exec
+// nobody hears from (gt-dl4nv.13).
+func TestCollectAbandonedAtTheCallersDeadline(t *testing.T) {
+	t.Parallel()
+	reg := newRecordingRegistry(nil)
+	path := ledgerPath(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	run := func(context.Context, []string, string, ...string) ([]byte, error) {
+		close(started)
+		// The command answers only when the test ends: nothing but the bound
+		// can end the apply's wait for it.
+		<-release
+		return nil, nil
+	}
+	// Both deadlines are wall-clock waits with a bookend: the apply's is longer
+	// than the delete it also has to make, and the test's is longer than the
+	// apply's, so a collect that is not abandoned fails the test as a timeout
+	// rather than hanging it.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	wait, expire := context.WithTimeout(context.Background(), 10*time.Second)
+	defer expire()
+
+	type outcome struct {
+		result diskmaint.Result
+		err    error
+	}
+	target := NewTarget(gcConfig(t, reg, path, run))
+	plan := deletePlan(refInRepo("a1"))
+	applied := make(chan outcome, 1)
+	go func() {
+		result, err := target.Apply(ctx, plan)
+		applied <- outcome{result, err}
+	}()
+
+	var out outcome
+	select {
+	case out = <-applied:
+	case <-wait.Done():
+		t.Fatal("the apply did not return after the collect's bound; a docker exec that never answers is holding the plugin lock")
+	}
+	if out.err != nil {
+		t.Fatalf("apply: %v", out.err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("the collect never started; one delete succeeded, so it should have run")
+	}
+	if out.result.Collected {
+		t.Fatal("result.Collected = true; a collect that never answered did not run")
+	}
+	entry := readLedger(t, path)[0]
+	unanswered := "collect: no answer by the bound: context deadline exceeded"
+	if !slices.Contains(entry.Errors, unanswered) {
+		t.Fatalf("ledger errors = %v, want %q", entry.Errors, unanswered)
+	}
+}
+
+// TestCollectAnsweredInsideTheDeadlineCounts: a collect that answers before the
+// caller's deadline is the collect that ran, however soon the deadline follows.
+func TestCollectAnsweredInsideTheDeadlineCounts(t *testing.T) {
+	t.Parallel()
+	reg := newRecordingRegistry(nil)
+	path := ledgerPath(t)
+	run := &fakeRunner{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := NewTarget(gcConfig(t, reg, path, run.run)).Apply(ctx, deletePlan(refInRepo("a1")))
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(run.calls) != 1 {
+		t.Fatalf("commands = %v, want the one collect", run.calls)
+	}
+	if !result.Collected {
+		t.Fatal("result.Collected = false; the collect answered")
+	}
+	if entry := readLedger(t, path)[0]; len(entry.Errors) != 0 {
+		t.Fatalf("ledger errors = %v, want none from a collect that answered", entry.Errors)
 	}
 }

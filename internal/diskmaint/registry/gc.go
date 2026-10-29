@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
 )
@@ -36,6 +37,10 @@ const collectSkipped = "collect skipped: "
 // reading as "no push, nothing waiting": a wrong answer there lets collect
 // walk storage a push is writing. A failed collect is the same refusal to act
 // on an unknown, so it is recorded and does not fail the apply.
+//
+// A collect that has not answered by the caller's deadline is recorded
+// unanswered and the apply returns, so a docker exec nobody hears from cannot
+// hold the plugin lock past the deadline the caller set (gt-dl4nv.13).
 func (t *Target) gc(ctx context.Context, result *diskmaint.Result) []string {
 	if len(result.Done) == 0 {
 		return nil
@@ -53,11 +58,35 @@ func (t *Target) gc(ctx context.Context, result *diskmaint.Result) []string {
 		return []string{collectSkipped + "container name failed validation"}
 	}
 	env := []string{"DOCKER_HOST=" + t.cfg.DockerHost}
-	_, err := t.cfg.Run(ctx, env, "docker",
-		"exec", t.cfg.Container, "timeout", CollectTimeoutSeconds, "registry", "garbage-collect", "--delete-untagged", collectConfigPath)
+	err := awaitBound(ctx, func() error {
+		_, err := t.cfg.Run(ctx, env, "docker",
+			"exec", t.cfg.Container, "timeout", CollectTimeoutSeconds, "registry", "garbage-collect", "--delete-untagged", collectConfigPath)
+		return err
+	})
 	if err != nil {
 		return []string{"collect: " + err.Error()}
 	}
 	result.Collected = true
 	return nil
+}
+
+// awaitBound runs fn and returns its error, waiting no longer than the deadline
+// on ctx. A ctx without a deadline sets no bound and fn is waited for, the
+// container's timeout then being the collect's only bound.
+//
+// fn is not stopped when the bound arrives: killing the docker client leaves
+// the collect running in the container, so the container's own timeout is what
+// ends a collect, and ending it there ends it for good (gt-dl4nv.13).
+func awaitBound(ctx context.Context, fn func() error) error {
+	if _, bounded := ctx.Deadline(); !bounded {
+		return fn()
+	}
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("no answer by the bound: %w", ctx.Err())
+	}
 }
