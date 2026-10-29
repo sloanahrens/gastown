@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -258,28 +257,7 @@ func TestPruneRegistryApplyDeletes(t *testing.T) {
 	if got := reg.deleted(); !slices.Equal(got, want) {
 		t.Fatalf("deleted %v, want the two oldest digests %v", got, want)
 	}
-	// The collect runs under the container's timeout, with the seconds the
-	// registry package derives from the retention's budget so the collect ends
-	// before the lock is released (gt-dl4nv.13). That value moves by the time
-	// the run spends before the collect, so this pins the command's shape and
-	// that the bound is a whole number of seconds; the registry package's own
-	// tests pin the value.
-	argv, ok := tr.argsOf("docker")
-	if !ok {
-		t.Fatal("garbage collect never ran")
-	}
-	wantArgv := []string{"exec", registryContainer, "timeout", "", "registry", "garbage-collect", "--delete-untagged", "/etc/docker/registry/config.yml"}
-	if len(argv) != len(wantArgv) || !slices.Equal(argv[:3], wantArgv[:3]) || !slices.Equal(argv[4:], wantArgv[4:]) {
-		t.Fatalf("garbage collect argv = %v, want %v with the timeout's seconds at [3]", argv, wantArgv)
-	}
-	if secs, err := strconv.Atoi(argv[3]); err != nil || secs < 1 {
-		t.Fatalf("garbage collect timeout %q is not a whole number of seconds", argv[3])
-	}
-	// The budget, not the no-deadline default, is what bounds the collect: the
-	// lock is held while it runs.
-	if argv[3] == registry.CollectTimeoutSeconds {
-		t.Fatalf("garbage collect ran under the no-deadline timeout %s, so the retention's budget does not bound it", argv[3])
-	}
+	tr.wantCall(t, "docker", "exec", registryContainer, "timeout", registry.CollectTimeoutSeconds, "registry", "garbage-collect", "--delete-untagged", "/etc/docker/registry/config.yml")
 	tr.wantLogged(t, "deleted 2 of 2 manifest(s)")
 
 	entries, err := diskmaint.NewLedger(tr.Cfg.RegistryLedger, registryLedgerMax).Tail(1)
