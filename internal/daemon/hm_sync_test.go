@@ -49,10 +49,20 @@ func hmSyncTestDaemon(t *testing.T, cfg *DaemonPatrolConfig) (*Daemon, *bytes.Bu
 	}
 	d.hmSync.now = func() time.Time { return f.now }
 	d.hmSync.run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) == 2 && args[0] == hmSyncStatusArg && args[1] == hmSyncStatusJSON {
+			// The health check reads the status through the same seam. These
+			// tests are about the sync, so the read answers as a fresh town and
+			// the alert stays quiet (hm_sync_alert_test.go).
+			return []byte(hmSyncHealthFresh), nil
+		}
 		f.calls = append(f.calls, hmSyncCall{name: name, args: args})
 		f.now = f.now.Add(f.advance)
 		return nil, f.err
 	}
+	// Alerts go to no-op functions rather than the notifier: the unit tier
+	// starts no gt, and these tests assert on the sync.
+	d.hmSyncAlerts.raise = func(string, string, string) error { return nil }
+	d.hmSyncAlerts.clear = func(string, ...string) error { return nil }
 	// A sync runs inline: a test asserts what it did, so it must have done it
 	// by the time runHMSync returns.
 	d.hmSync.dispatch = func(fn func()) { fn() }
@@ -333,6 +343,9 @@ func TestHMSyncDoesNotRunTwiceConcurrently(t *testing.T) {
 	// The second tick must find the first still in flight and skip.
 	inFlight := false
 	d.hmSync.run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) == 2 && args[0] == hmSyncStatusArg && args[1] == hmSyncStatusJSON {
+			return []byte(hmSyncHealthFresh), nil
+		}
 		f.calls = append(f.calls, hmSyncCall{name: name, args: args})
 		if !inFlight {
 			inFlight = true
@@ -364,7 +377,9 @@ func TestHMSyncProductionRunSeam(t *testing.T) {
 		d.hmSync.run = nil
 		var argv []string
 		d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
-			argv = cmd.Args
+			if cmd.Args[1] == "sync" {
+				argv = cmd.Args // the sync; the health check's status read follows it
+			}
 			return []byte("indexed 3 sources\n"), nil, nil
 		}
 
