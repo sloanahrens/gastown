@@ -1,11 +1,13 @@
 package bdbuild
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -492,6 +494,33 @@ func TestCompileRefusesACommitStillMissingAfterTheFetch(t *testing.T) {
 	}
 	if build.dir != "" {
 		t.Errorf("Compile built in %q for a commit that is still missing", build.dir)
+	}
+}
+
+// runGit names why a git command never ran when its context had already ended,
+// whether it was canceled or ran past its deadline (gt-6uid9). The context ends
+// before the command starts, so no git process runs and no test waits.
+func TestRunGitNamesACommandWhoseContextEnded(t *testing.T) {
+	t.Parallel()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	t.Cleanup(cancelExpired)
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want string
+	}{
+		{name: "a canceled context", ctx: canceled, want: "git was canceled"},
+		{name: "a deadline already past", ctx: expired, want: "git timed out after the " + gitCeiling.String() + " ceiling"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := runGit(tc.ctx, t.TempDir(), "--version")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("runGit under %s: err = %v, want one naming %q", tc.name, err, tc.want)
+			}
+		})
 	}
 }
 

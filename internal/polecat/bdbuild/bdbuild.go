@@ -5,12 +5,14 @@ package bdbuild
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -74,13 +76,36 @@ func Env(environ []string) []string {
 // that is not a git checkout fails the way git does.
 type Git func(dir string, args ...string) ([]byte, error)
 
-// ExecGit runs the host's git.
+// gitCeiling bounds one git command ExecGit runs. Compile's fetch of origin
+// reaches the network, and an unreachable origin would otherwise stall
+// make install with no message.
+const gitCeiling = 5 * time.Minute
+
+// ExecGit runs the host's git, and stops it if it runs past gitCeiling.
 func ExecGit(dir string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	ctx, cancel := context.WithTimeout(context.Background(), gitCeiling)
+	defer cancel()
+	return runGit(ctx, dir, args...)
+}
+
+// runGit runs the host's git under ctx, which kills it when ctx ends. A command
+// that ctx ends fails naming the timeout or the cancellation; any other failure
+// reports git's last stderr line.
+func runGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	// A git fetch leaves a git-remote-https child holding the output pipes, so
+	// Wait would block on it after git is killed; WaitDelay bounds that wait.
+	cmd.WaitDelay = time.Second
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		switch ctx.Err() {
+		case context.DeadlineExceeded:
+			return nil, fmt.Errorf("git timed out after the %s ceiling: %w", gitCeiling, ctx.Err())
+		case context.Canceled:
+			return nil, fmt.Errorf("git was canceled: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("%w: %s", err, lastLine(stderr.String()))
 	}
 	return out, nil
