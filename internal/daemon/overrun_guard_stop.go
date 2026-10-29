@@ -555,8 +555,11 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		// another polecat holds now, is that holder's (gt-tzbtf).
 		ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)
 		defer cancel()
-		store := beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot),
+		var store overrunHandBackStore = beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot),
 			beads.WithBin(d.bdPathOrDefault())).WithTimeout(overrunHandBackTimeout)
+		if d.openOverrunBeads != nil {
+			store = d.openOverrunBeads()
+		}
 		status, assignee, err := polecat.NewBeadWriter(store, overrunActor).State(ctx, seat.Bead)
 		if err != nil {
 			return false, fmt.Errorf("read bead %s: %w", seat.Bead, err)

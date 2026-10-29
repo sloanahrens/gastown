@@ -150,6 +150,11 @@ type Daemon struct {
 	// the routed bd. Tests answer from a beadsfake.
 	openRecoveryBeads func(env []string) beads.Client
 
+	// openOverrunBeads opens the store the overrun stop's ownership re-check
+	// reads the stopped seat's bead through (overrunStopSeams); nil is the
+	// routed bd. Tests answer from a beadsfake.
+	openOverrunBeads func() overrunHandBackStore
+
 	// sandboxExists asks a gateway whether it has a sandbox of that name (see
 	// patrolScanHost.sandboxStillExists); nil asks the real gateway. Tests
 	// answer from a stub.
