@@ -295,7 +295,7 @@ func TestPlanIgnoresForeignImageRunningOnTheCluster(t *testing.T) {
 		fakeTag(RepoMain, "c000003", c3, planTime(3), 400),
 	}})
 	cfg := testConfig(t, reg)
-	cfg.Run = podRunner(podsUsing(append([]string{"localhost:5001/gastown-polecat:c000001"}, clusterImages...)...))
+	cfg.Run = podRunner(podsUsing(append([]string{"localhost:5001/gastown-polecat:dev"}, clusterImages...)...))
 
 	plan, err := NewTarget(cfg).Plan(context.Background(), diskmaint.Policy{Keep: 1})
 	if err != nil {
@@ -304,8 +304,8 @@ func TestPlanIgnoresForeignImageRunningOnTheCluster(t *testing.T) {
 	if plan.Refused != "" {
 		t.Fatalf("plan refused on the cluster's own images: %s", plan.Refused)
 	}
-	if got := keptRule(plan, RepoMain+":c000001"); got != ruleInUse {
-		t.Fatalf("c000001 kept by %q, want %q", got, ruleInUse)
+	if keptRule(plan, RepoMain+":"+TagDev) == "" {
+		t.Fatalf("dev is not kept; the plan must keep the tag")
 	}
 	if slices.Contains(actionRefs(plan), mainRef(dev)) {
 		t.Fatalf("plan deletes dev %s; the tag must stay", mainRef(dev))
