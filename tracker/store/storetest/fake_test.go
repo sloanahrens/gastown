@@ -62,3 +62,49 @@ func TestARefusedRevokeEndsNoToken(t *testing.T) {
 		t.Errorf("a token after a refused revoke of its near actor = %v, want it still live", err)
 	}
 }
+
+// Stats counts a rig's durable issues by status and its wisps apart, so a
+// wisp is never in the durable total or in ByStatus.
+func TestTheFakeStatsCountsWispsApartFromDurableIssues(t *testing.T) {
+	t.Parallel()
+	f := NewFake()
+	ctx := t.Context()
+	if _, err := f.CreateIssue(ctx, api.CreateParams{Rig: "gt", Title: "open"}); err != nil {
+		t.Fatal(err)
+	}
+	done, err := f.CreateIssue(ctx, api.CreateParams{Rig: "gt", Title: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.CloseIssues(ctx, []string{done.ID}, "r", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.CreateIssue(ctx, api.CreateParams{Rig: "gt", Title: "a wisp", Ephemeral: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.CreateIssue(ctx, api.CreateParams{Rig: "hq", Title: "other rig"}); err != nil {
+		t.Fatal(err)
+	}
+
+	gt, err := f.Stats(ctx, "gt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gt.Total != 2 || gt.ByStatus["open"] != 1 || gt.ByStatus["closed"] != 1 || gt.Wisps != 1 {
+		t.Errorf("gt stats = %+v, want 2 durable (one open, one closed) and 1 wisp", gt)
+	}
+	all, err := f.Stats(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if all.Total != 3 || all.Wisps != 1 {
+		t.Errorf("stats of every rig = %+v, want 3 durable and 1 wisp", all)
+	}
+	empty, err := f.Stats(ctx, "nosuchrig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.Total != 0 || empty.Wisps != 0 || empty.ByStatus == nil {
+		t.Errorf("stats of a rig with nothing = %+v, want zero and a non-nil ByStatus", empty)
+	}
+}

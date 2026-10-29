@@ -2,8 +2,8 @@
 // implements the methods its Fake-flagged contract cases cover: create and
 // get, the claim, release and transfer guards, the plain close those guards
 // refuse, the creates a Batch applies, the comments and links an export
-// reads, and the tokens an admin issues and revokes. Every other method
-// returns store.ErrUnimplemented, so a unit test
+// reads, the counts a stats read reports, and the tokens an admin issues and
+// revokes. Every other method returns store.ErrUnimplemented, so a unit test
 // that reaches past them fails loudly rather than reading a store that only
 // looks modeled.
 package storetest
@@ -321,8 +321,26 @@ func (*Fake) DispatchBoard(context.Context, api.DispatchBoardRequest) (api.Dispa
 func (*Fake) TownSnapshot(context.Context, api.SnapshotRequest) (api.TownSnapshot, error) {
 	return api.TownSnapshot{}, unimplemented("TownSnapshot")
 }
-func (*Fake) Stats(context.Context, string) (api.Stats, error) {
-	return api.Stats{}, unimplemented("Stats")
+
+// Stats counts the durable issues of rig (every rig when empty) by status, and
+// its wisps as one total. A status only wisps hold is left out of ByStatus, as
+// the Postgres store leaves it out.
+func (f *Fake) Stats(_ context.Context, rig string) (api.Stats, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := api.Stats{ByStatus: map[string]int{}}
+	for _, is := range f.issues {
+		if rig != "" && rigOf(is.ID) != rig {
+			continue
+		}
+		if is.Ephemeral {
+			out.Wisps++
+			continue
+		}
+		out.Total++
+		out.ByStatus[is.Status]++
+	}
+	return out, nil
 }
 func (*Fake) ConfigGet(context.Context, string) (string, bool, error) {
 	return "", false, unimplemented("ConfigGet")
