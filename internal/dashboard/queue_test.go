@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -248,5 +249,49 @@ func TestPollQueueFillsState(t *testing.T) {
 	h.pollQueue()
 	if q := h.State().Queue; q == nil || q.ReadyTotal != 2 || len(q.Ready) != 2 {
 		t.Fatalf("queue = %+v", q)
+	}
+}
+
+// A ready row the dispatcher passed over carries the verdict beside its shape,
+// and a row with no verdict carries none of the fields, so the page can tell
+// "the ledger says nothing" from "the ledger says skipped" (gt-ckncx).
+func TestQueueSkipFieldsCarryTheVerdictToThePage(t *testing.T) {
+	t.Parallel()
+	since := time.Date(2026, 10, 29, 14, 0, 0, 0, time.UTC)
+	b, err := json.Marshal(QueueBead{
+		ID: "gt-1", Shape: "skipped", ShapeNote: "overlap hold: gt-2 is in progress",
+		SkipClass: "skipped", SkipReason: "overlap hold: gt-2 is in progress", SkippedSince: since, SkipTicks: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"shape":"skipped"`,
+		`"skip_class":"skipped"`,
+		`"skip_reason":"overlap hold: gt-2 is in progress"`,
+		`"skipped_since":"2026-10-29T14:00:00Z"`,
+		`"skip_ticks":3`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("a skipped row does not carry %s: %s", want, b)
+		}
+	}
+	bare, err := json.Marshal(QueueBead{ID: "gt-2", Shape: "ok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, absent := range []string{"skip_class", "skip_reason", "skipped_since", "skip_ticks"} {
+		if strings.Contains(string(bare), absent) {
+			t.Errorf("a row with no verdict must omit %s: %s", absent, bare)
+		}
+	}
+	// The queue itself says when its verdicts were taken, and marks them stale
+	// only when they are: a zero time must not reach the page as 1970.
+	if b, err := json.Marshal(Queue{}); err != nil || strings.Contains(string(b), "verdicts_at") || strings.Contains(string(b), "verdicts_stale") {
+		t.Errorf("a queue with no ledger must set neither field: %s err=%v", b, err)
+	}
+	if b, err := json.Marshal(Queue{VerdictsAt: since, VerdictsStale: true}); err != nil ||
+		!strings.Contains(string(b), `"verdicts_at":"2026-10-29T14:00:00Z"`) || !strings.Contains(string(b), `"verdicts_stale":true`) {
+		t.Errorf("a queue with old verdicts does not say so: %s err=%v", b, err)
 	}
 }

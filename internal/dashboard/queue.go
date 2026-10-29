@@ -47,10 +47,27 @@ type QueueBead struct {
 	// (a required field is missing; ShapeNote names the first), "planning"
 	// (it would go to the planner) or "other" (an epic or runtime record).
 	// "parked" and "held" are the dispatcher's exclusions rather than the
-	// lint's: the rig is parked, or an assignee already holds the bead. Empty
-	// for rows the lint was not run on.
+	// lint's: the rig is parked, or an assignee already holds the bead.
+	// "skipped" is the dispatcher's own record: the bead lints "ok" but the
+	// last dispatch tick passed it over, and ShapeNote is that tick's reason
+	// (the Skip fields below say for how long). Empty for rows the lint was
+	// not run on.
 	Shape     string `json:"shape,omitempty"`
 	ShapeNote string `json:"shape_note,omitempty"`
+	// The dispatcher's last verdict on a ready bead, from the town's tick
+	// ledger (gt-ckncx). SkipClass is the class the tick filed it under
+	// ("skipped", "refused", "deferred", "planning" or "failed"), SkipReason
+	// the line the tick reported it under, SkippedSince when the run of that
+	// verdict began and SkipTicks how many consecutive ticks have stood. A row
+	// whose Shape is "skipped" carries them, and so does any row the ledger
+	// holds whose shape the dispatcher's own lint already decided against
+	// ("fix", "held", "parked"): the shape says the bead is not dispatchable,
+	// these say why the dispatcher passed it over. All four are empty on a
+	// bead the ledger does not hold, which the page reads as no verdict.
+	SkipClass    string    `json:"skip_class,omitempty"`
+	SkipReason   string    `json:"skip_reason,omitempty"`
+	SkippedSince time.Time `json:"skipped_since,omitzero"`
+	SkipTicks    int       `json:"skip_ticks,omitempty"`
 	// Wisp marks a blocked row that is a leaked molecule step wisp rather than
 	// blocked work (IsLeakedStepWisp). Set on the blocked list, the only list
 	// the page asks the question of.
@@ -82,6 +99,15 @@ type Queue struct {
 	// Unreadable names the stores whose lists could not be read, so a store
 	// that is down does not read as an empty queue.
 	Unreadable []string `json:"unreadable,omitempty"`
+	// VerdictsAt is when the dispatch tick that wrote the rows' Skip fields
+	// finished, and VerdictsStale is true when the verdicts cannot be
+	// presented as current: the tick is older than the freshness window (a
+	// held or stopped dispatcher stops writing), or the ledger could not be
+	// read at all, in which case VerdictsAt is unset. Stale verdicts change no
+	// row's Shape and fill no Skip field. Both fields are unset when there is
+	// no ledger yet to have verdicts from.
+	VerdictsAt    time.Time `json:"verdicts_at,omitzero"`
+	VerdictsStale bool      `json:"verdicts_stale,omitempty"`
 	// ParkedRigs names the stores whose rigs are parked.
 	ParkedRigs []string `json:"parked_rigs,omitempty"`
 	// Prefixes maps each store's beads prefix to the store's name, so the page

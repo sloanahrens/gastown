@@ -454,3 +454,142 @@ func TestStorePrefixesReadsTheTownRoutes(t *testing.T) {
 		t.Error("a prefix for a store the reader does not carry must not be offered as a link")
 	}
 }
+
+// dashedShape is a description that passes the dispatcher's shape lint, so a
+// test's bead reads "ok" from the lint alone and the verdict overlay is the
+// only thing that can change it.
+const dashesShape = "## Goal\n\ng\n\n## Constraints\n\nc\n\n## Out of scope\n\no\n\n## Gate\n\nmake gate\n\n## Size\n\none worker, one landing\n\n## Acceptance\n\n- [ ] done\n"
+
+// The dispatcher's own last verdict outranks a shape read off the bead's text
+// (gt-ckncx): a bead that lints clean and that the last tick skipped is not
+// dispatchable, and the row carries the tick's reason, when the run began and
+// for how many ticks.
+func TestDashQueueOverlaysTheDispatchersSkippedVerdict(t *testing.T) {
+	t.Parallel()
+	since := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	gastown := &fakeQueueStore{ready: []*beads.Issue{
+		{ID: "gt-1", Title: "behind a bead in progress", Type: "task", Description: dashesShape},
+	}}
+	r := queueReaderOver(map[string]dashQueueStore{"gastown": gastown}, "gastown")
+	r.verdicts = func() (*specdispatch.Ledger, error) {
+		return &specdispatch.Ledger{SavedAt: since.Add(time.Minute), Verdicts: map[string]specdispatch.LedgerVerdict{
+			"gt-1": {Bead: "gt-1", Rig: "gastown", Class: specVerdictSkipped,
+				Reason: "overlap hold: gt-2 is in progress", FirstAt: since, Ticks: 3},
+		}}, nil
+	}
+	q := r.read(since.Add(2 * time.Minute))
+	if q == nil || len(q.Ready) != 1 {
+		t.Fatalf("ready = %+v", q)
+	}
+	row := q.Ready[0]
+	if row.Shape != "skipped" || row.ShapeNote != "overlap hold: gt-2 is in progress" {
+		t.Errorf("shape = %q note = %q, want skipped and the tick's reason", row.Shape, row.ShapeNote)
+	}
+	if !row.SkippedSince.Equal(since) || row.SkipTicks != 3 {
+		t.Errorf("skipped since %v over %d ticks, want %v over 3", row.SkippedSince, row.SkipTicks, since)
+	}
+	if row.SkipClass != specVerdictSkipped || row.SkipReason != "overlap hold: gt-2 is in progress" {
+		t.Errorf("skip class/reason = %q/%q", row.SkipClass, row.SkipReason)
+	}
+	if !q.VerdictsAt.Equal(since.Add(time.Minute)) || q.VerdictsStale {
+		t.Errorf("verdicts at %v stale=%v, want the tick's save time and fresh", q.VerdictsAt, q.VerdictsStale)
+	}
+}
+
+// A shape the lint itself decided against is not overwritten by the ledger: an
+// assigned bead stays held and a parked rig's bead stays parked, each still
+// carrying the verdict's fields so the page can say why the dispatcher passed
+// it over. A class that is not an exclusion fills the fields only.
+func TestDashQueueKeepsAHeldOrParkedShapeWithTheVerdict(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	gastown := &fakeQueueStore{ready: []*beads.Issue{
+		{ID: "gt-held", Title: "someone is on it", Type: "task", Description: dashesShape, Assignee: "gastown/crew/sloan"},
+		{ID: "gt-rough", Title: "unshaped", Type: "task", Description: "just a note"},
+	}}
+	mango := &fakeQueueStore{ready: []*beads.Issue{
+		{ID: "ma-1", Title: "parked", Type: "task", Description: dashesShape},
+	}}
+	r := queueReaderOver(map[string]dashQueueStore{"gastown": gastown, "mango": mango}, "gastown", "mango")
+	r.parked = func(rig string) bool { return rig == "mango" }
+	r.verdicts = func() (*specdispatch.Ledger, error) {
+		return &specdispatch.Ledger{SavedAt: at, Verdicts: map[string]specdispatch.LedgerVerdict{
+			"gt-held":  {Bead: "gt-held", Class: specVerdictSkipped, Reason: "overlap hold", FirstAt: at, Ticks: 1},
+			"gt-rough": {Bead: "gt-rough", Class: specVerdictFailed, Reason: "the tick failed it", FirstAt: at, Ticks: 2},
+			"ma-1":     {Bead: "ma-1", Class: specVerdictDeferred, Reason: "the seat is busy", FirstAt: at, Ticks: 4},
+		}}, nil
+	}
+	q := r.read(at.Add(time.Minute))
+	rows := map[string]dashboard.QueueBead{}
+	for _, b := range q.Ready {
+		rows[b.ID] = b
+	}
+	for id, want := range map[string]string{"gt-held": "held", "gt-rough": "fix", "ma-1": "parked"} {
+		if got := rows[id].Shape; got != want {
+			t.Errorf("%s: shape = %q, want %q kept", id, got, want)
+		}
+		if rows[id].SkipClass == "" || rows[id].SkipReason == "" {
+			t.Errorf("%s: keeps its shape but must still carry the verdict: %+v", id, rows[id])
+		}
+	}
+	if got := rows["ma-1"]; got.SkipClass != specVerdictDeferred || got.SkipTicks != 4 || !got.SkippedSince.Equal(at) {
+		t.Errorf("ma-1 skip fields = %+v, want deferred over 4 ticks from %v", got, at)
+	}
+}
+
+// A dispatcher that is held or stopped stops writing, so its last tick's
+// verdicts read as current would be a claim nothing backs: older than the
+// window, the ledger changes no shape and fills no field, and the queue says
+// the verdicts are old instead (gt-ckncx).
+func TestDashQueueIgnoresAnOldVerdictLedger(t *testing.T) {
+	t.Parallel()
+	saved := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	st := &fakeQueueStore{ready: []*beads.Issue{{ID: "gt-1", Title: "shaped", Type: "task", Description: dashesShape}}}
+	r := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown")
+	r.verdicts = func() (*specdispatch.Ledger, error) {
+		return &specdispatch.Ledger{SavedAt: saved, Verdicts: map[string]specdispatch.LedgerVerdict{
+			"gt-1": {Bead: "gt-1", Class: specVerdictSkipped, Reason: "overlap hold", FirstAt: saved, Ticks: 2},
+		}}, nil
+	}
+	q := r.read(saved.Add(dashVerdictTTL + time.Minute))
+	if q == nil || len(q.Ready) != 1 {
+		t.Fatalf("ready = %+v", q)
+	}
+	if row := q.Ready[0]; row.Shape != "ok" || row.SkipClass != "" || row.SkipReason != "" || row.SkipTicks != 0 || !row.SkippedSince.IsZero() {
+		t.Errorf("an old verdict must not be presented as current: %+v", row)
+	}
+	if !q.VerdictsStale || !q.VerdictsAt.Equal(saved) {
+		t.Errorf("verdicts stale=%v at=%v, want stale at the ledger's save time %v", q.VerdictsStale, q.VerdictsAt, saved)
+	}
+}
+
+// A ledger with no tick in it sets neither verdict field, so the page can tell
+// "no verdict yet" from a fresh one; a ledger this read cannot load overlays
+// nothing and is marked stale, so the page never offers the lint's shape as the
+// dispatcher's truth on the strength of a record it could not read (gt-ckncx).
+func TestDashQueueIgnoresAVerdictLedgerItCannotRead(t *testing.T) {
+	t.Parallel()
+	st := &fakeQueueStore{ready: []*beads.Issue{{ID: "gt-1", Title: "shaped", Type: "task", Description: dashesShape}}}
+	for name, c := range map[string]struct {
+		load      func() (*specdispatch.Ledger, error)
+		wantStale bool
+	}{
+		"missing": {func() (*specdispatch.Ledger, error) {
+			return specdispatch.LoadLedger(filepath.Join(t.TempDir(), "verdicts.json"))
+		}, false},
+		"unreadable": {func() (*specdispatch.Ledger, error) { return nil, errors.New("dolt down") }, true},
+	} {
+		r := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown")
+		r.verdicts = c.load
+		q := r.read(time.Now())
+		if q == nil || len(q.Ready) != 1 {
+			t.Fatalf("%s: ready = %+v", name, q)
+		}
+		if row := q.Ready[0]; row.Shape != "ok" || row.SkipClass != "" {
+			t.Errorf("%s: shape = %q skip class = %q, want the lint's ok and no verdict", name, row.Shape, row.SkipClass)
+		}
+		if !q.VerdictsAt.IsZero() || q.VerdictsStale != c.wantStale {
+			t.Errorf("%s: verdicts at %v stale=%v, want no time and stale=%v", name, q.VerdictsAt, q.VerdictsStale, c.wantStale)
+		}
+	}
+}
