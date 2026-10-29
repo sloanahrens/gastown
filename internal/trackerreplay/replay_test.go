@@ -410,6 +410,26 @@ func TestReplaySkipsAForeignEventItCouldNotReplay(t *testing.T) {
 	}
 }
 
+// An event with no issue id names no rig, so the run stops on it rather than
+// passing it over as another rig's; the cursor is not moved past it.
+func TestReplayRefusesAnEventWithNoIssueIdInsteadOfSkippingIt(t *testing.T) {
+	t.Parallel()
+	src := &fakeSource{events: []api.Event{
+		{Seq: 1, Op: "closed", IssueID: "gt-1"},
+		{Seq: 2, Op: "closed", IssueID: ""},
+		{Seq: 3, Op: "closed", IssueID: "gt-3"},
+	}}
+	run := &recorder{}
+	res, err := Replay(context.Background(), src, run.apply, 0, "gt-", false, nil)
+	var u *UnreplayableError
+	if !errors.As(err, &u) || u.Seq != 2 || u.Kind != "closed" {
+		t.Fatalf("Replay over an event with no issue id = %v, want unreplayable closed at seq 2", err)
+	}
+	if res != (Result{Applied: 1, Commands: 1}) || len(run.calls) != 1 {
+		t.Errorf("result %+v with %d calls, want seq 1 applied and nothing after the id-less event", res, len(run.calls))
+	}
+}
+
 // A dry run of a shared feed prints only the rig's own bd calls.
 func TestReplayDryRunPrintsNoCallForAnotherRigsEvent(t *testing.T) {
 	t.Parallel()

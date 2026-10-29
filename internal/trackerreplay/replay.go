@@ -82,15 +82,15 @@ func (e *ApplyError) Unwrap() error { return e.Err }
 // reached instead.
 const maxPages = 1000
 
-// Replay reads the feed after since and applies the events of the rig whose
-// beads prefix is prefix, in seq order. An event for another rig is skipped
-// before it is turned into a bd call, because bd run in this rig's directory
-// routes a foreign id to that rig's own Dolt or refuses it, and either would
-// apply the wrong rig's write or stop the run; a skipped event still advances
-// the cursor, and Result.Skipped counts it. On a dry run Replay prints each bd
-// call and runs none; apply is then not used and may be nil. The run stops at
-// the first event it cannot replay or the first bd call that fails; the Result
-// still says how far it got.
+// Replay applies the events of the rig whose beads prefix is prefix, after since, in seq order.
+//
+// An event for another rig is skipped before it is turned into a bd call:
+// bd run in this rig's directory routes a foreign id to that rig's own Dolt or
+// refuses it, and either would apply the wrong rig's write or stop the run. A
+// skipped event still advances the cursor, and Result.Skipped counts it. On a
+// dry run Replay prints each bd call and runs none; apply is then not used and
+// may be nil. The run stops at the first event it cannot replay or the first bd
+// call that fails; the Result still says how far it got.
 func Replay(ctx context.Context, src Source, apply Apply, since int64, prefix string, dryRun bool, out io.Writer) (Result, error) {
 	res := Result{Applied: since}
 	if strings.TrimSuffix(prefix, "-") == "" {
@@ -119,6 +119,11 @@ func Replay(ctx context.Context, src Source, apply Apply, since int64, prefix st
 		for _, ev := range page.Events {
 			if ev.Seq <= after {
 				return res, fmt.Errorf("tracker events feed is not ascending: seq %d follows seq %d", ev.Seq, after)
+			}
+			// An event with no id names no rig, so it is not skipped as foreign:
+			// passing it over would hide a write the replay cannot account for.
+			if ev.IssueID == "" {
+				return res, unreplayable(ev, ev.Op, "the feed carries no issue id, so the event cannot be told apart from another rig's")
 			}
 			if !belongsTo(ev, prefix) {
 				res.Skipped++
@@ -164,7 +169,9 @@ func feedEnded(page api.EventsPage, after int64) error {
 
 // belongsTo reports whether ev is an issue of the rig whose beads prefix is
 // prefix. The prefix is compared without its trailing dash, and the id must
-// carry it as a whole segment, so a "gt" rig does not claim "gtx-1".
+// carry it as a whole segment, so a "gt" rig does not claim "gtx-1"; a prefix
+// that is the start of another rig's ("gt" and "gt-x") cannot be told apart
+// here, so the caller refuses that route.
 func belongsTo(ev api.Event, prefix string) bool {
 	p := strings.TrimSuffix(prefix, "-")
 	return strings.HasPrefix(ev.IssueID, p+"-")

@@ -133,6 +133,15 @@ func TestOpenTrackerReplayRefusesWhatItCannotResolve(t *testing.T) {
 			rig:     "ag",
 			wantErr: "flip it back to dolt",
 		},
+		"rig prefix is the start of another rig's": {
+			edit: func(env *replayEnv) {
+				env.loadRoutes = func(string) ([]beads.Route, error) {
+					return []beads.Route{{Prefix: "gt-", Path: "gastown"}, {Prefix: "gt-x-", Path: "xrig"}}, nil
+				}
+			},
+			rig:     "gastown",
+			wantErr: "cannot tell their events apart",
+		},
 		"tracker url unset": {
 			edit:    func(env *replayEnv) { env.getenv = func(string) string { return "" } },
 			rig:     "gastown",

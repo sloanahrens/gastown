@@ -190,6 +190,9 @@ func openTrackerReplay(env replayEnv, rig string) (replayTarget, trackerreplay.S
 	if err != nil {
 		return replayTarget{}, nil, fmt.Errorf("gt tracker replay: %w", err)
 	}
+	if err := refuseNestedPrefix(routes, route); err != nil {
+		return replayTarget{}, nil, fmt.Errorf("gt tracker replay: %w", err)
+	}
 	tcfg := backend.FromEnv(env.getenv).Tracker
 	if tcfg.BaseURL == "" {
 		return replayTarget{}, nil, errors.New("gt tracker replay: TRACKER_URL is not set")
@@ -199,6 +202,26 @@ func openTrackerReplay(env replayEnv, rig string) (replayTarget, trackerreplay.S
 		return replayTarget{}, nil, fmt.Errorf("gt tracker replay: %w", err)
 	}
 	return replayTarget{dir: filepath.Join(townRoot, route.Path), prefix: route.Prefix}, src, nil
+}
+
+// refuseNestedPrefix refuses a rig whose beads prefix is the start of another
+// route's prefix: an issue of that other rig matches both on the shared feed,
+// and the replay would apply it to this rig.
+func refuseNestedPrefix(routes []beads.Route, rig beads.Route) error {
+	p := strings.TrimSuffix(rig.Prefix, "-")
+	if p == "" {
+		return nil
+	}
+	for _, r := range routes {
+		q := strings.TrimSuffix(r.Prefix, "-")
+		if r.Path == rig.Path || q == "" {
+			continue
+		}
+		if strings.HasPrefix(q, p+"-") {
+			return fmt.Errorf("rig %s prefix %q is the start of rig %s prefix %q: a replay cannot tell their events apart", rig.Path, rig.Prefix, r.Path, r.Prefix)
+		}
+	}
+	return nil
 }
 
 // pickRigRoute finds the rig's route by its path or beads prefix. The replay
