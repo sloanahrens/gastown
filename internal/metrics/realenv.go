@@ -13,13 +13,11 @@ import (
 	"time"
 )
 
-// This file ports the real-environment wiring of scripts/town_metrics/cli.py:
-// Rigs, PrefixToRig, real_env, save_caches, _town, _docs_dir and _run. It wires
-// the town the extract reads: every file it opens and every directory it lists
-// goes through the RealFiles seam, and every git and bd command through one
-// injected runner, so a unit test supplies a fixture town and a scripted runner
-// instead of ~/gt, and the hourly smoke is the only test that reads the real
-// town.
+// This file is the real-environment wiring. It wires the town the extract reads:
+// every file it opens and every directory it lists goes through the RealFiles
+// seam, and every git and bd command through one injected runner, so a unit
+// test supplies a fixture town and a scripted runner instead of ~/gt, and the
+// hourly smoke is the only test that reads the real town.
 
 // Rigs is the town's rig list, in the order the ported extract reads it.
 var Rigs = []string{"gastown", "devops", "fractals", "beaver", "agentlab", "om", "hm", "mango", "beads"}

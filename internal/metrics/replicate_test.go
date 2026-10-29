@@ -8,9 +8,8 @@ import (
 	"testing"
 )
 
-// The golden cases were produced by running scripts/town_metrics/replicate.py;
-// the Python test (scripts/test_town_metrics_replicate_golden.py) reads the same
-// file, so the two implementations cannot drift apart unseen.
+// The golden cases were captured from the reference implementation before it
+// was removed.
 type replicateGolden struct {
 	Binom []struct {
 		K    int     `json:"k"`

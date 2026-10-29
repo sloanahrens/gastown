@@ -960,34 +960,6 @@ func indexOfCallArg(call recordedCall, arg string) int {
 	return -1
 }
 
-func TestAnalyseReadsTheDirectoryTheExtractReports(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		out     string
-		want    string
-		wantErr bool
-	}{
-		{"the receipt's directory", "extract: 44 landings, 1 weekly rows -> /town/.runtime/metrics/2026-10-01\n", "/town/.runtime/metrics/2026-10-01", false},
-		{"the last directory in a multi-line receipt", "warn: nothing\n extract: 1 landings, 0 weekly rows -> /town/.runtime/metrics/x\n", "/town/.runtime/metrics/x", false},
-		{"no directory at all", "extract: done\n", "", true},
-		{"an empty directory", "extract: 1 landings -> \n", "", true},
-		{"no output", "", "", true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := extractDir([]byte(tc.out))
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("extractDir(%q) error = %v, want error = %v", tc.out, err, tc.wantErr)
-			}
-			if got != tc.want {
-				t.Fatalf("extractDir(%q) = %q, want %q", tc.out, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestReadSnapshotsSkipsOnlyAnUnfinishedLastLine(t *testing.T) {
 	t.Parallel()
 	record := `{"v":1,"ts":"2026-10-24T10:00:00Z","placement":null,"errors":[],"queue":{"open":3}}`

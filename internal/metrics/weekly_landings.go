@@ -8,8 +8,7 @@ import (
 )
 
 // The landing-side weekly metrics: size, rework and rejections per (week, rig)
-// and per week across the town. It is a port of the first part of
-// scripts/town_metrics/metrics.py, so the same rows give the same figures.
+// and per week across the town.
 
 // WeekRig is the group a landing belongs to; a rig of "ALL" is the town's row.
 type WeekRig struct {
