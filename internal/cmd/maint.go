@@ -20,6 +20,9 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/baks"
+	"github.com/steveyegge/gastown/internal/diskmaint/civol"
+	"github.com/steveyegge/gastown/internal/diskmaint/colima"
+	"github.com/steveyegge/gastown/internal/diskmaint/nodes"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 	"github.com/steveyegge/gastown/internal/diskmaint/sizes"
 	"github.com/steveyegge/gastown/internal/diskmaint/worktree"
@@ -40,6 +43,18 @@ const (
 	maintTargetWorktree = "worktree"
 	maintTargetBaks     = "baks"
 	maintTargetSizes    = "sizes"
+
+	// maintTargetNodes, maintTargetColima and maintTargetCivol are the names the
+	// docker targets answer to: the sandbox cluster's kind nodes, the colima
+	// daemon's images and the CI cache volumes.
+	maintTargetNodes  = "nodes"
+	maintTargetColima = "colima"
+	maintTargetCivol  = "civol"
+
+	// maintNodesContext and maintNodesPrefix name the docker context and the
+	// kind node prefix of the sandbox cluster, the defaults cmd/nodeprune uses.
+	maintNodesContext = "colima-gt-sbx"
+	maintNodesPrefix  = "gt-sbx-"
 
 	// maintKeepDefault is the newest-commit window a town that names none gets;
 	// it matches the plugin's default, so gt maint plans what the plugin's
@@ -66,13 +81,15 @@ var maintCmd = &cobra.Command{
 plan is a dry run: it prints every action it would take and changes nothing.
 apply runs the plan it just printed. A registry apply runs under the
 polecat-image lock, so a delete never races an image push; one that finds the
-lock held defers and says to retry. The local targets keep no lock: they touch
-only the worktrees, backups and directories this machine owns.
+lock held defers and says to retry. The other targets keep no lock: the local
+ones touch only the worktrees, backups and directories this machine owns, and
+the docker ones only the images and volumes their daemons list.
 
-A target names what to maintain: baks, registry (only when the town configures
-a registry), sizes or worktree. The known targets are listed when a name is
-unknown, and naming none runs every target in name order. A plan that could not
-read its inputs refuses instead of guessing, and both leaves exit non-zero then.`,
+A target names what to maintain: baks, civol, colima, nodes, registry (only
+when the town configures a registry), sizes or worktree. The known targets are
+listed when a name is unknown, and naming none runs every target in name order.
+A plan that could not read its inputs refuses instead of guessing, and both
+leaves exit non-zero then.`,
 	RunE: requireSubcommand,
 }
 
@@ -315,11 +332,12 @@ func maintKeep(get func(string) string) (int, error) {
 	return keep, nil
 }
 
-// maintTargets builds every target the town configures: the local targets,
-// which every town has, and the registry target, which only a town that names
-// a registry has. A target whose settings cannot be read refuses that target
-// alone (see maintLocalTargets), so the registry still plans for a town whose
-// rig registry is damaged, exactly as it did before the local targets existed.
+// maintTargets builds every target the town configures: the local targets and
+// the docker targets, which every town has, and the registry target, which only
+// a town that names a registry has. A target whose settings cannot be read
+// refuses that target alone (see maintLocalTargets), so the registry still plans
+// for a town whose rig registry is damaged, exactly as it did before the local
+// targets existed.
 //
 // The ledger directory is made in apply mode alone: a plan is a dry run, so it
 // must not leave a directory behind that was not there before. An apply whose
@@ -346,6 +364,9 @@ func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, kee
 		}
 	}
 	targets := maintLocalTargets(town, home, run, ledger, apply)
+	for name, target := range maintDockerTargets(home, run, ledger) {
+		targets[name] = target
+	}
 	if registryTarget != nil {
 		targets[maintTargetRegistry] = registryTarget
 	}
@@ -373,7 +394,7 @@ func maintRegistryTarget(ctx context.Context, town string, cfg polecatimage.Conf
 		Base:         "http://" + cfg.Registry,
 		Kubeconfig:   filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig"),
 		RecordsDir:   cfg.SandboxRecords,
-		DockerHost:   "unix://" + filepath.Join(home, ".colima", "gt-sbx", "docker.sock"),
+		DockerHost:   maintColimaHost(home),
 		Container:    maintRegistryContainer,
 		Keep:         keep,
 		Installed:    maintInstalled(ctx, run, cfg.GT),
@@ -427,6 +448,40 @@ func maintLocalTargets(town, home string, run diskmaint.Runner, ledger *diskmain
 		Ledger: ledger,
 	})
 	return targets
+}
+
+// maintDockerTargets builds the targets that maintain the sandbox's docker
+// daemons: the kind node images, the colima daemon's dangling images and the CI
+// cache volumes. Each shares the run's ledger. The nodes and civol targets take
+// the container names and limits their packages default to, the same ones the
+// nodeprune command and the CI runner use: civol's container names are
+// unexported there, and TestMaintCivolTargetReadsTheCIContainers pins them
+// through the runner. They carry no dry-run gate of their own: runMaintContext
+// calls Apply only in apply mode, and Plan never does.
+func maintDockerTargets(home string, run diskmaint.Runner, ledger *diskmaint.Ledger) map[string]diskmaint.Target {
+	return map[string]diskmaint.Target{
+		maintTargetNodes: nodes.NewTarget(nodes.Config{
+			Context:    maintNodesContext,
+			NodePrefix: maintNodesPrefix,
+			Run:        run,
+			Ledger:     ledger,
+		}),
+		maintTargetColima: colima.NewTarget(colima.Config{
+			DockerHost: maintColimaHost(home),
+			Run:        run,
+			Ledger:     ledger,
+		}),
+		maintTargetCivol: civol.NewTarget(civol.Config{
+			Run:    run,
+			Ledger: ledger,
+		}),
+	}
+}
+
+// maintColimaHost is the docker socket of the sandbox's colima VM, the one the
+// registry target and the colima target both prune.
+func maintColimaHost(home string) string {
+	return "unix://" + filepath.Join(home, ".colima", "gt-sbx", "docker.sock")
 }
 
 // maintRefusedTarget stands in for a target the town's settings would not let

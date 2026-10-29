@@ -482,9 +482,9 @@ func TestMaintTargetsBuildTheRegistryFromTheTownConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("maintTargets() error = %v", err)
 	}
-	want := []string{maintTargetBaks, maintTargetRegistry, maintTargetSizes, maintTargetWorktree}
+	want := []string{maintTargetBaks, maintTargetCivol, maintTargetColima, maintTargetNodes, maintTargetRegistry, maintTargetSizes, maintTargetWorktree}
 	if got := maintTargetNames(targets); !slices.Equal(got, want) {
-		t.Fatalf("targets = %v, want %v: the registry joins the local targets", got, want)
+		t.Fatalf("targets = %v, want %v: the registry joins the local and docker targets", got, want)
 	}
 	if got := targets[maintTargetRegistry].Name(); got != maintTargetRegistry {
 		t.Errorf("Name() = %q, want %q", got, maintTargetRegistry)
@@ -505,9 +505,96 @@ func TestMaintTargetsWithoutARegistryKeepTheLocalTargets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("maintTargets() error = %v, want the local targets", err)
 	}
-	want := []string{maintTargetBaks, maintTargetSizes, maintTargetWorktree}
+	want := []string{maintTargetBaks, maintTargetCivol, maintTargetColima, maintTargetNodes, maintTargetSizes, maintTargetWorktree}
 	if got := maintTargetNames(targets); !slices.Equal(got, want) {
-		t.Fatalf("targets = %v, want %v: no registry means no registry target, and the local targets still run", got, want)
+		t.Fatalf("targets = %v, want %v: no registry means no registry target, and the local and docker targets still run", got, want)
+	}
+}
+
+func TestMaintColimaTargetPrunesThroughTheSandboxSocket(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	var env []string
+	run := func(_ context.Context, e []string, _ string, _ ...string) ([]byte, error) {
+		env = append(env, e...)
+		return nil, nil
+	}
+	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, maintModePlan, run, home, io.Discard)
+	if err != nil {
+		t.Fatalf("maintTargets() error = %v", err)
+	}
+	if _, err := targets[maintTargetColima].Measure(context.Background()); err != nil {
+		t.Fatalf("Measure() error = %v", err)
+	}
+	want := "DOCKER_HOST=unix://" + filepath.Join(home, ".colima", "gt-sbx", "docker.sock")
+	if !slices.Contains(env, want) {
+		t.Fatalf("docker env = %v, want %q: the colima target reads the sandbox's socket", env, want)
+	}
+}
+
+func TestMaintNodesTargetNamesTheSandboxCluster(t *testing.T) {
+	t.Parallel()
+	runner := &fakeMaintRunner{}
+	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, maintModePlan, runner.run, t.TempDir(), io.Discard)
+	if err != nil {
+		t.Fatalf("maintTargets() error = %v", err)
+	}
+	// The runner lists no nodes, so the plan refuses. The refusal names the
+	// node prefix it looked for, and the docker call names the context.
+	plan, err := targets[maintTargetNodes].Plan(context.Background(), diskmaint.Policy{Keep: 5})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if !strings.Contains(plan.Refused, "gt-sbx-") {
+		t.Errorf("Refused = %q, want the sandbox's node prefix gt-sbx-", plan.Refused)
+	}
+	if len(runner.calls) == 0 || !strings.Contains(strings.Join(runner.calls[0], " "), "colima-gt-sbx") {
+		t.Errorf("docker calls = %v, want one under the colima-gt-sbx context", runner.calls)
+	}
+}
+
+func TestMaintCivolTargetReadsTheCIContainers(t *testing.T) {
+	t.Parallel()
+	// The runner answers false for the inspect, so the plan keeps the CI
+	// daemon as down and plans nothing: the one call shows the container name.
+	runner := &fakeMaintRunner{out: "false\n"}
+	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, maintModePlan, runner.run, t.TempDir(), io.Discard)
+	if err != nil {
+		t.Fatalf("maintTargets() error = %v", err)
+	}
+	if _, err := targets[maintTargetCivol].Plan(context.Background(), diskmaint.Policy{Keep: 5}); err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	want := []string{"docker", "inspect", "-f", "{{.State.Running}}", "forgejo-docker-in-docker-1"}
+	if len(runner.calls) != 1 || !slices.Equal(runner.calls[0], want) {
+		t.Fatalf("calls = %v, want [%s]: the civol target reads the CI daemon's container", runner.calls, strings.Join(want, " "))
+	}
+}
+
+func TestMaintPlanOfCivolPlansOnlyThatTarget(t *testing.T) {
+	t.Parallel()
+	// The CI daemon is down, so the civol plan has nothing to delete: a clean
+	// plan with no refusal, which makes the run's error nil.
+	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{out: "false\n"}).run, t.TempDir(), io.Discard)
+	if err != nil {
+		t.Fatalf("maintTargets() error = %v", err)
+	}
+	deps := maintDeps{
+		Targets: func() (map[string]diskmaint.Target, error) { return targets, nil },
+		Now:     func() time.Time { return maintTestNow },
+		Keep:    5,
+	}
+	var out strings.Builder
+	if err := runMaintContext(context.Background(), &out, deps, maintModePlan, maintTargetCivol); err != nil {
+		t.Fatalf("runMaintContext(civol) error = %v, want a clean plan", err)
+	}
+	for _, other := range []string{maintTargetBaks, maintTargetColima, maintTargetNodes, maintTargetSizes, maintTargetWorktree} {
+		if strings.Contains(out.String(), other+":") {
+			t.Errorf("output = %q, want only the %s target planned", out.String(), maintTargetCivol)
+		}
+	}
+	if !strings.Contains(out.String(), maintTargetCivol+":") {
+		t.Errorf("output = %q, want the %s target planned", out.String(), maintTargetCivol)
 	}
 }
 
@@ -943,9 +1030,18 @@ func TestMaintTargetsRefuseWithoutAHome(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := maintTargets(context.Background(), t.TempDir(), tc.cfg, 5, maintModePlan, (&fakeMaintRunner{}).run, "", io.Discard)
+			town := t.TempDir()
+			targets, err := maintTargets(context.Background(), town, tc.cfg, 5, maintModeApply, (&fakeMaintRunner{}).run, "", io.Discard)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("maintTargets() error = %v, want one naming %q", err, tc.want)
+			}
+			if targets != nil {
+				t.Errorf("targets = %v, want none: a blank HOME builds no docker target", maintTargetNames(targets))
+			}
+			// The ledger directory is made after the HOME check, so a refused
+			// apply leaves nothing behind.
+			if _, statErr := os.Stat(filepath.Join(town, ".runtime", "diskmaint")); !os.IsNotExist(statErr) {
+				t.Errorf("ledger directory stat = %v, want it absent after a refused apply", statErr)
 			}
 		})
 	}
