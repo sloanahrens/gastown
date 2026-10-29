@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
@@ -205,6 +206,13 @@ func reposToRead(catalog []string) []string {
 	return repos
 }
 
+// deletesFrom reports whether the target may delete from repo: RepoMain and the
+// stray repos. It matches by repo name alone, because a pod or record names the
+// registry by host:port and the host is not reliable.
+func deletesFrom(repo string) bool {
+	return repo == RepoMain || slices.Contains(StrayRepos, repo)
+}
+
 // tagNames returns one TagInfo per tag, before any manifest is read.
 func tagNames(repo string, names []string) []TagInfo {
 	tags := make([]TagInfo, len(names))
@@ -264,7 +272,9 @@ func (t *Target) manifestTags(ctx context.Context, repo string, tags []TagInfo) 
 // resolveTags turns the tags running pods name into digests, because a pod's
 // imageID can be a bare config digest that names no manifest. A tag the
 // registry cannot resolve refuses the plan: something is running it, and what
-// it points at cannot be read.
+// it points at cannot be read. A tag of a repo the target cannot delete from is
+// skipped: no delete can hurt it, and the cluster's own images are not ours to
+// resolve.
 func (t *Target) resolveTags(ctx context.Context, tags map[string]bool, into map[string]bool) []string {
 	refs := make([]string, 0, len(tags))
 	for ref := range tags {
@@ -276,6 +286,9 @@ func (t *Target) resolveTags(ctx context.Context, tags map[string]bool, into map
 		// A reference without a colon yields an empty tag, which GetManifest
 		// refuses, so the read fails closed either way.
 		repo, tag, _ := strings.Cut(ref, ":")
+		if !deletesFrom(repo) {
+			continue
+		}
 		m, err := t.client.GetManifest(ctx, repo, tag)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("in use: resolve %s: %v", ref, err))

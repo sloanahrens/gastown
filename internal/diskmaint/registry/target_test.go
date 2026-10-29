@@ -173,6 +173,23 @@ func podUsing(image, imageID string) string {
 		image, image, imageID)
 }
 
+// podsUsing names each image as a container of one pod in a kubectl reply.
+func podsUsing(images ...string) string {
+	containers := make([]string, len(images))
+	for i, image := range images {
+		containers[i] = fmt.Sprintf(`{"image":%q}`, image)
+	}
+	return fmt.Sprintf(`{"items":[{"spec":{"containers":[%s]}}]}`, strings.Join(containers, ","))
+}
+
+// clusterImages are images the kind cluster's own pods run. None lives in the
+// local registry, and the target cannot delete from their repos.
+var clusterImages = []string{
+	"registry.k8s.io/etcd:3.7.0-0",
+	"docker.io/kindest/kindnetd:v20260820-69b56db7",
+	"ghcr.io/nvidia/openshell/gateway:0.1.4",
+}
+
 // planTime is the created time of the nth fixture manifest.
 func planTime(n int) time.Time {
 	return time.Date(2026, 10, 20+n, 9, 0, 0, 0, time.UTC)
@@ -265,6 +282,104 @@ func TestPlanRefusesWhenAnInUseTagCannotBeResolved(t *testing.T) {
 	assertRefused(t, plan)
 	if !strings.Contains(plan.Refused, "c999999") {
 		t.Fatalf("Refused = %q, want it to name the unresolvable tag", plan.Refused)
+	}
+}
+
+func TestPlanIgnoresForeignImageRunningOnTheCluster(t *testing.T) {
+	t.Parallel()
+	dev, c1, c2, c3 := dg("d0"), dg("a1"), dg("a2"), dg("a3")
+	reg := newFakeRegistry(map[string][]TagInfo{RepoMain: {
+		fakeTag(RepoMain, TagDev, dev, planTime(0), 100),
+		fakeTag(RepoMain, "c000001", c1, planTime(1), 200),
+		fakeTag(RepoMain, "c000002", c2, planTime(2), 300),
+		fakeTag(RepoMain, "c000003", c3, planTime(3), 400),
+	}})
+	cfg := testConfig(t, reg)
+	cfg.Run = podRunner(podsUsing(append([]string{"localhost:5001/gastown-polecat:dev"}, clusterImages...)...))
+
+	plan, err := NewTarget(cfg).Plan(context.Background(), diskmaint.Policy{Keep: 1})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Refused != "" {
+		t.Fatalf("plan refused on the cluster's own images: %s", plan.Refused)
+	}
+	if keptRule(plan, RepoMain+":"+TagDev) == "" {
+		t.Fatalf("dev is not kept; the plan must keep the tag")
+	}
+	if slices.Contains(actionRefs(plan), mainRef(dev)) {
+		t.Fatalf("plan deletes dev %s; the tag must stay", mainRef(dev))
+	}
+	for _, path := range reg.requested() {
+		if path != "/v2/_catalog" && !strings.HasPrefix(path, "/v2/"+RepoMain+"/") {
+			t.Fatalf("registry asked about %s; a foreign image must not be read", path)
+		}
+	}
+}
+
+func TestPlanRefusesWhenAnInUseImageDoesNotResolve(t *testing.T) {
+	t.Parallel()
+	dev, c1, c2, c3 := dg("d0"), dg("a1"), dg("a2"), dg("a3")
+	mainTags := []TagInfo{
+		fakeTag(RepoMain, TagDev, dev, planTime(0), 100),
+		fakeTag(RepoMain, "c000001", c1, planTime(1), 200),
+		fakeTag(RepoMain, "c000002", c2, planTime(2), 300),
+		fakeTag(RepoMain, "c000003", c3, planTime(3), 400),
+	}
+	strayTags := []TagInfo{fakeTag("seedtest/polecat", "x1", dg("b1"), planTime(0), 60)}
+	cases := []struct {
+		name, image, tag string
+	}{
+		{name: "main repo", image: "localhost:5001/gastown-polecat:c999999", tag: "c999999"},
+		{name: "stray repo", image: "localhost:5001/seedtest/polecat:x9", tag: "x9"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := newFakeRegistry(map[string][]TagInfo{RepoMain: mainTags, "seedtest/polecat": strayTags})
+			cfg := testConfig(t, reg)
+			cfg.Run = podRunner(podsUsing(append([]string{tc.image}, clusterImages...)...))
+
+			plan, err := NewTarget(cfg).Plan(context.Background(), diskmaint.Policy{Keep: 1})
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			assertRefused(t, plan)
+			if !strings.Contains(plan.Refused, tc.tag) {
+				t.Fatalf("Refused = %q, want it to name the unresolvable tag %s", plan.Refused, tc.tag)
+			}
+		})
+	}
+}
+
+func TestPlanForeignImageRefAddsNothing(t *testing.T) {
+	t.Parallel()
+	dev, c1, c2, c3 := dg("d0"), dg("a1"), dg("a2"), dg("a3")
+	repos := map[string][]TagInfo{RepoMain: {
+		fakeTag(RepoMain, TagDev, dev, planTime(0), 100),
+		fakeTag(RepoMain, "c000001", c1, planTime(1), 200),
+		fakeTag(RepoMain, "c000002", c2, planTime(2), 300),
+		fakeTag(RepoMain, "c000003", c3, planTime(3), 400),
+	}}
+	baseline, err := NewTarget(testConfig(t, newFakeRegistry(repos))).Plan(context.Background(), diskmaint.Policy{Keep: 1})
+	if err != nil {
+		t.Fatalf("baseline Plan: %v", err)
+	}
+
+	reg := newFakeRegistry(repos)
+	cfg := testConfig(t, reg)
+	cfg.Run = podRunner(podUsing("docker.io/library/gastown-polecat:c000002", ""))
+	plan, err := NewTarget(cfg).Plan(context.Background(), diskmaint.Policy{Keep: 1})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if !plansEqual(plan, baseline) {
+		t.Fatalf("plan = %+v, want the plan without the foreign ref = %+v", plan, baseline)
+	}
+	for _, path := range reg.requested() {
+		if strings.Contains(path, "library/") {
+			t.Fatalf("registry asked about %s; a foreign-repo ref must not be resolved", path)
+		}
 	}
 }
 
