@@ -172,10 +172,10 @@ func (r *dashQueueReader) readVerdicts(now time.Time) dashVerdicts {
 		return dashVerdicts{}
 	}
 	l, err := r.verdicts()
-	if err != nil || l == nil {
+	if err != nil {
 		return dashVerdicts{stale: true}
 	}
-	if l.SavedAt.IsZero() {
+	if l == nil || l.SavedAt.IsZero() {
 		return dashVerdicts{}
 	}
 	return dashVerdicts{byBead: l.Verdicts, at: l.SavedAt, stale: now.Sub(l.SavedAt) > dashVerdictTTL}
