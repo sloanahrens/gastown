@@ -24,6 +24,12 @@ type JevSpend struct {
 	TopCaller      string  `json:"top_caller,omitempty"`
 	TopCallerCalls int     `json:"top_caller_calls,omitempty"`
 	TopCallerUSD   float64 `json:"top_caller_usd,omitempty"`
+	// ReadFailed and Stale say the figures are the last good ones rather than
+	// current: the hub sets them on the value it hands the Cost rows, so the row
+	// can say why instead of drawing them as today's. Both are false on the
+	// report the reader parses, so a figure from it reads current.
+	ReadFailed bool `json:"read_failed,omitempty"`
+	Stale      bool `json:"stale,omitempty"`
 }
 
 // ParseJevSpend folds the JSON `gt jev spend --json` prints into the row.
