@@ -614,14 +614,23 @@ func writeBurstProbe(t *testing.T, town string, p hostprobe.Probes) {
 	}
 }
 
-// burstContainerGetenv is the getenv seam of a daemon in container mode: the
-// variable the rendered compose file sets answers, everything else is the empty
-// environment.
+// burstContainerGetenv is the read containerModeFromEnv takes of a daemon in
+// container mode: the variable the rendered compose file sets answers,
+// everything else is the empty environment.
 func burstContainerGetenv(key string) string {
 	if key == config.ContainerModeEnv {
 		return config.SupervisorContainer
 	}
 	return ""
+}
+
+// burstInContainer puts a test's daemon in the town's container. Container mode
+// is settled once on the daemon (New asks the process environment in
+// production), so a test says it here rather than letting the environment the
+// tests run under decide.
+func burstInContainer(d *Daemon) *Daemon {
+	d.containerMode = true
+	return d
 }
 
 // burstTestTownEnv is burstTestEnv plus a daemon log holding a dispatcher
@@ -669,11 +678,10 @@ func TestBurstSamplerReadsTheProbeFileInContainerMode(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	clk := newFixedClock()
-	d := burstTestDaemon(t, town, clk, io.Discard)
+	d := burstInContainer(burstTestDaemon(t, town, clk, io.Discard))
 	writeBurstProbe(t, town, burstProbeFixture(testEpoch))
 	d.burstSeams = burstSamplerSeams{
-		env:    burstTestTownEnv(clk),
-		getenv: burstContainerGetenv,
+		env: burstTestTownEnv(clk),
 	}
 	burstSampleOnce(t, d)
 
@@ -720,11 +728,10 @@ func TestBurstSamplerRecordsTheProbeFilesAge(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	clk := newFixedClock()
-	d := burstTestDaemon(t, town, clk, io.Discard)
+	d := burstInContainer(burstTestDaemon(t, town, clk, io.Discard))
 	writeBurstProbe(t, town, burstProbeFixture(testEpoch.Add(-90*time.Second)))
 	d.burstSeams = burstSamplerSeams{
-		env:    burstTestTownEnv(clk),
-		getenv: burstContainerGetenv,
+		env: burstTestTownEnv(clk),
 	}
 	burstSampleOnce(t, d)
 
@@ -777,11 +784,10 @@ func TestBurstSamplerUnusableProbeFileMarksTheRow(t *testing.T) {
 			town := t.TempDir()
 			clk := newFixedClock()
 			sink := newCensusLogSink()
-			d := burstTestDaemon(t, town, clk, sink)
+			d := burstInContainer(burstTestDaemon(t, town, clk, sink))
 			tt.stage(t, town)
 			d.burstSeams = burstSamplerSeams{
-				env:    burstTestTownEnv(clk),
-				getenv: burstContainerGetenv,
+				env: burstTestTownEnv(clk),
 			}
 			burstSampleOnce(t, d)
 
@@ -872,13 +878,12 @@ func TestBurstSamplerProbeFieldErrorsCostThatFieldOnly(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
 			clk := newFixedClock()
-			d := burstTestDaemon(t, town, clk, io.Discard)
+			d := burstInContainer(burstTestDaemon(t, town, clk, io.Discard))
 			p := burstProbeFixture(testEpoch)
 			tt.stage(&p)
 			writeBurstProbe(t, town, p)
 			d.burstSeams = burstSamplerSeams{
-				env:    burstTestTownEnv(clk),
-				getenv: burstContainerGetenv,
+				env: burstTestTownEnv(clk),
 			}
 			burstSampleOnce(t, d)
 
@@ -939,8 +944,7 @@ func TestBurstSamplerOutsideContainerModeUsesTheHostsCommands(t *testing.T) {
 	d := burstTestDaemon(t, town, clk, io.Discard)
 	writeBurstProbe(t, town, burstProbeFixture(testEpoch))
 	d.burstSeams = burstSamplerSeams{
-		env:    burstTestEnv(clk),
-		getenv: func(string) string { return "" },
+		env: burstTestEnv(clk),
 	}
 	burstSampleOnce(t, d)
 
@@ -963,6 +967,30 @@ func TestBurstSamplerOutsideContainerModeUsesTheHostsCommands(t *testing.T) {
 	}
 }
 
+// TestContainerModeFromEnv pins the one read that decides container mode: the
+// value the rendered compose file sets answers yes, and every other value of
+// the variable, the empty environment included, is the host.
+func TestContainerModeFromEnv(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		getenv func(string) string
+		want   bool
+	}{
+		{name: "the compose file's container", getenv: burstContainerGetenv, want: true},
+		{name: "launchd", getenv: func(string) string { return config.SupervisorLaunchd }, want: false},
+		{name: "an empty environment", getenv: func(string) string { return "" }, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := containerModeFromEnv(tt.getenv); got != tt.want {
+				t.Errorf("containerModeFromEnv = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestBurstSamplerLogsAStaleProbeFileOnce pins the log's dedup over a file that
 // stays stale: the age it reports grows with every sample, and the failure is
 // still one line rather than one per tick.
@@ -971,14 +999,13 @@ func TestBurstSamplerLogsAStaleProbeFileOnce(t *testing.T) {
 	town := t.TempDir()
 	clk := newFixedClock()
 	sink := newCensusLogSink()
-	d := burstTestDaemon(t, town, clk, sink)
+	d := burstInContainer(burstTestDaemon(t, town, clk, sink))
 	writeBurstProbe(t, town, burstProbeFixture(testEpoch.Add(-10*time.Minute)))
 
 	samples := 0
 	third := make(chan struct{})
 	d.burstSeams = burstSamplerSeams{
-		env:    burstTestTownEnv(clk),
-		getenv: burstContainerGetenv,
+		env: burstTestTownEnv(clk),
 		run: func(ctx context.Context, env metrics.Env) (metrics.BurstRow, string, error) {
 			samples++
 			if samples == 3 {
@@ -1014,7 +1041,7 @@ func TestBurstSamplerLogsAProbeFailureAgainAfterRecovery(t *testing.T) {
 	town := t.TempDir()
 	clk := newFixedClock()
 	sink := newCensusLogSink()
-	d := burstTestDaemon(t, town, clk, sink)
+	d := burstInContainer(burstTestDaemon(t, town, clk, sink))
 	writeBurstProbe(t, town, burstProbeFixture(testEpoch.Add(-10*time.Minute)))
 
 	nows := []time.Time{
@@ -1034,7 +1061,6 @@ func TestBurstSamplerLogsAProbeFailureAgainAfterRecovery(t *testing.T) {
 			samples++
 			return env
 		},
-		getenv: burstContainerGetenv,
 		run: func(ctx context.Context, env metrics.Env) (metrics.BurstRow, string, error) {
 			row, path, err := metrics.RunBurst(ctx, env)
 			if samples == len(nows) {

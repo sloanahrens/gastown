@@ -827,6 +827,13 @@ type Daemon struct {
 	burst      *burstSampler
 	burstMu    sync.Mutex
 	burstSeams burstSamplerSeams
+	// containerMode says this daemon runs inside the town's container, where
+	// top and ps read the container's own process tree rather than the host's.
+	// New settles it once from config.ContainerModeEnv (the rendered compose
+	// file sets it); a Daemon a test builds by hand keeps it false, so the
+	// process running the tests cannot change what an existing burst test
+	// samples (burst_sampler.go).
+	containerMode bool
 
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
@@ -1103,6 +1110,10 @@ func New(config *Config) (*Daemon, error) {
 		bdPath:          bdPath,
 		notifier:        newDaemonNotifier(gtPath, config.TownRoot),
 		rigPool:         newRigWorkerPool(0, 0, logger), // defaults: 10 workers, 30s timeout
+		// The container's compose file sets this beside the daemon; asking the
+		// process environment here, in the one constructor production runs,
+		// keeps the burst sampler from reading it (burst_sampler.go).
+		containerMode: containerModeFromEnv(os.Getenv),
 	}
 
 	// A rig whose docked/parked status cannot be read is treated as not

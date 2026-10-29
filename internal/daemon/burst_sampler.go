@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"os"
 	"regexp"
 	"sync/atomic"
 	"time"
@@ -68,6 +67,15 @@ const (
 	burstProbeFileKey      = "probes_file"
 )
 
+// containerModeFromEnv answers whether the process environment puts the daemon
+// in the town's container: the rendered compose file sets
+// config.ContainerModeEnv to config.SupervisorContainer beside it. The read is
+// passed in rather than taken here so the daemon's New and a test ask the same
+// question of their own environment.
+func containerModeFromEnv(getenv func(string) string) bool {
+	return getenv(config.ContainerModeEnv) == config.SupervisorContainer
+}
+
 // burstSamplerSeams replaces the sampler's sample, its wait, its Env and where
 // its host readings come from in tests; the zero value is production.
 type burstSamplerSeams struct {
@@ -81,9 +89,6 @@ type burstSamplerSeams struct {
 	// rather than this process's own commands. nil outside container mode,
 	// where top and ps read the host the daemon runs on.
 	host func(now time.Time) (metrics.BurstHostReading, error)
-	// getenv reads the environment, for the one question that decides whether
-	// the sampler reads a file at all: container mode. nil is os.Getenv.
-	getenv func(key string) string
 }
 
 // burstSampler paces metrics.RunBurst for one town. started keeps the loop
@@ -144,14 +149,17 @@ func (d *Daemon) burstSampler() *burstSampler {
 	if s.seams.wait == nil {
 		s.seams.wait = s.wait
 	}
-	if s.seams.getenv == nil {
-		s.seams.getenv = os.Getenv
-	}
 	// In container mode top and ps read this process's own process table, which
 	// is the container's and not the Mac's, and the health file's exec tax is
 	// measured in that same tree, so none of the three readings describes the
 	// host: the host agent's probe file carries them.
-	if s.seams.host == nil && s.seams.getenv(config.ContainerModeEnv) == config.SupervisorContainer {
+	//
+	// The answer is the daemon's (Daemon.containerMode), settled once in New
+	// from the environment the container sets, and not read here: a test that
+	// builds a daemon by hand is on the host whatever the process running the
+	// tests says, so a gate run inside a container cannot move an existing
+	// burst test onto the file.
+	if s.seams.host == nil && d.containerMode {
 		path := hostprobe.Path(s.town)
 		s.seams.host = func(now time.Time) (metrics.BurstHostReading, error) {
 			return burstHostFromProbeFile(path, now)
