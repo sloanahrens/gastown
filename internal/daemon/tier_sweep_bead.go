@@ -51,13 +51,10 @@ const (
 	// asks for "the slowcheck: finding lines". Such a run writes no FAIL line,
 	// so the stage log the sweep captures names no test for it (gt-j6vlz).
 	//
-	// Nothing after the marker is matched as a shape. slowcheck's source is in
-	// no repo on this host, in no module of the module cache and in no worktree
-	// of this sandbox, so a rule for the rest of the line's spelling could be
-	// checked against no writer, and any line in another spelling would be
-	// dropped — losing the only record a cap trip leaves. The daemon matches
-	// the marker alone, quotes the whole line, and takes a test name only from
-	// the token that follows the marker when that token is a test's name.
+	// Only the marker is matched: slowcheck's source is not on this host, so a
+	// rule for the rest of the line could not be checked against its writer, and
+	// a line in another spelling would be lost. The whole line is quoted, and a
+	// test name is taken only from the token after the marker when it is one.
 	tierSweepSlowcheckPrefix = "slowcheck: "
 
 	// tierSweepFindingLines caps how many findings a bead quotes: the polecat
@@ -403,7 +400,14 @@ func tierSweepUnitSubject(tier, unit string) string {
 // do alone.
 func tierSweepAcceptanceItem(tier, unit string, ts tierSweepTierResult, red tierSweepUnitRed) string {
 	if cmd := tierSweepCheckCommand(tier, unit, red); cmd != "" {
-		return "- [ ] `" + cmd + "` passes on a worktree rebased onto main."
+		item := "- [ ] `" + cmd + "` passes on a worktree rebased onto main."
+		if tier != "shell" {
+			// A -run filter taken from a log line can match no test, and go test
+			// then passes having run nothing; the item says what that output means
+			// so a worker does not tick a box nothing was run for.
+			item += " Output that says `no tests to run` ran nothing: the name matched no test, so say so on this bead instead of ticking this box."
+		}
+		return item
 	}
 	log := strings.TrimSpace(ts.Log)
 	where := ""
@@ -426,7 +430,8 @@ func tierSweepRedDetail(tier, sha string, ts tierSweepTierResult) string {
 // character and a control character (an escape sequence slowcheck echoed from
 // a test's output included) is dropped, so the quoting keeps the finding's
 // printable text instead of losing the line or pasting terminal control into a
-// bead (gt-j6vlz). Dropping a control character leaves no residue: a run of
+// bead (gt-j6vlz). A tab or other whitespace control reads as a space, so it
+// separates words as it did; any other control character is dropped. A run of
 // spaces is collapsed to one, and a cut never ends on a space before the "..."
 // marker, so the quoted line reads as slowcheck's text with nothing of the
 // quoting in it.
@@ -436,8 +441,15 @@ func tierSweepClip(line string, n int) string {
 	cut := false
 	var last rune = -1
 	for _, r := range line {
-		if unicode.IsControl(r) {
-			continue
+		// Whitespace controls separate words, so they read as a space; any
+		// other control character is dropped.
+		switch r {
+		case '\t', '\n', '\r', '\v', '\f':
+			r = ' '
+		default:
+			if unicode.IsControl(r) {
+				continue
+			}
 		}
 		if r == ' ' && last == ' ' {
 			continue
@@ -473,7 +485,7 @@ func tierSweepFindingsBlock(red tierSweepUnitRed) string {
 		findings = findings[:tierSweepFindingLines]
 	}
 	var b strings.Builder
-	b.WriteString("slowcheck's findings for this unit, quoted from its log (each is a wall-time cap trip, not a FAIL line):\n")
+	b.WriteString("slowcheck's findings for this unit, quoted from its log (slowcheck's own lines, not FAIL lines; read each for what it reports):\n")
 	for _, line := range findings {
 		b.WriteString("  " + tierSweepClip(line, tierSweepFindingLineLen) + "\n")
 	}

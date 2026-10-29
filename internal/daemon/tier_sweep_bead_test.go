@@ -886,3 +886,43 @@ func TestTierSweepBead_BoundedReadKeepsNoPartialLine(t *testing.T) {
 		t.Fatalf("failures = %v (tag %q), want none from a read cut mid fail line", red.Names, red.BuildTag)
 	}
 }
+
+// A re-run filter taken from a log line can match no test, and go test then
+// passes having run nothing. The acceptance item for a Go tier says what that
+// output means, so a worker does not tick a box nothing was run for; the shell
+// tier runs a script, where the sentence would mean nothing.
+func TestTierSweepAcceptanceItemSaysAnEmptyRunProvesNothing(t *testing.T) {
+	t.Parallel()
+	red := tierSweepUnitRed{Names: []string{"TestSlow"}}
+	for _, tier := range []string{"integration", "race"} {
+		item := tierSweepAcceptanceItem(tier, "./internal/daemon", tierSweepTierResult{}, red)
+		if !strings.Contains(item, "-run '^(TestSlow)$'") {
+			t.Fatalf("%s item = %q, want the narrow command", tier, item)
+		}
+		if !strings.Contains(item, "no tests to run") || !strings.Contains(item, "instead of ticking this box") {
+			t.Errorf("%s item = %q, want it to say a run of no tests proves nothing", tier, item)
+		}
+	}
+	shell := tierSweepAcceptanceItem("shell", "scripts/example-test.sh", tierSweepTierResult{}, red)
+	if strings.Contains(shell, "no tests to run") {
+		t.Errorf("shell item = %q, want no go test wording for a script", shell)
+	}
+}
+
+// A tab or other whitespace control in a quoted finding separates words as it
+// did, so it reads as a space; any other control character is dropped.
+func TestTierSweepClipReadsWhitespaceControlsAsSpaces(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"a tab", "TestSlow\ttook\t12s", "TestSlow took 12s"},
+		{"a newline and a carriage return", "a\r\nb", "a b"},
+		{"an escape sequence is dropped", "a\x1b[31mb", "a[31mb"},
+		{"a run of mixed whitespace collapses", "a \t \n b", "a b"},
+	} {
+		if got := tierSweepClip(tc.in, 200); got != tc.want {
+			t.Errorf("%s: tierSweepClip(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
