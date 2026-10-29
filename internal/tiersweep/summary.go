@@ -1,0 +1,39 @@
+package tiersweep
+
+import "fmt"
+
+// FormatDuration renders whole seconds the way the daemon logs a duration
+// (time.Duration.String() after Round(time.Second)), so a sweep's line and the
+// daemon's line for the same tier read alike in `gt tail`.
+func FormatDuration(seconds int) string {
+	switch {
+	case seconds >= 3600:
+		return fmt.Sprintf("%dh%dm%ds", seconds/3600, (seconds%3600)/60, seconds%60)
+	case seconds >= 60:
+		return fmt.Sprintf("%dm%ds", seconds/60, seconds%60)
+	}
+	return fmt.Sprintf("%ds", seconds)
+}
+
+// Summary renders one tier's summary line and whether the tier is RED. The
+// line's shape is the daemon's to parse (tierSweepSummaryRE in
+// internal/daemon/tier_sweep.go), so logDir is a parameter: the line names it.
+//
+// A tier with a failure is RED and names its failures when it has names. A
+// tier that counted nothing is RED too, since an empty tier's list broke and
+// GREEN would report nothing as passing (gt-tqxdd). Skips alone are GREEN:
+// TIER_SWEEP_SKIP is deliberate.
+func Summary(tier, logDir string, passed, failed, skipped int, failedNames string, seconds int) (line string, red bool) {
+	verdict, note := "GREEN", ""
+	switch {
+	case failed > 0:
+		verdict, red = "RED", true
+		if failedNames != "" {
+			note = " failed: " + failedNames
+		}
+	case passed+failed+skipped == 0:
+		verdict, red = "RED", true
+	}
+	return fmt.Sprintf("%s: %s %s passed=%d failed=%d skipped=%d%s (logs %s) in %s",
+		Name, tier, verdict, passed, failed, skipped, note, logDir, FormatDuration(seconds)), red
+}
