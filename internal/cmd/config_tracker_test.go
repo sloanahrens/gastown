@@ -42,6 +42,28 @@ func TestConfigSetTrackerPortWritesTheTownEndpoint(t *testing.T) {
 	}
 }
 
+// The port a freshly installed town already carries is the case gt config set
+// must change: the install stamp leaves an existing tracker entry alone, and
+// reusing it here silently wrote nothing (gt-p85pw.77).
+func TestConfigSetTrackerPortOverwritesAnInstalledPort(t *testing.T) {
+	t.Parallel()
+	townRoot := setupTestTownForConfig(t)
+	if err := config.UpdateConfigJSON(filepath.Join(townRoot, "mayor", "town.json"), 0o600, func(town *config.TownConfig, _ bool) error {
+		town.Tracker = &config.TrackerEndpoint{Host: "tracker.internal", Port: config.DefaultTrackerPort}
+		return nil
+	}); err != nil {
+		t.Fatalf("write the installed tracker endpoint: %v", err)
+	}
+
+	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"tracker.port", "8000"}); err != nil {
+		t.Fatalf("config set tracker.port: %v", err)
+	}
+	want := config.TrackerEndpoint{Host: "tracker.internal", Port: 8000}
+	if town := loadTestTown(t, townRoot); town.Tracker == nil || *town.Tracker != want {
+		t.Errorf("town.json tracker = %+v, want %+v", town.Tracker, want)
+	}
+}
+
 func TestConfigSetTrackerHostKeepsThePort(t *testing.T) {
 	t.Parallel()
 	townRoot := setupTestTownForConfig(t)
@@ -64,6 +86,20 @@ func TestConfigSetTrackerHostKeepsThePort(t *testing.T) {
 	}
 	if got := strings.TrimSpace(out.String()); got != "tracker.internal" {
 		t.Errorf("config get tracker.host = %q, want tracker.internal", got)
+	}
+}
+
+// A bare IPv6 literal is a host the resolver brackets when it builds the URL,
+// so gt config set tracker.host takes it as written.
+func TestConfigSetTrackerHostAcceptsABareIPv6Literal(t *testing.T) {
+	t.Parallel()
+	townRoot := setupTestTownForConfig(t)
+
+	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"tracker.host", "::1"}); err != nil {
+		t.Fatalf("config set tracker.host ::1: %v", err)
+	}
+	if town := loadTestTown(t, townRoot); town.Tracker == nil || town.Tracker.Host != "::1" {
+		t.Errorf("town.json tracker = %+v, want host ::1", town.Tracker)
 	}
 }
 
@@ -96,6 +132,10 @@ func TestConfigSetTrackerRefusesBadValues(t *testing.T) {
 		{"port above the range", "tracker.port", "70000", "expected port number"},
 		{"empty host", "tracker.host", " ", "expected a host name"},
 		{"host with a path", "tracker.host", "tracker/internal", "expected a host name"},
+		{"host with a user", "tracker.host", "user@tracker.internal", "expected a host name"},
+		{"host with a query", "tracker.host", "tracker.internal?x=1", "expected a host name"},
+		{"host with a fragment", "tracker.host", "tracker.internal#frag", "expected a host name"},
+		{"host with a bracketed IPv6 literal", "tracker.host", "[::1]", "expected a host name"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

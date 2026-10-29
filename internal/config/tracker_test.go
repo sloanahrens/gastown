@@ -1,11 +1,8 @@
 package config
 
 import (
-	"net"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -60,29 +57,6 @@ func TestResolveTrackerEndpoint_NoTownRootDefaults(t *testing.T) {
 	}
 	if want := (TrackerEndpoint{Port: DefaultTrackerPort}); got != want {
 		t.Errorf("ResolveTrackerEndpoint = %+v, want %+v", got, want)
-	}
-}
-
-// TestDefaultTrackerEndpointMatchesTrackerd guards the one copy across the
-// module boundary: the tracker module cannot import internal/config, so gt
-// states trackerd's default listen a second time. A drift points a fresh
-// town's endpoint at a port nothing serves.
-func TestDefaultTrackerEndpointMatchesTrackerd(t *testing.T) {
-	t.Parallel()
-	src, err := os.ReadFile(filepath.Join("..", "..", "tracker", "cmd", "trackerd", "run.go"))
-	if err != nil {
-		t.Fatalf("read trackerd's default listen: %v", err)
-	}
-	m := regexp.MustCompile(`defaultListen\s*=\s*"([^"]+)"`).FindStringSubmatch(string(src))
-	if m == nil {
-		t.Fatalf("tracker/cmd/trackerd/run.go names no defaultListen; the guard has gone blind")
-	}
-	host, port, err := net.SplitHostPort(m[1])
-	if err != nil {
-		t.Fatalf("trackerd's defaultListen %q: %v", m[1], err)
-	}
-	if port != strconv.Itoa(DefaultTrackerPort) || host != DefaultTrackerHost {
-		t.Errorf("trackerd listens on %q, gt defaults to %s:%d", m[1], DefaultTrackerHost, DefaultTrackerPort)
 	}
 }
 

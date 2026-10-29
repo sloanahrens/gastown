@@ -45,12 +45,17 @@ func ResolveTrackerEndpoint(townRoot string) (TrackerEndpoint, error) {
 	return TrackerEndpoint{Host: strings.TrimSpace(town.Tracker.Host), Port: town.Tracker.Port}, nil
 }
 
+// HostOrLocal is the host the endpoint reaches: the configured host, or the
+// local machine when the town names none.
+func (e TrackerEndpoint) HostOrLocal() string {
+	if host := strings.TrimSpace(e.Host); host != "" {
+		return host
+	}
+	return DefaultTrackerHost
+}
+
 // URL is the endpoint as the tracker client takes it. A host that is not a
 // literal loopback IP passes through as written; the client validates it.
 func (e TrackerEndpoint) URL() string {
-	host := strings.TrimSpace(e.Host)
-	if host == "" {
-		host = DefaultTrackerHost
-	}
-	return "http://" + net.JoinHostPort(host, strconv.Itoa(e.Port))
+	return "http://" + net.JoinHostPort(e.HostOrLocal(), strconv.Itoa(e.Port))
 }

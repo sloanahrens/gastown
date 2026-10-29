@@ -441,29 +441,13 @@ func TestRunInstallEmptyPathArgErrors(t *testing.T) {
 	}
 }
 
-// setInstallFlag sets one of the install command's flags, which is how a real
-// invocation changes them, and restores it when the test ends.
-func setInstallFlag(t *testing.T, name, value string) {
-	t.Helper()
-	if err := installCmd.Flags().Set(name, value); err != nil {
-		t.Fatalf("set --%s=%s: %v", name, value, err)
-	}
-	t.Cleanup(func() {
-		if err := installCmd.Flags().Set(name, "false"); err != nil {
-			t.Errorf("restore --%s: %v", name, err)
-		}
-	})
-}
-
 // A fresh install writes the tracker endpoint into town.json, and a re-install
 // over a town that names its own port keeps it (gt-p85pw.77).
-//
-//testpolicy:allow parallel — runInstall reads the install command's flag variables, which this test sets
 func TestRunInstallWritesTheTrackerEndpoint(t *testing.T) {
+	t.Parallel()
 	hqPath := filepath.Join(t.TempDir(), "hq")
-	setInstallFlag(t, "no-beads", "true")
 
-	if err := runInstall(nil, []string{hqPath}); err != nil {
+	if err := runInstallWith(installOptions{noBeads: true}, []string{hqPath}); err != nil {
 		t.Fatalf("gt install --no-beads: %v", err)
 	}
 	townPath := filepath.Join(hqPath, "mayor", "town.json")
@@ -481,8 +465,7 @@ func TestRunInstallWritesTheTrackerEndpoint(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("write the operator's tracker endpoint: %v", err)
 	}
-	setInstallFlag(t, "force", "true")
-	if err := runInstall(nil, []string{hqPath}); err != nil {
+	if err := runInstallWith(installOptions{noBeads: true, force: true}, []string{hqPath}); err != nil {
 		t.Fatalf("gt install --force: %v", err)
 	}
 	town, err = config.LoadTownConfig(townPath)
@@ -497,9 +480,8 @@ func TestRunInstallWritesTheTrackerEndpoint(t *testing.T) {
 
 // An install that cannot write the tracker endpoint fails rather than
 // reporting an HQ whose endpoint is missing.
-//
-//testpolicy:allow parallel — runInstall reads the install command's flag variables, which this test sets
 func TestRunInstallFailsWhenItCannotWriteTheTrackerEndpoint(t *testing.T) {
+	t.Parallel()
 	hqPath := filepath.Join(t.TempDir(), "hq")
 	townPath := filepath.Join(hqPath, "mayor", "town.json")
 	if err := os.MkdirAll(filepath.Dir(townPath), 0o755); err != nil {
@@ -508,10 +490,8 @@ func TestRunInstallFailsWhenItCannotWriteTheTrackerEndpoint(t *testing.T) {
 	if err := os.WriteFile(townPath, []byte(`{"type":`), 0o600); err != nil {
 		t.Fatalf("write town.json: %v", err)
 	}
-	setInstallFlag(t, "no-beads", "true")
-	setInstallFlag(t, "force", "true")
 
-	err := runInstall(nil, []string{hqPath})
+	err := runInstallWith(installOptions{noBeads: true, force: true}, []string{hqPath})
 	if err == nil || !strings.Contains(err.Error(), "tracker endpoint") {
 		t.Fatalf("runInstall over a torn town.json = %v, want it to name the tracker endpoint", err)
 	}

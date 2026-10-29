@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -875,6 +876,29 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	return configSet(cwdConfigCmdEnv(), args)
 }
 
+// validTrackerHost reports whether host is a host name or IP literal the
+// tracker endpoint URL can carry. The resolver composes http://<host>:<port>
+// from it, so a value that would end the URL's authority early — a user, a
+// path, a query, a fragment, whitespace — is refused. An IPv6 literal goes in
+// bare ("::1"); the resolver brackets it when it builds the URL.
+func validTrackerHost(host string) bool {
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if host == "" {
+		return false
+	}
+	for _, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func configSet(e configCmdEnv, args []string) error {
 	key := args[0]
 	value := args[1]
@@ -989,7 +1013,7 @@ func configSet(e configCmdEnv, args []string) error {
 		if err != nil || port < 1024 || port > 65535 {
 			return fmt.Errorf("invalid value for %s: expected port number 1024-65535", key)
 		}
-		if err := stampTownTrackerPort(filepath.Join(townRoot, workspace.PrimaryMarker), port); err != nil {
+		if err := setTownTrackerPort(filepath.Join(townRoot, workspace.PrimaryMarker), port); err != nil {
 			return fmt.Errorf("saving town.json: %w", err)
 		}
 		fmt.Fprintf(e.out, "Set tracker.port = %s in mayor/town.json\n", style.Bold.Render(value))
@@ -998,10 +1022,10 @@ func configSet(e configCmdEnv, args []string) error {
 
 	case "tracker.host":
 		host := strings.TrimSpace(value)
-		if host == "" || strings.ContainsAny(host, " \t/") {
+		if !validTrackerHost(host) {
 			return fmt.Errorf("invalid value for %s: expected a host name or IP address", key)
 		}
-		if err := stampTownTrackerHost(filepath.Join(townRoot, workspace.PrimaryMarker), host); err != nil {
+		if err := setTownTrackerHost(filepath.Join(townRoot, workspace.PrimaryMarker), host); err != nil {
 			return fmt.Errorf("saving town.json: %w", err)
 		}
 		fmt.Fprintf(e.out, "Set tracker.host = %s in mayor/town.json\n", style.Bold.Render(host))
@@ -1111,11 +1135,7 @@ func configGet(e configCmdEnv, args []string) error {
 			fmt.Fprintln(e.out, ep.Port)
 			return nil
 		}
-		host := ep.Host
-		if host == "" {
-			host = config.DefaultTrackerHost
-		}
-		fmt.Fprintln(e.out, host)
+		fmt.Fprintln(e.out, ep.HostOrLocal())
 		return nil
 
 	default:
