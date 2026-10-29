@@ -62,6 +62,14 @@ func buildEnv(environ []string) []string {
 	return append(env, "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED="+cgo, "GOENV=off")
 }
 
+// Env is the environment a cross-compile of the image's binaries runs with,
+// built from environ the way Compile builds bd's: the same host variables, the
+// same drops, and GOENV=off. A nil environ reads the host's. The daemon image
+// builds gt and om with it too, so every image binary is compiled the same way.
+func Env(environ []string) []string {
+	return buildEnv(environ)
+}
+
 // Git runs git with args in dir and returns its standard output; a directory
 // that is not a git checkout fails the way git does.
 type Git func(dir string, args ...string) ([]byte, error)
