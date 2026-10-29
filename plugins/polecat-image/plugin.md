@@ -27,7 +27,8 @@ plugin every sandbox sling would be refused until someone rebuilt the image by
 hand.
 
 `rebuild_gt` installs at most once per 30 minutes, so this plugin builds at most
-about 48 times a day.
+about 48 times a day; a build is three cross-compiles and a `docker build`, about
+a minute.
 
 `make install` (`cmd/gt-installer`) runs this plugin itself: by default it
 builds the image before it swaps the binary and fails the install if the build
@@ -79,8 +80,10 @@ reads it and `POLECAT_IMAGE_CRANE` from daemon.env in the town's
 unset (gt-du3fi). Naming neither publishes nothing; an unreadable config fails
 the run.
 
-- **Name.** A `POLECAT_IMAGE_REGISTRY` that is a path is refused with a log line
-  naming `POLECAT_IMAGE_SANDBOX_RECORDS`.
+- **Name change.** `POLECAT_IMAGE_REGISTRY` once named the gateway's
+  sandbox-records directory; that is `POLECAT_IMAGE_SANDBOX_RECORDS` now. A
+  `POLECAT_IMAGE_REGISTRY` that is a path is refused with a log line naming the
+  new variable.
 - **Why `crane`.** Docker Desktop's list of insecure registries belongs to the
   overseer, so the plugin pushes with `crane` from a `docker save` tarball and
   tags the image locally with the registry reference, which is what the sandbox
@@ -125,8 +128,8 @@ rest of the run carries on.
 ## Build cache
 
 Each rebuild also leaves its layers in Docker's build cache (apt, the Go
-toolchain, golangci-lint, the gt and bd compiles), which nothing trimmed
-(gt-atxdz). After the image prune the plugin runs
+toolchain, golangci-lint, the gt and bd compiles): a day of installs made it 20
+GB with nothing in use (gt-atxdz). After the image prune the plugin runs
 `docker builder prune --keep-storage 8GB -f` (`POLECAT_IMAGE_BUILDER_KEEP`):
 LRU, so the most recently used layers stay and the next rebuild is warm. It runs
 that command and no wider prune (never a system, image, volume or `--all`
@@ -139,7 +142,8 @@ the run.
 ## Per-rig cache volumes
 
 Every sandbox of a rig mounts that rig's `gt-cache-<rig>` volume at
-`/sandbox/.cache`, and nothing trimmed it (gt-3g7p2). After the build cache trim
+`/sandbox/.cache`, and nothing trimmed it: `gt-cache-gastown` reached 27.7 GB on
+2026-10-24, growing about 3 GB an hour (gt-3g7p2). After the build cache trim
 the plugin brings each `gt-cache-<rig>` volume back under `POLECAT_CACHE_CAP`
 (default 10GB; a K, M, G, T or P suffix, so `512M` works):
 

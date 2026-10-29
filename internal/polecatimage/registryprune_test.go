@@ -375,6 +375,30 @@ func TestPruneRegistryReadsTheInstalledCommitFromGTVersion(t *testing.T) {
 		}
 		tr.wantLogged(t, "the installed commit is unknown (gt version reported none)")
 	})
+
+	t.Run("a gt version that exits nonzero refuses the plan", func(t *testing.T) {
+		t.Parallel()
+		reg := newFakeRegistry(tags...)
+		tr := newRegistryRun(t, reg, tagName(2))
+		tr.Cfg.RegistryPrune = registryPruneApply
+		answer := tr.reply
+		tr.reply = func(c command) result {
+			if c.name == "gt" {
+				return result{exit: 1, stderr: "gt: panic: secret\n"}
+			}
+			return answer(c)
+		}
+
+		tr.PruneRegistry()
+
+		if got := reg.deleted(); len(got) != 0 {
+			t.Fatalf("deleted %v with a failing gt version, want nothing", got)
+		}
+		tr.wantLogged(t, "installed: gt version exited 1")
+		if strings.Contains(tr.output(), "secret") {
+			t.Fatal("the refusal echoed gt version's stderr")
+		}
+	})
 }
 
 // TestPruneRegistryRefusesWhatItCannotRead is the fail-closed half: an in-use
@@ -553,13 +577,16 @@ func TestRegistryRunnerSkipsACancelledCommand(t *testing.T) {
 	}
 }
 
-// TestPruneRegistryBoundsEveryCommandWithTheBudget: every command the retention
-// runs carries a deadline, so none can hold the plugin lock past the budget.
+// TestPruneRegistryBoundsEveryCommandWithTheBudget: every command an apply runs
+// carries a deadline, so none can hold the plugin lock past the budget. docker
+// is the one exception, as its own test pins: once garbage collect starts, it
+// is not cut short.
 func TestPruneRegistryBoundsEveryCommandWithTheBudget(t *testing.T) {
 	t.Parallel()
-	reg := newFakeRegistry(devTag(), registryTagAt(1))
-	tr := newRegistryRun(t, reg, tagName(1))
-	tr.Cfg.RegistryPrune = registryPruneDryRun
+	reg := newFakeRegistry(devTag(),
+		registryTagAt(1), registryTagAt(2), registryTagAt(3))
+	tr := newRegistryRun(t, reg, tagName(3))
+	tr.Cfg.RegistryPrune = registryPruneApply
 
 	tr.PruneRegistry()
 
@@ -567,12 +594,102 @@ func TestPruneRegistryBoundsEveryCommandWithTheBudget(t *testing.T) {
 		t.Fatal("the retention ran no command, want the installed-commit and in-use reads")
 	}
 	for _, c := range tr.calls {
+		if c.name == "docker" {
+			continue
+		}
 		if c.ctx == nil {
 			t.Fatalf("%s ran with no context, so no budget bounds it", c.name)
 		}
 		if _, ok := c.ctx.Deadline(); !ok {
 			t.Fatalf("%s ran with a context that has no deadline", c.name)
 		}
+	}
+}
+
+// cancellableBudget is a retention budget the test ends by hand, so the budget
+// expires at a point the test chooses rather than on a clock. cancel is set by
+// the budget when the retention starts.
+type cancellableBudget struct {
+	cancel context.CancelFunc
+}
+
+func (b *cancellableBudget) start() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	b.cancel = cancel
+	return ctx, cancel
+}
+
+// TestPruneRegistryBudgetEndingBeforeCollectSkipsIt: a budget spent on the
+// deletes leaves no collect to start, so nothing runs beside a push that got in
+// once the lock is gone.
+func TestPruneRegistryBudgetEndingBeforeCollectSkipsIt(t *testing.T) {
+	t.Parallel()
+	reg := newFakeRegistry(devTag(),
+		registryTagAt(1), registryTagAt(2), registryTagAt(3))
+	tr := newRegistryRun(t, reg, tagName(3))
+	tr.Cfg.RegistryPrune = registryPruneApply
+	budget := &cancellableBudget{}
+	tr.budget = budget.start
+	// The first delete spends the budget, so the collect that follows starts
+	// with it already gone.
+	tr.web = &http.Client{Transport: roundTrip(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			budget.cancel()
+		}
+		reg.handler(w, r)
+	})}
+
+	tr.PruneRegistry()
+
+	if calls := tr.callsTo("docker"); len(calls) != 0 {
+		t.Fatalf("garbage collect started after the budget ended: %v", callLines(tr, "docker"))
+	}
+	entries, err := diskmaint.NewLedger(tr.Cfg.RegistryLedger, registryLedgerMax).Tail(1)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("read the ledger: %v (%d entries)", err, len(entries))
+	}
+	if !slices.ContainsFunc(entries[0].Errors, func(e string) bool { return strings.Contains(e, "collect:") }) {
+		t.Fatalf("ledger errors %v, want the skipped collect named", entries[0].Errors)
+	}
+}
+
+// TestPruneRegistryBudgetEndingDuringCollectDoesNotCutItShort: a budget that
+// ends while garbage collect runs must not end the collect. The docker client
+// would die and the in-container collect would keep running after the lock is
+// released, so the run waits for the collect to finish.
+func TestPruneRegistryBudgetEndingDuringCollectDoesNotCutItShort(t *testing.T) {
+	t.Parallel()
+	reg := newFakeRegistry(devTag(),
+		registryTagAt(1), registryTagAt(2), registryTagAt(3))
+	tr := newRegistryRun(t, reg, tagName(3))
+	tr.Cfg.RegistryPrune = registryPruneApply
+	budget := &cancellableBudget{}
+	tr.budget = budget.start
+	answer := tr.reply
+	var collectCtxErr error
+	tr.reply = func(c command) result {
+		if c.name == "docker" {
+			budget.cancel()
+			collectCtxErr = c.ctx.Err()
+			return result{}
+		}
+		return answer(c)
+	}
+
+	tr.PruneRegistry()
+
+	if len(tr.callsTo("docker")) != 1 {
+		t.Fatalf("docker ran %d time(s), want the one garbage collect", len(tr.callsTo("docker")))
+	}
+	if collectCtxErr != nil {
+		t.Fatalf("the budget ending cancelled garbage collect: %v", collectCtxErr)
+	}
+	entries, err := diskmaint.NewLedger(tr.Cfg.RegistryLedger, registryLedgerMax).Tail(1)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("read the ledger: %v (%d entries)", err, len(entries))
+	}
+	if len(entries[0].Errors) != 0 {
+		t.Fatalf("ledger errors %v, want the collect to have run clean", entries[0].Errors)
 	}
 }
 
@@ -651,7 +768,7 @@ func TestRegistryPushInFlightFailsClosed(t *testing.T) {
 			tr := newTestRun(t)
 			tr.reply = func(command) result { return result{exit: tc.exit} }
 
-			if got := tr.registryPushInFlight(); got != tc.want {
+			if got := tr.registryPushInFlight(context.Background()); got != tc.want {
 				t.Fatalf("registryPushInFlight() = %v at pgrep status %d, want %v", got, tc.exit, tc.want)
 			}
 			if c := tr.calls[0]; c.name != tr.Cfg.Pgrep || !strings.Contains(strings.Join(c.args, " "), "crane push") {

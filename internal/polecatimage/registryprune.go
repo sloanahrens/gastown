@@ -86,7 +86,7 @@ func (r *Run) PruneRegistry() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), registryPruneBudget)
+	ctx, cancel := r.pruneContext()
 	defer cancel()
 	target := r.registryTarget(ctx, keep)
 	plan, err := target.Plan(ctx, diskmaint.Policy{Keep: keep, Now: r.clock()})
@@ -122,6 +122,15 @@ func (r *Run) PruneRegistry() {
 	r.logRegistryApply(plan, result, err, ledger)
 }
 
+// pruneContext starts the retention's budget: the context every command and
+// request of the retention runs under.
+func (r *Run) pruneContext() (context.Context, context.CancelFunc) {
+	if r.budget != nil {
+		return r.budget()
+	}
+	return context.WithTimeout(context.Background(), registryPruneBudget)
+}
+
 // registryTarget is the registry retention target this run prunes through.
 //
 // The run holds the plugin lock, so the target applies directly instead of
@@ -136,28 +145,32 @@ func (r *Run) registryTarget(ctx context.Context, keep int) *registry.Target {
 		Container:    registryContainer,
 		Keep:         keep,
 		Installed:    func() (string, error) { return r.registryInstalledCommit(ctx) },
-		PushInFlight: r.registryPushInFlight,
+		PushInFlight: func() bool { return r.registryPushInFlight(ctx) },
 		Run:          r.registryRunner(),
 		HTTP:         r.webClient(),
 		Ledger:       diskmaint.NewLedger(r.Cfg.RegistryLedger, registryLedgerMax),
 	})
 }
 
-// registryPushInFlight reports whether a crane push is running on this host.
-// pgrep exits 1 when nothing matches; 0 is a match, and any other status is a
-// probe that did not answer. The last two both report true, so garbage collect
-// refuses rather than reading an unanswered probe as "no push".
-func (r *Run) registryPushInFlight() bool {
-	match := r.call(r.Cfg.Pgrep, "-f", registryPushPattern)
+// registryPushInFlight reports whether a crane push is running on this host,
+// under the retention's budget. pgrep exits 1 when nothing matches; 0 is a
+// match, and any other status is a probe that did not answer. The last two both
+// report true, so garbage collect refuses rather than reading an unanswered
+// probe as "no push".
+func (r *Run) registryPushInFlight(ctx context.Context) bool {
+	match := r.runner()(command{name: r.Cfg.Pgrep, args: []string{"-f", registryPushPattern}, ctx: ctx})
 	return match.exit != 1
 }
 
 // registryInstalledCommit is the commit the installed gt reports, read like
-// InstalledCommit but within the retention's budget. An empty commit, which is
-// what an unreadable gt version gives, makes the planner refuse, so no tag is
-// deleted on a guess.
+// InstalledCommit but within the retention's budget. A gt version that exits
+// nonzero is an error, which the planner refuses on, so no tag is deleted on a
+// guess.
 func (r *Run) registryInstalledCommit(ctx context.Context) (string, error) {
 	res := r.runner()(command{name: r.Cfg.GT, args: []string{"version"}, ctx: ctx})
+	if res.failed() {
+		return "", fmt.Errorf("%s version exited %d", r.Cfg.GT, res.exit)
+	}
 	return commitOfVersion(res.output()), nil
 }
 
@@ -167,6 +180,11 @@ func (r *Run) registryInstalledCommit(ctx context.Context) (string, error) {
 // retention's budget into each command, so a command that hangs is ended with
 // the budget.
 //
+// docker is the exception once it has started. Garbage collect runs inside the
+// registry container, and killing the docker client leaves that collect running
+// after the plugin lock is released, where it can race a push. So docker is not
+// cancelled: the budget gates whether it starts, and the run waits for it.
+//
 // An environment entry with a value is carried to the command. An entry with an
 // empty value sets nothing, so it is dropped and the command inherits this
 // process's value for that variable.
@@ -175,9 +193,15 @@ func (r *Run) registryRunner() diskmaint.Runner {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		res := r.runner()(command{name: name, args: args, env: setEntries(env), ctx: ctx})
+		run := ctx
+		if name == "docker" {
+			run = context.WithoutCancel(ctx)
+		}
+		res := r.runner()(command{name: name, args: args, env: setEntries(env), ctx: run})
 		if res.failed() {
-			return nil, fmt.Errorf("%s exited %d: %s", name, res.exit, lastLine(res.stderr))
+			// The error names the command and its status and never its output,
+			// which can hold a secret.
+			return nil, fmt.Errorf("%s exited %d", name, res.exit)
 		}
 		return []byte(res.output()), nil
 	}

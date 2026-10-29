@@ -113,6 +113,9 @@ type Run struct {
 	// web answers the registry retention's HTTP calls; nil means a client with
 	// a request timeout.
 	web *http.Client
+	// budget starts the registry retention's deadline; nil means one that ends
+	// after registryPruneBudget.
+	budget func() (context.Context, context.CancelFunc)
 }
 
 // command is one program invocation: its working directory, program and
