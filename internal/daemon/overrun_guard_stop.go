@@ -561,12 +561,9 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		if err != nil {
 			return false, fmt.Errorf("read bead %s: %w", seat.Bead, err)
 		}
-		if status == "closed" || status == "tombstone" {
-			return false, nil
-		}
 		// An empty assignee is the half-released bead this stop already began
 		// handing back, and it is finished like one the seat still holds.
-		return assignee == "" || assignee == seat.Polecat, nil
+		return overrunSeatOwnsBead(seat, status, assignee), nil
 	}
 	s.endRun = func(seat overrunSeat, at time.Time) error {
 		// The town's event log is the clock both the guard and the dashboard
@@ -590,6 +587,21 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		return err
 	}
 	return s
+}
+
+// overrunSeatAssignee is the assignee bd stores for a bead the seat holds.
+func overrunSeatAssignee(seat overrunSeat) string {
+	return seat.Rig + "/polecats/" + seat.Polecat
+}
+
+// overrunSeatOwnsBead reports whether a bead in this status and assignee is
+// still the seat's to end: a closed or tombstoned bead is not, and an
+// unassigned bead or one assigned to the seat is.
+func overrunSeatOwnsBead(seat overrunSeat, status, assignee string) bool {
+	if status == "closed" || status == "tombstone" {
+		return false
+	}
+	return assignee == "" || assignee == overrunSeatAssignee(seat)
 }
 
 // overrunPushBranch pushes the seat's kept branch to origin at the commit the
