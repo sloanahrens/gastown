@@ -479,6 +479,16 @@ func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) 
 		return 0, fmt.Errorf("creating dir %s: %w", dbDir, err)
 	}
 
+	// A rig whose route names the tracker is read through the tracker's export
+	// route, never from the Dolt database it left behind (jsonl_tracker_export.go).
+	rigs, err := d.jsonlTrackerRigs()
+	if err != nil {
+		return 0, err
+	}
+	if rig, ok := rigs[db]; ok {
+		return d.exportTrackerDatabaseToJsonl(rig, db, dbDir)
+	}
+
 	total := 0
 
 	exportTable := d.exportTableToJsonl

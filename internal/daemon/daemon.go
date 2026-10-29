@@ -310,6 +310,12 @@ type Daemon struct {
 	// been given, the shared supplemental bound included.
 	jsonlTableExportFn func(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error)
 
+	// jsonlTrackerExportFn replaces the tracker client behind the JSONL
+	// backup's tracker branch in tests, so a tracker rig's export is driven
+	// with records a test wrote; nil is the client built from the environment
+	// (jsonl_tracker_export.go).
+	jsonlTrackerExportFn trackerRigExporter
+
 	// dogFeedFn records a dog cycle's failed outcome in the town feed. Nil
 	// writes the real feed; tests capture the event instead.
 	dogFeedFn func(eventType string, payload map[string]interface{}) error
