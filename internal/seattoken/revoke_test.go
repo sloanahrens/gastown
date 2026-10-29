@@ -264,10 +264,11 @@ func TestTrackerRevokerReportsARefusal(t *testing.T) {
 }
 
 // A tracker rig whose town has no admin credential fails the revoke, naming
-// the seat rather than reading as a seat with nothing to revoke. The home
-// directory is the test's own, so no ambient config can supply a credential.
+// the seat rather than reading as a seat with nothing to revoke. The town is a
+// fresh directory with no daemon env file, so the credential can only come from
+// the town the test built.
 func TestRevokeSeatReportsAMissingAdminCredential(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	t.Parallel()
 	town := t.TempDir()
 	writeRouteTable(t, town, trackerRoute)
 
