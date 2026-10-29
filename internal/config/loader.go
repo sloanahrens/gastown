@@ -941,7 +941,9 @@ func RigSettingsPath(rigPath string) string {
 	return filepath.Join(rigPath, "settings", "config.json")
 }
 
-// LoadOrCreateTownSettings loads town settings or creates defaults if missing.
+// LoadOrCreateTownSettings reads town settings and never writes the file: an
+// absent file returns NewTownSettings(), a broken one a *ParseError, and one
+// holding a retired key an error naming the migration.
 func LoadOrCreateTownSettings(path string) (*TownSettings, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally
 	if err != nil {
