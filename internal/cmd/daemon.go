@@ -586,35 +586,55 @@ func runDaemonClearBackoff(cmd *cobra.Command, args []string) error {
 	}
 
 	// Signal the daemon to reload its in-memory restart tracker
-	running, pid, err := daemon.IsRunning(townRoot)
+	return clearBackoffReload(cmd.OutOrStdout(), agentID, daemonReloadDeps{
+		isRunning:   func() (bool, int, error) { return daemon.IsRunning(townRoot) },
+		findProcess: os.FindProcess,
+		signal:      signalDaemonReload,
+	})
+}
+
+// daemonReloadDeps is how clear-backoff reads and signals the daemon, so a test
+// can drive the pid gate with a fake. Every field must be set.
+type daemonReloadDeps struct {
+	isRunning   func() (bool, int, error)
+	findProcess func(pid int) (*os.Process, error)
+	signal      func(process *os.Process) error
+}
+
+// clearBackoffReload tells a running daemon that the backoff state it holds in
+// memory is stale, and prints what happened. It takes its daemon calls as deps
+// so the pid gate around the signal can be driven by a test with a fake daemon.
+func clearBackoffReload(w io.Writer, agentID string, deps daemonReloadDeps) error {
+	running, pid, err := deps.isRunning()
 	if err != nil {
 		return fmt.Errorf("checking daemon status: %w", err)
 	}
 	reload, note := daemonReloadPlan(running, pid)
 	if reload {
-		process, err := os.FindProcess(pid)
+		process, err := deps.findProcess(pid)
 		if err != nil {
 			return fmt.Errorf("finding daemon process: %w", err)
 		}
-		if err := signalDaemonReload(process); err != nil {
+		if err := deps.signal(process); err != nil {
 			return fmt.Errorf("signaling daemon to reload: %w", err)
 		}
 	}
-	fmt.Printf("%s Cleared backoff for %s (%s)\n", style.Bold.Render("✓"), agentID, note)
-
+	fmt.Fprintf(w, "%s Cleared backoff for %s (%s)\n", style.Bold.Render("✓"), agentID, note)
 	return nil
 }
 
 // daemonReloadPlan decides whether clear-backoff signals the daemon to reload
-// and what the success line says. A container daemon reports pid 0, which
-// belongs to the container's namespace and which os.Process.Signal refuses, so
-// it is never signaled.
+// and what the success line says. A running daemon can report no pid to signal:
+// a container town's daemon lives in another namespace, and a host town whose
+// pid file cannot be read has a lock holder and no process id. Neither pid-below
+// -one value may reach os.Process.Signal, where 0 names this process group, so
+// both skip the signal and the note names only what the pid tells us.
 func daemonReloadPlan(running bool, pid int) (reload bool, note string) {
 	switch {
 	case !running:
 		return false, "daemon not running, will take effect on next start"
 	case pid <= 0:
-		return false, "daemon runs in a container and was not signaled; the change takes effect when the container restarts"
+		return false, "daemon reported no pid to signal; the change takes effect when the daemon restarts"
 	default:
 		return true, "daemon reloaded"
 	}
