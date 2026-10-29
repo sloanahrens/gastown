@@ -264,29 +264,40 @@ func backoff(n int) time.Duration {
 }
 
 func (c *Client) once(parent context.Context, method, path string, body []byte, out any) error {
-	ctx, cancel := context.WithTimeout(parent, c.timeout)
-	defer cancel()
-	resp, err := c.send(ctx, parent, method, path, body)
+	status, data, err := c.exchange(parent, method, path, body)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return api.Unavailable("tracker response unreadable: %v", urlErrorOnly(err))
-	}
-	if resp.StatusCode/100 == 2 {
+	if status/100 == 2 {
 		if out == nil {
 			return nil
 		}
 		if err := json.Unmarshal(data, out); err != nil {
 			// The server answered success, so the call may have been applied:
 			// this is a protocol error, never a retryable "unavailable".
-			return fmt.Errorf("client: tracker answered %d with a body that is not the expected JSON", resp.StatusCode)
+			return fmt.Errorf("client: tracker answered %d with a body that is not the expected JSON", status)
 		}
 		return nil
 	}
-	return c.decodeError(resp.StatusCode, data)
+	return c.decodeError(status, data)
+}
+
+// exchange makes one attempt bounded by the client's timeout and returns the
+// answer's status and body. A transport failure is the error; any answer,
+// success or not, is returned for the caller to judge.
+func (c *Client) exchange(parent context.Context, method, path string, body []byte) (int, []byte, error) {
+	ctx, cancel := context.WithTimeout(parent, c.timeout)
+	defer cancel()
+	resp, err := c.send(ctx, parent, method, path, body)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return 0, nil, api.Unavailable("tracker response unreadable: %v", urlErrorOnly(err))
+	}
+	return resp.StatusCode, data, nil
 }
 
 // send makes one request, bounded by ctx. parent is the caller's context: when

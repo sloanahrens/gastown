@@ -1,0 +1,7 @@
+Tracker    https://tracker.test:7433
+Ready      yes (schema level 4)
+Rigs
+  gt  issues 120 (closed 100, in_progress 2, open 18)  wisps 45
+  ag  issues 8 (open 8)                                wisps 3
+Requests   46 since start
+Slowest    at most 0.25 s on GET /v1/stats
