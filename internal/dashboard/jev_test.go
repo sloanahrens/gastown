@@ -14,6 +14,29 @@ import (
 const jevReport = `{"calls":14,"input_tokens":900,"output_tokens":100,"usd":1.75,"lines_skipped":0,
  "by_caller":{"deacon":{"calls":4,"usd":0.25},"overseer":{"calls":10,"usd":1.5}}}`
 
+// The Jev row's marks are the hub's, set on the copy the rows are built from: a
+// report can neither set them nor find them on the state's JSON.
+func TestJevSpendMarksAreNeverSentOrRead(t *testing.T) {
+	t.Parallel()
+
+	out, err := json.Marshal(JevSpend{Calls: 1, USD: 2, ReadFailed: true, Stale: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"read_failed", "stale"} {
+		if strings.Contains(string(out), key) {
+			t.Errorf("the marks are sent as %q: %s", key, out)
+		}
+	}
+	var got JevSpend
+	if err := json.Unmarshal([]byte(`{"calls":1,"usd":2,"read_failed":true,"stale":true}`), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ReadFailed || got.Stale {
+		t.Errorf("a report sets the marks: %+v", got)
+	}
+}
+
 func TestParseJevSpendKeepsTheCallsDollarsAndTopCaller(t *testing.T) {
 	t.Parallel()
 

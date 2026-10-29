@@ -557,6 +557,130 @@ func TestCostProvidersJevRow(t *testing.T) {
 	}
 }
 
+// The Cost rows are kept between snapshots: a State() with no cost input moved
+// hands back the rows already built, and a spend read rebuilds them once.
+func TestCostProviderRowsAreKeptUntilACostInputChanges(t *testing.T) {
+	t.Parallel()
+
+	now := costProvidersNow
+	raw := deepSeekFixture(t, 9)
+	h := NewHub(Config{
+		Now:      func() time.Time { return now },
+		Spend:    func() json.RawMessage { return raw },
+		JevSpend: func() *JevSpend { return &JevSpend{Calls: 1, USD: 1} },
+	})
+	built := 0
+	h.costProviders = []costProviderBuilder{
+		func(time.Time, json.RawMessage, *ClaudePlan, *CostCharts, *JevSpend) CostProvider {
+			built++
+			return CostProvider{ID: "counted"}
+		},
+	}
+
+	h.State()
+	kept := built
+	h.State()
+	h.State()
+	if built != kept {
+		t.Errorf("State() rebuilt the Cost rows %d times with no cost input moved, want 0", built-kept)
+	}
+
+	h.pollSpend()
+	if built == kept {
+		t.Fatalf("a spend read did not rebuild the Cost rows")
+	}
+	kept = built
+	h.State()
+	if built != kept {
+		t.Errorf("State() after the spend read rebuilt the Cost rows %d times, want 0", built-kept)
+	}
+
+	h.pollJevSpend()
+	if built == kept {
+		t.Errorf("a Jev read did not rebuild the Cost rows")
+	}
+}
+
+// The Claude row's reason for an unread plan reads the clock: the age of the
+// newest sample, and whether its week has reset. A State() that moves only the
+// clock must redraw it through the kept rows.
+func TestCostProviderRowsFollowTheClockForAnUnreadClaudePlan(t *testing.T) {
+	t.Parallel()
+
+	now := costProvidersNow
+	plan, _ := claudeFixture()
+	plan.Stale = true
+	plan.SampledAt = costProvidersNow.Add(-40 * time.Minute).Unix()
+	plan.WeeklyResetsAt = costProvidersNow.Add(time.Hour).Unix()
+	h := NewHub(Config{
+		Now:        func() time.Time { return now },
+		ClaudePlan: func() *ClaudePlan { return plan },
+	})
+	h.pollClaudePlan()
+
+	for _, tc := range []struct {
+		name  string
+		clock time.Duration
+		want  string
+	}{
+		{name: "the age as read", want: "the newest sample is 40m old"},
+		{name: "the age a minute later", clock: time.Minute, want: "the newest sample is 41m old"},
+		{name: "the week reset as the clock passes it", clock: time.Hour, want: "the week the newest sample measures has already reset"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now = costProvidersNow.Add(tc.clock)
+			if p := costProviderRow(t, h.State().CostProviders, costProviderClaude); p.Why != tc.want {
+				t.Errorf("claude why = %q, want %q", p.Why, tc.want)
+			}
+		})
+	}
+}
+
+// A State() hands its caller its own copy of the Cost rows, so editing one
+// snapshot cannot change the rows the next one is given.
+func TestCostProviderRowsAreCopiedPerSnapshot(t *testing.T) {
+	t.Parallel()
+
+	h := NewHub(Config{Now: func() time.Time { return costProvidersNow }})
+	h.costProviders = []costProviderBuilder{
+		func(time.Time, json.RawMessage, *ClaudePlan, *CostCharts, *JevSpend) CostProvider {
+			return CostProvider{ID: "counted", Label: "Counted"}
+		},
+	}
+	h.State().CostProviders[0].Label = "edited"
+	if got := h.State().CostProviders[0].Label; got != "Counted" {
+		t.Errorf("a later snapshot's row reads %q, want the row as built", got)
+	}
+}
+
+// A failed Jev read is marked on the row's copy even before its stamp has aged
+// past the stale line, so the row never draws the last good figures as current.
+func TestJevSpendForRowsMarksTheReadsOwnFailure(t *testing.T) {
+	t.Parallel()
+
+	jev := &JevSpend{Calls: 1, USD: 1}
+	for _, tc := range []struct {
+		name       string
+		r          ReadStatus
+		wantFailed bool
+		wantStale  bool
+	}{
+		{name: "current", r: ReadStatus{At: costProvidersNow}},
+		{name: "failed before its stamp ages", r: ReadStatus{At: costProvidersNow, Error: true}, wantFailed: true, wantStale: true},
+		{name: "aged", r: ReadStatus{At: costProvidersNow, Stale: true}, wantStale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := jevSpendForRows(jev, tc.r)
+			if got.ReadFailed != tc.wantFailed || got.Stale != tc.wantStale {
+				t.Errorf("row copy marks = failed %v stale %v, want failed %v stale %v",
+					got.ReadFailed, got.Stale, tc.wantFailed, tc.wantStale)
+			}
+		})
+	}
+}
+
 // costProviderRow is the row with id in a built list, which a test names rather
 // than counting rows.
 func costProviderRow(t *testing.T, rows []CostProvider, id string) CostProvider {
