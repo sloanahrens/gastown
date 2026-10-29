@@ -531,7 +531,7 @@ func TestDispatchableWaitingIgnoresReasonsSpecDispatchWrites(t *testing.T) {
 	if container == "" {
 		t.Fatal("an open child raised no container hold")
 	}
-	unshaped := (specdispatch.Verdict{Route: specdispatch.RouteRefuse, Field: "## Goal"}).UnshapedReason()
+	unshaped := (specdispatch.LintVerdict{Route: specdispatch.RouteRefuse, Field: "## Goal"}).UnshapedReason()
 	for name, reason := range map[string]string{
 		"conflicting formula labels": formulaErr.Error(),
 		"bad formula label":          labelErr.Error(),

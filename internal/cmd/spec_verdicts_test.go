@@ -51,7 +51,7 @@ func seedVerdictLedger(t *testing.T, town string, at time.Time, entries []specdi
 // emptyLedger is what LoadLedger returns alongside an error it could not read
 // past: an empty ledger, never nil, so a fake Load mirrors the real one.
 func emptyLedger() *specdispatch.Ledger {
-	return &specdispatch.Ledger{Verdicts: map[string]specdispatch.LedgerVerdict{}}
+	return &specdispatch.Ledger{Verdicts: map[string]specdispatch.Verdict{}}
 }
 
 // readVerdictLedger reads town's ledger back off disk, which is how the

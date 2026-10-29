@@ -285,8 +285,8 @@ type Refusal struct {
 	Reason string `json:"reason"`
 }
 
-// Verdict is the lint's answer.
-type Verdict struct {
+// LintVerdict is the lint's answer.
+type LintVerdict struct {
 	Route Route
 	// Field names the first refusal's field ("## Gate", "acceptance", "size",
 	// "not a work bead"), or "size" when the route is planning. Empty when
@@ -302,8 +302,8 @@ type Verdict struct {
 // refusal builds a refused verdict from one or more failures. Field and Reason
 // mirror the first failure so the one-line report and the dispatcher's note
 // keep naming one field.
-func refusal(failures ...Refusal) Verdict {
-	v := Verdict{Route: RouteRefuse, Refusals: failures}
+func refusal(failures ...Refusal) LintVerdict {
+	v := LintVerdict{Route: RouteRefuse, Refusals: failures}
 	if len(failures) > 0 {
 		v.Field, v.Reason = failures[0].Field, failures[0].Reason
 	}
@@ -311,7 +311,7 @@ func refusal(failures ...Refusal) Verdict {
 }
 
 // Clean reports whether the spec may be dispatched to a polecat.
-func (v Verdict) Clean() bool { return v.Route == RouteDispatch }
+func (v LintVerdict) Clean() bool { return v.Route == RouteDispatch }
 
 // ShapeNote renders the verdict as the note a shape gate leaves on a bead the
 // lint did not clear: "SHAPE: <field>: <reason>; ..." for a refusal, "SHAPE:
@@ -322,7 +322,7 @@ func (v Verdict) Clean() bool { return v.Route == RouteDispatch }
 // bead is waived and dispatched, because the dispatcher otherwise holds a
 // planning bead and comments it with its own planning note (gt-tod3q). Empty
 // when the verdict is clean.
-func (v Verdict) ShapeNote() string {
+func (v LintVerdict) ShapeNote() string {
 	switch v.Route {
 	case RouteDispatch:
 		return ""
@@ -347,7 +347,7 @@ func (v Verdict) ShapeNote() string {
 // a planning verdict is the planner's hold, not an unshaped one — the
 // dispatcher holds it under warn as well as refuse and names it by its
 // planning state instead (gt-f8ppx, gt-tod3q).
-func (v Verdict) UnshapedReason() string {
+func (v LintVerdict) UnshapedReason() string {
 	if v.Route != RouteRefuse {
 		return ""
 	}
@@ -367,7 +367,7 @@ func (v Verdict) UnshapedReason() string {
 // Line renders the one-line report for a bead: "<id>: spec lint ok",
 // "<id>: spec lint refused: <field>: <reason>", or
 // "<id>: spec needs planning: <reason>".
-func (v Verdict) Line(id string) string {
+func (v LintVerdict) Line(id string) string {
 	switch v.Route {
 	case RouteDispatch:
 		return fmt.Sprintf("%s: spec lint ok", id)
@@ -479,7 +479,7 @@ func acceptanceText(s Spec, sections map[string]string) string {
 //
 // The bead's type and labels are not a gate: a task or bug with the five
 // sections is as lintable as a feature (gt-mmsr2).
-func Lint(s Spec, t Template) Verdict {
+func Lint(s Spec, t Template) LintVerdict {
 	return lint(s, t, true)
 }
 
@@ -489,11 +489,11 @@ func Lint(s Spec, t Template) Verdict {
 // Constraints paths against (gt-7t1im). Every dispatch decision reads Lint:
 // this one answers a bead it cannot see the base of as shape-clean, which is
 // why it is not the dispatcher's question.
-func LintShape(s Spec, t Template) Verdict {
+func LintShape(s Spec, t Template) LintVerdict {
 	return lint(s, t, false)
 }
 
-func lint(s Spec, t Template, paths bool) Verdict {
+func lint(s Spec, t Template, paths bool) LintVerdict {
 	if why := NotWorkBead(s); why != "" {
 		return refusal(Refusal{Field: "not a work bead", Reason: why})
 	}
@@ -523,17 +523,17 @@ func lint(s Spec, t Template, paths bool) Verdict {
 	size := sections["size"]
 	switch {
 	case s.HasLabel(NeedsPlanningLabel):
-		return Verdict{Route: RoutePlanning, Field: "size", Reason: "label " + NeedsPlanningLabel}
+		return LintVerdict{Route: RoutePlanning, Field: "size", Reason: "label " + NeedsPlanningLabel}
 	case size != "" && planningRe.MatchString(size):
-		return Verdict{Route: RoutePlanning, Field: "size", Reason: "size says: " + firstLine(size)}
+		return LintVerdict{Route: RoutePlanning, Field: "size", Reason: "size says: " + firstLine(size)}
 	case items > MaxAcceptance:
-		return Verdict{Route: RoutePlanning, Field: "size", Reason: fmt.Sprintf("%d acceptance items (max %d for one worker)", items, MaxAcceptance)}
+		return LintVerdict{Route: RoutePlanning, Field: "size", Reason: fmt.Sprintf("%d acceptance items (max %d for one worker)", items, MaxAcceptance)}
 	}
 	// A template without a Size section has nothing to read here.
 	if hasSection(t, "size") && !oneWorkerRe.MatchString(size) {
 		return refusal(Refusal{Field: "size", Reason: fmt.Sprintf("size %q is not one worker, one MR", firstLine(size))})
 	}
-	return Verdict{Route: RouteDispatch}
+	return LintVerdict{Route: RouteDispatch}
 }
 
 func hasSection(t Template, name string) bool {

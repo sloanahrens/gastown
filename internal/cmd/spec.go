@@ -268,7 +268,7 @@ func specPlanNote(key, state, reason string) string {
 // comments once per state. Nothing is spawned: the planner was retired
 // (gt-4rizh), and a planner files nothing from a proposal anyway (gt-4k3fj.13,
 // gt-4k3fj.14). The caller always skips the sling.
-func specPlanHold(report *specDispatchReport, env specDispatchEnv, c specCandidate, full specdispatch.Spec, verdict specdispatch.Verdict) {
+func specPlanHold(report *specDispatchReport, env specDispatchEnv, c specCandidate, full specdispatch.Spec, verdict specdispatch.LintVerdict) {
 	state := specPlanState(full.Notes)
 	report.Planning = append(report.Planning, specDispatchEntry{Bead: full.ID, Rig: c.Rig, Line: specPlanLine(full.ID, state, verdict.Reason)})
 	if env.DryRun {
