@@ -5,9 +5,9 @@
 package dolt
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 
@@ -206,35 +206,34 @@ func validDNS1123Label(name string) bool {
 	return len(name) <= 63 && dns1123LabelRE.MatchString(name)
 }
 
-// Render returns m as one multi-document YAML stream, or the reason encoding
-// failed.
-func Render(m Manifests) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	for _, v := range []any{m.Claim, m.Service, m.StatefulSet} {
-		if err := enc.Encode(v); err != nil {
-			return nil, fmt.Errorf("encoding the manifest: %w", err)
-		}
-	}
-	if err := enc.Close(); err != nil {
-		return nil, fmt.Errorf("closing the manifest encoder: %w", err)
-	}
-	return buf.Bytes(), nil
+// Render writes m to w as one multi-document YAML stream, or returns the reason
+// the stream could not be written.
+func Render(w io.Writer, m Manifests) error {
+	return encode(w, m.Claim, m.Service, m.StatefulSet)
 }
 
-// YAML returns v as one YAML document, or the reason encoding failed.
-func YAML(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
+// YAML writes v to w as one YAML document, or returns the reason it could not
+// be written.
+func YAML(w io.Writer, v any) error {
+	return encode(w, v)
+}
+
+// encode writes each document in order. A failed write is the one failure the
+// encoder can report for these values, and Close reports the same one, so both
+// are joined rather than dropped.
+func encode(w io.Writer, docs ...any) error {
+	enc := yaml.NewEncoder(w)
 	enc.SetIndent(2)
-	if err := enc.Encode(v); err != nil {
-		return nil, fmt.Errorf("encoding the manifest: %w", err)
+	var encodeErr error
+	for _, doc := range docs {
+		if encodeErr = enc.Encode(doc); encodeErr != nil {
+			break
+		}
 	}
-	if err := enc.Close(); err != nil {
-		return nil, fmt.Errorf("closing the manifest encoder: %w", err)
+	if err := errors.Join(encodeErr, enc.Close()); err != nil {
+		return fmt.Errorf("encoding the manifest: %w", err)
 	}
-	return buf.Bytes(), nil
+	return nil
 }
 
 // TypeMeta is the apiVersion and kind every object carries.

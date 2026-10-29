@@ -2,7 +2,9 @@ package dolt
 
 import (
 	"bytes"
+	"errors"
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,10 +39,11 @@ func TestManifestsMatchGoldens(t *testing.T) {
 		{"statefulset.yaml", m.StatefulSet},
 	}
 	for _, o := range objects {
-		got, err := YAML(o.obj)
-		if err != nil {
+		var buf bytes.Buffer
+		if err := YAML(&buf, o.obj); err != nil {
 			t.Fatalf("YAML(%s): %v", o.file, err)
 		}
+		got := buf.Bytes()
 		path := filepath.Join("testdata", o.file)
 		if *updateGoldens {
 			if err := os.WriteFile(path, got, 0o644); err != nil {
@@ -181,10 +184,11 @@ func TestConfigReachesTheManifests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	out, err := Render(m)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := Render(&buf, m); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
+	out := buf.Bytes()
 	for _, want := range []string{"namespace: dolt-rehearsal", "storage: 5Gi", "value: localhost", "name: other-root", "key: db-password"} {
 		if !bytes.Contains(out, []byte(want)) {
 			t.Errorf("the rendered manifests do not contain %q", want)
@@ -247,19 +251,54 @@ func TestObjectsDoNotShareLabelMaps(t *testing.T) {
 	}
 }
 
+// failingWriter refuses every write, standing in for a full disk or a closed
+// pipe at the moment the manifest is written.
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestRenderReportsAWriteFailure(t *testing.T) {
+	t.Parallel()
+	m, err := Build(goldenConfig())
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	refused := errors.New("the disk is full")
+	for _, tc := range []struct {
+		name string
+		call func(w io.Writer) error
+	}{
+		{"one document", func(w io.Writer) error { return YAML(w, m.Claim) }},
+		{"the stream", func(w io.Writer) error { return Render(w, m) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.call(failingWriter{err: refused})
+			if err == nil {
+				t.Fatal("the write was refused, but no error came back")
+			}
+			for _, want := range []string{"encoding the manifest", refused.Error()} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
 func TestRenderEmitsTheThreeObjectsInOrder(t *testing.T) {
 	t.Parallel()
 	m, err := Build(goldenConfig())
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	out, err := Render(m)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := Render(&buf, m); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	docs := bytes.Split(out, []byte("\n---\n"))
+	docs := bytes.Split(buf.Bytes(), []byte("\n---\n"))
 	if len(docs) != 3 {
-		t.Fatalf("the stream holds %d documents, want three:\n%s", len(docs), out)
+		t.Fatalf("the stream holds %d documents, want three:\n%s", len(docs), buf.Bytes())
 	}
 	for i, kind := range []string{"kind: PersistentVolumeClaim", "kind: Service", "kind: StatefulSet"} {
 		if !bytes.Contains(docs[i], []byte(kind)) {
