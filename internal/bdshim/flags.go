@@ -134,18 +134,18 @@ var persistentValueFlags = map[string]bool{
 // names no bead.
 //
 // A command that writes its bead in the store its working directory names has
-// no row here whatever issues its flags point at: create, create-form and q set
-// --parent on the bead they write, so routing by that value would send the
-// create to the tracker that holds the parent (gt-b00kz). A command a flag
-// picks the store for (migrate issues, the admin and audit verbs) has no row
-// either, since a bead id in its flags does not name the store it works on.
+// no row here whatever issues its flags point at: create, create-form, q and
+// gate create set --parent, --waits-for or --blocks on the bead they write, so
+// routing by that value would send the create to the tracker that holds the
+// related bead (gt-b00kz). A command a flag picks the store for (migrate
+// issues, the admin and audit verbs) has no row either, since a bead id in its
+// flags does not name the store it works on.
 var beadValueFlags = map[string]map[string]bool{
 	"blocked":           {"--parent": true},
 	"count":             {"--id": true},
 	"dep":               {"--blocks": true, "-b": true},
 	"dep add":           {"--blocked-by": true, "--depends-on": true},
 	"duplicate":         {"--of": true},
-	"gate create":       {"--blocks": true},
 	"list":              {"--id": true, "--parent": true},
 	"provenance record": {"--issue": true},
 	"ready":             {"--parent": true},
