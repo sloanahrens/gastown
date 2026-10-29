@@ -380,13 +380,14 @@ func (d *Daemon) tierSweepReshapeOpen(bd tierSweepBeadStore, rig, tier, name, sh
 
 // tierSweepUnshaped reports whether the dispatcher's lint would refuse spec for
 // a section it needs or its acceptance. A refusal on anything else (a Size
-// that does not say one worker, or a bead that is not a work bead) is left
-// for the dispatcher to report, since rewriting the sweep's text does not fix it.
+// that does not say one worker, a bead that is not a work bead, or the target
+// branch's files, which the sweep has no repo to read) is left for the
+// dispatcher to report, since rewriting the sweep's text does not fix it.
 func tierSweepUnshaped(spec specdispatch.Spec, tmpl specdispatch.Template) bool {
 	if specdispatch.NotWorkBead(spec) != "" {
 		return false
 	}
-	for _, r := range specdispatch.Lint(spec, tmpl).Refusals {
+	for _, r := range specdispatch.LintShape(spec, tmpl).Refusals {
 		if r.Field == "acceptance" || strings.HasPrefix(r.Field, "## ") {
 			return true
 		}

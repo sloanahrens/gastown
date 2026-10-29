@@ -246,6 +246,12 @@ type Spec struct {
 	// parent-child edges. The container rule reads them through OpenChildHold;
 	// nothing in this package queries (gt-gektq).
 	Children []Child
+	// Target is the target branch's file inventory, filled by the caller like
+	// Children: the lint checks the repo files the Constraints names against
+	// it (gt-7t1im). Nil is an inventory the caller did not read, and a bead
+	// naming a file is refused for it: a check that could not run must not
+	// pass as one that did.
+	Target *TargetTree
 }
 
 // HasLabel reports whether the spec carries label, ignoring case and space.
@@ -464,13 +470,30 @@ func acceptanceText(s Spec, sections map[string]string) string {
 //     families are refused before any shape is read
 //  2. every template section present and non-empty
 //  3. at least one acceptance item
-//  4. size: needs-planning label, a Size that says planning, or more than
+//  4. every repo file the Constraints names as a file it changes exists on the
+//     target branch; a path the spec's own words introduce, or one that is not
+//     a literal repo file, is passed (gt-7t1im)
+//  5. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
 //     worker is refused
 //
 // The bead's type and labels are not a gate: a task or bug with the five
 // sections is as lintable as a feature (gt-mmsr2).
 func Lint(s Spec, t Template) Verdict {
+	return lint(s, t, true)
+}
+
+// LintShape is Lint without the target branch's files, for a caller that
+// displays a bead's shape rather than deciding a dispatch — the dashboard's
+// queue badge, the tier sweep's reshape — and has no inventory to check the
+// Constraints paths against (gt-7t1im). Every dispatch decision reads Lint:
+// this one answers a bead it cannot see the base of as shape-clean, which is
+// why it is not the dispatcher's question.
+func LintShape(s Spec, t Template) Verdict {
+	return lint(s, t, false)
+}
+
+func lint(s Spec, t Template, paths bool) Verdict {
 	if why := NotWorkBead(s); why != "" {
 		return refusal(Refusal{Field: "not a work bead", Reason: why})
 	}
@@ -488,6 +511,11 @@ func Lint(s Spec, t Template) Verdict {
 	items := CountAcceptance(acceptanceText(s, sections))
 	if items < MinAcceptance {
 		failures = append(failures, Refusal{Field: "acceptance", Reason: "no acceptance criteria"})
+	}
+	if paths {
+		if r, failed := targetRefusal(sections, s.Target); failed {
+			failures = append(failures, r)
+		}
 	}
 	if len(failures) > 0 {
 		return refusal(failures...)

@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/models"
@@ -483,6 +484,13 @@ type specHoldKnobs struct {
 	// to end (gt-mqa3r). specPeerHeldFrom says so on Warn rather than skipping
 	// the question in silence.
 	Backoff func(beadID string) string
+	// Target reads the files the branch beadID's rig lands on holds, for the
+	// shape gate's path check (gt-7t1im). The guard asks what the tick asks, so
+	// a peer whose Constraints name a file the branch never got is held here
+	// too. Nil is a caller that never wired the reader: the lint then refuses a
+	// peer naming a file, which holds its cluster rather than reading the peer
+	// as next.
+	Target func(beadID string) *specdispatch.TargetTree
 	// Warn is where a question left unanswered because its inputs would not
 	// read says so; nil falls back to specHoldWarn, so a knob set built by hand
 	// cannot make an unanswered question silent.
@@ -498,6 +506,16 @@ func (k specHoldKnobs) warnWriter() io.Writer {
 		return specHoldWarn
 	}
 	return k.Warn
+}
+
+// target asks the knob set for beadID's target inventory. A set built without
+// the reader answers nil, which the lint refuses a file-naming bead for: the
+// peer is held rather than read as next on a check that never ran.
+func (k specHoldKnobs) target(beadID string) *specdispatch.TargetTree {
+	if k.Target == nil {
+		return nil
+	}
+	return k.Target(beadID)
 }
 
 // specHoldKnobsFrom reads the knobs from the town's settings — the same keys
@@ -518,6 +536,7 @@ func specHoldKnobsFrom(townRoot string, warn io.Writer) (specHoldKnobs, bool) {
 		MaxPriority: ts.PolecatPool.GetMaxPriority(),
 		ShapeGate:   ts.PolecatPool.GetShapeGate(),
 		Backoff:     func(beadID string) string { return dispatch.StartupBackoff(townRoot, beadID) },
+		Target:      cachedSpecTarget(townRoot, openRigTree),
 	}
 	if knobs.ShapeGate != specdispatch.ShapeGateOff {
 		knobs.Template = specdispatch.LoadTemplate(specTemplatePath(sd))
@@ -610,6 +629,7 @@ func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, peer sling.Duplic
 		return err.Error()
 	}
 	if knobs.ShapeGate != specdispatch.ShapeGateOff && !spec.HasLabel(specdispatch.ShapeWaivedLabel) {
+		spec.Target = knobs.target(peer.ID)
 		if verdict := specdispatch.Lint(spec, knobs.Template); !verdict.Clean() {
 			// The first refusal, as the lint's own one-line verdict names it:
 			// the whole ShapeNote can run to every missing section, and this
@@ -789,8 +809,127 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 	if path == "" {
 		path = specTemplatePath(loadSpecDispatchConfig(townRoot))
 	}
-	spec, err := showSpec(townRoot, args[0])
+	spec, err := specForLint(townRoot, args[0], func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) }, openRigTree)
 	return specLint(cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], spec, err, path, specLintJSON)
+}
+
+// specForLint reads beadID for gt spec lint with the target inventory the
+// lint's path check reads (gt-7t1im). A bead that did not read is linted on its
+// read failure alone, so no inventory is asked for it.
+func specForLint(townRoot, beadID string, show func(string) (specdispatch.Spec, error), open treeOpener) (specdispatch.Spec, error) {
+	spec, err := show(beadID)
+	if err != nil {
+		return spec, err
+	}
+	spec.Target = specLintTarget(townRoot, beadID, open)
+	return spec, nil
+}
+
+// specLintTarget is the target-branch inventory gt spec lint checks beadID's
+// Constraints against (gt-7t1im). A bead of no rig, a town bead included, gets
+// a tree carrying that error rather than none: the lint then holds a bead
+// naming a path with the error named.
+func specLintTarget(townRoot, beadID string, open treeOpener) *specdispatch.TargetTree {
+	rig := beads.GetRigNameForPrefix(townRoot, beads.ExtractPrefix(beadID))
+	if rig == "" {
+		return &specdispatch.TargetTree{Err: "no rig holds " + beadID}
+	}
+	return specTargetTree(filepath.Join(townRoot, rig), open)
+}
+
+// cachedSpecTarget is specLintTarget keyed by rig and read once per caller: the
+// overlap guard asks it of every peer in a cluster, and a rig's branch does not
+// change inside one question. A bead of no rig is answered per bead, since the
+// error names it.
+func cachedSpecTarget(townRoot string, open treeOpener) func(beadID string) *specdispatch.TargetTree {
+	trees := map[string]*specdispatch.TargetTree{}
+	return func(beadID string) *specdispatch.TargetTree {
+		rig := beads.GetRigNameForPrefix(townRoot, beads.ExtractPrefix(beadID))
+		if rig == "" {
+			return specLintTarget(townRoot, beadID, open)
+		}
+		tree, ok := trees[rig]
+		if !ok {
+			tree = specLintTarget(townRoot, beadID, open)
+			trees[rig] = tree
+		}
+		return tree
+	}
+}
+
+// treeReader reads a revision's file inventory: a *git.Git in a tick, a fake
+// in a test.
+type treeReader interface {
+	TreeFileBlobs(rev string) (map[string]string, error)
+}
+
+// treeOpener opens the treeReader of a repo directory.
+type treeOpener func(repoDir string) treeReader
+
+// openRigTree reads a rig repo's inventories with git.
+func openRigTree(repoDir string) treeReader { return git.NewGitWithDir(repoDir, "") }
+
+// specTargetTree is the inventory the lint checks a rig's Constraints paths
+// against: the branch the rig's landings target, read from the repo under
+// rigPath (gt-7t1im). Every failure is carried in the tree and never dropped: a
+// tree that could not be read must not read as one holding no files.
+//
+// origin's branch is read first, the local one only when origin has none: a
+// local main can lag the branch a landing worker targets, and reading it would
+// refuse a bead whose prerequisite has already landed.
+func specTargetTree(rigPath string, open treeOpener) *specdispatch.TargetTree {
+	branch, err := land.RigDefaultBranch(rigPath)
+	if err != nil {
+		return &specdispatch.TargetTree{Err: "cannot read the rig's default branch: " + firstErrLine(err)}
+	}
+	// The config names the branch, so a name that is not one literal revision is
+	// held before it reaches git: a leading "-" is read as an option and ".."
+	// as a range, and neither is a branch a rig reads files from.
+	if !validTargetBranch(branch) {
+		return &specdispatch.TargetTree{Branch: branch, Err: fmt.Sprintf("the rig's default branch %q is not a branch name", branch)}
+	}
+	repo := rigPruneRepoDir(rigPath)
+	if repo == "" {
+		return &specdispatch.TargetTree{Branch: branch, Err: "no git repo under " + rigPath}
+	}
+	reader := open(repo)
+	var lastErr error
+	for _, ref := range []string{"origin/" + branch, branch} {
+		blobs, err := reader.TreeFileBlobs(ref)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		files := make(map[string]struct{}, len(blobs))
+		for path := range blobs {
+			files[path] = struct{}{}
+		}
+		return &specdispatch.TargetTree{Branch: branch, Files: files}
+	}
+	return &specdispatch.TargetTree{Branch: branch, Err: fmt.Sprintf("cannot read %s in %s: %s", branch, repo, firstErrLine(lastErr))}
+}
+
+// validTargetBranch reports whether name can be handed to git as one branch
+// revision. The name comes from a rig's config.json, so it is checked before
+// the read: a leading "-" would be taken as an ls-tree option, and ".." or
+// "^"/"~" (refused below as not a branch-name character) would be taken as a
+// revision range or another ref, not the branch a landing targets (gt-7t1im).
+func validTargetBranch(name string) bool {
+	if name == "" || strings.HasPrefix(name, "-") || strings.HasPrefix(name, ".") {
+		return false
+	}
+	if strings.HasSuffix(name, "/") || strings.HasSuffix(name, ".lock") || strings.Contains(name, "..") {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_', r == '-', r == '.', r == '/':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // specLintReport is the --json shape for one bead, so a shell caller can read
@@ -1021,6 +1160,19 @@ type specDispatchEnv struct {
 	// none, and an error is a read that failed, which the tick reports rather
 	// than reading as 0.
 	OMThreshold func(rig string) (float64, error)
+	// Target reads the files the branch a rig's work lands on holds, for the
+	// lint's path check (gt-7t1im). Nil asks nothing, which is what a test of
+	// some other hold wants; the tick itself always wires it.
+	Target func(rig string) *specdispatch.TargetTree
+}
+
+// target asks the env for rig's target inventory. A tick built without the
+// reader lets the lint check no paths.
+func (e specDispatchEnv) target(rig string) *specdispatch.TargetTree {
+	if e.Target == nil {
+		return nil
+	}
+	return e.Target(rig)
 }
 
 // overrunThreshold asks the env for rig's review threshold. A tick built with no
@@ -1206,7 +1358,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// The verdict is read under every gate: the gate decides what a refusal
 		// does to the candidate, and the overrun box asks the lint the same
 		// question a dispatcher does — is this bead shaped — with no gate at all
-		// (gt-b9j3o.4).
+		// (gt-b9j3o.4). The target branch's files are the candidate's rig's: a
+		// bead whose Constraints name a file the branch never got is work on a
+		// base that is not there (gt-7t1im).
+		full.Target = env.target(c.Rig)
 		verdict := specdispatch.Lint(full, env.Template)
 		shapeNote := ""
 		if env.ShapeGate != specdispatch.ShapeGateOff {
@@ -2094,6 +2249,10 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	// The install job writes its marker under the same daemon dir this reader
 	// resolves, so the tick and the job agree on the file (gt-vc34c).
 	pendingInstall := installpending.StoreFor(townRoot)
+	// Each rig's target inventory, read once per tick: the lint asks it per
+	// candidate, and the files a branch holds do not change inside a tick
+	// (gt-7t1im).
+	targets := map[string]*specdispatch.TargetTree{}
 	env := specDispatchEnv{
 		Hold:           func() string { return dispatch.OperatorHold(townRoot) },
 		PendingInstall: func(now time.Time) (*installpending.Marker, error) { return pendingInstall.Pending(now) },
@@ -2177,6 +2336,14 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		// (gt-b9j3o.4).
 		OMThreshold: func(rig string) (float64, error) {
 			return land.OMThreshold(filepath.Join(townRoot, rig))
+		},
+		Target: func(rig string) *specdispatch.TargetTree {
+			if tree, ok := targets[rig]; ok {
+				return tree
+			}
+			tree := specTargetTree(filepath.Join(townRoot, rig), openRigTree)
+			targets[rig] = tree
+			return tree
 		},
 	}
 	report := runSpecDispatchCycle(env)
