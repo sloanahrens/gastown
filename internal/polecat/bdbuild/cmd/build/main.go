@@ -4,9 +4,14 @@
 //
 //	build -src <beads checkout> -out <bd binary> [-commit <sha>] [-build-dir <dir>]
 //
-// The commit must be in the checkout's object store; nothing is fetched. The
-// compile happens in a clean worktree of the checkout, which is removed before
-// the command returns.
+// The compile happens in a clean worktree of the checkout, which is removed
+// before the command returns. A commit the checkout does not hold is fetched
+// for: the build fetches that checkout's origin once — every branch the remote
+// advertises — and looks again, since a beads landing installs bd at its own
+// commit without refreshing this checkout. The checkout's own branch and
+// working tree are left alone; only its objects and remote-tracking refs grow.
+// bdbuild.Compile refuses a commit still missing after the fetch, or a failed
+// fetch, naming the checkout (gt-pme82).
 package main
 
 import (
@@ -26,7 +31,7 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	src := fs.String("src", "", "the beads checkout whose object store holds the commit")
+	src := fs.String("src", "", "the beads checkout the commit is built from; one that lacks it is fetched from origin once")
 	out := fs.String("out", "", "the bd binary to write")
 	commit := fs.String("commit", "", "the commit to build; default the commit the installed bd reports")
 	buildDir := fs.String("build-dir", "", "the directory the clean worktree is made in; default a temporary one")
