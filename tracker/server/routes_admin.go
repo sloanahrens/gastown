@@ -51,8 +51,10 @@ func (s *Server) issueToken(w http.ResponseWriter, r *http.Request) {
 // revokeTokens ends every live token of the actor the body names, or the one
 // token it names by id: an actor with none is a success answering zero, while
 // an id that names none is a not_found, an exact reference that missed. A
-// revoke that ends a token logs one line naming the admin, the target and how
-// many tokens it ended; a failed one logs nothing but the error.
+// revoke by actor logs one line naming the admin, the target and how many
+// tokens it ended, zero included, so an attempt on a tokenless actor stays on
+// record; a revoke by id logs one naming the id, and a failed one logs nothing
+// but the error.
 func (s *Server) revokeTokens(w http.ResponseWriter, r *http.Request) {
 	var req api.RevokeTokensRequest
 	if err := decodeJSON(r, &req); err != nil {
