@@ -1,6 +1,7 @@
 package polecat
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -12,7 +13,9 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/seattoken"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
 )
@@ -231,6 +234,80 @@ func TestStopNotFound(t *testing.T) {
 	err := m.Stop("Toast", false)
 	if err != ErrSessionNotFound {
 		t.Errorf("Stop = %v, want ErrSessionNotFound", err)
+	}
+}
+
+// countingIssuer mints one token and counts the asks, so a test can tell a
+// seat token that was reused from one that was issued again.
+type countingIssuer struct {
+	token string
+	asks  int
+}
+
+func (c *countingIssuer) Issue(context.Context, string) (string, error) {
+	c.asks++
+	return c.token, nil
+}
+
+// Stopping a polecat revokes nothing: its worktree survives and the seat
+// restarts with the token it was given, so only a removal ends that token
+// (gt-p85pw.85). A SessionManager holds no tracker credential and no revoker —
+// revocation lives on Manager alone — so the test watches the two things a
+// revocation takes survive the stop: the seat's token file, handed back
+// untouched, and the intent record releaseSeat clears beside it. The other
+// half — the revoker a removal reaches, injected and observed not to run when a
+// session ends — is TestEndingASessionOutsideARemovalRevokesNothing.
+func TestStopKeepsTheSeatToken(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tm := newFakeSessionTmux()
+	m := &SessionManager{tmux: tm, rig: &rig.Rig{Name: "test-rig", Path: filepath.Join(town, "test-rig"), Polecats: []string{"Toast"}}, gits: newWorld().opener()}
+	sess := m.SessionName("Toast")
+	if err := tm.NewSession(sess, ""); err != nil {
+		t.Fatal(err)
+	}
+	store := seattoken.New(town)
+	seat := trackerSeat("test-rig", "Toast")
+	issuer := &countingIssuer{token: "trk_toast-secret"}
+	path, err := store.Ensure(context.Background(), seat, issuer)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	issued, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the seat's token: %v", err)
+	}
+	// The intent record a removal's clean-up deletes. It surviving shows the
+	// removal path, which is the only one that revokes, never ran.
+	record := intentSeat("test-rig", "Toast")
+	if _, err := intent.Update(town, record, func(r *intent.Record) error {
+		r.Desired = intent.DesiredRun
+		return nil
+	}); err != nil {
+		t.Fatalf("seeding the intent record: %v", err)
+	}
+
+	if err := m.Stop("Toast", true); err != nil {
+		t.Fatalf("Stop = %v", err)
+	}
+
+	kept, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("token file gone after Stop: %v", err)
+	}
+	if string(kept) != string(issued) {
+		t.Errorf("token after Stop = %q, want the seat's own token %q", kept, issued)
+	}
+	if _, err := os.Stat(record.Path(town)); err != nil {
+		t.Errorf("intent record gone after Stop, so the removal's clean-up ran: %v", err)
+	}
+	again, err := store.Ensure(context.Background(), seat, issuer)
+	if err != nil {
+		t.Fatalf("Ensure after Stop: %v", err)
+	}
+	if again != path || issuer.asks != 1 {
+		t.Fatalf("Ensure after Stop = %q after %d issues, want the token file %q the seat already had",
+			again, issuer.asks, path)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/seattoken"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
@@ -2960,6 +2961,319 @@ func TestRemoveKeepsTheIntentRecordWhenTheRemovalIsRefused(t *testing.T) {
 	}
 	if _, err := os.Stat(seat.Path(mgr.townRoot)); err != nil {
 		t.Fatalf("refused removal deleted the intent record: %v", err)
+	}
+}
+
+// writeRoutes writes a town route table, the way gt install writes
+// routes.jsonl.
+func writeRoutes(t *testing.T, townRoot string, lines ...string) {
+	t.Helper()
+	dir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, beads.RoutesFileName), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// routeLine is one routes.jsonl line: the beads of path (relative to the town
+// root) are on backend.
+func routeLine(path, prefix, backend string) string {
+	return `{"path":"` + path + `","prefix":"` + prefix + `","backend":"` + backend + `"}`
+}
+
+// putRigOnBackend puts the canonical rig on backend in the town route table.
+func putRigOnBackend(t *testing.T, townRoot, backend string) {
+	t.Helper()
+	writeRoutes(t, townRoot, routeLine("rig/mayor/rig", "rig-", backend))
+}
+
+// writeSeatToken puts a token where seattoken keeps the seat's, and returns
+// the path.
+func writeSeatToken(t *testing.T, townRoot string, seat intent.Seat) string {
+	t.Helper()
+	path := seattoken.New(townRoot).Path(seat)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(seatTokenValue+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// seatTokenValue is the token a test puts in a seat's file; nothing compares
+// it to a real one.
+const seatTokenValue = "trk_toast-secret"
+
+// A removed polecat must not keep a tracker credential: its token file goes,
+// and the tokens issued to <rig>/polecats/<name> are revoked, in the one
+// removal gt polecat nuke, gt shutdown and the spawn rollbacks all reach
+// (gt-p85pw.85).
+func TestRemoveRevokesTheSeatTokenOnATrackerRig(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
+	putRigOnBackend(t, mgr.townRoot, beads.BackendTracker)
+	tokenPath := writeSeatToken(t, mgr.townRoot, trackerSeat("rig", "toast"))
+	var revoked []string
+	mgr.seatRevoker = func(_ context.Context, townRoot, actor string) error {
+		if townRoot != mgr.townRoot {
+			t.Errorf("revoke town root = %q, want %q", townRoot, mgr.townRoot)
+		}
+		revoked = append(revoked, actor)
+		return nil
+	}
+
+	if err := mgr.RemoveWithOptions("toast", RemoveOptions{Force: true}); err != nil {
+		t.Fatalf("RemoveWithOptions: %v", err)
+	}
+
+	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+		t.Errorf("token file survived the removal, stat err = %v", err)
+	}
+	if !slices.Equal(revoked, []string{"rig/polecats/toast"}) {
+		t.Errorf("revoked %v, want exactly one revoke for rig/polecats/toast", revoked)
+	}
+}
+
+// A revoke the tracker refuses is a warning, never a removal that cannot
+// finish: the worktree goes and the operator is told which seat kept a token.
+func TestRemoveWarnsWhenTheRevokeFailsAndStillRemovesThePolecat(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
+	putRigOnBackend(t, mgr.townRoot, beads.BackendTracker)
+	writeSeatToken(t, mgr.townRoot, trackerSeat("rig", "toast"))
+	mgr.seatRevoker = func(context.Context, string, string) error {
+		return errors.New("the tracker is down")
+	}
+	var warned []string
+	mgr.warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+
+	if err := mgr.RemoveWithOptions("toast", RemoveOptions{Force: true}); err != nil {
+		t.Fatalf("RemoveWithOptions = %v, want the removal to go on without the revoke", err)
+	}
+
+	if _, err := os.Stat(mgr.polecatDir("toast")); !os.IsNotExist(err) {
+		t.Fatalf("polecat dir survived, stat err = %v", err)
+	}
+	if len(warned) != 1 {
+		t.Fatalf("warnings = %q, want one naming the seat it could not revoke", warned)
+	}
+	if !strings.Contains(warned[0], "rig/polecats/toast") || !strings.Contains(warned[0], "the tracker is down") {
+		t.Errorf("warning = %q, want the seat and why the revoke failed", warned[0])
+	}
+	if strings.Contains(warned[0], seatTokenValue) {
+		t.Errorf("warning quotes the token: %q", warned[0])
+	}
+}
+
+// A rig on Dolt has issued no tracker token, so removing its polecat asks no
+// tracker and says nothing.
+func TestRemoveOnADoltRigCallsNoRevoker(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
+	putRigOnBackend(t, mgr.townRoot, beads.BackendDolt)
+	mgr.seatRevoker = func(_ context.Context, _, actor string) error {
+		t.Errorf("revoked %q for a Dolt rig", actor)
+		return nil
+	}
+	var warned []string
+	mgr.warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+
+	if err := mgr.RemoveWithOptions("toast", RemoveOptions{Force: true}); err != nil {
+		t.Fatalf("RemoveWithOptions: %v", err)
+	}
+	if _, err := os.Stat(mgr.polecatDir("toast")); !os.IsNotExist(err) {
+		t.Fatalf("polecat dir survived, stat err = %v", err)
+	}
+	if len(warned) != 0 {
+		t.Errorf("warnings = %q, want none for a rig the route table puts on Dolt", warned)
+	}
+}
+
+// A route table no line of which names the rig's beads is not a rig on Dolt:
+// the removal revokes nothing and says so, rather than reporting a clean
+// removal that may have left a tracker seat's token behind.
+func TestRemoveWarnsWhenNoRouteNamesTheRig(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
+	writeRoutes(t, mgr.townRoot, routeLine("other/mayor/rig", "oth-", beads.BackendDolt))
+	mgr.seatRevoker = func(_ context.Context, _, actor string) error {
+		t.Errorf("revoked %q for a rig the route table does not name", actor)
+		return nil
+	}
+	var warned []string
+	mgr.warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+
+	if err := mgr.RemoveWithOptions("toast", RemoveOptions{Force: true}); err != nil {
+		t.Fatalf("RemoveWithOptions: %v", err)
+	}
+
+	if len(warned) != 1 || !strings.Contains(warned[0], "rig/polecats/toast") {
+		t.Fatalf("warnings = %q, want one naming the seat whose tokens it could not revoke", warned)
+	}
+}
+
+// A route naming a backend nothing opens is not a rig on Dolt: the removal
+// says it could not tell which store held the rig's beads.
+func TestRemoveWarnsWhenTheRouteNamesAnUnknownBackend(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
+	writeRoutes(t, mgr.townRoot, routeLine("rig/mayor/rig", "rig-", "nosuchstore"))
+	mgr.seatRevoker = func(_ context.Context, _, actor string) error {
+		t.Errorf("revoked %q for a rig whose backend is unknown", actor)
+		return nil
+	}
+	var warned []string
+	mgr.warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+
+	if err := mgr.RemoveWithOptions("toast", RemoveOptions{Force: true}); err != nil {
+		t.Fatalf("RemoveWithOptions: %v", err)
+	}
+
+	if len(warned) != 1 || !strings.Contains(warned[0], "rig/polecats/toast") || !strings.Contains(warned[0], "nosuchstore") {
+		t.Fatalf("warnings = %q, want one naming the seat and the backend it could not read", warned)
+	}
+}
+
+// The revoke a removal runs is bounded, so a tracker that never answers cannot
+// hold gt polecat nuke, gt shutdown or a spawn rollback open (gt-p85pw.85).
+func TestRemoveBoundsTheRevokeWithADeadline(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
+	putRigOnBackend(t, mgr.townRoot, beads.BackendTracker)
+	var sawDeadline bool
+	mgr.seatRevoker = func(ctx context.Context, _, _ string) error {
+		deadline, ok := ctx.Deadline()
+		sawDeadline = ok
+		if ok {
+			if left := time.Until(deadline); left <= 0 || left > seatRevokeTimeout {
+				t.Errorf("revoke deadline is %v away, want one within %v", left, seatRevokeTimeout)
+			}
+		}
+		return nil
+	}
+
+	if err := mgr.RemoveWithOptions("toast", RemoveOptions{Force: true}); err != nil {
+		t.Fatalf("RemoveWithOptions: %v", err)
+	}
+
+	if !sawDeadline {
+		t.Error("the revoke ran with no deadline; a stalled tracker would block the removal")
+	}
+}
+
+// Ending a polecat's session without removing the worktree revokes nothing:
+// the worktree survives and the seat restarts with the token it was given
+// (gt-p85pw.85). This is the Manager's own session end, the one an idle reuse,
+// a repair and a reconcile run, so the revoker a removal reaches is injected
+// here and observed not to run.
+func TestEndingASessionOutsideARemovalRevokesNothing(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
+	putRigOnBackend(t, mgr.townRoot, beads.BackendTracker)
+	tokenPath := writeSeatToken(t, mgr.townRoot, trackerSeat("rig", "toast"))
+	mgr.seatRevoker = func(_ context.Context, _, actor string) error {
+		t.Errorf("revoked %q for a seat whose session ended and whose worktree stays", actor)
+		return nil
+	}
+
+	if err := mgr.killSession("toast", "test: the session ends, the polecat stays"); err != nil {
+		t.Fatalf("killSession: %v", err)
+	}
+
+	if _, err := os.Stat(mgr.polecatDir("toast")); err != nil {
+		t.Fatalf("polecat directory gone after a session end: %v", err)
+	}
+	if _, err := os.Stat(tokenPath); err != nil {
+		t.Fatalf("token file gone after a session end: %v", err)
+	}
+}
+
+// A route table that cannot be read is not a rig on Dolt: the removal revokes
+// nothing and says so, rather than reporting a clean removal that left a live
+// token behind.
+func TestRemoveWarnsWhenTheRouteTableCannotBeRead(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
+	// A directory where the file belongs: opening it reads as an error rather
+	// than an empty table.
+	if err := os.MkdirAll(filepath.Join(mgr.townRoot, ".beads", beads.RoutesFileName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mgr.seatRevoker = func(_ context.Context, _, actor string) error {
+		t.Errorf("revoked %q although the route table could not be read", actor)
+		return nil
+	}
+	var warned []string
+	mgr.warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+
+	if err := mgr.RemoveWithOptions("toast", RemoveOptions{Force: true}); err != nil {
+		t.Fatalf("RemoveWithOptions: %v", err)
+	}
+
+	if len(warned) != 1 || !strings.Contains(warned[0], "rig/polecats/toast") {
+		t.Fatalf("warnings = %q, want one naming the seat whose tokens it could not revoke", warned)
+	}
+}
+
+// With no admin credential the host revoker cannot be built, so the removal
+// warns and still finishes: the seat is gone either way. The town has no
+// settings/daemon.env, and config.LoadTrackerAdminToken reports the absent key
+// before it dereferences any ${VAR} in it, so no value this process's
+// environment holds can stand in for the credential here.
+func TestRemoveWarnsWhenTheTownHasNoAdminCredential(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
+	putRigOnBackend(t, mgr.townRoot, beads.BackendTracker)
+	var warned []string
+	mgr.warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+
+	if err := mgr.RemoveWithOptions("toast", RemoveOptions{Force: true}); err != nil {
+		t.Fatalf("RemoveWithOptions: %v", err)
+	}
+
+	if len(warned) != 1 || !strings.Contains(warned[0], "TRACKER_ADMIN_TOKEN") {
+		t.Fatalf("warnings = %q, want one saying the admin credential is missing", warned)
+	}
+	if _, err := os.Stat(mgr.polecatDir("toast")); !os.IsNotExist(err) {
+		t.Fatalf("polecat dir survived, stat err = %v", err)
+	}
+}
+
+// A token file that cannot be deleted warns, and the revoke still runs: the
+// live token is what matters most.
+func TestRemoveWarnsWhenTheSeatTokenFileCannotBeRemoved(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
+	putRigOnBackend(t, mgr.townRoot, beads.BackendTracker)
+	// A file where the seat's directory belongs: seattoken refuses to delete
+	// through it.
+	if err := os.MkdirAll(filepath.Join(mgr.townRoot, ".runtime", "seats"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mgr.townRoot, ".runtime", "seats", "rig"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var revoked []string
+	mgr.seatRevoker = func(_ context.Context, _, actor string) error {
+		revoked = append(revoked, actor)
+		return nil
+	}
+	var warned []string
+	mgr.warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+
+	if err := mgr.RemoveWithOptions("toast", RemoveOptions{Force: true}); err != nil {
+		t.Fatalf("RemoveWithOptions: %v", err)
+	}
+
+	if len(warned) != 1 || !strings.Contains(warned[0], "rig/polecats/toast") {
+		t.Fatalf("warnings = %q, want one naming the seat whose token file it could not delete", warned)
+	}
+	if !slices.Equal(revoked, []string{"rig/polecats/toast"}) {
+		t.Errorf("revoked %v, want the revoke to run despite the token file", revoked)
 	}
 }
 
