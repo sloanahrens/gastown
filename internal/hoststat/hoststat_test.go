@@ -58,14 +58,14 @@ func TestParseCPUIdle(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			got := parseCPUIdle(tc.in)
+			got := ParseCPUIdle(tc.in)
 			switch {
 			case tc.want == nil && got != nil:
-				t.Fatalf("parseCPUIdle = %v, want no reading", *got)
+				t.Fatalf("ParseCPUIdle = %v, want no reading", *got)
 			case tc.want != nil && got == nil:
-				t.Fatalf("parseCPUIdle = no reading, want %v", *tc.want)
+				t.Fatalf("ParseCPUIdle = no reading, want %v", *tc.want)
 			case tc.want != nil && math.Abs(*got-*tc.want) > 1e-9:
-				t.Fatalf("parseCPUIdle = %v, want %v", *got, *tc.want)
+				t.Fatalf("ParseCPUIdle = %v, want %v", *got, *tc.want)
 			}
 		})
 	}
@@ -154,9 +154,9 @@ func TestParseDoltCores(t *testing.T) {
 func TestParseTop(t *testing.T) {
 	t.Parallel()
 	ps := " 95.0 /usr/local/go/bin/go build ./...\n 40.2 /usr/bin/go test ./x\n 30.0 /usr/bin/dolt sql-server\n  0.1 launchd\n"
-	top := parseTop(ps, 5)
+	top := ParseTop(ps, 5)
 	if len(top) != 2 || top[0].Name != "go" || top[0].CPU < 135 || top[1].Name != "dolt" {
-		t.Fatalf("parseTop = %+v", top)
+		t.Fatalf("ParseTop = %+v", top)
 	}
 }
 
@@ -224,7 +224,7 @@ func ptr[T any](v T) *T { return &v }
 func TestSampleCPUIdleReadsTopAlone(t *testing.T) {
 	t.Parallel()
 	got, err := sampleCPUIdle(context.Background(), func(context.Context) ([]byte, error) { return []byte(macTop), nil })
-	if err != nil || got != *parseCPUIdle(macTop) {
+	if err != nil || got != *ParseCPUIdle(macTop) {
 		t.Fatalf("sampleCPUIdle = %v, %v, want the idle share of top's last CPU line", got, err)
 	}
 }
@@ -319,8 +319,8 @@ func TestPsOutputLinuxUsesInstantCPU(t *testing.T) {
 	if got == nil || math.Abs(*got-3.985) > 1e-9 {
 		t.Fatalf("DoltCores from the second sample = %v, want 3.985", got)
 	}
-	if top := parseTop(string(out), 5); len(top) != 1 || top[0].Name != "dolt" || top[0].CPU != 398.5 {
-		t.Fatalf("parseTop from the second sample = %+v, want dolt at 398.5", top)
+	if top := ParseTop(string(out), 5); len(top) != 1 || top[0].Name != "dolt" || top[0].CPU != 398.5 {
+		t.Fatalf("ParseTop from the second sample = %+v, want dolt at 398.5", top)
 	}
 }
 

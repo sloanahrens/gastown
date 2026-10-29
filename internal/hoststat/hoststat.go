@@ -101,11 +101,11 @@ func sample(ctx context.Context, p probes) Reading {
 	// idle reading (gt-auiji).
 	r.Load1, r.Load5, r.Load15 = p.load(ctx)
 	if out, err := p.top(ctx); err == nil {
-		r.CPUIdle = parseCPUIdle(string(out))
+		r.CPUIdle = ParseCPUIdle(string(out))
 	}
 	if out, err := p.ps(ctx); err == nil {
 		r.DoltCores = parseDoltCores(string(out))
-		r.Top = parseTop(string(out), topProcs)
+		r.Top = ParseTop(string(out), topProcs)
 	}
 	return r
 }
@@ -137,7 +137,7 @@ func sampleCPUIdle(ctx context.Context, top func(context.Context) ([]byte, error
 		}
 		return 0, fmt.Errorf("top failed: %w", err)
 	}
-	idle := parseCPUIdle(string(out))
+	idle := ParseCPUIdle(string(out))
 	if idle == nil {
 		return 0, errors.New("top ran but printed no CPU idle share")
 	}
@@ -209,16 +209,11 @@ func procTable(s string) ([]byte, error) {
 	return []byte(out.String()), nil
 }
 
-// ParseCPUIdle reads the idle share out of top's output, nil when it has none.
-// It is for a caller that runs top itself, so the share it reads is the one
-// Sample reads.
-func ParseCPUIdle(s string) *float64 { return parseCPUIdle(s) }
-
-// parseCPUIdle reads the idle share out of top's last CPU line: macOS writes
+// ParseCPUIdle reads the idle share out of top's last CPU line: macOS writes
 // "CPU usage: 39.24% user, 60.75% sys, 0.0% idle", Linux "%Cpu(s):  6.2 us,
 // 12.5 sy, 81.2 id". The last line wins because a two-sample top prints one
 // per sample, and the first is the host's average since boot.
-func parseCPUIdle(s string) *float64 {
+func ParseCPUIdle(s string) *float64 {
 	line := lastLineContaining(s, "cpu usage")
 	if line == "" {
 		line = lastLineContaining(s, "cpu(s)")
@@ -341,15 +336,10 @@ func isTestServer(argv []string) bool {
 	return false
 }
 
-// ParseTop reads "pcpu command" process lines into the n busiest processes,
-// largest first. It is for a caller that runs ps itself, so the names and
-// merging are the ones Sample reports.
-func ParseTop(s string, n int) []Proc { return parseTop(s, n) }
-
-// parseTop reads "pcpu command" lines and keeps the first n that use any CPU,
+// ParseTop reads "pcpu command" lines and keeps the first n that use any CPU,
 // naming each process by the last element of its path and merging repeats
 // (twenty go test children are one line: "go").
-func parseTop(s string, n int) []Proc {
+func ParseTop(s string, n int) []Proc {
 	var order []string
 	sum := map[string]float64{}
 	for _, line := range strings.Split(s, "\n") {
