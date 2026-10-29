@@ -138,8 +138,8 @@ type dashPolecatInputs struct {
 func dashPolecatState(item polecatInventoryItem, hasWork, ready bool, labels []string) (state, reason string) {
 	d := item.Disposition
 	switch {
-	case hasWork && hasAnyLabel(labels, "needs-human", "gt:needs-human"):
-		return dashboard.StateNeedsHuman, "the bead is labeled needs-human"
+	case hasWork && hasAnyLabel(labels, "needs-human", "gt:needs-human", "needs-overseer", "gt:needs-overseer", "needs-operator", "gt:needs-operator"):
+		return dashboard.StateNeedsHuman, "the bead is labeled for a person"
 	case hasWork && ready:
 		return dashboard.StateQueued, "submitted for landing"
 	}

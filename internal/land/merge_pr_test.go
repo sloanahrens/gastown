@@ -401,7 +401,7 @@ func TestLandMergerRefusalIsAHumanRejection(t *testing.T) {
 	}}
 
 	_, err := l.Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectMergeRefused, LabelNeedsHuman)
+	rej := f.assertRejected(t, err, RejectMergeRefused, LabelNeedsOverseer)
 	if !strings.Contains(rej.Reason, OMStatusContext) {
 		t.Fatalf("reason %q; want it to name the required %s status", rej.Reason, OMStatusContext)
 	}

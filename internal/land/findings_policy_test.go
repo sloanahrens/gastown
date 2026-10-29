@@ -211,7 +211,7 @@ func TestLandCapsTheFindingRefusal(t *testing.T) {
 		b := f.bead()
 		wantLabel := LabelRework
 		if capped {
-			wantLabel = LabelNeedsHuman
+			wantLabel = LabelNeedsOverseer
 		}
 		if !beads.HasLabel(b, wantLabel) || CountRejections(b.Notes) != attempt {
 			t.Errorf("attempt %d: labels = %v, %d rejection block(s); want %s and %d",
@@ -222,8 +222,8 @@ func TestLandCapsTheFindingRefusal(t *testing.T) {
 			t.Fatalf("attempt %d: re-submitting: %v", attempt, err)
 		}
 	}
-	if b := f.bead(); !beads.HasLabel(b, LabelNeedsHuman) {
-		t.Errorf("after %d refusals the bead is %v, want %s", MaxReworkAttempts, b.Labels, LabelNeedsHuman)
+	if b := f.bead(); !beads.HasLabel(b, LabelNeedsOverseer) {
+		t.Errorf("after %d refusals the bead is %v, want %s", MaxReworkAttempts, b.Labels, LabelNeedsOverseer)
 	}
 }
 

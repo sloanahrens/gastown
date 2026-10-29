@@ -470,7 +470,7 @@ const (
 // again: the ready label is its request in the worker's hands, and the two
 // refusal labels are the worker's answer to it.
 func revertPastQueueing(is *beads.Issue) bool {
-	return beads.HasLabel(is, land.LabelReadyToLand) || beads.HasLabel(is, land.LabelRework) || beads.HasLabel(is, land.LabelNeedsHuman)
+	return beads.HasLabel(is, land.LabelReadyToLand) || beads.HasLabel(is, land.LabelRework) || land.HasNeedsPerson(is)
 }
 
 // requeueStranded finishes filing an open revert bead a failed write left

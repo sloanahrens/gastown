@@ -207,7 +207,7 @@ type Lander struct {
 	ReviewErrorLands bool
 	// ReviewErrorRejects, when ReviewErrorLands is false, rejects a green
 	// merged tree whose om review produced no verdict (after the reviewer's
-	// own retries) to gt:needs-human, instead of stopping as an *InfraError
+	// own retries) to gt:needs-overseer, instead of stopping as an *InfraError
 	// that the next pass would retry and pay om for again (gt-b5ugw).
 	ReviewErrorRejects bool
 	// ReviewErrorLandsLabels names labels whose beads land a green tree with
@@ -282,7 +282,7 @@ const (
 
 // Rejection is a landing refused because of the work itself. Land has
 // already written it to the work bead (a MERGE REJECTION block), swapped the
-// ready label for rework (or gt:needs-human when Rework is false), and
+// ready label for rework (or gt:needs-overseer when Rework is false), and
 // released the bead to dispatch by reopening and unassigning it — except a
 // bird-owned bead, which keeps its assignee and status and hears of the
 // refusal from a rejected:<bead> attention item (BirdOwned, RejectionAlert).
@@ -2129,7 +2129,7 @@ func attemptAtCeiling(attempt int) int {
 // (gt-kwe1l).
 func (l *Lander) rejectionAlreadyRecorded(issue *beads.Issue, w Work, rej *Rejection) (bool, error) {
 	if w.Head == "" || !beads.HasLabel(issue, LabelReadyToLand) ||
-		beads.HasLabel(issue, LabelRework) || beads.HasLabel(issue, LabelNeedsHuman) {
+		beads.HasLabel(issue, LabelRework) || HasNeedsPerson(issue) {
 		return false, nil
 	}
 	last, ok := ParseRejectionNote(issue.Notes)
@@ -2239,8 +2239,8 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		return rej
 	}
 	// The cap's other half: the landing worker routes the outcome by Rework,
-	// and its human branch is the one that escalates. Writing gt:needs-human
-	// without flipping this would leave a capped bead labeled for a human with
+	// and its human branch is the one that escalates. Writing gt:needs-overseer
+	// without flipping this would leave a capped bead labeled for a person with
 	// nobody told (gt-28ibg).
 	if capped {
 		rej.Rework = false
@@ -2248,17 +2248,20 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	}
 	label := LabelRework
 	if !rej.Rework {
-		label = LabelNeedsHuman
+		label = LabelNeedsOverseer
 	}
-	// The two refusal labels are exclusive. A bead can move between them — a
+	// The refusal labels are exclusive. A bead can move between them — a
 	// resubmission rejected for a different reason, or one that hits the
 	// attempt cap — and carrying both would leave the record claiming the
-	// author and a human own it at once.
-	other := LabelNeedsHuman
-	if label == LabelNeedsHuman {
-		other = LabelRework
+	// author and a person own it at once. A swap clears every person label the
+	// bead still carries (gt:needs-human from before the rename included), not
+	// only the one it writes (gt-zjel5).
+	remove := []string{LabelReadyToLand}
+	for _, other := range append([]string{LabelRework}, needsPersonLabels...) {
+		if other != label {
+			remove = append(remove, other)
+		}
 	}
-	remove := []string{LabelReadyToLand, other}
 	update := beads.UpdateOptions{
 		AddLabels:    []string{label},
 		RemoveLabels: remove,

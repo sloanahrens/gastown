@@ -896,6 +896,28 @@ func TestRedMainLeavesARejectedRevertBeadAlone(t *testing.T) {
 	}
 }
 
+// A revert bead a person holds is past queueing whichever person label says
+// so: the old spelling and both overseer-first ones (gt-zjel5).
+func TestRedMainLeavesARevertBeadAlonePastEveryPersonLabel(t *testing.T) {
+	t.Parallel()
+	for _, label := range []string{land.LabelNeedsHuman, land.LabelNeedsOverseer, land.LabelNeedsOperator} {
+		t.Run(label, func(t *testing.T) {
+			t.Parallel()
+			h := newRevertHarness(t, greenSHA)
+			id := seedRevertBead(t, h)
+			if err := h.bd.Update(id, beads.UpdateOptions{AddLabels: []string{label}, RemoveLabels: []string{land.LabelReadyToLand}}); err != nil {
+				t.Fatal(err)
+			}
+			h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+
+			rv, _ := h.bd.Show(id)
+			if beads.HasLabel(rv, land.LabelReadyToLand) || !strings.Contains(h.lastStatus(), "already open as "+id) {
+				t.Fatalf("revert %+v, status %q; a revert a person holds must not be requeued", rv, h.lastStatus())
+			}
+		})
+	}
+}
+
 func TestRedMainClearsTheFlightWhenAnUnrequestedRevertBeadCannotBeClosed(t *testing.T) {
 	t.Parallel()
 	h := newRevertHarness(t, greenSHA)

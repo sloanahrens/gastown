@@ -455,6 +455,37 @@ func TestAttentionSources_EscalationBeadReadsTheBeadsOwnRig(t *testing.T) {
 	}
 }
 
+// A landing left for a person is a rework item whichever person label holds it,
+// so the attention queue shows it (gt-zjel5).
+func TestAttentionSources_ReworkReadsEveryPersonLabel(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	bd := &labelBeads{issuesByLabel: map[string][]*beads.Issue{
+		land.LabelRework:        {{ID: "gt-rework", Status: "open"}},
+		land.LabelNeedsHuman:    {{ID: "gt-human", Status: "open"}},
+		land.LabelNeedsOverseer: {{ID: "gt-overseer", Status: "open"}},
+		land.LabelNeedsOperator: {{ID: "gt-operator", Status: "open"}},
+	}}
+	d := &Daemon{
+		config:        &Config{TownRoot: t.TempDir()},
+		logger:        log.New(io.Discard, "", 0),
+		openWorkBeads: bd.open,
+	}
+	issues, err := d.attentionSources(now).rework(context.Background(), attentionRig)
+	if err != nil {
+		t.Fatalf("rework: %v", err)
+	}
+	got := map[string]bool{}
+	for _, is := range issues {
+		got[is.ID] = true
+	}
+	for _, id := range []string{"gt-rework", "gt-human", "gt-overseer", "gt-operator"} {
+		if !got[id] {
+			t.Errorf("rework collector missed %s; got %d issues", id, len(issues))
+		}
+	}
+}
+
 // reworkNotes builds a bead's notes with n MERGE REJECTION blocks.
 func reworkNotes(n int) string {
 	var b strings.Builder

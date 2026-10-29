@@ -510,7 +510,7 @@ func TestLogReviewAttemptMatchesTheBlockAtTheCeiling(t *testing.T) {
 			if !errors.As(err, &rej) || rej.Kind != RejectReview || rej.RecordErr != nil {
 				t.Fatalf("Land = %T %v, want a recorded review rejection", err, err)
 			}
-			if !beads.HasLabel(f.bead(), LabelNeedsHuman) {
+			if !beads.HasLabel(f.bead(), LabelNeedsOverseer) {
 				t.Errorf("bead labels = %v, want the capped round to go to a human", f.bead().Labels)
 			}
 			block, ok := ParseRejectionNote(f.bead().Notes)
