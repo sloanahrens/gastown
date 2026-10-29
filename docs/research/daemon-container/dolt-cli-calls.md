@@ -15,7 +15,7 @@ Legend:
 
 ## Summary
 
-- 13 `exec` sites call `dolt` or build its argv: 4 in `internal/daemon`, 9 in `internal/doltserver`. Two builders (`buildDoltSQLCmd`, `buildServerSQLCmd`) carry most of the connection-based calls.
+- 13 `exec` sites call `dolt` or build its argv: 4 in `internal/daemon`, 9 in `internal/doltserver`. Tables A and B hold 12 of them; the 13th, `getDoltVersion` (`daemon/dolt.go:1681`), is in Table C because no daemon path reaches it. Two builders (`buildDoltSQLCmd`, `buildServerSQLCmd`) carry most of the connection-based calls.
 - Six of the 13 are reachable from daemon code: `daemon/dolt.go:299`, `jsonl_git_backup.go:547`, `jsonl_git_backup.go:555`, `doltserver.go:504` (through `daemon/dolt.go:1059`), `doltserver.go:4517`, `doltserver.go:5118`.
 - Two daemon-reachable sites need local files: `doltserver.go:504` (start a local `dolt sql-server`) and `jsonl_git_backup.go:555` (embedded `dolt sql` against a local directory). **Neither checks `IsRemote()`**, so neither is skipped for a remote endpoint.
 - The daemon's start path is gated only by `IsEnabled()` and `IsExternal()` (`daemon/dolt.go:509-521`). Static hypothesis: with a remote endpoint, `Enabled` and not `External`, every heartbeat would start a local server (Table A, row 4).
@@ -48,9 +48,9 @@ Static hypothesis for rows 1, 4, 5 and 6: each sets `cmd.Dir` to a data director
 | 12 | `doltserver.go:3153` (`InitRig`) | `dolt init`; `cmd.Dir = rigDir` | Taken when `h.IsRunning` (`:739-746`) reports the server down. Callers: `rig/manager.go:662`, `RepairWorkspace` (`:4056`), `internal/cmd`. Not the daemon | needs-local-files (creates a Dolt repo under the rig directory on this host) | **Not skipped.** For a remote host, `IsRunning` dials the endpoint, so an endpoint that does not answer gets a local `dolt init`. |
 | 13 | `doltserver.go:5118` callers outside the daemon | `buildServerSQLCmd` with these argv: `:2846` `-r json -q "SHOW DATABASES"` (`VerifyExpectedDatabasesAtConfig`, ← `internal/doctor/migration_check.go:287`); `:3908` `-r csv -q <query>` (`databaseHasUserTables`, ← `RemoveDatabase`); `:4754` `-q <query>` (`CheckReadOnly`, ← `GetHealthMetrics`, `RecoverReadOnly`); `:5088` `-q <query>` (`serverExecSQL`, ← `InitRig`, `RemoveDatabase`, `applyWaitTimeout`, `applyTimeZone`, `waitForCatalog`); `:5218` `--file <tmp>` (`doltSQLScript`, only ← `doltSQLScriptWithRetry`, which has no production caller) | Callers listed | works-over-connection | Not consulted |
 
-## Table C: not counted
+## Table C: outside Tables A and B
 
-- `internal/daemon/dolt.go:1681` (`getDoltVersion`): `dolt version`. Class: works-over-connection (no data; needs only the binary). Reached only through `DoltServerManager.Status` (`dolt.go:362`), which the daemon package never calls. Not daemon-reachable.
+- `internal/daemon/dolt.go:1681` (`getDoltVersion`): `dolt version`. Counted in the Summary's 13. Class: works-over-connection (no data; needs only the binary). Reached only through `DoltServerManager.Status` (`dolt.go:362`), which the daemon package never calls. Not daemon-reachable.
 - `LookPath("dolt")` at `internal/daemon/dolt.go:1038`, `internal/deps/dolt.go:36` and `internal/rig/manager.go:661`: a path check, not an exec.
 - `doltserver.go:1035` runs `lsof` and is not a dolt call. The generic runner at `internal/doltserver/host.go:212` takes any binary and is not a dolt call.
 - Test-only `exec` of `dolt`: `internal/daemon/maintenance_backup_integration_test.go:127`, `internal/doltserver/process_integration_test.go:292`, `internal/doltserver/sql_server_command_test.go:16`.
