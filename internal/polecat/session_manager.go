@@ -103,6 +103,8 @@ type SessionManager struct {
 	// seatTokenIssuer mints the token a tracker-rig seat does not have yet;
 	// nil is the host issuer, built from the town's admin credential.
 	seatTokenIssuer seattoken.Issuer
+	// seatTokenTimeout bounds one token issue; zero is seatTokenIssueTimeout.
+	seatTokenTimeout time.Duration
 }
 
 // The two variables a seat on a tracker rig carries. The tracker client reads
@@ -111,6 +113,11 @@ const (
 	envTrackerURL       = "TRACKER_URL"
 	envTrackerTokenFile = "TRACKER_TOKEN_FILE"
 )
+
+// seatTokenIssueTimeout bounds the launch's call for a seat token, so a
+// tracker that accepts the connection and then stalls cannot hold a launch
+// open.
+const seatTokenIssueTimeout = 30 * time.Second
 
 // SessionHooks route a SessionManager's kills through the supervisor
 // (gt-4k3fj.4.1). Each nil hook kills straight through tmux.
@@ -733,10 +740,10 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		envVars[runtimeConfig.Session.ConfigDirEnv] = opts.RuntimeConfigDir
 	}
 	// A seat on a tracker rig carries the tracker endpoint and the path to its
-	// own token file, so the bd it runs opens its rig's beads. Set before the
-	// backend Prepare: the sandbox path stages the file, and both the tmux -e
-	// env and the export prefix carry the two names. A Dolt rig gets nothing
-	// here and its environment is what it was.
+	// own token file, so the bd it runs opens its rig's beads. Both names ride
+	// in envVars with the rest, so the tmux -e environment and the export
+	// prefix carry them. A Dolt rig gets nothing here and its environment is
+	// what it was.
 	if err := m.addTrackerSeatEnv(envVars, townRoot, polecat); err != nil {
 		return err
 	}
@@ -954,17 +961,22 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 // seat is handed the file's path, and the tracker client reads it from there.
 //
 // A rig on Dolt gets neither variable, so a Dolt rig's seat environment is
-// byte for byte what it was. An unreadable route table or endpoint is an
-// error, never "no rig on the tracker": that would start the seat with no
-// beads store it could open.
+// byte for byte what it was. An unreadable route table, a backend the table
+// does not define, or an endpoint that does not resolve is an error, never
+// "no rig on the tracker": that would start the seat with no beads store it
+// could open.
 func (m *SessionManager) addTrackerSeatEnv(envVars map[string]string, townRoot, polecat string) error {
 	seat := intent.Seat{Rig: m.rig.Name, Role: "polecats", Name: polecat}
-	onTracker, err := rigOnTracker(townRoot, seat.Rig)
+	store, err := rigBackend(townRoot, seat.Rig)
 	if err != nil {
 		return fmt.Errorf("the tracker environment of seat %s: %w", seat, err)
 	}
-	if !onTracker {
+	if store == beads.BackendDolt {
 		return nil
+	}
+	if store != beads.BackendTracker {
+		return fmt.Errorf("the tracker environment of seat %s: the route table names the backend %q for rig %s, which is neither %q nor %q",
+			seat, store, seat.Rig, beads.BackendDolt, beads.BackendTracker)
 	}
 	endpoint, err := config.ResolveTrackerEndpoint(townRoot)
 	if err != nil {
@@ -978,7 +990,13 @@ func (m *SessionManager) addTrackerSeatEnv(envVars map[string]string, townRoot, 
 		}
 		issuer = host
 	}
-	path, err := seattoken.New(townRoot).Ensure(context.Background(), seat, issuer)
+	timeout := m.seatTokenTimeout
+	if timeout <= 0 {
+		timeout = seatTokenIssueTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	path, err := seattoken.New(townRoot).Ensure(ctx, seat, issuer)
 	if err != nil {
 		// seattoken's errors name the seat and never the token; the wrap
 		// keeps the seat in the message a failed launch shows an operator.
@@ -989,20 +1007,31 @@ func (m *SessionManager) addTrackerSeatEnv(envVars map[string]string, townRoot, 
 	return nil
 }
 
-// rigOnTracker reports whether rig's route names the tracker backend. A rig
-// the table does not name is on Dolt, and so is one whose route names no
-// backend.
-func rigOnTracker(townRoot, rig string) (bool, error) {
+// rigBackend reports the backend the route table names for rig: every route
+// whose path begins with the rig's name is read, so a second route for the rig
+// is not lost behind the first. A rig the table does not name is on Dolt.
+// Routes that name rig and disagree are an error, because the store that holds
+// its beads must have one answer.
+func rigBackend(townRoot, rig string) (string, error) {
 	routes, err := beads.LoadRoutes(filepath.Join(townRoot, ".beads"))
 	if err != nil {
-		return false, fmt.Errorf("reading the route table: %w", err)
+		return "", fmt.Errorf("reading the route table: %w", err)
 	}
+	name := ""
 	for _, r := range routes {
-		if strings.SplitN(r.Path, "/", 2)[0] == rig {
-			return r.BackendName() == beads.BackendTracker, nil
+		if strings.SplitN(r.Path, "/", 2)[0] != rig {
+			continue
 		}
+		n := r.BackendName()
+		if name != "" && n != name {
+			return "", fmt.Errorf("the routes for rig %s name both %q and %q", rig, name, n)
+		}
+		name = n
 	}
-	return false, nil
+	if name == "" {
+		return beads.BackendDolt, nil
+	}
+	return name, nil
 }
 
 // isSessionStale checks if a tmux session's pane process has died.

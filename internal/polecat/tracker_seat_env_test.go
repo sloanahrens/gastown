@@ -8,11 +8,28 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/seattoken"
 )
+
+// hostShellTrackerValue marks a tracker name this test's own process
+// environment sets, so an assertion can tell the shell's value from the
+// town's.
+const hostShellTrackerValue = "set-in-the-test-shell-"
+
+// isolateHostTrackerEnv makes the shell's tracker names a known, hostile
+// value: a launch that reads one of them instead of the town's files shows it
+// in these tests' assertions.
+func isolateHostTrackerEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"TRACKER_URL", "TRACKER_TOKEN", "TRACKER_TOKEN_FILE", "TRACKER_ADMIN_TOKEN", "GT_TOWN_ROOT"} {
+		//testpolicy:allow no-env — the shell's tracker names are the input under test: a launch that reads one rather than the town's files must fail these assertions
+		t.Setenv(name, hostShellTrackerValue+name)
+	}
+}
 
 // fakeSeatIssuer records the actors it was asked for and answers with token
 // and err together, so an issuer that fails after minting cannot have its
@@ -28,6 +45,15 @@ func (f *fakeSeatIssuer) Issue(_ context.Context, actor string) (string, error) 
 	return f.token, f.err
 }
 
+// waitingSeatIssuer answers only once its context ends, so a test can show
+// the launch bounds the issue it waits on.
+type waitingSeatIssuer struct{}
+
+func (*waitingSeatIssuer) Issue(ctx context.Context, _ string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
 // trackerSeatTown is a temp town whose polecat worktree is already on a
 // session branch, so a launch keeps that branch: two launches of one seat
 // then hand the session the same environment apart from what a test varies.
@@ -40,17 +66,27 @@ func trackerSeatTown(t *testing.T) (town, rigPath, workDir string, w *world) {
 	return town, rigPath, workDir, w
 }
 
-// writeRigRoute gives the town one route for the rig, on backend.
-func writeRigRoute(t *testing.T, town, backend string) {
+// rigRoute is one route line of the test town's table.
+func rigRoute(path, prefix, backend string) string {
+	return fmt.Sprintf(`{"path":%q,"prefix":%q,"backend":%q}`, path, prefix, backend)
+}
+
+// writeRoutes gives the town the route lines it is passed, one per line.
+func writeRoutes(t *testing.T, town string, lines ...string) {
 	t.Helper()
 	dir := filepath.Join(town, ".beads")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	route := fmt.Sprintf(`{"path":"gastown/mayor/rig","prefix":"gt-","backend":%q}`+"\n", backend)
-	if err := os.WriteFile(filepath.Join(dir, beads.RoutesFileName), []byte(route), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, beads.RoutesFileName), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writeRigRoute gives the town one route for the rig, on backend.
+func writeRigRoute(t *testing.T, town, backend string) {
+	t.Helper()
+	writeRoutes(t, town, rigRoute("gastown/mayor/rig", "gt-", backend))
 }
 
 // launchCapturingEnv launches the polecat named box in the town and returns
@@ -74,11 +110,12 @@ func seatEnvSessionManager(rigPath string, w *world, issuer seattoken.Issuer) *S
 // A seat whose rig is on the tracker carries the endpoint and the path to its
 // token file, and the token itself reaches neither the environment nor argv.
 // A seat whose rig is on Dolt carries neither name: its environment is byte
-// for byte what it was.
+// for byte what it was. A tracker name the shell exports changes neither.
 //
-//testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
+//testpolicy:allow parallel — sets the process environment and points the process-wide sandbox routing at a temp town, which another test must not see mid-run
 func TestLaunchTrackerSeatEnv(t *testing.T) {
 	town, rigPath, workDir, w := trackerSeatTown(t)
+	isolateHostTrackerEnv(t)
 	const token = "trk_seat-token-value"
 	issuer := &fakeSeatIssuer{token: token}
 	m := seatEnvSessionManager(rigPath, w, issuer)
@@ -120,6 +157,9 @@ func TestLaunchTrackerSeatEnv(t *testing.T) {
 		if strings.Contains(value, token) {
 			t.Errorf("the seat environment's %s carries the token itself", name)
 		}
+		if strings.Contains(value, hostShellTrackerValue) {
+			t.Errorf("the seat environment's %s carries the shell's value %q", name, value)
+		}
 	}
 	if len(tracker) != len(dolt)+2 {
 		t.Errorf("tracker env has %d names, want %d: Dolt's %d plus the two tracker names",
@@ -135,9 +175,10 @@ func TestLaunchTrackerSeatEnv(t *testing.T) {
 // A restart reuses the seat's token: the issuer is asked once across two
 // launches, and both sessions are given the same file.
 //
-//testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
+//testpolicy:allow parallel — sets the process environment and points the process-wide sandbox routing at a temp town, which another test must not see mid-run
 func TestLaunchTrackerSeatEnvReusesTheTokenOnRestart(t *testing.T) {
 	town, rigPath, workDir, w := trackerSeatTown(t)
+	isolateHostTrackerEnv(t)
 	writeRigRoute(t, town, beads.BackendTracker)
 	issuer := &fakeSeatIssuer{token: "trk_seat-token-value"}
 	m := seatEnvSessionManager(rigPath, w, issuer)
@@ -159,9 +200,11 @@ func TestLaunchTrackerSeatEnvReusesTheTokenOnRestart(t *testing.T) {
 }
 
 // A seat that cannot be given a token does not launch: the refusal names the
-// rig and seat, and never the token.
+// rig and seat, and never the token. The host shell exporting a tracker
+// credential or a route table line naming an undefined backend does not turn
+// any of these into a launch.
 //
-//testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
+//testpolicy:allow parallel — sets the process environment and points the process-wide sandbox routing at a temp town, which another test must not see mid-run
 func TestLaunchTrackerSeatEnvRefusals(t *testing.T) {
 	const token = "trk_seat-token-value"
 	cases := []struct {
@@ -173,7 +216,8 @@ func TestLaunchTrackerSeatEnvRefusals(t *testing.T) {
 			name: "no host credential to build an issuer",
 			prepare: func(t *testing.T, _ string) seattoken.Issuer {
 				// A nil issuer makes the launch build the host issuer from
-				// the town's admin credential, which this town does not have.
+				// the town's admin credential, which this town does not have;
+				// the one the shell exports is not that credential.
 				return nil
 			},
 			want: "TRACKER_ADMIN_TOKEN",
@@ -203,6 +247,26 @@ func TestLaunchTrackerSeatEnvRefusals(t *testing.T) {
 			want: "reading the route table",
 		},
 		{
+			name: "routes that name the rig and disagree",
+			prepare: func(t *testing.T, town string) seattoken.Issuer {
+				t.Helper()
+				writeRoutes(t, town,
+					rigRoute("gastown/mayor/rig", "gt-", beads.BackendDolt),
+					rigRoute("gastown/polecats/box", "gt-box-", beads.BackendTracker))
+				return &fakeSeatIssuer{token: token}
+			},
+			want: "name both",
+		},
+		{
+			name: "a backend the route table does not define",
+			prepare: func(t *testing.T, town string) seattoken.Issuer {
+				t.Helper()
+				writeRigRoute(t, town, "postgres")
+				return &fakeSeatIssuer{token: token}
+			},
+			want: "which is neither",
+		},
+		{
 			name: "a town config that does not resolve the endpoint",
 			prepare: func(t *testing.T, town string) seattoken.Issuer {
 				t.Helper()
@@ -221,6 +285,7 @@ func TestLaunchTrackerSeatEnvRefusals(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			town, rigPath, workDir, w := trackerSeatTown(t)
+			isolateHostTrackerEnv(t)
 			writeRigRoute(t, town, beads.BackendTracker)
 			issuer := tc.prepare(t, town)
 			m := seatEnvSessionManager(rigPath, w, issuer)
@@ -242,6 +307,33 @@ func TestLaunchTrackerSeatEnvRefusals(t *testing.T) {
 				t.Errorf("the launch created a session (env captured) after failing to get a token")
 			}
 		})
+	}
+}
+
+// A token issue that never answers fails the launch at the launch's own
+// bound: the issuer is handed a bounded context, so a tracker that accepted
+// the connection and then stalled cannot hold the launch open.
+//
+//testpolicy:allow parallel — sets the process environment and points the process-wide sandbox routing at a temp town, which another test must not see mid-run
+func TestLaunchTrackerSeatEnvBoundsTheIssue(t *testing.T) {
+	town, rigPath, workDir, w := trackerSeatTown(t)
+	isolateHostTrackerEnv(t)
+	writeRigRoute(t, town, beads.BackendTracker)
+	m := seatEnvSessionManager(rigPath, w, &waitingSeatIssuer{})
+	m.seatTokenTimeout = 100 * time.Millisecond
+
+	env, err := launchCapturingEnv(t, m, workDir)
+	if err == nil {
+		t.Fatal("launch succeeded; a token issue that never answers must not")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("launch error = %v, want the token issue's bound to have expired", err)
+	}
+	if !strings.Contains(err.Error(), "gastown/polecats/box") {
+		t.Errorf("launch error = %v, want it to name the seat gastown/polecats/box", err)
+	}
+	if env != nil {
+		t.Errorf("the launch created a session (env captured) after the token issue's bound expired")
 	}
 }
 
