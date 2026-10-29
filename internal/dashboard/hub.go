@@ -54,6 +54,10 @@ type Hub struct {
 	detailMu    sync.Mutex
 	detailCache map[string]detailEntry
 	detailGate  detailGate // bead-detail reads join Run's lifecycle (gt-fekq1)
+
+	// costProviders builds the Cost panel's provider rows, in order. NewHub
+	// sets it to costProviderBuilders; a test injects its own list here.
+	costProviders []costProviderBuilder
 }
 
 // Sub is one open page.
@@ -72,6 +76,8 @@ func NewHub(cfg Config) *Hub {
 		jevGood: map[string]time.Time{},
 		wake:    make(chan struct{}),
 		alerts:  NewAlerter(cfg.Now),
+
+		costProviders: costProviderBuilders,
 	}
 }
 
@@ -865,7 +871,7 @@ func (h *Hub) rebuildCostProvidersLocked() {
 		costProviderJev:      h.cfg.JevSpend == nil,
 	}
 	var rows []CostProvider
-	for _, p := range BuildCostProviders(h.cfg.Now(), h.state.Spend, h.state.ClaudePlan, h.state.CostCharts, h.state.JevSpend) {
+	for _, p := range buildCostProviders(h.costProviders, h.cfg.Now(), h.state.Spend, h.state.ClaudePlan, h.state.CostCharts, h.state.JevSpend) {
 		if !unwired[p.ID] {
 			rows = append(rows, p)
 		}

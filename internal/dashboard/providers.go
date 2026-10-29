@@ -59,8 +59,13 @@ var costProviderBuilders = []costProviderBuilder{
 // BuildCostProviders builds every provider's row from the same inputs the Cost
 // charts are built from, in costProviderBuilders' order.
 func BuildCostProviders(now time.Time, spend json.RawMessage, plan *ClaudePlan, charts *CostCharts, jev *JevSpend) []CostProvider {
-	out := make([]CostProvider, 0, len(costProviderBuilders))
-	for _, build := range costProviderBuilders {
+	return buildCostProviders(costProviderBuilders, now, spend, plan, charts, jev)
+}
+
+// buildCostProviders runs the given builders over one set of inputs, in order.
+func buildCostProviders(builders []costProviderBuilder, now time.Time, spend json.RawMessage, plan *ClaudePlan, charts *CostCharts, jev *JevSpend) []CostProvider {
+	out := make([]CostProvider, 0, len(builders))
+	for _, build := range builders {
 		out = append(out, build(now, spend, plan, charts, jev))
 	}
 	return out

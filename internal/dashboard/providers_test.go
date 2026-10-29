@@ -335,18 +335,14 @@ func TestCostProvidersOrderIsFixed(t *testing.T) {
 	}
 }
 
-// The state carries the rows in the order the builders list them, a provider
-// whose reader is not configured has no row, and a builder added to the list
-// shows up in the state the page reads. The list is a package var, so this
-// test is not parallel.
+// The state carries the rows in the order the builders list them, and a builder
+// added to the hub's list shows up in the state the page reads.
 func TestCostProvidersStateCarriesTheRowsInOrder(t *testing.T) {
+	t.Parallel()
+
 	fake := func(time.Time, json.RawMessage, *ClaudePlan, *CostCharts, *JevSpend) CostProvider {
 		return CostProvider{ID: "fake", Label: "Fake", Kind: "cash", Status: "none", Why: "placeholder"}
 	}
-	prev := costProviderBuilders
-	costProviderBuilders = append(slices.Clip(prev), fake)
-	t.Cleanup(func() { costProviderBuilders = prev })
-
 	raw := deepSeekFixture(t, 9)
 	plan, _ := claudeFixture()
 	jev := &JevSpend{Calls: 2, USD: 0.5, Window: "24h"}
@@ -356,6 +352,7 @@ func TestCostProvidersStateCarriesTheRowsInOrder(t *testing.T) {
 		ClaudePlan: func() *ClaudePlan { return plan },
 		JevSpend:   func() *JevSpend { return jev },
 	})
+	h.costProviders = append(slices.Clip(h.costProviders), fake)
 	h.pollSpend()
 	h.pollClaudePlan()
 	h.pollJevSpend()
@@ -390,6 +387,8 @@ func TestCostProvidersStateCarriesTheRowsInOrder(t *testing.T) {
 }
 
 func TestCostProvidersOmitsAReaderThatIsNotConfigured(t *testing.T) {
+	t.Parallel()
+
 	raw := deepSeekFixture(t, 9)
 	h := NewHub(Config{
 		Now:   func() time.Time { return costProvidersNow },
