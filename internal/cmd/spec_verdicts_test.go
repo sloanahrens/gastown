@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -134,11 +136,12 @@ func TestSpecDispatchVerdictsRecordsEachHeldBead(t *testing.T) {
 		}
 	}
 	// The deferral stays in the tick's skipped list too, and is recorded once,
-	// under the more specific class (deferred, not skipped).
-	deferredInSkipped := ""
+	// under the more specific class (deferred, not skipped) with the line it
+	// was deferred under: the later list wins both.
+	deferredInSkipped := false
 	for _, e := range r.Skipped {
 		if e.Bead == "gt-defer" {
-			deferredInSkipped = e.Line
+			deferredInSkipped = true
 		}
 		if e.Bead == "gt-extra" {
 			if got := l.Verdicts["gt-extra"].Reason; got != e.Line {
@@ -146,11 +149,14 @@ func TestSpecDispatchVerdictsRecordsEachHeldBead(t *testing.T) {
 			}
 		}
 	}
-	if deferredInSkipped == "" {
+	if !deferredInSkipped {
 		t.Fatalf("skipped = %+v, want the deferral listed there as well", r.Skipped)
 	}
-	if got := l.Verdicts["gt-defer"].Reason; got != deferredInSkipped {
-		t.Errorf("gt-defer reason = %q, want the line it was skipped under %q", got, deferredInSkipped)
+	if len(r.Deferred) != 1 {
+		t.Fatalf("deferred = %+v, want the one deferral", r.Deferred)
+	}
+	if got := l.Verdicts["gt-defer"].Reason; got != r.Deferred[0].Line {
+		t.Errorf("gt-defer reason = %q, want the line it was deferred under %q", got, r.Deferred[0].Line)
 	}
 	// A bead the tick slung is not a verdict.
 	if _, ok := l.Verdicts["gt-slung"]; ok {
@@ -262,19 +268,15 @@ func TestSpecDispatchVerdictsLedgerFailureLeavesTheTick(t *testing.T) {
 		seedVerdictLedger(t, town, specTestNow.Add(-time.Minute), []specdispatch.Entry{
 			{Bead: "gt-old", Rig: "gastown", Class: specVerdictSkipped, Reason: "gt-old: no free seat this tick"},
 		})
-		// The ledger reads back, so the tick gets as far as saving it, and the
-		// directory takes no new file.
-		dir := filepath.Dir(specdispatch.LedgerPath(town))
-		//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit
-		if err := os.Chmod(dir, 0o555); err != nil {
-			t.Fatalf("making the ledger directory read-only: %v", err)
-		}
-		t.Cleanup(func() {
-			//testpolicy:allow no-exec-files — the fixture directory takes its search bit back so the temp tree can be walked
-			_ = os.Chmod(dir, 0o755)
-		})
 		var warn bytes.Buffer
-		got := runSpecDispatchCycle(specVerdictEnv(newTown(), town, &warn))
+		env := specVerdictEnv(newTown(), town, &warn)
+		// The save fails on its own terms: a read-only directory would make
+		// this case depend on the host's permissions, and pass or fail by
+		// whether the tests run as a user those permissions bind.
+		env.Ledger = &specLedgerFile{Save: func(string, *specdispatch.Ledger) error {
+			return errors.New("publishing the ledger: no space left on device")
+		}}
+		got := runSpecDispatchCycle(env)
 		if !reflect.DeepEqual(got, control) {
 			t.Errorf("the failed ledger changed the tick:\n got  %+v\n want %+v", got, control)
 		}
@@ -282,8 +284,10 @@ func TestSpecDispatchVerdictsLedgerFailureLeavesTheTick(t *testing.T) {
 			t.Errorf("warnings = %q, want one line saying the ledger was not recorded", warn.String())
 		}
 		l := readVerdictLedger(t, town)
-		if _, ok := l.Verdicts["gt-old"]; !ok {
+		if len(l.Verdicts) != 1 {
 			t.Errorf("the tick recorded onto a ledger it could not save: %+v", l.Verdicts)
+		} else if _, ok := l.Verdicts["gt-old"]; !ok {
+			t.Errorf("the tick replaced a ledger it could not save: %+v", l.Verdicts)
 		}
 	})
 
@@ -294,8 +298,9 @@ func TestSpecDispatchVerdictsLedgerFailureLeavesTheTick(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("making the ledger directory: %v", err)
 		}
-		// A ledger that cannot be read is not an empty one: recording onto it
-		// would reset the first-seen time of every verdict it holds.
+		// A ledger that does not parse can never be read again, so the tick
+		// replaces it and says so: leaving it would warn on every tick and
+		// heal nothing (gt-tcsnr).
 		corrupt := []byte(`{"verdicts": {"gt-old": {"bead": "gt-old", "class": "skipped"}}`)
 		if err := os.WriteFile(path, corrupt, 0o644); err != nil {
 			t.Fatalf("planting the corrupt ledger: %v", err)
@@ -305,11 +310,26 @@ func TestSpecDispatchVerdictsLedgerFailureLeavesTheTick(t *testing.T) {
 		if !reflect.DeepEqual(got, control) {
 			t.Errorf("the corrupt ledger changed the tick:\n got  %+v\n want %+v", got, control)
 		}
-		if lines := strings.Count(warn.String(), "\n"); lines != 1 || !strings.Contains(warn.String(), "verdict ledger not recorded") {
-			t.Errorf("warnings = %q, want one line saying the ledger was not recorded", warn.String())
+		if lines := strings.Count(warn.String(), "\n"); lines != 1 || !strings.Contains(warn.String(), "verdict ledger replaced") {
+			t.Errorf("warnings = %q, want one line saying the ledger was replaced", warn.String())
 		}
-		if after, err := os.ReadFile(path); err != nil || !bytes.Equal(after, corrupt) {
-			t.Errorf("the tick recorded onto a ledger it could not read: err %v\n got  %s\n want %s", err, after, corrupt)
+		if after, err := os.ReadFile(path); err != nil || bytes.Equal(after, corrupt) {
+			t.Errorf("the tick left the ledger it could not read in place: err %v\n got %s", err, after)
+		}
+		l := readVerdictLedger(t, town)
+		if _, ok := l.Verdicts["gt-old"]; ok {
+			t.Errorf("a verdict from the unparsable ledger survived it being replaced: %+v", l.Verdicts)
+		}
+		want := verdictClasses(control)
+		if len(want) == 0 {
+			t.Fatal("the control tick held no bead, so this case asserts nothing")
+		}
+		gotClasses := map[string]string{}
+		for bead, v := range l.Verdicts {
+			gotClasses[bead] = v.Class
+		}
+		if !reflect.DeepEqual(gotClasses, want) {
+			t.Errorf("verdicts = %+v, want the tick's own record %+v", gotClasses, want)
 		}
 	})
 
@@ -334,4 +354,109 @@ func TestSpecDispatchVerdictsLedgerFailureLeavesTheTick(t *testing.T) {
 			t.Errorf("warnings = %q, want one line saying the ledger was not recorded", warn.String())
 		}
 	})
+}
+
+// TestSpecDispatchVerdictsOneTickAtATime: two ticks — the daemon's and an
+// operator's hand-run — share one town's ledger. Each tick loads the file,
+// folds its verdicts and saves it, and that read-fold-save is one step under
+// the ledger's lock: a tick that is between its load and its save holds it, so
+// the other tick waits instead of loading a file the first is about to
+// replace. Without the lock both loads see the same file and one tick of every
+// verdict's count is lost (gt-tcsnr).
+func TestSpecDispatchVerdictsOneTickAtATime(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := specdispatch.LedgerPath(town)
+	inSave := make(chan struct{})
+	release := make(chan struct{})
+	var warn bytes.Buffer
+	env := specVerdictEnv(newFakeSpecTown(
+		cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"),
+		cleanSpec("gt-b", 1, "2026-09-29T10:01:00Z"),
+	), town, &warn)
+	env.Ledger = &specLedgerFile{Save: func(path string, l *specdispatch.Ledger) error {
+		close(inSave)
+		<-release
+		return l.Save(path)
+	}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSpecDispatchCycle(env)
+	}()
+	<-inSave
+	// The tick is mid-fold: the lock it took is still held, so the tick that
+	// comes next cannot take it and must wait its turn.
+	if unlock, held, err := lock.FlockTryAcquire(specVerdictLedgerLockPath(path)); err != nil || held {
+		if unlock != nil {
+			unlock()
+		}
+		t.Errorf("a second tick took the ledger lock while the first was saving: held=%v err=%v", held, err)
+	}
+	close(release)
+	<-done
+	if warn.Len() != 0 {
+		t.Errorf("warnings = %q, want none", warn.String())
+	}
+	l := readVerdictLedger(t, town)
+	if len(l.Verdicts) == 0 {
+		t.Errorf("the tick recorded no verdict through the lock: %+v", l.Verdicts)
+	}
+	if !l.SavedAt.Equal(specTestNow) {
+		t.Errorf("SavedAt = %v, want the tick's clock %v", l.SavedAt, specTestNow)
+	}
+}
+
+// TestSpecTickVerdictsLaterListWins: the class a bead in two lists keeps is
+// the later list's, and its reason is that list's line. The precedence is the
+// fold's list order, not the order the report happened to build the lists in
+// (gt-tcsnr).
+func TestSpecTickVerdictsLaterListWins(t *testing.T) {
+	t.Parallel()
+	report := specDispatchReport{
+		Skipped:  []specDispatchEntry{{Bead: "gt-a", Rig: "gastown", Line: "gt-a: skipped, no free seat"}},
+		Deferred: []specDispatchEntry{{Bead: "gt-a", Rig: "gastown", Line: "gt-a: deferred, the seat started too slowly"}},
+	}
+	got := specTickVerdicts(report)
+	if len(got) != 1 {
+		t.Fatalf("entries = %+v, want one per bead", got)
+	}
+	if got[0].Class != specVerdictDeferred || got[0].Reason != report.Deferred[0].Line {
+		t.Errorf("entry = %+v, want class %q and the deferred line %q", got[0], specVerdictDeferred, report.Deferred[0].Line)
+	}
+}
+
+// verdictClasses is specTickVerdicts(report) as bead → class: the ledger a
+// tick that decided what report decided should hold.
+func verdictClasses(report specDispatchReport) map[string]string {
+	out := map[string]string{}
+	for _, e := range specTickVerdicts(report) {
+		out[e.Bead] = e.Class
+	}
+	return out
+}
+
+// TestSpecDispatchAtRecordsTheTownsLedger runs the production tick, the one the
+// daemon calls, over a town and reads the ledger back from that town's runtime
+// directory: the town a tick records to is wired in runSpecDispatchAt, and a
+// tick that lost that wiring would record nothing at all (gt-tcsnr).
+func TestSpecDispatchAtRecordsTheTownsLedger(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, specTickSettings, specTickDaemon)
+	// The operator's hold stops the tick before it reads the roster, so this
+	// test needs no tmux server: the tick still returns through the defer that
+	// records the ledger, which is the wiring under test.
+	if err := os.WriteFile(dispatch.HoldFilePath(root), nil, 0o644); err != nil {
+		t.Fatalf("planting the operator hold: %v", err)
+	}
+	if _, err := runSpecDispatchAt(root); err != nil {
+		t.Fatalf("runSpecDispatchAt: %v", err)
+	}
+	if _, err := os.Stat(specdispatch.LedgerPath(root)); err != nil {
+		t.Fatalf("the tick wrote no ledger under the town it ran for: %v", err)
+	}
+	l := readVerdictLedger(t, root)
+	if l.SavedAt.IsZero() {
+		t.Fatalf("the ledger under %s holds no tick", specdispatch.LedgerPath(root))
+	}
 }

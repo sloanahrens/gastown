@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/models"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -1153,6 +1154,11 @@ type specDispatchEnv struct {
 	// LedgerWarn is where a ledger the tick could not read or write says so;
 	// nil is stderr. The tick itself never fails over it.
 	LedgerWarn io.Writer
+	// Ledger is the file operations the ledger is read and written through;
+	// nil is the town's own file (specdispatch.LoadLedger and Ledger.Save). A
+	// test that needs one of them to fail injects it here, instead of making
+	// the host's permissions decide whether the failure happens (gt-tcsnr).
+	Ledger *specLedgerFile
 	// Background hands the tick's slings back in the report instead of running
 	// them (specSlingJob): the daemon runs each one in the background, so the
 	// tick returns once it has planned (gt-5h70s).
@@ -1177,6 +1183,32 @@ type specDispatchEnv struct {
 	// lint's path check (gt-7t1im). Nil asks nothing, which is what a test of
 	// some other hold wants; the tick itself always wires it.
 	Target func(rig string) *specdispatch.TargetTree
+}
+
+// specLedgerFile is the verdict ledger's two file operations, so a test can
+// drive the tick through a read or a write that fails without depending on the
+// permissions of the host it runs on. A nil field is the real operation.
+type specLedgerFile struct {
+	Load func(path string) (*specdispatch.Ledger, error)
+	Save func(path string, ledger *specdispatch.Ledger) error
+}
+
+// ledgerFile is the env's ledger access, or the town's own file when it sets
+// none.
+func (e specDispatchEnv) ledgerFile() specLedgerFile {
+	f := specLedgerFile{
+		Load: specdispatch.LoadLedger,
+		Save: func(path string, l *specdispatch.Ledger) error { return l.Save(path) },
+	}
+	if e.Ledger != nil {
+		if e.Ledger.Load != nil {
+			f.Load = e.Ledger.Load
+		}
+		if e.Ledger.Save != nil {
+			f.Save = e.Ledger.Save
+		}
+	}
+	return f
 }
 
 // target asks the env for rig's target inventory. A tick built without the
@@ -1629,10 +1661,12 @@ const (
 
 // specTickVerdicts folds a finished tick's decisions into ledger entries: one
 // per bead the tick did not sling, carrying its class and the line it was
-// reported under as the reason. The lists are folded least specific first, so
-// a bead in two of them keeps the class that says what became of it — a
-// deferred entry stays in Skipped too, and deferred wins (gt-8thox). The order
-// is the report's, so the ledger reads back the same from run to run.
+// reported under as the reason. The precedence is the order of the lists
+// below: a bead in two of them takes the class and reason of the later one, so
+// a bead the tick both skipped and deferred is recorded as deferred (gt-8thox).
+// The fold is deterministic — each list keeps the report's order, and a bead
+// that appears twice keeps the slot of its first appearance — but the ledger
+// keys by bead, so nothing downstream depends on that order.
 func specTickVerdicts(report specDispatchReport) []specdispatch.Entry {
 	lists := []struct {
 		class   string
@@ -1672,26 +1706,57 @@ func specRecordTickVerdicts(env specDispatchEnv, report specDispatchReport) {
 	if warn == nil {
 		warn = os.Stderr
 	}
-	specRecordVerdictsTo(warn, env.TownRoot, env.Now(), specTickVerdicts(report))
+	specRecordVerdictsTo(warn, env.TownRoot, env.Now(), specTickVerdicts(report), env.ledgerFile())
+}
+
+// specVerdictLedgerLockPath is the flock that serializes the ticks writing one
+// town's ledger. It sits beside the ledger rather than on it, because the
+// ledger's own file is replaced by a rename, which would carry a lock taken on
+// it away with the old file.
+func specVerdictLedgerLockPath(path string) string { return path + ".flock" }
+
+// specLockVerdictLedger takes the lock that makes one town's load-fold-save a
+// single step. Two ticks — the daemon's and an operator's `gt spec dispatch` —
+// that each loaded before either saved would both fold onto the same file and
+// the second save would drop the first's sighting, losing a tick of every
+// verdict it held (gt-tcsnr).
+func specLockVerdictLedger(path string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("creating the ledger directory: %w", err)
+	}
+	return lock.FlockAcquire(specVerdictLedgerLockPath(path))
 }
 
 // specRecordVerdictsTo folds one tick's entries into the verdict ledger at
-// townRoot and saves it. A ledger it cannot read or write is one warning line
-// on warn and nothing more: the ledger reports on the tick, and a tick that
-// decided and slung correctly is not failed by the file it could not write.
-// A ledger that could not be read is left as it is rather than recorded onto
-// empty, because that would reset the first-seen time of every verdict it
-// holds (gt-8thox).
-func specRecordVerdictsTo(warn io.Writer, townRoot string, at time.Time, entries []specdispatch.Entry) {
+// townRoot and saves it, all under the ledger's lock. A ledger it cannot read
+// or write is one warning line on warn and nothing more: the ledger reports on
+// the tick, and a tick that decided and slung correctly is not failed by the
+// file it could not write. A ledger it could not read is left as it is rather
+// than recorded onto empty, because that would reset the first-seen time of
+// every verdict it holds (gt-8thox). A ledger that does not parse is the
+// exception: it can never be read again, so the tick replaces it and says so,
+// where leaving it would warn on every tick and heal nothing (gt-tcsnr).
+func specRecordVerdictsTo(warn io.Writer, townRoot string, at time.Time, entries []specdispatch.Entry, file specLedgerFile) {
 	path := specdispatch.LedgerPath(townRoot)
-	ledger, err := specdispatch.LoadLedger(path)
+	unlock, err := specLockVerdictLedger(path)
 	if err != nil {
 		fmt.Fprintf(warn, "spec dispatch: verdict ledger not recorded: %v\n", err)
 		return
 	}
-	ledger.Record(at, entries)
-	if err := ledger.Save(path); err != nil {
+	defer unlock()
+	ledger, err := file.Load(path)
+	var corrupt *specdispatch.CorruptLedgerError
+	if err != nil && !errors.As(err, &corrupt) {
 		fmt.Fprintf(warn, "spec dispatch: verdict ledger not recorded: %v\n", err)
+		return
+	}
+	ledger.Record(at, entries)
+	if err := file.Save(path, ledger); err != nil {
+		fmt.Fprintf(warn, "spec dispatch: verdict ledger not recorded: %v\n", err)
+		return
+	}
+	if corrupt != nil {
+		fmt.Fprintf(warn, "spec dispatch: verdict ledger replaced: %v\n", err)
 	}
 }
 
