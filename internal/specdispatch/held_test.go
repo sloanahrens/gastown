@@ -441,12 +441,15 @@ func TestHeldOverlapReadOnlyMarkerDecidesTheHold(t *testing.T) {
 // the marker drops only the path it follows (gt-5v13p).
 func TestHeldOverlapHoldsOnTheUnmarkedPath(t *testing.T) {
 	t.Parallel()
-	const doc = "docs/testing.md"
+	// Both paths are code the hold would otherwise count: a docs path the
+	// Constraints section does not list is dropped whatever the marker says, so
+	// it could not show the marker at work.
+	const marked = "internal/cmd/spec.go"
 	const code = "internal/specdispatch/held.go"
 	const seat = "gastown/polecats/capable"
-	paths := func(text string) []string { return HoldFiles([]string{code, doc}, nil, text) }
-	held := []HeldBead{{ID: "gt-first", Assignee: seat, Paths: paths("Change " + doc + " and " + code + ".")}}
-	candidate := paths("Read " + doc + " (read-only), then change " + code + ".")
+	paths := func(text string) []string { return HoldFiles([]string{marked, code}, nil, text) }
+	held := []HeldBead{{ID: "gt-first", Assignee: seat, Paths: paths("Change " + marked + " and " + code + ".")}}
+	candidate := paths("Read " + marked + " (read-only), then change " + code + ".")
 	want := "gt-first (held by " + seat + ") is already hooked to a working seat and names " + code + "; the hold lifts when that bead closes"
 	if got := HeldOverlap(candidate, nil, 2, held).Reason; got != want {
 		t.Errorf("HeldOverlap = %q, want %q", got, want)

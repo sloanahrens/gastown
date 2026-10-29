@@ -119,10 +119,7 @@ decides and reports without slinging, labeling or commenting.
    already hooked to a working seat`; a P0 or P1 candidate takes the seat anyway
    and the skip is reported as a bypass (gt-iydx1). Only a polecat's bead holds:
    a crew or operator session's bead, and a handoff bead whose notes name every
-   file the run read, are not work on the candidate's files (gt-asvow). A bead
-   that cites a document as context marks it `(read-only)` right after the
-   path, and every mention has to carry the marker: two beads that read one
-   document that way are not held against each other (gt-5v13p).
+   file the run read, are not work on the candidate's files (gt-asvow).
 6. A bead that takes a seat and matches the overrun-stop box is slung anyway
    and wears one comment saying so (see below).
 
