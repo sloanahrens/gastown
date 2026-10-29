@@ -32,6 +32,10 @@ const deferredReason = "report-only target: nothing is deleted until the operato
 // ledger line, so an apply with nowhere to record it refuses to run.
 var errNoLedger = errors.New("sizes apply: no ledger configured")
 
+// errEmptyRoot reports a Config whose Town or Home is blank. Listing from a blank
+// root reads the working directory, so a plan or measure refuses to run.
+var errEmptyRoot = errors.New("sizes: town and home must both be set")
+
 // Compile-time check that the sizes target satisfies the diskmaint contract.
 var _ diskmaint.Target = (*Target)(nil)
 
@@ -180,18 +184,21 @@ func (t *Target) scan(ctx context.Context) ([]row, error) {
 }
 
 // paths lists the paths the target reads, sorted: the Dolt .bak and cache-trash
-// directories under the town, and gt-backups under home when it exists. A
-// gt-backups that cannot be stat'd for a reason other than absence is still
+// directories directly under the town, and gt-backups under home when it exists.
+// A blank Town or Home is refused, because it would join to a relative path and
+// list the working directory. A town that exists but cannot be read fails the
+// plan, where it used to list nothing; a town that does not exist lists nothing.
+// A gt-backups that cannot be stat'd for a reason other than absence is still
 // listed, so its row says unreadable.
 func (t *Target) paths() ([]string, error) {
+	if t.cfg.Town == "" || t.cfg.Home == "" {
+		return nil, errEmptyRoot
+	}
 	var out []string
-	for _, pattern := range []string{
-		filepath.Join(t.cfg.Town, ".dolt-data.bak-*"),
-		filepath.Join(t.cfg.Town, ".dolt-remote-cache-trash-*"),
-	} {
-		matches, err := filepath.Glob(pattern)
+	for _, prefix := range []string{".dolt-data.bak-", ".dolt-remote-cache-trash-"} {
+		matches, err := listPrefixed(t.cfg.Town, prefix)
 		if err != nil {
-			return nil, fmt.Errorf("list %s: %w", pattern, err)
+			return nil, fmt.Errorf("list town: %w", err)
 		}
 		out = append(out, matches...)
 	}
@@ -200,6 +207,27 @@ func (t *Target) paths() ([]string, error) {
 		out = append(out, backups)
 	}
 	slices.Sort(out)
+	return out, nil
+}
+
+// listPrefixed returns the entries of dir whose names start with prefix, joined
+// to dir. The directory is read by name, not matched as a glob, so a dir whose
+// own path holds glob characters is read as text. A dir that does not exist
+// lists nothing; any other read error is returned.
+func listPrefixed(dir, prefix string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
+	}
 	return out, nil
 }
 
