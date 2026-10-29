@@ -72,6 +72,13 @@ func BurstInterval(idlePct, execTaxMS *float64) time.Duration {
 // one-second window, one top, one daemon-log tail and one bd read per rig for
 // the landing queue: a price worth paying while the host is pressed, and what
 // BurstInterval's slow cadence keeps from being paid all day.
+//
+// A daemon in a container cannot take the host readings with top and ps, so in
+// container mode they come from the host agent's probe file instead: IdlePct,
+// TopConsumers and ExecTaxMS hold the file's readings, HostAgeS says how far
+// before TS the file was stamped, and a reading the file could not give is null
+// with its reason in HostErrors. Outside container mode those two fields are
+// absent and the three readings are taken from the host at TS.
 type BurstRow struct {
 	// V is the schema version, BurstVersion.
 	V int `json:"v"`
@@ -100,6 +107,40 @@ type BurstRow struct {
 	// Running is the test runs in progress, empty when the log was read and
 	// nothing was running, and nil when it could not be read.
 	Running []BurstRun `json:"running"`
+	// HostErrors names, per host reading this row could not take from an
+	// outside source (BurstHostReading.Errors), why it holds no number. It is
+	// absent outside container mode, where the host's own commands answer for
+	// a failed reading with the sampler's log line alone.
+	HostErrors map[string]string `json:"host_errors,omitempty"`
+	// HostAgeS is how many seconds before TS the host agent read the idle
+	// share and the consumers this row holds (BurstHostReading.AgeS): the two
+	// describe the host then, not at TS, and IntervalS is taken from the idle
+	// share at that age. It is absent outside container mode, where both
+	// readings are taken at TS, and on a row the file answered no reading for,
+	// which HostErrors explains.
+	HostAgeS *float64 `json:"host_age_s,omitempty"`
+}
+
+// BurstHostReading is a burst sample's host readings taken from outside this
+// process: the three a sample otherwise takes from top, ps and the daemon's
+// health file, each absent when it could not be read.
+type BurstHostReading struct {
+	// IdlePct is the host's idle share.
+	IdlePct *float64
+	// Consumers are the busiest processes in cores, empty when the sample was
+	// taken and nothing burned a core and nil when it could not be taken.
+	Consumers []BurstConsumer
+	// ExecTaxMS is the exec tax measured and ExecTaxAgeS how old that
+	// measurement was, both nil when the tax was not read.
+	ExecTaxMS   *float64
+	ExecTaxAgeS *float64
+	// AgeS is how many seconds before the sample the source read IdlePct and
+	// Consumers, and is written into the row's HostAgeS. nil when the source
+	// read them at the sample's own instant.
+	AgeS *float64
+	// Errors names why a reading is absent, keyed by the row field it would
+	// have filled, and is written into the row's HostErrors.
+	Errors map[string]string
 }
 
 // BurstConsumer is one process name and the cores it burned over the sample's
@@ -161,10 +202,19 @@ func SampleBurst(ctx context.Context, env Env) (BurstRow, error) {
 		V:  BurstVersion,
 		TS: now.UTC().Format(time.RFC3339),
 	}
-	row.IdlePct = burstIdle(ctx, env)
-	row.ExecTaxMS, row.ExecTaxAgeS = burstExecTax(env, now)
-	if consumers, ok := burstConsumers(ctx, env); ok {
-		row.TopConsumers = consumers
+	if env.BurstHost != nil {
+		host := env.BurstHost(now)
+		row.IdlePct = host.IdlePct
+		row.ExecTaxMS, row.ExecTaxAgeS = host.ExecTaxMS, host.ExecTaxAgeS
+		row.TopConsumers = burstRankedConsumers(host.Consumers, burstTopN)
+		row.HostErrors = host.Errors
+		row.HostAgeS = host.AgeS
+	} else {
+		row.IdlePct = burstIdle(ctx, env)
+		row.ExecTaxMS, row.ExecTaxAgeS = burstExecTax(env, now)
+		if consumers, ok := burstConsumers(ctx, env); ok {
+			row.TopConsumers = consumers
+		}
 	}
 	polecats, running, logRead := burstLogReadings(env, now)
 	row.Polecats = polecats
@@ -294,16 +344,29 @@ func burstTopConsumers(cols map[string]any, n int) []BurstConsumer {
 		}
 		out = append(out, BurstConsumer{Name: name, Cores: cores})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Cores != out[j].Cores {
-			return out[i].Cores > out[j].Cores
-		}
-		return out[i].Name < out[j].Name
-	})
-	if len(out) > n {
-		out = out[:n]
+	return burstRankedConsumers(out, n)
+}
+
+// burstRankedConsumers orders consumers the way the row names them: the
+// busiest first, the name breaking a tie, and at most n. The ranking is a copy,
+// so a caller's list keeps its order. nil stays nil and an empty list stays
+// empty: one is a list that was never taken, the other a host nothing burned.
+func burstRankedConsumers(consumers []BurstConsumer, n int) []BurstConsumer {
+	if consumers == nil {
+		return nil
 	}
-	return out
+	ranked := make([]BurstConsumer, len(consumers))
+	copy(ranked, consumers)
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].Cores != ranked[j].Cores {
+			return ranked[i].Cores > ranked[j].Cores
+		}
+		return ranked[i].Name < ranked[j].Name
+	})
+	if len(ranked) > n {
+		ranked = ranked[:n]
+	}
+	return ranked
 }
 
 // burstLogTailBytes is how much of the daemon log a row reads: its newest

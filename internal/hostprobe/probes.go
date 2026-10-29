@@ -58,6 +58,12 @@ type Probes struct {
 	ExecTaxMS    Field[float64]    `json:"exec_tax_ms"`
 }
 
+// Path is the probe file under townRoot: the host agent writes it there and a
+// container daemon reads it, so both resolve one location.
+func Path(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "host", "probes.json")
+}
+
 // probeFileMode is the permissions the probe file is published with: the host
 // agent writes it and the daemon, which in container mode is another user,
 // reads it.

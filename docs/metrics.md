@@ -34,6 +34,10 @@ A source fills one column group of the snapshot. Add one only when the move need
 
 Done when the new source's columns appear in a snapshot row, and `git diff` shows the source as the only change.
 
+## Burst rows
+
+Before writing a reader of `.runtime/metrics/bursts.jsonl`, read the `BurstRow` doc comment in `internal/metrics/burst.go`: it is the schema's one source, and it names the container-mode fields (`host_errors`, `host_age_s`) and when a row carries them.
+
 ## The additive rule
 
 Never rename or remove a column in the log. The join and the backtest read columns by name: a snapshot group becomes `snap_<group>_<column>`, and placement becomes `snap_place_<component>`. A rename splits one series into two. A removed column leaves every later row without a value for it.

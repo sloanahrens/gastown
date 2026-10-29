@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/jonboulle/clockwork"
 
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/hostprobe"
 	"github.com/steveyegge/gastown/internal/metrics"
 	"github.com/steveyegge/gastown/internal/resourcesampler"
 )
@@ -578,4 +581,515 @@ func TestRunStartsTheBurstSampler(t *testing.T) {
 		t.Fatal("Run did not return after the daemon context ended")
 	}
 	waitForSignal(t, waitEnded, "Run returned without stopping the burst sampler's loop")
+}
+
+// burstProbeFixture is a probe file a host agent writes at testEpoch: the host
+// calm at 42.5 percent idle and a 12.5 ms exec tax, with four consumers written
+// in no order, so a row that keeps the file's order is not the ranking the row
+// promises.
+func burstProbeFixture(at time.Time) hostprobe.Probes {
+	return hostprobe.Probes{
+		At:         at,
+		CPUIdlePct: hostprobe.Field[float64]{Value: 42.5},
+		TopConsumers: hostprobe.Field[[]hostprobe.Consumer]{Value: []hostprobe.Consumer{
+			{Name: "gt", CPU: 40},
+			{Name: "dolt", CPU: 250},
+			{Name: "BDLDaemon", CPU: 90},
+			{Name: "Google Chrome", CPU: 10},
+		}},
+		ExecTaxMS: hostprobe.Field[float64]{Value: 12.5},
+	}
+}
+
+// writeBurstProbe stages the probe file under town the way the host agent
+// writes it.
+func writeBurstProbe(t *testing.T, town string, p hostprobe.Probes) {
+	t.Helper()
+	path := hostprobe.Path(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating the host agent's directory: %v", err)
+	}
+	if err := hostprobe.Write(path, p); err != nil {
+		t.Fatalf("writing the probe file: %v", err)
+	}
+}
+
+// burstContainerGetenv is the read containerModeFromEnv takes of a daemon in
+// container mode: the variable the rendered compose file sets answers,
+// everything else is the empty environment.
+func burstContainerGetenv(key string) string {
+	if key == config.ContainerModeEnv {
+		return config.SupervisorContainer
+	}
+	return ""
+}
+
+// burstInContainer puts a test's daemon in the town's container. Container mode
+// is settled once on the daemon (New asks the process environment in
+// production), so a test says it here rather than letting the environment the
+// tests run under decide.
+func burstInContainer(d *Daemon) *Daemon {
+	d.containerMode = true
+	return d
+}
+
+// burstTestTownEnv is burstTestEnv plus a daemon log holding a dispatcher
+// roster two minutes before testEpoch, so a row the probe file cannot fill
+// still has the town's own reading.
+func burstTestTownEnv(clk clockwork.Clock) func(string) metrics.Env {
+	base := burstTestEnv(clk)
+	return func(town string) metrics.Env {
+		env := base(town)
+		env.Tail = func(string, int64) ([]byte, error) {
+			return []byte("2026/01/02 15:03:05 spec_dispatch: tick: 1 candidate(s), roster deepseek-flash 2/2, claude-sonnet 1/2, 1 dispatched, 1 skipped\n"), nil
+		}
+		return env
+	}
+}
+
+// burstSampleOnce starts the sampler, waits for its first sample and stops it.
+// The fake clock never advances, so the loop parks after that row and the stop
+// joins a loop with nothing left to take.
+func burstSampleOnce(t *testing.T, d *Daemon) {
+	t.Helper()
+	run := d.burstSeams.run
+	if run == nil {
+		run = metrics.RunBurst
+	}
+	sampled := make(chan struct{}, 1)
+	d.burstSeams.run = func(ctx context.Context, env metrics.Env) (metrics.BurstRow, string, error) {
+		row, path, err := run(ctx, env)
+		select {
+		case sampled <- struct{}{}:
+		default:
+		}
+		return row, path, err
+	}
+	stop := d.startBurstSamplerIfEnabled()
+	waitForSignal(t, sampled, "the sampler never took a sample")
+	stop()
+}
+
+// TestBurstSamplerReadsTheProbeFileInContainerMode is the bead's first
+// acceptance test: in container mode the production sample fills the row's
+// existing fields from the host agent's probe file. The fake host's own commands
+// would read 0.29 percent idle, so a row filled any other way fails here.
+func TestBurstSamplerReadsTheProbeFileInContainerMode(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	clk := newFixedClock()
+	d := burstInContainer(burstTestDaemon(t, town, clk, io.Discard))
+	writeBurstProbe(t, town, burstProbeFixture(testEpoch))
+	d.burstSeams = burstSamplerSeams{
+		env: burstTestTownEnv(clk),
+	}
+	burstSampleOnce(t, d)
+
+	rows := readBurstRows(t, town)
+	if len(rows) != 1 {
+		t.Fatalf("the burst log holds %d rows, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.IdlePct == nil || *row.IdlePct != 42.5 {
+		t.Errorf("idle_pct = %v, want the probe file's 42.5", row.IdlePct)
+	}
+	if row.ExecTaxMS == nil || *row.ExecTaxMS != 12.5 {
+		t.Errorf("exec_tax_ms = %v, want the probe file's 12.5", row.ExecTaxMS)
+	}
+	if row.ExecTaxAgeS == nil || *row.ExecTaxAgeS != 0 {
+		t.Errorf("exec_tax_age_s = %v, want 0: the file was stamped at the sample's own instant", row.ExecTaxAgeS)
+	}
+	if row.HostAgeS == nil || *row.HostAgeS != 0 {
+		t.Errorf("host_age_s = %v, want 0: the file was stamped at the sample's own instant", row.HostAgeS)
+	}
+	wantConsumers := []metrics.BurstConsumer{
+		{Name: "dolt", Cores: 2.5},
+		{Name: "BDLDaemon", Cores: 0.9},
+		{Name: "gt", Cores: 0.4},
+	}
+	if !reflect.DeepEqual(row.TopConsumers, wantConsumers) {
+		t.Errorf("top_consumers = %+v, want the file's three busiest as %+v", row.TopConsumers, wantConsumers)
+	}
+	if len(row.HostErrors) != 0 {
+		t.Errorf("host_errors = %v, want none: the file answered every host reading", row.HostErrors)
+	}
+	if want := metrics.BurstSlowInterval.Seconds(); row.IntervalS != want {
+		t.Errorf("interval_s = %v, want %v: 42.5 percent idle under a 12.5 ms tax is a calm host", row.IntervalS, want)
+	}
+}
+
+// TestBurstSamplerRecordsTheProbeFilesAge pins the age a file's readings carry:
+// a file the sampler accepts may be up to burstProbeMaxAge old, so idle_pct and
+// top_consumers describe the host then rather than at the row's ts, and the row
+// says how far before it they were read. The file is ninety seconds old and the
+// only row must say so beside calm readings, so a row that drops the age fails
+// here.
+func TestBurstSamplerRecordsTheProbeFilesAge(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	clk := newFixedClock()
+	d := burstInContainer(burstTestDaemon(t, town, clk, io.Discard))
+	writeBurstProbe(t, town, burstProbeFixture(testEpoch.Add(-90*time.Second)))
+	d.burstSeams = burstSamplerSeams{
+		env: burstTestTownEnv(clk),
+	}
+	burstSampleOnce(t, d)
+
+	rows := readBurstRows(t, town)
+	if len(rows) != 1 {
+		t.Fatalf("the burst log holds %d rows, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.HostAgeS == nil || *row.HostAgeS != 90 {
+		t.Errorf("host_age_s = %v, want 90: the file was stamped ninety seconds before the sample", row.HostAgeS)
+	}
+	if row.ExecTaxAgeS == nil || *row.ExecTaxAgeS != 90 {
+		t.Errorf("exec_tax_age_s = %v, want 90: the tax shares the file's stamp", row.ExecTaxAgeS)
+	}
+	if row.IdlePct == nil || *row.IdlePct != 42.5 {
+		t.Errorf("idle_pct = %v, want the file's 42.5: an accepted file's reading still fills the row", row.IdlePct)
+	}
+	if want := metrics.BurstSlowInterval.Seconds(); row.IntervalS != want {
+		t.Errorf("interval_s = %v, want %v: 42.5 percent idle is a calm host", row.IntervalS, want)
+	}
+}
+
+// TestBurstSamplerUnusableProbeFileMarksTheRow is the bead's second acceptance
+// test: a file the daemon cannot use leaves the three host fields null with the
+// reason in the row's host_errors and no number invented for them, and the
+// town's own reading still makes a row.
+func TestBurstSamplerUnusableProbeFileMarksTheRow(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		stage  func(t *testing.T, town string)
+		reason string
+	}{
+		{
+			name: "a stale file",
+			stage: func(t *testing.T, town string) {
+				writeBurstProbe(t, town, burstProbeFixture(testEpoch.Add(-4*time.Minute)))
+			},
+			reason: "older than",
+		},
+		{
+			name:   "a missing file",
+			stage:  func(*testing.T, string) {},
+			reason: "no such file",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			clk := newFixedClock()
+			sink := newCensusLogSink()
+			d := burstInContainer(burstTestDaemon(t, town, clk, sink))
+			tt.stage(t, town)
+			d.burstSeams = burstSamplerSeams{
+				env: burstTestTownEnv(clk),
+			}
+			burstSampleOnce(t, d)
+
+			rows := readBurstRows(t, town)
+			if len(rows) != 1 {
+				t.Fatalf("the burst log holds %d rows, want 1: the town's own reading still makes a row", len(rows))
+			}
+			row := rows[0]
+			if row.IdlePct != nil || row.ExecTaxMS != nil || row.TopConsumers != nil {
+				t.Errorf("idle_pct = %v, exec_tax_ms = %v, top_consumers = %+v, want all null: the file holds no reading of now",
+					row.IdlePct, row.ExecTaxMS, row.TopConsumers)
+			}
+			if row.ExecTaxAgeS != nil {
+				t.Errorf("exec_tax_age_s = %v, want null beside a tax that was never read", row.ExecTaxAgeS)
+			}
+			if row.HostAgeS != nil {
+				t.Errorf("host_age_s = %v, want null: the file answered no reading to be an age for", row.HostAgeS)
+			}
+			reason, ok := row.HostErrors[burstProbeFileKey]
+			if !ok || !strings.Contains(reason, tt.reason) {
+				t.Errorf("host_errors = %v, want an entry under %q naming a file %s", row.HostErrors, burstProbeFileKey, tt.reason)
+			}
+			if want := metrics.BurstFastInterval.Seconds(); row.IntervalS != want {
+				t.Errorf("interval_s = %v, want %v: a host the file cannot describe is not a calm one", row.IntervalS, want)
+			}
+			if got := sink.countContaining("burst_sampler: "); got != 1 {
+				t.Errorf("the sampler logged the unusable file %d times, want once: %q", got, burstTestLogLines(sink))
+			}
+		})
+	}
+}
+
+// TestBurstSamplerProbeFieldErrorsCostThatFieldOnly pins each of the file's
+// per-field failures: a command the agent could not run, or a consumer list it
+// wrote null, leaves that one reading null with the file's reason under that
+// field's host_errors key, and the file's other readings still fill the row.
+// Every case breaks one field, so a reading that costs another its value — or a
+// broken field that writes a zero instead of leaving null — fails on the fields
+// the case left whole.
+func TestBurstSamplerProbeFieldErrorsCostThatFieldOnly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		broken string
+		stage  func(*hostprobe.Probes)
+		key    string
+		reason string
+	}{
+		{
+			name:   "an idle share the agent could not read",
+			broken: "idle",
+			stage: func(p *hostprobe.Probes) {
+				p.CPUIdlePct = hostprobe.Field[float64]{Err: "top: the agent could not read the host's CPU"}
+			},
+			key:    burstProbeIdleKey,
+			reason: "top: the agent could not read the host's CPU",
+		},
+		{
+			name:   "a consumer list the agent could not read",
+			broken: "consumers",
+			stage: func(p *hostprobe.Probes) {
+				p.TopConsumers = hostprobe.Field[[]hostprobe.Consumer]{Err: "ps: the agent could not read the process table"}
+			},
+			key:    burstProbeConsumersKey,
+			reason: "ps: the agent could not read the process table",
+		},
+		{
+			name:   "a consumer list written null",
+			broken: "consumers",
+			stage: func(p *hostprobe.Probes) {
+				p.TopConsumers = hostprobe.Field[[]hostprobe.Consumer]{}
+			},
+			key:    burstProbeConsumersKey,
+			reason: "no consumer list",
+		},
+		{
+			name:   "an exec tax the agent could not measure",
+			broken: "tax",
+			stage: func(p *hostprobe.Probes) {
+				p.ExecTaxMS = hostprobe.Field[float64]{Err: "exec: the agent could not measure the tax"}
+			},
+			key:    burstProbeTaxKey,
+			reason: "exec: the agent could not measure the tax",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			clk := newFixedClock()
+			d := burstInContainer(burstTestDaemon(t, town, clk, io.Discard))
+			p := burstProbeFixture(testEpoch)
+			tt.stage(&p)
+			writeBurstProbe(t, town, p)
+			d.burstSeams = burstSamplerSeams{
+				env: burstTestTownEnv(clk),
+			}
+			burstSampleOnce(t, d)
+
+			rows := readBurstRows(t, town)
+			if len(rows) != 1 {
+				t.Fatalf("the burst log holds %d rows, want 1", len(rows))
+			}
+			row := rows[0]
+			if len(row.HostErrors) != 1 {
+				t.Errorf("host_errors = %v, want one entry: only the broken field has a reason", row.HostErrors)
+			}
+			if got := row.HostErrors[tt.key]; !strings.Contains(got, tt.reason) {
+				t.Errorf("host_errors[%q] = %q, want the field's reason naming %q", tt.key, got, tt.reason)
+			}
+			switch tt.broken {
+			case "idle":
+				if row.IdlePct != nil {
+					t.Errorf("idle_pct = %v, want null: the agent could not read it", *row.IdlePct)
+				}
+			case "consumers":
+				if row.TopConsumers != nil {
+					t.Errorf("top_consumers = %+v, want null: the file gave no list", row.TopConsumers)
+				}
+			case "tax":
+				if row.ExecTaxMS != nil || row.ExecTaxAgeS != nil {
+					t.Errorf("exec_tax_ms = %v, exec_tax_age_s = %v, want both null: the tax was never measured",
+						row.ExecTaxMS, row.ExecTaxAgeS)
+				}
+			}
+			if tt.broken != "idle" {
+				if row.IdlePct == nil || *row.IdlePct != 42.5 {
+					t.Errorf("idle_pct = %v, want the file's 42.5: a broken %s took the idle share with it", row.IdlePct, tt.broken)
+				}
+			}
+			if tt.broken != "consumers" && len(row.TopConsumers) != 3 {
+				t.Errorf("top_consumers = %+v, want the file's three busiest: a broken %s took them with it",
+					row.TopConsumers, tt.broken)
+			}
+			if tt.broken != "tax" {
+				if row.ExecTaxMS == nil || *row.ExecTaxMS != 12.5 {
+					t.Errorf("exec_tax_ms = %v, want the file's 12.5: a broken %s took the tax with it", row.ExecTaxMS, tt.broken)
+				}
+			}
+			if row.HostAgeS == nil || *row.HostAgeS != 0 {
+				t.Errorf("host_age_s = %v, want 0: the file was read, whatever one field of it could not answer", row.HostAgeS)
+			}
+		})
+	}
+}
+
+// TestBurstSamplerOutsideContainerModeUsesTheHostsCommands is the bead's third
+// acceptance test: the probe file is the container's source, so a daemon on the
+// host samples top exactly as before even with a fresh file in the town.
+func TestBurstSamplerOutsideContainerModeUsesTheHostsCommands(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	clk := newFixedClock()
+	d := burstTestDaemon(t, town, clk, io.Discard)
+	writeBurstProbe(t, town, burstProbeFixture(testEpoch))
+	d.burstSeams = burstSamplerSeams{
+		env: burstTestEnv(clk),
+	}
+	burstSampleOnce(t, d)
+
+	rows := readBurstRows(t, town)
+	if len(rows) != 1 {
+		t.Fatalf("the burst log holds %d rows, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.IdlePct == nil || *row.IdlePct != 0.29 {
+		t.Errorf("idle_pct = %v, want top's 0.29: the file answers the container and not this daemon", row.IdlePct)
+	}
+	if row.ExecTaxMS != nil {
+		t.Errorf("exec_tax_ms = %v, want null: this host wrote no health file", row.ExecTaxMS)
+	}
+	if row.HostErrors != nil {
+		t.Errorf("host_errors = %v, want none: no file was read", row.HostErrors)
+	}
+	if row.HostAgeS != nil {
+		t.Errorf("host_age_s = %v, want none: top read the host at the sample's own instant", row.HostAgeS)
+	}
+}
+
+// TestContainerModeFromEnv pins the one read that decides container mode: the
+// value the rendered compose file sets answers yes, and every other value of
+// the variable, the empty environment included, is the host.
+func TestContainerModeFromEnv(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		getenv func(string) string
+		want   bool
+	}{
+		{name: "the compose file's container", getenv: burstContainerGetenv, want: true},
+		{name: "launchd", getenv: func(string) string { return config.SupervisorLaunchd }, want: false},
+		{name: "an empty environment", getenv: func(string) string { return "" }, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := containerModeFromEnv(tt.getenv); got != tt.want {
+				t.Errorf("containerModeFromEnv = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBurstSamplerLogsAStaleProbeFileOnce pins the log's dedup over a file that
+// stays stale: the age it reports grows with every sample, and the failure is
+// still one line rather than one per tick.
+func TestBurstSamplerLogsAStaleProbeFileOnce(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	clk := newFixedClock()
+	sink := newCensusLogSink()
+	d := burstInContainer(burstTestDaemon(t, town, clk, sink))
+	writeBurstProbe(t, town, burstProbeFixture(testEpoch.Add(-10*time.Minute)))
+
+	samples := 0
+	third := make(chan struct{})
+	d.burstSeams = burstSamplerSeams{
+		env: burstTestTownEnv(clk),
+		run: func(ctx context.Context, env metrics.Env) (metrics.BurstRow, string, error) {
+			samples++
+			if samples == 3 {
+				close(third)
+			}
+			return metrics.RunBurst(ctx, env)
+		},
+	}
+	// The sampler's one goroutine keeps the count, so neither it nor the
+	// signal needs a lock.
+	stop := d.startBurstSamplerIfEnabled()
+	driveClock(t, clk, metrics.BurstFastInterval, third)
+	stop()
+
+	if samples != 3 {
+		t.Fatalf("the sampler took %d samples, want 3", samples)
+	}
+	if got := sink.countContaining("burst_sampler: "); got != 1 {
+		t.Errorf("the sampler logged the stale file %d times over three samples, want once: %q",
+			got, burstTestLogLines(sink))
+	}
+}
+
+// TestBurstSamplerLogsAProbeFailureAgainAfterRecovery pins the dedup's other
+// half: a good sample forgets the failure's class, so a file that goes stale
+// again is logged again rather than swallowed as the same failure. One stamp
+// serves all three samples and the sample's own clock decides its age
+// (testEpoch: ten minutes old, refused; eight minutes back: two minutes old,
+// accepted; testEpoch again: refused), which changes freshness without the test
+// rewriting the file from the sampler's goroutine.
+func TestBurstSamplerLogsAProbeFailureAgainAfterRecovery(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	clk := newFixedClock()
+	sink := newCensusLogSink()
+	d := burstInContainer(burstTestDaemon(t, town, clk, sink))
+	writeBurstProbe(t, town, burstProbeFixture(testEpoch.Add(-10*time.Minute)))
+
+	nows := []time.Time{
+		testEpoch,
+		testEpoch.Add(-8 * time.Minute),
+		testEpoch,
+	}
+	samples := 0
+	third := make(chan struct{})
+	d.burstSeams = burstSamplerSeams{
+		env: func(town string) metrics.Env {
+			env := burstTestTownEnv(clk)(town)
+			if samples < len(nows) {
+				at := nows[samples]
+				env.Now = func() time.Time { return at }
+			}
+			samples++
+			return env
+		},
+		run: func(ctx context.Context, env metrics.Env) (metrics.BurstRow, string, error) {
+			row, path, err := metrics.RunBurst(ctx, env)
+			if samples == len(nows) {
+				close(third)
+			}
+			return row, path, err
+		},
+	}
+	// The sampler's one goroutine keeps the count, so neither it nor the
+	// signal needs a lock.
+	stop := d.startBurstSamplerIfEnabled()
+	driveClock(t, clk, metrics.BurstFastInterval, third)
+	stop()
+
+	if got := sink.countContaining("burst_sampler: "); got != 2 {
+		t.Fatalf("the sampler logged the file %d times, want 2: one line per stale stretch and none while it was fresh: %q",
+			got, burstTestLogLines(sink))
+	}
+	rows := readBurstRows(t, town)
+	if len(rows) != 3 {
+		t.Fatalf("the burst log holds %d rows, want 3: a refused file still leaves the town's own reading", len(rows))
+	}
+	if rows[0].HostAgeS != nil || rows[2].HostAgeS != nil {
+		t.Errorf("host_age_s = %v and %v, want null on both rows a refused file made", rows[0].HostAgeS, rows[2].HostAgeS)
+	}
+	if rows[1].IdlePct == nil || *rows[1].IdlePct != 42.5 {
+		t.Errorf("idle_pct = %v on the sample after recovery, want the file's 42.5", rows[1].IdlePct)
+	}
+	if rows[1].HostAgeS == nil || *rows[1].HostAgeS != 120 {
+		t.Errorf("host_age_s = %v on the sample after recovery, want 120: the file was two minutes old there", rows[1].HostAgeS)
+	}
 }
