@@ -212,6 +212,24 @@ func TestParseRejectsBadValues(t *testing.T) {
 	}
 }
 
+// TestParseHelp holds both spellings of the help request: parsing stops and
+// returns no options, and the command prints the usage text and exits 0.
+func TestParseHelp(t *testing.T) {
+	t.Parallel()
+	for _, flag := range []string{"-h", "--help"} {
+		t.Run(flag, func(t *testing.T) {
+			t.Parallel()
+			opts, err := Parse([]string{flag}, env(nil))
+			if !errors.Is(err, ErrHelp) {
+				t.Fatalf("Parse(%s) = %+v, %v, want ErrHelp", flag, opts, err)
+			}
+			if opts != nil {
+				t.Errorf("Parse(%s) = %+v, want no options with the help request", flag, *opts)
+			}
+		})
+	}
+}
+
 // TestRoleScopes pins the four roles' scope lists, which are what a bot can
 // reach, and the unknown role that provisions nothing.
 func TestRoleScopes(t *testing.T) {
