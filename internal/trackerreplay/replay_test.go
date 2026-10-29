@@ -260,7 +260,7 @@ func TestReplayReturnsAFeedReadFailureWithoutRunningAnything(t *testing.T) {
 	t.Parallel()
 	readErr := errors.New("tracker unreachable")
 	run := &recorder{}
-	res, err := Replay(context.Background(), failingSource{err: readErr}, run.apply, 3, false, nil)
+	res, err := Replay(context.Background(), failingSource{err: readErr}, run.apply, 3, "gt-", false, nil)
 	if !errors.Is(err, readErr) || res != (Result{Applied: 3}) || len(run.calls) != 0 {
 		t.Errorf("Replay over an unreadable feed = %+v, %v with %d calls; want the read error, Applied 3 and no calls", res, err, len(run.calls))
 	}
@@ -273,7 +273,7 @@ func TestReplayDryRunPrintsEachBdCallAndRunsNone(t *testing.T) {
 		{Seq: 2, Op: "status_changed", IssueID: "gt-1", NewValue: str("in_progress")},
 	}}
 	var out bytes.Buffer
-	res, err := Replay(context.Background(), src, nil, 0, true, &out)
+	res, err := Replay(context.Background(), src, nil, 0, "gt-", true, &out)
 	if err != nil {
 		t.Fatalf("Replay dry run: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestReplayStopsAtTheFirstFailingCommandAndKeepsItsErrorOutOfTheMessage(t *t
 		{Seq: 3, Op: "closed", IssueID: "gt-1"},
 	}}
 	run := &recorder{failAt: 2, err: errors.New("database locked: token sk-secret-value")}
-	res, err := Replay(context.Background(), src, run.apply, 0, false, nil)
+	res, err := Replay(context.Background(), src, run.apply, 0, "gt-", false, nil)
 
 	var ae *ApplyError
 	if !errors.As(err, &ae) || ae.Seq != 2 || ae.Verb != "update" {
@@ -319,7 +319,7 @@ func TestReplayRefusesAnUnknownKindAfterRunningTheCommandsBeforeIt(t *testing.T)
 		{Seq: 3, Op: "created", IssueID: "gt-2", NewValue: str("b")},
 	}}
 	run := &recorder{}
-	res, err := Replay(context.Background(), src, run.apply, 0, false, nil)
+	res, err := Replay(context.Background(), src, run.apply, 0, "gt-", false, nil)
 
 	var u *UnreplayableError
 	if !errors.As(err, &u) || u.Seq != 2 || u.Kind != "frobnicated" {
@@ -339,7 +339,7 @@ func TestReplayResumesAfterSinceAndAppliesTheRest(t *testing.T) {
 		{Seq: 4, Op: "deleted", IssueID: "gt-3"},
 	}}
 	run := &recorder{}
-	res, err := Replay(context.Background(), src, run.apply, 2, false, nil)
+	res, err := Replay(context.Background(), src, run.apply, 2, "gt-", false, nil)
 	if err != nil {
 		t.Fatalf("Replay from 2: %v", err)
 	}
@@ -352,13 +352,126 @@ func TestReplayResumesAfterSinceAndAppliesTheRest(t *testing.T) {
 	}
 }
 
+// The feed carries every rig on the tracker; a replay applies only its own
+// rig's events, in seq order, and counts the rest as skipped (gt-0n2s6).
+func TestReplaySkipsEventsForOtherRigsAndCountsThem(t *testing.T) {
+	t.Parallel()
+	src := &fakeSource{events: []api.Event{
+		{Seq: 1, Op: "created", IssueID: "gt-1", NewValue: str("a")},
+		{Seq: 2, Op: "created", IssueID: "dv-1", NewValue: str("b")},
+		{Seq: 3, Op: "status_changed", IssueID: "gt-1", NewValue: str("in_progress")},
+		{Seq: 4, Op: "closed", IssueID: "dv-1"},
+		{Seq: 5, Op: "closed", IssueID: "gt-2"},
+		{Seq: 6, Op: "deleted", IssueID: "dv-2"},
+	}}
+	run := &recorder{}
+	res, err := Replay(context.Background(), src, run.apply, 0, "gt-", false, nil)
+	if err != nil {
+		t.Fatalf("Replay over a feed of two rigs = %v, want no error", err)
+	}
+	want := [][]string{
+		{"create", "--id=gt-1", "--title=a"},
+		{"update", "gt-1", "--status=in_progress"},
+		{"close", "gt-2"},
+	}
+	if !reflect.DeepEqual(run.calls, want) {
+		t.Errorf("applied %q, want only the gt- events in seq order: %q", run.calls, want)
+	}
+	if res != (Result{Applied: 5, Commands: 3, Defaulted: 1, Skipped: 3}) {
+		t.Errorf("result = %+v, want the last applied seq 5, 3 commands, 1 defaulted creation and 3 skipped; the dv- creation takes no defaulted count", res)
+	}
+}
+
+// A foreign event of a kind Command refuses is skipped, not replayed and not a
+// stop: the run pages past it and applies the rig's own event that follows.
+func TestReplaySkipsAForeignEventItCouldNotReplay(t *testing.T) {
+	t.Parallel()
+	src := &pageSource{pages: []api.EventsPage{
+		{Events: []api.Event{
+			{Seq: 1, Op: "frobnicated", IssueID: "dv-1"},
+			{Seq: 2, Op: "deleted", IssueID: "--force"},
+		}, FirstSeq: 1, NextAfter: 2},
+		{Events: []api.Event{{Seq: 3, Op: "closed", IssueID: "gt-1"}}, FirstSeq: 1, NextAfter: 3},
+		{FirstSeq: 1, NextAfter: 3},
+	}}
+	run := &recorder{}
+	res, err := Replay(context.Background(), src, run.apply, 0, "gt-", false, nil)
+	if err != nil {
+		t.Fatalf("Replay over a foreign unreplayable kind and a foreign flag-like id = %v, want both skipped", err)
+	}
+	if want := [][]string{{"close", "gt-1"}}; !reflect.DeepEqual(run.calls, want) {
+		t.Errorf("applied %q, want %q: the foreign events must not reach Command", run.calls, want)
+	}
+	if res != (Result{Applied: 3, Commands: 1, Skipped: 2}) {
+		t.Errorf("result = %+v, want seq 3 applied and 2 skipped", res)
+	}
+	if want := []int64{0, 2, 3}; !reflect.DeepEqual(src.asked, want) {
+		t.Errorf("pages were asked for after %v, want %v: a skipped event still moves the cursor", src.asked, want)
+	}
+}
+
+// An event with no issue id names no rig, so the run stops on it rather than
+// passing it over as another rig's; the cursor is not moved past it.
+func TestReplayRefusesAnEventWithNoIssueIdInsteadOfSkippingIt(t *testing.T) {
+	t.Parallel()
+	src := &fakeSource{events: []api.Event{
+		{Seq: 1, Op: "closed", IssueID: "gt-1"},
+		{Seq: 2, Op: "closed", IssueID: ""},
+		{Seq: 3, Op: "closed", IssueID: "gt-3"},
+	}}
+	run := &recorder{}
+	res, err := Replay(context.Background(), src, run.apply, 0, "gt-", false, nil)
+	var u *UnreplayableError
+	if !errors.As(err, &u) || u.Seq != 2 || u.Kind != "closed" {
+		t.Fatalf("Replay over an event with no issue id = %v, want unreplayable closed at seq 2", err)
+	}
+	if res != (Result{Applied: 1, Commands: 1}) || len(run.calls) != 1 {
+		t.Errorf("result %+v with %d calls, want seq 1 applied and nothing after the id-less event", res, len(run.calls))
+	}
+}
+
+// A dry run of a shared feed prints only the rig's own bd calls.
+func TestReplayDryRunPrintsNoCallForAnotherRigsEvent(t *testing.T) {
+	t.Parallel()
+	src := &fakeSource{events: []api.Event{
+		{Seq: 1, Op: "created", IssueID: "gt-1", NewValue: str("a")},
+		{Seq: 2, Op: "created", IssueID: "dv-1", NewValue: str("b")},
+	}}
+	var out bytes.Buffer
+	res, err := Replay(context.Background(), src, nil, 0, "gt-", true, &out)
+	if err != nil {
+		t.Fatalf("Replay dry run: %v", err)
+	}
+	if want := "bd create --id=gt-1 --title=a\n"; out.String() != want {
+		t.Errorf("dry run printed %q, want %q", out.String(), want)
+	}
+	if res != (Result{Applied: 1, Commands: 1, Defaulted: 1, Skipped: 1}) {
+		t.Errorf("result = %+v, want 1 command on the last own seq and 1 skipped", res)
+	}
+}
+
+// A replay with no prefix could not tell its rig's events from the others, so
+// it refuses before reading the feed rather than applying another rig's writes.
+func TestReplayRefusesAnEmptyPrefix(t *testing.T) {
+	t.Parallel()
+	src := &fakeSource{events: []api.Event{{Seq: 1, Op: "closed", IssueID: "gt-1"}}}
+	run := &recorder{}
+	res, err := Replay(context.Background(), src, run.apply, 3, "-", false, nil)
+	if err == nil || !strings.Contains(err.Error(), "beads prefix") {
+		t.Fatalf("Replay with no prefix = %v, want a refusal naming the missing prefix", err)
+	}
+	if len(run.calls) != 0 || res != (Result{Applied: 3}) {
+		t.Errorf("result %+v with %d calls, want nothing applied", res, len(run.calls))
+	}
+}
+
 func TestReplayRefusesAFeedPrunedPastSince(t *testing.T) {
 	t.Parallel()
 	src := &fakeSource{firstSeq: 5, events: []api.Event{
 		{Seq: 5, Op: "deleted", IssueID: "gt-5"},
 	}}
 	run := &recorder{}
-	_, err := Replay(context.Background(), src, run.apply, 2, false, nil)
+	_, err := Replay(context.Background(), src, run.apply, 2, "gt-", false, nil)
 	var tr *TruncatedError
 	if !errors.As(err, &tr) || tr.Since != 2 || tr.Floor != 5 {
 		t.Fatalf("Replay from 2 with oldest retained 5 = %v, want *TruncatedError{Since:2, Floor:5}", err)
@@ -366,7 +479,7 @@ func TestReplayRefusesAFeedPrunedPastSince(t *testing.T) {
 	if len(run.calls) != 0 {
 		t.Errorf("runner was called %d times on a pruned feed, want 0", len(run.calls))
 	}
-	if _, err := Replay(context.Background(), src, run.apply, 4, false, nil); err != nil {
+	if _, err := Replay(context.Background(), src, run.apply, 4, "gt-", false, nil); err != nil {
 		t.Errorf("Replay from 4 with oldest retained 5 = %v, want no error: nothing is missing", err)
 	}
 }
@@ -390,7 +503,7 @@ func TestReplayRefusesAPrunedFeedWhoseFirstPageIsEmpty(t *testing.T) {
 	t.Parallel()
 	src := &pageSource{pages: []api.EventsPage{{FirstSeq: 5}}}
 	run := &recorder{}
-	res, err := Replay(context.Background(), src, run.apply, 2, false, nil)
+	res, err := Replay(context.Background(), src, run.apply, 2, "gt-", false, nil)
 	var tr *TruncatedError
 	if !errors.As(err, &tr) || tr.Since != 2 || tr.Floor != 5 {
 		t.Fatalf("Replay from 2 over an empty page with oldest retained 5 = %v, want *TruncatedError{Since:2, Floor:5}", err)
@@ -407,7 +520,7 @@ func TestReplayRefusesAFeedPrunedWhileItReads(t *testing.T) {
 		{FirstSeq: 6, NextAfter: 2},
 	}}
 	run := &recorder{}
-	_, err := Replay(context.Background(), src, run.apply, 0, false, nil)
+	_, err := Replay(context.Background(), src, run.apply, 0, "gt-", false, nil)
 	var tr *TruncatedError
 	if !errors.As(err, &tr) || tr.Since != 2 || tr.Floor != 6 {
 		t.Fatalf("Replay whose feed pruned past its cursor = %v, want *TruncatedError{Since:2, Floor:6}", err)
@@ -424,7 +537,7 @@ func TestReplayRefusesAnEmptyPageThatSaysMoreEventsFollow(t *testing.T) {
 		{NextAfter: 9, FirstSeq: 1},
 	}}
 	run := &recorder{}
-	res, err := Replay(context.Background(), src, run.apply, 0, false, nil)
+	res, err := Replay(context.Background(), src, run.apply, 0, "gt-", false, nil)
 	if err == nil || !strings.Contains(err.Error(), "empty page") || !strings.Contains(err.Error(), "9") {
 		t.Fatalf("Replay over an empty page that points at seq 9 = %v, want a refusal naming it", err)
 	}
@@ -443,7 +556,7 @@ func TestReplayEndsOnAnEmptyPageThatHoldsItsCursor(t *testing.T) {
 		{FirstSeq: 1, NextAfter: 4},
 	}}
 	run := &recorder{}
-	res, err := Replay(context.Background(), src, run.apply, 0, false, nil)
+	res, err := Replay(context.Background(), src, run.apply, 0, "gt-", false, nil)
 	if err != nil {
 		t.Fatalf("Replay over an empty page that holds its cursor = %v, want no error", err)
 	}
@@ -459,7 +572,7 @@ func TestReplayRefusesAnEmptyPageThatDoesNotHoldItsCursor(t *testing.T) {
 		{}, // neither a cursor nor a log: a feed that stalled or lost its place
 	}}
 	run := &recorder{}
-	res, err := Replay(context.Background(), src, run.apply, 0, false, nil)
+	res, err := Replay(context.Background(), src, run.apply, 0, "gt-", false, nil)
 	if err == nil || !strings.Contains(err.Error(), "empty page") || !strings.Contains(err.Error(), "cursor") {
 		t.Fatalf("Replay over an empty page holding no cursor = %v, want a refusal naming the stalled feed", err)
 	}
@@ -474,7 +587,7 @@ func TestReplayRefusesAnEmptyFeedThatHoldsNoEventsAtAll(t *testing.T) {
 	// log with no events cannot account for the seqs a replay from 3 is past.
 	src := &pageSource{pages: []api.EventsPage{{NextAfter: 3, FirstSeq: 0}}}
 	run := &recorder{}
-	res, err := Replay(context.Background(), src, run.apply, 3, false, nil)
+	res, err := Replay(context.Background(), src, run.apply, 3, "gt-", false, nil)
 	if err == nil || !strings.Contains(err.Error(), "holding no events") {
 		t.Fatalf("Replay from 3 over an empty feed = %v, want a refusal naming the missing log", err)
 	}
@@ -494,7 +607,7 @@ func (endlessSource) Events(_ context.Context, after int64, _ int) (api.EventsPa
 func TestReplayStopsAFeedThatNeverEnds(t *testing.T) {
 	t.Parallel()
 	run := &recorder{}
-	res, err := Replay(context.Background(), endlessSource{}, run.apply, 0, false, nil)
+	res, err := Replay(context.Background(), endlessSource{}, run.apply, 0, "gt-", false, nil)
 	if err == nil || !strings.Contains(err.Error(), "did not end") {
 		t.Fatalf("Replay over an endless feed = %v, want a refusal naming the page bound", err)
 	}
@@ -514,7 +627,7 @@ func TestReplayDryRunQuotesAValueTheShellWouldRewrite(t *testing.T) {
 		{Seq: 6, Op: "created", IssueID: "gt-6", NewValue: str("a|b&c;d")},
 	}}
 	var out bytes.Buffer
-	if _, err := Replay(context.Background(), src, nil, 0, true, &out); err != nil {
+	if _, err := Replay(context.Background(), src, nil, 0, "gt-", true, &out); err != nil {
 		t.Fatalf("Replay dry run: %v", err)
 	}
 	want := "bd create --id=gt-1 '--title=line one\nline two'\n" +
@@ -536,7 +649,7 @@ func TestReplayReadsEveryPageOfTheFeed(t *testing.T) {
 	}
 	src := &fakeSource{pageSize: 2, events: evs}
 	run := &recorder{}
-	res, err := Replay(context.Background(), src, run.apply, 0, false, nil)
+	res, err := Replay(context.Background(), src, run.apply, 0, "gt-", false, nil)
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
@@ -565,7 +678,7 @@ func (u *unorderedSource) Events(_ context.Context, _ int64, _ int) (api.EventsP
 func TestReplayRefusesAFeedThatGoesBackwards(t *testing.T) {
 	t.Parallel()
 	run := &recorder{}
-	_, err := Replay(context.Background(), &unorderedSource{}, run.apply, 0, false, nil)
+	_, err := Replay(context.Background(), &unorderedSource{}, run.apply, 0, "gt-", false, nil)
 	if err == nil || !strings.Contains(err.Error(), "not ascending") {
 		t.Fatalf("Replay over a backwards feed = %v, want a not-ascending refusal", err)
 	}

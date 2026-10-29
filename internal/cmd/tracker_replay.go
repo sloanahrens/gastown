@@ -49,6 +49,10 @@ defaults for priority, type and description; the run counts them on stderr so
 you can review those issues. The rig must already be routed to Dolt. --dry-run
 prints the bd calls and runs none.
 
+The feed carries every rig on the tracker, so only the events whose issue id
+has this rig's beads prefix are replayed; the count skipped for other rigs is
+reported on stderr.
+
 Examples:
   gt tracker replay --rig agentlab --since-seq 1200 --dry-run
   gt tracker replay --rig agentlab --since-seq 1200`,
@@ -111,11 +115,12 @@ func runTrackerReplay(env replayEnv, out, errOut io.Writer, rig string, since in
 	if since < 0 {
 		return fmt.Errorf("gt tracker replay: --since-seq must not be negative (got %d)", since)
 	}
-	rigDir, src, err := openTrackerReplay(env, rig)
+	target, src, err := openTrackerReplay(env, rig)
 	if err != nil {
 		return err
 	}
-	res, err := trackerreplay.Replay(context.Background(), src, env.newApply(rigDir), since, dryRun, out)
+	res, err := trackerreplay.Replay(context.Background(), src, env.newApply(target.dir), since, target.prefix, dryRun, out)
+	replaySkippedNote(errOut, res, target.prefix)
 	replayDefaultedNote(errOut, res)
 	if err != nil {
 		replayStopHint(errOut, res)
@@ -127,6 +132,17 @@ func runTrackerReplay(env replayEnv, out, errOut io.Writer, rig string, since in
 	}
 	fmt.Fprintf(out, "applied %d bd calls through seq %d\n", res.Commands, res.Applied)
 	return nil
+}
+
+// replaySkippedNote says how many feed events belonged to another rig and were
+// left alone, with the prefix that told them apart. The feed is shared by every
+// rig on the tracker, so a run that said nothing would leave the operator
+// unable to tell a quiet feed from one it had filtered.
+func replaySkippedNote(w io.Writer, res trackerreplay.Result, prefix string) {
+	if res.Skipped == 0 {
+		return
+	}
+	fmt.Fprintf(w, "note: skipped %d event(s) for other rigs (issue ids without the %q prefix)\n", res.Skipped, prefix)
 }
 
 // replayDefaultedNote says how many creations replayed with bd's defaults. The
@@ -151,30 +167,61 @@ func replayStopHint(w io.Writer, res trackerreplay.Result) {
 	fmt.Fprintf(w, "replay stopped: last applied seq %d; fix the cause, then rerun with --since-seq %d\n", res.Applied, res.Applied)
 }
 
-// openTrackerReplay resolves the rig's directory, where bd runs, and the
+// replayTarget is where a replay writes: the rig's directory, where bd runs,
+// and its beads prefix, which tells its issues from every other rig's on the
+// shared feed.
+type replayTarget struct {
+	dir    string
+	prefix string
+}
+
+// openTrackerReplay resolves the rig's directory and beads prefix, and the
 // tracker's feed.
-func openTrackerReplay(env replayEnv, rig string) (string, trackerreplay.Source, error) {
+func openTrackerReplay(env replayEnv, rig string) (replayTarget, trackerreplay.Source, error) {
 	townRoot, err := env.findTown()
 	if err != nil {
-		return "", nil, fmt.Errorf("gt tracker replay: %w", err)
+		return replayTarget{}, nil, fmt.Errorf("gt tracker replay: %w", err)
 	}
 	routes, err := env.loadRoutes(filepath.Join(townRoot, ".beads"))
 	if err != nil {
-		return "", nil, fmt.Errorf("gt tracker replay: %w", err)
+		return replayTarget{}, nil, fmt.Errorf("gt tracker replay: %w", err)
 	}
 	route, err := pickRigRoute(routes, rig)
 	if err != nil {
-		return "", nil, fmt.Errorf("gt tracker replay: %w", err)
+		return replayTarget{}, nil, fmt.Errorf("gt tracker replay: %w", err)
+	}
+	if err := refuseNestedPrefix(routes, route); err != nil {
+		return replayTarget{}, nil, fmt.Errorf("gt tracker replay: %w", err)
 	}
 	tcfg := backend.FromEnv(env.getenv).Tracker
 	if tcfg.BaseURL == "" {
-		return "", nil, errors.New("gt tracker replay: TRACKER_URL is not set")
+		return replayTarget{}, nil, errors.New("gt tracker replay: TRACKER_URL is not set")
 	}
 	src, err := env.newSource(tcfg)
 	if err != nil {
-		return "", nil, fmt.Errorf("gt tracker replay: %w", err)
+		return replayTarget{}, nil, fmt.Errorf("gt tracker replay: %w", err)
 	}
-	return filepath.Join(townRoot, route.Path), src, nil
+	return replayTarget{dir: filepath.Join(townRoot, route.Path), prefix: route.Prefix}, src, nil
+}
+
+// refuseNestedPrefix refuses a rig whose beads prefix is the start of another
+// route's prefix: an issue of that other rig matches both on the shared feed,
+// and the replay would apply it to this rig.
+func refuseNestedPrefix(routes []beads.Route, rig beads.Route) error {
+	p := strings.TrimSuffix(rig.Prefix, "-")
+	if p == "" {
+		return nil
+	}
+	for _, r := range routes {
+		q := strings.TrimSuffix(r.Prefix, "-")
+		if r.Path == rig.Path || q == "" {
+			continue
+		}
+		if strings.HasPrefix(q, p+"-") {
+			return fmt.Errorf("rig %s prefix %q is the start of rig %s prefix %q: a replay cannot tell their events apart", rig.Path, rig.Prefix, r.Path, r.Prefix)
+		}
+	}
+	return nil
 }
 
 // pickRigRoute finds the rig's route by its path or beads prefix. The replay
