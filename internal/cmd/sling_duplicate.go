@@ -162,7 +162,9 @@ const planDocPrefix = "docs/plans/"
 
 // extractOverlapRefs is extractContentRefs for the content-overlap guard, minus
 // the plan documents a bead cites. A code path named beside the plan still
-// counts.
+// counts. A (read-only) marker is not read here: specdispatch.HoldFiles drops a
+// marked path from the hold alone, so the sling-time guard keeps every path the
+// text names.
 func extractOverlapRefs(parts ...string) contentRefs {
 	refs := extractContentRefs(parts...)
 	files := make([]string, 0, len(refs.Files))

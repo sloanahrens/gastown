@@ -371,6 +371,18 @@ func TestHoldFilesReadOnlyMarker(t *testing.T) {
 			want:  nil,
 		},
 		{
+			name:  "a path spelled with a leading ../ takes the marker",
+			named: []string{code},
+			text:  []string{"Peek at ../" + code + " (read-only)."},
+			want:  nil,
+		},
+		{
+			name:  "an unmarked ../ mention keeps the path named",
+			named: []string{code},
+			text:  []string{"Change ../" + code + "."},
+			want:  []string{code},
+		},
+		{
 			name:  "no text marks nothing",
 			named: []string{code},
 			want:  []string{code},

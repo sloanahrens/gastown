@@ -1280,6 +1280,66 @@ func TestSpecHeldHoldReferenceDocsDoNotHold(t *testing.T) {
 	}
 }
 
+// The three sites that feed the overlap hold (the held read, the pending signal
+// and the peer-hold question) read the (read-only) marker from every text field
+// the paths came from. A site that drops one field reads a marker there as
+// absent and keeps the path held (gt-5v13p).
+func TestSpecHoldReadOnlyMarkerReadsEveryTextField(t *testing.T) {
+	t.Parallel()
+	const code = "internal/cmd/spec.go"
+	const seat = "gastown/polecats/capable"
+	const marked = "Read " + code + " (read-only)."
+	const unmarked = "Change " + code + "."
+	fields := []struct {
+		name string
+		text func(sentence string) (title, desc, design, notes string)
+	}{
+		{"title", func(s string) (string, string, string, string) { return s, specTestDescription, "", "" }},
+		{"description", func(s string) (string, string, string, string) {
+			return "Add a bead", specTestDescription + "\n" + s, "", ""
+		}},
+		{"design", func(s string) (string, string, string, string) { return "Add a bead", specTestDescription, s, "" }},
+		{"notes", func(s string) (string, string, string, string) { return "Add a bead", specTestDescription, "", s }},
+	}
+	held := func(title, desc, design, notes string) duplicateCandidate {
+		return duplicateCandidate{ID: "gt-seat", Title: title, Status: "in_progress", IssueType: "task",
+			Ready: sling.Readiness{Assignee: seat, Description: desc, Design: design, Notes: notes, Acceptance: specTestAcceptance},
+			Refs:  sling.ContentRefs{Files: []string{code}}}
+	}
+	// peer is priority 2: a P0 or P1 peer skips the hold and would pass for the wrong reason.
+	peer := func(title, desc, design, notes string) duplicateCandidate {
+		p := held(title, desc, design, notes)
+		p.ID, p.Status, p.Priority = "gt-peer", "open", 2
+		return p
+	}
+	pool := []sling.Duplicate{held("Add gt-seat", specTestDescription, "", "")}
+	for _, f := range fields {
+		t.Run(f.name, func(t *testing.T) {
+			t.Parallel()
+			title, desc, design, notes := f.text(marked)
+			h, ok := heldBeadFrom(held(title, desc, design, notes))
+			if !ok || len(h.Paths) != 0 {
+				t.Errorf("heldBeadFrom with the marker in %s: ok %v paths %v, want no paths", f.name, ok, h.Paths)
+			}
+			paths, _ := specPendingRefs(specdispatch.Spec{ID: "gt-cand", Title: title, Description: desc, Design: design, Notes: notes})
+			if len(paths) != 0 {
+				t.Errorf("specPendingRefs with the marker in %s: paths %v, want none", f.name, paths)
+			}
+			if why := specPeerHeldBySeat(peer(title, desc, design, notes), pool); why != "" {
+				t.Errorf("specPeerHeldBySeat with the marker in %s held: %q", f.name, why)
+			}
+
+			title, desc, design, notes = f.text(unmarked)
+			if h, ok := heldBeadFrom(held(title, desc, design, notes)); !ok || len(h.Paths) != 1 {
+				t.Errorf("heldBeadFrom with no marker in %s: ok %v paths %v, want the path", f.name, ok, h.Paths)
+			}
+			if why := specPeerHeldBySeat(peer(title, desc, design, notes), pool); why == "" {
+				t.Errorf("specPeerHeldBySeat with no marker in %s did not hold", f.name)
+			}
+		})
+	}
+}
+
 // --dry-run holds an unshaped bead too: it reports the unshaped reason and
 // writes nothing (gt-f8ppx acceptance 1).
 func TestSpecDispatchDryRunHoldsUnshaped(t *testing.T) {

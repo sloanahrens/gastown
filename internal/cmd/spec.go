@@ -1858,8 +1858,8 @@ func specNotePendingHeld(reads map[string]heldRead, rig, id, holder string, path
 
 // specPendingRefs is the overlap signal a bead holds while its sling is
 // pending or running, the signal specHeldHold compares a candidate's against:
-// the files its text names (with the hold's reference-document and (read-only)
-// rules) and the test names it cites.
+// the files its text names (with the hold's file rules, specHoldFiles) and the
+// test names it cites.
 func specPendingRefs(full specdispatch.Spec) (paths, tests []string) {
 	refs := extractOverlapRefs(full.Title, full.Description, full.Design, full.Notes)
 	paths = specHoldFiles(refs.Files, full.Description,
@@ -1913,8 +1913,8 @@ func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads
 // instead (gt-1e5s8). A missing or empty Goal leaves that work unknown too, so
 // it keeps every path as well (gt-zs8fq).
 //
-// text is the bead's own words, every field the files were extracted from, so
-// a (read-only) marker is read from the same text it was written in.
+// text is every field the files were extracted from; specdispatch.HoldFiles
+// reads the (read-only) marker from it.
 func specHoldFiles(files []string, description string, text ...string) []string {
 	sections := specdispatch.Sections(description)
 	constraints, ok := sections["constraints"]

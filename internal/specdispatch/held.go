@@ -267,18 +267,13 @@ func HoldFiles(named, listed []string, text ...string) []string {
 	return out
 }
 
-// readOnlyMarker is the marker a bead's text places directly after a path it
-// only reads: "docs/testing.md (read-only)" (gt-5v13p). A closing backtick or
-// quote between the two is allowed, because a path is often wrapped in one.
+// readOnlyMarker matches the (read-only) marker right after a mention; see
+// HoldFiles. A closing backtick or quote may sit between the path and the marker.
 var readOnlyMarker = regexp.MustCompile("^[`\"']?\\s*\\(read-only\\)")
 
-// markedReadOnly reports whether text mentions path and marks every one of its
-// mentions (read-only), so the path is one the bead reads and does not change.
-//
-// A mention counts only where a path token starts: the same characters inside a
-// longer path ("xdocs/testing.md") are not a mention of the shorter one, and
-// text that never mentions the path marks nothing — a path no mention marks is
-// not a path the bead reads only.
+// markedReadOnly reports whether every mention of path in text is followed by
+// the (read-only) marker. A mention counts only at a path-token start
+// (startsPathToken), and text with no mention marks nothing.
 func markedReadOnly(text, path string) bool {
 	if path == "" {
 		return false
@@ -312,7 +307,9 @@ func startsPathToken(prefix string) bool {
 	if prefix == "" {
 		return true
 	}
-	for _, up := range []string{"./", "../"} {
+	// "../" is checked first: it ends in "./", so checking "./" first would strip
+	// just that suffix, leave a "." and reject the mention.
+	for _, up := range []string{"../", "./"} {
 		if trimmed, ok := strings.CutSuffix(prefix, up); ok {
 			return startsPathToken(trimmed)
 		}
