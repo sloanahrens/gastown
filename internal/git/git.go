@@ -888,23 +888,22 @@ func (g *Git) CloneBranchWithReference(url, dest, branch, reference string) erro
 
 // CloneFull clones the remote's HEAD branch with its full history and every
 // branch fetched, as a crew clone needs to read merge bases and other agents'
-// branches. Unlike Clone, it passes neither --single-branch nor --depth.
+// branches: unlike Clone it passes neither --single-branch nor --depth.
+// CloneFullWithReference adds a local repo whose objects the clone shares,
+// CloneBranchFull checks out branch instead of HEAD, and
+// CloneBranchFullWithReference does both.
 func (g *Git) CloneFull(url, dest string) error {
 	return g.cloneInternal(url, dest, cloneOptions{})
 }
 
-// CloneFullWithReference clones as CloneFull and shares reference's objects.
 func (g *Git) CloneFullWithReference(url, dest, reference string) error {
 	return g.cloneInternal(url, dest, cloneOptions{reference: reference})
 }
 
-// CloneBranchFull clones as CloneFull, checking out branch.
 func (g *Git) CloneBranchFull(url, dest, branch string) error {
 	return g.cloneInternal(url, dest, cloneOptions{branch: branch})
 }
 
-// CloneBranchFullWithReference clones as CloneBranchFull and shares
-// reference's objects.
 func (g *Git) CloneBranchFullWithReference(url, dest, branch, reference string) error {
 	return g.cloneInternal(url, dest, cloneOptions{branch: branch, reference: reference})
 }
