@@ -21,7 +21,7 @@ import (
 // errContainerStateUnread is the container supervisor's state until the reader
 // that asks docker lands (templates.ContainerJobState, plan task A4). A check
 // reports it as unknown, which it never counts as healthy.
-var errContainerStateUnread = errors.New("the container supervisor's state is not read yet (plan task A4)")
+var errContainerStateUnread = errors.New("the container supervisor's state is not read yet")
 
 // containerDaemonReading is a container town's two daemon reports: state.json,
 // the daemon's own, and what the container supervisor says about the container.
@@ -166,10 +166,11 @@ func (r containerDaemonReading) staleAfter() time.Duration {
 // found nothing.
 func (r containerDaemonReading) okResult(name string) *CheckResult {
 	details := []string{"Supervised: " + r.job.StatusLine(0)}
-	if !r.state.StartedAt.IsZero() {
+	// A reading with no daemon state still reports the supervisor's view.
+	if r.state != nil && !r.state.StartedAt.IsZero() {
 		details = append(details, "Uptime: "+time.Since(r.state.StartedAt).Round(time.Second).String())
 	}
-	if r.state.HeartbeatCount > 0 {
+	if r.state != nil && r.state.HeartbeatCount > 0 {
 		details = append(details, "Heartbeats: "+strconv.FormatInt(r.state.HeartbeatCount, 10))
 	}
 	return &CheckResult{

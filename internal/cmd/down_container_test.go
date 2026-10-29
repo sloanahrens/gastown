@@ -95,6 +95,39 @@ func TestStopTownServices_ContainerTownStopFailure(t *testing.T) {
 	}
 }
 
+// A town whose daemon settings cannot be read still stops its daemon through
+// the pid path, which is where daemon.StopDaemon's identity check keeps a
+// container-namespace pid from being signaled. Refusing to stop at all would
+// leave a host town's daemon running over a settings file gt down never needed.
+func TestStopTownServices_UnreadableSettingsFallBackToThePidPath(t *testing.T) {
+	t.Parallel()
+	town := downTestTown(t, "")
+	ctl, calls := stubContainerTown(t, nil)
+	ctl.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
+		return nil, errors.New("settings are not valid JSON")
+	}
+	stopped := 0
+	svc := containerDownServices(t, ctl)
+	svc.daemonRunning = func(string) (bool, int, error) { return true, 4242, nil }
+	svc.stopDaemon = func(string) error { stopped++; return nil }
+
+	if !stopTownServices(town, svc, false) {
+		t.Error("stopTownServices = not ok, want the daemon stopped by its pid")
+	}
+	if stopped != 1 {
+		t.Errorf("stopDaemon ran %d times, want once", stopped)
+	}
+	if got := calls.last(); got != nil {
+		t.Errorf("ran %v, want no supervisor command for a town whose kind is unknown", got)
+	}
+
+	// The pid path's own refusal (an unverified pid) is still a failed stop.
+	svc.stopDaemon = func(string) error { return errors.New("refusing to signal PID 4242") }
+	if stopTownServices(town, svc, false) {
+		t.Error("stopTownServices = ok, want the identity check's refusal reported")
+	}
+}
+
 // A container town whose stop settings are incomplete stops nothing: acting on
 // the defaults would reach the live container (gt-ix1kz).
 func TestStopTownServices_ContainerTownUnsetSettingsStopNothing(t *testing.T) {

@@ -458,18 +458,23 @@ func reportRigSessionsSkipped(rigNames []string, rigsErr error) {
 // command, and no pid from daemon.lock or daemon.pid is signaled, because
 // that number comes from the container's namespace and names nothing — or an
 // unrelated process — on this host (gt-qpeei.20). handled is false for every
-// other kind, which keeps the pid path gt down has always taken.
+// other kind, which keeps the pid path gt down has always taken. It is also
+// false when the settings cannot be read: the pid path is the one gt down took
+// before containers, and daemon.StopDaemon signals only a pid it has shown to
+// be `gt daemon run` in this town, so a container-namespace pid is refused, not
+// signaled, and a host town with a damaged settings file still stops.
 func stopContainerDaemon(townRoot string, svc downServices, dryRun bool) (handled, ok bool) {
 	ctl := svc.supervisor
 	if ctl == nil {
 		ctl = realDaemonControl()
 	}
-	// An unreadable setting is reported, never read as a host supervisor: the
-	// town may be a container town whose settings the operator has to fix.
+	// An unreadable setting is warned about and the pid path takes over, which
+	// verifies the pid before it signals: refusing to stop at all would leave a
+	// host town's daemon running over a settings file gt down never needed.
 	cfg, container, err := ctl.townDaemonKind(townRoot)
 	if err != nil {
-		printDownStatus("Daemon", false, fmt.Sprintf("cannot tell how this town's daemon is supervised: %v", err))
-		return true, false
+		fmt.Printf("%s Daemon: cannot tell how this town's daemon is supervised (%v); stopping by its verified pid\n", style.WarningPrefix, err)
+		return false, true
 	}
 	if !container {
 		return false, true
