@@ -1739,7 +1739,9 @@ func containsHelper(s, substr string) bool {
 // the world.
 func backupTestDaemon(t *testing.T) (*Daemon, *gitfake.Fake) {
 	t.Helper()
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	// The notifier records the alerts and clears a verify raises, so a test
+	// that does not look at them never reaches `gt escalate`.
+	d := &Daemon{logger: log.New(io.Discard, "", 0), notifier: notifyfake.New()}
 	return d, useGitfake(t, d)
 }
 

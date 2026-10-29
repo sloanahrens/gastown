@@ -1730,7 +1730,11 @@ const (
 	alertKeyJSONLRoute = "jsonl_git_backup:tracker-routes"
 	alertKeyJSONLScrub = "jsonl_git_backup:scrub-suspicious"
 	alertKeyJSONLSpike = "jsonl_git_backup:spike"
-	alertKeyJSONLPush  = "jsonl_git_backup:push"
+	// alertKeyJSONLStoreFlip is the prefix of the per-database alert that says a
+	// database's count changed store and its level was reset, so a short export
+	// cannot become the baseline unseen.
+	alertKeyJSONLStoreFlip = "jsonl_git_backup:store-flip:"
+	alertKeyJSONLPush      = "jsonl_git_backup:push"
 )
 
 // escalate raises an alert whose key is derived from its own title, for
@@ -2604,6 +2608,12 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 		return nil, fmt.Errorf("no spike baseline: %w", err)
 	}
 
+	var compared []string // databases checked against a comparable level this run
+	defer func() {
+		if len(compared) > 0 {
+			d.clearAlerts("the count compares against its own store's level again", compared...)
+		}
+	}()
 	for _, db := range databases {
 		currentCount, ok := counts[db]
 		if !ok {
@@ -2632,10 +2642,37 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 		// run's count is committed as the first level of the new kind, which
 		// the next run compares against (jsonlTrackerCountToken).
 		if prev, _ := spikeBaselineLevel(spikeBase, db); prev.Tracker != d.jsonlTrackerDBs[db] {
+			from, to := countStoreName(prev.Tracker), countStoreName(d.jsonlTrackerDBs[db])
+			// Nothing is comparable across the flip, but an empty export of a
+			// database that had records is never the tables an export leaves
+			// out: it halts like any drop, for an operator to accept, instead
+			// of becoming the new level.
+			if currentCount == 0 && prevCount > 0 {
+				spikes = append(spikes, spikeInfo{
+					DB:       db,
+					File:     filepath.Join(db, "issues.jsonl"),
+					Previous: prevCount,
+					Current:  currentCount,
+					Delta:    1,
+					Baseline: spikeHistoryDetail(spikeBase, db),
+				})
+				d.logger.Printf("jsonl_git_backup: SPIKE DETECTED: %s: the count's store changed (%s to %s) and the export is empty (was %d) — baseline window: %s",
+					db, from, to, prevCount, spikeHistoryDetail(spikeBase, db))
+				continue
+			}
+			// Any other count is committed as the first level of the new kind,
+			// and the reset is raised so a short export is seen rather than
+			// only logged; it clears once the database compares normally.
 			d.logger.Printf("jsonl_git_backup: verify: %s: the count's store changed (%s to %s) — rebaselining: this run's count (%d) becomes the new baseline, spike check skipped",
-				db, countStoreName(prev.Tracker), countStoreName(d.jsonlTrackerDBs[db]), currentCount)
+				db, from, to, currentCount)
+			// A dropped delivery has its own escalation_dropped feed line, and the
+			// level is committed either way, so there is no next action to take.
+			_ = d.escalateAlertSeverity("low", alertKeyJSONLStoreFlip+db, "jsonl_git_backup", fmt.Sprintf(
+				"%s: the backup's count changed store (%s to %s), so its spike check was skipped and %d records (was %d) become the new baseline. If %d is short of the rig's issues, run the export by hand before the next tick.",
+				db, from, to, currentCount, prevCount, currentCount))
 			continue
 		}
+		compared = append(compared, alertKeyJSONLStoreFlip+db)
 		absDelta := currentCount - prevCount
 		if absDelta < 0 {
 			absDelta = -absDelta

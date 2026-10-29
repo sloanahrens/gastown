@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -876,6 +877,8 @@ func TestExportDatabaseToJsonlTrackerExportWriteFailureIsReported(t *testing.T) 
 func TestVerifyExportCountsRebaselinesARigThatMovesToTheTracker(t *testing.T) {
 	t.Parallel()
 	d, _ := backupTestDaemon(t)
+	rec := notifyfake.New()
+	d.notifier = rec
 	gitRepo := t.TempDir()
 	initEmptyGitRepo(t, d, gitRepo)
 	// The Dolt-era level: 100 records over the seven tables.
@@ -892,6 +895,13 @@ func TestVerifyExportCountsRebaselinesARigThatMovesToTheTracker(t *testing.T) {
 	if len(spikes) != 0 {
 		t.Fatalf("spikes = %+v, want the first tracker count rebaselined", spikes)
 	}
+	// The reset is raised, not only logged, so a short export is seen.
+	flipKey := alertKeyJSONLStoreFlip + "al"
+	escalations := rec.Escalations()
+	if len(escalations) != 1 || escalations[0].Escalation.Fingerprint != flipKey || escalations[0].Escalation.Severity != "low" ||
+		!strings.Contains(escalations[0].Escalation.Reason, "4 records (was 100)") {
+		t.Fatalf("escalations = %+v, want one low store-flip alert for al naming 4 records (was 100)", escalations)
+	}
 
 	// A tracker-measured level and a tracker-measured count are the same
 	// measure: a drop is checked, and halts.
@@ -902,6 +912,48 @@ func TestVerifyExportCountsRebaselinesARigThatMovesToTheTracker(t *testing.T) {
 	}
 	if len(spikes) != 1 || spikes[0].Current != 40 || spikes[0].Previous != 100 {
 		t.Fatalf("spikes = %+v, want the tracker count's drop to be caught", spikes)
+	}
+	// The same-store comparison clears the flip alert.
+	cleared := false
+	for _, c := range rec.Clears() {
+		cleared = cleared || slices.Contains(c.Fingerprints, flipKey)
+	}
+	if !cleared {
+		t.Errorf("clears = %+v, want the store-flip alert cleared once al compares against its own store", rec.Clears())
+	}
+}
+
+// TestVerifyExportCountsHaltsAnEmptyExportOnAStoreFlip: nothing is comparable
+// across a flip, but a database that had records never exports none, so an
+// empty tracker export halts like a drop instead of becoming the new level. A
+// database that had no records has nothing to lose and is rebaselined.
+func TestVerifyExportCountsHaltsAnEmptyExportOnAStoreFlip(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	rec := notifyfake.New()
+	d.notifier = rec
+	gitRepo := t.TempDir()
+	initEmptyGitRepo(t, d, gitRepo)
+	for _, db := range []string{"al", "empty"} {
+		if err := os.MkdirAll(filepath.Join(gitRepo, db), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commitBackup(t, d, gitRepo, "al", 100)
+	commitBackup(t, d, gitRepo, "empty", 0)
+
+	d.jsonlTrackerDBs = map[string]bool{"al": true, "empty": true}
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"al", "empty"}, map[string]int{"al": 0, "empty": 0}, 0.20)
+	if err != nil {
+		t.Fatalf("verifyExportCounts: %v", err)
+	}
+	if len(spikes) != 1 || spikes[0].DB != "al" || spikes[0].Previous != 100 || spikes[0].Current != 0 {
+		t.Fatalf("spikes = %+v, want only al's empty export (was 100) to halt", spikes)
+	}
+	for _, c := range rec.Escalations() {
+		if c.Escalation.Fingerprint == alertKeyJSONLStoreFlip+"al" {
+			t.Errorf("al halted and was also rebaselined with a flip alert: %+v", c.Escalation)
+		}
 	}
 }
 
@@ -954,8 +1006,10 @@ func TestSyncJsonlGitBackupTrackerFlipCommitsAMarkedCount(t *testing.T) {
 
 	d.syncJsonlGitBackup()
 
-	if got := rec.Escalations(); len(got) != 0 {
-		t.Fatalf("the flip tick escalated: %+v", got)
+	// The flip is raised once, at low severity: it informs, it does not halt.
+	flipKey := alertKeyJSONLStoreFlip + "al"
+	if got := rec.Escalations(); len(got) != 1 || got[0].Escalation.Fingerprint != flipKey || got[0].Escalation.Severity != "low" {
+		t.Fatalf("the flip tick escalated %+v, want one low store-flip alert for al", got)
 	}
 	subjects := backupSubjects(t, d, gitRepo)
 	if len(subjects) != 3 {
@@ -971,8 +1025,15 @@ func TestSyncJsonlGitBackupTrackerFlipCommitsAMarkedCount(t *testing.T) {
 	// The next tick reads a tracker level, so it compares rather than
 	// rebaselining again.
 	d.syncJsonlGitBackup()
-	if got := rec.Escalations(); len(got) != 0 {
-		t.Fatalf("the tick after the flip escalated: %+v", got)
+	if got := rec.Escalations(); len(got) != 1 {
+		t.Fatalf("the tick after the flip escalated again: %+v", got)
+	}
+	cleared := false
+	for _, c := range rec.Clears() {
+		cleared = cleared || slices.Contains(c.Fingerprints, flipKey)
+	}
+	if !cleared {
+		t.Errorf("clears = %+v, want the tick after the flip to clear the store-flip alert", rec.Clears())
 	}
 	if n := strings.Count(logs.String(), "the count's store changed"); n != 1 {
 		t.Errorf("the tick after the flip rebaselined again (%d logs); log:\n%s", n, logs.String())

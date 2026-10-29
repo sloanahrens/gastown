@@ -380,7 +380,10 @@ func (s *trackerSpool) file(table string) (*os.File, error) {
 }
 
 // publish writes the staged rows as the backup's shards and returns the number
-// of rows written, the rows of a wisp's issues excluded.
+// of rows written, the rows of a wisp's issues excluded. It publishes one table
+// at a time, so an error part way leaves the tables already published from this
+// stream beside the rest from the previous export; the caller reports the
+// database as failed, and no count is committed for it.
 func (s *trackerSpool) publish() (int, error) {
 	s.close()
 	total := 0
