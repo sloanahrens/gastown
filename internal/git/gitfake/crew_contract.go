@@ -184,6 +184,11 @@ func RunCrewContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 }
 
+// openBranches is env.Open for the clone cases that need a verb Repo leaves
+// out: detaching HEAD needs a checkout, and reading a tracking config needs
+// ConfigGet. Both implementations satisfy BranchRepo.
+func openBranches(env Env, dir string) BranchRepo { return env.Open(dir).(BranchRepo) }
+
 // CrewCloneKeepsHistoryAndBranches checks the crew full-clone methods against
 // an origin of three commits and a second branch: the clone keeps every
 // commit below its tip and tracks the branch it did not check out. It returns
@@ -195,6 +200,11 @@ func RunCrewContract(t *testing.T, newEnv func(t *testing.T) Env) {
 // makes it fail for real git, which git also reads as --single-branch, and
 // leaves the merge-base check to catch a truncation that keeps the branches.
 // The fake does not model depth: its commits always carry their ancestry.
+// Naming the checked-out branch instead of the source's HEAD makes the
+// detached-source case report "trunk" where git reports no branch:
+//
+//	a clone from a source whose HEAD is detached reports remote default
+//	"trunk"; want main, the fallback, since the source named no branch.
 func CrewCloneKeepsHistoryAndBranches(t *testing.T, newEnv func(t *testing.T) Env) string {
 	t.Helper()
 	env := newEnv(t)
@@ -249,6 +259,36 @@ func CrewCloneKeepsHistoryAndBranches(t *testing.T, newEnv func(t *testing.T) En
 	}
 	if def := env.Open(side).RemoteDefaultBranch(); def != "trunk" {
 		t.Errorf("a full clone of side reports remote default %q; want trunk from origin/HEAD", def)
+	}
+
+	// A source whose HEAD is detached names no branch, so a full clone of one
+	// of its branches records no origin/HEAD, as git does when no ref is at the
+	// detached commit; the clone still checks out and tracks the branch it was
+	// asked for. The source is a checkout rather than a bare repository
+	// because git detaches HEAD only where there is a work tree.
+	detachedOrigin := filepath.Join(root, "detached-origin.git")
+	env.InitBare(t, detachedOrigin)
+	below := env.Commit(t, detachedOrigin, "trunk", "trunk: one", map[string]string{"u.txt": "u\n"})
+	above := env.Commit(t, detachedOrigin, "trunk", "trunk: two", map[string]string{"v.txt": "v\n"})
+	env.SetHead(t, detachedOrigin, "trunk")
+	source := filepath.Join(root, "detached-source")
+	env.Clone(t, detachedOrigin, source)
+	if err := openBranches(env, source).CheckoutDetachForce(below); err != nil {
+		t.Fatalf("detaching the clone source at %s: %v", below, err)
+	}
+	detached := filepath.Join(root, "CloneBranchFullDetached")
+	if err := g.CloneBranchFull(source, detached, "trunk"); err != nil {
+		t.Fatalf("CloneBranchFull from a source whose HEAD is detached: %v", err)
+	}
+	d := openBranches(env, detached)
+	if head, err := d.Rev("HEAD"); err != nil || head != above {
+		t.Errorf("a clone of trunk from a source whose HEAD is detached has HEAD %q, %v; want trunk's tip %s", head, err, above)
+	}
+	if def := d.RemoteDefaultBranch(); def != "main" {
+		t.Errorf("a clone from a source whose HEAD is detached reports remote default %q; want main, the fallback, since the source named no branch", def)
+	}
+	if remote, err := d.ConfigGet("branch.trunk.remote"); err != nil || remote != "origin" {
+		t.Errorf("branch.trunk.remote of that clone = %q, %v; want origin, so it tracks the branch it checked out", remote, err)
 	}
 	return filepath.Join(root, "CloneBranchFull")
 }
