@@ -1,11 +1,15 @@
 package slot
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 // shortWait is a timed-acquire budget for tests that expect a timeout: under
@@ -277,6 +281,189 @@ func TestStatusPoolLocksOnlySkipsDockerProbe(t *testing.T) {
 	}
 	if len(full.UnwrappedContainers) != 1 {
 		t.Fatalf("StatusPool UnwrappedContainers = %v, want the one container up with no slot held", full.UnwrappedContainers)
+	}
+}
+
+// TestPoolBusyReadOnlyWritesNothing pins the daemon cutover's contract
+// (gt-qpeei.22): the quiet gate asks whether the pool is busy and must leave
+// the town exactly as it found it, so the dead holder's owner file survives the
+// read. The ordinary status read is the one that sweeps it, and this test
+// asserts both halves so a read-only path that starts cleaning is caught here.
+func TestPoolBusyReadOnlyWritesNothing(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	town := t.TempDir()
+	pool := Pool{Slots: 1}
+	if err := os.MkdirAll(LockDir(town), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A lock file nobody holds, and the owner file a holder that died left
+	// behind.
+	if err := os.WriteFile(SlotLockPath(town, 0), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ownerPath := SlotOwnerPath(town, 0)
+	if err := os.WriteFile(ownerPath, []byte(`{"role":"gastown/landing","pid":999999}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	busy, err := tg.PoolBusyReadOnly(town, pool)
+	if err != nil {
+		t.Fatalf("PoolBusyReadOnly: %v", err)
+	}
+	if busy {
+		t.Fatalf("PoolBusyReadOnly = busy for a pool with its only slot free")
+	}
+	if _, err := os.Stat(ownerPath); err != nil {
+		t.Fatalf("the read-only busy check removed the dead holder's owner file: %v", err)
+	}
+
+	rep, err := tg.StatusPoolLocksOnly(town, pool)
+	if err != nil {
+		t.Fatalf("StatusPoolLocksOnly: %v", err)
+	}
+	if rep.Held || rep.HeldCount != 0 {
+		t.Fatalf("the free slot reads held: %+v", rep)
+	}
+	if _, err := os.Stat(ownerPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the ordinary status read left the dead holder's owner file in place (stat err %v); the contrast this test rests on is gone", err)
+	}
+}
+
+// TestPoolBusyReadOnlyCreatesNoLockFile: a town with the gate's directory but
+// no lock file in it must gain none from the read — a cutover that gave up
+// would otherwise leave a lock file behind that no holder wrote.
+func TestPoolBusyReadOnlyCreatesNoLockFile(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	town := t.TempDir()
+	if err := os.MkdirAll(LockDir(town), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	busy, err := tg.PoolBusyReadOnly(town, Pool{Slots: 2})
+	if err != nil {
+		t.Fatalf("PoolBusyReadOnly: %v", err)
+	}
+	if busy {
+		t.Fatalf("PoolBusyReadOnly = busy for a town with no lock file and no container")
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := os.Stat(SlotLockPath(town, i)); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("the read-only busy check left slot %d's lock file behind (stat err %v)", i, err)
+		}
+	}
+}
+
+// The read-only verdict is Report.Busy's — every slot held, or an unwrapped
+// suite — and the two checks that cannot be taken, the slot read and the docker
+// listing, are errors rather than a silent free or a busy the gate cannot
+// vouch for.
+func TestPoolBusyReadOnly(t *testing.T) {
+	t.Parallel()
+	looking := errors.New("docker is not answering")
+	cases := []struct {
+		name           string
+		slots          int
+		held           []int
+		lines          []string
+		listErr        error
+		lockUnopenable bool // a directory where the slot's lock file belongs
+		want           bool
+		wantErr        bool
+	}{
+		{name: "the pool is free", slots: 1},
+		{name: "the only slot is held", slots: 1, held: []int{0}, want: true},
+		{name: "one of two slots is held", slots: 2, held: []int{1}},
+		{name: "an unwrapped suite holds the docker VM", slots: 1, lines: []string{"dolt/dolt-sql-server:2.2.0 unwrapped-suite"}, want: true},
+		{name: "docker cannot be read", slots: 1, listErr: looking, wantErr: true},
+		{name: "the lock cannot be opened", slots: 1, lockUnopenable: true, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tg := newTestGate(t)
+			town := t.TempDir()
+			pool := Pool{Slots: tc.slots}
+			if err := os.MkdirAll(LockDir(town), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < tc.slots; i++ {
+				if err := os.WriteFile(SlotLockPath(town, i), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, i := range tc.held {
+				unlock, ok, err := lock.FlockTryAcquire(SlotLockPath(town, i))
+				if err != nil || !ok {
+					t.Fatalf("holding slot %d = (%v, %v)", i, ok, err)
+				}
+				t.Cleanup(unlock)
+			}
+			if tc.listErr != nil {
+				tg.rt.failList(tc.listErr)
+			} else {
+				tg.rt.setLines(tc.lines...)
+			}
+			if tc.lockUnopenable {
+				// A directory where the lock file belongs cannot be opened for a
+				// flock, which is how a slot read fails on the host.
+				lockPath := SlotLockPath(town, 0)
+				if err := os.Remove(lockPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(lockPath, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			busy, err := tg.PoolBusyReadOnly(town, pool)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("PoolBusyReadOnly = (%v, nil); want the failed check's error, never a silent free", busy)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PoolBusyReadOnly: %v", err)
+			}
+			if busy != tc.want {
+				t.Errorf("PoolBusyReadOnly = %v; want %v", busy, tc.want)
+			}
+			if len(tc.held) == 0 {
+				// With no slot held the probe took the flock to read it, and a
+				// probe that kept that hold would refuse the gate's next suite:
+				// the second read must see the same free pool.
+				again, err := tg.PoolBusyReadOnly(town, pool)
+				if err != nil || again != busy {
+					t.Errorf("the second read = (%v, %v); want %v: the probe must not keep a slot it read", again, err, busy)
+				}
+			}
+		})
+	}
+}
+
+// TestStatusPoolLocksOnlyReportsAnUnreadableSlot: a slot whose lock cannot be
+// opened is not reported free, because a report that reads "free" is what lets
+// the next suite start on top of a holder. The read fails, and the caller says
+// so.
+func TestStatusPoolLocksOnlyReportsAnUnreadableSlot(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	town := t.TempDir()
+	pool := Pool{Slots: 1}
+	if err := os.MkdirAll(LockDir(town), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the lock file belongs opens for reading but not for a
+	// flock, which is how the probe cannot take this slot.
+	if err := os.Mkdir(SlotLockPath(town, 0), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := tg.StatusPoolLocksOnly(town, pool)
+	if err == nil {
+		t.Fatalf("StatusPoolLocksOnly = %+v, nil; want the slot read's error", rep)
 	}
 }
 

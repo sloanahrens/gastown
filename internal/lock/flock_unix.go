@@ -63,6 +63,29 @@ func FlockTryAcquire(path string) (func(), bool, error) {
 	return cleanup, true, nil
 }
 
+// FlockTryAcquireExisting is FlockTryAcquireStable for a lock file the caller
+// only reads: it opens without O_CREATE, so the probe can never leave a lock
+// file behind, and an absent file is reported as the open failed (an error
+// matching fs.ErrNotExist) rather than being created and taken. It returns the
+// cleanup when it takes the lock, ErrFlockHeld when another process holds it,
+// and any other error as itself.
+func FlockTryAcquireExisting(path string) (func(), error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0) //nolint:gosec // G304: lock files are internal operational data
+	if err != nil {
+		return nil, err
+	}
+
+	if err := flockFileTry(f); err != nil {
+		f.Close()
+		return nil, err
+	}
+
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck
+		f.Close()
+	}, nil
+}
+
 // ErrFlockHeld reports that another process holds the flock. FlockTryAcquireStable
 // returns it in place of an error so that a caller can tell a lock that is taken
 // from a check that could not run.

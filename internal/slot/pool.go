@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -999,6 +1000,60 @@ func (g *Gate) StatusPool(townRoot string, pool Pool) (Report, error) {
 	return rep, nil
 }
 
+// PoolBusyReadOnly answers Report.Busy for the pool while writing nothing: it
+// creates no lock file, removes no dead holder's owner file and leaves any
+// stale marker alone, so a caller can ask the question and still leave the town
+// exactly as it found it. The held/free reading is the same flock truth
+// StatusPool reads, and the `docker ps` cross-check runs under the same rule —
+// only when no slot is held at all. The marker rows StatusPool appends are
+// left out: Busy does not count them, and sweeping them is the one thing a
+// read-only reader cannot do.
+//
+// A `docker ps` that cannot run is an error here, where Report.Busy folds it
+// into DockerUnknown=true: a caller that has to say why the town is not quiet
+// needs to name the check that failed, not a busy slot it cannot vouch for.
+// Both answers stop the wait, so neither reads an unchecked host as free.
+//
+// The daemon cutover's quiet gate (internal/cmd/daemon_quiet.go) is the
+// caller: it must be able to give up having changed nothing (gt-qpeei.22).
+func PoolBusyReadOnly(townRoot string, pool Pool) (bool, error) {
+	return NewGate().PoolBusyReadOnly(townRoot, pool)
+}
+
+// PoolBusyReadOnly is the package-level PoolBusyReadOnly on this gate.
+func (g *Gate) PoolBusyReadOnly(townRoot string, pool Pool) (bool, error) {
+	idx := knownSlotIndices(townRoot, pool)
+	held := 0
+	for _, i := range idx {
+		unlock, free, err := probeSlotLock(townRoot, i)
+		if err != nil {
+			return false, err
+		}
+		if !free {
+			held++
+			continue
+		}
+		if unlock != nil {
+			unlock()
+		}
+	}
+	if held == 0 {
+		// Containers up with no slot held are an unwrapped suite; a check that
+		// could not run is neither free nor provably busy, so it travels to the
+		// caller instead of passing for a reading.
+		containers, err := g.gateContainers()
+		if err != nil {
+			return false, fmt.Errorf("listing the gate's containers: %w", err)
+		}
+		for _, verdict := range g.owner.classify(containers, g.clock.Now(), StaleContainerWindow) {
+			if verdict.Blocks() {
+				return true, nil
+			}
+		}
+	}
+	return held == len(idx), nil
+}
+
 // StatusPoolLocksOnly is StatusPool without the `docker ps` cross-check: the
 // held/free picture and the owner metadata, read from the flocks and the
 // display-only owner files alone. Both halves are in-process work — non-
@@ -1044,13 +1099,12 @@ func (g *Gate) StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
 
 	for _, i := range idx {
 		st := SlotState{Index: i}
-		path := SlotLockPath(townRoot, i)
-		if _, statErr := os.Stat(path); statErr == nil || !os.IsNotExist(statErr) {
-			unlock, ok, err := lock.FlockTryAcquire(path)
-			if err != nil {
-				return Report{}, err
-			}
-			if ok {
+		unlock, free, err := probeSlotLock(townRoot, i)
+		if err != nil {
+			return Report{}, err
+		}
+		if free {
+			if unlock != nil {
 				// Remove the stale owner file while the flock is still held: an
 				// unlock first would let the next acquirer take the slot and
 				// write its own owner file in the window before the remove,
@@ -1059,14 +1113,14 @@ func (g *Gate) StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
 				// a removal under the lock removes only a dead holder's.
 				_ = os.Remove(SlotOwnerPath(townRoot, i))
 				unlock()
-			} else {
-				st.Held = true
-				st.Owner = readSlotOwner(townRoot, i)
-				rep.HeldCount++
-				if !rep.Held {
-					rep.Held = true
-					rep.Owner = st.Owner
-				}
+			}
+		} else {
+			st.Held = true
+			st.Owner = readSlotOwner(townRoot, i)
+			rep.HeldCount++
+			if !rep.Held {
+				rep.Held = true
+				rep.Owner = st.Owner
 			}
 		}
 		rep.Slots = append(rep.Slots, st)
@@ -1107,6 +1161,28 @@ func (g *Gate) StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
 		})
 	}
 	return rep, nil
+}
+
+// probeSlotLock asks whether slot i is held without blocking on it. free
+// reports that nobody holds the slot, and unlock releases the probe's own hold
+// (nil when the slot has no lock file to hold).
+//
+// The probe never creates the lock file it asks about, so a read cannot leave
+// a hold behind in a town that had none: a status read, and the daemon
+// cutover's quiet gate above all, must be able to look and change nothing.
+func probeSlotLock(townRoot string, i int) (unlock func(), free bool, err error) {
+	unlock, err = lock.FlockTryAcquireExisting(SlotLockPath(townRoot, i))
+	switch {
+	case errors.Is(err, lock.ErrFlockHeld):
+		return nil, false, nil
+	case errors.Is(err, fs.ErrNotExist):
+		// No lock file: nothing has ever taken this slot, which is as free as
+		// an unlocked file.
+		return nil, true, nil
+	case err != nil:
+		return nil, false, err
+	}
+	return unlock, true, nil
 }
 
 // readSlotOwner reads slot i's display-only owner file, tagging it with the
