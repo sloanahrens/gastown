@@ -3,6 +3,7 @@ package dashboard
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -303,7 +304,13 @@ func claudeCostProvider(now time.Time, _ json.RawMessage, plan *ClaudePlan, char
 	}
 	h1 := perHour(plan.PacePerDay1h)
 	p.PerHour1h = &h1
-	p.Detail = append(p.Detail, "plan pace last 24h "+money(perHour(plan.PacePerDay24h))+"/h, approximate")
+	p.Detail = append(p.Detail, claudeFiveHourLine(plan), "plan pace last 24h "+money(perHour(plan.PacePerDay24h))+"/h, approximate")
+	if charts != nil && charts.Headline != nil {
+		if h := charts.Headline; h.WindowHours > 0 && h.HoursRead < h.WindowHours {
+			p.Detail = append(p.Detail, fmt.Sprintf("%d of %d hours read", h.HoursRead, h.WindowHours))
+		}
+	}
+	p.Detail = append(p.Detail, claudeHoverLines(plan)...)
 
 	p.Status = planStatus(plan.WeeklyPct, plan.ProjectedPctAtReset)
 	if h := plan.HitsLimitInDays; h != nil {
@@ -314,6 +321,48 @@ func claudeCostProvider(now time.Time, _ json.RawMessage, plan *ClaudePlan, char
 		}
 	}
 	return p
+}
+
+// claudeFiveHourLine is the five-hour limit in use and when it rolls over; a
+// sample that carried no reset says so rather than drawing a time.
+func claudeFiveHourLine(plan *ClaudePlan) string {
+	line := "5-hour limit " + claudePct(plan.FiveHourPct) + " used"
+	if plan.FiveHourResetsAt == 0 {
+		return line + ", no reset instant in the newest sample"
+	}
+	return line + ", resets " + time.Unix(plan.FiveHourResetsAt, 0).Format("Mon 15:04")
+}
+
+// claudeHoverLines are the plan's hover lines beyond the row's figures: the
+// API-equivalent dollars when the plan has both, the billing month's use and
+// weeks at the ceiling when a week is counted, and the state the poll could not
+// keep. The dollars are approximate: plans weight tokens differently from the
+// API, and an unpriced model counts as zero, so the figure is then a floor.
+func claudeHoverLines(plan *ClaudePlan) []string {
+	var lines []string
+	if w, m := plan.APIEquivalentWeekUSD, plan.APIEquivalentMonthUSD; w != nil && m != nil {
+		line := "API-equivalent " + money(*w) + " this week, " + money(*m) + " this month, approximate: plans weight tokens differently from the API"
+		if len(plan.Unpriced) > 0 {
+			line += " · counted at zero, no list price: " + strings.Join(plan.Unpriced, ", ")
+		}
+		lines = append(lines, line)
+	}
+	if plan.WeeksCounted > 0 {
+		line := "month " + claudePct(plan.UtilizationPct) + " of plan"
+		if n := plan.WeeksAtCeiling; n > 0 {
+			line += fmt.Sprintf(" · %d %s at ceiling", n, plural(n, "week", "weeks"))
+		}
+		lines = append(lines, line)
+	}
+	if plan.StateError != "" {
+		lines = append(lines, "state not kept: "+plan.StateError)
+	}
+	return lines
+}
+
+// claudePct reads a percentage of a limit whole, as the status line samples it.
+func claudePct(v float64) string {
+	return fmt.Sprintf("%.0f%%", math.Round(v))
 }
 
 // planStatus is the row's color: a week already at the ceiling the month rollup

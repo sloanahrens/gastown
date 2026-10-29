@@ -256,6 +256,164 @@ func TestCostProvidersClaudeFigures(t *testing.T) {
 	}
 }
 
+// The five-hour limit is in the hover with its reset; a sample that carried no
+// reset says so instead of drawing a time.
+func TestCostProvidersClaudeDetailCarriesTheFiveHourLimit(t *testing.T) {
+	t.Parallel()
+
+	// Built in local zone so the wall clock the hover shows is 15:04 wherever
+	// the test runs; 29 October 2026 is a Thursday.
+	reset := time.Date(2026, time.October, 29, 15, 4, 0, 0, time.Local).Unix()
+	for _, tc := range []struct {
+		name  string
+		reset int64
+		want  string
+	}{
+		{"with a reset", reset, "5-hour limit 30% used, resets Thu 15:04"},
+		{"without a reset", 0, "5-hour limit 30% used, no reset instant in the newest sample"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			plan, charts := claudeFixture()
+			plan.FiveHourPct = 30
+			plan.FiveHourResetsAt = tc.reset
+			p := claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+
+			if !slices.Contains(p.Detail, tc.want) {
+				t.Errorf("detail %q does not carry %q", p.Detail, tc.want)
+			}
+		})
+	}
+}
+
+// The API-equivalent dollars are in the hover only when the plan has both; an
+// unpriced model is named after them, since they are then a floor.
+func TestCostProvidersClaudeDetailCarriesTheAPIEquivalent(t *testing.T) {
+	t.Parallel()
+
+	plan, charts := claudeFixture()
+	plan.APIEquivalentWeekUSD = fptr(12.5)
+	plan.APIEquivalentMonthUSD = fptr(180)
+	plan.Unpriced = []string{"placeholder-model"}
+	p := claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+
+	want := "API-equivalent $12.50 this week, $180.00 this month, approximate: plans weight tokens differently from the API · counted at zero, no list price: placeholder-model"
+	if !slices.Contains(p.Detail, want) {
+		t.Errorf("detail %q does not carry %q", p.Detail, want)
+	}
+
+	// A week without its month is not a figure the hover can state, so neither
+	// is drawn.
+	for name, set := range map[string]func(*ClaudePlan){
+		"no figures": func(*ClaudePlan) {},
+		"week only":  func(p *ClaudePlan) { p.APIEquivalentWeekUSD = fptr(12.5) },
+		"month only": func(p *ClaudePlan) { p.APIEquivalentMonthUSD = fptr(180) },
+	} {
+		plan, charts := claudeFixture()
+		set(plan)
+		p := claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+		for _, line := range p.Detail {
+			if strings.Contains(line, "API-equivalent") {
+				t.Errorf("%s: detail draws %q, want no API-equivalent line", name, line)
+			}
+		}
+	}
+}
+
+// The billing month's use and its weeks at the ceiling are in the hover, and a
+// month with no counted week draws neither.
+func TestCostProvidersClaudeDetailCarriesTheMonth(t *testing.T) {
+	t.Parallel()
+
+	plan, charts := claudeFixture()
+	plan.WeeksCounted = 3
+	plan.UtilizationPct = 57.4
+	plan.WeeksAtCeiling = 2
+	p := claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+
+	if !slices.Contains(p.Detail, "month 57% of plan · 2 weeks at ceiling") {
+		t.Errorf("detail %q does not carry the month's use and its weeks at the ceiling", p.Detail)
+	}
+
+	// A counted month with no week at the ceiling says its use alone; one week
+	// at the ceiling is named in the singular.
+	plan, charts = claudeFixture()
+	plan.WeeksCounted = 3
+	plan.UtilizationPct = 57.4
+	p = claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+	if !slices.Contains(p.Detail, "month 57% of plan") {
+		t.Errorf("detail %q does not carry the month's use alone", p.Detail)
+	}
+
+	plan.WeeksAtCeiling = 1
+	p = claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+	if !slices.Contains(p.Detail, "month 57% of plan · 1 week at ceiling") {
+		t.Errorf("detail %q does not name the one week at the ceiling", p.Detail)
+	}
+
+	plan, charts = claudeFixture()
+	p = claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+	for _, line := range p.Detail {
+		if strings.HasPrefix(line, "month ") {
+			t.Errorf("detail draws %q for a month with no counted week", line)
+		}
+	}
+}
+
+// A headline whose hourly rate read fewer hours than its window says how many
+// it read; a full window says nothing.
+func TestCostProvidersClaudeDetailCarriesTheHoursRead(t *testing.T) {
+	t.Parallel()
+
+	plan, charts := claudeFixture()
+	charts.Headline.WindowHours = 24
+	charts.Headline.HoursRead = 18
+	p := claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+
+	if !slices.Contains(p.Detail, "18 of 24 hours read") {
+		t.Errorf("detail %q does not state the hours read", p.Detail)
+	}
+
+	// No hour read at all is the emptiest headline, and must say so too.
+	charts.Headline.HoursRead = 0
+	p = claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+
+	if !slices.Contains(p.Detail, "0 of 24 hours read") {
+		t.Errorf("detail %q does not state that no hours were read", p.Detail)
+	}
+
+	charts.Headline.HoursRead = 24
+	p = claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+	for _, line := range p.Detail {
+		if strings.Contains(line, "hours read") {
+			t.Errorf("detail draws %q for a full window", line)
+		}
+	}
+}
+
+// A poll that could not keep its state says so in the hover, so a history that
+// stopped growing is not read as a healthy one.
+func TestCostProvidersClaudeDetailCarriesTheStateError(t *testing.T) {
+	t.Parallel()
+
+	plan, charts := claudeFixture()
+	plan.StateError = "the closeout history could not be written"
+	p := claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+
+	if !slices.Contains(p.Detail, "state not kept: the closeout history could not be written") {
+		t.Errorf("detail %q does not carry the state error", p.Detail)
+	}
+
+	plan, charts = claudeFixture()
+	p = claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+	for _, line := range p.Detail {
+		if strings.HasPrefix(line, "state not kept") {
+			t.Errorf("detail draws %q for a poll that kept its state", line)
+		}
+	}
+}
+
 // The row's status is the colour the table's chip takes, and the rule is the
 // reader's own: a week at the ceiling, or a projection past the limit, is bad; a
 // projection past the ceiling is a warning; anything else is ok. The cases pin
