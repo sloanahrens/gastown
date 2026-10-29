@@ -3227,16 +3227,17 @@ function drawOverseerQueue(panel, s) {
 }
 
 // The Usage part of the Cost panel: what the town spent over the last day, from
-// the records the usage scan writes. Collapsed by default, with the two numbers
-// an operator wants without opening it in the panel's header: the day's
-// DeepSeek estimate and how many beads ran over twenty minutes. Read-only.
+// the records the usage scan writes. Each block is a fold of its own, closed by
+// default, with a one-line summary on its heading; the Cost panel's header
+// carries the day's DeepSeek estimate and how many beads ran over twenty
+// minutes. Read-only.
 //
-// Claude rows show uncached tokens, since the scan estimates no cost for them;
-// DeepSeek rows show estimated dollars, labelled "est." because they are a rate
-// over the tokens and not a bill. A read that failed and a scan that never ran
-// are named states, never an empty list. Every cell goes through el(), which
-// writes textContent: a bead id or model name is text and never markup.
-let openUsage = false;
+// Money and tokens are in separate columns: Spend ($) holds dollars and is
+// "est." for DeepSeek rows only, since the scan estimates no cost for Claude
+// rows; Tokens holds the uncached token count of every row. A read that failed
+// and a scan that never ran are named states, never an empty list. Every cell
+// goes through el(), which writes textContent: a bead id or model name is text
+// and never markup.
 const USAGE_STALE_SEC = 3 * 3600;
 const isDeepSeek = model => /^deepseek/i.test(model || "");
 const fmtTokens = n => {
@@ -3281,34 +3282,50 @@ function costUsage(box, u, s) {
     warn: over.length > 0,
   };
 
-  // How old the records are: the scan runs on a schedule, so an old AsOf means
-  // the numbers below are a past day's, and the pane says so beside them.
-  const scanned = u.as_of ? new Date(u.as_of).getTime() : NaN;
-  if (isNaN(scanned)) box.append(el("div", "empty warnc", "never scanned"));
-  else {
-    const old = (Date.now() - scanned) / 1000 > USAGE_STALE_SEC;
-    box.append(el("div", "empty" + (old ? " warnc" : ""), "records last scanned " + age(u.as_of) + " ago" + (old ? " (stale)" : "")));
-  }
-
-  const d = document.createElement("details");
-  d.open = openUsage;
-  d.ontoggle = () => { openUsage = d.open; };
-  d.append(el("summary", "title", "last " + (u.window || "24h") + " by class and model, deep reviews, top and slow beads"));
+  const win = u.window || "24h";
   const table = costTable;
-  const section = (title, node) => { d.append(el("h3", "sub", title), node); };
   const none = text => el("div", "empty", text);
+  const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
 
-  section("By class and model", byClass.length
-    ? table([["Class"], ["Model"], ["Calls", 1], ["Spend", 1]], byClass.map(r => [
+  const calls = byClass.reduce((n, r) => n + (r.calls || 0), 0);
+  const tokens = byClass.reduce((n, r) => n + (r.uncached || 0), 0);
+  const byClassFold = costFold(box, "cost.byclass", "By class and model",
+    byClass.length ? calls + " calls · " + fmtTokens(tokens) + " tokens" : "no usage in the last " + win);
+  byClassFold.body.append(byClass.length
+    ? table([["Class"], ["Model"], ["Calls", 1], ["Spend ($)", 1], ["Tokens", 1]], byClass.map(r => [
         [r.class], [r.model, "title"], [String(r.calls), "n"],
-        [isDeepSeek(r.model) ? "est. " + money(r.est_cost_usd) : fmtTokens(r.uncached) + " tokens", "n"]]))
-    : none("no usage in the last " + (u.window || "24h")));
+        [r.est_cost_usd ? "est. " + money(r.est_cost_usd) : "–", "n"],
+        [fmtTokens(r.uncached), "n"]]))
+    : none("no usage in the last " + win));
+
   // What a run's tokens bought: its findings, joined by bead id from the runs
   // the Deep review block's reader carries. A run that reader does not list has
   // no count ("-"), and a run with none has no per-finding figure to divide
   // into.
   const found = new Map(((s.deepreview && s.deepreview.runs) || []).map(r => [r.id, r.findings]));
-  section("Deep reviews", deep.length
+  const latest = deep.reduce((a, r) => (!a || new Date(r.end) > new Date(a.end) ? r : a), null);
+  const deepLine = latest ? plural(deep.length, "run", "runs") + " · last " + age(latest.end) + " ago" : "no deep review runs";
+  // The state chip: paused while the town holds dispatch or its scheduled_slings
+  // patrol is switched off, scheduled while a schedule is on and has filed runs,
+  // and unknown when the deep review state is missing or could not be read. A
+  // state that did not arrive must not read as a healthy schedule, so only a
+  // state that names a schedule can say "scheduled".
+  const dr = (s && s.deepreview) || null;
+  const scheds = (dr && dr.schedules) || [];
+  const unread = !dr || !!dr.unavailable;
+  const off = !unread && (!!dr.paused || scheds.some(sc => sc && sc.next === "patrol disabled"));
+  const deepFold = costFold(box, "cost.deepreview", "Deep reviews", deepLine);
+  const chip = unread ? el("span", "badge warnc", "unknown")
+    : off ? el("span", "badge warnc", "paused")
+    : scheds.length && deep.length ? el("span", "badge good", "scheduled") : null;
+  if (chip) chip.title = unread ? "the deep review state is missing or could not be read, so the schedule is unknown"
+    : off ? (dr.paused || "the town's scheduled_slings patrol is switched off")
+    : "the schedule is on and has filed runs";
+  const bits = [];
+  if (chip) bits.push(document.createTextNode(" "), chip);
+  if (latest) bits.push(document.createTextNode(" "), el("span", "title", "last run " + new Date(latest.end).toLocaleDateString([], {month: "short", day: "numeric"})));
+  deepFold.bits.replaceChildren(...bits);
+  deepFold.body.append(deep.length
     ? table([["Run"], ["Ended"], ["Took", 1], ["Tokens", 1], ["In subagents", 1], ["Findings", 1], ["Tokens per finding", 1]], deep.map(r => {
         const f = found.get(r.bead);
         return [
@@ -3316,38 +3333,102 @@ function costUsage(box, u, s) {
           [f == null ? "-" : String(f), "n"], [f ? fmtTokens(Math.round(r.uncached / f)) : "-", "n"]];
       }))
     : none("no deep review runs"));
-  section("Top beads", top.length
-    ? table([["Bead"], ["Class"], ["Took", 1], ["Spend", 1]], top.map(r => [
+
+  const topFold = costFold(box, "cost.topbeads", "Top beads",
+    top.length ? "top " + top[0].bead + " " + fmtTokens(top[0].uncached) + " tokens" : "no beads in the last " + win);
+  topFold.body.append(top.length
+    ? table([["Bead"], ["Class"], ["Took", 1], ["Spend ($)", 1], ["Tokens", 1]], top.map(r => [
         [r.bead], [r.class, "title"], [fmtDur(r.wall_s), "n"],
-        [r.est_cost_usd ? "est. " + money(r.est_cost_usd) : fmtTokens(r.uncached) + " tokens", "n"]]))
-    : none("no beads in the last " + (u.window || "24h")));
-  section("Over 20 minutes (48h)", over.length
+        [r.est_cost_usd ? "est. " + money(r.est_cost_usd) : "–", "n"],
+        [fmtTokens(r.uncached), "n"]]))
+    : none("no beads in the last " + win));
+
+  const overFold = costFold(box, "cost.over20", "Over 20 minutes (48h)",
+    over.length ? plural(over.length, "bead", "beads") + " in the last 48h" : "none in the last 48h");
+  overFold.body.append(over.length
     ? table([["Bead"], ["Rig"], ["Took", 1], ["Tests", 1]], over.map(r => [
         [r.bead, "warnc"], [r.rig, "title"], [fmtDur(r.wall_s), "n warnc"],
         [r.test_runs + " runs, " + r.failed_test_runs + " failed", "n" + (r.failed_test_runs ? " badc" : "")]]))
     : none("none in the last 48h"));
-  d.append(el("div", "empty", (u.unmatched || 0) + " unmatched · " + (u.incomplete || 0) + " incomplete · " + (u.skipped || 0) + " skipped"));
-  box.append(d);
+
+  // How old the records are: the scan runs on a schedule, so an old AsOf means
+  // the numbers in the folds are a past day's, and the fold says so.
+  const counts = (u.unmatched || 0) + " unmatched · " + (u.incomplete || 0) + " incomplete · " + (u.skipped || 0) + " skipped";
+  const quality = costFold(box, "cost.quality", "Data quality", counts);
+  const scanned = u.as_of ? new Date(u.as_of).getTime() : NaN;
+  if (isNaN(scanned)) quality.body.append(el("div", "empty warnc", "never scanned"));
+  else {
+    const old = (Date.now() - scanned) / 1000 > USAGE_STALE_SEC;
+    quality.body.append(el("div", "empty" + (old ? " warnc" : ""), "records last scanned " + age(u.as_of) + " ago" + (old ? " (stale)" : "")));
+  }
+  quality.body.append(el("div", "empty", counts));
   return caption;
+}
+
+// costFolds keeps each fold of the Cost panel's usage part by its key, built once
+// like the chart folds: a redraw refills the fold's body and its heading's chip
+// and date, so a reading that arrives every few seconds does not stack a second
+// fold on the same key.
+const costFolds = {};
+// costFold draws a closed fold under key into box, titled title, with line as
+// the one line its heading shows while closed, and returns it. Its heading holds
+// the title, then the bits span a redraw sets (a state chip, a date), then the
+// closed line foldable adds.
+function costFold(box, key, title, line) {
+  let f = costFolds[key];
+  if (!f) {
+    const sec = el("section");
+    sec.dataset.fold = key;
+    const head = el("h2", "", title);
+    f = costFolds[key] = {sec: sec, head: head, bits: el("span", ""), body: el("div", "body"), line: line};
+    head.append(f.bits);
+    sec.append(head, f.body);
+    f.fold = foldable(sec, {key: key, summary: () => f.line});
+  }
+  f.line = line;
+  f.fold.paint(state);
+  f.body.replaceChildren();
+  box.append(f.sec);
+  return f;
+}
+
+// costJevFold draws the Jev fold: the calls, the window and the top caller from
+// the Jev spend read. The provider row above carries the dollars. A town with no
+// Jev reader has neither a row nor a read, so it has no fold; a configured Jev
+// whose read failed says so in the fold.
+function costJevFold(box, s) {
+  const jev = s && s.jev_spend;
+  const rows = Array.isArray(s && s.cost_providers) ? s.cost_providers : [];
+  if (!jev && !rows.some(p => p && p.id === "jev")) return;
+  if (!jev) {
+    const missing = "the Jev spend could not be read";
+    costFold(box, "cost.jev", "Jev spend", missing).body.append(el("div", "badc", missing));
+    return;
+  }
+  const calls = jev.calls + (jev.calls === 1 ? " call" : " calls") + (jev.window ? " in " + jev.window : "");
+  const top = jev.top_caller ? " · top caller " + jev.top_caller + " (" + jev.top_caller_calls + (jev.top_caller_calls === 1 ? " call" : " calls") + ")" : "";
+  costFold(box, "cost.jev", "Jev spend", calls + top).body.append(el("div", "empty", calls + top));
 }
 
 // The om rework part of the Cost panel: what each review bar costs in rework,
 // from the landing worker's review log, for the last seven days and the seven
-// before them. A bead counts under the bar in force at its first review in the
-// window. A bar of 0 is a tree that named none and reads "?". A read that
-// failed is a named state, never an empty week. The om time column is the mean
-// of the landed beads' own totals, each the sum of every review that bead had
-// before it landed; a bar no bead has a time for draws a dash.
+// before them, in one table with a row per window and bar. A bead counts under
+// the bar in force at its first review in the window. A bar of 0 is a tree that
+// named none and reads "?". A read that failed is a named state, never an empty
+// week, and a window with no bars says so under the table. The om time column is
+// the mean of the landed beads' own totals, each the sum of every review that
+// bead had before it landed; a bar no bead has a time for draws a dash.
 function costRework(box, r) {
   if (!r) { box.append(el("div", "empty", "om rework · reading…")); return; }
   if (r.unavailable) { box.append(el("div", "badc", "om rework · review log unreadable")); return; }
-  const heads = [["Bar", 1], ["Reviews", 1], ["First try", 1], ["Rework", 1], ["Reviews per landed", 1], ["Mean om time", 1], ["Loops out", 1], ["Mean score", 1]];
+  const heads = [["Window"], ["Bar", 1], ["Reviews", 1], ["First try", 1], ["Rework", 1], ["Reviews per landed", 1], ["Mean om time", 1], ["Loops out", 1], ["Mean score", 1]];
   if (r.om_unavailable) box.append(el("div", "badc", "om rework · om times unavailable: the daemon log could not be read"));
+  const rows = [], empty = [];
   for (const w of r.windows || []) {
-    box.append(el("h3", "sub", "om rework · " + w.name));
     const bars = w.bars || [];
-    if (!bars.length) { box.append(el("div", "empty", "no om reviews")); continue; }
-    box.append(costTable(heads, bars.map(b => [
+    if (!bars.length) { empty.push(w.name); continue; }
+    for (const b of bars) rows.push([
+      [w.name],
       [b.bar ? b.bar.toFixed(2) : "?", "n"],
       [String(b.reviews), "n"],
       [b.first_try + "/" + b.beads, "n"],
@@ -3355,8 +3436,10 @@ function costRework(box, r) {
       [b.landed ? b.reviews_per_landed.toFixed(2) : "–", "n"],
       [b.om_beads ? fmtMS(b.mean_om_secs) : "–", "n", omTimeHover(b)],
       [String(b.loops_out), "n" + (b.loops_out ? " badc" : "")],
-      [b.mean_score.toFixed(2), "n"]])));
+      [b.mean_score.toFixed(2), "n"]]);
   }
+  if (rows.length) box.append(el("h3", "sub", "om rework"), costTable(heads, rows));
+  for (const name of empty) box.append(el("div", "empty", name + ": no om reviews"));
 }
 
 // omTimeHover is what the Mean om time cell says behind the figure: how many
@@ -4036,6 +4119,7 @@ function renderCost(s) {
   costChartFold(spendBox, "hourly", charts.hourly, s.cost_providers);
   costGCP(box, s.cloud);
   const usage = costUsage(box, u, s);
+  costJevFold(box, s);
   costRework(box, s.rework);
   // The caption carries the spend report's ledger sample and its read age,
   // which the table's hover does not, beside the usage glance.

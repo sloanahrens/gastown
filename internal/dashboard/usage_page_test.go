@@ -1,8 +1,10 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The Usage pane draws the payload the hub holds: both kinds of spend, the
@@ -20,8 +22,6 @@ func TestUsagePanelDrawsThePayload(t *testing.T) {
 		`byClass.filter(r => isDeepSeek(r.model))`,
 		`text: "DeepSeek est. " + money(est) + " · " + over.length + (over.length === 1 ? " bead" : " beads") + " over 20m"`,
 		`warn: over.length > 0,`,
-		// Claude rows are tokens, DeepSeek rows are dollars labelled est.
-		`isDeepSeek(r.model) ? "est. " + money(r.est_cost_usd) : fmtTokens(r.uncached) + " tokens"`,
 		// A bead over twenty minutes is flagged in the page's warning style.
 		`[r.bead, "warnc"]`,
 		`r.test_runs + " runs, " + r.failed_test_runs + " failed"`,
@@ -56,11 +56,7 @@ func TestUsagePanelNamesItsStates(t *testing.T) {
 		`box.append(el("div", "badc", "usage records unreadable"))`,
 		`el("div", "empty warnc", "never scanned")`,
 		`"records last scanned " + age(u.as_of) + " ago" + (old ? " (stale)" : "")`,
-		`none("no usage in the last " + (u.window || "24h"))`,
 		`none("no deep review runs")`,
-		`none("no beads in the last " + (u.window || "24h"))`,
-		`none("none in the last 48h")`,
-		`section("Over 20 minutes (48h)", over.length`,
 	} {
 		if !strings.Contains(draw, want) {
 			t.Errorf("costUsage has no %q", want)
@@ -82,23 +78,25 @@ func TestUsagePanelNamesItsStates(t *testing.T) {
 	}
 }
 
-// The pane is collapsed on load and keeps the viewer's choice across redraws,
-// the way the idle polecats section does.
-func TestUsagePanelIsCollapsedByDefault(t *testing.T) {
+// Each usage block is a fold of its own under its own key, drawn into the Cost
+// panel, so the viewer's choice for each is kept across redraws the way the
+// chart folds' is: no single details block holds them all.
+func TestUsagePanelBlocksAreFoldsUnderTheirOwnKeys(t *testing.T) {
 	t.Parallel()
 
-	if !strings.Contains(string(indexHTML), `let openUsage = false;`) {
-		t.Error("the Usage pane does not start collapsed")
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", usageReading(time.Now()))
+	v, err := dom.vm.RunString(`JSON.stringify((() => { const out = []; __walk(__byId["cost"], c => { if (c.tagName === "SECTION" && c.dataset.fold) out.push(c.dataset.fold); }); return out; })())`)
+	if err != nil {
+		t.Fatalf("reading the Cost panel's folds: %v", err)
 	}
-	draw := pageFunc(t, "costUsage")
-	for _, want := range []string{
-		`document.createElement("details")`,
-		`d.open = openUsage;`,
-		`d.ontoggle = () => { openUsage = d.open; };`,
-	} {
-		if !strings.Contains(draw, want) {
-			t.Errorf("costUsage has no %q", want)
-		}
+	var keys []string
+	if err := json.Unmarshal([]byte(v.String()), &keys); err != nil {
+		t.Fatalf("reading the Cost panel's folds: %v", err)
+	}
+	want := []string{"cost.byclass", "cost.deepreview", "cost.topbeads", "cost.over20", "cost.quality", "cost.jev"}
+	if strings.Join(keys, "|") != strings.Join(want, "|") {
+		t.Errorf("Cost panel folds = %v, want one per usage block: %v", keys, want)
 	}
 }
 

@@ -54,8 +54,9 @@ func costSpendUsage() map[string]any {
 	}
 }
 
-// The table has one row per bar with the columns the operator watches, a
-// window with no reviews says so, and the unknown bar reads "?".
+// The table is one table over both windows, with a Window column in front and a
+// row per bar, and the unknown bar reads "?". A window with no reviews says so
+// under the table rather than drawing an empty table of its own.
 func TestCostPanelDrawsTheReworkTable(t *testing.T) {
 	t.Parallel()
 
@@ -70,23 +71,23 @@ func TestCostPanelDrawsTheReworkTable(t *testing.T) {
 		switch {
 		case k.Tag == "H3" && strings.HasPrefix(k.Text, "om rework"):
 			subs = append(subs, k.Text)
-		case k.Tag == "TABLE" && len(k.Rows) > 0 && k.Rows[0][0] == "Bar":
+		case k.Tag == "TABLE" && len(k.Rows) > 0 && k.Rows[0][0] == "Window":
 			heads, tables = k.Rows[0], append(tables, k.Rows)
 		}
 	}
-	if len(subs) != 2 || subs[0] != "om rework · last 7 days" || subs[1] != "om rework · the 7 days before" {
-		t.Fatalf("rework headings = %q, want one per window", subs)
+	if len(subs) != 1 || subs[0] != "om rework" {
+		t.Fatalf("rework headings = %q, want one for the one table", subs)
 	}
-	if strings.Join(heads, "|") != "Bar|Reviews|First try|Rework|Reviews per landed|Mean om time|Loops out|Mean score" {
+	if strings.Join(heads, "|") != "Window|Bar|Reviews|First try|Rework|Reviews per landed|Mean om time|Loops out|Mean score" {
 		t.Errorf("columns = %q", heads)
 	}
 	if len(tables) != 1 {
-		t.Fatalf("drew %d rework tables, want one: the empty window has none", len(tables))
+		t.Fatalf("drew %d rework tables, want one for both windows", len(tables))
 	}
 	want := [][]string{
-		{"0.70", "2", "0/1", "50%", "2.00", "2:25", "0", "0.71"},
-		{"0.80", "7", "1/3", "71%", "2.00", "3:10", "1", "0.58"},
-		{"?", "1", "0/1", "100%", "–", "–", "0", "0.40"},
+		{"last 7 days", "0.70", "2", "0/1", "50%", "2.00", "2:25", "0", "0.71"},
+		{"last 7 days", "0.80", "7", "1/3", "71%", "2.00", "3:10", "1", "0.58"},
+		{"last 7 days", "?", "1", "0/1", "100%", "–", "–", "0", "0.40"},
 	}
 	rows := tables[0][1:]
 	if len(rows) != len(want) {
@@ -99,7 +100,7 @@ func TestCostPanelDrawsTheReworkTable(t *testing.T) {
 	}
 	empty := false
 	for _, k := range kids {
-		empty = empty || (k.Class == "empty" && k.Text == "no om reviews")
+		empty = empty || (k.Class == "empty" && k.Text == "the 7 days before: no om reviews")
 	}
 	if !empty {
 		t.Error("the window with no reviews does not say so")
@@ -118,7 +119,7 @@ func TestCostPanelHoversTheMeanOMTime(t *testing.T) {
 	dom.call(t, "renderCost", s)
 	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children
 		.filter(c => c.tagName === "TABLE" && c.children[0].children.map(x => x.textContent).indexOf("Mean om time") >= 0)
-		.map(t => t.children.slice(1).map(r => r.children[5].title)))`)
+		.map(t => t.children.slice(1).map(r => r.children[6].title)))`)
 	if err != nil {
 		t.Fatalf("reading the column's hovers: %v", err)
 	}
@@ -223,7 +224,7 @@ func TestCostPanelHoversABarWithNoLandedOMTime(t *testing.T) {
 	dom.call(t, "renderCost", s)
 	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children
 		.filter(c => c.tagName === "TABLE" && c.children[0].children.map(x => x.textContent).indexOf("Mean om time") >= 0)
-		.map(t => t.children.slice(1).map(r => [r.children[5].textContent, r.children[5].title])))`)
+		.map(t => t.children.slice(1).map(r => [r.children[6].textContent, r.children[6].title])))`)
 	if err != nil {
 		t.Fatalf("reading the column: %v", err)
 	}
