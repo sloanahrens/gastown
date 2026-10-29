@@ -42,6 +42,9 @@ echo "default render"
 check "no host.docker.internal is left" lacks "host.docker.internal" "$out"
 check "the header names the in-cluster route" contains "Forgejo on :3000 are reached through in-cluster Services." "$out"
 check "the header does not claim a Docker host alias" lacks "Docker Desktop" "$out"
+# 11 changed lines: the header line that names the route (2), and for each of
+# the three endpoints (Dolt, Forgejo, tracker) the host line rewritten (2) and
+# its allowed_ips pin added (1).
 check "the render differs from the Docker policy in exactly 11 lines" test "$(diff "$BASE" <(printf '%s\n' "$out") | grep -c '^[<>]')" -eq 11
 check "the Docker policy file is only read" test "$(shasum "$BASE")" = "$base_sum_before"
 dolt="$(endpoint_of 3307 "$out")"
@@ -169,6 +172,7 @@ check "four Services are defined" test "$(grep -c '^kind: Service' "$SERVICES")"
 check "every Service is an ExternalName to the Mac" test "$(grep -c 'externalName: host.lima.internal' "$SERVICES")" -eq 4
 check "the names are control-plane, dolt, forgejo and tracker" test "$(grep -o 'name: [a-z-]*,' "$SERVICES" | tr -d ',' | sort | tr '\n' ' ')" = "name: control-plane name: dolt name: forgejo name: tracker "
 check "no Service has a selector key" test "$(grep -c '^ *selector:' "$SERVICES")" -eq 0
+check "the script header has no stub line that ends after 'Dolt over'" lacks "$(printf 'Dolt over\n#')" "$(cat "$RENDER")"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "render-policy_test.sh: all $PASS cases passed"
