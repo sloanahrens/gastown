@@ -86,10 +86,16 @@ func datasetFingerprint(is IssueRow, parent string, labels []string) string {
 // Verify compares ds with the tracker. It reads only. A query that fails is
 // an error, never a count of zero.
 func Verify(ctx context.Context, q Querier, ds *Dataset) (Diff, error) {
+	return verify(ctx, q, ds, repairedDeps)
+}
+
+// verify is Verify with the repair it expects passed in, so a test can hand it a wrong repair and
+// see the alarm the repair check raises; Verify passes repairedDeps.
+func verify(ctx context.Context, q Querier, ds *Dataset, repair func(*Dataset) (deps, synthesized []DepRow)) (Diff, error) {
 	var p problems
 	// The rows Import wrote, synthesized links included: the same function
 	// decides both, so a repaired import verifies.
-	deps, _ := repairedDeps(ds)
+	deps, _ := repair(ds)
 	// The expectation above is repairedDeps's output, so the repair is also
 	// checked against the rule: a wrong link would otherwise be expected and pass.
 	for _, msg := range repairProblems(ds, deps) {

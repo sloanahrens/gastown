@@ -113,8 +113,14 @@ func repairProblems(ds *Dataset, deps []DepRow) []string {
 	var out []string
 	have := map[string]bool{}
 	for _, d := range deps {
-		have[linkKey(d)] = true
-		if fromDataset[linkKey(d)] {
+		k := linkKey(d)
+		repeated := have[k]
+		have[k] = true
+		if fromDataset[k] {
+			continue
+		}
+		if repeated {
+			out = append(out, fmt.Sprintf("repair links %s -> %s (%s) more than once", d.IssueID, d.DependsOn, d.Type))
 			continue
 		}
 		if want, ok := eligible[d.IssueID]; !ok || want != d.DependsOn || d.Type != "parent-child" {
