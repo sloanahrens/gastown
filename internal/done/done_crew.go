@@ -206,7 +206,7 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 			// Route from the town, not the worktree: a crew worktree's own
 			// .beads may be the source repo's, not the town's.
 			// bd records the submission's label and notes as written by
-			// actor, the session's own identity (crewSubmissionActor).
+			// actor, the session's own identity (crewActorFromEnv).
 			info, err := resolveSubmitSourceIssueIn(townRoot, id, func(cwd, beadsDir string) beads.Client {
 				return beads.NewWithBeadsDir(cwd, beadsDir).ActingAs(actor)
 			})
