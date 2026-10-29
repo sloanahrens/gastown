@@ -37,6 +37,73 @@ type DaemonPatrolConfig struct {
 	// Propagated to all sessions spawned by the daemon and read by gt up.
 	// Example: {"GT_SEAT_REFILL_MAX_PRIORITY": "50"}
 	Env map[string]string `json:"env,omitempty"`
+
+	// Supervisor selects the service manager a provisioned daemon runs under;
+	// empty keeps the host's own detection. SupervisorKind validates it.
+	Supervisor string `json:"supervisor,omitempty"`
+
+	// ContainerNameSetting is the container the container supervisor starts
+	// and inspects, read through ContainerName so the default lives in one
+	// place. The name is per town: a scratch town names its own, so it can
+	// never reach the live daemon's container. The field cannot take the
+	// method's name in Go, hence the suffix.
+	ContainerNameSetting string `json:"container_name,omitempty"`
+
+	// ComposeProjectSetting is the compose project the container supervisor
+	// runs under, read through ComposeProject for the same reason.
+	ComposeProjectSetting string `json:"compose_project,omitempty"`
+}
+
+// The supervisor kinds daemon.supervisor accepts, and the names the container
+// kind runs under when the town sets neither.
+const (
+	SupervisorLaunchd   = "launchd"
+	SupervisorSystemd   = "systemd"
+	SupervisorContainer = "container"
+
+	// ContainerModeEnv is the environment variable the rendered compose file
+	// sets to "container" (SupervisorContainer) beside the daemon, which puts
+	// `gt daemon run` in container mode: it writes no pid file, because a pid
+	// from another namespace means nothing on the host.
+	ContainerModeEnv = "GT_DAEMON_SUPERVISOR"
+
+	// DefaultContainerName and DefaultComposeProject name the container and
+	// its compose project for a town that sets container_name and
+	// compose_project neither.
+	DefaultContainerName  = "gt-town-daemon-1"
+	DefaultComposeProject = "gt-town"
+)
+
+// SupervisorKind returns the configured supervisor kind, or "" when the town
+// sets none and the host's own detection answers, and an error for any value
+// that is not one of the three kinds.
+func (c *DaemonPatrolConfig) SupervisorKind() (string, error) {
+	if c == nil || c.Supervisor == "" {
+		return "", nil
+	}
+	switch c.Supervisor {
+	case SupervisorLaunchd, SupervisorSystemd, SupervisorContainer:
+		return c.Supervisor, nil
+	}
+	return "", fmt.Errorf("daemon.supervisor %q: accepted values are %q, %q and %q; leave it unset to detect the host's service manager",
+		c.Supervisor, SupervisorLaunchd, SupervisorSystemd, SupervisorContainer)
+}
+
+// ContainerName returns the container the container supervisor manages.
+func (c *DaemonPatrolConfig) ContainerName() string {
+	if c == nil || c.ContainerNameSetting == "" {
+		return DefaultContainerName
+	}
+	return c.ContainerNameSetting
+}
+
+// ComposeProject returns the compose project the container supervisor runs
+// under.
+func (c *DaemonPatrolConfig) ComposeProject() string {
+	if c == nil || c.ComposeProjectSetting == "" {
+		return DefaultComposeProject
+	}
+	return c.ComposeProjectSetting
 }
 
 // PatrolsConfig holds configuration for all patrols.
