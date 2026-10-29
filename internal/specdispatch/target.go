@@ -35,8 +35,13 @@ var targetPathRe = regexp.MustCompile(`^(?:[A-Za-z0-9_.+-]+/)+[A-Za-z0-9_.+-]*\.
 var targetLineRefRe = regexp.MustCompile(`:\d+(?::\d+)?$`)
 
 // targetPathTrim is the punctuation a path wears in prose: wrapping quotes,
-// backticks and brackets, and a trailing comma, semicolon or full stop.
-const targetPathTrim = " \t`'\"()[]<>,;:."
+// backticks and brackets, and a trailing comma, semicolon or colon. A full stop
+// is trimmed from the end only (targetPathTail): at the start it is part of the
+// name, as in .github/workflows/ci.yml.
+const targetPathTrim = " \t`'\"()[]<>,;:"
+
+// targetPathTail is targetPathTrim plus the sentence's full stop.
+const targetPathTail = targetPathTrim + "."
 
 // targetPathReject are the characters that make a token something other than
 // one literal path: a glob, a URL fragment, a comparison, an interpolation.
@@ -93,9 +98,13 @@ func pathTokens(text string) []string {
 // literal form counts, so a glob, a URL, an absolute path or a symbol is read
 // as "not a file to change" and passed rather than guessed at.
 func targetPathOf(token string) (string, bool) {
-	path := strings.Trim(token, targetPathTrim)
+	path := strings.TrimRight(strings.TrimLeft(token, targetPathTrim), targetPathTail)
 	path = targetLineRefRe.ReplaceAllString(path, "")
-	path = strings.Trim(path, targetPathTrim)
+	path = strings.TrimRight(path, targetPathTail)
+	// ./internal/x.go names the same repo-relative file as internal/x.go.
+	for strings.HasPrefix(path, "./") {
+		path = strings.TrimPrefix(path, "./")
+	}
 	if path == "" || strings.ContainsAny(path, targetPathReject) || !targetPathRe.MatchString(path) {
 		return "", false
 	}

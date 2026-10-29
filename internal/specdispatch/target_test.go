@@ -255,6 +255,16 @@ func TestConstraintFilePaths(t *testing.T) {
 			want: []string{"internal/cmd/spec.go", "internal/specdispatch/lint.go"},
 		},
 		{
+			name: "a leading dot is part of the name and ./ is the repo root",
+			body: "Change .github/workflows/ci.yml, then ./internal/cmd/spec.go and (./scripts/x.sh).",
+			want: []string{".github/workflows/ci.yml", "internal/cmd/spec.go", "scripts/x.sh"},
+		},
+		{
+			name: "a parent path is never a repo file",
+			body: "Not ../internal/cmd/spec.go and not ./../scripts/x.sh.",
+			want: nil,
+		},
+		{
 			name: "duplicates keep the first sighting",
 			body: "internal/cmd/spec.go is where it ends; internal/cmd/spec.go again.",
 			want: []string{"internal/cmd/spec.go"},
