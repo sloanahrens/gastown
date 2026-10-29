@@ -33,6 +33,7 @@ type dashQueueReader struct {
 	parked   func(rig string) bool                               // whether a store's rig is parked (nil: none is)
 	stores   func() (map[string]dashQueueStore, []string, error) // store by name, in order
 	prefixes func(names []string) map[string]string              // beads prefix to store name
+	verdicts func() (*specdispatch.Ledger, error)                // the dispatcher's verdict ledger (nil: none to read)
 }
 
 // storePrefixes maps each store's beads prefix back to the store's name, so a
@@ -67,7 +68,10 @@ func storePrefixes(townRoot string, names []string) map[string]string {
 func newDashQueueReader(townRoot string) *dashQueueReader {
 	r := &dashQueueReader{townRoot: townRoot, template: specdispatch.LoadTemplate(specdispatch.DefaultTemplatePath()),
 		parked:   func(rig string) bool { return rig != "hq" && IsRigParked(townRoot, rig) },
-		prefixes: func(names []string) map[string]string { return storePrefixes(townRoot, names) }}
+		prefixes: func(names []string) map[string]string { return storePrefixes(townRoot, names) },
+		verdicts: func() (*specdispatch.Ledger, error) {
+			return specdispatch.LoadLedger(specdispatch.LedgerPath(townRoot))
+		}}
 	r.stores = func() (map[string]dashQueueStore, []string, error) {
 		rigs, err := knownRigNames(townRoot)
 		if err != nil {
@@ -141,6 +145,63 @@ func dashShape(t specdispatch.Template, i *beads.Issue) (shape, note string) {
 	return "fix", strings.TrimSpace(v.Field + ": " + v.Reason)
 }
 
+// dashVerdictTTL is how old the verdict ledger may be before the page must not
+// present its verdicts as current: a held or stopped dispatcher stops writing,
+// so its last tick's verdicts read as fresh would be a claim nothing backs
+// (gt-ckncx).
+const dashVerdictTTL = 5 * time.Minute
+
+// dashVerdicts is one queue read's view of the dispatch ledger: the verdicts to
+// overlay and when they were taken. An empty view (no ledger, no tick in it, or
+// one this read could not load) has a zero at and overlays nothing.
+type dashVerdicts struct {
+	byBead map[string]specdispatch.LedgerVerdict
+	at     time.Time
+	stale  bool
+}
+
+// readVerdicts loads the dispatcher's last published verdicts for one queue
+// read. A ledger with no tick in it, and one this read cannot load, are both no
+// overlay: the page then shows the lint's shape, as it did before the ledger
+// existed, rather than fields derived from verdicts it did not see (gt-7t1im).
+func (r *dashQueueReader) readVerdicts(now time.Time) dashVerdicts {
+	if r.verdicts == nil {
+		return dashVerdicts{}
+	}
+	l, err := r.verdicts()
+	if err != nil || l == nil || l.SavedAt.IsZero() {
+		return dashVerdicts{}
+	}
+	return dashVerdicts{byBead: l.Verdicts, at: l.SavedAt, stale: now.Sub(l.SavedAt) > dashVerdictTTL}
+}
+
+// dashOverlayVerdict puts the dispatcher's own last verdict on a ready row
+// (gt-ckncx). The lint's "ok" says the bead's text is well formed, not that the
+// dispatcher took it: a bead whose named file is absent from main, or that sits
+// behind a bead in progress, lints clean and is still passed over. So a row the
+// ledger says was skipped, refused or deferred stops wearing "ok" — it becomes
+// "skipped", its note the tick's reason — and the page's dispatchable count is
+// the dispatcher's truth rather than a second derivation. A row whose shape
+// already decides against it ("fix", "held", "parked", "planning", "other")
+// keeps that shape and still carries the verdict's fields, so the page can say
+// why the dispatcher passed it over; a planning or failed class fills the
+// fields and changes no shape.
+func dashOverlayVerdict(row *dashboard.QueueBead, verdicts map[string]specdispatch.LedgerVerdict) {
+	v, ok := verdicts[row.ID]
+	if !ok {
+		return
+	}
+	row.SkipClass, row.SkipReason = v.Class, v.Reason
+	row.SkippedSince, row.SkipTicks = v.FirstAt, v.Ticks
+	if row.Shape != "ok" {
+		return
+	}
+	switch v.Class {
+	case specVerdictSkipped, specVerdictRefused, specVerdictDeferred:
+		row.Shape, row.ShapeNote = "skipped", v.Reason
+	}
+}
+
 // read is the queue's whole reading. A store that cannot be read is named in
 // Unreadable and contributes nothing; the other stores still show.
 func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
@@ -152,6 +213,11 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 	if r.prefixes != nil {
 		q.Prefixes = r.prefixes(names)
 	}
+	// One ledger read per queue read: every ready row's overlay comes from the
+	// same tick's verdicts, and a stale ledger is read here once rather than
+	// per row.
+	v := r.readVerdicts(now)
+	q.VerdictsAt, q.VerdictsStale = v.at, v.stale
 	var ready, landing, blocked []dashboard.QueueBead
 	// The Rigs panel lists one row per known rig; hq is the town store, not a
 	// rig, so it gets none. A store this read could not reach keeps its row and
@@ -209,6 +275,11 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 				// the dispatcher takes only unassigned beads: an assignee holds this
 				// one whether or not it is shaped
 				row.Shape, row.ShapeNote = "held", "assigned to "+row.Assignee+": the dispatcher takes only unassigned beads"
+			}
+			// The dispatcher's own last verdict outranks a shape derived from the
+			// bead's text; an old verdict outranks nothing (gt-ckncx).
+			if !v.stale {
+				dashOverlayVerdict(&row, v.byBead)
 			}
 			ready = append(ready, row)
 		}
