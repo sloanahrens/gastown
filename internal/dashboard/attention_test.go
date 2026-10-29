@@ -481,9 +481,9 @@ func TestTheServedAttentionNamesTheOperator(t *testing.T) {
 	}
 }
 
-// The row's owner tag takes its colour from the class drawn for that owner, so
-// a class with no rule leaves the operator's rows in the default colour, beside
-// the overseer's and the loudest alerts' (gt-rujis).
+// The owner tag is drawn in the colour its .own-<owner> rule gives it, so the
+// operator's tag needs that rule under its own name. Without it the tag falls
+// back to the default colour and reads as an ordinary label (gt-rujis).
 func TestTheOperatorsTagHasItsColour(t *testing.T) {
 	t.Parallel()
 

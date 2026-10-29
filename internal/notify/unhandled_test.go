@@ -391,6 +391,21 @@ func TestUnhandledRunNamesTheEscalationsAgeNotTheWindow(t *testing.T) {
 	}
 }
 
+// The push gate takes its owner from the escalation's address on every call and
+// stores nothing, so a human's escalation keeps the whole route through the two
+// functions together. No owner value from an older record can reach the gate
+// and drop the route (gt-rujis).
+func TestAHumansEscalationKeepsItsWholePushRoute(t *testing.T) {
+	t.Parallel()
+	route := []string{"bead", "mail:gastown/overseer", "exec:imessage", "email:human", "sms:human", "slack", "log"}
+	for _, address := range []string{attention.HumanAddress, "gastown/" + attention.HumanAddress} {
+		owner := attention.EscalationOwner(address)
+		if got := PushActions(route, owner); strings.Join(got, ",") != strings.Join(route, ",") {
+			t.Errorf("an escalation from %q is owned by %s and pushes %v, want the whole route %v", address, owner, got, route)
+		}
+	}
+}
+
 // EscalationOwner is the rule the push gate reads: only the human's own session
 // speaks for the human.
 func TestEscalationOwner(t *testing.T) {
