@@ -167,7 +167,7 @@ func copyFile(root *os.Root, fixture fs.FS, name string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }() // a read of the fixture: a close failure cannot lose a copy
 	out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
