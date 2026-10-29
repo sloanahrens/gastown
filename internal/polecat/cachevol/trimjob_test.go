@@ -1,6 +1,8 @@
 package cachevol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -539,9 +541,11 @@ func ceilingListing(t *testing.T, n int) []Entry {
 	return out
 }
 
-// TestBuildTrimManifestBoundsTheShardRouteAtOneSetOfShards pins where the route changes: a list that
-// fills one set of shards exactly stays in ConfigMaps, and one path more takes the claim.
-func TestBuildTrimManifestBoundsTheShardRouteAtOneSetOfShards(t *testing.T) {
+// TestBuildTrimManifestRoutesOnTheEncodedCeiling pins where the route changes. The route is decided on
+// the list's encoded size: a list encoded to exactly TrimMaxShards*TrimShardBytes stays in ConfigMaps,
+// and one path more takes the claim. Shards pack by their own bytes, so a list at the ceiling can take
+// more than TrimMaxShards shards and so more than one Job; the ceiling is in bytes, not in shards.
+func TestBuildTrimManifestRoutesOnTheEncodedCeiling(t *testing.T) {
 	t.Parallel()
 	// 4094-character paths are 4096 encoded bytes each and the array adds 4097n+1, so 16 MiB is an
 	// integral number of paths.
@@ -553,8 +557,8 @@ func TestBuildTrimManifestBoundsTheShardRouteAtOneSetOfShards(t *testing.T) {
 		paths int
 		want  TrimRoute
 	}{
-		{name: "a list that fills one set of shards", paths: atCeiling, want: TrimRouteShards},
-		{name: "one path past one set", paths: atCeiling + 1, want: TrimRouteClaim},
+		{name: "a list encoded to exactly the ceiling", paths: atCeiling, want: TrimRouteShards},
+		{name: "one path past the ceiling", paths: atCeiling + 1, want: TrimRouteClaim},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -615,8 +619,10 @@ func TestBuildTrimManifestCarriesAListPastTheShardCeilingInTheClaim(t *testing.T
 	if want := []string{HelperPath, "trim-paths"}; !reflect.DeepEqual(trim.Command, want) {
 		t.Errorf("command = %v, want the image's trim-paths helper", trim.Command)
 	}
-	if want := []string{"--root", SeedCacheRoot, "--list-file", TrimClaimListPath}; !reflect.DeepEqual(trim.Args, want) {
-		t.Errorf("args = %v, want the claim list file and no shard count", trim.Args)
+	// The Job carries the digest of the list the caller writes, so its pod trims that list and no other.
+	sum := sha256.Sum256(m.ClaimList().Data)
+	if want := []string{"--root", SeedCacheRoot, "--list-file", TrimClaimListPath, "--list-sha256", hex.EncodeToString(sum[:])}; !reflect.DeepEqual(trim.Args, want) {
+		t.Errorf("args = %v, want the claim list file, its digest, and no shard count", trim.Args)
 	}
 	if len(trim.VolumeMounts) != 1 || trim.VolumeMounts[0].MountPath != SeedCacheRoot {
 		t.Errorf("mounts = %+v, want the claim alone at %s", trim.VolumeMounts, SeedCacheRoot)

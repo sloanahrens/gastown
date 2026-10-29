@@ -1,6 +1,8 @@
 package cachevol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -144,7 +146,9 @@ func (m *TrimManifest) jobs() []*TrimJob {
 }
 
 // ClaimList returns the list a caller must write into the claim before it applies Documents, for a
-// claim-carried trim; a shard trim carries its list in the documents themselves and returns nil.
+// claim-carried trim; a shard trim carries its list in the documents themselves and returns nil. The
+// Job names the list's digest, and its pod refuses a list written with any other, so the caller writes
+// exactly Data.
 func (m *TrimManifest) ClaimList() *TrimClaimList {
 	if m.route != TrimRouteClaim {
 		return nil
@@ -253,14 +257,16 @@ func BuildTrimManifest(in TrimJobInput) (*TrimManifest, error) {
 }
 
 // claimTrimManifest is the manifest for a list past one set of ConfigMap shards: one Job whose pod
-// mounts the claim alone, reading the list from the file the caller writes into it first.
+// mounts the claim alone, reading the list from the file the caller writes into it first. The Job
+// carries the list's digest, so its pod trims only the list this manifest was built with.
 func claimTrimManifest(in TrimJobInput, name string, annotations map[string]string, paths []string) *TrimManifest {
 	// Encoding a slice of strings cannot fail, so the error is dropped.
 	data, _ := json.Marshal(paths)
+	sum := sha256.Sum256(data)
 	return &TrimManifest{
 		route: TrimRouteClaim,
 		list:  TrimClaimList{Path: TrimClaimListPath, Data: data},
-		job:   claimTrimJob(in, name, annotations),
+		job:   claimTrimJob(in, name, annotations, hex.EncodeToString(sum[:])),
 	}
 }
 
@@ -307,13 +313,14 @@ func trimJob(in TrimJobInput, name string, annotations map[string]string, shards
 }
 
 // claimTrimJob is the Job document for the claim route: the claim alone is mounted, and the
-// container reads the list from the file a caller wrote into it.
-func claimTrimJob(in TrimJobInput, name string, annotations map[string]string) *TrimJob {
+// container reads the list from the file a caller wrote into it, provided the list's digest is
+// digest.
+func claimTrimJob(in TrimJobInput, name string, annotations map[string]string, digest string) *TrimJob {
 	volumes := []Volume{
 		{Name: trimCacheVolume, PersistentVolumeClaim: &PersistentVolumeClaimRef{ClaimName: in.ClaimName}},
 	}
 	mounts := []VolumeMount{{Name: trimCacheVolume, MountPath: SeedCacheRoot}}
-	return trimJobDocument(in, name, annotations, claimRemoveContainer(in.Image, mounts), volumes)
+	return trimJobDocument(in, name, annotations, claimRemoveContainer(in.Image, mounts, digest), volumes)
 }
 
 // trimJobDocument is the Job both routes apply: the cache user's trim container, with the volumes
@@ -389,14 +396,19 @@ func removeContainer(image string, shards int, mounts []VolumeMount) Container {
 }
 
 // claimRemoveContainer deletes the listed files with the image's trim-paths helper, which reads the
-// list from the file the caller wrote into the claim. A list that is not there fails the run rather
-// than trimming nothing.
-func claimRemoveContainer(image string, mounts []VolumeMount) Container {
+// list from the file the caller wrote into the claim. The helper refuses a list whose digest is not
+// digest, so a list a writer put there for another trim is not trimmed, and a list that is not there
+// fails the run rather than trimming nothing.
+func claimRemoveContainer(image string, mounts []VolumeMount, digest string) Container {
 	return Container{
-		Name:         "trim",
-		Image:        image,
-		Command:      []string{HelperPath, "trim-paths"},
-		Args:         []string{"--root", SeedCacheRoot, "--list-file", TrimClaimListPath},
+		Name:    "trim",
+		Image:   image,
+		Command: []string{HelperPath, "trim-paths"},
+		Args: []string{
+			"--root", SeedCacheRoot,
+			"--list-file", TrimClaimListPath,
+			"--list-sha256", digest,
+		},
 		VolumeMounts: mounts,
 	}
 }

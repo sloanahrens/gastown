@@ -2,9 +2,10 @@ package polecatimage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
@@ -13,25 +14,34 @@ import (
 // file is the writer: something with the claim mounted writes PlanTrim's list into the claim, and
 // the trim Job's container then reads it with trim-paths --list-file (trimpaths.go).
 
-// TrimListFiles is the filesystem the list writer touches: the directory under the claim and the
-// file it puts the list in. A test answers the calls, so each failure is injected at the call it
-// belongs to.
+// TrimListFiles is the claim the list writer touches, by names relative to the claim root. A test
+// answers the calls, so each failure is injected at the call it belongs to; the claim itself answers
+// through an os.Root (rootTrimListFiles), so a symlink planted in the shared claim cannot take a call
+// out of it.
 type TrimListFiles interface {
 	MkdirAll(name string, perm os.FileMode) error
+	Remove(name string) error
 	WriteFile(name string, data []byte, perm os.FileMode) error
 	Rename(oldpath, newpath string) error
 }
 
-// osTrimListFiles is TrimListFiles on the filesystem of the pod that writes the list.
-type osTrimListFiles struct{}
+// rootTrimListFiles is TrimListFiles on the claim: every name resolves inside the root, and a name
+// that would leave it through a symlink is refused by the walk the kernel makes.
+type rootTrimListFiles struct{ root *os.Root }
 
-func (osTrimListFiles) MkdirAll(p string, m os.FileMode) error { return os.MkdirAll(p, m) }
-
-func (osTrimListFiles) WriteFile(p string, b []byte, m os.FileMode) error {
-	return os.WriteFile(p, b, m)
+func (f rootTrimListFiles) MkdirAll(name string, perm os.FileMode) error {
+	return f.root.MkdirAll(name, perm)
 }
 
-func (osTrimListFiles) Rename(o, n string) error { return os.Rename(o, n) }
+func (f rootTrimListFiles) Remove(name string) error { return f.root.Remove(name) }
+
+func (f rootTrimListFiles) WriteFile(name string, data []byte, perm os.FileMode) error {
+	return f.root.WriteFile(name, data, perm)
+}
+
+func (f rootTrimListFiles) Rename(oldpath, newpath string) error {
+	return f.root.Rename(oldpath, newpath)
+}
 
 const (
 	// trimListDirPerm is the mode of the directory under the claim the list sits in.
@@ -41,13 +51,13 @@ const (
 	trimListFilePerm = 0o644
 )
 
-// WriteTrimList writes paths, PlanTrim's removal list, into the claim at root, where a
+// WriteTrimList writes paths, PlanTrim's removal list, into the claim files answers for, where a
 // claim-carried trim reads it.
 //
 // The list is written under a temporary name and renamed into place, so a write that fails part way
 // leaves no list a Job could read as the whole one. A path a walk of the claim could not give is
 // refused whole rather than written, since the container would refuse the list it read.
-func WriteTrimList(root string, paths []string, files TrimListFiles) error {
+func WriteTrimList(paths []string, files TrimListFiles) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("the trim list names no path: a claim-carried trim with nothing to remove would apply as a success")
 	}
@@ -59,17 +69,36 @@ func WriteTrimList(root string, paths []string, files TrimListFiles) error {
 	// Encoding a slice of strings cannot fail, so the error is dropped.
 	data, _ := json.Marshal(paths)
 
-	dir := filepath.Join(root, filepath.FromSlash(cachevol.TrimClaimListDir))
-	if err := files.MkdirAll(dir, trimListDirPerm); err != nil {
-		return fmt.Errorf("creating the trim list directory %s: %w", dir, err)
+	if err := files.MkdirAll(cachevol.TrimClaimListDir, trimListDirPerm); err != nil {
+		return fmt.Errorf("creating the trim list directory %s: %w", cachevol.TrimClaimListDir, err)
 	}
-	dest := filepath.Join(root, filepath.FromSlash(cachevol.TrimClaimListPath))
+	dest := cachevol.TrimClaimListPath
 	tmp := dest + ".tmp"
+	// A temporary left by an earlier write is removed before this one is made: a symlink at its name
+	// would otherwise take the write to whatever it points at, even inside the claim.
+	if err := files.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("clearing the stale trim list %s: %w", tmp, err)
+	}
 	if err := files.WriteFile(tmp, data, trimListFilePerm); err != nil {
-		return fmt.Errorf("writing the trim list under %s: %w", dir, err)
+		return fmt.Errorf("writing the trim list under %s: %w", cachevol.TrimClaimListDir, err)
 	}
 	if err := files.Rename(tmp, dest); err != nil {
-		return fmt.Errorf("moving the trim list into place under %s: %w", dir, err)
+		return fmt.Errorf("moving the trim list into place under %s: %w", cachevol.TrimClaimListDir, err)
 	}
 	return nil
+}
+
+// writeTrimListInto writes paths into the claim at root, through an os.Root on it, so every name the
+// writer makes is answered inside the claim.
+func writeTrimListInto(root string, paths []string) (err error) {
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return fmt.Errorf("opening the claim %s: %w", root, err)
+	}
+	defer func() {
+		if cerr := r.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	return WriteTrimList(paths, rootTrimListFiles{root: r})
 }

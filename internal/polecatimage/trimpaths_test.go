@@ -2,6 +2,8 @@ package polecatimage
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -59,6 +61,7 @@ func (f *fakeTrimFS) fs() trimPathsFS {
 				return err
 			}
 			f.removed = append(f.removed, name)
+			delete(f.files, name)
 			return nil
 		},
 		resolve: func(name string) (string, error) {
@@ -90,6 +93,13 @@ func (f *fakeTrimFS) addShard(listDir string, index int, paths ...string) string
 // the claim.
 func (f *fakeTrimFS) addClaimList(root string, paths ...string) string {
 	name := filepath.Join(root, filepath.FromSlash(cachevol.TrimClaimListPath))
+	f.files[name] = string(claimListBytes(paths))
+	return cachevol.TrimClaimListPath
+}
+
+// claimListBytes is the encoding a writer puts in the claim for paths: the JSON array, empty rather
+// than null when there are none.
+func claimListBytes(paths []string) []byte {
 	if paths == nil {
 		paths = []string{}
 	}
@@ -97,8 +107,24 @@ func (f *fakeTrimFS) addClaimList(root string, paths ...string) string {
 	if err != nil {
 		panic(err)
 	}
-	f.files[name] = string(data)
-	return cachevol.TrimClaimListPath
+	return data
+}
+
+// digestOf is the digest a Job carries for the list whose bytes are data.
+func digestOf(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// claimDigest is the digest a Job carries for the list planted in the claim at root, the one a writer
+// would have put there.
+func (f *fakeTrimFS) claimDigest(root string) string {
+	return digestOf([]byte(f.files[filepath.Join(root, filepath.FromSlash(cachevol.TrimClaimListPath))]))
+}
+
+// claimListDigest is the digest a Job carries for the list addClaimList plants for paths.
+func claimListDigest(paths ...string) string {
+	return digestOf(claimListBytes(paths))
 }
 
 // TestRemoveTrimPathsFromClaimRemovesEveryListedPath is the claim route's success path: each path the
@@ -107,14 +133,15 @@ func TestRemoveTrimPathsFromClaimRemovesEveryListedPath(t *testing.T) {
 	t.Parallel()
 	f := newFakeTrimFS()
 	list := f.addClaimList("/cache", "gocache/ab/one", "gomodcache/three")
-	res, err := RemoveTrimPathsFromClaim("/cache", list, f.fs())
+	res, err := RemoveTrimPathsFromClaim("/cache", list, f.claimDigest("/cache"), f.fs())
 	if err != nil {
 		t.Fatalf("RemoveTrimPathsFromClaim: %v", err)
 	}
 	if res.Removed != 2 || res.Absent != 0 {
 		t.Errorf("result = %+v, want both paths removed", res)
 	}
-	want := []string{"/cache/gocache/ab/one", "/cache/gomodcache/three"}
+	// The list is consumed first, so a Job that runs again finds no list to trim again.
+	want := []string{"/cache/" + cachevol.TrimClaimListPath, "/cache/gocache/ab/one", "/cache/gomodcache/three"}
 	if !reflect.DeepEqual(f.removed, want) {
 		t.Errorf("removed %v, want %v", f.removed, want)
 	}
@@ -127,7 +154,7 @@ func TestRemoveTrimPathsFromClaimCountsAnAbsentFile(t *testing.T) {
 	f := newFakeTrimFS()
 	list := f.addClaimList("/cache", "gocache/ab/gone")
 	f.resolveErr["/cache/gocache/ab"] = fs.ErrNotExist
-	res, err := RemoveTrimPathsFromClaim("/cache", list, f.fs())
+	res, err := RemoveTrimPathsFromClaim("/cache", list, f.claimDigest("/cache"), f.fs())
 	if err != nil {
 		t.Fatalf("RemoveTrimPathsFromClaim: %v", err)
 	}
@@ -160,7 +187,7 @@ func TestRemoveTrimPathsFromClaimRefusesAListItCannotUse(t *testing.T) {
 			t.Parallel()
 			f := newFakeTrimFS()
 			tc.plant(f)
-			if _, err := RemoveTrimPathsFromClaim("/cache", tc.list, f.fs()); err == nil {
+			if _, err := RemoveTrimPathsFromClaim("/cache", tc.list, f.claimDigest("/cache"), f.fs()); err == nil {
 				t.Fatal("RemoveTrimPathsFromClaim trimmed from a list it could not use whole")
 			}
 			if len(f.removed) != 0 {
@@ -180,13 +207,98 @@ func TestRemoveTrimPathsFromClaimRefusesAListedPathThatIsNotBelowTheClaim(t *tes
 			t.Parallel()
 			f := newFakeTrimFS()
 			list := f.addClaimList("/cache", "gocache/fine", entry)
-			if _, err := RemoveTrimPathsFromClaim("/cache", list, f.fs()); err == nil {
+			if _, err := RemoveTrimPathsFromClaim("/cache", list, f.claimDigest("/cache"), f.fs()); err == nil {
 				t.Fatalf("RemoveTrimPathsFromClaim removed the list holding %q", entry)
 			}
 			if len(f.removed) != 0 {
 				t.Errorf("removed %v, want nothing removed for %q", f.removed, entry)
 			}
 		})
+	}
+}
+
+// TestRemoveTrimPathsFromClaimRefusesAListWithAnotherDigest pins the tie between a Job and its list: a
+// list whose digest is not the one the Job was built with belongs to another trim, so nothing is
+// removed and the list is left in place for the writer to replace.
+func TestRemoveTrimPathsFromClaimRefusesAListWithAnotherDigest(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	list := f.addClaimList("/cache", "gocache/ab/one")
+	if _, err := RemoveTrimPathsFromClaim("/cache", list, claimListDigest("gocache/ab/other"), f.fs()); err == nil {
+		t.Fatal("RemoveTrimPathsFromClaim trimmed a list whose digest is not the Job's")
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed", f.removed)
+	}
+	if _, ok := f.files[filepath.Join("/cache", filepath.FromSlash(cachevol.TrimClaimListPath))]; !ok {
+		t.Error("the refused list was consumed, want it left in place")
+	}
+}
+
+// TestRemoveTrimPathsFromClaimRefusesAJobWithNoDigest pins the fail-closed default: a Job that names no
+// digest has nothing to tie the list to, so it trims nothing.
+func TestRemoveTrimPathsFromClaimRefusesAJobWithNoDigest(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	list := f.addClaimList("/cache", "gocache/ab/one")
+	_, err := RemoveTrimPathsFromClaim("/cache", list, "", f.fs())
+	if err == nil || !strings.Contains(err.Error(), "no digest") {
+		t.Fatal("RemoveTrimPathsFromClaim trimmed a list with no digest to check it against")
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed", f.removed)
+	}
+}
+
+// TestRemoveTrimPathsFromClaimConsumesTheListOnce pins that a list is trimmed once: the run removes the
+// list it read, so a second run of the same Job with no fresh write finds no list and fails rather than
+// trimming the paths again.
+func TestRemoveTrimPathsFromClaimConsumesTheListOnce(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	list := f.addClaimList("/cache", "gocache/ab/one")
+	digest := f.claimDigest("/cache")
+	if _, err := RemoveTrimPathsFromClaim("/cache", list, digest, f.fs()); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	f.removed = nil
+	if _, err := RemoveTrimPathsFromClaim("/cache", list, digest, f.fs()); err == nil {
+		t.Fatal("a second run of the Job trimmed again with no fresh list")
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("the second run removed %v, want nothing", f.removed)
+	}
+}
+
+// TestRemoveTrimPathsFromClaimRefusesAListFileOutsideTheClaim pins the symlink case on the list itself:
+// a list file that resolves outside the claim, through a link in the claim, is refused rather than read.
+func TestRemoveTrimPathsFromClaimRefusesAListFileOutsideTheClaim(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	listFile := filepath.Join("/cache", filepath.FromSlash(cachevol.TrimClaimListPath))
+	f.files["/outside/paths.json"] = `["gocache/ab/one"]`
+	f.resolves[listFile] = "/outside/paths.json"
+	digest := digestOf([]byte(`["gocache/ab/one"]`))
+	if _, err := RemoveTrimPathsFromClaim("/cache", cachevol.TrimClaimListPath, digest, f.fs()); err == nil {
+		t.Fatal("RemoveTrimPathsFromClaim read a list file that resolves outside the claim")
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed", f.removed)
+	}
+}
+
+// TestRemoveTrimPathsFromClaimRefusesADirectoryOutsideTheClaim pins the removal guard on the claim route:
+// a listed directory that resolves outside the claim through a symlink is refused, and nothing is removed.
+func TestRemoveTrimPathsFromClaimRefusesADirectoryOutsideTheClaim(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	list := f.addClaimList("/cache", "gocache/ab/one")
+	f.resolves["/cache/gocache/ab"] = "/outside"
+	if _, err := RemoveTrimPathsFromClaim("/cache", list, f.claimDigest("/cache"), f.fs()); err == nil {
+		t.Fatal("RemoveTrimPathsFromClaim followed a directory out of the claim")
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed when a directory is outside the claim", f.removed)
 	}
 }
 
@@ -336,15 +448,33 @@ func TestTrimPathsRunReadsAClaimCarriedList(t *testing.T) {
 	f := newFakeTrimFS()
 	f.addClaimList("/cache", "gocache/one")
 	var out, errOut bytes.Buffer
-	code := trimPathsRun([]string{"--root", "/cache", "--list-file", cachevol.TrimClaimListPath}, &out, &errOut, f.fs())
+	args := []string{"--root", "/cache", "--list-file", cachevol.TrimClaimListPath, "--list-sha256", claimListDigest("gocache/one")}
+	code := trimPathsRun(args, &out, &errOut, f.fs())
 	if code != 0 {
 		t.Fatalf("trimPathsRun = %d, want 0 (%s)", code, errOut.String())
 	}
 	if got := strings.TrimSpace(out.String()); got != "removed 1 absent 0" {
 		t.Errorf("trimPathsRun printed %q, want %q", got, "removed 1 absent 0")
 	}
-	if want := []string{"/cache/gocache/one"}; !reflect.DeepEqual(f.removed, want) {
+	want := []string{"/cache/" + cachevol.TrimClaimListPath, "/cache/gocache/one"}
+	if !reflect.DeepEqual(f.removed, want) {
 		t.Errorf("removed %v, want %v", f.removed, want)
+	}
+}
+
+// TestTrimPathsRunRefusesAListWithAnotherDigest runs the claim route through the helper's flags with a
+// digest that is not the list's: exit 3, and nothing is trimmed.
+func TestTrimPathsRunRefusesAListWithAnotherDigest(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addClaimList("/cache", "gocache/one")
+	var out, errOut bytes.Buffer
+	args := []string{"--root", "/cache", "--list-file", cachevol.TrimClaimListPath, "--list-sha256", claimListDigest("gocache/other")}
+	if code := trimPathsRun(args, &out, &errOut, f.fs()); code != 3 {
+		t.Fatalf("trimPathsRun = %d, want 3 for a list with another digest (stdout %q)", code, out.String())
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed", f.removed)
 	}
 }
 

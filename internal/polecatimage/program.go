@@ -219,6 +219,7 @@ func trimPathsRun(args []string, stdout, stderr io.Writer, w trimPathsFS) int {
 	root := flags.String("root", cachevol.SeedCacheRoot, "the claim the listed paths are relative to")
 	list := flags.String("list", cachevol.TrimListRoot, "the directory the shard volumes are mounted under")
 	listFile := flags.String("list-file", "", "the claim-relative file a claim-carried trim reads its list from")
+	listSHA256 := flags.String("list-sha256", "", "the digest of the claim-carried list the Job was built with")
 	shardsText := flags.String("shards", "", "the number of shards the Job mounted")
 	if err := flags.Parse(args); err != nil {
 		return 3
@@ -230,7 +231,7 @@ func trimPathsRun(args []string, stdout, stderr io.Writer, w trimPathsFS) int {
 			fmt.Fprintln(stderr, "trim-paths: --list-file and --shards name two routes; give one")
 			return 3
 		}
-		res, err = RemoveTrimPathsFromClaim(*root, *listFile, w)
+		res, err = RemoveTrimPathsFromClaim(*root, *listFile, *listSHA256, w)
 	} else {
 		shards, aerr := strconv.Atoi(*shardsText)
 		if aerr != nil || shards <= 0 {
@@ -272,7 +273,7 @@ func trimListWriteMain(stdin io.Reader, args []string, stdout, stderr io.Writer)
 		}
 	}
 	if err == nil {
-		err = WriteTrimList(*root, paths, osTrimListFiles{})
+		err = writeTrimListInto(*root, paths)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "trim-list-write: %v\n", err)

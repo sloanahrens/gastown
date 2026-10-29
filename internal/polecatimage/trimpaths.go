@@ -1,6 +1,8 @@
 package polecatimage
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -89,22 +91,49 @@ func RemoveTrimPaths(root, listDir string, shards int, w trimPathsFS) (TrimPaths
 	if err != nil {
 		return TrimPathsResult{}, err
 	}
-	return removeTrimPaths(root, list, w)
+	realRoot, err := resolveClaim(root, w)
+	if err != nil {
+		return TrimPathsResult{}, err
+	}
+	targets, gone, err := trimTargets(realRoot, list, w)
+	if err != nil {
+		return TrimPathsResult{}, err
+	}
+	return removeTargets(realRoot, targets, gone, w)
 }
 
 // RemoveTrimPathsFromClaim removes every path the claim-carried list holds, relative to root.
 //
-// listPath is the claim-relative file a writer put in the claim before the Job applied, and it is
-// read and checked whole before anything is removed, as the shard route's list is. A list file that
-// is absent, unreadable, not an array of paths, or empty fails the run rather than reporting a
-// success that removed nothing.
-func RemoveTrimPathsFromClaim(root, listPath string, w trimPathsFS) (TrimPathsResult, error) {
+// listPath is the claim-relative file a writer put in the claim before the Job applied. wantSHA256 is
+// the digest of the list the Job was built with, so a list a writer put there for another trim, or
+// one never written for this Job, fails the run rather than being trimmed. The list file must resolve
+// inside the claim, and it is read and checked whole before anything is removed, as the shard route's
+// list is. A list file that is absent, outside the claim, unreadable, not an array of paths, or empty
+// fails the run rather than reporting a success that removed nothing.
+//
+// The list is consumed before the first removal, so a Job that runs again finds no list and fails,
+// rather than trimming the paths a run already removed.
+func RemoveTrimPathsFromClaim(root, listPath, wantSHA256 string, w trimPathsFS) (TrimPathsResult, error) {
 	if !claimRelative(listPath) {
 		return TrimPathsResult{}, fmt.Errorf("the trim list file %q: want a path inside the claim, such as %s", listPath, cachevol.TrimClaimListPath)
 	}
-	data, err := w.read(filepath.Join(root, filepath.FromSlash(listPath)))
+	if wantSHA256 == "" {
+		return TrimPathsResult{}, fmt.Errorf("the trim list %s has no digest to check it against: want the digest of the list the Job was built with", listPath)
+	}
+	realRoot, err := resolveClaim(root, w)
+	if err != nil {
+		return TrimPathsResult{}, err
+	}
+	listFile, err := trimListFile(realRoot, listPath, w)
+	if err != nil {
+		return TrimPathsResult{}, err
+	}
+	data, err := w.read(listFile)
 	if err != nil {
 		return TrimPathsResult{}, fmt.Errorf("reading the trim list %s: %w", listPath, err)
+	}
+	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != wantSHA256 {
+		return TrimPathsResult{}, fmt.Errorf("the trim list %s does not match the digest its Job was built with: a list a writer put in the claim for another trim", listPath)
 	}
 	var list []string
 	if err := json.Unmarshal(data, &list); err != nil {
@@ -113,16 +142,51 @@ func RemoveTrimPathsFromClaim(root, listPath string, w trimPathsFS) (TrimPathsRe
 	if len(list) == 0 {
 		return TrimPathsResult{}, fmt.Errorf("the trim list %s names no path: a claim-carried trim with nothing to remove would report a success that removed nothing", listPath)
 	}
-	return removeTrimPaths(root, list, w)
+	targets, gone, err := trimTargets(realRoot, list, w)
+	if err != nil {
+		return TrimPathsResult{}, err
+	}
+	rel, err := filepath.Rel(realRoot, listFile)
+	if err == nil {
+		err = w.remove(realRoot, rel)
+	}
+	if err != nil {
+		return TrimPathsResult{}, fmt.Errorf("consuming the trim list %s before the removals: %w", listPath, err)
+	}
+	return removeTargets(realRoot, targets, gone, w)
 }
 
-// removeTrimPaths removes list's claim-relative paths, resolving every target inside the claim
-// before the first removal, so a list that names a file outside it leaves the claim untouched.
-func removeTrimPaths(root string, list []string, w trimPathsFS) (TrimPathsResult, error) {
+// resolveClaim is the claim root with every symlink in it followed: the boundary each target is
+// checked against.
+func resolveClaim(root string, w trimPathsFS) (string, error) {
 	realRoot, err := w.resolve(root)
 	if err != nil {
-		return TrimPathsResult{}, fmt.Errorf("resolving the claim root %s: %w", root, err)
+		return "", fmt.Errorf("resolving the claim root %s: %w", root, err)
 	}
+	return realRoot, nil
+}
+
+// trimListFile is the claim-relative list file resolved to its real name. A file the writer never put
+// in the claim is refused as absent, and one that resolves outside the claim, through a symlink, is
+// refused rather than read.
+func trimListFile(realRoot, listPath string, w trimPathsFS) (string, error) {
+	file, err := w.resolve(filepath.Join(realRoot, filepath.FromSlash(listPath)))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("the trim list %s is not in the claim: a writer puts it there before the Job applies", listPath)
+		}
+		return "", fmt.Errorf("resolving the trim list %s: %w", listPath, err)
+	}
+	if !withinClaim(realRoot, file) {
+		return "", fmt.Errorf("the trim list %s resolves to %s, outside the claim at %s", listPath, file, realRoot)
+	}
+	return file, nil
+}
+
+// trimTargets resolves every entry of list to the path to remove, inside realRoot, before any removal,
+// so a list that names a file outside the claim is refused whole. It returns the targets and how many
+// entries were already gone. realRoot is the claim root with its symlinks followed.
+func trimTargets(realRoot string, list []string, w trimPathsFS) ([]string, int, error) {
 	targets := make([]string, 0, len(list))
 	var gone int
 	for _, entry := range list {
@@ -132,11 +196,16 @@ func removeTrimPaths(root string, list []string, w trimPathsFS) (TrimPathsResult
 			gone++
 			continue
 		case err != nil:
-			return TrimPathsResult{}, err
+			return nil, 0, err
 		}
 		targets = append(targets, target)
 	}
+	return targets, gone, nil
+}
 
+// removeTargets removes the targets trimTargets resolved, and counts the entries it found gone as
+// absent. A removal that fails does not stop the rest, and the count comes back in the error.
+func removeTargets(realRoot string, targets []string, gone int, w trimPathsFS) (TrimPathsResult, error) {
 	res := TrimPathsResult{Absent: gone}
 	failed, firstPath := 0, ""
 	var firstErr error
