@@ -47,10 +47,13 @@ func probeFailure(t *testing.T) error {
 
 // unmappedPortDeadlineErr is the startup failure of a port lookup that ran out
 // of its budget and still had Docker answering that the Dolt port was never
-// published: a port-not-mapped failure that also wraps the deadline.
+// published: a port-not-mapped failure that also wraps the deadline. It drives
+// the wait through the injected sleep, so the retry tests that call it do not
+// spend the poll budget in real time; the wait's own poll arithmetic is
+// TestWaitForMappedPortGivesUpAtBudget's to pin (gt-d8h2i).
 func unmappedPortDeadlineErr(t *testing.T) error {
 	t.Helper()
-	err := awaitDoltReady(context.Background(),
+	err := awaitDoltReadySleeping(context.Background(),
 		func(_ context.Context, containerPort string) (string, error) {
 			return "", fmt.Errorf("getting mapped port: port %q not found: %w", containerPort, context.DeadlineExceeded)
 		},
@@ -58,6 +61,7 @@ func unmappedPortDeadlineErr(t *testing.T) error {
 			t.Fatalf("probe ran for a container whose port was never published")
 			return nil
 		},
+		func(time.Duration) {},
 	)
 	if err == nil {
 		t.Fatalf("awaitDoltReady returned no error for an unpublished port")
@@ -128,6 +132,34 @@ func TestWaitForMappedPortGivesUpAtBudget(t *testing.T) {
 	}
 	if lookups != mappedPortPolls || sleeps != mappedPortPolls-1 {
 		t.Fatalf("lookups = %d, sleeps = %d, want %d and %d", lookups, sleeps, mappedPortPolls, mappedPortPolls-1)
+	}
+}
+
+// A readiness step whose port never appears still has to wait out the whole
+// poll budget, and this pins that the budget is spent in the injected seam
+// rather than in real time (gt-d8h2i).
+func TestAwaitDoltReadyDoesNotSpendThePollBudgetInRealTime(t *testing.T) {
+	t.Parallel()
+	slept := false
+	start := time.Now()
+	err := awaitDoltReadySleeping(context.Background(),
+		func(_ context.Context, containerPort string) (string, error) {
+			return "", fmt.Errorf("getting mapped port: port %q not found: %w", containerPort, context.DeadlineExceeded)
+		},
+		func(context.Context, string) error {
+			t.Fatalf("probe ran for a container whose port was never published")
+			return nil
+		},
+		func(time.Duration) { slept = true },
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the lookup's deadline error", err)
+	}
+	if !slept {
+		t.Fatalf("the wait returned without sleeping, so it never walked the poll budget")
+	}
+	if elapsed := time.Since(start); elapsed >= mappedPortPollInterval {
+		t.Fatalf("awaitDoltReadySleeping took %s, more than one real poll interval, so the budget was not spent in the seam", elapsed)
 	}
 }
 

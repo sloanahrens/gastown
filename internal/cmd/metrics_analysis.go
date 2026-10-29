@@ -34,27 +34,28 @@ place.`,
 		if err != nil {
 			return err
 		}
-		return runMetricsAnalyse(cmd.Context(), cmd.OutOrStdout(), town)
+		return runMetricsAnalyse(cmd.Context(), cmd.OutOrStdout(), metrics.OSEnv(town), analysisOptions(town))
 	},
 }
 
-// runMetricsAnalyse runs the daily analysis against town and prints its
-// receipt. It is the only place the command wires the real environment; tests
-// call runMetricsAnalyseWith.
+// analysisOptions is the town's own mango repository and the binary built from
+// it, for the two callers that wire the real environment.
+func analysisOptions(town string) metrics.AnalysisOptions {
+	return metrics.AnalysisOptions{
+		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
+		MangoBin:    filepath.Join(town, ".runtime", "metrics", "bin", "mango"),
+	}
+}
+
+// runMetricsAnalyse runs the analysis in env and prints one receipt line: what
+// it published, or that the last run is still current.
 //
 // Nothing here needs the gt source checkout: the extract runs in process inside
 // the town (gt-fsoh3), so a town whose gastown/ holds no cmd/gt/main.go still
-// analyses.
-func runMetricsAnalyse(ctx context.Context, out io.Writer, town string) error {
-	return runMetricsAnalyseWith(ctx, out, metrics.OSEnv(town), metrics.AnalysisOptions{
-		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
-		MangoBin:    filepath.Join(town, ".runtime", "metrics", "bin", "mango"),
-	})
-}
-
-// runMetricsAnalyseWith runs the analysis in env and prints one receipt line:
-// what it published, or that the last run is still current.
-func runMetricsAnalyseWith(ctx context.Context, out io.Writer, env metrics.Env, opts metrics.AnalysisOptions) error {
+// analyses. The env is a parameter because the lookup that failed such a town
+// lived in this function, and the regression test drives it with a fake
+// (gt-w4brv).
+func runMetricsAnalyse(ctx context.Context, out io.Writer, env metrics.Env, opts metrics.AnalysisOptions) error {
 	res, err := metrics.RunAnalysis(ctx, env, opts)
 	if err != nil {
 		return err
