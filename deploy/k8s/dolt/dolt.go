@@ -20,8 +20,7 @@ const (
 	Version = "2.3.2"
 	// Image is the container image the StatefulSet runs.
 	Image = imageRepository + ":" + Version
-	// ServicePort is the port the Service publishes: the port every Dolt endpoint
-	// in the town reaches a server on (gt-cfjn7).
+	// ServicePort is the port the Service publishes (gt-cfjn7).
 	ServicePort = 3307
 	// ContainerPort is the port the container declares, under PortName.
 	ContainerPort = 3306
@@ -30,8 +29,8 @@ const (
 	PortName = "mysql"
 	// DataDir is where the container mounts the claim.
 	DataDir = "/var/lib/dolt"
-	// Name is the name of all three objects, so the pod is addressable as
-	// <Name>-0.<Name> inside the namespace.
+	// Name is the name of all three objects, and of the StatefulSet's
+	// serviceName.
 	Name = "dolt"
 	// DefaultNamespace is the namespace the objects land in when Config names none.
 	DefaultNamespace = "openshell"
@@ -60,7 +59,7 @@ type Config struct {
 	// Storage is the claim's requested size, such as "10Gi".
 	Storage string
 	// RootHost is where Dolt accepts root's login from, such as "localhost" or
-	// "%". It has no default: the server's own default is every host.
+	// "%". It has no default, so every manifest states it (gt-cfjn7).
 	RootHost string
 	// RootPasswordSecret is the Secret holding root's password. The builder
 	// renders a reference to it and never reads it.
@@ -70,7 +69,7 @@ type Config struct {
 	RootPasswordKey string
 }
 
-// Manifests is what Build returns, in the order a fresh namespace needs them.
+// Manifests is what Build returns, in the order Render writes them.
 type Manifests struct {
 	Claim       PersistentVolumeClaim
 	Service     Service
@@ -104,8 +103,7 @@ func Build(c Config) (Manifests, error) {
 			TypeMeta: TypeMeta{APIVersion: "v1", Kind: "Service"},
 			Metadata: objectMeta(namespace),
 			Spec: ServiceSpec{
-				// Headless: the cluster DNS answers with the pod's own address,
-				// <Name>-0.<Name>, which is what a StatefulSet identity is for.
+				// Headless: the Service publishes no cluster IP (gt-cfjn7).
 				ClusterIP: "None",
 				Selector:  selectorLabels(),
 				Ports: []PublishedPort{{
@@ -121,8 +119,8 @@ func Build(c Config) (Manifests, error) {
 			Metadata: objectMeta(namespace),
 			Spec: StatefulSetSpec{
 				ServiceName: Name,
-				// One replica: Dolt serves reads and writes from one process, and
-				// the claim below is the one volume it writes.
+				// One replica: one pod holds the claim, so one process
+				// writes the volume (gt-cfjn7).
 				Replicas: 1,
 				Selector: LabelSelector{MatchLabels: selectorLabels()},
 				Template: PodTemplate{
@@ -132,8 +130,8 @@ func Build(c Config) (Manifests, error) {
 							Name:  Name,
 							Image: Image,
 							Ports: []Port{{Name: PortName, ContainerPort: ContainerPort}},
-							// Root's password comes from the Secret on every render, so
-							// even the host "%" admits root only with that password
+							// Root's password is a Secret reference on every render,
+							// so no manifest here carries a literal password
 							// (gt-cfjn7).
 							Env: []EnvVar{
 								{Name: "DOLT_ROOT_HOST", Value: c.RootHost},
@@ -145,9 +143,9 @@ func Build(c Config) (Manifests, error) {
 						}},
 						Volumes: []Volume{{
 							Name: "data",
-							// A standalone claim, not a volumeClaimTemplate: the
-							// claim is one object whose size the caller states, and
-							// it survives the StatefulSet being deleted.
+							// A standalone claim rather than a
+							// volumeClaimTemplate: the claim is its own
+							// object, sized by Config (gt-cfjn7).
 							PersistentVolumeClaim: &PersistentVolumeClaimRef{ClaimName: Name},
 						}},
 					},
@@ -163,8 +161,7 @@ func objectMeta(namespace string) ObjectMeta {
 	return ObjectMeta{Name: Name, Namespace: namespace, Labels: labels()}
 }
 
-// labels are the labels on every object: what a selector matches and what a
-// cleanup removes.
+// labels are on every object; selectorLabels is the subset a selector matches.
 func labels() map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       Name,
@@ -172,8 +169,8 @@ func labels() map[string]string {
 	}
 }
 
-// selectorLabels are what a Service and a StatefulSet select their pods by. A
-// selector cannot be updated in place, so it carries only the name.
+// selectorLabels are what a Service and a StatefulSet select their pods by, so
+// they carry only the name.
 func selectorLabels() map[string]string {
 	return map[string]string{"app.kubernetes.io/name": Name}
 }
@@ -218,19 +215,21 @@ func YAML(w io.Writer, v any) error {
 	return encode(w, v)
 }
 
-// encode writes each document in order. A failed write is the one failure the
-// encoder can report for these values, and Close reports the same one, so both
-// are joined rather than dropped.
+// encode writes each document in order. Close reports a failed document's write
+// error a second time, so the first error is the one kept.
 func encode(w io.Writer, docs ...any) error {
 	enc := yaml.NewEncoder(w)
 	enc.SetIndent(2)
-	var encodeErr error
+	var err error
 	for _, doc := range docs {
-		if encodeErr = enc.Encode(doc); encodeErr != nil {
+		if err = enc.Encode(doc); err != nil {
 			break
 		}
 	}
-	if err := errors.Join(encodeErr, enc.Close()); err != nil {
+	if closeErr := enc.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		return fmt.Errorf("encoding the manifest: %w", err)
 	}
 	return nil

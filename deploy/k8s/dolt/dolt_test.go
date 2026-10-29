@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -149,6 +150,31 @@ func TestRootPasswordIsAlwaysAReference(t *testing.T) {
 	}
 }
 
+// TestRootEnvVarsMatchTheImageVariables pins the two names the pinned image
+// documents for root's login, and which of them takes a literal and which a
+// Secret. A golden records whatever the builder renders, so only a literal
+// catches a rename (gt-cfjn7).
+func TestRootEnvVarsMatchTheImageVariables(t *testing.T) {
+	t.Parallel()
+	c := goldenConfig()
+	c.RootHost = "localhost"
+	m, err := Build(c)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	env := m.StatefulSet.Spec.Template.Spec.Containers[0].Env
+	names := make([]string, 0, len(env))
+	for _, e := range env {
+		names = append(names, e.Name)
+	}
+	if want := []string{"DOLT_ROOT_HOST", "DOLT_ROOT_PASSWORD"}; !slices.Equal(names, want) {
+		t.Fatalf("the container sets %q, want exactly %q", names, want)
+	}
+	if env[0].Value != c.RootHost || env[0].ValueFrom != nil {
+		t.Errorf("DOLT_ROOT_HOST = %+v, want the literal root host %q", env[0], c.RootHost)
+	}
+}
+
 func TestNamespaceDefaultsToOpenshell(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ name, given, want string }{
@@ -282,6 +308,11 @@ func TestRenderReportsAWriteFailure(t *testing.T) {
 					t.Errorf("error = %q, want it to name %q", err, want)
 				}
 			}
+			// Close can report the write failure Encode already returned, so the
+			// cause is counted: a reader debugging a failed write needs it once.
+			if n := strings.Count(err.Error(), refused.Error()); n != 1 {
+				t.Errorf("error = %q, names the cause %d times, want once", err, n)
+			}
 		})
 	}
 }
@@ -303,22 +334,6 @@ func TestRenderEmitsTheThreeObjectsInOrder(t *testing.T) {
 	for i, kind := range []string{"kind: PersistentVolumeClaim", "kind: Service", "kind: StatefulSet"} {
 		if !bytes.Contains(docs[i], []byte(kind)) {
 			t.Errorf("document %d does not contain %q", i+1, kind)
-		}
-	}
-}
-
-func TestBuilderImportsNoApplyPath(t *testing.T) {
-	t.Parallel()
-	dir := packageDir(t)
-	files := goFiles(t, dir)
-	if len(files) == 0 {
-		t.Fatal("the package holds no non-test Go file, so the import check read nothing")
-	}
-	for _, file := range files {
-		for _, imp := range importsOf(t, filepath.Join(dir, file)) {
-			if forbiddenImport(imp) {
-				t.Errorf("%s imports %q: the builder renders manifests and reaches no cluster", file, imp)
-			}
 		}
 	}
 }

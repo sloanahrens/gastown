@@ -1,11 +1,14 @@
 package dolt
 
 import (
+	"fmt"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,7 +26,8 @@ func packageDir(t *testing.T) string {
 }
 
 // goFiles lists the package's non-test Go files, the ones the import check
-// judges: a test may import what the builder itself must not.
+// judges: a test may import what the builder itself must not. A directory with
+// none fails, since a scan over nothing would pass for the wrong reason.
 func goFiles(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -37,6 +41,9 @@ func goFiles(t *testing.T, dir string) []string {
 			continue
 		}
 		files = append(files, name)
+	}
+	if len(files) == 0 {
+		t.Fatalf("%s holds no non-test Go file, so the import check read nothing", dir)
 	}
 	return files
 }
@@ -71,4 +78,80 @@ func forbiddenImport(path string) bool {
 		return true
 	}
 	return false
+}
+
+// scanImports reports every forbidden import in dir's non-test Go files, one
+// finding per import. It returns the findings instead of failing, so a fixture
+// that must produce some drives this same scan.
+func scanImports(t *testing.T, dir string) []string {
+	t.Helper()
+	var findings []string
+	for _, file := range goFiles(t, dir) {
+		for _, imp := range importsOf(t, filepath.Join(dir, file)) {
+			if forbiddenImport(imp) {
+				findings = append(findings, fmt.Sprintf("%s imports %q", file, imp))
+			}
+		}
+	}
+	sort.Strings(findings)
+	return findings
+}
+
+func TestBuilderImportsNoApplyPath(t *testing.T) {
+	t.Parallel()
+	for _, finding := range scanImports(t, packageDir(t)) {
+		t.Errorf("%s: the builder renders manifests and reaches no cluster", finding)
+	}
+}
+
+// TestImportScanReportsForbiddenImports drives the failing branch: a fixture
+// that reaches a process, a socket and a client must be reported, and the clean
+// file and the test file beside it must not.
+func TestImportScanReportsForbiddenImports(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFixture(t, filepath.Join(dir, "builder.go"), `package fixture
+
+import (
+	"fmt"
+
+	"gopkg.in/yaml.v3"
+)
+
+var (
+	_ = fmt.Sprint
+	_ = yaml.Marshal
+)
+`)
+	writeFixture(t, filepath.Join(dir, "apply.go"), `package fixture
+
+import (
+	_ "k8s.io/client-go/kubernetes"
+	_ "net/http"
+	_ "os/exec"
+	_ "sigs.k8s.io/controller-runtime"
+)
+`)
+	writeFixture(t, filepath.Join(dir, "apply_test.go"), `package fixture
+
+import _ "os/exec"
+`)
+
+	want := []string{
+		`apply.go imports "k8s.io/client-go/kubernetes"`,
+		`apply.go imports "net/http"`,
+		`apply.go imports "os/exec"`,
+		`apply.go imports "sigs.k8s.io/controller-runtime"`,
+	}
+	if got := scanImports(t, dir); !slices.Equal(got, want) {
+		t.Errorf("the scan reported %q, want %q", got, want)
+	}
+}
+
+// writeFixture writes one file of the fixture package.
+func writeFixture(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
 }
