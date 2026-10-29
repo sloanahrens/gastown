@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+// SlingPattern is the pgrep pattern that matches a running `gt sling`, whatever
+// path it was invoked by: the daemon cutover's quiet gate asks the same
+// question of the same process (gt-qpeei.22).
+const SlingPattern = `^([^ ]*/)?gt sling `
+
 // DeferReason is why a rebuild must wait, "" when it may run: a gt sling is
 // running, or the gateway lists a sandbox whose registry record does not exist
 // yet, so a retag could land between a Prepare's image check and its create.
@@ -13,7 +18,7 @@ import (
 // A probe that cannot answer is a deferral too, so "nothing running" and "the
 // probe failed" never read alike.
 func (r *Run) DeferReason() string {
-	sling := r.call(r.Cfg.Pgrep, "-f", `^([^ ]*/)?gt sling `)
+	sling := r.call(r.Cfg.Pgrep, "-f", SlingPattern)
 	switch sling.exit {
 	case 0:
 		return "sandbox sling in progress"
