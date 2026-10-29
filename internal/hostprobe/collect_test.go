@@ -198,8 +198,8 @@ func TestCollectSetsOnlyTheFailedFieldsErr(t *testing.T) {
 
 // TestCollectBoundsEachReadSoAHungCommandFailsOnlyItsField holds ps until its
 // read's deadline. The exec tax is read after ps and must still be filled: a
-// read with no deadline of its own would hold it up. The fallback wait fails
-// the test, not hangs it, when no deadline ends the read.
+// read with no deadline of its own would hold it up. A ps with no deadline
+// fails at once rather than waiting, so dropping the deadline turns this red.
 func TestCollectBoundsEachReadSoAHungCommandFailsOnlyItsField(t *testing.T) {
 	t.Parallel()
 	h := newFakeHost()
@@ -209,12 +209,11 @@ func TestCollectBoundsEachReadSoAHungCommandFailsOnlyItsField(t *testing.T) {
 		if strings.Join(argv, " ") != psKey {
 			return h.run(ctx, argv)
 		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(5 * time.Second):
-			return nil, errors.New("no deadline ended the read")
+		if _, ok := ctx.Deadline(); !ok {
+			return nil, errors.New("no deadline on the read")
 		}
+		<-ctx.Done()
+		return nil, ctx.Err()
 	}
 	got := collect(context.Background(), c, "/town", testAt())
 
