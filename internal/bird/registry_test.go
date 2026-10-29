@@ -621,6 +621,139 @@ func TestClaimRefusesANameAnotherLaunchReserved(t *testing.T) {
 	}
 }
 
+// TestClaimPinnedTakesOverAReservation: a launch whose caller chose the name
+// is the process a spawn's reservation was made for, so it claims the name and
+// leaves no reservation holding it.
+func TestClaimPinnedTakesOverAReservation(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	if _, err := reg.ReserveName("wren"); err != nil {
+		t.Fatalf("ReserveName: %v", err)
+	}
+	reg.ProcStart = starts(map[int]string{11: "tok11"})
+
+	claimed, err := reg.ClaimPinned(Agent{Name: "wren", PID: 11, Start: "tok11"})
+	if err != nil || !claimed {
+		t.Fatalf("ClaimPinned = %v, %v, want the reserved name taken", claimed, err)
+	}
+	st, err := reg.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(st.Agents) != 1 || st.Agents[0].PID != 11 {
+		t.Errorf("agents = %+v, want the session that claimed the name", st.Agents)
+	}
+	if len(st.Reservations) != 0 {
+		t.Errorf("reservations = %+v, want none: the process the reservation named holds it", st.Reservations)
+	}
+}
+
+// TestClaimPinnedRefusesANameALiveSessionHolds: taking over a reservation does
+// not take away a name a running session holds.
+func TestClaimPinnedRefusesANameALiveSessionHolds(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	seedAgent(t, reg, Agent{Name: "wren", PID: 10, Start: "tok10", Started: at(0)})
+	reg.ProcStart = starts(map[int]string{10: "tok10", 11: "tok11"})
+
+	claimed, err := reg.ClaimPinned(Agent{Name: "wren", PID: 11, Start: "tok11"})
+	if err != nil {
+		t.Fatalf("ClaimPinned: %v", err)
+	}
+	if claimed {
+		t.Error("ClaimPinned took a name a live session holds")
+	}
+}
+
+func TestReserveNameTakesAFreeName(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren", "robin")
+
+	held, err := reg.ReserveName("robin")
+	if err != nil || held != "" {
+		t.Fatalf("ReserveName = %q, %v, want robin reserved", held, err)
+	}
+	st, err := reg.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(st.Reservations) != 1 || st.Reservations[0].Name != "robin" {
+		t.Errorf("reservations = %+v, want one on robin", st.Reservations)
+	}
+}
+
+// TestReserveNameRefusesATakenName says why a name the caller chose cannot be
+// reserved, and reserves nothing.
+func TestReserveNameRefusesATakenName(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		arrange func(t *testing.T, reg *Registry)
+		want    SkipReason
+	}{
+		{
+			name: "bound to a bead",
+			arrange: func(t *testing.T, reg *Registry) {
+				if _, err := reg.Bind("robin", "gt-abc"); err != nil {
+					t.Fatalf("Bind: %v", err)
+				}
+			},
+			want: SkipBound,
+		},
+		{
+			name: "held by a live session",
+			arrange: func(t *testing.T, reg *Registry) {
+				reg.ProcStart = starts(map[int]string{10: "tok10"})
+				seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok10", Started: at(0)})
+			},
+			want: SkipLiveProcess,
+		},
+		{
+			name: "reserved already",
+			arrange: func(t *testing.T, reg *Registry) {
+				if _, err := reg.ReserveName("robin"); err != nil {
+					t.Fatalf("ReserveName: %v", err)
+				}
+			},
+			want: SkipReserved,
+		},
+		{
+			name: "a polecat directory holds it",
+			arrange: func(t *testing.T, reg *Registry) {
+				seated := filepath.Join(townDir(reg), "gastown", "polecats", "robin")
+				if err := os.MkdirAll(seated, 0o755); err != nil {
+					t.Fatalf("creating a polecat directory: %v", err)
+				}
+			},
+			want: SkipPolecatDirectory,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := testRegistry(t, "wren", "robin")
+			tc.arrange(t, reg)
+
+			held, err := reg.ReserveName("robin")
+			if err != nil {
+				t.Fatalf("ReserveName: %v", err)
+			}
+			if held != tc.want {
+				t.Errorf("ReserveName = %q, want the reason %q", held, tc.want)
+			}
+			st, err := reg.Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			for _, res := range st.Reservations {
+				if res.Name == "robin" && tc.want != SkipReserved {
+					t.Errorf("reservations = %+v, want none written for a refused name", st.Reservations)
+				}
+			}
+		})
+	}
+}
+
 func TestClaimTakesANameWhoseSessionHasExited(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren")

@@ -20,7 +20,7 @@ import (
 func init() {
 	birdCmd.GroupID = GroupAgents
 	rootCmd.AddCommand(birdCmd)
-	birdCmd.AddCommand(birdStartCmd, birdBindCmd, birdListCmd)
+	birdCmd.AddCommand(birdStartCmd, birdBindCmd, birdListCmd, birdSpawnCmd)
 }
 
 var birdCmd = &cobra.Command{
@@ -94,6 +94,40 @@ exited.`,
 	},
 }
 
+var birdSpawnCmd = &cobra.Command{
+	Use:   "spawn [name] [mission...]",
+	Short: "Open a cmux tab running a bird",
+	Long: `Open a new terminal tab in this cmux workspace running a bird, and print the
+name, the surface it runs in and the bead it runs.
+
+The first word names the bird and is used when nothing holds it; with no name
+one is drawn from the pool. The tab runs gt bird start --name <name> --bead
+gt-<name>, is titled with the name, and asks the new session for /bird-spawn
+and the rest of the words, which is the mission. The name is reserved until the
+session in the tab claims it.
+
+Outside cmux (no CMUX_SOCKET_PATH) there is no workspace to open a tab in, so
+it prints the gt bird start line to run here instead and exits non-zero.`,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return birdLeaf(processBirdSetup(), func(r *bird.Runner) error {
+			return runBirdSpawn(r, birdSpawnRequest(args), cmd.OutOrStdout())
+		})
+	},
+}
+
+// birdSpawnRequest reads gt bird spawn's arguments: the first word names the
+// bird, and every word after it is the mission the new session is given.
+func birdSpawnRequest(args []string) bird.SpawnRequest {
+	var req bird.SpawnRequest
+	if len(args) == 0 {
+		return req
+	}
+	req.Name = args[0]
+	req.Mission = strings.Join(args[1:], " ")
+	return req
+}
+
 // runBirdStart is the start leaf over the runner, so a test drives the call
 // site where a bird error becomes the command's exit status.
 func runBirdStart(r *bird.Runner, args []string) error {
@@ -103,6 +137,17 @@ func runBirdStart(r *bird.Runner, args []string) error {
 // runBirdBind is bind's body over the runner.
 func runBirdBind(r *bird.Runner, bead string) error {
 	return birdFailure(r.Bind(bead))
+}
+
+// runBirdSpawn is spawn's body over the runner: the tab is opened by the
+// runner and the answer is printed here, where the caller's stream is.
+func runBirdSpawn(r *bird.Runner, req bird.SpawnRequest, w io.Writer) error {
+	res, err := r.Spawn(req)
+	if err != nil {
+		return birdFailure(err)
+	}
+	fmt.Fprintf(w, "spawned %s in %s, bead %s\n", res.Name, res.Surface, res.Bead)
+	return nil
 }
 
 // runBirdList is list's body over the runner.

@@ -216,6 +216,17 @@ func (s *State) HeldLive(now time.Time, ttl time.Duration) map[string]bool {
 	return taken
 }
 
+// heldAgents returns the names the recorded agents hold. A claim that takes a
+// name over from a reservation reads the held names from this: the reservation
+// is the promise of the process that is now claiming it, not another holder.
+func (s *State) heldAgents() map[string]bool {
+	taken := make(map[string]bool, len(s.Agents))
+	for _, a := range s.Agents {
+		taken[a.Name] = true
+	}
+	return taken
+}
+
 // heldByState is the part of the taken set no process table decides.
 func (s *State) heldByState(now time.Time, ttl time.Duration) map[string]bool {
 	taken := s.reserved(now, ttl)
