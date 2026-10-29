@@ -117,7 +117,7 @@ func TestReviewBeadWarnsNamingEachFlagAnOlderOMLacks(t *testing.T) {
 	stub := &contextOM{t: t, help: omHelpWithBead}
 	var warnings []string
 	r := OMReviewer{OutDir: t.TempDir(), run: stub.run}
-	_, err := r.ReviewBead(context.Background(), ReviewInput{
+	_, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc",
 		BriefText: "# Work item\n", PolicyText: "policy", RoundsText: "[]", Round: 2,
 		Logf: func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) },

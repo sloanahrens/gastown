@@ -47,7 +47,7 @@ func TestOMReviewerStoresTheVerdict(t *testing.T) {
 	var argv []string
 	r := OMReviewer{OutDir: t.TempDir(), Verdicts: store}
 	r.run = fakeOM(t, body, 0, nil, &argv)
-	v, err := r.ReviewBead(context.Background(), ReviewInput{
+	v, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: "/wt", Base: "aaa", Head: storeTestHead, BeadID: "gt-abc"})
 	if err != nil {
 		t.Fatal(err)
@@ -88,17 +88,14 @@ func TestOMReviewerStoresTheVerdict(t *testing.T) {
 // said, though the landing's own threshold turns the approval into a rejection.
 func TestOMReviewerStoresTheVerdictBeforeTheThreshold(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".om.json"), []byte(`{"threshold":0.95}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	store := TownVerdicts(t.TempDir(), "gastown")
 	body := `{"score":0.9,"verdict":"approve","findings":[]}`
 	var argv []string
 	r := OMReviewer{OutDir: t.TempDir(), Verdicts: store}
 	r.run = fakeOM(t, body, 0, nil, &argv)
 	v, err := r.ReviewBead(context.Background(), ReviewInput{
-		Dir: dir, Base: "aaa", Head: storeTestHead, BeadID: "gt-abc"})
+		Dir: t.TempDir(), Base: "aaa", Head: storeTestHead, BeadID: "gt-abc",
+		Repo: baseRepo{omJSON: `{"threshold":0.95}`}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +118,7 @@ func TestOMReviewerKeepsTheVerdictWhenTheStoreFails(t *testing.T) {
 	var argv []string
 	r := OMReviewer{OutDir: t.TempDir(), Verdicts: store}
 	r.run = fakeOM(t, `{"score":0.9,"verdict":"approve","findings":[]}`, 0, nil, &argv)
-	v, err := r.ReviewBead(context.Background(), ReviewInput{
+	v, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: "/wt", Base: "aaa", Head: storeTestHead, BeadID: "gt-abc", Logf: logfTo(&log)})
 	if err != nil {
 		t.Fatalf("ReviewBead = %v, want the verdict to stand without the store", err)
@@ -291,7 +288,7 @@ func TestOMReviewerStoresNothingForAReviewWithNoBead(t *testing.T) {
 	var argv []string
 	r := OMReviewer{OutDir: t.TempDir(), Verdicts: store, Out: &log}
 	r.run = fakeOM(t, `{"score":0.9,"verdict":"approve","findings":[]}`, 0, nil, &argv)
-	if _, err := r.Review(context.Background(), "/wt", "aaa", storeTestHead); err != nil {
+	if _, err := reviewAt(context.Background(), r, "", "/wt", "aaa", storeTestHead); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.ReadDir(VerdictsDir(store.TownRoot)); !errors.Is(err, os.ErrNotExist) {

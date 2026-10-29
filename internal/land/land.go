@@ -1442,7 +1442,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
 		accepted, used := l.acceptedRisks(w.BeadID)
 		comments = l.beadComments(issue)
-		in := ReviewInput{Dir: dir, Base: base, Head: merged, BeadID: w.BeadID,
+		in := ReviewInput{Dir: dir, Base: base, Head: merged, Repo: g, BeadID: w.BeadID,
 			CriteriaText: CriteriaText(issue), PriorFindings: priorReviewFindings(issue.Notes),
 			AcceptedRisksText: accepted,
 			BriefText:         BeadBrief(issue.Description, comments), PolicyText: policy.PolicyBlock(),

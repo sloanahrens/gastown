@@ -395,7 +395,7 @@ func TestOMReviewerPassesTheContextFile(t *testing.T) {
 	stub := &criteriaStub{t: t, help: omHelpWithAcceptedRisks}
 	r := criteriaStubbed(t, bin, stub)
 	var log strings.Builder
-	v, err := r.ReviewBead(context.Background(), ReviewInput{
+	v, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc", AcceptedRisksText: risks, Logf: logfTo(&log)})
 	if err != nil {
 		t.Fatal(err)
@@ -437,7 +437,7 @@ func TestOMReviewerPassesBothFilesFromOneProbe(t *testing.T) {
 	bin, dir := omBinary(t), t.TempDir()
 	stub := &criteriaStub{t: t, help: omHelpWithAcceptedRisks}
 	r := criteriaStubbed(t, bin, stub)
-	if _, err := r.ReviewBead(context.Background(), ReviewInput{
+	if _, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc",
 		CriteriaText: "- [ ] one", AcceptedRisksText: risks}); err != nil {
 		t.Fatal(err)
@@ -461,7 +461,7 @@ func TestOMReviewerOmitsContextWithoutAcceptedRisks(t *testing.T) {
 	bin, dir := omBinary(t), t.TempDir()
 	stub := &criteriaStub{t: t, help: omHelpWithAcceptedRisks}
 	var log strings.Builder
-	if _, err := criteriaStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{
+	if _, err := criteriaStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc", Logf: logfTo(&log)}); err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +480,7 @@ func TestOMReviewerOmitsContextTheHelpDoesNotList(t *testing.T) {
 	t.Parallel()
 	bin, dir := omBinary(t), t.TempDir()
 	stub := &criteriaStub{t: t, help: omHelpWithCriteria}
-	if _, err := criteriaStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{
+	if _, err := criteriaStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc",
 		AcceptedRisksText: "ACCEPTED-RISK: approved"}); err != nil {
 		t.Fatal(err)
@@ -499,7 +499,7 @@ func TestOMReviewerRunsWithoutContextWhenTheWriteFails(t *testing.T) {
 	r := criteriaStubbed(t, bin, stub)
 	r.acceptedRisksWriter = func(ReviewInput) (string, error) { return "", errors.New("no space left on device") }
 	var log strings.Builder
-	if _, err := r.ReviewBead(context.Background(), ReviewInput{
+	if _, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc",
 		AcceptedRisksText: "ACCEPTED-RISK: approved", Logf: logfTo(&log)}); err != nil {
 		t.Fatalf("ReviewBead: %v; an unwritable context file must not fail the review", err)

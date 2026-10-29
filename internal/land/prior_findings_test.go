@@ -27,7 +27,7 @@ func TestOMReviewerPassesThePreviousRoundsFindings(t *testing.T) {
 	}
 	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-abc"}
 	r := omStubbed(t, bin, stub)
-	if _, err := r.ReviewBead(context.Background(), ReviewInput{Dir: "/worktree", Base: "aaa", Head: "bbb", BeadID: "gt-abc", PriorFindings: prior}); err != nil {
+	if _, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{}, Dir: "/worktree", Base: "aaa", Head: "bbb", BeadID: "gt-abc", PriorFindings: prior}); err != nil {
 		t.Fatalf("ReviewBead: %v", err)
 	}
 	path := flagValue(t, stub.argv, "--prior-findings")
@@ -55,7 +55,7 @@ func TestOMReviewerOmitsPriorFindingsWithoutThem(t *testing.T) {
 	bin := omBinary(t)
 	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-abc"}
 	r := omStubbed(t, bin, stub)
-	if _, err := r.ReviewBead(context.Background(), ReviewInput{Dir: "/worktree", Base: "aaa", Head: "bbb", BeadID: "gt-abc"}); err != nil {
+	if _, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{}, Dir: "/worktree", Base: "aaa", Head: "bbb", BeadID: "gt-abc"}); err != nil {
 		t.Fatalf("ReviewBead: %v", err)
 	}
 	if got := flagValue(t, stub.argv, "--prior-findings"); got != "" {
