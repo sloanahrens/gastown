@@ -144,6 +144,13 @@ func TestMainReadsTheEnvironment(t *testing.T) {
 			wantCode:    0,
 			wantFetched: [][2]string{{"upstream", "feature/main"}},
 		},
+		{
+			name:     "a DEPLOY_MAIN_REF that starts with a dash is a check error and fetches nothing",
+			env:      map[string]string{deploysource.MainRefEnv: "--upload-pack=x"},
+			g:        merged(),
+			wantCode: 1,
+			wantErr:  "check-deploy-source: DEPLOY_MAIN_REF \"--upload-pack=x\" has a remote or branch starting with '-', which git reads as an option\n",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -154,8 +161,10 @@ func TestMainReadsTheEnvironment(t *testing.T) {
 			if errOut != tc.wantErr {
 				t.Errorf("stderr = %q, want %q", errOut, tc.wantErr)
 			}
-			if got := strings.TrimSpace(strings.Join(fetchTuples(tc.g.fetched), " ")); got != strings.TrimSpace(strings.Join(fetchTuples(tc.wantFetched), " ")) {
-				t.Errorf("fetched %q, want %q", got, strings.Join(fetchTuples(tc.wantFetched), " "))
+			got := strings.Join(fetchTuples(tc.g.fetched), " ")
+			want := strings.Join(fetchTuples(tc.wantFetched), " ")
+			if got != want {
+				t.Errorf("fetched %q, want %q", got, want)
 			}
 		})
 	}

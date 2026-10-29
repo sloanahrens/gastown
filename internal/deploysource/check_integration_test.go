@@ -18,10 +18,10 @@ import (
 // git's own answers for an equal commit, a detached HEAD, a branch with no
 // upstream, the .beads pathspec — and the porcelain parsing.
 func TestIntegrationRealRepoCases(t *testing.T) {
-	bare := newOrigin(t)
-	// originBefore is what the SKIP_UPDATE_CHECK case recorded before its
-	// run: the fetch it must not make would have moved it.
-	var originBefore string
+	// The user's git config must not change an answer: the check and the
+	// fixtures both run with the global and system files switched off.
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
 	cases := []struct {
 		name        string
 		setup       func(t *testing.T, bare, work string)
@@ -29,7 +29,9 @@ func TestIntegrationRealRepoCases(t *testing.T) {
 		wantPass    bool
 		wantRefusal string
 		wantOutput  string
-		verify      func(t *testing.T, work, out string)
+		// verify gets originBefore, the origin/main the work tree held before
+		// the check ran.
+		verify func(t *testing.T, work, out, originBefore string)
 	}{
 		{
 			name:     "HEAD equal to origin/main passes",
@@ -98,6 +100,15 @@ func TestIntegrationRealRepoCases(t *testing.T) {
 			wantPass: true,
 		},
 		{
+			// git status without -z C-quotes this path, so only the -z read
+			// sees it under .beads/.
+			name: "a .beads edit to a path git would C-quote passes",
+			setup: func(t *testing.T, _, work string) {
+				writeFile(t, filepath.Join(work, ".beads", "a b é.jsonl"), "changed\n")
+			},
+			wantPass: true,
+		},
+		{
 			name: "a main that moved is not fetched under SKIP_UPDATE_CHECK",
 			setup: func(t *testing.T, bare, work string) {
 				other := filepath.Join(t.TempDir(), "other")
@@ -105,11 +116,10 @@ func TestIntegrationRealRepoCases(t *testing.T) {
 				writeFile(t, filepath.Join(other, "file"), "c")
 				gitIn(t, other, "commit", "-am", "three")
 				gitIn(t, other, "push", "--quiet", "origin", "main")
-				originBefore = gitIn(t, work, "rev-parse", "origin/main")
 			},
 			opts:     Options{SkipUpdateCheck: true},
 			wantPass: true,
-			verify: func(t *testing.T, work, _ string) {
+			verify: func(t *testing.T, work, _, originBefore string) {
 				if got := gitIn(t, work, "rev-parse", "origin/main"); got != originBefore {
 					t.Errorf("origin/main moved to %s; SKIP_UPDATE_CHECK must not fetch (gt-9jax)", got)
 				}
@@ -131,10 +141,14 @@ func TestIntegrationRealRepoCases(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Each row gets its own origin, so a row that pushes to it cannot
+			// change what a later row sees.
+			bare := newOrigin(t)
 			work := cloneOrigin(t, bare)
 			if tc.setup != nil {
 				tc.setup(t, bare, work)
 			}
+			originBefore := gitIn(t, work, "rev-parse", "origin/main")
 			var w bytes.Buffer
 			err := Run(ExecGit{Dir: work}, tc.opts, &w)
 			out := w.String()
@@ -154,7 +168,7 @@ func TestIntegrationRealRepoCases(t *testing.T) {
 				t.Errorf("output = %q, want it to contain %q", out, tc.wantOutput)
 			}
 			if tc.verify != nil {
-				tc.verify(t, work, out)
+				tc.verify(t, work, out, originBefore)
 			}
 		})
 	}
@@ -173,6 +187,7 @@ func newOrigin(t *testing.T) string {
 	}
 	writeFile(t, filepath.Join(seed, "file"), "a")
 	writeFile(t, filepath.Join(seed, ".beads", "issues.jsonl"), "x\n")
+	writeFile(t, filepath.Join(seed, ".beads", "a b é.jsonl"), "x\n")
 	gitIn(t, seed, "add", "-A")
 	gitIn(t, seed, "commit", "-m", "one")
 	writeFile(t, filepath.Join(seed, "file"), "b")

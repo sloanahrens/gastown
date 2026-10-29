@@ -88,6 +88,11 @@ func Run(g Git, opts Options, w io.Writer) error {
 	if !found {
 		remote, branch = mainRef, mainRef
 	}
+	// git reads a remote or branch that begins with '-' as an option, so the
+	// ref is refused before any git question is asked of it.
+	if strings.HasPrefix(remote, "-") || strings.HasPrefix(branch, "-") {
+		return fmt.Errorf("%s %q has a remote or branch starting with '-', which git reads as an option", MainRefEnv, mainRef)
+	}
 
 	if !opts.SkipUpdateCheck {
 		if err := g.Fetch(remote, branch); err != nil {
@@ -132,9 +137,12 @@ func Run(g Git, opts Options, w io.Writer) error {
 		}
 	}
 
+	// Behind main is a warning, so a count that cannot be read warns too: the
+	// merged check above has already passed.
 	behind, err := g.CountBehind(mainRef)
 	if err != nil {
-		return fmt.Errorf("count the commits behind %s: %w", mainRef, err)
+		fmt.Fprintf(w, "Warning: could not count the commits behind %s: %v\n", mainRef, err)
+		return nil
 	}
 	if behind > 0 {
 		fmt.Fprintf(w, "Warning: HEAD %s is %d commit(s) behind %s; installing an older main build.\n", head, behind, mainRef)
@@ -161,6 +169,10 @@ func refuse(w io.Writer, reason string) error {
 // git is not on PATH, or exec refused it.
 const CodeCannotStart = -1
 
+// CodeKilled is what a Runner reports for a command that started and was ended
+// by a signal, which has no exit code to report.
+const CodeKilled = -2
+
 // Runner runs one git command in dir and reports its stdout and exit code.
 type Runner func(dir string, args ...string) (out string, code int)
 
@@ -174,13 +186,15 @@ type ExecGit struct {
 	Run Runner
 }
 
-// Fetch suppresses git's own diagnostics: a failed fetch becomes the check's
-// warning, not a page of transport noise.
+// Fetch updates the local copy of remote/branch, and returns an error when that
+// update did not happen.
 func (g ExecGit) Fetch(remote, branch string) error {
 	_, err := g.output("fetch", remote, branch, "--quiet")
 	return err
 }
 
+// ShortHead returns HEAD's abbreviated commit id, or an error when git cannot
+// read it.
 func (g ExecGit) ShortHead() (string, error) {
 	out, err := g.output("rev-parse", "--short", "HEAD")
 	if err != nil {
@@ -189,8 +203,8 @@ func (g ExecGit) ShortHead() (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// Resolve runs git rev-parse --verify --quiet ref: exit 1 is an unknown ref,
-// and any other exit is an error rather than a missing ref.
+// Resolve reports whether ref names a commit, and returns an error when git
+// cannot tell, so a failed lookup is never read as a missing ref.
 func (g ExecGit) Resolve(ref string) (bool, error) {
 	_, code, err := g.run("rev-parse", "--verify", "--quiet", ref)
 	if err != nil {
@@ -205,8 +219,9 @@ func (g ExecGit) Resolve(ref string) (bool, error) {
 	return false, fmt.Errorf("git rev-parse --verify --quiet %s: exit status %d", ref, code)
 }
 
-// IsAncestor runs git merge-base --is-ancestor: exit 1 is "not an ancestor",
-// and any other exit is an error.
+// IsAncestor reports whether commit is an ancestor of ref or ref itself, and
+// returns an error when git cannot tell, so the merged check never passes on a
+// failed question.
 func (g ExecGit) IsAncestor(commit, ref string) (bool, error) {
 	_, code, err := g.run("merge-base", "--is-ancestor", commit, ref)
 	if err != nil {
@@ -221,16 +236,19 @@ func (g ExecGit) IsAncestor(commit, ref string) (bool, error) {
 	return false, fmt.Errorf("git merge-base --is-ancestor %s %s: exit status %d", commit, ref, code)
 }
 
-// ModifiedTracked asks git to leave untracked files out: only a tracked
-// modification can reach the build.
+// ModifiedTracked returns the paths of the tracked files git reports as modified,
+// with git's C-quoting undone; untracked files are left out because only a
+// tracked modification can reach the build.
 func (g ExecGit) ModifiedTracked() ([]string, error) {
-	out, err := g.output("status", "--porcelain", "--untracked-files=no", "--", ".")
+	out, err := g.output("status", "--porcelain", "-z", "--untracked-files=no", "--", ".")
 	if err != nil {
 		return nil, err
 	}
 	return porcelainPaths(out), nil
 }
 
+// CountBehind returns how many commits ref has that HEAD does not, or an error
+// when the count cannot be read.
 func (g ExecGit) CountBehind(ref string) (int, error) {
 	out, err := g.output("rev-list", "--count", "HEAD.."+ref)
 	if err != nil {
@@ -254,8 +272,11 @@ func (g ExecGit) run(args ...string) (string, int, error) {
 		run = runGit
 	}
 	out, code := run(g.Dir, args...)
-	if code == CodeCannotStart {
+	switch code {
+	case CodeCannotStart:
 		return "", code, fmt.Errorf("git %s: the command did not start", strings.Join(args, " "))
+	case CodeKilled:
+		return "", code, fmt.Errorf("git %s: the command was killed by a signal", strings.Join(args, " "))
 	}
 	return out, code, nil
 }
@@ -282,33 +303,39 @@ func runGit(dir string, args ...string) (string, int) {
 	return string(out), commandCode(err)
 }
 
-// commandCode is a finished git command's exit code, or CodeCannotStart when
-// it never ran.
+// commandCode is a finished git command's exit code, CodeKilled when a signal
+// ended it, or CodeCannotStart when it never ran.
 func commandCode(err error) int {
 	if err == nil {
 		return 0
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode()
+		if code := exitErr.ExitCode(); code >= 0 {
+			return code
+		}
+		// ExitCode is -1 for a signal, which must not read as "did not start".
+		return CodeKilled
 	}
 	return CodeCannotStart
 }
 
-// porcelainPaths returns the paths a porcelain-v1 status names: the path after
-// the two status characters, and both sides of a rename.
+// porcelainPaths returns the paths a NUL-terminated porcelain-v1 status names:
+// the path after the two status characters, and for a rename or copy the
+// source, which git writes as the following NUL-terminated entry.
 func porcelainPaths(out string) []string {
 	var paths []string
-	for _, line := range strings.Split(out, "\n") {
-		if len(line) < 4 {
+	entries := strings.Split(out, "\x00")
+	for i := 0; i < len(entries); i++ {
+		entry := entries[i]
+		if len(entry) < 4 {
 			continue
 		}
-		path := line[3:]
-		if from, to, ok := strings.Cut(path, " -> "); ok {
-			paths = append(paths, from, to)
-			continue
+		paths = append(paths, entry[3:])
+		if x := entry[0]; (x == 'R' || x == 'C') && i+1 < len(entries) {
+			i++
+			paths = append(paths, entries[i])
 		}
-		paths = append(paths, path)
 	}
 	return paths
 }

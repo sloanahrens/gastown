@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -295,6 +296,47 @@ func TestBehindMainWarnsWithCount(t *testing.T) {
 	}
 }
 
+// The behind count is a warning only: a count that cannot be read warns and
+// the install goes ahead, because the merged check has already passed.
+func TestBehindCountFailureOnlyWarns(t *testing.T) {
+	t.Parallel()
+	g := merged()
+	g.behindErr = errors.New("git rev-list failed")
+	out, err := runCheck(t, g, Options{})
+	if err != nil {
+		t.Fatalf("Run = %v, want nil", err)
+	}
+	if want := "Warning: could not count the commits behind origin/main: git rev-list failed\n"; out != want {
+		t.Errorf("output = %q, want %q", out, want)
+	}
+}
+
+// git reads a remote or branch that begins with '-' as an option, so the check
+// refuses it as a check error before asking git anything.
+func TestMainRefOptionLikeIsACheckError(t *testing.T) {
+	t.Parallel()
+	for _, mainRef := range []string{"-x", "--upload-pack=x", "-origin/main", "origin/-x"} {
+		t.Run(mainRef, func(t *testing.T) {
+			t.Parallel()
+			g := merged()
+			out, err := runCheck(t, g, Options{MainRef: mainRef})
+			if err == nil {
+				t.Fatal("Run = nil, want an error")
+			}
+			var refusal *Refusal
+			if errors.As(err, &refusal) {
+				t.Fatalf("Run = %v, want a check error rather than a refusal", err)
+			}
+			if out != "" {
+				t.Errorf("output = %q, want empty", out)
+			}
+			if len(g.calls) != 0 {
+				t.Errorf("git calls = %v, want none", g.calls)
+			}
+		})
+	}
+}
+
 func TestUnresolvableMainRefRefuses(t *testing.T) {
 	t.Parallel()
 	g := merged()
@@ -322,7 +364,6 @@ func TestCheckGitFailureIsNotAPass(t *testing.T) {
 		{name: "ref unresolvable with an error", g: &fakeGit{resolved: true, resolveErr: failure}},
 		{name: "ancestry unanswerable", g: &fakeGit{resolved: true, ancestor: true, ancestorErr: failure}},
 		{name: "status unreadable", g: &fakeGit{resolved: true, ancestor: true, modifiedErr: failure}},
-		{name: "behind unreadable", g: &fakeGit{resolved: true, ancestor: true, behindErr: failure}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -363,16 +404,16 @@ func TestOptionsFromEnv(t *testing.T) {
 	}
 }
 
-// porcelainPaths reads the lines git status prints: the path follows the two
-// status characters, and a rename names both sides.
+// porcelainPaths reads the NUL-terminated entries git status -z prints: the
+// path follows the two status characters, and a rename names its source as the
+// next entry.
 func TestPorcelainPaths(t *testing.T) {
 	t.Parallel()
-	out := " M file\n" +
-		" M .beads/issues.jsonl\n" +
-		"R  old -> new\n" +
-		"A  added\n" +
-		"\n"
-	want := []string{"file", ".beads/issues.jsonl", "old", "new", "added"}
+	out := " M file\x00" +
+		" M .beads/issues.jsonl\x00" +
+		"R  new\x00old\x00" +
+		"A  added\x00"
+	want := []string{"file", ".beads/issues.jsonl", "new", "old", "added"}
 	got := porcelainPaths(out)
 	if len(got) != len(want) {
 		t.Fatalf("porcelainPaths = %q, want %q", got, want)
@@ -417,8 +458,11 @@ func TestExecGitAnswersAndFailures(t *testing.T) {
 		{name: "exit 1 is not an ancestor", run: scripting("", 1), call: func(g ExecGit) (any, error) { return g.IsAncestor("HEAD", "origin/main") }, want: false},
 		{name: "another exit is an error", run: scripting("", 128), call: func(g ExecGit) (any, error) { return g.IsAncestor("HEAD", "origin/main") }, want: false, wantErr: "git merge-base --is-ancestor HEAD origin/main: exit status 128"},
 		{name: "a command that could not run is an error", run: scripting("", -1), call: func(g ExecGit) (any, error) { return g.IsAncestor("HEAD", "origin/main") }, want: false, wantErr: "merge-base"},
-		{name: "status is parsed", run: scripting(" M file\n", 0), call: func(g ExecGit) (any, error) { return g.ModifiedTracked() }, want: []string{"file"}},
-		{name: "status names a failed exit", run: scripting("", 128), call: func(g ExecGit) (any, error) { return g.ModifiedTracked() }, wantErr: "git status --porcelain --untracked-files=no -- .: exit status 128"},
+		{name: "status is parsed", run: scripting(" M file\x00", 0), call: func(g ExecGit) (any, error) { return g.ModifiedTracked() }, want: []string{"file"}},
+		{name: "a .beads path with a space is not C-quoted", run: scripting(" M .beads/a b.jsonl\x00", 0), call: func(g ExecGit) (any, error) { return g.ModifiedTracked() }, want: []string{".beads/a b.jsonl"}},
+		{name: "a rename names its source", run: scripting("R  new\x00old\x00", 0), call: func(g ExecGit) (any, error) { return g.ModifiedTracked() }, want: []string{"new", "old"}},
+		{name: "a command killed by a signal is an error", run: scripting("", CodeKilled), call: func(g ExecGit) (any, error) { return g.IsAncestor("HEAD", "origin/main") }, want: false, wantErr: "git merge-base --is-ancestor HEAD origin/main: the command was killed by a signal"},
+		{name: "status names a failed exit", run: scripting("", 128), call: func(g ExecGit) (any, error) { return g.ModifiedTracked() }, wantErr: "git status --porcelain -z --untracked-files=no -- .: exit status 128"},
 		{name: "status names a command that could not run", run: scripting("", -1), call: func(g ExecGit) (any, error) { return g.ModifiedTracked() }, wantErr: "git status"},
 		{name: "a count", run: scripting("3\n", 0), call: func(g ExecGit) (any, error) { return g.CountBehind("origin/main") }, want: 3},
 		{name: "a count names a failed exit", run: scripting("", 128), call: func(g ExecGit) (any, error) { return g.CountBehind("origin/main") }, wantErr: "exit status 128"},
@@ -442,6 +486,29 @@ func TestExecGitAnswersAndFailures(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("call = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A command that exited with no exit code was ended by a signal; it must not
+// read as one that never started. An ExitError with no process state has no
+// exit code, which is how the signal case reaches commandCode without a process.
+func TestCommandCodeSignalIsNotNotStarted(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "a command that succeeded", err: nil, want: 0},
+		{name: "a command ended by a signal", err: &exec.ExitError{}, want: CodeKilled},
+		{name: "a command that did not start", err: errors.New("executable file not found"), want: CodeCannotStart},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := commandCode(tc.err); got != tc.want {
+				t.Errorf("commandCode = %d, want %d", got, tc.want)
 			}
 		})
 	}
