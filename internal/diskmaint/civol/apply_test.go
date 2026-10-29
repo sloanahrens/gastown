@@ -220,6 +220,42 @@ func TestApplySkipsThePruneWhenAJobStartsDuringTheTrim(t *testing.T) {
 	}
 }
 
+// TestApplyDefersThePruneWhenTheJobListFailsDuringTheTrim asserts a job list
+// that cannot be read before the prune holds the prune back and reports the
+// read failure, and that the deletes already made stay recorded.
+func TestApplyDefersThePruneWhenTheJobListFailsDuringTheTrim(t *testing.T) {
+	t.Parallel()
+	f := newFake()
+	path := filepath.Join(t.TempDir(), "ledger.jsonl")
+	// The job list reads fine before the deletes and fails when the first rm runs.
+	run := func(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "rm") {
+			f.ps = answer{err: errors.New("exit status 1")}
+		}
+		return f.run(ctx, env, name, args...)
+	}
+	tgt := NewTarget(Config{Dind: f.dind, Runner: f.runner, Image: testImage, Run: run,
+		Ledger: diskmaint.NewLedger(path, 1<<20)})
+
+	result, err := tgt.Apply(context.Background(), planOf(deletePath(gocacheVolume, "aa/old.bin", gb)))
+
+	if !errors.Is(err, errJobs) {
+		t.Fatalf("error = %v, want the unreadable job list reported", err)
+	}
+	if got, want := doneRefs(result), []string{gocacheVolume + ":aa/old.bin"}; !slices.Equal(got, want) {
+		t.Fatalf("done = %v, want %v", got, want)
+	}
+	if result.Deferred == "" {
+		t.Fatal("deferred = \"\", want the prune's deferral recorded")
+	}
+	if p := f.commands("prune"); len(p) > 0 {
+		t.Fatalf("prunes ran with an unreadable job list: %v", p)
+	}
+	if entry := ledgerEntries(t, path)[0]; entry.Deferred == "" || len(entry.Errors) == 0 {
+		t.Fatalf("ledger deferred/errors = %q/%v, want the deferral and the read failure recorded", entry.Deferred, entry.Errors)
+	}
+}
+
 // TestApplyTrimsTheBuildCacheWhileAJobRuns asserts a build-cache-only plan is
 // the one a running job allows, and that it prunes nothing.
 func TestApplyTrimsTheBuildCacheWhileAJobRuns(t *testing.T) {
