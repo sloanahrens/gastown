@@ -41,6 +41,7 @@ type fakeRunner struct {
 	adds    []worktreeAdd
 	removed []string
 	failPkg string
+	failAdd bool
 }
 
 func (f *fakeRunner) run(_ context.Context, dir string, env, argv []string) error {
@@ -62,6 +63,9 @@ func (f *fakeRunner) run(_ context.Context, dir string, env, argv []string) erro
 func (f *fakeRunner) git(known map[string]string) bdbuild.Git {
 	holding := gitHolding(known)
 	return func(dir string, args ...string) ([]byte, error) {
+		if f.failAdd && len(args) == 5 && args[0] == "worktree" && args[1] == "add" {
+			return nil, errors.New("fatal: cannot make the worktree")
+		}
 		if len(args) == 5 && args[0] == "worktree" && args[1] == "add" {
 			f.adds = append(f.adds, worktreeAdd{src: dir, dir: args[3], commit: args[4]})
 		}
@@ -281,6 +285,50 @@ func TestBuildBinariesFailsWithoutLeavingPartialOutput(t *testing.T) {
 	}
 }
 
+// TestBuildBinariesFailsWhenAWorktreeCannotBeMade: a build whose worktree cannot
+// be made fails before its compile runs, and lists no paths.
+func TestBuildBinariesFailsWhenAWorktreeCannotBeMade(t *testing.T) {
+	t.Parallel()
+	run := &fakeRunner{failAdd: true}
+	b := validBuilder(run, t.TempDir())
+	paths, err := b.BuildBinaries(context.Background(), testRev)
+	if err == nil || !strings.Contains(err.Error(), "cannot check commit "+testRev) {
+		t.Fatalf("BuildBinaries = %q, %v; want an error naming the commit it could not check out", paths, err)
+	}
+	if len(paths) != 0 {
+		t.Errorf("a failed worktree listed %q, want no paths", paths)
+	}
+	if len(run.calls) != 0 {
+		t.Errorf("a failed worktree ran %d builds, want none", len(run.calls))
+	}
+}
+
+// TestBuildBinariesFailsWhenAnOutputCannotBeMoved: an output that cannot be moved
+// into Out fails the call, and the staging directory is removed, so Out holds
+// nothing but what was already there.
+func TestBuildBinariesFailsWhenAnOutputCannotBeMoved(t *testing.T) {
+	t.Parallel()
+	b, _ := builderFor(t)
+	// rename(2) cannot put a file over a directory, so gt cannot be moved in.
+	if err := os.Mkdir(filepath.Join(b.Out, "gt"), 0o755); err != nil {
+		t.Fatalf("making the blocking directory: %v", err)
+	}
+	paths, err := b.BuildBinaries(context.Background(), testRev)
+	if err == nil || !strings.Contains(err.Error(), "cannot move gt") {
+		t.Fatalf("BuildBinaries = %q, %v; want an error naming the gt move", paths, err)
+	}
+	if len(paths) != 0 {
+		t.Errorf("a failed move listed %q, want no paths", paths)
+	}
+	entries, err := os.ReadDir(b.Out)
+	if err != nil {
+		t.Fatalf("reading the output directory: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "gt" {
+		t.Errorf("the output directory holds %d entries after a failed move, want only the blocking gt directory", len(entries))
+	}
+}
+
 // TestBuildBinariesRefusesBeforeAnyBuild covers every refusal: each one comes
 // before the first build, so a refused call runs nothing and writes nothing.
 func TestBuildBinariesRefusesBeforeAnyBuild(t *testing.T) {
@@ -304,6 +352,8 @@ func TestBuildBinariesRefusesBeforeAnyBuild(t *testing.T) {
 		{name: "no bd commit", breakIt: func(b *Builder) { b.BDCommit = "" }, rev: testRev, want: "no bd commit"},
 		{name: "a bd commit that is not hex", breakIt: func(b *Builder) { b.BDCommit = "main" }, rev: testRev, want: `bd commit "main" is not`},
 		{name: "a bd commit the bd checkout does not hold", breakIt: func(b *Builder) { b.BDCommit = "7654321" }, rev: testRev, want: "does not hold commit 7654321"},
+		{name: "an om checkout that does not hold its HEAD", breakIt: func(b *Builder) { b.Git = gitHolding(map[string]string{testRev: testRev, testBDCommit: testBDCommit}) }, rev: testRev, want: "does not hold commit HEAD"},
+		{name: "an output directory that does not exist", breakIt: func(b *Builder) { b.Out = filepath.Join(b.Out, "missing") }, rev: testRev, want: "cannot stage the binaries"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

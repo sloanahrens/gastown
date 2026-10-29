@@ -51,7 +51,8 @@ type Builder struct {
 	Environ []string
 	// Out is the absolute directory the three binaries are written to. git and go
 	// resolve a relative path against the worktree a build runs in, not the
-	// caller's directory, so BuildBinaries refuses a relative Out.
+	// caller's directory, so BuildBinaries refuses a relative Out. Out must
+	// already exist: the staging directory is made inside it.
 	Out string
 	// GTSrc is the gt checkout gt is built from, at rev. The build runs in a clean
 	// worktree of rev, so uncommitted changes in GTSrc never reach the binary.
@@ -126,9 +127,6 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtCommitFlag + gtCommit},
 		{name: "bd", src: b.BDSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit},
 		{name: "om", src: b.OMSrc, commit: omCommit, pkg: OMPackage},
-	}
-	if err := os.MkdirAll(b.Out, 0o755); err != nil {
-		return nil, fmt.Errorf("daemonimage: cannot make the output directory %s: %w", b.Out, err)
 	}
 	stage, err := os.MkdirTemp(b.Out, ".daemonimage-")
 	if err != nil {
