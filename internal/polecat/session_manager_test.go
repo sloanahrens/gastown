@@ -13,6 +13,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/seattoken"
 	"github.com/steveyegge/gastown/internal/session"
@@ -251,10 +252,11 @@ func (c *countingIssuer) Issue(context.Context, string) (string, error) {
 // Stopping a polecat revokes nothing: its worktree survives and the seat
 // restarts with the token it was given, so only a removal ends that token
 // (gt-p85pw.85). A SessionManager holds no tracker credential and no revoker —
-// revocation lives on Manager alone — so the stop has no path to one; the token
-// file surviving the stop and being handed back untouched is what this test can
-// observe, and TestReuseOfAnIdlePolecatRevokesNothing drives the Manager's own
-// session end past an injected revoker to show the other half.
+// revocation lives on Manager alone — so the test watches the two things a
+// revocation takes survive the stop: the seat's token file, handed back
+// untouched, and the intent record releaseSeat clears beside it. The other
+// half — the revoker a removal reaches, injected and observed not to run when a
+// session ends — is TestEndingASessionOutsideARemovalRevokesNothing.
 func TestStopKeepsTheSeatToken(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -271,13 +273,33 @@ func TestStopKeepsTheSeatToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
+	issued, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the seat's token: %v", err)
+	}
+	// The intent record a removal's clean-up deletes. It surviving shows the
+	// removal path, which is the only one that revokes, never ran.
+	record := intentSeat("test-rig", "Toast")
+	if _, err := intent.Update(town, record, func(r *intent.Record) error {
+		r.Desired = intent.DesiredRun
+		return nil
+	}); err != nil {
+		t.Fatalf("seeding the intent record: %v", err)
+	}
 
 	if err := m.Stop("Toast", true); err != nil {
 		t.Fatalf("Stop = %v", err)
 	}
 
-	if _, err := os.Stat(path); err != nil {
+	kept, err := os.ReadFile(path)
+	if err != nil {
 		t.Fatalf("token file gone after Stop: %v", err)
+	}
+	if string(kept) != string(issued) {
+		t.Errorf("token after Stop = %q, want the seat's own token %q", kept, issued)
+	}
+	if _, err := os.Stat(record.Path(town)); err != nil {
+		t.Errorf("intent record gone after Stop, so the removal's clean-up ran: %v", err)
 	}
 	again, err := store.Ensure(context.Background(), seat, issuer)
 	if err != nil {

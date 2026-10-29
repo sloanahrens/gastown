@@ -3220,20 +3220,14 @@ func TestRemoveWarnsWhenTheRouteTableCannotBeRead(t *testing.T) {
 }
 
 // With no admin credential the host revoker cannot be built, so the removal
-// warns and still finishes: the seat is gone either way. The town's daemon.env
-// sets no credential, so the answer cannot depend on this process's
-// environment.
+// warns and still finishes: the seat is gone either way. The town has no
+// settings/daemon.env, and config.LoadTrackerAdminToken reports the absent key
+// before it dereferences any ${VAR} in it, so no value this process's
+// environment holds can stand in for the credential here.
 func TestRemoveWarnsWhenTheTownHasNoAdminCredential(t *testing.T) {
 	t.Parallel()
 	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
 	putRigOnBackend(t, mgr.townRoot, beads.BackendTracker)
-	settings := filepath.Join(mgr.townRoot, "settings")
-	if err := os.MkdirAll(settings, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(settings, "daemon.env"), []byte("TRACKER_ADMIN_TOKEN=\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	var warned []string
 	mgr.warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
 

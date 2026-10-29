@@ -1801,8 +1801,8 @@ func intentSeat(rigName, name string) intent.Seat {
 }
 
 // trackerSeat is the same seat as the tracker and bd's BD_ACTOR know it: the
-// worktree's directory, <rig>/polecats/<name> (config.AgentEnvConfig builds the
-// same address). The two spellings are one polecat, never one seat seen twice.
+// worktree directory, <rig>/polecats/<name>. It and intentSeat are two
+// spellings of one polecat, never one seat seen twice.
 func trackerSeat(rigName, name string) intent.Seat {
 	return intent.Seat{Rig: rigName, Role: constants.DirPolecats, Name: name}
 }
