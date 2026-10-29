@@ -926,7 +926,7 @@ func minorFindings(findings []Finding) int {
 // landing would have recorded anyway, and the three-attempt cap counts it
 // once.
 func (l *Lander) rescoreBorderline(ctx context.Context, v Verdict, in ReviewInput) Verdict {
-	bar, err := OMThreshold(in.Dir)
+	bar, err := OMThresholdAt(in.Repo, in.Base)
 	if err != nil {
 		l.logf("%s: could not read the review bar to decide whether to re-score the rejection (%v); the rejection stands", in.BeadID, err)
 		return v
@@ -973,12 +973,13 @@ func (l *Lander) rescoreBorderline(ctx context.Context, v Verdict, in ReviewInpu
 // append never holds a landing, but the line it loses is a hole in the rework
 // table, so it is also written on the work bead, where the table's reader can
 // find it.
-func (l *Lander) logReview(issue *beads.Issue, w Work, comments []beads.Comment, dir string, v Verdict, rejected bool) {
+func (l *Lander) logReview(issue *beads.Issue, w Work, comments []beads.Comment, repo Repo, base string, v Verdict, rejected bool) {
 	if l.Reviews == nil || (v.Verdict != VerdictApprove && v.Verdict != VerdictRequestChanges) {
 		return
 	}
-	// An unreadable bar is logged as 0, which the table names unknown.
-	bar, err := OMThreshold(dir)
+	// An unreadable bar is logged as 0, which the table names unknown. The bar
+	// is the base's, the one the review was held to (gt-uhuw9).
+	bar, err := OMThresholdAt(repo, base)
 	if err != nil {
 		l.logf("%s: could not read the review bar for the reviews log (%v); it is logged as 0", w.BeadID, err)
 	}
@@ -1489,7 +1490,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// findings decide the approval's fate before the line is written, so an
 	// approval they bounce is logged as the rejection it is (gt-vu18r).
 	findingsRej := findingsRejection(verdict)
-	l.logReview(issue, w, comments, dir, verdict, findingsRej != nil)
+	l.logReview(issue, w, comments, g, base, verdict, findingsRej != nil)
 	l.logRounds(issue, w, verdict)
 	l.commentVerdict(w, verdict, reviewStart, time.Now())
 	if verdict.Verdict == VerdictRequestChanges {
@@ -1548,7 +1549,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	}
 	// The landing is recorded, so the feed runs after it and cannot change it
 	// (gt-s01pn).
-	l.fileFollowups(dir, w, res)
+	l.fileFollowups(g, base, w, res)
 	return res, nil
 }
 

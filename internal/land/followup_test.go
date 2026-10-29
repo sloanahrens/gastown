@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -57,7 +55,7 @@ type followupFixture struct {
 	lander  *Lander
 	fake    *followupFake
 	bd      *beadsfake.Fake
-	dir     string
+	repo    Repo
 	reviews *ReviewsFile
 	work    Work
 	result  Result
@@ -67,12 +65,9 @@ const followupThreshold = 0.6
 
 func newFollowupFixture(t *testing.T, score float64, findings []Finding) *followupFixture {
 	t.Helper()
-	dir := t.TempDir()
-	// The band's floor is the rig's own .om.json threshold, read from the tree
-	// the landing ran in.
-	if err := os.WriteFile(filepath.Join(dir, ".om.json"), []byte(`{"threshold": 0.6}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// The band's floor is the rig's own .om.json threshold at the landing's
+	// base, the bar the review was held to (gt-uhuw9).
+	repo := baseRepo{omJSON: `{"threshold": 0.6}`}
 	bd := beadsfake.New(beadsfake.WithPrefix("gt"))
 	bd.Seed(
 		beads.Issue{ID: "gt-abc", Title: "land the thing", Status: "open", Type: "task"},
@@ -81,7 +76,7 @@ func newFollowupFixture(t *testing.T, score float64, findings []Finding) *follow
 	fake := &followupFake{}
 	reviews := reviewsFileIn(t)
 	return &followupFixture{
-		t: t, bd: bd, fake: fake, dir: dir, reviews: reviews,
+		t: t, bd: bd, fake: fake, repo: repo, reviews: reviews,
 		lander: &Lander{Beads: bd, Followups: fake, Reviews: reviews},
 		work:   Work{BeadID: "gt-abc", Rig: "gastown", Branch: fixtureBranch, Head: "aaa1111", Target: "main"},
 		result: Result{LandedCommit: "0123456789abcdef0123456789abcdef01234567",
@@ -94,7 +89,7 @@ func (f *followupFixture) run() string {
 	f.t.Helper()
 	var log strings.Builder
 	f.lander.Out = &log
-	f.lander.fileFollowups(f.dir, f.work, f.result)
+	f.lander.fileFollowups(f.repo, "base", f.work, f.result)
 	return log.String()
 }
 

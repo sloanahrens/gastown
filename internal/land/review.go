@@ -234,11 +234,13 @@ var omUnsetEnv = []string{"CLAUDE_CONFIG_DIR"}
 // omConfigFile is the om config a rig keeps at the root of its tree.
 const omConfigFile = ".om.json"
 
-// OMThreshold reads "threshold" from the .om.json in dir (the tree under
-// review). It returns 0 when the file or the key is absent. A review bar is
-// read from the base commit instead (OMThresholdAt); this reads the tree.
+// OMThreshold reads "threshold" from the .om.json in dir, the checkout the spec
+// dispatcher's overrun band reads. It returns 0 when the file or the key is
+// absent. It is not the bar a landing is reviewed against: that is read at the
+// base commit (OMThresholdAt), because a diff under review can edit the tree's
+// .om.json (gt-uhuw9).
 func OMThreshold(dir string) (float64, error) {
-	data, err := os.ReadFile(filepath.Join(dir, omConfigFile)) //nolint:gosec // G304: the reviewed tree's own config
+	data, err := os.ReadFile(filepath.Join(dir, omConfigFile)) //nolint:gosec // G304: the rig checkout's own config
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
@@ -414,12 +416,13 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	// om that cannot describe its own flags must not spend the review's
 	// (gt-yl7n4). One probe answers both, so a bead carrying both texts pays for
 	// one help read.
-	// The brief, policy and rounds flags (gt-3l5qy) ride the same one probe.
+	// The brief, policy and rounds flags (gt-3l5qy) ride the same one probe, and
+	// so does --threshold (gt-uhuw9).
 	newFlags := in.BriefText != "" || in.PolicyText != "" || in.RoundsText != "" || in.Round > 0
 	criteriaPath, contextPath := "", ""
 	briefPath, policyPath, roundsPath := "", "", ""
 	help, probed := "", false
-	if in.CriteriaText != "" || in.AcceptedRisksText != "" || newFlags {
+	if in.CriteriaText != "" || in.AcceptedRisksText != "" || newFlags || bar > 0 {
 		help, probed = r.omReviewHelp(ctx, in, path, run)
 	}
 	if in.CriteriaText != "" {
@@ -486,8 +489,14 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 		argv = append(argv, "--bead", in.BeadID)
 	}
 	// om decides against the base commit's bar, not the threshold in the tree
-	// it reviews (gt-uhuw9). A base with no bar adds no flag.
-	if bar > 0 {
+	// it reviews (gt-uhuw9). A base with no bar adds no flag, and an om whose
+	// help does not list --threshold gets none: the landing's own check below
+	// holds the verdict to the bar either way.
+	thresholdFlag := bar > 0 && probed && omHelpListsFlag(help, "--threshold")
+	if bar > 0 && probed && !thresholdFlag {
+		r.warnf(in, "om does not take --threshold; the landing holds the verdict to the base bar %.2f", bar)
+	}
+	if thresholdFlag {
 		argv = append(argv, "--threshold", strconv.FormatFloat(bar, 'f', -1, 64))
 	}
 	if criteriaPath != "" {
