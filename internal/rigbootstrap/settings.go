@@ -22,18 +22,24 @@ type member struct {
 	value json.RawMessage
 }
 
+// SettingsRelPath is the rig settings file MergeRoleAgents merges, relative to
+// the rig directory. The merge errors name it so a broken file is a path the
+// operator can open.
+const SettingsRelPath = "settings/config.json"
+
 // MergeRoleAgents returns the rig settings in existing with type and version set
 // when absent, and role_agents.polecat set to polecat when polecat is non-empty.
-// Keys keep their order, new keys append in the order type, version,
-// role_agents, and the result is indented two spaces with a final newline. Empty
-// existing starts from an empty object. Invalid JSON returns an error and no
-// bytes.
+// role_agents is written only when polecat is non-empty or existing already had
+// it, so an empty polecat adds no empty object. Keys keep their order, new keys
+// append in the order type, version, role_agents, and the result is indented two
+// spaces with a final newline. Empty existing starts from an empty object.
+// Invalid JSON returns an error naming SettingsRelPath and no bytes.
 func MergeRoleAgents(existing []byte, polecat string) ([]byte, error) {
 	var top []member
 	if len(existing) > 0 {
 		ms, err := parseObject(existing)
 		if err != nil {
-			return nil, fmt.Errorf("rig settings: %w", err)
+			return nil, fmt.Errorf("%s: %w", SettingsRelPath, err)
 		}
 		top = ms
 	}
@@ -41,17 +47,22 @@ func MergeRoleAgents(existing []byte, polecat string) ([]byte, error) {
 	top = setDefault(top, "version", json.RawMessage(`1`))
 
 	var roleAgents []member
+	hasRoleAgents := false
 	if raw, ok := lookup(top, "role_agents"); ok {
 		ms, err := parseObject(raw)
 		if err != nil {
-			return nil, fmt.Errorf("role_agents: %w", err)
+			return nil, fmt.Errorf("%s: role_agents: %w", SettingsRelPath, err)
 		}
 		roleAgents = ms
+		hasRoleAgents = true
 	}
 	if polecat != "" {
 		roleAgents = setMember(roleAgents, "polecat", encodeString(polecat))
+		hasRoleAgents = true
 	}
-	top = setMember(top, "role_agents", encodeObject(roleAgents))
+	if hasRoleAgents {
+		top = setMember(top, "role_agents", encodeObject(roleAgents))
+	}
 
 	// Every byte here came from a parse or an encoder, so it is valid JSON and
 	// Indent cannot fail: no input reaches an error branch for it.
