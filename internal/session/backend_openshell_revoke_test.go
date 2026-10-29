@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/seattoken"
 )
@@ -60,6 +61,15 @@ func seedSeatToken(t *testing.T, townRoot, rig, polecat string) string {
 		t.Fatalf("seeding the seat's token file: %v", err)
 	}
 	return path
+}
+
+// trackerSeatToken seeds the seat's token file and points the backend at it the
+// way a launch's seat-token ask does, so a tracker-routed Prepare gets past
+// staging the token and reaches the step under test.
+func trackerSeatToken(t *testing.T, b *openshellBackend, town string) {
+	t.Helper()
+	path := seedSeatToken(t, town, openshellTestRig, openshellTestPolecat)
+	b.seatToken = func(context.Context, intent.Seat) (string, error) { return path, nil }
 }
 
 func wantActors(rig, polecat string) []string {
@@ -169,7 +179,7 @@ func TestOpenShellPrepareRollbackRevokesTheSeatToken(t *testing.T) {
 	}}
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 	writeTrackerRoute(t, town, openshellTestRig)
-	seedSeatToken(t, town, openshellTestRig, openshellTestPolecat)
+	trackerSeatToken(t, b, town)
 	revoker := &revokeFake{}
 	b.revoker = revoker
 
@@ -193,7 +203,7 @@ func TestOpenShellPrepareRollbackReportsAFailedDelete(t *testing.T) {
 	}
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 	writeTrackerRoute(t, town, openshellTestRig)
-	seedSeatToken(t, town, openshellTestRig, openshellTestPolecat)
+	trackerSeatToken(t, b, town)
 	revoker := &revokeFake{}
 	b.revoker = revoker
 
