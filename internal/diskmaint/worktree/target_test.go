@@ -27,6 +27,7 @@ type fakeGit struct {
 	t     *testing.T
 	reply map[string]fakeReply
 	calls []string
+	envs  [][]string // the environment each command received
 }
 
 type fakeReply struct {
@@ -48,9 +49,10 @@ func (f *fakeGit) answer(line, out string, err error) {
 // answerErr sets the command line to fail, as a git that exited non-zero does.
 func (f *fakeGit) answerErr(line string, err error) { f.answer(line, "", err) }
 
-func (f *fakeGit) run(_ context.Context, _ []string, name string, args ...string) ([]byte, error) {
+func (f *fakeGit) run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
 	line := strings.TrimSpace(name + " " + strings.Join(args, " "))
 	f.calls = append(f.calls, line)
+	f.envs = append(f.envs, env)
 	r, ok := f.reply[line]
 	if !ok {
 		f.t.Errorf("unexpected command: %s", line)

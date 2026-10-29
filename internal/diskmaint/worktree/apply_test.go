@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
 )
@@ -18,10 +17,11 @@ func applyLedger(t *testing.T) *diskmaint.Ledger {
 	return diskmaint.NewLedger(filepath.Join(t.TempDir(), "maint.jsonl"), 0)
 }
 
-// applyTarget returns a target over the fake runner and ledger, with no
-// redirecting variable in its environment.
+// applyTarget returns a target over the fake runner and ledger, allowed to
+// apply and with no redirecting variable in its environment.
 func applyTarget(root string, f *fakeGit, l *diskmaint.Ledger) *Target {
-	return NewTarget(Config{Town: root, Rigs: []string{"rig-a"}, Run: f.run, Environ: noRedirect, Ledger: l})
+	return NewTarget(Config{Town: root, Rigs: []string{"rig-a"}, Run: f.run, Environ: noRedirect,
+		Policy: diskmaint.Policy{Apply: true}, Ledger: l})
 }
 
 // commonOf is the shared git dir a fixture's worktrees report.
@@ -35,8 +35,11 @@ func answerRemove(f *fakeGit, root, path string, refuse error) {
 	f.answer("--git-dir "+commonOf(root)+" worktree remove "+path, "", refuse)
 }
 
-// answerBranch answers the branch delete for branch in the shared git dir.
+// answerBranch answers the apply-time merge check and the branch delete for
+// branch in the shared git dir. git branch --list prints a merged branch with
+// its two-character marker.
 func answerBranch(f *fakeGit, root, branch string) {
+	f.answer("--git-dir "+commonOf(root)+" branch --merged "+originMain+" --list "+branch, "  "+branch+"\n", nil)
 	f.answer("--git-dir "+commonOf(root)+" branch -D "+branch, "", nil)
 }
 
@@ -50,38 +53,34 @@ func branchAction(path, branch string) diskmaint.Action {
 	return diskmaint.Action{Kind: kindDeleteBranch, Ref: path + "#" + branch}
 }
 
-// touches reports whether a recorded command names path as a whole argument.
-func touches(calls []string, path string) bool {
-	for _, c := range calls {
-		if strings.Contains(c, path+" ") || strings.HasSuffix(c, path) {
-			return true
-		}
-	}
-	return false
-}
-
-// TestApplyDryRunRunsNothing is the dry-run rule. Apply has no Policy: a dry run
-// is a Plan with Policy.Apply false, and the caller applies only when it means
-// to. Planning with Apply false issues no worktree removal or branch delete.
+// TestApplyDryRunRunsNothing is the dry-run rule: with Policy.Apply false an
+// Apply issues no worktree removal and no branch command, records its one
+// ledger line, and reports the dry run rather than reading as a clean apply.
 func TestApplyDryRunRunsNothing(t *testing.T) {
 	t.Parallel()
 	root := townRoot(t)
-	a := addCheckout(t, root, "rig-a/crew/overseer-a")
+	path := filepath.Join(root, "rig-a", "crew", "overseer-a")
 	const branch = "polecat/overseer-a/x"
 	f := newFakeGit(t)
-	f.answer("-C "+a+" worktree list --porcelain", listing(porcelainWorktree{a, shaHead, branch}), nil)
-	settle(f, a, branch, shaHead, testNow.Add(-72*time.Hour))
+	l := applyLedger(t)
+	target := NewTarget(Config{Town: root, Rigs: []string{"rig-a"}, Run: f.run, Environ: noRedirect, Ledger: l})
 
-	cfg := Config{Town: root, Rigs: []string{"rig-a"}, Run: f.run, Environ: noRedirect}
-	p, err := NewTarget(cfg).Plan(context.Background(), diskmaint.Policy{Apply: false, Now: testNow})
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
+	res, err := target.Apply(context.Background(), diskmaint.Plan{Target: planTarget, Actions: []diskmaint.Action{
+		removeAction(path),
+		branchAction(path, branch),
+	}})
+	if !errors.Is(err, errDryRun) {
+		t.Fatalf("Apply error = %v, want errDryRun", err)
 	}
-	if len(p.Actions) != 1 || p.Actions[0].Kind != kindRemove {
-		t.Fatalf("plan actions = %+v, want the one removal the dry run would make", p.Actions)
-	}
-	if n := f.callsMatching("worktree remove") + f.callsMatching("branch -D"); n != 0 {
+	if n := f.callsMatching("worktree remove") + f.callsMatching("branch "); n != 0 {
 		t.Fatalf("dry run ran %v, want no removal or branch command", f.calls)
+	}
+	if len(res.Done) != 0 || len(res.Failed) != 0 {
+		t.Fatalf("Result = %+v, want nothing done or failed", res)
+	}
+	entries, err := l.Tail(1)
+	if err != nil || len(entries) != 1 || entries[0].Planned != 2 || entries[0].Done != 0 {
+		t.Fatalf("ledger = %+v (%v), want one line for the dry run", entries, err)
 	}
 }
 
@@ -118,14 +117,20 @@ func TestApplyRefusesPathsOutsideOverseerCrew(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Apply: %v", err)
 			}
-			if touches(f.calls, badPath) {
-				t.Fatalf("a command named the refused path %q: %v", badPath, f.calls)
+			// The exact call list proves it: every command names the good
+			// worktree, so nothing ran for a refused path whatever shape its
+			// text was in (a traversal is not its cleaned form).
+			want := []string{
+				"git -C " + goodPath + " rev-parse --git-common-dir",
+				"git --git-dir " + commonOf(root) + " worktree remove " + goodPath,
+				"git --git-dir " + commonOf(root) + " branch --merged " + originMain + " --list " + goodBranch,
+				"git --git-dir " + commonOf(root) + " branch -D " + goodBranch,
+			}
+			if strings.Join(f.calls, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("calls = %v, want only the good worktree's commands %v", f.calls, want)
 			}
 			if len(res.Done) != 2 || len(res.Failed) != 2 {
 				t.Fatalf("Done %d, Failed %d; want the good pair done and the refused pair failed", len(res.Done), len(res.Failed))
-			}
-			if f.callsMatching("worktree remove") != 1 || f.callsMatching("branch -D "+goodBranch) != 1 {
-				t.Fatalf("calls %v, want the good worktree removed and its branch deleted", f.calls)
 			}
 		})
 	}
@@ -200,7 +205,7 @@ func TestApplyRejectsUnsafeBranchName(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Apply: %v", err)
 			}
-			if n := f.callsMatching("branch -D"); n != 0 {
+			if n := f.callsMatching("branch "); n != 0 {
 				t.Fatalf("calls %v, want no branch command for an unsafe name", f.calls)
 			}
 			if len(res.Failed) != 1 || res.Failed[0].Action.Kind != kindDeleteBranch {
@@ -235,6 +240,7 @@ func TestApplyRemovesWorktreeThenItsBranch(t *testing.T) {
 	want := []string{
 		"git -C " + path + " rev-parse --git-common-dir",
 		"git --git-dir " + commonOf(root) + " worktree remove " + path,
+		"git --git-dir " + commonOf(root) + " branch --merged " + originMain + " --list " + branch,
 		"git --git-dir " + commonOf(root) + " branch -D " + branch,
 	}
 	if strings.Join(f.calls, "\n") != strings.Join(want, "\n") {
@@ -271,6 +277,94 @@ func TestApplyDoesNotDeleteBranchWhenRemovalFailed(t *testing.T) {
 	}
 }
 
+// TestApplyRunsGitWithTheCheckedEnvironment checks that every command an apply
+// launches receives the environment the redirect check read, rather than the
+// process environment: a git run under a list nobody checked could read a
+// GIT_DIR the check never saw.
+func TestApplyRunsGitWithTheCheckedEnvironment(t *testing.T) {
+	t.Parallel()
+	root := townRoot(t)
+	path := filepath.Join(root, "rig-a", "crew", "overseer-a")
+	const branch = "polecat/overseer-a/x"
+	f := newFakeGit(t)
+	answerRemove(f, root, path, nil)
+	answerBranch(f, root, branch)
+
+	_, err := applyTarget(root, f, applyLedger(t)).Apply(context.Background(), diskmaint.Plan{Target: planTarget, Actions: []diskmaint.Action{
+		removeAction(path),
+		branchAction(path, branch),
+	}})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(f.envs) == 0 {
+		t.Fatal("no command ran")
+	}
+	want := strings.Join(noRedirect(), ",")
+	for i, env := range f.envs {
+		if got := strings.Join(env, ","); got != want {
+			t.Fatalf("command %q got environment %q, want %q", f.calls[i], got, want)
+		}
+	}
+}
+
+// TestApplyKeepsABranchThatIsNotMerged checks the apply-time guard: a branch
+// the plan called landed, whose tip origin/main does not hold, is kept. The
+// plan's landed flag is a subject match, so a branch that committed again after
+// its landing would otherwise lose those commits to -D.
+func TestApplyKeepsABranchThatIsNotMerged(t *testing.T) {
+	t.Parallel()
+	root := townRoot(t)
+	path := filepath.Join(root, "rig-a", "crew", "overseer-a")
+	const branch = "polecat/overseer-a/x"
+	f := newFakeGit(t)
+	answerRemove(f, root, path, nil)
+	// git prints nothing for a branch whose tip is not in the target.
+	f.answer("--git-dir "+commonOf(root)+" branch --merged "+originMain+" --list "+branch, "", nil)
+
+	res, err := applyTarget(root, f, applyLedger(t)).Apply(context.Background(), diskmaint.Plan{Target: planTarget, Actions: []diskmaint.Action{
+		removeAction(path),
+		branchAction(path, branch),
+	}})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if n := f.callsMatching("branch -D"); n != 0 {
+		t.Fatalf("calls %v, want the unmerged branch kept", f.calls)
+	}
+	if len(res.Done) != 1 || res.Done[0].Kind != kindRemove {
+		t.Fatalf("Done = %+v, want the worktree removed", res.Done)
+	}
+	if len(res.Failed) != 1 || res.Failed[0].Err != errBranchUnmerged.Error() {
+		t.Fatalf("Failed = %+v, want the kept branch recorded", res.Failed)
+	}
+}
+
+// TestMergedInto reads git branch --list output: a merged branch is printed
+// with its two-character marker, and a name that is only another branch's
+// prefix is not a match.
+func TestMergedInto(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/overseer-a/x"
+	for name, c := range map[string]struct {
+		out  string
+		want bool
+	}{
+		"not current":  {"  " + branch + "\n", true},
+		"current":      {"* " + branch + "\n", true},
+		"prefix only":  {"  " + branch + "-more\n", false},
+		"empty output": {"", false},
+		"another":      {"  polecat/overseer-b/x\n", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := mergedInto([]byte(c.out), branch); got != c.want {
+				t.Fatalf("mergedInto(%q) = %v, want %v", c.out, got, c.want)
+			}
+		})
+	}
+}
+
 // TestApplyAppendsOneLedgerEntry checks that each call appends exactly one line,
 // including a refused plan and an empty one, and that a refused plan runs no
 // command.
@@ -303,8 +397,8 @@ func TestApplyAppendsOneLedgerEntry(t *testing.T) {
 	calls := len(f.calls)
 	if _, err := target.Apply(ctx, diskmaint.Plan{Target: planTarget, Refused: "unreadable worktree state", Actions: []diskmaint.Action{
 		removeAction(path),
-	}}); err != nil {
-		t.Fatalf("Apply refused: %v", err)
+	}}); !errors.Is(err, errPlanRefused) {
+		t.Fatalf("Apply refused: %v, want errPlanRefused", err)
 	}
 	if len(f.calls) != calls {
 		t.Fatalf("a refused plan ran %v, want no command", f.calls[calls:])
@@ -347,6 +441,7 @@ func TestApplyRefusesARedirectedGit(t *testing.T) {
 	f := newFakeGit(t)
 	l := applyLedger(t)
 	target := NewTarget(Config{Town: root, Rigs: []string{"rig-a"}, Run: f.run, Ledger: l,
+		Policy:  diskmaint.Policy{Apply: true},
 		Environ: func() []string { return []string{"GIT_DIR=/elsewhere/.git"} }})
 	_, err := target.Apply(context.Background(), diskmaint.Plan{Target: planTarget, Actions: []diskmaint.Action{removeAction(path)}})
 	if !errors.Is(err, errRedirected) {
@@ -386,12 +481,33 @@ func TestApplyRecordsEachRefusal(t *testing.T) {
 		"the branch delete is refused": {
 			setup: func(f *fakeGit, root, path string) {
 				answerRemove(f, root, path, nil)
+				f.answer("--git-dir "+commonOf(root)+" branch --merged "+originMain+" --list "+branch, "  "+branch+"\n", nil)
 				f.answerErr("--git-dir "+commonOf(root)+" branch -D "+branch, errors.New("exit status 1"))
 			},
 			actions: func(path string) []diskmaint.Action {
 				return []diskmaint.Action{removeAction(path), branchAction(path, branch)}
 			},
 			want: errBranchFailed,
+		},
+		"the branch is not merged": {
+			setup: func(f *fakeGit, root, path string) {
+				answerRemove(f, root, path, nil)
+				f.answer("--git-dir "+commonOf(root)+" branch --merged "+originMain+" --list "+branch, "", nil)
+			},
+			actions: func(path string) []diskmaint.Action {
+				return []diskmaint.Action{removeAction(path), branchAction(path, branch)}
+			},
+			want: errBranchUnmerged,
+		},
+		"whether the branch is merged cannot be read": {
+			setup: func(f *fakeGit, root, path string) {
+				answerRemove(f, root, path, nil)
+				f.answerErr("--git-dir "+commonOf(root)+" branch --merged "+originMain+" --list "+branch, errors.New("exit status 128"))
+			},
+			actions: func(path string) []diskmaint.Action {
+				return []diskmaint.Action{removeAction(path), branchAction(path, branch)}
+			},
+			want: errBranchUnchecked,
 		},
 		"a branch ref with no separator": {
 			setup: func(f *fakeGit, root, path string) { answerRemove(f, root, path, nil) },
@@ -450,7 +566,8 @@ func TestApplyNeedsARunner(t *testing.T) {
 	root := townRoot(t)
 	path := filepath.Join(root, "rig-a", "crew", "overseer-a")
 	l := applyLedger(t)
-	target := NewTarget(Config{Town: root, Rigs: []string{"rig-a"}, Environ: noRedirect, Ledger: l})
+	target := NewTarget(Config{Town: root, Rigs: []string{"rig-a"}, Environ: noRedirect,
+		Policy: diskmaint.Policy{Apply: true}, Ledger: l})
 	_, err := target.Apply(context.Background(), diskmaint.Plan{Target: planTarget, Actions: []diskmaint.Action{removeAction(path)}})
 	if !errors.Is(err, errNoRunner) {
 		t.Fatalf("Apply error = %v, want errNoRunner", err)

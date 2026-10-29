@@ -88,8 +88,12 @@ type Config struct {
 	Run diskmaint.Runner
 	// Environ returns the environment as NAME=value entries; nil reads the
 	// process environment. A test passes a fixed list so the result does not
-	// depend on the host.
+	// depend on the host. It is also the environment every git run receives, so
+	// the list that is checked is the list that is used.
 	Environ func() []string
+	// Policy is the run's limits. Its Apply flag is the dry-run gate: the zero
+	// value is a dry run, so a target built without one removes nothing.
+	Policy diskmaint.Policy
 	// Ledger records an apply. The planner never writes to it.
 	Ledger *diskmaint.Ledger
 }
@@ -390,8 +394,14 @@ func countLines(out []byte) int {
 
 // git runs git with -C dir and args, and returns its stdout.
 func (t *Target) git(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	return t.gitEnv(ctx, t.environ(), dir, args...)
+}
+
+// gitEnv runs git with -C dir and args under env, which the caller checked for
+// redirecting variables.
+func (t *Target) gitEnv(ctx context.Context, env []string, dir string, args ...string) ([]byte, error) {
 	argv := make([]string, 0, 2+len(args))
 	argv = append(argv, "-C", dir)
 	argv = append(argv, args...)
-	return t.cfg.Run(ctx, nil, "git", argv...)
+	return t.cfg.Run(ctx, env, "git", argv...)
 }
