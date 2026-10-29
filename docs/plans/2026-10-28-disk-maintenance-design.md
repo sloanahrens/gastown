@@ -110,8 +110,10 @@ So the planner works on digests:
    is the one source for that commit); the digest of every image a running
    sandbox pod uses, by `imageID` and also by the tag its container `image`
    field names (an `imageID` can be a config digest or a bare image id, so the
-   tag is resolved through the registry too when it names `gastown-polecat` or a stray repo, the only repos a delete can touch: the cluster's own images are not resolved); and the digests of the newest
-   `KEEP` candidate tags by manifest creation time (default 5). If `dev` is
+   tag is resolved through the registry too when it names `gastown-polecat` or
+   a stray repo, the only repos a delete can touch; the cluster's own images are
+   not resolved); and the digests of the newest `KEEP` candidate tags by
+   manifest creation time (default 5). If `dev` is
    absent from `gastown-polecat`, the plan refuses: a registry without `dev` is
    mid-rebuild or broken, and a prune would have nothing to anchor on.
 3. A manifest is deleted only when its digest is outside the keep set. Because
