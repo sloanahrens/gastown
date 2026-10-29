@@ -57,8 +57,9 @@ func TestToleratedTierSweepKeysDecode(t *testing.T) {
 
 // The warning is one line per key per process, whichever file names the key
 // and wherever in the file it sits.
+//
+//testpolicy:allow parallel — it reads and resets the process-wide record of named keys, so no other test may name one while it runs
 func TestToleratedTierSweepKeyWarnsOncePerProcess(t *testing.T) {
-	// Not parallel: it reads and resets the process-wide record of named keys.
 	forgetToleratedKeyWarnings()
 	t.Cleanup(forgetToleratedKeyWarnings)
 
