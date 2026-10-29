@@ -201,6 +201,8 @@ func TestRecordFlagFile(t *testing.T) {
 		"persistent\t--actor --db --directory -C",
 		"alias\tbackup add\tbackup init",
 		"alias\tnew\tcreate",
+		"operand\tclose\t[issue-id...]",
+		"operand\tcreate\t[title]",
 		"value\tbackup init\t--remote",
 		"value\tclose\t--reason -r",
 		"value\tcreate\t--assignee --deps --estimate --file --labels --title -a -e -f -l",
@@ -216,6 +218,35 @@ func TestRecordFlagFile(t *testing.T) {
 	}, "\n")
 	if got := rowsOf(t, body); got != want {
 		t.Errorf("RecordFlagFile rows =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestPositionals: the placeholders of a usage line are the operands bd names,
+// stopping at the first flag, so a value flag's placeholder is not an operand.
+func TestPositionals(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		usage string
+		depth int
+		want  string
+	}{
+		{"a command with an operand", "bd show [id...] [--id=<id>...] [flags]", 1, "[id...]"},
+		{"two operands", "bd dep add [issue-id] [depends-on-id] [flags]", 2, "[issue-id] [depends-on-id]"},
+		{"a bare flag list", "bd list [flags]", 1, ""},
+		{"a subcommand list", "bd backup [command]", 1, ""},
+		{"a value flag before the operands ends them", "bd migrate legacy-sqlite --source-db PATH --output PATH|- [flags]", 2, ""},
+		{"an operand after a path word", "bd worktree create <name> [--branch=<branch>] [flags]", 2, "<name>"},
+		{"a quoted operand", `bd remember "<insight>" [flags]`, 1, `"<insight>"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := strings.Join(positionals(strings.Fields(tc.usage)[1:], tc.depth), " ")
+			if got != tc.want {
+				t.Errorf("positionals(%q) = %q, want %q", tc.usage, got, tc.want)
+			}
+		})
 	}
 }
 

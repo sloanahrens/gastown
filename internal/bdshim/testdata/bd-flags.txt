@@ -8,6 +8,9 @@
 # persistent<TAB>the value flags bd puts on every command (bd --help, Flags:),
 #     left out of each command row because every command has them
 # alias<TAB><name><TAB>the command path bd reads that name as ("new" is create)
+# operand<TAB><command><TAB>the positional placeholders of the command's usage
+#     line, space separated and in order ("[id...]", "[title]"); a command
+#     whose usage names none has no row
 # value<TAB><command><TAB>the flags bd reads a value for, space separated
 # bool<TAB><command><TAB>the flags bd reads as a boolean or an optional value
 #     here (--deps takes its value only after an =) although another command
@@ -25,6 +28,118 @@ alias	new	create
 alias	protomolecule	mol
 alias	stats	status
 alias	view	show
+operand	assign	<id> <name>
+operand	audit label	<entry-id>
+operand	backup init	<path>
+operand	backup restore	[path]
+operand	branch	[name]
+operand	children	<parent-id>
+operand	close	[id...]
+operand	comment	<id> [text...]
+operand	comments	[issue-id]
+operand	comments add	[issue-id] [text...]
+operand	config get	<key>
+operand	config set	<key> <value>
+operand	config set-many	<key=value>...
+operand	config unset	<key>
+operand	conflicts resolve	[<issue-id>...]
+operand	conflicts show	[<issue-id>]
+operand	cook	<formula-file>
+operand	create	[title]
+operand	defer	[id...]
+operand	delete	<issue-id> [issue-id...]
+operand	dep	[issue-id]
+operand	dep add	[issue-id] [depends-on-id]
+operand	dep list	[issue-id...]
+operand	dep relate	<id1> <id2>
+operand	dep remove	[issue-id] [depends-on-id]
+operand	dep tree	[issue-id]
+operand	dep unrelate	<id1> <id2>
+operand	diff	<from-ref> <to-ref>
+operand	doctor	[path]
+operand	dolt remote add	<name> <url>
+operand	dolt remote remove	<name>
+operand	dolt remote reset-data	<name>
+operand	dolt set	<key> <value>
+operand	duplicate	<id>
+operand	forget	<key>
+operand	formula convert	<formula-name|path>
+operand	formula lint	<path|dir>
+operand	formula schema	[primitive]
+operand	formula show	<formula-name>
+operand	gate add-waiter	<gate-id> <waiter>
+operand	gate list	[issue-id]
+operand	gate resolve	<gate-id>
+operand	gate show	<gate-id>
+operand	graph	[issue-id]
+operand	heartbeat	<id>
+operand	history	<id>
+operand	hooks run	<hook-name> [args...]
+operand	human dismiss	<issue-id> [reason...]
+operand	human respond	<issue-id> [response...]
+operand	import	[file|-]
+operand	kv clear	<key>
+operand	kv get	<key>
+operand	kv set	<key> <value>
+operand	label add	[issue-id...] [label[,label...]]
+operand	label list	[issue-id]
+operand	label propagate	[parent-id] [label]
+operand	label remove	[issue-id...] [label[,label...]]
+operand	land-record	<id>
+operand	link	<id1> <id2>
+operand	lint	[issue-id...]
+operand	mail	[subcommand] [args...]
+operand	memories	[search]
+operand	migrate hooks	[path]
+operand	migrate sync	<branch>
+operand	mol bond	<A> <B>
+operand	mol burn	<molecule-id> [molecule-id...]
+operand	mol current	[molecule-id]
+operand	mol distill	<epic-id> [formula-name]
+operand	mol last-activity	<molecule-id>
+operand	mol pour	<proto-id>
+operand	mol progress	[molecule-id]
+operand	mol seed	<formula-name>
+operand	mol show	<molecule-id>
+operand	mol squash	<molecule-id>
+operand	mol wisp	[proto-id]
+operand	mol wisp create	<proto-id>
+operand	note	<id> [text...]
+operand	priority	<id> <n>
+operand	promote	<wisp-id>
+operand	provenance by-ref	<ref>
+operand	provenance log	<issue-id>
+operand	q	[title]
+operand	query	[expression]
+operand	recall	<key>
+operand	remember	"<insight>"
+operand	rename	<old-id> <new-id>
+operand	rename-prefix	<new-prefix>
+operand	reopen	[id...]
+operand	repo add	<path>
+operand	repo remove	<path>
+operand	restore	<issue-id>
+operand	search	[query]
+operand	set-state	<issue-id> <dimension>=<value>
+operand	setup	[recipe]
+operand	ship	<capability>
+operand	show	[id...]
+operand	sql	<query>
+operand	state	<issue-id> <dimension>
+operand	state list	<issue-id>
+operand	supersede	<id>
+operand	swarm create	[epic-id]
+operand	swarm status	[epic-or-swarm-id]
+operand	swarm validate	[epic-id]
+operand	tag	<id> <label>
+operand	todo add	<title>
+operand	todo done	<id> [<id>...]
+operand	unclaim	[id...]
+operand	undefer	[id...]
+operand	update	[id...]
+operand	vc merge	<branch>
+operand	worktree create	<name>
+operand	worktree remove	<name>
 value	admin cleanup	--older-than
 value	admin compact	--batch-size --id --limit --summary --tier --workers
 value	audit label	--label --reason
