@@ -71,7 +71,7 @@ func dashPolecatHints(rig, name, bead, state string) []string {
 		return []string{"gt polecat status " + who, "gt polecat check-recovery " + who}
 	case dashboard.StateRecovery, dashboard.StateReviewNeeded:
 		return []string{"gt polecat check-recovery " + who, "gt polecat nuke " + who + " --dry-run"}
-	case dashboard.StateNeedsHuman:
+	case dashboard.StateNeedsHuman, dashboard.StateNeedsOverseer, dashboard.StateNeedsOperator:
 		if bead != "" {
 			return []string{"bd show " + bead}
 		}

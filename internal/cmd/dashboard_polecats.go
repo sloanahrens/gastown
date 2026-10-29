@@ -68,7 +68,10 @@ func (l *dashLandings) get() []omRecord {
 
 // dashLabelsShown are the labels worth a badge: the ones that say a bead is
 // waiting on someone or somewhere, not the bookkeeping ones.
-var dashLabelsShown = map[string]bool{"needs-human": true, "deferred": true, "failed": true}
+var dashLabelsShown = map[string]bool{
+	"needs-human": true, "needs-overseer": true, "needs-operator": true,
+	"deferred": true, "failed": true,
+}
 
 func dashBadgeLabels(labels []string) []string {
 	var out []string
@@ -135,12 +138,15 @@ type dashPolecatInputs struct {
 
 // dashPolecatState maps the town's inventory state to the dashboard's. The
 // inventory decides; the dashboard adds only what the inventory cannot see: a
-// bead the queue says is waiting to land, and a bead labeled for a human.
+// bead the queue says is waiting to land, and the person label its bead
+// carries. The person branch names the label, so the row says which person must
+// act (gt-slmaz); a bead carrying two of the labels reads as the first step,
+// the overseer's.
 func dashPolecatState(item polecatInventoryItem, hasWork, ready bool, labels []string) (state, reason string) {
 	d := item.Disposition
 	switch {
 	case hasWork && hasAnyLabel(labels, "needs-human", "gt:needs-human", "needs-overseer", "gt:needs-overseer", "needs-operator", "gt:needs-operator"):
-		return dashboard.StateNeedsHuman, "the bead is labeled for a person"
+		return dashPersonState(labels)
 	case hasWork && ready:
 		return dashboard.StateQueued, "submitted for landing"
 	}
@@ -163,6 +169,20 @@ func dashPolecatState(item polecatInventoryItem, hasWork, ready bool, labels []s
 		return dashboard.StateRecovery, d.Reason
 	}
 	return dashboard.StateIdle, ""
+}
+
+// dashPersonState names the person a person label points at, so the row says
+// who must act rather than that someone must (gt-slmaz): the overseer's label
+// first, then the operator's, and the old needs-human label a bead may still
+// carry (gt-zjel5) reads as the person hold it always has.
+func dashPersonState(labels []string) (state, reason string) {
+	switch {
+	case hasAnyLabel(labels, "needs-overseer", "gt:needs-overseer"):
+		return dashboard.StateNeedsOverseer, "the bead is labeled needs-overseer"
+	case hasAnyLabel(labels, "needs-operator", "gt:needs-operator"):
+		return dashboard.StateNeedsOperator, "the bead is labeled needs-operator"
+	}
+	return dashboard.StateNeedsHuman, "the bead is labeled needs-human"
 }
 
 // dashPolecatStateSince is when a seat entered the state it is in, for the one
@@ -326,7 +346,7 @@ func hasAnyLabel(labels []string, want ...string) bool {
 // dashStateRank orders the table: what needs a look first, idle last.
 func dashStateRank(state string) int {
 	switch state {
-	case dashboard.StateNeedsHuman:
+	case dashboard.StateNeedsHuman, dashboard.StateNeedsOverseer, dashboard.StateNeedsOperator:
 		return 0
 	case dashboard.StateStalled, dashboard.StateUnknown:
 		return 1

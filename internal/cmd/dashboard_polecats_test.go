@@ -38,8 +38,8 @@ func TestDashPolecatStateFollowsTheInventory(t *testing.T) {
 		"stalled":     {dashItem(polecat.StateStalled, polecat.WorkstateDisposition{}), true, false, nil, dashboard.StateStalled},
 		"review":      {dashItem(polecat.StateReviewNeeded, polecat.WorkstateDisposition{}), false, false, nil, dashboard.StateReviewNeeded},
 		"human":       {dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), true, true, []string{"gt:needs-human"}, dashboard.StateNeedsHuman},
-		"overseer":    {dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), true, true, []string{"gt:needs-overseer"}, dashboard.StateNeedsHuman},
-		"operator":    {dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), true, true, []string{"gt:needs-operator"}, dashboard.StateNeedsHuman},
+		"overseer":    {dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), true, true, []string{"gt:needs-overseer"}, dashboard.StateNeedsOverseer},
+		"operator":    {dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), true, true, []string{"gt:needs-operator"}, dashboard.StateNeedsOperator},
 		"parked":      {dashItem(polecat.StateIdle, parked), false, false, nil, dashboard.StateParked},
 		"recovery":    {dashItem(polecat.StateIdle, recovery), false, false, nil, dashboard.StateRecovery},
 		"idle":        {dashItem(polecat.StateIdle, polecat.WorkstateDisposition{Reusable: true}), false, false, nil, dashboard.StateIdle},
@@ -49,6 +49,33 @@ func TestDashPolecatStateFollowsTheInventory(t *testing.T) {
 		got, _ := dashPolecatState(c.item, c.work, c.ready, c.labels)
 		if got != c.want {
 			t.Errorf("%s: state = %q, want %q", name, got, c.want)
+		}
+	}
+}
+
+// The row says which person must act: a bead labeled needs-overseer or
+// needs-operator reads as that label with its own text rather than as
+// needs-human, and a bead carrying two of the labels reads as the first step,
+// the overseer's (gt-slmaz).
+func TestNeedsOverseerDashPolecatStateNamesThePersonLabel(t *testing.T) {
+	t.Parallel()
+	working := dashItem(polecat.StateWorking, polecat.WorkstateDisposition{})
+	for _, tc := range []struct {
+		name   string
+		labels []string
+		want   string
+		reason string
+	}{
+		{"the old label", []string{"gt:needs-human"}, dashboard.StateNeedsHuman, "the bead is labeled needs-human"},
+		{"the overseer", []string{"gt:needs-overseer"}, dashboard.StateNeedsOverseer, "the bead is labeled needs-overseer"},
+		{"the operator", []string{"gt:needs-operator"}, dashboard.StateNeedsOperator, "the bead is labeled needs-operator"},
+		{"the bare spellings", []string{"needs-operator"}, dashboard.StateNeedsOperator, "the bead is labeled needs-operator"},
+		{"two labels read as the overseer's step", []string{"gt:needs-human", "gt:needs-operator", "gt:needs-overseer"},
+			dashboard.StateNeedsOverseer, "the bead is labeled needs-overseer"},
+	} {
+		got, reason := dashPolecatState(working, true, false, tc.labels)
+		if got != tc.want || reason != tc.reason {
+			t.Errorf("%s: %q %q, want %q %q", tc.name, got, reason, tc.want, tc.reason)
 		}
 	}
 }

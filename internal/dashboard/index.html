@@ -87,7 +87,7 @@ td.n,th.n{text-align:right}
 tr.live{background:#101a13}
 .badge{padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid currentColor;white-space:nowrap}
 .st-working{color:var(--green)}.st-gating{color:var(--violet)}.st-queued{color:var(--blue)}
-.st-needs-human{color:var(--red)}.st-quiet{color:var(--amber)}.st-stalled{color:var(--red)}.st-review-needed,.st-recovery{color:var(--amber)}.st-spawning{color:var(--teal)}.st-parked,.st-idle,.st-unknown{color:var(--dim)}
+.st-needs-human,.st-needs-overseer,.st-needs-operator{color:var(--red)}.st-quiet{color:var(--amber)}.st-stalled{color:var(--red)}.st-review-needed,.st-recovery{color:var(--amber)}.st-spawning{color:var(--teal)}.st-parked,.st-idle,.st-unknown{color:var(--dim)}
 .tag.p0,.tag.p1{color:var(--red)}.tag.p2{color:var(--amber)}.tag.p3,.tag.p4{color:var(--dim)}
 .cmd{display:inline-block;margin:2px 6px 0 0;padding:0 6px;border:1px solid var(--line);border-radius:4px;color:var(--dim);background:none;font:inherit;font-size:11px;cursor:pointer;text-align:left}
 .cmd:hover{color:var(--text);border-color:var(--dim)}.cmd.done{color:var(--green);border-color:var(--green)}
@@ -516,8 +516,8 @@ let state = null;
 // states this page has never seen the moment the town learns one, so no state
 // is dropped: one in neither table is counted as a state this page does not
 // know, and which of them alarm is the reader's own verdict (StripAlarms).
-const POLE_WORKING = {working: 1, quiet: 1, gating: 1, queued: 0, spawning: 0, stalled: 0, "review-needed": 0, recovery: 0, "needs-human": 0, parked: 0, idle: 0, unknown: 0};
-const POLE_WORD = {queued: "queued", spawning: "spawning", stalled: "stalled", "review-needed": "need review", recovery: "recovering", "needs-human": "need a human", parked: "parked", unknown: "unknown (tmux unreadable)", quiet: "quiet"};
+const POLE_WORKING = {working: 1, quiet: 1, gating: 1, queued: 0, spawning: 0, stalled: 0, "review-needed": 0, recovery: 0, "needs-human": 0, "needs-overseer": 0, "needs-operator": 0, parked: 0, idle: 0, unknown: 0};
+const POLE_WORD = {queued: "queued", spawning: "spawning", stalled: "stalled", "review-needed": "need review", recovery: "recovering", "needs-human": "need a human", "needs-overseer": "need the overseer", "needs-operator": "need the operator", parked: "parked", unknown: "unknown (tmux unreadable)", quiet: "quiet"};
 // polecatsWorking is the strip's working count and the Work section's summary:
 // the live polecats whose state is work in progress. A parked rig holds nothing
 // and is counted nowhere, so both readers take their number from here.
@@ -829,7 +829,9 @@ const STATE_HELP = {
   working: "holds a bead and its session is producing output",
   gating: "its bead is being gated and om-reviewed by the landing worker",
   queued: "its bead is submitted and waiting to land",
-  "needs-human": "its bead is waiting on an operator",
+  "needs-human": "its bead carries the old needs-human label",
+  "needs-overseer": "its bead is labeled needs-overseer: the overseer acts or vets first",
+  "needs-operator": "its bead is labeled needs-operator: only the operator can settle it",
   quiet: "its session has been silent for 10 minutes or more",
   stalled: "has assigned work and no live session: nothing is doing it",
   spawning: "dispatched seconds ago, session not up yet",
@@ -1064,8 +1066,8 @@ function workRow(names, p, now) {
 // this table does not name draws with the live seats, last, so a state added
 // later is seen rather than hidden.
 const WORK_RANK = {working: 0, spawning: 1, queued: 2, gating: 3, quiet: 4,
-  "needs-human": 5, stalled: 6, unknown: 7, recovery: 8, "review-needed": 9};
-const WORK_LOOK = new Set(["needs-human", "stalled", "unknown", "recovery", "review-needed"]);
+  "needs-human": 5, "needs-overseer": 5, "needs-operator": 5, stalled: 6, unknown: 7, recovery: 8, "review-needed": 9};
+const WORK_LOOK = new Set(["needs-human", "needs-overseer", "needs-operator", "stalled", "unknown", "recovery", "review-needed"]);
 const workRank = p => WORK_RANK[p.state] == null ? 10 : WORK_RANK[p.state];
 
 // workSeats draws the seats in the table: the live seats first in rank order,

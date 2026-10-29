@@ -461,8 +461,9 @@ func TestWriteTownHealth_NeedsHumanCountsOnlyPendingBeads(t *testing.T) {
 	}
 }
 
-// A landing held for a person counts under whichever person label holds it,
-// and a bead carrying two of them counts once (gt-zjel5).
+// A landing held for a person is reported under the label that holds it, so
+// the health line names the person who must act, and a bead carrying two of
+// the labels counts once (gt-zjel5, gt-slmaz).
 func TestWriteTownHealth_NeedsHumanCountsEveryPersonLabel(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -473,19 +474,23 @@ func TestWriteTownHealth_NeedsHumanCountsEveryPersonLabel(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		labels map[string][]*beads.Issue
-		want   string
+		// want is the value of each person field the case should report; a
+		// field it does not name reads as a green zero, never as absent.
+		want map[string]string
 	}{
-		{"an overseer hold", map[string][]*beads.Issue{land.LabelNeedsOverseer: {bead("gt-3")}}, "1"},
-		{"an operator hold", map[string][]*beads.Issue{land.LabelNeedsOperator: {bead("gt-4")}}, "1"},
+		{"an overseer hold", map[string][]*beads.Issue{land.LabelNeedsOverseer: {bead("gt-3")}},
+			map[string]string{"needs-overseer": "1"}},
+		{"an operator hold", map[string][]*beads.Issue{land.LabelNeedsOperator: {bead("gt-4")}},
+			map[string]string{"needs-operator": "1"}},
 		{"a bead under two person labels", map[string][]*beads.Issue{
 			land.LabelNeedsHuman:    {bead("gt-5")},
 			land.LabelNeedsOverseer: {bead("gt-5")},
-		}, "1"},
+		}, map[string]string{"needs-overseer": "1"}},
 		{"one bead under each label", map[string][]*beads.Issue{
 			land.LabelNeedsHuman:    {bead("gt-6")},
 			land.LabelNeedsOverseer: {bead("gt-7")},
 			land.LabelNeedsOperator: {bead("gt-8")},
-		}, "3"},
+		}, map[string]string{"needs-human": "1", "needs-overseer": "1", "needs-operator": "1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -499,8 +504,18 @@ func TestWriteTownHealth_NeedsHumanCountsEveryPersonLabel(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := healthField(t, r, "needs-human"); got.Value != tc.want {
-				t.Errorf("needs-human = %q, want %q", got.Value, tc.want)
+			for _, key := range []string{"needs-human", "needs-overseer", "needs-operator"} {
+				got := healthField(t, r, key)
+				want, ok := tc.want[key]
+				if !ok {
+					want = "0"
+				}
+				if got.Value != want {
+					t.Errorf("%s = %q, want %q", key, got.Value, want)
+				}
+				if !ok && got.Verdict != townhealth.Green {
+					t.Errorf("%s = %+v; no bead holds it, so it reads green", key, got)
+				}
 			}
 		})
 	}
@@ -526,6 +541,54 @@ func TestWriteTownHealth_NeedsHumanFailedReadIsUnknown(t *testing.T) {
 				t.Errorf("needs-human = %+v, want UNKNOWN", got)
 			}
 		})
+	}
+}
+
+// A cancelled health computation reads no label: the person waits come back as
+// the context error rather than as a report of nobody waiting (gt-slmaz).
+func TestWriteTownHealth_NeedsHumanStopsOnACancelledContext(t *testing.T) {
+	t.Parallel()
+	d, _ := healthTown(t, time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (&healthSources{d: d}).NeedsHuman(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+// cancelOnList is a bead reader that cancels the context the moment it is first
+// read and answers every read with one waiting bead, so a health read can be
+// cancelled while it is part way through the rigs it walks.
+type cancelOnList struct {
+	cancel func()
+}
+
+func (c *cancelOnList) Show(string) (*beads.Issue, error) { return nil, errors.New("not used") }
+func (c *cancelOnList) List(beads.ListOptions) ([]*beads.Issue, error) {
+	c.cancel()
+	return []*beads.Issue{{ID: "gt-waiting", Status: "open"}}, nil
+}
+
+// A cancellation that lands while the rigs are being read stops the read with
+// the context error, not with the counts it had gathered so far: with two
+// landing rigs and the cancel arriving during the first one's read, the answer
+// is the error and never a count of the one rig that was read (gt-slmaz). The
+// test asserts that outcome, not how often the context is consulted.
+func TestWriteTownHealth_NeedsHumanStopsBetweenRigs(t *testing.T) {
+	t.Parallel()
+	d, _ := healthTown(t, time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC))
+	writeJSONFile(t, filepath.Join(d.config.TownRoot, "mayor", "rigs.json"),
+		map[string]any{"version": 1, "rigs": map[string]any{"gastown": map[string]any{}, "other": map[string]any{}}})
+	d.invalidateKnownRigsCache()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.openWorkBeads = func([]string, time.Duration) workBeadReader { return &cancelOnList{cancel: cancel} }
+	if rigs := (&healthSources{d: d}).landingRigs(); len(rigs) != 2 {
+		t.Fatalf("the fixture has landing rigs %v, want two so a cancel can land between them", rigs)
+	}
+	got, err := (&healthSources{d: d}).NeedsHuman(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("NeedsHuman = %+v, %v; want the context error, not the count of the rig read before the cancel", got, err)
 	}
 }
 

@@ -101,7 +101,12 @@ const (
 	FieldMain       = "main"
 	FieldConfig     = "config"
 	FieldNeedsHuman = "needs-human"
-	FieldSeat       = "seat"
+	// FieldNeedsOverseer and FieldNeedsOperator name a person hold by the label
+	// that holds it, so the line and the pill say which person must act
+	// (gt-slmaz).
+	FieldNeedsOverseer = "needs-overseer"
+	FieldNeedsOperator = "needs-operator"
+	FieldSeat          = "seat"
 	// FieldPromote is how far a promoting rig's GitHub main is behind its
 	// green main (gt-fn9e6.39).
 	FieldPromote = "promote"
@@ -491,9 +496,25 @@ type Config interface {
 	Validate() error
 }
 
-// NeedsHuman counts beads waiting on the operator and finds the oldest.
+// PersonWait is the beads waiting on a person under one label: how many, and
+// when the oldest of them started waiting.
+type PersonWait struct {
+	// Label names the wait in the line and the pill: one of the person field
+	// names, FieldNeedsHuman, FieldNeedsOverseer or FieldNeedsOperator.
+	Label string
+	// Count is how many beads wait under that label. The source reports a bead
+	// carrying two person labels once, under one of them.
+	Count int
+	// Oldest is when the oldest waiting bead was created; zero when no bead
+	// waits or its age is unknown.
+	Oldest time.Time
+}
+
+// NeedsHuman reports the beads waiting on the person behind them, one entry
+// per person label, so a hold the landing left for the overseer reads as
+// needs-overseer rather than as the old needs-human (gt-slmaz).
 type NeedsHuman interface {
-	NeedsHuman(ctx context.Context) (count int, oldest time.Time, err error)
+	NeedsHuman(ctx context.Context) ([]PersonWait, error)
 }
 
 // Seat is one seat's intent record as stall evidence.
@@ -641,7 +662,8 @@ func Compute(ctx context.Context, in Inputs) Report {
 	r.Fields = append(r.Fields, escalation(ctx, in), slot(in), backup(in))
 	r.Fields = append(r.Fields, mains(in)...)
 	r.Fields = append(r.Fields, promotions(in)...)
-	r.Fields = append(r.Fields, config(in), needsHuman(ctx, in))
+	r.Fields = append(r.Fields, config(in))
+	r.Fields = append(r.Fields, needsHuman(ctx, in)...)
 	r.Fields = append(r.Fields, seats(in)...)
 	r.Fields = append(r.Fields, dispatch(in))
 	r.Fields = append(r.Fields, infra(in)...)
@@ -1169,20 +1191,53 @@ func config(in Inputs) Field {
 	return Field{Name: FieldConfig, Tag: Live, Verdict: Green, Value: "valid"}
 }
 
-func needsHuman(ctx context.Context, in Inputs) Field {
+// personFields are the person fields in the order they render.
+var personFields = []string{FieldNeedsOverseer, FieldNeedsOperator, FieldNeedsHuman}
+
+// needsHuman renders one field per person label, every time, named by the
+// label, so the line and the pill say which person must act (gt-slmaz). A
+// label with nothing waiting is a green zero, not a missing field: a consumer
+// that reads an absent field as healthy would miss a hold under that label.
+func needsHuman(ctx context.Context, in Inputs) []Field {
 	if in.NeedsHuman == nil {
-		return unknown(FieldNeedsHuman, "", "", errNotWired)
+		return unknownPersonFields(errNotWired)
 	}
-	n, oldest, err := in.NeedsHuman.NeedsHuman(ctx)
+	waits, err := in.NeedsHuman.NeedsHuman(ctx)
 	if err != nil {
-		return unknown(FieldNeedsHuman, "", "", err)
+		return unknownPersonFields(err)
 	}
-	if n == 0 {
-		return Field{Name: FieldNeedsHuman, Tag: Live, Verdict: Green, Value: "0"}
+	byLabel := make(map[string]PersonWait, len(waits))
+	for _, w := range waits {
+		byLabel[w.Label] = w
 	}
-	f := Field{Name: FieldNeedsHuman, Tag: Live, Verdict: Degraded, Value: fmt.Sprintf("%d", n), Detail: fmt.Sprintf("%d waiting on the operator", n)}
-	if !oldest.IsZero() {
-		age := in.Now.Sub(oldest)
+	out := make([]Field, 0, len(personFields))
+	for _, label := range personFields {
+		if w := byLabel[label]; w.Count > 0 {
+			out = append(out, personWait(w, in))
+			continue
+		}
+		out = append(out, Field{Name: label, Tag: Live, Verdict: Green, Value: "0"})
+	}
+	return out
+}
+
+// unknownPersonFields is every person field UNKNOWN: a failed read does not
+// say which label it failed on, so none of the three reads as nobody waiting.
+func unknownPersonFields(err error) []Field {
+	out := make([]Field, 0, len(personFields))
+	for _, label := range personFields {
+		out = append(out, unknown(label, "", "", err))
+	}
+	return out
+}
+
+// personWait is one label's field: its count, how long the oldest has waited
+// and the verdict that age earns.
+func personWait(w PersonWait, in Inputs) Field {
+	f := Field{Name: w.Label, Tag: Live, Verdict: Degraded, Value: strconv.Itoa(w.Count),
+		Detail: fmt.Sprintf("%d waiting on a person", w.Count)}
+	if !w.Oldest.IsZero() {
+		age := in.Now.Sub(w.Oldest)
 		f.Verdict = f.Verdict.Worse(in.Thresholds.NeedsHuman.judge(age))
 		f.Detail += ", oldest " + Short(age)
 	}

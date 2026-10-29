@@ -207,6 +207,23 @@ func TestPolecatAlertsOnNewStallOnly(t *testing.T) {
 	}
 }
 
+// gt-slmaz: the two labels that name who must act are the same news as the old
+// one: a polecat newly held under either alerts once, on its own polecat key.
+func TestPolecatAlertsOnNeedsOverseerAndOperator(t *testing.T) {
+	t.Parallel()
+	working := Polecat{Rig: "gastown", Name: "agate", Bead: "gt-1", Title: "some work", State: StateWorking}
+	for _, state := range []string{StateNeedsOverseer, StateNeedsOperator} {
+		held := working
+		held.State = state
+		a := NewAlerter(func() time.Time { return alertBase })
+		a.Observe(State{}, State{Polecats: []Polecat{working}}, nil)
+		got := a.Observe(State{Polecats: []Polecat{working}}, State{Polecats: []Polecat{held}}, nil)
+		if len(got) != 1 || got[0].Key != "polecat:gastown/agate" || got[0].Level != LevelWarn {
+			t.Fatalf("newly %s -> %+v, want one warn on the polecat key", state, got)
+		}
+	}
+}
+
 // A rising escalation count is critical; the first count is a baseline.
 func TestEscalationIncreaseAlerts(t *testing.T) {
 	t.Parallel()
