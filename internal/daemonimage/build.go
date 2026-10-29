@@ -290,12 +290,13 @@ func (b Builder) checkImageBinaries(bins []string) error {
 }
 
 // dockerEnvKeys names the host variables the image build runs with: those that
-// find the docker CLI and read its config, plus the proxy and CA settings a pull
-// through a proxy needs. bdbuild.Env's compile settings stay out, and so do
+// find the docker CLI and read its config (DOCKER_CONFIG holds the registry
+// logins a base-image pull needs), plus the proxy and CA settings a pull through
+// a proxy needs. bdbuild.Env's compile settings stay out, and so do
 // DOCKER_CONTEXT and DOCKER_HOST: the build names its context in argv, so a
 // shell's choice of engine cannot reach it.
 var dockerEnvKeys = map[string]bool{
-	"PATH": true, "HOME": true, "TMPDIR": true,
+	"PATH": true, "HOME": true, "TMPDIR": true, "DOCKER_CONFIG": true,
 	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
 	"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
 	"http_proxy": true, "https_proxy": true, "no_proxy": true,

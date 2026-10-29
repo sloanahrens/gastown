@@ -2,6 +2,7 @@ package daemonimage
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -38,14 +39,26 @@ func imageBinaries(b Builder) []string {
 }
 
 // repoFile returns the absolute path of a file of the repo this package lives
-// in, named relative to its root.
+// in, named relative to its root. The root is the nearest directory above the
+// package that holds this module's go.mod, so the path does not depend on how
+// many directories deep the package sits.
 func repoFile(t *testing.T, rel string) string {
 	t.Helper()
-	abs, err := filepath.Abs(filepath.Join("..", "..", rel))
+	dir, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("resolving %s: %v", rel, err)
+		t.Fatalf("finding the package directory: %v", err)
 	}
-	return abs
+	for {
+		body, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		if err == nil && strings.HasPrefix(string(body), "module github.com/steveyegge/gastown\n") {
+			return filepath.Join(dir, rel)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("no go.mod for github.com/steveyegge/gastown above %s", dir)
+		}
+		dir = parent
+	}
 }
 
 // TestBuildImageRecordsTheDockerBuild: the image is built by one docker call in
@@ -158,12 +171,12 @@ func TestBuildImageRunsWithTheDockerEnvironment(t *testing.T) {
 	t.Parallel()
 	b, run := imageBuilder(t)
 	b.Environ = append(append([]string(nil), testEnv...),
-		"GOCACHE=/cache/go", "DOCKER_HOST=tcp://elsewhere:2375")
+		"GOCACHE=/cache/go", "DOCKER_HOST=tcp://elsewhere:2375", "DOCKER_CONFIG=/home/builder/.docker")
 	if _, err := b.BuildImage(context.Background(), testRev, imageBinaries(b)); err != nil {
 		t.Fatalf("BuildImage: %v", err)
 	}
 	env := run.calls[0].env
-	for _, want := range []string{"PATH=/usr/bin:/bin", "HOME=/home/builder"} {
+	for _, want := range []string{"PATH=/usr/bin:/bin", "HOME=/home/builder", "DOCKER_CONFIG=/home/builder/.docker"} {
 		if !contains(env, want) {
 			t.Errorf("build env = %q, want %s carried through", env, want)
 		}
@@ -195,15 +208,13 @@ func TestDaemonDockerfileHasNoBuildStep(t *testing.T) {
 }
 
 // TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages: the image is
-// config, so no instruction downloads or installs anything over the network and
-// the one RUN is the apt install of ca-certificates, git and tmux. The Dolt
-// client arrives by COPY from the official Dolt image, whose registry layers the
-// daemon verifies by digest, rather than by a download inside a RUN that no
-// checksum would guard.
+// config, so no instruction downloads anything over the network and the one RUN
+// installs exactly ca-certificates, git and tmux. The Dolt client arrives by COPY
+// from the official Dolt image, whose registry layers the daemon verifies by
+// digest, rather than by a download inside a RUN that no checksum would guard.
 func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) {
 	t.Parallel()
 	var runs []string
-	copiedDolt := false
 	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
 		line := in.cmd + " " + strings.Join(in.args, " ")
 		for _, banned := range []string{"curl", "wget", "http://", "https://", "git clone", "tar -", "install -m"} {
@@ -211,44 +222,75 @@ func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) 
 				t.Errorf("%s has %q in %q; the image fetches and installs nothing but the three packages", DockerfilePath, banned, line)
 			}
 		}
-		switch in.cmd {
-		case "RUN":
+		if in.cmd == "RUN" {
 			runs = append(runs, line)
-		case "COPY":
-			if src := withoutFlags(in.args); len(src) > 0 && filepath.Base(src[0]) == "dolt" {
-				copiedDolt = true
-			}
 		}
 	}
 	if len(runs) != 1 {
 		t.Fatalf("%s has %d RUN instructions, want the one package install: %q", DockerfilePath, len(runs), runs)
 	}
-	if got, want := installedPackages(runs[0]), []string{"ca-certificates", "git", "tmux"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("%s installs %q, want %q", DockerfilePath, got, want)
+	got, problem := aptInstalls(runs[0])
+	if problem != "" {
+		t.Fatalf("%s: %s", DockerfilePath, problem)
 	}
-	if !copiedDolt {
-		t.Errorf("%s does not COPY the Dolt client in; it has no other source", DockerfilePath)
+	if want := []string{"ca-certificates", "git", "tmux"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("%s installs %q, want %q", DockerfilePath, got, want)
 	}
 }
 
-// TestDaemonDockerfileCopiesTheThreeBinaries: the COPY sources are the three
-// names BuildImage's context holds, so the image cannot ship a binary the
-// deployer did not build or miss one it did.
-func TestDaemonDockerfileCopiesTheThreeBinaries(t *testing.T) {
+// TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt: every COPY is one of two
+// kinds. The Dolt client is copied from the dolt stage, and nothing else is.
+// Each of gt, bd and om is copied from the build context by its bare name,
+// once each, and no other file is. A COPY from any other source, or a second
+// copy of a name, fails, so the image cannot ship a binary the deployer did not
+// build or miss one it did.
+func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 	t.Parallel()
-	copied := map[string]bool{}
+	doltCopies := 0
+	contextCopies := map[string]int{}
 	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
-		if in.cmd == "COPY" {
-			if src := withoutFlags(in.args); len(src) > 0 {
-				copied[filepath.Base(src[0])] = true
-			}
+		if in.cmd != "COPY" {
+			continue
 		}
+		from, src, dst := copyOperands(in.args)
+		if from == "" {
+			if !slices.Contains([]string{"gt", "bd", "om"}, src) || dst != "/usr/local/bin/"+src {
+				t.Errorf("%s COPY %q reads %q from the build context; want one of gt, bd or om, by its bare name, to /usr/local/bin", DockerfilePath, in.args, src)
+				continue
+			}
+			contextCopies[src]++
+			continue
+		}
+		if from != "dolt" || src != "/usr/local/bin/dolt" || dst != "/usr/local/bin/dolt" {
+			t.Errorf("%s COPY %q reads %q from stage %q; the only stage copy is the Dolt client from the dolt stage", DockerfilePath, in.args, src, from)
+			continue
+		}
+		doltCopies++
+	}
+	if doltCopies != 1 {
+		t.Errorf("%s COPYs the Dolt client %d times from the dolt stage, want once", DockerfilePath, doltCopies)
 	}
 	for _, name := range []string{"gt", "bd", "om"} {
-		if !copied[name] {
-			t.Errorf("%s COPYs no %s from the build context", DockerfilePath, name)
+		if contextCopies[name] != 1 {
+			t.Errorf("%s COPYs %s from the build context %d times, want once", DockerfilePath, name, contextCopies[name])
 		}
 	}
+}
+
+// copyOperands returns a COPY's --from stage, and its source and destination
+// operands, with its --flag entries dropped. A COPY with no --from reads the
+// build context, so its from is empty.
+func copyOperands(args []string) (from, src, dst string) {
+	for _, arg := range args {
+		if name, ok := strings.CutPrefix(arg, "--from="); ok {
+			from = name
+		}
+	}
+	ops := withoutFlags(args)
+	if len(ops) != 2 {
+		return "?", "", ""
+	}
+	return from, ops[0], ops[1]
 }
 
 // TestDaemonDockerfileMatchesTheImageTable: the base image and the Dolt version
@@ -324,17 +366,34 @@ func newStage(t *testing.T, args []string, values map[string]string) stage {
 // ${NAME} or the $NAME form.
 var dockerArgRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
 
-// installedPackages returns the packages an apt-get install instruction names,
-// sorted: the words after --no-install-recommends up to the next command.
-func installedPackages(line string) []string {
-	_, after, ok := strings.Cut(line, "--no-install-recommends ")
-	if !ok {
-		return nil
+// aptInstalls returns the packages a RUN installs, sorted, and a problem naming
+// the first command it runs that the image may not. The RUN is read command by
+// command, as the shell runs its && chain: apt-get update, the one apt-get
+// install, and the apt list cleanup are the only commands allowed, so a second
+// install or another package manager cannot hide later in the RUN.
+func aptInstalls(run string) (pkgs []string, problem string) {
+	installs := 0
+	for _, seg := range strings.Split(strings.TrimPrefix(run, "RUN "), "&&") {
+		words := strings.Fields(seg)
+		switch {
+		case slices.Equal(words, []string{"apt-get", "update"}):
+		case slices.Equal(words, []string{"rm", "-rf", "/var/lib/apt/lists/*"}):
+		case len(words) > 1 && words[0] == "apt-get" && words[1] == "install":
+			installs++
+			for _, w := range words[2:] {
+				if !strings.HasPrefix(w, "-") {
+					pkgs = append(pkgs, w)
+				}
+			}
+		default:
+			return nil, fmt.Sprintf("runs %q, which is not apt-get update, the apt-get install, or the list cleanup", strings.TrimSpace(seg))
+		}
 	}
-	after, _, _ = strings.Cut(after, "&&")
-	pkgs := slices.Clone(strings.Fields(after))
+	if installs != 1 {
+		return nil, fmt.Sprintf("runs %d apt-get installs in one RUN, want one", installs)
+	}
 	slices.Sort(pkgs)
-	return pkgs
+	return pkgs, ""
 }
 
 // withoutFlags returns an instruction's operands with its --flag entries

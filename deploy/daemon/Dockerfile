@@ -43,5 +43,6 @@ COPY --chmod=0755 om /usr/local/bin/om
 
 # The entrypoint is a gt subcommand rather than a shell script: it refuses to
 # start without a town on the bind mount, so a missing mount never turns into a
-# fresh town (gt-qpeei.26).
+# fresh town. The subcommand is added by gt-qpeei.26; until it lands, gt rejects
+# it and the container exits, so no container runs this image yet.
 ENTRYPOINT ["gt", "daemon", "container-entrypoint"]
