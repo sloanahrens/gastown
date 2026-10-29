@@ -193,13 +193,8 @@ func TestSplitLabelKeepsTheDispatcherOff(t *testing.T) {
 	}
 }
 
-// needs-split is the overrun guard's hand-back label, not a record that a bead
-// was split (polecat.NeedsSplitLabel): the shared hold rule keeps such a bead
-// out of every automatic path until a person cuts it smaller, so the verdict
-// here is the one it had before SplitLabel existed. Reading the split rule as a
-// substring would take the hand-back label over and refuse the bead by the
-// wrong line, leaving a person to hunt for a split that never happened
-// (hq-et8bc).
+// needs-split is the overrun guard's hand-back label, not a split record, so
+// the shared hold rule decides it and the split rule must not (hq-et8bc).
 func TestNeedsSplitLabelStaysDispatchable(t *testing.T) {
 	t.Parallel()
 	const needsSplit = "needs-split"
