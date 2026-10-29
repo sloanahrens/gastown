@@ -187,8 +187,10 @@ func TestApplyDefersWhenAJobStarted(t *testing.T) {
 }
 
 // TestApplySkipsThePruneWhenAJobStartsDuringTheTrim asserts a job that starts
-// after the first job read, while the volumes are trimmed, holds the prune
-// back. The deletes the plan named still run.
+// after the first job read, while the build cache is trimmed, holds the prune
+// back. The build cache's own deletes still run: the planner trims that volume
+// while a job runs too, so this plan is the one case a mid-trim job leaves
+// valid. Only the prune needs a quiet runner.
 func TestApplySkipsThePruneWhenAJobStartsDuringTheTrim(t *testing.T) {
 	t.Parallel()
 	f := newFake()
@@ -217,6 +219,47 @@ func TestApplySkipsThePruneWhenAJobStartsDuringTheTrim(t *testing.T) {
 	}
 	if entry := ledgerEntries(t, path)[0]; entry.Deferred != deferredPruneJob || entry.Done != 1 {
 		t.Fatalf("ledger deferred/done = %q/%d, want %q/1", entry.Deferred, entry.Done, deferredPruneJob)
+	}
+}
+
+// TestApplyStopsTheRemainingVolumesWhenAJobStartsDuringTheTrim asserts a job
+// that appears while the build cache is trimmed stops every remaining volume
+// the planner would not touch during a job. The build cache's own delete stays:
+// it was allowed when it ran.
+func TestApplyStopsTheRemainingVolumesWhenAJobStartsDuringTheTrim(t *testing.T) {
+	t.Parallel()
+	f := newFake()
+	path := filepath.Join(t.TempDir(), "ledger.jsonl")
+	// The job starts when the build cache's rm runs, so the list read before
+	// the loop saw none and the one before the npm volume sees a job.
+	run := func(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "rm") {
+			f.ps = answer{out: "job1\n"}
+		}
+		return f.run(ctx, env, name, args...)
+	}
+	tgt := NewTarget(Config{Dind: f.dind, Runner: f.runner, Image: testImage, Run: run,
+		Ledger: diskmaint.NewLedger(path, 1<<20)})
+
+	result := apply(t, tgt, planOf(
+		deletePath(gocacheVolume, "aa/old.bin", gb),
+		deletePath(npmVolume, "_cacache/tmp/x", gb),
+	))
+
+	if got, want := doneRefs(result), []string{gocacheVolume + ":aa/old.bin"}; !slices.Equal(got, want) {
+		t.Fatalf("done = %v, want only the build cache's delete", got)
+	}
+	if result.Deferred != deferredJobStarted {
+		t.Fatalf("deferred = %q, want %q", result.Deferred, deferredJobStarted)
+	}
+	if c := f.commands(" -v " + npmVolume + ":"); len(c) > 0 {
+		t.Fatalf("the npm volume was trimmed after a job started: %v", c)
+	}
+	if p := f.commands("prune"); len(p) > 0 {
+		t.Fatalf("prunes ran after a job started: %v", p)
+	}
+	if entry := ledgerEntries(t, path)[0]; entry.Deferred != deferredJobStarted || entry.Done != 1 {
+		t.Fatalf("ledger deferred/done = %q/%d, want %q/1", entry.Deferred, entry.Done, deferredJobStarted)
 	}
 }
 
@@ -551,6 +594,13 @@ func TestApplyCanceledDuringARemove(t *testing.T) {
 	if len(result.Done) != 0 || len(result.Failed) == 0 {
 		t.Fatalf("done = %v, failed = %v, want the cut-short volume recorded as failed", doneRefs(result), result.Failed)
 	}
+	// A cancelled rm may have removed part of its paths, so the record says the
+	// outcome is unknown rather than claiming the volume is as it was.
+	for _, f := range result.Failed {
+		if !strings.Contains(f.Err, "cancelled") || !strings.Contains(f.Err, "unknown") {
+			t.Fatalf("failure = %q, want it to say the outcome is unknown", f.Err)
+		}
+	}
 }
 
 // TestApplyCanceledDuringAPrune asserts a cancellation while the prunes run
@@ -571,6 +621,9 @@ func TestApplyCanceledDuringAPrune(t *testing.T) {
 	}
 	if len(result.Failed) != 1 || result.Failed[0].Action.Kind != pruneKind {
 		t.Fatalf("failed = %v, want the builder prune only", result.Failed)
+	}
+	if got := result.Failed[0].Err; !strings.Contains(got, "cancelled") || !strings.Contains(got, "unknown") {
+		t.Fatalf("failure = %q, want it to say the cancelled prune's outcome is unknown", got)
 	}
 }
 

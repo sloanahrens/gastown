@@ -74,6 +74,12 @@ func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Resu
 // trim re-validates the plan's actions, re-reads the job list, removes what the
 // plan names one container per volume, and prunes a quiet runner. It returns the
 // errors to record and, when the caller cancels, its cancellation.
+//
+// The job list is read again before each volume the planner never trims during
+// a job. A job that starts while the volumes before it are being removed means
+// the plan was made against a runner that is no longer quiet, so the rest of
+// it is stale; those deletes do not run. What was already removed stays
+// recorded, since a delete cannot be taken back.
 func (t *Target) trim(ctx context.Context, actions []diskmaint.Action, result *diskmaint.Result) (errs []string, err error) {
 	groups, errs := t.validate(actions, result)
 	if len(groups) == 0 {
@@ -95,6 +101,23 @@ func (t *Target) trim(ctx context.Context, actions []diskmaint.Action, result *d
 	for _, g := range groups {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return errs, ctxErr
+		}
+		// The list read above is not enough for this volume: the ones before
+		// it took time to remove, and a job that started meanwhile makes their
+		// premise false. Only the build cache may be trimmed while a job runs,
+		// so every other volume reads the list again just before its delete.
+		if g.volume != gocacheVolume {
+			count, readErr := t.jobCount(ctx)
+			if readErr != nil {
+				result.Deferred = readErr.Error()
+				errs = append(errs, readErr.Error())
+				return errs, readErr
+			}
+			if count > 0 {
+				result.Deferred = deferredJobStarted
+				errs = append(errs, deferredJobStarted)
+				return errs, nil
+			}
 		}
 		lines, stop := t.trimVolume(ctx, g, result)
 		errs = append(errs, lines...)
@@ -213,12 +236,12 @@ func (t *Target) trimVolume(ctx context.Context, g volumeGroup, result *diskmain
 	if g.volume == gomodVolume {
 		args := append([]string{"-R", "u+w", "--"}, mounts...)
 		if _, err := t.runInVolume(ctx, g.volume, "chmod", args...); err != nil {
-			return failedVolume(result, g, fmt.Errorf("chmod: %w", err)), ctx.Err()
+			return failedVolume(result, g, commandError(ctx, "chmod", err)), ctx.Err()
 		}
 	}
 	args := append([]string{"-rf", "--"}, mounts...)
 	if _, err := t.runInVolume(ctx, g.volume, "rm", args...); err != nil {
-		return failedVolume(result, g, fmt.Errorf("rm: %w", err)), ctx.Err()
+		return failedVolume(result, g, commandError(ctx, "rm", err)), ctx.Err()
 	}
 	for _, action := range g.actions {
 		result.Done = append(result.Done, action)
@@ -234,6 +257,17 @@ func (t *Target) runInVolume(ctx context.Context, volume, command string, args .
 		"-v", volume + ":" + volumeRoot, "--entrypoint", command, t.cfg.Image}
 	argv = append(argv, args...)
 	return t.dind(ctx, argv...)
+}
+
+// commandError words a failed command for the result and the ledger. A command
+// cut short by the caller's cancellation may have run partway through its
+// paths, so its outcome is recorded as unknown rather than as a removal that
+// failed and left the volume as it was.
+func commandError(ctx context.Context, command string, err error) error {
+	if ctx.Err() != nil {
+		return fmt.Errorf("%s: cancelled; its outcome is unknown", command)
+	}
+	return fmt.Errorf("%s: %w", command, err)
 }
 
 // failedVolume records each of a volume's actions as failed and returns the
@@ -256,8 +290,9 @@ func (t *Target) prune(ctx context.Context, result *diskmaint.Result) (errs []st
 	}
 	for _, action := range prunes {
 		if _, err := t.dind(ctx, action.Ref, "prune", "-f"); err != nil {
+			err = commandError(ctx, action.Ref+" prune", err)
 			result.Failed = append(result.Failed, diskmaint.Failure{Action: action, Err: err.Error()})
-			errs = append(errs, fmt.Sprintf("%s prune: %v", action.Ref, err))
+			errs = append(errs, err.Error())
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return errs, ctxErr
 			}
