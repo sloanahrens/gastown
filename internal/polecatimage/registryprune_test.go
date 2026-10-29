@@ -712,6 +712,85 @@ func TestPruneRegistryBudgetEndingDuringCollectDoesNotCutItShort(t *testing.T) {
 	}
 }
 
+// TestPruneRegistryHungCollectReturnsAtTheBudget: a docker client that never
+// answers holds the plugin lock only as long as the retention's budget. The
+// budget ends the wait for the client, and the collect that client started
+// carries a container timeout shorter than the time the budget left, so the
+// collect is over inside the container by the time the retention returns
+// (gt-eg14z).
+func TestPruneRegistryHungCollectReturnsAtTheBudget(t *testing.T) {
+	t.Parallel()
+	reg := newFakeRegistry(devTag(),
+		registryTagAt(1), registryTagAt(2), registryTagAt(3))
+	tr := newRegistryRun(t, reg, tagName(3))
+	tr.Cfg.RegistryPrune = registryPruneApply
+	// A budget short enough for the test to reach its end, with enough left
+	// after registry.collectGrace for the collect to have a whole second.
+	const budget = 3 * time.Second
+	var deadline time.Time
+	tr.budget = func() (context.Context, context.CancelFunc) {
+		deadline = time.Now().Add(budget)
+		return context.WithDeadline(context.Background(), deadline)
+	}
+	// The collect answers only when the test ends, so only the budget can end
+	// the wait for it.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	hung := make(chan []string, 1)
+	var left time.Duration
+	answer := tr.reply
+	tr.reply = func(c command) result {
+		if c.name != "docker" {
+			return answer(c)
+		}
+		left = time.Until(deadline)
+		hung <- c.args
+		<-release
+		return result{}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tr.PruneRegistry()
+	}()
+	// The bound on the wait, so a run that never returns fails the test instead
+	// of hanging it.
+	bound, cancel := context.WithTimeout(context.Background(), budget+5*time.Second)
+	defer cancel()
+	select {
+	case <-done:
+	case <-bound.Done():
+		t.Fatal("PruneRegistry did not return at its budget; a collect that never answered held it")
+	}
+
+	var gc []string
+	select {
+	case gc = <-hung:
+	default:
+		t.Fatalf("no garbage collect started; calls: %v", callLines(tr, "docker"))
+	}
+	if len(gc) != 8 {
+		t.Fatalf("garbage-collect argv = %q, want the registry collect command", gc)
+	}
+	secs, err := strconv.Atoi(gc[3])
+	if err != nil || secs < 1 {
+		t.Fatalf("garbage-collect timeout = %q, want a whole number of seconds", gc[3])
+	}
+	if whole := int(left / time.Second); secs >= whole {
+		t.Fatalf("garbage-collect timeout = %ds with %v left on the budget, want a timeout shorter than the time left so the container ends the collect first", secs, left)
+	}
+	entries, err := diskmaint.NewLedger(tr.Cfg.RegistryLedger, registryLedgerMax).Tail(1)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("read the ledger: %v (%d entries)", err, len(entries))
+	}
+	if !slices.ContainsFunc(entries[0].Errors, func(e string) bool {
+		return strings.Contains(e, "no answer by the caller's deadline")
+	}) {
+		t.Fatalf("ledger errors %v, want the abandoned collect named", entries[0].Errors)
+	}
+}
+
 // TestPruneRegistryHoldsCollectWhileAPushRuns is the push gate: a crane push on
 // this host stops garbage collect, while the deletes the plan made still apply
 // under the lock.
