@@ -103,17 +103,19 @@ func TestTransferRequestRefusesAssigneesNoSeatCouldHave(t *testing.T) {
 }
 
 // The refusal quotes the assignee with %q, so a control character cannot reach
-// an event line or a log raw.
-func TestATransferAssigneesControlCharacterIsQuotedInTheRefusal(t *testing.T) {
+// an event line or a log raw. The table above asserts the refusal; this asserts
+// the message itself, on a record separator, which would split a line if it
+// arrived raw.
+func TestTransferRequestQuotesAControlCharacterInTheRefusal(t *testing.T) {
 	t.Parallel()
-	err := TransferRequest{Assignee: "seat\x1bone"}.Validate()
+	err := TransferRequest{Assignee: "seat\x1eone"}.Validate()
 	if err == nil {
-		t.Fatal("an escape-bearing assignee was accepted")
+		t.Fatal("a record-separator-bearing assignee was accepted")
 	}
-	if strings.ContainsRune(err.Error(), '\x1b') {
-		t.Fatalf("message %q carries the raw escape", err)
+	if strings.ContainsRune(err.Error(), '\x1e') {
+		t.Fatalf("message %q carries the raw separator", err)
 	}
-	if !strings.Contains(err.Error(), `\x1b`) {
-		t.Errorf("message %q does not quote the escape as \\x1b", err)
+	if !strings.Contains(err.Error(), `\x1e`) {
+		t.Errorf("message %q does not quote the separator as \\x1e", err)
 	}
 }
