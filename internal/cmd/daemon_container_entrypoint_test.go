@@ -90,8 +90,10 @@ func (r *entrypointRig) installCalls() int {
 }
 
 func TestContainerEntrypointRefusesOutsideContainerMode(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"", "launchd"} {
 		t.Run("mode="+mode, func(t *testing.T) {
+			t.Parallel()
 			r := townRig()
 			r.env[config.ContainerModeEnv] = mode
 			if err := runContainerEntrypoint(r.entrypoint()); err == nil {
@@ -105,8 +107,10 @@ func TestContainerEntrypointRefusesOutsideContainerMode(t *testing.T) {
 }
 
 func TestContainerEntrypointRefusesTownRootThatIsNotAbsolute(t *testing.T) {
+	t.Parallel()
 	for _, root := range []string{"", "gt"} {
 		t.Run("GT_TOWN_ROOT="+root, func(t *testing.T) {
+			t.Parallel()
 			// The town is present under the relative path, so only the
 			// absolute-path check stands between this start and the exec.
 			r := townRig()
@@ -123,6 +127,7 @@ func TestContainerEntrypointRefusesTownRootThatIsNotAbsolute(t *testing.T) {
 }
 
 func TestContainerEntrypointReturnsDaemonExecError(t *testing.T) {
+	t.Parallel()
 	r := townRig()
 	e := r.entrypoint()
 	e.exec = func(argv []string) error { return errors.New("exec failed") }
@@ -132,6 +137,7 @@ func TestContainerEntrypointReturnsDaemonExecError(t *testing.T) {
 }
 
 func TestContainerEntrypointTownPresentExecsDaemonWithoutInstall(t *testing.T) {
+	t.Parallel()
 	r := townRig()
 	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
 		t.Fatalf("runContainerEntrypoint: %v", err)
@@ -150,6 +156,7 @@ func TestContainerEntrypointTownPresentExecsDaemonWithoutInstall(t *testing.T) {
 }
 
 func TestContainerEntrypointEmptyGitIdentityLeavesGitConfigAlone(t *testing.T) {
+	t.Parallel()
 	r := townRig()
 	delete(r.env, containerGitUserEnv)
 	delete(r.env, containerGitEmailEnv)
@@ -163,8 +170,10 @@ func TestContainerEntrypointEmptyGitIdentityLeavesGitConfigAlone(t *testing.T) {
 }
 
 func TestContainerEntrypointAbsentTownRefusesWithoutScratchFlag(t *testing.T) {
+	t.Parallel()
 	for _, flag := range []string{"", "0"} {
 		t.Run("GT_SCRATCH_TOWN="+flag, func(t *testing.T) {
+			t.Parallel()
 			// Every scratch condition holds, so the refusal is the only thing
 			// that stops an install.
 			r := scratchRig()
@@ -180,6 +189,7 @@ func TestContainerEntrypointAbsentTownRefusesWithoutScratchFlag(t *testing.T) {
 }
 
 func TestContainerEntrypointScratchTownRefusesWhenAConditionFails(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		mutate func(r *entrypointRig)
@@ -204,6 +214,7 @@ func TestContainerEntrypointScratchTownRefusesWhenAConditionFails(t *testing.T) 
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			r := scratchRig()
 			tc.mutate(r)
 			if err := runContainerEntrypoint(r.entrypoint()); err == nil {
@@ -217,6 +228,7 @@ func TestContainerEntrypointScratchTownRefusesWhenAConditionFails(t *testing.T) 
 }
 
 func TestContainerEntrypointScratchTownInstallsOnceBeforeDaemon(t *testing.T) {
+	t.Parallel()
 	r := scratchRig()
 	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
 		t.Fatalf("runContainerEntrypoint: %v", err)
@@ -236,6 +248,7 @@ func TestContainerEntrypointScratchTownInstallsOnceBeforeDaemon(t *testing.T) {
 }
 
 func TestContainerEntrypointRunErrorStopsBeforeDaemonExec(t *testing.T) {
+	t.Parallel()
 	r := scratchRig()
 	e := r.entrypoint()
 	e.run = func(argv []string) error {
@@ -253,6 +266,7 @@ func TestContainerEntrypointRunErrorStopsBeforeDaemonExec(t *testing.T) {
 }
 
 func TestIsMountPoint(t *testing.T) {
+	t.Parallel()
 	const table = "21 1 0:20 / / rw - tmpfs tmpfs rw\n" +
 		"36 35 98:0 /srv/scratch /gt/data rw,noatime - ext4 /dev/root rw\n" +
 		"40 35 98:0 /srv/my\\040dir /srv/my\\040dir rw - ext4 /dev/root rw\n"
@@ -270,6 +284,7 @@ func TestIsMountPoint(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := isMountPoint(table, tc.path); got != tc.want {
 				t.Errorf("isMountPoint(%q) = %v, want %v", tc.path, got, tc.want)
 			}
