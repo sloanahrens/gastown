@@ -43,8 +43,33 @@ type daemonSupervisor struct {
 	// operator gets back to a hand-run daemon. A file kind has a file to
 	// remove; the container kind has a town setting to unset.
 	fallback string
+	// state reads this job's live state. The file kinds leave it nil and read
+	// through the control, which needs the kind alone; the container kind sets
+	// it, because its container is named by the town's settings.
+	state templates.SupervisorReader
 
 	ctl *daemonControl // what runs the commands above and reads the job
+}
+
+// jobState reads the live state of this supervisor's job.
+func (s *daemonSupervisor) jobState() templates.SupervisorState {
+	if s.state != nil {
+		return s.state(s.name)
+	}
+	return s.ctl.stateFor(s.name)
+}
+
+// jobIsMissing reports whether a failed command left the job in the state the
+// caller recovers from by loading it. The container kind never reads as
+// missing: its daemon lives in the container, so an absent container runs no
+// daemon to replace, and loading the whole project is not the repair a failed
+// container command asks for.
+func (s *daemonSupervisor) jobIsMissing() bool {
+	if s.name == config.SupervisorContainer {
+		return false
+	}
+	st := s.jobState()
+	return st.Err == nil && !st.Loaded
 }
 
 // errSupervisorRefused marks a builder's refusal, in which no command ran.
@@ -81,6 +106,10 @@ type daemonControl struct {
 	// runs in, never the global one, which nothing here may change.
 	dockerContext string
 	run           func(argv []string) error
+	// dockerInspect runs one docker command and returns what it printed, both
+	// streams: the container kind's state read, which needs the output run
+	// discards.
+	dockerInspect func(argv []string) ([]byte, error)
 	stateFor      templates.SupervisorReader
 	spawn         func(townRoot string) (int, error)
 	stopDirect    func(townRoot string) error
@@ -88,7 +117,7 @@ type daemonControl struct {
 	// install writes a repaired supervisor file (installSupervisorFile).
 	install func(path, content string) error
 	// statusLine renders the Supervised: line of gt daemon status
-	// (templates.SupervisorStatusLine over stateFor).
+	// (supervisedLine).
 	statusLine func(townRoot string, lockPID int) string
 	// sleep waits pollInterval between lock checks and loadRetryInterval
 	// between bootstrap attempts.
@@ -112,6 +141,9 @@ func realDaemonControl() *daemonControl {
 			}
 			return nil
 		},
+		dockerInspect: func(argv []string) ([]byte, error) {
+			return exec.Command(argv[0], argv[1:]...).CombinedOutput() //nolint:gosec // fixed argv from ContainerJobState
+		},
 		stateFor:          supervisorJobState,
 		stopDirect:        daemon.StopDaemon,
 		isRunning:         daemon.IsRunning,
@@ -121,26 +153,104 @@ func realDaemonControl() *daemonControl {
 		loadRetryInterval: supervisorLoadRetryInterval,
 	}
 	c.spawn = func(townRoot string) (int, error) { return spawnDaemonProcess(c, townRoot) }
-	c.statusLine = func(townRoot string, lockPID int) string {
-		return templates.SupervisorStatusLine(townRoot, lockPID, c.stateFor)
-	}
+	c.statusLine = c.supervisedLine
 	return c
 }
 
-// supervisorJobState is the live job read of this host. The container kind has
-// no reader yet, so its state is unknown rather than "not loaded": a failed
-// start that read "not loaded" would go on to a bootstrap, and a failed restart
-// to a hand stop of the running daemon.
+// supervisorJobState is the live job read of this host, keyed by kind alone.
+// The container kind is not one it can read: which container a town runs is
+// said only by that town's settings, so a container town's supervisor carries
+// its own reader (containerJobState). Unknown, never "not loaded", is the
+// honest answer where no town was named.
 func supervisorJobState(kind string) templates.SupervisorState {
 	if kind == config.SupervisorContainer {
-		return templates.SupervisorState{Kind: kind, LastExit: -1, Err: errContainerStateUnread}
+		return templates.SupervisorState{Kind: kind, LastExit: -1, Err: errContainerStateUntowned}
 	}
 	return templates.SupervisorJobState(kind)
 }
 
-// errContainerStateUnread is the state read of a container town until the
-// container state reader exists.
-var errContainerStateUnread = errors.New("the container kind's state is not read yet")
+// errContainerStateUntowned is the container kind's state where the read was
+// asked by kind alone and no town's settings named its container.
+var errContainerStateUntowned = errors.New("the container kind's state is read per town: no town's settings name its container here")
+
+// ContainerJobState is the state reader of a town whose daemon runs in the
+// container named containerName: one docker inspect under dockerContext, through
+// run, mapped into a SupervisorState.
+//
+// A container docker reports as absent ("No such object") is known and not
+// running, so a recreate that replaced the old instance never leaves an owner
+// nothing can check. Any other failure is unknown, never "not running": a
+// daemon whose state could not be read may well be up (gt-qpeei.18).
+func ContainerJobState(run func(argv []string) ([]byte, error), dockerContext, containerName string) templates.SupervisorReader {
+	argv := []string{"docker", "--context", dockerContext, "inspect",
+		"-f", "{{.State.Status}} {{.Config.Image}}", containerName}
+	return func(kind string) templates.SupervisorState {
+		st := templates.SupervisorState{Kind: kind, LastExit: -1, Container: containerName}
+		out, err := run(argv)
+		if err != nil {
+			if strings.Contains(string(out), "No such object") {
+				return st
+			}
+			// The command's output stays out of the error (om: "Keep secrets
+			// out of errors"): docker's stderr is not ours to quote.
+			st.Err = fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+			return st
+		}
+		fields := strings.Fields(string(out))
+		if len(fields) < 2 {
+			st.Err = fmt.Errorf("%s: docker printed no status and image for %s", strings.Join(argv, " "), containerName)
+			return st
+		}
+		st.Loaded = true
+		st.Status = fields[0]
+		st.Image = fields[1]
+		return st
+	}
+}
+
+// containerJobState is the state reader of the container town whose settings
+// are cfg: the container cfg names, inspected under this control's docker
+// context. The town's own settings are the only source of that name, so a
+// scratch town inspects its scratch container and never the live one.
+func (c *daemonControl) containerJobState(cfg *config.DaemonPatrolConfig) templates.SupervisorReader {
+	if _, err := containerComposeProject(cfg); err != nil {
+		return unreadContainerState(err)
+	}
+	return ContainerJobState(c.dockerInspect, c.dockerCLIContext(), cfg.ContainerName())
+}
+
+// unreadContainerState is the reader of a container town whose settings do not
+// name a container this binary may act on: unknown, and no docker command run.
+func unreadContainerState(err error) templates.SupervisorReader {
+	return func(kind string) templates.SupervisorState {
+		return templates.SupervisorState{Kind: kind, LastExit: -1, Err: err}
+	}
+}
+
+// supervisedLine renders the "Supervised:" value gt daemon status prints for
+// townRoot. A container town reads its own container, which its settings name;
+// every other town is the file reading, which no per-user file can supply for a
+// container.
+func (c *daemonControl) supervisedLine(townRoot string, lockPID int) string {
+	cfg, err := c.townDaemonConfig(townRoot)
+	if err != nil {
+		return unverifiedSupervisorLine(fmt.Errorf("reading the town's daemon settings: %w", err))
+	}
+	kind, err := cfg.SupervisorKind()
+	if err != nil {
+		return unverifiedSupervisorLine(err)
+	}
+	if kind != config.SupervisorContainer {
+		return templates.SupervisorStatusLine(townRoot, lockPID, c.stateFor)
+	}
+	return c.containerJobState(cfg)(config.SupervisorContainer).StatusLine(lockPID)
+}
+
+// unverifiedSupervisorLine is what status prints where the town's settings
+// cannot say which supervisor it has: "none" would claim it has none.
+func unverifiedSupervisorLine(err error) string {
+	return fmt.Sprintf("unknown (unverified - %v)", err)
+}
 
 // defaultDockerContext is the Docker context the container supervisor's argv
 // carry unless the control names another: Docker Desktop's Linux engine, the
@@ -275,6 +385,7 @@ func (c *daemonControl) containerSupervisor(composeFile string, cfg *config.Daem
 		bootstrap: compose("up", "-d"),
 		load:      fmt.Sprintf("docker --context %s compose -p %s -f %s up -d daemon", c.dockerCLIContext(), project, composeFile),
 		fallback:  "or unset daemon.supervisor to run the daemon by hand",
+		state:     c.containerJobState(cfg),
 		ctl:       c,
 	}, nil
 }
@@ -539,11 +650,11 @@ func (s *daemonSupervisor) startFromFile() error {
 	// Unload only a job the manager knows: bootout on a job that is not there
 	// fails, and startFromFile is also reached from start, where "not loaded"
 	// (the state `gt daemon stop` leaves) is ordinary.
-	if st := s.ctl.stateFor(s.name); st.Err == nil && st.Loaded {
+	if st := s.jobState(); st.Err == nil && st.Loaded {
 		if err := s.runArgv(s.stop); err != nil {
 			// Only a job that is still loaded means the unload did not
 			// happen, and then that job is still supervising the daemon.
-			if st := s.ctl.stateFor(s.name); st.Err != nil || st.Loaded {
+			if st := s.jobState(); st.Err != nil || st.Loaded {
 				return fmt.Errorf("unloading the %s job to load its rewritten file: %w", s.name, err)
 			}
 		}
@@ -557,7 +668,7 @@ func (s *daemonSupervisor) startFromFile() error {
 // follows retries, and is the one that reports a job that would not go.
 func (s *daemonSupervisor) waitUnloaded() {
 	for range handStopConfirmAttempts {
-		if st := s.ctl.stateFor(s.name); st.Err == nil && !st.Loaded {
+		if st := s.jobState(); st.Err == nil && !st.Loaded {
 			return
 		}
 		s.ctl.sleep(s.ctl.pollInterval)
@@ -589,7 +700,7 @@ func (s *daemonSupervisor) loadJob() error {
 			// Nothing ran, so another attempt would refuse identically.
 			return err
 		}
-		if st := s.ctl.stateFor(s.name); st.Err == nil && st.Loaded {
+		if st := s.jobState(); st.Err == nil && st.Loaded {
 			return nil
 		}
 	}
@@ -634,7 +745,7 @@ func (c *daemonControl) startDaemon(townRoot string) (via string, pid int, err e
 				// One that gt daemon stop unloaded is bootstrapped instead, so that
 				// a stop-then-start pair leaves a supervised daemon rather than the
 				// hand spawn that recreates the crash loop (gt-3jrm).
-				if st := c.stateFor(sup.name); st.Err == nil && !st.Loaded {
+				if sup.jobIsMissing() {
 					runErr = sup.runArgv(sup.bootstrap)
 				}
 			}
@@ -788,7 +899,7 @@ func (c *daemonControl) restartDaemon(townRoot string) (via string, pid int, err
 			// cannot be loaded beside it: the loaded job would respawn
 			// against the lock the hand-run daemon holds (gt-3jrm). So it
 			// goes, and the job comes up in its place.
-			if st := c.stateFor(sup.name); st.Err == nil && !st.Loaded {
+			if sup.jobIsMissing() {
 				runErr = c.replaceUnsupervisedDaemon(townRoot, sup)
 			}
 		}

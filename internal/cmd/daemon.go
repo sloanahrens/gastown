@@ -314,7 +314,7 @@ func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
 	case supErr != nil:
 		unconfirmed = fmt.Errorf("could not tell whether a supervisor is provisioned for this town: %w", supErr)
 	case sup != nil:
-		switch st := c.stateFor(sup.name); {
+		switch st := sup.jobState(); {
 		case st.Err != nil:
 			unconfirmed = fmt.Errorf("could not read the %s job's state: %w", sup.name, st.Err)
 		case st.Loaded:
