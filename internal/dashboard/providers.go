@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -85,7 +86,11 @@ type deepSeekSpend struct {
 		Spent *float64 `json:"spent"`
 	} `json:"per_day"`
 	Live struct {
-		OK *bool `json:"ok"`
+		// OK is the report's own "the live read succeeded" and Available its
+		// "the balance came from it"; writers in the field have sent either,
+		// and the page colours the balance from Available alone.
+		OK        *bool `json:"ok"`
+		Available *bool `json:"available"`
 	} `json:"live"`
 	// WatcherPID is null or empty when the spend watcher is not running.
 	WatcherPID any    `json:"watcher_pid"`
@@ -188,13 +193,25 @@ func deepSeekCostProvider(_ time.Time, spend json.RawMessage, _ *ClaudePlan, _ *
 		p.Detail = append(p.Detail, "ledger "+strings.Replace(d.LastSample, "T", " ", 1))
 	}
 
-	if d.Live.OK != nil && !*d.Live.OK {
+	if liveUnreachable(d.Live.OK, d.Live.Available) {
 		p.Warnings = append(p.Warnings, "live balance unreachable")
 	}
 	if d.WatcherPID == nil || d.WatcherPID == "" {
 		p.Warnings = append(p.Warnings, "spend watcher is not running")
 	}
 	return p
+}
+
+// liveUnreachable is whether the report leaves the balance on its ledger rather
+// than a live read. It fails closed: a writer that sent neither field, or that
+// reported the read failed through either one, has not said the balance is
+// live, and the page colours the figure bad for Available as well as OK. A
+// field that does confirm the read keeps the warning away.
+func liveUnreachable(ok, available *bool) bool {
+	if ok == nil && available == nil {
+		return true
+	}
+	return (ok != nil && !*ok) || (available != nil && !*available)
 }
 
 // runwayStatus is the color of a runway in days: bad under three, warn under
@@ -257,16 +274,24 @@ func claudeCostProvider(now time.Time, _ json.RawMessage, plan *ClaudePlan, char
 	}
 	if n := len(bars); n > 0 {
 		p.Yesterday = barFigure(bars, n-2)
-		var sum float64
-		var count int
+		// The mean is of the complete days before today, capped at the chart's
+		// week the way the DeepSeek row caps its own: a longer series must not
+		// turn the seven-day average into a month's.
+		var complete []float64
 		for _, b := range bars[:n-1] {
 			if !b.Gap {
-				sum += b.Value
-				count++
+				complete = append(complete, b.Value)
 			}
 		}
-		if count > 0 {
-			avg := sum / float64(count)
+		if len(complete) > costDailyDays {
+			complete = complete[len(complete)-costDailyDays:]
+		}
+		if len(complete) > 0 {
+			var sum float64
+			for _, v := range complete {
+				sum += v
+			}
+			avg := sum / float64(len(complete))
 			p.Avg7d = &avg
 		}
 	}
@@ -280,15 +305,7 @@ func claudeCostProvider(now time.Time, _ json.RawMessage, plan *ClaudePlan, char
 	p.PerHour1h = &h1
 	p.Detail = append(p.Detail, "plan pace last 24h "+money(perHour(plan.PacePerDay24h))+"/h, approximate")
 
-	projected := plan.ProjectedPctAtReset
-	switch {
-	case plan.WeeklyPct >= ClaudePlanCeilingPct || projected > claudePlanLimitPct:
-		p.Status = "bad"
-	case projected > ClaudePlanCeilingPct:
-		p.Status = "warn"
-	default:
-		p.Status = "ok"
-	}
+	p.Status = planStatus(plan.WeeklyPct, plan.ProjectedPctAtReset)
 	if h := plan.HitsLimitInDays; h != nil {
 		if *h > 0 {
 			p.StatusText = fmt.Sprintf("limit in %.1fd", *h)
@@ -297,6 +314,21 @@ func claudeCostProvider(now time.Time, _ json.RawMessage, plan *ClaudePlan, char
 		}
 	}
 	return p
+}
+
+// planStatus is the row's colour, the page's planClass rule line for line: a
+// week already at the ceiling the month rollup counts, or a projection past the
+// limit, is bad; a projection past the ceiling warns; anything else is ok. It is
+// a separate function so a test can run the page's own planClass over the same
+// figures and hold the two together.
+func planStatus(weeklyPct, projectedPct float64) string {
+	switch {
+	case weeklyPct >= ClaudePlanCeilingPct || projectedPct > claudePlanLimitPct:
+		return "bad"
+	case projectedPct > ClaudePlanCeilingPct:
+		return "warn"
+	}
+	return "ok"
 }
 
 // claudePlanUnreadWhy is why the plan has no figures, in the page's words.
@@ -320,7 +352,7 @@ func jevCostProvider(_ time.Time, _ json.RawMessage, _ *ClaudePlan, _ *CostChart
 		p.Why = "the Jev spend could not be read"
 		return p
 	}
-	if w, err := time.ParseDuration(jev.Window); err == nil && w == 24*time.Hour {
+	if hours, ok := windowHours(jev.Window); ok && hours == 24 {
 		rate := jev.USD / 24
 		p.PerHour24h = &rate
 	}
@@ -333,6 +365,28 @@ func jevCostProvider(_ time.Time, _ json.RawMessage, _ *ClaudePlan, _ *CostChart
 		p.Detail = append(p.Detail, fmt.Sprintf("top caller %s (%d %s, %s)", jev.TopCaller, jev.TopCallerCalls, plural(jev.TopCallerCalls, "call", "calls"), money(jev.TopCallerUSD)))
 	}
 	return p
+}
+
+// windowHours is a spend window's length in hours. The reader writes it as the
+// Go duration form ("24h"), and a days form ("1d") or a bare number of hours is
+// read too, so a second writer's spelling does not silently drop the rate.
+func windowHours(window string) (float64, bool) {
+	if window == "" {
+		return 0, false
+	}
+	if w, err := time.ParseDuration(window); err == nil {
+		return w.Hours(), true
+	}
+	if days, ok := strings.CutSuffix(window, "d"); ok {
+		if n, err := strconv.ParseFloat(days, 64); err == nil && n > 0 {
+			return n * 24, true
+		}
+		return 0, false
+	}
+	if n, err := strconv.ParseFloat(window, 64); err == nil && n > 0 {
+		return n, true
+	}
+	return 0, false
 }
 
 // barFigure is the value of bar i as a figure, nil when the bucket is a gap.

@@ -2,8 +2,8 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -160,6 +160,46 @@ func TestCostProvidersDeepSeekStatusByRunway(t *testing.T) {
 	}
 }
 
+// The live warning fails closed: it takes a field that confirms the read to
+// keep it away, and a report that says nothing about the live read is not
+// evidence the balance was live. The page colours the balance bad on Available
+// as well as alarming on OK, so either field failing raises the line.
+func TestCostProvidersDeepSeekLiveWarningFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		live map[string]any
+		want bool
+	}{
+		{"both fields say live", map[string]any{"ok": true, "available": true}, false},
+		{"only ok", map[string]any{"ok": true}, false},
+		{"only available", map[string]any{"available": true}, false},
+		{"ok false", map[string]any{"ok": false, "available": true}, true},
+		{"available false without ok", map[string]any{"available": false}, true},
+		{"ok true but available false", map[string]any{"ok": true, "available": false}, true},
+		{"an empty live block", map[string]any{}, true},
+		{"no live block", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			report := map[string]any{"balance": 10.0, "watcher_pid": 4242}
+			if tc.live != nil {
+				report["live"] = tc.live
+			}
+			raw, err := json.Marshal(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := deepSeekCostProvider(costProvidersNow, raw, nil, nil, nil)
+			if got := slices.Contains(p.Warnings, "live balance unreachable"); got != tc.want {
+				t.Errorf("live %v gives warnings %q, want the unreachable line: %v", tc.live, p.Warnings, tc.want)
+			}
+		})
+	}
+}
+
 func TestCostProvidersDeepSeekTopUpDayIsNilWithTheRiseInDetail(t *testing.T) {
 	t.Parallel()
 
@@ -217,40 +257,62 @@ func TestCostProvidersClaudeFigures(t *testing.T) {
 	}
 }
 
-func TestCostProvidersClaudeStatusMatchesPlanClass(t *testing.T) {
+// The row's colour is the page's planClass, and the test takes the expectation
+// from the page itself: the harness runs index.html's planClass over the same
+// figures, so the page's ceiling and the reader's are held together by
+// behaviour rather than by a hard-coded copy of the rule. A week exactly at the
+// ceiling and a projection one point past it are both rows, so a ceiling that
+// drifted on either side turns this red.
+func TestCostProvidersClaudeStatusMatchesThePagesPlanClass(t *testing.T) {
 	t.Parallel()
 
+	dom := newPageDOM(t)
 	for _, tc := range []struct {
 		weekly, projected float64
-		want              string
 	}{
-		{42, 75, "ok"},
-		{42, 95, "warn"},
-		{90, 50, "bad"},
-		{50, 101, "bad"},
+		{42, 75},
+		{42, 89.9},
+		{42, 90.5},
+		{42, 100},
+		{42, 101},
+		{89.9, 50},
+		{90, 50},
+		{95, 120},
+		{0, 0},
 	} {
+		v, err := dom.vm.RunString(fmt.Sprintf("planClass({weekly_pct: %v, projected_pct_at_reset: %v})", tc.weekly, tc.projected))
+		if err != nil {
+			t.Fatalf("the page's planClass over weekly %v projected %v: %v", tc.weekly, tc.projected, err)
+		}
+		want := map[string]string{"badc": "bad", "warnc": "warn", "": "ok"}[v.String()]
+
 		plan, charts := claudeFixture()
 		plan.WeeklyPct = tc.weekly
 		plan.ProjectedPctAtReset = tc.projected
-		p := claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
-		if p.Status != tc.want {
-			t.Errorf("weekly %v projected %v gives status %q, want %q", tc.weekly, tc.projected, p.Status, tc.want)
+		if got := claudeCostProvider(costProvidersNow, nil, plan, charts, nil).Status; got != want {
+			t.Errorf("weekly %v projected %v gives status %q, the page's planClass says %q", tc.weekly, tc.projected, got, want)
 		}
 	}
 }
 
-// The row's ceiling is the reader's, and the page's copy must equal it: the
-// page colours a week by its own CLAUDE_PLAN_CEILING_PCT.
-func TestCostProvidersCeilingIsThePagesCeiling(t *testing.T) {
+// The Claude mean is the chart's week, not the whole series: a bar list longer
+// than the week averages its newest seven complete days.
+func TestCostProvidersClaudeAverageCapsAtSevenDays(t *testing.T) {
 	t.Parallel()
 
-	m := regexp.MustCompile(`const CLAUDE_PLAN_CEILING_PCT = (\d+);`).FindSubmatch(indexHTML)
-	if m == nil {
-		t.Fatal("index.html has no CLAUDE_PLAN_CEILING_PCT constant")
+	plan, charts := claudeFixture()
+	bars := []CostBar{{Label: "21", Gap: true}}
+	for i, v := range []float64{1, 2, 3, 4, 5, 6, 7, 8} {
+		bars = append(bars, CostBar{Label: strconv.Itoa(22 + i), Value: v})
 	}
-	if got, _ := strconv.ParseFloat(string(m[1]), 64); got != ClaudePlanCeilingPct {
-		t.Errorf("the page's ceiling is %v, the reader's is %v", got, ClaudePlanCeilingPct)
-	}
+	bars = append(bars, CostBar{Label: "30", Value: 9})
+	charts.Daily.Claude.Bars = bars
+
+	p := claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+	// The newest seven complete days before today are 2 to 8: 1 is older than
+	// the cap, and today's 9 is never in the mean.
+	figureIs(t, "avg_7d", p.Avg7d, 5)
+	figureIs(t, "yesterday", p.Yesterday, 8)
 }
 
 func TestCostProvidersUnavailableHasNilFiguresAndWhy(t *testing.T) {
@@ -315,9 +377,30 @@ func TestCostProvidersJevRow(t *testing.T) {
 		t.Errorf("detail %q does not carry %q", p.Detail, want)
 	}
 
-	jev.Window = "1h"
-	if p := jevCostProvider(costProvidersNow, nil, nil, nil, jev); p.PerHour24h != nil {
-		t.Errorf("a one-hour window gives a 24-hour rate %v, want nil", *p.PerHour24h)
+	// The rate needs a day's window, and the spelling of the window is not what
+	// decides it: the reader writes "24h", and a writer's days or bare-hours
+	// form must not silently drop the rate.
+	for _, tc := range []struct {
+		window string
+		want   *float64
+	}{
+		{"24h", fptr(0.15)},
+		{"24h0m0s", fptr(0.15)},
+		{"1d", fptr(0.15)},
+		{"24", fptr(0.15)},
+		{"1h", nil},
+		{"2d", nil},
+		{"", nil},
+		{"yesterday", nil},
+	} {
+		jev.Window = tc.window
+		p := jevCostProvider(costProvidersNow, nil, nil, nil, jev)
+		switch {
+		case tc.want == nil && p.PerHour24h != nil:
+			t.Errorf("window %q gives a 24-hour rate %v, want nil", tc.window, *p.PerHour24h)
+		case tc.want != nil:
+			figureIs(t, "per_hour_24h for window "+tc.window, p.PerHour24h, *tc.want)
+		}
 	}
 }
 
@@ -352,7 +435,7 @@ func TestCostProvidersStateCarriesTheRowsInOrder(t *testing.T) {
 		ClaudePlan: func() *ClaudePlan { return plan },
 		JevSpend:   func() *JevSpend { return jev },
 	})
-	h.costProviders = append(slices.Clip(h.costProviders), fake)
+	h.costProviders = append(slices.Clip(costProviderBuilders), fake)
 	h.pollSpend()
 	h.pollClaudePlan()
 	h.pollJevSpend()

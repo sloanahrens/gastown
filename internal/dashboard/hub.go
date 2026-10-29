@@ -55,8 +55,8 @@ type Hub struct {
 	detailCache map[string]detailEntry
 	detailGate  detailGate // bead-detail reads join Run's lifecycle (gt-fekq1)
 
-	// costProviders builds the Cost panel's provider rows, in order. NewHub
-	// sets it to costProviderBuilders; a test injects its own list here.
+	// costProviders builds the Cost panel's provider rows, in order. Nil is the
+	// default list (BuildCostProviders); a test injects its own list here.
 	costProviders []costProviderBuilder
 }
 
@@ -76,8 +76,6 @@ func NewHub(cfg Config) *Hub {
 		jevGood: map[string]time.Time{},
 		wake:    make(chan struct{}),
 		alerts:  NewAlerter(cfg.Now),
-
-		costProviders: costProviderBuilders,
 	}
 }
 
@@ -871,12 +869,23 @@ func (h *Hub) rebuildCostProvidersLocked() {
 		costProviderJev:      h.cfg.JevSpend == nil,
 	}
 	var rows []CostProvider
-	for _, p := range buildCostProviders(h.costProviders, h.cfg.Now(), h.state.Spend, h.state.ClaudePlan, h.state.CostCharts, h.state.JevSpend) {
+	for _, p := range h.costProviderRows() {
 		if !unwired[p.ID] {
 			rows = append(rows, p)
 		}
 	}
 	h.state.CostProviders = rows
+}
+
+// costProviderRows builds the panel's rows from the state the charts are built
+// from: the default list through BuildCostProviders, or the list a test handed
+// the hub so it can add a provider without touching the town's.
+func (h *Hub) costProviderRows() []CostProvider {
+	now := h.cfg.Now()
+	if h.costProviders == nil {
+		return BuildCostProviders(now, h.state.Spend, h.state.ClaudePlan, h.state.CostCharts, h.state.JevSpend)
+	}
+	return buildCostProviders(h.costProviders, now, h.state.Spend, h.state.ClaudePlan, h.state.CostCharts, h.state.JevSpend)
 }
 
 // pollJevSpend keeps the last good Jev row across a failed read, like the
