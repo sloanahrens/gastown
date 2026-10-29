@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -28,6 +29,10 @@ type TrackerCheck struct {
 	// getenv reads TRACKER_URL and the token. Nil is os.Getenv; tests answer
 	// from a map, so the check reads nothing from the host's environment.
 	getenv func(string) string
+
+	// http answers the probe. Nil is the client's own transport; tests serve
+	// the request in process, since a unit test opens no socket.
+	http *http.Client
 }
 
 // NewTrackerCheck creates the tracker readiness check.
@@ -74,6 +79,7 @@ func (c *TrackerCheck) Run(ctx *CheckContext) *CheckResult {
 		return res
 	}
 	cfg.Timeout = readyzTimeout
+	cfg.HTTP = c.http
 	tc, err := client.New(cfg)
 	if err != nil {
 		res.Status = StatusError

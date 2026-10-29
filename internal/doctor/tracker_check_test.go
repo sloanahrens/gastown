@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,18 +12,36 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// trackerEnv answers the tracker settings from a map, so the check under test
-// never reads the host's environment.
-func trackerEnv(env map[string]string) func(string) string {
-	return func(k string) string { return env[k] }
+// trackerTestURL is the endpoint the tests configure. Nothing listens on it:
+// the transport below answers the request in process, so no test opens a
+// socket.
+const trackerTestURL = "http://127.0.0.1:1"
+
+// handlerTransport serves each request with h in process, so the check and the
+// tracker client under it run their real request building and response
+// handling without a connection.
+type handlerTransport struct{ h http.Handler }
+
+func (tr handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	tr.h.ServeHTTP(rec, r)
+	resp := rec.Result()
+	resp.Request = r
+	return resp, nil
 }
 
-// trackerReadyServer is a tracker whose /readyz answers the given status code
-// and body; every other path is a 404, so a check that asks the wrong route
-// fails loudly.
-func trackerReadyServer(t *testing.T, code int, body string) *httptest.Server {
-	t.Helper()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// failingTransport is a tracker that cannot be reached: every request fails
+// the way a refused connection does.
+type failingTransport struct{}
+
+func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("connection refused")
+}
+
+// trackerReadyz answers /readyz with the given status code and body; every
+// other path is a 404, so a check that asks the wrong route fails loudly.
+func trackerReadyz(code int, body string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/readyz" {
 			http.NotFound(w, r)
 			return
@@ -30,9 +49,18 @@ func trackerReadyServer(t *testing.T, code int, body string) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(code)
 		_, _ = w.Write([]byte(body))
-	}))
-	t.Cleanup(ts.Close)
-	return ts
+	})
+}
+
+// newTrackerCheck is a check configured with a tracker endpoint and a token,
+// answered by transport.
+func newTrackerCheck(transport http.RoundTripper) *TrackerCheck {
+	c := NewTrackerCheck()
+	c.getenv = func(k string) string {
+		return map[string]string{"TRACKER_URL": trackerTestURL, "TRACKER_TOKEN": "trk_test"}[k]
+	}
+	c.http = &http.Client{Transport: transport}
+	return c
 }
 
 // trackerTown is a town whose route table puts one rig on the tracker.
@@ -44,9 +72,7 @@ func trackerTown(t *testing.T) string {
 // A ready tracker is OK, with the schema level the server reported.
 func TestTrackerCheckReadyIsOK(t *testing.T) {
 	t.Parallel()
-	ts := trackerReadyServer(t, http.StatusOK, `{"status":"ready","schema_level":3}`)
-	c := NewTrackerCheck()
-	c.getenv = trackerEnv(map[string]string{"TRACKER_URL": ts.URL, "TRACKER_TOKEN": "trk_test"})
+	c := newTrackerCheck(handlerTransport{trackerReadyz(http.StatusOK, `{"status":"ready","schema_level":3}`)})
 
 	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
 	if res.Status != StatusOK {
@@ -60,10 +86,8 @@ func TestTrackerCheckReadyIsOK(t *testing.T) {
 // A tracker that answers not ready is ERROR, carrying the server's reason.
 func TestTrackerCheckNotReadyIsError(t *testing.T) {
 	t.Parallel()
-	ts := trackerReadyServer(t, http.StatusServiceUnavailable,
-		`{"kind":"unavailable","message":"database does not accept writes"}`)
-	c := NewTrackerCheck()
-	c.getenv = trackerEnv(map[string]string{"TRACKER_URL": ts.URL, "TRACKER_TOKEN": "trk_test"})
+	c := newTrackerCheck(handlerTransport{trackerReadyz(http.StatusServiceUnavailable,
+		`{"kind":"unavailable","message":"database does not accept writes"}`)})
 
 	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
 	if res.Status != StatusError {
@@ -78,9 +102,7 @@ func TestTrackerCheckNotReadyIsError(t *testing.T) {
 // just the status code.
 func TestTrackerCheckStatusThatIsNotReadyIsError(t *testing.T) {
 	t.Parallel()
-	ts := trackerReadyServer(t, http.StatusOK, `{"status":"starting","schema_level":3}`)
-	c := NewTrackerCheck()
-	c.getenv = trackerEnv(map[string]string{"TRACKER_URL": ts.URL, "TRACKER_TOKEN": "trk_test"})
+	c := newTrackerCheck(handlerTransport{trackerReadyz(http.StatusOK, `{"status":"starting","schema_level":3}`)})
 
 	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
 	if res.Status != StatusError {
@@ -91,15 +113,10 @@ func TestTrackerCheckStatusThatIsNotReadyIsError(t *testing.T) {
 	}
 }
 
-// A tracker nothing listens on is ERROR, not a pass.
+// A tracker nothing answers for is ERROR, not a pass.
 func TestTrackerCheckUnreachableIsError(t *testing.T) {
 	t.Parallel()
-	ts := trackerReadyServer(t, http.StatusOK, `{"status":"ready","schema_level":3}`)
-	url := ts.URL
-	ts.Close()
-
-	c := NewTrackerCheck()
-	c.getenv = trackerEnv(map[string]string{"TRACKER_URL": url, "TRACKER_TOKEN": "trk_test"})
+	c := newTrackerCheck(failingTransport{})
 
 	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
 	if res.Status != StatusError {
@@ -120,6 +137,7 @@ func TestTrackerCheckNotApplicableWithoutTrackerRigs(t *testing.T) {
 		t.Errorf("read %s with no rig on the tracker; the check must not probe", k)
 		return ""
 	}
+	c.http = &http.Client{Transport: failingTransport{}}
 
 	res := c.Run(&CheckContext{TownRoot: town})
 	if res.Status != StatusSkipped {
@@ -135,7 +153,9 @@ func TestTrackerCheckNotApplicableWithoutTrackerRigs(t *testing.T) {
 func TestTrackerCheckMissingURLIsError(t *testing.T) {
 	t.Parallel()
 	c := NewTrackerCheck()
-	c.getenv = trackerEnv(map[string]string{"TRACKER_TOKEN": "trk_test"})
+	c.getenv = func(k string) string {
+		return map[string]string{"TRACKER_TOKEN": "trk_test"}[k]
+	}
 
 	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
 	if res.Status != StatusError {
@@ -151,7 +171,9 @@ func TestTrackerCheckMissingURLIsError(t *testing.T) {
 func TestTrackerCheckMissingTokenIsError(t *testing.T) {
 	t.Parallel()
 	c := NewTrackerCheck()
-	c.getenv = trackerEnv(map[string]string{"TRACKER_URL": "http://127.0.0.1:1"})
+	c.getenv = func(k string) string {
+		return map[string]string{"TRACKER_URL": trackerTestURL}[k]
+	}
 
 	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
 	if res.Status != StatusError {
@@ -169,7 +191,7 @@ func TestTrackerCheckUnreadableRoutesIsSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := NewTrackerCheck()
-	c.getenv = trackerEnv(nil)
+	c.getenv = func(string) string { return "" }
 
 	res := c.Run(&CheckContext{TownRoot: town})
 	if res.Status != StatusSkipped {
