@@ -742,9 +742,11 @@ const seatEndTestBound = 30 * time.Second
 // within seatEndTestBound.
 func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), seatEndTestBound)
+	defer cancel()
 	select {
 	case <-ch:
-	case <-time.After(seatEndTestBound):
+	case <-ctx.Done():
 		t.Fatalf("waiting for %s: still blocked after %s", what, seatEndTestBound)
 	}
 }
