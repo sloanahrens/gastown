@@ -18,7 +18,7 @@ func containerDownServices(t *testing.T, ctl *daemonControl) downServices {
 	return downServices{
 		supervisor:       ctl,
 		daemonRunning:    func(string) (bool, int, error) { t.Error("read a pid for a container town"); return false, 0, nil },
-		stopDaemon:       func(string) error { t.Error("signalled a pid for a container town"); return nil },
+		stopDaemon:       func(string) error { t.Error("signaled a pid for a container town"); return nil },
 		doltRunning:      func(string) (bool, int, error) { return false, 0, nil },
 		stopDolt:         func(string) error { return nil },
 		killImposters:    func(string) error { return nil },

@@ -448,7 +448,7 @@ func reportRigSessionsSkipped(rigNames []string, rigsErr error) {
 
 // stopContainerDaemon is gt down's daemon phase for a town whose daemon runs
 // in a container: the container stops through its supervisor's own compose
-// command, and no pid from daemon.lock or daemon.pid is signalled, because
+// command, and no pid from daemon.lock or daemon.pid is signaled, because
 // that number comes from the container's namespace and names nothing — or an
 // unrelated process — on this host (gt-qpeei.20). handled is false for every
 // other kind, which keeps the pid path gt down has always taken.
