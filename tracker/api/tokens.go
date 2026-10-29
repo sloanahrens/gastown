@@ -78,7 +78,8 @@ type RevokeTokensResult struct {
 }
 
 // validateTokenActor refuses an actor no token may be issued to: blank or
-// padded, over MaxTokenActorLen, or holding whitespace (so not one address).
+// padded, over MaxTokenActorLen, or holding whitespace or a control character
+// (so not one address).
 func validateTokenActor(actor string) error {
 	switch {
 	case strings.TrimSpace(actor) == "":
@@ -87,6 +88,8 @@ func validateTokenActor(actor string) error {
 		return Invalid("actor is %d bytes, at most %d", len(actor), MaxTokenActorLen)
 	case strings.ContainsFunc(actor, unicode.IsSpace):
 		return Invalid("actor %q holds whitespace; a seat address has none", actor)
+	case strings.ContainsFunc(actor, unicode.IsControl):
+		return Invalid("actor %q holds a control character; a seat address has none", actor)
 	}
 	return nil
 }

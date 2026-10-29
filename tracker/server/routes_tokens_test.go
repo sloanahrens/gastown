@@ -147,6 +147,7 @@ func TestTokenRoutesRefuseBodiesThatNameNothingUsable(t *testing.T) {
 		"issue with no actor":             {"/v1/tokens", `{}`},
 		"issue with a blank actor":        {"/v1/tokens", `{"actor":"  "}`},
 		"issue with a spaced actor":       {"/v1/tokens", `{"actor":"two seats"}`},
+		"issue with a control character":  {"/v1/tokens", `{"actor":"seat\u001bone"}`},
 		"issue with a long actor":         {"/v1/tokens", `{"actor":"` + long + `"}`},
 		"issue with a scope no token has": {"/v1/tokens", `{"actor":"a","scope":"root"}`},
 		"issue with an unknown field":     {"/v1/tokens", `{"actor":"a","reuse":true}`},
