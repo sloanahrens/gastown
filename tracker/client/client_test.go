@@ -313,6 +313,78 @@ func TestBaseURLMustBeLoopbackUnlessTLS(t *testing.T) {
 	}
 }
 
+// Plain http reaches the loopback IPs and the one allowed host, and no other
+// host; an allowed value that is a wildcard, a port or a scheme is refused.
+func TestPlainHTTPReachesOnlyLoopbackAndTheAllowedHost(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, base, allowed string
+		ok                  bool
+	}{
+		{"loopback IPv4", "http://127.0.0.1:7433", "", true},
+		{"loopback IPv6", "http://[::1]:7433", "", true},
+		{"allowed host", "http://tracker.internal:7433", "tracker.internal", true},
+		{"allowed host in another case", "http://Tracker.Internal:7433", "tracker.internal", true},
+		{"no allowed host", "http://tracker.internal:7433", "", false},
+		{"other host", "http://other.internal:7433", "tracker.internal", false},
+		{"allowed host as a prefix of another host", "http://tracker.internal.evil:7433", "tracker.internal", false},
+		{"allowed host as a suffix of another host", "http://evil.tracker.internal:7433", "tracker.internal", false},
+		{"wildcard subdomain value", "http://sub.tracker.internal:7433", "*.tracker.internal", false},
+		{"bare wildcard value", "http://tracker.internal:7433", "*", false},
+		{"bare wildcard value reaches any host", "http://anything.example:7433", "*", false},
+		{"allowed value with a port", "http://tracker.internal:7433", "tracker.internal:7433", false},
+		{"allowed value with a scheme", "http://tracker.internal:7433", "http://tracker.internal", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := New(Config{BaseURL: c.base, Token: "t", AllowHTTPHost: c.allowed})
+			if (err == nil) != c.ok {
+				t.Errorf("New(BaseURL=%q, AllowHTTPHost=%q) error = %v, want ok=%v", c.base, c.allowed, err, c.ok)
+			}
+		})
+	}
+}
+
+// https reaches any host whatever the allowed host is, so the allowed host
+// adds nothing to a TLS base URL.
+func TestHTTPSIsUnchangedByTheAllowedHost(t *testing.T) {
+	t.Parallel()
+	for _, allowed := range []string{"", "tracker.internal", "other.internal"} {
+		for _, base := range []string{"https://tracker.internal:443", "https://elsewhere.example:443"} {
+			if _, err := New(Config{BaseURL: base, Token: "t", AllowHTTPHost: allowed}); err != nil {
+				t.Errorf("New(BaseURL=%q, AllowHTTPHost=%q) = %v, want https accepted", base, allowed, err)
+			}
+		}
+	}
+}
+
+// A wildcard, port, scheme or path in the allowed value is a configuration
+// error for any base URL, so a misconfiguration is seen, not silently matched.
+func TestAMalformedAllowedHostIsRefusedWhateverTheScheme(t *testing.T) {
+	t.Parallel()
+	for _, allowed := range []string{"*", "*.tracker.internal", "tracker.internal:7433", "http://tracker.internal", "tracker.internal/x"} {
+		for _, base := range []string{"http://tracker.internal:7433", "https://tracker.internal:443"} {
+			if _, err := New(Config{BaseURL: base, Token: "t", AllowHTTPHost: allowed}); err == nil {
+				t.Errorf("New(BaseURL=%q, AllowHTTPHost=%q) succeeded, want the malformed allowed host refused", base, allowed)
+			}
+		}
+	}
+}
+
+func TestFromEnvCarriesTheAllowedHostIntoPlainHTTP(t *testing.T) {
+	t.Parallel()
+	cfg := FromEnv(func(k string) string {
+		return map[string]string{"TRACKER_URL": "http://tracker.internal:7433", "TRACKER_TOKEN": "t", "TRACKER_ALLOW_HTTP_HOST": "tracker.internal"}[k]
+	})
+	if cfg.AllowHTTPHost != "tracker.internal" {
+		t.Fatalf("FromEnv AllowHTTPHost = %q, want the TRACKER_ALLOW_HTTP_HOST value", cfg.AllowHTTPHost)
+	}
+	if _, err := New(cfg); err != nil {
+		t.Errorf("New(FromEnv) = %v, want plain http to the allowed host accepted", err)
+	}
+}
+
 func TestAllPagesThroughTheCursorAndStopsOnItsAbsence(t *testing.T) {
 	t.Parallel()
 	pages := map[string]struct {

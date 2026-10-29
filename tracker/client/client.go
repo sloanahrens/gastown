@@ -36,8 +36,12 @@ const (
 // Config configures a Client. Exactly one of Token and TokenFile is set.
 type Config struct {
 	// BaseURL is the service address. Plain http is accepted only to a
-	// literal loopback IP; anything else must be https.
+	// literal loopback IP or to AllowHTTPHost; anything else must be https.
 	BaseURL string
+	// AllowHTTPHost is the one host plain http may also reach: the
+	// control-plane host when it is not this machine. A single host name,
+	// no wildcard, no port; empty allows none.
+	AllowHTTPHost string
 	// Token is the bearer token itself, for callers that took it from their
 	// environment. TokenFile names a file holding it instead.
 	Token     string
@@ -58,10 +62,10 @@ type Config struct {
 	HTTP *http.Client
 }
 
-// FromEnv builds a Config from TRACKER_URL and either TRACKER_TOKEN_FILE or
-// TRACKER_TOKEN. It validates nothing; New does.
+// FromEnv builds a Config from TRACKER_URL, TRACKER_ALLOW_HTTP_HOST and either
+// TRACKER_TOKEN_FILE or TRACKER_TOKEN. It validates nothing; New does.
 func FromEnv(getenv func(string) string) Config {
-	cfg := Config{BaseURL: getenv("TRACKER_URL")}
+	cfg := Config{BaseURL: getenv("TRACKER_URL"), AllowHTTPHost: getenv("TRACKER_ALLOW_HTTP_HOST")}
 	if f := getenv("TRACKER_TOKEN_FILE"); f != "" {
 		cfg.TokenFile = f
 	} else {
@@ -87,7 +91,7 @@ type Client struct {
 // surrounding whitespace trimmed; an empty one is an error. Errors name the
 // file, never its contents.
 func New(cfg Config) (*Client, error) {
-	if err := checkBaseURL(cfg.BaseURL); err != nil {
+	if err := checkBaseURL(cfg.BaseURL, cfg.AllowHTTPHost); err != nil {
 		return nil, err
 	}
 	token := cfg.Token
@@ -162,8 +166,12 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // checkBaseURL accepts https anywhere and plain http only to a literal
-// loopback IP, so a token never crosses a network in the clear.
-func checkBaseURL(raw string) error {
+// loopback IP or to allowHTTPHost, so a token never crosses a network in the
+// clear.
+func checkBaseURL(raw, allowHTTPHost string) error {
+	if err := checkAllowHTTPHost(allowHTTPHost); err != nil {
+		return err
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		return fmt.Errorf("client: base URL %q is not a URL with a host", raw)
@@ -175,9 +183,25 @@ func checkBaseURL(raw string) error {
 		if ip := net.ParseIP(u.Hostname()); ip != nil && ip.IsLoopback() {
 			return nil
 		}
+		if allowHTTPHost != "" && strings.EqualFold(u.Hostname(), allowHTTPHost) {
+			return nil
+		}
 		return fmt.Errorf("client: base URL %q is plain http to a non-loopback host; use https", raw)
 	}
 	return fmt.Errorf("client: base URL %q must be http or https", raw)
+}
+
+// checkAllowHTTPHost refuses an allowed host that is not one plain host name.
+// A wildcard, a port, a scheme or a path would widen what plain http reaches,
+// so such a value is a configuration error, not a pattern to match.
+func checkAllowHTTPHost(h string) error {
+	if h == "" {
+		return nil
+	}
+	if strings.ContainsAny(h, "*:/@?#[] \t\r\n") {
+		return fmt.Errorf("client: allowed plain-http host %q must be one host name: no wildcard, port, scheme or path", h)
+	}
+	return nil
 }
 
 type tagKey struct{}
