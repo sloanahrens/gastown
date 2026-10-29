@@ -27,6 +27,9 @@ type Options struct {
 type Report struct {
 	Written map[string]int
 	Skipped map[string]int
+	// Synthesized lists the parent-child links Import added for dotted ids
+	// that Dolt holds none for, as "child -> parent".
+	Synthesized []string
 }
 
 // VerifyError is returned by Import when the written data does not match the
@@ -103,11 +106,18 @@ func importAll(ctx context.Context, tx pgx.Tx, ds *Dataset, opt Options, rep *Re
 			return fmt.Errorf("migrate: rig %s: %w", rig, err)
 		}
 	}
-	if err := copyIssues(ctx, tx, ds, rep); err != nil {
+	deps, synth := repairedDeps(ds)
+	if err := copyIssues(ctx, tx, ds, deps, rep); err != nil {
 		return err
 	}
-	if err := copyDeps(ctx, tx, ds, have, rep); err != nil {
+	if err := copyDeps(ctx, tx, deps, have, rep); err != nil {
 		return err
+	}
+	for _, d := range synth {
+		rep.Synthesized = append(rep.Synthesized, d.IssueID+" -> "+d.DependsOn)
+	}
+	if len(synth) > 0 {
+		rep.Written["dependencies.synthesized"] = len(synth)
 	}
 	if err := copyLabels(ctx, tx, ds, have, rep); err != nil {
 		return err
@@ -121,8 +131,8 @@ func importAll(ctx context.Context, tx pgx.Tx, ds *Dataset, opt Options, rep *Re
 	return writeSettings(ctx, tx, ds, rep)
 }
 
-func copyIssues(ctx context.Context, tx pgx.Tx, ds *Dataset, rep *Report) error {
-	parents := parentsOf(ds.Deps)
+func copyIssues(ctx context.Context, tx pgx.Tx, ds *Dataset, deps []DepRow, rep *Report) error {
+	parents := parentsOf(deps)
 	rows := make([][]any, 0, len(ds.Issues))
 	for _, is := range ds.Issues {
 		rig, _, _ := strings.Cut(is.ID, "-")
@@ -155,10 +165,10 @@ func copyIssues(ctx context.Context, tx pgx.Tx, ds *Dataset, rep *Report) error 
 	return nil
 }
 
-func copyDeps(ctx context.Context, tx pgx.Tx, ds *Dataset, have map[string]bool, rep *Report) error {
+func copyDeps(ctx context.Context, tx pgx.Tx, deps []DepRow, have map[string]bool, rep *Report) error {
 	seen := map[[2]string]bool{}
 	var rows [][]any
-	for _, d := range ds.Deps {
+	for _, d := range deps {
 		key := [2]string{d.IssueID, d.DependsOn}
 		switch {
 		case !have[d.IssueID]:

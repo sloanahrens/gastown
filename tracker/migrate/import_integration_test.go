@@ -437,3 +437,59 @@ func TestAnImportWithZeroTimestampsIsRefusedAndWritesNothing(t *testing.T) {
 		t.Errorf("rows after the refused import = %d, %v; want 0", n, err)
 	}
 }
+
+// repairSample is sample() plus a dotted child with no dependency rows at all,
+// whose prefix gt-p is an issue of the dataset.
+func repairSample() *Dataset {
+	ds := sample()
+	ds.Issues = append(ds.Issues, IssueRow{ID: "gt-p.2", Title: "orphan child", Status: "open", Type: "task", CreatedAt: at(2), UpdatedAt: at(2)})
+	return ds
+}
+
+func TestImportLinksADottedChildWithNoParentRowAndVerifies(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool, ds := newPool(t), repairSample()
+	rep, err := Import(ctx, pool, ds, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Written["dependencies.synthesized"] != 1 || strings.Join(rep.Synthesized, ",") != "gt-p.2 -> gt-p" {
+		t.Errorf("synthesized = %v, written %d; want gt-p.2 -> gt-p, once", rep.Synthesized, rep.Written["dependencies.synthesized"])
+	}
+	var parent string
+	if err := pool.QueryRow(ctx, "SELECT coalesce(parent_id,'') FROM tracker.issues WHERE id='gt-p.2'").Scan(&parent); err != nil || parent != "gt-p" {
+		t.Errorf("parent of gt-p.2 = %q, %v; want gt-p from the synthesized link", parent, err)
+	}
+	diff, err := Verify(ctx, pool, ds)
+	if err != nil || !diff.Equal() {
+		t.Fatalf("Verify = %v, %v; want equal", diff.Problems, err)
+	}
+}
+
+func TestVerifyFailsWhenARealOrARepairedLinkIsDropped(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for name, tc := range map[string]struct{ sql, want string }{
+		"a real link":       {"DELETE FROM tracker.dependencies WHERE issue_id = 'gt-a' AND depends_on = 'gt-b'", "gt-a"},
+		"the repaired link": {"DELETE FROM tracker.dependencies WHERE issue_id = 'gt-p.2'", "gt-p.2"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			pool, ds := newPool(t), repairSample()
+			if _, err := Import(ctx, pool, ds, Options{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, tc.sql); err != nil {
+				t.Fatal(err)
+			}
+			diff, err := Verify(ctx, pool, ds)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff.Equal() || !strings.Contains(strings.Join(diff.Problems, "\n"), tc.want) {
+				t.Errorf("Verify after dropping %s = %v, want a problem naming %q", name, diff.Problems, tc.want)
+			}
+		})
+	}
+}

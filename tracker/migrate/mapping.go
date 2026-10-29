@@ -29,6 +29,50 @@ func parentsOf(deps []DepRow) map[string]string {
 	return out
 }
 
+// dottedParent is the parent a dotted child id names: X for X.N, the part
+// before its last dot. It reports false for an id with no dot, nothing before
+// the dot, or nothing after it.
+func dottedParent(id string) (string, bool) {
+	i := strings.LastIndex(id, ".")
+	if i <= 0 || i == len(id)-1 {
+		return "", false
+	}
+	return id[:i], true
+}
+
+// repairedDeps returns the dependency rows to import and the parent-child links
+// it synthesizes. A dotted id X.N whose prefix X is an issue of the dataset
+// gets one parent-child row to X when it has no dependency row at all: bd lists
+// such a child under X, but the tracker's children-of reads only the dependency
+// rows, so the two would disagree. An id that already has a row keeps exactly
+// its own rows, so no row is ever replaced. A wisp child is repaired only when
+// its parent is a wisp too; the data says which rows are wisps, so no wisp is
+// left unjudged.
+func repairedDeps(ds *Dataset) (deps, synthesized []DepRow) {
+	isWisp := map[string]bool{}
+	for _, is := range ds.Issues {
+		isWisp[is.ID] = is.Wisp
+	}
+	hasRow := map[string]bool{}
+	for _, d := range ds.Deps {
+		if d.DependsOn != "" {
+			hasRow[d.IssueID] = true
+		}
+	}
+	for _, is := range ds.Issues {
+		parent, ok := dottedParent(is.ID)
+		if !ok || hasRow[is.ID] {
+			continue
+		}
+		parentWisp, known := isWisp[parent]
+		if !known || (is.Wisp && !parentWisp) {
+			continue
+		}
+		synthesized = append(synthesized, DepRow{IssueID: is.ID, DependsOn: parent, Type: "parent-child"})
+	}
+	return append(slices.Clone(ds.Deps), synthesized...), synthesized
+}
+
 // splitConfig separates memories (keys under "kv.") from rig configuration.
 func splitConfig(all map[string]string) (cfg, kv map[string]string) {
 	cfg, kv = map[string]string{}, map[string]string{}

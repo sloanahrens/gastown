@@ -119,6 +119,9 @@ func runWith(ctx context.Context, args []string, getenv func(string) string, std
 	}
 	printCounts(stdout, "written", rep.Written)
 	printCounts(stdout, "skipped", rep.Skipped)
+	for _, link := range rep.Synthesized {
+		fmt.Fprintln(stdout, "synthesized parent-child link:", link)
+	}
 	// The import verified itself before committing; check the committed
 	// state once more, from the pool, as the final word.
 	diff, err := migrate.Verify(ctx, pool, ds)
