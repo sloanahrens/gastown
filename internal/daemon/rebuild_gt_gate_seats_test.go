@@ -83,7 +83,7 @@ func TestRebuildGTStarvedEscalation_NamesTheBlockingSeats(t *testing.T) {
 	defer holdGateSlot(t, town, 0, "gastown/post-land")()
 
 	busy, _ := d.rebuildGTGate()
-	d.rebuildGTBlock.open(time.Now().Add(-(rebuildGTStarveAfter + time.Minute)))
+	d.rebuildGTBlock.open(time.Now().Add(-(d.rebuildGTInstallCap() + time.Minute)))
 	cycle := d.startDogCycle("rebuild_gt")
 	defer cycle.close()
 	d.rebuildGTNoteBlocked(cycle, true, "not quiet: "+busy)

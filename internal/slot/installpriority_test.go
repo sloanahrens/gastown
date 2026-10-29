@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/installpending"
 )
 
@@ -207,5 +208,60 @@ func TestInstallPriority_DefaultCapApplies(t *testing.T) {
 	}
 	if DefaultMaxInstallYield != 30*time.Minute {
 		t.Fatalf("DefaultMaxInstallYield = %s, want the install job's 30m starvation cliff", DefaultMaxInstallYield)
+	}
+}
+
+// TestInstallPriority_InstallYieldIsTheCapApplied: InstallYield is the value the
+// post-landing acquisition is bounded by and the value the install job's
+// starvation alarm fires at, so it must be the configured cap when one is set
+// and the default when it is not (gt-pa4tg).
+func TestInstallPriority_InstallYieldIsTheCapApplied(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		pool Pool
+		want time.Duration
+	}{
+		{"unset means the default", Pool{Slots: 4}, DefaultMaxInstallYield},
+		{"a set cap is reported as set", Pool{Slots: 4, MaxInstallYield: 45 * time.Minute}, 45 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.pool.InstallYield(); got != tc.want {
+				t.Fatalf("InstallYield = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPoolFromConfig_InstallYieldStaysAtTheDefault: PoolFromConfig is how every
+// pool the town runs is built, and it has no field for MaxInstallYield, so the
+// cap the install job reads is the default in every configuration the town can
+// express. The day a settings knob reaches this field, this test fails and the
+// alarm must be taught to follow it before the two can disagree (gt-pa4tg).
+func TestPoolFromConfig_InstallYieldStaysAtTheDefault(t *testing.T) {
+	t.Parallel()
+	slots, reserved, fullSuites := 4, 1, 2
+	cases := []struct {
+		name string
+		cg   *config.ContainerGateThresholds
+	}{
+		{"nil block", nil},
+		{"empty block", &config.ContainerGateThresholds{}},
+		{"every knob set", &config.ContainerGateThresholds{
+			Slots:           &slots,
+			ReservedForGate: &reserved,
+			MaxGateYield:    "10m",
+			MaxFullSuites:   &fullSuites,
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := PoolFromConfig(tc.cg).InstallYield(); got != DefaultMaxInstallYield {
+				t.Fatalf("PoolFromConfig install yield = %s, want the default %s: a configurable cap needs the install job's alarm to read it", got, DefaultMaxInstallYield)
+			}
+		})
 	}
 }
