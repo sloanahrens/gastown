@@ -157,7 +157,7 @@ const dashVerdictTTL = 5 * time.Minute
 // nothing either and is stale, because its verdicts are not ones the page can
 // present as current.
 type dashVerdicts struct {
-	byBead map[string]specdispatch.LedgerVerdict
+	byBead map[string]specdispatch.Verdict
 	at     time.Time
 	stale  bool
 }
@@ -192,7 +192,7 @@ func (r *dashQueueReader) readVerdicts(now time.Time) dashVerdicts {
 // keeps that shape and still carries the verdict's fields, so the page can say
 // why the dispatcher passed it over; a planning or failed class fills the
 // fields and changes no shape.
-func dashOverlayVerdict(row *dashboard.QueueBead, verdicts map[string]specdispatch.LedgerVerdict) {
+func dashOverlayVerdict(row *dashboard.QueueBead, verdicts map[string]specdispatch.Verdict) {
 	v, ok := verdicts[row.ID]
 	if !ok {
 		return

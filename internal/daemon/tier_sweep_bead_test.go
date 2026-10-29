@@ -28,13 +28,13 @@ func tierSweepWriteTestLog(t *testing.T, body string) string {
 // template's sections, the acceptance items and the Size. It is LintShape, the
 // check the sweep itself asks: the target-path half needs a rig's repo, which
 // the sweep's text is not written against here (gt-7t1im).
-func lintTierSweepBead(opts beads.CreateOptions) specdispatch.Verdict {
+func lintTierSweepBead(opts beads.CreateOptions) specdispatch.LintVerdict {
 	return lintTierSweepBeadAgainst(opts, specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"})
 }
 
 // lintTierSweepBeadAgainst lints the bead against tmpl, the template the
 // dispatcher would read for the operator's configured path.
-func lintTierSweepBeadAgainst(opts beads.CreateOptions, tmpl specdispatch.Template) specdispatch.Verdict {
+func lintTierSweepBeadAgainst(opts beads.CreateOptions, tmpl specdispatch.Template) specdispatch.LintVerdict {
 	return specdispatch.LintShape(specdispatch.Spec{
 		Title:       opts.Title,
 		Labels:      opts.Labels,

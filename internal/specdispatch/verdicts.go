@@ -26,12 +26,10 @@ type Entry struct {
 	Reason string
 }
 
-// LedgerVerdict is what the ledger remembers of a bead the dispatcher did not
+// Verdict is what the ledger remembers of a bead the dispatcher did not
 // sling: its latest class and reason, the tick that first saw it, the tick that
-// last saw it, and how many consecutive ticks it has stood (gt-n05o0). The spec
-// named this record Verdict, the name this package's lint answer already holds,
-// so the record keeps the qualifier instead (gt-97ar6).
-type LedgerVerdict struct {
+// last saw it, and how many consecutive ticks it has stood (gt-n05o0).
+type Verdict struct {
 	Bead    string    `json:"bead"`
 	Rig     string    `json:"rig"`
 	Class   string    `json:"class"`
@@ -43,8 +41,8 @@ type LedgerVerdict struct {
 
 // Ledger is the last dispatch tick's verdicts, keyed by bead id.
 type Ledger struct {
-	SavedAt  time.Time                `json:"saved_at"`
-	Verdicts map[string]LedgerVerdict `json:"verdicts"`
+	SavedAt  time.Time          `json:"saved_at"`
+	Verdicts map[string]Verdict `json:"verdicts"`
 }
 
 // Record replaces the ledger with one tick's entries at at: a bead the ledger
@@ -52,9 +50,9 @@ type Ledger struct {
 // entries is dropped, because the ledger states what the tick saw and a bead
 // no longer seen is one the dispatcher has taken or stopped considering.
 func (l *Ledger) Record(at time.Time, entries []Entry) {
-	next := make(map[string]LedgerVerdict, len(entries))
+	next := make(map[string]Verdict, len(entries))
 	for _, e := range entries {
-		v := LedgerVerdict{
+		v := Verdict{
 			Bead:    e.Bead,
 			Rig:     e.Rig,
 			Class:   e.Class,
@@ -108,7 +106,7 @@ func (e *CorruptLedgerError) Unwrap() error { return e.Err }
 // parse comes back as a CorruptLedgerError, which tells the caller the file is
 // worth replacing rather than leaving in place.
 func LoadLedger(path string) (*Ledger, error) {
-	empty := func() *Ledger { return &Ledger{Verdicts: map[string]LedgerVerdict{}} }
+	empty := func() *Ledger { return &Ledger{Verdicts: map[string]Verdict{}} }
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -121,7 +119,7 @@ func LoadLedger(path string) (*Ledger, error) {
 		return empty(), &CorruptLedgerError{Path: path, Err: err}
 	}
 	if l.Verdicts == nil {
-		l.Verdicts = map[string]LedgerVerdict{}
+		l.Verdicts = map[string]Verdict{}
 	}
 	return &l, nil
 }
@@ -131,7 +129,7 @@ func LoadLedger(path string) (*Ledger, error) {
 func (l *Ledger) Save(path string) error {
 	rec := Ledger{SavedAt: l.SavedAt, Verdicts: l.Verdicts}
 	if rec.Verdicts == nil {
-		rec.Verdicts = map[string]LedgerVerdict{}
+		rec.Verdicts = map[string]Verdict{}
 	}
 	if err := atomicfile.EnsureDirAndWriteJSON(path, rec); err != nil {
 		return fmt.Errorf("save verdict ledger %s: %w", path, err)

@@ -472,7 +472,7 @@ func TestDashQueueOverlaysTheDispatchersSkippedVerdict(t *testing.T) {
 	}}
 	r := queueReaderOver(map[string]dashQueueStore{"gastown": gastown}, "gastown")
 	r.verdicts = func() (*specdispatch.Ledger, error) {
-		return &specdispatch.Ledger{SavedAt: since.Add(time.Minute), Verdicts: map[string]specdispatch.LedgerVerdict{
+		return &specdispatch.Ledger{SavedAt: since.Add(time.Minute), Verdicts: map[string]specdispatch.Verdict{
 			"gt-1": {Bead: "gt-1", Rig: "gastown", Class: specVerdictSkipped,
 				Reason: "overlap hold: gt-2 is in progress", FirstAt: since, Ticks: 3},
 		}}, nil
@@ -513,7 +513,7 @@ func TestDashQueueKeepsAHeldOrParkedShapeWithTheVerdict(t *testing.T) {
 	r := queueReaderOver(map[string]dashQueueStore{"gastown": gastown, "mango": mango}, "gastown", "mango")
 	r.parked = func(rig string) bool { return rig == "mango" }
 	r.verdicts = func() (*specdispatch.Ledger, error) {
-		return &specdispatch.Ledger{SavedAt: at, Verdicts: map[string]specdispatch.LedgerVerdict{
+		return &specdispatch.Ledger{SavedAt: at, Verdicts: map[string]specdispatch.Verdict{
 			"gt-held":  {Bead: "gt-held", Class: specVerdictSkipped, Reason: "overlap hold", FirstAt: at, Ticks: 1},
 			"gt-rough": {Bead: "gt-rough", Class: specVerdictFailed, Reason: "the tick failed it", FirstAt: at, Ticks: 2},
 			"ma-1":     {Bead: "ma-1", Class: specVerdictDeferred, Reason: "the seat is busy", FirstAt: at, Ticks: 4},
@@ -546,7 +546,7 @@ func TestDashQueueFillsThePlanningVerdictWithoutChangingTheShape(t *testing.T) {
 	st := &fakeQueueStore{ready: []*beads.Issue{{ID: "gt-1", Title: "needs planning", Type: "task", Description: dashesShape}}}
 	r := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown")
 	r.verdicts = func() (*specdispatch.Ledger, error) {
-		return &specdispatch.Ledger{SavedAt: at, Verdicts: map[string]specdispatch.LedgerVerdict{
+		return &specdispatch.Ledger{SavedAt: at, Verdicts: map[string]specdispatch.Verdict{
 			"gt-1": {Bead: "gt-1", Class: specVerdictPlanning, Reason: "label needs-planning", FirstAt: at, Ticks: 2},
 		}}, nil
 	}
@@ -573,7 +573,7 @@ func TestDashQueueIgnoresAnOldVerdictLedger(t *testing.T) {
 	st := &fakeQueueStore{ready: []*beads.Issue{{ID: "gt-1", Title: "shaped", Type: "task", Description: dashesShape}}}
 	r := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown")
 	r.verdicts = func() (*specdispatch.Ledger, error) {
-		return &specdispatch.Ledger{SavedAt: saved, Verdicts: map[string]specdispatch.LedgerVerdict{
+		return &specdispatch.Ledger{SavedAt: saved, Verdicts: map[string]specdispatch.Verdict{
 			"gt-1": {Bead: "gt-1", Class: specVerdictSkipped, Reason: "overlap hold", FirstAt: saved, Ticks: 2},
 		}}, nil
 	}

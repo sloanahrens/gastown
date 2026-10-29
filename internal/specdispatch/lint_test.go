@@ -286,10 +286,10 @@ func TestLintListsEveryRefusalInOrder(t *testing.T) {
 // refusal, or the planning route, in seat-refill's own text (gt-cq5gb).
 func TestVerdictShapeNote(t *testing.T) {
 	t.Parallel()
-	if got := (Verdict{Route: RouteDispatch}).ShapeNote(); got != "" {
+	if got := (LintVerdict{Route: RouteDispatch}).ShapeNote(); got != "" {
 		t.Errorf("clean verdict note = %q, want empty", got)
 	}
-	planning := Verdict{Route: RoutePlanning, Field: "size", Reason: "size says: needs planning"}
+	planning := LintVerdict{Route: RoutePlanning, Field: "size", Reason: "size says: needs planning"}
 	if got := planning.ShapeNote(); got != "SHAPE: needs planning" {
 		t.Errorf("planning note = %q", got)
 	}
@@ -301,7 +301,7 @@ func TestVerdictShapeNote(t *testing.T) {
 		t.Errorf("refusal note = %q", got)
 	}
 	// A refused verdict with no refusals still renders a note.
-	if got := (Verdict{Route: RouteRefuse}).ShapeNote(); got != "SHAPE: refused" {
+	if got := (LintVerdict{Route: RouteRefuse}).ShapeNote(); got != "SHAPE: refused" {
 		t.Errorf("empty refusal note = %q", got)
 	}
 }
@@ -312,10 +312,10 @@ func TestVerdictShapeNote(t *testing.T) {
 // (gt-f8ppx).
 func TestVerdictUnshapedReason(t *testing.T) {
 	t.Parallel()
-	if got := (Verdict{Route: RouteDispatch}).UnshapedReason(); got != "" {
+	if got := (LintVerdict{Route: RouteDispatch}).UnshapedReason(); got != "" {
 		t.Errorf("clean verdict reason = %q, want empty", got)
 	}
-	if got := (Verdict{Route: RoutePlanning, Field: "size", Reason: "size says: needs planning"}).UnshapedReason(); got != "" {
+	if got := (LintVerdict{Route: RoutePlanning, Field: "size", Reason: "size says: needs planning"}).UnshapedReason(); got != "" {
 		t.Errorf("planning verdict reason = %q, want empty", got)
 	}
 

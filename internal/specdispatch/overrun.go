@@ -38,7 +38,7 @@ type OverrunFacts struct {
 	// number sorts as.
 	Type     string
 	Priority int
-	// Shaped is the shape lint's answer for the bead (Verdict.Clean), the same
+	// Shaped is the shape lint's answer for the bead (LintVerdict.Clean), the same
 	// predicate the dispatcher gates a candidate on.
 	Shaped bool
 	// Labels is the bead's label count: the box is one label, the operator's or
