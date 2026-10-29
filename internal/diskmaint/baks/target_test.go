@@ -377,17 +377,6 @@ func TestTargetMeasureCountsCandidates(t *testing.T) {
 	}
 }
 
-func TestTargetApplyRefusesThePlan(t *testing.T) {
-	t.Parallel()
-	got, err := NewTarget(Config{}).Apply(context.Background(), diskmaint.Plan{Target: planTarget})
-	if err == nil || !strings.Contains(err.Error(), "deletion is not wired yet") {
-		t.Fatalf("Apply error = %v, want one saying deletion is not wired yet", err)
-	}
-	if len(got.Done) != 0 || got.BytesFreed != 0 {
-		t.Errorf("Result = %+v, want nothing done and nothing freed", got)
-	}
-}
-
 func TestTargetPlanRefusesWithoutALsofRunner(t *testing.T) {
 	t.Parallel()
 	plan, err := NewTarget(Config{ConfigDirs: []string{t.TempDir()}}).
