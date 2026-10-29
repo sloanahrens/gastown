@@ -167,57 +167,83 @@ func TestCopyFixtureFailsWhenTheFixtureIsMissing(t *testing.T) {
 	}
 }
 
-// TestCopyTreeKeepsTheLayoutOfARelativelyNamedFixture: an operator names the fixture relatively as
-// readily as absolutely, and the walk reports the entry paths with the root as it was named, so the
-// root must be stripped by filepath.Rel. A copy that misplaced .beads would leave bd in it answering
-// from a database above the copy (gt-p85pw.87).
-func TestCopyTreeKeepsTheLayoutOfARelativelyNamedFixture(t *testing.T) {
-	work := t.TempDir()
-	mustWrite(t, filepath.Join(work, "fixture", ".beads", "config.yaml"), "prefix: fx\n")
-	mustWrite(t, filepath.Join(work, "fixture", "notes.txt"), "row data\n")
-	t.Chdir(work)
+// TestCopyTargetKeepsTheFixtureLayoutForAnyRootSpelling: the walk reports each entry's path with the
+// root as the operator wrote it, so where it lands must come from filepath.Rel; trimming the root as
+// a string prefix leaves part of the fixture's own name in the copy for ".", "./x" and "x/."
+// (gt-p85pw.87).
+func TestCopyTargetKeepsTheFixtureLayoutForAnyRootSpelling(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		src  string
+		path string
+		want string
 	}{
-		{"a relative name", "fixture"},
-		{"a dotted relative name", "./fixture"},
-		{"a relative name with a trailing dot", "fixture/."},
+		{"absolute root", "/f/fixture", "/f/fixture/.beads/config.yaml", "/copy/.beads/config.yaml"},
+		{"relative root", "fixture", "fixture/.beads/config.yaml", "/copy/.beads/config.yaml"},
+		{"dotted relative root", "./fixture", "fixture/.beads/config.yaml", "/copy/.beads/config.yaml"},
+		{"root with a trailing dot", "fixture/.", "fixture/.beads/config.yaml", "/copy/.beads/config.yaml"},
+		{"the current directory", ".", ".beads/config.yaml", "/copy/.beads/config.yaml"},
+		{"the root itself", ".", ".", "/copy"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			dst := t.TempDir()
-			if err := copyTree(tc.src, dst); err != nil {
-				t.Fatalf("copyTree(%q): %v", tc.src, err)
+			t.Parallel()
+			got, err := copyTarget(tc.src, "/copy", tc.path)
+			if err != nil {
+				t.Fatalf("copyTarget(%q, %q) = %v, want the entry's place in the copy", tc.src, tc.path, err)
 			}
-			if got := readFile(t, filepath.Join(dst, ".beads", "config.yaml")); got != "prefix: fx\n" {
-				t.Errorf("copy of %q holds %q at .beads/config.yaml, want the fixture's file there", tc.src, got)
-			}
-			if got := readFile(t, filepath.Join(dst, "notes.txt")); got != "row data\n" {
-				t.Errorf("copy of %q holds %q at notes.txt, want the fixture's file there", tc.src, got)
-			}
-			if got := fileNames(t, dst); !reflect.DeepEqual(got, []string{".beads", "notes.txt"}) {
-				t.Errorf("copy of %q holds %v at its root, want only the fixture's entries", tc.src, got)
+			if got := filepath.ToSlash(got); got != tc.want {
+				t.Errorf("copyTarget(%q, %q) = %s, want %s", tc.src, tc.path, got, tc.want)
 			}
 		})
 	}
 }
 
-// TestCopyTreeCopiesTheCurrentDirectory: "." is the fixture the operator is standing in, and its
-// entries belong at the copy's root, not one level down.
-func TestCopyTreeCopiesTheCurrentDirectory(t *testing.T) {
+// TestCopyTargetRefusesAnEntryOutsideTheFixture: an entry filepath.Rel places outside the fixture
+// would write outside the copy, so the copy is refused instead.
+func TestCopyTargetRefusesAnEntryOutsideTheFixture(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{"elsewhere/a.txt", "/f/fixture/../a.txt"} {
+		if got, err := copyTarget("/f/fixture", "/copy", path); err == nil {
+			t.Errorf("copyTarget(%q) = %s, want a refusal", path, got)
+		}
+	}
+}
+
+// TestCopyTreeCopiesARelativelyNamedFixture: an operator names the fixture relative to where they
+// stand, and the copy must still hold the fixture's .beads at its root; a copy that misplaced it
+// would leave bd in it answering from a database above the copy (gt-p85pw.87).
+func TestCopyTreeCopiesARelativelyNamedFixture(t *testing.T) {
+	t.Parallel()
 	fixture := t.TempDir()
 	mustWrite(t, filepath.Join(fixture, ".beads", "config.yaml"), "prefix: fx\n")
-	t.Chdir(fixture)
-	dst := t.TempDir()
-	if err := copyTree(".", dst); err != nil {
-		t.Fatalf("copyTree(.): %v", err)
+	mustWrite(t, filepath.Join(fixture, "notes.txt"), "row data\n")
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
 	}
-	if got := readFile(t, filepath.Join(dst, ".beads", "config.yaml")); got != "prefix: fx\n" {
-		t.Errorf("copy of . holds %q at .beads/config.yaml, want the fixture's file there", got)
+	rel, err := filepath.Rel(cwd, fixture)
+	if err != nil {
+		t.Fatalf("path to the fixture from %s: %v", cwd, err)
 	}
-	if got := fileNames(t, dst); !reflect.DeepEqual(got, []string{".beads"}) {
-		t.Errorf("copy of . holds %v at its root, want only .beads", got)
+	for _, src := range []string{rel, "." + string(filepath.Separator) + rel} {
+		t.Run(src, func(t *testing.T) {
+			t.Parallel()
+			dst := t.TempDir()
+			if err := copyTree(src, dst); err != nil {
+				t.Fatalf("copyTree(%q): %v", src, err)
+			}
+			if got := readFile(t, filepath.Join(dst, ".beads", "config.yaml")); got != "prefix: fx\n" {
+				t.Errorf("copy of %q holds %q at .beads/config.yaml, want the fixture's file there", src, got)
+			}
+			if got := readFile(t, filepath.Join(dst, "notes.txt")); got != "row data\n" {
+				t.Errorf("copy of %q holds %q at notes.txt, want the fixture's file there", src, got)
+			}
+			if got := fileNames(t, dst); !reflect.DeepEqual(got, []string{".beads", "notes.txt"}) {
+				t.Errorf("copy of %q holds %v at its root, want only the fixture's entries", src, got)
+			}
+		})
 	}
 }
 

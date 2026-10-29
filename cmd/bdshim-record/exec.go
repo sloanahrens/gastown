@@ -138,25 +138,16 @@ func scratchInsideFixture(fixture, scratch string) (bool, error) {
 	}
 }
 
-// copyTree copies the directories and regular files under src into dst. Each entry lands at the path
-// filepath.Rel names, so the fixture keeps its layout when the operator names it relatively (".",
-// "./x", "x/.") instead of as an absolute path. Any other kind of entry is refused: a symlink could
-// point the copy back at the live town.
+// copyTree copies the directories and regular files under src into dst, each at the place copyTarget
+// names. Any other kind of entry is refused: a symlink could point the copy back at the live town.
 func copyTree(src, dst string) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(src, path)
+		target, err := copyTarget(src, dst, path)
 		if err != nil {
 			return err
-		}
-		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("fixture entry %s is outside the fixture %s", path, src)
-		}
-		target := dst
-		if rel != "." {
-			target = filepath.Join(dst, rel)
 		}
 		switch {
 		case d.IsDir():
@@ -167,6 +158,23 @@ func copyTree(src, dst string) error {
 			return fmt.Errorf("fixture entry %s is neither a directory nor a regular file", path)
 		}
 	})
+}
+
+// copyTarget returns where an entry the walk reports at path lands under dst. The walk reports the
+// root as the operator wrote it, so the entry's name inside the fixture comes from filepath.Rel: a
+// fixture named "." or "./x" would otherwise keep part of its own name in the copy (gt-p85pw.87).
+func copyTarget(src, dst, path string) (string, error) {
+	rel, err := filepath.Rel(src, path)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("fixture entry %s is outside the fixture %s", path, src)
+	}
+	if rel == "." {
+		return dst, nil
+	}
+	return filepath.Join(dst, rel), nil
 }
 
 // copyFile copies one regular file to dst, which must not exist yet.
