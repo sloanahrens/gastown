@@ -370,10 +370,11 @@ func TestWithSlotForCommandSkipsADeclaredContainerFreeCommand(t *testing.T) {
 	t.Parallel()
 	for _, cmd := range []string{
 		"GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh",
-		"cd /w && GT_TEST_DOCKER=0 make test",
-		"make lint; GT_TEST_DOCKER=0 make test",
-		"true | GT_TEST_DOCKER=0 make test",
 		"GT_TEST_DOCKER=0",
+		"  GT_TEST_DOCKER=0 make test  ",
+		"GT_TEST_DOCKER=0 make test && GT_TEST_DOCKER=0 make lint",
+		"GT_TEST_DOCKER=0 make test; GT_TEST_DOCKER=0 make lint",
+		"GT_TEST_DOCKER=0 make test\nGT_TEST_DOCKER=0 make lint",
 	} {
 		t.Run(cmd, func(t *testing.T) {
 			t.Parallel()
@@ -405,7 +406,9 @@ func TestWithSlotForCommandSkipsADeclaredContainerFreeCommand(t *testing.T) {
 
 // A command whose text does not declare itself container-free keeps the slot
 // exactly as WithSlot gives it: its tests may start containers, and that is
-// not visible in the command (gt-7k0hz).
+// not visible in the command (gt-7k0hz). A line where only one segment
+// declares the assignment keeps the slot too: the other segment may start
+// containers and inherits the ambient value (gt-7k0hz).
 func TestWithSlotForCommandKeepsTheSlotOtherwise(t *testing.T) {
 	t.Parallel()
 	for _, cmd := range []string{
@@ -415,6 +418,13 @@ func TestWithSlotForCommandKeepsTheSlotOtherwise(t *testing.T) {
 		"GT_TEST_DOCKER=1 make test",
 		"GT_TEST_DOCKER=01 make test",
 		"MY_GT_TEST_DOCKER=0 make test",
+		`GT_TEST_DOCKER="0" make test`,
+		"echo GT_TEST_DOCKER=0; make test",
+		"GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh; make test",
+		"cd /w && GT_TEST_DOCKER=0 make test",
+		"make lint; GT_TEST_DOCKER=0 make test",
+		"true | GT_TEST_DOCKER=0 make test",
+		"GT_TEST_DOCKER=0 make test | tee log",
 	} {
 		t.Run(cmd, func(t *testing.T) {
 			t.Parallel()

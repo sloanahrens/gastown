@@ -337,8 +337,16 @@ func WithSlot(g CommandGate, townRoot, role string) CommandGate {
 }
 
 // WithSlotForCommand returns WithSlot(g, townRoot, role) unless command
-// declares itself container-free with a GT_TEST_DOCKER=0 word of its own, in
-// which case g is returned as it is and no step takes a slot.
+// declares itself container-free, in which case g is returned as it is and no
+// step takes a slot.
+//
+// The declaration is GT_TEST_DOCKER=0 as the leading assignment on every
+// segment of the command (`GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh`),
+// so each command the line runs sets the variable for itself. A segment
+// without one keeps the slot even when another segment declares it: in `make
+// lint; GT_TEST_DOCKER=0 make test` the `make lint` run, and in
+// `GT_TEST_DOCKER=0 bash x.sh; make test` the `make test` run, carries
+// whatever GT_TEST_DOCKER the ambient environment holds, which may be 1.
 //
 // The declaration is the whole evidence: a rig whose command is `make test`
 // may or may not start containers, and that is not visible in its text, so a
@@ -350,15 +358,41 @@ func WithSlotForCommand(g CommandGate, townRoot, role, command string) CommandGa
 	return WithSlot(g, townRoot, role)
 }
 
-// containerFreeDeclarationRE matches GT_TEST_DOCKER=0 as a word of the
-// command: a match inside a longer name or value (MY_GT_TEST_DOCKER=0,
-// GT_TEST_DOCKER=00) is not a declaration.
-var containerFreeDeclarationRE = regexp.MustCompile(`(?:^|[\s;&|])GT_TEST_DOCKER=0(?:[\s;&|]|$)`)
+// containerFreeDeclarationRE matches a segment that leads with the
+// declaration: GT_TEST_DOCKER=0 as the segment's first word, followed by
+// whitespace or the segment's end. A longer name or value (MY_GT_TEST_DOCKER=0,
+// GT_TEST_DOCKER=00) and a quoted value (GT_TEST_DOCKER="0") are not
+// declarations.
+var containerFreeDeclarationRE = regexp.MustCompile(`^GT_TEST_DOCKER=0(?:\s|$)`)
 
 // declaresContainerFree reports whether command sets GT_TEST_DOCKER=0 for
-// itself.
+// every command its line runs.
+//
+// The split ignores quoting, so a `;`, `&` or `|` inside a quoted string cuts
+// its segment in two. That can only add segments to check, never pass one
+// unexamined, so it keeps the slot where a shell would not have split.
 func declaresContainerFree(command string) bool {
-	return containerFreeDeclarationRE.MatchString(command)
+	segments := strings.FieldsFunc(command, isCommandSeparator)
+	if len(segments) == 0 {
+		return false
+	}
+	for _, segment := range segments {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			continue
+		}
+		if !containerFreeDeclarationRE.MatchString(segment) {
+			return false
+		}
+	}
+	return true
+}
+
+// isCommandSeparator reports whether r starts another command in a shell
+// line: `;`, `&` (which also covers `&&`), `|` (which also covers `||`) and a
+// newline.
+func isCommandSeparator(r rune) bool {
+	return r == ';' || r == '&' || r == '|' || r == '\n'
 }
 
 // takeSlot holds the container-gate slot a step runs under, returning the
