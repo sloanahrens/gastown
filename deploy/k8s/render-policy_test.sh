@@ -42,24 +42,37 @@ echo "default render"
 check "no host.docker.internal is left" lacks "host.docker.internal" "$out"
 check "the header names the in-cluster route" contains "Forgejo on :3000 are reached through in-cluster Services." "$out"
 check "the header does not claim a Docker host alias" lacks "Docker Desktop" "$out"
-check "the render differs from the Docker policy in exactly 8 lines" test "$(diff "$BASE" <(printf '%s\n' "$out") | grep -c '^[<>]')" -eq 8
+check "the render differs from the Docker policy in exactly 11 lines" test "$(diff "$BASE" <(printf '%s\n' "$out") | grep -c '^[<>]')" -eq 11
 check "the Docker policy file is only read" test "$(shasum "$BASE")" = "$base_sum_before"
 dolt="$(endpoint_of 3307 "$out")"
 forgejo="$(endpoint_of 3000 "$out")"
+tracker="$(endpoint_of 7433 "$out")"
 check "dolt's endpoint is the control-plane name" contains "host: control-plane.openshell.svc.cluster.local" "$dolt"
 check "dolt's endpoint pins the Mac address" contains 'allowed_ips: ["192.168.5.2/32"]' "$dolt"
 check "forgejo's endpoint is the control-plane name" contains "host: control-plane.openshell.svc.cluster.local" "$forgejo"
 check "forgejo's endpoint pins the Mac address" contains 'allowed_ips: ["192.168.5.2/32"]' "$forgejo"
+check "dolt's block is unchanged from before the tracker" test "$dolt" = "      - host: control-plane.openshell.svc.cluster.local
+        allowed_ips: [\"192.168.5.2/32\"]
+        port: 3307"
+check "forgejo's block is unchanged from before the tracker" test "$forgejo" = "      - host: control-plane.openshell.svc.cluster.local
+        allowed_ips: [\"192.168.5.2/32\"]
+        port: 3000"
+check "tracker's endpoint is the tracker name" contains "host: tracker.openshell.svc.cluster.local" "$tracker"
+check "tracker's endpoint pins the Mac address" contains 'allowed_ips: ["192.168.5.2/32"]' "$tracker"
 
 echo "separate names land on the right ports"
-out2="$("$RENDER" --dolt-host dolt.example --forgejo-host forgejo.example --allowed-ip 10.0.0.9)"
+out2="$("$RENDER" --dolt-host dolt.example --forgejo-host forgejo.example --tracker-host tracker.example --allowed-ip 10.0.0.9)"
 dolt2="$(endpoint_of 3307 "$out2")"
 forgejo2="$(endpoint_of 3000 "$out2")"
+tracker2="$(endpoint_of 7433 "$out2")"
 check "the dolt name is on port 3307" contains "host: dolt.example" "$dolt2"
 check "the forgejo name is on port 3000" contains "host: forgejo.example" "$forgejo2"
+check "the tracker name is on port 7433" contains "host: tracker.example" "$tracker2"
 check "the dolt name is not on port 3000" lacks "dolt.example" "$forgejo2"
 check "the forgejo name is not on port 3307" lacks "forgejo.example" "$dolt2"
-check "--allowed-ip is the pinned address on both" test "$(grep -c 'allowed_ips: \["10.0.0.9/32"\]' <<<"$out2")" -eq 2
+check "the tracker name is not on port 3307" lacks "tracker.example" "$dolt2"
+check "the dolt name is not on port 7433" lacks "dolt.example" "$tracker2"
+check "--allowed-ip is the pinned address on all three" test "$(grep -c 'allowed_ips: \["10.0.0.9/32"\]' <<<"$out2")" -eq 3
 
 echo "bad input"
 set +e
@@ -84,6 +97,12 @@ set +e
 "$RENDER" --forgejo-host '' >"$TMP/o" 2>"$TMP/e"; rc=$?
 set -e
 check "an empty forgejo host is rejected" test "$rc" -eq 2
+set +e
+"$RENDER" --tracker-host 'track er.example' >"$TMP/o" 2>"$TMP/e"; rc=$?
+set -e
+check "a tracker host with a space is rejected" test "$rc" -eq 2
+check "a rejected tracker host renders nothing" test ! -s "$TMP/o"
+check "the tracker failure names the flag" contains "--tracker-host" "$(cat "$TMP/e")"
 set +e
 "$RENDER" --forgejo-host '-bad.example' >"$TMP/o" 2>"$TMP/e"; rc=$?
 set -e
@@ -146,9 +165,9 @@ check "the endpoint after it is untouched" contains "host: proxy.golang.org" "$o
 
 echo "checked-in files"
 check "policy/kind.yaml is exactly what the script renders (no drift)" test "$(cat "$KIND")" = "$out"
-check "three Services are defined" test "$(grep -c '^kind: Service' "$SERVICES")" -eq 3
-check "every Service is an ExternalName to the Mac" test "$(grep -c 'externalName: host.lima.internal' "$SERVICES")" -eq 3
-check "the names are control-plane, dolt and forgejo" test "$(grep -o 'name: [a-z-]*,' "$SERVICES" | tr -d ',' | sort | tr '\n' ' ')" = "name: control-plane name: dolt name: forgejo "
+check "four Services are defined" test "$(grep -c '^kind: Service' "$SERVICES")" -eq 4
+check "every Service is an ExternalName to the Mac" test "$(grep -c 'externalName: host.lima.internal' "$SERVICES")" -eq 4
+check "the names are control-plane, dolt, forgejo and tracker" test "$(grep -o 'name: [a-z-]*,' "$SERVICES" | tr -d ',' | sort | tr '\n' ' ')" = "name: control-plane name: dolt name: forgejo name: tracker "
 check "no Service has a selector key" test "$(grep -c '^ *selector:' "$SERVICES")" -eq 0
 
 if [ "$FAIL" -eq 0 ]; then

@@ -132,6 +132,7 @@ type reviewedEndpoint struct {
 var reviewedEgress = map[string]reviewedEndpoint{
 	"host.docker.internal:3000":  {protocol: "rest", enforcement: "enforce"},
 	"host.docker.internal:3307":  {protocol: "tcp"},
+	"host.docker.internal:7433":  {protocol: "tcp"},
 	"proxy.golang.org:443":       {protocol: "rest", access: "read-only", enforcement: "enforce"},
 	"sum.golang.org:443":         {protocol: "rest", access: "read-only", enforcement: "enforce"},
 	"storage.googleapis.com:443": {protocol: "rest", access: "read-only", enforcement: "enforce"},

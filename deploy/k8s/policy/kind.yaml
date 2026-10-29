@@ -84,6 +84,20 @@ network_policies:
       - path: /usr/local/bin/bd
       - path: /usr/local/bin/gt
 
+  # trackerd, the town's issue service, on the same port forward as Dolt. Plain
+  # TCP with no request rules for now: TLS is not terminated here (it arrives
+  # when trackerd leaves the host), and token injection is a later bead.
+  tracker:
+    endpoints:
+      - host: tracker.openshell.svc.cluster.local
+        allowed_ips: ["192.168.5.2/32"]
+        port: 7433
+        protocol: tcp
+        tls: skip
+    binaries:
+      - path: /usr/local/bin/bd
+      - path: /usr/local/bin/gt
+
   # Go module downloads during build and test inside the sandbox.
   go_modules:
     endpoints:

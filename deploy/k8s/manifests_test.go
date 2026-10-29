@@ -176,9 +176,47 @@ func TestControlPlaneServicesAreExternalNames(t *testing.T) {
 			t.Errorf("service %s externalName = %v, want host.lima.internal", name, got)
 		}
 	}
-	for _, want := range []string{"control-plane", "dolt", "forgejo"} {
+	for _, want := range []string{"control-plane", "dolt", "forgejo", "tracker"} {
 		if !seen[want] {
 			t.Errorf("service %s is missing", want)
+		}
+	}
+}
+
+// The Docker policy is the source the kind policy renders from, so its tracker
+// endpoint must reach trackerd on the default port from both gt and bd.
+func TestDockerPolicyTrackerEndpointReachesGtAndBd(t *testing.T) {
+	t.Parallel()
+	pol := decodeDocs(t, "../polecat/policy.yaml")[0]
+	eps, ok := at(t, pol, "network_policies", "tracker", "endpoints").([]any)
+	if !ok || len(eps) != 1 {
+		t.Fatalf("tracker endpoints = %v, want exactly one endpoint", eps)
+	}
+	ep, ok := eps[0].(map[string]any)
+	if !ok {
+		t.Fatalf("tracker endpoint = %v, want a map", eps[0])
+	}
+	if got := ep["host"]; got != "host.docker.internal" {
+		t.Errorf("tracker host = %v, want host.docker.internal", got)
+	}
+	if got := ep["port"]; got != 7433 {
+		t.Errorf("tracker port = %v, want 7433", got)
+	}
+	bins, ok := at(t, pol, "network_policies", "tracker", "binaries").([]any)
+	if !ok {
+		t.Fatalf("tracker binaries = %v, want a list", bins)
+	}
+	paths := map[string]bool{}
+	for _, b := range bins {
+		if m, ok := b.(map[string]any); ok {
+			if p, ok := m["path"].(string); ok {
+				paths[p] = true
+			}
+		}
+	}
+	for _, want := range []string{"/usr/local/bin/gt", "/usr/local/bin/bd"} {
+		if !paths[want] {
+			t.Errorf("tracker binaries %v lack %s", paths, want)
 		}
 	}
 }
