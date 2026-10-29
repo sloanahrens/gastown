@@ -7,7 +7,8 @@ services:
     stop_grace_period: "30s"
     working_dir: "/towns/live"
     depends_on:
-      - sweep-dind
+      sweep-dind:
+        condition: service_healthy
     environment:
       DOCKER_HOST: "tcp://sweep-dind:2375"
       GT_DAEMON_CONTAINER_NAME: "gt-town-daemon-1"
@@ -28,6 +29,12 @@ services:
     command: ["--tls=false"]
     environment:
       DOCKER_TLS_CERTDIR: ""
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
     volumes:
       - type: volume
         source: sweep_dind_data
