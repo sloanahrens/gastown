@@ -275,9 +275,13 @@ type Daemon struct {
 	// silently (gt-6hhp8). patrolRestartTried holds the keys a scan of the
 	// current rig tried to restart, so the scan's end can break the runs it
 	// did not continue. Created on first write; guarded by the mutex.
+	// patrolRestartCleared holds the keys whose alert this process has cleared
+	// since the seat's last failed restart, so a steady success does not ask
+	// the town to clear again (gt-7tz5f).
 	patrolRestartFailsMu sync.Mutex
 	patrolRestartFails   map[string]patrolRestartFailure
 	patrolRestartTried   map[string]bool
+	patrolRestartCleared map[string]bool
 
 	// jsonlPushFailures tracks consecutive git push failures for JSONL backup.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
