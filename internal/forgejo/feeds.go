@@ -14,8 +14,9 @@ import (
 // handful of repos, so one page is always the whole list.
 const userReposLimit = 100
 
-// Repository is the subset of a Forgejo repository the activity feed carries:
-// the owner/name the feed addresses the repo by.
+// Repository is the subset of a Forgejo repository the client reads: the
+// owner/name an activity feed addresses the repo by, and the reply to the
+// probe's existence check (Client.Repository).
 type Repository struct {
 	FullName string `json:"full_name"`
 }
