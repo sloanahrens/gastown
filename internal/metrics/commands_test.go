@@ -307,7 +307,8 @@ func TestMetricsMango(t *testing.T) {
 	mango, _ := mangoSectionRun(t, mangoSectionResult)
 	cmds := town.commands()
 	cmds.Mango = func(string) string { return "/opt/mango" }
-	cmds.Env.Run = rejectionDigestRunner(t, firstPassBd(t, map[string]string{"gt-a": "polecat/alfa/gt-a"}, nil), mango)
+	cmds.Env.Run = mango
+	cmds.Env.Beads = firstPassStores(t, map[string]string{"gt-a": "polecat/alfa/gt-a"}, nil)
 	if _, err := town.run(t, CommandExtract); err != nil {
 		t.Fatalf("extract: %v", err)
 	}

@@ -189,11 +189,10 @@ func mergedBeads(env Env, since time.Time) (merged []MergedBead, skipped int, er
 // (AttributeRecords), the same derived author_kind the snapshot's review group
 // counts. The section reads no branch and no bead's notes of its own.
 //
-// An unreadable log, a store whose read failed or was not a bead list, or a
-// rig that is not one path element under the town is an error: a table built
-// from a read that broke would report the beads it lost as unreviewed rather
-// than say the read broke. A bead the store no longer lists is an unknown
-// author's, which is an answer.
+// An unreadable log, a store whose read failed, or a rig that is not one path
+// element under the town is an error: a table built from a read that broke
+// would report the beads it lost as unreviewed rather than say the read broke.
+// A bead the store no longer lists is an unknown author's, which is an answer.
 func MangoFirstPassSection(ctx context.Context, env Env, since time.Time) (string, error) {
 	switch {
 	case env.Town == "":
@@ -202,8 +201,8 @@ func MangoFirstPassSection(ctx context.Context, env Env, since time.Time) (strin
 		return "", errors.New("first-pass section: Env.ReadFile is unset")
 	case env.ReadDir == nil:
 		return "", errors.New("first-pass section: Env.ReadDir is unset")
-	case env.Run == nil:
-		return "", errors.New("first-pass section: Env.Run is unset")
+	case env.Beads == nil:
+		return "", errors.New("first-pass section: Env.Beads is unset")
 	}
 	records, skippedReviews, err := townReviewRecords(env)
 	if err != nil {

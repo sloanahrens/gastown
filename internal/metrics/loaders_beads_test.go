@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"bytes"
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -243,6 +245,35 @@ func TestHandoffBytesCacheSkipsCalls(t *testing.T) {
 	if len(calls) != 0 {
 		t.Errorf("bd calls = %d, want none for a cached bead", len(calls))
 	}
+}
+
+// ShownBeads parses `bd show --json` output into one row per bead, keeping
+// what an attribution reads: the bead's id and the last Branch line of its
+// notes. ok is false when out is not the JSON array bd show prints, so a read
+// that failed is never mistaken for a bead that names no branch.
+//
+// It is a test helper here rather than a production parser: the review
+// attribution reads its beads through the store seam (gt-uyl6d), so the package
+// has no reader of bd show's output left. The cases below keep the format's
+// parse pinned for whoever moves the last bd show read, HandoffBytes, onto the
+// seam.
+func ShownBeads(out []byte) ([]BeadRow, bool) {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, false
+	}
+	var shown []bdListBead
+	if err := json.Unmarshal(trimmed, &shown); err != nil {
+		return nil, false
+	}
+	rows := make([]BeadRow, 0, len(shown))
+	for _, b := range shown {
+		if b.ID == "" {
+			continue
+		}
+		rows = append(rows, BeadRow{ID: b.ID, Branch: BranchLine(b.Notes)})
+	}
+	return rows, true
 }
 
 func TestShownBeadsKeepsTheBranchAttributionReads(t *testing.T) {

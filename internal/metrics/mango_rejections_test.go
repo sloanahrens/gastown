@@ -901,20 +901,6 @@ func TestLoadRejectionNotesRunsTheStoreSeamsArgv(t *testing.T) {
 	}
 }
 
-// rejectionDigestRunner answers bd from the first-pass reader's fixture and
-// every other command from the fake mango, so one section can drive both
-// readers. The refusal tables read their notes through the store seam, so this
-// runner carries no bd show of theirs.
-func rejectionDigestRunner(t *testing.T, bd, mango Runner) Runner {
-	t.Helper()
-	return func(ctx context.Context, argv []string) ([]byte, error) {
-		if len(argv) > 0 && argv[0] == "bd" {
-			return bd(ctx, argv)
-		}
-		return mango(ctx, argv)
-	}
-}
-
 // TestMangoSectionCarriesTheRejectionTables is the digest's side of the join:
 // the findings section MangoSection renders ends with the refusal rate, so a
 // rate is readable without a second command.

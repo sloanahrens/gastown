@@ -1,6 +1,134 @@
 package metrics
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"reflect"
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
+)
+
+// notesStore answers ShowMultiple from a table of notes and refuses every other
+// read, so a test sees the rows a store hands back without a board behind it.
+type notesStore map[string]string
+
+func (s notesStore) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("the attribution read the board")
+}
+
+func (s notesStore) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("the attribution read the ready board")
+}
+
+func (s notesStore) Blocked() ([]*beads.Issue, error) {
+	return nil, errors.New("the attribution read the blocked board")
+}
+
+func (s notesStore) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	found := make(map[string]*beads.Issue, len(ids))
+	for _, id := range ids {
+		notes, ok := s[id]
+		if !ok {
+			continue
+		}
+		found[id] = &beads.Issue{ID: id, Notes: notes}
+	}
+	return found, nil
+}
+
+// notesStores is the seam a test reads through: every directory answers with
+// the same notes table, so a test names only what the store holds.
+func notesStores(notes notesStore) BeadStores {
+	return func(context.Context, string) BeadStore { return notes }
+}
+
+// AttributeRecords refuses a missing store seam, a seam that hands back no
+// store, and a store whose read failed: a kind derived from a read that did not
+// answer would be printed as the unknown seat's rather than the read being
+// reported.
+func TestAttributeRecordsRefusesAFailedStoreRead(t *testing.T) {
+	t.Parallel()
+	records := []land.ReviewRecord{{BeadID: "gt-a", Rig: "gastown", Verdict: land.VerdictApprove}}
+	tests := []struct {
+		name string
+		env  Env
+	}{
+		{"no seam", Env{Town: "/town"}},
+		{"a seam with no store", Env{Town: "/town", Beads: func(context.Context, string) BeadStore {
+			return nil
+		}}},
+		{"a read that failed", Env{Town: "/town", Beads: func(context.Context, string) BeadStore {
+			return failingStore{err: errors.New("dolt is down")}
+		}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got, err := AttributeRecords(context.Background(), tc.env, records); err == nil {
+				t.Errorf("AttributeRecords = %v, nil; want a refused read", got)
+			}
+		})
+	}
+}
+
+// AttributeRecords reads each store's branches through the seam, so a bead the
+// store holds is attributed from its notes and a bead it leaves out is the
+// unknown author's rather than an error.
+func TestAttributeRecordsReadsItsBranchesThroughTheStore(t *testing.T) {
+	t.Parallel()
+	records := []land.ReviewRecord{
+		{BeadID: "gt-a", Rig: "gastown", Verdict: land.VerdictApprove},
+		{BeadID: "gt-b", Rig: "gastown", Verdict: land.VerdictApprove},
+		{BeadID: "gt-gone", Rig: "gastown", Verdict: land.VerdictApprove},
+	}
+	env := Env{Town: "/town", Beads: notesStores(notesStore{
+		"gt-a": "READY TO LAND\nBranch: polecat/opal/gt-a\n",
+		"gt-b": "READY TO LAND\nBranch: crew/merlin/gt-b\n",
+	})}
+	got, err := AttributeRecords(context.Background(), env, records)
+	if err != nil {
+		t.Fatalf("AttributeRecords: %v, want a bead the store leaves out to be an answer", err)
+	}
+	want := []string{AuthorKindPolecat, AuthorKindCrew, AuthorKindUnknown}
+	if len(got) != len(want) {
+		t.Fatalf("attributed records = %d, want %d", len(got), len(want))
+	}
+	for i, kind := range want {
+		if got[i].AuthorKind != kind {
+			t.Errorf("record %d (%s) kind = %q, want %q", i, got[i].Record.BeadID, got[i].AuthorKind, kind)
+		}
+	}
+}
+
+// TestStoreBeadsKeepsTheIDsSorted: the store answers with a map, so a reader's
+// rows would otherwise follow the map's iteration order. The rows come back in
+// id order whatever the store's map does. Ten beads are enough that a map
+// ranging in id order by chance is not what the assertion rests on.
+func TestStoreBeadsKeepsTheIDsSorted(t *testing.T) {
+	t.Parallel()
+	shuffled := []string{"gt-d", "gt-a", "gt-j", "gt-f", "gt-b", "gt-h", "gt-e", "gt-c", "gt-i", "gt-g"}
+	records := make([]land.ReviewRecord, 0, len(shuffled))
+	notes := notesStore{}
+	for _, id := range shuffled {
+		records = append(records, land.ReviewRecord{BeadID: id})
+		notes[id] = "Branch: polecat/opal/" + id + "\n"
+	}
+	env := Env{Town: "/town", Beads: notesStores(notes)}
+	rows, err := storeBeads(context.Background(), env, "/town/gastown", records)
+	if err != nil {
+		t.Fatalf("storeBeads: %v", err)
+	}
+	var ids []string
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	want := []string{"gt-a", "gt-b", "gt-c", "gt-d", "gt-e", "gt-f", "gt-g", "gt-h", "gt-i", "gt-j"}
+	if !reflect.DeepEqual(ids, want) {
+		t.Errorf("rows = %v, want %v in id order", ids, want)
+	}
+}
 
 func TestAuthorKindTable(t *testing.T) {
 	t.Parallel()
