@@ -1107,13 +1107,16 @@ func TestMangoStalePanelGreysTheTrend(t *testing.T) {
 }
 
 // TestMangoRowFitsThePanelAtTheWidthItIsReadAt lays the Mango table out the way
-// the page declares and measures the text each body cell draws against the
-// column it lands in, at the 1760px page the panel is read at: the table fills
-// its panel and lays out fixed, so a column takes its declared share and no
-// cell's text can size it, and every body cell breaks its text, so no unbroken
-// run is wider than its column and nothing crosses the panel's right edge. The
-// best box takes the widest column because it carries the row's longest prose,
-// so a condition wraps as words rather than a character a line (gt-6q7zj).
+// the page declares where its six columns are drawn — a panel at 800px, above
+// the width the stacked layout takes over — and measures the text each body cell
+// draws against the column it lands in: the table fills its panel and lays out
+// fixed, so a column takes its declared share and no cell's text can size it,
+// and every body cell breaks its text, so no unbroken run is wider than its
+// column and nothing crosses the panel's right edge. The best box takes the
+// widest column because it carries the row's longest prose, so a condition
+// wraps as words rather than a character a line. The panel's real width, about
+// 620px, draws the stacked layout, which TestMangoStackedRowFitsThePanel
+// measures (gt-6q7zj, gt-c6ge9).
 func TestMangoRowFitsThePanelAtTheWidthItIsReadAt(t *testing.T) {
 	t.Parallel()
 
@@ -1124,6 +1127,7 @@ func TestMangoRowFitsThePanelAtTheWidthItIsReadAt(t *testing.T) {
 	if got := table["width"]; got != "100%" {
 		t.Errorf("the Mango table takes %q of the panel, want 100%% so its shares are the whole row", got)
 	}
+	requireWideTable(t)
 
 	dom := newPageDOM(t)
 	target := mangoPageTarget("rejected_before_landing", 48, false, "model = opus and attempts in q4", 96, 0.42, 0.25, MangoEarning)
@@ -1135,7 +1139,7 @@ func TestMangoRowFitsThePanelAtTheWidthItIsReadAt(t *testing.T) {
 	}
 	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
 
-	widths, boxAt := mangoColumnWidths(t, dom, 1760)
+	widths, boxAt := mangoWideColumnWidths(t, dom)
 
 	// The box draws the panel's longest prose — a condition runs to 240
 	// characters where a label stops at 60 (mango.go) — so no other column may
@@ -1171,15 +1175,16 @@ func TestMangoRowFitsThePanelAtTheWidthItIsReadAt(t *testing.T) {
 	}
 }
 
-// TestMangoRateReadsInTwoLinesAndItsRowStaysShort draws the row the Mango panel
-// is read at — the panel's own width at the 1760px page, its font stack at the
-// widest face it names — and lays the drawn cells out the way the stylesheet
-// says: the baseline line takes at most two lines, and no cell draws taller
-// than the 120px a reader takes in at a glance. The fixture is a full modern
-// row: a 34-character label, a rate with its group count, an interval, two
-// narrow condition chips and a 33-character best box. The unit tier renders
-// nothing, so the layout is measured from the declarations the stylesheet sets
-// against the text the row draws (gt-g4vif).
+// TestMangoRateReadsInTwoLinesAndItsRowStaysShort draws the row where the
+// six-column table is drawn — a panel at 800px, its font stack at the widest
+// face it names — and lays the drawn cells out the way the stylesheet says: the
+// baseline line takes at most two lines, and no cell draws taller than the
+// 120px a reader takes in at a glance. The fixture is a full modern row: a
+// 34-character label, a rate with its group count, an interval, two narrow
+// condition chips and a 33-character best box. The unit tier renders nothing,
+// so the layout is measured from the declarations the stylesheet sets against
+// the text the row draws. The panel's real width draws the stacked layout,
+// whose row TestMangoStackedRowFitsThePanel measures (gt-g4vif, gt-c6ge9).
 func TestMangoRateReadsInTwoLinesAndItsRowStaysShort(t *testing.T) {
 	t.Parallel()
 
@@ -1197,7 +1202,8 @@ func TestMangoRateReadsInTwoLinesAndItsRowStaysShort(t *testing.T) {
 	}
 	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
 
-	widths, _ := mangoColumnWidths(t, dom, 1760)
+	requireWideTable(t)
+	widths, _ := mangoWideColumnWidths(t, dom)
 	row := mangoRowNamed(t, mangoRows(t, dom), label)
 	if len(row) != len(widths) {
 		t.Fatalf("the target row draws %d cells, want the header's %d columns", len(row), len(widths))
@@ -1247,6 +1253,64 @@ func TestMangoRateReadsInTwoLinesAndItsRowStaysShort(t *testing.T) {
 		if msg := mangoRowHeightProblem(mangoColumnName(t, dom, c), h, limit); msg != "" {
 			t.Error(msg)
 		}
+	}
+}
+
+// TestMangoStackedRowFitsThePanel draws the full modern row at the panel's real
+// width, where the page stacks a target row into three lines of two equal
+// tracks, and measures what it draws: the stacked layout is the one drawn at
+// that width, every unbroken run fits the track its cell lands in, and the
+// row's three lines with their gaps, padding and rule stay inside the row's
+// bound. The fixture is the fullest row the writer produces: a 34-character
+// label, a rate with its group count, an interval, two narrow condition chips
+// and a 33-character best box (gt-c6ge9).
+func TestMangoStackedRowFitsThePanel(t *testing.T) {
+	t.Parallel()
+
+	panel := mangoPanelReadWidth(t)
+	if got := mangoStackWidth(t); panel > got {
+		t.Fatalf("the Mango table stacks only up to %gpx, so the %gpx panel draws six columns rather than the stacked row this test measures", got, panel)
+	}
+	cell := mangoStackedCellWidth(t)
+
+	dom := newPageDOM(t)
+	const label = "Landings rejected before they land"
+	target := mangoPageTarget("rejected_before_landing", 48, false, "model = opus and attempts in q4", 96, 0.42, 0.243, MangoEarning)
+	target["label"] = label
+	target["holdout_positives"] = 44
+	target["ci_low"] = 0.31
+	target["ci_high"] = 0.53
+	target["conditions"] = []any{
+		map[string]any{"text": "model = opus", "share": 0.12, "narrows": true},
+		map[string]any{"text": "attempts in q4", "share": 0.18, "narrows": true},
+		map[string]any{"text": "rig = gastown", "share": 0.71, "narrows": false},
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
+
+	row := mangoRowNamed(t, mangoRows(t, dom), label)
+
+	// Every unbroken run keeps inside the track its cell draws in at the page's
+	// font; a run wider than the track is text past the panel's right edge.
+	base := mangoText{whiteSpace: "normal", font: cssPxValue(t, declOf(t, topRule(t, "html,body"), "font"))}
+	for c, node := range row {
+		for _, run := range node.runs(t, base) {
+			text := float64(len([]rune(run.Text))) * run.Font * monospaceAdvance
+			if text > cell+0.5 {
+				t.Errorf("the stacked %s cell draws the unbroken %q in %gpx, wider than the %gpx its track leaves: the text would cross the panel's right edge", mangoColumnName(t, dom, c), run.Text, text, cell)
+			}
+		}
+	}
+
+	// The bound is the stacked row's own lines and the space around them: line 1
+	// draws 20px, line 2 (the rate cell's number, baseline, lift and group count)
+	// 63.6px and line 3 48px, so the lines sum to 131.6px; two row gaps add 4px,
+	// the row's padding 16px and its rule 1px, and the row draws 152.6px. The
+	// bound is 170px, which holds that sum with room for a face wider than the
+	// one measured (gt-c6ge9).
+	const limit = 170
+	h := mangoStackedRowHeight(t, row, mangoMeasureBase(t), cell)
+	if msg := mangoRowHeightProblem("stacked target row", h, limit); msg != "" {
+		t.Error(msg)
 	}
 }
 
@@ -1348,8 +1412,10 @@ func mangoLines(text string, m mangoMeasure, width float64) int {
 				used += adv
 			}
 			used += w
-		case m.wrap == "anywhere":
-			// The word fills this line and as many more as it needs.
+		case m.wrap == "anywhere" || m.wrap == "break-word":
+			// The word fills this line and as many more as it needs. A break-word
+			// word breaks only when it is wider than a line, so it takes the same
+			// lines here as an anywhere word does once it cannot stand whole.
 			left := w - (width - used)
 			more := int(math.Ceil(left / width))
 			lines += more
@@ -1526,12 +1592,12 @@ func mangoRowBorder(t *testing.T) float64 {
 	return boxSide(t, topRule(t, ".mgtable td"), "border", "top")
 }
 
-// mangoColumnWidths reads the Mango table's columns in pixels at a page
-// viewport: each header cell names a class, that class declares its share of
-// the row, and the table is as wide as its panel. The shares must add up to the
-// row, or a column takes what the others leave and the box's room is a guess.
-// It returns the widths and the best box's index.
-func mangoColumnWidths(t *testing.T, dom *pageDOM, viewport float64) ([]float64, int) {
+// mangoColumnWidths reads the Mango table's columns in pixels for a table of
+// the given width: each header cell names a class, and that class declares its
+// share of the row. The shares must add up to the row, or a column takes what
+// the others leave and the box's room is a guess. It returns the widths and the
+// best box's index.
+func mangoColumnWidths(t *testing.T, dom *pageDOM, tablePx float64) ([]float64, int) {
 	t.Helper()
 
 	const expr = `JSON.stringify((function () {
@@ -1550,7 +1616,6 @@ func mangoColumnWidths(t *testing.T, dom *pageDOM, viewport float64) ([]float64,
 		t.Fatal("the Mango table draws no header")
 	}
 
-	tablePx := mangoTableWidth(t, viewport)
 	widths := make([]float64, len(head))
 	boxAt, total := -1, 0.0
 	for i, th := range head {
@@ -1605,10 +1670,137 @@ func mangoTableWidth(t *testing.T, viewport float64) float64 {
 	grid := topRule(t, ".grid")
 	tracks := frTracks(t, declOf(t, grid, "grid-template-columns"))
 	left := (content - cssPxValue(t, declOf(t, grid, "gap"))) * tracks[0] / (tracks[0] + tracks[1])
+	return left - mangoPanelInset(t)
+}
+
+// mangoPanelInset is what the Mango section's border and its .body's padding
+// take from the width the panel is given: the table is what is left of it.
+func mangoPanelInset(t *testing.T) float64 {
+	t.Helper()
+
 	panel := topRule(t, "section")
 	pad := topRule(t, ".body")
-	inset := 2*cssPxValue(t, declOf(t, panel, "border")) + boxSide(t, pad, "padding", "left") + boxSide(t, pad, "padding", "right")
-	return left - inset
+	return 2*cssPxValue(t, declOf(t, panel, "border")) + boxSide(t, pad, "padding", "left") + boxSide(t, pad, "padding", "right")
+}
+
+// mangoPanelReadWidth is the width the Mango table gets at the 1760px page the
+// dashboard is read at: about 620px in the left column, under the width the page
+// stacks it at. It is the panel's real width, and the width the stacked layout
+// is measured at (gt-c6ge9).
+func mangoPanelReadWidth(t *testing.T) float64 {
+	t.Helper()
+
+	return mangoTableWidth(t, 1760)
+}
+
+// mangoWidePanelWidth is a panel width above the stacked width, where the page
+// draws its six-column table rather than stacking it: the two tests that guard
+// that table measure it at this width (gt-c6ge9).
+const mangoWidePanelWidth = 800
+
+// mangoWideTableWidth is what the table fills of a panel that wide.
+func mangoWideTableWidth(t *testing.T) float64 {
+	t.Helper()
+
+	return mangoWidePanelWidth - mangoPanelInset(t)
+}
+
+// mangoWideColumnWidths reads the columns as the six-column table draws them on
+// a panel of mangoWidePanelWidth.
+func mangoWideColumnWidths(t *testing.T, dom *pageDOM) ([]float64, int) {
+	t.Helper()
+
+	return mangoColumnWidths(t, dom, mangoWideTableWidth(t))
+}
+
+// requireWideTable fails when a panel of mangoWidePanelWidth stacks instead of
+// drawing the six-column table, so a test that measures that table must also
+// read the width the page stacks below.
+func requireWideTable(t *testing.T) {
+	t.Helper()
+
+	if got := mangoStackWidth(t); float64(mangoWidePanelWidth) <= got {
+		t.Fatalf("the Mango table stacks up to %gpx, so a %dpx panel draws no six-column table to measure", got, mangoWidePanelWidth)
+	}
+}
+
+// mangoStackWidth is the container width at or below which the page stacks the
+// Mango table, read from the @container rule that guards the stacked layout.
+func mangoStackWidth(t *testing.T) float64 {
+	t.Helper()
+
+	css := pageStyle(t)
+	const at = "@container (max-width:"
+	for from := 0; ; {
+		i := strings.Index(css[from:], at)
+		if i < 0 {
+			t.Fatal("the page has no @container (max-width: ...) rule that styles the Mango table, so it never stacks")
+		}
+		i += from
+		start := i + len(at)
+		width, block := strings.Index(css[start:], ")"), strings.Index(css[start:], "}")
+		if width < 0 || block < 0 {
+			t.Fatalf("the @container rule at offset %d is not written as a width and a block", i)
+		}
+		if strings.Contains(css[start:start+block], ".mgtable") {
+			return cssPxValue(t, strings.TrimSpace(css[start:start+width]))
+		}
+		from = start + block
+	}
+}
+
+// mangoStackedLines is the grid line each cell of a stacked target row draws on,
+// by the class the cell carries. It mirrors the grid-area rules in the
+// stylesheet's container block, so a test can say which cells share a line.
+var mangoStackedLines = map[string]int{"jvname": 1, "mgverdict": 1, "mgrates": 2, "mginterval": 2, "mgevidence": 3, "mgbox": 3}
+
+// mangoStackedCellWidth is the width a cell of a stacked target row draws in at
+// the panel's real width: the table's width less the column gap between the
+// row's two tracks, split evenly between them. The stacked cells carry no
+// padding, so a track is all the room its cell's text has.
+func mangoStackedCellWidth(t *testing.T) float64 {
+	t.Helper()
+
+	row := containerDecls(t, "max-width: 760px", ".mgtable tbody tr")
+	tracks := frTracks(t, row["grid-template-columns"])
+	if len(tracks) != 2 || tracks[0] != tracks[1] {
+		t.Fatalf("the stacked target row draws %q, want two equal tracks", row["grid-template-columns"])
+	}
+	if got := containerDecls(t, "max-width: 760px", ".mgtable tbody td")["padding"]; got != "0" {
+		t.Fatalf("the stacked cells draw with padding %q, want 0 so a track is all the room its text has", got)
+	}
+	return (mangoPanelReadWidth(t) - mangoPanelInset(t) - cssPxValue(t, row["column-gap"])) / 2
+}
+
+// mangoStackedRowHeight is the height a stacked target row draws at a cell width:
+// each grid line is as tall as its tallest cell, the lines are set apart by the
+// row gap, and the row adds its padding above and below and the rule above it.
+// The first row draws without that rule and padding, so this reads the taller case.
+func mangoStackedRowHeight(t *testing.T, row []mangoNode, base mangoMeasure, width float64) float64 {
+	t.Helper()
+
+	style := containerDecls(t, "max-width: 760px", ".mgtable tbody tr")
+	lines := map[int]float64{}
+	for _, cell := range row {
+		line := 0
+		for class, n := range mangoStackedLines {
+			if mangoNamesClass(cell.Classes, class) {
+				line = n
+			}
+		}
+		if line == 0 {
+			t.Fatalf("the stacked target row draws a cell on no grid line: %q", cell.Classes)
+		}
+		if h := mangoCellHeight(t, cell, base, width); h > lines[line] {
+			lines[line] = h
+		}
+	}
+	height := float64(len(lines)-1) * cssPxValue(t, style["row-gap"])
+	for _, h := range lines {
+		height += h
+	}
+	pad := cssPxValue(t, strings.Fields(style["padding"])[0])
+	return height + 2*pad + cssPxValue(t, style["border-top"])
 }
 
 // mangoNode is one element the Mango table draws, with the classes of the
@@ -1661,7 +1853,8 @@ func (s mangoText) apply(t *testing.T, classes []string) mangoText {
 
 // runs is every stretch of the node's text the browser cannot break: a nowrap
 // element keeps its whole content on one line, a leaf breaks anywhere when its
-// style lets it, and otherwise breaks at its longest word.
+// style lets it (anywhere, or break-word, which breaks a word only once the word
+// is wider than the line), and otherwise breaks at its longest word.
 func (n mangoNode) runs(t *testing.T, s mangoText) []mangoRun {
 	t.Helper()
 
@@ -1674,7 +1867,7 @@ func (n mangoNode) runs(t *testing.T, s mangoText) []mangoRun {
 		switch {
 		case text == "":
 			return nil
-		case s.wrap == "anywhere":
+		case s.wrap == "anywhere" || s.wrap == "break-word":
 			return []mangoRun{{Text: string([]rune(text)[:1]), Font: s.font}}
 		}
 		longest := ""
@@ -2167,7 +2360,7 @@ func mangoBaselineProblem(baseline string, lines int, width float64) string {
 // (gt-g4vif).
 func mangoRowHeightProblem(column string, height float64, limit int) string {
 	if height > float64(limit) {
-		return fmt.Sprintf("the %s column draws %gpx tall at the 1760px page, over the %dpx a row may take", column, height, limit)
+		return fmt.Sprintf("the %s draws %gpx tall, over the %dpx a row may take", column, height, limit)
 	}
 	return ""
 }
@@ -2206,4 +2399,179 @@ func TestMangoLayoutChecksFailWhereTheOldLayoutFailed(t *testing.T) {
 	if mangoBaselineProblem(baseline, mangoLines(baseline, fixed, -4), -4) == "" {
 		t.Error("a column with negative width is measured as fitting")
 	}
+}
+
+// TestMangoStacksTheTableBelowTheSectionWidth: the Mango section is a size
+// container, and under 760px a rule draws each target row as a grid so its
+// cells land on lines of their own rather than in six columns the panel is too
+// narrow for (gt-c6ge9).
+func TestMangoStacksTheTableBelowTheSectionWidth(t *testing.T) {
+	t.Parallel()
+
+	if got := declOf(t, topRule(t, "#mangosec"), "container-type"); got != "inline-size" {
+		t.Fatalf("the Mango section is a %q container, want inline-size so a rule can read the width the panel gets", got)
+	}
+	if got := containerDecls(t, "max-width: 760px", ".mgtable tbody tr")["display"]; got != "grid" {
+		t.Errorf("a target row under the 760px container draws %q, want grid so each cell lands on its own line", got)
+	}
+	if got := containerDecls(t, "max-width: 760px", ".mgtable")["display"]; got != "block" {
+		t.Errorf("the table under the 760px container draws %q, want block so its rows stack", got)
+	}
+}
+
+// TestMangoEveryTargetRowCellNamesItsColumn: the stacked layout has no header
+// above a cell to say what it holds, so every body cell of a target row carries
+// its column's name in data-label, in the header's column order (gt-c6ge9).
+func TestMangoEveryTargetRowCellNamesItsColumn(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	target := mangoPageTarget("rejected_before_landing", 48, false, "model = opus in q4", 96, 0.42, 0.25, MangoEarning)
+	target["label"] = "Landings rejected before they land"
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", target)})
+
+	var head []string
+	for i := 0; i < 6; i++ {
+		head = append(head, mangoColumnName(t, dom, i))
+	}
+	if got := mangoBodyLabels(t, dom, target["label"].(string)); fmt.Sprint(got) != fmt.Sprint(head) {
+		t.Errorf("the target row's cells carry data-label %q, want each cell to name its column %q", got, head)
+	}
+}
+
+// mangoBodyLabels reads the data-label of each cell in the body row whose name
+// cell reads label, in the order the cells sit. The body's first row is the
+// collection line, which is not a target row and names no columns.
+func mangoBodyLabels(t *testing.T, dom *pageDOM, label string) []string {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((function () {
+  var table = __byId["mango"].children.find(function (c) { return String(c.className).split(" ").indexOf("mgtable") >= 0; });
+  var row = table.children[1].children.find(function (tr) { return String(tr.children[0].textContent) === ` + quoteJS(label) + `; });
+  if (!row) return [];
+  return row.children.map(function (td) { return String(td.getAttribute("data-label") || ""); });
+})())`)
+	if err != nil {
+		t.Fatalf("reading the target row's data-labels: %v", err)
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the target row's data-labels: %v", err)
+	}
+	if len(out) == 0 {
+		t.Fatalf("the target row labelled %q is not drawn, so no cell names its column", label)
+	}
+	return out
+}
+
+// TestMangoVerdictChipStaysWhole: a verdict chip is one token, so it keeps its
+// own line rather than splitting mid-word, and the
+// verdict column keeps a floor wide enough for it (gt-c6ge9).
+func TestMangoVerdictChipStaysWhole(t *testing.T) {
+	t.Parallel()
+
+	chip := topRule(t, ".mgtable td.mgverdict .jvchip")
+	if got := declOf(t, chip, "white-space"); got != "nowrap" {
+		t.Errorf("a verdict chip draws with white-space %q, want nowrap so it is never split mid-word", got)
+	}
+	if got := declOf(t, chip, "overflow-wrap"); got != "normal" {
+		t.Errorf("a verdict chip draws with overflow-wrap %q, want normal so it is never split mid-word", got)
+	}
+	if got := cssDecls(t, "mgc-verdict")["min-width"]; !strings.HasSuffix(got, "em") {
+		t.Errorf("the verdict column keeps a floor of %q, want a width in em so its chip fits whatever share the row gives it", got)
+	}
+}
+
+// TestMangoTargetNameBreaksOnlyInsideALongWord: a target name wraps between
+// words, and breaks inside a word only when that word is longer than its column,
+// so it is never broken anywhere (gt-c6ge9).
+func TestMangoTargetNameBreaksOnlyInsideALongWord(t *testing.T) {
+	t.Parallel()
+
+	if got := cssDecls(t, "jvname")["overflow-wrap"]; got != "break-word" {
+		t.Errorf("a target name draws with overflow-wrap %q, want break-word so it breaks only inside a word longer than its column", got)
+	}
+}
+
+// TestMangoIntervalHeaderClipsAtItsCell: the interval column is narrower than
+// the word it heads, so the header cell clips the word inside its own cell and
+// the whole word rides in a title for a reader who hovers it (gt-c6ge9).
+func TestMangoIntervalHeaderClipsAtItsCell(t *testing.T) {
+	t.Parallel()
+
+	head := cssDecls(t, "mgc-interval")
+	if got := head["overflow"]; got != "hidden" {
+		t.Errorf("the interval header draws with overflow %q, want hidden so the word clips inside its cell", got)
+	}
+	if got := head["text-overflow"]; got != "ellipsis" {
+		t.Errorf("the interval header draws with text-overflow %q, want ellipsis so the clipped word ends in a mark", got)
+	}
+	if got := head["white-space"]; got != "nowrap" {
+		t.Errorf("the interval header draws with white-space %q, want nowrap so its one word stays on one line", got)
+	}
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh", mangoPageTarget("rejected_before_landing", 48, false, "model = opus in q4", 96, 0.42, 0.25, MangoEarning))})
+	if got := mangoAttrs(t, dom, "mgc-interval", "title"); len(got) != 1 || got[0] != "interval" {
+		t.Errorf("the interval header carries titles %q, want the whole word \"interval\"", got)
+	}
+}
+
+// containerDecls returns the declarations the @container block guarded by cond
+// sets on the rule whose selector is sel, keyed by property. A rule inside the
+// block styles a descendant of the size container, so it is read from the block
+// rather than from the top-level rules cssDecls reads (gt-c6ge9).
+func containerDecls(t *testing.T, cond, sel string) map[string]string {
+	t.Helper()
+
+	css := pageStyle(t)
+	at := strings.Index(css, "@container ("+cond+")")
+	if at < 0 {
+		t.Fatalf("the page has no @container (%s) rule", cond)
+	}
+	open := strings.Index(css[at:], "{")
+	if open < 0 {
+		t.Fatalf("the @container (%s) rule has no block", cond)
+	}
+	depth, end := 0, -1
+	for i := at + open; i < len(css) && end < 0; i++ {
+		switch css[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				end = i
+			}
+		}
+	}
+	if end < 0 {
+		t.Fatalf("the @container (%s) rule is not closed", cond)
+	}
+	decls := map[string]string{}
+	for _, rule := range strings.Split(css[at+open+1:end], "}") {
+		s, body, ok := strings.Cut(rule, "{")
+		if !ok || !namesSelector(s, sel) {
+			continue
+		}
+		for _, decl := range strings.Split(body, ";") {
+			prop, val, ok := strings.Cut(decl, ":")
+			if !ok {
+				continue
+			}
+			decls[strings.TrimSpace(prop)] = strings.TrimSpace(val)
+		}
+	}
+	return decls
+}
+
+// namesSelector reports whether a rule's selector list names sel exactly, so a
+// rule written for a group of selectors is read for each of them.
+func namesSelector(list, sel string) bool {
+	for _, one := range strings.Split(list, ",") {
+		if strings.TrimSpace(one) == sel {
+			return true
+		}
+	}
+	return false
 }
