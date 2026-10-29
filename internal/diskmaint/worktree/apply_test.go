@@ -460,3 +460,19 @@ func TestApplyNeedsARunner(t *testing.T) {
 		t.Fatalf("ledger = %+v (%v), want the refusal recorded", entries, err)
 	}
 }
+
+// TestApplyReportsALedgerThatCannotBeWritten checks that a run whose record cannot
+// be written says so, rather than reading as a clean run. The ledger's directory
+// does not exist, so the append fails.
+func TestApplyReportsALedgerThatCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	root := townRoot(t)
+	path := filepath.Join(root, "rig-a", "crew", "overseer-a")
+	f := newFakeGit(t)
+	answerRemove(f, root, path, nil)
+	l := diskmaint.NewLedger(filepath.Join(root, "missing", "maint.jsonl"), 0)
+	_, err := applyTarget(root, f, l).Apply(context.Background(), diskmaint.Plan{Target: planTarget, Actions: []diskmaint.Action{removeAction(path)}})
+	if err == nil || !strings.Contains(err.Error(), "record the apply") {
+		t.Fatalf("Apply error = %v, want the unwritable ledger reported", err)
+	}
+}
