@@ -265,6 +265,174 @@ func TestDecideFailsClosedOnMalformedRouteTable(t *testing.T) {
 	}
 }
 
+// A flag's value that the table did not know read as an id, and an id no route
+// names took the working-directory rule away from the command, so a create or
+// a list from a tracker rig's directory landed in the rig's stale Dolt store
+// (gt-w8j7v). The town's own labels and assignees are hyphenated words, which
+// is why a value and an id read alike.
+func TestDecideRoutesAFlagValueByTheWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	alpha := filepath.Join(town, "alpha", "mayor", "rig")
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{"a short label flag", []string{"create", "T", "-l", "review-deep"}},
+		{"a short label flag on list", []string{"list", "-l", "human-only"}},
+		{"a short assignee flag", []string{"create", "T", "-a", "town-crew"}},
+		{"a long add-label flag", []string{"update", "--add-label", "x-y"}},
+	}
+	for _, tc := range commands {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := decide(t, beta, "", tc.args...)
+			if err != nil {
+				t.Fatalf("Decide(%v) from the tracker rig = %v, want no error", tc.args, err)
+			}
+			if !got.Tracker || got.Route.Prefix != "bt-" {
+				t.Errorf("Decide(%v) from the tracker rig = %+v, want the tracker rig bt-", tc.args, got)
+			}
+
+			got, err = decide(t, alpha, "", tc.args...)
+			if err != nil {
+				t.Fatalf("Decide(%v) from the dolt rig = %v, want no error", tc.args, err)
+			}
+			if got.Tracker {
+				t.Errorf("Decide(%v) from the dolt rig = %+v, want bd.real", tc.args, got)
+			}
+		})
+	}
+}
+
+func TestCommandPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"a verb", []string{"show", "bt-abc"}, "show"},
+		{"a verb with an operand before a flag", []string{"list", "bt-abc", "--json"}, "list"},
+		{"a subverb a flag differs on", []string{"gate", "list", "-a"}, "gate list"},
+		{"a subverb no flag differs on", []string{"dep", "add", "bt-abc", "bt-def"}, "dep"},
+		{"a three word command", []string{"mol", "wisp", "gc"}, "mol wisp gc"},
+		{"no args", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := commandPath(tc.args); got != tc.want {
+				t.Errorf("commandPath(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// persistentValueFlags are the value flags bd puts on every command, which
+// testdata/bd-flags.txt leaves out because every command has them.
+var persistentValueFlags = []string{
+	"--actor", "--database", "--db", "--directory", "--dolt-auto-commit",
+	"--mem-profile", "-C",
+}
+
+// bdDocumented reads testdata/bd-flags.txt: the value flags bd documents for
+// each command, and the flags it reads as a boolean on one command although
+// another command reads a value for the same one.
+func bdDocumented(t *testing.T) (value, boolean map[string][]string) {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("testdata", "bd-flags.txt"))
+	if err != nil {
+		t.Fatalf("reading bd's documented flags: %v", err)
+	}
+	value, boolean = map[string][]string{}, map[string][]string{}
+	for _, line := range strings.Split(string(body), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		kind, rest, ok := strings.Cut(line, "\t")
+		if !ok {
+			t.Fatalf("testdata/bd-flags.txt: %q names no command", line)
+		}
+		command, flags, ok := strings.Cut(rest, "\t")
+		if !ok || strings.TrimSpace(flags) == "" {
+			t.Fatalf("testdata/bd-flags.txt: %q names no flag", line)
+		}
+		switch kind {
+		case "value":
+			value[command] = strings.Fields(flags)
+		case "bool":
+			boolean[command] = strings.Fields(flags)
+		default:
+			t.Fatalf("testdata/bd-flags.txt: %q has kind %q, want value or bool", line, kind)
+		}
+	}
+	return value, boolean
+}
+
+// The tables have to hold what bd documents: a value flag missing from them
+// turns its value into an id, and a token read as a value that bd reads as a
+// boolean hides the operand behind it. bd's help is pinned in
+// testdata/bd-flags.txt rather than run, because a unit test starts no process.
+func TestFlagTablesCoverWhatBdDocuments(t *testing.T) {
+	t.Parallel()
+	value, boolean := bdDocumented(t)
+
+	for command, flags := range value {
+		for _, flag := range flags {
+			if !takesValue(command, flag) {
+				t.Errorf("bd reads the token after %s %s as its value, and the table does not", command, flag)
+			}
+		}
+	}
+	for command, flags := range boolean {
+		for _, flag := range flags {
+			if takesValue(command, flag) {
+				t.Errorf("bd reads %s %s as a boolean, and the table reads the token after it as its value", command, flag)
+			}
+		}
+	}
+
+	// The other way: a flag in the table that bd documents nowhere is a typo,
+	// or a flag bd dropped.
+	documented := map[string]bool{}
+	for _, flags := range value {
+		for _, flag := range flags {
+			documented[flag] = true
+		}
+	}
+	for _, flag := range persistentValueFlags {
+		documented[flag] = true
+	}
+	for flag := range valueFlags {
+		if !documented[flag] {
+			t.Errorf("%s is in valueFlags and bd documents no value for it", flag)
+		}
+	}
+
+	// A flag the table calls a boolean on a command is one bd calls a boolean
+	// there, and the file names every such command.
+	named := map[string]bool{}
+	for command, flags := range boolean {
+		for _, flag := range flags {
+			named[command+" "+flag] = true
+		}
+	}
+	for command, flags := range boolFlags {
+		for flag := range flags {
+			if !named[command+" "+flag] {
+				t.Errorf("boolFlags calls %s %s a boolean, and bd's help does not", command, flag)
+			}
+			delete(named, command+" "+flag)
+		}
+	}
+	for name := range named {
+		t.Errorf("bd reads %s as a boolean on one command, and boolFlags does not say so", name)
+	}
+}
+
 func TestDecideVerbs(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -307,11 +475,20 @@ func TestIDTokens(t *testing.T) {
 		{"a flag-like token past a separator names no bead", []string{"show", "--", "--json"}, nil},
 		{"two ids", []string{"dep", "add", "bt-abc", "bt-def"}, []string{"bt-abc", "bt-def"}},
 		{"a verb", []string{"list"}, nil},
+		{"a short label value", []string{"create", "T", "-l", "review-deep"}, nil},
+		{"a short assignee value", []string{"list", "-a", "bt-abc"}, nil},
+		{"-f is a value flag on create", []string{"create", "T", "-f", "notes.md", "bt-abc"}, []string{"bt-abc"}},
+		{"-f is a boolean on close", []string{"close", "-f", "bt-abc"}, []string{"bt-abc"}},
+		{"-r is a value flag on close", []string{"close", "-r", "bt-abc"}, nil},
+		{"-r is a boolean on list", []string{"list", "-r", "bt-abc"}, []string{"bt-abc"}},
+		{"-a is a boolean on gate list", []string{"gate", "list", "-a", "bt-abc"}, []string{"bt-abc"}},
+		{"a bare --deps takes no value on list", []string{"list", "--deps", "bt-abc"}, []string{"bt-abc"}},
+		{"--deps takes a value on create", []string{"create", "T", "--deps", "bt-abc"}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := idTokens(tc.args)
+			got := idTokens(commandPath(tc.args), tc.args)
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Errorf("idTokens(%v) = %v, want %v", tc.args, got, tc.want)
 			}
