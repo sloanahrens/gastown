@@ -720,6 +720,25 @@ func isDiskMaintenanceTarget(name string) bool {
 	return slices.Contains(diskMaintenanceTargets, name)
 }
 
+// Cadence returns the interval the named target runs on: zero for a target
+// keeping the daily window, and an error for a name the patrol does not know
+// or a cadence it cannot schedule.
+//
+// Decoding refuses a config file's targets with it, and the daemon calls it for
+// a config built in code, so a per-target interval applies only to a target
+// that exists however the config was made (gt-kdbzb).
+func (c *DiskMaintenanceConfig) Cadence(name string) (time.Duration, error) {
+	if !isDiskMaintenanceTarget(name) {
+		return 0, fmt.Errorf("patrols.disk_maintenance.targets.%s: unknown target; the patrol knows %s",
+			name, strings.Join(diskMaintenanceTargets, " and "))
+	}
+	every, err := c.Targets[name].Every()
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.targets.%s.interval: %w", name, err)
+	}
+	return every, nil
+}
+
 // The values DiskMaintenanceConfig accepts. An empty field means the default,
 // so a town that sets only enabled still gets a window and a mode.
 const (
@@ -763,16 +782,13 @@ func (c *DiskMaintenanceConfig) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("patrols.disk_maintenance.window %q: want HH:MM", p.Window)
 		}
 	}
-	for _, name := range slices.Sorted(maps.Keys(p.Targets)) {
-		if !isDiskMaintenanceTarget(name) {
-			return fmt.Errorf("patrols.disk_maintenance.targets.%s: unknown target; the patrol knows %s",
-				name, strings.Join(diskMaintenanceTargets, " and "))
-		}
-		if _, err := p.Targets[name].Every(); err != nil {
-			return fmt.Errorf("patrols.disk_maintenance.targets.%s.interval: %w", name, err)
+	cfg := DiskMaintenanceConfig(p)
+	for _, name := range slices.Sorted(maps.Keys(cfg.Targets)) {
+		if _, err := cfg.Cadence(name); err != nil {
+			return err
 		}
 	}
-	*c = DiskMaintenanceConfig(p)
+	*c = cfg
 	return nil
 }
 

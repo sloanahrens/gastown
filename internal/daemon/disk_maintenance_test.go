@@ -417,6 +417,38 @@ func TestDiskMaintenanceRefusesAnUnreadableCadence(t *testing.T) {
 	}
 }
 
+// TestDiskMaintenanceRefusesAnUnknownTarget: a target name the patrol does not
+// know is refused from a config built in code the way decoding refuses it from
+// the config file, so it runs nothing and is said once rather than per tick.
+func TestDiskMaintenanceRefusesAnUnknownTarget(t *testing.T) {
+	t.Parallel()
+	for name, every := range map[string]string{
+		"with a cadence": "2h",
+		"without one":    "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d, logs, f := diskMaintTestDaemon(t)
+			d.patrolConfig = diskMaintCadence("go-build", every)
+			d.diskMaint.now = func() time.Time { return diskMaintNow.Add(8 * time.Hour) }
+
+			for i := 0; i < 2; i++ {
+				d.runDiskMaintenance()
+			}
+
+			if len(f.target.policies) != 0 {
+				t.Errorf("registry planned %d times, want 0: an unknown target refuses rather than opening the window", len(f.target.policies))
+			}
+			if got := strings.Count(logs.String(), "unknown target"); got != 1 {
+				t.Errorf("refused the unknown target %d times, want 1: %q", got, logs.String())
+			}
+			if strings.Contains(logs.String(), "has no such target") {
+				t.Errorf("log = %q, want the unknown name refused, not reported as a target this build does not produce", logs.String())
+			}
+		})
+	}
+}
+
 // TestDiskMaintenanceSkipsWhenNotQuiet: a town with work in flight gets a log
 // line and no plan, and the window stays open for a later tick.
 func TestDiskMaintenanceSkipsWhenNotQuiet(t *testing.T) {
