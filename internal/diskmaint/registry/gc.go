@@ -3,6 +3,8 @@ package registry
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
 )
@@ -13,7 +15,7 @@ import (
 const collectConfigPath = "/etc/docker/registry/config.yml"
 
 // CollectTimeoutSeconds is how long the collect may run inside the registry
-// container before the container's own timeout ends it. The collect is run
+// container when the caller sets no deadline of its own. The collect is run
 // under `timeout` in the container, not bounded by killing the docker client:
 // killing the client leaves the collect running after the plugin lock is
 // released, where it can race a push, while a collect ended in the container
@@ -22,6 +24,12 @@ const collectConfigPath = "/etc/docker/registry/config.yml"
 // tens of gigabytes; a collect that needs longer is recorded as a failure and
 // the next run picks it up.
 const CollectTimeoutSeconds = "1800"
+
+// collectGrace is the time between the container's timeout ending the collect
+// and the caller's deadline. It is the margin in which docker exec notices the
+// collect has ended and returns, so the collect is over and the plugin lock is
+// still held when it goes back (gt-dl4nv.13).
+const collectGrace = time.Second
 
 // collectSkipped prefixes every ledger line that says why a collect did not
 // run: a skipped collect and a quiet one look alike in a ledger otherwise.
@@ -38,9 +46,11 @@ const collectSkipped = "collect skipped: "
 // walk storage a push is writing. A failed collect is the same refusal to act
 // on an unknown, so it is recorded and does not fail the apply.
 //
-// A collect that has not answered by the caller's deadline is recorded
-// unanswered and the apply returns, so a docker exec nobody hears from cannot
-// hold the plugin lock past the deadline the caller set (gt-dl4nv.13).
+// The caller's deadline is the bound on a collect that never returns. The
+// container enforces it, so the collect ends before the deadline rather than
+// the docker client being killed at it: see collectTimeout. A client that
+// still does not answer by the deadline is abandoned and recorded a failure,
+// which leaves nothing running — the collect it started has already ended.
 func (t *Target) gc(ctx context.Context, result *diskmaint.Result) []string {
 	if len(result.Done) == 0 {
 		return nil
@@ -57,10 +67,21 @@ func (t *Target) gc(ctx context.Context, result *diskmaint.Result) []string {
 		// command that is not fixed text.
 		return []string{collectSkipped + "container name failed validation"}
 	}
+	if err := ctx.Err(); err != nil {
+		return []string{"collect: the caller's context is done: " + err.Error()}
+	}
+	timeout, ok := collectTimeout(ctx)
+	if !ok {
+		return []string{"collect: the caller's deadline leaves no time to run it"}
+	}
 	env := []string{"DOCKER_HOST=" + t.cfg.DockerHost}
 	err := awaitBound(ctx, func() error {
-		_, err := t.cfg.Run(ctx, env, "docker",
-			"exec", t.cfg.Container, "timeout", CollectTimeoutSeconds, "registry", "garbage-collect", "--delete-untagged", collectConfigPath)
+		// The command runs under a context the caller's deadline does not
+		// cancel: a docker client killed at the deadline leaves the collect
+		// running in the container, and the in-container timeout is what ends
+		// a collect. What the deadline buys is the timeout's value.
+		_, err := t.cfg.Run(context.WithoutCancel(ctx), env, "docker",
+			"exec", t.cfg.Container, "timeout", timeout, "registry", "garbage-collect", "--delete-untagged", collectConfigPath)
 		return err
 	})
 	if err != nil {
@@ -70,13 +91,35 @@ func (t *Target) gc(ctx context.Context, result *diskmaint.Result) []string {
 	return nil
 }
 
-// awaitBound runs fn and returns its error, waiting no longer than the deadline
-// on ctx. A ctx without a deadline sets no bound and fn is waited for, the
-// container's timeout then being the collect's only bound.
+// collectTimeout is the number of seconds the collect may run inside the
+// container, and whether it may run at all.
 //
-// fn is not stopped when the bound arrives: killing the docker client leaves
-// the collect running in the container, so the container's own timeout is what
-// ends a collect, and ending it there ends it for good (gt-dl4nv.13).
+// The caller's deadline is the bound: the container gets the time left on it
+// less collectGrace, so its own timeout ends the collect before the deadline
+// and docker exec returns while the plugin lock is still held. A deadline
+// already less than collectGrace plus one whole second away refuses the
+// collect — starting one the container ends at once buys nothing — and a
+// context with no deadline leaves CollectTimeoutSeconds as the only bound.
+func collectTimeout(ctx context.Context) (timeout string, ok bool) {
+	deadline, bounded := ctx.Deadline()
+	if !bounded {
+		return CollectTimeoutSeconds, true
+	}
+	seconds := int((time.Until(deadline) - collectGrace) / time.Second)
+	if seconds < 1 {
+		return "", false
+	}
+	return strconv.Itoa(seconds), true
+}
+
+// awaitBound runs fn and returns its error, waiting no longer than the deadline
+// on ctx. A ctx without a deadline sets no bound and fn is waited for.
+//
+// fn is not stopped when the bound arrives. The command's context is detached
+// from the deadline (see gc) because killing the docker client leaves the
+// collect running in the container; the deadline's bound is the container's
+// (see collectTimeout). So what is abandoned here is a docker client that never
+// answered, after the collect it started has been ended.
 func awaitBound(ctx context.Context, fn func() error) error {
 	if _, bounded := ctx.Deadline(); !bounded {
 		return fn()
@@ -87,6 +130,6 @@ func awaitBound(ctx context.Context, fn func() error) error {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		return fmt.Errorf("no answer by the bound: %w", ctx.Err())
+		return fmt.Errorf("no answer by the caller's deadline: %w", ctx.Err())
 	}
 }
