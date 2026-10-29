@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -72,6 +73,7 @@ func doltCompareRealDeps() doltCompareDeps {
 func newDoltCompareCmd(deps doltCompareDeps) *cobra.Command {
 	var user string
 	var timeout time.Duration
+	var useTLS bool
 	cmd := &cobra.Command{
 		Use:   "compare <source> <target>",
 		Short: "Compare per-database row counts and content hashes between two Dolt servers",
@@ -96,9 +98,13 @@ printed. Passwords come from the environment, one per side:
   GT_DOLT_COMPARE_SOURCE_PASSWORD   password for the source server
   GT_DOLT_COMPARE_TARGET_PASSWORD   password for the target server
 
+--tls connects to both servers over TLS and verifies their certificates.
+Without it the passwords cross the network in cleartext.
+
 The exit status is non-zero when any database differs or is missing on one
 side, and zero only when both servers serve the same databases with equal row
-counts and content hashes.
+counts and content hashes. Two servers that serve no databases are refused:
+there is nothing to prove.
 
 A server still taking writes answers from different moments at each read, so
 compare a source that is quiesced when the result is a proof.
@@ -107,29 +113,33 @@ Example:
   gt dolt compare 127.0.0.1:3307 127.0.0.1:3401`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDoltCompare(cmd.Context(), deps, args, user, timeout)
+			return runDoltCompare(cmd.Context(), deps, args, user, timeout, useTLS)
 		},
 	}
 	cmd.Flags().StringVar(&user, "user", "root", "MySQL user to connect as to both servers")
 	cmd.Flags().DurationVar(&timeout, "timeout", 2*time.Minute, "Deadline for reading each server")
+	cmd.Flags().BoolVar(&useTLS, "tls", false, "Connect to both servers over TLS, verifying each server's certificate")
 	return cmd
 }
 
-func runDoltCompare(ctx context.Context, deps doltCompareDeps, args []string, user string, timeout time.Duration) error {
+func runDoltCompare(ctx context.Context, deps doltCompareDeps, args []string, user string, timeout time.Duration, useTLS bool) error {
 	source, err := parseDoltCompareEndpoint(args[0], user, deps.lookupPassword(doltCompareSourcePasswordEnv))
 	if err != nil {
 		return fmt.Errorf("source endpoint %q: %w", args[0], err)
 	}
+	source.TLS = useTLS
 	target, err := parseDoltCompareEndpoint(args[1], user, deps.lookupPassword(doltCompareTargetPasswordEnv))
 	if err != nil {
 		return fmt.Errorf("target endpoint %q: %w", args[1], err)
 	}
+	target.TLS = useTLS
 	return compareServers(ctx, deps.out,
 		deps.newReader(source, timeout), deps.newReader(target, timeout))
 }
 
 // compareServers reads both servers, writes the comparison to w and returns
-// the command's exit status: an error naming every database that differs.
+// the command's exit status: an error naming every database that differs, or
+// the absence of any database to compare.
 func compareServers(ctx context.Context, w io.Writer, source, target snapshotReader) error {
 	src, err := source.Read(ctx)
 	if err != nil {
@@ -142,8 +152,7 @@ func compareServers(ctx context.Context, w io.Writer, source, target snapshotRea
 
 	diffs := compareSnapshots(src, tgt)
 	if len(diffs) == 0 {
-		fmt.Fprintln(w, "Both servers serve no databases: nothing to compare.")
-		return nil
+		return errNothingToCompare
 	}
 	if err := printComparison(w, diffs); err != nil {
 		return fmt.Errorf("writing comparison: %w", err)
@@ -151,12 +160,18 @@ func compareServers(ctx context.Context, w io.Writer, source, target snapshotRea
 	return compareExitError(diffs)
 }
 
+// errNothingToCompare is the refusal for two servers that serve no databases.
+// Equal-by-emptiness is not a match a restore proof can rest on, so it exits
+// non-zero rather than reading as a pass.
+var errNothingToCompare = errors.New("neither server serves a database, so there is nothing to compare")
+
 // doltCompareEndpoint is one server a comparison reads.
 type doltCompareEndpoint struct {
 	Host     string
 	Port     int
 	User     string
 	Password string
+	TLS      bool
 }
 
 // parseDoltCompareEndpoint reads an endpoint's host:port, defaulting the port
@@ -167,7 +182,13 @@ func parseDoltCompareEndpoint(raw, user, password string) (doltCompareEndpoint, 
 	}
 	host, portText, err := net.SplitHostPort(raw)
 	if err != nil {
-		// A bare host (including a bare IPv6 literal) has no port to split.
+		// A bare host has no port to split. An IPv6 literal with more than one
+		// colon and no brackets is refused: "fe80::1:3307" is a valid address
+		// with no port, so guessing which reading was meant would connect to the
+		// wrong server without a word.
+		if strings.Count(raw, ":") > 1 && !strings.HasPrefix(raw, "[") {
+			return doltCompareEndpoint{}, fmt.Errorf("IPv6 address %q must be bracketed, e.g. [::1]:3307", raw)
+		}
 		host, portText = raw, ""
 	}
 	host = strings.Trim(host, "[]")
@@ -203,6 +224,10 @@ func (e doltCompareEndpoint) dsn(timeout time.Duration) string {
 	cfg.Timeout = timeout
 	cfg.ReadTimeout = timeout
 	cfg.WriteTimeout = timeout
+	if e.TLS {
+		// "true" verifies the server certificate against the system roots.
+		cfg.TLSConfig = "true"
+	}
 	return cfg.FormatDSN()
 }
 

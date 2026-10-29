@@ -48,6 +48,22 @@ func runCompareCmd(deps doltCompareDeps, endpoints ...string) error {
 	return cmd.RunE(cmd, endpoints)
 }
 
+// executeCompareCmd runs the command the way the shell does, through its flag
+// and argument parsing, so the flags a test passes are the ones the command
+// reads.
+func executeCompareCmd(deps doltCompareDeps, args ...string) error {
+	cmd := newDoltCompareCmd(deps)
+	cmd.SetArgs(args)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	return cmd.Execute()
+}
+
+// compareFailingWriter is an output whose writes fail, as a closed pipe's do.
+type compareFailingWriter struct{}
+
+func (compareFailingWriter) Write([]byte) (int, error) { return 0, errors.New("closed pipe") }
+
 // testCompareCmd runs the command with the two servers' ports as endpoints.
 func testCompareCmd(t *testing.T, deps doltCompareDeps, sourcePort, targetPort int) error {
 	t.Helper()
@@ -264,20 +280,126 @@ func TestCompareUnreadableServerFails(t *testing.T) {
 	}
 }
 
-// Two servers that serve nothing compare equal by definition, and say so
-// rather than printing an empty table a reader could take for a proof.
-func TestCompareBothServersEmptySucceeds(t *testing.T) {
+// Two servers that serve nothing are refused with a non-zero exit, not passed
+// as equal: a proof over no databases proves nothing, and an empty table must
+// not read as a match.
+func TestCompareBothServersEmptyFails(t *testing.T) {
 	t.Parallel()
 	out := &bytes.Buffer{}
 	deps := compareTestDeps(out, map[int]*fakeSnapshotReader{
 		3307: {snapshots: nil},
 		3401: {snapshots: nil},
 	})
-	if err := testCompareCmd(t, deps, 3307, 3401); err != nil {
-		t.Fatalf("compare of two empty servers = %v, want nil", err)
+	err := testCompareCmd(t, deps, 3307, 3401)
+	if !errors.Is(err, errNothingToCompare) {
+		t.Fatalf("compare of two empty servers = %v, want errNothingToCompare", err)
 	}
-	if !strings.Contains(out.String(), "no databases") {
-		t.Errorf("output %q should say both servers serve no databases", out.String())
+	if out.Len() != 0 {
+		t.Errorf("output %q should be empty when there is nothing to compare", out.String())
+	}
+}
+
+// A server that serves no databases while the other serves one is a
+// difference, not the empty refusal: the comparison still runs and fails.
+func TestCompareOneEmptyServerFails(t *testing.T) {
+	t.Parallel()
+	out := &bytes.Buffer{}
+	deps := compareTestDeps(out, map[int]*fakeSnapshotReader{
+		3307: {snapshots: []dbSnapshot{{Name: "hq", Rows: 1, Hash: "a"}}},
+		3401: {snapshots: nil},
+	})
+	err := testCompareCmd(t, deps, 3307, 3401)
+	if err == nil || errors.Is(err, errNothingToCompare) {
+		t.Fatalf("compare against an empty server = %v, want a difference naming hq", err)
+	}
+	if !strings.Contains(err.Error(), "hq") {
+		t.Errorf("error %q should name hq", err)
+	}
+}
+
+// The command's flags reach the readers, and an omitted flag keeps its default.
+func TestDoltCompareFlagsReachTheReaders(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		args     []string
+		wantUser string
+		wantWait time.Duration
+		wantTLS  bool
+	}{
+		{
+			name:     "defaults",
+			args:     []string{"127.0.0.1:3307", "127.0.0.1:3401"},
+			wantUser: "root",
+			wantWait: 2 * time.Minute,
+		},
+		{
+			name:     "flags are passed through",
+			args:     []string{"--user", "prover", "--timeout", "5s", "--tls", "127.0.0.1:3307", "127.0.0.1:3401"},
+			wantUser: "prover",
+			wantWait: 5 * time.Second,
+			wantTLS:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var endpoints []doltCompareEndpoint
+			var timeouts []time.Duration
+			deps := doltCompareDeps{
+				newReader: func(ep doltCompareEndpoint, timeout time.Duration) snapshotReader {
+					endpoints = append(endpoints, ep)
+					timeouts = append(timeouts, timeout)
+					return &fakeSnapshotReader{snapshots: []dbSnapshot{{Name: "hq", Rows: 1, Hash: "a"}}}
+				},
+				lookupPassword: func(string) string { return "" },
+				out:            &bytes.Buffer{},
+			}
+			if err := executeCompareCmd(deps, tt.args...); err != nil {
+				t.Fatalf("compare = %v, want nil", err)
+			}
+			if len(endpoints) != 2 {
+				t.Fatalf("readers built = %d, want 2", len(endpoints))
+			}
+			for i, ep := range endpoints {
+				if ep.User != tt.wantUser || ep.TLS != tt.wantTLS {
+					t.Errorf("endpoint %d user=%q tls=%v, want user=%q tls=%v", i, ep.User, ep.TLS, tt.wantUser, tt.wantTLS)
+				}
+				if timeouts[i] != tt.wantWait {
+					t.Errorf("reader %d timeout = %v, want %v", i, timeouts[i], tt.wantWait)
+				}
+			}
+		})
+	}
+}
+
+// The command takes exactly two endpoints. A wrong count is refused before any
+// reader is built, so no connection is attempted.
+func TestDoltCompareRefusesWrongArgumentCount(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{},
+		{"127.0.0.1:3307"},
+		{"127.0.0.1:3307", "127.0.0.1:3401", "127.0.0.1:3402"},
+	} {
+		t.Run(strconv.Itoa(len(args))+" args", func(t *testing.T) {
+			t.Parallel()
+			built := 0
+			deps := doltCompareDeps{
+				newReader: func(doltCompareEndpoint, time.Duration) snapshotReader {
+					built++
+					return &fakeSnapshotReader{}
+				},
+				lookupPassword: func(string) string { return "" },
+				out:            &bytes.Buffer{},
+			}
+			if err := executeCompareCmd(deps, args...); err == nil {
+				t.Fatalf("compare with %d endpoint(s) = nil, want an error", len(args))
+			}
+			if built != 0 {
+				t.Errorf("readers built = %d for a refused argument count, want 0", built)
+			}
+		})
 	}
 }
 
@@ -291,7 +413,7 @@ func TestComparePasswordsComeFromTheEnvironmentPerSide(t *testing.T) {
 	deps := doltCompareDeps{
 		newReader: func(ep doltCompareEndpoint, _ time.Duration) snapshotReader {
 			got = append(got, ep)
-			return &fakeSnapshotReader{}
+			return &fakeSnapshotReader{snapshots: []dbSnapshot{{Name: "hq", Rows: 1, Hash: "a"}}}
 		},
 		lookupPassword: func(key string) string {
 			asked = append(asked, key)
@@ -327,6 +449,9 @@ func TestParseDoltCompareEndpoint(t *testing.T) {
 		{"host and port", "127.0.0.1:3401", doltCompareEndpoint{Host: "127.0.0.1", Port: 3401, User: "root"}, false},
 		{"port defaults to the Dolt port", "db.example.com", doltCompareEndpoint{Host: "db.example.com", Port: 3307, User: "root"}, false},
 		{"IPv6 is bracketed", "[::1]:3401", doltCompareEndpoint{Host: "::1", Port: 3401, User: "root"}, false},
+		{"bracketed IPv6 without a port takes the default", "[::1]", doltCompareEndpoint{Host: "::1", Port: 3307, User: "root"}, false},
+		{"unbracketed IPv6 with a port is refused", "fe80::1:3307", doltCompareEndpoint{}, true},
+		{"unbracketed IPv6 literal is refused", "::1", doltCompareEndpoint{}, true},
 		{"empty endpoint", "", doltCompareEndpoint{}, true},
 		{"non-numeric port", "127.0.0.1:abc", doltCompareEndpoint{}, true},
 		{"port above the range", "127.0.0.1:70000", doltCompareEndpoint{}, true},
@@ -366,6 +491,13 @@ func TestDoltCompareEndpointDSN(t *testing.T) {
 	}
 	if label := ep.label(); label != "127.0.0.2:3401" {
 		t.Errorf("label = %q, want host:port without a credential", label)
+	}
+	if strings.Contains(dsn, "tls=") {
+		t.Errorf("dsn %q should not request TLS unless --tls is set", dsn)
+	}
+	ep.TLS = true
+	if dsn := ep.dsn(time.Minute); !strings.Contains(dsn, "tls=true") {
+		t.Errorf("dsn %q should request TLS when the endpoint is TLS", dsn)
 	}
 }
 
@@ -417,7 +549,7 @@ func TestCompareReportsAnUnwritableOutput(t *testing.T) {
 		3307: {snapshots: []dbSnapshot{{Name: "hq", Rows: 1, Hash: "a"}}},
 		3401: {snapshots: []dbSnapshot{{Name: "hq", Rows: 1, Hash: "a"}}},
 	})
-	deps.out = failingWriter{}
+	deps.out = compareFailingWriter{}
 	err := testCompareCmd(t, deps, 3307, 3401)
 	if err == nil {
 		t.Fatal("compare with an unwritable output = nil, want an error")
