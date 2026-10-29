@@ -556,35 +556,48 @@ func (s *healthSources) Validate() error {
 	return err
 }
 
-// NeedsHuman counts the landing rigs' beads Land refused on a policy only
-// the person behind them can lift: gt:needs-human, gt:needs-overseer or
-// gt:needs-operator. A bead carrying two of those labels counts once.
-func (s *healthSources) NeedsHuman(ctx context.Context) (int, time.Time, error) {
-	total := 0
-	var oldest time.Time
+// NeedsHuman counts the landing rigs' beads Land refused on a policy only the
+// person behind them can lift, one entry per person label, so the health line
+// names the person who must act (gt-slmaz). A bead carrying two of the labels
+// counts once, under the first one, so the counts sum to the beads waiting.
+func (s *healthSources) NeedsHuman(ctx context.Context) ([]townhealth.PersonWait, error) {
+	labels := []struct{ field, label string }{
+		{townhealth.FieldNeedsOverseer, land.LabelNeedsOverseer},
+		{townhealth.FieldNeedsOperator, land.LabelNeedsOperator},
+		{townhealth.FieldNeedsHuman, land.LabelNeedsHuman},
+	}
+	waits := make(map[string]*townhealth.PersonWait, len(labels))
+	for _, l := range labels {
+		waits[l.field] = &townhealth.PersonWait{Label: l.field}
+	}
 	for _, rig := range s.landingRigs() {
 		if err := ctx.Err(); err != nil {
-			return 0, time.Time{}, err
+			return nil, err
 		}
 		counted := map[string]bool{}
-		for _, label := range []string{land.LabelNeedsHuman, land.LabelNeedsOverseer, land.LabelNeedsOperator} {
-			issues, err := s.actionableBeads(rig, label)
+		for _, l := range labels {
+			issues, err := s.actionableBeads(rig, l.label)
 			if err != nil {
-				return 0, time.Time{}, fmt.Errorf("%s: %w", rig, err)
+				return nil, fmt.Errorf("%s: %w", rig, err)
 			}
 			for _, is := range issues {
 				if counted[is.ID] {
 					continue
 				}
 				counted[is.ID] = true
-				total++
-				if t, err := time.Parse(time.RFC3339, is.CreatedAt); err == nil && (oldest.IsZero() || t.Before(oldest)) {
-					oldest = t
+				w := waits[l.field]
+				w.Count++
+				if t, err := time.Parse(time.RFC3339, is.CreatedAt); err == nil && (w.Oldest.IsZero() || t.Before(w.Oldest)) {
+					w.Oldest = t
 				}
 			}
 		}
 	}
-	return total, oldest, nil
+	out := make([]townhealth.PersonWait, 0, len(labels))
+	for _, l := range labels {
+		out = append(out, *waits[l.field])
+	}
+	return out, nil
 }
 
 // seatHome returns the directory a seat's agent lives in, and whether this

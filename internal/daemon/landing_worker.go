@@ -41,6 +41,34 @@ const (
 	landingRemoteFetchTimeout    = 2 * time.Minute
 )
 
+// beadReader reads one bead's record; landworker.RetryBeads is one.
+type beadReader interface {
+	Show(id string) (*beads.Issue, error)
+}
+
+// landingPersonKey is the escalation key for a landing left for a person, named
+// by the person label the bead carries, so an overseer hold does not upsert
+// onto an old label's escalation (gt-slmaz). A bead carrying no person label,
+// two of them, or labels that cannot be read keeps the landing-needs-human
+// key, which is where a person hold was raised before the new labels existed.
+func landingPersonKey(reader beadReader, beadID string) string {
+	const old = "landing-needs-human:"
+	is, err := reader.Show(beadID)
+	if err != nil || is == nil {
+		return old + beadID
+	}
+	for _, p := range []struct{ label, key string }{
+		{land.LabelNeedsOverseer, "landing-needs-overseer:"},
+		{land.LabelNeedsOperator, "landing-needs-operator:"},
+		{land.LabelNeedsHuman, old},
+	} {
+		if beads.HasLabel(is, p.label) {
+			return p.key + beadID
+		}
+	}
+	return old + beadID
+}
+
 func landingWorkerConfig(config *DaemonPatrolConfig) *LandingWorkerConfig {
 	if config == nil || config.Patrols == nil {
 		return nil
@@ -675,7 +703,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		LandTimeout:       landingRigLandTimeout(d.patrolConfig),
 		Logf:              d.logger.Printf,
 		Escalate: func(beadID, message string) {
-			d.escalateAlert("landing-needs-human:"+beadID, "landing_worker", message)
+			d.escalateAlert(landingPersonKey(bd, beadID), "landing_worker", message)
 		},
 		// A landing failing at any stage is its own alert, keyed per rig and
 		// bead so the retries upsert onto one escalation instead of minting

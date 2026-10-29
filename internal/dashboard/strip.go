@@ -22,25 +22,27 @@ const (
 )
 
 // polecatAlarm is the alarm the strip wears for a polecat's state. A quiet
-// polecat holds work and has gone silent past QuietAfter, and the two states
-// the town is waiting on an operator for are the only ones that read red: a
-// polecat queued, spawning, parked or idle is the town working as intended.
-// The reader learns a state the moment the town does, so a state with no row
-// here earns no alarm rather than passing as a calm one, and the working fact
-// names it in its title instead.
+// polecat holds work and has gone silent past QuietAfter, and a bead waiting
+// on a person reads red under every person label (gt-slmaz); a polecat
+// queued, spawning, parked or idle is the town working as intended. The reader
+// learns a state the moment the town does, so a state with no row here earns
+// no alarm rather than passing as a calm one, and the working fact names it in
+// its title instead.
 var polecatAlarm = map[string]string{
-	StateWorking:      "",
-	StateQuiet:        alarmWarn,
-	StateGating:       "",
-	StateQueued:       "",
-	StateSpawning:     "",
-	StateStalled:      alarmBad,
-	StateReviewNeeded: "",
-	StateRecovery:     "",
-	StateNeedsHuman:   alarmBad,
-	StateParked:       "",
-	StateIdle:         "",
-	StateUnknown:      "",
+	StateWorking:       "",
+	StateQuiet:         alarmWarn,
+	StateGating:        "",
+	StateQueued:        "",
+	StateSpawning:      "",
+	StateStalled:       alarmBad,
+	StateReviewNeeded:  "",
+	StateRecovery:      "",
+	StateNeedsHuman:    alarmBad,
+	StateNeedsOverseer: alarmBad,
+	StateNeedsOperator: alarmBad,
+	StateParked:        "",
+	StateIdle:          "",
+	StateUnknown:       "",
 }
 
 // StripAlarms is what each of the strip's alarming readings earned, decided

@@ -68,7 +68,10 @@ func (l *dashLandings) get() []omRecord {
 
 // dashLabelsShown are the labels worth a badge: the ones that say a bead is
 // waiting on someone or somewhere, not the bookkeeping ones.
-var dashLabelsShown = map[string]bool{"needs-human": true, "deferred": true, "failed": true}
+var dashLabelsShown = map[string]bool{
+	"needs-human": true, "needs-overseer": true, "needs-operator": true,
+	"deferred": true, "failed": true,
+}
 
 func dashBadgeLabels(labels []string) []string {
 	var out []string
@@ -135,12 +138,19 @@ type dashPolecatInputs struct {
 
 // dashPolecatState maps the town's inventory state to the dashboard's. The
 // inventory decides; the dashboard adds only what the inventory cannot see: a
-// bead the queue says is waiting to land, and a bead labeled for a human.
+// bead the queue says is waiting to land, and the person label its bead
+// carries. The state names the label, so the row says which person must act
+// (gt-slmaz); a bead carrying two of the labels reads as the first step, the
+// overseer's.
 func dashPolecatState(item polecatInventoryItem, hasWork, ready bool, labels []string) (state, reason string) {
 	d := item.Disposition
 	switch {
-	case hasWork && hasAnyLabel(labels, "needs-human", "gt:needs-human", "needs-overseer", "gt:needs-overseer", "needs-operator", "gt:needs-operator"):
-		return dashboard.StateNeedsHuman, "the bead is labeled for a person"
+	case hasWork && hasAnyLabel(labels, "needs-overseer", "gt:needs-overseer"):
+		return dashboard.StateNeedsOverseer, "the bead is labeled needs-overseer"
+	case hasWork && hasAnyLabel(labels, "needs-operator", "gt:needs-operator"):
+		return dashboard.StateNeedsOperator, "the bead is labeled needs-operator"
+	case hasWork && hasAnyLabel(labels, "needs-human", "gt:needs-human"):
+		return dashboard.StateNeedsHuman, "the bead is labeled needs-human"
 	case hasWork && ready:
 		return dashboard.StateQueued, "submitted for landing"
 	}
@@ -326,7 +336,7 @@ func hasAnyLabel(labels []string, want ...string) bool {
 // dashStateRank orders the table: what needs a look first, idle last.
 func dashStateRank(state string) int {
 	switch state {
-	case dashboard.StateNeedsHuman:
+	case dashboard.StateNeedsHuman, dashboard.StateNeedsOverseer, dashboard.StateNeedsOperator:
 		return 0
 	case dashboard.StateStalled, dashboard.StateUnknown:
 		return 1

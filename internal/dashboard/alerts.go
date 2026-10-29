@@ -274,6 +274,17 @@ func (a *Alerter) healthAlert(next State, now time.Time) (Alert, bool) {
 	return Alert{}, false
 }
 
+// holdsForPerson reports a state that means the polecat's bead waits on a
+// person: the old needs-human label and the two labels naming who must act
+// (gt-slmaz).
+func holdsForPerson(state string) bool {
+	switch state {
+	case StateNeedsHuman, StateNeedsOverseer, StateNeedsOperator:
+		return true
+	}
+	return false
+}
+
 // polecatAlerts reports each polecat that has newly stalled or started waiting
 // on a human, against the previous snapshot. The first snapshot is a baseline,
 // so a polecat that was already in one of those states raises nothing.
@@ -301,7 +312,7 @@ func (a *Alerter) polecatAlerts(prev, next State, now time.Time) []Alert {
 
 	var out []Alert
 	for _, p := range list {
-		if p.State != StateStalled && p.State != StateNeedsHuman {
+		if p.State != StateStalled && !holdsForPerson(p.State) {
 			continue
 		}
 		if p.RigParked {

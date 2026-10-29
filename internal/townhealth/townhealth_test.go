@@ -53,9 +53,8 @@ type fake struct {
 
 	configErr error
 
-	waiting    int
-	waitOldest time.Time
-	waitErr    error
+	waits   []PersonWait
+	waitErr error
 
 	seats    []Seat
 	seatsErr error
@@ -110,8 +109,8 @@ func (f *fake) Validate() error                        { return f.configErr }
 func (f *fake) Seats() ([]Seat, error)                 { return f.seats, f.seatsErr }
 func (f *fake) Dispatch() (DispatchRecord, error)      { return f.dispatch, f.dispatchErr }
 func (f *fake) LandingInfra() LandingInfraReport       { return f.infra }
-func (f *fake) NeedsHuman(context.Context) (int, time.Time, error) {
-	return f.waiting, f.waitOldest, f.waitErr
+func (f *fake) NeedsHuman(context.Context) ([]PersonWait, error) {
+	return f.waits, f.waitErr
 }
 
 // healthy is a fake town with every field green.
@@ -626,17 +625,30 @@ func TestAgeFields(t *testing.T) {
 		tag  Tag
 		want Verdict
 	}{
-		"no escalation":         {set: func(f *fake) {}, key: "escalation", tag: Live, want: Green},
-		"young escalation":      {set: func(f *fake) { f.escOpened, f.escOK = ago(2*time.Hour), true }, key: "escalation", tag: Live, want: Degraded},
-		"old escalation":        {set: func(f *fake) { f.escOpened, f.escOK = ago(5*time.Hour), true }, key: "escalation", tag: Live, want: Red},
-		"free slots":            {set: func(f *fake) {}, key: "slot", tag: Recorded, want: Green},
-		"long slot holder":      {set: func(f *fake) { f.holders = []SlotHolder{{"a", ago(time.Minute)}, {"b", ago(40 * time.Minute)}} }, key: "slot", tag: Recorded, want: Degraded},
-		"holder without start":  {set: func(f *fake) { f.holders = []SlotHolder{{Name: "a"}} }, key: "slot", tag: Unknown, want: VerdictUnknown},
-		"stale backup":          {set: func(f *fake) { f.backupAt = ago(40 * time.Hour) }, key: "backup", tag: Recorded, want: Degraded},
-		"no backup":             {set: func(f *fake) { f.backupOK = false }, key: "backup", tag: Recorded, want: Red},
-		"invalid config":        {set: func(f *fake) { f.configErr = errors.New("rigs.json: unknown key") }, key: "config", tag: Live, want: Red},
-		"one needs human":       {set: func(f *fake) { f.waiting, f.waitOldest = 1, ago(time.Hour) }, key: "needs-human", tag: Live, want: Degraded},
-		"needs human for a day": {set: func(f *fake) { f.waiting, f.waitOldest = 2, ago(25*time.Hour) }, key: "needs-human", tag: Live, want: Red},
+		"no escalation":        {set: func(f *fake) {}, key: "escalation", tag: Live, want: Green},
+		"young escalation":     {set: func(f *fake) { f.escOpened, f.escOK = ago(2*time.Hour), true }, key: "escalation", tag: Live, want: Degraded},
+		"old escalation":       {set: func(f *fake) { f.escOpened, f.escOK = ago(5*time.Hour), true }, key: "escalation", tag: Live, want: Red},
+		"free slots":           {set: func(f *fake) {}, key: "slot", tag: Recorded, want: Green},
+		"long slot holder":     {set: func(f *fake) { f.holders = []SlotHolder{{"a", ago(time.Minute)}, {"b", ago(40 * time.Minute)}} }, key: "slot", tag: Recorded, want: Degraded},
+		"holder without start": {set: func(f *fake) { f.holders = []SlotHolder{{Name: "a"}} }, key: "slot", tag: Unknown, want: VerdictUnknown},
+		"stale backup":         {set: func(f *fake) { f.backupAt = ago(40 * time.Hour) }, key: "backup", tag: Recorded, want: Degraded},
+		"no backup":            {set: func(f *fake) { f.backupOK = false }, key: "backup", tag: Recorded, want: Red},
+		"invalid config":       {set: func(f *fake) { f.configErr = errors.New("rigs.json: unknown key") }, key: "config", tag: Live, want: Red},
+		"one needs human": {set: func(f *fake) {
+			f.waits = []PersonWait{{Label: FieldNeedsHuman, Count: 1, Oldest: ago(time.Hour)}}
+		}, key: "needs-human", tag: Live, want: Degraded},
+		"needs human for a day": {set: func(f *fake) {
+			f.waits = []PersonWait{{Label: FieldNeedsHuman, Count: 2, Oldest: ago(25 * time.Hour)}}
+		}, key: "needs-human", tag: Live, want: Red},
+		// gt-slmaz: a hold under a newer label is its own field, named by the
+		// label, so the line and the pill say who must act.
+		"an overseer hold": {set: func(f *fake) {
+			f.waits = []PersonWait{{Label: FieldNeedsOverseer, Count: 1, Oldest: ago(time.Hour)}}
+		}, key: "needs-overseer", tag: Live, want: Degraded},
+		"an operator hold for a day": {set: func(f *fake) {
+			f.waits = []PersonWait{{Label: FieldNeedsOperator, Count: 1, Oldest: ago(25 * time.Hour)}}
+		}, key: "needs-operator", tag: Live, want: Red},
+		"nothing waiting": {set: func(f *fake) {}, key: "needs-human", tag: Live, want: Green},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

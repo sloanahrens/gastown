@@ -161,9 +161,13 @@ func TestTheAlarmTableCoversEveryStateTheReaderSends(t *testing.T) {
 
 	states := []string{
 		StateWorking, StateQuiet, StateGating, StateQueued, StateSpawning, StateStalled,
-		StateReviewNeeded, StateRecovery, StateNeedsHuman, StateParked, StateIdle, StateUnknown,
+		StateReviewNeeded, StateRecovery, StateNeedsHuman, StateNeedsOverseer, StateNeedsOperator,
+		StateParked, StateIdle, StateUnknown,
 	}
-	want := map[string]string{StateQuiet: alarmWarn, StateStalled: alarmBad, StateNeedsHuman: alarmBad}
+	want := map[string]string{
+		StateQuiet: alarmWarn, StateStalled: alarmBad,
+		StateNeedsHuman: alarmBad, StateNeedsOverseer: alarmBad, StateNeedsOperator: alarmBad,
+	}
 	for _, state := range states {
 		got, ok := polecatAlarm[state]
 		if !ok {

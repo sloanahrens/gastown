@@ -1618,3 +1618,57 @@ func TestNewRigLandingWorker_WiresTheBirdRejectionPath(t *testing.T) {
 		t.Errorf("escalation = %+v, want MEDIUM keyed %q", got[0].Escalation, key)
 	}
 }
+
+// fakeBeadReader serves one bead by id, or fails every read.
+type fakeBeadReader struct {
+	issues map[string]*beads.Issue
+	err    error
+}
+
+func (f fakeBeadReader) Show(id string) (*beads.Issue, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	is, ok := f.issues[id]
+	if !ok {
+		return nil, fmt.Errorf("no bead %s", id)
+	}
+	return is, nil
+}
+
+// A landing left for a person escalates under the label that holds the bead,
+// so the overseer's hold is its own escalation rather than reusing the old
+// label's key, which stays for a bead carrying the old label, no person label,
+// or labels nobody can read (gt-slmaz).
+func TestLandingPersonKeyNamesThePersonLabel(t *testing.T) {
+	t.Parallel()
+	bead := func(labels ...string) *beads.Issue {
+		return &beads.Issue{ID: "gt-1", Labels: labels}
+	}
+	for _, tc := range []struct {
+		name string
+		read fakeBeadReader
+		want string
+	}{
+		{"an overseer hold", fakeBeadReader{issues: map[string]*beads.Issue{"gt-1": bead(land.LabelNeedsOverseer)}},
+			"landing-needs-overseer:gt-1"},
+		{"an operator hold", fakeBeadReader{issues: map[string]*beads.Issue{"gt-1": bead(land.LabelNeedsOperator)}},
+			"landing-needs-operator:gt-1"},
+		{"the old label", fakeBeadReader{issues: map[string]*beads.Issue{"gt-1": bead(land.LabelNeedsHuman)}},
+			"landing-needs-human:gt-1"},
+		{"two labels read as the overseer's step", fakeBeadReader{issues: map[string]*beads.Issue{
+			"gt-1": bead(land.LabelNeedsHuman, land.LabelNeedsOperator, land.LabelNeedsOverseer)}},
+			"landing-needs-overseer:gt-1"},
+		{"no person label keeps the old key", fakeBeadReader{issues: map[string]*beads.Issue{"gt-1": bead(land.LabelReadyToLand)}},
+			"landing-needs-human:gt-1"},
+		{"an unreadable bead keeps the old key", fakeBeadReader{err: errors.New("bd: connection refused")},
+			"landing-needs-human:gt-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := landingPersonKey(tc.read, "gt-1"); got != tc.want {
+				t.Errorf("key = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

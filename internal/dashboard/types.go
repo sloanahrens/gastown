@@ -49,17 +49,19 @@ type HealthCause struct {
 // list shows and the dispatcher's capacity counts), plus gating and quiet,
 // which only the dashboard can see.
 const (
-	StateWorking      = "working"       // assigned work and a live session
-	StateQuiet        = "quiet"         // working, but the session has been silent past QuietAfter
-	StateGating       = "gating"        // its bead is being gated and om-reviewed by the landing worker
-	StateQueued       = "queued"        // its work is submitted and waits to land
-	StateSpawning     = "spawning"      // dispatched seconds ago, session not up yet
-	StateStalled      = "stalled"       // assigned work but no session: nothing is doing it
-	StateReviewNeeded = "review-needed" // a live session holding uncommitted or unpushed state
-	StateRecovery     = "recovery"      // idle, but its worktree needs recovery before reuse
-	StateNeedsHuman   = "needs-human"   // its bead is waiting on an operator
-	StateParked       = "parked"        // parked by an operator
-	StateIdle         = "idle"
+	StateWorking       = "working"        // assigned work and a live session
+	StateQuiet         = "quiet"          // working, but the session has been silent past QuietAfter
+	StateGating        = "gating"         // its bead is being gated and om-reviewed by the landing worker
+	StateQueued        = "queued"         // its work is submitted and waits to land
+	StateSpawning      = "spawning"       // dispatched seconds ago, session not up yet
+	StateStalled       = "stalled"        // assigned work but no session: nothing is doing it
+	StateReviewNeeded  = "review-needed"  // a live session holding uncommitted or unpushed state
+	StateRecovery      = "recovery"       // idle, but its worktree needs recovery before reuse
+	StateNeedsHuman    = "needs-human"    // its bead carries the old needs-human label
+	StateNeedsOverseer = "needs-overseer" // its bead is labeled needs-overseer: the overseer acts or vets first
+	StateNeedsOperator = "needs-operator" // its bead is labeled needs-operator: only the operator can settle it
+	StateParked        = "parked"         // parked by an operator
+	StateIdle          = "idle"
 	// StateUnknown is a polecat the dashboard cannot classify because tmux could
 	// not be read: without the session list "working" and "stalled" look alike.
 	StateUnknown = "unknown"
