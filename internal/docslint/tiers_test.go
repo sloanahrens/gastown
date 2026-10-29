@@ -7,7 +7,15 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
+
+// TestMain holds the package to the unit tier's run-time rules: no goroutine a
+// test started outlives it, and no test starts an external tool.
+func TestMain(m *testing.M) {
+	os.Exit(unittier.Main(m))
+}
 
 // memFS is the checkout a test describes: each file path mapped to its
 // contents. WalkFiles iterates a map, so its order is the unspecified one the
@@ -35,6 +43,7 @@ func (m memFS) WalkFiles(dir string) []string {
 }
 
 func TestAgentFacingTier(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		files memFS
@@ -97,6 +106,7 @@ func TestAgentFacingTier(t *testing.T) {
 }
 
 func TestHistoricalAndReferenceTiers(t *testing.T) {
+	t.Parallel()
 	files := memFS{
 		"README.md":               "# readme\n",
 		"docs/HOOKS.md":           "# hooks\n",
@@ -184,6 +194,7 @@ func TestHistoricalAndReferenceTiers(t *testing.T) {
 }
 
 func TestHistoricalUnreadableDesignDocIsAnError(t *testing.T) {
+	t.Parallel()
 	// A docs/design file that cannot be read is not a live one and not a
 	// historical one: the tier functions report it rather than guess.
 	files := memFS{}
@@ -221,6 +232,7 @@ func (failingReadFS) ReadFile(p string) ([]byte, error) {
 }
 
 func TestGoTierExcludesTests(t *testing.T) {
+	t.Parallel()
 	files := memFS{
 		"cmd/gt/main.go":         "package main\n",
 		"cmd/gt/main_test.go":    "package main\n",
@@ -228,7 +240,6 @@ func TestGoTierExcludesTests(t *testing.T) {
 		"internal/pkg/a_test.go": "package pkg\n",
 		"internal/pkg/data.json": "{}\n",
 		"docs/guides/guide.md":   "# guide\n",
-		"scripts/docs-lint.sh":   "#!/bin/sh\n",
 	}
 	want := []string{"cmd/gt/main.go", "internal/pkg/a.go"}
 	if got := Go(files); !reflect.DeepEqual(got, want) {
@@ -237,6 +248,7 @@ func TestGoTierExcludesTests(t *testing.T) {
 }
 
 func TestMissingDirectoriesAreEmpty(t *testing.T) {
+	t.Parallel()
 	// A docs-only root: no cmd/ and no internal/, so the go tier is empty and
 	// every tier still lists.
 	files := memFS{
@@ -262,6 +274,7 @@ func TestMissingDirectoriesAreEmpty(t *testing.T) {
 }
 
 func TestCeilingTierExemptions(t *testing.T) {
+	t.Parallel()
 	files := memFS{
 		"internal/formula/formulas/mol-polecat-work.formula.toml":          "description = \"work\"\n",
 		"internal/formula/formulas/mol-polecat-work-monorepo.formula.toml": "description = \"monorepo\"\n",
@@ -288,6 +301,7 @@ func TestCeilingTierExemptions(t *testing.T) {
 }
 
 func TestListTable(t *testing.T) {
+	t.Parallel()
 	files := memFS{
 		"README.md":              "# readme\n",
 		"AGENTS.md":              "# agents\n",
@@ -352,6 +366,7 @@ func TestListTable(t *testing.T) {
 }
 
 func TestOSFilesReadsACheckout(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	write := func(rel, contents string) {
 		p := filepath.Join(root, filepath.FromSlash(rel))
