@@ -33,16 +33,17 @@ func Status(ctx context.Context, o Options) error {
 	line("state", derive(r))
 	line("dolt :3307", yesNo(r.dolt, "up", "DOWN"))
 	// The tracker prints beside Dolt only when a rig's route names it: a town
-	// with no rig on the tracker has none to report. An endpoint that does
-	// not resolve says so rather than printing a guessed port, and an
-	// unreadable route table leaves "no rig on the tracker" unknown.
+	// with no rig on the tracker has none to report. A town config that does
+	// not resolve the endpoint says so and names the cause rather than
+	// printing a guessed port, and an unreadable route table leaves "no rig
+	// on the tracker" unknown.
 	switch tr := r.tracker; {
 	case tr.routeErr != nil:
 		line("tracker", fmt.Sprintf("? (cannot read the route table: %v)", tr.routeErr))
 	case !tr.on:
 		// No rig is on the tracker, so there is no tracker line.
-	case !tr.resolved:
-		line("tracker", "unconfigured")
+	case tr.configErr != nil:
+		line("tracker", fmt.Sprintf("? (malformed tracker config: %v)", tr.configErr))
 	default:
 		line(fmt.Sprintf("tracker :%d", tr.port), yesNo(tr.up, "up", "DOWN"))
 	}
@@ -71,9 +72,10 @@ type trackerStatus struct {
 	routeErr error
 	// on reports that some rig's route names the tracker backend.
 	on bool
-	// resolved reports that the town's endpoint was read; port and up mean
-	// something only when it is true.
-	resolved bool
+	// configErr is a town config that does not resolve the endpoint. The
+	// port is unknown, so the report carries the cause; port and up mean
+	// something only when it is nil.
+	configErr error
 	// port is the port the town's endpoint resolves to.
 	port int
 	// up reports that GET /healthz on that endpoint answered 200.
@@ -92,9 +94,9 @@ func (e *engine) readTracker() trackerStatus {
 	}
 	ep, err := config.ResolveTrackerEndpoint(e.o.TownRoot)
 	if err != nil {
-		return trackerStatus{on: true}
+		return trackerStatus{on: true, configErr: err}
 	}
-	return trackerStatus{on: true, resolved: true, port: ep.Port, up: e.trackerOK(ep)}
+	return trackerStatus{on: true, port: ep.Port, up: e.trackerOK(ep)}
 }
 
 // rigOnTracker reports whether some rig's route names the tracker backend. An
