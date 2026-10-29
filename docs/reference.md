@@ -405,7 +405,12 @@ environment knobs and one key under `daemon` in `settings/config.json`:
 |------|---------|---------|
 | `POLECAT_IMAGE_REGISTRY_KEEP` | `5` | the newest per-commit tags kept by the plugin's retention, `gt maint` and the patrol |
 | `POLECAT_IMAGE_REGISTRY_PRUNE` | `dry-run` | the `polecat-image` plugin only: `off`, `dry-run` or `apply` |
-| `daemon.patrols.disk_maintenance` | disabled; once enabled, `{"interval": "daily", "window": "04:30", "mode": "dry_run"}` (`mode` may be `apply`) | the daemon patrol |
+| `daemon.patrols.disk_maintenance` | disabled; once enabled, `{"interval": "daily", "window": "04:30", "mode": "dry_run", "targets": {"civol": {"interval": "2h"}}}` (`mode` may be `apply`) | the daemon patrol |
+
+A `targets` entry gives one target a cadence of its own, such as civol's `2h`
+for the CI cache volumes; a target without one runs in the daily window. An
+interval that is not a Go duration of at least a minute, or a target name the
+patrol does not know, is refused when the config is read.
 
 The two environment knobs are read from the environment of the run: the
 daemon's for the plugin and the patrol, the shell's for a hand-run `gt maint`.

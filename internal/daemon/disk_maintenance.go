@@ -1,9 +1,13 @@
 package daemon
 
-// disk_maintenance is the town's daily registry prune: in the configured quiet
-// window it plans every maintenance target and, when the mode is apply, applies
-// the plan under the polecat-image lock so a delete never races an image push
+// disk_maintenance is the town's registry prune: in the configured quiet window
+// it plans every maintenance target and, when the mode is apply, applies the
+// plan under the polecat-image lock so a delete never races an image push
 // (gt-dl4nv.15, docs/plans/2026-10-28-disk-maintenance-design.md).
+//
+// A target may set a cadence of its own, and the CI cache volumes do: they grow
+// faster than a daily window can hold, so civol runs every two hours in any
+// window while the rest keep the daily pass (gt-z6qre.17).
 //
 // The patrol is opt-in twice over. It runs only when
 // daemon.patrols.disk_maintenance.enabled is true, and it changes nothing
@@ -11,20 +15,22 @@ package daemon
 // delete. A plan that could not read its inputs refuses rather than guessing.
 //
 // The disk readings, the 80/70 usage alerts and the unreadable alert are in
-// disk_maintenance_disks.go; this file owns the window, the mode, and the pass
-// that plans with the keep those readings decide.
+// disk_maintenance_disks.go; this file owns the schedule, the mode, and the
+// pass that plans with the keep those readings decide.
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -163,13 +169,140 @@ func diskMaintenanceModeOrDefault(cfg *DaemonPatrolConfig) string {
 	return mode
 }
 
-// runDiskMaintenance is the tick: it decides whether this is the window's one
-// pass, refuses quietly while the town is busy, and then runs the pass off the
-// loop goroutine.
+// diskMaintSchedule is the patrol's state between ticks: when each target with
+// a cadence of its own last concluded a run, and the settings the patrol has
+// already refused to schedule. Both are in memory, as the daily window's own
+// marker is, so a restarted daemon runs each target once rather than
+// inheriting a deadline it never met.
+type diskMaintSchedule struct {
+	mu      sync.Mutex
+	lastRun map[string]time.Time
+	refused map[string]bool
+}
+
+// lastRunAt is when the named target last concluded a run; the zero time when
+// it has none, which reads as due.
+func (s *diskMaintSchedule) lastRunAt(name string) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastRun[name]
+}
+
+// record keeps the time a target concluded a run. The reading loses its
+// monotonic side, as a persisted one would: the seam clock carries none, and a
+// due-ness subtraction across the two would count awake time only, so a host
+// that slept would keep a target waiting past its interval.
+func (s *diskMaintSchedule) record(name string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastRun == nil {
+		s.lastRun = make(map[string]time.Time)
+	}
+	s.lastRun[name] = at.Round(0)
+}
+
+// firstRefusal reports whether the patrol has yet to report the refusal key
+// names, and marks it reported: a setting the patrol cannot schedule is worth
+// one line, not one on every five-minute tick.
+func (s *diskMaintSchedule) firstRefusal(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.refused[key] {
+		return false
+	}
+	if s.refused == nil {
+		s.refused = make(map[string]bool)
+	}
+	s.refused[key] = true
+	return true
+}
+
+// diskMaintDue is the work one tick found: the targets with a cadence of their
+// own that are due now, and whether the daily window's targets are due.
+type diskMaintDue struct {
+	// interval is the due target names with a cadence of their own, sorted.
+	interval []string
+	// scheduled is every target name given a cadence, due or not: it runs on
+	// that cadence and never on the daily window.
+	scheduled map[string]bool
+	// daily is whether the targets without a cadence are due: the window is
+	// open and the day's pass has not concluded.
+	daily bool
+}
+
+// empty reports whether this tick has nothing to run.
+func (due diskMaintDue) empty() bool { return !due.daily && len(due.interval) == 0 }
+
+// selection returns the built targets this tick runs, sorted. A target with a
+// cadence runs only when the cadence is due; the daily window never reaches it.
+func (due diskMaintDue) selection(targets map[string]diskmaint.Target) []string {
+	names := make([]string, 0, len(targets))
+	for name := range targets {
+		if due.daily && !due.scheduled[name] {
+			names = append(names, name)
+		}
+	}
+	for _, name := range due.interval {
+		if _, built := targets[name]; built {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+// diskMaintenanceDue decides what this tick runs. A target with its own cadence
+// is due from its own last run and ignores the window; a target without one
+// keeps the window and its one run a day (gt-z6qre.17).
 //
-// It runs on the loop goroutine and only reads the window marker: the pass
-// writes it when it settles a window, and a pass that deferred leaves it alone
-// so a later tick in the window tries again.
+// The errors are settings the patrol cannot schedule. Decoding refuses them
+// from the config file, and this is the same refusal for a config built in
+// code: the target runs on no cadence rather than quietly on the daily window.
+func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
+	due := diskMaintDue{scheduled: map[string]bool{}}
+	var errs []error
+	if cfg := diskMaintenanceSettings(d.patrolConfig); cfg != nil {
+		for _, name := range slices.Sorted(maps.Keys(cfg.Targets)) {
+			target := cfg.Targets[name]
+			if target.Interval == "" {
+				continue // no cadence: the daily window decides
+			}
+			// A target given a cadence never runs on the daily window, whether
+			// that cadence is due or unreadable: falling back would run it on a
+			// clock the town never asked for.
+			due.scheduled[name] = true
+			every, err := target.Every()
+			if err != nil {
+				errs = append(errs, fmt.Errorf("patrols.disk_maintenance.targets.%s.interval: %w", name, err))
+				continue
+			}
+			if last := d.diskMaintSchedule.lastRunAt(name); last.IsZero() || now.Sub(last) >= every {
+				due.interval = append(due.interval, name)
+			}
+		}
+	}
+	if !shouldRunMaintenanceCycle(now, d.diskMaintenanceSettledAt()) {
+		return due, errs
+	}
+	window := diskMaintenanceWindow(d.patrolConfig)
+	if isInMaintenanceWindow(now, window) {
+		due.daily = true
+		return due, errs
+	}
+	if _, _, err := maintenanceWindowBounds(now, window); err != nil {
+		// A window that does not parse never opens, so the patrol would
+		// otherwise be a silent skip forever.
+		errs = append(errs, err)
+	}
+	return due, errs
+}
+
+// runDiskMaintenance is the tick: it finds the targets due, refuses quietly
+// while the town is busy, and then runs them off the loop goroutine.
+//
+// It runs on the loop goroutine and only reads the schedule: the pass writes
+// it when it concludes a target, and a pass that deferred leaves that target
+// due so a later tick tries again.
 func (d *Daemon) runDiskMaintenance() {
 	if !d.isPatrolActive("disk_maintenance") {
 		return
@@ -177,27 +310,19 @@ func (d *Daemon) runDiskMaintenance() {
 	s := d.diskMaintenanceSeams()
 	now := s.now()
 
-	if !shouldRunMaintenanceCycle(now, d.diskMaintenanceSettledAt()) {
-		return // this window's pass already ran, refused or failed
+	due, errs := d.diskMaintenanceDue(now)
+	for _, err := range errs {
+		d.refuseDiskMaintenance(err)
+	}
+	if due.empty() {
+		return
 	}
 
 	mode, err := diskMaintenanceMode(d.patrolConfig)
 	if err != nil {
-		// A mode the patrol cannot act on runs nothing, and must not be retried
-		// every tick: settle the day and say why once.
-		d.settleDiskMaintenanceWindow(now)
-		d.logger.Printf("disk_maintenance: not running: %v", err)
-		return
-	}
-
-	window := diskMaintenanceWindow(d.patrolConfig)
-	if !isInMaintenanceWindow(now, window) {
-		if _, _, err := maintenanceWindowBounds(now, window); err != nil {
-			// A window that does not parse never opens, so the patrol would
-			// otherwise be a silent skip forever.
-			d.settleDiskMaintenanceWindow(now)
-			d.logger.Printf("disk_maintenance: not running: %v", err)
-		}
+		// A mode the patrol cannot act on runs nothing, and is not retried every
+		// tick: the refusal is reported once and the schedule stands.
+		d.refuseDiskMaintenance(err)
 		return
 	}
 
@@ -211,8 +336,16 @@ func (d *Daemon) runDiskMaintenance() {
 	}
 	s.dispatch(func() {
 		defer d.diskMaintRunning.Store(false)
-		d.diskMaintenancePass(now, mode)
+		d.diskMaintenancePass(now, mode, due)
 	})
+}
+
+// refuseDiskMaintenance says why a setting the patrol cannot schedule runs
+// nothing, once rather than on every tick.
+func (d *Daemon) refuseDiskMaintenance(err error) {
+	if d.diskMaintSchedule.firstRefusal(err.Error()) {
+		d.logger.Printf("disk_maintenance: not running: %v", err)
+	}
 }
 
 // settleDiskMaintenanceWindow records that this window's pass is over, so the
@@ -230,12 +363,12 @@ func (d *Daemon) diskMaintenanceSettledAt() time.Time {
 	return time.Time{}
 }
 
-// diskMaintenancePass plans every target and, in apply mode, applies the plan
-// it just built. A window is settled by anything the pass reaches a conclusion
-// about — a kept plan, a refused one, a failed read — and left open when an
-// apply deferred, so the next tick in the window retries once the push holding
-// the lock is done.
-func (d *Daemon) diskMaintenancePass(now time.Time, mode string) {
+// diskMaintenancePass plans the due targets and, in apply mode, applies the
+// plans it just built. A target is settled by anything its run reaches a
+// conclusion about — a kept plan, a refused one, a failed read — and left due
+// when an apply deferred, so the next tick retries once the push holding the
+// lock is done.
+func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDue) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
 	s := d.diskMaintenanceSeams()
@@ -249,39 +382,65 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string) {
 	keep, err := diskMaintenanceKeep(s.getenv, readings)
 	if err != nil {
 		d.logger.Printf("disk_maintenance: not running: %v", err)
-		d.settleDiskMaintenanceWindow(now)
+		d.concludeDiskMaintenance(now, due)
 		return
 	}
 	targets, err := s.targets(ctx, d, mode)
 	if err != nil {
 		d.logger.Printf("disk_maintenance: the targets could not be built: %v", err)
-		d.settleDiskMaintenanceWindow(now)
+		d.concludeDiskMaintenance(now, due)
 		return
 	}
-	names := make([]string, 0, len(targets))
-	for name := range targets {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	if len(names) == 0 {
+	if len(targets) == 0 {
 		d.logger.Printf("disk_maintenance: no maintenance target publishes here; nothing to do")
-		d.settleDiskMaintenanceWindow(now)
+		d.concludeDiskMaintenance(now, due)
 		return
+	}
+	for _, name := range due.interval {
+		if _, built := targets[name]; built {
+			continue
+		}
+		// A cadence set for a target this build does not produce runs nothing.
+		// Saying so once keeps it from looking like a run that keeps failing,
+		// and recording it means the patrol looks again per interval, not per
+		// tick.
+		if d.diskMaintSchedule.firstRefusal("absent:" + name) {
+			d.logger.Printf("disk_maintenance: %s: this build has no such target; its interval runs nothing", name)
+		}
+		d.diskMaintSchedule.record(name, now)
 	}
 
 	apply := mode == agentconfig.DiskMaintenanceModeApply
 	policy := diskmaint.Policy{Keep: keep, Apply: apply, Now: now}
 	deferred := false
-	for _, name := range names {
+	for _, name := range due.selection(targets) {
 		if d.diskMaintenanceTarget(ctx, name, targets[name], policy, apply) {
 			deferred = true
+			continue
+		}
+		if due.scheduled[name] {
+			d.diskMaintSchedule.record(name, now)
 		}
 	}
 	if deferred {
 		d.logger.Printf("disk_maintenance: apply deferred; the window stays open for another try")
 		return
 	}
-	d.settleDiskMaintenanceWindow(now)
+	if due.daily {
+		d.settleDiskMaintenanceWindow(now)
+	}
+}
+
+// concludeDiskMaintenance settles the targets due this tick without running
+// them, for a pass that refused whole: a failed read concludes a run as a plan
+// does, and retrying it on every tick would be a line and a build apiece.
+func (d *Daemon) concludeDiskMaintenance(now time.Time, due diskMaintDue) {
+	if due.daily {
+		d.settleDiskMaintenanceWindow(now)
+	}
+	for _, name := range due.interval {
+		d.diskMaintSchedule.record(name, now)
+	}
 }
 
 // diskMaintenanceTarget plans one target and, in apply mode, applies the plan.

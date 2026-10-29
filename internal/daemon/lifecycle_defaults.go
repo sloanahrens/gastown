@@ -64,11 +64,17 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 			// which an install must not start doing on its own. The key is here
 			// so an installed gt writes it once and the operator flips enabled
 			// and mode together (gt-dl4nv.15).
+			// The CI cache volumes grow about 3 GB an hour, so their trim runs
+			// every two hours in any window, as the shell job it replaces did;
+			// every other target keeps the daily window (gt-z6qre.17).
 			DiskMaintenance: &DiskMaintenanceConfig{
 				Enabled:  false,
 				Interval: agentconfig.DiskMaintenanceIntervalDaily,
 				Window:   agentconfig.DiskMaintenanceDefaultWindow,
 				Mode:     agentconfig.DiskMaintenanceModeDryRun,
+				Targets: map[string]DiskMaintenanceTarget{
+					agentconfig.DiskMaintenanceTargetCivol: {Interval: agentconfig.DiskMaintenanceDefaultCivolInterval},
+				},
 			},
 			// Declared but switched off for the same reason: the patrol runs a
 			// program on a timer, so an install must not start one. The key is

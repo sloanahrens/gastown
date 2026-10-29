@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -667,6 +670,54 @@ type DiskMaintenanceConfig struct {
 	Interval string `json:"interval"` // "daily"
 	Window   string `json:"window"`   // "04:30", local time
 	Mode     string `json:"mode"`     // "dry_run" (default) | "apply"
+	// Targets holds the targets with a cadence of their own. A target absent
+	// here keeps the daily window.
+	Targets map[string]DiskMaintenanceTarget `json:"targets,omitempty"`
+}
+
+// DiskMaintenanceTarget is one target's own cadence: a set Interval runs that
+// target on it in any window, and an empty one keeps the daily window.
+type DiskMaintenanceTarget struct {
+	Interval string `json:"interval,omitempty"` // Go duration such as "2h"
+}
+
+// Every returns the cadence Interval names, or zero for an empty setting,
+// which keeps the daily window. A setting the patrol cannot schedule is an
+// error rather than the daily window: reading a typo as daily would run the
+// target on a cadence the town never asked for, and nothing would say so.
+func (t DiskMaintenanceTarget) Every() (time.Duration, error) {
+	if t.Interval == "" {
+		return 0, nil
+	}
+	every, err := time.ParseDuration(t.Interval)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a Go duration such as \"2h\"", t.Interval)
+	}
+	if every < time.Minute {
+		return 0, fmt.Errorf("%q is under the one-minute minimum", t.Interval)
+	}
+	return every, nil
+}
+
+// The maintenance targets the patrol knows, so a per-target interval applies
+// to one that exists. The registry prune is built today; the CI cache volume
+// trim (internal/diskmaint/civol) joins it, which is why the shipped default
+// gives it an interval before the patrol builds it (gt-z6qre.17).
+const (
+	DiskMaintenanceTargetCivol    = "civol"
+	DiskMaintenanceTargetRegistry = "registry"
+)
+
+// diskMaintenanceTargets is the set Target names are checked against.
+var diskMaintenanceTargets = []string{
+	DiskMaintenanceTargetCivol,
+	DiskMaintenanceTargetRegistry,
+}
+
+// isDiskMaintenanceTarget reports whether name is a maintenance target the
+// patrol knows.
+func isDiskMaintenanceTarget(name string) bool {
+	return slices.Contains(diskMaintenanceTargets, name)
 }
 
 // The values DiskMaintenanceConfig accepts. An empty field means the default,
@@ -676,6 +727,10 @@ const (
 	DiskMaintenanceModeDryRun    = "dry_run"
 	DiskMaintenanceModeApply     = "apply"
 	DiskMaintenanceDefaultWindow = "04:30"
+	// DiskMaintenanceDefaultCivolInterval is the CI cache volumes' cadence:
+	// they grow about 3 GB an hour, so the daily window cannot hold them. It
+	// matches the shell job the patrol replaces (gt-z6qre.17).
+	DiskMaintenanceDefaultCivolInterval = "2h"
 )
 
 // UnmarshalJSON decodes the patrol's block strictly, refusing a value the
@@ -706,6 +761,15 @@ func (c *DiskMaintenanceConfig) UnmarshalJSON(data []byte) error {
 	if p.Window != "" {
 		if _, err := parseClock(p.Window); err != nil {
 			return fmt.Errorf("patrols.disk_maintenance.window %q: want HH:MM", p.Window)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(p.Targets)) {
+		if !isDiskMaintenanceTarget(name) {
+			return fmt.Errorf("patrols.disk_maintenance.targets.%s: unknown target; the patrol knows %s",
+				name, strings.Join(diskMaintenanceTargets, " and "))
+		}
+		if _, err := p.Targets[name].Every(); err != nil {
+			return fmt.Errorf("patrols.disk_maintenance.targets.%s.interval: %w", name, err)
 		}
 	}
 	*c = DiskMaintenanceConfig(p)
