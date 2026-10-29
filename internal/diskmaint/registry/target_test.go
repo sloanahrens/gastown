@@ -25,11 +25,12 @@ type fakeRegistry struct {
 	mu     sync.Mutex
 	paths  []string
 	repos  map[string][]TagInfo
-	status map[string]int // path prefix -> status code, for a failing read
+	status map[string]int    // path prefix -> status code, for a failing read
+	bodies map[string]string // digest -> manifest body served in place of the default
 }
 
 func newFakeRegistry(repos map[string][]TagInfo) *fakeRegistry {
-	return &fakeRegistry{repos: repos, status: map[string]int{}}
+	return &fakeRegistry{repos: repos, status: map[string]int{}, bodies: map[string]string{}}
 }
 
 func (f *fakeRegistry) requested() []string {
@@ -73,6 +74,10 @@ func (f *fakeRegistry) handler(w http.ResponseWriter, r *http.Request) {
 		ti, found := f.find(repo, ref)
 		if !ok || !found {
 			http.NotFound(w, r)
+			return
+		}
+		if body, custom := f.bodies[ti.Digest]; custom {
+			served(w, ti.Digest, body)
 			return
 		}
 		served(w, ti.Digest, imageBody(configOf(ti.Digest), ti.Bytes))
@@ -738,6 +743,137 @@ func TestPlanKeepFallsBackToTheConfig(t *testing.T) {
 				t.Fatalf("actions = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// unreadableBody is a manifest whose config blob the fake does not serve: the
+// manifest answers, and GetManifest fails on the blob read.
+func unreadableBody() string { return imageBody(digestOf('e'), 60) }
+
+// unreadableTag is a tag whose manifest answers but cannot be read in full. Its
+// digest is the sha256 of the body, as a real registry's is, so ManifestDigest
+// reads it; reg serves the body under that digest.
+func unreadableTag(reg *fakeRegistry, repo, tag string, created time.Time) TagInfo {
+	body := unreadableBody()
+	ti := fakeTag(repo, tag, bodyDigest(body), created, 0)
+	reg.bodies[ti.Digest] = body
+	return ti
+}
+
+// actionFor returns the action that deletes ref, and whether the plan has one.
+func actionFor(p diskmaint.Plan, ref string) (diskmaint.Action, bool) {
+	for _, a := range p.Actions {
+		if a.Ref == ref {
+			return a, true
+		}
+	}
+	return diskmaint.Action{}, false
+}
+
+func TestPlanDeletesAnUnreadableStrayManifest(t *testing.T) {
+	t.Parallel()
+	reg := newFakeRegistry(map[string][]TagInfo{RepoMain: {
+		fakeTag(RepoMain, TagDev, dg("d0"), planTime(0), 100),
+		fakeTag(RepoMain, "c000001", dg("a1"), planTime(1), 200),
+	}})
+	bad := unreadableTag(reg, straySeed, "x1", planTime(0))
+	reg.repos[straySeed] = []TagInfo{bad}
+
+	plan, err := NewTarget(testConfig(t, reg)).Plan(context.Background(), diskmaint.Policy{Keep: 2})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Refused != "" {
+		t.Fatalf("plan refused: %s: an unreadable stray manifest must not refuse the registry plan", plan.Refused)
+	}
+	ref := straySeed + "@" + bad.Digest
+	a, ok := actionFor(plan, ref)
+	if !ok {
+		t.Fatalf("actions = %v, want a delete of %s", actionRefs(plan), ref)
+	}
+	if a.Kind != "delete-manifest" {
+		t.Errorf("kind = %q, want delete-manifest", a.Kind)
+	}
+	if a.Bytes != 0 {
+		t.Errorf("bytes = %d, want 0: the size of an unreadable manifest is unknown", a.Bytes)
+	}
+	if !strings.Contains(a.Why, "unreadable") {
+		t.Errorf("why = %q, want it to say the manifest was unreadable", a.Why)
+	}
+}
+
+func TestPlanRefusesAnUnreadableMainManifest(t *testing.T) {
+	t.Parallel()
+	reg := newFakeRegistry(map[string][]TagInfo{})
+	reg.repos[RepoMain] = []TagInfo{
+		fakeTag(RepoMain, TagDev, dg("d0"), planTime(0), 100),
+		fakeTag(RepoMain, "c000001", dg("a1"), planTime(1), 200),
+		fakeTag(RepoMain, "c000002", dg("a2"), planTime(2), 300),
+		unreadableTag(reg, RepoMain, "c000003", planTime(3)),
+	}
+
+	plan, err := NewTarget(testConfig(t, reg)).Plan(context.Background(), diskmaint.Policy{Keep: 2})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	assertRefused(t, plan)
+	if !strings.Contains(plan.Refused, "c000003") {
+		t.Fatalf("Refused = %q, want it to name the unreadable main manifest", plan.Refused)
+	}
+}
+
+func TestPlanKeepsAnUnreadableStrayNamedByARecord(t *testing.T) {
+	t.Parallel()
+	reg := newFakeRegistry(map[string][]TagInfo{RepoMain: {
+		fakeTag(RepoMain, TagDev, dg("d0"), planTime(0), 100),
+		fakeTag(RepoMain, "c000001", dg("a1"), planTime(1), 200),
+	}})
+	// A record names seedtest/polecat:p1, which reads fine, so the in-use resolve
+	// succeeds and the repo is kept whole, unreadable x1 included.
+	reg.repos[straySeed] = []TagInfo{
+		fakeTag(straySeed, "p1", dg("bbbb0001"), planTime(1), 60),
+		unreadableTag(reg, straySeed, "x1", planTime(0)),
+	}
+	record := `{"image":"localhost:5001/seedtest/polecat:p1"}`
+
+	plan, err := NewTarget(testConfig(t, reg, record)).Plan(context.Background(), diskmaint.Policy{Keep: 2})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Refused != "" {
+		t.Fatalf("plan refused: %s", plan.Refused)
+	}
+	for _, ref := range actionRefs(plan) {
+		if strings.HasPrefix(ref, straySeed+"@") {
+			t.Fatalf("actions = %v: a stray repo a sandbox record names must not be deleted", actionRefs(plan))
+		}
+	}
+	if rule := keptRule(plan, straySeed+":x1"); rule != ruleSandboxRecord {
+		t.Fatalf("x1 kept by %q, want %q: %v", rule, ruleSandboxRecord, plan.Kept)
+	}
+}
+
+func TestPlanRefusesWhenStrayDigestAlsoFails(t *testing.T) {
+	t.Parallel()
+	reg := newFakeRegistry(map[string][]TagInfo{RepoMain: {
+		fakeTag(RepoMain, TagDev, dg("d0"), planTime(0), 100),
+		fakeTag(RepoMain, "c000001", dg("a1"), planTime(1), 200),
+	}})
+	// The header names dg("b1"), which is not the sha256 of the body, so
+	// ManifestDigest refuses too: the plan must name both failures.
+	bad := fakeTag(straySeed, "x1", dg("b1"), planTime(0), 0)
+	reg.repos[straySeed] = []TagInfo{bad}
+	reg.bodies[bad.Digest] = unreadableBody()
+
+	plan, err := NewTarget(testConfig(t, reg)).Plan(context.Background(), diskmaint.Policy{Keep: 2})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	assertRefused(t, plan)
+	for _, want := range []string{straySeed + ":x1", "digest fallback"} {
+		if !strings.Contains(plan.Refused, want) {
+			t.Fatalf("Refused = %q, want it to name %q", plan.Refused, want)
+		}
 	}
 }
 

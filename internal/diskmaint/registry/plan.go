@@ -39,6 +39,10 @@ type TagInfo struct {
 	Repo, Tag, Digest string
 	Created           time.Time
 	Bytes             int64
+	// Unreadable marks a stray manifest whose GetManifest failed and whose
+	// digest ManifestDigest read instead: only the digest is known, so it is
+	// deleted by digest and the action says so.
+	Unreadable bool
 }
 
 // PlanInput is everything a retention decision reads; any failed read in Errs
