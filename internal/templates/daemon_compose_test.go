@@ -1,10 +1,14 @@
 package templates_test
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -178,6 +182,7 @@ func TestRenderDaemonCompose_RefusesASpecItCannotRenderSafely(t *testing.T) {
 		{"no container name", func(s *templates.ComposeSpec) { s.ContainerName = "" }, "ContainerName"},
 		{"no image", func(s *templates.ComposeSpec) { s.Image = "" }, "Image"},
 		{"no town root", func(s *templates.ComposeSpec) { s.TownRoot = "" }, "TownRoot"},
+		{"relative town root", func(s *templates.ComposeSpec) { s.TownRoot = "towns/live" }, "not absolute"},
 		{"no stop grace", func(s *templates.ComposeSpec) { s.StopGrace = 0 }, "MinimumStopGrace"},
 		{"stop grace below the budget", func(s *templates.ComposeSpec) { s.StopGrace = templates.MinimumStopGrace - time.Second }, "MinimumStopGrace"},
 		{"loopback dolt host", func(s *templates.ComposeSpec) { s.DoltHost = "127.0.0.1" }, "loopback"},
@@ -204,15 +209,24 @@ func TestRenderDaemonCompose_RefusesASpecItCannotRenderSafely(t *testing.T) {
 	}
 }
 
-func TestRenderDaemonCompose_AcceptsANonLoopbackDoltHost(t *testing.T) {
+// A dolt host the container can reach is passed through untouched, and an
+// empty one is the shipped configuration rather than a mistake: dolt.host then
+// applies, so refusing it would reject a town nobody had misconfigured.
+func TestRenderDaemonCompose_AcceptsADoltHostItCanUse(t *testing.T) {
 	t.Parallel()
 	// The probe (gt-qpeei.4) answered the path to the Mac's Dolt at the VM's
 	// gateway address, so a literal non-loopback address is a host the
-	// container can use and the renderer passes it through untouched.
-	spec := liveSpec()
-	spec.DoltHost = "192.168.65.254"
-	if _, err := templates.RenderDaemonCompose(spec); err != nil {
-		t.Errorf("RenderDaemonCompose with a gateway address = %v, want no error", err)
+	// container can use. An empty one is an unset container_host, which leaves
+	// the town's own dolt.host in force.
+	for _, host := range []string{"192.168.65.254", "host.docker.internal", ""} {
+		t.Run("host="+host, func(t *testing.T) {
+			t.Parallel()
+			spec := liveSpec()
+			spec.DoltHost = host
+			if _, err := templates.RenderDaemonCompose(spec); err != nil {
+				t.Errorf("RenderDaemonCompose with DoltHost %q = %v, want no error", host, err)
+			}
+		})
 	}
 }
 
@@ -234,11 +248,94 @@ func TestRenderDaemonCompose_QuotesAValueThatWouldChangeTheYAML(t *testing.T) {
 	}
 }
 
-// pinnedImages are the references images.go declares, as a service may name
-// them by tag. A task that adds a service adds its constant here, so an image
-// string hard-coded in the renderer fails this test.
-var pinnedImages = []string{
-	templates.DaemonBaseImage,
+// A dollar sign in a spec value is a dollar sign, not a reference: `docker
+// compose` interpolates $NAME and ${NAME} in every value it reads, so an
+// unescaped one would reach the container as whatever the environment names.
+// The takeover line is the file's one intended reference and keeps its single
+// dollars, which is what the escape has to leave alone.
+func TestRenderDaemonCompose_EscapesADollarInAValue(t *testing.T) {
+	t.Parallel()
+	spec := liveSpec()
+	spec.TownRoot = "/towns/$HOME/${WEB}"
+	out, f := render(t, spec)
+
+	// The rendered file is what compose reads, so the value there carries the
+	// escape compose undoes ($$ names one literal $).
+	escaped := "/towns/$$HOME/$${WEB}"
+	if got := f.Services["daemon"].WorkingDir; got != escaped {
+		t.Errorf("working_dir = %q, want %q: compose would otherwise substitute $HOME", got, escaped)
+	}
+	if got := f.Services["daemon"].Environment["GT_TOWN_ROOT"]; got != escaped {
+		t.Errorf("GT_TOWN_ROOT = %q, want %q", got, escaped)
+	}
+	vols := f.Services["daemon"].Volumes
+	if len(vols) != 1 || vols[0].Source != escaped || vols[0].Target != escaped {
+		t.Errorf("volumes = %+v, want %q on both sides", vols, escaped)
+	}
+	if got := f.Services["daemon"].Environment["GT_DAEMON_TAKEOVER"]; got != "${GT_DAEMON_TAKEOVER:-}" {
+		t.Errorf("GT_DAEMON_TAKEOVER = %q, want the single-dollar pass-through", got)
+	}
+
+	// Every other dollar in the file is paired, so nothing the environment
+	// holds can rewrite a value the spec supplied.
+	rest := strings.Replace(out, `GT_DAEMON_TAKEOVER: "${GT_DAEMON_TAKEOVER:-}"`, "", 1)
+	for i := 0; i < len(rest); i++ {
+		if rest[i] != '$' {
+			continue
+		}
+		if i+1 < len(rest) && rest[i+1] == '$' {
+			i++
+			continue
+		}
+		start, end := i-20, i+20
+		if start < 0 {
+			start = 0
+		}
+		if end > len(rest) {
+			end = len(rest)
+		}
+		t.Fatalf("unescaped $ at offset %d (%q): compose interpolates it\n%s", i, rest[start:end], out)
+	}
+}
+
+// imageTable parses images.go and returns every string constant it declares.
+// The pin is checked against that file, not a copy: a reference added to the
+// table counts the moment it is written, and a service naming an image the
+// table does not carry fails.
+func imageTable(t *testing.T) []string {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "images.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parsing images.go: %v", err)
+	}
+	var refs []string
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, v := range vs.Values {
+				lit, ok := v.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				s, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					t.Fatalf("unquoting %s in images.go: %v", lit.Value, err)
+				}
+				refs = append(refs, s)
+			}
+		}
+	}
+	if len(refs) == 0 {
+		t.Fatal("images.go declares no string constant; an empty table would pin nothing")
+	}
+	return refs
 }
 
 // daemonImagePrefix is the local tag the deployer builds on this host; it is
@@ -247,6 +344,18 @@ const daemonImagePrefix = "gt-daemon:"
 
 func TestRenderDaemonCompose_EveryImageIsPinned(t *testing.T) {
 	t.Parallel()
+	pinned := imageTable(t)
+	// The parse is only worth anything if it read the real table, which this
+	// constant proves it did.
+	if !slices.Contains(pinned, templates.DaemonBaseImage) {
+		t.Fatalf("images.go parsed as %q, want it to declare DaemonBaseImage %q", pinned, templates.DaemonBaseImage)
+	}
+	for _, ref := range pinned {
+		if strings.HasSuffix(ref, ":latest") {
+			t.Errorf("images.go declares %q: a moving tag makes a restart run an image the ladder never proved", ref)
+		}
+	}
+
 	spec := liveSpec()
 	_, f := render(t, spec)
 	if len(f.Services) == 0 {
@@ -259,7 +368,7 @@ func TestRenderDaemonCompose_EveryImageIsPinned(t *testing.T) {
 			t.Errorf("service %q renders no image", name)
 		case strings.HasPrefix(svc.Image, daemonImagePrefix) && svc.Image != daemonImagePrefix:
 			// The daemon's own tag, built from this host's binaries.
-		case slices.Contains(pinnedImages, svc.Image):
+		case slices.Contains(pinned, svc.Image):
 			// A reference images.go carries.
 		default:
 			t.Errorf("service %q image %q: neither the local %s<rev> tag nor a reference in images.go", name, svc.Image, daemonImagePrefix)
