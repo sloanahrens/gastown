@@ -10,11 +10,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/bdshim/flagrecord"
 )
 
-// Runner runs bd with args in dir and returns what it wrote to stdout and its exit code. A non-zero
-// exit is a result the golden records; an error means bd did not run to an exit.
-type Runner func(dir string, args []string) (stdout []byte, exit int, err error)
+// Runner runs bd with args in dir and returns what it wrote to stdout and its exit code; it is the
+// runner flagrecord walks bd's help through.
+type Runner = flagrecord.Runner
 
 // Copier makes a fresh copy of the fixture. It returns the copy's directory and the function that
 // removes it.

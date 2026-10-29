@@ -49,6 +49,17 @@ func TestDoctorRegistersRigBDBinaryCheck(t *testing.T) {
 	t.Fatal("expected the rig-bd-binary check in the default doctor set")
 }
 
+func TestDoctorRegistersBdShimFlagsCheck(t *testing.T) {
+	t.Parallel()
+	d := newDoctorForCommand("")
+	for _, check := range d.Checks() {
+		if check.Name() == "bd-shim-flags" {
+			return
+		}
+	}
+	t.Fatal("expected the bd-shim-flags check in the default doctor set")
+}
+
 func TestDoctorRegistersTrackerCheck(t *testing.T) {
 	t.Parallel()
 	d := newDoctorForCommand("")

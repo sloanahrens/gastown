@@ -5,14 +5,16 @@ package buildpaths
 
 import "strings"
 
-// embedDirs are the package directories carrying //go:embed directives:
+// embedDirs are the directories holding what //go:embed directives compile
+// in: internal/bdshim/testdata (bd-flags.txt, embedded by internal/bdshim),
 // internal/cmdtree (bd-command-tree.json), internal/config (roles/*.toml),
 // internal/formula (formulas/*.formula.toml), internal/land/policy
 // (om-policy.md) and internal/templates (roles/, launchd/, systemd/, bodies/,
-// townroot/claude.md, polecat-CLAUDE.md). What they embed is compiled into the
-// binary, so a change anywhere under one is binary-affecting even when the file
-// itself looks like documentation.
+// townroot/claude.md, polecat-CLAUDE.md). What they hold is compiled into the
+// binary, so a change under one is binary-affecting even when the file itself
+// looks like documentation.
 var embedDirs = []string{
+	"internal/bdshim/testdata/",
 	"internal/cmdtree/",
 	"internal/config/",
 	"internal/formula/",

@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,13 +9,6 @@ import (
 	"strings"
 	"testing"
 )
-
-// exitError is a bd exit status, matched the way *exec.ExitError is. Only a real process makes an
-// *exec.ExitError, and a unit test runs none, so a fake carries the code instead.
-type exitError int
-
-func (e exitError) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
-func (e exitError) ExitCode() int { return int(e) }
 
 // TestCopyFixtureMakesAnIndependentCopy: a mutating row changes only its copy; the fixture keeps its
 // files, and removing the copy leaves the fixture in place.
@@ -298,44 +290,6 @@ func TestCopyFileRefusesWhatItCannotCopy(t *testing.T) {
 			defer root.Close() //nolint:errcheck // a test's read of the copy, not a write whose loss matters
 			if err := copyFile(root, tc.fixture, "b.txt"); err == nil {
 				t.Errorf("copyFile(%s) = nil error, want an error", tc.name)
-			}
-		})
-	}
-}
-
-// TestInterpretRunTurnsHowBDEndedIntoAGolden: a clean run and a non-zero exit are results the golden
-// keeps; a run that timed out, was killed, or never started is an error and records no output.
-func TestInterpretRunTurnsHowBDEndedIntoAGolden(t *testing.T) {
-	t.Parallel()
-	out := []byte("partial\n")
-	tests := []struct {
-		name     string
-		runErr   error
-		timedOut bool
-		wantExit int
-		wantErr  string
-	}{
-		{"clean run", nil, false, 0, ""},
-		{"non-zero exit", exitError(3), false, 3, ""},
-		{"timed out", exitError(0), true, 0, "ran past"},
-		{"killed by a signal", exitError(-1), false, 0, "killed by a signal"},
-		{"never started", errors.New(`exec: "bd": executable file not found in $PATH`), false, 0, "not found"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			stdout, exit, err := interpretRun(out, tc.runErr, tc.timedOut)
-			if tc.wantErr == "" {
-				if err != nil || exit != tc.wantExit || string(stdout) != string(out) {
-					t.Errorf("interpretRun = (%q, %d, %v), want bd's output and exit %d", stdout, exit, err, tc.wantExit)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("interpretRun error = %v, want one naming %q", err, tc.wantErr)
-			}
-			if stdout != nil {
-				t.Errorf("interpretRun returned %q on failure, want no output recorded", stdout)
 			}
 		})
 	}

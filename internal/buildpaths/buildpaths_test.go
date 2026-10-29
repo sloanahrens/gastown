@@ -23,6 +23,7 @@ func TestAffectsBuild(t *testing.T) {
 		// the documentation under one is.
 		{"internal/templates/polecat-CLAUDE.md", true},
 		{"internal/templates/commands/bodies/foo.md", true},
+		{"internal/bdshim/testdata/bd-flags.txt", true},
 		{"internal/cmdtree/bd-command-tree.json", true},
 		{"internal/config/roles/worker.toml", true},
 		{"internal/land/policy/om-policy.md", true},
