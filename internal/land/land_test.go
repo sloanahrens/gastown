@@ -1674,6 +1674,124 @@ func TestLandOverseerReviewedHeadSkipsOM(t *testing.T) {
 	}
 }
 
+// branchEditing moves the work branch to one commit on base that writes path,
+// and declares that commit the head.
+func (f *landFixture) branchEditing(path, body string) {
+	f.t.Helper()
+	f.git.SetRef(f.t, f.origin, "refs/heads/"+fixtureBranch, f.base)
+	head := f.git.Commit(f.t, f.origin, fixtureBranch, "feat: edit the review config", map[string]string{path: body})
+	f.ready(head)
+}
+
+// diffFailsRepo is a landing repo whose changed-paths read fails.
+type diffFailsRepo struct{ Repo }
+
+func (diffFailsRepo) DiffNameOnly(base, head string) ([]string, error) {
+	return nil, errors.New("git diff: fatal: bad revision")
+}
+
+// TestLandOMJSONEditWaitsForOverseerReview: a landing whose merge edits the
+// root .om.json and carries no waiver for its head is refused before om runs,
+// as a policy refusal that leaves the bead for the overseer and names the
+// waiver line to write (gt-93hf4).
+func TestLandOMJSONEditWaitsForOverseerReview(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.branchEditing(omConfigFile, "{\"threshold\": 0.8}\n")
+	f.review.fn = func(string) (Verdict, error) {
+		t.Error("om ran on a head that edits .om.json without the overseer's review")
+		return Verdict{}, errors.New("unreachable")
+	}
+
+	_, err := f.lander().Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectPolicy, LabelNeedsOverseer)
+	if rej.Rework {
+		t.Error("a config edit awaiting the overseer is not rework: the author's branch is not what is wrong")
+	}
+	want := OverseerReviewedMarker + " " + f.work.Head
+	if !strings.Contains(rej.Reason, omConfigFile) || !strings.Contains(rej.Reason, want) {
+		t.Errorf("reason %q, want it to name %s and the waiver line %q", rej.Reason, omConfigFile, want)
+	}
+}
+
+// TestLandOMJSONWaivedHeadLandsWithoutTheRefusal: the same .om.json edit lands
+// once the overseer has reviewed that exact head: the waiver skips om, and the
+// refusal above is not written for it.
+func TestLandOMJSONWaivedHeadLandsWithoutTheRefusal(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.branchEditing(omConfigFile, "{\"threshold\": 0.8}\n")
+	if err := f.bd.AppendNotes("gt-abc", OverseerReviewedMarker+" "+f.work.Head); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.bd.Update("gt-abc", beads.UpdateOptions{AddLabels: []string{LabelOverseerReviewed}}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land: %v; a waived config edit must land", err)
+	}
+	if !strings.HasPrefix(res.Verdict.Verdict, VerdictOverseerPrefix) || f.originMain() != res.LandedCommit {
+		t.Fatalf("verdict %q landed=%v, want overseer:<sha> and a landing", res.Verdict.Verdict, f.originMain() == res.LandedCommit)
+	}
+}
+
+// TestLandOMJSONOtherPathsLandNormally: a nested file named .om.json is not
+// the review config, and a head that touches no config at all, land through om
+// as before.
+func TestLandOMJSONOtherPathsLandNormally(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "no change to the config", path: ""},
+		{name: "a nested file of the same name", path: "docs/" + omConfigFile},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			if tc.path != "" {
+				f.branchEditing(tc.path, "notes\n")
+			}
+			reviewed := false
+			f.review.fn = func(string) (Verdict, error) { reviewed = true; return Verdict{Verdict: VerdictApprove}, nil }
+
+			res, err := f.lander().Land(context.Background(), f.work)
+			if err != nil {
+				t.Fatalf("Land: %v", err)
+			}
+			if !reviewed {
+				t.Error("om did not run on a head that does not edit the root config")
+			}
+			if f.originMain() != res.LandedCommit {
+				t.Errorf("origin/main = %s, want the landing %s", f.originMain(), res.LandedCommit)
+			}
+		})
+	}
+}
+
+// TestLandOMJSONUnreadableDiffIsRefused: when the paths a landing changes
+// cannot be read, the landing is refused rather than passed as clean, and the
+// refusal does not carry git's error text (gt-93hf4).
+func TestLandOMJSONUnreadableDiffIsRefused(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	l.openRepo = func(dir string) Repo { return diffFailsRepo{Repo: f.git.Open(dir)} }
+	f.review.fn = func(string) (Verdict, error) {
+		t.Error("om ran although the paths this landing changes were never read")
+		return Verdict{}, errors.New("unreachable")
+	}
+
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectPolicy, LabelNeedsOverseer)
+	if !strings.Contains(rej.Reason, "could not be read") || strings.Contains(rej.Reason, "bad revision") {
+		t.Errorf("reason %q, want the unread diff named and git's error text kept out", rej.Reason)
+	}
+}
+
 // TestLandRevertLandsWhenOMHasNoVerdict: a revert of a red main lands a green
 // tree with om_verdict error rather than wait on om (gt-b5ugw review).
 func TestLandRevertLandsWhenOMHasNoVerdict(t *testing.T) {
