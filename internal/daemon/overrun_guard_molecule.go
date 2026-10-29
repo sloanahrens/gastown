@@ -52,7 +52,7 @@ func handBackEndingMolecule(ctx context.Context, store overrunHandBackStore, log
 	}
 
 	w := polecat.NewBeadWriter(store, overrunActor)
-	assignee := seat.Rig + "/polecats/" + seat.Polecat
+	assignee := overrunSeatAssignee(seat)
 	var err error
 	if seat.ReworkSHA != "" {
 		err = polecat.HandBackRework(ctx, w, seat.Bead, assignee, seat.Branch, seat.ReworkSHA, elapsed, note)
