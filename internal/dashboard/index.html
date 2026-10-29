@@ -3306,12 +3306,21 @@ function costUsage(box, u, s) {
   const latest = deep.reduce((a, r) => (!a || new Date(r.end) > new Date(a.end) ? r : a), null);
   const deepLine = latest ? plural(deep.length, "run", "runs") + " · last " + age(latest.end) + " ago" : "no deep review runs";
   // The state chip: paused while the town holds dispatch or its scheduled_slings
-  // patrol is switched off, scheduled while the schedule is on and has filed runs.
-  const dr = (s && s.deepreview) || {};
-  const off = !!dr.paused || (dr.schedules || []).some(sc => sc && sc.next === "patrol disabled");
+  // patrol is switched off, scheduled while a schedule is on and has filed runs,
+  // and unknown when the deep review state is missing or could not be read. A
+  // state that did not arrive must not read as a healthy schedule, so only a
+  // state that names a schedule can say "scheduled".
+  const dr = (s && s.deepreview) || null;
+  const scheds = (dr && dr.schedules) || [];
+  const unread = !dr || !!dr.unavailable;
+  const off = !unread && (!!dr.paused || scheds.some(sc => sc && sc.next === "patrol disabled"));
   const deepFold = costFold(box, "cost.deepreview", "Deep reviews", deepLine);
-  const chip = off ? el("span", "badge warnc", "paused") : deep.length ? el("span", "badge good", "scheduled") : null;
-  if (chip) chip.title = off ? (dr.paused || "the town's scheduled_slings patrol is switched off") : "the schedule is on and has filed runs";
+  const chip = unread ? el("span", "badge warnc", "unknown")
+    : off ? el("span", "badge warnc", "paused")
+    : scheds.length && deep.length ? el("span", "badge good", "scheduled") : null;
+  if (chip) chip.title = unread ? "the deep review state is missing or could not be read, so the schedule is unknown"
+    : off ? (dr.paused || "the town's scheduled_slings patrol is switched off")
+    : "the schedule is on and has filed runs";
   const bits = [];
   if (chip) bits.push(document.createTextNode(" "), chip);
   if (latest) bits.push(document.createTextNode(" "), el("span", "title", "last run " + new Date(latest.end).toLocaleDateString([], {month: "short", day: "numeric"})));

@@ -265,8 +265,9 @@ func TestCostReworkDrawsOneRowPerWindowAndBar(t *testing.T) {
 }
 
 // The Deep reviews heading carries a paused chip while the schedule is off, a
-// scheduled chip while it is on and has runs, and the date of the last run
-// beside it whenever there is one.
+// scheduled chip while it is on and has runs, an unknown chip while the state is
+// missing or could not be read — a read that did not arrive is not a healthy
+// schedule — and the date of the last run beside it whenever there is one.
 func TestCostDeepReviewsChipIsPausedOrScheduled(t *testing.T) {
 	t.Parallel()
 
@@ -288,6 +289,9 @@ func TestCostDeepReviewsChipIsPausedOrScheduled(t *testing.T) {
 		{"the town holds dispatch", map[string]any{"schedules": patrolOn, "paused": "the town is held"}, run, "paused"},
 		{"the schedule is on and has runs", map[string]any{"schedules": patrolOn}, run, "scheduled"},
 		{"the schedule is on with no runs", map[string]any{"schedules": patrolOn}, []any{}, ""},
+		{"the state names no schedule", map[string]any{}, run, ""},
+		{"the schedule's read failed", map[string]any{"unavailable": true, "schedules": patrolOn}, run, "unknown"},
+		{"the state never arrived", nil, run, "unknown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -306,6 +310,10 @@ func TestCostDeepReviewsChipIsPausedOrScheduled(t *testing.T) {
 				}
 			} else if !strings.Contains(bits, tc.chip) {
 				t.Errorf("heading holds %q, want the %s chip", bits, tc.chip)
+			}
+			// An unread state is never reported as a healthy schedule.
+			if tc.chip == "unknown" && strings.Contains(bits, "scheduled") {
+				t.Errorf("heading holds %q, want no scheduled chip while the state is unread", bits)
 			}
 			if len(tc.runs) == 0 {
 				if strings.Contains(bits, "last run") {
@@ -367,5 +375,84 @@ func TestCostPanelDataQualityAndJevFolds(t *testing.T) {
 	dom.call(t, "renderCost", unwired)
 	if n := foldCount(t, dom, "cost.jev"); n != 0 {
 		t.Errorf("an unwired Jev reader drew %d jev folds, want none", n)
+	}
+}
+
+// The Jev fold is the call line; the dollars ride on the Jev provider row of the
+// table above it, from the same read, so the fold needs no money column of its
+// own.
+func TestCostJevFoldLeavesTheDollarsToTheProviderRow(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", usageReading(time.Now()))
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const t = __byId["cost"].children.filter(c => c.className === "costprov")[0];
+		if (!t) return null;
+		return t.children.slice(1).map(r => r.children.map(c => c.textContent)).filter(r => r[0] === "Jev");
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the provider rows: %v", err)
+	}
+	if v.String() == "null" {
+		t.Fatal("the Cost panel drew no provider table")
+	}
+	var rows [][]string
+	if err := json.Unmarshal([]byte(v.String()), &rows); err != nil {
+		t.Fatalf("reading the provider rows: %v", err)
+	}
+	// Provider, Kind, Balance or plan, Today, Yesterday, 7-day avg, Last 1h, Last
+	// 24h, Status: the Jev row's Today is its dollars spent.
+	if len(rows) != 1 {
+		t.Fatalf("provider rows = %v, want one Jev row", rows)
+	}
+	if got := rows[0][3]; got != "$0.50" {
+		t.Errorf("the Jev row's Today = %q, want its dollars", got)
+	}
+
+	// The fold itself carries calls and the top caller, and no dollar figure.
+	for _, l := range costFoldLines(t, dom, "cost.jev") {
+		if strings.Contains(l.Text, "$") {
+			t.Errorf("jev fold line %q holds a dollar figure, want the dollars on the provider row", l.Text)
+		}
+	}
+}
+
+// A window with no usage, no top beads, no slow beads and no deep review runs
+// says so in each fold, and a scan that never ran says so instead of an age.
+func TestCostPanelFoldsNameTheirEmptyStates(t *testing.T) {
+	t.Parallel()
+
+	s := map[string]any{
+		"spend":          spendReading(),
+		"cost_providers": []any{},
+		"deepreview":     map[string]any{"schedules": []any{}},
+		"usage": map[string]any{
+			"window":           "24h",
+			"by_class_model":   []any{},
+			"deep_review_runs": []any{},
+			"top_beads":        []any{},
+			"over20":           []any{},
+		},
+	}
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", s)
+
+	want := map[string]string{
+		"cost.byclass":    "no usage in the last 24h",
+		"cost.deepreview": "no deep review runs",
+		"cost.topbeads":   "no beads in the last 24h",
+		"cost.over20":     "none in the last 48h",
+	}
+	for key, text := range want {
+		lines := costFoldLines(t, dom, key)
+		if len(lines) != 1 || lines[0].Text != text {
+			t.Errorf("%s = %+v, want the empty line %q", key, lines, text)
+		}
+	}
+	quality := costFoldLines(t, dom, "cost.quality")
+	if len(quality) != 2 || quality[0].Class != "empty warnc" || quality[0].Text != "never scanned" || quality[1].Text != "0 unmatched · 0 incomplete · 0 skipped" {
+		t.Errorf("data quality fold = %+v, want the never-scanned warning and the counts", quality)
 	}
 }

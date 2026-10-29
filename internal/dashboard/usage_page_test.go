@@ -1,8 +1,10 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The Usage pane draws the payload the hub holds: both kinds of spend, the
@@ -20,11 +22,6 @@ func TestUsagePanelDrawsThePayload(t *testing.T) {
 		`byClass.filter(r => isDeepSeek(r.model))`,
 		`text: "DeepSeek est. " + money(est) + " · " + over.length + (over.length === 1 ? " bead" : " beads") + " over 20m"`,
 		`warn: over.length > 0,`,
-		// Money and tokens are separate columns: dollars are est. for a row with an
-		// estimate and a dash for one without, and every row's tokens are counted.
-		`[r.est_cost_usd ? "est. " + money(r.est_cost_usd) : "–", "n"],`,
-		`[fmtTokens(r.uncached), "n"]]))`,
-		`["Calls", 1], ["Spend ($)", 1], ["Tokens", 1]`,
 		// A bead over twenty minutes is flagged in the page's warning style.
 		`[r.bead, "warnc"]`,
 		`r.test_runs + " runs, " + r.failed_test_runs + " failed"`,
@@ -59,13 +56,7 @@ func TestUsagePanelNamesItsStates(t *testing.T) {
 		`box.append(el("div", "badc", "usage records unreadable"))`,
 		`el("div", "empty warnc", "never scanned")`,
 		`"records last scanned " + age(u.as_of) + " ago" + (old ? " (stale)" : "")`,
-		`const win = u.window || "24h";`,
-		`none("no usage in the last " + win)`,
 		`none("no deep review runs")`,
-		`none("no beads in the last " + win)`,
-		`none("none in the last 48h")`,
-		`costFold(box, "cost.over20", "Over 20 minutes (48h)",`,
-		`costFold(box, "cost.quality", "Data quality", counts)`,
 	} {
 		if !strings.Contains(draw, want) {
 			t.Errorf("costUsage has no %q", want)
@@ -87,29 +78,25 @@ func TestUsagePanelNamesItsStates(t *testing.T) {
 	}
 }
 
-// Each usage block is a fold of its own under its own key, so the viewer's choice
-// for each is kept across redraws the way the chart folds' is, and no single
-// details block holds them all.
+// Each usage block is a fold of its own under its own key, drawn into the Cost
+// panel, so the viewer's choice for each is kept across redraws the way the
+// chart folds' is: no single details block holds them all.
 func TestUsagePanelBlocksAreFoldsUnderTheirOwnKeys(t *testing.T) {
 	t.Parallel()
 
-	if strings.Contains(string(indexHTML), `let openUsage`) {
-		t.Error("the Usage part still keeps one open choice for a details block")
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", usageReading(time.Now()))
+	v, err := dom.vm.RunString(`JSON.stringify((() => { const out = []; __walk(__byId["cost"], c => { if (c.tagName === "SECTION" && c.dataset.fold) out.push(c.dataset.fold); }); return out; })())`)
+	if err != nil {
+		t.Fatalf("reading the Cost panel's folds: %v", err)
 	}
-	draw := pageFunc(t, "costUsage")
-	if strings.Contains(draw, `createElement("details")`) {
-		t.Error("costUsage still draws a details block")
+	var keys []string
+	if err := json.Unmarshal([]byte(v.String()), &keys); err != nil {
+		t.Fatalf("reading the Cost panel's folds: %v", err)
 	}
-	for _, want := range []string{
-		`costFold(box, "cost.byclass", "By class and model",`,
-		`costFold(box, "cost.deepreview", "Deep reviews",`,
-		`costFold(box, "cost.topbeads", "Top beads",`,
-		`costFold(box, "cost.over20", "Over 20 minutes (48h)",`,
-		`costFold(box, "cost.quality", "Data quality", counts)`,
-	} {
-		if !strings.Contains(draw, want) {
-			t.Errorf("costUsage has no %q", want)
-		}
+	want := []string{"cost.byclass", "cost.deepreview", "cost.topbeads", "cost.over20", "cost.quality", "cost.jev"}
+	if strings.Join(keys, "|") != strings.Join(want, "|") {
+		t.Errorf("Cost panel folds = %v, want one per usage block: %v", keys, want)
 	}
 }
 
