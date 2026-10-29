@@ -131,7 +131,7 @@ func Prepare(header []string, rows []Row, explainOnly []string, target string) P
 
 // positive reads a target cell as the flag it is: the extract writes the three
 // targets as int(flag), so "1" is the ordinary positive, and a cell another
-// table wrote as a non-zero number or as a Python bool still counts.
+// table wrote as a non-zero number or as a bool still counts.
 func positive(cell string) bool {
 	c := strings.TrimSpace(cell)
 	if f, err := strconv.ParseFloat(c, 64); err == nil {
@@ -172,7 +172,7 @@ func WriteSplit(p Prepared, dir string, w func(path string) (io.WriteCloser, err
 }
 
 // writeMangoCSV writes header and rows through the writer open returns, with
-// the CRLF endings the Python run's csv module emits.
+// the CRLF endings the csv writer emits.
 func writeMangoCSV(path string, header []string, rows []Row, open func(string) (io.WriteCloser, error)) error {
 	f, err := open(path)
 	if err != nil {

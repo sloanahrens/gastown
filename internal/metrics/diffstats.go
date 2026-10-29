@@ -33,7 +33,7 @@ type NumstatEntry struct {
 
 // ParseNumstat parses `git show --numstat` output. A line that is not three
 // tab-separated fields is skipped; a count that is neither "-" nor an integer
-// is an error, where the Python raised ValueError.
+// is an error that stops the parse, not a skipped line.
 func ParseNumstat(text string) ([]NumstatEntry, error) {
 	var out []NumstatEntry
 	for _, line := range pySplitLines(text) {
@@ -65,7 +65,7 @@ func numstatCount(s string) (int, error) {
 	return n, nil
 }
 
-// pySplitLines splits on the line boundaries Python's str.splitlines knows.
+// pySplitLines splits on the same line boundaries as str.splitlines.
 // It drops empty lines, which ParseNumstat skips anyway.
 func pySplitLines(text string) []string {
 	return strings.FieldsFunc(text, func(r rune) bool {
@@ -145,7 +145,8 @@ func (w *weights) values() []float64 {
 }
 
 // commitHash is what a ledger commit value must look like before it reaches
-// git. Its "$" also admits one trailing newline, as the Python's does.
+// git. Its "$" also admits one trailing newline, so a value ending in one still
+// matches.
 var commitHash = regexp.MustCompile(`^[0-9a-f]{7,64}\n?$`)
 
 // DiffKey names one landing in a DiffCache.
@@ -171,8 +172,7 @@ type GitDiffSource struct {
 }
 
 // ErrDiffUnavailable is the error Stats wraps when it has no stats for a
-// commit: the Python returned None. The commit value is not a hash, or git
-// could not read it.
+// commit. The commit value is not a hash, or git could not read it.
 var ErrDiffUnavailable = errors.New("diff stats unavailable")
 
 // Stats returns the diff stats of commit in rig. A commit that is not a hash

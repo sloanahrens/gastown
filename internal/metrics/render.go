@@ -31,9 +31,9 @@ var flaggedColumns = []string{
 	"dependency_density", "h_labels", "handoff_bytes_median", "conflict_gate_share",
 }
 
-// countColumns are the weekly columns the Python types as counts, which print
+// countColumns are the weekly columns typed as counts, which print
 // without a decimal point. Every other figure prints with three significant
-// digits, handoff_bytes_total among them: the Python leaves that one a float.
+// digits, handoff_bytes_total among them: that one stays a float.
 var countColumns = map[string]bool{
 	"landings": true, "unreadable": true, "manual_rescue_count": true,
 	"rejections": true, "rho_numerator": true, "rho_denominator": true,
@@ -83,7 +83,7 @@ var metricSections = []metricSection{
 	},
 	{
 		title:      "Handoff size",
-		definition: "Bytes of notes plus comments on handoff-labelled beads closed that week, and sessions per bead.", //nolint:misspell // the text the Python publishes, kept verbatim
+		definition: "Bytes of notes plus comments on handoff-labelled beads closed that week, and sessions per bead.", //nolint:misspell // the text the report publishes, kept verbatim
 		columns:    []string{"handoff_bytes_total", "handoff_bytes_median", "sessions_median"},
 		caveat:     "Includes beads in `~/.claude`.",
 	},
@@ -103,7 +103,7 @@ var metricSections = []metricSection{
 		title:      "Non-conservative merges",
 		definition: "Rejections of kind conflict or gate as a share of all rejections, and the count of landings that were not daemon-routed.",
 		columns:    []string{"rejections", "conflict_gate_share", "unknown_share", "manual_rescue_count"},
-		caveat:     "Kinds come from the kind word in the bead's rejection notes; an unrecognised word counts as `unknown`. Only beads that eventually landed are counted, in the week they landed.", //nolint:misspell // the text the Python publishes, kept verbatim
+		caveat:     "Kinds come from the kind word in the bead's rejection notes; an unrecognised word counts as `unknown`. Only beads that eventually landed are counted, in the week they landed.", //nolint:misspell // the text the report publishes, kept verbatim
 	},
 }
 
@@ -111,7 +111,7 @@ var metricSections = []metricSection{
 // week is thin, and every column's value with nil where the week has none.
 //
 // A count is a value here too, so a row can lack one and the digest prints n/a:
-// the Python's typed rows carry None for an absent count, where WeeklyMetrics
+// a row with an absent count carries nil, where WeeklyMetrics
 // keeps an int (load_result.go).
 type ReportRow struct {
 	Week   string
@@ -127,8 +127,8 @@ type MovedFlag struct {
 	Value, Mean, SD   float64
 }
 
-// formatFigure is render._fmt for a figure: "n/a" when the week has none, else
-// three significant digits, spelled as Python spells a non-finite value.
+// formatFigure formats a figure: "n/a" when the week has none, else
+// three significant digits, and nan, inf or -inf for a non-finite value.
 func formatFigure(v *float64) string {
 	if v == nil {
 		return "n/a"
@@ -160,8 +160,7 @@ func formatNumber(v float64) string {
 }
 
 // reportCell is one cell of a report table: the row's value for column as
-// render._fmt prints it. A column the row does not carry is an error, where the
-// Python's r[column] raises KeyError.
+// the digest prints it. A column the row does not carry is an error.
 func reportCell(r ReportRow, column string) (string, error) {
 	v, ok := r.Values[column]
 	if !ok {
@@ -207,7 +206,7 @@ func table(header []string, rows [][]string) string {
 // newest, non-thin week that is more than two population standard deviations
 // from the same rig's history in prev, which needs at least six non-thin weeks
 // carrying a value for that column. A column the rows do not carry is absent
-// from every week, as it is in the Python, and so never flags.
+// from every week, and so never flags.
 func MovedSinceLast(prev, cur []ReportRow, columns []string) []MovedFlag {
 	var flags []MovedFlag
 	for _, rig := range rigNames(cur) {
@@ -343,9 +342,9 @@ func RenderReport(date string, weekly []ReportRow, flags []MovedFlag, footer Foo
 	return strings.Join(blocks, "\n\n") + "\n", nil
 }
 
-// reportWindow is rows[from:to] with Python's negative indices, so the digest's
-// headline takes the last four weeks and the four before them, and an empty
-// window where the run has fewer weeks.
+// reportWindow is rows[from:to] with negative indices counted from the end,
+// so the digest's headline takes the last four weeks and the four before them,
+// and an empty window where the run has fewer weeks.
 func reportWindow(rows []ReportRow, from, to int) []ReportRow {
 	n := len(rows)
 	if from < 0 {

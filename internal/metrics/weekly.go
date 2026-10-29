@@ -23,12 +23,12 @@ var WeeklyColumns = []string{
 	"unknown_share", "mode_shift", "om_threshold", "dominant_model",
 }
 
-// shiftColumns are the columns ModeShift measures between weeks, in the
-// Python's set; they are read in sorted order.
+// shiftColumns are the columns ModeShift measures between weeks, read in sorted
+// order.
 var shiftColumns = []string{"size_median", "file_entropy_mean", "rejected_share"}
 
 // Bead is a bead record the weekly metrics read: the loader's JSON object, not
-// a CSV row. An absent timestamp is "", the Python's None.
+// a CSV row. An absent timestamp is "".
 type Bead struct {
 	ID              string   `json:"id"`
 	Rig             string   `json:"rig"`
@@ -40,7 +40,7 @@ type Bead struct {
 }
 
 // WeeklyMetrics is one row of weekly.csv: a (week, rig) group's figures, with a
-// rig of "ALL" for the town's row. A nil pointer is the Python's None, a figure
+// rig of "ALL" for the town's row. A nil pointer marks a figure
 // the week could not supply; the counts are ints because weekly.csv writes them
 // without a decimal point.
 type WeeklyMetrics struct {
@@ -84,10 +84,10 @@ type WeeklyMetrics struct {
 
 // Cell returns the cell weekly.csv carries for column: "" for None, a count
 // without a decimal point, a bool as True or False, and every float through
-// FormatFloat, so a float the Python typed as 2.0 is still 2.0. The shared
-// median is a float64, so an odd count's integer median is 20.0 here where the
-// Python wrote 20. The second result is false when column is not one weekly.csv
-// carries.
+// FormatFloat, so a float typed as 2.0 is still 2.0. The shared
+// median is a float64, so an odd count's integer median is 20.0 here, where the
+// weekly.csv cell holds 20. The second result is false when column is not one
+// that weekly.csv carries.
 func (r WeeklyMetrics) Cell(column string) (string, bool) {
 	switch column {
 	case "week":
@@ -175,7 +175,7 @@ type EntropyFigures struct {
 	HTypes  float64
 }
 
-// counts is the Python's _counts: how many times each item appears, one entry
+// counts is how many times each item appears, one entry
 // per distinct item in first-appearance order.
 func counts(items []string) []float64 {
 	seen := make(map[string]int, len(items))
@@ -229,7 +229,7 @@ func DependencyDensity(closed []Bead) *float64 {
 }
 
 // RhoFigure is Rho's answer. Both parts are published beside the ratio, so a
-// small denominator is visible; a nil Rho is the Python's None for no daemon
+// small denominator is visible; a nil Rho means no daemon
 // landing.
 type RhoFigure struct {
 	Numerator   int
@@ -254,8 +254,8 @@ func Rho(landings []Row, handoffClosed int) RhoFigure {
 	return f
 }
 
-// HandoffSizeFigure is HandoffSize's answer; a nil pointer is the Python's None
-// for no id in that map.
+// HandoffSizeFigure is HandoffSize's answer; a nil pointer means the id is
+// absent from that map.
 type HandoffSizeFigure struct {
 	HandoffBytesTotal  int
 	HandoffBytesMedian *float64
@@ -289,7 +289,7 @@ func HandoffSize(closedHandoffIDs []string, handoff, sessions map[string]int) Ha
 	return f
 }
 
-// mode is the Python's _mode: the most common value, ties to the smallest, nil
+// mode is the most common value, ties to the smallest, nil
 // when there are no values. Callers leave out a value the row does not carry.
 func mode[T cmp.Ordered](values []T) *T {
 	if len(values) == 0 {
@@ -313,8 +313,7 @@ func mode[T cmp.Ordered](values []T) *T {
 // root of the summed squared changes, each divided by its column's standard
 // deviation. The scale comes from non-thin weeks only, so a noisy thin week
 // cannot inflate it. An incomplete or non-consecutive week (when weeks is
-// given) is nil, as is the first week; an empty series is one nil, the Python's
-// initial [None].
+// given) is nil, as is the first week; an empty series is one nil.
 //
 // A column a week has no value for is absent from its map, or nil; the two
 // read the same.
@@ -397,14 +396,14 @@ func ModeShift(series []map[string]*float64, thin []bool, weeks []string) ([]*fl
 	return out, nil
 }
 
-// emptyLandingSummary is the Python's _EMPTY_LANDINGS: a week known only from
+// emptyLandingSummary is the summary of a week known only from
 // beads has no landings, so it is thin and every size and share is nil.
 func emptyLandingSummary() LandingSummary {
 	return LandingSummary{Thin: true}
 }
 
-// landingMode is _mode over a landing column: the most common non-empty cell,
-// parsed as a number because the Python compared typed values, so a tie goes to
+// landingMode is the mode of a landing column: the most common non-empty cell,
+// parsed as a number because values compare by type, so a tie goes to
 // the smallest number rather than the smallest text.
 func landingMode(rows []Row, column string) (*float64, error) {
 	values := make([]float64, 0, len(rows))

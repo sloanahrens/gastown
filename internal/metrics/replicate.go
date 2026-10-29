@@ -93,8 +93,8 @@ func Holm(p []float64) []float64 {
 // Matches reports whether row satisfies every range of c. Columns are matched
 // by name. A category range needs the cell text in the set. A numeric range
 // needs a cell that parses as a number (surrounding spaces allowed) within
-// Min..Max inclusive; an empty or unparseable cell never matches it. Like the
-// Python, a NaN cell passes the span test, because NaN is neither below Min nor
+// Min..Max inclusive; an empty or unparseable cell never matches it. A NaN cell
+// passes the span test, because NaN is neither below Min nor
 // above Max. A column the row lacks reads as an empty cell, so it fails a
 // numeric range and a category set that does not hold the empty string.
 func Matches(c Cube, row map[string]string) bool {

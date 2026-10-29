@@ -56,7 +56,7 @@ func ReadLandings(r io.Reader) (header []string, rows []Row, err error) {
 	}
 }
 
-// WriteLandings writes landings.csv the way the Python extract does: the
+// WriteLandings writes landings.csv in the extract's format: the
 // header, then each row's cells in header order, for a column the row does not
 // carry an empty cell, and CRLF line endings.
 //

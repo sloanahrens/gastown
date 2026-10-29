@@ -436,7 +436,7 @@ func nonblankLines(lines []string) int {
 }
 
 // weeklyBeads is the weekly metrics' view of the bead listing: a bead no
-// closed_at field carries is an empty timestamp, which is the Python's None.
+// closed_at field carries is an empty timestamp, which is nil.
 func weeklyBeads(beads []BeadRow) []Bead {
 	out := make([]Bead, 0, len(beads))
 	for _, b := range beads {
@@ -509,9 +509,9 @@ func beadsCSVRows(beads []BeadRow, handoff map[string]int, usage map[string]Usag
 }
 
 // footerDoc is footer.json's shape with its fields in the order the extract
-// builds them. The file is not byte-identical to the one the ported script's
-// json.dump writes: Python spaces its separators and Go writes none, so the
-// parity run compares cells and leaves this file alone (gt-f3dmx).
+// builds them. The file is not byte-identical to the one a JSON encoder with
+// spaced separators writes, and Go writes none, so the parity run compares
+// cells and leaves this file alone (gt-f3dmx).
 type footerDoc struct {
 	RowsRead          footerRowsRead `json:"rows_read"`
 	RowsDropped       [][]string     `json:"rows_dropped"`
@@ -519,7 +519,7 @@ type footerDoc struct {
 	SourcesUnreadable []string       `json:"sources_unreadable"`
 }
 
-// footerRowsRead is footerDoc's rows_read object, in the Python's order.
+// footerRowsRead is footerDoc's rows_read object, with its keys in file order.
 type footerRowsRead struct {
 	Ledger  int `json:"ledger"`
 	Reviews int `json:"reviews"`
