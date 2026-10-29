@@ -165,6 +165,7 @@ func (d *Daemon) runPatrolScan() {
 			return
 		}
 		report := scanner.Tick(rigName)
+		d.endPatrolRestartScan(rigName)
 		for _, line := range report.Lines() {
 			d.logger.Printf("patrol_scan: %s", line)
 		}
@@ -708,8 +709,102 @@ func (h *patrolScanHost) Heartbeat(rig, name string) *patrolscan.Heartbeat {
 	return &patrolscan.Heartbeat{State: string(hb.State), At: hb.Timestamp}
 }
 
+// Restart restarts a seat through the supervisor and records how the attempt
+// ended for the seat's patrol-restart run (gt-6hhp8).
 func (h *patrolScanHost) Restart(rig, name, reason string) error {
-	return h.d.sup().Restart(h.seat(rig, name), reason, patrolscan.Actor)
+	err := h.d.sup().Restart(h.seat(rig, name), reason, patrolscan.Actor)
+	h.d.notePatrolRestart(rig, name, err)
+	return err
+}
+
+// patrolRestartFailure is one seat's run of consecutive failed patrol-scan
+// restarts: the cause they share and how many scans ended on it.
+type patrolRestartFailure struct {
+	cause string
+	scans int
+}
+
+// patrolRestartKey is the alert key a seat's repeated restart failure is
+// filed under. One key per seat, so a condition that lasts across many
+// scans leaves one open escalation behind, as the stable keys of the other
+// patrol readers do (gt-vwry).
+func patrolRestartKey(rig, name string) string {
+	return "patrol-restart:" + rig + "/" + name
+}
+
+// notePatrolRestart records how one patrol scan's restart attempt ended for a
+// seat and escalates a seat whose restart has failed with the same cause on
+// two consecutive scans, naming the seat and the cause (gt-6hhp8).
+//
+// The alert clears on the first restart that succeeds, and only that clears
+// it: a cause that changes is a different failure and is escalated again from
+// its own second scan. A refusal is an attempt that started nothing, so it
+// neither starts nor ends a run, and the supervisor escalates its own
+// refusals under their own keys.
+func (d *Daemon) notePatrolRestart(rig, name string, err error) {
+	key := patrolRestartKey(rig, name)
+	d.patrolRestartFailsMu.Lock()
+	if d.patrolRestartTried == nil {
+		d.patrolRestartTried = map[string]bool{}
+	}
+	d.patrolRestartTried[key] = true
+	if err == nil {
+		delete(d.patrolRestartFails, key)
+		open := d.patrolRestartAlerts[key]
+		delete(d.patrolRestartAlerts, key)
+		d.patrolRestartFailsMu.Unlock()
+		if open {
+			d.clearAlerts("restarting "+rig+"/"+name+" succeeded again", key)
+		}
+		return
+	}
+	if errors.Is(err, supervisor.ErrRefused) {
+		d.patrolRestartFailsMu.Unlock()
+		return
+	}
+
+	cause := err.Error()
+	if d.patrolRestartFails == nil {
+		d.patrolRestartFails = map[string]patrolRestartFailure{}
+	}
+	last := d.patrolRestartFails[key]
+	if last.cause == cause {
+		last.scans++
+	} else {
+		last = patrolRestartFailure{cause: cause, scans: 1}
+	}
+	d.patrolRestartFails[key] = last
+	escalate := last.scans == 2
+	if escalate {
+		if d.patrolRestartAlerts == nil {
+			d.patrolRestartAlerts = map[string]bool{}
+		}
+		d.patrolRestartAlerts[key] = true
+	}
+	d.patrolRestartFailsMu.Unlock()
+
+	if escalate {
+		d.escalateAlert(key, "patrol-restart", fmt.Sprintf(
+			"%s/%s: the patrol scan could not restart the seat on %d consecutive scans, same cause: %s",
+			rig, name, last.scans, cause))
+	}
+}
+
+// endPatrolRestartScan closes one rig's patrol scan for the restart runs. A
+// run counts consecutive scans, so a seat of the rig whose restart the scan
+// did not try breaks its run: the seat recovered, or was not a restart this
+// scan. An open alert stays open until a restart succeeds (gt-6hhp8). The
+// tried set then starts over for the next scan.
+func (d *Daemon) endPatrolRestartScan(rig string) {
+	prefix := patrolRestartKey(rig, "")
+	d.patrolRestartFailsMu.Lock()
+	defer d.patrolRestartFailsMu.Unlock()
+	for key := range d.patrolRestartFails {
+		if strings.HasPrefix(key, prefix) && !d.patrolRestartTried[key] {
+			delete(d.patrolRestartFails, key)
+		}
+	}
+	clear(d.patrolRestartTried)
 }
 
 // Kill stops a stalled seat's live session through the supervisor's
@@ -961,9 +1056,40 @@ func (d *Daemon) restartPolecatSession(seat supervisor.Seat) error {
 	cmd.Env = daemonGTEnv(os.Environ())
 	out, err := d.combinedOutput(cmd)
 	if err != nil {
-		return fmt.Errorf("gt session restart %s/%s: %w: %s", seat.Rig, seat.Name, err, lastLine(string(out)))
+		return fmt.Errorf("gt session restart %s/%s: %w: %s", seat.Rig, seat.Name, err, childErrorLine(string(out)))
 	}
 	return nil
+}
+
+// childErrorLine is the reason a failed gt child gave: the text after
+// "Error:" on the last line carrying it. cobra prints the child's own error
+// that way and follows it with its usage block, whose last line describes a
+// flag rather than the failure (gt-6hhp8).
+//
+// When no line carries "Error:", the last line printed before the usage
+// block is the best the output offers, and failing that the last line of all.
+func childErrorLine(out string) string {
+	lines := strings.Split(out, "\n")
+	usage := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if rest, ok := strings.CutPrefix(line, "Error:"); ok {
+			if rest = strings.TrimSpace(rest); rest != "" {
+				return rest
+			}
+		}
+		if usage < 0 && strings.HasPrefix(line, "Usage:") {
+			usage = i
+		}
+	}
+	if usage > 0 {
+		for i := usage - 1; i >= 0; i-- {
+			if line := strings.TrimSpace(lines[i]); line != "" {
+				return line
+			}
+		}
+	}
+	return lastLine(out)
 }
 
 // ctxOrBackground returns the daemon context, or Background for a Daemon
