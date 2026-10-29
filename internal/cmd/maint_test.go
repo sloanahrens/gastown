@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -479,8 +480,9 @@ func TestMaintTargetsBuildTheRegistryFromTheTownConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("maintTargets() error = %v", err)
 	}
-	if len(targets) != 1 || targets[maintTargetRegistry] == nil {
-		t.Fatalf("targets = %v, want the registry alone", targets)
+	want := []string{maintTargetBaks, maintTargetRegistry, maintTargetSizes, maintTargetWorktree}
+	if got := maintTargetNames(targets); !slices.Equal(got, want) {
+		t.Fatalf("targets = %v, want %v: the registry joins the local targets", got, want)
 	}
 	if got := targets[maintTargetRegistry].Name(); got != maintTargetRegistry {
 		t.Errorf("Name() = %q, want %q", got, maintTargetRegistry)
@@ -490,14 +492,98 @@ func TestMaintTargetsBuildTheRegistryFromTheTownConfig(t *testing.T) {
 	}
 }
 
-func TestMaintTargetsWithoutARegistryAreNone(t *testing.T) {
+func TestMaintTargetsWithoutARegistryKeepTheLocalTargets(t *testing.T) {
 	t.Parallel()
 	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
 	if err != nil {
-		t.Fatalf("maintTargets() error = %v, want none", err)
+		t.Fatalf("maintTargets() error = %v, want the local targets", err)
 	}
-	if len(targets) != 0 {
-		t.Fatalf("targets = %v, want none: a town with no registry has nothing to prune", targets)
+	want := []string{maintTargetBaks, maintTargetSizes, maintTargetWorktree}
+	if got := maintTargetNames(targets); !slices.Equal(got, want) {
+		t.Fatalf("targets = %v, want %v: no registry means no registry target, and the local targets still run", got, want)
+	}
+}
+
+// maintTargetNames returns a target map's names sorted, so a test compares the
+// set of targets rather than the map's iteration order.
+func maintTargetNames(targets map[string]diskmaint.Target) []string {
+	names := make([]string, 0, len(targets))
+	for name := range targets {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+func TestMaintLocalTargetsRemoveOnlyInApply(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		apply   bool
+		refused bool
+	}{
+		{name: "plan refuses to remove", apply: false, refused: true},
+		{name: "apply may remove", apply: true, refused: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ledger := diskmaint.NewLedger(filepath.Join(t.TempDir(), "ledger.jsonl"), maintLedgerMaxBytes)
+			targets := maintLocalTargets(t.TempDir(), t.TempDir(), nil, (&fakeMaintRunner{}).run, ledger, tc.apply)
+			// An empty plan removes nothing, so the only answer that differs
+			// between the two modes is the dry-run gate itself.
+			for _, name := range []string{maintTargetWorktree, maintTargetBaks} {
+				_, err := targets[name].Apply(context.Background(), diskmaint.Plan{Target: name})
+				if got := err != nil; got != tc.refused {
+					t.Errorf("%s Apply() refused = %v, want %v (error %v)", name, got, tc.refused, err)
+				}
+			}
+		})
+	}
+}
+
+func TestMaintRigNamesAreSortedAndAnUnreadableRegistryRefuses(t *testing.T) {
+	t.Parallel()
+	t.Run("sorted", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeMaintRigs(t, town, `{"version":1,"rigs":{"zulu":{"git_url":"u"},"alpha":{"git_url":"u"}}}`)
+		got, err := maintRigNames(town)
+		if err != nil {
+			t.Fatalf("maintRigNames() error = %v", err)
+		}
+		if want := []string{"alpha", "zulu"}; !slices.Equal(got, want) {
+			t.Errorf("maintRigNames() = %v, want %v", got, want)
+		}
+	})
+	t.Run("no registry is no rigs", func(t *testing.T) {
+		t.Parallel()
+		got, err := maintRigNames(t.TempDir())
+		if err != nil || len(got) != 0 {
+			t.Errorf("maintRigNames() = %v, %v; want no rigs and no error", got, err)
+		}
+	})
+	t.Run("unreadable registry refuses the run", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeMaintRigs(t, town, `{"version":1,"rigs":`)
+		_, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "rig registry") {
+			t.Fatalf("maintTargets() error = %v, want the unreadable rig registry refusal", err)
+		}
+	})
+}
+
+// writeMaintRigs writes the town's rig registry, the file a rig list is read
+// from.
+func writeMaintRigs(t *testing.T, town, doc string) {
+	t.Helper()
+	dir := filepath.Join(town, "mayor")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rigs.json"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
