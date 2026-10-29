@@ -187,9 +187,10 @@ type operandSlot struct {
 // in a slot that names no bead is data: a title, a query, a path or a key. A
 // word such as refactor-sling in one is not a bead reference, so it routes by
 // the working directory rather than reaching bd.real as an id no route names
-// (gt-xzi9c). A variadic placeholder (`[id...]`) takes every operand from its
-// position on. bd reads `mol bond` names, proto or molecule, as ids, so those
-// slots name a bead too.
+// (gt-xzi9c). A variadic placeholder (`[id...]`) takes the operands up to the
+// placeholders that follow it, which fill the last operands (see slotOf). bd
+// reads `mol bond` names, proto or molecule, as ids, so those slots name a bead
+// too.
 //
 // A command with no row reads every operand as a possible id, as the shim did
 // before this table existed.
@@ -314,22 +315,46 @@ func isVariadic(placeholder string) bool {
 	return strings.HasSuffix(strings.TrimSuffix(placeholder, "]"), "...")
 }
 
-// slotOf returns the slot that fills operand i of a command, and false when
+// slotOf returns the slot that fills operand i of n operands, and false when
 // bd's usage names no slot for it. Each placeholder before a variadic one fills
-// one operand; the variadic placeholder fills every operand from its own
+// one operand. The placeholders after a variadic one fill the last operands, so
+// `label add gt-a gt-b urgent` reads urgent as the label; the variadic
+// placeholder takes the operands between them. With too few operands for the
+// placeholders after it, the variadic takes none and they fill from its own
 // position on.
-func slotOf(slots []operandSlot, i int) (operandSlot, bool) {
+func slotOf(slots []operandSlot, n, i int) (operandSlot, bool) {
+	v := len(slots)
 	for k, slot := range slots {
-		if isVariadic(slot.placeholder) || i == k {
-			return slot, true
+		if isVariadic(slot.placeholder) {
+			v = k
+			break
 		}
+	}
+	if v == len(slots) {
+		if i < len(slots) {
+			return slots[i], true
+		}
+		return operandSlot{}, false
+	}
+	if i < v {
+		return slots[i], true
+	}
+	after := slots[v+1:]
+	start := max(v, n-len(after))
+	if i < start {
+		return slots[v], true
+	}
+	if j := i - start; j < len(after) {
+		return after[j], true
 	}
 	return operandSlot{}, false
 }
 
-// idOperands returns the operands that fill a slot naming a bead. A command
-// with no row in operandSlots reads every operand as a possible id. The words
-// of the command path are its verb and subverb, so they are not operands.
+// idOperands returns the operands that can name a bead. A command with no row
+// in operandSlots reads every operand as a possible id, and so does an operand
+// past the placeholders bd's usage names: a stray id must still name its rig,
+// and only an operand in a data slot is kept from doing so. The words of the
+// command path are its verb and subverb, so they are not operands.
 func idOperands(command string, args []string) []string {
 	ops := operands(command, args)
 	ops = ops[min(len(strings.Fields(command)), len(ops)):]
@@ -339,7 +364,7 @@ func idOperands(command string, args []string) []string {
 	}
 	var ids []string
 	for i, op := range ops {
-		if slot, ok := slotOf(slots, i); ok && slot.bead {
+		if slot, ok := slotOf(slots, len(ops), i); !ok || slot.bead {
 			ids = append(ids, op)
 		}
 	}
@@ -357,9 +382,10 @@ func takesValue(command, flag string) bool {
 	return persistentValueFlags[flag]
 }
 
-// knownCommand reports whether bd documents flags for the command path.
+// knownCommand reports whether bd documents flags or positionals for the
+// command path, so `label add` is a command of its own and not `label`.
 func knownCommand(command string) bool {
-	return valueFlags[command] != nil || boolFlags[command] != nil
+	return valueFlags[command] != nil || boolFlags[command] != nil || operandSlots[command] != nil
 }
 
 // verbOf returns bd's subcommand: the first operand. A global value flag is
