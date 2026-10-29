@@ -541,3 +541,114 @@ func TestGetManifestErrorBranches(t *testing.T) {
 		})
 	}
 }
+
+// TestManifestDigestIgnoresMissingConfigBlob pins that ManifestDigest reads the
+// one manifest and nothing else: a config blob that answers 404 does not stop it
+// naming the manifest.
+func TestManifestDigestIgnoresMissingConfigBlob(t *testing.T) {
+	t.Parallel()
+	body := imageBody(digestOf('c'), 1000, 2048)
+	handler, requests := countingHandler(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/gastown-polecat/manifests/dev":
+			served(w, bodyDigest(body), body)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	c := newTestClient(handler)
+
+	got, err := c.ManifestDigest(context.Background(), "gastown-polecat", "dev")
+	if err != nil {
+		t.Fatalf("ManifestDigest: %v", err)
+	}
+	if want := bodyDigest(body); got != want {
+		t.Errorf("ManifestDigest = %q, want %q: the manifest's own digest", got, want)
+	}
+	if n := requests.Load(); n != 1 {
+		t.Errorf("server saw %d requests, want 1: the manifest alone, no config blob", n)
+	}
+}
+
+// TestManifestDigestDoesNotWalkAnIndex pins that an index is named by its own
+// digest: its children are not fetched, so one request answers.
+func TestManifestDigestDoesNotWalkAnIndex(t *testing.T) {
+	t.Parallel()
+	index := indexBody(digestOf('1'), digestOf('2'))
+	handler, requests := countingHandler(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/gastown-polecat/manifests/dev":
+			served(w, bodyDigest(index), index)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	c := newTestClient(handler)
+
+	got, err := c.ManifestDigest(context.Background(), "gastown-polecat", "dev")
+	if err != nil {
+		t.Fatalf("ManifestDigest: %v", err)
+	}
+	if want := bodyDigest(index); got != want {
+		t.Errorf("ManifestDigest = %q, want %q: the index's own digest", got, want)
+	}
+	if n := requests.Load(); n != 1 {
+		t.Errorf("server saw %d requests, want 1: the index is not walked", n)
+	}
+}
+
+// TestManifestDigestValidates pins both refusals: a bad repo or ref is ErrBadName
+// before any request, and a reply whose Docker-Content-Digest is missing,
+// malformed or names another digest is an error.
+func TestManifestDigestValidates(t *testing.T) {
+	t.Parallel()
+	t.Run("bad name is ErrBadName with no request", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct{ name, repo, ref string }{
+			{"bad repo", "../x", "dev"},
+			{"traversal ref", "gastown-polecat", "../x"},
+			{"empty ref", "gastown-polecat", ""},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				handler, requests := countingHandler(func(w http.ResponseWriter, r *http.Request) {})
+				c := newTestClient(handler)
+
+				_, err := c.ManifestDigest(context.Background(), tc.repo, tc.ref)
+				if !errors.Is(err, ErrBadName) {
+					t.Fatalf("ManifestDigest(%q, %q) error = %v, want ErrBadName", tc.repo, tc.ref, err)
+				}
+				if n := requests.Load(); n != 0 {
+					t.Errorf("server saw %d requests, want 0", n)
+				}
+			})
+		}
+	})
+
+	t.Run("bad Docker-Content-Digest is an error", func(t *testing.T) {
+		t.Parallel()
+		body := imageBody(digestOf('c'), 1000)
+		cases := []struct{ name, header string }{
+			{"the header is missing", ""},
+			{"the header is malformed", "sha256:not-a-digest"},
+			{"the header names another digest", digestOf('a')},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+					if tc.header != "" {
+						w.Header().Set("Docker-Content-Digest", tc.header)
+					}
+					_, _ = w.Write([]byte(body))
+				})
+
+				got, err := c.ManifestDigest(context.Background(), "gastown-polecat", "dev")
+				if err == nil {
+					t.Fatalf("ManifestDigest = %q, want an error: the header does not name the body", got)
+				}
+			})
+		}
+	})
+}
