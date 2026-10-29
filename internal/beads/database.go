@@ -271,6 +271,10 @@ func doltTargetEnvFromBeadsDir(beadsDir string) []string {
 	meta := readDoltMetadata(beadsDir)
 	var env []string
 	if meta.Host != "" {
+		// metadata.json is written on the host, so its host names this
+		// machine's loopback; addResolvedDoltConnectionEnv replaces it with the
+		// town's endpoint when the town names one, which is where a daemon in
+		// the container gets dolt.container_host (gt-qpeei.17).
 		env = append(env, "BEADS_DOLT_SERVER_HOST="+meta.Host)
 	}
 	if meta.Port != "" {
@@ -353,9 +357,11 @@ var bdEndpointEnvKeys = []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PO
 
 // addResolvedDoltConnectionEnv sets bd's endpoint variables in env. When
 // beadsDir is in a town that names a Dolt endpoint, that endpoint wins
-// (gt-y3pgh.3). Otherwise the endpoint variables in base, the caller's
-// inherited environment, pass through unread, so bd meets the server its
-// parent was given; with none, env keeps what the beads directory's
+// (gt-y3pgh.3), and it is agentconfig.ResolveDoltEndpoint's answer, so the bd a
+// daemon in the container starts is given dolt.container_host where the Mac is
+// given dolt.host (gt-qpeei.17). Otherwise the endpoint variables in base, the
+// caller's inherited environment, pass through unread, so bd meets the server
+// its parent was given; with none, env keeps what the beads directory's
 // metadata.json says. gt never reads GT_DOLT_* or BEADS_DOLT_* values.
 func addResolvedDoltConnectionEnv(env, base []string, beadsDir string) []string {
 	if townRoot := FindTownRoot(filepath.Dir(beadsDir)); beadsDir != "" && townRoot != "" {

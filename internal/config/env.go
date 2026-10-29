@@ -396,20 +396,39 @@ func clearBDTargetSelectorEnv(env map[string]string) {
 }
 
 // ResolveDoltEndpoint is the one resolver for the town's Dolt server endpoint
-// (gt-y3pgh.3). It reads durable config only, never the environment:
+// (gt-y3pgh.3). The endpoint comes from durable config, in this order:
 //
 //  1. mayor/town.json "dolt" (written by gt install and gt config set dolt.port)
 //  2. .dolt-data/config.yaml listener, for a town whose town.json predates
 //     the field (gt dolt start writes that file from this resolver)
 //
+// Its one environment read is the container-mode flag, and it says which
+// process is asking rather than where the server is: a daemon the compose file
+// started takes the town's dolt.container_host where the Mac takes dolt.host,
+// both from that same town.json (gt-qpeei.17).
+//
 // ok is false when neither names a port: the town has no endpoint, and the
 // caller must not guess one (no fallback to DefaultPort).
 func ResolveDoltEndpoint(townRoot string) (DoltEndpoint, bool) {
+	return ResolveDoltEndpointFor(townRoot, InContainerMode())
+}
+
+// ResolveDoltEndpointFor is ResolveDoltEndpoint for a process known to be in
+// container mode or not; ResolveDoltEndpoint passes InContainerMode. A
+// container host substitutes for dolt.host in the town.json branch only, since
+// the config.yaml fallback names one listener for every process (gt-qpeei.17).
+func ResolveDoltEndpointFor(townRoot string, inContainer bool) (DoltEndpoint, bool) {
 	if townRoot == "" {
 		return DoltEndpoint{}, false
 	}
 	if town, err := LoadTownConfig(filepath.Join(townRoot, "mayor", "town.json")); err == nil && town.Dolt != nil {
-		return DoltEndpoint{Host: strings.TrimSpace(town.Dolt.Host), Port: town.Dolt.Port}, true
+		host := strings.TrimSpace(town.Dolt.Host)
+		// The Mac binds the server to its loopback and names it dolt.host; the
+		// container reaches the same server as container_host (gt-qpeei.17).
+		if containerHost := strings.TrimSpace(town.Dolt.ContainerHost); containerHost != "" && inContainer {
+			host = containerHost
+		}
+		return DoltEndpoint{Host: host, Port: town.Dolt.Port}, true
 	}
 	data, err := os.ReadFile(filepath.Join(townRoot, ".dolt-data", "config.yaml")) //nolint:gosec // G304: managed file under the town root
 	if err != nil {
@@ -420,6 +439,20 @@ func ResolveDoltEndpoint(townRoot string) (DoltEndpoint, bool) {
 		return DoltEndpoint{}, false
 	}
 	return DoltEndpoint{Host: parseHostFromConfigYAML(data), Port: port}, true
+}
+
+// InContainerMode reports whether this process is the daemon the rendered
+// compose file starts, which is the one environment read on the Dolt endpoint
+// path: it names the mode, never the endpoint (gt-qpeei.17).
+func InContainerMode() bool {
+	return inContainerMode(os.Getenv)
+}
+
+// inContainerMode is InContainerMode with the environment read through
+// getenv, so the mode predicate is testable without touching the process
+// environment.
+func inContainerMode(getenv func(string) string) bool {
+	return getenv(ContainerModeEnv) == SupervisorContainer
 }
 
 // ResolveDoltPort is ResolveDoltEndpoint's port, or 0 when the town has no
@@ -439,7 +472,13 @@ func ResolveDoltHost(townRoot string) string {
 // with the town's endpoint. When the town has no endpoint base is returned
 // unchanged.
 func NormalizeConfiguredDoltEnv(base []string, townRoot string) []string {
-	ep, ok := ResolveDoltEndpoint(townRoot)
+	return normalizeConfiguredDoltEnvFor(base, townRoot, InContainerMode())
+}
+
+// normalizeConfiguredDoltEnvFor is NormalizeConfiguredDoltEnv for a daemon of
+// one mode.
+func normalizeConfiguredDoltEnvFor(base []string, townRoot string, inContainer bool) []string {
+	ep, ok := ResolveDoltEndpointFor(townRoot, inContainer)
 	if !ok {
 		return base
 	}
@@ -463,8 +502,13 @@ var DoltEndpointEnvKeys = []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_
 // (gt up, the daemon) exports to the children it spawns, from the town's
 // endpoint. It is empty when the town has no endpoint.
 func ConfiguredDoltEnv(townRoot string) map[string]string {
+	return configuredDoltEnvFor(townRoot, InContainerMode())
+}
+
+// configuredDoltEnvFor is ConfiguredDoltEnv for a daemon of one mode.
+func configuredDoltEnvFor(townRoot string, inContainer bool) map[string]string {
 	env := make(map[string]string)
-	ep, ok := ResolveDoltEndpoint(townRoot)
+	ep, ok := ResolveDoltEndpointFor(townRoot, inContainer)
 	if !ok {
 		return env
 	}

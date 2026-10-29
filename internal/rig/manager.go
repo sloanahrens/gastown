@@ -725,7 +725,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		// The endpoint goes into an untracked .beads/config.yaml only: a
 		// tracked one belongs to the source repo, like the keys above.
 		if _, err := os.Stat(filepath.Join(rigRootBeadsDir, "redirect")); os.IsNotExist(err) {
-			ep, ok := config.ResolveDoltEndpoint(m.townRoot)
+			ep, ok := persistedDoltEndpoint(m.townRoot)
 			warnings = append(warnings, stampRigDoltEndpoint(rigBD, ep, ok)...)
 		}
 		for _, w := range warnings {

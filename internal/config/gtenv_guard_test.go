@@ -23,6 +23,14 @@ var gtEnvIdentity = map[string]bool{
 	"GT_DOG_NAME": true, "GT_SESSION": true, EnvAgent: true,
 	EnvAgentOverride: true, "GT_TOWN_ROOT": true, "GT_TMUX_SOCKET": true,
 	"GT_POLECAT_PATH": true,
+	// The rendered compose file is the one spawner of the daemon in the
+	// container, and it exports this member of that one process's environment,
+	// as the session manager exports GT_POLECAT_PATH at spawn (gt-qpeei.17). It
+	// is a fact about which process is asking, not a choice the operator makes
+	// per run, and it names the mode where the Dolt host is still read from the
+	// same town.json the Mac reads — so no config file can stand in for it: the
+	// same file is on both sides of the boundary.
+	ContainerModeEnv: true,
 }
 
 // gtEnvPreferences are the GT_ variables that carry the operator's display and

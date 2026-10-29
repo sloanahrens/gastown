@@ -2,6 +2,8 @@ package rig
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -77,5 +79,40 @@ func TestStampRigDoltEndpoint(t *testing.T) {
 	none := &recordingConfigSetter{}
 	if w := stampRigDoltEndpoint(none, config.DoltEndpoint{}, false); len(w) != 0 || len(none.set) != 0 {
 		t.Errorf("no endpoint: set %v, warnings %v; want nothing", none.set, w)
+	}
+}
+
+// writeContainerHostTown writes a town whose Dolt block names a container host
+// beside the local one, and returns its root.
+func writeContainerHostTown(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	town := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z",` +
+		`"dolt":{"host":"127.0.0.2","container_host":"host.docker.internal","port":5507}}`
+	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(town), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// A rig's config.yaml is shared with the Mac through the town bind mount, so the
+// endpoint stamped into it is the one a non-container process resolves
+// (dolt.host), never dolt.container_host, which only resolves inside the
+// container (gt-qpeei.17). The container resolution is the control: it names
+// the other host for the same town.
+func TestPersistedDoltEndpointIsTheNonContainerEndpoint(t *testing.T) {
+	t.Parallel()
+	root := writeContainerHostTown(t)
+
+	control, ok := config.ResolveDoltEndpointFor(root, true)
+	if !ok || control.Host != "host.docker.internal" {
+		t.Fatalf("the container resolution = %+v (ok %v), want the container host: the control for this test", control, ok)
+	}
+	got, ok := persistedDoltEndpoint(root)
+	if !ok || got.Host != "127.0.0.2" || got.Port != 5507 {
+		t.Errorf("persistedDoltEndpoint = %+v (ok %v), want dolt.host 127.0.0.2 and port 5507", got, ok)
 	}
 }

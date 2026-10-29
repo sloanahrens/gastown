@@ -65,6 +65,21 @@ Tailscale), set `"host"` in `town.json`'s `dolt` block. gt exports it as
 `BEADS_DOLT_SERVER_HOST` to all bd subprocesses, overriding bd's hardcoded
 `127.0.0.1` default.
 
+**A containerized daemon**: the daemon in the container reaches the same server
+by a name the Mac does not answer to, so the `dolt` block may also hold
+`"container_host"`:
+
+```json
+"dolt": {"host": "127.0.0.1", "container_host": "host.docker.internal", "port": 3307}
+```
+
+A daemon started by the rendered compose file (`GT_DAEMON_SUPERVISOR=container`)
+uses `container_host` wherever `host` would be used, for both its own
+`IsRemote` decision and the `BEADS_DOLT_SERVER_HOST` it exports; on the Mac,
+and for every other supervisor, the key is ignored (gt-qpeei.17). Set it by
+hand before a cutover to the container supervisor; it is the same server in
+both places.
+
 ## Commands
 
 ```bash
