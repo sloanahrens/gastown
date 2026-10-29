@@ -17,6 +17,8 @@ import (
 //     then dolt_gc --full weekly, or on old-gen growth >20%
 //   - Disk Maintenance: declared with window 04:30 and mode dry_run, and
 //     disabled: it prunes the registry, so a town turns it on itself
+//   - HM Sync: declared with a 30m interval, and disabled: it runs a program
+//     on a timer, so a town turns it on itself
 //   - Main Branch Test: every 30m, 10m timeout per rig
 //   - Dolt Remotes: every 15m, pushes databases that have a configured remote
 func DefaultLifecycleConfig() *DaemonPatrolConfig {
@@ -68,6 +70,15 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Window:   agentconfig.DiskMaintenanceDefaultWindow,
 				Mode:     agentconfig.DiskMaintenanceModeDryRun,
 			},
+			// Declared but switched off for the same reason: the patrol runs a
+			// program on a timer, so an install must not start one. The key is
+			// here so a town writes it once and the operator turns it on
+			// (gt-z6qre.15).
+			HMSync: &HMSyncConfig{
+				Enabled:  false,
+				Interval: agentconfig.HMSyncDefaultInterval,
+				Command:  agentconfig.HMSyncDefaultCommand,
+			},
 			Handler: &PatrolConfig{
 				Enabled: true,
 			},
@@ -88,10 +99,10 @@ type lifecyclePatrol struct {
 // lifecyclePatrols is the set of patrols EnsureLifecycleDefaults fills when nil.
 // Add a patrol here and the doctor check reports it missing too.
 //
-// disk_maintenance joins the set switched off, so a town that predates it reads
-// as missing one patrol in gt doctor until the next gt up fills the key in; the
-// fill cannot turn it on, and an operator who never enables it keeps a patrol
-// that does nothing.
+// disk_maintenance and hm_sync join the set switched off, so a town that
+// predates them reads as missing those patrols in gt doctor until the next gt
+// up fills the keys in; the fill cannot turn them on, and an operator who never
+// enables one keeps a patrol that does nothing.
 var lifecyclePatrols = []lifecyclePatrol{
 	{"wisp_reaper", func(p *PatrolsConfig) bool { return p.WispReaper != nil }, func(p, d *PatrolsConfig) { p.WispReaper = d.WispReaper }},
 	{"compactor_dog", func(p *PatrolsConfig) bool { return p.CompactorDog != nil }, func(p, d *PatrolsConfig) { p.CompactorDog = d.CompactorDog }},
@@ -100,6 +111,7 @@ var lifecyclePatrols = []lifecyclePatrol{
 	{"jsonl_git_backup", func(p *PatrolsConfig) bool { return p.JsonlGitBackup != nil }, func(p, d *PatrolsConfig) { p.JsonlGitBackup = d.JsonlGitBackup }},
 	{"scheduled_maintenance", func(p *PatrolsConfig) bool { return p.ScheduledMaintenance != nil }, func(p, d *PatrolsConfig) { p.ScheduledMaintenance = d.ScheduledMaintenance }},
 	{"disk_maintenance", func(p *PatrolsConfig) bool { return p.DiskMaintenance != nil }, func(p, d *PatrolsConfig) { p.DiskMaintenance = d.DiskMaintenance }},
+	{"hm_sync", func(p *PatrolsConfig) bool { return p.HMSync != nil }, func(p, d *PatrolsConfig) { p.HMSync = d.HMSync }},
 	{"handler", func(p *PatrolsConfig) bool { return p.Handler != nil }, func(p, d *PatrolsConfig) { p.Handler = d.Handler }},
 }
 

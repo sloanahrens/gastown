@@ -178,6 +178,7 @@ type PatrolsConfig struct {
 	OverrunGuard         *OverrunGuardConfig         `json:"overrun_guard,omitempty"`
 	ScheduledMaintenance *ScheduledMaintenanceConfig `json:"scheduled_maintenance,omitempty"`
 	DiskMaintenance      *DiskMaintenanceConfig      `json:"disk_maintenance,omitempty"`
+	HMSync               *HMSyncConfig               `json:"hm_sync,omitempty"`
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	OverseerReport       *OverseerReportConfig       `json:"overseer_report,omitempty"`
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
@@ -708,6 +709,48 @@ func (c *DiskMaintenanceConfig) UnmarshalJSON(data []byte) error {
 		}
 	}
 	*c = DiskMaintenanceConfig(p)
+	return nil
+}
+
+// HMSyncConfig configures the hm_sync patrol: the interval run of `hm sync`
+// that keeps history-man's index fresh (internal/daemon/hm_sync.go).
+//
+// The patrol is opt-in. It runs a program on a timer, so a town that has not
+// asked for it must not get it from a default.
+type HMSyncConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Interval string `json:"interval"` // Go duration, default "30m"
+	Command  string `json:"command"`  // default "hm"
+}
+
+// The values HMSyncConfig accepts. An empty field means the default, so a town
+// that sets only enabled still gets an interval and a command.
+const (
+	HMSyncDefaultInterval = "30m"
+	HMSyncDefaultCommand  = "hm"
+)
+
+// UnmarshalJSON decodes the patrol's block strictly, refusing an interval the
+// patrol cannot schedule: a mistyped one must not read as the default, or the
+// town would run hm on a cadence it never asked for.
+//
+// The unknown-field check is repeated here because a type that decodes itself
+// is decoded by the config kernel's strict decoder opaquely.
+func (c *HMSyncConfig) UnmarshalJSON(data []byte) error {
+	type plain HMSyncConfig
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("patrols.hm_sync: %w", err)
+	}
+	if p.Interval != "" {
+		every, err := time.ParseDuration(p.Interval)
+		if err != nil || every <= 0 {
+			return fmt.Errorf("patrols.hm_sync.interval = %q: want a positive Go duration such as %q", p.Interval, HMSyncDefaultInterval)
+		}
+	}
+	*c = HMSyncConfig(p)
 	return nil
 }
 
