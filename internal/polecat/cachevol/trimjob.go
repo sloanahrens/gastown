@@ -85,9 +85,10 @@ func (m *TrimManifest) Shards() []TrimShard {
 	return all
 }
 
-// Jobs returns the trim Jobs in the order they are applied: one per run of at most TrimMaxShards
-// shards.
-func (m *TrimManifest) Jobs() []*TrimJob {
+// jobs returns the trim Jobs in the order they are applied: one per run of at most TrimMaxShards
+// shards. It is unexported so Documents stays the manifest's only route out: an exported accessor
+// would hand a caller a Job without its shards.
+func (m *TrimManifest) jobs() []*TrimJob {
 	jobs := make([]*TrimJob, 0, len(m.runs))
 	for _, run := range m.runs {
 		jobs = append(jobs, run.job)

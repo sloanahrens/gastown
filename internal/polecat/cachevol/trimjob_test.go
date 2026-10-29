@@ -57,7 +57,7 @@ func manifestPaths(t *testing.T, m *TrimManifest) []string {
 func TestBuildTrimManifestRunsAsTheCacheUserWithTheClaimAtCache(t *testing.T) {
 	t.Parallel()
 	m := buildTrim(t, trimInput())
-	job := m.Jobs()[0]
+	job := m.jobs()[0]
 	if job.APIVersion != "batch/v1" || job.Kind != "Job" {
 		t.Errorf("apiVersion/kind = %q/%q, want batch/v1 and Job", job.APIVersion, job.Kind)
 	}
@@ -128,7 +128,7 @@ func TestBuildTrimManifestCarriesTheRemovalsInTheMountedShards(t *testing.T) {
 		t.Errorf("the shards list %v, want PlanTrim's removals %v", got, want)
 	}
 
-	trim := m.Jobs()[0].Spec.Template.Spec.Containers[0]
+	trim := m.jobs()[0].Spec.Template.Spec.Containers[0]
 	if want := []string{HelperPath, "trim-paths"}; !reflect.DeepEqual(trim.Command, want) {
 		t.Errorf("command = %v, want the image's trim-paths helper", trim.Command)
 	}
@@ -146,7 +146,7 @@ func TestBuildTrimManifestCarriesTheRemovalsInTheMountedShards(t *testing.T) {
 		if want := TrimListRoot + "/" + strconv.Itoa(i); mount.MountPath != want || !mount.ReadOnly {
 			t.Errorf("mount %d = %+v, want the shard read-only at %s", i, mount, want)
 		}
-		if got := m.Jobs()[0].Spec.Template.Spec.Volumes[i+1].ConfigMap; got == nil || got.Name != shard.Metadata.Name {
+		if got := m.jobs()[0].Spec.Template.Spec.Volumes[i+1].ConfigMap; got == nil || got.Name != shard.Metadata.Name {
 			t.Errorf("volume %d mounts %+v, want the shard %s", i, got, shard.Metadata.Name)
 		}
 	}
@@ -183,15 +183,15 @@ func TestBuildTrimManifestCarriesAListTooLongForOneArgv(t *testing.T) {
 	}
 
 	// The Job document carries the list nowhere: not a path, not an rm argv.
-	doc := string(m.Jobs()[0].JSON())
+	doc := string(m.jobs()[0].JSON())
 	if strings.Contains(doc, "gocache/") {
 		t.Errorf("the Job document names a planned path")
 	}
 	argv := 0
-	for _, arg := range m.Jobs()[0].Spec.Template.Spec.Containers[0].Command {
+	for _, arg := range m.jobs()[0].Spec.Template.Spec.Containers[0].Command {
 		argv += len(arg)
 	}
-	for _, arg := range m.Jobs()[0].Spec.Template.Spec.Containers[0].Args {
+	for _, arg := range m.jobs()[0].Spec.Template.Spec.Containers[0].Args {
 		argv += len(arg)
 	}
 	if argv > 4096 {
@@ -263,10 +263,10 @@ func TestBuildTrimManifestMountsAListAtTheShardCeilingInOneJob(t *testing.T) {
 	in.Listing = shardPerPathListing(TrimMaxShards)
 
 	m := buildTrim(t, in)
-	if len(m.Shards()) != TrimMaxShards || len(m.Jobs()) != 1 {
-		t.Fatalf("manifest = %d shards and %d Jobs, want %d shards in one Job", len(m.Shards()), len(m.Jobs()), TrimMaxShards)
+	if len(m.Shards()) != TrimMaxShards || len(m.jobs()) != 1 {
+		t.Fatalf("manifest = %d shards and %d Jobs, want %d shards in one Job", len(m.Shards()), len(m.jobs()), TrimMaxShards)
 	}
-	if got := m.Jobs()[0].Metadata.Name; got != DefaultTrimJobName {
+	if got := m.jobs()[0].Metadata.Name; got != DefaultTrimJobName {
 		t.Errorf("the Job is named %q, want the name a one-Job trim always had, %q", got, DefaultTrimJobName)
 	}
 }
@@ -282,7 +282,7 @@ func TestBuildTrimManifestSplitsAListPastTheShardCeiling(t *testing.T) {
 	in.Listing = shardPerPathListing(TrimMaxShards + 1)
 	m := buildTrim(t, in)
 
-	jobs := m.Jobs()
+	jobs := m.jobs()
 	if len(jobs) != 2 {
 		t.Fatalf("the manifest has %d Jobs, want 2 for %d shards past one Job's %d mounts", len(jobs), len(m.Shards()), TrimMaxShards)
 	}
@@ -479,7 +479,7 @@ func TestBuildTrimManifestTakesTheSandboxCountFromItsCaller(t *testing.T) {
 			if got := hasModulePath(manifestPaths(t, m)); got != tc.wantMod {
 				t.Errorf("the list names the module cache = %v, want %v", got, tc.wantMod)
 			}
-			_, annotated := m.Jobs()[0].Metadata.Annotations[TrimOverflowAnnotation]
+			_, annotated := m.jobs()[0].Metadata.Annotations[TrimOverflowAnnotation]
 			if annotated != tc.wantOver {
 				t.Errorf("overflow annotation present = %v, want %v", annotated, tc.wantOver)
 			}
@@ -500,18 +500,18 @@ func TestBuildTrimManifestAnnotatesTheOverflow(t *testing.T) {
 	in.CapBytes = 50
 	in.SandboxesRunning = 1
 	m := buildTrim(t, in)
-	if got := m.Jobs()[0].Metadata.Annotations[TrimOverflowAnnotation]; got != "50" {
+	if got := m.jobs()[0].Metadata.Annotations[TrimOverflowAnnotation]; got != "50" {
 		t.Errorf("%s = %q, want 50 bytes over the cap", TrimOverflowAnnotation, got)
 	}
-	if doc := string(m.Jobs()[0].JSON()); !strings.Contains(doc, `"`+TrimOverflowAnnotation+`": "50"`) {
+	if doc := string(m.jobs()[0].JSON()); !strings.Contains(doc, `"`+TrimOverflowAnnotation+`": "50"`) {
 		t.Errorf("the document does not carry the overflow annotation: %s", doc)
 	}
 
 	// The same listing with no sandbox running loses the module cache too, so nothing overflows.
 	in.SandboxesRunning = 0
 	m = buildTrim(t, in)
-	if _, ok := m.Jobs()[0].Metadata.Annotations[TrimOverflowAnnotation]; ok {
-		t.Errorf("annotations = %v, want none when the trim reaches the cap", m.Jobs()[0].Metadata.Annotations)
+	if _, ok := m.jobs()[0].Metadata.Annotations[TrimOverflowAnnotation]; ok {
+		t.Errorf("annotations = %v, want none when the trim reaches the cap", m.jobs()[0].Metadata.Annotations)
 	}
 }
 
@@ -604,5 +604,36 @@ func TestBuildTrimManifestRefusesAListingUnderAnotherCache(t *testing.T) {
 				t.Errorf("BuildTrimManifest(%+v) = %+v, want a refusal", in, m)
 			}
 		})
+	}
+}
+
+// TestBuildTrimManifestRefusesAClaimThatIsUnderItsCap pins the refusal at the builder, where a caller
+// meets it: a claim already under its cap plans no removals, and no manifest (and so no Job) comes
+// back for it (gt-284u5).
+func TestBuildTrimManifestRefusesAClaimThatIsUnderItsCap(t *testing.T) {
+	t.Parallel()
+	in := trimInput()
+	in.CapBytes = 1 << 40
+	m, err := BuildTrimManifest(in)
+	if err == nil {
+		t.Fatalf("BuildTrimManifest returned %d Jobs for a claim under its cap, want a refusal", len(m.jobs()))
+	}
+	if !strings.Contains(err.Error(), "would remove nothing") {
+		t.Errorf("error = %q, want it to say the trim would remove nothing", err)
+	}
+}
+
+// TestTrimManifestExportsNoJobAccessor pins the claim Documents makes: it is the manifest's only
+// route to the Jobs, so no caller can apply a Job without its shards. An exported method that returns
+// the Jobs would break it (gt-284u5).
+func TestTrimManifestExportsNoJobAccessor(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeOf(&TrimManifest{})
+	var got []string
+	for i := 0; i < typ.NumMethod(); i++ {
+		got = append(got, typ.Method(i).Name)
+	}
+	if want := []string{"Documents", "Shards"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("TrimManifest exports %v, want %v: a Job accessor lets a caller apply a Job without its shards", got, want)
 	}
 }
