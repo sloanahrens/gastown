@@ -1,0 +1,30 @@
+# Provider profile for the sbx-haiku seat: Claude Code with a setup-token subscription
+# token, sent as a bearer placeholder the proxy swaps, to api.anthropic.com only.
+# Modelled on deploy/polecat/profiles/deepseek-claude.yaml.
+#
+# What ran (claude-q3f.13, 2026-10-28): proofs A, B and C passed with a scratch copy of
+# this profile whose binaries list also held /usr/bin/node. The list here is narrowed to
+# the claude launcher; the narrow list is not yet proven in a sandbox (the bead for this
+# file records the scratch result).
+id: anthropic-oauth
+display_name: Anthropic subscription token for Claude Code
+description: Claude Code model requests with a setup-token subscription token, sent only to api.anthropic.com
+category: inference
+inference_capable: true
+credentials:
+  - name: oauth_token
+    description: Claude subscription setup-token, sent only to api.anthropic.com
+    env_vars: [CLAUDE_CODE_OAUTH_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+discovery:
+  credentials: [oauth_token]
+endpoints:
+  - host: api.anthropic.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries:
+  - /usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
