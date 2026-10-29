@@ -290,6 +290,13 @@ func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
 		return fmt.Errorf("daemon is not running")
 	}
 
+	// Whether this town runs in a container decides whether the direct signal
+	// below is allowed at all, and it is read from the settings rather than the
+	// detected supervisor because detection can fail where the kind still
+	// decides that: a compose file that went missing is a detection error, and
+	// it is not a licence to signal a host PID.
+	containerTown, settingsErr := c.townIsContainer(townRoot)
+
 	// A signal alone does not stop a supervised daemon: the loaded KeepAlive
 	// job respawns the process it manages, and one it does not manage takes
 	// the lock the moment the signal lands. Stop the job through the
@@ -328,6 +335,16 @@ func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
 		return fmt.Errorf("checking daemon status after stopping: %w", err)
 	}
 	if stillRunning {
+		// A container town's daemon runs in another namespace, so the lock's
+		// PID is not a host process to signal: the stop is its supervisor's
+		// argv or an error (containerStopError), never the mop-up the launchd
+		// and systemd kinds may fall back on (gt-qpeei.10).
+		if containerTown {
+			return c.containerStopError(townRoot, sup, unconfirmed)
+		}
+		if settingsErr != nil {
+			return fmt.Errorf("the daemon is still running, and the town's daemon settings could not be read to say whether it runs in a container, so it was not signaled: %w", settingsErr)
+		}
 		outcome = "the daemon was signaled directly"
 		if err := c.stopDirect(townRoot); err != nil {
 			// The supervisor's SIGTERM can land between that re-check and

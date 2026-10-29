@@ -299,6 +299,61 @@ func (c *daemonControl) dockerCLIContext() string {
 	return c.dockerContext
 }
 
+// townIsContainer reports whether the town's settings name the container
+// supervisor, whether or not that supervisor could be built: a stop needs the
+// kind even when detection failed (a missing compose file is a detection
+// error). An unreadable settings read or a kind this package does not know
+// answers "cannot tell" as an error, and the caller refuses rather than
+// guesses.
+func (c *daemonControl) townIsContainer(townRoot string) (bool, error) {
+	cfg, err := c.townDaemonConfig(townRoot)
+	if err != nil {
+		return false, err
+	}
+	kind, err := cfg.SupervisorKind()
+	if err != nil {
+		return false, err
+	}
+	return kind == config.SupervisorContainer, nil
+}
+
+// containerStopError is what a stop reports instead of signaling a container
+// town's lock-file PID. cause is why the supervisor did not settle the daemon
+// (an unknown job state, a stopped command that failed), or nil when the
+// supervisor ran and something else still holds the lock.
+//
+// The signal is the one thing that must not happen here: daemon.lock's PID
+// comes from the container's namespace, so on this host it names nothing — or,
+// once the number is reused, an unrelated process. The error carries the
+// compose command that does stop the container, built from the town's settings
+// when detection could not supply the supervisor.
+func (c *daemonControl) containerStopError(townRoot string, sup *daemonSupervisor, cause error) error {
+	lines := []string{"the daemon is still running, and a container town's daemon is stopped through its supervisor, never by a signal: daemon.lock's PID comes from the container's namespace and names no process on this host"}
+	if cause != nil {
+		lines = append(lines, cause.Error())
+	}
+	if argv, err := c.containerStopArgv(townRoot, sup); err != nil {
+		lines = append(lines, err.Error())
+	} else {
+		lines = append(lines, "stop it with: "+strings.Join(argv, " "))
+	}
+	return errors.New(strings.Join(lines, "\n  "))
+}
+
+// containerStopArgv builds the compose command that stops a container town's
+// daemon: the detected supervisor's own argv, or the same argv from the town's
+// settings when detection failed and left no supervisor to ask.
+func (c *daemonControl) containerStopArgv(townRoot string, sup *daemonSupervisor) ([]string, error) {
+	if sup != nil {
+		return sup.stop()
+	}
+	cfg, err := c.townDaemonConfig(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	return c.composeArgv(composeFilePath(townRoot), cfg, "stop", "daemon")
+}
+
 // containerComposeProject returns the compose project the container supervisor
 // runs under, and is where that supervisor refuses a town whose settings it
 // cannot act on. The project is the field the argv carry, so the refusal keys

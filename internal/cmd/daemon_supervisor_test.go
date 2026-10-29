@@ -1499,6 +1499,112 @@ func TestRestartDaemon_ContainerFailedRestartLeavesTheDaemonAlone(t *testing.T) 
 	}
 }
 
+// A container town's daemon runs in another namespace, so daemon.lock's PID
+// is not a process this host may signal. With the container job's state still
+// unread, the stop must refuse instead of falling through to that signal, the
+// mop-up the launchd and systemd kinds may use (gt-qpeei.10).
+func TestRunDaemonStop_ContainerUnknownStateNeverSignalsTheLockPID(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	compose := writeComposeFile(t, town)
+	c, calls := productionContainerControl(containerTownConfig("scratch-daemon-1", "scratch"))
+	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+	err := c.stopDaemon(io.Discard, town)
+	if err == nil {
+		t.Fatal("reported a stop although the container job's state is unknown and the daemon still holds the lock")
+	}
+	if calls.stopped {
+		t.Fatal("signaled the lock-file PID of a container town")
+	}
+	if len(calls.argv) != 0 {
+		t.Errorf("ran %v, want no docker command when the job's state is unknown", calls.argv)
+	}
+	want := "docker --context desktop-linux compose -p scratch -f " + compose + " stop daemon"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %v, want it to name the stop command %q", err, want)
+	}
+}
+
+// A container job that is loaded but whose stop command fails leaves the
+// daemon's fate unproven, and the lock is still not a licence to signal: the
+// stop reports the failed command and the one that does stop the container.
+func TestRunDaemonStop_ContainerFailedStopNeverSignalsTheLockPID(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	compose := writeComposeFile(t, town)
+	c, calls := productionContainerControl(containerTownConfig("scratch-daemon-1", "scratch"))
+	c.stateFor = func(kind string) templates.SupervisorState {
+		return templates.SupervisorState{Kind: kind, Loaded: true, LastExit: -1}
+	}
+	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+	err := c.stopDaemon(io.Discard, town)
+	if err == nil {
+		t.Fatal("reported a stop although the container stop command failed and the daemon still holds the lock")
+	}
+	if calls.stopped {
+		t.Fatal("signaled the lock-file PID of a container town")
+	}
+	if !strings.Contains(err.Error(), "daemon unreachable") {
+		t.Errorf("error = %v, want it to carry the failed stop command", err)
+	}
+	want := "docker --context desktop-linux compose -p scratch -f " + compose + " stop daemon"
+	if got := calls.joined(); got != want {
+		t.Errorf("supervisor command = %q, want %q", got, want)
+	}
+}
+
+// Detection can fail where the kind still decides the stop: a container town
+// whose compose file went missing has no supervisor to build, and that error
+// is not permission to signal a host PID.
+func TestRunDaemonStop_ContainerWithoutAComposeFileNeverSignalsTheLockPID(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	c, calls := productionContainerControl(containerTownConfig("scratch-daemon-1", "scratch"))
+	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+	err := c.stopDaemon(io.Discard, town)
+	if err == nil {
+		t.Fatal("reported a stop although detection failed and the daemon still holds the lock")
+	}
+	if calls.stopped {
+		t.Fatal("signaled the lock-file PID although the town runs in a container")
+	}
+	if !strings.Contains(err.Error(), composeFilePath(town)) {
+		t.Errorf("error = %v, want it to carry the missing compose file %s", err, composeFilePath(town))
+	}
+	want := "docker --context desktop-linux compose -p scratch -f " + composeFilePath(town) + " stop daemon"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %v, want it to name the stop command %q", err, want)
+	}
+}
+
+// Unreadable settings leave it unknown whether the town runs in a container,
+// and an unknown is not the launchd kind: the stop refuses the signal rather
+// than guess what the lock's PID belongs to.
+func TestRunDaemonStop_UnreadableSettingsNeverSignalTheLockPID(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
+		return nil, errors.New("daemon.json: unexpected end of JSON input")
+	}
+	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+	err := c.stopDaemon(io.Discard, town)
+	if err == nil {
+		t.Fatal("reported a stop although the town's daemon settings could not be read")
+	}
+	if calls.stopped {
+		t.Fatal("signaled the lock-file PID without knowing whether the town runs in a container")
+	}
+	if !strings.Contains(err.Error(), "unexpected end of JSON input") {
+		t.Errorf("error = %v, want it to carry the settings failure", err)
+	}
+}
+
 // A setting this host has no manager for is refused rather than answered with
 // the host's own: driving systemd for a town that asked for launchd is not
 // what the setting says.
