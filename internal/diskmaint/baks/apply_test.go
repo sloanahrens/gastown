@@ -347,3 +347,54 @@ func TestApplyStopsOnACancelledContext(t *testing.T) {
 	}
 	assertKept(t, bak)
 }
+
+// TestApplyReportsAFileThatIsGone: a planned file that is no longer there cannot
+// have its state read, so it is a Failure naming that, and the run goes on to
+// the file after it.
+func TestApplyReportsAFileThatIsGone(t *testing.T) {
+	t.Parallel()
+	cfgDir, binDir := t.TempDir(), t.TempDir()
+	gone := filepath.Join(cfgDir, "gone.toml.bak-01")
+	kept := writeBackup(t, cfgDir, "kept.toml.bak-01", 40*24*time.Hour, 10)
+
+	res, err := applyTarget(cfgDir, binDir, applyLedger(t), true).Apply(context.Background(), diskmaint.Plan{
+		Target:  planTarget,
+		Actions: []diskmaint.Action{fileAction(gone, 0), fileAction(kept, 10)},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(res.Failed) != 1 || res.Failed[0].Action.Ref != gone || !strings.Contains(res.Failed[0].Err, "the file state cannot be read") {
+		t.Fatalf("Failed = %+v, want the missing file reported as unreadable", res.Failed)
+	}
+	if len(res.Done) != 1 {
+		t.Errorf("Done = %v, want the file after the missing one removed", res.Done)
+	}
+	assertGone(t, kept)
+}
+
+// TestApplyReportsALedgerThatCannotBeWritten: a ledger under a regular file
+// cannot be written, so the apply returns an error naming the record. The file
+// it removed before the record is still removed.
+func TestApplyReportsALedgerThatCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	cfgDir, binDir := t.TempDir(), t.TempDir()
+	notADir := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", notADir, err)
+	}
+	l := diskmaint.NewLedger(filepath.Join(notADir, "maint.jsonl"), 0)
+	bak := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
+
+	res, err := applyTarget(cfgDir, binDir, l, true).Apply(context.Background(), diskmaint.Plan{
+		Target:  planTarget,
+		Actions: []diskmaint.Action{fileAction(bak, 10)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "record the apply") {
+		t.Fatalf("Apply error = %v, want one naming the record that failed", err)
+	}
+	assertGone(t, bak)
+	if len(res.Done) != 1 {
+		t.Errorf("Done = %v, want the removal reported even though the record failed", res.Done)
+	}
+}
