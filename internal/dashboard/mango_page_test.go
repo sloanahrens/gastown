@@ -913,6 +913,66 @@ func TestMangoTrendStacksThreeCollidingLabels(t *testing.T) {
 	}
 }
 
+// Two labels on one row must not overlap as text. The placement measures each
+// label at 6.6 units a character, the advance of the page's monospace font at
+// 11 units, so the test measures the same way and reads the drawn positions
+// back: a row shared by two labels whose text runs together fails here.
+func TestMangoTrendLabelsOnOneRowDoNotOverlapAtSixPointSixUnitsAChar(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	state := mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 96, 0.42, 0.25, MangoEarning))
+	state["weekly"] = []map[string]any{
+		mangoPageWeek("2026-10-05", 27, 0.25),
+		mangoPageWeek("2026-10-12", 34, 0.125),
+	}
+	state["events"] = []map[string]any{
+		mangoPageEvent("2026-10-06", "the first change, short"),
+		mangoPageEvent("2026-10-08", "the second change lands on the next row"),
+		mangoPageEvent("2026-10-11", "the third change, a few days on"),
+		mangoPageEvent("2026-10-12", "the fourth change, the latest"),
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": state})
+
+	texts := mangoTexts(t, dom, "mgtwhat")
+	xs := mangoAttrs(t, dom, "mgtwhat", "x")
+	ys := mangoAttrs(t, dom, "mgtwhat", "y")
+	anchors := mangoAttrs(t, dom, "mgtwhat", "text-anchor")
+	if len(texts) != 4 || len(xs) != 4 || len(ys) != 4 || len(anchors) != 4 {
+		t.Fatalf("the trend draws %d event labels, want four", len(texts))
+	}
+
+	type extent struct{ from, to float64 }
+	spans := make([]extent, len(texts))
+	for i := range texts {
+		w := float64(len(texts[i])) * 6.6
+		x := mustFloat(t, xs[i])
+		if anchors[i] == "end" {
+			spans[i] = extent{x - w, x}
+		} else {
+			spans[i] = extent{x, x + w}
+		}
+	}
+
+	sharing := 0
+	for i := 0; i < len(spans); i++ {
+		for j := i + 1; j < len(spans); j++ {
+			if ys[i] != ys[j] {
+				continue
+			}
+			sharing++
+			a, b := spans[i], spans[j]
+			if a.from < b.to && b.from < a.to {
+				t.Errorf("the labels %q and %q share the row at y=%s and their text overlaps: %.1f-%.1f against %.1f-%.1f at 6.6 units a character", texts[i], texts[j], ys[i], a.from, a.to, b.from, b.to)
+			}
+		}
+	}
+	if sharing == 0 {
+		t.Fatalf("no two event labels share a row, so the row's spacing is not checked")
+	}
+}
+
 // The trend's text is drawn at 11 units or more, which at the panel's width
 // (about 570px on a 700-unit viewBox) renders at about 9 pixels: the event
 // labels, the percentages, the week labels and the share scale.
