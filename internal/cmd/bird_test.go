@@ -38,7 +38,7 @@ func birdSetupForTest(t *testing.T, town string) (birdSetup, string) {
 		find:   func() (string, error) { return town, nil },
 		guard:  func(string, string) error { return nil },
 		isTTY:  func(*os.File) bool { return false },
-		claude: func(h string) string { return filepath.Join(h, "bin", "claude") },
+		claude: func(h, _ string) (string, error) { return filepath.Join(h, "bin", "claude"), nil },
 		label:  func(string, string, string) error { return nil },
 	}, home
 }
@@ -204,6 +204,103 @@ func TestBirdStartPassesClaudesOwnFlagsThrough(t *testing.T) {
 	}
 	if got := argv[1:]; !slices.Equal(got, args) {
 		t.Errorf("claude was given %q, want its own arguments %q", got, args)
+	}
+}
+
+// writeBirdTownSettings writes the town's settings file, where bird_claude is
+// read from.
+func writeBirdTownSettings(t *testing.T, town, body string) {
+	t.Helper()
+	dir := filepath.Join(town, "settings")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBirdStartExecsTheClaudeTheTownNames drives the production claude path
+// into the exec a start makes: a configured bird_claude is the claude that
+// runs, and an unset one keeps ~/.local/bin/claude.
+func TestBirdStartExecsTheClaudeTheTownNames(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		settings string
+		want     func(home string) string
+	}{
+		{
+			name:     "an unset bird_claude execs ~/.local/bin/claude",
+			settings: `{"type":"town-settings","version":1}`,
+			want:     func(home string) string { return filepath.Join(home, ".local", "bin", "claude") },
+		},
+		{
+			name:     "a configured absolute path is the claude that runs",
+			settings: `{"type":"town-settings","version":1,"bird_claude":"/opt/claude/bin/claude"}`,
+			want:     func(string) string { return "/opt/claude/bin/claude" },
+		},
+		{
+			name:     "a path under ~/ is read from the operator's home",
+			settings: `{"type":"town-settings","version":1,"bird_claude":"~/tools/claude"}`,
+			want:     func(home string) string { return filepath.Join(home, "tools", "claude") },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := filepath.Join(t.TempDir(), "town")
+			writeBirdTownSettings(t, town, tc.settings)
+			setup, home := birdSetupForTest(t, town)
+			setup.claude = birdClaudePath
+			r, err := setup.runner()
+			if err != nil {
+				t.Fatalf("runner: %v", err)
+			}
+			if want := tc.want(home); r.Claude != want {
+				t.Errorf("runner claude = %q, want %q", r.Claude, want)
+			}
+			r.Stat = runnableClaude
+			var execed string
+			r.Exec = func(path string, _, _ []string) error {
+				execed = path
+				return nil
+			}
+
+			if err := runBirdStart(r, []string{"-p", "hello"}); err != nil {
+				t.Fatalf("gt bird start: %v", err)
+			}
+			if want := tc.want(home); execed != want {
+				t.Errorf("gt bird start execed %q, want %q", execed, want)
+			}
+		})
+	}
+}
+
+// TestBirdClaudePathRefusesASettingItCannotUse: a relative bird_claude would
+// exec a name looked up from the working directory, and a settings file that
+// does not parse hides the setting, so neither falls back to the default.
+func TestBirdClaudePathRefusesASettingItCannotUse(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		settings string
+	}{
+		{name: "a relative path", settings: `{"type":"town-settings","version":1,"bird_claude":"bin/claude"}`},
+		{name: "a settings file that does not parse", settings: `{"type":`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := filepath.Join(t.TempDir(), "town")
+			writeBirdTownSettings(t, town, tc.settings)
+			home := filepath.Join(t.TempDir(), "home")
+
+			got, err := birdClaudePath(home, town)
+			if err == nil || !strings.Contains(err.Error(), "bird_claude") {
+				t.Fatalf("birdClaudePath = %q, %v; want an error naming bird_claude", got, err)
+			}
+		})
 	}
 }
 
