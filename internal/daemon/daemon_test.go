@@ -756,6 +756,18 @@ func TestDetectSelf(t *testing.T) {
 			want: Owner{Kind: "manual", ID: fmt.Sprintf("fixture-host:%d", os.Getpid())},
 		},
 		{
+			// macOS sets XPC_SERVICE_NAME to "0" in a plain user session, so
+			// a daemon run by hand there is manual, not the launchd job "0".
+			name: "a hand-run daemon in a macOS session",
+			env:  map[string]string{"XPC_SERVICE_NAME": "0"},
+			want: Owner{Kind: "manual", ID: fmt.Sprintf("fixture-host:%d", os.Getpid())},
+		},
+		{
+			name: "a macOS session value of 0 does not outrank systemd",
+			env:  map[string]string{"XPC_SERVICE_NAME": "0", "INVOCATION_ID": "9f2c4d1e"},
+			want: Owner{Kind: "systemd", ID: "9f2c4d1e"},
+		},
+		{
 			name: "container mode outranks the panel variables",
 			env: map[string]string{
 				"GT_DAEMON_SUPERVISOR":     "container",

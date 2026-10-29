@@ -2025,7 +2025,7 @@ func DetectSelf(env func(string) string, hostname func() (string, error)) (Owner
 		}
 		return Owner{Kind: agentconfig.SupervisorContainer, ID: name}, nil
 	}
-	if label := env(agentconfig.LaunchdJobEnv); label != "" {
+	if label := launchdJob(env); label != "" {
 		return Owner{Kind: agentconfig.SupervisorLaunchd, ID: label}, nil
 	}
 	if invocation := env(agentconfig.SystemdInvocationEnv); invocation != "" {
@@ -2036,6 +2036,19 @@ func DetectSelf(env func(string) string, hostname func() (string, error)) (Owner
 		return Owner{}, fmt.Errorf("naming the daemon's owner: %w", err)
 	}
 	return Owner{Kind: OwnerKindManual, ID: fmt.Sprintf("%s:%d", host, os.Getpid())}, nil
+}
+
+// launchdJob returns the launchd job label that started this process, or ""
+// when launchd did not start it. launchd sets LaunchdJobEnv to the job label
+// for a job it starts, but macOS also sets it to "0" for a process in an
+// ordinary user session, so "0" means "no job" and never a label: a daemon
+// run by hand on the Mac must not be recorded as a launchd owner.
+func launchdJob(env func(string) string) string {
+	label := env(agentconfig.LaunchdJobEnv)
+	if label == "0" {
+		return ""
+	}
+	return label
 }
 
 // containerMode reports whether the compose file started this process as the
