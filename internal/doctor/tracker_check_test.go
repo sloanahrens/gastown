@@ -181,9 +181,9 @@ func TestTrackerCheckMissingTokenIsError(t *testing.T) {
 	}
 }
 
-// An unreadable route table leaves the check unable to say any rig is on the
-// tracker, so it reports skipped with the reason rather than not-applicable.
-func TestTrackerCheckUnreadableRoutesIsSkipped(t *testing.T) {
+// An unreadable route table leaves the check unable to say whether any rig is
+// on the tracker, so it reports the read error rather than reading as clean.
+func TestTrackerCheckUnreadableRoutesIsError(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	// A directory where the routes file belongs cannot be read as one.
@@ -194,10 +194,38 @@ func TestTrackerCheckUnreadableRoutesIsSkipped(t *testing.T) {
 	c.getenv = func(string) string { return "" }
 
 	res := c.Run(&CheckContext{TownRoot: town})
-	if res.Status != StatusSkipped {
-		t.Fatalf("status = %v (%s), want skipped with an unreadable routes file", res.Status, res.Message)
+	if res.Status != StatusError {
+		t.Fatalf("status = %v (%s), want ERROR with an unreadable routes file", res.Status, res.Message)
+	}
+	if !strings.Contains(res.Message, "cannot read the town routes") {
+		t.Errorf("message = %q, want it to say the routes could not be read", res.Message)
 	}
 	if len(res.Details) == 0 {
 		t.Error("details are empty, want the read error")
+	}
+}
+
+// The endpoint is reported with its credentials stripped, so a doctor run's
+// output can be shared without carrying them.
+func TestTrackerCheckRedactsCredentialsInEndpoint(t *testing.T) {
+	t.Parallel()
+	c := NewTrackerCheck()
+	c.getenv = func(k string) string {
+		return map[string]string{
+			"TRACKER_URL":   "https://operator:hunter2@tracker.example",
+			"TRACKER_TOKEN": "trk_test",
+		}[k]
+	}
+	c.http = &http.Client{Transport: handlerTransport{trackerReadyz(http.StatusOK, `{"status":"ready","schema_level":3}`)}}
+
+	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
+	if res.Status != StatusOK {
+		t.Fatalf("status = %v (%s), want OK", res.Status, res.Message)
+	}
+	if strings.Contains(res.Message, "hunter2") {
+		t.Errorf("message = %q, want the endpoint's credentials withheld", res.Message)
+	}
+	if !strings.Contains(res.Message, "tracker.example") {
+		t.Errorf("message = %q, want the endpoint named without its credentials", res.Message)
 	}
 }

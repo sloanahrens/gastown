@@ -3,7 +3,6 @@ package client
 import (
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 
@@ -62,19 +61,19 @@ func TestReadyzNotReadyIsUnavailableOnce(t *testing.T) {
 	}
 }
 
-// TestReadyzUnreachable is the transport failure branch: a service nothing
-// listens on is an unavailable error, not a nil answer.
+// TestReadyzUnreachable is the transport failure branch: a service that cannot
+// be reached is an unavailable error, not a nil answer. The transport fails in
+// process, so the test opens no socket.
 func TestReadyzUnreachable(t *testing.T) {
 	t.Parallel()
-	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	url := ts.URL
-	ts.Close()
-
-	c, err := New(Config{BaseURL: url, Token: "trk_secret-token-value"})
+	c, err := New(Config{BaseURL: "http://127.0.0.1:1", Token: "trk_secret-token-value",
+		HTTP: &http.Client{Transport: rtFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("connection refused")
+		})}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Readyz(t.Context()); !errors.Is(err, api.ErrUnavailable) {
-		t.Fatalf("Readyz to a closed server = %v, want an unavailable error", err)
+		t.Fatalf("Readyz to an unreachable server = %v, want an unavailable error", err)
 	}
 }

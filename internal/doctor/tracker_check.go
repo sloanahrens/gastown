@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -11,9 +12,8 @@ import (
 	"github.com/steveyegge/gastown/tracker/client"
 )
 
-// readyzTimeout bounds the readiness probe. The server bounds its own probe
-// (a ping and a write against Postgres) at two seconds, so this reaches an
-// answer or a clean timeout rather than hanging the doctor run.
+// readyzTimeout bounds the wait for the readiness answer, so a tracker that
+// does not answer reads as an error instead of stalling the doctor run.
 const readyzTimeout = 5 * time.Second
 
 // TrackerCheck reports whether the town tracker is ready. It asks /readyz,
@@ -30,8 +30,8 @@ type TrackerCheck struct {
 	// from a map, so the check reads nothing from the host's environment.
 	getenv func(string) string
 
-	// http answers the probe. Nil is the client's own transport; tests serve
-	// the request in process, since a unit test opens no socket.
+	// http answers the probe. Nil is the client's own transport; tests answer
+	// in process, so no test in this package opens a socket.
 	http *http.Client
 }
 
@@ -51,9 +51,10 @@ func (c *TrackerCheck) Run(ctx *CheckContext) *CheckResult {
 	res := &CheckResult{Name: c.Name(), Category: c.Category()}
 	rigs, err := trackerRoutedRigs(ctx.TownRoot)
 	if err != nil {
-		// An unreadable route table hides whether any rig is on the tracker,
-		// so the check cannot say it is not applicable (fail closed).
-		res.Status = StatusSkipped
+		// An unreadable route table leaves the check unable to tell whether a
+		// rig is on the tracker: it reports the read error rather than a
+		// result it cannot support.
+		res.Status = StatusError
 		res.Message = "cannot read the town routes, so the tracker is not checked"
 		res.Details = []string{err.Error()}
 		return res
@@ -83,27 +84,39 @@ func (c *TrackerCheck) Run(ctx *CheckContext) *CheckResult {
 	tc, err := client.New(cfg)
 	if err != nil {
 		res.Status = StatusError
-		res.Message = "a rig is on the tracker but the tracker client cannot be built"
-		res.Details = append(res.Details, err.Error())
+		res.Message = "a rig is on the tracker but the tracker client cannot be built from TRACKER_URL and the token settings"
+		res.FixHint = "Set TRACKER_URL to an https endpoint and TRACKER_TOKEN (or TRACKER_TOKEN_FILE)"
 		return res
 	}
 
+	endpoint := trackerEndpoint(cfg.BaseURL)
 	actx, cancel := context.WithTimeout(context.Background(), readyzTimeout)
 	defer cancel()
 	status, err := tc.Readyz(actx)
 	if err != nil {
 		res.Status = StatusError
-		res.Message = fmt.Sprintf("the tracker at %s is not ready: %v", cfg.BaseURL, err)
+		res.Message = fmt.Sprintf("the tracker at %s is not ready: %v", endpoint, err)
 		return res
 	}
 	if status.Status != "ready" {
 		res.Status = StatusError
-		res.Message = fmt.Sprintf("the tracker at %s answered %q, not ready", cfg.BaseURL, status.Status)
+		res.Message = fmt.Sprintf("the tracker at %s answered %q, not ready", endpoint, status.Status)
 		return res
 	}
 	res.Status = StatusOK
-	res.Message = fmt.Sprintf("the tracker at %s is ready (schema level %d)", cfg.BaseURL, status.SchemaLevel)
+	res.Message = fmt.Sprintf("the tracker at %s is ready (schema level %d)", endpoint, status.SchemaLevel)
 	return res
+}
+
+// trackerEndpoint is the configured tracker address with any credentials
+// stripped, so a report can name the endpoint without carrying them.
+func trackerEndpoint(baseURL string) string {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "(unparsable tracker URL)"
+	}
+	u.User = nil
+	return u.String()
 }
 
 // trackerRoutedRigs returns the paths of the rigs the route table puts on the
