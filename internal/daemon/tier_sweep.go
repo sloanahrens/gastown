@@ -144,6 +144,12 @@ type tierSweepTierResult struct {
 	FailedNames []string `json:"failed_names"`
 	// Log is the file the stage's whole output was written to.
 	Log string `json:"log,omitempty"`
+	// LogDir is the directory the rig's script wrote each unit's own log into,
+	// from the summary line's "(logs <dir>)" group. The stage log holds only
+	// what the script echoed, so a slowcheck finding is reachable only here
+	// (gt-j6vlz). Omitted when the sweep that wrote the record reported none,
+	// which is also how a record written before the field existed reads.
+	LogDir string `json:"log_dir,omitempty"`
 	// SHA is the tip this verdict was taken at: the cycle's own tip for a tier
 	// that cycle ran, an earlier one for a tier a later Partial cycle carried
 	// forward (gt-euxf1). It, not the record's LastSHA, is what a verdict's
@@ -1406,7 +1412,10 @@ func tierSweepUnreachedAfterDeclined(tiers []string, declined map[string]bool) m
 }
 
 // parseTierSweepSummaries reads the verdicts a stage's output reported, keyed
-// by tier.
+// by tier. The summary's "(logs <dir>)" group is the script's log directory,
+// kept in LogDir as well as Log: the caller replaces Log with the path of the
+// stage log it writes, and the unit logs are only findable through the
+// directory (gt-j6vlz).
 func parseTierSweepSummaries(output string) map[string]tierSweepTierResult {
 	out := map[string]tierSweepTierResult{}
 	for _, line := range strings.Split(output, "\n") {
@@ -1422,6 +1431,7 @@ func parseTierSweepSummaries(output string) map[string]tierSweepTierResult {
 			Failed:      failed,
 			FailedNames: strings.Fields(m[6]),
 			Log:         m[7],
+			LogDir:      m[7],
 		}
 	}
 	return out
