@@ -62,7 +62,7 @@ func (h *handle) clone(url, dest, branch string, bare, singleBranch bool) error 
 		}
 	}
 	if !bare {
-		cloned(r, src) // a bare clone sets neither origin/HEAD nor an upstream
+		cloned(r, src, singleBranch) // a bare clone sets neither origin/HEAD nor an upstream
 	}
 	write := func() error { return layoutRepo(r) }
 	if !bare {

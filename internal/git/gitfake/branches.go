@@ -19,9 +19,9 @@ func remoteHeadKey(remote string) string { return "\x00remote-head." + remote }
 // cloned records what a non-bare git clone of src configures beyond the
 // refs, once r holds its remote-tracking refs and r.head is the branch it
 // checked out: the checked-out branch tracks its origin counterpart, and
-// origin/HEAD names src's HEAD branch when the clone fetched it (a clone of
-// another branch alone, or of an empty remote, has none).
-func cloned(r, src *repo) {
+// origin/HEAD names src's HEAD branch when the clone fetched it (a
+// single-branch clone of another branch, or an empty remote, has none).
+func cloned(r, src *repo, singleBranch bool) {
 	b, ok := strings.CutPrefix(r.head, "refs/heads/")
 	if !ok {
 		return
@@ -29,8 +29,9 @@ func cloned(r, src *repo) {
 	if _, exists := r.refs["refs/remotes/origin/"+b]; !exists {
 		return
 	}
-	if r.head == src.head {
-		r.configMap()[remoteHeadKey("origin")] = b
+	hb, isBranch := strings.CutPrefix(src.head, "refs/heads/")
+	if _, fetched := r.refs["refs/remotes/origin/"+hb]; isBranch && fetched && (!singleBranch || r.head == src.head) {
+		r.configMap()[remoteHeadKey("origin")] = hb
 	}
 	setUpstream(r, b, "origin/"+b)
 }

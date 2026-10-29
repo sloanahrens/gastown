@@ -221,7 +221,7 @@ func (f *Fake) Clone(t testing.TB, src, dest string) {
 		r.refs[s.head] = id
 	}
 	f.repos[dest] = r
-	cloned(r, s)
+	cloned(r, s, false)
 	if err := materializeCheckout(dest, f.treeOf(r.refs[r.head])); err != nil {
 		t.Fatalf("gitfake: Clone: %v", err)
 	}

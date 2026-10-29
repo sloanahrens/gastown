@@ -235,5 +235,20 @@ func CrewCloneKeepsHistoryAndBranches(t *testing.T, newEnv func(t *testing.T) En
 			}
 		})
 	}
+
+	// A full clone of a branch that is not the remote's HEAD still names the
+	// remote's HEAD branch in origin/HEAD, as git does, because it fetched it.
+	sideOrigin := filepath.Join(root, "side-origin.git")
+	env.InitBare(t, sideOrigin)
+	trunk := env.Commit(t, sideOrigin, "trunk", "trunk: one", map[string]string{"t.txt": "t\n"})
+	env.SetRef(t, sideOrigin, "refs/heads/side", trunk)
+	env.SetHead(t, sideOrigin, "trunk")
+	side := filepath.Join(root, "CloneBranchFullSide")
+	if err := g.CloneBranchFull(sideOrigin, side, "side"); err != nil {
+		t.Fatalf("CloneBranchFull side: %v", err)
+	}
+	if def := env.Open(side).RemoteDefaultBranch(); def != "trunk" {
+		t.Errorf("a full clone of side reports remote default %q; want trunk from origin/HEAD", def)
+	}
 	return filepath.Join(root, "CloneBranchFull")
 }
