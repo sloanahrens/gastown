@@ -84,7 +84,7 @@ func sendEscalationExec(run commandRunner, cfg *config.EscalationConfig, name, b
 // one. It reaches the human only if it is still open after the unhandled window
 // (PushUnhandled, gt-71714).
 func PushActions(actions []string, owner attention.Owner) []string {
-	if owner == attention.OwnerSloan {
+	if owner == attention.OwnerOperator {
 		return actions
 	}
 	out := make([]string, 0, len(actions))

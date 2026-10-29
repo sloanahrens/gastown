@@ -56,9 +56,9 @@ func TestBuildAttentionMergesTheReadersIntoOneTaggedList(t *testing.T) {
 	// row type that stops the town until it is answered — then the overseer's,
 	// and inside each group the loudest first and the longest wait behind it.
 	want := []struct{ kind, owner, id string }{
-		{AttentionQuestion, string(attention.OwnerSloan), "gt-q1"},     // P0, and the human's
-		{AttentionEscalation, string(attention.OwnerSloan), "hq-2"},    // the human raised it
-		{AttentionItem, string(attention.OwnerSloan), "host:disk"},     // the host is the human's
+		{AttentionQuestion, string(attention.OwnerOperator), "gt-q1"},  // P0, and the human's
+		{AttentionEscalation, string(attention.OwnerOperator), "hq-2"}, // the human raised it
+		{AttentionItem, string(attention.OwnerOperator), "host:disk"},  // the host is the human's
 		{AttentionQuestion, string(attention.OwnerOverseer), "gt-q2"},  // answered: the overseer owes the next move
 		{AttentionEscalation, string(attention.OwnerOverseer), "hq-1"}, // a polecat raised it
 		{AttentionItem, string(attention.OwnerOverseer), "stall:gastown/opal"},
@@ -382,7 +382,7 @@ func TestMineCountsOnlyTheRowsThatNeedAPerson(t *testing.T) {
 		{Key: "host:gpu", Kind: attention.KindReviewBacklog, Owner: "opal", WaitingOn: "the next review round"},
 	}}
 	at := buildAttention(&Escalations{}, &Questions{}, pipeOnly, queue, ScoresRead{}, attentionNow)
-	if len(at.Pipeline.Rows) != 1 || at.Pipeline.Rows[0].Owner != string(attention.OwnerSloan) {
+	if len(at.Pipeline.Rows) != 1 || at.Pipeline.Rows[0].Owner != string(attention.OwnerOperator) {
 		t.Fatalf("the fixture drew %+v in the pipeline group, want one row the human's rule owns", at.Pipeline.Rows)
 	}
 	if at.Mine != 0 {
@@ -432,7 +432,7 @@ func TestEveryAttentionRuleHasAnOwnerThePageDraws(t *testing.T) {
 	t.Parallel()
 
 	tags := attentionOwnerTags(t)
-	if len(tags) != 2 || tags[0] != string(attention.OwnerSloan) || tags[1] != string(attention.OwnerOverseer) {
+	if len(tags) != 2 || tags[0] != string(attention.OwnerOperator) || tags[1] != string(attention.OwnerOverseer) {
 		t.Fatalf("the page builds its chips from %v, want the two owners", tags)
 	}
 	for _, rule := range attention.Rules() {
@@ -456,6 +456,40 @@ func attentionOwnerTags(t *testing.T) []string {
 		out = append(out, q[1])
 	}
 	return out
+}
+
+// The dashboard serves the owner tag as the row's owner, and the page's chip
+// and item badge read that word, so the JSON a reader gets names the operator:
+// the owner's own value, never a person's name (gt-rujis).
+func TestTheServedAttentionNamesTheOperator(t *testing.T) {
+	t.Parallel()
+
+	// A host reading: a rule the owner table gives the operator.
+	items := []Alert{
+		{Key: "host:disk", Rule: attention.RuleHostDiskCrit, Text: "the volume is 96% full", At: attentionNow, Level: LevelCrit},
+	}
+	at := buildAttention(&Escalations{}, &Questions{}, items, AttentionQueue{}, ScoresRead{}, attentionNow)
+	raw, err := json.Marshal(at)
+	if err != nil {
+		t.Fatalf("marshalling the attention reading: %v", err)
+	}
+	if want := `"owner":"operator"`; !strings.Contains(string(raw), want) {
+		t.Errorf("the served attention carries no %s: %s", want, raw)
+	}
+	if strings.Contains(string(raw), "sloan") {
+		t.Errorf("the served attention still names the old owner: %s", raw)
+	}
+}
+
+// The row's owner tag takes its colour from the class drawn for that owner, so
+// a class with no rule leaves the operator's rows in the default colour, beside
+// the overseer's and the loudest alerts' (gt-rujis).
+func TestTheOperatorsTagHasItsColour(t *testing.T) {
+	t.Parallel()
+
+	if want := ".own-" + string(attention.OwnerOperator) + "{"; !strings.Contains(string(indexHTML), want) {
+		t.Errorf("index.html has no %s rule, so the operator's tag is drawn in the default colour", want)
+	}
 }
 
 // Inside one alert level the queue items are ordered by Jev's needs_human

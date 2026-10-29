@@ -10,9 +10,9 @@ type Owner string
 
 // The owners.
 const (
-	// OwnerSloan is the human: the item waits on a decision or an action only
-	// they can take.
-	OwnerSloan Owner = "sloan"
+	// OwnerOperator is the human — the operator: the item waits on a decision or
+	// an action only they can take.
+	OwnerOperator Owner = "operator"
 	// OwnerOverseer is an agent: it triages the item itself, and the human
 	// hears about it only if it goes unhandled.
 	OwnerOverseer Owner = "overseer"
@@ -37,18 +37,18 @@ var ruleOwners = map[string]Owner{
 	// A question is filed for the human to answer. question.answered is the
 	// overseer's: the human has answered it, and the overseer owes the next
 	// move, so handing it back to the human would be a row nobody can clear.
-	RuleQuestionNew:      OwnerSloan,
-	RuleQuestionStale:    OwnerSloan,
+	RuleQuestionNew:      OwnerOperator,
+	RuleQuestionStale:    OwnerOperator,
 	RuleQuestionAnswered: OwnerOverseer,
 	// The physical machine: no agent frees disk or memory.
-	RuleHostDiskWarn:   OwnerSloan,
-	RuleHostDiskCrit:   OwnerSloan,
-	RuleHostMemLow:     OwnerSloan,
-	RuleHostDockerDown: OwnerSloan,
-	RuleHostProbe:      OwnerSloan,
+	RuleHostDiskWarn:   OwnerOperator,
+	RuleHostDiskCrit:   OwnerOperator,
+	RuleHostMemLow:     OwnerOperator,
+	RuleHostDockerDown: OwnerOperator,
+	RuleHostProbe:      OwnerOperator,
 	// A silent overseer cannot wake itself; the daemon pushes to the human
 	// instead (gt-3a6h6).
-	RuleOverseerSilent: OwnerSloan,
+	RuleOverseerSilent: OwnerOperator,
 	// Rework through the second rejection is routine; the overseer decides what
 	// a bead that keeps failing becomes (a rework brief, a waiver, a split). An
 	// escalation the third rejection raises that the overseer cannot settle
@@ -105,7 +105,7 @@ func RuleOwner(rule string) Owner {
 	}
 	for _, family := range humanFamilies {
 		if strings.HasPrefix(rule, family) {
-			return OwnerSloan
+			return OwnerOperator
 		}
 	}
 	return OwnerOverseer
@@ -119,7 +119,7 @@ func RuleOwner(rule string) Owner {
 // human anyway.
 func EscalationOwner(escalatedBy string) Owner {
 	if IsHumanAddress(escalatedBy) {
-		return OwnerSloan
+		return OwnerOperator
 	}
 	return OwnerOverseer
 }

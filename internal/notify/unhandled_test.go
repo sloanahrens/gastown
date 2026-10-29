@@ -39,7 +39,7 @@ func TestPushActionsReachTheHumanOnlyForTheHumansEscalation(t *testing.T) {
 		owner attention.Owner
 		want  []string
 	}{
-		{"the human owns it: the whole route runs", attention.OwnerSloan, route},
+		{"the human owns it: the whole route runs", attention.OwnerOperator, route},
 		{"the overseer owns it: nothing reaches a person", attention.OwnerOverseer,
 			[]string{"bead", "mail:gastown/overseer", "log"}},
 	}
@@ -396,14 +396,14 @@ func TestUnhandledRunNamesTheEscalationsAgeNotTheWindow(t *testing.T) {
 func TestEscalationOwner(t *testing.T) {
 	t.Parallel()
 	cases := map[string]attention.Owner{
-		"overseer":                 attention.OwnerSloan,
-		"gastown/overseer":         attention.OwnerSloan,
+		"overseer":                 attention.OwnerOperator,
+		"gastown/overseer":         attention.OwnerOperator,
 		"gastown/polecats/rictus":  attention.OwnerOverseer,
 		"gastown/crew/sloan":       attention.OwnerOverseer,
 		"daemon":                   attention.OwnerOverseer,
 		"":                         attention.OwnerOverseer,
 		"gastown/overseer/polecat": attention.OwnerOverseer,
-		"  gastown/overseer  ":     attention.OwnerSloan,
+		"  gastown/overseer  ":     attention.OwnerOperator,
 	}
 	for address, want := range cases {
 		if got := attention.EscalationOwner(address); got != want {
