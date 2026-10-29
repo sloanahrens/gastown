@@ -174,27 +174,54 @@ func TestStatusOmitsTheTrackerForATownWithNoTrackerRig(t *testing.T) {
 	}
 }
 
-func TestStatusReportsAnUnconfiguredTracker(t *testing.T) {
+func TestStatusNamesTheCauseOfAMalformedTrackerConfig(t *testing.T) {
 	t.Parallel()
-	f := newFake(t)
-	f.setHealthy()
-	// A port outside the TCP range: the endpoint does not resolve, and the
-	// report must not print a guessed one.
-	f.trackerPort = 7444
-	f.writeTownJSON(t, `{"type":"town","version":1,"name":"test","tracker":{"port":70000}}`)
-	f.writeRoutes(t, `{"prefix":"gastown-","path":"gastown","backend":"tracker"}`)
-	o, _, _ := f.optsWithOut()
-	got := f.statusOutput(t, o)
-	if want := statusLine("tracker", "unconfigured"); !strings.Contains(got, want) {
-		t.Errorf("status output missing %q:\n%s", want, got)
-	}
-	for _, l := range strings.Split(got, "\n") {
-		if strings.HasPrefix(l, "tracker :") {
-			t.Errorf("an endpoint that does not resolve printed a port: %q", l)
-		}
-	}
-	if len(f.trackerProbes) != 0 {
-		t.Errorf("an endpoint that does not resolve was probed: %v", f.trackerProbes)
+	for _, tt := range []struct {
+		name  string
+		town  string
+		cause string
+	}{
+		{
+			name:  "a port outside the TCP range",
+			town:  `{"type":"town","version":1,"name":"test","tracker":{"port":70000}}`,
+			cause: "tracker.port 70000 is not a TCP port",
+		},
+		{
+			name:  "a port that is not a number",
+			town:  `{"type":"town","version":1,"name":"test","tracker":{"port":"seven"}}`,
+			cause: "town.json",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFake(t)
+			f.setHealthy()
+			// The endpoint does not resolve, so the report must not print a
+			// guessed port, and it must name what is wrong with the config.
+			f.trackerPort = 7444
+			f.writeTownJSON(t, tt.town)
+			f.writeRoutes(t, `{"prefix":"gastown-","path":"gastown","backend":"tracker"}`)
+			o, _, _ := f.optsWithOut()
+			got := f.statusOutput(t, o)
+			var trackerLines []string
+			for _, l := range strings.Split(got, "\n") {
+				if strings.HasPrefix(l, "tracker") {
+					trackerLines = append(trackerLines, l)
+				}
+			}
+			if len(trackerLines) != 1 {
+				t.Fatalf("a malformed tracker config printed %d tracker lines, want 1:\n%s", len(trackerLines), got)
+			}
+			if !strings.Contains(trackerLines[0], tt.cause) {
+				t.Errorf("tracker line %q does not name the cause %q:\n%s", trackerLines[0], tt.cause, got)
+			}
+			if !strings.HasPrefix(trackerLines[0], statusLine("tracker", "? ")) {
+				t.Errorf("an endpoint that does not resolve is not reported as unknown: %q", trackerLines[0])
+			}
+			if len(f.trackerProbes) != 0 {
+				t.Errorf("an endpoint that does not resolve was probed: %v", f.trackerProbes)
+			}
+		})
 	}
 }
 
