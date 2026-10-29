@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"time"
 )
 
@@ -104,6 +105,33 @@ func (c *DaemonPatrolConfig) ComposeProject() string {
 		return DefaultComposeProject
 	}
 	return c.ComposeProjectSetting
+}
+
+// The shapes docker and compose accept for a container name and a compose
+// project. The container supervisor builds argv from both, so a value outside
+// them (a leading dash, a space, a slash) must be refused before it gets there.
+var (
+	containerNameShape  = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]+$`)
+	composeProjectShape = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+)
+
+// ValidateContainerNames refuses a container_name or compose_project that is set
+// without the other or is outside the shape docker and compose accept, because a
+// town that sets one inherits the live town's default for the other.
+func (c *DaemonPatrolConfig) ValidateContainerNames() error {
+	if c == nil {
+		return nil
+	}
+	if (c.ContainerNameSetting == "") != (c.ComposeProjectSetting == "") {
+		return fmt.Errorf("daemon.container_name and daemon.compose_project: set both or neither; a town that sets one inherits the live town's default for the other")
+	}
+	if c.ContainerNameSetting != "" && !containerNameShape.MatchString(c.ContainerNameSetting) {
+		return fmt.Errorf("daemon.container_name %q: want at least two letters, digits, dots, dashes and underscores, starting with a letter or digit", c.ContainerNameSetting)
+	}
+	if c.ComposeProjectSetting != "" && !composeProjectShape.MatchString(c.ComposeProjectSetting) {
+		return fmt.Errorf("daemon.compose_project %q: want lowercase letters, digits, dashes and underscores, starting with a letter or digit", c.ComposeProjectSetting)
+	}
+	return nil
 }
 
 // PatrolsConfig holds configuration for all patrols.
