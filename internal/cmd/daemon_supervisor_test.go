@@ -1605,6 +1605,31 @@ func TestRunDaemonStop_UnreadableSettingsNeverSignalTheLockPID(t *testing.T) {
 	}
 }
 
+// A daemon.supervisor value that is not a kind this binary knows leaves the
+// stop unable to say whether the town runs in a container, and that unknown
+// refuses the signal the same way an unreadable file does.
+func TestRunDaemonStop_UnknownSupervisorKindNeverSignalsTheLockPID(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
+		return &config.DaemonPatrolConfig{Supervisor: "kube"}, nil
+	}
+	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+	err := c.stopDaemon(io.Discard, town)
+	if err == nil {
+		t.Fatal("reported a stop although daemon.supervisor names a kind this binary does not know")
+	}
+	if calls.stopped {
+		t.Fatal("signaled the lock-file PID without knowing the town's supervisor kind")
+	}
+	if !strings.Contains(err.Error(), "daemon.supervisor") {
+		t.Errorf("error = %v, want it to name daemon.supervisor", err)
+	}
+}
+
 // A setting this host has no manager for is refused rather than answered with
 // the host's own: driving systemd for a town that asked for launchd is not
 // what the setting says.

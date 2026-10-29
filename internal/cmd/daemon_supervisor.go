@@ -299,22 +299,23 @@ func (c *daemonControl) dockerCLIContext() string {
 	return c.dockerContext
 }
 
-// townIsContainer reports whether the town's settings name the container
-// supervisor, whether or not that supervisor could be built: a stop needs the
-// kind even when detection failed (a missing compose file is a detection
-// error). An unreadable settings read or a kind this package does not know
-// answers "cannot tell" as an error, and the caller refuses rather than
-// guesses.
-func (c *daemonControl) townIsContainer(townRoot string) (bool, error) {
+// townDaemonKind reads the town's daemon settings and reports whether they name
+// the container supervisor, whether or not that supervisor could be built: a
+// stop needs the kind even when detection failed (a missing compose file is a
+// detection error). The settings come back with it for the caller that has to
+// build the compose command detection could not. An unreadable read or a kind
+// this package does not know answers "cannot tell" as an error, and the caller
+// refuses rather than guesses.
+func (c *daemonControl) townDaemonKind(townRoot string) (*config.DaemonPatrolConfig, bool, error) {
 	cfg, err := c.townDaemonConfig(townRoot)
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
 	kind, err := cfg.SupervisorKind()
 	if err != nil {
-		return false, err
+		return cfg, false, err
 	}
-	return kind == config.SupervisorContainer, nil
+	return cfg, kind == config.SupervisorContainer, nil
 }
 
 // containerStopError is what a stop reports instead of signaling a container
@@ -327,12 +328,12 @@ func (c *daemonControl) townIsContainer(townRoot string) (bool, error) {
 // once the number is reused, an unrelated process. The error carries the
 // compose command that does stop the container, built from the town's settings
 // when detection could not supply the supervisor.
-func (c *daemonControl) containerStopError(townRoot string, sup *daemonSupervisor, cause error) error {
+func (c *daemonControl) containerStopError(townRoot string, cfg *config.DaemonPatrolConfig, sup *daemonSupervisor, cause error) error {
 	lines := []string{"the daemon is still running, and a container town's daemon is stopped through its supervisor, never by a signal: daemon.lock's PID comes from the container's namespace and names no process on this host"}
 	if cause != nil {
 		lines = append(lines, cause.Error())
 	}
-	if argv, err := c.containerStopArgv(townRoot, sup); err != nil {
+	if argv, err := c.containerStopArgv(townRoot, cfg, sup); err != nil {
 		lines = append(lines, err.Error())
 	} else {
 		lines = append(lines, "stop it with: "+strings.Join(argv, " "))
@@ -341,15 +342,11 @@ func (c *daemonControl) containerStopError(townRoot string, sup *daemonSuperviso
 }
 
 // containerStopArgv builds the compose command that stops a container town's
-// daemon: the detected supervisor's own argv, or the same argv from the town's
-// settings when detection failed and left no supervisor to ask.
-func (c *daemonControl) containerStopArgv(townRoot string, sup *daemonSupervisor) ([]string, error) {
+// daemon: the detected supervisor's own argv, or the same argv from the
+// settings townDaemonKind read when detection failed and left no supervisor.
+func (c *daemonControl) containerStopArgv(townRoot string, cfg *config.DaemonPatrolConfig, sup *daemonSupervisor) ([]string, error) {
 	if sup != nil {
 		return sup.stop()
-	}
-	cfg, err := c.townDaemonConfig(townRoot)
-	if err != nil {
-		return nil, err
 	}
 	return c.composeArgv(composeFilePath(townRoot), cfg, "stop", "daemon")
 }

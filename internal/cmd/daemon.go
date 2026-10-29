@@ -295,7 +295,7 @@ func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
 	// detected supervisor because detection can fail where the kind still
 	// decides that: a compose file that went missing is a detection error, and
 	// it is not a license to signal a host PID.
-	containerTown, settingsErr := c.townIsContainer(townRoot)
+	cfg, containerTown, settingsErr := c.townDaemonKind(townRoot)
 
 	// A signal alone does not stop a supervised daemon: the loaded KeepAlive
 	// job respawns the process it manages, and one it does not manage takes
@@ -340,7 +340,7 @@ func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
 		// argv or an error (containerStopError), never the mop-up the launchd
 		// and systemd kinds may fall back on (gt-qpeei.10).
 		if containerTown {
-			return c.containerStopError(townRoot, sup, unconfirmed)
+			return c.containerStopError(townRoot, cfg, sup, unconfirmed)
 		}
 		if settingsErr != nil {
 			return fmt.Errorf("the daemon is still running, and the town's daemon settings could not be read to say whether it runs in a container, so it was not signaled: %w", settingsErr)
