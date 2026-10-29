@@ -143,9 +143,9 @@ func write(path string, p Probes, fs probeFS) error {
 	// Every failure after the temp file exists removes it, so the directory is
 	// left holding the target the write found and nothing else.
 	discard := func(cause error) error {
-		// The write has already failed; the close is a release, and its error
-		// says nothing the caller can act on.
-		f.Close()
+		// The write has already failed; the close only releases the handle,
+		// so its error says nothing the caller can act on.
+		_ = f.Close()
 		if rmErr := fs.remove(tmp); rmErr != nil {
 			return fmt.Errorf("write probes to %s: %w (and removing the temp file %s: %v)",
 				path, cause, tmp, rmErr)
