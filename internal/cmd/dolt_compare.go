@@ -225,13 +225,25 @@ type mysqlSnapshotReader struct {
 	dsn     string
 	label   string
 	timeout time.Duration
+	// openDB opens the connection pool; nil opens it with the MySQL driver. A
+	// test supplies a driver that answers in process, so every failure path of
+	// Read is driven without a server (docs/testing.md, "Seams for external
+	// tools").
+	openDB func(dsn string) (*sql.DB, error)
+}
+
+func (r *mysqlSnapshotReader) open() (*sql.DB, error) {
+	if r.openDB != nil {
+		return r.openDB(r.dsn)
+	}
+	return sql.Open("mysql", r.dsn)
 }
 
 func (r *mysqlSnapshotReader) Read(ctx context.Context) ([]dbSnapshot, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	db, err := sql.Open("mysql", r.dsn)
+	db, err := r.open()
 	if err != nil {
 		return nil, fmt.Errorf("%s: opening connection: %w", r.label, err)
 	}

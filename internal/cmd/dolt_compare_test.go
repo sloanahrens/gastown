@@ -40,16 +40,20 @@ func compareTestDeps(w *bytes.Buffer, servers map[int]*fakeSnapshotReader) doltC
 	}
 }
 
-// testCompareCmd builds the command over fake readers and runs its RunE, the
+// runCompareCmd builds the command over fake readers and runs its RunE, the
 // way the shell would reach it with the two endpoints.
-func testCompareCmd(t *testing.T, deps doltCompareDeps, sourcePort, targetPort int) error {
-	t.Helper()
+func runCompareCmd(deps doltCompareDeps, endpoints ...string) error {
 	cmd := newDoltCompareCmd(deps)
 	cmd.SetContext(context.Background())
-	return cmd.RunE(cmd, []string{
-		"127.0.0.1:" + strconv.Itoa(sourcePort),
-		"127.0.0.1:" + strconv.Itoa(targetPort),
-	})
+	return cmd.RunE(cmd, endpoints)
+}
+
+// testCompareCmd runs the command with the two servers' ports as endpoints.
+func testCompareCmd(t *testing.T, deps doltCompareDeps, sourcePort, targetPort int) error {
+	t.Helper()
+	return runCompareCmd(deps,
+		"127.0.0.1:"+strconv.Itoa(sourcePort),
+		"127.0.0.1:"+strconv.Itoa(targetPort))
 }
 
 func TestCompareSnapshots(t *testing.T) {
@@ -327,6 +331,7 @@ func TestParseDoltCompareEndpoint(t *testing.T) {
 		{"non-numeric port", "127.0.0.1:abc", doltCompareEndpoint{}, true},
 		{"port above the range", "127.0.0.1:70000", doltCompareEndpoint{}, true},
 		{"zero port", "127.0.0.1:0", doltCompareEndpoint{}, true},
+		{"port without a host", ":3307", doltCompareEndpoint{}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -374,5 +379,50 @@ func TestQuoteCompareIdentifier(t *testing.T) {
 		if got, err := quoteCompareIdentifier(bad); err == nil {
 			t.Errorf("quoteCompareIdentifier(%q) = %q, want an error", bad, got)
 		}
+	}
+}
+
+// A malformed endpoint on either side is a refusal naming the argument, not a
+// comparison against a default.
+func TestCompareRejectsAMalformedEndpoint(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		endpoints []string
+		want      string
+	}{
+		{"source", []string{"not-a-port:x", "127.0.0.1:3401"}, "source endpoint"},
+		{"target", []string{"127.0.0.1:3307", "not-a-port:x"}, "target endpoint"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			deps := compareTestDeps(&bytes.Buffer{}, nil)
+			err := runCompareCmd(deps, tt.endpoints...)
+			if err == nil {
+				t.Fatalf("compare with a malformed endpoint = nil, want an error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q should name the %s endpoint", err, tt.name)
+			}
+		})
+	}
+}
+
+// A comparison that cannot be written is a failure, not a silent pass: the
+// exit status must not read clean when the operator saw no table.
+func TestCompareReportsAnUnwritableOutput(t *testing.T) {
+	t.Parallel()
+	deps := compareTestDeps(&bytes.Buffer{}, map[int]*fakeSnapshotReader{
+		3307: {snapshots: []dbSnapshot{{Name: "hq", Rows: 1, Hash: "a"}}},
+		3401: {snapshots: []dbSnapshot{{Name: "hq", Rows: 1, Hash: "a"}}},
+	})
+	deps.out = failingWriter{}
+	err := testCompareCmd(t, deps, 3307, 3401)
+	if err == nil {
+		t.Fatal("compare with an unwritable output = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "writing comparison") {
+		t.Errorf("error %q should name the write failure", err)
 	}
 }
