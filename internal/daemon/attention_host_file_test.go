@@ -104,23 +104,52 @@ func TestFileHostProbesRefuseAMissingOrStaleFile(t *testing.T) {
 func TestFileHostProbesReturnOneFieldsErrorOnly(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	p := newFileHostProbes(t.TempDir())
-	writeFileProbes(t, p, hostprobe.Probes{
-		At:         now,
-		MemFreePct: hostprobe.Field[float64]{Err: "memory_pressure: exit status 1"},
-		Disk:       hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 30, FreeGB: 100}},
-		Containers: hostprobe.Field[[]string]{Value: []string{"forgejo-db-1"}},
-	})
-	p.now = func() time.Time { return now }
+	const recorded = "the tool failed"
+	tests := []struct {
+		name    string
+		setErr  func(*hostprobe.Probes)
+		failing string
+	}{
+		{"disk", func(p *hostprobe.Probes) { p.Disk.Err = recorded }, hostProbeDisk},
+		{"memory", func(p *hostprobe.Probes) { p.MemFreePct.Err = recorded }, hostProbeMem},
+		{"containers", func(p *hostprobe.Probes) { p.Containers.Err = recorded }, hostProbeDocker},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := newFileHostProbes(t.TempDir())
+			probes := hostprobe.Probes{
+				At:         now,
+				MemFreePct: hostprobe.Field[float64]{Value: 42},
+				Disk:       hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 30, FreeGB: 100}},
+				Containers: hostprobe.Field[[]string]{Value: []string{"forgejo-db-1"}},
+			}
+			tt.setErr(&probes)
+			writeFileProbes(t, p, probes)
+			p.now = func() time.Time { return now }
 
-	if _, err := p.MemFreePct(context.Background()); err == nil || !strings.Contains(err.Error(), "memory_pressure: exit status 1") {
-		t.Errorf("MemFreePct error = %v; want the recorded failure", err)
-	}
-	if disk, err := p.Disk(); err != nil || disk.UsedPct != 30 {
-		t.Errorf("Disk = %+v, %v; want the written disk, since another field failed", disk, err)
-	}
-	if containers, err := p.Containers(context.Background()); err != nil || len(containers) != 1 {
-		t.Errorf("Containers = %v, %v; want the written names, since another field failed", containers, err)
+			disk, err := p.Disk()
+			switch {
+			case tt.failing == hostProbeDisk && (err == nil || !strings.Contains(err.Error(), recorded)):
+				t.Errorf("Disk error = %v; want the recorded failure", err)
+			case tt.failing != hostProbeDisk && (err != nil || disk.UsedPct != 30):
+				t.Errorf("Disk = %+v, %v; want the written disk, since another field failed", disk, err)
+			}
+			mem, err := p.MemFreePct(context.Background())
+			switch {
+			case tt.failing == hostProbeMem && (err == nil || !strings.Contains(err.Error(), recorded)):
+				t.Errorf("MemFreePct error = %v; want the recorded failure", err)
+			case tt.failing != hostProbeMem && (err != nil || mem != 42):
+				t.Errorf("MemFreePct = %v, %v; want the written value, since another field failed", mem, err)
+			}
+			containers, err := p.Containers(context.Background())
+			switch {
+			case tt.failing == hostProbeDocker && (err == nil || !strings.Contains(err.Error(), recorded)):
+				t.Errorf("Containers error = %v; want the recorded failure", err)
+			case tt.failing != hostProbeDocker && (err != nil || len(containers) != 1):
+				t.Errorf("Containers = %v, %v; want the written names, since another field failed", containers, err)
+			}
+		})
 	}
 }
 
