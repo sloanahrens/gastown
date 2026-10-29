@@ -106,7 +106,7 @@ func TestStatsPassesTheRigAndAnswersAnEmptyMapNotNull(t *testing.T) {
 	}
 	ts := adminServer(t, st)
 	code, body := adminCall(t, "GET", ts.URL+"/v1/stats?rig=gt", "", true)
-	if code != 200 || !strings.Contains(body, `"by_status":{}`) || !strings.Contains(body, `"total":0`) {
+	if code != 200 || !strings.Contains(body, `"by_status":{}`) || !strings.Contains(body, `"total":0`) || !strings.Contains(body, `"wisps":0`) {
 		t.Errorf("stats = %d %q, want 200 and an empty by_status object, not null", code, body)
 	}
 	adminCall(t, "GET", ts.URL+"/v1/stats", "", true)
@@ -206,7 +206,7 @@ func TestClientAdminAgreesWithTheRoutes(t *testing.T) {
 	vals := map[string]string{}
 	st := okAdmin()
 	st.stats = func(_ context.Context, rig string) (api.Stats, error) {
-		return api.Stats{Total: 3, ByStatus: map[string]int{"open": 2, "closed": 1}}, nil
+		return api.Stats{Total: 3, Wisps: 4, ByStatus: map[string]int{"open": 2, "closed": 1}}, nil
 	}
 	st.get = func(_ context.Context, k string) (string, bool, error) { v, ok := vals[k]; return v, ok, nil }
 	st.set = func(_ context.Context, k, v string) error { vals[k] = v; return nil }
@@ -227,7 +227,7 @@ func TestClientAdminAgreesWithTheRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if got, err := c.Stats(ctx, "gt"); err != nil || got.Total != 3 || got.ByStatus["closed"] != 1 {
+	if got, err := c.Stats(ctx, "gt"); err != nil || got.Total != 3 || got.Wisps != 4 || got.ByStatus["closed"] != 1 {
 		t.Errorf("Stats = %+v, %v", got, err)
 	}
 	if err := c.ConfigSet(ctx, "types.custom", "x"); !errors.Is(err, api.ErrForbidden) {

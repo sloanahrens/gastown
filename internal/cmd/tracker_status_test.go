@@ -161,10 +161,9 @@ type trackerFake struct {
 	noStatus bool
 	// level is the /readyz schema level; 0 means 4.
 	level int
-	// failStats and failList name a rig whose call answers 500, as a broken
-	// store would.
+	// failStats names a rig whose stats call answers 500, as a broken store
+	// would.
 	failStats string
-	failList  string
 }
 
 // fakeTrackerd is the set of routes the screen reads, answered as trackerd
@@ -179,10 +178,9 @@ func fakeTrackerd(t *testing.T, withMetrics bool) http.Handler {
 func fakeTrackerdWith(t *testing.T, f trackerFake) http.Handler {
 	t.Helper()
 	stats := map[string]api.Stats{
-		"gt": {Total: 120, ByStatus: map[string]int{"open": 18, "in_progress": 2, "closed": 100}},
-		"ag": {Total: 8, ByStatus: map[string]int{"open": 8}},
+		"gt": {Total: 120, Wisps: 45, ByStatus: map[string]int{"open": 18, "in_progress": 2, "closed": 100}},
+		"ag": {Total: 8, Wisps: 3, ByStatus: map[string]int{"open": 8}},
 	}
-	wisps := map[string]int{"gt": 45, "ag": 3}
 	ready, level := f.ready, f.level
 	if ready == "" {
 		ready = "ready"
@@ -213,20 +211,6 @@ func fakeTrackerdWith(t *testing.T, f trackerFake) http.Handler {
 			return
 		}
 		writeTestJSON(w, stats[rig])
-	})
-	mux.HandleFunc("POST /v1/issues:list", func(w http.ResponseWriter, r *http.Request) {
-		var filter api.ListFilter
-		if err := json.NewDecoder(r.Body).Decode(&filter); err != nil {
-			t.Errorf("decode list filter: %v", err)
-		}
-		if !filter.Ephemeral {
-			t.Errorf("list filter ephemeral = false, want the wisp listing")
-		}
-		if filter.Rig == f.failList {
-			http.Error(w, "the store is unavailable", http.StatusInternalServerError)
-			return
-		}
-		writeTestJSON(w, api.IssuePage{Issues: make([]api.Issue, wisps[filter.Rig])})
 	})
 	if f.metrics {
 		page := f.metricsPage
@@ -407,11 +391,6 @@ func (s *statusCtxSource) Stats(ctx context.Context, _ string) (api.Stats, error
 	return api.Stats{}, ctx.Err()
 }
 
-func (s *statusCtxSource) ListAll(ctx context.Context, _ api.ListFilter) ([]api.Issue, error) {
-	s.seen = append(s.seen, ctx)
-	return nil, ctx.Err()
-}
-
 func (s *statusCtxSource) Metrics(ctx context.Context) (string, error) {
 	s.seen = append(s.seen, ctx)
 	return "", ctx.Err()
@@ -567,21 +546,21 @@ func TestTrackerStatusNotReadyKeepsTheReasonToOneLine(t *testing.T) {
 	}
 }
 
-// One rig's count failing marks that count unavailable and still prints the
-// other, for that rig and for the rest.
-func TestTrackerStatusRigCountsDegradeOneAtATime(t *testing.T) {
+// One rig's stats failing marks both its counts unavailable and still prints
+// the other rig's counts.
+func TestTrackerStatusRigCountsDegradeOneRigAtATime(t *testing.T) {
 	t.Parallel()
-	env := statusTestEnv(inProcess(fakeTrackerdWith(t, trackerFake{metrics: true, failStats: "gt", failList: "ag"})))
+	env := statusTestEnv(inProcess(fakeTrackerdWith(t, trackerFake{metrics: true, failStats: "gt"})))
 	var out bytes.Buffer
 	if err := runTrackerStatus(t.Context(), env, &out, false); err != nil {
-		t.Fatalf("runTrackerStatus with two failed counts = %v, want the screen", err)
+		t.Fatalf("runTrackerStatus with one failed stats call = %v, want the screen", err)
 	}
 	text := out.String()
 	for _, want := range []string{
 		"issues unavailable: tracker answered 500", // gt's stats call failed, with its reason
-		"wisps 45",          // gt's wisp count still answered
-		"issues 8 (open 8)", // ag's stats call still answered
-		"wisps unavailable: tracker answered 500", // ag's wisp listing failed, with its reason
+		"wisps unavailable: tracker answered 500",  // and its wisp count came from the same call
+		"issues 8 (open 8)",                        // ag's stats call still answered
+		"wisps 3",                                  // so ag's wisp count did too
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("screen lacks %q:\n%s", want, text)

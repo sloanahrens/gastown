@@ -65,7 +65,6 @@ func init() {
 type trackerStatusSource interface {
 	Readyz(ctx context.Context) (client.ReadyzStatus, error)
 	Stats(ctx context.Context, rig string) (api.Stats, error)
-	ListAll(ctx context.Context, f api.ListFilter) ([]api.Issue, error)
 	Metrics(ctx context.Context) (string, error)
 }
 
@@ -119,7 +118,7 @@ type trackerStatus struct {
 
 // trackerRigStatus is one rig routed to the tracker. Issues counts durable
 // issues, closed ones included; Wisps counts the rig's wisps, which the stats
-// route leaves out.
+// route totals without breaking them out by status.
 type trackerRigStatus struct {
 	Rig               string         `json:"rig"`
 	Issues            *int           `json:"issues,omitempty"`
@@ -239,8 +238,9 @@ func withinStatus[T any](ctx context.Context, call func(ctx context.Context) (T,
 	return call(ctx)
 }
 
-// trackerRigCounts reads one rig's issue and wisp counts. A count that did not
-// answer is marked unavailable and the other count is still read.
+// trackerRigCounts reads one rig's issue and wisp counts from the stats route.
+// One failed read marks both unavailable, so the screen never shows one count
+// as unanswered and the other as zero.
 func trackerRigCounts(ctx context.Context, src trackerStatusSource, rig string) trackerRigStatus {
 	rs := trackerRigStatus{Rig: rig}
 	st, err := withinStatus(ctx, func(ctx context.Context) (api.Stats, error) {
@@ -248,23 +248,12 @@ func trackerRigCounts(ctx context.Context, src trackerStatusSource, rig string) 
 	})
 	if err != nil {
 		rs.IssuesUnavailable = unavailableReason(err)
-	} else {
-		n := st.Total
-		rs.Issues = &n
-		rs.ByStatus = st.ByStatus
+		rs.WispsUnavailable = rs.IssuesUnavailable
+		return rs
 	}
-	// The stats route counts durable issues and leaves wisps out, and no route
-	// counts them, so a rig's wisp count is the size of its listing: one call
-	// per page (gt-h1ldd).
-	wisps, err := withinStatus(ctx, func(ctx context.Context) ([]api.Issue, error) {
-		return src.ListAll(ctx, api.ListFilter{Rig: rig, Ephemeral: true, IncludeInfra: true})
-	})
-	if err != nil {
-		rs.WispsUnavailable = unavailableReason(err)
-	} else {
-		n := len(wisps)
-		rs.Wisps = &n
-	}
+	issues, wisps := st.Total, st.Wisps
+	rs.Issues, rs.Wisps = &issues, &wisps
+	rs.ByStatus = st.ByStatus
 	return rs
 }
 

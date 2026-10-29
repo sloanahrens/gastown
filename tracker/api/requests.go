@@ -239,9 +239,11 @@ type DispatchBoardResponse struct {
 	Errors map[string]string   `json:"errors"`
 }
 
-// Stats counts a rig's durable issues (wisps are not counted) by status.
+// Stats counts a rig's durable issues by status and its wisps as one total;
+// a wisp's status is not broken out, so Total and ByStatus stay durable only.
 type Stats struct {
 	Total    int            `json:"total"`
+	Wisps    int            `json:"wisps"`
 	ByStatus map[string]int `json:"by_status"`
 }
 
