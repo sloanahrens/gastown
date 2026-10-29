@@ -69,6 +69,19 @@ type State struct {
 	// the gastown source repo is available (see resolveOwnCommit). rebuild-gt
 	// reads it to tell whether the daemon is running the installed binary.
 	Commit string `json:"commit,omitempty"`
+
+	// Owner is what started this daemon (see DetectSelf). A state written by a
+	// binary older than gt-qpeei.12 has none, and its readers treat that as
+	// the legacy case.
+	Owner *Owner `json:"owner,omitempty"`
+}
+
+// Owner names what started the daemon: the container it runs in, the service
+// manager job, or the operator's hand-run process. ID is the container name,
+// the job label, the systemd invocation id, or "<hostname>:<pid>".
+type Owner struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
 }
 
 // StateFile returns the path to the state file.
