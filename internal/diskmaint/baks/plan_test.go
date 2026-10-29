@@ -22,13 +22,18 @@ func entry(dir, name string, age time.Duration) Entry {
 	return Entry{Path: dir + "/" + name, Name: name, ModTime: testNow.Add(-age), Size: 1024}
 }
 
-// copies is n backups of app.toml, copy i aged (i+1)*step.
-func copies(n int, step time.Duration) []Entry {
+// copiesIn is n backups of dir/stem, copy i aged (i+1)*step.
+func copiesIn(dir, stem string, n int, step time.Duration) []Entry {
 	out := make([]Entry, 0, n)
 	for i := range n {
-		out = append(out, entry(configDir, fmt.Sprintf("app.toml.bak-%02d", i), time.Duration(i+1)*step))
+		out = append(out, entry(dir, fmt.Sprintf("%s.bak-%02d", stem, i), time.Duration(i+1)*step))
 	}
 	return out
+}
+
+// copies is n backups of app.toml in configDir, copy i aged (i+1)*step.
+func copies(n int, step time.Duration) []Entry {
+	return copiesIn(configDir, "app.toml", n, step)
 }
 
 // removed is the Ref of every action, in plan order; nil when there are none.
@@ -57,6 +62,95 @@ func keptRule(p diskmaint.Plan, ref string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// A file's backups are grouped by the directory they live in as well as by
+// their name: the same name under two directories is two files, each with its
+// own keep count. Grouped on the name alone, one directory's old copies evict
+// another directory's newest, or only, copy.
+func TestGroupsArePerDirectoryAndName(t *testing.T) {
+	t.Parallel()
+	const (
+		dirA = "/town/settings"
+		dirB = "/town/rigs/fractals/settings"
+		dirC = "/town/rigs/devops/settings"
+	)
+	tests := map[string]struct {
+		in       Input
+		wantGone []string
+		wantKept map[string]string // ref -> the rule it must be kept under
+	}{
+		"an old copy in each of two directories is kept when a third holds 40 newer copies": {
+			in: Input{Config: append(
+				copiesIn(dirC, "config.json", 40, time.Hour),
+				entry(dirA, "config.json.bak-20261007", 22*24*time.Hour),
+				entry(dirB, "config.json.bak-20261021", 8*24*time.Hour),
+			)},
+			wantKept: map[string]string{
+				dirA + "/config.json.bak-20261007": "newest 30 of config.json",
+				dirB + "/config.json.bak-20261021": "newest 30 of config.json",
+			},
+		},
+		"within one directory the copies past the newest 30 and older than 7 days still go": {
+			in: Input{Config: copiesIn(dirA, "config.json", configKeep+5, 24*time.Hour)},
+			wantGone: []string{
+				dirA + "/config.json.bak-30",
+				dirA + "/config.json.bak-31",
+				dirA + "/config.json.bak-32",
+				dirA + "/config.json.bak-33",
+				dirA + "/config.json.bak-34",
+			},
+		},
+		"a full directory does not evict an old copy from another directory": {
+			in: Input{Config: append(
+				copiesIn(dirA, "config.json", configKeep, 24*time.Hour),
+				entry(dirB, "config.json.bak-old", 40*24*time.Hour),
+			)},
+			wantKept: map[string]string{dirB + "/config.json.bak-old": "newest 30 of config.json"},
+		},
+		"binary backups keep the newest 2 of each directory separately": {
+			in: Input{Binaries: []Entry{
+				entry(dirA, "bd.bak-a", 1*24*time.Hour),
+				entry(dirA, "bd.bak-b", 2*24*time.Hour),
+				entry(dirA, "bd.bak-c", 3*24*time.Hour),
+				entry(dirA, "bd.bak-d", 4*24*time.Hour),
+				entry(dirB, "bd.bak-w", 5*24*time.Hour),
+				entry(dirB, "bd.bak-x", 6*24*time.Hour),
+				entry(dirB, "bd.bak-y", 7*24*time.Hour),
+				entry(dirB, "bd.bak-z", 8*24*time.Hour),
+			}},
+			wantGone: []string{
+				dirB + "/bd.bak-y", dirB + "/bd.bak-z",
+				dirA + "/bd.bak-c", dirA + "/bd.bak-d",
+			},
+			wantKept: map[string]string{
+				dirA + "/bd.bak-a": "newest 2 of bd",
+				dirA + "/bd.bak-b": "newest 2 of bd",
+				dirB + "/bd.bak-w": "newest 2 of bd",
+				dirB + "/bd.bak-x": "newest 2 of bd",
+			},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			in := tc.in
+			in.Now = testNow
+			p := BuildPlan(in)
+
+			if got := removed(p); !reflect.DeepEqual(got, tc.wantGone) {
+				t.Fatalf("removed = %v, want %v", got, tc.wantGone)
+			}
+			for ref, wantRule := range tc.wantKept {
+				if rule, ok := keptRule(p, ref); !ok || rule != wantRule {
+					t.Fatalf("rule for %s = %q (kept %v), want %q", ref, rule, ok, wantRule)
+				}
+			}
+			if got := len(p.Kept) + len(p.Actions); got != len(in.Config)+len(in.Binaries) {
+				t.Fatalf("kept+removed = %d, want every file accounted for", got)
+			}
+		})
+	}
 }
 
 func TestConfigRemovesOnlyCopiesOutsideTheUnion(t *testing.T) {
