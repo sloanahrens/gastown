@@ -3248,6 +3248,31 @@ func TestSpecLintHelpNamesTheDaemonSection(t *testing.T) {
 	}
 }
 
+// TestSpecDispatchHelpNamesTheOverseerLabels: the dispatch help names each
+// overseer-first label the dispatcher skips, in every spelling it reads.
+func TestSpecDispatchHelpNamesTheOverseerLabels(t *testing.T) {
+	t.Parallel()
+	// Match whole words, so the plain needs-overseer is not satisfied by
+	// gt:needs-overseer.
+	words := make(map[string]bool)
+	punct := strings.NewReplacer(",", " ", ".", " ", "(", " ", ")", " ", ";", " ")
+	for _, w := range strings.Fields(punct.Replace(specDispatchCmd.Long)) {
+		words[w] = true
+	}
+	for _, want := range []string{
+		"overseer-only",
+		"operator-only",
+		"needs-overseer",
+		"gt:needs-overseer",
+		"needs-operator",
+		"gt:needs-operator",
+	} {
+		if !words[want] {
+			t.Errorf("gt spec dispatch help does not name the label %q:\n%s", want, specDispatchCmd.Long)
+		}
+	}
+}
+
 // childrenFailBD is a store whose child read fails.
 type childrenFailBD struct {
 	beads.Client

@@ -13,13 +13,15 @@ which automatic path reads which marker.
 | `deferred`, `pinned` | status |
 | `operator` | label |
 | a person's handle (`sloan`, `Sloan Ahrens`, `overseer`) | assignee |
-| `needs-pro`, `gt:needs-human` (or `needs-human`), `needs-split`, `human-only` | label |
+| `needs-pro`, `overseer-only`, `operator-only`, `gt:needs-overseer`, `gt:needs-operator`, `needs-split` | label |
 | `do not redispatch` | design or notes |
 
 The markers are machine-read, so write one exactly as listed. A label matches
-however it is typed (case-insensitive). A prose marker holds only where it is
-asserted — at the start of a line, past any `#`, `>`, `-`, `*`, `+` or backtick
-in front of it — with case, hyphens, underscores and spaces folded, so
+however it is typed (case-insensitive). The old `human-only`, `gt:needs-human`
+and `needs-human` labels still hold the same way until they are retired. A prose
+marker holds only where it is asserted — at the start of a line, past any `#`,
+`>`, `-`, `*`, `+` or backtick in front of it — with case, hyphens, underscores
+and spaces folded, so
 `- do not redispatch` and `do not re-dispatch` both hold while a note that only
 quotes the wording does not.
 

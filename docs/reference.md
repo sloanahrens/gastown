@@ -292,9 +292,10 @@ landing worker until the identity is fixed.
 
 **Re-queueing a rejected landing (gt-3e1z4).** A landing the worker refuses labels the
 bead `rework` (removing `gt:ready-to-land`) and appends a `MERGE REJECTION` note naming
-the head it refused. A bead the human-only label holds keeps its assignee: its branch
-comes from a person, so the refusal goes back to the crew that submitted it rather than
-onto the board (gt-me800). A bead a bird claimed — any assignee but a
+the head it refused. A bead the human-only label holds (the old name; it still
+holds until it is retired) keeps its assignee: its branch comes from a person,
+so the refusal goes back to the crew that submitted it rather than onto the
+board (gt-me800). A bead a bird claimed — any assignee but a
 `<rig>/polecats/<name>` seat — keeps its assignee and `in_progress` status, and the owner
 hears of the refusal from a `rejected:<bead>` attention item instead (gt-h4cvi). When the
 polecat's branch still sits on that head the
@@ -1130,8 +1131,9 @@ The rule acts on nothing else: it restarts, kills and unhooks no session.
 5 ticks each had a free seat in the roster, at least one dispatchable bead
 waiting and nothing dispatched. A bead counts as waiting when its skip reason is
 not one a free seat leaves unchanged: unshaped, not eligible (crew-only,
-needs-human), container, unknown formula, no seat of its class, rig hold, an
-unresolved blocker and the per-tick limit do not count; a content-overlap hold
+needs-human, overseer-only, operator-only, needs-overseer, needs-operator),
+container, unknown formula, no seat of its class, rig hold, an unresolved
+blocker and the per-tick limit do not count; a content-overlap hold
 on a P2 or lower bead (P0 and P1 skip that hold, gt-iydx1) or an already-hooked
 hold, a stale board read and a failed sling do. The summary names the three
 commonest skip reasons with their bead counts, so a standoff over one overlap
@@ -2037,9 +2039,11 @@ second pass inside the window asks nothing. A bead whose call got no reply
 The battery reads work beads only: type `task`, `bug` or `feature`. It never
 asks about rig, molecule, agent, role, epic or wisp beads, any other type
 (including the ones the beads package marks infrastructure), a crew seat's bead
-(an ID containing `-crew-<name>`), or a bead labeled `human-only`, `handoff`,
-`needs-human` or `gt:needs-human`. A rig whose beads cannot be read is skipped
-and counted in the daemon log.
+(an ID containing `-crew-<name>`), or a bead labeled `human-only`, `overseer-only`,
+`operator-only`, `handoff`, `needs-human`, `needs-overseer`, `needs-operator`,
+`gt:needs-human`, `gt:needs-overseer` or `gt:needs-operator` (`human-only` and
+`needs-human` still hold until they are retired). A rig whose beads cannot be
+read is skipped and counted in the daemon log.
 
 The battery is log-only: it never changes a bead's status, labels, priority or
 comments. The E-stop holds the patrol and stops a running pass between Jev calls;

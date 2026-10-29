@@ -1166,7 +1166,7 @@ type LandingWorkerConfig struct {
 	// OMTimeoutStr bounds the one om run (e.g. "5m"). Default 5m. om runs
 	// only after lint and tests pass and is never retried; work never lands
 	// unreviewed: a review with no verdict rejects the landing to
-	// gt:needs-human and escalates (gt-b5ugw), except a red-main revert.
+	// gt:needs-overseer and escalates (gt-b5ugw), except a red-main revert.
 	OMTimeoutStr string `json:"om_timeout,omitempty"`
 
 	// LintTimeoutStr is no longer read: it bounded the lint stage of the local

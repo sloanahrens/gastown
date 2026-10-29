@@ -154,7 +154,7 @@ Every landing outcome belongs to one class, and the class decides who acts:
 |-------|---------|------------|--------------|
 | Work | the change caused a red | reworks the bead to the polecat with the failure excerpt | nothing |
 | Infrastructure | the runner, Forgejo, Docker or the network failed | retries with backoff, and escalates to a human after three in a row | fix the machinery; watch the alert |
-| Policy | `om` rejected, a forged status, a refused merge | escalates to a human with the `gt:needs-human` label | decide |
+| Policy | `om` rejected, a forged status, a refused merge | escalates to the overseer with the `gt:needs-overseer` label (the old `gt:needs-human` label still holds until it is retired) | decide |
 | Operator | cutover, config, mirror or image | nothing automatic | run the procedure on this page |
 
 The failures seen on the live rigs so far, each closed or ticketed:
