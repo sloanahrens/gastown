@@ -245,6 +245,16 @@ type Daemon struct {
 	// alerts a disk once, and a clear needs a reading that says so.
 	diskMaintAlerts diskMaintAlerts
 
+	// hmSync replaces the hm_sync patrol's clock and run seam in tests (see
+	// hmSyncSeams); the zero value is production.
+	hmSync hmSyncSeams
+	// hmSyncRunning is that patrol's single-flight guard.
+	hmSyncRunning atomic.Bool
+	// hmSyncLastRun is when it last finished a sync, as UnixNano: the pass runs
+	// off the loop goroutine, so the marker it writes is atomic and the loop
+	// only reads it.
+	hmSyncLastRun atomic.Int64
+
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup
 	// instead of each paying a bd subprocess - which, on a CPU-starved host,
@@ -1553,6 +1563,20 @@ func (d *Daemon) Run() (err error) {
 			diskMaintCheckInterval, diskMaintenanceWindow(d.patrolConfig), diskMaintenanceModeOrDefault(d.patrolConfig))
 	}
 
+	// Start the hm_sync ticker if configured. It runs the town's `hm sync`
+	// once per interval, so history-man's index no longer depends on someone
+	// running it by hand (hm_sync.go, gt-z6qre.15).
+	var hmSyncTicker *time.Ticker
+	var hmSyncChan <-chan time.Time
+	if d.isPatrolActive("hm_sync") {
+		interval := hmSyncInterval(d.patrolConfig)
+		hmSyncTicker = time.NewTicker(shortPatrolCheckTick(interval))
+		hmSyncChan = hmSyncTicker.C
+		defer hmSyncTicker.Stop()
+		d.logger.Printf("HM sync ticker started (check every %v, run interval %v)",
+			shortPatrolCheckTick(interval), interval)
+	}
+
 	// Start the scheduled_slings ticker if configured. Each tick evaluates
 	// every entry; the decision function decides due-ness, so a coarse tick
 	// is enough (gt-nj23).
@@ -1741,6 +1765,13 @@ func (d *Daemon) Run() (err error) {
 			// town's registry and applies the plan only in apply mode.
 			if !d.isShutdownInProgress() {
 				d.runDiskMaintenance()
+			}
+
+		case <-hmSyncChan:
+			// HM sync — runs the configured sync once per interval, off the
+			// loop goroutine.
+			if !d.isShutdownInProgress() {
+				d.runHMSync()
 			}
 
 		case <-scheduledSlingsChan:

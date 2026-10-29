@@ -156,6 +156,7 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			JsonlGitBackup:       &JsonlGitBackupConfig{Enabled: false},
 			ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: false, Window: "05:30"},
 			DiskMaintenance:      &DiskMaintenanceConfig{Enabled: false, Window: "06:15"},
+			HMSync:               &HMSyncConfig{Enabled: false, Interval: "1h"},
 			Handler:              &PatrolConfig{Enabled: false},
 		},
 	}
@@ -408,7 +409,7 @@ func TestMissingLifecyclePatrols_MatchesWhatEnsureFills(t *testing.T) {
 		{
 			name:    "empty section",
 			patrols: func() *PatrolsConfig { return &PatrolsConfig{} },
-			want:    []string{"wisp_reaper", "compactor_dog", "checkpoint_dog", "doctor_dog", "jsonl_git_backup", "scheduled_maintenance", "disk_maintenance", "handler"},
+			want:    []string{"wisp_reaper", "compactor_dog", "checkpoint_dog", "doctor_dog", "jsonl_git_backup", "scheduled_maintenance", "disk_maintenance", "hm_sync", "handler"},
 			changed: true,
 		},
 		{
@@ -419,7 +420,7 @@ func TestMissingLifecyclePatrols_MatchesWhatEnsureFills(t *testing.T) {
 					Handler:       &PatrolConfig{Enabled: false},
 				}
 			},
-			want:    []string{"wisp_reaper", "compactor_dog", "doctor_dog", "jsonl_git_backup", "scheduled_maintenance", "disk_maintenance"},
+			want:    []string{"wisp_reaper", "compactor_dog", "doctor_dog", "jsonl_git_backup", "scheduled_maintenance", "disk_maintenance", "hm_sync"},
 			changed: true,
 			kept: func(t *testing.T, p *PatrolsConfig) {
 				t.Helper()

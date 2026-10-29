@@ -136,6 +136,7 @@ type (
 	OverrunGuardConfig         = agentconfig.OverrunGuardConfig
 	ScheduledMaintenanceConfig = agentconfig.ScheduledMaintenanceConfig
 	DiskMaintenanceConfig      = agentconfig.DiskMaintenanceConfig
+	HMSyncConfig               = agentconfig.HMSyncConfig
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
 	OverseerReportConfig       = agentconfig.OverseerReportConfig
 	PatrolScanConfig           = agentconfig.PatrolScanConfig
@@ -276,6 +277,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.DiskMaintenance.Enabled
+	}
+	// hm_sync is opt-in: it runs a program on a timer, so only an explicit
+	// enabled:true turns it on (gt-z6qre.15).
+	if patrol == "hm_sync" {
+		if config == nil || config.Patrols == nil || config.Patrols.HMSync == nil {
+			return false
+		}
+		return config.Patrols.HMSync.Enabled
 	}
 	// landing_worker is opt-in: it pushes main, so only an explicit
 	// enabled:true turns it on (gt-v4ssj.2).
