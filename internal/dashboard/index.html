@@ -50,7 +50,7 @@ td.n,th.n{text-align:right}
 .body.stale,#cost .spendpart.stale{opacity:.55}
 .spark{width:100%;height:56px;display:block}
 .chart{width:100%;height:64px;display:block}
-.dchart{width:100%;height:auto;display:block;margin:4px 0 2px}.dchart .bar{fill:var(--blue)}.dchart .axis{stroke:var(--line)}.dchart .limit{stroke:var(--amber);stroke-width:1.5;stroke-dasharray:4 3}.dchart text{fill:var(--dim);font-size:11px}.dchart .amt{fill:var(--text)}.dchart .limitlbl{fill:var(--amber)}.dchart .gap{stroke:var(--dim);stroke-width:1;stroke-dasharray:2 2}
+.dchart{width:100%;height:auto;display:block;margin:4px 0 2px}.dchart .bar{fill:var(--blue)}.dchart .axis{stroke:var(--line)}.dchart .limit{stroke:var(--amber);stroke-width:1.5;stroke-dasharray:4 3}.dchart text{fill:var(--dim);font-size:11px}.dchart .amt{fill:var(--text)}.dchart .gap{stroke:var(--dim);stroke-width:1;stroke-dasharray:2 2}
 .dchart .cbar{fill:var(--violet)}.dchart .cgap{opacity:.35}.dchart .hatch{stroke:var(--violet);stroke-width:1}
 .hbars{display:flex;align-items:stretch;gap:2px;height:64px;margin:4px 0 2px}
 .hbar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;min-height:1px}
@@ -178,6 +178,8 @@ section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-
 .ltable td:nth-child(2){overflow-wrap:anywhere}
 .lrows{max-height:70vh;overflow:auto}
 .lrows th{position:sticky;top:0;background:var(--panel)}
+.costchip{border:1px solid currentColor;border-radius:999px;padding:0 7px;font-size:11px;white-space:nowrap;color:var(--dim)}
+.costprov tr.dimrow td{color:var(--dim)}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
 /* The JEV panel's chips. A chip is inline-block, so a battery's questions wrap
    inside their cell; the battery name is nowrap, so a name never splits. */
@@ -2510,123 +2512,54 @@ function renderForgejo(s) {
   if (follow) box.scrollTop = box.scrollHeight;
 }
 
-// The DeepSeek lines of the Cost panel, drawn into box from the spend report d
-// and the status r of the read that brought it. The headline row carries the
-// Claude plan-equivalent dollars beside them from h, the server's CostHeadline.
-// Returns the report's own words for the panel's caption: the ledger's last
-// sample and the read's age.
-function costSpend(box, d, r, h) {
-  // No spend command is configured at all — no reader, so no status either —
-  // which is not the same as one that failed or has not answered yet (gt-q6h8e).
-  if (!d) {
-    box.append(el("div", "empty", r ? "unavailable — the spend read failed" : "no spend report"));
-    // The Claude dollars are not the spend report's, so they draw alone when it
-    // is missing rather than vanishing with the DeepSeek figures (gt-iazpv).
-    costClaudeRow(box, h);
-    return [];
+// A status with no entry here draws the chip in the dim colour.
+const COST_STATUS_CLASS = {ok: "good", warn: "warnc", bad: "badc"};
+// costProviders draws one row per provider, all with the same columns, so a
+// provider the server adds needs no change here. A provider that could not be
+// read keeps its row, dim, since dropping it would read as no provider at all.
+function costProviders(box, list) {
+  if (!Array.isArray(list) || !list.length) return;
+  const rows = list.filter(p => p && typeof p === "object");
+  const t = el("table", "costprov");
+  const head = el("tr");
+  // The figure columns read right-aligned, so the dollars line up down the table.
+  const columns = [["Provider"], ["Kind"], ["Balance or plan", "n"], ["Today", "n"], ["Yesterday", "n"], ["7-day avg", "n"], ["Last 1h ($/h)", "n"], ["Last 24h ($/h)", "n"], ["Status"]];
+  for (const [h, cls] of columns) head.append(el("th", cls || "", h));
+  t.append(head);
+  for (const p of rows) {
+    const tr = el("tr", p.why ? "dimrow" : "");
+    if (p.detail && p.detail.length) tr.title = p.detail.join(" · ");
+    const cell = (text, cls) => tr.append(el("td", cls || "", text));
+    cell(p.label || p.id || "–");
+    cell(p.kind || "–");
+    cell(p.kind === "plan" ? (p.plan_pct == null ? "–" : Math.round(p.plan_pct) + "% of week") : money(p.balance), "n");
+    cell(money(p.today), "n");
+    cell(money(p.yesterday), "n");
+    cell(money(p.avg_7d), "n");
+    cell(money(p.per_hour_1h), "n");
+    cell(money(p.per_hour_24h), "n");
+    const status = el("td");
+    if (p.why) status.append(el("span", "title", p.why));
+    else if (p.status_text) status.append(el("span", ["costchip", COST_STATUS_CLASS[p.status]].filter(Boolean).join(" "), p.status_text));
+    else status.textContent = "–";
+    tr.append(status);
+    t.append(tr);
   }
-  const live = d.live || {};
-  const kv = el("div", "kv costheadline");
-  const add = (v, k, cls) => { const x = el("div"); x.append(el("b", cls || "", v), el("span", "", k)); kv.append(x); };
-  add(money(d.balance), "DeepSeek balance", live.available === false ? "badc" : "");
-  // Spent is the sum of the sampled drops from ledger_since; only a report with
-  // no ledger total falls back to spent_total.
-  if (d.spent_ledger != null) {
-    const since = /^\d{4}-\d{2}-\d{2}/.exec(String(d.ledger_since || ""));
-    add(money(d.spent_ledger), "DeepSeek spent (sampled" + (since ? " since " + since[0] : "") + ")");
-  } else add(money(d.spent_total), "DeepSeek spent since top-up");
-  add(d.pace_1h ? money(d.pace_1h.per_hour) + "/h" : "–", "DeepSeek last 1h");
-  add(d.pace_24h ? money(d.pace_24h.per_hour) + "/h" : "–", "DeepSeek last 24h");
-  const rw = d.runway_days_at_24h_pace;
-  add(rw == null ? "–" : rw.toFixed(1) + "d", "DeepSeek runway", rw != null && rw < 3 ? "badc" : rw != null && rw < 7 ? "warnc" : "");
-  costClaudeHeadline(kv, h);
-  box.append(kv);
-  // Cash and credit under the balance, both DeepSeek's, how long the credit
-  // alone covers the 24h rate on the same line: granted credit is not money paid
-  // in, and the two are read together or not at all. Both fields are needed; a
-  // report without them gets no line.
-  if (d.cash != null && d.credit != null) {
-    const cr = d.credit_runway_days_at_24h_pace;
-    const left = d.credit > 0 && cr != null ? "credit lasts ~" + cr.toFixed(1) + "d, then cash" : null;
-    box.append(el("div", "title", "DeepSeek " + money(d.cash) + " cash + " + money(d.credit) + " credit" + (left ? " · " + left : "")));
-  }
-  // One dim line of the recent days instead of a table, to keep the panel short:
-  // today and yesterday beside the mean of the complete days behind them, which
-  // is the rate the panel is read for rather than one heavy day. A negative day
-  // is a balance rise; the credits line below says of what kind. The report's
-  // per_day is unordered, so the days are sorted before today is read off the
-  // last of them.
-  const history = Object.entries(d.per_day || {}).sort((a, b) => (a[0] < b[0] ? -1 : 1));
-  if (history.length) {
-    const dayText = v => v.spent < 0 ? "+" + money(-v.spent) + " added" : money(v.spent);
-    const fig = v => (v && v.spent != null) ? dayText(v) : "–";
-    // The mean is a spend rate, so a day with no figure is left out rather than
-    // counted as zero, and a day the balance rose on is left out rather than
-    // counted negative: a top-up says what was added, not what the day cost,
-    // and averaging it in reports a rate nobody spent (gt-3ux9j).
-    const complete = history.slice(0, -1).filter(([, v]) => v && v.spent != null && v.spent >= 0).slice(-7);
-    const mean = complete.length ? complete.reduce((sum, [, v]) => sum + v.spent, 0) / complete.length : null;
-    // A history shorter than a week says how many days the mean covers. With no
-    // spend day behind today there is no rate to show, and the clause goes
-    // rather than reading as "–/day", which a reader takes for a report that
-    // failed to send a figure.
-    const line = el("div", "title", "today " + fig(history[history.length - 1][1]) +
-      " · yesterday " + fig(history.length > 1 ? history[history.length - 2][1] : null) +
-      (mean == null ? "" : " · 7-day avg " + money(mean) + "/day" +
-        (complete.length < 7 ? " (" + complete.length + (complete.length === 1 ? " day" : " days") + ")" : "")));
-    line.title = history.slice().reverse().map(([day, v]) => day.slice(5) + " " + fig(v)).join(" · ");
-    box.append(line);
-  }
-  // The last balance rises, each with what the report made of it: the two newest
-  // on the line, the older ones in its hover, since the line is read for the
-  // recent grants and the ledger only grows.
-  const creditText = c => {
-    const kind = { "credit": " credit", "top-up": " top-up", "credit+top-up": " credit + top-up" }[c.kind];
-    return String(c.at || "").slice(5, 16).replace("T", " ") + " +" + money(c.amount) + (kind || " added");
-  };
-  const credits = Array.isArray(d.credits) ? d.credits.slice().reverse() : [];
-  if (credits.length) {
-    const rises = credits.map(creditText);
-    const line = el("div", "title", rises.slice(0, 2).join(" · "));
-    if (rises.length > 2) line.title = "older rises · " + rises.slice(2).join(" · ");
-    box.append(line);
-  }
-  const alerts = d.alerts || [];
-  if (live.ok === false) box.append(el("div", "badc", "live balance unreachable; showing the ledger"));
-  if (d.watcher_pid == null || d.watcher_pid === "") box.append(el("div", "badc", "spend watcher is not running"));
-  return [d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null];
+  box.append(t);
+  for (const p of rows) for (const w of p.warnings || []) box.append(el("div", "badc", (p.label || p.id) + " · " + w));
 }
-
-// costClaudeRow draws the Claude headline as a row of its own, for a panel with
-// no DeepSeek figures to put it beside; a server that sent no headline draws
-// nothing.
-function costClaudeRow(box, h) {
-  if (!h) return;
-  const kv = el("div", "kv costheadline");
-  costClaudeHeadline(kv, h);
-  box.append(kv);
-}
-
-// costClaudeHeadline draws the Claude plan-equivalent dollars into kv, the
-// headline row beside the DeepSeek figures: today's spend and the last 24
-// hours' hourly rate, priced by the server from the same samples the charts
-// draw. A series the server could not build is said on the tile, never drawn as
-// a zero that reads as a plan nobody used (gt-iazpv).
-function costClaudeHeadline(kv, h) {
-  const name = (h && h.name) || "Claude, plan-equivalent estimate";
-  const tile = el("div");
-  if (!h || h.why) {
-    tile.append(el("b", "empty", "not available"), el("span", "", name + " — " + ((h && h.why) || "the series has not been read yet")));
-    kv.append(tile);
-    return;
-  }
-  const parts = [
-    h.today != null ? "~" + money(h.today) + " today" : "– today",
-    h.per_hour_24h != null ? "~" + money(h.per_hour_24h) + "/h last 24h" : "– last 24h",
-  ];
-  const read = h.hours_read > 0 && h.hours_read < h.window_hours ? " · " + h.hours_read + " of " + h.window_hours + " hours read" : "";
-  tile.append(el("b", "", parts.join(" · ")), el("span", "", name + read));
-  kv.append(tile);
+// costHeadline is the Cost section's closed line. It is built from the same
+// array as the table, so the summary cannot name a provider the table does not draw.
+function costHeadline(list) {
+  if (!Array.isArray(list) || !list.length) return null;
+  const parts = list.filter(p => p && typeof p === "object").map(p => {
+    if (p.why) return (p.label || p.id) + " unavailable";
+    const figure = p.kind === "plan"
+      ? (p.plan_pct == null ? null : Math.round(p.plan_pct) + "% of week")
+      : (p.balance != null ? money(p.balance) : (p.today != null ? money(p.today) + " today" : null));
+    return [p.label || p.id, figure, p.status_text].filter(Boolean).join(" ");
+  });
+  return parts.length ? parts.join(" · ") : null;
 }
 
 function sec(v) { return v == null ? "–" : fmtDur(v); }
@@ -3464,166 +3397,6 @@ function costGCP(box, c) {
   if (!rows.length && late) box.append(el("div", "warnc", "GCP budget · patrol overdue, no alert on its last report"));
 }
 
-// The Claude plan line of the Cost panel, drawn directly under the DeepSeek part
-// so the two spend meters are read side by side, both paces an hour's worth and
-// a day's, as the DeepSeek line's own pace is hourly (gt-d2sy4). A week its
-// reader could not place is never drawn as 0%, which would say the limit is
-// untouched (gt-qn3j4).
-//
-// The series carries limits and a price, not a plan's name, so the line names
-// what it has and not a subscription.
-
-// CLAUDE_PLAN_CEILING_PCT mirrors the reader's ClaudePlanCeilingPct; a test
-// pins the two together.
-const CLAUDE_PLAN_CEILING_PCT = 90;
-
-// planReset is a rollover as the operator reads it, off the page's own weekday
-// table: a browser's locale short name is not what a page test can read back.
-const WEEKDAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const planReset = secs => {
-  if (secs == null) return "–";
-  const d = new Date(secs * 1000);
-  return WEEKDAY[d.getDay()] + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
-};
-
-// planDay is a billing month's bound as day and month name, off the same table.
-const MONTH = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const planDay = secs => {
-  if (secs == null) return "–";
-  const d = new Date(secs * 1000);
-  return d.getDate() + " " + MONTH[d.getMonth()];
-};
-
-// planPct reads a percentage of a limit whole, as the status line samples it: a
-// tenth of a percent of a week is not a decision. planPace keeps its tenth, since
-// it is the number that says how fast the week is going. A number the reader did
-// not send is a dash, as money draws a dollar it was not sent.
-const planPct = v => v == null ? "–" : Math.round(v) + "%";
-const planPace = v => v == null ? "–" : (v > 0 ? "+" : "") + Number(v).toFixed(1) + "%/day";
-
-// planHourly is the pace over an hour rather than a day, with the hour's plan
-// value beside it, the tilde marking an estimate of plan value and not a bill. A
-// pace that rounds to no points an hour draws a dash rather than a zero, which
-// would say the limit is untouched (gt-d2sy4).
-const planHourly = (perDay, weeklyValue, window) => {
-  const pct = perDay == null ? NaN : Number(perDay) / 24;
-  if (!(Math.abs(pct) >= 0.005)) return "– " + window;
-  const worth = weeklyValue == null ? "" : " (~" + money(pct / 100 * weeklyValue) + "/h)";
-  return (pct > 0 ? "+" : "") + pct.toFixed(2) + "%/h" + worth + " " + window;
-};
-
-// planPrice is the plan's monthly price, not a bill: the line reads "$200/mo"
-// whole, since cents on a monthly price are noise.
-const planPrice = usd => usd == null ? "–" : "$" + Math.round(usd) + "/mo";
-
-// planClass is the line's colour: a week at the ceiling the month rollup counts,
-// or projected past the limit, is bad; past the ceiling it warns.
-function planClass(c) {
-  if (c.weekly_pct >= CLAUDE_PLAN_CEILING_PCT || c.projected_pct_at_reset > 100) return "badc";
-  return c.projected_pct_at_reset > CLAUDE_PLAN_CEILING_PCT ? "warnc" : "";
-}
-
-// planUnread is why the line carries no week: each unreadable state as itself.
-function planUnread(c) {
-  if (c.unavailable) return "the status line's samples could not be read";
-  if (!c.sampled_at) return "the status line has written no samples yet";
-  if (c.weekly_resets_at && c.weekly_resets_at * 1000 <= Date.now()) return "the week the newest sample measures has already reset";
-  return "the newest sample is " + fmtDur((Date.now() - c.sampled_at * 1000) / 1000) + " old";
-}
-
-// planAPIEquivalent is the hover's words for what the town's Claude tokens would
-// have cost on the API at the price table's list rates, which is approximate —
-// the prices move, and a plan weights tokens differently from the meter — so the
-// hover says so rather than reading as a bill. A payload with unpriced models is
-// a floor that names what it could not price.
-function planAPIEquivalent(c) {
-  if (c.api_equivalent_week_usd == null || c.api_equivalent_month_usd == null) return null;
-  return "API-equivalent " + money(c.api_equivalent_week_usd) + " this week, " + money(c.api_equivalent_month_usd) + " this month, approximate: plans weight tokens differently from the API" +
-    (c.unpriced && c.unpriced.length ? " · counted at zero, no list price: " + c.unpriced.join(", ") : "");
-}
-
-// planMonthSuffix is the month's clause on the line. A month with no counted
-// weeks draws none, not 0%.
-function planMonthSuffix(c) {
-  if (!(c.month_weeks > 0)) return null;
-  const words = ["month " + planPct(c.month_utilization_pct) + " of plan"];
-  if (c.weeks_at_ceiling > 0) words.push(c.weeks_at_ceiling === 1 ? "1 week at ceiling" : c.weeks_at_ceiling + " weeks at ceiling");
-  return words.join(" · ");
-}
-
-// planMonthHover is the month's part of the hover, which the line has no room for.
-function planMonthHover(c) {
-  if (!(c.month_weeks > 0)) return [];
-  const out = [
-    "billing month " + planDay(c.month_start_at) + " to " + planDay(c.month_end_at) + ", the plan's renewal day to the next",
-    "about " + money(c.month_value_used_usd) + " of the " + money(c.plan_usd_month) + " plan, approximate",
-    "mean week " + planPct(c.avg_weekly_pct) + " over " + c.month_weeks + (c.month_weeks === 1 ? " week" : " weeks"),
-  ];
-  if (c.month_open_week) out.push("the week in progress counts at its latest reading");
-  if (c.prev_month_utilization_pct != null) out.push("month before " + planPct(c.prev_month_utilization_pct) + " of plan");
-  return out;
-}
-
-// costClaudePlan draws the line into box. No block at all is the reader's first
-// poll not answered yet — the start-up silence the GCP line keeps too — and
-// every answer after it is a week or a named failure.
-function costClaudePlan(box, c) {
-  if (!c) return;
-  if (c.unavailable || c.stale) { box.append(el("div", "empty", "Claude plan · unavailable — " + planUnread(c))); return; }
-  const line = el("div", planClass(c), [
-    "Claude plan",
-    planPrice(c.plan_usd_month),
-    planPct(c.weekly_pct) + " of this week's limit",
-    c.weekly_resets_at ? "resets " + planReset(c.weekly_resets_at) : "no reset instant in the newest sample",
-    // The two windows' paces as an hour's worth, beside the DeepSeek line's own
-    // hourly pair, which is how the two meters are read against each other.
-    planHourly(c.pace_per_day_1h, c.weekly_value_usd, "last 1h"),
-    planHourly(c.pace_per_day_24h, c.weekly_value_usd, "last 24h"),
-    "projected " + planPct(c.projected_pct_at_reset) + " at reset",
-    // A week already at its limit is reached at no pace, so the reader sends 0
-    // for it rather than a day count.
-    c.hits_limit_in_days == null ? null : c.hits_limit_in_days > 0 ? "limit in " + c.hits_limit_in_days.toFixed(1) + "d" : "at the limit",
-    planMonthSuffix(c),
-  ].filter(Boolean).join(" · "));
-  // The dollars are the plan's share of the month rather than a bill, so they
-  // are labelled approximate.
-  line.title = [
-    "5-hour limit " + planPct(c.five_hour_pct) + " used" + (c.five_hour_resets_at ? ", resets " + planReset(c.five_hour_resets_at) : ", no reset instant in the newest sample"),
-    "1-hour pace " + planPace(c.pace_per_day_1h),
-    "about " + money(c.used_value_usd) + " of this week's " + money(c.weekly_value_usd) + ", approximate (the plan's share of the month, not a bill)",
-    // The hourly figures' dollars are the plan's value and the line's colour is
-    // the projection's, neither of which the line has room to say (gt-d2sy4).
-    c.weekly_value_usd == null ? null : "the dollars beside each hourly pace are plan value at " + money(c.weekly_value_usd / 100) + " a point of the week, approximate and not a bill",
-    "the colour comes from the projection: " + planPct(c.projected_pct_at_reset) + " at reset, past the limit bad, past " + CLAUDE_PLAN_CEILING_PCT + "% a warning, as a week already at " + CLAUDE_PLAN_CEILING_PCT + "% of the limit is",
-    planAPIEquivalent(c),
-    c.sampled_at ? "newest sample " + fmtDur((Date.now() - c.sampled_at * 1000) / 1000) + " ago" : null,
-    c.state_error ? "state not kept: " + c.state_error : null,
-  ].filter(Boolean).concat(planMonthHover(c)).join(" · ");
-  box.append(line);
-}
-
-// The Jev row of the Cost panel. A failed or stale read says unavailable rather
-// than drawing a window of no spend, since zero would read as a quiet town; the
-// last good figures stay on the line, dimmed, and no other row is blanked.
-// Neither a report nor a status means no Jev command is configured, or it has
-// not answered yet, so nothing is drawn.
-function costJev(box, j, r) {
-  if (!j && !r) return;
-  if (!j) { box.append(el("div", "empty", "Jev spend · unavailable — the read failed")); return; }
-  const figures = [
-    j.calls + (j.calls === 1 ? " call" : " calls") + (j.window ? " in " + j.window : ""),
-    money(j.usd),
-    j.top_caller ? "top caller " + j.top_caller + " (" + j.top_caller_calls + (j.top_caller_calls === 1 ? " call, " : " calls, ") + money(j.top_caller_usd) + ")" : null,
-  ].filter(Boolean);
-  if (r && r.stale) {
-    const why = r.error ? "the read failed" : "the read went stale";
-    const line = el("div", "empty", "Jev spend · unavailable — " + why + (r.ageSec != null ? " · last good " + fmtDur(r.ageSec) + " ago: " : " · last good: ") + figures.join(" · "));
-    box.append(line);
-    return;
-  }
-  box.append(el("div", "", ["Jev spend"].concat(figures).join(" · ")));
-}
-
 // The JEV panel, under the Tier sweeps and folded until opened. The title line
 // carries the totals, the scorecard window with the read's age, and a chip per
 // verdict; each battery is a table row, its not-yet questions folded behind
@@ -4088,7 +3861,7 @@ function mangoUnchecked(t, stale) {
 // them on the same buckets, an optional limit line, and the aria-label that
 // carries the numbers. The page only places what it is given; it decides no
 // value, label or line of its own.
-function costBarChart(box, c, kind) {
+function costBarChart(box, c, kind, providers) {
   if (!c || !Array.isArray(c.bars) || !c.bars.length) return;
   const daily = kind === "daily";
   // The Claude series is drawn only when it lines up bucket for bucket; a series
@@ -4136,16 +3909,17 @@ function costBarChart(box, c, kind) {
       svg.append(lbl);
     }
   });
-  if (c.limit) {
-    svg.append(svgEl("line", {x1: pad, x2: W - pad, y1: y(c.limit.value), y2: y(c.limit.value), class: "limit"}));
-    const lt = svgEl("text", {x: W - pad, y: y(c.limit.value) - 4, class: "limitlbl", "text-anchor": "end"});
-    lt.textContent = c.limit.label;
-    svg.append(lt);
-  }
+  // The limit is a dashed line only. Its words are a caption under the legend,
+  // not text over the bars, which the bars would overprint (gt-p39fq).
+  if (c.limit) svg.append(svgEl("line", {x1: pad, x2: W - pad, y1: y(c.limit.value), y2: y(c.limit.value), class: "limit"}));
   box.append(svg);
-  // The legend names both series, since the colour is the only thing that tells
-  // them apart, and the Claude entry says in full what its dollars are.
-  if (cl) box.append(legend([["var(--blue)", "DeepSeek"], ["var(--violet)", cl.name]]));
+  // The legend names each series the chart draws, since the colour is the only
+  // thing that tells them apart; the Claude entry says in full what its dollars
+  // are. The series are drawn by the providers that own them, so the legend
+  // follows the providers array rather than a fixed pair.
+  const lg = costLegend(providers, {deepseek: true, claude: cl ? cl.name || true : null});
+  if (lg) box.append(lg);
+  if (c.limit) box.append(el("div", "title", "dashed line: " + c.limit.label));
   // A chart with no Claude series says why on the panel, so an absent series is
   // not read as a week of no plan spend.
   if (!cl && claudeWhy) box.append(el("div", "title", "Claude series not drawn — " + claudeWhy));
@@ -4173,15 +3947,52 @@ function costClaudeBar(svg, b, x, w, base, y, kind) {
   svg.append(r);
 }
 
-function costDailyChart(box, c) { costBarChart(box, c, "daily"); }
-function costHourlyChart(box, c) { costBarChart(box, c, "hourly"); }
+// COST_SERIES_COLOURS are the chart series' colours by a provider's place in the
+// providers array: DeepSeek's blue and Claude's violet, then a fixed palette for
+// a provider added after them.
+const COST_SERIES_COLOURS = ["var(--blue)", "var(--violet)", "var(--amber)", "var(--green)", "var(--red)"];
+// costLegend lists the series a chart draws, one entry per provider that has
+// one, in the providers' order. drawn maps a provider's id to the name its
+// series carries: true takes the provider's own label, a string is the series'
+// own name. A provider with no series in the chart has no entry, and no entry
+// means no legend at all.
+function costLegend(providers, drawn) {
+  const items = [];
+  (Array.isArray(providers) ? providers : []).forEach((p, i) => {
+    if (!p || !drawn[p.id]) return;
+    const name = typeof drawn[p.id] === "string" ? drawn[p.id] : p.label;
+    items.push([COST_SERIES_COLOURS[i % COST_SERIES_COLOURS.length], name]);
+  });
+  return items.length ? legend(items) : null;
+}
+// costChartFolds keeps each chart's fold by its key. A fold is a section of its
+// own that foldable folds like every other section, and it is built once: the
+// fold keeps one entry per section, so a redraw that built a new section would
+// stack a second fold on the same key.
+const costChartFolds = {};
+// costChartFold draws a Cost chart into box as a fold under its own heading. The
+// daily chart starts open and the hourly one closed, unless the reader has
+// chosen otherwise. A chart the server did not build leaves no fold at all.
+function costChartFold(box, kind, chart, providers) {
+  if (!chart || !Array.isArray(chart.bars) || !chart.bars.length) return;
+  const key = "cost." + kind;
+  let f = costChartFolds[key];
+  if (!f) {
+    const sec = el("section");
+    sec.dataset.fold = key;
+    const body = el("div", "body");
+    sec.append(el("h2", "", kind === "daily" ? "Daily spend" : "Hourly spend"), body);
+    foldable(sec, {key: key, defaultOpen: kind === "daily"});
+    f = costChartFolds[key] = {sec: sec, body: body};
+  }
+  f.body.replaceChildren();
+  costBarChart(f.body, chart, kind, providers);
+  box.append(f.sec);
+}
 
-// The Cost panel: what the town is spending, in one place. DeepSeek's balance,
-// pace and credit, the Claude plan line and the Jev row under them, the usage
-// scan's estimate and slow runs, the GCP budget alert, and what each om review
-// bar costs in rework. The panel greys with the spend read it is mostly drawn
-// from; a part whose own read has not answered says so on its own line. With
-// neither a spend report nor usage records there is one line and nothing else.
+// renderCost draws the Cost panel. The table draws even without a spend report,
+// since its rows come from the other readers too, and the panel greys with the
+// spend read the table and charts are drawn from.
 function renderCost(s) {
   const box = $("cost"), note = $("costnote");
   box.replaceChildren();
@@ -4190,26 +4001,22 @@ function renderCost(s) {
   const spendBox = el("div", "spendpart");
   box.append(spendBox);
   paintsRead(spendBox, note, r);
+  // A usage scan that has not answered yet is reading, not missing.
+  if (!d) spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + (u ? "" : "; usage still reading…")));
+  costProviders(spendBox, s.cost_providers);
   if (!d && !u) {
-    // The usage scan has not answered yet, which is reading, not missing; the
-    // budget line still draws, since an alert needs no spend report, and the
-    // Claude headline and plan line with it, since their own readers owe the
-    // panel nothing.
-    spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + "; usage still reading…"));
-    costClaudeRow(spendBox, s.cost_charts && s.cost_charts.headline);
-    costClaudePlan(box, s.claude_plan);
-    costJev(box, s.jev_spend, readOf(s, "jev_spend"));
     costGCP(box, s.cloud);
     return;
   }
-  const spendWords = costSpend(spendBox, d, r, s.cost_charts && s.cost_charts.headline);
-  costDailyChart(spendBox, s.cost_charts && s.cost_charts.daily);
-  costHourlyChart(spendBox, s.cost_charts && s.cost_charts.hourly);
-  costClaudePlan(box, s.claude_plan);
-  costJev(box, s.jev_spend, readOf(s, "jev_spend"));
+  const charts = s.cost_charts || {};
+  costChartFold(spendBox, "daily", charts.daily, s.cost_providers);
+  costChartFold(spendBox, "hourly", charts.hourly, s.cost_providers);
   costGCP(box, s.cloud);
   const usage = costUsage(box, u, s);
   costRework(box, s.rework);
+  // The caption carries the spend report's ledger sample and its read age,
+  // which the table's hover does not, beside the usage glance.
+  const spendWords = [d && d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null];
   note.textContent = readCaption(r, [usage.text || null].concat(spendWords));
   note.title = usage.title || "";
   // A stale or failed spend read has already coloured the caption; the usage
@@ -4605,8 +4412,8 @@ const FOLD_SUMMARY = {
     const needs = shown.filter(needsYou).length, pipeline = shown.length - needs;
     return needs + " need you" + (pipeline ? " · " + pipeline + " in the pipeline" : "");
   },
-  // The Cost panel's summary arrives with the bead that rebuilds its rows.
-  cost: () => null,
+  // The Cost panel's providers, one figure and status each, in the array's order.
+  cost: s => costHeadline(s && s.cost_providers),
 };
 // foldStore is the saved choices, keyed as FOLD_KEY holds them. Storage that
 // throws — a locked-down browser, private mode — reads as no choice at all, so

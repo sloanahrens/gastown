@@ -174,220 +174,12 @@ func jevStateAt(now time.Time, over map[string]any) map[string]any {
 	return s
 }
 
-// drawCostAt draws the Cost panel on a page whose clock stands at now. Every
-// draw loads its own page, and a page's clock starts at the real instant it
-// loads, so two draws a second apart disagree on a row that reads its age off
-// the clock ("newest sample 0s ago" against "1s ago"). Pinning each page to one
-// now makes the draws of a comparison agree whatever the wall clock does.
-func drawCostAt(t *testing.T, now time.Time, s map[string]any) []costLine {
-	t.Helper()
-
-	dom := newPageDOM(t)
-	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
-	lines, _ := drawCostOn(t, dom, s)
-	return lines
-}
-
 func jevRead(extra map[string]any) map[string]any {
 	r := map[string]any{"at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339), "every_sec": 300}
 	for k, v := range extra {
 		r[k] = v
 	}
 	return map[string]any{"jev_spend": r}
-}
-
-func costTexts(lines []costLine) []string {
-	var out []string
-	for _, l := range lines {
-		out = append(out, l.Text)
-	}
-	return out
-}
-
-func findLine(lines []costLine, prefix string) (costLine, bool) {
-	for _, l := range lines {
-		if strings.HasPrefix(l.Text, prefix) {
-			return l, true
-		}
-	}
-	return costLine{}, false
-}
-
-// The Jev row sits between the Claude plan line and the rest, with the calls,
-// the dollars and the top caller read off the report.
-func TestCostPanelDrawsTheJevRowBesideDeepSeekAndClaude(t *testing.T) {
-	t.Parallel()
-
-	lines, _ := drawCost(t, jevState(map[string]any{"reads": jevRead(nil)}))
-	row, ok := findLine(lines, "Jev spend")
-	if !ok {
-		t.Fatalf("no Jev row in %q", costTexts(lines))
-	}
-	if want := "Jev spend · 14 calls in 24h · $1.75 · top caller overseer (10 calls, $1.50)"; row.Text != want {
-		t.Errorf("Jev row = %q, want %q", row.Text, want)
-	}
-	if _, ok := findLine(lines, "Claude plan"); !ok {
-		t.Errorf("the Claude plan line went missing: %q", costTexts(lines))
-	}
-	var plan, jev = -1, -1
-	for i, l := range lines {
-		switch {
-		case strings.HasPrefix(l.Text, "Claude plan"):
-			plan = i
-		case strings.HasPrefix(l.Text, "Jev spend"):
-			jev = i
-		}
-	}
-	if jev != plan+1 {
-		t.Errorf("the Jev row is line %d, want it directly under the Claude plan line (%d)", jev, plan)
-	}
-}
-
-func TestCostPanelJevRowWordsASingleCallAndNoCallers(t *testing.T) {
-	t.Parallel()
-
-	one := map[string]any{"calls": 1, "usd": 0.1, "top_caller": "a", "top_caller_calls": 1, "top_caller_usd": 0.1}
-	lines, _ := drawCost(t, jevState(map[string]any{"jev_spend": one, "reads": jevRead(nil)}))
-	if row, _ := findLine(lines, "Jev spend"); row.Text != "Jev spend · 1 call · $0.10 · top caller a (1 call, $0.10)" {
-		t.Errorf("single-call row = %q", row.Text)
-	}
-
-	none := map[string]any{"calls": 0, "usd": 0}
-	lines, _ = drawCost(t, jevState(map[string]any{"jev_spend": none, "reads": jevRead(nil)}))
-	if row, _ := findLine(lines, "Jev spend"); row.Text != "Jev spend · 0 calls · $0.00" {
-		t.Errorf("empty-window row = %q", row.Text)
-	}
-}
-
-// A Jev command that never worked is "unavailable", and the DeepSeek and Claude
-// lines are drawn exactly as they were without it.
-func TestCostPanelJevFailureIsUnavailableAndLeavesTheOtherRows(t *testing.T) {
-	t.Parallel()
-
-	checkJevFailureLeavesTheOtherRows(t, time.Now())
-}
-
-// checkJevFailureLeavesTheOtherRows draws the panel with and without a failed Jev
-// read, both from one now (the state's and the page's clock), and compares
-// everything but the Jev row.
-func checkJevFailureLeavesTheOtherRows(t *testing.T, now time.Time) {
-	t.Helper()
-
-	without := drawCostAt(t, now, jevStateAt(now, map[string]any{"jev_spend": nil}))
-	failed := drawCostAt(t, now, jevStateAt(now, map[string]any{
-		"jev_spend": nil,
-		"reads":     jevRead(map[string]any{"error": true, "stale": true}),
-	}))
-	row, ok := findLine(failed, "Jev spend")
-	if !ok {
-		t.Fatalf("no Jev row in %q", costTexts(failed))
-	}
-	if row.Text != "Jev spend · unavailable — the read failed" || row.Class != "empty" {
-		t.Errorf("failed row = %+v", row)
-	}
-	var rest []costLine
-	for _, l := range failed {
-		if !strings.HasPrefix(l.Text, "Jev spend") {
-			rest = append(rest, l)
-		}
-	}
-	if len(rest) != len(without) {
-		t.Fatalf("the failed row changed the other rows: %q vs %q", costTexts(rest), costTexts(without))
-	}
-	for i := range rest {
-		if rest[i] != without[i] {
-			t.Errorf("row %d changed: %+v vs %+v", i, rest[i], without[i])
-		}
-	}
-}
-
-// The Claude plan line reads its reset time off the clock, and the reset moves
-// at a minute boundary. Two builds either side of one would differ on that line,
-// so the failed-row check would fail on the rows it leaves alone. Both draws of
-// the check take one instant, so the check holds on the boundary itself.
-func TestCostPanelJevFailureRowsAgreeAcrossAMinuteBoundary(t *testing.T) {
-	t.Parallel()
-
-	boundary := time.Date(2026, 10, 20, 12, 30, 0, 0, time.Local)
-	before, after := boundary.Add(-time.Millisecond), boundary.Add(time.Millisecond)
-
-	drawnBefore := drawCostAt(t, before, jevStateAt(before, nil))
-	drawnAfter := drawCostAt(t, after, jevStateAt(after, nil))
-	planBefore, _ := findLine(drawnBefore, "Claude plan")
-	planAfter, _ := findLine(drawnAfter, "Claude plan")
-	if planBefore.Text == planAfter.Text {
-		t.Fatalf("the plan line reads %q on both sides of the boundary, so the boundary proves nothing", planBefore.Text)
-	}
-
-	checkJevFailureLeavesTheOtherRows(t, before)
-	checkJevFailureLeavesTheOtherRows(t, after)
-}
-
-// A failed read after a good one says unavailable and keeps the last figures.
-func TestCostPanelJevFailureAfterAGoodReadKeepsTheLastFigures(t *testing.T) {
-	t.Parallel()
-
-	lines, _ := drawCost(t, jevState(map[string]any{"reads": jevRead(map[string]any{"error": true, "stale": true})}))
-	row, ok := findLine(lines, "Jev spend")
-	if !ok {
-		t.Fatalf("no Jev row in %q", costTexts(lines))
-	}
-	for _, want := range []string{"unavailable — the read failed", "last good", "14 calls in 24h", "$1.75"} {
-		if !strings.Contains(row.Text, want) {
-			t.Errorf("row %q has no %q", row.Text, want)
-		}
-	}
-	if row.Class != "empty" {
-		t.Errorf("a failed row wears %q, want the dimmed empty class", row.Class)
-	}
-}
-
-// A read that answered but has gone stale says so, not that it failed, and
-// keeps the last figures the same way.
-func TestCostPanelJevStaleReadSaysStaleAndKeepsTheLastFigures(t *testing.T) {
-	t.Parallel()
-
-	lines, _ := drawCost(t, jevState(map[string]any{"reads": jevRead(map[string]any{"stale": true})}))
-	row, ok := findLine(lines, "Jev spend")
-	if !ok {
-		t.Fatalf("no Jev row in %q", costTexts(lines))
-	}
-	for _, want := range []string{"unavailable — the read went stale", "last good", "14 calls in 24h", "$1.75"} {
-		if !strings.Contains(row.Text, want) {
-			t.Errorf("row %q has no %q", row.Text, want)
-		}
-	}
-	if strings.Contains(row.Text, "the read failed") {
-		t.Errorf("a stale read is worded as a failure: %q", row.Text)
-	}
-	if row.Class != "empty" {
-		t.Errorf("a stale row wears %q, want the dimmed empty class", row.Class)
-	}
-}
-
-// With no Jev command configured there is no reader and no status, and the
-// panel draws no row at all, even with the rest of it empty.
-func TestCostPanelDrawsNoJevRowWithoutAReader(t *testing.T) {
-	t.Parallel()
-
-	lines, _ := drawCost(t, jevState(map[string]any{"jev_spend": nil}))
-	if row, ok := findLine(lines, "Jev spend"); ok {
-		t.Errorf("a town with no Jev command drew %+v", row)
-	}
-}
-
-// The row is drawn on the panel's one-line empty path too: its own reader owes
-// the panel nothing.
-func TestCostPanelJevRowDrawsWithoutASpendReport(t *testing.T) {
-	t.Parallel()
-
-	lines, _ := drawCost(t, map[string]any{
-		"jev_spend": map[string]any{"calls": 2, "usd": 0.2},
-		"reads":     jevRead(nil),
-	})
-	if len(lines) != 2 || !strings.Contains(lines[0].Text, "no spend report") || !strings.HasPrefix(lines[1].Text, "Jev spend · 2 calls · $0.20") {
-		t.Errorf("empty panel drew %q", costTexts(lines))
-	}
 }
 
 // ParseJevScorecard turns one battery's `gt jev scorecard --json` report into
@@ -1125,29 +917,22 @@ func TestJevPanelShowsTheCountAloneWhenEveryQuestionIsNotYet(t *testing.T) {
 	}
 }
 
-// The Cost panel keeps the Jev spend row and draws none of the scorecard.
-func TestCostPanelKeepsOnlyTheJevSpendRow(t *testing.T) {
-	t.Parallel()
-
-	lines, _ := drawCost(t, jevScorecardState(time.Now(), nil))
-	if _, ok := findLine(lines, "Jev spend"); !ok {
-		t.Fatalf("no Jev spend row in %q", costTexts(lines))
-	}
-	for _, prefix := range []string{"finding", "landing", "targets", "Jev scorecard"} {
-		if row, ok := findLine(lines, prefix); ok {
-			t.Errorf("the Cost panel draws a scorecard line %+v", row)
-		}
-	}
-}
-
 // A scorecard that cannot be read says so on the JEV title line and draws no
-// battery lines, and the Cost panel's spend row is left as it was.
+// battery lines, and the Cost panel's providers table is left as it was.
 func TestJevPanelFailureSaysUnavailableOnItsTitle(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	healthy, _ := drawCost(t, jevStateAt(now, map[string]any{"reads": jevRead(nil)}))
-	spend, _ := findLine(healthy, "Jev spend")
+	// The table's rows come from the server's providers array, which a scorecard
+	// read does not feed, so the table draws the same whatever the scorecard says.
+	providers := []any{map[string]any{"id": "jev", "label": "Jev", "kind": "cash", "today": 0.5, "status": "none"}}
+	drawTable := func(s map[string]any) []costTableRow {
+		s["cost_providers"] = providers
+		dom := newPageDOM(t)
+		dom.call(t, "renderCost", s)
+		return costTable(t, dom)
+	}
+	healthy := drawTable(jevStateAt(now, map[string]any{"reads": jevRead(nil)}))
 
 	cases := map[string]struct {
 		read  map[string]any
@@ -1165,9 +950,8 @@ func TestJevPanelFailureSaysUnavailableOnItsTitle(t *testing.T) {
 		if len(rows) != 0 {
 			t.Errorf("%s: drew %v from an unreadable scorecard", name, jevRowTexts(rows))
 		}
-		cost, _ := drawCost(t, jevScorecardState(now, tc.read))
-		if got, _ := findLine(cost, "Jev spend"); got != spend {
-			t.Errorf("%s: spend row = %+v, want %+v", name, got, spend)
+		if got := drawTable(jevScorecardState(now, tc.read)); !reflect.DeepEqual(got, healthy) {
+			t.Errorf("%s: the providers table = %+v, want the healthy one %+v", name, got, healthy)
 		}
 	}
 

@@ -2,7 +2,6 @@ package dashboard
 
 import (
 	"encoding/json"
-	"fmt"
 	"math"
 	"slices"
 	"strconv"
@@ -257,40 +256,36 @@ func TestCostProvidersClaudeFigures(t *testing.T) {
 	}
 }
 
-// The row's color is the page's planClass, and the test takes the expectation
-// from the page itself: the harness runs index.html's planClass over the same
-// figures, so the page's ceiling and the reader's are held together by
-// behavior rather than by a hard-coded copy of the rule. A week exactly at the
-// ceiling and a projection one point past it are both rows, so a ceiling that
-// drifted on either side turns this red.
-func TestCostProvidersClaudeStatusMatchesThePagesPlanClass(t *testing.T) {
+// The row's status is the colour the table's chip takes, and the rule is the
+// reader's own: a week at the ceiling, or a projection past the limit, is bad; a
+// projection past the ceiling is a warning; anything else is ok. The cases pin
+// each edge against the constant, so a ceiling that drifts on either side turns
+// this red: a week exactly at the ceiling and a projection one point past it are
+// both rows.
+func TestCostProvidersClaudeStatusFollowsTheCeiling(t *testing.T) {
 	t.Parallel()
 
-	dom := newPageDOM(t)
+	ceiling := float64(ClaudePlanCeilingPct)
 	for _, tc := range []struct {
+		name              string
 		weekly, projected float64
+		want              string
 	}{
-		{42, 75},
-		{42, 89.9},
-		{42, 90.5},
-		{42, 100},
-		{42, 101},
-		{89.9, 50},
-		{90, 50},
-		{95, 120},
-		{0, 0},
+		{"projection under the ceiling", 42, 75, "ok"},
+		{"projection just under the ceiling", 42, ceiling - 0.1, "ok"},
+		{"projection one point past the ceiling", 42, ceiling + 0.5, "warn"},
+		{"projection at the limit", 42, 100, "warn"},
+		{"projection past the limit", 42, 101, "bad"},
+		{"week just under the ceiling", ceiling - 0.1, 50, "ok"},
+		{"week exactly at the ceiling", ceiling, 50, "bad"},
+		{"week and projection both past", 95, 120, "bad"},
+		{"nothing used yet", 0, 0, "ok"},
 	} {
-		v, err := dom.vm.RunString(fmt.Sprintf("planClass({weekly_pct: %v, projected_pct_at_reset: %v})", tc.weekly, tc.projected))
-		if err != nil {
-			t.Fatalf("the page's planClass over weekly %v projected %v: %v", tc.weekly, tc.projected, err)
-		}
-		want := map[string]string{"badc": "bad", "warnc": "warn", "": "ok"}[v.String()]
-
 		plan, charts := claudeFixture()
 		plan.WeeklyPct = tc.weekly
 		plan.ProjectedPctAtReset = tc.projected
-		if got := claudeCostProvider(costProvidersNow, nil, plan, charts, nil).Status; got != want {
-			t.Errorf("weekly %v projected %v gives status %q, the page's planClass says %q", tc.weekly, tc.projected, got, want)
+		if got := claudeCostProvider(costProvidersNow, nil, plan, charts, nil).Status; got != tc.want {
+			t.Errorf("%s: weekly %v projected %v gives status %q, want %q", tc.name, tc.weekly, tc.projected, got, tc.want)
 		}
 	}
 }
