@@ -105,9 +105,14 @@ func RemoveTrimPaths(root, listDir string, shards int, w trimPathsFS) (TrimPaths
 // RemoveTrimPathsFromClaim removes every path the claim-carried list holds, relative to root.
 //
 // listPath is the claim-relative file the Job's init container wrote into the claim, and digestPath
-// the file it wrote the list's digest to beside it. The list must hash to that digest, so a list this
-// Job did not write — one another trim left, or one a sandbox replaced after the init container ran —
-// fails the run rather than being trimmed. Both files must resolve inside the claim, and the list is
+// the file it wrote the list's digest to beside it. The list must hash to that digest, so a list that
+// is not the one the init container wrote — one another trim left behind, or one a crash or a partial
+// write truncated or changed — fails the run rather than being trimmed. The digest is an integrity
+// check, not a defense against a sandbox that can write to the claim: such a writer could rewrite the
+// list and its digest together. What bounds that writer is the containment every listed path still
+// passes before it is removed (claim-relative, resolving inside the claim, removed through an os.Root),
+// and a sandbox with write access to its own cache claim could delete those same files itself. Both
+// files must resolve inside the claim, and the list is
 // read and checked whole before anything is removed, as the shard route's list is. A list that is
 // absent, outside the claim, unreadable, not an array of paths, or empty fails the run rather than
 // reporting a success that removed nothing.
@@ -141,7 +146,7 @@ func RemoveTrimPathsFromClaim(root, listPath, digestPath string, w trimPathsFS) 
 		return TrimPathsResult{}, fmt.Errorf("reading the trim list %s: %w", listPath, err)
 	}
 	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != want {
-		return TrimPathsResult{}, fmt.Errorf("the trim list %s does not match the digest its init container wrote beside it at %s: a list this Job did not write", listPath, digestPath)
+		return TrimPathsResult{}, fmt.Errorf("the trim list %s does not match the digest its init container wrote beside it at %s: a list this Job did not write intact", listPath, digestPath)
 	}
 	var list []string
 	if err := json.Unmarshal(data, &list); err != nil {

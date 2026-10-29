@@ -744,3 +744,36 @@ func TestTrimSelectorLeavesTheSeedJobAlone(t *testing.T) {
 		t.Errorf("selector %q selects the seed Job's pods, labelled %v", TrimSelector(), seed.Spec.Template.Metadata.Labels)
 	}
 }
+
+// TestBuildTrimManifestTakesTheClaimForAListPastTheShardBytesCeiling is the bead's gate at its stated
+// size: a removal list whose raw text is past TrimMaxShards times TrimShardBytes cannot be carried by
+// one set of shards, however small its paths, so it takes the claim route (gt-2rq36). The paths are
+// short on purpose: the other tests reach the ceiling with few large paths, this one with the many
+// small ones a badly overfilled go cache produces.
+func TestBuildTrimManifestTakesTheClaimForAListPastTheShardBytesCeiling(t *testing.T) {
+	t.Parallel()
+	const pathLen = 100
+	n := (TrimMaxShards*TrimShardBytes)/pathLen + 2000
+	listing := make([]Entry, 0, n)
+	for i := 0; i < n; i++ {
+		p := fmt.Sprintf("gocache/%02x/%0*d", i%256, pathLen-len("gocache/00/"), i)
+		listing = append(listing, file(p, BuildCache, 1, 0, i))
+	}
+	var raw int
+	for _, e := range listing {
+		raw += len(e.Path) + 3 // the quotes and the comma of the JSON list
+	}
+	if raw <= TrimMaxShards*TrimShardBytes {
+		t.Fatalf("the test list is %d bytes of paths, want it past %d", raw, TrimMaxShards*TrimShardBytes)
+	}
+	in := trimInput()
+	in.CapBytes = 0
+	in.Listing = listing
+	m := buildTrim(t, in)
+	if got := m.Route(); got != TrimRouteClaim {
+		t.Fatalf("a list of %d bytes takes route %v, want the claim route", raw, got)
+	}
+	if len(m.Shards()) != 0 || len(m.jobs()) != 1 {
+		t.Errorf("the claim route applies %d shards and %d Jobs, want no shards and one Job", len(m.Shards()), len(m.jobs()))
+	}
+}
