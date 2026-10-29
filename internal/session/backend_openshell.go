@@ -1095,9 +1095,9 @@ const sandboxTrackerTokenFile = sandboxHome + "/" + runtimeTrackerToken
 
 // sandboxTracker is the tracker a sandbox's rig is routed to, as the sandbox
 // reaches it: the town tracker's port on the control-plane host, that host as
-// the one host plain http may carry a seat token to, and the seat's token bytes
-// the runtime archive stages. The zero value is a Dolt rig: the contract names
-// no tracker and the archive stages no token file.
+// the one host plain http may carry a seat token to, and the seat's token,
+// which the runtime archive stages as its file. The zero value is a Dolt rig:
+// the contract names no tracker and the archive stages no token file.
 type sandboxTracker struct {
 	URL           string
 	AllowHTTPHost string
@@ -1137,7 +1137,11 @@ func (b *openshellBackend) trackerFor(ctx context.Context, spec SpawnSpec) (sand
 	if err != nil {
 		return sandboxTracker{}, fmt.Errorf("the seat's tracker token: %w", err)
 	}
-	if len(bytes.TrimSpace(token)) == 0 {
+	// A token file can end in a newline (seattoken writes one); the sandbox
+	// stages the token itself, so a reader that takes the file's bytes as its
+	// bearer value gets the token and not the newline after it (gt-psyvw).
+	token = bytes.TrimSpace(token)
+	if len(token) == 0 {
 		return sandboxTracker{}, fmt.Errorf("the seat's tracker token: %s holds no token", path)
 	}
 	host := b.controlPlaneHost()

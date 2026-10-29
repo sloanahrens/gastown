@@ -253,19 +253,48 @@ func TestOpenShellTrackerForRefusesWhatItCannotResolve(t *testing.T) {
 	}
 }
 
-// The production seat-token seam refuses a town with no admin credential before
-// it asks the tracker for anything, and names the credential rather than a
-// value.
+// The production seat-token seam refuses a town whose admin credential is not
+// in the town's settings/daemon.env, before it asks the tracker for anything,
+// and names the credential rather than a value.
+//
+// Every case is decided by the town's files alone. A ${VAR} a host exports
+// cannot reach any of them: the first two are answered at the file lookup, and
+// the third names a variable the same file defines, which the loader resolves
+// from the file rather than the process (gt-psyvw).
 func TestHostSeatTokenRefusesATownWithNoAdminCredential(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
+	for _, c := range []struct {
+		name      string
+		daemonEnv string
+		// wantErr tells the file lookup's refusal from the expansion's.
+		wantErr string
+	}{
+		{name: "no settings/daemon.env", wantErr: "is not set in"},
+		{name: "an empty credential", daemonEnv: "TRACKER_ADMIN_TOKEN=\n", wantErr: "is not set in"},
+		{
+			name:      "a credential naming a variable the town leaves empty",
+			daemonEnv: "SEAT_TOKEN_REF_SOURCE=\nTRACKER_ADMIN_TOKEN=${SEAT_TOKEN_REF_SOURCE}\n",
+			wantErr:   "refers to SEAT_TOKEN_REF_SOURCE",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if c.daemonEnv != "" {
+				writeOpenshellFile(t, filepath.Join(town, "settings", "daemon.env"), c.daemonEnv)
+			}
 
-	_, err := hostSeatToken(town)(context.Background(), intent.Seat{Rig: openshellTestRig, Role: "polecats", Name: openshellTestPolecat})
-	if err == nil {
-		t.Fatal("hostSeatToken produced a token file with no admin credential")
-	}
-	if !strings.Contains(err.Error(), "TRACKER_ADMIN_TOKEN") {
-		t.Errorf("hostSeatToken error = %v, want it to name the credential", err)
+			_, err := hostSeatToken(town)(context.Background(), intent.Seat{Rig: openshellTestRig, Role: "polecats", Name: openshellTestPolecat})
+			if err == nil {
+				t.Fatal("hostSeatToken produced a token file with no admin credential")
+			}
+			if !strings.Contains(err.Error(), "TRACKER_ADMIN_TOKEN") {
+				t.Errorf("hostSeatToken error = %v, want it to name the credential", err)
+			}
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("hostSeatToken error = %v, want %q", err, c.wantErr)
+			}
+		})
 	}
 }
 
@@ -291,6 +320,9 @@ func TestOpenShellPrepareStagesTheSeatTokenAsOneFile(t *testing.T) {
 	var uploaded []byte
 	b.cli = &sandbox.CLI{Gateway: openshellTestProfile.Gateway, Run: func(ctx context.Context, argv []string, stdin []byte, env []string) ([]byte, []byte, error) {
 		for _, a := range argv {
+			if strings.Contains(a, openshellSeatTokenValue) {
+				t.Errorf("the gateway's argv carries the seat token in %q", a)
+			}
 			if filepath.Base(a) != runtimeArchiveName || strings.HasPrefix(a, sandboxHome+"/") {
 				continue
 			}
@@ -318,8 +350,11 @@ func TestOpenShellPrepareStagesTheSeatTokenAsOneFile(t *testing.T) {
 	if token.mode != 0o600 {
 		t.Errorf("%s mode = %o, want 600", runtimeTrackerToken, token.mode)
 	}
-	if got := strings.TrimSpace(token.body); got != openshellSeatTokenValue {
-		t.Errorf("%s = %q, want the seat's token", runtimeTrackerToken, got)
+	// Exactly the token: the seat's file ends in a newline, and staging that
+	// newline would hand a reader of the file's bytes a value the tracker never
+	// issued (gt-psyvw).
+	if token.body != openshellSeatTokenValue {
+		t.Errorf("%s = %q, want exactly the seat's token", runtimeTrackerToken, token.body)
 	}
 	if dir, ok := entries[".tracker/"]; !ok || dir.mode != 0o700 {
 		t.Errorf("archive directory entry = %+v (present %v), want .tracker/ at mode 700", dir, ok)

@@ -136,9 +136,9 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 	files = append(files, runtimeFile{path.Join(claudeDir, promptName), promptBytes, 0o644, false})
 	logSystemPrompt(promptLog, spec.Polecat, promptBytes)
 
-	// A tracker-routed seat's token travels as a file: the directory is 0700 and
-	// the file 0600, as the seat's file on the host is, and no other entry of the
-	// archive, no environment value and no settings file holds it (gt-p85pw.84).
+	// A tracker-routed seat's token travels as a file: the archive holds it at
+	// 0600 in a 0700 directory, and no other entry of the archive, no
+	// environment value and no settings file holds it (gt-p85pw.84).
 	if tracker.on() {
 		files = append(files,
 			runtimeFile{path.Dir(runtimeTrackerToken), nil, 0o700, true},
