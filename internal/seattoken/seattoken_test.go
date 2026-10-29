@@ -172,23 +172,25 @@ func TestEnsureUnreadableFile(t *testing.T) {
 	}
 }
 
-// A seat whose file cannot be created is refused, so a launch never goes on
-// tokenless.
-func TestEnsureRefusesAnUnwritableDirectory(t *testing.T) {
+// A seat whose directory is a file cannot get a token directory, so a launch
+// never goes on tokenless and the issuer is never asked.
+func TestEnsureRefusesASeatDirectoryThatIsAFile(t *testing.T) {
 	t.Parallel()
 	store := New(t.TempDir())
 	dir := filepath.Dir(store.Path(testSeat()))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	readOnly(t, dir)
+	if err := os.WriteFile(dir, []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	issuer := &fakeIssuer{token: seatToken}
 
 	if _, err := store.Ensure(context.Background(), testSeat(), issuer); err == nil {
-		t.Fatal("Ensure wrote a token into a directory that refuses writes")
+		t.Fatal("Ensure wrote a token into a seat directory that is a file")
 	}
 	if len(issuer.actors) != 0 {
-		t.Errorf("issuer asked %d times, want none while the file cannot be created", len(issuer.actors))
+		t.Errorf("issuer asked %d times, want none while the directory cannot be made", len(issuer.actors))
 	}
 }
 
@@ -213,51 +215,68 @@ func TestEnsureReportsAnUnreclaimableEmptyFile(t *testing.T) {
 
 // Remove reports a file it cannot delete, so a caller does not record a seat
 // as tokenless while its token is still on disk.
-func TestRemoveReportsAFileItCannotDelete(t *testing.T) {
+func TestRemoveReportsAPathItCannotDelete(t *testing.T) {
 	t.Parallel()
 	store := New(t.TempDir())
 	path := store.Path(testSeat())
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(seatToken+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(path, "entry"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	readOnly(t, filepath.Dir(path))
 
 	if err := store.Remove(testSeat()); err == nil {
-		t.Fatal("Remove reported success with the token file still in place")
+		t.Fatal("Remove reported success with a non-empty directory still at the token path")
 	}
 }
 
-// A symlink where the seat directory should be is refused: its target is not
-// created, so a token is never written outside the town's runtime directory.
-func TestEnsureRefusesADirectorySymlink(t *testing.T) {
+// A symlink at any level of the seat's directories is refused, not followed: the
+// target is a real directory that must stay empty, so a token written through
+// the link would land outside the town's runtime directory.
+func TestEnsureRefusesASymlinkedDirectory(t *testing.T) {
 	t.Parallel()
-	store := New(t.TempDir())
-	dir := filepath.Dir(store.Path(testSeat()))
-	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name  string
+		level int // index into seatDirs: the runtime directory, seats, or the rig
+	}{
+		{"the runtime directory", 0},
+		{"the seats directory", 1},
+		{"the rig directory", 2},
 	}
-	target := filepath.Join(t.TempDir(), "elsewhere")
-	if err := os.Symlink(target, dir); err != nil {
-		t.Fatal(err)
-	}
-	issuer := &fakeIssuer{token: seatToken}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := New(t.TempDir())
+			dir := store.seatDirs(testSeat())[tc.level]
+			target := t.TempDir()
+			if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, dir); err != nil {
+				t.Fatal(err)
+			}
+			issuer := &fakeIssuer{token: seatToken}
 
-	if _, err := store.Ensure(context.Background(), testSeat(), issuer); err == nil {
-		t.Fatal("Ensure made a token directory through a symlink")
-	}
-	if len(issuer.actors) != 0 {
-		t.Errorf("issuer asked %d times, want none while the directory cannot be made", len(issuer.actors))
-	}
-	if _, err := os.Stat(target); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("the symlink's target was created: %v", err)
+			if _, err := store.Ensure(context.Background(), testSeat(), issuer); err == nil {
+				t.Fatal("Ensure wrote a token through a symlinked directory")
+			}
+			if len(issuer.actors) != 0 {
+				t.Errorf("issuer asked %d times, want none through a symlink", len(issuer.actors))
+			}
+			entries, err := os.ReadDir(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("the symlink's target holds %d entries, want it left empty", len(entries))
+			}
+		})
 	}
 }
 
-// A symlink at the token path is refused rather than followed: O_EXCL never
-// creates through one, and the seat is not handed a file at its target.
+// A symlink at the token path is refused rather than reused or followed: the
+// file it points at keeps its content, and the issuer is never asked.
 func TestEnsureRefusesASymlink(t *testing.T) {
 	t.Parallel()
 	store := New(t.TempDir())
@@ -266,13 +285,14 @@ func TestEnsureRefusesASymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := filepath.Join(t.TempDir(), "elsewhere")
+	writeFile(t, target, "trk_old-token\n")
 	if err := os.Symlink(target, path); err != nil {
 		t.Fatal(err)
 	}
 	issuer := &fakeIssuer{token: seatToken}
 
 	if _, err := store.Ensure(context.Background(), testSeat(), issuer); err == nil {
-		t.Fatal("Ensure took over a symlink at the token path")
+		t.Fatal("Ensure reused a symlink at the token path")
 	}
 	if len(issuer.actors) != 0 {
 		t.Errorf("issuer asked %d times, want none over a symlink", len(issuer.actors))
@@ -280,10 +300,72 @@ func TestEnsureRefusesASymlink(t *testing.T) {
 	if _, err := os.Lstat(path); err != nil {
 		t.Errorf("the symlink is gone: %v", err)
 	}
-	if _, err := os.Stat(target); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("a file was written at the symlink's target: %v", err)
+	if got := stringOf(t, target); got != "trk_old-token" {
+		t.Errorf("the symlink's target now holds %q, want it untouched", got)
 	}
 }
+
+// Remove does not delete through a symlinked seat directory: the file the link
+// reaches is the seat's own only by accident, and it stays.
+func TestRemoveRefusesASymlinkedDirectory(t *testing.T) {
+	t.Parallel()
+	store := New(t.TempDir())
+	dir := store.seatDirs(testSeat())[2]
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, dir); err != nil {
+		t.Fatal(err)
+	}
+	reached := filepath.Join(target, filepath.Base(store.Path(testSeat())))
+	writeFile(t, reached, seatToken+"\n")
+
+	if err := store.Remove(testSeat()); err == nil {
+		t.Fatal("Remove reported success through a symlinked seat directory")
+	}
+	if got := stringOf(t, reached); got != seatToken {
+		t.Errorf("the file behind the symlink holds %q, want it untouched", got)
+	}
+}
+
+// A launch that loses the publish race keeps the token the winner wrote and
+// writes none of its own; the issuer's token is discarded, and no temporary
+// file is left in the seat directory.
+func TestEnsureRivalPublishedFirst(t *testing.T) {
+	t.Parallel()
+	store := New(t.TempDir())
+	path := store.Path(testSeat())
+	const rival = "trk_rival-token-value"
+	issuer := issuerFunc(func(string) (string, error) {
+		writeFile(t, path, rival+"\n")
+		return seatToken, nil
+	})
+
+	got, err := store.Ensure(context.Background(), testSeat(), issuer)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if got != path {
+		t.Errorf("Ensure path = %q, want %q", got, path)
+	}
+	if value := stringOf(t, path); value != rival {
+		t.Errorf("token file holds %q, want the rival's token kept", value)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("seat directory holds %d entries, want only the token file", len(entries))
+	}
+}
+
+// issuerFunc adapts a function to Issuer, for a case whose issue has a side
+// effect on the store.
+type issuerFunc func(actor string) (string, error)
+
+func (f issuerFunc) Issue(_ context.Context, actor string) (string, error) { return f(actor) }
 
 func TestRemove(t *testing.T) {
 	t.Parallel()
@@ -308,21 +390,21 @@ func TestSeatRefusals(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name    string
-		town    string
+		noTown  bool // the store is made with no town root
 		seat    intent.Seat
 		wantErr string
 	}{
-		{"no town root", "", testSeat(), "no town root"},
-		{"no role", "root", intent.Seat{Rig: "gastown"}, "names no role"},
-		{"a separator in the rig", "root", intent.Seat{Rig: "../etc", Role: "polecats"}, "path separator"},
-		{"a separator in the name", "root", intent.Seat{Rig: "gastown", Role: "polecats", Name: "a/b"}, "path separator"},
-		{"a rig that climbs out", "root", intent.Seat{Rig: "..", Role: "polecats"}, "not one directory name"},
+		{"no town root", true, testSeat(), "no town root"},
+		{"no role", false, intent.Seat{Rig: "gastown"}, "names no role"},
+		{"a separator in the rig", false, intent.Seat{Rig: "../etc", Role: "polecats"}, "path separator"},
+		{"a separator in the name", false, intent.Seat{Rig: "gastown", Role: "polecats", Name: "a/b"}, "path separator"},
+		{"a rig that climbs out", false, intent.Seat{Rig: "..", Role: "polecats"}, "not one directory name"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			town := tc.town
-			if town != "" {
+			town := ""
+			if !tc.noTown {
 				town = t.TempDir()
 			}
 			store := New(town)
@@ -352,7 +434,7 @@ func TestEnsureWithoutIssuer(t *testing.T) {
 func readOnly(t *testing.T, dir string) {
 	t.Helper()
 	before := permOf(t, dir)
-	//testpolicy:allow no-exec-files — the target is the fixture directory: it keeps its search bit so the token file inside stays readable, and drops its write bit so creating and removing entries fails
+	//testpolicy:allow no-exec-files — a directory must keep its search bit to be entered, so the 0500 mode is the fixture's read-only state: the write bit is what it drops
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
 	}

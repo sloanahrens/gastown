@@ -2,6 +2,7 @@ package seattoken
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -52,8 +53,16 @@ func hostClientConfig(townRoot string) (client.Config, error) {
 	if err != nil {
 		return client.Config{}, err
 	}
-	// The loader answers a valid credential or an error, never a zero one, and
-	// client.New refuses an empty token rather than issuing without one.
-	secret, _ := token.Reveal()
-	return client.Config{BaseURL: endpoint.URL(), Token: secret}, nil
+	return adminClientConfig(endpoint.URL(), token)
+}
+
+// adminClientConfig pairs the endpoint with the admin credential. A token the
+// loader did not produce is refused here, so no client is built around an empty
+// secret; the error names the credential and never its value.
+func adminClientConfig(baseURL string, token config.TrackerAdminToken) (client.Config, error) {
+	secret, ok := token.Reveal()
+	if !ok {
+		return client.Config{}, errors.New("seattoken: the tracker admin credential is not valid")
+	}
+	return client.Config{BaseURL: baseURL, Token: secret}, nil
 }

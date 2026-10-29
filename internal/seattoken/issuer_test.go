@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/tracker/api"
 	"github.com/steveyegge/gastown/tracker/client"
 )
@@ -92,8 +93,8 @@ func TestTrackerIssuerIssueRefused(t *testing.T) {
 	}
 }
 
-// hostClientConfig is what NewHostIssuer hands client.New: the town's endpoint
-// and the credential daemon.env holds.
+// TestHostClientConfig checks the config hostClientConfig builds for client.New:
+// the town's endpoint and the credential daemon.env holds.
 func TestHostClientConfig(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -128,6 +129,20 @@ func TestHostClientConfig(t *testing.T) {
 					got.BaseURL, got.Token, got.TokenFile, tc.want.BaseURL, tc.want.Token)
 			}
 		})
+	}
+}
+
+// A credential the loader did not produce yields no client: the zero value
+// stands for one, and the config must refuse it rather than carry an empty
+// secret into the client.
+func TestAdminClientConfigRefusesAnUnloadedToken(t *testing.T) {
+	t.Parallel()
+	got, err := adminClientConfig("http://127.0.0.1:7433", config.TrackerAdminToken{})
+	if err == nil {
+		t.Fatalf("adminClientConfig = %+v, want an error for a credential that was not loaded", got)
+	}
+	if got.Token != "" {
+		t.Errorf("adminClientConfig returned token %q with an error", got.Token)
 	}
 }
 
