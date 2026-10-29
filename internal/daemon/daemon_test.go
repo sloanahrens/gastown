@@ -808,7 +808,7 @@ func startParkedRun(t *testing.T, env map[string]string) (*Config, func() error)
 		config: cfg,
 		logger: log.New(io.Discard, "", 0),
 		getenv: ownerEnv(env),
-		clock:  clockwork.NewFakeClock(),
+		clock:  clockwork.NewFakeClockAt(time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)),
 	}
 	// The rest of the startup does real host work: the heartbeat dispatches
 	// and restarts sessions, the sweep touches the tmux socket directory, and
