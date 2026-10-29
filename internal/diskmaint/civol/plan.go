@@ -1,7 +1,7 @@
-// Package civol plans the trim of the CI cache volumes: the Go build cache,
-// the Go module cache and the npm cache. It only decides. Measuring the
-// volumes and removing the paths a plan names belong to the target that uses
-// this plan.
+// Package civol trims the CI cache volumes: the Go build cache, the Go module
+// cache and the npm cache. Plan decides which paths may be removed; Target.Apply
+// removes them inside the docker-in-docker daemon and, with no job running,
+// prunes the build cache and the dangling images.
 package civol
 
 import (
@@ -176,10 +176,18 @@ func refused(why string) diskmaint.Plan {
 	return diskmaint.Plan{Target: planTarget, Refused: why}
 }
 
-// unsafePath reports a path that could name something outside its volume. Only
-// a ".." segment escapes, so a name that merely contains two dots is fine.
+// unsafePath reports a path that could name something outside its volume, or
+// the volume root itself. A ".." segment escapes. A "." segment, or an empty one
+// from "a//b" or a trailing slash, names the root or an entry find never prints,
+// and rm -rf on the root of a volume would empty it. A name that merely contains
+// two dots is fine.
 func unsafePath(p string) bool {
-	return p == "" || strings.HasPrefix(p, "/") || slices.Contains(strings.Split(p, "/"), "..") || strings.ContainsAny(p, "\r\n")
+	if p == "" || strings.HasPrefix(p, "/") || strings.ContainsAny(p, "\r\n") {
+		return true
+	}
+	return slices.ContainsFunc(strings.Split(p, "/"), func(s string) bool {
+		return s == "" || s == "." || s == ".."
+	})
 }
 
 // isModuleCache reports a path in the module cache's download area, which Go
