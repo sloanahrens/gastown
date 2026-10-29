@@ -11,6 +11,8 @@ import (
 
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/sandbox"
+	"github.com/steveyegge/gastown/internal/seattoken"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -284,15 +286,45 @@ func (b *openshellBackend) Stop(session string) error {
 	return b.cli.Stop(context.Background(), session)
 }
 
-// Delete removes the sandbox and its registry record. A sandbox that is
-// already gone counts as deleted; any other failure keeps the record so the
-// delete can be retried.
+// Delete removes the sandbox and its registry record, and ends the tracker
+// token of the seat it ran. A sandbox that is already gone counts as deleted
+// and still ends the token; any other failure keeps the record so the delete
+// can be retried.
 func (b *openshellBackend) Delete(session string) error {
+	rec, hasRec, recErr := ReadSandboxRecord(b.townRoot, session)
 	if err := b.deleteSandbox(session); err != nil {
 		return err
 	}
+	if recErr != nil {
+		b.warn("sandbox %s: reading its record to revoke its seat's token: %v", session, recErr)
+	} else if hasRec {
+		b.revokeSeat(rec)
+	}
 	routing.forget(session)
 	return RemoveSandboxRecord(b.townRoot, session)
+}
+
+// revokeSeat ends the tracker token of the seat rec names. A failed revoke is a
+// warning naming the seat: the sandbox is gone, so the delete has happened
+// whether or not the tracker answered (gt-p85pw.86).
+func (b *openshellBackend) revokeSeat(rec SandboxRecord) {
+	if !plainPathName(rec.Rig) || !plainPathName(rec.Polecat) {
+		b.warn("sandbox %s: its record names no seat (rig %q, polecat %q), so no token is revoked", rec.Session, rec.Rig, rec.Polecat)
+		return
+	}
+	seat := seattoken.PolecatSeat(rec.Rig, rec.Polecat)
+	if err := seattoken.RevokeSeat(context.Background(), b.townRoot, seat, b.revoker); err != nil {
+		b.warn("sandbox %s: revoking the tracker token of seat %s: %v", rec.Session, seat, err)
+	}
+}
+
+// warn reports a warning through the test's hook, or to the console.
+func (b *openshellBackend) warn(format string, args ...any) {
+	if b.warnf != nil {
+		b.warnf(format, args...)
+		return
+	}
+	style.PrintWarning(format, args...)
 }
 
 // deleteSandbox is `sandbox delete` with "not found" as success.

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -16,18 +17,46 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/crew"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/seattoken"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// crewRemoveEnv is what crew remove reads outside the process before it
-// touches a workspace: the member's rig, and whether its session exists.
+// crewRemoveEnv is what crew remove reads and writes outside the process: the
+// member's rig, whether its session exists, the store holding the agent bead,
+// and the hooks that end the member's tracker token and report a warning. A nil
+// hook is the production one.
 type crewRemoveEnv struct {
 	member     func(rigOverride, name string) (*crew.Manager, *rig.Rig, error)
 	hasSession func(sessionID string) (bool, error)
+	revoke     func(ctx context.Context, townRoot string, seat intent.Seat) error
+	warn       func(format string, args ...any)
+	// store is the rig's agent-bead store, for the bead the removal closes or
+	// deletes. Nil is bd at the rig path; the unit tier injects one because it
+	// starts no bd process (docs/testing.md).
+	store func(rigPath string) beads.Client
+}
+
+// revokeSeat ends seat's tracker token: through the test's hook, or with the
+// host's revoker.
+func (e crewRemoveEnv) revokeSeat(townRoot string, seat intent.Seat) error {
+	if e.revoke != nil {
+		return e.revoke(context.Background(), townRoot, seat)
+	}
+	return seattoken.RevokeSeat(context.Background(), townRoot, seat, nil)
+}
+
+// warnf reports a warning through the test's hook, or to the console.
+func (e crewRemoveEnv) warnf(format string, args ...any) {
+	if e.warn != nil {
+		e.warn(format, args...)
+		return
+	}
+	style.PrintWarning(format, args...)
 }
 
 func runCrewRemove(cmd *cobra.Command, args []string) error {
@@ -135,15 +164,27 @@ func runCrewRemoveWith(args []string, rigFlag string, force, purge bool, env cre
 				style.Bold.Render("✓"), r.Name, name)
 		}
 
-		// Handle agent bead
 		townRoot, _ := workspace.Find(r.Path)
 		if townRoot == "" {
 			townRoot = r.Path
 		}
+
+		// The workspace is gone, so the member's tracker token ends with it; a
+		// rig on Dolt has none. The revoke is idempotent, and a failure warns
+		// rather than failing a removal that has already happened (gt-p85pw.86).
+		seat := seattoken.CrewSeat(r.Name, name)
+		if err := env.revokeSeat(townRoot, seat); err != nil {
+			env.warnf("crew remove %s: revoking the tracker token of seat %s: %v", arg, seat, err)
+		}
+
+		// Handle agent bead
 		prefix := beads.GetPrefixForRig(townRoot, r.Name)
 		agentBeadID := beads.CrewBeadIDWithPrefix(prefix, r.Name, name)
 
-		rigBd := beads.NewPlain(r.Path, nil)
+		rigBd := beads.Client(beads.NewPlain(r.Path, nil))
+		if env.store != nil {
+			rigBd = env.store(r.Path)
+		}
 		if purge {
 			// --purge: DELETE the agent bead entirely (obliterate)
 			if err := rigBd.DeleteIssues(agentBeadID); err != nil {

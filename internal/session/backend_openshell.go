@@ -169,6 +169,11 @@ type openshellBackend struct {
 	// phaseWatch is how long this session's gateway phase has been a terminal
 	// failure. Nil is the process's watch (sandboxPhases); tests set one.
 	phaseWatch *sandboxPhaseWatch
+	// revoker ends the tracker tokens of a seat whose sandbox is gone. Nil is
+	// the host's tracker revoker; tests set it.
+	revoker seattoken.Revoker
+	// warnf reports a warning. Nil writes to stderr; tests set it.
+	warnf func(format string, args ...any)
 }
 
 func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
@@ -825,7 +830,7 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 
 	workDir := path.Join(sandboxTownRoot, rel)
 	if err := b.populate(ctx, spec, workDir, redirectTarget(rel), staged); err != nil {
-		return nil, b.rollback(ctx, spec.Session, err, spec.Trace)
+		return nil, b.rollback(spec, err, spec.Trace)
 	}
 
 	b.tmux = tmux.NewTmuxWithExecPrefix(SandboxTmuxSocket, SandboxExecPrefix(b.profile.Gateway, spec.Session)).Routed()
@@ -943,16 +948,23 @@ func (b *openshellBackend) checkSandboxGT(ctx context.Context, name string) erro
 	return checkImageGT(b.profile.Image, sandboxVersionSource, parseGTVersionCommit(string(out)), b.installedGT(), b.imageDiff)
 }
 
-// rollback deletes the sandbox after a failed populate and removes its
-// record, which populate may have written before it failed. The cleanup runs
-// without the caller's context, so a canceled spawn still cleans up.
-func (b *openshellBackend) rollback(ctx context.Context, name string, cause error, trace *SandboxTrace) error {
-	ctx = context.WithoutCancel(ctx)
+// rollback deletes the sandbox after a failed populate and removes its record,
+// which populate may have written before it failed. The sandbox being gone, the
+// seat's tracker token ends with it; the seat comes from the spec, because the
+// record is the last thing populate writes and a failed populate often has not
+// written one. The cleanup runs on its own context, so a canceled spawn still
+// cleans up (gt-p85pw.86).
+func (b *openshellBackend) rollback(spec SpawnSpec, cause error, trace *SandboxTrace) error {
+	var deleteErr error
 	err := trace.Phase("teardown", func() error {
-		return errors.Join(b.cli.Delete(ctx, name), RemoveSandboxRecord(b.townRoot, name))
+		deleteErr = b.deleteSandbox(spec.Session)
+		return errors.Join(deleteErr, RemoveSandboxRecord(b.townRoot, spec.Session))
 	})
+	if deleteErr == nil {
+		b.revokeSeat(SandboxRecord{Session: spec.Session, Rig: spec.Rig, Polecat: spec.Polecat})
+	}
 	if err != nil {
-		return fmt.Errorf("%w (rolling back sandbox %s: %v)", cause, name, err)
+		return fmt.Errorf("%w (rolling back sandbox %s: %v)", cause, spec.Session, err)
 	}
 	return cause
 }
