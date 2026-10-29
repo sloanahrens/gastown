@@ -23,8 +23,15 @@ const (
 	// SkipStartupBackoff starts the reason a bead stays unslung while its rest
 	// after a failed session start runs (dispatch.StartupBackoff).
 	SkipStartupBackoff = "startup backoff:"
-	// SkipBlocked starts the reason a candidate is left ready because a
-	// blocking dependency of it has not resolved (gt-ndad8). The blockers, each
-	// naming the status the read gave it, follow.
+	// SkipBlocked starts the tick's skip reason for a candidate a blocking
+	// dependency keeps off a seat, with the blockers following (gt-ndad8). The
+	// daemon's dispatch.idle rule matches this prefix, so the tick's skip line
+	// is the only writer: the peer-hold answer the overlap guard weighs has its
+	// own prefix below (gt-mz7v7).
 	SkipBlocked = "blocked by "
+	// SkipPeerBlocked starts specPeerHeldFrom's answer for a peer its own
+	// unresolved blockers keep off the ready board: a verdict the overlap guard
+	// weighs, never a line the tick reports, so it does not wear SkipBlocked
+	// (gt-mz7v7).
+	SkipPeerBlocked = "peer blocked by "
 )

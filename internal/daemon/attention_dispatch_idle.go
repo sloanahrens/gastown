@@ -355,10 +355,12 @@ var notDispatchableReasons = []string{
 	specdispatch.SkipNoSeat,
 	specdispatch.SkipRigHold,
 	specdispatch.SkipPerTickLimit,
-	// A bead an unresolved blocker holds waits on that blocker's resolution,
-	// which a free seat does not change; reading it as the dispatcher's standoff
-	// would raise the rule over every bead a deferred blocker is holding
-	// (gt-ndad8).
+	// A candidate an unresolved blocker holds waits on that blocker's
+	// resolution, which a free seat does not change; reading it as the
+	// dispatcher's standoff would raise the rule over every bead a deferred
+	// blocker is holding (gt-ndad8). This is the tick's skip line alone: the
+	// peer-hold answer the overlap guard reads carries its own prefix, since a
+	// peer's hold is not a line this rule classifies (gt-mz7v7).
 	specdispatch.SkipBlocked,
 }
 
