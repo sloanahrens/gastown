@@ -10,8 +10,7 @@ import (
 )
 
 // The mango stage: run the CLI over a target's training split and check the
-// boxes it found on the holdout. It is a port of the run and check halves of
-// scripts/town_metrics/mango_run.py; the Markdown report is a separate step.
+// boxes it found on the holdout. The Markdown report is a separate step.
 
 // The experiment's explore parameters. A zero MangoOptions asks for these, so
 // a caller that wants the report's run passes the zero value.

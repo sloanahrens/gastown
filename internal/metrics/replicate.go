@@ -9,9 +9,8 @@ import (
 )
 
 // The replication maths of the town's metrics: the checks that decide whether a
-// box mango found on the training split also holds on the held-out split. It is
-// a port of scripts/town_metrics/replicate.py, and both are tested against one
-// file of cases, testdata/replicate_cases.json, produced by running the Python.
+// box mango found on the training split also holds on the held-out split. The
+// tests check it against the golden cases in testdata/replicate_cases.json.
 //
 // Range and Cube mirror the ranges in mango explore's result JSON: a range
 // names a column and is either a set of categories or a numeric span.

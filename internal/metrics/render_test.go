@@ -96,7 +96,7 @@ func firstLineDifference(got, want string) string {
 // fixture is byte for byte the hand-written golden.
 func TestRenderReportMatchesTheGolden(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile(filepath.Join("..", "..", "scripts", "testdata", "town_metrics", "report_golden.md"))
+	data, err := os.ReadFile(filepath.Join("testdata", "report_golden.md"))
 	if err != nil {
 		t.Fatalf("read the golden: %v", err)
 	}

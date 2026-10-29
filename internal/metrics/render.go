@@ -14,11 +14,11 @@ import (
 	"strings"
 )
 
-// This file ports the report of scripts/town_metrics/render.py and cli.py: the
-// Markdown digest a run publishes, the "what moved" comparison against the
-// previous run, and the reads and the one write that turn an extract's output
-// directory into that digest. Every input and the output are seams, so a test
-// renders a town it built and writes nothing on the host.
+// This file renders the report: the Markdown digest a run publishes, the "what
+// moved" comparison against the previous run, and the reads and the one write
+// that turn an extract's output directory into that digest. Every input and the
+// output are seams, so a test renders a town it built and writes nothing on the
+// host.
 
 // headlineColumns are the town figures the headline table compares: the last
 // four weeks against the four before.

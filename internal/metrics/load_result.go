@@ -12,9 +12,9 @@ import (
 	"strings"
 )
 
-// This file ports load_result and typed_weekly from
-// scripts/town_metrics/cli.py: what a later report reads back from an earlier
-// extract's output directory.
+// This file reads an earlier extract's output directory back for a later report:
+// the footer.json the extract wrote and its weekly.csv, typed for the metrics
+// and render code.
 
 const (
 	footerName = "footer.json"

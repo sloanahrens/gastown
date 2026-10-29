@@ -7,9 +7,8 @@ import (
 	"strconv"
 )
 
-// This file ports the usage, overrun and om-era loaders of
-// scripts/town_metrics/loaders.py. Each takes its source by injection, as the
-// Python does, so a unit test needs neither ~/gt nor bd.
+// This file holds the usage, overrun and om-era loaders. Each takes its source by
+// injection, so a unit test needs neither ~/gt nor bd.
 
 // UsageModel is one model's entry in a bead's *.work.json. Only the call count
 // matters to LoadUsage, which picks the bead's busiest model.

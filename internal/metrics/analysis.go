@@ -304,20 +304,6 @@ func runEnv(ctx context.Context, env Env, argv []string) ([]byte, error) {
 	return env.RunEnv(ctx, argv, nil)
 }
 
-// extractDir is the directory the extract reports writing: its receipt line
-// ends with "-> <dir>", and the analysis reads there, so a run that writes
-// somewhere else is followed rather than assumed from the clock.
-func extractDir(out []byte) (string, error) {
-	const arrow = " -> "
-	text := strings.TrimSpace(string(out))
-	if i := strings.LastIndex(text, arrow); i >= 0 {
-		if dir := strings.TrimSpace(text[i+len(arrow):]); dir != "" {
-			return dir, nil
-		}
-	}
-	return "", fmt.Errorf("extract: no output directory in its receipt %q", tailString(string(out), 400))
-}
-
 // readExtract reads the landings and the explain-only columns the extract wrote
 // into dir, with the CSV header Join keeps as the joined table's own. A missing
 // sidecar names no explain-only column: it is additive to the CSV, so its

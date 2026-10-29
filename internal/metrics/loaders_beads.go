@@ -9,8 +9,7 @@ import (
 )
 
 // The beads loaders read bd through an injected BdRun and record every bead
-// they refuse in the Dropped log. Their behavior follows
-// scripts/town_metrics/loaders.py.
+// they refuse in the Dropped log.
 
 // BdRun runs bd with args in dir and returns its stdout. ok is false when the
 // call failed.

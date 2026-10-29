@@ -9,10 +9,9 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
-// This file ports the ledger and review loaders of
-// scripts/town_metrics/loaders.py. Each takes its source by injection, records
-// every refused line in the Dropped log, and returns the rows it could
-// attribute, so rows plus drops accounts for every non-blank line.
+// This file holds the ledger and review loaders. Each takes its source by
+// injection, records every refused line in the Dropped log, and returns the rows
+// it could attribute, so rows plus drops accounts for every non-blank line.
 
 // jsonRows returns the JSON of each non-blank line, in order. A line that is
 // not JSON is recorded in dropped and yields nil, so a caller sees one entry

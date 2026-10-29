@@ -7,11 +7,7 @@ import (
 	"strings"
 )
 
-// landingColumns is the contract landings.csv carries: the header the Python
-// extract writes, in its order.
-//
-// It mirrors LANDING_COLUMNS in scripts/town_metrics/tables.py. Change both in
-// one landing, or Join writes a header the extract did not.
+// landingColumns is the header landings.csv is written with, in its order.
 var landingColumns = []string{
 	"bead", "rig", "landed_at", "week", "route", "om_verdict", "gate_result",
 	"lines_added", "lines_deleted", "lines_total", "files_touched",

@@ -17,8 +17,7 @@ import (
 
 // The digest's "Mango findings" section: the weekly table's profile and, per
 // target, the split's counts, the search's counters and the boxes measured on
-// the holdout. It is a port of the Markdown section of
-// scripts/town_metrics/mango_run.py.
+// the holdout.
 
 // MangoSectionMinPositives is the fewest positives a target's training split
 // needs for the section to run it; a thinner target is named and skipped,

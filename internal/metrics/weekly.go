@@ -10,9 +10,7 @@ import (
 )
 
 // The bead-side weekly quantities: labels, dependency density, the handoff
-// ratio, handoff size, mode shift and the weekly row that joins them. It is a
-// port of the second part of scripts/town_metrics/metrics.py, so the same rows
-// give the same figures.
+// ratio, handoff size, mode shift and the weekly row that joins them.
 
 // WeeklyColumns is the header weekly.csv carries, in the Python's order. Change
 // it and WeeklyMetrics together, or the extract writes a column no row fills.

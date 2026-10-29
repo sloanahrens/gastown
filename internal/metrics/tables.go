@@ -10,8 +10,8 @@ import (
 )
 
 // explainOnlyColumns are the landings.csv columns known only after the landing:
-// never a predictor, only joined back to explain a box. It mirrors EXPLAIN_ONLY
-// in scripts/town_metrics/tables.py, in the sorted order the sidecar writes.
+// never a predictor, only joined back to explain a box. They are kept in the
+// sorted order the sidecar writes.
 var explainOnlyColumns = []string{
 	"attempts", "file_entropy", "files_touched", "gate_result", "lines_added",
 	"lines_deleted", "lines_total", "om_verdict", "package_entropy", "unreadable",
