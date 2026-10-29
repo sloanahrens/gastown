@@ -294,7 +294,7 @@ func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
 	// below is allowed at all, and it is read from the settings rather than the
 	// detected supervisor because detection can fail where the kind still
 	// decides that: a compose file that went missing is a detection error, and
-	// it is not a licence to signal a host PID.
+	// it is not a license to signal a host PID.
 	containerTown, settingsErr := c.townIsContainer(townRoot)
 
 	// A signal alone does not stop a supervised daemon: the loaded KeepAlive

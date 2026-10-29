@@ -1527,7 +1527,7 @@ func TestRunDaemonStop_ContainerUnknownStateNeverSignalsTheLockPID(t *testing.T)
 }
 
 // A container job that is loaded but whose stop command fails leaves the
-// daemon's fate unproven, and the lock is still not a licence to signal: the
+// daemon's fate unproven, and the lock is still not a license to signal: the
 // stop reports the failed command and the one that does stop the container.
 func TestRunDaemonStop_ContainerFailedStopNeverSignalsTheLockPID(t *testing.T) {
 	t.Parallel()
