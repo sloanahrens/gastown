@@ -34,9 +34,6 @@ Available guards:
   question-tool      - Deny AskUserQuestion in a session with nobody at the pane
   permission-request - Deny a permission prompt an unattended session cannot answer (PermissionRequest hook, exit 0)
 
-External guards (standalone scripts, not compiled into gt):
-  context-budget   - scripts/guards/context-budget-guard.sh
-
 Example hook configuration (matcher is the TOOL NAME only, a shell guard's
 being "Bash|Monitor" — a bare "Bash" lets a command run through the
 Monitor tool reach the guard's target unguarded, gt-vx2mm; a command

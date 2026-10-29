@@ -102,7 +102,6 @@ func TestManifestOrderIsToday(t *testing.T) {
 		"scripts/resource-sampler_test.sh",
 		"scripts/makefile-gate_test.sh",
 		".githooks/pre-push_test.sh",
-		"scripts/guards/context-budget-guard_test.sh",
 		"scripts/post-land-shell_test.sh",
 		"scripts/town_metrics_test.sh",
 	}

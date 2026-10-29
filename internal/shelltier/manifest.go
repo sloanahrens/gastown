@@ -92,7 +92,6 @@ func Manifest() []Entry {
 		{Path: "scripts/resource-sampler_test.sh", StubsGo: "none: go test appears only in a ps fixture line"},
 		{Path: "scripts/makefile-gate_test.sh", StubsGo: "stub: scripts/makefile-gate_test.sh:504 puts a fake go on PATH"},
 		{Path: ".githooks/pre-push_test.sh", StubsGo: "none: names no go command"},
-		{Path: "scripts/guards/context-budget-guard_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/post-land-shell_test.sh", StubsGo: "none: stubs tier-sweep.sh, so no go runs"},
 		{Path: "scripts/town_metrics_test.sh", StubsGo: "none: names no go command"},
 	}
