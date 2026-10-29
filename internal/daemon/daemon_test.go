@@ -747,6 +747,14 @@ func TestDetectSelf(t *testing.T) {
 			want: Owner{Kind: "launchd", ID: "com.gastown.daemon"},
 		},
 		{
+			// An app-launched process carries its own XPC service name, which
+			// is not the town's job, so it is recorded as a hand-run daemon
+			// (gt-qpeei.27).
+			name: "an app-launched process is not the launchd job",
+			env:  map[string]string{"XPC_SERVICE_NAME": "application.x.y"},
+			want: Owner{Kind: "manual", ID: fmt.Sprintf("fixture-host:%d", os.Getpid())},
+		},
+		{
 			name: "a systemd unit",
 			env:  map[string]string{"INVOCATION_ID": "9f2c4d1e"},
 			want: Owner{Kind: "systemd", ID: "9f2c4d1e"},
@@ -860,17 +868,24 @@ func fixtureHostname(host string) func() (string, error) {
 // and returns Run's error.
 func startParkedRun(t *testing.T, env map[string]string) (*Config, func() error) {
 	t.Helper()
-	town := t.TempDir()
+	return startParkedRunIn(t, t.TempDir(), env, nil)
+}
+
+// startParkedRunIn is startParkedRun on the town root town, with probe as the
+// owner probe the startup guard reads (nil reads the supervisors for real).
+func startParkedRunIn(t *testing.T, town string, env map[string]string, probe OwnerProbe) (*Config, func() error) {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfg := DefaultConfig(town)
 	d := &Daemon{
-		config:   cfg,
-		logger:   log.New(io.Discard, "", 0),
-		getenv:   ownerEnv(env),
-		hostname: fixtureHostname("fixture-host"),
-		clock:    clockwork.NewFakeClockAt(time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)),
+		config:     cfg,
+		logger:     log.New(io.Discard, "", 0),
+		getenv:     ownerEnv(env),
+		hostname:   fixtureHostname("fixture-host"),
+		clock:      clockwork.NewFakeClockAt(time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)),
+		ownerProbe: probe,
 	}
 	// The rest of the startup does real host work: the heartbeat dispatches
 	// and restarts sessions, the sweep touches the tmux socket directory, and
@@ -1032,6 +1047,9 @@ func TestRunRefusesContainerModeWithoutAContainerName(t *testing.T) {
 	}
 	if _, err := os.Stat(cfg.PidFile); !os.IsNotExist(err) {
 		t.Errorf("Run wrote %s before refusing", cfg.PidFile)
+	}
+	if _, err := os.Stat(filepath.Join(town, "daemon", "daemon.lock")); !os.IsNotExist(err) {
+		t.Errorf("Run wrote daemon.lock before refusing")
 	}
 	if _, err := os.Stat(StateFile(cfg.TownRoot)); !os.IsNotExist(err) {
 		t.Errorf("Run wrote state.json before refusing")
