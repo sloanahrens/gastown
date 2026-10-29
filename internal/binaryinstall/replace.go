@@ -205,17 +205,14 @@ func (f Files) setImmutable(path string) error {
 }
 
 // createTempFile is mktemp: the pattern decides the name, the directory decides
-// the filesystem the rename stays on. A close that fails is reported rather
-// than ignored, because the caller is about to write the file it named.
+// the filesystem the rename stays on. A close that fails is not the step's
+// failure: the copy that follows reopens the file and reports its own error.
 func createTempFile(dir, pattern string) (string, error) {
 	file, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return "", err
 	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(file.Name())
-		return "", err
-	}
+	_ = file.Close()
 	return file.Name(), nil
 }
 

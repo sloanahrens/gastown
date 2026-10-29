@@ -391,6 +391,84 @@ func TestReplaceLeavesNoTempFileBesideTheTarget(t *testing.T) {
 	}
 }
 
+// The four tests below drive the real operations behind the seams, which the
+// fakes cannot: they are the paths a replace takes when the disk itself says
+// no.
+
+func TestReplaceStopsAtASourceThatVanishesBeforeTheModeRead(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// The existence check saw the file; the read a moment later did not, which
+	// is the race the 0755 fallback exists for.
+	files := Files{IsFile: func(string) bool { return true }}
+	destDir := filepath.Join(dir, "bin")
+	err := (Installer{Files: files}).Replace(filepath.Join(dir, "gt-built"), destDir, "gt")
+	if err == nil || !strings.Contains(err.Error(), "copy") {
+		t.Fatalf("Replace: %v, want the copy to report the vanished source", err)
+	}
+	if entries, readErr := os.ReadDir(destDir); readErr != nil || len(entries) != 0 {
+		t.Fatalf("%s holds %v (%v), want the temp file removed", destDir, entries, readErr)
+	}
+}
+
+func TestReplaceReportsADestinationDirectoryTheDiskWouldNotCreate(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	src := writeSourceFile(t, dir)
+	// MkdirAll answers success without creating, which is the one way a real
+	// os.CreateTemp meets a directory that is not there.
+	files := Files{MkdirAll: func(string) error { return nil }}
+	destDir := filepath.Join(dir, "absent")
+	err := (Installer{Files: files}).Replace(src, destDir, "gt")
+	if err == nil || !strings.Contains(err.Error(), "create temp file") || !strings.Contains(err.Error(), destDir) {
+		t.Fatalf("Replace: %v, want the temp-file error to name %s", err, destDir)
+	}
+}
+
+func TestReplaceReportsACopyThatCannotOpenTheTempFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	src := writeSourceFile(t, dir)
+	absent := filepath.Join(dir, "absent")
+	files := Files{TempFile: func(string, string) (string, error) {
+		return filepath.Join(absent, ".gt.tmp.1"), nil
+	}}
+	err := (Installer{Files: files}).Replace(src, filepath.Join(dir, "bin"), "gt")
+	if err == nil || !strings.Contains(err.Error(), "copy") {
+		t.Fatalf("Replace: %v, want the copy to report the temp file it could not open", err)
+	}
+}
+
+func TestReplaceReportsACopyThatCannotReadTheSource(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// A directory opens and then refuses the read, which is how the streaming
+	// copy meets an unreadable source.
+	src := filepath.Join(dir, "gt-built")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", src, err)
+	}
+	files := Files{IsFile: func(string) bool { return true }}
+	destDir := filepath.Join(dir, "bin")
+	err := (Installer{Files: files}).Replace(src, destDir, "gt")
+	if err == nil || !strings.Contains(err.Error(), "copy") {
+		t.Fatalf("Replace: %v, want the copy to report the unreadable source", err)
+	}
+	if entries, readErr := os.ReadDir(destDir); readErr != nil || len(entries) != 0 {
+		t.Fatalf("%s holds %v (%v), want the temp file removed", destDir, entries, readErr)
+	}
+}
+
+// writeSourceFile is a built binary on a real filesystem.
+func writeSourceFile(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "gt-built")
+	if err := os.WriteFile(path, []byte("built binary"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
+}
+
 // indexOf is the position of call in the log, or -1 when the code never made
 // it.
 func indexOf(calls []string, call string) int {
