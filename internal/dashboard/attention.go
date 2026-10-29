@@ -290,7 +290,7 @@ func buildAttention(esc *Escalations, ask *Questions, items []Alert, queue Atten
 	// without them, and counting it would make the pill loud with nothing to do
 	// (gt-tv5v2).
 	for _, r := range at.NeedsYou.Rows {
-		if r.Owner == string(attention.OwnerSloan) {
+		if r.Owner == string(attention.OwnerOperator) {
 			at.Mine++
 		}
 	}
@@ -354,7 +354,7 @@ func attentionBefore(a, b AttentionRow) bool {
 // rather than hidden among the rows somebody is already reading.
 func ownerRank(owner string) int {
 	switch attention.Owner(owner) {
-	case attention.OwnerSloan:
+	case attention.OwnerOperator:
 		return 0
 	case attention.OwnerOverseer:
 		return 1

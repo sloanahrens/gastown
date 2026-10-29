@@ -96,7 +96,7 @@ func attentionState(at map[string]any) map[string]any {
 // with nothing new looks like.
 func attentionFoldRows() []any {
 	return []any{
-		map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy",
+		map[string]any{"kind": "question", "owner": "operator", "id": "gt-q1", "title": "retry policy",
 			"priority": 1, "question": "how many times should a push retry?",
 			"recommended": "retry twice\nand page someone after an hour", "effort": "quick",
 			"held_count": 2, "held": []any{"gt-h1"}, "state": "awaiting", "age_sec": 5400},
@@ -252,13 +252,13 @@ func TestThePanelOpensOnTheHumanRowsAndTheChipsAddTheRest(t *testing.T) {
 
 	dom := newPageDOM(t)
 	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{
-		map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy"},
+		map[string]any{"kind": "question", "owner": "operator", "id": "gt-q1", "title": "retry policy"},
 		map[string]any{"kind": "escalation", "owner": "overseer", "id": "hq-9", "title": "slot held"},
 		map[string]any{"kind": "item", "owner": "overseer", "id": "slot:gastown", "title": "the slot is held"},
 	}}))
 
 	rows := panelRows(t, dom)
-	if len(rows) != 1 || rows[0].Owner != "sloan" {
+	if len(rows) != 1 || rows[0].Owner != "operator" {
 		t.Fatalf("the panel drew %+v before a chip was touched, want the human's row alone", rows)
 	}
 
@@ -276,7 +276,7 @@ func TestThePanelOpensOnTheHumanRowsAndTheChipsAddTheRest(t *testing.T) {
 	if err := json.Unmarshal([]byte(v.String()), &chips); err != nil {
 		t.Fatalf("reading the owner chips: %v", err)
 	}
-	if len(chips) != 2 || !strings.Contains(chips[0].Title, "sloan") || chips[0].Count != "1" ||
+	if len(chips) != 2 || !strings.Contains(chips[0].Title, "operator") || chips[0].Count != "1" ||
 		!strings.Contains(chips[1].Title, "overseer") || chips[1].Count != "2" {
 		t.Errorf("the chips read %+v, want the human's one row and the overseer's two", chips)
 	}
@@ -292,7 +292,7 @@ func TestThePanelOpensOnTheHumanRowsAndTheChipsAddTheRest(t *testing.T) {
 	}
 
 	// The human's chip switched off leaves the overseer's rows.
-	switchOwner(t, dom, "sloan")
+	switchOwner(t, dom, "operator")
 	rows = panelRows(t, dom)
 	if len(rows) != 2 {
 		t.Fatalf("the panel drew %+v with the human's chip off, want the overseer's two", rows)
@@ -335,7 +335,7 @@ func TestThePanelDrawsTheThreeKindsOfRow(t *testing.T) {
 
 	dom := newPageDOM(t)
 	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{
-		map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy",
+		map[string]any{"kind": "question", "owner": "operator", "id": "gt-q1", "title": "retry policy",
 			"question": "how many times should a push retry?", "recommended": "retry twice\nand page someone if it fails again",
 			"held_count": 2, "held": []any{"gt-h1"}, "effort": "quick",
 			"state": "awaiting", "priority": 0, "age_sec": 5400},
@@ -354,7 +354,7 @@ func TestThePanelDrawsTheThreeKindsOfRow(t *testing.T) {
 	// The question leads: it is the row type that stops the town while it waits,
 	// and it is the only one the human has to answer.
 	q := rows[0]
-	if q.Owner != "sloan" || !panelCells(q, "span tag own-sloan") {
+	if q.Owner != "operator" || !panelCells(q, "span tag own-operator") {
 		t.Errorf("the question row is tagged %q with the cells %v, want it the human's", q.Owner, q.Cells)
 	}
 	for _, want := range []string{
@@ -455,7 +455,7 @@ func TestThePanelDrawsTheNeedsHumanScore(t *testing.T) {
 func TestThePanelGroupsNeedsYouAndInThePipeline(t *testing.T) {
 	t.Parallel()
 
-	act := map[string]any{"kind": "item", "owner": "sloan", "class": "act", "id": "host:disk",
+	act := map[string]any{"kind": "item", "owner": "operator", "class": "act", "id": "host:disk",
 		"title": "the volume is 96% full", "level": "crit", "rule": "host.disk_crit", "age_sec": 60}
 	held := map[string]any{"kind": "item", "owner": "overseer", "class": "pipeline", "id": "rejected-twice:gt-9",
 		"title": "gt-9 was rejected twice", "level": "warn", "rule": "landing.rejected_twice",
@@ -550,7 +550,7 @@ func TestARowFoldsOnItsOwnAndUnfolds(t *testing.T) {
 	q := readRow(t, dom, 0)
 	// The header line is the row: its owner, its bead and title, its priority
 	// and state, its age and its caret.
-	for _, want := range []string{"sloan", "gt-q1", "retry policy", "P1", "awaiting you", "1h30m", "▸"} {
+	for _, want := range []string{"operator", "gt-q1", "retry policy", "P1", "awaiting you", "1h30m", "▸"} {
 		if !strings.Contains(q.Text, want) {
 			t.Errorf("the folded row reads %q, with no %q of its header line", q.Text, want)
 		}
@@ -798,9 +798,9 @@ func TestASecondTabDoesNotUndoTheFirstTabsFold(t *testing.T) {
 
 	twoQuestions := func() map[string]any {
 		return attentionState(map[string]any{"rows": []any{
-			map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy",
+			map[string]any{"kind": "question", "owner": "operator", "id": "gt-q1", "title": "retry policy",
 				"priority": 1, "question": "how many times should a push retry?", "age_sec": 60},
-			map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q2", "title": "which slot",
+			map[string]any{"kind": "question", "owner": "operator", "id": "gt-q2", "title": "which slot",
 				"priority": 2, "question": "which slot should the gate use?", "age_sec": 90},
 		}})
 	}
@@ -934,7 +934,7 @@ func TestThePanelNamesAQuestionItCannotDraw(t *testing.T) {
 
 	dom := newPageDOM(t)
 	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{
-		map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q2", "title": "a question the bead lost",
+		map[string]any{"kind": "question", "owner": "operator", "id": "gt-q2", "title": "a question the bead lost",
 			"state": "awaiting", "malformed": true, "age_sec": 3600},
 	}}))
 
@@ -1036,21 +1036,21 @@ func TestThePanelNoteCountsTheRowsAndAgesTheOldestQuestion(t *testing.T) {
 	}{
 		{
 			name:      "one row of a longer queue",
-			rows:      []any{map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy"}},
+			rows:      []any{map[string]any{"kind": "question", "owner": "operator", "id": "gt-q1", "title": "retry policy"}},
 			more:      2,
 			wantNote:  "1 need you · 0 in the pipeline · 1 of 3",
 			wantClass: "r",
 		},
 		{
 			name: "a question past four hours is marked",
-			rows: []any{map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1",
+			rows: []any{map[string]any{"kind": "question", "owner": "operator", "id": "gt-q1",
 				"title": "retry policy", "age_sec": 5 * 3600}},
 			wantNote:  "1 need you · 0 in the pipeline · oldest question 5h00m",
 			wantClass: "r warnc",
 		},
 		{
 			name:       "a fresh question is not",
-			rows:       []any{map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy", "age_sec": 600}},
+			rows:       []any{map[string]any{"kind": "question", "owner": "operator", "id": "gt-q1", "title": "retry policy", "age_sec": 600}},
 			wantNote:   "1 need you · 0 in the pipeline",
 			wantClass:  "r",
 			wantAbsent: "oldest question",
@@ -1060,7 +1060,7 @@ func TestThePanelNoteCountsTheRowsAndAgesTheOldestQuestion(t *testing.T) {
 			// beside the shown rows only while the filter is showing all of them.
 			name: "rows the filter is holding back are not counted",
 			rows: []any{
-				map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy"},
+				map[string]any{"kind": "question", "owner": "operator", "id": "gt-q1", "title": "retry policy"},
 				map[string]any{"kind": "escalation", "owner": "overseer", "id": "hq-9", "title": "slot held"},
 			},
 			more:      3,
@@ -1107,12 +1107,12 @@ func TestTheStripDrawsTheHumanCountAsAFloor(t *testing.T) {
 	}{
 		{
 			name: "every row was read",
-			at:   map[string]any{"mine": 2, "rows": []any{map[string]any{"owner": "sloan"}}},
+			at:   map[string]any{"mine": 2, "rows": []any{map[string]any{"owner": "operator"}}},
 			want: "2 needs you",
 		},
 		{
 			name: "a reader capped rows out of the list",
-			at:   map[string]any{"mine": 2, "more": 3, "rows": []any{map[string]any{"owner": "sloan"}}},
+			at:   map[string]any{"mine": 2, "more": 3, "rows": []any{map[string]any{"owner": "operator"}}},
 			want: "2+ needs you",
 		},
 		{
@@ -1146,7 +1146,7 @@ func TestTheStripDrawsTheHumanCountAsAFloor(t *testing.T) {
 func TestTheStripPillCountsOnlyTheRowsThatNeedAPerson(t *testing.T) {
 	t.Parallel()
 
-	act := map[string]any{"kind": "item", "owner": "sloan", "class": "act", "id": "host:disk", "title": "disk"}
+	act := map[string]any{"kind": "item", "owner": "operator", "class": "act", "id": "host:disk", "title": "disk"}
 	pipe := map[string]any{"kind": "item", "owner": "overseer", "class": "pipeline", "id": "rejected-twice:gt-9", "title": "rework",
 		"held_by": "opal", "waiting_on": "rework by opal, attempt 2"}
 
@@ -1160,7 +1160,7 @@ func TestTheStripPillCountsOnlyTheRowsThatNeedAPerson(t *testing.T) {
 
 		mine := 0
 		for _, row := range rows {
-			if m, ok := row.(map[string]any); ok && m["owner"] == "sloan" && m["class"] != "pipeline" {
+			if m, ok := row.(map[string]any); ok && m["owner"] == "operator" && m["class"] != "pipeline" {
 				mine++
 			}
 		}
@@ -1200,7 +1200,7 @@ func TestTheStripPillCountsOnlyTheRowsThatNeedAPerson(t *testing.T) {
 
 	// A pipeline row the human owns is still work in flight: the pill counts it
 	// nowhere (gt-tv5v2).
-	minePipe := map[string]any{"kind": "item", "owner": "sloan", "class": "pipeline", "id": "risk:gt-7:deadbeef",
+	minePipe := map[string]any{"kind": "item", "owner": "operator", "class": "pipeline", "id": "risk:gt-7:deadbeef",
 		"title": "risk", "held_by": "opal", "waiting_on": "the review round"}
 	if value, _ := readPill([]any{minePipe}); value != "0 needs you" {
 		t.Errorf("the pill reads %q with only the human's pipeline row standing, want 0 needs you", value)
@@ -1352,7 +1352,7 @@ func TestTheHubMergesTheReadersIntoTheOneList(t *testing.T) {
 			item = &rows[i]
 		}
 	}
-	if item == nil || item.Rule != attention.RuleHostDiskCrit || item.Owner != string(attention.OwnerSloan) {
+	if item == nil || item.Rule != attention.RuleHostDiskCrit || item.Owner != string(attention.OwnerOperator) {
 		t.Fatalf("the queue item is %+v, want the host rule owned by the human", item)
 	}
 	if item.Title != "the volume is 96% full" {

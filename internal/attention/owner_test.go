@@ -23,7 +23,7 @@ func TestEveryRuleHasAnOwner(t *testing.T) {
 	// The human's rules: a decision or an action only the person can take. Every
 	// other row is the overseer's, which the loop below pins so a rule moving
 	// between the two is a test failure rather than a quiet retag.
-	sloan := map[string]bool{
+	operator := map[string]bool{
 		RuleQuestionNew:    true,
 		RuleQuestionStale:  true,
 		RuleOverseerSilent: true,
@@ -35,12 +35,24 @@ func TestEveryRuleHasAnOwner(t *testing.T) {
 	}
 	for _, rule := range Rules() {
 		want := OwnerOverseer
-		if sloan[rule] {
-			want = OwnerSloan
+		if operator[rule] {
+			want = OwnerOperator
 		}
 		if got := RuleOwner(rule); got != want {
 			t.Errorf("RuleOwner(%q) = %q, want %q", rule, got, want)
 		}
+	}
+}
+
+// The owner's value is what the dashboard serves and the page's chip and badge
+// read, so the constant is pinned to the word itself: a rename of the constant
+// that left the value behind would pass every test that reads the tag by name
+// and serve a reader a person where they expect the operator (gt-rujis).
+func TestTheOperatorsOwnerIsTheWordOperator(t *testing.T) {
+	t.Parallel()
+
+	if OwnerOperator != "operator" {
+		t.Errorf("OwnerOperator = %q, want %q", string(OwnerOperator), "operator")
 	}
 }
 
@@ -74,8 +86,8 @@ func TestRuleOwnerReadsAnUnknownRuleByItsFamily(t *testing.T) {
 		want Owner
 	}{
 		{RuleEscalation, OwnerOverseer}, // the family's row, corrected per escalation
-		{"escalation.unhandled_hours", OwnerSloan},
-		{"host.disk_full", OwnerSloan},
+		{"escalation.unhandled_hours", OwnerOperator},
+		{"host.disk_full", OwnerOperator},
 		{"landing.new_rule", OwnerOverseer}, // landing.* is the town's own
 		{"question.expired", OwnerOverseer}, // a question's owner is its state, which only a row states
 		{"something.new", OwnerOverseer},

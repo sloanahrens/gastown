@@ -39,7 +39,7 @@ func TestPushActionsReachTheHumanOnlyForTheHumansEscalation(t *testing.T) {
 		owner attention.Owner
 		want  []string
 	}{
-		{"the human owns it: the whole route runs", attention.OwnerSloan, route},
+		{"the human owns it: the whole route runs", attention.OwnerOperator, route},
 		{"the overseer owns it: nothing reaches a person", attention.OwnerOverseer,
 			[]string{"bead", "mail:gastown/overseer", "log"}},
 	}
@@ -391,19 +391,34 @@ func TestUnhandledRunNamesTheEscalationsAgeNotTheWindow(t *testing.T) {
 	}
 }
 
+// The push gate takes its owner from the escalation's address on every call and
+// stores nothing, so a human's escalation keeps the whole route through the two
+// functions together. No owner value from an older record can reach the gate
+// and drop the route (gt-rujis).
+func TestAHumansEscalationKeepsItsWholePushRoute(t *testing.T) {
+	t.Parallel()
+	route := []string{"bead", "mail:gastown/overseer", "exec:imessage", "email:human", "sms:human", "slack", "log"}
+	for _, address := range []string{attention.HumanAddress, "gastown/" + attention.HumanAddress} {
+		owner := attention.EscalationOwner(address)
+		if got := PushActions(route, owner); strings.Join(got, ",") != strings.Join(route, ",") {
+			t.Errorf("an escalation from %q is owned by %s and pushes %v, want the whole route %v", address, owner, got, route)
+		}
+	}
+}
+
 // EscalationOwner is the rule the push gate reads: only the human's own session
 // speaks for the human.
 func TestEscalationOwner(t *testing.T) {
 	t.Parallel()
 	cases := map[string]attention.Owner{
-		"overseer":                 attention.OwnerSloan,
-		"gastown/overseer":         attention.OwnerSloan,
+		"overseer":                 attention.OwnerOperator,
+		"gastown/overseer":         attention.OwnerOperator,
 		"gastown/polecats/rictus":  attention.OwnerOverseer,
 		"gastown/crew/sloan":       attention.OwnerOverseer,
 		"daemon":                   attention.OwnerOverseer,
 		"":                         attention.OwnerOverseer,
 		"gastown/overseer/polecat": attention.OwnerOverseer,
-		"  gastown/overseer  ":     attention.OwnerSloan,
+		"  gastown/overseer  ":     attention.OwnerOperator,
 	}
 	for address, want := range cases {
 		if got := attention.EscalationOwner(address); got != want {

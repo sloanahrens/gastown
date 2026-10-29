@@ -272,7 +272,7 @@ button.arow-head:hover{background:#19212b}
 .arow .waiting{color:var(--blue)}
 .arow .badc{display:block}
 .arow .qcmd,.arow .qrec{margin-top:3px}
-.own-sloan{color:var(--amber);border-color:var(--amber)}
+.own-operator{color:var(--amber);border-color:var(--amber)}
 .own-overseer{color:var(--blue);border-color:var(--blue)}
 .tag.rule{font-family:ui-monospace,Menlo,monospace}
 .esc{font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em;white-space:nowrap}
@@ -2840,8 +2840,8 @@ const QUESTION_OLDEST_SEC = 4 * 3600;
 // one chip per owner, opened on the human's rows — the panel that lists what
 // needs the human — so the overseer reads its own rows by switching its chip
 // rather than opening a second panel (gt-bi6w0).
-const OWNERS = ["sloan", "overseer"];
-const PANEL_OPENS_ON = "sloan";
+const OWNERS = ["operator", "overseer"];
+const PANEL_OPENS_ON = "operator";
 
 // A row of the panel folds on its own, so one long question stops taking the
 // pane everything waiting shares (gt-1kaed). The choice is the reader's and

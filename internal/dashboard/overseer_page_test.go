@@ -241,7 +241,7 @@ func TestOverseerQueueDrawsTheRowsTheOverseerOwns(t *testing.T) {
 			"title": "gt-abc landed deadbeef touching internal/land; overseer review wanted", "level": "crit", "age_sec": 7200},
 		map[string]any{"kind": "item", "owner": "overseer", "rule": "dispatch.idle", "id": "dispatch:idle",
 			"title": "5 idle ticks with 2 beads waiting", "level": "warn"},
-		map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy", "state": "awaiting"},
+		map[string]any{"kind": "question", "owner": "operator", "id": "gt-q1", "title": "retry policy", "state": "awaiting"},
 	}}})
 
 	block := blockNamed(t, overseerBlocks(t, dom), "For the overseer")

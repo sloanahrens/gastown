@@ -116,7 +116,7 @@ func TestStripAlarmsTurnWithTheReadingsTheStripHolds(t *testing.T) {
 		},
 		{
 			name:  "a decision waiting on the human is red",
-			state: State{Now: now, Attention: &Attention{Rows: []AttentionRow{{Owner: "sloan"}}, Mine: 1}},
+			state: State{Now: now, Attention: &Attention{Rows: []AttentionRow{{Owner: "operator"}}, Mine: 1}},
 			want:  StripAlarms{NeedsYou: alarmBad},
 		},
 		{
