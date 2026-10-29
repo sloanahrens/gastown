@@ -98,29 +98,6 @@ func TestBuildBinariesReturnsTheThreePathsUnderOut(t *testing.T) {
 	}
 }
 
-func TestBuildBinariesOutIsResolvedAgainstTheCallersDirectory(t *testing.T) {
-	t.Parallel()
-	b, run := builderFor(t)
-	b.Out = filepath.Join("rel", "out")
-	paths, err := b.BuildBinaries(context.Background(), testRev)
-	if err != nil {
-		t.Fatalf("BuildBinaries: %v", err)
-	}
-	abs, err := filepath.Abs(b.Out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, name := range []string{"gt", "bd", "om"} {
-		want := filepath.Join(abs, name)
-		if paths[i] != want {
-			t.Errorf("%s path = %q, want %q", name, paths[i], want)
-		}
-		if got := outOf(run.calls[i].argv); got != want {
-			t.Errorf("%s build writes to %q, want %q (the caller's directory, not its source checkout)", name, got, want)
-		}
-	}
-}
-
 func TestBuildBinariesRecordsTheCrossCompile(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
@@ -235,6 +212,7 @@ func TestBuildBinariesRefusesBeforeAnyBuild(t *testing.T) {
 		{name: "no runner", breakIt: func(b *Builder) { b.Run = nil }, rev: testRev, want: "no runner"},
 		{name: "no git", breakIt: func(b *Builder) { b.Git = nil }, rev: testRev, want: "no git"},
 		{name: "no output directory", breakIt: func(b *Builder) { b.Out = "" }, rev: testRev, want: "no output directory"},
+		{name: "a relative output directory", breakIt: func(b *Builder) { b.Out = filepath.Join("rel", "out") }, rev: testRev, want: `output directory "rel/out" is not absolute`},
 		{name: "no rev", breakIt: func(*Builder) {}, rev: " ", want: "no rev"},
 		{name: "a rev that is an option", breakIt: func(*Builder) {}, rev: "--upload-pack=sh", want: `rev "--upload-pack=sh" is not`},
 		{name: "a rev the gt checkout does not hold", breakIt: func(*Builder) {}, rev: "1234567", want: "does not hold commit 1234567"},
@@ -248,7 +226,7 @@ func TestBuildBinariesRefusesBeforeAnyBuild(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			run := &fakeRunner{}
-			b := validBuilder(run, "out")
+			b := validBuilder(run, t.TempDir())
 			tc.breakIt(&b)
 			paths, err := b.BuildBinaries(context.Background(), tc.rev)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {

@@ -47,9 +47,9 @@ type Builder struct {
 	// host's. bdbuild.Env keeps the variables that locate the toolchain and drops
 	// the ones that would change what is compiled.
 	Environ []string
-	// Out is the directory the three binaries are written to. A relative Out is
-	// resolved against the caller's directory, not the source checkouts the
-	// builds run in.
+	// Out is the absolute directory the three binaries are written to. A build
+	// runs in its source checkout, so a relative Out would be read against that
+	// checkout, not the caller's directory: BuildBinaries refuses one.
 	Out string
 	// GTSrc is the gt checkout, read as it stands: the caller owes one at rev
 	// with no changes, the rule `make polecat-image` refuses a dirty tree for
@@ -79,9 +79,8 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	if b.Out == "" {
 		return nil, errors.New("daemonimage: no output directory for the binaries")
 	}
-	out, err := filepath.Abs(b.Out)
-	if err != nil {
-		return nil, fmt.Errorf("daemonimage: cannot resolve the output directory %q: %w", b.Out, err)
+	if !filepath.IsAbs(b.Out) {
+		return nil, fmt.Errorf("daemonimage: output directory %q is not absolute; a build runs in its source checkout", b.Out)
 	}
 	if rev = strings.TrimSpace(rev); rev == "" {
 		return nil, errors.New("daemonimage: no rev to stamp gt with")
@@ -119,7 +118,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	}
 	paths := make([]string, 0, len(builds))
 	for _, build := range builds {
-		path := filepath.Join(out, build.name)
+		path := filepath.Join(b.Out, build.name)
 		argv := []string{"go", "build", "-trimpath"}
 		if build.ldflags != "" {
 			argv = append(argv, "-ldflags", build.ldflags)
