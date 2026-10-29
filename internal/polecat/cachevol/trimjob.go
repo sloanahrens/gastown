@@ -309,6 +309,53 @@ func TrimSelector() string {
 	return strings.Join(terms, ",")
 }
 
+// TrimObject is one object a trim applied, as a rerun lists it in the namespace: its kind, its name
+// and the labels it carries.
+type TrimObject struct {
+	Kind   string
+	Name   string
+	Labels map[string]string
+}
+
+// TrimStale returns what existing holds that a rerun must delete before it applies m: every Job it
+// finds, then every other trim object m does not name.
+func TrimStale(m *TrimManifest, existing []TrimObject) []TrimObject {
+	// Only what TrimSelector reaches is returned, so a caller that lists wider than the trim deletes
+	// nothing a trim did not apply: the seed Job shares the namespace.
+	named := make(map[string]bool, len(m.Shards()))
+	for _, shard := range m.Shards() {
+		named[shard.Metadata.Name] = true
+	}
+	// A Job is stale even though m names it: a completed Job's pod never runs again, and its template
+	// is immutable, so the rerun's Job cannot be applied over it (gt-tjhfe). A shard m names is updated
+	// by the apply, so only the ones it leaves out have to go.
+	//
+	// The Jobs lead because deleting one cascades to its pods: a shard deleted first could leave a pod
+	// waiting on a mount the rerun does not apply.
+	var stale []TrimObject
+	for _, o := range existing {
+		if o.Kind == "Job" && trimSelects(o) {
+			stale = append(stale, o)
+		}
+	}
+	for _, o := range existing {
+		if o.Kind != "Job" && trimSelects(o) && !named[o.Name] {
+			stale = append(stale, o)
+		}
+	}
+	return stale
+}
+
+// trimSelects reports whether o carries every label TrimSelector matches.
+func trimSelects(o TrimObject) bool {
+	for k, v := range trimLabels() {
+		if o.Labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
 // removeContainer deletes the listed files with the image's trim-paths helper. The helper reads the
 // paths from the mounted shards, not from argv, so a name that holds a space or a glob character
 // stays the one string the shard gave; the helper decides whether a path may be removed.
