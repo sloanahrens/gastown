@@ -23,6 +23,10 @@ const (
 	cgo    = "0"
 )
 
+// Package is the package the image's bd is compiled from, inside the beads
+// checkout.
+const Package = "./cmd/bd"
+
 // hostEnv names the host variables the compile passes through: those that
 // locate the toolchain, the Go caches and the module proxy, so the compile
 // reuses what the host already has. Anything else — a shell's GOFLAGS,
@@ -189,7 +193,7 @@ func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	env := buildEnv(opt.Env)
 	// -X main.Commit stamps the commit `bd version --json` reports, the same
 	// variable scripts/refresh-bd-command-tree.sh stamps.
-	if _, err := goBuild(dir, env, "build", "-trimpath", "-ldflags", "-X main.Commit="+commit, "-o", out, "./cmd/bd"); err != nil {
+	if _, err := goBuild(dir, env, "build", "-trimpath", "-ldflags", "-X main.Commit="+commit, "-o", out, Package); err != nil {
 		return "", fmt.Errorf("cannot build bd at %s: %w", commit, err)
 	}
 	return commit, nil
