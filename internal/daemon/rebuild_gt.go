@@ -58,19 +58,6 @@ const (
 	// and becomes drift worth an operator's attention.
 	rebuildGTMaxCommitsBehind = 20
 
-	// rebuildGTStarveAfter is how long a due binary may go uninstalled before
-	// the block is escalated and, when the container-gate slot is the blocker,
-	// waited for instead of raced. Under it, a busy gate is the town working
-	// as designed (gate holds measured 2m-20m20s on 2026-09-22); past it, the
-	// block is the thing to report.
-	//
-	// It is the pool's default install cap, not a second 30 minutes: a
-	// post-landing acquisition yields to an install in flight for at most
-	// slot.DefaultMaxInstallYield, and this job raises the alarm at that same
-	// duration. The link covers the default only: this job does not read a
-	// Pool.MaxInstallYield override (gt-pa4tg).
-	rebuildGTStarveAfter = slot.DefaultMaxInstallYield
-
 	// rebuildGTReserveWait bounds the wait for a gate to release its slot,
 	// together with the acquire that follows it.
 	rebuildGTReserveWait = 10 * time.Minute
@@ -554,7 +541,7 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 	//
 	// A cycle that defers keeps the marker, and the next heartbeat refreshes
 	// it, so a gate that stays busy holds the marker up past Ceiling: the
-	// starvation escalation at rebuildGTStarveAfter is what bounds that
+	// starvation escalation at rebuildGTInstallCap is what bounds that
 	// standing, because it is the alarm for a due binary that never installs.
 	d.rebuildGTMarkPending(now)
 
@@ -569,7 +556,7 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 	if busy, reservable := d.rebuildGTGate(); busy != "" {
 		age, _ := d.rebuildGTBlock.openFor(now)
 		switch {
-		case reservable && age >= rebuildGTStarveAfter:
+		case reservable && age >= d.rebuildGTInstallCap():
 			d.rebuildGTNoteBlocked(cycle, true, "not quiet: "+busy)
 			d.logger.Printf("rebuild_gt: blocked %s: waiting up to %s for the gate to release the slot",
 				age.Round(time.Minute), rebuildGTReserveWait)
@@ -990,7 +977,7 @@ func (d *Daemon) rebuildGTDrift(repoRoot string, info *version.StaleBinaryInfo) 
 
 // rebuildGTNoteBlocked records a cycle that did not install the binary and,
 // when the binary was due, opens (or ages) the block against it and escalates
-// once that block outlasts rebuildGTStarveAfter. A skip that leaves a binary
+// once that block outlasts rebuildGTInstallCap. A skip that leaves a binary
 // needing no install out of force is not a block.
 func (d *Daemon) rebuildGTNoteBlocked(cycle *dogCycle, due bool, reason string) {
 	cycle.skipStep("blocked", reason)
@@ -1001,7 +988,7 @@ func (d *Daemon) rebuildGTNoteBlocked(cycle *dogCycle, due bool, reason string) 
 	now := d.clk().Now()
 	age := d.rebuildGTBlock.open(now)
 	d.logger.Printf("rebuild_gt: due and not installed for %s: %s", age.Round(time.Minute), reason)
-	if age < rebuildGTStarveAfter || !d.rebuildGTBlock.alertOnce() {
+	if age < d.rebuildGTInstallCap() || !d.rebuildGTBlock.alertOnce() {
 		return
 	}
 	if err := d.rebuildGTAlert(alertKeyRebuildGTStarved,
@@ -1085,6 +1072,23 @@ func (d *Daemon) rebuildGTClearPending() {
 		return
 	}
 	d.clearAlerts("the pending-install marker is cleared", alertKeyRebuildGTMarkerClear)
+}
+
+// rebuildGTInstallCap is how long a due binary may go uninstalled before the
+// block is escalated and, when the container-gate slot is the blocker, waited
+// for instead of raced. Under it, a busy gate is the town working as designed
+// (gate holds measured 2m-20m20s on 2026-09-22); past it, the block is the
+// thing to report.
+//
+// It is the install cap of the pool this town runs: a post-landing acquisition
+// yields to an install in flight for at most Pool.InstallYield, and this job
+// raises the alarm at that same duration. Reading the pool rather than copying
+// its default keeps the two together if the cap ever moves (gt-pa4tg).
+func (d *Daemon) rebuildGTInstallCap() time.Duration {
+	if d.rebuildGTInstallYieldFn != nil {
+		return d.rebuildGTInstallYieldFn()
+	}
+	return slot.PoolForTown(d.config.TownRoot).InstallYield()
 }
 
 // rebuildGTGate reads the container-gate picture: which gate-class roles hold

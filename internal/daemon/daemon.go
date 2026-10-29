@@ -281,6 +281,11 @@ type Daemon struct {
 	// slot package, which shells out to docker. Tests answer both.
 	rebuildGTStaleFn func(repoRoot string) *version.StaleBinaryInfo
 	rebuildGTGateFn  func() (busy string, reservable bool)
+	// rebuildGTInstallYieldFn answers the pool's install cap, the duration at
+	// which the job escalates a binary that stays due; nil is the town pool's
+	// Pool.InstallYield. Tests set a cap so the alarm can be driven at a value
+	// other than the default (gt-pa4tg).
+	rebuildGTInstallYieldFn func() time.Duration
 	// rebuildGTPendingFn answers where the pending-install marker lives; nil is
 	// installpending.StoreFor(townRoot), which honors INSTALL_GT_DAEMON_DIR the
 	// way scripts/install-gt.sh does. Tests point it at their own temp file, so
