@@ -176,6 +176,22 @@ func TestRemoveTrimPathsRemovesThePathItResolved(t *testing.T) {
 	}
 }
 
+// TestRemoveTrimPathsRefusesADirectoryItCannotResolve pins the other answer a resolve gives: an error
+// that is not the directory being gone is a check that did not run, so the run refuses rather than
+// counting the file absent.
+func TestRemoveTrimPathsRefusesADirectoryItCannotResolve(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addShard("/trim", 0, "gocache/one")
+	f.resolveErr["/cache/gocache"] = errors.New("permission denied")
+	if _, err := RemoveTrimPaths("/cache", "/trim", 1, f.fs()); err == nil {
+		t.Fatal("RemoveTrimPaths reported a trim it could not check")
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed when a check did not run", f.removed)
+	}
+}
+
 // TestRemoveTrimPathsRefusesADirectoryOutsideTheClaim pins the refusal a symlinked directory earns
 // when it leads out of the claim, and that nothing is removed when it does.
 func TestRemoveTrimPathsRefusesADirectoryOutsideTheClaim(t *testing.T) {

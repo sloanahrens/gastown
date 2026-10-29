@@ -77,13 +77,13 @@ func RemoveTrimPaths(root, listDir string, shards int, w trimPathsFS) (TrimPaths
 	targets := make([]string, 0, len(list))
 	var gone int
 	for _, entry := range list {
-		target, absent, err := trimTarget(realRoot, entry, w)
-		if err != nil {
-			return TrimPathsResult{}, err
-		}
-		if absent {
+		target, err := trimTarget(realRoot, entry, w)
+		switch {
+		case errors.Is(err, errTrimGone):
 			gone++
 			continue
+		case err != nil:
+			return TrimPathsResult{}, err
 		}
 		targets = append(targets, target)
 	}
@@ -154,25 +154,29 @@ func shardFile(dir string, names []string) (string, error) {
 	return filepath.Join(dir, files[0]), nil
 }
 
-// trimTarget is the path to remove for one listed entry, and whether it is already gone: the claim
-// root joined with a path a walk of the claim gives, through a directory that resolves inside the
-// claim. A directory that is gone makes the file absent; one that resolves outside the claim, by a
-// symlink no walk of the claim would have followed, is refused rather than followed.
-func trimTarget(realRoot, entry string, w trimPathsFS) (string, bool, error) {
+// errTrimGone is trimTarget's answer for a listed file whose directory is already gone: the trim's
+// goal is the file's absence, so the caller counts it apart from a removal rather than as a failure.
+var errTrimGone = errors.New("the listed path is already gone")
+
+// trimTarget is the path to remove for one listed entry: the claim root joined with a path a walk of
+// the claim gives, through a directory that resolves inside the claim. A directory that is gone is
+// errTrimGone; one that resolves outside the claim, by a symlink no walk of the claim would have
+// followed, is refused rather than followed.
+func trimTarget(realRoot, entry string, w trimPathsFS) (string, error) {
 	if !claimRelative(entry) {
-		return "", false, fmt.Errorf("the trim list names %q: want a path a walk of the claim root gives, such as gocache/ab/cdef", entry)
+		return "", fmt.Errorf("the trim list names %q: want a path a walk of the claim root gives, such as gocache/ab/cdef", entry)
 	}
 	dir, err := w.resolve(filepath.Join(realRoot, filepath.Dir(entry)))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return "", true, nil
+			return "", errTrimGone
 		}
-		return "", false, fmt.Errorf("resolving the directory of %q: %w", entry, err)
+		return "", fmt.Errorf("resolving the directory of %q: %w", entry, err)
 	}
 	if !withinClaim(realRoot, dir) {
-		return "", false, fmt.Errorf("the trim list names %q: its directory resolves to %s, outside the claim at %s", entry, dir, realRoot)
+		return "", fmt.Errorf("the trim list names %q: its directory resolves to %s, outside the claim at %s", entry, dir, realRoot)
 	}
-	return filepath.Join(dir, path.Base(entry)), false, nil
+	return filepath.Join(dir, path.Base(entry)), nil
 }
 
 // claimRelative reports whether p is a path a walk of the claim gives: relative to the claim root,
