@@ -874,7 +874,7 @@ func TestLoadRejectionNotesRunsTheStoreSeamsArgv(t *testing.T) {
 	answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
 		// The seam's probe that bd takes --allow-stale, keyed the way
 		// internal/beads' own tests key it.
-		if len(args) >= 2 && args[0] == "--allow-stale" && args[1] == "version" {
+		if showTestVersionProbe(args) {
 			return []byte("bd version 1.2.2\n"), nil, nil
 		}
 		reads = append(reads, append([]string(nil), args...))
