@@ -1723,7 +1723,8 @@ func (diffFailsRepo) DiffNameOnly(base, head string) ([]string, error) {
 // TestLandOMJSONEditWaitsForOverseerReview: a landing whose merge edits the
 // root .om.json and carries no waiver for its head is refused before om runs,
 // as a policy refusal that leaves the bead for the overseer and names the
-// waiver line to write (gt-93hf4).
+// waiver line to write (gt-93hf4). Mutant: deleting the .om.json check makes it
+// fail, because the landing then reaches om instead of being refused.
 func TestLandOMJSONEditWaitsForOverseerReview(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
@@ -1769,7 +1770,8 @@ func TestLandOMJSONWaivedHeadLandsWithoutTheRefusal(t *testing.T) {
 
 // TestLandOMJSONOtherPathsLandNormally: a nested file named .om.json is not
 // the review config, and a head that touches no config at all, land through om
-// as before.
+// as before (gt-93hf4). Mutant: refusing on any changed path fails it, since
+// both rows are then refused.
 func TestLandOMJSONOtherPathsLandNormally(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -1804,7 +1806,8 @@ func TestLandOMJSONOtherPathsLandNormally(t *testing.T) {
 
 // TestLandOMJSONUnreadableDiffIsRefused: when the paths a landing changes
 // cannot be read, the landing is refused rather than passed as clean, and the
-// refusal does not carry git's error text (gt-93hf4).
+// refusal does not carry git's error text (gt-93hf4). Mutant: reading the error
+// as a clean diff makes it fail, because the landing then reaches om.
 func TestLandOMJSONUnreadableDiffIsRefused(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
