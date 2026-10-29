@@ -17,7 +17,8 @@
 # tarball downloaded inside a RUN would not have unless a sha256 were written out
 # beside the version and kept in step with it.
 ARG DOLT_VERSION=2.3.2
-FROM dolthub/dolt:${DOLT_VERSION} AS dolt
+ARG DOLT_DIGEST=sha256:9a077bc9c8cb6604a6d458c734096b482735f640144e5665b36161d560f14861
+FROM dolthub/dolt:${DOLT_VERSION}@${DOLT_DIGEST} AS dolt
 
 FROM ubuntu:24.04
 

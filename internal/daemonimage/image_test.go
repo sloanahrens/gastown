@@ -314,6 +314,12 @@ func TestDaemonDockerfileMatchesTheImageTable(t *testing.T) {
 	if got := args["DOLT_VERSION"]; got != templates.DoltVersion {
 		t.Errorf("%s installs Dolt %q, want %q (templates.DoltVersion)", DockerfilePath, got, templates.DoltVersion)
 	}
+	if got := args["DOLT_DIGEST"]; got != templates.DoltImageDigest {
+		t.Errorf("%s pins the Dolt image at %q, want %q (templates.DoltImageDigest)", DockerfilePath, got, templates.DoltImageDigest)
+	}
+	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(templates.DoltImageDigest) {
+		t.Errorf("templates.DoltImageDigest = %q, want sha256: and 64 lower-case hex digits", templates.DoltImageDigest)
+	}
 	var stages []stage
 	for _, in := range ins {
 		if in.cmd == "FROM" {
@@ -323,7 +329,7 @@ func TestDaemonDockerfileMatchesTheImageTable(t *testing.T) {
 	if len(stages) != 2 {
 		t.Fatalf("%s builds %d stages, want the Dolt client's and the image's", DockerfilePath, len(stages))
 	}
-	if want := "dolthub/dolt:" + templates.DoltVersion; stages[0].image != want {
+	if want := "dolthub/dolt:" + templates.DoltVersion + "@" + templates.DoltImageDigest; stages[0].image != want {
 		t.Errorf("%s takes the Dolt client from %q, want %q", DockerfilePath, stages[0].image, want)
 	}
 	if stages[0].alias != "dolt" {
