@@ -66,6 +66,7 @@ var vmmapUnits = map[byte]float64{
 // into bytes. Anything without a recognized unit, or with a value that is not
 // a non-negative number, reads as zero — which the caller reports as
 // unavailable.
+// NaN, Inf and a size that int64 cannot hold also read as zero.
 func parseVMMapBytes(s string) int64 {
 	if s == "" {
 		return 0
@@ -76,6 +77,13 @@ func parseVMMapBytes(s string) int64 {
 	}
 	n, err := strconv.ParseFloat(s[:len(s)-1], 64)
 	if err != nil || n < 0 {
+		return 0
+	}
+	if math.IsNaN(n) || math.IsInf(n, 0) {
+		return 0
+	}
+	// int64 cannot hold 2^63 bytes or more, so an overflowing size reads as zero.
+	if n*unit >= 1<<63 {
 		return 0
 	}
 	return int64(math.Round(n * unit))

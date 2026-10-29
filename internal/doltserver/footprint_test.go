@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // recordedVMMapSummary is `vmmap -summary <pid>` output as macOS prints it for
@@ -68,6 +69,24 @@ func TestParseVMMapFootprint(t *testing.T) {
 		{
 			name:          "value without a unit reads as zero",
 			out:           "Physical footprint:         1.7\nPhysical footprint (peak):  10.2G\n",
+			wantFootprint: 0,
+			wantPeak:      10952166605,
+		},
+		{
+			name:          "NaN reads as zero",
+			out:           "Physical footprint:         NaNG\nPhysical footprint (peak):  10.2G\n",
+			wantFootprint: 0,
+			wantPeak:      10952166605,
+		},
+		{
+			name:          "infinity reads as zero",
+			out:           "Physical footprint:         InfG\nPhysical footprint (peak):  10.2G\n",
+			wantFootprint: 0,
+			wantPeak:      10952166605,
+		},
+		{
+			name:          "size past int64 reads as zero",
+			out:           "Physical footprint:         1e300G\nPhysical footprint (peak):  10.2G\n",
 			wantFootprint: 0,
 			wantPeak:      10952166605,
 		},
@@ -210,7 +229,47 @@ func TestGetHealthMetrics_Footprint(t *testing.T) {
 					t.Errorf("footprint warned in the status output: %q", w)
 				}
 			}
+			if !metrics.Healthy {
+				t.Errorf("footprint marked the server unhealthy: warnings %v", metrics.Warnings)
+			}
 		})
+	}
+}
+
+// A vmmap that never answers must not hold the status path. The test runs
+// through the real machine's probe deadlines (std.probeTimeout), so the hung
+// probe gives up at the footprint deadline, not the default every other probe
+// keeps: the footprint reads as unavailable and GetHealthMetrics still returns.
+// The test waits the real footprint deadline, so it costs about 2s.
+func TestGetHealthMetrics_HungVMMapReadsAsUnavailable(t *testing.T) {
+	t.Parallel()
+	const port = 4600
+	f := newFakeHost().townPort(port).on("dolt *", fakeReply{})
+	h := f.host()
+	h.goos = func() string { return "darwin" }
+	h.probeTimeout = std.probeTimeout
+	townRoot := testTown(t)
+	pid := f.doltServer(townRoot, port)
+	writePIDFile(t, h, townRoot, pid)
+	key := "vmmap -summary " + strconv.Itoa(pid)
+	release := f.hangOn(key)
+	defer close(release)
+
+	start := time.Now()
+	metrics := h.GetHealthMetrics(townRoot)
+	elapsed := time.Since(start)
+	f.awaitHung(t, key)
+
+	if metrics.FootprintBytes != 0 || metrics.FootprintPeakBytes != 0 {
+		t.Errorf("hung vmmap reported footprint %d / peak %d, want both zero",
+			metrics.FootprintBytes, metrics.FootprintPeakBytes)
+	}
+	if elapsed < footprintProbeTimeout {
+		t.Errorf("status returned after %v, before the %v footprint deadline", elapsed, footprintProbeTimeout)
+	}
+	if elapsed >= probeTimeoutDefault {
+		t.Errorf("hung vmmap held the status for %v, which is the default %v, not the %v footprint deadline",
+			elapsed, probeTimeoutDefault, footprintProbeTimeout)
 	}
 }
 
