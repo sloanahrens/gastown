@@ -35,6 +35,9 @@ type diskMaintFakeTarget struct {
 	planErr  error
 	result   diskmaint.Result
 	applyErr error
+	// during, when set, runs as the plan is built: a test moves the clock through
+	// a pass that takes time.
+	during func()
 }
 
 func (f *diskMaintFakeTarget) Name() string { return "registry" }
@@ -45,6 +48,9 @@ func (f *diskMaintFakeTarget) Measure(context.Context) (diskmaint.Measurement, e
 
 func (f *diskMaintFakeTarget) Plan(_ context.Context, p diskmaint.Policy) (diskmaint.Plan, error) {
 	f.policies = append(f.policies, p)
+	if f.during != nil {
+		f.during()
+	}
 	if f.planErr != nil {
 		return diskmaint.Plan{}, f.planErr
 	}
@@ -288,6 +294,38 @@ func TestDiskMaintenanceCadenceRunsOutsideTheWindow(t *testing.T) {
 	}
 }
 
+// TestDiskMaintenanceCadenceCountsFromTheConclusion: an interval counts from when
+// the target concluded its last run, not from the tick that started it, so a
+// pass that takes minutes does not shorten the wait before the next one.
+func TestDiskMaintenanceCadenceCountsFromTheConclusion(t *testing.T) {
+	t.Parallel()
+	d, _, f := diskMaintTestDaemon(t)
+	civol := &diskMaintFakeTarget{}
+	f.extra = map[string]*diskMaintFakeTarget{"civol": civol}
+	d.patrolConfig = diskMaintCadence("civol", "2h")
+	now := diskMaintNow.Add(8 * time.Hour) // 12:45
+	d.diskMaint.now = func() time.Time { return now }
+	civol.during = func() { now = now.Add(3 * time.Minute) } // the plan takes three minutes
+
+	d.runDiskMaintenance()
+	if len(civol.policies) != 1 {
+		t.Fatalf("civol planned %d times at 12:45, want 1", len(civol.policies))
+	}
+
+	now = diskMaintNow.Add(10*time.Hour + time.Minute) // 14:46: two hours after the tick, not the conclusion
+	civol.during = nil
+	d.runDiskMaintenance()
+	if len(civol.policies) != 1 {
+		t.Fatalf("civol planned %d times at 14:46, want 1: the 2h interval runs from the 12:48 conclusion, not the 12:45 tick", len(civol.policies))
+	}
+
+	now = diskMaintNow.Add(10*time.Hour + 3*time.Minute) // 14:48: two hours after the conclusion
+	d.runDiskMaintenance()
+	if len(civol.policies) != 2 {
+		t.Fatalf("civol planned %d times at 14:48, want 2: its interval was up at the 12:48 conclusion", len(civol.policies))
+	}
+}
+
 // TestDiskMaintenanceCadenceLeavesTheDailyWindowToTheOthers: giving one target
 // a cadence does not move the others onto it, and a cadence set for a target
 // this build does not produce is said once and looked for per interval, not
@@ -410,8 +448,12 @@ func TestDiskMaintenanceRefusesAnUnreadableCadence(t *testing.T) {
 			if len(f.target.policies) != 0 {
 				t.Fatalf("registry planned %d times with its %q interval, want 0: a bad interval does not fall back to the daily window", len(f.target.policies), every)
 			}
-			if got := strings.Count(logs.String(), every); got != 1 {
-				t.Errorf("logged the %q interval %d times, want 1: %q", every, got, logs.String())
+			// The setting's path names the refusal. The value is not counted: the
+			// refusal quotes it again in its own reason, so a count of the literal
+			// is a count of two things.
+			const setting = "patrols.disk_maintenance.targets.registry.interval"
+			if got := strings.Count(logs.String(), setting); got != 1 {
+				t.Errorf("logged the refused %q interval %d times, want 1: %q", every, got, logs.String())
 			}
 		})
 	}
