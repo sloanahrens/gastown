@@ -34,12 +34,12 @@ docker --context desktop-linux info --format '{{.Name}} {{.ServerVersion}} {{.Op
 docker --context desktop-linux image ls --format '{{.Repository}}:{{.Tag}}' mysql:8.4
 ```
 
-**PASS:** `gt dolt status` reports the server running, `lsof` prints one `LISTEN` row on `127.0.0.1:3307`, and the `docker info` line exits 0 and prints a VM name and a server version. Write down two things for the later steps:
+**PASS:** `gt dolt status` reports the server running, `lsof` prints one `LISTEN` row on `127.0.0.1:3307`, the `docker info` line exits 0 and prints a VM name and a server version, and the `docker image ls` line exits 0. Write down two things for the later steps:
 
-- whether `mysql:8.4` is already in the VM. The `image ls` line prints the tag when it is and nothing when it is not, and either answer passes this step; step 1's cleanup reads this record.
+- whether `mysql:8.4` is already in the VM, written as `present` (the `image ls` line exited 0 and printed the tag) or `absent` (it exited 0 and printed nothing). Either answer passes this step; step 1's cleanup reads this record. Write `absent` only after an exit status of 0: a listing that failed is not an empty one.
 - the Dolt pid and the exact listen address; step 5 compares against them.
 
-**FAIL:** `gt dolt status` says the server is not running, `lsof` prints no listener, or `docker info` exits non-zero. Stop and escalate with that text: the probe cannot answer its question without a running loopback Dolt and a reachable Docker Desktop.
+**FAIL:** `gt dolt status` says the server is not running, `lsof` prints no listener, `docker info` exits non-zero, or the `docker image ls` line exits non-zero (write neither `present` nor `absent`, and do not pull). Stop and escalate with that text: the probe cannot answer its question without a running loopback Dolt and a reachable Docker Desktop.
 
 **STOP — neither PASS nor FAIL:** an `lsof` row on `*:3307` or `0.0.0.0:3307` means Dolt is already reachable off-host, so the question this probe answers is a different one. Record the row, write neither `R4 PASS` nor `R4 FAIL` for this run, and tell the overseer before running step 1: whether the probe still applies is the overseer's call, and the verdict is theirs to give.
 
@@ -53,7 +53,7 @@ docker --context desktop-linux pull mysql:8.4
 
 **FAIL:** non-zero exit. Record the error text. Without the client the probe cannot run; escalate rather than change the Mac's networking to get it.
 
-The pull adds one image to the Docker Desktop VM and is the probe's only write. Remove it when the run ends — after step 5 on a run that reaches it, or after the step that ends a run early, before you escalate — but only when both hold: step 0 printed no `mysql:8.4` tag, and this pull exited 0.
+The pull adds one image to the Docker Desktop VM and is the probe's only write. Remove it when the run ends — after step 5 on a run that reaches it, or after the step that ends a run early, before you escalate — but only when both hold: step 0 recorded `absent` (the `image ls` line exited 0 and printed no tag), and this pull exited 0. A step 0 record that is missing or reads anything but `absent` means leave the image alone.
 
 ```bash
 docker --context desktop-linux image rm mysql:8.4
