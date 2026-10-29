@@ -1196,15 +1196,20 @@ func TestJevPanelSitsAfterTierSweepsAndFoldsUntilOpened(t *testing.T) {
 	t.Parallel()
 
 	page := string(indexHTML)
-	at := strings.Index(page, `<section id="jevsec" data-default-collapsed hidden><h2>JEV · <span class="r" id="jevnote"></span></h2><div class="body" id="jev"></div></section>`)
+	at := strings.Index(page, `<section id="jevsec" data-fold="jev" data-default-collapsed hidden><h2>JEV · <span class="r" id="jevnote"></span></h2><div class="body" id="jev"></div></section>`)
 	if at < 0 {
 		t.Fatal("index.html has no JEV panel")
 	}
-	if tier := strings.Index(page, `<section><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps`); tier < 0 || tier > at {
+	if tier := strings.Index(page, `<section data-fold="tiersweep"><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps`); tier < 0 || tier > at {
 		t.Error("the JEV panel is not after Tier sweeps")
 	}
-	if setup := pageFunc(t, "setupCollapse"); !strings.Contains(setup, `apply(saved[name] === undefined ? sec.hasAttribute("data-default-collapsed") : !!saved[name]);`) {
-		t.Error("setupCollapse does not fold a data-default-collapsed pane until it has been opened")
+	dom := newPageDOM(t)
+	if !dom.fold(t, "jev").Collapsed {
+		t.Error("the JEV pane starts open on first load")
+	}
+	dom.press(t, "jev", "click")
+	if dom.fold(t, "jev").Collapsed {
+		t.Error("the JEV pane does not open when its heading is clicked")
 	}
 	if all := pageFunc(t, "renderAll"); !strings.Contains(all, "renderJev(state)") {
 		t.Error("renderAll does not draw the JEV panel")

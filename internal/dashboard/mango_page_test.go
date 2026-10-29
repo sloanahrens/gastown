@@ -20,8 +20,13 @@ func TestMangoPanelStartsFolded(t *testing.T) {
 	if !strings.Contains(tag, " data-default-collapsed") || !strings.Contains(tag, " hidden") {
 		t.Errorf("the Mango section %q does not start folded on first load", tag)
 	}
-	if !strings.Contains(pageFunc(t, "setupCollapse"), `sec.hasAttribute("data-default-collapsed")`) {
-		t.Error("setupCollapse no longer folds a pane that opts in with data-default-collapsed")
+	dom := newPageDOM(t)
+	if !dom.fold(t, "mango").Collapsed {
+		t.Error("the Mango pane starts open on first load")
+	}
+	dom.press(t, "mango", "click")
+	if dom.fold(t, "mango").Collapsed {
+		t.Error("the Mango pane does not open when its heading is clicked")
 	}
 }
 

@@ -58,7 +58,7 @@ func TestPaneColumns(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(left+right, `<section id="trendsec" hidden>`) {
+	if !strings.Contains(left+right, `<section id="trendsec" data-fold="landings" hidden>`) {
 		t.Error("the Landings section lost its hidden attribute")
 	}
 }

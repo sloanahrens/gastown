@@ -1274,7 +1274,7 @@ func TestOnePanelReplacedTheThree(t *testing.T) {
 	t.Parallel()
 
 	page := string(indexHTML)
-	if !strings.Contains(page, `<section><h2>Attention <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>`) {
+	if !strings.Contains(page, `<section data-fold="attention"><h2>Attention <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>`) {
 		t.Error("the Attention section is not the markup its neighbours are")
 	}
 	for _, gone := range []string{`id="questions"`, `id="escalations"`, `id="alerts"`, `renderQuestions(`, `renderEscalations(`, `renderAlerts(`} {
