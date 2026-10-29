@@ -42,10 +42,14 @@ const ruleDindDown = "dind not running"
 // the output shape a Go parser reads is the same on every run; find prints
 // "<mtime>\t<bytes or KB>\t<path>" and du prints "<KB>\t<path>".
 const (
-	sizeScript          = `du -sk /c | cut -f1`
-	fileListingScript   = `find /c -type f -printf '%T@\t%s\t%p\n'`
-	moduleListingScript = `cd /c/pkg/mod && find . -mindepth 2 -maxdepth 8 -type d -name '*@*' -prune -printf '%T@\t%p\n'`
-	moduleSizesScript   = `cd /c/pkg/mod && find . -mindepth 2 -maxdepth 8 -type d -name '*@*' -prune -exec du -sk {} +`
+	sizeScript        = `du -sk /c | cut -f1`
+	fileListingScript = `find /c -type f -printf '%T@\t%s\t%p\n'`
+	// moduleFind names the whole "<module>@<version>" directories under
+	// pkg/mod. It prunes ./cache first: the download cache's "@v" directories
+	// match "*@*" too, and nothing there may be removed (gt-z6qre.9).
+	moduleFind          = `find . -maxdepth 8 -path ./cache -prune -o -type d -name '*@*' -prune`
+	moduleListingScript = `cd /c/pkg/mod && ` + moduleFind + ` -printf '%T@\t%p\n'`
+	moduleSizesScript   = `cd /c/pkg/mod && ` + moduleFind + ` -exec du -sk {} +`
 )
 
 var (
@@ -64,9 +68,9 @@ var (
 	errJobStart = errors.New("docker inspect of a running job failed; its start is unreadable")
 	// errDF reports a runner disk whose df cannot be read.
 	errDF = errors.New("docker exec df failed; the runner disk is unreadable")
-	// errVolumeInspect reports a volume whose state cannot be read. Docker's
-	// own "no such volume" answer is not this: it is a volume that is missing.
-	errVolumeInspect = errors.New("docker volume inspect failed; the volume's state is unreadable")
+	// errVolumes reports a volume list that cannot be read, so which volumes
+	// exist is unknown.
+	errVolumes = errors.New("docker volume ls in the docker-in-docker container failed; the volumes are unreadable")
 	// errVolumeSize reports a volume whose size cannot be read.
 	errVolumeSize = errors.New("measuring the volume failed; its size is unreadable")
 	// errVolumeList reports a volume whose entries cannot be listed.
@@ -168,11 +172,18 @@ func (t *Target) Plan(ctx context.Context, _ diskmaint.Policy) (diskmaint.Plan, 
 	if err != nil {
 		return planOrErr(ctx, err)
 	}
+	// Which volumes exist comes from the list, never from a failed inspect: a
+	// volume that is not there must not be told apart by docker's message, and
+	// a list that cannot be read must refuse rather than report all missing.
+	present, err := t.volumeNames(ctx)
+	if err != nil {
+		return planOrErr(ctx, err)
+	}
 	for _, lim := range t.cfg.Limits {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return diskmaint.Plan{}, ctxErr
 		}
-		v, readErrs, err := t.volume(ctx, lim.Name)
+		v, readErrs, err := t.volume(ctx, lim.Name, present)
 		if err != nil {
 			return diskmaint.Plan{}, err
 		}
@@ -210,7 +221,9 @@ func (t *Target) dindRunning(ctx context.Context) (bool, error) {
 
 // jobs counts the containers a running job holds and reads the earliest start
 // among them. A start that does not parse leaves the oldest start unknown, so
-// the gated volume waits instead of trimming around a job of unknown age.
+// the gated volume waits instead of trimming around a job of unknown age. That
+// is stricter than "zero only when none parse": one unreadable start can hide a
+// job older than every start this target could read.
 func (t *Target) jobs(ctx context.Context) (count int, oldest time.Time, err error) {
 	out, err := t.dind(ctx, "ps", "-q")
 	if err != nil {
@@ -257,19 +270,31 @@ func (t *Target) jobStart(ctx context.Context, id string) (time.Time, error) {
 	return parseStartedAt(string(out)), nil
 }
 
+// volumeNames lists the volume names the docker-in-docker daemon holds. An
+// unreadable list is an error, never an empty one: every volume would otherwise
+// read as missing.
+func (t *Target) volumeNames(ctx context.Context) (map[string]bool, error) {
+	out, err := t.dind(ctx, "volume", "ls", "--format", "{{.Name}}")
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, errVolumes
+	}
+	present := make(map[string]bool)
+	for _, name := range nonEmptyLines(string(out)) {
+		present[strings.TrimSpace(name)] = true
+	}
+	return present, nil
+}
+
 // volume reads one volume: whether it exists, its size in KB and its entries.
 // It returns read errors rather than fail, so one unreadable volume refuses the
 // plan instead of hiding what the others hold.
-func (t *Target) volume(ctx context.Context, name string) (VolumeInput, []string, error) {
+func (t *Target) volume(ctx context.Context, name string, present map[string]bool) (VolumeInput, []string, error) {
 	v := VolumeInput{Name: name}
-	if _, err := t.dind(ctx, "volume", "inspect", name); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return v, nil, ctxErr
-		}
-		if missingVolume(err) {
-			return v, nil, nil
-		}
-		return v, []string{fmt.Sprintf("%s: %v", name, errVolumeInspect)}, nil
+	if !present[name] {
+		return v, nil, nil
 	}
 	v.Exists = true
 
@@ -292,12 +317,19 @@ func (t *Target) volume(ctx context.Context, name string) (VolumeInput, []string
 
 // volumeSize reads a volume's size in KB from a read-only mount of it.
 func (t *Target) volumeSize(ctx context.Context, name string) (int64, error) {
-	out, err := t.dind(ctx, "run", "--rm", "--user", "0",
-		"-v", name+":"+volumeRoot+":ro", "--entrypoint", "sh", t.cfg.Image, "-c", sizeScript)
+	out, err := t.readOnlyScript(ctx, name, sizeScript)
 	if err != nil {
 		return 0, err
 	}
 	return parseKB(string(out))
+}
+
+// readOnlyScript runs script in a throwaway root container that mounts the
+// volume read-only: the read commands share one mount shape, so none of them
+// can change what it measures.
+func (t *Target) readOnlyScript(ctx context.Context, name, script string) ([]byte, error) {
+	return t.dind(ctx, "run", "--rm", "--user", "0",
+		"-v", name+":"+volumeRoot+":ro", "--entrypoint", "sh", t.cfg.Image, "-c", script)
 }
 
 // entries lists what a volume holds. The module cache is listed by whole module
@@ -311,8 +343,7 @@ func (t *Target) entries(ctx context.Context, name string) ([]Entry, []string, e
 
 // fileEntries lists the files of a build or npm cache volume.
 func (t *Target) fileEntries(ctx context.Context, name string) ([]Entry, []string, error) {
-	out, err := t.dind(ctx, "run", "--rm", "--user", "0",
-		"-v", name+":"+volumeRoot+":ro", "--entrypoint", "sh", t.cfg.Image, "-c", fileListingScript)
+	out, err := t.readOnlyScript(ctx, name, fileListingScript)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, nil, ctxErr
@@ -329,8 +360,7 @@ func (t *Target) fileEntries(ctx context.Context, name string) ([]Entry, []strin
 // moduleEntries lists the whole "<module>@<version>" directories of the module
 // cache and reads each one's size from du.
 func (t *Target) moduleEntries(ctx context.Context, name string) ([]Entry, []string, error) {
-	out, err := t.dind(ctx, "run", "--rm", "--user", "0",
-		"-v", name+":"+volumeRoot+":ro", "--entrypoint", "sh", t.cfg.Image, "-c", moduleListingScript)
+	out, err := t.readOnlyScript(ctx, name, moduleListingScript)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, nil, ctxErr
@@ -342,8 +372,7 @@ func (t *Target) moduleEntries(ctx context.Context, name string) ([]Entry, []str
 		return nil, []string{fmt.Sprintf("%s: %v", name, err)}, nil
 	}
 
-	sizesOut, err := t.dind(ctx, "run", "--rm", "--user", "0",
-		"-v", name+":"+volumeRoot+":ro", "--entrypoint", "sh", t.cfg.Image, "-c", moduleSizesScript)
+	sizesOut, err := t.readOnlyScript(ctx, name, moduleSizesScript)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, nil, ctxErr
@@ -390,13 +419,6 @@ func planOrErr(ctx context.Context, err error) (diskmaint.Plan, error) {
 	return diskmaint.Plan{Target: planTarget, Refused: err.Error()}, nil
 }
 
-// missingVolume reports docker's own answer that a volume is not there, which
-// is a state BuildPlan keeps rather than a failed read. Any other failure to
-// inspect stays that failed read.
-func missingVolume(err error) bool {
-	return strings.Contains(strings.ToLower(err.Error()), "no such volume")
-}
-
 // module is one "<module>@<version>" directory a listing named, before its size
 // is looked up.
 type module struct {
@@ -405,7 +427,10 @@ type module struct {
 	mtime     time.Time
 }
 
-// parseModules reads find's "<mtime>\t<path>" listing of module directories.
+// parseModules reads find's "<mtime>\t<path>" listing of module directories. A
+// path that is not a whole module directory outside the download cache means
+// the listing script and this parser disagree, so the listing is refused rather
+// than planned on a path this target would not remove.
 func parseModules(out string) ([]module, error) {
 	var modules []module
 	for _, line := range nonEmptyLines(out) {
@@ -421,7 +446,11 @@ func parseModules(out string) ([]module, error) {
 		if !ok {
 			return nil, errParse
 		}
-		modules = append(modules, module{path: path, entryPath: "pkg/mod/" + rel, mtime: mtime})
+		entryPath := "pkg/mod/" + rel
+		if isModuleCache(entryPath) || !isModuleDir(entryPath) {
+			return nil, errParse
+		}
+		modules = append(modules, module{path: path, entryPath: entryPath, mtime: mtime})
 	}
 	return modules, nil
 }

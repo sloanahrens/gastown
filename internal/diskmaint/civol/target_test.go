@@ -37,7 +37,7 @@ type fakeDocker struct {
 	running      answer            // docker inspect -f {{.State.Running}}
 	ps           answer            // docker exec <dind> docker ps -q
 	starts       map[string]answer // job id -> StartedAt
-	volumes      map[string]answer // volume name -> volume inspect; no error is a volume that exists
+	volumeList   answer            // docker exec <dind> docker volume ls
 	sizes        map[string]answer // volume name -> du -sk
 	listings     map[string]answer // volume name -> file or module listing
 	moduleSizes  answer            // module directory sizes from du
@@ -74,7 +74,10 @@ func (f *fakeDocker) run(_ context.Context, env []string, name string, args ...s
 	case "inspect":
 		return f.starts[sub[len(sub)-1]].bytes()
 	case "volume":
-		return f.volumes[sub[len(sub)-1]].bytes()
+		if len(sub) != 4 || sub[1] != "ls" {
+			return nil, fmt.Errorf("unexpected docker command %q", strings.Join(args, " "))
+		}
+		return f.volumeList.bytes()
 	case "run":
 		return f.runAnswer(sub)
 	}
@@ -102,59 +105,105 @@ func (f *fakeDocker) runAnswer(sub []string) ([]byte, error) {
 	}
 }
 
+// writeVerbs are the docker subcommands that could change state, so a plan that
+// issues one would be trimming rather than planning.
+var writeVerbs = []string{"rm", "rmi", "prune", "stop", "kill", "create", "build", "push", "pull", "tag", "load", "import", "commit", "start", "restart"}
+
 // writes returns the calls that could change state, which a plan never makes.
 func (f *fakeDocker) writes() []string {
 	var out []string
 	for _, c := range f.calls {
-		fields := strings.Fields(c)
-		for _, field := range fields {
-			if slices.Contains([]string{"rm", "rmi", "prune"}, field) || writableMount(field) {
-				out = append(out, c)
-				break
-			}
+		if stateChanging(c) {
+			out = append(out, c)
 		}
 	}
 	return out
 }
 
-// writableMount reports a volume mount field the container could write to.
-func writableMount(field string) bool {
-	return strings.Contains(field, ":") && strings.HasSuffix(field, volumeRoot)
+// stateChanging reports a docker command line that could change state: a verb
+// that removes, stops or creates, or a volume mounted writable.
+func stateChanging(call string) bool {
+	fields := strings.Fields(call)
+	for i, field := range fields {
+		if slices.Contains(writeVerbs, field) {
+			return true
+		}
+		var mount string
+		switch {
+		case field == "-v" || field == "--volume" || field == "--mount":
+			if i+1 < len(fields) {
+				mount = fields[i+1]
+			}
+		case strings.HasPrefix(field, "--mount="):
+			mount = strings.TrimPrefix(field, "--mount=")
+		}
+		if mount != "" && !readOnlyMount(mount) {
+			return true
+		}
+	}
+	return false
+}
+
+// readOnlyMount reports a mount argument the container cannot write through: a
+// -v/--volume value whose option list says ro, or a --mount value shown ro or
+// readonly.
+func readOnlyMount(arg string) bool {
+	if strings.Contains(arg, "=") {
+		for _, opt := range strings.Split(arg, ",") {
+			if opt == "ro" || opt == "readonly" {
+				return true
+			}
+		}
+		return false
+	}
+	parts := strings.Split(arg, ":")
+	return len(parts) > 2 && slices.Contains(strings.Split(parts[2], ","), "ro")
 }
 
 // newFake answers the reads of a CI runner with every volume present, empty and
 // well under its cap, and no job running.
 func newFake() *fakeDocker {
 	return &fakeDocker{
-		dind:     testDind,
-		runner:   testRunner,
-		running:  answer{out: "true\n"},
-		volumes:  map[string]answer{gocacheVolume: {}, gomodVolume: {}, npmVolume: {}},
-		sizes:    map[string]answer{gocacheVolume: {out: "1000\n"}, gomodVolume: {out: "1000\n"}, npmVolume: {out: "1000\n"}},
-		starts:   map[string]answer{},
-		listings: map[string]answer{},
+		dind:       testDind,
+		runner:     testRunner,
+		running:    answer{out: "true\n"},
+		volumeList: answer{out: gocacheVolume + "\n" + gomodVolume + "\n" + npmVolume + "\n"},
+		sizes:      map[string]answer{gocacheVolume: {out: "1000\n"}, gomodVolume: {out: "1000\n"}, npmVolume: {out: "1000\n"}},
+		starts:     map[string]answer{},
+		listings:   map[string]answer{},
 		df: answer{out: "Filesystem 1024-blocks Used Available Capacity Mounted on\n" +
 			"overlay 102400 40960 61440 40% /\n"},
 	}
 }
 
-// canceling answers the fake's canned output, but cancels ctx at the call
-// numbered at: before it, so that call fails as canceled, or after it, so the
-// caller's next check sees the cancellation. Everything the target asks for
-// after that is refused the way a canceled run is.
-func canceling(cancel context.CancelFunc, f *fakeDocker, at int, after bool) diskmaint.Runner {
-	return func(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
-		n := len(f.calls) + 1
-		if n == at && !after {
-			cancel()
-			return nil, context.Canceled
-		}
-		out, err := f.run(ctx, env, name, args...)
-		if n == at && after {
-			cancel()
-		}
-		return out, err
+// cancelRunner answers the fake's canned output, but cancels ctx around the
+// first call whose command line contains want: before it, so that call fails as
+// canceled, or after it, so the caller's next check sees the cancellation.
+// Everything the target asks for after that is refused the way a canceled run
+// is.
+type cancelRunner struct {
+	f      *fakeDocker
+	cancel context.CancelFunc
+	want   string
+	after  bool
+	fired  bool
+}
+
+// run is the Runner the target calls. fired records that a call matched want,
+// so a test whose command changed fails instead of passing on nothing.
+func (c *cancelRunner) run(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
+	match := strings.Contains(name+" "+strings.Join(args, " "), c.want)
+	if match && !c.after {
+		c.fired = true
+		c.cancel()
+		return nil, context.Canceled
 	}
+	out, err := c.f.run(ctx, env, name, args...)
+	if match && c.after {
+		c.fired = true
+		c.cancel()
+	}
+	return out, err
 }
 
 // target plans against the fake's canned docker.
@@ -376,7 +425,7 @@ func TestPlanModuleEntries(t *testing.T) {
 func TestPlanMissingVolume(t *testing.T) {
 	t.Parallel()
 	f := newFake()
-	f.volumes[npmVolume] = answer{err: errors.New("Error response from daemon: No such volume: ci-npm")}
+	f.volumeList = answer{out: gocacheVolume + "\n" + gomodVolume + "\n"}
 
 	p := f.plan(t)
 	if p.Refused != "" {
@@ -402,7 +451,7 @@ func TestPlanRefusesFailedRead(t *testing.T) {
 			f.ps = answer{out: "aaa\n"}
 			f.starts["aaa"] = answer{err: boom}
 		}},
-		{"volume state", func(f *fakeDocker) { f.volumes[gocacheVolume] = answer{err: boom} }},
+		{"volume list", func(f *fakeDocker) { f.volumeList = answer{err: boom} }},
 		{"volume size", func(f *fakeDocker) { f.sizes[gocacheVolume] = answer{err: boom} }},
 		{"volume listing", func(f *fakeDocker) { f.listings[gocacheVolume] = answer{err: boom} }},
 		{"module sizes", func(f *fakeDocker) { f.moduleSizes = answer{err: boom} }},
@@ -455,6 +504,77 @@ func TestPlanRefusesUnparseableListing(t *testing.T) {
 	})
 }
 
+// TestModuleListingExcludesDownloadCache pins the two guards that keep the go
+// download cache out of a plan: the listing script prunes it, and a listing
+// that names it anyway is refused rather than planned.
+func TestModuleListingExcludesDownloadCache(t *testing.T) {
+	t.Parallel()
+
+	t.Run("scripts prune the cache", func(t *testing.T) {
+		t.Parallel()
+		for _, script := range []string{moduleListingScript, moduleSizesScript} {
+			if !strings.Contains(script, "-path ./cache -prune") {
+				t.Fatalf("script %q does not prune the download cache", script)
+			}
+		}
+	})
+
+	// The sizes are canned so a listing the parser let through would reach the
+	// plan as a kept row instead of refusing for a missing size.
+	t.Run("listing that names the cache is refused", func(t *testing.T) {
+		t.Parallel()
+		f := newFake()
+		f.sizes[gomodVolume] = answer{out: strconv.FormatInt(6*kbPerGB, 10) + "\n"}
+		f.listings[gomodVolume] = answer{out: moduleLine("cache/download/github.com/x/@v", testNow.Add(-5*day))}
+		f.moduleSizes = answer{out: moduleSizeLine("cache/download/github.com/x/@v", kbPerGB)}
+
+		p := f.plan(t)
+		if p.Refused == "" {
+			t.Fatalf("plan read a download-cache path: kept %v", p.Kept)
+		}
+		if len(p.Actions) > 0 {
+			t.Fatalf("refused plan names actions: %v", removed(p))
+		}
+	})
+
+	t.Run("listing that names a directory inside a module is refused", func(t *testing.T) {
+		t.Parallel()
+		f := newFake()
+		f.sizes[gomodVolume] = answer{out: strconv.FormatInt(6*kbPerGB, 10) + "\n"}
+		f.listings[gomodVolume] = answer{out: moduleLine("github.com/one@v1.0.0/deeper/tree", testNow.Add(-5*day))}
+		f.moduleSizes = answer{out: moduleSizeLine("github.com/one@v1.0.0/deeper/tree", kbPerGB)}
+
+		if p := f.plan(t); p.Refused == "" {
+			t.Fatalf("plan read a directory inside a module: kept %v", p.Kept)
+		}
+	})
+}
+
+// TestStateChanging self-tests the write guard the other tests rely on, so a
+// plan that issues a state-changing command cannot pass unnoticed.
+func TestStateChanging(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		call string
+		want bool
+	}{
+		{"docker exec d docker ps -q", false},
+		{"docker exec d docker volume ls --format {{.Name}}", false},
+		{"docker exec d docker run --rm --user 0 -v c:/c:ro --entrypoint sh img -c du -sk /c", false},
+		{"docker exec d docker run --rm --mount type=volume,src=c,dst=/c,readonly img", false},
+		{"docker exec d docker run --rm -v c:/c img", true},
+		{"docker exec d docker run --rm --mount type=volume,src=c,dst=/c img", true},
+		{"docker exec d docker volume rm c", true},
+		{"docker rmi img", true},
+		{"docker volume prune -f", true},
+	}
+	for _, c := range cases {
+		if got := stateChanging(c.call); got != c.want {
+			t.Errorf("stateChanging(%q) = %t, want %t", c.call, got, c.want)
+		}
+	}
+}
+
 func TestMeasure(t *testing.T) {
 	t.Parallel()
 	m, err := target(newFake()).Measure(context.Background())
@@ -464,8 +584,10 @@ func TestMeasure(t *testing.T) {
 	if m.Used != 40960*1024 || m.Capacity != 102400*1024 {
 		t.Fatalf("measurement = %+v, want used %d and capacity %d", m, 40960*1024, 102400*1024)
 	}
-	if m.Detail == "" {
-		t.Fatal("measurement has no detail line")
+	for _, want := range []string{bytesText(m.Used), bytesText(m.Capacity)} {
+		if !strings.Contains(m.Detail, want) {
+			t.Fatalf("detail = %q, want it to name %q", m.Detail, want)
+		}
 	}
 }
 
@@ -503,19 +625,19 @@ func TestPlanStopsWhenCanceled(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name  string
-		at    int    // the call the cancellation lands on
+		want  string // the command the cancellation lands on
 		after bool   // cancel after the call answers, not before
 		ps    string // the job list the call sequence starts from
 	}{
-		{"dind state", 1, false, ""},
-		{"job list", 2, false, ""},
-		{"job start", 3, false, "aaa\n"},
-		{"after the job list", 2, true, ""},
-		{"volume state", 3, false, ""},
-		{"volume size", 4, false, ""},
-		{"file listing", 5, false, ""},
-		{"module listing", 8, false, ""},
-		{"module sizes", 9, false, ""},
+		{"dind state", "inspect -f {{.State.Running}}", false, ""},
+		{"job list", "docker ps -q", false, ""},
+		{"job start", "inspect -f {{.State.StartedAt}} aaa", false, "aaa\n"},
+		{"after the job list", "docker ps -q", true, ""},
+		{"volume list", "docker volume ls", false, ""},
+		{"volume size", sizeScript, false, ""},
+		{"file listing", fileListingScript, false, ""},
+		{"module listing", moduleListingScript, false, ""},
+		{"module sizes", moduleSizesScript, false, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -525,11 +647,14 @@ func TestPlanStopsWhenCanceled(t *testing.T) {
 			f.starts["aaa"] = answer{out: "2026-10-29T09:00:00Z\n"}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			tgt := NewTarget(Config{Dind: f.dind, Runner: f.runner, Image: testImage,
-				Run: canceling(cancel, f, c.at, c.after)})
+			r := &cancelRunner{f: f, cancel: cancel, want: c.want, after: c.after}
+			tgt := NewTarget(Config{Dind: f.dind, Runner: f.runner, Image: testImage, Run: r.run})
 
 			if _, err := tgt.Plan(ctx, diskmaint.Policy{}); !errors.Is(err, context.Canceled) {
 				t.Fatalf("plan error = %v, want the caller's cancellation", err)
+			}
+			if !r.fired {
+				t.Fatalf("no call matched %q: calls %v", c.want, f.calls)
 			}
 		})
 	}
@@ -540,11 +665,14 @@ func TestMeasureStopsWhenCanceled(t *testing.T) {
 	f := newFake()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	tgt := NewTarget(Config{Image: testImage, Runner: f.runner,
-		Run: canceling(cancel, f, 1, false)})
+	r := &cancelRunner{f: f, cancel: cancel, want: "df -P /"}
+	tgt := NewTarget(Config{Image: testImage, Runner: f.runner, Run: r.run})
 
 	if _, err := tgt.Measure(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("measure error = %v, want the caller's cancellation", err)
+	}
+	if !r.fired {
+		t.Fatalf("no call matched df: calls %v", f.calls)
 	}
 }
 
