@@ -67,13 +67,13 @@ const (
 	BacktestUndecided = "undecided"
 )
 
-// Answer is a yes, a no or an unanswered question: nil is the Python's None.
+// Answer is a yes, a no or an unanswered question: nil means unanswered.
 type Answer = *bool
 
 // WeeklyRow is one week of one rig's metrics as weekly.csv carries them, with
 // the extract's ALL row beside each rig's. Values holds the numeric columns; a
-// column the week has no value for is absent from the map, which is the
-// Python's None.
+// column the week has no value for is absent from the map, which reads as
+// nil.
 type WeeklyRow struct {
 	Week   string
 	Rig    string
@@ -335,7 +335,7 @@ func ReadBacktestInputs(env Env, docsDir string) (events []RegimeEvent, sloan ma
 }
 
 // weakEvidenceNote and insufficientHistoryNote are the report's two readings of
-// its own table, kept verbatim from the Python so a published report does not
+// its own table, kept verbatim so a published report does not
 // change wording with its implementation.
 const (
 	weakEvidenceNote        = "A yes under moved-at-event is weak evidence when the chance of coincidence is high: with few weekly changes and several events, the series' biggest move lands on an event week by luck that often. Read a verdict as a prompt to look, not as a result."

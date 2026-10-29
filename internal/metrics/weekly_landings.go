@@ -16,7 +16,7 @@ type WeekRig struct {
 	Rig  string
 }
 
-// LandingSummary is one group's figures; a nil pointer is the Python's None, a
+// LandingSummary is one group's figures; a nil pointer marks a
 // figure no row could supply.
 type LandingSummary struct {
 	Landings           int
@@ -33,7 +33,7 @@ type LandingSummary struct {
 }
 
 // Percentile is the linearly interpolated p-quantile of ascending values; it
-// needs at least one value, as the Python indexed into an empty list.
+// needs at least one value, since an empty list has nothing to index.
 func Percentile(sortedValues []float64, p float64) float64 {
 	if len(sortedValues) == 1 {
 		return sortedValues[0]
@@ -55,8 +55,8 @@ type parsedLanding struct {
 	attempts, rejected, manualRescue, unreadable int
 }
 
-// parseLanding reads the cells an unreadable landing leaves empty as the
-// Python's None, and refuses a cell that is neither empty nor a number: a
+// parseLanding reads the cells an unreadable landing leaves empty as nil,
+// and refuses a cell that is neither empty nor a number: a
 // silent zero would publish a figure the file did not hold.
 func parseLanding(r Row) (parsedLanding, error) {
 	l := parsedLanding{week: r["week"], rig: r["rig"]}
@@ -96,7 +96,7 @@ func optionalFloat(r Row, column string) (*float64, error) {
 	return &v, nil
 }
 
-// rowInt reads a cell that must be an integer, as the Python's int() did.
+// rowInt reads a cell that must be an integer; anything else is an error.
 func rowInt(r Row, column string) (int, error) {
 	cell := r[column]
 	v, err := strconv.Atoi(cell)
@@ -124,7 +124,7 @@ func mean(xs []float64) *float64 {
 }
 
 // median is statistics.median: the middle value, or the mean of the two middle
-// ones; it needs at least one value, as the Python raised for an empty list.
+// ones; it needs at least one value, since an empty list has no middle.
 func median(sortedValues []float64) *float64 {
 	n := len(sortedValues)
 	var v float64
@@ -214,8 +214,8 @@ func ClassifyRejection(kind string) string {
 	return "unknown"
 }
 
-// NonConservativeCount is NonConservative's answer; a nil pointer is the
-// Python's None, a share no rejection could supply.
+// NonConservativeCount is NonConservative's answer; a nil pointer marks a
+// share no rejection could supply.
 type NonConservativeCount struct {
 	Rejections        int
 	ConflictGateShare *float64

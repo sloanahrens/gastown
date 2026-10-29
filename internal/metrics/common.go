@@ -10,10 +10,10 @@ import (
 	"time"
 )
 
-// ParseTS parses an ISO 8601 timestamp the way the Python extract's parse_ts
-// does: a trailing Z is UTC, a fractional second and a numeric offset are read,
-// and a timestamp with no zone (or only a date) is taken as UTC, where Python
-// would return a naive datetime.
+// ParseTS parses an ISO 8601 timestamp with these rules:
+// a trailing Z is UTC, a fractional second and a numeric offset are read,
+// and a timestamp with no zone (or only a date) is taken as UTC, so the result
+// is never naive.
 func ParseTS(ts string) (time.Time, error) {
 	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999", "2006-01-02"} {
 		if t, err := time.Parse(layout, ts); err == nil {
@@ -24,7 +24,7 @@ func ParseTS(ts string) (time.Time, error) {
 }
 
 // WeekOf returns the Monday of ts's week as YYYY-MM-DD. The date is the one in
-// ts's own offset, not UTC's, as in the Python.
+// ts's own offset, not UTC's.
 func WeekOf(ts string) (string, error) {
 	t, err := ParseTS(ts)
 	if err != nil {
@@ -83,8 +83,8 @@ func ReadCSV(r io.Reader) ([]Row, error) {
 	return rows, err
 }
 
-// FormatFloat formats v the way Python prints a float, so a CSV cell the Python
-// extract wrote as 2.0 is still 2.0: the shortest digits that round-trip, a
+// FormatFloat formats v so a CSV cell written as 2.0 is still 2.0: the shortest
+// digits that round-trip, a
 // ".0" on an integer-valued float, and exponent form (1e+16, 1.5e-05) when the
 // decimal exponent is below -4 or at least 16.
 func FormatFloat(v float64) string {

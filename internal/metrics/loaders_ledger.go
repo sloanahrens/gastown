@@ -32,7 +32,7 @@ func jsonRows(lines []string, source string, dropped *Dropped) []json.RawMessage
 	return rows
 }
 
-// LedgerRow is one line of a rig's ledger.jsonl: the seven fields the Python
+// LedgerRow is one line of a rig's ledger.jsonl: the seven fields the
 // loader keeps, with Rig filled from the source rig when the line names none.
 type LedgerRow struct {
 	Bead         string `json:"bead"`
@@ -48,8 +48,8 @@ type LedgerRow struct {
 // or that names no bead or no landed_at, is recorded in dropped instead. A line
 // that names no rig is attributed to the source rig.
 //
-// Rigs are visited in sorted order. The Python iterates its dict in insertion
-// order, which a Go map does not have; sorting keeps the row order stable from
+// Rigs are visited in sorted order, since a Go map keeps no insertion
+// order; sorting keeps the row order stable from
 // run to run.
 func LoadLedger(sources map[string][]string, dropped *Dropped) []LedgerRow {
 	rigs := make([]string, 0, len(sources))
@@ -66,8 +66,8 @@ func LoadLedger(sources map[string][]string, dropped *Dropped) []LedgerRow {
 			}
 			var row LedgerRow
 			// Valid JSON that is not an object has no bead and no landed_at;
-			// it takes the same refusal. The Python raised AttributeError on
-			// such a line, and the loader records it rather than dying.
+			// it takes the same refusal, so the loader records it
+			// rather than stopping the load.
 			if err := json.Unmarshal(raw, &row); err != nil || row.Bead == "" || row.LandedAt == "" {
 				dropped.Add(source, "missing bead or landed_at")
 				continue
@@ -99,7 +99,7 @@ type Review struct {
 }
 
 // reviewFields is a review row mid-parse: a pointer per required field tells an
-// absent field from a zero value, which the Python's KeyError tells apart.
+// absent field from a zero value.
 type reviewFields struct {
 	Bead    *string  `json:"bead"`
 	Rig     *string  `json:"rig"`
@@ -158,8 +158,8 @@ type Rework struct {
 // source says so, and attempts is the larger of the two views. A review whose
 // bead never landed is ignored.
 //
-// A timestamp that does not parse is an error, where the Python's parse_ts
-// raised: a malformed date would otherwise compare as zero and undercount.
+// A timestamp that does not parse is an error:
+// a malformed date would otherwise compare as zero and undercount.
 func ReworkByBead(reviews []Review, landedAt map[string]string, noteKinds map[string][]string) (map[string]Rework, error) {
 	out := make(map[string]Rework, len(landedAt))
 	for bead := range landedAt {

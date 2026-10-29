@@ -49,7 +49,7 @@ func LoadResult(env Env, outDir string) (Result, error) {
 	if err := dec.Decode(&footer); err != nil {
 		return Result{}, fmt.Errorf("%s: %w", footerName, err)
 	}
-	// The Python's json.load reads one value and refuses a tail, so a second
+	// Reading takes one value and refuses a tail, so a second
 	// value here means the file is corrupt rather than a footer with more in it.
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return Result{}, fmt.Errorf("%s: data after the top-level object", footerName)
@@ -87,10 +87,9 @@ func TypedWeekly(rows []Row) ([]WeeklyMetrics, error) {
 // typedWeeklyRow turns one weekly.csv row into the typed row it describes.
 func typedWeeklyRow(r Row) (WeeklyMetrics, error) {
 	var m WeeklyMetrics
-	// The Python reads the label columns with r["..."], which raises KeyError
-	// when the row lacks one, and the numeric columns with r.get(c, ""), which
-	// makes an absent column the value the week lacks. The two arms differ on
-	// purpose: requiredCell is r["..."], weeklyCellFloat is r.get(c, "").
+	// Label columns must be present: a row without one is an error. The numeric
+	// columns read an absent cell as "", the value the week lacks. The two arms
+	// differ on purpose: requiredCell is strict, weeklyCellFloat is lenient.
 	for _, c := range []struct {
 		name string
 		dst  *string
@@ -153,7 +152,7 @@ func typedWeeklyRow(r Row) (WeeklyMetrics, error) {
 		{"rejections", &m.Rejections},
 		{"rho_numerator", &m.RhoNumerator},
 		{"rho_denominator", &m.RhoDenominator},
-		// The Python leaves this column a float after typing; WeeklyMetrics
+		// This column is left a float after typing; WeeklyMetrics
 		// stores it as the count the extract wrote without a decimal point.
 		{"handoff_bytes_total", &m.HandoffBytesTotal},
 	} {
@@ -167,7 +166,7 @@ func typedWeeklyRow(r Row) (WeeklyMetrics, error) {
 }
 
 // requiredCell returns r's cell for a column typed_weekly reads as r[name]: a
-// row without the column is an error, where the Python raises KeyError.
+// row without the column is an error.
 func requiredCell(r Row, name string) (string, error) {
 	v, ok := r[name]
 	if !ok {
@@ -178,7 +177,7 @@ func requiredCell(r Row, name string) (string, error) {
 
 // weeklyCellFloat reads one numeric cell the way typed_weekly reads it with
 // r.get(column, ""): an empty cell, or a column the row does not carry, is a
-// figure the week lacks (the Python's None).
+// figure the week lacks, which is nil.
 func weeklyCellFloat(r Row, column string) (*float64, error) {
 	cell := r[column]
 	if cell == "" {
@@ -193,8 +192,7 @@ func weeklyCellFloat(r Row, column string) (*float64, error) {
 	return &v, nil
 }
 
-// weeklyCellInt reads one count cell, truncating a fractional one as the
-// Python's int() does.
+// weeklyCellInt reads one count cell, truncating a fractional one toward zero.
 func weeklyCellInt(r Row, column string) (int, error) {
 	v, err := weeklyCellFloat(r, column)
 	if err != nil || v == nil {
@@ -208,7 +206,7 @@ func weeklyCellInt(r Row, column string) (int, error) {
 
 // fitsInt reports whether v is a value an int can hold. The upper bound is
 // exclusive because float64(math.MaxInt) rounds up to 2^63: a count of exactly
-// 2^63 is out of an int's range, where the Python's arbitrary-precision int()
+// 2^63 is out of an int's range, where an arbitrary-precision int()
 // would carry it. NaN and infinity fail the comparisons too.
 func fitsInt(v float64) bool {
 	return v >= float64(math.MinInt) && v < float64(math.MaxInt)

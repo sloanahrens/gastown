@@ -55,7 +55,7 @@ type CheckedBox struct {
 // known after the landing cannot be a predictor, so it stays out of the split
 // and is reported beside the box instead.
 //
-// A non-blank cell that is not a number is an error, as the Python's float()
+// A non-blank cell that is not a number is an error, as a float parse
 // raises on it: the extract wrote something the mean cannot read, and
 // dropping the cell would quietly move the mean instead of saying so.
 func CheckHoldoutExplained(boxes []Box, rows []Row, target string, minSupport int,
@@ -259,7 +259,7 @@ func mangoCreateFile(path string) (io.WriteCloser, error) {
 
 // writeMangoSummary writes the per-target counts backtest reads, with a
 // skipped or failed target absent rather than present as a zero result, as
-// the Python writes only the targets whose search ran. It is written after
+// the section writes only the targets whose search ran. It is written after
 // every target, so a failed weekly profile still leaves the targets' counts on
 // disk beside the section that reports the failure.
 func writeMangoSummary(path string, summary map[string]MangoSummary) error {

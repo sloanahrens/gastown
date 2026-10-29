@@ -19,7 +19,7 @@ var explainOnlyColumns = []string{
 
 // DiffSource is where a landing's size and spread columns come from: Stats
 // returns the stats of one commit, and an error wrapping ErrDiffUnavailable
-// when the diff cannot be read, which is the Python's None.
+// when the diff cannot be read.
 type DiffSource interface {
 	Stats(ctx context.Context, rig, commit string) (DiffStat, error)
 }
@@ -67,7 +67,7 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 
 		b := beadsByID[l.Bead]
 		model := usage[l.Bead].Model
-		// The Python's None is an empty cell: write_csv wrote it that way.
+		// A nil value is written as an empty cell.
 		var linesAdded, linesDeleted, linesTotal, filesTouched, fileEntropy, packageEntropy string
 		if d != nil {
 			linesAdded = strconv.Itoa(d.LinesAdded)
@@ -134,8 +134,8 @@ func boolCell(v bool) string {
 }
 
 // WriteLandingSidecar writes landings.sidecar.json: the explain-only columns,
-// which the mango stage drops from its predictors, in the Python sidecar's
-// json.dump(..., indent=1) bytes.
+// which the mango stage drops from its predictors, in the sidecar's
+// indent=1 JSON bytes.
 func WriteLandingSidecar(w io.Writer) error {
 	sidecar := struct {
 		ExplainOnly []string `json:"explain_only"`

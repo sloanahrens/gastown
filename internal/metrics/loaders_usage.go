@@ -46,7 +46,7 @@ func LoadUsage(files map[string]UsageFile) map[string]Usage {
 		for name := range f.Models {
 			names = append(names, name)
 		}
-		// The Python maxes over the sorted names, so a tie in calls goes to the
+		// Names are scanned in sorted order, so a tie in calls goes to the
 		// first name alphabetically; map order cannot decide it.
 		sort.Strings(names)
 		top := names[0]
@@ -61,7 +61,7 @@ func LoadUsage(files map[string]UsageFile) map[string]Usage {
 }
 
 // overrunZeroTime is the zero stamp the guard writes for a stop that has not
-// begun, as the Python compares against it.
+// begun; LoadOverrun reads a stop stamped with it as not begun.
 const overrunZeroTime = "0001-01-01T00:00:00Z"
 
 // OverrunState is the part of a bead's overrun-guard state file LoadOverrun
@@ -101,13 +101,13 @@ type OMEra struct {
 // OMEras returns the threshold eras a rig's .om.json commits record, in commit
 // order. A commit that is not JSON, is not an object, or sets no threshold
 // contributes no era; a threshold that does not convert to a number is an
-// error, where the Python's float raised and stopped the extract.
+// error that stops the load.
 func OMEras(commits []OMCommit) ([]OMEra, error) {
 	var eras []OMEra
 	for _, c := range commits {
 		var obj map[string]any
 		// Unparseable JSON and JSON that is not an object both carry no
-		// threshold: the Python's ValueError and AttributeError skipped them.
+		// threshold, so the commit contributes no era.
 		if err := json.Unmarshal([]byte(c.Text), &obj); err != nil {
 			continue
 		}
@@ -124,9 +124,8 @@ func OMEras(commits []OMCommit) ([]OMEra, error) {
 	return eras, nil
 }
 
-// thresholdFloat converts an .om.json threshold to a float as Python's float
-// does: a number, a numeric string and a bool convert, and anything else is the
-// error float raised.
+// thresholdFloat converts an .om.json threshold to a float: a number, a numeric
+// string and a bool convert, and anything else is an error.
 func thresholdFloat(v any) (float64, error) {
 	switch x := v.(type) {
 	case float64:
@@ -145,11 +144,10 @@ func thresholdFloat(v any) (float64, error) {
 
 // EraOf returns the threshold in force at ts: the last era in list order that
 // began at or before it, or nil when ts precedes every era. A timestamp that
-// does not parse is an error, where the Python's parse_ts raised.
+// does not parse is an error.
 func EraOf(eras []OMEra, ts string) (*float64, error) {
 	if len(eras) == 0 {
-		// The Python's loop never reaches parse_ts, so an empty era list never
-		// reads the timestamp.
+		// With no eras there is no loop to run, so an empty list never parses ts.
 		return nil, nil
 	}
 	when, err := ParseTS(ts)

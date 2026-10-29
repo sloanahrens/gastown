@@ -55,7 +55,7 @@ type RealFiles struct {
 	// ReadFile reads a whole file.
 	ReadFile func(path string) ([]byte, error)
 	// ReadDir lists a directory's entries in name order. A path that holds no
-	// directory lists nothing, as the Python's isdir guard did; a directory
+	// directory lists nothing; a directory
 	// that cannot be listed is an error, because a listing that failed is not
 	// an empty one.
 	ReadDir func(dir string) ([]DirEntry, error)
@@ -80,13 +80,13 @@ func hostFiles() RealFiles {
 }
 
 // hostDir is the host's directory listing: entries in name order, none for a
-// path that holds no directory (the Python's isdir guard), and an error for a
+// path that holds no directory, and an error for a
 // directory that cannot be listed.
 func hostDir(dir string) ([]DirEntry, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		// ReadDir refuses a path that is a file, where the Python's isdir
-		// guard listed nothing.
+		// ReadDir refuses a path that is a file, where the stat check
+		// lists nothing.
 		if info, statErr := os.Stat(dir); statErr == nil && !info.IsDir() {
 			return nil, nil
 		}
@@ -234,7 +234,7 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 }
 
 // realBd is the extract's bd seam over the runner: bd in dir, its stdout, and
-// ok false for any failure, which is the Python's None.
+// ok false for any failure.
 func realBd(ctx context.Context, r RunnerDir) BdRun {
 	return func(dir string, args []string) ([]byte, bool) {
 		out, err := run(ctx, r, dir, append([]string{"bd"}, args...), runTimeout)
@@ -248,9 +248,8 @@ func rigRepo(town, rig string) string {
 }
 
 // realOMHistory is each rig's .om.json history, oldest first. A rig whose log
-// cannot be read stops the wiring: the Python called .splitlines on the failed
-// read's None and raised, so a rig with no history never passes for one whose
-// threshold never moved.
+// cannot be read stops the wiring, so a rig with no history never passes for one
+// whose threshold never moved.
 func realOMHistory(ctx context.Context, r RunnerDir, town string) (map[string][]OMCommit, error) {
 	out := make(map[string][]OMCommit, len(Rigs))
 	for _, rig := range Rigs {
@@ -268,8 +267,8 @@ func realOMHistory(ctx context.Context, r RunnerDir, town string) (map[string][]
 			}
 			text, err := run(ctx, r, "", []string{"git", "--git-dir", gitDir, "show", fields[1] + ":.om.json"}, gitTimeout)
 			if err != nil {
-				// A show that fails contributes "" as the Python's `or ""`
-				// did: the commit names no threshold, and OMEras skips it.
+				// A show that fails contributes an empty read, which
+				// means the commit names no threshold, and OMEras skips it.
 				text = nil
 			}
 			commits = append(commits, OMCommit{At: fields[0], Text: string(text)})
@@ -280,8 +279,8 @@ func realOMHistory(ctx context.Context, r RunnerDir, town string) (map[string][]
 }
 
 // realUsageFiles is real_env's usage map: each bead's *.work.json, named by the
-// file minus its suffix. A file that does not decode, or that is empty in the
-// Python sense, is left out, so the footer does not count it.
+// file minus its suffix. A file that does not decode, or whose value is
+// falsy (see pyTruthy), is left out, so the footer does not count it.
 func realUsageFiles(files RealFiles, dir string) (map[string]UsageFile, error) {
 	const suffix = ".work.json"
 	out := map[string]UsageFile{}
@@ -396,7 +395,7 @@ func listDirNames(files RealFiles, dir string) ([]string, error) {
 }
 
 // readCache decodes one cache file into T. A town with no cache yet reads as an
-// empty one, which is the Python's _load_json default, so a first run costs
+// empty one, which is the default, so a first run costs
 // what it costs; a cache file that is there and does not decode is an error,
 // because a corrupt cache read as empty is a first run again on every later
 // run, silently.
@@ -415,8 +414,8 @@ func readCache[T any](files RealFiles, path string) (T, error) {
 	return value, nil
 }
 
-// readJSONTruthy decodes path into T unless the file is empty in the Python
-// sense, which `if data:` skipped.
+// readJSONTruthy decodes path into T unless the file's value is falsy (see
+// pyTruthy), and the result is not ok.
 func readJSONTruthy[T any](files RealFiles, path string) (T, bool) {
 	var value T
 	data, err := files.ReadFile(path)
@@ -436,7 +435,7 @@ func readJSONTruthy[T any](files RealFiles, path string) (T, bool) {
 	return value, true
 }
 
-// pyTruthy is the truth of a decoded JSON value as Python reads it: null,
+// pyTruthy is the truth of a decoded JSON value, where null,
 // false, zero, the empty string and an empty list or object are all false.
 func pyTruthy(v any) bool {
 	switch x := v.(type) {
