@@ -203,6 +203,16 @@ type Daemon struct {
 	// maintenanceSeams); the zero value is production.
 	maint maintenanceSeams
 
+	// diskMaint replaces the disk_maintenance patrol's side effects in tests
+	// (see diskMaintSeams); the zero value is production.
+	diskMaint diskMaintSeams
+	// diskMaintRunning is that patrol's single-flight guard.
+	diskMaintRunning atomic.Bool
+	// diskMaintSettled is when it last settled a window, as UnixNano: the
+	// pass runs off the loop goroutine, so the marker it writes is atomic and
+	// the loop only reads it.
+	diskMaintSettled atomic.Int64
+
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup
 	// instead of each paying a bd subprocess - which, on a CPU-starved host,
@@ -1440,6 +1450,19 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Scheduled maintenance ticker started (check interval %v, window %s)", interval, window)
 	}
 
+	// Start the disk_maintenance ticker if configured. It plans the town's
+	// registry in its own quiet window, once a day, and prunes nothing unless
+	// the mode is apply (disk_maintenance.go, gt-dl4nv.15).
+	var diskMaintTicker *time.Ticker
+	var diskMaintChan <-chan time.Time
+	if d.isPatrolActive("disk_maintenance") {
+		diskMaintTicker = time.NewTicker(diskMaintCheckInterval)
+		diskMaintChan = diskMaintTicker.C
+		defer diskMaintTicker.Stop()
+		d.logger.Printf("Disk maintenance ticker started (check interval %v, window %s, mode %s)",
+			diskMaintCheckInterval, diskMaintenanceWindow(d.patrolConfig), diskMaintenanceModeOrDefault(d.patrolConfig))
+	}
+
 	// Start the scheduled_slings ticker if configured. Each tick evaluates
 	// every entry; the decision function decides due-ness, so a coarse tick
 	// is enough (gt-nj23).
@@ -1621,6 +1644,13 @@ func (d *Daemon) Run() (err error) {
 			// and dispatches a dolt_gc('--full') cycle for the databases due.
 			if !d.isShutdownInProgress() {
 				d.runScheduledMaintenance()
+			}
+
+		case <-diskMaintChan:
+			// Disk maintenance — in its own quiet window, once a day, plans the
+			// town's registry and applies the plan only in apply mode.
+			if !d.isShutdownInProgress() {
+				d.runDiskMaintenance()
 			}
 
 		case <-scheduledSlingsChan:

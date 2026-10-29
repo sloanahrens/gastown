@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -64,6 +66,7 @@ type PatrolsConfig struct {
 	CheckpointDog        *CheckpointDogConfig        `json:"checkpoint_dog,omitempty"`
 	OverrunGuard         *OverrunGuardConfig         `json:"overrun_guard,omitempty"`
 	ScheduledMaintenance *ScheduledMaintenanceConfig `json:"scheduled_maintenance,omitempty"`
+	DiskMaintenance      *DiskMaintenanceConfig      `json:"disk_maintenance,omitempty"`
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	OverseerReport       *OverseerReportConfig       `json:"overseer_report,omitempty"`
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
@@ -538,6 +541,63 @@ type ScheduledMaintenanceConfig struct {
 	Mode          string   `json:"mode,omitempty"`
 	GCMinBytes    *int64   `json:"gc_min_bytes,omitempty"`
 	GCGrowthRatio *float64 `json:"gc_growth_ratio,omitempty"`
+}
+
+// DiskMaintenanceConfig configures the disk_maintenance patrol: the daily
+// quiet-window run that plans, and in apply mode prunes, the town's registry
+// (internal/daemon/disk_maintenance.go).
+//
+// The patrol is opt-in. Nothing runs unless Enabled is true, and it changes
+// nothing unless Mode is "apply": disk maintenance deletes images, so a town
+// that has not asked for it must not get it from a default.
+type DiskMaintenanceConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Interval string `json:"interval"` // "daily"
+	Window   string `json:"window"`   // "04:30", local time
+	Mode     string `json:"mode"`     // "dry_run" (default) | "apply"
+}
+
+// The values DiskMaintenanceConfig accepts. An empty field means the default,
+// so a town that sets only enabled still gets a window and a mode.
+const (
+	DiskMaintenanceIntervalDaily = "daily"
+	DiskMaintenanceModeDryRun    = "dry_run"
+	DiskMaintenanceModeApply     = "apply"
+	DiskMaintenanceDefaultWindow = "04:30"
+)
+
+// UnmarshalJSON decodes the patrol's block strictly, refusing a value the
+// patrol cannot act on: an unknown mode, an interval other than daily, or a
+// window that is not HH:MM. A mistyped mode must not read as either a planned
+// run or a dry one, so it is an error at decode rather than a default later.
+//
+// The unknown-field check is repeated here because a type that decodes itself
+// is decoded by the config kernel's strict decoder opaquely.
+func (c *DiskMaintenanceConfig) UnmarshalJSON(data []byte) error {
+	type plain DiskMaintenanceConfig
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("patrols.disk_maintenance: %w", err)
+	}
+	switch p.Interval {
+	case "", DiskMaintenanceIntervalDaily:
+	default:
+		return fmt.Errorf("patrols.disk_maintenance.interval = %q: only %q is supported", p.Interval, DiskMaintenanceIntervalDaily)
+	}
+	switch p.Mode {
+	case "", DiskMaintenanceModeDryRun, DiskMaintenanceModeApply:
+	default:
+		return fmt.Errorf("patrols.disk_maintenance.mode = %q: use %q or %q", p.Mode, DiskMaintenanceModeDryRun, DiskMaintenanceModeApply)
+	}
+	if p.Window != "" {
+		if _, err := parseClock(p.Window); err != nil {
+			return fmt.Errorf("patrols.disk_maintenance.window %q: want HH:MM", p.Window)
+		}
+	}
+	*c = DiskMaintenanceConfig(p)
+	return nil
 }
 
 // JevDedupeConfig switches on the duplicate-finding pass and prices its Jev
