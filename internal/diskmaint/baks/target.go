@@ -33,9 +33,6 @@ var (
 	// errNoDirs reports a target with no directory to read at all, which is a
 	// configuration mistake rather than a town with no backups.
 	errNoDirs = errors.New("baks: no config or binary directory configured")
-	// errNotWired reports an apply to a target that only reads: it lists
-	// directories and asks lsof, and it removes nothing.
-	errNotWired = errors.New("baks apply: deletion is not wired yet; the plan is a dry run")
 	// errReadDir reports a directory that exists but cannot be listed. A plan
 	// refuses on it, because an unlisted directory could hide a backup that
 	// must stay.
@@ -63,13 +60,20 @@ type Config struct {
 	// Now is the clock a policy without a time is read against; nil uses the
 	// system clock.
 	Now func() time.Time
-	// Ledger records an apply, which this target does not do yet.
+	// Policy is the run's limits. Its Apply flag is the dry-run gate: the zero
+	// value is a dry run, so a caller must opt in to a removal.
+	Policy diskmaint.Policy
+	// Ledger records each apply. Apply refuses to run without one.
 	Ledger *diskmaint.Ledger
 }
 
 // Target discovers config and binary backups and plans their removal.
 type Target struct {
 	cfg Config
+	// remove deletes one file. NewTarget sets it to os.Remove; a test swaps in
+	// a fake to make a removal fail, which a real directory cannot do without
+	// depending on who runs the test.
+	remove func(path string) error
 }
 
 // NewTarget returns a Target that reads the directories named by cfg.
@@ -77,7 +81,7 @@ func NewTarget(cfg Config) *Target {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Target{cfg: cfg}
+	return &Target{cfg: cfg, remove: os.Remove}
 }
 
 // Name is the target's name in plans and ledger entries.
@@ -200,13 +204,6 @@ func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, 
 		in.InstalledMod = t.installedMods()
 	}
 	return BuildPlan(in), nil
-}
-
-// Apply refuses the plan and deletes nothing: this target reads directory state
-// and asks lsof, it does not remove a file, so a caller that ignored a dry run
-// cannot lose a backup.
-func (t *Target) Apply(context.Context, diskmaint.Plan) (diskmaint.Result, error) {
-	return diskmaint.Result{Target: planTarget}, errNotWired
 }
 
 // scan reads the configured directories into the config and binary entries
