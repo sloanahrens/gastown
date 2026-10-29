@@ -720,6 +720,10 @@ type State struct {
 	// the spend report, the hours, the Claude plan and the samples its dollars
 	// come from. Nil until one of them has reported.
 	CostCharts *CostCharts `json:"cost_charts,omitempty"`
+	// CostProviders is one row per provider the Cost panel's table draws, in
+	// the order costProviderBuilders lists them. It is rebuilt beside the
+	// charts; a provider whose reader is not configured has no row.
+	CostProviders []CostProvider `json:"cost_providers,omitempty"`
 	// JevSpend is the Jev ledger's calls and dollars over the spend command's
 	// window, read beside the DeepSeek spend. It is nil until the reader first
 	// reports; a failed read keeps the last good value and says so in Reads.
