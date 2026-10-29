@@ -627,9 +627,12 @@ func TestMaintLocalTargetsRemoveOnlyInApply(t *testing.T) {
 			ledger := diskmaint.NewLedger(filepath.Join(t.TempDir(), "ledger.jsonl"), maintLedgerMaxBytes)
 			targets := maintLocalTargets(town, t.TempDir(), (&fakeMaintRunner{}).run, ledger, tc.apply)
 			// An empty plan removes nothing, so the only answer that differs
-			// between the two modes is the dry-run gate itself.
+			// between the two modes is the dry-run gate itself. The plan carries
+			// the mode's policy, as the run builds it, so a target that gates on
+			// the plan it is handed refuses exactly as the mode says.
 			for _, name := range []string{maintTargetWorktree, maintTargetBaks} {
-				_, err := targets[name].Apply(context.Background(), diskmaint.Plan{Target: name})
+				plan := diskmaint.Plan{Target: name, Policy: diskmaint.Policy{Apply: tc.apply}}
+				_, err := targets[name].Apply(context.Background(), plan)
 				if got := err != nil; got != tc.refused {
 					t.Errorf("%s Apply() refused = %v, want %v (error %v)", name, got, tc.refused, err)
 				}

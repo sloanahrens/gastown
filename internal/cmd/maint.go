@@ -409,8 +409,8 @@ func maintRegistryTarget(ctx context.Context, town string, cfg polecatimage.Conf
 // the stale crew worktrees under the town's rigs, the backup files in the town
 // and the operator's config and binary directories, and the sizes of the Dolt
 // and backup paths. Each shares the run's ledger. apply is the dry-run gate the
-// two removing targets carry: a target built for a plan refuses to remove
-// anything, so only an apply can delete.
+// worktree target carries; the baks target takes its gate from the policy of
+// the plan it is handed, so a plan built for a dry run removes nothing.
 //
 // A town whose rig registry cannot be read still gets a worktree target, one
 // that refuses the plan with the read error. Leaving the target out would hide
@@ -425,7 +425,6 @@ func maintLocalTargets(town, home string, run diskmaint.Runner, ledger *diskmain
 			BinaryDirs: binaryDirs,
 			Installed:  []string{"bd", "gt", "om"},
 			Run:        run,
-			Policy:     policy,
 			Ledger:     ledger,
 		}),
 		maintTargetSizes: sizes.NewTarget(sizes.Config{
