@@ -588,7 +588,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		host:        d.hostProbes,
 	}
 	if s.host == nil {
-		s.host = systemHostProbes{townRoot: d.config.TownRoot}
+		s.host = attentionHostProbes(d.config.TownRoot, os.Getenv)
 	}
 	s.landingRigs = d.attentionLandingRigs
 	overseerCfg := d.loadOperationalConfig().GetOverseerConfig()
