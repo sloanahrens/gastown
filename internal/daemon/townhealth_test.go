@@ -554,6 +554,18 @@ func TestWriteTownHealth_NeedsHumanFailedReadIsUnknown(t *testing.T) {
 	}
 }
 
+// A cancelled health computation reads no label: the person waits come back as
+// the context error rather than as a report of nobody waiting (gt-slmaz).
+func TestNeedsHumanStopsOnACancelledContext(t *testing.T) {
+	t.Parallel()
+	d, _ := healthTown(t, time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (&healthSources{d: d}).NeedsHuman(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
 // The exec-tax line the daemon logs is its field's state changing, and a
 // beat that reports the same state says nothing (gt-2ycne.1).
 func TestWriteTownHealth_LogsTheExecTaxOnlyWhenItChanges(t *testing.T) {
