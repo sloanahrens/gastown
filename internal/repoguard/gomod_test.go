@@ -14,7 +14,7 @@ const trackerLine = "replace github.com/steveyegge/gastown/tracker => ./tracker"
 // tracker line it must admit. The block cases expect the opening line alone:
 // the entries inside name a module, not the replace keyword. The indented
 // cases are the tightening beyond the script's column-0 regexp: Go's parser
-// honours a top-level replace set off by whitespace, so the guard reports it.
+// honors a top-level replace set off by whitespace, so the guard reports it.
 func TestCheckGoModReplacesTable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -8,7 +8,7 @@ import (
 // goModReplaceDirective matches a line that opens a replace directive: after
 // any indent, the keyword, then whitespace (a one-line replace) or an opening
 // parenthesis (a block). The indent is allowed because Go's modfile parser
-// honours a top-level replace set off by spaces or a tab, and a column-0 match
+// honors a top-level replace set off by spaces or a tab, and a column-0 match
 // would let it through.
 var goModReplaceDirective = regexp.MustCompile(`^[[:space:]]*replace([[:space:]]|\()`)
 
