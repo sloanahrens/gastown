@@ -37,7 +37,7 @@ func runParse(args []string, getenv func(string) string, stdout, stderr io.Write
 	opts, err := parse(args, getenv)
 	switch {
 	case errors.Is(err, forgejoprov.ErrHelp):
-		fmt.Fprint(stdout, usage)
+		fmt.Fprintf(stdout, "%s", usage)
 		return forgejoprov.ExitOK
 	case err != nil:
 		var refused *forgejoprov.UsageError
