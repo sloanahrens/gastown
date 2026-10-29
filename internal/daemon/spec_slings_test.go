@@ -7,6 +7,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"io"
 	"log"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -153,8 +154,8 @@ func TestNextTickStartsWhileAnEarlierSlingIsStillRunning(t *testing.T) {
 		t.Errorf("first tick argv = %v, want background slings and nothing in flight", ticks[0])
 	}
 	i := slices.Index(ticks[1], "--in-flight")
-	if i < 0 || !strings.Contains(ticks[1][i+1], `"bead":"gt-a"`) || !strings.Contains(ticks[1][i+1], `"agent":"claude-sonnet"`) || !strings.Contains(ticks[1][i+1], "internal/x.go") {
-		t.Errorf("second tick argv = %v, want --in-flight naming gt-a, its seat and its files", ticks[1])
+	if i < 0 || !strings.Contains(ticks[1][i+1], `"bead":"gt-a"`) || !strings.Contains(ticks[1][i+1], `"agent":"claude-sonnet"`) {
+		t.Errorf("second tick argv = %v, want --in-flight naming gt-a and its seat", ticks[1])
 	}
 
 	close(b.release)
@@ -167,6 +168,43 @@ func TestNextTickStartsWhileAnEarlierSlingIsStillRunning(t *testing.T) {
 	if n := countContaining(got, "spec_dispatch: dispatched: gt-a: slung to gastown/p", "sling took"); n != 2 {
 		t.Errorf("sling result lines = %d, want one per finished sling: %v", n, got)
 	}
+}
+
+// The tick is handed the running sling's bead, its seat and its start, and
+// nothing else: the job's file and test lists are the sling's, and the tick
+// never reads them (gt-mx656).
+func TestTheInFlightPayloadCarriesOnlyWhatTheTickReads(t *testing.T) {
+	t.Parallel()
+	job := `{"bead":"gt-a","rig":"gastown","agent":"claude-sonnet","paths":["internal/x.go"],"tests":["TestX"],"run":{"Formula":"","Vars":null,"Actor":""}}`
+	b, fake, d, _ := newBlockedSlings(t, plannedTick(job))
+
+	d.runSpecDispatch()
+	recvSling(t, b.started)
+	// The second tick runs with gt-a's sling still in flight.
+	d.runSpecDispatch()
+
+	ticks := fake.argvs("spec", "dispatch")
+	if len(ticks) != 2 {
+		t.Fatalf("ticks = %v, want two", ticks)
+	}
+	i := slices.Index(ticks[1], "--in-flight")
+	if i < 0 {
+		t.Fatalf("second tick argv = %v, want --in-flight naming the running sling", ticks[1])
+	}
+	var got []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(ticks[1][i+1]), &got); err != nil {
+		t.Fatalf("--in-flight is not JSON: %v (%s)", err, ticks[1][i+1])
+	}
+	if len(got) != 1 {
+		t.Fatalf("--in-flight = %s, want gt-a alone", ticks[1][i+1])
+	}
+	keys := slices.Sorted(maps.Keys(got[0]))
+	if want := []string{"agent", "bead", "rig", "started"}; !slices.Equal(keys, want) {
+		t.Errorf("--in-flight keys = %v, want %v: the job carried a path and a test list, and the tick reads neither", keys, want)
+	}
+
+	close(b.release)
+	waitSlings(t, d)
 }
 
 func TestARunningBeadIsNeverSlungTwice(t *testing.T) {
