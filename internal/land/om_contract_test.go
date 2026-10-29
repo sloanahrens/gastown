@@ -166,7 +166,7 @@ func (f *fakeOMRun) review(t *testing.T) fakeOMCall {
 // land on f, which a failing recorded-call assertion quotes.
 func contractInput(t *testing.T, f *fakeOMRun) ReviewInput {
 	t.Helper()
-	return ReviewInput{
+	return ReviewInput{Repo: baseRepo{},
 		Dir: t.TempDir(), Base: "aaa111", Head: "bbb222",
 		BeadID: "gt-q52sv", CriteriaText: "## Acceptance\n- [ ] it works\n- [ ] it is pinned",
 		Logf: f.logf,
@@ -243,7 +243,7 @@ func TestOMContractWithoutBeadOrCriteria(t *testing.T) {
 	t.Parallel()
 	f := newFakeOM(t, fakeOMSpec{help: helpBoth, verdict: `{"score":0.9,"verdict":"approve","findings":[]}`})
 	dir := t.TempDir()
-	if _, err := f.reviewer.Review(context.Background(), dir, "aaa111", "bbb222"); err != nil {
+	if _, err := reviewAt(context.Background(), f.reviewer, "", dir, "aaa111", "bbb222"); err != nil {
 		t.Fatal(err)
 	}
 	got := f.review(t)
@@ -373,7 +373,7 @@ func TestOMContractFailsClosed(t *testing.T) {
 func TestOMContractMissingBinary(t *testing.T) {
 	t.Parallel()
 	r := OMReviewer{Path: filepath.Join(t.TempDir(), "no-such-om"), OutDir: t.TempDir()}
-	v, err := r.ReviewBead(context.Background(), ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b"})
+	v, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{}, Dir: t.TempDir(), Base: "a", Head: "b"})
 	if err == nil {
 		t.Fatalf("ReviewBead = %+v, nil; want an error", v)
 	}

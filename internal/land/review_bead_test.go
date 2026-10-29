@@ -151,7 +151,7 @@ func TestOMReviewerAlwaysPassesTheBead(t *testing.T) {
 			dir := t.TempDir()
 			var log strings.Builder
 			v, err := omStubbed(t, bin, stub).ReviewBead(context.Background(),
-				ReviewInput{Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc", Logf: logfTo(&log)})
+				ReviewInput{Repo: baseRepo{}, Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc", Logf: logfTo(&log)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -183,7 +183,7 @@ func TestOMReviewerKeepsTheBeadWhenTheOnlyFlagIsMissing(t *testing.T) {
 	t.Parallel()
 	bin, dir := omBinary(t), t.TempDir()
 	stub := &omStub{t: t, help: omHelpWithoutBead, bead: "gt-abc"}
-	if _, err := omStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{
+	if _, err := omStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc", CriteriaText: "- [ ] one"}); err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestOMReviewerLogsABeadMismatch(t *testing.T) {
 	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-other"}
 	var log strings.Builder
 	v, err := omStubbed(t, bin, stub).ReviewBead(context.Background(),
-		ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc", Logf: logfTo(&log)})
+		ReviewInput{Repo: baseRepo{}, Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc", Logf: logfTo(&log)})
 	if err != nil {
 		t.Fatalf("ReviewBead: %v; a mismatch must not fail the landing", err)
 	}
@@ -286,7 +286,7 @@ func TestOMReviewerLogsAMissingEcho(t *testing.T) {
 	stub := &omStub{t: t, help: omHelpWithBead}
 	var log strings.Builder
 	v, err := omStubbed(t, bin, stub).ReviewBead(context.Background(),
-		ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc", Logf: logfTo(&log)})
+		ReviewInput{Repo: baseRepo{}, Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc", Logf: logfTo(&log)})
 	if err != nil {
 		t.Fatal(err)
 	}

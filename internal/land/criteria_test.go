@@ -146,7 +146,7 @@ func TestOMReviewerPassesTheCriteriaFile(t *testing.T) {
 	stub := &criteriaStub{t: t, help: omHelpWithCriteria}
 	r := criteriaStubbed(t, bin, stub)
 	var log strings.Builder
-	v, err := r.ReviewBead(context.Background(), ReviewInput{
+	v, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc", CriteriaText: criteria, Logf: logfTo(&log)})
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +188,7 @@ func TestOMReviewerProbesTheHelpOncePerBinary(t *testing.T) {
 	stub := &criteriaStub{t: t, help: omHelpWithCriteria}
 	r := criteriaStubbed(t, bin, stub)
 	for i := 0; i < 3; i++ {
-		if _, err := r.ReviewBead(context.Background(), ReviewInput{
+		if _, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 			Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc", CriteriaText: "- [ ] one"}); err != nil {
 			t.Fatal(err)
 		}
@@ -206,7 +206,7 @@ func TestOMReviewerReprobesAReinstalledOM(t *testing.T) {
 	stub := &criteriaStub{t: t, help: omHelpWithCriteria}
 	r := criteriaStubbed(t, bin, stub)
 	in := func() ReviewInput {
-		return ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc", CriteriaText: "- [ ] one"}
+		return ReviewInput{Repo: baseRepo{}, Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc", CriteriaText: "- [ ] one"}
 	}
 	if _, err := r.ReviewBead(context.Background(), in()); err != nil {
 		t.Fatal(err)
@@ -234,7 +234,7 @@ func TestOMReviewerRetriesAFailedProbe(t *testing.T) {
 	r := criteriaStubbed(t, bin, stub)
 	var log strings.Builder
 	in := func() ReviewInput {
-		return ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc",
+		return ReviewInput{Repo: baseRepo{}, Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc",
 			CriteriaText: "- [ ] one", Logf: logfTo(&log)}
 	}
 	if _, err := r.ReviewBead(context.Background(), in()); err != nil {
@@ -270,7 +270,7 @@ func TestOMReviewerRetriesAProbeWithNoHelpText(t *testing.T) {
 	r := criteriaStubbed(t, bin, stub)
 	var log strings.Builder
 	in := func() ReviewInput {
-		return ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc",
+		return ReviewInput{Repo: baseRepo{}, Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc",
 			CriteriaText: "- [ ] one", Logf: logfTo(&log)}
 	}
 	for i := 0; i < 2; i++ {
@@ -297,7 +297,7 @@ func TestOMReviewerRemovesTheCriteriaFileOnErrorAndTimeout(t *testing.T) {
 		t.Parallel()
 		bin := omBinary(t)
 		stub := &criteriaStub{t: t, help: omHelpWithCriteria, fail: errors.New("exec: om: not found")}
-		if _, err := criteriaStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{
+		if _, err := criteriaStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 			Dir: t.TempDir(), Base: "a", Head: "b", CriteriaText: "- [ ] one"}); err == nil {
 			t.Fatal("a failed run returned no error")
 		}
@@ -309,7 +309,7 @@ func TestOMReviewerRemovesTheCriteriaFileOnErrorAndTimeout(t *testing.T) {
 		stub := &criteriaStub{t: t, help: omHelpWithCriteria, hold: true}
 		r := criteriaStubbed(t, bin, stub)
 		r.Timeout = 50 * time.Millisecond
-		_, err := r.ReviewBead(context.Background(), ReviewInput{
+		_, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 			Dir: t.TempDir(), Base: "a", Head: "b", CriteriaText: "- [ ] one"})
 		if !errors.Is(err, ErrOMTimeout) {
 			t.Fatalf("err = %v, want a timeout", err)
@@ -324,7 +324,7 @@ func TestOMReviewerOmitsCriteriaTheHelpDoesNotList(t *testing.T) {
 	t.Parallel()
 	bin, dir := omBinary(t), t.TempDir()
 	stub := &criteriaStub{t: t, help: omHelpWithoutCriteria}
-	if _, err := criteriaStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{
+	if _, err := criteriaStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc", CriteriaText: "- [ ] one"}); err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestOMReviewerOmitsCriteriaWithoutText(t *testing.T) {
 	bin := omBinary(t)
 	stub := &criteriaStub{t: t, help: omHelpWithCriteria}
 	var log strings.Builder
-	if _, err := criteriaStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{
+	if _, err := criteriaStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc", Logf: logfTo(&log)}); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func TestOMReviewerRunsWithoutCriteriaWhenTheWriteFails(t *testing.T) {
 	r := criteriaStubbed(t, bin, stub)
 	r.criteriaWriter = func(ReviewInput) (string, error) { return "", errors.New("no space left on device") }
 	var log strings.Builder
-	v, err := r.ReviewBead(context.Background(), ReviewInput{
+	v, err := r.ReviewBead(context.Background(), ReviewInput{Repo: baseRepo{},
 		Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc", CriteriaText: "- [ ] one", Logf: logfTo(&log)})
 	if err != nil {
 		t.Fatalf("ReviewBead: %v; an unwritable criteria file must not fail the review", err)

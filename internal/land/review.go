@@ -18,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/steveyegge/gastown/internal/forgejo"
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // Verdict values om writes.
@@ -154,6 +155,11 @@ type Reviewer interface {
 type ReviewInput struct {
 	// Dir is the tree under review; Base and Head are the range reviewed in it.
 	Dir, Base, Head string
+	// Repo is the landing's repository, which holds Base. The review bar is the
+	// threshold in the .om.json at Base, read through it (OMThresholdAt), never
+	// from the tree under review: a diff that edits .om.json cannot set the bar
+	// it is judged against (gt-uhuw9). Nil fails the review closed.
+	Repo Repo
 	// BeadID is the work bead the landed diff belongs to.
 	BeadID string
 	// CriteriaText is the work bead's acceptance text (CriteriaText), which om
@@ -225,16 +231,45 @@ const DefaultOMTimeout = 5 * time.Minute
 // report a false "Not logged in".
 var omUnsetEnv = []string{"CLAUDE_CONFIG_DIR"}
 
-// OMThreshold reads "threshold" from the .om.json in dir (the tree under
-// review). It returns 0 when the file or the key is absent.
+// omConfigFile is the om config a rig keeps at the root of its tree.
+const omConfigFile = ".om.json"
+
+// OMThreshold reads "threshold" from the .om.json in dir, the checkout the spec
+// dispatcher's overrun band reads. It returns 0 when the file or the key is
+// absent. It is not the bar a landing is reviewed against: that is read at the
+// base commit (OMThresholdAt), because a diff under review can edit the tree's
+// .om.json (gt-uhuw9).
 func OMThreshold(dir string) (float64, error) {
-	data, err := os.ReadFile(filepath.Join(dir, ".om.json")) //nolint:gosec // G304: the reviewed tree's own config
+	data, err := os.ReadFile(filepath.Join(dir, omConfigFile)) //nolint:gosec // G304: the rig checkout's own config
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
 	if err != nil {
 		return 0, fmt.Errorf("reading .om.json: %w", err)
 	}
+	return omThresholdOf(data)
+}
+
+// OMThresholdAt reads "threshold" from the .om.json at base, the commit a
+// landing is judged against, through g. It returns 0 when the file or the key
+// is absent at base. Any other read failure is an error, never 0: an
+// unreadable base must not read as no bar (gt-uhuw9).
+func OMThresholdAt(g Repo, base string) (float64, error) {
+	if g == nil {
+		return 0, fmt.Errorf("reading .om.json at %s: no repository to read it from", base)
+	}
+	text, err := g.ShowFileAtRev(base, omConfigFile)
+	if errors.Is(err, git.ErrNotAtRef) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reading .om.json at %s: %w", base, err)
+	}
+	return omThresholdOf([]byte(text))
+}
+
+// omThresholdOf parses the threshold out of one .om.json's bytes.
+func omThresholdOf(data []byte) (float64, error) {
 	var cfg struct {
 		Threshold *float64 `json:"threshold"`
 	}
@@ -294,6 +329,9 @@ type OMReviewer struct {
 // it fails, and Land decides (gt-is0ep). Land retries an execution error once
 // on a tree under the size bound (gt-q241r); every other failure goes to a
 // human who reviews instead.
+//
+// Review carries no repository, so it cannot read the review bar at base and
+// fails closed. Land reviews through ReviewBead, which is given one.
 func (r OMReviewer) Review(ctx context.Context, dir, base, head string) (Verdict, error) {
 	return r.reviewOnce(ctx, ReviewInput{Dir: dir, Base: base, Head: head})
 }
@@ -350,6 +388,13 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	if r.OutDir == "" {
 		return Verdict{}, fmt.Errorf("om review: no verdict directory configured")
 	}
+	// The bar is the base commit's, read before om runs: om is given it on the
+	// argv, and the verdict below is held to it (gt-uhuw9). A bar that cannot
+	// be read fails the review, not the landing's reading of it as 0.
+	bar, err := OMThresholdAt(in.Repo, base)
+	if err != nil {
+		return Verdict{}, fmt.Errorf("om review: %w", err)
+	}
 	if err := os.MkdirAll(r.OutDir, 0o700); err != nil {
 		return Verdict{}, fmt.Errorf("om review: creating verdict dir: %w", err)
 	}
@@ -371,12 +416,13 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	// om that cannot describe its own flags must not spend the review's
 	// (gt-yl7n4). One probe answers both, so a bead carrying both texts pays for
 	// one help read.
-	// The brief, policy and rounds flags (gt-3l5qy) ride the same one probe.
+	// The brief, policy and rounds flags (gt-3l5qy) ride the same one probe, and
+	// so does --threshold (gt-uhuw9).
 	newFlags := in.BriefText != "" || in.PolicyText != "" || in.RoundsText != "" || in.Round > 0
 	criteriaPath, contextPath := "", ""
 	briefPath, policyPath, roundsPath := "", "", ""
 	help, probed := "", false
-	if in.CriteriaText != "" || in.AcceptedRisksText != "" || newFlags {
+	if in.CriteriaText != "" || in.AcceptedRisksText != "" || newFlags || bar > 0 {
 		help, probed = r.omReviewHelp(ctx, in, path, run)
 	}
 	if in.CriteriaText != "" {
@@ -442,6 +488,17 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	if in.BeadID != "" {
 		argv = append(argv, "--bead", in.BeadID)
 	}
+	// om decides against the base commit's bar, not the threshold in the tree
+	// it reviews (gt-uhuw9). A base with no bar adds no flag, and an om whose
+	// help does not list --threshold gets none: the landing's own check below
+	// holds the verdict to the bar either way.
+	thresholdFlag := bar > 0 && probed && omHelpListsFlag(help, "--threshold")
+	if bar > 0 && probed && !thresholdFlag {
+		r.warnf(in, "om does not take --threshold; the landing holds the verdict to the base bar %.2f", bar)
+	}
+	if thresholdFlag {
+		argv = append(argv, "--threshold", strconv.FormatFloat(bar, 'f', -1, 64))
+	}
 	if criteriaPath != "" {
 		argv = append(argv, "--criteria-file", criteriaPath)
 	}
@@ -499,15 +556,11 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	// om's JSON is kept before the threshold below rewrites the verdict: the
 	// store records what om said, whatever the landing decides on it.
 	r.storeVerdict(in, data, argv)
-	// The rig's own threshold decides too: an approve scored below it is a
-	// request for changes, whatever om's exit code said.
-	threshold, err := OMThreshold(dir)
-	if err != nil {
-		return Verdict{}, fmt.Errorf("om review: %w", err)
-	}
-	if v.Verdict == VerdictApprove && v.Score < threshold {
+	// The rig's own threshold at base decides too: an approve scored below it is
+	// a request for changes, whatever om's exit code said.
+	if v.Verdict == VerdictApprove && v.Score < bar {
 		v.Verdict = VerdictRequestChanges
-		v.Summary = strings.TrimSpace(fmt.Sprintf("score %.2f is below the rig's .om.json threshold %.2f. %s", v.Score, threshold, v.Summary))
+		v.Summary = strings.TrimSpace(fmt.Sprintf("score %.2f is below the rig's .om.json threshold %.2f. %s", v.Score, bar, v.Summary))
 	}
 	return v, nil
 }

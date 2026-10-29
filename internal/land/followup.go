@@ -80,7 +80,7 @@ type FollowupBeads interface {
 // It runs once the landing is recorded and every failure is logged and dropped:
 // the record is written, and nothing here may change the result or hold the
 // queue past followUpTimeout.
-func (l *Lander) fileFollowups(dir string, w Work, res Result) {
+func (l *Lander) fileFollowups(repo Repo, base string, w Work, res Result) {
 	if l.Followups == nil {
 		return // the feed is off for this rig
 	}
@@ -89,12 +89,12 @@ func (l *Lander) fileFollowups(dir string, w Work, res Result) {
 	if res.Verdict.Verdict != VerdictApprove {
 		return
 	}
-	// The floor is the rig's own threshold, read the way the review read it:
-	// the landing om approved at its bar is the one worth a follow-up. There is
-	// no ceiling — a landing that risks a great deal and still passes leaves as
-	// many minors as one that barely passes, and the review stays strictest
+	// The floor is the rig's own threshold at base, read the way the review read
+	// it: the landing om approved at its bar is the one worth a follow-up. There
+	// is no ceiling — a landing that risks a great deal and still passes leaves
+	// as many minors as one that barely passes, and the review stays strictest
 	// when every finding of a passing landing is written down (gt-4ty22).
-	threshold, err := OMThreshold(dir)
+	threshold, err := OMThresholdAt(repo, base)
 	if err != nil {
 		l.logf("%s: could not read the .om.json threshold the follow-up feed floors on (%v); reading it as 0", w.BeadID, err)
 	}

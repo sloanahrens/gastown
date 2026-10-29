@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -267,13 +266,10 @@ func TestLandDoesNotRetryARequestChangesVerdict(t *testing.T) {
 func TestOMReviewerAppliesTheRigThreshold(t *testing.T) {
 	t.Parallel()
 	tree := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tree, ".om.json"), []byte(`{"threshold":0.6}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	var argv []string
 	r := OMReviewer{OutDir: t.TempDir()}
 	r.run = fakeOM(t, `{"score":0.55,"verdict":"approve","summary":"mostly fine","findings":[]}`, 0, nil, &argv)
-	v, err := r.Review(context.Background(), tree, "a", "b")
+	v, err := reviewAt(context.Background(), r, `{"threshold":0.6}`, tree, "a", "b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +277,7 @@ func TestOMReviewerAppliesTheRigThreshold(t *testing.T) {
 		t.Fatalf("verdict %+v; a score under the threshold is a request for changes", v)
 	}
 	r.run = fakeOM(t, `{"score":0.6,"verdict":"approve","findings":[]}`, 0, nil, &argv)
-	if v, err := r.Review(context.Background(), tree, "a", "b"); err != nil || v.Verdict != VerdictApprove {
+	if v, err := reviewAt(context.Background(), r, `{"threshold":0.6}`, tree, "a", "b"); err != nil || v.Verdict != VerdictApprove {
 		t.Fatalf("at the threshold: %+v %v", v, err)
 	}
 }
@@ -299,7 +295,7 @@ func TestOMReviewerStripsClaudeConfigDir(t *testing.T) {
 		}
 		return 0, nil
 	}
-	if _, err := r.Review(context.Background(), t.TempDir(), "a", "b"); err != nil {
+	if _, err := reviewAt(context.Background(), r, "", t.TempDir(), "a", "b"); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Contains(env, "CLAUDE_CONFIG_DIR") {

@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // stubOMVersion is the version every reviewer stub answers `om version` with:
@@ -57,12 +59,38 @@ func fakeOM(t *testing.T, verdict string, code int, runErr error, gotArgv *[]str
 	}
 }
 
+// baseRepo is the landing's repository for a review test: its base commit holds
+// omJSON as .om.json, or no .om.json when omJSON is "", and any read fails with
+// err when err is set.
+type baseRepo struct {
+	Repo
+	omJSON string
+	err    error
+}
+
+func (b baseRepo) ShowFileAtRev(_, path string) (string, error) {
+	if b.err != nil {
+		return "", b.err
+	}
+	if path != omConfigFile || b.omJSON == "" {
+		return "", git.ErrNotAtRef
+	}
+	return b.omJSON, nil
+}
+
+// reviewAt runs one om review of dir from base to head through reviewOnce, with
+// a base repository whose .om.json is omJSON. Review carries no repository and
+// fails closed, so the tests that exercise om's verdict go through here.
+func reviewAt(ctx context.Context, r OMReviewer, omJSON, dir, base, head string) (Verdict, error) {
+	return r.reviewOnce(ctx, ReviewInput{Dir: dir, Base: base, Head: head, Repo: baseRepo{omJSON: omJSON}})
+}
+
 func TestOMReviewerApprove(t *testing.T) {
 	t.Parallel()
 	var argv []string
 	r := OMReviewer{OutDir: t.TempDir()}
 	r.run = fakeOM(t, `{"score":0.91,"verdict":"approve","findings":[{"id":"f1","severity":"minor","path":"a.go","line":3,"title":"nit"}]}`, 0, nil, &argv)
-	v, err := r.Review(context.Background(), "/wt", "aaa", "bbb")
+	v, err := reviewAt(context.Background(), r, "", "/wt", "aaa", "bbb")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +108,7 @@ func TestOMReviewerRequestChanges(t *testing.T) {
 	var argv []string
 	r := OMReviewer{Path: "/bin/om", OutDir: t.TempDir()}
 	r.run = fakeOM(t, `{"score":0.4,"verdict":"request_changes","findings":[{"id":"f2","severity":"major","title":"bug"}]}`, 1, nil, &argv)
-	v, err := r.Review(context.Background(), "/wt", "a", "b")
+	v, err := reviewAt(context.Background(), r, "", "/wt", "a", "b")
 	if err != nil || v.Verdict != VerdictRequestChanges || argv[0] != "/bin/om" {
 		t.Fatalf("verdict = %+v, %v (argv %q)", v, err, argv)
 	}
@@ -106,7 +134,7 @@ func TestOMReviewerFailsClosed(t *testing.T) {
 			var argv []string
 			r := OMReviewer{OutDir: t.TempDir()}
 			r.run = fakeOM(t, tc.verdict, tc.code, tc.runErr, &argv)
-			if v, err := r.Review(context.Background(), "/wt", "a", "b"); err == nil {
+			if v, err := reviewAt(context.Background(), r, "", "/wt", "a", "b"); err == nil {
 				t.Fatalf("Review = %+v, nil; want an error", v)
 			}
 		})
@@ -120,7 +148,7 @@ func TestOMReviewerMarksAnExecutionError(t *testing.T) {
 	var argv []string
 	r := OMReviewer{OutDir: t.TempDir()}
 	r.run = fakeOM(t, "", 2, nil, &argv)
-	_, err := r.Review(context.Background(), "/wt", "a", "b")
+	_, err := reviewAt(context.Background(), r, "", "/wt", "a", "b")
 	if !errors.Is(err, ErrOMExecution) {
 		t.Fatalf("Review error = %v, want it to wrap ErrOMExecution", err)
 	}
@@ -151,7 +179,7 @@ func TestOMReviewerRunsOnce(t *testing.T) {
 	calls := 0
 	r := OMReviewer{OutDir: t.TempDir(), Timeout: 20 * time.Millisecond}
 	r.run = hangThenOM(t, 1, &calls)
-	_, err := r.Review(context.Background(), "/wt", "a", "b")
+	_, err := reviewAt(context.Background(), r, "", "/wt", "a", "b")
 	if !errors.Is(err, ErrOMTimeout) {
 		t.Fatalf("Review error = %v, want ErrOMTimeout", err)
 	}
@@ -164,7 +192,7 @@ func TestOMReviewerRunsOnce(t *testing.T) {
 		calls++
 		return 2, nil
 	}
-	if _, err := r.Review(context.Background(), "/wt", "a", "b"); err == nil || errors.Is(err, ErrOMTimeout) {
+	if _, err := reviewAt(context.Background(), r, "", "/wt", "a", "b"); err == nil || errors.Is(err, ErrOMTimeout) {
 		t.Fatalf("Review error = %v, want an execution error", err)
 	}
 	if calls != 1 {
@@ -186,7 +214,7 @@ func TestOMReviewerDoesNotRetryAVerdict(t *testing.T) {
 		}
 		return inner(ctx, dir, unset, av, out)
 	}
-	if v, err := r.Review(context.Background(), "/wt", "a", "b"); err != nil || v.Verdict != VerdictRequestChanges || calls != 1 {
+	if v, err := reviewAt(context.Background(), r, "", "/wt", "a", "b"); err != nil || v.Verdict != VerdictRequestChanges || calls != 1 {
 		t.Fatalf("Review = %+v, %v after %d runs; want request_changes from one run", v, err, calls)
 	}
 }
@@ -197,7 +225,7 @@ func TestOMReviewerRecordsTheVersionOnTheVerdict(t *testing.T) {
 	t.Parallel()
 	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-abc"}
 	v, err := omStubbed(t, omBinary(t), stub).ReviewBead(context.Background(),
-		ReviewInput{Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc"})
+		ReviewInput{Repo: baseRepo{}, Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +244,7 @@ func TestOMReviewerRecordsTheVersionOfAReviewThatFailed(t *testing.T) {
 	t.Parallel()
 	stub := &criteriaStub{t: t, help: omHelpWithCriteria, fail: errors.New("exec: om: not found")}
 	v, err := criteriaStubbed(t, omBinary(t), stub).ReviewBead(context.Background(),
-		ReviewInput{Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc"})
+		ReviewInput{Repo: baseRepo{}, Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc"})
 	if err == nil {
 		t.Fatal("a failed review returned no error")
 	}
@@ -234,7 +262,7 @@ func TestOMReviewerProbesTheVersionOncePerBinary(t *testing.T) {
 	r := omStubbed(t, omBinary(t), stub)
 	for i := 0; i < 3; i++ {
 		if _, err := r.ReviewBead(context.Background(),
-			ReviewInput{Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc"}); err != nil {
+			ReviewInput{Repo: baseRepo{}, Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -259,7 +287,7 @@ func TestOMReviewerRestartsAnExecTheKernelCalledBusy(t *testing.T) {
 		_, _ = io.WriteString(out, stubVersionLine())
 		return 0, nil
 	}
-	if got := r.omVersion(context.Background(), ReviewInput{Dir: t.TempDir()}); got != stubOMVersion {
+	if got := r.omVersion(context.Background(), ReviewInput{Repo: baseRepo{}, Dir: t.TempDir()}); got != stubOMVersion {
 		t.Fatalf("version = %q, want %q after one busy start", got, stubOMVersion)
 	}
 	if calls != 2 {
@@ -278,7 +306,7 @@ func TestOMReviewerBoundsTheRestarts(t *testing.T) {
 		return -1, fmt.Errorf("fork/exec: %w", syscall.ETXTBSY)
 	}
 	var log strings.Builder
-	got := r.omVersion(context.Background(), ReviewInput{Dir: t.TempDir(), Logf: logfTo(&log)})
+	got := r.omVersion(context.Background(), ReviewInput{Repo: baseRepo{}, Dir: t.TempDir(), Logf: logfTo(&log)})
 	if got != omVersionUnknown {
 		t.Fatalf("version = %q, want %q: a busy om has none to report", got, omVersionUnknown)
 	}
@@ -301,7 +329,7 @@ func TestOMReviewerRestartsNothingElse(t *testing.T) {
 		calls++
 		return -1, fmt.Errorf("fork/exec: %w", syscall.ENOENT)
 	}
-	if got := r.omVersion(context.Background(), ReviewInput{Dir: t.TempDir()}); got != omVersionUnknown {
+	if got := r.omVersion(context.Background(), ReviewInput{Repo: baseRepo{}, Dir: t.TempDir()}); got != omVersionUnknown {
 		t.Fatalf("version = %q, want %q", got, omVersionUnknown)
 	}
 	if calls != 1 {
@@ -316,7 +344,7 @@ func TestOMReviewerRecordsAnUnreadableVersionAsUnknown(t *testing.T) {
 	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-abc", noVersion: true}
 	var log strings.Builder
 	v, err := omStubbed(t, omBinary(t), stub).ReviewBead(context.Background(),
-		ReviewInput{Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc", Logf: logfTo(&log)})
+		ReviewInput{Repo: baseRepo{}, Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc", Logf: logfTo(&log)})
 	if err != nil {
 		t.Fatalf("ReviewBead: %v; a version-less om is still a reviewer", err)
 	}
@@ -355,7 +383,7 @@ func TestOMReviewerRecordsTheVersionOfTheOMThatRanTheReview(t *testing.T) {
 		return code, err
 	}
 	v, err := r.ReviewBead(context.Background(),
-		ReviewInput{Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc"})
+		ReviewInput{Repo: baseRepo{}, Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc"})
 	if err != nil {
 		t.Fatal(err)
 	}
