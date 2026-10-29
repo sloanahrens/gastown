@@ -47,6 +47,9 @@ type Config struct {
 	Health      Health
 	SchemaLevel int
 	Log         Logger
+	// ExportTimeout bounds one export, the time its read holds one snapshot
+	// open while a slow client reads; default 30 min.
+	ExportTimeout time.Duration
 }
 
 // Server is trackerd's HTTP handler.
@@ -62,10 +65,16 @@ type Server struct {
 // ready instead of hanging the prober.
 const readyTimeout = 2 * time.Second
 
+// defaultExportTimeout bounds one export when Config.ExportTimeout is zero.
+const defaultExportTimeout = 30 * time.Minute
+
 // New returns a Server. Auth and Health are required.
 func New(cfg Config) *Server {
 	if cfg.Log == nil {
 		cfg.Log = discardLog{}
+	}
+	if cfg.ExportTimeout == 0 {
+		cfg.ExportTimeout = defaultExportTimeout
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), metrics: newMetrics(cfg.Log)}
 	// Probes carry no token: the daemon and launchd call them.

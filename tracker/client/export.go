@@ -21,10 +21,17 @@ import (
 //
 // A stream is not retried: a rerun reads the rig again from the start. It is
 // bounded by ctx rather than the per-attempt timeout, because a whole rig can
-// take longer than one call's deadline. A stream the server ends with an error
-// record returns that error. A stream cut off before its end returns an
-// unavailable error, so a truncated export never reads as complete.
+// take longer than one call's deadline. A caller whose ctx has no deadline gets
+// the client's ExportTimeout, so a stalled stream cannot wait forever. A stream
+// the server ends with an error record returns that error. A stream cut off
+// before its end returns an unavailable error, so a truncated export never
+// reads as complete.
 func (c *Client) Export(ctx context.Context, req api.ExportRequest, emit func(api.ExportRecord) error) error {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.exportTime)
+		defer cancel()
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("client: encode request: %w", err)

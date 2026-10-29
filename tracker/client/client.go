@@ -25,11 +25,12 @@ import (
 )
 
 const (
-	defaultTimeout    = 10 * time.Second
-	defaultMaxRetries = 3
-	backoffBase       = 100 * time.Millisecond
-	backoffCap        = 2 * time.Second
-	maxResponseBytes  = 32 << 20
+	defaultTimeout       = 10 * time.Second
+	defaultExportTimeout = 30 * time.Minute
+	defaultMaxRetries    = 3
+	backoffBase          = 100 * time.Millisecond
+	backoffCap           = 2 * time.Second
+	maxResponseBytes     = 32 << 20
 )
 
 // Config configures a Client. Exactly one of Token and TokenFile is set.
@@ -45,6 +46,9 @@ type Config struct {
 	SchemaLevel int
 	// Timeout bounds each attempt; default 10 s.
 	Timeout time.Duration
+	// ExportTimeout bounds one export when the caller's context has no
+	// deadline of its own; default 30 min.
+	ExportTimeout time.Duration
 	// MaxRetries is how many times a read is retried after an unavailable
 	// answer; 0 means the default 3, a negative value means none.
 	MaxRetries int
@@ -72,6 +76,7 @@ type Client struct {
 	token      string
 	schema     string
 	timeout    time.Duration
+	exportTime time.Duration
 	maxRetries int
 	sleep      func(ctx context.Context, d time.Duration) error
 	http       *http.Client
@@ -104,6 +109,7 @@ func New(cfg Config) (*Client, error) {
 		base: strings.TrimRight(cfg.BaseURL, "/"), token: token,
 		schema:  fmt.Sprint(orInt(cfg.SchemaLevel, api.SchemaLevel)),
 		timeout: orDuration(cfg.Timeout, defaultTimeout), sleep: cfg.Sleep, http: cfg.HTTP,
+		exportTime: orDuration(cfg.ExportTimeout, defaultExportTimeout),
 	}
 	switch {
 	case cfg.MaxRetries < 0:

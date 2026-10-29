@@ -1,10 +1,10 @@
 // Package storetest holds the in-memory store.Store for the unit tier. It
-// implements the methods its Fake-flagged contract cases cover (create and
+// implements the methods its Fake-flagged contract cases cover: create and
 // get, the claim, release and transfer guards, the plain close those guards
 // refuse, the creates a Batch applies, and the comments and links an export
-// reads) and nothing more: every other
-// method returns store.ErrUnimplemented, so a unit test that reaches past them
-// fails loudly rather than reading a store that only looks modeled.
+// reads. Every other method returns store.ErrUnimplemented, so a unit test
+// that reaches past them fails loudly rather than reading a store that only
+// looks modeled.
 package storetest
 
 import (

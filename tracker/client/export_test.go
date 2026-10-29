@@ -1,11 +1,14 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/tracker/api"
 )
@@ -174,5 +177,47 @@ func TestExportCutOffMidStreamIsUnavailable(t *testing.T) {
 	})
 	if emitted != 1 || !errors.Is(err, api.ErrUnavailable) {
 		t.Errorf("Export = %v after %d records, want unavailable after the one record", err, emitted)
+	}
+}
+
+// A caller with no deadline of its own is bounded by ExportTimeout: a stream
+// that stalls after its first record ends with the deadline, not a hang.
+func TestExportWithoutADeadlineIsBoundedByExportTimeout(t *testing.T) {
+	t.Parallel()
+	c, _ := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reading the request to its end lets the server notice the client
+		// going away, which is what cancels r's context below.
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"type":"issue","issue":{"id":"gt-1"}}` + "\n"))
+		_ = http.NewResponseController(w).Flush()
+		<-r.Context().Done()
+	}), func(cfg *Config) { cfg.ExportTimeout = 50 * time.Millisecond })
+	var emitted int
+	err := c.Export(t.Context(), api.ExportRequest{Rig: "gt"}, func(api.ExportRecord) error {
+		emitted++
+		return nil
+	})
+	if emitted != 1 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Export = %v after %d records, want the deadline after the one record", err, emitted)
+	}
+}
+
+// A caller's own deadline is theirs: ExportTimeout applies only when there is
+// none. A nanosecond ExportTimeout would fail this export if it were applied.
+func TestExportKeepsTheCallersDeadline(t *testing.T) {
+	t.Parallel()
+	c, _ := newClient(t, writeStream(`{"type":"issue","issue":{"id":"gt-1"}}`+"\n"), func(cfg *Config) {
+		cfg.ExportTimeout = time.Nanosecond
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	var emitted int
+	err := c.Export(ctx, api.ExportRequest{Rig: "gt"}, func(api.ExportRecord) error {
+		emitted++
+		return nil
+	})
+	if err != nil || emitted != 1 {
+		t.Errorf("Export = %v after %d records, want the caller's minute to hold over the client's nanosecond", err, emitted)
 	}
 }

@@ -76,6 +76,21 @@ func exportOneRig(t *testing.T, s store.Store) {
 		}
 	}
 
+	// The issue payload is the same on every store: the fields a create sets
+	// come back, and labels travel as their own lines, so no issue carries them.
+	for _, is := range issueRecs {
+		if is.Labels != nil {
+			t.Errorf("issue %s carries labels %v; labels travel as their own lines", is.ID, is.Labels)
+		}
+		if is.ID != durable.ID {
+			continue
+		}
+		if is.Title != durable.Title || is.Description != durable.Description || is.Status != durable.Status || is.Type != durable.Type || is.Priority != durable.Priority {
+			t.Errorf("issue %s = title %q status %q type %q priority %d, want the created issue's %q %q %q %d",
+				is.ID, is.Title, is.Status, is.Type, is.Priority, durable.Title, durable.Status, durable.Type, durable.Priority)
+		}
+	}
+
 	wantLabels := []string{durable.ID + "=a", durable.ID + "=b"}
 	if !slices.Equal(labels, wantLabels) {
 		t.Errorf("labels = %v, want %v: sorted within the issue, and hq's label left out", labels, wantLabels)

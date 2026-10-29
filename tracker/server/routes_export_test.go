@@ -7,12 +7,20 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/tracker/api"
 	"github.com/steveyegge/gastown/tracker/store"
+)
+
+const (
+	exportSchema    = 3
+	exportSeatToken = "good-token"
+	exportAdmin     = "admin-token"
 )
 
 // exportStub answers Export; any other method panics on the nil embedded
@@ -24,6 +32,46 @@ type exportStub struct {
 
 func (s exportStub) Export(ctx context.Context, rig string, emit func(api.ExportRecord) error) error {
 	return s.export(ctx, rig, emit)
+}
+
+// exportServer serves st with one seat token and one admin token. limit is
+// Config.ExportTimeout; zero keeps the default.
+func exportServer(t *testing.T, st store.Store, limit time.Duration) *httptest.Server {
+	t.Helper()
+	s := New(Config{
+		Auth:          fakeAuth{exportSeatToken: "town/crew/dipper", exportAdmin: "town/daemon"},
+		Health:        fakeHealth{},
+		SchemaLevel:   exportSchema,
+		Store:         st,
+		ExportTimeout: limit,
+	})
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// exportRequest is a POST of body to ts's export route, bearing tok.
+func exportRequest(t *testing.T, ts *httptest.Server, body, tok string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/export", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set(api.SchemaHeader, strconv.Itoa(exportSchema))
+	return req
+}
+
+// exportCall sends the export and reads the whole answer.
+func exportCall(t *testing.T, ts *httptest.Server, body, tok string) (int, string) {
+	t.Helper()
+	resp, err := http.DefaultClient.Do(exportRequest(t, ts, body, tok))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
 }
 
 // decodeRecords reads each line of a JSONL body as a record, failing the test
@@ -48,14 +96,14 @@ func decodeRecords(t *testing.T, body string) []api.ExportRecord {
 func TestExportStreamsEachRecordAsOneJSONLine(t *testing.T) {
 	t.Parallel()
 	var got api.ExportRequest
-	ts := stubServer(t, exportStub{export: func(_ context.Context, rig string, emit func(api.ExportRecord) error) error {
+	ts := exportServer(t, exportStub{export: func(_ context.Context, rig string, emit func(api.ExportRecord) error) error {
 		got = api.ExportRequest{Rig: rig}
 		if err := emit(api.ExportRecord{Type: api.RecordIssue, Issue: &api.Issue{ID: "gt-1", Title: "one", Ephemeral: true}}); err != nil {
 			return err
 		}
 		return emit(api.ExportRecord{Type: api.RecordLabel, Label: &api.ExportLabel{IssueID: "gt-1", Label: "x"}})
-	}})
-	code, body := call(t, http.MethodPost, ts.URL+"/v1/export", `{"rig":"gt"}`)
+	}}, 0)
+	code, body := exportCall(t, ts, `{"rig":"gt"}`, exportAdmin)
 	if code != 200 {
 		t.Fatalf("status = %d %q, want 200", code, body)
 	}
@@ -74,12 +122,31 @@ func TestExportStreamsEachRecordAsOneJSONLine(t *testing.T) {
 	}
 }
 
+// Only an admin-scope token may export. A seat token is valid but its scope
+// does not allow this route: a 403 naming the scope, and the store is never
+// asked for a record.
+func TestExportNeedsAnAdminToken(t *testing.T) {
+	t.Parallel()
+	read := false
+	ts := exportServer(t, exportStub{export: func(context.Context, string, func(api.ExportRecord) error) error {
+		read = true
+		return nil
+	}}, 0)
+	code, body := exportCall(t, ts, `{"rig":"gt"}`, exportSeatToken)
+	if e := decodeErr(t, body); code != 403 || e.Kind != api.KindForbidden {
+		t.Errorf("seat export = %d %q, want 403 forbidden", code, body)
+	}
+	if read {
+		t.Error("a seat's refused export still reached the store")
+	}
+}
+
 func TestExportOfAnEmptyRigIsAnEmptySuccess(t *testing.T) {
 	t.Parallel()
-	ts := stubServer(t, exportStub{export: func(context.Context, string, func(api.ExportRecord) error) error {
+	ts := exportServer(t, exportStub{export: func(context.Context, string, func(api.ExportRecord) error) error {
 		return nil
-	}})
-	code, body := call(t, http.MethodPost, ts.URL+"/v1/export", `{"rig":"gt"}`)
+	}}, 0)
+	code, body := exportCall(t, ts, `{"rig":"gt"}`, exportAdmin)
 	if code != 200 || body != "" {
 		t.Errorf("empty export = %d %q, want 200 with an empty body", code, body)
 	}
@@ -88,12 +155,12 @@ func TestExportOfAnEmptyRigIsAnEmptySuccess(t *testing.T) {
 func TestExportRefusesAMissingRigBeforeReadingAnything(t *testing.T) {
 	t.Parallel()
 	read := false
-	ts := stubServer(t, exportStub{export: func(context.Context, string, func(api.ExportRecord) error) error {
+	ts := exportServer(t, exportStub{export: func(context.Context, string, func(api.ExportRecord) error) error {
 		read = true
 		return nil
-	}})
+	}}, 0)
 	for name, body := range map[string]string{"no rig": `{}`, "blank rig": `{"rig":""}`, "not json": `{nope`} {
-		code, resp := call(t, http.MethodPost, ts.URL+"/v1/export", body)
+		code, resp := exportCall(t, ts, body, exportAdmin)
 		if e := decodeErr(t, resp); code != 400 || e.Kind != api.KindInvalid {
 			t.Errorf("%s = %d %q, want 400 invalid", name, code, resp)
 		}
@@ -107,10 +174,10 @@ func TestExportRefusesAMissingRigBeforeReadingAnything(t *testing.T) {
 // status is still unsent.
 func TestExportFailingBeforeTheFirstRecordIsAnErrorAnswer(t *testing.T) {
 	t.Parallel()
-	ts := stubServer(t, exportStub{export: func(context.Context, string, func(api.ExportRecord) error) error {
+	ts := exportServer(t, exportStub{export: func(context.Context, string, func(api.ExportRecord) error) error {
 		return api.Unavailable("database is restarting")
-	}})
-	code, body := call(t, http.MethodPost, ts.URL+"/v1/export", `{"rig":"gt"}`)
+	}}, 0)
+	code, body := exportCall(t, ts, `{"rig":"gt"}`, exportAdmin)
 	if e := decodeErr(t, body); code != 503 || e.Kind != api.KindUnavailable || e.Message != "database is restarting" {
 		t.Errorf("failed export = %d %q, want 503 unavailable with the store's message", code, body)
 	}
@@ -135,13 +202,13 @@ func TestExportFailingAfterARecordEndsTheStreamWithAnErrorLine(t *testing.T) {
 			wantMsg: "internal error; see the server log", hideMsg: "secret",
 		},
 	} {
-		ts := stubServer(t, exportStub{export: func(_ context.Context, _ string, emit func(api.ExportRecord) error) error {
+		ts := exportServer(t, exportStub{export: func(_ context.Context, _ string, emit func(api.ExportRecord) error) error {
 			if err := emit(api.ExportRecord{Type: api.RecordIssue, Issue: &api.Issue{ID: "gt-1"}}); err != nil {
 				return err
 			}
 			return tc.err
-		}})
-		code, body := call(t, http.MethodPost, ts.URL+"/v1/export", `{"rig":"gt"}`)
+		}}, 0)
+		code, body := exportCall(t, ts, `{"rig":"gt"}`, exportAdmin)
 		if code != 200 {
 			t.Fatalf("%s: status = %d %q, want 200: the status went out with the first record", name, code, body)
 		}
@@ -158,6 +225,37 @@ func TestExportFailingAfterARecordEndsTheStreamWithAnErrorLine(t *testing.T) {
 	}
 }
 
+// A read that runs past Config.ExportTimeout is cut off and the stream says
+// why: the store sees its context end at the limit, and the record names the
+// limit so the caller reads the rig again rather than trusting a partial one.
+func TestExportPastItsLimitEndsTheStreamWithAnUnavailableLine(t *testing.T) {
+	t.Parallel()
+	ts := exportServer(t, exportStub{export: func(ctx context.Context, _ string, emit func(api.ExportRecord) error) error {
+		if err := emit(api.ExportRecord{Type: api.RecordIssue, Issue: &api.Issue{ID: "gt-1"}}); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}}, 50*time.Millisecond)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(exportRequest(t, ts, `{"rig":"gt"}`, exportAdmin))
+	if err != nil {
+		t.Fatalf("export request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("stream: %v; the export was not cut off at its limit", err)
+	}
+	recs := decodeRecords(t, string(raw))
+	if len(recs) != 2 || recs[1].Type != api.RecordError || recs[1].Error == nil {
+		t.Fatalf("records = %q, want the issue then an error record", raw)
+	}
+	if e := recs[1].Error; e.Kind != api.KindUnavailable || e.Message != "export of gt ran past its 50ms limit; read it again" {
+		t.Errorf("error = %+v, want unavailable naming the limit", e)
+	}
+}
+
 // The handler writes each record as the store emits it. The store holds the
 // second record until the client has read the first, so a handler that
 // buffers the stream until its end never gets past the first read; the client
@@ -165,7 +263,7 @@ func TestExportFailingAfterARecordEndsTheStreamWithAnErrorLine(t *testing.T) {
 func TestExportWritesEachRecordBeforeTheStoreReadsTheNext(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
-	ts := stubServer(t, exportStub{export: func(ctx context.Context, _ string, emit func(api.ExportRecord) error) error {
+	ts := exportServer(t, exportStub{export: func(ctx context.Context, _ string, emit func(api.ExportRecord) error) error {
 		if err := emit(api.ExportRecord{Type: api.RecordIssue, Issue: &api.Issue{ID: "gt-1"}}); err != nil {
 			return err
 		}
@@ -175,15 +273,9 @@ func TestExportWritesEachRecordBeforeTheStoreReadsTheNext(t *testing.T) {
 			return ctx.Err()
 		}
 		return emit(api.ExportRecord{Type: api.RecordIssue, Issue: &api.Issue{ID: "gt-2"}})
-	}})
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/export", strings.NewReader(`{"rig":"gt"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer good-token")
-	req.Header.Set(api.SchemaHeader, "3")
+	}}, 0)
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := client.Do(exportRequest(t, ts, `{"rig":"gt"}`, exportAdmin))
 	if err != nil {
 		t.Fatalf("export request: %v", err)
 	}

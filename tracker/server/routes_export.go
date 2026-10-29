@@ -1,16 +1,19 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/steveyegge/gastown/tracker/api"
 )
 
 // registerExportRoutes registers POST /v1/export: one rig's issues, wisps
-// included, then their labels, dependencies and comments, as JSONL.
+// included, then their labels, dependencies and comments, as JSONL. An export
+// is an ops read, so only an admin-scope token may run it; a seat gets a 403.
 func (s *Server) registerExportRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/export", s.exportRig)
+	mux.HandleFunc("POST /v1/export", requireAdmin(s.exportRig))
 }
 
 // exportRig writes one record per line as the store reads them. The status
@@ -44,7 +47,15 @@ func (s *Server) exportRig(w http.ResponseWriter, r *http.Request) {
 		_ = rc.Flush()
 		return nil
 	}
-	err := s.cfg.Store.Export(r.Context(), req.Rig, emit)
+	// The read holds one repeatable-read snapshot for as long as the client
+	// takes to read the stream, so the deadline keeps a stalled client from
+	// holding that snapshot open.
+	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.ExportTimeout)
+	defer cancel()
+	err := s.cfg.Store.Export(ctx, req.Rig, emit)
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		err = api.Unavailable("export of %s ran past its %s limit; read it again", req.Rig, s.cfg.ExportTimeout)
+	}
 	if err == nil {
 		// A rig with no records is still a successful, empty export.
 		if !started {
