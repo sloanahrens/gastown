@@ -9,7 +9,7 @@ import (
 )
 
 func init() {
-	register(Case{Name: "stats count durable issues by status per rig, closed included and wisps not", Run: adminStats})
+	register(Case{Name: "stats count durable issues by status per rig, closed included, and wisps as one total", Run: adminStats})
 	register(Case{Name: "config returns what was set, unset keys report unset, and a set replaces", Run: adminConfig})
 }
 
@@ -21,7 +21,10 @@ func adminStats(t *testing.T, s store.Store) {
 	if err := s.CloseIssues(ctx(), []string{done.ID}, "r", false); err != nil {
 		t.Fatal(err)
 	}
-	mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "a wisp", Ephemeral: true})
+	wisp := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "a wisp", Ephemeral: true})
+	// Held at a status no durable issue has, so a status that only wisps carry
+	// is visibly left out of by_status instead of reported as zero.
+	mustUpdate(t, s, wisp.ID, api.UpdatePatch{Status: str("deferred")}, api.Guard{})
 	mustCreate(t, s, api.CreateParams{Rig: "hq", Title: "other rig"})
 
 	gt, err := s.Stats(ctx(), "gt")
@@ -29,14 +32,20 @@ func adminStats(t *testing.T, s store.Store) {
 		t.Fatal(err)
 	}
 	if gt.Total != 3 || gt.ByStatus["open"] != 1 || gt.ByStatus["in_progress"] != 1 || gt.ByStatus["closed"] != 1 {
-		t.Errorf("gt stats = %+v, want 3 in all: one open, one in progress, one closed, and the wisp not counted", gt)
+		t.Errorf("gt stats = %+v, want 3 in all: one open, one in progress, one closed", gt)
+	}
+	if gt.Wisps != 1 {
+		t.Errorf("gt wisps = %d, want 1: the wisp counted while the durable counts are not", gt.Wisps)
+	}
+	if n, ok := gt.ByStatus["deferred"]; ok {
+		t.Errorf("gt by_status has deferred = %d, want the key absent: only a wisp holds that status", n)
 	}
 	all, err := s.Stats(ctx(), "")
-	if err != nil || all.Total != 4 {
-		t.Errorf("stats of every rig = %+v, %v; want 4 (gt's three and hq's one)", all, err)
+	if err != nil || all.Total != 4 || all.Wisps != 1 {
+		t.Errorf("stats of every rig = %+v, %v; want 4 durable (gt's three and hq's one) and 1 wisp", all, err)
 	}
 	empty, err := s.Stats(ctx(), "nosuchrig")
-	if err != nil || empty.Total != 0 || empty.ByStatus == nil {
+	if err != nil || empty.Total != 0 || empty.Wisps != 0 || empty.ByStatus == nil {
 		t.Errorf("stats of a rig with nothing = %+v, %v; want zero and a non-nil map", empty, err)
 	}
 }

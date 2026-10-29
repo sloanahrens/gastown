@@ -94,7 +94,8 @@ type Store interface {
 	// blocked verdicts, and the counts over the whole set, all read in one
 	// repeatable-read transaction so the page and the counts cannot disagree.
 	TownSnapshot(ctx context.Context, req api.SnapshotRequest) (api.TownSnapshot, error)
-	// Stats counts the durable issues of rig (every rig when empty) by status.
+	// Stats counts the durable issues of rig (every rig when empty) by status,
+	// and its wisps as one total.
 	Stats(ctx context.Context, rig string) (api.Stats, error)
 	// ConfigGet returns a configuration key's value; ok is false when unset.
 	ConfigGet(ctx context.Context, key string) (value string, ok bool, err error)

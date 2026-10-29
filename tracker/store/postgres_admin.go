@@ -10,10 +10,11 @@ import (
 	"github.com/steveyegge/gastown/tracker/api"
 )
 
-// Stats counts the durable issues (wisps are not counted) of rig, or of every
-// rig when rig is empty, by status. Closed issues are counted.
+// Stats counts the durable issues of rig, or of every rig when rig is empty, by
+// status, plus its wisps as one total. Closed issues are counted; a wisp's
+// status is not broken out, so the two counts never mix.
 func (p *Postgres) Stats(ctx context.Context, rig string) (api.Stats, error) {
-	rows, err := p.pool.Query(ctx, "SELECT status, count(*) FROM tracker.issues WHERE NOT ephemeral AND ($1 = '' OR rig = $1) GROUP BY status", rig)
+	rows, err := p.pool.Query(ctx, "SELECT status, count(*) FILTER (WHERE NOT ephemeral), count(*) FILTER (WHERE ephemeral) FROM tracker.issues WHERE ($1 = '' OR rig = $1) GROUP BY status", rig)
 	if err != nil {
 		return api.Stats{}, fmt.Errorf("store: stats: %w", err)
 	}
@@ -21,12 +22,17 @@ func (p *Postgres) Stats(ctx context.Context, rig string) (api.Stats, error) {
 	out := api.Stats{ByStatus: map[string]int{}}
 	for rows.Next() {
 		var status string
-		var n int
-		if err := rows.Scan(&status, &n); err != nil {
+		var durable, wisps int
+		if err := rows.Scan(&status, &durable, &wisps); err != nil {
 			return api.Stats{}, fmt.Errorf("store: stats: %w", err)
 		}
-		out.ByStatus[status] = n
-		out.Total += n
+		// A status held by wisps alone is not a durable status, so it is left
+		// out of ByStatus rather than reported as zero.
+		if durable > 0 {
+			out.ByStatus[status] = durable
+			out.Total += durable
+		}
+		out.Wisps += wisps
 	}
 	return out, rows.Err()
 }

@@ -8,7 +8,8 @@ import (
 	"github.com/steveyegge/gastown/tracker/api"
 )
 
-// Stats counts the durable issues of rig (every rig when empty) by status.
+// Stats counts the durable issues of rig (every rig when empty) by status, and
+// its wisps as one total.
 func (c *Client) Stats(ctx context.Context, rig string) (api.Stats, error) {
 	path := "/v1/stats"
 	if rig != "" {
