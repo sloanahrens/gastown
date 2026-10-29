@@ -89,8 +89,8 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 		s.now = func() time.Time { return d.clk().Now() }
 	}
 	if s.targets == nil {
-		s.targets = func(ctx context.Context, d *Daemon, mode string) (map[string]diskmaint.Target, error) {
-			return d.diskMaintenanceTargets(ctx, mode, s.getenv)
+		s.targets = func(_ context.Context, d *Daemon, mode string) (map[string]diskmaint.Target, error) {
+			return d.diskMaintenanceTargets(mode, s.getenv)
 		}
 	}
 	if s.readDisks == nil {
@@ -358,7 +358,7 @@ func diskMaintKeep(get func(string) string) (int, error) {
 //
 // Only an apply may create the ledger directory: a dry run must leave the disk
 // as it found it.
-func (d *Daemon) diskMaintenanceTargets(ctx context.Context, mode string, getenv func(string) string) (map[string]diskmaint.Target, error) {
+func (d *Daemon) diskMaintenanceTargets(mode string, getenv func(string) string) (map[string]diskmaint.Target, error) {
 	town := d.config.TownRoot
 	cfg, err := polecatimage.ConfigFromEnv(func(key string) string {
 		if key == "POLECAT_IMAGE_TOWN_ROOT" {

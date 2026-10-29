@@ -511,7 +511,7 @@ func TestDiskMaintenanceBuiltTargetAppliesUnderThePluginLock(t *testing.T) {
 	getenv := func(key string) string { return env[key] }
 
 	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
-	targets, err := d.diskMaintenanceTargets(context.Background(), agentconfig.DiskMaintenanceModeApply, getenv)
+	targets, err := d.diskMaintenanceTargets(agentconfig.DiskMaintenanceModeApply, getenv)
 	if err != nil {
 		t.Fatalf("building the targets: %v", err)
 	}
