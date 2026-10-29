@@ -173,26 +173,37 @@ func TestRemoveTrimPathsFromClaimCountsAnAbsentFile(t *testing.T) {
 // could not read its whole list would trim part of one and report a success.
 func TestRemoveTrimPathsFromClaimRefusesAListItCannotUse(t *testing.T) {
 	t.Parallel()
+	listFile := filepath.Join("/cache", filepath.FromSlash(cachevol.TrimClaimListPath))
+	digestFile := filepath.Join("/cache", filepath.FromSlash(cachevol.TrimClaimDigestPath))
 	tests := []struct {
-		name  string
-		plant func(*fakeTrimFS)
-		list  string
+		name   string
+		plant  func(*fakeTrimFS)
+		list   string
+		digest string
 	}{
 		{"a list file the writer never wrote", func(f *fakeTrimFS) {
-			f.files[filepath.Join("/cache", filepath.FromSlash(cachevol.TrimClaimDigestPath))] = digestOf([]byte("x"))
-		}, cachevol.TrimClaimListPath},
+			f.files[digestFile] = digestOf([]byte("x"))
+		}, cachevol.TrimClaimListPath, ""},
 		{"a list file that is not a JSON array", func(f *fakeTrimFS) {
-			f.addClaimListWithDigest("/cache", digestOf([]byte(`{"paths": "gocache/one"}`)))
-		}, cachevol.TrimClaimListPath},
-		{"a list that names no path", func(f *fakeTrimFS) { f.addClaimList("/cache") }, cachevol.TrimClaimListPath},
-		{"a list file outside the claim", func(f *fakeTrimFS) {}, "../outside/paths.json"},
+			f.files[listFile] = `{"paths": "gocache/one"}`
+			f.files[digestFile] = digestOf([]byte(`{"paths": "gocache/one"}`)) + "\n"
+		}, cachevol.TrimClaimListPath, ""},
+		{"a list that names no path", func(f *fakeTrimFS) { f.addClaimList("/cache") }, cachevol.TrimClaimListPath, ""},
+		{"a list file outside the claim", func(f *fakeTrimFS) {}, "../outside/paths.json", ""},
+		{"a digest file outside the claim's names", func(f *fakeTrimFS) {
+			f.addClaimList("/cache", "gocache/one")
+		}, cachevol.TrimClaimListPath, "../outside/paths.sha256"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeTrimFS()
 			tc.plant(f)
-			if _, err := RemoveTrimPathsFromClaim("/cache", tc.list, cachevol.TrimClaimDigestPath, f.fs()); err == nil {
+			digest := tc.digest
+			if digest == "" {
+				digest = cachevol.TrimClaimDigestPath
+			}
+			if _, err := RemoveTrimPathsFromClaim("/cache", tc.list, digest, f.fs()); err == nil {
 				t.Fatal("RemoveTrimPathsFromClaim trimmed from a list it could not use whole")
 			}
 			if len(f.removed) != 0 {

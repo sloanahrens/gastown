@@ -254,6 +254,75 @@ func TestClaimListingNamesOnlyTheCacheTrees(t *testing.T) {
 	}
 }
 
+// TestClaimListingRefusesAClaimRootThatIsNotADirectory pins the root check: a claim that is a symlink
+// or a plain file has no cache trees to walk, and the walk would answer "no files" for a claim that is
+// there, so the listing is refused rather than planning a trim of nothing.
+func TestClaimListingRefusesAClaimRootThatIsNotADirectory(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	dir := filepath.Join(base, "claim")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := plantCacheFile(t, filepath.Join(base, "not-a-dir"), 1, testTime)
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		root    string
+		wantErr string
+	}{
+		{"a root that is a link", link, "is a symlink, not a directory"},
+		{"a root that is a file", file, "is not a directory"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := claimListing(tc.root, filepath.Walk)
+			if err == nil {
+				t.Fatal("claimListing listed a claim root that is not a directory")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to name %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestClaimListingRefusesAPathTheWalkPutsOutsideTheClaim pins the guard on the path a walk returns: a
+// walk that answers a name below the claim would have the trim name a path the claim root does not
+// give, so the listing is refused rather than carrying it.
+func TestClaimListingRefusesAPathTheWalkPutsOutsideTheClaim(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, cachevol.SeedBuildCacheDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	walk := func(root string, fn filepath.WalkFunc) error {
+		return fn(cachevol.SeedBuildCacheDir+"/elsewhere", &fakeFileInfo{name: "elsewhere"}, nil)
+	}
+	_, err := claimListing(root, walk)
+	if err == nil {
+		t.Fatal("claimListing carried a path its walk did not put under the claim")
+	}
+	if !strings.Contains(err.Error(), "the claim path") {
+		t.Errorf("error = %q, want it to name the path the claim does not give", err)
+	}
+}
+
+// fakeFileInfo is the one file a walk answers with: a regular file of a byte, so a listing of it is
+// built the way a real walk's would be.
+type fakeFileInfo struct{ name string }
+
+func (f *fakeFileInfo) Name() string       { return f.name }
+func (f *fakeFileInfo) Size() int64        { return 1 }
+func (f *fakeFileInfo) Mode() os.FileMode  { return 0o644 }
+func (f *fakeFileInfo) ModTime() time.Time { return testTime }
+func (f *fakeFileInfo) IsDir() bool        { return false }
+func (f *fakeFileInfo) Sys() any           { return nil }
+
 // TestClaimListingRefusesACacheTreeItCannotRead pins the fail-closed walk: a cache tree the run cannot
 // list, a symlinked one included, leaves the plan unbuilt rather than trimming from a partial listing.
 func TestClaimListingRefusesACacheTreeItCannotRead(t *testing.T) {
@@ -412,6 +481,29 @@ func TestTrimListWriteHelperRefusesWhatItCannotPlan(t *testing.T) {
 				t.Errorf("the helper wrote a list directory for a run it refused (%v)", err)
 			}
 		})
+	}
+}
+
+// TestWriteTrimListIntoRefusesAClaimItCannotOpen pins the writer's own open of the claim, below the
+// helper: a claim it cannot open is refused before any name is written through it.
+func TestWriteTrimListIntoRefusesAClaimItCannotOpen(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "no-claim")
+	_, err := writeTrimListInto(missing, []string{"gocache/one"})
+	if err == nil {
+		t.Fatal("writeTrimListInto wrote into a claim it could not open")
+	}
+	if !strings.Contains(err.Error(), "opening the claim") {
+		t.Errorf("error = %q, want it to name the open", err)
+	}
+}
+
+// TestFilesystemFreeReportsARootItCannotMeasure pins the free-space reading's own failure: a path the
+// filesystem does not have cannot be measured, and the error is the caller's to fail closed on.
+func TestFilesystemFreeReportsARootItCannotMeasure(t *testing.T) {
+	t.Parallel()
+	if _, err := filesystemFree(filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Fatal("filesystemFree measured a path the filesystem does not have")
 	}
 }
 
