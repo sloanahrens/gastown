@@ -426,3 +426,27 @@ func TestContainerJobState_TownWithoutItsOwnContainerIsUnknown(t *testing.T) {
 		})
 	}
 }
+
+// A town whose daemon settings will not read names no container to inspect:
+// the reading is unknown, naming the file, and no docker command runs.
+func TestContainerJobState_UnreadableSettingsIsUnknown(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	path := config.TownSettingsPath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"daemon": {"type": "daemon-patrol-config", "version": 99}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	docker := &fakeDockerInspect{}
+
+	st := containerJobState(townRoot, docker.run)
+
+	if st.Err == nil || !strings.Contains(st.Err.Error(), "reading") {
+		t.Fatalf("Err = %v, want a read failure naming the settings file", st.Err)
+	}
+	if len(docker.argv) != 0 {
+		t.Errorf("docker ran %d times, want none: %q", len(docker.argv), docker.argv)
+	}
+}

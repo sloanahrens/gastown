@@ -74,7 +74,8 @@ func (e *dockerInspectError) Error() string { return e.err.Error() }
 
 func (e *dockerInspectError) Unwrap() error { return e.err }
 
-// runDockerInspect runs one docker command for the container reading.
+// runDockerInspect runs one docker command, keeping its stderr out of the
+// stdout the reading parses.
 func runDockerInspect(argv []string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // fixed argv from inspectContainerJobState
@@ -90,9 +91,9 @@ func runDockerInspect(argv []string) ([]byte, error) {
 // inspect of the container named containerName reports it. Only docker's own
 // "No such object" makes an absent container: every other failure is unknown,
 // never "not running", because the daemon may well be up and of the two wrong
-// answers only one reports a failure the operator can see. This is the read
-// internal/cmd.ContainerJobState makes for gt daemon and gt down, repeated here
-// because doctor is a package internal/cmd imports, not the other way round.
+// answers only one reports a failure the operator can see. It repeats
+// internal/cmd.ContainerJobState's inspect because doctor is a package
+// internal/cmd imports, not the other way round.
 func inspectContainerJobState(run func(argv []string) ([]byte, error), containerName string) templates.SupervisorState {
 	argv := []string{"docker", "--context", defaultDockerContext, "inspect", "-f", containerInspectFormat, containerName}
 	st := templates.SupervisorState{Kind: config.SupervisorContainer, LastExit: -1, Container: containerName}
@@ -120,15 +121,12 @@ func inspectContainerJobState(run func(argv []string) ([]byte, error), container
 }
 
 // containerJobState is the container supervisor's live state in the town at
-// townRoot. The town's own settings are the only source of the container's
-// name, so a scratch town inspects its scratch container and never the live
-// one; a container town that names no container of its own is unknown, since
-// an inherited default would report the live daemon's container as this town's.
-// run may be nil (runDockerInspect).
+// townRoot, read with run (readContainerDaemon passes runDockerInspect). The
+// town's own settings are the only source of the container's name, so a
+// scratch town inspects its scratch container and never the live one; a
+// container town that names no container of its own is unknown, since an
+// inherited default would report the live daemon's container as this town's.
 func containerJobState(townRoot string, run func(argv []string) ([]byte, error)) templates.SupervisorState {
-	if run == nil {
-		run = runDockerInspect
-	}
 	cfg, err := daemon.ReadPatrolConfig(townRoot)
 	if err != nil {
 		return unreadContainerState(fmt.Errorf("reading %s: %w", daemon.PatrolConfigSource(townRoot), err))
