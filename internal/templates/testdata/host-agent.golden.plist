@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gastown.host-agent</string>
+
+    <!-- The agent rewrites .runtime/host/probes.json every 60 seconds; a
+         container daemon cannot run memory_pressure, top or ps against the
+         host, so this file is its only view of it. No shell: the job runs the
+         gt subcommand directly. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/gt</string>
+        <string>host</string>
+        <string>agent</string>
+        <string>run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/towns/live</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on a crash, stay stopped after a clean exit: `gt host agent
+         run` returns 0 on SIGTERM, which is how the job is stopped, so a
+         restart there would make a stop impossible. The daemon's own plist
+         keeps the same rule. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/towns/live/.runtime/host/agent.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/towns/live/.runtime/host/agent.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>GT_TOWN_ROOT</key>
+        <string>/towns/live</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
