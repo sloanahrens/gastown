@@ -154,6 +154,9 @@ func validateTownConfig(c *TownConfig) error {
 	if c.Dolt != nil && (c.Dolt.Port < 1 || c.Dolt.Port > 65535) {
 		return fmt.Errorf("dolt.port %d is not a TCP port", c.Dolt.Port)
 	}
+	if c.Tracker != nil && (c.Tracker.Port < 1 || c.Tracker.Port > 65535) {
+		return fmt.Errorf("tracker.port %d is not a TCP port", c.Tracker.Port)
+	}
 	return nil
 }
 

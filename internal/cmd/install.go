@@ -255,6 +255,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("writing the Dolt endpoint to town.json: %w", err)
 		}
 	}
+	if err := stampTownTrackerPort(townPath, config.DefaultTrackerPort); err != nil {
+		return fmt.Errorf("writing the tracker endpoint to town.json: %w", err)
+	}
 
 	// Create the rig registry (only if it doesn't already exist).
 	// Re-running install must NOT clobber existing rig registrations, which
@@ -636,6 +639,30 @@ func stampTownDoltPort(townPath string, port int) error {
 			town.Dolt = &config.DoltEndpoint{}
 		}
 		town.Dolt.Port = port
+		return nil
+	})
+}
+
+// stampTownTrackerPort writes port as the town's tracker endpoint when
+// town.json names none. The tracker has no install flag, so the default is
+// trackerd's listen port and a re-install leaves an operator's value alone.
+func stampTownTrackerPort(townPath string, port int) error {
+	return config.UpdateConfigJSON(townPath, 0o600, func(town *config.TownConfig, _ bool) error {
+		if town.Tracker == nil {
+			town.Tracker = &config.TrackerEndpoint{Port: port}
+		}
+		return nil
+	})
+}
+
+// stampTownTrackerHost writes host as the town's tracker endpoint host,
+// keeping the port town.json already names.
+func stampTownTrackerHost(townPath, host string) error {
+	return config.UpdateConfigJSON(townPath, 0o600, func(town *config.TownConfig, _ bool) error {
+		if town.Tracker == nil {
+			town.Tracker = &config.TrackerEndpoint{Port: config.DefaultTrackerPort}
+		}
+		town.Tracker.Host = host
 		return nil
 	})
 }
