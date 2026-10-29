@@ -259,8 +259,12 @@ assert_rc() {
 echo "fresh run: nothing in the gateway"
 run
 assert_rc 0 "exits 0"
-# The script imports three profiles: anthropic-oauth (sbx-haiku), deepseek-claude and forgejo-polecat.
-check "imports all three profiles" [ "$(calls '^profile import')" -eq 3 ]
+# Three profiles, each exactly once: a wrong or extra import changes one of these
+# counts, which the total alone would hide.
+check "imports the anthropic-oauth profile once" [ "$(calls '^profile import -f .*anthropic-oauth.yaml')" -eq 1 ]
+check "imports the deepseek-claude profile once" [ "$(calls '^profile import -f .*deepseek-claude.yaml')" -eq 1 ]
+check "imports the forgejo-polecat profile once" [ "$(calls '^profile import -f .*forgejo-polecat.yaml')" -eq 1 ]
+check "imports exactly three profiles" [ "$(calls '^profile import')" -eq 3 ]
 check "creates both providers" [ "$(calls '^provider create')" -eq 2 ]
 check "led the user to the imported profiles" contains "imported profile deepseek-claude" "$OUT"
 check "never printed the deepseek key" lacks "$DEEPSEEK_KEY" "$OUT"
