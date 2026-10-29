@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/seattoken"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -188,6 +189,11 @@ type Manager struct {
 	// the supervisor can refuse and log it (gt-4k3fj.4.1). nil runs it
 	// directly.
 	Respawn func(name, reason string, run func() error) error
+
+	// trackerIssuer mints a crew member's tracker token on a tracker-backed rig.
+	// nil builds the host issuer from the town's config when such a rig starts;
+	// a test hands a fake, so no admin credential is read.
+	trackerIssuer seattoken.Issuer
 }
 
 // NewManager creates a new crew manager. prefixes names its sessions.
@@ -865,6 +871,15 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 		Agent:            opts.AgentOverride,
 	})
 	envVars = session.MergeRuntimeLivenessEnv(envVars, runtimeConfig)
+	// A tracker-backed rig gets the tracker URL and this seat's token file. The
+	// token is minted here, before any session is killed or started.
+	trackerVars, err := m.trackerEnv(townRoot, name)
+	if err != nil {
+		return err
+	}
+	for k, v := range trackerVars {
+		envVars[k] = v
+	}
 
 	// Build startup command (also includes env vars via 'exec env' for
 	// WaitForCommand detection — belt and suspenders with -e flags)
