@@ -637,3 +637,67 @@ func TestTrimManifestExportsNoJobAccessor(t *testing.T) {
 		t.Errorf("TrimManifest exports %v, want %v: a Job accessor lets a caller apply a Job without its shards", got, want)
 	}
 }
+
+// labelSelectorMatches reports whether sel, a comma-joined list of key=value terms that must all
+// hold, selects an object carrying labels. An empty selector matches nothing.
+func labelSelectorMatches(sel string, labels map[string]string) bool {
+	if sel == "" {
+		return false
+	}
+	for _, term := range strings.Split(sel, ",") {
+		key, value, ok := strings.Cut(term, "=")
+		if !ok || labels[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+// TestTrimSelectorMatchesEveryShardAndTheJobs pins the cleanup's selector across a split trim: it
+// finds every shard ConfigMap and each Job and its pod template, so deleting by it after the Jobs
+// finish leaves no shard behind, whichever run mounted it.
+func TestTrimSelectorMatchesEveryShardAndTheJobs(t *testing.T) {
+	t.Parallel()
+	in := trimInput()
+	in.CapBytes = 0
+	in.Listing = shardPerPathListing(TrimMaxShards + 1)
+	m := buildTrim(t, in)
+
+	sel := TrimSelector()
+	if len(m.jobs()) < 2 {
+		t.Fatalf("the manifest has %d Jobs, want a split trim with at least 2", len(m.jobs()))
+	}
+	for _, shard := range m.Shards() {
+		if !labelSelectorMatches(sel, shard.Metadata.Labels) {
+			t.Errorf("selector %q misses shard %s, labelled %v", sel, shard.Metadata.Name, shard.Metadata.Labels)
+		}
+	}
+	for _, job := range m.jobs() {
+		if !labelSelectorMatches(sel, job.Metadata.Labels) {
+			t.Errorf("selector %q misses Job %s, labelled %v", sel, job.Metadata.Name, job.Metadata.Labels)
+		}
+		if !labelSelectorMatches(sel, job.Spec.Template.Metadata.Labels) {
+			t.Errorf("selector %q misses the pods of Job %s, labelled %v", sel, job.Metadata.Name, job.Spec.Template.Metadata.Labels)
+		}
+	}
+}
+
+// TestTrimSelectorLeavesTheSeedJobAlone pins that the cleanup's selector does not reach the seed
+// Job or its pods: a trim's cleanup deletes only what a trim applied.
+func TestTrimSelectorLeavesTheSeedJobAlone(t *testing.T) {
+	t.Parallel()
+	seed, err := BuildSeedJob(SeedJobInput{
+		Image:     "gastown-polecat:dev",
+		ClaimName: "gt-cache",
+		Pins:      []Pin{{Rig: "devops", Commit: sha, URL: "http://forgejo:3000/town/devops.git"}},
+	})
+	if err != nil {
+		t.Fatalf("BuildSeedJob: %v", err)
+	}
+	if labelSelectorMatches(TrimSelector(), seed.Metadata.Labels) {
+		t.Errorf("selector %q selects the seed Job, labelled %v", TrimSelector(), seed.Metadata.Labels)
+	}
+	if labelSelectorMatches(TrimSelector(), seed.Spec.Template.Metadata.Labels) {
+		t.Errorf("selector %q selects the seed Job's pods, labelled %v", TrimSelector(), seed.Spec.Template.Metadata.Labels)
+	}
+}

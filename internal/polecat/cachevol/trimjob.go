@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -256,14 +257,29 @@ func trimJob(in TrimJobInput, name string, annotations map[string]string, shards
 	}
 }
 
-// trimLabels are the labels on the Job, its pods and its shards, so a selector matches all of them.
-// Nothing in the tree deletes the shards yet: a rerun of the same trim overwrites them by name, and
-// the most a stale set can leave behind is the shards of a longer earlier run.
+// trimLabels are the labels on the Job, its pods and its shards, so TrimSelector matches all of them.
 func trimLabels() map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "polecat-cache-trim",
 		"app.kubernetes.io/managed-by": "gt",
 	}
+}
+
+// TrimSelector is the label selector matching every object a trim applies, its shard ConfigMaps
+// included. A cleanup deletes by it once the Jobs finish, not by name: a rerun overwrites the shards
+// of the same Job by name, but a longer earlier run leaves shards a rerun does not name.
+func TrimSelector() string {
+	labels := trimLabels()
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	terms := make([]string, 0, len(keys))
+	for _, k := range keys {
+		terms = append(terms, k+"="+labels[k])
+	}
+	return strings.Join(terms, ",")
 }
 
 // removeContainer deletes the listed files with the image's trim-paths helper. The helper reads the
