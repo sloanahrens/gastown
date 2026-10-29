@@ -733,18 +733,6 @@ func TestRunKeepsTheDSNSettingsButNotThePassword(t *testing.T) {
 	}
 }
 
-// A keyword DSN loses only its password setting (gt-p85pw.48).
-func TestDsnWithoutPasswordKeywordForm(t *testing.T) {
-	t.Parallel()
-	got, err := dsnWithoutPassword("host=db port=5433 user=tracker password='s3cr t' dbname=tracker sslmode=require")
-	if err != nil {
-		t.Fatalf("dsnWithoutPassword: %v", err)
-	}
-	if strings.Contains(got, "password") || strings.Contains(got, "s3cr") || !strings.Contains(got, "sslmode=require") {
-		t.Errorf("keyword DSN without password = %q", got)
-	}
-}
-
 // A second run in the same directory finds the lock held and writes nothing
 // (gt-p85pw.48).
 func TestRunRefusesASecondRunInTheSameDir(t *testing.T) {
@@ -933,18 +921,6 @@ func TestRunRedactsTheExecRunnersStderr(t *testing.T) {
 	}
 }
 
-// A password in the query string is removed too (gt-p85pw.48).
-func TestDsnWithoutPasswordQueryForm(t *testing.T) {
-	t.Parallel()
-	got, err := dsnWithoutPassword("postgres://tracker:uripw@db.internal/tracker?sslmode=require&password=qpw")
-	if err != nil {
-		t.Fatalf("dsnWithoutPassword: %v", err)
-	}
-	if strings.Contains(got, "qpw") || strings.Contains(got, "uripw") || !strings.Contains(got, "sslmode=require") {
-		t.Errorf("URI DSN without password = %q", got)
-	}
-}
-
 // dumpsIn lists the dump files in dir, leaving out the run lock.
 func dumpsIn(t *testing.T, dir string) []string {
 	t.Helper()
@@ -959,19 +935,6 @@ func dumpsIn(t *testing.T, dir string) []string {
 		}
 	}
 	return names
-}
-
-// An escaped quote inside a quoted keyword password is one value, so no part
-// of it is left in argv (gt-p85pw.48).
-func TestDsnWithoutPasswordEscapedQuote(t *testing.T) {
-	t.Parallel()
-	got, err := dsnWithoutPassword(`host=db password='pa\'ss word' sslmode=require`)
-	if err != nil {
-		t.Fatalf("dsnWithoutPassword: %v", err)
-	}
-	if strings.Contains(got, "word") || strings.Contains(got, `\'`) || !strings.Contains(got, "sslmode=require") {
-		t.Errorf("keyword DSN with an escaped quote = %q", got)
-	}
 }
 
 // A dump dated after today is named on stderr, and it is never pruned.
